@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use super::codec::{cutoff_text, db_err, node_id, text_to_ts};
 use super::SqliteStore;
+use crate::store::evidence::{EvidenceRow, EvidenceRows};
 use crate::types::{InteractionSpan, NodeId, Scored, SessionId, StoreError};
 
 /// The dependents of one node (#36 read-time dependents semantics, spec §4.1
@@ -90,6 +91,34 @@ pub(super) const INTERACTION_SPAN_SQL: &str = "WITH {DEPENDENTS_CTE}, \
      (SELECT max(about_ts) FROM span), \
      extent.lo, extent.hi \
  FROM extent";
+
+/// #20 supersession evidence rows (`crate::store::evidence`): one row per
+/// dependence edge into the node (a `Dependency` source or a `Hierarchical`
+/// child, concepts of the session other than the node), with the edge's
+/// dates and its dependent's origin interaction, whose dates are present only
+/// when it is an interaction of the session. No age filter here: the shared
+/// rules apply it, so every adapter agrees by construction. Binds: session,
+/// session, node, node, node, session.
+pub(super) const EVIDENCE_ROWS_SQL: &str = "SELECT e.id, e.created_at, e.event_time, \
+     c.id, c.origin_interaction, i.created_at, i.event_time \
+ FROM edges e \
+ JOIN concepts c ON c.session_id = ? AND c.id = CASE e.edge_type \
+     WHEN 'Dependency' THEN e.source ELSE e.target END \
+ LEFT JOIN interactions i ON i.id = c.origin_interaction AND i.session_id = ? \
+ WHERE ((e.edge_type = 'Dependency' AND e.target = ?) \
+     OR (e.edge_type = 'Hierarchical' AND e.source = ?)) \
+   AND c.id <> ? AND e.session_id = ? \
+ ORDER BY e.id";
+
+/// The node's own origin interaction (#20). Binds: node, session.
+pub(super) const EVIDENCE_OWN_ORIGIN_SQL: &str =
+    "SELECT origin_interaction FROM concepts WHERE id = ? AND session_id = ?";
+
+/// The session's about-time extent, Stage 2's denominator (#20). Binds:
+/// session.
+pub(super) const EVIDENCE_EXTENT_SQL: &str = "SELECT \
+     min(COALESCE(event_time, created_at)), max(COALESCE(event_time, created_at)) \
+ FROM interactions WHERE session_id = ?";
 
 /// Expand `{DEPENDENTS_CTE}` in one of the structural queries above.
 pub(super) fn with_dependents(sql: &str) -> String {
@@ -276,6 +305,74 @@ impl SqliteStore {
         Ok(InteractionSpan {
             distinct: distinct as u64,
             coverage,
+        })
+    }
+    /// #20: the raw evidence rows `crate::store::evidence` reads.
+    pub(super) async fn select_evidence_rows(
+        &self,
+        session: &SessionId,
+        node: NodeId,
+    ) -> Result<EvidenceRows, StoreError> {
+        self.require_session(session).await?;
+        let node_text = node.0.to_string();
+        let err = |e| db_err("supersession evidence", e);
+        let own: Option<String> = sqlx::query_scalar(EVIDENCE_OWN_ORIGIN_SQL)
+            .bind(&node_text)
+            .bind(&session.0)
+            .fetch_optional(self.pool())
+            .await
+            .map_err(err)?;
+        let own_origin = own
+            .as_deref()
+            .map(|s| node_id(s, "origin interaction"))
+            .transpose()?;
+        let rows = sqlx::query(EVIDENCE_ROWS_SQL)
+            .bind(&session.0)
+            .bind(&session.0)
+            .bind(&node_text)
+            .bind(&node_text)
+            .bind(&node_text)
+            .bind(&session.0)
+            .fetch_all(self.pool())
+            .await
+            .map_err(err)?;
+        let ts = |s: Option<String>| s.as_deref().map(text_to_ts).transpose();
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            let edge: String = row.try_get(0).map_err(err)?;
+            let edge_created: String = row.try_get(1).map_err(err)?;
+            let edge_event: Option<String> = row.try_get(2).map_err(err)?;
+            let dependent: String = row.try_get(3).map_err(err)?;
+            let origin: String = row.try_get(4).map_err(err)?;
+            let origin_created: Option<String> = row.try_get(5).map_err(err)?;
+            let origin_event: Option<String> = row.try_get(6).map_err(err)?;
+            out.push(EvidenceRow {
+                edge: node_id(&edge, "edge id")?,
+                edge_created: text_to_ts(&edge_created)?,
+                edge_event: ts(edge_event)?,
+                dependent: node_id(&dependent, "concept id")?,
+                origin: node_id(&origin, "origin interaction")?,
+                origin_dates: match ts(origin_created)? {
+                    Some(created) => Some((created, ts(origin_event)?)),
+                    None => None,
+                },
+            });
+        }
+        let extent = sqlx::query(EVIDENCE_EXTENT_SQL)
+            .bind(&session.0)
+            .fetch_one(self.pool())
+            .await
+            .map_err(err)?;
+        let lo: Option<String> = extent.try_get(0).map_err(err)?;
+        let hi: Option<String> = extent.try_get(1).map_err(err)?;
+        let extent = match (ts(lo)?, ts(hi)?) {
+            (Some(lo), Some(hi)) => Some((lo, hi)),
+            _ => None,
+        };
+        Ok(EvidenceRows {
+            own_origin,
+            rows: out,
+            extent,
         })
     }
 }

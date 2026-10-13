@@ -3088,6 +3088,17 @@ async fn a_recall_by_vector_fails_when_the_tier_and_its_fallback_both_fail() {
     mem.close().await.unwrap();
 }
 
+/// #20: the tier forwards both supersession accessors to its primary.
+#[tokio::test]
+async fn tier_forwards_supersession_evidence_to_primary() {
+    let store = TieredStore::new(
+        Box::new(MemoryStore::new()),
+        Box::new(Arc::new(FakeIndex::new())),
+        Some(4),
+    );
+    crate::test_util::supersession::check_accessors(&store).await;
+}
+
 #[tokio::test]
 async fn tier_forwards_custom_coverage_window_to_primary() {
     let store = TieredStore::new(

@@ -946,6 +946,49 @@ impl GraphStore for MemoryStore {
         Ok(InteractionSpan { distinct, coverage })
     }
 
+    async fn latest_structural_evidence_at(
+        &self,
+        session: &SessionId,
+        node: NodeId,
+        min_age: Duration,
+        now: DateTime<Utc>,
+        exclude_edges: &[NodeId],
+    ) -> Result<Option<DateTime<Utc>>, StoreError> {
+        // #20: the rows from the session's snapshot, the rules shared with
+        // every adapter (`store::evidence`). `now` is the caller's (F8).
+        let map = self.inner.read();
+        let data = map
+            .get(&session.0)
+            .ok_or_else(|| StoreError::SessionNotFound(session.0.clone()))?;
+        let rows = super::evidence::rows_from_snapshot(&data.snapshot, node);
+        Ok(super::evidence::latest_at(
+            &rows,
+            min_age,
+            now,
+            exclude_edges,
+        ))
+    }
+
+    async fn interaction_span_since(
+        &self,
+        session: &SessionId,
+        node: NodeId,
+        min_age: Duration,
+        now: DateTime<Utc>,
+        window: Duration,
+        since: DateTime<Utc>,
+    ) -> Result<InteractionSpan, StoreError> {
+        super::validate_coverage_window(window)?;
+        let map = self.inner.read();
+        let data = map
+            .get(&session.0)
+            .ok_or_else(|| StoreError::SessionNotFound(session.0.clone()))?;
+        let rows = super::evidence::rows_from_snapshot(&data.snapshot, node);
+        Ok(super::evidence::span_since(
+            &rows, min_age, now, window, since,
+        ))
+    }
+
     /// #23. One critical section under every lock the session's state lives
     /// behind, taken in the store's one order (`inner`, then `leases`, then
     /// `flush_stats` and `refusals`), so there is no step between the gate and
@@ -1948,6 +1991,14 @@ mod tests {
 
     /// #36 PR 2: the fourteen-day cap on the shared window case (long
     /// session, injected clock, event time, age guards).
+    /// #20: the shared supersession case (accessors and audit columns).
+    #[tokio::test]
+    async fn supersession_case() {
+        let store = MemoryStore::new();
+        crate::test_util::supersession::check_accessors(&store).await;
+        crate::test_util::supersession::check_reason_persistence(&store).await;
+    }
+
     #[tokio::test]
     async fn capped_span_follows_window_case() {
         crate::test_util::dependents::check_window_case(&MemoryStore::new()).await;

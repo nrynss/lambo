@@ -146,6 +146,16 @@ pub(crate) mod dependents_live;
     )
 ))]
 pub(crate) mod fair_test_live;
+// #20: the supersession accessors and audit columns, live and by hand only
+// (Postgres test here, Cockroach leg in its conformance suite).
+#[cfg(all(
+    test,
+    any(
+        feature = "store-postgres",
+        all(feature = "store-cockroach", feature = "fixtures")
+    )
+))]
+pub(crate) mod supersession_live;
 
 // Postgres-only: the flush fence's lease row stays locked until commit.
 #[cfg(all(test, feature = "store-postgres"))]
@@ -502,6 +512,39 @@ impl<D: Dialect> GraphStore for PgStore<D> {
     ) -> Result<InteractionSpan, StoreError> {
         self.select_interaction_span(session, node, min_age, now, window)
             .await
+    }
+
+    async fn latest_structural_evidence_at(
+        &self,
+        session: &SessionId,
+        node: NodeId,
+        min_age: Duration,
+        now: DateTime<Utc>,
+        exclude_edges: &[NodeId],
+    ) -> Result<Option<DateTime<Utc>>, StoreError> {
+        let rows = self.select_evidence_rows(session, node).await?;
+        Ok(crate::store::evidence::latest_at(
+            &rows,
+            min_age,
+            now,
+            exclude_edges,
+        ))
+    }
+
+    async fn interaction_span_since(
+        &self,
+        session: &SessionId,
+        node: NodeId,
+        min_age: Duration,
+        now: DateTime<Utc>,
+        window: Duration,
+        since: DateTime<Utc>,
+    ) -> Result<InteractionSpan, StoreError> {
+        crate::store::validate_coverage_window(window)?;
+        let rows = self.select_evidence_rows(session, node).await?;
+        Ok(crate::store::evidence::span_since(
+            &rows, min_age, now, window, since,
+        ))
     }
 
     async fn erase_session(

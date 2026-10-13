@@ -858,6 +858,15 @@ async fn structural_queries_follow_the_dependents_case_like_memory() {
     }
 }
 
+/// #20: the shared supersession case (accessors and audit columns).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn supersession_case() {
+    let store = test_store();
+    store.init_schema().await.unwrap();
+    crate::test_util::supersession::check_accessors(&store).await;
+    crate::test_util::supersession::check_reason_persistence(&store).await;
+}
+
 #[tokio::test]
 async fn capped_span_follows_window_case() {
     let store = test_store();

@@ -1818,6 +1818,8 @@ async fn conformance_suite() {
     crate::store::pg::dependents_live::check_dependents_case(&store).await;
     // #36 PR 3: the canonization fair test, both policies.
     crate::store::pg::fair_test_live::check_fair_test(&store).await;
+    // #20: the supersession accessors and the demotion-reason columns.
+    crate::store::pg::supersession_live::check_supersession_case(&store).await;
     check_record_canonization_appends_and_is_idempotent(&store).await;
     check_corrupt_contract_row_load_errors(&store).await;
     check_unstamped_vector_candidates_are_empty_until_contract_commit(&store).await;

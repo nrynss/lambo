@@ -35,7 +35,6 @@ pub fn validate_coverage_window(window: Duration) -> Result<(), StoreError> {
     Ok(())
 }
 
-#[cfg(any(feature = "store-memory", feature = "store-sqlite", test))]
 pub(crate) fn coverage(span_ms: i64, session_ms: i64, window: Duration) -> f64 {
     if session_ms <= 0 {
         // Called only for nonempty support. F1: a single-point session.
@@ -181,6 +180,46 @@ mod tests {
                 Duration::ZERO,
                 chrono::Utc::now(),
                 Duration::from_secs(60),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StoreError::Invariant(_)), "{err:?}");
+    }
+
+    /// #20: both supersession accessors default to `Capability` (the
+    /// evaluator then skips supersession for the cycle), and an invalid cap
+    /// is still refused as invalid first.
+    #[tokio::test]
+    async fn the_supersession_defaults_fail_closed() {
+        use crate::store::GraphStore;
+        let session = crate::types::SessionId::from("legacy");
+        let node = crate::types::NodeId::new();
+        let now = chrono::Utc::now();
+        let err = Legacy
+            .latest_structural_evidence_at(&session, node, Duration::ZERO, now, &[])
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StoreError::Capability(_)), "{err:?}");
+        let err = Legacy
+            .interaction_span_since(
+                &session,
+                node,
+                Duration::ZERO,
+                now,
+                DEFAULT_COVERAGE_WINDOW,
+                now,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StoreError::Capability(_)), "{err:?}");
+        let err = Legacy
+            .interaction_span_since(
+                &session,
+                node,
+                Duration::ZERO,
+                now,
+                Duration::from_secs(60),
+                now,
             )
             .await
             .unwrap_err();

@@ -1599,6 +1599,33 @@ impl GraphStore for TieredStore {
             .await
     }
 
+    async fn latest_structural_evidence_at(
+        &self,
+        session: &SessionId,
+        node: NodeId,
+        min_age: Duration,
+        now: DateTime<Utc>,
+        exclude_edges: &[NodeId],
+    ) -> Result<Option<DateTime<Utc>>, StoreError> {
+        self.primary
+            .latest_structural_evidence_at(session, node, min_age, now, exclude_edges)
+            .await
+    }
+
+    async fn interaction_span_since(
+        &self,
+        session: &SessionId,
+        node: NodeId,
+        min_age: Duration,
+        now: DateTime<Utc>,
+        window: Duration,
+        since: DateTime<Utc>,
+    ) -> Result<InteractionSpan, StoreError> {
+        self.primary
+            .interaction_span_since(session, node, min_age, now, window, since)
+            .await
+    }
+
     async fn record_canonization(
         &self,
         event: &CanonizationEvent,
