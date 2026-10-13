@@ -144,6 +144,17 @@
   ```sql
   DELETE FROM edges WHERE edge_type = 'Contradicts';
   ```
+- **Repository-scoped paths (#129 part 2, #33 PR 7) need nothing
+  migrated.** A write without the new `repo_scope` keeps the 0.5.0
+  identity for every path. Path concepts already in a session, including
+  the shared hubs several repositories' `README.md` or `src/main.rs` were
+  joined into, stay as they are and keep their ids: their edges do not say
+  which repository each came from, so Lambo cannot split them truthfully.
+  Scoped writes create new, per-repository concepts beside them; cite an
+  old one by its id. A scoped write's durable intent is a new kind
+  (`repo_scoped`): settled, it is rewritten to the empty `derive` 0.5.0
+  decodes; unconsumed, 0.5.0 refuses it by name, so let the 0.6.0 writer
+  drain its queue before downgrading.
 
 ### Breaking (library API)
 
@@ -260,6 +271,12 @@
   optional and omitting it changes nothing; a server older than this one
   refuses a call that sends it (the parameters deny unknown fields), so a
   scoped write never lands in the wrong session.
+- **`Action` gains `repo_scope: Option<&str>`, and `WriteIntentPayload`
+  gains the `RepoScoped { repo_scope, payload }` variant** (#129, #33 PR 7).
+  An `Action { .. }` literal needs the field (`None` keeps 0.5.0
+  behaviour), and an exhaustive `match` on `WriteIntentPayload` needs the
+  arm. `ParentOf::with_repo_scope` and `ParentOf::repo_scope` are new and
+  scope a derive; the existing constructors stay unscoped.
 
 ### Added
 
@@ -466,6 +483,23 @@
   optional `scope`). New library items: `WritePipeline::knows_receipt`,
   `take_piggyback_at_most`, `lookup_for` and `wait_for`, and
   `ServeLayers::is_layer`.
+- **`repo_scope` on `lambo_derive` and `lambo_record_action`, and
+  `--repo-scope` on `lambo derive` and `lambo record-action`**
+  ([#129](https://github.com/nrynss/lambo/issues/129) part 2, #33 PR 7).
+  It names the repository a call's path-like Resources belong to, such as
+  `github.com/acme/widgets`, so `README.md` in two repositories of one
+  session is two concepts instead of one shared hub. The scope and path
+  are matched as exact text after trimming and NFC (case and `./` count),
+  under a key no unscoped concept can have (`RepoResource:v1:` and a JSON
+  pair). A scoped path never merges by similarity and nothing merges into
+  it; a path-like `depends_on` entry becomes a Resource, so producing a
+  file and depending on it name the same concept; citations, dependencies
+  and `parent_of` ends resolve under the scope with no fallback to
+  unscoped concepts, while an id stays an exact reference. In a shared
+  layer, a relative path the scope covers is no longer refused. The scope
+  is caller-asserted and never verified; an empty one is refused before
+  the ack. The library exposes `lambo::graph::resource` (the path
+  predicate and key). See *Repository-scoped paths* in the MCP reference.
 
 ### Changed
 
