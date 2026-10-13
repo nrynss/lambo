@@ -102,3 +102,10 @@ Fresh adversarial review of c6bcd2e3: 0 High, 1 Medium, 0 Low.
   Focused verification completed on f20ef0fb with zero open High, Medium or Low
   findings. The reviewer checked response construction, scope regression,
   client/runbook boundaries and mirrored docs; mirror drift and diff checks pass.
+
+After main advanced to e333bc7c, merged it in f6ab3bc8 and retained both sides of
+the CHANGELOG conflict in one Unreleased section. Documentation merged without
+conflicts. Required integration checks passed: fmt, all-targets sqlite/fixtures
+and postgres-only clippy with warnings denied, full SQLite tests (2,322 passed,
+0 failed, 7 existing ignored), and mirror drift. The final record update changes
+only this diary; no client settings or live store changed.
