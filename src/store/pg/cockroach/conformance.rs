@@ -1814,6 +1814,8 @@ async fn conformance_suite() {
     check_interaction_span_single_point_session_coverage(&store).await;
     // #36: the shared dependents case, with MemoryStore parity.
     crate::store::pg::dependents_live::check_dependents_case(&store).await;
+    // #36 PR 3: the canonization fair test, both policies.
+    crate::store::pg::fair_test_live::check_fair_test(&store).await;
     check_record_canonization_appends_and_is_idempotent(&store).await;
     check_corrupt_contract_row_load_errors(&store).await;
     check_unstamped_vector_candidates_are_empty_until_contract_commit(&store).await;

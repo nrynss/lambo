@@ -392,13 +392,20 @@ impl WritePipeline {
                     // intent stayed `pending_replay` for good. Narrow on purpose:
                     // any other `Invariant` can mean an inconsistent graph or
                     // store, and still stops the replay.
+                    // #36 PR 4: a refused reference is a fact about this
+                    // input against this graph too (re-resolution at apply
+                    // reached a different answer, or none): settle `failed`.
                     Err(err)
-                        if matches!(&err, LamboError::Embed(_) | LamboError::ImageIdTaken(_))
-                            || matches!(&err, LamboError::Store(e) if e.is_cycle_refusal()) =>
+                        if matches!(
+                            &err,
+                            LamboError::Embed(_)
+                                | LamboError::ImageIdTaken(_)
+                                | LamboError::Reference(_)
+                        ) || matches!(&err, LamboError::Store(e) if e.is_cycle_refusal()) =>
                     {
                         // A cycle refusal is decided before any embed, so it
                         // proves nothing about the embedder's health.
-                        if !matches!(&err, LamboError::Store(_)) {
+                        if !matches!(&err, LamboError::Store(_) | LamboError::Reference(_)) {
                             transient_streak = 0;
                         }
                         failed += 1;
@@ -413,7 +420,9 @@ impl WritePipeline {
                         // model-safe sentence (it names the fix); every other
                         // refusal is its class, as before.
                         let reason = match &err {
-                            LamboError::ImageIdTaken(_) | LamboError::Store(_) => {
+                            LamboError::ImageIdTaken(_)
+                            | LamboError::Store(_)
+                            | LamboError::Reference(_) => {
                                 crate::surface::error::model_safe_message(&err)
                             }
                             _ => crate::surface::error::err_class(&err).to_owned(),

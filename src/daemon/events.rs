@@ -42,9 +42,11 @@
 //!     ([`session_stale_at`]). Per-concept staleness emitted one event per
 //!     concept in a single warm-up burst — 22 on the shipped fixture, thousands
 //!     at scale — wrapping the same cycle's `Conflict` out of the ring.
-//!   * **HighRisk** — a fresh write to a **high-value** node: Canonical,
-//!     Venerable, or `blast_radius >= HIGH_RISK_BLAST_RADIUS` (spec §10
-//!     Stage-3 threshold: more than 5 dependents, #36).
+//!   * **HighRisk** — a fresh write to a **high-value** node: Canonical, or
+//!     more than `HIGH_RISK_BLAST_RADIUS` live dependents (spec §10 Stage-3
+//!     threshold, `> 5`, #36). Venerable alone is not high-value since #36
+//!     PR 3: evidence-led admission lets a file with four dependents reach
+//!     Venerable, and that is not a load-bearing pillar.
 //!     Modifying such a node is the "high-risk modification" the hot list
 //!     names. A write is fresh when the node itself or any incident edge was
 //!     written inside [`HIGH_RISK_WRITE_WINDOW`] (the same 30s recency story
@@ -100,9 +102,10 @@ pub const STALE_WINDOW: Duration = Duration::from_secs(3600);
 /// Same recency story as conflict's `CONFLICT_RECENCY_WINDOW`.
 pub const HIGH_RISK_WRITE_WINDOW: Duration = Duration::from_secs(30);
 
-/// A node with at least this many dependents (spec §10 Stage-3 threshold,
-/// counted as declared dependents since #36) is high-value; modifying it is
-/// high-risk.
+/// A node with **more than** this many live dependents (spec §10 Stage-3
+/// threshold, `blast_radius > 5`, counted as declared dependents since #36)
+/// is high-value; modifying it is high-risk. Before #36 PR 3 the comparison
+/// was `>=`, off by one from Stage 3.
 pub const HIGH_RISK_BLAST_RADIUS: u64 = 5;
 
 /// The §6.1 channel's send half: the broadcast sender plus the **publication
@@ -386,11 +389,14 @@ pub struct HighRiskHit {
 /// [`crate::types::Concept::blast_radius`] stamp: the stamp is written only
 /// at Stage 3 promotion, nulled on demotion, and a stamp written before #36
 /// holds the older exclusive count.
+///
+/// Canonical, or more dependents than Stage 3's floor. A Venerable is no
+/// longer high-value by status (#36 PR 3): evidence-led Stage 1 lets cited
+/// files and names reach Venerable with a handful of dependents, and a
+/// warning on them would cry wolf. Freshness is unchanged: a new incident
+/// edge still counts as a fresh write (the owner's #19(c) decision).
 fn is_high_value(c: &crate::types::Concept, live_radius: u64) -> bool {
-    matches!(
-        c.canonization_status,
-        CanonizationStatus::Canonical | CanonizationStatus::Venerable
-    ) || live_radius >= HIGH_RISK_BLAST_RADIUS
+    c.canonization_status == CanonizationStatus::Canonical || live_radius > HIGH_RISK_BLAST_RADIUS
 }
 
 /// Is a fresh write to this one high-value node in flight at `now`? The
@@ -944,10 +950,10 @@ mod tests {
         );
         let c1_id = c1.id;
         g.insert_concept(c1, i1_id).unwrap();
-        // c2: five live dependents (the writer below plus four older
+        // c2: six live dependents (the writer below plus five older
         // ones), write at 95 (5s ago) -> hit. No stored stamp: the live
         // count decides (#36). The fresh edge is also the one that makes the
-        // fifth dependent: reaching five fires immediately, because the live
+        // sixth dependent: passing five fires immediately, because the live
         // count has no age floor.
         let c2 = concept(
             2,
@@ -960,7 +966,7 @@ mod tests {
         );
         let c2_id = c2.id;
         g.insert_concept(c2, i1_id).unwrap();
-        for k in 0..4u64 {
+        for k in 0..5u64 {
             let d = concept(
                 20 + k,
                 i1_id,
@@ -999,6 +1005,46 @@ mod tests {
         );
         let c3_id = c3.id;
         g.insert_concept(c3, i2_id).unwrap();
+        // c7: exactly five live dependents (four older plus the writer),
+        // fresh write -> not high-value: the bar is Stage 3's `> 5`.
+        let c7 = concept(
+            7,
+            i1_id,
+            "agent-a",
+            "five dependents",
+            0,
+            CanonizationStatus::None,
+            None,
+        );
+        let c7_id = c7.id;
+        g.insert_concept(c7, i1_id).unwrap();
+        for k in 0..4u64 {
+            let d = concept(
+                30 + k,
+                i1_id,
+                "agent-a",
+                &format!("depends on five dependents {k}"),
+                0,
+                CanonizationStatus::None,
+                None,
+            );
+            let d_id = d.id;
+            g.insert_concept(d, i1_id).unwrap();
+            g.upsert_edge(edge(30 + k, d_id, c7_id, 10)).unwrap();
+        }
+        // c8: Venerable with a fresh write but no dependents -> not
+        // high-value since #36 PR 3.
+        let c8 = concept(
+            8,
+            i1_id,
+            "agent-a",
+            "venerable fresh",
+            0,
+            CanonizationStatus::Venerable,
+            None,
+        );
+        let c8_id = c8.id;
+        g.insert_concept(c8, i1_id).unwrap();
         // c4: ordinary node with a fresh write -> not high-value -> no hit.
         let c4 = concept(
             4,
@@ -1028,6 +1074,8 @@ mod tests {
         g.upsert_edge(edge(3, cw_id, c3_id, 50)).unwrap();
         g.upsert_edge(edge(4, cw_id, c4_id, 95)).unwrap();
         g.upsert_edge(edge(5, c6_id, cw_id, 95)).unwrap();
+        g.upsert_edge(edge(7, cw_id, c7_id, 95)).unwrap();
+        g.upsert_edge(edge(8, cw_id, c8_id, 95)).unwrap();
 
         let hits = detect_high_risk(&g, HIGH_RISK_WRITE_WINDOW, now);
         assert_eq!(hits.len(), 2, "only c1 and c2 fire: {hits:?}");
@@ -1039,7 +1087,7 @@ mod tests {
         );
         assert_eq!(hits[1].node, c2_id);
         assert!(
-            hits[1].reason.contains("blast radius 5"),
+            hits[1].reason.contains("blast radius 6"),
             "reason: {}",
             hits[1].reason
         );

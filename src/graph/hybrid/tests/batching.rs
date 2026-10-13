@@ -34,6 +34,7 @@ async fn run(
         10,
         SEMANTIC_MATCH_THRESHOLD_DEFAULT,
         None,
+        &crate::graph::cite::PinnedCitations::default(),
         None,
     )
     .await
@@ -185,6 +186,7 @@ async fn a_candidate_lookup_timeout_is_transient_and_writes_nothing() {
         10,
         SEMANTIC_MATCH_THRESHOLD_DEFAULT,
         None,
+        &crate::graph::cite::PinnedCitations::default(),
         None,
     )
     .await
@@ -241,6 +243,7 @@ async fn slow_embeds_that_spend_the_budget_are_not_a_lookup_timeout() {
         10,
         SEMANTIC_MATCH_THRESHOLD_DEFAULT,
         None,
+        &crate::graph::cite::PinnedCitations::default(),
         None,
     )
     .await

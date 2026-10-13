@@ -78,8 +78,8 @@ struct Shared {
 pub struct CanonizationTask {
     graph: Arc<RwLock<Graph>>,
     store: Arc<dyn GraphStore>,
-    /// The daemon's score table (Stage 1's P90 population). Read per cycle,
-    /// never written here.
+    /// The daemon's score table, which orders Stage 1's queue and the
+    /// Stage 3 window. Read per cycle, never written here.
     scores: Arc<RwLock<ScoreTable>>,
     events: EventSender,
     params: EvalParams,
@@ -392,13 +392,36 @@ mod tests {
         }
     }
 
-    /// 20 non-Canonical peers so Stage 1's session gate opens; id 20 is the
-    /// only one above P90.
+    /// Twenty concepts past the survival floor; id 20 is the only one with
+    /// dependents from two other interactions (21 from `i2`, 22 from `i3`),
+    /// so it is the one Stage 1 admits (#36 PR 3).
     fn session() -> (Arc<RwLock<Graph>>, MemoryStore, ScoreTable) {
         let mut g = Graph::new(sid());
         g.insert_interaction(interaction()).unwrap();
         for id in 1..=20u64 {
             g.insert_concept(concept(id), iid(1)).unwrap();
+        }
+        for k in 2..=3u64 {
+            let mut turn = interaction();
+            turn.id = iid(k);
+            turn.previous_id = Some(iid(k - 1));
+            g.insert_interaction(turn).unwrap();
+            let mut dep = concept(19 + k);
+            dep.origin_interaction = iid(k);
+            g.insert_concept(dep, iid(k)).unwrap();
+            g.upsert_edge(crate::types::Edge {
+                event_time: None,
+                id: NodeId(Uuid::from_u64_pair(3, k)),
+                session_id: sid(),
+                source: nid(19 + k),
+                target: nid(20),
+                edge_type: crate::types::EdgeType::Dependency,
+                weight: 1.0,
+                reinforcements: 1,
+                created_at: ts(),
+                last_reinforced: ts(),
+            })
+            .unwrap();
         }
         let snap = g.snapshot();
         let store = MemoryStore::new();
@@ -843,8 +866,8 @@ mod tests {
 
     /// `from_daemon` is the assembled-process wiring: it must take the
     /// daemon's own score table and event channel (a private table would
-    /// leave Stage 1 with an empty P90 population forever, and a private
-    /// channel would break the re-arm accounting).
+    /// order every queue on stale zeros forever, and a private channel would
+    /// break the re-arm accounting).
     #[tokio::test]
     async fn from_daemon_shares_the_daemon_score_table_and_channel() {
         let (graph, store, _scores) = session();

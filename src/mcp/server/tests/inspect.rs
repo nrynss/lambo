@@ -24,11 +24,34 @@ async fn inspect_finds_a_concept_and_reports_a_miss() {
     )
     .await;
     assert_eq!(hit.is_error, Some(false), "{hit:?}");
-    let view = hit.structured_content.unwrap()["view"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let structured = hit.structured_content.unwrap();
+    let view = structured["view"].as_str().unwrap().to_string();
     assert!(view.contains("auth middleware"), "{view}");
+    // #36 PR 3: why the focus is not promoted, in the text and as data.
+    assert!(
+        view.contains("canonization (Swarm): None -> Candidate refused\n"),
+        "{view}"
+    );
+    assert!(
+        view.contains("  - survived 0 GC sweeps, needs at least 3\n"),
+        "{view}"
+    );
+    let admission = &structured["admission"];
+    assert_eq!(admission["policy"], "Swarm", "{structured}");
+    assert_eq!(admission["status"], "None", "{structured}");
+    assert_eq!(admission["next"], "Candidate", "{structured}");
+    assert_eq!(admission["eligible"], false, "{structured}");
+    let gates: Vec<&str> = admission["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["gate"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        gates,
+        ["gc_survived", "dependent_interactions"],
+        "{structured}"
+    );
 
     let miss = call(
         &s,

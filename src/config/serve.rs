@@ -152,7 +152,8 @@ pub struct ServeConfig {
 #[serde(deny_unknown_fields)]
 pub struct ProjectConfig {
     /// A directory: absolute, `~` or `~/...`. `~` is expanded to `$HOME` and
-    /// the result canonicalized when the map is resolved.
+    /// the result canonicalized when the map is resolved. `*` in the final
+    /// component matches zero or more filename bytes; other components are literal.
     pub path: String,
     /// The session a stdio serve started under `path` uses.
     pub session: String,

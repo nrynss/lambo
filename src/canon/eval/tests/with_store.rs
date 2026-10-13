@@ -127,8 +127,9 @@ async fn failed_apply_does_not_record_or_emit() {
 
 #[tokio::test]
 async fn one_hop_per_cycle_none_with_stage2_evidence_becomes_candidate() {
-    // 20 non-Canonical peers so Stage 1 opens; hub also has Stage 2
-    // evidence. First cycle must stop at Candidate.
+    // The hub clears Stage 1 on evidence (three other dependent
+    // interactions) and also has Stage 2 evidence. The first cycle must
+    // stop at Candidate.
     let mut g = Graph::new(sid());
     let at = ts();
     g.insert_interaction(interaction(1, None, at)).unwrap();
@@ -173,7 +174,10 @@ async fn one_hop_per_cycle_none_with_stage2_evidence_becomes_candidate() {
     let scores = table(&pairs);
     let (tx, mut rx) = channel();
     let mut ev = Evaluator::new();
-    let outcome = eval_cycle(&mut ev, &g, &store, &scores, &tx, &params(), ts())
+    // Evaluated after the last interaction (80 s in), so every dependent
+    // origin is aged (#36 PR 3: Stage 1 ages its evidence like Stage 2).
+    let at = ts() + chrono::Duration::seconds(120);
+    let outcome = eval_cycle(&mut ev, &g, &store, &scores, &tx, &params(), at)
         .await
         .unwrap();
 
@@ -192,24 +196,14 @@ async fn one_hop_per_cycle_none_with_stage2_evidence_becomes_candidate() {
     assert_eq!(drain_canonized(&mut rx).len(), 1);
 }
 // -------------------------------------------------------------------
-// C-R1-1 closure — the published bands drive the ladder under solo
+// #36 PR 3 — Solo's band caps the ladder; the evidence gates every hop
 // -------------------------------------------------------------------
 
-/// A solo Candidate whose resistant score sits exactly on the
-/// Venerable bar climbs without stage-2 evidence. Fixture: Entity hub
-/// with one extra Derives support whose about-time clusters with the
-/// origin turn (one recurrence session), one human confirmation →
-/// raw (1 + 4) × 1.2 = **6.0**, the inclusive bar. Stage-2 span
-/// evidence cannot pass — the hub traces to two distinct origin
-/// interactions, below MIN_DISTINCT — so pre-closure this hop was
-/// unreachable and the concept sat at Candidate forever while
-/// `classify` reported Venerable.
-///
-/// Mutations: revert apply's stage-2 loop to `verdicts.stage2_pass`
-/// (bands unreachable again) → red. `SoloScorer::admits_hop` returning
-/// `_evidence`, or its comparison made exclusive (`>`) → red.
-#[tokio::test]
-async fn solo_band_drives_the_candidate_to_venerable_hop() {
+/// A Solo hub whose band clears the bar but whose evidence does not:
+/// Entity with one extra `Derives` turn (one recurrence session) and
+/// `confirmed` human confirmations, `status`, origin `i1`. Interactions
+/// 1 and 2 are an hour and two back.
+fn solo_band_only_graph(status: CanonizationStatus, confirmed: i32) -> (Graph, NodeId) {
     let mut g = Graph::new(sid());
     let mut prev = None;
     for n in 1..=2u64 {
@@ -218,9 +212,9 @@ async fn solo_band_drives_the_candidate_to_venerable_hop() {
         g.insert_interaction(turn).unwrap();
         prev = Some(n);
     }
-    let mut hub = concept(10, 1, 0, CanonizationStatus::Candidate);
+    let mut hub = concept(10, 1, 0, status);
     hub.concept_type = ConceptType::Entity;
-    hub.human_confirmed = 1;
+    hub.human_confirmed = confirmed;
     let hub_id = hub.id;
     g.insert_concept(hub, iid(1)).unwrap();
     g.upsert_edge(Edge {
@@ -236,148 +230,133 @@ async fn solo_band_drives_the_candidate_to_venerable_hop() {
         event_time: Some(ts() - chrono::Duration::hours(2)),
     })
     .unwrap();
+    (g, hub_id)
+}
 
+fn solo_params() -> EvalParams {
+    EvalParams {
+        promotion_policy: PromotionPolicy::Solo,
+        ..params()
+    }
+}
+
+/// Design test: Solo cannot bypass Stage 2. The Candidate's band is
+/// Venerable ((1 + 4) × 1.2 = 6.0) but it has no dependents, so Stage 2
+/// fails and the hop is refused. Given three children from three other
+/// interactions (Stage 2 holds), the same Candidate climbs.
+///
+/// Mutation: apply's Stage 2 loop asking the policy without first requiring
+/// the verdict (the pre-PR 3 bypass) → red.
+#[tokio::test]
+async fn solo_cannot_bypass_stage_2_on_its_band() {
+    let (g, hub_id) = solo_band_only_graph(CanonizationStatus::Candidate, 1);
     let store = store_from_graph(&g).await;
-    let g = RwLock::new(g);
     assert!(
         !stage2_passes(&store, &sid(), hub_id, Duration::ZERO, ts())
             .await
             .unwrap(),
-        "fixture premise: two distinct origins must fail stage 2"
+        "fixture premise: no dependents, no Stage 2"
     );
-
-    let solo_params = EvalParams {
-        promotion_policy: PromotionPolicy::Solo,
-        ..params()
-    };
+    let g = RwLock::new(g);
     let (tx, _rx) = channel();
-    let mut ev = Evaluator::new();
-    let outcome = eval_cycle(&mut ev, &g, &store, &table(&[]), &tx, &solo_params, ts())
-        .await
-        .unwrap();
+    let outcome = eval_cycle(
+        &mut Evaluator::new(),
+        &g,
+        &store,
+        &table(&[]),
+        &tx,
+        &solo_params(),
+        ts(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(status_of(&g.read(), hub_id), CanonizationStatus::Candidate);
+    assert!(outcome.promotions.is_empty(), "{:?}", outcome.promotions);
+
+    let (mut g, hub_id) = solo_band_only_graph(CanonizationStatus::Candidate, 1);
+    attach_blast(&mut g, 10, 3, 300);
+    let store = store_from_graph(&g).await;
+    let g = RwLock::new(g);
+    eval_cycle(
+        &mut Evaluator::new(),
+        &g,
+        &store,
+        &table(&[]),
+        &tx,
+        &solo_params(),
+        ts(),
+    )
+    .await
+    .unwrap();
     assert_eq!(status_of(&g.read(), hub_id), CanonizationStatus::Venerable);
-    let hops: Vec<_> = outcome
-        .transitions()
-        .filter(|e| e.node_id == hub_id)
-        .map(|e| (e.from_status, e.to_status))
-        .collect();
-    assert_eq!(
-        hops,
-        vec![(CanonizationStatus::Candidate, CanonizationStatus::Venerable)]
-    );
 }
 
-/// The Canonical bar likewise: a solo Venerable at 10.8 (one
-/// recurrence session + two confirmations on an Entity) reaches
-/// Canonical on the band alone — blast-radius evidence fails (no
-/// dependents), so pre-closure this hop was unreachable too.
-///
-/// Mutations: revert apply's stage-3 loop to `verdicts.stage3_pass`
-/// → red; `admits_hop` returning `_evidence` → red.
+/// Design test: Solo cannot bypass Stage 3. A Venerable in the Canonical
+/// band ((1 + 8) × 1.2 = 10.8) with no dependents stays Venerable.
 #[tokio::test]
-async fn solo_band_drives_the_venerable_to_canonical_hop() {
-    let mut g = Graph::new(sid());
-    let mut prev = None;
-    for n in 1..=2u64 {
-        let mut turn = interaction(n, prev, ts());
-        turn.event_time = Some(ts() - chrono::Duration::hours(n as i64));
-        g.insert_interaction(turn).unwrap();
-        prev = Some(n);
-    }
-    let mut hub = concept(10, 1, 0, CanonizationStatus::Venerable);
-    hub.concept_type = ConceptType::Entity;
-    hub.human_confirmed = 2;
-    let hub_id = hub.id;
-    g.insert_concept(hub, iid(1)).unwrap();
-    g.upsert_edge(Edge {
-        id: eid(2),
-        session_id: sid(),
-        source: iid(2),
-        target: hub_id,
-        edge_type: EdgeType::Derives,
-        weight: 0.9,
-        reinforcements: 1,
-        created_at: ts(),
-        last_reinforced: ts(),
-        event_time: Some(ts() - chrono::Duration::hours(2)),
-    })
-    .unwrap();
-
+async fn solo_cannot_bypass_stage_3_on_its_band() {
+    let (g, hub_id) = solo_band_only_graph(CanonizationStatus::Venerable, 2);
     let store = store_from_graph(&g).await;
     let g = RwLock::new(g);
-    let solo_params = EvalParams {
-        promotion_policy: PromotionPolicy::Solo,
-        ..params()
-    };
     let (tx, _rx) = channel();
-    let mut ev = Evaluator::new();
-    let outcome = eval_cycle(&mut ev, &g, &store, &table(&[]), &tx, &solo_params, ts())
+    let outcome = eval_cycle(
+        &mut Evaluator::new(),
+        &g,
+        &store,
+        &table(&[]),
+        &tx,
+        &solo_params(),
+        ts(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(status_of(&g.read(), hub_id), CanonizationStatus::Venerable);
+    assert!(outcome.promotions.is_empty(), "{:?}", outcome.promotions);
+}
+
+/// Design test: Solo cannot bypass the re-promotion cooldown. A Venerable
+/// in the Canonical band with real Stage 2 and Stage 3 evidence, demoted a
+/// minute ago, waits out the 300 s cooldown and then promotes.
+#[tokio::test]
+async fn solo_cannot_bypass_the_repromotion_cooldown() {
+    let (mut g, hub_id) = solo_band_only_graph(CanonizationStatus::Venerable, 2);
+    attach_blast(&mut g, 10, 6, 300);
+    let mut hub = match g.node(hub_id) {
+        Some(Node::Concept(c)) => c.clone(),
+        _ => unreachable!(),
+    };
+    hub.last_demotion_time = Some(ts() - chrono::Duration::seconds(60));
+    g.insert_concept(hub, iid(1)).unwrap();
+    let store = store_from_graph(&g).await;
+    // Inspect explains the stall by the cooldown, and nothing else.
+    let inputs = crate::canon::admission_inputs(&g, hub_id, &solo_params(), ts()).unwrap();
+    let why = crate::canon::explain_admission(&store, &sid(), &inputs, &solo_params(), ts())
         .await
         .unwrap();
-    assert_eq!(status_of(&g.read(), hub_id), CanonizationStatus::Canonical);
-    let hop = outcome
-        .transitions()
-        .find(|e| e.node_id == hub_id)
-        .expect("the canonical hop must be audited");
-    assert_eq!(
-        (hop.from_status, hop.to_status),
-        (CanonizationStatus::Venerable, CanonizationStatus::Canonical)
+    assert!(!why.eligible);
+    assert_eq!(why.reasons.len(), 1, "{:?}", why.reasons);
+    assert!(
+        why.reasons[0].contains("240s of the re-promotion cooldown left"),
+        "{:?}",
+        why.reasons
     );
-}
-
-/// Score-driven stage-3 admission bypasses the verdict phase — where
-/// the re-promotion cooldown normally gates — so apply gates it
-/// itself: a cooling Venerable stays put no matter what its band says.
-///
-/// Mutation: drop the `in_repromotion_cooldown` check on the
-/// score-admitted path → red.
-#[tokio::test]
-async fn solo_score_admission_still_honors_the_repromotion_cooldown() {
-    let mut g = Graph::new(sid());
-    let mut prev = None;
-    for n in 1..=2u64 {
-        let mut turn = interaction(n, prev, ts());
-        turn.event_time = Some(ts() - chrono::Duration::hours(n as i64));
-        g.insert_interaction(turn).unwrap();
-        prev = Some(n);
-    }
-    let mut hub = concept(10, 1, 0, CanonizationStatus::Venerable);
-    hub.concept_type = ConceptType::Entity;
-    hub.human_confirmed = 2;
-    hub.last_demotion_time = Some(ts() - chrono::Duration::seconds(60));
-    let hub_id = hub.id;
-    g.insert_concept(hub, iid(1)).unwrap();
-    g.upsert_edge(Edge {
-        id: eid(2),
-        session_id: sid(),
-        source: iid(2),
-        target: hub_id,
-        edge_type: EdgeType::Derives,
-        weight: 0.9,
-        reinforcements: 1,
-        created_at: ts(),
-        last_reinforced: ts(),
-        event_time: Some(ts() - chrono::Duration::hours(2)),
-    })
-    .unwrap();
-
-    let store = store_from_graph(&g).await;
     let g = RwLock::new(g);
-    let solo_params = EvalParams {
-        promotion_policy: PromotionPolicy::Solo,
-        ..params()
-    };
     let (tx, _rx) = channel();
     let mut ev = Evaluator::new();
-    let outcome = eval_cycle(&mut ev, &g, &store, &table(&[]), &tx, &solo_params, ts())
+    let outcome = eval_cycle(&mut ev, &g, &store, &table(&[]), &tx, &solo_params(), ts())
         .await
         .unwrap();
     assert_eq!(status_of(&g.read(), hub_id), CanonizationStatus::Venerable);
     assert!(
         outcome.promotions.is_empty(),
-        "cooling node must not climb on the band alone: {:?}",
+        "cooling node must not climb: {:?}",
         outcome.promotions
     );
+    let later = ts() + chrono::Duration::seconds(300);
+    eval_cycle(&mut ev, &g, &store, &table(&[]), &tx, &solo_params(), later)
+        .await
+        .unwrap();
+    assert_eq!(status_of(&g.read(), hub_id), CanonizationStatus::Canonical);
 }
 
 #[tokio::test]
@@ -691,6 +670,7 @@ async fn record_failure_keeps_the_emitted_event_and_the_partial_outcome() {
         g.insert_concept(concept(id, 1, 5, CanonizationStatus::None), iid(1))
             .unwrap();
     }
+    admit_on_evidence(&mut g, 20);
     let store = FaultyStore::record_fails(store_from_graph(&g).await);
     let g = RwLock::new(g);
     let mut pairs: Vec<(u64, f64)> = (1..=19).map(|i| (i, 0.1)).collect();
@@ -754,6 +734,7 @@ async fn store_fault_still_lands_the_io_free_stage_1_hops() {
         g.insert_concept(concept(id, 1, 5, CanonizationStatus::None), iid(1))
             .unwrap();
     }
+    admit_on_evidence(&mut g, 20);
     // One pre-existing Candidate, so Stage 2 has a window member and
     // the cycle actually reaches the failing query.
     g.insert_concept(concept(21, 1, 5, CanonizationStatus::Candidate), iid(1))
@@ -1186,6 +1167,7 @@ async fn emit_canonized_reaches_event_sender_subscriber() {
         g.insert_concept(concept(id, 1, 5, CanonizationStatus::None), iid(1))
             .unwrap();
     }
+    admit_on_evidence(&mut g, 20);
     let store = store_from_graph(&g).await;
     let g = RwLock::new(g);
     let mut pairs: Vec<(u64, f64)> = (1..=19).map(|i| (i, 0.1)).collect();
@@ -1219,6 +1201,7 @@ async fn audit_rows_equal_committed_transitions() {
         g.insert_concept(concept(id, 1, 5, CanonizationStatus::None), iid(1))
             .unwrap();
     }
+    admit_on_evidence(&mut g, 20);
     let store = store_from_graph(&g).await;
     let g = RwLock::new(g);
     let mut pairs: Vec<(u64, f64)> = (1..=19).map(|i| (i, 0.1)).collect();
@@ -1303,6 +1286,7 @@ async fn flush_after_eval_does_not_duplicate_audit_rows() {
         g.insert_concept(concept(id, 1, 5, CanonizationStatus::None), iid(1))
             .unwrap();
     }
+    admit_on_evidence(&mut g, 20);
     let store = store_from_graph(&g).await;
     let g = RwLock::new(g);
     let mut pairs: Vec<(u64, f64)> = (1..=19).map(|i| (i, 0.1)).collect();
@@ -1496,14 +1480,15 @@ async fn configured_window_controls_both_stage_2_paths_and_inspect() {
     }
 }
 
-/// #36 review M1: the Stage 2 re-check is Swarm's. A Solo Venerable whose
-/// six dependents all come from its own interaction fails Stage 2, but Solo
-/// admits by its score band, and the Stage 3 probe must still run so the
-/// audit row carries the measured blast radius, exactly as before the
-/// re-check existed.
+/// #36 PR 3: the Stage 2 re-check is both policies'. A Solo Venerable in
+/// the Canonical band whose six dependents all come from its own
+/// interaction has blast 6 but no Stage 2 support, so it stays Venerable
+/// (before PR 3 it promoted on its band). Given children from other
+/// interactions instead, it promotes, and the audit row carries the blast
+/// radius that admitted it.
 #[tokio::test]
-async fn solo_keeps_its_stage_3_probe_and_stamps_the_measured_blast() {
-    let (g, hub_id) = solo_hub_graph();
+async fn solo_needs_stage_2_again_at_stage_3_and_stamps_the_measured_blast() {
+    let (g, hub_id) = solo_hub_graph(false);
     let store = store_from_graph(&g).await;
     assert!(
         !stage2_passes(&store, &sid(), hub_id, Duration::ZERO, ts())
@@ -1511,53 +1496,68 @@ async fn solo_keeps_its_stage_3_probe_and_stamps_the_measured_blast() {
             .unwrap(),
         "fixture premise: Stage 2 fails"
     );
-    solo_hub_promotes_with_measured_blast(g, hub_id, &store).await;
-}
-
-/// #36 PR 2 review M1 (a): Solo's hop ignores the Stage 2 verdict, so a
-/// store without the window-aware span is never asked for one, and the
-/// Solo ladder runs exactly as on a store that has it.
-#[tokio::test]
-async fn solo_never_asks_a_store_for_the_window_aware_span() {
-    let (logs, _guard) = crate::test_util::capture_logs(tracing::Level::WARN);
-    let (g, hub_id) = solo_hub_graph();
-    let store = FaultyStore::without_window(store_from_graph(&g).await);
-    solo_hub_promotes_with_measured_blast(g, hub_id, &store).await;
-    assert_eq!(store.window_calls(), 0, "Solo must not query Stage 2");
-    let out = logs.contents();
-    assert!(!out.contains("CanonizationStage2Unsupported"), "{out}");
-}
-
-/// The Solo hub: a Venerable in the Canonical band with six children from
-/// its own interaction, so blast 6 and no Stage 2 support.
-fn solo_hub_graph() -> (Graph, NodeId) {
-    let mut g = Graph::new(sid());
-    let mut prev = None;
-    for n in 1..=2u64 {
-        let mut turn = interaction(n, prev, ts());
-        turn.event_time = Some(ts() - chrono::Duration::hours(n as i64));
-        g.insert_interaction(turn).unwrap();
-        prev = Some(n);
-    }
-    let mut hub = concept(10, 1, 0, CanonizationStatus::Venerable);
-    hub.concept_type = ConceptType::Entity;
-    hub.human_confirmed = 2;
-    let hub_id = hub.id;
-    g.insert_concept(hub, iid(1)).unwrap();
-    g.upsert_edge(Edge {
-        id: eid(2),
-        session_id: sid(),
-        source: iid(2),
-        target: hub_id,
-        edge_type: EdgeType::Derives,
-        weight: 0.9,
-        reinforcements: 1,
-        created_at: ts(),
-        last_reinforced: ts(),
-        event_time: Some(ts() - chrono::Duration::hours(2)),
-    })
+    let g = RwLock::new(g);
+    let (tx, _rx) = channel();
+    let outcome = eval_cycle(
+        &mut Evaluator::new(),
+        &g,
+        &store,
+        &table(&[]),
+        &tx,
+        &solo_params(),
+        ts(),
+    )
+    .await
     .unwrap();
-    // Six children from the hub's own interaction: blast 6, no Stage 2.
+    assert_eq!(status_of(&g.read(), hub_id), CanonizationStatus::Venerable);
+    assert!(outcome.promotions.is_empty(), "{:?}", outcome.promotions);
+
+    let (g, hub_id) = solo_hub_graph(true);
+    let store = store_from_graph(&g).await;
+    solo_hub_promotes_with_measured_blast(g, hub_id, &store).await;
+}
+
+/// #36 PR 3: Solo now consumes the Stage 2 verdict, so a store without the
+/// window-aware span gives the Solo hub no evidence: it stays Venerable,
+/// the cycle still succeeds, and one warning names the capability.
+#[tokio::test]
+async fn solo_without_the_window_span_gives_no_evidence_and_keeps_the_cycle() {
+    let (logs, _guard) = crate::test_util::capture_logs(tracing::Level::WARN);
+    let (g, hub_id) = solo_hub_graph(true);
+    let store = FaultyStore::without_window(store_from_graph(&g).await);
+    let g = RwLock::new(g);
+    let (tx, _rx) = channel();
+    eval_cycle(
+        &mut Evaluator::new(),
+        &g,
+        &store,
+        &table(&[]),
+        &tx,
+        &solo_params(),
+        ts(),
+    )
+    .await
+    .expect("a missing capability must not fail the cycle");
+    assert_eq!(status_of(&g.read(), hub_id), CanonizationStatus::Venerable);
+    assert_eq!(store.window_calls(), 1, "Solo asks for the Stage 2 verdict");
+    let out = logs.contents();
+    assert_eq!(
+        out.matches("CanonizationStage2Unsupported").count(),
+        1,
+        "{out}"
+    );
+}
+
+/// The Solo hub: a Venerable in the Canonical band with six children, so
+/// blast 6. With `supported`, the children come round-robin from three
+/// other interactions (Stage 2 holds); without, all from the hub's own
+/// interaction (no Stage 2 support).
+fn solo_hub_graph(supported: bool) -> (Graph, NodeId) {
+    let (mut g, hub_id) = solo_band_only_graph(CanonizationStatus::Venerable, 2);
+    if supported {
+        attach_blast(&mut g, 10, 6, 100);
+        return (g, hub_id);
+    }
     for k in 100..106u64 {
         g.insert_concept(concept(k, 1, 0, CanonizationStatus::None), iid(1))
             .unwrap();
@@ -1570,13 +1570,9 @@ fn solo_hub_graph() -> (Graph, NodeId) {
 
 async fn solo_hub_promotes_with_measured_blast(g: Graph, hub_id: NodeId, store: &dyn GraphStore) {
     let g = RwLock::new(g);
-    let solo_params = EvalParams {
-        promotion_policy: PromotionPolicy::Solo,
-        ..params()
-    };
     let (tx, _rx) = channel();
     let mut ev = Evaluator::new();
-    let outcome = eval_cycle(&mut ev, &g, store, &table(&[]), &tx, &solo_params, ts())
+    let outcome = eval_cycle(&mut ev, &g, store, &table(&[]), &tx, &solo_params(), ts())
         .await
         .unwrap();
     assert_eq!(status_of(&g.read(), hub_id), CanonizationStatus::Canonical);
@@ -1671,4 +1667,119 @@ fn no_window_graph() -> Graph {
         attach_blast(&mut g, id, blast, first);
     }
     g
+}
+
+/// #36 PR 3: inspect's explanation treats a store without the window-aware
+/// span the way the evaluator does: no Stage 2 evidence, said in words, and
+/// not eligible. On a capable store the same two nodes are eligible, as the
+/// evaluator's verdicts are.
+#[tokio::test]
+async fn the_explanation_matches_the_evaluator_on_a_store_without_the_window_span() {
+    let g = no_window_graph();
+    let p = params();
+    let without = FaultyStore::without_window(store_from_graph(&g).await);
+    let healthy = store_from_graph(&g).await;
+    for id in [20, 21] {
+        let inputs = crate::canon::admission_inputs(&g, nid(id), &p, ts()).unwrap();
+        let a = crate::canon::explain_admission(&without, &sid(), &inputs, &p, ts())
+            .await
+            .unwrap();
+        assert!(!a.eligible, "{a:?}");
+        assert!(
+            a.reasons[0].contains("cannot measure capped interaction-span coverage"),
+            "{:?}",
+            a.reasons
+        );
+        let a = crate::canon::explain_admission(&healthy, &sid(), &inputs, &p, ts())
+            .await
+            .unwrap();
+        assert!(a.eligible, "{a:?}");
+    }
+}
+
+/// #36 PR 3 review L1: under Solo a Candidate whose band can never admit
+/// the Venerable hop is not probed (no store query), while one whose band
+/// can is. Swarm probes every Candidate, as before.
+#[tokio::test]
+async fn solo_probes_only_candidates_its_band_could_admit() {
+    for (confirmed, policy, probes) in [
+        (0, PromotionPolicy::Solo, 0usize),
+        (1, PromotionPolicy::Solo, 1),
+        (0, PromotionPolicy::Swarm, 1),
+    ] {
+        let (g, _) = solo_band_only_graph(CanonizationStatus::Candidate, confirmed);
+        let store = FaultyStore::healthy(store_from_graph(&g).await);
+        let g = RwLock::new(g);
+        let (tx, _rx) = channel();
+        let p = EvalParams {
+            promotion_policy: policy,
+            ..params()
+        };
+        eval_cycle(
+            &mut Evaluator::new(),
+            &g,
+            &store,
+            &table(&[]),
+            &tx,
+            &p,
+            ts(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            store.window_calls(),
+            probes,
+            "{policy:?} with {confirmed} confirmation(s)"
+        );
+    }
+}
+
+/// #36 PR 3 review L9: with the Canonical budget full the cycle runs no
+/// Stage 3 window, and the explanation says so instead of reporting a
+/// Venerable whose other Stage 3 gates hold as eligible.
+#[tokio::test]
+async fn the_explanation_reports_a_full_canonical_budget() {
+    let mut g = Graph::new(sid());
+    g.insert_interaction(interaction(1, None, ts())).unwrap();
+    let mut existing = concept(10, 1, 5, CanonizationStatus::Canonical);
+    existing.blast_radius = Some(8);
+    g.insert_concept(existing, iid(1)).unwrap();
+    attach_blast(&mut g, 10, 8, 100);
+    g.insert_concept(concept(20, 1, 5, CanonizationStatus::Venerable), iid(1))
+        .unwrap();
+    attach_blast(&mut g, 20, 6, 200);
+    let store = store_from_graph(&g).await;
+    for (budget, eligible) in [(1usize, false), (2, true)] {
+        let p = EvalParams {
+            max_canonical_nodes: budget,
+            ..params()
+        };
+        let inputs = crate::canon::admission_inputs(&g, nid(20), &p, ts()).unwrap();
+        let a = crate::canon::explain_admission(&store, &sid(), &inputs, &p, ts())
+            .await
+            .unwrap();
+        assert_eq!(a.eligible, eligible, "budget {budget}: {a:?}");
+        if !eligible {
+            assert_eq!(a.reasons.len(), 1, "{:?}", a.reasons);
+            assert!(
+                a.reasons[0].contains("the Canonical budget is full (1 of 1)"),
+                "{:?}",
+                a.reasons
+            );
+        }
+        let gr = RwLock::new(g.clone());
+        let (tx, _rx) = channel();
+        let out = eval_cycle(
+            &mut Evaluator::new(),
+            &gr,
+            &store,
+            &table(&[]),
+            &tx,
+            &p,
+            ts(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(!out.promotions.is_empty(), eligible, "budget {budget}");
+    }
 }

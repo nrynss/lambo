@@ -28,7 +28,9 @@ use super::{
     MAX_RETAINED_RECEIPTS,
 };
 use crate::surface::limits::MAX_CONTENT_BYTES;
-use crate::types::{AgentId, ConceptType, NodeId, SuppliedVector, WriteIntent, WriteIntentPayload};
+use crate::types::{
+    AgentId, ConceptType, NodeId, PinnedCitations, SuppliedVector, WriteIntent, WriteIntentPayload,
+};
 
 /// **Deleted roles, recorded where they lived** (J3 redesign): this block used
 /// to define `DRAIN_PROJECTION_SHARE` (the share of the drain budget an
@@ -181,6 +183,9 @@ pub(super) enum JobPayload {
     Derive {
         concepts: Vec<(String, ConceptType)>,
         pairs: Vec<(String, String)>,
+        /// #36 PR 4: the citations and names accepted at the ack; empty for
+        /// a derive without them (whose intent is then a plain `Derive`).
+        citations: PinnedCitations,
     },
     /// An image derive (#22): the derive above, with one concept's vector
     /// supplied. It carries the vector, never image bytes.
@@ -194,6 +199,9 @@ pub(super) enum JobPayload {
         produces: Vec<String>,
         modifies: Vec<String>,
         depends_on: Vec<String>,
+        /// #36 PR 4: what each id-shaped `depends_on` entry named at the ack
+        /// (`graph::action::validate_pinned`); empty when none reads as an id.
+        depends_on_pins: Vec<Option<NodeId>>,
     },
 }
 
@@ -209,9 +217,22 @@ impl JobPayload {
     /// The durable form of this job, exactly as validated (J3 intents).
     pub(super) fn to_intent_payload(&self) -> WriteIntentPayload {
         match self {
-            JobPayload::Derive { concepts, pairs } => WriteIntentPayload::Derive {
+            JobPayload::Derive {
+                concepts,
+                pairs,
+                citations,
+            } if citations.is_empty() => WriteIntentPayload::Derive {
                 concepts: concepts.clone(),
                 pairs: pairs.clone(),
+            },
+            JobPayload::Derive {
+                concepts,
+                pairs,
+                citations,
+            } => WriteIntentPayload::DeriveCited {
+                concepts: concepts.clone(),
+                pairs: pairs.clone(),
+                citations: citations.clone(),
             },
             JobPayload::DeriveImage {
                 concepts,
@@ -227,11 +248,13 @@ impl JobPayload {
                 produces,
                 modifies,
                 depends_on,
+                depends_on_pins,
             } => WriteIntentPayload::Action {
                 action: action.clone(),
                 produces: produces.clone(),
                 modifies: modifies.clone(),
                 depends_on: depends_on.clone(),
+                depends_on_pins: depends_on_pins.clone(),
             },
         }
     }
@@ -239,9 +262,20 @@ impl JobPayload {
     /// Rehydrate a job payload from its durable form (replay).
     pub(super) fn from_intent_payload(p: WriteIntentPayload) -> Self {
         match p {
-            WriteIntentPayload::Derive { concepts, pairs } => {
-                JobPayload::Derive { concepts, pairs }
-            }
+            WriteIntentPayload::Derive { concepts, pairs } => JobPayload::Derive {
+                concepts,
+                pairs,
+                citations: PinnedCitations::default(),
+            },
+            WriteIntentPayload::DeriveCited {
+                concepts,
+                pairs,
+                citations,
+            } => JobPayload::Derive {
+                concepts,
+                pairs,
+                citations,
+            },
             WriteIntentPayload::DeriveImage {
                 concepts,
                 pairs,
@@ -256,11 +290,13 @@ impl JobPayload {
                 produces,
                 modifies,
                 depends_on,
+                depends_on_pins,
             } => JobPayload::Action {
                 action,
                 produces,
                 modifies,
                 depends_on,
+                depends_on_pins,
             },
         }
     }
@@ -276,7 +312,11 @@ impl JobPayload {
                 + pairs.iter().map(|(a, b)| a.len() + b.len()).sum::<usize>()
         }
         match self {
-            JobPayload::Derive { concepts, pairs } => derive_bytes(concepts, pairs),
+            JobPayload::Derive {
+                concepts,
+                pairs,
+                citations,
+            } => derive_bytes(concepts, pairs) + citations.bytes(),
             JobPayload::DeriveImage {
                 concepts,
                 pairs,
@@ -293,8 +333,10 @@ impl JobPayload {
                 produces,
                 modifies,
                 depends_on,
+                depends_on_pins,
             } => {
-                action.len()
+                std::mem::size_of::<Option<NodeId>>() * depends_on_pins.len()
+                    + action.len()
                     + produces
                         .iter()
                         .chain(modifies)
@@ -589,9 +631,18 @@ impl WritePipeline {
         interaction: NodeId,
         concepts: Vec<(String, ConceptType)>,
         pairs: Vec<(String, String)>,
+        citations: PinnedCitations,
     ) -> Submitted {
-        self.admit(agent, interaction, JobPayload::Derive { concepts, pairs })
-            .await
+        self.admit(
+            agent,
+            interaction,
+            JobPayload::Derive {
+                concepts,
+                pairs,
+                citations,
+            },
+        )
+        .await
     }
 
     /// Queue an image derive (#22). The interaction is already open and the
@@ -617,6 +668,9 @@ impl WritePipeline {
     }
 
     /// Queue a `record_action`. The interaction is already open (call path).
+    // Each parameter is one field of the job, in the job's own order; a
+    // params struct would only rename `JobPayload::Action`.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn submit_action(
         &self,
         agent: AgentId,
@@ -625,6 +679,7 @@ impl WritePipeline {
         produces: Vec<String>,
         modifies: Vec<String>,
         depends_on: Vec<String>,
+        depends_on_pins: Vec<Option<NodeId>>,
     ) -> Submitted {
         self.admit(
             agent,
@@ -634,6 +689,7 @@ impl WritePipeline {
                 produces,
                 modifies,
                 depends_on,
+                depends_on_pins,
             },
         )
         .await

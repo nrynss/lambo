@@ -16,7 +16,7 @@ use crate::test_util::dependents as case;
 use crate::types::{EdgeType, Mutation, MutationBatch, Node, NodeId, ScoreTable};
 
 use super::policy::solo_score;
-use super::{stage1_candidates, stage2_passes, stage3_passes};
+use super::{dependent_interactions, stage1_candidates, stage2_passes, stage3_passes};
 
 fn is_contradiction(m: &Mutation) -> bool {
     matches!(m, Mutation::UpsertEdge { edge } if edge.edge_type == EdgeType::Contradicts)
@@ -63,13 +63,20 @@ fn contradictions_change_no_graph_side_canonization_input() {
     };
     let (t_with, t_without) = (table(&with), table(&without));
     assert_eq!(t_with.ranked, t_without.ranked, "daemon scores");
-    let s1_with = stage1_candidates(&with, &t_with, 1);
+    let (age, now) = (case::MIN_AGE, case::now());
+    let s1_with = stage1_candidates(&with, &t_with, age, now);
     assert!(!s1_with.is_empty(), "Stage 1 admits someone in this case");
-    assert_eq!(s1_with, stage1_candidates(&without, &t_without, 1));
+    assert_eq!(s1_with, stage1_candidates(&without, &t_without, age, now));
     for name in ["X", "Q"] {
+        let id = case::concept_id(name);
+        let (d_with, d_without) = (
+            dependent_interactions(&with, id, age, now),
+            dependent_interactions(&without, id, age, now),
+        );
+        assert_eq!(d_with, d_without, "{name} dependent interactions");
         assert_eq!(
-            solo_score(&with, &concept(&with, name)),
-            solo_score(&without, &concept(&without, name)),
+            solo_score(&with, &concept(&with, name), d_with),
+            solo_score(&without, &concept(&without, name), d_without),
             "{name} Solo score"
         );
     }

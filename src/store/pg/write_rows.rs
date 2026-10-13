@@ -386,7 +386,8 @@ pub(super) async fn put_write_intent(
 /// own `consumed_at`. Consuming an absent receipt is a no-op (idempotent
 /// replay, same as the canonization dedupe). A settled image intent's payload
 /// is overwritten with [`crate::types::SETTLED_IMAGE_INTENT_PAYLOAD`] in the
-/// same statement (#22 review L1).
+/// same statement (#22 review L1), and so is a settled cited derive's (#36
+/// PR 4 review H2).
 pub(super) async fn consume_write_intent(
     tx: &mut sqlx::PgConnection,
     session_id: &SessionId,
@@ -395,7 +396,8 @@ pub(super) async fn consume_write_intent(
 ) -> Result<(), StoreError> {
     sqlx::query(
         "UPDATE write_intents SET consumed_at = $1, outcome_tag = $2, outcome_summary = $3, \
-             payload = CASE WHEN payload LIKE CAST($6 AS TEXT) THEN CAST($7 AS TEXT) \
+             payload = CASE WHEN payload LIKE CAST($6 AS TEXT) \
+                 OR payload LIKE CAST($8 AS TEXT) THEN CAST($7 AS TEXT) \
                  ELSE payload END \
          WHERE session_id = $4 AND receipt = $5",
     )
@@ -406,6 +408,7 @@ pub(super) async fn consume_write_intent(
     .bind(receipt)
     .bind(crate::types::DERIVE_IMAGE_PAYLOAD_LIKE)
     .bind(crate::types::SETTLED_IMAGE_INTENT_PAYLOAD)
+    .bind(crate::types::DERIVE_CITED_PAYLOAD_LIKE)
     .execute(&mut *tx)
     .await
     .map_err(|e| map_write_err(e, |m| format!("consume write intent: {m}")))?;

@@ -37,9 +37,12 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::graph::canonical::{canonicalize, CanonicalizeResult};
 use crate::graph::Graph;
+use crate::surface::resolve::{
+    is_hyphenated_id, is_short_id_shaped, parse_full_id, short_id_matches,
+};
 use crate::types::{
     AgentId, CanonizationStatus, Concept, ConceptType, Edge, EdgeType, LamboError, Node, NodeId,
-    StoreError,
+    ReferenceField, ReferenceRefusalKind, StoreError,
 };
 
 /// Initial weight of `Causal` edges created by [`record_action`] — the
@@ -269,6 +272,24 @@ pub fn record_action_with_embeddings(
     action: &Action,
     embeddings: &ActionEmbeddings,
 ) -> Result<ActionOutcome, LamboError> {
+    record_action_pinned(graph, interaction, agent, action, embeddings, &[])
+}
+
+/// [`record_action_with_embeddings`], checking the `depends_on` entries that
+/// named a concept by id against what they named at the ack (#36 PR 4):
+/// `pins` is [`validate_pinned`]'s answer, one entry per `depends_on` entry,
+/// or empty to resolve afresh (an intent from before #36 PR 4, or a
+/// synchronous call that validates and applies under one lock). An entry
+/// that resolves differently now refuses the whole call with
+/// [`crate::types::ReferenceRefusalKind::Changed`].
+pub(crate) fn record_action_pinned(
+    graph: &mut Graph,
+    interaction: NodeId,
+    agent: &AgentId,
+    action: &Action,
+    embeddings: &ActionEmbeddings,
+    pins: &[Option<NodeId>],
+) -> Result<ActionOutcome, LamboError> {
     // Step 1 — the interaction must exist (a concept id is equally rejected:
     // `record_action` attaches the action to a specific interaction).
     let (created_at, event_time) = match graph.node(interaction) {
@@ -285,7 +306,8 @@ pub fn record_action_with_embeddings(
         action_node,
         planned,
         planned_edges,
-    } = plan(graph, action)?;
+        ..
+    } = plan(graph, action, pins)?;
 
     // Step 5 — every check passed; mutate. Concepts first (their Derives edges
     // are emitted by insert_concept), then the planned edges, so the mutation
@@ -361,6 +383,10 @@ struct Plan {
     action_node: NodeId,
     planned: Vec<PlannedConcept>,
     planned_edges: Vec<(NodeId, NodeId, EdgeType)>,
+    /// Per `depends_on` entry, the concept it named by id (#36 PR 4), or
+    /// `None` for an entry resolved the legacy way (canonical match or
+    /// create). Empty when no entry named a concept by id.
+    pins: Vec<Option<NodeId>>,
 }
 
 /// [`record_action`]'s read-only steps 2 to 4 — resolve, plan, cycle-check —
@@ -372,7 +398,7 @@ struct Plan {
 /// check is inseparable from the planning — it reasons about edges landing on
 /// not-yet-created nodes — so a "cheap validation" that skipped it would not be
 /// the same check.
-fn plan(graph: &Graph, action: &Action) -> Result<Plan, LamboError> {
+fn plan(graph: &Graph, action: &Action, expected: &[Option<NodeId>]) -> Result<Plan, LamboError> {
     // Step 2 — resolve + plan concepts (read-only; nothing touches the graph).
     let mut resolved: HashMap<String, NodeId> = HashMap::new();
     let mut planned: Vec<PlannedConcept> = Vec::new();
@@ -407,8 +433,17 @@ fn plan(graph: &Graph, action: &Action) -> Result<Plan, LamboError> {
             EdgeType::Causal,
         );
     }
-    for d in action.depends_on {
-        let tgt = resolve(graph, &mut resolved, &mut planned, d, ConceptType::Entity)?;
+    let mut pins: Vec<Option<NodeId>> = Vec::with_capacity(action.depends_on.len());
+    for (i, d) in action.depends_on.iter().enumerate() {
+        let (tgt, pin) = resolve_dependency(
+            graph,
+            &mut resolved,
+            &mut planned,
+            action.action,
+            d,
+            expected.get(i).copied(),
+        )?;
+        pins.push(pin);
         plan_edge(
             &mut planned_edges,
             &mut edge_keys,
@@ -426,10 +461,23 @@ fn plan(graph: &Graph, action: &Action) -> Result<Plan, LamboError> {
         )));
     }
 
+    // Kept whenever an entry reads as an id, so an id-shaped entry that
+    // named nothing at the ack (to be created) is refused at the apply if it
+    // has come to name a concept since; dropped otherwise, so a request with
+    // no id-shaped entry carries exactly what it carried before #36 PR 4.
+    if pins.iter().all(Option::is_none)
+        && !action
+            .depends_on
+            .iter()
+            .any(|d| crate::surface::resolve::is_id_shaped(d))
+    {
+        pins.clear();
+    }
     Ok(Plan {
         action_node,
         planned,
         planned_edges,
+        pins,
     })
 }
 
@@ -442,7 +490,17 @@ fn plan(graph: &Graph, action: &Action) -> Result<Plan, LamboError> {
 /// edge that would close a cycle) surface at call time instead of on a receipt.
 /// Nothing is written whether it passes or fails.
 pub fn validate(graph: &Graph, action: &Action) -> Result<(), LamboError> {
-    plan(graph, action).map(|_| ())
+    plan(graph, action, &[]).map(|_| ())
+}
+
+/// [`validate`], returning what each `depends_on` entry named by id (#36 PR
+/// 4), for the apply to check with [`record_action_pinned`]. Empty when no
+/// entry named a concept by id.
+pub(crate) fn validate_pinned(
+    graph: &Graph,
+    action: &Action,
+) -> Result<Vec<Option<NodeId>>, LamboError> {
+    plan(graph, action, &[]).map(|p| p.pins)
 }
 
 /// A concept planned for creation by [`record_action`] — resolved but not yet
@@ -492,6 +550,98 @@ fn resolve(
     }
 }
 
+/// The `depends_on` entries in the hyphenated id form that name no concept
+/// of `graph`, by id or by text: the ones `record_action` would mint as new
+/// text. The caller asks other scopes about them (a cross-session id is
+/// refused, not minted). Read-only.
+pub(crate) fn unresolved_ids<'a>(
+    graph: &Graph,
+    action: &Action<'a>,
+) -> Result<Vec<&'a str>, LamboError> {
+    let mut out = Vec::new();
+    for &d in action.depends_on {
+        if !is_hyphenated_id(d) {
+            continue;
+        }
+        let by_id = parse_full_id(d).is_some_and(|id| graph.node(id).is_some());
+        let by_text = matches!(canonicalize(d, graph)?, CanonicalizeResult::Matched { .. });
+        if !by_id && !by_text {
+            out.push(d);
+        }
+    }
+    Ok(out)
+}
+
+/// Resolve one `depends_on` entry (#36 PR 4, review M1).
+///
+/// * An entry in the canonical hyphenated id form that names a concept of
+///   this session cites it, and is pinned; one that names an interaction is
+///   refused. One that names nothing is text (below), so a re-sent 0.5.0
+///   request whose id text was minted as an Entity still lands on it.
+/// * An entry of exactly 8 hex characters (the short id recall prints)
+///   whose text names no concept cites the one concept whose id it
+///   prefixes, and is pinned; a prefix two concepts share is refused. So an
+///   8-character commit hash that happens to prefix a concept's id cites
+///   that concept: the chance is about (concepts in the session) / 2^32. A
+///   text match wins over the prefix, as in 0.5.0.
+/// * Every other entry, and an id-shaped one that names nothing, keeps the
+///   0.5.0 rule: canonical match, else create (9 to 32 hex characters, the
+///   unhyphenated simple form, `urn:uuid:` and braced spellings included).
+///
+/// `expected` is the pin from the ack, when the caller has one: the entry
+/// must resolve the same way now, or the call is refused as
+/// [`ReferenceRefusalKind::Changed`].
+fn resolve_dependency(
+    graph: &Graph,
+    resolved: &mut HashMap<String, NodeId>,
+    planned: &mut Vec<PlannedConcept>,
+    action: &str,
+    entry: &str,
+    expected: Option<Option<NodeId>>,
+) -> Result<(NodeId, Option<NodeId>), LamboError> {
+    let refuse = |kind| {
+        crate::surface::resolve::refusal(ReferenceField::ActionDependsOn, Some(action), entry, kind)
+    };
+    let pin = if is_hyphenated_id(entry) {
+        match parse_full_id(entry).map(|id| (id, graph.node(id))) {
+            Some((id, Some(Node::Concept(_)))) => Some(id),
+            Some((_, Some(Node::Interaction(_)))) => {
+                return Err(refuse(ReferenceRefusalKind::NotAConcept))
+            }
+            _ => None,
+        }
+    } else if is_short_id_shaped(entry)
+        && !matches!(
+            canonicalize(entry, graph)?,
+            CanonicalizeResult::Matched { .. }
+        )
+    {
+        match short_id_matches(graph, entry).as_slice() {
+            [] => None,
+            [one] => Some(*one),
+            many => {
+                return Err(refuse(ReferenceRefusalKind::Ambiguous {
+                    candidates: crate::surface::resolve::candidates(graph, many),
+                }))
+            }
+        }
+    } else {
+        None
+    };
+    if let Some(accepted) = expected
+        && accepted != pin
+    {
+        return Err(refuse(ReferenceRefusalKind::Changed { accepted, now: pin }));
+    }
+    match pin {
+        Some(node) => Ok((node, pin)),
+        None => Ok((
+            resolve(graph, resolved, planned, entry, ConceptType::Entity)?,
+            None,
+        )),
+    }
+}
+
 /// Register one planned edge unless its natural key is already planned.
 fn plan_edge(
     planned: &mut Vec<(NodeId, NodeId, EdgeType)>,
@@ -516,7 +666,7 @@ fn plan_edge(
 /// action `"x"` producing `["x"]`) would create one. `Hierarchical` is
 /// deliberately excluded: write-time acyclicity of that edge type is not part
 /// of the pinned §5.7 contract (see `graph.rs` module docs).
-fn closing_edge(
+pub(crate) fn closing_edge(
     graph: &Graph,
     planned: &[(NodeId, NodeId, EdgeType)],
 ) -> Option<(NodeId, NodeId, EdgeType)> {

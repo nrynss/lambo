@@ -226,7 +226,7 @@ enum Commands {
         )]
         session: String,
     },
-    /// Inspect the neighbourhood around a concept: its type, canonization status, blast radius, the dependents it counts, and typed edges out to a depth.
+    /// Inspect the neighbourhood around a concept: its type, canonization status, blast radius, the dependents it counts, why it is or is not promoted next, and typed edges out to a depth.
     Inspect {
         /// Session to inspect (reader process; does not take the writer lease).
         #[arg(
@@ -322,6 +322,14 @@ enum Commands {
             help = "Extra concept CONTENT:KIND (repeatable) so one invocation can match a multi-concept MCP lambo_derive."
         )]
         concept: Vec<String>,
+        /// An existing concept the first concept rests on (repeatable, at most 8): its 8-hex id from recall, its full node id or its exact content. Must match exactly one concept, or nothing is written.
+        #[arg(
+            long = "depends-on",
+            value_name = "REF",
+            action = ArgAction::Append,
+            help = "An existing concept the first concept rests on (repeatable, at most 8): its 8-hex id from recall, its full node id or its exact content. Must match exactly one concept, or nothing is written."
+        )]
+        depends_on: Vec<String>,
         /// DANGEROUS: attach despite a same-width stored/configured model-id mismatch.
         #[arg(long)]
         allow_embedding_mismatch: bool,
@@ -590,6 +598,10 @@ enum Resolved {
         /// `scripts/provision.sh` so the config file, not the ambient
         /// environment, names the cluster that receives the DDL (E2E-1).
         dsn: Option<String>,
+        /// The promotion policy `lambo.toml` and `LAMBO_PROMOTION_POLICY`
+        /// select, which `inspect` explains the focus's next canonization
+        /// hop under (#36 PR 3). A reader resolves its own, like `serve-web`.
+        promotion_policy: lambo::canon::PromotionPolicy,
     },
 }
 
@@ -613,8 +625,14 @@ fn resolve_for_command(
         let file = LamboFile::load_resolved(config).map_err(|e| e.to_string())?;
         let kind = file.store.kind;
         let dsn = file.store.dsn.clone();
+        let promotion_policy = file.promotion_policy.unwrap_or_default();
         let store = resolve_store_only(config).map_err(|e| e.to_string())?;
-        Ok(Resolved::StoreOnly { store, kind, dsn })
+        Ok(Resolved::StoreOnly {
+            store,
+            kind,
+            dsn,
+            promotion_policy,
+        })
     }
 }
 
@@ -1235,15 +1253,30 @@ fn main() -> ExitCode {
                 focus,
                 depth,
             },
-            Resolved::StoreOnly { store, .. },
+            Resolved::StoreOnly {
+                store,
+                promotion_policy,
+                ..
+            },
         ) => run_async(
             "inspect",
-            lambo::cli::inspect::run(store.as_ref(), &session, &focus, depth),
+            lambo::cli::inspect::run_with_policy(
+                store.as_ref(),
+                &session,
+                &focus,
+                depth,
+                promotion_policy,
+            ),
         ),
         (Commands::Stats { session }, Resolved::StoreOnly { store, .. }) => {
             run_async("stats", lambo::cli::stats::run(store.as_ref(), &session))
         }
-        (Commands::Provision, Resolved::StoreOnly { store, kind, dsn }) => run_async(
+        (
+            Commands::Provision,
+            Resolved::StoreOnly {
+                store, kind, dsn, ..
+            },
+        ) => run_async(
             "provision",
             lambo::cli::provision::run(store, kind, dsn.as_deref()),
         ),
@@ -1276,6 +1309,7 @@ fn main() -> ExitCode {
                 kind,
                 parent_of,
                 concept,
+                depends_on,
                 allow_embedding_mismatch: _,
             },
             Resolved::Full(backends),
@@ -1290,6 +1324,7 @@ fn main() -> ExitCode {
                     kind,
                     parent_of,
                     concept,
+                    depends_on,
                 },
             ),
         ),

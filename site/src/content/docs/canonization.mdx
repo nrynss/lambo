@@ -45,19 +45,21 @@ Every dimension is clamped to $[0,1]$ before weighting, a non-finite input count
 
 ## The three gates
 
-That score is the entry fee, not the promotion. Evaluation runs one hop per cycle, and each stage is a separate predicate against evidence the concept cannot fabricate.
+That score orders the queue; it is not the promotion. Evaluation runs one hop per cycle, and each stage is a separate predicate against evidence the concept cannot fabricate. Since 0.6.0 no stage selects by score: a concept qualifies on its own evidence or not at all, and the score only decides which qualifying concepts a bounded cycle reaches first.
 
 ### Stage 1, Candidate
 
-[`src/canon/stage1.rs`](https://github.com/nrynss/lambo/blob/main/src/canon/stage1.rs). The concept must have survived three garbage collection passes, and its composite must sit **strictly** above the 90th percentile of its non-Canonical peers. The percentile is nearest-rank, not interpolated:
+[`src/canon/stage1.rs`](https://github.com/nrynss/lambo/blob/main/src/canon/stage1.rs). Under the default `Swarm` policy a concept becomes a Candidate when both hold:
 
 $$
-k = \lceil 0.90\,n \rceil, \qquad P_{90} = x_{(k)}
+\text{gc\_survived}(c) \ge 3 \quad \wedge \quad \text{distinct}(c) \ge 2
 $$
 
-where $x$ is the ascending sort of the non-Canonical peer scores and $n$ is their count.
+`gc_survived` counts the garbage collection sweeps the concept has outlived. `distinct` is the same count Stage 2 uses: the distinct origin interactions of the concept's dependents (defined under Stage 3), not counting the interaction the concept itself came from, each dependence edge and each interaction older than `canonization_edge_min_age`. Two other interactions have to rest on the concept before it is worth evaluating.
 
-An interpolating percentile, the kind a spreadsheet gives you, returns a value no concept actually scored. Nearest-rank returns a real peer's score, so "above $P_{90}$" means "beat an actual peer" rather than "beat an average of two". The stage is also gated on the session holding at least `canonization_min_peer_count` non-Canonical concepts, 20 by default. In a session of three concepts, nobody is exceptional.
+There is no peer minimum and no percentile cut. Before 0.6.0 Stage 1 needed 20 non-Canonical concepts in the session and a score strictly above their 90th percentile, which made it a quota: it admitted the top tenth of whatever the session held, and recall traffic moved who that was. Replaying reads on a real store moved the Canonical count by a tenth and changed which named ruling reached Venerable, while the evidence floor gave the same set every time. A young or small session can now qualify on evidence alone, and reading a concept never makes it more promotable.
+
+The composite score orders the admitted set, highest first, so a cycle that admits at most `canonization_eval_batch_size` concepts takes the strongest first and the rest on the following cycles.
 
 ### Stage 2, Venerable
 
@@ -83,11 +85,27 @@ $$
 
 A dependent is a concept with a `Dependency` edge into $c$, which is what `lambo_record_action`'s `depends_on` writes, or one of $c$'s `parent_of` children. Every dependent counts, including one that also depends on something else. `Causal` edges, which `produces` and `modifies` write, record provenance and count for nothing, and neither do association edges. Lambo reads the stored edges this way when it answers; nothing is migrated.
 
-The comparison is strict. Under the default `Swarm` policy, Stage 3 also asks again whether the concept still meets Stage 2: Venerable is not a permanent pass, so a concept whose support has thinned, or was admitted under an older definition of support, waits at Venerable instead of promoting on blast radius alone. A concept that was demoted also stays inside a `canonization_repromotion_cooldown` of 300 seconds before it can be promoted again, so a flapping concept cannot oscillate its way into permanence. The cooldown is checked first, because it is a field comparison while blast radius is a store round trip.
+The comparison is strict. Under either policy, Stage 3 also asks again whether the concept still meets Stage 2: Venerable is not a permanent pass, so a concept whose support has thinned, or was admitted under an older definition of support, waits at Venerable instead of promoting on blast radius alone. A concept that was demoted also stays inside a `canonization_repromotion_cooldown` of 300 seconds before it can be promoted again, so a flapping concept cannot oscillate its way into permanence. The cooldown is checked first, because it is a field comparison while blast radius is a store round trip.
 
 <Note>
 The blast radius that admitted the concept is the one stamped on the audit row. It is not re-queried afterwards, which on a live store could write a row that contradicts the gate that let the concept through.
 </Note>
+
+### The Solo policy
+
+`promotion_policy = "Solo"` is for a single writer, where there are no independent agents to converge. A concept becomes a Solo Candidate by a score over its own evidence instead of Stage 1's two floors:
+
+$$
+\Big(\text{sessions} \times 1.0 + \text{confirmations} \times 4.0 + \text{distinct} \times 2.0 - \text{reverts} \times 3.0\Big) \times r(\tau) \;\ge\; 3.0
+$$
+
+`sessions` counts the 24-hour-separated days on which the concept was derived or something declared that it depends on it, by event time. Since 0.6.0 an action that only produced or modified the concept does not count: a file edited on five days recurred as work, not as a fact anything rests on. `distinct` is the dependent-interaction count above; it replaced a count of the actions that touched the concept, which rewarded files modified many times and canonized artifacts. $r(\tau)$ is the type's eviction resistance, from 1.5 for a Constraint to 0.7 for an Observation.
+
+The later bands are 6.0 for Venerable and 10.0 for Canonical, and since 0.6.0 a band is necessary but not sufficient: every Solo hop past Candidate also needs the Stage 2 or Stage 3 verdict that Swarm needs, cooldown included. A Solo session can admit Candidates without GC sweeps, but nothing reaches Canonical without more than five dependents from enough other interactions.
+
+### Why a concept is where it is
+
+`lambo_inspect`, `lambo inspect` and the portal's inspect panel explain each concept's next hop under the live policy: which gates it is checked against, its value and bar for each, and one sentence per gate that fails. The explanation runs the evaluator's own predicates with the evaluator's own inputs, the Canonical budget included: a Venerable is not reported eligible while the budget is full, because no Stage 3 window runs then. What it does not predict is timing: whether a cycle reaches an eligible concept this minute is up to the batch size and the round-robin order.
 
 ## What recall does with it
 
@@ -99,7 +117,7 @@ $$
 
 $Q$ is the BM25 keyword score, or the merged similarity score for a vector hit. It is $0$ for a concept that arrived through graph traversal rather than as a query hit.
 
-A recalled concept that was just written to is also flagged as a high-risk modification when it is high-value: Canonical, Venerable, or with five or more dependents counted live from the graph. That count has no age floor, unlike Stage 3, so the edge that gives a concept its fifth dependent is itself the fresh write that raises the flag.
+A recalled concept that was just written to is also flagged as a high-risk modification when it is high-value: Canonical, or with more than five dependents counted live from the graph, the same bar as Stage 3. Since 0.6.0 being Venerable is not enough on its own, because evidence-led admission lets a file with a handful of dependents reach Venerable. The live count has no age floor, unlike Stage 3, so the edge that gives a concept its sixth dependent is itself the fresh write that raises the flag.
 
 That last rule is the one that makes dependency retrieval work. A concept nobody searched for still surfaces if the graph says it is load-bearing, carried entirely by the daemon half of the mix. Canonical concepts are partitioned ahead of everything else regardless of score, and each one returns marked with its blast radius and a warning.
 
@@ -113,12 +131,12 @@ Without an embedder you keep the whole canonization path and lose this check, wh
 
 ## The constants, in one place
 
-Everything here is a `lambo.toml` key. See [Configuration](/lambo/config/) for the full set.
+These are library `Config` settings. Of them, only the `[daemon]` cadence keys (`gc_interval`, `gc_max_interval_secs`, `gc_idle_floor`, and `canonization_eval_interval` as `canonization_eval_interval_secs`) can also be set in `lambo.toml`; the thresholds cannot. See [Configuration](/lambo/config/) for the full set.
 
 | Key | Default | Gate it governs |
 |---|---|---|
-| `canonization_min_peer_count` | 20 | Stage 1 needs a distribution to be exceptional against |
-| `canonization_edge_min_age` | 60s | Stages 2 and 3 ignore edges younger than this |
+| `canonization_min_peer_count` | 20 | Inert since 0.6.0: Stage 1 has no peer minimum, and a non-default value is logged as a warning |
+| `canonization_edge_min_age` | 60s | Stages 1, 2 and 3 ignore edges and interactions younger than this |
 | `canonization_eval_interval` | 60s | How often the evaluation cycle runs |
 | `canonization_eval_batch_size` | 50 | Concepts evaluated per cycle |
 | `canonization_repromotion_cooldown` | 300s | Stage 3 refusal window after a demotion |

@@ -101,6 +101,7 @@ async fn derive_text(store: &Arc<MemoryStore>, session: &str, content: &str) {
             kind: ConceptKind::Entity,
             parent_of: vec![],
             concept: vec![],
+            depends_on: Vec::new(),
         },
     )
     .await

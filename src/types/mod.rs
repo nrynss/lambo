@@ -7,6 +7,13 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use uuid::Uuid;
 
+mod reference;
+pub(crate) use reference::shown;
+pub use reference::{
+    ConceptCitations, PinnedCitations, PinnedReference, ReferenceCandidate, ReferenceField,
+    ReferenceRefusal, ReferenceRefusalKind,
+};
+
 // ---------------------------------------------------------------------------
 // Ids
 // ---------------------------------------------------------------------------
@@ -903,6 +910,33 @@ pub enum WriteIntentPayload {
         modifies: Vec<String>,
         /// Concept contents this action depends on.
         depends_on: Vec<String>,
+        /// #36 PR 4: per `depends_on` entry, the concept it named by id at
+        /// the ack (`None`: resolved the legacy way). Empty, and then not
+        /// serialized, when no entry reads as an id, so such a payload is
+        /// byte-identical to one written before 0.6.0. A build that predates
+        /// it ignores the field and resolves the entries afresh, the 0.5.0
+        /// rule.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        depends_on_pins: Vec<Option<NodeId>>,
+    },
+    /// A `lambo_derive` job with citations or names (#36 PR 4): the derive
+    /// above plus what its references resolved to at the ack.
+    ///
+    /// Its own variant, not a defaulted field on [`Self::Derive`], for the
+    /// reason [`Self::DeriveImage`] is (design Q18): a build that predates
+    /// citations fails to decode an unconsumed cited intent and says so,
+    /// where a defaulted field would let it apply the derive with its
+    /// citations silently dropped. A derive without citations stays
+    /// [`Self::Derive`], byte-identical.
+    DeriveCited {
+        /// `(content, concept_type)` pairs, in submission order.
+        concepts: Vec<(String, ConceptType)>,
+        /// `(parent, child)` hierarchy pairs, in submission order.
+        pairs: Vec<(String, String)>,
+        /// The citations and names as accepted at the ack. A replay
+        /// re-resolves every reference and refuses one that resolves
+        /// differently.
+        citations: PinnedCitations,
     },
 }
 
@@ -920,9 +954,15 @@ impl WriteIntentPayload {
     /// load a session whose image intents are all settled (design R5: only an
     /// *unconsumed* image intent stops an older build). Text payloads are kept
     /// as they are.
+    ///
+    /// A settled [`Self::DeriveCited`] (#36 PR 4 review H2) becomes the same
+    /// empty [`Self::Derive`], for the second reason: a 0.5.0 build cannot
+    /// decode the variant, and a settled row is decoded at every load, so a
+    /// cited derive that had already applied would otherwise stop a
+    /// downgrade from loading the session at all.
     pub fn settled(&self) -> Option<WriteIntentPayload> {
         match self {
-            Self::DeriveImage { .. } => Some(Self::Derive {
+            Self::DeriveImage { .. } | Self::DeriveCited { .. } => Some(Self::Derive {
                 concepts: Vec::new(),
                 pairs: Vec::new(),
             }),
@@ -944,8 +984,9 @@ impl WriteIntent {
     }
 }
 
-/// [`WriteIntentPayload::settled`]'s form of an image intent, serialized: what
-/// the SQL adapters' consume writes over a settled `DeriveImage` payload.
+/// [`WriteIntentPayload::settled`]'s form of an image or cited intent,
+/// serialized: what the SQL adapters' consume writes over a settled
+/// `DeriveImage` or `DeriveCited` payload.
 pub const SETTLED_IMAGE_INTENT_PAYLOAD: &str = r#"{"kind":"derive","concepts":[],"pairs":[]}"#;
 
 /// A SQL `LIKE` pattern that matches a stored `DeriveImage` payload and no
@@ -953,6 +994,10 @@ pub const SETTLED_IMAGE_INTENT_PAYLOAD: &str = r#"{"kind":"derive","concepts":[]
 /// for one character, which can only widen the match to tags that do not
 /// exist.)
 pub const DERIVE_IMAGE_PAYLOAD_LIKE: &str = r#"{"kind":"derive_image",%"#;
+
+/// A SQL `LIKE` pattern that matches a stored `DeriveCited` payload (#36
+/// PR 4) and no other, for the same overwrite at consume.
+pub const DERIVE_CITED_PAYLOAD_LIKE: &str = r#"{"kind":"derive_cited",%"#;
 
 /// A vector supplied for one concept instead of being embedded from its text
 /// (#22, design sections 3.3 and 5.1): an image embedding the server computed
@@ -1915,6 +1960,20 @@ pub enum LamboError {
     /// intent that meets it settles `failed` instead of blocking the replay.
     #[error("image id taken: a text concept in this session already holds the caption with image id {0:?}; derive the image with another image id")]
     ImageIdTaken(String),
+    /// A reference to an existing concept was refused (#36 PR 4): a derive's
+    /// `depends_on` or `name`, or a `record_action` `depends_on` entry that
+    /// names a concept by id, did not resolve to exactly one concept of the
+    /// session the write targets, or would cite the concept itself, close a
+    /// cycle, or resolved differently at apply than at the ack.
+    ///
+    /// Its message is built only from the caller's own reference (shortened
+    /// and escaped) and session-local ids and content the caller can already
+    /// read, which is what lets every surface render it intact
+    /// (`crate::surface::error`), the J1-R2-2 rule by type. It is a fact
+    /// about this input against this graph, like [`LamboError::Embed`]: a
+    /// replayed intent that meets it settles `failed`.
+    #[error("reference refused: {0}")]
+    Reference(Box<ReferenceRefusal>),
     /// Any other failure, kept whole.
     #[error(transparent)]
     Other(#[from] anyhow::Error),
@@ -2017,6 +2076,7 @@ mod tests {
                 produces: vec![],
                 modifies: vec![],
                 depends_on: vec![],
+                depends_on_pins: vec![],
             },
         ] {
             assert!(!serde_json::to_string(&text)

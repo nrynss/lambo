@@ -72,7 +72,7 @@ Lambo gives those agents a shared memory that outlives the context. It treats ea
 Three properties make this memory useful at scale.
 
 - **It consolidates.** Many agents write the same idea in different words. Lambo matches the duplicates, deduplicates them, and lets recall return one canonical fact instead of fifty near-identical notes.
-- **It promotes by evidence.** Importance is earned, not declared. The background daemon scores concepts from structural evidence such as peer count, blast radius, and how long edges have lived. A concept that accumulates evidence earns canonical status. [Canonization](/lambo/canonization/) has the arithmetic, and [Evidence and evaluation](/lambo/evidence/) has the transcripts that verify it from a plain SQL client.
+- **It promotes by evidence.** Importance is earned, not declared. The background daemon promotes concepts on structural evidence: how many other interactions declared that they depend on a concept, over how long, and how many concepts rest on it. A concept that accumulates evidence earns canonical status. [Canonization](/lambo/canonization/) has the arithmetic, and [Evidence and evaluation](/lambo/evidence/) has the transcripts that verify it from a plain SQL client.
 - **It retracts safely.** Each concept carries a blast radius, so an agent knows how many things depend on what it is about to change. Coordination tools such as `lambo_reserve` and `lambo_inspect` turn that knowledge into action.
 
 Durability is write-behind and eventual. Mutations batch into a few round trips to a durable store, so a burst of writes drains quickly and the session survives restarts.

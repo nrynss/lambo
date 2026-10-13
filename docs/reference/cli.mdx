@@ -138,6 +138,8 @@ The blast radius is the number of concepts that depend on this one: actions that
 | `--focus <FOCUS>` | Yes | |
 | `--depth <DEPTH>` | No | `2`, and at most `5`. |
 
+The `canonization` section explains the concept's next promotion under the promotion policy `lambo.toml` and `LAMBO_PROMOTION_POLICY` select (`inspect` is a reader and resolves its own, like `serve-web`): one line naming the policy, the status and the next status, then one reason per gate that fails. It runs the evaluator's own gates the way the next cycle would, the Canonical budget included. If the store cannot answer, the section is one `canonization: explanation unavailable` line instead.
+
 `--focus` takes concept text, a node UUID, or the short id a recall block renders. Lambo resolves text exactly first, then the short id, then as a single substring match. Past the 2,000-concept scan cap the substring leg runs on a bounded recency-plus-blast-radius subset and says so; a miss offers the closest concepts as suggestions with their node ids.
 
 ```bash
@@ -147,6 +149,9 @@ blast radius: 1
 ⚑ Load-bearing pillar — 1 nodes depend on this. Modify with caution.
 dependents (1):
   auth middleware [Entity] (Hierarchical)
+canonization (Swarm): None -> Candidate refused
+  - survived 0 GC sweeps, needs at least 3
+  - dependents from 0 other interactions, needs at least 2
 
 hop 1:
   CoOccurrence
@@ -223,6 +228,7 @@ Stores concepts from the current interaction. Lambo stamps the time itself, so t
 | `--kind <KIND>` | Yes | One of `entity`, `logic`, `constraint`, `resource`, `observation`. |
 | `--concept <CONTENT:KIND>` | No | An extra concept. Repeat it to derive several in one call. |
 | `--parent-of <CHILD:PARENT>` | No | A hierarchy pair. Repeat it for several links. |
+| `--depends-on <REF>` | No | An existing concept the first concept rests on: its 8-hex id from recall or its full node id (its exact content also works). Repeat it, at most 8 times. Each must match exactly one concept of the session, or nothing is written (see [`lambo_derive`](/mcp#lambo_derive)). |
 
 `--parent-of` puts the child left of the first colon and the parent right of it. Only the first colon separates, so the parent may itself contain colons (an IPv6 CIDR such as `2001:db8::/32`); the child and the parent must both be non-empty.
 
@@ -270,7 +276,7 @@ Records an action the agent took. The action becomes a `Resource` concept, and t
 | `--action <ACTION>` | Yes | |
 | `--produces <PRODUCES>` | No | Resources this action creates. Repeatable. |
 | `--modifies <MODIFIES>` | No | Resources this action mutates. Repeatable. |
-| `--depends-on <DEPENDS_ON>` | No | Things this action depends on. Repeatable. |
+| `--depends-on <DEPENDS_ON>` | No | Things this action depends on. Repeatable. An existing concept's full node id (hyphenated), or exactly 8 hex characters that name no concept by text and start exactly one concept's id, cites that concept; an interaction's id, or a short id several concepts share, is a usage error and nothing is written. Any other value (9 to 32 hex characters, the unhyphenated form included), and an id that names nothing, is matched by text and created if new, as before 0.6.0. |
 
 ```bash
 $ lambo record-action --session demo --agent agent-a \
@@ -327,6 +333,8 @@ Over `stdio`, `--session` can be left out when `lambo.toml` names the session in
 ```bash
 cd ~/Documents/work/lambo && lambo serve --config ~/lambo.toml   # session from [[serve.projects]]
 ```
+
+A final-component `*` in a project path covers matching sibling directories and their descendants, for example `~/work/lambo-wt-*`. It matches whole filenames, case-sensitively, with zero or more bytes per star. Parent-component stars are refused. Matching roots are resolved through symlinks; the deepest canonical root wins, a literal wins a same-depth pattern tie, and conflicting same-depth patterns are refused. See [Choosing a stdio serve's session](/config#choosing-a-stdio-serves-session) for syntax and fallback rules.
 
 The map is only read from the `lambo.toml` the serve loads, so a global client config must name that file with `--config` (as above) or `LAMBO_CONFIG`. Without either, each serve reads its project's own `./lambo.toml`, if there is one, and that file's `default_session` or `[[serve.projects]]` chooses the session, just as it already chooses the store.
 

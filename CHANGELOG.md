@@ -4,6 +4,35 @@
 
 ### Upgrading from 0.5.0
 
+- **Citations (#36 PR 4) need nothing migrated, and rewrite nothing
+  already written.** Existing citations that landed on a short alias
+  Entity stay there; the reviewed alias backfill (#36 PR 5) is what
+  redirects them. From now on a ruling can be cited by id: `depends_on` on
+  a `lambo_derive` concept, or a `lambo_record_action` `depends_on` entry.
+  There is no `name` field: in-memory names could not be made safe in
+  0.6.0, and durable names are a follow-up.
+- **`record_action` `depends_on` entries that are ids now cite.** An entry
+  in the hyphenated node-id form that names a concept of the session, or
+  exactly 8 hex characters (the short id recall prints) whose text names
+  no concept and that start exactly one concept's id, now resolves to that concept instead of
+  creating a concept named by the id. An interaction's id, or a short id
+  two concepts share, is refused (`reference refused`), and so is a
+  hyphenated id that names nothing here but a concept in one of the
+  session's layers. Everything else keeps the 0.5.0 text rule: commit
+  hashes of other lengths, 9 to 32 hex characters (MD5s, longer prefixes,
+  the unhyphenated node-id form), `urn:uuid:` and braced ids, paths, issue references, a
+  hyphenated id that names nothing, and an id whose text a 0.5.0 write
+  already minted as an Entity. A commit hash that happens to prefix a
+  concept's id cites that concept (about concepts / 2^32).
+- **Downgrading to 0.5.0 after cited writes.** A cited derive's durable
+  intent is a new kind (`derive_cited`). Once it settles (applied or
+  failed), its stored payload is rewritten to the empty `derive` 0.5.0
+  decodes, as an image intent's is, so a downgrade loads the session. An
+  unconsumed one is refused by name by 0.5.0, which stops that session's
+  load rather than apply the write without its citations: let the 0.6.0
+  writer drain its queue (a clean close applies or settles what it can)
+  before downgrading. An action intent's new `depends_on_pins` field is
+  ignored by 0.5.0, which re-resolves the entries by its own text rule.
 - **Code or scripts that read `session_leases.holder` or
   `LeaseHolder::token()`.** The holder string gains an optional
   `;boot=<id>;pidns=<inode>` suffix after the pid. Ignore anything after
@@ -22,8 +51,8 @@
   Nothing is demoted. This includes a session's root goal, which
   `set_root_goal` makes Venerable directly: under Swarm it now needs Stage 2
   support (three dependents' interactions spanning 30% of the capped
-  session extent) to go Canonical. Solo is unchanged: it still probes and
-  stamps blast radius and admits by its score bands. On a copy of the
+  session extent) to go Canonical. Since #36 PR 3 the same re-check runs
+  under Solo (below). On a copy of the
   dogfood store taken 2026-10-12, no Candidate or Venerable would have
   promoted on the first evaluation, with or without this check, and all 7
   Venerables lose their Stage 2 support.
@@ -45,6 +74,59 @@
   dependents, so a file or entity that many actions name in `depends_on`
   reports a larger count than before, and an action record that depended
   on many things reports a smaller one.
+- **Candidates are admitted on evidence, not by quota (#36 PR 3).** Under
+  Swarm, Stage 1 no longer needs 20 peers and a score above their 90th
+  percentile: a concept becomes a Candidate when it has survived three GC
+  sweeps and its dependents come from at least two other interactions.
+  Small and young sessions can promote; reading a concept never makes it
+  more promotable. Nothing is demoted: a 0.5.0 Candidate without that
+  evidence stays a Candidate and simply cannot climb further. On a copy of
+  the dogfood store taken 2026-10-12 07:26 (5,005 concepts), evaluated at
+  2026-10-12T12:00Z with `examples/canon36_admission.rs`, the first
+  evaluation would admit 63 new Candidates (42 Resource, 20 Entity, 1
+  Constraint), and, run to a fixed point, 2 of them (both Resources) become
+  Venerable. **No concept turns Canonical**, and none of the 404 existing
+  Candidates or 7 Venerables moves. The new Candidates are almost all
+  artifacts, because on today's history only actions declare dependence;
+  rulings need #36 PR 4's citations.
+- **This build queues depended-on artifacts and names for promotion; do
+  not re-pin the rig to it until #36 PR 5's dry run has been reviewed.**
+  "No concept turns Canonical" holds for today's snapshot only and is not
+  a forecast: on the same copy two Entities already have more than five
+  dependents (7 and 10, from 6 and 9 other interactions) and lack only
+  Stage 2's spread (coverage 0.065 and 0.119 against 0.3). A few more days
+  of citations would take them to Canonical with the load-bearing warning.
+  `examples/canon36_admission.rs` lists such concepts by id.
+- **Solo needs the stage evidence (#36 PR 3).** Under `Solo` a concept
+  still becomes a Candidate by its score band, but every later hop now also
+  needs the Stage 2 or Stage 3 verdict Swarm needs, cooldown included. The
+  score's "valid actions" term is now distinct dependent interactions, and
+  its recurrence term no longer counts actions that only produced or
+  modified the concept (`Causal`), so a file many actions modified no
+  longer scores for either. A Solo session that promoted on its bands alone
+  stops climbing until it has declared dependents. Nothing is demoted, and
+  Solo Canonicals from 0.5.0 are kept (budget demotion still applies). On
+  the same store copy, Solo's first evaluation would admit 218 new
+  Candidates (140 Resource, 68 Entity, 8 Constraint, 2 Logic; 244 before
+  `Causal` left recurrence), 2 become Venerable at the fixed point, and
+  **no concept turns Canonical**.
+- **A third-party store without `interaction_span_with_window` stops every
+  Solo concept at Candidate (#36 PR 3).** Solo now needs the Stage 2
+  verdict, which such a store cannot give: each Candidate gets no evidence
+  and each cycle logs one `CanonizationStage2Unsupported` warning, as under
+  Swarm since PR 2. Forward the call if your adapter wraps a built-in
+  store.
+- **High-risk alerts fire on fewer nodes (#36 PR 3).** A node is
+  high-value only when it is Canonical or has more than five live
+  dependents (Stage 3's bar; it was Canonical, any Venerable, or five or
+  more). A fresh write to a Venerable with five or fewer dependents no
+  longer raises "High-risk modification".
+- **`lambo demo` ends with 15 canonization events, not 5.** Ten concepts
+  with dependents from two other interactions become Candidates, four
+  reach Venerable, and `user schema` alone goes Canonical as before; the
+  CANONIZATION section now narrates the nine other promotions. Agent B's
+  recall carries eight warnings, as in 0.5.0: `auth middleware` (five
+  dependents) is not high-value.
 - **Downgrading or mixing versions with `Contradicts` edges (#19).** No
   0.6.0 tool writes a `Contradicts` edge yet; only a library caller or a
   hand-built batch can. A 0.5.0 (or older) binary refuses to load a
@@ -58,6 +140,39 @@
 
 ### Breaking (library API)
 
+- **`LamboError::Reference(Box<ReferenceRefusal>)`** (#36 PR 4): a new
+  variant, so an exhaustive `match` on `LamboError` needs an arm. It carries
+  a typed `ReferenceRefusal` (`field`, `concept`, `reference`, `kind`:
+  `ReferenceRefusalKind::{Missing, Ambiguous, NotAConcept, ForeignScope,
+  SelfReference, Cycle, Changed, Limit, UnknownConcept}`), and its message is shown to callers intact, with the
+  class `reference refused`.
+- **`DeriveOutcome` gains `cited`** (#36 PR 4); a struct literal needs it
+  (or `..Default::default()`).
+- **`WriteIntentPayload` gains the `DeriveCited` variant, and its `Action`
+  variant gains `depends_on_pins`** (#36 PR 4). An exhaustive `match` needs
+  the new arm, and an `Action { .. }` literal the new field. A payload
+  without citations or id entries serializes byte for byte as before.
+- **`mcp::server::WireConcept` and `cli::derive::Args` gain
+  `depends_on`** (#36 PR 4); struct literals need it.
+- **`graph::action::record_action` resolves id-shaped `depends_on`
+  entries** (#36 PR 4; see Upgrading from 0.5.0), and can return
+  `LamboError::Reference`.
+- **`canon::stage1_candidates(graph, scores, min_age, now)`**
+  ([#36](https://github.com/nrynss/lambo/issues/36) PR 3) replaces
+  `stage1_candidates(graph, scores, min_peer_count)`: Stage 1 admits on
+  evidence aged by `min_age` at `now`, and returns the admitted set ordered
+  by composite score (highest first), not by `NodeId`.
+- **`PromotionScorer::admits_hop(graph, node, to, params, now)`** (#36
+  PR 3): it takes the cycle's `EvalParams` and clock, so Solo's
+  dependent-interaction term ages its evidence like Stage 1, and it no
+  longer takes `evidence`: the evaluator asks only about a node whose
+  stage verdict passed, and asks first when building the Stage 2 and 3
+  windows. `PromotionScorer::candidates` now returns its admitted set in
+  the order a bounded cycle should take it.
+- **`EvalParams::min_peer_count` and `Config::canonization_min_peer_count`
+  are `#[deprecated]` and inert** (#36 PR 3). They still exist and
+  deserialize, no policy reads them, and `Config::warnings` names a
+  non-default value.
 - **`Config` gains `canonization_coverage_window` and `EvalParams` gains
   `coverage_window`** ([#36](https://github.com/nrynss/lambo/issues/36)
   PR 2). Exhaustive struct literals need the field, or
@@ -134,6 +249,58 @@
 
 ### Added
 
+- **Citations on `lambo_derive`**
+  ([#36](https://github.com/nrynss/lambo/issues/36) PR 4). Each concept
+  may carry `depends_on`, existing concepts it rests on (at most 8, and 32
+  per call). A reference resolves by full node id, recall's short id or
+  its exact content (never through a synonym) to exactly one concept of
+  the session, or the whole call is refused before the ack with a typed
+  `reference refused` error: missing, ambiguous, an interaction id, in
+  another scope ("is in scope 'general'; cross-session citations are not
+  recorded"), the concept itself, or a dependency cycle. A citation is
+  written as `citing -Dependency-> cited`, so the cited concept gains a
+  dependent. What each reference named is pinned at the ack and checked
+  again when the write is applied, in session and after a restart, so a
+  cited concept removed in between fails the receipt instead of linking
+  elsewhere. Re-sending a citation reinforces its one edge; a similarity
+  merge into the cited concept drops that citation. The same on the CLI:
+  `lambo derive --depends-on <REF>`. In the
+  library: `Memory::derive_cited_as`, `derive_cited_for_ingest_as`,
+  `derive_cited_async_as`, `ConceptCitations`, `PinnedCitations`,
+  `PinnedReference`, and `graph::cite`'s limits.
+- **One strict resolver for references in writes** (`crate::surface::resolve`,
+  crate-internal): no substring leg, never creates. `lambo_inspect`'s
+  short-id leg now shares its prefix matcher. #19's `contradicts` and #33's
+  scoped writes use it.
+- **Inspect explains each concept's next promotion (#36 PR 3).**
+  `lambo_inspect` and `lambo inspect` print a `canonization (<policy>):
+  <status> -> <next> eligible|refused` line with one reason per gate that
+  fails, and `lambo_inspect`'s structured result and `/api/inspect` carry
+  the same as `admission` (`policy`, `status`, `next`, `eligible`, `checks`,
+  `solo`, `reasons`). It runs the evaluator's own gates. `lambo inspect`
+  explains under the policy `lambo.toml` and `LAMBO_PROMOTION_POLICY`
+  select. In the library: `canon::admission_inputs`,
+  `canon::explain_admission`, `canon::render_admission`, `Admission`,
+  `AdmissionCheck`, `AdmissionInputs`, `Comparison`,
+  `canon::dependent_interaction_counts`, `canon::dependent_interactions`,
+  `canon::solo_breakdown`, `SoloBreakdown`, `canon::Measurements`,
+  `canon::explain_measured`, `canon::gate_progress_measured` and
+  `cli::inspect::run_with_policy`. A Venerable is not explained eligible
+  while the Canonical budget is full (`canonical_budget`).
+- **The canonization fair-test fixture** (`fixtures/session-fair-test.json`,
+  #36 PR 3): four supported rulings, under-supported variants, chaff and one
+  contradiction. Both policies promote exactly the four rulings to
+  Canonical on Memory and SQLite, with no seeded statuses. A live
+  Postgres and Cockroach run is manual, like the dependents check:
+  `LAMBO_POSTGRES_DSN=<dsn> cargo test --no-default-features --features store-postgres --lib store::pg::fair_test_live -- --ignored`,
+  and the Cockroach conformance suite.
+- `examples/canon36_admission.rs` measures what PR 3's admission does on a
+  copy of a SQLite store (counts and ids only, no concept text).
+- **Stdio project patterns (#33 PR 5).** `[[serve.projects]] path` accepts
+  `*` in its final component, covering matching sibling directories and
+  descendants. Matching roots follow symlinks; deepest canonical root wins,
+  then literal over pattern, with conflicting pattern ties refused. Patterns
+  are byte-exact and case-sensitive. Parent-component stars are refused.
 - `EdgeType::Contradicts` persistence and synthetic exclusion checks across
   the store adapters (#19(a)). It does not decay. Write-tool fields,
   contradiction warnings and evidence-driven supersession follow separately.
@@ -226,6 +393,15 @@
   project overrides. The runbook includes worktree checks and rollback
   boundaries; applying it remains the operator's action. Write scope waits
   for #33 PR 4.
+- **`lambo_record_action` `depends_on` entries that are concept ids cite
+  those concepts** (#36 PR 4). See Upgrading from 0.5.0. The
+  `lambo_derive` and `lambo_record_action` tool descriptions and the
+  server's instructions now ask agents to cite the rulings they rely on by
+  id, and the schemas describe the new field.
+- **Swarm admits Candidates on evidence; Solo needs the stage evidence for
+  every later hop** ([#36](https://github.com/nrynss/lambo/issues/36) PR 3).
+  See Upgrading from 0.5.0. The `lambo_inspect` tool description now
+  mentions the explanation.
 - **Stage 2 coverage is measured against at most fourteen days**
   ([#36](https://github.com/nrynss/lambo/issues/36) PR 2). The bars are
   unchanged (three dependent origin interactions, coverage at least 0.3),
@@ -273,18 +449,19 @@
   concepts that depend on a node: actions that named it in `depends_on`,
   concepts with a `Dependency` edge to it, and its `parent_of` children. An
   action that produced or modified a node no longer counts toward it there.
-  `Causal` edges still count where they did outside that relation: Solo's
-  valid-action count, the score's edge-type bonus, and #29's GC protection.
-- Under Swarm, a Venerable must pass Stage 2 again before Stage 3 can
-  promote it. Solo is unchanged.
+  `Causal` edges still count for the score's edge-type bonus and #29's GC
+  protection; since #36 PR 3 they no longer count anywhere in the Solo
+  score.
+- A Venerable must pass Stage 2 again before Stage 3 can promote it, under
+  both policies (Swarm since #36 PR 1, Solo since PR 3).
 - The high-risk check reads a node's live dependent count instead of the
-  stored blast-radius stamp, so a node with five or more dependents counts
-  as high-value whatever its status. The live count has no age floor,
-  unlike Stage 3, and the edge that gives a node its fifth dependent is
-  itself a fresh write, so reaching five fires a high-risk warning at once.
-  In the demo, `auth middleware` (five actions depend on it) is now
-  high-value, so agent B's recall carries a high-risk line for it: nine
-  warnings instead of eight.
+  stored blast-radius stamp. A node is high-value when it is Canonical or
+  has more than five live dependents (Stage 3's bar); being Venerable is
+  not enough on its own. The live count has no age floor, unlike Stage 3,
+  and the edge that gives a node its sixth dependent is itself a fresh
+  write, so passing five fires a high-risk warning at once. In the demo,
+  agent B's recall carries eight warnings, as in 0.5.0: `auth middleware`
+  (five dependents) is not high-value.
 - The REST API fixture plants `user schema`'s eight fields as `parent_of`
   children, so it has 14 dependents (was 8). The demo's `user schema` reports
   15 (its nine children plus the six actions that depend on it; was 9).

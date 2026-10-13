@@ -87,6 +87,7 @@ impl Memory {
             self.config.max_cooccurrence_per_derive,
             self.config.semantic_match_threshold,
             Some(&prepared.supplied),
+            &crate::graph::cite::PinnedCitations::default(),
             None,
         )
         .await?;

@@ -115,6 +115,7 @@ mod live {
                 kind: ConceptKind::Entity,
                 parent_of: vec![],
                 concept: vec![],
+                depends_on: Vec::new(),
             },
         )
         .await

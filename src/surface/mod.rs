@@ -18,6 +18,11 @@
 //! * `error`: the model-safe class of a `LamboError` (`err_class`, N4),
 //!   shared by MCP's tool errors and the write queue's receipts, crate-internal.
 //! * `focus`: `inspect` focus resolution (`resolve_focus`), crate-internal.
+//!   It may resolve by substring, so it is for reads only.
+//! * `resolve`: the strict resolve-or-refuse resolver a **write** uses for a
+//!   reference to an existing concept (`resolve_reference`; #36 PR 4's
+//!   citations and names, #19's `contradicts`), crate-internal. No substring
+//!   leg: a fuzzy match can never authorize a write.
 //! * `neighbourhood`: the bounded `inspect` neighbourhood projection
 //!   (`render_neighbourhood`), crate-internal.
 //! * [`session`]: session addressing (`parse_addressed`), the in-memory
@@ -36,5 +41,6 @@ pub(crate) mod focus;
 pub mod image;
 pub mod limits;
 pub(crate) mod neighbourhood;
+pub(crate) mod resolve;
 pub mod session;
 pub mod validate;

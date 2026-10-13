@@ -87,7 +87,11 @@ impl std::error::Error for CliError {}
 
 impl From<crate::types::LamboError> for CliError {
     fn from(err: crate::types::LamboError) -> Self {
-        Self::Runtime(err.to_string())
+        match err {
+            // #36 PR 4: a refused reference is bad input the caller fixes.
+            crate::types::LamboError::Reference(_) => Self::Usage(err.to_string()),
+            other => Self::Runtime(other.to_string()),
+        }
     }
 }
 
