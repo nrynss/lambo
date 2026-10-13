@@ -209,6 +209,52 @@ pub fn check_no_image_suffix(field: &str, value: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Is `entry` a bare relative file path (#33 PR 4, design-33 section 3)?
+///
+/// A shared layer such as `general` is read by every project, so a
+/// relative path written there (`README.md`, `src/main.rs`) names a
+/// different file in each and joins them into one concept (#129). A write
+/// into a layer refuses such an entry before the ack.
+///
+/// The rule is deliberately narrow, so prose, ids, branch names and repo
+/// slugs pass (`feat/33-pr4`, `nrynss/lambo#147`, `api.example.com`): an
+/// entry is a bare relative path when it holds no whitespace, is not
+/// absolute (`/`, `~`, `\`, a drive letter) or a URL (`://`), and either
+/// starts with `./` or `../`, ends with a separator (a directory), or ends
+/// in a file name: a stem and a 1-to-10 character alphanumeric extension
+/// holding a letter. A lone name with no separator counts only with
+/// exactly one dot, so a domain name is not a file. A directory named
+/// without a trailing separator (`docs/reference`) is not caught.
+pub(crate) fn is_bare_relative_path(entry: &str) -> bool {
+    let s = entry.trim();
+    if s.is_empty() || s.chars().any(char::is_whitespace) || s.contains("://") {
+        return false;
+    }
+    let b = s.as_bytes();
+    let drive = b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':';
+    if s.starts_with(['/', '\\', '~']) || (drive && matches!(b[2], b'/' | b'\\')) {
+        return false;
+    }
+    if s.starts_with("./") || s.starts_with("../") || s.starts_with(".\\") {
+        return true;
+    }
+    let separated = s.contains(['/', '\\']);
+    if separated && s.ends_with(['/', '\\']) {
+        return true;
+    }
+    let name = s.rsplit(['/', '\\']).next().unwrap_or(s);
+    let Some((stem, ext)) = name.rsplit_once('.') else {
+        return false;
+    };
+    if !separated && stem.contains('.') {
+        return false;
+    }
+    !stem.is_empty()
+        && (1..=10).contains(&ext.len())
+        && ext.chars().all(|c| c.is_ascii_alphanumeric())
+        && ext.chars().any(|c| c.is_ascii_alphabetic())
+}
+
 #[cfg(test)]
 mod tests {
     /// #22 PR 4: the image suffix is refused in a concept's own text, raw or
@@ -461,5 +507,47 @@ mod tests {
                 MAX_ACTION_TARGETS + 2
             )
         );
+    }
+
+    /// #33 PR 4: what a write into a shared layer refuses as a bare
+    /// relative path, and what it lets through.
+    #[test]
+    fn bare_relative_paths_are_told_from_prose_ids_and_absolute_paths() {
+        for path in [
+            "README.md",
+            "Cargo.toml",
+            "src/main.rs",
+            "src/mcp/server/tools/scope.rs",
+            "./run.sh",
+            "../lambo/AGENTS.md",
+            ".github/workflows/ci.yml",
+            "docs/reference/",
+            "src\\lib.rs",
+            "lambo.example.toml/x.toml",
+            " src/main.rs ",
+        ] {
+            assert!(is_bare_relative_path(path), "{path:?} is a relative path");
+        }
+        for other in [
+            "/Users/narayan/Documents/work/lambo/README.md",
+            "~/lambo/README.md",
+            "C:\\work\\lambo\\README.md",
+            "\\\\host\\share\\x.txt",
+            "https://github.com/nrynss/lambo/blob/main/README.md",
+            "merged PR #52",
+            "edited src/main.rs",
+            "feat/33-pr4-write-scope",
+            "nrynss/lambo#147",
+            "api.endorlabs.com",
+            "lambo-0.5.0",
+            "v0.6.0",
+            "e333bc7c",
+            "1dc87ca4-4410-4ed2-8777-d8748aa68013",
+            ".gitignore",
+            "docs/reference",
+            "",
+        ] {
+            assert!(!is_bare_relative_path(other), "{other:?} is not");
+        }
     }
 }
