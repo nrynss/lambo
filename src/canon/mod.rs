@@ -11,8 +11,14 @@
 //! it for tests, and every adapter resolves stored instants against the
 //! caller-supplied anchor rather than reading a clock of its own.
 
+pub mod alias;
+#[cfg(feature = "store-memory")]
+pub mod alias_preview;
 #[cfg(all(test, feature = "store-memory"))]
 mod contradicts_tests;
+#[cfg(feature = "store-memory")]
+pub mod dry_run;
+pub mod dry_run_defaults;
 mod eval;
 mod event_time;
 mod explain;

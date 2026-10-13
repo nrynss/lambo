@@ -6,6 +6,7 @@
 //! [`crate::surface`], shared with MCP, the web portal and the write queue;
 //! [`caps`] adapts them to [`CliError`] and re-exports them.
 
+pub mod canon;
 pub mod caps;
 pub mod demo;
 pub mod derive;
