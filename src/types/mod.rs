@@ -208,8 +208,8 @@ pub enum EdgeType {
     /// `newer assertion -> older assertion`, concept to concept.
     /// Informational only: it declares no dependence, support or blast,
     /// counts toward neither score density nor the edge bonus, and does not
-    /// decay. No product path writes it yet; the derive and record_action
-    /// write fields arrive with #19(b).
+    /// decay. Written by `against` on `lambo_derive` and
+    /// `lambo_record_action` (#19(b)).
     Contradicts,
 }
 
