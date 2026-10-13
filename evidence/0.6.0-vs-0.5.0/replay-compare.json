@@ -1,0 +1,132 @@
+{
+  "totals": {
+    "a": {
+      "calls": 330,
+      "state:applied": 330,
+      "created_count": 810,
+      "matched_count": 0,
+      "semantic_merged": 28,
+      "reinforced": 0,
+      "embedded": 810,
+      "edges": 596
+    },
+    "b": {
+      "calls": 330,
+      "state:applied": 330,
+      "created_count": 810,
+      "matched_count": 0,
+      "semantic_merged": 28,
+      "reinforced": 0,
+      "embedded": 810,
+      "edges": 596
+    }
+  },
+  "store": {
+    "base": {
+      "concepts": 8282,
+      "embedded": 8247,
+      "unembedded": 35,
+      "interactions": 2579,
+      "concepts_by_type": {
+        "Constraint": 805,
+        "Entity": 1568,
+        "Logic": 1048,
+        "Observation": 711,
+        "Resource": 4150
+      },
+      "edges_by_type": {
+        "Causal": 4059,
+        "CoOccurrence": 2587,
+        "Dependency": 2324,
+        "Derives": 8309,
+        "Hierarchical": 72,
+        "Semantic": 127,
+        "Temporal": 2578
+      },
+      "canonization_status": {
+        "None": 8282
+      },
+      "edges": 20056
+    },
+    "a": {
+      "concepts": 9092,
+      "embedded": 9057,
+      "unembedded": 35,
+      "interactions": 2909,
+      "concepts_by_type": {
+        "Constraint": 851,
+        "Entity": 1672,
+        "Logic": 1182,
+        "Observation": 769,
+        "Resource": 4618
+      },
+      "edges_by_type": {
+        "Causal": 4487,
+        "CoOccurrence": 2642,
+        "Dependency": 2492,
+        "Derives": 9119,
+        "Hierarchical": 72,
+        "Semantic": 155,
+        "Temporal": 2908
+      },
+      "canonization_status": {
+        "None": 9092
+      },
+      "edges": 21875
+    },
+    "b": {
+      "concepts": 9092,
+      "embedded": 9057,
+      "unembedded": 35,
+      "interactions": 2909,
+      "concepts_by_type": {
+        "Constraint": 851,
+        "Entity": 1672,
+        "Logic": 1182,
+        "Observation": 769,
+        "Resource": 4618
+      },
+      "edges_by_type": {
+        "Causal": 4487,
+        "CoOccurrence": 2642,
+        "Dependency": 2492,
+        "Derives": 9119,
+        "Hierarchical": 72,
+        "Semantic": 155,
+        "Temporal": 2908
+      },
+      "canonization_status": {
+        "None": 9092
+      },
+      "edges": 21875
+    }
+  },
+  "canonization": {
+    "status_counts": {
+      "base": {
+        "None": 8282
+      },
+      "a": {
+        "None": 9092
+      },
+      "b": {
+        "None": 9092
+      }
+    },
+    "events_since_T": {
+      "a": {},
+      "b": {}
+    }
+  },
+  "verdict": {
+    "pass": true,
+    "failures": [],
+    "notes": [
+      "semantic_edges: only A=10 only B=10"
+    ]
+  },
+  "differing_by_reason": {
+    "merge_into_replayed_concept": 38
+  },
+  "differing_calls": 38
+}
