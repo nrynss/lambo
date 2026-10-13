@@ -447,41 +447,196 @@ async fn receipts_from_both_pipelines_drain_on_the_next_response() {
     general.mem.close().await.expect("close");
 }
 
+/// Write `content` to `mem` as `agent`, delivered to `deliver_to` (as a
+/// layered session's scoped write is), and wait for it to apply. Straight
+/// through the pipeline, so no tool response drains it on the way.
+async fn write_through(
+    mem: &Memory,
+    agent: &AgentId,
+    content: &str,
+    deliver_to: Option<&crate::types::SessionId>,
+) -> ReceiptId {
+    let submitted = mem
+        .derive_cited_async_scoped(
+            agent,
+            &[(content, ConceptType::Logic)],
+            &ParentOf::none(),
+            &[],
+            None,
+            &crate::surface::resolve::NoForeignScopes,
+            deliver_to,
+        )
+        .await
+        .expect("submit");
+    let answer = mem
+        .pipeline()
+        .wait(agent, submitted.receipt, crate::writeq::RECEIPT_WAIT_MAX)
+        .await;
+    assert_eq!(answer.tag(), "applied");
+    submitted.receipt
+}
+
 /// The piggyback's one budget is shared across pipelines: ten settled
 /// receipts (five per session) come back eight on one response and the
-/// rest on the next, with the count of what waits.
+/// rest on the next, with the count of what waits. Review L3: a pipeline
+/// with receipts waiting always gets a slot, so ten of this session's and
+/// one of the layer's put the layer's on the first response.
 #[tokio::test]
 async fn the_piggyback_budget_is_shared_across_pipelines() {
     let (s, general, _source) = project_and_general("budget").await;
-    // Written through each session's own pipeline directly, so no tool
-    // response drains them on the way.
     let agent = AgentId::new("agent-z");
+    let own = s.memory().session().clone();
     for i in 0..5 {
-        for (mem, content) in [
-            (s.memory(), format!("project fact {i}")),
-            (general.memory(), format!("general ruling {i}")),
-        ] {
-            let submitted = mem
-                .derive_async_as(
-                    &agent,
-                    &[(&content, ConceptType::Logic)],
-                    &ParentOf::none(),
-                    None,
-                )
-                .await
-                .expect("submit");
-            let answer = mem
-                .pipeline()
-                .wait(&agent, submitted.receipt, crate::writeq::RECEIPT_WAIT_MAX)
-                .await;
-            assert_eq!(answer.tag(), "applied");
-        }
+        write_through(s.memory(), &agent, &format!("project fact {i}"), None).await;
+        write_through(
+            general.memory(),
+            &agent,
+            &format!("general ruling {i}"),
+            Some(&own),
+        )
+        .await;
     }
     let (taken, left) = s.take_receipts(&agent);
     assert_eq!(taken.len(), crate::writeq::MAX_PIGGYBACK_RECEIPTS);
     assert_eq!(taken.len() + left, 10);
     let (rest, left) = s.take_receipts(&agent);
     assert_eq!((rest.len(), left), (2, 0));
+
+    let mut own_ids = Vec::new();
+    for i in 0..10 {
+        own_ids.push(write_through(s.memory(), &agent, &format!("more fact {i}"), None).await);
+    }
+    let layer_id = write_through(general.memory(), &agent, "one more ruling", Some(&own)).await;
+    let (taken, left) = s.take_receipts(&agent);
+    assert_eq!(taken.len(), crate::writeq::MAX_PIGGYBACK_RECEIPTS);
+    assert_eq!(left, 3);
+    assert!(
+        taken.iter().any(|(id, _)| *id == layer_id),
+        "the layer's one receipt is not starved by this session's ten"
+    );
+    s.mem.close().await.expect("close");
+    general.mem.close().await.expect("close");
+}
+
+/// Review H1: two projects layered with one `general`, their agents
+/// sharing one id, both writing to `general` with `scope`, and a direct
+/// writer at `general` itself under the same id. Each server hands out
+/// only the receipts of writes it sent: neither project sees the other's
+/// (whose failure detail could quote that project's input), and `general`'s
+/// own server sees only its own direct write. A receipt id from the other
+/// project is `forbidden` through `lambo_stats`.
+#[tokio::test]
+async fn two_projects_sharing_an_agent_id_get_only_their_own_layer_receipts() {
+    let alpha_own = server("alpha-proj").await;
+    let beta_own = server("beta-proj").await;
+    let general = server("general").await;
+    let general = general.clone().serving_a_layer(true);
+    let (alpha, _a) = layered(&alpha_own, &general);
+    let (beta, _b) = layered(&beta_own, &general);
+    let agent = AgentId::new("agent-a");
+
+    // Through the pipelines, tagged as each server's tools tag them, so no
+    // tool response drains them before the check.
+    let ids = [
+        write_through(
+            general.memory(),
+            &agent,
+            "alpha's ruling",
+            Some(alpha.memory().session()),
+        )
+        .await,
+        write_through(
+            general.memory(),
+            &agent,
+            "beta's ruling",
+            Some(beta.memory().session()),
+        )
+        .await,
+        write_through(general.memory(), &agent, "curated ruling", None).await,
+    ];
+    let only = |s: &LamboServer, want: ReceiptId| {
+        let (taken, left) = s.take_receipts(&agent);
+        let got: Vec<ReceiptId> = taken.iter().map(|(id, _)| *id).collect();
+        assert_eq!((got, left), (vec![want], 0), "{}", s.memory().session());
+    };
+    only(&alpha, ids[0]);
+    only(&beta, ids[1]);
+    only(&general, ids[2]);
+
+    // Through the tools: alpha's scoped write is tagged for alpha, and by
+    // id it is forbidden to beta and to general's own server.
+    let ack = call(
+        &alpha,
+        "lambo_derive",
+        derive_args("alpha again", "logic", Some("general")),
+    )
+    .await;
+    let id = receipt_of(&ack);
+    for (s, state) in [
+        (&beta, "forbidden"),
+        (&general, "forbidden"),
+        (&alpha, "applied"),
+    ] {
+        let out = call_raw(
+            s,
+            "lambo_stats",
+            json!({"agent_id": "agent-a", "receipt": id}),
+        )
+        .await;
+        assert_eq!(
+            structured(&out)["receipt"]["state"],
+            json!(state),
+            "{}",
+            s.memory().session()
+        );
+    }
+    for s in [&alpha_own, &beta_own, &general] {
+        s.mem.close().await.expect("close");
+    }
+}
+
+/// Review M2: a receipt no serving pipeline knows, asked while a layer the
+/// call reads is not serving, may be that layer's: `lambo_stats` answers
+/// it as unknown for now (`pending`, ask again), not `restart_lost`; once
+/// the layer is back, its receipt answers as usual.
+#[tokio::test]
+async fn a_receipt_asked_while_its_layer_is_down_is_ask_again() {
+    let (s, general, source) = project_and_general("down-receipt").await;
+    let scoped = call(
+        &s,
+        "lambo_derive",
+        derive_args("a ruling", "logic", Some("general")),
+    )
+    .await;
+    let receipt = receipt_of(&scoped);
+    let taken = source.0.lock().take();
+    let out = call_raw(
+        &s,
+        "lambo_stats",
+        json!({"agent_id": "agent-a", "receipt": receipt, "wait_ms": 1_000}),
+    )
+    .await;
+    let r = &structured(&out)["receipt"];
+    assert_eq!(r["state"], json!("pending"), "{r}");
+    assert!(
+        r["detail"]
+            .as_str()
+            .unwrap()
+            .contains("layer general is not serving"),
+        "{r}"
+    );
+    assert!(
+        structured(&out)["node_count"].is_number(),
+        "the stats payload is whole"
+    );
+    *source.0.lock() = taken;
+    let out = call_raw(
+        &s,
+        "lambo_stats",
+        json!({"agent_id": "agent-a", "receipt": receipt}),
+    )
+    .await;
+    assert_eq!(structured(&out)["receipt"]["state"], json!("applied"));
     s.mem.close().await.expect("close");
     general.mem.close().await.expect("close");
 }
@@ -549,7 +704,7 @@ async fn lambo_stats_routes_a_receipt_to_its_pipeline_by_epoch() {
 /// A source over one layer that counts reads by kind and can refuse a
 /// direct one as over its rate.
 struct Counting {
-    mem: Arc<Memory>,
+    mem: parking_lot::Mutex<Arc<Memory>>,
     direct: AtomicUsize,
     other: AtomicUsize,
     limited: bool,
@@ -566,7 +721,7 @@ impl LayerSource for Counting {
             self.other.fetch_add(1, Ordering::SeqCst);
         }
         Ok(LiveLayer {
-            mem: Arc::clone(&self.mem),
+            mem: Arc::clone(&self.mem.lock()),
             _in_flight: None,
         })
     }
@@ -578,7 +733,7 @@ fn counted(
     limited: bool,
 ) -> (LamboServer, Arc<Counting>) {
     let source = Arc::new(Counting {
-        mem: Arc::clone(general.memory()),
+        mem: parking_lot::Mutex::new(Arc::clone(general.memory())),
         direct: AtomicUsize::new(0),
         other: AtomicUsize::new(0),
         limited,
@@ -1054,4 +1209,282 @@ async fn the_ledger_records_a_writes_scope() {
     ledger.shutdown();
     own.mem.close().await.expect("close");
     general.mem.close().await.expect("close");
+}
+
+/// An image embedder that parks each image embed until released, and says
+/// when one has started.
+struct ParkedImages {
+    inner: FixtureEmbedder,
+    started: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+#[async_trait::async_trait]
+impl Embedder for ParkedImages {
+    fn dimensions(&self) -> usize {
+        self.inner.dimensions()
+    }
+    async fn embed(&self, text: &str) -> Result<Vec<f32>, crate::embed::EmbedError> {
+        self.inner.embed(text).await
+    }
+    async fn embed_query(&self, text: &str) -> Result<Vec<f32>, crate::embed::EmbedError> {
+        self.inner.embed_query(text).await
+    }
+    fn modalities(&self) -> crate::embed::Modalities {
+        self.inner.modalities()
+    }
+    async fn embed_image(
+        &self,
+        image: crate::embed::ImageInput<'_>,
+    ) -> Result<Vec<f32>, crate::embed::EmbedError> {
+        self.started.notify_one();
+        self.release.notified().await;
+        self.inner.embed_image(image).await
+    }
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        self.inner.as_any()
+    }
+}
+
+/// Review H2: a scoped `lambo_derive_image` embeds holding nothing of the
+/// layer. While the (parked) embed runs, the layer's `Memory` is held by
+/// no one but its source (so no in-flight guard or gate permit), and a re-attach
+/// can replace it; the write then lands in the layer as it is after the
+/// embed (the re-attached one), with no second rate token.
+#[tokio::test]
+async fn a_scoped_image_embed_holds_nothing_of_the_layer() {
+    let parked = Arc::new(ParkedImages {
+        inner: FixtureEmbedder::new(),
+        started: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+    });
+    let layer_server = |embedder: Arc<ParkedImages>| {
+        server_with_parts(
+            "general",
+            Arc::new(crate::test_util::VectorSearchable(Arc::new(
+                MemoryStore::new(),
+            ))),
+            embedder,
+            fixture_contract(),
+            Config::default(),
+        )
+    };
+    let own = image_server("parked-proj", Config::default()).await;
+    let old_general = layer_server(Arc::clone(&parked)).await;
+    let new_general = layer_server(Arc::clone(&parked)).await;
+    let (s, source) = counted(&own, &old_general, false);
+    let args = json!({
+        "agent_id": "agent-a",
+        "caption": "the shared diagram",
+        "concept_type": "resource",
+        "image_id": "d1",
+        "image": {"mime": "image/png", "data": png_b64("d1")},
+        "scope": "general",
+    });
+    let call_fut = {
+        let s = s.clone();
+        tokio::spawn(async move { call_raw(&s, "lambo_derive_image", args).await })
+    };
+    parked.started.notified().await;
+    // Mid-embed: the call holds no strong reference to the layer's Memory
+    // (only the source and this test do), so neither its in-flight guard nor
+    // its writers-gate permit, which borrows from it, is held.
+    assert_eq!(Arc::strong_count(old_general.memory()), 2);
+    // The layer is re-attached (a new Memory) while the embed runs.
+    *source.mem.lock() = Arc::clone(new_general.memory());
+    parked.release.notify_one();
+    let out = call_fut.await.expect("join");
+    assert_eq!(out.is_error, Some(false), "{out:?}");
+    assert_eq!(
+        source.direct.load(Ordering::SeqCst),
+        1,
+        "one token, not two"
+    );
+    let has = |s: &LamboServer| contents(s).iter().any(|c| c.ends_with("[image:d1]"));
+    let receipt: ReceiptId = receipt_of(&out).parse().unwrap();
+    let answer = new_general
+        .memory()
+        .pipeline()
+        .wait(
+            &AgentId::new("agent-a"),
+            receipt,
+            crate::writeq::RECEIPT_WAIT_MAX,
+        )
+        .await;
+    assert_eq!(answer.tag(), "applied");
+    assert!(has(&new_general) && !has(&old_general) && !has(&own));
+    for s in [&own, &old_general, &new_general] {
+        s.mem.close().await.expect("close");
+    }
+}
+
+/// A source with a second layer whose probe fences the first: so a write
+/// scoped to the first passes its writers gate, then (when its reference
+/// probe reads the second) the first loses its lease before the submit.
+struct FencesOnProbe {
+    first: Arc<Memory>,
+    second: Arc<Memory>,
+}
+
+impl LayerSource for FencesOnProbe {
+    fn live_layer(&self, session: &str, read: LayerRead) -> Result<LiveLayer, LayerDown> {
+        let mem = if session == self.first.session().as_str() {
+            Arc::clone(&self.first)
+        } else {
+            if read == LayerRead::Probe {
+                self.first.simulate_lease_loss();
+            }
+            Arc::clone(&self.second)
+        };
+        Ok(LiveLayer {
+            mem,
+            _in_flight: None,
+        })
+    }
+}
+
+/// Review M3: a layer that loses its lease after the write passed its gate
+/// but before the ack is answered as having stopped serving, not with a
+/// success ack whose outcome no lookup could reach; nothing is applied.
+#[tokio::test]
+async fn a_lease_lost_between_the_gate_and_the_ack_is_refused() {
+    let own = server("m3-proj").await;
+    let general = server("general").await;
+    let other = server("other").await;
+    let source: Arc<dyn LayerSource> = Arc::new(FencesOnProbe {
+        first: Arc::clone(general.memory()),
+        second: Arc::clone(other.memory()),
+    });
+    let handle = |name: &str| {
+        LayerHandle::new(
+            name,
+            DEFAULT_LAYER_WEIGHT,
+            DEFAULT_LAYER_MIN_SIMILARITY,
+            Arc::downgrade(&source),
+        )
+    };
+    let s = own.clone().with_layers(ServerLayers {
+        handles: vec![handle("general"), handle("other")],
+        authority: None,
+    });
+    // A hyphenated id that names nothing makes the core probe the other
+    // sessions after its gate: the probe of `other` fences `general`.
+    let out = call_raw(
+        &s,
+        "lambo_record_action",
+        action_args(
+            "a late act",
+            "depends_on",
+            &["00000000-0000-4000-8000-000000000001"],
+            Some("general"),
+        ),
+    )
+    .await;
+    assert_eq!(out.is_error, Some(true), "{out:?}");
+    assert!(
+        text_of(&out).contains("layer general stopped serving during this call"),
+        "{}",
+        text_of(&out)
+    );
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(!contents(&general).contains(&"a late act".to_string()));
+    own.mem.close().await.expect("close");
+    other.mem.close().await.expect("close");
+    let _ = general.mem.close().await;
+}
+
+/// Review L1: in a layer, every concept's content (any type) and every
+/// parent_of end is checked for relative paths, and a record_action
+/// depends_on text naming a concept of the caller's own session is refused
+/// as cross-session instead of being minted in the layer. Unscoped, the
+/// 0.5.0 text rule stands: text naming a layer concept is minted here.
+#[tokio::test]
+async fn a_layer_write_checks_every_concept_and_never_copies_the_project_in() {
+    let (s, general, _source) = project_and_general("l1").await;
+    let before = general.memory().graph().read().snapshot();
+    let out = call_raw(
+        &s,
+        "lambo_derive",
+        derive_args("README.md", "logic", Some("general")),
+    )
+    .await;
+    assert!(text_of(&out).contains("concept.content entry \"README.md\" is a relative path"));
+    let out = call_raw(
+        &s,
+        "lambo_derive",
+        json!({"agent_id": "agent-a", "scope": "general",
+               "concepts": [{"content": "a ruling", "concept_type": "logic"}],
+               "parent_of": [{"parent": "a ruling", "child": "src/main.rs"}]}),
+    )
+    .await;
+    assert!(
+        text_of(&out).contains("parent_of entry \"src/main.rs\" is a relative path"),
+        "{}",
+        text_of(&out)
+    );
+    let out = call_raw(
+        &s,
+        "lambo_record_action",
+        action_args(
+            "applied the project fact",
+            "depends_on",
+            &[PROJECT_FACT],
+            Some("general"),
+        ),
+    )
+    .await;
+    assert_eq!(out.is_error, Some(true));
+    let text = text_of(&out);
+    assert!(text.contains("is in scope \"l1-proj\""), "{text}");
+    assert!(text.contains(PROJECT_FACT), "{text}");
+    assert_eq!(before, general.memory().graph().read().snapshot());
+    // Unscoped: text naming general's ruling is this session's own concept.
+    let out = call(
+        &s,
+        "lambo_record_action",
+        action_args("followed the ruling", "depends_on", &[GENERAL_RULING], None),
+    )
+    .await;
+    assert_eq!(out.is_error, Some(false), "{out:?}");
+    assert!(contents(&s).contains(&GENERAL_RULING.to_string()));
+    s.mem.close().await.expect("close");
+    general.mem.close().await.expect("close");
+}
+
+/// Review L2: a server whose session is itself a layer (`/mcp/s/general`)
+/// refuses relative paths on its own writes too; an ordinary one does not.
+#[tokio::test]
+async fn a_layers_own_server_refuses_relative_paths() {
+    let general = server("general").await.serving_a_layer(true);
+    let out = call_raw(
+        &general,
+        "lambo_record_action",
+        action_args("edited", "modifies", &["README.md"], None),
+    )
+    .await;
+    assert_eq!(out.is_error, Some(true));
+    assert!(
+        text_of(&out).contains(
+            "modifies entry \"README.md\" is a relative path, refused in scope \"general\""
+        ),
+        "{}",
+        text_of(&out)
+    );
+    let out = call(
+        &general,
+        "lambo_record_action",
+        action_args("edited", "modifies", &["/abs/README.md"], None),
+    )
+    .await;
+    assert_eq!(out.is_error, Some(false), "{out:?}");
+    let plain = server("plain-l2").await;
+    let out = call(
+        &plain,
+        "lambo_record_action",
+        action_args("edited", "modifies", &["README.md"], None),
+    )
+    .await;
+    assert_eq!(out.is_error, Some(false), "{out:?}");
+    general.mem.close().await.expect("close");
+    plain.mem.close().await.expect("close");
 }

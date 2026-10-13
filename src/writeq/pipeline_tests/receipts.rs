@@ -52,6 +52,7 @@ async fn an_applied_receipt_counts_an_embedded_parent_of_end() {
             vec![("user schema".to_string(), ConceptType::Entity)],
             vec![("document:src.md".to_string(), "user schema".to_string())],
             Default::default(),
+            None,
         )
         .await;
     let settled = rig
@@ -99,6 +100,7 @@ async fn an_applied_action_receipt_reports_its_embedded_count() {
             Vec::new(),
             vec!["schema v1".to_string()],
             Vec::new(),
+            None,
         )
         .await;
     let settled = rig
@@ -147,6 +149,7 @@ async fn a_hybrid_action_receipt_without_vector_search_embeds_nothing() {
             Vec::new(),
             Vec::new(),
             Vec::new(),
+            None,
         )
         .await;
     let settled = rig
@@ -184,6 +187,7 @@ async fn a_canonical_action_receipt_has_no_embedded_count() {
             Vec::new(),
             Vec::new(),
             Vec::new(),
+            None,
         )
         .await;
     let settled = rig
@@ -266,6 +270,7 @@ fn eviction_is_oldest_settled_first_and_never_takes_a_running_writes_receipt() {
     let base = Utc::now();
     let entry = |seq: u64, settled: bool| Entry {
         agent: AgentId::new("agent-a"),
+        deliver_to: None,
         settled_at: settled.then_some(base + chrono::Duration::milliseconds(seq as i64)),
         answer: if settled {
             ReceiptAnswer::Failed("settled".into())
@@ -513,6 +518,7 @@ async fn an_action_completion_line_carries_edges_and_no_derive_only_keys() {
             Vec::new(),
             vec!["schema v1".to_string()],
             Vec::new(),
+            None,
         )
         .await;
     let ReceiptAnswer::Applied(s) = rig

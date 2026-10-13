@@ -158,6 +158,7 @@ impl Rig {
                 vec![(content.to_string(), ConceptType::Entity)],
                 Vec::new(),
                 Default::default(),
+                None,
             )
             .await
     }

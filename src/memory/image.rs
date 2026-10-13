@@ -10,14 +10,14 @@
 //! contract here (design section 3.3, point 1). What reaches the write path is
 //! a [`SuppliedVector`], which `hybrid::derive_with` takes as it is.
 
-use crate::embed::{EmbedError, Modalities};
+use crate::embed::{EmbedError, Embedder, ImageInput, Modalities};
 use crate::graph::derive::{DeriveOutcome, ParentOf};
 use crate::graph::hybrid::{self, HYBRID_IO_TIMEOUT};
 use crate::graph::image::{self, ImageDerive, ImagePayload};
 use crate::surface::validate::{check_size, require_nonempty};
 use crate::types::{
-    check_supplied_values, AgentId, ConceptType, EmbeddingSource, LamboError, MatchStrategy,
-    SourceModality, SuppliedVector, VectorOrigin,
+    check_supplied_values, AgentId, ConceptType, EmbeddingContract, EmbeddingSource, LamboError,
+    MatchStrategy, SessionId, SourceModality, SuppliedVector, VectorOrigin,
 };
 use crate::writeq::Submitted;
 
@@ -25,6 +25,69 @@ use super::Memory;
 
 /// An image derive after the call-path work: the concept, its pairs, and the
 /// vector it carries.
+/// A server-side image already embedded off the session (#33 PR 4 review
+/// H2): a scoped `lambo_derive_image` embeds with the layer's embedder
+/// while holding nothing of the layer, then hands this to the layer's
+/// [`Memory::derive_image_async_scoped`], which re-checks the contract.
+pub(crate) struct PreEmbedded {
+    /// The normalized vector.
+    vector: Vec<f32>,
+    /// The id a call without one gets: the bytes' digest.
+    default_id: String,
+    /// Where the vector came from.
+    source: EmbeddingSource,
+    /// The contract it was embedded under.
+    contract: EmbeddingContract,
+}
+
+/// Embed `input` with `embedder` under `live`, as an image derive does on
+/// its call path (see [`Memory::derive_image_as`]), holding no session.
+pub(crate) async fn embed_server_image(
+    embedder: &dyn Embedder,
+    live: &EmbeddingContract,
+    session: &SessionId,
+    input: ImageInput<'_>,
+) -> Result<PreEmbedded, LamboError> {
+    if !embedder.modalities().contains(Modalities::IMAGE) {
+        return Err(LamboError::Config(
+            "the configured embedder does not embed images; an image derive needs one that \
+             does, or a client-computed vector"
+                .into(),
+        ));
+    }
+    let raw = embed_image_or_refuse(embedder, input).await?;
+    // The adapter's own output, held to the trait's contract: a wrong
+    // width, a NaN or a zero vector is the embedder's failure on this
+    // input, not the caller's.
+    check_supplied_values(&raw, live, live).map_err(|e| {
+        LamboError::Embed(format!(
+            "the embedder returned an unusable image vector ({e}); nothing was written"
+        ))
+    })?;
+    let sha = input.sha256();
+    tracing::debug!(
+        target: "lambo::image",
+        session = %session,
+        mime = %input.mime(),
+        bytes = input.bytes().len(),
+        sha256_prefix = %image::hex(&sha[..4]),
+        "image derive: embedded on the call path"
+    );
+    Ok(PreEmbedded {
+        vector: image::normalize(&raw),
+        default_id: image::digest_id(&sha),
+        source: EmbeddingSource {
+            modality: SourceModality::Image,
+            origin: VectorOrigin::Server,
+            // PR 2 decision: built only from the validated input's digest,
+            // lowercase hex.
+            sha256: Some(image::hex(&sha)),
+            mime: Some(input.mime().into()),
+        },
+        contract: live.clone(),
+    })
+}
+
 struct PreparedImage {
     concept_type: ConceptType,
     pairs: Vec<(String, String)>,
@@ -60,7 +123,7 @@ impl Memory {
         // Held across the image embed and the derive, as `derive_as` holds it.
         let _writing = self.begin_write().await?;
         let event_time = image.event_time;
-        let prepared = self.prepare_image(image).await?;
+        let prepared = self.prepare_image(image, None).await?;
         let content = prepared.supplied.content.clone();
         let concepts = [(content.as_str(), prepared.concept_type)];
         let pairs: Vec<(&str, &str)> = prepared
@@ -112,9 +175,26 @@ impl Memory {
         agent: &AgentId,
         image: ImageDerive<'_>,
     ) -> Result<Submitted, LamboError> {
+        self.derive_image_async_scoped(agent, image, None, None)
+            .await
+    }
+
+    /// [`Memory::derive_image_async_as`] with the image already embedded
+    /// (`pre`, for an [`ImagePayload::Bytes`] payload: no embed runs here,
+    /// so the writers gate is held for the pre-pass and the submit only)
+    /// and the receipt delivered to `deliver_to` (as for
+    /// [`Memory::derive_cited_async_scoped`]). A `pre` embedded under a
+    /// contract other than this session's is refused.
+    pub(crate) async fn derive_image_async_scoped(
+        &self,
+        agent: &AgentId,
+        image: ImageDerive<'_>,
+        pre: Option<PreEmbedded>,
+        deliver_to: Option<&SessionId>,
+    ) -> Result<Submitted, LamboError> {
         let _writing = self.begin_write().await?;
         let event_time = image.event_time;
-        let prepared = self.prepare_image(image).await?;
+        let prepared = self.prepare_image(image, pre).await?;
         let content = prepared.supplied.content.clone();
         {
             // The pre-pass `derive_async_as` runs under `Hybrid`, so the
@@ -145,13 +225,18 @@ impl Memory {
                 vec![(content, prepared.concept_type)],
                 prepared.pairs,
                 prepared.supplied,
+                deliver_to.cloned(),
             )
             .await)
     }
 
     /// The call-path work both image entry points share. See
     /// [`Memory::derive_image_as`] for what it refuses.
-    async fn prepare_image(&self, image: ImageDerive<'_>) -> Result<PreparedImage, LamboError> {
+    async fn prepare_image(
+        &self,
+        image: ImageDerive<'_>,
+        pre: Option<PreEmbedded>,
+    ) -> Result<PreparedImage, LamboError> {
         let config = |e: String| LamboError::Config(e);
         // Design Q16: an image concept is found only through its vector.
         if self.config.match_strategy != MatchStrategy::Hybrid {
@@ -195,44 +280,26 @@ impl Memory {
         let live = &self.embedding;
         let (vector, default_id, source) = match image.payload {
             ImagePayload::Bytes(input) => {
-                if !self.embedder.modalities().contains(Modalities::IMAGE) {
-                    return Err(LamboError::Config(
-                        "the configured embedder does not embed images; an image derive needs \
-                         one that does, or a client-computed vector"
-                            .into(),
-                    ));
-                }
-                let raw = self.embed_image_or_refuse(input).await?;
-                // The adapter's own output, held to the trait's contract: a
-                // wrong width, a NaN or a zero vector is the embedder's
-                // failure on this input, not the caller's.
-                check_supplied_values(&raw, live, live).map_err(|e| {
-                    LamboError::Embed(format!(
-                        "the embedder returned an unusable image vector ({e}); nothing was \
-                         written"
-                    ))
-                })?;
-                let sha = input.sha256();
-                tracing::debug!(
-                    target: "lambo::image",
-                    session = %self.session,
-                    mime = %input.mime(),
-                    bytes = input.bytes().len(),
-                    sha256_prefix = %image::hex(&sha[..4]),
-                    "image derive: embedded on the call path"
-                );
-                (
-                    image::normalize(&raw),
-                    image::digest_id(&sha),
-                    EmbeddingSource {
-                        modality: SourceModality::Image,
-                        origin: VectorOrigin::Server,
-                        // PR 2 decision: built only from the validated
-                        // input's digest, lowercase hex.
-                        sha256: Some(image::hex(&sha)),
-                        mime: Some(input.mime().into()),
-                    },
-                )
+                let embedded = match pre {
+                    Some(pre) => {
+                        // Embedded off this session: it must be in this
+                        // session's space, as a client vector must.
+                        if &pre.contract != live {
+                            return Err(LamboError::Config(
+                                "the image was embedded under another embedding contract than \
+                                 this session's (the session was re-attached while it was \
+                                 embedded); nothing was written"
+                                    .into(),
+                            ));
+                        }
+                        pre
+                    }
+                    None => {
+                        embed_server_image(self.embedder.as_ref(), live, &self.session, input)
+                            .await?
+                    }
+                };
+                (embedded.vector, embedded.default_id, embedded.source)
             }
             ImagePayload::Vector { values, declared } => {
                 check_supplied_values(&values, &declared, live).map_err(config)?;
@@ -275,33 +342,33 @@ impl Memory {
             },
         })
     }
+}
 
-    /// Embed an image under [`HYBRID_IO_TIMEOUT`], with the text derive's
-    /// error classes: a timeout or an unreachable embedder is
-    /// [`LamboError::EmbedUnavailable`], a refusal of this input
-    /// [`LamboError::Embed`], and an embedder that does not embed images
-    /// [`LamboError::Config`]. Messages never quote the bytes.
-    async fn embed_image_or_refuse(
-        &self,
-        input: crate::embed::ImageInput<'_>,
-    ) -> Result<Vec<f32>, LamboError> {
-        match tokio::time::timeout(HYBRID_IO_TIMEOUT, self.embedder.embed_image(input)).await {
-            Err(_) => Err(LamboError::EmbedUnavailable(format!(
-                "the image embed timed out after {HYBRID_IO_TIMEOUT:?}; nothing was written"
-            ))),
-            Ok(Err(EmbedError::Unsupported(e))) => Err(LamboError::Config(format!(
-                "the configured embedder does not embed images ({e}); nothing was written"
-            ))),
-            Ok(Err(EmbedError::Unreadable(e))) => Err(LamboError::Embed(format!(
-                "Lambo could not read the image ({e}); nothing was written"
-            ))),
-            Ok(Err(e)) if e.is_transient() => Err(LamboError::EmbedUnavailable(format!(
-                "the embedder could not be reached for the image ({e}); nothing was written"
-            ))),
-            Ok(Err(e)) => Err(LamboError::Embed(format!(
-                "the embedder refused the image ({e}); nothing was written"
-            ))),
-            Ok(Ok(vector)) => Ok(vector),
-        }
+/// Embed an image under [`HYBRID_IO_TIMEOUT`], with the text derive's error
+/// classes: a timeout or an unreachable embedder is
+/// [`LamboError::EmbedUnavailable`], a refusal of this input
+/// [`LamboError::Embed`], and an embedder that does not embed images
+/// [`LamboError::Config`]. Messages never quote the bytes.
+async fn embed_image_or_refuse(
+    embedder: &dyn Embedder,
+    input: ImageInput<'_>,
+) -> Result<Vec<f32>, LamboError> {
+    match tokio::time::timeout(HYBRID_IO_TIMEOUT, embedder.embed_image(input)).await {
+        Err(_) => Err(LamboError::EmbedUnavailable(format!(
+            "the image embed timed out after {HYBRID_IO_TIMEOUT:?}; nothing was written"
+        ))),
+        Ok(Err(EmbedError::Unsupported(e))) => Err(LamboError::Config(format!(
+            "the configured embedder does not embed images ({e}); nothing was written"
+        ))),
+        Ok(Err(EmbedError::Unreadable(e))) => Err(LamboError::Embed(format!(
+            "Lambo could not read the image ({e}); nothing was written"
+        ))),
+        Ok(Err(e)) if e.is_transient() => Err(LamboError::EmbedUnavailable(format!(
+            "the embedder could not be reached for the image ({e}); nothing was written"
+        ))),
+        Ok(Err(e)) => Err(LamboError::Embed(format!(
+            "the embedder refused the image ({e}); nothing was written"
+        ))),
+        Ok(Ok(vector)) => Ok(vector),
     }
 }

@@ -96,14 +96,11 @@ impl LamboServer {
                 return bad_param(msg);
             }
         }
-        // #33 PR 4: a Resource written into a shared layer is no bare
-        // relative path.
+        // #33 PR 4: nothing written into a shared layer is a bare relative
+        // path, whatever its type (review L1).
         if let Err(e) = target.check_paths(
             "concept.content",
-            p.concepts
-                .iter()
-                .filter(|c| ConceptType::from(c.concept_type) == ConceptType::Resource)
-                .map(|c| c.content.as_str()),
+            p.concepts.iter().map(|c| c.content.as_str()),
         ) {
             return e;
         }
@@ -134,6 +131,10 @@ impl LamboServer {
             if let Err(e) = check_size("parent_of.child", b) {
                 return e;
             }
+        }
+        // Review L1: a parent_of end becomes a concept too.
+        if let Err(e) = target.check_paths("parent_of", pairs.iter().flat_map(|(a, b)| [*a, *b])) {
+            return e;
         }
         let parent_of = if pairs.is_empty() {
             ParentOf::none()
@@ -168,12 +169,18 @@ impl LamboServer {
                 &citations,
                 event_time,
                 &target.probe(self),
+                target.deliver_to().as_ref(),
             )
             .await
         {
             Ok(s) => s,
             Err(e) => return self.target_err("lambo_derive", &target, e),
         };
+        // Review M3: a layer fenced between the gate and the admission
+        // admitted a job its apply refuses; say so, not "accepted".
+        if let Some(refusal) = self.stopped_serving("lambo_derive", &target) {
+            return refusal;
+        }
 
         // I1 (DOGFOOD metric 2, re-derivation savings) — **changed by J3, and
         // this is the honest statement of what changed.** `created`, `matched`,
@@ -340,12 +347,21 @@ impl LamboServer {
         // is ORDERING with derive — see `Memory::record_action_async_as`.
         let submitted = match target
             .mem(&self.mem)
-            .record_action_async_scoped(&acting, &action, &target.probe(self))
+            .record_action_async_scoped(
+                &acting,
+                &action,
+                &target.probe(self),
+                target.deliver_to().as_ref(),
+            )
             .await
         {
             Ok(s) => s,
             Err(e) => return self.target_err("lambo_record_action", &target, e),
         };
+        // Review M3, as in `derive_impl`.
+        if let Some(refusal) = self.stopped_serving("lambo_record_action", &target) {
+            return refusal;
+        }
 
         // I1: `created` and `edges` are not knowable at ack time — see the
         // matching note in `derive_impl` for what that costs and where the

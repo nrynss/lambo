@@ -106,6 +106,11 @@ pub struct LamboServer {
     /// `tools/list` is not: every tool but lambo_stats lists `scope`). Set
     /// by a multi-session serve from `[serve] layers`.
     layers: layers::ServerLayers,
+    /// Whether this session is itself a layer of another session in this
+    /// serve (#33 PR 4 review L2): every project reads it, so its own
+    /// writes refuse relative file paths as a write scoped to it does. Set
+    /// by a multi-session serve from `[serve] layers`; `false` otherwise.
+    is_layer: bool,
 }
 
 impl std::fmt::Debug for LamboServer {
@@ -135,6 +140,7 @@ impl LamboServer {
             started_at: Instant::now(),
             activity: None,
             layers: layers::ServerLayers::default(),
+            is_layer: false,
         }
     }
 
@@ -142,6 +148,17 @@ impl LamboServer {
     /// `lambo_recall` (#33 PR 3). Clones share them.
     pub(crate) fn with_layers(self, layers: layers::ServerLayers) -> Self {
         Self { layers, ..self }
+    }
+
+    /// The same handle, serving a session that is itself a layer of
+    /// another (#33 PR 4 review L2). Clones share it.
+    pub(crate) fn serving_a_layer(self, is_layer: bool) -> Self {
+        Self { is_layer, ..self }
+    }
+
+    /// Whether this session is itself a layer of another.
+    pub(crate) fn is_layer(&self) -> bool {
+        self.is_layer
     }
 
     /// The shared layers this session's recall reads, nearest tier first.

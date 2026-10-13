@@ -29,7 +29,8 @@ use super::{
 };
 use crate::surface::limits::MAX_CONTENT_BYTES;
 use crate::types::{
-    AgentId, ConceptType, NodeId, PinnedCitations, SuppliedVector, WriteIntent, WriteIntentPayload,
+    AgentId, ConceptType, NodeId, PinnedCitations, SessionId, SuppliedVector, WriteIntent,
+    WriteIntentPayload,
 };
 
 /// **Deleted roles, recorded where they lived** (J3 redesign): this block used
@@ -470,6 +471,7 @@ impl WritePipeline {
         agent: AgentId,
         interaction: NodeId,
         payload: JobPayload,
+        deliver_to: Option<SessionId>,
     ) -> Submitted {
         let bytes = payload.bytes();
         let receipt = self.next_receipt();
@@ -582,6 +584,7 @@ impl WritePipeline {
                     receipt,
                     Entry {
                         agent: agent.clone(),
+                        deliver_to,
                         // A refusal is born settled, so its retention window
                         // starts now.
                         settled_at: Some(now),
@@ -607,6 +610,7 @@ impl WritePipeline {
                     receipt,
                     Entry {
                         agent,
+                        deliver_to,
                         // Unsettled, and therefore never expired and never
                         // evicted until it settles (J3-R1-3).
                         settled_at: None,
@@ -632,6 +636,7 @@ impl WritePipeline {
         concepts: Vec<(String, ConceptType)>,
         pairs: Vec<(String, String)>,
         citations: PinnedCitations,
+        deliver_to: Option<SessionId>,
     ) -> Submitted {
         self.admit(
             agent,
@@ -641,6 +646,7 @@ impl WritePipeline {
                 pairs,
                 citations,
             },
+            deliver_to,
         )
         .await
     }
@@ -654,6 +660,7 @@ impl WritePipeline {
         concepts: Vec<(String, ConceptType)>,
         pairs: Vec<(String, String)>,
         supplied: SuppliedVector,
+        deliver_to: Option<SessionId>,
     ) -> Submitted {
         self.admit(
             agent,
@@ -663,6 +670,7 @@ impl WritePipeline {
                 pairs,
                 supplied,
             },
+            deliver_to,
         )
         .await
     }
@@ -680,6 +688,7 @@ impl WritePipeline {
         modifies: Vec<String>,
         depends_on: Vec<String>,
         depends_on_pins: Vec<Option<NodeId>>,
+        deliver_to: Option<SessionId>,
     ) -> Submitted {
         self.admit(
             agent,
@@ -691,6 +700,7 @@ impl WritePipeline {
                 depends_on,
                 depends_on_pins,
             },
+            deliver_to,
         )
         .await
     }

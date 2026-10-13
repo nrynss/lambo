@@ -72,6 +72,10 @@ pub(crate) enum LayerRead {
     /// a layer over its rate must not withhold an outcome the agent is owed
     /// (it would arrive on a later call, but only if one happened to fit).
     Receipts,
+    /// #33 PR 4 review H2: a scoped call that let its layer go for work
+    /// that must not hold it (an image embed) takes it back. Draws nothing:
+    /// the call drew its one token when it first looked the layer up.
+    Retake,
 }
 
 /// Why a layer is not served right now (#33 PR 3 review L1).

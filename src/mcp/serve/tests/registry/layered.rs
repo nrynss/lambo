@@ -472,6 +472,34 @@ async fn a_scoped_write_lands_in_the_layer_end_to_end() {
         .to_string()
         .contains("one of its layers: lay-proj, general"));
 
+    // Review L2: general's own server knows it is a layer, so a direct
+    // write there refuses a relative path too; the project's does not.
+    let (general_sid, _) = initialize(addr, &path(GENERAL)).await;
+    let direct = call(
+        addr,
+        &path(GENERAL),
+        &general_sid,
+        "lambo_record_action",
+        serde_json::json!({"agent_id": "agent-a", "action": "edited", "modifies": ["README.md"]}),
+    )
+    .await;
+    assert_eq!(direct["isError"], serde_json::json!(true), "{direct}");
+    assert!(
+        direct
+            .to_string()
+            .contains("is a relative path, refused in scope"),
+        "{direct}"
+    );
+    let own = call(
+        addr,
+        &path(PROJECT),
+        &proj,
+        "lambo_record_action",
+        serde_json::json!({"agent_id": "agent-a", "action": "edited", "modifies": ["README.md"]}),
+    )
+    .await;
+    assert_eq!(own["isError"], serde_json::json!(false), "{own}");
+
     for session in registry.close_set().await {
         session.mem.close().await.expect("close");
     }

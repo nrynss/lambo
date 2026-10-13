@@ -28,7 +28,7 @@ use parking_lot::Mutex as PlMutex;
 use super::{WritePipeline, WRITE_QUEUE_DRAIN_BUDGET};
 use crate::graph::hybrid::HYBRID_IO_TIMEOUT;
 use crate::surface::limits::MAX_CONCEPTS_PER_DERIVE;
-use crate::types::{AgentId, LamboError};
+use crate::types::{AgentId, LamboError, SessionId};
 
 /// How long a **settled** receipt's outcome is held, measured **from the
 /// settle**, not from the issue.
@@ -690,6 +690,13 @@ impl ReceiptAnswer {
 
 pub(super) struct Entry {
     pub(super) agent: AgentId,
+    /// The session whose server delivers this receipt (#33 PR 4 review
+    /// H1), when it is not this pipeline's own: a layered session's write
+    /// scoped to a layer is applied by the layer's pipeline but delivered
+    /// only through the session that sent it. `None` for this session's own
+    /// writes. Agent ids are caller-asserted and shared across projects, so
+    /// the agent alone cannot keep one project's outcome from another.
+    pub(super) deliver_to: Option<SessionId>,
     /// When the answer became terminal, and therefore when
     /// [`RECEIPT_RETENTION`] starts. `None` while the write is queued or
     /// running — and an entry with `None` here is **never** expired and never
@@ -1004,41 +1011,91 @@ impl WritePipeline {
     /// Take-once. A response that never reaches its client loses its
     /// piggyback, which is why the fetch-by-id surface exists as well.
     pub fn take_piggyback(&self, agent: &AgentId) -> (Vec<(ReceiptId, ReceiptAnswer)>, usize) {
-        self.take_piggyback_at_most(agent, MAX_PIGGYBACK_RECEIPTS)
+        self.take_piggyback_at_most(agent, None, MAX_PIGGYBACK_RECEIPTS)
     }
 
     /// [`WritePipeline::take_piggyback`] taking at most `max` receipts
-    /// (#33 PR 4): a call that drains several pipelines (a layered
-    /// session's own and each layer's) shares one
-    /// [`MAX_PIGGYBACK_RECEIPTS`] budget across them. `max = 0` takes
-    /// nothing and only counts what is waiting.
+    /// delivered to `deliver_to` (#33 PR 4): `None` takes this pipeline's
+    /// own writes' receipts only; `Some(session)` takes only those of
+    /// writes that `session`'s server sent here (a layered session's
+    /// writes scoped to this layer). A call that drains several pipelines
+    /// shares one [`MAX_PIGGYBACK_RECEIPTS`] budget across them. `max = 0`
+    /// takes nothing and only counts what is waiting for `deliver_to`.
+    /// Receipts for another destination stay queued, in order.
     pub fn take_piggyback_at_most(
         &self,
         agent: &AgentId,
+        deliver_to: Option<&SessionId>,
         max: usize,
     ) -> (Vec<(ReceiptId, ReceiptAnswer)>, usize) {
         let mut r = self.receipts.lock();
         r.expire((self.clock)());
-        let mut ids = Vec::new();
-        match r.undelivered.get_mut(agent) {
-            Some(queue) => {
-                while ids.len() < max {
-                    match queue.pop_front() {
-                        Some(id) => ids.push(id),
-                        None => break,
-                    }
-                }
+        let Some(queue) = r.undelivered.remove(agent) else {
+            return (Vec::new(), 0);
+        };
+        let mut kept = VecDeque::with_capacity(queue.len());
+        let mut taken = Vec::new();
+        let mut remaining = 0;
+        for id in queue {
+            let Some(entry) = r.entries.get(&id) else {
+                // Forgotten (expired or evicted): nothing to deliver.
+                continue;
+            };
+            if entry.deliver_to.as_ref() != deliver_to {
+                kept.push_back(id);
+                continue;
             }
-            None => return (Vec::new(), 0),
+            if taken.len() < max {
+                taken.push((id, entry.answer.clone()));
+            } else {
+                remaining += 1;
+                kept.push_back(id);
+            }
         }
-        let taken: Vec<(ReceiptId, ReceiptAnswer)> = ids
-            .into_iter()
-            .filter_map(|id| r.entries.get(&id).map(|e| (id, e.answer.clone())))
-            .collect();
-        let remaining = r.undelivered.get(agent).map_or(0, VecDeque::len);
-        if remaining == 0 {
-            r.undelivered.remove(agent);
+        if !kept.is_empty() {
+            r.undelivered.insert(agent.clone(), kept);
         }
         (taken, remaining)
+    }
+
+    /// [`WritePipeline::lookup`] for a caller that delivers to
+    /// `deliver_to` (#33 PR 4 review H1): a receipt this pipeline holds for
+    /// another destination is [`ReceiptAnswer::Forbidden`], as another
+    /// agent's is. `None` is this pipeline's own writes.
+    pub fn lookup_for(
+        &self,
+        agent: &AgentId,
+        deliver_to: Option<&SessionId>,
+        id: ReceiptId,
+    ) -> ReceiptAnswer {
+        if self.delivered_elsewhere(deliver_to, id) {
+            return ReceiptAnswer::Forbidden;
+        }
+        self.lookup(agent, id)
+    }
+
+    /// [`WritePipeline::wait`] for a caller that delivers to `deliver_to`;
+    /// see [`WritePipeline::lookup_for`].
+    pub async fn wait_for(
+        &self,
+        agent: &AgentId,
+        deliver_to: Option<&SessionId>,
+        id: ReceiptId,
+        budget: Duration,
+    ) -> ReceiptAnswer {
+        if self.delivered_elsewhere(deliver_to, id) {
+            return ReceiptAnswer::Forbidden;
+        }
+        self.wait(agent, id, budget).await
+    }
+
+    /// Whether this pipeline holds `id` for a destination other than
+    /// `deliver_to`.
+    fn delivered_elsewhere(&self, deliver_to: Option<&SessionId>, id: ReceiptId) -> bool {
+        self.receipts
+            .lock()
+            .entries
+            .get(&id)
+            .is_some_and(|e| e.deliver_to.as_ref() != deliver_to)
     }
 }
