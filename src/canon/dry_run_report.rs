@@ -81,6 +81,9 @@ fn survey(out: &mut String, title: &str, s: &Survey) {
     for r in &s.load_bearing {
         let _ = writeln!(out, "      {}", row(r));
     }
+    for r in &s.watched {
+        let _ = writeln!(out, "    watched {}", row(r));
+    }
 }
 
 fn invariants(out: &mut String, indent: &str, list: &[Invariant]) {

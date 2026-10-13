@@ -57,6 +57,7 @@ fn common(store: PathBuf, scratch: &Path, json: bool) -> CommonArgs {
         top: 20,
         assume_survived: false,
         scratch: Some(scratch.to_path_buf()),
+        watch: Vec::new(),
     }
 }
 

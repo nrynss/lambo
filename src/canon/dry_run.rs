@@ -87,6 +87,9 @@ pub struct DryRunParams {
     /// Raise every `gc_survived` below 3 to 3 first: the state after three
     /// GC sweeps (Swarm's Stage 1 needs it; Solo does not read it).
     pub assume_survived: bool,
+    /// Concepts reported by id at the start and the stop whatever their
+    /// state (the fair test's named rulings, say); see [`resolve_watch`].
+    pub watch: Vec<NodeId>,
 }
 
 impl DryRunParams {
@@ -103,6 +106,7 @@ impl DryRunParams {
             max_cycles: DEFAULT_MAX_CYCLES,
             top: DEFAULT_TOP,
             assume_survived: false,
+            watch: Vec::new(),
         }
     }
 }
@@ -175,6 +179,50 @@ pub struct Survey {
     pub load_bearing: Vec<IdRow>,
     /// How many there are (the list is capped).
     pub load_bearing_total: usize,
+    /// The [`DryRunParams::watch`] concepts, in the order given, with their
+    /// next hop's unmet gates and the Stage 2 gates that stop them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub watched: Vec<IdRow>,
+}
+
+/// Resolve `--watch` references against `snap`: a full node id, or an
+/// 8-hex short id that starts exactly one concept's id.
+pub fn resolve_watch(snap: &GraphSnapshot, refs: &[String]) -> Result<Vec<NodeId>, String> {
+    use crate::surface::resolve::{id_has_hex_prefix, is_short_id_shaped, parse_full_id};
+    refs.iter()
+        .map(|r| {
+            let r = r.trim();
+            if let Some(id) = parse_full_id(r)
+                && r.len() == 36
+            {
+                return snap
+                    .concepts
+                    .iter()
+                    .any(|c| c.id == id)
+                    .then_some(id)
+                    .ok_or_else(|| format!("--watch {r}: no such concept in the session"));
+            }
+            if !is_short_id_shaped(r) {
+                return Err(format!(
+                    "--watch {r}: expected a node id or an 8-character short id"
+                ));
+            }
+            let found: Vec<NodeId> = snap
+                .concepts
+                .iter()
+                .filter(|c| id_has_hex_prefix(c.id.0, r))
+                .map(|c| c.id)
+                .collect();
+            match found.as_slice() {
+                [one] => Ok(*one),
+                [] => Err(format!("--watch {r}: no such concept in the session")),
+                _ => Err(format!(
+                    "--watch {r}: {} concepts share this short id; pass the full id",
+                    found.len()
+                )),
+            }
+        })
+        .collect()
 }
 
 /// Why the run stopped.
@@ -406,6 +454,7 @@ async fn survey(
     let mut out = Survey::default();
     let mut one_away = Vec::new();
     let mut load_bearing = Vec::new();
+    let mut watched_rows: Vec<IdRow> = Vec::new();
     for (id, t, status, inputs) in inputs {
         let a: Admission = explain_admission(store, &session, &inputs, &params.eval, now).await?;
         let blast = store
@@ -421,22 +470,24 @@ async fn survey(
         for u in &unmet {
             *out.unmet.entry(format!("{hop} {u}")).or_default() += 1;
         }
-        let (distinct, coverage) = if blast > 5 && status != CanonizationStatus::Canonical {
-            let span = store
-                .interaction_span_with_window(
-                    &session,
-                    id,
-                    params.eval.min_age,
-                    now,
-                    params.eval.coverage_window,
-                )
-                .await?;
-            (Some(span.distinct), Some(span.coverage))
-        } else {
-            let d = a.checks.iter().find(|k| k.gate == "distinct_interactions");
-            let c = a.checks.iter().find(|k| k.gate == "coverage");
-            (d.map(|k| k.current as u64), c.map(|k| k.current))
-        };
+        let watched = params.watch.contains(&id);
+        let (distinct, coverage) =
+            if (blast > 5 && status != CanonizationStatus::Canonical) || watched {
+                let span = store
+                    .interaction_span_with_window(
+                        &session,
+                        id,
+                        params.eval.min_age,
+                        now,
+                        params.eval.coverage_window,
+                    )
+                    .await?;
+                (Some(span.distinct), Some(span.coverage))
+            } else {
+                let d = a.checks.iter().find(|k| k.gate == "distinct_interactions");
+                let c = a.checks.iter().find(|k| k.gate == "coverage");
+                (d.map(|k| k.current as u64), c.map(|k| k.current))
+            };
         let row = IdRow {
             id,
             concept_type: t,
@@ -464,10 +515,9 @@ async fn survey(
                 .add(t);
             one_away.push(row.clone());
         }
-        if blast > 5 && status != CanonizationStatus::Canonical {
-            // Name the Stage 2 gates that stop it even when its next hop is
-            // Stage 1: they decide whether it can ever reach Canonical.
-            let mut row = row;
+        // Name the Stage 2 gates that stop it even when its next hop is
+        // Stage 1: they decide whether it can ever reach Canonical.
+        let with_stage2 = |mut row: IdRow| {
             for (gate, fails) in [
                 (
                     "stage2/distinct_interactions",
@@ -479,7 +529,13 @@ async fn survey(
                     row.unmet.push(gate.into());
                 }
             }
-            load_bearing.push(row);
+            row
+        };
+        if watched {
+            watched_rows.push(with_stage2(row.clone()));
+        }
+        if blast > 5 && status != CanonizationStatus::Canonical {
+            load_bearing.push(with_stage2(row));
         }
     }
     let by_load = |a: &IdRow, b: &IdRow| b.dependents.cmp(&a.dependents).then(a.id.0.cmp(&b.id.0));
@@ -490,6 +546,11 @@ async fn survey(
     load_bearing.truncate(params.top);
     out.one_gate_away_top = one_away;
     out.load_bearing = load_bearing;
+    out.watched = params
+        .watch
+        .iter()
+        .filter_map(|w| watched_rows.iter().find(|r| r.id == *w).cloned())
+        .collect();
     Ok(out)
 }
 

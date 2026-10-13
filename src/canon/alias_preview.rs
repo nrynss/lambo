@@ -356,6 +356,22 @@ pub fn render_alias_preview(r: &AliasPreviewReport, verbose: bool) -> String {
         for (s, (b, a)) in &p.delta.end {
             let _ = writeln!(out, "  end {s}: {b} -> {a}");
         }
+        for (when, rows) in [
+            ("without redirects", &p.before.fixed_point.watched),
+            ("with redirects", &p.after.fixed_point.watched),
+        ] {
+            for r in rows {
+                let _ = writeln!(
+                    out,
+                    "  watched {when}: {} {:?} {:?} dependents={} unmet={}",
+                    r.id,
+                    r.concept_type,
+                    r.status,
+                    r.dependents,
+                    r.unmet.join(",")
+                );
+            }
+        }
         let _ = writeln!(out, "  flips: {}", p.flips_total);
         for f in &p.flips {
             let _ = writeln!(

@@ -80,6 +80,8 @@ pub struct CommonArgs {
     pub assume_survived: bool,
     /// Where the private copy goes (default: the system temp directory).
     pub scratch: Option<PathBuf>,
+    /// Concepts to report by id whatever their state.
+    pub watch: Vec<String>,
 }
 
 /// `lambo canon dry-run`'s options.
@@ -128,7 +130,8 @@ mod imp {
     use super::{AliasPreviewArgs, CommonArgs, DryRunArgs, Outcome};
     use crate::canon::alias_preview::{alias_preview, render_alias_preview, PairInput};
     use crate::canon::dry_run::{
-        compare, dry_run_all, render_report, DryRunParams, DryRunReport, Invariant, SourceFacts,
+        compare, dry_run_all, render_report, resolve_watch, DryRunParams, DryRunReport, Invariant,
+        SourceFacts,
     };
     use crate::cli::caps::{check_size_cli, require_nonempty, CliError};
     use crate::store::{GraphStore, SqliteStore};
@@ -291,13 +294,18 @@ mod imp {
         })
     }
 
-    fn base_params(c: &CommonArgs, now: chrono::DateTime<chrono::Utc>) -> DryRunParams {
+    fn base_params(
+        c: &CommonArgs,
+        now: chrono::DateTime<chrono::Utc>,
+        snapshot: &GraphSnapshot,
+    ) -> Result<DryRunParams, CliError> {
         let mut p = DryRunParams::new(crate::canon::PromotionPolicy::Swarm, now);
         p.min_quiet_cycles = c.quiet;
         p.max_cycles = c.max_cycles;
         p.top = c.top;
         p.assume_survived = c.assume_survived;
-        p
+        p.watch = resolve_watch(snapshot, &c.watch).map_err(CliError::Usage)?;
+        Ok(p)
     }
 
     /// Hash the input again and say whether it is unchanged.
@@ -349,7 +357,8 @@ mod imp {
             mut facts,
             before,
         } = load_copy(c, &scratch, now).await?;
-        let mut report = dry_run_all(snapshot, &c.policy.policies(), &base_params(c, now))
+        let params = base_params(c, now, &snapshot)?;
+        let mut report = dry_run_all(snapshot, &c.policy.policies(), &params)
             .await
             .map_err(|e| CliError::Runtime(e.to_string()))?;
         drop(scratch);
@@ -386,10 +395,10 @@ mod imp {
             mut facts,
             before,
         } = load_copy(c, &scratch, now).await?;
-        let mut report =
-            alias_preview(snapshot, &input, &c.policy.policies(), &base_params(c, now))
-                .await
-                .map_err(|e| CliError::Runtime(e.to_string()))?;
+        let params = base_params(c, now, &snapshot)?;
+        let mut report = alias_preview(snapshot, &input, &c.policy.policies(), &params)
+            .await
+            .map_err(|e| CliError::Runtime(e.to_string()))?;
         drop(scratch);
         let check = source_check(c, &before, &mut facts);
         report.invariants.push(check);

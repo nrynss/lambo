@@ -565,6 +565,13 @@ enum CanonAction {
             help = "Directory the private copy goes under (default: the system temp directory). Removed afterwards."
         )]
         scratch: Option<PathBuf>,
+        /// A concept to report by id at the start and the stop, whatever its state: a full node id or an 8-character short id. Repeatable.
+        #[arg(
+            long,
+            value_name = "ID",
+            help = "A concept to report by id at the start and the stop, whatever its state: a full node id or an 8-character short id. Repeatable."
+        )]
+        watch: Vec<String>,
         /// An earlier `canon dry-run --json` report to compare with.
         #[arg(
             long,
@@ -624,6 +631,13 @@ enum CanonAction {
             help = "Directory the private copy goes under (default: the system temp directory). Removed afterwards."
         )]
         scratch: Option<PathBuf>,
+        /// A concept to report by id at the start and the stop, whatever its state: a full node id or an 8-character short id. Repeatable.
+        #[arg(
+            long,
+            value_name = "ID",
+            help = "A concept to report by id at the start and the stop, whatever its state: a full node id or an 8-character short id. Repeatable."
+        )]
+        watch: Vec<String>,
         /// A reviewed map: one `alias-id ruling-id` pair per line (full or 8-hex ids, `#` comments). Without it, the leading-phrase rule proposes the pairs.
         #[arg(
             long,
@@ -976,6 +990,7 @@ fn run_canon(action: CanonAction) -> ExitCode {
         top: usize,
         assume_survived: bool,
         scratch: Option<PathBuf>,
+        watch: Vec<String>,
     ) -> Result<CommonArgs, CliError> {
         Ok(CommonArgs {
             store,
@@ -988,6 +1003,7 @@ fn run_canon(action: CanonAction) -> ExitCode {
             top,
             assume_survived,
             scratch: scratch.as_deref().map(canon::check_scratch).transpose()?,
+            watch,
         })
     }
     match action {
@@ -1002,6 +1018,7 @@ fn run_canon(action: CanonAction) -> ExitCode {
             top,
             assume_survived,
             scratch,
+            watch,
             baseline,
         } => {
             let name = "canon dry-run";
@@ -1016,6 +1033,7 @@ fn run_canon(action: CanonAction) -> ExitCode {
                 top,
                 assume_survived,
                 scratch,
+                watch,
             ) {
                 Ok(common) => {
                     canon_exit(name, canon::dry_run(canon::DryRunArgs { common, baseline }))
@@ -1037,6 +1055,7 @@ fn run_canon(action: CanonAction) -> ExitCode {
             top,
             assume_survived,
             scratch,
+            watch,
             map,
             verbose,
         } => {
@@ -1052,6 +1071,7 @@ fn run_canon(action: CanonAction) -> ExitCode {
                 top,
                 assume_survived,
                 scratch,
+                watch,
             ) {
                 Ok(common) => canon_exit(
                     name,

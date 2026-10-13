@@ -377,3 +377,47 @@ async fn the_alias_preview_refuses_and_applies_nothing_for_a_bad_map() {
     let g = Graph::from_snapshot(fair::snapshot(true)).unwrap();
     assert!(matches!(g.node(alias), Some(Node::Concept(_))));
 }
+
+#[tokio::test]
+async fn watched_concepts_are_reported_by_id_at_the_start_and_the_stop() {
+    let mut snap = fair::snapshot(true);
+    prepare(&mut snap, false);
+    let short = |k: &str| fair::concept_id(k).0.simple().to_string()[..8].to_string();
+    let refs = vec![
+        short("wedge"),
+        fair::concept_id("wedge_five").0.to_string(),
+        short("identity_burst"),
+    ];
+    let watch = resolve_watch(&snap, &refs).unwrap();
+    assert_eq!(
+        watch,
+        ["wedge", "wedge_five", "identity_burst"].map(fair::concept_id)
+    );
+    for bad in ["zzzzzzzz", "00000000", "writer lease"] {
+        assert!(resolve_watch(&snap, &[bad.to_string()]).is_err(), "{bad}");
+    }
+    let mut p = params(PromotionPolicy::Swarm);
+    p.watch = watch.clone();
+    let r = dry_run(&snap, &p).await.unwrap();
+    let ids = |rows: &[IdRow]| rows.iter().map(|r| r.id).collect::<Vec<_>>();
+    assert_eq!(ids(&r.first_evaluation.watched), watch);
+    assert_eq!(ids(&r.fixed_point.watched), watch);
+    let end = &r.fixed_point.watched;
+    assert_eq!(end[0].status, CanonizationStatus::Canonical);
+    assert_eq!(
+        (end[1].status, end[1].dependents, end[1].unmet.clone()),
+        (
+            CanonizationStatus::Venerable,
+            5,
+            vec!["stage3/blast_radius".to_string()]
+        )
+    );
+    assert_eq!(end[2].status, CanonizationStatus::Candidate);
+    assert!(end[2].unmet.contains(&"stage2/coverage".to_string()));
+    assert!(render_report(
+        &dry_run_all(snap, &[PromotionPolicy::Swarm], &p)
+            .await
+            .unwrap()
+    )
+    .contains(&format!("watched {}", fair::concept_id("wedge_five"))));
+}
