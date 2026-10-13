@@ -144,6 +144,9 @@ pub(crate) struct Probes {
     pub list: Vec<Probe>,
     /// The forward probes hit [`MAX_SUPERSESSION_PROBES`].
     pub capped: bool,
+    /// Targets with a live contradiction the cap left unprobed (focused
+    /// review 1): for the hold, Stage 3 does not promote them this cycle.
+    pub deferred: Vec<NodeId>,
 }
 
 impl Probes {
@@ -362,23 +365,49 @@ fn probes_for(
     budget: &mut usize,
 ) -> Probes {
     let mut out = Probes::default();
-    for &target_id in targets {
+    // Pairs whose attribution is ambiguous (review L4): never probed, and
+    // their other direction is not probed either (focused review 3), so an
+    // ambiguity on one side cannot let the other side act alone.
+    let mut ambiguous: HashSet<(NodeId, NodeId)> = HashSet::new();
+    let mut targets = targets.iter();
+    for &target_id in targets.by_ref() {
         let Some(target) = concept(graph, target_id) else {
             continue;
         };
-        let forward: Vec<Probe> = contradictions(graph, target, params, now)
-            .into_iter()
-            .filter_map(|(edge, source)| probe(graph, target, edge, source, timeline, false))
-            .collect();
-        // A target with more contradictions than the whole cap is still
-        // probed when it comes first, so it cannot starve the ring.
-        let first = out.list.is_empty() && *budget == MAX_SUPERSESSION_PROBES;
-        if forward.len() > *budget && !first {
+        let mut forward = Vec::new();
+        for (edge, source) in contradictions(graph, target, params, now) {
+            match probe(graph, target, edge, source, timeline, false) {
+                Some(p) => forward.push(p),
+                None => {
+                    ambiguous.insert((target.id, source.id));
+                }
+            }
+        }
+        if forward.len() > *budget {
             out.capped = true;
+            if out.list.is_empty() && *budget == MAX_SUPERSESSION_PROBES {
+                // A target with more contradictions than the whole cap is
+                // still probed when it comes first, so it cannot starve the
+                // ring; its reads count against the cap, which is spent, and
+                // the cycle warns (focused review 1).
+                *budget = 0;
+                out.list.extend(forward);
+                continue;
+            }
+            out.deferred.push(target_id);
             break;
         }
-        *budget = budget.saturating_sub(forward.len());
+        *budget -= forward.len();
         out.list.extend(forward);
+    }
+    // Every target after the cap with a live contradiction is deferred: not
+    // probed, so (for the hold) not promoted this cycle either.
+    for &target_id in targets {
+        if let Some(target) = concept(graph, target_id)
+            && !contradictions(graph, target, params, now).is_empty()
+        {
+            out.deferred.push(target_id);
+        }
     }
     let mut reverse = Vec::new();
     for p in out.list.iter() {
@@ -395,12 +424,18 @@ fn probes_for(
         if let Some((edge, source)) = contradictions(graph, t, params, now)
             .into_iter()
             .find(|(_, s2)| s2.id == s.id)
-            && let Some(r) = probe(graph, t, edge, source, timeline, true)
         {
-            reverse.push(r);
+            match probe(graph, t, edge, source, timeline, true) {
+                Some(r) => reverse.push(r),
+                None => {
+                    ambiguous.insert((t.id, source.id));
+                }
+            }
         }
     }
     out.list.extend(reverse);
+    out.list
+        .retain(|p| !ambiguous.contains(&(p.source, p.target)));
     out
 }
 

@@ -423,6 +423,9 @@ impl Evaluator {
             // log carries these hops to it on the next flush (deduped on
             // event id) exactly as it does for a failed `record`.
             Err(err) => {
+                // Focused review 2: Stage 3 evaluated nothing, so its ring
+                // does not advance.
+                self.stage3_cursor = plan.stage3_cursor_before;
                 let stage1_only = CyclePlan {
                     session: plan.session.clone(),
                     supersede: Default::default(),
@@ -459,7 +462,9 @@ impl Evaluator {
 
         // #20 review M4: a speculative Stage 3 window whose reads were
         // skipped was not evaluated, so its ring does not advance.
-        if verdicts.stage3_skipped {
+        // Focused review 1: a window the hold probes could not cover (the
+        // probe cap) defers its unprobed Venerables, and is evaluated again.
+        if verdicts.stage3_skipped || !plan.hold.deferred.is_empty() {
             self.stage3_cursor = plan.stage3_cursor_before;
         }
 
@@ -979,6 +984,7 @@ fn apply(
         }
         if concept_status(graph, probe.node) != Some(CanonizationStatus::Venerable)
             || verdicts.held.contains(&probe.node)
+            || plan.hold.deferred.contains(&probe.node)
         {
             continue;
         }

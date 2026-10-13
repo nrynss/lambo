@@ -793,6 +793,8 @@ struct Recording {
     evidence_calls: Mutex<std::collections::HashMap<NodeId, usize>>,
     /// Stage 2/3 reads: window-aware span and blast radius calls.
     stage_reads: std::sync::atomic::AtomicUsize,
+    /// Answer `dependent_evidence` with a backend fault.
+    fail_evidence: bool,
 }
 
 impl Recording {
@@ -804,6 +806,7 @@ impl Recording {
             recorded: Mutex::new(Vec::new()),
             evidence_calls: Mutex::new(std::collections::HashMap::new()),
             stage_reads: std::sync::atomic::AtomicUsize::new(0),
+            fail_evidence: false,
         }
     }
 
@@ -912,6 +915,9 @@ impl GraphStore for Recording {
         if !self.accessors {
             return Err(StoreError::Capability("dependent_evidence".into()));
         }
+        if self.fail_evidence {
+            return Err(StoreError::Backend("dependent_evidence is down".into()));
+        }
         self.inner.dependent_evidence(session, node).await
     }
     async fn record_canonization(
@@ -1016,4 +1022,74 @@ async fn an_ambiguous_declarer_is_not_probed() {
     let (g, out) = run(s, &on()).await;
     assert!(out.supersessions.is_empty(), "{out:?}");
     assert_eq!(status_of(&g, nid(C)), CanonizationStatus::Canonical);
+}
+
+/// Focused review 2: a store fault in the verdict phase fails the cycle as
+/// before, and the Stage 3 ring does not advance over a window it never
+/// evaluated.
+#[tokio::test]
+async fn a_verdict_fault_does_not_advance_the_stage3_ring() {
+    const V: u64 = 4;
+    let mut s = superseding();
+    let origin = s.interaction(at(5), "v");
+    s.concept(V, origin, CanonizationStatus::Venerable);
+    let g = s.build();
+    let store = Recording {
+        fail_evidence: true,
+        ..Recording::new(store_of(&g).await)
+    };
+    let g = RwLock::new(g);
+    let mut ev = Evaluator::new();
+    let before = ev.stage3_cursor();
+    let (tx, _rx) = crate::daemon::events::event_channel();
+    let err = ev
+        .eval_cycle(&g, &store, &table(&[]), &tx, &on(), at(NOW), None)
+        .await
+        .expect_err("the store fault fails the cycle");
+    assert!(err.outcome.supersessions.is_empty());
+    assert_eq!(ev.stage3_cursor(), before);
+    assert_eq!(status_of(&g.read(), nid(C)), CanonizationStatus::Canonical);
+}
+
+/// Focused review 3: when the reverse direction of a pair is ambiguous (two
+/// agents act at the instant the reverse contradiction was written), the
+/// forward direction does not act alone either.
+#[tokio::test]
+async fn an_ambiguous_reverse_blocks_the_forward_pair() {
+    let mut s = superseding();
+    s.contradicts(C, S, at(61), "p");
+    s.interaction(at(61), "p2");
+    let (g, out) = run(s, &on()).await;
+    assert!(out.supersessions.is_empty(), "{out:?}");
+    assert_eq!(status_of(&g, nid(C)), CanonizationStatus::Canonical);
+}
+
+/// Focused review 1: with more Venerables in Stage 3's window than the
+/// probe cap covers, the unprobed ones that a contradiction might hold are
+/// deferred, not promoted, and the ring is evaluated again.
+#[tokio::test]
+async fn the_hold_does_not_fail_open_under_the_probe_cap() {
+    let mut probe_budget = 1;
+    let mut s = Scene::new();
+    let mut venerables = Vec::new();
+    for k in 0..3u64 {
+        let v = 700 + k;
+        let origin = s.interaction(at(1 + k as i64), "v");
+        s.concept(v, origin, CanonizationStatus::Venerable);
+        s.contradicts(S, v, at(60 + k as i64), "x");
+        venerables.push(v);
+    }
+    let g = s.build();
+    let window: Vec<NodeId> = venerables.iter().map(|&v| nid(v)).collect();
+    let probes = crate::canon::supersession::gather_holds(
+        &g,
+        &window,
+        &on(),
+        at(NOW),
+        &Default::default(),
+        &mut probe_budget,
+    );
+    assert!(probes.capped);
+    assert_eq!(probes.targets().count(), 1);
+    assert_eq!(probes.deferred, window[1..].to_vec());
 }
