@@ -794,7 +794,8 @@ lambo session classify --session mixed --database ./backup-copy.db \
 `--config` is refused. The output must be a new file; existing files and aliases
 are never overwritten. The plan is written to a private temporary file beside it
 and linked into place only when complete, so a failed write leaves no partial
-plan. The output has private file permissions and the command
+plan. The output directory must support hard links; where it does not (FAT,
+some network mounts) the command fails with no output written. The output has private file permissions and the command
 prints aggregate counts only. Keep plans and label files private: they contain
 source ids and classification evidence.
 
