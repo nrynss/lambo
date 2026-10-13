@@ -59,8 +59,8 @@ use super::plan::digest;
 use super::{validate_plan, ClassificationPlan, ClassifyError, ItemKind, ItemRef};
 use crate::graph::Graph;
 use crate::types::{
-    CanonizationEvent, Concept, ConceptType, Edge, EdgeType, GcMark, GraphSnapshot, Interaction,
-    NodeId, SessionId, Synonym,
+    CanonizationEvent, Concept, ConceptType, DemotionReason, Edge, EdgeType, GcMark, GraphSnapshot,
+    Interaction, NodeId, SessionId, Synonym,
 };
 
 /// Version of the split transform. It is part of every derived id and of the
@@ -813,10 +813,28 @@ pub(super) fn build_validated(
         // Canonization audit follows every placement of its concept.
         let mut snap_events = Vec::new();
         for ev in events.iter().filter(|ev| placed(ev.node_id.0, t)) {
+            // #20: a supersession's source is a concept id too, remapped the
+            // same way, so it names the target's copy when it is placed here
+            // (and, like a collected source, names no row when it is not),
+            // never the source session's id.
+            let reason = match &ev.reason {
+                Some(DemotionReason::Superseded { by }) => Some(DemotionReason::Superseded {
+                    by: map("concept", by.0),
+                }),
+                Some(DemotionReason::Unknown {
+                    reason,
+                    superseded_by,
+                }) => Some(DemotionReason::Unknown {
+                    reason: reason.clone(),
+                    superseded_by: superseded_by.map(|by| map("concept", by.0)),
+                }),
+                other => other.clone(),
+            };
             snap_events.push(CanonizationEvent {
                 id: map("canonization_event", ev.id.0),
                 session_id: sid.clone(),
                 node_id: map("concept", ev.node_id.0),
+                reason,
                 ..(*ev).clone()
             });
         }

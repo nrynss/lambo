@@ -1549,3 +1549,42 @@ fn a_general_replica_is_a_stub_unless_it_passes_the_general_interaction_test() {
     // Deterministic with stubs and full-text replicas alike.
     assert_eq!(build_split(&plan, &source).unwrap(), out);
 }
+
+/// #20: a supersession's source is remapped with the concept ids, so the
+/// split audit row names the target's copy of the superseding concept,
+/// never the source session's id.
+#[test]
+fn a_supersession_source_is_remapped_with_its_concept() {
+    use crate::types::DemotionReason;
+    let mut source = source();
+    source.canonization_events.push(CanonizationEvent {
+        id: id(403),
+        session_id: source.session_id.clone(),
+        node_id: id(11),
+        from_status: CanonizationStatus::Canonical,
+        to_status: CanonizationStatus::None,
+        blast_radius: None,
+        last_demotion_time: Some(at(22)),
+        occurred_at: at(22),
+        reason: Some(DemotionReason::Superseded { by: id(13) }),
+    });
+    let plan = plan_for(&source);
+    let out = build_split(&plan, &source).unwrap();
+    let mut seen = 0;
+    for t in &out.targets {
+        for e in t
+            .snapshot
+            .canonization_events
+            .iter()
+            .filter(|e| e.occurred_at == at(22))
+        {
+            seen += 1;
+            let Some(DemotionReason::Superseded { by }) = &e.reason else {
+                panic!("{e:?}");
+            };
+            assert_ne!(*by, id(13), "never the source session's id");
+            assert_eq!(*by, mapped(&out, 13, &t.session), "{}", t.session);
+        }
+    }
+    assert!(seen > 0);
+}
