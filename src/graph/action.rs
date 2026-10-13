@@ -438,6 +438,13 @@ fn refuse_depended_and_contradicted(
 /// counted in [`ActionOutcome::edges`] when new. Any refusal undoes the
 /// whole call. With no contradictions it is exactly
 /// [`record_action_pinned`], outside any transaction as before.
+///
+/// `stamp` is the session's embedding contract when the call writes
+/// vectors (the caller stamped it before #19(b) review L3). It is stamped
+/// here: before the record without contradictions, as before; with them,
+/// inside the transaction and after the recheck, so a refused
+/// contradiction leaves no contract stamped on the session.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn record_action_against(
     graph: &mut Graph,
     interaction: NodeId,
@@ -446,15 +453,22 @@ pub(crate) fn record_action_against(
     embeddings: &ActionEmbeddings,
     pins: &[Option<NodeId>],
     against: &[crate::types::PinnedReference],
+    stamp: Option<crate::types::EmbeddingContract>,
 ) -> Result<ActionOutcome, LamboError> {
     use crate::graph::cite;
     if against.is_empty() {
+        if let Some(contract) = stamp {
+            graph.stamp_embedding(contract)?;
+        }
         return record_action_pinned(graph, interaction, agent, action, embeddings, pins);
     }
     graph.transaction(|graph| {
         let spec = &cite::ACTION_AGAINST;
         cite::recheck(graph, spec, against)?;
         refuse_depended_and_contradicted(graph, action, pins, against)?;
+        if let Some(contract) = stamp {
+            graph.stamp_embedding(contract)?;
+        }
         let mut outcome =
             record_action_pinned(graph, interaction, agent, action, embeddings, pins)?;
         let stamp = match graph.node(interaction) {

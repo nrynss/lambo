@@ -450,8 +450,17 @@ fn record_action_against_writes_from_the_action_node_and_refuses_bad_targets() {
     let pinned = validate_against(&g, &act, &refs).unwrap();
     assert_eq!(pinned.len(), 1);
     assert_eq!(pinned[0].content, act.action);
-    let out = record_action_against(&mut g, i, &agent(), &act, &Default::default(), &[], &pinned)
-        .unwrap();
+    let out = record_action_against(
+        &mut g,
+        i,
+        &agent(),
+        &act,
+        &Default::default(),
+        &[],
+        &pinned,
+        None,
+    )
+    .unwrap();
     assert!(g
         .edge_between(out.action_node, belief, EdgeType::Contradicts)
         .is_some());
@@ -514,6 +523,7 @@ fn record_action_against_rolls_back_on_a_changed_target() {
         &Default::default(),
         &[],
         &pinned,
+        None,
     )
     .unwrap_err();
     assert_eq!(
@@ -537,6 +547,7 @@ fn record_action_against_rolls_back_on_a_changed_target() {
         &Default::default(),
         &[],
         &pinned,
+        None,
     )
     .unwrap_err();
     assert_eq!(refusal(&err).kind, ReferenceRefusalKind::SelfReference);
@@ -663,11 +674,72 @@ fn an_action_that_depends_on_and_contradicts_one_concept_is_refused() {
     let pinned = validate_against(&g, &act, &refs).unwrap();
     g.declare_synonym("the belief, by another name", BELIEF);
     let before = g.snapshot();
-    let err = record_action_against(&mut g, i, &agent(), &act, &Default::default(), &[], &pinned)
-        .unwrap_err();
+    let err = record_action_against(
+        &mut g,
+        i,
+        &agent(),
+        &act,
+        &Default::default(),
+        &[],
+        &pinned,
+        None,
+    )
+    .unwrap_err();
     assert_eq!(
         refusal(&err).kind,
         ReferenceRefusalKind::DependsOnAndAgainst
     );
     assert_eq!(g.snapshot(), before);
+}
+
+/// #19(b) review L3: a contradiction refused at the commit leaves no
+/// embedding contract stamped on the session. The stamp runs after the
+/// recheck, inside the transaction; the same call with its target intact
+/// stamps it.
+#[test]
+fn a_refused_action_contradiction_stamps_no_embedding_contract() {
+    let (mut g, i) = graph("against-action-stamp");
+    let belief = concept(&mut g, i, "brand y chargers are fine", ConceptType::Logic);
+    assert!(g.embedding().is_none());
+    let act = action("refunded: the charger overheated");
+    let pinned = validate_against(&g, &act, &[format::short_id(belief)]).unwrap();
+    let contract = crate::types::EmbeddingContract {
+        kind: "fixture".into(),
+        model: None,
+        dim: 4,
+    };
+
+    let mut gone = g.clone();
+    gone.remove_node(belief).unwrap();
+    let before = gone.snapshot();
+    let err = record_action_against(
+        &mut gone,
+        i,
+        &agent(),
+        &act,
+        &Default::default(),
+        &[],
+        &pinned,
+        Some(contract.clone()),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        refusal(&err).kind,
+        ReferenceRefusalKind::Changed { .. }
+    ));
+    assert!(gone.embedding().is_none(), "no contract was stamped");
+    assert_eq!(gone.snapshot(), before);
+
+    record_action_against(
+        &mut g,
+        i,
+        &agent(),
+        &act,
+        &Default::default(),
+        &[],
+        &pinned,
+        Some(contract.clone()),
+    )
+    .unwrap();
+    assert_eq!(g.embedding(), Some(&contract));
 }

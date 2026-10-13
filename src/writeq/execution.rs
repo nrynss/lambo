@@ -427,12 +427,10 @@ impl WriteCtx {
                     // stamp already there. Same rule as `hybrid::derive`'s
                     // commit phase: a vector must never land in a session with
                     // no declared contract.
-                    if !embeddings.is_empty() {
-                        g.stamp_embedding(self.embedding.clone())?;
-                    }
                     // #36 PR 4: an entry that named a concept by id at the
                     // ack must name the same one now. #19(b): so must each
-                    // `against` target, re-resolved in the same transaction.
+                    // `against` target, re-resolved in the same transaction,
+                    // before the contract is stamped (review L3).
                     let outcome = record_action_against(
                         &mut g,
                         job.interaction,
@@ -441,6 +439,7 @@ impl WriteCtx {
                         &embeddings,
                         depends_on_pins,
                         against,
+                        (!embeddings.is_empty()).then(|| self.embedding.clone()),
                     )?;
                     // Same lock hold as the commit — see `run`'s doc.
                     if let Some(stamp) = consume {

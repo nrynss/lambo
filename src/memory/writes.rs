@@ -361,6 +361,7 @@ impl Memory {
                     &crate::graph::action::ActionEmbeddings::new(),
                     &[],
                     &against,
+                    None,
                 )?
             }
         };
@@ -434,9 +435,7 @@ impl Memory {
             self.begin_interaction_full(agent, Some(action.action.to_string()), action.event_time)?;
         let outcome = {
             let mut g = self.graph.write();
-            if !embeddings.is_empty() {
-                g.stamp_embedding(self.embedding.clone())?;
-            }
+            // #19(b) review L3: stamped by the record, after the recheck.
             crate::graph::action::record_action_against(
                 &mut g,
                 interaction,
@@ -445,6 +444,7 @@ impl Memory {
                 &embeddings,
                 &pins,
                 &against,
+                (!embeddings.is_empty()).then(|| self.embedding.clone()),
             )?
         };
         let mut touched = outcome.created.clone();
