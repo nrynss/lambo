@@ -3,6 +3,31 @@
 
 use super::*;
 
+// Memory/Graph do not create a durable sessions row. SQLite's FK anchor
+// does, so the graph oracle must include the exact persisted session times.
+async fn include_persisted_session_metadata(
+    store: &SqliteStore,
+    sid: &SessionId,
+    expected: &mut GraphSnapshot,
+) {
+    let (created, closed): (Option<String>, Option<String>) =
+        sqlx::query_as("SELECT created_at, closed_at FROM sessions WHERE session_id = ?")
+            .bind(&sid.0)
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+    expected.created_at = created
+        .as_deref()
+        .map(super::super::codec::text_to_ts)
+        .transpose()
+        .unwrap();
+    expected.closed_at = closed
+        .as_deref()
+        .map(super::super::codec::text_to_ts)
+        .transpose()
+        .unwrap();
+}
+
 #[tokio::test]
 async fn flush_stats_write_then_read_round_trips_sqlite() {
     // T85-3: a writer publishes flush stats into the durable table; a
@@ -112,7 +137,8 @@ async fn root_goal_roundtrips_flush_and_load() {
     {
         let memory = MemoryStore::new();
         memory.flush(&batch, None).await.unwrap();
-        let want = memory.load_session(&sid).await.unwrap();
+        let mut want = memory.load_session(&sid).await.unwrap();
+        include_persisted_session_metadata(&store, &sid, &mut want).await;
         assert_eq!(
             want.root_goal.as_ref(),
             Some(&goal),
@@ -254,7 +280,8 @@ async fn concept_embedding_roundtrips_flush_and_load() {
     {
         let memory = MemoryStore::new();
         memory.flush(&batch, None).await.unwrap();
-        let want = memory.load_session(&sid).await.unwrap();
+        let mut want = memory.load_session(&sid).await.unwrap();
+        include_persisted_session_metadata(&sqlite, &sid, &mut want).await;
         assert_eq!(
             loaded, want,
             "sqlite snapshot deep-equals the MemoryStore oracle (embedding included)"
@@ -606,6 +633,7 @@ async fn flush_load_roundtrip_deep_equals_graph() {
     store.flush(&batch, None).await.unwrap();
     let loaded = load_session(&store, &sid).unwrap();
 
+    include_persisted_session_metadata(&store, &sid, &mut expected).await;
     assert_eq!(loaded.graph.snapshot(), expected);
     assert_eq!(loaded.graph.log_len(), 0, "load must not seed mutations");
     // Issue #17: the batch's stamp is durable, so the load resumes the

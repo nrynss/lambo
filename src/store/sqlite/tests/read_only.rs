@@ -61,6 +61,7 @@ async fn nonempty_wal_missing_input_and_old_schema_refuse_without_repair() {
     assert_eq!(std::fs::read(&path).unwrap(), before);
 }
 
+#[cfg(feature = "fixtures")]
 #[tokio::test]
 async fn session_metadata_roundtrips_and_invalidates_classification_binding() {
     let store = test_store();
