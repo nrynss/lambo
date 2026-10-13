@@ -44,7 +44,7 @@ pub(super) fn phrase(text: &str, needle: &str) -> bool {
     })
 }
 
-fn folder(text: &str, path: &str) -> bool {
+pub(super) fn folder(text: &str, path: &str) -> bool {
     let path = path.trim_end_matches('/');
     text.match_indices(path).any(|(at, _)| {
         let before = text[..at].chars().next_back();

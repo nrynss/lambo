@@ -46,22 +46,24 @@ pub(super) fn protected_source_items(
     snapshot: &GraphSnapshot,
     rules: &ClassificationRules,
 ) -> (BTreeSet<uuid::Uuid>, BTreeSet<uuid::Uuid>) {
+    // A product-name mention is soft classification evidence, not immutable
+    // provenance. Actual source actors and configured repository paths are hard.
     let protected_interactions: BTreeSet<_> = snapshot
         .interactions
         .iter()
         .filter(|i| {
             let actor = signals::actor(rules, &i.agent_id.0);
-            let mut text = signals::content(rules, i.prompt_text.as_deref().unwrap_or("")).0;
-            for c in snapshot
-                .concepts
-                .iter()
-                .filter(|c| c.origin_interaction == i.id)
-            {
-                signals::merge(&mut text, &signals::content(rules, &c.content).0);
-            }
             rules.projects.iter().any(|p| {
                 p.exclude_from_general
-                    && (actor.contains_key(&p.session) || text.contains_key(&p.session))
+                    && (actor.contains_key(&p.session)
+                        || p.folders.iter().any(|folder| {
+                            signals::folder(i.prompt_text.as_deref().unwrap_or(""), folder)
+                                || snapshot
+                                    .concepts
+                                    .iter()
+                                    .filter(|c| c.origin_interaction == i.id)
+                                    .any(|c| signals::folder(&c.content, folder))
+                        }))
             })
         })
         .map(|i| i.id.0)
@@ -74,9 +76,9 @@ pub(super) fn protected_source_items(
                 || rules.projects.iter().any(|p| {
                     p.exclude_from_general
                         && (signals::actor(rules, &c.origin_agent.0).contains_key(&p.session)
-                            || signals::content(rules, &c.content)
-                                .0
-                                .contains_key(&p.session))
+                            || p.folders
+                                .iter()
+                                .any(|folder| signals::folder(&c.content, folder)))
                 })
         })
         .map(|c| c.id.0)
@@ -440,8 +442,7 @@ fn classify_internal(
                 || !matches!(c.concept_type, ConceptType::Logic | ConceptType::Constraint)
                 || rules.projects.iter().any(|p| {
                     p.exclude_from_general
-                        && (p.session == row.session
-                            || signals::actor(rules, &c.origin_agent.0).contains_key(&p.session))
+                        && signals::actor(rules, &c.origin_agent.0).contains_key(&p.session)
                 })
             {
                 return Err(ClassifyError::Rules(

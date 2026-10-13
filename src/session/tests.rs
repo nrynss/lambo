@@ -442,7 +442,7 @@ fn reviewed_general_cannot_erase_protected_source_provenance() {
         } else if mode == 1 {
             source.interactions[2].prompt_text = Some("all projects in /work/beta".into());
         } else {
-            source.concepts[2].content = "all projects beta".into();
+            source.concepts[2].content = "all projects in /work/beta".into();
         }
         let generated = classify(&source, &rules, &[]).unwrap();
         let mut labels: Vec<_> = generated
@@ -647,4 +647,31 @@ fn resealed_automatic_general_requires_operator_prompt_and_actor() {
         .session = "general".into();
     plan.seal().unwrap();
     assert!(validate_plan(&plan, &source).is_err());
+}
+
+#[test]
+fn project_name_mention_is_soft_evidence_but_actor_and_folder_are_hard() {
+    let (mut source, rules) = fixture();
+    source.interactions[2].agent_id = AgentId::from("neutral");
+    source.interactions[2].prompt_text = Some("Operator-wide data separation".into());
+    source.concepts[2].origin_agent = AgentId::from("neutral");
+    source.concepts[2].content = "All projects must avoid beta data in unrelated projects".into();
+    let plan = classify(&source, &rules, &[]).unwrap();
+    assert_ne!(row(&plan, 13).session, "general");
+    let audit = OperatorOverride {
+        shared_hub_assertion: false,
+        kind: ItemKind::Concept,
+        id: id(13),
+        session: "general".into(),
+        reason: "Reviewed operator-wide privacy rule mentions a product, not its source".into(),
+        from: None,
+        copy_into: vec![],
+    };
+    let plan = classify(&source, &rules, std::slice::from_ref(&audit)).unwrap();
+    assert_eq!(row(&plan, 13).session, "general");
+    source.concepts[2].origin_agent = AgentId::from("beta-build");
+    assert!(classify(&source, &rules, std::slice::from_ref(&audit)).is_err());
+    source.concepts[2].origin_agent = AgentId::from("neutral");
+    source.interactions[2].prompt_text = Some("Operator-wide task from /work/beta".into());
+    assert!(classify(&source, &rules, &[audit]).is_err());
 }
