@@ -213,7 +213,7 @@ own, covering at least 0.3 of min(session extent, the coverage cap).
   carries `reason: Some(DemotionReason::Superseded { by: S })`. `S` is not
   promoted by it. A supersession counts toward Solo's revert penalty like
   any demotion.
-- **The hold** (owner-approved): Stage 3 does not promote a Venerable that
+- **The hold.** Stage 3 does not promote a Venerable that
   a contradicting concept would supersede at once, under the same rules,
   whether or not it was ever Canonical. It waits at Venerable until it
   earns newer evidence. `explain_admission` and `Measurements::take_hold`
@@ -228,6 +228,13 @@ own, covering at least 0.3 of min(session extent, the coverage cap).
   `EvalOutcome::transitions()` and the durable audit follow that order.
   A cycle's audit ids are time-ordered with a commit-order sequence, so a
   reload, which orders one instant's rows by id, keeps commit order.
+- The pair rule covers two concepts that contradict each other. Longer
+  cycles have soft spots it does not settle: in a 3-cycle (A against B, B
+  against C, C against A) each member can hold the next at Venerable at
+  once, and a source that is itself held at Venerable can still hold
+  another Venerable. Neither deadlocks permanently: any member that earns
+  evidence newer than its contradictor's is released, and a Canonical
+  member is superseded rather than held. There is no n-cycle rule.
 - At most `canonization_eval_batch_size` targets and
   `canon::supersession::MAX_SUPERSESSION_PROBES` (256) forward probes per
   cycle (a cycle at the cap logs `CanonizationSupersessionProbeCap`); each
@@ -251,7 +258,9 @@ store keeps it in two nullable columns, `reason` and `superseded_by`. A
 stored pair this build cannot read (unknown text, a malformed pair, a
 reason on a promotion) loads as `DemotionReason::Unknown` with the raw
 pair and a `CanonizationReasonUnreadable` warning, never as `Budget`, and
-the session still loads; every write gate refuses it. Recall marks a hit
+the session still loads; every write gate refuses it, so a snapshot that
+holds a loaded `Unknown` reason cannot be persisted to another store (a
+seed, a split import, a flush of its transition) until that row is fixed. Recall marks a hit
 whose latest demotion was a supersession, while it is not Canonical again,
 with the annotation kind `superseded` and the line
 `recall::format::superseded_warning`; it never forces a hit into a result.

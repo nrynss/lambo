@@ -245,7 +245,9 @@ split test. The owner decided the hold stays, under the conditions below.
 - **H1, scenario A (single writer).** #19(c)'s declarer rule is unchanged:
   support the declarer writes never counts for the contradicted concept, so
   one writer (or a shared `agent_id`) can never release it. Documented in
-  config.mdx, canonization.mdx, mcp.mdx, the CHANGELOG and the module docs,
+  config.mdx and api.mdx (both copies; the reference has no canonization
+  page, the site's `canonization.mdx` carries it too), mcp.mdx, the
+  CHANGELOG and the module docs,
   recommending distinct agent ids before enabling.
 - **M2.** `explain_admission` (and the portal through
   `Measurements::take_hold`) runs the same hold probe with the pair rule and
@@ -278,3 +280,41 @@ split test. The owner decided the hold stays, under the conditions below.
 - **Found while merging:** the D2 split copied a supersession's
   `superseded_by` without remapping it into the target; fixed in its own
   commit, with a test.
+
+## Focused review (Sonnet, 2026-10-13): NOT READY, then fixed
+
+Merged `origin/main` `2672ebf2` (D3 #158) first. D3 moved
+`resolve_backends`' config building into `process_config`, shared with the
+offline verify replay; `canonization_supersede` now goes through it too.
+
+- **Blocker: the D2 split importer** (`store/sqlite/split_import.rs`)
+  inserted `canonization_events` without `reason` / `superseded_by`, so a
+  split supersession reloaded as a reasonless (Budget) demotion. It now
+  binds both through `DemotionReason::to_columns` and runs `check_reason`.
+  Coverage: `target_sha256` serializes the whole canonical snapshot,
+  `reason` included, and both D2's post-import comparison and D3's verify
+  compare it, so a destination that lost the pair no longer matches
+  (`a_supersession_survives_import_and_reload`, which fails on the old
+  importer).
+- **Also found running the Cockroach row**, which the lane gate does not
+  run: its SQL shape tests still pinned the pre-#20 audit select and an
+  8-placeholder insert (fixed), and, pre-existing on main since #156, the
+  pre-#129 keyword predicate (fixed in its own commit).
+- **Low 1, the hold under the cap.** Venerables the cap leaves unprobed
+  that have a live contradiction are deferred (not promoted), and the
+  window's cursor is restored. The first-target exemption stays so one huge
+  target cannot starve the ring, but it spends the whole cap and warns.
+- **Low 2.** A verdict-phase store fault restores the Stage 3 cursor.
+- **Low 3.** An ambiguous reverse direction blocks the forward pair too.
+- **Low 4, beyond 2-cycles.** The pair rule settles two concepts that
+  contradict each other. In a 3-cycle (A against B, B against C, C against
+  A) every member can hold the next at Venerable at once, and a source that
+  is itself held can still hold another Venerable. Neither deadlocks
+  permanently: any member that earns evidence newer than its contradictor's
+  is released, and a Canonical member is superseded rather than held. No
+  n-cycle rule was built (documented in api.mdx too).
+- **Low 5, docs.** Public pages state the hold's behaviour without
+  "owner-approved" (the CHANGELOG and this note keep it). A snapshot that
+  holds a loaded `Unknown` reason cannot be persisted to another store (a
+  seed, a split import, a flush of its transition): every write gate
+  refuses it until the row is fixed.

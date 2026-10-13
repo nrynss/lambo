@@ -184,7 +184,9 @@
   attach. Existing rows keep a `NULL` pair, which reads as a budget demotion
   (or no reason, on a promotion), and budget demotions keep writing `NULL`.
   A row whose pair this build cannot read loads as an unknown reason with a
-  `CanonizationReasonUnreadable` warning instead of failing the load.
+  `CanonizationReasonUnreadable` warning instead of failing the load; a
+  session holding one cannot be copied to another store (seed, split
+  import) until that row is fixed, since every write refuses it.
   Downgrading to 0.5.0 after a supersession loads the session; 0.5.0
   ignores the columns, so that row reads as an ordinary demotion (see also
   *Downgrading to 0.5.0 after cited writes*, above, for what else a
@@ -867,9 +869,12 @@
   counts every Canonical -> None demotion, so with supersession on a
   superseded concept carries the same -3.0 per revert a budget-demoted one
   does.
-- **Splitting a session remaps a supersession's source (#20, #33 D2).**
+- **Splitting a session keeps a supersession (#20, #33 D2).**
   `superseded_by` goes through the same per-target concept mapping as the
-  rest of the row.
+  rest of the row, and `lambo session split`'s importer writes the
+  `reason` / `superseded_by` pair (it used to drop it, so the row reloaded
+  as a budget demotion); the target digest covers the pair, so verify
+  catches a destination that lost it.
 - **The budget cut passes over concepts that are no longer Canonical
   (#20).** It used to take the first `overflow` ranked concepts and skip
   any that had moved, demoting fewer than the overflow; it now demotes the
