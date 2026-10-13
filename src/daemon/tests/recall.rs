@@ -848,3 +848,142 @@ async fn gather_contract_race_annotates_vector_degraded() {
         result.warnings
     );
 }
+
+/// #19(c) end to end through `Daemon::recall_detailed`: a newer
+/// contradiction of the fixture's Canonical "user schema" renders the
+/// contradiction line on it, force-includes it, and pulls the contradicting
+/// concept into the result (it is not even in the keyword index) with its
+/// companion line. Pinned by `fixtures/recall-context-contradiction-golden.txt`.
+#[cfg(feature = "fixtures")]
+#[tokio::test]
+async fn recall_renders_a_contradiction_and_pulls_in_its_source() {
+    use crate::config::RecallWeights;
+    use crate::daemon::score::rescore;
+    use crate::fixtures;
+    use crate::recall::cache::RecallCache;
+
+    // After the fixture's last write (2026-08-10T09:55:00Z).
+    let now = Utc.with_ymd_and_hms(2026, 8, 10, 10, 30, 0).unwrap();
+    let snap = fixtures::load_snapshot("session-rest-api").unwrap();
+    let session = SessionId::from("session-rest-api");
+    let us = NodeId("f0000000-0000-4000-8000-000000001001".parse().unwrap());
+    let mut g = Graph::from_snapshot(snap.clone()).unwrap();
+    let tail = g
+        .interactions()
+        .max_by_key(|i| i.created_at)
+        .expect("fixture has interactions")
+        .id;
+    let declared = now - chrono::Duration::minutes(2);
+    let ix = NodeId("f0000000-0000-4000-8000-00000000c001".parse().unwrap());
+    g.insert_interaction(Interaction {
+        event_time: None,
+        id: ix,
+        session_id: session.clone(),
+        agent_id: AgentId::from("agent-c"),
+        prompt_text: None,
+        previous_id: Some(tail),
+        created_at: declared,
+    })
+    .unwrap();
+    let by = NodeId("f0000000-0000-4000-8000-00000000c002".parse().unwrap());
+    g.insert_concept(
+        Concept {
+            id: by,
+            session_id: session.clone(),
+            content: "accounts replaced the users table".into(),
+            canonical_key: "accounts replaced the users table".into(),
+            concept_type: ConceptType::Observation,
+            origin_interaction: ix,
+            origin_agent: AgentId::from("agent-c"),
+            created_at: declared,
+            access_count: 0,
+            last_accessed: None,
+            gc_survived: 0,
+            canonization_status: CanonizationStatus::None,
+            blast_radius: None,
+            last_demotion_time: None,
+            embedding: None,
+            human_confirmed: 0,
+            embedding_source: None,
+            chunk_group_id: None,
+        },
+        ix,
+    )
+    .unwrap();
+    g.upsert_edge(Edge {
+        event_time: None,
+        id: NodeId("f0000000-0000-4000-8000-00000000c003".parse().unwrap()),
+        session_id: session.clone(),
+        source: by,
+        target: us,
+        edge_type: EdgeType::Contradicts,
+        weight: 1.0,
+        reinforcements: 1,
+        created_at: declared,
+        last_reinforced: declared,
+    })
+    .unwrap();
+    let graph = Arc::new(RwLock::new(g));
+    // The fixture's own index: the new concept is not in it.
+    let index = Arc::new(RwLock::new(InvertedIndex::from_snapshot(&snap)));
+    let daemon = Daemon::new(
+        graph.clone(),
+        ScoringWeights::default(),
+        Duration::from_secs(3600),
+    )
+    .with_clock(Arc::new(move || now))
+    .with_index(index);
+    daemon.scores.write().ranked = rescore(&graph.read(), &ScoringWeights::default());
+    daemon.scores.write().epoch = graph.read().epoch();
+    let hits = crate::daemon::contradiction::insert_contradictions(
+        &mut daemon.hot.write(),
+        &graph.read(),
+        Duration::from_secs(60),
+        now,
+    );
+    assert_eq!(hits.len(), 1, "user schema is contradicted");
+
+    let store = fixtures::load_store("session-rest-api").unwrap();
+    let mut cache = RecallCache::new();
+    let query = RecallQuery {
+        query: "update user schema".into(),
+        top_k: 2,
+        max_tokens: 500,
+        traversal_depth: 2,
+    };
+    let result = daemon
+        .recall_detailed(
+            &session,
+            query,
+            &store,
+            None,
+            RecallWeights::default(),
+            &mut cache,
+        )
+        .await;
+
+    let golden = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/fixtures/recall-context-contradiction-golden.txt"
+    ))
+    .expect("contradiction golden present");
+    assert_eq!(result.context, golden, "context:\n{}", result.context);
+
+    let kinds = |id: NodeId| -> Vec<AnnotationKind> {
+        result
+            .detailed
+            .iter()
+            .find(|h| h.node_id == id)
+            .map(|h| h.annotations.iter().map(|a| a.kind).collect())
+            .unwrap_or_default()
+    };
+    assert!(kinds(us).contains(&AnnotationKind::Contradiction));
+    assert_eq!(kinds(by), vec![AnnotationKind::Contradicts]);
+    // Two ranked hits, plus the force-included contradicted hit and its
+    // companion, neither of which takes a top_k slot.
+    assert_eq!(result.hits.len(), 4);
+    assert!(result
+        .warnings
+        .iter()
+        .any(|w| w.starts_with("⚠ Contradicted at") && w.contains("agent-c")));
+}

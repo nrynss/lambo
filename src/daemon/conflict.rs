@@ -150,7 +150,7 @@ pub struct ConflictHit {
 /// One `O(interactions)` build per pass, `O(1)` per edge: a whole-graph
 /// [`detect`] builds it once and shares it across every node, and a per-node
 /// [`conflict_at`] (recall's path, CONC-5) builds it once for that node.
-struct WriterTimeline {
+pub(crate) struct WriterTimeline {
     /// `created_at -> every (interaction id, agent) written at that instant`,
     /// id-ascending.
     ///
@@ -164,7 +164,7 @@ struct WriterTimeline {
 }
 
 impl WriterTimeline {
-    fn of(graph: &Graph) -> Self {
+    pub(crate) fn of(graph: &Graph) -> Self {
         let mut by_time: HashMap<DateTime<Utc>, Vec<(NodeId, AgentId)>> = HashMap::new();
         for i in graph.interactions() {
             by_time
@@ -198,7 +198,7 @@ impl WriterTimeline {
 
 /// Who wrote an edge — one agent, or every same-instant candidate when the
 /// timeline cannot separate them (NEW-4).
-enum EdgeWriters<'a> {
+pub(crate) enum EdgeWriters<'a> {
     /// Exactly attributed: an interaction-sourced edge, or the structural
     /// fallback to the source concept's `origin_agent`.
     Certain(AgentId),
@@ -212,7 +212,7 @@ impl EdgeWriters<'_> {
     /// Every candidate writer. All of them join the contested node's agent set:
     /// "agent X has an edge to node N" is true of each, and dropping the ones a
     /// tie-break did not pick is what made a real conflict invisible (NEW-4).
-    fn all(&self) -> impl Iterator<Item = &AgentId> {
+    pub(crate) fn all(&self) -> impl Iterator<Item = &AgentId> {
         let (certain, acting): (&[AgentId], &[(NodeId, AgentId)]) = match self {
             Self::Certain(agent) => (std::slice::from_ref(agent), &[]),
             Self::Acting(candidates) => (&[], candidates),
@@ -222,7 +222,7 @@ impl EdgeWriters<'_> {
 
     /// The single agent to *name* as the writer: the only candidate, or the
     /// smallest interaction id at a collided instant (the slice is id-ascending).
-    fn named(&self) -> &AgentId {
+    pub(crate) fn named(&self) -> &AgentId {
         match self {
             Self::Certain(agent) => agent,
             // Non-empty by construction (`Acting` is only built from a hit).
@@ -264,10 +264,40 @@ fn edge_writers<'a>(
     if edge.edge_type == EdgeType::Contradicts {
         return None;
     }
+    attribute(graph, edge, timeline)
+}
+
+/// The agents that may have written `edge`, by the resolution order of
+/// [`edge_writers`], for every edge type (`Contradicts` included). `None`
+/// only for a source node missing from the graph.
+fn attribute<'a>(
+    graph: &'a Graph,
+    edge: &Edge,
+    timeline: &'a WriterTimeline,
+) -> Option<EdgeWriters<'a>> {
+    attribute_at(
+        graph,
+        edge,
+        edge.last_reinforced.max(edge.created_at),
+        timeline,
+    )
+}
+
+/// [`attribute`], resolving a concept-sourced edge's writer at the write
+/// instant `at` instead of the edge's latest write. #19(c) passes the
+/// edge's `created_at`: a contradiction (or a piece of evidence) is dated by
+/// its first declaration, so it is attributed to that declaration's writer
+/// too, not to whoever re-sent it.
+pub(crate) fn attribute_at<'a>(
+    graph: &'a Graph,
+    edge: &Edge,
+    at: DateTime<Utc>,
+    timeline: &'a WriterTimeline,
+) -> Option<EdgeWriters<'a>> {
     match graph.node(edge.source) {
         Some(Node::Interaction(i)) => Some(EdgeWriters::Certain(i.agent_id.clone())),
         Some(Node::Concept(c)) => {
-            let acting = timeline.acting(edge.last_reinforced.max(edge.created_at));
+            let acting = timeline.acting(at);
             Some(if acting.is_empty() {
                 EdgeWriters::Certain(c.origin_agent.clone())
             } else {
