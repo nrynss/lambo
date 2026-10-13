@@ -197,6 +197,9 @@ pub struct Assignment {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OperatorOverride {
+    /// Explicit historical shared-hub assertion, only with a complete reviewed import.
+    #[serde(default)]
+    pub shared_hub_assertion: bool,
     pub kind: ItemKind,
     pub id: NodeId,
     #[serde(alias = "to")]
@@ -207,6 +210,25 @@ pub struct OperatorOverride {
     pub from: Option<String>,
     #[serde(default)]
     pub copy_into: Vec<String>,
+}
+
+impl OperatorOverride {
+    pub(super) fn permits_reviewed_replication(
+        &self,
+        kind: ItemKind,
+        id: NodeId,
+        session: &str,
+        placements: &[String],
+    ) -> bool {
+        self.shared_hub_assertion
+            && self.kind == kind
+            && self.id == id
+            && self.session == session
+            && !self.reason.trim().is_empty()
+            && !placements.is_empty()
+            && self.copy_into.iter().collect::<BTreeSet<_>>()
+                == placements.iter().collect::<BTreeSet<_>>()
+    }
 }
 
 /// Explicitly reviewed complete labels, compatible with the v2 JSONL shape.
@@ -394,6 +416,120 @@ pub fn validate_plan(
             return Err(ClassifyError::Plan(
                 "invalid target, candidate or hub placement".into(),
             ));
+        }
+    }
+    if plan
+        .reviewed_assignments_sha256
+        .as_ref()
+        .is_some_and(|s| s.len() != 64 || !s.bytes().all(|b| b.is_ascii_hexdigit()))
+    {
+        return Err(ClassifyError::Plan(
+            "invalid reviewed import fingerprint".into(),
+        ));
+    }
+    let mut audited = BTreeSet::new();
+    for o in &plan.overrides {
+        let key = ItemRef {
+            kind: o.kind,
+            id: o.id,
+        };
+        if !expected.contains(&key)
+            || !audited.insert(key)
+            || o.reason.trim().is_empty()
+            || o.reason.len() > 4096
+            || !sessions.contains(&o.session)
+            || o.from.as_ref().is_some_and(|s| !sessions.contains(s))
+            || o.copy_into
+                .iter()
+                .any(|s| !sessions.contains(s) || s == &plan.rules.general_session)
+            || (!o.copy_into.is_empty()
+                && (o.kind != ItemKind::Concept || !o.copy_into.contains(&o.session)))
+            || (o.shared_hub_assertion
+                && (plan.reviewed_assignments_sha256.is_none()
+                    || !plan.assignments.iter().any(|a| {
+                        o.permits_reviewed_replication(a.kind, a.id, &a.session, &a.copy_into)
+                    })))
+        {
+            return Err(ClassifyError::Plan(
+                "invalid, duplicate or foreign operator audit".into(),
+            ));
+        }
+    }
+    let (protected_interactions, protected_concepts) =
+        super::classify::protected_source_items(snapshot, &plan.rules);
+    for a in plan
+        .assignments
+        .iter()
+        .filter(|a| a.session == plan.rules.general_session)
+    {
+        match a.kind {
+            ItemKind::Interaction if protected_interactions.contains(&a.id.0) => {
+                return Err(ClassifyError::Plan(
+                    "general interaction has protected source provenance".into(),
+                ))
+            }
+            ItemKind::Concept => {
+                let c = snapshot
+                    .concepts
+                    .iter()
+                    .find(|c| c.id == a.id)
+                    .expect("assignment source checked");
+                let audited_general = plan.overrides.iter().any(|o| {
+                    o.kind == a.kind && o.id == a.id && o.session == plan.rules.general_session
+                });
+                let auto_origin = snapshot
+                    .interactions
+                    .iter()
+                    .find(|i| i.id == c.origin_interaction)
+                    .is_some_and(|i| {
+                        super::signals::operator_signal(
+                            &plan.rules,
+                            i.prompt_text.as_deref().unwrap_or(""),
+                        ) && !super::signals::has_reference(i.prompt_text.as_deref().unwrap_or(""))
+                            && plan
+                                .rules
+                                .general_agent_patterns
+                                .iter()
+                                .any(|p| super::signals::glob(p, &i.agent_id.0))
+                    });
+                if (plan.reviewed_assignments_sha256.is_none() && !auto_origin && !audited_general)
+                    || protected_concepts.contains(&a.id.0)
+                    || !matches!(
+                        c.concept_type,
+                        crate::types::ConceptType::Logic | crate::types::ConceptType::Constraint
+                    )
+                    || (!super::signals::general_ruling(&plan.rules, c)
+                        && !plan.overrides.iter().any(|o| {
+                            o.kind == a.kind
+                                && o.id == a.id
+                                && o.session == plan.rules.general_session
+                        }))
+                {
+                    return Err(ClassifyError::Plan("general concept must be an unprotected ruling with conservative evidence or explicit audit".into()));
+                }
+            }
+            _ => (),
+        }
+    }
+    for a in plan.assignments.iter().filter(|a| !a.copy_into.is_empty()) {
+        let concept = snapshot
+            .concepts
+            .iter()
+            .find(|c| c.id == a.id)
+            .ok_or_else(|| ClassifyError::Plan("hub must name a concept".into()))?;
+        let identity = matches!(
+            concept.concept_type,
+            crate::types::ConceptType::Resource | crate::types::ConceptType::Entity
+        );
+        if a.session == plan.rules.general_session
+            || a.copy_into.contains(&plan.rules.general_session)
+            || (!identity
+                && (plan.reviewed_assignments_sha256.is_none()
+                    || !plan.overrides.iter().any(|o| {
+                        o.permits_reviewed_replication(a.kind, a.id, &a.session, &a.copy_into)
+                    })))
+        {
+            return Err(ClassifyError::Plan("nonidentity replication requires an audited reviewed shared-hub assertion, never general".into()));
         }
     }
     // General interaction provenance must remain general after corrections.

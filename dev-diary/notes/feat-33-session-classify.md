@@ -45,12 +45,43 @@ Inference uses one fixed assignment set so hub-to-hub inference cannot cascade.
 Explicit complete reviewed legacy placements remain authoritative for reproducing
 the historical report, rather than being replaced with inferred placements.
 
+Final plan validation now rechecks the general interaction invariant after
+corrections, so moving a child out of general cannot leave its prompt in the
+shared layer. It also rejects a resealed direct plan with that inconsistency.
+
+SQLite previously omitted persisted session creation/close times on load.
+The loader now reads both; normal writable schema initialization converges old
+partial session tables against the already-authoritative timestamp columns.
+Classification remains read-only and never calls that initialization. Regression
+oracles compare SQLite timestamps with their exact persisted SQL values, while
+still deep-comparing every graph field with the Memory/Graph oracle. A seeded
+metadata roundtrip demonstrates that a changed close time invalidates the plan.
+
 ## Validation and follow-ups
 
 Synthetic fixture coverage checks deterministic plans, strict general guards,
 noncascading event-time smoothing, complete reviewed imports, audited overrides,
 hub hints, source/plan tampering, ordered-array fingerprints and immutable input
 handling. Full lane gate results are recorded after execution.
+
+On the prepared backup copy, schema preflight succeeds and the source hash stays
+unchanged. Complete reviewed labels need explicit audited treatment for historical
+general assignments whose phrases/references differ from the generic heuristic.
+The operator authorized an external, provenance-recorded conversion of ten reviewed
+assertions plus the two original corrections. Import then identified five historical replication entries whose source types
+are not identities and whose contents are narrative records, not bare paths.
+The root resolved the conflict: the newer, explicitly authoritative historical
+report takes precedence over section 8's no-ruling-copy restriction for those
+already-reviewed placements. A generic `shared_hub_assertion` on a distinct
+audited correction, with exact repeated placements and reason, records that
+operator decision. Complete reviewed import provenance is required, all general
+placements are refused, and no source type/content/status changes. The validator
+requires this evidence even after resealing. Automatic inference and unaudited
+imports remain Resource/Entity-only. Synthetic narrative Constraint coverage
+checks accepted audited, refused unaudited/general and missing-audit direct plans.
+Five separate assertions preserve the reviewed replication, making seventeen
+audits in total (ten general assertions, two original corrections, five hubs). The private report retains counts and original input hashes; source ids
+and contents remain outside this note.
 
 D2 performs copying and exact edge accounting; D3 compares layered recall. Neither
 a live rig run nor owner cut-over belongs to D1. A later run on the prepared backup

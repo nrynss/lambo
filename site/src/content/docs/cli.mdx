@@ -815,3 +815,13 @@ and a changed plan fingerprint. The seal detects accidental corruption; it is
 not a signature or authorization mechanism. To correct a plan, regenerate it
 with reviewed labels or audited overrides. Splitting and cut-over are separate
 steps and are not implemented by this command.
+
+
+A complete reviewed import can preserve an explicitly reviewed historical shared
+hub whose source type is a narrative rather than Resource or Entity. Its separate
+correction must set `shared_hub_assertion: true`, provide a reason and repeat the
+exact primary session and `copy_into` placements. This is an operator assertion
+bound to the reviewed import hash; the original type and content are preserved.
+Without that audit, nonidentity replication is refused. Automatic inference never
+replicates narrative records. Every copied placement must exclude `general`, and
+`validate_plan` checks the audit evidence even for a newly sealed plan.

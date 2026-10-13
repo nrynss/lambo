@@ -230,6 +230,7 @@ fn malformed_plans_overrides_and_rules_refuse_before_any_output() {
         assert!(validate_plan(&p, &source).is_err());
     }
     let correction = OperatorOverride {
+        shared_hub_assertion: false,
         kind: ItemKind::Concept,
         id: id(11),
         session: "general-usage".into(),
@@ -463,6 +464,7 @@ fn reviewed_general_cannot_erase_protected_source_provenance() {
             }
         }
         let audit = OperatorOverride {
+            shared_hub_assertion: false,
             kind: ItemKind::Concept,
             id: id(13),
             session: "general".into(),
@@ -503,6 +505,7 @@ fn nonpath_resource_and_entity_hubs_use_fixed_incident_assignments() {
         let plan = classify(&source, &rules, &[]).unwrap();
         assert_eq!(row(&plan, 15).copy_into, vec!["alpha", "beta"]);
         let override_ = OperatorOverride {
+            shared_hub_assertion: false,
             kind: ItemKind::Concept,
             id: id(15),
             session: "alpha".into(),
@@ -533,6 +536,7 @@ fn final_general_interaction_guard_runs_after_child_overrides() {
         })
         .collect();
     let correction = OperatorOverride {
+        shared_hub_assertion: false,
         kind: ItemKind::Concept,
         id: id(13),
         session: "general-usage".into(),
@@ -550,4 +554,97 @@ fn final_general_interaction_guard_runs_after_child_overrides() {
         .session = "general-usage".into();
     altered.seal().unwrap();
     assert!(validate_plan(&altered, &source).is_err());
+}
+
+#[test]
+fn reviewed_narrative_replication_requires_explicit_audited_assertion() {
+    let (source, rules) = fixture();
+    let generated = classify(&source, &rules, &[]).unwrap();
+    let mut labels: Vec<_> = generated
+        .assignments
+        .iter()
+        .map(|a| ReviewedAssignment {
+            kind: a.kind,
+            id: a.id,
+            project: a.session.clone(),
+            confidence: a.confidence,
+            signals: a.signals.clone(),
+            pass2: a.pass2,
+            copy_into: a.copy_into.clone(),
+        })
+        .collect();
+    let label = labels.iter_mut().find(|a| a.id == id(12)).unwrap();
+    label.copy_into = vec!["alpha".into(), "beta".into()];
+    assert!(classify_reviewed(&source, &rules, &labels, &[]).is_err());
+    let mut audit = OperatorOverride {
+        shared_hub_assertion: true,
+        kind: ItemKind::Concept,
+        id: id(12),
+        session: "beta".into(),
+        reason: "Historical reviewed shared-hub assertion".into(),
+        from: None,
+        copy_into: vec!["alpha".into(), "beta".into()],
+    };
+    let plan = classify_reviewed(&source, &rules, &labels, &[audit.clone()]).unwrap();
+    assert_eq!(row(&plan, 12).copy_into, vec!["alpha", "beta"]);
+    let mut corrupted = plan.clone();
+    corrupted.overrides.clear();
+    corrupted.seal().unwrap();
+    assert!(validate_plan(&corrupted, &source).is_err());
+    audit.copy_into.push("general".into());
+    assert!(classify_reviewed(&source, &rules, &labels, &[audit.clone()]).is_err());
+    audit.copy_into.pop();
+    assert!(classify(&source, &rules, &[audit]).is_err());
+}
+
+#[test]
+fn resealed_plan_cannot_bypass_source_guards_or_malformed_audits() {
+    let (source, rules) = fixture();
+    let baseline = classify(&source, &rules, &[]).unwrap();
+    for n in [12, 15] {
+        let mut plan = baseline.clone();
+        let a = plan.assignments.iter_mut().find(|a| a.id == id(n)).unwrap();
+        a.session = "general".into();
+        a.copy_into.clear();
+        plan.seal().unwrap();
+        assert!(validate_plan(&plan, &source).is_err());
+    }
+    for mode in 0..5 {
+        let mut plan = baseline.clone();
+        let mut audit = OperatorOverride {
+            shared_hub_assertion: false,
+            kind: ItemKind::Concept,
+            id: id(11),
+            session: "alpha".into(),
+            reason: "Reviewed assertion".into(),
+            from: None,
+            copy_into: vec![],
+        };
+        match mode {
+            0 => audit.id = id(99),
+            1 => audit.reason = "x".repeat(4097),
+            2 => audit.reason = " ".into(),
+            3 => audit.session = "foreign".into(),
+            _ => plan.overrides.push(audit.clone()),
+        }
+        plan.overrides.push(audit);
+        plan.seal().unwrap();
+        assert!(validate_plan(&plan, &source).is_err());
+    }
+}
+
+#[test]
+fn resealed_automatic_general_requires_operator_prompt_and_actor() {
+    let (mut source, rules) = fixture();
+    source.interactions[2].agent_id = AgentId::from("unknown");
+    source.interactions[2].prompt_text = Some("Task completed".into());
+    let mut plan = classify(&source, &rules, &[]).unwrap();
+    assert_ne!(row(&plan, 13).session, "general");
+    plan.assignments
+        .iter_mut()
+        .find(|a| a.id == id(13))
+        .unwrap()
+        .session = "general".into();
+    plan.seal().unwrap();
+    assert!(validate_plan(&plan, &source).is_err());
 }

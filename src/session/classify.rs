@@ -42,6 +42,48 @@ pub(super) fn validate_source(s: &GraphSnapshot) -> Result<(), ClassifyError> {
     Ok(())
 }
 
+pub(super) fn protected_source_items(
+    snapshot: &GraphSnapshot,
+    rules: &ClassificationRules,
+) -> (BTreeSet<uuid::Uuid>, BTreeSet<uuid::Uuid>) {
+    let protected_interactions: BTreeSet<_> = snapshot
+        .interactions
+        .iter()
+        .filter(|i| {
+            let actor = signals::actor(rules, &i.agent_id.0);
+            let mut text = signals::content(rules, i.prompt_text.as_deref().unwrap_or("")).0;
+            for c in snapshot
+                .concepts
+                .iter()
+                .filter(|c| c.origin_interaction == i.id)
+            {
+                signals::merge(&mut text, &signals::content(rules, &c.content).0);
+            }
+            rules.projects.iter().any(|p| {
+                p.exclude_from_general
+                    && (actor.contains_key(&p.session) || text.contains_key(&p.session))
+            })
+        })
+        .map(|i| i.id.0)
+        .collect();
+    let protected_concepts = snapshot
+        .concepts
+        .iter()
+        .filter(|c| {
+            protected_interactions.contains(&c.origin_interaction.0)
+                || rules.projects.iter().any(|p| {
+                    p.exclude_from_general
+                        && (signals::actor(rules, &c.origin_agent.0).contains_key(&p.session)
+                            || signals::content(rules, &c.content)
+                                .0
+                                .contains_key(&p.session))
+                })
+        })
+        .map(|c| c.id.0)
+        .collect();
+    (protected_interactions, protected_concepts)
+}
+
 fn assignment(
     kind: ItemKind,
     id: NodeId,
@@ -248,33 +290,7 @@ fn classify_internal(
             row,
         );
     }
-    // Capture protected source evidence before any imported label or override
-    // can erase it. Both recorded actors and text evidence matter.
-    let protected_interactions: BTreeSet<_> = interactions
-        .values()
-        .filter(|i| {
-            rules.projects.iter().any(|p| {
-                p.exclude_from_general
-                    && (actors[&i.id.0].contains_key(&p.session)
-                        || texts[&i.id.0].contains_key(&p.session))
-            })
-        })
-        .map(|i| i.id.0)
-        .collect();
-    let protected_concepts: BTreeSet<_> = concepts
-        .values()
-        .filter(|c| {
-            protected_interactions.contains(&c.origin_interaction.0)
-                || rules.projects.iter().any(|p| {
-                    p.exclude_from_general
-                        && (signals::actor(rules, &c.origin_agent.0).contains_key(&p.session)
-                            || signals::content(rules, &c.content)
-                                .0
-                                .contains_key(&p.session))
-                })
-        })
-        .map(|c| c.id.0)
-        .collect();
+    let (protected_interactions, protected_concepts) = protected_source_items(snapshot, rules);
     let mut reviewed_sha = None;
     if let Some(reviewed) = reviewed {
         let expected: BTreeSet<_> = rows.keys().copied().collect();
@@ -301,9 +317,11 @@ fn classify_internal(
                 || (!r.copy_into.is_empty()
                     && (!r.copy_into.contains(&r.project)
                         || r.kind != ItemKind::Concept
-                        || !concepts.get(&r.id.0).is_some_and(|c| {
+                        || (!concepts.get(&r.id.0).is_some_and(|c| {
                             matches!(c.concept_type, ConceptType::Resource | ConceptType::Entity)
-                        })))
+                        }) && !overrides.iter().any(|o| {
+                            o.permits_reviewed_replication(r.kind, r.id, &r.project, &r.copy_into)
+                        }))))
             {
                 return Err(ClassifyError::Rules(
                     "reviewed label has invalid session or non-identity hub placement".into(),
@@ -432,14 +450,19 @@ fn classify_internal(
                 ));
             }
         }
+        let identity = concepts
+            .get(&o.id.0)
+            .is_some_and(|c| matches!(c.concept_type, ConceptType::Resource | ConceptType::Entity));
+        let historical = reviewed.is_some()
+            && o.permits_reviewed_replication(o.kind, o.id, &o.session, &o.copy_into);
         if !o.copy_into.is_empty()
-            && (!concepts.get(&o.id.0).is_some_and(|c| {
-                matches!(c.concept_type, ConceptType::Resource | ConceptType::Entity)
-            }) || !o.copy_into.contains(&o.session)
+            && ((!identity && !historical)
+                || o.kind != ItemKind::Concept
+                || !o.copy_into.contains(&o.session)
                 || o.copy_into.contains(&rules.general_session))
         {
             return Err(ClassifyError::Rules(
-                "hub override must name an identity and include primary, never general".into(),
+                "hub override requires an identity or audited reviewed assertion, includes primary, never general".into(),
             ));
         }
         row.session = o.session.clone();
