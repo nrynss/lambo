@@ -546,14 +546,13 @@ pub fn expected(policy: PromotionPolicy) -> Vec<(&'static str, CanonizationStatu
         // KNOWN DEFECT, pinned on purpose: the short name "writer lease"
         // reaches Venerable because three actions cited the name instead of
         // the `lease_stays` ruling it stands for (design note section 2, the
-        // name-resolution defect). #36 PR 4 stops NEW citations from landing
-        // on an alias (a ruling named "writer lease" takes them, and no
-        // alias Entity is minted), but it redirects nothing already written
-        // and refuses to give the ruling a name an existing alias holds; the
-        // three `Dependency` edges here are such history. Only the reviewed
-        // alias backfill (#36 PR 5) flips this row to None; when it does,
-        // update this line rather than the resolver. PR 4 re-ran the fixture
-        // and no expected status moved.
+        // name-resolution defect). #36 PR 4 lets new work cite the ruling
+        // itself by id, but it redirects nothing already written, and a
+        // citation by the alias's text still lands on the alias (0.5.0's text
+        // rule; 0.6.0 has no names). The three `Dependency` edges here are
+        // such history. Only the reviewed alias backfill (#36 PR 5) flips
+        // this row to None; when it does, update this line rather than the
+        // resolver. PR 4 re-ran the fixture and no expected status moved.
         ("lease_alias", Venerable),
     ];
     match policy {

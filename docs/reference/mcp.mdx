@@ -138,7 +138,7 @@ Errors come back as normal tool results with `isError` set to `true` and a short
 | A store or embedding failure | The class of failure, such as `store error`, and a note that the detail was logged. |
 | A vector read refused because the session's embedding contract changed mid-query, or the vector width differs | `store error`, and that you should re-check the session's embedding contract (`lambo_stats`) and retry. Nothing from the refusal is shown. Most often seen on `lambo_recall` with `image` or `query_vector`, which fails rather than answer from the other legs. |
 | An image whose caption and `image_id` a text concept already holds | `image id taken`, your `image_id`, and the fix: choose another image id. On `lambo_derive_image` this arrives on the receipt. |
-| A `depends_on` or `name` that does not resolve to exactly one concept of this session, or a `lambo_record_action` `depends_on` id that does not | `reference refused`, the reference, and why: it matches nothing, matches several (listed with their ids), is an interaction's id, is in another scope, names the concept itself, would close a dependency loop, or (on the receipt) named something else when the write was applied. Always ends "nothing was written". |
+| A `lambo_derive` `depends_on` that does not resolve to exactly one concept of this session, or a `lambo_record_action` `depends_on` that names an interaction, a short id several concepts share, or an id only another scope holds | `reference refused`, the reference, and why: it matches nothing, matches several (listed with their ids), is an interaction's id, is in another scope, names the concept itself, would close a dependency loop, or (on the receipt) named something else when the write was applied. Always ends "nothing was written". |
 | A call this server is not configured for | `configuration error` and the setting to change, such as `[embedder] accept_client_vectors = true`. Only `lambo_derive_image`, and `lambo_recall` with `image` or `query_vector`, answer this way. |
 | A handler fault | An internal error, with a note that the call had no effect beyond anything already written. |
 
@@ -235,15 +235,14 @@ Store new concepts learned from the current interaction.
 
 Activity (what you did) goes to [`lambo_record_action`](#lambo_record_action). To group facts under a decision, send each fact as its own concept and add `parent_of` pairs with the decision as `parent` and each fact as `child`.
 
-**Citing what a concept rests on.** When a concept applies or follows one already in memory, such as a decision that applies a ruling, list the ruling in that concept's `depends_on`. Lambo records that the concept depends on the ruling, which is what makes a ruling load-bearing: its dependents count toward its blast radius and its canonization evidence, and recall warns before work that would break it. Name the ruling by the id recall shows (`id 8baad4e0`), its full node id, its exact content, or a `name`:
+**Citing what a concept rests on.** When a concept applies or follows one already in memory, such as a decision that applies a ruling, list the ruling in that concept's `depends_on`. Lambo records that the concept depends on the ruling, which is what makes a ruling load-bearing: its dependents count toward its blast radius and its canonization evidence, and recall warns before work that would break it. Cite the ruling by the id recall shows (`id 8baad4e0`) or its full node id; its exact content also works. Names and synonyms are not reference forms:
 
 * Each reference must match **exactly one concept that already exists in this session**. A reference that matches nothing, matches several concepts, is an interaction's id, names the concept itself, or would close a dependency loop refuses the whole call before the ack, with a `reference refused` error that says which reference and why, and nothing is written. A call cannot cite a concept it creates itself: derive the ruling first, then cite it.
 * Lambo never guesses. Unlike `lambo_inspect`'s focus, a reference never matches by substring, and a missing reference is never created.
 * A reference that names a concept only in another session the server reads, such as a shared `general` layer, is refused with "is in scope 'general'; cross-session citations are not recorded". Dependence is counted per session.
-* What each reference named is fixed when the call is accepted. If the cited concept is removed, renamed or shadowed before the write is applied, the write fails on its receipt instead of linking something else; the same holds when a write waiting in the queue is applied after a restart.
+* What each reference named is fixed when the call is accepted. If the cited concept is removed, or its short id comes to match a second concept, before the write is applied, the write fails on its receipt instead of linking something else; the same holds when a write waiting in the queue is applied after a restart.
 * Sending the same citation again reinforces the one dependency rather than adding another.
-
-`name` gives a concept a short name, such as `writer lease rule`, that later `depends_on` entries here and in `lambo_record_action` can cite, and that a later concept with exactly that text matches. A name that already names another concept is refused rather than moved. A name is kept in the server's memory and **forgotten when the server restarts**; a citation by a forgotten name is refused as matching nothing, never linked elsewhere, so cite by id when the citation must work later.
+* If the concept being derived is merged by similarity into the very concept it cites, that citation is dropped (the merge already ties the two) and counted as a reinforcement; the rest of the call applies.
 
 **This call returns before the write is applied.** Lambo validates your input, fixes this write's place in the session's order, and answers — the embedding and the graph insert happen in the background. A warm derive against a local BGE-M3 embedder went from a 14 ms call to a 0.05 ms call this way, because the embedder is no longer inside it. Two consequences worth planning around:
 
@@ -263,8 +262,7 @@ Writes you send one after another are applied in that order, whatever other agen
 | `concepts[].concept_type` | enum | Yes | One of `entity`, `logic`, `constraint`, `resource`, `observation`. |
 | `event_time` | RFC3339 timestamp | No | Historical about-time, such as a commit or document date. Omit for a live fact, which is about now. |
 | `parent_of` | array of `{parent, child}` | No | Hierarchy links. Both ends resolve as concepts, and either may be created. The hierarchy must stay acyclic: a pair that would close a cycle (its child is already an ancestor of its parent, or the call's own pairs loop) refuses the whole call with "store error: parent_of would close a Hierarchical cycle (the hierarchy must stay acyclic); nothing was written". A cycle the graph already shows is refused before the ack; one closed by a write applied in between is refused on the receipt. |
-| `concepts[].depends_on` | array of string | No | Existing concepts this one rests on, at most 8 per concept and 32 per call. Each by recall's id, its full node id, its exact content or a name. See *Citing what a concept rests on* above. |
-| `concepts[].name` | string | No | A short name later citations can use, at most 256 bytes. Not an id-shaped string. Refused if it names another concept; forgotten when the server restarts. |
+| `concepts[].depends_on` | array of string | No | Existing concepts this one rests on, at most 8 per concept and 32 per call. Each by recall's id or its full node id (or its exact content). See *Citing what a concept rests on* above. |
 
 <Warning>
 `concept_type` is lower case on the wire. Sending `Entity` is refused with "unknown variant `Entity`, expected one of `entity`, `logic`, `constraint`, `resource`, `observation`".
@@ -287,17 +285,16 @@ Writes you send one after another are applied in that order, whatever other agen
 
 `created` and `matched` are **absent** rather than empty. An empty list would be a claim about a write that has not run; the ids live on the receipt.
 
-A call that cites a ruling and names the new concept:
+A call that cites a ruling:
 
 ```json
 {"name": "lambo_derive", "arguments": {"agent_id": "agent-a",
   "concepts": [{"content": "flush retries keep the lease instead of re-acquiring it",
                 "concept_type": "logic",
-                "depends_on": ["8baad4e0"],
-                "name": "retry lease rule"}]}}
+                "depends_on": ["8baad4e0"]}]}}
 ```
 
-Its receipt, once applied, ends with `; 1 citation(s) recorded, 1 name(s) registered`. A call without `depends_on` or `name` answers exactly as before.
+Its receipt, once applied, ends with `; 1 citation(s) recorded`. A call without `depends_on` answers exactly as before.
 
 A write refused for backpressure answers the same shape with `receipt_state` of `dropped` and a summary that says plainly that nothing was written. It is not an error: the call succeeded, the write did not.
 
@@ -347,7 +344,7 @@ Record something the agent did, along with what it produces, modifies, and depen
 | `agent_id` | string | Yes | |
 | `action` | string | Yes | Up to 16 KB. May not contain an image suffix (`[image:<id>]`). |
 | `event_time` | RFC3339 timestamp | No | Historical about-time, such as a commit or document date. Omit for a live fact, which is about now. |
-| `produces`, `modifies`, `depends_on` | array of string | No | Up to 64 entries combined across the three. An entry may name an image concept by its content, `caption [image:<image_id>]`. A `depends_on` entry that is an existing concept's id (the 8 hex characters recall shows, or its full node id) cites that concept, as `lambo_derive`'s `depends_on` does: a full node id that names nothing in this session, or a short id several concepts share, is refused with `reference refused`, and a short id still names the same concept when the write is applied or the receipt says why not. Any other entry names a concept by its text, matched through `name`s and canonical text and created if new, as before; a hex string that names no concept, such as a commit hash, is still such a text. The `Causal` and `Dependency` edges they create must stay acyclic: one that would close a cycle refuses the whole call with "store error: record_action would close a Causal or Dependency cycle (produces, modifies and depends_on must stay acyclic); nothing was written", before the ack or, if a write applied in between closed it, on the receipt. |
+| `produces`, `modifies`, `depends_on` | array of string | No | Up to 64 entries combined across the three. An entry may name an image concept by its content, `caption [image:<image_id>]`. To cite a ruling or decision the action relied on, give its id. A `depends_on` entry that is an existing concept's full node id (in the hyphenated form recall, inspect and receipts print) cites that concept; an interaction's id is refused with `reference refused`. An entry of 8 to 32 hex characters whose text names no concept cites the one concept whose id starts with it, and is refused if several do; so a commit hash that happens to prefix a concept's id cites that concept (for an 8-character hash the chance is about the session's concept count divided by 2^32). An id still names the same concept when the write is applied, or the receipt says why not. Every other entry names a concept by its text, matched by canonical text and created if new, exactly as before 0.6.0: a commit hash, an MD5, a `urn:uuid:` or braced id, a file path, an issue reference, and a hyphenated id that names no concept here. One exception: a hyphenated id that names no concept here but one in a layer the session reads is refused as cross-session rather than created. The `Causal` and `Dependency` edges they create must stay acyclic: one that would close a cycle refuses the whole call with "store error: record_action would close a Causal or Dependency cycle (produces, modifies and depends_on must stay acyclic); nothing was written", before the ack or, if a write applied in between closed it, on the receipt. |
 
 ```json
 {"name": "lambo_record_action", "arguments": {"agent_id": "agent-a",
@@ -472,8 +469,10 @@ to load relevant prior memory, lambo_derive and lambo_record_action to write wha
 learned and did, lambo_reserve before editing a shared concept, and lambo_inspect /
 lambo_saints / lambo_stats to look around. A concept is one fact, stated atomically and
 short, such as a decision with its reason; it is not a log line or a paragraph, and
-activity goes to lambo_record_action. Every tool takes your agent_id: use one stable id
-for as long as you run, never one per call, task or topic: your model or client id
+activity goes to lambo_record_action. When a write rests on a ruling or decision recall
+showed you, cite it by its id (the 8 hex characters recall shows) in depends_on:
+lambo_record_action's, or the concept's on lambo_derive. Every tool takes your agent_id:
+use one stable id for as long as you run, never one per call, task or topic: your model or client id
 (<your-model-id>), with a stable instance suffix if several of you run at once. It is
 caller-asserted and unverified. Work is recorded under it, so a stable id keeps
 attribution whole. Soft locks are held under it: distinct ids contend for a node, and
@@ -515,7 +514,6 @@ Lambo enforces these when the call runs, and the published tool schemas carry th
 | `parent_of` pairs per `lambo_derive` or `lambo_derive_image` | 256, and 512 concepts and pairs combined |
 | Targets per `lambo_record_action`, combined | 64 |
 | `depends_on` references per concept in a `lambo_derive` | 8, and 32 per call |
-| A concept's `name` | 256 bytes |
 | Reservation TTL | 3600 seconds |
 | Neighbours rendered by `lambo_inspect` | 200 |
 | Candidates listed for an ambiguous focus | 10 |
