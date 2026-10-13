@@ -82,6 +82,18 @@ impl SqliteStore {
             .await
             .map_err(|e| db_err("init_schema (migrations/sqlite/001_init.sql)", e))?;
 
+        // Both timestamp columns are authoritative DDL metadata. Historical
+        // partial session tables must converge before the loader reads them.
+        for column in ["created_at", "closed_at"] {
+            ensure_column(
+                self.pool(),
+                "sessions",
+                column,
+                &format!("ALTER TABLE sessions ADD COLUMN {column} TEXT"),
+            )
+            .await?;
+        }
+
         // Post-T3.1 columns (P3 wave 2 remediation): fresh databases carry them
         // inline from the DDL above; pre-existing databases converge here.
         // SQLite has no `ADD COLUMN IF NOT EXISTS` (verified: 3.53.4 rejects

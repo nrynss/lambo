@@ -236,10 +236,11 @@
 //! `root_goal` **is** carried by the mutation path since XP-8
 //! (`Mutation::SetRootGoal`): `flush` updates `sessions.root_goal` with `seed`'s
 //! exact JSON encoding and `load_session` reads it back, so a reload no longer
-//! silently clears the drift anchor. `created_at`/`closed_at` still have no
-//! `Mutation` kind — like MemoryStore, `load_session` returns `None` for those
-//! two, and their columns stay inert (the row is created as an FK anchor with a
-//! `created_at` DB-default) until a full-snapshot save path exists.
+//! silently clears the drift anchor. `created_at`/`closed_at` have no
+//! `Mutation` kind, but full-snapshot `seed` stores them and `load_session`
+//! preserves those columns. A session first created as an FK anchor keeps
+//! its `created_at` DB-default. Read-only classification binds this metadata
+//! along with the rest of the durable snapshot.
 //!
 //! ## Embedding contract (session metadata)
 //!
@@ -391,6 +392,45 @@ impl SqliteStore {
                 .busy_timeout(Duration::from_secs(8))
         };
         Ok(Self::new(options))
+    }
+
+    /// Open a completed standalone backup without creation, migrations,
+    /// journal changes or sidecars. The caller must copy a finished backup
+    /// first: an empty WAL alone does not prove a live database is immutable.
+    pub fn connect_read_only(path: &std::path::Path) -> Result<Self, StoreError> {
+        if !path.is_file() {
+            return Err(StoreError::Invariant(
+                "classification database must be an existing standalone backup file".into(),
+            ));
+        }
+        let info = std::fs::symlink_metadata(path)
+            .map_err(|e| StoreError::Backend(format!("inspect backup file: {e}")))?;
+        use std::os::unix::fs::MetadataExt;
+        if info.file_type().is_symlink() || info.nlink() != 1 {
+            return Err(StoreError::Invariant(
+                "classification needs a standalone backup copy, not a symlink or hardlink".into(),
+            ));
+        }
+        let mut wal = path.as_os_str().to_os_string();
+        wal.push("-wal");
+        match std::fs::metadata(&wal) {
+            Ok(m) if m.len() > 0 => {
+                return Err(StoreError::Invariant(
+                    "classification refuses a nonempty WAL; use a completed standalone backup copy"
+                        .into(),
+                ))
+            }
+            Ok(_) => (),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+            Err(e) => return Err(StoreError::Backend(format!("inspect backup WAL: {e}"))),
+        }
+        Ok(Self::new(
+            SqliteConnectOptions::new()
+                .filename(path)
+                .read_only(true)
+                .create_if_missing(false)
+                .immutable(true),
+        ))
     }
 
     /// Whether `path` names an in-memory database as far as sqlx's `FromStr`

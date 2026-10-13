@@ -282,6 +282,16 @@
 
 ### Added
 
+- `lambo session classify` (#33 D1) reads a copied standalone SQLite backup
+  or exported snapshot and writes a deterministic private review plan. Rules
+  configure project evidence, conservative general rulings, fixed-seed
+  smoothing and shared identity hub hints. Complete reviewed labels and audited
+  overrides are bound to the source without modifying it; imported labels
+  cannot erase protected provenance. Plans carry durable source, rules and
+  corruption-detection fingerprints. New library APIs live in
+  `lambo::session`; the central resolver exposes a read-only classification
+  source. This command does not split or cut over a writer.
+
 - **Citations on `lambo_derive`**
   ([#36](https://github.com/nrynss/lambo/issues/36) PR 4). Each concept
   may carry `depends_on`, existing concepts it rests on (at most 8, and 32
@@ -620,6 +630,11 @@
   `check_single_source` guard is gone (Lambo refuses a second parent itself).
 
 ### Fixed
+
+- SQLite session loads preserve persisted creation and close timestamps,
+  including in immutable classification source fingerprints. Writable schema
+  initialization converges these existing DDL columns on partial legacy
+  session tables; classification does not migrate them.
 
 - **A dependency question no longer anchors on a word fragment.**
   Substring matching picked `db` in `dbadmin`, and shortest-first picked
