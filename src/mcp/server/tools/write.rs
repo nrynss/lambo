@@ -5,7 +5,10 @@ use rmcp::model::{CallToolResult, ContentBlock};
 use serde_json::json;
 
 use crate::graph::action::Action;
-use crate::graph::cite::{MAX_REFERENCES_PER_CONCEPT, MAX_REFERENCES_PER_DERIVE};
+use crate::graph::cite::{
+    MAX_AGAINST_PER_CONCEPT, MAX_AGAINST_PER_DERIVE, MAX_REFERENCES_PER_CONCEPT,
+    MAX_REFERENCES_PER_DERIVE,
+};
 use crate::graph::derive::ParentOf;
 use crate::graph::hybrid;
 use crate::mcp::server::params::{check_size, DeriveParams, RecordActionParams};
@@ -19,38 +22,75 @@ use crate::types::{ConceptCitations, ConceptType};
 
 use super::scope::LayerProbe;
 
-/// A derive's per-concept `depends_on` as core citations (#36 PR 4),
-/// refused with `bad_param` when one is empty, too long or over a count
-/// limit. Concepts without any are left out, so a call without citations
-/// is exactly the call it was before.
+/// One reference list's shape checks: each entry non-empty and within the
+/// size cap, at most `per_concept` on its `owner` ("a concept's") and
+/// `per_call` across the call (`total` carries the running count).
+fn check_references(
+    owner: &str,
+    field: &str,
+    refs: &[String],
+    per_concept: usize,
+    per_call: usize,
+    total: &mut usize,
+) -> Result<(), CallToolResult> {
+    if refs.len() > per_concept {
+        return Err(bad_param(format!(
+            "{owner} {field} may list at most {per_concept} concepts"
+        )));
+    }
+    *total += refs.len();
+    if *total > per_call {
+        return Err(bad_param(format!(
+            "{field} may list at most {per_call} concepts across one call"
+        )));
+    }
+    let what = if owner == "a concept's" {
+        format!("concept.{field} entry")
+    } else {
+        format!("{field} entry")
+    };
+    for r in refs {
+        if let Err(e) = require_nonempty(&what, r) {
+            return Err(bad_param(e));
+        }
+        check_size(&what, r)?;
+    }
+    Ok(())
+}
+
+/// A derive's per-concept `depends_on` (#36 PR 4) and `against` (#19(b))
+/// as core references, refused with `bad_param` when one is empty, too long
+/// or over a count limit. Concepts without any are left out, so a call
+/// without references is exactly the call it was before.
 fn wire_citations(p: &DeriveParams) -> Result<Vec<ConceptCitations>, CallToolResult> {
     let mut out = Vec::new();
-    let mut total = 0usize;
+    let (mut cited, mut contradicted) = (0usize, 0usize);
     for c in &p.concepts {
         let depends_on: Vec<String> = c.depends_on.iter().flatten().map(|r| r.0.clone()).collect();
-        if depends_on.is_empty() {
+        let against: Vec<String> = c.against.iter().flatten().map(|r| r.0.clone()).collect();
+        if depends_on.is_empty() && against.is_empty() {
             continue;
         }
-        if depends_on.len() > MAX_REFERENCES_PER_CONCEPT {
-            return Err(bad_param(format!(
-                "a concept's depends_on may list at most {MAX_REFERENCES_PER_CONCEPT} concepts"
-            )));
-        }
-        total += depends_on.len();
-        if total > MAX_REFERENCES_PER_DERIVE {
-            return Err(bad_param(format!(
-                "depends_on may list at most {MAX_REFERENCES_PER_DERIVE} concepts across one call"
-            )));
-        }
-        for r in &depends_on {
-            if let Err(e) = require_nonempty("concept.depends_on entry", r) {
-                return Err(bad_param(e));
-            }
-            check_size("concept.depends_on entry", r)?;
-        }
+        check_references(
+            "a concept's",
+            "depends_on",
+            &depends_on,
+            MAX_REFERENCES_PER_CONCEPT,
+            MAX_REFERENCES_PER_DERIVE,
+            &mut cited,
+        )?;
+        check_references(
+            "a concept's",
+            "against",
+            &against,
+            MAX_AGAINST_PER_CONCEPT,
+            MAX_AGAINST_PER_DERIVE,
+            &mut contradicted,
+        )?;
         out.push(ConceptCitations {
             content: c.content.clone(),
             depends_on,
+            against,
         });
     }
     Ok(out)
@@ -123,8 +163,9 @@ impl LamboServer {
         } else {
             ParentOf::from_pairs(&pairs)
         };
-        // #36 PR 4: each concept's citations and name, checked for shape
-        // here; whether each resolves is the core pre-pass's question.
+        // #36 PR 4, #19(b): each concept's citations and contradictions,
+        // checked for shape here; whether each resolves is the core
+        // pre-pass's question.
         let citations = match wire_citations(&p) {
             Ok(c) => c,
             Err(e) => return e,
@@ -273,6 +314,27 @@ impl LamboServer {
                 return e;
             }
         }
+        // #19(b): the contradicted concepts, shape-checked here and resolved
+        // by the core pre-pass. Bounded on their own (at most 8), apart from
+        // N1's fan-out cap, since each names an existing concept and creates
+        // nothing.
+        let against: Vec<String> = p
+            .against
+            .unwrap_or_default()
+            .into_iter()
+            .map(|r| r.0)
+            .collect();
+        let mut contradicted = 0usize;
+        if let Err(e) = check_references(
+            "an action's",
+            "against",
+            &against,
+            MAX_AGAINST_PER_CONCEPT,
+            MAX_AGAINST_PER_CONCEPT,
+            &mut contradicted,
+        ) {
+            return e;
+        }
 
         // N1, superseded by J3 and worth saying why rather than deleting.
         // `Memory::record_action` is synchronous and takes the graph write lock
@@ -303,7 +365,7 @@ impl LamboServer {
         // is ORDERING with derive — see `Memory::record_action_async_as`.
         let submitted = match self
             .mem
-            .record_action_async_scoped(&acting, &action, &LayerProbe { server: self })
+            .record_action_async_scoped(&acting, &action, &against, &LayerProbe { server: self })
             .await
         {
             Ok(s) => s,

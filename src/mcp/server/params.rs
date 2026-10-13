@@ -159,10 +159,20 @@ pub struct WireConcept {
     /// load-bearing. At most 32 across the call.
     #[schemars(length(max = 8))]
     pub depends_on: Option<Vec<WireReference>>,
+    /// Optional: up to 8 existing concepts this one contradicts, such as an
+    /// older belief a newer observation shows is wrong. Name each as for
+    /// `depends_on`: its id (the 8 hex characters recall shows) or full
+    /// node id (its exact content also works). Each must already exist in
+    /// this session and match exactly one concept other than this one, or
+    /// the whole call is refused before the ack and nothing is written.
+    /// Recorded as this concept contradicting each; it is not evidence for
+    /// or against either and changes no score. At most 32 across the call.
+    #[schemars(length(max = 8))]
+    pub against: Option<Vec<WireReference>>,
 }
 
-/// One `depends_on` entry of a `lambo_derive` concept: an existing concept,
-/// by the id recall shows, its full node id or its exact content.
+/// One `depends_on` or `against` entry: an existing concept, by the id
+/// recall shows, its full node id or its exact content.
 #[derive(Clone, Debug, Deserialize, schemars::JsonSchema)]
 pub struct WireReference(#[schemars(length(max = 16_384))] pub String);
 
@@ -240,6 +250,14 @@ pub struct RecordActionParams {
     /// id that names no concept, names a concept by its text, created if
     /// new.
     pub depends_on: Option<Vec<WireResource>>,
+    /// Optional: up to 8 existing concepts this action contradicts, such as a
+    /// belief the action showed to be wrong. Name each by its id (the 8 hex
+    /// characters recall shows) or full node id (its exact content also
+    /// works). Unlike `depends_on`, nothing is ever created: each must
+    /// already exist in this session and match exactly one concept, or the
+    /// whole call is refused before the ack and nothing is written.
+    #[schemars(length(max = 8))]
+    pub against: Option<Vec<WireReference>>,
 }
 
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]

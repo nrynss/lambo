@@ -330,6 +330,14 @@ enum Commands {
             help = "An existing concept the first concept rests on (repeatable, at most 8): its 8-hex id from recall, its full node id or its exact content. Must match exactly one concept, or nothing is written."
         )]
         depends_on: Vec<String>,
+        /// An existing concept the first concept contradicts (repeatable, at most 8): its 8-hex id from recall, its full node id or its exact content. Must match exactly one other concept, or nothing is written.
+        #[arg(
+            long = "against",
+            value_name = "REF",
+            action = ArgAction::Append,
+            help = "An existing concept the first concept contradicts (repeatable, at most 8): its 8-hex id from recall, its full node id or its exact content. Must match exactly one other concept, or nothing is written."
+        )]
+        against: Vec<String>,
         /// DANGEROUS: attach despite a same-width stored/configured model-id mismatch.
         #[arg(long)]
         allow_embedding_mismatch: bool,
@@ -423,6 +431,14 @@ enum Commands {
         /// Things this action depends on (Dependency edges). Repeatable.
         #[arg(long = "depends-on", action = ArgAction::Append, help = "Things this action depends on (Dependency edges). Repeatable.")]
         depends_on: Vec<String>,
+        /// An existing concept this action contradicts (repeatable, at most 8): its 8-hex id from recall, its full node id or its exact content. Must match exactly one concept, or nothing is written.
+        #[arg(
+            long = "against",
+            value_name = "REF",
+            action = ArgAction::Append,
+            help = "An existing concept this action contradicts (repeatable, at most 8): its 8-hex id from recall, its full node id or its exact content. Must match exactly one concept, or nothing is written."
+        )]
+        against: Vec<String>,
         /// DANGEROUS: attach despite a same-width stored/configured model-id mismatch.
         #[arg(long)]
         allow_embedding_mismatch: bool,
@@ -1310,6 +1326,7 @@ fn main() -> ExitCode {
                 parent_of,
                 concept,
                 depends_on,
+                against,
                 allow_embedding_mismatch: _,
             },
             Resolved::Full(backends),
@@ -1325,6 +1342,7 @@ fn main() -> ExitCode {
                     parent_of,
                     concept,
                     depends_on,
+                    against,
                 },
             ),
         ),
@@ -1367,6 +1385,7 @@ fn main() -> ExitCode {
                 produces,
                 modifies,
                 depends_on,
+                against,
                 allow_embedding_mismatch: _,
             },
             Resolved::Full(backends),
@@ -1381,6 +1400,7 @@ fn main() -> ExitCode {
                     produces,
                     modifies,
                     depends_on,
+                    against,
                 },
             ),
         ),
