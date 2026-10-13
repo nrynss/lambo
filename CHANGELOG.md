@@ -134,6 +134,16 @@
 
 ### Added
 
+- `lambo session classify` (#33 D1) reads a copied standalone SQLite backup
+  or exported snapshot and writes a deterministic private review plan. Rules
+  configure project evidence, conservative general rulings, fixed-seed
+  smoothing and shared identity hub hints. Complete reviewed labels and audited
+  overrides are bound to the source without modifying it; imported labels
+  cannot erase protected provenance. Plans carry durable source, rules and
+  corruption-detection fingerprints. New library APIs live in
+  `lambo::session`; the central resolver exposes a read-only classification
+  source. This command does not split or cut over a writer.
+
 - `EdgeType::Contradicts` persistence and synthetic exclusion checks across
   the store adapters (#19(a)). It does not decay. Write-tool fields,
   contradiction warnings and evidence-driven supersession follow separately.

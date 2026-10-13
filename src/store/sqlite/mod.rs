@@ -393,6 +393,45 @@ impl SqliteStore {
         Ok(Self::new(options))
     }
 
+    /// Open a completed standalone backup without creation, migrations,
+    /// journal changes or sidecars. The caller must copy a finished backup
+    /// first: an empty WAL alone does not prove a live database is immutable.
+    pub fn connect_read_only(path: &std::path::Path) -> Result<Self, StoreError> {
+        if !path.is_file() {
+            return Err(StoreError::Invariant(
+                "classification database must be an existing standalone backup file".into(),
+            ));
+        }
+        let info = std::fs::symlink_metadata(path)
+            .map_err(|e| StoreError::Backend(format!("inspect backup file: {e}")))?;
+        use std::os::unix::fs::MetadataExt;
+        if info.file_type().is_symlink() || info.nlink() != 1 {
+            return Err(StoreError::Invariant(
+                "classification needs a standalone backup copy, not a symlink or hardlink".into(),
+            ));
+        }
+        let mut wal = path.as_os_str().to_os_string();
+        wal.push("-wal");
+        match std::fs::metadata(&wal) {
+            Ok(m) if m.len() > 0 => {
+                return Err(StoreError::Invariant(
+                    "classification refuses a nonempty WAL; use a completed standalone backup copy"
+                        .into(),
+                ))
+            }
+            Ok(_) => (),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+            Err(e) => return Err(StoreError::Backend(format!("inspect backup WAL: {e}"))),
+        }
+        Ok(Self::new(
+            SqliteConnectOptions::new()
+                .filename(path)
+                .read_only(true)
+                .create_if_missing(false)
+                .immutable(true),
+        ))
+    }
+
     /// Whether `path` names an in-memory database as far as sqlx's `FromStr`
     /// is concerned (database part `:memory:` or a `mode=memory` query
     /// parameter, position-independent). These spellings must never receive

@@ -20,6 +20,7 @@ pub mod record_action;
 pub mod reserve;
 pub mod saints;
 pub mod serve_web;
+pub mod session;
 pub mod stats;
 
 pub use caps::{check_size, CliError, ConceptKind};

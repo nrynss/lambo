@@ -2,8 +2,6 @@
 title: "Command line"
 description: "Read and write session memory from the terminal"
 ---
-import Note from '../../components/MdxNote.astro';
-import Warning from '../../components/MdxWarning.astro';
 
 Lambo has command line verbs that mirror the MCP tools, so you can read and write session memory from the terminal without an MCP client. The command line is the primary surface for large swarms of small agents, because each call is one deterministic line with no tool schema overhead.
 
@@ -15,7 +13,7 @@ Lambo has command line verbs that mirror the MCP tools, so you can read and writ
 lambo --config lambo.toml recall --session demo --query "user schema"
 ```
 
-Lambo looks for the config file in this order: the `--config` path, then the `LAMBO_CONFIG` environment variable, then `./lambo.toml`. See [Configuration](/lambo/config/) for the file contents.
+Lambo looks for the config file in this order: the `--config` path, then the `LAMBO_CONFIG` environment variable, then `./lambo.toml`. See [Configuration](/config) for the file contents.
 
 `lambo --version` prints the version, and `lambo --help` lists the subcommands.
 
@@ -109,7 +107,7 @@ auth middleware [Entity] (score 0.25, id 71b0e4c2)
 migrations/003.sql [Resource] (score 0.25, id 9d44f8b1)
 ```
 
-If the top hit alone is longer than `--max-tokens`, the output shows its text cut short and marked `…`, its label (type, canonical marker, score, id), and a `[truncated: N tokens left out; lambo_inspect <id> for the full concept]` line instead of nothing. Any warning line that did not fit is printed above it. `lambo inspect --session <session> --focus <id>` shows the whole concept. See [`lambo_recall`](/lambo/mcp/#lambo_recall) for the rule.
+If the top hit alone is longer than `--max-tokens`, the output shows its text cut short and marked `…`, its label (type, canonical marker, score, id), and a `[truncated: N tokens left out; lambo_inspect <id> for the full concept]` line instead of nothing. Any warning line that did not fit is printed above it. `lambo inspect --session <session> --focus <id>` shows the whole concept. See [`lambo_recall`](/mcp#lambo_recall) for the rule.
 
 **One session.** `lambo recall` reads the one session `--session` names and never applies `[serve] layers`: it is a reader with no lease, and layers belong to an HTTP serve. To read a layer, name it: `lambo recall --session general`. A layered `lambo_recall` through `lambo serve` is described in [Layered recall](#layered-recall).
 
@@ -238,7 +236,7 @@ derived 3 concept(s): 3 created, 2 matched existing
 
 ### lambo derive-image
 
-Stores one image as a concept, from a local image file or from a vector file you computed. The concept's content is the caption plus `[image:<id>]`, and its vector is the image's, so a text recall finds it. It is the command line twin of [`lambo_derive_image`](/lambo/mcp/#lambo_derive_image), with the same rules, and it writes synchronously like `derive`.
+Stores one image as a concept, from a local image file or from a vector file you computed. The concept's content is the caption plus `[image:<id>]`, and its vector is the image's, so a text recall finds it. It is the command line twin of [`lambo_derive_image`](/mcp#lambo_derive_image), with the same rules, and it writes synchronously like `derive`.
 
 | Flag | Required | Notes |
 |---|---|---|
@@ -249,7 +247,7 @@ Stores one image as a concept, from a local image file or from a vector file you
 | `--image-id <ID>` | No | Your id for the image: 1 to 64 lowercase letters and digits. Without it, an id is made from a digest of the image file's bytes, or of the normalized vector with `--vector-json`. |
 | `--image <PATH>` | One of `--image`, `--vector-json` | A PNG, JPEG or WebP file, at most 2 MiB and 4096 pixels a side, for the configured embedder to embed. It needs an embedder that embeds images. |
 | `--mime <MIME>` | No | With `--image`: `image/png`, `image/jpeg` or `image/webp`. Without it the type is read from the file; a `--mime` that disagrees with the file is refused. |
-| `--vector-json <PATH>` | One of `--image`, `--vector-json` | A JSON file `{"values": [...], "contract": {"kind", "model", "dim"}}` holding a vector computed in this session's embedding space. Needs `[embedder] accept_client_vectors = true` (see [Configuration](/lambo/config/)). The contract must equal the session's exactly. |
+| `--vector-json <PATH>` | One of `--image`, `--vector-json` | A JSON file `{"values": [...], "contract": {"kind", "model", "dim"}}` holding a vector computed in this session's embedding space. Needs `[embedder] accept_client_vectors = true` (see [Configuration](/config)). The contract must equal the session's exactly. |
 | `--parent-of <CHILD:PARENT>` | No | As for `derive`. Name the image concept by its content, `caption [image:<id>]`. |
 
 ```bash
@@ -314,7 +312,7 @@ reservations are advisory and RAM-local: this reservation ends when this process
 | `--transport <TRANSPORT>` | No | `stdio`, or `http` |
 | `--port <PORT>` | No | `7700`, used when the transport is `http`. |
 | `--bind <BIND>` | No | `127.0.0.1`, used when the transport is `http`. Any other bind requires a credential: `--auth-token` (or `LAMBO_AUTH_TOKEN`) or a `[[serve.credential]]`. |
-| `--auth-token <TOKEN>` | No | Bearer token for the HTTP transport: the credential named `default`, which reaches every pinned session. Loopback runs unauthenticated by default while no credential is configured. A non-loopback bind fails closed without a credential (this token or a `[[serve.credential]]`). Ignored on `stdio`. `LAMBO_AUTH_TOKEN` overrides it. See [Credentials](/lambo/config/#credentials). |
+| `--auth-token <TOKEN>` | No | Bearer token for the HTTP transport: the credential named `default`, which reaches every pinned session. Loopback runs unauthenticated by default while no credential is configured. A non-loopback bind fails closed without a credential (this token or a `[[serve.credential]]`). Ignored on `stdio`. `LAMBO_AUTH_TOKEN` overrides it. See [Credentials](/config#credentials). |
 | `--max-sessions <N>` | No | `32`. Ceiling on concurrently live HTTP MCP sessions, counted across every session the process holds. With several credentials, each may hold an even share: this divided by the number of credentials, rounded down, at least 1. |
 | `--rate-limit-rps <N>` | No | `50`. Sustained HTTP request rate, per credential. Burst allowance is double. `0` disables it. |
 | `--ledger <PATH>` | No | Off by default. Append JSONL records of what this serve did to `PATH` (append-only, created if absent). **Five line kinds, not one:** `call` (one per MCP tool call), `completion` (one per background write's outcome, carrying the receipt id that joins it back to the `call` line that acked it, plus, for an applied write, the counts the receipt reports: `created_count` and `matched_count`, `semantic_merged` and `reinforced` for a derive, `edges` for a record_action, and `embedded` under the hybrid strategy, each present only for the write kind that has it and never payload text), `startup` (this serve's intent to acquire the single-writer lease, written *before* the attempt, so a serve that loses it still leaves a record), and `lease` (a refused acquisition from both sides, and a proxy starting or losing its connection to the holder). `stats` is the fifth and arrives only with `--ledger-heartbeat`. Every line carries `session`, the session it is about, so one file can hold every session of a serve that holds several; a `call` line made through a configured `[[serve.credential]]` also carries `credential`, its name. Never affects a tool call: the write is buffered onto a dedicated writer thread, and a stalled or unwritable path drops lines rather than failing or delaying anything, counting them in `lambo_stats` as `ledger_dropped_lines`, split by cause into `ledger_dropped_channel_full` (backpressure) and `ledger_dropped_write_failed` (a broken path), alongside `ledger_queued_lines` (accepted but not yet on disk — the one key that moves when a blocked `open` parks the writer before it has dropped anything). Rotation is the operator's (`logrotate`, or just `mv` it — the writer recreates the path on the next line). |
@@ -324,7 +322,7 @@ reservations are advisory and RAM-local: this reservation ends when this process
 lambo serve --config lambo.toml --session demo --agent agent-a
 ```
 
-Over `stdio`, `--session` can be left out when `lambo.toml` names the session instead (see [Multi-session serving](/lambo/config/#multi-session-serving)). The serve then uses the `[[serve.projects]]` entry whose `path` contains its working directory, picking the longest such path, and otherwise `[serve] default_session`. If neither applies it refuses with the usual missing `--session` error (exit code 2) before building any backend. This lets one global client config (one command line for every project) land each project in its own session, because MCP clients start a stdio server in the project directory. `--session` still wins whenever it is given; a `stdio` serve takes at most one, and more than one is refused (exit code 2). The map is a `stdio` serve's only: an `http` serve pins its sessions from a repeated `--session` and `[serve] sessions`, never from `[[serve.projects]]` (see [Several sessions in one serve](#several-sessions-in-one-serve)).
+Over `stdio`, `--session` can be left out when `lambo.toml` names the session instead (see [Multi-session serving](/config#multi-session-serving)). The serve then uses the `[[serve.projects]]` entry whose `path` contains its working directory, picking the longest such path, and otherwise `[serve] default_session`. If neither applies it refuses with the usual missing `--session` error (exit code 2) before building any backend. This lets one global client config (one command line for every project) land each project in its own session, because MCP clients start a stdio server in the project directory. `--session` still wins whenever it is given; a `stdio` serve takes at most one, and more than one is refused (exit code 2). The map is a `stdio` serve's only: an `http` serve pins its sessions from a repeated `--session` and `[serve] sessions`, never from `[[serve.projects]]` (see [Several sessions in one serve](#several-sessions-in-one-serve)).
 
 ```bash
 cd ~/Documents/work/lambo && lambo serve --config ~/lambo.toml   # session from [[serve.projects]]
@@ -332,9 +330,9 @@ cd ~/Documents/work/lambo && lambo serve --config ~/lambo.toml   # session from 
 
 The map is only read from the `lambo.toml` the serve loads, so a global client config must name that file with `--config` (as above) or `LAMBO_CONFIG`. Without either, each serve reads its project's own `./lambo.toml`, if there is one, and that file's `default_session` or `[[serve.projects]]` chooses the session, just as it already chooses the store.
 
-See [MCP tools](/lambo/mcp/) for the tools it exposes.
+See [MCP tools](/mcp) for the tools it exposes.
 
-While it holds the session, `lambo serve` keeps the embedder warm. With the in-process candle embedder on a Metal device it embeds one short fixed probe every 10 seconds by default, so an idle writer's recently touched model weights are more likely to still be resident when the next call arrives, which reduces how often a call pays the swap-in. It does not guarantee residency under heavy memory pressure. The probe writes nothing. A serve that proxies to another holder runs no keep-warm and never loads a model: the candle weights reach the device only once a serve has won the session, before it serves its first call. Set the interval, or turn it off with `0`, through `keep_warm_secs` in [Configuration](/lambo/config/#embedder).
+While it holds the session, `lambo serve` keeps the embedder warm. With the in-process candle embedder on a Metal device it embeds one short fixed probe every 10 seconds by default, so an idle writer's recently touched model weights are more likely to still be resident when the next call arrives, which reduces how often a call pays the swap-in. It does not guarantee residency under heavy memory pressure. The probe writes nothing. A serve that proxies to another holder runs no keep-warm and never loads a model: the candle weights reach the device only once a serve has won the session, before it serves its first call. Set the interval, or turn it off with `0`, through `keep_warm_secs` in [Configuration](/config#embedder).
 
 ### stdio versus HTTP for several clients
 
@@ -366,7 +364,7 @@ One `lambo serve --transport http` can hold several sessions at once. Each sessi
 | Detached | Only when it loses its lease, is erased, or the serve stops. Never for being idle, never evicted. | After `idle_detach_secs` without a tool call, to make room at `max_attached`, on a lost lease, when erased, or when the serve stops. |
 | Typical use | A few project sessions for agents. | One session per user of an app. |
 
-A serve attaches sessions on demand only when some `[[serve.credential]]` reaches past the pinned sessions. A serve configured with nothing more than `--session` flags, `[serve] sessions`, `LAMBO_AUTH_TOKEN`, or no credential at all serves its pinned sessions and nothing else. The keys are in [Multi-session serving](/lambo/config/#multi-session-serving). A minimal file with both kinds:
+A serve attaches sessions on demand only when some `[[serve.credential]]` reaches past the pinned sessions. A serve configured with nothing more than `--session` flags, `[serve] sessions`, `LAMBO_AUTH_TOKEN`, or no credential at all serves its pinned sessions and nothing else. The keys are in [Multi-session serving](/config#multi-session-serving). A minimal file with both kinds:
 
 ```toml
 [serve]
@@ -418,7 +416,7 @@ A serve with one session and nothing on demand behaves as it always has: losing 
 
 #### Layered recall
 
-`[serve] layers` names shared sessions that a pinned session's `lambo_recall` reads too (see [Layers](/lambo/config/#layers)). With
+`[serve] layers` names shared sessions that a pinned session's `lambo_recall` reads too (see [Layers](/config#layers)). With
 
 ```toml
 [serve]
@@ -438,7 +436,7 @@ A request's credential decides which sessions it reaches.
 - **The legacy token.** `--auth-token` or `LAMBO_AUTH_TOKEN` is the credential `default`, with the same reach.
 - **Configured credentials.** `[[serve.credential]]` entries add credentials, each with its own scope and the flags `create`, `erase` and `admin`. Once one exists, every request needs a token, on loopback too.
 
-Neither `local` nor `default` attaches on demand, erases or lists. See [Credentials](/lambo/config/#credentials).
+Neither `local` nor `default` attaches on demand, erases or lists. See [Credentials](/config#credentials).
 
 A request without a valid token gets `401`, whatever it asked for.
 
@@ -553,15 +551,15 @@ The page reads its session through read-only `GET` routes: `/api/session`, `/api
 
 **Security headers.** Every response the router answers carries `X-Content-Type-Options: nosniff`, including the Host `403`, a missing or wrong bearer (`401`), the empty `404`, a `405`, the `/s/<session>` redirect (`308`), `/healthz`, the JSON routes and `/app.js` / `/app.css`. The HTTP server's own replies to a request it cannot parse (a malformed request line, a `431` for oversized headers) never reach the router and carry neither header. The HTML page, `GET` and `HEAD` of `/` and of `/s/<session>/`, also carries `Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; font-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; object-src 'none'`. Nothing else does. The page's script and stylesheet are same-origin files, with no inline script or style, so the policy has no `'unsafe-inline'` and no `'unsafe-eval'`.
 
-**Credentials.** The token from `--auth-token` or `LAMBO_AUTH_TOKEN` is the credential `default` and reads every served session. `[[web.credential]]` entries in `lambo.toml` add read credentials with their own scope: exact session names, `"*"` for every served session, or a prefix. A credential reads only the served sessions in its scope; any other session is the same empty `404` as a session that is not served, and an unscoped route (`/`, `/api/...`) serves the default session only to a credential whose scope includes it. Once any credential exists, every request needs a bearer, loopback included. At startup the window prints each credential with the number of sessions it reads, and warns about a credential that reads none or names a session that is not served. See [Portal credentials](/lambo/config/#portal-credentials).
+**Credentials.** The token from `--auth-token` or `LAMBO_AUTH_TOKEN` is the credential `default` and reads every served session. `[[web.credential]]` entries in `lambo.toml` add read credentials with their own scope: exact session names, `"*"` for every served session, or a prefix. A credential reads only the served sessions in its scope; any other session is the same empty `404` as a session that is not served, and an unscoped route (`/`, `/api/...`) serves the default session only to a credential whose scope includes it. Once any credential exists, every request needs a bearer, loopback included. At startup the window prints each credential with the number of sessions it reads, and warns about a credential that reads none or names a session that is not served. See [Portal credentials](/config#portal-credentials).
 
-**Session list.** With `[web] list_sessions = true`, `GET /api/sessions` returns `{"sessions": [...]}`: the served sessions the presenting credential names exactly, in served order, or every served session for `default`, a `[[web.credential]]` `"*"` and the unauthenticated window. An inherited `"*"` lists only the served sessions named in `[serve] sessions`, as in [Portal credentials](/lambo/config/#portal-credentials). It never expands a prefix and never shows another credential's names. Without the key the route does not exist and answers the same empty `404` as any unknown path.
+**Session list.** With `[web] list_sessions = true`, `GET /api/sessions` returns `{"sessions": [...]}`: the served sessions the presenting credential names exactly, in served order, or every served session for `default`, a `[[web.credential]]` `"*"` and the unauthenticated window. An inherited `"*"` lists only the served sessions named in `[serve] sessions`, as in [Portal credentials](/config#portal-credentials). It never expands a prefix and never shows another credential's names. Without the key the route does not exist and answers the same empty `404` as any unknown path.
 
 **Switching sessions.** When the caller reads more than one served session, the page shows a session picker beside the session's name, and `/api/session` carries `"switchable": true`. The field is absent otherwise, so for a one-session window the `/api/session` JSON is unchanged and the page looks the same; the page's HTML did gain the picker's markup, hidden. Apart from the security headers above, a response's headers change only with its body: the page, `/app.js` and `/app.css` grew, so their `Content-Length` did. With `list_sessions` on and a listing that names at least two sessions, the current one included, the picker offers the listed names plus "Other session…", which opens a text field for a session the listing does not name (it names a credential's exact sessions, never a `session_prefix` expansion). Otherwise, with the listing off or naming fewer than two, it is a text field that suggests the sessions this browser has opened, kept in the browser's `localStorage` under `lambo-sessions`, names only. That history belongs to the browser profile, not to a credential: behind a proxy where several people share one profile, one person's names are suggested to the next (names only, and a name nobody there can read is dropped on its first `404`). Opening a session first asks for its page with `HEAD` (the page reads no store), then goes to it, `/s/<session>/`, so nothing from one session carries into another, and links such as `/s/<session>/?focus=user%20schema` reopen a focus. A name the caller cannot read (the portal's `404`) is reported in the picker and dropped from the suggestions; any other failure (a `401` from an expired proxy session, a `5xx`, no answer) keeps the name and says to try again. A long session name is cut with an ellipsis on a narrow screen, with the full name in its tooltip. A session with nothing in it says "No memory in this session yet", within one poll of being erased, and stops saying so within one poll of its first write.
 
 **Tokens and browsers.** The page sends no `Authorization` header itself, so with any credential configured a plain browser cannot open it: put it behind a proxy that adds the header for each user, or read the JSON routes from a script. Per-credential scope is for such a proxy and for scripts; behind one, the picker follows the scope of the token the proxy adds.
 
-Every request and every open tab reads one shared view of each session, loaded at most once per `view_ttl_ms` (1.5 seconds by default), so the page can be up to that much older than the store and the store load does not grow with the number of tabs. A session is loaded on the first request for it, not at startup; startup still checks the store's schema and fails if it is not provisioned. A recall that cannot start within 2 seconds because `recall_concurrency` recalls are already running gets `503` with `Retry-After: 1`. The `[web]` keys set these bounds; see [Read-only window views](/lambo/config/#read-only-window-views).
+Every request and every open tab reads one shared view of each session, loaded at most once per `view_ttl_ms` (1.5 seconds by default), so the page can be up to that much older than the store and the store load does not grow with the number of tabs. A session is loaded on the first request for it, not at startup; startup still checks the store's schema and fails if it is not provisioned. A recall that cannot start within 2 seconds because `recall_concurrency` recalls are already running gets `503` with `Retry-After: 1`. The `[web]` keys set these bounds; see [Read-only window views](/config#read-only-window-views).
 
 ## Provision a store
 
@@ -572,7 +570,7 @@ $ lambo --config lambo.toml provision
 sqlite schema provisioned (init_schema, idempotent)
 ```
 
-Running it again is safe. For a CockroachDB store it runs the repository's provisioning script, so run it from inside a checkout. See [Configuration](/lambo/config/).
+Running it again is safe. For a CockroachDB store it runs the repository's provisioning script, so run it from inside a checkout. See [Configuration](/config).
 
 ## Erase a session
 
@@ -611,7 +609,7 @@ Only someone with access to the store, or an HTTP `lambo serve` credential with 
 
 ### Erase from a running serve
 
-An HTTP `lambo serve` erases a session it can reach without being stopped, for a credential that carries `erase` and reaches that session (see [Credentials](/lambo/config/#credentials)). The request repeats the id in its body, as `--confirm` does:
+An HTTP `lambo serve` erases a session it can reach without being stopped, for a credential that carries `erase` and reaches that session (see [Credentials](/config#credentials)). The request repeats the id in its body, as `--confirm` does:
 
 ```sh
 $ curl -sS -X POST http://127.0.0.1:7700/admin/s/user-42/erase \
@@ -643,7 +641,7 @@ The same warning applies as for the command: backups and the `--ledger` file are
 
 ## Rebuild the recall index
 
-`lambo recall-index backfill` rebuilds one session's recall index from the store, when your config has a [recall tier](/lambo/config/#recall-tier). It copies every stored concept vector to the index, removes index entries the store no longer has, such as deleted concepts or vectors from an earlier embedding model, and marks the session as in sync. It reads the store from your config and does not build the embedder.
+`lambo recall-index backfill` rebuilds one session's recall index from the store, when your config has a [recall tier](/config#recall-tier). It copies every stored concept vector to the index, removes index entries the store no longer has, such as deleted concepts or vectors from an earlier embedding model, and marks the session as in sync. It reads the store from your config and does not build the embedder.
 
 | Flag | Required | Default |
 |---|---|---|
@@ -665,7 +663,7 @@ It takes the session's writer lease while it runs, so it exits `1` and names the
 | `--scenario <SCENARIO>` | No | `rest-api`, the only scenario in v0.1. An unknown value is a usage error. |
 | `--session <SESSION>` | No | A fresh session id per run. |
 
-The harness takes and releases the single-writer lease across the two acts, so provision a durable store first if you persist it. See [End to end](/lambo/end-to-end/) for the topology it exercises.
+The harness takes and releases the single-writer lease across the two acts, so provision a durable store first if you persist it. See [End to end](/end-to-end) for the topology it exercises.
 
 ## The swarm idiom
 
@@ -675,7 +673,7 @@ Run one `lambo serve` writer for the session, then give each small agent a singl
 lambo derive --session demo --agent agent-7 --content "retry budget is 3" --kind constraint
 ```
 
-Canonization collapses the duplicate observations many agents produce into single canonical facts. See [End to end](/lambo/end-to-end/) for the full topology.
+Canonization collapses the duplicate observations many agents produce into single canonical facts. See [End to end](/end-to-end) for the full topology.
 
 ## Limits
 
@@ -700,4 +698,91 @@ The command line enforces the same limits as the MCP tools.
 
 See [What Lambo accepts in text](#what-lambo-accepts-in-text) for the character rules, which apply to every string on every verb.
 
-See [MCP tools](/lambo/mcp/) for the same operations over MCP, and [Library API](/lambo/api/) for the type both surfaces share.
+See [MCP tools](/mcp) for the same operations over MCP, and [Library API](/api) for the type both surfaces share.
+
+
+## Classify a session before splitting
+
+`lambo session classify` produces a private, reviewable JSON plan. It reads a
+copied, completed standalone SQLite backup or an exported `GraphSnapshot`, and
+never acquires a writer lease, migrates the schema, builds an embedder, or writes
+source data. SQLite input needs the `store-sqlite` feature. Snapshot input works
+without a store feature. Do not pass a live writer database: copy a finished
+backup first. Nonempty WAL files, symlinks and hardlinks are refused. An older
+schema must be upgraded on a separate copy or exported by a compatible binary.
+
+```bash
+lambo session classify --session mixed --database ./backup-copy.db \
+  --rules ./classification.toml --output ./plan.json
+# Or: --snapshot ./export.json instead of --database.
+```
+
+`--session`, `--rules`, `--output` and exactly one source flag are required.
+`--config` is refused. The output must be a new file; existing files and aliases
+are never overwritten. The output has private file permissions and the command
+prints aggregate counts only. Keep plans and label files private: they contain
+source ids and classification evidence.
+
+Rules are TOML (a `.toml` extension) or JSON. This synthetic example maps two
+projects; the same format accepts any project names:
+
+```toml
+general_session = "general"
+fallback_session = "general-usage"
+neighbour_window_secs = 7200
+general_agent_patterns = ["operator"]
+operator_wide_phrases = ["all projects", "every repository", "operator-wide"]
+
+[[projects]]
+session = "alpha"
+folders = ["/work/alpha"]
+agent_id_patterns = ["alpha-*"]
+content_keywords = ["alpha"]
+
+[[projects]]
+session = "beta"
+folders = ["/work/beta"]
+agent_id_patterns = ["beta-*"]
+content_keywords = ["beta"]
+exclude_from_general = true
+```
+
+Folders are absolute literal paths; actor patterns use anchored, case-sensitive
+`*` and `?` globs. Content keywords are case-insensitive phrases with word
+boundaries. Unknown rule keys and duplicate sessions are errors. General and
+fallback session names default to those above. Neighbour smoothing uses event
+time (creation time when absent), a fixed set of high-confidence seeds and at
+most six neighbours on either side. It upgrades an uncertain placement only
+when actor, text and neighbour evidence agree; inference does not cascade.
+
+Every interaction and concept has one primary session, confidence and signals.
+The plan lists low-confidence items and identity hub `copy_into` placements.
+These placements are hints for a future split command; classification copies
+nothing. Automatic `general` classification requires a Logic or Constraint,
+operator-wide text and prompt, a configured operator actor, and no project,
+path, issue, PR, commit or version reference. Protected project provenance
+cannot be relabeled into general.
+
+`--reviewed-assignments labels.jsonl` imports complete operator-reviewed labels.
+Each row has `kind` (`interaction` or `concept`), `id`, `project`, `confidence`
+(`high`, `medium`, `low` or `hub`), `signals`, `pass2`, and optional `copy_into`.
+Every source node must appear exactly once. This supports legacy v2 labels, but
+is an explicit operator assertion: it does not prove their original provenance.
+A general interaction requires all its origin concepts to belong to general.
+
+`--overrides corrections.jsonl` applies separately audited corrections. Each
+row has `kind`, `id`, `session` (or `to`), a nonempty `reason`, optional `from`
+(the expected prior session) and optional `copy_into`. Unknown ids, duplicate
+corrections and stale `from` values are refused. An audited general correction
+can exempt a ruling from automatic reference guards, but cannot move protected
+project provenance or identity records into general. Hub corrections must name
+a Resource or Entity identity, include the primary placement and exclude general.
+
+The versioned plan binds the complete durable source snapshot and rules with
+SHA256 fingerprints. Array order in vectors, metadata and audit history is
+preserved; volatile reservations are excluded. `lambo::session::validate_plan`
+refuses a stale source, missing or duplicate assignments, unsupported versions
+and a changed plan fingerprint. The seal detects accidental corruption; it is
+not a signature or authorization mechanism. To correct a plan, regenerate it
+with reviewed labels or audited overrides. Splitting and cut-over are separate
+steps and are not implemented by this command.
