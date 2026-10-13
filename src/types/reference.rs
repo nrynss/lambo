@@ -1,11 +1,12 @@
 //! The typed refusal of a reference to an existing concept (#36 PR 4).
 //!
-//! A derive's `depends_on`, and a `record_action` `depends_on` entry that
-//! names a concept by id, must resolve to exactly one existing
-//! concept in the session the write targets. When one does not, the write is
+//! A derive's `depends_on`, a `record_action` `depends_on` entry that
+//! names a concept by id, and an `against` entry on either (#19(b)) must
+//! resolve to exactly one existing concept in the session the write
+//! targets. When one does not, the write is
 //! refused whole with a [`ReferenceRefusal`]: what was sent, where, and why,
 //! worded so the caller can fix it. The resolver that produces these lives in
-//! `crate::surface::resolve`; #19's `contradicts` field reuses both.
+//! `crate::surface::resolve`.
 //!
 //! The message is the caller's own reference (shortened and escaped) plus
 //! session-local ids and content snippets the caller can already read through
@@ -27,6 +28,10 @@ pub enum ReferenceField {
     DependsOn,
     /// A `record_action` `depends_on` entry.
     ActionDependsOn,
+    /// A derive concept's `against` entry (#19(b)): a concept it contradicts.
+    Against,
+    /// A `record_action` `against` entry (#19(b)).
+    ActionAgainst,
 }
 
 impl ReferenceField {
@@ -35,6 +40,24 @@ impl ReferenceField {
         match self {
             ReferenceField::DependsOn => "depends_on",
             ReferenceField::ActionDependsOn => "depends_on",
+            ReferenceField::Against | ReferenceField::ActionAgainst => "against",
+        }
+    }
+
+    /// Whether this field records a contradiction rather than a citation.
+    fn is_against(self) -> bool {
+        matches!(
+            self,
+            ReferenceField::Against | ReferenceField::ActionAgainst
+        )
+    }
+
+    /// What one reference of this field records, in the plural.
+    fn records(self) -> &'static str {
+        if self.is_against() {
+            "contradictions"
+        } else {
+            "citations"
         }
     }
 }
@@ -62,13 +85,13 @@ pub enum ReferenceRefusalKind {
     /// A full node id that names an interaction, not a concept.
     NotAConcept,
     /// It names nothing in this session but resolves in another session this
-    /// server reads (a layer such as `general`). Dependence is per session,
-    /// so the citation is not recorded.
+    /// server reads (a layer such as `general`). Dependence and contradiction
+    /// are per session, so the reference is not recorded.
     ForeignScope {
         /// The session that holds it.
         scope: String,
     },
-    /// The citing concept would cite itself.
+    /// The citing concept would cite (or contradict) itself.
     SelfReference,
     /// The `Dependency` edge would close a cycle: the cited concept already
     /// depends, directly or through others, on the citing one.
@@ -164,9 +187,14 @@ impl fmt::Display for ReferenceRefusal {
         match &self.kind {
             ReferenceRefusalKind::Missing => write!(
                 f,
-                "{field} {r}{on} names no concept in this session; cite a concept that already \
+                "{field} {r}{on} names no concept in this session; {} a concept that already \
                  exists, by the id recall shows (8 hex characters), its full node id or its exact \
-                 content"
+                 content",
+                if self.field.is_against() {
+                    "name"
+                } else {
+                    "cite"
+                }
             ),
             ReferenceRefusalKind::Ambiguous { candidates } => write!(
                 f,
@@ -182,11 +210,22 @@ impl fmt::Display for ReferenceRefusal {
                 f,
                 "{field} {r}{on} is the id of an interaction, not a concept; cite a concept"
             ),
+            ReferenceRefusalKind::ForeignScope { scope } if self.field.is_against() => write!(
+                f,
+                "{field} {r}{on} is in scope {scope:?}; cross-session {} are not recorded. \
+                 Contradict a concept in this session; to challenge that one, write the \
+                 assertion in scope {scope:?} itself",
+                self.field.records()
+            ),
             ReferenceRefusalKind::ForeignScope { scope } => write!(
                 f,
-                "{field} {r}{on} is in scope {scope:?}; cross-session citations are not recorded. \
-                 Cite a concept in this session"
+                "{field} {r}{on} is in scope {scope:?}; cross-session {} are not recorded. \
+                 Cite a concept in this session",
+                self.field.records()
             ),
+            ReferenceRefusalKind::SelfReference if self.field.is_against() => {
+                write!(f, "{field} {r}{on} names the contradicting concept itself")
+            }
             ReferenceRefusalKind::SelfReference => {
                 write!(f, "{field} {r}{on} names the citing concept itself")
             }
@@ -224,7 +263,7 @@ impl std::error::Error for ReferenceRefusal {}
 // The write path is `crate::graph::cite`.
 // ---------------------------------------------------------------------------
 
-/// One derived concept's citations, as the caller sent them.
+/// One derived concept's references, as the caller sent them.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConceptCitations {
     /// The citing concept's content: one of the call's `concepts`.
@@ -233,6 +272,10 @@ pub struct ConceptCitations {
     /// id or its content.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub depends_on: Vec<String>,
+    /// Existing concepts it contradicts (#19(b)), by the same forms: each is
+    /// written as `this -Contradicts-> that`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub against: Vec<String>,
 }
 
 /// A citation as accepted at the ack: the reference and what it resolved to.
@@ -251,7 +294,7 @@ pub struct PinnedReference {
     pub target: NodeId,
 }
 
-/// A derive's citations as accepted at the ack
+/// A derive's citations and contradictions as accepted at the ack
 /// (`crate::graph::cite::validate`).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -259,21 +302,31 @@ pub struct PinnedCitations {
     /// One per distinct `(content, target)`: `depends_on`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub references: Vec<PinnedReference>,
+    /// One per distinct `(content, target)`: `against` (#19(b)). Skipped
+    /// when empty, so a derive that only cites serializes as before.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub against: Vec<PinnedReference>,
 }
 
 impl PinnedCitations {
-    /// Whether there is nothing to cite.
+    /// Whether there is nothing to cite or contradict.
     pub fn is_empty(&self) -> bool {
-        self.references.is_empty()
+        self.references.is_empty() && self.against.is_empty()
     }
 
     /// Retained bytes, for the write queue's byte admission.
     pub(crate) fn bytes(&self) -> usize {
-        self.references
-            .iter()
-            .map(|r| r.content.len() + r.reference.len() + 16)
-            .sum::<usize>()
+        pinned_bytes(&self.references) + pinned_bytes(&self.against)
     }
+}
+
+/// Retained bytes of pinned references, for the write queue's byte
+/// admission.
+pub(crate) fn pinned_bytes(pinned: &[PinnedReference]) -> usize {
+    pinned
+        .iter()
+        .map(|r| r.content.len() + r.reference.len() + 16)
+        .sum::<usize>()
 }
 
 #[cfg(test)]
@@ -329,6 +382,30 @@ mod tests {
             assert!(msg.ends_with("; nothing was written"), "{msg}");
             assert!(msg.contains("\"lease stays\""), "{msg}");
         }
+        // #19(b): an `against` refusal names its field and its noun.
+        let against = ReferenceRefusal::new(
+            ReferenceField::Against,
+            Some("a newer claim"),
+            "an old belief",
+            ReferenceRefusalKind::Missing,
+        );
+        assert!(against.to_string().starts_with(
+            "against \"an old belief\" on \"a newer claim\" names no concept in this session; \
+             name a concept"
+        ));
+        let against = ReferenceRefusal::new(
+            ReferenceField::ActionAgainst,
+            Some("ran it"),
+            "8baad4e0",
+            ReferenceRefusalKind::ForeignScope {
+                scope: "general".into(),
+            },
+        );
+        assert!(against.to_string().contains(
+            "is in scope \"general\"; cross-session contradictions are not recorded. \
+             Contradict a concept in this session; to challenge that one, write the assertion \
+             in scope \"general\" itself"
+        ));
         let foreign = ReferenceRefusal::new(
             ReferenceField::DependsOn,
             None,

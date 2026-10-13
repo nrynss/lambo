@@ -220,7 +220,7 @@ pub(super) async fn put_write_intent(
 /// [`crate::types::SETTLED_IMAGE_INTENT_PAYLOAD`] in the same statement, so
 /// its vector does not outlive the consume (#22 review L1); so is a settled
 /// cited derive's, so a 0.5.0 build can still load the session (#36 PR 4
-/// review H2).
+/// review H2), and a settled cited action's (#19(b)).
 pub(super) async fn consume_write_intent(
     tx: &mut sqlx::SqliteConnection,
     session_id: &SessionId,
@@ -229,7 +229,8 @@ pub(super) async fn consume_write_intent(
 ) -> Result<(), StoreError> {
     sqlx::query(
         "UPDATE write_intents SET consumed_at = ?, outcome_tag = ?, outcome_summary = ?, \
-             payload = CASE WHEN payload LIKE ? OR payload LIKE ? THEN ? ELSE payload END \
+             payload = CASE WHEN payload LIKE ? OR payload LIKE ? OR payload LIKE ? THEN ? \
+                 ELSE payload END \
          WHERE session_id = ? AND receipt = ?",
     )
     .bind(ts_to_text(outcome.consumed_at))
@@ -237,6 +238,7 @@ pub(super) async fn consume_write_intent(
     .bind(&outcome.summary)
     .bind(crate::types::DERIVE_IMAGE_PAYLOAD_LIKE)
     .bind(crate::types::DERIVE_CITED_PAYLOAD_LIKE)
+    .bind(crate::types::ACTION_CITED_PAYLOAD_LIKE)
     .bind(crate::types::SETTLED_IMAGE_INTENT_PAYLOAD)
     .bind(session_id.as_str())
     .bind(receipt)

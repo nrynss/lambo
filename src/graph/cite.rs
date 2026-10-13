@@ -1,4 +1,4 @@
-//! Citations on a derive (#36 PR 4).
+//! Citations (#36 PR 4) and contradictions (#19(b)) on a write.
 //!
 //! A derived concept may declare what it rests on (`depends_on`: existing
 //! concepts it cites). A citation is written as `citing -Dependency->
@@ -38,13 +38,34 @@
 //!
 //! The pin, the recheck and the edge write take a [`ReferenceSpec`]: the
 //! field, the edge it writes, its weight, whether that edge family must
-//! stay acyclic, and its limits. [`DEPENDS_ON`] is the only one today;
-//! #19(b)'s `against` adds a `Contradicts` spec and reuses the rest.
+//! stay acyclic, its limits, and whether a similarity merge into the target
+//! makes the reference a reinforcement. [`DEPENDS_ON`] is a derive's
+//! citations; [`AGAINST`] and [`ACTION_AGAINST`] are #19(b)'s
+//! contradictions, `newer -Contradicts-> older`, on a derive concept and on
+//! a `record_action` action. A contradiction is resolved, pinned, rechecked
+//! and refused exactly like a citation (owner decision, #19(b) option A),
+//! and differs in three ways only:
+//!
+//! * **No acyclicity.** Two concepts may contradict each other (`Q -> X`
+//!   and `X -> Q`, the #19(a) fixture's pair): each asserts the other is
+//!   wrong. `Contradicts` is outside §5.7's `Causal`/`Dependency` family,
+//!   and nothing traverses it (no dependence, recall expansion or GC
+//!   structural walk), so a cycle of contradictions cannot loop anything.
+//!   Self-contradiction is still refused.
+//! * **A similarity merge keeps it.** A hybrid similarity merge writes the
+//!   new concept as its own node tied to its neighbour by a `Semantic`
+//!   edge. For a citation of that neighbour the tie already says it, so the
+//!   citation is a reinforcement; for a contradiction it does not (similar
+//!   text often states the opposite), so the `Contradicts` edge is written.
+//! * **Its own budget.** At most [`MAX_AGAINST_PER_CONCEPT`] per concept and
+//!   [`MAX_AGAINST_PER_DERIVE`] per derive call, counted apart from
+//!   `depends_on`; an action takes at most [`MAX_AGAINST_PER_CONCEPT`].
 //!
 //! # Idempotent by natural key
 //!
 //! Re-sending the same citation writes no second edge: the
-//! `(citing, cited, Dependency)` natural key reinforces the one edge.
+//! `(citing, cited, Dependency)` natural key reinforces the one edge, and
+//! `(newer, older, Contradicts)` likewise.
 
 use std::collections::{HashMap, HashSet};
 
@@ -76,6 +97,11 @@ pub(crate) struct ReferenceSpec {
     pub(crate) per_concept: usize,
     /// At most this many references in one call.
     pub(crate) per_call: usize,
+    /// Whether a hybrid similarity merge of the citing concept into the
+    /// target drops the reference as a reinforcement (the merge's `Semantic`
+    /// edge already ties the two). True for a citation, false for a
+    /// contradiction, which the tie does not express.
+    pub(crate) merge_is_reinforcement: bool,
 }
 
 /// At most this many `depends_on` references on one concept.
@@ -92,6 +118,40 @@ pub(crate) const DEPENDS_ON: ReferenceSpec = ReferenceSpec {
     acyclic: true,
     per_concept: MAX_REFERENCES_PER_CONCEPT,
     per_call: MAX_REFERENCES_PER_DERIVE,
+    merge_is_reinforcement: true,
+};
+
+/// At most this many `against` references on one concept (or one action).
+pub const MAX_AGAINST_PER_CONCEPT: usize = 8;
+/// At most this many `against` references in one derive call.
+pub const MAX_AGAINST_PER_DERIVE: usize = 32;
+
+/// The weight of a `Contradicts` edge. The edge never decays and feeds no
+/// score (#19(a)), so the weight only says the opposition was declared
+/// outright.
+pub(crate) const CONTRADICTS_WEIGHT: f64 = 1.0;
+
+/// A derive concept's `against` (#19(b)): `concept -Contradicts-> target`.
+pub(crate) const AGAINST: ReferenceSpec = ReferenceSpec {
+    field: ReferenceField::Against,
+    edge_type: EdgeType::Contradicts,
+    weight: CONTRADICTS_WEIGHT,
+    acyclic: false,
+    per_concept: MAX_AGAINST_PER_CONCEPT,
+    per_call: MAX_AGAINST_PER_DERIVE,
+    merge_is_reinforcement: false,
+};
+
+/// A `record_action`'s `against` (#19(b)): `action -Contradicts-> target`.
+/// One action is one concept, so the call limit is the concept limit.
+pub(crate) const ACTION_AGAINST: ReferenceSpec = ReferenceSpec {
+    field: ReferenceField::ActionAgainst,
+    edge_type: EdgeType::Contradicts,
+    weight: CONTRADICTS_WEIGHT,
+    acyclic: false,
+    per_concept: MAX_AGAINST_PER_CONCEPT,
+    per_call: MAX_AGAINST_PER_CONCEPT,
+    merge_is_reinforcement: false,
 };
 
 fn refuse(
@@ -103,19 +163,59 @@ fn refuse(
     resolve::refusal(spec.field, Some(concept), reference, kind)
 }
 
-/// The derive's call-time pre-pass for `depends_on` (see [`pin`]).
+/// The derive's call-time pre-pass for `depends_on` and `against` (see
+/// [`pin`]). `depends_on` is resolved first, so a call with a bad entry in
+/// each is refused for the citation.
 pub(crate) fn validate(
     g: &Graph,
     concepts: &[(&str, ConceptType)],
     citations: &[ConceptCitations],
 ) -> Result<PinnedCitations, LamboError> {
-    let entries: Vec<(&str, &[String])> = citations
+    let depends_on: Vec<(&str, &[String])> = citations
         .iter()
         .map(|c| (c.content.as_str(), c.depends_on.as_slice()))
         .collect();
+    let against: Vec<(&str, &[String])> = citations
+        .iter()
+        .map(|c| (c.content.as_str(), c.against.as_slice()))
+        .collect();
     Ok(PinnedCitations {
-        references: pin(g, concepts, &DEPENDS_ON, &entries)?,
+        references: pin(g, concepts, &DEPENDS_ON, &depends_on)?,
+        against: pin(g, concepts, &AGAINST, &against)?,
     })
+}
+
+/// The commit's re-resolution of a derive's citations and contradictions
+/// ([`recheck`] for each list).
+pub(crate) fn recheck_all(g: &Graph, pinned: &PinnedCitations) -> Result<(), LamboError> {
+    recheck(g, &DEPENDS_ON, &pinned.references)?;
+    recheck(g, &AGAINST, &pinned.against)
+}
+
+/// Write a derive's citation and contradiction edges ([`write_edges`] for
+/// each list), counting them on `outcome` (`cited`, `contradicted`,
+/// `reinforced`).
+pub(crate) fn write_all_edges(
+    g: &mut Graph,
+    pinned: &PinnedCitations,
+    written: &Written,
+    stamp: Stamp,
+    session_id: &SessionId,
+    outcome: &mut DeriveOutcome,
+) -> Result<(), LamboError> {
+    let cited = write_edges(
+        g,
+        &DEPENDS_ON,
+        &pinned.references,
+        written,
+        stamp,
+        session_id,
+    )?;
+    let contradicted = write_edges(g, &AGAINST, &pinned.against, written, stamp, session_id)?;
+    outcome.cited += cited.added;
+    outcome.contradicted += contradicted.added;
+    outcome.reinforced += cited.reinforced + contradicted.reinforced;
+    Ok(())
 }
 
 /// Resolve every reference of `entries` (`(citing content, references)`,
@@ -277,12 +377,21 @@ pub(crate) struct Written {
     pub(crate) merged_into: HashMap<NodeId, NodeId>,
 }
 
-/// Write the reference edges, inside the derive's transaction and after its
-/// concepts. A reference whose citing concept a similarity merge tied to
-/// its target is dropped and counted in `outcome.reinforced`. Refuses (and
-/// so rolls the whole write back) a reference whose source turned out to be
-/// its target, or, for an acyclic spec, whose edge would close a cycle with
-/// the graph as written so far.
+/// What [`write_edges`] wrote: edges it added, and references that
+/// reinforced an existing edge or were dropped as a reinforcement.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct EdgeCounts {
+    pub(crate) added: usize,
+    pub(crate) reinforced: usize,
+}
+
+/// Write the reference edges, inside the write's transaction and after its
+/// concepts. For a spec whose [`ReferenceSpec::merge_is_reinforcement`]
+/// holds, a reference whose citing concept a similarity merge tied to its
+/// target is dropped and counted as reinforced. Refuses (and so rolls the
+/// whole write back) a reference whose source turned out to be its target,
+/// or, for an acyclic spec, whose edge would close a cycle with the graph as
+/// written so far.
 pub(crate) fn write_edges(
     g: &mut Graph,
     spec: &ReferenceSpec,
@@ -290,8 +399,8 @@ pub(crate) fn write_edges(
     written: &Written,
     stamp: Stamp,
     session_id: &SessionId,
-    outcome: &mut DeriveOutcome,
-) -> Result<(), LamboError> {
+) -> Result<EdgeCounts, LamboError> {
+    let mut counts = EdgeCounts::default();
     let mut planned: Vec<(NodeId, NodeId, EdgeType)> = Vec::new();
     let mut seen: HashSet<(NodeId, NodeId)> = HashSet::new();
     for p in pinned {
@@ -303,8 +412,8 @@ pub(crate) fn write_edges(
                 ReferenceRefusalKind::UnknownConcept,
             )
         })?;
-        if written.merged_into.get(&source) == Some(&p.target) {
-            outcome.reinforced += 1;
+        if spec.merge_is_reinforcement && written.merged_into.get(&source) == Some(&p.target) {
+            counts.reinforced += 1;
             continue;
         }
         if source == p.target {
@@ -335,9 +444,9 @@ pub(crate) fn write_edges(
     }
     for &(source, target, edge_type) in &planned {
         if g.edge_between(source, target, edge_type).is_some() {
-            outcome.reinforced += 1;
+            counts.reinforced += 1;
         } else {
-            outcome.cited += 1;
+            counts.added += 1;
         }
         g.upsert_edge(Edge {
             event_time: stamp.event_time,
@@ -352,8 +461,10 @@ pub(crate) fn write_edges(
             last_reinforced: stamp.created_at,
         })?;
     }
-    Ok(())
+    Ok(counts)
 }
 
+#[cfg(test)]
+mod against_tests;
 #[cfg(test)]
 mod tests;
