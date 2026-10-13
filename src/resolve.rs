@@ -1043,6 +1043,22 @@ mod tests {
             "the process-file selector must reach Memory's Config"
         );
         assert!(
+            !r.config.canonization_supersede,
+            "#20: an unset canonization_supersede leaves supersession off"
+        );
+        let on = resolve_backends(LamboFile {
+            canonization_supersede: Some(true),
+            ..LamboFile::from_toml_str(
+                "[store]\nkind = \"memory\"\n[embedder]\nkind = \"fixture\"\ndim = 1024\n",
+            )
+            .unwrap()
+        })
+        .unwrap();
+        assert!(
+            on.config.canonization_supersede,
+            "#20: the file's canonization_supersede must reach Memory's Config"
+        );
+        assert!(
             !r.config.accept_client_vectors,
             "client vectors are off unless the operator opts in (#22)"
         );

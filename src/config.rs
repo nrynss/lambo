@@ -1337,6 +1337,28 @@ mod tests {
         assert!(err.contains("ulr"), "{err}");
     }
 
+    /// #20: supersession is off unless the file turns it on; the key is a
+    /// boolean, an unset key leaves the default alone, and a wrong type
+    /// fails closed.
+    #[test]
+    fn canonization_supersede_defaults_off_and_parses_from_the_file() {
+        assert!(!Config::default().canonization_supersede);
+        assert_eq!(
+            LamboFile::from_toml_str("").unwrap().canonization_supersede,
+            None
+        );
+        for (text, want) in [("true", true), ("false", false)] {
+            let f =
+                LamboFile::from_toml_str(&format!("canonization_supersede = {text}\n")).unwrap();
+            assert_eq!(f.canonization_supersede, Some(want));
+        }
+        assert!(LamboFile::from_toml_str("canonization_supersede = \"yes\"\n").is_err());
+        assert!(LamboFile::from_toml_str("[daemon]\ncanonization_supersede = true\n").is_err());
+        // An unset key is not written back, so an older binary can read it.
+        let text = toml::to_string(&LamboFile::default()).unwrap();
+        assert!(!text.contains("canonization_supersede"), "{text}");
+    }
+
     #[test]
     fn lambo_file_rejects_unknown_keys() {
         assert!(
