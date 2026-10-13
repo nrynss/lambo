@@ -407,8 +407,9 @@ lambo serve --config lambo.toml --transport http --session lambo --session gener
 Each session is a full writer of its own. It has its own lease and fencing token, graph, caches, write queue and local endpoint. So a stdio `lambo serve --session <name>` on the same machine forwards to this process for that session.
 
 Each graph's edges, writes, GC, saints and stats stay in that session. MCP
-recall can merge its configured layers, and MCP recall/inspect can read a
-configured layer with `scope` (below). An MCP session opened on one session's
+recall can merge its configured layers, and MCP tools can act on a
+configured layer with `scope` (below): recall and inspect read it, and the
+writes, `lambo_reserve` and `lambo_saints` act on it. An MCP session opened on one session's
 URL is unknown at another's.
 
 For a project split, set `[serve] default_session = "general-usage"`, pin that
@@ -418,9 +419,9 @@ a first `--session` takes precedence. `general` can be the shared recall layer
 without being the fallback write session. See the
 [configuration example](/config#project-urls-and-a-shared-layer).
 
-**MCP read scope versus CLI session selection.** The JSON field `scope` belongs
-to `lambo_recall` and `lambo_inspect`; there is no `--scope` flag on the CLI
-reader verbs. `lambo recall --session general --query "worktree policy"` and
+**MCP scope versus CLI session selection.** The JSON field `scope` belongs
+to the MCP tools (every one but `lambo_stats`); there is no `--scope` flag on
+the CLI verbs. `lambo recall --session general --query "worktree policy"` and
 `lambo inspect --session general --focus <id>` read that one stored session directly,
 without merging layers. For the layered result agents see, call `lambo_recall`
 through the project's HTTP endpoint. `lambo serve-web` also reads each session
@@ -450,7 +451,7 @@ sessions = ["lambo", "general"]
 layers = ["general"]
 ```
 
-a recall at `/mcp/s/lambo` reads `lambo` and `general` and merges them under one budget. Each hit names its session, a `general` hit's block says `from general`, and `scope` reads one of the two alone, on `lambo_recall` and `lambo_inspect` (a `general` hit's id is inspected with `scope = "general"`). `general` itself is not layered: a recall at `/mcp/s/general` reads `general` only. Writes and every other tool act on the addressed session only.
+a recall at `/mcp/s/lambo` reads `lambo` and `general` and merges them under one budget. Each hit names its session, a `general` hit's block says `from general`, and `scope` reads one of the two alone, on `lambo_recall` and `lambo_inspect` (a `general` hit's id is inspected with `scope = "general"`). `general` itself is not layered: a recall at `/mcp/s/general` reads `general` only. Writes, `lambo_reserve` and `lambo_saints` act on the addressed session unless they pass `scope = "general"`, which writes to (or reserves in, or lists) the layer; writes to different sessions have no ordering between them.
 
 A layer is pinned like any other session and keeps its own lease. If it loses the lease, only the layer is detached: `lambo` keeps serving, and its recalls answer from `lambo` alone with the warning `recall: layer general is unavailable; results are from lambo only` until the layer is taken back. The start is refused when a credential reaches `lambo` but not `general`, or when a layer is not pinned. A stdio `lambo serve --session lambo` that forwards to this serve gets `lambo`'s layering from it; one that holds `lambo` itself serves it unlayered, with one warning.
 

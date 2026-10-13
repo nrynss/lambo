@@ -504,6 +504,7 @@ async fn the_foreign_probe_runs_with_this_sessions_lock_released() {
             &[cite("a decision", &["8baad4e0"])],
             None,
             &probe,
+            None,
         )
         .await
         .unwrap_err();
@@ -532,6 +533,7 @@ async fn the_foreign_probe_runs_with_this_sessions_lock_released() {
                 depends_on: &[missing.as_str()],
             },
             &probe,
+            None,
         )
         .await
         .unwrap_err();

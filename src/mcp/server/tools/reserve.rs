@@ -6,12 +6,14 @@ use rmcp::model::{CallToolResult, ContentBlock};
 use serde_json::json;
 
 use crate::mcp::server::params::{check_size, ReserveParams};
-use crate::mcp::server::response::{attach_warnings, bad_param, conflict_err, tool_err};
+use crate::mcp::server::response::{attach_warnings, bad_param, conflict_err};
 use crate::mcp::server::trace::note_facts;
 use crate::mcp::server::LamboServer;
 use crate::surface::limits::MAX_RESERVE_TTL_SECS;
 use crate::surface::validate::check_in_range;
 use crate::types::{LamboError, NodeId};
+
+use super::scope::{with_scope, with_session};
 
 impl LamboServer {
     pub(in crate::mcp::server) async fn reserve_impl(&self, p: ReserveParams) -> CallToolResult {
@@ -25,7 +27,8 @@ impl LamboServer {
         // annotate. The id check used to run first, which left its own two exits
         // reporting `op=None granted=None`.
         let op = if releasing { "release" } else { "reserve" };
-        note_facts(|| json!({ "op": op, "granted": false }));
+        let scope = p.scope.as_deref();
+        note_facts(|| with_scope(json!({ "op": op, "granted": false }), scope));
         // J1: the caller's id IS the lock identity. No refusal here any more —
         // two clients through one serve contend for real, each under its own
         // name, which is the whole point. The id is unauthenticated, and the
@@ -34,6 +37,13 @@ impl LamboServer {
             Ok(a) => a,
             Err(e) => return e,
         };
+        // #33 PR 4: a layer's node is reserved in the layer, whose id it is.
+        // Soft locks are per session, as reservations always were.
+        let target = match self.target("lambo_reserve", scope) {
+            Ok(t) => t,
+            Err(e) => return e,
+        };
+        let mem = target.mem(&self.mem);
         let mut warnings: Vec<String> = Vec::new();
         // N5: node_id is a client string too — size- and control-checked before
         // it is parsed, so the same uniform guard covers every field.
@@ -46,9 +56,9 @@ impl LamboServer {
         };
 
         if releasing {
-            return match self.mem.release_as(&acting, node_id) {
+            return match mem.release_as(&acting, node_id) {
                 Ok(()) => {
-                    note_facts(|| json!({ "op": "release", "granted": true }));
+                    note_facts(|| with_scope(json!({ "op": "release", "granted": true }), scope));
                     let msg = format!("released {}", node_id.0);
                     let mut out = CallToolResult::success(vec![ContentBlock::text(msg.clone())]);
                     attach_warnings(&mut out, &warnings);
@@ -60,7 +70,7 @@ impl LamboServer {
                 Err(LamboError::SoftLock(msg)) => {
                     conflict_err("lambo_reserve (release)", &msg, "nothing was released")
                 }
-                Err(e) => tool_err("lambo_reserve (release)", e),
+                Err(e) => self.target_err("lambo_reserve (release)", &target, e),
             };
         }
 
@@ -68,35 +78,45 @@ impl LamboServer {
         if let Err(e) = check_in_range("ttl_seconds", ttl_secs, 1, MAX_RESERVE_TTL_SECS) {
             return bad_param(e);
         }
-        let reservation = match self
-            .mem
-            .reserve_as(&acting, node_id, Duration::from_secs(ttl_secs))
-        {
+        let reservation = match mem.reserve_as(&acting, node_id, Duration::from_secs(ttl_secs)) {
             Ok(r) => r,
             Err(LamboError::SoftLock(msg)) => {
                 return conflict_err("lambo_reserve", &msg, "nothing was reserved")
             }
-            Err(e) => return tool_err("lambo_reserve", e),
+            Err(e) => return self.target_err("lambo_reserve", &target, e),
         };
-        note_facts(|| json!({ "op": "reserve", "granted": true, "ttl_seconds": ttl_secs }));
+        note_facts(|| {
+            with_scope(
+                json!({ "op": "reserve", "granted": true, "ttl_seconds": ttl_secs }),
+                scope,
+            )
+        });
         warnings.push(
             "reservations are advisory and RAM-local: they are lost on server restart".into(),
         );
-        let summary = format!(
+        let mut summary = format!(
             "reserved {} until {} for agent '{}'",
             node_id.0,
             reservation.expires_at.to_rfc3339(),
             reservation.agent_id.0
         );
+        // #33 PR 4: a layer's lock names its session; this session's reads
+        // as it always did.
+        if let Some(layer) = target.layer() {
+            summary.push_str(&format!(" in session '{layer}'"));
+        }
         let mut out = CallToolResult::success(vec![ContentBlock::text(summary.clone())]);
         attach_warnings(&mut out, &warnings);
-        out.structured_content = Some(json!({
-            "summary": summary,
-            "node_id": node_id.0.to_string(),
-            "agent_id": reservation.agent_id.0,
-            "expires_at": reservation.expires_at.to_rfc3339(),
-            "warnings": warnings,
-        }));
+        out.structured_content = Some(with_session(
+            json!({
+                "summary": summary,
+                "node_id": node_id.0.to_string(),
+                "agent_id": reservation.agent_id.0,
+                "expires_at": reservation.expires_at.to_rfc3339(),
+                "warnings": warnings,
+            }),
+            &target,
+        ));
         out
     }
 }
