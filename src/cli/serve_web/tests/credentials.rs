@@ -102,6 +102,7 @@ async fn derive_text(store: &Arc<MemoryStore>, session: &str, content: &str) {
             parent_of: vec![],
             concept: vec![],
             depends_on: Vec::new(),
+            against: Vec::new(),
         },
     )
     .await

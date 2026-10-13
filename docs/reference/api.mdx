@@ -35,9 +35,10 @@ The accessors `session`, `agent`, `config`, `embedding_contract`, `graph`, `inde
 | Method | What it does |
 |---|---|
 | `derive` | Derives concepts from an interaction. Async. |
-| `derive_cited_as` | `derive` with citations: each `ConceptCitations` names one of the call's concepts by its content and the existing concepts it depends on. Every reference must resolve to exactly one concept of the session, or the call fails with `LamboError::Reference` and writes nothing. Async. |
+| `derive_cited_as` | `derive` with citations and contradictions: each `ConceptCitations` names one of the call's concepts by its content, the existing concepts it depends on (`depends_on`) and the existing concepts it contradicts (`against`, written as `Contradicts` edges, newer to older). Every reference must resolve to exactly one concept of the session, or the call fails with `LamboError::Reference` and writes nothing. Async. |
 | `derive_cited_async_as` | The same, acknowledged before the write is applied, like `derive_async_as`; the references are resolved before the ack and checked again when the write is applied. Async. |
 | `record_action` | Records an action as a concept plus its causal and dependency edges. |
+| `record_action_against_async_as` and `record_action_against_embedded_as` | `record_action_async_as` and `record_action_embedded_as` with `against`: existing concepts the action contradicts, resolved like a derive's references (never created) and written as `action -Contradicts-> target`. |
 | `demote` | Demotes a chunk. |
 | `retract` | Retracts a concept. Pass a dry-run flag to get an impact report without mutating. Async. |
 | `reserve` and `release` | Take or release an advisory soft lock. |

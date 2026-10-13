@@ -432,6 +432,7 @@ mod tests {
                 parent_of: vec!["auth middleware:user schema".into()],
                 concept: vec!["auth middleware:entity".into()],
                 depends_on: Vec::new(),
+                against: Vec::new(),
             },
         )
         .await
@@ -446,11 +447,13 @@ mod tests {
                         content: "user schema".into(),
                         concept_type: WireConceptType::Entity,
                         depends_on: None,
+                        against: None,
                     },
                     WireConcept {
                         content: "auth middleware".into(),
                         concept_type: WireConceptType::Entity,
                         depends_on: None,
+                        against: None,
                     },
                 ],
                 parent_of: Some(vec![WireParentOf {
@@ -477,6 +480,7 @@ mod tests {
                 produces: vec!["user schema".into()],
                 modifies: vec![],
                 depends_on: vec!["auth middleware".into()],
+                against: Vec::new(),
             },
         )
         .await
@@ -491,6 +495,7 @@ mod tests {
                 produces: Some(vec![WireResource("user schema".into())]),
                 modifies: None,
                 depends_on: Some(vec![WireResource("auth middleware".into())]),
+                against: None,
                 scope: None,
             })
             .await;
@@ -553,6 +558,7 @@ mod tests {
                 parent_of: vec![],
                 concept: vec![],
                 depends_on: Vec::new(),
+                against: Vec::new(),
             },
         )
         .await
@@ -570,6 +576,7 @@ mod tests {
                 parent_of: vec![],
                 concept: vec![],
                 depends_on: Vec::new(),
+                against: Vec::new(),
             },
         )
         .await
@@ -600,6 +607,7 @@ mod tests {
                     parent_of: vec![],
                     concept,
                     depends_on: Vec::new(),
+                    against: Vec::new(),
                 },
             )
             .await
@@ -616,6 +624,7 @@ mod tests {
                 produces: vec![],
                 modifies: vec![],
                 depends_on: vec![],
+                against: Vec::new(),
             },
         )
         .await
@@ -626,6 +635,109 @@ mod tests {
             .await
             .map(|s| s.concepts.is_empty())
             .unwrap_or(true));
+    }
+
+    /// #19(b): `--against` on `lambo derive` and `lambo record-action`
+    /// records the contradiction and says so; a reference that names
+    /// nothing is a usage error and writes nothing; more than eight is
+    /// refused before the writer opens.
+    #[tokio::test]
+    async fn cli_against_records_contradictions_and_refuses_bad_references() {
+        let store = Arc::new(MemoryStore::new());
+        let derive = |content: &str, against: Vec<String>| crate::cli::derive::Args {
+            session: "cli-against".into(),
+            agent: "agent-a".into(),
+            content: content.into(),
+            kind: ConceptKind::Logic,
+            parent_of: vec![],
+            concept: vec![],
+            depends_on: Vec::new(),
+            against,
+        };
+        let plain = crate::cli::derive::run(
+            backends_on(store.clone()),
+            derive("brand x runs true to size", vec![]),
+        )
+        .await
+        .expect("derive the belief");
+        assert!(!plain.contains("contradiction"), "{plain}");
+        let out = crate::cli::derive::run(
+            backends_on(store.clone()),
+            derive(
+                "brand x runs a size small",
+                vec!["brand x runs true to size".into()],
+            ),
+        )
+        .await
+        .expect("derive the contradiction");
+        assert!(out.ends_with("; 1 contradiction(s) recorded"), "{out}");
+        let out = crate::cli::record_action::run(
+            backends_on(store.clone()),
+            crate::cli::record_action::Args {
+                session: "cli-against".into(),
+                agent: "agent-a".into(),
+                action: "returned the shirt".into(),
+                produces: vec![],
+                modifies: vec![],
+                depends_on: vec![],
+                against: vec!["brand x runs true to size".into()],
+            },
+        )
+        .await
+        .expect("record the contradicting action");
+        assert!(out.contains("1 edge(s) added"), "{out}");
+        let snap = store
+            .load_session(&SessionId::new("cli-against"))
+            .await
+            .expect("load");
+        assert_eq!(
+            snap.edges
+                .iter()
+                .filter(|e| e.edge_type == crate::types::EdgeType::Contradicts)
+                .count(),
+            2
+        );
+        let concepts = snap.concepts.len();
+
+        let err = crate::cli::derive::run(
+            backends_on(store.clone()),
+            derive("a third claim", vec!["no such belief".into()]),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, CliError::Usage(_)), "{err}");
+        assert!(
+            err.to_string()
+                .contains("against \"no such belief\" on \"a third claim\" names no concept"),
+            "{err}"
+        );
+        let err = crate::cli::derive::run(
+            backends_on(store.clone()),
+            derive("a third claim", (0..9).map(|n| format!("r{n}")).collect()),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("at most 8"), "{err}");
+        let err = crate::cli::record_action::run(
+            backends_on(store.clone()),
+            crate::cli::record_action::Args {
+                session: "cli-against".into(),
+                agent: "agent-a".into(),
+                action: "returned another".into(),
+                produces: vec![],
+                modifies: vec![],
+                depends_on: vec![],
+                against: vec!["no such belief".into()],
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, CliError::Usage(_)), "{err}");
+        let snap = store
+            .load_session(&SessionId::new("cli-against"))
+            .await
+            .expect("load");
+        assert_eq!(snap.concepts.len(), concepts, "the refusals wrote nothing");
     }
 
     /// #25: the two count-cap refusals come from one builder each
@@ -681,6 +793,7 @@ mod tests {
                     .map(|i| format!("c{i}:entity"))
                     .collect(),
                 depends_on: Vec::new(),
+                against: Vec::new(),
             },
         )
         .await
@@ -693,6 +806,7 @@ mod tests {
                         content: format!("c{i}"),
                         concept_type: WireConceptType::Entity,
                         depends_on: None,
+                        against: None,
                     })
                     .collect(),
                 parent_of: None,
@@ -715,6 +829,7 @@ mod tests {
                 produces: produces.clone(),
                 modifies: vec!["m0".into()],
                 depends_on: vec![],
+                against: Vec::new(),
             },
         )
         .await
@@ -727,6 +842,7 @@ mod tests {
                 produces: Some(produces.into_iter().map(WireResource).collect()),
                 modifies: Some(vec![WireResource("m0".into())]),
                 depends_on: None,
+                against: None,
                 scope: None,
             })
             .await;
@@ -760,6 +876,7 @@ mod tests {
                 parent_of: vec!["auth middleware:user schema".into()],
                 concept: vec!["auth middleware:entity".into()],
                 depends_on: Vec::new(),
+                against: Vec::new(),
             },
         )
         .await
@@ -812,6 +929,7 @@ mod tests {
                 parent_of: vec![],
                 concept: vec![],
                 depends_on: Vec::new(),
+                against: Vec::new(),
             },
         )
         .await
@@ -893,6 +1011,7 @@ mod tests {
                 parent_of: vec![],
                 concept: vec![],
                 depends_on: Vec::new(),
+                against: Vec::new(),
             },
         )
         .await
@@ -1185,6 +1304,7 @@ mod sqlite_tests {
                 parent_of: vec![],
                 concept: vec!["auth middleware:entity".into()],
                 depends_on: Vec::new(),
+                against: Vec::new(),
             },
         )
         .await
@@ -1200,6 +1320,7 @@ mod sqlite_tests {
                 produces: vec!["user schema".into()],
                 modifies: vec![],
                 depends_on: vec!["auth middleware".into()],
+                against: Vec::new(),
             },
         )
         .await
@@ -1337,6 +1458,7 @@ mod sqlite_tests {
                 parent_of: vec![],
                 concept: vec![],
                 depends_on: Vec::new(),
+                against: Vec::new(),
             },
         )
         .await
@@ -1355,6 +1477,7 @@ mod sqlite_tests {
                 parent_of: vec![],
                 concept: vec![],
                 depends_on: Vec::new(),
+                against: Vec::new(),
             },
         )
         .await
@@ -1378,6 +1501,7 @@ mod sqlite_tests {
                 parent_of: vec![],
                 concept: vec![],
                 depends_on: Vec::new(),
+                against: Vec::new(),
             },
         )
         .await
@@ -1424,6 +1548,7 @@ mod sqlite_tests {
                 parent_of: vec![],
                 concept: vec![],
                 depends_on: Vec::new(),
+                against: Vec::new(),
             },
         )
         .await

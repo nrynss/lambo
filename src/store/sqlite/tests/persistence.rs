@@ -1760,9 +1760,9 @@ async fn a_settled_image_intent_keeps_no_vector() {
     let with_vector = payloads.iter().filter(|p| p.contains("\"vector\"")).count();
     assert_eq!(
         (payloads.len(), with_vector),
-        (4, 0),
-        "four intents (#36 PR 4 added a cited one), none of the settled ones carries a \
-         vector: {payloads:?}"
+        (5, 0),
+        "five intents (#36 PR 4 added a cited derive, #19(b) a cited action), none of the \
+         settled ones carries a vector: {payloads:?}"
     );
 }
 

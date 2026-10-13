@@ -372,6 +372,7 @@ async fn a_scoped_write_is_refused_for_a_grant_that_does_not_reach_the_layer() {
             content: "a narrow write".into(),
             concept_type: WireConceptType::Logic,
             depends_on: None,
+            against: None,
         }],
         scope: scope.map(str::to_string),
         ..Default::default()
@@ -959,6 +960,119 @@ async fn a_cross_session_citation_or_edge_is_refused_with_its_id() {
         g.edges().any(|e| e.source == citing && e.target == ruling)
     };
     assert!(cited_in_general, "the citation edge stays inside general");
+    s.mem.close().await.expect("close");
+    general.mem.close().await.expect("close");
+}
+
+/// #19(b) under #33 PR 4: `against` resolves against the session the
+/// write goes to, like a citation. In both directions a cross-session
+/// contradiction is refused, naming the reference and the holder, on a
+/// derive and on an action, and nothing is written in either session: a
+/// project concept from a write scoped to `general`, and a `general`
+/// concept from an unscoped write. A contradiction inside the scoped
+/// session lands there, and only there.
+#[tokio::test]
+async fn a_cross_session_contradiction_is_refused_in_both_directions() {
+    let (s, general, _source) = project_and_general("cross-against").await;
+    let fact = id_of(&s, PROJECT_FACT);
+    let ruling = id_of(&general, GENERAL_RULING);
+    let before = (
+        s.memory().graph().read().snapshot(),
+        general.memory().graph().read().snapshot(),
+    );
+    let contradict = |reference: String, scope: Option<&str>| {
+        let mut args = json!({"agent_id": "agent-a", "concepts": [{
+            "content": "a newer claim against another", "concept_type": "logic",
+            "against": [reference],
+        }]});
+        if let Some(scope) = scope {
+            args["scope"] = json!(scope);
+        }
+        args
+    };
+    for (target, holder, scope) in [
+        (fact, "cross-against-proj", Some("general")),
+        (ruling, "general", None),
+    ] {
+        for reference in [
+            crate::recall::format::short_id(target),
+            target.0.to_string(),
+        ] {
+            let out = call_raw(&s, "lambo_derive", contradict(reference.clone(), scope)).await;
+            assert_eq!(out.is_error, Some(true), "{reference} {scope:?}");
+            let text = text_of(&out);
+            assert!(
+                text.contains(&format!(
+                    "is in scope \"{holder}\"; cross-session contradictions are not recorded"
+                )),
+                "{text}"
+            );
+            assert!(
+                text.contains(&reference),
+                "the reference is reported: {text}"
+            );
+            let out = call_raw(
+                &s,
+                "lambo_record_action",
+                action_args("acted against it", "against", &[&reference], scope),
+            )
+            .await;
+            assert_eq!(out.is_error, Some(true), "{reference} {scope:?}");
+            let text = text_of(&out);
+            assert!(
+                text.contains(&format!("is in scope \"{holder}\"")),
+                "{text}"
+            );
+        }
+    }
+    assert_eq!(
+        before,
+        (
+            s.memory().graph().read().snapshot(),
+            general.memory().graph().read().snapshot(),
+        )
+    );
+    // Within the scoped session, a contradiction lands there.
+    let out = call(
+        &s,
+        "lambo_derive",
+        contradict(crate::recall::format::short_id(ruling), Some("general")),
+    )
+    .await;
+    assert_eq!(out.is_error, Some(false), "{out:?}");
+    let out = call(
+        &s,
+        "lambo_record_action",
+        action_args(
+            "challenged the ruling",
+            "against",
+            &[&ruling.0.to_string()],
+            Some("general"),
+        ),
+    )
+    .await;
+    assert_eq!(out.is_error, Some(false), "{out:?}");
+    {
+        let g = general.memory().graph().read();
+        for source in ["a newer claim against another", "challenged the ruling"] {
+            let id = g
+                .concepts()
+                .find(|c| c.content == source)
+                .unwrap_or_else(|| panic!("{source} is written in general"))
+                .id;
+            assert!(
+                g.edge_between(id, ruling, crate::types::EdgeType::Contradicts)
+                    .is_some(),
+                "{source}"
+            );
+        }
+    }
+    assert!(s
+        .memory()
+        .graph()
+        .read()
+        .edges()
+        .all(|e| e.edge_type != crate::types::EdgeType::Contradicts));
     s.mem.close().await.expect("close");
     general.mem.close().await.expect("close");
 }

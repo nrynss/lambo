@@ -813,3 +813,64 @@ async fn a_citation_of_a_layer_concept_is_refused_as_cross_session() {
     s.mem.close().await.expect("close");
     general.mem.close().await.expect("close general");
 }
+
+/// #19(b), the approved layered rule: a contradiction of a layer's concept
+/// from the project session is refused as cross-session, by short id, full
+/// id and content, on a derive and on an action, and nothing is written in
+/// either session. The message says how to challenge it: deliberately, in
+/// that scope.
+#[tokio::test]
+async fn a_contradiction_of_a_layer_concept_is_refused_as_cross_session() {
+    let (s, general, _source) = project_and_general("against").await;
+    let ruling = general
+        .memory()
+        .graph()
+        .read()
+        .concepts()
+        .find(|c| c.content == GENERAL_RULING)
+        .expect("general holds the ruling")
+        .id;
+    let before = (
+        s.memory().graph().read().snapshot(),
+        general.memory().graph().read().snapshot(),
+    );
+    for reference in [
+        crate::recall::format::short_id(ruling),
+        ruling.0.to_string(),
+        GENERAL_RULING.to_string(),
+    ] {
+        for (tool, args) in [
+            (
+                "lambo_derive",
+                json!({"agent_id": "agent-a", "concepts": [{
+                    "content": "a project finding", "concept_type": "observation",
+                    "against": [reference.clone()],
+                }]}),
+            ),
+            (
+                "lambo_record_action",
+                json!({"agent_id": "agent-a", "action": "ran it",
+                       "against": [reference.clone()]}),
+            ),
+        ] {
+            let out = call_raw(&s, tool, args).await;
+            assert_eq!(out.is_error, Some(true), "{tool}");
+            let text = text_of(&out);
+            assert!(
+                text.contains(
+                    "is in scope \"general\"; cross-session contradictions are not recorded"
+                ) && text.contains("write the assertion in scope \"general\" itself"),
+                "{tool}: {text}"
+            );
+        }
+    }
+    assert_eq!(
+        before,
+        (
+            s.memory().graph().read().snapshot(),
+            general.memory().graph().read().snapshot(),
+        )
+    );
+    s.mem.close().await.expect("close");
+    general.mem.close().await.expect("close general");
+}

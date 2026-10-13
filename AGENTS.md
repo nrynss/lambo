@@ -90,6 +90,12 @@ infrastructure section above, applied to design surface instead of resources:
   showed you, put its id (the 8 hex characters recall shows) in `depends_on`: on
   `lambo_record_action`, or on the concept in `lambo_derive`. The ruling then gains a
   dependent, instead of a short alias Entity collecting the citation.
+- **Name what a write shows to be wrong in `against`** (also 0.6.0 only; a 0.5.0 writer
+  refuses the field). When a decision, finding or action contradicts a concept already in
+  memory, put that concept's id in `against`, on the concept in `lambo_derive` or on
+  `lambo_record_action`. It records the contradiction, dated by your write; it adds no
+  dependent, changes no score or promotion, raises no conflict, and never replaces the
+  older concept. Do not cite and contradict one concept in the same call (refused).
 - Use one stable `agent_id` for an agent's whole life (model or client id: `claude-opus-5-5`,
   `codex-agent`, …), never per call, task or topic. Agents sharing an id share soft locks, so
   concurrent agents that must not collide need distinct stable ids (model + stable suffix).
