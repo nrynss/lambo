@@ -560,6 +560,67 @@ fn a_commit_hash_that_prefixes_a_concept_id_cites_it_unless_its_text_exists() {
         .is_some());
 }
 
+/// Orchestrator decision on the #36 PR 4 review: only the hyphenated id and
+/// exactly 8 hex characters are ids. The 32-hex simple form of a real
+/// concept's id, and a 9 to 12 character prefix of it, stay text in
+/// `record_action` (created as before, no edge to the concept) and match
+/// nothing as a derive citation; exactly 8 cites.
+#[test]
+fn only_the_hyphenated_id_and_exactly_eight_hex_characters_are_ids() {
+    let (mut g, i) = graph("cite-id-shapes");
+    let ruling = concept(&mut g, i, RULING, ConceptType::Logic);
+    let simple = ruling.0.simple().to_string();
+    let mut texts = vec![simple.clone()];
+    texts.extend((9..=12).map(|n| simple[..n].to_string()));
+    for text in &texts {
+        let deps = [text.as_str()];
+        let out = record_action(&mut g, i, &agent(), &action(&deps)).unwrap();
+        let minted = node_of(&g, text);
+        assert_ne!(minted, ruling, "{text}");
+        assert!(
+            g.edge_between(out.action_node, minted, EdgeType::Dependency)
+                .is_some(),
+            "{text} is text"
+        );
+        assert!(
+            g.edge_between(out.action_node, ruling, EdgeType::Dependency)
+                .is_none(),
+            "{text} does not cite the concept"
+        );
+    }
+    let (mut g, i) = graph("cite-id-shapes-derive");
+    let ruling = concept(&mut g, i, RULING, ConceptType::Logic);
+    let simple = ruling.0.simple().to_string();
+    for text in [
+        simple.clone(),
+        simple[..9].to_string(),
+        simple[..12].to_string(),
+    ] {
+        let err = derive_with_citations(
+            &mut g,
+            i,
+            &[(DECISION, ConceptType::Logic)],
+            &[cite(DECISION, &[&text])],
+        )
+        .unwrap_err();
+        assert_eq!(refusal(&err).kind, ReferenceRefusalKind::Missing, "{text}");
+    }
+    // Exactly 8 cites, in both places.
+    let out = derive_with_citations(
+        &mut g,
+        i,
+        &[(DECISION, ConceptType::Logic)],
+        &[cite(DECISION, &[&simple[..8]])],
+    )
+    .unwrap();
+    assert_eq!(out.cited, 1);
+    let deps = [&simple[..8]];
+    let act = record_action(&mut g, i, &agent(), &action(&deps)).unwrap();
+    assert!(g
+        .edge_between(act.action_node, ruling, EdgeType::Dependency)
+        .is_some());
+}
+
 /// An id entry is pinned at the ack and checked at the apply; a request
 /// with no id-shaped entry carries no pins at all.
 #[test]

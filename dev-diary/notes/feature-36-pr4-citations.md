@@ -38,8 +38,11 @@ decisions 5 and 6 on [#36](https://github.com/nrynss/lambo/issues/36)
 
 `resolve_reference(&Graph, &str) -> Resolved { Concept { node, leg },
 Missing, Ambiguous, NotAConcept }`. Legs: a full node id (exclusive: content
-never parses as a UUID), a short id (8 to 31 hex characters, a unique
-prefix) and the canonical key, computed **without** the synonym lookup
+never has the hyphenated shape, the only full-id form a write accepts), a
+short id (exactly 8 hex characters, a unique prefix; orchestrator decision
+after the Sonnet review: 9 to 32 hex characters and the unhyphenated form
+are text, so the surface that changed from 0.5.0 stays small and matches
+the only ids agents see) and the canonical key, computed **without** the synonym lookup
 (`graph::canonical::canonical_key(.., |_| None)`). No synonym is ever a
 reference: synonyms are in-memory state (S5), so a reference resolved
 through one could mean something else after a restart (review H1). The
@@ -146,13 +149,15 @@ refused depends_on strings 0.5.0 accepted. Now:
   its id text minted then), unless a layer holds it, which is refused as
   cross-session (`Memory::record_action_async_scoped`, via
   `graph::action::unresolved_ids`);
-- 8 to 32 **hex** characters whose text names no concept cite the one
+- exactly 8 **hex** characters whose text names no concept cite the one
   concept whose id they prefix, and a shared prefix is refused; a text
   match wins, as in 0.5.0. So a commit hash that happens to prefix a
   concept's id cites it (review L4): about (concepts) / 2^32 for 8
   characters, documented in mcp.mdx and the CHANGELOG;
-- everything else, `urn:uuid:` and braced ids included, is the 0.5.0 text
-  rule.
+- everything else, 9 to 32 hex characters (the unhyphenated form
+  included), `urn:uuid:` and braced ids, is the 0.5.0 text rule
+  (`only_the_hyphenated_id_and_exactly_eight_hex_characters_are_ids`).
+  Inspect's read-only focus keeps its own 8-to-32 prefix check.
 
 An entry resolved by id is pinned, and an id-shaped one that named nothing
 at the ack is pinned as `None`, so it is refused if it comes to name a

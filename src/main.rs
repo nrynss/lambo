@@ -322,12 +322,12 @@ enum Commands {
             help = "Extra concept CONTENT:KIND (repeatable) so one invocation can match a multi-concept MCP lambo_derive."
         )]
         concept: Vec<String>,
-        /// An existing concept the first concept rests on (repeatable, at most 8): its 8-hex id from recall, its full node id, its exact content or a name. Must match exactly one concept, or nothing is written.
+        /// An existing concept the first concept rests on (repeatable, at most 8): its 8-hex id from recall, its full node id or its exact content. Must match exactly one concept, or nothing is written.
         #[arg(
             long = "depends-on",
             value_name = "REF",
             action = ArgAction::Append,
-            help = "An existing concept the first concept rests on (repeatable, at most 8): its 8-hex id from recall, its full node id, its exact content or a name. Must match exactly one concept, or nothing is written."
+            help = "An existing concept the first concept rests on (repeatable, at most 8): its 8-hex id from recall, its full node id or its exact content. Must match exactly one concept, or nothing is written."
         )]
         depends_on: Vec<String>,
         /// DANGEROUS: attach despite a same-width stored/configured model-id mismatch.

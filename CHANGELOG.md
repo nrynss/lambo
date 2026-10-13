@@ -13,17 +13,17 @@
   0.6.0, and durable names are a follow-up.
 - **`record_action` `depends_on` entries that are ids now cite.** An entry
   in the hyphenated node-id form that names a concept of the session, or
-  8 to 32 hex characters whose text names no concept and that start
-  exactly one concept's id, now resolves to that concept instead of
+  exactly 8 hex characters (the short id recall prints) whose text names
+  no concept and that start exactly one concept's id, now resolves to that concept instead of
   creating a concept named by the id. An interaction's id, or a short id
   two concepts share, is refused (`reference refused`), and so is a
   hyphenated id that names nothing here but a concept in one of the
   session's layers. Everything else keeps the 0.5.0 text rule: commit
-  hashes, MD5s, `urn:uuid:` and braced ids, paths, issue references, a
+  hashes of other lengths, 9 to 32 hex characters (MD5s, longer prefixes,
+  the unhyphenated node-id form), `urn:uuid:` and braced ids, paths, issue references, a
   hyphenated id that names nothing, and an id whose text a 0.5.0 write
   already minted as an Entity. A commit hash that happens to prefix a
-  concept's id cites that concept (about concepts / 2^32 for 8
-  characters).
+  concept's id cites that concept (about concepts / 2^32).
 - **Downgrading to 0.5.0 after cited writes.** A cited derive's durable
   intent is a new kind (`derive_cited`). Once it settles (applied or
   failed), its stored payload is rewritten to the empty `derive` 0.5.0

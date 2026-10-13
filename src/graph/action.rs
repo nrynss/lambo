@@ -578,15 +578,15 @@ pub(crate) fn unresolved_ids<'a>(
 ///   this session cites it, and is pinned; one that names an interaction is
 ///   refused. One that names nothing is text (below), so a re-sent 0.5.0
 ///   request whose id text was minted as an Entity still lands on it.
-/// * An entry with a short id's shape (8 to 32 hex characters) whose text
-///   names no concept cites the one concept whose id it prefixes, and is
-///   pinned; a prefix two concepts share is refused. So a commit hash that
-///   happens to prefix a concept's id cites that concept: the chance is
-///   about (concepts in the session) / 2^32 for 8 characters. A text match
-///   wins over the prefix, as in 0.5.0.
+/// * An entry of exactly 8 hex characters (the short id recall prints)
+///   whose text names no concept cites the one concept whose id it
+///   prefixes, and is pinned; a prefix two concepts share is refused. So an
+///   8-character commit hash that happens to prefix a concept's id cites
+///   that concept: the chance is about (concepts in the session) / 2^32. A
+///   text match wins over the prefix, as in 0.5.0.
 /// * Every other entry, and an id-shaped one that names nothing, keeps the
-///   0.5.0 rule: canonical match, else create (`urn:uuid:`, braced and
-///   other spellings included).
+///   0.5.0 rule: canonical match, else create (9 to 32 hex characters, the
+///   unhyphenated simple form, `urn:uuid:` and braced spellings included).
 ///
 /// `expected` is the pin from the ack, when the caller has one: the entry
 /// must resolve the same way now, or the call is refused as

@@ -23,14 +23,13 @@ fn every_leg_reaches_the_same_concept() {
     g.declare_synonym("lease rule", RULING);
 
     let full = ruling.0.to_string();
-    let simple = ruling.0.simple().to_string();
+    let upper_full = full.to_uppercase();
     let upper_short = short(ruling).to_uppercase();
     for reference in [
         full.as_str(),
-        simple.as_str(),
+        upper_full.as_str(),
         &short(ruling),
         &upper_short,
-        &simple[..12],
         RULING,
         "  THE Writer Lease stays with its holder until the holder releases it ",
         "lease writer the stays with its holder until the holder releases it",
@@ -40,13 +39,26 @@ fn every_leg_reaches_the_same_concept() {
             Resolved::Concept {
                 node: ruling,
                 leg: match reference {
-                    r if r == full || r == simple => Leg::NodeId,
+                    r if r == full || r == upper_full => Leg::NodeId,
                     r if is_short_id_shaped(r) => Leg::ShortId,
                     _ => Leg::Key,
                 },
             },
             "{reference:?}"
         );
+    }
+    // Only the hyphenated id and exactly 8 hex characters are ids to a
+    // write: the simple form, a longer prefix, braced and urn spellings
+    // are text, and no concept has that text.
+    let simple = ruling.0.simple().to_string();
+    for text in [
+        simple.clone(),
+        simple[..9].to_string(),
+        simple[..12].to_string(),
+        format!("{{{full}}}"),
+        format!("urn:uuid:{full}"),
+    ] {
+        assert_eq!(resolve_reference(&g, &text), Resolved::Missing, "{text}");
     }
     // A synonym the session holds is not a reference (review H1): it is
     // in-memory state, so it could mean something else after a restart.
@@ -93,7 +105,7 @@ fn nothing_resolves_to_missing_and_an_interaction_id_is_not_a_concept() {
 }
 
 #[test]
-fn a_shared_prefix_is_ambiguous_until_it_is_long_enough() {
+fn a_shared_short_id_is_ambiguous_and_a_longer_prefix_is_text() {
     let (mut g, i) = graph("resolve-ambiguous");
     let a = concept_with_id(
         &mut g,
@@ -116,11 +128,13 @@ fn a_shared_prefix_is_ambiguous_until_it_is_long_enough() {
         }
         other => panic!("{other:?}"),
     }
+    // A longer prefix is not an id to a write; the full id disambiguates.
+    assert_eq!(resolve_reference(&g, "8baad4e0aa"), Resolved::Missing);
     assert_eq!(
-        resolve_reference(&g, "8baad4e0aa"),
+        resolve_reference(&g, &a.0.to_string()),
         Resolved::Concept {
             node: a,
-            leg: Leg::ShortId
+            leg: Leg::NodeId
         }
     );
     let err = resolve_existing(&g, ReferenceField::DependsOn, Some("x"), "8baad4e0").unwrap_err();
@@ -270,6 +284,10 @@ fn id_shapes() {
     assert!(!is_id_shaped("8baad4e"));
     assert!(!is_id_shaped("8baad4eg"));
     assert!(!is_id_shaped("writer lease"));
+    // Writes take exactly 8 hex characters or the hyphenated form.
+    assert!(!is_id_shaped("8baad4e0a"));
+    assert!(!is_id_shaped(&NodeId::new().0.simple().to_string()));
+    assert!(!is_id_shaped(&format!("{{{}}}", NodeId::new().0)));
     assert!(id_has_hex_prefix(
         uuid::Uuid::from_u128(0xABCD_0000_0000_0000_0000_0000_0000_0000),
         "abcd"

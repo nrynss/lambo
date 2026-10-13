@@ -276,7 +276,7 @@ Records an action the agent took. The action becomes a `Resource` concept, and t
 | `--action <ACTION>` | Yes | |
 | `--produces <PRODUCES>` | No | Resources this action creates. Repeatable. |
 | `--modifies <MODIFIES>` | No | Resources this action mutates. Repeatable. |
-| `--depends-on <DEPENDS_ON>` | No | Things this action depends on. Repeatable. An existing concept's full node id, or 8 to 32 hex characters that name no concept by text and start exactly one concept's id, cites that concept; an interaction's id, or a short id several concepts share, is a usage error and nothing is written. Any other value, and an id that names nothing, is matched by text and created if new, as before 0.6.0. |
+| `--depends-on <DEPENDS_ON>` | No | Things this action depends on. Repeatable. An existing concept's full node id (hyphenated), or exactly 8 hex characters that name no concept by text and start exactly one concept's id, cites that concept; an interaction's id, or a short id several concepts share, is a usage error and nothing is written. Any other value (9 to 32 hex characters, the unhyphenated form included), and an id that names nothing, is matched by text and created if new, as before 0.6.0. |
 
 ```bash
 $ lambo record-action --session demo --agent agent-a \

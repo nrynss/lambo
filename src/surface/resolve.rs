@@ -9,11 +9,18 @@
 //! which is fine for a read and never acceptable for a write. Here a
 //! reference resolves only by
 //!
-//! 1. a **full node id** (any form `Uuid::parse_str` accepts); this leg is
-//!    exclusive, since content never parses as a UUID;
-//! 2. the **short id** recall renders: [`SHORT_ID_CHARS`] to 31 hex
-//!    characters, a unique prefix of a concept's id (the same prefix match
-//!    `inspect` uses, [`short_id_matches`]);
+//! 1. a **full node id** in the hyphenated form recall, inspect and receipts
+//!    print ([`is_hyphenated_id`]); this leg is exclusive, since content
+//!    never has that shape;
+//! 2. the **short id** recall renders: exactly [`SHORT_ID_CHARS`] (8) hex
+//!    characters, a unique prefix of a concept's id (the prefix match
+//!    `inspect` uses, [`short_id_matches`]). No other hex string is an id to
+//!    a write (orchestrator decision, #36 PR 4 review): 9 to 32 hex
+//!    characters, the unhyphenated simple form, braced and `urn:uuid:`
+//!    spellings are text, so the surface that changed from 0.5.0 stays as
+//!    small as possible, and agents only ever see 8-character ids.
+//!    `inspect`'s read-only focus keeps its wider prefix leg (8 to 32, its
+//!    own check in `surface::focus`);
 //! 3. its **canonical key**: the reference's key as derive computes it, so
 //!    composed and decomposed spellings, case and word order reach the same
 //!    concept. Normalization is `crate::graph::canonical`'s (NFC,
@@ -76,11 +83,12 @@ pub(crate) fn parse_full_id(reference: &str) -> Option<NodeId> {
     uuid::Uuid::parse_str(reference.trim()).ok().map(NodeId)
 }
 
-/// Whether `reference` has a short id's shape: [`SHORT_ID_CHARS`] to 32
-/// ASCII hex characters.
+/// Whether `reference` is a short id to a **write**: exactly
+/// [`SHORT_ID_CHARS`] ASCII hex characters, what recall prints. Inspect's
+/// read-only focus accepts longer prefixes with its own check.
 pub(crate) fn is_short_id_shaped(reference: &str) -> bool {
     let b = reference.trim().as_bytes();
-    (SHORT_ID_CHARS..=32).contains(&b.len()) && b.iter().all(u8::is_ascii_hexdigit)
+    b.len() == SHORT_ID_CHARS && b.iter().all(u8::is_ascii_hexdigit)
 }
 
 /// Whether `reference` is a node id in its canonical hyphenated form
@@ -143,7 +151,10 @@ pub(crate) fn short_id_matches(g: &Graph, prefix: &str) -> Vec<NodeId> {
 /// (read for a pre-pass, write at a commit) and no other.
 pub(crate) fn resolve_reference(g: &Graph, reference: &str) -> Resolved {
     let reference = reference.trim();
-    if let Some(id) = parse_full_id(reference) {
+    if let Some(id) = is_hyphenated_id(reference)
+        .then(|| parse_full_id(reference))
+        .flatten()
+    {
         return match g.node(id) {
             Some(Node::Concept(_)) => Resolved::Concept {
                 node: id,
