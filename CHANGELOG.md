@@ -296,6 +296,12 @@
   behaviour), and an exhaustive `match` on `WriteIntentPayload` needs the
   arm. `ParentOf::with_repo_scope` and `ParentOf::repo_scope` are new and
   scope a derive; the existing constructors stay unscoped.
+- **`RecallHit` gains `repo_scope: Option<String>`, and `ReferenceField`
+  gains `RetractTarget`** (#129, #33 PR 7). A `RecallHit { .. }` literal
+  needs the field (`None` for an unscoped concept), and an exhaustive
+  `match` on `ReferenceField` needs the arm. `Memory::retract` now returns
+  `LamboError::Reference` with `ReferenceRefusalKind::Ambiguous` for text
+  that matches a repository-scoped path and another concept.
 
 ### Added
 
@@ -563,6 +569,15 @@
   is caller-asserted and never verified; an empty one is refused before
   the ack. The library exposes `lambo::graph::resource` (the path
   predicate and key). See *Repository-scoped paths* in the MCP reference.
+  `against` (#19(b)) resolves path text under the scope like
+  `depends_on`, and a scoped write with `against` is durably the same
+  `repo_scoped` wrapper. A recall hit for a scoped path carries
+  `repo_scope` and its label names the repository (`README.md [Resource,
+  repo "github.com/acme/widgets"]`); unscoped hits and recall output are
+  unchanged. Text that matches a scoped path and another concept is no
+  longer resolved to one of them quietly: `lambo_inspect`'s focus and
+  `Memory::retract` refuse it as ambiguous, listing each candidate's id and
+  repository, and `retract` now also takes a concept's full node id.
 
 ### Changed
 

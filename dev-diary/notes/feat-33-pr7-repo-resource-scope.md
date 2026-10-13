@@ -170,18 +170,61 @@ run: manual and `#[ignore]`d); schema goldens pass; mirror drift check
 pass; `git diff --check` clean. Each intermediate commit after the merge
 fix compiles on its own.
 
-Open:
+Open after round one (both closed in round two, below):
 
-- `origin/main` moved to `1c5a6bc2` during this work and now holds #19(b)
-  (#151), which also edits `src/graph/cite.rs` and the intent payloads,
-  plus #152 and #153. Expect conflicts on the next main merge; the
-  `RepoScoped` wrapper must wrap #19(b)'s new payload kinds the same way.
-- Recall and inspect render a scoped Resource by its content only, so two
-  repositories' `README.md` hits look alike; the repository is visible only
-  in the key. Text lookups outside the write path are not scope-aware:
-  `lambo_inspect` by text takes the first exact-content match in a stable
-  key order (a scoped `README.md` sorts before the legacy one) without
-  saying others exist, and retract and demote by text try the legacy key,
-  then the lowest-id exact-content match. Ids are exact. A follow-up could
-  list same-content candidates or take `repo_scope` on those reads.
-- Existing conflated hubs are untouched by design (provenance, not cost).
+- `origin/main` moved to `1c5a6bc2` with #19(b) (#151), #152 and #153.
+- Recall rendered a scoped Resource by content only, and inspect and
+  retract by text could pick one of several same-content concepts.
+  (Round one also listed demote here; demote resolves no target, so it
+  never had the problem.)
+
+Existing conflated hubs stay untouched by design (provenance, not cost).
+
+### Round two (2026-10-13)
+
+- **Merged `origin/main` at `1c5a6bc2`** (`d5cb0b5e`, a merge, not a
+  rebase): #19(b) `against` (#151), its docs (#152) and session
+  classification D1 (#153). Conflicts were in `graph::cite`, the intents,
+  the three store adapters, the settle testkit and the docs. Resolution
+  keeps main's `validate`/`recheck_all`/`write_all_edges` shape and threads
+  the repo scope through them: `validate_scoped` pins `depends_on` and
+  `against` with the scoped resolver, `recheck_all` takes the scope, and an
+  action's `against` is pinned and rechecked under `action.repo_scope`.
+  `RepoScoped` may wrap `ActionCited`; `settled()` and every adapter's
+  consume UPDATE settle it beside `ActionCited`; the shared settle testkit
+  stores a scoped `ActionCited`.
+- **Scoped `against` tests** (`8b75bd97`): a scoped derive and a scoped
+  action with `against` contradict only their repository's `README.md`
+  (both strategies); a scope without the file is refused, never the legacy
+  concept; unscoped still names the legacy one; deferred at close they are
+  `repo_scoped` wrappers around `derive_cited` and `action_cited` and
+  replay under their scope.
+- **Retract and inspect** (`f12e725c`). Text that reaches a
+  repository-scoped path and any other concept is refused as ambiguous:
+  `Memory::retract` with the shared typed refusal
+  (`ReferenceField::RetractTarget`, `ReferenceRefusalKind::Ambiguous`,
+  candidates with short ids and repositories) and now also accepts a full
+  node id; `lambo_inspect`'s focus with its existing `Focus::Ambiguous`,
+  candidates listed with repositories and full ids. No wire parameter was
+  added: neither surface has a natural repo field, and an id is the exact
+  reference the design already names. Without scoped concepts, and for a
+  single match, both behave as before.
+- **Recall labels** (`94beacd7`). `RecallHit` and the presentation hit
+  behind `structuredContent.hits[]` carry `repo_scope` for a scoped path,
+  omitted when absent; the label reads `README.md [Resource, repo
+  "github.com/acme/widgets"]`. The recall goldens are unchanged.
+- Tests for both (`22074de4`).
+
+Gate on the merged head (fresh `XDG_RUNTIME_DIR` per cargo call): fmt
+pass; the 8 clippy rows pass; `cargo test --features store-sqlite,fixtures`
+2468 passed, 0 failed, 7 ignored (lib 2385/0/5) against 2449/0/7 on
+`1c5a6bc2`: +19 tests, none lost, the same ignored set; SQLite-only
+`--no-run`, `cargo check --no-default-features`, Postgres and
+Postgres+SQLite all-targets `--no-run` pass; Postgres non-live 1272/0/18
+(live Postgres and Cockroach not run); goldens and mirror drift pass;
+`git diff --check` clean. Each new intermediate commit compiles.
+
+Still open: `lambo_inspect`'s neighbourhood view of a scoped node still
+shows only its content; the label carries the repository in recall only.
+Root goals naming a path match every same-content concept (all, not one),
+unchanged.
