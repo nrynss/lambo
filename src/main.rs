@@ -1586,7 +1586,14 @@ fn main() -> ExitCode {
     let mut resolved = match resolve_for_command(&cmd, config, loaded) {
         Ok(r) => r,
         Err(e) => {
-            let what = if cmd.needs_embedder() {
+            let what = if matches!(
+                cmd,
+                Commands::Session {
+                    action: SessionAction::Verify { .. }
+                }
+            ) {
+                "failed to resolve verify inputs"
+            } else if cmd.needs_embedder() {
                 "failed to build backends"
             } else {
                 "failed to resolve store"
