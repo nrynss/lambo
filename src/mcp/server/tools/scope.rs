@@ -646,3 +646,37 @@ pub(super) fn with_warning(mut out: CallToolResult, warning: Option<String>) -> 
     }
     out
 }
+
+#[cfg(test)]
+mod path_exempt_tests {
+    use super::Target;
+
+    /// #129 review L9: the exemption is the entry being a scoped path, not
+    /// the call merely carrying a scope.
+    #[test]
+    fn path_exempt_needs_a_covered_path_not_just_a_scope() {
+        let layer = Target {
+            layer: None,
+            own: "general".into(),
+            own_is_layer: true,
+        };
+        let repo = Some("github.com/acme/widgets");
+        assert!(layer.path_exempt("README.md", repo));
+        assert!(layer.path_exempt("docs/reference/", repo));
+        for not_a_path in [
+            "a decision",
+            "https://host/a.md",
+            "git@host:a.md",
+            "Node.js",
+        ] {
+            assert!(!layer.path_exempt(not_a_path, repo), "{not_a_path}");
+        }
+        assert!(!layer.path_exempt("README.md", None));
+        assert!(layer
+            .check_paths_scoped("produces", ["README.md"], repo)
+            .is_ok());
+        assert!(layer
+            .check_paths_scoped("produces", ["README.md"], None)
+            .is_err());
+    }
+}

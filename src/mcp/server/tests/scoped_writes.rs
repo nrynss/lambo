@@ -871,6 +871,41 @@ async fn a_relative_path_is_refused_in_a_layer() {
     general.mem.close().await.expect("close");
 }
 
+/// #129 review L9: the project's own unscoped `README.md` (a legacy path
+/// Resource) is not what a repo-scoped `depends_on` names, so a write
+/// scoped to `general` is not refused as cross-session for it; the scoped
+/// path is minted in `general`.
+#[tokio::test]
+async fn a_project_legacy_path_does_not_refuse_a_repo_scoped_layer_write() {
+    use crate::graph::resource::scoped_resource_key;
+    let (s, general, _source) = project_and_general("legacy-holder").await;
+    let out = call(
+        &s,
+        "lambo_record_action",
+        action_args("wrote the readme", "produces", &["README.md"], None),
+    )
+    .await;
+    assert_eq!(out.is_error, Some(false), "{out:?}");
+    let mut args = action_args(
+        "checked the readme",
+        "depends_on",
+        &["README.md"],
+        Some("general"),
+    );
+    args["repo_scope"] = json!("github.com/acme/widgets");
+    let out = call(&s, "lambo_record_action", args).await;
+    assert_eq!(out.is_error, Some(false), "{}", text_of(&out));
+    let key = scoped_resource_key("README.md", Some("github.com/acme/widgets")).unwrap();
+    assert!(general
+        .memory()
+        .graph()
+        .read()
+        .concepts()
+        .any(|c| c.canonical_key == key));
+    s.mem.close().await.expect("close");
+    general.mem.close().await.expect("close");
+}
+
 /// The action text is written as a Resource, so a layer refuses one that
 /// is a bare relative path, as it refuses a target; prose passes.
 #[tokio::test]
@@ -977,7 +1012,9 @@ async fn a_repo_scope_exempts_only_the_resource_paths_it_covers_in_a_layer() {
     for (field, entry) in [
         ("produces", "src/main.rs"),
         ("modifies", "README.md"),
-        ("depends_on", "docs/reference"),
+        // An inferred depends_on is a path by a file name or a trailing
+        // separator; `docs/reference/` keys as `docs/reference`.
+        ("depends_on", "docs/reference/"),
     ] {
         let out = call(
             &s,

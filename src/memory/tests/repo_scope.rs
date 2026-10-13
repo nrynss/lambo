@@ -920,3 +920,357 @@ async fn inspect_labels_scoped_nodes_with_their_repository() {
     assert!(plain.contains("README.md [Resource]"), "{plain}");
     mem.close().await.unwrap();
 }
+
+fn legacy_id(mem: &Memory, text: &str) -> Option<NodeId> {
+    mem.graph
+        .read()
+        .concept_by_key(&crate::graph::canonical::canonical_key(text, |_| None))
+}
+
+fn scoped_action<'a>(repo: &'a str, action: &'a str, depends_on: &'a [&'a str]) -> Action<'a> {
+    Action {
+        repo_scope: Some(repo),
+        event_time: None,
+        action,
+        produces: &[],
+        modifies: &[],
+        depends_on,
+    }
+}
+
+/// Review M1: under a repo scope, slash prose (`TCP/IP`, `CI/CD`) is not
+/// inferred as a path. An action's `depends_on`, a citation and an
+/// undeclared `parent_of` end name the existing non-Resource concept under
+/// its legacy key (no duplicate is minted), and new prose stays legacy
+/// text; an existing Logic `config.toml` stays citable by text.
+#[tokio::test]
+async fn scoped_inference_keeps_prose_and_non_resource_concepts_legacy() {
+    for strategy in [MatchStrategy::Canonical, MatchStrategy::Hybrid] {
+        let mem = memory(&format!("repo-prose-{strategy:?}"), strategy).await;
+        let agent = AgentId::new("agent-a");
+        let out = mem
+            .derive_as(
+                &agent,
+                &[
+                    ("config.toml", ConceptType::Logic),
+                    ("TCP/IP", ConceptType::Entity),
+                ],
+                &ParentOf::none(),
+            )
+            .await
+            .unwrap();
+        let (config, tcp) = (out.created[0], out.created[1]);
+        let before = mem.graph.read().concepts().count();
+        // An action's depends_on: the existing concepts, plus new prose kept
+        // legacy rather than minted as a scoped Resource.
+        let out = mem
+            .record_action_embedded_as(
+                &agent,
+                &scoped_action(
+                    "repo-a",
+                    "tuned the stack",
+                    &["config.toml", "TCP/IP", "CI/CD"],
+                ),
+            )
+            .await
+            .unwrap();
+        for target in [config, tcp] {
+            assert!(mem
+                .graph
+                .read()
+                .edge_between(out.action_node, target, EdgeType::Dependency)
+                .is_some());
+        }
+        let cicd = legacy_id(&mem, "CI/CD").expect("CI/CD stays legacy text");
+        assert!(scoped_resource_key("CI/CD", Some("repo-a"))
+            .and_then(|k| mem.graph.read().concept_by_key(&k))
+            .is_none());
+        // Only the action and CI/CD are new: no duplicate config.toml or TCP/IP.
+        assert_eq!(mem.graph.read().concepts().count(), before + 2);
+        // A citation by text reaches the Logic config.toml under a scope.
+        let concepts = [("deployment verified", ConceptType::Logic)];
+        let out = mem
+            .derive_cited_as(
+                &agent,
+                &concepts,
+                &ParentOf::none().with_repo_scope(Some("repo-a")),
+                &[ConceptCitations {
+                    content: concepts[0].0.into(),
+                    depends_on: vec!["config.toml".into(), "TCP/IP".into()],
+                    against: Vec::new(),
+                }],
+            )
+            .await
+            .unwrap();
+        assert_eq!(out.cited, 2, "{strategy:?}");
+        // An undeclared parent_of end: the legacy Entity, not a scoped path.
+        let pairs = [("networking", "TCP/IP")];
+        mem.derive_as(
+            &agent,
+            &[("networking", ConceptType::Entity)],
+            &ParentOf::from_pairs(&pairs).with_repo_scope(Some("repo-a")),
+        )
+        .await
+        .unwrap();
+        let net = legacy_id(&mem, "networking").unwrap();
+        assert!(mem
+            .graph
+            .read()
+            .edge_between(net, tcp, EdgeType::Hierarchical)
+            .is_some());
+        let _ = cicd;
+        mem.close().await.unwrap();
+    }
+}
+
+/// Review M1: text that names both an existing scoped path and an existing
+/// non-Resource concept is refused as ambiguous, on a citation, an action's
+/// depends_on and an undeclared parent_of end, writing nothing.
+#[tokio::test]
+async fn scoped_text_naming_both_identities_is_ambiguous() {
+    let mem = memory("repo-both", MatchStrategy::Canonical).await;
+    let agent = AgentId::new("agent-a");
+    mem.derive_as(
+        &agent,
+        &[("config.toml", ConceptType::Logic)],
+        &ParentOf::none(),
+    )
+    .await
+    .unwrap();
+    mem.derive_as(
+        &agent,
+        &[("config.toml", ConceptType::Resource)],
+        &ParentOf::none().with_repo_scope(Some("repo-a")),
+    )
+    .await
+    .unwrap();
+    // Concepts and their edges; a refused synchronous write may still have
+    // opened its interaction, as for any graph-level refusal.
+    let written = |mem: &Memory| {
+        let snap = mem.graph.read().snapshot();
+        let concepts: HashSet<NodeId> = snap.concepts.iter().map(|c| c.id).collect();
+        let edges: Vec<(NodeId, NodeId)> = snap
+            .edges
+            .iter()
+            .filter(|e| concepts.contains(&e.source) && concepts.contains(&e.target))
+            .map(|e| (e.source, e.target))
+            .collect();
+        (concepts, edges)
+    };
+    let before = written(&mem);
+    let ambiguous = |e: LamboError| {
+        matches!(&e, LamboError::Reference(r)
+            if matches!(r.kind, ReferenceRefusalKind::Ambiguous { .. }))
+    };
+    let concepts = [("the config is wrong", ConceptType::Logic)];
+    let err = mem
+        .derive_cited_as(
+            &agent,
+            &concepts,
+            &ParentOf::none().with_repo_scope(Some("repo-a")),
+            &[ConceptCitations {
+                content: concepts[0].0.into(),
+                depends_on: vec!["config.toml".into()],
+                against: Vec::new(),
+            }],
+        )
+        .await
+        .unwrap_err();
+    assert!(ambiguous(err));
+    let err = mem
+        .record_action_as(
+            &agent,
+            &scoped_action("repo-a", "read the config", &["config.toml"]),
+        )
+        .unwrap_err();
+    assert!(ambiguous(err));
+    let pairs = [("settings", "config.toml")];
+    let err = mem
+        .derive_as(
+            &agent,
+            &[("settings", ConceptType::Entity)],
+            &ParentOf::from_pairs(&pairs).with_repo_scope(Some("repo-a")),
+        )
+        .await
+        .unwrap_err();
+    assert!(ambiguous(err));
+    assert_eq!(written(&mem), before);
+    mem.close().await.unwrap();
+}
+
+/// Review M3: a lone directory parent of a scoped path is that
+/// repository's directory, not a legacy Entity two repositories share;
+/// `src/` and `src` name one directory.
+#[tokio::test]
+async fn scoped_directory_parents_stay_per_repository() {
+    for strategy in [MatchStrategy::Canonical, MatchStrategy::Hybrid] {
+        let mem = memory(&format!("repo-dirs-{strategy:?}"), strategy).await;
+        let agent = AgentId::new("agent-a");
+        for (repo, parent) in [("repo-a", "src"), ("repo-b", "src"), ("repo-a", "src/")] {
+            let pairs = [(parent, "src/main.rs")];
+            mem.derive_as(
+                &agent,
+                &[("layout recorded", ConceptType::Logic)],
+                &ParentOf::from_pairs(&pairs).with_repo_scope(Some(repo)),
+            )
+            .await
+            .unwrap();
+        }
+        let dir = |repo| path_id_unchecked(&mem, repo, "src");
+        let (a, b) = (dir("repo-a"), dir("repo-b"));
+        assert_ne!(a, b);
+        assert!(legacy_id(&mem, "src").is_none(), "no shared legacy src");
+        for (repo, d) in [("repo-a", a), ("repo-b", b)] {
+            let child = path_id(&mem, repo, "src/main.rs");
+            assert!(mem
+                .graph
+                .read()
+                .edge_between(d, child, EdgeType::Hierarchical)
+                .is_some());
+        }
+        mem.close().await.unwrap();
+    }
+}
+
+fn path_id_unchecked(mem: &Memory, repo: &str, path: &str) -> NodeId {
+    mem.graph
+        .read()
+        .concept_by_key(&crate::graph::resource::scoped_key_unchecked(path, repo))
+        .unwrap()
+}
+
+/// Review L9: repo A's `a.md` over `b.md` and repo B's `b.md` over `a.md`
+/// are four files, not a Hierarchical cycle.
+#[tokio::test]
+async fn opposite_hierarchies_in_two_repositories_are_not_a_cycle() {
+    let mem = memory("repo-no-cycle", MatchStrategy::Canonical).await;
+    let agent = AgentId::new("agent-a");
+    for (repo, pair) in [("repo-a", ("a.md", "b.md")), ("repo-b", ("b.md", "a.md"))] {
+        let pairs = [pair];
+        mem.derive_as(
+            &agent,
+            &[("docs nested", ConceptType::Logic)],
+            &ParentOf::from_pairs(&pairs).with_repo_scope(Some(repo)),
+        )
+        .await
+        .unwrap();
+    }
+    // The same two pairs unscoped do close a cycle.
+    mem.derive_as(
+        &agent,
+        &[("docs nested", ConceptType::Logic)],
+        &ParentOf::from_pairs(&[("a.md", "b.md")]),
+    )
+    .await
+    .unwrap();
+    let err = mem
+        .derive_as(
+            &agent,
+            &[("docs nested", ConceptType::Logic)],
+            &ParentOf::from_pairs(&[("b.md", "a.md")]),
+        )
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("cycle"), "{err}");
+    mem.close().await.unwrap();
+}
+
+/// Review M2: layered recall dedupes a scoped path only by an equal key.
+/// With every vector identical, project repo-a's `README.md` absorbs the
+/// team layer's repo-a copy (same key), but neither the general layer's
+/// repo-b `README.md` nor its unscoped prose joins it by vector.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn layered_dedupe_joins_scoped_paths_only_by_key() {
+    use crate::memory::LayerRef;
+    async fn session(name: &str) -> Memory {
+        Memory::builder()
+            .session(name)
+            .agent("agent-a")
+            .flush_interval(Duration::from_secs(3_600))
+            .store(
+                Arc::new(super::writes::VectorSearchStore::graph_ranked(Arc::new(
+                    MemoryStore::new(),
+                ))) as Arc<dyn GraphStore>,
+            )
+            .embedder(Arc::new(ConstEmbedder) as Arc<dyn Embedder>)
+            .embedding_contract(contract("fixture", 1024))
+            .match_strategy(MatchStrategy::Hybrid)
+            .build()
+            .await
+            .unwrap()
+    }
+    let (project, team, general) = (
+        session("repo-layer-p").await,
+        session("repo-layer-t").await,
+        session("repo-layer-g").await,
+    );
+    let agent = AgentId::new("agent-a");
+    for (mem, repo) in [
+        (&project, "repo-a"),
+        (&team, "repo-a"),
+        (&general, "repo-b"),
+    ] {
+        mem.derive_as(
+            &agent,
+            &[("README.md", ConceptType::Resource)],
+            &ParentOf::none().with_repo_scope(Some(repo)),
+        )
+        .await
+        .unwrap();
+    }
+    general
+        .derive_as(
+            &agent,
+            &[("release notes", ConceptType::Logic)],
+            &ParentOf::none(),
+        )
+        .await
+        .unwrap();
+    let r = project
+        .recall_layered(
+            &[LayerRef::new(&team), LayerRef::new(&general)],
+            RecallQuery {
+                query: "README.md".into(),
+                top_k: 10,
+                max_tokens: 2_000,
+                traversal_depth: 1,
+            },
+        )
+        .await
+        .unwrap();
+    let shown: Vec<(String, Option<String>, usize)> = r
+        .hits
+        .iter()
+        .map(|h| {
+            (
+                h.session.to_string(),
+                h.hit.repo_scope.clone(),
+                h.also.len(),
+            )
+        })
+        .collect();
+    let a = r
+        .hits
+        .iter()
+        .find(|h| h.hit.repo_scope.as_deref() == Some("repo-a"))
+        .expect("repo-a README.md");
+    assert_eq!(a.session.to_string(), "repo-layer-p", "{shown:?}");
+    assert_eq!(
+        a.also.len(),
+        1,
+        "team's repo-a copy joins by key: {shown:?}"
+    );
+    let b = r
+        .hits
+        .iter()
+        .find(|h| h.hit.repo_scope.as_deref() == Some("repo-b"))
+        .expect("repo-b README.md is its own hit");
+    assert!(b.also.is_empty(), "{shown:?}");
+    assert!(
+        r.hits.iter().any(|h| h.hit.content == "release notes"),
+        "unscoped prose is not merged into a scoped path: {shown:?}"
+    );
+    for m in [project, team, general] {
+        m.close().await.unwrap();
+    }
+}
