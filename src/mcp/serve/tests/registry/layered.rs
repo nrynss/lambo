@@ -397,3 +397,127 @@ async fn a_direct_layer_read_draws_the_layers_rate_and_a_merged_one_does_not() {
         session.mem.close().await.expect("close");
     }
 }
+
+/// #33 PR 4, end to end through the real registry, router and guards: a
+/// write to `/mcp/s/lay-proj` with `scope = "general"` lands in `general`
+/// alone, its receipt is found by `lambo_stats` at the project's path
+/// (routed to `general`'s pipeline by epoch), get_info says how to write
+/// to the layer, and an unknown scope is refused.
+#[tokio::test]
+async fn a_scoped_write_lands_in_the_layer_end_to_end() {
+    let registry = started_registry().await;
+    let addr = serve_router(&registry, 32).await;
+    let (proj, init) = initialize(addr, &path(PROJECT)).await;
+    let info = init["instructions"].as_str().unwrap();
+    assert!(
+        info.contains("Writes to different sessions have no ordering between them"),
+        "{info}"
+    );
+    assert!(
+        info.contains("with scope = \"general\""),
+        "get_info names the write scope: {info}"
+    );
+
+    let ack = call(
+        addr,
+        &path(PROJECT),
+        &proj,
+        "lambo_derive",
+        serde_json::json!({"agent_id": "agent-a", "scope": GENERAL,
+                           "concepts": [{"content": GENERAL_RULING, "concept_type": "logic"}]}),
+    )
+    .await;
+    assert_eq!(ack["isError"], serde_json::json!(false), "{ack}");
+    assert_eq!(
+        ack["structuredContent"]["session"],
+        serde_json::json!(GENERAL)
+    );
+    let receipt = ack["structuredContent"]["receipt"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let waited = call(
+        addr,
+        &path(PROJECT),
+        &proj,
+        "lambo_stats",
+        serde_json::json!({"agent_id": "agent-a", "receipt": receipt, "wait_ms": 10_000}),
+    )
+    .await;
+    assert_eq!(
+        waited["structuredContent"]["receipt"]["state"],
+        serde_json::json!("applied"),
+        "{waited}"
+    );
+    let has = |id: &str| {
+        session_of(&registry, id)
+            .mem
+            .graph()
+            .read()
+            .concepts()
+            .any(|c| c.content == GENERAL_RULING)
+    };
+    assert!(has(GENERAL) && !has(PROJECT));
+
+    let refused = call(
+        addr,
+        &path(PROJECT),
+        &proj,
+        "lambo_record_action",
+        serde_json::json!({"agent_id": "agent-a", "scope": "elsewhere", "action": "x"}),
+    )
+    .await;
+    assert_eq!(refused["isError"], serde_json::json!(true), "{refused}");
+    assert!(refused
+        .to_string()
+        .contains("one of its layers: lay-proj, general"));
+
+    for session in registry.close_set().await {
+        session.mem.close().await.expect("close");
+    }
+}
+
+/// #33 PR 4: a scoped write draws one token from the layer's own
+/// `per_session_rps` (as a request to `/mcp/s/general` would); draining
+/// receipts and probing references draw none. Driven on the project's
+/// server directly, so no request to the project spends the project's own
+/// bucket.
+#[tokio::test]
+async fn a_scoped_write_draws_the_layers_rate() {
+    let registry = layered_registry_at(
+        backends_over(Box::new(MemoryStore::new()), fast_config(1_000)),
+        1,
+    );
+    attach_or_hold(&registry, PROJECT).await;
+    attach_or_hold(&registry, GENERAL).await;
+    let server = session_of(&registry, PROJECT).server.clone();
+    let out = server
+        .derive_impl(crate::mcp::server::DeriveParams {
+            agent_id: "agent-a".into(),
+            concepts: vec![crate::mcp::server::WireConcept {
+                content: GENERAL_RULING.into(),
+                concept_type: crate::mcp::server::WireConceptType::Logic,
+                depends_on: None,
+            }],
+            scope: Some(GENERAL.into()),
+            ..Default::default()
+        })
+        .await;
+    assert_eq!(out.is_error, Some(false), "{out:?}");
+    let source: &dyn LayerSource = registry.as_ref();
+    for read in [LayerRead::Receipts, LayerRead::Probe, LayerRead::Merged] {
+        for _ in 0..5 {
+            assert!(source.live_layer(GENERAL, read).is_ok(), "{read:?}");
+        }
+    }
+    // The burst is twice the rate of 1: the write drew one token, so one
+    // direct read is left and the next is refused.
+    assert!(source.live_layer(GENERAL, LayerRead::Direct).is_ok());
+    assert_eq!(
+        source.live_layer(GENERAL, LayerRead::Direct).err(),
+        Some(LayerDown::RateLimited)
+    );
+    for session in registry.close_set().await {
+        session.mem.close().await.expect("close");
+    }
+}

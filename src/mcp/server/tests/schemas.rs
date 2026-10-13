@@ -282,6 +282,8 @@ async fn f18_tool_schemas_match_the_golden_property_set() {
                 "parent_of",
                 "parent_of[].child",
                 "parent_of[].parent",
+                // #33 PR 4: a session name, not a time.
+                "scope",
             ],
         ),
         // #33 PR 3: `scope` is a session name, not a time.
@@ -318,13 +320,16 @@ async fn f18_tool_schemas_match_the_golden_property_set() {
                 "event_time",
                 "modifies",
                 "produces",
+                // #33 PR 4: a session name, not a time.
+                "scope",
             ],
         ),
+        // #33 PR 4: `scope` on both is a session name, not a time.
         (
             "lambo_reserve",
-            vec!["agent_id", "node_id", "release", "ttl_seconds"],
+            vec!["agent_id", "node_id", "release", "scope", "ttl_seconds"],
         ),
-        ("lambo_saints", vec!["agent_id"]),
+        ("lambo_saints", vec!["agent_id", "scope"]),
         ("lambo_stats", vec!["agent_id", "receipt", "wait_ms"]),
         // #22 PR 4. `event_time` is the same historical about-time as on the
         // two text writes; nothing else here is a time.
@@ -342,6 +347,8 @@ async fn f18_tool_schemas_match_the_golden_property_set() {
                 "parent_of",
                 "parent_of[].child",
                 "parent_of[].parent",
+                // #33 PR 4: a session name, not a time.
+                "scope",
                 "vector",
                 "vector.contract",
                 "vector.contract.dim",

@@ -18,14 +18,14 @@ use serde_json::json;
 use crate::embed::Modalities;
 use crate::graph::image::{self, ImageDerive, ImagePayload};
 use crate::mcp::server::params::{check_size, DeriveImageParams};
-use crate::mcp::server::response::{
-    bad_param, config_refusal, recorded_under, redact_urls, tool_err,
-};
+use crate::mcp::server::response::{bad_param, config_refusal, recorded_under, redact_urls};
 use crate::mcp::server::trace::note_facts;
 use crate::mcp::server::LamboServer;
 use crate::surface::image::{check_caption_fits, check_submitted_vector, decode_base64, validate};
 use crate::surface::validate::require_nonempty;
 use crate::types::{ConceptType, EmbeddingContract, MatchStrategy};
+
+use super::scope::{scoped_ack_line, with_scope, with_session};
 
 const TOOL: &str = "lambo_derive_image";
 
@@ -42,6 +42,14 @@ impl LamboServer {
             (None, Some(_)) => "vector",
             _ => return bad_param("send exactly one of image or vector"),
         };
+        // #33 PR 4: the session written to. Its own embedder, config and
+        // store answer every precondition below.
+        let target = match self.target(TOOL, p.scope.as_deref()) {
+            Ok(t) => t,
+            Err(e) => return e,
+        };
+        let mem = target.mem(&self.mem);
+        let scope = p.scope.clone();
 
         if let Err(msg) = require_nonempty("caption", &p.caption) {
             return bad_param(msg);
@@ -87,7 +95,7 @@ impl LamboServer {
         // #74: a parent_of end too long to embed framed with the image
         // content is refused now, not on the receipt. Only a session that
         // embeds reaches apply; the preconditions below refuse the rest.
-        if self.mem.derive_embeds()
+        if mem.derive_embeds()
             && let Err(msg) = image::check_embed_context(
                 &p.caption,
                 p.image_id.as_deref(),
@@ -100,7 +108,7 @@ impl LamboServer {
 
         // Deployment preconditions, named so the caller (or its operator) can
         // act: these are Lambo's own settings, not environment detail.
-        if self.mem.config().match_strategy != MatchStrategy::Hybrid {
+        if mem.config().match_strategy != MatchStrategy::Hybrid {
             return config_refusal(
                 TOOL,
                 "an image derive needs match_strategy = \"hybrid\": an image concept is found \
@@ -114,7 +122,7 @@ impl LamboServer {
         // not a listing input either, and a listed tool whose refusal names
         // the missing capability tells the operator what to change where an
         // absent tool says nothing.
-        if !self.mem.derive_vector_candidates().available() {
+        if !mem.derive_vector_candidates().available() {
             return config_refusal(
                 TOOL,
                 "an image derive needs a store with vector search (VECTOR_SEARCH): an image \
@@ -128,7 +136,7 @@ impl LamboServer {
         let bytes;
         let payload = match (p.image, p.vector) {
             (Some(img), None) => {
-                if !self.mem.embedder().modalities().contains(Modalities::IMAGE) {
+                if !mem.embedder().modalities().contains(Modalities::IMAGE) {
                     return config_refusal(
                         TOOL,
                         "this server's embedder does not embed images; send a vector \
@@ -149,7 +157,7 @@ impl LamboServer {
                 }
             }
             (None, Some(vector)) => {
-                if !self.mem.config().accept_client_vectors {
+                if !mem.config().accept_client_vectors {
                     return config_refusal(
                         TOOL,
                         "this server does not accept client-computed vectors; the operator \
@@ -165,7 +173,7 @@ impl LamboServer {
                 // AC4 at the wire: refused here with a message that names the
                 // fields that differ and never quotes the submitted ones.
                 if let Err(msg) =
-                    check_submitted_vector(&vector.values, &declared, self.mem.embedding_contract())
+                    check_submitted_vector(&vector.values, &declared, mem.embedding_contract())
                 {
                     return bad_param(msg);
                 }
@@ -186,19 +194,22 @@ impl LamboServer {
             parent_of: &pairs,
             event_time: p.event_time,
         };
-        let submitted = match self.mem.derive_image_async_as(&acting, derive).await {
+        let submitted = match mem.derive_image_async_as(&acting, derive).await {
             Ok(s) => s,
-            Err(e) => return tool_err(TOOL, e),
+            Err(e) => return self.target_err(TOOL, &target, e),
         };
 
         // I1: which payload kind, whether it was admitted, and the receipt.
         // Never the caption, the id, the bytes or the vector.
         note_facts(|| {
-            json!({
-                "payload": payload_kind,
-                "admitted": !submitted.dropped(),
-                "receipt": submitted.receipt.to_string(),
-            })
+            with_scope(
+                json!({
+                    "payload": payload_kind,
+                    "admitted": !submitted.dropped(),
+                    "receipt": submitted.receipt.to_string(),
+                }),
+                scope.as_deref(),
+            )
         });
 
         let summary = if submitted.dropped() {
@@ -213,19 +224,23 @@ impl LamboServer {
         };
         let mut out = CallToolResult::success(vec![ContentBlock::text(format!(
             "{summary}\nreceipt {}: {}\nThe outcome arrives on your next tool response. To wait \
-             for it, call lambo_stats with receipt={} (add wait_ms to block).\n{}",
+             for it, call lambo_stats with receipt={} (add wait_ms to block).\n{}{}",
             submitted.receipt,
             redact_urls(&submitted.answer.describe()),
             submitted.receipt,
             recorded_under(&acting),
+            scoped_ack_line(&target),
         ))]);
-        out.structured_content = Some(json!({
-            "summary": summary,
-            "receipt": submitted.receipt.to_string(),
-            "receipt_state": submitted.answer.tag(),
-            "agent_id": acting.to_string(),
-            "warnings": [],
-        }));
+        out.structured_content = Some(with_session(
+            json!({
+                "summary": summary,
+                "receipt": submitted.receipt.to_string(),
+                "receipt_state": submitted.answer.tag(),
+                "agent_id": acting.to_string(),
+                "warnings": [],
+            }),
+            &target,
+        ));
         out
     }
 }

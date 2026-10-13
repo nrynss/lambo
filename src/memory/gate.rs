@@ -35,6 +35,13 @@ impl Memory {
         Ok(())
     }
 
+    /// `true` once `close()` latched (#33 PR 4): a serve tells a write
+    /// refused because its layer closed or lost its lease mid-call from any
+    /// other refusal.
+    pub(crate) fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Acquire)
+    }
+
     pub(super) fn closed_error(&self) -> LamboError {
         LamboError::Config(format!("session {} is closed", self.session))
     }

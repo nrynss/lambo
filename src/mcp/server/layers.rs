@@ -65,6 +65,13 @@ pub(crate) enum LayerRead {
     /// session's bucket, and the probe reads one graph index under a read
     /// lock, never cites what it finds.
     Probe,
+    /// #33 PR 4: a call drains this agent's settled write receipts from
+    /// every pipeline it may have written to, or routes a `lambo_stats`
+    /// receipt to the pipeline that issued it. Draws nothing: it reads the
+    /// layer's receipt store only, on a call its own session admitted, and
+    /// a layer over its rate must not withhold an outcome the agent is owed
+    /// (it would arrive on a later call, but only if one happened to fit).
+    Receipts,
 }
 
 /// Why a layer is not served right now (#33 PR 3 review L1).

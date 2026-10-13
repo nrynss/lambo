@@ -199,6 +199,13 @@ pub struct DeriveParams {
     /// Optional `(parent, child)` hierarchy pairs. Both ends resolve (and may
     /// be created) as concepts.
     pub parent_of: Option<Vec<WireParentOf>>,
+    /// Optional: the session to write to. Omit it for this session; name
+    /// one of its layers (as `get_info` lists them), such as `general`, to
+    /// write there instead. Writes to different sessions have no ordering
+    /// between them, and every id or text a write cites must name a concept
+    /// in the session it writes to.
+    #[schemars(length(max = 16_384))]
+    pub scope: Option<String>,
 }
 /// One entry in a `lambo_record_action` resource list (`produces`,
 /// `modifies`, `depends_on`). A plain string on the wire, with the same
@@ -240,6 +247,13 @@ pub struct RecordActionParams {
     /// id that names no concept, names a concept by its text, created if
     /// new.
     pub depends_on: Option<Vec<WireResource>>,
+    /// Optional: the session to write to. Omit it for this session; name
+    /// one of its layers (as `get_info` lists them), such as `general`, to
+    /// write there instead. Writes to different sessions have no ordering
+    /// between them, and every id or text a write cites must name a concept
+    /// in the session it writes to.
+    #[schemars(length(max = 16_384))]
+    pub scope: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
@@ -264,6 +278,12 @@ pub struct ReserveParams {
     pub ttl_seconds: Option<u64>,
     /// Release this agent's existing soft lock instead of taking one.
     pub release: Option<bool>,
+    /// Optional: the session the node belongs to. Omit it for this
+    /// session; name one of its layers (as `get_info` lists them) to reserve
+    /// or release a node there, such as a recall hit from that layer, whose
+    /// id belongs to it.
+    #[schemars(length(max = 16_384))]
+    pub scope: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
@@ -308,6 +328,11 @@ pub struct SaintsParams {
     /// other's edits need distinct stable ids.
     #[schemars(length(max = 16_384))]
     pub agent_id: String,
+    /// Optional: the session to list. Omit it for this session; name one of
+    /// its layers (as `get_info` lists them) to list that layer's canonical
+    /// memories.
+    #[schemars(length(max = 16_384))]
+    pub scope: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -497,6 +522,13 @@ pub struct DeriveImageParams {
     /// be created) as concepts; name the image concept by its content,
     /// `caption [image:<image_id>]`.
     pub parent_of: Option<Vec<WireParentOf>>,
+    /// Optional: the session to write to. Omit it for this session; name
+    /// one of its layers (as `get_info` lists them), such as `general`, to
+    /// write there instead. Writes to different sessions have no ordering
+    /// between them, and every id or text a write cites must name a concept
+    /// in the session it writes to.
+    #[schemars(length(max = 16_384))]
+    pub scope: Option<String>,
 }
 
 // Redacting `Debug` for the image tool's params (review L4): the base64,
@@ -553,6 +585,7 @@ impl std::fmt::Debug for DeriveImageParams {
             .field("vector", &self.vector)
             .field("event_time", &self.event_time)
             .field("parent_of", &self.parent_of.as_ref().map(Vec::len))
+            .field("scope", &self.scope)
             .finish()
     }
 }

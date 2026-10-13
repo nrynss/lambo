@@ -40,7 +40,9 @@ impl LamboServer {
                     Ok(a) => a,
                     Err(e) => return e,
                 };
-                let queue = self.mem.pipeline();
+                // #33 PR 4: the pipeline that issued it (by epoch), which
+                // for a scoped write is its layer's.
+                let queue = self.receipt_pipeline(id);
                 let answer = match p.wait_ms {
                     // A wait of 0 is a fetch, not a wait; both go through the
                     // same clamp so the difference is only the budget.

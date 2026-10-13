@@ -100,11 +100,11 @@ pub struct LamboServer {
     /// `lambo serve`.
     activity: Option<Arc<crate::mcp::serve::activity::SessionActivity>>,
     /// The shared layers this session's `lambo_recall` also reads (#33 PR
-    /// 3), nearest tier first; empty for an unlayered session, whose tool
-    /// results and instructions are byte-identical to 0.5.0's (its
-    /// `tools/list` is not: recall and inspect list `scope`). Set by a
-    /// multi-session serve
-    /// from `[serve] layers`.
+    /// 3) and a call's `scope` may name (PR 4: writes, reserve and saints
+    /// too), nearest tier first; empty for an unlayered session, whose
+    /// tool results and instructions are byte-identical to 0.5.0's (its
+    /// `tools/list` is not: every tool but lambo_stats lists `scope`). Set
+    /// by a multi-session serve from `[serve] layers`.
     layers: layers::ServerLayers,
 }
 
@@ -217,7 +217,9 @@ impl LamboServer {
         // about hiding anything.
         if self.check_agent_id(&agent_id).is_ok() {
             let acting = AgentId::new(&agent_id);
-            let (taken, remaining) = self.mem.pipeline().take_piggyback(&acting);
+            // #33 PR 4: from every pipeline the call may have written to
+            // (this session's alone when it has no layers).
+            let (taken, remaining) = self.take_receipts(&acting);
             attach_receipts(&mut out, &taken, remaining);
         }
         out
@@ -283,7 +285,9 @@ impl LamboServer {
                        lambo_stats with that receipt and a wait_ms. On a store with vector \
                        search each concept is embedded with the whole call's text, so a \
                        concept sent alone may be at most 8189 bytes; a longer call is \
-                       refused before the ack, naming the part that is too long."
+                       refused before the ack, naming the part that is too long. scope \
+                       (optional) writes to one of this session's shared layers instead; \
+                       writes to different sessions have no ordering between them."
     )]
     async fn lambo_derive(&self, Parameters(p): Parameters<DeriveParams>) -> CallToolResult {
         let agent_id = p.agent_id.clone();
@@ -305,7 +309,9 @@ impl LamboServer {
                        it for a live fact, which is about now. \
                        Returns as soon as the input is validated and ordered — the write is \
                        applied in the background and the ack carries a receipt id, resolved \
-                       the same way as lambo_derive's."
+                       the same way as lambo_derive's. scope (optional) writes to one of this \
+                       session's shared layers instead, where a relative file path is \
+                       refused; writes to different sessions have no ordering between them."
     )]
     async fn lambo_record_action(
         &self,
@@ -337,7 +343,8 @@ impl LamboServer {
                        Reservations are advisory and do not survive a server restart. The \
                        lock is held under the agent_id you send, which is caller-asserted \
                        and unverified: a distinct id gets a distinct lock, and callers \
-                       sharing an id share the lock."
+                       sharing an id share the lock. scope (optional) names one of this \
+                       session's shared layers, for a node from that layer."
     )]
     async fn lambo_reserve(&self, Parameters(p): Parameters<ReserveParams>) -> CallToolResult {
         let agent_id = p.agent_id.clone();
@@ -362,7 +369,8 @@ impl LamboServer {
     #[tool(
         name = "lambo_saints",
         description = "List the session's canonical memories — concepts that earned Canonical \
-                       status through the audited transition path."
+                       status through the audited transition path. scope (optional) lists \
+                       one of this session's shared layers instead."
     )]
     async fn lambo_saints(&self, Parameters(p): Parameters<SaintsParams>) -> CallToolResult {
         let agent_id = p.agent_id.clone();
@@ -383,7 +391,7 @@ impl LamboServer {
                        caption plus [image:<image_id>] and its vector is the image's, so a \
                        text recall finds it; the same caption and image_id derived again is \
                        the same concept. created_at is stamped server-side; event_time, \
-                       parent_of, the ack and its receipt work as for lambo_derive."
+                       parent_of, scope, the ack and its receipt work as for lambo_derive."
     )]
     async fn lambo_derive_image(
         &self,
@@ -489,7 +497,7 @@ impl ServerHandler for LamboServer {
         ));
         // #33 PR 3: a layered session names its layers. Appended, so an
         // unlayered session's instructions are byte-identical to 0.5.0's
-        // (its `tools/list` is not: recall and inspect list `scope`).
+        // (its `tools/list` is not: every tool but lambo_stats lists `scope`).
         if !self.layers.is_empty()
             && let Some(text) = info.instructions.as_mut()
         {
@@ -506,8 +514,13 @@ impl ServerHandler for LamboServer {
                  belongs to that session: pass the same scope (scope = \"{first}\") to \
                  lambo_inspect to inspect a hit from that layer. Pass scope = \"{first}\" to \
                  lambo_recall to read that layer alone, or scope = \"{session}\" for this \
-                 session alone. Every other tool, and every write, acts on session \
-                 '{session}' only.",
+                 session alone. Writes go to session '{session}' unless you pass scope: write \
+                 a ruling or preference that applies in every project with scope = \
+                 \"{first}\", and project facts, file actions and decisions without a scope. \
+                 A write's depends_on must name concepts in the session it writes to, and a \
+                 write into a layer refuses relative file paths. Writes to different sessions \
+                 have no ordering between them. lambo_reserve and lambo_saints take the same \
+                 scope, and lambo_stats finds a receipt from any of them.",
                 session = self.mem.session().0,
                 layers = names.join(", "),
                 first = names[0],

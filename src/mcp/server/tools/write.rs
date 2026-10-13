@@ -9,7 +9,7 @@ use crate::graph::cite::{MAX_REFERENCES_PER_CONCEPT, MAX_REFERENCES_PER_DERIVE};
 use crate::graph::derive::ParentOf;
 use crate::graph::hybrid;
 use crate::mcp::server::params::{check_size, DeriveParams, RecordActionParams};
-use crate::mcp::server::response::{bad_param, recorded_under, redact_urls, tool_err};
+use crate::mcp::server::response::{bad_param, recorded_under, redact_urls};
 use crate::mcp::server::trace::note_facts;
 use crate::mcp::server::LamboServer;
 use crate::surface::validate::{
@@ -17,7 +17,7 @@ use crate::surface::validate::{
 };
 use crate::types::{ConceptCitations, ConceptType};
 
-use super::scope::LayerProbe;
+use super::scope::{scoped_ack_line, with_scope, with_session};
 
 /// A derive's per-concept `depends_on` as core citations (#36 PR 4),
 /// refused with `bad_param` when one is empty, too long or over a count
@@ -62,6 +62,12 @@ impl LamboServer {
             Ok(a) => a,
             Err(e) => return e,
         };
+        // #33 PR 4: the session written to, refused before anything else.
+        let target = match self.target("lambo_derive", p.scope.as_deref()) {
+            Ok(t) => t,
+            Err(e) => return e,
+        };
+        let mem = target.mem(&self.mem);
         let event_time = p.event_time;
         // J1-R1-3: this path can no longer emit a warning. The attribution
         // warning was the only one it ever had, and J1 deleted it rather than
@@ -89,6 +95,17 @@ impl LamboServer {
             if let Err(msg) = check_no_image_suffix("concept.content", &c.content) {
                 return bad_param(msg);
             }
+        }
+        // #33 PR 4: a Resource written into a shared layer is no bare
+        // relative path.
+        if let Err(e) = target.check_paths(
+            "concept.content",
+            p.concepts
+                .iter()
+                .filter(|c| ConceptType::from(c.concept_type) == ConceptType::Resource)
+                .map(|c| c.content.as_str()),
+        ) {
+            return e;
         }
 
         // `derive` borrows `&[(&str, ConceptType)]` and `ParentOf<'_>` borrows
@@ -133,7 +150,7 @@ impl LamboServer {
         // #74: on a session that embeds, a call whose embedding context
         // would exceed the hybrid limit is refused now, naming the limit,
         // rather than failing on its receipt as an opaque configuration error.
-        if self.mem.derive_embeds()
+        if mem.derive_embeds()
             && let Err(msg) = hybrid::check_embed_context(&concepts, &parent_of, None)
         {
             return bad_param(msg);
@@ -143,20 +160,19 @@ impl LamboServer {
         // validation pre-pass and the interaction that pins this write's place
         // in the `Temporal` chain both happen inside this call; the embed,
         // canonicalize and insert happen in the background.
-        let submitted = match self
-            .mem
+        let submitted = match mem
             .derive_cited_async_scoped(
                 &acting,
                 &concepts,
                 &parent_of,
                 &citations,
                 event_time,
-                &LayerProbe { server: self },
+                &target.probe(self),
             )
             .await
         {
             Ok(s) => s,
-            Err(e) => return tool_err("lambo_derive", e),
+            Err(e) => return self.target_err("lambo_derive", &target, e),
         };
 
         // I1 (DOGFOOD metric 2, re-derivation savings) — **changed by J3, and
@@ -175,11 +191,14 @@ impl LamboServer {
         // J3 owes is that the loss is visible rather than silent, which is what
         // `admitted` and `receipt` on this line are for.
         note_facts(|| {
-            json!({
-                "concepts_requested": concepts.len(),
-                "admitted": !submitted.dropped(),
-                "receipt": submitted.receipt.to_string(),
-            })
+            with_scope(
+                json!({
+                    "concepts_requested": concepts.len(),
+                    "admitted": !submitted.dropped(),
+                    "receipt": submitted.receipt.to_string(),
+                }),
+                p.scope.as_deref(),
+            )
         });
 
         let summary = if submitted.dropped() {
@@ -197,28 +216,36 @@ impl LamboServer {
         };
         let mut out = CallToolResult::success(vec![ContentBlock::text(format!(
             "{summary}\nreceipt {}: {}\nThe outcome arrives on your next tool response. To wait \
-             for it, call lambo_stats with receipt={} (add wait_ms to block).\n{}",
+             for it, call lambo_stats with receipt={} (add wait_ms to block).\n{}{}",
             submitted.receipt,
             redact_urls(&submitted.answer.describe()),
             submitted.receipt,
             recorded_under(&acting),
+            scoped_ack_line(&target),
         ))]);
         // `created` / `matched` are deliberately ABSENT rather than empty: an
         // empty list here would claim nothing was created, which is not what
         // this ack knows. They live on the receipt.
-        out.structured_content = Some(json!({
-            "summary": summary,
-            "receipt": submitted.receipt.to_string(),
-            "receipt_state": submitted.answer.tag(),
-            "agent_id": acting.to_string(),
-            "warnings": [],
-        }));
+        out.structured_content = Some(with_session(
+            json!({
+                "summary": summary,
+                "receipt": submitted.receipt.to_string(),
+                "receipt_state": submitted.answer.tag(),
+                "agent_id": acting.to_string(),
+                "warnings": [],
+            }),
+            &target,
+        ));
         out
     }
 
     pub(crate) async fn record_action_impl(&self, p: RecordActionParams) -> CallToolResult {
         let acting = match self.caller_agent(&p.agent_id) {
             Ok(a) => a,
+            Err(e) => return e,
+        };
+        let target = match self.target("lambo_record_action", p.scope.as_deref()) {
+            Ok(t) => t,
             Err(e) => return e,
         };
         let event_time = p.event_time;
@@ -273,6 +300,16 @@ impl LamboServer {
                 return e;
             }
         }
+        // #33 PR 4: no bare relative path into a shared layer.
+        for (field, entries) in [
+            ("produces", &produces),
+            ("modifies", &modifies),
+            ("depends_on", &depends_on),
+        ] {
+            if let Err(e) = target.check_paths(field, entries.iter().map(String::as_str)) {
+                return e;
+            }
+        }
 
         // N1, superseded by J3 and worth saying why rather than deleting.
         // `Memory::record_action` is synchronous and takes the graph write lock
@@ -301,23 +338,26 @@ impl LamboServer {
         // J3: acknowledged after validation, before the graph write. Unlike
         // `derive` this path has no embedder hop, so what asynchrony buys here
         // is ORDERING with derive — see `Memory::record_action_async_as`.
-        let submitted = match self
-            .mem
-            .record_action_async_scoped(&acting, &action, &LayerProbe { server: self })
+        let submitted = match target
+            .mem(&self.mem)
+            .record_action_async_scoped(&acting, &action, &target.probe(self))
             .await
         {
             Ok(s) => s,
-            Err(e) => return tool_err("lambo_record_action", e),
+            Err(e) => return self.target_err("lambo_record_action", &target, e),
         };
 
         // I1: `created` and `edges` are not knowable at ack time — see the
         // matching note in `derive_impl` for what that costs and where the
         // numbers went.
         note_facts(|| {
-            json!({
-                "admitted": !submitted.dropped(),
-                "receipt": submitted.receipt.to_string(),
-            })
+            with_scope(
+                json!({
+                    "admitted": !submitted.dropped(),
+                    "receipt": submitted.receipt.to_string(),
+                }),
+                p.scope.as_deref(),
+            )
         });
         let summary = if submitted.dropped() {
             format!(
@@ -334,21 +374,25 @@ impl LamboServer {
         };
         let mut out = CallToolResult::success(vec![ContentBlock::text(format!(
             "{summary}\nreceipt {}: {}\nThe outcome arrives on your next tool response. To wait \
-             for it, call lambo_stats with receipt={} (add wait_ms to block).\n{}",
+             for it, call lambo_stats with receipt={} (add wait_ms to block).\n{}{}",
             submitted.receipt,
             redact_urls(&submitted.answer.describe()),
             submitted.receipt,
             recorded_under(&acting),
+            scoped_ack_line(&target),
         ))]);
         // `action_node`, `created` and `edges` are ABSENT rather than zeroed:
         // this ack does not know them. They are on the receipt.
-        out.structured_content = Some(json!({
-            "summary": summary,
-            "receipt": submitted.receipt.to_string(),
-            "receipt_state": submitted.answer.tag(),
-            "agent_id": acting.to_string(),
-            "warnings": [],
-        }));
+        out.structured_content = Some(with_session(
+            json!({
+                "summary": summary,
+                "receipt": submitted.receipt.to_string(),
+                "receipt_state": submitted.answer.tag(),
+                "agent_id": acting.to_string(),
+                "warnings": [],
+            }),
+            &target,
+        ));
         out
     }
 }
