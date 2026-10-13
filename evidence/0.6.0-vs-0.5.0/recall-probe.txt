@@ -1,0 +1,25 @@
+Recall tail probe, 2026-10-13. Two scratch HTTP serves (0.5.0 :17705, 0.6.0 :17704),
+each on its own provisioned copy of the dogfood store taken before the re-pin.
+
+400 sequential recalls per build: 20 rounds of the 20 mcp_ab.py QUERIES, builds
+interleaved per query, order flipped every round. Client-side ms.
+
+0.5.0  n=400  p50 16.5  p90 21.5  p99  46.8  max  95.5  >100ms: 0
+0.6.0  n=400  p50 16.6  p90 29.9  p99 281.7  max 291.9  >100ms: 21
+
+Slow calls by query, 0.6.0, 5 rounds: only "blast radius warning dependents",
+281 / 280 / 282 / 280 / 277 ms. No other query exceeded 100 ms.
+
+Split (second of two identical calls, ms):
+query                              depth  0.5.0  0.6.0
+blast radius warning dependents    0        21    280
+blast radius warning dependents    def      21    290
+blast radius                       0        20    281
+blast radius                       def      20    281
+warning                            0        16     16
+dependents                         0        16     16
+dependents warning                 0        16     16
+
+Same five hits in the same order on both builds, no warnings.
+Server ledger duration_us for the query: 0.5.0 21.2 ms, 0.6.0 279.5 ms.
+Cause and fix options: nrynss/lambo#165.

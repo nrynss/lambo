@@ -1,0 +1,16 @@
+Derive ack probe, 2026-10-13. Same two scratch serves as recall-probe.txt.
+25 single-concept derives per pattern, sent to one build at a time. Client-side ms.
+
+pattern                          0.5.0 p50 / p90   0.6.0 p50 / p90
+idle, 300 ms gap                  0.9 /  1.0        0.9 /  1.0
+back-to-back                      0.3 /  0.4        0.4 /  0.6
+right after a receipt wait       52.0 / 59.1       68.3 / 72.3
+
+The ack costs the same on both builds except in the window right after the
+previous write settles. Both builds are slow there; 0.6.0 by about 16 ms more.
+
+mcp_ab.py (test 1) read 1 ms against 52 ms. It interleaves the builds:
+between one side's receipt wait and that side's next derive, the other side
+does a derive and a wait (about 80 ms). The likely reading is that 0.5.0's slow
+window ends inside that gap and 0.6.0's does not, so the post-settle window is
+longer on 0.6.0. Not confirmed; not investigated further.
