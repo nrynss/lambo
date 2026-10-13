@@ -492,7 +492,23 @@ pub fn validate_plan(
                                 .iter()
                                 .any(|p| super::signals::glob(p, &i.agent_id.0))
                     });
+                // A project mention in the origin prompt or a sibling concept is
+                // soft evidence: only an explicit audit may waive it.
+                let soft_origin_mention = snapshot
+                    .interactions
+                    .iter()
+                    .filter(|i| i.id == c.origin_interaction)
+                    .map(|i| i.prompt_text.as_deref().unwrap_or(""))
+                    .chain(
+                        snapshot
+                            .concepts
+                            .iter()
+                            .filter(|s| s.origin_interaction == c.origin_interaction)
+                            .map(|s| s.content.as_str()),
+                    )
+                    .any(|text| !super::signals::content(&plan.rules, text).0.is_empty());
                 if (plan.reviewed_assignments_sha256.is_none() && !auto_origin && !audited_general)
+                    || (soft_origin_mention && !audited_general)
                     || protected_concepts.contains(&a.id.0)
                     || !matches!(
                         c.concept_type,

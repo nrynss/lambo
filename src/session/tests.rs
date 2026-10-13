@@ -702,3 +702,75 @@ fn excluded_source_session_is_immutable_known_provenance() {
     };
     assert!(classify(&source, &rules, &[audit]).is_err());
 }
+
+#[test]
+fn soft_origin_mention_blocks_unaudited_general_after_reseal_or_review() {
+    let (mut source, rules) = fixture();
+    source.interactions[2].prompt_text =
+        Some("all projects follow operator-wide review conventions, as beta does".into());
+    let generated = classify(&source, &rules, &[]).unwrap();
+    assert_ne!(row(&generated, 13).session, "general");
+    // A resealed automatic plan cannot place it in general without an audit.
+    let mut plan = generated.clone();
+    for a in &mut plan.assignments {
+        if a.id == id(3) || a.id == id(13) {
+            a.session = "general".into();
+        }
+    }
+    plan.seal().unwrap();
+    assert!(validate_plan(&plan, &source).is_err());
+    // Neither can an unaudited reviewed label.
+    let mut labels: Vec<_> = generated
+        .assignments
+        .iter()
+        .map(|a| ReviewedAssignment {
+            kind: a.kind,
+            id: a.id,
+            project: if a.id == id(3) || a.id == id(13) {
+                "general".into()
+            } else {
+                a.session.clone()
+            },
+            confidence: a.confidence,
+            signals: a.signals.clone(),
+            pass2: a.pass2,
+            copy_into: a.copy_into.clone(),
+        })
+        .collect();
+    assert!(classify_reviewed(&source, &rules, &labels, &[]).is_err());
+    // An explicit audited operator assertion may address the soft mention.
+    let audit = OperatorOverride {
+        shared_hub_assertion: false,
+        kind: ItemKind::Concept,
+        id: id(13),
+        session: "general".into(),
+        reason: "Reviewed operator-wide rule mentions a product, not its source".into(),
+        from: None,
+        copy_into: vec![],
+    };
+    let audited =
+        classify_reviewed(&source, &rules, &labels, std::slice::from_ref(&audit)).unwrap();
+    assert_eq!(row(&audited, 13).session, "general");
+    assert_eq!(row(&audited, 3).session, "general");
+    // A sibling concept's mention is the same soft origin evidence.
+    source.interactions[2].prompt_text =
+        Some("all projects follow operator-wide review conventions".into());
+    let mut sibling = source.concepts[2].clone();
+    sibling.id = id(18);
+    sibling.content = "beta rollout notes".into();
+    sibling.canonical_key = sibling.content.clone();
+    sibling.concept_type = ConceptType::Observation;
+    source.concepts.push(sibling);
+    labels.push(ReviewedAssignment {
+        kind: ItemKind::Concept,
+        id: id(18),
+        project: "beta".into(),
+        confidence: Confidence::High,
+        signals: vec![],
+        pass2: false,
+        copy_into: vec![],
+    });
+    labels.iter_mut().find(|a| a.id == id(3)).unwrap().project = "beta".into();
+    assert!(classify_reviewed(&source, &rules, &labels, &[]).is_err());
+    classify_reviewed(&source, &rules, &labels, &[audit]).unwrap();
+}
