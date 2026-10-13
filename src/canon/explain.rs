@@ -505,12 +505,22 @@ pub(crate) fn render_last_demotion(graph: &Graph, node: NodeId) -> Option<String
         crate::types::DemotionReason::Superseded { by } => {
             let id = crate::recall::format::short_id(by);
             match graph.node(by) {
-                Some(crate::types::Node::Concept(c)) => {
-                    format!("superseded by \"{}\" (id {id})", c.content)
-                }
+                // Review L6: the same 80-character excerpt recall quotes.
+                Some(crate::types::Node::Concept(c)) => format!(
+                    "superseded by \"{}\" (id {id})",
+                    crate::recall::format::excerpt(&c.content)
+                ),
                 _ => format!("superseded by a concept no longer in memory (id {id})"),
             }
         }
+        crate::types::DemotionReason::Unknown {
+            reason,
+            superseded_by,
+        } => format!(
+            "a reason this build cannot read (reason {}, superseded_by {})",
+            reason.as_deref().unwrap_or("none"),
+            superseded_by.map_or("none".to_string(), crate::recall::format::short_id)
+        ),
     };
     Some(format!("last demotion {at}: {why}\n"))
 }

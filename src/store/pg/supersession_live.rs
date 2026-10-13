@@ -25,6 +25,7 @@
 //! `ADD COLUMN IF NOT EXISTS`; its existing rows keep a `NULL` pair, which
 //! reads as a budget demotion (or no reason, on a promotion).
 
+use super::{Dialect, PgStore};
 use crate::store::GraphStore;
 use crate::test_util::supersession as case;
 
@@ -33,6 +34,60 @@ use crate::test_util::supersession as case;
 pub(crate) async fn check_supersession_case(store: &dyn GraphStore) {
     case::check_accessors(store).await;
     case::check_reason_persistence(store).await;
+}
+
+/// Review M3 on the Postgres family: rows whose reason pair is unreadable
+/// (inserted by hand, as an older or newer build might leave them) load as
+/// an unknown reason, never Budget, and do not stop the session's load. The
+/// event ids are fixed, so a re-run inserts nothing new.
+pub(crate) async fn check_unreadable_reason<D: Dialect>(store: &PgStore<D>) {
+    use crate::types::{CanonizationStatus, DemotionReason, NodeId};
+    let sid = case::session();
+    let node = case::concept_id("R1");
+    let pool = store.pool().await.expect("pool");
+    let rows: [(u64, &str, &str, Option<&str>, Option<uuid::Uuid>); 3] = [
+        (90, "Canonical", "None", Some("evicted"), None),
+        (91, "Canonical", "None", Some("budget"), Some(node.0)),
+        (92, "Venerable", "Canonical", Some("budget"), None),
+    ];
+    for (n, from, to, reason, by) in rows {
+        sqlx::query(
+            "INSERT INTO canonization_events (id, session_id, node_id, from_status, \
+             to_status, blast_radius, last_demotion_time, occurred_at, reason, superseded_by) \
+             VALUES ($1, $2, $3, $4, $5, NULL, NULL, now(), $6, $7) ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(uuid::Uuid::from_u64_pair(0x20_05, n))
+        .bind(&sid.0)
+        .bind(node.0)
+        .bind(from)
+        .bind(to)
+        .bind(reason)
+        .bind(by)
+        .execute(&pool)
+        .await
+        .expect("insert a raw row");
+    }
+    let snap = store
+        .load_session(&sid)
+        .await
+        .expect("the load must not fail");
+    for (n, ..) in rows {
+        let id = NodeId(uuid::Uuid::from_u64_pair(0x20_05, n));
+        let ev = snap
+            .canonization_events
+            .iter()
+            .find(|e| e.id == id)
+            .expect("the row loads");
+        assert!(
+            matches!(ev.reason, Some(DemotionReason::Unknown { .. })),
+            "{ev:?}"
+        );
+        assert_ne!(ev.demotion_reason(), Some(DemotionReason::Budget));
+    }
+    assert!(snap
+        .concepts
+        .iter()
+        .any(|c| c.id == node && c.canonization_status == CanonizationStatus::None));
 }
 
 #[cfg(feature = "store-postgres")]
@@ -54,4 +109,5 @@ async fn postgres_answers_the_supersession_case() {
     .expect("construct");
     store.init_schema().await.expect("init_schema");
     check_supersession_case(&store).await;
+    check_unreadable_reason(&store).await;
 }

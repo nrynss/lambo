@@ -315,12 +315,12 @@ pub(super) fn row_to_canonization_event(row: &PgRow) -> Result<CanonizationEvent
         blast_radius: blast_radius.map(|v| v as i32),
         last_demotion_time: row.try_get("last_demotion_time").map_err(backend)?,
         occurred_at: row.try_get("occurred_at").map_err(backend)?,
-        // #20: (NULL, NULL) is a historical row; a malformed pair or a reason
-        // on a promotion is refused, never read as Budget.
-        reason: DemotionReason::from_columns(reason.as_deref(), superseded_by)?,
+        // #20: (NULL, NULL) is a historical row. A malformed pair or a reason
+        // on a promotion loads as an unknown reason with a warning (review
+        // M3), never as Budget, and never stops the load.
+        reason: DemotionReason::read_columns(reason.as_deref(), superseded_by),
     };
-    event.check_reason()?;
-    Ok(event)
+    Ok(event.loaded())
 }
 
 #[cfg(test)]

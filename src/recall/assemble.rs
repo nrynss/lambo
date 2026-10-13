@@ -516,7 +516,10 @@ fn superseded_by(graph: &Graph) -> HashMap<NodeId, (NodeId, chrono::DateTime<chr
             Some(crate::types::DemotionReason::Superseded { by }) => {
                 latest.insert(e.node_id, Some((by, e.occurred_at)));
             }
-            Some(crate::types::DemotionReason::Budget) => {
+            // A later budget (or unreadable) demotion is why it is down now.
+            Some(
+                crate::types::DemotionReason::Budget | crate::types::DemotionReason::Unknown { .. },
+            ) => {
                 latest.insert(e.node_id, None);
             }
             None => {}

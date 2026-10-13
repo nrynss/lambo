@@ -440,7 +440,7 @@ pub(super) async fn insert_canonization_event(
     ev: &CanonizationEvent,
 ) -> Result<bool, StoreError> {
     ev.check_reason()?;
-    let (reason, superseded_by) = DemotionReason::to_columns(ev.reason);
+    let (reason, superseded_by) = DemotionReason::to_columns(ev.reason.as_ref());
     let res = sqlx::query(INSERT_CANONIZATION_EVENT_SQL)
         .bind(ev.id.0)
         .bind(&ev.session_id.0)

@@ -299,27 +299,63 @@ async fn a_reason_on_a_promotion_or_a_self_supersession_is_refused() {
     );
 }
 
-/// A stored row whose pair does not name exactly one reason is refused on
-/// load, never read as Budget: `budget` with an id, `superseded` without
-/// one, an id without a reason, unknown text, and a reason on a promotion.
+/// Review M3: a stored row whose pair does not name exactly one reason
+/// (`budget` with an id, `superseded` without one, an id without a reason,
+/// unknown text, a `superseded_by` that is not an id, a reason on a
+/// promotion) does not stop the session's load. It loads as an unknown
+/// reason, never as Budget, with one warning, and the rest of the session is
+/// intact; the same row is still refused at every write gate.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_malformed_reason_row_is_refused_on_load() {
+async fn an_unreadable_reason_row_loads_as_unknown() {
+    let (logs, _guard) = crate::test_util::capture_logs(tracing::Level::WARN);
     let by = || Some(NodeId::new().0.to_string());
-    let cases: [(&str, &str, Option<&str>, Option<String>); 5] = [
+    let cases: [(&str, &str, Option<&str>, Option<String>); 6] = [
         ("Canonical", "None", Some("budget"), by()),
         ("Canonical", "None", Some("superseded"), None),
         ("Canonical", "None", None, by()),
         ("Canonical", "None", Some("evicted"), None),
+        (
+            "Canonical",
+            "None",
+            Some("superseded"),
+            Some("not-an-id".into()),
+        ),
         ("Venerable", "Canonical", Some("budget"), None),
     ];
     for (n, (from, to, reason, by)) in cases.into_iter().enumerate() {
         let store = test_store();
         store.init_schema().await.unwrap();
-        let sid = SessionId::from(format!("malformed-{n}"));
+        let sid = SessionId::from(format!("unreadable-{n}"));
         let c = NodeId::new();
         seeded(&store, &sid, &[c]).await;
         raw_event(&store, &sid, c, from, to, reason, by).await;
-        let err = store.load_session(&sid).await.unwrap_err();
-        assert!(matches!(err, StoreError::Invariant(_)), "case {n}: {err:?}");
+        let snap = store
+            .load_session(&sid)
+            .await
+            .unwrap_or_else(|e| panic!("case {n}: the load must not fail: {e:?}"));
+        assert_eq!(snap.concepts.len(), 1, "case {n}");
+        let ev = &snap.canonization_events[0];
+        assert!(
+            matches!(ev.reason, Some(DemotionReason::Unknown { .. })),
+            "case {n}: {:?}",
+            ev.reason
+        );
+        assert_ne!(
+            ev.demotion_reason(),
+            Some(DemotionReason::Budget),
+            "case {n}"
+        );
+        // The write gates still refuse the row (the graph-side load is
+        // `graph::...::a_snapshot_with_an_unreadable_reason_still_loads`).
+        assert!(
+            store.record_canonization(ev, None).await.is_err(),
+            "case {n}"
+        );
     }
+    assert!(
+        logs.contents()
+            .matches("CanonizationReasonUnreadable")
+            .count()
+            >= 6
+    );
 }

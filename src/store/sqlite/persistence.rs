@@ -285,7 +285,7 @@ impl SqliteStore {
             ev.check_reason()?;
             let from_status = enum_to_text(&ev.from_status, "from_status")?;
             let to_status = enum_to_text(&ev.to_status, "to_status")?;
-            let (reason, superseded_by) = DemotionReason::to_columns(ev.reason);
+            let (reason, superseded_by) = DemotionReason::to_columns(ev.reason.as_ref());
             sqlx::query(
                 "INSERT INTO canonization_events (\
                      id, session_id, node_id, from_status, to_status, blast_radius, \

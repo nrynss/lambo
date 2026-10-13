@@ -211,7 +211,7 @@ fn superseded_by(outcome: &EvalOutcome) -> Vec<(NodeId, NodeId)> {
     outcome
         .supersessions
         .iter()
-        .map(|e| match e.reason {
+        .map(|e| match e.reason.clone() {
             Some(DemotionReason::Superseded { by }) => (e.node_id, by),
             other => panic!("a supersession without its reason: {other:?}"),
         })

@@ -345,10 +345,23 @@ pub(super) async fn load_canonization_events(
         let superseded_by: Option<String> = row
             .try_get(9)
             .map_err(|e| db_err("load canonization events", e))?;
-        let superseded_by = superseded_by
-            .as_deref()
-            .map(|by| node_id(by, "canonization superseded_by"))
-            .transpose()?;
+        // A `superseded_by` that is not an id makes the pair unreadable: the
+        // reason loads as unknown (review M3) instead of failing the load.
+        let (reason, superseded_by, unreadable_by) = match superseded_by.as_deref() {
+            None => (reason, None, false),
+            Some(by) => match node_id(by, "canonization superseded_by") {
+                Ok(by) => (reason, Some(by), false),
+                Err(_) => (reason, None, true),
+            },
+        };
+        let reason = if unreadable_by {
+            Some(DemotionReason::Unknown {
+                reason,
+                superseded_by: None,
+            })
+        } else {
+            DemotionReason::read_columns(reason.as_deref(), superseded_by)
+        };
         let event = CanonizationEvent {
             id: node_id(&id, "canonization event id")?,
             session_id: SessionId::from(sid),
@@ -358,12 +371,12 @@ pub(super) async fn load_canonization_events(
             blast_radius,
             last_demotion_time: last_demotion.as_deref().map(text_to_ts).transpose()?,
             occurred_at: text_to_ts(&occurred)?,
-            // #20: (NULL, NULL) is a historical row; a malformed pair or a
-            // reason on a promotion is refused, never read as Budget.
-            reason: DemotionReason::from_columns(reason.as_deref(), superseded_by)?,
+            // #20: (NULL, NULL) is a historical row. A malformed pair or a
+            // reason on a promotion loads as an unknown reason with a warning
+            // (review M3), never as Budget, and never stops the load.
+            reason,
         };
-        event.check_reason()?;
-        out.push(event);
+        out.push(event.loaded());
     }
     Ok(out)
 }

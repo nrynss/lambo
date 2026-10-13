@@ -277,3 +277,34 @@ fn the_write_gate_checks_the_demotion_reason() {
         Some(DemotionReason::Superseded { by })
     );
 }
+
+/// #20 review L7: a snapshot carrying an event the write gate would refuse
+/// (here a reason on a promotion) still loads; the reason reads as unknown,
+/// never as Budget.
+#[test]
+fn a_snapshot_with_an_unreadable_reason_still_loads() {
+    use crate::types::{CanonizationStatus as S, DemotionReason};
+    let (g, _, cid) = small_graph();
+    let mut snap = g.snapshot();
+    snap.canonization_events.push(CanonizationEvent {
+        id: NodeId::new(),
+        session_id: sid(),
+        node_id: cid,
+        from_status: S::None,
+        to_status: S::Candidate,
+        blast_radius: None,
+        last_demotion_time: None,
+        occurred_at: ts(9),
+        reason: Some(DemotionReason::Budget),
+    });
+    let g = Graph::from_snapshot(snap).expect("the snapshot loads");
+    let ev = g.canonization_events().last().unwrap();
+    assert_eq!(
+        ev.reason,
+        Some(DemotionReason::Unknown {
+            reason: Some("budget".into()),
+            superseded_by: None
+        })
+    );
+    assert_eq!(ev.demotion_reason(), None, "still a promotion");
+}

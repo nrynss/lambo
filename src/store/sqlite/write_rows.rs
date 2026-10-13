@@ -798,7 +798,7 @@ pub(super) async fn apply_canonization_transition(
     event.check_reason()?;
     let to_status = enum_to_text(&event.to_status, "to_status")?;
     let from_status = enum_to_text(&event.from_status, "from_status")?;
-    let (reason, superseded_by) = DemotionReason::to_columns(event.reason);
+    let (reason, superseded_by) = DemotionReason::to_columns(event.reason.as_ref());
     let appended = sqlx::query(
         "INSERT INTO canonization_events (\
              id, session_id, node_id, from_status, to_status, blast_radius, \

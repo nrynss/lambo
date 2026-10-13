@@ -525,13 +525,13 @@ async fn supersession_on_the_fixture() {
                 .canonization_events()
                 .iter()
                 .filter(|e| e.node_id == forever)
-                .map(|e| (e.from_status, e.to_status, e.reason))
+                .map(|e| (e.from_status, e.to_status, e.reason.clone()))
                 .collect();
             use CanonizationStatus::{Candidate, Canonical, Venerable};
             let reason = DemotionReason::Superseded {
                 by: fair::concept_id("retry_bounded"),
             };
-            let superseded = Some(reason);
+            let superseded = Some(reason.clone());
             assert_eq!(
                 hops,
                 vec![
