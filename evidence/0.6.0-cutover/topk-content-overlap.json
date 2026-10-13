@@ -1,0 +1,142 @@
+[
+ {
+  "nold": 8,
+  "nnew": 8,
+  "id_inter": 0,
+  "content_inter": 7,
+  "content_jacc": 0.778
+ },
+ {
+  "nold": 8,
+  "nnew": 8,
+  "id_inter": 0,
+  "content_inter": 4,
+  "content_jacc": 0.333
+ },
+ {
+  "nold": 8,
+  "nnew": 8,
+  "id_inter": 0,
+  "content_inter": 8,
+  "content_jacc": 1.0
+ },
+ {
+  "nold": 8,
+  "nnew": 8,
+  "id_inter": 0,
+  "content_inter": 6,
+  "content_jacc": 0.6
+ },
+ {
+  "nold": 8,
+  "nnew": 8,
+  "id_inter": 0,
+  "content_inter": 3,
+  "content_jacc": 0.231
+ },
+ {
+  "nold": 8,
+  "nnew": 8,
+  "id_inter": 0,
+  "content_inter": 6,
+  "content_jacc": 0.6
+ },
+ {
+  "nold": 8,
+  "nnew": 8,
+  "id_inter": 0,
+  "content_inter": 7,
+  "content_jacc": 0.778
+ },
+ {
+  "nold": 8,
+  "nnew": 8,
+  "id_inter": 0,
+  "content_inter": 7,
+  "content_jacc": 0.778
+ },
+ {
+  "nold": 8,
+  "nnew": 8,
+  "id_inter": 0,
+  "content_inter": 6,
+  "content_jacc": 0.6
+ },
+ {
+  "nold": 8,
+  "nnew": 8,
+  "id_inter": 0,
+  "content_inter": 7,
+  "content_jacc": 0.778
+ },
+ {
+  "nold": 8,
+  "nnew": 8,
+  "id_inter": 0,
+  "content_inter": 4,
+  "content_jacc": 0.333
+ },
+ {
+  "nold": 8,
+  "nnew": 8,
+  "id_inter": 0,
+  "content_inter": 7,
+  "content_jacc": 0.778
+ },
+ {
+  "nold": 8,
+  "nnew": 8,
+  "id_inter": 0,
+  "content_inter": 8,
+  "content_jacc": 1.0
+ },
+ {
+  "nold": 8,
+  "nnew": 8,
+  "id_inter": 0,
+  "content_inter": 7,
+  "content_jacc": 0.778
+ },
+ {
+  "nold": 8,
+  "nnew": 8,
+  "id_inter": 0,
+  "content_inter": 8,
+  "content_jacc": 1.0
+ },
+ {
+  "nold": 8,
+  "nnew": 8,
+  "id_inter": 0,
+  "content_inter": 3,
+  "content_jacc": 0.231
+ },
+ {
+  "nold": 8,
+  "nnew": 8,
+  "id_inter": 0,
+  "content_inter": 8,
+  "content_jacc": 1.0
+ },
+ {
+  "nold": 8,
+  "nnew": 8,
+  "id_inter": 0,
+  "content_inter": 8,
+  "content_jacc": 1.0
+ },
+ {
+  "nold": 8,
+  "nnew": 8,
+  "id_inter": 0,
+  "content_inter": 6,
+  "content_jacc": 0.6
+ },
+ {
+  "nold": 8,
+  "nnew": 8,
+  "id_inter": 0,
+  "content_inter": 7,
+  "content_jacc": 0.778
+ }
+]
