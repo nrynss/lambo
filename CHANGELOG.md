@@ -663,7 +663,9 @@
   concept is no longer resolved to one of them quietly: `lambo_inspect`'s
   focus and `Memory::retract` refuse it as ambiguous, listing each
   candidate's id and repository, and `retract` now also takes a concept's
-  full node id.
+  full node id. A dependency question about such a path (`what depends on
+  README.md`) answers for the repository it names, and otherwise lists the
+  candidates with their repositories and answers for none.
 
 ### Changed
 

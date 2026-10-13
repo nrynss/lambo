@@ -334,3 +334,23 @@ test lost against the review round; SQLite-only `--no-run`, `cargo check
 --no-default-features`, Postgres and Postgres+SQLite all-targets `--no-run`
 pass; Postgres non-live 1276/0/18; mirror drift pass; `git diff --check`
 clean.
+
+### CodeRabbit on PR #156 (2026-10-13)
+
+- **Major, dependency dispatch.** `resolve_anchor` matched a structural
+  question's subject by content and picked one concept by canonical-key
+  order, so `what depends on README.md` could answer with another
+  repository's dependents. Now, when the best match ties (by distance and
+  text) with other concepts and one is a repository-scoped path: a question
+  that names exactly one of their repositories (word-bounded in the query)
+  answers for that file; otherwise the answer is warning-only, listing each
+  candidate's short id and repository, with no hits guessed. Decision:
+  refuse rather than answer for every match, because a structural answer
+  is one subject's traversal (one anchor, one headline, one layered
+  alignment key); a union would mix repositories' dependents under one
+  headline. A scoped anchor's anchor text also carries its repository, so a
+  layered merge aligns structural answers only for the same repository's
+  file. Unscoped questions and the recall goldens are unchanged.
+- **Minor.** `RecordActionParams.repo_scope` now says it also covers a
+  path-like action text (scoped key, layer check); golden and both MCP
+  reference rows updated.
