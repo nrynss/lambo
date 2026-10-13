@@ -460,11 +460,14 @@ pub fn recurrence_sessions(graph: &Graph, c: &Concept) -> usize {
 /// [`crate::graph::Graph::apply_canonization_transition`]) admits exactly one
 /// such rank-*decreasing* transition, Canonical → None: stage skips and downgrades
 /// (`Venerable → None`, `Canonical → Venerable`, …) are rejected there, so
-/// today the filter can only ever count budget demotions. It is written as a
-/// rank comparison on purpose — any future addition to the legal set that
-/// decreases rank lands in this count by the same filter, which is the
-/// behavior an audit of that change must re-examine. Reads the durable
-/// canonization-event log; no new state.
+/// the filter counts Canonical → None demotions, **whatever their reason**:
+/// budget demotions and, since #20 (with `canonization_supersede` on),
+/// supersessions too. A superseded concept therefore carries Solo's revert
+/// penalty, as a budget-demoted one always has (#20 review L5). It is
+/// written as a rank comparison on purpose — any future addition to the
+/// legal set that decreases rank lands in this count by the same filter,
+/// which is the behavior an audit of that change must re-examine. Reads the
+/// durable canonization-event log; no new state.
 pub fn revert_count(graph: &Graph, id: NodeId) -> usize {
     graph
         .canonization_events()
@@ -1224,6 +1227,28 @@ mod tests {
             supporting_interaction_times(&graph, &concept_of(&graph, hub)),
             before
         );
+    }
+
+    /// #20 review L5: a supersession is a Canonical → None demotion, so it
+    /// counts toward Solo's revert penalty exactly like a budget demotion.
+    #[test]
+    fn a_supersession_counts_as_a_revert() {
+        let (mut graph, hub) = spread_support_graph(ConceptType::Resource);
+        for (from, to) in [
+            (CanonizationStatus::None, CanonizationStatus::Venerable),
+            (CanonizationStatus::Venerable, CanonizationStatus::Canonical),
+        ] {
+            graph
+                .apply_canonization_transition(transition(hub, from, to))
+                .unwrap();
+        }
+        graph
+            .apply_canonization_transition(crate::types::CanonizationEvent {
+                reason: Some(crate::types::DemotionReason::Superseded { by: NodeId::new() }),
+                ..transition(hub, CanonizationStatus::Canonical, CanonizationStatus::None)
+            })
+            .unwrap();
+        assert_eq!(revert_count(&graph, hub), 1);
     }
 
     /// Reverts subtract: one demotion (−3.0) pulls a three-session fact back
