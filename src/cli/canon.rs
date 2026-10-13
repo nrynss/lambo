@@ -229,26 +229,44 @@ mod imp {
         }
     }
 
-    /// SIGINT, or SIGTERM on unix: the name of the one that arrived.
-    async fn shutdown_signal() -> &'static str {
+    /// The stop future: SIGINT or SIGTERM, resolving to the name of the one
+    /// that arrived.
+    pub(super) type Stop = std::pin::Pin<Box<dyn Future<Output = &'static str> + Send>>;
+
+    /// Install the SIGINT and SIGTERM handlers **now**, synchronously, and
+    /// return the future that waits on them. Callers install them before
+    /// the scratch directory exists, so there is no window in which a copy
+    /// exists and a signal would kill the process without removing it
+    /// (Sonnet review 3): tokio's unix `signal()` registers on call, where
+    /// an `async fn` would register only when first polled.
+    ///
+    /// Off unix, `tokio::signal::ctrl_c()` registers on first poll, which is
+    /// when `guarded` starts waiting, just after the scratch directory is
+    /// created: a Ctrl-C in that window ends the process with the default
+    /// handler and can leave the copy behind (residual, documented).
+    pub(super) fn install_signals() -> Result<Stop, CliError> {
         #[cfg(unix)]
         {
             use tokio::signal::unix::{signal, SignalKind};
-            match signal(SignalKind::terminate()) {
-                Ok(mut term) => tokio::select! {
-                    _ = tokio::signal::ctrl_c() => "SIGINT",
+            let install = |kind: SignalKind, name: &str| {
+                signal(kind)
+                    .map_err(|e| CliError::Runtime(format!("install the {name} handler: {e}")))
+            };
+            let mut int = install(SignalKind::interrupt(), "SIGINT")?;
+            let mut term = install(SignalKind::terminate(), "SIGTERM")?;
+            Ok(Box::pin(async move {
+                tokio::select! {
+                    _ = int.recv() => "SIGINT",
                     _ = term.recv() => "SIGTERM",
-                },
-                Err(_) => {
-                    let _ = tokio::signal::ctrl_c().await;
-                    "SIGINT"
                 }
-            }
+            }))
         }
         #[cfg(not(unix))]
         {
-            let _ = tokio::signal::ctrl_c().await;
-            "SIGINT"
+            Ok(Box::pin(async {
+                let _ = tokio::signal::ctrl_c().await;
+                "SIGINT"
+            }))
         }
     }
 
@@ -261,9 +279,9 @@ mod imp {
         work: impl Future<Output = Result<T, CliError>> + Send + 'static,
         stop: impl Future<Output = &'static str>,
     ) -> Result<(T, Result<(), String>), CliError> {
-        let task = tokio::spawn(work);
+        let mut task = tokio::spawn(work);
         tokio::select! {
-            joined = task => {
+            joined = &mut task => {
                 let removed = scratch.remove();
                 match joined {
                     Ok(Ok(t)) => Ok((t, removed)),
@@ -272,6 +290,9 @@ mod imp {
                 }
             }
             sig = stop => {
+                // Stop the work before its scratch copy goes (Sonnet
+                // review 1): an abandoned task would keep reading it.
+                task.abort();
                 let removed = scratch.remove();
                 Err(with_removal(CliError::Runtime(format!("interrupted by {sig}")), removed))
             }
@@ -482,6 +503,7 @@ mod imp {
                 )));
             }
         }
+        let stop = install_signals()?;
         let scratch = Scratch::new(args.common.scratch.as_deref())?;
         let dir = scratch.path().to_path_buf();
         let c = args.common.clone();
@@ -494,8 +516,7 @@ mod imp {
                 .map_err(|e| CliError::Runtime(e.to_string()))?;
             Ok((report, loaded.facts, loaded.before))
         };
-        let ((mut report, mut facts, before), removed) =
-            guarded(scratch, work, shutdown_signal()).await?;
+        let ((mut report, mut facts, before), removed) = guarded(scratch, work, stop).await?;
         let c = &args.common;
         report.invariants.push(removal_invariant(removed));
         report.invariants.push(source_check(c, &before, &mut facts));
@@ -527,6 +548,7 @@ mod imp {
             ),
             None => PairInput::Detect,
         };
+        let stop = install_signals()?;
         let scratch = Scratch::new(args.common.scratch.as_deref())?;
         let dir = scratch.path().to_path_buf();
         let c = args.common.clone();
@@ -539,8 +561,7 @@ mod imp {
                 .map_err(|e| CliError::Runtime(e.to_string()))?;
             Ok((report, loaded.facts, loaded.before))
         };
-        let ((mut report, mut facts, before), removed) =
-            guarded(scratch, work, shutdown_signal()).await?;
+        let ((mut report, mut facts, before), removed) = guarded(scratch, work, stop).await?;
         let c = &args.common;
         report.invariants.push(removal_invariant(removed));
         report.invariants.push(source_check(c, &before, &mut facts));

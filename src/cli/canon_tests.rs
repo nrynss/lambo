@@ -261,14 +261,24 @@ async fn a_reviewed_map_with_a_refused_line_fails_the_command() {
 }
 
 /// Review L1: a stop signal while the work runs removes the scratch copy
-/// and reports it; the work is abandoned.
+/// and reports it; the work task is aborted.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_interrupted_run_removes_its_scratch_copy() {
     let parent = ScratchDir::new("lambo-canon-scratch");
     let scratch = imp::Scratch::new(Some(&parent)).unwrap();
     let dir = scratch.path().to_path_buf();
     std::fs::write(dir.join("store.db"), b"copy").unwrap();
-    let work = async {
+    // The work notes when its future is dropped: an aborted task drops it.
+    struct Dropped(std::sync::Arc<std::sync::atomic::AtomicBool>);
+    impl Drop for Dropped {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let guard = Dropped(flag.clone());
+    let work = async move {
+        let _guard = guard;
         tokio::time::sleep(Duration::from_secs(3_600)).await;
         Ok::<(), CliError>(())
     };
@@ -276,6 +286,17 @@ async fn an_interrupted_run_removes_its_scratch_copy() {
         .await
         .unwrap_err();
     assert!(err.to_string().contains("interrupted by SIGINT"), "{err}");
+    // Sonnet review 1: the work task is aborted, not left running.
+    for _ in 0..1_000 {
+        if flag.load(std::sync::atomic::Ordering::SeqCst) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    assert!(
+        flag.load(std::sync::atomic::Ordering::SeqCst),
+        "the work task was not aborted"
+    );
     assert!(!dir.exists());
     assert!(listing(&parent).is_empty());
     // A completed run reports its removal too.
@@ -382,4 +403,16 @@ async fn a_baseline_of_another_session_is_refused() {
     .unwrap_err();
     assert_eq!(err.exit_code(), 2);
     assert!(err.to_string().contains("session"), "{err}");
+}
+
+/// Sonnet review 3: the handlers install synchronously, before any scratch
+/// directory exists, and installing them does not resolve the stop future.
+#[tokio::test]
+async fn the_signal_handlers_install_before_the_scratch_copy() {
+    let stop = imp::install_signals().unwrap();
+    let raced = tokio::time::timeout(Duration::from_millis(20), stop).await;
+    assert!(
+        raced.is_err(),
+        "no signal arrived, so the stop future must still wait"
+    );
 }
