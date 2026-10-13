@@ -62,7 +62,7 @@ metadata roundtrip demonstrates that a changed close time invalidates the plan.
 Synthetic fixture coverage checks deterministic plans, strict general guards,
 noncascading event-time smoothing, complete reviewed imports, audited overrides,
 hub hints, source/plan tampering, ordered-array fingerprints and immutable input
-handling. Full lane gate results are recorded after execution.
+handling. Full lane gate results are recorded in the final readiness section.
 
 On the prepared backup copy, schema preflight succeeds and the source hash stays
 unchanged. Complete reviewed labels need explicit audited treatment for historical
@@ -88,7 +88,6 @@ a live rig run nor owner cut-over belongs to D1. A later run on the prepared bac
 copy can import the owner-reviewed labels; automatic classification alone is not
 a promise to reproduce those reviewed placements.
 
-
 The audited legacy import exposed a product-name mention in a global privacy
 rule. The root distinguished mention from provenance: excluded source session
 attribution, matching source actors and configured repository folder evidence
@@ -97,3 +96,14 @@ that blocks automatic general classification but may be addressed by an explicit
 audited operator assertion. This applies to all configured projects, with no
 owner-specific exception. Synthetic neutral-actor privacy, excluded actor/folder
 and declared excluded source-session regressions exercise that distinction.
+
+## Final readiness review
+
+The final delta review found that narrowing protected provenance to hard
+evidence had also removed soft keyword evidence from plan validation. A resealed
+automatic plan, or an unaudited reviewed label, could place a ruling whose origin
+prompt or sibling concept mentioned a protected project into general. Validation
+now requires an explicit audited general assertion whenever the record, its
+origin prompt or a sibling concept carries project keyword evidence, matching the
+classifier. A synthetic regression covers resealed, unaudited reviewed and
+audited cases. The full lane gate passed after this fix, with no failing rows.
