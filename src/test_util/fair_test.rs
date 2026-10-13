@@ -30,8 +30,12 @@
 //! | | `soak_note` | an Observation read 17 times (access count), cited by none |
 //! | | `lease_alias` | a short Entity name cited by three actions on three days: support, no load (history #36 PR 4 does not rewrite and PR 5 only previews; see [`expected`]) |
 //! | | `write_path_hub` | an Entity associated (`CoOccurrence`/`Semantic`) with every ruling |
-//! | | `lease_revoke` | a newer Logic that contradicts `lease_stays` (the one `Contradicts` edge) |
-//! | Dependents | `a01`..`a32` (Resource actions), `d01`..`d10` (Logic decisions), `c01`..`c06` (children) | the work that cites the rows above |
+//! | | `lease_revoke` | a newer Logic that contradicts `lease_stays`: an assertion with no support of its own |
+//! | Supersession (#20) | `retry_forever` (Logic) | six dependents from six other interactions on days 1 to 8: earns Canonical |
+//! | | `retry_bounded` (Logic) | contradicts `retry_forever` on day 12; four dependents from four interactions on days 14 to 19, all newer than `retry_forever`'s: supersedes it when `canonization_supersede` is on; blast 4, so it stops at Venerable itself |
+//! | | `ttl_fixed` (Logic) | six dependents on days 2 to 14: earns Canonical |
+//! | | `ttl_sliding` (Logic) | contradicts `ttl_fixed`; four dependents on days 6, 8, 15 and 17: Stage 2 on its own, but only two are newer than `ttl_fixed`'s day-14 evidence, so it never supersedes it (the cutoff applies before origins are counted) |
+//! | Dependents | `a01`..`a32` (Resource actions), `d01`..`d10` (Logic decisions), `c01`..`c06` (children), `e01`..`e06`, `f01`..`f04`, `g01`..`g06`, `h01`..`h04` (#20's actions) | the work that cites the rows above |
 //!
 //! Dependence is real-shaped: an action or a later decision declares
 //! `depends_on` a ruling, which the store holds as `dependent -Dependency->
@@ -162,6 +166,11 @@ pub const CONCEPTS: &[(&str, ConceptType, &str, &str)] = &[
     ("lease_alias", Entity, "writer lease", "i06"),
     ("write_path_hub", Entity, "write path", "i06"),
     ("lease_revoke", Logic, "a stalled writer's lease may be revoked after one missed heartbeat", "w15"),
+    // Supersession (#20).
+    ("retry_forever", Logic, "a failed flush retries the same batch until the store accepts it", "i02"),
+    ("retry_bounded", Logic, "a failed flush retries at most three times and then gives up on the batch", "w12"),
+    ("ttl_fixed", Logic, "a lease ttl is fixed when the lease is taken and never extended", "i01"),
+    ("ttl_sliding", Logic, "every heartbeat extends the lease ttl", "i06"),
     // Dependents of lease_stays.
     ("a01", Resource, "renew the writer lease from the heartbeat", "w05"),
     ("d01", Logic, "a writer that stalls keeps its lease until the ttl runs out", "w05"),
@@ -219,6 +228,30 @@ pub const CONCEPTS: &[(&str, ConceptType, &str, &str)] = &[
     ("a30", Resource, "check the writer lease before a flush", "w06"),
     ("a31", Resource, "show the writer lease in stats", "w12"),
     ("a32", Resource, "log writer lease takeovers", "w18"),
+    // Dependents of retry_forever (days 1 to 8).
+    ("e01", Resource, "requeue a failed flush batch at the head of the queue", "i03"),
+    ("e02", Resource, "keep a failed batch in memory until it lands", "i04"),
+    ("e03", Resource, "log each flush retry with its attempt number", "i06"),
+    ("e04", Resource, "retry the lease renewal write until it lands", "w05"),
+    ("e05", Resource, "back off between flush retries", "w06"),
+    ("e06", Resource, "retry a failed canonization record on the next flush", "w08"),
+    // Dependents of retry_bounded (days 14 to 19, all newer than the above).
+    ("f01", Resource, "count flush attempts per batch", "w14"),
+    ("f02", Resource, "surface the store error after the third failed flush", "w15"),
+    ("f03", Resource, "drop a batch the store refused three times", "w17"),
+    ("f04", Resource, "report given-up batches in stats", "w19"),
+    // Dependents of ttl_fixed (days 2 to 14).
+    ("g01", Resource, "store the lease expiry with the lease row", "i05"),
+    ("g02", Resource, "compute the lease expiry once at acquisition", "w05"),
+    ("g03", Resource, "check the fixed expiry before each flush", "w06"),
+    ("g04", Resource, "reject a write after the fixed expiry", "w08"),
+    ("g05", Resource, "drain the queue before the fixed expiry", "w12"),
+    ("g06", Resource, "show the fixed expiry to readers", "w14"),
+    // Dependents of ttl_sliding (days 6 and 8, then 15 and 17).
+    ("h01", Resource, "push the lease expiry forward on each heartbeat", "w06"),
+    ("h02", Resource, "renew the lease ttl from the fence path", "w08"),
+    ("h03", Resource, "extend the ttl when a store write times out", "w15"),
+    ("h04", Resource, "test that a heartbeat moves the expiry", "w17"),
 ];
 
 /// Declared dependence: `(dependent, ruling)`, stored as
@@ -268,6 +301,26 @@ pub const DEPENDS: &[(&str, &str)] = &[
     ("a30", "lease_alias"),
     ("a31", "lease_alias"),
     ("a32", "lease_alias"),
+    ("e01", "retry_forever"),
+    ("e02", "retry_forever"),
+    ("e03", "retry_forever"),
+    ("e04", "retry_forever"),
+    ("e05", "retry_forever"),
+    ("e06", "retry_forever"),
+    ("f01", "retry_bounded"),
+    ("f02", "retry_bounded"),
+    ("f03", "retry_bounded"),
+    ("f04", "retry_bounded"),
+    ("g01", "ttl_fixed"),
+    ("g02", "ttl_fixed"),
+    ("g03", "ttl_fixed"),
+    ("g04", "ttl_fixed"),
+    ("g05", "ttl_fixed"),
+    ("g06", "ttl_fixed"),
+    ("h01", "ttl_sliding"),
+    ("h02", "ttl_sliding"),
+    ("h03", "ttl_sliding"),
+    ("h04", "ttl_sliding"),
 ];
 
 /// `record_action`'s provenance: `(action, file)` as `action -Causal-> file`.
@@ -306,8 +359,16 @@ pub const ASSOCIATIONS: &[(&str, &str, EdgeType)] = &[
     ("write_path_hub", "lease_alias", EdgeType::Semantic),
 ];
 
-/// The fixture's one contradiction, `newer -Contradicts-> older` (#19).
-pub const CONTRADICTION: (&str, &str) = ("lease_revoke", "lease_stays");
+/// The fixture's contradictions, `newer -Contradicts-> older` (#19), each
+/// stamped two minutes into its source's interaction: an assertion with no
+/// support (`lease_revoke`), one whose newer support supersedes its target
+/// when `canonization_supersede` is on (`retry_bounded`, #20), and one whose
+/// support is mostly older than its target's (`ttl_sliding`, #20).
+pub const CONTRADICTIONS: &[(&str, &str)] = &[
+    ("lease_revoke", "lease_stays"),
+    ("retry_bounded", "retry_forever"),
+    ("ttl_sliding", "ttl_fixed"),
+];
 
 /// Read traffic: `(concept, access_count)`, last accessed on day 19.
 pub const ACCESSES: &[(&str, i32)] = &[("soak_note", 17), ("write_path_hub", 9)];
@@ -388,7 +449,7 @@ fn edge(
 }
 
 /// The fixture as a graph, built through the graph's own write path.
-/// `with_contradiction = false` leaves out the one `Contradicts` edge.
+/// `with_contradiction = false` leaves out every `Contradicts` edge.
 pub fn build(with_contradiction: bool) -> Graph {
     build_in(NAME, with_contradiction)
 }
@@ -486,15 +547,16 @@ pub fn build_in(sid: &str, with_contradiction: bool) -> Graph {
         .unwrap();
     }
     if with_contradiction {
-        let (newer, older) = CONTRADICTION;
-        g.upsert_edge(edge(
-            &session_id,
-            concept_id_in(sid, newer),
-            concept_id_in(sid, older),
-            EdgeType::Contradicts,
-            stamped(newer),
-        ))
-        .unwrap();
+        for (newer, older) in CONTRADICTIONS {
+            g.upsert_edge(edge(
+                &session_id,
+                concept_id_in(sid, newer),
+                concept_id_in(sid, older),
+                EdgeType::Contradicts,
+                stamped(newer),
+            ))
+            .unwrap();
+        }
     }
     g
 }
@@ -558,6 +620,12 @@ pub fn expected(policy: PromotionPolicy) -> Vec<(&'static str, CanonizationStatu
         // nothing, and this fixture is history: the row stays Venerable here
         // until a backfill is actually applied, if one ever is.
         ("lease_alias", Venerable),
+        // #20, with supersession off (the default): both beliefs earn
+        // Canonical and their contradictors stop at Venerable (blast 4).
+        ("retry_forever", Canonical),
+        ("retry_bounded", Venerable),
+        ("ttl_fixed", Canonical),
+        ("ttl_sliding", Venerable),
     ];
     match policy {
         PromotionPolicy::Swarm => {}
@@ -568,6 +636,22 @@ pub fn expected(policy: PromotionPolicy) -> Vec<(&'static str, CanonizationStatu
         PromotionPolicy::Solo => out.push(("ack_single", Candidate)),
     }
     out
+}
+
+/// [`expected`] with `canonization_supersede` on (#20): `retry_forever` is
+/// held at Venerable (its contradictor's support is all newer than its
+/// evidence, so promoting it would supersede it at once); `ttl_fixed` and
+/// `lease_stays` keep Canonical (older support, an assertion alone); no
+/// contradictor is promoted by it. From a fixed point reached with
+/// supersession off, turning it on demotes `retry_forever` and ends here too.
+pub fn expected_superseding(policy: PromotionPolicy) -> Vec<(&'static str, CanonizationStatus)> {
+    expected(policy)
+        .into_iter()
+        .map(|(key, status)| match key {
+            "retry_forever" => (key, CanonizationStatus::Venerable),
+            _ => (key, status),
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -604,10 +688,31 @@ pub async fn fixed_point(
     params: &EvalParams,
     quiet: usize,
 ) -> Graph {
-    let graph = RwLock::new(Graph::from_snapshot(snap).unwrap());
+    fixed_point_from(
+        store,
+        Graph::from_snapshot(snap).unwrap(),
+        params,
+        quiet,
+        now(),
+    )
+    .await
+    .0
+}
+
+/// [`fixed_point`] from a graph and a clock, returning the clock it stopped
+/// at too, so a second run (#20: supersession turned on after a fixed point
+/// reached without it) continues forward in time.
+pub async fn fixed_point_from(
+    store: &dyn GraphStore,
+    graph: Graph,
+    params: &EvalParams,
+    quiet: usize,
+    start: DateTime<Utc>,
+) -> (Graph, DateTime<Utc>) {
+    let graph = RwLock::new(graph);
     let (tx, _rx) = crate::daemon::events::event_channel();
     let mut ev = Evaluator::new();
-    let mut now = now();
+    let mut now = start;
     let mut idle = 0;
     for _ in 0..500 {
         let scores = {
@@ -625,7 +730,7 @@ pub async fn fixed_point(
         if out.is_empty() {
             idle += 1;
             if idle >= quiet {
-                return graph.into_inner();
+                return (graph.into_inner(), now);
             }
         } else {
             idle = 0;
@@ -651,7 +756,13 @@ pub fn statuses(g: &Graph) -> HashMap<&'static str, CanonizationStatus> {
 }
 
 pub fn expected_map(policy: PromotionPolicy) -> HashMap<&'static str, CanonizationStatus> {
-    let listed: HashMap<_, _> = expected(policy).into_iter().collect();
+    map_of(expected(policy))
+}
+
+fn map_of(
+    listed: Vec<(&'static str, CanonizationStatus)>,
+) -> HashMap<&'static str, CanonizationStatus> {
+    let listed: HashMap<_, _> = listed.into_iter().collect();
     CONCEPTS
         .iter()
         .map(|(key, ..)| {
@@ -668,7 +779,24 @@ pub fn assert_expected(
     policy: PromotionPolicy,
     on: &str,
 ) {
-    let want = expected_map(policy);
+    assert_statuses(got, &expected_map(policy), policy, on);
+}
+
+/// [`assert_expected`] against [`expected_superseding`] (#20).
+pub fn assert_expected_superseding(
+    got: &HashMap<&'static str, CanonizationStatus>,
+    policy: PromotionPolicy,
+    on: &str,
+) {
+    assert_statuses(got, &map_of(expected_superseding(policy)), policy, on);
+}
+
+fn assert_statuses(
+    got: &HashMap<&'static str, CanonizationStatus>,
+    want: &HashMap<&'static str, CanonizationStatus>,
+    policy: PromotionPolicy,
+    on: &str,
+) {
     let mut wrong: Vec<String> = CONCEPTS
         .iter()
         .filter(|(key, ..)| got[key] != want[key])

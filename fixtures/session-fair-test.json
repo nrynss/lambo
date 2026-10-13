@@ -41,6 +41,24 @@
     {
       "access_count": 0,
       "blast_radius": null,
+      "canonical_key": "attempt each flush it log number retri with",
+      "canonization_status": "None",
+      "concept_type": "Resource",
+      "content": "log each flush retry with its attempt number",
+      "created_at": "2026-09-04T11:01:00Z",
+      "embedding": null,
+      "gc_survived": 3,
+      "human_confirmed": 0,
+      "id": "04285bd0-eaff-8a72-85c0-c9cda5f75fc5",
+      "last_accessed": null,
+      "last_demotion_time": null,
+      "origin_agent": "agent-c",
+      "origin_interaction": "0efdc857-e769-8290-8acc-58436c736a8b",
+      "session_id": "session-fair-test"
+    },
+    {
+      "access_count": 0,
+      "blast_radius": null,
       "canonical_key": "ack action add field receipt",
       "canonization_status": "None",
       "concept_type": "Resource",
@@ -54,6 +72,60 @@
       "last_demotion_time": null,
       "origin_agent": "agent-b",
       "origin_interaction": "de34f884-b697-816a-82fb-b5b92718af09",
+      "session_id": "session-fair-test"
+    },
+    {
+      "access_count": 0,
+      "blast_radius": null,
+      "canonical_key": "acquisit comput expiri leas onc",
+      "canonization_status": "None",
+      "concept_type": "Resource",
+      "content": "compute the lease expiry once at acquisition",
+      "created_at": "2026-09-06T10:01:00Z",
+      "embedding": null,
+      "gc_survived": 3,
+      "human_confirmed": 0,
+      "id": "0b9bb71c-bc1e-87c5-ab57-8a6970097e7b",
+      "last_accessed": null,
+      "last_demotion_time": null,
+      "origin_agent": "agent-a",
+      "origin_interaction": "839941a6-bc64-84b8-bec1-5b6d2632960c",
+      "session_id": "session-fair-test"
+    },
+    {
+      "access_count": 0,
+      "blast_radius": null,
+      "canonical_key": "batch fail flush head queue requeu",
+      "canonization_status": "None",
+      "concept_type": "Resource",
+      "content": "requeue a failed flush batch at the head of the queue",
+      "created_at": "2026-09-02T10:01:00Z",
+      "embedding": null,
+      "gc_survived": 3,
+      "human_confirmed": 0,
+      "id": "0bb59595-0ee5-8a67-9d5c-e10b3a75cb74",
+      "last_accessed": null,
+      "last_demotion_time": null,
+      "origin_agent": "agent-b",
+      "origin_interaction": "8d4766c6-bdfa-8afe-8955-bcfb5b6f17d2",
+      "session_id": "session-fair-test"
+    },
+    {
+      "access_count": 0,
+      "blast_radius": null,
+      "canonical_key": "expiri heartbeat move test that",
+      "canonization_status": "None",
+      "concept_type": "Resource",
+      "content": "test that a heartbeat moves the expiry",
+      "created_at": "2026-09-18T10:01:00Z",
+      "embedding": null,
+      "gc_survived": 3,
+      "human_confirmed": 0,
+      "id": "1e436bf4-d075-838f-9d3e-0fd51e5571a6",
+      "last_accessed": null,
+      "last_demotion_time": null,
+      "origin_agent": "agent-a",
+      "origin_interaction": "78163e5e-cb77-8f71-bff0-ded0812b435e",
       "session_id": "session-fair-test"
     },
     {
@@ -77,6 +149,24 @@
     {
       "access_count": 0,
       "blast_radius": null,
+      "canonical_key": "after expiri fix reject write",
+      "canonization_status": "None",
+      "concept_type": "Resource",
+      "content": "reject a write after the fixed expiry",
+      "created_at": "2026-09-09T10:01:00Z",
+      "embedding": null,
+      "gc_survived": 3,
+      "human_confirmed": 0,
+      "id": "23f3154b-1192-8104-996b-8a89f4b8f756",
+      "last_accessed": null,
+      "last_demotion_time": null,
+      "origin_agent": "agent-c",
+      "origin_interaction": "f1a0164a-28ed-8b56-8be6-fba27145f2c6",
+      "session_id": "session-fair-test"
+    },
+    {
+      "access_count": 0,
+      "blast_radius": null,
       "canonical_key": "batch deadlin fail flush it it miss that",
       "canonization_status": "None",
       "concept_type": "Logic",
@@ -90,6 +180,24 @@
       "last_demotion_time": null,
       "origin_agent": "agent-a",
       "origin_interaction": "3206e3ed-3630-86cd-8b1b-578b6c3cda95",
+      "session_id": "session-fair-test"
+    },
+    {
+      "access_count": 0,
+      "blast_radius": null,
+      "canonical_key": "canon fail flush next record retri",
+      "canonization_status": "None",
+      "concept_type": "Resource",
+      "content": "retry a failed canonization record on the next flush",
+      "created_at": "2026-09-09T10:01:00Z",
+      "embedding": null,
+      "gc_survived": 3,
+      "human_confirmed": 0,
+      "id": "289f8ec2-d843-8e2e-b510-d3a04b4fa97b",
+      "last_accessed": null,
+      "last_demotion_time": null,
+      "origin_agent": "agent-c",
+      "origin_interaction": "f1a0164a-28ed-8b56-8be6-fba27145f2c6",
       "session_id": "session-fair-test"
     },
     {
@@ -275,6 +383,42 @@
     {
       "access_count": 0,
       "blast_radius": null,
+      "canonical_key": "each expiri forward heartbeat leas push",
+      "canonization_status": "None",
+      "concept_type": "Resource",
+      "content": "push the lease expiry forward on each heartbeat",
+      "created_at": "2026-09-07T10:01:00Z",
+      "embedding": null,
+      "gc_survived": 3,
+      "human_confirmed": 0,
+      "id": "56616128-d1ac-87f9-91ed-94d4b093cd6e",
+      "last_accessed": null,
+      "last_demotion_time": null,
+      "origin_agent": "agent-b",
+      "origin_interaction": "4c55d533-d4a3-8422-8be1-5ec67607ba85",
+      "session_id": "session-fair-test"
+    },
+    {
+      "access_count": 0,
+      "blast_radius": null,
+      "canonical_key": "extend out store time ttl when write",
+      "canonization_status": "None",
+      "concept_type": "Resource",
+      "content": "extend the ttl when a store write times out",
+      "created_at": "2026-09-16T10:01:00Z",
+      "embedding": null,
+      "gc_survived": 3,
+      "human_confirmed": 0,
+      "id": "5ade3a5d-9029-85e8-96d1-f86a33452d36",
+      "last_accessed": null,
+      "last_demotion_time": null,
+      "origin_agent": "agent-c",
+      "origin_interaction": "a4fa0d65-553a-83ed-ac20-af71588c6c4a",
+      "session_id": "session-fair-test"
+    },
+    {
+      "access_count": 0,
+      "blast_radius": null,
       "canonical_key": "changelog.md",
       "canonization_status": "None",
       "concept_type": "Resource",
@@ -288,6 +432,42 @@
       "last_demotion_time": null,
       "origin_agent": "agent-c",
       "origin_interaction": "0efdc857-e769-8290-8acc-58436c736a8b",
+      "session_id": "session-fair-test"
+    },
+    {
+      "access_count": 0,
+      "blast_radius": null,
+      "canonical_key": "after error fail flush store surfac third",
+      "canonization_status": "None",
+      "concept_type": "Resource",
+      "content": "surface the store error after the third failed flush",
+      "created_at": "2026-09-16T10:01:00Z",
+      "embedding": null,
+      "gc_survived": 3,
+      "human_confirmed": 0,
+      "id": "5cd0c485-4402-8266-a5e2-6beba699c0f1",
+      "last_accessed": null,
+      "last_demotion_time": null,
+      "origin_agent": "agent-c",
+      "origin_interaction": "a4fa0d65-553a-83ed-ac20-af71588c6c4a",
+      "session_id": "session-fair-test"
+    },
+    {
+      "access_count": 0,
+      "blast_radius": null,
+      "canonical_key": "back between flush off retri",
+      "canonization_status": "None",
+      "concept_type": "Resource",
+      "content": "back off between flush retries",
+      "created_at": "2026-09-07T10:01:00Z",
+      "embedding": null,
+      "gc_survived": 3,
+      "human_confirmed": 0,
+      "id": "62c7842b-b821-8531-8485-1e45e3abce94",
+      "last_accessed": null,
+      "last_demotion_time": null,
+      "origin_agent": "agent-b",
+      "origin_interaction": "4c55d533-d4a3-8422-8be1-5ec67607ba85",
       "session_id": "session-fair-test"
     },
     {
@@ -363,6 +543,24 @@
       "session_id": "session-fair-test"
     },
     {
+      "access_count": 0,
+      "blast_radius": null,
+      "canonical_key": "batch fail flush give most retri then three time up",
+      "canonization_status": "None",
+      "concept_type": "Logic",
+      "content": "a failed flush retries at most three times and then gives up on the batch",
+      "created_at": "2026-09-13T10:01:00Z",
+      "embedding": null,
+      "gc_survived": 3,
+      "human_confirmed": 0,
+      "id": "727bb797-2b42-8ddd-9784-9cae6451cf96",
+      "last_accessed": null,
+      "last_demotion_time": null,
+      "origin_agent": "agent-a",
+      "origin_interaction": "3206e3ed-3630-86cd-8b1b-578b6c3cda95",
+      "session_id": "session-fair-test"
+    },
+    {
       "access_count": 17,
       "blast_radius": null,
       "canonical_key": "by climb dure flush lag morn overnight recov soak",
@@ -401,6 +599,24 @@
     {
       "access_count": 0,
       "blast_radius": null,
+      "canonical_key": "attempt batch count flush per",
+      "canonization_status": "None",
+      "concept_type": "Resource",
+      "content": "count flush attempts per batch",
+      "created_at": "2026-09-15T10:01:00Z",
+      "embedding": null,
+      "gc_survived": 3,
+      "human_confirmed": 0,
+      "id": "765a6223-f14a-81f8-9a0e-7c367965aa8c",
+      "last_accessed": null,
+      "last_demotion_time": null,
+      "origin_agent": "agent-b",
+      "origin_interaction": "7aeb5642-ca19-8a2f-9574-7bf59f9f47e5",
+      "session_id": "session-fair-test"
+    },
+    {
+      "access_count": 0,
+      "blast_radius": null,
       "canonical_key": "agent concurr id stabl two two use",
       "canonization_status": "None",
       "concept_type": "Logic",
@@ -432,6 +648,60 @@
       "last_demotion_time": null,
       "origin_agent": "agent-b",
       "origin_interaction": "de34f884-b697-816a-82fb-b5b92718af09",
+      "session_id": "session-fair-test"
+    },
+    {
+      "access_count": 0,
+      "blast_radius": null,
+      "canonical_key": "everi extend heartbeat leas ttl",
+      "canonization_status": "None",
+      "concept_type": "Logic",
+      "content": "every heartbeat extends the lease ttl",
+      "created_at": "2026-09-04T11:01:00Z",
+      "embedding": null,
+      "gc_survived": 3,
+      "human_confirmed": 0,
+      "id": "80761713-02cb-86ad-89fc-cb3cff641da6",
+      "last_accessed": null,
+      "last_demotion_time": null,
+      "origin_agent": "agent-c",
+      "origin_interaction": "0efdc857-e769-8290-8acc-58436c736a8b",
+      "session_id": "session-fair-test"
+    },
+    {
+      "access_count": 0,
+      "blast_radius": null,
+      "canonical_key": "fenc from leas path renew ttl",
+      "canonization_status": "None",
+      "concept_type": "Resource",
+      "content": "renew the lease ttl from the fence path",
+      "created_at": "2026-09-09T10:01:00Z",
+      "embedding": null,
+      "gc_survived": 3,
+      "human_confirmed": 0,
+      "id": "819a9a5b-6632-8326-ba03-56a5641b9f49",
+      "last_accessed": null,
+      "last_demotion_time": null,
+      "origin_agent": "agent-c",
+      "origin_interaction": "f1a0164a-28ed-8b56-8be6-fba27145f2c6",
+      "session_id": "session-fair-test"
+    },
+    {
+      "access_count": 0,
+      "blast_radius": null,
+      "canonical_key": "befor check each expiri fix flush",
+      "canonization_status": "None",
+      "concept_type": "Resource",
+      "content": "check the fixed expiry before each flush",
+      "created_at": "2026-09-07T10:01:00Z",
+      "embedding": null,
+      "gc_survived": 3,
+      "human_confirmed": 0,
+      "id": "8691dcf1-7b76-8463-9cca-1181622367af",
+      "last_accessed": null,
+      "last_demotion_time": null,
+      "origin_agent": "agent-b",
+      "origin_interaction": "4c55d533-d4a3-8422-8be1-5ec67607ba85",
       "session_id": "session-fair-test"
     },
     {
@@ -522,6 +792,24 @@
       "last_demotion_time": null,
       "origin_agent": "agent-a",
       "origin_interaction": "839941a6-bc64-84b8-bec1-5b6d2632960c",
+      "session_id": "session-fair-test"
+    },
+    {
+      "access_count": 0,
+      "blast_radius": null,
+      "canonical_key": "batch given report stat up",
+      "canonization_status": "None",
+      "concept_type": "Resource",
+      "content": "report given-up batches in stats",
+      "created_at": "2026-09-20T10:01:00Z",
+      "embedding": null,
+      "gc_survived": 3,
+      "human_confirmed": 0,
+      "id": "97b29a61-915e-8c0a-932a-80cd1e003f05",
+      "last_accessed": null,
+      "last_demotion_time": null,
+      "origin_agent": "agent-c",
+      "origin_interaction": "6ed07cbc-5a4d-8619-9cbb-386764581fad",
       "session_id": "session-fair-test"
     },
     {
@@ -671,6 +959,24 @@
     {
       "access_count": 0,
       "blast_radius": null,
+      "canonical_key": "batch fail it keep land memori until",
+      "canonization_status": "None",
+      "concept_type": "Resource",
+      "content": "keep a failed batch in memory until it lands",
+      "created_at": "2026-09-02T16:01:00Z",
+      "embedding": null,
+      "gc_survived": 3,
+      "human_confirmed": 0,
+      "id": "b17c26ff-cfed-8ef6-b644-80938e373f2f",
+      "last_accessed": null,
+      "last_demotion_time": null,
+      "origin_agent": "agent-b",
+      "origin_interaction": "59a3966a-51fe-8bb2-b7f3-d610a4f65618",
+      "session_id": "session-fair-test"
+    },
+    {
+      "access_count": 0,
+      "blast_radius": null,
       "canonical_key": "await flush handler no request",
       "canonization_status": "None",
       "concept_type": "Logic",
@@ -702,6 +1008,24 @@
       "last_demotion_time": null,
       "origin_agent": "agent-c",
       "origin_interaction": "f1a0164a-28ed-8b56-8be6-fba27145f2c6",
+      "session_id": "session-fair-test"
+    },
+    {
+      "access_count": 0,
+      "blast_radius": null,
+      "canonical_key": "expiri leas leas row store with",
+      "canonization_status": "None",
+      "concept_type": "Resource",
+      "content": "store the lease expiry with the lease row",
+      "created_at": "2026-09-03T10:01:00Z",
+      "embedding": null,
+      "gc_survived": 3,
+      "human_confirmed": 0,
+      "id": "bc30f3b5-6fb2-8c96-b737-2a6a4250e919",
+      "last_accessed": null,
+      "last_demotion_time": null,
+      "origin_agent": "agent-c",
+      "origin_interaction": "353528e0-4505-81c9-9099-11e84dd227a1",
       "session_id": "session-fair-test"
     },
     {
@@ -833,6 +1157,24 @@
     {
       "access_count": 0,
       "blast_radius": null,
+      "canonical_key": "it land leas renew retri until write",
+      "canonization_status": "None",
+      "concept_type": "Resource",
+      "content": "retry the lease renewal write until it lands",
+      "created_at": "2026-09-06T10:01:00Z",
+      "embedding": null,
+      "gc_survived": 3,
+      "human_confirmed": 0,
+      "id": "c876ad2b-a66a-8b1b-a6a3-7c5add030065",
+      "last_accessed": null,
+      "last_demotion_time": null,
+      "origin_agent": "agent-a",
+      "origin_interaction": "839941a6-bc64-84b8-bec1-5b6d2632960c",
+      "session_id": "session-fair-test"
+    },
+    {
+      "access_count": 0,
+      "blast_radius": null,
       "canonical_key": "across agent id reconnect reus",
       "canonization_status": "None",
       "concept_type": "Resource",
@@ -846,6 +1188,24 @@
       "last_demotion_time": null,
       "origin_agent": "agent-a",
       "origin_interaction": "70623390-7af2-8914-b84e-338a704af803",
+      "session_id": "session-fair-test"
+    },
+    {
+      "access_count": 0,
+      "blast_radius": null,
+      "canonical_key": "accept batch fail flush it retri same store until",
+      "canonization_status": "None",
+      "concept_type": "Logic",
+      "content": "a failed flush retries the same batch until the store accepts it",
+      "created_at": "2026-09-01T14:01:00Z",
+      "embedding": null,
+      "gc_survived": 3,
+      "human_confirmed": 0,
+      "id": "c8e9339b-b760-87ab-b15e-0072ccb53a87",
+      "last_accessed": null,
+      "last_demotion_time": null,
+      "origin_agent": "agent-a",
+      "origin_interaction": "a50882b6-ddfc-8906-acad-06ae16c513b5",
       "session_id": "session-fair-test"
     },
     {
@@ -869,6 +1229,24 @@
     {
       "access_count": 0,
       "blast_radius": null,
+      "canonical_key": "expiri fix reader show",
+      "canonization_status": "None",
+      "concept_type": "Resource",
+      "content": "show the fixed expiry to readers",
+      "created_at": "2026-09-15T10:01:00Z",
+      "embedding": null,
+      "gc_survived": 3,
+      "human_confirmed": 0,
+      "id": "cdee7b0c-faa6-865f-a99f-0d7fbd2d8122",
+      "last_accessed": null,
+      "last_demotion_time": null,
+      "origin_agent": "agent-b",
+      "origin_interaction": "7aeb5642-ca19-8a2f-9574-7bf59f9f47e5",
+      "session_id": "session-fair-test"
+    },
+    {
+      "access_count": 0,
+      "blast_radius": null,
       "canonical_key": "between caller id lock one share soft with",
       "canonization_status": "None",
       "concept_type": "Resource",
@@ -882,6 +1260,42 @@
       "last_demotion_time": null,
       "origin_agent": "agent-b",
       "origin_interaction": "7aeb5642-ca19-8a2f-9574-7bf59f9f47e5",
+      "session_id": "session-fair-test"
+    },
+    {
+      "access_count": 0,
+      "blast_radius": null,
+      "canonical_key": "extend fix leas leas never taken ttl when",
+      "canonization_status": "None",
+      "concept_type": "Logic",
+      "content": "a lease ttl is fixed when the lease is taken and never extended",
+      "created_at": "2026-09-01T09:01:00Z",
+      "embedding": null,
+      "gc_survived": 3,
+      "human_confirmed": 0,
+      "id": "d73d8390-e150-81ce-bad9-d1beb0dfa968",
+      "last_accessed": null,
+      "last_demotion_time": null,
+      "origin_agent": "agent-a",
+      "origin_interaction": "1494bfeb-81fa-83ab-845f-10ce29e1f0cf",
+      "session_id": "session-fair-test"
+    },
+    {
+      "access_count": 0,
+      "blast_radius": null,
+      "canonical_key": "befor drain expiri fix queue",
+      "canonization_status": "None",
+      "concept_type": "Resource",
+      "content": "drain the queue before the fixed expiry",
+      "created_at": "2026-09-13T10:01:00Z",
+      "embedding": null,
+      "gc_survived": 3,
+      "human_confirmed": 0,
+      "id": "d73f0de7-22a9-8742-8f47-69693f6fda6a",
+      "last_accessed": null,
+      "last_demotion_time": null,
+      "origin_agent": "agent-a",
+      "origin_interaction": "3206e3ed-3630-86cd-8b1b-578b6c3cda95",
       "session_id": "session-fair-test"
     },
     {
@@ -1135,6 +1549,24 @@
       "origin_agent": "agent-a",
       "origin_interaction": "78163e5e-cb77-8f71-bff0-ded0812b435e",
       "session_id": "session-fair-test"
+    },
+    {
+      "access_count": 0,
+      "blast_radius": null,
+      "canonical_key": "batch drop refus store three time",
+      "canonization_status": "None",
+      "concept_type": "Resource",
+      "content": "drop a batch the store refused three times",
+      "created_at": "2026-09-18T10:01:00Z",
+      "embedding": null,
+      "gc_survived": 3,
+      "human_confirmed": 0,
+      "id": "ff35a301-bc08-8ec4-b3f8-1a7a83e49b2a",
+      "last_accessed": null,
+      "last_demotion_time": null,
+      "origin_agent": "agent-a",
+      "origin_interaction": "78163e5e-cb77-8f71-bff0-ded0812b435e",
+      "session_id": "session-fair-test"
     }
   ],
   "created_at": "2026-09-01T09:00:00Z",
@@ -1151,6 +1583,17 @@
       "weight": 1.0
     },
     {
+      "created_at": "2026-09-04T11:02:00Z",
+      "edge_type": "Dependency",
+      "id": "1adb2aa5-6def-884c-830e-935f85bbc167",
+      "last_reinforced": "2026-09-04T11:02:00Z",
+      "reinforcements": 1,
+      "session_id": "session-fair-test",
+      "source": "04285bd0-eaff-8a72-85c0-c9cda5f75fc5",
+      "target": "c8e9339b-b760-87ab-b15e-0072ccb53a87",
+      "weight": 1.0
+    },
+    {
       "created_at": "2026-09-11T10:02:00Z",
       "edge_type": "Dependency",
       "id": "76e6c7a0-ec80-81c0-8e87-cbfc5599b1d9",
@@ -1160,6 +1603,39 @@
       "source": "0796fa6c-4e44-80e5-aa4e-6319ebd39abd",
       "target": "20c5e2b4-c4a7-8c48-b0ed-0b877c53a122",
       "weight": 1.0
+    },
+    {
+      "created_at": "2026-09-06T10:02:00Z",
+      "edge_type": "Dependency",
+      "id": "5089a41f-cb33-8d2e-9e22-e92e2091c776",
+      "last_reinforced": "2026-09-06T10:02:00Z",
+      "reinforcements": 1,
+      "session_id": "session-fair-test",
+      "source": "0b9bb71c-bc1e-87c5-ab57-8a6970097e7b",
+      "target": "d73d8390-e150-81ce-bad9-d1beb0dfa968",
+      "weight": 1.0
+    },
+    {
+      "created_at": "2026-09-02T10:02:00Z",
+      "edge_type": "Dependency",
+      "id": "044a2ff4-1bde-8565-b6f2-1cf0cfb227af",
+      "last_reinforced": "2026-09-02T10:02:00Z",
+      "reinforcements": 1,
+      "session_id": "session-fair-test",
+      "source": "0bb59595-0ee5-8a67-9d5c-e10b3a75cb74",
+      "target": "c8e9339b-b760-87ab-b15e-0072ccb53a87",
+      "weight": 1.0
+    },
+    {
+      "created_at": "2026-09-04T11:01:00Z",
+      "edge_type": "Derives",
+      "id": "c4572ed1-2591-8af7-a091-a218e2a33736",
+      "last_reinforced": "2026-09-04T11:01:00Z",
+      "reinforcements": 1,
+      "session_id": "session-fair-test",
+      "source": "0efdc857-e769-8290-8acc-58436c736a8b",
+      "target": "04285bd0-eaff-8a72-85c0-c9cda5f75fc5",
+      "weight": 0.9
     },
     {
       "created_at": "2026-09-04T11:00:00Z",
@@ -1192,6 +1668,17 @@
       "session_id": "session-fair-test",
       "source": "0efdc857-e769-8290-8acc-58436c736a8b",
       "target": "741b3ea9-7a42-8893-922c-03c121fb5a44",
+      "weight": 0.9
+    },
+    {
+      "created_at": "2026-09-04T11:01:00Z",
+      "edge_type": "Derives",
+      "id": "d67fb20b-ad79-8981-a58c-5ccd8723170e",
+      "last_reinforced": "2026-09-04T11:01:00Z",
+      "reinforcements": 1,
+      "session_id": "session-fair-test",
+      "source": "0efdc857-e769-8290-8acc-58436c736a8b",
+      "target": "80761713-02cb-86ad-89fc-cb3cff641da6",
       "weight": 0.9
     },
     {
@@ -1241,6 +1728,17 @@
     {
       "created_at": "2026-09-01T09:01:00Z",
       "edge_type": "Derives",
+      "id": "f3d60eab-e762-8ee2-8832-7bb713778837",
+      "last_reinforced": "2026-09-01T09:01:00Z",
+      "reinforcements": 1,
+      "session_id": "session-fair-test",
+      "source": "1494bfeb-81fa-83ab-845f-10ce29e1f0cf",
+      "target": "d73d8390-e150-81ce-bad9-d1beb0dfa968",
+      "weight": 0.9
+    },
+    {
+      "created_at": "2026-09-01T09:01:00Z",
+      "edge_type": "Derives",
       "id": "4bf1c406-ab49-8fbb-9bff-c56d3b58f9b8",
       "last_reinforced": "2026-09-01T09:01:00Z",
       "reinforcements": 1,
@@ -1248,6 +1746,28 @@
       "source": "1494bfeb-81fa-83ab-845f-10ce29e1f0cf",
       "target": "e162553f-d31d-8727-aecc-81d5e0dd6dbb",
       "weight": 0.9
+    },
+    {
+      "created_at": "2026-09-18T10:02:00Z",
+      "edge_type": "Dependency",
+      "id": "731a8920-20d0-8231-9979-4eff1db6a82f",
+      "last_reinforced": "2026-09-18T10:02:00Z",
+      "reinforcements": 1,
+      "session_id": "session-fair-test",
+      "source": "1e436bf4-d075-838f-9d3e-0fd51e5571a6",
+      "target": "80761713-02cb-86ad-89fc-cb3cff641da6",
+      "weight": 1.0
+    },
+    {
+      "created_at": "2026-09-09T10:02:00Z",
+      "edge_type": "Dependency",
+      "id": "094a3be4-730c-8eaa-98d1-e63072b9f51d",
+      "last_reinforced": "2026-09-09T10:02:00Z",
+      "reinforcements": 1,
+      "session_id": "session-fair-test",
+      "source": "23f3154b-1192-8104-996b-8a89f4b8f756",
+      "target": "d73d8390-e150-81ce-bad9-d1beb0dfa968",
+      "weight": 1.0
     },
     {
       "created_at": "2026-09-13T10:02:00Z",
@@ -1258,6 +1778,17 @@
       "session_id": "session-fair-test",
       "source": "24ba8faf-1059-8575-a99d-4d275b0781f4",
       "target": "e04ef0bb-6ead-893d-93bc-3a93e535c873",
+      "weight": 1.0
+    },
+    {
+      "created_at": "2026-09-09T10:02:00Z",
+      "edge_type": "Dependency",
+      "id": "cfe5c2b3-8cf7-841b-bde2-303056bf20bc",
+      "last_reinforced": "2026-09-09T10:02:00Z",
+      "reinforcements": 1,
+      "session_id": "session-fair-test",
+      "source": "289f8ec2-d843-8e2e-b510-d3a04b4fa97b",
+      "target": "c8e9339b-b760-87ab-b15e-0072ccb53a87",
       "weight": 1.0
     },
     {
@@ -1360,6 +1891,17 @@
       "weight": 0.9
     },
     {
+      "created_at": "2026-09-13T10:01:00Z",
+      "edge_type": "Derives",
+      "id": "6ebe10c0-2ca2-8b95-8ca6-8735148e9972",
+      "last_reinforced": "2026-09-13T10:01:00Z",
+      "reinforcements": 1,
+      "session_id": "session-fair-test",
+      "source": "3206e3ed-3630-86cd-8b1b-578b6c3cda95",
+      "target": "727bb797-2b42-8ddd-9784-9cae6451cf96",
+      "weight": 0.9
+    },
+    {
       "created_at": "2026-09-13T10:00:00Z",
       "edge_type": "Temporal",
       "id": "0a738b4b-b3fa-8b9d-a521-bcb02ac0b6e7",
@@ -1390,6 +1932,17 @@
       "session_id": "session-fair-test",
       "source": "3206e3ed-3630-86cd-8b1b-578b6c3cda95",
       "target": "ccd6a6b7-3204-86c5-a7ec-f511a8615fc5",
+      "weight": 0.9
+    },
+    {
+      "created_at": "2026-09-13T10:01:00Z",
+      "edge_type": "Derives",
+      "id": "a7e57c05-7c15-81e9-9ea6-61dc6eefc6f4",
+      "last_reinforced": "2026-09-13T10:01:00Z",
+      "reinforcements": 1,
+      "session_id": "session-fair-test",
+      "source": "3206e3ed-3630-86cd-8b1b-578b6c3cda95",
+      "target": "d73f0de7-22a9-8742-8f47-69693f6fda6a",
       "weight": 0.9
     },
     {
@@ -1505,6 +2058,17 @@
     {
       "created_at": "2026-09-03T10:01:00Z",
       "edge_type": "Derives",
+      "id": "58052f3e-83fa-8e23-bb3f-a7020a1aca66",
+      "last_reinforced": "2026-09-03T10:01:00Z",
+      "reinforcements": 1,
+      "session_id": "session-fair-test",
+      "source": "353528e0-4505-81c9-9099-11e84dd227a1",
+      "target": "bc30f3b5-6fb2-8c96-b737-2a6a4250e919",
+      "weight": 0.9
+    },
+    {
+      "created_at": "2026-09-03T10:01:00Z",
+      "edge_type": "Derives",
       "id": "4c14bc50-8543-8063-ad09-59d2600193b2",
       "last_reinforced": "2026-09-03T10:01:00Z",
       "reinforcements": 1,
@@ -1613,6 +2177,28 @@
       "weight": 0.9
     },
     {
+      "created_at": "2026-09-07T10:01:00Z",
+      "edge_type": "Derives",
+      "id": "351aa0e9-856c-81c2-b90a-c720181ebdd0",
+      "last_reinforced": "2026-09-07T10:01:00Z",
+      "reinforcements": 1,
+      "session_id": "session-fair-test",
+      "source": "4c55d533-d4a3-8422-8be1-5ec67607ba85",
+      "target": "56616128-d1ac-87f9-91ed-94d4b093cd6e",
+      "weight": 0.9
+    },
+    {
+      "created_at": "2026-09-07T10:01:00Z",
+      "edge_type": "Derives",
+      "id": "fe9f7d59-3d63-897b-b433-83e96fae44d5",
+      "last_reinforced": "2026-09-07T10:01:00Z",
+      "reinforcements": 1,
+      "session_id": "session-fair-test",
+      "source": "4c55d533-d4a3-8422-8be1-5ec67607ba85",
+      "target": "62c7842b-b821-8531-8485-1e45e3abce94",
+      "weight": 0.9
+    },
+    {
       "created_at": "2026-09-07T10:00:00Z",
       "edge_type": "Temporal",
       "id": "09040832-4465-87af-86ea-6621d07bec23",
@@ -1622,6 +2208,17 @@
       "source": "4c55d533-d4a3-8422-8be1-5ec67607ba85",
       "target": "839941a6-bc64-84b8-bec1-5b6d2632960c",
       "weight": 1.0
+    },
+    {
+      "created_at": "2026-09-07T10:01:00Z",
+      "edge_type": "Derives",
+      "id": "9e77e4dc-f637-8c90-aa5d-d0ae01861f37",
+      "last_reinforced": "2026-09-07T10:01:00Z",
+      "reinforcements": 1,
+      "session_id": "session-fair-test",
+      "source": "4c55d533-d4a3-8422-8be1-5ec67607ba85",
+      "target": "8691dcf1-7b76-8463-9cca-1181622367af",
+      "weight": 0.9
     },
     {
       "created_at": "2026-09-07T10:01:00Z",
@@ -1679,6 +2276,17 @@
       "weight": 1.0
     },
     {
+      "created_at": "2026-09-07T10:02:00Z",
+      "edge_type": "Dependency",
+      "id": "ecd09747-626d-8759-8da2-5a7b3f2a2426",
+      "last_reinforced": "2026-09-07T10:02:00Z",
+      "reinforcements": 1,
+      "session_id": "session-fair-test",
+      "source": "56616128-d1ac-87f9-91ed-94d4b093cd6e",
+      "target": "80761713-02cb-86ad-89fc-cb3cff641da6",
+      "weight": 1.0
+    },
+    {
       "created_at": "2026-09-02T16:00:00Z",
       "edge_type": "Temporal",
       "id": "76979172-41e6-8249-9fd3-4e2e2d8ff8fe",
@@ -1699,6 +2307,39 @@
       "source": "59a3966a-51fe-8bb2-b7f3-d610a4f65618",
       "target": "9e430a51-c989-86ae-a319-3a6fcbd89e8c",
       "weight": 0.9
+    },
+    {
+      "created_at": "2026-09-02T16:01:00Z",
+      "edge_type": "Derives",
+      "id": "2a8f113f-d999-811d-865f-2ffe2c05fe37",
+      "last_reinforced": "2026-09-02T16:01:00Z",
+      "reinforcements": 1,
+      "session_id": "session-fair-test",
+      "source": "59a3966a-51fe-8bb2-b7f3-d610a4f65618",
+      "target": "b17c26ff-cfed-8ef6-b644-80938e373f2f",
+      "weight": 0.9
+    },
+    {
+      "created_at": "2026-09-16T10:02:00Z",
+      "edge_type": "Dependency",
+      "id": "5a6d5044-7a3e-81b7-8626-10dfdb3d96df",
+      "last_reinforced": "2026-09-16T10:02:00Z",
+      "reinforcements": 1,
+      "session_id": "session-fair-test",
+      "source": "5ade3a5d-9029-85e8-96d1-f86a33452d36",
+      "target": "80761713-02cb-86ad-89fc-cb3cff641da6",
+      "weight": 1.0
+    },
+    {
+      "created_at": "2026-09-16T10:02:00Z",
+      "edge_type": "Dependency",
+      "id": "5ca736b6-a15e-814c-8581-f36b970d90b3",
+      "last_reinforced": "2026-09-16T10:02:00Z",
+      "reinforcements": 1,
+      "session_id": "session-fair-test",
+      "source": "5cd0c485-4402-8266-a5e2-6beba699c0f1",
+      "target": "727bb797-2b42-8ddd-9784-9cae6451cf96",
+      "weight": 1.0
     },
     {
       "created_at": "2026-09-19T10:01:00Z",
@@ -1767,6 +2408,17 @@
       "weight": 0.9
     },
     {
+      "created_at": "2026-09-07T10:02:00Z",
+      "edge_type": "Dependency",
+      "id": "ea2bac14-f9d8-891c-af9d-220dd99aa901",
+      "last_reinforced": "2026-09-07T10:02:00Z",
+      "reinforcements": 1,
+      "session_id": "session-fair-test",
+      "source": "62c7842b-b821-8531-8485-1e45e3abce94",
+      "target": "c8e9339b-b760-87ab-b15e-0072ccb53a87",
+      "weight": 1.0
+    },
+    {
       "created_at": "2026-09-06T10:02:00Z",
       "edge_type": "Causal",
       "id": "dab88ccf-e648-8214-9081-5abe374c8e6f",
@@ -1808,6 +2460,17 @@
       "session_id": "session-fair-test",
       "source": "6ed07cbc-5a4d-8619-9cbb-386764581fad",
       "target": "778bb139-4cf8-803e-be88-638cc04391a4",
+      "weight": 0.9
+    },
+    {
+      "created_at": "2026-09-20T10:01:00Z",
+      "edge_type": "Derives",
+      "id": "4692709e-8cb8-8c10-b64f-dc6ec275a8a7",
+      "last_reinforced": "2026-09-20T10:01:00Z",
+      "reinforcements": 1,
+      "session_id": "session-fair-test",
+      "source": "6ed07cbc-5a4d-8619-9cbb-386764581fad",
+      "target": "97b29a61-915e-8c0a-932a-80cd1e003f05",
       "weight": 0.9
     },
     {
@@ -1866,6 +2529,17 @@
       "weight": 1.0
     },
     {
+      "created_at": "2026-09-13T10:02:00Z",
+      "edge_type": "Contradicts",
+      "id": "a96cd977-56a8-85fc-9482-e254e58101d6",
+      "last_reinforced": "2026-09-13T10:02:00Z",
+      "reinforcements": 1,
+      "session_id": "session-fair-test",
+      "source": "727bb797-2b42-8ddd-9784-9cae6451cf96",
+      "target": "c8e9339b-b760-87ab-b15e-0072ccb53a87",
+      "weight": 1.0
+    },
+    {
       "created_at": "2026-09-10T12:01:00Z",
       "edge_type": "Derives",
       "id": "50b925e8-e5a4-81a3-b582-b93a7cddad6c",
@@ -1896,6 +2570,17 @@
       "session_id": "session-fair-test",
       "source": "72f91631-2ada-8200-81a1-83d77a7d1a9e",
       "target": "f6a7dbf9-5fb6-8e26-83de-e48d2f710a8a",
+      "weight": 1.0
+    },
+    {
+      "created_at": "2026-09-15T10:02:00Z",
+      "edge_type": "Dependency",
+      "id": "067cdcbd-1a45-83bc-91b7-12556fa8e04a",
+      "last_reinforced": "2026-09-15T10:02:00Z",
+      "reinforcements": 1,
+      "session_id": "session-fair-test",
+      "source": "765a6223-f14a-81f8-9a0e-7c367965aa8c",
+      "target": "727bb797-2b42-8ddd-9784-9cae6451cf96",
       "weight": 1.0
     },
     {
@@ -1956,6 +2641,17 @@
     {
       "created_at": "2026-09-18T10:01:00Z",
       "edge_type": "Derives",
+      "id": "654d547e-c5ba-8788-9947-59173b00d7f2",
+      "last_reinforced": "2026-09-18T10:01:00Z",
+      "reinforcements": 1,
+      "session_id": "session-fair-test",
+      "source": "78163e5e-cb77-8f71-bff0-ded0812b435e",
+      "target": "1e436bf4-d075-838f-9d3e-0fd51e5571a6",
+      "weight": 0.9
+    },
+    {
+      "created_at": "2026-09-18T10:01:00Z",
+      "edge_type": "Derives",
       "id": "bc54b779-bf7f-8209-9c45-b2d6a0d69ba7",
       "last_reinforced": "2026-09-18T10:01:00Z",
       "reinforcements": 1,
@@ -1987,6 +2683,17 @@
       "weight": 0.9
     },
     {
+      "created_at": "2026-09-18T10:01:00Z",
+      "edge_type": "Derives",
+      "id": "3ee53aac-3f00-89e9-b3f5-283b42d8343f",
+      "last_reinforced": "2026-09-18T10:01:00Z",
+      "reinforcements": 1,
+      "session_id": "session-fair-test",
+      "source": "78163e5e-cb77-8f71-bff0-ded0812b435e",
+      "target": "ff35a301-bc08-8ec4-b3f8-1a7a83e49b2a",
+      "weight": 0.9
+    },
+    {
       "created_at": "2026-09-15T10:01:00Z",
       "edge_type": "Derives",
       "id": "65f40533-66d9-82e7-a0af-ad1a95a86e7c",
@@ -2011,6 +2718,28 @@
     {
       "created_at": "2026-09-15T10:01:00Z",
       "edge_type": "Derives",
+      "id": "78742536-c458-8e24-a10b-1eadeef283c8",
+      "last_reinforced": "2026-09-15T10:01:00Z",
+      "reinforcements": 1,
+      "session_id": "session-fair-test",
+      "source": "7aeb5642-ca19-8a2f-9574-7bf59f9f47e5",
+      "target": "765a6223-f14a-81f8-9a0e-7c367965aa8c",
+      "weight": 0.9
+    },
+    {
+      "created_at": "2026-09-15T10:01:00Z",
+      "edge_type": "Derives",
+      "id": "61c4f009-0c6e-8b50-8f29-8259c1cbf4a7",
+      "last_reinforced": "2026-09-15T10:01:00Z",
+      "reinforcements": 1,
+      "session_id": "session-fair-test",
+      "source": "7aeb5642-ca19-8a2f-9574-7bf59f9f47e5",
+      "target": "cdee7b0c-faa6-865f-a99f-0d7fbd2d8122",
+      "weight": 0.9
+    },
+    {
+      "created_at": "2026-09-15T10:01:00Z",
+      "edge_type": "Derives",
       "id": "0d272f38-45be-85c1-9581-74a9db697e7e",
       "last_reinforced": "2026-09-15T10:01:00Z",
       "reinforcements": 1,
@@ -2029,6 +2758,39 @@
       "source": "7bd676bd-1d16-82d2-ab3a-566a39dd6c6c",
       "target": "20c5e2b4-c4a7-8c48-b0ed-0b877c53a122",
       "weight": 1.0
+    },
+    {
+      "created_at": "2026-09-04T11:02:00Z",
+      "edge_type": "Contradicts",
+      "id": "475e9fc4-54bd-8114-9043-12081dceba3a",
+      "last_reinforced": "2026-09-04T11:02:00Z",
+      "reinforcements": 1,
+      "session_id": "session-fair-test",
+      "source": "80761713-02cb-86ad-89fc-cb3cff641da6",
+      "target": "d73d8390-e150-81ce-bad9-d1beb0dfa968",
+      "weight": 1.0
+    },
+    {
+      "created_at": "2026-09-09T10:02:00Z",
+      "edge_type": "Dependency",
+      "id": "456405eb-a546-8d8f-8c20-d6ad9146f863",
+      "last_reinforced": "2026-09-09T10:02:00Z",
+      "reinforcements": 1,
+      "session_id": "session-fair-test",
+      "source": "819a9a5b-6632-8326-ba03-56a5641b9f49",
+      "target": "80761713-02cb-86ad-89fc-cb3cff641da6",
+      "weight": 1.0
+    },
+    {
+      "created_at": "2026-09-06T10:01:00Z",
+      "edge_type": "Derives",
+      "id": "8da87320-722e-80ae-a21a-ebd12e0f10fe",
+      "last_reinforced": "2026-09-06T10:01:00Z",
+      "reinforcements": 1,
+      "session_id": "session-fair-test",
+      "source": "839941a6-bc64-84b8-bec1-5b6d2632960c",
+      "target": "0b9bb71c-bc1e-87c5-ab57-8a6970097e7b",
+      "weight": 0.9
     },
     {
       "created_at": "2026-09-06T10:00:00Z",
@@ -2075,6 +2837,28 @@
       "weight": 0.9
     },
     {
+      "created_at": "2026-09-06T10:01:00Z",
+      "edge_type": "Derives",
+      "id": "833f53a1-91f5-81bd-add6-06f20fe1c143",
+      "last_reinforced": "2026-09-06T10:01:00Z",
+      "reinforcements": 1,
+      "session_id": "session-fair-test",
+      "source": "839941a6-bc64-84b8-bec1-5b6d2632960c",
+      "target": "c876ad2b-a66a-8b1b-a6a3-7c5add030065",
+      "weight": 0.9
+    },
+    {
+      "created_at": "2026-09-07T10:02:00Z",
+      "edge_type": "Dependency",
+      "id": "05261a2e-9f3d-8d38-90e6-55c869ea61f1",
+      "last_reinforced": "2026-09-07T10:02:00Z",
+      "reinforcements": 1,
+      "session_id": "session-fair-test",
+      "source": "8691dcf1-7b76-8463-9cca-1181622367af",
+      "target": "d73d8390-e150-81ce-bad9-d1beb0dfa968",
+      "weight": 1.0
+    },
+    {
       "created_at": "2026-09-12T10:02:00Z",
       "edge_type": "Dependency",
       "id": "d5f85583-c62f-88d1-b10e-9329775021ae",
@@ -2095,6 +2879,17 @@
       "source": "8944d002-00d7-80bb-ad7f-b921c81e65f4",
       "target": "4649574b-2aae-8672-b512-81622b77843f",
       "weight": 1.0
+    },
+    {
+      "created_at": "2026-09-02T10:01:00Z",
+      "edge_type": "Derives",
+      "id": "ca3b0bb9-9dee-8ee6-97d4-5b6274a6c4dc",
+      "last_reinforced": "2026-09-02T10:01:00Z",
+      "reinforcements": 1,
+      "session_id": "session-fair-test",
+      "source": "8d4766c6-bdfa-8afe-8955-bcfb5b6f17d2",
+      "target": "0bb59595-0ee5-8a67-9d5c-e10b3a75cb74",
+      "weight": 0.9
     },
     {
       "created_at": "2026-09-02T10:01:00Z",
@@ -2163,6 +2958,17 @@
       "weight": 1.0
     },
     {
+      "created_at": "2026-09-20T10:02:00Z",
+      "edge_type": "Dependency",
+      "id": "046b903f-3ba8-87aa-a0ab-6d7906edaa09",
+      "last_reinforced": "2026-09-20T10:02:00Z",
+      "reinforcements": 1,
+      "session_id": "session-fair-test",
+      "source": "97b29a61-915e-8c0a-932a-80cd1e003f05",
+      "target": "727bb797-2b42-8ddd-9784-9cae6451cf96",
+      "weight": 1.0
+    },
+    {
       "created_at": "2026-09-11T10:02:00Z",
       "edge_type": "Dependency",
       "id": "6b2cf6ec-867b-8462-9da3-73f5b21edda7",
@@ -2182,6 +2988,28 @@
       "session_id": "session-fair-test",
       "source": "a4fa0d65-553a-83ed-ac20-af71588c6c4a",
       "target": "326922c5-8e96-8b50-97d6-25b8e91ccffb",
+      "weight": 0.9
+    },
+    {
+      "created_at": "2026-09-16T10:01:00Z",
+      "edge_type": "Derives",
+      "id": "c49ce4d4-4282-8aa3-94cb-ecc21f885f48",
+      "last_reinforced": "2026-09-16T10:01:00Z",
+      "reinforcements": 1,
+      "session_id": "session-fair-test",
+      "source": "a4fa0d65-553a-83ed-ac20-af71588c6c4a",
+      "target": "5ade3a5d-9029-85e8-96d1-f86a33452d36",
+      "weight": 0.9
+    },
+    {
+      "created_at": "2026-09-16T10:01:00Z",
+      "edge_type": "Derives",
+      "id": "db012b2a-c7f5-85a4-8ca0-4369b5b4b60b",
+      "last_reinforced": "2026-09-16T10:01:00Z",
+      "reinforcements": 1,
+      "session_id": "session-fair-test",
+      "source": "a4fa0d65-553a-83ed-ac20-af71588c6c4a",
+      "target": "5cd0c485-4402-8266-a5e2-6beba699c0f1",
       "weight": 0.9
     },
     {
@@ -2238,6 +3066,17 @@
       "source": "a50882b6-ddfc-8906-acad-06ae16c513b5",
       "target": "1494bfeb-81fa-83ab-845f-10ce29e1f0cf",
       "weight": 1.0
+    },
+    {
+      "created_at": "2026-09-01T14:01:00Z",
+      "edge_type": "Derives",
+      "id": "aaf869fb-682b-87c5-945a-6827cd750531",
+      "last_reinforced": "2026-09-01T14:01:00Z",
+      "reinforcements": 1,
+      "session_id": "session-fair-test",
+      "source": "a50882b6-ddfc-8906-acad-06ae16c513b5",
+      "target": "c8e9339b-b760-87ab-b15e-0072ccb53a87",
+      "weight": 0.9
     },
     {
       "created_at": "2026-09-01T14:01:00Z",
@@ -2306,6 +3145,17 @@
       "weight": 1.0
     },
     {
+      "created_at": "2026-09-02T16:02:00Z",
+      "edge_type": "Dependency",
+      "id": "36bd97b3-338a-85bd-87b3-7dfea20feb5a",
+      "last_reinforced": "2026-09-02T16:02:00Z",
+      "reinforcements": 1,
+      "session_id": "session-fair-test",
+      "source": "b17c26ff-cfed-8ef6-b644-80938e373f2f",
+      "target": "c8e9339b-b760-87ab-b15e-0072ccb53a87",
+      "weight": 1.0
+    },
+    {
       "created_at": "2026-09-07T10:02:00Z",
       "edge_type": "Dependency",
       "id": "5d7a590a-d262-8481-bcf6-e0ab3b7c522c",
@@ -2347,6 +3197,17 @@
       "session_id": "session-fair-test",
       "source": "b65def00-6c34-8e22-8647-096345c03b48",
       "target": "e162553f-d31d-8727-aecc-81d5e0dd6dbb",
+      "weight": 1.0
+    },
+    {
+      "created_at": "2026-09-03T10:02:00Z",
+      "edge_type": "Dependency",
+      "id": "7602f388-d934-8c91-88d5-f107a101331c",
+      "last_reinforced": "2026-09-03T10:02:00Z",
+      "reinforcements": 1,
+      "session_id": "session-fair-test",
+      "source": "bc30f3b5-6fb2-8c96-b737-2a6a4250e919",
+      "target": "d73d8390-e150-81ce-bad9-d1beb0dfa968",
       "weight": 1.0
     },
     {
@@ -2405,6 +3266,17 @@
       "weight": 1.0
     },
     {
+      "created_at": "2026-09-06T10:02:00Z",
+      "edge_type": "Dependency",
+      "id": "caa3ab8d-7125-8554-9687-9db323ed2bf5",
+      "last_reinforced": "2026-09-06T10:02:00Z",
+      "reinforcements": 1,
+      "session_id": "session-fair-test",
+      "source": "c876ad2b-a66a-8b1b-a6a3-7c5add030065",
+      "target": "c8e9339b-b760-87ab-b15e-0072ccb53a87",
+      "weight": 1.0
+    },
+    {
       "created_at": "2026-09-10T10:02:00Z",
       "edge_type": "Dependency",
       "id": "ff0fd07a-b761-8b69-b50d-2a3c36e1714f",
@@ -2451,12 +3323,34 @@
     {
       "created_at": "2026-09-15T10:02:00Z",
       "edge_type": "Dependency",
+      "id": "309714d5-b5b9-8502-92cb-28c7d825b5cc",
+      "last_reinforced": "2026-09-15T10:02:00Z",
+      "reinforcements": 1,
+      "session_id": "session-fair-test",
+      "source": "cdee7b0c-faa6-865f-a99f-0d7fbd2d8122",
+      "target": "d73d8390-e150-81ce-bad9-d1beb0dfa968",
+      "weight": 1.0
+    },
+    {
+      "created_at": "2026-09-15T10:02:00Z",
+      "edge_type": "Dependency",
       "id": "9c29a233-df21-8b6b-8140-ee5acdb77068",
       "last_reinforced": "2026-09-15T10:02:00Z",
       "reinforcements": 1,
       "session_id": "session-fair-test",
       "source": "d2aef0d5-56f7-8639-b049-2e86821466ac",
       "target": "2dea2dac-6e60-8b68-968f-6b010adaa2cb",
+      "weight": 1.0
+    },
+    {
+      "created_at": "2026-09-13T10:02:00Z",
+      "edge_type": "Dependency",
+      "id": "011461b5-26d7-8dcf-845d-1e95c8269780",
+      "last_reinforced": "2026-09-13T10:02:00Z",
+      "reinforcements": 1,
+      "session_id": "session-fair-test",
+      "source": "d73f0de7-22a9-8742-8f47-69693f6fda6a",
+      "target": "d73d8390-e150-81ce-bad9-d1beb0dfa968",
       "weight": 1.0
     },
     {
@@ -2603,6 +3497,28 @@
       "weight": 1.0
     },
     {
+      "created_at": "2026-09-09T10:01:00Z",
+      "edge_type": "Derives",
+      "id": "b4e75cd2-36b1-8e0b-b5be-bbb39d79a510",
+      "last_reinforced": "2026-09-09T10:01:00Z",
+      "reinforcements": 1,
+      "session_id": "session-fair-test",
+      "source": "f1a0164a-28ed-8b56-8be6-fba27145f2c6",
+      "target": "23f3154b-1192-8104-996b-8a89f4b8f756",
+      "weight": 0.9
+    },
+    {
+      "created_at": "2026-09-09T10:01:00Z",
+      "edge_type": "Derives",
+      "id": "bfb48a4a-94f3-81b8-bc70-0436b167b4f1",
+      "last_reinforced": "2026-09-09T10:01:00Z",
+      "reinforcements": 1,
+      "session_id": "session-fair-test",
+      "source": "f1a0164a-28ed-8b56-8be6-fba27145f2c6",
+      "target": "289f8ec2-d843-8e2e-b510-d3a04b4fa97b",
+      "weight": 0.9
+    },
+    {
       "created_at": "2026-09-09T10:00:00Z",
       "edge_type": "Temporal",
       "id": "90ce4cd6-a62a-86c2-8e08-22dc3fb64c95",
@@ -2612,6 +3528,17 @@
       "source": "f1a0164a-28ed-8b56-8be6-fba27145f2c6",
       "target": "4c55d533-d4a3-8422-8be1-5ec67607ba85",
       "weight": 1.0
+    },
+    {
+      "created_at": "2026-09-09T10:01:00Z",
+      "edge_type": "Derives",
+      "id": "0d1786b2-ec62-890b-82e1-3c19429ca82e",
+      "last_reinforced": "2026-09-09T10:01:00Z",
+      "reinforcements": 1,
+      "session_id": "session-fair-test",
+      "source": "f1a0164a-28ed-8b56-8be6-fba27145f2c6",
+      "target": "819a9a5b-6632-8326-ba03-56a5641b9f49",
+      "weight": 0.9
     },
     {
       "created_at": "2026-09-09T10:01:00Z",
@@ -2809,6 +3736,17 @@
       "session_id": "session-fair-test",
       "source": "fe1fb792-c681-817b-9907-44a148a4a083",
       "target": "2dea2dac-6e60-8b68-968f-6b010adaa2cb",
+      "weight": 1.0
+    },
+    {
+      "created_at": "2026-09-18T10:02:00Z",
+      "edge_type": "Dependency",
+      "id": "dc471363-9e70-886b-83cc-7566bf77e383",
+      "last_reinforced": "2026-09-18T10:02:00Z",
+      "reinforcements": 1,
+      "session_id": "session-fair-test",
+      "source": "ff35a301-bc08-8ec4-b3f8-1a7a83e49b2a",
+      "target": "727bb797-2b42-8ddd-9784-9cae6451cf96",
       "weight": 1.0
     }
   ],

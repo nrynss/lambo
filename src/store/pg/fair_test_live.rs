@@ -50,6 +50,23 @@ pub(crate) async fn check_fair_test(store: &dyn GraphStore) {
             policy,
             &format!("the live store ({sid})"),
         );
+        // #20: supersession on, from the start, through the live SQL.
+        let sid = format!("{}-{}", fair::NAME, uuid::Uuid::new_v4());
+        let snap = fair::snapshot_in(&sid, true);
+        store
+            .flush(&fair::batch_of(&snap), None)
+            .await
+            .expect("flush the fixture");
+        let on = EvalParams {
+            supersede: true,
+            ..params
+        };
+        let g = fair::fixed_point(store, snap, &on, 3).await;
+        fair::assert_expected_superseding(
+            &fair::statuses(&g),
+            policy,
+            &format!("the live store with supersession ({sid})"),
+        );
     }
 }
 

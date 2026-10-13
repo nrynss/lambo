@@ -91,7 +91,7 @@ fn the_dry_run_binary_reads_a_copy_and_leaves_no_trace() {
     );
     let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     for policy in report["policies"].as_array().unwrap() {
-        assert_eq!(policy["canonical_total"], 4, "{}", policy["policy"]);
+        assert_eq!(policy["canonical_total"], 6, "{}", policy["policy"]);
         assert_eq!(policy["stop"], "fixed_point");
     }
     assert_eq!(report["source"]["sha256_before"], hash.as_str());
