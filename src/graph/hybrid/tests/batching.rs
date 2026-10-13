@@ -136,6 +136,7 @@ async fn record_action_contents_embed_in_one_round() {
     let modifies = ["a.rs", "b.rs"];
     let depends_on = ["a.rs"];
     let act = crate::graph::action::Action {
+        repo_scope: None,
         event_time: None,
         action: "rewired the lanes",
         produces: &produces,
@@ -155,6 +156,7 @@ async fn record_action_contents_embed_in_one_round() {
     let e = BatchingEmbedder::new(32);
     let bad = [BatchingEmbedder::REFUSE];
     let act = crate::graph::action::Action {
+        repo_scope: None,
         event_time: None,
         action: "touched a refused path",
         produces: &bad,

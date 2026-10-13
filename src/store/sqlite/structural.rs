@@ -169,16 +169,27 @@ impl SqliteStore {
             if i > 0 {
                 sql.push_str(" + ");
             }
-            sql.push_str("(instr(lower(content), ?) > 0 OR instr(lower(canonical_key), ?) > 0)");
+            sql.push_str(&format!(
+                "(instr(lower(content), ?) > 0 OR ({} AND instr(lower(canonical_key), ?) > 0))",
+                crate::graph::resource::KEYWORD_KEY_GUARD_SQL
+            ));
         }
         sql.push_str(" AS score FROM concepts WHERE session_id = ? AND (");
         for (i, _) in tokens_l.iter().enumerate() {
             if i > 0 {
                 sql.push_str(" OR ");
             }
-            sql.push_str("(instr(lower(content), ?) > 0 OR instr(lower(canonical_key), ?) > 0)");
+            sql.push_str(&format!(
+                "(instr(lower(content), ?) > 0 OR ({} AND instr(lower(canonical_key), ?) > 0))",
+                crate::graph::resource::KEYWORD_KEY_GUARD_SQL
+            ));
         }
-        sql.push_str(") ORDER BY score DESC, canonical_key ASC, id ASC LIMIT ?");
+        // #129: the tie order compares `resource::tie_form`, which lowercases
+        // a scoped key's ASCII prefix so scoped keys do not all sort first.
+        sql.push_str(&format!(
+            ") ORDER BY score DESC, {} ASC, id ASC LIMIT ?",
+            crate::graph::resource::TIE_FORM_SQL
+        ));
 
         let mut q = sqlx::query(&sql);
         for tok in &tokens_l {

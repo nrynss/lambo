@@ -371,7 +371,16 @@ where
             .and_then(|ci| ci.canonical_key.as_deref())
             .and_then(|k| by_key.get(k))
             .and_then(|gs| gs.iter().copied().find(|&g| !groups[g].has_tier(c.tier)));
+        // #129 (review M2): a repository-scoped path is its exact key. Two
+        // repositories' `README.md` embed alike, so a scoped copy joins a
+        // group only by an equal key, never by vector, and no copy joins a
+        // scoped one by vector.
+        let scoped = |i: Option<&HitIdentity>| {
+            i.and_then(|i| i.canonical_key.as_deref())
+                .is_some_and(crate::graph::resource::is_scoped_key)
+        };
         if found.is_none()
+            && !scoped(ci)
             && let Some(cv) = ci.and_then(|ci| ci.embedding.as_deref())
         {
             'groups: for (g, group) in groups.iter().enumerate() {
@@ -379,6 +388,9 @@ where
                     continue;
                 }
                 for m in group.members() {
+                    if scoped(identity(m)) {
+                        continue;
+                    }
                     let Some(mv) = identity(m).and_then(|i| i.embedding.as_deref()) else {
                         continue;
                     };

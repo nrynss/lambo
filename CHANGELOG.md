@@ -145,6 +145,24 @@
   ```sql
   DELETE FROM edges WHERE edge_type = 'Contradicts';
   ```
+- **Repository-scoped paths (#129 part 2, #33 PR 7) need nothing
+  migrated.** A write without the new `repo_scope` keeps the 0.5.0
+  identity for every path. Path concepts already in a session, including
+  the shared hubs several repositories' `README.md` or `src/main.rs` were
+  joined into, stay as they are and keep their ids: their edges do not say
+  which repository each came from, so Lambo cannot split them truthfully.
+  Scoped writes create new, per-repository concepts beside them; cite an
+  old one by its id. A scoped write's durable intent is a new kind
+  (`repo_scoped`): settled, it is rewritten to the empty `derive` 0.5.0
+  decodes; unconsumed, 0.5.0 refuses it by name, so let the 0.6.0 writer
+  drain its queue before downgrading.
+- **A plain concept can make a scoped reference ambiguous.** In a session
+  that already holds a plain (non-Resource) concept named like a file, for
+  example an Entity `README.md` minted by an unscoped `depends_on`, a
+  scoped `depends_on`, citation or `against` of `README.md` reaches that
+  concept while no scoped `README.md` exists, and is refused as
+  `Ambiguous` once one does, listing both with their ids. Name the one you
+  mean by its id.
 
   A derive's `against` rides in the `derive_cited` intent and an action's
   in a new `action_cited` intent. Once settled (applied or failed), both
@@ -309,6 +327,23 @@
   `GraphStore::latest_structural_evidence_at` and
   `GraphStore::interaction_span_since` default to `StoreError::Capability`,
   so a third-party store compiles unchanged and skips supersession.
+- **`Action` gains `repo_scope: Option<&str>`, and `WriteIntentPayload`
+  gains the `RepoScoped { repo_scope, payload }` variant** (#129, #33 PR 7).
+  An `Action { .. }` literal needs the field (`None` keeps 0.5.0
+  behaviour), and an exhaustive `match` on `WriteIntentPayload` needs the
+  arm. `ParentOf::with_repo_scope` and `ParentOf::repo_scope` are new and
+  scope a derive; the existing constructors stay unscoped.
+- **`RecallHit` gains `repo_scope: Option<String>`** (#129, #33 PR 7). A
+  `RecallHit { .. }` literal needs the field (`None` for an unscoped
+  concept). `ReferenceField` gains `RetractTarget` and `ParentOf`; it is
+  `#[non_exhaustive]`, so a `match` already has a wildcard arm and nothing
+  breaks. `Memory::retract` now returns `LamboError::Reference` with
+  `ReferenceRefusalKind::Ambiguous` for text that matches a
+  repository-scoped path and another concept.
+- **`repo_scope: Option<String>` on `cli::derive::Args`,
+  `cli::record_action::Args`, `DeriveParams` and `RecordActionParams`**
+  (#129, #33 PR 7). A struct literal needs the field (`None` keeps 0.5.0
+  behaviour); the two `Params` also take `..Default::default()`.
 
 ### Added
 
@@ -349,6 +384,30 @@
   corruption-detection fingerprints. New library APIs live in
   `lambo::session`; the central resolver exposes a read-only classification
   source. This command does not split or cut over a writer.
+
+- `lambo session split` (#33 D2) writes a validated classification plan's
+  target sessions into a new offline SQLite file. The plan must reproduce
+  from the source, rules, reviewed labels and overrides files (the plan's own
+  overrides never authorize themselves). Targets are built in memory with
+  deterministic per-target ids, shared-hub copies, origin replicas (for
+  assigned concepts and for hub copies, across projects as well as into
+  `general`) and Temporal chains rebuilt as subsequences of the original
+  chain, and each is validated as a complete graph first. A replica outside
+  its own session is a stub without prompt text (the full text stays in its
+  own target); in `general` it keeps its text only when the interaction
+  passes the general-interaction test. An interaction with
+  hard protected provenance is never copied out of its session. Every source
+  edge lands in exactly one ledger category (intra, cross-session Temporal,
+  hub reattached, Derives reattached, dropped with a named reason). Each
+  target imports in one transaction with a `split_imports` receipt and
+  in-transaction verification of rows and receipt; a rerun verifies committed
+  targets with zero writes and resumes the rest. Pending write intents are
+  refused; consumed ones are counted and not migrated. A private create-new
+  report carries the accounting with a replica matrix, the edge ledger, id
+  maps, the low-confidence inventory and a general-provenance notice.
+  `lambo::session::build_split` is the pure library entry point;
+  `lambo::resolve::resolve_split_io` resolves the inputs. No cut-over is
+  performed.
 
 - **Citations on `lambo_derive`**
   ([#36](https://github.com/nrynss/lambo/issues/36) PR 4). Each concept
@@ -603,6 +662,48 @@
   `Superseded { by }`, recall marks such a hit with a `superseded`
   annotation and a `⤓ Superseded at ...` line (history: never forced), and
   inspect names the latest demotion and its reason.
+- **`repo_scope` on `lambo_derive` and `lambo_record_action`, and
+  `--repo-scope` on `lambo derive` and `lambo record-action`**
+  ([#129](https://github.com/nrynss/lambo/issues/129) part 2, #33 PR 7).
+  It names the repository a call's path-like Resources belong to, such as
+  `github.com/acme/widgets`, so `README.md` in two repositories of one
+  session is two concepts instead of one shared hub. The scope and path
+  are matched as exact text after trimming and NFC (case and `./` count),
+  under a key no unscoped concept can have (`RepoResource:v1:` and a JSON
+  pair; `docs/` and `docs` are one directory). A scoped path never merges
+  by similarity and nothing merges into it, in a derive or in a layered
+  recall's dedupe. Where the type is inferred (an action's `depends_on`,
+  an undeclared `parent_of` end, a citation or `against`), an existing
+  scoped path is that Resource, an existing non-Resource concept under its
+  plain key (a Logic `config.toml`, an Entity `TCP/IP`) is that concept,
+  and both at once is refused as ambiguous; a new entry becomes a scoped
+  path only if it reads as a file or a `dir/`, so slash prose (`TCP/IP`,
+  `CI/CD`) stays plain text. A `parent_of` directory of a scoped child
+  (`src` over `src/main.rs`) is that repository's directory. An unscoped
+  path Resource is never a fallback, and an id stays an exact reference.
+  In a shared layer, a relative path the scope covers is no longer
+  refused. The scope is caller-asserted and never verified; one that is
+  empty, over 512 bytes, or holds whitespace, a control or an invisible
+  character is refused before the ack. The keyword search matches a scoped
+  path by its text, not its repository. A trailing line reference names
+  the same file (`src/main.rs:12` is `src/main.rs`). A name only loosely a
+  path (`scripts/build`) that a `depends_on` meets first stays plain text,
+  and a later `produces` of it is a separate scoped path; spelled
+  `./scripts/build` or `scripts/build/`, both are the one scoped path. The
+  library exposes `lambo::graph::resource` (the path predicate and key).
+  See *Repository-scoped paths* in the MCP reference. `against` (#19(b))
+  resolves path text under the scope like `depends_on`, and a scoped write
+  with `against` is durably the same `repo_scoped` wrapper. A recall hit
+  for a scoped path carries `repo_scope` and its label names the
+  repository (`README.md [Resource, repo "github.com/acme/widgets"]`), as
+  does `lambo_inspect`'s label for the node; unscoped hits, nodes and
+  recall output are unchanged. Text that matches a scoped path and another
+  concept is no longer resolved to one of them quietly: `lambo_inspect`'s
+  focus and `Memory::retract` refuse it as ambiguous, listing each
+  candidate's id and repository, and `retract` now also takes a concept's
+  full node id. A dependency question about such a path (`what depends on
+  README.md`) answers for the repository it names, and otherwise lists the
+  candidates with their repositories and answers for none.
 
 ### Changed
 
@@ -729,6 +830,12 @@
   instead of four, and no existing row's outcome moved.
 
 ### Fixed
+
+- **A layer refuses an action text that is a relative path (#33 PR 4
+  follow-up).** `lambo_record_action` writes its action text as a Resource,
+  but a write into a shared layer checked only `produces`, `modifies` and
+  `depends_on`, so an action named `README.md` was minted there. The
+  action text is now checked like a target.
 
 - **A huge configured window no longer panics the daemon cycle.** The
   conflict, staleness and high-risk detectors saturated an out-of-range

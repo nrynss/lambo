@@ -193,7 +193,13 @@ pub fn concept_label(hit: &RecallHit) -> String {
         .map(|t| format!("{t:?}"))
         .unwrap_or_default();
     let marker = if hit.is_canonical { ", canonical" } else { "" };
-    format!("{} [{ty}{marker}]", hit.content)
+    // #129: a scoped path names its repository, quoted, since two
+    // repositories' `README.md` are otherwise the same line.
+    let repo = match &hit.repo_scope {
+        Some(repo) => format!(", repo {repo:?}"),
+        None => String::new(),
+    };
+    format!("{} [{ty}{repo}{marker}]", hit.content)
 }
 
 /// Length of the rendered short-form node id, in hex chars (issue #9).
@@ -393,6 +399,7 @@ pub(crate) fn render_detailed_block(h: &crate::recall::detail::DetailedHit) -> S
         score: h.score,
         is_canonical: h.status == Some(crate::types::CanonizationStatus::Canonical),
         blast_radius: h.blast_radius,
+        repo_scope: h.repo_scope.clone(),
     };
     let lines: Vec<String> = h.annotations.iter().map(|a| a.text.clone()).collect();
     render_block(&hit, &lines)
@@ -676,6 +683,7 @@ mod tests {
     #[test]
     fn concept_label_marks_only_canonical() {
         let hit = |canonical: bool| RecallHit {
+            repo_scope: None,
             node_id: uid(1),
             content: "user schema".into(),
             concept_type: Some(ConceptType::Entity),
@@ -755,6 +763,7 @@ mod tests {
     #[test]
     fn render_block_and_context_layout() {
         let hit = RecallHit {
+            repo_scope: None,
             node_id: uid(1),
             content: "user schema".into(),
             concept_type: Some(ConceptType::Entity),
@@ -813,6 +822,7 @@ mod tests {
             .map(|(i, id)| {
                 render_block(
                     &RecallHit {
+                        repo_scope: None,
                         node_id: *id,
                         content: format!("hit {i}"),
                         concept_type: Some(ConceptType::Entity),
@@ -872,6 +882,7 @@ mod tests {
         let us = NodeId("f0000000-0000-4000-8000-000000001001".parse().unwrap());
         assert_eq!(
             concept_label(&RecallHit {
+                repo_scope: None,
                 node_id: us,
                 content: "user schema".into(),
                 concept_type: Some(ConceptType::Entity),

@@ -381,83 +381,87 @@ impl SqliteStore {
             .begin()
             .await
             .map_err(|e| db_err("begin load transaction", e))?;
-
-        // The existence probe doubles as the embedding-contract read. Both
-        // snapshot seed and `SetEmbedding` flush write these columns; root_goal
-        // likewise has its ordered mutation path (XP-8). `mutation_epoch` is
-        // the durable mutation counter (issue #17): flush stamps it, and this
-        // read is what a writer restart resumes it from.
-        let row = sqlx::query(
-            "SELECT embedding_kind, embedding_model, embedding_dim, root_goal, mutation_epoch, \
-                    last_gc_epoch, last_gc_at, created_at, closed_at \
-             FROM sessions WHERE session_id = ?",
-        )
-        .bind(&session.0)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(|e| db_err("lookup session", e))?;
-        let row = match row {
-            Some(row) => row,
-            None => return Err(StoreError::SessionNotFound(session.0.clone())),
-        };
-        let embedding_kind: Option<String> =
-            row.try_get(0).map_err(|e| db_err("lookup session", e))?;
-        let embedding_model: Option<String> =
-            row.try_get(1).map_err(|e| db_err("lookup session", e))?;
-        let embedding_dim: Option<i64> = row.try_get(2).map_err(|e| db_err("lookup session", e))?;
-        // XP-8: `root_goal` survives a reload — `Mutation::SetRootGoal` writes
-        // it, so replaying the log no longer silently clears the drift anchor.
-        let root_goal: Option<String> = row.try_get(3).map_err(|e| db_err("lookup session", e))?;
-        let root_goal = root_goal
-            .as_deref()
-            .map(serde_json::from_str::<serde_json::Value>)
-            .transpose()
-            .map_err(|e| StoreError::Backend(format!("parse root_goal JSON: {e}")))?;
-        let mutation_epoch: i64 = row.try_get(4).map_err(|e| db_err("lookup session", e))?;
-        // Issue #29: GC's sweep accounting, resumed with the epoch.
-        let last_gc_epoch: i64 = row.try_get(5).map_err(|e| db_err("lookup session", e))?;
-        let last_gc_at: Option<String> = row.try_get(6).map_err(|e| db_err("lookup session", e))?;
-        let created_at: Option<String> = row.try_get(7).map_err(|e| db_err("lookup session", e))?;
-        let closed_at: Option<String> = row.try_get(8).map_err(|e| db_err("lookup session", e))?;
-        let gc_mark = GcMark {
-            last_gc_epoch: u64::try_from(last_gc_epoch).unwrap_or(0),
-            last_gc_at: last_gc_at.as_deref().map(text_to_ts).transpose()?,
-            last_gc_at_reset: false,
-        };
-        let embedding = session_embedding_from_parts(
-            embedding_kind,
-            embedding_model,
-            embedding_dim,
-            &session.0,
-        )?;
-
-        let interactions = load_interactions(&mut *tx, session).await?;
-        let concepts = load_concepts(&mut *tx, session).await?;
-        let edges = load_edges(&mut *tx, session).await?;
-        let synonyms = load_synonyms(&mut *tx, session).await?;
-        let reservations = load_reservations(&mut *tx, session).await?;
-        let canonization_events = load_canonization_events(&mut *tx, session).await?;
-        let write_intents = load_write_intents(&mut *tx, session).await?;
-
+        let snapshot = load_snapshot_in(&mut tx, session).await?;
         tx.commit()
             .await
             .map_err(|e| db_err("commit load transaction", e))?;
-
-        Ok(GraphSnapshot {
-            session_id: session.clone(),
-            root_goal,
-            created_at: created_at.as_deref().map(text_to_ts).transpose()?,
-            closed_at: closed_at.as_deref().map(text_to_ts).transpose()?,
-            interactions,
-            concepts,
-            edges,
-            synonyms,
-            reservations,
-            canonization_events,
-            embedding,
-            write_intents,
-            mutation_epoch: u64::try_from(mutation_epoch).unwrap_or(u64::MAX),
-            gc_mark,
-        })
+        snapshot.ok_or_else(|| StoreError::SessionNotFound(session.0.clone()))
     }
+}
+
+/// Materialize one session on the caller's transaction, `None` when it has no
+/// `sessions` row. `load_snapshot` and the split import's in-transaction
+/// verification (#33 D2) both read through here, so a verified import is
+/// compared with exactly what a later load returns.
+pub(super) async fn load_snapshot_in(
+    tx: &mut sqlx::SqliteConnection,
+    session: &SessionId,
+) -> Result<Option<GraphSnapshot>, StoreError> {
+    // The existence probe doubles as the embedding-contract read. Both
+    // snapshot seed and `SetEmbedding` flush write these columns; root_goal
+    // likewise has its ordered mutation path (XP-8). `mutation_epoch` is
+    // the durable mutation counter (issue #17): flush stamps it, and this
+    // read is what a writer restart resumes it from.
+    let row = sqlx::query(
+        "SELECT embedding_kind, embedding_model, embedding_dim, root_goal, mutation_epoch, \
+                last_gc_epoch, last_gc_at, created_at, closed_at \
+         FROM sessions WHERE session_id = ?",
+    )
+    .bind(&session.0)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| db_err("lookup session", e))?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let embedding_kind: Option<String> = row.try_get(0).map_err(|e| db_err("lookup session", e))?;
+    let embedding_model: Option<String> =
+        row.try_get(1).map_err(|e| db_err("lookup session", e))?;
+    let embedding_dim: Option<i64> = row.try_get(2).map_err(|e| db_err("lookup session", e))?;
+    // XP-8: `root_goal` survives a reload — `Mutation::SetRootGoal` writes
+    // it, so replaying the log no longer silently clears the drift anchor.
+    let root_goal: Option<String> = row.try_get(3).map_err(|e| db_err("lookup session", e))?;
+    let root_goal = root_goal
+        .as_deref()
+        .map(serde_json::from_str::<serde_json::Value>)
+        .transpose()
+        .map_err(|e| StoreError::Backend(format!("parse root_goal JSON: {e}")))?;
+    let mutation_epoch: i64 = row.try_get(4).map_err(|e| db_err("lookup session", e))?;
+    // Issue #29: GC's sweep accounting, resumed with the epoch.
+    let last_gc_epoch: i64 = row.try_get(5).map_err(|e| db_err("lookup session", e))?;
+    let last_gc_at: Option<String> = row.try_get(6).map_err(|e| db_err("lookup session", e))?;
+    let created_at: Option<String> = row.try_get(7).map_err(|e| db_err("lookup session", e))?;
+    let closed_at: Option<String> = row.try_get(8).map_err(|e| db_err("lookup session", e))?;
+    let gc_mark = GcMark {
+        last_gc_epoch: u64::try_from(last_gc_epoch).unwrap_or(0),
+        last_gc_at: last_gc_at.as_deref().map(text_to_ts).transpose()?,
+        last_gc_at_reset: false,
+    };
+    let embedding =
+        session_embedding_from_parts(embedding_kind, embedding_model, embedding_dim, &session.0)?;
+
+    let interactions = load_interactions(&mut *tx, session).await?;
+    let concepts = load_concepts(&mut *tx, session).await?;
+    let edges = load_edges(&mut *tx, session).await?;
+    let synonyms = load_synonyms(&mut *tx, session).await?;
+    let reservations = load_reservations(&mut *tx, session).await?;
+    let canonization_events = load_canonization_events(&mut *tx, session).await?;
+    let write_intents = load_write_intents(&mut *tx, session).await?;
+
+    Ok(Some(GraphSnapshot {
+        session_id: session.clone(),
+        root_goal,
+        created_at: created_at.as_deref().map(text_to_ts).transpose()?,
+        closed_at: closed_at.as_deref().map(text_to_ts).transpose()?,
+        interactions,
+        concepts,
+        edges,
+        synonyms,
+        reservations,
+        canonization_events,
+        embedding,
+        write_intents,
+        mutation_epoch: u64::try_from(mutation_epoch).unwrap_or(u64::MAX),
+        gc_mark,
+    }))
 }

@@ -262,9 +262,13 @@ impl WriteCtx {
             } => {
                 // #36 PR 4: what the ack accepted; the commit re-resolves it.
                 let no_citations = PinnedCitations::default();
-                let pinned = match &job.payload {
-                    JobPayload::Derive { citations, .. } => citations,
-                    _ => &no_citations,
+                let (pinned, repo_scope) = match &job.payload {
+                    JobPayload::Derive {
+                        citations,
+                        repo_scope,
+                        ..
+                    } => (citations, repo_scope.as_deref()),
+                    _ => (&no_citations, None),
                 };
                 // #22: an image derive is this derive with one concept's
                 // vector supplied (`hybrid::derive_with`'s `supplied`).
@@ -283,7 +287,8 @@ impl WriteCtx {
                     ParentOf::none()
                 } else {
                     ParentOf::from_pairs(&borrowed_pairs)
-                };
+                }
+                .with_repo_scope(repo_scope);
                 let strategy = self.match_strategy;
                 let submitted = borrowed.len();
                 if image && strategy != MatchStrategy::Hybrid {
@@ -386,6 +391,7 @@ impl WriteCtx {
                 })
             }
             JobPayload::Action {
+                repo_scope,
                 action,
                 produces,
                 modifies,
@@ -397,6 +403,7 @@ impl WriteCtx {
                 let m: Vec<&str> = modifies.iter().map(String::as_str).collect();
                 let d: Vec<&str> = depends_on.iter().map(String::as_str).collect();
                 let act = Action {
+                    repo_scope: repo_scope.as_deref(),
                     event_time: None,
                     action: action.as_str(),
                     produces: &p,

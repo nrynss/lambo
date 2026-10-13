@@ -607,6 +607,7 @@ mod tests {
         use crate::types::{ConceptType, NodeId, RecallHit};
 
         let hit = RecallHit {
+            repo_scope: None,
             node_id: NodeId(uuid::Uuid::from_u64_pair(2, 7)),
             content,
             concept_type: Some(ConceptType::Logic),

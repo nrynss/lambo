@@ -400,7 +400,8 @@ pub(super) async fn consume_write_intent(
         "UPDATE write_intents SET consumed_at = $1, outcome_tag = $2, outcome_summary = $3, \
              payload = CASE WHEN payload LIKE CAST($6 AS TEXT) \
                  OR payload LIKE CAST($8 AS TEXT) \
-                 OR payload LIKE CAST($9 AS TEXT) THEN CAST($7 AS TEXT) \
+                 OR payload LIKE CAST($9 AS TEXT) \
+                 OR payload LIKE CAST($10 AS TEXT) THEN CAST($7 AS TEXT) \
                  ELSE payload END \
          WHERE session_id = $4 AND receipt = $5",
     )
@@ -413,6 +414,7 @@ pub(super) async fn consume_write_intent(
     .bind(crate::types::SETTLED_IMAGE_INTENT_PAYLOAD)
     .bind(crate::types::DERIVE_CITED_PAYLOAD_LIKE)
     .bind(crate::types::ACTION_CITED_PAYLOAD_LIKE)
+    .bind(crate::types::REPO_SCOPED_PAYLOAD_LIKE)
     .execute(&mut *tx)
     .await
     .map_err(|e| map_write_err(e, |m| format!("consume write intent: {m}")))?;

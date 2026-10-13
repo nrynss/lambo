@@ -988,6 +988,17 @@ pub enum WriteIntentPayload {
         /// one that resolves differently.
         against: Vec<PinnedReference>,
     },
+    /// #129: a text derive or action whose path-like Resources take the
+    /// repository-scoped key. A wrapper, not a field, so a build that
+    /// predates it refuses an unconsumed row instead of replaying it under
+    /// the legacy path key; replay refuses an invalid scope, a nested
+    /// wrapper and a wrapped image derive.
+    RepoScoped {
+        /// Caller-asserted repository identity, validated again at replay.
+        repo_scope: String,
+        /// Exactly one `Derive`, `DeriveCited`, `Action` or `ActionCited`.
+        payload: Box<WriteIntentPayload>,
+    },
 }
 
 impl WriteIntentPayload {
@@ -1011,14 +1022,18 @@ impl WriteIntentPayload {
     /// cited derive that had already applied would otherwise stop a
     /// downgrade from loading the session at all. A settled
     /// [`Self::ActionCited`] (#19(b)) too, for the same reason.
+    ///
+    /// A settled [`Self::RepoScoped`] (#129) becomes the same empty
+    /// [`Self::Derive`], for the same reason, whatever it wrapped.
     pub fn settled(&self) -> Option<WriteIntentPayload> {
         match self {
-            Self::DeriveImage { .. } | Self::DeriveCited { .. } | Self::ActionCited { .. } => {
-                Some(Self::Derive {
-                    concepts: Vec::new(),
-                    pairs: Vec::new(),
-                })
-            }
+            Self::DeriveImage { .. }
+            | Self::DeriveCited { .. }
+            | Self::ActionCited { .. }
+            | Self::RepoScoped { .. } => Some(Self::Derive {
+                concepts: Vec::new(),
+                pairs: Vec::new(),
+            }),
             Self::Derive { .. } | Self::Action { .. } => None,
         }
     }
@@ -1055,6 +1070,10 @@ pub const DERIVE_CITED_PAYLOAD_LIKE: &str = r#"{"kind":"derive_cited",%"#;
 /// A SQL `LIKE` pattern that matches a stored `ActionCited` payload
 /// (#19(b)) and no other, for the same overwrite at consume.
 pub const ACTION_CITED_PAYLOAD_LIKE: &str = r#"{"kind":"action_cited",%"#;
+
+/// A SQL `LIKE` pattern that matches a stored `RepoScoped` payload (#129)
+/// and no other, for the same overwrite at consume.
+pub const REPO_SCOPED_PAYLOAD_LIKE: &str = r#"{"kind":"repo_scoped",%"#;
 
 /// A vector supplied for one concept instead of being embedded from its text
 /// (#22, design sections 3.3 and 5.1): an image embedding the server computed
@@ -1600,6 +1619,11 @@ pub struct RecallHit {
     pub is_canonical: bool,
     /// How many concepts depend on this one, when that is known.
     pub blast_radius: Option<u64>,
+    /// The repository a repository-scoped path Resource belongs to (#129),
+    /// so two repositories' `README.md` hits can be told apart. Absent for
+    /// every other concept, and then not serialized.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_scope: Option<String>,
 }
 
 /// Everything one recall produced.
@@ -1650,7 +1674,11 @@ pub fn tie_break_by_key(
     b: &NodeId,
 ) -> std::cmp::Ordering {
     match (a_key, b_key) {
-        (Some(a_key), Some(b_key)) => a_key.cmp(b_key),
+        // #129: scoped keys compare in their tie form, which lowercases the
+        // ASCII prefix, so they do not all sort ahead of legacy keys.
+        (Some(a_key), Some(b_key)) => {
+            crate::graph::resource::tie_form(a_key).cmp(&crate::graph::resource::tie_form(b_key))
+        }
         (Some(_), None) => std::cmp::Ordering::Less,
         (None, Some(_)) => std::cmp::Ordering::Greater,
         (None, None) => std::cmp::Ordering::Equal,
@@ -2291,6 +2319,23 @@ mod tests {
                 },
             },
         };
+        // #129: a scoped wrapper matches its own pattern, never the image
+        // or cited ones, and settles to the same constant.
+        let scoped = WriteIntentPayload::RepoScoped {
+            repo_scope: "host/owner/repo".into(),
+            payload: Box::new(WriteIntentPayload::Derive {
+                concepts: vec![("README.md".into(), ConceptType::Resource)],
+                pairs: vec![],
+            }),
+        };
+        let scoped_json = serde_json::to_string(&scoped).unwrap();
+        assert!(scoped_json.starts_with(REPO_SCOPED_PAYLOAD_LIKE.trim_end_matches('%')));
+        assert!(!scoped_json.starts_with(DERIVE_IMAGE_PAYLOAD_LIKE.trim_end_matches('%')));
+        assert!(!scoped_json.starts_with(DERIVE_CITED_PAYLOAD_LIKE.trim_end_matches('%')));
+        assert_eq!(
+            serde_json::to_string(&scoped.settled().unwrap()).unwrap(),
+            SETTLED_IMAGE_INTENT_PAYLOAD
+        );
         let like_prefix = DERIVE_IMAGE_PAYLOAD_LIKE.trim_end_matches('%');
         assert!(serde_json::to_string(&image)
             .unwrap()

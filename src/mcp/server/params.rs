@@ -222,7 +222,24 @@ pub struct DeriveParams {
     /// in the session it writes to.
     #[schemars(length(max = 16_384))]
     pub scope: Option<String>,
+    /// Optional: the repository this call's path-like `resource` concepts
+    /// and `parent_of` ends belong to, so that `README.md` in two
+    /// repositories is two concepts. Not the session written to (that is
+    /// `scope`). Send one stable id per repository, the same from every clone
+    /// and worktree: its remote as `host/owner/repo` (no scheme, credentials,
+    /// query or `.git`), or for a local-only repository an agreed unique root
+    /// name: at most 512 bytes, with no whitespace or invisible characters
+    /// inside. Taken as given, never verified; compared exactly after
+    /// trimming.
+    /// A path is matched as exact text (case and `./` count), never resolved
+    /// on disk. With it, path text names only this repository's concept and
+    /// never falls back to an unscoped one; cite an older concept by its id.
+    /// In a shared layer it lets a relative path through on the entries it
+    /// covers. Omit it to keep the unscoped identity.
+    #[schemars(length(max = 16_384))]
+    pub repo_scope: Option<String>,
 }
+
 /// One entry in a `lambo_record_action` resource list (`produces`,
 /// `modifies`, `depends_on`). A plain string on the wire, with the same
 /// per-string size cap the runtime enforces, so a client can pre-validate an
@@ -282,6 +299,24 @@ pub struct RecordActionParams {
     /// in the session it writes to.
     #[schemars(length(max = 16_384))]
     pub scope: Option<String>,
+    /// Optional: the repository this action's path-like `produces`,
+    /// `modifies` and `depends_on` entries, and a path-like `action` text
+    /// itself, belong to, so that `README.md` in two repositories is two
+    /// concepts (the action text is checked against a shared layer the same
+    /// way). Not the session written to (that is
+    /// `scope`). Send one stable id per repository, the same from every clone
+    /// and worktree: its remote as `host/owner/repo` (no scheme, credentials,
+    /// query or `.git`), or for a local-only repository an agreed unique root
+    /// name: at most 512 bytes, with no whitespace or invisible characters
+    /// inside. Taken as given, never verified; compared exactly after
+    /// trimming.
+    /// A path is matched as exact text (case and `./` count), never resolved
+    /// on disk. With it, path text names only this repository's concept and
+    /// never falls back to an unscoped one; cite an older concept by its id.
+    /// In a shared layer it lets a relative path through on the entries it
+    /// covers. Omit it to keep the unscoped identity.
+    #[schemars(length(max = 16_384))]
+    pub repo_scope: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]

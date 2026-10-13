@@ -44,6 +44,7 @@ mod query_cache;
 mod reads;
 mod recall_by;
 mod replay;
+mod repo_scope;
 mod shutdown;
 mod supersession;
 mod writes;
@@ -359,6 +360,7 @@ async fn at_cap_burst(mem: &Memory) {
         let produces_refs: Vec<&str> = produces.iter().map(String::as_str).collect();
         let depends_refs: Vec<&str> = depends_on.iter().map(String::as_str).collect();
         mem.record_action(&Action {
+            repo_scope: None,
             event_time: None,
             action: &format!("burst action {call}"),
             produces: &produces_refs,

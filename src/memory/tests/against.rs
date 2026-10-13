@@ -26,6 +26,7 @@ fn against(content: &str, refs: &[&str]) -> ConceptCitations {
 
 fn action<'a>(text: &'a str) -> Action<'a> {
     Action {
+        repo_scope: None,
         event_time: None,
         action: text,
         produces: &[],
@@ -587,6 +588,7 @@ async fn an_against_write_by_another_agent_raises_no_conflict() {
     mem.record_action_as(
         &a,
         &Action {
+            repo_scope: None,
             event_time: None,
             action: "left the charger plugged in",
             produces: &[],
@@ -619,6 +621,7 @@ async fn an_against_write_by_another_agent_raises_no_conflict() {
     mem.record_action_as(
         &b,
         &Action {
+            repo_scope: None,
             event_time: None,
             action: "unplugged the charger",
             produces: &[],

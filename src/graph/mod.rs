@@ -85,3 +85,5 @@ pub mod image;
 pub(crate) mod vector_source;
 
 pub use graph::{Graph, MAX_EDGE_WEIGHT, REINFORCE_BUMP};
+
+pub mod resource;

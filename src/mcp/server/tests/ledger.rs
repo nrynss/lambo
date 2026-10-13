@@ -1008,6 +1008,7 @@ fn i1_the_recall_line_reports_a_truncated_top_hit() {
 
     let facts_at = |budget: usize| {
         let hit = RecallHit {
+            repo_scope: None,
             node_id: NodeId(uuid::Uuid::from_u64_pair(2, 9)),
             content: "pillar ".repeat(800),
             concept_type: Some(ConceptType::Entity),
