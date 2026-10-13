@@ -749,25 +749,26 @@ async fn deferred_scoped_against_replays_under_its_scope() {
         tags.iter().all(|t| t == "applied_after_restart"),
         "{tags:?}"
     );
-    let g = mem2.graph.read();
-    let source = g
-        .concepts()
-        .find(|c| c.content == concepts[0].0)
-        .unwrap()
-        .id;
-    let actor = g
-        .concepts()
-        .find(|c| c.content == "replaced the readme")
-        .unwrap()
-        .id;
-    assert!(g.edge_between(source, b, EdgeType::Contradicts).is_some());
-    assert!(g.edge_between(actor, a, EdgeType::Contradicts).is_some());
-    for from in [source, actor] {
-        assert!(g
-            .edge_between(from, legacy, EdgeType::Contradicts)
-            .is_none());
+    {
+        let g = mem2.graph.read();
+        let source = g
+            .concepts()
+            .find(|c| c.content == concepts[0].0)
+            .unwrap()
+            .id;
+        let actor = g
+            .concepts()
+            .find(|c| c.content == "replaced the readme")
+            .unwrap()
+            .id;
+        assert!(g.edge_between(source, b, EdgeType::Contradicts).is_some());
+        assert!(g.edge_between(actor, a, EdgeType::Contradicts).is_some());
+        for from in [source, actor] {
+            assert!(g
+                .edge_between(from, legacy, EdgeType::Contradicts)
+                .is_none());
+        }
     }
-    drop(g);
     mem2.close().await.unwrap();
     assert!(inner
         .load_session(&sid)
@@ -778,4 +779,121 @@ async fn deferred_scoped_against_replays_under_its_scope() {
         .all(
             |i| i.outcome.is_some() && !matches!(i.payload, WriteIntentPayload::RepoScoped { .. })
         ));
+}
+
+/// Text lookups outside the write path never quietly pick one of several
+/// same-content concepts when one is a repository-scoped path: retract
+/// refuses the text as ambiguous (listing ids and repositories) and takes
+/// a full node id; inspect's focus refuses it the same way. With a single
+/// match, or no scoped concept at all, both resolve as before.
+#[tokio::test]
+async fn retract_and_inspect_refuse_ambiguous_scoped_text() {
+    use crate::memory::DryRun;
+    use crate::surface::focus::{ambiguous_refusal, resolve_focus, Focus};
+    let mem = memory("repo-retract", MatchStrategy::Canonical).await;
+    let agent = AgentId::new("agent-a");
+    let [legacy, a, b] = three_readmes(&mem, &agent);
+    let before = mem.graph.read().snapshot();
+    let err = mem.retract("README.md", DryRun::No).await.unwrap_err();
+    let LamboError::Reference(r) = &err else {
+        panic!("{err:?}")
+    };
+    let ReferenceRefusalKind::Ambiguous { candidates } = &r.kind else {
+        panic!("{r:?}")
+    };
+    let mut ids: Vec<NodeId> = candidates.iter().map(|c| c.node).collect();
+    ids.sort_by_key(|n| n.0);
+    let mut want = vec![legacy, a, b];
+    want.sort_by_key(|n| n.0);
+    assert_eq!(ids, want);
+    let text = err.to_string();
+    for needle in [
+        "target \"README.md\" matches 3 concepts",
+        "(repo \"repo-a\")",
+        "(repo \"repo-b\")",
+        "name one by its full node id",
+    ] {
+        assert!(text.contains(needle), "{needle}: {text}");
+    }
+    assert_eq!(mem.graph.read().snapshot(), before, "nothing retracted");
+    // Inspect's focus refuses the same text, naming each repository.
+    match resolve_focus(&mem.graph.read(), "README.md") {
+        Focus::Ambiguous { candidates, .. } => {
+            assert_eq!(candidates.len(), 3);
+            let msg = ambiguous_refusal("README.md", &candidates, None);
+            assert!(
+                msg.contains("(repo \"repo-a\")") && msg.contains("(repo \"repo-b\")"),
+                "{msg}"
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+    // A full id names exactly one; it retracts that one and no other.
+    mem.retract(&b.0.to_string(), DryRun::No).await.unwrap();
+    assert!(mem.graph.read().node(b).is_none());
+    assert!(mem.graph.read().node(a).is_some() && mem.graph.read().node(legacy).is_some());
+    mem.close().await.unwrap();
+
+    // One scoped match alone, and no scoped concept at all: as before.
+    let mem = memory("repo-retract-single", MatchStrategy::Canonical).await;
+    mem.record_action_as(
+        &agent,
+        &Action {
+            repo_scope: Some("repo-a"),
+            event_time: None,
+            action: "wrote the notes",
+            produces: &["NOTES.md"],
+            modifies: &[],
+            depends_on: &[],
+        },
+    )
+    .unwrap();
+    let only = path_id(&mem, "repo-a", "NOTES.md");
+    assert!(matches!(resolve_focus(&mem.graph.read(), "NOTES.md"), Focus::Exact(n) if n == only));
+    mem.retract("NOTES.md", DryRun::No).await.unwrap();
+    assert!(mem.graph.read().node(only).is_none());
+    mem.close().await.unwrap();
+}
+
+/// Recall labels a repository-scoped hit with its repository, in the
+/// context block and on the hit, so two repositories' `README.md` read
+/// differently; an unscoped hit's label and serialized hit are unchanged.
+#[tokio::test]
+async fn recall_labels_scoped_hits_with_their_repository() {
+    let mem = memory("repo-recall", MatchStrategy::Canonical).await;
+    let agent = AgentId::new("agent-a");
+    let [legacy, a, b] = three_readmes(&mem, &agent);
+    let out = mem
+        .recall(RecallQuery {
+            query: "README.md".into(),
+            top_k: 10,
+            max_tokens: 2_000,
+            traversal_depth: 1,
+        })
+        .await
+        .unwrap();
+    let hit = |id: NodeId| out.hits.iter().find(|h| h.node_id == id).expect("hit");
+    assert_eq!(hit(a).repo_scope.as_deref(), Some("repo-a"));
+    assert_eq!(hit(b).repo_scope.as_deref(), Some("repo-b"));
+    assert_eq!(hit(legacy).repo_scope, None);
+    assert!(
+        out.context
+            .contains("README.md [Resource, repo \"repo-a\"]"),
+        "{}",
+        out.context
+    );
+    assert!(
+        out.context
+            .contains("README.md [Resource, repo \"repo-b\"]"),
+        "{}",
+        out.context
+    );
+    assert!(
+        out.context.contains("README.md [Resource] ("),
+        "{}",
+        out.context
+    );
+    let legacy_json = serde_json::to_string(hit(legacy)).unwrap();
+    assert!(!legacy_json.contains("repo_scope"), "{legacy_json}");
+    mem.close().await.unwrap();
 }
