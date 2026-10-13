@@ -572,3 +572,69 @@ async fn a_similarity_merge_into_the_contradicted_target_keeps_the_contradiction
     }
     mem.close().await.unwrap();
 }
+
+/// #19(c) owner decision 2, option B, applied with #19(b): an `against`
+/// write by a second agent on a concept another agent just depended on is
+/// no conflict, through the real write path. A second agent's own
+/// `Dependency` write on the same concept is (the control).
+#[tokio::test]
+async fn an_against_write_by_another_agent_raises_no_conflict() {
+    use crate::daemon::conflict::{detect, CONFLICT_RECENCY_WINDOW};
+    let mem = canonical("against-mem-conflict").await;
+    let a = AgentId::new("agent-a");
+    let b = AgentId::new("agent-b");
+    let target = belief(&mem, BELIEF).await;
+    mem.record_action_as(
+        &a,
+        &Action {
+            event_time: None,
+            action: "left the charger plugged in",
+            produces: &[],
+            modifies: &[],
+            depends_on: &[BELIEF],
+        },
+    )
+    .unwrap();
+    mem.derive_cited_as(
+        &b,
+        &[("the charger overheated overnight", ConceptType::Observation)],
+        &ParentOf::none(),
+        &[against(
+            "the charger overheated overnight",
+            &[&format::short_id(target)],
+        )],
+    )
+    .await
+    .unwrap();
+    {
+        let g = mem.graph.read();
+        assert!(g
+            .edges()
+            .any(|e| e.edge_type == EdgeType::Contradicts && e.target == target));
+        assert!(
+            detect(&g, CONFLICT_RECENCY_WINDOW, chrono::Utc::now()).is_empty(),
+            "a contradiction is not a concurrent edit"
+        );
+    }
+    mem.record_action_as(
+        &b,
+        &Action {
+            event_time: None,
+            action: "unplugged the charger",
+            produces: &[],
+            modifies: &[],
+            depends_on: &[BELIEF],
+        },
+    )
+    .unwrap();
+    let hits = detect(
+        &mem.graph.read(),
+        CONFLICT_RECENCY_WINDOW,
+        chrono::Utc::now(),
+    );
+    assert!(
+        hits.iter().any(|h| h.node == target),
+        "the control conflicts: {hits:?}"
+    );
+    mem.close().await.unwrap();
+}

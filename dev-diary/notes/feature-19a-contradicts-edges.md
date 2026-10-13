@@ -35,7 +35,9 @@ clean.
 - The conflict detector counts a contradiction's writer in its agent set,
   so another agent contradicting a node can complete a two-agent conflict.
   Kept as is and pinned by
-  `daemon::conflict::tests::a_contradiction_writer_joins_the_conflict_agent_set`.
+  `daemon::conflict::tests::a_contradiction_writer_joins_the_conflict_agent_set`
+  (inverted by #19(b) review M1, per #19(c) owner decision 2: now
+  `a_contradiction_writer_does_not_join_the_conflict_agent_set`).
 - Edge only. No MCP or CLI write field, resolver, detector, recall
   annotation or supersession: #19(b) waits for #36 PR 4.
 - The shared synthetic #36 dependents case gains concept `Q` with
