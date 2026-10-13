@@ -137,6 +137,41 @@ index_prefix = "lambo"
 
 Erasing a session also removes it from the index, and reports success only once a search of the index finds nothing of the session. See [Command line](/lambo/cli/#rebuild-the-recall-index).
 
+### Running the live Elasticsearch tests
+
+The adapter has manual integration checks against a disposable local cluster,
+using synthetic data and the fixture embedder. They stay ignored in ordinary
+test runs and are not added to CI. Start the approved single-node cluster:
+
+```sh
+docker run -d --name lambo-es-live -p 127.0.0.1:59200:9200 \
+  -e discovery.type=single-node -e xpack.security.enabled=false \
+  -e 'ES_JAVA_OPTS=-Xms512m -Xmx512m' \
+  docker.elastic.co/elasticsearch/elasticsearch:8.15.3
+```
+
+Security is disabled only for this throwaway cluster, bound to localhost.
+Wait until `curl --fail http://127.0.0.1:59200` succeeds, then run:
+
+```sh
+XDG_RUNTIME_DIR=$(mktemp -d /tmp/lbX.XXXX) \
+  LAMBO_ELASTIC_URL=http://127.0.0.1:59200 \
+  cargo test --features recall-elastic,store-sqlite,fixtures,embed-fixture \
+  --lib elastic_live -- --ignored --nocapture
+```
+
+Omit `-- --ignored --nocapture` to confirm the tests are reported as ignored.
+An explicitly requested live run fails if the URL is absent. Each test owns
+a UUID index prefix and removes only those indices, including on assertion
+failure. The outage check uses an owned loopback endpoint that times out;
+restart/resume reopens the client and SQLite primary over persisted state.
+It does not restart the Elasticsearch server. Always remove the container
+afterward, including after a failed run; retain the image for reuse:
+
+```sh
+docker rm -f lambo-es-live
+```
+
 ## Embedder
 
 `[embedder]` selects how text is turned into vectors.

@@ -361,6 +361,11 @@
 
 ### Added
 
+- Manual Elasticsearch integration checks (#18) against a disposable local
+  cluster cover mapping, leased projection, recall parity, deletion, erase
+  isolation, outage fallback and client restart/resume. They remain ignored
+  in ordinary test runs; no live CI step is added.
+
 - **Recall warns when a newer assertion contradicts a promoted concept**
   ([#19](https://github.com/nrynss/lambo/issues/19) part c). A Canonical or
   Venerable hit that another concept contradicts (`against`) more recently

@@ -3,6 +3,14 @@
 //! No Elasticsearch: the fake applies the engine's external-version rules,
 //! and `elastic.rs` tests the wire format against an in-process HTTP mock.
 
+#[cfg(all(
+    feature = "store-sqlite",
+    feature = "fixtures",
+    feature = "embed-fixture"
+))]
+#[path = "elastic_live.rs"]
+mod elastic_live;
+
 use std::sync::Arc;
 use std::time::Duration;
 
