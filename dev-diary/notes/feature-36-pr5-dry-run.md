@@ -327,7 +327,7 @@ its citations moved.
 
 1. **Preview on a fresh copy.** Take a new backup of the writer's store,
    copy it, and run `lambo canon dry-run` and `lambo canon alias-preview`
-   on the copy with `--at` pinned, `--json` saved, and `--watch` on the
+   on the copy with `--at` pinned at or after the backup's time, `--json` saved, and `--watch` on the
    nominated rulings. Compare with the previous re-pin's report via
    `--baseline`. Every invariant must hold (exit 0), `source_unchanged`
    included.
@@ -364,3 +364,96 @@ its citations moved.
    this copy (the design counted 31 names on an older one) and misses
    names that are not an opening phrase (the fixture's "writer lease");
    the map covers those.
+
+## Review round (2026-10-13)
+
+Adversarial review: 2 High, 4 Medium, 8 Low. Each fixed; commits
+`28c1dab3` (H1, and the plan data for M3/L4), `0450c382` (engine: M1,
+M2, H2's invariant, M3, L2, L3, L4 output, L7), `49d7f23c` (M4 tests),
+`6e67cbdf` (CLI: H2's exit, L1, L2, L5, L6, help for M1/L7/L8),
+`f544f1bd` (CLI docs). Then `origin/main` (#144) merged cleanly; the
+CHANGELOG keeps one Unreleased section with no duplicate bullet.
+
+- **H1** The cycle check walked `Causal`/`Dependency` only, while the
+  graph's invariant also refuses a cycle through `Hierarchical`: a
+  ruling's `parent_of` child citing its alias was moved into
+  `child -> ruling -> child` and the whole preview aborted. The check
+  now walks all three; the move is kept on the alias and counted
+  (`a_rulings_child_citing_its_alias_is_kept_as_a_cycle`;
+  mutation-checked).
+- **H2** A reviewed map whose lines were all refused exited 0. Any
+  refused reviewed line now fails `every_reviewed_line_accepted`
+  (exit 1); detected-pair refusals stay information (two tests, one per
+  layer; mutation-checked).
+- **M1** A `--at` earlier than the data silently left rows out.
+  **Decision: an invariant failure (`clock_after_the_data`, exit 1), not
+  a usage refusal (exit 2).** The clock is well-formed input; what is
+  wrong is its relation to the data, which is only known after the
+  copy is loaded, and the report should still show what was measured
+  and how much was left out (`rows_after_clock`: interactions, edges,
+  demotions). On the rig copy, `--at 2026-10-10T00:00Z` fails it with
+  133 interactions and 739 edges left out. Help and both cli.mdx
+  copies say to pin `--at` at or after the newest row.
+- **M2** `both_runs_hold_their_invariants` replaces the overlaid-only
+  check, and flips are computed only when both runs held every
+  invariant.
+- **M3** Each redirect carries the alias's stored status; the report
+  prints it and counts the aliases that keep a status with no citations
+  left. On the rig: 3 (all Candidate, `6a3b4ca3`, `73df9d9a`,
+  `77626e89`).
+- **M4** The SQLite oracle waits 200 quiet cycles; a test runs batches
+  of 1 and 2 so the queues exceed a batch (the fair-test fixture is the
+  largest committed one; small batches lengthen its queues without
+  inventing data); and a test drives the real `CanonizationTask` with an
+  injected clock and `Config::scoring`, woken cycle by cycle until 100
+  cycles change nothing, and compares the fixed point.
+- **L1** The run executes on its own task beside SIGINT/SIGTERM
+  (`tokio::signal`, no new crate); the scratch copy is removed before
+  the error returns, and a failed removal is reported
+  (`scratch_removed`, the error, or stderr on drop).
+- **L2** Every Canonical id is stored (`canonical_ids`) and compared; a
+  baseline of another session or report version (now 2) is refused
+  (exit 2) before the run.
+- **L3** Graph and store invariant errors keep their ids and withhold the
+  rest (`redact`); a non-id `--watch` argument is not echoed.
+- **L4** Reviewed pairs whose alias is not an Entity or whose ruling is
+  not a Logic/Constraint are accepted with a warning; fan-in per ruling
+  is printed (none above 1 on the rig).
+- **L5** The fingerprint is streamed; a hot `-journal` is refused; the
+  copy is opened with `SqliteConnectOptions::filename`, so `?`/`%` in a
+  path are literal (tested).
+- **L6** The input is re-hashed after the copy behind a test hook (an
+  input written mid-copy is refused); the scratch directory is tested
+  0700; the `source_unchanged` failure reads "input changed during the
+  run (a live writer?)".
+- **L7** The weights are a `DryRunParams` field defaulting to
+  `Config::scoring`; `lambo.toml` cannot set them, so the CLI uses the
+  defaults every writer runs. Documented, with "the dry run runs no GC;
+  use `--assume-survived` to see what Swarm admits once survival no
+  longer binds".
+- **L8** `--quiet` help: a running cooldown pauses (resets) the count,
+  it does not add cycles to it.
+
+**Rig re-run after the fixes** (fresh copy, same flags and clock, hash
+unchanged, copy deleted): **no number changed.** Both policies' dry-run
+reports, the `--assume-survived` run, the alias preview's 33 pairs, 45
+moved citations, 21 ambiguous refusals, deltas and flips are identical,
+field for field, to the figures above; the new invariants
+(`clock_after_the_data`, `scratch_removed`,
+`both_runs_hold_their_invariants`) all hold. The only new information is
+M3's: three detected names are stored Candidates and would stay
+Candidate with no citations left (rollout step 2 should decide whether
+that matters).
+
+**Gate after the review round and the merge**, each command with a fresh
+`XDG_RUNTIME_DIR`: `cargo fmt --check`; clippy `-D warnings` on
+`store-sqlite,fixtures`, `ship,fixtures`, `--no-default-features
+store-postgres`, `store-postgres,store-sqlite,fixtures` (with and
+without default features), `embed-eg2`, `recall-elastic`,
+`embed-candle`; `cargo test --features store-sqlite,fixtures` (2,366
+passed, 0 failed, 7 ignored; the library 2,283 / 0 / 5: the 16 new
+review tests over the earlier 2,350); `cargo test --no-run
+--no-default-features --features store-sqlite`; `cargo check
+--no-default-features`; `cargo check --features demo`;
+`scripts/docs/check-mirror-drift.sh`. All pass. No live Postgres or
+Cockroach run.

@@ -314,8 +314,12 @@
   `--baseline` comparison. `alias-preview` pairs cited short names with the
   ruling whose opening phrase they are (an ambiguous name is refused), or
   takes a reviewed `--map` of ids, refuses chains and cycles, and reports
-  what moving their citations to the ruling would change. Ids, labels and
-  counts only, never concept text. Library: `canon::dry_run`,
+  what moving their citations to the ruling would change; any refused line
+  of a reviewed map fails the preview (exit 1). A `--at` earlier than the
+  newest row fails `clock_after_the_data` and counts what it would leave
+  out; a hot `-journal` beside the input is refused; on SIGINT or SIGTERM
+  the scratch copy is removed. Ids, labels and counts only, never concept
+  text. Library: `canon::dry_run`,
   `canon::alias`, `canon::alias_preview`, `cli::canon`. It replaces
   `examples/canon36_admission.rs`, which is removed.
 - **Stdio project patterns (#33 PR 5).** `[[serve.projects]] path` accepts
