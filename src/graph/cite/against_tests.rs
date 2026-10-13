@@ -416,6 +416,7 @@ fn a_similarity_merge_keeps_the_contradiction() {
 
 fn action<'a>(text: &'a str) -> Action<'a> {
     Action {
+        repo_scope: None,
         event_time: None,
         action: text,
         produces: &[],

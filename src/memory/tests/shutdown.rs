@@ -304,6 +304,7 @@ async fn close_flushes_the_tail() {
     .await
     .unwrap();
     mem.record_action(&Action {
+        repo_scope: None,
         event_time: None,
         action: "created migrations/003.sql",
         produces: &["migrations/003.sql"],
@@ -420,6 +421,7 @@ async fn close_returns_the_retained_batch_to_the_front_of_the_log() {
 
     // Fresh writes land in the log *after* the retained batch was drained.
     mem.record_action(&Action {
+        repo_scope: None,
         event_time: None,
         action: "wrote docs/api.md",
         produces: &["docs/api.md"],
@@ -912,6 +914,7 @@ async fn close_refuses_to_claim_durability_for_a_degraded_session() {
 
     // A write after degradation is still in the log when close drains it.
     mem.record_action(&Action {
+        repo_scope: None,
         event_time: None,
         action: "wrote docs/api.md",
         produces: &["docs/api.md"],
@@ -949,6 +952,7 @@ async fn close_refuses_a_degraded_session_even_when_its_log_is_empty() {
     // Write, then let a degraded cycle drain-and-drop it: log empty, tail
     // gone. Exactly the state the shortcut used to bless.
     mem.record_action(&Action {
+        repo_scope: None,
         event_time: None,
         action: "wrote docs/api.md",
         produces: &["docs/api.md"],
@@ -1169,6 +1173,7 @@ async fn a_sync_write_is_refused_while_the_gate_is_taken() {
     let gate = mem.writers.write().await;
     let err = mem
         .record_action(&Action {
+            repo_scope: None,
             event_time: None,
             action: "late",
             produces: &[],
@@ -1280,6 +1285,7 @@ async fn every_mutating_method_is_refused_after_close() {
     );
     closed(
         mem.record_action(&Action {
+            repo_scope: None,
             event_time: None,
             action: "late",
             produces: &[],

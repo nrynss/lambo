@@ -8,6 +8,7 @@
 //! [`MAX_INSPECT_SCAN_CONCEPTS`], [`MAX_INSPECT_BOUNDED_SCAN`].
 
 use super::limits::MAX_INSPECT_CANDIDATES;
+use crate::graph::resource::RESOURCE_KEY_PREFIX;
 use crate::graph::Graph;
 use crate::recall::format;
 use crate::types::{tie_break_by_key, NodeId};
@@ -131,6 +132,20 @@ pub(crate) fn resolve_focus(g: &Graph, focus: &str) -> Focus {
                 tie_break_by_key(Some(&a.canonical_key), &a.id, Some(&b.canonical_key), &b.id)
             })
         });
+        // #129: one of them is a repository-scoped path, so they are
+        // different files (two repositories' `README.md`, or one beside the
+        // unscoped concept), not spellings of one concept. Never pick one
+        // quietly: the caller names it by id.
+        if exact.len() > 1
+            && exact
+                .iter()
+                .any(|c| c.canonical_key.starts_with(RESOURCE_KEY_PREFIX))
+        {
+            return Focus::Ambiguous {
+                candidates: exact,
+                bounded: None,
+            };
+        }
         return Focus::Exact(exact[0].id);
     }
 
@@ -197,6 +212,16 @@ fn finish_fuzzy(fuzzy: &mut Vec<FocusCandidate>, bounded: Option<BoundedScan>) -
             candidates: std::mem::take(fuzzy),
             bounded,
         }
+    }
+}
+
+/// A candidate's content as a refusal lists it: a repository-scoped path
+/// (#129) names its repository, so same-content candidates can be told
+/// apart. Every other candidate is its content, as before.
+fn candidate_text(c: &FocusCandidate) -> String {
+    match crate::graph::resource::repo_scope_of_key(&c.canonical_key) {
+        Some(repo) => format!("{} (repo {repo:?})", c.content),
+        None => c.content.clone(),
     }
 }
 
@@ -424,7 +449,7 @@ pub(crate) fn ambiguous_refusal(
         ),
     };
     for c in candidates.iter().take(MAX_INSPECT_CANDIDATES) {
-        msg.push_str(&format!("\n  {} [{}]", c.content, c.id.0));
+        msg.push_str(&format!("\n  {} [{}]", candidate_text(c), c.id.0));
     }
     if candidates.len() > MAX_INSPECT_CANDIDATES {
         msg.push_str(&format!(
@@ -451,7 +476,7 @@ pub(crate) fn oversized_refusal(cap: usize, near: &[FocusCandidate]) -> String {
              pass a node_id or name one exactly):",
         );
         for c in near.iter().take(MAX_INSPECT_CANDIDATES) {
-            msg.push_str(&format!("\n  {} [{}]", c.content, c.id.0));
+            msg.push_str(&format!("\n  {} [{}]", candidate_text(c), c.id.0));
         }
     }
     msg
@@ -467,7 +492,7 @@ pub(crate) fn missing_refusal(focus: &str, session: &str, near: &[FocusCandidate
     if !near.is_empty() {
         msg.push_str("\nsuggestions (not matches; pass a node_id or name one exactly):");
         for c in near.iter().take(MAX_INSPECT_CANDIDATES) {
-            msg.push_str(&format!("\n  {} [{}]", c.content, c.id.0));
+            msg.push_str(&format!("\n  {} [{}]", candidate_text(c), c.id.0));
         }
     }
     msg

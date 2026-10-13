@@ -553,6 +553,7 @@ mod tests {
         crate::cli::record_action::run(
             backends(&store, false),
             crate::cli::record_action::Args {
+                repo_scope: None,
                 session: SESSION.into(),
                 agent: "agent-a".into(),
                 action: "dismissed the outfit".into(),

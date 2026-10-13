@@ -21,10 +21,14 @@ use crate::types::{InteractionSpan, NodeId, Scored, SessionId, StoreError};
 /// [`PgStore::normalize_tokens`].
 pub(super) fn score_keyword_hits(content: &str, canonical_key: &str, tokens: &[String]) -> usize {
     let content = content.to_lowercase();
-    let key = canonical_key.to_lowercase();
+    // #129: a scoped key's text is not matched (see `keyword_matches_key`).
+    let key = crate::graph::resource::keyword_matches_key(canonical_key)
+        .then(|| canonical_key.to_lowercase());
     tokens
         .iter()
-        .filter(|t| content.contains(t.as_str()) || key.contains(t.as_str()))
+        .filter(|t| {
+            content.contains(t.as_str()) || key.as_deref().is_some_and(|k| k.contains(t.as_str()))
+        })
         .count()
 }
 

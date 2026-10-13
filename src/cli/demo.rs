@@ -1137,6 +1137,7 @@ async fn play(
             } => {
                 let outcome = mem
                     .record_action(&Action {
+                        repo_scope: None,
                         event_time: None,
                         action,
                         produces,

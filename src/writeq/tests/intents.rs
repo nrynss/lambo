@@ -10,6 +10,7 @@ fn derive(citations: PinnedCitations) -> JobPayload {
         concepts: vec![("a decision".into(), ConceptType::Logic)],
         pairs: vec![],
         citations,
+        repo_scope: None,
     }
 }
 
@@ -19,6 +20,7 @@ fn action(pins: Vec<Option<NodeId>>) -> JobPayload {
 
 fn action_against(pins: Vec<Option<NodeId>>, against: Vec<PinnedReference>) -> JobPayload {
     JobPayload::Action {
+        repo_scope: None,
         action: "ran it".into(),
         produces: vec![],
         modifies: vec![],
@@ -53,7 +55,7 @@ fn legacy_payloads_are_byte_identical() {
     );
     // And an intent written before 0.6.0 decodes with nothing pinned.
     let old: WriteIntentPayload = serde_json::from_str(&json).unwrap();
-    match JobPayload::from_intent_payload(old) {
+    match JobPayload::from_intent_payload(old).unwrap() {
         JobPayload::Action {
             depends_on_pins, ..
         } => assert!(depends_on_pins.is_empty()),
@@ -79,7 +81,7 @@ fn a_cited_derive_is_its_own_variant_and_round_trips() {
     assert!(json.starts_with(r#"{"kind":"derive_cited","#), "{json}");
     let back: WriteIntentPayload = serde_json::from_str(&json).unwrap();
     assert_eq!(back, intent);
-    match JobPayload::from_intent_payload(back) {
+    match JobPayload::from_intent_payload(back).unwrap() {
         JobPayload::Derive { citations: c, .. } => assert_eq!(c, citations),
         other => panic!("{other:?}"),
     }
@@ -190,6 +192,119 @@ fn an_unknown_pin_field_is_refused() {
     assert!(serde_json::from_str::<WriteIntentPayload>(json).is_err());
 }
 
+fn scoped(mut job: JobPayload, scope: &str) -> JobPayload {
+    match &mut job {
+        JobPayload::Derive { repo_scope, .. } | JobPayload::Action { repo_scope, .. } => {
+            *repo_scope = Some(scope.into());
+        }
+        JobPayload::DeriveImage { .. } => unreachable!("not used here"),
+    }
+    job
+}
+
+/// #129: a scoped job is one `repo_scoped` wrapper around the unscoped
+/// payload, so an older build refuses it instead of replaying it under the
+/// legacy path key; it round-trips, is charged its scope, and settles to the
+/// payload every build decodes.
+#[test]
+fn repo_scoped_intents_round_trip_and_refuse_downgrade() {
+    let cited = PinnedCitations {
+        references: vec![pinned("a decision", "README.md", 9)],
+        against: vec![],
+    };
+    // #19(b): contradictions ride inside the wrapped payload too.
+    let contradicting = PinnedCitations {
+        references: vec![],
+        against: vec![pinned("a decision", "docs/old.md", 10)],
+    };
+    let jobs = [
+        derive(PinnedCitations::default()),
+        derive(cited),
+        derive(contradicting),
+        action(vec![]),
+        action_against(vec![], vec![pinned("ran it", "src/lib.rs", 11)]),
+    ];
+    for unscoped in jobs {
+        let bare_bytes = unscoped.bytes();
+        let inner = unscoped.to_intent_payload();
+        let job = scoped(unscoped, "host/owner/repo");
+        let intent = job.to_intent_payload();
+        assert_eq!(
+            intent,
+            WriteIntentPayload::RepoScoped {
+                repo_scope: "host/owner/repo".into(),
+                payload: Box::new(inner),
+            }
+        );
+        let json = serde_json::to_string(&intent).unwrap();
+        assert!(
+            json.starts_with(crate::types::REPO_SCOPED_PAYLOAD_LIKE.trim_end_matches('%')),
+            "{json}"
+        );
+        // The scope is stored once, on the wrapper.
+        assert_eq!(json.matches("host/owner/repo").count(), 1, "{json}");
+        assert!(serde_json::from_str::<v0_5_0::WriteIntentPayload>(&json).is_err());
+        let replay = JobPayload::from_intent_payload(serde_json::from_str(&json).unwrap()).unwrap();
+        assert_eq!(replay.to_intent_payload(), intent);
+        let settled = serde_json::to_string(&intent.settled().unwrap()).unwrap();
+        assert_eq!(settled, crate::types::SETTLED_IMAGE_INTENT_PAYLOAD);
+        assert!(serde_json::from_str::<v0_5_0::WriteIntentPayload>(&settled).is_ok());
+        assert_eq!(job.bytes(), bare_bytes + "host/owner/repo".len());
+    }
+}
+
+#[test]
+fn repo_scoped_replay_refuses_invalid_nested_or_image_payloads() {
+    let bare = WriteIntentPayload::Derive {
+        concepts: vec![],
+        pairs: vec![],
+    };
+    let wrap = |scope: &str, payload: WriteIntentPayload| WriteIntentPayload::RepoScoped {
+        repo_scope: scope.into(),
+        payload: Box::new(payload),
+    };
+    // Replay checks only that a stored scope is nonempty (review L4): the
+    // full check ran on the call path of the build that wrote the row.
+    for scope in ["", "  "] {
+        assert!(
+            JobPayload::from_intent_payload(wrap(scope, bare.clone())).is_err(),
+            "{scope:?}"
+        );
+    }
+    assert!(JobPayload::from_intent_payload(wrap("a b", bare.clone())).is_ok());
+    let nested = wrap("outer", wrap("inner", bare.clone()));
+    assert!(JobPayload::from_intent_payload(nested).is_err());
+    // An image derive is never scoped: a stored one is refused, not applied
+    // without its scope.
+    use crate::types::{
+        EmbeddingContract, EmbeddingSource, SourceModality, SuppliedVector, VectorOrigin,
+    };
+    let image = WriteIntentPayload::DeriveImage {
+        concepts: vec![("red [image:a1]".into(), ConceptType::Resource)],
+        pairs: vec![],
+        supplied: SuppliedVector {
+            content: "red [image:a1]".into(),
+            vector: vec![0.6, 0.8],
+            contract: EmbeddingContract {
+                kind: "fixture".into(),
+                model: None,
+                dim: 2,
+            },
+            source: EmbeddingSource {
+                modality: SourceModality::Image,
+                origin: VectorOrigin::Client,
+                sha256: None,
+                mime: None,
+            },
+        },
+    };
+    assert!(JobPayload::from_intent_payload(wrap("repo", image)).is_err());
+    // The scope lives only on the wrapper: citations carrying one are
+    // refused at decode (`deny_unknown_fields`).
+    let stray = r#"{"kind":"derive_cited","concepts":[],"pairs":[],"citations":{"repo_scope":"r","references":[]}}"#;
+    assert!(serde_json::from_str::<WriteIntentPayload>(stray).is_err());
+}
+
 /// #19(b): a derive's contradictions ride in the cited intent beside its
 /// citations, and a derive that only cites serializes exactly as #36 PR 4
 /// wrote it (no `against` key), so the two can be told apart and neither
@@ -227,7 +342,7 @@ fn a_derive_s_contradictions_ride_in_the_cited_intent() {
             "{json}"
         );
         let back: WriteIntentPayload = serde_json::from_str(&json).unwrap();
-        match JobPayload::from_intent_payload(back) {
+        match JobPayload::from_intent_payload(back).unwrap() {
             JobPayload::Derive { citations: c, .. } => assert_eq!(c, citations),
             other => panic!("{other:?}"),
         }
@@ -259,7 +374,7 @@ fn an_action_with_against_is_its_own_variant_and_round_trips() {
     );
     let back: WriteIntentPayload = serde_json::from_str(&json).unwrap();
     assert_eq!(back, intent);
-    match JobPayload::from_intent_payload(back) {
+    match JobPayload::from_intent_payload(back).unwrap() {
         JobPayload::Action {
             against: a,
             depends_on_pins,

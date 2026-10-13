@@ -923,3 +923,62 @@ async fn stage1_graph_counts_equal_sqlite_at_the_exact_cutoff() {
         );
     }
 }
+
+/// #129 review L5: the keyword leg matches a scoped concept by its content
+/// only, never by the `RepoResource:v1:` prefix or JSON tuple of its key,
+/// and ties order scoped keys by their tie form (lowercased prefix), not
+/// all ahead of legacy keys. SQLite and MemoryStore agree.
+#[cfg(feature = "store-memory")]
+#[tokio::test]
+async fn keyword_leg_matches_scoped_concepts_by_content_only() {
+    use crate::graph::resource::scoped_resource_key;
+    let sqlite = test_store();
+    sqlite.init_schema().await.unwrap();
+    let memory = MemoryStore::new();
+    let sid = SessionId::from("kw-scoped");
+    let i1 = NodeId::new();
+    let ts = Utc::now();
+    let keyed = |id: NodeId, content: &str, key: String| {
+        let mut m = plant_concept(&sid, id, i1, content, ConceptType::Resource, ts);
+        if let Mutation::UpsertNode {
+            node: NodeKind::Concept(c),
+        } = &mut m
+        {
+            c.canonical_key = key;
+        }
+        m
+    };
+    let (scoped, aaa, zzz) = (NodeId::new(), NodeId::new(), NodeId::new());
+    let batch = MutationBatch {
+        mutation_epoch: 0,
+        gc_mark: Default::default(),
+        mutations: vec![
+            plant_interaction(&sid, i1, None, ts),
+            keyed(
+                scoped,
+                "notes.md",
+                scoped_resource_key("notes.md", Some("github.com/acme/widgets")).unwrap(),
+            ),
+            keyed(aaa, "aaa notes", "aaa notes".into()),
+            keyed(zzz, "zzz notes", "zzz notes".into()),
+        ],
+    };
+    sqlite.flush(&batch, None).await.unwrap();
+    memory.flush(&batch, None).await.unwrap();
+    // Tokens only the scoped key's text holds match nothing.
+    for token in ["repo", "resource", "v1", "acme", "widgets"] {
+        let tokens = vec![token.to_string()];
+        let got = sqlite.keyword_candidates(&sid, &tokens, 10).await.unwrap();
+        let want = memory.keyword_candidates(&sid, &tokens, 10).await.unwrap();
+        assert_eq!(got, want, "{token}");
+        assert!(got.is_empty(), "{token}: {got:?}");
+    }
+    // Content still matches; the three tie on one token, ordered by tie
+    // form: "aaa notes" < "reporesource:v1:…" < "zzz notes".
+    let tokens = vec!["notes".to_string()];
+    let got = sqlite.keyword_candidates(&sid, &tokens, 10).await.unwrap();
+    let want = memory.keyword_candidates(&sid, &tokens, 10).await.unwrap();
+    assert_eq!(got, want);
+    let order: Vec<NodeId> = got.iter().map(|s| s.item).collect();
+    assert_eq!(order, [aaa, scoped, zzz]);
+}
