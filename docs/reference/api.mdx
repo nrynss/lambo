@@ -217,8 +217,8 @@ own, covering at least 0.3 of min(session extent, the coverage cap).
   a contradicting concept would supersede at once, under the same rules,
   whether or not it was ever Canonical. It waits at Venerable until it
   earns newer evidence. `explain_admission` and `Measurements::take_hold`
-  report it as a failing `held` check ("held: contradicted by <id> with
-  newer evidence"; `Measurements::held_by`).
+  report it as a failing `held` check (`held: contradicted by <id> with newer evidence`;
+  `Measurements::held_by`).
 - Order within a cycle: supersessions commit first, then promotions against
   the recomputed budget (so a freed slot is spent in the same cycle), then
   budget demotions. At a full budget Stage 3 is gathered only when
