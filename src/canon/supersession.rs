@@ -207,11 +207,12 @@ impl EvidenceCache {
         session: &SessionId,
         node: NodeId,
     ) -> Result<&DependentEvidence, StoreError> {
-        if !self.rows.contains_key(&node) {
-            let rows = store.dependent_evidence(session, node).await?;
-            self.rows.insert(node, rows);
+        match self.rows.entry(node) {
+            std::collections::hash_map::Entry::Occupied(e) => Ok(e.into_mut()),
+            std::collections::hash_map::Entry::Vacant(e) => {
+                Ok(e.insert(store.dependent_evidence(session, node).await?))
+            }
         }
-        Ok(&self.rows[&node])
     }
 }
 

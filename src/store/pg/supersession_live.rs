@@ -45,7 +45,8 @@ pub(crate) async fn check_unreadable_reason<D: Dialect>(store: &PgStore<D>) {
     let sid = case::session();
     let node = case::concept_id("R1");
     let pool = store.pool().await.expect("pool");
-    let rows: [(u64, &str, &str, Option<&str>, Option<uuid::Uuid>); 3] = [
+    type Row<'a> = (u64, &'a str, &'a str, Option<&'a str>, Option<uuid::Uuid>);
+    let rows: [Row<'_>; 3] = [
         (90, "Canonical", "None", Some("evicted"), None),
         (91, "Canonical", "None", Some("budget"), Some(node.0)),
         (92, "Venerable", "Canonical", Some("budget"), None),

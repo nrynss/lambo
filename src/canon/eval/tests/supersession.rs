@@ -554,7 +554,7 @@ async fn a_freed_slot_is_spent_in_the_same_cycle_in_commit_order() {
         .await
         .unwrap()
         .canonization_events;
-    reloaded.sort_by(|a, b| (a.occurred_at, a.id.0).cmp(&(b.occurred_at, b.id.0)));
+    reloaded.sort_by_key(|e| (e.occurred_at, e.id.0));
     let reloaded: Vec<_> = reloaded
         .iter()
         .filter(|e| e.occurred_at == at(NOW))
