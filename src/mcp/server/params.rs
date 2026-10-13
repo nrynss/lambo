@@ -226,7 +226,9 @@ pub struct DeriveParams {
     /// `scope`). Send one stable id per repository, the same from every clone
     /// and worktree: its remote as `host/owner/repo` (no scheme, credentials,
     /// query or `.git`), or for a local-only repository an agreed unique root
-    /// name. Taken as given, never verified; compared exactly after trimming.
+    /// name: at most 512 bytes, with no whitespace or invisible characters
+    /// inside. Taken as given, never verified; compared exactly after
+    /// trimming.
     /// A path is matched as exact text (case and `./` count), never resolved
     /// on disk. With it, path text names only this repository's concept and
     /// never falls back to an unscoped one; cite an older concept by its id.
@@ -301,7 +303,9 @@ pub struct RecordActionParams {
     /// `scope`). Send one stable id per repository, the same from every clone
     /// and worktree: its remote as `host/owner/repo` (no scheme, credentials,
     /// query or `.git`), or for a local-only repository an agreed unique root
-    /// name. Taken as given, never verified; compared exactly after trimming.
+    /// name: at most 512 bytes, with no whitespace or invisible characters
+    /// inside. Taken as given, never verified; compared exactly after
+    /// trimming.
     /// A path is matched as exact text (case and `./` count), never resolved
     /// on disk. With it, path text names only this repository's concept and
     /// never falls back to an unscoped one; cite an older concept by its id.

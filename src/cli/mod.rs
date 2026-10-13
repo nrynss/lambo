@@ -1489,7 +1489,7 @@ mod sqlite_tests {
         let err = crate::cli::derive::run(resolve_clean(&cfg), derive(Some("  ")))
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("repo_scope"), "{err}");
+        assert!(err.to_string().contains("--repo-scope"), "{err}");
         for repo in [Some("repo-a"), None] {
             crate::cli::derive::run(resolve_clean(&cfg), derive(repo))
                 .await
