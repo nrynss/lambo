@@ -749,3 +749,65 @@ async fn an_unlayered_recall_matches_the_frozen_v0_5_0_projection() {
     );
     plain.mem.close().await.expect("close");
 }
+
+/// #36 PR 4 and design-33 section 7: a write resolves its references
+/// against its own session. One that names a concept only in a layer is
+/// refused by name, and nothing is written in either session.
+#[tokio::test]
+async fn a_citation_of_a_layer_concept_is_refused_as_cross_session() {
+    let (s, general, _source) = project_and_general("cite").await;
+    let ruling = general
+        .memory()
+        .graph()
+        .read()
+        .concepts()
+        .find(|c| c.content == GENERAL_RULING)
+        .expect("general holds the ruling")
+        .id;
+    let before = (
+        s.memory().graph().read().snapshot(),
+        general.memory().graph().read().snapshot(),
+    );
+    for reference in [
+        crate::recall::format::short_id(ruling),
+        ruling.0.to_string(),
+        GENERAL_RULING.to_string(),
+    ] {
+        let out = call_raw(
+            &s,
+            "lambo_derive",
+            json!({"agent_id": "agent-a", "concepts": [{
+                "content": "a project decision", "concept_type": "logic",
+                "depends_on": [reference],
+            }]}),
+        )
+        .await;
+        assert_eq!(out.is_error, Some(true));
+        let text = text_of(&out);
+        assert!(
+            text.contains("is in scope \"general\"; cross-session citations are not recorded"),
+            "{text}"
+        );
+    }
+    let out = call_raw(
+        &s,
+        "lambo_record_action",
+        json!({"agent_id": "agent-a", "action": "ran it", "depends_on": [ruling.0.to_string()]}),
+    )
+    .await;
+    assert_eq!(out.is_error, Some(true));
+    assert!(
+        text_of(&out).contains("is in scope \"general\""),
+        "{}",
+        text_of(&out)
+    );
+    assert_eq!(
+        before,
+        (
+            s.memory().graph().read().snapshot(),
+            general.memory().graph().read().snapshot(),
+        )
+    );
+    s.mem.close().await.expect("close");
+    general.mem.close().await.expect("close general");
+}

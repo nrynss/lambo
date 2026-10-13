@@ -688,6 +688,7 @@ async fn an_ends_only_call_does_not_probe_a_graph_source() {
         10,
         SEMANTIC_MATCH_THRESHOLD_DEFAULT,
         None,
+        &crate::graph::cite::PinnedCitations::default(),
         None,
     )
     .await

@@ -156,6 +156,7 @@ async fn derive_over_graph(
         10,
         SEMANTIC_MATCH_THRESHOLD_DEFAULT,
         None,
+        &crate::graph::cite::PinnedCitations::default(),
         None,
     )
     .await
@@ -560,6 +561,7 @@ async fn the_commit_hook_runs_once_after_a_replan() {
                 10,
                 SEMANTIC_MATCH_THRESHOLD_DEFAULT,
                 None,
+                &crate::graph::cite::PinnedCitations::default(),
                 Some(hook),
             )
             .await

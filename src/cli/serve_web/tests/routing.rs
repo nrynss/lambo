@@ -266,6 +266,7 @@ pub(super) async fn two_sessions() -> Arc<MemoryStore> {
             kind: ConceptKind::Entity,
             parent_of: vec![],
             concept: vec![],
+            depends_on: Vec::new(),
         },
     )
     .await
@@ -796,6 +797,7 @@ async fn two_sessions_stay_apart_under_concurrent_clients() {
             kind: ConceptKind::Entity,
             parent_of: vec![],
             concept: vec![],
+            depends_on: Vec::new(),
         },
     )
     .await
@@ -915,6 +917,7 @@ async fn freshness_and_counts_are_per_session() {
             kind: ConceptKind::Entity,
             parent_of: vec![],
             concept: vec![],
+            depends_on: Vec::new(),
         },
     )
     .await

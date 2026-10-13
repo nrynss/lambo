@@ -13,6 +13,10 @@
 //! for a handle that is only finishing a read. A read is bounded by the
 //! recall and inspect timeouts, well inside 30 s. Writes take `scope` in
 //! PR 4.
+//!
+//! [`LayerProbe`] (#36 PR 4) is the write side's read of the layers: a
+//! write's reference that names nothing in this session is looked up in each
+//! layer only to say where it is, and is refused as cross-session either way.
 
 use rmcp::model::CallToolResult;
 
@@ -21,6 +25,7 @@ use crate::mcp::server::params::check_size;
 use crate::mcp::server::response::{bad_param, config_refusal, layer_unavailable};
 use crate::mcp::server::trace::call_auth;
 use crate::mcp::server::LamboServer;
+use crate::surface::resolve::{resolve_reference, ForeignScopes, Resolved};
 
 /// What a `scope` names.
 pub(super) enum Scoped<'a> {
@@ -97,5 +102,40 @@ impl LamboServer {
             .iter()
             .map(|h| h.session.as_str())
             .collect()
+    }
+}
+
+/// The foreign scopes of a write to this server's session (#36 PR 4): its
+/// layers, nearest tier first. A reference that names nothing in the session
+/// but exactly one concept in a layer is refused as "in scope '<layer>'"
+/// rather than as missing; nothing found here is ever cited (dependence is
+/// per session, design-33 section 7). A layer the call may not read, or one
+/// not serving now, is skipped: the reference is then refused as missing.
+/// #33 PR 4's scoped writes build the same lookup over the addressed session
+/// and the other layers.
+pub(super) struct LayerProbe<'a> {
+    pub(super) server: &'a LamboServer,
+}
+
+impl ForeignScopes for LayerProbe<'_> {
+    fn holder_of(&self, reference: &str) -> Option<String> {
+        let layers = self.server.layers();
+        let auth = call_auth();
+        for handle in &layers.handles {
+            let layer = handle.session.as_str();
+            if !layers.authorize(auth.as_ref(), layer) {
+                continue;
+            }
+            let Ok(live) = handle.live(LayerRead::Probe) else {
+                continue;
+            };
+            // The layer's read guard is a temporary of this statement: one
+            // session's lock at a time, never across an await.
+            let resolved = resolve_reference(&live.mem.graph().read(), reference);
+            if matches!(resolved, Resolved::Concept { .. }) {
+                return Some(layer.to_string());
+            }
+        }
+        None
     }
 }

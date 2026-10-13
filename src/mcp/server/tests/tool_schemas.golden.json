@@ -1,6 +1,6 @@
 {
   "lambo_derive": {
-    "description": "Derive concepts from the current interaction into session memory. A concept is one fact, stated atomically and short enough that a later restatement of the same fact matches it, such as a decision with its reason. Good: 'Lease TTL is 45s because it must exceed the 15s shutdown budget'. Bad: a paragraph narrating what you did and found. It is not a log: record activity with lambo_record_action. To group facts under a decision, send each as its own concept and add parent_of pairs with the decision as parent and each fact as child. created_at is stamped server-side. event_time is optional RFC3339 historical about-time, such as a commit or document date; omit it for a live fact, which is about now. Returns as soon as the input is validated and ordered — the write is applied in the background and the ack carries a receipt id. The outcome is piggybacked on your next tool response; to wait for it, call lambo_stats with that receipt and a wait_ms. On a store with vector search each concept is embedded with the whole call's text, so a concept sent alone may be at most 8189 bytes; a longer call is refused before the ack, naming the part that is too long.",
+    "description": "Derive concepts from the current interaction into session memory. A concept is one fact, stated atomically and short enough that a later restatement of the same fact matches it, such as a decision with its reason. Good: 'Lease TTL is 45s because it must exceed the 15s shutdown budget'. Bad: a paragraph narrating what you did and found. It is not a log: record activity with lambo_record_action. To group facts under a decision, send each as its own concept and add parent_of pairs with the decision as parent and each fact as child. When a concept rests on a ruling or decision already in memory, cite it by id (the 8 hex characters recall shows) in that concept's depends_on: it must already exist and match exactly one concept, or the whole call is refused. created_at is stamped server-side. event_time is optional RFC3339 historical about-time, such as a commit or document date; omit it for a live fact, which is about now. Returns as soon as the input is validated and ordered — the write is applied in the background and the ack carries a receipt id. The outcome is piggybacked on your next tool response; to wait for it, call lambo_stats with that receipt and a wait_ms. On a store with vector search each concept is embedded with the whole call's text, so a concept sent alone may be at most 8189 bytes; a longer call is refused before the ack, naming the part that is too long.",
     "inputSchema": {
       "$defs": {
         "WireConcept": {
@@ -14,6 +14,17 @@
               "description": "The concept text: one fact, stated atomically and short — a sentence,\nnot a paragraph or a log of what you did.",
               "maxLength": 16384,
               "type": "string"
+            },
+            "depends_on": {
+              "description": "Optional: up to 8 existing concepts this one rests on, such as the\nruling a decision applies. Cite each by its id: the 8 hex characters\nrecall shows, or its full node id (its exact content also works).\nEach must already exist in this session and match exactly one\nconcept; one that does not, or that names this concept itself,\nrefuses the whole call before the ack and writes nothing. Recorded as\nthis concept depending on each, which makes the cited concept\nload-bearing. At most 32 across the call.",
+              "items": {
+                "$ref": "#/$defs/WireReference"
+              },
+              "maxItems": 8,
+              "type": [
+                "array",
+                "null"
+              ]
             }
           },
           "required": [
@@ -50,6 +61,11 @@
             "child"
           ],
           "type": "object"
+        },
+        "WireReference": {
+          "description": "One `depends_on` entry of a `lambo_derive` concept: an existing concept,\nby the id recall shows, its full node id or its exact content.",
+          "maxLength": 16384,
+          "type": "string"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -492,7 +508,7 @@
     }
   },
   "lambo_record_action": {
-    "description": "Record an action the agent took, with what it produces, modifies and depends on. This is where activity goes: name the act in a short line (e.g. 'merged PR #52'), not a narrative. A fact or decision that later work should recall is a concept for lambo_derive. created_at is stamped server-side. event_time is optional RFC3339 historical about-time, such as a commit or document date; omit it for a live fact, which is about now. Returns as soon as the input is validated and ordered — the write is applied in the background and the ack carries a receipt id, resolved the same way as lambo_derive's.",
+    "description": "Record an action the agent took, with what it produces, modifies and depends on. This is where activity goes: name the act in a short line (e.g. 'merged PR #52'), not a narrative. A fact or decision that later work should recall is a concept for lambo_derive. When the action relied on a ruling or decision from memory, cite it by id (the 8 hex characters recall shows) in depends_on. created_at is stamped server-side. event_time is optional RFC3339 historical about-time, such as a commit or document date; omit it for a live fact, which is about now. Returns as soon as the input is validated and ordered — the write is applied in the background and the ack carries a receipt id, resolved the same way as lambo_derive's.",
     "inputSchema": {
       "$defs": {
         "WireResource": {
@@ -515,7 +531,7 @@
           "type": "string"
         },
         "depends_on": {
-          "description": "Things this action depends on (`Dependency` edges).",
+          "description": "Things this action depends on (`Dependency` edges). To cite a ruling\nor decision you relied on, give its id: the 8 hex characters recall\nshows, or its full node id. An id names that existing concept; a\nshort id several concepts share is refused. Any other entry, and an\nid that names no concept, names a concept by its text, created if\nnew.",
           "items": {
             "$ref": "#/$defs/WireResource"
           },

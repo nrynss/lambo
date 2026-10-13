@@ -23,14 +23,16 @@ use chrono::{DateTime, Utc};
 use super::{DryRun, ImpactReport, Memory};
 use crate::graph::action::{record_action as graph_record_action, Action, ActionOutcome};
 use crate::graph::canonical::{canonicalize, CanonicalizeResult};
+use crate::graph::cite;
 use crate::graph::demote::demote as graph_demote;
-use crate::graph::derive::{derive as graph_derive, DeriveOutcome, ParentOf};
+use crate::graph::derive::{derive_cited, DeriveOutcome, ParentOf};
 use crate::graph::reserve::{release as graph_release, reserve as graph_reserve};
 use crate::graph::{hybrid, Graph};
 use crate::recall::format;
+use crate::surface::resolve::{attribute_foreign, ForeignScopes, NoForeignScopes};
 use crate::types::{
-    AgentId, Concept, ConceptType, Interaction, LamboError, MatchStrategy, Node, NodeId,
-    Reservation, StoreError,
+    AgentId, Concept, ConceptCitations, ConceptType, Interaction, LamboError, MatchStrategy, Node,
+    NodeId, Reservation, StoreError,
 };
 use crate::writeq::{Submitted, WritePipeline};
 use std::sync::Arc;
@@ -212,12 +214,51 @@ impl Memory {
         concepts: &[(&str, ConceptType)],
         parent_of: &ParentOf<'_>,
     ) -> Result<DeriveOutcome, LamboError> {
+        self.derive_cited_for_ingest_as(agent, event_time, concepts, parent_of, &[])
+            .await
+    }
+
+    /// [`Memory::derive_as`] with citations (#36 PR 4): each
+    /// [`ConceptCitations`] names one of `concepts` by its content and the
+    /// existing concepts it depends on (`citing -Dependency-> cited`). Every
+    /// reference must resolve to exactly one existing concept of this
+    /// session, by full node id, recall's short id or its canonical key (no
+    /// synonym is consulted); one that does not, or that would cite the
+    /// concept itself or close a `Dependency` cycle, refuses the whole call
+    /// with [`LamboError::Reference`] and writes nothing. With no citations
+    /// this is exactly [`Memory::derive_as`].
+    pub async fn derive_cited_as(
+        &self,
+        agent: &AgentId,
+        concepts: &[(&str, ConceptType)],
+        parent_of: &ParentOf<'_>,
+        citations: &[ConceptCitations],
+    ) -> Result<DeriveOutcome, LamboError> {
+        self.derive_cited_for_ingest_as(agent, None, concepts, parent_of, citations)
+            .await
+    }
+
+    /// [`Memory::derive_cited_as`] with an optional about-time, as
+    /// [`Memory::derive_for_ingest_as`].
+    pub async fn derive_cited_for_ingest_as(
+        &self,
+        agent: &AgentId,
+        event_time: Option<DateTime<Utc>>,
+        concepts: &[(&str, ConceptType)],
+        parent_of: &ParentOf<'_>,
+        citations: &[ConceptCitations],
+    ) -> Result<DeriveOutcome, LamboError> {
         // Held across every await below, so a concurrent `close()` either
         // waits for this whole derive or refuses it (T81-1).
         let _writing = self.begin_write().await?;
         // #74: an over-long embedding context is refused before anything is
         // written, as on the asynchronous path, not after the interaction.
         hybrid::validate_embed_context(concepts, parent_of, None, self.derive_embeds())?;
+        // #36 PR 4: the citations are resolved before the interaction opens,
+        // so a refused reference leaves nothing behind. The guard is dropped
+        // at the end of the statement; the commit re-resolves under the
+        // write lock.
+        let pinned = cite::validate(&self.graph.read(), concepts, citations)?;
         let prompt = hybrid::derive_prompt(concepts.iter().map(|(content, _)| *content));
         let interaction = self.begin_interaction_full(agent, Some(prompt), event_time)?;
 
@@ -236,6 +277,7 @@ impl Memory {
                     self.config.semantic_match_threshold,
                     // A text derive supplies no vector (#22).
                     None,
+                    &pinned,
                     // The synchronous path has no durable intent to consume —
                     // the caller holds the outcome directly (J3).
                     None,
@@ -246,13 +288,14 @@ impl Memory {
                 // Short critical section; the guard dies with this block, well
                 // before the mirroring below. No `.await` inside it (§6.4).
                 let mut g = self.graph.write();
-                graph_derive(
+                derive_cited(
                     &mut g,
                     interaction,
                     agent,
                     concepts,
                     parent_of,
                     self.config.max_cooccurrence_per_derive,
+                    &pinned,
                 )?
             }
         };
@@ -330,10 +373,9 @@ impl Memory {
         // Held across the embed await below, so a concurrent `close()` either
         // waits for this whole call or refuses it (T81-1), matching `derive`.
         let _writing = self.begin_write().await?;
-        {
-            let g = self.graph.read();
-            crate::graph::action::validate(&g, action)?;
-        }
+        // #36 PR 4: what each id-shaped `depends_on` entry names now; the
+        // apply below, after the embed await, refuses one that has changed.
+        let pins = crate::graph::action::validate_pinned(&self.graph.read(), action)?;
         // Off-lock: real model calls. Skipped when the store cannot search
         // vectors, as hybrid `derive` skips them: the write is keyword-only.
         let embeddings = if self.vector_candidates().available() {
@@ -348,12 +390,13 @@ impl Memory {
             if !embeddings.is_empty() {
                 g.stamp_embedding(self.embedding.clone())?;
             }
-            crate::graph::action::record_action_with_embeddings(
+            crate::graph::action::record_action_pinned(
                 &mut g,
                 interaction,
                 agent,
                 action,
                 &embeddings,
+                &pins,
             )?
         };
         let mut touched = outcome.created.clone();
@@ -435,6 +478,61 @@ impl Memory {
         parent_of: &ParentOf<'_>,
         event_time: Option<DateTime<Utc>>,
     ) -> Result<Submitted, LamboError> {
+        self.derive_cited_async_scoped(
+            agent,
+            concepts,
+            parent_of,
+            &[],
+            event_time,
+            &NoForeignScopes,
+        )
+        .await
+    }
+
+    /// [`Memory::derive_async_as`] with citations (#36 PR 4); see
+    /// [`Memory::derive_cited_as`] for what they are.
+    ///
+    /// The citations join the call-path pre-pass: every reference is
+    /// resolved against this session's graph before the ack, and a refusal
+    /// is an `Err` here, before a receipt exists. What each one resolved to
+    /// is pinned on the job (and its durable intent); the background commit
+    /// re-resolves under the write lock and fails the receipt with
+    /// [`crate::types::ReferenceRefusalKind::Changed`] if the answer
+    /// differs, so the pre-pass and the background write never disagree
+    /// silently.
+    pub async fn derive_cited_async_as(
+        &self,
+        agent: &AgentId,
+        concepts: &[(&str, ConceptType)],
+        parent_of: &ParentOf<'_>,
+        citations: &[ConceptCitations],
+        event_time: Option<DateTime<Utc>>,
+    ) -> Result<Submitted, LamboError> {
+        self.derive_cited_async_scoped(
+            agent,
+            concepts,
+            parent_of,
+            citations,
+            event_time,
+            &NoForeignScopes,
+        )
+        .await
+    }
+
+    /// [`Memory::derive_cited_async_as`], with the other sessions the caller
+    /// reads (`foreign`) consulted for a reference this session does not
+    /// hold, so it is refused as foreign ("is in scope 'general'") instead of
+    /// missing. Each scope is read only after this session's lock is
+    /// released (one session's lock at a time, none across an await).
+    pub(crate) async fn derive_cited_async_scoped(
+        &self,
+        agent: &AgentId,
+        concepts: &[(&str, ConceptType)],
+        parent_of: &ParentOf<'_>,
+        citations: &[ConceptCitations],
+        event_time: Option<DateTime<Utc>>,
+        foreign: &dyn ForeignScopes,
+    ) -> Result<Submitted, LamboError> {
         let _writing = self.begin_write().await?;
         // The pre-pass, on the call path. The background path re-runs its own
         // planning validation; this one exists so the common errors do not have
@@ -447,7 +545,7 @@ impl Memory {
         // background path would have accepted, and validation that disagrees
         // with the write is worse than none.
         hybrid::validate_limits(concepts, parent_of, self.config.semantic_match_threshold)?;
-        {
+        let pinned = {
             let g = self.graph.read();
             match self.config.match_strategy {
                 MatchStrategy::Hybrid => {
@@ -473,7 +571,13 @@ impl Memory {
                     crate::graph::derive::validate(&g, concepts, parent_of)?
                 }
             }
-        }
+            // #36 PR 4: the citations, against the same graph read. The
+            // background commit re-resolves them (`cite::recheck`).
+            cite::validate(&g, concepts, citations)
+        };
+        // This session's guard is gone: only now may another session's be
+        // read for the foreign-scope label.
+        let pinned = pinned.map_err(|e| attribute_foreign(e, foreign))?;
         let prompt = hybrid::derive_prompt(concepts.iter().map(|(content, _)| *content));
         let interaction = self.begin_interaction_full(agent, Some(prompt), event_time)?;
         Ok(self
@@ -490,6 +594,7 @@ impl Memory {
                     .iter()
                     .map(|(a, b)| ((*a).to_string(), (*b).to_string()))
                     .collect(),
+                pinned,
             )
             .await)
     }
@@ -512,10 +617,44 @@ impl Memory {
         agent: &AgentId,
         action: &Action<'_>,
     ) -> Result<Submitted, LamboError> {
+        self.record_action_async_scoped(agent, action, &NoForeignScopes)
+            .await
+    }
+
+    /// [`Memory::record_action_async_as`], consulting `foreign` for a
+    /// `depends_on` node id this session does not hold (see
+    /// [`Memory::derive_cited_async_scoped`]).
+    ///
+    /// #36 PR 4: a `depends_on` entry that names a concept by full node id or
+    /// recall's short id resolves to it, and is pinned on the job; the
+    /// background apply refuses the call if it names something else by then.
+    /// A hyphenated node id that names nothing here and no concept by its
+    /// text is text, as in 0.5.0, unless `foreign` finds it in another
+    /// scope: then it is refused as cross-session rather than minted here.
+    pub(crate) async fn record_action_async_scoped(
+        &self,
+        agent: &AgentId,
+        action: &Action<'_>,
+        foreign: &dyn ForeignScopes,
+    ) -> Result<Submitted, LamboError> {
         let _writing = self.begin_write().await?;
-        {
-            let g = self.graph.read();
-            crate::graph::action::validate(&g, action)?;
+        // The guard is a temporary of this statement only; `foreign` reads
+        // another session in the next one, after it is gone.
+        let pins = crate::graph::action::validate_pinned(&self.graph.read(), action);
+        let pins = pins.map_err(|e| attribute_foreign(e, foreign))?;
+        // Hyphenated ids that will be taken as new text (the guard is again a
+        // temporary of its statement)...
+        let unresolved = crate::graph::action::unresolved_ids(&self.graph.read(), action)?;
+        // ...are refused when another scope holds them.
+        for entry in unresolved {
+            if let Some(scope) = foreign.holder_of(entry) {
+                return Err(crate::surface::resolve::refusal(
+                    crate::types::ReferenceField::ActionDependsOn,
+                    Some(action.action),
+                    entry,
+                    crate::types::ReferenceRefusalKind::ForeignScope { scope },
+                ));
+            }
         }
         let interaction =
             self.begin_interaction_full(agent, Some(action.action.to_string()), action.event_time)?;
@@ -528,6 +667,7 @@ impl Memory {
                 action.produces.iter().map(|s| (*s).to_string()).collect(),
                 action.modifies.iter().map(|s| (*s).to_string()).collect(),
                 action.depends_on.iter().map(|s| (*s).to_string()).collect(),
+                pins,
             )
             .await)
     }

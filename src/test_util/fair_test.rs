@@ -28,7 +28,7 @@
 //! | | `lease_self` | six `parent_of` children minted in its own interaction: no other interaction vouches for it |
 //! | Chaff | `file_flush`, `file_lease`, `file_changelog` | file Resources that actions modify (`Causal`) on many days, cited by none |
 //! | | `soak_note` | an Observation read 17 times (access count), cited by none |
-//! | | `lease_alias` | a short Entity name cited by three actions on three days: support, no load |
+//! | | `lease_alias` | a short Entity name cited by three actions on three days: support, no load (history #36 PR 4 does not rewrite; see [`expected`]) |
 //! | | `write_path_hub` | an Entity associated (`CoOccurrence`/`Semantic`) with every ruling |
 //! | | `lease_revoke` | a newer Logic that contradicts `lease_stays` (the one `Contradicts` edge) |
 //! | Dependents | `a01`..`a32` (Resource actions), `d01`..`d10` (Logic decisions), `c01`..`c06` (children) | the work that cites the rows above |
@@ -546,10 +546,13 @@ pub fn expected(policy: PromotionPolicy) -> Vec<(&'static str, CanonizationStatu
         // KNOWN DEFECT, pinned on purpose: the short name "writer lease"
         // reaches Venerable because three actions cited the name instead of
         // the `lease_stays` ruling it stands for (design note section 2, the
-        // name-resolution defect). #36 PR 4's resolver, or the reviewed alias
-        // backfill, is expected to redirect those citations to the ruling and
-        // flip this row to None; when it does, update this line rather than
-        // the resolver.
+        // name-resolution defect). #36 PR 4 lets new work cite the ruling
+        // itself by id, but it redirects nothing already written, and a
+        // citation by the alias's text still lands on the alias (0.5.0's text
+        // rule; 0.6.0 has no names). The three `Dependency` edges here are
+        // such history. Only the reviewed alias backfill (#36 PR 5) flips
+        // this row to None; when it does, update this line rather than the
+        // resolver. PR 4 re-ran the fixture and no expected status moved.
         ("lease_alias", Venerable),
     ];
     match policy {

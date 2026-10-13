@@ -138,9 +138,10 @@ pub use store::{
 
 // Explicit re-exports (no `types::*` glob — keeps the public surface auditable).
 pub use types::{
-    AgentId, CanonizationEvent, CanonizationStatus, Concept, ConceptType, DaemonEvent,
-    DependentEnd, Edge, EdgeType, EmbeddingContract, EmbeddingSource, GraphSnapshot, ImageMimeWire,
-    Interaction, InteractionSpan, LamboError, MatchStrategy, Mutation, MutationBatch, Node, NodeId,
-    RecallHit, RecallQuery, RecallResult, Reservation, ScoreTable, Scored, SessionId,
-    SourceModality, StoreError, Synonym, VectorOrigin,
+    AgentId, CanonizationEvent, CanonizationStatus, Concept, ConceptCitations, ConceptType,
+    DaemonEvent, DependentEnd, Edge, EdgeType, EmbeddingContract, EmbeddingSource, GraphSnapshot,
+    ImageMimeWire, Interaction, InteractionSpan, LamboError, MatchStrategy, Mutation,
+    MutationBatch, Node, NodeId, PinnedCitations, PinnedReference, RecallHit, RecallQuery,
+    RecallResult, ReferenceCandidate, ReferenceField, ReferenceRefusal, ReferenceRefusalKind,
+    Reservation, ScoreTable, Scored, SessionId, SourceModality, StoreError, Synonym, VectorOrigin,
 };

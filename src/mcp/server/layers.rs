@@ -58,6 +58,13 @@ pub(crate) enum LayerRead {
     /// A `scope` naming the layer: the call reads the layer alone, as a
     /// request to `/mcp/s/<layer>` would, so it draws the layer's token.
     Direct,
+    /// #36 PR 4: a write's reference that names nothing in this session is
+    /// looked up in the layer only to say where it is ("is in scope
+    /// 'general'; cross-session citations are not recorded"). Draws
+    /// nothing, for `Merged`'s reason: the write was admitted by its own
+    /// session's bucket, and the probe reads one graph index under a read
+    /// lock, never cites what it finds.
+    Probe,
 }
 
 /// Why a layer is not served right now (#33 PR 3 review L1).

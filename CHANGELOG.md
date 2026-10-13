@@ -4,6 +4,35 @@
 
 ### Upgrading from 0.5.0
 
+- **Citations (#36 PR 4) need nothing migrated, and rewrite nothing
+  already written.** Existing citations that landed on a short alias
+  Entity stay there; the reviewed alias backfill (#36 PR 5) is what
+  redirects them. From now on a ruling can be cited by id: `depends_on` on
+  a `lambo_derive` concept, or a `lambo_record_action` `depends_on` entry.
+  There is no `name` field: in-memory names could not be made safe in
+  0.6.0, and durable names are a follow-up.
+- **`record_action` `depends_on` entries that are ids now cite.** An entry
+  in the hyphenated node-id form that names a concept of the session, or
+  exactly 8 hex characters (the short id recall prints) whose text names
+  no concept and that start exactly one concept's id, now resolves to that concept instead of
+  creating a concept named by the id. An interaction's id, or a short id
+  two concepts share, is refused (`reference refused`), and so is a
+  hyphenated id that names nothing here but a concept in one of the
+  session's layers. Everything else keeps the 0.5.0 text rule: commit
+  hashes of other lengths, 9 to 32 hex characters (MD5s, longer prefixes,
+  the unhyphenated node-id form), `urn:uuid:` and braced ids, paths, issue references, a
+  hyphenated id that names nothing, and an id whose text a 0.5.0 write
+  already minted as an Entity. A commit hash that happens to prefix a
+  concept's id cites that concept (about concepts / 2^32).
+- **Downgrading to 0.5.0 after cited writes.** A cited derive's durable
+  intent is a new kind (`derive_cited`). Once it settles (applied or
+  failed), its stored payload is rewritten to the empty `derive` 0.5.0
+  decodes, as an image intent's is, so a downgrade loads the session. An
+  unconsumed one is refused by name by 0.5.0, which stops that session's
+  load rather than apply the write without its citations: let the 0.6.0
+  writer drain its queue (a clean close applies or settles what it can)
+  before downgrading. An action intent's new `depends_on_pins` field is
+  ignored by 0.5.0, which re-resolves the entries by its own text rule.
 - **Code or scripts that read `session_leases.holder` or
   `LeaseHolder::token()`.** The holder string gains an optional
   `;boot=<id>;pidns=<inode>` suffix after the pid. Ignore anything after
@@ -111,6 +140,23 @@
 
 ### Breaking (library API)
 
+- **`LamboError::Reference(Box<ReferenceRefusal>)`** (#36 PR 4): a new
+  variant, so an exhaustive `match` on `LamboError` needs an arm. It carries
+  a typed `ReferenceRefusal` (`field`, `concept`, `reference`, `kind`:
+  `ReferenceRefusalKind::{Missing, Ambiguous, NotAConcept, ForeignScope,
+  SelfReference, Cycle, Changed, Limit, UnknownConcept}`), and its message is shown to callers intact, with the
+  class `reference refused`.
+- **`DeriveOutcome` gains `cited`** (#36 PR 4); a struct literal needs it
+  (or `..Default::default()`).
+- **`WriteIntentPayload` gains the `DeriveCited` variant, and its `Action`
+  variant gains `depends_on_pins`** (#36 PR 4). An exhaustive `match` needs
+  the new arm, and an `Action { .. }` literal the new field. A payload
+  without citations or id entries serializes byte for byte as before.
+- **`mcp::server::WireConcept` and `cli::derive::Args` gain
+  `depends_on`** (#36 PR 4); struct literals need it.
+- **`graph::action::record_action` resolves id-shaped `depends_on`
+  entries** (#36 PR 4; see Upgrading from 0.5.0), and can return
+  `LamboError::Reference`.
 - **`canon::stage1_candidates(graph, scores, min_age, now)`**
   ([#36](https://github.com/nrynss/lambo/issues/36) PR 3) replaces
   `stage1_candidates(graph, scores, min_peer_count)`: Stage 1 admits on
@@ -203,6 +249,29 @@
 
 ### Added
 
+- **Citations on `lambo_derive`**
+  ([#36](https://github.com/nrynss/lambo/issues/36) PR 4). Each concept
+  may carry `depends_on`, existing concepts it rests on (at most 8, and 32
+  per call). A reference resolves by full node id, recall's short id or
+  its exact content (never through a synonym) to exactly one concept of
+  the session, or the whole call is refused before the ack with a typed
+  `reference refused` error: missing, ambiguous, an interaction id, in
+  another scope ("is in scope 'general'; cross-session citations are not
+  recorded"), the concept itself, or a dependency cycle. A citation is
+  written as `citing -Dependency-> cited`, so the cited concept gains a
+  dependent. What each reference named is pinned at the ack and checked
+  again when the write is applied, in session and after a restart, so a
+  cited concept removed in between fails the receipt instead of linking
+  elsewhere. Re-sending a citation reinforces its one edge; a similarity
+  merge into the cited concept drops that citation. The same on the CLI:
+  `lambo derive --depends-on <REF>`. In the
+  library: `Memory::derive_cited_as`, `derive_cited_for_ingest_as`,
+  `derive_cited_async_as`, `ConceptCitations`, `PinnedCitations`,
+  `PinnedReference`, and `graph::cite`'s limits.
+- **One strict resolver for references in writes** (`crate::surface::resolve`,
+  crate-internal): no substring leg, never creates. `lambo_inspect`'s
+  short-id leg now shares its prefix matcher. #19's `contradicts` and #33's
+  scoped writes use it.
 - **Inspect explains each concept's next promotion (#36 PR 3).**
   `lambo_inspect` and `lambo inspect` print a `canonization (<policy>):
   <status> -> <next> eligible|refused` line with one reason per gate that
@@ -317,6 +386,11 @@
 
 ### Changed
 
+- **`lambo_record_action` `depends_on` entries that are concept ids cite
+  those concepts** (#36 PR 4). See Upgrading from 0.5.0. The
+  `lambo_derive` and `lambo_record_action` tool descriptions and the
+  server's instructions now ask agents to cite the rulings they rely on by
+  id, and the schemas describe the new field.
 - **Swarm admits Candidates on evidence; Solo needs the stage evidence for
   every later hop** ([#36](https://github.com/nrynss/lambo/issues/36) PR 3).
   See Upgrading from 0.5.0. The `lambo_inspect` tool description now
