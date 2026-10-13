@@ -1,4 +1,6 @@
-//! Read-only `lambo session classify`: an explicit input, never a writer.
+//! `lambo session classify` (read-only: an explicit input, never a writer)
+//! and `lambo session split` (#33 D2: writes a validated plan's targets into
+//! a new offline SQLite file; the source stays read-only).
 
 use std::io::{Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
@@ -94,12 +96,18 @@ fn write_new_private(
     path: &Path,
     write: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>,
 ) -> Result<(), CliError> {
-    let name = path.file_name().ok_or_else(|| {
-        CliError::Usage(format!(
-            "classification plan {} must name a file",
-            path.display()
-        ))
-    })?;
+    write_new_private_as("classification plan", path, write)
+}
+
+/// [`write_new_private`], naming the file `what` in its errors.
+fn write_new_private_as(
+    what: &str,
+    path: &Path,
+    write: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>,
+) -> Result<(), CliError> {
+    let name = path
+        .file_name()
+        .ok_or_else(|| CliError::Usage(format!("{what} {} must name a file", path.display())))?;
     let mut temp_name = std::ffi::OsString::from(".");
     temp_name.push(name);
     temp_name.push(format!(".{}.partial", uuid::Uuid::new_v4()));
@@ -109,32 +117,93 @@ fn write_new_private(
         .create_new(true)
         .mode(0o600)
         .open(&temp)
-        .map_err(|e| {
-            CliError::Usage(format!(
-                "create new classification plan {}: {e}",
-                path.display()
-            ))
-        })?;
+        .map_err(|e| CliError::Usage(format!("create new {what} {}: {e}", path.display())))?;
     let written = write(&mut file)
         .and_then(|_| file.sync_all())
-        .map_err(|e| CliError::Runtime(format!("write classification plan: {e}")))
+        .map_err(|e| CliError::Runtime(format!("write {what}: {e}")))
         .and_then(|_| {
-            std::fs::hard_link(&temp, path).map_err(|e| {
-                CliError::Usage(format!(
-                    "create new classification plan {}: {e}",
-                    path.display()
-                ))
-            })
+            std::fs::hard_link(&temp, path)
+                .map_err(|e| CliError::Usage(format!("create new {what} {}: {e}", path.display())))
         });
     drop(file);
     let removed = std::fs::remove_file(&temp);
     written?;
-    removed.map_err(|e| {
-        CliError::Runtime(format!(
-            "remove temporary classification plan {}: {e}",
-            temp.display()
-        ))
-    })
+    removed
+        .map_err(|e| CliError::Runtime(format!("remove temporary {what} {}: {e}", temp.display())))
+}
+
+fn read_rules(path: &Path) -> Result<ClassificationRules, CliError> {
+    let text = read_bounded(path, 4 * 1024 * 1024)?;
+    let rules: ClassificationRules = if path.extension().is_some_and(|e| e == "toml") {
+        toml::from_str(&text)
+            .map_err(|e| CliError::Usage(format!("classification rules: {}", e.message())))?
+    } else {
+        serde_json::from_str(&text)
+            .map_err(|e| CliError::Usage(format!("classification rules: {e}")))?
+    };
+    rules
+        .validate()
+        .map_err(|e| CliError::Usage(e.to_string()))?;
+    Ok(rules)
+}
+
+fn read_overrides(path: &Path) -> Result<Vec<OperatorOverride>, CliError> {
+    let mut overrides = Vec::new();
+    for (n, line) in read_bounded(path, 32 * 1024 * 1024)?.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        overrides.push(
+            serde_json::from_str(line)
+                .map_err(|e| CliError::Usage(format!("override line {}: {e}", n + 1)))?,
+        );
+    }
+    Ok(overrides)
+}
+
+fn read_labels(path: &Path) -> Result<Vec<ReviewedAssignment>, CliError> {
+    let mut labels = Vec::new();
+    for (n, line) in read_bounded(path, 32 * 1024 * 1024)?.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        labels
+            .push(serde_json::from_str(line).map_err(|e| {
+                CliError::Usage(format!("reviewed assignment line {}: {e}", n + 1))
+            })?);
+    }
+    Ok(labels)
+}
+
+/// Materialize the source through the immutable path only: a read-only
+/// schema check (never `init_schema`), then one load. No lease, flush,
+/// canonization or writable pool touches it.
+async fn load_source(
+    source: ClassificationSource,
+    session: &str,
+    what: &str,
+) -> Result<GraphSnapshot, CliError> {
+    let snapshot = match source {
+        ClassificationSource::Snapshot(path) => read_snapshot(&path)?,
+        ClassificationSource::Database(store) => {
+            // Read-only verification, not init_schema. Old schemas must be
+            // exported/upgraded on a separate copy, never repaired here.
+            store
+                .preflight_schema()
+                .await
+                .map_err(|e| CliError::Runtime(format!("{what} schema: {e}")))?;
+            store
+                .load_session(&SessionId::from(session))
+                .await
+                .map_err(|e| CliError::Runtime(format!("{what} source: {e}")))?
+        }
+    };
+    if snapshot.session_id.0 != session {
+        return Err(CliError::Usage(
+            "snapshot session does not match --session".into(),
+        ));
+    }
+    Ok(snapshot)
 }
 
 /// Produces a private plan, printing only aggregate counts and its path.
@@ -145,60 +214,14 @@ pub async fn classify_session(
     args: ClassifyArgs,
 ) -> Result<String, CliError> {
     require_nonempty("session", &args.session)?;
-    let text = read_bounded(&args.rules, 4 * 1024 * 1024)?;
-    let rules: ClassificationRules = if args.rules.extension().is_some_and(|e| e == "toml") {
-        toml::from_str(&text)
-            .map_err(|e| CliError::Usage(format!("classification rules: {}", e.message())))?
-    } else {
-        serde_json::from_str(&text)
-            .map_err(|e| CliError::Usage(format!("classification rules: {e}")))?
+    let rules = read_rules(&args.rules)?;
+    let overrides = match &args.overrides {
+        Some(path) => read_overrides(path)?,
+        None => Vec::new(),
     };
-    rules
-        .validate()
-        .map_err(|e| CliError::Usage(e.to_string()))?;
-    let mut overrides: Vec<OperatorOverride> = Vec::new();
-    if let Some(path) = &args.overrides {
-        for (n, line) in read_bounded(path, 32 * 1024 * 1024)?.lines().enumerate() {
-            if line.trim().is_empty() {
-                continue;
-            }
-            overrides.push(
-                serde_json::from_str(line)
-                    .map_err(|e| CliError::Usage(format!("override line {}: {e}", n + 1)))?,
-            );
-        }
-    }
-    let snapshot = match source {
-        ClassificationSource::Snapshot(path) => read_snapshot(&path)?,
-        ClassificationSource::Database(store) => {
-            // Read-only verification, not init_schema. Old schemas must be
-            // exported/upgraded on a separate copy, never repaired here.
-            store
-                .preflight_schema()
-                .await
-                .map_err(|e| CliError::Runtime(format!("classification schema: {e}")))?;
-            store
-                .load_session(&SessionId::from(args.session.as_str()))
-                .await
-                .map_err(|e| CliError::Runtime(format!("classification source: {e}")))?
-        }
-    };
-    if snapshot.session_id.0 != args.session {
-        return Err(CliError::Usage(
-            "snapshot session does not match --session".into(),
-        ));
-    }
+    let snapshot = load_source(source, &args.session, "classification").await?;
     let plan = if let Some(path) = &args.reviewed_assignments {
-        let mut labels: Vec<ReviewedAssignment> = Vec::new();
-        for (n, line) in read_bounded(path, 32 * 1024 * 1024)?.lines().enumerate() {
-            if line.trim().is_empty() {
-                continue;
-            }
-            labels.push(serde_json::from_str(line).map_err(|e| {
-                CliError::Usage(format!("reviewed assignment line {}: {e}", n + 1))
-            })?);
-        }
-        classify_reviewed(&snapshot, &rules, &labels, &overrides)
+        classify_reviewed(&snapshot, &rules, &read_labels(path)?, &overrides)
     } else {
         classify(&snapshot, &rules, &overrides)
     }
