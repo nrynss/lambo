@@ -532,3 +532,250 @@ async fn scoped_paths_neither_merge_nor_are_merged_into_at_similarity_one() {
     assert!(scoped.iter().all(|s| !out.semantic_merged.contains(s)));
     mem.close().await.unwrap();
 }
+
+/// Three `README.md` concepts: the legacy one and one per repository,
+/// written by synchronous actions (no embedder needed).
+fn three_readmes(mem: &Memory, agent: &AgentId) -> [NodeId; 3] {
+    for repo in [None, Some("repo-a"), Some("repo-b")] {
+        mem.record_action_as(
+            agent,
+            &Action {
+                repo_scope: repo,
+                event_time: None,
+                action: "wrote the readme",
+                produces: &["README.md"],
+                modifies: &[],
+                depends_on: &[],
+            },
+        )
+        .unwrap();
+    }
+    let legacy = mem
+        .graph
+        .read()
+        .concept_by_key(&crate::graph::canonical::canonical_key("README.md", |_| {
+            None
+        }))
+        .unwrap();
+    [
+        legacy,
+        path_id(mem, "repo-a", "README.md"),
+        path_id(mem, "repo-b", "README.md"),
+    ]
+}
+
+/// #19(b) under #129: `against` path text resolves to the call's scoped
+/// key, like `depends_on`, on a derive and on an action, under both
+/// strategies; a scope with no such file is refused rather than falling
+/// back to the legacy concept, and an unscoped call still names the legacy
+/// one.
+#[tokio::test]
+async fn scoped_against_contradicts_only_the_scoped_path() {
+    for strategy in [MatchStrategy::Canonical, MatchStrategy::Hybrid] {
+        let mem = memory(&format!("repo-against-{strategy:?}"), strategy).await;
+        let agent = AgentId::new("agent-a");
+        let [legacy, a, b] = three_readmes(&mem, &agent);
+        let against = |content: &str| ConceptCitations {
+            content: content.into(),
+            depends_on: Vec::new(),
+            against: vec!["README.md".into()],
+        };
+        let contradicts = |from: NodeId, to: NodeId| {
+            mem.graph
+                .read()
+                .edge_between(from, to, EdgeType::Contradicts)
+                .is_some()
+        };
+        // A scoped derive contradicts repo-b's file only.
+        let concepts = [("the readme is stale", ConceptType::Logic)];
+        let out = mem
+            .derive_cited_as(
+                &agent,
+                &concepts,
+                &ParentOf::none().with_repo_scope(Some("repo-b")),
+                &[against(concepts[0].0)],
+            )
+            .await
+            .unwrap();
+        assert_eq!(out.contradicted, 1, "{strategy:?}");
+        let source = mem
+            .graph
+            .read()
+            .concepts()
+            .find(|c| c.content == concepts[0].0)
+            .unwrap()
+            .id;
+        assert!(contradicts(source, b));
+        assert!(!contradicts(source, a) && !contradicts(source, legacy));
+        // A scoped action contradicts repo-a's file only.
+        let action = Action {
+            repo_scope: Some("repo-a"),
+            event_time: None,
+            action: "replaced the readme",
+            produces: &[],
+            modifies: &[],
+            depends_on: &[],
+        };
+        let out = mem
+            .record_action_against_embedded_as(&agent, &action, &["README.md".into()])
+            .await
+            .unwrap();
+        assert!(contradicts(out.action_node, a));
+        assert!(!contradicts(out.action_node, b) && !contradicts(out.action_node, legacy));
+        // No such file in repo-c: refused, never the legacy concept.
+        let before = mem.graph.read().snapshot();
+        let concepts = [("repo c has no readme", ConceptType::Logic)];
+        let err = mem
+            .derive_cited_as(
+                &agent,
+                &concepts,
+                &ParentOf::none().with_repo_scope(Some("repo-c")),
+                &[against(concepts[0].0)],
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, LamboError::Reference(r) if r.kind == ReferenceRefusalKind::Missing));
+        let action_c = Action {
+            repo_scope: Some("repo-c"),
+            ..action
+        };
+        assert!(mem
+            .record_action_against_embedded_as(&agent, &action_c, &["README.md".into()])
+            .await
+            .is_err());
+        assert_eq!(mem.graph.read().snapshot(), before);
+        // Unscoped, the legacy concept.
+        let out = mem
+            .record_action_against_embedded_as(
+                &agent,
+                &Action {
+                    repo_scope: None,
+                    action: "questioned the old readme",
+                    ..action
+                },
+                &["README.md".into()],
+            )
+            .await
+            .unwrap();
+        assert!(contradicts(out.action_node, legacy));
+        assert!(!contradicts(out.action_node, a) && !contradicts(out.action_node, b));
+        mem.close().await.unwrap();
+    }
+}
+
+/// Scoped derives and actions with `against`, deferred at close, are
+/// `repo_scoped` wrappers around `derive_cited` and `action_cited`; the
+/// next attach replays them under their scope, writing each contradiction
+/// to that repository's file, and the stored rows settle.
+#[tokio::test]
+async fn deferred_scoped_against_replays_under_its_scope() {
+    use crate::types::WriteIntentPayload;
+    let inner = Arc::new(MemoryStore::new());
+    let agent = AgentId::new("agent-a");
+    let mem = hybrid_on(
+        &inner,
+        "repo-against-replay",
+        Arc::new(super::replay::HangingEmbedder::new()),
+    )
+    .build()
+    .await
+    .unwrap();
+    let [legacy, a, b] = three_readmes(&mem, &agent);
+    let concepts = [("the readme is stale", ConceptType::Logic)];
+    let derive = mem
+        .derive_cited_async_as(
+            &agent,
+            &concepts,
+            &ParentOf::none().with_repo_scope(Some("repo-b")),
+            &[ConceptCitations {
+                content: concepts[0].0.into(),
+                depends_on: Vec::new(),
+                against: vec!["README.md".into()],
+            }],
+            None,
+        )
+        .await
+        .unwrap()
+        .receipt;
+    let action = mem
+        .record_action_against_async_as(
+            &agent,
+            &Action {
+                repo_scope: Some("repo-a"),
+                event_time: None,
+                action: "replaced the readme",
+                produces: &[],
+                modifies: &[],
+                depends_on: &[],
+            },
+            &["README.md".into()],
+        )
+        .await
+        .unwrap()
+        .receipt;
+    mem.close().await.unwrap();
+    assert_eq!(mem.pipeline().counters().deferred(), 2);
+    let sid = SessionId::new("repo-against-replay");
+    let kinds: Vec<&str> = inner
+        .load_session(&sid)
+        .await
+        .unwrap()
+        .write_intents
+        .iter()
+        .filter(|i| i.outcome.is_none())
+        .map(|i| match &i.payload {
+            WriteIntentPayload::RepoScoped { payload, .. } => match payload.as_ref() {
+                WriteIntentPayload::DeriveCited { .. } => "scoped derive_cited",
+                WriteIntentPayload::ActionCited { .. } => "scoped action_cited",
+                _ => "scoped other",
+            },
+            _ => "unscoped",
+        })
+        .collect();
+    let mut kinds = kinds;
+    kinds.sort();
+    assert_eq!(kinds, ["scoped action_cited", "scoped derive_cited"]);
+
+    let mem2 = hybrid_on(
+        &inner,
+        "repo-against-replay",
+        Arc::new(FixtureEmbedder::new()),
+    )
+    .build()
+    .await
+    .unwrap();
+    let tags = settle_all(&mem2, &agent, &[derive, action]).await;
+    assert!(
+        tags.iter().all(|t| t == "applied_after_restart"),
+        "{tags:?}"
+    );
+    let g = mem2.graph.read();
+    let source = g
+        .concepts()
+        .find(|c| c.content == concepts[0].0)
+        .unwrap()
+        .id;
+    let actor = g
+        .concepts()
+        .find(|c| c.content == "replaced the readme")
+        .unwrap()
+        .id;
+    assert!(g.edge_between(source, b, EdgeType::Contradicts).is_some());
+    assert!(g.edge_between(actor, a, EdgeType::Contradicts).is_some());
+    for from in [source, actor] {
+        assert!(g
+            .edge_between(from, legacy, EdgeType::Contradicts)
+            .is_none());
+    }
+    drop(g);
+    mem2.close().await.unwrap();
+    assert!(inner
+        .load_session(&sid)
+        .await
+        .unwrap()
+        .write_intents
+        .iter()
+        .all(
+            |i| i.outcome.is_some() && !matches!(i.payload, WriteIntentPayload::RepoScoped { .. })
+        ));
+}
