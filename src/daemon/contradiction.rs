@@ -115,6 +115,14 @@ pub(crate) fn declared_at(e: &Edge) -> DateTime<Utc> {
     e.about_time().min(e.created_at)
 }
 
+/// Whether `e` had been written at `now`: its write time, not its
+/// about-time, is what says a declaration exists yet. `declared_at <= now`
+/// alone let an edge written after `now` with an earlier `event_time` count
+/// (PR #154 review). Shared with GC's protection.
+pub(crate) fn written_by(e: &Edge, now: DateTime<Utc>) -> bool {
+    e.created_at <= now
+}
+
 fn concept(graph: &Graph, id: NodeId) -> Option<&Concept> {
     match graph.node(id) {
         Some(Node::Concept(c)) => Some(c),
@@ -221,10 +229,10 @@ fn contradiction_at_with(
         if by.session_id != target.session_id {
             continue;
         }
-        let at = declared_at(e);
-        if at > now {
+        if !written_by(e, now) {
             continue; // not written yet at the instant examined (a mocked clock)
         }
+        let at = declared_at(e);
         let Some(writers) = attribute_at(graph, e, e.created_at, timeline) else {
             continue;
         };

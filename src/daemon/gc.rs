@@ -711,8 +711,10 @@ fn has_gc_connection(graph: &Graph, node: NodeId) -> bool {
 ///
 /// The edge counts from the date the detector gives it
 /// ([`crate::daemon::contradiction::declared_at`]: its about-time clamped
-/// to its write time, #19(c) review M1), so GC protects exactly the
-/// contradictions recall can warn about: none dated after the sweep's `now`.
+/// to its write time, #19(c) review M1), and only once it has been
+/// **written** by the sweep's `now`
+/// ([`crate::daemon::contradiction::written_by`]): a write after the clock
+/// protects nothing yet, even with an earlier `event_time`.
 fn contradicts_a_promoted_concept(graph: &Graph, node: NodeId, now: DateTime<Utc>) -> bool {
     graph
         .out_neighbors_typed(node, EdgeType::Contradicts)
@@ -729,7 +731,7 @@ fn contradicts_a_promoted_concept(graph: &Graph, node: NodeId, now: DateTime<Utc
             promoted
                 && graph
                     .edge_between(node, t, EdgeType::Contradicts)
-                    .is_some_and(|e| crate::daemon::contradiction::declared_at(e) <= now)
+                    .is_some_and(|e| crate::daemon::contradiction::written_by(e, now))
         })
 }
 

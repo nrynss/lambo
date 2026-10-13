@@ -63,6 +63,10 @@
 //! concepts' creation times, and the contradiction is dated by that
 //! write's about-time: its `event_time` if one was given, otherwise its
 //! write time. Re-sending it reinforces the edge without re-dating it.
+//! Recall's detector uses an effective date
+//! (`crate::daemon::contradiction::declared_at`): the about-time clamped to
+//! the edge's `created_at`, so an `event_time` later than the write does not
+//! delay the warning, while an earlier one backdates it.
 //! * **A similarity merge keeps it.** A hybrid similarity merge writes the
 //!   new concept as its own node tied to its neighbour by a `Semantic`
 //!   edge. For a citation of that neighbour the tie already says it, so the

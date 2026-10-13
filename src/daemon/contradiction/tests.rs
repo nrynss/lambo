@@ -634,3 +634,17 @@ fn self_suppression_is_judged_per_contradiction() {
     let hit = at(&s, 1000).unwrap();
     assert_eq!((hit.by, hit.writer), (cid(3), AgentId::from("agent-c")));
 }
+
+/// PR #154 review: an edge written after `now` does not exist yet at `now`,
+/// even when its `event_time` is earlier.
+#[test]
+fn a_contradiction_written_after_now_does_not_fire_even_if_backdated() {
+    let mut s = Session::new();
+    s.interaction(1, "agent-a", 0, None);
+    s.concept_with(1, 1, "agent-a", "x", 0, CanonizationStatus::Canonical);
+    s.interaction(3, "agent-c", 2000, Some(200));
+    s.concept(3, 3, "agent-c", "not x", 2000);
+    s.edge(11, EdgeType::Contradicts, 3, 1, 2000, Some(200));
+    assert_eq!(at(&s, 1000), None, "written at t2000, examined at t1000");
+    assert_eq!(at(&s, 3000).map(|h| h.at), Some(t(200)));
+}

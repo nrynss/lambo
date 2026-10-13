@@ -206,4 +206,18 @@ fn protection_uses_the_detectors_declaration_date() {
         run(&mut g, default_params()).concepts_collected,
         vec![nid(20)]
     );
+
+    // Written after the clock but backdated before it (PR #154 review):
+    // still not written at the sweep, so still no protection.
+    let mut g = session_with_island();
+    promote(&mut g, 50, 10, CanonizationStatus::Venerable);
+    g.upsert_edge(Edge {
+        event_time: Some(ts(0)),
+        ..edge(200, 20, 10, EdgeType::Contradicts, 1.0, 200)
+    })
+    .unwrap();
+    assert_eq!(
+        run(&mut g, default_params()).concepts_collected,
+        vec![nid(20)]
+    );
 }

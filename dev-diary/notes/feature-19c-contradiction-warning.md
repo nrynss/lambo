@@ -31,9 +31,10 @@ on [feature-19a-contradicts-edges.md](feature-19a-contradicts-edges.md)
 ### When it fires
 
 The hit is Canonical or Venerable; another concept of its session has a
-`Contradicts` edge to it; that edge's about-time is not after `now` and is
-strictly later than the hit's latest eligible dependent evidence, or, with
-none, than the hit's origin interaction's about-time (the Phase 0 baseline).
+`Contradicts` edge to it, written by `now`; that edge's date is strictly
+later than the hit's origin interaction's about-time (the Phase 0 baseline)
+and than its latest eligible dependent evidence, when it has any: the bar is
+the later of the two.
 Self-edges never fire.
 
 ### Dating: about-time on both sides (coordinator, option A)
@@ -59,7 +60,9 @@ Review M1 added a clamp: every date here is `declared_at`, the about-time
 clamped to the write time (`min(event_time, created_at)`). Backdating still
 works; a future `event_time` counts from the write. Without it a
 contradiction dated 30 days ahead stayed hidden yet GC-protected, then
-outranked everything written in between. Pinned by
+outranked everything written in between. The PR #154 review closed the
+other side: an edge written after `now` with an earlier `event_time` is not
+yet written, so it neither fires nor protects (`written_by`). Pinned by
 `re_sending_a_contradiction_does_not_re_date_or_re_attribute_it`.
 
 ### Eligible evidence
@@ -187,8 +190,13 @@ to end (`a_layered_recall_keeps_contradictions_inside_their_session`).
 - The boundary: once the target is demoted (Canonical to None; Venerable
   never demotes directly), the next sweep judges the contradicting concept
   like any other, and with only its contradiction it is an orphan.
-- The edge counts from its `declared_at` (review M1): GC protects exactly
-  what recall can warn about.
+- The edge counts once it has been written by the sweep's clock
+  (`contradiction::written_by`, PR #154 review; the detector uses the same
+  check). Protection is **not** the same as a current warning: GC checks
+  the target's promoted status and the edge's existence, not freshness
+  against evidence, so a concept stays protected after its warning lapsed
+  because newer evidence arrived. That follows decision 1C's wording
+  (protected while the target holds its status).
 - **Abuse vector (review L6, not changed: owner decision).** Any agent can
   write `against` naming a promoted concept, so any concept can be kept
   alive indefinitely by contradicting one. The protection is bounded by the

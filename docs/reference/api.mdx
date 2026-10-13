@@ -109,9 +109,11 @@ fires on a concept when:
 2. another concept of its session has a `Contradicts` edge to it; and
 3. that edge's declaration date (`declared_at`: `Edge::about_time`, the
    declaring write's `event_time`, else its write time, clamped to its write
-   time) is strictly later than the concept's latest eligible dependent
-   evidence, or, with none, than its own origin interaction's about-time
-   (clamped the same way).
+   time) is strictly later than both the concept's own origin interaction's
+   about-time (clamped the same way) and its latest eligible dependent
+   evidence, when it has any. The bar is the later of the two, so a citation
+   backdated before the concept's origin does not let an earlier
+   contradiction warn.
 
 Eligible evidence is #36's dependents relation (`Dependency` sources into the
 concept and its `Hierarchical` children), one piece per dependence edge,
@@ -155,10 +157,13 @@ Garbage collection does not count a `Contradicts` edge as connectivity
 edge to a concept that is Venerable or Canonical when a sweep starts is a
 protected class for that sweep, as a Venerable concept is: it is not
 collected as an orphan, as a disconnected component or by the score cut, and
-it is outside the collection cap's base. The edge counts from its
-`declared_at`, so GC protects what recall can warn about. The protection does
-not extend to its neighbours, and it lapses on the first sweep after the
-target is demoted. Because any agent may write `against`, the protection can
+it is outside the collection cap's base. The edge counts once it has been
+written by the sweep's clock. Protection is not the same as a current
+warning: GC checks only the target's promoted status and that the
+contradiction exists, not whether it is newer than the target's evidence,
+so a concept stays protected after its warning has lapsed because newer
+evidence arrived. The protection does not extend to its neighbours, and it
+lapses on the first sweep after the target is demoted. Because any agent may write `against`, the protection can
 keep an otherwise collectable concept alive indefinitely by contradicting a
 promoted one; this is the owner's decision (#19(c) decision 1C), noted here
 as a store-growth consideration.

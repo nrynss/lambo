@@ -576,7 +576,9 @@
   that contradicts a Venerable or Canonical concept is protected from
   collection, as a Venerable concept is, while that concept keeps its
   status, so a recall warning's evidence lasts as long as the warning can
-  fire. Its neighbours are not protected through it, and the protection
+  fire. Protection is not a current warning: it checks only the target's
+  status, so it outlasts a warning that lapsed because newer evidence
+  arrived. Its neighbours are not protected through it, and the protection
   lapses on the first sweep after the target is demoted. Any agent can use
   `against` this way to keep a concept alive; that is the owner's call.
 
