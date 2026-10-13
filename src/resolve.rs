@@ -243,17 +243,16 @@ pub fn check_vector_search_contract(
     }
 }
 
-/// Build store + embedder from a resolved process file and enforce store×embedder dim match.
-pub fn resolve_backends(file: LamboFile) -> Result<ResolvedBackends, LamboError> {
-    let store_cfg = file.store;
-    let embedder_cfg = file.embedder;
-    let daemon_cfg = file.daemon;
-    let promotion_policy = file.promotion_policy;
-    let recall_cfg = file.recall;
-    // Fail closed at the file boundary: every file-driven command rejects a
-    // degenerate cadence here, uniformly and BEFORE any store/embedder build
-    // (an embedder build may hash a weight file or dial a credential source,
-    // so we reject the file first; since #31 none loads a model, see below).
+/// The product [`crate::Config`] a resolved process runs with: the
+/// `[daemon]` cadence overrides, the promotion policy and the client-vector
+/// switch applied to the defaults, then validated. Shared by
+/// [`resolve_backends`] and [`resolve_verify_io`], so an offline replay runs
+/// with the knobs a serve would.
+fn process_config(
+    daemon_cfg: &crate::config::DaemonConfig,
+    promotion_policy: Option<crate::canon::PromotionPolicy>,
+    embedder_cfg: &EmbedderConfig,
+) -> Result<crate::Config, LamboError> {
     let mut config = crate::Config::default();
     daemon_cfg.apply_to(&mut config);
     if let Some(policy) = promotion_policy {
@@ -271,6 +270,45 @@ pub fn resolve_backends(file: LamboFile) -> Result<ResolvedBackends, LamboError>
     for warning in config.warnings() {
         tracing::warn!(target: "lambo::config", "{warning}");
     }
+    Ok(config)
+}
+
+/// The embedding contract a resolved embedder stamps and is checked
+/// against. Shared by [`resolve_backends`] and [`resolve_verify_io`].
+fn embedding_contract(embedder_cfg: &EmbedderConfig, embedder: &dyn Embedder) -> EmbeddingContract {
+    // K2 task 3: the candle adapter stamps its served-artifact identity
+    // (source revision + weight sha256 prefix) rather than a raw model string,
+    // so a kind/dim match cannot hide a swap between two quantizations. bge_m3
+    // keeps stamping `llama_model` as today (empty => server default).
+    let model = match embedder_cfg.kind {
+        crate::embed::EmbedderKind::Candle => crate::embed::candle_identity(embedder),
+        // A3: the Gemini adapter stamps its real model id (`gemini-embedding-001`).
+        crate::embed::EmbedderKind::Gemini => crate::embed::gemini_identity(embedder),
+        // #22 PR 5: the weights artifact plus the prompt profile, because
+        // llama-server ignores the request's model name and EG2's text
+        // vectors depend on the task prefixes.
+        crate::embed::EmbedderKind::EmbeddingGemma2 => crate::embed::eg2_identity(embedder),
+        _ => embedder_cfg.llama_model.clone().filter(|s| !s.is_empty()),
+    };
+    EmbeddingContract {
+        kind: embedder_cfg.kind.to_string(),
+        model,
+        dim: embedder.dimensions(),
+    }
+}
+
+/// Build store + embedder from a resolved process file and enforce store×embedder dim match.
+pub fn resolve_backends(file: LamboFile) -> Result<ResolvedBackends, LamboError> {
+    let store_cfg = file.store;
+    let embedder_cfg = file.embedder;
+    let daemon_cfg = file.daemon;
+    let promotion_policy = file.promotion_policy;
+    let recall_cfg = file.recall;
+    // Fail closed at the file boundary: every file-driven command rejects a
+    // degenerate cadence here, uniformly and BEFORE any store/embedder build
+    // (an embedder build may hash a weight file or dial a credential source,
+    // so we reject the file first; since #31 none loads a model, see below).
+    let config = process_config(&daemon_cfg, promotion_policy, &embedder_cfg)?;
     // A store whose vector column carries no width of its own (SQLite's BLOB) reports
     // the operator's `store.vector_dim` pin when one is set, and otherwise **echoes**
     // the configured embedder width — an echo, not a store-side authority, which is
@@ -337,27 +375,7 @@ pub fn resolve_backends(file: LamboFile) -> Result<ResolvedBackends, LamboError>
     }
     check_vector_compatibility(store.vector_dimensions(), embed_dim)?;
 
-    // K2 task 3: the candle adapter stamps its served-artifact identity
-    // (source revision + weight sha256 prefix) rather than a raw model string,
-    // so a kind/dim match cannot hide a swap between two quantizations. bge_m3
-    // keeps stamping `llama_model` as today (empty => server default).
-    let model = match embedder_cfg.kind {
-        crate::embed::EmbedderKind::Candle => crate::embed::candle_identity(embedder.as_ref()),
-        // A3: the Gemini adapter stamps its real model id (`gemini-embedding-001`).
-        crate::embed::EmbedderKind::Gemini => crate::embed::gemini_identity(embedder.as_ref()),
-        // #22 PR 5: the weights artifact plus the prompt profile, because
-        // llama-server ignores the request's model name and EG2's text
-        // vectors depend on the task prefixes.
-        crate::embed::EmbedderKind::EmbeddingGemma2 => {
-            crate::embed::eg2_identity(embedder.as_ref())
-        }
-        _ => embedder_cfg.llama_model.clone().filter(|s| !s.is_empty()),
-    };
-    let embedding = EmbeddingContract {
-        kind: embedder_cfg.kind.to_string(),
-        model,
-        dim: embed_dim,
-    };
+    let embedding = embedding_contract(&embedder_cfg, embedder.as_ref());
 
     Ok(ResolvedBackends {
         store,
@@ -528,6 +546,122 @@ pub fn resolve_split_io(
             #[cfg(feature = "store-sqlite")]
             store: SplitDestination::open(output),
         },
+    })
+}
+
+/// The verifier's explicit inputs (#33 D3, `lambo session verify`): the
+/// immutable source and the split output, both opened read-only, plus the
+/// embedder, product config and `[serve]` table of one `lambo.toml`.
+pub struct VerifyIo {
+    /// The source the split was made from, resolved as classification
+    /// resolves it.
+    pub source: ClassificationSource,
+    /// The split's output database, opened read-only and immutable.
+    pub split: VerifySplitOutput,
+    /// The query embedder, built once here.
+    pub embedder: Box<dyn Embedder>,
+    /// The contract `embedder` stamps; every session the verifier reads must
+    /// be compatible with it.
+    pub embedding: EmbeddingContract,
+    /// The product config a serve of this file runs its sessions with.
+    pub config: crate::Config,
+    /// The file's `[serve]` table: its layer stacks are the "after" side.
+    pub serve: crate::config::ServeConfig,
+}
+
+/// A split output database, opened read-only (`lambo session verify`).
+pub struct VerifySplitOutput {
+    path: std::path::PathBuf,
+    #[cfg(feature = "store-sqlite")]
+    store: crate::store::SqliteStore,
+}
+
+impl VerifySplitOutput {
+    /// The output file.
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
+    /// The read-only store over it.
+    #[cfg(feature = "store-sqlite")]
+    pub(crate) fn store(&self) -> &crate::store::SqliteStore {
+        &self.store
+    }
+
+    #[cfg(feature = "store-sqlite")]
+    fn open(path: &std::path::Path) -> Result<Self, LamboError> {
+        Ok(Self {
+            path: path.to_path_buf(),
+            store: crate::store::SqliteStore::connect_read_only(path)?,
+        })
+    }
+
+    #[cfg(not(feature = "store-sqlite"))]
+    fn open(path: &std::path::Path) -> Result<Self, LamboError> {
+        let _ = path;
+        Err(LamboError::Config(
+            "session verify reads a SQLite split output and requires --features store-sqlite"
+                .into(),
+        ))
+    }
+}
+
+/// One construction site for `lambo session verify` (#33 D3). The source
+/// follows [`resolve_classification_source`]; the split output must be a
+/// completed standalone SQLite file and is opened the same immutable,
+/// read-only way. From `config` it reads `[embedder]`, `[daemon]`, the
+/// promotion policy and `[serve]`. `[store]` is parsed with its environment
+/// overlays, and only its kind is read (it must be SQLite, with no
+/// `[recall]` tier, because the replay measures a SQLite holder); no store
+/// is ever built or opened from it, so no live store is touched. The
+/// embedder is built once, here; its contract is checked against every
+/// session the verifier loads.
+pub fn resolve_verify_io(
+    config: &std::path::Path,
+    database: Option<&std::path::Path>,
+    snapshot: Option<&std::path::Path>,
+    split_database: &std::path::Path,
+) -> Result<VerifyIo, LamboError> {
+    let file = LamboFile::load_resolved(Some(config))?;
+    // The replay measures a SQLite holder (graph-ranked vectors, exact
+    // scan). `[store]` is parsed and its environment overlays applied by
+    // the load above, but the store is never built or opened: only its kind
+    // is read, to refuse a serving configuration the replay does not model.
+    if file.store.kind != crate::store::StoreKind::Sqlite {
+        return Err(LamboError::Config(format!(
+            "session verify measures SQLite-holder behaviour, and this serving config's [store] \
+             kind is {:?}; verify against the SQLite serving config",
+            file.store.kind
+        )));
+    }
+    if file.recall.is_some() {
+        return Err(LamboError::Config(
+            "session verify measures a SQLite holder without a recall tier, and this config has \
+             [recall]: a tier ranks vectors elsewhere, which the replay does not model"
+                .into(),
+        ));
+    }
+    let process = process_config(&file.daemon, file.promotion_policy, &file.embedder)?;
+    file.serve.validate()?;
+    let source = resolve_classification_source(database, snapshot)?;
+    let split = VerifySplitOutput::open(split_database)?;
+    let embedder =
+        build_embedder(file.embedder.clone()).map_err(|e| LamboError::Config(e.to_string()))?;
+    if embedder.dimensions() != file.embedder.dim {
+        return Err(LamboError::Config(format!(
+            "embedder reported dim {} but config requested {}",
+            embedder.dimensions(),
+            file.embedder.dim
+        )));
+    }
+    let embedding = embedding_contract(&file.embedder, embedder.as_ref());
+    Ok(VerifyIo {
+        source,
+        split,
+        embedder,
+        embedding,
+        config: process,
+        serve: file.serve,
     })
 }
 
