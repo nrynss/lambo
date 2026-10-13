@@ -291,6 +291,8 @@ impl Memory {
         parent_of: &ParentOf<'_>,
         citations: &[ConceptCitations],
     ) -> Result<DeriveOutcome, LamboError> {
+        // #129: the full repo_scope check, once, on the call path.
+        crate::graph::resource::validate_repo_scope(parent_of.repo_scope())?;
         // Held across every await below, so a concurrent `close()` either
         // waits for this whole derive or refuses it (T81-1).
         let _writing = self.begin_write().await?;
@@ -301,12 +303,7 @@ impl Memory {
         // so a refused reference leaves nothing behind. The guard is dropped
         // at the end of the statement; the commit re-resolves under the
         // write lock.
-        let pinned = cite::validate_scoped(
-            &self.graph.read(),
-            concepts,
-            citations,
-            parent_of.repo_scope(),
-        )?;
+        let pinned = cite::validate_scoped(&self.graph.read(), concepts, citations, parent_of)?;
         let prompt = hybrid::derive_prompt(concepts.iter().map(|(content, _)| *content));
         let interaction = self.begin_interaction_full(agent, Some(prompt), event_time)?;
 
@@ -640,6 +637,8 @@ impl Memory {
         foreign: &dyn ForeignScopes,
         deliver_to: Option<&SessionId>,
     ) -> Result<Submitted, LamboError> {
+        // #129: the full repo_scope check, once, on the call path.
+        crate::graph::resource::validate_repo_scope(parent_of.repo_scope())?;
         let _writing = self.begin_write().await?;
         // The pre-pass, on the call path. The background path re-runs its own
         // planning validation; this one exists so the common errors do not have
@@ -680,7 +679,7 @@ impl Memory {
             }
             // #36 PR 4: the citations, against the same graph read. The
             // background commit re-resolves them (`cite::recheck`).
-            cite::validate_scoped(&g, concepts, citations, parent_of.repo_scope())
+            cite::validate_scoped(&g, concepts, citations, parent_of)
         };
         // This session's guard is gone: only now may another session's be
         // read for the foreign-scope label.
@@ -776,6 +775,8 @@ impl Memory {
         foreign: &dyn ForeignScopes,
         deliver_to: Option<&SessionId>,
     ) -> Result<Submitted, LamboError> {
+        // #129: the full repo_scope check, once, on the call path.
+        crate::graph::resource::validate_repo_scope(action.repo_scope)?;
         let _writing = self.begin_write().await?;
         // The guard is a temporary of this statement only; `foreign` reads
         // another session in the next one, after it is gone.

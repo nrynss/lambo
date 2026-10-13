@@ -36,7 +36,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::graph::canonical::{canonicalize, CanonicalizeResult};
-use crate::graph::resource::{canonicalize_resource, scoped_resource_key};
+use crate::graph::resource::{canonicalize_resource, infer_identity, Inferred};
 use crate::graph::Graph;
 use crate::surface::resolve::{
     is_hyphenated_id, is_short_id_shaped, parse_full_id, short_id_matches,
@@ -391,7 +391,7 @@ pub(crate) fn validate_against(
     action: &Action<'_>,
     against: &[String],
 ) -> Result<Vec<crate::types::PinnedReference>, LamboError> {
-    crate::graph::resource::validate_repo_scope(action.repo_scope)?;
+    crate::graph::resource::require_repo_scope(action.repo_scope)?;
     // #129: under the action's repo scope, path text resolves to the scoped
     // key, as its `depends_on` does.
     let pinned = crate::graph::cite::pin_scoped(
@@ -400,6 +400,7 @@ pub(crate) fn validate_against(
         &crate::graph::cite::ACTION_AGAINST,
         &[(action.action, against)],
         action.repo_scope,
+        &|content, kind| canonicalize_resource(content, graph, kind, action.repo_scope),
     )?;
     if !pinned.is_empty() {
         refuse_depended_and_contradicted(graph, action, &[], &pinned)?;
@@ -518,7 +519,7 @@ struct Plan {
 /// not-yet-created nodes — so a "cheap validation" that skipped it would not be
 /// the same check.
 fn plan(graph: &Graph, action: &Action, expected: &[Option<NodeId>]) -> Result<Plan, LamboError> {
-    crate::graph::resource::validate_repo_scope(action.repo_scope)?;
+    crate::graph::resource::require_repo_scope(action.repo_scope)?;
     // Step 2 — resolve + plan concepts (read-only; nothing touches the graph).
     let mut resolved: HashMap<String, NodeId> = HashMap::new();
     let mut planned: Vec<PlannedConcept> = Vec::new();
@@ -740,13 +741,24 @@ fn resolve_dependency(
     let refuse = |kind| {
         crate::surface::resolve::refusal(ReferenceField::ActionDependsOn, Some(action), entry, kind)
     };
-    // #129: under a repo scope a path-like entry is a Resource, as the
-    // action's `produces` and `modifies` are, so depending on a file and
-    // producing it name the same scoped concept.
-    let text_kind = if scoped_resource_key(entry, repo_scope).is_some() {
-        ConceptType::Resource
-    } else {
-        ConceptType::Entity
+    // #129 (review M1): under a repo scope, entry text is inferred. An
+    // existing (or, earlier in this action, planned) scoped path is that
+    // Resource, so producing a file and depending on it name one concept; an
+    // existing non-Resource concept under the legacy key (a Logic
+    // `config.toml`, an Entity `TCP/IP`) is that concept, not a duplicate;
+    // both is ambiguous; with neither, a new scoped path only if the entry
+    // reads as one, else new legacy text as before.
+    let text_kind = match repo_scope {
+        None => ConceptType::Entity,
+        Some(scope) => match infer_identity(entry, graph, scope, |k| resolved.get(k).copied())? {
+            Inferred::Scoped(_) => ConceptType::Resource,
+            Inferred::Legacy => ConceptType::Entity,
+            Inferred::Ambiguous(ids) => {
+                return Err(refuse(ReferenceRefusalKind::Ambiguous {
+                    candidates: crate::surface::resolve::candidates(graph, &ids),
+                }))
+            }
+        },
     };
     let pin = if is_hyphenated_id(entry) {
         match parse_full_id(entry).map(|id| (id, graph.node(id))) {

@@ -314,7 +314,7 @@ impl JobPayload {
         else {
             return Self::from_unscoped_intent(p);
         };
-        crate::graph::resource::validate_repo_scope(Some(&repo_scope))?;
+        crate::graph::resource::require_repo_scope(Some(&repo_scope))?;
         let mut job = match *payload {
             inner @ (WriteIntentPayload::Derive { .. }
             | WriteIntentPayload::DeriveCited { .. }

@@ -186,11 +186,33 @@ pub(crate) fn resolve_reference_scoped(
         }
     }
     // The key without the synonym lookup (see the module docs).
-    let key = crate::graph::resource::scoped_resource_key(reference, repo_scope)
-        .unwrap_or_else(|| canonical_key(reference, |_| None));
-    if !key.is_empty() {
-        for &node in g.concepts_by_key(&key) {
-            push(node, Leg::Key);
+    let legacy = canonical_key(reference, |_| None);
+    match crate::graph::resource::scoped_resource_key(reference, repo_scope) {
+        // #129 (review M1): under a repo scope, path text names the scoped
+        // path, and also an existing non-Resource concept under its legacy
+        // key (a Logic `config.toml`, an Entity `TCP/IP`), never an unscoped
+        // path Resource (a hub several repositories may have joined). Both
+        // at once is ambiguous, below.
+        Some(scoped) => {
+            for &node in g.concepts_by_key(&scoped) {
+                push(node, Leg::Key);
+            }
+            if !legacy.is_empty() {
+                for &node in g.concepts_by_key(&legacy) {
+                    if matches!(g.node(node), Some(Node::Concept(c))
+                        if c.concept_type != crate::types::ConceptType::Resource)
+                    {
+                        push(node, Leg::Key);
+                    }
+                }
+            }
+        }
+        None => {
+            if !legacy.is_empty() {
+                for &node in g.concepts_by_key(&legacy) {
+                    push(node, Leg::Key);
+                }
+            }
         }
     }
     match found.len() {

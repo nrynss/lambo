@@ -263,12 +263,15 @@ fn repo_scoped_replay_refuses_invalid_nested_or_image_payloads() {
         repo_scope: scope.into(),
         payload: Box::new(payload),
     };
-    for scope in ["", "  ", "a\0b", "a\u{202e}b"] {
+    // Replay checks only that a stored scope is nonempty (review L4): the
+    // full check ran on the call path of the build that wrote the row.
+    for scope in ["", "  "] {
         assert!(
             JobPayload::from_intent_payload(wrap(scope, bare.clone())).is_err(),
             "{scope:?}"
         );
     }
+    assert!(JobPayload::from_intent_payload(wrap("a b", bare.clone())).is_ok());
     let nested = wrap("outer", wrap("inner", bare.clone()));
     assert!(JobPayload::from_intent_payload(nested).is_err());
     // An image derive is never scoped: a stored one is refused, not applied

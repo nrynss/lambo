@@ -195,7 +195,7 @@ use crate::embed::Embedder;
 use crate::graph::canonical::CanonicalizeResult;
 use crate::graph::cite::PinnedCitations;
 use crate::graph::derive::{DeriveOutcome, ParentOf, COOCCURRENCE_WEIGHT, HIERARCHICAL_WEIGHT};
-use crate::graph::resource::{canonicalize_resource, RESOURCE_KEY_PREFIX};
+use crate::graph::resource::{canonicalize_keyed, RESOURCE_KEY_PREFIX};
 use crate::graph::Graph;
 use crate::store::vector_source::VectorCandidates;
 use crate::store::GraphStore;
@@ -771,7 +771,7 @@ pub fn validate_limits(
     parent_of: &ParentOf<'_>,
     semantic_match_threshold: f64,
 ) -> Result<(), LamboError> {
-    crate::graph::resource::validate_repo_scope(parent_of.repo_scope())?;
+    crate::graph::resource::require_repo_scope(parent_of.repo_scope())?;
     if !semantic_match_threshold.is_finite() || !(0.0..=1.0).contains(&semantic_match_threshold) {
         return Err(LamboError::Config(format!(
             "semantic_match_threshold must be finite and in [0, 1], got {semantic_match_threshold}"
@@ -843,7 +843,7 @@ fn validate_pairs(
     parent_of: &ParentOf<'_>,
     concepts: &[(&str, ConceptType)],
 ) -> Result<(), LamboError> {
-    crate::graph::resource::validate_repo_scope(parent_of.repo_scope())?;
+    crate::graph::resource::require_repo_scope(parent_of.repo_scope())?;
     for &(parent, child) in parent_of.pairs() {
         if parent == child {
             return Err(LamboError::Store(StoreError::Invariant(format!(
@@ -851,20 +851,10 @@ fn validate_pairs(
                  Hierarchical self-loop is a cycle (spec §5.7)"
             ))));
         }
-        let pk = match canonicalize_resource(
-            parent,
-            graph,
-            parent_of.end_type(parent, concepts),
-            parent_of.repo_scope(),
-        )? {
+        let pk = match parent_of.canonicalize_end(parent, concepts, graph)? {
             CanonicalizeResult::Matched { key, .. } | CanonicalizeResult::Unmatched { key } => key,
         };
-        let ck = match canonicalize_resource(
-            child,
-            graph,
-            parent_of.end_type(child, concepts),
-            parent_of.repo_scope(),
-        )? {
+        let ck = match parent_of.canonicalize_end(child, concepts, graph)? {
             CanonicalizeResult::Matched { key, .. } | CanonicalizeResult::Unmatched { key } => key,
         };
         reject_empty_key(parent, &pk)?;
@@ -901,7 +891,7 @@ fn plan_inputs<'a>(
             continue;
         }
         let (key, matched) =
-            match canonicalize_resource(content, g, concept_type, parent_of.repo_scope())? {
+            match parent_of.canonicalize_concept(content, concept_type, concepts, g)? {
                 CanonicalizeResult::Matched { key, node } => (key, Some(node)),
                 CanonicalizeResult::Unmatched { key } => (key, None),
             };
@@ -919,12 +909,9 @@ fn plan_inputs<'a>(
     let mut parent_ends: PlannedEnds<'a> = Vec::new();
     for &(parent, child) in parent_of.pairs() {
         for content in [parent, child] {
-            if let CanonicalizeResult::Unmatched { key } = canonicalize_resource(
-                content,
-                g,
-                parent_of.end_type(content, concepts),
-                parent_of.repo_scope(),
-            )? && !item_keys.contains(key.as_str())
+            if let CanonicalizeResult::Unmatched { key } =
+                parent_of.canonicalize_end(content, concepts, g)?
+                && !item_keys.contains(key.as_str())
                 && end_keys.insert(key.clone())
             {
                 parent_ends.push((content, key));
@@ -1492,7 +1479,7 @@ async fn derive_planned(
                 // item's canonical match is what it was at plan, so the only newly
                 // Matched node here is one written earlier in THIS call.
                 if let CanonicalizeResult::Matched { node, .. } =
-                    canonicalize_resource(content, g, *concept_type, parent_of.repo_scope())?
+                    parent_of.canonicalize_concept(content, *concept_type, concepts, g)?
                     && written.contains(&node)
                 {
                     cited.by_content.insert((*content).to_string(), node);
@@ -1714,10 +1701,11 @@ async fn derive_planned(
                  Hierarchical self-loop is a cycle (spec §5.7)"
                     ))));
                 }
+                let (parent_type, parent_key) = parent_of.identity(parent, None, concepts, g)?;
                 let parent_node = self::resolve_concept(
                     g,
                     parent,
-                    parent_of.end_type(parent, concepts),
+                    parent_type,
                     interaction,
                     agent,
                     interaction_created_at,
@@ -1726,12 +1714,13 @@ async fn derive_planned(
                     &mut outcome,
                     &call_by_key,
                     &parent_vectors,
-                    parent_of.repo_scope(),
+                    parent_key,
                 )?;
+                let (child_type, child_key) = parent_of.identity(child, None, concepts, g)?;
                 let child_node = self::resolve_concept(
                     g,
                     child,
-                    parent_of.end_type(child, concepts),
+                    child_type,
                     interaction,
                     agent,
                     interaction_created_at,
@@ -1740,7 +1729,7 @@ async fn derive_planned(
                     &mut outcome,
                     &call_by_key,
                     &parent_vectors,
-                    parent_of.repo_scope(),
+                    child_key,
                 )?;
                 if parent_node == child_node {
                     return Err(LamboError::Store(StoreError::Invariant(format!(
@@ -2358,9 +2347,9 @@ fn resolve_concept(
     outcome: &mut DeriveOutcome,
     call_by_key: &HashMap<String, NodeId>,
     parent_vectors: &HashMap<String, Vec<f32>>,
-    repo_scope: Option<&str>,
+    scoped_key: Option<String>,
 ) -> Result<NodeId, LamboError> {
-    match canonicalize_resource(content, graph, concept_type, repo_scope)? {
+    match canonicalize_keyed(content, graph, scoped_key)? {
         CanonicalizeResult::Unmatched { key } => {
             // C4: `canonicalize` returns Unmatched for a key whose only holder
             // is an `Observation` (GRAPH-1). When that holder is a concept

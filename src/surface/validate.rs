@@ -459,7 +459,7 @@ pub(crate) const NOT_FILES: &[&str] = &[
 
 /// `entry` without a trailing line reference: `:12`, `:12:5`, `#L12`,
 /// `#L12-L20` (or `#L12-20`).
-fn strip_line_reference(entry: &str) -> &str {
+pub(crate) fn strip_line_reference(entry: &str) -> &str {
     let digits = |t: &str| !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit());
     if let Some((head, tail)) = entry.rsplit_once("#L") {
         let ok = match tail.split_once('-') {

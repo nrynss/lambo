@@ -79,12 +79,7 @@ pub(crate) fn reject_parent_of_cycles(
     }
     let resolve = |content: &str| -> Result<(Option<NodeId>, String), LamboError> {
         Ok(
-            match crate::graph::resource::canonicalize_resource(
-                content,
-                graph,
-                parent_of.end_type(content, concepts),
-                parent_of.repo_scope(),
-            )? {
+            match parent_of.canonicalize_end(content, concepts, graph)? {
                 CanonicalizeResult::Matched { node, key } => (Some(node), key),
                 CanonicalizeResult::Unmatched { key } => (None, key),
             },

@@ -36,6 +36,10 @@ pub enum ReferenceField {
     /// that matches a repository-scoped path and another concept is refused
     /// as ambiguous rather than resolved to one of them.
     RetractTarget,
+    /// A `parent_of` end the call does not declare (#129): under a repo
+    /// scope, text that names both a scoped path and a non-Resource concept
+    /// is refused as ambiguous.
+    ParentOf,
 }
 
 impl ReferenceField {
@@ -46,6 +50,7 @@ impl ReferenceField {
             ReferenceField::ActionDependsOn => "depends_on",
             ReferenceField::Against | ReferenceField::ActionAgainst => "against",
             ReferenceField::RetractTarget => "target",
+            ReferenceField::ParentOf => "parent_of",
         }
     }
 
@@ -196,7 +201,11 @@ impl fmt::Display for ReferenceRefusal {
         let r = &self.reference;
         // What the caller does with a reference of this field, for the fix
         // each refusal suggests (#19(b) review L6).
-        let verb = if self.field.is_against() || self.field == ReferenceField::RetractTarget {
+        let verb = if self.field.is_against()
+            || matches!(
+                self.field,
+                ReferenceField::RetractTarget | ReferenceField::ParentOf
+            ) {
             "name"
         } else {
             "cite"
