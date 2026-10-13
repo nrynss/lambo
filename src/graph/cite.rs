@@ -50,11 +50,9 @@
 //!   and `X -> Q`, the #19(a) fixture's pair): each asserts the other is
 //!   wrong. `Contradicts` is outside §5.7's `Causal`/`Dependency` family,
 //!   and no dependence or recall walk follows it, so a cycle of
-//!   contradictions cannot loop anything. (GC connectivity does count it:
-//!   the orphan check and reachability from the interaction chain treat it
-//!   like any edge until #19(c) owner decision 1, option C, lands; a cycle
-//!   there only keeps its members connected.) Self-contradiction is still
-//!   refused.
+//!   contradictions cannot loop anything. GC connectivity does not follow
+//!   it either (#19(c) owner decision 1, option C). Self-contradiction is
+//!   still refused.
 //! * **Not the same target as a citation.** One concept (or action) may not
 //!   both cite and contradict the same concept in one call
 //!   ([`ReferenceRefusalKind::DependsOnAndAgainst`], review M2); separate
@@ -62,7 +60,9 @@
 //!
 //! The edge's direction comes from the write, not from node age: the
 //! concept that declares the contradiction is `newer`, whatever the two
-//! concepts' creation times, and the contradiction is dated by that write.
+//! concepts' creation times, and the contradiction is dated by that
+//! write's about-time: its `event_time` if one was given, otherwise its
+//! write time. Re-sending it reinforces the edge without re-dating it.
 //! * **A similarity merge keeps it.** A hybrid similarity merge writes the
 //!   new concept as its own node tied to its neighbour by a `Semantic`
 //!   edge. For a citation of that neighbour the tie already says it, so the

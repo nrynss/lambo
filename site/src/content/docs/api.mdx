@@ -74,8 +74,11 @@ The accessors `session`, `agent`, `config`, `embedding_contract`, `graph`, `inde
 
 `EdgeType::Contradicts` is a directed concept-to-concept relation:
 `writer -> target`: from the concept or action that declares the
-contradiction to the existing concept it names. The direction and date come from
-the write that declares it, not from either concept's age. Its serialized and stored name is
+contradiction to the existing concept it names. The direction comes from
+the write that declares it, not from either concept's age, and the edge is
+dated by that write's about-time: its `event_time` if one was given,
+otherwise its write time. Sending the same contradiction again reinforces
+the edge and does not re-date it. Its serialized and stored name is
 `Contradicts`, following the other edge types. Graph snapshots and store
 mutation batches can carry it; existing database schemas need no migration.
 Older binaries cannot decode a store or snapshot containing the new variant.
@@ -88,14 +91,13 @@ bonus), or protect a Resource from the GC score cut, and its writer does not joi
 conflict agent set. A fresh contradiction does count as a recent write in the
 high-risk check. Its weight does not decay.
 
-GC's connectivity rules are unchanged and count it like any other edge: a
-concept with a contradiction is not an orphan, and a contradiction can keep a
-concept reachable from the interaction chain. Because the edge never decays,
-it keeps that connection until either endpoint is collected for another
-reason.
+GC does not count it as connectivity (#19(c) owner decision 1, option C): a
+concept whose only edges are contradictions is an orphan, and a contradiction
+keeps nothing reachable from the interaction chain. The one exception is a
+concept that contradicts a Venerable or Canonical concept: GC protects it
+while the target keeps that status (see *Contradiction warnings* below).
 Agents write it through `against` on derive and record_action (see the methods
-above and the MCP reference). Recall contradiction warnings, the GC rule
-change and supersession are separate follow-ups (#19(c), #20).
+above and the MCP reference). Supersession is a separate follow-up (#20).
 
 ## Settings
 

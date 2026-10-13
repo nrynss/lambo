@@ -306,14 +306,16 @@
   an action, may carry `against`: existing concepts it says are wrong (at
   most 8 per concept or action, and 32 per derive call, counted apart from
   `depends_on`). Each is written as a `Contradicts` edge from the concept
-  (or action) that declares it to the one it names: the direction and the
-  date come from that write, not from which concept is older. It adds no
+  (or action) that declares it to the one it names: the direction comes
+  from that write, not from which concept is older, and the date is that
+  write's about-time (its `event_time` if one was given, otherwise its
+  write time; re-sending does not re-date it). It adds no
   dependent or blast radius, changes no score or promotion stage, and makes
   no conflict line (#19(c) owner decision 2, applied here: a
   contradiction's writer does not join the conflict agent set). It is
   still a fresh write to its target, so a load-bearing target gets the
-  short-lived high-risk alert (decision 3), and garbage collection counts
-  it as connectivity until #19(c) (decision 1). References resolve exactly
+  short-lived high-risk alert (decision 3). Garbage collection does not
+  count it as connectivity (#19(c), decision 1). References resolve exactly
   like citations, through the same resolver, and are refused the same
   typed ways before the ack (missing, ambiguous, an interaction id, the
   concept or action itself, in another scope, including a scoped write's
@@ -330,8 +332,8 @@
   contradiction(s) recorded`. The CLI takes `--against <REF>` on `lambo
   derive` (first concept) and `lambo record-action`; the library,
   `ConceptCitations::against`, `Memory::record_action_against_async_as` and
-  `record_action_against_embedded_as`. Recall does not yet annotate a
-  contradicted concept (#19 part c).
+  `record_action_against_embedded_as`. Recall annotates a contradicted
+  Canonical or Venerable concept (#19 part c, below).
 - **One strict resolver for references in writes** (`crate::surface::resolve`,
   crate-internal): no substring leg, never creates. `lambo_inspect`'s
   short-id leg now shares its prefix matcher. #19(b)'s `against` and
@@ -386,8 +388,8 @@
   are byte-exact and case-sensitive. Parent-component stars are refused.
 - `EdgeType::Contradicts` persistence and synthetic exclusion checks across
   the store adapters (#19(a)). It does not decay. The write-tool field is
-  `against` (above); contradiction warnings and evidence-driven
-  supersession follow separately.
+  `against` (above), and recall warns about contradictions (#19(c),
+  above). Evidence-driven supersession follows separately (#20).
 - A live check of the #36 dependents case on Postgres and Cockroach, with
   MemoryStore parity. It is manual by the owner's decision and is not part
   of CI: run `LAMBO_POSTGRES_DSN=<dsn> cargo test --no-default-features --features store-postgres --lib store::pg::dependents_live -- --ignored` or, for
