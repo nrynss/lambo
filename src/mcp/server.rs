@@ -292,7 +292,9 @@ impl LamboServer {
                        concept rests on a ruling or decision already in memory, cite it by id \
                        (the 8 hex characters recall shows) in that concept's depends_on: it \
                        must already exist and match exactly one concept, or the whole call is \
-                       refused. \
+                       refused. When a concept says an existing one is wrong, name that one \
+                       the same way in the concept's against: it records the contradiction, \
+                       dated by this write, and adds no dependent, score or promotion. \
                        created_at is stamped server-side. event_time is optional RFC3339 \
                        historical about-time, such as a commit or document date; omit it for \
                        a live fact, which is about now. Returns as soon \
@@ -321,7 +323,10 @@ impl LamboServer {
                        (e.g. 'merged PR #52'), not a narrative. A fact or decision that later \
                        work should recall is a concept for lambo_derive. When the action relied \
                        on a ruling or decision from memory, cite it by id (the 8 hex characters \
-                       recall shows) in depends_on. created_at is stamped server-side. event_time is optional \
+                       recall shows) in depends_on. When the action showed a concept in \
+                       memory to be wrong, name it the same way in against (dated by this \
+                       write; never the action itself). created_at is \
+                       stamped server-side. event_time is optional \
                        RFC3339 historical about-time, such as a commit or document date; omit \
                        it for a live fact, which is about now. \
                        Returns as soon as the input is validated and ordered — the write is \
@@ -490,7 +495,8 @@ impl ServerHandler for LamboServer {
                  paragraph, and activity goes to lambo_record_action. When a write rests \
                  on a ruling or decision recall showed you, cite it by its id (the 8 hex \
                  characters recall shows) in depends_on: lambo_record_action's, or the \
-                 concept's on lambo_derive. Every tool takes \
+                 concept's on lambo_derive. When a write shows an existing concept to be \
+                 wrong, name it the same way in against. Every tool takes \
                  your agent_id: use one stable id for as long as you run, never one per \
                  call, task or topic: your model or client id (<your-model-id>), with a \
                  stable instance suffix if several of you run at once. It is \

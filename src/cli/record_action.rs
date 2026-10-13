@@ -3,6 +3,7 @@
 use super::caps::{check_size_cli, require_nonempty, CliError};
 use super::{close_writer, open_writer};
 use crate::graph::action::Action;
+use crate::graph::cite::MAX_AGAINST_PER_CONCEPT;
 use crate::resolve::ResolvedBackends;
 use crate::surface::validate::{check_action_targets, check_no_image_suffix};
 
@@ -14,6 +15,8 @@ pub struct Args {
     pub produces: Vec<String>,
     pub modifies: Vec<String>,
     pub depends_on: Vec<String>,
+    /// `--against` (#19(b)): existing concepts the action contradicts.
+    pub against: Vec<String>,
 }
 
 /// Record an action the agent took.
@@ -39,6 +42,18 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
         check_size_cli("produces / modifies / depends_on entry", s)?;
     }
 
+    // #19(b): shape-checked here; whether each resolves is the core's
+    // question.
+    if args.against.len() > MAX_AGAINST_PER_CONCEPT {
+        return Err(CliError::Usage(format!(
+            "against may be given at most {MAX_AGAINST_PER_CONCEPT} times"
+        )));
+    }
+    for r in &args.against {
+        require_nonempty("against", r)?;
+        check_size_cli("against", r)?;
+    }
+
     let mem = open_writer(backends, &args.session, &args.agent).await?;
     let produces: Vec<&str> = args.produces.iter().map(String::as_str).collect();
     let modifies: Vec<&str> = args.modifies.iter().map(String::as_str).collect();
@@ -53,7 +68,10 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
     // The embedding variant, not the sync one: a CLI-recorded action that
     // stored no vector was findable by keyword only, exactly like the MCP path
     // before 2026-09-01.
-    let out = match mem.record_action_embedded_as(mem.agent(), &action).await {
+    let out = match mem
+        .record_action_against_embedded_as(mem.agent(), &action, &args.against)
+        .await
+    {
         Ok(outcome) => Ok(format!(
             "recorded action '{}': {} concept(s) created ({} embedded), {} edge(s) added",
             args.action,

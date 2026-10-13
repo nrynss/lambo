@@ -250,13 +250,20 @@ impl EdgeWriters<'_> {
 /// attributed to agent A. Both edges then read as agent A's, the agent set
 /// collapses to one, and the conflict silently does not fire.
 ///
-/// `None` only for a source node missing from the graph (defensive;
-/// `assert_invariants` guarantees every edge endpoint exists).
+/// `None` for a `Contradicts` edge, whose writer never joins the agent set
+/// (#19(c) owner decision 2, option B, applied with #19(b), the first
+/// product path that writes one): conflict lines stay about concurrent
+/// edits, and disagreement is #19's contradiction annotation. Also `None`
+/// for a source node missing from the graph (defensive; `assert_invariants`
+/// guarantees every edge endpoint exists).
 fn edge_writers<'a>(
     graph: &'a Graph,
     edge: &Edge,
     timeline: &'a WriterTimeline,
 ) -> Option<EdgeWriters<'a>> {
+    if edge.edge_type == EdgeType::Contradicts {
+        return None;
+    }
     match graph.node(edge.source) {
         Some(Node::Interaction(i)) => Some(EdgeWriters::Certain(i.agent_id.clone())),
         Some(Node::Concept(c)) => {
@@ -617,14 +624,14 @@ mod tests {
         );
     }
 
-    /// #19(a) pins the current behaviour, which #19(c) must revisit
-    /// deliberately: a `Contradicts` edge's writer joins the conflict agent
-    /// set like any incident edge's, so agent-b contradicting agent-a's node
-    /// turns agent-a's own fresh `Dependency` write into a two-agent
-    /// conflict. The contradiction is never the qualifying write itself
-    /// (only `Causal`/`Dependency` are): the named writer stays agent-a.
+    /// #19(c) owner decision 2, option B (applied with #19(b)): a
+    /// `Contradicts` edge's writer does not join the conflict agent set, so
+    /// agent-b contradicting agent-a's node leaves agent-a's own fresh
+    /// `Dependency` write a one-agent write, not a conflict. A second agent's
+    /// real `Dependency` write still makes one. (#19(a) pinned the opposite
+    /// as `a_contradiction_writer_joins_the_conflict_agent_set`.)
     #[test]
-    fn a_contradiction_writer_joins_the_conflict_agent_set() {
+    fn a_contradiction_writer_does_not_join_the_conflict_agent_set() {
         let now = t(3600);
         let mut g = Graph::new(sid());
         let i1 = interaction(1, None, "agent-a", 3600 - 60);
@@ -652,14 +659,20 @@ mod tests {
         })
         .unwrap();
         assert!(g.assert_invariants().is_ok());
+        assert!(
+            conflict_at(&g, c1_id, CONFLICT_RECENCY_WINDOW, now).is_none(),
+            "a contradiction's writer is not a second agent"
+        );
+        assert!(detect(&g, CONFLICT_RECENCY_WINDOW, now).is_empty());
+
+        // Control: agent-b's own Dependency write on the node does conflict.
+        g.upsert_edge(dep_edge(3, c3_id, c1_id, 3600 - 10)).unwrap();
         let hit = conflict_at(&g, c1_id, CONFLICT_RECENCY_WINDOW, now)
-            .expect("the contradiction's writer makes a second agent");
+            .expect("a second agent's Dependency write is a conflict");
         assert_eq!(
             hit.agents,
             vec![AgentId::from("agent-a"), AgentId::from("agent-b")]
         );
-        assert_eq!(hit.writer, AgentId::from("agent-a"));
-        assert_eq!(hit.seconds_ago, 25);
     }
 
     #[test]

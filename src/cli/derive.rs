@@ -2,7 +2,7 @@
 
 use super::caps::{check_size_cli, require_nonempty, CliError, ConceptKind};
 use super::{close_writer, open_writer};
-use crate::graph::cite::MAX_REFERENCES_PER_CONCEPT;
+use crate::graph::cite::{MAX_AGAINST_PER_CONCEPT, MAX_REFERENCES_PER_CONCEPT};
 use crate::graph::derive::ParentOf;
 use crate::graph::hybrid;
 use crate::resolve::ResolvedBackends;
@@ -20,6 +20,9 @@ pub struct Args {
     /// `--depends-on` (#36 PR 4): existing concepts the first concept rests
     /// on.
     pub depends_on: Vec<String>,
+    /// `--against` (#19(b)): existing concepts the first concept
+    /// contradicts.
+    pub against: Vec<String>,
 }
 
 /// `--parent-of CHILD:PARENT` → `(parent, child)` for [`ParentOf::from_pairs`].
@@ -97,12 +100,24 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
         require_nonempty("depends-on", r)?;
         check_size_cli("depends-on", r)?;
     }
-    let citations: Vec<ConceptCitations> = if args.depends_on.is_empty() {
+    // #19(b): the first concept's contradictions, the same way.
+    if args.against.len() > MAX_AGAINST_PER_CONCEPT {
+        return Err(CliError::Usage(format!(
+            "against may be given at most {MAX_AGAINST_PER_CONCEPT} times"
+        )));
+    }
+    for r in &args.against {
+        require_nonempty("against", r)?;
+        check_size_cli("against", r)?;
+    }
+    let citations: Vec<ConceptCitations> = if args.depends_on.is_empty() && args.against.is_empty()
+    {
         Vec::new()
     } else {
         vec![ConceptCitations {
             content: args.content.clone(),
             depends_on: args.depends_on.clone(),
+            against: args.against.clone(),
         }]
     };
 
@@ -137,8 +152,15 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
             );
             // #36 PR 4: said only when the call cited something, so a
             // derive without citations prints exactly what it printed.
-            if !citations.is_empty() {
+            if !args.depends_on.is_empty() {
                 summary.push_str(&format!("; {} citation(s) recorded", outcome.cited));
+            }
+            // #19(b): likewise for contradictions.
+            if !args.against.is_empty() {
+                summary.push_str(&format!(
+                    "; {} contradiction(s) recorded",
+                    outcome.contradicted
+                ));
             }
             Ok(summary)
         }

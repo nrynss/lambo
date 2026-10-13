@@ -526,6 +526,7 @@ async fn a_scoped_write_draws_the_layers_rate() {
                 content: GENERAL_RULING.into(),
                 concept_type: crate::mcp::server::WireConceptType::Logic,
                 depends_on: None,
+                against: None,
             }],
             scope: Some(GENERAL.into()),
             ..Default::default()

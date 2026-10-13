@@ -118,6 +118,13 @@ pub(crate) fn render_neighbourhood_parts(
         let mut next = Vec::new();
         let mut rows: Vec<serde_json::Value> = Vec::new();
         let mut by_type: HashMap<EdgeType, Vec<String>> = HashMap::new();
+        // #19(b) review L1: the neighbours this hop listed, by the frontier
+        // node they were reached from. A second edge between the same pair
+        // (another kind, or the other direction: `depends_on` and `against`
+        // from separate writes, or a mutual contradiction) is listed too,
+        // without spending budget or expanding the neighbour again, so no
+        // edge kind hides behind the first one found.
+        let mut listed_from: HashMap<NodeId, NodeId> = HashMap::new();
         for &node in &frontier {
             for edge in g.incident_edges(node) {
                 let other = if edge.source == node {
@@ -125,6 +132,21 @@ pub(crate) fn render_neighbourhood_parts(
                 } else {
                     edge.source
                 };
+                let dir = if edge.source == node { "->" } else { "<-" };
+                if listed_from.get(&other) == Some(&node) {
+                    by_type
+                        .entry(edge.edge_type)
+                        .or_default()
+                        .push(format!("{dir} {}", label(other)));
+                    rows.push(json!({
+                        "node_id": other.0.to_string(),
+                        "label": label(other),
+                        "edge_type": format!("{:?}", edge.edge_type),
+                        "direction": dir,
+                        "weight": edge.weight,
+                    }));
+                    continue;
+                }
                 // Budget first, `seen` second: marking a node seen and *then*
                 // discovering the budget is spent permanently excludes a
                 // neighbour that was never rendered.
@@ -135,7 +157,7 @@ pub(crate) fn render_neighbourhood_parts(
                     continue;
                 }
                 budget -= 1;
-                let dir = if edge.source == node { "->" } else { "<-" };
+                listed_from.insert(other, node);
                 by_type
                     .entry(edge.edge_type)
                     .or_default()
@@ -279,6 +301,58 @@ mod tests {
         }
         let golden = std::fs::read_to_string(path).expect("golden present");
         assert_eq!(text, golden, "inspect text drifted from {path}");
+    }
+
+    /// #19(b) review L1: a concept that both depends on and contradicts
+    /// another (from separate writes, since one call may not do both) shows
+    /// both edges in inspect, from either end, and the neighbour is counted
+    /// once against the budget.
+    #[test]
+    fn inspect_lists_every_edge_between_one_pair() {
+        use crate::graph::cite::{validate, ConceptCitations};
+        use crate::graph::derive::{derive_cited, ParentOf};
+        use crate::test_util::citations::{concept, graph};
+        use crate::types::{AgentId, ConceptType};
+        let (mut g, i) = graph("inspect-pair");
+        let older = concept(&mut g, i, "brand x runs true to size", ConceptType::Logic);
+        let newer = "brand x runs a size small";
+        for (depends_on, against) in [(true, false), (false, true)] {
+            let refs = vec!["brand x runs true to size".to_string()];
+            let call = [ConceptCitations {
+                content: newer.into(),
+                depends_on: if depends_on { refs.clone() } else { vec![] },
+                against: if against { refs } else { vec![] },
+            }];
+            let concepts = [(newer, ConceptType::Logic)];
+            let pinned = validate(&g, &concepts, &call).unwrap();
+            derive_cited(
+                &mut g,
+                i,
+                &AgentId::from("agent-a"),
+                &concepts,
+                &ParentOf::none(),
+                10,
+                &pinned,
+            )
+            .unwrap();
+        }
+        let (text, json) = render_neighbourhood(&g, older, 1);
+        for kind in ["Contradicts", "Dependency"] {
+            assert!(
+                text.contains(&format!("  {kind}\n    <- ")),
+                "{kind} is listed: {text}"
+            );
+        }
+        let rows = json["levels"][0]["neighbours"].as_array().unwrap();
+        let kinds: Vec<&str> = rows
+            .iter()
+            .filter(|r| r["label"].as_str().unwrap_or("").contains("size small"))
+            .map(|r| r["edge_type"].as_str().unwrap())
+            .collect();
+        assert!(
+            kinds.contains(&"Contradicts") && kinds.contains(&"Dependency"),
+            "{kinds:?}"
+        );
     }
 
     #[test]
