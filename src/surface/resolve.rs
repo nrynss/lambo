@@ -264,6 +264,16 @@ pub(crate) trait ForeignScopes: Sync {
     /// The first scope, in tier order, in which `reference` resolves to
     /// exactly one concept.
     fn holder_of(&self, reference: &str) -> Option<String>;
+
+    /// The scope holding `reference` among those a `record_action`
+    /// `depends_on` text entry must not be minted past (#33 PR 4 review
+    /// L1): for a write scoped to a layer, the caller's own session. A text
+    /// entry naming nothing in the target but a concept there is refused
+    /// as cross-session rather than created in the target. `None` by
+    /// default: an unscoped write keeps 0.5.0's text rule.
+    fn text_holder_of(&self, _reference: &str) -> Option<String> {
+        None
+    }
 }
 
 /// No other scope: the unlayered default.
