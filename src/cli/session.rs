@@ -503,7 +503,8 @@ fn summary(split: &SplitOutput, output: &Path, report: &Path, outcome: &str) -> 
     if !a.general_replicas_from_excluded_projects.is_empty() {
         out.push_str(&format!(
             "GENERAL PROVENANCE: {} interactions assigned to projects excluded from general are \
-             copied into general as origins of audited general rulings (listed in the report); \
+             copied into general as origins of audited general rulings (stubs unless the report \
+             lists them as full-text); \
              review them before any cut-over\n",
             a.general_replicas_from_excluded_projects.len()
         ));

@@ -925,7 +925,7 @@ anything is written:
 - An interaction with hard protected provenance (the actor or a repository
   folder of a project excluded from general) is never copied out of its own
   session; such a plan is refused.
-- A replica is a stub: the same agent, creation and event times, with no
+- A replica, hub-only replicas included, is a stub: the same agent, creation and event times, with no
   prompt text. The full text stays in the interaction's own target, so
   nothing is lost and no project's prompt is copied into another project's
   session. A stub is a state Lambo already produces (chunk-ingest
@@ -990,4 +990,5 @@ inventory and every dropped edge id, but no content. The summary prints
 aggregate counts. Two notices need the owner before any cut-over:
 low-confidence items, which the plan places but nobody reviewed, and the
 general-provenance notice, which lists interactions of a project excluded from
-general that are copied into general as origins of audited general rulings.
+general that are copied into general as origins of audited general rulings
+(as stubs, unless the report lists them as full-text).
