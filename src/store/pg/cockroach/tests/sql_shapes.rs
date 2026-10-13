@@ -197,9 +197,12 @@ WHERE session_id = $1
 ORDER BY id
 "#;
 
+    // #20: the demotion reason pair joins the select, the id cast like
+    // every other id column.
     const PRE_SELECT_CANONIZATION_EVENTS_SQL: &str = r#"
 SELECT id::STRING AS id, session_id, node_id::STRING AS node_id,
-       from_status, to_status, blast_radius, last_demotion_time, occurred_at
+       from_status, to_status, blast_radius, last_demotion_time, occurred_at,
+       reason, superseded_by::STRING AS superseded_by
 FROM canonization_events
 WHERE session_id = $1
 ORDER BY occurred_at, id
@@ -317,7 +320,8 @@ fn upsert_placeholder_shapes_match_structs() {
     assert!(
         stamp.contains("last_gc_epoch = GREATEST(sessions.last_gc_epoch, EXCLUDED.last_gc_epoch)")
     );
-    assert_eq!(placeholder_max(INSERT_CANONIZATION_EVENT_SQL), 8);
+    // #20: reason and superseded_by are $9 and $10.
+    assert_eq!(placeholder_max(INSERT_CANONIZATION_EVENT_SQL), 10);
     assert_eq!(placeholder_max(UPDATE_CONCEPT_STATUS_SQL), 5);
     assert_eq!(placeholder_max(UPSERT_SYNONYM_SQL), 3);
     assert_eq!(placeholder_max(UPSERT_RESERVATION_SQL), 4);
