@@ -226,6 +226,42 @@ worktree branches are always rebased onto origin main first [Logic] (score 0.42,
   "image": {"mime": "image/png", "data": "iVBORw0KGgo..."}}}
 ```
 
+#### Reading a layer hit
+
+These are tool argument objects for a client connected to `/mcp/s/lambo`,
+with `lambo` configured to read `general`. Use your actual model name as the
+stable `agent_id` across all calls:
+
+```json
+{"agent_id":"gpt-6.1-sol","query":"worktree policy","top_k":5,"max_tokens":500}
+```
+
+This reads the configured stack. A returned hit with `session: "general"`
+belongs to the layer; use its `node_id` (or short id) and the same session:
+
+```json
+{"agent_id":"gpt-6.1-sol","focus":"<id from the general hit>","scope":"general","depth":1}
+```
+
+To read a single session's memories with `lambo_recall`:
+
+```json
+{"agent_id":"gpt-6.1-sol","query":"worktree policy","scope":"general"}
+```
+
+Set `scope` to `"lambo"` for the project alone. It does not select another
+arbitrary served project: `"rustydocs"` is refused unless it is this session
+or a configured layer. An empty string is not the same as omitting `scope`.
+Scoped recall renders the selected session's context alone, without `from general`
+on its blocks. Through a layered endpoint, every structured hit still carries
+`session`, regardless of `scope`. An unlayered endpoint, such as a direct
+connection to unlayered `/mcp/s/general`, omits that field. A direct layer
+read through the project's endpoint also supplies a warning naming the layer;
+the warning does not replace its hits' `session` fields.
+MCP `scope` is not a CLI flag and is not accepted by
+the write tools yet. To write to another session today, deliberately connect
+to its own endpoint; a read of `general` does not redirect later project writes.
+
 ### lambo_derive
 
 Store new concepts learned from the current interaction.

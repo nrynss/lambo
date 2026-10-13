@@ -374,6 +374,38 @@ Once the pinned sessions are attached, a layer whose embedding contract differs 
 
 While the serve runs, a layer can stop serving: another writer took its lease, it is being detached, or its attach failed. Losing `general`'s lease detaches `general` alone. Until it is attached again, every layered recall answers from its own session with one warning, `recall: layer general is unavailable; results are from lambo only`, and a `scope` naming the layer is refused: retryably while it is held elsewhere or detaching, and as permanent once its attach has failed for good or it was erased (an erased layer is also warned of at start).
 
+### Project URLs and a shared layer
+
+An HTTP client chooses its session by URL, not by its working directory or a
+project header. A useful split keeps operator-wide rulings in `general`, project
+work in its own session, and work outside a mapped project in `general-usage`:
+
+```toml
+[serve]
+sessions = ["lambo", "rustydocs", "general", "general-usage"]
+default_session = "general-usage"
+layers = ["general"]
+
+[[serve.layer]]
+session = "general"
+weight = 0.5
+min_similarity = 0.40
+```
+
+Start the HTTP serve without a `--session` override if `/mcp` should use this
+`default_session`. Register `.../mcp/s/lambo` in the Lambo project's client and
+`.../mcp/s/rustydocs` in RustyDocs; register `.../mcp` as the client's fallback.
+`general` is itself a layer, so it does not inherit `layers`. The project
+sessions and `general-usage` read it. A per-session empty list can opt a
+consumer out, as in the preceding example.
+
+This configuration does not copy memories or move existing sessions. Each
+project's text recall reads its own session plus `general`; its writes still
+go to the addressed project. Only MCP `lambo_recall` and `lambo_inspect` accept
+the read-only `scope` field in this release. See the
+[read examples](/mcp#reading-a-layer-hit) and the operator's
+[cut-over runbook](https://github.com/nrynss/lambo/blob/main/dev-diary/lambo-for-mooshik/DOGFOOD-SETUP.md#7-multi-session-cut-over-runbook).
+
 ### Choosing a stdio serve's session
 
 A `stdio` serve given `--session` uses it and reads none of this. Without `--session` it picks, in order:
