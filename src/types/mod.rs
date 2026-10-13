@@ -252,6 +252,27 @@ impl EdgeType {
         }
     }
 
+    /// Whether an edge of this type connects its ends for garbage
+    /// collection (spec §9 steps 2 and 3): an endpoint with such an edge is
+    /// not an orphan, and step 3's reachability walk from the temporal chain
+    /// crosses it. Every type does except `Contradicts` (#19(c) owner
+    /// decision 1, option C): being contradicted, or contradicting, keeps
+    /// nothing alive. GC's one exception, a concept contradicting a target
+    /// that is Venerable or Canonical, is a protection in
+    /// `crate::daemon::gc`, not connectivity.
+    pub const fn counts_toward_gc_connectivity(self) -> bool {
+        match self {
+            Self::Temporal
+            | Self::Derives
+            | Self::CoOccurrence
+            | Self::Causal
+            | Self::Dependency
+            | Self::Hierarchical
+            | Self::Semantic => true,
+            Self::Contradicts => false,
+        }
+    }
+
     /// Which end of an edge of this type is the **dependent**: the concept
     /// that rests on the other end (#36, read-time dependents semantics).
     ///
@@ -2194,6 +2215,19 @@ mod tests {
             assert!(ty.counts_toward_density(), "{ty:?}");
         }
         assert!(!EdgeType::Contradicts.counts_toward_density());
+    }
+
+    /// #19(c) owner decision 1C: every edge type connects for GC except
+    /// `Contradicts`.
+    #[test]
+    fn edge_type_gc_connectivity_table() {
+        for ty in EdgeType::ALL {
+            assert_eq!(
+                ty.counts_toward_gc_connectivity(),
+                ty != EdgeType::Contradicts,
+                "{ty:?}"
+            );
+        }
     }
 
     /// #36: only `Dependency` (source rests on target) and `Hierarchical`

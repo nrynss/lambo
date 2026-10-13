@@ -10,6 +10,7 @@ use uuid::Uuid;
 
 mod cap_and_bumps;
 mod collection;
+mod contradictions;
 mod score_cut;
 mod triggers;
 
