@@ -897,3 +897,26 @@ async fn recall_labels_scoped_hits_with_their_repository() {
     assert!(!legacy_json.contains("repo_scope"), "{legacy_json}");
     mem.close().await.unwrap();
 }
+
+/// Inspect's neighbourhood labels a scoped node with its repository, as
+/// recall does, and leaves an unscoped node's label unchanged.
+#[tokio::test]
+async fn inspect_labels_scoped_nodes_with_their_repository() {
+    use crate::surface::neighbourhood::render_neighbourhood_parts;
+    let mem = memory("repo-inspect", MatchStrategy::Canonical).await;
+    let agent = AgentId::new("agent-a");
+    let [legacy, a, _] = three_readmes(&mem, &agent);
+    let (scoped, plain) = {
+        let g = mem.graph.read();
+        (
+            render_neighbourhood_parts(&g, a, 1).text(None),
+            render_neighbourhood_parts(&g, legacy, 1).text(None),
+        )
+    };
+    assert!(
+        scoped.contains("README.md [Resource, repo \"repo-a\"]"),
+        "{scoped}"
+    );
+    assert!(plain.contains("README.md [Resource]"), "{plain}");
+    mem.close().await.unwrap();
+}

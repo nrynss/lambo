@@ -68,7 +68,13 @@ pub(crate) fn render_neighbourhood_parts(
                     CanonizationStatus::Candidate => ", candidate",
                     CanonizationStatus::None => "",
                 };
-                format!("{} [{:?}{}]", c.content, c.concept_type, canon)
+                // #129: a repository-scoped path names its repository, as
+                // recall's label does.
+                let repo = match crate::graph::resource::repo_scope_of_key(&c.canonical_key) {
+                    Some(repo) => format!(", repo {repo:?}"),
+                    None => String::new(),
+                };
+                format!("{} [{:?}{repo}{}]", c.content, c.concept_type, canon)
             }
             Some(Node::Interaction(i)) => {
                 format!("<interaction {}>", i.id.0)
