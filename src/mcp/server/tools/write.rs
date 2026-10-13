@@ -24,16 +24,20 @@ use super::scope::{scoped_ack_line, with_scope, with_session, with_warning};
 
 /// One reference list's shape checks: each entry non-empty and within the
 /// size cap, at most `per_concept` on its `owner` ("a concept's") and
-/// `per_call` across the call (`total` carries the running count).
+/// `per_call` across the call. `on_owner` and `total` carry the running
+/// counts: `on_owner` per content, as the core counts it (#19(b) review
+/// L6), so a content sent as two wire concepts is one concept here too.
 fn check_references(
     owner: &str,
     field: &str,
     refs: &[String],
     per_concept: usize,
     per_call: usize,
+    on_owner: &mut usize,
     total: &mut usize,
 ) -> Result<(), CallToolResult> {
-    if refs.len() > per_concept {
+    *on_owner += refs.len();
+    if *on_owner > per_concept {
         return Err(bad_param(format!(
             "{owner} {field} may list at most {per_concept} concepts"
         )));
@@ -65,18 +69,23 @@ fn check_references(
 fn wire_citations(p: &DeriveParams) -> Result<Vec<ConceptCitations>, CallToolResult> {
     let mut out = Vec::new();
     let (mut cited, mut contradicted) = (0usize, 0usize);
+    // Per content, as `graph::cite::pin` counts them.
+    let mut per_content: std::collections::HashMap<&str, (usize, usize)> =
+        std::collections::HashMap::new();
     for c in &p.concepts {
         let depends_on: Vec<String> = c.depends_on.iter().flatten().map(|r| r.0.clone()).collect();
         let against: Vec<String> = c.against.iter().flatten().map(|r| r.0.clone()).collect();
         if depends_on.is_empty() && against.is_empty() {
             continue;
         }
+        let (on_cited, on_contradicted) = per_content.entry(c.content.as_str()).or_default();
         check_references(
             "a concept's",
             "depends_on",
             &depends_on,
             MAX_REFERENCES_PER_CONCEPT,
             MAX_REFERENCES_PER_DERIVE,
+            on_cited,
             &mut cited,
         )?;
         check_references(
@@ -85,6 +94,7 @@ fn wire_citations(p: &DeriveParams) -> Result<Vec<ConceptCitations>, CallToolRes
             &against,
             MAX_AGAINST_PER_CONCEPT,
             MAX_AGAINST_PER_DERIVE,
+            on_contradicted,
             &mut contradicted,
         )?;
         out.push(ConceptCitations {
@@ -362,13 +372,14 @@ impl LamboServer {
             .into_iter()
             .map(|r| r.0)
             .collect();
-        let mut contradicted = 0usize;
+        let (mut on_action, mut contradicted) = (0usize, 0usize);
         if let Err(e) = check_references(
             "an action's",
             "against",
             &against,
             MAX_AGAINST_PER_CONCEPT,
             MAX_AGAINST_PER_CONCEPT,
+            &mut on_action,
             &mut contradicted,
         ) {
             return e;

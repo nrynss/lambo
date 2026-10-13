@@ -189,21 +189,23 @@ impl fmt::Display for ReferenceRefusal {
             None => String::new(),
         };
         let r = &self.reference;
+        // What the caller does with a reference of this field, for the fix
+        // each refusal suggests (#19(b) review L6).
+        let verb = if self.field.is_against() {
+            "name"
+        } else {
+            "cite"
+        };
         match &self.kind {
             ReferenceRefusalKind::Missing => write!(
                 f,
-                "{field} {r}{on} names no concept in this session; {} a concept that already \
+                "{field} {r}{on} names no concept in this session; {verb} a concept that already \
                  exists, by the id recall shows (8 hex characters), its full node id or its exact \
-                 content",
-                if self.field.is_against() {
-                    "name"
-                } else {
-                    "cite"
-                }
+                 content"
             ),
             ReferenceRefusalKind::Ambiguous { candidates } => write!(
                 f,
-                "{field} {r}{on} matches {} concepts: {}; cite one by its full node id",
+                "{field} {r}{on} matches {} concepts: {}; {verb} one by its full node id",
                 candidates.len(),
                 candidates
                     .iter()
@@ -213,7 +215,7 @@ impl fmt::Display for ReferenceRefusal {
             ),
             ReferenceRefusalKind::NotAConcept => write!(
                 f,
-                "{field} {r}{on} is the id of an interaction, not a concept; cite a concept"
+                "{field} {r}{on} is the id of an interaction, not a concept; {verb} a concept"
             ),
             ReferenceRefusalKind::ForeignScope { scope } if self.field.is_against() => write!(
                 f,
@@ -392,6 +394,22 @@ mod tests {
             let msg = r.to_string();
             assert!(msg.ends_with("; nothing was written"), "{msg}");
             assert!(msg.contains("\"lease stays\""), "{msg}");
+        }
+        // #19(b) review L6: no `against` refusal tells the caller to cite.
+        for kind in [
+            ReferenceRefusalKind::Missing,
+            ReferenceRefusalKind::Ambiguous {
+                candidates: vec![ReferenceCandidate {
+                    node: NodeId(Uuid::from_u128(1)),
+                    content: "\"one\"".into(),
+                }],
+            },
+            ReferenceRefusalKind::NotAConcept,
+            ReferenceRefusalKind::SelfReference,
+        ] {
+            let msg =
+                ReferenceRefusal::new(ReferenceField::Against, Some("c"), "r", kind).to_string();
+            assert!(!msg.contains("cite"), "{msg}");
         }
         // #19(b): an `against` refusal names its field and its noun.
         let against = ReferenceRefusal::new(

@@ -299,3 +299,31 @@ async fn citing_and_contradicting_one_concept_in_one_call_is_refused() {
     assert_eq!(s.mem.graph().read().snapshot(), before);
     s.mem.close().await.expect("close");
 }
+
+/// #19(b) review L6: the surface counts the per-concept limit per content,
+/// as the core does, so one content sent as two wire concepts with 5
+/// references each is over 8 here too (for `depends_on` and `against`),
+/// and is a bad parameter rather than a core refusal.
+#[tokio::test]
+async fn the_per_concept_limit_counts_per_content() {
+    let s = server("mcp-against-per-content").await;
+    let five = |p: &str| -> Vec<String> { (0..5).map(|n| format!("{p}{n}")).collect() };
+    for field in ["depends_on", "against"] {
+        let out = call_raw(
+            &s,
+            "lambo_derive",
+            json!({"agent_id": "agent-a", "concepts": [
+                {"content": "one claim", "concept_type": "logic", field: five("a")},
+                {"content": "one claim", "concept_type": "logic", field: five("b")},
+            ]}),
+        )
+        .await;
+        assert_eq!(out.is_error, Some(true), "{field}");
+        assert!(
+            text_of(&out).contains(&format!("a concept's {field} may list at most 8")),
+            "{field}: {}",
+            text_of(&out)
+        );
+    }
+    s.mem.close().await.expect("close");
+}
