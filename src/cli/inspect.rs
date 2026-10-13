@@ -85,6 +85,7 @@ pub async fn run_with_policy(
         Ok(admission) => admission.as_ref().map(render_admission),
         Err(e) => Some(format!("canonization: explanation unavailable: {e}\n")),
     };
+    let section = crate::canon::with_last_demotion(section, &loaded.graph.read(), id);
     let text = view.text(section.as_deref());
     Ok(match note {
         Some(note) => format!("{note}\n{text}"),

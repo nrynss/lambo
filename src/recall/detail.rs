@@ -24,7 +24,8 @@
 //! patterns: `load_bearing` from a Canonical blast warning, `conflict` from
 //! `HotListPayload::Conflict`, `hot` from HighRisk/Drift/Stale,
 //! `contradiction` from `HotListPayload::Contradiction`, `contradicts` on
-//! the contradicting concept pulled in beside it (#19(c)),
+//! the contradicting concept pulled in beside it (#19(c)), `superseded` on a
+//! hit whose latest demotion was a supersession (#20, history, not forced),
 //! `reservation` from an active reservation, `traversal` from the
 //! structural-dispatch explanation, and `vector_degraded` from a query
 //! embedding failure. The two response-global kinds are never attached to a
@@ -60,6 +61,9 @@ pub(crate) enum AnnotationKind {
     /// This hit contradicts a contradicted hit of the same result, and was
     /// pulled in beside it (#19(c)) — hit-owned.
     Contradicts,
+    /// History (#20): this hit's latest demotion was a supersession and it is
+    /// not Canonical again. Never forces the hit into the result — hit-owned.
+    Superseded,
 }
 
 /// One typed warning: its kind and the exact line that renders it.

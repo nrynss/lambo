@@ -35,6 +35,7 @@ mod task;
 pub use eval::{eval_cycle, EvalError, EvalOutcome, EvalParams, Evaluator};
 pub use event_time::separated_session_count;
 pub(crate) use explain::explain_node;
+pub(crate) use explain::with_last_demotion;
 pub use explain::{
     admission_inputs, explain_admission, render_admission, Admission, AdmissionCheck,
     AdmissionInputs, Comparison,

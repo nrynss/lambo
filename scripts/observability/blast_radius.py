@@ -59,6 +59,7 @@ HIT_KINDS = (
     "reservation",
     "contradiction",
     "contradicts",
+    "superseded",
 )
 
 #: Tokens too common to mean anything in a git-log match.

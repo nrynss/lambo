@@ -483,6 +483,51 @@ pub fn render_admission(a: &Admission) -> String {
     out
 }
 
+/// Inspect's line for `node`'s latest demotion (#20), when it has one: why
+/// (`budget`, or `superseded by` the contradicting concept, quoted while it
+/// is in the graph and named by id either way) and when.
+///
+/// ```text
+/// last demotion 2026-09-30T12:00:00Z: superseded by "flushes give up after three attempts" (id 1a2b3c4d)
+/// last demotion 2026-09-30T12:00:00Z: budget
+/// ```
+pub(crate) fn render_last_demotion(graph: &Graph, node: NodeId) -> Option<String> {
+    let event = graph
+        .canonization_events()
+        .iter()
+        .rev()
+        .find(|e| e.node_id == node && e.is_demotion())?;
+    let at = event
+        .occurred_at
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let why = match event.demotion_reason()? {
+        crate::types::DemotionReason::Budget => "budget".to_string(),
+        crate::types::DemotionReason::Superseded { by } => {
+            let id = crate::recall::format::short_id(by);
+            match graph.node(by) {
+                Some(crate::types::Node::Concept(c)) => {
+                    format!("superseded by \"{}\" (id {id})", c.content)
+                }
+                _ => format!("superseded by a concept no longer in memory (id {id})"),
+            }
+        }
+    };
+    Some(format!("last demotion {at}: {why}\n"))
+}
+
+/// The canonization section inspect prints: the admission explanation, then
+/// the latest demotion line (#20).
+pub(crate) fn with_last_demotion(
+    section: Option<String>,
+    graph: &Graph,
+    node: NodeId,
+) -> Option<String> {
+    match (section, render_last_demotion(graph, node)) {
+        (Some(s), Some(d)) => Some(s + &d),
+        (s, d) => s.or(d),
+    }
+}
+
 /// Inspect's explanation for `node`: [`admission_inputs`] under a short read
 /// of `graph`, then [`explain_admission`] with no lock held. `None` when
 /// `node` is not a concept.

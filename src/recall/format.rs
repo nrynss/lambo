@@ -323,6 +323,34 @@ pub fn contradicts_warning(target: NodeId, target_content: &str) -> String {
     )
 }
 
+/// The historical supersession line on a demoted hit (#20):
+///
+/// ```text
+/// ⤓ Superseded at 2026-09-30T12:00:00Z by "a failed flush retries at most three times" (id 1a2b3c4d)
+/// ```
+///
+/// `at` is the demotion's time and the id is the superseding concept's
+/// [`short_id`]. Unlike the live `contradiction` line it is history: it
+/// stays on the concept while its latest demotion is a supersession and it
+/// is not Canonical again. `by_content` is `None` when the superseding
+/// concept is no longer in the graph (collected), and then the quote is
+/// left out; the id still names it.
+pub fn superseded_warning(
+    by: NodeId,
+    at: chrono::DateTime<chrono::Utc>,
+    by_content: Option<&str>,
+) -> String {
+    let at = at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    match by_content {
+        Some(content) => format!(
+            "⤓ Superseded at {at} by \"{}\" (id {})",
+            excerpt(content),
+            short_id(by)
+        ),
+        None => format!("⤓ Superseded at {at} (id {})", short_id(by)),
+    }
+}
+
 /// The active soft-lock line (spec §10.3.3, T2.7): agent + expiry.
 pub fn reservation_warning(r: &Reservation) -> String {
     format!(
