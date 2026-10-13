@@ -148,8 +148,8 @@ pub(crate) fn short_id_matches(g: &Graph, prefix: &str) -> Vec<NodeId> {
 
 /// Resolve `reference` against `g`, the target session's graph. See the
 /// module docs for the legs. Read-only; the caller holds the graph's lock
-/// (read for a pre-pass, write at a commit) and no other.
-#[cfg(test)]
+/// (read for a pre-pass, write at a commit) and no other. Unscoped: a path
+/// takes its legacy canonical key (see [`resolve_reference_scoped`]).
 pub(crate) fn resolve_reference(g: &Graph, reference: &str) -> Resolved {
     resolve_reference_scoped(g, reference, None)
 }
