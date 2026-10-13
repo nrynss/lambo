@@ -1390,3 +1390,105 @@ async fn loose_and_clear_path_spellings_under_depends_on_then_produces() {
     );
     mem.close().await.unwrap();
 }
+
+/// CodeRabbit (PR #156): a dependency question naming `README.md` never
+/// answers with whichever repository's file sorts first. Unnamed, the two
+/// repositories' files are listed (short id and repository) and nothing is
+/// guessed; naming the repository answers for its file only. A session with
+/// one, unscoped `README.md` answers as before.
+#[tokio::test]
+async fn dependency_questions_about_a_scoped_path_name_the_repository() {
+    let mem = memory("repo-dispatch", MatchStrategy::Canonical).await;
+    let agent = AgentId::new("agent-a");
+    for (repo, dependent) in [
+        ("github.com/acme/widgets", "widget build guide"),
+        ("github.com/acme/gadgets", "gadget release checklist"),
+    ] {
+        mem.derive_as(
+            &agent,
+            &[("README.md", ConceptType::Resource)],
+            &ParentOf::none().with_repo_scope(Some(repo)),
+        )
+        .await
+        .unwrap();
+        mem.derive_cited_as(
+            &agent,
+            &[(dependent, ConceptType::Logic)],
+            &ParentOf::none().with_repo_scope(Some(repo)),
+            &[ConceptCitations {
+                content: dependent.into(),
+                depends_on: vec!["README.md".into()],
+                against: Vec::new(),
+            }],
+        )
+        .await
+        .unwrap();
+    }
+    let ask = |q: &str| {
+        let mem = &mem;
+        let q = q.to_string();
+        async move {
+            mem.recall(RecallQuery {
+                query: q,
+                top_k: 10,
+                max_tokens: 2_000,
+                traversal_depth: 1,
+            })
+            .await
+            .unwrap()
+        }
+    };
+    let out = ask("what depends on README.md").await;
+    assert!(out.hits.is_empty(), "{:?}", out.hits);
+    let warning = out.warnings.join("\n");
+    for needle in [
+        "\"README.md\" names 2 concepts in different repositories",
+        "(repo \"github.com/acme/widgets\")",
+        "(repo \"github.com/acme/gadgets\")",
+        "name the repository in the question",
+    ] {
+        assert!(warning.contains(needle), "{needle}: {warning}");
+    }
+    let out = ask("what depends on README.md in github.com/acme/gadgets").await;
+    let contents: Vec<&str> = out.hits.iter().map(|h| h.content.as_str()).collect();
+    assert_eq!(contents, ["gadget release checklist"], "{:?}", out.warnings);
+    mem.close().await.unwrap();
+
+    // Unscoped: one README.md, its dependent, as before.
+    let mem = memory("repo-dispatch-plain", MatchStrategy::Canonical).await;
+    mem.derive_as(
+        &agent,
+        &[("README.md", ConceptType::Resource)],
+        &ParentOf::none(),
+    )
+    .await
+    .unwrap();
+    mem.derive_cited_as(
+        &agent,
+        &[("docs build guide", ConceptType::Logic)],
+        &ParentOf::none(),
+        &[ConceptCitations {
+            content: "docs build guide".into(),
+            depends_on: vec!["README.md".into()],
+            against: Vec::new(),
+        }],
+    )
+    .await
+    .unwrap();
+    let out = mem
+        .recall(RecallQuery {
+            query: "what depends on README.md".into(),
+            top_k: 10,
+            max_tokens: 2_000,
+            traversal_depth: 1,
+        })
+        .await
+        .unwrap();
+    let contents: Vec<&str> = out.hits.iter().map(|h| h.content.as_str()).collect();
+    assert_eq!(contents, ["docs build guide"]);
+    assert!(out
+        .warnings
+        .iter()
+        .any(|w| w.contains("answered by graph traversal (1 dependents)")));
+    mem.close().await.unwrap();
+}
