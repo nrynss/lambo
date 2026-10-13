@@ -60,8 +60,7 @@ async fn rest_api_user_schema_progresses_three_hops_with_audit() {
         ranked: rescore(&graph, &ScoringWeights::default()),
     };
     let graph = RwLock::new(graph);
-    let mut p = params();
-    p.min_peer_count = crate::Config::default().canonization_min_peer_count;
+    let p = params();
 
     let (tx, mut rx) = crate::daemon::events::event_channel();
     let mut ev = Evaluator::new();
@@ -210,8 +209,7 @@ async fn sqlite_three_hop_progression_matches_memory() {
         ranked: rescore(&graph, &ScoringWeights::default()),
     };
     let graph = RwLock::new(graph);
-    let mut p = params();
-    p.min_peer_count = crate::Config::default().canonization_min_peer_count;
+    let p = params();
 
     let (tx, _rx) = crate::daemon::events::event_channel();
     let mut ev = Evaluator::new();
@@ -316,8 +314,7 @@ async fn cockroach_three_hop_progression_matches_memory() {
         ranked: rescore(&graph, &ScoringWeights::default()),
     };
     let graph = RwLock::new(graph);
-    let mut p = params();
-    p.min_peer_count = crate::Config::default().canonization_min_peer_count;
+    let p = params();
 
     let (tx, _rx) = crate::daemon::events::event_channel();
     let mut ev = Evaluator::new();

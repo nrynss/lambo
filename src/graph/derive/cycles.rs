@@ -357,6 +357,7 @@ mod tests {
                     Utc.timestamp_opt(1_752_000_000, 0).unwrap(),
                     None,
                     session,
+                    &mut std::collections::HashMap::new(),
                 )
             })
             .unwrap_err()

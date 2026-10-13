@@ -8,4 +8,5 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 mod calibration;
+mod intents;
 mod receipts;

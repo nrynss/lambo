@@ -5,20 +5,23 @@
 //! `None → Venerable` (that edge is reserved for `set_root_goal`). The
 //! hops this cycle will emit, in order, are:
 //!
-//! 1. Stage 1: `None → Candidate` for nodes still-None in
-//!    [`crate::canon::stage1_candidates`].
+//! 1. Stage 1: `None → Candidate` for the first [`EvalParams::batch_size`]
+//!    still-None nodes the policy admits, in the policy's order (Swarm:
+//!    [`crate::canon::stage1_candidates`], evidence-led and composite-ordered;
+//!    Solo: score band, score-ordered).
 //! 2. Stage 2: `Candidate → Venerable` for nodes that were already
 //!    Candidate *before* this cycle's Stage 1 hop (a node that just
 //!    became Candidate is not re-checked for Venerable in the same tick).
+//!    The hop needs the Stage 2 verdict under **both** policies (#36 PR 3);
+//!    Solo also needs its band.
 //! 3. Stage 3: `Venerable → Canonical` for a **round-robin** window of
 //!    at most [`EvalParams::batch_size`] Venerable nodes, **score-
 //!    descending** (canonical key ascending, then NodeId ascending —
-//!    [`tie_break_by_key`], issue #2) within the window. Under Swarm a
-//!    member's Stage 3 verdict also requires it to pass Stage 2 again (#36
-//!    upgrade guard): a Venerable admitted under an older support rule cannot
-//!    jump to Canonical on blast radius alone. Solo's probe is unchanged.
-//!    The cursor lives on [`Evaluator`] so the next cycle continues
-//!    around the ring.
+//!    [`tie_break_by_key`], issue #2) within the window. A member's Stage 3
+//!    verdict requires it to pass Stage 2 again (#36 upgrade guard), blast
+//!    radius above five and the re-promotion cooldown clear, under both
+//!    policies; Solo also needs its band. The cursor lives on [`Evaluator`]
+//!    so the next cycle continues around the ring.
 //! 4. Budget: if Canonical count exceeds `max_canonical_nodes`, demote
 //!    `Canonical → None` lowest [`GraphStore::blast_radius`] first
 //!    (canonical key ascending, then NodeId ascending —
@@ -41,13 +44,13 @@
 //! 1. [`Evaluator::gather`] — **synchronous, read guard.** Reads the three
 //!    stage windows, the Stage-3 cooldown inputs and the budget probe out of
 //!    the graph. No I/O.
-//! 2. [`verdicts`] — **async, no lock.** Under Swarm, one
-//!    `interaction_span_with_window` per Stage-2 window member (Solo asks
-//!    nothing: its hop ignores the verdict); one `blast_radius` per Stage-3
-//!    window member (under Swarm preceded by an `interaction_span_with_window`,
-//!    and skipped when that fails); and one `blast_radius` per budget probe.
-//!    A store without the window-aware span gives a node no Stage 2 evidence
-//!    and one warning per cycle, not a failed cycle. Touches no graph.
+//! 2. [`verdicts`] — **async, no lock.** One `interaction_span_with_window`
+//!    per Stage-2 window member; one `blast_radius` per Stage-3 window member,
+//!    preceded by an `interaction_span_with_window` and skipped when that
+//!    fails; and one `blast_radius` per budget probe. Both policies ask the
+//!    same queries (#36 PR 3: Solo consumes the verdicts). A store without
+//!    the window-aware span gives a node no Stage 2 evidence and one warning
+//!    per cycle, not a failed cycle. Touches no graph.
 //! 3. [`apply`] — **synchronous, write guard.** Re-checks each node's
 //!    current status, applies the transitions, emits `DaemonEvent::Canonized`.
 //! 4. [`record`] — **async, no lock.** `store.record_canonization` per hop.
@@ -127,8 +130,17 @@ pub struct Evaluator {
 /// Knobs for one [`eval_cycle`]. Defaults match [`crate::Config`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EvalParams {
+    /// **Inert since #36 PR 3.** Swarm's Stage 1 used to need this many
+    /// non-Canonical peers before its P90 cut opened; evidence-led admission
+    /// has no peer minimum and no policy reads the field. Kept so existing
+    /// callers compile; [`crate::Config::warnings`] names a non-default value.
+    #[deprecated(
+        since = "0.6.0",
+        note = "inert since #36 PR 3: Stage 1 admits on evidence with no peer minimum"
+    )]
     pub min_peer_count: usize,
-    /// Forwarded to Stage 2 (`interaction_span_with_window` age floor).
+    /// Age floor for Stage 1's dependent interactions and Stage 2's
+    /// `interaction_span_with_window`.
     pub min_age: Duration,
     /// Denominator cap forwarded to Stage 2; no evidence expiry.
     pub coverage_window: Duration,
@@ -216,6 +228,9 @@ impl From<EvalError> for LamboError {
 }
 
 impl EvalParams {
+    // Copies the deprecated inert field so library callers that still read
+    // it see the configured value.
+    #[allow(deprecated)]
     pub fn from_config(config: &crate::Config) -> Self {
         Self {
             min_peer_count: config.canonization_min_peer_count,
@@ -405,14 +420,12 @@ impl Evaluator {
     ) -> CyclePlan {
         let session = graph.session_id().clone();
 
-        // The P90 population is the graph's, the scores are the daemon's. A
-        // table older than the graph drags every concept born since the last
-        // rescore into the peer distribution at 0.0, which inflates `n` and
-        // floods the bottom of the P90 population. The daemon's rescore is
-        // epoch-gated and runs on its own (1s) tick while this cycle runs on
-        // a 60s one, so a brief lag is expected rather than a fault: report
-        // it and proceed. (Recall refuses a stale table only because it must
-        // not *cache* a compute keyed on the graph epoch.)
+        // The scores are the daemon's and only order Stage 1's queue and the
+        // Stage 3 window (#36 PR 3: they no longer select anyone). A table
+        // older than the graph orders concepts born since the last rescore
+        // at 0.0. The daemon's rescore is epoch-gated and runs on its own (1s)
+        // tick while this cycle runs on a 60s one, so a brief lag is expected
+        // rather than a fault: report it and proceed.
         if scores.epoch != graph.epoch() {
             tracing::debug!(
                 target: "lambo::canon",
@@ -422,16 +435,15 @@ impl Evaluator {
             );
         }
 
-        // Stage 1 — still-None candidates, NodeId ascending. No cursor: the
-        // set drains (a promoted node leaves it), unlike Stage 2, whose
+        // Stage 1 — still-None candidates in the policy's order (Swarm: the
+        // composite, highest first; Solo: its resistant score), capped at the
+        // batch. No cursor: the set drains (a promoted node leaves it, and
+        // the next cycle takes the next members), unlike Stage 2, whose
         // members can fail their evidence gate cycle after cycle.
         //
         // C1: the predicate is chosen by `promotion_policy` rather than
-        // welded in. The default arm is `SwarmScorer`, which forwards to
-        // `stage1_candidates` with the same argument this line always passed —
-        // the seam adds an indirection and nothing else. `now` is handed to
-        // the scorer even though swarm ignores it, so D2 can give the solo
-        // policy event time without widening the trait.
+        // welded in. `now` and `params.min_age` age the dependence evidence
+        // both policies read (#36 PR 3).
         let stage1: Vec<NodeId> = params
             .promotion_policy
             .scorer()
@@ -443,7 +455,16 @@ impl Evaluator {
 
         // Stage 2 — one `interaction_span_with_window` round-trip per member, so the
         // window is capped and walks the identity cursor (F13).
-        let candidates = ids_with_status(graph, CanonizationStatus::Candidate);
+        //
+        // #36 PR 3 review L1: the ring holds only members the policy could
+        // admit (`admits_hop` for the hop, asked before the verdict). Swarm
+        // admits every member, so its ring is unchanged; Solo drops the
+        // Candidates whose band cannot reach Venerable, which would cost a
+        // store probe every pass and could never promote.
+        let scorer = params.promotion_policy.scorer();
+        let mut candidates = ids_with_status(graph, CanonizationStatus::Candidate);
+        candidates
+            .retain(|&id| scorer.admits_hop(graph, id, CanonizationStatus::Venerable, params, now));
         let stage2 = ring_window(&candidates, self.stage2_cursor, params.batch_size);
         if let Some(&last) = stage2.last() {
             self.stage2_cursor = Some(last);
@@ -470,7 +491,10 @@ impl Evaluator {
         let remaining = params
             .max_canonical_nodes
             .saturating_sub(canonical_count(graph));
-        let venerable = ids_with_status(graph, CanonizationStatus::Venerable);
+        let mut venerable = ids_with_status(graph, CanonizationStatus::Venerable);
+        // Same filter as Stage 2's ring (review L1).
+        venerable
+            .retain(|&id| scorer.admits_hop(graph, id, CanonizationStatus::Canonical, params, now));
         let mut window = if remaining == 0 {
             Vec::new()
         } else {
@@ -567,43 +591,35 @@ async fn verdicts(
     now: DateTime<Utc>,
 ) -> Result<Verdicts, StoreError> {
     let mut out = Verdicts::default();
-    // #36 PR 2 review M1: which policies consume the Stage 2 verdict. Solo
-    // admits by its score band and ignores the verdict (`admits_hop` drops
-    // its `evidence`), so it asks the store nothing for it. The match is
-    // exhaustive so a new policy has to decide.
+    // #36 PR 3: both policies consume the Stage 2 verdict for the
+    // Candidate → Venerable hop and re-check it before Stage 3 (PR 1's
+    // upgrade guard, PR 2 review M1 had Solo skip it because Solo then
+    // ignored the verdict). The match is exhaustive so a new policy has to
+    // decide.
     let (query_stage2, recheck_stage2) = match params.promotion_policy {
-        PromotionPolicy::Swarm => (true, true),
-        PromotionPolicy::Solo => (false, false),
+        PromotionPolicy::Swarm | PromotionPolicy::Solo => (true, true),
     };
     // The capability a store lacks, if its window-aware span refused this
     // cycle. Collected so one warning names it, not one per node.
     let mut missing: Option<String> = None;
     if query_stage2 {
         for &id in &plan.stage2 {
-            if swarm_stage2(store, &plan.session, id, params, now, &mut missing).await? {
+            if stage2_verdict(store, &plan.session, id, params, now, &mut missing).await? {
                 out.stage2_pass.push(id);
             }
         }
     }
     for probe in &plan.stage3 {
-        // #36 upgrade guard, Swarm only: a Venerable is re-checked against
-        // Stage 2 before its Stage 3 probe. Stage 2 is not a one-time
-        // admission. A node admitted under an older definition of support
-        // (before #36, inbound `Causal` edges counted), or whose support has
-        // since thinned, must still hold the evidence the ladder rests on
-        // before it can become Canonical; otherwise a stale Venerable with
-        // more than five dependents would promote on the first cycle after an
-        // upgrade. Under Swarm the Stage 3 verdict becomes "Stage 2 still
-        // holds and blast > 5", and the span query runs first so a failing
-        // node costs no blast probe.
-        //
-        // Solo does not consume verdicts for admission, but `apply` stamps the
-        // measured blast from a passing Stage 3 verdict on its audit row, so
-        // Solo keeps the plain probe: skipping it would promote the same
-        // node with no measured blast recorded. The match is exhaustive so a
-        // new policy has to decide.
+        // #36 upgrade guard: a Venerable is re-checked against Stage 2 before
+        // its Stage 3 probe. Stage 2 is not a one-time admission. A node
+        // admitted under an older definition of support (before #36, inbound
+        // `Causal` edges counted; under Solo before PR 3, the band alone), or
+        // whose support has since thinned, must still hold the evidence the
+        // ladder rests on before it can become Canonical. The Stage 3 verdict
+        // is "Stage 2 still holds, blast > 5 and the cooldown is clear", and
+        // the span query runs first so a failing node costs no blast probe.
         if recheck_stage2
-            && !swarm_stage2(store, &plan.session, probe.node, params, now, &mut missing).await?
+            && !stage2_verdict(store, &plan.session, probe.node, params, now, &mut missing).await?
         {
             continue;
         }
@@ -636,20 +652,20 @@ async fn verdicts(
             target: "lambo::canon",
             capability = %capability,
             "CanonizationStage2Unsupported: the store does not implement \
-             interaction_span_with_window, so no concept passes Stage 2 this \
-             cycle; Stage 1, Stage 3 and the budget still ran"
+             interaction_span_with_window, so no concept passes Stage 2 or \
+             Stage 3 this cycle; Stage 1 and the budget still ran"
         );
     }
     Ok(out)
 }
 
-/// One Swarm Stage 2 verdict. A store that lacks the window-aware span
+/// One Stage 2 verdict, under either policy. A store that lacks the window-aware span
 /// (`StoreError::Capability`, the trait default) gives this node **no
 /// evidence** rather than failing the cycle (#36 PR 2 review M1): Stage 2
 /// fails closed for the node, and Stage 1, Stage 3's other probes and the
 /// budget still run. The capability is recorded once for the cycle's
 /// warning. Any other store error still fails the cycle.
-async fn swarm_stage2(
+async fn stage2_verdict(
     store: &dyn GraphStore,
     session: &crate::types::SessionId,
     node: crate::types::NodeId,
@@ -694,12 +710,10 @@ fn apply(
 ) -> Result<(), LamboError> {
     outcome.stage3_batch = plan.stage3.iter().map(|p| p.node).collect();
 
-    // Every promotion hop's admission goes through the policy seam: the stage
-    // predicates stay policy-independent measures, and the active policy
-    // decides what their verdict is worth (C-R1-1). Swarm keeps the verdict
-    // as the whole decision — byte-for-byte the pre-seam pipeline. Solo
-    // substitutes its §3.2 score bands, which is what makes the published
-    // Venerable/Canonical bars drive the ladder.
+    // Every later hop needs its stage verdict first (#36 PR 3: no policy can
+    // admit a hop the evidence refuses), then the policy seam has the final
+    // word: Swarm keeps the verdict as the whole decision, Solo also needs
+    // its score band.
     let scorer = params.promotion_policy.scorer();
 
     // --- Stage 1: None → Candidate (one hop; no skip to Venerable) ---
@@ -721,15 +735,16 @@ fn apply(
     }
 
     // --- Stage 2: Candidate → Venerable ---
-    // The window is walked in ring order; a member promotes iff its policy
-    // admits the hop given the span verdict. Under swarm that reduces to the
-    // verdict alone (the pre-seam set), so membership and order are unchanged.
+    // The window is walked in ring order; a member promotes iff it passed
+    // Stage 2 and its policy admits the hop.
     for &id in &plan.stage2 {
         if concept_status(graph, id) != Some(CanonizationStatus::Candidate) {
             continue;
         }
-        let evidence = verdicts.stage2_pass.contains(&id);
-        if !scorer.admits_hop(graph, id, CanonizationStatus::Venerable, evidence) {
+        if !verdicts.stage2_pass.contains(&id) {
+            continue;
+        }
+        if !scorer.admits_hop(graph, id, CanonizationStatus::Venerable, params, now) {
             continue;
         }
         let event = promotion_event(
@@ -751,12 +766,11 @@ fn apply(
     // score-descending order. Recomputed here, under the write guard, because
     // the graph was unlocked while the verdicts ran.
     //
-    // Admission again goes through the policy seam. A node whose blast-radius
-    // verdict passed keeps the measurement that admitted it — the audit row is
-    // stamped with exactly that value (F9). A node admitted *without* a
-    // passing verdict (solo's score bands) has no measurement to stamp and is
-    // cooldown-gated here instead: its admission bypassed the verdict phase,
-    // where that gate normally runs.
+    // A node needs a passing Stage 3 verdict (which already includes the
+    // Stage 2 re-check and the cooldown) and its policy's admission. It
+    // keeps the measurement that admitted it: the audit row is stamped with
+    // exactly that value (F9). Before #36 PR 3 Solo could promote here on its
+    // band with no verdict, gated only by the cooldown; that path is gone.
     let mut remaining = params
         .max_canonical_nodes
         .saturating_sub(canonical_count(graph));
@@ -767,35 +781,29 @@ fn apply(
         if concept_status(graph, probe.node) != Some(CanonizationStatus::Venerable) {
             continue;
         }
-        let evidence = verdicts
+        let Some(blast) = verdicts
             .stage3_pass
             .iter()
             .find(|&&(id, _)| id == probe.node)
-            .map(|&(_, blast)| blast);
-        if evidence.is_none()
-            && stage3::in_repromotion_cooldown(probe.last_demotion_time, params.cooldown, now)
-        {
+            .map(|&(_, blast)| blast)
+        else {
             continue;
-        }
+        };
         if !scorer.admits_hop(
             graph,
             probe.node,
             CanonizationStatus::Canonical,
-            evidence.is_some(),
+            params,
+            now,
         ) {
             continue;
         }
-        let narrowed = match evidence {
-            Some(blast) => Some(narrow_blast_radius(blast)?),
-            // Score-admitted: keep the concept's current blast (promotion_event).
-            None => None,
-        };
         let event = promotion_event(
             graph,
             probe.node,
             CanonizationStatus::Venerable,
             CanonizationStatus::Canonical,
-            narrowed,
+            Some(narrow_blast_radius(blast)?),
             now,
         );
         outcome
@@ -880,7 +888,7 @@ fn commit_transition(
 }
 
 /// Stage 1 / 2 keep the concept's current blast so apply does not wipe it.
-/// Stage 3 supplies the narrowed measurement. Promotions never stamp
+/// Stage 3 always supplies the narrowed measurement that admitted the hop. Promotions never stamp
 /// `last_demotion_time` (must not clobber a prior demotion).
 fn promotion_event(
     graph: &Graph,

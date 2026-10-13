@@ -85,6 +85,11 @@ infrastructure section above, applied to design surface instead of resources:
   what was done; the graph records what the next agent must not re-derive.
 - **`record_action` on merges** — workstream landed, review round closed, dogfood
   binary re-pinned.
+- **Cite the rulings you rely on by id** (once the dogfood writer runs 0.6.0; a 0.5.0
+  writer stores an id as text). When a decision or action rests on a ruling recall
+  showed you, put its id (the 8 hex characters recall shows) in `depends_on`: on
+  `lambo_record_action`, or on the concept in `lambo_derive`. The ruling then gains a
+  dependent, instead of a short alias Entity collecting the citation.
 - Use one stable `agent_id` for an agent's whole life (model or client id: `claude-opus-5-5`,
   `codex-agent`, …), never per call, task or topic. Agents sharing an id share soft locks, so
   concurrent agents that must not collide need distinct stable ids (model + stable suffix).

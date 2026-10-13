@@ -136,6 +136,16 @@ pub(crate) mod release_fencing;
     )
 ))]
 pub(crate) mod dependents_live;
+// #36 PR 3: the canonization fair test, live and by hand only (Postgres
+// test here, Cockroach leg in its conformance suite).
+#[cfg(all(
+    test,
+    any(
+        feature = "store-postgres",
+        all(feature = "store-cockroach", feature = "fixtures")
+    )
+))]
+pub(crate) mod fair_test_live;
 
 // Postgres-only: the flush fence's lease row stays locked until commit.
 #[cfg(all(test, feature = "store-postgres"))]

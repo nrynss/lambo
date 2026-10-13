@@ -14,9 +14,11 @@ use tracing_subscriber::fmt::MakeWriter;
 
 use crate::embed::{EmbedError, Embedder};
 
+pub mod citations;
 pub mod dependents;
 #[cfg(feature = "embed-fixture")]
 pub mod dresscode;
+pub mod fair_test;
 #[cfg(feature = "store-memory")]
 mod vector_searchable;
 #[cfg(feature = "store-memory")]

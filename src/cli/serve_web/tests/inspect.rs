@@ -197,6 +197,17 @@ async fn inspect_endpoint_reports_a_focus_and_its_structural_dependents() {
     // fact identically.
     assert_eq!(hit["gate_progress_omitted"], "already_canonical", "{hit}");
     assert_eq!(hit["promotion_policy"], "Swarm", "{hit}");
+    // #36 PR 3: the additive admission explanation is present for a
+    // Canonical hit too, with no next status and one plain reason.
+    let admission = &hit["admission"];
+    assert_eq!(admission["policy"], "Swarm", "{hit}");
+    assert_eq!(admission["status"], "Canonical", "{hit}");
+    assert!(admission.get("next").is_none(), "{hit}");
+    assert_eq!(admission["eligible"], false, "{hit}");
+    assert_eq!(
+        admission["reasons"][0], "canonical: no further promotion",
+        "{hit}"
+    );
 
     handle.abort();
 }
@@ -282,6 +293,10 @@ async fn inspect_keeps_the_gate_block_for_every_non_canonical_status() {
 /// replaced four irrelevant numbers with zero relevant ones. Pinned
 /// directly below by `inspect_reports_the_repromotion_cooldown_under_solo`.
 ///
+/// (Both lies are C2-era history. Since #36 PR 3 Solo needs the Stage 2 and
+/// Stage 3 verdicts too; this block keeps its C2 shape, and the per-policy
+/// account of every gate Solo now reads is the additive `admission` key.)
+///
 /// Both policies run, against the same concept and the same store: a
 /// `Solo`-only assertion would pass equally well if the four gates had been
 /// dropped for everyone. The query counters make the `Solo` half
@@ -324,6 +339,14 @@ async fn inspect_drops_only_the_swarm_gates_under_solo_and_keeps_them_under_swar
         // count is attributable and an absence is never a guess. Present at
         // both levels and on every policy.
         assert_eq!(hit["promotion_policy"], policy.as_str(), "{hit}");
+        // #36 PR 3: the admission explanation names the same policy, and
+        // only Solo's carries the score terms.
+        assert_eq!(hit["admission"]["policy"], policy.as_str(), "{hit}");
+        assert_eq!(
+            hit["admission"].get("solo").is_some(),
+            policy == PromotionPolicy::Solo,
+            "{hit}"
+        );
         let gp = &hit["gate_progress"];
         assert!(
             !gp.is_null(),
@@ -386,7 +409,9 @@ async fn inspect_drops_only_the_swarm_gates_under_solo_and_keeps_them_under_swar
 /// suppressed the operator got `status: "Venerable"`, no explanation
 /// whatsoever, and a page whose `renderGates` returned early — strictly
 /// worse than the pre-C2 payload, which at least carried this one true
-/// fact among the four bogus gates.
+/// fact among the four bogus gates. (Since #36 PR 3 a Solo Venerable needs
+/// the Stage 3 verdict as well, the cooldown included; the cooldown is
+/// still the determinant this fixture stalls on.)
 ///
 /// Deliberately asserted with the four swarm gates absent in the same
 /// breath: the point is not that the block exists but that it carries the
@@ -772,4 +797,59 @@ fn inspect_dependents_follow_the_dependents_case() {
         want.sort();
         assert_eq!(got, want, "inspect dependents of {name}");
     }
+}
+
+/// #36 PR 3 review L2: `gate_progress` and `admission` share one
+/// measurement. A Venerable focus under Swarm needs the span and the blast
+/// radius for both, and the store is asked for each exactly once.
+#[tokio::test]
+async fn inspect_measures_once_for_the_gate_block_and_the_admission() {
+    let store = Arc::new(MemoryStore::new());
+    let session = "t93-inspect-shared-measurement";
+    let sid = SessionId::new(session);
+    let iid = NodeId::new();
+    let now = Utc::now();
+    let cid = NodeId::new();
+    let mut c = concept(sid.clone(), cid, iid, "venerable concept", now);
+    c.canonization_status = CanonizationStatus::Venerable;
+    let mut batch = MutationBatch::new();
+    batch.push(Mutation::UpsertNode {
+        node: Node::Interaction(Interaction {
+            event_time: None,
+            id: iid,
+            session_id: sid.clone(),
+            agent_id: AgentId::from("agent-a"),
+            prompt_text: Some("shared measurement".to_string()),
+            previous_id: None,
+            created_at: now,
+        }),
+    });
+    batch.push(Mutation::UpsertNode {
+        node: Node::Concept(c),
+    });
+    batch.push(Mutation::UpsertEdge {
+        edge: edge(NodeId::new(), sid.clone(), iid, cid, EdgeType::Derives, now),
+    });
+    store.flush(&batch, None).await.expect("seed");
+    let blast_calls = Arc::new(AtomicUsize::new(0));
+    let span_calls = Arc::new(AtomicUsize::new(0));
+    let counted = Counting {
+        inner: Shared(store),
+        blast_radius_calls: blast_calls.clone(),
+        interaction_span_calls: span_calls.clone(),
+        fail_gate_queries: false,
+    };
+    let (addr, handle) = spawn(state_from_backends(
+        backends_with_store(Box::new(counted)),
+        session,
+        None,
+    ))
+    .await;
+    let hit = get_json(addr, "/api/inspect?focus=venerable%20concept").await;
+    assert_eq!(hit["status"], "Venerable", "{hit}");
+    assert!(hit["gate_progress"].is_object(), "{hit}");
+    assert_eq!(hit["admission"]["next"], "Canonical", "{hit}");
+    assert_eq!(blast_calls.load(Ordering::SeqCst), 1, "one blast_radius");
+    assert_eq!(span_calls.load(Ordering::SeqCst), 1, "one span");
+    handle.abort();
 }

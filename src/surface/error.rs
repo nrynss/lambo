@@ -52,6 +52,9 @@ pub(crate) fn err_class(err: &LamboError) -> &'static str {
         // #22 PR 4: its own class, so the ledger's `error_kind` tells a
         // caller-fixable id collision from an embedder refusal.
         LamboError::ImageIdTaken(_) => "image id taken",
+        // #36 PR 4: a caller-fixable refusal of a reference, its own class
+        // so the ledger's `error_kind` tells it from a store fault.
+        LamboError::Reference(_) => "reference refused",
         LamboError::Other(_) => "internal error",
     }
 }
@@ -66,6 +69,9 @@ pub(crate) fn err_class(err: &LamboError) -> &'static str {
 /// its only field is the caller's own image id. Even that id is shown only
 /// when it has the published shape (`[a-z0-9]{1,64}`), so nothing else can
 /// ride on it.
+///
+/// **And one more by type** (#36 PR 4): a [`LamboError::Reference`] says
+/// which reference was refused and why, so the caller can fix it.
 ///
 /// **And one by kind** (#22 PR 6 review Low 1): a store error that is a
 /// vector read refusing a probe outside the session's embedding space
@@ -87,6 +93,11 @@ pub(crate) fn model_safe_message(err: &LamboError) -> String {
                  image id"
             )
         }
+        // #36 PR 4: a refused reference says which reference and why, by
+        // type (J1-R2-2): its text is the caller's own reference, shortened
+        // and escaped, and session-local ids and content the caller can read
+        // through recall and inspect.
+        LamboError::Reference(_) => err.to_string(),
         LamboError::Store(e) if e.is_embedding_contract_refusal() => {
             "store error: the session's embedding contract no longer matches this query \
              (it changed mid-query, or the vector width differs); re-check the session's \

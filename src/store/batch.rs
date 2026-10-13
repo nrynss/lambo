@@ -662,6 +662,7 @@ mod tests {
                 produces: vec![],
                 modifies: vec![],
                 depends_on: vec![],
+                depends_on_pins: vec![],
             },
             created_at: ts(0),
             outcome: None,

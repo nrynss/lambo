@@ -451,7 +451,11 @@ fn demo_outcome_meets_spec_13_and_is_identical_across_two_runs() {
     assert!(o1.contains("interactions        12"), "{o1}");
     assert!(o1.contains("concepts            27"), "{o1}");
     assert!(o1.contains("edges               114"), "{o1}");
-    assert!(o1.contains("canonization_events 5"), "{o1}");
+    // 15 since #36 PR 3: evidence-led Stage 1 admits ten Candidates (every
+    // concept past the survival floor with dependents from two other
+    // interactions), four of them reach Venerable and `user schema` alone
+    // goes Canonical. Under the P90 quota it was 5.
+    assert!(o1.contains("canonization_events 15"), "{o1}");
     assert!(o1.contains("canonical           1"), "{o1}");
 
     // Step 2 outcome: the single canonical is `user schema` with a Stage-3

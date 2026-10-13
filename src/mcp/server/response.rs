@@ -29,7 +29,7 @@ use crate::writeq::{ReceiptAnswer, ReceiptId};
 pub(super) fn tool_err(what: &str, err: LamboError) -> CallToolResult {
     // An image id a text concept already holds is a fact the caller fixes
     // (choose another id), not a server fault, so it is a warning.
-    if matches!(err, LamboError::ImageIdTaken(_)) {
+    if matches!(err, LamboError::ImageIdTaken(_) | LamboError::Reference(_)) {
         tracing::warn!(
             tool = what,
             error = %err,

@@ -1,124 +1,190 @@
-//! Stage 1 — Candidate (T6.1, spec §10).
+//! Stage 1 — Candidate (T6.1, spec §10, #36 PR 3).
 //!
 //! Pure predicate: reports which concepts currently clear Stage 1. It does
 //! **not** apply a `None → Candidate` transition (T6.4 owns writes).
 //!
-//! A concept passes when every rule below holds:
+//! ## Evidence-led admission (#36 PR 3)
 //!
-//! 1. **Session gate.** Evaluated only when the session has at least
-//!    `min_peer_count` **non-Canonical** concepts (`status != Canonical`).
-//!    Below that threshold the result is empty — nobody passes.
-//! 2. **`gc_survived >= 3`.**
-//! 3. **Strictly above P90.** The concept's daemon composite (from the
-//!    caller's [`ScoreTable`]) is **strictly greater** than the 90th
-//!    percentile of non-Canonical peer scores. Exactly-at-P90 does not pass.
-//! 4. **Missing [`ScoreTable`] entry → `0.0`**, same as assemble (T5.3).
-//!    A non-finite or negative entry is likewise read as `0.0` — the ALGO-10
-//!    `sane_weight` convention `recall::assemble` applies to the identical
-//!    lookup (see [`sane_score`]).
+//! A concept passes when both hold:
 //!
-//! Non-Canonical peers are every concept with `status != Canonical`,
-//! **including the candidate** — the session-wide distribution is not
-//! leave-one-out. Canonical concepts are neither peers nor candidates.
+//! 1. **`gc_survived >= 3`** ([`MIN_GC_SURVIVED`]): it has outlived three GC
+//!    sweeps.
+//! 2. **At least two other dependent interactions**
+//!    ([`MIN_DEPENDENT_INTERACTIONS`]): its aged dependents (#36's
+//!    `dependents` relation, [`crate::types::Edge::dependence`]) originate in
+//!    at least two distinct interactions **other than the concept's own
+//!    origin**, each interaction itself older than the age floor. This is the
+//!    same measurement as `distinct` in Stage 2's
+//!    [`crate::store::GraphStore::interaction_span_with_window`], with a lower
+//!    bar (2 here, 3 at Stage 2).
 //!
-//! ## P90 definition (nearest-rank)
+//! Canonical concepts are never candidates. There is **no peer minimum and no
+//! percentile cut**: the spec's "20 non-Canonical peers and strictly above
+//! P90" was a quota, and a quota moves with whatever else the session holds.
+//! Measured on a rig snapshot (design note `design-36-canonization.md`),
+//! replaying recall traffic at k = 0/1/2 moved the P90 Canonical count
+//! 68/74/78 and flipped which fair-test ruling reached Venerable; the evidence
+//! floor gave the same set every time. A young or small session (fewer than
+//! twenty concepts) can now qualify on evidence alone.
 //!
-//! Locked as the **nearest-rank** method (Wikipedia / NIST one-sided rank),
-//! not linear interpolation:
+//! ## The composite score orders, it does not select
 //!
-//! ```text
-//! rank = ceil(0.90 × n)     // 1-based, n = non-Canonical peer count
-//! P90  = sorted_ascending[rank - 1]
-//! ```
+//! [`stage1_candidates`] returns the admitted set **ordered** by the daemon
+//! composite (from the caller's [`ScoreTable`]), highest first, then canonical
+//! key ascending, then `NodeId` ascending ([`tie_break_by_key`], issue #2).
+//! The order only decides which members a bounded cycle takes first
+//! (`EvalParams::batch_size`); it never decides membership, so access
+//! frequency (#30) can reorder the queue but cannot admit or refuse anyone.
+//! A missing, non-finite or negative score entry orders as `0.0` (ALGO-10's
+//! `sane_weight` convention, see [`sane_score`]).
 //!
-//! For `n = 20`, `rank = 18` so P90 is the 18th smallest score. Linear
-//! interpolators (Excel `PERCENTILE.INC` / NumPy default, Hyndman-Fan R7)
-//! would yield a non-sample value (`18.1` on `1..=20`) and are rejected by
-//! `p90_nearest_rank_is_the_ceil_np_value`.
+//! ## Batched input
 //!
-//! Output is `NodeId` ascending so the set is a total order regardless of
-//! `HashMap` walk order.
+//! The dependent-interaction count is computed for every concept in **one
+//! pass over the edges** ([`dependent_interaction_counts`]), over the in-RAM
+//! graph the cycle already holds under its read guard: no per-node store
+//! round-trip, so Stage 1 stays I/O-free (the evaluator's R2-4 property). It
+//! follows the stores' Stage 2 rules exactly (session-scoped concepts,
+//! edge about-time and interaction about-time at or before `now - min_age`,
+//! own origin excluded, a dependent reached twice counted once), and a
+//! parity test holds it to `MemoryStore` and SQLite on the shared #36
+//! dependents case. [`dependent_interactions`] answers the same question for
+//! one node in `O(degree)`, for inspect.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::time::Duration;
+
+use chrono::{DateTime, Utc};
 
 use crate::graph::Graph;
-#[cfg(test)]
-use crate::types::Node;
-use crate::types::{CanonizationStatus, NodeId, ScoreTable};
+use crate::types::{tie_break_by_key, CanonizationStatus, Edge, Node, NodeId, ScoreTable};
 
 /// Stage 1 survival floor (spec §10).
 pub(super) const MIN_GC_SURVIVED: i32 = 3;
-/// Percentile of the non-Canonical peer distribution (spec §10).
-const PEER_PERCENTILE: f64 = 0.90;
 
-/// Concepts that currently clear Stage 1, in `NodeId` ascending order.
-pub fn stage1_candidates(graph: &Graph, scores: &ScoreTable, min_peer_count: usize) -> Vec<NodeId> {
-    let peers: Vec<&crate::types::Concept> = graph
+/// Stage 1 evidence floor (#36 PR 3): distinct dependent origin interactions,
+/// other than the concept's own, that a Candidate needs.
+pub(super) const MIN_DEPENDENT_INTERACTIONS: usize = 2;
+
+/// Whether Stage 1's two bars hold for these measurements (`>=` on both).
+pub(crate) fn stage1_evidence_passes(gc_survived: i32, dependent_interactions: usize) -> bool {
+    gc_survived >= MIN_GC_SURVIVED && dependent_interactions >= MIN_DEPENDENT_INTERACTIONS
+}
+
+/// Concepts that currently clear Stage 1, ordered by composite score
+/// (highest first), then canonical key, then `NodeId` (see the module docs).
+///
+/// `min_age` is the age floor Stage 2 uses (`canonization_edge_min_age`):
+/// a dependence edge or a dependent's origin interaction younger than
+/// `now - min_age` does not count yet.
+pub fn stage1_candidates(
+    graph: &Graph,
+    scores: &ScoreTable,
+    min_age: Duration,
+    now: DateTime<Utc>,
+) -> Vec<NodeId> {
+    let counts = dependent_interaction_counts(graph, min_age, now);
+    let mut passed: Vec<&crate::types::Concept> = graph
         .concepts()
         .filter(|c| c.canonization_status != CanonizationStatus::Canonical)
+        .filter(|c| stage1_evidence_passes(c.gc_survived, counts.get(&c.id).copied().unwrap_or(0)))
         .collect();
-    if peers.len() < min_peer_count {
-        return Vec::new();
-    }
-
     let score_of: HashMap<NodeId, f64> = scores.ranked.iter().map(|s| (s.item, s.score)).collect();
     let daemon_score = |id: NodeId| sane_score(score_of.get(&id).copied().unwrap_or(0.0));
+    passed.sort_by(|a, b| {
+        daemon_score(b.id)
+            .total_cmp(&daemon_score(a.id))
+            .then_with(|| {
+                tie_break_by_key(Some(&a.canonical_key), &a.id, Some(&b.canonical_key), &b.id)
+            })
+    });
+    passed.into_iter().map(|c| c.id).collect()
+}
 
-    let mut peer_scores: Vec<f64> = peers.iter().map(|c| daemon_score(c.id)).collect();
-    peer_scores.sort_by(|a, b| a.total_cmp(b));
-    let p90 = percentile_nearest_rank(&peer_scores, PEER_PERCENTILE);
+/// `now - min_age`, or `None` when that instant is not representable (an
+/// absurd floor): then nothing is old enough and nothing counts, which is
+/// the conservative answer.
+fn age_cutoff(min_age: Duration, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    let age = chrono::Duration::from_std(min_age).ok()?;
+    now.checked_sub_signed(age)
+}
 
-    let mut passed: Vec<NodeId> = peers
-        .iter()
-        .filter(|c| c.gc_survived >= MIN_GC_SURVIVED && daemon_score(c.id) > p90)
-        .map(|c| c.id)
-        .collect();
-    passed.sort_by_key(|id| id.0);
-    passed
+/// The `(pillar, interaction)` this edge contributes, if any: the edge
+/// declares a dependence ([`Edge::dependence`]), is aged, both ends are
+/// concepts of `graph`, and the dependent's origin interaction is in `graph`,
+/// aged, and not the pillar's own origin.
+fn dependent_origin(graph: &Graph, e: &Edge, cutoff: DateTime<Utc>) -> Option<(NodeId, NodeId)> {
+    if e.about_time() > cutoff {
+        return None;
+    }
+    let (pillar, dependent) = e.dependence()?;
+    let (Some(Node::Concept(p)), Some(Node::Concept(d))) =
+        (graph.node(pillar), graph.node(dependent))
+    else {
+        return None;
+    };
+    if d.origin_interaction == p.origin_interaction {
+        return None;
+    }
+    match graph.node(d.origin_interaction) {
+        Some(Node::Interaction(i)) if i.about_time() <= cutoff => Some((pillar, i.id)),
+        _ => None,
+    }
+}
+
+/// For every concept with at least one, the number of distinct interactions
+/// its aged dependents originate in, other than its own origin (see the
+/// module docs). One pass over the edges.
+pub fn dependent_interaction_counts(
+    graph: &Graph,
+    min_age: Duration,
+    now: DateTime<Utc>,
+) -> HashMap<NodeId, usize> {
+    let Some(cutoff) = age_cutoff(min_age, now) else {
+        return HashMap::new();
+    };
+    let mut pairs: HashSet<(NodeId, NodeId)> = HashSet::new();
+    for e in graph.edges() {
+        if let Some(pair) = dependent_origin(graph, e, cutoff) {
+            pairs.insert(pair);
+        }
+    }
+    let mut out: HashMap<NodeId, usize> = HashMap::new();
+    for (pillar, _) in pairs {
+        *out.entry(pillar).or_insert(0) += 1;
+    }
+    out
+}
+
+/// [`dependent_interaction_counts`] for one node, through the adjacency
+/// index (`O(degree)`). Agrees with the batched map for every node.
+pub fn dependent_interactions(
+    graph: &Graph,
+    node: NodeId,
+    min_age: Duration,
+    now: DateTime<Utc>,
+) -> usize {
+    let Some(cutoff) = age_cutoff(min_age, now) else {
+        return 0;
+    };
+    graph
+        .incident_edges(node)
+        .into_iter()
+        .filter_map(|e| dependent_origin(graph, e, cutoff))
+        .filter(|(pillar, _)| *pillar == node)
+        .map(|(_, interaction)| interaction)
+        .collect::<HashSet<NodeId>>()
+        .len()
 }
 
 /// Finite, non-negative score, else `0.0` — ALGO-10's `sane_weight`
-/// convention, applied at the point of use.
-///
-/// The module claims parity with `recall::assemble`'s treatment of the same
-/// `ScoreTable` lookup, and assemble sanitizes. Without this the percentile
-/// is not merely wrong but *closing*: `total_cmp` sorts NaN above every real
-/// score, so three NaNs among twenty peers push P90 itself to NaN, `score >
-/// NaN` is false for everyone, and the stage silently admits nobody. No
-/// `rescore` path produces NaN today (every division is guarded), which is
-/// why this was P3 — but "unreachable from today's producer" is not the same
-/// contract as "sanitized at the point of use", and the doc claimed the
-/// latter.
+/// convention, applied at the point of use, so a NaN can neither jump the
+/// queue (`total_cmp` sorts NaN above every real score) nor be dropped.
 fn sane_score(score: f64) -> f64 {
     if score.is_finite() && score >= 0.0 {
         score
     } else {
         0.0
-    }
-}
-
-/// Nearest-rank percentile of a **sorted ascending** sample.
-///
-/// `rank = ceil(p × n)` (1-based), then `sorted[rank - 1]`. An empty sample
-/// is not a defined percentile; the session gate is the only caller and
-/// never reaches here with `n == 0` unless `min_peer_count == 0`, in which
-/// case we treat P90 as `+∞` so nobody can be strictly above it.
-fn percentile_nearest_rank(sorted_asc: &[f64], p: f64) -> f64 {
-    let n = sorted_asc.len();
-    if n == 0 {
-        return f64::INFINITY;
-    }
-    let rank = (p * n as f64).ceil() as usize;
-    let idx = rank.clamp(1, n) - 1;
-    sorted_asc[idx]
-}
-
-/// Concept lookup used by tests (Graph exposes [`Graph::node`], not `concept`).
-#[cfg(test)]
-fn concept_of(graph: &Graph, id: NodeId) -> Option<&crate::types::Concept> {
-    match graph.node(id) {
-        Some(Node::Concept(c)) => Some(c),
-        _ => None,
     }
 }
 
@@ -129,13 +195,15 @@ mod tests {
     use crate::config::ScoringWeights;
     #[cfg(feature = "fixtures")]
     use crate::daemon::score::rescore;
-    use crate::types::{AgentId, Concept, ConceptType, Interaction, Scored, SessionId};
-    use chrono::{DateTime, TimeZone, Utc};
+    use crate::types::{AgentId, Concept, ConceptType, EdgeType, Interaction, Scored, SessionId};
+    use chrono::{TimeZone, Utc};
     use uuid::Uuid;
 
-    fn ts() -> DateTime<Utc> {
+    fn now() -> DateTime<Utc> {
         Utc.timestamp_opt(1_752_000_000, 0).unwrap()
     }
+
+    const MIN_AGE: Duration = Duration::from_secs(60);
 
     fn sid() -> SessionId {
         SessionId::from("test-session")
@@ -145,28 +213,33 @@ mod tests {
         NodeId(Uuid::from_u64_pair(2, id))
     }
 
-    fn interaction() -> Interaction {
+    fn iid(id: u64) -> NodeId {
+        NodeId(Uuid::from_u64_pair(1, id))
+    }
+
+    /// Interaction `id`, `mins` minutes before [`now`].
+    fn interaction(id: u64, mins: i64) -> Interaction {
         Interaction {
             event_time: None,
-            id: NodeId(Uuid::from_u64_pair(1, 1)),
+            id: iid(id),
             session_id: sid(),
             agent_id: AgentId::from("agent-a"),
             prompt_text: Some("prompt".into()),
             previous_id: None,
-            created_at: ts(),
+            created_at: now() - chrono::Duration::minutes(mins),
         }
     }
 
-    fn concept(id: u64, gc: i32, status: CanonizationStatus) -> Concept {
+    fn concept(id: u64, origin: u64, gc: i32, status: CanonizationStatus) -> Concept {
         Concept {
             id: nid(id),
             session_id: sid(),
             content: format!("c{id}"),
             canonical_key: format!("c{id}"),
-            concept_type: ConceptType::Entity,
-            origin_interaction: NodeId(Uuid::from_u64_pair(1, 1)),
+            concept_type: ConceptType::Logic,
+            origin_interaction: iid(origin),
             origin_agent: AgentId::from("agent-a"),
-            created_at: ts(),
+            created_at: now() - chrono::Duration::minutes(100),
             access_count: 0,
             last_accessed: None,
             gc_survived: gc,
@@ -180,13 +253,36 @@ mod tests {
         }
     }
 
+    fn edge(src: u64, tgt: u64, ty: EdgeType, mins: i64) -> Edge {
+        let at = now() - chrono::Duration::minutes(mins);
+        Edge {
+            event_time: None,
+            id: NodeId::new(),
+            session_id: sid(),
+            source: nid(src),
+            target: nid(tgt),
+            edge_type: ty,
+            weight: 1.0,
+            reinforcements: 1,
+            created_at: at,
+            last_reinforced: at,
+        }
+    }
+
+    /// Five interactions 100..60 minutes back (`i1`..`i5`) and one at `now`
+    /// (`i9`, young under [`MIN_AGE`]), plus `concepts`.
     fn graph_with(concepts: impl IntoIterator<Item = Concept>) -> Graph {
         let mut g = Graph::new(sid());
-        let i = interaction();
-        let iid = i.id;
-        g.insert_interaction(i).unwrap();
+        let mut previous = None;
+        for (id, mins) in [(1, 100), (2, 90), (3, 80), (4, 70), (5, 60), (9, 0)] {
+            let mut i = interaction(id, mins);
+            i.previous_id = previous;
+            previous = Some(i.id);
+            g.insert_interaction(i).unwrap();
+        }
         for c in concepts {
-            g.insert_concept(c, iid).unwrap();
+            let origin = c.origin_interaction;
+            g.insert_concept(c, origin).unwrap();
         }
         g
     }
@@ -201,266 +297,325 @@ mod tests {
         }
     }
 
-    fn n_none(n: u64, gc: i32) -> Vec<Concept> {
-        (1..=n)
-            .map(|i| concept(i, gc, CanonizationStatus::None))
-            .collect()
+    /// Pillar `1` (origin `i1`) with dependents `10 + k` originating in the
+    /// given interactions, each citing it with an aged `Dependency` edge.
+    fn pillar_with(gc: i32, dependent_origins: &[u64]) -> Graph {
+        let mut concepts = vec![concept(1, 1, gc, CanonizationStatus::None)];
+        for (k, &origin) in dependent_origins.iter().enumerate() {
+            concepts.push(concept(10 + k as u64, origin, 0, CanonizationStatus::None));
+        }
+        let mut g = graph_with(concepts);
+        for k in 0..dependent_origins.len() as u64 {
+            g.upsert_edge(edge(10 + k, 1, EdgeType::Dependency, 30))
+                .unwrap();
+        }
+        g
     }
 
-    /// Nearest-rank P90 on `1..=n` is `ceil(0.90 n)`, not the R7 interpolate.
+    /// Design test 1: a graph far below the old 20-peer minimum (three
+    /// concepts) admits a Candidate on evidence alone. Fails if any peer
+    /// minimum survives.
     #[test]
-    fn p90_nearest_rank_is_the_ceil_np_value() {
-        let v20: Vec<f64> = (1..=20).map(|i| i as f64).collect();
-        assert_eq!(percentile_nearest_rank(&v20, 0.90), 18.0);
-        let v21: Vec<f64> = (1..=21).map(|i| i as f64).collect();
-        assert_eq!(percentile_nearest_rank(&v21, 0.90), 19.0);
-        // Linear R7 on n=10 is 9.1; nearest-rank is the 9th sample.
-        let v10: Vec<f64> = (1..=10).map(|i| i as f64).collect();
-        assert_eq!(percentile_nearest_rank(&v10, 0.90), 9.0);
-    }
-
-    /// 19 non-Canonical → empty, even when a node has high score + gc >= 3.
-    /// Fails if the gate is `> 18` / `>= 19` (off-by-one toward open).
-    #[test]
-    fn peer_count_gate_19_is_empty_even_with_high_score() {
-        let g = graph_with(n_none(19, 5));
-        let scores = table(&[(1, 1.0)]);
-        assert!(
-            stage1_candidates(&g, &scores, 20).is_empty(),
-            "19 non-Canonical peers must not open Stage 1"
-        );
-    }
-
-    /// Complementary lock: 20 non-Canonical with a strictly-above-P90 node
-    /// must produce a candidate. Fails if the gate is `>= 21`.
-    #[test]
-    fn peer_count_gate_20_evaluates() {
-        // 19 at 0.1 + one at 1.0; nearest-rank P90 (n=20) is 0.1.
-        let g = graph_with(n_none(20, 5));
-        let mut pairs: Vec<(u64, f64)> = (1..=19).map(|i| (i, 0.1)).collect();
-        pairs.push((20, 1.0));
-        let passed = stage1_candidates(&g, &table(&pairs), 20);
-        assert_eq!(passed, vec![nid(20)]);
-    }
-
-    /// Exactly-at-P90 fails; just-above passes. Fails if the cut is `>=`.
-    #[test]
-    fn exactly_at_p90_does_not_pass_just_above_does() {
-        // n=20, rank=18 → P90 = sorted[17].
-        // 17 × 0.1, two × 0.5 (at P90), one × 0.51 (above).
-        let g = graph_with(n_none(20, 5));
-        let mut pairs: Vec<(u64, f64)> = (1..=17).map(|i| (i, 0.1)).collect();
-        pairs.push((18, 0.5));
-        pairs.push((19, 0.5));
-        pairs.push((20, 0.51));
-        let passed = stage1_candidates(&g, &table(&pairs), 20);
-        assert!(
-            !passed.contains(&nid(18)) && !passed.contains(&nid(19)),
-            "exactly-at-P90 must not pass: {passed:?}"
-        );
-        assert_eq!(passed, vec![nid(20)]);
-    }
-
-    /// gc_survived < 3 fails even when the score is strictly above P90.
-    #[test]
-    fn gc_survived_below_3_fails_even_above_p90() {
-        let mut concepts = n_none(19, 5);
-        concepts.push(concept(20, 2, CanonizationStatus::None));
-        let g = graph_with(concepts);
-        let mut pairs: Vec<(u64, f64)> = (1..=19).map(|i| (i, 0.1)).collect();
-        pairs.push((20, 1.0));
-        let passed = stage1_candidates(&g, &table(&pairs), 20);
-        assert!(
-            !passed.contains(&nid(20)),
-            "gc_survived=2 must not pass: {passed:?}"
-        );
-        assert!(passed.is_empty());
-    }
-
-    /// Complementary lock: `gc_survived == 3` passes when the score is
-    /// strictly above P90. Fails if the floor is `> 3` / `>= 4`.
-    #[test]
-    fn gc_survived_3_passes_when_above_p90() {
-        let mut concepts = n_none(19, 5);
-        concepts.push(concept(20, 3, CanonizationStatus::None));
-        let g = graph_with(concepts);
-        let mut pairs: Vec<(u64, f64)> = (1..=19).map(|i| (i, 0.1)).collect();
-        pairs.push((20, 1.0));
-        let passed = stage1_candidates(&g, &table(&pairs), 20);
-        assert_eq!(passed, vec![nid(20)]);
-    }
-
-    /// Canonicals do not count toward `min_peer_count`. 19 None + N Canonicals
-    /// stay closed even when a None has high score + `gc >= 3`. Fails if the
-    /// gate counts every concept.
-    #[test]
-    fn canonicals_do_not_count_toward_peer_gate() {
-        let mut concepts = n_none(19, 5);
-        concepts.push(concept(20, 5, CanonizationStatus::Canonical));
-        concepts.push(concept(21, 5, CanonizationStatus::Canonical));
-        concepts.push(concept(22, 5, CanonizationStatus::Canonical));
-        let g = graph_with(concepts);
-        // Canonical scores stay low so a broken gate is the only way the
-        // high-score None (id 19) could pass — not a lifted P90.
-        let mut pairs: Vec<(u64, f64)> = (1..=18).map(|i| (i, 0.1)).collect();
-        pairs.push((19, 1.0));
-        pairs.push((20, 0.0));
-        pairs.push((21, 0.0));
-        pairs.push((22, 0.0));
-        let passed = stage1_candidates(&g, &table(&pairs), 20);
-        assert!(
-            passed.is_empty(),
-            "19 non-Canonical + Canonicals must not open Stage 1: {passed:?}"
-        );
-    }
-
-    /// The peer set is "**not** Canonical", not "== None". 19 `None` plus one
-    /// `Venerable` is 20 non-Canonical peers, so the session gate opens and a
-    /// high-scoring node must still be promoted. Under a `== None` peer set
-    /// this session silently stops producing Candidates forever — and the
-    /// stage-1 fixture cannot catch it (it holds exactly 20 `None` concepts,
-    /// so dropping its one Venerable still leaves the gate open at exactly
-    /// 20: pure luck).
-    #[test]
-    fn nineteen_none_plus_one_venerable_opens_the_session_gate() {
-        let mut concepts = n_none(19, 5);
-        concepts.push(concept(20, 5, CanonizationStatus::Venerable));
-        let g = graph_with(concepts);
-        let mut pairs: Vec<(u64, f64)> = (1..=18).map(|i| (i, 0.1)).collect();
-        pairs.push((19, 1.0));
-        pairs.push((20, 0.1));
-        let passed = stage1_candidates(&g, &table(&pairs), 20);
+    fn a_graph_with_fewer_than_twenty_peers_qualifies_on_evidence() {
+        let g = pillar_with(3, &[2, 3]);
+        assert_eq!(g.concepts().count(), 3);
         assert_eq!(
-            passed,
-            vec![nid(19)],
-            "a Venerable is a non-Canonical peer; the gate must open at 20"
+            stage1_candidates(&g, &table(&[]), MIN_AGE, now()),
+            vec![nid(1)]
         );
     }
 
-    /// The complement: a Venerable's score enters the P90 **distribution**,
-    /// so it moves the cut. 20 `None` + 1 `Venerable` is n=21, rank
-    /// `ceil(0.9 × 21) = 19` → P90 is the 19th smallest (0.5), and only the
-    /// 0.6 node clears it. Excluding the Venerable gives n=20, rank 18 → P90
-    /// is 0.4 and the 0.5 node passes too — a different answer, which is what
-    /// makes this discriminating where a `contains` assertion would not be.
-    /// The Venerable carries `gc_survived = 0` so it cannot pass itself and
-    /// muddy the output.
+    /// Design test 2, survival half: two other dependent interactions but
+    /// only two GC survivals is refused; three passes (`>=`, not `>`).
     #[test]
-    fn a_venerable_peers_score_moves_the_p90_cut() {
-        let mut concepts = n_none(20, 5);
-        concepts.push(concept(21, 0, CanonizationStatus::Venerable));
-        let g = graph_with(concepts);
-        let mut pairs: Vec<(u64, f64)> = (1..=17).map(|i| (i, 0.1)).collect();
-        pairs.push((18, 0.4));
-        pairs.push((19, 0.5));
-        pairs.push((20, 0.6));
-        pairs.push((21, 10.0));
-        let passed = stage1_candidates(&g, &table(&pairs), 20);
+    fn fewer_than_three_survivals_is_refused() {
+        let g = pillar_with(2, &[2, 3]);
+        assert!(stage1_candidates(&g, &table(&[]), MIN_AGE, now()).is_empty());
+        let g = pillar_with(3, &[2, 3]);
         assert_eq!(
-            passed,
-            vec![nid(20)],
-            "the Venerable's 10.0 must be in the peer distribution, lifting \
-             P90 from 0.4 to 0.5 and rejecting the 0.5 node"
+            stage1_candidates(&g, &table(&[]), MIN_AGE, now()),
+            vec![nid(1)]
         );
     }
 
-    /// Canonicals are not peers (their score must not lift P90) and are not
-    /// candidates. Discriminating: 17×0.1 + 0.4 + two×0.5. Correct P90
-    /// (n=20, rank 18) is 0.4 so both 0.5s pass; including Canonical 10.0
-    /// makes n=21 rank 19 land on 0.5 and rejects them. A unique-max
-    /// candidate still clears the lifted P90 (0.45), which is why 0.45
-    /// cannot lock this.
+    /// Design test 2, origin half: one other dependent interaction is
+    /// refused, however many dependents share it; a dependent minted in the
+    /// pillar's own interaction is not another interaction.
     #[test]
-    fn canonical_concepts_are_neither_peers_nor_candidates() {
-        let mut concepts = n_none(19, 5);
-        concepts.push(concept(20, 5, CanonizationStatus::None));
-        concepts.push(concept(21, 5, CanonizationStatus::Canonical));
-        let g = graph_with(concepts);
-        let mut pairs: Vec<(u64, f64)> = (1..=17).map(|i| (i, 0.1)).collect();
-        pairs.push((18, 0.4));
-        pairs.push((19, 0.5));
-        pairs.push((20, 0.5));
-        pairs.push((21, 10.0));
-        let passed = stage1_candidates(&g, &table(&pairs), 20);
-        assert!(
-            !passed.contains(&nid(21)),
-            "Canonical must not be a candidate: {passed:?}"
-        );
+    fn fewer_than_two_other_dependent_interactions_is_refused() {
+        // Three dependents, all from i2: one interaction.
+        let g = pillar_with(9, &[2, 2, 2]);
+        assert_eq!(dependent_interactions(&g, nid(1), MIN_AGE, now()), 1);
+        assert!(stage1_candidates(&g, &table(&[]), MIN_AGE, now()).is_empty());
+        // i2 plus the pillar's own i1: still one *other* interaction.
+        let g = pillar_with(9, &[2, 1]);
+        assert_eq!(dependent_interactions(&g, nid(1), MIN_AGE, now()), 1);
+        assert!(stage1_candidates(&g, &table(&[]), MIN_AGE, now()).is_empty());
+        // A young origin (i9, at now) does not count under the floor...
+        let g = pillar_with(9, &[2, 9]);
+        assert_eq!(dependent_interactions(&g, nid(1), MIN_AGE, now()), 1);
+        assert!(stage1_candidates(&g, &table(&[]), MIN_AGE, now()).is_empty());
+        // ...and does with no floor.
         assert_eq!(
-            passed,
-            vec![nid(19), nid(20)],
-            "Canonical's 10.0 must not enter the peer P90"
+            stage1_candidates(&g, &table(&[]), Duration::ZERO, now()),
+            vec![nid(1)]
         );
+    }
+
+    /// A young dependence edge does not count until it ages; neither do
+    /// edges that declare no dependence (`Causal`, `Contradicts`,
+    /// `CoOccurrence`), nor the wrong direction of `Dependency` (the pillar
+    /// depending on something) or of `Hierarchical` (the pillar's parent).
+    #[test]
+    fn only_aged_declared_dependence_counts() {
+        let mut concepts = vec![concept(1, 1, 9, CanonizationStatus::None)];
+        for (id, origin) in [(10, 2), (11, 3), (12, 4), (13, 5), (14, 2), (15, 3)] {
+            concepts.push(concept(id, origin, 0, CanonizationStatus::None));
+        }
+        let mut g = graph_with(concepts);
+        g.upsert_edge(edge(10, 1, EdgeType::Dependency, 0)).unwrap(); // young
+        g.upsert_edge(edge(11, 1, EdgeType::Causal, 30)).unwrap();
+        g.upsert_edge(edge(12, 1, EdgeType::Contradicts, 30))
+            .unwrap();
+        g.upsert_edge(edge(13, 1, EdgeType::CoOccurrence, 30))
+            .unwrap();
+        g.upsert_edge(edge(1, 14, EdgeType::Dependency, 30))
+            .unwrap(); // 1 depends on 14
+        g.upsert_edge(edge(15, 1, EdgeType::Hierarchical, 30))
+            .unwrap(); // 15 is 1's parent
+        assert_eq!(dependent_interactions(&g, nid(1), MIN_AGE, now()), 0);
+        assert!(stage1_candidates(&g, &table(&[]), MIN_AGE, now()).is_empty());
+        // The young edge counts with no floor, alone: one interaction.
+        assert_eq!(dependent_interactions(&g, nid(1), Duration::ZERO, now()), 1);
+        // The reversed edges make 14 and 15 the pillars instead.
+        let counts = dependent_interaction_counts(&g, MIN_AGE, now());
+        assert_eq!(counts.get(&nid(14)), Some(&1));
+        assert_eq!(counts.get(&nid(15)), Some(&1));
+    }
+
+    /// `Hierarchical` children count like `Dependency` sources, and a
+    /// dependent reached by both is one dependent.
+    #[test]
+    fn hierarchical_children_count_and_double_declarations_count_once() {
+        let mut g = pillar_with(3, &[2]);
+        g.insert_concept(concept(20, 3, 0, CanonizationStatus::None), iid(3))
+            .unwrap();
+        g.upsert_edge(edge(1, 20, EdgeType::Hierarchical, 30))
+            .unwrap();
+        g.upsert_edge(edge(1, 10, EdgeType::Hierarchical, 30))
+            .unwrap();
+        assert_eq!(dependent_interactions(&g, nid(1), MIN_AGE, now()), 2);
         assert_eq!(
-            concept_of(&g, nid(21)).unwrap().canonization_status,
-            CanonizationStatus::Canonical
+            stage1_candidates(&g, &table(&[]), MIN_AGE, now()),
+            vec![nid(1)]
         );
     }
 
-    /// A ScoreTable miss is 0.0, not a skip and not an implicit pass.
+    /// Canonical concepts are never candidates; Candidates and Venerables
+    /// that still hold the evidence are reported (the cycle keeps only
+    /// still-`None` ones).
     #[test]
-    fn missing_score_table_entry_is_zero() {
-        let g = graph_with(n_none(20, 5));
-        // id 20 is absent from the table. 19 zeros + one implicit zero → P90 = 0.
-        let pairs: Vec<(u64, f64)> = (1..=19).map(|i| (i, 0.0)).collect();
-        let passed = stage1_candidates(&g, &table(&pairs), 20);
-        assert!(
-            passed.is_empty(),
-            "missing score must be 0.0, not above P90=0.0: {passed:?}"
-        );
+    fn canonical_concepts_are_not_candidates() {
+        for (status, admitted) in [
+            (CanonizationStatus::None, true),
+            (CanonizationStatus::Candidate, true),
+            (CanonizationStatus::Venerable, true),
+            (CanonizationStatus::Canonical, false),
+        ] {
+            let mut g = pillar_with(3, &[2, 3]);
+            if status != CanonizationStatus::None {
+                let c = match g.node(nid(1)) {
+                    Some(Node::Concept(c)) => c.clone(),
+                    _ => unreachable!(),
+                };
+                g.insert_concept(
+                    Concept {
+                        canonization_status: status,
+                        ..c
+                    },
+                    iid(1),
+                )
+                .unwrap();
+            }
+            let got = stage1_candidates(&g, &table(&[]), MIN_AGE, now());
+            assert_eq!(got.contains(&nid(1)), admitted, "{status:?}");
+        }
     }
 
-    /// F14: a non-finite score is `0.0` at the point of use (ALGO-10), so it
-    /// cannot poison the percentile. Three NaNs among twenty peers sort above
-    /// every real score under `total_cmp`, which lands P90 (rank 18 of 20)
-    /// on NaN and makes `score > p90` false for everyone — the stage closes
-    /// silently. Sanitized, the NaNs sort to the bottom as zeros and the
-    /// genuine top scorer still passes.
+    /// The composite orders, highest first, then canonical key, then id;
+    /// a missing or non-finite score orders as zero and never drops a
+    /// member.
     #[test]
-    fn non_finite_scores_do_not_poison_the_percentile() {
-        let g = graph_with(n_none(20, 5));
-        let mut pairs: Vec<(u64, f64)> = vec![
-            (1, f64::NAN),
-            (2, f64::NAN),
-            (3, f64::NAN),
-            (4, f64::NEG_INFINITY),
-        ];
-        pairs.extend((5..=19).map(|i| (i, 0.1)));
-        pairs.push((20, 1.0));
-        let passed = stage1_candidates(&g, &table(&pairs), 20);
-        assert_eq!(
-            passed,
-            vec![nid(20)],
-            "NaN peers must read as 0.0, not close the stage"
-        );
+    fn the_composite_orders_the_admitted_set_and_never_filters_it() {
+        let mut concepts = Vec::new();
+        for p in 1..=4u64 {
+            concepts.push(concept(p, 1, 3, CanonizationStatus::None));
+            concepts.push(concept(10 + p, 2, 0, CanonizationStatus::None));
+            concepts.push(concept(20 + p, 3, 0, CanonizationStatus::None));
+        }
+        let mut g = graph_with(concepts);
+        for p in 1..=4u64 {
+            g.upsert_edge(edge(10 + p, p, EdgeType::Dependency, 30))
+                .unwrap();
+            g.upsert_edge(edge(20 + p, p, EdgeType::Dependency, 30))
+                .unwrap();
+        }
+        // 4 high, 2 NaN (orders as 0.0), 1 and 3 absent (0.0): ties go to
+        // canonical key c1 < c2 < c3.
+        let got = stage1_candidates(&g, &table(&[(4, 0.9), (2, f64::NAN)]), MIN_AGE, now());
+        assert_eq!(got, vec![nid(4), nid(1), nid(2), nid(3)]);
     }
 
-    /// Output is NodeId-ascending, not score order.
+    /// Design test 3: replayed reads (access traffic, #30) move the composite
+    /// and so the order, never the admitted set. Each pillar's score is
+    /// recomputed after k replayed accesses on a rotating subset.
+    #[cfg(feature = "fixtures")]
     #[test]
-    fn passed_set_is_id_ascending() {
-        let g = graph_with(n_none(20, 5));
-        let mut pairs: Vec<(u64, f64)> = (1..=18).map(|i| (i, 0.1)).collect();
-        // Higher score on the higher id, so a score-desc sort would flip them.
-        pairs.push((19, 0.8));
-        pairs.push((20, 0.9));
-        let passed = stage1_candidates(&g, &table(&pairs), 20);
-        assert_eq!(passed, vec![nid(19), nid(20)]);
+    fn replayed_reads_preserve_eligibility() {
+        let mut concepts = Vec::new();
+        for p in 1..=6u64 {
+            concepts.push(concept(p, 1, 3, CanonizationStatus::None));
+            // Pillars 1..=3 have two other interactions, 4..=6 only one.
+            concepts.push(concept(10 + p, 2, 0, CanonizationStatus::None));
+            let second = if p <= 3 { 3 } else { 2 };
+            concepts.push(concept(20 + p, second, 0, CanonizationStatus::None));
+        }
+        let mut g = graph_with(concepts);
+        for p in 1..=6u64 {
+            g.upsert_edge(edge(10 + p, p, EdgeType::Dependency, 30))
+                .unwrap();
+            g.upsert_edge(edge(20 + p, p, EdgeType::Dependency, 30))
+                .unwrap();
+        }
+        let weights = ScoringWeights::default();
+        let baseline: HashSet<NodeId> = {
+            let t = ScoreTable {
+                epoch: 0,
+                ranked: rescore(&g, &weights),
+            };
+            stage1_candidates(&g, &t, MIN_AGE, now())
+                .into_iter()
+                .collect()
+        };
+        assert_eq!(baseline, [nid(1), nid(2), nid(3)].into_iter().collect());
+        for k in 1..=3u32 {
+            // Replay k reads per interaction on the refused pillars and on
+            // one admitted pillar, the traffic that used to move a P90 cut.
+            for p in [2u64, 4, 5, 6] {
+                let c = match g.node(nid(p)) {
+                    Some(Node::Concept(c)) => c.clone(),
+                    _ => unreachable!(),
+                };
+                g.insert_concept(
+                    Concept {
+                        access_count: c.access_count + k as i32 * 5,
+                        last_accessed: Some(now()),
+                        ..c
+                    },
+                    iid(1),
+                )
+                .unwrap();
+            }
+            let t = ScoreTable {
+                epoch: 0,
+                ranked: rescore(&g, &weights),
+            };
+            let got: HashSet<NodeId> = stage1_candidates(&g, &t, MIN_AGE, now())
+                .into_iter()
+                .collect();
+            assert_eq!(got, baseline, "k={k}: reads changed eligibility");
+        }
+    }
+
+    /// The batched map and the single-node walk agree on every node of the
+    /// shared #36 dependents case, at both ages.
+    #[test]
+    fn batched_and_single_node_counts_agree_on_the_dependents_case() {
+        let g = crate::test_util::dependents::graph();
+        let at = crate::test_util::dependents::now();
+        for age in [crate::test_util::dependents::MIN_AGE, Duration::ZERO] {
+            let counts = dependent_interaction_counts(&g, age, at);
+            for c in g.concepts() {
+                assert_eq!(
+                    counts.get(&c.id).copied().unwrap_or(0),
+                    dependent_interactions(&g, c.id, age, at),
+                    "{} at {age:?}",
+                    c.content
+                );
+            }
+        }
+    }
+
+    /// The graph-side count is the stores' Stage 2 `distinct` (#36 PR 3
+    /// parity): every concept of the shared dependents case, at both ages,
+    /// on `MemoryStore`. SQLite runs the same comparison in
+    /// `store::sqlite::tests::structural`.
+    #[cfg(feature = "store-memory")]
+    #[tokio::test]
+    async fn graph_counts_equal_memory_store_span_distinct() {
+        use crate::store::{GraphStore, MemoryStore};
+        use crate::test_util::dependents as case;
+        let store = MemoryStore::new();
+        store.flush(&case::store_batch(), None).await.unwrap();
+        let g = case::graph();
+        for age in [case::MIN_AGE, Duration::ZERO] {
+            let counts = dependent_interaction_counts(&g, age, case::now());
+            for c in g.concepts() {
+                let span = store
+                    .interaction_span(&case::session(), c.id, age, case::now())
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    counts.get(&c.id).copied().unwrap_or(0) as u64,
+                    span.distinct,
+                    "{} at {age:?}",
+                    c.content
+                );
+            }
+        }
+    }
+
+    /// Review L9: an edge and an interaction exactly at `now - min_age`
+    /// count, one second younger do not, on the graph and on MemoryStore.
+    #[cfg(feature = "store-memory")]
+    #[tokio::test]
+    async fn rows_exactly_at_the_cutoff_count_on_graph_and_memory_store() {
+        use crate::store::{GraphStore, MemoryStore};
+        use crate::test_util::dependents as case;
+        let g = case::cutoff_graph();
+        let pillar = case::cutoff_pillar();
+        let store = MemoryStore::new();
+        store.flush(&case::cutoff_batch(), None).await.unwrap();
+        for (age, want) in [(case::MIN_AGE, 2usize), (Duration::ZERO, 4)] {
+            assert_eq!(dependent_interactions(&g, pillar, age, case::now()), want);
+            assert_eq!(
+                dependent_interaction_counts(&g, age, case::now()).get(&pillar),
+                Some(&want)
+            );
+            let span = store
+                .interaction_span(g.session_id(), pillar, age, case::now())
+                .await
+                .unwrap();
+            assert_eq!(span.distinct, want as u64, "{age:?}");
+        }
+    }
+
+    /// An unrepresentable age floor counts nothing rather than everything.
+    #[test]
+    fn an_absurd_age_floor_counts_nothing() {
+        let g = pillar_with(3, &[2, 3]);
+        let huge = Duration::from_secs(u64::MAX);
+        assert!(dependent_interaction_counts(&g, huge, now()).is_empty());
+        assert_eq!(dependent_interactions(&g, nid(1), huge, now()), 0);
     }
 
     /// Fixture composition smoke: planted `user schema` is Canonical, so it
-    /// is not a candidate until rewound. Does not lock P90 arithmetic —
-    /// unique-max + `contains` would still pass a loose cut.
+    /// is not a candidate until rewound; rewound, it qualifies on evidence.
     #[cfg(feature = "fixtures")]
     #[test]
-    fn rest_api_user_schema_passes_stage1_after_rescore() {
+    fn rest_api_user_schema_passes_stage1_after_rewind() {
         let mut snap = crate::fixtures::load_snapshot("session-rest-api").unwrap();
-        let planted_peers = snap
-            .concepts
-            .iter()
-            .filter(|c| c.canonization_status != CanonizationStatus::Canonical)
-            .count();
-        assert_eq!(planted_peers, 21, "fixture premise: 21 non-Canonical peers");
-
+        let at = chrono::Utc.with_ymd_and_hms(2026, 8, 10, 10, 0, 0).unwrap();
         let us_id = snap
             .concepts
             .iter()
@@ -468,50 +623,31 @@ mod tests {
             .expect("user schema present")
             .id;
         {
-            let us = snap
-                .concepts
-                .iter()
-                .find(|c| c.id == us_id)
-                .expect("user schema present");
-            assert_eq!(us.gc_survived, 4);
-            assert_eq!(us.canonization_status, CanonizationStatus::Canonical);
-        }
-
-        let min_peers = crate::Config::default().canonization_min_peer_count;
-        {
             let g = Graph::from_snapshot(snap.clone()).unwrap();
             let scores = ScoreTable {
                 epoch: g.epoch(),
                 ranked: rescore(&g, &ScoringWeights::default()),
             };
-            let passed = stage1_candidates(&g, &scores, min_peers);
+            let passed = stage1_candidates(&g, &scores, MIN_AGE, at);
             assert!(
                 !passed.contains(&us_id),
-                "Canonical user schema must not be a candidate; passed={passed:?}"
+                "Canonical user schema: {passed:?}"
             );
         }
-
-        {
-            let us = snap
-                .concepts
-                .iter_mut()
-                .find(|c| c.id == us_id)
-                .expect("user schema present");
-            // End-state stamp: rewind so Stage 1 can name it a candidate.
-            us.canonization_status = CanonizationStatus::None;
-            us.blast_radius = None;
-        }
-
+        let us = snap
+            .concepts
+            .iter_mut()
+            .find(|c| c.id == us_id)
+            .expect("user schema present");
+        assert_eq!(us.gc_survived, 4);
+        us.canonization_status = CanonizationStatus::None;
+        us.blast_radius = None;
         let g = Graph::from_snapshot(snap).unwrap();
-        let ranked = rescore(&g, &ScoringWeights::default());
+        assert_eq!(dependent_interactions(&g, us_id, MIN_AGE, at), 7);
         let scores = ScoreTable {
             epoch: g.epoch(),
-            ranked,
+            ranked: rescore(&g, &ScoringWeights::default()),
         };
-        let passed = stage1_candidates(&g, &scores, min_peers);
-        assert!(
-            passed.contains(&us_id),
-            "user schema must pass Stage 1 after rescore; passed={passed:?}"
-        );
+        assert!(stage1_candidates(&g, &scores, MIN_AGE, at).contains(&us_id));
     }
 }

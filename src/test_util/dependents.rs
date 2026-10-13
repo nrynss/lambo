@@ -689,3 +689,120 @@ pub fn expected_graph() -> Vec<(&'static str, Vec<&'static str>)> {
         ("Q", vec![]),
     ]
 }
+
+/// #36 PR 3 review L9: rows exactly at the age cutoff (`now - MIN_AGE`)
+/// count; rows one second younger do not. Session `deps-cutoff`, pillar
+/// `P0` (origin `c0`, two hours back) with four `Dependency` dependents:
+///
+/// | Dependent | Origin interaction | Edge about-time | Counts at [`MIN_AGE`] |
+/// |---|---|---|---|
+/// | `D1` | `cc`, exactly at the cutoff | an hour back | yes |
+/// | `D2` | `co`, an hour back | exactly at the cutoff | yes |
+/// | `D3` | `co2`, an hour back | one second after the cutoff | no |
+/// | `D4` | `cy`, one second after the cutoff | an hour back | no |
+///
+/// So the pillar's dependent-interaction count and every store's span
+/// `distinct` are 2 at [`MIN_AGE`] and 4 with no floor.
+pub fn cutoff_graph() -> crate::graph::Graph {
+    let sid = SessionId::from("deps-cutoff");
+    let cutoff = now() - ChronoDuration::from_std(MIN_AGE).unwrap();
+    let young = cutoff + ChronoDuration::seconds(1);
+    let hour = now() - ChronoDuration::hours(1);
+    let id = |hi: u64, lo: u64| NodeId(Uuid::from_u64_pair(hi, lo));
+    let mut g = crate::graph::Graph::new(sid.clone());
+    let interactions = [
+        ("c0", now() - ChronoDuration::hours(2)),
+        ("co", hour),
+        ("co2", hour + ChronoDuration::seconds(1)),
+        ("cc", cutoff),
+        ("cy", young),
+    ];
+    let mut previous = None;
+    for (n, (name, t)) in interactions.iter().enumerate() {
+        let i = Interaction {
+            event_time: None,
+            id: id(0x36_11, n as u64),
+            session_id: sid.clone(),
+            agent_id: AgentId::from("agent-36"),
+            prompt_text: Some((*name).into()),
+            previous_id: previous,
+            created_at: *t,
+        };
+        previous = Some(i.id);
+        g.insert_interaction(i).unwrap();
+    }
+    let concept = |n: u64, origin: usize, t: DateTime<Utc>| Concept {
+        id: id(0x36_12, n),
+        session_id: sid.clone(),
+        content: format!("cutoff concept {n}"),
+        canonical_key: format!("cutoff concept {n}"),
+        concept_type: ConceptType::Resource,
+        origin_interaction: id(0x36_11, origin as u64),
+        origin_agent: AgentId::from("agent-36"),
+        created_at: t,
+        access_count: 0,
+        last_accessed: None,
+        gc_survived: 3,
+        canonization_status: CanonizationStatus::None,
+        blast_radius: None,
+        last_demotion_time: None,
+        embedding: None,
+        human_confirmed: 0,
+        embedding_source: None,
+        chunk_group_id: None,
+    };
+    // (concept, origin index, edge about-time)
+    let rows = [
+        (0u64, 0usize, None),
+        (1, 3, Some(hour)),
+        (2, 1, Some(cutoff)),
+        (3, 2, Some(young)),
+        (4, 4, Some(hour)),
+    ];
+    for (n, origin, edge_at) in rows {
+        let t = interactions[origin].1;
+        g.insert_concept(concept(n, origin, t), id(0x36_11, origin as u64))
+            .unwrap();
+        if let Some(at) = edge_at {
+            g.upsert_edge(Edge {
+                event_time: None,
+                id: id(0x36_13, n),
+                session_id: sid.clone(),
+                source: id(0x36_12, n),
+                target: id(0x36_12, 0),
+                edge_type: EdgeType::Dependency,
+                weight: 1.0,
+                reinforcements: 1,
+                created_at: at,
+                last_reinforced: at,
+            })
+            .unwrap();
+        }
+    }
+    g
+}
+
+/// The cutoff case's pillar.
+pub fn cutoff_pillar() -> NodeId {
+    NodeId(Uuid::from_u64_pair(0x36_12, 0))
+}
+
+/// [`cutoff_graph`] as a store batch.
+pub fn cutoff_batch() -> MutationBatch {
+    let snap = cutoff_graph().snapshot();
+    let mut batch = MutationBatch::new();
+    for i in snap.interactions {
+        batch.push(Mutation::UpsertNode {
+            node: Node::Interaction(i),
+        });
+    }
+    for c in snap.concepts {
+        batch.push(Mutation::UpsertNode {
+            node: Node::Concept(c),
+        });
+    }
+    for e in snap.edges {
+        batch.push(Mutation::UpsertEdge { edge: e });
+    }
+    batch
+}

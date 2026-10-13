@@ -62,6 +62,8 @@ pub mod graph;
 pub mod canonical;
 // T2.3 — `derive()`, the primary write path (spec §7; see `derive.rs`).
 pub mod derive;
+// #36 PR 4 — citations (`depends_on`) and names on a derive (see `cite.rs`).
+pub mod cite;
 // T2.5 — context-overflow demotion: Observation nodes per sentence (spec §7).
 pub mod demote;
 // Inverted index + BM25 (T2.6) — spec §8 phase-1 keyword source.
