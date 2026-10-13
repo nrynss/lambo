@@ -954,13 +954,19 @@ impl WriteIntentPayload {
     /// load a session whose image intents are all settled (design R5: only an
     /// *unconsumed* image intent stops an older build). Text payloads are kept
     /// as they are.
+    ///
+    /// A settled [`Self::DeriveCited`] (#36 PR 4 review H2) becomes the same
+    /// empty [`Self::Derive`], for the second reason: a 0.5.0 build cannot
+    /// decode the variant, and a settled row is decoded at every load, so a
+    /// cited derive that had already applied would otherwise stop a
+    /// downgrade from loading the session at all.
     pub fn settled(&self) -> Option<WriteIntentPayload> {
         match self {
-            Self::DeriveImage { .. } => Some(Self::Derive {
+            Self::DeriveImage { .. } | Self::DeriveCited { .. } => Some(Self::Derive {
                 concepts: Vec::new(),
                 pairs: Vec::new(),
             }),
-            Self::Derive { .. } | Self::DeriveCited { .. } | Self::Action { .. } => None,
+            Self::Derive { .. } | Self::Action { .. } => None,
         }
     }
 }
@@ -978,8 +984,9 @@ impl WriteIntent {
     }
 }
 
-/// [`WriteIntentPayload::settled`]'s form of an image intent, serialized: what
-/// the SQL adapters' consume writes over a settled `DeriveImage` payload.
+/// [`WriteIntentPayload::settled`]'s form of an image or cited intent,
+/// serialized: what the SQL adapters' consume writes over a settled
+/// `DeriveImage` or `DeriveCited` payload.
 pub const SETTLED_IMAGE_INTENT_PAYLOAD: &str = r#"{"kind":"derive","concepts":[],"pairs":[]}"#;
 
 /// A SQL `LIKE` pattern that matches a stored `DeriveImage` payload and no
@@ -987,6 +994,10 @@ pub const SETTLED_IMAGE_INTENT_PAYLOAD: &str = r#"{"kind":"derive","concepts":[]
 /// for one character, which can only widen the match to tags that do not
 /// exist.)
 pub const DERIVE_IMAGE_PAYLOAD_LIKE: &str = r#"{"kind":"derive_image",%"#;
+
+/// A SQL `LIKE` pattern that matches a stored `DeriveCited` payload (#36
+/// PR 4) and no other, for the same overwrite at consume.
+pub const DERIVE_CITED_PAYLOAD_LIKE: &str = r#"{"kind":"derive_cited",%"#;
 
 /// A vector supplied for one concept instead of being embedded from its text
 /// (#22, design sections 3.3 and 5.1): an image embedding the server computed

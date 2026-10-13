@@ -89,6 +89,74 @@ fn a_cited_job_is_charged_its_citations() {
     assert!(cited > bare);
 }
 
+/// The v0.5.0 intent payload, frozen here byte for byte in shape (from tag
+/// `v0.5.0`, `src/types/mod.rs`): what a downgraded writer decodes every
+/// stored intent row with at load. `supplied` is kept opaque; only the
+/// variant set and the field names matter to the decode.
+mod v0_5_0 {
+    use crate::types::ConceptType;
+
+    #[allow(dead_code)]
+    #[derive(Debug, PartialEq, serde::Deserialize)]
+    #[serde(tag = "kind", rename_all = "snake_case")]
+    pub(super) enum WriteIntentPayload {
+        Derive {
+            concepts: Vec<(String, ConceptType)>,
+            pairs: Vec<(String, String)>,
+        },
+        DeriveImage {
+            concepts: Vec<(String, ConceptType)>,
+            pairs: Vec<(String, String)>,
+            supplied: serde_json::Value,
+        },
+        Action {
+            action: String,
+            produces: Vec<String>,
+            modifies: Vec<String>,
+            depends_on: Vec<String>,
+        },
+    }
+}
+
+/// #36 PR 4 review H2: a settled cited derive is stored as the empty derive,
+/// which the 0.5.0 decoder reads, so a downgrade still loads a session
+/// whose cited writes all applied; an unconsumed one is refused by name
+/// (Q18), never applied without its citations; an action's pins are
+/// ignored by 0.5.0, which re-resolves its own way.
+#[test]
+fn a_settled_cited_intent_decodes_under_the_0_5_0_payload() {
+    let cited = derive(PinnedCitations {
+        references: vec![PinnedReference {
+            content: "a decision".into(),
+            reference: "8baad4e0".into(),
+            target: NodeId::new(),
+        }],
+    })
+    .to_intent_payload();
+    let settled = serde_json::to_string(&cited.settled().expect("a cited derive settles")).unwrap();
+    assert_eq!(settled, crate::types::SETTLED_IMAGE_INTENT_PAYLOAD);
+    let old: v0_5_0::WriteIntentPayload = serde_json::from_str(&settled).unwrap();
+    assert_eq!(
+        old,
+        v0_5_0::WriteIntentPayload::Derive {
+            concepts: vec![],
+            pairs: vec![],
+        }
+    );
+    let unconsumed = serde_json::to_string(&cited).unwrap();
+    let err = serde_json::from_str::<v0_5_0::WriteIntentPayload>(&unconsumed).unwrap_err();
+    assert!(err.to_string().contains("derive_cited"), "{err}");
+    // The settle pattern the SQL adapters match is this payload's prefix.
+    assert!(unconsumed.starts_with(crate::types::DERIVE_CITED_PAYLOAD_LIKE.trim_end_matches('%')));
+
+    let pinned_action =
+        serde_json::to_string(&action(vec![Some(NodeId::new())]).to_intent_payload()).unwrap();
+    assert!(matches!(
+        serde_json::from_str::<v0_5_0::WriteIntentPayload>(&pinned_action).unwrap(),
+        v0_5_0::WriteIntentPayload::Action { .. }
+    ));
+}
+
 /// L1: a pinned payload with a field this build does not know is refused,
 /// not decoded with the field dropped.
 #[test]
