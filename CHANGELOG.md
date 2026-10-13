@@ -296,12 +296,17 @@
   behaviour), and an exhaustive `match` on `WriteIntentPayload` needs the
   arm. `ParentOf::with_repo_scope` and `ParentOf::repo_scope` are new and
   scope a derive; the existing constructors stay unscoped.
-- **`RecallHit` gains `repo_scope: Option<String>`, and `ReferenceField`
-  gains `RetractTarget`** (#129, #33 PR 7). A `RecallHit { .. }` literal
-  needs the field (`None` for an unscoped concept), and an exhaustive
-  `match` on `ReferenceField` needs the arm. `Memory::retract` now returns
-  `LamboError::Reference` with `ReferenceRefusalKind::Ambiguous` for text
-  that matches a repository-scoped path and another concept.
+- **`RecallHit` gains `repo_scope: Option<String>`** (#129, #33 PR 7). A
+  `RecallHit { .. }` literal needs the field (`None` for an unscoped
+  concept). `ReferenceField` gains `RetractTarget` and `ParentOf`; it is
+  `#[non_exhaustive]`, so a `match` already has a wildcard arm and nothing
+  breaks. `Memory::retract` now returns `LamboError::Reference` with
+  `ReferenceRefusalKind::Ambiguous` for text that matches a
+  repository-scoped path and another concept.
+- **`repo_scope: Option<String>` on `cli::derive::Args`,
+  `cli::record_action::Args`, `DeriveParams` and `RecordActionParams`**
+  (#129, #33 PR 7). A struct literal needs the field (`None` keeps 0.5.0
+  behaviour); the two `Params` also take `..Default::default()`.
 
 ### Added
 
@@ -560,14 +565,22 @@
   session is two concepts instead of one shared hub. The scope and path
   are matched as exact text after trimming and NFC (case and `./` count),
   under a key no unscoped concept can have (`RepoResource:v1:` and a JSON
-  pair). A scoped path never merges by similarity and nothing merges into
-  it; a path-like `depends_on` entry becomes a Resource, so producing a
-  file and depending on it name the same concept; citations, dependencies
-  and `parent_of` ends resolve under the scope with no fallback to
-  unscoped concepts, while an id stays an exact reference. In a shared
-  layer, a relative path the scope covers is no longer refused. The scope
-  is caller-asserted and never verified; an empty one is refused before
-  the ack. The library exposes `lambo::graph::resource` (the path
+  pair; `docs/` and `docs` are one directory). A scoped path never merges
+  by similarity and nothing merges into it, in a derive or in a layered
+  recall's dedupe. Where the type is inferred (an action's `depends_on`,
+  an undeclared `parent_of` end, a citation or `against`), an existing
+  scoped path is that Resource, an existing non-Resource concept under its
+  plain key (a Logic `config.toml`, an Entity `TCP/IP`) is that concept,
+  and both at once is refused as ambiguous; a new entry becomes a scoped
+  path only if it reads as a file or a `dir/`, so slash prose (`TCP/IP`,
+  `CI/CD`) stays plain text. A `parent_of` directory of a scoped child
+  (`src` over `src/main.rs`) is that repository's directory. An unscoped
+  path Resource is never a fallback, and an id stays an exact reference.
+  In a shared layer, a relative path the scope covers is no longer
+  refused. The scope is caller-asserted and never verified; one that is
+  empty, over 512 bytes, or holds whitespace, a control or an invisible
+  character is refused before the ack. The keyword search matches a
+  scoped path by its text, not its repository. The library exposes `lambo::graph::resource` (the path
   predicate and key). See *Repository-scoped paths* in the MCP reference.
   `against` (#19(b)) resolves path text under the scope like
   `depends_on`, and a scoped write with `against` is durably the same
@@ -679,6 +692,12 @@
   `check_single_source` guard is gone (Lambo refuses a second parent itself).
 
 ### Fixed
+
+- **A layer refuses an action text that is a relative path (#33 PR 4
+  follow-up).** `lambo_record_action` writes its action text as a Resource,
+  but a write into a shared layer checked only `produces`, `modifies` and
+  `depends_on`, so an action named `README.md` was minted there. The
+  action text is now checked like a target.
 
 - SQLite session loads preserve persisted creation and close timestamps,
   including in immutable classification source fingerprints. Writable schema

@@ -230,3 +230,70 @@ Postgres+SQLite all-targets `--no-run` pass; Postgres non-live 1272/0/18
 
 Still open: root goals naming a path match every same-content concept (all
 of them, not one of them quietly), unchanged; nothing else known.
+
+### Review round (2026-10-13): 0 High, 4 Medium, 10 Low, all fixed
+
+`origin/main` had not moved past `1c5a6bc2`, so no merge was needed.
+
+- **M1, inference** (`d23476dc`). Text whose type is inferred (an action's
+  `depends_on`, an undeclared `parent_of` end, a citation or `against`)
+  now resolves under a scope to an existing scoped path, else an existing
+  non-Resource concept under its legacy key (a Logic `config.toml`, an
+  Entity `TCP/IP`), refusing both at once as ambiguous
+  (`ReferenceField::ParentOf` for ends). A new entry becomes a scoped path
+  only if `is_inferred_path`: a file name, dotfile, known extensionless
+  file, `dir/`, or an anchored path. Slash prose and a bare directory name
+  stay legacy text. Anchors (`/`, `~/`, `./`, a drive) need a non-space
+  character after them, so `/ note` and `~ 5 minutes` are prose; `/` alone
+  is no path. Explicit Resource contexts (a `resource` concept, `produces`,
+  `modifies`, the action text) keep the broader `is_path_like`.
+  `ParentOf::identity` is the single place a derive decides a content's
+  key, used by the canonical, Hybrid, cycle and citation paths.
+- **M2, layered dedupe** (`2fdacb10`). A scoped copy joins a group only by
+  an equal key; no copy joins a scoped one by vector. Decision: the repo
+  is **not** added to the scoped item's embed context. Identity is the
+  key's job, the dedupe fix already prevents the merge, and adding the
+  repo would skew the vector leg toward repository names, which are not
+  semantics.
+- **M3, directories** (`d23476dc`). A `parent_of` parent that is a
+  directory of a scoped child (`src` over `src/main.rs`) is that
+  repository's scoped directory; trailing separators fold (`docs/` and
+  `docs` are one key).
+- **M4, CHANGELOG**. Breaking now lists the public `repo_scope` fields on
+  `cli::derive::Args`, `cli::record_action::Args`, `DeriveParams` and
+  `RecordActionParams`; the `ReferenceField` sentence says the enum is
+  `#[non_exhaustive]`, so the new variants break nothing.
+- **L1 to L4, L8** (`d23476dc`): line references stripped in the
+  predicates; `MAX_REPO_SCOPE_BYTES` = 512, so the Postgres btree unique
+  index on `(session, canonical_key)` cannot overflow; no whitespace,
+  control or invisible character (ZWJ, ZWNJ, bidi, BOM) inside a scope;
+  the full check runs once on the call path and the apply path and replay
+  check only nonempty. A row replay refuses is still rewritten to the empty
+  `derive` when it settles `failed`. That is required: a settled row is
+  decoded at every load, and leaving `repo_scoped` in it would stop an
+  older build (0.5.0) loading the session at all, which is the reason
+  image and cited intents are rewritten too. The reason stays on the
+  receipt (the outcome summary). `pin_scoped`'s doc comment is restored.
+- **L5, keyword leg** (`92074c0f`): MemoryStore, SQLite and Postgres match a
+  scoped concept by content only; ties compare `tie_form` (lowercased
+  prefix), byte-identical in Rust and SQL.
+- **L6, root goal**: behaviour unchanged. The lane rules forbid agents to
+  touch GitHub issues, so the issue is drafted for the orchestrator to file:
+  `~/Documents/work/lambo-handoff-2026-10-08/0.6.0/scratch/C7/issue-root-goal-scoped-paths.md`.
+  The issue number goes here once filed.
+- **L7**: CLI usage errors say `--repo-scope` (`32c21f18`).
+- **L9**: tests for opposite hierarchies in two repositories, a
+  project-held legacy `README.md` with a general-scoped repo-scoped
+  `depends_on`, `path_exempt` needing a covered path, and layered dedupe
+  (`6fe7bf73`).
+- **L10**: the action text is path-checked in a layer (`4b2cf82c`, own
+  commit; predates PR 7).
+
+Gate on the remediated head (fresh `XDG_RUNTIME_DIR` per cargo call): fmt
+pass; the 8 clippy rows pass; `cargo test --features store-sqlite,fixtures`
+2481 passed, 0 failed, 7 ignored (lib 2398/0/5), no test lost against
+round two or `1c5a6bc2`, the same ignored set; SQLite-only `--no-run`,
+`cargo check --no-default-features`, Postgres and Postgres+SQLite
+all-targets `--no-run` pass; Postgres non-live 1276/0/18 (live Postgres and
+Cockroach not run); goldens and mirrors pass; `git diff --check` clean.
+Each remediation commit compiles on its own.
