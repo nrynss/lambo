@@ -84,8 +84,9 @@ frozen; this note is the record, and the `EdgeType` rustdoc says so.
 
 `fixtures/inspect-dependents-golden.txt` gains exactly two lines: a
 `Contradicts` heading and `<- concept Q [Resource]` in the hop listing.
-Inspect lists each neighbour once, by the first incident edge, so the mutual
-pair shows one direction. The dependents list, its count (8) and the blast
+Inspect listed each neighbour once, by the first incident edge, so the mutual
+pair shows one direction (until #19(b) review L1, which lists every edge
+between a pair: the golden then gains `-> concept Q` and N's `Semantic`). The dependents list, its count (8) and the blast
 warning are unchanged. Main did not touch this golden between `422ed101`
 and `92c0f4af`. The cloudops parser self-test
 (`python3 scripts/cloudops/_lambo.py`) passes against it, and
