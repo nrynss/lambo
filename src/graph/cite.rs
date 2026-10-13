@@ -113,7 +113,12 @@ pub(crate) fn validate(
     validate_scoped(g, concepts, citations, None)
 }
 
-pub(crate) fn validate_scoped(g: &Graph, concepts: &[(&str, ConceptType)], citations: &[ConceptCitations], repo_scope: Option<&str>) -> Result<PinnedCitations, LamboError> {
+pub(crate) fn validate_scoped(
+    g: &Graph,
+    concepts: &[(&str, ConceptType)],
+    citations: &[ConceptCitations],
+    repo_scope: Option<&str>,
+) -> Result<PinnedCitations, LamboError> {
     crate::graph::resource::validate_repo_scope(repo_scope)?;
     let entries: Vec<(&str, &[String])> = citations
         .iter()
@@ -121,11 +126,16 @@ pub(crate) fn validate_scoped(g: &Graph, concepts: &[(&str, ConceptType)], citat
         .collect();
     Ok(PinnedCitations {
         references: pin_scoped(g, concepts, &DEPENDS_ON, &entries, repo_scope)?,
-        repo_scope: repo_scope.map(str::to_string),
     })
 }
 
-pub(crate) fn pin_scoped(g: &Graph, concepts: &[(&str, ConceptType)], spec: &ReferenceSpec, entries: &[(&str, &[String])], repo_scope: Option<&str>) -> Result<Vec<PinnedReference>, LamboError> {
+pub(crate) fn pin_scoped(
+    g: &Graph,
+    concepts: &[(&str, ConceptType)],
+    spec: &ReferenceSpec,
+    entries: &[(&str, &[String])],
+    repo_scope: Option<&str>,
+) -> Result<Vec<PinnedReference>, LamboError> {
     let mut pinned: Vec<PinnedReference> = Vec::new();
     if entries.iter().all(|(_, refs)| refs.is_empty()) {
         return Ok(pinned);
@@ -185,7 +195,13 @@ pub(crate) fn pin_scoped(g: &Graph, concepts: &[(&str, ConceptType)], spec: &Ref
             ));
         };
         for reference in refs {
-            let (target, _) = resolve::resolve_existing_scoped(g, spec.field, Some(content), reference, repo_scope)?;
+            let (target, _) = resolve::resolve_existing_scoped(
+                g,
+                spec.field,
+                Some(content),
+                reference,
+                repo_scope,
+            )?;
             if *source == Some(target) {
                 return Err(refuse(
                     spec,

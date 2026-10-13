@@ -372,13 +372,23 @@ pub(crate) async fn check_a_settled_image_intent_keeps_no_vector(
         concepts: vec![("wears silk at pongal".into(), ConceptType::Logic)],
         pairs: vec![],
         citations: crate::types::PinnedCitations {
-            repo_scope: None,
             references: vec![crate::types::PinnedReference {
                 content: "wears silk at pongal".into(),
                 reference: "prefers silk".into(),
                 target: NodeId::new(),
             }],
         },
+    };
+    // #129: a repository-scoped job settles the same way too.
+    let scoped_payload = WriteIntentPayload::RepoScoped {
+        repo_scope: "host/owner/repo".into(),
+        payload: Box::new(WriteIntentPayload::Action {
+            action: "built the binary".into(),
+            produces: vec!["src/main.rs".into()],
+            modifies: vec![],
+            depends_on: vec![],
+            depends_on_pins: vec![],
+        }),
     };
     let intent = |receipt: &str, payload: &WriteIntentPayload, outcome| WriteIntent {
         session_id: sid.clone(),
@@ -399,6 +409,7 @@ pub(crate) async fn check_a_settled_image_intent_keeps_no_vector(
     let image = intent("settle-image", &image_payload, None);
     let text = intent("settle-text", &text_payload, None);
     let cited = intent("settle-cited", &cited_payload, None);
+    let scoped = intent("settle-scoped", &scoped_payload, None);
     let failed = intent("settle-failed", &image_payload, Some(outcome("failed")));
     let stored = |receipt: &str| {
         let receipt = receipt.to_string();
@@ -444,6 +455,9 @@ pub(crate) async fn check_a_settled_image_intent_keeps_no_vector(
             Mutation::PutWriteIntent {
                 intent: cited.clone(),
             },
+            Mutation::PutWriteIntent {
+                intent: scoped.clone(),
+            },
         ],
         token,
     )
@@ -457,6 +471,11 @@ pub(crate) async fn check_a_settled_image_intent_keeps_no_vector(
         stored(&cited.receipt).await.payload,
         cited_payload,
         "an unconsumed cited intent keeps its citations: the replay owes them"
+    );
+    assert_eq!(
+        stored(&scoped.receipt).await.payload,
+        scoped_payload,
+        "an unconsumed scoped intent keeps its scope: the replay owes it"
     );
     let settled_failed = stored(&failed.receipt).await;
     assert_eq!(
@@ -485,6 +504,11 @@ pub(crate) async fn check_a_settled_image_intent_keeps_no_vector(
                 receipt: cited.receipt.clone(),
                 outcome: applied.clone(),
             },
+            Mutation::ConsumeWriteIntent {
+                session_id: sid.clone(),
+                receipt: scoped.receipt.clone(),
+                outcome: applied.clone(),
+            },
         ],
         token,
     )
@@ -510,6 +534,14 @@ pub(crate) async fn check_a_settled_image_intent_keeps_no_vector(
             pairs: vec![],
         },
         "a consumed cited intent settles to the empty derive a 0.5.0 build decodes"
+    );
+    assert_eq!(
+        stored(&scoped.receipt).await.payload,
+        WriteIntentPayload::Derive {
+            concepts: vec![],
+            pairs: vec![],
+        },
+        "a consumed scoped intent settles to the empty derive a 0.5.0 build decodes"
     );
     let consumed_text = stored(&text.receipt).await;
     assert_eq!(

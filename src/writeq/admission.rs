@@ -29,8 +29,8 @@ use super::{
 };
 use crate::surface::limits::MAX_CONTENT_BYTES;
 use crate::types::{
-    AgentId, ConceptType, NodeId, PinnedCitations, SessionId, SuppliedVector, WriteIntent,
-    WriteIntentPayload,
+    AgentId, ConceptType, LamboError, NodeId, PinnedCitations, SessionId, SuppliedVector,
+    WriteIntent, WriteIntentPayload,
 };
 
 /// **Deleted roles, recorded where they lived** (J3 redesign): this block used
@@ -187,6 +187,9 @@ pub(super) enum JobPayload {
         /// #36 PR 4: the citations and names accepted at the ack; empty for
         /// a derive without them (whose intent is then a plain `Derive`).
         citations: PinnedCitations,
+        /// #129: the call's repository identity for path-like Resources;
+        /// its durable form is the [`WriteIntentPayload::RepoScoped`] wrapper.
+        repo_scope: Option<String>,
     },
     /// An image derive (#22): the derive above, with one concept's vector
     /// supplied. It carries the vector, never image bytes.
@@ -219,8 +222,9 @@ impl JobPayload {
     /// The durable form of this job, exactly as validated (J3 intents).
     pub(super) fn to_intent_payload(&self) -> WriteIntentPayload {
         let repo_scope = match self {
-            Self::Derive { citations, .. } => citations.repo_scope.as_ref(),
-            Self::Action { repo_scope, .. } => repo_scope.as_ref(),
+            Self::Derive { repo_scope, .. } | Self::Action { repo_scope, .. } => {
+                repo_scope.as_ref()
+            }
             Self::DeriveImage { .. } => None,
         };
         let payload = match self {
@@ -228,6 +232,7 @@ impl JobPayload {
                 concepts,
                 pairs,
                 citations,
+                ..
             } if citations.is_empty() => WriteIntentPayload::Derive {
                 concepts: concepts.clone(),
                 pairs: pairs.clone(),
@@ -236,6 +241,7 @@ impl JobPayload {
                 concepts,
                 pairs,
                 citations,
+                ..
             } => WriteIntentPayload::DeriveCited {
                 concepts: concepts.clone(),
                 pairs: pairs.clone(),
@@ -266,36 +272,58 @@ impl JobPayload {
             },
         };
         match repo_scope {
-            Some(scope) => WriteIntentPayload::RepoScoped { repo_scope: scope.clone(), payload: Box::new(payload) },
+            Some(scope) => WriteIntentPayload::RepoScoped {
+                repo_scope: scope.clone(),
+                payload: Box::new(payload),
+            },
             None => payload,
         }
     }
 
     /// Rehydrate a job payload from its durable form (replay).
-    pub(super) fn from_intent_payload(p: WriteIntentPayload) -> Result<Self, crate::types::LamboError> {
-        if let WriteIntentPayload::RepoScoped { repo_scope, payload } = p {
-            crate::graph::resource::validate_repo_scope(Some(&repo_scope))?;
-            if !matches!(payload.as_ref(), WriteIntentPayload::Derive { .. } | WriteIntentPayload::DeriveCited { .. } | WriteIntentPayload::Action { .. }) {
-                return Err(crate::types::LamboError::Config("repo_scoped intent must wrap one text derive or action, never a nested wrapper".into()));
+    ///
+    /// A [`WriteIntentPayload::RepoScoped`] wrapper must carry a valid scope
+    /// and wrap exactly one text derive or action: an image derive or a
+    /// nested wrapper is refused, never replayed under some other identity.
+    pub(super) fn from_intent_payload(p: WriteIntentPayload) -> Result<Self, LamboError> {
+        let WriteIntentPayload::RepoScoped {
+            repo_scope,
+            payload,
+        } = p
+        else {
+            return Self::from_unscoped_intent(p);
+        };
+        crate::graph::resource::validate_repo_scope(Some(&repo_scope))?;
+        let mut job = match *payload {
+            inner @ (WriteIntentPayload::Derive { .. }
+            | WriteIntentPayload::DeriveCited { .. }
+            | WriteIntentPayload::Action { .. }) => Self::from_unscoped_intent(inner)?,
+            WriteIntentPayload::DeriveImage { .. } | WriteIntentPayload::RepoScoped { .. } => {
+                return Err(LamboError::Config(
+                    "a repo_scoped intent must wrap one text derive or action, never an image \
+                     derive or another repo_scoped wrapper"
+                        .into(),
+                ))
             }
-            let mut job = Self::from_intent_payload(*payload)?;
-            match &mut job {
-                Self::Derive { citations, .. } => {
-                    if citations.repo_scope.as_deref().is_some_and(|scope| scope != repo_scope) {
-                        return Err(crate::types::LamboError::Config("intent repo_scope conflicts with citation context".into()));
-                    }
-                    citations.repo_scope = Some(repo_scope);
-                }
-                Self::Action { repo_scope: scope, .. } => *scope = Some(repo_scope),
-                Self::DeriveImage { .. } => unreachable!(),
+        };
+        match &mut job {
+            Self::Derive { repo_scope: s, .. } | Self::Action { repo_scope: s, .. } => {
+                *s = Some(repo_scope);
             }
-            return Ok(job);
+            Self::DeriveImage { .. } => {}
         }
+        Ok(job)
+    }
+
+    /// [`Self::from_intent_payload`] for a payload that is not a
+    /// `RepoScoped` wrapper; one that is is refused.
+    fn from_unscoped_intent(p: WriteIntentPayload) -> Result<Self, LamboError> {
         Ok(match p {
             WriteIntentPayload::Derive { concepts, pairs } => JobPayload::Derive {
                 concepts,
                 pairs,
                 citations: PinnedCitations::default(),
+                repo_scope: None,
             },
             WriteIntentPayload::DeriveCited {
                 concepts,
@@ -305,6 +333,7 @@ impl JobPayload {
                 concepts,
                 pairs,
                 citations,
+                repo_scope: None,
             },
             WriteIntentPayload::DeriveImage {
                 concepts,
@@ -329,7 +358,11 @@ impl JobPayload {
                 depends_on,
                 depends_on_pins,
             },
-            WriteIntentPayload::RepoScoped { .. } => unreachable!(),
+            WriteIntentPayload::RepoScoped { .. } => {
+                return Err(LamboError::Config(
+                    "a repo_scoped intent may not be nested in another".into(),
+                ))
+            }
         })
     }
 
@@ -348,7 +381,12 @@ impl JobPayload {
                 concepts,
                 pairs,
                 citations,
-            } => derive_bytes(concepts, pairs) + citations.bytes(),
+                repo_scope,
+            } => {
+                derive_bytes(concepts, pairs)
+                    + citations.bytes()
+                    + repo_scope.as_ref().map_or(0, String::len)
+            }
             JobPayload::DeriveImage {
                 concepts,
                 pairs,
@@ -368,7 +406,8 @@ impl JobPayload {
                 depends_on,
                 depends_on_pins,
             } => {
-                repo_scope.as_ref().map_or(0, String::len) + std::mem::size_of::<Option<NodeId>>() * depends_on_pins.len()
+                repo_scope.as_ref().map_or(0, String::len)
+                    + std::mem::size_of::<Option<NodeId>>() * depends_on_pins.len()
                     + action.len()
                     + produces
                         .iter()
@@ -661,6 +700,8 @@ impl WritePipeline {
     }
 
     /// Queue a `derive`. The interaction is already open (call path).
+    // As for `submit_action`: each parameter is one field of the job.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn submit_derive(
         &self,
         agent: AgentId,
@@ -668,6 +709,7 @@ impl WritePipeline {
         concepts: Vec<(String, ConceptType)>,
         pairs: Vec<(String, String)>,
         citations: PinnedCitations,
+        repo_scope: Option<String>,
         deliver_to: Option<SessionId>,
     ) -> Submitted {
         self.admit(
@@ -677,6 +719,7 @@ impl WritePipeline {
                 concepts,
                 pairs,
                 citations,
+                repo_scope,
             },
             deliver_to,
         )

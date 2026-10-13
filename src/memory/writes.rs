@@ -258,7 +258,12 @@ impl Memory {
         // so a refused reference leaves nothing behind. The guard is dropped
         // at the end of the statement; the commit re-resolves under the
         // write lock.
-        let pinned = cite::validate_scoped(&self.graph.read(), concepts, citations, parent_of.repo_scope())?;
+        let pinned = cite::validate_scoped(
+            &self.graph.read(),
+            concepts,
+            citations,
+            parent_of.repo_scope(),
+        )?;
         let prompt = hybrid::derive_prompt(concepts.iter().map(|(content, _)| *content));
         let interaction = self.begin_interaction_full(agent, Some(prompt), event_time)?;
 
@@ -606,6 +611,7 @@ impl Memory {
                     .map(|(a, b)| ((*a).to_string(), (*b).to_string()))
                     .collect(),
                 pinned,
+                parent_of.repo_scope().map(str::to_string),
                 deliver_to.cloned(),
             )
             .await)

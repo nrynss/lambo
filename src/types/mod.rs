@@ -874,14 +874,6 @@ pub enum Mutation {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WriteIntentPayload {
-    /// Repository-scoped identity. Older binaries must refuse an unconsumed
-    /// intent rather than replay it using the legacy path key.
-    RepoScoped {
-        /// Caller-asserted repository identity, validated before replay.
-        repo_scope: String,
-        /// Exactly one text derive or action; nested wrappers are refused.
-        payload: Box<WriteIntentPayload>,
-    },
     /// A `lambo_derive` job.
     Derive {
         /// `(content, concept_type)` pairs, in submission order.
@@ -946,6 +938,17 @@ pub enum WriteIntentPayload {
         /// differently.
         citations: PinnedCitations,
     },
+    /// #129: a text derive or action whose path-like Resources take the
+    /// repository-scoped key. A wrapper, not a field, so a build that
+    /// predates it refuses an unconsumed row instead of replaying it under
+    /// the legacy path key; replay refuses an invalid scope, a nested
+    /// wrapper and a wrapped image derive.
+    RepoScoped {
+        /// Caller-asserted repository identity, validated again at replay.
+        repo_scope: String,
+        /// Exactly one `Derive`, `DeriveCited` or `Action`.
+        payload: Box<WriteIntentPayload>,
+    },
 }
 
 impl WriteIntentPayload {
@@ -968,12 +971,17 @@ impl WriteIntentPayload {
     /// decode the variant, and a settled row is decoded at every load, so a
     /// cited derive that had already applied would otherwise stop a
     /// downgrade from loading the session at all.
+    ///
+    /// A settled [`Self::RepoScoped`] (#129) becomes the same empty
+    /// [`Self::Derive`], for the same reason, whatever it wrapped.
     pub fn settled(&self) -> Option<WriteIntentPayload> {
         match self {
-            Self::DeriveImage { .. } | Self::DeriveCited { .. } | Self::RepoScoped { .. } => Some(Self::Derive {
-                concepts: Vec::new(),
-                pairs: Vec::new(),
-            }),
+            Self::DeriveImage { .. } | Self::DeriveCited { .. } | Self::RepoScoped { .. } => {
+                Some(Self::Derive {
+                    concepts: Vec::new(),
+                    pairs: Vec::new(),
+                })
+            }
             Self::Derive { .. } | Self::Action { .. } => None,
         }
     }
@@ -1005,10 +1013,11 @@ pub const DERIVE_IMAGE_PAYLOAD_LIKE: &str = r#"{"kind":"derive_image",%"#;
 
 /// A SQL `LIKE` pattern that matches a stored `DeriveCited` payload (#36
 /// PR 4) and no other, for the same overwrite at consume.
-pub const REPO_SCOPED_PAYLOAD_LIKE: &str = r#"{"kind":"repo_scoped",%"#;
-
-/// Cited derive serialized prefix for adapter settlement.
 pub const DERIVE_CITED_PAYLOAD_LIKE: &str = r#"{"kind":"derive_cited",%"#;
+
+/// A SQL `LIKE` pattern that matches a stored `RepoScoped` payload (#129)
+/// and no other, for the same overwrite at consume.
+pub const REPO_SCOPED_PAYLOAD_LIKE: &str = r#"{"kind":"repo_scoped",%"#;
 
 /// A vector supplied for one concept instead of being embedded from its text
 /// (#22, design sections 3.3 and 5.1): an image embedding the server computed
@@ -2073,6 +2082,23 @@ mod tests {
                 },
             },
         };
+        // #129: a scoped wrapper matches its own pattern, never the image
+        // or cited ones, and settles to the same constant.
+        let scoped = WriteIntentPayload::RepoScoped {
+            repo_scope: "host/owner/repo".into(),
+            payload: Box::new(WriteIntentPayload::Derive {
+                concepts: vec![("README.md".into(), ConceptType::Resource)],
+                pairs: vec![],
+            }),
+        };
+        let scoped_json = serde_json::to_string(&scoped).unwrap();
+        assert!(scoped_json.starts_with(REPO_SCOPED_PAYLOAD_LIKE.trim_end_matches('%')));
+        assert!(!scoped_json.starts_with(DERIVE_IMAGE_PAYLOAD_LIKE.trim_end_matches('%')));
+        assert!(!scoped_json.starts_with(DERIVE_CITED_PAYLOAD_LIKE.trim_end_matches('%')));
+        assert_eq!(
+            serde_json::to_string(&scoped.settled().unwrap()).unwrap(),
+            SETTLED_IMAGE_INTENT_PAYLOAD
+        );
         let like_prefix = DERIVE_IMAGE_PAYLOAD_LIKE.trim_end_matches('%');
         assert!(serde_json::to_string(&image)
             .unwrap()

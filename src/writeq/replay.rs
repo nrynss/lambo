@@ -245,9 +245,18 @@ impl WritePipeline {
                 let Ok(receipt) = ReceiptId::from_str(&intent.receipt) else {
                     continue;
                 };
-                let (payload, decode_error) = match JobPayload::from_intent_payload(intent.payload) {
+                let (payload, decode_error) = match JobPayload::from_intent_payload(intent.payload)
+                {
                     Ok(payload) => (payload, None),
-                    Err(error) => (JobPayload::Derive { concepts: vec![], pairs: vec![], citations: Default::default() }, Some(error)),
+                    Err(error) => (
+                        JobPayload::Derive {
+                            concepts: vec![],
+                            pairs: vec![],
+                            citations: Default::default(),
+                            repo_scope: None,
+                        },
+                        Some(error),
+                    ),
                 };
                 let job = Job {
                     receipt,
@@ -261,6 +270,11 @@ impl WritePipeline {
                     tag: "applied_after_restart",
                     at: (this.clock)(),
                 };
+                // #129: a stored payload this build refuses to decode into a
+                // job (an invalid scope, a nested or image `repo_scoped`
+                // wrapper) is a fact about this row, settled `failed` below
+                // like a content refusal, never a reason to stop the replay.
+                let decode_refused = decode_error.is_some();
                 let result = match decode_error {
                     Some(error) => Err(error),
                     None => this.ctx.run(&job, Some(stamp)).await,
@@ -404,16 +418,21 @@ impl WritePipeline {
                     // input against this graph too (re-resolution at apply
                     // reached a different answer, or none): settle `failed`.
                     Err(err)
-                        if matches!(
-                            &err,
-                            LamboError::Embed(_)
-                                | LamboError::ImageIdTaken(_)
-                                | LamboError::Reference(_)
-                        ) || matches!(&err, LamboError::Store(e) if e.is_cycle_refusal()) =>
+                        if decode_refused
+                            || matches!(
+                                &err,
+                                LamboError::Embed(_)
+                                    | LamboError::ImageIdTaken(_)
+                                    | LamboError::Reference(_)
+                            )
+                            || matches!(&err, LamboError::Store(e) if e.is_cycle_refusal()) =>
                     {
                         // A cycle refusal is decided before any embed, so it
-                        // proves nothing about the embedder's health.
-                        if !matches!(&err, LamboError::Store(_) | LamboError::Reference(_)) {
+                        // proves nothing about the embedder's health; nor
+                        // does a decode refusal.
+                        if !decode_refused
+                            && !matches!(&err, LamboError::Store(_) | LamboError::Reference(_))
+                        {
                             transient_streak = 0;
                         }
                         failed += 1;
@@ -428,6 +447,8 @@ impl WritePipeline {
                         // model-safe sentence (it names the fix); every other
                         // refusal is its class, as before.
                         let reason = match &err {
+                            // Lambo's own sentence about the stored row.
+                            LamboError::Config(why) if decode_refused => why.clone(),
                             LamboError::ImageIdTaken(_)
                             | LamboError::Store(_)
                             | LamboError::Reference(_) => {

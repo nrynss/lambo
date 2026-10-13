@@ -53,6 +53,7 @@ async fn an_applied_receipt_counts_an_embedded_parent_of_end() {
             vec![("document:src.md".to_string(), "user schema".to_string())],
             Default::default(),
             None,
+            None,
         )
         .await;
     let settled = rig
