@@ -163,6 +163,7 @@ use shutdown::final_flush;
 ///     depends_on: &["user schema"],
 ///     modifies: &[],
 ///     event_time: None,
+///     repo_scope: None,
 /// })?;
 ///
 /// mem.demote("The caching layer was the bottleneck.", "chunk-1")?;
