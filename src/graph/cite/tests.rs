@@ -560,65 +560,115 @@ fn a_commit_hash_that_prefixes_a_concept_id_cites_it_unless_its_text_exists() {
         .is_some());
 }
 
+/// Fixed ids for the id-shape tests, so no run depends on a random id. The
+/// first is the shape CI flaked on: its 12- and 11-character prefixes
+/// (`2122de39e47e`, `2122de39e47`) share one canonical key, because the
+/// Porter stemmer drops a trailing `e` (see
+/// `hex_text_that_stems_alike_is_one_concept`).
+const FIXED_IDS: [u128; 4] = [
+    0x2122de39_e47e_4a51_9c3b_0d6f8e2a1b47,
+    0xabcdef01_2345_4678_9abc_def012345678,
+    0x9e9e9e9e_e9e9_4e9e_8e9e_9e9e9e9e9e9e,
+    0x00000000_0000_4000_8000_000000000001,
+];
+
 /// Orchestrator decision on the #36 PR 4 review: only the hyphenated id and
 /// exactly 8 hex characters are ids. The 32-hex simple form of a real
 /// concept's id, and a 9 to 12 character prefix of it, stay text in
-/// `record_action` (created as before, no edge to the concept) and match
-/// nothing as a derive citation; exactly 8 cites.
+/// `record_action` (the 0.5.0 rule: canonical match, else create; never an
+/// edge to the concept the id names) and match nothing as a derive
+/// citation; exactly 8 cites.
 #[test]
 fn only_the_hyphenated_id_and_exactly_eight_hex_characters_are_ids() {
-    let (mut g, i) = graph("cite-id-shapes");
-    let ruling = concept(&mut g, i, RULING, ConceptType::Logic);
-    let simple = ruling.0.simple().to_string();
-    let mut texts = vec![simple.clone()];
-    texts.extend((9..=12).map(|n| simple[..n].to_string()));
-    for text in &texts {
-        let deps = [text.as_str()];
-        let out = record_action(&mut g, i, &agent(), &action(&deps)).unwrap();
-        let minted = node_of(&g, text);
-        assert_ne!(minted, ruling, "{text}");
-        assert!(
-            g.edge_between(out.action_node, minted, EdgeType::Dependency)
-                .is_some(),
-            "{text} is text"
+    for raw in FIXED_IDS {
+        let (mut g, i) = graph("cite-id-shapes");
+        let ruling = concept_with_id(
+            &mut g,
+            i,
+            NodeId(uuid::Uuid::from_u128(raw)),
+            RULING,
+            ConceptType::Logic,
         );
-        assert!(
-            g.edge_between(out.action_node, ruling, EdgeType::Dependency)
-                .is_none(),
-            "{text} does not cite the concept"
+        let simple = ruling.0.simple().to_string();
+        let mut texts = vec![simple.clone()];
+        texts.extend((9..=12).map(|n| simple[..n].to_string()));
+        for text in &texts {
+            let deps = [text.as_str()];
+            let out = record_action(&mut g, i, &agent(), &action(&deps)).unwrap();
+            // The text rule's own answer: the concept carrying the text's
+            // canonical key (created now, or by an earlier text that stems
+            // alike), never the concept whose id the text spells.
+            let key = crate::graph::canonical::canonical_key(text, |_| None);
+            let target = g.concept_by_key(&key).expect("the text rule wrote it");
+            assert_ne!(target, ruling, "{text}");
+            assert!(
+                g.edge_between(out.action_node, target, EdgeType::Dependency)
+                    .is_some(),
+                "{text} is text"
+            );
+            assert!(
+                g.edge_between(out.action_node, ruling, EdgeType::Dependency)
+                    .is_none(),
+                "{text} does not cite the concept"
+            );
+        }
+        let (mut g, i) = graph("cite-id-shapes-derive");
+        let ruling = concept_with_id(
+            &mut g,
+            i,
+            NodeId(uuid::Uuid::from_u128(raw)),
+            RULING,
+            ConceptType::Logic,
         );
-    }
-    let (mut g, i) = graph("cite-id-shapes-derive");
-    let ruling = concept(&mut g, i, RULING, ConceptType::Logic);
-    let simple = ruling.0.simple().to_string();
-    for text in [
-        simple.clone(),
-        simple[..9].to_string(),
-        simple[..12].to_string(),
-    ] {
-        let err = derive_with_citations(
+        for text in [
+            simple.clone(),
+            simple[..9].to_string(),
+            simple[..12].to_string(),
+        ] {
+            let err = derive_with_citations(
+                &mut g,
+                i,
+                &[(DECISION, ConceptType::Logic)],
+                &[cite(DECISION, &[&text])],
+            )
+            .unwrap_err();
+            assert_eq!(refusal(&err).kind, ReferenceRefusalKind::Missing, "{text}");
+        }
+        // Exactly 8 cites, in both places.
+        let out = derive_with_citations(
             &mut g,
             i,
             &[(DECISION, ConceptType::Logic)],
-            &[cite(DECISION, &[&text])],
+            &[cite(DECISION, &[&simple[..8]])],
         )
-        .unwrap_err();
-        assert_eq!(refusal(&err).kind, ReferenceRefusalKind::Missing, "{text}");
+        .unwrap();
+        assert_eq!(out.cited, 1);
+        let deps = [&simple[..8]];
+        let act = record_action(&mut g, i, &agent(), &action(&deps)).unwrap();
+        assert!(g
+            .edge_between(act.action_node, ruling, EdgeType::Dependency)
+            .is_some());
     }
-    // Exactly 8 cites, in both places.
-    let out = derive_with_citations(
-        &mut g,
-        i,
-        &[(DECISION, ConceptType::Logic)],
-        &[cite(DECISION, &[&simple[..8]])],
-    )
-    .unwrap();
-    assert_eq!(out.cited, 1);
-    let deps = [&simple[..8]];
-    let act = record_action(&mut g, i, &agent(), &action(&deps)).unwrap();
+}
+
+/// The CI flake's root cause, pinned: canonicalization (spec section 7.1,
+/// unchanged since 0.5.0) stems every token, and the Porter stemmer drops
+/// a trailing `e`, so `2122de39e47e` and `2122de39e47` are one canonical key
+/// and one concept, whichever came first. The same holds in 0.5.0; it is
+/// the text rule, not anything #36 PR 4 resolves.
+#[test]
+fn hex_text_that_stems_alike_is_one_concept() {
+    let key = |t: &str| crate::graph::canonical::canonical_key(t, |_| None);
+    assert_eq!(key("2122de39e47e"), key("2122de39e47"));
+    let (mut g, i) = graph("cite-hex-stem");
+    let first = record_action(&mut g, i, &agent(), &action(&["2122de39e47"])).unwrap();
+    let minted = node_of(&g, "2122de39e47");
+    assert!(first.created.contains(&minted));
+    let second = record_action(&mut g, i, &agent(), &action(&["2122de39e47e"])).unwrap();
     assert!(g
-        .edge_between(act.action_node, ruling, EdgeType::Dependency)
+        .edge_between(second.action_node, minted, EdgeType::Dependency)
         .is_some());
+    assert!(g.concepts().all(|c| c.content != "2122de39e47e"));
 }
 
 /// An id entry is pinned at the ack and checked at the apply; a request
