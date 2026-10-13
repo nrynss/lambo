@@ -30,7 +30,7 @@ url = "http://127.0.0.1:8080"
 Unknown keys are refused, so a typo fails at startup instead of silently falling back to a default. A misspelled `knd`, a misspelled `[embeder]` section, and a key that belongs to the library rather than the file all stop the process before it attaches a session.
 </Warning>
 
-Recall defaults, flush timing, canonization thresholds, and scoring weights are not `lambo.toml` keys. They are library settings you pass when you build a `Memory` in Rust, so putting one in the file stops the process rather than tuning anything. Five settings are exceptions, and none of them is a threshold: `promotion_policy` below, and the four cadence keys in [Daemon cadence](#daemon-cadence). `promotion_policy` is a selector — it sets no number. But do not read that as "the numbers stay the same": `Solo` replaces the ladder rather than re-tuning it, and the store-evidence gates stop deciding anything. See [Library API](/lambo/api/) for what each policy actually measures.
+Recall defaults, flush timing, canonization thresholds, and scoring weights are not `lambo.toml` keys. They are library settings you pass when you build a `Memory` in Rust, so putting one in the file stops the process rather than tuning anything. Six settings are exceptions, and none of them is a threshold: `promotion_policy` and `canonization_supersede` below, and the four cadence keys in [Daemon cadence](#daemon-cadence). `promotion_policy` is a selector — it sets no number. But do not read that as "the numbers stay the same": `Solo` replaces the ladder rather than re-tuning it, and the store-evidence gates stop deciding anything. See [Library API](/lambo/api/) for what each policy actually measures.
 
 ```
 $ lambo --config lambo.toml provision
@@ -71,6 +71,16 @@ lambo demo: failed to build backends: config: LAMBO_PROMOTION_POLICY: unknown pr
 ```
 
 [`[daemon]`](#daemon-cadence) is the same bargain with a narrower scope: the demo discards the cadence you set and still refuses a degenerate one, but only the commands that resolve an embedder refuse it at all.
+
+## Supersession
+
+`canonization_supersede` turns on evidence-driven supersession (0.6.0). It is a top-level boolean, like `promotion_policy` a selector rather than a threshold, and it defaults to `false`, so a file without it behaves exactly as before:
+
+```toml
+canonization_supersede = true   # optional; top-level, before the first [table]
+```
+
+With it on, each canonization cycle first demotes a Canonical concept to ordinary memory when a concept that contradicts it (written with `against`) has since earned its own structural support: dependents from at least three other interactions, newer than the Canonical concept's latest eligible evidence, with Stage 2's spread. A contradiction with no newer support never demotes anything, and the contradicting concept is not promoted by it: it climbs on its own evidence. The demoted concept enters the usual re-promotion cooldown, a concept inside its cooldown cannot supersede another, and while the newer side still holds, the demoted one stops at Venerable instead of climbing back. Recall marks a superseded concept with a `⤓ Superseded at ... by ...` line, and `lambo inspect` names its latest demotion and why. No new numbers: it reuses Stage 2's bars, the age floor and the cooldown. A value that is not `true` or `false` stops the process at startup, as does the key under a table.
 
 ## Store
 

@@ -154,6 +154,16 @@
   `against`. Removing `Contradicts` edges does not help there: shut the
   0.6.0 writer down cleanly first, so its queue drains and every intent is
   consumed, then downgrade.
+- **Supersession (#20) is off until you turn it on.** Nothing changes for
+  a session that does not set `canonization_supersede = true`. The audit
+  table `canonization_events` gains two nullable columns, `reason` and
+  `superseded_by`: Postgres and Cockroach converge an existing table with
+  `ADD COLUMN IF NOT EXISTS` at `lambo provision` / `init_schema`, SQLite
+  through its column guard on attach. Existing rows keep a `NULL` pair,
+  which reads as a budget demotion (or no reason, on a promotion), and
+  budget demotions keep writing `NULL`. Downgrading to 0.5.0 after a
+  supersession loads the session; 0.5.0 ignores the columns, so that row
+  reads as an ordinary demotion.
 
 ### Breaking (library API)
 
@@ -285,6 +295,20 @@
   optional and omitting it changes nothing; a server older than this one
   refuses a call that sends it (the parameters deny unknown fields), so a
   scoped write never lands in the wrong session.
+- **#20 supersession.** `CanonizationEvent` gains `reason:
+  Option<DemotionReason>` (new public enum `DemotionReason { Budget,
+  Superseded { by } }`, serialized `{"kind": "budget"}` /
+  `{"kind": "superseded", "by": ...}` and omitted when `None`), so struct
+  literals need `reason: None`; read it through
+  `CanonizationEvent::demotion_reason()`. A promotion with a reason, or a
+  supersession by the demoted concept itself, is refused at every write
+  gate. `EvalOutcome` gains `supersessions` (committed first) and
+  `transitions()` now yields supersessions, promotions, then demotions.
+  `EvalParams` gains `supersede`, `Config` gains `canonization_supersede`
+  and `LamboFile` gains `canonization_supersede: Option<bool>`. The new
+  `GraphStore::latest_structural_evidence_at` and
+  `GraphStore::interaction_span_since` default to `StoreError::Capability`,
+  so a third-party store compiles unchanged and skips supersession.
 
 ### Added
 
@@ -565,6 +589,20 @@
   optional `scope`). New library items: `WritePipeline::knows_receipt`,
   `take_piggyback_at_most`, `lookup_for` and `wait_for`, and
   `ServeLayers::is_layer`.
+- **Evidence-driven supersession (#20).** With `canonization_supersede =
+  true` (top-level `lambo.toml` key or `Config` field, default `false`), a
+  Canonical concept is demoted to `None` when a concept contradicting it
+  has earned dependent evidence newer than the Canonical concept's latest
+  that clears Stage 2's bars (three other origins, coverage 0.3). An
+  assertion alone never demotes; the contradicting concept is not
+  promoted; evidence uses #19(c)'s clock and self-suppression; both sides
+  respect the re-promotion cooldown; supersession commits before
+  promotions, so a freed slot is spent in the same cycle. While the newer
+  side holds, Stage 3 keeps the superseded concept at Venerable, so the two
+  cannot trade places once per cooldown. The audit records
+  `Superseded { by }`, recall marks such a hit with a `superseded`
+  annotation and a `⤓ Superseded at ...` line (history: never forced), and
+  inspect names the latest demotion and its reason.
 
 ### Changed
 
@@ -678,6 +716,17 @@
   the blast radius. The refusal itself is unchanged.
 - The cloudops scripts read inspect's dependents list, and the client-side
   `check_single_source` guard is gone (Lambo refuses a second parent itself).
+- **Inspect names a concept's latest demotion (#20).** `lambo inspect`
+  and `lambo_inspect` end the canonization section with `last demotion
+  <time>: budget` or `superseded by "..." (id ...)` for a concept that was
+  ever demoted; concepts never demoted print as before.
+- **The budget cut passes over concepts that are no longer Canonical
+  (#20).** It used to take the first `overflow` ranked concepts and skip
+  any that had moved, demoting fewer than the overflow; it now demotes the
+  next Canonical one instead.
+- **The fair-test fixture grew (#20).** `fixtures/session-fair-test.json`
+  gains two supersession pairs; its dry-run golden counts six Canonicals
+  instead of four, and no existing row's outcome moved.
 
 ### Fixed
 

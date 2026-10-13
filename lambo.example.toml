@@ -31,6 +31,13 @@
 # an embedder. Those four accept a degenerate cadence.
 # promotion_policy = "Solo"
 
+# Evidence-driven supersession (#20), off by default. When true, a Canonical
+# concept is demoted once a concept contradicting it (`against`) has newer
+# dependent evidence of its own that clears Stage 2's bars; an assertion
+# alone never demotes. A boolean selector, not a threshold; TOP-LEVEL like
+# promotion_policy (above the first [table] header).
+# canonization_supersede = true
+
 [store]
 # memory | cockroach | postgres | sqlite
 kind = "memory"

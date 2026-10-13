@@ -170,11 +170,70 @@ keep an otherwise collectable concept alive indefinitely by contradicting a
 promoted one; this is the owner's decision (#19(c) decision 1C), noted here
 as a store-growth consideration.
 
+## Supersession
+
+Off by default (`Config::canonization_supersede`, or the top-level
+`canonization_supersede` key in `lambo.toml`). When it is on, each
+canonization cycle first demotes a Canonical concept `C` (`Canonical ->
+None`) when a concept `S` with a `S -Contradicts-> C` edge of the same
+session has earned dependent evidence, after `C`'s **watermark**, that
+clears Stage 2's bars: at least three origin interactions other than `S`'s
+own, covering at least 0.3 of min(session extent, the coverage cap).
+
+- Evidence is #19(c)'s: one dependence edge (a `Dependency` source or a
+  `Hierarchical` child, a concept of the session, not from the concept's
+  own origin interaction), eligible once **written** at least
+  `canonization_edge_min_age` before the cycle's clock, dated by its
+  about-time clamped to its write time. For `S`, both the edge and its
+  dependent's origin interaction must be dated strictly after the
+  watermark, and the filter runs before origins are counted and spread is
+  measured.
+- The watermark is the later of `C`'s origin about-time and its latest
+  eligible evidence, not counting evidence written by the agent that
+  declared the contradiction, nor `S`'s own dependence on `C`.
+- An assertion alone (no newer support for `S`) never demotes anything.
+- Neither side may be inside its re-promotion cooldown: a source demoted
+  within `canonization_repromotion_cooldown` cannot supersede, and a target
+  demoted within it cannot be superseded again. Competing sources for one
+  target rank by newest eligible evidence, then canonical key, then id.
+- `C` is stamped `last_demotion_time = now` and its `CanonizationEvent`
+  carries `reason: Some(DemotionReason::Superseded { by: S })`. `S` is not
+  promoted by it.
+- While `S` would still supersede it, Stage 3 holds `C` at Venerable rather
+  than promote it, so the two cannot trade places once per cooldown window.
+- Order within a cycle: supersessions commit first, then promotions against
+  the recomputed budget (so a freed slot is spent in the same cycle; Stage 3
+  is gathered at a full budget whenever supersession probes are pending),
+  then budget demotions. `EvalOutcome::supersessions` holds them, and
+  `EvalOutcome::transitions()` and the durable audit follow that order.
+- At most `canonization_eval_batch_size` targets are probed per cycle, and
+  every verdict is re-checked against the graph under the write lock before
+  it commits.
+
+The two store accessors are `GraphStore::latest_structural_evidence_at`
+and `GraphStore::interaction_span_since`. Both default to
+`StoreError::Capability`; the built-in stores implement them, and a store
+that does not skips supersession for the cycle with one
+`CanonizationSupersessionUnsupported` warning while the rest of the cycle
+runs.
+
+`CanonizationEvent::reason` is demotion-only. A demotion without one (every
+row written before 0.6.0, and every budget demotion, which still writes
+none) reads as `DemotionReason::Budget` through
+`CanonizationEvent::demotion_reason()`; a promotion has no reason. Each
+store keeps it in two nullable columns, `reason` and `superseded_by`; a row
+whose pair is malformed, or a promotion with a reason, is refused on load
+and at every write gate. Recall marks a hit whose latest demotion was a
+supersession, while it is not Canonical again, with the annotation kind
+`superseded` and the line `recall::format::superseded_warning`; it never
+forces a hit into a result. Inspect ends its canonization section with the
+latest demotion and its reason.
+
 ## Settings
 
 `Config` holds the product settings: recall defaults, flush timing, canonization thresholds, and scoring weights. Pass it to the builder with `.config(...)`.
 
-These are library settings you pass in Rust when you build a `Memory`. Five of them can also come from the process file. `promotion_policy` is a top-level `lambo.toml` key with a `LAMBO_PROMOTION_POLICY` override, so a `lambo serve` process can select a policy without a code change; `[daemon]` carries the cadence settings: `canonization_eval_interval` (spelled `canonization_eval_interval_secs` there), `gc_interval`, and GC's time bound, `gc_max_interval` (spelled `gc_max_interval_secs`) and `gc_idle_floor`. Everything else is code-only, and the file refuses it along with any key it does not know. No canonization *threshold* is settable from the file under either policy. See [Configuration](/lambo/config/).
+These are library settings you pass in Rust when you build a `Memory`. Six of them can also come from the process file. `promotion_policy` is a top-level `lambo.toml` key with a `LAMBO_PROMOTION_POLICY` override, so a `lambo serve` process can select a policy without a code change; `canonization_supersede` is a top-level boolean; `[daemon]` carries the cadence settings: `canonization_eval_interval` (spelled `canonization_eval_interval_secs` there), `gc_interval`, and GC's time bound, `gc_max_interval` (spelled `gc_max_interval_secs`) and `gc_idle_floor`. Everything else is code-only, and the file refuses it along with any key it does not know. No canonization *threshold* is settable from the file under either policy. See [Configuration](/lambo/config/).
 
 ```rust
 let mem = Memory::builder()
@@ -205,6 +264,7 @@ let mem = Memory::builder()
 | `canonization_eval_interval` | 60 seconds | How often promotion is evaluated. Also settable from the file, as `[daemon] canonization_eval_interval_secs`. |
 | `canonization_eval_batch_size` | `50` | Concepts evaluated per pass. |
 | `canonization_repromotion_cooldown` | 300 seconds | Wait before a demoted concept can be promoted again. |
+| `canonization_supersede` | `false` | Evidence-driven supersession (see [Supersession](#supersession)). Also settable from the file, as the top-level `canonization_supersede` key. |
 | `promotion_policy` | `Swarm` | Which promotion policy canonization runs. `Swarm` admits a Candidate on evidence: `gc_survived >= 3` and dependents from at least two interactions other than the concept's own (no peer minimum, no percentile cut; the composite score only orders the queue), and every later hop is its stage's verdict. `Solo` (single-writer promotion) admits a Candidate when `(Sessions × 1.0) + (Human Confirmed × 4.0) + (Dependent Interactions × 2.0) − (Reverts × 3.0)`, multiplied by its concept type's eviction resistance (Constraint 1.5 … Observation 0.7), reaches 3.0; sessions are distinct ≥24-hour-apart supports (derivations and declared dependents; since 0.6.0 not actions that only produced or modified the concept) measured on **event time**, dependent interactions are the same count Swarm's Stage 1 reads, and human confirmations enter only through the confirm verb (`Memory::confirm_human`), never an agent write. Under `Solo` the Candidate → Venerable and Venerable → Canonical hops need the score's band (6.0 / 10.0) **and** the stage verdict Swarm needs, cooldown included (since 0.6.0; before, the band alone decided). `Swarm` stays the default. Selectable from `lambo.toml` or `LAMBO_PROMOTION_POLICY` (see [Configuration](/lambo/config/)); there is no `serve` flag. |
 | `scoring` | `0.25`, `0.20`, `0.20`, `0.35` | Recency, frequency, session activity, and density weights. |
 | `recall_weights` | `0.5`, `0.5` | How much the background score and the query relevance each contribute. |
@@ -227,7 +287,7 @@ Backends are chosen by Cargo feature and configuration, not loaded as plugins. S
 
 ### The GraphStore trait
 
-`GraphStore` handles durable graph storage. The implementations are the in-memory store, the SQLite store, and the CockroachDB store. Its methods cover schema setup, flushing a batch, loading a session, keyword and vector candidate lookup, blast radius, interaction spans, and canonization records, plus the lease methods below.
+`GraphStore` handles durable graph storage. The implementations are the in-memory store, the SQLite store, and the CockroachDB store. Its methods cover schema setup, flushing a batch, loading a session, keyword and vector candidate lookup, blast radius, interaction spans, the two supersession evidence accessors, and canonization records, plus the lease methods below.
 
 A store also declares what it can do. `capabilities` reports its features, and `vector_dimensions` reports the width of its vector column, or nothing when it has none. A store that reports a width must agree with the embedder's, and Lambo refuses to start when they differ.
 
