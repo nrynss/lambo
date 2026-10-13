@@ -1005,7 +1005,9 @@ needs the `store-sqlite` feature and `--config`, which must be the serving
 `lambo.toml`: the same `[embedder]` (to embed the queries), `[daemon]` and
 `[serve]` the split will be served with. The `[store]` table is parsed and its
 environment overlays applied, but no store is built or opened from it; only
-its kind is read, and it must be `sqlite` with no `[recall]` tier, because
+its kind is read, and it must be `sqlite`, set explicitly (`[store] kind =
+"sqlite"`: with no `[store]` table the kind defaults to `memory` and verify
+refuses), with no `[recall]` tier, because
 verify measures **SQLite-holder behaviour** (vectors ranked in the session's
 own graph). A serve on another store kind, or with a recall tier, can rank
 differently, and is refused.

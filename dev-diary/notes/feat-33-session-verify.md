@@ -197,17 +197,21 @@ the split-specific order. Nothing here was run against the live rig.
    hard-provenance refusal stops the cut-over: fix the plan, do not work
    around it. Rerun once: it must verify with zero rows written.
 5. **Verify** with the same binary, with `--config` set to the exact serving
-   `lambo.toml` of step 6 (same `[embedder]`, `[daemon]` and `[serve]`; a
-   SQLite `[store]`; verify measures a SQLite holder and refuses anything
-   else), the agreed query set and `--aggregate-only endor`. Gate:
+   `lambo.toml` of step 6 (same `[embedder]`, `[daemon]` and `[serve]`, and
+   `[store] kind = "sqlite"` set explicitly: without a `[store]` table the
+   kind defaults to `memory` and verify refuses, because it measures a SQLite
+   holder), the agreed query set and `--aggregate-only endor`. Gate:
    foreign-primary after hits from endor must be 0, and every other
    foreign-primary hit must be an intended shared hub; review every lost hit
    and the changed warning kinds (newly stale project or `general` sessions
    are expected); stop on anything unexplained.
-6. **Re-pin and serve a copy.** `chmod 444` the verified output and record
-   its hash; copy it to the serving path and point the serve's `[store]` at
-   the copy, never at the verified file. Install 0.6.0 (keep the old binary
-   and config for rollback) with the section 7.2 `[serve]` table: all eight
+6. **Re-pin and serve a copy.** The re-pin happens only at the 0.6.0
+   release, and only after the #36 PR 5 `lambo canon dry-run` review that
+   the CHANGELOG requires before re-pinning a writer (no earlier build is
+   re-pinned for the split). `chmod 444` the verified output and record its
+   hash; copy it to the serving path and point the serve's `[store]` at the
+   copy, never at the verified file. Install 0.6.0 (keep the old binary and
+   config for rollback) with the section 7.2 `[serve]` table: all eight
    sessions pinned, `default_session = "general-usage"`,
    `layers = ["general"]` and the #157 knobs. Start it and check the startup
    contract and pinning checks.

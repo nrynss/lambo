@@ -79,6 +79,12 @@ pub enum SplitError {
     Plan(#[from] ClassifyError),
     #[error("split refused: {0}")]
     Refused(String),
+    /// A refusal whose message lists ids (`message`), with an id-free
+    /// version (`counts`, by session) for callers that must not print ids,
+    /// such as `lambo session verify` with `--aggregate-only`. Displays
+    /// exactly as [`SplitError::Refused`] with `message`.
+    #[error("split refused: {message}")]
+    Withheld { message: String, counts: String },
     #[error("split report: {0}")]
     Render(#[from] serde_json::Error),
 }
@@ -504,11 +510,19 @@ pub(super) fn build_validated(
             .copied()
             .collect::<Vec<_>>()
             .join(", ");
-        return refuse(format!(
-            "{} pending write intent(s) are owed a replay ({shown}); serve the source once so \
-             they settle, take a new backup and reclassify",
-            pending.len()
-        ));
+        return Err(SplitError::Withheld {
+            message: format!(
+                "{} pending write intent(s) are owed a replay ({shown}); serve the source once \
+                 so they settle, take a new backup and reclassify",
+                pending.len()
+            ),
+            counts: format!(
+                "{} pending write intent(s) in session {} are owed a replay; serve the source \
+                 once so they settle, take a new backup and reclassify",
+                pending.len(),
+                source.session_id
+            ),
+        });
     }
     if source.created_at.is_none() {
         return refuse("the source session has no created_at to inherit");
@@ -567,6 +581,7 @@ pub(super) fn build_validated(
     // general; this re-derives the barrier from the source for every target.
     let (protected, _) = super::classify::protected_source_items(source, &plan.rules);
     let mut hard_replicas: Vec<String> = Vec::new();
+    let mut hard_pairs: Vec<String> = Vec::new();
     for i in &source.interactions {
         if !protected.contains(&i.id.0) {
             continue;
@@ -574,23 +589,41 @@ pub(super) fn build_validated(
         for t in &places[&i.id.0] {
             if *t != primary[&i.id.0] {
                 hard_replicas.push(format!("{} ({} -> {t})", i.id, primary[&i.id.0]));
+                hard_pairs.push(format!("{} -> {t}", primary[&i.id.0]));
             }
         }
     }
     if !hard_replicas.is_empty() {
         hard_replicas.sort();
-        return refuse(format!(
-            "{} origin replica(s) would copy an interaction with hard protected project \
-             provenance out of its session: {}; place the concepts that originated there \
-             in that session, or drop their hub copies",
-            hard_replicas.len(),
-            hard_replicas
-                .iter()
-                .take(20)
-                .cloned()
-                .collect::<Vec<_>>()
-                .join(", ")
-        ));
+        let mut pairs: BTreeMap<String, usize> = BTreeMap::new();
+        for pair in &hard_pairs {
+            *pairs.entry(pair.clone()).or_default() += 1;
+        }
+        let by_pair = pairs
+            .iter()
+            .map(|(k, v)| format!("{k} {v}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(SplitError::Withheld {
+            message: format!(
+                "{} origin replica(s) would copy an interaction with hard protected project \
+                 provenance out of its session: {}; place the concepts that originated there \
+                 in that session, or drop their hub copies",
+                hard_replicas.len(),
+                hard_replicas
+                    .iter()
+                    .take(20)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            counts: format!(
+                "{} origin replica(s) would copy an interaction with hard protected project \
+                 provenance out of its session ({by_pair}); place the concepts that originated \
+                 there in that session, or drop their hub copies",
+                hard_replicas.len()
+            ),
+        });
     }
 
     // The exclusive source-edge ledger, from primary assignments only.

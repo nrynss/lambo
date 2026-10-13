@@ -680,6 +680,39 @@ async fn load_split_targets(
     ))
 }
 
+/// A split refusal as verify may print it: counts by session instead of
+/// the ids `session split` lists, and any other id replaced, so a refusal
+/// never names a row of an aggregate-only session.
+fn id_free(e: &crate::session::SplitError) -> String {
+    let text = match e {
+        crate::session::SplitError::Withheld { counts, .. } => format!("split refused: {counts}"),
+        other => other.to_string(),
+    };
+    scrub_ids(&text)
+}
+
+/// `text` with every hyphenated UUID replaced by `<id>`.
+fn scrub_ids(text: &str) -> String {
+    const LEN: usize = 36;
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while !rest.is_empty() {
+        if rest.len() >= LEN
+            && rest.is_char_boundary(LEN)
+            && uuid::Uuid::try_parse(&rest[..LEN]).is_ok()
+            && rest.as_bytes()[8] == b'-'
+        {
+            out.push_str("<id>");
+            rest = &rest[LEN..];
+            continue;
+        }
+        let c = rest.chars().next().expect("non-empty");
+        out.push(c);
+        rest = &rest[c.len_utf8()..];
+    }
+    out
+}
+
 fn ratio(v: Option<f64>) -> String {
     v.map_or_else(|| "n/a".to_owned(), |v| format!("{v:.3}"))
 }
@@ -800,7 +833,7 @@ pub async fn verify_session(
     // The same pure build the split ran: a plan that does not seal against
     // this source is refused here, and the result's digests and placements
     // are what the output must match.
-    let split = build_split(&plan, &snapshot).map_err(|e| CliError::Usage(e.to_string()))?;
+    let split = build_split(&plan, &snapshot).map_err(|e| CliError::Usage(id_free(&e)))?;
     let targets = load_split_targets(&split, &io.split).await?;
     let at = match args.at {
         Some(at) => at,
@@ -1622,6 +1655,63 @@ mod tests {
                     )
                     .await,
                     "never overwritten",
+                );
+                std::fs::remove_dir_all(&i.dir).unwrap();
+            }
+
+            /// A split refusal re-raised by verify's rebuild names counts by
+            /// session, never the ids `session split` itself lists.
+            #[tokio::test(flavor = "multi_thread")]
+            async fn split_refusals_in_verify_carry_counts_not_ids() {
+                use crate::types::AgentId;
+                let i = inputs();
+                let (output, queries) = split_output(&i).await;
+                let id = crate::session::split_tests::id;
+                let mut pending = source();
+                pending.write_intents[0].outcome = None;
+                let mut hard = source();
+                hard.concepts[9].origin_interaction = id(7);
+                hard.concepts[9].origin_agent = AgentId::from("beta-build");
+                hard.edges
+                    .iter_mut()
+                    .find(|e| e.id == id(210))
+                    .unwrap()
+                    .source = id(7);
+                for (n, (variant, counts, ids)) in [
+                    (
+                        pending,
+                        "1 pending write intent(s) in session mixed",
+                        vec!["r-alpha".to_string()],
+                    ),
+                    (hard, "(beta -> alpha 1)", vec![id(7).0.to_string()]),
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    // The split itself still lists the ids.
+                    let direct = crate::session::build_split(&plan_for(&variant), &variant)
+                        .unwrap_err()
+                        .to_string();
+                    assert!(ids.iter().all(|x| direct.contains(x.as_str())), "{direct}");
+                    let snapshot = i.dir.join(format!("variant-{n}.json"));
+                    std::fs::write(&snapshot, serde_json::to_vec(&variant).unwrap()).unwrap();
+                    let plan = i.dir.join(format!("variant-plan-{n}.json"));
+                    std::fs::write(&plan, serde_json::to_vec(&plan_for(&variant)).unwrap())
+                        .unwrap();
+                    let mut args = verify_args(&i, &queries, &format!("variant-{n}.json.report"));
+                    args.plan = plan;
+                    let err = verify(&i, &snapshot, &output, args)
+                        .await
+                        .unwrap_err()
+                        .to_string();
+                    assert!(err.contains(counts), "{err}");
+                    for x in &ids {
+                        assert!(!err.contains(x.as_str()), "{err}");
+                    }
+                }
+                assert_eq!(
+                    super::super::super::scrub_ids(&format!("a {} b", id(3).0)),
+                    "a <id> b"
                 );
                 std::fs::remove_dir_all(&i.dir).unwrap();
             }
