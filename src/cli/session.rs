@@ -1,12 +1,16 @@
 //! `lambo session classify` (read-only: an explicit input, never a writer)
 //! and `lambo session split` (#33 D2: writes a validated plan's targets into
-//! a new offline SQLite file; the source stays read-only).
+//! a new offline SQLite file; the source stays read-only), and `lambo
+//! session verify` (#33 D3: a read-only before/after recall comparison of
+//! the source and the split output).
 
 use std::io::{Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
-use super::caps::{require_nonempty, CliError};
+use super::caps::{
+    check_in_range_cli, require_nonempty, CliError, MAX_MAX_TOKENS, MAX_TOP_K, MAX_TRAVERSAL_DEPTH,
+};
 use crate::resolve::{ClassificationSource, SplitIo};
 use crate::session::{
     build_split, classify, classify_reviewed, ClassificationPlan, ClassificationRules,
@@ -598,6 +602,223 @@ pub async fn split_session(io: SplitIo, args: SplitArgs) -> Result<String, CliEr
         }
     })?;
     Ok(summary(&split, &output, &args.report, &outcome))
+}
+
+#[derive(Debug)]
+pub struct VerifyArgs {
+    pub session: String,
+    pub plan: PathBuf,
+    pub queries: PathBuf,
+    pub report: PathBuf,
+    pub top_k: Option<usize>,
+    pub max_tokens: Option<usize>,
+    pub traversal_depth: Option<usize>,
+    pub at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+fn read_queries(path: &Path) -> Result<crate::session::VerifyQueries, CliError> {
+    let text = read_bounded(path, 4 * 1024 * 1024)?;
+    let queries: crate::session::VerifyQueries = if path.extension().is_some_and(|e| e == "toml") {
+        toml::from_str(&text).map_err(|e| CliError::Usage(format!("query set: {}", e.message())))?
+    } else {
+        serde_json::from_str(&text).map_err(|e| CliError::Usage(format!("query set: {e}")))?
+    };
+    queries
+        .validate()
+        .map_err(|e| CliError::Usage(e.to_string()))?;
+    Ok(queries)
+}
+
+/// Every target of `split` as the output stores it, each read in one
+/// read-only transaction and checked against its receipt and its digest.
+#[cfg(feature = "store-sqlite")]
+async fn load_split_targets(
+    split: &SplitOutput,
+    output: &crate::resolve::VerifySplitOutput,
+) -> Result<std::collections::BTreeMap<String, GraphSnapshot>, CliError> {
+    use crate::store::SplitReceipt;
+    let mismatch = |e: crate::types::StoreError| {
+        CliError::Usage(format!(
+            "the split output does not match this source and plan: {e}"
+        ))
+    };
+    let names: std::collections::BTreeSet<String> =
+        split.targets.iter().map(|t| t.session.clone()).collect();
+    let store = output.store();
+    store
+        .verify_split_destination(&split.split_sha256, &names)
+        .await
+        .map_err(mismatch)?;
+    let mut out = std::collections::BTreeMap::new();
+    for t in &split.targets {
+        let receipt = SplitReceipt::for_target(
+            &t.snapshot,
+            &split.split_sha256,
+            &t.sha256,
+            split.algorithm_version,
+            &split.source_sha256,
+            &split.plan_sha256,
+        );
+        let stored = store
+            .read_verified_split_target(&receipt, &t.snapshot, &names)
+            .await
+            .map_err(mismatch)?;
+        out.insert(t.session.clone(), stored);
+    }
+    Ok(out)
+}
+
+#[cfg(not(feature = "store-sqlite"))]
+async fn load_split_targets(
+    _: &SplitOutput,
+    _: &crate::resolve::VerifySplitOutput,
+) -> Result<std::collections::BTreeMap<String, GraphSnapshot>, CliError> {
+    Err(CliError::Usage(
+        "session verify requires --features store-sqlite".into(),
+    ))
+}
+
+fn ratio(v: Option<f64>) -> String {
+    v.map_or_else(|| "n/a".to_owned(), |v| format!("{v:.3}"))
+}
+
+/// Aggregates only: counts per project, no ids, queries or content.
+fn verify_summary(report: &crate::session::VerifyReport, path: &Path) -> String {
+    let p = &report.params;
+    let mut out = format!(
+        "verify {}: split {} (algorithm {}), {} projects, top_k {}, clock {}\n",
+        report.source_session,
+        &report.split_sha256[..report.split_sha256.len().min(12)],
+        report.split_algorithm_version,
+        report.projects.len(),
+        p.top_k,
+        p.at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+    );
+    for (project, s) in &report.projects {
+        let layers = if s.layers.is_empty() {
+            "unlayered".to_owned()
+        } else {
+            format!("layers {}", s.layers.join(", "))
+        };
+        let by_session: Vec<String> = s
+            .after_by_session
+            .iter()
+            .map(|(k, v)| format!("{k} {v}"))
+            .collect();
+        out.push_str(&format!(
+            "{project} ({layers}): {} queries; before {} hits ({} in scope, {} from other \
+             sessions removed); after {} hits ({}; {} shared-hub copies); recall@{} {} (mean {}); \
+             lost {}, merged by dedupe {}, gained {}, leaked {}; {} on both sides, {} moved (mean |shift| {}, max {}); \
+             annotation kinds +{} -{}; {} queries with changed warnings\n",
+            s.queries,
+            s.before_hits,
+            s.before_in_scope,
+            s.removed_foreign,
+            s.after_hits,
+            if by_session.is_empty() {
+                "none".to_owned()
+            } else {
+                by_session.join(", ")
+            },
+            s.after_hub_hits,
+            p.top_k,
+            ratio(s.recall_at_k),
+            ratio(s.mean_recall_at_k),
+            s.lost,
+            s.deduped,
+            s.gained,
+            s.leaked,
+            s.common,
+            s.moved,
+            ratio(s.mean_abs_shift),
+            s.max_abs_shift,
+            s.annotations_added.values().sum::<usize>(),
+            s.annotations_removed.values().sum::<usize>(),
+            s.queries_with_changed_warnings,
+        ));
+    }
+    out.push_str(&format!(
+        "report {}; source and split output opened read-only",
+        path.display()
+    ));
+    out
+}
+
+/// `lambo session verify` (#33 D3). Rebuilds the split from the source and
+/// plan, requires the output's receipts and target digests to match it,
+/// replays the query set before (plain recall on the source) and after
+/// (layered recall per project, as `[serve] layers` configures it), and
+/// publishes the private report create-new. Both inputs are read-only: no
+/// lease, flush or schema initialization touches either.
+pub async fn verify_session(
+    io: crate::resolve::VerifyIo,
+    args: VerifyArgs,
+) -> Result<String, CliError> {
+    require_nonempty("session", &args.session)?;
+    if std::fs::symlink_metadata(&args.report).is_ok() {
+        return Err(CliError::Usage(format!(
+            "verify report {} already exists; reports are never overwritten",
+            args.report.display()
+        )));
+    }
+    let cfg = &io.config;
+    let top_k = args.top_k.unwrap_or(cfg.default_top_k);
+    let max_tokens = args.max_tokens.unwrap_or(cfg.default_max_tokens);
+    let traversal_depth = args.traversal_depth.unwrap_or(cfg.default_traversal_depth);
+    check_in_range_cli("top-k", top_k, 1, MAX_TOP_K)?;
+    check_in_range_cli("max-tokens", max_tokens, 1, MAX_MAX_TOKENS)?;
+    check_in_range_cli("traversal-depth", traversal_depth, 0, MAX_TRAVERSAL_DEPTH)?;
+    let queries = read_queries(&args.queries)?;
+
+    let plan: ClassificationPlan =
+        serde_json::from_str(&read_bounded(&args.plan, 512 * 1024 * 1024)?)
+            .map_err(|e| CliError::Usage(format!("classification plan: {e}")))?;
+    if plan.source.session != args.session {
+        return Err(CliError::Usage(
+            "the plan was made for a different --session".into(),
+        ));
+    }
+    let snapshot = load_source(io.source, &args.session, "verify").await?;
+    // The same pure build the split ran: a plan that does not seal against
+    // this source is refused here, and the result's digests and placements
+    // are what the output must match.
+    let split = build_split(&plan, &snapshot).map_err(|e| CliError::Usage(e.to_string()))?;
+    let targets = load_split_targets(&split, &io.split).await?;
+    let pinned: Vec<String> = split.targets.iter().map(|t| t.session.clone()).collect();
+    let layers = io
+        .serve
+        .resolve_layers(&pinned)
+        .map_err(|e| CliError::Usage(e.to_string()))?;
+    let at = match args.at {
+        Some(at) => at,
+        None => crate::session::newest_row(&snapshot)
+            .ok_or_else(|| CliError::Usage("the source is empty; pass --at".into()))?,
+    };
+    let report = crate::session::verify_split(crate::session::VerifyInputs {
+        source: snapshot,
+        split: &split,
+        targets,
+        layers: &layers,
+        queries: &queries,
+        params: crate::session::VerifyParams {
+            top_k,
+            max_tokens,
+            traversal_depth,
+            at,
+        },
+        embedder: io.embedder.as_ref(),
+        embedding: &io.embedding,
+        config: cfg,
+    })
+    .await
+    .map_err(|e| CliError::Usage(e.to_string()))?;
+    let bytes = serde_json::to_vec_pretty(&report)
+        .map_err(|e| CliError::Runtime(format!("render verify report: {e}")))?;
+    write_new_private_as("verify report", &args.report, |f| {
+        f.write_all(&bytes)?;
+        f.write_all(b"\n")
+    })?;
+    Ok(verify_summary(&report, &args.report))
 }
 
 #[cfg(not(feature = "store-sqlite"))]
@@ -1244,6 +1465,202 @@ mod tests {
                 .is_err());
             assert_eq!(std::fs::read(&db).unwrap(), before);
             std::fs::remove_dir_all(&i.dir).unwrap();
+        }
+
+        /// `lambo session verify` end to end on a real split output (#33 D3).
+        #[cfg(all(feature = "store-sqlite", feature = "embed-fixture"))]
+        mod verify {
+            use super::*;
+            use crate::resolve::resolve_verify_io;
+
+            fn verify_args(i: &Inputs, queries: &Path, report: &str) -> VerifyArgs {
+                VerifyArgs {
+                    session: "mixed".into(),
+                    plan: i.args.plan.clone(),
+                    queries: queries.to_path_buf(),
+                    report: i.dir.join(report),
+                    top_k: Some(10),
+                    max_tokens: Some(4000),
+                    traversal_depth: None,
+                    at: None,
+                }
+            }
+
+            async fn verify(
+                i: &Inputs,
+                snapshot: &Path,
+                output: &Path,
+                args: VerifyArgs,
+            ) -> Result<String, CliError> {
+                let config = i.dir.join("lambo.toml");
+                let io = resolve_verify_io(&config, None, Some(snapshot), output)
+                    .map_err(|e| CliError::Usage(e.to_string()))?;
+                verify_session(io, args).await
+            }
+
+            async fn split_output(i: &Inputs) -> (PathBuf, PathBuf) {
+                let output = i.dir.join("split.db");
+                run(i, &output, again(&i.args, "split-report.json"))
+                    .await
+                    .unwrap();
+                std::fs::write(
+                    i.dir.join("lambo.toml"),
+                    "[embedder]\nkind = \"fixture\"\ndim = 2\n\n[serve]\nlayers = [\"general\"]\n",
+                )
+                .unwrap();
+                let queries = i.dir.join("queries.toml");
+                std::fs::write(
+                    &queries,
+                    "[queries]\nalpha = [\"alpha cache is warm\", \"beta parser is strict\"]\n\
+                     beta = [\"beta result is green\"]\n",
+                )
+                .unwrap();
+                (output, queries)
+            }
+
+            fn tampered(output: &Path, name: &str, sql: &str) -> PathBuf {
+                let copy = output.with_file_name(name);
+                std::fs::copy(output, &copy).unwrap();
+                let rt = tokio::runtime::Handle::current();
+                let sql = sql.to_owned();
+                let path = copy.clone();
+                std::thread::spawn(move || {
+                    rt.block_on(async move {
+                        use sqlx::{ConnectOptions, Connection};
+                        let mut conn = sqlx::sqlite::SqliteConnectOptions::new()
+                            .filename(&path)
+                            .journal_mode(sqlx::sqlite::SqliteJournalMode::Delete)
+                            .connect()
+                            .await
+                            .unwrap();
+                        sqlx::query(&sql).execute(&mut conn).await.unwrap();
+                        conn.close().await.unwrap();
+                    })
+                })
+                .join()
+                .unwrap();
+                copy
+            }
+
+            #[tokio::test(flavor = "multi_thread")]
+            async fn verify_reports_aggregates_only_and_leaves_both_inputs_unchanged() {
+                let i = inputs();
+                let (output, queries) = split_output(&i).await;
+                let source_bytes = std::fs::read(&i.snapshot).unwrap();
+                let output_bytes = std::fs::read(&output).unwrap();
+                let summary = verify(
+                    &i,
+                    &i.snapshot,
+                    &output,
+                    verify_args(&i, &queries, "v1.json"),
+                )
+                .await
+                .unwrap();
+                assert!(
+                    summary.contains("alpha (layers general): 2 queries"),
+                    "{summary}"
+                );
+                assert!(summary.contains("leaked 0"), "{summary}");
+                assert!(summary.ends_with("opened read-only"), "{summary}");
+                // Aggregates only: no source id or query text on stdout.
+                let source = source();
+                for c in &source.concepts {
+                    assert!(!summary.contains(&c.id.0.to_string()));
+                }
+                assert!(!summary.contains("alpha cache is warm"));
+                assert_eq!(std::fs::read(&i.snapshot).unwrap(), source_bytes);
+                assert_eq!(std::fs::read(&output).unwrap(), output_bytes);
+                for suffix in ["-wal", "-shm", "-journal"] {
+                    assert!(!super::super::super::with_suffix(&output, suffix).exists());
+                }
+                use std::os::unix::fs::PermissionsExt;
+                let report = i.dir.join("v1.json");
+                let mode = std::fs::metadata(&report).unwrap().permissions().mode();
+                assert_eq!(mode & 0o777, 0o600);
+                // Deterministic, and a report is never overwritten.
+                verify(
+                    &i,
+                    &i.snapshot,
+                    &output,
+                    verify_args(&i, &queries, "v2.json"),
+                )
+                .await
+                .unwrap();
+                assert_eq!(
+                    std::fs::read(&report).unwrap(),
+                    std::fs::read(i.dir.join("v2.json")).unwrap()
+                );
+                refused(
+                    verify(
+                        &i,
+                        &i.snapshot,
+                        &output,
+                        verify_args(&i, &queries, "v1.json"),
+                    )
+                    .await,
+                    "never overwritten",
+                );
+                std::fs::remove_dir_all(&i.dir).unwrap();
+            }
+
+            #[tokio::test(flavor = "multi_thread")]
+            async fn outputs_that_do_not_match_the_source_or_plan_are_refused() {
+                let i = inputs();
+                let (output, queries) = split_output(&i).await;
+                let args = |name: &str| verify_args(&i, &queries, name);
+                const MISMATCH: &str = "does not match this source and plan";
+
+                let edited = tampered(
+                    &output,
+                    "edited.db",
+                    "UPDATE concepts SET content = content || ' (edited)' \
+                     WHERE session_id = 'alpha' AND rowid = (SELECT min(rowid) FROM concepts \
+                     WHERE session_id = 'alpha')",
+                );
+                refused(
+                    verify(&i, &i.snapshot, &edited, args("r1.json")).await,
+                    MISMATCH,
+                );
+
+                let unreceipted = tampered(
+                    &output,
+                    "unreceipted.db",
+                    "DELETE FROM split_imports WHERE target_session = 'beta'",
+                );
+                refused(
+                    verify(&i, &i.snapshot, &unreceipted, args("r2.json")).await,
+                    MISMATCH,
+                );
+
+                let foreign = tampered(
+                    &output,
+                    "foreign.db",
+                    "UPDATE split_imports SET split_sha256 = 'other'",
+                );
+                refused(
+                    verify(&i, &i.snapshot, &foreign, args("r3.json")).await,
+                    MISMATCH,
+                );
+
+                // Another source: the plan's seal no longer matches it.
+                let mut other = source();
+                other.interactions[0].prompt_text = Some("changed".into());
+                let other_snapshot = i.dir.join("other.json");
+                std::fs::write(&other_snapshot, serde_json::to_vec(&other).unwrap()).unwrap();
+                assert!(verify(&i, &other_snapshot, &output, args("r4.json"))
+                    .await
+                    .is_err());
+
+                // Not a split output at all.
+                refused(
+                    verify(&i, &i.snapshot, &i.snapshot, args("r5.json")).await,
+                    "",
+                );
+                for name in ["r1.json", "r2.json", "r3.json", "r4.json", "r5.json"] {
+                    assert!(!i.dir.join(name).exists(), "{name}");
+                }
+                std::fs::remove_dir_all(&i.dir).unwrap();
+            }
         }
     }
 }

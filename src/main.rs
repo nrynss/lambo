@@ -608,6 +608,50 @@ enum SessionAction {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Compare recall before and after a split (plain recall on the source, layered recall per project) and write a private report. Needs --config for [embedder], [daemon] and [serve] layers; [store] is never opened.
+    Verify {
+        /// Source session id; must match the plan and the snapshot.
+        #[arg(long)]
+        session: String,
+        /// The same copied, completed standalone backup the split was made from.
+        #[arg(
+            long,
+            conflicts_with = "snapshot",
+            required_unless_present = "snapshot"
+        )]
+        database: Option<PathBuf>,
+        /// The same exported GraphSnapshot JSON the split was made from.
+        #[arg(
+            long,
+            conflicts_with = "database",
+            required_unless_present = "database"
+        )]
+        snapshot: Option<PathBuf>,
+        /// The classification plan the split was made from.
+        #[arg(long)]
+        plan: PathBuf,
+        /// The split's output SQLite file (`session split --output-database`), opened read-only.
+        #[arg(long)]
+        split_database: PathBuf,
+        /// Query set in TOML or JSON: a [queries] table of project = [queries].
+        #[arg(long)]
+        queries: PathBuf,
+        /// New private JSON report (per-query hits, ids, rank shifts); never overwritten.
+        #[arg(long)]
+        report: PathBuf,
+        /// Hits per recall, and the k of recall@k (default: the config's default_top_k).
+        #[arg(long)]
+        top_k: Option<usize>,
+        /// Token budget per recall (default: the config's default_max_tokens).
+        #[arg(long)]
+        max_tokens: Option<usize>,
+        /// Traversal depth per recall (default: the config's default_traversal_depth).
+        #[arg(long)]
+        traversal_depth: Option<usize>,
+        /// Detector clock, RFC 3339 (default: the newest row in the source), so reruns match.
+        #[arg(long, value_name = "RFC3339")]
+        at: Option<String>,
+    },
 }
 
 /// `lambo canon` actions (#36 PR 5).
@@ -842,6 +886,7 @@ impl Commands {
 enum Resolved {
     Classification(lambo::resolve::ClassificationSource),
     Split(Box<lambo::resolve::SplitIo>),
+    Verify(Box<lambo::resolve::VerifyIo>),
     Full(Box<ResolvedBackends>),
     StoreOnly {
         store: Box<dyn GraphStore>,
@@ -888,6 +933,32 @@ fn resolve_for_command(
             *dry_run,
         )
         .map(|io| Resolved::Split(Box::new(io)))
+        .map_err(|e| e.to_string());
+    }
+    if let Commands::Session {
+        action:
+            SessionAction::Verify {
+                database,
+                snapshot,
+                split_database,
+                ..
+            },
+    } = cmd
+    {
+        let Some(config) = config else {
+            return Err(
+                "session verify needs --config naming the lambo.toml whose [embedder], [daemon] \
+                 and [serve] layers it replays ([store] is never opened)"
+                    .into(),
+            );
+        };
+        return lambo::resolve::resolve_verify_io(
+            config,
+            database.as_deref(),
+            snapshot.as_deref(),
+            split_database,
+        )
+        .map(|io| Resolved::Verify(Box::new(io)))
         .map_err(|e| e.to_string());
     }
     if let Commands::Session {
@@ -1514,7 +1585,10 @@ fn main() -> ExitCode {
     if allow_embedding_mismatch {
         match &mut resolved {
             Resolved::Full(backends) => backends.allow_embedding_mismatch = true,
-            Resolved::StoreOnly { .. } | Resolved::Classification(_) | Resolved::Split(_) => {
+            Resolved::StoreOnly { .. }
+            | Resolved::Classification(_)
+            | Resolved::Split(_)
+            | Resolved::Verify(_) => {
                 unreachable!("writer override requires full backends")
             }
         }
@@ -1577,6 +1651,39 @@ fn main() -> ExitCode {
                 },
             ),
         ),
+        (
+            Commands::Session {
+                action:
+                    SessionAction::Verify {
+                        session,
+                        plan,
+                        queries,
+                        report,
+                        top_k,
+                        max_tokens,
+                        traversal_depth,
+                        at,
+                        ..
+                    },
+            },
+            Resolved::Verify(io),
+        ) => run_async("session verify", async move {
+            let at = at.as_deref().map(lambo::cli::canon::parse_at).transpose()?;
+            lambo::cli::session::verify_session(
+                *io,
+                lambo::cli::session::VerifyArgs {
+                    session,
+                    plan,
+                    queries,
+                    report,
+                    top_k,
+                    max_tokens,
+                    traversal_depth,
+                    at,
+                },
+            )
+            .await
+        }),
 
         (
             Commands::Serve {
