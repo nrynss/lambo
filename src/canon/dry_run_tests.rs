@@ -6,7 +6,9 @@ use std::time::Duration;
 
 use super::*;
 use crate::canon::alias_preview::{alias_preview, render_alias_preview, FlipRole, PairInput};
+use crate::daemon::score::rescore;
 use crate::test_util::fair_test as fair;
+use crate::types::ScoreTable;
 use crate::types::{EdgeType, Node};
 
 const BOTH: [PromotionPolicy; 2] = [PromotionPolicy::Swarm, PromotionPolicy::Solo];
@@ -71,7 +73,9 @@ async fn the_dry_run_agrees_with_an_independent_oracle() {
         sqlite.init_schema().await.unwrap();
         sqlite.seed(&snap).await.unwrap();
         let p = params(policy);
-        let oracle = fair::fixed_point(&sqlite, snap.clone(), &p.eval, 10).await;
+        // Review M4: the oracle waits far longer than the dry run's own
+        // stop rule (200 quiet cycles), so an early stop would show here.
+        let oracle = fair::fixed_point(&sqlite, snap.clone(), &p.eval, 200).await;
         let (report, finals) = run(&snap, &p).await.unwrap();
         for c in oracle.concepts() {
             assert_eq!(
@@ -420,6 +424,125 @@ async fn watched_concepts_are_reported_by_id_at_the_start_and_the_stop() {
             .unwrap()
     )
     .contains(&format!("watched {}", fair::concept_id("wedge_five"))));
+}
+
+/// Review M4: queues longer than one batch. With a batch of 1 or 2 the
+/// fixture's 7 to 8 first-cycle Candidates and 6 Venerables each take
+/// several cycles to go round, so a stop rule that quit before the queues
+/// drained would end short of the fixed point the oracle (200 quiet cycles,
+/// a real SQLite store) reaches.
+#[cfg(feature = "store-sqlite")]
+#[tokio::test]
+async fn queues_longer_than_a_batch_still_reach_the_oracles_fixed_point() {
+    use crate::store::SqliteStore;
+    let mut snap = fair::snapshot(true);
+    prepare(&mut snap, false);
+    for policy in BOTH {
+        for batch in [1, 2] {
+            let mut p = params(policy);
+            p.eval.batch_size = batch;
+            p.min_quiet_cycles = 1;
+            let sqlite = SqliteStore::connect("sqlite::memory:").unwrap();
+            sqlite.init_schema().await.unwrap();
+            sqlite.seed(&snap).await.unwrap();
+            let oracle = fair::fixed_point(&sqlite, snap.clone(), &p.eval, 200).await;
+            let (report, finals) = run(&snap, &p).await.unwrap();
+            all_held(&report);
+            assert!(report.quiet_needed > 1, "the ring term must bind");
+            for c in oracle.concepts() {
+                assert_eq!(
+                    finals[&c.id], c.canonization_status,
+                    "{policy:?} batch {batch}: {}",
+                    c.id
+                );
+            }
+            fair::assert_expected(&by_key(&finals), policy, "small batches");
+        }
+    }
+}
+
+/// Review M4: the production loop itself. `CanonizationTask` runs on the
+/// same snapshot with an injected clock (61 s a cycle), woken cycle by
+/// cycle, with the daemon's scores recomputed from `Config::scoring`
+/// before each, until nothing changes for 100 cycles; its fixed point must
+/// equal the dry run's.
+#[tokio::test]
+async fn the_canonization_task_reaches_the_same_fixed_point() {
+    use std::sync::atomic::{AtomicI64, Ordering};
+    use std::sync::Arc;
+
+    use crate::canon::CanonizationTask;
+    use crate::store::MemoryStore;
+
+    let mut snap = fair::snapshot(true);
+    prepare(&mut snap, false);
+    let config = crate::Config::default();
+    for policy in BOTH {
+        let mut p = params(policy);
+        p.eval.batch_size = 2;
+        p.weights = config.scoring.clone();
+        let (_, finals) = run(&snap, &p).await.unwrap();
+
+        let graph = Arc::new(RwLock::new(Graph::from_snapshot(snap.clone()).unwrap()));
+        let store = Arc::new(MemoryStore::new());
+        store.seed(snap.clone()).unwrap();
+        let score = |g: &Graph| ScoreTable {
+            epoch: g.epoch(),
+            ranked: rescore(g, &config.scoring),
+        };
+        let scores = Arc::new(RwLock::new(score(&graph.read())));
+        let (tx, _rx) = crate::daemon::events::event_channel();
+        let millis = Arc::new(AtomicI64::new(p.now.timestamp_millis()));
+        let clock = millis.clone();
+        let task = CanonizationTask::new(
+            graph.clone(),
+            store,
+            scores.clone(),
+            tx,
+            p.eval.clone(),
+            Duration::from_secs(3_600),
+        )
+        .with_clock(Arc::new(move || {
+            DateTime::from_timestamp_millis(clock.load(Ordering::SeqCst)).unwrap()
+        }));
+        let handle = task.spawn();
+        let snapshot_of = |g: &Graph| -> FinalStatuses {
+            g.concepts()
+                .map(|c| (c.id, c.canonization_status))
+                .collect()
+        };
+        let mut last = snapshot_of(&graph.read());
+        let mut unchanged = 0;
+        for cycle in 1..=600u64 {
+            *scores.write() = score(&graph.read());
+            task.wake();
+            for _ in 0..5_000 {
+                if task.cycles() >= cycle {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+            assert_eq!(task.cycles(), cycle, "cycle {cycle} did not run");
+            millis.fetch_add(61_000, Ordering::SeqCst);
+            let now = snapshot_of(&graph.read());
+            if now == last {
+                unchanged += 1;
+                if unchanged >= 100 {
+                    break;
+                }
+            } else {
+                unchanged = 0;
+                last = now;
+            }
+        }
+        handle.abort();
+        assert_eq!(task.failures(), 0);
+        assert!(unchanged >= 100, "{policy:?}: the task never settled");
+        assert_eq!(
+            last, finals,
+            "{policy:?}: the task and the dry run disagree"
+        );
+    }
 }
 
 /// Review M1: a clock earlier than the data fails `clock_after_the_data`
