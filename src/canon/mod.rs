@@ -11,6 +11,7 @@
 //! it for tests, and every adapter resolves stored instants against the
 //! caller-supplied anchor rather than reading a clock of its own.
 
+pub mod alias;
 #[cfg(all(test, feature = "store-memory"))]
 mod contradicts_tests;
 mod eval;
