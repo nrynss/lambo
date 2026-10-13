@@ -274,6 +274,8 @@ async fn f18_tool_schemas_match_the_golden_property_set() {
             vec![
                 "agent_id",
                 "concepts",
+                // #19(b): references to existing concepts, not a time.
+                "concepts[].against",
                 "concepts[].concept_type",
                 "concepts[].content",
                 // #36 PR 4: references to existing concepts, not a time.
@@ -317,6 +319,8 @@ async fn f18_tool_schemas_match_the_golden_property_set() {
             "lambo_record_action",
             vec![
                 "action",
+                // #19(b): references to existing concepts, not a time.
+                "against",
                 "agent_id",
                 "depends_on",
                 "event_time",

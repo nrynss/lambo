@@ -117,6 +117,7 @@ mod live {
                 parent_of: vec![],
                 concept: vec![],
                 depends_on: Vec::new(),
+                against: Vec::new(),
             },
         )
         .await

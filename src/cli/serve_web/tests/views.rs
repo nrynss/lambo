@@ -708,6 +708,7 @@ async fn two_sessions() -> Arc<MemoryStore> {
             parent_of: vec![],
             concept: vec![],
             depends_on: Vec::new(),
+            against: Vec::new(),
         },
     )
     .await

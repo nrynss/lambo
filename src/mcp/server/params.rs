@@ -159,10 +159,24 @@ pub struct WireConcept {
     /// load-bearing. At most 32 across the call.
     #[schemars(length(max = 8))]
     pub depends_on: Option<Vec<WireReference>>,
+    /// Optional: up to 8 existing concepts this one contradicts, such as an
+    /// older belief a newer observation shows is wrong. Name each as for
+    /// `depends_on`: its id (the 8 hex characters recall shows) or full
+    /// node id (its exact content also works). Each must already exist in
+    /// the session the write goes to and match exactly one concept other
+    /// than this one, or the whole call is refused before the ack and
+    /// nothing is written, as is a concept this one also lists in
+    /// `depends_on`. Recorded as this concept contradicting each, dated by
+    /// this write whatever the two concepts' ages. It adds no dependent and
+    /// changes no score or promotion, and raises no conflict; it does count
+    /// as a fresh write to the contradicted concept. At most 32 across the
+    /// call.
+    #[schemars(length(max = 8))]
+    pub against: Option<Vec<WireReference>>,
 }
 
-/// One `depends_on` entry of a `lambo_derive` concept: an existing concept,
-/// by the id recall shows, its full node id or its exact content.
+/// One `depends_on` or `against` entry: an existing concept, by the id
+/// recall shows, its full node id or its exact content.
 #[derive(Clone, Debug, Deserialize, schemars::JsonSchema)]
 pub struct WireReference(#[schemars(length(max = 16_384))] pub String);
 
@@ -262,6 +276,18 @@ pub struct RecordActionParams {
     /// id that names no concept, names a concept by its text, created if
     /// new.
     pub depends_on: Option<Vec<WireResource>>,
+    /// Optional: up to 8 existing concepts this action contradicts, such as a
+    /// belief the action showed to be wrong. Name each by its id (the 8 hex
+    /// characters recall shows) or full node id (its exact content also
+    /// works). Unlike `depends_on`, nothing is ever created: each must
+    /// already exist in the session the write goes to and match exactly one
+    /// concept other than the action itself, and not one the action's
+    /// `depends_on` names, or the whole call is refused before the ack and
+    /// nothing is written. Recorded as the action contradicting each, dated
+    /// by this write; it adds no dependent and changes no score or
+    /// promotion.
+    #[schemars(length(max = 8))]
+    pub against: Option<Vec<WireReference>>,
     /// Optional: the session to write to. Omit it for this session; name
     /// one of its layers (as `get_info` lists them), such as `general`, to
     /// write there instead. Writes to different sessions have no ordering

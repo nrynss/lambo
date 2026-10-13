@@ -1441,9 +1441,9 @@ async fn derive_planned(
             // call writes anything (a cited concept removed or shadowed
             // since refuses the write; it never dangles or redirects). Not
             // part of `plan_still_holds`: a changed citation is a refusal,
-            // not a reason to plan again.
-            let spec = &crate::graph::cite::DEPENDS_ON;
-            crate::graph::cite::recheck(g, spec, &pinned.references, parent_of.repo_scope())?;
+            // not a reason to plan again. #19(b): `against` likewise (owner
+            // decision, option A).
+            crate::graph::cite::recheck_all(g, pinned, parent_of.repo_scope())?;
             if attempted_embed && g.embedding().is_none() {
                 g.stamp_embedding(embedding.clone())?;
             }
@@ -1780,14 +1780,13 @@ async fn derive_planned(
                 })?;
             }
 
-            // Step 7 (#36 PR 4) — citation edges, against the sources as
-            // written: a hybrid write can match differently at commit than
+            // Step 7 (#36 PR 4, #19(b)) — citation and contradiction edges,
+            // against the sources as written: a hybrid write can match differently at commit than
             // the pre-pass saw, so the self and cycle checks run again here.
             if !pinned.is_empty() {
-                crate::graph::cite::write_edges(
+                crate::graph::cite::write_all_edges(
                     g,
-                    spec,
-                    &pinned.references,
+                    pinned,
                     &cited,
                     crate::graph::cite::Stamp {
                         created_at: interaction_created_at,

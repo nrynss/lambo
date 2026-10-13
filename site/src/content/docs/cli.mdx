@@ -231,7 +231,8 @@ Stores concepts from the current interaction. Lambo stamps the time itself, so t
 | `--concept <CONTENT:KIND>` | No | An extra concept. Repeat it to derive several in one call. |
 | `--parent-of <CHILD:PARENT>` | No | A hierarchy pair. Repeat it for several links. |
 | `--depends-on <REF>` | No | An existing concept the first concept rests on: its 8-hex id from recall or its full node id (its exact content also works). Repeat it, at most 8 times. Each must match exactly one concept of the session, or nothing is written (see [`lambo_derive`](/lambo/mcp/#lambo_derive)). |
-| `--repo-scope <REPO>` | No | The repository this call's path-like `resource` concepts and `--parent-of` ends belong to, such as `github.com/acme/widgets`, so the same path in two repositories is two concepts. Matched as exact text; an empty value is a usage error. See [Repository-scoped paths](/lambo/mcp/#repository-scoped-paths). |
+| `--against <REF>` | No | An existing concept the first concept contradicts, by the same forms. Repeat it, at most 8 times. Each must match exactly one concept of the session other than the first concept, or nothing is written, and naming it in `--depends-on` too is refused; it is recorded as a contradiction, not a dependency (see *Saying an existing concept is wrong* under [`lambo_derive`](/lambo/mcp/#lambo_derive)). |
+| `--repo-scope <REPO>` | No | The repository this call's path-like `resource` concepts, `--parent-of` ends and `--depends-on` and `--against` path text belong to, such as `github.com/acme/widgets`, so the same path in two repositories is two concepts. Matched as exact text; an empty value is a usage error. See [Repository-scoped paths](/lambo/mcp/#repository-scoped-paths). |
 
 `--parent-of` puts the child left of the first colon and the parent right of it. Only the first colon separates, so the parent may itself contain colons (an IPv6 CIDR such as `2001:db8::/32`); the child and the parent must both be non-empty.
 
@@ -280,7 +281,8 @@ Records an action the agent took. The action becomes a `Resource` concept, and t
 | `--produces <PRODUCES>` | No | Resources this action creates. Repeatable. |
 | `--modifies <MODIFIES>` | No | Resources this action mutates. Repeatable. |
 | `--depends-on <DEPENDS_ON>` | No | Things this action depends on. Repeatable. An existing concept's full node id (hyphenated), or exactly 8 hex characters that name no concept by text and start exactly one concept's id, cites that concept; an interaction's id, or a short id several concepts share, is a usage error and nothing is written. Any other value (9 to 32 hex characters, the unhyphenated form included), and an id that names nothing, is matched by text and created if new, as before 0.6.0. |
-| `--repo-scope <REPO>` | No | As for `derive`: the repository this action's path-like `--produces`, `--modifies` and `--depends-on` entries belong to. |
+| `--against <REF>` | No | An existing concept this action contradicts: its 8-hex id from recall, its full node id or its exact content. Repeatable, at most 8. Never created: each must match exactly one existing concept other than the action, or it is a usage error and nothing is written. Naming the same concept in `--depends-on` is refused the same way. |
+| `--repo-scope <REPO>` | No | As for `derive`: the repository this action's path-like `--produces`, `--modifies`, `--depends-on` and `--against` entries belong to. |
 
 ```bash
 $ lambo record-action --session demo --agent agent-a \
@@ -776,3 +778,110 @@ The command line enforces the same limits as the MCP tools.
 See [What Lambo accepts in text](#what-lambo-accepts-in-text) for the character rules, which apply to every string on every verb.
 
 See [MCP tools](/lambo/mcp/) for the same operations over MCP, and [Library API](/lambo/api/) for the type both surfaces share.
+
+
+## Classify a session before splitting
+
+`lambo session classify` produces a private, reviewable JSON plan. It reads a
+copied, completed standalone SQLite backup or an exported `GraphSnapshot`, and
+never acquires a writer lease, migrates the schema, builds an embedder, or writes
+source data. SQLite input needs the `store-sqlite` feature. Snapshot input works
+without a store feature. Do not pass a live writer database: copy a finished
+backup first. Nonempty WAL files, symlinks and hardlinks are refused. An older
+schema must be upgraded on a separate copy or exported by a compatible binary.
+
+```bash
+lambo session classify --session mixed --database ./backup-copy.db \
+  --rules ./classification.toml --output ./plan.json
+# Or: --snapshot ./export.json instead of --database.
+```
+
+`--session`, `--rules`, `--output` and exactly one source flag are required.
+`--config` is refused. The output must be a new file; existing files and aliases
+are never overwritten. The plan is written to a private temporary file beside it
+and linked into place only when complete, so a failed write leaves no partial
+plan. The output directory must support hard links; where it does not (FAT,
+some network mounts) the command fails with no output written. The output has private file permissions and the command
+prints aggregate counts only. Keep plans and label files private: they contain
+source ids and classification evidence.
+
+Rules are TOML (a `.toml` extension) or JSON. This synthetic example maps two
+projects; the same format accepts any project names:
+
+```toml
+general_session = "general"
+fallback_session = "general-usage"
+neighbour_window_secs = 7200
+general_agent_patterns = ["operator"]
+operator_wide_phrases = ["all projects", "every repository", "operator-wide"]
+
+[[projects]]
+session = "alpha"
+folders = ["/work/alpha"]
+agent_id_patterns = ["alpha-*"]
+content_keywords = ["alpha"]
+
+[[projects]]
+session = "beta"
+folders = ["/work/beta"]
+agent_id_patterns = ["beta-*"]
+content_keywords = ["beta"]
+exclude_from_general = true
+```
+
+Folders are absolute literal paths; actor patterns use anchored, case-sensitive
+`*` and `?` globs. Content keywords are case-insensitive phrases with word
+boundaries. Unknown rule keys and duplicate sessions are errors. General and
+fallback session names default to those above. Neighbour smoothing uses event
+time (creation time when absent), a fixed set of high-confidence seeds and at
+most six neighbours on either side. It upgrades an uncertain placement only
+when actor, text and neighbour evidence agree; inference does not cascade.
+
+Every interaction and concept has one primary session, confidence and signals.
+The plan lists low-confidence items and identity hub `copy_into` placements.
+These placements are hints for a future split command; classification copies
+nothing. Automatic `general` classification requires a Logic or Constraint,
+operator-wide text and prompt, a configured operator actor, and no project,
+path, issue, PR, commit or version reference. Protected project provenance
+cannot be relabeled into general.
+
+`--reviewed-assignments labels.jsonl` imports complete operator-reviewed labels.
+Each row has `kind` (`interaction` or `concept`), `id`, `project`, `confidence`
+(`high`, `medium`, `low` or `hub`), `signals`, `pass2`, and optional `copy_into`.
+Every source node must appear exactly once. This supports legacy v2 labels, but
+is an explicit operator assertion: it does not prove their original provenance.
+A general interaction requires all its origin concepts to belong to general.
+
+`--overrides corrections.jsonl` applies separately audited corrections. Each
+row has `kind`, `id`, `session` (or `to`), a nonempty `reason`, optional `from`
+(the expected prior session) and optional `copy_into`. Unknown ids, duplicate
+corrections and stale `from` values are refused. An audited general correction
+can exempt a ruling from automatic reference guards, but cannot move protected
+project provenance or identity records into general. A keyword for a project
+with `exclude_from_general`, in the origin prompt or a sibling record, is soft
+evidence: it blocks automatic, resealed and unaudited reviewed general placement,
+and only an audited operator-wide assertion may address it. Keywords of other
+projects there do not block general. Any project keyword in the ruling itself
+fails the conservative guards and needs the same audit. Source actors, configured
+repository paths and an excluded source session remain hard provenance barriers.
+Hub corrections must name a Resource or Entity identity, include the primary
+placement and exclude general.
+
+The versioned plan binds the complete durable source snapshot and rules with
+SHA256 fingerprints. Array order in vectors, metadata and audit history is
+preserved; volatile reservations are excluded. `lambo::session::validate_plan`
+refuses a stale source, missing or duplicate assignments, unsupported versions
+and a changed plan fingerprint. The seal detects accidental corruption; it is
+not a signature or authorization mechanism. To correct a plan, regenerate it
+with reviewed labels or audited overrides. Splitting and cut-over are separate
+steps and are not implemented by this command.
+
+
+A complete reviewed import can preserve an explicitly reviewed historical shared
+hub whose source type is a narrative rather than Resource or Entity. Its separate
+correction must set `shared_hub_assertion: true`, provide a reason and repeat the
+exact primary session and `copy_into` placements. This is an operator assertion
+bound to the reviewed import hash; the original type and content are preserved.
+Without that audit, nonidentity replication is refused. Automatic inference never
+replicates narrative records. Every copied placement must exclude `general`, and
+`validate_plan` checks the audit evidence even for a newly sealed plan.

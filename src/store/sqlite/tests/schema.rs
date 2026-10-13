@@ -310,6 +310,7 @@ async fn init_schema_converges_pre_d_event_time_and_human_confirmed() {
         ("interactions", "event_time"),
         ("edges", "event_time"),
         ("concepts", "human_confirmed"),
+        ("sessions", "closed_at"),
     ] {
         let cols: Vec<String> =
             sqlx::query_scalar(&format!("SELECT name FROM pragma_table_info('{table}')"))

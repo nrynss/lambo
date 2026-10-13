@@ -8,6 +8,7 @@ use std::fmt;
 use uuid::Uuid;
 
 mod reference;
+pub(crate) use reference::pinned_bytes;
 pub(crate) use reference::shown;
 pub use reference::{
     ConceptCitations, PinnedCitations, PinnedReference, ReferenceCandidate, ReferenceField,
@@ -919,8 +920,9 @@ pub enum WriteIntentPayload {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         depends_on_pins: Vec<Option<NodeId>>,
     },
-    /// A `lambo_derive` job with citations or names (#36 PR 4): the derive
-    /// above plus what its references resolved to at the ack.
+    /// A `lambo_derive` job with citations (#36 PR 4) or contradictions
+    /// (#19(b), `against`): the derive above plus what its references
+    /// resolved to at the ack.
     ///
     /// Its own variant, not a defaulted field on [`Self::Derive`], for the
     /// reason [`Self::DeriveImage`] is (design Q18): a build that predates
@@ -933,10 +935,37 @@ pub enum WriteIntentPayload {
         concepts: Vec<(String, ConceptType)>,
         /// `(parent, child)` hierarchy pairs, in submission order.
         pairs: Vec<(String, String)>,
-        /// The citations and names as accepted at the ack. A replay
+        /// The citations and contradictions as accepted at the ack. A replay
         /// re-resolves every reference and refuses one that resolves
         /// differently.
         citations: PinnedCitations,
+    },
+    /// A `lambo_record_action` job with `against` (#19(b)): the action
+    /// above plus the concepts it contradicts, as resolved at the ack.
+    ///
+    /// Its own variant, for [`Self::DeriveCited`]'s reason (design Q18): a
+    /// defaulted field on [`Self::Action`] would let a build that predates
+    /// it replay the action with its contradictions silently dropped, where
+    /// a new variant is refused by name. An action without `against` stays
+    /// [`Self::Action`], byte-identical. Settled, it becomes the empty
+    /// [`Self::Derive`] ([`Self::settled`]), so a 0.5.0 build still loads the
+    /// session.
+    ActionCited {
+        /// The action sentence.
+        action: String,
+        /// Concept contents this action produces.
+        produces: Vec<String>,
+        /// Concept contents this action modifies.
+        modifies: Vec<String>,
+        /// Concept contents this action depends on.
+        depends_on: Vec<String>,
+        /// As on [`Self::Action`].
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        depends_on_pins: Vec<Option<NodeId>>,
+        /// The concepts the action contradicts, as accepted at the ack
+        /// (`content` is the action). A replay re-resolves each and refuses
+        /// one that resolves differently.
+        against: Vec<PinnedReference>,
     },
     /// #129: a text derive or action whose path-like Resources take the
     /// repository-scoped key. A wrapper, not a field, so a build that
@@ -946,7 +975,7 @@ pub enum WriteIntentPayload {
     RepoScoped {
         /// Caller-asserted repository identity, validated again at replay.
         repo_scope: String,
-        /// Exactly one `Derive`, `DeriveCited` or `Action`.
+        /// Exactly one `Derive`, `DeriveCited`, `Action` or `ActionCited`.
         payload: Box<WriteIntentPayload>,
     },
 }
@@ -970,18 +999,20 @@ impl WriteIntentPayload {
     /// empty [`Self::Derive`], for the second reason: a 0.5.0 build cannot
     /// decode the variant, and a settled row is decoded at every load, so a
     /// cited derive that had already applied would otherwise stop a
-    /// downgrade from loading the session at all.
+    /// downgrade from loading the session at all. A settled
+    /// [`Self::ActionCited`] (#19(b)) too, for the same reason.
     ///
     /// A settled [`Self::RepoScoped`] (#129) becomes the same empty
     /// [`Self::Derive`], for the same reason, whatever it wrapped.
     pub fn settled(&self) -> Option<WriteIntentPayload> {
         match self {
-            Self::DeriveImage { .. } | Self::DeriveCited { .. } | Self::RepoScoped { .. } => {
-                Some(Self::Derive {
-                    concepts: Vec::new(),
-                    pairs: Vec::new(),
-                })
-            }
+            Self::DeriveImage { .. }
+            | Self::DeriveCited { .. }
+            | Self::ActionCited { .. }
+            | Self::RepoScoped { .. } => Some(Self::Derive {
+                concepts: Vec::new(),
+                pairs: Vec::new(),
+            }),
             Self::Derive { .. } | Self::Action { .. } => None,
         }
     }
@@ -1002,7 +1033,7 @@ impl WriteIntent {
 
 /// [`WriteIntentPayload::settled`]'s form of an image or cited intent,
 /// serialized: what the SQL adapters' consume writes over a settled
-/// `DeriveImage` or `DeriveCited` payload.
+/// `DeriveImage`, `DeriveCited` or `ActionCited` payload.
 pub const SETTLED_IMAGE_INTENT_PAYLOAD: &str = r#"{"kind":"derive","concepts":[],"pairs":[]}"#;
 
 /// A SQL `LIKE` pattern that matches a stored `DeriveImage` payload and no
@@ -1014,6 +1045,10 @@ pub const DERIVE_IMAGE_PAYLOAD_LIKE: &str = r#"{"kind":"derive_image",%"#;
 /// A SQL `LIKE` pattern that matches a stored `DeriveCited` payload (#36
 /// PR 4) and no other, for the same overwrite at consume.
 pub const DERIVE_CITED_PAYLOAD_LIKE: &str = r#"{"kind":"derive_cited",%"#;
+
+/// A SQL `LIKE` pattern that matches a stored `ActionCited` payload
+/// (#19(b)) and no other, for the same overwrite at consume.
+pub const ACTION_CITED_PAYLOAD_LIKE: &str = r#"{"kind":"action_cited",%"#;
 
 /// A SQL `LIKE` pattern that matches a stored `RepoScoped` payload (#129)
 /// and no other, for the same overwrite at consume.
@@ -1981,8 +2016,9 @@ pub enum LamboError {
     #[error("image id taken: a text concept in this session already holds the caption with image id {0:?}; derive the image with another image id")]
     ImageIdTaken(String),
     /// A reference to an existing concept was refused (#36 PR 4): a derive's
-    /// `depends_on` or `name`, or a `record_action` `depends_on` entry that
-    /// names a concept by id, did not resolve to exactly one concept of the
+    /// `depends_on`, a `record_action` `depends_on` entry that names a
+    /// concept by id, or an `against` entry on either (#19(b)), did not
+    /// resolve to exactly one concept of the
     /// session the write targets, or would cite the concept itself, close a
     /// cycle, or resolved differently at apply than at the ack.
     ///

@@ -18,6 +18,7 @@ fn cite(content: &str, depends_on: &[&str]) -> ConceptCitations {
     ConceptCitations {
         content: content.to_string(),
         depends_on: depends_on.iter().map(|s| s.to_string()).collect(),
+        against: Vec::new(),
     }
 }
 
@@ -248,11 +249,11 @@ async fn the_sync_and_async_paths_refuse_the_same_references() {
 }
 
 /// Holds every real-content embed until released; the calibration probe
-/// passes through.
-struct GatedEmbedder {
-    inner: FixtureEmbedder,
-    hold: tokio::sync::watch::Receiver<bool>,
-    entered: Arc<AtomicUsize>,
+/// passes through. Shared with `against` (#19(b)).
+pub(super) struct GatedEmbedder {
+    pub(super) inner: FixtureEmbedder,
+    pub(super) hold: tokio::sync::watch::Receiver<bool>,
+    pub(super) entered: Arc<AtomicUsize>,
 }
 
 #[async_trait]
@@ -534,6 +535,7 @@ async fn the_foreign_probe_runs_with_this_sessions_lock_released() {
                 modifies: &[],
                 depends_on: &[missing.as_str()],
             },
+            &[],
             &probe,
             None,
         )

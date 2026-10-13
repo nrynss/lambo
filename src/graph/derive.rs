@@ -212,6 +212,10 @@ pub struct DeriveOutcome {
     /// re-sent citation reinforces its edge and is counted in
     /// [`Self::reinforced`] instead.
     pub cited: usize,
+    /// `Contradicts` edges this call **added** (#19(b), `against`): a
+    /// re-sent contradiction reinforces its edge and is counted in
+    /// [`Self::reinforced`] instead.
+    pub contradicted: usize,
 }
 
 /// The primary write path (spec §7): derive `concepts` from `interaction`,
@@ -255,13 +259,15 @@ pub fn derive(
     )
 }
 
-/// [`derive`](fn@derive) with citations (#36 PR 4), as accepted by
-/// [`crate::graph::cite::validate`]. With none it is exactly `derive`.
+/// [`derive`](fn@derive) with citations (#36 PR 4) and contradictions
+/// (#19(b)), as accepted by [`crate::graph::cite::validate`]. With none it
+/// is exactly `derive`.
 ///
 /// Inside the one transaction: the pinned references are re-resolved
-/// against the graph before anything is written (`cite::recheck`), the
-/// concepts and their edges are written, then the citation edges
-/// (`cite::write_edges`); any refusal undoes the whole write.
+/// against the graph before anything is written (`cite::recheck_all`), the
+/// concepts and their edges are written, then the citation and
+/// contradiction edges (`cite::write_all_edges`); any refusal undoes the
+/// whole write.
 pub(crate) fn derive_cited(
     graph: &mut Graph,
     interaction: NodeId,
@@ -295,8 +301,7 @@ pub(crate) fn derive_cited(
     // writer closed after the pre-pass could have seen it) undoes whatever
     // the loop wrote before it.
     graph.transaction(|graph| {
-        let spec = &crate::graph::cite::DEPENDS_ON;
-        crate::graph::cite::recheck(graph, spec, &pinned.references, parent_of.repo_scope())?;
+        crate::graph::cite::recheck_all(graph, pinned, parent_of.repo_scope())?;
         let mut written = crate::graph::cite::Written::default();
         let mut outcome = derive_after_validation(
             graph,
@@ -311,10 +316,9 @@ pub(crate) fn derive_cited(
             &mut written.by_content,
         )?;
         if !pinned.is_empty() {
-            crate::graph::cite::write_edges(
+            crate::graph::cite::write_all_edges(
                 graph,
-                spec,
-                &pinned.references,
+                pinned,
                 &written,
                 crate::graph::cite::Stamp {
                     created_at: interaction_created_at,

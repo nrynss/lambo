@@ -372,6 +372,12 @@ pub(crate) async fn check_a_settled_image_intent_keeps_no_vector(
         concepts: vec![("wears silk at pongal".into(), ConceptType::Logic)],
         pairs: vec![],
         citations: crate::types::PinnedCitations {
+            // #19(b): and its contradictions.
+            against: vec![crate::types::PinnedReference {
+                content: "wears silk at pongal".into(),
+                reference: "avoids silk".into(),
+                target: NodeId::new(),
+            }],
             references: vec![crate::types::PinnedReference {
                 content: "wears silk at pongal".into(),
                 reference: "prefers silk".into(),
@@ -379,16 +385,25 @@ pub(crate) async fn check_a_settled_image_intent_keeps_no_vector(
             }],
         },
     };
-    // #129: a repository-scoped job settles the same way too.
+    // #19(b): an action with `against` is its own kind and settles the same
+    // way.
+    let action_cited_payload = WriteIntentPayload::ActionCited {
+        action: "returned the silk shirt".into(),
+        produces: vec![],
+        modifies: vec![],
+        depends_on: vec!["silk shirt".into()],
+        depends_on_pins: vec![],
+        against: vec![crate::types::PinnedReference {
+            content: "returned the silk shirt".into(),
+            reference: "prefers silk".into(),
+            target: NodeId::new(),
+        }],
+    };
+    // #129: a repository-scoped job settles the same way too, here an
+    // action with `against` under a scope.
     let scoped_payload = WriteIntentPayload::RepoScoped {
         repo_scope: "host/owner/repo".into(),
-        payload: Box::new(WriteIntentPayload::Action {
-            action: "built the binary".into(),
-            produces: vec!["src/main.rs".into()],
-            modifies: vec![],
-            depends_on: vec![],
-            depends_on_pins: vec![],
-        }),
+        payload: Box::new(action_cited_payload.clone()),
     };
     let intent = |receipt: &str, payload: &WriteIntentPayload, outcome| WriteIntent {
         session_id: sid.clone(),
@@ -409,6 +424,7 @@ pub(crate) async fn check_a_settled_image_intent_keeps_no_vector(
     let image = intent("settle-image", &image_payload, None);
     let text = intent("settle-text", &text_payload, None);
     let cited = intent("settle-cited", &cited_payload, None);
+    let action_cited = intent("settle-action-cited", &action_cited_payload, None);
     let scoped = intent("settle-scoped", &scoped_payload, None);
     let failed = intent("settle-failed", &image_payload, Some(outcome("failed")));
     let stored = |receipt: &str| {
@@ -456,6 +472,9 @@ pub(crate) async fn check_a_settled_image_intent_keeps_no_vector(
                 intent: cited.clone(),
             },
             Mutation::PutWriteIntent {
+                intent: action_cited.clone(),
+            },
+            Mutation::PutWriteIntent {
                 intent: scoped.clone(),
             },
         ],
@@ -471,6 +490,11 @@ pub(crate) async fn check_a_settled_image_intent_keeps_no_vector(
         stored(&cited.receipt).await.payload,
         cited_payload,
         "an unconsumed cited intent keeps its citations: the replay owes them"
+    );
+    assert_eq!(
+        stored(&action_cited.receipt).await.payload,
+        action_cited_payload,
+        "an unconsumed cited action keeps its contradictions: the replay owes them"
     );
     assert_eq!(
         stored(&scoped.receipt).await.payload,
@@ -506,6 +530,11 @@ pub(crate) async fn check_a_settled_image_intent_keeps_no_vector(
             },
             Mutation::ConsumeWriteIntent {
                 session_id: sid.clone(),
+                receipt: action_cited.receipt.clone(),
+                outcome: applied.clone(),
+            },
+            Mutation::ConsumeWriteIntent {
+                session_id: sid.clone(),
                 receipt: scoped.receipt.clone(),
                 outcome: applied.clone(),
             },
@@ -535,14 +564,19 @@ pub(crate) async fn check_a_settled_image_intent_keeps_no_vector(
         },
         "a consumed cited intent settles to the empty derive a 0.5.0 build decodes"
     );
-    assert_eq!(
-        stored(&scoped.receipt).await.payload,
-        WriteIntentPayload::Derive {
-            concepts: vec![],
-            pairs: vec![],
-        },
-        "a consumed scoped intent settles to the empty derive a 0.5.0 build decodes"
-    );
+    for (receipt, what) in [
+        (&action_cited.receipt, "cited action"),
+        (&scoped.receipt, "scoped intent"),
+    ] {
+        assert_eq!(
+            stored(receipt).await.payload,
+            WriteIntentPayload::Derive {
+                concepts: vec![],
+                pairs: vec![],
+            },
+            "a consumed {what} settles to the empty derive a 0.5.0 build decodes"
+        );
+    }
     let consumed_text = stored(&text.receipt).await;
     assert_eq!(
         consumed_text.payload, text_payload,

@@ -810,9 +810,9 @@ pub(super) fn put_write_intents_upsert<'a>(
 // #22 review L1: a settled image intent's payload is overwritten with
 // `types::SETTLED_IMAGE_INTENT_PAYLOAD` in the same statement, so its vector
 // does not outlive the consume. #36 PR 4 review H2: a settled cited derive's
-// too, so a 0.5.0 build can still load the session. The two patterns and the
-// replacement are bound between the pieces of this prefix, before the VALUES
-// rows.
+// too, so a 0.5.0 build can still load the session, and (#19(b)) a settled
+// cited action's. The three patterns and the replacement are bound between
+// the pieces of this prefix, before the VALUES rows.
 pub(super) const CONSUME_WRITE_INTENT_UPDATE_PREFIX_SQL: &str = r#"
 UPDATE write_intents SET
     consumed_at = v.consumed_at, outcome_tag = v.outcome_tag, outcome_summary = v.outcome_summary,
@@ -843,6 +843,8 @@ pub(super) fn consume_write_intents_update<'a>(
     qb.push_bind(crate::types::DERIVE_IMAGE_PAYLOAD_LIKE)
         .push(CONSUME_WRITE_INTENT_UPDATE_OR_SQL)
         .push_bind(crate::types::DERIVE_CITED_PAYLOAD_LIKE)
+        .push(CONSUME_WRITE_INTENT_UPDATE_OR_SQL)
+        .push_bind(crate::types::ACTION_CITED_PAYLOAD_LIKE)
         .push(CONSUME_WRITE_INTENT_UPDATE_OR_SQL)
         .push_bind(crate::types::REPO_SCOPED_PAYLOAD_LIKE)
         .push(CONSUME_WRITE_INTENT_UPDATE_PAYLOAD_SQL)

@@ -2,7 +2,7 @@
 //! concept a **write** names, in the session the write targets.
 //!
 //! A derive's `depends_on`, a `record_action` `depends_on` entry that names
-//! a concept by id, and #19's `contradicts` all call
+//! a concept by id, and #19(b)'s `against` on either all call
 //! [`resolve_reference`] against the graph of the session they write. It is
 //! deliberately not `inspect`'s resolver ([`super::focus`]): a focus may
 //! resolve by **substring** and tells the caller which concept it picked,

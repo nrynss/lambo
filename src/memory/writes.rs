@@ -331,13 +331,45 @@ impl Memory {
         agent: &AgentId,
         action: &Action<'_>,
     ) -> Result<ActionOutcome, LamboError> {
+        self.record_action_sync(agent, action, &[])
+    }
+
+    /// [`Memory::record_action_as`] with `against` (#19(b)), synchronous:
+    /// resolved before the interaction opens, re-resolved under the write
+    /// lock in the write's transaction.
+    fn record_action_sync(
+        &self,
+        agent: &AgentId,
+        action: &Action<'_>,
+        against: &[String],
+    ) -> Result<ActionOutcome, LamboError> {
         crate::graph::resource::validate_repo_scope(action.repo_scope)?;
         let _writing = self.begin_write_sync()?;
+        // #19(b): refused before the interaction opens, so a bad reference
+        // leaves nothing behind. Empty (and nothing changes) without any.
+        let against = if against.is_empty() {
+            Vec::new()
+        } else {
+            crate::graph::action::validate_against(&self.graph.read(), action, against)?
+        };
         let interaction =
             self.begin_interaction_full(agent, Some(action.action.to_string()), action.event_time)?;
         let outcome = {
             let mut g = self.graph.write();
-            graph_record_action(&mut g, interaction, agent, action)?
+            if against.is_empty() {
+                graph_record_action(&mut g, interaction, agent, action)?
+            } else {
+                crate::graph::action::record_action_against(
+                    &mut g,
+                    interaction,
+                    agent,
+                    action,
+                    &crate::graph::action::ActionEmbeddings::new(),
+                    &[],
+                    &against,
+                    None,
+                )?
+            }
         };
 
         // The action node may be pre-existing (already indexed) — mirroring it
@@ -373,9 +405,23 @@ impl Memory {
         agent: &AgentId,
         action: &Action<'_>,
     ) -> Result<ActionOutcome, LamboError> {
+        self.record_action_against_embedded_as(agent, action, &[])
+            .await
+    }
+
+    /// [`Memory::record_action_embedded_as`] with the concepts the action
+    /// contradicts (#19(b)); see [`Memory::record_action_against_async_as`]
+    /// for what `against` takes. With none it is exactly
+    /// `record_action_embedded_as`.
+    pub async fn record_action_against_embedded_as(
+        &self,
+        agent: &AgentId,
+        action: &Action<'_>,
+        against: &[String],
+    ) -> Result<ActionOutcome, LamboError> {
         crate::graph::resource::validate_repo_scope(action.repo_scope)?;
         if self.config.match_strategy == MatchStrategy::Canonical {
-            return self.record_action_as(agent, action);
+            return self.record_action_sync(agent, action, against);
         }
         // Held across the embed await below, so a concurrent `close()` either
         // waits for this whole call or refuses it (T81-1), matching `derive`.
@@ -383,6 +429,8 @@ impl Memory {
         // #36 PR 4: what each id-shaped `depends_on` entry names now; the
         // apply below, after the embed await, refuses one that has changed.
         let pins = crate::graph::action::validate_pinned(&self.graph.read(), action)?;
+        // #19(b): the contradictions, pinned the same way.
+        let against = crate::graph::action::validate_against(&self.graph.read(), action, against)?;
         // Off-lock: real model calls. Skipped when the store cannot search
         // vectors, as hybrid `derive` skips them: the write is keyword-only.
         let embeddings = if self.vector_candidates().available() {
@@ -394,16 +442,16 @@ impl Memory {
             self.begin_interaction_full(agent, Some(action.action.to_string()), action.event_time)?;
         let outcome = {
             let mut g = self.graph.write();
-            if !embeddings.is_empty() {
-                g.stamp_embedding(self.embedding.clone())?;
-            }
-            crate::graph::action::record_action_pinned(
+            // #19(b) review L3: stamped by the record, after the recheck.
+            crate::graph::action::record_action_against(
                 &mut g,
                 interaction,
                 agent,
                 action,
                 &embeddings,
                 &pins,
+                &against,
+                (!embeddings.is_empty()).then(|| self.embedding.clone()),
             )?
         };
         let mut touched = outcome.created.clone();
@@ -635,7 +683,25 @@ impl Memory {
         agent: &AgentId,
         action: &Action<'_>,
     ) -> Result<Submitted, LamboError> {
-        self.record_action_async_scoped(agent, action, &NoForeignScopes, None)
+        self.record_action_async_scoped(agent, action, &[], &NoForeignScopes, None)
+            .await
+    }
+
+    /// [`Memory::record_action_async_as`] with the concepts the action
+    /// contradicts (#19(b)): each `against` entry must resolve to exactly one
+    /// existing concept of this session, by full node id, recall's short id
+    /// or its canonical key, as a derive's citations do
+    /// ([`Memory::derive_cited_as`]); one that does not, or that names the
+    /// action's own concept, refuses the call before the ack with
+    /// [`LamboError::Reference`]. Each is written as `action -Contradicts->
+    /// target`, re-resolved under the write lock at apply.
+    pub async fn record_action_against_async_as(
+        &self,
+        agent: &AgentId,
+        action: &Action<'_>,
+        against: &[String],
+    ) -> Result<Submitted, LamboError> {
+        self.record_action_async_scoped(agent, action, against, &NoForeignScopes, None)
             .await
     }
 
@@ -650,6 +716,9 @@ impl Memory {
     /// text is text, as in 0.5.0, unless `foreign` finds it in another
     /// scope: then it is refused as cross-session rather than minted here.
     ///
+    /// #19(b): `against` is resolved after `depends_on`, against the same
+    /// session, and a target only `foreign` holds is refused as
+    /// cross-session.
     /// #33 PR 4 review L1: a `depends_on` entry that names nothing here but
     /// a concept in a session `foreign` checks by text (for a write scoped
     /// to a layer, the caller's own session) is refused as cross-session
@@ -660,6 +729,7 @@ impl Memory {
         &self,
         agent: &AgentId,
         action: &Action<'_>,
+        against: &[String],
         foreign: &dyn ForeignScopes,
         deliver_to: Option<&SessionId>,
     ) -> Result<Submitted, LamboError> {
@@ -668,6 +738,9 @@ impl Memory {
         // another session in the next one, after it is gone.
         let pins = crate::graph::action::validate_pinned(&self.graph.read(), action);
         let pins = pins.map_err(|e| attribute_foreign(e, foreign))?;
+        // #19(b): likewise, the guard dies with the statement.
+        let against = crate::graph::action::validate_against(&self.graph.read(), action, against);
+        let against = against.map_err(|e| attribute_foreign(e, foreign))?;
         // Hyphenated ids that will be taken as new text (the guard is again a
         // temporary of its statement)...
         let unresolved = crate::graph::action::unresolved_ids(&self.graph.read(), action)?;
@@ -721,6 +794,7 @@ impl Memory {
                 action.depends_on.iter().map(|s| (*s).to_string()).collect(),
                 pins,
                 action.repo_scope.map(str::to_string),
+                against,
                 deliver_to.cloned(),
             )
             .await)

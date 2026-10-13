@@ -560,6 +560,7 @@ mod tests {
                 produces: vec![],
                 modifies: vec![],
                 depends_on: vec!["render 17 [image:r17]".into()],
+                against: Vec::new(),
             },
         )
         .await

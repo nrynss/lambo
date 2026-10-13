@@ -97,6 +97,7 @@ pub mod memory;
 pub mod recall;
 pub mod resolve;
 
+pub mod session;
 pub mod store;
 pub mod surface;
 #[cfg(test)]

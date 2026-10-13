@@ -35,9 +35,10 @@ The accessors `session`, `agent`, `config`, `embedding_contract`, `graph`, `inde
 | Method | What it does |
 |---|---|
 | `derive` | Derives concepts from an interaction. Async. |
-| `derive_cited_as` | `derive` with citations: each `ConceptCitations` names one of the call's concepts by its content and the existing concepts it depends on. Every reference must resolve to exactly one concept of the session, or the call fails with `LamboError::Reference` and writes nothing. Async. |
+| `derive_cited_as` | `derive` with citations and contradictions: each `ConceptCitations` names one of the call's concepts by its content, the existing concepts it depends on (`depends_on`) and the existing concepts it contradicts (`against`, written as `Contradicts` edges, newer to older). Every reference must resolve to exactly one concept of the session, or the call fails with `LamboError::Reference` and writes nothing. Async. |
 | `derive_cited_async_as` | The same, acknowledged before the write is applied, like `derive_async_as`; the references are resolved before the ack and checked again when the write is applied. Async. |
 | `record_action` | Records an action as a concept plus its causal and dependency edges. |
+| `record_action_against_async_as` and `record_action_against_embedded_as` | `record_action_async_as` and `record_action_embedded_as` with `against`: existing concepts the action contradicts, resolved like a derive's references (never created) and written as `action -Contradicts-> target`. |
 | `demote` | Demotes a chunk. |
 | `retract` | Retracts a concept. Pass a dry-run flag to get an impact report without mutating. Async. |
 | `reserve` and `release` | Take or release an advisory soft lock. |
@@ -70,24 +71,29 @@ The accessors `session`, `agent`, `config`, `embedding_contract`, `graph`, `inde
 ## Contradiction edges
 
 `EdgeType::Contradicts` is a directed concept-to-concept relation:
-`newer assertion -> older assertion`. Its serialized and stored name is
+`writer -> target`: from the concept or action that declares the
+contradiction to the existing concept it names. The direction and date come from
+the write that declares it, not from either concept's age. Its serialized and stored name is
 `Contradicts`, following the other edge types. Graph snapshots and store
 mutation batches can carry it; existing database schemas need no migration.
 Older binaries cannot decode a store or snapshot containing the new variant.
 Library callers with exhaustive `EdgeType` matches must add an arm.
 
-A contradiction is informational: it does not change either concept's
+A contradiction does not change either concept's
 canonization status, count as dependence or promotion evidence, increase blast
 radius, raise either concept's score (it adds nothing to density or the edge
-bonus), or protect a Resource from the GC score cut. Its weight does not decay.
+bonus), or protect a Resource from the GC score cut, and its writer does not join the
+conflict agent set. A fresh contradiction does count as a recent write in the
+high-risk check. Its weight does not decay.
 
 GC's connectivity rules are unchanged and count it like any other edge: a
 concept with a contradiction is not an orphan, and a contradiction can keep a
 concept reachable from the interaction chain. Because the edge never decays,
 it keeps that connection until either endpoint is collected for another
 reason.
-This release groundwork adds the typed edge only; derive/action tool fields,
-recall contradiction warnings and supersession are separate follow-ups.
+Agents write it through `against` on derive and record_action (see the methods
+above and the MCP reference). Recall contradiction warnings, the GC rule
+change and supersession are separate follow-ups (#19(c), #20).
 
 ## Settings
 

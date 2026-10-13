@@ -596,6 +596,7 @@ async fn seed(session: &str) -> Arc<MemoryStore> {
             parent_of: vec!["auth middleware:user schema".into()],
             concept: vec!["auth middleware:entity".into()],
             depends_on: Vec::new(),
+            against: Vec::new(),
         },
     )
     .await
@@ -611,6 +612,7 @@ async fn seed(session: &str) -> Arc<MemoryStore> {
             produces: vec!["user schema".into()],
             modifies: vec![],
             depends_on: vec!["auth middleware".into()],
+            against: Vec::new(),
         },
     )
     .await

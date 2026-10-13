@@ -20,6 +20,7 @@ fn cite(content: &str, depends_on: &[&str]) -> ConceptCitations {
     ConceptCitations {
         content: content.to_string(),
         depends_on: depends_on.iter().map(|s| s.to_string()).collect(),
+        against: Vec::new(),
     }
 }
 
@@ -378,6 +379,7 @@ fn the_commit_and_the_pre_pass_refuse_the_same_kinds() {
         let concepts = [(content, ConceptType::Logic)];
         let pre = validate(&g, &concepts, &[cite(content, &[reference])]).unwrap_err();
         let forged = PinnedCitations {
+            against: Vec::new(),
             references: vec![PinnedReference {
                 content: content.to_string(),
                 reference: reference.to_string(),

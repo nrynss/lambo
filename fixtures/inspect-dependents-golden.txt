@@ -19,6 +19,7 @@ hop 1:
   CoOccurrence
     <- concept N [Entity]
   Contradicts
+    -> concept Q [Resource]
     <- concept Q [Resource]
   Dependency
     -> concept D [Entity]
@@ -34,3 +35,5 @@ hop 1:
     -> concept C1 [Entity]
     -> concept C2 [Entity]
     <- concept P [Entity]
+  Semantic
+    <- concept N [Entity]

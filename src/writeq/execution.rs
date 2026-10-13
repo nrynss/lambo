@@ -31,7 +31,7 @@ use super::{
     WritePipeline, MAX_RECEIPT_IDS,
 };
 use crate::embed::Embedder;
-use crate::graph::action::{record_action_pinned, Action, ActionEmbeddings};
+use crate::graph::action::{record_action_against, Action, ActionEmbeddings};
 use crate::graph::derive::{derive_cited, ParentOf};
 use crate::graph::hybrid;
 use crate::graph::index::InvertedIndex;
@@ -149,12 +149,19 @@ pub(super) fn derive_sentence_of(
 ) -> String {
     let sentence = derive_sentence_core(strategy, submitted, outcome, image);
     // #36 PR 4: what the call's citations added, only when they added
-    // something, so a derive without them reads exactly as before.
+    // something, so a derive without them reads exactly as before. #19(b):
+    // contradictions likewise.
+    let mut sentence = sentence;
     if outcome.cited > 0 {
-        format!("{sentence}; {} citation(s) recorded", outcome.cited)
-    } else {
-        sentence
+        sentence = format!("{sentence}; {} citation(s) recorded", outcome.cited);
     }
+    if outcome.contradicted > 0 {
+        sentence = format!(
+            "{sentence}; {} contradiction(s) recorded",
+            outcome.contradicted
+        );
+    }
+    sentence
 }
 
 fn derive_sentence_core(
@@ -390,6 +397,7 @@ impl WriteCtx {
                 modifies,
                 depends_on,
                 depends_on_pins,
+                against,
             } => {
                 let p: Vec<&str> = produces.iter().map(String::as_str).collect();
                 let m: Vec<&str> = modifies.iter().map(String::as_str).collect();
@@ -426,18 +434,19 @@ impl WriteCtx {
                     // stamp already there. Same rule as `hybrid::derive`'s
                     // commit phase: a vector must never land in a session with
                     // no declared contract.
-                    if !embeddings.is_empty() {
-                        g.stamp_embedding(self.embedding.clone())?;
-                    }
                     // #36 PR 4: an entry that named a concept by id at the
-                    // ack must name the same one now.
-                    let outcome = record_action_pinned(
+                    // ack must name the same one now. #19(b): so must each
+                    // `against` target, re-resolved in the same transaction,
+                    // before the contract is stamped (review L3).
+                    let outcome = record_action_against(
                         &mut g,
                         job.interaction,
                         &job.agent,
                         &act,
                         &embeddings,
                         depends_on_pins,
+                        against,
+                        (!embeddings.is_empty()).then(|| self.embedding.clone()),
                     )?;
                     // Same lock hold as the commit — see `run`'s doc.
                     if let Some(stamp) = consume {

@@ -380,6 +380,122 @@ pub(crate) fn record_action_pinned(
     })
 }
 
+/// The `against` pre-pass of a `record_action` (#19(b)): resolve each entry
+/// to exactly one existing concept of `graph` through the shared resolver,
+/// refusing a missing, ambiguous, interaction or self reference (the action
+/// contradicting its own `Resource` concept) and an over-long list, with
+/// [`LamboError::Reference`]. Returns what it accepted, to pin on the job
+/// (`content` is the action). Read-only.
+pub(crate) fn validate_against(
+    graph: &Graph,
+    action: &Action<'_>,
+    against: &[String],
+) -> Result<Vec<crate::types::PinnedReference>, LamboError> {
+    crate::graph::resource::validate_repo_scope(action.repo_scope)?;
+    // #129: under the action's repo scope, path text resolves to the scoped
+    // key, as its `depends_on` does.
+    let pinned = crate::graph::cite::pin_scoped(
+        graph,
+        &[(action.action, ConceptType::Resource)],
+        &crate::graph::cite::ACTION_AGAINST,
+        &[(action.action, against)],
+        action.repo_scope,
+    )?;
+    if !pinned.is_empty() {
+        refuse_depended_and_contradicted(graph, action, &[], &pinned)?;
+    }
+    Ok(pinned)
+}
+
+/// #19(b) review M2: an `against` target that one of the action's own
+/// `depends_on` entries resolves to (by id or by text, as the action would
+/// write it) is refused with
+/// [`ReferenceRefusalKind::DependsOnAndAgainst`]. Read-only; run at the
+/// pre-pass and again at the commit, since a text entry can come to match
+/// a concept in between.
+fn refuse_depended_and_contradicted(
+    graph: &Graph,
+    action: &Action<'_>,
+    pins: &[Option<NodeId>],
+    against: &[crate::types::PinnedReference],
+) -> Result<(), LamboError> {
+    let plan = plan(graph, action, pins)?;
+    for p in against {
+        if plan
+            .planned_edges
+            .iter()
+            .any(|&(_, t, ty)| ty == EdgeType::Dependency && t == p.target)
+        {
+            return Err(crate::surface::resolve::refusal(
+                ReferenceField::ActionAgainst,
+                Some(action.action),
+                &p.reference,
+                ReferenceRefusalKind::DependsOnAndAgainst,
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// [`record_action_pinned`] with the action's contradictions (#19(b)):
+/// inside one transaction, every pinned `against` reference is re-resolved
+/// before anything is written (a target removed or shadowed since the ack
+/// refuses the call with [`ReferenceRefusalKind::Changed`]), the action is
+/// recorded, then `action -Contradicts-> target` is written for each,
+/// counted in [`ActionOutcome::edges`] when new. Any refusal undoes the
+/// whole call. With no contradictions it is exactly
+/// [`record_action_pinned`], outside any transaction as before.
+///
+/// `stamp` is the session's embedding contract when the call writes
+/// vectors (the caller stamped it before #19(b) review L3). It is stamped
+/// here: before the record without contradictions, as before; with them,
+/// inside the transaction and after the recheck, so a refused
+/// contradiction leaves no contract stamped on the session.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn record_action_against(
+    graph: &mut Graph,
+    interaction: NodeId,
+    agent: &AgentId,
+    action: &Action,
+    embeddings: &ActionEmbeddings,
+    pins: &[Option<NodeId>],
+    against: &[crate::types::PinnedReference],
+    stamp: Option<crate::types::EmbeddingContract>,
+) -> Result<ActionOutcome, LamboError> {
+    use crate::graph::cite;
+    if against.is_empty() {
+        if let Some(contract) = stamp {
+            graph.stamp_embedding(contract)?;
+        }
+        return record_action_pinned(graph, interaction, agent, action, embeddings, pins);
+    }
+    graph.transaction(|graph| {
+        let spec = &cite::ACTION_AGAINST;
+        cite::recheck(graph, spec, against, action.repo_scope)?;
+        refuse_depended_and_contradicted(graph, action, pins, against)?;
+        if let Some(contract) = stamp {
+            graph.stamp_embedding(contract)?;
+        }
+        let mut outcome =
+            record_action_pinned(graph, interaction, agent, action, embeddings, pins)?;
+        let stamp = match graph.node(interaction) {
+            Some(Node::Interaction(i)) => cite::Stamp {
+                created_at: i.created_at,
+                event_time: i.event_time,
+            },
+            _ => unreachable!("record_action_pinned found the interaction"),
+        };
+        let mut written = cite::Written::default();
+        written
+            .by_content
+            .insert(action.action.to_string(), outcome.action_node);
+        let session_id = graph.session_id().clone();
+        let counts = cite::write_edges(graph, spec, against, &written, stamp, &session_id)?;
+        outcome.edges += counts.added;
+        Ok(outcome)
+    })
+}
+
 /// [`record_action`]'s planned write: what it would create, before it creates
 /// anything.
 struct Plan {

@@ -148,6 +148,7 @@ async fn queued_actions_and_derives_share_scoped_file_dependencies() {
         .edge_between(out.action_node, a, EdgeType::Dependency)
         .is_none());
     let citations = [ConceptCitations {
+        against: Vec::new(),
         content: "artifact has been checked".into(),
         depends_on: vec!["src/main.rs".into()],
     }];
@@ -197,6 +198,7 @@ async fn scoped_citations_refuse_legacy_fallback_but_allow_explicit_ids() {
     let context = ParentOf::none().with_repo_scope(Some("repo-a"));
     let concepts = [("documented the build", ConceptType::Logic)];
     let citations = [ConceptCitations {
+        against: Vec::new(),
         content: concepts[0].0.into(),
         depends_on: vec!["README.md".into()],
     }];
@@ -208,6 +210,7 @@ async fn scoped_citations_refuse_legacy_fallback_but_allow_explicit_ids() {
     assert!(matches!(err, LamboError::Reference(r) if r.kind == ReferenceRefusalKind::Missing));
     assert_eq!(mem.graph.read().snapshot(), before);
     let explicit = [ConceptCitations {
+        against: Vec::new(),
         content: concepts[0].0.into(),
         depends_on: vec![old.to_string()],
     }];

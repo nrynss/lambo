@@ -3,6 +3,31 @@
 
 use super::*;
 
+// Memory/Graph do not create a durable sessions row. SQLite's FK anchor
+// does, so the graph oracle must include the exact persisted session times.
+async fn include_persisted_session_metadata(
+    store: &SqliteStore,
+    sid: &SessionId,
+    expected: &mut GraphSnapshot,
+) {
+    let (created, closed): (Option<String>, Option<String>) =
+        sqlx::query_as("SELECT created_at, closed_at FROM sessions WHERE session_id = ?")
+            .bind(&sid.0)
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+    expected.created_at = created
+        .as_deref()
+        .map(super::super::codec::text_to_ts)
+        .transpose()
+        .unwrap();
+    expected.closed_at = closed
+        .as_deref()
+        .map(super::super::codec::text_to_ts)
+        .transpose()
+        .unwrap();
+}
+
 #[tokio::test]
 async fn flush_stats_write_then_read_round_trips_sqlite() {
     // T85-3: a writer publishes flush stats into the durable table; a
@@ -254,7 +279,8 @@ async fn concept_embedding_roundtrips_flush_and_load() {
     {
         let memory = MemoryStore::new();
         memory.flush(&batch, None).await.unwrap();
-        let want = memory.load_session(&sid).await.unwrap();
+        let mut want = memory.load_session(&sid).await.unwrap();
+        include_persisted_session_metadata(&store, &sid, &mut want).await;
         assert_eq!(
             loaded, want,
             "sqlite snapshot deep-equals the MemoryStore oracle (embedding included)"
@@ -484,7 +510,8 @@ async fn mutations_batch_roundtrip_matches_memory() {
 
     let sid = SessionId::from("session-mutations");
     let got = sqlite.load_session(&sid).await.unwrap();
-    let want = memory.load_session(&sid).await.unwrap();
+    let mut want = memory.load_session(&sid).await.unwrap();
+    include_persisted_session_metadata(&sqlite, &sid, &mut want).await;
     assert_eq!(got, want);
 
     // Spot-check the expected shape (fixture: delete_edge 70051 removes
@@ -604,8 +631,8 @@ async fn flush_load_roundtrip_deep_equals_graph() {
     assert!(!batch.is_empty());
 
     store.flush(&batch, None).await.unwrap();
+    include_persisted_session_metadata(&store, &sid, &mut expected).await;
     let loaded = load_session(&store, &sid).unwrap();
-
     assert_eq!(loaded.graph.snapshot(), expected);
     assert_eq!(loaded.graph.log_len(), 0, "load must not seed mutations");
     // Issue #17: the batch's stamp is durable, so the load resumes the
@@ -1733,9 +1760,9 @@ async fn a_settled_image_intent_keeps_no_vector() {
     let with_vector = payloads.iter().filter(|p| p.contains("\"vector\"")).count();
     assert_eq!(
         (payloads.len(), with_vector),
-        (5, 0),
-        "five intents (#36 PR 4 added a cited one, #129 a repo-scoped one), none of the \
-         settled ones carries a vector: {payloads:?}"
+        (6, 0),
+        "six intents (#36 PR 4 added a cited derive, #19(b) a cited action, #129 a \
+         repo-scoped one), none of the settled ones carries a vector: {payloads:?}"
     );
     assert!(
         payloads.iter().all(|p| !p.contains("repo_scoped")),
