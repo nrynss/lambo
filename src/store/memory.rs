@@ -952,47 +952,18 @@ impl GraphStore for MemoryStore {
         Ok(InteractionSpan { distinct, coverage })
     }
 
-    async fn latest_structural_evidence_at(
+    async fn dependent_evidence(
         &self,
         session: &SessionId,
         node: NodeId,
-        min_age: Duration,
-        now: DateTime<Utc>,
-        exclude_edges: &[NodeId],
-    ) -> Result<Option<DateTime<Utc>>, StoreError> {
-        // #20: the rows from the session's snapshot, the rules shared with
-        // every adapter (`store::evidence`). `now` is the caller's (F8).
+    ) -> Result<super::DependentEvidence, StoreError> {
+        // #20: the rows from the session's snapshot; the rules are shared
+        // with every adapter (`store::evidence`).
         let map = self.inner.read();
         let data = map
             .get(&session.0)
             .ok_or_else(|| StoreError::SessionNotFound(session.0.clone()))?;
-        let rows = super::evidence::rows_from_snapshot(&data.snapshot, node);
-        Ok(super::evidence::latest_at(
-            &rows,
-            min_age,
-            now,
-            exclude_edges,
-        ))
-    }
-
-    async fn interaction_span_since(
-        &self,
-        session: &SessionId,
-        node: NodeId,
-        min_age: Duration,
-        now: DateTime<Utc>,
-        window: Duration,
-        since: DateTime<Utc>,
-    ) -> Result<InteractionSpan, StoreError> {
-        super::validate_coverage_window(window)?;
-        let map = self.inner.read();
-        let data = map
-            .get(&session.0)
-            .ok_or_else(|| StoreError::SessionNotFound(session.0.clone()))?;
-        let rows = super::evidence::rows_from_snapshot(&data.snapshot, node);
-        Ok(super::evidence::span_since(
-            &rows, min_age, now, window, since,
-        ))
+        Ok(super::evidence::rows_from_snapshot(&data.snapshot, node))
     }
 
     /// #23. One critical section under every lock the session's state lives

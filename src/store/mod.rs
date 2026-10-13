@@ -76,7 +76,8 @@ pub mod load;
 pub(crate) mod span;
 // #20 supersession evidence: one reading of the dependence rows for every
 // adapter and the evaluator's revalidation.
-pub(crate) mod evidence;
+pub mod evidence;
+pub use evidence::{DependentEvidence, DependentEvidenceRow};
 pub use span::{validate_coverage_window, DEFAULT_COVERAGE_WINDOW, MIN_COVERAGE_WINDOW};
 // T3.4 — write-behind flush task (spec §2.4–§2.5); drains any GraphStore.
 pub mod flush;
@@ -583,61 +584,30 @@ pub trait GraphStore: Send + Sync {
         ))
     }
 
-    /// Supersession watermark (#20): the newest declaration date of `node`'s
-    /// **eligible dependent evidence**, ignoring the dependence edges in
-    /// `exclude_edges`; `Ok(None)` when it has none.
-    ///
-    /// Evidence is one dependence edge into `node` (a `Dependency` source or
-    /// a `Hierarchical` child, a concept of the session other than `node`,
-    /// not from `node`'s own origin interaction), eligible once **written**
-    /// at or before `now - min_age`, and dated by its about-time clamped to
-    /// its write time: #19(c)'s clock (`daemon::contradiction`), so a
-    /// contradiction's warning and a supersession read one date. The rules
-    /// live in [`evidence`]; an adapter only fetches the rows. The caller
-    /// passes the edges a contradiction's own declarer wrote (#19(c)
-    /// self-suppression), and falls back to the node's origin about-time.
-    /// `now` is the caller's clock (F8).
+    /// Supersession evidence (#20): `node`'s **dependent evidence rows**,
+    /// unfiltered: one [`DependentEvidenceRow`] per dependence edge into it
+    /// (a `Dependency` source or a `Hierarchical` child, a concept of the
+    /// session other than `node`) with the edge's dates and its dependent's
+    /// origin interaction (with dates only when that interaction is in the
+    /// session), plus `node`'s own origin and the session's about-time
+    /// extent. The rules live in [`DependentEvidence`]'s methods, so every
+    /// adapter agrees by construction: #19(c)'s clock (eligible by write time
+    /// against the age floor, dated by about-time clamped to write time, own
+    /// origin excluded), the watermark
+    /// ([`DependentEvidence::latest_structural_evidence_at`]) and Stage 2's
+    /// span after it ([`DependentEvidence::interaction_span_since`]). The
+    /// evaluator reads it once per node per cycle.
     ///
     /// Default: [`StoreError::Capability`]. Built-in stores implement it; a
     /// third-party store compiles unchanged and the evaluator skips
     /// supersession for the cycle with one diagnostic.
-    async fn latest_structural_evidence_at(
+    async fn dependent_evidence(
         &self,
         _session: &SessionId,
         _node: NodeId,
-        _min_age: Duration,
-        _now: DateTime<Utc>,
-        _exclude_edges: &[NodeId],
-    ) -> Result<Option<DateTime<Utc>>, StoreError> {
+    ) -> Result<DependentEvidence, StoreError> {
         Err(StoreError::Capability(
-            "supersession evidence watermark (latest_structural_evidence_at)".into(),
-        ))
-    }
-
-    /// Stage 2's span (#36) over `node`'s eligible dependent evidence
-    /// **strictly after** `since` (#20): the evidence of
-    /// [`Self::latest_structural_evidence_at`] whose edge **and** whose
-    /// dependent's origin interaction (an interaction of the session, written
-    /// by the cutoff) are both dated after `since`, filtered **before** the
-    /// origins are counted and their spread measured. Coverage is against
-    /// min(session extent, `window`), the extent measured as Stage 2 does; the
-    /// cap is not an expiry and the denominator is not the interval after
-    /// `since`. Feed the result to [`crate::canon::stage2_evidence_passes`].
-    ///
-    /// Default: [`StoreError::Capability`] (an invalid window is still
-    /// refused as invalid first).
-    async fn interaction_span_since(
-        &self,
-        _session: &SessionId,
-        _node: NodeId,
-        _min_age: Duration,
-        _now: DateTime<Utc>,
-        window: Duration,
-        _since: DateTime<Utc>,
-    ) -> Result<InteractionSpan, StoreError> {
-        validate_coverage_window(window)?;
-        Err(StoreError::Capability(
-            "supersession evidence span (interaction_span_since)".into(),
+            "supersession evidence (dependent_evidence)".into(),
         ))
     }
 

@@ -137,6 +137,9 @@ pub struct Evaluator {
     stage3_cursor: Option<NodeId>,
     /// Last supersession target probed (#20); the next cycle resumes after it.
     supersession_cursor: Option<NodeId>,
+    /// The writer timeline supersession attributes edges with, rebuilt only
+    /// when the graph's epoch moves (#20 review L10).
+    timeline: supersession::Timeline,
 }
 
 /// Knobs for one [`eval_cycle`]. Defaults match [`crate::Config`].
@@ -297,9 +300,15 @@ struct CyclePlan {
     session: SessionId,
     /// Supersession (#20): bounded `(target, source)` probes, empty unless
     /// [`EvalParams::supersede`].
-    supersede: Vec<supersession::Probe>,
+    supersede: supersession::Probes,
     /// The hold (#20): the same probes for Stage 3's Venerable window.
-    hold: Vec<supersession::Probe>,
+    hold: supersession::Probes,
+    /// Stage 3 was gathered at a full budget only because supersession
+    /// might free a slot (#20 review M4): its store reads are skipped, and
+    /// its cursor restored, when no supersession passes.
+    stage3_speculative: bool,
+    /// The Stage 3 cursor before this gather, for that restore.
+    stage3_cursor_before: Option<NodeId>,
     /// Stage 1: still-`None` concepts clearing the Candidate predicate.
     stage1: Vec<NodeId>,
     /// Stage 2: still-`Candidate` window off the identity cursor.
@@ -332,6 +341,13 @@ struct Verdicts {
     /// Stage-3 window members a contradicting concept would supersede at
     /// once (#20's hold): not promoted this cycle.
     held: Vec<NodeId>,
+    /// Stage 3 was speculative and nothing was superseded: no Stage 3 store
+    /// read ran and nothing in its window was evaluated.
+    stage3_skipped: bool,
+    /// The supersession probes hit [`supersession::MAX_SUPERSESSION_PROBES`].
+    probes_capped: bool,
+    /// The store lacks `dependent_evidence` (its capability), once.
+    supersession_unsupported: Option<String>,
     /// Stage-2 window members that cleared the span predicate.
     stage2_pass: Vec<NodeId>,
     /// `(node, measured blast)` for Stage-3 admissions, in evaluation order.
@@ -409,8 +425,10 @@ impl Evaluator {
             Err(err) => {
                 let stage1_only = CyclePlan {
                     session: plan.session.clone(),
-                    supersede: Vec::new(),
-                    hold: Vec::new(),
+                    supersede: Default::default(),
+                    hold: Default::default(),
+                    stage3_speculative: false,
+                    stage3_cursor_before: plan.stage3_cursor_before,
                     stage1: plan.stage1.clone(),
                     stage2: Vec::new(),
                     stage3: Vec::new(),
@@ -426,6 +444,7 @@ impl Evaluator {
                         &Verdicts::default(),
                         params,
                         now,
+                        &self.timeline,
                         &mut outcome,
                     )
                 };
@@ -438,11 +457,26 @@ impl Evaluator {
             }
         };
 
+        // #20 review M4: a speculative Stage 3 window whose reads were
+        // skipped was not evaluated, so its ring does not advance.
+        if verdicts.stage3_skipped {
+            self.stage3_cursor = plan.stage3_cursor_before;
+        }
+
         // 3. Apply — write guard, released before the next await. Commit point.
         let mut outcome = EvalOutcome::default();
         let applied = {
             let mut g = graph.write();
-            apply(&mut g, events, &plan, &verdicts, params, now, &mut outcome)
+            apply(
+                &mut g,
+                events,
+                &plan,
+                &verdicts,
+                params,
+                now,
+                &self.timeline,
+                &mut outcome,
+            )
         };
         if let Err(err) = applied {
             return Err(EvalError::new(outcome, err));
@@ -468,7 +502,16 @@ impl Evaluator {
         // Supersession (#20) — bounded probes off its own target ring. Read
         // first: whether any exist decides whether Stage 3 is gathered at a
         // full budget below.
-        let supersede = supersession::gather(graph, params, now, &mut self.supersession_cursor);
+        // One probe budget for supersession and the hold together (review M4).
+        let mut probe_budget = supersession::MAX_SUPERSESSION_PROBES;
+        let supersede = supersession::gather(
+            graph,
+            params,
+            now,
+            &mut self.supersession_cursor,
+            &self.timeline,
+            &mut probe_budget,
+        );
 
         // The scores are the daemon's and only order Stage 1's queue and the
         // Stage 3 window (#36 PR 3: they no longer select anyone). A table
@@ -549,6 +592,8 @@ impl Evaluator {
         // Same filter as Stage 2's ring (review L1).
         venerable
             .retain(|&id| scorer.admits_hop(graph, id, CanonizationStatus::Canonical, params, now));
+        let stage3_cursor_before = self.stage3_cursor;
+        let stage3_speculative = remaining == 0 && !supersede.is_empty();
         let mut window = if remaining == 0 && supersede.is_empty() {
             Vec::new()
         } else {
@@ -574,7 +619,14 @@ impl Evaluator {
         });
         // #20's hold: the same probes for the window, so a Venerable that
         // would be superseded at once is not promoted.
-        let hold = supersession::gather_holds(graph, &window, params, now);
+        let hold = supersession::gather_holds(
+            graph,
+            &window,
+            params,
+            now,
+            &self.timeline,
+            &mut probe_budget,
+        );
         let stage3: Vec<Stage3Probe> = window
             .into_iter()
             .map(|node| Stage3Probe {
@@ -607,6 +659,8 @@ impl Evaluator {
             session,
             supersede,
             hold,
+            stage3_speculative,
+            stage3_cursor_before,
             stage1,
             stage2,
             stage3,
@@ -649,22 +703,39 @@ async fn verdicts(
     params: &EvalParams,
     now: DateTime<Utc>,
 ) -> Result<Verdicts, StoreError> {
-    // #20: supersession and the hold in one probe pass, so a store without
-    // the accessors gives no verdicts and one warning; any other error fails
-    // the cycle like every query here. The two target sets are disjoint
-    // (Canonical, Venerable).
-    let probes: Vec<supersession::Probe> =
-        plan.supersede.iter().chain(&plan.hold).cloned().collect();
-    let (held, supersede): (Vec<_>, Vec<_>) =
-        supersession::verdicts(store, &plan.session, &probes, params, now)
-            .await?
-            .into_iter()
-            .partition(|v| plan.hold.iter().any(|p| p.target == v.target));
+    // #20: supersession first (review M4), each node's evidence read once
+    // per cycle. A store without `dependent_evidence` gives no verdicts and
+    // one warning; any other error fails the cycle like every query here.
     let mut out = Verdicts {
-        supersede,
-        held: supersession::held(&held),
+        probes_capped: plan.supersede.capped || plan.hold.capped,
         ..Verdicts::default()
     };
+    let mut cache = supersession::EvidenceCache::default();
+    match supersession::decide(
+        store,
+        &plan.session,
+        &plan.supersede,
+        params,
+        now,
+        &mut cache,
+    )
+    .await
+    {
+        Ok(v) => out.supersede = v,
+        Err(StoreError::Capability(what)) => out.supersession_unsupported = Some(what),
+        Err(e) => return Err(e),
+    }
+    // A Stage 3 window gathered only because supersession might free a slot
+    // is not read at all when nothing was superseded.
+    out.stage3_skipped = plan.stage3_speculative && out.supersede.is_empty();
+    if !out.stage3_skipped && out.supersession_unsupported.is_none() {
+        match supersession::decide(store, &plan.session, &plan.hold, params, now, &mut cache).await
+        {
+            Ok(v) => out.held = v.into_iter().map(|v| v.target).collect(),
+            Err(StoreError::Capability(what)) => out.supersession_unsupported = Some(what),
+            Err(e) => return Err(e),
+        }
+    }
     // #36 PR 3: both policies consume the Stage 2 verdict for the
     // Candidate → Venerable hop and re-check it before Stage 3 (PR 1's
     // upgrade guard, PR 2 review M1 had Solo skip it because Solo then
@@ -683,7 +754,12 @@ async fn verdicts(
             }
         }
     }
-    for probe in &plan.stage3 {
+    let stage3: &[Stage3Probe] = if out.stage3_skipped {
+        &[]
+    } else {
+        &plan.stage3
+    };
+    for probe in stage3 {
         // #36 upgrade guard: a Venerable is re-checked against Stage 2 before
         // its Stage 3 probe. Stage 2 is not a one-time admission. A node
         // admitted under an older definition of support (before #36, inbound
@@ -721,6 +797,12 @@ async fn verdicts(
         a.0.cmp(&b.0)
             .then_with(|| tie_break_by_key(Some(&a.2), &a.1, Some(&b.2), &b.1))
     });
+    if let Some(capability) = &out.supersession_unsupported {
+        supersession::warn_unsupported(capability);
+    }
+    if out.probes_capped {
+        supersession::warn_capped();
+    }
     if let Some(capability) = missing {
         tracing::warn!(
             target: "lambo::canon",
@@ -773,6 +855,7 @@ async fn stage2_verdict(
 /// unlocked while the verdicts were computed, so another writer may have
 /// moved it. `outcome` is filled in as hops commit, so a mid-phase failure
 /// still hands the caller everything that did.
+#[allow(clippy::too_many_arguments)] // one cycle's apply input
 fn apply(
     graph: &mut Graph,
     events: &EventSender,
@@ -780,9 +863,19 @@ fn apply(
     verdicts: &Verdicts,
     params: &EvalParams,
     now: DateTime<Utc>,
+    timeline: &supersession::Timeline,
     outcome: &mut EvalOutcome,
 ) -> Result<(), LamboError> {
-    outcome.stage3_batch = plan.stage3.iter().map(|p| p.node).collect();
+    // A skipped speculative window was not evaluated (#20 review M4).
+    let stage3: &[Stage3Probe] = if verdicts.stage3_skipped {
+        &[]
+    } else {
+        &plan.stage3
+    };
+    outcome.stage3_batch = stage3.iter().map(|p| p.node).collect();
+    // #20 review M5: every event this cycle commits gets a time-ordered id,
+    // so a reload (which orders one instant's rows by id) keeps commit order.
+    let mut ids = EventIds::new(now);
 
     // Every later hop needs its stage verdict first (#36 PR 3: no policy can
     // admit a hop the evidence refuses), then the policy seam has the final
@@ -793,14 +886,17 @@ fn apply(
     // --- Supersession (#20): Canonical → None, committed first ---
     // Each verdict is re-checked against the graph as it is now (the store
     // was probed with no lock held), and a concept demoted here takes no
-    // other hop this cycle. Re-checking in target order also settles
-    // reciprocal contradictions: the first demotion stamps its concept's
-    // cooldown, so that concept can no longer supersede the other.
+    // other hop this cycle.
     let mut superseded: Vec<NodeId> = Vec::new();
     if !verdicts.supersede.is_empty() {
-        let timeline = crate::daemon::conflict::WriterTimeline::of(graph);
+        let timeline = timeline.get(graph);
+        // Review M1: cooldowns are judged as of the start of the cycle, so a
+        // concept demoted earlier in this loop keeps what it could do, and
+        // the order verdicts are applied in changes nothing. Reciprocal pairs
+        // were already settled by the pair rule in `decide`.
+        let before = supersession::cooldowns_before(graph, &verdicts.supersede);
         for verdict in &verdicts.supersede {
-            if !supersession::still_holds(graph, verdict, params, now, &timeline) {
+            if !supersession::still_holds(graph, verdict, params, now, &timeline, &before) {
                 tracing::debug!(
                     target: "lambo::canon",
                     node = %verdict.target,
@@ -809,7 +905,7 @@ fn apply(
                 );
                 continue;
             }
-            let event = supersession::event(graph, verdict, now);
+            let event = supersession::event(graph, verdict, now, ids.next());
             outcome
                 .supersessions
                 .push(commit_transition(graph, events, event)?);
@@ -829,6 +925,7 @@ fn apply(
             CanonizationStatus::Candidate,
             None,
             now,
+            ids.next(),
         );
         outcome
             .promotions
@@ -855,6 +952,7 @@ fn apply(
             CanonizationStatus::Venerable,
             None,
             now,
+            ids.next(),
         );
         outcome
             .promotions
@@ -875,7 +973,7 @@ fn apply(
     let mut remaining = params
         .max_canonical_nodes
         .saturating_sub(canonical_count(graph));
-    for probe in &plan.stage3 {
+    for probe in stage3 {
         if remaining == 0 {
             break;
         }
@@ -908,6 +1006,7 @@ fn apply(
             CanonizationStatus::Canonical,
             Some(narrow_blast_radius(blast)?),
             now,
+            ids.next(),
         );
         outcome
             .promotions
@@ -930,7 +1029,7 @@ fn apply(
         }
         overflow -= 1;
         let event = CanonizationEvent {
-            id: NodeId::new(),
+            id: ids.next(),
             session_id: plan.session.clone(),
             node_id: id,
             from_status: CanonizationStatus::Canonical,
@@ -1012,6 +1111,7 @@ fn promotion_event(
     to: CanonizationStatus,
     blast_radius: Option<i32>,
     now: DateTime<Utc>,
+    id: NodeId,
 ) -> CanonizationEvent {
     let blast_radius = match blast_radius {
         Some(b) => Some(b),
@@ -1021,7 +1121,7 @@ fn promotion_event(
         },
     };
     CanonizationEvent {
-        id: NodeId::new(),
+        id,
         session_id: graph.session_id().clone(),
         node_id: node,
         from_status: from,
@@ -1030,6 +1130,43 @@ fn promotion_event(
         last_demotion_time: None,
         occurred_at: now,
         reason: None,
+    }
+}
+
+/// Audit event ids for one cycle, in commit order (#20 review M5).
+///
+/// UUIDv7-shaped: the cycle's `now` in milliseconds, then a 12-bit sequence
+/// in commit order, then random bits. Every event of one cycle shares
+/// `occurred_at`, and every store reloads by `(occurred_at, id)`, so with
+/// random v4 ids a reload put one cycle's rows in random order; these sort
+/// in the order they were committed. Built with `uuid::Builder` (no `v7`
+/// feature is enabled, and `Cargo.toml` is not changed); past 4,096 events
+/// the millisecond part steps by one, which keeps the order.
+pub(super) struct EventIds {
+    millis: u64,
+    seq: u16,
+}
+
+impl EventIds {
+    pub(super) fn new(now: DateTime<Utc>) -> Self {
+        Self {
+            millis: u64::try_from(now.timestamp_millis()).unwrap_or(0),
+            seq: 0,
+        }
+    }
+
+    pub(super) fn next(&mut self) -> NodeId {
+        if self.seq > 0x0FFF {
+            self.millis = self.millis.saturating_add(1);
+            self.seq = 0;
+        }
+        let random = uuid::Uuid::new_v4();
+        let mut bytes = [0u8; 10];
+        bytes.copy_from_slice(&random.as_bytes()[..10]);
+        bytes[0] = (self.seq >> 8) as u8 & 0x0F;
+        bytes[1] = (self.seq & 0xFF) as u8;
+        self.seq += 1;
+        NodeId(uuid::Builder::from_unix_timestamp_millis(self.millis, &bytes).into_uuid())
     }
 }
 

@@ -13,7 +13,7 @@ use super::sql::{
     keyword_candidates_sql, BLAST_RADIUS_SQL, EVIDENCE_EXTENT_SQL, INTERACTION_SPAN_SQL,
 };
 use super::{Dialect, PgStore};
-use crate::store::evidence::{EvidenceRow, EvidenceRows};
+use crate::store::evidence::{DependentEvidence, DependentEvidenceRow};
 use crate::types::{InteractionSpan, NodeId, Scored, SessionId, StoreError};
 
 /// Keyword hit count for one candidate row, case-folded on BOTH sides (MemoryStore
@@ -153,7 +153,7 @@ impl<D: Dialect> PgStore<D> {
         &self,
         session: &SessionId,
         node: NodeId,
-    ) -> Result<EvidenceRows, StoreError> {
+    ) -> Result<DependentEvidence, StoreError> {
         if !self.session_exists(session).await? {
             return Err(StoreError::SessionNotFound(session.0.clone()));
         }
@@ -182,7 +182,7 @@ impl<D: Dialect> PgStore<D> {
                 row.try_get("origin_created").map_err(backend)?;
             let origin_event: Option<DateTime<Utc>> =
                 row.try_get("origin_event").map_err(backend)?;
-            out.push(EvidenceRow {
+            out.push(DependentEvidenceRow {
                 edge: parse_node_id(&row.try_get::<String, _>("edge_id").map_err(backend)?)?,
                 edge_created: row.try_get("edge_created").map_err(backend)?,
                 edge_event: row.try_get("edge_event").map_err(backend)?,
@@ -198,7 +198,7 @@ impl<D: Dialect> PgStore<D> {
             .map_err(backend)?;
         let lo: Option<DateTime<Utc>> = extent.try_get("lo").map_err(backend)?;
         let hi: Option<DateTime<Utc>> = extent.try_get("hi").map_err(backend)?;
-        Ok(EvidenceRows {
+        Ok(DependentEvidence {
             own_origin,
             rows: out,
             extent: lo.zip(hi),

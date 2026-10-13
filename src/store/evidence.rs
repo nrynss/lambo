@@ -1,9 +1,11 @@
 //! Supersession evidence (#20): one reading of a node's dependence rows,
 //! shared by every adapter and by the evaluator's apply-time revalidation.
 //!
-//! Each adapter returns the same raw [`EvidenceRows`] (one row per
+//! Each adapter returns the same raw [`DependentEvidence`] (one row per
 //! dependence edge, no filtering beyond "a concept of this session other
-//! than the node"), and [`latest_at`] / [`span_since`] apply the rules, so
+//! than the node", fetched once per node per cycle), and its
+//! [`DependentEvidence::latest_structural_evidence_at`] /
+//! [`DependentEvidence::interaction_span_since`] apply the rules, so
 //! MemoryStore, SQLite and the Postgres family cannot drift apart on them.
 //! [`rows_from_graph`] builds the same rows from the in-RAM graph.
 //!
@@ -42,7 +44,7 @@ use crate::types::{InteractionSpan, Node, NodeId};
 
 /// One dependence edge into a node, with its dependent's origin.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct EvidenceRow {
+pub struct DependentEvidenceRow {
     /// The dependence edge.
     pub edge: NodeId,
     /// The edge's write time.
@@ -59,14 +61,16 @@ pub(crate) struct EvidenceRow {
     pub origin_dates: Option<(DateTime<Utc>, Option<DateTime<Utc>>)>,
 }
 
-/// Everything [`latest_at`] and [`span_since`] read for one node.
+/// One node's dependent evidence as a store returns it
+/// ([`crate::store::GraphStore::dependent_evidence`]): every row, unfiltered,
+/// so the rules below are applied in one place for every adapter.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub(crate) struct EvidenceRows {
+pub struct DependentEvidence {
     /// The node's own origin interaction (`None` when the node is not a
     /// concept of the session).
     pub own_origin: Option<NodeId>,
     /// One row per dependence edge into the node.
-    pub rows: Vec<EvidenceRow>,
+    pub rows: Vec<DependentEvidenceRow>,
     /// The session's temporal extent on about-times (Stage 2's denominator),
     /// `None` for a session without interactions.
     pub extent: Option<(DateTime<Utc>, DateTime<Utc>)>,
@@ -85,10 +89,10 @@ fn cutoff(now: DateTime<Utc>, min_age: Duration) -> Option<DateTime<Utc>> {
 }
 
 fn eligible<'a>(
-    rows: &'a EvidenceRows,
+    rows: &'a DependentEvidence,
     min_age: Duration,
     now: DateTime<Utc>,
-) -> impl Iterator<Item = &'a EvidenceRow> + 'a {
+) -> impl Iterator<Item = &'a DependentEvidenceRow> + 'a {
     let cutoff = cutoff(now, min_age);
     rows.rows.iter().filter(move |r| {
         cutoff.is_some_and(|c| r.edge_created <= c) && Some(r.origin) != rows.own_origin
@@ -98,7 +102,7 @@ fn eligible<'a>(
 /// The newest declaration date of the node's eligible evidence, ignoring
 /// the edges in `exclude`; `None` with no eligible evidence.
 pub(crate) fn latest_at(
-    rows: &EvidenceRows,
+    rows: &DependentEvidence,
     min_age: Duration,
     now: DateTime<Utc>,
     exclude: &[NodeId],
@@ -109,31 +113,53 @@ pub(crate) fn latest_at(
         .max()
 }
 
+/// The evidence [`span_since`] counts: eligible rows whose edge and whose
+/// origin interaction (a session interaction written by the cutoff) are both
+/// dated strictly after `since`, as `(row, origin date)`.
+fn counted<'a>(
+    rows: &'a DependentEvidence,
+    min_age: Duration,
+    now: DateTime<Utc>,
+    since: DateTime<Utc>,
+) -> impl Iterator<Item = (&'a DependentEvidenceRow, DateTime<Utc>)> + 'a {
+    let cutoff = cutoff(now, min_age);
+    eligible(rows, min_age, now).filter_map(move |r| {
+        if declared(r.edge_created, r.edge_event) <= since {
+            return None;
+        }
+        let (created, event) = r.origin_dates?;
+        if cutoff.is_none_or(|c| created > c) {
+            return None;
+        }
+        let at = declared(created, event);
+        (at > since).then_some((r, at))
+    })
+}
+
+/// The newest declaration date among the evidence [`span_since`] counts
+/// after `since` (#20 review L2: sources rank by what was counted).
+pub(crate) fn newest_counted(
+    rows: &DependentEvidence,
+    min_age: Duration,
+    now: DateTime<Utc>,
+    since: DateTime<Utc>,
+) -> Option<DateTime<Utc>> {
+    counted(rows, min_age, now, since)
+        .map(|(r, _)| declared(r.edge_created, r.edge_event))
+        .max()
+}
+
 /// Stage 2's span over the node's eligible evidence strictly after `since`
 /// (see the module docs). The window must already be validated.
 pub(crate) fn span_since(
-    rows: &EvidenceRows,
+    rows: &DependentEvidence,
     min_age: Duration,
     now: DateTime<Utc>,
     window: Duration,
     since: DateTime<Utc>,
 ) -> InteractionSpan {
-    let cutoff = cutoff(now, min_age);
     let mut origins: HashMap<NodeId, DateTime<Utc>> = HashMap::new();
-    for r in eligible(rows, min_age, now) {
-        if declared(r.edge_created, r.edge_event) <= since {
-            continue;
-        }
-        let Some((created, event)) = r.origin_dates else {
-            continue;
-        };
-        if cutoff.is_none_or(|c| created > c) {
-            continue;
-        }
-        let at = declared(created, event);
-        if at <= since {
-            continue;
-        }
+    for (r, at) in counted(rows, min_age, now, since) {
         origins.insert(r.origin, at);
     }
     let distinct = origins.len() as u64;
@@ -149,9 +175,49 @@ pub(crate) fn span_since(
     InteractionSpan { distinct, coverage }
 }
 
+impl DependentEvidence {
+    /// The supersession watermark: the newest declaration date of the
+    /// node's eligible evidence, ignoring the dependence edges in `exclude`
+    /// (#19(c) self-suppression); `None` with no eligible evidence. `now` is
+    /// the caller's clock.
+    pub fn latest_structural_evidence_at(
+        &self,
+        min_age: Duration,
+        now: DateTime<Utc>,
+        exclude: &[NodeId],
+    ) -> Option<DateTime<Utc>> {
+        latest_at(self, min_age, now, exclude)
+    }
+
+    /// Stage 2's span over the eligible evidence strictly after `since`,
+    /// against min(session extent, `window`); feed it to
+    /// [`crate::canon::stage2_evidence_passes`]. `window` is validated.
+    pub fn interaction_span_since(
+        &self,
+        min_age: Duration,
+        now: DateTime<Utc>,
+        window: Duration,
+        since: DateTime<Utc>,
+    ) -> Result<InteractionSpan, crate::types::StoreError> {
+        super::validate_coverage_window(window)?;
+        Ok(span_since(self, min_age, now, window, since))
+    }
+
+    /// The newest declaration date among the evidence
+    /// [`Self::interaction_span_since`] counts after `since`.
+    pub fn newest_counted_at(
+        &self,
+        min_age: Duration,
+        now: DateTime<Utc>,
+        since: DateTime<Utc>,
+    ) -> Option<DateTime<Utc>> {
+        newest_counted(self, min_age, now, since)
+    }
+}
+
 /// The same rows read from the in-RAM graph (the evaluator's apply-time
 /// revalidation).
-pub(crate) fn rows_from_graph(graph: &Graph, node: NodeId) -> EvidenceRows {
+pub(crate) fn rows_from_graph(graph: &Graph, node: NodeId) -> DependentEvidence {
     let session = graph.session_id();
     let own_origin = match graph.node(node) {
         Some(Node::Concept(c)) if &c.session_id == session => Some(c.origin_interaction),
@@ -178,7 +244,7 @@ pub(crate) fn rows_from_graph(graph: &Graph, node: NodeId) -> EvidenceRows {
             }
             _ => None,
         };
-        rows.push(EvidenceRow {
+        rows.push(DependentEvidenceRow {
             edge: e.id,
             edge_created: e.created_at,
             edge_event: e.event_time,
@@ -195,7 +261,7 @@ pub(crate) fn rows_from_graph(graph: &Graph, node: NodeId) -> EvidenceRows {
             Some((lo, hi)) => (lo.min(at), hi.max(at)),
         });
     }
-    EvidenceRows {
+    DependentEvidence {
         own_origin,
         rows,
         extent,
@@ -206,7 +272,7 @@ pub(crate) fn rows_from_graph(graph: &Graph, node: NodeId) -> EvidenceRows {
 /// snapshot may hold rows a legal graph cannot (a self-loop, a foreign
 /// concept's edge), so the session checks are explicit here too.
 #[cfg(feature = "store-memory")]
-pub(crate) fn rows_from_snapshot(snap: &GraphSnapshot, node: NodeId) -> EvidenceRows {
+pub(crate) fn rows_from_snapshot(snap: &GraphSnapshot, node: NodeId) -> DependentEvidence {
     let session = &snap.session_id;
     let concepts: HashMap<NodeId, &Concept> = snap
         .concepts
@@ -232,7 +298,7 @@ pub(crate) fn rows_from_snapshot(snap: &GraphSnapshot, node: NodeId) -> Evidence
                 return None;
             }
             let dep = concepts.get(&dependent)?;
-            Some(EvidenceRow {
+            Some(DependentEvidenceRow {
                 edge: e.id,
                 edge_created: e.created_at,
                 edge_event: e.event_time,
@@ -250,7 +316,7 @@ pub(crate) fn rows_from_snapshot(snap: &GraphSnapshot, node: NodeId) -> Evidence
             Some(acc.map_or((at, at), |(lo, hi)| (lo.min(at), hi.max(at))))
         },
     );
-    EvidenceRows {
+    DependentEvidence {
         own_origin,
         rows,
         extent,
@@ -270,8 +336,8 @@ mod tests {
         NodeId(uuid::Uuid::from_u64_pair(0x20, n))
     }
 
-    fn row(edge: u64, at: i64, origin: u64, origin_at: i64) -> EvidenceRow {
-        EvidenceRow {
+    fn row(edge: u64, at: i64, origin: u64, origin_at: i64) -> DependentEvidenceRow {
+        DependentEvidenceRow {
             edge: id(edge),
             edge_created: t(at),
             edge_event: None,
@@ -281,8 +347,8 @@ mod tests {
         }
     }
 
-    fn rows(rs: Vec<EvidenceRow>) -> EvidenceRows {
-        EvidenceRows {
+    fn rows(rs: Vec<DependentEvidenceRow>) -> DependentEvidence {
+        DependentEvidence {
             own_origin: Some(id(1000)),
             rows: rs,
             extent: Some((t(0), t(100))),

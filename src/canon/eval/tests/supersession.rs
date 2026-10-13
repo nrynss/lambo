@@ -375,20 +375,25 @@ async fn a_source_inside_its_cooldown_cannot_supersede() {
     assert_eq!(status_of(&g, nid(C)), CanonizationStatus::Canonical);
 }
 
-/// Two Canonical concepts contradicting each other, each with newer
-/// support the other's declarer did not write: both qualify at once. Only
-/// one flips (the first demotion puts its concept in cooldown, so it can no
-/// longer supersede), nothing flips inside the cooldown, and the other side
-/// may win once it is over: at most one flip per window, either way.
+/// Review H1/M1: two Canonical concepts contradicting each other, each with
+/// newer support the other's declarer did not write, so each qualifies
+/// against the other. The pair rule lets only the one with the newest
+/// counted evidence act (C's 205 beats S's 200), whatever their ids: C
+/// supersedes S, nothing flips inside the cooldown, and S re-climbs and is
+/// held at Venerable while C's evidence is newer (inspect says so). Neither
+/// is stuck there forever: once S earns newer support from another agent,
+/// S is released, promoted, and supersedes C, which is then held in turn.
 #[tokio::test]
 async fn reciprocal_contradictions_flip_at_most_once_per_cooldown() {
     let mut s = Scene::new();
     s.concept_mut(S).canonization_status = CanonizationStatus::Canonical;
+    s.concept_mut(S).gc_survived = 3;
+    s.concept_mut(C).gc_survived = 3;
     s.contradicts(S, C, at(60), "q");
     s.contradicts(C, S, at(61), "p");
     // S's support is written by p, C's declarer, so it is not S's evidence
-    // against C's contradiction; and the other way round.
-    for m in [100, 150, 200] {
+    // against C's contradiction; and the other way round. Six each: blast 6.
+    for m in [100, 120, 140, 160, 180, 200] {
         s.support(S, at(m), "p");
         s.support(C, at(m + 5), "q");
     }
@@ -398,15 +403,109 @@ async fn reciprocal_contradictions_flip_at_most_once_per_cooldown() {
     let mut ev = Evaluator::new();
 
     let first = cycle(&mut ev, &g, &store, &on(), at(NOW)).await;
-    assert_eq!(superseded_by(&first), vec![(nid(C), nid(S))]);
-    assert_eq!(status_of(&g.read(), nid(S)), CanonizationStatus::Canonical);
+    assert_eq!(superseded_by(&first), vec![(nid(S), nid(C))]);
+    assert_eq!(status_of(&g.read(), nid(C)), CanonizationStatus::Canonical);
 
     let inside = cycle(&mut ev, &g, &store, &on(), at(NOW + 1)).await;
     assert!(inside.supersessions.is_empty(), "{inside:?}");
 
-    let after = cycle(&mut ev, &g, &store, &on(), at(NOW + 6)).await;
-    assert_eq!(superseded_by(&after), vec![(nid(S), nid(C))]);
-    assert_eq!(status_of(&g.read(), nid(C)), CanonizationStatus::None);
+    // S climbs back, and is held at Venerable: C's evidence is newer.
+    for m in 2..20 {
+        let out = cycle(&mut ev, &g, &store, &on(), at(NOW + m)).await;
+        assert!(out.supersessions.is_empty(), "minute {m}: {out:?}");
+    }
+    assert_eq!(status_of(&g.read(), nid(S)), CanonizationStatus::Venerable);
+    assert_eq!(status_of(&g.read(), nid(C)), CanonizationStatus::Canonical);
+    let why = crate::canon::explain::explain_node(&g, &store, nid(S), &on(), at(NOW + 20))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!why.eligible, "{why:?}");
+    let held = format!(
+        "held: contradicted by {} with newer evidence",
+        crate::recall::format::short_id(nid(C))
+    );
+    assert!(why.reasons.contains(&held), "{:?}", why.reasons);
+
+    // S earns newer support from another agent: released, promoted, and it
+    // supersedes C, which is held in turn.
+    for (k, m) in [30, 31, 32].into_iter().enumerate() {
+        add_support(&g, &store, S, at(NOW + m), 7_000 + k as u64).await;
+    }
+    let mut flips = Vec::new();
+    for m in 34..60 {
+        let out = cycle(&mut ev, &g, &store, &on(), at(NOW + m)).await;
+        flips.extend(superseded_by(&out));
+    }
+    assert_eq!(flips, vec![(nid(C), nid(S))]);
+    assert_eq!(status_of(&g.read(), nid(S)), CanonizationStatus::Canonical);
+    assert_eq!(status_of(&g.read(), nid(C)), CanonizationStatus::Venerable);
+}
+
+/// The pair rule decides by evidence, not by id: mirror the scene so the
+/// higher-id concept has the newer counted evidence, and it wins.
+#[tokio::test]
+async fn the_pair_rule_does_not_depend_on_ids() {
+    let mut s = Scene::new();
+    s.concept_mut(S).canonization_status = CanonizationStatus::Canonical;
+    s.contradicts(S, C, at(60), "q");
+    s.contradicts(C, S, at(61), "p");
+    for m in [100, 150, 200] {
+        s.support(S, at(m + 5), "p");
+        s.support(C, at(m), "q");
+    }
+    let (g, out) = run(s, &on()).await;
+    assert_eq!(superseded_by(&out), vec![(nid(C), nid(S))]);
+    assert_eq!(status_of(&g, nid(S)), CanonizationStatus::Canonical);
+}
+
+/// Add, to the graph and the store, a concept written by agent `r` at `when`
+/// that depends on `pillar`.
+async fn add_support(
+    g: &RwLock<Graph>,
+    store: &dyn GraphStore,
+    pillar: u64,
+    when: DateTime<Utc>,
+    id: u64,
+) {
+    let mut batch = MutationBatch::new();
+    {
+        let mut g = g.write();
+        let interaction = Interaction {
+            event_time: None,
+            id: iid(id),
+            session_id: sid(),
+            agent_id: AgentId::from("r"),
+            prompt_text: Some(format!("i{id}")),
+            previous_id: g.temporal_chain().last().copied(),
+            created_at: when,
+        };
+        g.insert_interaction(interaction.clone()).unwrap();
+        let mut dep = super::concept(id + 1, id, 0, CanonizationStatus::None);
+        dep.created_at = when;
+        g.insert_concept(dep.clone(), iid(id)).unwrap();
+        let edge = Edge {
+            event_time: None,
+            id: eid(id + 2),
+            session_id: sid(),
+            source: nid(id + 1),
+            target: nid(pillar),
+            edge_type: EdgeType::Dependency,
+            weight: 1.0,
+            reinforcements: 1,
+            created_at: when,
+            last_reinforced: when,
+        };
+        g.upsert_edge(edge.clone()).unwrap();
+        batch.push(Mutation::UpsertNode {
+            node: Node::Interaction(interaction),
+        });
+        batch.push(Mutation::UpsertNode {
+            node: Node::Concept(dep),
+        });
+        batch.push(Mutation::UpsertEdge { edge });
+    }
+    store.flush(&batch, None).await.unwrap();
 }
 
 /// A full budget: supersession frees C's slot, the same cycle's Stage 3
@@ -443,6 +542,25 @@ async fn a_freed_slot_is_spent_in_the_same_cycle_in_commit_order() {
     assert!(outcome.demotions.is_empty());
     let order: Vec<_> = outcome.transitions().map(|e| e.node_id).collect();
     assert_eq!(order, vec![nid(C), nid(V)]);
+    // Review M5: the ids sort in commit order, so a reload, which orders one
+    // instant's rows by id, keeps it.
+    let ids: Vec<_> = outcome.transitions().map(|e| e.id.0).collect();
+    let mut sorted = ids.clone();
+    sorted.sort();
+    assert_eq!(ids, sorted);
+    let mut reloaded = store
+        .inner
+        .load_session(&sid())
+        .await
+        .unwrap()
+        .canonization_events;
+    reloaded.sort_by(|a, b| (a.occurred_at, a.id.0).cmp(&(b.occurred_at, b.id.0)));
+    let reloaded: Vec<_> = reloaded
+        .iter()
+        .filter(|e| e.occurred_at == at(NOW))
+        .map(|e| e.node_id)
+        .collect();
+    assert_eq!(reloaded, order);
     assert_eq!(
         store.recorded(),
         order,
@@ -579,14 +697,24 @@ async fn apply_rechecks_a_graph_that_changed_since_the_probe() {
         let store = store_of(&g).await;
         let mut ev = Evaluator::new();
         let plan = ev.gather(&g, &table(&[]), &on(), at(NOW));
-        assert_eq!(plan.supersede.len(), 1, "{what}");
+        assert_eq!(plan.supersede.list.len(), 1, "{what}");
         let verdicts = verdicts(&store, &plan, &on(), at(NOW)).await.unwrap();
         assert_eq!(verdicts.supersede.len(), 1, "{what}: the probe passed");
         let mut g = g;
         change(&mut g);
         let (tx, _rx) = crate::daemon::events::event_channel();
         let mut outcome = EvalOutcome::default();
-        apply(&mut g, &tx, &plan, &verdicts, &on(), at(NOW), &mut outcome).unwrap();
+        apply(
+            &mut g,
+            &tx,
+            &plan,
+            &verdicts,
+            &on(),
+            at(NOW),
+            &Default::default(),
+            &mut outcome,
+        )
+        .unwrap();
         assert!(outcome.supersessions.is_empty(), "{what}: {outcome:?}");
     }
 }
@@ -661,6 +789,10 @@ struct Recording {
     fail_record: bool,
     accessors: bool,
     recorded: Mutex<Vec<(NodeId, Option<u64>)>>,
+    /// `dependent_evidence` calls per node (review M4).
+    evidence_calls: Mutex<std::collections::HashMap<NodeId, usize>>,
+    /// Stage 2/3 reads: window-aware span and blast radius calls.
+    stage_reads: std::sync::atomic::AtomicUsize,
 }
 
 impl Recording {
@@ -670,6 +802,8 @@ impl Recording {
             fail_record: false,
             accessors: true,
             recorded: Mutex::new(Vec::new()),
+            evidence_calls: Mutex::new(std::collections::HashMap::new()),
+            stage_reads: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -738,6 +872,8 @@ impl GraphStore for Recording {
         min_edge_age: Duration,
         now: DateTime<Utc>,
     ) -> Result<u64, StoreError> {
+        self.stage_reads
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.inner
             .blast_radius(session, node, min_edge_age, now)
             .await
@@ -761,40 +897,22 @@ impl GraphStore for Recording {
         now: DateTime<Utc>,
         window: Duration,
     ) -> Result<crate::types::InteractionSpan, StoreError> {
+        self.stage_reads
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.inner
             .interaction_span_with_window(session, node, min_age, now, window)
             .await
     }
-    async fn latest_structural_evidence_at(
+    async fn dependent_evidence(
         &self,
         session: &SessionId,
         node: NodeId,
-        min_age: Duration,
-        now: DateTime<Utc>,
-        exclude: &[NodeId],
-    ) -> Result<Option<DateTime<Utc>>, StoreError> {
+    ) -> Result<crate::store::DependentEvidence, StoreError> {
+        *self.evidence_calls.lock().unwrap().entry(node).or_default() += 1;
         if !self.accessors {
-            return Err(StoreError::Capability("watermark".into()));
+            return Err(StoreError::Capability("dependent_evidence".into()));
         }
-        self.inner
-            .latest_structural_evidence_at(session, node, min_age, now, exclude)
-            .await
-    }
-    async fn interaction_span_since(
-        &self,
-        session: &SessionId,
-        node: NodeId,
-        min_age: Duration,
-        now: DateTime<Utc>,
-        window: Duration,
-        since: DateTime<Utc>,
-    ) -> Result<crate::types::InteractionSpan, StoreError> {
-        if !self.accessors {
-            return Err(StoreError::Capability("span since".into()));
-        }
-        self.inner
-            .interaction_span_since(session, node, min_age, now, window, since)
-            .await
+        self.inner.dependent_evidence(session, node).await
     }
     async fn record_canonization(
         &self,
@@ -807,4 +925,95 @@ impl GraphStore for Recording {
         }
         self.inner.record_canonization(event, token).await
     }
+}
+
+/// Review M5: event ids are time-ordered and sequenced within a cycle, past
+/// the 12-bit sequence too.
+#[test]
+fn event_ids_sort_in_mint_order() {
+    let mut ids = EventIds::new(at(NOW));
+    let minted: Vec<_> = (0..5_000).map(|_| ids.next().0).collect();
+    let mut sorted = minted.clone();
+    sorted.sort();
+    assert_eq!(minted, sorted);
+    assert_eq!(
+        minted
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        5_000
+    );
+    let later = EventIds::new(at(NOW + 1)).next().0;
+    assert!(later > *minted.last().unwrap());
+}
+
+/// Review M4: at a full budget with a contradiction that does not pass,
+/// supersession is decided first and Stage 3's window is not read at all
+/// (no span or blast read, nothing evaluated, the ring does not move); and
+/// each node's evidence rows are read once per cycle, even when two sources
+/// share a target.
+#[tokio::test]
+async fn store_reads_are_bounded_and_skipped_when_nothing_frees_a_slot() {
+    const S2: u64 = 3;
+    const V: u64 = 4;
+    let mut s = Scene::new();
+    s.support(C, at(50), "c");
+    s.contradicts(S, C, at(60), "x");
+    let origin = s.interaction(at(20), "b2");
+    s.concept(S2, origin, CanonizationStatus::None);
+    s.contradicts(S2, C, at(70), "x2");
+    let origin = s.interaction(at(5), "v");
+    s.concept(V, origin, CanonizationStatus::Venerable);
+    for (k, m) in [30, 130, 230, 31, 131, 231].into_iter().enumerate() {
+        let child_origin = s.interaction(at(m), "w");
+        let child = 500 + k as u64;
+        s.concept(child, child_origin, CanonizationStatus::None);
+        s.edge(V, child, EdgeType::Hierarchical, at(m));
+    }
+    let g = s.build();
+    let store = Recording::new(store_of(&g).await);
+    let g = RwLock::new(g);
+    let full = EvalParams {
+        max_canonical_nodes: 1,
+        ..on()
+    };
+    let mut ev = Evaluator::new();
+    let cursor = ev.stage3_cursor();
+    let out = cycle(&mut ev, &g, &store, &full, at(NOW)).await;
+    assert!(out.is_empty(), "{out:?}");
+    assert!(
+        out.stage3_batch.is_empty(),
+        "nothing in the window was evaluated"
+    );
+    assert_eq!(ev.stage3_cursor(), cursor, "the ring did not move");
+    assert_eq!(
+        store.stage_reads.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "no Stage 2/3 store read"
+    );
+    let calls = store.evidence_calls.lock().unwrap().clone();
+    assert_eq!(calls.get(&nid(C)), Some(&1), "{calls:?}");
+    assert!(calls.values().all(|&n| n == 1), "{calls:?}");
+    assert_eq!(calls.len(), 3, "C, S and S2: {calls:?}");
+}
+
+/// Review L4: when the contradiction's declarer cannot be told apart from
+/// another agent acting at the same instant, the pair is not probed, so an
+/// ambiguity never demotes; the same scene with one agent at that instant
+/// supersedes.
+#[tokio::test]
+async fn an_ambiguous_declarer_is_not_probed() {
+    let mut s = superseding();
+    s.interaction(at(60), "y");
+    let (g, out) = run(s, &on()).await;
+    assert!(out.supersessions.is_empty(), "{out:?}");
+    assert_eq!(status_of(&g, nid(C)), CanonizationStatus::Canonical);
+    // A piece of C's evidence that may or may not be the declarer's (x and
+    // y both acting at 220): not excluded, not counted, not probed.
+    let mut s = superseding();
+    s.support(C, at(220), "x");
+    s.interaction(at(220), "y");
+    let (g, out) = run(s, &on()).await;
+    assert!(out.supersessions.is_empty(), "{out:?}");
+    assert_eq!(status_of(&g, nid(C)), CanonizationStatus::Canonical);
 }

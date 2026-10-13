@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use super::codec::{cutoff_text, db_err, node_id, text_to_ts};
 use super::SqliteStore;
-use crate::store::evidence::{EvidenceRow, EvidenceRows};
+use crate::store::evidence::{DependentEvidence, DependentEvidenceRow};
 use crate::types::{InteractionSpan, NodeId, Scored, SessionId, StoreError};
 
 /// The dependents of one node (#36 read-time dependents semantics, spec §4.1
@@ -323,7 +323,7 @@ impl SqliteStore {
         &self,
         session: &SessionId,
         node: NodeId,
-    ) -> Result<EvidenceRows, StoreError> {
+    ) -> Result<DependentEvidence, StoreError> {
         self.require_session(session).await?;
         let node_text = node.0.to_string();
         let err = |e| db_err("supersession evidence", e);
@@ -357,7 +357,7 @@ impl SqliteStore {
             let origin: String = row.try_get(4).map_err(err)?;
             let origin_created: Option<String> = row.try_get(5).map_err(err)?;
             let origin_event: Option<String> = row.try_get(6).map_err(err)?;
-            out.push(EvidenceRow {
+            out.push(DependentEvidenceRow {
                 edge: node_id(&edge, "edge id")?,
                 edge_created: text_to_ts(&edge_created)?,
                 edge_event: ts(edge_event)?,
@@ -380,7 +380,7 @@ impl SqliteStore {
             (Some(lo), Some(hi)) => Some((lo, hi)),
             _ => None,
         };
-        Ok(EvidenceRows {
+        Ok(DependentEvidence {
             own_origin,
             rows: out,
             extent,

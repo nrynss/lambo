@@ -186,44 +186,17 @@ mod tests {
         assert!(matches!(err, StoreError::Invariant(_)), "{err:?}");
     }
 
-    /// #20: both supersession accessors default to `Capability` (the
-    /// evaluator then skips supersession for the cycle), and an invalid cap
-    /// is still refused as invalid first.
+    /// #20: `dependent_evidence` defaults to `Capability` (the evaluator
+    /// then skips supersession for the cycle).
     #[tokio::test]
-    async fn the_supersession_defaults_fail_closed() {
+    async fn the_supersession_default_fails_closed() {
         use crate::store::GraphStore;
         let session = crate::types::SessionId::from("legacy");
-        let node = crate::types::NodeId::new();
-        let now = chrono::Utc::now();
         let err = Legacy
-            .latest_structural_evidence_at(&session, node, Duration::ZERO, now, &[])
+            .dependent_evidence(&session, crate::types::NodeId::new())
             .await
             .unwrap_err();
         assert!(matches!(err, StoreError::Capability(_)), "{err:?}");
-        let err = Legacy
-            .interaction_span_since(
-                &session,
-                node,
-                Duration::ZERO,
-                now,
-                DEFAULT_COVERAGE_WINDOW,
-                now,
-            )
-            .await
-            .unwrap_err();
-        assert!(matches!(err, StoreError::Capability(_)), "{err:?}");
-        let err = Legacy
-            .interaction_span_since(
-                &session,
-                node,
-                Duration::ZERO,
-                now,
-                Duration::from_secs(60),
-                now,
-            )
-            .await
-            .unwrap_err();
-        assert!(matches!(err, StoreError::Invariant(_)), "{err:?}");
     }
 
     /// #36 PR 2 review L4: after M1 a store that does not forward the

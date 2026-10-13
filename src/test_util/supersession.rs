@@ -302,28 +302,27 @@ pub fn expected_span() -> Vec<(&'static str, DateTime<Utc>, u64, f64)> {
     ]
 }
 
-/// Flush the case and check both accessors, plus [`check_graph`]'s reading.
+/// Flush the case and check `dependent_evidence` and the two readings of
+/// it, plus [`check_graph`]'s reading.
 pub async fn check_accessors(store: &dyn GraphStore) {
     store.flush(&store_batch(), None).await.expect("flush");
     let sid = session();
-    for (name, age, exclude, want) in expected_latest() {
-        let got = store
-            .latest_structural_evidence_at(&sid, concept_id(name), age, now(), &exclude)
+    let rows = |name: &'static str| async move {
+        store
+            .dependent_evidence(&session(), concept_id(name))
             .await
-            .expect("latest_structural_evidence_at");
+            .expect("dependent_evidence")
+    };
+    for (name, age, exclude, want) in expected_latest() {
+        let got = rows(name)
+            .await
+            .latest_structural_evidence_at(age, now(), &exclude);
         assert_eq!(got, want, "latest({name}, {age:?}, {exclude:?})");
     }
     for (name, since, distinct, coverage) in expected_span() {
-        let span = store
-            .interaction_span_since(
-                &sid,
-                concept_id(name),
-                MIN_AGE,
-                now(),
-                crate::store::DEFAULT_COVERAGE_WINDOW,
-                since,
-            )
+        let span = rows(name)
             .await
+            .interaction_span_since(MIN_AGE, now(), crate::store::DEFAULT_COVERAGE_WINDOW, since)
             .expect("interaction_span_since");
         assert_eq!(span.distinct, distinct, "span_since({name}, {since})");
         assert!(
@@ -332,28 +331,23 @@ pub async fn check_accessors(store: &dyn GraphStore) {
             span.coverage
         );
     }
+    // The newest counted evidence (review L2): Sc's child edge at 20 is the
+    // newest counted after 120; nothing is counted after 20.
+    let s = rows("S").await;
+    assert_eq!(s.newest_counted_at(MIN_AGE, now(), at(120)), Some(at(20)));
+    assert_eq!(s.newest_counted_at(MIN_AGE, now(), at(20)), None);
     // A session the store never saw is SessionNotFound, as for the span.
     let missing = SessionId::from("supersede-missing");
     assert!(matches!(
-        store
-            .latest_structural_evidence_at(&missing, concept_id("C"), MIN_AGE, now(), &[])
-            .await,
+        store.dependent_evidence(&missing, concept_id("C")).await,
         Err(crate::types::StoreError::SessionNotFound(_))
     ));
-    // An invalid cap is refused as invalid before anything is read.
+    // An invalid cap is refused as invalid.
     assert!(matches!(
-        store
-            .interaction_span_since(
-                &sid,
-                concept_id("S"),
-                MIN_AGE,
-                now(),
-                std::time::Duration::from_secs(60),
-                at(120)
-            )
-            .await,
+        s.interaction_span_since(MIN_AGE, now(), std::time::Duration::from_secs(60), at(120)),
         Err(crate::types::StoreError::Invariant(_))
     ));
+    let _ = sid;
 }
 
 /// The graph-side reading (`store::evidence::rows_from_graph`) gives the

@@ -381,6 +381,14 @@ pub(super) async fn api_inspect(
                 swarm_gates || blast_needed,
             )
             .await;
+            // #20 review M2: the hold the evaluator would apply.
+            let measured = match (measured, &inputs) {
+                (Ok(mut m), Some(inputs)) => m
+                    .take_hold(state.store(), &ctx.session, inputs, &eval_params, now)
+                    .await
+                    .map(|()| m),
+                (other, _) => other,
+            };
             if let Err(e) = &measured {
                 tracing::warn!(
                     error = %e,
