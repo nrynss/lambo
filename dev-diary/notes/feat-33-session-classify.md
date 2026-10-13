@@ -103,7 +103,23 @@ The final delta review found that narrowing protected provenance to hard
 evidence had also removed soft keyword evidence from plan validation. A resealed
 automatic plan, or an unaudited reviewed label, could place a ruling whose origin
 prompt or sibling concept mentioned a protected project into general. Validation
-now requires an explicit audited general assertion whenever the record, its
-origin prompt or a sibling concept carries project keyword evidence, matching the
-classifier. A synthetic regression covers resealed, unaudited reviewed and
-audited cases. The full lane gate passed after this fix, with no failing rows.
+now requires an explicit audited general assertion when the origin prompt or a
+sibling concept mentions a project excluded from general. A keyword in the ruling
+itself already fails the conservative guards. A synthetic regression covers
+resealed, unaudited reviewed and audited cases.
+
+A focused follow-up review found that the first version of this check counted
+keywords of every project. The classifier guards only excluded projects, so a
+prompt naming a non-excluded project produced an automatic general placement that
+validation then refused, failing the whole run. The validator now uses the
+classifier's scope. Regressions on the automatic, resealed and reviewed paths
+show that a non-excluded mention passes and an excluded mention still needs an
+audit.
+
+The same review found that a failed write could leave a partial plan behind. The
+plan is now written to a private create-new sibling, synced and hard-linked
+into place. Linking refuses any existing entry, so the output stays create-new
+and never replaces an input, and the temporary name is always removed. The
+summary line reports that the source was opened read-only. It no longer claims
+an unverified "source unchanged". The full lane gate passed after these fixes,
+with no failing rows.
