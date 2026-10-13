@@ -871,6 +871,36 @@ async fn a_relative_path_is_refused_in_a_layer() {
     general.mem.close().await.expect("close");
 }
 
+/// The action text is written as a Resource, so a layer refuses one that
+/// is a bare relative path, as it refuses a target; prose passes.
+#[tokio::test]
+async fn a_layer_refuses_an_action_text_that_is_a_relative_path() {
+    let (s, general, _source) = project_and_general("action-path").await;
+    let before = general.memory().graph().read().snapshot();
+    let out = call_raw(
+        &s,
+        "lambo_record_action",
+        json!({"agent_id": "agent-a", "action": "README.md", "scope": "general"}),
+    )
+    .await;
+    assert_eq!(out.is_error, Some(true));
+    assert!(
+        text_of(&out).contains("action entry \"README.md\" is a relative path"),
+        "{}",
+        text_of(&out)
+    );
+    assert_eq!(before, general.memory().graph().read().snapshot());
+    let out = call(
+        &s,
+        "lambo_record_action",
+        json!({"agent_id": "agent-a", "action": "set the merge policy", "scope": "general"}),
+    )
+    .await;
+    assert_eq!(out.is_error, Some(false), "{out:?}");
+    s.mem.close().await.expect("close");
+    general.mem.close().await.expect("close");
+}
+
 /// #129 (#33 PR 7): a validated `repo_scope` exempts exactly the relative
 /// paths it covers, the path-like Resources, from a layer's refusal: action
 /// targets, Resource concepts and Resource `parent_of` ends. A non-Resource

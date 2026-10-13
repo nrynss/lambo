@@ -410,8 +410,12 @@ impl LamboServer {
         ) {
             return e;
         }
-        // #33 PR 4: no bare relative path into a shared layer.
+        // #33 PR 4: no bare relative path into a shared layer. The action
+        // text is written as a Resource too, so it is checked like a target
+        // (an action named `README.md` would otherwise be minted as one).
+        let action_text = vec![p.action.clone()];
         for (field, entries) in [
+            ("action", &action_text),
             ("produces", &produces),
             ("modifies", &modifies),
             ("depends_on", &depends_on),
