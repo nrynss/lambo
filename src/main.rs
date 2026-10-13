@@ -24,7 +24,7 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
-    /// Produce reviewable session plans without modifying the source.
+    /// Plan a session split without modifying the source, then write it offline.
     Session {
         #[command(subcommand)]
         action: SessionAction,
@@ -532,7 +532,7 @@ enum Commands {
     },
 }
 
-/// Read-only session planning. Splitting is a separate future command.
+/// Session planning (read-only) and the offline split it feeds (#33).
 #[derive(Debug, Subcommand)]
 enum SessionAction {
     /// Classify a copied standalone SQLite backup or exported GraphSnapshot.
@@ -566,6 +566,47 @@ enum SessionAction {
         /// New private plan file. Existing files are never overwritten.
         #[arg(long)]
         output: PathBuf,
+    },
+    /// Write a validated classification plan's target sessions into a new offline SQLite file.
+    Split {
+        /// Source session id; must match the plan and the snapshot.
+        #[arg(long)]
+        session: String,
+        /// The same copied, completed standalone backup the plan was made from.
+        #[arg(
+            long,
+            conflicts_with = "snapshot",
+            required_unless_present = "snapshot"
+        )]
+        database: Option<PathBuf>,
+        /// The same exported GraphSnapshot JSON the plan was made from.
+        #[arg(
+            long,
+            conflicts_with = "database",
+            required_unless_present = "database"
+        )]
+        snapshot: Option<PathBuf>,
+        /// Classification plan from `lambo session classify`.
+        #[arg(long)]
+        plan: PathBuf,
+        /// The rules file the plan was classified with; the plan must reproduce from it.
+        #[arg(long)]
+        rules: PathBuf,
+        /// The reviewed labels the plan imported, when it imported any.
+        #[arg(long)]
+        reviewed_assignments: Option<PathBuf>,
+        /// The overrides file the plan was made with; required when the plan carries overrides.
+        #[arg(long)]
+        overrides: Option<PathBuf>,
+        /// Destination SQLite file: new, or this same split's earlier output to resume and verify.
+        #[arg(long)]
+        output_database: PathBuf,
+        /// New private JSON report (accounting, edge ledger, id maps); never overwritten.
+        #[arg(long)]
+        report: PathBuf,
+        /// Build, validate and report the split without creating or opening the destination.
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -800,6 +841,7 @@ impl Commands {
 /// Single construction site for store + embedder (T8.x must reuse this, not rebuild).
 enum Resolved {
     Classification(lambo::resolve::ClassificationSource),
+    Split(Box<lambo::resolve::SplitIo>),
     Full(Box<ResolvedBackends>),
     StoreOnly {
         store: Box<dyn GraphStore>,
@@ -821,6 +863,33 @@ fn resolve_for_command(
     config: Option<&std::path::Path>,
     loaded: Option<LamboFile>,
 ) -> Result<Resolved, String> {
+    if let Commands::Session {
+        action:
+            SessionAction::Split {
+                database,
+                snapshot,
+                output_database,
+                dry_run,
+                ..
+            },
+    } = cmd
+    {
+        if config.is_some() {
+            return Err(
+                "session split uses explicit source, plan and output inputs; --config is not \
+                 supported"
+                    .into(),
+            );
+        }
+        return lambo::resolve::resolve_split_io(
+            database.as_deref(),
+            snapshot.as_deref(),
+            output_database,
+            *dry_run,
+        )
+        .map(|io| Resolved::Split(Box::new(io)))
+        .map_err(|e| e.to_string());
+    }
     if let Commands::Session {
         action: SessionAction::Classify {
             database, snapshot, ..
@@ -1445,7 +1514,7 @@ fn main() -> ExitCode {
     if allow_embedding_mismatch {
         match &mut resolved {
             Resolved::Full(backends) => backends.allow_embedding_mismatch = true,
-            Resolved::StoreOnly { .. } | Resolved::Classification(_) => {
+            Resolved::StoreOnly { .. } | Resolved::Classification(_) | Resolved::Split(_) => {
                 unreachable!("writer override requires full backends")
             }
         }
@@ -1475,6 +1544,36 @@ fn main() -> ExitCode {
                     overrides,
                     reviewed_assignments,
                     output,
+                },
+            ),
+        ),
+        (
+            Commands::Session {
+                action:
+                    SessionAction::Split {
+                        session,
+                        plan,
+                        rules,
+                        reviewed_assignments,
+                        overrides,
+                        report,
+                        dry_run,
+                        ..
+                    },
+            },
+            Resolved::Split(io),
+        ) => run_async(
+            "session split",
+            lambo::cli::session::split_session(
+                *io,
+                lambo::cli::session::SplitArgs {
+                    session,
+                    plan,
+                    rules,
+                    reviewed_assignments,
+                    overrides,
+                    report,
+                    dry_run,
                 },
             ),
         ),

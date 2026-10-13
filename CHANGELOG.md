@@ -326,6 +326,30 @@
   `lambo::session`; the central resolver exposes a read-only classification
   source. This command does not split or cut over a writer.
 
+- `lambo session split` (#33 D2) writes a validated classification plan's
+  target sessions into a new offline SQLite file. The plan must reproduce
+  from the source, rules, reviewed labels and overrides files (the plan's own
+  overrides never authorize themselves). Targets are built in memory with
+  deterministic per-target ids, shared-hub copies, origin replicas (for
+  assigned concepts and for hub copies, across projects as well as into
+  `general`) and Temporal chains rebuilt as subsequences of the original
+  chain, and each is validated as a complete graph first. A replica outside
+  its own session is a stub without prompt text (the full text stays in its
+  own target); in `general` it keeps its text only when the interaction
+  passes the general-interaction test. An interaction with
+  hard protected provenance is never copied out of its session. Every source
+  edge lands in exactly one ledger category (intra, cross-session Temporal,
+  hub reattached, Derives reattached, dropped with a named reason). Each
+  target imports in one transaction with a `split_imports` receipt and
+  in-transaction verification of rows and receipt; a rerun verifies committed
+  targets with zero writes and resumes the rest. Pending write intents are
+  refused; consumed ones are counted and not migrated. A private create-new
+  report carries the accounting with a replica matrix, the edge ledger, id
+  maps, the low-confidence inventory and a general-provenance notice.
+  `lambo::session::build_split` is the pure library entry point;
+  `lambo::resolve::resolve_split_io` resolves the inputs. No cut-over is
+  performed.
+
 - **Citations on `lambo_derive`**
   ([#36](https://github.com/nrynss/lambo/issues/36) PR 4). Each concept
   may carry `depends_on`, existing concepts it rests on (at most 8, and 32
