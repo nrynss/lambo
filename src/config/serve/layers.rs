@@ -12,8 +12,8 @@
 //!
 //! [[serve.layer]]               # per-layer ranking knobs
 //! session = "general"
-//! weight = 0.5                  # uncalibrated until #87
-//! min_similarity = 0.40         # uncalibrated until #87
+//! weight = 0.5                  # BGE-M3 tuning: #157
+//! min_similarity = 0.50         # absolute vector relevance
 //! ```
 //!
 //! Every shape is a list, so N tiers later is one relaxed check
@@ -42,8 +42,7 @@ pub(crate) const MAX_LAYERS: usize = 1;
 
 /// One `[[serve.layer]]` entry: how a layer's hits rank against the
 /// consuming session's. Absent knobs take the library defaults
-/// ([`DEFAULT_LAYER_WEIGHT`], [`DEFAULT_LAYER_MIN_SIMILARITY`]), both
-/// uncalibrated until #87.
+/// ([`DEFAULT_LAYER_WEIGHT`], [`DEFAULT_LAYER_MIN_SIMILARITY`]), measured on BGE-M3 in #157.
 ///
 /// `#[non_exhaustive]`: team tiers (#131) may add knobs. Build one with
 /// `LayerConfig::default()` and set its fields, or parse it from
@@ -58,7 +57,7 @@ pub struct LayerConfig {
     /// Finite and positive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub weight: Option<f64>,
-    /// The layer's floor: a hit without keyword evidence merges only at
+    /// The layer's absolute floor: an ordinary hit merges only at
     /// vector cosine at or above this. In `[0, 1]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_similarity: Option<f64>,

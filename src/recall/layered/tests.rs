@@ -20,12 +20,12 @@ struct H {
     embedding: Option<Vec<f32>>,
 }
 
-/// A hit found by the keyword leg, with its content as canonical key.
+/// A hit found by keyword and vector legs, with its content as canonical key.
 fn kw(content: &str) -> H {
     H {
         content: content.into(),
         keyword: Some(1.0),
-        vector: None,
+        vector: Some(0.8),
         annotations: Vec::new(),
         key: Some(content.into()),
         embedding: None,
@@ -45,6 +45,7 @@ fn vec_hit(content: &str, cos: f64) -> H {
 fn expanded(content: &str) -> H {
     H {
         keyword: None,
+        vector: None,
         ..kw(content)
     }
 }
@@ -250,42 +251,74 @@ fn weights_move_a_layer_up_or_down() {
 }
 
 #[test]
-fn the_floor_admits_keyword_or_vector_evidence_only() {
+fn the_absolute_floor_rejects_keyword_matches_without_relevance() {
+    let mut keyword_only = kw("g-keyword-only");
+    keyword_only.vector = None;
+    let mut weak_keyword = kw("g-weak-keyword");
+    weak_keyword.vector = Some(DEFAULT_LAYER_MIN_SIMILARITY - 0.01);
     let lists = [
         primary(&[expanded("p-expanded"), vec_hit("p-weak", 0.1)]),
         layer(
             1,
             "general",
-            0.5,
+            DEFAULT_LAYER_WEIGHT,
             &[
-                vec_hit("g-below", 0.39),
-                vec_hit("g-at", 0.40),
-                kw("g-keyword"),
+                vec_hit("g-below", DEFAULT_LAYER_MIN_SIMILARITY - 0.01),
+                vec_hit("g-at", DEFAULT_LAYER_MIN_SIMILARITY),
+                keyword_only,
+                weak_keyword.with(AnnotationKind::Hot, "weak keyword warning"),
                 expanded("g-expanded"),
                 vec_hit("g-above", 0.9),
             ],
         ),
     ];
     let r = run(&lists, params(10));
-    // The caller's own session has no floor; a layer's hits need evidence.
-    // Keys keep each hit's own position: g-at is 2nd (.25), not 1st.
     assert_eq!(
         order(&r),
         [
             "lambo/p-expanded",
             "lambo/p-weak",
             "general/g-at",
-            "general/g-keyword",
             "general/g-above"
         ]
     );
-    // A custom floor is the layer's own.
+    assert!(r.warnings.is_empty(), "rejected layer warnings stay out");
     let mut strict = lists.clone();
     strict[1].floor = Some(0.95);
     assert_eq!(
         order(&run(&strict, params(10))),
-        ["lambo/p-expanded", "lambo/p-weak", "general/g-keyword"]
+        ["lambo/p-expanded", "lambo/p-weak"]
     );
+}
+
+#[test]
+fn tuned_defaults_admit_relevant_rules_and_reject_shared_vocabulary() {
+    let mut unrelated = kw("shared vocabulary");
+    unrelated.vector = Some(0.49);
+    let lists = [
+        primary(&[kw("p1"), kw("p2"), kw("p3"), kw("p4"), kw("p5")]),
+        layer(
+            1,
+            "general",
+            DEFAULT_LAYER_WEIGHT,
+            &[
+                unrelated.with(AnnotationKind::Hot, "unrelated warning"),
+                vec_hit("relevant rule", 0.51),
+            ],
+        ),
+    ];
+    let r = run(&lists, params(5));
+    assert_eq!(
+        order(&r),
+        [
+            "lambo/p1",
+            "lambo/p2",
+            "lambo/p3",
+            "lambo/p4",
+            "general/relevant rule"
+        ]
+    );
+    assert!(r.warnings.is_empty());
 }
 
 #[test]

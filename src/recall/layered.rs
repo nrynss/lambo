@@ -12,8 +12,8 @@
 //!
 //! 1. **Admission.** Every hit of a list without a floor is a candidate (the
 //!    caller's own session). A hit of a list with a floor is a candidate
-//!    only with evidence: a keyword (BM25) leg score, a vector leg score at
-//!    cosine `>=` the floor (both from the session's phase-1 leg
+//!    only with evidence: a vector leg score at
+//!    cosine `>=` the floor (from the session's phase-1 leg
 //!    provenance, `DetailedRecall::legs`), or an **anchored** answer: the
 //!    session answered a dependency question by traversal from an anchor
 //!    the query names (its `traversal` response annotation), so every
@@ -77,10 +77,11 @@
 //! ## Calibration
 //!
 //! [`DEFAULT_LAYER_WEIGHT`] and [`DEFAULT_LAYER_MIN_SIMILARITY`] are
-//! **uncalibrated until #87**: they come from the design's reasoning (a 0.5
-//! weight puts a layer's first hit beside the caller's second, and 0.40 is
-//! just above the lowest durable true BGE-M3 hit seen, 0.3991), not from a
-//! measured query set.
+//! measured on BGE-M3 in #157 (see `dev-diary/notes/feat-157-layer-tuning.md`).
+//! Keywords do not bypass the absolute cosine floor: shared vocabulary
+//! alone admitted unrelated general rules. The weight stays 0.5 so admitted
+//! rules still fit the merged context. Other embedders need calibration
+//! (#87); both knobs remain configurable per layer.
 
 use std::collections::HashMap;
 
@@ -91,12 +92,12 @@ use crate::types::{NodeId, RecallHit, SessionId};
 
 /// The default merge weight of a layer: its hit at position `r` ranks as
 /// `0.5 / r`, against `1 / r` for the caller's own session.
-/// **Uncalibrated until #87.**
+/// Retained by the BGE-M3 sweep in #157 to preserve rule visibility.
 pub const DEFAULT_LAYER_WEIGHT: f64 = 0.5;
 
-/// The default floor of a layer: a layer hit without keyword evidence is
-/// admitted only at vector cosine `>=` this. **Uncalibrated until #87.**
-pub const DEFAULT_LAYER_MIN_SIMILARITY: f64 = 0.40;
+/// The default absolute vector-cosine floor of a layer, measured on BGE-M3
+/// in #157. Keywords and warnings do not bypass it; anchored traversal does.
+pub const DEFAULT_LAYER_MIN_SIMILARITY: f64 = 0.50;
 
 /// The merge weight of the caller's own session.
 pub(crate) const PRIMARY_WEIGHT: f64 = 1.0;
@@ -271,7 +272,7 @@ fn is_anchored(recall: &DetailedRecall) -> bool {
 
 /// Rule 1's leg-evidence test for a layer hit.
 fn has_evidence(legs: Option<&LegScores>, floor: f64) -> bool {
-    legs.is_some_and(|l| l.keyword.is_some() || l.vector.is_some_and(|v| v >= floor))
+    legs.is_some_and(|l| l.vector.is_some_and(|v| v >= floor))
 }
 
 /// Holder-vector sameness.

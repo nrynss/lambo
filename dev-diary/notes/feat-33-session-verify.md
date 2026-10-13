@@ -143,9 +143,10 @@ leaves a report), and refusal of a non-SQLite store and of a `[recall]` tier.
 
 ## Follow-ups
 
-- The weight 0.5 and floor 0.40 are uncalibrated until #87; #157 tracks the
-  general-layer tuning, and verify is its measuring tool (`[[serve.layer]]`
-  knobs in the serving config).
+- #157 measures the general-layer settings with verify: default weight 0.5,
+  absolute vector floor 0.50 (keywords no longer bypass it). See
+  [the tuning evidence](feat-157-layer-tuning.md). Per-embedder calibration
+  remains #87; `[[serve.layer]]` still configures both knobs.
 - A recall by image or query vector is not replayed (layered recall is
   text-only, PR 3 decision).
 

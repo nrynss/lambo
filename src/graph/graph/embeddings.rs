@@ -11,6 +11,22 @@ use super::{invariant, Graph};
 use crate::types::{LamboError, Mutation, Node, NodeId};
 
 impl Graph {
+    /// Install synthetic relevance without changing the fixture contract.
+    /// Test-only: the hash embedder cannot model semantic query similarity.
+    #[cfg(all(test, feature = "embed-fixture"))]
+    pub(crate) fn seed_test_vectors(&mut self, updates: Vec<(NodeId, Vec<f32>)>) {
+        for (id, vector) in updates {
+            let Some(Node::Concept(c)) = self.nodes.get_mut(&id) else {
+                panic!("synthetic vector target must be a concept");
+            };
+            c.embedding = Some(vector);
+            let updated = c.clone();
+            self.append_mutation(Mutation::UpsertNode {
+                node: Node::Concept(updated),
+            });
+        }
+    }
+
     /// Stamp the session's embedding space on first vector work, or verify an
     /// existing stamp. Ordinary callers cannot clear or replace the contract.
     pub fn stamp_embedding(

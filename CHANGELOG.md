@@ -4,6 +4,15 @@
 
 ### Upgrading from 0.5.0
 
+- **Layer relevance (#157).** The default `min_similarity` rises from 0.40
+  to 0.50. Ordinary layer hits now require vector cosine above that cutoff;
+  keywords no longer bypass it. Anchored dependency answers still pass.
+  Weight stays 0.5 and both knobs remain configurable. BGE-M3 measurements
+  reduced general top-5 appearances from 36/37 project queries to 3/37 while
+  preserving rule-probe visibility. Layers without vector evidence contribute
+  no ordinary hits; the primary session still supports keyword recall. See
+  `dev-diary/notes/feat-157-layer-tuning.md` for aggregates and limitations.
+
 - **Citations (#36 PR 4) need nothing migrated, and rewrite nothing
   already written.** Existing citations that landed on a short alias
   Entity stay there; the reviewed alias backfill (#36 PR 5) is what
@@ -572,8 +581,8 @@
   `general`), passed nearest tier first as `LayerRef`s, and returns a
   `LayeredRecall` whose hits each name their session. The query is embedded
   once. Lists are merged by `weight / rank` (a layer's weight defaults to
-  0.5 and must be greater than 0); a layer hit needs keyword evidence,
-  vector similarity of at least its `min_similarity` (default 0.40), or a
+  0.5 and must be greater than 0); a layer hit needs
+  vector similarity of at least its `min_similarity` (default 0.50), or a
   place in the layer's traversal answer, and no warning lifts that floor;
   hits with a conflict, hot or reservation warning are kept beyond
   `top_k`; the same memory in two tiers keeps the nearer copy; and one

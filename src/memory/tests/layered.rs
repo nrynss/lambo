@@ -103,6 +103,16 @@ async fn seeded(session: &str, concepts: &[(&str, ConceptType)]) -> Memory {
     mem
 }
 
+async fn seeded_vectors(session: &str, concepts: &[(&str, ConceptType)]) -> Memory {
+    let store = Arc::new(crate::test_util::GraphRanked(
+        crate::test_util::VectorSearchable(Arc::new(MemoryStore::new())),
+    ));
+    let mem = slow_session(store, session, "fixture").await;
+    mem.derive(concepts, &ParentOf::none()).await.unwrap();
+    mem.settle_daemon().await;
+    mem
+}
+
 #[tokio::test]
 async fn an_unlayered_call_is_byte_identical_to_recall() {
     // Every concept is long, so whichever ranks first is cut at 40 tokens.
@@ -204,6 +214,7 @@ async fn the_query_is_embedded_once_for_every_layer() {
             .await
             .unwrap();
         mem.settle_daemon().await;
+        crate::test_util::seed_layer_match(mem, text, "auth tokens").await;
     }
     for q in [&p_queries, &t_queries, &g_queries] {
         q.store(0, Ordering::SeqCst);
@@ -260,6 +271,7 @@ async fn a_caller_without_vector_search_still_embeds_once_for_its_layers() {
         0,
         "premise: no own vector leg"
     );
+    crate::test_util::seed_layer_match(&general, "auth tokens rotate weekly", "auth tokens").await;
     let r = project
         .recall_layered(&[LayerRef::new(&general)], query("auth tokens"))
         .await
@@ -344,7 +356,7 @@ async fn a_layer_hit_merges_names_its_session_and_counts_its_own_access() {
         &[("auth middleware checks tokens", ConceptType::Entity)],
     )
     .await;
-    let general = seeded(
+    let general = seeded_vectors(
         "layered-general",
         &[
             ("auth tokens rotate weekly", ConceptType::Logic),
@@ -354,6 +366,7 @@ async fn a_layer_hit_merges_names_its_session_and_counts_its_own_access() {
         ],
     )
     .await;
+    crate::test_util::seed_layer_match(&general, "auth tokens rotate weekly", "auth tokens").await;
     let r = project
         .recall_layered(&[LayerRef::new(&general)], query("auth tokens"))
         .await
@@ -377,8 +390,8 @@ async fn a_layer_hit_merges_names_its_session_and_counts_its_own_access() {
     assert_eq!(project.unapplied_accesses(), own("layered-project"));
     assert_eq!(general.unapplied_accesses(), own("layered-general"));
 
-    // Route::Layer runs no recent leg: the plain recall finds the recent
-    // `zebra crossing`, the layer's side of a layered recall does not.
+    // Route::Layer runs no recent leg: plain recall finds `zebra crossing`
+    // by recency; any layer-side candidate needs keyword or vector evidence.
     let plain = general.recall(query("auth tokens")).await.unwrap();
     assert!(plain.hits.iter().any(|h| h.content == "zebra crossing"));
     let side = general
@@ -394,9 +407,46 @@ async fn a_layer_hit_merges_names_its_session_and_counts_its_own_access() {
         .recall
         .hits
         .iter()
-        .all(|h| h.content != "zebra crossing"));
+        .all(|h| h.content != "zebra crossing"
+            || side
+                .recall
+                .legs
+                .get(&h.node_id)
+                .is_some_and(|l| l.vector.is_some())));
     assert_eq!(side.identities.len(), side.recall.hits.len());
 
+    project.close().await.unwrap();
+    general.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_keyword_only_layer_has_no_ordinary_hits_without_vector_evidence() {
+    let project = seeded(
+        "keyword-project",
+        &[("auth checks tokens", ConceptType::Logic)],
+    )
+    .await;
+    let general = seeded(
+        "keyword-general",
+        &[("auth tokens rotate weekly", ConceptType::Logic)],
+    )
+    .await;
+    let plain = general.recall_detailed(query("auth tokens")).await.unwrap();
+    assert!(plain
+        .hits
+        .iter()
+        .any(|h| h.content == "auth tokens rotate weekly"));
+    assert!(plain.legs.values().all(|l| l.vector.is_none()));
+    let merged = project
+        .recall_layered(&[LayerRef::new(&general)], query("auth tokens"))
+        .await
+        .unwrap();
+    assert!(!merged.hits.is_empty());
+    assert!(merged.hits.iter().all(|h| h.session == *project.session()));
+    assert!(
+        merged.unavailable_layers.is_empty(),
+        "no evidence differs from an unavailable layer"
+    );
     project.close().await.unwrap();
     general.close().await.unwrap();
 }

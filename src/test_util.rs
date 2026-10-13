@@ -25,6 +25,49 @@ mod vector_searchable;
 #[cfg(feature = "store-memory")]
 pub use vector_searchable::{GraphRanked, VectorSearchable};
 
+/// Give a synthetic concept cosine 0.7 to a fixture query, while keeping
+/// distinct concepts below the vector-dedupe threshold. Hash fixture vectors
+/// model identity, not semantic relatedness; layer integration tests need
+/// explicit relevance now that keywords cannot bypass the floor (#157).
+#[cfg(feature = "embed-fixture")]
+pub async fn seed_layer_match(memory: &crate::Memory, content: &str, query: &str) {
+    let fixture = crate::embed::FixtureEmbedder::with_dimensions(memory.embedding_contract().dim)
+        .expect("fixture width");
+    let q = fixture.embed_sync(query);
+    let mut orthogonal = fixture.embed_sync(content);
+    let dot: f32 = q.iter().zip(&orthogonal).map(|(a, b)| a * b).sum();
+    for (r, q) in orthogonal.iter_mut().zip(&q) {
+        *r -= dot * q;
+    }
+    let norm = orthogonal.iter().map(|x| x * x).sum::<f32>().sqrt();
+    assert!(norm > 0.01, "use distinct synthetic content and query");
+    let vector: Vec<f32> = q
+        .iter()
+        .zip(orthogonal)
+        .map(|(q, r)| 0.7 * q + 0.51_f32.sqrt() * r / norm)
+        .collect();
+    {
+        let mut graph = memory.graph().write();
+        let updates = graph
+            .concepts()
+            .map(|c| {
+                (
+                    c.id,
+                    if c.content == content {
+                        vector.clone()
+                    } else {
+                        c.embedding
+                            .clone()
+                            .unwrap_or_else(|| fixture.embed_sync(&c.content))
+                    },
+                )
+            })
+            .collect();
+        graph.seed_test_vectors(updates);
+    }
+    memory.settle_daemon().await;
+}
+
 /// The text role a delegating test embedder forwards (#22).
 ///
 /// A wrapper that counts, gates, refuses or rewrites embeds keeps its

@@ -340,7 +340,11 @@ async fn other_projects_hits_are_removed_and_foreign_primaries_are_counted() {
     assert!(report.projects["alpha"].after_by_session["general"] >= 1);
     assert_eq!(
         report.layer_knobs["alpha"],
-        vec![("general".into(), 0.5, 0.40)]
+        vec![(
+            "general".into(),
+            layered::DEFAULT_LAYER_WEIGHT,
+            layered::DEFAULT_LAYER_MIN_SIMILARITY
+        )]
     );
     assert_eq!(report.pinned, strings(&["alpha", "beta", "general"]));
     assert_eq!(report.default_session, "alpha");
@@ -361,12 +365,18 @@ async fn without_layers_general_is_out_of_scope() {
 
 #[tokio::test]
 async fn layered_dedupe_is_not_a_loss() {
-    // In the unmodified fixture every 2-d holder vector is nearly collinear,
-    // so the general ruling's copy is merged into a project hit by layered
+    // Give every 2-d holder vector the same relevant query vector,
+    // so the general ruling's copy passes admission and merges by layered
     // dedupe: the memory is still answered, as that hit's `also`.
     let mut run = Run::new();
     run.source = source();
-    run.split_source = source();
+    let vector = FixtureEmbedder::with_dimensions(2)
+        .unwrap()
+        .embed_sync("operator-wide review conventions");
+    for c in &mut run.source.concepts {
+        c.embedding = Some(vector.clone());
+    }
+    run.split_source = run.source.clone();
     let report = run.go().await.unwrap();
     let q = query(&report, "alpha", "operator-wide review conventions");
     assert!(q.deduped_ids.contains(&id(17)), "{q:#?}");

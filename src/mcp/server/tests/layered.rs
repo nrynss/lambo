@@ -57,11 +57,24 @@ pub(super) fn layered(own: &LamboServer, layer: &LamboServer) -> (LamboServer, A
     (server, source)
 }
 
+async fn vector_general() -> LamboServer {
+    server_with_parts(
+        "general",
+        Arc::new(crate::test_util::GraphRanked(
+            crate::test_util::VectorSearchable(Arc::new(MemoryStore::new())),
+        )),
+        Arc::new(FixtureEmbedder::new()),
+        fixture_contract(),
+        Config::default(),
+    )
+    .await
+}
+
 /// A project session and a `general` session, each holding one fact about
 /// worktrees, and the project server layered with `general`.
 pub(super) async fn project_and_general(tag: &str) -> (LamboServer, LamboServer, Arc<Fixed>) {
     let own = server(&format!("{tag}-proj")).await;
-    let general = server("general").await;
+    let general = vector_general().await;
     derive(&own, PROJECT_FACT).await;
     derive(&general, GENERAL_RULING).await;
     let (layered, source) = layered(&own, &general);
@@ -75,6 +88,9 @@ pub(super) async fn derive(s: &LamboServer, content: &str) {
         json!({"agent_id": "agent-a", "concepts": [{"content": content, "concept_type": "logic"}]}),
     )
     .await;
+    if content == GENERAL_RULING {
+        crate::test_util::seed_layer_match(s.memory(), content, "worktree branches").await;
+    }
 }
 
 async fn recall(s: &LamboServer, args: serde_json::Value) -> CallToolResult {
@@ -170,7 +186,7 @@ async fn an_unlayered_session_keeps_the_0_5_0_shape() {
 
     let plain_info = plain.get_info().instructions.expect("instructions");
     assert!(!plain_info.contains("layer"), "{plain_info}");
-    let general = server("general").await;
+    let general = vector_general().await;
     let (layered, _source) = layered(&plain, &general);
     let layered_info = layered.get_info().instructions.expect("instructions");
     assert!(layered_info.starts_with(&plain_info), "only appended");
@@ -232,7 +248,7 @@ async fn scope_reads_one_session_and_names_only_this_sessions_scopes() {
 async fn a_layer_not_serving_degrades_the_stack_and_refuses_its_scope() {
     let (s, general, source) = project_and_general("down").await;
     let taken = source.0.lock().take();
-    let out = recall(&s, json!({"query": "worktree"})).await;
+    let out = recall(&s, json!({"query": "worktree branches"})).await;
     assert_eq!(out.is_error, Some(false), "a layer never fails the primary");
     let sessions = hit_sessions(&out);
     assert!(!sessions.is_empty());
@@ -243,7 +259,11 @@ async fn a_layer_not_serving_degrades_the_stack_and_refuses_its_scope() {
         "{warnings}"
     );
 
-    let out = recall(&s, json!({"query": "worktree", "scope": "general"})).await;
+    let out = recall(
+        &s,
+        json!({"query": "worktree branches", "scope": "general"}),
+    )
+    .await;
     assert_eq!(out.is_error, Some(true));
     assert!(
         text_of(&out).contains("layer general is unavailable right now; retry shortly"),
@@ -253,7 +273,7 @@ async fn a_layer_not_serving_degrades_the_stack_and_refuses_its_scope() {
 
     // Back again (re-elected): the next call finds it.
     *source.0.lock() = taken;
-    let out = recall(&s, json!({"query": "worktree"})).await;
+    let out = recall(&s, json!({"query": "worktree branches"})).await;
     assert!(hit_sessions(&out).contains(&"general".to_string()));
     s.mem.close().await.expect("close");
     general.mem.close().await.expect("close");
@@ -373,7 +393,7 @@ async fn the_ledger_line_names_each_hits_session_and_counts_them() {
     let path = dir.join("calls.jsonl");
     let own = server_with_ledger("ledger-proj", &path).await;
     let ledger = Arc::clone(own.ledger().expect("ledger"));
-    let general = server("general").await;
+    let general = vector_general().await;
     derive(&own, PROJECT_FACT).await;
     derive(&general, GENERAL_RULING).await;
     let (s, _source) = layered(&own, &general);

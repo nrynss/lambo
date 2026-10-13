@@ -17,6 +17,10 @@ const BELIEF: &str = "brand y chargers are safe to leave plugged in";
 const NEWER: &str = "units overheated overnight and were recalled";
 
 async fn session(name: &str) -> Memory {
+    session_on(name, Arc::new(MemoryStore::new())).await
+}
+
+async fn session_on(name: &str, store: Arc<dyn GraphStore>) -> Memory {
     Memory::builder()
         .session(name)
         .agent("agent-a")
@@ -25,7 +29,7 @@ async fn session(name: &str) -> Memory {
             ..Config::default()
         })
         .flush_interval(Duration::from_secs(3_600))
-        .store(Arc::new(MemoryStore::new()) as Arc<dyn GraphStore>)
+        .store(store)
         .embedder(Arc::new(FixtureEmbedder::new()) as Arc<dyn Embedder>)
         .embedding_contract(contract("fixture", 1024))
         .match_strategy(MatchStrategy::Canonical)
@@ -166,7 +170,13 @@ async fn an_against_write_on_a_canonical_belief_warns_until_it_is_demoted() {
 #[tokio::test]
 async fn a_layered_recall_keeps_contradictions_inside_their_session() {
     let project = session("contradiction-project").await;
-    let general = session("contradiction-general").await;
+    let general = session_on(
+        "contradiction-general",
+        Arc::new(crate::test_util::GraphRanked(
+            crate::test_util::VectorSearchable(Arc::new(MemoryStore::new())),
+        )),
+    )
+    .await;
     project
         .derive(
             &[("brand y chargers ship in march", ConceptType::Entity)],
@@ -176,6 +186,7 @@ async fn a_layered_recall_keeps_contradictions_inside_their_session() {
         .unwrap();
     project.settle_daemon().await;
     let (belief, newer) = contradicted(&general).await;
+    crate::test_util::seed_layer_match(&general, BELIEF, "brand y chargers").await;
 
     let r = project
         .recall_layered(&[LayerRef::new(&general)], query("brand y chargers"))

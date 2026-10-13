@@ -77,7 +77,9 @@ fn layered_registry_at(backends: ResolvedBackends, session_rps: u32) -> Arc<Sess
 
 async fn started_registry() -> Arc<SessionRegistry> {
     let registry = layered_registry(backends_over(
-        Box::new(MemoryStore::new()),
+        Box::new(crate::test_util::GraphRanked(
+            crate::test_util::VectorSearchable(Arc::new(MemoryStore::new())),
+        )),
         fast_config(1_000),
     ));
     attach_or_hold(&registry, PROJECT).await;
@@ -147,6 +149,11 @@ async fn two_sessions_in_one_serve_answer_a_layered_recall_end_to_end() {
 
     derive(addr, &path(PROJECT), &proj, &[PROJECT_FACT]).await;
     derive(addr, &path(GENERAL), &general, &[GENERAL_RULING]).await;
+    let live = registry
+        .live_layer(GENERAL, LayerRead::Merged)
+        .expect("live general");
+    crate::test_util::seed_layer_match(&live.mem, GENERAL_RULING, "worktree branches").await;
+    drop(live);
 
     let merged = recall(
         addr,
