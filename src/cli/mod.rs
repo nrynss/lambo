@@ -423,6 +423,7 @@ mod tests {
         let derived = crate::cli::derive::run(
             backends_on(cli_store.clone()),
             crate::cli::derive::Args {
+                repo_scope: None,
                 session: "cli-mcp-diff-cli".into(),
                 agent: "agent-a".into(),
                 content: "user schema".into(),
@@ -438,6 +439,7 @@ mod tests {
 
         let mcp_derived = server
             .derive_impl(DeriveParams {
+                repo_scope: None,
                 agent_id: "agent-a".into(),
                 concepts: vec![
                     WireConcept {
@@ -469,6 +471,7 @@ mod tests {
         let recorded = crate::cli::record_action::run(
             backends_on(cli_store.clone()),
             crate::cli::record_action::Args {
+                repo_scope: None,
                 session: "cli-mcp-diff-cli".into(),
                 agent: "agent-a".into(),
                 action: "create user".into(),
@@ -483,6 +486,7 @@ mod tests {
 
         let mcp_action = server
             .record_action_impl(RecordActionParams {
+                repo_scope: None,
                 agent_id: "agent-a".into(),
                 action: "create user".into(),
                 event_time: None,
@@ -544,6 +548,7 @@ mod tests {
         let err = crate::cli::derive::run(
             backends_on(store.clone()),
             crate::cli::derive::Args {
+                repo_scope: None,
                 session: "cli-caps".into(),
                 agent: "agent-a".into(),
                 content: big,
@@ -561,6 +566,7 @@ mod tests {
         let err = crate::cli::derive::run(
             backends_on(store),
             crate::cli::derive::Args {
+                repo_scope: None,
                 session: "cli-caps".into(),
                 agent: "agent-a".into(),
                 content: "ok\u{0001}no".into(),
@@ -591,6 +597,7 @@ mod tests {
             let err = crate::cli::derive::run(
                 backends_on(store.clone()),
                 crate::cli::derive::Args {
+                    repo_scope: None,
                     session: "cli-image-suffix".into(),
                     agent: "agent-a".into(),
                     content: content.into(),
@@ -608,6 +615,7 @@ mod tests {
         let err = crate::cli::record_action::run(
             backends_on(store.clone()),
             crate::cli::record_action::Args {
+                repo_scope: None,
                 session: "cli-image-suffix".into(),
                 agent: "agent-a".into(),
                 action: "dismissed [image:r17]".into(),
@@ -670,6 +678,7 @@ mod tests {
         let cli = crate::cli::derive::run(
             backends_on(store.clone()),
             crate::cli::derive::Args {
+                repo_scope: None,
                 session: "cli-mcp-caps-cli".into(),
                 agent: "agent-a".into(),
                 content: "c0".into(),
@@ -685,6 +694,7 @@ mod tests {
         .unwrap_err();
         let mcp = server
             .derive_impl(DeriveParams {
+                repo_scope: None,
                 agent_id: "agent-a".into(),
                 concepts: (0..=MAX_CONCEPTS_PER_DERIVE)
                     .map(|i| WireConcept {
@@ -707,6 +717,7 @@ mod tests {
         let cli = crate::cli::record_action::run(
             backends_on(store),
             crate::cli::record_action::Args {
+                repo_scope: None,
                 session: "cli-mcp-caps-cli".into(),
                 agent: "agent-a".into(),
                 action: "touch everything".into(),
@@ -719,6 +730,7 @@ mod tests {
         .unwrap_err();
         let mcp = server
             .record_action_impl(RecordActionParams {
+                repo_scope: None,
                 agent_id: "agent-a".into(),
                 action: "touch everything".into(),
                 event_time: None,
@@ -751,6 +763,7 @@ mod tests {
         crate::cli::derive::run(
             backends_on(store.clone()),
             crate::cli::derive::Args {
+                repo_scope: None,
                 session: "t83-parent-of".into(),
                 agent: "agent-a".into(),
                 content: "user schema".into(),
@@ -803,6 +816,7 @@ mod tests {
         crate::cli::derive::run(
             backends_on(store.clone()),
             crate::cli::derive::Args {
+                repo_scope: None,
                 session: "t83-no-gc".into(),
                 agent: "agent-a".into(),
                 content: "user schema".into(),
@@ -884,6 +898,7 @@ mod tests {
         crate::cli::derive::run(
             backends_on(store.clone()),
             crate::cli::derive::Args {
+                repo_scope: None,
                 session: "t83-vector-skip".into(),
                 agent: "agent-a".into(),
                 content: "user schema".into(),
@@ -1176,6 +1191,7 @@ mod sqlite_tests {
         let derived = crate::cli::derive::run(
             resolve_clean(&cfg),
             crate::cli::derive::Args {
+                repo_scope: None,
                 session: session.into(),
                 agent: "agent-a".into(),
                 content: "user schema".into(),
@@ -1192,6 +1208,7 @@ mod sqlite_tests {
         let recorded = crate::cli::record_action::run(
             resolve_clean(&cfg),
             crate::cli::record_action::Args {
+                repo_scope: None,
                 session: session.into(),
                 agent: "agent-a".into(),
                 action: "create user".into(),
@@ -1328,6 +1345,7 @@ mod sqlite_tests {
         crate::cli::derive::run(
             first,
             crate::cli::derive::Args {
+                repo_scope: None,
                 session: "h1-sqlite-model".into(),
                 agent: "operator".into(),
                 content: "stored with model v1".into(),
@@ -1346,6 +1364,7 @@ mod sqlite_tests {
         let err = crate::cli::derive::run(
             changed,
             crate::cli::derive::Args {
+                repo_scope: None,
                 session: "h1-sqlite-model".into(),
                 agent: "operator".into(),
                 content: "must refuse".into(),
@@ -1369,6 +1388,7 @@ mod sqlite_tests {
         crate::cli::derive::run(
             override_backends,
             crate::cli::derive::Args {
+                repo_scope: None,
                 session: "h1-sqlite-model".into(),
                 agent: "operator".into(),
                 content: "verified model alias".into(),
@@ -1415,6 +1435,7 @@ mod sqlite_tests {
         crate::cli::derive::run(
             resolve_clean(&cfg),
             crate::cli::derive::Args {
+                repo_scope: None,
                 session: "h1-sqlite-legacy".into(),
                 agent: "operator".into(),
                 content: "legacy opens".into(),

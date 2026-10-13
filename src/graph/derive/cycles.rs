@@ -27,7 +27,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::graph::canonical::{canonicalize, CanonicalizeResult};
+use crate::graph::canonical::CanonicalizeResult;
 use crate::graph::Graph;
 use crate::types::{EdgeType, LamboError, NodeId, StoreError};
 
@@ -70,13 +70,15 @@ fn end((node, key): &(Option<NodeId>, String)) -> End<'_> {
 /// plan phase, under the read lock; a hybrid commit does not rerun it.
 pub(crate) fn reject_parent_of_cycles(
     graph: &Graph,
-    pairs: &[(&str, &str)],
+    parent_of: &super::ParentOf<'_>,
+    concepts: &[(&str, crate::types::ConceptType)],
 ) -> Result<(), LamboError> {
+    let pairs = parent_of.pairs();
     if pairs.is_empty() {
         return Ok(());
     }
     let resolve = |content: &str| -> Result<(Option<NodeId>, String), LamboError> {
-        Ok(match canonicalize(content, graph)? {
+        Ok(match crate::graph::resource::canonicalize_resource(content, graph, parent_of.end_type(content, concepts), parent_of.repo_scope())? {
             CanonicalizeResult::Matched { node, key } => (Some(node), key),
             CanonicalizeResult::Unmatched { key } => (None, key),
         })
@@ -319,14 +321,14 @@ mod tests {
         .unwrap();
         let leaf = format!("chain node {}", N - 1);
         let started = std::time::Instant::now();
-        let err = reject_parent_of_cycles(&g, &[(leaf.as_str(), "chain node 0")]).unwrap_err();
+        let err = reject_parent_of_cycles(&g, &crate::graph::derive::ParentOf::from_pairs(&[(leaf.as_str(), "chain node 0")]), &[]).unwrap_err();
         let prepass = started.elapsed();
         assert!(err.to_string().contains("Hierarchical cycle"));
         let started = std::time::Instant::now();
         assert!(reject_closing_edge(&g, "leaf", "root", ids[N as usize - 1], ids[0]).is_err());
         let write_time = started.elapsed();
         let started = std::time::Instant::now();
-        reject_parent_of_cycles(&g, &[("a new parent", "chain node 0")]).unwrap();
+        reject_parent_of_cycles(&g, &crate::graph::derive::ParentOf::from_pairs(&[("a new parent", "chain node 0")]), &[]).unwrap();
         let no_cycle = started.elapsed();
         println!(
             "cycle walk over a {N}-node chain: pre-pass {prepass:?}, write-time {write_time:?}, \

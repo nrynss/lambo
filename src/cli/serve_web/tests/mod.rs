@@ -588,6 +588,7 @@ async fn seed(session: &str) -> Arc<MemoryStore> {
     crate::cli::derive::run(
         backends_on(store.clone()),
         crate::cli::derive::Args {
+            repo_scope: None,
             session: session.into(),
             agent: "agent-a".into(),
             content: "user schema".into(),
@@ -603,6 +604,7 @@ async fn seed(session: &str) -> Arc<MemoryStore> {
     crate::cli::record_action::run(
         backends_on(store.clone()),
         crate::cli::record_action::Args {
+            repo_scope: None,
             session: session.into(),
             agent: "agent-a".into(),
             action: "create user".into(),

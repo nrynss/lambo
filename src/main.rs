@@ -287,6 +287,9 @@ enum Commands {
     },
     /// Derive concepts from the current interaction into session memory. Timestamps are stamped server-side; do not send one.
     Derive {
+        /// Stable caller-asserted repository identity for path-like Resources.
+        #[arg(long)]
+        repo_scope: Option<String>,
         /// Session this process writes (acquires the single-writer lease).
         #[arg(
             long,
@@ -402,6 +405,9 @@ enum Commands {
     },
     /// Record an action the agent took, with what it produces, modifies and depends on. Timestamps are stamped server-side; do not send one.
     RecordAction {
+        /// Stable caller-asserted repository identity for path-like Resources.
+        #[arg(long)]
+        repo_scope: Option<String>,
         /// Session this process writes (acquires the single-writer lease).
         #[arg(
             long,
@@ -1303,6 +1309,7 @@ fn main() -> ExitCode {
         }
         (
             Commands::Derive {
+                repo_scope,
                 session,
                 agent,
                 content,
@@ -1318,6 +1325,7 @@ fn main() -> ExitCode {
             lambo::cli::derive::run(
                 *backends,
                 lambo::cli::derive::Args {
+                    repo_scope,
                     session,
                     agent,
                     content,
@@ -1361,6 +1369,7 @@ fn main() -> ExitCode {
         ),
         (
             Commands::RecordAction {
+                repo_scope,
                 session,
                 agent,
                 action,
@@ -1375,6 +1384,7 @@ fn main() -> ExitCode {
             lambo::cli::record_action::run(
                 *backends,
                 lambo::cli::record_action::Args {
+                    repo_scope,
                     session,
                     agent,
                     action,

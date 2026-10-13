@@ -629,6 +629,7 @@ async fn a_cycle_refused_at_replay_settles_failed_and_the_replay_goes_on() {
             mem.record_action_async_as(
                 agent,
                 &Action {
+                    repo_scope: None,
                     event_time: None,
                     action,
                     produces,

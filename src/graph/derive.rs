@@ -92,7 +92,7 @@ use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
 
-use crate::graph::canonical::{canonicalize, CanonicalizeResult};
+use crate::graph::canonical::CanonicalizeResult;
 use crate::graph::cite::PinnedCitations;
 use crate::graph::Graph;
 
@@ -123,18 +123,36 @@ pub const PARENT_OF_CONCEPT_TYPE: ConceptType = ConceptType::Entity;
 #[derive(Clone, Copy, Debug)]
 pub struct ParentOf<'a> {
     pairs: &'a [(&'a str, &'a str)],
+    repo_scope: Option<&'a str>,
 }
 
 impl<'a> ParentOf<'a> {
     /// No hierarchical relationships.
     pub fn none() -> Self {
-        Self { pairs: &[] }
+        Self { pairs: &[], repo_scope: None }
     }
 
     /// Hierarchical pairs `(parent, child)` in declaration order. Both ends of
     /// each pair resolve (and may be created) as concepts.
     pub fn from_pairs(pairs: &'a [(&'a str, &'a str)]) -> Self {
-        Self { pairs }
+        Self { pairs, repo_scope: None }
+    }
+
+    /// Repository identity for all path-like Resources of this derive, including
+    /// concepts without hierarchy pairs. Existing constructors remain unscoped.
+    pub fn with_repo_scope(mut self, repo_scope: Option<&'a str>) -> Self {
+        self.repo_scope = repo_scope;
+        self
+    }
+
+    /// Caller-asserted repository identity for this derive.
+    pub fn repo_scope(&self) -> Option<&'a str> { self.repo_scope }
+
+    pub(crate) fn end_type(&self, content: &str, concepts: &[(&str, ConceptType)]) -> ConceptType {
+        concepts.iter().find(|(c, _)| *c == content).map(|(_, t)| *t)
+            .unwrap_or_else(|| if self.repo_scope.is_some() && crate::graph::resource::is_path_like(content) {
+                ConceptType::Resource
+            } else { PARENT_OF_CONCEPT_TYPE })
     }
 
     /// Raw `(parent, child)` pairs in declaration order (read-only accessor so
@@ -263,7 +281,7 @@ pub(crate) fn derive_cited(
     // the loop wrote before it.
     graph.transaction(|graph| {
         let spec = &crate::graph::cite::DEPENDS_ON;
-        crate::graph::cite::recheck(graph, spec, &pinned.references)?;
+        crate::graph::cite::recheck(graph, spec, &pinned.references, parent_of.repo_scope())?;
         let mut written = crate::graph::cite::Written::default();
         let mut outcome = derive_after_validation(
             graph,
@@ -312,6 +330,7 @@ pub fn validate(
     concepts: &[(&str, ConceptType)],
     parent_of: &ParentOf,
 ) -> Result<(), LamboError> {
+    crate::graph::resource::validate_repo_scope(parent_of.repo_scope())?;
     // Pre-pass (read-only): hoist every fallible input check here so the write
     // loop below cannot fail mid-call — derive is validate-then-mutate, never
     // partially applied (muse-spark M4). canonicalize is read-only, so nothing
@@ -329,7 +348,7 @@ pub fn validate(
     // FIRST-time Observation (key not yet present) still derives normally: it
     // is a fresh context-overflow record, exactly what demote produces.
     for &(content, concept_type) in concepts {
-        let key = match canonicalize(content, graph)? {
+        let key = match crate::graph::resource::canonicalize_resource(content, graph, concept_type, parent_of.repo_scope())? {
             CanonicalizeResult::Matched { key, .. } | CanonicalizeResult::Unmatched { key } => key,
         };
         reject_empty_key(content, &key)?;
@@ -348,10 +367,10 @@ pub fn validate(
                  self-loop is a cycle (spec §5.7)"
             ))));
         }
-        let parent_key = match canonicalize(parent, graph)? {
+        let parent_key = match crate::graph::resource::canonicalize_resource(parent, graph, parent_of.end_type(parent, concepts), parent_of.repo_scope())? {
             CanonicalizeResult::Matched { key, .. } | CanonicalizeResult::Unmatched { key } => key,
         };
-        let child_key = match canonicalize(child, graph)? {
+        let child_key = match crate::graph::resource::canonicalize_resource(child, graph, parent_of.end_type(child, concepts), parent_of.repo_scope())? {
             CanonicalizeResult::Matched { key, .. } | CanonicalizeResult::Unmatched { key } => key,
         };
         reject_empty_key(parent, &parent_key)?;
@@ -372,7 +391,7 @@ pub fn validate(
     }
     // A pair that would close a Hierarchical cycle with the graph's existing
     // edges or the call's other pairs (spec §5.7); see `cycles`.
-    reject_parent_of_cycles(graph, parent_of.pairs)?;
+    reject_parent_of_cycles(graph, parent_of, concepts)?;
     Ok(())
 }
 
@@ -424,6 +443,7 @@ fn derive_after_validation(
             &mut written_this_call,
             &mut outcome,
             &mut call_by_key,
+            parent_of.repo_scope(),
         )?;
         // #36 PR 4: what each content was written as, for its citations.
         by_content.insert(content.to_string(), node);
@@ -493,7 +513,7 @@ fn derive_after_validation(
         let parent_node = resolve_concept(
             graph,
             parent,
-            PARENT_OF_CONCEPT_TYPE,
+            parent_of.end_type(parent, concepts),
             interaction,
             agent,
             interaction_created_at,
@@ -501,11 +521,12 @@ fn derive_after_validation(
             &mut written_this_call,
             &mut outcome,
             &mut call_by_key,
+            parent_of.repo_scope(),
         )?;
         let child_node = resolve_concept(
             graph,
             child,
-            PARENT_OF_CONCEPT_TYPE,
+            parent_of.end_type(child, concepts),
             interaction,
             agent,
             interaction_created_at,
@@ -513,6 +534,7 @@ fn derive_after_validation(
             &mut written_this_call,
             &mut outcome,
             &mut call_by_key,
+            parent_of.repo_scope(),
         )?;
         if parent_node == child_node {
             return Err(LamboError::Store(StoreError::Invariant(format!(
@@ -576,8 +598,9 @@ fn resolve_concept(
     written_this_call: &mut HashSet<NodeId>,
     outcome: &mut DeriveOutcome,
     call_by_key: &mut HashMap<String, NodeId>,
+    repo_scope: Option<&str>,
 ) -> Result<NodeId, LamboError> {
-    match canonicalize(content, graph)? {
+    match crate::graph::resource::canonicalize_resource(content, graph, concept_type, repo_scope)? {
         CanonicalizeResult::Unmatched { key } => {
             // C4: `canonicalize` never matches an `Observation` (GRAPH-1 —
             // agent-declared content must not attach to a *demoted*

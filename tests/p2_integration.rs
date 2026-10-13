@@ -124,6 +124,7 @@ fn write_paths_interleave_with_mutation_log_and_invariants() {
 
     // record_action: Resource concept + Causal/Dependency edges.
     let action = Action {
+        repo_scope: None,
         action: "created migrations/003.sql",
         produces: &["migrations/003.sql"],
         modifies: &[],

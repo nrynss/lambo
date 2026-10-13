@@ -874,6 +874,14 @@ pub enum Mutation {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WriteIntentPayload {
+    /// Repository-scoped identity. Older binaries must refuse an unconsumed
+    /// intent rather than replay it using the legacy path key.
+    RepoScoped {
+        /// Caller-asserted repository identity, validated before replay.
+        repo_scope: String,
+        /// Exactly one text derive or action; nested wrappers are refused.
+        payload: Box<WriteIntentPayload>,
+    },
     /// A `lambo_derive` job.
     Derive {
         /// `(content, concept_type)` pairs, in submission order.
@@ -962,7 +970,7 @@ impl WriteIntentPayload {
     /// downgrade from loading the session at all.
     pub fn settled(&self) -> Option<WriteIntentPayload> {
         match self {
-            Self::DeriveImage { .. } | Self::DeriveCited { .. } => Some(Self::Derive {
+            Self::DeriveImage { .. } | Self::DeriveCited { .. } | Self::RepoScoped { .. } => Some(Self::Derive {
                 concepts: Vec::new(),
                 pairs: Vec::new(),
             }),
@@ -997,6 +1005,9 @@ pub const DERIVE_IMAGE_PAYLOAD_LIKE: &str = r#"{"kind":"derive_image",%"#;
 
 /// A SQL `LIKE` pattern that matches a stored `DeriveCited` payload (#36
 /// PR 4) and no other, for the same overwrite at consume.
+pub const REPO_SCOPED_PAYLOAD_LIKE: &str = r#"{"kind":"repo_scoped",%"#;
+
+/// Cited derive serialized prefix for adapter settlement.
 pub const DERIVE_CITED_PAYLOAD_LIKE: &str = r#"{"kind":"derive_cited",%"#;
 
 /// A vector supplied for one concept instead of being embedded from its text

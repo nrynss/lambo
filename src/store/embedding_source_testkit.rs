@@ -372,6 +372,7 @@ pub(crate) async fn check_a_settled_image_intent_keeps_no_vector(
         concepts: vec![("wears silk at pongal".into(), ConceptType::Logic)],
         pairs: vec![],
         citations: crate::types::PinnedCitations {
+            repo_scope: None,
             references: vec![crate::types::PinnedReference {
                 content: "wears silk at pongal".into(),
                 reference: "prefers silk".into(),

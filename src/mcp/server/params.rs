@@ -178,6 +178,17 @@ pub struct WireParentOf {
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DeriveParams {
+    /// Optional repository identity for every path-like Resource in this call,
+    /// distinct from destination session `scope`. Use a stable sanitized remote
+    /// host/owner/repository (strip scheme, userinfo, query, fragment and `.git`),
+    /// or an agreed unique repository-root basename for local-only repos. Reuse
+    /// it across worktrees; never send credentials. Caller-asserted, unverified,
+    /// case-sensitive after trim/NFC. Paths are exact trim/NFC text; no filesystem
+    /// normalization. Omit for legacy unscoped identity; scoped text never falls
+    /// back to legacy file nodes. Explicit ids still name existing nodes.
+    #[schemars(length(max = 16_384))]
+    pub repo_scope: Option<String>,
+
     /// Id of the agent making this call. Use one stable id for the agent's
     /// whole life, never one per call, task or topic (good: your model or
     /// client id, such as `claude-opus-5-5` or `gpt-5.6`, with a stable
@@ -217,6 +228,17 @@ pub struct WireResource(#[schemars(length(max = 16_384))] pub String);
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RecordActionParams {
+    /// Optional repository identity for every path-like Resource in this call,
+    /// distinct from destination session `scope`. Use a stable sanitized remote
+    /// host/owner/repository (strip scheme, userinfo, query, fragment and `.git`),
+    /// or an agreed unique repository-root basename for local-only repos. Reuse
+    /// it across worktrees; never send credentials. Caller-asserted, unverified,
+    /// case-sensitive after trim/NFC. Paths are exact trim/NFC text; no filesystem
+    /// normalization. Omit for legacy unscoped identity; scoped text never falls
+    /// back to legacy file nodes. Explicit ids still name existing nodes.
+    #[schemars(length(max = 16_384))]
+    pub repo_scope: Option<String>,
+
     /// Id of the agent making this call. Use one stable id for the agent's
     /// whole life, never one per call, task or topic (good: your model or
     /// client id, such as `claude-opus-5-5` or `gpt-5.6`, with a stable

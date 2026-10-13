@@ -192,10 +192,10 @@ use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
 
 use crate::embed::Embedder;
-use crate::graph::canonical::{canonicalize, CanonicalizeResult};
+use crate::graph::canonical::CanonicalizeResult;
 use crate::graph::cite::PinnedCitations;
 use crate::graph::derive::{
-    DeriveOutcome, ParentOf, COOCCURRENCE_WEIGHT, HIERARCHICAL_WEIGHT, PARENT_OF_CONCEPT_TYPE,
+    DeriveOutcome, ParentOf, COOCCURRENCE_WEIGHT, HIERARCHICAL_WEIGHT,
 };
 use crate::graph::Graph;
 use crate::store::vector_source::VectorCandidates;
@@ -772,6 +772,7 @@ pub fn validate_limits(
     parent_of: &ParentOf<'_>,
     semantic_match_threshold: f64,
 ) -> Result<(), LamboError> {
+    crate::graph::resource::validate_repo_scope(parent_of.repo_scope())?;
     if !semantic_match_threshold.is_finite() || !(0.0..=1.0).contains(&semantic_match_threshold) {
         return Err(LamboError::Config(format!(
             "semantic_match_threshold must be finite and in [0, 1], got {semantic_match_threshold}"
@@ -819,10 +820,14 @@ pub fn validate_limits(
 ///
 /// Read-only: [`canonicalize`] writes nothing.
 pub fn validate_graph_inputs(graph: &Graph, parent_of: &ParentOf<'_>) -> Result<(), LamboError> {
-    validate_pairs(graph, parent_of)?;
+    validate_graph_inputs_scoped(graph, parent_of, &[])
+}
+
+pub(crate) fn validate_graph_inputs_scoped(graph: &Graph, parent_of: &ParentOf<'_>, concepts: &[(&str, ConceptType)]) -> Result<(), LamboError> {
+    validate_pairs(graph, parent_of, concepts)?;
     // A pair that would close a longer Hierarchical cycle (spec §5.7), with
     // the graph's edges or the call's other pairs; see `derive::cycles`.
-    crate::graph::derive::reject_parent_of_cycles(graph, parent_of.pairs())
+    crate::graph::derive::reject_parent_of_cycles(graph, parent_of, concepts)
 }
 
 /// [`validate_graph_inputs`] without the cycle walk: reflexive pairs and
@@ -830,7 +835,8 @@ pub fn validate_graph_inputs(graph: &Graph, parent_of: &ParentOf<'_>) -> Result<
 /// one, under the write lock: the cycle check that counts there is
 /// `reject_closing_edge` at each edge write, inside the transaction, so
 /// walking the hierarchy a second time under the lock buys nothing.
-fn validate_pairs(graph: &Graph, parent_of: &ParentOf<'_>) -> Result<(), LamboError> {
+fn validate_pairs(graph: &Graph, parent_of: &ParentOf<'_>, concepts: &[(&str, ConceptType)]) -> Result<(), LamboError> {
+    crate::graph::resource::validate_repo_scope(parent_of.repo_scope())?;
     for &(parent, child) in parent_of.pairs() {
         if parent == child {
             return Err(LamboError::Store(StoreError::Invariant(format!(
@@ -838,10 +844,10 @@ fn validate_pairs(graph: &Graph, parent_of: &ParentOf<'_>) -> Result<(), LamboEr
                  Hierarchical self-loop is a cycle (spec §5.7)"
             ))));
         }
-        let pk = match canonicalize(parent, graph)? {
+        let pk = match crate::graph::resource::canonicalize_resource(parent, graph, parent_of.end_type(parent, concepts), parent_of.repo_scope())? {
             CanonicalizeResult::Matched { key, .. } | CanonicalizeResult::Unmatched { key } => key,
         };
-        let ck = match canonicalize(child, graph)? {
+        let ck = match crate::graph::resource::canonicalize_resource(child, graph, parent_of.end_type(child, concepts), parent_of.repo_scope())? {
             CanonicalizeResult::Matched { key, .. } | CanonicalizeResult::Unmatched { key } => key,
         };
         reject_empty_key(parent, &pk)?;
@@ -877,7 +883,7 @@ fn plan_inputs<'a>(
         if !seen.insert(content) {
             continue;
         }
-        let (key, matched) = match canonicalize(content, g)? {
+        let (key, matched) = match crate::graph::resource::canonicalize_resource(content, g, concept_type, parent_of.repo_scope())? {
             CanonicalizeResult::Matched { key, node } => (key, Some(node)),
             CanonicalizeResult::Unmatched { key } => (key, None),
         };
@@ -895,7 +901,7 @@ fn plan_inputs<'a>(
     let mut parent_ends: PlannedEnds<'a> = Vec::new();
     for &(parent, child) in parent_of.pairs() {
         for content in [parent, child] {
-            if let CanonicalizeResult::Unmatched { key } = canonicalize(content, g)?
+            if let CanonicalizeResult::Unmatched { key } = crate::graph::resource::canonicalize_resource(content, g, parent_of.end_type(content, concepts), parent_of.repo_scope())?
                 && !item_keys.contains(key.as_str())
                 && end_keys.insert(key.clone())
             {
@@ -1026,7 +1032,7 @@ async fn derive_planned(
             };
             let stamped = g.embedding().cloned();
 
-            validate_graph_inputs(&g, parent_of)?;
+            validate_graph_inputs_scoped(&g, parent_of, concepts)?;
 
             let (items, parent_ends) = plan_inputs(&g, concepts, parent_of)?;
             // Bound the embed work before any I/O (see MAX_HYBRID_EMBEDS).
@@ -1096,6 +1102,9 @@ async fn derive_planned(
             )
         };
 
+        let scoped_nodes: HashSet<NodeId> = graph.read().concepts()
+            .filter(|c| c.canonical_key.starts_with(crate::graph::resource::RESOURCE_KEY_PREFIX))
+            .map(|c| c.id).collect();
         embeds.observe_stamp(stamped.as_ref());
 
         // Mid-session contract check — refuse a kind/model/dim swap BEFORE any embed
@@ -1140,7 +1149,7 @@ async fn derive_planned(
         // concept did.
         let mut probed_store = false;
         let mut resolutions: Vec<Resolution> = Vec::with_capacity(items.len());
-        for (content, _concept_type, key, matched) in &items {
+        for (content, concept_type, key, matched) in &items {
             let res = match matched {
                 Some(node) => Resolution::CanonicalMatch { node: *node },
                 // #22: the image item takes its supplied vector. No embed, no
@@ -1168,6 +1177,12 @@ async fn derive_planned(
                         source: None,
                     }
                 }
+                None if *concept_type == ConceptType::Resource && key.starts_with(crate::graph::resource::RESOURCE_KEY_PREFIX) => {
+                    let context = context_text(content, origin_text.as_deref());
+                    let emb = embeds.embed(embedder, context, io_deadline).await?;
+                    attempted_embed = true;
+                    Resolution::Fresh { key: key.clone(), embedding: Some(emb), source: None }
+                }
                 None => {
                     let context = context_text(content, origin_text.as_deref());
                     // An embed failure or timeout FAILS the write — see
@@ -1194,7 +1209,7 @@ async fn derive_planned(
                         Some(mut hits) => {
                             // #22: a text item never merges into an image
                             // concept (design section 4.4).
-                            hits.retain(|hit| !image_nodes.contains(&hit.item));
+                            hits.retain(|hit| !image_nodes.contains(&hit.item) && !scoped_nodes.contains(&hit.item));
                             // The tier tied at the highest score
                             // at/above threshold (store results are not
                             // guaranteed sorted). Every member is
@@ -1393,7 +1408,7 @@ async fn derive_planned(
             // part of `plan_still_holds`: a changed citation is a refusal,
             // not a reason to plan again.
             let spec = &crate::graph::cite::DEPENDS_ON;
-            crate::graph::cite::recheck(g, spec, &pinned.references)?;
+            crate::graph::cite::recheck(g, spec, &pinned.references, parent_of.repo_scope())?;
             if attempted_embed && g.embedding().is_none() {
                 g.stamp_embedding(embedding.clone())?;
             }
@@ -1441,7 +1456,7 @@ async fn derive_planned(
                 // (hard error + partial write). `plan_still_holds` proved every
                 // item's canonical match is what it was at plan, so the only newly
                 // Matched node here is one written earlier in THIS call.
-                if let CanonicalizeResult::Matched { node, .. } = canonicalize(content, g)?
+                if let CanonicalizeResult::Matched { node, .. } = crate::graph::resource::canonicalize_resource(content, g, *concept_type, parent_of.repo_scope())?
                     && written.contains(&node)
                 {
                     cited.by_content.insert((*content).to_string(), node);
@@ -1666,7 +1681,7 @@ async fn derive_planned(
                 let parent_node = self::resolve_concept(
                     g,
                     parent,
-                    PARENT_OF_CONCEPT_TYPE,
+                    parent_of.end_type(parent, concepts),
                     interaction,
                     agent,
                     interaction_created_at,
@@ -1675,11 +1690,12 @@ async fn derive_planned(
                     &mut outcome,
                     &call_by_key,
                     &parent_vectors,
+                    parent_of.repo_scope(),
                 )?;
                 let child_node = self::resolve_concept(
                     g,
                     child,
-                    PARENT_OF_CONCEPT_TYPE,
+                    parent_of.end_type(child, concepts),
                     interaction,
                     agent,
                     interaction_created_at,
@@ -1688,6 +1704,7 @@ async fn derive_planned(
                     &mut outcome,
                     &call_by_key,
                     &parent_vectors,
+                    parent_of.repo_scope(),
                 )?;
                 if parent_node == child_node {
                     return Err(LamboError::Store(StoreError::Invariant(format!(
@@ -1910,7 +1927,7 @@ fn plan_still_holds(g: &Graph, plan: &PlanRead<'_, '_>) -> Result<Verdict, Lambo
     let Some(written) = g.nodes_written_since(plan.planned_epoch) else {
         return Ok(Verdict::OverBudget);
     };
-    validate_pairs(g, plan.parent_of)?;
+    validate_pairs(g, plan.parent_of, plan.concepts)?;
     let (items, parent_ends) = plan_inputs(g, plan.concepts, plan.parent_of)?;
     if &items != plan.items || &parent_ends != plan.parent_ends {
         return Ok(Verdict::Stale);
@@ -1934,10 +1951,10 @@ fn plan_still_holds(g: &Graph, plan: &PlanRead<'_, '_>) -> Result<Verdict, Lambo
                 ranked.push((embedding, Some(*score)));
             }
             Resolution::Fresh {
+                key,
                 embedding: Some(embedding),
                 source: None,
-                ..
-            } => ranked.push((embedding, None)),
+            } if !key.starts_with(crate::graph::resource::RESOURCE_KEY_PREFIX) => ranked.push((embedding, None)),
             _ => {}
         }
     }
@@ -1959,6 +1976,7 @@ fn plan_still_holds(g: &Graph, plan: &PlanRead<'_, '_>) -> Result<Verdict, Lambo
         }
         if let Some(Node::Concept(c)) = g.node(id)
             && c.embedding_source.is_none()
+            && !c.canonical_key.starts_with(crate::graph::resource::RESOURCE_KEY_PREFIX)
             && let Some(vector) = c.embedding.as_deref()
         {
             rivals.push(vector);
@@ -2303,8 +2321,9 @@ fn resolve_concept(
     outcome: &mut DeriveOutcome,
     call_by_key: &HashMap<String, NodeId>,
     parent_vectors: &HashMap<String, Vec<f32>>,
+    repo_scope: Option<&str>,
 ) -> Result<NodeId, LamboError> {
-    match canonicalize(content, graph)? {
+    match crate::graph::resource::canonicalize_resource(content, graph, concept_type, repo_scope)? {
         CanonicalizeResult::Unmatched { key } => {
             // C4: `canonicalize` returns Unmatched for a key whose only holder
             // is an `Observation` (GRAPH-1). When that holder is a concept

@@ -245,19 +245,27 @@ impl WritePipeline {
                 let Ok(receipt) = ReceiptId::from_str(&intent.receipt) else {
                     continue;
                 };
+                let (payload, decode_error) = match JobPayload::from_intent_payload(intent.payload) {
+                    Ok(payload) => (payload, None),
+                    Err(error) => (JobPayload::Derive { concepts: vec![], pairs: vec![], citations: Default::default() }, Some(error)),
+                };
                 let job = Job {
                     receipt,
                     agent: intent.agent.clone(),
                     interaction: intent.interaction,
                     bytes: 0,
-                    payload: JobPayload::from_intent_payload(intent.payload),
+                    payload,
                     admitted: tokio::time::Instant::now(),
                 };
                 let stamp = ConsumeStamp {
                     tag: "applied_after_restart",
                     at: (this.clock)(),
                 };
-                let answer = match this.ctx.run(&job, Some(stamp)).await {
+                let result = match decode_error {
+                    Some(error) => Err(error),
+                    None => this.ctx.run(&job, Some(stamp)).await,
+                };
+                let answer = match result {
                     Ok(summary) => {
                         // Observed health: the embedder just worked. Resets the
                         // consecutive-transient streak.

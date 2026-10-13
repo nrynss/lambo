@@ -67,6 +67,8 @@ const DEPENDENCY_WEIGHT: f64 = 0.5;
 /// `crate::canon::event_time` for the design decisions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Action<'a> {
+    /// Caller-asserted repository identity for path-like Resources.
+    pub repo_scope: Option<&'a str>,
     /// The action itself — becomes a `Resource` concept.
     pub action: &'a str,
     /// Resources this action creates; `Causal` edges from the action node.
@@ -399,6 +401,7 @@ struct Plan {
 /// not-yet-created nodes — so a "cheap validation" that skipped it would not be
 /// the same check.
 fn plan(graph: &Graph, action: &Action, expected: &[Option<NodeId>]) -> Result<Plan, LamboError> {
+    crate::graph::resource::validate_repo_scope(action.repo_scope)?;
     // Step 2 — resolve + plan concepts (read-only; nothing touches the graph).
     let mut resolved: HashMap<String, NodeId> = HashMap::new();
     let mut planned: Vec<PlannedConcept> = Vec::new();
@@ -408,13 +411,14 @@ fn plan(graph: &Graph, action: &Action, expected: &[Option<NodeId>]) -> Result<P
         &mut planned,
         action.action,
         ConceptType::Resource,
+        action.repo_scope,
     )?;
 
     // Step 3 — plan edges, deduplicated by natural key.
     let mut planned_edges: Vec<(NodeId, NodeId, EdgeType)> = Vec::new();
     let mut edge_keys: HashSet<(NodeId, NodeId, EdgeType)> = HashSet::new();
     for p in action.produces {
-        let tgt = resolve(graph, &mut resolved, &mut planned, p, ConceptType::Resource)?;
+        let tgt = resolve(graph, &mut resolved, &mut planned, p, ConceptType::Resource, action.repo_scope)?;
         plan_edge(
             &mut planned_edges,
             &mut edge_keys,
@@ -424,7 +428,7 @@ fn plan(graph: &Graph, action: &Action, expected: &[Option<NodeId>]) -> Result<P
         );
     }
     for m in action.modifies {
-        let tgt = resolve(graph, &mut resolved, &mut planned, m, ConceptType::Resource)?;
+        let tgt = resolve(graph, &mut resolved, &mut planned, m, ConceptType::Resource, action.repo_scope)?;
         plan_edge(
             &mut planned_edges,
             &mut edge_keys,
@@ -442,6 +446,7 @@ fn plan(graph: &Graph, action: &Action, expected: &[Option<NodeId>]) -> Result<P
             action.action,
             d,
             expected.get(i).copied(),
+            action.repo_scope,
         )?;
         pins.push(pin);
         plan_edge(
@@ -524,8 +529,9 @@ fn resolve(
     planned: &mut Vec<PlannedConcept>,
     content: &str,
     concept_type: ConceptType,
+    repo_scope: Option<&str>,
 ) -> Result<NodeId, LamboError> {
-    match canonicalize(content, graph)? {
+    match crate::graph::resource::canonicalize_resource(content, graph, concept_type, repo_scope)? {
         CanonicalizeResult::Matched { key, node } => {
             // GRAPH-8: a concept with an empty canonical key is junk regardless
             // of how it got in — reject at the entry point.
@@ -598,6 +604,7 @@ fn resolve_dependency(
     action: &str,
     entry: &str,
     expected: Option<Option<NodeId>>,
+    repo_scope: Option<&str>,
 ) -> Result<(NodeId, Option<NodeId>), LamboError> {
     let refuse = |kind| {
         crate::surface::resolve::refusal(ReferenceField::ActionDependsOn, Some(action), entry, kind)
@@ -636,7 +643,7 @@ fn resolve_dependency(
     match pin {
         Some(node) => Ok((node, pin)),
         None => Ok((
-            resolve(graph, resolved, planned, entry, ConceptType::Entity)?,
+            resolve(graph, resolved, planned, entry, if crate::graph::resource::scoped_resource_key(entry, repo_scope).is_some() { ConceptType::Resource } else { ConceptType::Entity }, repo_scope)?,
             None,
         )),
     }
@@ -808,6 +815,7 @@ mod tests {
         depends_on: &'a [&'a str],
     ) -> Action<'a> {
         Action {
+            repo_scope: None,
             event_time: None,
             action,
             produces,

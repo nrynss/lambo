@@ -8,6 +8,7 @@ use crate::surface::validate::{check_action_targets, check_no_image_suffix};
 
 /// Parsed `record-action` flags.
 pub struct Args {
+    pub repo_scope: Option<String>,
     pub session: String,
     pub agent: String,
     pub action: String,
@@ -18,6 +19,7 @@ pub struct Args {
 
 /// Record an action the agent took.
 pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliError> {
+    crate::graph::resource::validate_repo_scope(args.repo_scope.as_deref()).map_err(|e| CliError::Usage(e.to_string()))?;
     require_nonempty("session", &args.session)?;
     check_size_cli("session", &args.session)?;
     require_nonempty("agent", &args.agent)?;
@@ -44,6 +46,7 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
     let modifies: Vec<&str> = args.modifies.iter().map(String::as_str).collect();
     let depends_on: Vec<&str> = args.depends_on.iter().map(String::as_str).collect();
     let action = Action {
+        repo_scope: args.repo_scope.as_deref(),
         event_time: None,
         action: args.action.as_str(),
         produces: &produces,

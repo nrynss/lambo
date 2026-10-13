@@ -481,7 +481,7 @@ fn strip_line_reference(entry: &str) -> &str {
 }
 
 /// `user@host:path`, the scp-style remote git takes.
-fn is_scp_like(s: &str) -> bool {
+pub(crate) fn is_scp_like(s: &str) -> bool {
     let Some((before, after)) = s.split_once(':') else {
         return false;
     };

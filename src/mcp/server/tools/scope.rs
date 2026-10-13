@@ -47,7 +47,7 @@ use crate::mcp::server::response::{
 use crate::mcp::server::trace::call_auth;
 use crate::mcp::server::LamboServer;
 use crate::memory::Memory;
-use crate::surface::resolve::{resolve_reference, ForeignScopes, Resolved};
+use crate::surface::resolve::{resolve_reference_scoped, ForeignScopes, Resolved};
 use crate::surface::validate::is_bare_relative_path;
 use crate::types::{AgentId, LamboError, SessionId};
 use crate::writeq::{ReceiptAnswer, ReceiptId, WritePipeline, MAX_PIGGYBACK_RECEIPTS};
@@ -472,16 +472,11 @@ impl Target {
         self.layer.is_some() || self.own_is_layer
     }
 
-    /// **The seam for #129 part 2 (#33 PR 7), per entry.** Whether `entry`
-    /// is exempt from the relative-path refusal because it names its file
-    /// unambiguously. Nothing is today. PR 7 adds a client-supplied repo
-    /// scope to the canonical key of path-like Resources: an entry in its
-    /// `repo:path` form, or any entry of a call whose explicit repo field
-    /// covers it, returns `true` here (the call's repo field would be
-    /// carried on `Target`), and [`Target::check_paths`] lets it through.
-    /// [`Target::refuses_relative_paths`] stays the call-wide switch.
-    pub(super) fn path_exempt(&self, _entry: &str) -> bool {
-        false
+    /// A relative path is exempt only when this entry is actually covered by
+    /// validated repository Resource identity. The caller passes no scope for
+    /// non-Resource derive entries.
+    pub(super) fn path_exempt(&self, entry: &str, repo_scope: Option<&str>) -> bool {
+        crate::graph::resource::scoped_resource_key(entry, repo_scope).is_some()
     }
 
     /// Refuse a bare relative path among `entries` (of `field`) when
@@ -493,29 +488,36 @@ impl Target {
         field: &str,
         entries: impl IntoIterator<Item = &'e str>,
     ) -> Result<(), CallToolResult> {
+        self.check_paths_scoped(field, entries, None)
+    }
+
+    pub(super) fn check_paths_scoped<'e>(
+        &self, field: &str, entries: impl IntoIterator<Item = &'e str>, repo_scope: Option<&str>,
+    ) -> Result<(), CallToolResult> {
         if !self.refuses_relative_paths() {
             return Ok(());
         }
         let shared = self.layer().unwrap_or(&self.own);
         match entries
             .into_iter()
-            .find(|e| is_bare_relative_path(e) && !self.path_exempt(e))
+            .find(|e| is_bare_relative_path(e) && !self.path_exempt(e, repo_scope))
         {
             None => Ok(()),
             Some(entry) => Err(bad_param(format!(
                 "{field} entry {:?} is a relative path, refused in scope \"{shared}\": {shared} \
                  is shared by every project, so a relative path there names a different file \
                  in each. Record file actions in the project's own session, or use an \
-                 absolute path",
+                 absolute path or a validated repo_scope",
                 entry.trim()
             ))),
         }
     }
 
     /// The `foreign` scopes of a write here, for [`LayerProbe`].
-    pub(super) fn probe<'a>(&'a self, server: &'a LamboServer) -> LayerProbe<'a> {
+    pub(super) fn probe<'a>(&'a self, server: &'a LamboServer, repo_scope: Option<&'a str>) -> LayerProbe<'a> {
         LayerProbe {
             server,
+            repo_scope,
             target: self.layer(),
         }
     }
@@ -535,6 +537,7 @@ impl Target {
 /// statement: the core calls this only after dropping the target's guard,
 /// so one session's lock is held at a time and none across an await.
 pub(super) struct LayerProbe<'a> {
+    repo_scope: Option<&'a str>,
     pub(super) server: &'a LamboServer,
     /// The layer the write goes to; `None` for this server's session.
     pub(super) target: Option<&'a str>,
@@ -546,7 +549,7 @@ impl LayerProbe<'_> {
     fn own_holder(&self, reference: &str) -> Option<String> {
         self.target?;
         let own = self.server.memory();
-        let resolved = resolve_reference(&own.graph().read(), reference);
+        let resolved = resolve_reference_scoped(&own.graph().read(), reference, self.repo_scope);
         matches!(resolved, Resolved::Concept { .. }).then(|| own.session().to_string())
     }
 }
@@ -568,7 +571,7 @@ impl ForeignScopes for LayerProbe<'_> {
             };
             // The layer's read guard is a temporary of this statement: one
             // session's lock at a time, never across an await.
-            let resolved = resolve_reference(&live.mem.graph().read(), reference);
+            let resolved = resolve_reference_scoped(&live.mem.graph().read(), reference, self.repo_scope);
             if matches!(resolved, Resolved::Concept { .. }) {
                 return Some(layer.to_string());
             }

@@ -229,7 +229,7 @@ pub(super) async fn consume_write_intent(
 ) -> Result<(), StoreError> {
     sqlx::query(
         "UPDATE write_intents SET consumed_at = ?, outcome_tag = ?, outcome_summary = ?, \
-             payload = CASE WHEN payload LIKE ? OR payload LIKE ? THEN ? ELSE payload END \
+             payload = CASE WHEN payload LIKE ? OR payload LIKE ? OR payload LIKE ? THEN ? ELSE payload END \
          WHERE session_id = ? AND receipt = ?",
     )
     .bind(ts_to_text(outcome.consumed_at))
@@ -237,6 +237,7 @@ pub(super) async fn consume_write_intent(
     .bind(&outcome.summary)
     .bind(crate::types::DERIVE_IMAGE_PAYLOAD_LIKE)
     .bind(crate::types::DERIVE_CITED_PAYLOAD_LIKE)
+    .bind(crate::types::REPO_SCOPED_PAYLOAD_LIKE)
     .bind(crate::types::SETTLED_IMAGE_INTENT_PAYLOAD)
     .bind(session_id.as_str())
     .bind(receipt)

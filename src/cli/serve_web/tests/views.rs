@@ -700,6 +700,7 @@ async fn two_sessions() -> Arc<MemoryStore> {
     crate::cli::derive::run(
         backends_on(store.clone()),
         crate::cli::derive::Args {
+            repo_scope: None,
             session: "t4-b".into(),
             agent: "agent-b".into(),
             content: "billing ledger".into(),

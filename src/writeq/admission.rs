@@ -196,6 +196,7 @@ pub(super) enum JobPayload {
         supplied: SuppliedVector,
     },
     Action {
+        repo_scope: Option<String>,
         action: String,
         produces: Vec<String>,
         modifies: Vec<String>,
@@ -217,7 +218,12 @@ impl JobPayload {
 
     /// The durable form of this job, exactly as validated (J3 intents).
     pub(super) fn to_intent_payload(&self) -> WriteIntentPayload {
-        match self {
+        let repo_scope = match self {
+            Self::Derive { citations, .. } => citations.repo_scope.as_ref(),
+            Self::Action { repo_scope, .. } => repo_scope.as_ref(),
+            Self::DeriveImage { .. } => None,
+        };
+        let payload = match self {
             JobPayload::Derive {
                 concepts,
                 pairs,
@@ -245,6 +251,7 @@ impl JobPayload {
                 supplied: supplied.clone(),
             },
             JobPayload::Action {
+                repo_scope: _,
                 action,
                 produces,
                 modifies,
@@ -257,12 +264,34 @@ impl JobPayload {
                 depends_on: depends_on.clone(),
                 depends_on_pins: depends_on_pins.clone(),
             },
+        };
+        match repo_scope {
+            Some(scope) => WriteIntentPayload::RepoScoped { repo_scope: scope.clone(), payload: Box::new(payload) },
+            None => payload,
         }
     }
 
     /// Rehydrate a job payload from its durable form (replay).
-    pub(super) fn from_intent_payload(p: WriteIntentPayload) -> Self {
-        match p {
+    pub(super) fn from_intent_payload(p: WriteIntentPayload) -> Result<Self, crate::types::LamboError> {
+        if let WriteIntentPayload::RepoScoped { repo_scope, payload } = p {
+            crate::graph::resource::validate_repo_scope(Some(&repo_scope))?;
+            if !matches!(payload.as_ref(), WriteIntentPayload::Derive { .. } | WriteIntentPayload::DeriveCited { .. } | WriteIntentPayload::Action { .. }) {
+                return Err(crate::types::LamboError::Config("repo_scoped intent must wrap one text derive or action, never a nested wrapper".into()));
+            }
+            let mut job = Self::from_intent_payload(*payload)?;
+            match &mut job {
+                Self::Derive { citations, .. } => {
+                    if citations.repo_scope.as_deref().is_some_and(|scope| scope != repo_scope) {
+                        return Err(crate::types::LamboError::Config("intent repo_scope conflicts with citation context".into()));
+                    }
+                    citations.repo_scope = Some(repo_scope);
+                }
+                Self::Action { repo_scope: scope, .. } => *scope = Some(repo_scope),
+                Self::DeriveImage { .. } => unreachable!(),
+            }
+            return Ok(job);
+        }
+        Ok(match p {
             WriteIntentPayload::Derive { concepts, pairs } => JobPayload::Derive {
                 concepts,
                 pairs,
@@ -293,13 +322,15 @@ impl JobPayload {
                 depends_on,
                 depends_on_pins,
             } => JobPayload::Action {
+                repo_scope: None,
                 action,
                 produces,
                 modifies,
                 depends_on,
                 depends_on_pins,
             },
-        }
+            WriteIntentPayload::RepoScoped { .. } => unreachable!(),
+        })
     }
 
     /// Retained payload bytes, for the byte admission condition.
@@ -330,13 +361,14 @@ impl JobPayload {
                     + supplied.contract.model.as_ref().map_or(0, String::len)
             }
             JobPayload::Action {
+                repo_scope,
                 action,
                 produces,
                 modifies,
                 depends_on,
                 depends_on_pins,
             } => {
-                std::mem::size_of::<Option<NodeId>>() * depends_on_pins.len()
+                repo_scope.as_ref().map_or(0, String::len) + std::mem::size_of::<Option<NodeId>>() * depends_on_pins.len()
                     + action.len()
                     + produces
                         .iter()
@@ -688,12 +720,14 @@ impl WritePipeline {
         modifies: Vec<String>,
         depends_on: Vec<String>,
         depends_on_pins: Vec<Option<NodeId>>,
+        repo_scope: Option<String>,
         deliver_to: Option<SessionId>,
     ) -> Submitted {
         self.admit(
             agent,
             interaction,
             JobPayload::Action {
+                repo_scope,
                 action,
                 produces,
                 modifies,

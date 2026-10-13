@@ -959,6 +959,7 @@ async fn sixteen_dirty_sqlite_sessions_close_inside_the_shutdown_budget() {
         for i in 0..8 {
             let text = format!("dirty write {i} in {}", session.id());
             let action = crate::graph::action::Action {
+                repo_scope: None,
                 event_time: None,
                 action: &text,
                 produces: &[],

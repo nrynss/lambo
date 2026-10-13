@@ -58,6 +58,9 @@ fn wire_citations(p: &DeriveParams) -> Result<Vec<ConceptCitations>, CallToolRes
 
 impl LamboServer {
     pub(crate) async fn derive_impl(&self, p: DeriveParams) -> CallToolResult {
+        if let Err(e) = crate::graph::resource::validate_repo_scope(p.repo_scope.as_deref()) {
+            return bad_param(e.to_string());
+        }
         let acting = match self.caller_agent(&p.agent_id) {
             Ok(a) => a,
             Err(e) => return e,
@@ -100,11 +103,9 @@ impl LamboServer {
         }
         // #33 PR 4: nothing written into a shared layer is a bare relative
         // path, whatever its type (review L1).
-        if let Err(e) = target.check_paths(
-            "concept.content",
-            p.concepts.iter().map(|c| c.content.as_str()),
-        ) {
-            return e;
+        for c in &p.concepts {
+            let repo_scope = if ConceptType::from(c.concept_type) == ConceptType::Resource { p.repo_scope.as_deref() } else { None };
+            if let Err(e) = target.check_paths_scoped("concept.content", [c.content.as_str()], repo_scope) { return e; }
         }
 
         // `derive` borrows `&[(&str, ConceptType)]` and `ParentOf<'_>` borrows
@@ -135,14 +136,16 @@ impl LamboServer {
             }
         }
         // Review L1: a parent_of end becomes a concept too.
-        if let Err(e) = target.check_paths("parent_of", pairs.iter().flat_map(|(a, b)| [*a, *b])) {
-            return e;
+        for end in pairs.iter().flat_map(|(a, b)| [*a, *b]) {
+            let kind = concepts.iter().find(|(c, _)| *c == end).map(|(_, t)| *t).unwrap_or(ConceptType::Resource);
+            let repo_scope = if kind == ConceptType::Resource { p.repo_scope.as_deref() } else { None };
+            if let Err(e) = target.check_paths_scoped("parent_of", [end], repo_scope) { return e; }
         }
         let parent_of = if pairs.is_empty() {
             ParentOf::none()
         } else {
             ParentOf::from_pairs(&pairs)
-        };
+        }.with_repo_scope(p.repo_scope.as_deref());
         // #36 PR 4: each concept's citations and name, checked for shape
         // here; whether each resolves is the core pre-pass's question.
         let citations = match wire_citations(&p) {
@@ -170,7 +173,7 @@ impl LamboServer {
                 &parent_of,
                 &citations,
                 event_time,
-                &target.probe(self),
+                &target.probe(self, p.repo_scope.as_deref()),
                 target.deliver_to().as_ref(),
             )
             .await
@@ -250,6 +253,9 @@ impl LamboServer {
     }
 
     pub(crate) async fn record_action_impl(&self, p: RecordActionParams) -> CallToolResult {
+        if let Err(e) = crate::graph::resource::validate_repo_scope(p.repo_scope.as_deref()) {
+            return bad_param(e.to_string());
+        }
         let acting = match self.caller_agent(&p.agent_id) {
             Ok(a) => a,
             Err(e) => return e,
@@ -317,7 +323,7 @@ impl LamboServer {
             ("modifies", &modifies),
             ("depends_on", &depends_on),
         ] {
-            if let Err(e) = target.check_paths(field, entries.iter().map(String::as_str)) {
+            if let Err(e) = target.check_paths_scoped(field, entries.iter().map(String::as_str), p.repo_scope.as_deref()) {
                 return e;
             }
         }
@@ -340,6 +346,7 @@ impl LamboServer {
         let modifies: Vec<&str> = modifies.iter().map(String::as_str).collect();
         let depends_on: Vec<&str> = depends_on.iter().map(String::as_str).collect();
         let action = Action {
+            repo_scope: p.repo_scope.as_deref(),
             event_time,
             action: p.action.as_str(),
             produces: &produces,
@@ -354,7 +361,7 @@ impl LamboServer {
             .record_action_async_scoped(
                 &acting,
                 &action,
-                &target.probe(self),
+                &target.probe(self, p.repo_scope.as_deref()),
                 target.deliver_to().as_ref(),
             )
             .await

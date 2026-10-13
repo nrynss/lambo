@@ -258,7 +258,7 @@ impl Memory {
         // so a refused reference leaves nothing behind. The guard is dropped
         // at the end of the statement; the commit re-resolves under the
         // write lock.
-        let pinned = cite::validate(&self.graph.read(), concepts, citations)?;
+        let pinned = cite::validate_scoped(&self.graph.read(), concepts, citations, parent_of.repo_scope())?;
         let prompt = hybrid::derive_prompt(concepts.iter().map(|(content, _)| *content));
         let interaction = self.begin_interaction_full(agent, Some(prompt), event_time)?;
 
@@ -326,6 +326,7 @@ impl Memory {
         agent: &AgentId,
         action: &Action<'_>,
     ) -> Result<ActionOutcome, LamboError> {
+        crate::graph::resource::validate_repo_scope(action.repo_scope)?;
         let _writing = self.begin_write_sync()?;
         let interaction =
             self.begin_interaction_full(agent, Some(action.action.to_string()), action.event_time)?;
@@ -367,6 +368,7 @@ impl Memory {
         agent: &AgentId,
         action: &Action<'_>,
     ) -> Result<ActionOutcome, LamboError> {
+        crate::graph::resource::validate_repo_scope(action.repo_scope)?;
         if self.config.match_strategy == MatchStrategy::Canonical {
             return self.record_action_as(agent, action);
         }
@@ -558,7 +560,7 @@ impl Memory {
             let g = self.graph.read();
             match self.config.match_strategy {
                 MatchStrategy::Hybrid => {
-                    hybrid::validate_graph_inputs(&g, parent_of)?;
+                    hybrid::validate_graph_inputs_scoped(&g, parent_of, concepts)?;
                     // The embed budget too: an over-budget call is refused
                     // here, not after the ack as a timeout at apply.
                     hybrid::validate_embed_budget(
@@ -582,7 +584,7 @@ impl Memory {
             }
             // #36 PR 4: the citations, against the same graph read. The
             // background commit re-resolves them (`cite::recheck`).
-            cite::validate(&g, concepts, citations)
+            cite::validate_scoped(&g, concepts, citations, parent_of.repo_scope())
         };
         // This session's guard is gone: only now may another session's be
         // read for the foreign-scope label.
@@ -683,7 +685,7 @@ impl Memory {
                 .copied()
                 .filter(|e| {
                     matches!(
-                        crate::surface::resolve::resolve_reference(&g, e),
+                        crate::surface::resolve::resolve_reference_scoped(&g, e, action.repo_scope),
                         crate::surface::resolve::Resolved::Missing
                     )
                 })
@@ -712,6 +714,7 @@ impl Memory {
                 action.modifies.iter().map(|s| (*s).to_string()).collect(),
                 action.depends_on.iter().map(|s| (*s).to_string()).collect(),
                 pins,
+                action.repo_scope.map(str::to_string),
                 deliver_to.cloned(),
             )
             .await)

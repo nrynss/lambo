@@ -843,6 +843,8 @@ pub(super) fn consume_write_intents_update<'a>(
     qb.push_bind(crate::types::DERIVE_IMAGE_PAYLOAD_LIKE)
         .push(CONSUME_WRITE_INTENT_UPDATE_OR_SQL)
         .push_bind(crate::types::DERIVE_CITED_PAYLOAD_LIKE)
+        .push(CONSUME_WRITE_INTENT_UPDATE_OR_SQL)
+        .push_bind(crate::types::REPO_SCOPED_PAYLOAD_LIKE)
         .push(CONSUME_WRITE_INTENT_UPDATE_PAYLOAD_SQL)
         .push_bind(crate::types::SETTLED_IMAGE_INTENT_PAYLOAD)
         .push(CONSUME_WRITE_INTENT_UPDATE_VALUES_SQL);

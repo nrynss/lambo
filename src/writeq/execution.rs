@@ -276,7 +276,7 @@ impl WriteCtx {
                     ParentOf::none()
                 } else {
                     ParentOf::from_pairs(&borrowed_pairs)
-                };
+                }.with_repo_scope(pinned.repo_scope.as_deref());
                 let strategy = self.match_strategy;
                 let submitted = borrowed.len();
                 if image && strategy != MatchStrategy::Hybrid {
@@ -379,6 +379,7 @@ impl WriteCtx {
                 })
             }
             JobPayload::Action {
+                repo_scope,
                 action,
                 produces,
                 modifies,
@@ -389,6 +390,7 @@ impl WriteCtx {
                 let m: Vec<&str> = modifies.iter().map(String::as_str).collect();
                 let d: Vec<&str> = depends_on.iter().map(String::as_str).collect();
                 let act = Action {
+                    repo_scope: repo_scope.as_deref(),
                     event_time: None,
                     action: action.as_str(),
                     produces: &p,

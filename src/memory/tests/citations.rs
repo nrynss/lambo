@@ -164,6 +164,7 @@ async fn an_accepted_citation_applies_in_the_background_under_both_strategies() 
             .record_action_async_as(
                 &agent,
                 &Action {
+                    repo_scope: None,
                     event_time: None,
                     action: "retried a flush under the lease",
                     produces: &[],
@@ -526,6 +527,7 @@ async fn the_foreign_probe_runs_with_this_sessions_lock_released() {
         .record_action_async_scoped(
             &agent,
             &Action {
+                repo_scope: None,
                 event_time: None,
                 action: "ran it",
                 produces: &[],

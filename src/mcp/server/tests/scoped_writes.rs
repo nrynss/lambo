@@ -367,6 +367,7 @@ async fn a_scoped_write_is_refused_for_a_grant_that_does_not_reach_the_layer() {
     let auth = || Some(CallAuth::Http(Some(Arc::new(narrow.clone()))));
     let before = general.memory().graph().read().snapshot();
     let params = |scope: Option<&str>| super::super::params::DeriveParams {
+        repo_scope: None,
         agent_id: "agent-a".into(),
         concepts: vec![WireConcept {
             content: "a narrow write".into(),

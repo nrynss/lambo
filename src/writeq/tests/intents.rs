@@ -15,6 +15,7 @@ fn derive(citations: PinnedCitations) -> JobPayload {
 
 fn action(pins: Vec<Option<NodeId>>) -> JobPayload {
     JobPayload::Action {
+        repo_scope: None,
         action: "ran it".into(),
         produces: vec![],
         modifies: vec![],
@@ -40,7 +41,7 @@ fn legacy_payloads_are_byte_identical() {
     );
     // And an intent written before 0.6.0 decodes with nothing pinned.
     let old: WriteIntentPayload = serde_json::from_str(&json).unwrap();
-    match JobPayload::from_intent_payload(old) {
+    match JobPayload::from_intent_payload(old).unwrap() {
         JobPayload::Action {
             depends_on_pins, ..
         } => assert!(depends_on_pins.is_empty()),
@@ -54,6 +55,7 @@ fn legacy_payloads_are_byte_identical() {
 fn a_cited_derive_is_its_own_variant_and_round_trips() {
     let target = NodeId(uuid::Uuid::from_u128(7));
     let citations = PinnedCitations {
+        repo_scope: None,
         references: vec![PinnedReference {
             content: "a decision".into(),
             reference: "00000000".into(),
@@ -65,7 +67,7 @@ fn a_cited_derive_is_its_own_variant_and_round_trips() {
     assert!(json.starts_with(r#"{"kind":"derive_cited","#), "{json}");
     let back: WriteIntentPayload = serde_json::from_str(&json).unwrap();
     assert_eq!(back, intent);
-    match JobPayload::from_intent_payload(back) {
+    match JobPayload::from_intent_payload(back).unwrap() {
         JobPayload::Derive { citations: c, .. } => assert_eq!(c, citations),
         other => panic!("{other:?}"),
     }
@@ -79,6 +81,7 @@ fn a_cited_derive_is_its_own_variant_and_round_trips() {
 fn a_cited_job_is_charged_its_citations() {
     let bare = derive(PinnedCitations::default()).bytes();
     let cited = derive(PinnedCitations {
+        repo_scope: None,
         references: vec![PinnedReference {
             content: "a decision".into(),
             reference: "a long reference to a ruling".into(),
@@ -126,6 +129,7 @@ mod v0_5_0 {
 #[test]
 fn a_settled_cited_intent_decodes_under_the_0_5_0_payload() {
     let cited = derive(PinnedCitations {
+        repo_scope: None,
         references: vec![PinnedReference {
             content: "a decision".into(),
             reference: "8baad4e0".into(),
@@ -165,4 +169,47 @@ fn an_unknown_pin_field_is_refused() {
     assert!(serde_json::from_str::<WriteIntentPayload>(json).is_err());
     let json = r#"{"kind":"derive_cited","concepts":[],"pairs":[],"citations":{"references":[{"content":"a","reference":"b","target":"00000000-0000-0000-0000-000000000001","edge":"x"}]}}"#;
     assert!(serde_json::from_str::<WriteIntentPayload>(json).is_err());
+}
+
+#[test]
+fn repo_scoped_intents_round_trip_and_refuse_downgrade() {
+    let mut derive = derive(PinnedCitations::default());
+    if let JobPayload::Derive { citations, .. } = &mut derive {
+        citations.repo_scope = Some("host/owner/repo".into());
+    }
+    let mut action = action(vec![]);
+    if let JobPayload::Action { repo_scope, .. } = &mut action {
+        *repo_scope = Some("host/owner/repo".into());
+    }
+    for job in [derive, action] {
+        let intent = job.to_intent_payload();
+        let json = serde_json::to_string(&intent).unwrap();
+        assert!(json.starts_with(crate::types::REPO_SCOPED_PAYLOAD_LIKE.trim_end_matches('%')));
+        assert!(serde_json::from_str::<v0_5_0::WriteIntentPayload>(&json).is_err());
+        let replay = JobPayload::from_intent_payload(serde_json::from_str(&json).unwrap()).unwrap();
+        assert_eq!(replay.to_intent_payload(), intent);
+        let settled = serde_json::to_string(&intent.settled().unwrap()).unwrap();
+        assert_eq!(settled, crate::types::SETTLED_IMAGE_INTENT_PAYLOAD);
+        assert!(serde_json::from_str::<v0_5_0::WriteIntentPayload>(&settled).is_ok());
+        assert!(job.bytes() >= "host/owner/repo".len());
+    }
+}
+
+#[test]
+fn repo_scoped_replay_refuses_invalid_or_nested_context() {
+    let bare = WriteIntentPayload::Derive { concepts: vec![], pairs: vec![] };
+    for scope in ["", "  ", "a\0b"] {
+        let payload = WriteIntentPayload::RepoScoped { repo_scope: scope.into(), payload: Box::new(bare.clone()) };
+        assert!(JobPayload::from_intent_payload(payload).is_err());
+    }
+    let nested = WriteIntentPayload::RepoScoped {
+        repo_scope: "outer".into(),
+        payload: Box::new(WriteIntentPayload::RepoScoped { repo_scope: "inner".into(), payload: Box::new(bare) }),
+    };
+    assert!(JobPayload::from_intent_payload(nested).is_err());
+    let conflict = WriteIntentPayload::RepoScoped {
+        repo_scope: "outer".into(),
+        payload: Box::new(WriteIntentPayload::DeriveCited { concepts: vec![], pairs: vec![], citations: PinnedCitations { repo_scope: Some("inner".into()), references: vec![] } }),
+    };
+    assert!(JobPayload::from_intent_payload(conflict).is_err());
 }

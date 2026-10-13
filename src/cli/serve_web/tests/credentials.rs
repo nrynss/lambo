@@ -95,6 +95,7 @@ async fn derive_text(store: &Arc<MemoryStore>, session: &str, content: &str) {
     crate::cli::derive::run(
         backends_on(store.clone()),
         crate::cli::derive::Args {
+            repo_scope: None,
             session: session.into(),
             agent: "agent-4c".into(),
             content: content.into(),

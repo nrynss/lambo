@@ -2,6 +2,7 @@
 //! gathers and request limits.
 
 use super::*;
+use crate::graph::derive::PARENT_OF_CONCEPT_TYPE;
 
 #[derive(Debug)]
 struct BarrierEmbedder {

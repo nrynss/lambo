@@ -521,6 +521,7 @@ async fn a_scoped_write_draws_the_layers_rate() {
     let server = session_of(&registry, PROJECT).server.clone();
     let out = server
         .derive_impl(crate::mcp::server::DeriveParams {
+            repo_scope: None,
             agent_id: "agent-a".into(),
             concepts: vec![crate::mcp::server::WireConcept {
                 content: GENERAL_RULING.into(),

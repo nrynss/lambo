@@ -256,6 +256,9 @@ pub struct PinnedReference {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PinnedCitations {
+    /// Repository context accepted at admission, retained for text rechecks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_scope: Option<String>,
     /// One per distinct `(content, target)`: `depends_on`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub references: Vec<PinnedReference>,
@@ -269,7 +272,7 @@ impl PinnedCitations {
 
     /// Retained bytes, for the write queue's byte admission.
     pub(crate) fn bytes(&self) -> usize {
-        self.references
+        self.repo_scope.as_ref().map_or(0, String::len) + self.references
             .iter()
             .map(|r| r.content.len() + r.reference.len() + 16)
             .sum::<usize>()

@@ -149,7 +149,12 @@ pub(crate) fn short_id_matches(g: &Graph, prefix: &str) -> Vec<NodeId> {
 /// Resolve `reference` against `g`, the target session's graph. See the
 /// module docs for the legs. Read-only; the caller holds the graph's lock
 /// (read for a pre-pass, write at a commit) and no other.
+#[cfg(test)]
 pub(crate) fn resolve_reference(g: &Graph, reference: &str) -> Resolved {
+    resolve_reference_scoped(g, reference, None)
+}
+
+pub(crate) fn resolve_reference_scoped(g: &Graph, reference: &str, repo_scope: Option<&str>) -> Resolved {
     let reference = reference.trim();
     if let Some(id) = is_hyphenated_id(reference)
         .then(|| parse_full_id(reference))
@@ -177,7 +182,8 @@ pub(crate) fn resolve_reference(g: &Graph, reference: &str) -> Resolved {
         }
     }
     // The key without the synonym lookup (see the module docs).
-    let key = canonical_key(reference, |_| None);
+    let key = crate::graph::resource::scoped_resource_key(reference, repo_scope)
+        .unwrap_or_else(|| canonical_key(reference, |_| None));
     if !key.is_empty() {
         for &node in g.concepts_by_key(&key) {
             push(node, Leg::Key);
@@ -223,13 +229,21 @@ pub(crate) fn candidate(g: &Graph, node: NodeId) -> ReferenceCandidate {
 
 /// Resolve `reference` to exactly one existing concept of `g`, or refuse it
 /// as `field` of `concept` with the typed reason.
+#[cfg(test)]
 pub(crate) fn resolve_existing(
     g: &Graph,
     field: ReferenceField,
     concept: Option<&str>,
     reference: &str,
 ) -> Result<(NodeId, Leg), LamboError> {
-    let kind = match resolve_reference(g, reference) {
+    resolve_existing_scoped(g, field, concept, reference, None)
+}
+
+pub(crate) fn resolve_existing_scoped(
+    g: &Graph, field: ReferenceField, concept: Option<&str>, reference: &str,
+    repo_scope: Option<&str>,
+) -> Result<(NodeId, Leg), LamboError> {
+    let kind = match resolve_reference_scoped(g, reference, repo_scope) {
         Resolved::Concept { node, leg } => return Ok((node, leg)),
         Resolved::Missing => ReferenceRefusalKind::Missing,
         Resolved::Ambiguous(ids) => ReferenceRefusalKind::Ambiguous {

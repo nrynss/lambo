@@ -27,6 +27,7 @@ async fn mem(session: &str) -> Arc<Memory> {
 
 fn assert_closed(m: &Memory, ctx: &str) {
     let action = Action {
+        repo_scope: None,
         event_time: None,
         action: "post-close write",
         produces: &[],

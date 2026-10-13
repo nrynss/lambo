@@ -11,6 +11,7 @@ use crate::types::{ConceptCitations, ConceptType};
 
 /// Parsed `derive` flags.
 pub struct Args {
+    pub repo_scope: Option<String>,
     pub session: String,
     pub agent: String,
     pub content: String,
@@ -57,6 +58,7 @@ pub(crate) fn parse_concept(raw: &str) -> Result<(String, ConceptType), CliError
 
 /// Derive concepts from this interaction into session memory.
 pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliError> {
+    crate::graph::resource::validate_repo_scope(args.repo_scope.as_deref()).map_err(|e| CliError::Usage(e.to_string()))?;
     require_nonempty("session", &args.session)?;
     check_size_cli("session", &args.session)?;
     require_nonempty("agent", &args.agent)?;
@@ -116,7 +118,7 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
         ParentOf::none()
     } else {
         ParentOf::from_pairs(&pair_refs)
-    };
+    }.with_repo_scope(args.repo_scope.as_deref());
     // #74: a usage error naming the limit, before the write, on a session
     // that embeds (the core refuses it too, as a runtime error).
     if mem.derive_embeds()

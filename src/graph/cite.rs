@@ -50,7 +50,7 @@ use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
 
-use crate::graph::canonical::{canonicalize, CanonicalizeResult};
+use crate::graph::canonical::CanonicalizeResult;
 use crate::graph::derive::DeriveOutcome;
 use crate::graph::Graph;
 use crate::surface::resolve::{self, Resolved};
@@ -104,42 +104,39 @@ fn refuse(
 }
 
 /// The derive's call-time pre-pass for `depends_on` (see [`pin`]).
+#[cfg(test)]
 pub(crate) fn validate(
     g: &Graph,
     concepts: &[(&str, ConceptType)],
     citations: &[ConceptCitations],
 ) -> Result<PinnedCitations, LamboError> {
+    validate_scoped(g, concepts, citations, None)
+}
+
+pub(crate) fn validate_scoped(g: &Graph, concepts: &[(&str, ConceptType)], citations: &[ConceptCitations], repo_scope: Option<&str>) -> Result<PinnedCitations, LamboError> {
+    crate::graph::resource::validate_repo_scope(repo_scope)?;
     let entries: Vec<(&str, &[String])> = citations
         .iter()
         .map(|c| (c.content.as_str(), c.depends_on.as_slice()))
         .collect();
     Ok(PinnedCitations {
-        references: pin(g, concepts, &DEPENDS_ON, &entries)?,
+        references: pin_scoped(g, concepts, &DEPENDS_ON, &entries, repo_scope)?,
+        repo_scope: repo_scope.map(str::to_string),
     })
 }
 
-/// Resolve every reference of `entries` (`(citing content, references)`,
-/// a content listed twice being one concept) against `g`, the target
-/// session's graph, under `spec`'s limits; refuse self references and, for
-/// an acyclic spec, an edge that would close a cycle with what the graph
-/// already shows. Returns what it accepted, to pin on the job. Read-only.
-pub(crate) fn pin(
-    g: &Graph,
-    concepts: &[(&str, ConceptType)],
-    spec: &ReferenceSpec,
-    entries: &[(&str, &[String])],
-) -> Result<Vec<PinnedReference>, LamboError> {
+pub(crate) fn pin_scoped(g: &Graph, concepts: &[(&str, ConceptType)], spec: &ReferenceSpec, entries: &[(&str, &[String])], repo_scope: Option<&str>) -> Result<Vec<PinnedReference>, LamboError> {
     let mut pinned: Vec<PinnedReference> = Vec::new();
     if entries.iter().all(|(_, refs)| refs.is_empty()) {
         return Ok(pinned);
     }
     // Each of the call's contents and its current canonical match.
     let mut matched: HashMap<&str, Option<NodeId>> = HashMap::new();
-    for &(content, _) in concepts {
+    for &(content, kind) in concepts {
         if matched.contains_key(content) {
             continue;
         }
-        let m = match canonicalize(content, g)? {
+        let m = match crate::graph::resource::canonicalize_resource(content, g, kind, repo_scope)? {
             CanonicalizeResult::Matched { node, .. } => Some(node),
             CanonicalizeResult::Unmatched { .. } => None,
         };
@@ -188,7 +185,7 @@ pub(crate) fn pin(
             ));
         };
         for reference in refs {
-            let (target, _) = resolve::resolve_existing(g, spec.field, Some(content), reference)?;
+            let (target, _) = resolve::resolve_existing_scoped(g, spec.field, Some(content), reference, repo_scope)?;
             if *source == Some(target) {
                 return Err(refuse(
                     spec,
@@ -240,9 +237,10 @@ pub(crate) fn recheck(
     g: &Graph,
     spec: &ReferenceSpec,
     pinned: &[PinnedReference],
+    repo_scope: Option<&str>,
 ) -> Result<(), LamboError> {
     for p in pinned {
-        let now = match resolve::resolve_reference(g, &p.reference) {
+        let now = match resolve::resolve_reference_scoped(g, &p.reference, repo_scope) {
             Resolved::Concept { node, .. } if node == p.target => continue,
             Resolved::Concept { node, .. } => Some(node),
             Resolved::Missing | Resolved::Ambiguous(_) | Resolved::NotAConcept(_) => None,
