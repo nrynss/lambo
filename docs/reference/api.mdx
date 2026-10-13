@@ -187,31 +187,59 @@ own, covering at least 0.3 of min(session extent, the coverage cap).
   watermark, and the filter runs before origins are counted and spread is
   measured.
 - The watermark is the later of `C`'s origin about-time and its latest
-  eligible evidence, not counting evidence written by the agent that
-  declared the contradiction, nor `S`'s own dependence on `C`.
+  eligible evidence, not counting evidence the agent that declared the
+  contradiction certainly wrote, nor `S`'s own dependence on `C`. When the
+  declarer, or whether a piece of `C`'s evidence is the declarer's, cannot
+  be told apart (several agents acting at one instant), the pair is not
+  probed: an ambiguity never demotes.
+- The bar is asymmetric on purpose: `S` must clear Stage 2 again with
+  newer evidence, while one new eligible piece of evidence for `C` (not
+  the declarer's) moves the watermark past `S`'s support.
+- Because the declarer's own evidence never counts for `C`, a single
+  writer (or agents sharing one `agent_id`) can never release `C` from a
+  contradiction it declared; use distinct agent ids before enabling this.
 - An assertion alone (no newer support for `S`) never demotes anything.
 - Neither side may be inside its re-promotion cooldown: a source demoted
   within `canonization_repromotion_cooldown` cannot supersede, and a target
   demoted within it cannot be superseded again. Competing sources for one
-  target rank by newest eligible evidence, then canonical key, then id.
+  target rank by their newest **counted** evidence, then canonical key,
+  then id.
+- **The pair rule.** When two concepts each qualify against the other,
+  only the one with the newest counted evidence (then key, then id) may
+  supersede or hold the other. It is applied before anything commits, and
+  the apply step judges cooldowns as of the start of the cycle, so the
+  order targets are applied in changes nothing.
 - `C` is stamped `last_demotion_time = now` and its `CanonizationEvent`
   carries `reason: Some(DemotionReason::Superseded { by: S })`. `S` is not
-  promoted by it.
-- While `S` would still supersede it, Stage 3 holds `C` at Venerable rather
-  than promote it, so the two cannot trade places once per cooldown window.
+  promoted by it. A supersession counts toward Solo's revert penalty like
+  any demotion.
+- **The hold** (owner-approved): Stage 3 does not promote a Venerable that
+  a contradicting concept would supersede at once, under the same rules,
+  whether or not it was ever Canonical. It waits at Venerable until it
+  earns newer evidence. `explain_admission` and `Measurements::take_hold`
+  report it as a failing `held` check ("held: contradicted by <id> with
+  newer evidence"; `Measurements::held_by`).
 - Order within a cycle: supersessions commit first, then promotions against
-  the recomputed budget (so a freed slot is spent in the same cycle; Stage 3
-  is gathered at a full budget whenever supersession probes are pending),
-  then budget demotions. `EvalOutcome::supersessions` holds them, and
+  the recomputed budget (so a freed slot is spent in the same cycle), then
+  budget demotions. At a full budget Stage 3 is gathered only when
+  supersession probes are pending, and its store reads are skipped (the
+  window is not evaluated and its ring does not move) when nothing was
+  superseded. `EvalOutcome::supersessions` holds them, and
   `EvalOutcome::transitions()` and the durable audit follow that order.
-- At most `canonization_eval_batch_size` targets are probed per cycle, and
-  every verdict is re-checked against the graph under the write lock before
-  it commits.
+  A cycle's audit ids are time-ordered with a commit-order sequence, so a
+  reload, which orders one instant's rows by id, keeps commit order.
+- At most `canonization_eval_batch_size` targets and
+  `canon::supersession::MAX_SUPERSESSION_PROBES` (256) forward probes per
+  cycle (a cycle at the cap logs `CanonizationSupersessionProbeCap`); each
+  node's evidence is read from the store once per cycle; and every verdict
+  is re-checked against the graph under the write lock before it commits.
 
-The two store accessors are `GraphStore::latest_structural_evidence_at`
-and `GraphStore::interaction_span_since`. Both default to
-`StoreError::Capability`; the built-in stores implement them, and a store
-that does not skips supersession for the cycle with one
+The store surface is one method, `GraphStore::dependent_evidence`, which
+returns a node's rows unfiltered as a `DependentEvidence`; its
+`latest_structural_evidence_at`, `interaction_span_since` and
+`newest_counted_at` apply the rules, so every adapter agrees. It defaults
+to `StoreError::Capability`; the built-in stores implement it, and a store
+that does not skips supersession and the hold for the cycle with one
 `CanonizationSupersessionUnsupported` warning while the rest of the cycle
 runs.
 
@@ -219,13 +247,17 @@ runs.
 row written before 0.6.0, and every budget demotion, which still writes
 none) reads as `DemotionReason::Budget` through
 `CanonizationEvent::demotion_reason()`; a promotion has no reason. Each
-store keeps it in two nullable columns, `reason` and `superseded_by`; a row
-whose pair is malformed, or a promotion with a reason, is refused on load
-and at every write gate. Recall marks a hit whose latest demotion was a
-supersession, while it is not Canonical again, with the annotation kind
-`superseded` and the line `recall::format::superseded_warning`; it never
-forces a hit into a result. Inspect ends its canonization section with the
-latest demotion and its reason.
+store keeps it in two nullable columns, `reason` and `superseded_by`. A
+stored pair this build cannot read (unknown text, a malformed pair, a
+reason on a promotion) loads as `DemotionReason::Unknown` with the raw
+pair and a `CanonizationReasonUnreadable` warning, never as `Budget`, and
+the session still loads; every write gate refuses it. Recall marks a hit
+whose latest demotion was a supersession, while it is not Canonical again,
+with the annotation kind `superseded` and the line
+`recall::format::superseded_warning`; it never forces a hit into a result.
+Inspect ends its canonization section with the latest demotion and its
+reason. `lambo canon dry-run --supersede` runs a dry run with the setting
+on.
 
 ## Settings
 

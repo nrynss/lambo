@@ -19,8 +19,9 @@ dating ([feature-19c-contradiction-warning.md](feature-19c-contradiction-warning
 - `CanonizationEvent::reason: Option<DemotionReason>` (`Budget`,
   `Superseded { by }`), `demotion_reason()`, `check_reason()`; nullable
   `reason` / `superseded_by` columns in all three init schemas.
-- `GraphStore::latest_structural_evidence_at` and
-  `GraphStore::interaction_span_since` (default `Capability`), implemented by
+- `GraphStore::dependent_evidence` (default `Capability`; it replaced the
+  two Phase 0 accessors in the review round, whose names live on as
+  `DependentEvidence` methods), implemented by
   MemoryStore, SQLite, the Postgres family and the Tiered wrapper over one
   shared reading, `store::evidence`.
 - Recall's `superseded` annotation (`recall::format::superseded_warning`);
@@ -88,7 +89,7 @@ ignored) and Cockroach (`conformance_suite`).
 
 The exclusions (self-suppression) need write-time attribution, which only
 the graph has (`daemon::conflict::WriterTimeline`), so the evaluator
-computes them and passes edge ids to `latest_structural_evidence_at`.
+computes them and passes edge ids to the watermark reading.
 
 ### Order, budget and fairness
 
@@ -120,13 +121,10 @@ used. Canon transitions stay outside `Graph::transaction`.
 
 ### Reciprocal contradictions and cooldown
 
-Verdicts apply in target-id order. When `C` and `S` contradict each other
-and both qualify (possible with self-suppression), the first demotion
-stamps its concept's cooldown, so it can no longer supersede the other in
-the same cycle; inside the cooldown nothing flips; after it the other side
-may win. Pinned by `reciprocal_contradictions_flip_at_most_once_per_cooldown`.
+Superseded by the review round's pair rule (below): verdicts no longer rely
+on target-id order or on a cooldown stamped earlier in the apply loop.
 
-### The hold (not in Phase 0: a conservative choice, for the owner)
+### The hold (owner-approved 2026-10-13)
 
 Without it, a superseded concept whose own evidence still passes every
 stage climbs back (Stage 1 at once, Venerable, Canonical once its cooldown
@@ -135,9 +133,11 @@ forever, and a fixed point is never reached. The issue's intended steady
 state is that the side with the newer evidence wins. So, with
 supersession on, Stage 3 also probes its window's Venerables with the same
 predicate and does not promote one that would be superseded at once; it
-waits at Venerable until it earns newer evidence. Derived to dogfood memory.
-If the owner prefers the flap, the hold is one `gather_holds` call and one
-`held` check in `eval.rs`.
+waits at Venerable until it earns newer evidence. It also holds a Venerable
+that was never Canonical (review L9): promoting it would only demote it on
+the next cycle. The owner approved keeping it on 2026-10-13, under the
+review's conditions: the pair rule, inspect showing the hold, and the
+single-writer limit documented (all below). Derived to dogfood memory.
 
 ### The audit
 
@@ -151,10 +151,9 @@ SQLite, the Postgres family) refuses a reason on a promotion and a
 self-supersession. `superseded_by` is a bare id, no foreign key.
 
 Rows of one cycle share `occurred_at`, and the stores reload by
-`(occurred_at, id)`, so a reload orders one cycle's rows by id, not by
-commit order. Each concept takes at most one hop per cycle, so nothing
-reads that order; commit order is what the writes, the in-graph audit and
-the outcome carry.
+`(occurred_at, id)`. Since review M5 a cycle's event ids are UUIDv7-shaped
+(the cycle's milliseconds, a commit-order sequence, random bits), so a
+reload keeps commit order.
 
 ### Capability
 
@@ -179,8 +178,10 @@ change, in the CHANGELOG).
 
 ### Dry run
 
-`lambo canon dry-run` runs with supersession off (its `EvalParams` default);
-a library caller can set `eval.supersede`. Not wired to `lambo.toml`.
+`lambo canon dry-run` and `alias-preview` take `--supersede` (review L1):
+the dry run reads no `lambo.toml`, and `--policy` is chosen the same way.
+Its explanation knows the hold, so `nothing_eligible_at_the_stop` holds at
+the supersession fixed point. The report records `supersede` only when on.
 
 ## Tests
 
@@ -221,3 +222,59 @@ owner decision).
 **§10 canonization.** A second demotion path, supersession, before
 promotions, off by default; the hold at Stage 3 while supersession is on;
 `CanonizationEvent` gains a demotion reason.
+
+## Review round (2026-10-13)
+
+Adversarial review: 1 High, 5 Medium, 10 Low. Merged `origin/main`
+(`8b8cbcba`: #154, D2 #155, PR7 #156) first; the CHANGELOG conflict was two
+Breaking and two Added entries, all kept in one Unreleased section, and the
+awk duplicate check is clean. The merge needed `reason: None` in D2's new
+split test. The owner decided the hold stays, under the conditions below.
+
+- **H1 / M1, the pair rule.** Two concepts that each qualify against the
+  other (possible through self-suppression) could both be demoted, and then
+  each held the other at Venerable forever; the result also depended on
+  target-id order. Now reverse probes are gathered for every forward pair,
+  and in `decide` only the one with the newest counted evidence (then key,
+  then id) may supersede or hold the other. Apply judges cooldowns as of the
+  start of the cycle (`cooldowns_before`), so a concept demoted earlier in
+  the loop keeps what it could do and chains are order-independent.
+  `reciprocal_contradictions_flip_at_most_once_per_cooldown` now runs past
+  the hold to a release (S earns newer support from a third agent, is
+  promoted and supersedes C), and `the_pair_rule_does_not_depend_on_ids`.
+- **H1, scenario A (single writer).** #19(c)'s declarer rule is unchanged:
+  support the declarer writes never counts for the contradicted concept, so
+  one writer (or a shared `agent_id`) can never release it. Documented in
+  config.mdx, canonization.mdx, mcp.mdx, the CHANGELOG and the module docs,
+  recommending distinct agent ids before enabling.
+- **M2.** `explain_admission` (and the portal through
+  `Measurements::take_hold`) runs the same hold probe with the pair rule and
+  adds a failing `held` check, "held: contradicted by <id> with newer
+  evidence". `lambo inspect` reads `canonization_supersede` from
+  `lambo.toml` (`run_with_settings`).
+- **M3, L7.** An unreadable reason pair loads as `DemotionReason::Unknown`
+  (raw pair kept, one `CanonizationReasonUnreadable` warning), never as
+  Budget, on SQLite, the Postgres family and `Graph::from_snapshot`; write
+  gates still refuse it. `DemotionReason` lost `Copy`.
+- **M4.** The store surface is now one method, `dependent_evidence`, whose
+  rows the evaluator reads once per node per cycle (`EvidenceCache`); the
+  two Phase 0 names live on as `DependentEvidence` methods. At most
+  `MAX_SUPERSESSION_PROBES` (256) forward probes per cycle, with a
+  `CanonizationSupersessionProbeCap` warning. Supersession is decided first;
+  a speculative full-budget Stage 3 window is not read, evaluated or
+  advanced when nothing was superseded
+  (`store_reads_are_bounded_and_skipped_when_nothing_frees_a_slot` counts
+  the calls).
+- **M5.** Event ids are built with `uuid::Builder::from_unix_timestamp_millis`
+  (the `v7` feature is not enabled; no Cargo change).
+- **L1** dry run wired (above). **L2** ranking by newest counted evidence.
+  **L3** the asymmetric bar documented. **L4** only certain attributions are
+  self-suppressed; an ambiguous declarer, or evidence that may be the
+  declarer's, skips the probe. **L5** `revert_count`'s doc and the CHANGELOG
+  say supersessions count. **L6** the inspect line quotes `excerpt()`. **L8**
+  the CHANGELOG downgrade note cross-references the 0.5.0 downgrade entry.
+  **L9** the hold docs say it holds never-demoted Venerables too. **L10** the
+  evaluator keeps a `SharedTimeline`.
+- **Found while merging:** the D2 split copied a supersession's
+  `superseded_by` without remapping it into the target; fixed in its own
+  commit, with a test.

@@ -138,7 +138,7 @@ The blast radius is the number of concepts that depend on this one: actions that
 | `--focus <FOCUS>` | Yes | |
 | `--depth <DEPTH>` | No | `2`, and at most `5`. |
 
-The `canonization` section explains the concept's next promotion under the promotion policy `lambo.toml` and `LAMBO_PROMOTION_POLICY` select (`inspect` is a reader and resolves its own, like `serve-web`): one line naming the policy, the status and the next status, then one reason per gate that fails. It runs the evaluator's own gates the way the next cycle would, the Canonical budget included. If the store cannot answer, the section is one `canonization: explanation unavailable` line instead.
+The `canonization` section explains the concept's next promotion under the promotion policy `lambo.toml` and `LAMBO_PROMOTION_POLICY` select (`inspect` is a reader and resolves its own, like `serve-web`): one line naming the policy, the status and the next status, then one reason per gate that fails. It runs the evaluator's own gates the way the next cycle would, the Canonical budget included. With `canonization_supersede = true` in `lambo.toml` it also runs the supersession hold, and a Venerable a contradicting concept would supersede at once reads `held: contradicted by <id> with newer evidence`. The section ends with the concept's latest demotion, if it has one: `last demotion <time>: budget`, or `superseded by "..." (id ...)`. If the store cannot answer, the section is one `canonization: explanation unavailable` line instead.
 
 `--focus` takes concept text, a node UUID, or the short id a recall block renders. Lambo resolves text exactly first, then the short id, then as a single substring match. Past the 2,000-concept scan cap the substring leg runs on a bounded recency-plus-blast-radius subset and says so; a miss offers the closest concepts as suggestions with their node ids.
 
@@ -706,6 +706,7 @@ The dry run runs the evaluator only: no garbage collection sweeps, so survival c
 | `--max-cycles <N>` | No | `5000` |
 | `--top <N>` | No | `20` ids per list |
 | `--assume-survived` | No | raises survival counts below 3 to 3, the state after three GC sweeps |
+| `--supersede` | No | runs with `canonization_supersede` on: supersession first in every cycle, and the Stage 3 hold. The dry run reads no `lambo.toml`, so pass it to match a writer that has the setting on; the report then says `supersede: on` |
 | `--scratch <DIR>` | No | the system temp directory |
 | `--watch <ID>` | No | a concept reported by id at the start and the stop whatever its state (full or 8-character id); repeatable |
 
