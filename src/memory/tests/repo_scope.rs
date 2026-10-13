@@ -1274,3 +1274,119 @@ async fn layered_dedupe_joins_scoped_paths_only_by_key() {
         m.close().await.unwrap();
     }
 }
+
+/// Focused review L1: a trailing line reference names the file, so
+/// `src/main.rs`, `src/main.rs:12` and `src/main.rs#L3-L5` are one scoped
+/// concept (its content keeps its first write's spelling).
+#[tokio::test]
+async fn line_references_fold_to_one_scoped_file() {
+    let mem = memory("repo-lines", MatchStrategy::Canonical).await;
+    let agent = AgentId::new("agent-a");
+    let mut ids = Vec::new();
+    for entry in ["src/main.rs:12", "src/main.rs", "src/main.rs#L3-L5"] {
+        let out = mem
+            .record_action_as(
+                &agent,
+                &Action {
+                    repo_scope: Some("repo-a"),
+                    event_time: None,
+                    action: "edited main",
+                    produces: &[],
+                    modifies: &[entry],
+                    depends_on: &[],
+                },
+            )
+            .unwrap();
+        let _ = out;
+        ids.push(path_id(&mem, "repo-a", entry));
+    }
+    assert!(ids.windows(2).all(|w| w[0] == w[1]), "{ids:?}");
+    let content = mem
+        .graph
+        .read()
+        .concepts()
+        .find(|c| c.id == ids[0])
+        .unwrap()
+        .content
+        .clone();
+    assert_eq!(content, "src/main.rs:12");
+    mem.close().await.unwrap();
+}
+
+/// Focused review L2, documented rather than changed: a loosely
+/// path-like name (`scripts/build`) that an inferred `depends_on` meets
+/// first stays plain text, and a later explicit `produces` is a separate
+/// scoped path; a scoped `produces` never joins a plain concept another
+/// repository may share. Spelled as a clear path (`./tools/gen`), both
+/// orders name the one scoped concept.
+#[tokio::test]
+async fn loose_and_clear_path_spellings_under_depends_on_then_produces() {
+    let mem = memory("repo-order", MatchStrategy::Canonical).await;
+    let agent = AgentId::new("agent-a");
+    // Distinct action texts, so each action is its own node.
+    let act = |repo,
+               action: &'static str,
+               depends_on: &'static [&'static str],
+               produces: &'static [&'static str]| Action {
+        repo_scope: Some(repo),
+        event_time: None,
+        action,
+        produces,
+        modifies: &[],
+        depends_on,
+    };
+    let edge_to = |out: &crate::graph::action::ActionOutcome, content: &str, ty| {
+        let g = mem.graph.read();
+        g.concepts()
+            .filter(|c| c.content == content)
+            .map(|c| c.id)
+            .find(|&id| g.edge_between(out.action_node, id, ty).is_some())
+            .expect("edge")
+    };
+    // Loose spelling: depends_on first is plain, produces later is scoped.
+    let a = mem
+        .record_action_as(
+            &agent,
+            &act("repo-a", "checked step one", &["scripts/build"], &[]),
+        )
+        .unwrap();
+    let b = mem
+        .record_action_as(
+            &agent,
+            &act("repo-a", "checked step two", &[], &["scripts/build"]),
+        )
+        .unwrap();
+    let plain = edge_to(&a, "scripts/build", EdgeType::Dependency);
+    let scoped = edge_to(&b, "scripts/build", EdgeType::Causal);
+    assert_ne!(plain, scoped);
+    assert_eq!(scoped, path_id(&mem, "repo-a", "scripts/build"));
+    // Another repository's produces does not join the plain concept.
+    let c = mem
+        .record_action_as(
+            &agent,
+            &act("repo-b", "checked step three", &[], &["scripts/build"]),
+        )
+        .unwrap();
+    assert_eq!(
+        edge_to(&c, "scripts/build", EdgeType::Causal),
+        path_id(&mem, "repo-b", "scripts/build")
+    );
+    // Clear spelling: one scoped concept in either order.
+    let d = mem
+        .record_action_as(
+            &agent,
+            &act("repo-c", "checked step four", &["./tools/gen"], &[]),
+        )
+        .unwrap();
+    let e = mem
+        .record_action_as(
+            &agent,
+            &act("repo-c", "checked step five", &[], &["./tools/gen"]),
+        )
+        .unwrap();
+    assert_eq!(
+        edge_to(&d, "./tools/gen", EdgeType::Dependency),
+        edge_to(&e, "./tools/gen", EdgeType::Causal)
+    );
+    mem.close().await.unwrap();
+}

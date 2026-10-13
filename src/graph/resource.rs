@@ -12,8 +12,10 @@ pub const RESOURCE_KEY_PREFIX: &str = "RepoResource:v1:";
 
 /// The longest `repo_scope`, in bytes. A scoped key holds the scope and the
 /// path, and the stores' unique `(session, canonical_key)` btree index has a
-/// per-entry size limit (about 2.7 KB in Postgres), so the scope is capped
-/// well below it. A real remote id (`host/owner/repo`) is far shorter.
+/// per-entry size limit (about 2.7 KB in Postgres). The cap keeps the scope
+/// from being what overflows it; it does not bound the entry, since the
+/// path can still be as long as any content, exactly as a legacy key can.
+/// A real remote id (`host/owner/repo`) is far shorter.
 pub const MAX_REPO_SCOPE_BYTES: usize = 512;
 
 /// Invisible format characters a scope may not hold anywhere: zero-width
@@ -155,12 +157,14 @@ pub fn is_inferred_path(content: &str) -> bool {
 }
 
 /// The scoped key of `content` in `repo_scope`, whatever the predicates say:
-/// trimmed NFC scope and path, the path's trailing separators folded so
-/// `docs/` and `docs` are one directory. Callers decide whether the content
-/// is a scoped path.
+/// trimmed NFC scope and path; the path without a trailing line reference
+/// (`:12`, `#L12`), so `src/main.rs:12` and `src/main.rs` are one file; the
+/// path's trailing separators folded so `docs/` and `docs` are one
+/// directory. Callers decide whether the content is a scoped path. The
+/// concept's content keeps the spelling its first write used.
 pub(crate) fn scoped_key_unchecked(content: &str, repo_scope: &str) -> String {
     let scope: String = repo_scope.trim().nfc().collect();
-    let mut path: String = content.trim().nfc().collect();
+    let mut path: String = path_text(content).nfc().collect();
     while path.len() > 1 && path.ends_with(['/', '\\']) {
         path.pop();
     }
@@ -303,6 +307,14 @@ pub(crate) fn canonicalize_keyed(
 
 /// The explicit-context identity: a Resource that [`is_path_like`] under a
 /// scope takes its scoped key; anything else its legacy key.
+///
+/// An explicit Resource never takes an existing plain concept's legacy key,
+/// even for loosely path-like text (`scripts/build`), because that concept
+/// may be another repository's: joining it would re-join repositories.
+/// So a loosely path-like name that an inferred `depends_on` met first (as
+/// plain text) and a later `produces` (scoped) are two concepts; spelled as
+/// a clear path (`./scripts/build`, `scripts/build/`) both are scoped (#129
+/// focused review L2).
 pub(crate) fn canonicalize_resource(
     content: &str,
     graph: &Graph,
@@ -414,6 +426,15 @@ mod tests {
             scoped_resource_key("docs/reference/", Some("r")),
             Some(k("docs/reference"))
         );
+        // Focused review L1: a trailing line reference names the file.
+        for spelled in [
+            "src/main.rs:12",
+            "src/main.rs:12:5",
+            "src/main.rs#L3-L5",
+            " src/main.rs ",
+        ] {
+            assert_eq!(k(spelled), k("src/main.rs"), "{spelled}");
+        }
     }
 
     /// Review L5: the tie form lowercases a scoped key's ASCII prefix, so
