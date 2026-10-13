@@ -282,6 +282,8 @@ async fn f18_tool_schemas_match_the_golden_property_set() {
                 "parent_of",
                 "parent_of[].child",
                 "parent_of[].parent",
+                // #129: a repository id, not a time.
+                "repo_scope",
                 // #33 PR 4: a session name, not a time.
                 "scope",
             ],
@@ -320,6 +322,8 @@ async fn f18_tool_schemas_match_the_golden_property_set() {
                 "event_time",
                 "modifies",
                 "produces",
+                // #129: a repository id, not a time.
+                "repo_scope",
                 // #33 PR 4: a session name, not a time.
                 "scope",
             ],

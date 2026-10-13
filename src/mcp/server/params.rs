@@ -178,17 +178,6 @@ pub struct WireParentOf {
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DeriveParams {
-    /// Optional repository identity for every path-like Resource in this call,
-    /// distinct from destination session `scope`. Use a stable sanitized remote
-    /// host/owner/repository (strip scheme, userinfo, query, fragment and `.git`),
-    /// or an agreed unique repository-root basename for local-only repos. Reuse
-    /// it across worktrees; never send credentials. Caller-asserted, unverified,
-    /// case-sensitive after trim/NFC. Paths are exact trim/NFC text; no filesystem
-    /// normalization. Omit for legacy unscoped identity; scoped text never falls
-    /// back to legacy file nodes. Explicit ids still name existing nodes.
-    #[schemars(length(max = 16_384))]
-    pub repo_scope: Option<String>,
-
     /// Id of the agent making this call. Use one stable id for the agent's
     /// whole life, never one per call, task or topic (good: your model or
     /// client id, such as `claude-opus-5-5` or `gpt-5.6`, with a stable
@@ -217,7 +206,22 @@ pub struct DeriveParams {
     /// in the session it writes to.
     #[schemars(length(max = 16_384))]
     pub scope: Option<String>,
+    /// Optional: the repository this call's path-like `resource` concepts
+    /// and `parent_of` ends belong to, so that `README.md` in two
+    /// repositories is two concepts. Not the session written to (that is
+    /// `scope`). Send one stable id per repository, the same from every clone
+    /// and worktree: its remote as `host/owner/repo` (no scheme, credentials,
+    /// query or `.git`), or for a local-only repository an agreed unique root
+    /// name. Taken as given, never verified; compared exactly after trimming.
+    /// A path is matched as exact text (case and `./` count), never resolved
+    /// on disk. With it, path text names only this repository's concept and
+    /// never falls back to an unscoped one; cite an older concept by its id.
+    /// In a shared layer it lets a relative path through on the entries it
+    /// covers. Omit it to keep the unscoped identity.
+    #[schemars(length(max = 16_384))]
+    pub repo_scope: Option<String>,
 }
+
 /// One entry in a `lambo_record_action` resource list (`produces`,
 /// `modifies`, `depends_on`). A plain string on the wire, with the same
 /// per-string size cap the runtime enforces, so a client can pre-validate an
@@ -228,17 +232,6 @@ pub struct WireResource(#[schemars(length(max = 16_384))] pub String);
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RecordActionParams {
-    /// Optional repository identity for every path-like Resource in this call,
-    /// distinct from destination session `scope`. Use a stable sanitized remote
-    /// host/owner/repository (strip scheme, userinfo, query, fragment and `.git`),
-    /// or an agreed unique repository-root basename for local-only repos. Reuse
-    /// it across worktrees; never send credentials. Caller-asserted, unverified,
-    /// case-sensitive after trim/NFC. Paths are exact trim/NFC text; no filesystem
-    /// normalization. Omit for legacy unscoped identity; scoped text never falls
-    /// back to legacy file nodes. Explicit ids still name existing nodes.
-    #[schemars(length(max = 16_384))]
-    pub repo_scope: Option<String>,
-
     /// Id of the agent making this call. Use one stable id for the agent's
     /// whole life, never one per call, task or topic (good: your model or
     /// client id, such as `claude-opus-5-5` or `gpt-5.6`, with a stable
@@ -276,6 +269,20 @@ pub struct RecordActionParams {
     /// in the session it writes to.
     #[schemars(length(max = 16_384))]
     pub scope: Option<String>,
+    /// Optional: the repository this action's path-like `produces`,
+    /// `modifies` and `depends_on` entries belong to, so that `README.md` in
+    /// two repositories is two concepts. Not the session written to (that is
+    /// `scope`). Send one stable id per repository, the same from every clone
+    /// and worktree: its remote as `host/owner/repo` (no scheme, credentials,
+    /// query or `.git`), or for a local-only repository an agreed unique root
+    /// name. Taken as given, never verified; compared exactly after trimming.
+    /// A path is matched as exact text (case and `./` count), never resolved
+    /// on disk. With it, path text names only this repository's concept and
+    /// never falls back to an unscoped one; cite an older concept by its id.
+    /// In a shared layer it lets a relative path through on the entries it
+    /// covers. Omit it to keep the unscoped identity.
+    #[schemars(length(max = 16_384))]
+    pub repo_scope: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]

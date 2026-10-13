@@ -8,6 +8,7 @@ use crate::graph::action::Action;
 use crate::graph::cite::{MAX_REFERENCES_PER_CONCEPT, MAX_REFERENCES_PER_DERIVE};
 use crate::graph::derive::ParentOf;
 use crate::graph::hybrid;
+use crate::graph::resource::check_repo_scope;
 use crate::mcp::server::params::{check_size, DeriveParams, RecordActionParams};
 use crate::mcp::server::response::{bad_param, recorded_under, redact_urls};
 use crate::mcp::server::trace::note_facts;
@@ -58,8 +59,8 @@ fn wire_citations(p: &DeriveParams) -> Result<Vec<ConceptCitations>, CallToolRes
 
 impl LamboServer {
     pub(crate) async fn derive_impl(&self, p: DeriveParams) -> CallToolResult {
-        if let Err(e) = crate::graph::resource::validate_repo_scope(p.repo_scope.as_deref()) {
-            return bad_param(e.to_string());
+        if let Some(Err(e)) = p.repo_scope.as_deref().map(check_repo_scope) {
+            return bad_param(e);
         }
         let acting = match self.caller_agent(&p.agent_id) {
             Ok(a) => a,
@@ -104,8 +105,16 @@ impl LamboServer {
         // #33 PR 4: nothing written into a shared layer is a bare relative
         // path, whatever its type (review L1).
         for c in &p.concepts {
-            let repo_scope = if ConceptType::from(c.concept_type) == ConceptType::Resource { p.repo_scope.as_deref() } else { None };
-            if let Err(e) = target.check_paths_scoped("concept.content", [c.content.as_str()], repo_scope) { return e; }
+            let repo_scope = if ConceptType::from(c.concept_type) == ConceptType::Resource {
+                p.repo_scope.as_deref()
+            } else {
+                None
+            };
+            if let Err(e) =
+                target.check_paths_scoped("concept.content", [c.content.as_str()], repo_scope)
+            {
+                return e;
+            }
         }
 
         // `derive` borrows `&[(&str, ConceptType)]` and `ParentOf<'_>` borrows
@@ -137,15 +146,26 @@ impl LamboServer {
         }
         // Review L1: a parent_of end becomes a concept too.
         for end in pairs.iter().flat_map(|(a, b)| [*a, *b]) {
-            let kind = concepts.iter().find(|(c, _)| *c == end).map(|(_, t)| *t).unwrap_or(ConceptType::Resource);
-            let repo_scope = if kind == ConceptType::Resource { p.repo_scope.as_deref() } else { None };
-            if let Err(e) = target.check_paths_scoped("parent_of", [end], repo_scope) { return e; }
+            let kind = concepts
+                .iter()
+                .find(|(c, _)| *c == end)
+                .map(|(_, t)| *t)
+                .unwrap_or(ConceptType::Resource);
+            let repo_scope = if kind == ConceptType::Resource {
+                p.repo_scope.as_deref()
+            } else {
+                None
+            };
+            if let Err(e) = target.check_paths_scoped("parent_of", [end], repo_scope) {
+                return e;
+            }
         }
         let parent_of = if pairs.is_empty() {
             ParentOf::none()
         } else {
             ParentOf::from_pairs(&pairs)
-        }.with_repo_scope(p.repo_scope.as_deref());
+        }
+        .with_repo_scope(p.repo_scope.as_deref());
         // #36 PR 4: each concept's citations and name, checked for shape
         // here; whether each resolves is the core pre-pass's question.
         let citations = match wire_citations(&p) {
@@ -253,8 +273,8 @@ impl LamboServer {
     }
 
     pub(crate) async fn record_action_impl(&self, p: RecordActionParams) -> CallToolResult {
-        if let Err(e) = crate::graph::resource::validate_repo_scope(p.repo_scope.as_deref()) {
-            return bad_param(e.to_string());
+        if let Some(Err(e)) = p.repo_scope.as_deref().map(check_repo_scope) {
+            return bad_param(e);
         }
         let acting = match self.caller_agent(&p.agent_id) {
             Ok(a) => a,
@@ -323,7 +343,11 @@ impl LamboServer {
             ("modifies", &modifies),
             ("depends_on", &depends_on),
         ] {
-            if let Err(e) = target.check_paths_scoped(field, entries.iter().map(String::as_str), p.repo_scope.as_deref()) {
+            if let Err(e) = target.check_paths_scoped(
+                field,
+                entries.iter().map(String::as_str),
+                p.repo_scope.as_deref(),
+            ) {
                 return e;
             }
         }

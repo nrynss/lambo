@@ -19,7 +19,9 @@ pub struct Args {
 
 /// Record an action the agent took.
 pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliError> {
-    crate::graph::resource::validate_repo_scope(args.repo_scope.as_deref()).map_err(|e| CliError::Usage(e.to_string()))?;
+    if let Some(scope) = args.repo_scope.as_deref() {
+        crate::graph::resource::check_repo_scope(scope).map_err(CliError::Usage)?;
+    }
     require_nonempty("session", &args.session)?;
     check_size_cli("session", &args.session)?;
     require_nonempty("agent", &args.agent)?;

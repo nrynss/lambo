@@ -295,9 +295,6 @@ enum Commands {
     },
     /// Derive concepts from the current interaction into session memory. Timestamps are stamped server-side; do not send one.
     Derive {
-        /// Stable caller-asserted repository identity for path-like Resources.
-        #[arg(long)]
-        repo_scope: Option<String>,
         /// Session this process writes (acquires the single-writer lease).
         #[arg(
             long,
@@ -344,6 +341,11 @@ enum Commands {
         /// DANGEROUS: attach despite a same-width stored/configured model-id mismatch.
         #[arg(long)]
         allow_embedding_mismatch: bool,
+        /// Repository this call's path-like resource concepts and --parent-of ends belong to,
+        /// such as github.com/acme/widgets: the same path in two repositories is then two
+        /// concepts. Matched as exact text; omit it for the unscoped identity.
+        #[arg(long, value_name = "REPO")]
+        repo_scope: Option<String>,
     },
     /// Derive one image concept from a local image file or a client-computed vector file (#22). Its content is the caption plus [image:<id>] and its vector is the image's.
     DeriveImage {
@@ -413,9 +415,6 @@ enum Commands {
     },
     /// Record an action the agent took, with what it produces, modifies and depends on. Timestamps are stamped server-side; do not send one.
     RecordAction {
-        /// Stable caller-asserted repository identity for path-like Resources.
-        #[arg(long)]
-        repo_scope: Option<String>,
         /// Session this process writes (acquires the single-writer lease).
         #[arg(
             long,
@@ -440,6 +439,11 @@ enum Commands {
         /// DANGEROUS: attach despite a same-width stored/configured model-id mismatch.
         #[arg(long)]
         allow_embedding_mismatch: bool,
+        /// Repository this action's path-like --produces, --modifies and --depends-on entries
+        /// belong to, such as github.com/acme/widgets: the same path in two repositories is
+        /// then two concepts. Matched as exact text; omit it for the unscoped identity.
+        #[arg(long, value_name = "REPO")]
+        repo_scope: Option<String>,
     },
     /// Take a soft lock on a memory node before editing it. On the CLI the reservation ends when this process exits; it is not durable.
     Reserve {

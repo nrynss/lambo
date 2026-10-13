@@ -492,7 +492,10 @@ impl Target {
     }
 
     pub(super) fn check_paths_scoped<'e>(
-        &self, field: &str, entries: impl IntoIterator<Item = &'e str>, repo_scope: Option<&str>,
+        &self,
+        field: &str,
+        entries: impl IntoIterator<Item = &'e str>,
+        repo_scope: Option<&str>,
     ) -> Result<(), CallToolResult> {
         if !self.refuses_relative_paths() {
             return Ok(());
@@ -514,7 +517,11 @@ impl Target {
     }
 
     /// The `foreign` scopes of a write here, for [`LayerProbe`].
-    pub(super) fn probe<'a>(&'a self, server: &'a LamboServer, repo_scope: Option<&'a str>) -> LayerProbe<'a> {
+    pub(super) fn probe<'a>(
+        &'a self,
+        server: &'a LamboServer,
+        repo_scope: Option<&'a str>,
+    ) -> LayerProbe<'a> {
         LayerProbe {
             server,
             repo_scope,
@@ -571,7 +578,8 @@ impl ForeignScopes for LayerProbe<'_> {
             };
             // The layer's read guard is a temporary of this statement: one
             // session's lock at a time, never across an await.
-            let resolved = resolve_reference_scoped(&live.mem.graph().read(), reference, self.repo_scope);
+            let resolved =
+                resolve_reference_scoped(&live.mem.graph().read(), reference, self.repo_scope);
             if matches!(resolved, Resolved::Concept { .. }) {
                 return Some(layer.to_string());
             }
