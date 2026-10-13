@@ -349,6 +349,10 @@ pub struct DryRunReport {
     pub edges: usize,
     /// Survival counts raised to 3 by `assume_survived`.
     pub survival_raised: usize,
+    /// Whether the run had `canonization_supersede` on (#20). Absent when
+    /// off, so a report of a default run is unchanged.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub supersede: bool,
     /// Rows dated after the clock (review M1); any fails `clock_after_the_data`.
     pub rows_after_clock: RowsAfterClock,
     /// The source, when the CLI read one.
@@ -866,6 +870,7 @@ pub async fn dry_run_all(
         interactions: snap.interactions.len(),
         edges: snap.edges.len(),
         survival_raised: raised,
+        supersede: base.eval.supersede,
         rows_after_clock,
         source: None,
         policies: reports,

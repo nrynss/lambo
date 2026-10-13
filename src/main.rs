@@ -667,6 +667,12 @@ enum CanonAction {
             help = "Raise every survival count below 3 to 3 first: the state after three GC sweeps. The dry run runs no GC, so without it a concept short of three sweeps stays short; use it to see what Swarm would admit once survival no longer binds."
         )]
         assume_survived: bool,
+        /// Run with canonization_supersede on (#20): supersession first in every cycle, and the Stage 3 hold. Off by default, as in lambo.toml; the dry run reads no lambo.toml, so pass it to match a writer that has it on.
+        #[arg(
+            long,
+            help = "Run with canonization_supersede on (#20): supersession first in every cycle, and the Stage 3 hold. Off by default, as in lambo.toml; the dry run reads no lambo.toml, so pass it to match a writer that has it on."
+        )]
+        supersede: bool,
         /// Directory the private copy goes under (default: the system temp directory). Removed afterwards.
         #[arg(
             long,
@@ -733,6 +739,12 @@ enum CanonAction {
             help = "Raise every survival count below 3 to 3 first: the state after three GC sweeps. The dry run runs no GC, so without it a concept short of three sweeps stays short; use it to see what Swarm would admit once survival no longer binds."
         )]
         assume_survived: bool,
+        /// Run with canonization_supersede on (#20): supersession first in every cycle, and the Stage 3 hold. Off by default, as in lambo.toml; the dry run reads no lambo.toml, so pass it to match a writer that has it on.
+        #[arg(
+            long,
+            help = "Run with canonization_supersede on (#20): supersession first in every cycle, and the Stage 3 hold. Off by default, as in lambo.toml; the dry run reads no lambo.toml, so pass it to match a writer that has it on."
+        )]
+        supersede: bool,
         /// Directory the private copy goes under (default: the system temp directory). Removed afterwards.
         #[arg(
             long,
@@ -865,6 +877,9 @@ enum Resolved {
         /// select, which `inspect` explains the focus's next canonization
         /// hop under (#36 PR 3). A reader resolves its own, like `serve-web`.
         promotion_policy: lambo::canon::PromotionPolicy,
+        /// `lambo.toml`'s `canonization_supersede`, so `inspect` explains
+        /// the Stage 3 hold a writer with it on applies (#20 review M2).
+        supersede: bool,
     },
 }
 
@@ -935,12 +950,14 @@ fn resolve_for_command(
         let kind = file.store.kind;
         let dsn = file.store.dsn.clone();
         let promotion_policy = file.promotion_policy.unwrap_or_default();
+        let supersede = file.canonization_supersede.unwrap_or_default();
         let store = resolve_store_only(config).map_err(|e| e.to_string())?;
         Ok(Resolved::StoreOnly {
             store,
             kind,
             dsn,
             promotion_policy,
+            supersede,
         })
     }
 }
@@ -1150,6 +1167,7 @@ fn run_canon(action: CanonAction) -> ExitCode {
         assume_survived: bool,
         scratch: Option<PathBuf>,
         watch: Vec<String>,
+        supersede: bool,
     ) -> Result<CommonArgs, CliError> {
         Ok(CommonArgs {
             store,
@@ -1163,6 +1181,7 @@ fn run_canon(action: CanonAction) -> ExitCode {
             assume_survived,
             scratch: scratch.as_deref().map(canon::check_scratch).transpose()?,
             watch,
+            supersede,
         })
     }
     match action {
@@ -1176,6 +1195,7 @@ fn run_canon(action: CanonAction) -> ExitCode {
             max_cycles,
             top,
             assume_survived,
+            supersede,
             scratch,
             watch,
             baseline,
@@ -1193,6 +1213,7 @@ fn run_canon(action: CanonAction) -> ExitCode {
                 assume_survived,
                 scratch,
                 watch,
+                supersede,
             ) {
                 Ok(common) => {
                     canon_exit(name, canon::dry_run(canon::DryRunArgs { common, baseline }))
@@ -1213,6 +1234,7 @@ fn run_canon(action: CanonAction) -> ExitCode {
             max_cycles,
             top,
             assume_survived,
+            supersede,
             scratch,
             watch,
             map,
@@ -1231,6 +1253,7 @@ fn run_canon(action: CanonAction) -> ExitCode {
                 assume_survived,
                 scratch,
                 watch,
+                supersede,
             ) {
                 Ok(common) => canon_exit(
                     name,
@@ -1778,16 +1801,18 @@ fn main() -> ExitCode {
             Resolved::StoreOnly {
                 store,
                 promotion_policy,
+                supersede,
                 ..
             },
         ) => run_async(
             "inspect",
-            lambo::cli::inspect::run_with_policy(
+            lambo::cli::inspect::run_with_settings(
                 store.as_ref(),
                 &session,
                 &focus,
                 depth,
                 promotion_policy,
+                supersede,
             ),
         ),
         (Commands::Stats { session }, Resolved::StoreOnly { store, .. }) => {

@@ -142,6 +142,10 @@ pub fn render_report(r: &DryRunReport) -> String {
         r.edges,
         r.survival_raised
     );
+    if r.supersede {
+        // #20: only when on, so a default report is unchanged.
+        let _ = writeln!(out, "  supersede: on (supersession, then the Stage 3 hold)");
+    }
     if let Some(s) = &r.source {
         let _ = writeln!(
             out,

@@ -743,3 +743,34 @@ fn errors_keep_ids_and_withhold_text() {
     let e = resolve_watch(&fair::snapshot(true), &["no flush may wedge".to_string()]).unwrap_err();
     assert!(!e.contains("wedge"), "{e}");
 }
+
+/// #20 review L1: the dry run with supersession on reaches the fixture's
+/// supersession fixed point under both policies, every invariant holding:
+/// `retry_forever` is held at Venerable (its explanation names the hold, so
+/// `nothing_eligible_at_the_stop` holds), and the report says it ran on.
+#[tokio::test]
+async fn the_dry_run_with_supersession_reaches_the_held_fixed_point() {
+    let mut snap = fair::snapshot(true);
+    prepare(&mut snap, false);
+    for policy in BOTH {
+        let mut p = params(policy);
+        p.eval.supersede = true;
+        let (report, finals) = run(&snap, &p).await.unwrap();
+        fair::assert_expected_superseding(&by_key(&finals), policy, "the dry run, supersede on");
+        all_held(&report);
+        assert_eq!(report.stop, StopReason::FixedPoint);
+    }
+    let mut p = params(PromotionPolicy::Swarm);
+    p.eval.supersede = true;
+    let r = dry_run_all(fair::snapshot(true), &BOTH, &p).await.unwrap();
+    assert!(r.supersede);
+    assert!(render_report(&r).contains("supersede: on"));
+    assert!(serde_json::to_value(&r).unwrap()["supersede"] == serde_json::json!(true));
+    let off = dry_run_all(fair::snapshot(true), &BOTH, &params(PromotionPolicy::Swarm))
+        .await
+        .unwrap();
+    assert!(serde_json::to_value(&off)
+        .unwrap()
+        .get("supersede")
+        .is_none());
+}

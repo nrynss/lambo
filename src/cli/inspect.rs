@@ -48,6 +48,20 @@ pub async fn run_with_policy(
     depth: usize,
     policy: PromotionPolicy,
 ) -> Result<String, CliError> {
+    run_with_settings(store, session, focus, depth, policy, false).await
+}
+
+/// [`run_with_policy`] with `lambo.toml`'s `canonization_supersede` too
+/// (#20 review M2), so the explanation shows the Stage 3 hold a writer with
+/// the setting applies.
+pub async fn run_with_settings(
+    store: &dyn GraphStore,
+    session: &str,
+    focus: &str,
+    depth: usize,
+    policy: PromotionPolicy,
+    supersede: bool,
+) -> Result<String, CliError> {
     require_nonempty("session", session)?;
     check_size_cli("session", session)?;
     require_nonempty("focus", focus)?;
@@ -77,6 +91,7 @@ pub async fn run_with_policy(
     };
     let params = EvalParams::from_config(&crate::Config {
         promotion_policy: policy,
+        canonization_supersede: supersede,
         ..crate::Config::default()
     });
     // A store fault degrades this additive section to one line; the

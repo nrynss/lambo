@@ -47,6 +47,7 @@ async fn fixture_db(dir: &Path) -> (PathBuf, crate::store::LeaseInfo) {
 
 fn common(store: PathBuf, scratch: &Path, json: bool) -> CommonArgs {
     CommonArgs {
+        supersede: false,
         store,
         session: fair::NAME.into(),
         policy: PolicyChoice::Both,

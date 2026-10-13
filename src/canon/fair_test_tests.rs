@@ -581,3 +581,48 @@ async fn fresh_store(name: &str) -> Box<dyn GraphStore> {
         _ => Box::new(MemoryStore::new()),
     }
 }
+
+/// #20 review M2: `lambo inspect` reads `canonization_supersede`, and with it
+/// on explains the hold the evaluator applies to `retry_forever`; without
+/// it, the same concept reads as eligible.
+#[tokio::test]
+async fn inspect_explains_the_hold_with_the_setting() {
+    let snap = snapshot();
+    let store = memory_store(&snap).await;
+    let on = EvalParams {
+        supersede: true,
+        ..params(PromotionPolicy::Swarm)
+    };
+    let g = fair::fixed_point(&store, snap, &on, 3).await;
+    assert_eq!(
+        fair::statuses(&g)["retry_forever"],
+        CanonizationStatus::Venerable
+    );
+    let focus = crate::recall::format::short_id(fair::concept_id("retry_forever"));
+    let held = format!(
+        "held: contradicted by {} with newer evidence",
+        crate::recall::format::short_id(fair::concept_id("retry_bounded"))
+    );
+    let text = crate::cli::inspect::run_with_settings(
+        &store,
+        fair::NAME,
+        &focus,
+        1,
+        PromotionPolicy::Swarm,
+        true,
+    )
+    .await
+    .unwrap();
+    assert!(text.contains(&held), "{text}");
+    let off = crate::cli::inspect::run_with_settings(
+        &store,
+        fair::NAME,
+        &focus,
+        1,
+        PromotionPolicy::Swarm,
+        false,
+    )
+    .await
+    .unwrap();
+    assert!(!off.contains("held:"), "{off}");
+}
