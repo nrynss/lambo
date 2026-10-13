@@ -99,6 +99,56 @@ while the target keeps that status (see *Contradiction warnings* below).
 Agents write it through `against` on derive and record_action (see the methods
 above and the MCP reference). Supersession is a separate follow-up (#20).
 
+## Contradiction warnings
+
+Recall warns when a Canonical or Venerable concept is contradicted by a newer
+assertion (#19(c)). The daemon's detector, `daemon::contradiction`
+(`detect`, `contradiction_at`, `insert_contradictions`, `ContradictionHit`),
+fires on a concept when:
+
+1. it is Canonical or Venerable;
+2. another concept of its session has a `Contradicts` edge to it; and
+3. that edge's about-time (`Edge::about_time`: the declaring write's
+   `event_time`, else its write time) is not after the clock and is strictly
+   later than the concept's latest eligible dependent evidence, or, with
+   none, than its own origin interaction's about-time.
+
+Eligible evidence is #36's dependents relation (`Dependency` sources into the
+concept and its `Hierarchical` children), one piece per dependence edge,
+dated by that edge's about-time. It counts once it is at least
+`CycleParams::contradiction_evidence_min_age` old (from
+`Config::canonization_edge_min_age`, Stage 2's floor). A dependent written by
+the concept's own origin interaction never counts. Neither does evidence
+written by the agent that declared the contradiction, or declared by the
+contradicting concept itself, so a writer cannot outweigh its own
+contradiction. Re-sending a contradiction reinforces the edge without
+re-dating it.
+
+The detector keeps one `HotListPayload::Contradiction { by, writer, at }` per
+contradicted concept on the hot list under `Condition::Contradiction`, which
+shares `Condition::Conflict`'s severity. It is the newest qualifying
+contradiction, ties going to the smaller canonical key and then the smaller
+id of `by`. `writer` is the agent acting when the edge was first written,
+falling back to `by`'s origin agent. No `DaemonEvent` is published for it.
+Recall re-validates it at read time like every hot entry, so it lapses when
+the concept is demoted below Venerable, when newer evidence becomes eligible,
+or when `by` is collected.
+
+Recall renders `recall::format::contradiction_warning` on the hit and
+force-includes it, and pulls `by` into the result, force-included too, with
+`recall::format::contradicts_warning`. Both lines quote at most
+`CONTRADICTION_EXCERPT_CHARS` (80) characters of the other concept and name
+its short id. The detailed recall's annotation kinds are `contradiction` and
+`contradicts`; a layered merge forces both past `top_k`, never past a floor.
+
+Garbage collection does not count a `Contradicts` edge as connectivity
+(`EdgeType::counts_toward_gc_connectivity`). A concept with a `Contradicts`
+edge to a concept that is Venerable or Canonical when a sweep starts is a
+protected class for that sweep, as a Venerable concept is: it is not
+collected as an orphan, as a disconnected component or by the score cut, and
+it is outside the collection cap's base. The protection does not extend to
+its neighbours, and it lapses on the first sweep after the target is demoted.
+
 ## Settings
 
 `Config` holds the product settings: recall defaults, flush timing, canonization thresholds, and scoring weights. Pass it to the builder with `.config(...)`.

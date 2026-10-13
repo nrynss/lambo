@@ -157,6 +157,12 @@
 
 ### Breaking (library API)
 
+- **`HotListPayload::Contradiction { by, writer, at }` and
+  `daemon::hotlist::Condition::Contradiction`** (#19(c)): new variants, so
+  an exhaustive `match` on either needs an arm. `Condition::severity`
+  gives `Contradiction` the same tier as `Conflict`. **`CycleParams` gains
+  `contradiction_evidence_min_age`**; a struct literal needs it (or
+  `..Default::default()`).
 - **`LamboError::Reference(Box<ReferenceRefusal>)`** (#36 PR 4): a new
   variant, so an exhaustive `match` on `LamboError` needs an arm. It carries
   a typed `ReferenceRefusal` (`field`, `concept`, `reference`, `kind`:
@@ -281,6 +287,30 @@
   scoped write never lands in the wrong session.
 
 ### Added
+
+- **Recall warns when a newer assertion contradicts a promoted concept**
+  ([#19](https://github.com/nrynss/lambo/issues/19) part c). A Canonical or
+  Venerable hit that another concept contradicts (`against`) more recently
+  than its latest supporting evidence gets the line
+  `⚠ Contradicted at <time> by <agent>: "<excerpt>" (id <short id>)`, is
+  kept past `top_k`, and has the contradicting concept shown beside it with
+  `⚠ Contradicts "<excerpt>" (id <short id>)`, also past `top_k`. Supporting
+  evidence is the concept's dependents (#36), dated by the write that
+  declared each, eligible once `canonization_edge_min_age` old, excluding
+  the concept's own origin interaction, and excluding support written by the
+  contradicting agent or by the contradicting concept itself. Both sides are
+  dated by about-time: the write's `event_time` if it gave one, otherwise
+  its write time, so a backdated contradiction is outweighed by later-dated
+  evidence; re-sending a contradiction does not re-date it. A hit shows one
+  contradiction, the newest. It is a daemon hot-list condition
+  (`daemon::contradiction`), re-checked on every recall, so it lapses on
+  demotion, newer evidence or removal of the contradicting concept; it
+  publishes no daemon event and changes no status. In a layered recall the
+  two are kept past `top_k` but never past a layer's floor, and a
+  contradiction never crosses sessions. New annotation kinds `contradiction`
+  and `contradicts`; the `--ledger` recall line gains
+  `contradiction_warning`. The `lambo_recall` tool description mentions
+  the warning, and the `against` descriptions say how it is dated.
 
 - **Citations on `lambo_derive`**
   ([#36](https://github.com/nrynss/lambo/issues/36) PR 4). Each concept
@@ -523,6 +553,17 @@
   `ServeLayers::is_layer`.
 
 ### Changed
+
+- **Garbage collection no longer counts a contradiction as connectivity**
+  (#19(c) owner decision 1, option C). A concept whose only edges are
+  `Contradicts` edges is an orphan, and a `Contradicts` edge keeps nothing
+  reachable from the interaction chain
+  (`EdgeType::counts_toward_gc_connectivity`). The one exception: a concept
+  that contradicts a Venerable or Canonical concept is protected from
+  collection, as a Venerable concept is, while that concept keeps its
+  status, so a recall warning's evidence lasts as long as the warning can
+  fire. Its neighbours are not protected through it, and the protection
+  lapses on the first sweep after the target is demoted.
 
 - **A contradiction no longer makes a conflict (#19(c) owner decision 2,
   applied with #19(b)).** The conflict detector skips `Contradicts` edges
