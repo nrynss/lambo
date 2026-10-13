@@ -89,6 +89,11 @@ pub(crate) struct DetailedHit {
     /// Serialized only when present.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) blast_radius: Option<u64>,
+    /// #129: the repository of a repository-scoped path Resource. Additive
+    /// on the wire: serialized only when present, so every unscoped payload
+    /// is byte-identical to before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) repo_scope: Option<String>,
     /// True exactly for the longest ranked prefix of hits whose complete
     /// rendered blocks appear in `context`. Hits after the token-budget cut
     /// remain in `hits` with `false`.
@@ -119,6 +124,7 @@ impl DetailedHit {
             status,
             score: hit.score,
             blast_radius: hit.blast_radius,
+            repo_scope: hit.repo_scope.clone(),
             included_in_context: false,
             truncated_in_context: false,
             annotations: Vec::new(),

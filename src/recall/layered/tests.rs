@@ -81,6 +81,7 @@ fn recall(tier: usize, hits: &[H], extra: &[&str]) -> TierRecall {
     let mut identities = Vec::new();
     for (pos, h) in hits.iter().enumerate() {
         let hit = RecallHit {
+            repo_scope: None,
             node_id: nid(tier, pos),
             content: h.content.clone(),
             concept_type: Some(ConceptType::Logic),
@@ -731,6 +732,7 @@ fn the_merge_is_deterministic_with_total_tie_breaks() {
 #[test]
 fn block_with_meta_without_meta_is_the_plain_block() {
     let hit = RecallHit {
+        repo_scope: None,
         node_id: nid(0, 0),
         content: "c".into(),
         concept_type: Some(ConceptType::Entity),

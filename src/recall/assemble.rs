@@ -350,6 +350,7 @@ where
             } else {
                 None
             },
+            repo_scope: crate::graph::resource::repo_scope_of_key(&c.canonical_key),
         };
         // H3: the full status comes from the SAME graph snapshot the hit was
         // assembled from (never reconstructed from `is_canonical` or a later
@@ -1275,6 +1276,7 @@ mod tests {
         // token_fn = byte length; budget = exactly block 1's bytes -> only
         // the highest-scoring block survives (whole-block rule).
         let hit1 = RecallHit {
+            repo_scope: None,
             node_id: uid(1),
             content: "concept 1".into(),
             concept_type: Some(ConceptType::Entity),
@@ -1530,6 +1532,7 @@ mod tests {
         // code must stop at block1 (ranked-prefix: block2, though it might
         // fit alone, must NOT appear after block1).
         let hit1 = RecallHit {
+            repo_scope: None,
             node_id: uid(1),
             content: "concept 1".into(),
             concept_type: Some(ConceptType::Entity),
@@ -1538,6 +1541,7 @@ mod tests {
             blast_radius: None,
         };
         let hit2 = RecallHit {
+            repo_scope: None,
             node_id: uid(2),
             content: "concept 2".into(),
             concept_type: Some(ConceptType::Entity),

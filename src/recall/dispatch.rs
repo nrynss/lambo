@@ -461,6 +461,7 @@ pub(crate) fn try_structural(
             } else {
                 None
             },
+            repo_scope: crate::graph::resource::repo_scope_of_key(&c.canonical_key),
         };
         // H3: status from the same graph snapshot, typed annotation attached
         // where its producer is known (mirrors assemble). Status `None` is

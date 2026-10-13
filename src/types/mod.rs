@@ -1598,6 +1598,11 @@ pub struct RecallHit {
     pub is_canonical: bool,
     /// How many concepts depend on this one, when that is known.
     pub blast_radius: Option<u64>,
+    /// The repository a repository-scoped path Resource belongs to (#129),
+    /// so two repositories' `README.md` hits can be told apart. Absent for
+    /// every other concept, and then not serialized.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_scope: Option<String>,
 }
 
 /// Everything one recall produced.
