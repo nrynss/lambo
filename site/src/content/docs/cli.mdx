@@ -794,7 +794,9 @@ lambo session classify --session mixed --database ./backup-copy.db \
 
 `--session`, `--rules`, `--output` and exactly one source flag are required.
 `--config` is refused. The output must be a new file; existing files and aliases
-are never overwritten. The output has private file permissions and the command
+are never overwritten. The plan is written to a private temporary file beside it
+and linked into place only when complete, so a failed write leaves no partial
+plan. The output has private file permissions and the command
 prints aggregate counts only. Keep plans and label files private: they contain
 source ids and classification evidence.
 
@@ -850,10 +852,12 @@ row has `kind`, `id`, `session` (or `to`), a nonempty `reason`, optional `from`
 (the expected prior session) and optional `copy_into`. Unknown ids, duplicate
 corrections and stale `from` values are refused. An audited general correction
 can exempt a ruling from automatic reference guards, but cannot move protected
-project provenance or identity records into general. A product-name mention
-alone is soft evidence, whether in the record, its origin prompt or a sibling
-record: it blocks automatic and unaudited reviewed general placement, and only an
-audited operator-wide assertion may address it. Source actors, configured
+project provenance or identity records into general. A keyword for a project
+with `exclude_from_general`, in the origin prompt or a sibling record, is soft
+evidence: it blocks automatic, resealed and unaudited reviewed general placement,
+and only an audited operator-wide assertion may address it. Keywords of other
+projects there do not block general. Any project keyword in the ruling itself
+fails the conservative guards and needs the same audit. Source actors, configured
 repository paths and an excluded source session remain hard provenance barriers.
 Hub corrections must name a Resource or Entity identity, include the primary
 placement and exclude general.
