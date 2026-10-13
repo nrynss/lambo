@@ -424,9 +424,11 @@
   `depends_on`, since every project reads the layer; absolute paths, URLs,
   `git@host:path` remotes, domain and library names (`crates.io`,
   `Node.js`, `vercel/next.js`) and prose pass. A layer that stops serving
-  or loses its lease during a scoped call, up to its ack, is a retryable
-  "stopped serving during this call" refusal with nothing applied, never
-  the store's lease error. A scoped `lambo_derive_image` embeds its image
+  during a scoped call before the write is admitted, or loses its lease
+  before the ack, is a retryable "stopped serving during this call"
+  refusal with nothing applied, never the store's lease error; one that
+  closes cleanly after admitting the write still applies it, and the ack
+  carries a warning not to resend it. A scoped `lambo_derive_image` embeds its image
   holding nothing of the layer (so a slow embed cannot delay the layer's
   re-attach), and its configuration refusals name the layer's settings.
   With `--ledger`, a scoped call's line carries `scope`. A layered

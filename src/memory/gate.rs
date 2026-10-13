@@ -42,6 +42,14 @@ impl Memory {
         self.closed.load(Ordering::Acquire)
     }
 
+    /// Latch `closed` alone, as `close()` does first, leaving the write
+    /// queue running: the window in which a clean close still drains jobs
+    /// already admitted (#33 PR 4 second review).
+    #[cfg(all(test, feature = "store-memory", feature = "embed-fixture"))]
+    pub(crate) fn latch_closed_for_test(&self) {
+        self.closed.store(true, Ordering::Release);
+    }
+
     pub(super) fn closed_error(&self) -> LamboError {
         LamboError::Config(format!("session {} is closed", self.session))
     }

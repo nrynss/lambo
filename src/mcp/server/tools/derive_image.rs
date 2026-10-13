@@ -28,7 +28,7 @@ use crate::surface::image::{check_caption_fits, check_submitted_vector, decode_b
 use crate::surface::validate::require_nonempty;
 use crate::types::{ConceptType, EmbeddingContract, MatchStrategy};
 
-use super::scope::{scoped_ack_line, with_scope, with_session};
+use super::scope::{scoped_ack_line, with_scope, with_session, with_warning};
 
 const TOOL: &str = "lambo_derive_image";
 
@@ -259,9 +259,10 @@ impl LamboServer {
             Err(e) => return self.target_err(TOOL, &target, e),
         };
         // Review M3, as in `derive_impl`.
-        if let Some(refusal) = self.stopped_serving(TOOL, &target) {
-            return refusal;
-        }
+        let warning = match self.after_submit(TOOL, &target) {
+            Ok(w) => w,
+            Err(refusal) => return refusal,
+        };
 
         // I1: which payload kind, whether it was admitted, and the receipt.
         // Never the caption, the id, the bytes or the vector.
@@ -305,6 +306,6 @@ impl LamboServer {
             }),
             &target,
         ));
-        out
+        with_warning(out, warning)
     }
 }

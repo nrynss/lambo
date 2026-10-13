@@ -1488,3 +1488,88 @@ async fn a_layers_own_server_refuses_relative_paths() {
     general.mem.close().await.expect("close");
     plain.mem.close().await.expect("close");
 }
+
+/// As [`FencesOnProbe`], but the probe only closes the first layer (a
+/// clean close's first step, which leaves its write queue draining).
+struct ClosesOnProbe {
+    first: Arc<Memory>,
+    second: Arc<Memory>,
+}
+
+impl LayerSource for ClosesOnProbe {
+    fn live_layer(&self, session: &str, read: LayerRead) -> Result<LiveLayer, LayerDown> {
+        let mem = if session == self.first.session().as_str() {
+            Arc::clone(&self.first)
+        } else {
+            if read == LayerRead::Probe {
+                self.first.latch_closed_for_test();
+            }
+            Arc::clone(&self.second)
+        };
+        Ok(LiveLayer {
+            mem,
+            _in_flight: None,
+        })
+    }
+}
+
+/// Second review, item 1: a layer that closes cleanly after the write was
+/// admitted still applies it (a clean close drains admitted jobs), so the
+/// call is acked, with a warning not to resend and to ask lambo_stats,
+/// rather than refused as "nothing was applied".
+#[tokio::test]
+async fn a_layer_that_closes_after_the_submit_acks_with_a_warning() {
+    let own = server("closed-proj").await;
+    let general = server("general").await;
+    let other = server("other").await;
+    let source: Arc<dyn LayerSource> = Arc::new(ClosesOnProbe {
+        first: Arc::clone(general.memory()),
+        second: Arc::clone(other.memory()),
+    });
+    let handle = |name: &str| {
+        LayerHandle::new(
+            name,
+            DEFAULT_LAYER_WEIGHT,
+            DEFAULT_LAYER_MIN_SIMILARITY,
+            Arc::downgrade(&source),
+        )
+    };
+    let s = own.clone().with_layers(ServerLayers {
+        handles: vec![handle("general"), handle("other")],
+        authority: None,
+    });
+    let out = call_raw(
+        &s,
+        "lambo_record_action",
+        action_args(
+            "an act during close",
+            "depends_on",
+            &["00000000-0000-4000-8000-000000000002"],
+            Some("general"),
+        ),
+    )
+    .await;
+    assert_eq!(out.is_error, Some(false), "{out:?}");
+    let warnings = structured(&out)["warnings"].to_string();
+    assert!(
+        warnings.contains("layer general closed while this call was finishing")
+            && warnings.contains("do not resend"),
+        "{warnings}"
+    );
+    assert!(text_of(&out).contains("do not resend"));
+    let receipt: ReceiptId = receipt_of(&out).parse().unwrap();
+    let answer = general
+        .memory()
+        .pipeline()
+        .wait(
+            &AgentId::new("agent-a"),
+            receipt,
+            crate::writeq::RECEIPT_WAIT_MAX,
+        )
+        .await;
+    assert_eq!(answer.tag(), "applied", "the admitted write still applies");
+    assert!(contents(&general).contains(&"an act during close".to_string()));
+    own.mem.close().await.expect("close");
+    other.mem.close().await.expect("close");
+    let _ = general.mem.close().await;
+}

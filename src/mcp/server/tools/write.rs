@@ -17,7 +17,7 @@ use crate::surface::validate::{
 };
 use crate::types::{ConceptCitations, ConceptType};
 
-use super::scope::{scoped_ack_line, with_scope, with_session};
+use super::scope::{scoped_ack_line, with_scope, with_session, with_warning};
 
 /// A derive's per-concept `depends_on` as core citations (#36 PR 4),
 /// refused with `bad_param` when one is empty, too long or over a count
@@ -69,7 +69,9 @@ impl LamboServer {
         };
         let mem = target.mem(&self.mem);
         let event_time = p.event_time;
-        // J1-R1-3: this path can no longer emit a warning. The attribution
+        // #33 PR 4: the one warning this path has is a scoped write's
+        // closed-layer warning (`after_submit`, through `with_warning`).
+        // J1-R1-3: before it, this path could no longer emit a warning. The attribution
         // warning was the only one it ever had, and J1 deleted it rather than
         // rewording it, so a `Vec` here would be a shape that says otherwise to
         // the next reader. The `warnings` key stays in `structuredContent`
@@ -178,9 +180,10 @@ impl LamboServer {
         };
         // Review M3: a layer fenced between the gate and the admission
         // admitted a job its apply refuses; say so, not "accepted".
-        if let Some(refusal) = self.stopped_serving("lambo_derive", &target) {
-            return refusal;
-        }
+        let warning = match self.after_submit("lambo_derive", &target) {
+            Ok(w) => w,
+            Err(refusal) => return refusal,
+        };
 
         // I1 (DOGFOOD metric 2, re-derivation savings) — **changed by J3, and
         // this is the honest statement of what changed.** `created`, `matched`,
@@ -243,7 +246,7 @@ impl LamboServer {
             }),
             &target,
         ));
-        out
+        with_warning(out, warning)
     }
 
     pub(crate) async fn record_action_impl(&self, p: RecordActionParams) -> CallToolResult {
@@ -256,7 +259,8 @@ impl LamboServer {
             Err(e) => return e,
         };
         let event_time = p.event_time;
-        // J1-R1-3: no warning is reachable here — see `derive_impl`.
+        // J1-R1-3: only the closed-layer warning is reachable here — see
+        // `derive_impl`.
         if let Err(e) = require_nonempty("action", &p.action) {
             return bad_param(e);
         }
@@ -359,9 +363,10 @@ impl LamboServer {
             Err(e) => return self.target_err("lambo_record_action", &target, e),
         };
         // Review M3, as in `derive_impl`.
-        if let Some(refusal) = self.stopped_serving("lambo_record_action", &target) {
-            return refusal;
-        }
+        let warning = match self.after_submit("lambo_record_action", &target) {
+            Ok(w) => w,
+            Err(refusal) => return refusal,
+        };
 
         // I1: `created` and `edges` are not knowable at ack time — see the
         // matching note in `derive_impl` for what that costs and where the
@@ -409,6 +414,6 @@ impl LamboServer {
             }),
             &target,
         ));
-        out
+        with_warning(out, warning)
     }
 }

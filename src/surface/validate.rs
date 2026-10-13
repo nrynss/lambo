@@ -237,8 +237,9 @@ pub fn check_no_image_suffix(field: &str, value: &str) -> Result<(), String> {
 /// [`NOT_FILES`]) pass as a last segment. Prose with slashes (`and/or`,
 /// `I/O`, `TCP/IP`, `50/50`, `N/A`) passes: its last segment is no file
 /// name. Not caught: a directory named without a trailing separator
-/// (`docs/reference`), and a lone file name whose extension is not on the
-/// list.
+/// (`docs/reference`), a lone file name whose extension is not on the
+/// list, and a path whose first segment holds a dot inside it, which reads
+/// as a domain (`src.old/main.rs`, `v1.2/x.rs`).
 pub(crate) fn is_bare_relative_path(entry: &str) -> bool {
     let s = strip_line_reference(entry.trim());
     if s.is_empty() || s.chars().any(char::is_whitespace) || s.contains("://") {
@@ -453,6 +454,7 @@ pub(crate) const NOT_FILES: &[&str] = &[
     "docs.rs",
     "bun.sh",
     "go.dev",
+    ".net",
 ];
 
 /// `entry` without a trailing line reference: `:12`, `:12:5`, `#L12`,
@@ -488,8 +490,27 @@ fn is_scp_like(s: &str) -> bool {
 
 /// `.env`, `.gitignore`: a leading dot and a name after it.
 fn is_dotfile(name: &str) -> bool {
-    name.len() > 1 && name.starts_with('.') && name != ".."
+    // A letter or digit right after the dot, so `...` and `..x` are not.
+    // An extension-shaped name (`.com`, `.md`) is not one either: a
+    // dotfile whose name is a file extension or a domain suffix reads as
+    // that suffix, not as a file.
+    let Some(rest) = name.strip_prefix('.') else {
+        return false;
+    };
+    if !rest.starts_with(|c: char| c.is_ascii_alphanumeric()) {
+        return false;
+    }
+    // `.env` is the one listed extension that is a common dotfile too.
+    rest.eq_ignore_ascii_case("env")
+        || !(FILE_EXTENSIONS.iter().any(|e| e.eq_ignore_ascii_case(rest))
+            || DOMAIN_SUFFIXES.iter().any(|e| e.eq_ignore_ascii_case(rest)))
 }
+
+/// Domain suffixes that, written alone with a leading dot, name the
+/// suffix rather than a dotfile.
+const DOMAIN_SUFFIXES: &[&str] = &[
+    "com", "org", "net", "io", "dev", "ai", "app", "co", "edu", "gov", "uk", "de", "in", "rs",
+];
 
 #[cfg(test)]
 mod tests {
@@ -809,6 +830,15 @@ mod tests {
             ("1dc87ca4-4410-4ed2-8777-d8748aa68013", false),
             ("docs/reference", false),
             ("..", false),
+            ("...", false),
+            (".com", false),
+            (".md", false),
+            (".NET", false),
+            ("..x", false),
+            ("src.old/main.rs", false),
+            ("v1.2/x.rs", false),
+            (".envrc", true),
+            (".github/CODEOWNERS", true),
             ("", false),
         ];
         for (entry, path) in table {

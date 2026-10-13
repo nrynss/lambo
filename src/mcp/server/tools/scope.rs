@@ -220,6 +220,43 @@ impl LamboServer {
         None
     }
 
+    /// The re-check after a scoped write's submit (review M3, refined by
+    /// the second review): `Err` with the refusal when the layer lost its
+    /// lease or was erased, whose apply refuses the admitted job, so
+    /// nothing is applied; `Ok(Some(warning))` when it only closed, because
+    /// a clean close drains jobs already admitted, so the write may well
+    /// apply and a retry could duplicate it; `Ok(None)` while it serves.
+    pub(super) fn after_submit(
+        &self,
+        tool: &str,
+        target: &Target,
+    ) -> Result<Option<String>, CallToolResult> {
+        let Some(layer) = target.layer.as_ref() else {
+            return Ok(None);
+        };
+        let mem = &layer.live.mem;
+        if mem.erased() || mem.lease_lost() {
+            return Err(self
+                .stopped_serving(tool, target)
+                .expect("an erased or fenced layer stopped serving"));
+        }
+        if mem.is_closed() {
+            tracing::warn!(
+                session = %self.memory().session(),
+                layer = %layer.name,
+                tool,
+                "mcp: a scoped write's layer closed after the write was admitted"
+            );
+            return Ok(Some(format!(
+                "layer {} closed while this call was finishing; a clean close applies writes \
+                 it had already admitted, so do not resend this one: ask lambo_stats with the \
+                 receipt (it answers once the layer is serving again)",
+                layer.name
+            )));
+        }
+        Ok(None)
+    }
+
     /// `err` from acting on `target`: [`LamboServer::stopped_serving`]'s
     /// refusal when the layer stopped serving (never the layer store's lease
     /// error), else [`tool_err`].
@@ -581,4 +618,20 @@ pub(super) fn with_session(mut payload: serde_json::Value, target: &Target) -> s
         map.insert("session".into(), serde_json::json!(layer));
     }
     payload
+}
+
+/// A write ack with `warning` (from [`LamboServer::after_submit`]) added
+/// to its text and its structured `warnings`; unchanged without one.
+pub(super) fn with_warning(mut out: CallToolResult, warning: Option<String>) -> CallToolResult {
+    if let Some(w) = warning {
+        crate::mcp::server::response::attach_warnings(&mut out, std::slice::from_ref(&w));
+        if let Some(map) = out
+            .structured_content
+            .as_mut()
+            .and_then(|v| v.as_object_mut())
+        {
+            map.insert("warnings".into(), serde_json::json!([w]));
+        }
+    }
+    out
 }

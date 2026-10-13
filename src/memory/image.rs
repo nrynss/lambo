@@ -23,8 +23,6 @@ use crate::writeq::Submitted;
 
 use super::Memory;
 
-/// An image derive after the call-path work: the concept, its pairs, and the
-/// vector it carries.
 /// A server-side image already embedded off the session (#33 PR 4 review
 /// H2): a scoped `lambo_derive_image` embeds with the layer's embedder
 /// while holding nothing of the layer, then hands this to the layer's
@@ -88,6 +86,8 @@ pub(crate) async fn embed_server_image(
     })
 }
 
+/// An image derive after the call-path work: the concept, its pairs, and the
+/// vector it carries.
 struct PreparedImage {
     concept_type: ConceptType,
     pairs: Vec<(String, String)>,

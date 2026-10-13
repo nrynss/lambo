@@ -247,3 +247,21 @@ bucket: one token drawn; receipts, probes and merged reads draw none).
 - The scope.rs header claim about what a call holds was corrected.
 - **The decision above about `/mcp/s/general` is reversed by L2:** direct
   writes there now refuse relative paths too.
+
+## Second review (Sonnet, ready) follow-ups
+
+- **M3 refined.** A clean `close()` drains jobs already admitted, so a
+  layer that only closed between the submit and the re-check still
+  applies the write: `after_submit` now acks it with a warning (do not
+  resend; ask `lambo_stats` with the receipt) instead of refusing with a
+  false "nothing was applied", which would have invited a duplicate.
+  The refusal stays for a lost lease or an erased layer, whose apply
+  refuses the job. Test:
+  `a_layer_that_closes_after_the_submit_acks_with_a_warning` (a test hook
+  latches `closed` alone, the window a clean close leaves).
+- **Dotfiles.** A dotfile needs a letter or digit after its dot and is
+  not an extension or domain suffix spelled alone (`.com`, `.md`, `...`
+  pass; `.env` and `.envrc` are files); `.NET` is in `NOT_FILES`. The doc
+  comment now says a first segment with a dot inside (`src.old/main.rs`,
+  `v1.2/x.rs`) is not caught.
+- `PreparedImage` and `PreEmbedded` each have their own doc comment.
