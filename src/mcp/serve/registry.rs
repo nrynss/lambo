@@ -1288,6 +1288,9 @@ impl SessionRegistry {
         };
         let mut server = session_server(&mem, &ledger);
         if let Some(attacher) = &self.attacher {
+            // #33 PR 4 review L2: a layer's own writes refuse relative
+            // paths, as a write scoped to it does.
+            server = server.serving_a_layer(attacher.layers.is_layer(mem.session().as_str()));
             let stack = attacher.layers.stack(mem.session().as_str());
             if !stack.is_empty() {
                 let weak: Weak<SessionRegistry> = Arc::downgrade(self);

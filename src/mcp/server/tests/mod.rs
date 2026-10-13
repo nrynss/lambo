@@ -40,6 +40,7 @@ mod recall_image;
 mod recall_v0_5_0;
 mod receipts;
 mod schemas;
+mod scoped_writes;
 mod stats;
 mod tools;
 
@@ -188,9 +189,10 @@ async fn call(s: &LamboServer, name: &str, args: serde_json::Value) -> CallToolR
         .and_then(|v| v.as_str())
         .and_then(|r| r.parse::<crate::writeq::ReceiptId>().ok());
     if let Some(id) = receipt {
+        // #33 PR 4: the pipeline that issued it, which for a scoped write
+        // is its layer's.
         let answer = s
-            .mem
-            .pipeline()
+            .receipt_pipeline(id)
             .wait(
                 &AgentId::new(&agent_id),
                 id,

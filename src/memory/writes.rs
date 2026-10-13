@@ -32,7 +32,7 @@ use crate::recall::format;
 use crate::surface::resolve::{attribute_foreign, ForeignScopes, NoForeignScopes};
 use crate::types::{
     AgentId, Concept, ConceptCitations, ConceptType, Interaction, LamboError, MatchStrategy, Node,
-    NodeId, Reservation, StoreError,
+    NodeId, Reservation, SessionId, StoreError,
 };
 use crate::writeq::{Submitted, WritePipeline};
 use std::sync::Arc;
@@ -533,6 +533,7 @@ impl Memory {
             &[],
             event_time,
             &NoForeignScopes,
+            None,
         )
         .await
     }
@@ -563,6 +564,7 @@ impl Memory {
             citations,
             event_time,
             &NoForeignScopes,
+            None,
         )
         .await
     }
@@ -572,6 +574,12 @@ impl Memory {
     /// hold, so it is refused as foreign ("is in scope 'general'") instead of
     /// missing. Each scope is read only after this session's lock is
     /// released (one session's lock at a time, none across an await).
+    ///
+    /// `deliver_to` (#33 PR 4) names the session whose server delivers the
+    /// receipt when it is not this one: a layered session's write scoped to
+    /// this layer. `None` for this session's own writes.
+    // One parameter per input of the write; a struct would only rename them.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn derive_cited_async_scoped(
         &self,
         agent: &AgentId,
@@ -580,6 +588,7 @@ impl Memory {
         citations: &[ConceptCitations],
         event_time: Option<DateTime<Utc>>,
         foreign: &dyn ForeignScopes,
+        deliver_to: Option<&SessionId>,
     ) -> Result<Submitted, LamboError> {
         let _writing = self.begin_write().await?;
         // The pre-pass, on the call path. The background path re-runs its own
@@ -643,6 +652,7 @@ impl Memory {
                     .map(|(a, b)| ((*a).to_string(), (*b).to_string()))
                     .collect(),
                 pinned,
+                deliver_to.cloned(),
             )
             .await)
     }
@@ -665,7 +675,7 @@ impl Memory {
         agent: &AgentId,
         action: &Action<'_>,
     ) -> Result<Submitted, LamboError> {
-        self.record_action_async_scoped(agent, action, &[], &NoForeignScopes)
+        self.record_action_async_scoped(agent, action, &[], &NoForeignScopes, None)
             .await
     }
 
@@ -683,7 +693,7 @@ impl Memory {
         action: &Action<'_>,
         against: &[String],
     ) -> Result<Submitted, LamboError> {
-        self.record_action_async_scoped(agent, action, against, &NoForeignScopes)
+        self.record_action_async_scoped(agent, action, against, &NoForeignScopes, None)
             .await
     }
 
@@ -701,12 +711,19 @@ impl Memory {
     /// #19(b): `against` is resolved after `depends_on`, against the same
     /// session, and a target only `foreign` holds is refused as
     /// cross-session.
+    /// #33 PR 4 review L1: a `depends_on` entry that names nothing here but
+    /// a concept in a session `foreign` checks by text (for a write scoped
+    /// to a layer, the caller's own session) is refused as cross-session
+    /// too, as a derive's citation is, rather than minted here: a write
+    /// into a shared layer must not copy the caller's own concepts into it.
+    /// `deliver_to` is as for [`Memory::derive_cited_async_scoped`].
     pub(crate) async fn record_action_async_scoped(
         &self,
         agent: &AgentId,
         action: &Action<'_>,
         against: &[String],
         foreign: &dyn ForeignScopes,
+        deliver_to: Option<&SessionId>,
     ) -> Result<Submitted, LamboError> {
         let _writing = self.begin_write().await?;
         // The guard is a temporary of this statement only; `foreign` reads
@@ -730,6 +747,32 @@ impl Memory {
                 ));
             }
         }
+        // Entries this session does not hold (again a temporary guard)...
+        let missing: Vec<&str> = {
+            let g = self.graph.read();
+            action
+                .depends_on
+                .iter()
+                .copied()
+                .filter(|e| {
+                    matches!(
+                        crate::surface::resolve::resolve_reference(&g, e),
+                        crate::surface::resolve::Resolved::Missing
+                    )
+                })
+                .collect()
+        };
+        // ...are refused when a session checked by text holds them.
+        for entry in missing {
+            if let Some(scope) = foreign.text_holder_of(entry) {
+                return Err(crate::surface::resolve::refusal(
+                    crate::types::ReferenceField::ActionDependsOn,
+                    Some(action.action),
+                    entry,
+                    crate::types::ReferenceRefusalKind::ForeignScope { scope },
+                ));
+            }
+        }
         let interaction =
             self.begin_interaction_full(agent, Some(action.action.to_string()), action.event_time)?;
         Ok(self
@@ -743,6 +786,7 @@ impl Memory {
                 action.depends_on.iter().map(|s| (*s).to_string()).collect(),
                 pins,
                 against,
+                deliver_to.cloned(),
             )
             .await)
     }

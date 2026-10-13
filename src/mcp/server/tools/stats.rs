@@ -6,6 +6,7 @@ use serde_json::json;
 use crate::mcp::server::params::StatsParams;
 use crate::mcp::server::response::{bad_param, redact_urls};
 use crate::mcp::server::stats::gc_summary_line;
+use crate::mcp::server::tools::scope::ReceiptRoute;
 use crate::mcp::server::LamboServer;
 use crate::writeq::ReceiptAnswer;
 
@@ -40,27 +41,58 @@ impl LamboServer {
                     Ok(a) => a,
                     Err(e) => return e,
                 };
-                let queue = self.mem.pipeline();
+                // #33 PR 4: the pipeline that issued it (by epoch), which
+                // for a scoped write is its layer's, answering only for
+                // receipts this session delivers (review H1).
+                let (pipeline, deliver_to) = match self.route_receipt(id) {
+                    ReceiptRoute::Pipeline {
+                        pipeline,
+                        deliver_to,
+                    } => (pipeline, deliver_to),
+                    // Review M2: it may be a layer's that is briefly not
+                    // serving: retryable, never `restart_lost`.
+                    ReceiptRoute::LayerDown(layer) => {
+                        let detail = format!(
+                            "not answerable right now: layer {layer} is not serving, and this \
+                             receipt may be from a write to it; ask again shortly"
+                        );
+                        return self.stats_with(Some((id, ReceiptAnswer::Pending, Some(detail))));
+                    }
+                };
                 let answer = match p.wait_ms {
                     // A wait of 0 is a fetch, not a wait; both go through the
                     // same clamp so the difference is only the budget.
                     Some(ms) if ms > 0 => {
-                        queue
-                            .wait(&acting, id, std::time::Duration::from_millis(ms))
+                        pipeline
+                            .wait_for(
+                                &acting,
+                                deliver_to.as_ref(),
+                                id,
+                                std::time::Duration::from_millis(ms),
+                            )
                             .await
                     }
-                    _ => queue.lookup(&acting, id),
+                    _ => pipeline.lookup_for(&acting, deliver_to.as_ref(), id),
                 };
                 // Delivered here, explicitly, so `answered`'s piggyback does
                 // not state the same outcome a second time in the same response
                 // (J3-R1-9). Take-once is unaffected — this *is* the take.
                 if answer.is_settled() {
-                    queue.mark_delivered(&acting, id);
+                    pipeline.mark_delivered(&acting, id);
                 }
-                Some((id, answer))
+                Some((id, answer, None))
             }
         };
 
+        self.stats_with(receipt)
+    }
+
+    /// The stats payload, with the receipt answer when one was asked for
+    /// (`detail` overriding the answer's own sentence, #33 PR 4 review M2).
+    fn stats_with(
+        &self,
+        receipt: Option<(crate::writeq::ReceiptId, ReceiptAnswer, Option<String>)>,
+    ) -> CallToolResult {
         let s = self.mem.stats();
         // One GC reading for both halves of the answer (see `stats_json_with_gc`).
         let gc = self.mem.gc_stats();
@@ -110,10 +142,13 @@ impl LamboServer {
         let mut payload = self.stats_json_with_gc(&gc);
 
         let mut lines = vec![text.clone()];
-        if let Some((id, answer)) = &receipt {
+        if let Some((id, answer, detail)) = &receipt {
             // Redacted like every other model-facing string (N3): a `failed`
             // answer carries a `LamboError`, and a store error can name a DSN.
-            lines.push(format!("receipt {id}: {}", redact_urls(&answer.describe())));
+            let detail = detail
+                .clone()
+                .unwrap_or_else(|| redact_urls(&answer.describe()));
+            lines.push(format!("receipt {id}: {detail}"));
         }
         let text = lines.join("\n");
 
@@ -121,11 +156,13 @@ impl LamboServer {
             let obj = payload.as_object_mut().expect("stats_json built an object");
             obj.insert("summary".into(), json!(text));
             obj.insert("warnings".into(), json!([]));
-            if let Some((id, answer)) = &receipt {
+            if let Some((id, answer, detail)) = &receipt {
                 let mut r = json!({
                     "id": id.to_string(),
                     "state": answer.tag(),
-                    "detail": redact_urls(&answer.describe()),
+                    "detail": detail
+                        .clone()
+                        .unwrap_or_else(|| redact_urls(&answer.describe())),
                 });
                 // The node ids the ack could not report. Present only on
                 // `applied`, and absent — not empty — otherwise, for the same

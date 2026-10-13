@@ -159,6 +159,7 @@ async fn a_refused_against_is_an_error_before_the_ack_and_writes_nothing() {
             &[against("a newer claim", &["a general ruling"])],
             None,
             &General,
+            None,
         )
         .await
         .unwrap_err();
@@ -192,7 +193,7 @@ async fn a_refused_against_is_an_error_before_the_ack_and_writes_nothing() {
         ),
     ] {
         let err = if foreign {
-            mem.record_action_async_scoped(&agent, &act, &refs, &General)
+            mem.record_action_async_scoped(&agent, &act, &refs, &General, None)
                 .await
         } else {
             mem.record_action_against_async_as(&agent, &act, &refs)

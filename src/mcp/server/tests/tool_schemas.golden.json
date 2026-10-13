@@ -1,13 +1,13 @@
 {
   "lambo_derive": {
-    "description": "Derive concepts from the current interaction into session memory. A concept is one fact, stated atomically and short enough that a later restatement of the same fact matches it, such as a decision with its reason. Good: 'Lease TTL is 45s because it must exceed the 15s shutdown budget'. Bad: a paragraph narrating what you did and found. It is not a log: record activity with lambo_record_action. To group facts under a decision, send each as its own concept and add parent_of pairs with the decision as parent and each fact as child. When a concept rests on a ruling or decision already in memory, cite it by id (the 8 hex characters recall shows) in that concept's depends_on: it must already exist and match exactly one concept, or the whole call is refused. When a concept says an existing one is wrong, name that one the same way in the concept's against: it records the contradiction, newer against older, and changes no score. created_at is stamped server-side. event_time is optional RFC3339 historical about-time, such as a commit or document date; omit it for a live fact, which is about now. Returns as soon as the input is validated and ordered — the write is applied in the background and the ack carries a receipt id. The outcome is piggybacked on your next tool response; to wait for it, call lambo_stats with that receipt and a wait_ms. On a store with vector search each concept is embedded with the whole call's text, so a concept sent alone may be at most 8189 bytes; a longer call is refused before the ack, naming the part that is too long.",
+    "description": "Derive concepts from the current interaction into session memory. A concept is one fact, stated atomically and short enough that a later restatement of the same fact matches it, such as a decision with its reason. Good: 'Lease TTL is 45s because it must exceed the 15s shutdown budget'. Bad: a paragraph narrating what you did and found. It is not a log: record activity with lambo_record_action. To group facts under a decision, send each as its own concept and add parent_of pairs with the decision as parent and each fact as child. When a concept rests on a ruling or decision already in memory, cite it by id (the 8 hex characters recall shows) in that concept's depends_on: it must already exist and match exactly one concept, or the whole call is refused. When a concept says an existing one is wrong, name that one the same way in the concept's against: it records the contradiction, newer against older, and changes no score. created_at is stamped server-side. event_time is optional RFC3339 historical about-time, such as a commit or document date; omit it for a live fact, which is about now. Returns as soon as the input is validated and ordered — the write is applied in the background and the ack carries a receipt id. The outcome is piggybacked on your next tool response; to wait for it, call lambo_stats with that receipt and a wait_ms. On a store with vector search each concept is embedded with the whole call's text, so a concept sent alone may be at most 8189 bytes; a longer call is refused before the ack, naming the part that is too long. scope (optional) writes to one of this session's shared layers instead; writes to different sessions have no ordering between them.",
     "inputSchema": {
       "$defs": {
         "WireConcept": {
           "additionalProperties": false,
           "properties": {
             "against": {
-              "description": "Optional: up to 8 existing concepts this one contradicts, such as an\nolder belief a newer observation shows is wrong. Name each as for\n`depends_on`: its id (the 8 hex characters recall shows) or full\nnode id (its exact content also works). Each must already exist in\nthis session and match exactly one concept other than this one, or\nthe whole call is refused before the ack and nothing is written.\nRecorded as this concept contradicting each; it is not evidence for\nor against either and changes no score. At most 32 across the call.",
+              "description": "Optional: up to 8 existing concepts this one contradicts, such as an\nolder belief a newer observation shows is wrong. Name each as for\n`depends_on`: its id (the 8 hex characters recall shows) or full\nnode id (its exact content also works). Each must already exist in\nthe session the write goes to and match exactly one concept other\nthan this one, or the whole call is refused before the ack and\nnothing is written. Recorded as this concept contradicting each; it is not evidence for\nor against either and changes no score. At most 32 across the call.",
               "items": {
                 "$ref": "#/$defs/WireReference"
               },
@@ -112,6 +112,14 @@
             "array",
             "null"
           ]
+        },
+        "scope": {
+          "description": "Optional: the session to write to. Omit it for this session; name\none of its layers (as `get_info` lists them), such as `general`, to\nwrite there instead. Writes to different sessions have no ordering\nbetween them, and every id or text a write cites must name a concept\nin the session it writes to.",
+          "maxLength": 16384,
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -122,7 +130,7 @@
     }
   },
   "lambo_derive_image": {
-    "description": "Derive one image concept into session memory: a caption, plus either the image itself (image: mime and base64 data, embedded by this server) or a vector you computed in this session's embedding space (vector: values and contract, from lambo_stats embedding_contract). Send exactly one of image or vector. The concept's content is the caption plus [image:<image_id>] and its vector is the image's, so a text recall finds it; the same caption and image_id derived again is the same concept. created_at is stamped server-side; event_time, parent_of, the ack and its receipt work as for lambo_derive.",
+    "description": "Derive one image concept into session memory: a caption, plus either the image itself (image: mime and base64 data, embedded by this server) or a vector you computed in this session's embedding space (vector: values and contract, from lambo_stats embedding_contract). Send exactly one of image or vector. The concept's content is the caption plus [image:<image_id>] and its vector is the image's, so a text recall finds it; the same caption and image_id derived again is the same concept. created_at is stamped server-side; event_time, parent_of, scope, the ack and its receipt work as for lambo_derive.",
     "inputSchema": {
       "$defs": {
         "WireEmbeddingContract": {
@@ -287,6 +295,14 @@
           },
           "type": [
             "array",
+            "null"
+          ]
+        },
+        "scope": {
+          "description": "Optional: the session to write to. Omit it for this session; name\none of its layers (as `get_info` lists them), such as `general`, to\nwrite there instead. Writes to different sessions have no ordering\nbetween them, and every id or text a write cites must name a concept\nin the session it writes to.",
+          "maxLength": 16384,
+          "type": [
+            "string",
             "null"
           ]
         },
@@ -519,7 +535,7 @@
     }
   },
   "lambo_record_action": {
-    "description": "Record an action the agent took, with what it produces, modifies and depends on. This is where activity goes: name the act in a short line (e.g. 'merged PR #52'), not a narrative. A fact or decision that later work should recall is a concept for lambo_derive. When the action relied on a ruling or decision from memory, cite it by id (the 8 hex characters recall shows) in depends_on. When the action showed a concept in memory to be wrong, name it the same way in against. created_at is stamped server-side. event_time is optional RFC3339 historical about-time, such as a commit or document date; omit it for a live fact, which is about now. Returns as soon as the input is validated and ordered — the write is applied in the background and the ack carries a receipt id, resolved the same way as lambo_derive's.",
+    "description": "Record an action the agent took, with what it produces, modifies and depends on. This is where activity goes: name the act in a short line (e.g. 'merged PR #52'), not a narrative. A fact or decision that later work should recall is a concept for lambo_derive. When the action relied on a ruling or decision from memory, cite it by id (the 8 hex characters recall shows) in depends_on. When the action showed a concept in memory to be wrong, name it the same way in against. created_at is stamped server-side. event_time is optional RFC3339 historical about-time, such as a commit or document date; omit it for a live fact, which is about now. Returns as soon as the input is validated and ordered — the write is applied in the background and the ack carries a receipt id, resolved the same way as lambo_derive's. scope (optional) writes to one of this session's shared layers instead, where a relative file path is refused; writes to different sessions have no ordering between them.",
     "inputSchema": {
       "$defs": {
         "WireReference": {
@@ -542,7 +558,7 @@
           "type": "string"
         },
         "against": {
-          "description": "Optional: up to 8 existing concepts this action contradicts, such as a\nbelief the action showed to be wrong. Name each by its id (the 8 hex\ncharacters recall shows) or full node id (its exact content also\nworks). Unlike `depends_on`, nothing is ever created: each must\nalready exist in this session and match exactly one concept, or the\nwhole call is refused before the ack and nothing is written.",
+          "description": "Optional: up to 8 existing concepts this action contradicts, such as a\nbelief the action showed to be wrong. Name each by its id (the 8 hex\ncharacters recall shows) or full node id (its exact content also\nworks). Unlike `depends_on`, nothing is ever created: each must\nalready exist in the session the write goes to and match exactly one\nconcept, or the whole call is refused before the ack and nothing is\nwritten.",
           "items": {
             "$ref": "#/$defs/WireReference"
           },
@@ -595,6 +611,14 @@
             "array",
             "null"
           ]
+        },
+        "scope": {
+          "description": "Optional: the session to write to. Omit it for this session; name\none of its layers (as `get_info` lists them), such as `general`, to\nwrite there instead. Writes to different sessions have no ordering\nbetween them, and every id or text a write cites must name a concept\nin the session it writes to.",
+          "maxLength": 16384,
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -605,7 +629,7 @@
     }
   },
   "lambo_reserve": {
-    "description": "Take a soft lock on a memory node before editing it (or release one). Reservations are advisory and do not survive a server restart. The lock is held under the agent_id you send, which is caller-asserted and unverified: a distinct id gets a distinct lock, and callers sharing an id share the lock.",
+    "description": "Take a soft lock on a memory node before editing it (or release one). Reservations are advisory and do not survive a server restart. The lock is held under the agent_id you send, which is caller-asserted and unverified: a distinct id gets a distinct lock, and callers sharing an id share the lock. scope (optional) names one of this session's shared layers, for a node from that layer.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
@@ -624,6 +648,14 @@
           "description": "Release this agent's existing soft lock instead of taking one.",
           "type": [
             "boolean",
+            "null"
+          ]
+        },
+        "scope": {
+          "description": "Optional: the session the node belongs to. Omit it for this\nsession; name one of its layers (as `get_info` lists them) to reserve\nor release a node there, such as a recall hit from that layer, whose\nid belongs to it.",
+          "maxLength": 16384,
+          "type": [
+            "string",
             "null"
           ]
         },
@@ -646,7 +678,7 @@
     }
   },
   "lambo_saints": {
-    "description": "List the session's canonical memories — concepts that earned Canonical status through the audited transition path.",
+    "description": "List the session's canonical memories — concepts that earned Canonical status through the audited transition path. scope (optional) lists one of this session's shared layers instead.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
@@ -655,6 +687,14 @@
           "description": "Id of the agent making this call. Use one stable id for the agent's\nwhole life, never one per call, task or topic (good: your model or\nclient id, such as `claude-opus-5-5` or `gpt-5.6`, with a stable\ninstance suffix such as `-worker-2` if several run at once; bad:\n`b1-review`, `implement-m12`). Caller-asserted and unverified: work is\nrecorded under exactly the id you send, so a stable id keeps your\nattribution whole. Agents sharing an id share soft locks and can\nrelease each other's; concurrent agents that must keep out of each\nother's edits need distinct stable ids.",
           "maxLength": 16384,
           "type": "string"
+        },
+        "scope": {
+          "description": "Optional: the session to list. Omit it for this session; name one of\nits layers (as `get_info` lists them) to list that layer's canonical\nmemories.",
+          "maxLength": 16384,
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [

@@ -137,11 +137,22 @@ CLI's derive line says the same as the receipt.
 
 ### #33 PR 4 (`scope` on writes)
 
-Not merged when this branch was finished (no PR open). When it lands, the
-`against` path needs no new resolver work: `cite::validate` and
-`action::validate_against` take the target graph, and the foreign probe
-is the same `ForeignScopes` seam. Merge `origin/main` in, pass the scoped
-session's graph and its probe, and add a scoped-write test.
+#33 PR 4 merged to main as #149 (`6add6f12`) while this branch was open;
+it was merged in (not rebased). `against` needed no new resolver code to
+respect `scope`: the derive's `against` rides in `ConceptCitations`, which
+`derive_cited_async_scoped` already resolves against the target session's
+graph with the target's `LayerProbe`, and `record_action_async_scoped`
+now takes `against` beside `deliver_to` and resolves it against the
+target memory, refusing a target only another session holds (for a write
+scoped to a layer, the caller's own session first) as cross-session. A
+contradiction creates nothing, so #149's `text_holder_of` minting guard
+and relative-path check do not apply to it. The `against` parameter docs
+now say "the session the write goes to".
+`scoped_writes::a_cross_session_contradiction_is_refused_in_both_directions`
+pins it: project concept from a write scoped to `general`, `general`
+concept from an unscoped write, by short and full id, on derive and
+action, nothing written in either session; then a scoped contradiction
+lands inside `general` only.
 
 ## Spec errata
 
@@ -160,7 +171,7 @@ write-time acyclicity.
 | Settled intent under the frozen 0.5.0 decoder | `writeq::tests::intents::a_settled_contradicting_intent_decodes_under_the_0_5_0_payload`, `an_action_with_against_is_its_own_variant_and_round_trips`, `an_unknown_pin_field_is_refused` (now uses an unknown `supersedes`, and checks `against` entries refuse a field), the shared settle check (5 intents on SQLite) |
 | Mutual contradiction | `mutual_contradiction_is_allowed`, `mcp::server::tests::against::mutual_and_resent_contradictions_over_the_wire` |
 | No score or verdict change | `canon::contradicts_tests::contradictions_written_through_against_change_no_score_or_verdict` (#140's checks, over edges written by `against`: daemon scores, Stage 1, dependent interactions, Solo score, blast radius, store-side span, blast, Stage 2 and 3) |
-| Cross-session under a layered serve | `mcp::server::tests::layered::a_contradiction_of_a_layer_concept_is_refused_as_cross_session` (short id, full id, content; derive and action; neither session written) |
+| Cross-session under a layered serve | `mcp::server::tests::layered::a_contradiction_of_a_layer_concept_is_refused_as_cross_session` (short id, full id, content; derive and action; neither session written), `scoped_writes::a_cross_session_contradiction_is_refused_in_both_directions` (with `scope`, both directions) |
 | Byte identity without `against` | `legacy_payloads_are_byte_identical` (unchanged), `a_derive_s_contradictions_ride_in_the_cited_intent` (PR 4's cited form exact), `an_action_with_against_is_its_own_variant_and_round_trips` (plain action has no `against`), every pre-existing test unchanged except the schema goldens and the SQLite intent count |
 
 Also: `against_writes_one_contradicts_edge_newer_to_older` (one edge, weight,

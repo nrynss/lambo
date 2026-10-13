@@ -459,6 +459,7 @@ mod tests {
                     child: "auth middleware".into(),
                 }]),
                 event_time: None,
+                scope: None,
             })
             .await;
         assert_eq!(mcp_derived.is_error, Some(false), "{mcp_derived:?}");
@@ -493,6 +494,7 @@ mod tests {
                 modifies: None,
                 depends_on: Some(vec![WireResource("auth middleware".into())]),
                 against: None,
+                scope: None,
             })
             .await;
         assert_eq!(mcp_action.is_error, Some(false), "{mcp_action:?}");
@@ -807,6 +809,7 @@ mod tests {
                     .collect(),
                 parent_of: None,
                 event_time: None,
+                scope: None,
             })
             .await;
         let shared = check_concept_count(MAX_CONCEPTS_PER_DERIVE + 1).unwrap_err();
@@ -838,6 +841,7 @@ mod tests {
                 modifies: Some(vec![WireResource("m0".into())]),
                 depends_on: None,
                 against: None,
+                scope: None,
             })
             .await;
         let shared = check_action_targets(MAX_ACTION_TARGETS + 1).unwrap_err();

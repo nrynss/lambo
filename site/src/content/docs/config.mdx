@@ -345,7 +345,7 @@ Further rules once credentials are in play:
 
 ### Layers
 
-A layer is a shared session, such as `general`, whose memories a project session's recall reads too. With `layers = ["general"]`, a `lambo_recall` to `lambo` reads `lambo` and `general` in one call and merges the two answers under one token budget. `lambo_recall` and `lambo_inspect` take `scope` to read one of the two alone. Writes, and every other tool, still act on the addressed session only. Layers are an HTTP serve's. A stdio serve that holds its session itself serves it unlayered and logs one warning when the session would be layered; a stdio serve that forwards to an HTTP `lambo serve` holding the session (the usual case on a machine running one) reaches that session through the holder, layers included, and warns of nothing.
+A layer is a shared session, such as `general`, whose memories a project session's recall reads too. With `layers = ["general"]`, a `lambo_recall` to `lambo` reads `lambo` and `general` in one call and merges the two answers under one token budget. `lambo_recall` and `lambo_inspect` take `scope` to read one of the two alone. Writes, `lambo_reserve` and `lambo_saints` act on the addressed session unless they too pass `scope`: an agent writes a ruling that applies in every project with `scope = "general"`, which the layer's own write queue applies (writes to different sessions have no ordering between them, a write into a layer refuses relative file paths, as does any write to the layer's own address, and no reference or edge crosses sessions; see the MCP reference's *Writing to a layer*). A scoped call draws on the layer's own `per_session_rps`. No new credential capability is involved: a credential that reaches a layered session reaches its layers, which the start check enforces. Layers are an HTTP serve's. A stdio serve that holds its session itself serves it unlayered and logs one warning when the session would be layered; a stdio serve that forwards to an HTTP `lambo serve` holding the session (the usual case on a machine running one) reaches that session through the holder, layers included, and warns of nothing.
 
 ```toml
 [serve]
@@ -375,6 +375,38 @@ Refused when an HTTP `lambo serve` starts (exit `2`), before any lease is taken:
 Once the pinned sessions are attached, a layer whose embedding contract differs from its session's refuses the start too (a model left unset in one and set to `""` in the other counts as different, and the message says so).
 
 While the serve runs, a layer can stop serving: another writer took its lease, it is being detached, or its attach failed. Losing `general`'s lease detaches `general` alone. Until it is attached again, every layered recall answers from its own session with one warning, `recall: layer general is unavailable; results are from lambo only`, and a `scope` naming the layer is refused: retryably while it is held elsewhere or detaching, and as permanent once its attach has failed for good or it was erased (an erased layer is also warned of at start).
+
+### Project URLs and a shared layer
+
+An HTTP client chooses its session by URL, not by its working directory or a
+project header. A useful split keeps operator-wide rulings in `general`, project
+work in its own session, and work outside a mapped project in `general-usage`:
+
+```toml
+[serve]
+sessions = ["lambo", "rustydocs", "general", "general-usage"]
+default_session = "general-usage"
+layers = ["general"]
+
+[[serve.layer]]
+session = "general"
+weight = 0.5
+min_similarity = 0.40
+```
+
+Start the HTTP serve without a `--session` override if `/mcp` should use this
+`default_session`. Register `.../mcp/s/lambo` in the Lambo project's client and
+`.../mcp/s/rustydocs` in RustyDocs; register `.../mcp` as the client's fallback.
+`general` is itself a layer, so it does not inherit `layers`. The project
+sessions and `general-usage` read it. A per-session empty list can opt a
+consumer out, as in the preceding example.
+
+This configuration does not copy memories or move existing sessions. Each
+project's text recall reads its own session plus `general`; its writes
+go to the addressed project unless a call passes `scope = "general"` (see
+[Writing to a layer](/lambo/mcp/#lambo_derive)). See the
+[read examples](/lambo/mcp/#reading-a-layer-hit) and the operator's
+[cut-over runbook](https://github.com/nrynss/lambo/blob/main/dev-diary/lambo-for-mooshik/DOGFOOD-SETUP.md#7-multi-session-cut-over-runbook).
 
 ### Choosing a stdio serve's session
 

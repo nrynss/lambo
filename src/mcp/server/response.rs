@@ -205,6 +205,19 @@ pub(super) fn layer_unavailable(
     ))])
 }
 
+/// A call scoped to `layer` whose write was refused because the layer
+/// closed or lost its single-writer lease while the call held it (#33 PR
+/// 4): nothing was applied to the layer, and the serve re-elects it, so
+/// retrying can help. Never the store's lease error itself, which names
+/// operator-only SQL (J1-R2-2).
+pub(super) fn layer_lost(what: &str, layer: &str, fallback: &str) -> CallToolResult {
+    note_error("layer unavailable");
+    CallToolResult::error(vec![ContentBlock::text(format!(
+        "{what}: layer {layer} stopped serving during this call (it closed or lost its lease), \
+         so nothing was applied to it; retry shortly, or {fallback}"
+    ))])
+}
+
 /// Reject a parameter the server will not act on.
 ///
 /// A bad parameter is the *client's* problem and it is worth surfacing where

@@ -95,6 +95,15 @@ impl ServeLayers {
         self.stacks.get(session).map_or(&[], Vec::as_slice)
     }
 
+    /// Whether `session` is a layer of some layered session (#33 PR 4): a
+    /// shared session every project reads, whose writes refuse relative
+    /// file paths.
+    pub fn is_layer(&self, session: &str) -> bool {
+        self.stacks
+            .values()
+            .any(|stack| stack.iter().any(|l| l.session == session))
+    }
+
     /// Every layered session and its stack, by session name.
     pub fn iter(&self) -> impl Iterator<Item = (&str, &[LayerSpec])> {
         self.stacks.iter().map(|(s, l)| (s.as_str(), l.as_slice()))
