@@ -668,8 +668,10 @@ pub(super) fn keyword_candidates_sql<D: Dialect>(n_tokens: usize) -> String {
             sql.push_str(" OR ");
         }
         let n = i + 2;
+        // #129: a scoped key's text is not matched (`keyword_matches_key`).
         sql.push_str(&format!(
-            "strpos(lower(content), ${n}) > 0 OR strpos(lower(canonical_key), ${n}) > 0"
+            "strpos(lower(content), ${n}) > 0 OR ({} AND strpos(lower(canonical_key), ${n}) > 0)",
+            crate::graph::resource::KEYWORD_KEY_GUARD_SQL
         ));
     }
     sql.push(')');

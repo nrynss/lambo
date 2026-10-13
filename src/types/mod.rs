@@ -1653,7 +1653,11 @@ pub fn tie_break_by_key(
     b: &NodeId,
 ) -> std::cmp::Ordering {
     match (a_key, b_key) {
-        (Some(a_key), Some(b_key)) => a_key.cmp(b_key),
+        // #129: scoped keys compare in their tie form, which lowercases the
+        // ASCII prefix, so they do not all sort ahead of legacy keys.
+        (Some(a_key), Some(b_key)) => {
+            crate::graph::resource::tie_form(a_key).cmp(&crate::graph::resource::tie_form(b_key))
+        }
         (Some(_), None) => std::cmp::Ordering::Less,
         (None, Some(_)) => std::cmp::Ordering::Greater,
         (None, None) => std::cmp::Ordering::Equal,
