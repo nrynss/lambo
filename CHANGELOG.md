@@ -18,16 +18,19 @@
   after the split, the way agents will see it. All three are offline and
   read-only on their sources.
 - **Canonization promotes rulings, not artifacts (#36).** Support now
-  counts the concepts that depend on a ruling, not the actions that touched a
-  file. Swarm admission is evidence-led, and Solo is gated on stage verdicts.
+  comes from the concepts that depend on a ruling, not the actions that
+  touched a file, and is counted by their distinct origin interactions (the
+  ruling's own origin excluded), so several dependents from one interaction
+  count once. Swarm admission is evidence-led, and Solo is gated on stage verdicts.
   Agents cite rulings by id in `depends_on`. `lambo canon dry-run` and
   `alias-preview` show the effect on a backup before it happens.
 - **Contradictions (#19).** `against` on `lambo_derive` and
   `lambo_record_action` records that a write shows an existing concept to be
   wrong. Recall warns when a Canonical or Venerable concept is contradicted by
   something newer than its support, and shows the contradicting concept. A
-  contradiction never changes a score or a status, and no longer keeps a
-  concept alive through GC.
+  contradiction never changes a score or a status, and no longer counts as a
+  GC connection. The one exception: GC protects a concept that contradicts a
+  Venerable or Canonical concept until that target is demoted.
 - **Supersession, off by default (#20).** With `canonization_supersede =
   true`, a contradicting concept that earns its own newer evidence demotes the
   Canonical concept it contradicts. The audit records why each demotion
