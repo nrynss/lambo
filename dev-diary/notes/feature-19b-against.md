@@ -59,9 +59,12 @@ struct literal in many places); `against` is a separate argument.
 `ReferenceSpec::acyclic` is false for both specs. Why: mutual
 contradiction is legitimate (each asserts the other is wrong; #140's
 fixture carries `Q <-> X`); `Contradicts` is outside §5.7's
-`Causal`/`Dependency` family; and nothing traverses it (no dependence,
-recall expansion or GC structural walk), so a cycle of contradictions
-cannot loop anything. A contradiction against a concept that depends on
+`Causal`/`Dependency` family; and no dependence or recall walk follows
+it, so a cycle of contradictions cannot loop anything. (Corrected in
+review L2: GC connectivity does count it. The orphan check and
+reachability from the interaction chain, `daemon/gc.rs`, treat a
+`Contradicts` edge like any edge until #19(c) owner decision 1, option C,
+lands; a cycle there only keeps its members connected.) A contradiction against a concept that depends on
 the contradicting one is no `Dependency` cycle either. Self-contradiction
 is still refused (`SelfReference`), at the ack and again at the commit.
 
@@ -191,11 +194,70 @@ no dependence, natural-key replay), `a_similarity_merge_keeps_the_contradiction`
 `cli::tests::cli_against_records_contradictions_and_refuses_bad_references`,
 and the tool schema goldens.
 
+## What a contradiction does today
+
+- Adds no dependent or blast radius, changes no score or promotion stage
+  (`contradictions_written_through_against_change_no_score_or_verdict`).
+- Makes no conflict line: #19(c) owner decision 2 (option B) is applied
+  here, since `against` is the first product path writing the edge
+  (review M1).
+- Counts as a fresh write to its target in the high-risk check
+  (`daemon/events.rs`), so a load-bearing target gets the short-lived
+  alert: #19(c) owner decision 3 (option A), unchanged.
+- Counts toward GC connectivity until #19(c) owner decision 1 (option C)
+  lands.
+- Is dated, and directed, by the write that declares it, not by the two
+  concepts' ages (review L5).
+
 ## Out of scope
 
-The detector, recall annotations, companion recall, revalidation and the
-three #19(c) owner decisions (GC connectivity, conflict writers,
-high-risk freshness) are #19(c). Nothing in recall reads `Contradicts` yet.
+The detector, recall annotations, companion recall, revalidation, and
+#19(c) owner decisions 1 (GC connectivity) and 3 (pinning the high-risk
+freshness test) are #19(c). Decision 2 (conflict writers) is applied
+here (review M1). Nothing in recall reads `Contradicts` yet.
+
+## Review round (2026-10-13)
+
+Adversarial review: 2 Medium, 6 Low. Merged `origin/main` (#150,
+`57f79386`) first. Each fix in its own commit:
+
+- **M1** a contradiction's writer joined the conflict agent set, so an
+  `against` write made a two-agent conflict on its target. `edge_writers`
+  skips `Contradicts` (#19(c) decision 2, option B);
+  `a_contradiction_writer_joins_the_conflict_agent_set` is inverted and
+  renamed `a_contradiction_writer_does_not_join_the_conflict_agent_set`,
+  with a Dependency control; `an_against_write_by_another_agent_raises_no_conflict`
+  checks the product path. Decision 3 (high-risk freshness) is unchanged
+  and documented.
+- **M2** citing and contradicting one concept in one call is refused,
+  see "Same target" above (orchestrator decision). New kind
+  `DependsOnAndAgainst`; tests at graph (derive, action, forged commit
+  pins) and MCP level.
+- **L1** inspect kept one edge per neighbour, hiding a `Contradicts` edge
+  behind another edge to the same concept. A second edge from the same
+  frontier node is listed without spending budget or re-expanding
+  (`inspect_lists_every_edge_between_one_pair`). The dependents golden
+  gains exactly the two hidden lines; the cloudops parser self-test passes.
+- **L2** docs said no GC walk follows `Contradicts`; corrected (above, and
+  in `graph::cite`).
+- **L3** a refused `against` on `record_action` left the session's
+  embedding contract stamped: both apply paths stamped before the recheck.
+  `record_action_against` now stamps after the recheck, inside the
+  transaction (`a_refused_action_contradiction_stamps_no_embedding_contract`).
+- **L4** the CHANGELOG downgrade note now states the remedy for an
+  unconsumed `derive_cited`/`action_cited` intent (shut the 0.6.0 writer
+  down cleanly so its queue drains) and that a pre-#19(b) 0.6.0 build
+  refuses them too.
+- **L5** direction and date come from the declaring write: said in the
+  CHANGELOG, mcp.mdx, the tool and parameter descriptions and
+  `graph::cite`.
+- **L6** `Ambiguous` and `NotAConcept` refusals use the field's verb
+  (`name` for `against`); the `RecordActionParams.against` description
+  says "other than the action itself"; the MCP per-concept limit counts
+  per content, as the core does, for `depends_on` and `against`
+  (`the_per_concept_limit_counts_per_content`).
+- Docs that said a contradiction "changes nothing" now list what it does
+  (section above).
 
 ## Fixed in passing
 

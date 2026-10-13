@@ -147,8 +147,13 @@
   ```
 
   A derive's `against` rides in the `derive_cited` intent and an action's
-  in a new `action_cited` intent; both settle to the empty `derive` 0.5.0
-  decodes, and an unconsumed one stops a 0.5.0 load by name, as above.
+  in a new `action_cited` intent. Once settled (applied or failed), both
+  are stored as the empty `derive` 0.5.0 decodes. An **unconsumed** one
+  stops the load by name: 0.5.0 knows neither kind, and a 0.6.0 build from
+  before #19(b) refuses `action_cited` and a `derive_cited` carrying
+  `against`. Removing `Contradicts` edges does not help there: shut the
+  0.6.0 writer down cleanly first, so its queue drains and every intent is
+  consumed, then downgrade.
 
 ### Breaking (library API)
 
@@ -156,7 +161,8 @@
   variant, so an exhaustive `match` on `LamboError` needs an arm. It carries
   a typed `ReferenceRefusal` (`field`, `concept`, `reference`, `kind`:
   `ReferenceRefusalKind::{Missing, Ambiguous, NotAConcept, ForeignScope,
-  SelfReference, Cycle, Changed, Limit, UnknownConcept}`), and its message is shown to callers intact, with the
+  SelfReference, Cycle, Changed, Limit, UnknownConcept,
+  DependsOnAndAgainst}`), and its message is shown to callers intact, with the
   class `reference refused`.
 - **`DeriveOutcome` gains `cited`** (#36 PR 4) **and `contradicted`**
   (#19(b)); a struct literal needs them (or `..Default::default()`).
@@ -299,14 +305,22 @@
   ([#19](https://github.com/nrynss/lambo/issues/19) part b). A concept, or
   an action, may carry `against`: existing concepts it says are wrong (at
   most 8 per concept or action, and 32 per derive call, counted apart from
-  `depends_on`). Each is written as a `Contradicts` edge, newer to older,
-  which is informational only: no dependent, blast radius, score or
-  verdict. References resolve exactly like citations, through the same
-  resolver, and are refused the same typed ways before the ack (missing,
-  ambiguous, an interaction id, the concept or action itself, in another
-  scope, including a scoped write's own or other session: "cross-session
-  contradictions are not recorded"); a contradiction
-  is never created. What each named is pinned at the ack and resolved again
+  `depends_on`). Each is written as a `Contradicts` edge from the concept
+  (or action) that declares it to the one it names: the direction and the
+  date come from that write, not from which concept is older. It adds no
+  dependent or blast radius, changes no score or promotion stage, and makes
+  no conflict line (#19(c) owner decision 2, applied here: a
+  contradiction's writer does not join the conflict agent set). It is
+  still a fresh write to its target, so a load-bearing target gets the
+  short-lived high-risk alert (decision 3), and garbage collection counts
+  it as connectivity until #19(c) (decision 1). References resolve exactly
+  like citations, through the same resolver, and are refused the same
+  typed ways before the ack (missing, ambiguous, an interaction id, the
+  concept or action itself, in another scope, including a scoped write's
+  own or other session: "cross-session contradictions are not recorded").
+  Citing and contradicting one concept from the same concept or action in
+  one call is refused (`DependsOnAndAgainst`); separate writes may record
+  both. A contradiction is never created. What each named is pinned at the ack and resolved again
   inside the commit's transaction, so a target removed or shadowed in
   between fails the receipt (owner decision: not part of hybrid's plan
   check). Two concepts may contradict each other; a similarity merge keeps
@@ -507,6 +521,18 @@
 
 ### Changed
 
+- **A contradiction no longer makes a conflict (#19(c) owner decision 2,
+  applied with #19(b)).** The conflict detector skips `Contradicts` edges
+  when it collects writers, so another agent contradicting a concept never
+  turns a fresh write to it into a two-agent conflict. #19(a) pinned the
+  opposite; that test is inverted.
+- **`lambo_inspect` lists every edge between the focus hop and a
+  neighbour.** It listed each neighbour once, by the first edge found, so a
+  `Contradicts` edge could hide behind a `Dependency` to the same concept,
+  or one direction of a mutual contradiction behind the other. A second
+  edge is now its own line under its kind (and its own row in
+  `levels[].neighbours`, same `node_id`); the neighbour still counts once
+  against the 200-neighbour cap and is not expanded twice.
 - **Layered serving documentation and cut-over runbook (#33 PR 6).**
   Project URL examples separate `general-usage` fallback writes from
   shared `general` rulings, distinguish MCP recall/inspect read scope from

@@ -294,7 +294,7 @@ impl LamboServer {
                        must already exist and match exactly one concept, or the whole call is \
                        refused. When a concept says an existing one is wrong, name that one \
                        the same way in the concept's against: it records the contradiction, \
-                       newer against older, and changes no score. \
+                       dated by this write, and adds no dependent, score or promotion. \
                        created_at is stamped server-side. event_time is optional RFC3339 \
                        historical about-time, such as a commit or document date; omit it for \
                        a live fact, which is about now. Returns as soon \
@@ -324,7 +324,8 @@ impl LamboServer {
                        work should recall is a concept for lambo_derive. When the action relied \
                        on a ruling or decision from memory, cite it by id (the 8 hex characters \
                        recall shows) in depends_on. When the action showed a concept in \
-                       memory to be wrong, name it the same way in against. created_at is \
+                       memory to be wrong, name it the same way in against (dated by this \
+                       write; never the action itself). created_at is \
                        stamped server-side. event_time is optional \
                        RFC3339 historical about-time, such as a commit or document date; omit \
                        it for a live fact, which is about now. \

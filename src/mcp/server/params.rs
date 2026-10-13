@@ -165,8 +165,12 @@ pub struct WireConcept {
     /// node id (its exact content also works). Each must already exist in
     /// the session the write goes to and match exactly one concept other
     /// than this one, or the whole call is refused before the ack and
-    /// nothing is written. Recorded as this concept contradicting each; it is not evidence for
-    /// or against either and changes no score. At most 32 across the call.
+    /// nothing is written, as is a concept this one also lists in
+    /// `depends_on`. Recorded as this concept contradicting each, dated by
+    /// this write whatever the two concepts' ages. It adds no dependent and
+    /// changes no score or promotion, and raises no conflict; it does count
+    /// as a fresh write to the contradicted concept. At most 32 across the
+    /// call.
     #[schemars(length(max = 8))]
     pub against: Option<Vec<WireReference>>,
 }
@@ -262,8 +266,11 @@ pub struct RecordActionParams {
     /// characters recall shows) or full node id (its exact content also
     /// works). Unlike `depends_on`, nothing is ever created: each must
     /// already exist in the session the write goes to and match exactly one
-    /// concept, or the whole call is refused before the ack and nothing is
-    /// written.
+    /// concept other than the action itself, and not one the action's
+    /// `depends_on` names, or the whole call is refused before the ack and
+    /// nothing is written. Recorded as the action contradicting each, dated
+    /// by this write; it adds no dependent and changes no score or
+    /// promotion.
     #[schemars(length(max = 8))]
     pub against: Option<Vec<WireReference>>,
     /// Optional: the session to write to. Omit it for this session; name
