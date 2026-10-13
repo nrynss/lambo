@@ -694,7 +694,7 @@ max_attached = 16
 [[serve.layer]]
 session = "general"
 weight = 0.5
-min_similarity = 0.40
+min_similarity = 0.50
 ```
 
 `general` holds operator-wide rulings and is not itself layered. Other pinned

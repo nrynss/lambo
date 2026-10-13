@@ -33,12 +33,12 @@ pub struct LayerRef<'a> {
     /// `w` in the merge's `w / rank` key; the caller's own session has 1.0.
     /// Finite and positive (0 is refused: it would rank every hit of the
     /// layer last yet still fill free slots). Defaults to [`DEFAULT_LAYER_WEIGHT`]
-    /// (uncalibrated until #87).
+    /// (measured on BGE-M3 in #157).
     pub weight: f64,
-    /// The layer's floor: a hit without keyword evidence (and outside a
-    /// traversal answer anchored in this layer) merges only at vector
+    /// The layer's absolute floor: a hit outside a
+    /// traversal answer anchored in this layer merges only at vector
     /// cosine `>=` this; no warning lifts it. In `[0, 1]`. Defaults to
-    /// [`DEFAULT_LAYER_MIN_SIMILARITY`] (uncalibrated until #87).
+    /// [`DEFAULT_LAYER_MIN_SIMILARITY`] (measured on BGE-M3 in #157).
     pub min_similarity: f64,
 }
 
@@ -134,7 +134,7 @@ impl Memory {
     ///
     /// With layers, each session's list is merged by weighted rank
     /// interleave (`weight / rank`, this session at 1.0). A layer hit
-    /// merges only with keyword evidence, vector cosine at or above the
+    /// merges only with vector cosine at or above the
     /// layer's floor, or as a dependent in the layer's traversal answer to
     /// a dependency question whose anchor is in that layer. Hits with a
     /// Conflict, Hot or Reservation warning are kept past `top_k` (never

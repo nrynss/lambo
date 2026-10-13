@@ -347,7 +347,7 @@ erase = true
 | `[[serve.credential]]` | none | A bearer credential and the sessions it may reach (below). |
 | `layers` | none | The shared sessions every pinned session that is not itself a layer also reads on `lambo_recall`, as an ordered list, nearest tier first. At most one in this release. See [Layers](#layers). |
 | `[serve.session_layers]` | none | Per-session overrides of `layers`, each the same list form; `[]` opts a session out. |
-| `[[serve.layer]]` | none | Per-layer ranking: `session`, `weight` (default `0.5`) and `min_similarity` (default `0.40`). |
+| `[[serve.layer]]` | none | Per-layer ranking: `session`, `weight` (default `0.5`) and `min_similarity` (default `0.50`). |
 
 Every session named in `[serve]` must be addressable by URL: 1 to 128 bytes of `A-Z`, `a-z`, `0-9`, `.`, `_`, `:` and `-`, not starting with `.`. A name outside that rule is refused here, but you can still serve it on its own with `lambo serve --session <name>`, which keeps its looser rule.
 
@@ -406,13 +406,13 @@ lambo-paper = []                   # opt one session out
 
 [[serve.layer]]
 session = "general"
-weight = 0.5                       # uncalibrated until #87
-min_similarity = 0.40              # uncalibrated until #87
+weight = 0.5                       # measured on BGE-M3 (#157)
+min_similarity = 0.50              # absolute vector relevance
 ```
 
 `layers` applies to every pinned session that is not itself a layer; `[serve.session_layers]` overrides it per session. Every shape is a list, but this release supports one layer per session, and a longer list is refused (`lists 2 layers; at most 1 is supported`). On-demand sessions are never layered.
 
-A merged recall interleaves the two answers by rank: the layer's hit at position `r` ranks as `weight / r`, against `1 / r` for the session's own. At the default `0.5` the layer's first hit sits beside the session's second. A layer hit is admitted only with keyword evidence, a vector similarity at or above its `min_similarity`, or as a dependent in the layer's own answer to a dependency question. Both numbers are uncalibrated until [issue #87](https://github.com/nrynss/lambo/issues/87). See [`lambo_recall`](/mcp#lambo_recall) for what a layered answer looks like.
+A merged recall interleaves the two answers by rank: the layer's hit at position `r` ranks as `weight / r`, against `1 / r` for the session's own. At the default `0.5` the layer's first hit sits beside the session's second. An ordinary layer hit is admitted only with vector cosine at or above its `min_similarity` (default `0.50`); keyword matches and warnings do not bypass this absolute cutoff. A dependent in an anchored layer traversal answer also passes. These defaults were measured on BGE-M3 in [issue #157](https://github.com/nrynss/lambo/issues/157); other embedders still need [score calibration (#87)](https://github.com/nrynss/lambo/issues/87). A layer with no vector evidence contributes no ordinary hits, including during embedding or vector-search failure; the caller's own keyword recall and anchored dependency answers still work. See [`lambo_recall`](/mcp#lambo_recall) for what a layered answer looks like.
 
 Refused when the file is read (every command): a name outside the session charset or listed twice, more than one layer per session, a session that lists itself, a layer that has layers of its own (no transitive layering), and a `[[serve.layer]]` entry that names no configured layer or sets `weight` to anything but a finite positive number or `min_similarity` outside `[0, 1]`. Unknown keys in these tables are refused like any other.
 
@@ -440,7 +440,7 @@ layers = ["general"]
 [[serve.layer]]
 session = "general"
 weight = 0.5
-min_similarity = 0.40
+min_similarity = 0.50
 ```
 
 Start the HTTP serve without a `--session` override if `/mcp` should use this

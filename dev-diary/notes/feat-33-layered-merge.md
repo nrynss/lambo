@@ -1,5 +1,11 @@
 # #33 PR 2: layered recall in the library
 
+**Superseded admission/defaults in #157:** ordinary layer hits now require
+absolute vector cosine >= 0.50; keyword matches do not bypass the floor.
+The rank weight stays 0.5 and compatible anchored dependency answers still
+pass. See [the measured tuning](feat-157-layer-tuning.md). The initial
+implementation history below records the older 0.40 / keyword-bypass design.
+
 Design of record: the #33 layered-recall design (posted on issue 33),
 sections 1.1, 2 and 5, PR 2 row of section 10. PR 1 (#133) supplied
 `format::fit_blocks`, `ContextBlock.scope` and `DetailedRecall::mark_context`.
