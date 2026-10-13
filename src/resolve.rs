@@ -251,6 +251,7 @@ pub fn check_vector_search_contract(
 fn process_config(
     daemon_cfg: &crate::config::DaemonConfig,
     promotion_policy: Option<crate::canon::PromotionPolicy>,
+    canonization_supersede: Option<bool>,
     embedder_cfg: &EmbedderConfig,
 ) -> Result<crate::Config, LamboError> {
     let mut config = crate::Config::default();
@@ -258,7 +259,7 @@ fn process_config(
     if let Some(policy) = promotion_policy {
         config.promotion_policy = policy;
     }
-    if let Some(supersede) = file.canonization_supersede {
+    if let Some(supersede) = canonization_supersede {
         config.canonization_supersede = supersede;
     }
     // #22: a process setting the surfaces read through `Memory::config`, set
@@ -308,7 +309,12 @@ pub fn resolve_backends(file: LamboFile) -> Result<ResolvedBackends, LamboError>
     // degenerate cadence here, uniformly and BEFORE any store/embedder build
     // (an embedder build may hash a weight file or dial a credential source,
     // so we reject the file first; since #31 none loads a model, see below).
-    let config = process_config(&daemon_cfg, promotion_policy, &embedder_cfg)?;
+    let config = process_config(
+        &daemon_cfg,
+        promotion_policy,
+        file.canonization_supersede,
+        &embedder_cfg,
+    )?;
     // A store whose vector column carries no width of its own (SQLite's BLOB) reports
     // the operator's `store.vector_dim` pin when one is set, and otherwise **echoes**
     // the configured embedder width — an echo, not a store-side authority, which is
@@ -641,7 +647,12 @@ pub fn resolve_verify_io(
                 .into(),
         ));
     }
-    let process = process_config(&file.daemon, file.promotion_policy, &file.embedder)?;
+    let process = process_config(
+        &file.daemon,
+        file.promotion_policy,
+        file.canonization_supersede,
+        &file.embedder,
+    )?;
     file.serve.validate()?;
     let source = resolve_classification_source(database, snapshot)?;
     let split = VerifySplitOutput::open(split_database)?;
