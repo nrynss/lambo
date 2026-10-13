@@ -17,9 +17,10 @@
 //!    (the edge's last activity; a never-reinforced edge is dead from its
 //!    write). Structural types are exempt: their weight is a property of the
 //!    kind, not a decayed signal, and §5.7 depends on them surviving.
-//! 2. **Concept cleanup** — orphans (no incident edges after step 1) and
-//!    sub-threshold concepts are collected, **excluding** Venerable,
-//!    Canonical, and root-goal concepts. The cut takes the **session's**
+//! 2. **Concept cleanup** — orphans (no incident edges after step 1, a
+//!    `Contradicts` edge not counting) and sub-threshold concepts are
+//!    collected, **excluding** Venerable, Canonical, and root-goal concepts,
+//!    and concepts that contradict a Venerable or Canonical one (below). The cut takes the **session's**
 //!    [`ScoringWeights`] (ALGO-4 — GC must not rank eviction with weights
 //!    nothing else uses), scores each concept over the live dimensions plus
 //!    its own frequency term
@@ -59,12 +60,24 @@
 //!      the next sweep.
 //! 3. **Disconnected-component cleanup** — a cycle-safe BFS (visited set, per
 //!    the G6 binding note — never assume Hierarchical acyclicity) from the
-//!    temporal chain over the full undirected graph; every concept not reached
-//!    is collected. Protected classes are exempt ("protected classes survive"
-//!    contract); interactions are append-only and never collected. Measured
+//!    temporal chain over the undirected graph, crossing every edge but
+//!    `Contradicts`; every concept not reached is collected. Protected
+//!    classes are exempt ("protected classes survive" contract);
+//!    interactions are append-only and never collected. Measured
 //!    twice: on the post-step-1 graph (ranked before the score cut under the
 //!    cap), and again after the collections, so a concept reachable only
 //!    through a score-cut concept still goes in the same sweep.
+//!
+//!    **Contradictions (#19(c) owner decision 1, option C).** A
+//!    `Contradicts` edge connects nothing: it neither saves an orphan nor
+//!    carries reachability ([`EdgeType::counts_toward_gc_connectivity`]),
+//!    so a contradiction keeps neither of its concepts alive. One exception:
+//!    a concept with a `Contradicts` edge to a concept that is Venerable or
+//!    Canonical when the sweep starts is a protected class for that sweep
+//!    (`contradicts_a_promoted_concept`), because recall's contradiction
+//!    warning on the promoted concept names it. When the target is demoted
+//!    below Venerable, the next sweep judges the contradicting concept like
+//!    any other.
 //! 4. **Index maintenance** — the inverted index (T2.6) is owner-side (P3
 //!    contract, `src/graph/mod.rs`), so `run(&mut Graph, …)` cannot reach it.
 //!    [`GcOutcome::concepts_collected`] + [`sync_index`] are the hook: the
@@ -461,9 +474,13 @@ pub fn run(graph: &mut Graph, params: GcParams) -> GcOutcome {
     // Protected classes: Venerable / Canonical / root-goal. Computed once —
     // canonization statuses and the root goal do not change during a GC run.
     let goal_texts = graph.root_goal_texts();
+    // #19(c) owner decision 1C: a concept contradicting a Venerable or
+    // Canonical target is protected while the target holds that status.
     let protected: HashSet<NodeId> = graph
         .concepts()
-        .filter(|c| is_protected(c, &goal_texts))
+        .filter(|c| {
+            is_protected(c, &goal_texts) || contradicts_a_promoted_concept(graph, c.id, params.now)
+        })
         .map(|c| c.id)
         .collect();
 
@@ -503,7 +520,7 @@ pub fn run(graph: &mut Graph, params: GcParams) -> GcOutcome {
         if protected.contains(&c.id) {
             continue;
         }
-        if graph.incident_edges(c.id).is_empty() {
+        if !has_gc_connection(graph, c.id) {
             orphans.push(c.id);
             continue;
         }
@@ -647,7 +664,9 @@ pub fn run(graph: &mut Graph, params: GcParams) -> GcOutcome {
 
 /// Every node reachable from the temporal chain over the undirected graph —
 /// step 3's cycle-safe BFS (visited set, per the G6 binding note: never assume
-/// Hierarchical acyclicity).
+/// Hierarchical acyclicity). Only edges that
+/// [`EdgeType::counts_toward_gc_connectivity`] are crossed, so a
+/// `Contradicts` edge connects nothing (#19(c) owner decision 1C).
 fn reachable_from_temporal_chain(graph: &Graph) -> HashSet<NodeId> {
     let mut reachable: HashSet<NodeId> = HashSet::new();
     let mut stack: Vec<NodeId> = graph.temporal_chain().to_vec();
@@ -655,18 +674,65 @@ fn reachable_from_temporal_chain(graph: &Graph) -> HashSet<NodeId> {
         reachable.insert(seed);
     }
     while let Some(n) = stack.pop() {
-        for nb in graph.out_neighbors(n) {
-            if reachable.insert(nb) {
-                stack.push(nb);
+        for e in graph.incident_edges(n) {
+            if !e.edge_type.counts_toward_gc_connectivity() {
+                continue;
             }
-        }
-        for nb in graph.in_neighbors(n) {
+            let nb = if e.source == n { e.target } else { e.source };
             if reachable.insert(nb) {
                 stack.push(nb);
             }
         }
     }
     reachable
+}
+
+/// Does `node` have an incident edge that connects it for GC (step 2's
+/// orphan test)? A `Contradicts` edge does not (#19(c) owner decision 1C):
+/// a concept whose only edges are contradictions is an orphan.
+fn has_gc_connection(graph: &Graph, node: NodeId) -> bool {
+    graph
+        .incident_edges(node)
+        .iter()
+        .any(|e| e.edge_type.counts_toward_gc_connectivity())
+}
+
+/// Does `node` contradict a concept that is Venerable or Canonical right now
+/// (#19(c) owner decision 1C)? Such a concept is protected from GC: it is
+/// the evidence behind a recall contradiction warning, and that warning
+/// exists only for promoted concepts, so it must live as long as they hold
+/// their status. Protected means exactly what a Venerable concept gets
+/// here: never collected as an orphan, by the score cut or as a
+/// disconnected component, and not counted toward the collection cap.
+/// Once every such target is demoted below Venerable (or collected), the
+/// protection lapses and the concept is judged like any other, with its
+/// `Contradicts` edges counting for nothing. Self-edges and non-concept
+/// targets never protect.
+///
+/// The edge counts from the date the detector gives it
+/// ([`crate::daemon::contradiction::declared_at`]: its about-time clamped
+/// to its write time, #19(c) review M1), and only once it has been
+/// **written** by the sweep's `now`
+/// ([`crate::daemon::contradiction::written_by`]): a write after the clock
+/// protects nothing yet, even with an earlier `event_time`.
+fn contradicts_a_promoted_concept(graph: &Graph, node: NodeId, now: DateTime<Utc>) -> bool {
+    graph
+        .out_neighbors_typed(node, EdgeType::Contradicts)
+        .into_iter()
+        .filter(|&t| t != node)
+        .any(|t| {
+            let promoted = matches!(
+                graph.node(t),
+                Some(crate::types::Node::Concept(c)) if matches!(
+                    c.canonization_status,
+                    CanonizationStatus::Venerable | CanonizationStatus::Canonical
+                )
+            );
+            promoted
+                && graph
+                    .edge_between(node, t, EdgeType::Contradicts)
+                    .is_some_and(|e| crate::daemon::contradiction::written_by(e, now))
+        })
 }
 
 /// The order a sweep's survivor bumps are applied in (issue #29): the

@@ -267,7 +267,9 @@ impl LamboServer {
     #[tool(
         name = "lambo_recall",
         description = "Recall relevant memory for a query and return the Lambo context block \
-                       (canonical markers, blast-radius warnings, conflict lines)."
+                       (canonical markers, blast-radius warnings, conflict lines, and \
+                       contradiction warnings: a canonical or venerable concept that a newer \
+                       concept contradicts is shown with that concept beside it)."
     )]
     async fn lambo_recall(&self, Parameters(p): Parameters<RecallParams>) -> CallToolResult {
         let agent_id = p.agent_id.clone();
@@ -294,7 +296,8 @@ impl LamboServer {
                        must already exist and match exactly one concept, or the whole call is \
                        refused. When a concept says an existing one is wrong, name that one \
                        the same way in the concept's against: it records the contradiction, \
-                       dated by this write, and adds no dependent, score or promotion. \
+                       dated by this write's event_time (else now), and adds no dependent, \
+                       score or promotion. \
                        created_at is stamped server-side. event_time is optional RFC3339 \
                        historical about-time, such as a commit or document date; omit it for \
                        a live fact, which is about now. Returns as soon \
@@ -325,7 +328,7 @@ impl LamboServer {
                        on a ruling or decision from memory, cite it by id (the 8 hex characters \
                        recall shows) in depends_on. When the action showed a concept in \
                        memory to be wrong, name it the same way in against (dated by this \
-                       write; never the action itself). created_at is \
+                       write's event_time, else now; never the action itself). created_at is \
                        stamped server-side. event_time is optional \
                        RFC3339 historical about-time, such as a commit or document date; omit \
                        it for a live fact, which is about now. \

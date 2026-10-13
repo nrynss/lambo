@@ -280,6 +280,15 @@ fn chrono_window(window: Duration) -> ChronoDuration {
     ChronoDuration::from_std(window).unwrap_or(ChronoDuration::MAX)
 }
 
+/// `now - window`, or the earliest representable instant when that
+/// underflows: a window reaching past chrono's range covers all of time.
+/// `now - ChronoDuration::MAX` panicked (`DateTime - TimeDelta`
+/// overflowed), so saturating the duration alone was not enough.
+fn window_start(window: Duration, now: DateTime<Utc>) -> DateTime<Utc> {
+    now.checked_sub_signed(chrono_window(window))
+        .unwrap_or(DateTime::<Utc>::MIN_UTC)
+}
+
 /// The session's most recent activity at or before `now`, as
 /// `(anchor concept, instant)`.
 ///
@@ -354,7 +363,7 @@ fn session_last_activity(graph: &Graph, now: DateTime<Utc>) -> Option<(NodeId, D
 /// fresh write and a hundred old concepts is *not* a stale session, yet it fired
 /// a hundred Stale events.
 pub fn session_stale_at(graph: &Graph, window: Duration, now: DateTime<Utc>) -> Option<StaleHit> {
-    let window_start = now - chrono_window(window);
+    let window_start = window_start(window, now);
     let (node, last) = session_last_activity(graph, now)?;
     if last >= window_start {
         return None;
@@ -407,7 +416,7 @@ pub fn high_risk_at(
     window: Duration,
     now: DateTime<Utc>,
 ) -> Option<HighRiskHit> {
-    let window_start = now - chrono_window(window);
+    let window_start = window_start(window, now);
     let c = match graph.node(node) {
         Some(crate::types::Node::Concept(c)) => c,
         _ => return None,
@@ -934,6 +943,96 @@ mod tests {
         );
     }
 
+    /// #19(c) owner decision 3, option A: a fresh contradiction is a fresh
+    /// write to its target, so a high-value target gets the short-lived
+    /// high-risk alert, beside (not instead of) the lasting contradiction
+    /// annotation. The contradiction adds no dependent: a big-radius target
+    /// is high-value by its own dependents.
+    #[test]
+    fn a_fresh_contradiction_fires_the_high_risk_alert_on_a_high_value_target() {
+        let (mut g, i1_id, i2_id) = base_graph();
+        let canonical = concept(
+            1,
+            i1_id,
+            "agent-a",
+            "canonical",
+            0,
+            CanonizationStatus::Canonical,
+            None,
+        );
+        let canonical_id = canonical.id;
+        g.insert_concept(canonical, i1_id).unwrap();
+        let big = concept(
+            2,
+            i1_id,
+            "agent-a",
+            "big",
+            0,
+            CanonizationStatus::None,
+            None,
+        );
+        let big_id = big.id;
+        g.insert_concept(big, i1_id).unwrap();
+        for k in 0..6u64 {
+            let d = concept(
+                20 + k,
+                i1_id,
+                "agent-a",
+                &format!("depends on big {k}"),
+                0,
+                CanonizationStatus::None,
+                None,
+            );
+            let d_id = d.id;
+            g.insert_concept(d, i1_id).unwrap();
+            g.upsert_edge(edge(20 + k, d_id, big_id, 0)).unwrap();
+        }
+        let ordinary = concept(
+            3,
+            i1_id,
+            "agent-a",
+            "ordinary",
+            0,
+            CanonizationStatus::None,
+            None,
+        );
+        let ordinary_id = ordinary.id;
+        g.insert_concept(ordinary, i1_id).unwrap();
+        let by = concept(
+            9,
+            i2_id,
+            "agent-b",
+            "not so",
+            10,
+            CanonizationStatus::None,
+            None,
+        );
+        let by_id = by.id;
+        g.insert_concept(by, i2_id).unwrap();
+        let radius_before = crate::recall::format::blast_radius(&g, big_id);
+        for (k, target) in [canonical_id, big_id, ordinary_id].into_iter().enumerate() {
+            g.upsert_edge(Edge {
+                edge_type: EdgeType::Contradicts,
+                ..edge(90 + k as u64, by_id, target, 95)
+            })
+            .unwrap();
+        }
+        assert_eq!(
+            crate::recall::format::blast_radius(&g, big_id),
+            radius_before,
+            "a contradiction is not a dependent"
+        );
+
+        let window = Duration::from_secs(30);
+        let hits = detect_high_risk(&g, window, ts(100));
+        let nodes: Vec<NodeId> = hits.iter().map(|h| h.node).collect();
+        assert!(nodes.contains(&canonical_id), "Canonical target alerts");
+        assert!(nodes.contains(&big_id), "high-radius target alerts");
+        assert!(!nodes.contains(&ordinary_id), "an ordinary target does not");
+        // Short-lived: gone once the write leaves the window.
+        assert!(detect_high_risk(&g, window, ts(200)).is_empty());
+    }
+
     #[test]
     fn detect_high_risk_requires_value_and_fresh_write() {
         let now = ts(100);
@@ -1274,5 +1373,24 @@ mod tests {
                 c.id
             );
         }
+    }
+
+    /// A window past chrono's range covers all of time instead of panicking
+    /// on `now - ChronoDuration::MAX` (#19(c) review M5).
+    #[test]
+    fn an_unrepresentable_window_saturates_instead_of_panicking() {
+        let (mut g, i1_id, _) = base_graph();
+        let c = concept(
+            1,
+            i1_id,
+            "agent-a",
+            "c",
+            0,
+            CanonizationStatus::Canonical,
+            None,
+        );
+        g.insert_concept(c, i1_id).unwrap();
+        assert!(session_stale_at(&g, Duration::MAX, ts(100)).is_none());
+        assert_eq!(detect_high_risk(&g, Duration::MAX, ts(100)).len(), 1);
     }
 }

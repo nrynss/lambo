@@ -74,8 +74,12 @@ The accessors `session`, `agent`, `config`, `embedding_contract`, `graph`, `inde
 
 `EdgeType::Contradicts` is a directed concept-to-concept relation:
 `writer -> target`: from the concept or action that declares the
-contradiction to the existing concept it names. The direction and date come from
-the write that declares it, not from either concept's age. Its serialized and stored name is
+contradiction to the existing concept it names. The direction comes from
+the write that declares it, not from either concept's age, and the edge is
+dated by that write's about-time: its `event_time` if one was given,
+otherwise its write time. Sending the same contradiction again reinforces
+the edge and does not re-date it. Recall's detector clamps a future
+`event_time` to the write time (`declared_at`). Its serialized and stored name is
 `Contradicts`, following the other edge types. Graph snapshots and store
 mutation batches can carry it; existing database schemas need no migration.
 Older binaries cannot decode a store or snapshot containing the new variant.
@@ -88,14 +92,83 @@ bonus), or protect a Resource from the GC score cut, and its writer does not joi
 conflict agent set. A fresh contradiction does count as a recent write in the
 high-risk check. Its weight does not decay.
 
-GC's connectivity rules are unchanged and count it like any other edge: a
-concept with a contradiction is not an orphan, and a contradiction can keep a
-concept reachable from the interaction chain. Because the edge never decays,
-it keeps that connection until either endpoint is collected for another
-reason.
+GC does not count it as connectivity (#19(c) owner decision 1, option C): a
+concept whose only edges are contradictions is an orphan, and a contradiction
+keeps nothing reachable from the interaction chain. The one exception is a
+concept that contradicts a Venerable or Canonical concept: GC protects it
+while the target keeps that status (see *Contradiction warnings* below).
 Agents write it through `against` on derive and record_action (see the methods
-above and the MCP reference). Recall contradiction warnings, the GC rule
-change and supersession are separate follow-ups (#19(c), #20).
+above and the MCP reference). Supersession is a separate follow-up (#20).
+
+## Contradiction warnings
+
+Recall warns when a Canonical or Venerable concept is contradicted by a newer
+assertion (#19(c)). The daemon's detector, `daemon::contradiction`
+(`detect`, `contradiction_at`, `insert_contradictions`, `ContradictionHit`),
+fires on a concept when:
+
+1. it is Canonical or Venerable;
+2. another concept of its session has a `Contradicts` edge to it; and
+3. that edge's declaration date (`declared_at`: `Edge::about_time`, the
+   declaring write's `event_time`, else its write time, clamped to its write
+   time) is strictly later than both the concept's own origin interaction's
+   about-time (clamped the same way) and its latest eligible dependent
+   evidence, when it has any. The bar is the later of the two, so a citation
+   backdated before the concept's origin does not let an earlier
+   contradiction warn.
+
+Eligible evidence is #36's dependents relation (`Dependency` sources into the
+concept and its `Hierarchical` children), one piece per dependence edge,
+dated by that edge's `declared_at`. It counts once it was **written** at
+least `CycleParams::contradiction_evidence_min_age` ago (from
+`Config::canonization_edge_min_age`, Stage 2's floor); a backdated
+`event_time` does not skip the floor, and a cutoff out of chrono's range
+makes nothing eligible. Re-sending an existing dependence reinforces its
+edge and keeps its dates, so only a new dependence edge is new evidence. A dependent written by
+the concept's own origin interaction never counts. Neither does evidence
+written by the agent that declared the contradiction, or declared by the
+contradicting concept itself, so a writer cannot outweigh its own
+contradiction. Re-sending a contradiction reinforces the edge without
+re-dating it.
+
+The detector keeps one `HotListPayload::Contradiction { by, writer, at }` per
+contradicted concept on the hot list under `Condition::Contradiction`, which
+shares `Condition::Conflict`'s severity; the daemon inserts contradictions
+before conflicts each cycle, so on a full hot list a contradiction is
+evicted before a conflict. It is the newest qualifying
+contradiction, ties going to the smaller canonical key and then the smaller
+id of `by`. `writer` is the agent acting when the edge was first written,
+falling back to `by`'s origin agent. No `DaemonEvent` is published for it.
+Recall re-validates it at read time like every hot entry, so it lapses when
+the concept is demoted below Venerable, when newer evidence becomes eligible,
+or when `by` is collected. The entries of one detector pass share one writer
+timeline, rebuilt only when the graph's epoch moves.
+
+Recall renders `recall::format::contradiction_warning` on the hit and
+force-includes it, and pulls `by` into the result, force-included too, with
+`recall::format::contradicts_warning`. Both lines quote at most
+`CONTRADICTION_EXCERPT_CHARS` (80) characters of the other concept and name
+its short id. The detailed recall's annotation kinds are `contradiction` and
+`contradicts`; a layered merge forces both past `top_k`, never past a floor.
+The pulled-in concept is not itself re-validated, so it carries only the
+`contradicts` line. A structural (dependency-question) recall answers by
+traversal and renders no hot-list warnings, contradictions included.
+
+Garbage collection does not count a `Contradicts` edge as connectivity
+(`EdgeType::counts_toward_gc_connectivity`). A concept with a `Contradicts`
+edge to a concept that is Venerable or Canonical when a sweep starts is a
+protected class for that sweep, as a Venerable concept is: it is not
+collected as an orphan, as a disconnected component or by the score cut, and
+it is outside the collection cap's base. The edge counts once it has been
+written by the sweep's clock. Protection is not the same as a current
+warning: GC checks only the target's promoted status and that the
+contradiction exists, not whether it is newer than the target's evidence,
+so a concept stays protected after its warning has lapsed because newer
+evidence arrived. The protection does not extend to its neighbours, and it
+lapses on the first sweep after the target is demoted. Because any agent may write `against`, the protection can
+keep an otherwise collectable concept alive indefinitely by contradicting a
+promoted one; this is the owner's decision (#19(c) decision 1C), noted here
+as a store-growth consideration.
 
 ## Settings
 

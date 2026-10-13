@@ -208,8 +208,8 @@ pub enum EdgeType {
     /// `newer assertion -> older assertion`, concept to concept.
     /// Informational only: it declares no dependence, support or blast,
     /// counts toward neither score density nor the edge bonus, and does not
-    /// decay. No product path writes it yet; the derive and record_action
-    /// write fields arrive with #19(b).
+    /// decay. Written by `against` on `lambo_derive` and
+    /// `lambo_record_action` (#19(b)).
     Contradicts,
 }
 
@@ -240,6 +240,27 @@ impl EdgeType {
     /// being contradicted never raises the composite that feeds Stage 1
     /// candidate selection, recall ranking or the GC score cut (#19).
     pub const fn counts_toward_density(self) -> bool {
+        match self {
+            Self::Temporal
+            | Self::Derives
+            | Self::CoOccurrence
+            | Self::Causal
+            | Self::Dependency
+            | Self::Hierarchical
+            | Self::Semantic => true,
+            Self::Contradicts => false,
+        }
+    }
+
+    /// Whether an edge of this type connects its ends for garbage
+    /// collection (spec §9 steps 2 and 3): an endpoint with such an edge is
+    /// not an orphan, and step 3's reachability walk from the temporal chain
+    /// crosses it. Every type does except `Contradicts` (#19(c) owner
+    /// decision 1, option C): being contradicted, or contradicting, keeps
+    /// nothing alive. GC's one exception, a concept contradicting a target
+    /// that is Venerable or Canonical, is a protection in
+    /// `crate::daemon::gc`, not connectivity.
+    pub const fn counts_toward_gc_connectivity(self) -> bool {
         match self {
             Self::Temporal
             | Self::Derives
@@ -1685,6 +1706,24 @@ pub enum HotListPayload {
     },
     /// The node's session has been inactive this long, in seconds.
     Stale { seconds_inactive: u64 },
+    /// A Canonical or Venerable node is contradicted by a newer assertion
+    /// (#19(c)): a `by -Contradicts-> node` edge whose declaration date is
+    /// strictly later than the node's latest age-eligible dependent evidence. When
+    /// several qualify, the newest, then `by`'s canonical key, then its id.
+    /// See [`crate::daemon::contradiction`].
+    Contradiction {
+        /// The contradicting concept, the edge's source. Recall pulls it into
+        /// the result beside the node.
+        by: NodeId,
+        /// The agent that declared the contradiction: the one acting when the
+        /// edge was first written (falling back to `by`'s origin agent).
+        writer: AgentId,
+        /// The declaring write's about-time: its `event_time` when one was
+        /// given, else its write time ([`Edge::about_time`]), never later
+        /// than its write time (a future `event_time` is clamped). Re-sending
+        /// the same contradiction reinforces the edge and does not move this.
+        at: DateTime<Utc>,
+    },
 }
 
 /// Stage 2 structural evidence (spec §4.1 / §10).
@@ -2194,6 +2233,19 @@ mod tests {
             assert!(ty.counts_toward_density(), "{ty:?}");
         }
         assert!(!EdgeType::Contradicts.counts_toward_density());
+    }
+
+    /// #19(c) owner decision 1C: every edge type connects for GC except
+    /// `Contradicts`.
+    #[test]
+    fn edge_type_gc_connectivity_table() {
+        for ty in EdgeType::ALL {
+            assert_eq!(
+                ty.counts_toward_gc_connectivity(),
+                ty != EdgeType::Contradicts,
+                "{ty:?}"
+            );
+        }
     }
 
     /// #36: only `Dependency` (source rests on target) and `Hierarchical`

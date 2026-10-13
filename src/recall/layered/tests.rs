@@ -873,3 +873,71 @@ fn a_different_layer_anchor_cannot_admit_dependents_past_the_floor() {
     let accepted = run(&[caller, general], params(10));
     assert!(order(&accepted).contains(&"general/db dependent".to_string()));
 }
+
+/// #19(c): a contradicted hit and its companion are forced (they lift
+/// `top_k`) on either side of the merge, and never past a layer's floor.
+/// A companion floored out of a layer is still named, prefixed, on its
+/// target's line.
+#[test]
+fn contradiction_annotations_force_past_top_k_but_never_the_floor() {
+    let lists = [
+        primary(&[
+            kw("p1"),
+            kw("p-contradicted").with(
+                AnnotationKind::Contradiction,
+                "⚠ Contradicted at t by agent-c: \"p-companion\" (id aaaaaaaa)",
+            ),
+            expanded("p-companion").with(
+                AnnotationKind::Contradicts,
+                "⚠ Contradicts \"p-contradicted\"",
+            ),
+        ]),
+        layer(
+            1,
+            "general",
+            0.5,
+            &[
+                kw("g1"),
+                kw("g-contradicted").with(
+                    AnnotationKind::Contradiction,
+                    "⚠ Contradicted at t by agent-d: \"g-companion\" (id bbbbbbbb)",
+                ),
+                // The layer's companion has no leg evidence: the floor holds.
+                expanded("g-companion").with(
+                    AnnotationKind::Contradicts,
+                    "⚠ Contradicts \"g-contradicted\"",
+                ),
+            ],
+        ),
+    ];
+    let r = run(&lists, params(1));
+    assert_eq!(
+        order(&r),
+        [
+            "lambo/p1",
+            "lambo/p-contradicted",
+            "lambo/p-companion",
+            "general/g-contradicted"
+        ]
+    );
+    assert!(r
+        .warnings
+        .iter()
+        .any(|w| w.starts_with("[general] ⚠ Contradicted") && w.contains("bbbbbbbb")));
+    assert!(!r
+        .warnings
+        .iter()
+        .any(|w| w.contains("Contradicts \"g-contradicted\"")));
+}
+
+#[test]
+fn contradiction_kinds_are_snake_case_on_the_wire() {
+    assert_eq!(
+        serde_json::to_string(&AnnotationKind::Contradiction).unwrap(),
+        "\"contradiction\""
+    );
+    assert_eq!(
+        serde_json::to_string(&AnnotationKind::Contradicts).unwrap(),
+        "\"contradicts\""
+    );
+}
