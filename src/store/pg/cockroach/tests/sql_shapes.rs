@@ -258,8 +258,10 @@ WHERE session_id = $1
                 sql.push_str(" OR ");
             }
             let n = i + 2;
+            // #129 (#33 PR 7): a repository-scoped key's text is not matched.
             sql.push_str(&format!(
-                "strpos(lower(content), ${n}) > 0 OR strpos(lower(canonical_key), ${n}) > 0"
+                "strpos(lower(content), ${n}) > 0 OR (substr(canonical_key, 1, 16) <> \
+                 'RepoResource:v1:' AND strpos(lower(canonical_key), ${n}) > 0)"
             ));
         }
         sql.push(')');
