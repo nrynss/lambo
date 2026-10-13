@@ -37,6 +37,7 @@
 //! graceful stop is a P8 concern per the COH-6 note).
 pub mod access;
 pub mod conflict;
+pub mod contradiction;
 pub mod drift;
 pub mod events;
 pub mod gc;
@@ -216,6 +217,10 @@ pub struct CycleParams {
     /// Survivor `gc_survived` bumps applied per cycle
     /// ([`gc::GC_SURVIVOR_BUMP_CHUNK`], CONC-6/XP-10).
     pub gc_survivor_bump_chunk: usize,
+    /// How old dependent evidence must be before it outweighs a
+    /// contradiction (#19(c), [`contradiction`]): the session's
+    /// `canonization_edge_min_age`, Stage 2's age floor.
+    pub contradiction_evidence_min_age: Duration,
 }
 
 impl From<&Config> for CycleParams {
@@ -235,6 +240,7 @@ impl From<&Config> for CycleParams {
             max_canonical_nodes: config.max_canonical_nodes,
             event_capacity: events::EVENT_CAPACITY,
             gc_survivor_bump_chunk: gc::GC_SURVIVOR_BUMP_CHUNK,
+            contradiction_evidence_min_age: config.canonization_edge_min_age,
         }
     }
 }
@@ -1260,6 +1266,18 @@ fn run_cycle(
     let (conflict_hits, drift_hits, stale_hits, high_risk_hits, fresh) = {
         let g = graph.read();
         let mut h = hot.write();
+        // #19(c): hot-list only, so its pairs keep their entries below but
+        // never enter `fresh`, which drives events. Inserted FIRST (review
+        // L3): it shares conflict's severity tier, and within a tier the
+        // entry inserted last ranks higher and is evicted last, so a
+        // persistent contradiction never pushes a transient conflict off a
+        // full hot list. Lower tiers are evicted before either.
+        let contradiction_hits = contradiction::insert_contradictions(
+            &mut h,
+            &g,
+            params.contradiction_evidence_min_age,
+            now,
+        );
         let conflict_hits = conflict::insert_conflicts(&mut h, &g, params.conflict_window, now);
         let drift_hits = drift::record(&mut h, &g, params.drift_threshold);
         let stale_hits = events::insert_stale(&mut h, &g, params.stale_window, now);
@@ -1270,7 +1288,13 @@ fn run_cycle(
         // captured-`now` predicate. Also removes the old
         // O(hot_len × full-graph scan) per-cycle revalidation.
         let fresh = condition_set(&conflict_hits, &drift_hits, &stale_hits, &high_risk_hits);
-        h.retain_conditions(&fresh);
+        let mut held = fresh.clone();
+        held.extend(
+            contradiction_hits
+                .iter()
+                .map(|h| (Condition::Contradiction, h.node)),
+        );
+        h.retain_conditions(&held);
         (conflict_hits, drift_hits, stale_hits, high_risk_hits, fresh)
     };
 
@@ -1340,6 +1364,8 @@ fn run_cycle(
                     .iter()
                     .find(|h| h.node == pair.1)
                     .map(|h| events::stale_event(h.node, h.seconds_inactive)),
+                // Never armed: a contradiction publishes no event (#19(c)).
+                Condition::Contradiction => None,
             };
             // `armed` is kept equal to `fresh`, so the hit is always found.
             if let Some(event) = event {

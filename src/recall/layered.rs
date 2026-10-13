@@ -44,7 +44,8 @@
 //!    against emitted groups alone, which bounds the work).
 //!    Otherwise the candidate is emitted while fewer than `top_k`
 //!    non-forced hits are, or when it is **forced** (a Conflict, Hot or
-//!    Reservation annotation, design 2.2). Forcing only lifts the `top_k`
+//!    Reservation annotation, design 2.2, or #19(c)'s Contradiction or
+//!    Contradicts annotation). Forcing only lifts the `top_k`
 //!    cut, never a floor. The set is design 2.2's and is wider than
 //!    assembly's own: assembly forces hot-list payloads (Conflict and the
 //!    Hot kinds), and reservations only in cold mode.
@@ -244,12 +245,17 @@ impl LayeredRecall {
 pub(crate) const MAX_VECTOR_DEDUPE_PAIRS: usize = 65_536;
 
 /// A hit is forced (kept beyond `top_k`, never past a floor) when it
-/// carries a Conflict, Hot or Reservation annotation (design 2.2).
+/// carries a Conflict, Hot or Reservation annotation (design 2.2), or a
+/// contradiction annotation on either side (#19(c)).
 fn is_forced(d: &DetailedHit) -> bool {
     d.annotations.iter().any(|a| {
         matches!(
             a.kind,
-            AnnotationKind::Conflict | AnnotationKind::Hot | AnnotationKind::Reservation
+            AnnotationKind::Conflict
+                | AnnotationKind::Hot
+                | AnnotationKind::Reservation
+                | AnnotationKind::Contradiction
+                | AnnotationKind::Contradicts
         )
     })
 }

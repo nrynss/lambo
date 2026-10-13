@@ -787,3 +787,143 @@ async fn entering_conditions_publish_highest_severity_first() {
     );
     handle.abort();
 }
+
+/// #19(c): the loop keeps a contradiction of a Canonical concept on the hot
+/// list, publishes no event for it (`DaemonEvent` is frozen), and drops the
+/// entry once the target is demoted.
+#[tokio::test(start_paused = true)]
+async fn a_contradiction_is_held_on_the_hot_list_without_an_event() {
+    let now = Utc::now();
+    let mut g = Graph::new(sid());
+    let i1 = interaction_at(1, None, "agent-a", now - chrono::Duration::seconds(900));
+    let i1_id = i1.id;
+    g.insert_interaction(i1).unwrap();
+    let i2 = interaction_at(2, Some(1), "agent-b", now - chrono::Duration::seconds(600));
+    let i2_id = i2.id;
+    g.insert_interaction(i2).unwrap();
+    let mut c1 = concept_at(
+        1,
+        i1_id,
+        "agent-a",
+        "x holds",
+        now - chrono::Duration::seconds(900),
+    );
+    c1.canonization_status = CanonizationStatus::Canonical;
+    let c1_id = c1.id;
+    g.insert_concept(c1, i1_id).unwrap();
+    let c2 = concept_at(
+        2,
+        i2_id,
+        "agent-b",
+        "x does not hold",
+        now - chrono::Duration::seconds(600),
+    );
+    let c2_id = c2.id;
+    g.insert_concept(c2, i2_id).unwrap();
+    g.upsert_edge(Edge {
+        edge_type: EdgeType::Contradicts,
+        ..dep_edge_at(1, c2_id, c1_id, now - chrono::Duration::seconds(600))
+    })
+    .unwrap();
+    let graph = Arc::new(RwLock::new(g));
+
+    let daemon = Daemon::new(
+        graph.clone(),
+        ScoringWeights::default(),
+        Duration::from_secs(3600),
+    )
+    .with_clock(Arc::new(move || now));
+    let mut rx = daemon.events();
+    let handle = daemon.spawn();
+    wait_until(|| daemon.cycles() >= 1).await;
+    {
+        let hot = daemon.hot_list();
+        let hot = hot.read();
+        let entry = hot
+            .iter()
+            .find(|e| e.node() == c1_id)
+            .expect("the contradicted concept is on the hot list");
+        assert_eq!(entry.condition(), Condition::Contradiction);
+        assert_eq!(
+            entry.payload(),
+            &crate::types::HotListPayload::Contradiction {
+                by: c2_id,
+                writer: AgentId::from("agent-b"),
+                at: now - chrono::Duration::seconds(600),
+            }
+        );
+    }
+    match rx.try_recv() {
+        Err(tokio::sync::broadcast::error::TryRecvError::Empty) => {}
+        other => panic!("a contradiction publishes no event, got {other:?}"),
+    }
+
+    graph
+        .write()
+        .apply_canonization_transition(crate::types::CanonizationEvent {
+            id: NodeId::new(),
+            session_id: sid(),
+            node_id: c1_id,
+            from_status: CanonizationStatus::Canonical,
+            to_status: CanonizationStatus::None,
+            blast_radius: None,
+            last_demotion_time: Some(now),
+            occurred_at: now,
+        })
+        .unwrap();
+    wake_and_settle(&daemon).await;
+    assert!(
+        !daemon.hot_list().read().contains(c1_id),
+        "demoted: the contradiction no longer holds"
+    );
+    handle.abort();
+}
+
+/// #19(c) review L3: contradictions share conflict's tier and are inserted
+/// before conflicts each cycle, so on a full hot list the persistent
+/// contradictions are evicted before the transient conflict.
+#[tokio::test(start_paused = true)]
+async fn a_full_hot_list_keeps_the_conflict_over_contradictions() {
+    let (graph, c1_id, _, _) = conflicted_graph();
+    {
+        let mut g = graph.write();
+        let i1_id = NodeId(Uuid::from_u64_pair(0, 1));
+        let c2_id = NodeId(Uuid::from_u64_pair(1, 2));
+        for (n, content) in [(3u64, "x holds"), (4, "y holds")] {
+            let mut c = concept_at(n, i1_id, "agent-a", content, wall_ts(60));
+            c.canonization_status = CanonizationStatus::Canonical;
+            let id = c.id;
+            g.insert_concept(c, i1_id).unwrap();
+            g.upsert_edge(Edge {
+                edge_type: EdgeType::Contradicts,
+                ..dep_edge_at(10 + n, c2_id, id, wall_ts(30))
+            })
+            .unwrap();
+        }
+    }
+    let params = CycleParams {
+        hot_list_max: 2,
+        ..Default::default()
+    };
+    let daemon = Daemon::with_params(
+        graph.clone(),
+        ScoringWeights::default(),
+        Duration::from_secs(3600),
+        params,
+    );
+    let handle = daemon.spawn();
+    wait_until(|| daemon.cycles() >= 1).await;
+    let hot = daemon.hot_list();
+    let hot = hot.read();
+    assert_eq!(hot.len(), 2);
+    assert!(
+        hot.iter()
+            .any(|e| e.node() == c1_id && e.condition() == Condition::Conflict),
+        "{hot:?}"
+    );
+    assert!(hot
+        .iter()
+        .any(|e| e.condition() == Condition::Contradiction));
+    drop(hot);
+    handle.abort();
+}

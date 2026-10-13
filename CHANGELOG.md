@@ -157,6 +157,12 @@
 
 ### Breaking (library API)
 
+- **`HotListPayload::Contradiction { by, writer, at }` and
+  `daemon::hotlist::Condition::Contradiction`** (#19(c)): new variants, so
+  an exhaustive `match` on either needs an arm. `Condition::severity`
+  gives `Contradiction` the same tier as `Conflict`. **`CycleParams` gains
+  `contradiction_evidence_min_age`**; a struct literal needs it (or
+  `..Default::default()`).
 - **`LamboError::Reference(Box<ReferenceRefusal>)`** (#36 PR 4): a new
   variant, so an exhaustive `match` on `LamboError` needs an arm. It carries
   a typed `ReferenceRefusal` (`field`, `concept`, `reference`, `kind`:
@@ -282,6 +288,34 @@
 
 ### Added
 
+- **Recall warns when a newer assertion contradicts a promoted concept**
+  ([#19](https://github.com/nrynss/lambo/issues/19) part c). A Canonical or
+  Venerable hit that another concept contradicts (`against`) more recently
+  than its latest supporting evidence gets the line
+  `⚠ Contradicted at <time> by <agent>: "<excerpt>" (id <short id>)`, is
+  kept past `top_k`, and has the contradicting concept shown beside it with
+  `⚠ Contradicts "<excerpt>" (id <short id>)`, also past `top_k`. Supporting
+  evidence is the concept's dependents (#36), dated by the write that
+  declared each, eligible once `canonization_edge_min_age` old, excluding
+  the concept's own origin interaction, and excluding support written by the
+  contradicting agent or by the contradicting concept itself. Evidence is
+  eligible by when it was written, whatever its `event_time`. Both sides are
+  dated by about-time: the write's `event_time` if it gave one, otherwise
+  its write time, never later than its write time, so a backdated
+  contradiction is outweighed by later-dated evidence and a future-dated one
+  counts from when it was written; re-sending a contradiction or a citation
+  does not re-date it (write a concept with different content to restate
+  it). A hit shows one contradiction, the newest. It appears from the
+  daemon's next cycle, and not on dependency-question answers. It is a daemon hot-list condition
+  (`daemon::contradiction`), re-checked on every recall, so it lapses on
+  demotion, newer evidence or removal of the contradicting concept; it
+  publishes no daemon event and changes no status. In a layered recall the
+  two are kept past `top_k` but never past a layer's floor, and a
+  contradiction never crosses sessions. New annotation kinds `contradiction`
+  and `contradicts`; the `--ledger` recall line gains
+  `contradiction_warning`. The `lambo_recall` tool description mentions
+  the warning, and the `against` descriptions say how it is dated.
+
 - `lambo session classify` (#33 D1) reads a copied standalone SQLite backup
   or exported snapshot and writes a deterministic private review plan. Rules
   configure project evidence, conservative general rulings, fixed-seed
@@ -337,14 +371,16 @@
   an action, may carry `against`: existing concepts it says are wrong (at
   most 8 per concept or action, and 32 per derive call, counted apart from
   `depends_on`). Each is written as a `Contradicts` edge from the concept
-  (or action) that declares it to the one it names: the direction and the
-  date come from that write, not from which concept is older. It adds no
+  (or action) that declares it to the one it names: the direction comes
+  from that write, not from which concept is older, and the date is that
+  write's about-time (its `event_time` if one was given, otherwise its
+  write time; re-sending does not re-date it). It adds no
   dependent or blast radius, changes no score or promotion stage, and makes
   no conflict line (#19(c) owner decision 2, applied here: a
   contradiction's writer does not join the conflict agent set). It is
   still a fresh write to its target, so a load-bearing target gets the
-  short-lived high-risk alert (decision 3), and garbage collection counts
-  it as connectivity until #19(c) (decision 1). References resolve exactly
+  short-lived high-risk alert (decision 3). Garbage collection does not
+  count it as connectivity (#19(c), decision 1). References resolve exactly
   like citations, through the same resolver, and are refused the same
   typed ways before the ack (missing, ambiguous, an interaction id, the
   concept or action itself, in another scope, including a scoped write's
@@ -361,8 +397,8 @@
   contradiction(s) recorded`. The CLI takes `--against <REF>` on `lambo
   derive` (first concept) and `lambo record-action`; the library,
   `ConceptCitations::against`, `Memory::record_action_against_async_as` and
-  `record_action_against_embedded_as`. Recall does not yet annotate a
-  contradicted concept (#19 part c).
+  `record_action_against_embedded_as`. Recall annotates a contradicted
+  Canonical or Venerable concept (#19 part c, below).
 - **One strict resolver for references in writes** (`crate::surface::resolve`,
   crate-internal): no substring leg, never creates. `lambo_inspect`'s
   short-id leg now shares its prefix matcher. #19(b)'s `against` and
@@ -417,8 +453,8 @@
   are byte-exact and case-sensitive. Parent-component stars are refused.
 - `EdgeType::Contradicts` persistence and synthetic exclusion checks across
   the store adapters (#19(a)). It does not decay. The write-tool field is
-  `against` (above); contradiction warnings and evidence-driven
-  supersession follow separately.
+  `against` (above), and recall warns about contradictions (#19(c),
+  above). Evidence-driven supersession follows separately (#20).
 - A live check of the #36 dependents case on Postgres and Cockroach, with
   MemoryStore parity. It is manual by the owner's decision and is not part
   of CI: run `LAMBO_POSTGRES_DSN=<dsn> cargo test --no-default-features --features store-postgres --lib store::pg::dependents_live -- --ignored` or, for
@@ -553,6 +589,20 @@
 
 ### Changed
 
+- **Garbage collection no longer counts a contradiction as connectivity**
+  (#19(c) owner decision 1, option C). A concept whose only edges are
+  `Contradicts` edges is an orphan, and a `Contradicts` edge keeps nothing
+  reachable from the interaction chain
+  (`EdgeType::counts_toward_gc_connectivity`). The one exception: a concept
+  that contradicts a Venerable or Canonical concept is protected from
+  collection, as a Venerable concept is, while that concept keeps its
+  status, so a recall warning's evidence lasts as long as the warning can
+  fire. Protection is not a current warning: it checks only the target's
+  status, so it outlasts a warning that lapsed because newer evidence
+  arrived. Its neighbours are not protected through it, and the protection
+  lapses on the first sweep after the target is demoted. Any agent can use
+  `against` this way to keep a concept alive; that is the owner's call.
+
 - **A contradiction no longer makes a conflict (#19(c) owner decision 2,
   applied with #19(b)).** The conflict detector skips `Contradicts` edges
   when it collects writers, so another agent contradicting a concept never
@@ -651,6 +701,12 @@
   `check_single_source` guard is gone (Lambo refuses a second parent itself).
 
 ### Fixed
+
+- **A huge configured window no longer panics the daemon cycle.** The
+  conflict, staleness and high-risk detectors saturated an out-of-range
+  window to chrono's maximum and then subtracted it from the clock, which
+  overflowed and panicked. A window reaching past chrono's range now covers
+  all of time (found in #19(c) review).
 
 - SQLite session loads preserve persisted creation and close timestamps,
   including in immutable classification source fingerprints. Writable schema

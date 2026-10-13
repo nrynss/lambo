@@ -3,7 +3,7 @@
 //! A bounded priority queue of graph nodes whose conditions need surfacing in
 //! `recall()` (force-inclusion, spec §8). Entry conditions retained:
 //! **conflict detected**, **high-risk modification**, **drift detected**,
-//! **stale session**. The daemon loop (T4.6) keeps the list equal to the
+//! **stale session**, plus #19(c)'s **contradiction**. The daemon loop (T4.6) keeps the list equal to the
 //! current cycle's fresh detector hits ([`HotList::retain_conditions`]); the
 //! per-entry predicate ([`ConditionCheck`]) remains available for
 //! recall-time re-validation (T5.3).
@@ -80,7 +80,8 @@ use crate::types::NodeId;
 /// the module-level default for [`HotList::new`].
 pub const HOT_LIST_MAX: usize = 1000;
 
-/// Hot-list entry conditions (spec §9). Declared in priority order — see
+/// Hot-list entry conditions (spec §9, plus #19(c)). Declared in priority
+/// order, `Contradiction` last but sharing `Conflict`'s tier — see
 /// [`Condition::severity`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Condition {
@@ -92,14 +93,24 @@ pub enum Condition {
     Drift,
     /// The node's session has gone stale.
     StaleSession,
+    /// A Canonical or Venerable node is contradicted by a newer assertion
+    /// (#19(c), [`crate::daemon::contradiction`]). Hot-list only: it emits no
+    /// `DaemonEvent` (the §6.1 enum is frozen).
+    Contradiction,
 }
 
 impl Condition {
-    /// Priority severity: `Conflict > HighRiskModification > Drift >
-    /// StaleSession`. Higher = more urgent on the hot list.
+    /// Priority severity, highest first: `Conflict` and `Contradiction`
+    /// (one tier), then `HighRiskModification`, `Drift`, `StaleSession`.
+    /// Higher = more urgent on the hot list. A contradiction shares the
+    /// conflict tier (#19(c)): both are warnings an agent should act on
+    /// before trusting the node. Within the tier, insertion order decides
+    /// (the later insert ranks higher and is evicted last); the daemon cycle
+    /// inserts contradictions before conflicts, so on a full list a
+    /// persistent contradiction is evicted before a transient conflict.
     pub fn severity(self) -> u8 {
         match self {
-            Condition::Conflict => 3,
+            Condition::Conflict | Condition::Contradiction => 3,
             Condition::HighRiskModification => 2,
             Condition::Drift => 1,
             Condition::StaleSession => 0,

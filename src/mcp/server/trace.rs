@@ -150,9 +150,9 @@ pub(super) fn call_auth() -> Option<CallAuth> {
 ///   nowhere in the response. (Per-hit `is_canonical` is still on every hit, so
 ///   "was a Canonical concept *returned*" remains answerable — from the hits,
 ///   which is where a set-level flag cannot honestly answer it.)
-/// * **The four warning flags are budget-independent** —
+/// * **The warning flags are budget-independent** —
 ///   `blast_radius_warning`, `conflict_line`, `hot_warning`,
-///   `reservation_warning`. Their lines are pushed into the flat `warnings`
+///   `reservation_warning` and `contradiction_warning` (#19(c), additive). Their lines are pushed into the flat `warnings`
 ///   vector for *every* returned hit regardless of the budget
 ///   (`assemble.rs`: "a block truncated from the context still reports its
 ///   conditions") and delivered to the agent as a second text block. The line
@@ -210,6 +210,7 @@ fn recall_facts_with(
     let mut conflict_line = false;
     let mut hot_warning = false;
     let mut reservation_warning = false;
+    let mut contradiction_warning = false;
 
     // #130: the truncated first hit, if any, and whether its cut kept the
     // label line (and so `[…, canonical]`).
@@ -241,7 +242,7 @@ fn recall_facts_with(
                 }
             }
             let mut kinds: Vec<&'static str> = Vec::new();
-            // Deliberately NOT gated on `included_in_context`: these four lines
+            // Deliberately NOT gated on `included_in_context`: these lines
             // go into the flat `warnings` vector for every returned hit and
             // reach the agent as a second text block whatever the budget did to
             // the block itself. See this function's docs.
@@ -263,6 +264,11 @@ fn recall_facts_with(
                         reservation_warning = true;
                         kinds.push("reservation");
                     }
+                    AnnotationKind::Contradiction => {
+                        contradiction_warning = true;
+                        kinds.push("contradiction");
+                    }
+                    AnnotationKind::Contradicts => kinds.push("contradicts"),
                     // Response-global kinds are never hit-owned (H3 contract),
                     // so they are reported once, below.
                     AnnotationKind::Traversal
@@ -308,6 +314,8 @@ fn recall_facts_with(
             AnnotationKind::Conflict => "conflict",
             AnnotationKind::Hot => "hot",
             AnnotationKind::Reservation => "reservation",
+            AnnotationKind::Contradiction => "contradiction",
+            AnnotationKind::Contradicts => "contradicts",
         })
         .collect();
 
@@ -321,6 +329,7 @@ fn recall_facts_with(
         "conflict_line": conflict_line,
         "hot_warning": hot_warning,
         "reservation_warning": reservation_warning,
+        "contradiction_warning": contradiction_warning,
         "response_annotations": response_kinds,
         "warning_count": detailed.warnings.len(),
         "cold_start": detailed.cold_start,

@@ -167,10 +167,12 @@ pub struct WireConcept {
     /// than this one, or the whole call is refused before the ack and
     /// nothing is written, as is a concept this one also lists in
     /// `depends_on`. Recorded as this concept contradicting each, dated by
-    /// this write whatever the two concepts' ages. It adds no dependent and
-    /// changes no score or promotion, and raises no conflict; it does count
-    /// as a fresh write to the contradicted concept. At most 32 across the
-    /// call.
+    /// this write's `event_time` (else when it is written) whatever the two
+    /// concepts' ages; sending it again does not re-date it. It adds no
+    /// dependent and changes no score or promotion, and raises no conflict;
+    /// it does count as a fresh write to the contradicted concept. When the
+    /// contradicted concept is canonical or venerable, recall warns about
+    /// it. At most 32 across the call.
     #[schemars(length(max = 8))]
     pub against: Option<Vec<WireReference>>,
 }
@@ -269,8 +271,8 @@ pub struct RecordActionParams {
     /// concept other than the action itself, and not one the action's
     /// `depends_on` names, or the whole call is refused before the ack and
     /// nothing is written. Recorded as the action contradicting each, dated
-    /// by this write; it adds no dependent and changes no score or
-    /// promotion.
+    /// by this write's `event_time` (else when it is written); it adds no
+    /// dependent and changes no score or promotion.
     #[schemars(length(max = 8))]
     pub against: Option<Vec<WireReference>>,
     /// Optional: the session to write to. Omit it for this session; name

@@ -61,10 +61,10 @@ contradiction is legitimate (each asserts the other is wrong; #140's
 fixture carries `Q <-> X`); `Contradicts` is outside §5.7's
 `Causal`/`Dependency` family; and no dependence or recall walk follows
 it, so a cycle of contradictions cannot loop anything. (Corrected in
-review L2: GC connectivity does count it. The orphan check and
-reachability from the interaction chain, `daemon/gc.rs`, treat a
-`Contradicts` edge like any edge until #19(c) owner decision 1, option C,
-lands; a cycle there only keeps its members connected.) A contradiction against a concept that depends on
+review L2: GC connectivity did count it when (b) merged. Since #19(c),
+owner decision 1 option C, it does not: see
+[feature-19c-contradiction-warning.md](feature-19c-contradiction-warning.md).)
+A contradiction against a concept that depends on
 the contradicting one is no `Dependency` cycle either. Self-contradiction
 is still refused (`SelfReference`), at the ack and again at the commit.
 
@@ -204,17 +204,22 @@ and the tool schema goldens.
 - Counts as a fresh write to its target in the high-risk check
   (`daemon/events.rs`), so a load-bearing target gets the short-lived
   alert: #19(c) owner decision 3 (option A), unchanged.
-- Counts toward GC connectivity until #19(c) owner decision 1 (option C)
-  lands.
-- Is dated, and directed, by the write that declares it, not by the two
-  concepts' ages (review L5).
+- Counted toward GC connectivity when (b) merged; since #19(c) (owner
+  decision 1, option C) it does not, except that a concept contradicting
+  a Venerable or Canonical one is protected while that one keeps its
+  status.
+- Is directed by the write that declares it, not by the two concepts'
+  ages (review L5), and dated by that write's about-time: its
+  `event_time` if one was given, otherwise its write time (corrected by
+  #19(c), coordinator decision option A; re-sending does not re-date it).
 
 ## Out of scope
 
 The detector, recall annotations, companion recall, revalidation, and
 #19(c) owner decisions 1 (GC connectivity) and 3 (pinning the high-risk
 freshness test) are #19(c). Decision 2 (conflict writers) is applied
-here (review M1). Nothing in recall reads `Contradicts` yet.
+here (review M1). Nothing in recall read `Contradicts` when (b) merged;
+#19(c) added the recall warning.
 
 ## Review round (2026-10-13)
 
@@ -248,7 +253,8 @@ Adversarial review: 2 Medium, 6 Low. Merged `origin/main` (#150,
   unconsumed `derive_cited`/`action_cited` intent (shut the 0.6.0 writer
   down cleanly so its queue drains) and that a pre-#19(b) 0.6.0 build
   refuses them too.
-- **L5** direction and date come from the declaring write: said in the
+- **L5** direction and date come from the declaring write (the date being
+  its about-time, as #19(c) made explicit): said in the
   CHANGELOG, mcp.mdx, the tool and parameter descriptions and
   `graph::cite`.
 - **L6** `Ambiguous` and `NotAConcept` refusals use the field's verb

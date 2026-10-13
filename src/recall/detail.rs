@@ -23,6 +23,8 @@
 //! Annotation kinds are derived from typed producers, never from text
 //! patterns: `load_bearing` from a Canonical blast warning, `conflict` from
 //! `HotListPayload::Conflict`, `hot` from HighRisk/Drift/Stale,
+//! `contradiction` from `HotListPayload::Contradiction`, `contradicts` on
+//! the contradicting concept pulled in beside it (#19(c)),
 //! `reservation` from an active reservation, `traversal` from the
 //! structural-dispatch explanation, and `vector_degraded` from a query
 //! embedding failure. The two response-global kinds are never attached to a
@@ -52,6 +54,12 @@ pub(crate) enum AnnotationKind {
     /// A layer of a layered recall was unavailable, so its hits are missing
     /// (#33) — response-global, one per unavailable layer.
     LayerUnavailable,
+    /// `HotListPayload::Contradiction`: a newer assertion contradicts this
+    /// Canonical or Venerable hit (#19(c)) — hit-owned.
+    Contradiction,
+    /// This hit contradicts a contradicted hit of the same result, and was
+    /// pulled in beside it (#19(c)) — hit-owned.
+    Contradicts,
 }
 
 /// One typed warning: its kind and the exact line that renders it.
