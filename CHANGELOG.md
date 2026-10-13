@@ -246,6 +246,13 @@
   `InspectParams`, `SaintsParams` and `DeriveImageParams` now derive
   `Default` too, so optional fields added later (such as the write tools'
   `scope`) do not break literals written that way.
+- **`DeriveParams`, `RecordActionParams`, `DeriveImageParams`,
+  `ReserveParams` and `SaintsParams` gain `scope: Option<String>`** (#33
+  PR 4), breaking a struct literal that names every field;
+  `..Default::default()` keeps compiling. On the wire the field is
+  optional and omitting it changes nothing; a server older than this one
+  refuses a call that sends it (the parameters deny unknown fields), so a
+  scoped write never lands in the wrong session.
 
 ### Added
 
@@ -383,6 +390,38 @@
   library items: `config::{LayerConfig, LayerSpec, ServeLayers}`,
   `ServeConfig::{resolve_layers, layer_stack_of, stdio_layers}`,
   `mcp::plan_layers`.
+- **`scope` on the writes and the remaining tools (#33 PR 4).**
+  `lambo_derive`, `lambo_record_action`, `lambo_derive_image`,
+  `lambo_reserve` and `lambo_saints` take `scope`, as `lambo_recall` and
+  `lambo_inspect` do: omitted (or this session's name) acts on the
+  addressed session; a configured layer's name, such as `"general"`, acts
+  on that layer, so an agent can write a ruling that applies in every
+  project to `general` at its own discretion. Any other value is refused
+  before the ack, listing the session's own scopes; a credential that
+  does not reach the layer gets the generic refusal. A scoped write is
+  validated, ordered and applied by the layer's own write queue, draws one
+  token from the layer's `per_session_rps`, and its ack adds a line and a
+  `session` key naming the layer. **Writes to different sessions have no
+  ordering between them**, as the tool descriptions and server
+  instructions now say. Receipts keep their format: settled outcomes from
+  every pipeline the session writes to come back on the next tool
+  response (one budget of 8 across them), and `lambo_stats` with a
+  receipt finds it in the pipeline that issued it (by its epoch). A write
+  resolves its references against the session it writes to, and one held
+  elsewhere, the caller's own session included, is refused as
+  cross-session, naming the reference; no edge ever joins two sessions. A
+  write into a layer refuses a bare relative file path (`README.md`,
+  `src/main.rs`, `../x/y.toml`) in `record_action`'s `produces`,
+  `modifies` and `depends_on` and in a derived `resource` concept, since
+  every project reads the layer; absolute paths, URLs and prose pass. A
+  layer that stops serving or loses its lease during a scoped call is a
+  retryable "stopped serving during this call" refusal with nothing
+  applied, never the store's lease error. With `--ledger`, a scoped
+  call's line carries `scope`. A layered session's server instructions
+  now say how to write to a layer. Unscoped calls on an unlayered session
+  answer byte for byte as before (`tools/list` gains the optional
+  `scope`). New library items: `WritePipeline::knows_receipt` and
+  `WritePipeline::take_piggyback_at_most`.
 
 ### Changed
 

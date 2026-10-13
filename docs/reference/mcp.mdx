@@ -252,6 +252,16 @@ Activity (what you did) goes to [`lambo_record_action`](#lambo_record_action). T
 
 Writes you send one after another are applied in that order, whatever other agents are doing through the same server. Two calls you fire concurrently are a different matter: each one's place in the session's order is fixed when it is accepted, so two overlapping calls can be accepted in either order, and Lambo does not invent one for you. Duplicate detection is unaffected: the embedding still happens before the insert.
 
+**Writing to a layer.** On a layered session (see [`lambo_recall`](#lambo_recall)), `scope` names the session a write goes to. Write a ruling or preference that applies in every project with `scope = "general"`; write project facts, file actions and decisions without a scope. `lambo_record_action`, `lambo_derive_image`, `lambo_reserve` and `lambo_saints` take the same `scope`.
+
+* A value that names neither this session nor one of its layers is refused before the ack with "scope must name this session or one of its layers: lambo, general", and nothing is written. A credential that does not reach the layer gets a generic refusal.
+* The layer's own write queue validates, orders and applies the write. **Writes to different sessions have no ordering between them**: a write to `general` and a write to the project, sent one after the other, can be applied in either order. Within one session the order is kept as always.
+* Every reference must name a concept in the session the write goes to. A write scoped to `general` that cites a project concept, or an unscoped write that cites a `general` concept, is refused with "is in scope 'lambo'; cross-session citations are not recorded" (or `'general'`), naming the reference, and nothing is written. No edge joins two sessions.
+* `general` is shared by every project, so a relative file path there would name a different file in each. A write into a layer refuses an entry that is a bare relative path, such as `README.md`, `src/main.rs` or `../lambo/AGENTS.md`, in `lambo_record_action`'s `produces`, `modifies` and `depends_on` and as the content of a `resource` concept, with `is a relative path, refused in scope "general"`. Record file actions in the project, or use an absolute path. Absolute paths, URLs, branch names and prose pass, and so does a directory named without a trailing `/`.
+* The ack adds a line, `written to session 'general'; writes to different sessions have no ordering between them`, and `session: "general"` in `structuredContent`. The receipt has the usual format: its outcome arrives on your next tool response at the session you wrote through, and [`lambo_stats`](#lambo_stats) there finds it.
+* A scoped write draws one request from the layer's own `per_session_rps`. A layer over its rate or not serving refuses the write as `lambo_recall`'s `scope` does. A layer that closes or loses its lease while the call holds it answers "layer general stopped serving during this call (it closed or lost its lease), so nothing was applied to it; retry shortly, or call without scope to act on lambo".
+* An unlayered session accepts only its own name as `scope`, and a call without one answers exactly as before.
+
 **A derive needs the embedder, and on the default configuration it needs it for every write.** With `match_strategy = "hybrid"` — the default — a concept is stored with its embedding or it is not stored at all: an embedder that is unreachable, restarting or too slow fails the write rather than applying a concept that semantic recall could never find. The failure is honest and per call (the receipt says `failed` and that nothing was written). What survives an outage is the *unattempted* write: one not yet attempted when the session closes waits for an embedder as a durable intent, replayed by the next serve; a write the worker reaches during the outage fails, and its receipt says so — the honest asymmetry, because only the in-session caller has a receipt to read. But it does mean a server whose embedder is down accepts reads and refuses writes. If you would rather keep writing without an embedder, that is a lawful mode and you get it by **declaring** it: set `match_strategy = "canonical"` for keyword-only concepts, session-wide and deliberately, instead of having it happen to you one call at a time.
 
 | Argument | Type | Required | Notes |
@@ -263,6 +273,7 @@ Writes you send one after another are applied in that order, whatever other agen
 | `event_time` | RFC3339 timestamp | No | Historical about-time, such as a commit or document date. Omit for a live fact, which is about now. |
 | `parent_of` | array of `{parent, child}` | No | Hierarchy links. Both ends resolve as concepts, and either may be created. The hierarchy must stay acyclic: a pair that would close a cycle (its child is already an ancestor of its parent, or the call's own pairs loop) refuses the whole call with "store error: parent_of would close a Hierarchical cycle (the hierarchy must stay acyclic); nothing was written". A cycle the graph already shows is refused before the ack; one closed by a write applied in between is refused on the receipt. |
 | `concepts[].depends_on` | array of string | No | Existing concepts this one rests on, at most 8 per concept and 32 per call. Each by recall's id or its full node id (or its exact content). See *Citing what a concept rests on* above. |
+| `scope` | string | No | The session to write to: omit it (or send this session's name) for this session, or name one of its layers, such as `general`. See *Writing to a layer* below. |
 
 <Warning>
 `concept_type` is lower case on the wire. Sending `Entity` is refused with "unknown variant `Entity`, expected one of `entity`, `logic`, `constraint`, `resource`, `observation`".
@@ -316,6 +327,7 @@ Store one image as a concept. You send a caption and either the image itself, wh
 | `vector` | `{values, contract}` | One of `image`, `vector` | A vector you computed, with the embedding space it is in. `contract` is `{kind, model, dim}` and must equal the session's `embedding_contract` from [`lambo_stats`](#lambo_stats) exactly. At most 4096 values. Accepted only when the operator enabled client vectors. |
 | `event_time` | RFC3339 timestamp | No | As for `lambo_derive`. |
 | `parent_of` | array of `{parent, child}` | No | As for `lambo_derive`. Name the image concept by its content, `caption [image:<image_id>]`. |
+| `scope` | string | No | As for `lambo_derive`: the session to write to. |
 
 ```json
 {"name": "lambo_derive_image", "arguments": {"agent_id": "dresscode",
@@ -345,6 +357,7 @@ Record something the agent did, along with what it produces, modifies, and depen
 | `action` | string | Yes | Up to 16 KB. May not contain an image suffix (`[image:<id>]`). |
 | `event_time` | RFC3339 timestamp | No | Historical about-time, such as a commit or document date. Omit for a live fact, which is about now. |
 | `produces`, `modifies`, `depends_on` | array of string | No | Up to 64 entries combined across the three. An entry may name an image concept by its content, `caption [image:<image_id>]`. To cite a ruling or decision the action relied on, give its id. A `depends_on` entry that is an existing concept's full node id (in the hyphenated form recall, inspect and receipts print) cites that concept; an interaction's id is refused with `reference refused`. An entry of exactly 8 hex characters (the short id recall prints) whose text names no concept cites the one concept whose id starts with it, and is refused if several do; so an 8-character commit hash that happens to prefix a concept's id cites that concept (the chance is about the session's concept count divided by 2^32). An id still names the same concept when the write is applied, or the receipt says why not. Every other entry names a concept by its text, matched by canonical text and created if new, exactly as before 0.6.0: a commit hash of any other length, 9 to 32 hex characters (an MD5, a longer id prefix, a node id in its unhyphenated form), a `urn:uuid:` or braced id, a file path, an issue reference, and a hyphenated id that names no concept here. One exception: a hyphenated id that names no concept here but one in a layer the session reads is refused as cross-session rather than created. The `Causal` and `Dependency` edges they create must stay acyclic: one that would close a cycle refuses the whole call with "store error: record_action would close a Causal or Dependency cycle (produces, modifies and depends_on must stay acyclic); nothing was written", before the ack or, if a write applied in between closed it, on the receipt. |
+| `scope` | string | No | As for `lambo_derive`: the session to write to. Into a layer, an entry that is a bare relative file path is refused (see *Writing to a layer* under `lambo_derive`). |
 
 ```json
 {"name": "lambo_record_action", "arguments": {"agent_id": "agent-a",
@@ -373,6 +386,7 @@ Take a soft lock on a memory node before you edit it, so two agents do not edit 
 | `node_id` | string (UUID) | Yes | From `lambo_recall` or `lambo_inspect`. |
 | `ttl_seconds` | integer | No | `1` to `3600`. Defaults to `30`. |
 | `release` | boolean | No | Release instead of reserve. |
+| `scope` | string | No | Reserve or release a node in one of this session's layers, such as a recall hit from that layer (its id belongs to the layer). Locks are per session. Resolved and refused as `lambo_recall`'s `scope` is. |
 
 ```json
 {"name": "lambo_reserve", "arguments": {"agent_id": "agent-a",
@@ -404,7 +418,7 @@ Lambo resolves `focus` exactly first, then as the short id a recall block render
 
 ### lambo_saints
 
-List the session's canonical memories, which are the concepts Lambo has promoted to canonical facts. Each row carries the node id, the content, the type, the blast radius, the access count, and when it was created. This tool takes only `agent_id`.
+List the session's canonical memories, which are the concepts Lambo has promoted to canonical facts. Each row carries the node id, the content, the type, the blast radius, the access count, and when it was created. This tool takes `agent_id`, and `scope` to list one of the session's layers instead (resolved and refused as `lambo_recall`'s `scope` is).
 
 ### lambo_stats
 
@@ -413,7 +427,7 @@ Report session health: flush lag, write-behind log depth, background write queue
 | Argument | Type | Required | Notes |
 |---|---|---|---|
 | `agent_id` | string | Yes | |
-| `receipt` | string | No | A receipt id from a `lambo_derive`, `lambo_derive_image` or `lambo_record_action` ack. Answers what happened to that one write. |
+| `receipt` | string | No | A receipt id from a `lambo_derive`, `lambo_derive_image` or `lambo_record_action` ack. Answers what happened to that one write, including one written to a layer with `scope` (ask at the session you wrote through). |
 | `wait_ms` | integer | No | `0` to `34000`. With `receipt`, wait this long for the write to be applied before answering. A larger value is clamped, not refused. The maximum covers the longest one write can take to apply, so a wait that ends `pending` means other writes were queued ahead of it. A server holds 16 waits at once and one `agent_id` at most 8 of them; a wait over either answers at once with the current state. |
 
 Unlike `lambo stats` on the command line, this reaches the writer, so the flush figures are real rather than `n/a`. `flush_lag_ms` is how long ago the store last held every write. While nothing is waiting to be written it stays under a tenth of a second, however long the session has been idle. It grows while anything is waiting, including the access counts recalls leave behind, so under ordinary traffic it climbs to about the flush interval between flushes; it climbs past the flush interval only when the store is not taking writes, and it then bounds the age of the oldest write a crash would lose. Writes Lambo has dropped rather than flushed are not counted in it: `dead_lettered` counts batches the store rejected outright, and `degraded` says the session has stopped writing to the store. So after a rejected batch the lag falls back under a tenth of a second although that batch never reached the store; only a rising `dead_lettered` says so.
@@ -489,15 +503,20 @@ send one after another are applied in that order (two you fire at once have no o
 keep).
 ```
 
-A layered session (see [Layers](/config#layers)) appends one more paragraph, naming its layers and how `scope` reads them, for example for `lambo` layered with `general`:
+A layered session (see [Layers](/config#layers)) appends one more paragraph, naming its layers, how `scope` reads them and how to write to one, for example for `lambo` layered with `general`:
 
 ```text
 lambo_recall in session 'lambo' also searches its shared layers: general. Every recall hit
 names the session it is from (structuredContent hits[].session, and 'from <session>' in a
 layer hit's block), and its id belongs to that session: pass the same scope (scope =
 "general") to lambo_inspect to inspect a hit from that layer. Pass scope = "general" to
-lambo_recall to read that layer alone, or scope = "lambo" for this session alone. Every
-other tool, and every write, acts on session 'lambo' only.
+lambo_recall to read that layer alone, or scope = "lambo" for this session alone. Writes
+go to session 'lambo' unless you pass scope: write a ruling or preference that applies in
+every project with scope = "general", and project facts, file actions and decisions without
+a scope. A write's depends_on must name concepts in the session it writes to, and a write
+into a layer refuses relative file paths. Writes to different sessions have no ordering
+between them. lambo_reserve and lambo_saints take the same scope, and lambo_stats finds a
+receipt from any of them.
 ```
 
 ## Limits
