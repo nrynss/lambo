@@ -11,7 +11,7 @@ pub(super) use crate::test_util::VectorSearchable;
 /// Answers the calibration probe's own texts instantly and hangs forever
 /// on real content — the shape that leaves an ADMITTED write undrainable
 /// at close, which is the case J3's durable intents exist for.
-struct HangingEmbedder {
+pub(super) struct HangingEmbedder {
     inner: FixtureEmbedder,
     /// Real-content calls that have entered the hang, so a test can wait for
     /// a job to be inside the embedder rather than sleep for it.
@@ -19,7 +19,7 @@ struct HangingEmbedder {
 }
 
 impl HangingEmbedder {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             inner: FixtureEmbedder::new(),
             entered: Arc::new(AtomicUsize::new(0)),

@@ -1332,6 +1332,80 @@ mod sqlite_tests {
         );
     }
 
+    /// #129: `--repo-scope` gives a path Resource its repository key, which
+    /// a SQLite store persists across processes; an unscoped write keeps the
+    /// legacy key, and an empty scope is a usage error before anything opens.
+    #[tokio::test]
+    async fn repo_scoped_paths_persist_distinct_keys_in_sqlite() {
+        use crate::graph::resource::scoped_resource_key;
+        let (_dir, cfg) = scratch();
+        let session = "repo-scope-sqlite";
+        let store = {
+            let env = crate::test_util::env_lock();
+            for k in ENV_KEYS {
+                env.remove(k);
+            }
+            crate::resolve_store_only(Some(&cfg)).expect("store")
+        };
+        crate::cli::provision::run(store, StoreKind::Sqlite, None)
+            .await
+            .expect("provision");
+        let derive = |repo_scope: Option<&str>| crate::cli::derive::Args {
+            repo_scope: repo_scope.map(str::to_string),
+            session: session.into(),
+            agent: "agent-a".into(),
+            content: "README.md".into(),
+            kind: ConceptKind::Resource,
+            parent_of: vec![],
+            concept: vec![],
+            depends_on: Vec::new(),
+        };
+        let err = crate::cli::derive::run(resolve_clean(&cfg), derive(Some("  ")))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("repo_scope"), "{err}");
+        for repo in [Some("repo-a"), None] {
+            crate::cli::derive::run(resolve_clean(&cfg), derive(repo))
+                .await
+                .expect("derive");
+        }
+        crate::cli::record_action::run(
+            resolve_clean(&cfg),
+            crate::cli::record_action::Args {
+                repo_scope: Some("repo-b".into()),
+                session: session.into(),
+                agent: "agent-a".into(),
+                action: "rewrote the readme".into(),
+                produces: vec![],
+                modifies: vec!["README.md".into()],
+                depends_on: vec![],
+            },
+        )
+        .await
+        .expect("record-action");
+        let snap = resolve_clean(&cfg)
+            .store
+            .load_session(&SessionId::from(session))
+            .await
+            .expect("reload");
+        let readme: Vec<&str> = snap
+            .concepts
+            .iter()
+            .filter(|c| c.content == "README.md")
+            .map(|c| c.canonical_key.as_str())
+            .collect();
+        let legacy = crate::graph::canonical::canonical_key("README.md", |_| None);
+        let mut expected = vec![
+            scoped_resource_key("README.md", Some("repo-a")).unwrap(),
+            scoped_resource_key("README.md", Some("repo-b")).unwrap(),
+            legacy,
+        ];
+        expected.sort();
+        let mut got: Vec<String> = readme.iter().map(|k| (*k).to_string()).collect();
+        got.sort();
+        assert_eq!(got, expected);
+    }
+
     #[tokio::test]
     async fn h1_sqlite_reopen_checks_models_allows_explicit_rename_and_accepts_legacy() {
         let (_dir, cfg) = scratch();

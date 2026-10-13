@@ -870,6 +870,138 @@ async fn a_relative_path_is_refused_in_a_layer() {
     general.mem.close().await.expect("close");
 }
 
+/// #129 (#33 PR 7): a validated `repo_scope` exempts exactly the relative
+/// paths it covers, the path-like Resources, from a layer's refusal: action
+/// targets, Resource concepts and Resource `parent_of` ends. A non-Resource
+/// concept stays refused under a scope, and an invalid scope is refused
+/// before anything is written in either session.
+#[tokio::test]
+async fn a_repo_scope_exempts_only_the_resource_paths_it_covers_in_a_layer() {
+    use crate::graph::resource::scoped_resource_key;
+    const REPO: &str = "github.com/acme/widgets";
+    let (s, general, _source) = project_and_general("repo-paths").await;
+    let with_repo = |mut args: serde_json::Value, repo: &str| {
+        args["repo_scope"] = json!(repo);
+        args
+    };
+    let keys = |s: &LamboServer| -> Vec<String> {
+        s.memory()
+            .graph()
+            .read()
+            .concepts()
+            .map(|c| c.canonical_key.clone())
+            .collect()
+    };
+    let before = (
+        s.memory().graph().read().snapshot(),
+        general.memory().graph().read().snapshot(),
+    );
+    // Refused: an invalid scope, whatever the destination.
+    for repo in ["", "   ", "a\u{0}b", "a\u{202e}b"] {
+        for scope in [Some("general"), None] {
+            let out = call_raw(
+                &s,
+                "lambo_record_action",
+                with_repo(
+                    action_args("edited", "produces", &["src/main.rs"], scope),
+                    repo,
+                ),
+            )
+            .await;
+            assert_eq!(out.is_error, Some(true), "{repo:?} {scope:?}");
+            let text = text_of(&out);
+            assert!(text.contains("repo_scope"), "{text}");
+            assert!(!text.contains("config:"), "a parameter error: {text}");
+            let out = call_raw(
+                &s,
+                "lambo_derive",
+                with_repo(derive_args("Cargo.toml", "resource", scope), repo),
+            )
+            .await;
+            assert_eq!(out.is_error, Some(true), "{repo:?} {scope:?}");
+        }
+    }
+    // Refused: a scope covers Resources only, not a Logic concept's content.
+    let out = call_raw(
+        &s,
+        "lambo_derive",
+        with_repo(derive_args("README.md", "logic", Some("general")), REPO),
+    )
+    .await;
+    assert!(
+        text_of(&out).contains("concept.content entry \"README.md\" is a relative path"),
+        "{}",
+        text_of(&out)
+    );
+    assert!(text_of(&out).contains("or a validated repo_scope"));
+    assert_eq!(
+        before,
+        (
+            s.memory().graph().read().snapshot(),
+            general.memory().graph().read().snapshot(),
+        )
+    );
+
+    // Accepted in the layer, under the scoped key.
+    for (field, entry) in [
+        ("produces", "src/main.rs"),
+        ("modifies", "README.md"),
+        ("depends_on", "docs/reference"),
+    ] {
+        let out = call(
+            &s,
+            "lambo_record_action",
+            with_repo(
+                action_args("edited a file", field, &[entry], Some("general")),
+                REPO,
+            ),
+        )
+        .await;
+        assert_eq!(out.is_error, Some(false), "{field}: {out:?}");
+        let key = scoped_resource_key(entry, Some(REPO)).unwrap();
+        assert!(keys(&general).contains(&key), "{field} {entry}");
+    }
+    let out = call(
+        &s,
+        "lambo_derive",
+        with_repo(derive_args("Cargo.toml", "resource", Some("general")), REPO),
+    )
+    .await;
+    assert_eq!(out.is_error, Some(false), "{out:?}");
+    let out = call(
+        &s,
+        "lambo_derive",
+        with_repo(
+            json!({"agent_id": "agent-a", "scope": "general",
+                   "concepts": [{"content": "a ruling on layout", "concept_type": "logic"}],
+                   "parent_of": [{"parent": "a ruling on layout", "child": "src/lib.rs"}]}),
+            REPO,
+        ),
+    )
+    .await;
+    assert_eq!(out.is_error, Some(false), "{out:?}");
+    for path in ["Cargo.toml", "src/lib.rs"] {
+        assert!(keys(&general).contains(&scoped_resource_key(path, Some(REPO)).unwrap()));
+    }
+    // No legacy (unscoped) path key was minted in the layer.
+    let legacy = crate::graph::canonical::canonical_key("src/main.rs", |_| None);
+    assert!(!keys(&general).contains(&legacy));
+    // The project's own write with the same scope is its own scoped node.
+    let out = call(
+        &s,
+        "lambo_record_action",
+        with_repo(
+            action_args("edited", "produces", &["src/main.rs"], None),
+            REPO,
+        ),
+    )
+    .await;
+    assert_eq!(out.is_error, Some(false), "{out:?}");
+    assert!(keys(&s).contains(&scoped_resource_key("src/main.rs", Some(REPO)).unwrap()));
+    s.mem.close().await.expect("close");
+    general.mem.close().await.expect("close");
+}
+
 /// A scoped write resolves its references against the session it writes
 /// to: a project concept cited from a write scoped to `general`, and a
 /// `general` concept cited from an unscoped write, are refused as
