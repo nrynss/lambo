@@ -279,20 +279,16 @@ llama_url = "http://127.0.0.1:8080"
 
 ## 4. Client wiring
 
-Every client points at the **same URL** and holds no lease. Per-client attribution does not
+Before the planned cut-over in §7, clients share one URL and hold no lease.
+After cut-over each project uses its session URL. Per-client attribution does not
 come from the transport: `origin_agent` is taken from each call's own `agent_id`, above it,
 so one shared writer still attributes every write to the harness that made it (verified
 2026-08-23). The `--agent` on the writer names only the **lease holder**, hence
 `http-shared-writer`.
 
-| Client | `agent_id` it sends |
-| --- | --- |
-| Claude Code | `claude-orchestrator` |
-| Codex CLI | `codex-agent` |
-| Cursor / Cursor Agent CLI | `cursor-agent` |
-| OMP | `omp-agent` |
-| Pi | `pi-agent` |
-| Grok Build | `grok-agent` |
+Use the actual model name as the stable `agent_id`, for example `gpt-6.1-sol`,
+across every call for that agent's life. Do not append task/role names or switch
+IDs per project. It is caller-asserted attribution, not authentication.
 
 **The `--ledger` flags now live on the supervised unit (§5), not on any registration** —
 which is most of the point. They are off by default, so under the old per-client wiring a
@@ -318,7 +314,7 @@ and the `--ledger` flags live on the supervised unit rather than on six registra
 stdio forms are kept at the end of this section as history — they are what the ruling
 replaced, and reading them explains the shape of the URL blocks.
 
-**Claude Code** — user scope, never project scope (a project `.mcp.json` lands in this
+**Claude Code (single-session baseline)** — user scope, never project scope (a project `.mcp.json` lands in this
 public repo). In `~/.claude.json` under `mcpServers`:
 
 ```json
@@ -653,158 +649,218 @@ means §4's `--ledger` did not reach the registration. Either way the rig serves
 fine and measures nothing, which is the failure worth catching here rather than a week
 later.
 
-## 7. Multi-session: a planned move (the rig stays single-session)
+## 7. Multi-session cut-over runbook
 
-**The rig is single-session, and it stays single-session until its owner
-decides otherwise.** Nothing in this section has been run against the rig.
-The live unit serves `--session lambo-dev` from `lambo-0.3.0`, and every
-client points at `http://127.0.0.1:7700/mcp`.
+This is a proposed operator procedure, **not a record of a live cut-over**.
+Nothing in this PR changes the supervised writer, store, client settings or hooks.
+The owner chooses when to apply it. Sections 2–6 describe the earlier single-session
+setup; this section defines the planned per-project wiring and overrides their
+single-URL recommendation once the split is approved.
 
-This section is a runbook to read, not a change to apply. It records how an
-operator would move the rig to several sessions in one serve, which is
-#33's cut-over (split `lambo-dev` into per-project sessions), using what
-#32 shipped. The background is in
-[feature-32-multi-session.md](../notes/feature-32-multi-session.md) and
-`docs/reference/cli.mdx` § "Several sessions in one serve".
+### 7.1 Prerequisites and stop points
 
-### 7.1 Before anything: the binary
+- Use a binary containing #32's per-session HTTP routes and #33 PR3's serving
+  layers/read scope (#142, main829397b0). Earlier releases may refuse these keys.
+  Stage and verify it through §2's upgrade flow; keep the old binary/config.
+- Finish the split tooling and verify a fresh backup COPY before choosing a
+  cut-over. The source session is never mutated/deleted by the split. Review
+  unresolved assignments and dropped cross-session edges; keep private IDs and
+  store contents out of GitHub and this public runbook.
+- Confirm every target's embedding contract equals `general`'s: kind, model and
+  dimension. A different width or model is not a layering workaround.
+- Record the old binary/config, session/default/URL map and last write boundary
+  privately. Have rollback destinations before stopping any client.
+- **TODO #33 PR4 (write scope):** document `scope` on derive, record_action,
+  derive_image, reserve and saints only after that implementation merges.
+  Today only recall/inspect take read scope; writing an operator-wide ruling
+  requires a deliberate connection to `/mcp/s/general`. A scoped read never
+  redirects a later project write. Do not perform a live cut-over as this docs PR.
 
-- **Version.** Multi-session serving is on main from #32 PR 4 onward. The
-  admin routes arrived in PR 7, which is main `fe8c3d71`. **v0.3.0 has
-  none of it**, and an older binary refuses a `lambo.toml` that has
-  `[serve]` (an unknown key). Re-pin with the §2 flow first: stage, bootout,
-  back up, `provision`, swap, bootstrap, verify.
-- **Change nothing else on the first restart.** With the plist unchanged
-  (one `--session lambo-dev`, no `[serve]`), the new binary behaves exactly
-  as before. It still exits on a lost lease, so `KeepAlive` restarts it,
-  and it still serves at `/mcp`. Let it run for a day before any split, so
-  a regression in the binary is not mistaken for one in the split.
+### 7.2 Proposed serving configuration
 
-### 7.2 Config
-
-Add to `~/lambo-dogfood/lambo.toml`:
+Merge this table into the operator's existing configuration, preserving its store
+and embedder settings. It is an example, not a config installed by this PR:
 
 ```toml
 [serve]
-sessions = ["lambo", "rustydocs", "general"]   # pinned: attached at startup, never evicted
-default_session = "general"                    # what /mcp serves
-# max_attached = 16                            # the default; the pinned count must fit
+sessions = ["lambo", "lambo-paper", "endor", "ajilamu", "rustydocs", "vimanam", "general", "general-usage"]
+default_session = "general-usage"
+layers = ["general"]
+max_attached = 16
+
+[[serve.layer]]
+session = "general"
+weight = 0.5
+min_similarity = 0.40
 ```
 
-Then drop `--session lambo-dev` from the plist's `ProgramArguments`. An
-HTTP serve takes its sessions from `[serve] sessions` when no `--session`
-is given. If a `--session` is kept, it is pinned too, and the first one
-becomes the default.
+`general` holds operator-wide rulings and is not itself layered. Other pinned
+sessions, including `general-usage`, read it beside their own memories. The
+fallback is **general-usage**, not general: an unmapped folder must not write
+ordinary work into the operator-wide ruling session. Opt-outs use an empty list
+under `[serve.session_layers]`; one layer per session is supported in v1.
 
-Before you restart, know these:
+Keep all eight sessions pinned. A configured layer and its consumers must be
+pinned, credential coverage must include the consumer and its layer, and the
+embedding contracts must agree. Start HTTP serving without `--session` if
+`default_session` should control `/mcp`: a first `--session` overrides it.
+Retire the old `--session lambo-dev` argument only at the approved cut-over.
 
-- **Names.** Every pinned name must be addressable by URL:
-  `[A-Za-z0-9._:-]`, 1 to 128 bytes, no leading `.`. A bad name in
-  `[serve]` is refused when the file is read, which stops every command,
-  `provision` included, before any model loads.
-- **`lambo-dev` is not migrated.** The new sessions start empty. The
-  design keeps `lambo-dev` read-only and archived, not pinned. Its content
-  stays readable without a lease, through `lambo serve-web --session
-  lambo-dev` or the CLI read verbs. Moving its concepts into the project
-  sessions is #33's split tool, which does not exist yet. Pinning
-  `lambo-dev` beside the new sessions for a transition is also valid.
-- **Lease loss changes.** With two or more pinned sessions, a lost lease
-  detaches only that session (`DetachSession`). The registry tries to
-  attach it again 5 s after the detach and 5 s after each failed attempt,
-  and its retry loop looks for due retries once a second, so an attempt
-  starts 5 to 6 s after the last. While the detached session's old handle
-  is still in use, the retry waits for it, checking once a second, for up
-  to 30 s. The process does not exit, so `KeepAlive` no longer restarts
-  it. A session that keeps losing its lease shows up in the log, not as a
-  restart.
-- **SQLite carries every session.** Every session's flushes, heartbeats and
-  attaches share the one SQLite connection, and `attach_concurrency` is
-  forced to 1. Shutdown closes every session inside the same budget, so
-  `ExitTimeOut 30` stays right for a handful of sessions. A test covers 16
-  dirty SQLite sessions inside the budget.
-- **On-demand attach stays off.** Leave the on-demand keys at their
-  defaults (`attach_concurrency`, `idle_detach_secs`, `per_session_rps`).
-  The rig has no credential that reaches past the pinned sessions, so
-  nothing is ever attached on demand.
+For the loopback-only rig, the existing no-credential `local` grant reaches every
+pinned session. Adding credentials changes every client's authentication
+requirements; do that as a separate operator change. This runbook contains no
+credential values. SQLite still shares one connection and serializes attachment.
+Lease loss detaches just the affected session in a multi-session serve.
 
-### 7.3 Credentials: none, on purpose
+| Client location | URL | Text recall reads | Writes go to |
+|---|---|---|---|
+| Lambo project | `http://127.0.0.1:7700/mcp/s/lambo` | lambo + general | lambo |
+| Another mapped project | `http://127.0.0.1:7700/mcp/s/<session>` | that session + general | that session |
+| Unmapped folder/default | `http://127.0.0.1:7700/mcp` | general-usage + general | general-usage |
+| Explicit operator-wide work | `http://127.0.0.1:7700/mcp/s/general` | general alone | general |
 
-The rig binds `127.0.0.1` and configures no credential, so every request
-runs as the implicit `local` credential, which reaches every pinned
-session. That is enough for a pinned-only rig, and it is the recommended
-setting.
+The HTTP server cannot infer a project from a client folder. No project-header
+routing exists. `[[serve.projects]]` chooses a session only for stdio; the
+optional sibling-worktree pattern work is separate. The rig uses HTTP URLs.
 
-Adding any `[[serve.credential]]`, even an operator-only one, ends
-`local`. **Every client registration would then have to send
-`Authorization: Bearer <token>`**, or get `401`. A credential with a
-`session_prefix` or an unpinned name would also turn on on-demand attach.
+### 7.3 Client registration (operator action after approval)
 
-If the owner wants erase or listing over the wire anyway:
+Keep the server name `lambo-dogfood`: existing protocol hooks identify that name.
+Use the actual model name as one stable `agent_id` for its whole life, such as
+`gpt-6.1-sol`, never a per-task/role suffix. Client URL configuration does not set
+the per-call agent ID. Keep machine-local registrations out of public commits.
 
-1. Add an `operator` credential with `admin = true`, and `erase = true`
-   only if wanted.
-2. Give it `token_env`, never an inline token, and keep the token out of
-   the plist and the repo. The plist's `EnvironmentVariables` is a
-   plain-text file.
-3. Give every client its own credential scoped to the pinned names.
+**Claude Code.** Use a user fallback plus a local override in each project folder.
+Local scope is private in the project's entry in `~/.claude.json`; it overrides
+the same user-scope server name. Project scope instead writes `.mcp.json` into
+the repository, so it is not the rig's choice. These are operator commands,
+not commands executed by this PR:
 
-Without that, erase a session with `lambo erase-session`. It needs the
-writer stopped (bootout first), because it never interrupts a live
-writer.
+```bash
+claude mcp add --transport http --scope user lambo-dogfood http://127.0.0.1:7700/mcp
+cd /path/to/project
+claude mcp add --transport http --scope local lambo-dogfood http://127.0.0.1:7700/mcp/s/lambo
+```
 
-### 7.4 Client wiring per project
+For an existing same-name entry, inspect its scope in the client's MCP view and
+replace only that entry using the client's supported removal/edit flow. Repeat
+the local registration with the right session for each mapped project. See the
+[official Claude MCP scope reference](https://code.claude.com/docs/en/mcp#mcp-installation-scopes).
 
-- **Keep the server name `lambo-dogfood`.** The memory-protocol hooks key
-  on the server name, not the URL, so they keep working.
-- **Per-project clients use `http://127.0.0.1:7700/mcp/s/<project>`.**
-  - Claude Code: the §4 rule against a project `.mcp.json` (this repo is
-    public) still holds. Use `local` scope (`claude mcp add --scope local
-    --transport http lambo-dogfood http://127.0.0.1:7700/mcp/s/lambo`, run
-    in the project directory). It is stored in `~/.claude.json` under that
-    project, not in the repo.
-  - Cursor: a project `.cursor/mcp.json`, kept out of git through
-    `.git/info/exclude`.
-- **Global-config clients stay on `/mcp`.** Codex, Grok and anything else
-  configured only globally reach `/mcp`, which is `default_session`
-  (`general`). Binding them by MCP `roots` is a follow-up, not v1.
-- **Stdio is not used.** The stdio cwd map (`[[serve.projects]]`) is for
-  stdio serves, and the rig is HTTP only (§5). An HTTP serve never reads
-  the map, and logs a startup warning if the table sets it.
-- **Migrate every layer.** As with every transport change, a stale layer
-  keeps the old URL (§5). Move the registration in every config layer that
-  names the server.
+**Codex.** Local `codex mcp add --help` verifies `--url`; it provides no
+project-scope flag. Use the CLI to add the user fallback:
 
-### 7.5 What to watch
+```bash
+codex mcp add lambo-dogfood --url http://127.0.0.1:7700/mcp
+```
 
-- **Startup.** `serve.log` shows one `lambo serve: session attached` line
-  per pinned session. A session another writer holds logs `a pinned session
-  is held by another writer` and answers `503` until the 5 s retry takes
-  it. A session that cannot attach and will not recover (a contract
-  mismatch, say) answers `503` with no `Retry-After` until a restart.
-- **Leases.** `sqlite3 ~/lambo-dogfood/lambo-dev.db "select session_id,
-  holder from session_leases;"` shows one row per pinned session, all held
-  by `http-shared-writer`.
-- **Ledger.** Every line carries `session`, and the heartbeat writes one
-  `stats` line per session. The observability kit still groups by
-  `agent_id`, not `session`, so its numbers mix sessions until it is taught
-  to split them (#33, design R8). Filter on `session` by hand until then.
-- **Smoke test, per URL.** Run §6's test against each session's URL:
-  `lambo_stats` names the session it answers for, and a recall in one
-  session must not return another's concepts.
-- **A wrong URL looks like nothing at all.** A misspelled session in a
-  client URL gets an empty `404`, the same as any unknown path. Check the
-  URL first when a client "has no lambo".
-- **Lease loss.** Look for `lease lost to ...; detaching this session and
-  serving the others` in `serve.log`, and `lease` `lost` lines in the
-  ledger. The process keeps running, so nothing restarts.
+In each trusted project's `.codex/config.toml`, add the same-name override:
 
-### 7.6 Rolling back
+```toml
+[mcp_servers.lambo-dogfood]
+url = "http://127.0.0.1:7700/mcp/s/lambo"
+```
 
-1. Bootout.
-2. Remove the `[serve]` table, or the names that were added, and restore
-   `--session lambo-dev` in the plist.
-3. Bootstrap, and point the clients back at `/mcp`.
+Project config wins over user config, subject to managed requirements and trust;
+closest project config wins within its search path. Codex CLI, IDE and desktop
+share MCP config. Keep this machine-local file out of commits. An untrusted or
+unconfigured project uses the user fallback. See the fetched official
+[OpenAI MCP docs](https://developers.openai.com/codex/mcp/) and
+[configuration precedence](https://developers.openai.com/codex/config-basic/#configuration-precedence).
 
-The clean shutdown released every session's lease, so the next writer
-takes them at once. Remove `[serve]` before re-pinning a binary older than
-#32, which refuses the table.
+**Cursor (including its CLI).** Put the fallback URL in `~/.cursor/mcp.json`;
+put this same-name override in each project's `.cursor/mcp.json`:
+
+```json
+{"mcpServers":{"lambo-dogfood":{"url":"http://127.0.0.1:7700/mcp/s/lambo"}}}
+```
+
+The global file uses the same shape with URL ending `/mcp`. Cursor merges both
+files and the project name wins. Keep the local override untracked; reopen the
+client after updating it. Verify the CLI from the project too. Official
+[configuration locations and precedence](https://prod.cursor.com/help/customization/mcp)
+and [Cursor CLI MCP](https://prod.cursor.com/docs/cli/mcp) describe these files.
+
+Other clients remain on the user/default `/mcp` URL until their project selection
+is verified; that means general-usage, not general. Registration must be checked
+in every client/config layer that names this server, not just the primary UI.
+
+### 7.4 Worktree inheritance check
+
+Do not assume directory containment implies MCP inheritance. The official
+[Claude worktree docs](https://code.claude.com/docs/en/worktrees#what-worktrees-share-with-the-main-checkout)
+describe `.claude/worktrees/<name>` and desktop worktree reads of the main
+checkout's project config, including `.mcp.json`. They do not establish that a
+CLI worktree always inherits a parent's private local-scope HTTP entry. Test the
+installed version before cut-over:
+
+1. In a mapped root, open the client's MCP view and confirm `lambo-dogfood` uses
+   the expected `/mcp/s/<project>` URL. Call `lambo_stats`; it must name that session.
+2. Repeat inside a Claude-created `.claude/worktrees/<name>`, including a fresh
+   CLI launch there and a session that enters a worktree. Record each outcome.
+3. Repeat in a sibling worktree (`../lambo-wt-*`), and in an unmapped folder.
+   The unmapped folder should use `/mcp` and report general-usage.
+4. If a mapped worktree falls back, deliberately add that directory's local
+   Claude entry. For Codex/Cursor, ensure their project override is present and
+   recognized in that worktree and restart the client. Retest stats and MCP
+   instructions. Do not infer success from files existing on disk.
+
+This PR performs no live inheritance test or hook change. A failing check is a
+cut-over stop point; the owner may use an explicit per-directory registration
+step instead of changing hooks. File-based overrides excluded from git are not
+automatically copied into a new checkout by git.
+
+### 7.5 Cut-over and smoke-test checklist
+
+1. **Freeze writes.** Pause all clients, stop the supervised writer through §2's
+   approved flow, and verify it released the lease. Take a fresh completed
+   backup; retain source/config/binary and the recorded last-write boundary.
+   Work only from the backup copy for classification/split verification.
+2. **Review the plan.** Resolve the low-confidence queue with the owner. Review
+   copied hubs/origin interactions and all dropped cross-session edges. The
+   split report must account for every source row; no fabricated citations.
+3. **Split and verify.** Run the merged split tools on the copy, never the live
+   source. Rerun idempotency and before/after recall comparisons per project.
+   Stop for unexplained differences. Stage the verified target store through
+   the operator's approved restore procedure; preserve source read-only.
+4. **Start the planned serve.** Pin the target sessions and general layer with
+   the example's general-usage default. Check startup contract/credential errors,
+   per-session lease attachment and `/mcp`'s selected default before rewiring clients.
+5. **Validate every URL/client/worktree.** `lambo_stats` must report the addressed
+   session. Text `lambo_recall` without scope should show project/general hits
+   with their session meta. A query with no relevant general hit need not return
+   one: layer floors still apply. Recall with `scope` equal to the project or
+   general must read that session alone. Inspect a general hit with its ID and
+   `scope: "general"`; unrelated-project scope must refuse.
+6. **Check writes without mixing scopes.** In an approved disposable test
+   session, derive/action without scope must write only to its addressed URL.
+   Verify the call/receipt there and no copy in general. Do not pass write scope
+   until PR4 merges. No cross-session edges are supported in v1.
+7. **Check degradation and observation.** In the staged verification setup,
+   unavailable general must yield project-only merged recall plus a warning;
+   direct scoped general reads refuse. Ledger recall rows identify hit sessions
+   and session_hits; plain stats/heartbeats name their addressed session.
+   Reconcile per-session observations instead of treating every general read
+   as a project write.
+8. **Resume deliberately.** Only after the owner accepts the checks, resume
+   clients. Keep lambo-dev archived read-only; never erase it during cut-over.
+   Keep configuration/backup/URL records until the owner closes rollback.
+
+### 7.6 Rollback and escalation
+
+Before any post-cut-over write, rollback is straightforward: pause clients,
+stop the new writer cleanly, restore the saved single-session config/binary
+through §2, and restore old client URLs to `/mcp`. Confirm lambo_stats reports
+lambo-dev and only one writer holds it before resuming. Preserve split outputs
+and reports for investigation.
+
+After new sessions have accepted writes, **do not simply point clients at the
+archived source**: that loses the new history. Freeze clients and stop the new
+writer first, snapshot target stores and receipts, and ask the owner to choose
+reconciliation/replay or continued operation. No automatic merge-back is defined
+by this PR. Re-pinning an older binary may require restoring its saved config,
+and some newer stored edge types are unreadable by old binaries.
+
+Escalate a session/URL mismatch, lease conflict, contract mismatch, missing scoped
+layer or unexplained split-accounting/recall difference to the owner before
+resuming writes. Never delete the source or use erase-session as rollback.
