@@ -78,7 +78,8 @@ contradiction to the existing concept it names. The direction comes from
 the write that declares it, not from either concept's age, and the edge is
 dated by that write's about-time: its `event_time` if one was given,
 otherwise its write time. Sending the same contradiction again reinforces
-the edge and does not re-date it. Its serialized and stored name is
+the edge and does not re-date it. Recall's detector clamps a future
+`event_time` to the write time (`declared_at`). Its serialized and stored name is
 `Contradicts`, following the other edge types. Graph snapshots and store
 mutation batches can carry it; existing database schemas need no migration.
 Older binaries cannot decode a store or snapshot containing the new variant.
@@ -108,16 +109,20 @@ fires on a concept when:
 
 1. it is Canonical or Venerable;
 2. another concept of its session has a `Contradicts` edge to it; and
-3. that edge's about-time (`Edge::about_time`: the declaring write's
-   `event_time`, else its write time) is not after the clock and is strictly
-   later than the concept's latest eligible dependent evidence, or, with
-   none, than its own origin interaction's about-time.
+3. that edge's declaration date (`declared_at`: `Edge::about_time`, the
+   declaring write's `event_time`, else its write time, clamped to its write
+   time) is strictly later than the concept's latest eligible dependent
+   evidence, or, with none, than its own origin interaction's about-time
+   (clamped the same way).
 
 Eligible evidence is #36's dependents relation (`Dependency` sources into the
 concept and its `Hierarchical` children), one piece per dependence edge,
-dated by that edge's about-time. It counts once it is at least
-`CycleParams::contradiction_evidence_min_age` old (from
-`Config::canonization_edge_min_age`, Stage 2's floor). A dependent written by
+dated by that edge's `declared_at`. It counts once it was **written** at
+least `CycleParams::contradiction_evidence_min_age` ago (from
+`Config::canonization_edge_min_age`, Stage 2's floor); a backdated
+`event_time` does not skip the floor, and a cutoff out of chrono's range
+makes nothing eligible. Re-sending an existing dependence reinforces its
+edge and keeps its dates, so only a new dependence edge is new evidence. A dependent written by
 the concept's own origin interaction never counts. Neither does evidence
 written by the agent that declared the contradiction, or declared by the
 contradicting concept itself, so a writer cannot outweigh its own
@@ -126,13 +131,16 @@ re-dating it.
 
 The detector keeps one `HotListPayload::Contradiction { by, writer, at }` per
 contradicted concept on the hot list under `Condition::Contradiction`, which
-shares `Condition::Conflict`'s severity. It is the newest qualifying
+shares `Condition::Conflict`'s severity; the daemon inserts contradictions
+before conflicts each cycle, so on a full hot list a contradiction is
+evicted before a conflict. It is the newest qualifying
 contradiction, ties going to the smaller canonical key and then the smaller
 id of `by`. `writer` is the agent acting when the edge was first written,
 falling back to `by`'s origin agent. No `DaemonEvent` is published for it.
 Recall re-validates it at read time like every hot entry, so it lapses when
 the concept is demoted below Venerable, when newer evidence becomes eligible,
-or when `by` is collected.
+or when `by` is collected. The entries of one detector pass share one writer
+timeline, rebuilt only when the graph's epoch moves.
 
 Recall renders `recall::format::contradiction_warning` on the hit and
 force-includes it, and pulls `by` into the result, force-included too, with
@@ -140,14 +148,22 @@ force-includes it, and pulls `by` into the result, force-included too, with
 `CONTRADICTION_EXCERPT_CHARS` (80) characters of the other concept and name
 its short id. The detailed recall's annotation kinds are `contradiction` and
 `contradicts`; a layered merge forces both past `top_k`, never past a floor.
+The pulled-in concept is not itself re-validated, so it carries only the
+`contradicts` line. A structural (dependency-question) recall answers by
+traversal and renders no hot-list warnings, contradictions included.
 
 Garbage collection does not count a `Contradicts` edge as connectivity
 (`EdgeType::counts_toward_gc_connectivity`). A concept with a `Contradicts`
 edge to a concept that is Venerable or Canonical when a sweep starts is a
 protected class for that sweep, as a Venerable concept is: it is not
 collected as an orphan, as a disconnected component or by the score cut, and
-it is outside the collection cap's base. The protection does not extend to
-its neighbours, and it lapses on the first sweep after the target is demoted.
+it is outside the collection cap's base. The edge counts from its
+`declared_at`, so GC protects what recall can warn about. The protection does
+not extend to its neighbours, and it lapses on the first sweep after the
+target is demoted. Because any agent may write `against`, the protection can
+keep an otherwise collectable concept alive indefinitely by contradicting a
+promoted one; this is the owner's decision (#19(c) decision 1C), noted here
+as a store-growth consideration.
 
 ## Settings
 

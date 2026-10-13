@@ -1707,8 +1707,8 @@ pub enum HotListPayload {
     /// The node's session has been inactive this long, in seconds.
     Stale { seconds_inactive: u64 },
     /// A Canonical or Venerable node is contradicted by a newer assertion
-    /// (#19(c)): a `by -Contradicts-> node` edge whose about-time is strictly
-    /// later than the node's latest age-eligible dependent evidence. When
+    /// (#19(c)): a `by -Contradicts-> node` edge whose declaration date is
+    /// strictly later than the node's latest age-eligible dependent evidence. When
     /// several qualify, the newest, then `by`'s canonical key, then its id.
     /// See [`crate::daemon::contradiction`].
     Contradiction {
@@ -1719,8 +1719,9 @@ pub enum HotListPayload {
         /// edge was first written (falling back to `by`'s origin agent).
         writer: AgentId,
         /// The declaring write's about-time: its `event_time` when one was
-        /// given, else its write time ([`Edge::about_time`]). Re-sending the
-        /// same contradiction reinforces the edge and does not move this.
+        /// given, else its write time ([`Edge::about_time`]), never later
+        /// than its write time (a future `event_time` is clamped). Re-sending
+        /// the same contradiction reinforces the edge and does not move this.
         at: DateTime<Utc>,
     },
 }

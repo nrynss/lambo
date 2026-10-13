@@ -616,3 +616,21 @@ fn revalidating_many_contradictions_builds_the_timeline_once_per_epoch() {
         "a write moved the epoch: rebuilt once"
     );
 }
+
+/// Review L2: self-suppression is per contradiction. agent-c contradicts at
+/// t200, agent-d at t250, and agent-c then cites X at t300. agent-c's
+/// citation does not count against agent-c's own contradiction, but it does
+/// outweigh agent-d's; so the hit shows agent-c's older contradiction,
+/// though agent-d's is newer.
+#[test]
+fn self_suppression_is_judged_per_contradiction() {
+    let mut s = base(CanonizationStatus::Canonical);
+    s.interaction(4, "agent-d", 250, None);
+    s.concept(4, 4, "agent-d", "brand x fits large", 250);
+    s.edge(12, EdgeType::Contradicts, 4, 1, 250, None);
+    s.interaction(5, "agent-c", 300, None);
+    s.concept(5, 5, "agent-c", "brand x size chart", 300);
+    s.edge(13, EdgeType::Dependency, 5, 1, 300, None);
+    let hit = at(&s, 1000).unwrap();
+    assert_eq!((hit.by, hit.writer), (cid(3), AgentId::from("agent-c")));
+}

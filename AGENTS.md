@@ -97,7 +97,10 @@ infrastructure section above, applied to design surface instead of resources:
   (its `event_time` if you give one, else now); it adds no dependent, changes no score or
   promotion, raises no conflict, and never replaces the older concept. When the older
   concept is Canonical or Venerable, later recalls warn that it is contradicted and show
-  your concept beside it. Do not cite and contradict one concept in the same call (refused).
+  your concept beside it, but only from the daemon's next cycle after your write, only
+  while your contradiction is newer than other agents' eligible evidence for that concept
+  (your own citations do not count against it), and not on dependency-question answers
+  ("what depends on X"), which carry no warnings. Do not cite and contradict one concept in the same call (refused).
 - Use one stable `agent_id` for an agent's whole life (model or client id: `claude-opus-5-5`,
   `codex-agent`, …), never per call, task or topic. Agents sharing an id share soft locks, so
   concurrent agents that must not collide need distinct stable ids (model + stable suffix).

@@ -298,11 +298,15 @@
   evidence is the concept's dependents (#36), dated by the write that
   declared each, eligible once `canonization_edge_min_age` old, excluding
   the concept's own origin interaction, and excluding support written by the
-  contradicting agent or by the contradicting concept itself. Both sides are
+  contradicting agent or by the contradicting concept itself. Evidence is
+  eligible by when it was written, whatever its `event_time`. Both sides are
   dated by about-time: the write's `event_time` if it gave one, otherwise
-  its write time, so a backdated contradiction is outweighed by later-dated
-  evidence; re-sending a contradiction does not re-date it. A hit shows one
-  contradiction, the newest. It is a daemon hot-list condition
+  its write time, never later than its write time, so a backdated
+  contradiction is outweighed by later-dated evidence and a future-dated one
+  counts from when it was written; re-sending a contradiction or a citation
+  does not re-date it (write a concept with different content to restate
+  it). A hit shows one contradiction, the newest. It appears from the
+  daemon's next cycle, and not on dependency-question answers. It is a daemon hot-list condition
   (`daemon::contradiction`), re-checked on every recall, so it lapses on
   demotion, newer evidence or removal of the contradicting concept; it
   publishes no daemon event and changes no status. In a layered recall the
@@ -311,6 +315,7 @@
   and `contradicts`; the `--ledger` recall line gains
   `contradiction_warning`. The `lambo_recall` tool description mentions
   the warning, and the `against` descriptions say how it is dated.
+
 - `lambo session classify` (#33 D1) reads a copied standalone SQLite backup
   or exported snapshot and writes a deterministic private review plan. Rules
   configure project evidence, conservative general rulings, fixed-seed
@@ -572,7 +577,8 @@
   collection, as a Venerable concept is, while that concept keeps its
   status, so a recall warning's evidence lasts as long as the warning can
   fire. Its neighbours are not protected through it, and the protection
-  lapses on the first sweep after the target is demoted.
+  lapses on the first sweep after the target is demoted. Any agent can use
+  `against` this way to keep a concept alive; that is the owner's call.
 
 - **A contradiction no longer makes a conflict (#19(c) owner decision 2,
   applied with #19(b)).** The conflict detector skips `Contradicts` edges
@@ -672,6 +678,12 @@
   `check_single_source` guard is gone (Lambo refuses a second parent itself).
 
 ### Fixed
+
+- **A huge configured window no longer panics the daemon cycle.** The
+  conflict, staleness and high-risk detectors saturated an out-of-range
+  window to chrono's maximum and then subtracted it from the clock, which
+  overflowed and panicked. A window reaching past chrono's range now covers
+  all of time (found in #19(c) review).
 
 - SQLite session loads preserve persisted creation and close timestamps,
   including in immutable classification source fingerprints. Writable schema
