@@ -480,7 +480,7 @@ async fn the_canonization_task_reaches_the_same_fixed_point() {
     for policy in BOTH {
         let mut p = params(policy);
         p.eval.batch_size = 2;
-        p.weights = config.scoring.clone();
+        p.weights = config.scoring;
         let (_, finals) = run(&snap, &p).await.unwrap();
 
         let graph = Arc::new(RwLock::new(Graph::from_snapshot(snap.clone()).unwrap()));
