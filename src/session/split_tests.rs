@@ -718,13 +718,10 @@ fn derives_reattach_to_one_shared_origin_replica() {
     );
     let original = source.interactions.iter().find(|i| i.id == id(3)).unwrap();
     let replica = beta.interactions.iter().find(|i| i.id == three).unwrap();
+    // A soft replica is a stub: no prompt text outside its own session.
     assert_eq!(
         (&replica.agent_id, &replica.prompt_text, replica.created_at),
-        (
-            &original.agent_id,
-            &original.prompt_text,
-            original.created_at
-        )
+        (&original.agent_id, &None, original.created_at)
     );
     for (edge, concept) in [(205, 15), (206, 16)] {
         let l = entry(&out, edge);
@@ -1003,6 +1000,12 @@ mod sqlite {
             // A loaded target is a valid graph.
             crate::graph::Graph::from_snapshot(t.snapshot.clone()).unwrap();
         }
+        // Stubs (prompt_text None) round-trip and verify like any row.
+        let beta = store.load_session(&SessionId::from("beta")).await.unwrap();
+        let three = mapped(&out, 3, "beta");
+        let stub = beta.interactions.iter().find(|i| i.id == three).unwrap();
+        assert_eq!(stub.prompt_text, None);
+        {}
         store.finish_split_destination().await.unwrap();
 
         // Rerun: read-only destination check, then verification only.
@@ -1451,4 +1454,97 @@ fn general_origin_replicas_from_excluded_projects_are_surfaced() {
         .interactions
         .iter()
         .any(|i| i.id == mapped(&out, 8, "general")));
+}
+
+#[test]
+fn soft_replicas_outside_their_session_are_stubs() {
+    let source = source();
+    let out = build_split(&plan_for(&source), &source).unwrap();
+    let a = &out.accounting;
+    let stubs: Vec<_> = a
+        .stubbed_replicas
+        .iter()
+        .map(|r| (r.id, r.primary.as_str(), r.target.as_str()))
+        .collect();
+    // i1 (README copy) and i3 (concepts 15/16) in beta; i2 (Cargo.toml copy,
+    // a hub-only replica) in alpha.
+    assert_eq!(
+        stubs,
+        [
+            (id(1), "alpha", "beta"),
+            (id(2), "beta", "alpha"),
+            (id(3), "alpha", "beta")
+        ]
+    );
+    for (n, primary, replica_in) in [
+        (1, "alpha", "beta"),
+        (2, "beta", "alpha"),
+        (3, "alpha", "beta"),
+    ] {
+        let original = source.interactions.iter().find(|i| i.id == id(n)).unwrap();
+        let full = target(&out, primary)
+            .interactions
+            .iter()
+            .find(|i| i.id == mapped(&out, n, primary))
+            .unwrap();
+        assert_eq!(full.prompt_text, original.prompt_text, "primary keeps text");
+        let stub = target(&out, replica_in)
+            .interactions
+            .iter()
+            .find(|i| i.id == mapped(&out, n, replica_in))
+            .unwrap();
+        assert_eq!(
+            Interaction {
+                id: original.id,
+                session_id: original.session_id.clone(),
+                previous_id: original.previous_id,
+                ..stub.clone()
+            },
+            Interaction {
+                prompt_text: None,
+                ..original.clone()
+            }
+        );
+    }
+    assert_eq!(SPLIT_ALGORITHM_VERSION, 2);
+}
+
+#[test]
+fn a_general_replica_is_a_stub_unless_it_passes_the_general_interaction_test() {
+    // i8 is beta's; of its concepts only the audited ruling is in general.
+    let (source, variant_labels, variant_overrides) = general_replica_variant();
+    let plan = classify_reviewed(&source, &rules(), &variant_labels, &variant_overrides).unwrap();
+    let out = build_split(&plan, &source).unwrap();
+    let a = &out.accounting;
+    assert_eq!(a.general_replica_ids, vec![id(8)]);
+    assert!(a.general_full_text_replicas.is_empty());
+    let replica = target(&out, "general")
+        .interactions
+        .iter()
+        .find(|i| i.id == mapped(&out, 8, "general"))
+        .unwrap();
+    assert_eq!(replica.prompt_text, None);
+
+    // i5's only concept is the general ruling: assigned to alpha, it would
+    // still pass D1's test, so its general replica keeps the text.
+    let source = self::source();
+    let mut labels = labels();
+    labels.iter_mut().find(|l| l.id == id(5)).unwrap().project = "alpha".into();
+    let plan = classify_reviewed(&source, &rules(), &labels, &overrides()).unwrap();
+    let out = build_split(&plan, &source).unwrap();
+    let a = &out.accounting;
+    assert_eq!(a.general_replica_ids, vec![id(5)]);
+    assert_eq!(a.general_full_text_replicas, vec![id(5)]);
+    assert!(!a.stubbed_replicas.iter().any(|r| r.id == id(5)));
+    let original = source.interactions.iter().find(|i| i.id == id(5)).unwrap();
+    for name in ["alpha", "general"] {
+        let row = target(&out, name)
+            .interactions
+            .iter()
+            .find(|i| i.id == mapped(&out, 5, name))
+            .unwrap();
+        assert_eq!(row.prompt_text, original.prompt_text, "{name}");
+    }
+    // Deterministic with stubs and full-text replicas alike.
+    assert_eq!(build_split(&plan, &source).unwrap(), out);
 }

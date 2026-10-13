@@ -492,6 +492,13 @@ fn summary(split: &SplitOutput, output: &Path, report: &Path, outcome: &str) -> 
             .map(|(k, v)| format!("{k} {v}"))
             .collect();
         out.push_str(&format!("origin replicas: {}\n", cells.join(", ")));
+        out.push_str(&format!(
+            "replica text: {} stubs without prompt text (full text stays in the primary \
+             target); {} in general, {} of them with text (listed in the report)\n",
+            a.stubbed_replicas.len(),
+            a.general_replicas,
+            a.general_full_text_replicas.len()
+        ));
     }
     if !a.general_replicas_from_excluded_projects.is_empty() {
         out.push_str(&format!(

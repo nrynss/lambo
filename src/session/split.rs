@@ -23,9 +23,13 @@
 //! * **Replicas.** An interaction copied outside its own session (an origin
 //!   replica) is refused when it carries hard protected provenance (an
 //!   excluded project's actor or repository folder): that evidence is never
-//!   waivable, so it never leaves its project. What a soft replica carries is
-//!   one policy function, [`replica_interaction`]. The accounting carries a
-//!   replica matrix (origin session -> target session).
+//!   waivable, so it never leaves its project. A soft replica is a **stub**
+//!   (same mapped id, agent, created and event times, no prompt text), except
+//!   in `general` when the interaction itself passes D1's general-interaction
+//!   test (every origin concept is in general). The full text stays in the
+//!   interaction's own target. The rule is one function,
+//!   [`replica_interaction`]. The accounting carries a replica matrix (origin
+//!   session -> target session), every stub and every general replica.
 //! * **Output edges.** A non-Temporal edge that is not dropped is written into
 //!   every target holding both endpoints. Temporal links are not copied: each
 //!   target's chain is the subsequence of the original `previous_id` chain
@@ -61,7 +65,8 @@ use crate::types::{
 
 /// Version of the split transform. It is part of every derived id and of the
 /// split digest, so a changed rule can never verify against an older import.
-pub const SPLIT_ALGORITHM_VERSION: u32 = 1;
+/// Version 2: soft origin replicas are stubs (owner decision, 2026-10-13).
+pub const SPLIT_ALGORITHM_VERSION: u32 = 2;
 
 /// Weight of a Temporal link the split creates between interactions that were
 /// not adjacent in the source chain.
@@ -138,6 +143,17 @@ pub struct Placement {
     pub primary: String,
     /// Target session -> target id, including the primary.
     pub targets: BTreeMap<String, NodeId>,
+}
+
+/// An origin replica written as a stub.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StubbedReplica {
+    /// The source interaction.
+    pub id: NodeId,
+    /// Its own (primary) session, which keeps the full text.
+    pub primary: String,
+    /// The session the stub is in.
+    pub target: String,
 }
 
 /// One low-confidence item, with the session the plan put it in.
@@ -227,8 +243,15 @@ pub struct SplitAccounting {
     pub replicas_for_hub_copies_only: usize,
     /// Origin replicas by `"origin session -> target session"`.
     pub replica_matrix: BTreeMap<String, usize>,
+    /// Every replica written as a stub (no prompt text).
+    pub stubbed_replicas: Vec<StubbedReplica>,
     /// Origin replicas placed in the general session.
     pub general_replicas: usize,
+    /// Every one of them, by source id.
+    pub general_replica_ids: Vec<NodeId>,
+    /// Of those, replicas that keep their text because the interaction
+    /// passes D1's general-interaction test.
+    pub general_full_text_replicas: Vec<NodeId>,
     /// Of those, interactions assigned to a project excluded from general:
     /// provenance of audited general rulings, listed for owner review.
     pub general_replicas_from_excluded_projects: Vec<NodeId>,
@@ -424,12 +447,32 @@ fn resolve_synonym<'a>(
 }
 
 /// What an origin replica (an interaction copied into a session other than
-/// its own) carries. The single policy point for soft replicas, pending the
-/// owner's choice between a full copy (current), a stub without the prompt,
-/// or refusal unless an interaction-level audit authorizes it. Hard
-/// provenance never reaches here: it is refused before materialization.
-fn replica_interaction(original: &Interaction) -> Result<Interaction, SplitError> {
-    Ok(original.clone())
+/// its own) carries: the soft-replica policy, option A chosen by the owner on
+/// 2026-10-13. A replica is a stub: the same agent, created and event times,
+/// with no prompt text, a state chunk-ingest interactions already have. The
+/// full text stays in the interaction's own target, so nothing is lost, and
+/// no project's prompt is copied into another project's session. The one
+/// exception is `general`: an interaction that would itself pass D1's
+/// general-interaction test (it has origin concepts and all are in general)
+/// keeps its text there. Hard provenance never reaches here; it is refused
+/// before materialization. Returns the row and whether it is a stub.
+fn replica_interaction(
+    original: &Interaction,
+    target: &str,
+    general: &str,
+    passes_general_test: bool,
+) -> (Interaction, bool) {
+    if target == general && passes_general_test {
+        (original.clone(), false)
+    } else {
+        (
+            Interaction {
+                prompt_text: None,
+                ..original.clone()
+            },
+            true,
+        )
+    }
 }
 
 /// Build every target of the split. Pure and deterministic: the same plan and
@@ -631,6 +674,21 @@ pub(super) fn build_validated(
         }
     }
 
+    // D1's general-interaction test: origin concepts exist and all are
+    // assigned to general.
+    let mut origin_children: HashMap<Uuid, Vec<&str>> = HashMap::new();
+    for c in &source.concepts {
+        origin_children
+            .entry(c.origin_interaction.0)
+            .or_default()
+            .push(primary[&c.id.0]);
+    }
+    let all_general_origins: HashSet<Uuid> = origin_children
+        .iter()
+        .filter(|(_, sessions)| sessions.iter().all(|s| *s == general))
+        .map(|(i, _)| *i)
+        .collect();
+
     let mut out_targets = Vec::with_capacity(targets.len());
     let mut accounting = SplitAccounting::default();
     for &t in &targets {
@@ -661,7 +719,18 @@ pub(super) fn build_validated(
                     .replica_matrix
                     .entry(format!("{} -> {t}", primary[&orig]))
                     .or_default() += 1;
-                replica_interaction(src)?
+                let (row, stub) =
+                    replica_interaction(src, t, general, all_general_origins.contains(&orig));
+                if stub {
+                    accounting.stubbed_replicas.push(StubbedReplica {
+                        id: src.id,
+                        primary: primary[&orig].to_owned(),
+                        target: t.to_owned(),
+                    });
+                } else {
+                    accounting.general_full_text_replicas.push(src.id);
+                }
+                row
             };
             snap_interactions.push(Interaction {
                 id: map("interaction", orig),
@@ -885,12 +954,17 @@ pub(super) fn build_validated(
             continue;
         }
         a.general_replicas += 1;
+        a.general_replica_ids.push(i.id);
         if excluded.contains(primary[&i.id.0]) {
             a.general_replicas_from_excluded_projects.push(i.id);
         }
     }
     a.general_replicas_from_excluded_projects
         .sort_by_key(|id| id.0);
+    a.general_replica_ids.sort_by_key(|id| id.0);
+    a.general_full_text_replicas.sort_by_key(|id| id.0);
+    a.stubbed_replicas
+        .sort_by(|x, y| (x.id.0, &x.target).cmp(&(y.id.0, &y.target)));
     a.hub_extra_rows = a.target_concepts - a.source_concepts;
     for h in &hubs {
         let n = places[h].len();
