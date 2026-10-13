@@ -705,7 +705,17 @@ pub(crate) mod testkit {
             .expect("row kept");
         assert_eq!(row.token, t3, "a release keeps current_token");
         assert_eq!(row.endpoint, None, "a released row publishes no endpoint");
-        assert!(row.expires_at <= Utc::now(), "a released row is expired");
+        // A release stamps `expires_at` with the store's clock: Postgres uses
+        // the server's `now()`, which in a local container can run slightly
+        // ahead of this host. A held lease here expires 60 s out, so allowing
+        // a few seconds of skew still tells a released row from a held one.
+        let skew = chrono::Duration::seconds(5);
+        assert!(
+            row.expires_at <= Utc::now() + skew,
+            "a released row is expired ({} vs host {})",
+            row.expires_at,
+            Utc::now()
+        );
 
         // Shape 2: the zombie.
         let x = holder("zombie-x", 3);
