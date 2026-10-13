@@ -28,7 +28,7 @@
 //! | | `lease_self` | six `parent_of` children minted in its own interaction: no other interaction vouches for it |
 //! | Chaff | `file_flush`, `file_lease`, `file_changelog` | file Resources that actions modify (`Causal`) on many days, cited by none |
 //! | | `soak_note` | an Observation read 17 times (access count), cited by none |
-//! | | `lease_alias` | a short Entity name cited by three actions on three days: support, no load (history #36 PR 4 does not rewrite; see [`expected`]) |
+//! | | `lease_alias` | a short Entity name cited by three actions on three days: support, no load (history #36 PR 4 does not rewrite and PR 5 only previews; see [`expected`]) |
 //! | | `write_path_hub` | an Entity associated (`CoOccurrence`/`Semantic`) with every ruling |
 //! | | `lease_revoke` | a newer Logic that contradicts `lease_stays` (the one `Contradicts` edge) |
 //! | Dependents | `a01`..`a32` (Resource actions), `d01`..`d10` (Logic decisions), `c01`..`c06` (children) | the work that cites the rows above |
@@ -550,9 +550,13 @@ pub fn expected(policy: PromotionPolicy) -> Vec<(&'static str, CanonizationStatu
         // itself by id, but it redirects nothing already written, and a
         // citation by the alias's text still lands on the alias (0.5.0's text
         // rule; 0.6.0 has no names). The three `Dependency` edges here are
-        // such history. Only the reviewed alias backfill (#36 PR 5) flips
-        // this row to None; when it does, update this line rather than the
-        // resolver. PR 4 re-ran the fixture and no expected status moved.
+        // such history. PR 4 re-ran the fixture and no expected status
+        // moved. #36 PR 5's alias preview shows the flip on an overlay
+        // (`canon::dry_run::tests::the_alias_preview_flips_the_fixture_alias`:
+        // with the three citations moved to `lease_stays`, this row ends at
+        // None and the ruling carries nine dependents), but it applies
+        // nothing, and this fixture is history: the row stays Venerable here
+        // until a backfill is actually applied, if one ever is.
         ("lease_alias", Venerable),
     ];
     match policy {

@@ -107,6 +107,8 @@ The later bands are 6.0 for Venerable and 10.0 for Canonical, and since 0.6.0 a 
 
 `lambo_inspect`, `lambo inspect` and the portal's inspect panel explain each concept's next hop under the live policy: which gates it is checked against, its value and bar for each, and one sentence per gate that fails. The explanation runs the evaluator's own predicates with the evaluator's own inputs, the Canonical budget included: a Venerable is not reported eligible while the budget is full, because no Stage 3 window runs then. What it does not predict is timing: whether a cycle reaches an eligible concept this minute is up to the batch size and the round-robin order.
 
+For a whole session at once, `lambo canon dry-run` runs the same evaluator to its fixed point on an in-memory copy of a store backup and reports, per policy, how many concepts fail each gate, what would be promoted and which concepts are one gate away, without writing anything. `lambo canon alias-preview` shows what moving old citations of short names onto their rulings would change. See [Preview canonization](/lambo/cli/#preview-canonization).
+
 ## What recall does with it
 
 [`src/recall/assemble.rs`](https://github.com/nrynss/lambo/blob/main/src/recall/assemble.rs). Retrieval mixes earned importance with query relevance:
