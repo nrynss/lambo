@@ -1,6 +1,40 @@
 # Changelog
 
-## Unreleased
+## 0.6.0 (2026-10-13)
+
+### Highlights
+
+- **Per-project sessions with a shared layer (#33).** A serve can hold one
+  session per project and layer a shared session, such as `general`, under
+  each (`[serve] layers`, per-project URLs `/mcp/s/<session>`). Recall merges
+  the layers with the project's own hits and says which session each hit came
+  from. Writes can name their session with `scope`. A shared-layer hit must be
+  similar to the query by vector; a keyword match alone no longer admits it
+  (#157, floor 0.50).
+- **Moving one mixed session into per-project ones (#33).** `lambo session
+  classify` proposes where every record goes. `lambo session split` writes
+  the target sessions into a new SQLite file with exact accounting, and its
+  re-runs write nothing. `lambo session verify` compares recall before and
+  after the split, the way agents will see it. All three are offline and
+  read-only on their sources.
+- **Canonization promotes rulings, not artifacts (#36).** Support now
+  counts the concepts that depend on a ruling, not the actions that touched a
+  file. Swarm admission is evidence-led, and Solo is gated on stage verdicts.
+  Agents cite rulings by id in `depends_on`. `lambo canon dry-run` and
+  `alias-preview` show the effect on a backup before it happens.
+- **Contradictions (#19).** `against` on `lambo_derive` and
+  `lambo_record_action` records that a write shows an existing concept to be
+  wrong. Recall warns when a Canonical or Venerable concept is contradicted by
+  something newer than its support, and shows the contradicting concept. A
+  contradiction never changes a score or a status, and no longer keeps a
+  concept alive through GC.
+- **Supersession, off by default (#20).** With `canonization_supersede =
+  true`, a contradicting concept that earns its own newer evidence demotes the
+  Canonical concept it contradicts. The audit records why each demotion
+  happened.
+- **Repository-scoped paths (#129).** With `repo_scope`, `README.md` in two
+  repositories is two concepts, not one hub. Recall and inspect show the
+  repository, and an ambiguous lookup is refused rather than guessed.
 
 ### Upgrading from 0.5.0
 
