@@ -60,3 +60,26 @@ async fn nonempty_wal_missing_input_and_old_schema_refuse_without_repair() {
     reader.pool().close().await;
     assert_eq!(std::fs::read(&path).unwrap(), before);
 }
+
+#[tokio::test]
+async fn session_metadata_roundtrips_and_invalidates_classification_binding() {
+    let store = test_store();
+    store.init_schema().await.unwrap();
+    let (mut source, rules) = crate::session::tests::fixture();
+    let at = source.interactions[0].created_at;
+    source.created_at = Some(at);
+    source.closed_at = Some(at + chrono::Duration::days(1));
+    store.seed(&source).await.unwrap();
+    let loaded = store.load_session(&source.session_id).await.unwrap();
+    assert_eq!(loaded.created_at, source.created_at);
+    assert_eq!(loaded.closed_at, source.closed_at);
+    let plan = crate::session::classify(&loaded, &rules, &[]).unwrap();
+    sqlx::query("UPDATE sessions SET closed_at = ? WHERE session_id = ?")
+        .bind((at + chrono::Duration::days(2)).to_rfc3339())
+        .bind(&source.session_id.0)
+        .execute(store.pool())
+        .await
+        .unwrap();
+    let changed = store.load_session(&source.session_id).await.unwrap();
+    assert!(crate::session::validate_plan(&plan, &changed).is_err());
+}

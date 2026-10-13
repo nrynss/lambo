@@ -236,10 +236,11 @@
 //! `root_goal` **is** carried by the mutation path since XP-8
 //! (`Mutation::SetRootGoal`): `flush` updates `sessions.root_goal` with `seed`'s
 //! exact JSON encoding and `load_session` reads it back, so a reload no longer
-//! silently clears the drift anchor. `created_at`/`closed_at` still have no
-//! `Mutation` kind — like MemoryStore, `load_session` returns `None` for those
-//! two, and their columns stay inert (the row is created as an FK anchor with a
-//! `created_at` DB-default) until a full-snapshot save path exists.
+//! silently clears the drift anchor. `created_at`/`closed_at` have no
+//! `Mutation` kind, but full-snapshot `seed` stores them and `load_session`
+//! preserves those columns. A session first created as an FK anchor keeps
+//! its `created_at` DB-default. Read-only classification binds this metadata
+//! along with the rest of the durable snapshot.
 //!
 //! ## Embedding contract (session metadata)
 //!
