@@ -388,18 +388,22 @@
 - `lambo session verify` (#33 D3) compares recall before and after a split,
   as agents will see it. For each query of a per-project query set it runs
   plain recall on the mixed source session and layered recall on the
-  project's target session plus the layer stack `[serve] layers` gives it,
-  merged as a serve merges it. Hits are matched by origin through the
-  split's placements (hub copies and replicas included), and a private
-  create-new report gives overlap and recall@k, lost, merged-by-dedupe and
-  gained hits, rank shifts, other projects' hits removed, leaks, the session
-  each hit came from, and changed annotations and warnings; the summary
-  prints aggregates only. The split is rebuilt from the source and plan and
-  the output must hold exactly its receipted targets with matching rows.
-  Both inputs are read-only (immutable, no lease, flush or schema
-  initialization), and the replay runs on a pinned clock without noting
-  accesses, so it is deterministic. It needs `--config` for `[embedder]`,
-  `[daemon]` and `[serve]`; `[store]` is never opened.
+  project's target session plus the layer stack the serving `[serve]` table
+  gives it (pinned sessions and `default_session` worked out as an HTTP
+  serve does), merged as a serve merges it. Each query is embedded once for
+  both sides. Hits are matched by origin through the split's placements (hub
+  copies and replicas included), and a private create-new report gives
+  recall@k (cut at rank `k`), lost, merged-by-dedupe and gained hits, rank
+  shifts, other projects' hits removed, foreign-primary after hits, the
+  session each hit came from, and changed annotation and warning kinds. Ids
+  are named only for queried projects and their layers; everything else,
+  and every `--aggregate-only` session, appears as counts. The split is
+  rebuilt from the source and plan and the output must hold exactly its
+  receipted targets with matching rows. Both inputs are read-only
+  (immutable, no lease, flush or schema initialization), and the replay
+  runs on a pinned clock without noting accesses, so it is deterministic.
+  It measures SQLite-holder behaviour and needs the serving `--config` with
+  a SQLite `[store]` (parsed, never opened) and no `[recall]` tier.
   `lambo::session::verify_split` is the library entry point;
   `lambo::resolve::resolve_verify_io` resolves the inputs.
 
