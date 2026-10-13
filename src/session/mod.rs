@@ -20,9 +20,9 @@ pub use split::{
     SplitTarget, StubbedReplica, TargetCounts, NEW_CHAIN_LINK_WEIGHT, SPLIT_ALGORITHM_VERSION,
 };
 pub use verify::{
-    newest_row, verify_split, ProjectSummary, QueryComparison, RankShift, VerifyError, VerifyHit,
-    VerifyInputs, VerifyParams, VerifyQueries, VerifyReport, MAX_QUERIES_PER_PROJECT,
-    MAX_QUERY_BYTES, VERIFY_REPORT_VERSION,
+    newest_row, verify_split, warning_kind, ProjectSummary, QueryComparison, RankShift,
+    VerifyError, VerifyHit, VerifyInputs, VerifyParams, VerifyQueries, VerifyReport,
+    MAX_QUERIES_PER_PROJECT, MAX_QUERY_BYTES, MEASURES, VERIFY_REPORT_VERSION,
 };
 
 #[cfg(test)]

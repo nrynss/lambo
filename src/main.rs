@@ -618,7 +618,7 @@ enum SessionAction {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Compare recall before and after a split (plain recall on the source, layered recall per project) and write a private report. Needs --config for [embedder], [daemon] and [serve] layers; [store] is never opened.
+    /// Compare recall before and after a split (plain recall on the source, layered recall per project) and write a private report. Needs --config, the serving lambo.toml: a SQLite [store] (parsed, never opened) with no [recall] tier, [embedder], [daemon] and [serve]. Measures SQLite-holder behaviour.
     Verify {
         /// Source session id; must match the plan and the snapshot.
         #[arg(long)]
@@ -661,6 +661,9 @@ enum SessionAction {
         /// Detector clock, RFC 3339 (default: the newest row in the source), so reruns match.
         #[arg(long, value_name = "RFC3339")]
         at: Option<String>,
+        /// A session that appears only as counts in the report and summary, never by id; it cannot be queried or read as a layer. Repeatable (e.g. an excluded project).
+        #[arg(long, value_name = "SESSION")]
+        aggregate_only: Vec<String>,
     },
 }
 
@@ -1673,6 +1676,7 @@ fn main() -> ExitCode {
                         max_tokens,
                         traversal_depth,
                         at,
+                        aggregate_only,
                         ..
                     },
             },
@@ -1690,6 +1694,7 @@ fn main() -> ExitCode {
                     max_tokens,
                     traversal_depth,
                     at,
+                    aggregate_only,
                 },
             )
             .await

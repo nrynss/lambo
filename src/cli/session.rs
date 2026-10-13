@@ -614,6 +614,8 @@ pub struct VerifyArgs {
     pub max_tokens: Option<usize>,
     pub traversal_depth: Option<usize>,
     pub at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Sessions that appear only as counts (`--aggregate-only`, repeatable).
+    pub aggregate_only: Vec<String>,
 }
 
 fn read_queries(path: &Path) -> Result<crate::session::VerifyQueries, CliError> {
@@ -682,17 +684,36 @@ fn ratio(v: Option<f64>) -> String {
     v.map_or_else(|| "n/a".to_owned(), |v| format!("{v:.3}"))
 }
 
+fn counts(map: &std::collections::BTreeMap<String, usize>) -> String {
+    if map.is_empty() {
+        return "none".to_owned();
+    }
+    map.iter()
+        .map(|(k, v)| format!("{k} {v}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Aggregates only: counts per project, no ids, queries or content.
 fn verify_summary(report: &crate::session::VerifyReport, path: &Path) -> String {
     let p = &report.params;
     let mut out = format!(
-        "verify {}: split {} (algorithm {}), {} projects, top_k {}, clock {}\n",
+        "verify {}: split {} (algorithm {}), {} projects, top_k {}, clock {}; pinned {} \
+         (default {}); aggregate-only {}\nmeasures {}\n",
         report.source_session,
         &report.split_sha256[..report.split_sha256.len().min(12)],
         report.split_algorithm_version,
         report.projects.len(),
         p.top_k,
-        p.at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+        p.at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        report.pinned.len(),
+        report.default_session,
+        if report.aggregate_only.is_empty() {
+            "none".to_owned()
+        } else {
+            report.aggregate_only.join(", ")
+        },
+        report.measures,
     );
     for (project, s) in &report.projects {
         let layers = if s.layers.is_empty() {
@@ -700,26 +721,19 @@ fn verify_summary(report: &crate::session::VerifyReport, path: &Path) -> String 
         } else {
             format!("layers {}", s.layers.join(", "))
         };
-        let by_session: Vec<String> = s
-            .after_by_session
-            .iter()
-            .map(|(k, v)| format!("{k} {v}"))
-            .collect();
         out.push_str(&format!(
             "{project} ({layers}): {} queries; before {} hits ({} in scope, {} from other \
-             sessions removed); after {} hits ({}; {} shared-hub copies); recall@{} {} (mean {}); \
-             lost {}, merged by dedupe {}, gained {}, leaked {}; {} on both sides, {} moved (mean |shift| {}, max {}); \
-             annotation kinds +{} -{}; {} queries with changed warnings\n",
+             sessions removed: {}); after {} hits ({}; {} shared-hub hits); recall@{} {} \
+             (mean {}); lost {}, merged by dedupe {}, gained {}; FOREIGN-PRIMARY AFTER {} ({}); \
+             {} on both sides, {} moved (mean |shift| {}, max {}); annotation kinds +{} -{}; \
+             warning kinds +{} -{} ({} queries changed)\n",
             s.queries,
             s.before_hits,
             s.before_in_scope,
             s.removed_foreign,
+            counts(&s.removed_foreign_by_primary),
             s.after_hits,
-            if by_session.is_empty() {
-                "none".to_owned()
-            } else {
-                by_session.join(", ")
-            },
+            counts(&s.after_by_session),
             s.after_hub_hits,
             p.top_k,
             ratio(s.recall_at_k),
@@ -727,13 +741,16 @@ fn verify_summary(report: &crate::session::VerifyReport, path: &Path) -> String 
             s.lost,
             s.deduped,
             s.gained,
-            s.leaked,
+            s.foreign_primary_after,
+            counts(&s.foreign_primary_after_by_primary),
             s.common,
             s.moved,
             ratio(s.mean_abs_shift),
             s.max_abs_shift,
             s.annotations_added.values().sum::<usize>(),
             s.annotations_removed.values().sum::<usize>(),
+            counts(&s.warnings_added),
+            counts(&s.warnings_removed),
             s.queries_with_changed_warnings,
         ));
     }
@@ -747,7 +764,8 @@ fn verify_summary(report: &crate::session::VerifyReport, path: &Path) -> String 
 /// `lambo session verify` (#33 D3). Rebuilds the split from the source and
 /// plan, requires the output's receipts and target digests to match it,
 /// replays the query set before (plain recall on the source) and after
-/// (layered recall per project, as `[serve] layers` configures it), and
+/// (layered recall per project, as the serving `[serve]` table pins and
+/// layers it), and
 /// publishes the private report create-new. Both inputs are read-only: no
 /// lease, flush or schema initialization touches either.
 pub async fn verify_session(
@@ -784,22 +802,21 @@ pub async fn verify_session(
     // are what the output must match.
     let split = build_split(&plan, &snapshot).map_err(|e| CliError::Usage(e.to_string()))?;
     let targets = load_split_targets(&split, &io.split).await?;
-    let pinned: Vec<String> = split.targets.iter().map(|t| t.session.clone()).collect();
-    let layers = io
-        .serve
-        .resolve_layers(&pinned)
-        .map_err(|e| CliError::Usage(e.to_string()))?;
     let at = match args.at {
         Some(at) => at,
         None => crate::session::newest_row(&snapshot)
             .ok_or_else(|| CliError::Usage("the source is empty; pass --at".into()))?,
     };
+    let aggregate_only: std::collections::BTreeSet<String> =
+        args.aggregate_only.iter().cloned().collect();
     let report = crate::session::verify_split(crate::session::VerifyInputs {
         source: snapshot,
+        plan: &plan,
         split: &split,
         targets,
-        layers: &layers,
+        serve: &io.serve,
         queries: &queries,
+        aggregate_only: &aggregate_only,
         params: crate::session::VerifyParams {
             top_k,
             max_tokens,
@@ -1483,6 +1500,7 @@ mod tests {
                     max_tokens: Some(4000),
                     traversal_depth: None,
                     at: None,
+                    aggregate_only: vec![],
                 }
             }
 
@@ -1498,16 +1516,20 @@ mod tests {
                 verify_session(io, args).await
             }
 
+            /// The serving config verify replays: a SQLite store that is
+            /// parsed but never opened, every target pinned, general layered.
+            const SERVING: &str =
+                "[store]\nkind = \"sqlite\"\ndsn = \"/nonexistent/never-opened.db\"\n\n\
+                [embedder]\nkind = \"fixture\"\ndim = 2\n\n\
+                [serve]\nsessions = [\"alpha\", \"beta\", \"general\"]\n\
+                default_session = \"alpha\"\nlayers = [\"general\"]\n";
+
             async fn split_output(i: &Inputs) -> (PathBuf, PathBuf) {
                 let output = i.dir.join("split.db");
                 run(i, &output, again(&i.args, "split-report.json"))
                     .await
                     .unwrap();
-                std::fs::write(
-                    i.dir.join("lambo.toml"),
-                    "[embedder]\nkind = \"fixture\"\ndim = 2\n\n[serve]\nlayers = [\"general\"]\n",
-                )
-                .unwrap();
+                std::fs::write(i.dir.join("lambo.toml"), SERVING).unwrap();
                 let queries = i.dir.join("queries.toml");
                 std::fs::write(
                     &queries,
@@ -1560,7 +1582,8 @@ mod tests {
                     summary.contains("alpha (layers general): 2 queries"),
                     "{summary}"
                 );
-                assert!(summary.contains("leaked 0"), "{summary}");
+                assert!(summary.contains("FOREIGN-PRIMARY AFTER"), "{summary}");
+                assert!(summary.contains("measures SQLite holder"), "{summary}");
                 assert!(summary.ends_with("opened read-only"), "{summary}");
                 // Aggregates only: no source id or query text on stdout.
                 let source = source();
@@ -1600,6 +1623,33 @@ mod tests {
                     .await,
                     "never overwritten",
                 );
+                std::fs::remove_dir_all(&i.dir).unwrap();
+            }
+
+            /// L5: verify replays a SQLite holder, so another store kind or
+            /// a [recall] tier in the serving config is refused up front.
+            #[tokio::test(flavor = "multi_thread")]
+            async fn a_serving_config_verify_does_not_model_is_refused() {
+                let i = inputs();
+                let (output, _) = split_output(&i).await;
+                let config = i.dir.join("lambo.toml");
+                for (body, needle) in [
+                    (
+                        SERVING.replace("kind = \"sqlite\"", "kind = \"memory\""),
+                        "measures SQLite-holder behaviour",
+                    ),
+                    (
+                        format!("{SERVING}\n[recall]\nkind = \"elastic\"\nurl = \"http://127.0.0.1:1\"\n"),
+                        "recall",
+                    ),
+                ] {
+                    std::fs::write(&config, body).unwrap();
+                    let err = resolve_verify_io(&config, None, Some(&i.snapshot), &output)
+                        .err()
+                        .expect("refused")
+                        .to_string();
+                    assert!(err.contains(needle), "{err}");
+                }
                 std::fs::remove_dir_all(&i.dir).unwrap();
             }
 

@@ -5,10 +5,14 @@
 //! * **before**: plain recall on the mixed source session, as a holder of
 //!   that session answers it today;
 //! * **after**: layered recall as an agent for that project sees it once the
-//!   split is served: the project's target session plus the layer stack
-//!   `[serve] layers` gives it (`ServeConfig::resolve_layers` with every
-//!   target pinned), merged by the same `recall::layered::merge` with the
-//!   same knobs `Memory::recall_layered` passes.
+//!   split is served over HTTP: the project's target session plus the layer
+//!   stack the serving `[serve]` table gives it. The pinned sessions are
+//!   worked out exactly as `lambo serve --transport http` does with no
+//!   `--session` (`[serve] sessions`, with `default_session`), the stacks by
+//!   `ServeConfig::resolve_layers` over them, and the merge is the same
+//!   `recall::layered::merge` with the knobs `Memory::recall_layered`
+//!   passes. A queried project the serve would attach on demand (so
+//!   unlayered) is refused.
 //!
 //! Hits are compared by **origin identity**: an "after" hit's id is mapped
 //! back to its source id through the split's placements (every target id,
@@ -16,15 +20,24 @@
 //! copied into a hub placement or answers from `general` counts as the same
 //! memory it was before.
 //!
-//! The replay is offline and read-only. Each session is materialized as a
-//! holder loads it (`store::load::materialize`) into an **unspawned**
-//! daemon whose clock is pinned, primed once (`Daemon::prime_offline`:
-//! rescore and hot-list detection, no events, no GC, no access ledger).
-//! Recall re-validates hot-list entries at that same clock. The vector
-//! leg ranks in the session's own graph, as a SQLite holder's does
-//! (`VectorCandidates::for_holder`). Nothing notes accesses, so one query
-//! never changes the next one's answer, and the same inputs always give the
-//! same report.
+//! The replay is offline and read-only, and it measures a **SQLite
+//! holder**: each session is materialized as a holder loads it
+//! (`store::load::materialize`) into an **unspawned** daemon whose clock is
+//! pinned, primed once (`Daemon::prime_offline`: rescore and hot-list
+//! detection, no events, no GC, no access ledger), and the vector leg ranks
+//! in the session's own graph, which is what `VectorCandidates::for_holder`
+//! picks over SQLite (its checked read is an exact scan). Each query is
+//! embedded once and the vector is shared by both sides. Nothing notes
+//! accesses, so one query never changes the next one's answer, and the same
+//! inputs always give the same report.
+//!
+//! **Disclosure.** The report names an origin id only when the session the
+//! split assigned it to is a queried project or one of their layers, and is
+//! not aggregate-only. Everything else (other projects' hits, and every hit
+//! of an aggregate-only session such as an excluded project) appears only as
+//! counts by assigned session. Warning lines are reduced to their kind
+//! (`stale_session`, `conflict`, ...), never kept raw: a line can quote an
+//! agent id or a contradicting concept's text.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
@@ -33,14 +46,14 @@ use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
-use super::SplitOutput;
-use crate::config::{Config, LayerSpec, ServeLayers};
+use super::{ClassificationPlan, ItemKind, SplitOutput};
+use crate::config::{Config, LayerSpec, ServeConfig, ServeLayers};
 use crate::daemon::{Daemon, RecallPipeline};
 use crate::embed::Embedder;
 use crate::graph::vector_source::GraphVectorSource;
 use crate::graph::Graph;
 use crate::recall::cache::RecallCache;
-use crate::recall::candidates;
+use crate::recall::detail::DetailedRecall;
 use crate::recall::format;
 use crate::recall::layered::{
     self, HitIdentity, LayeredRecall, MergeParams, TierList, TierRecall, PRIMARY_WEIGHT,
@@ -49,8 +62,10 @@ use crate::resolve::assert_session_embedding_compatible;
 use crate::store::vector_source::VectorCandidates;
 use crate::types::{EmbeddingContract, GraphSnapshot, Node, NodeId, RecallQuery, SessionId};
 
-/// Version of the verify report's JSON shape.
-pub const VERIFY_REPORT_VERSION: u32 = 1;
+/// Version of the verify report's JSON shape. Version 2: disclosure rules,
+/// warning kinds instead of lines, foreign-primary after hits, recall@k cut
+/// at rank `k`, pinned sessions from `[serve]`.
+pub const VERIFY_REPORT_VERSION: u32 = 2;
 
 /// Most queries one project may list.
 pub const MAX_QUERIES_PER_PROJECT: usize = 200;
@@ -122,12 +137,12 @@ impl VerifyQueries {
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct VerifyParams {
     /// `k`: the hits each recall returns (forced hits may add more), and
-    /// the `k` of recall@k.
+    /// the `k` of recall@k (both sides cut at rank `k`).
     pub top_k: usize,
     pub max_tokens: usize,
     pub traversal_depth: usize,
-    /// The clock every session's detectors run at (stale, conflict and
-    /// high-risk windows). Pinned so a rerun gives the same report.
+    /// The clock every session's detectors and hot-list re-validation run
+    /// at. Pinned so a rerun gives the same report.
     pub at: DateTime<Utc>,
 }
 
@@ -146,7 +161,50 @@ pub fn newest_row(snapshot: &GraphSnapshot) -> Option<DateTime<Utc>> {
     times.into_iter().max()
 }
 
-/// One hit of one side.
+/// The kind of one warning line, keeping a layer's `[<session>] ` prefix.
+/// A raw line can quote an agent id, a high-risk reason or a contradicting
+/// concept's text, so the report keeps only this.
+pub fn warning_kind(line: &str) -> String {
+    let (prefix, body) = match line.strip_prefix('[').and_then(|r| r.split_once("] ")) {
+        Some((session, body)) => (Some(session), body),
+        None => (None, line),
+    };
+    let kind = if body.starts_with("Session inactive") {
+        "stale_session"
+    } else if body.starts_with("Agent ") && body.contains(" wrote to it ") {
+        "conflict"
+    } else if body.starts_with("High-risk modification") {
+        "high_risk"
+    } else if body.starts_with("Drifted ") {
+        "drift"
+    } else if body.starts_with("⚠ Contradicted") {
+        "contradicted"
+    } else if body.starts_with("⚠ Contradicts") {
+        "contradicts"
+    } else if body.starts_with("⚑ Load-bearing pillar") {
+        "load_bearing"
+    } else if body.starts_with("Reserved by ") {
+        "reservation"
+    } else if body.starts_with("recall: dependency question answered") {
+        "traversal"
+    } else if body.starts_with("recall: layer ") && body.contains(" is unavailable") {
+        "layer_unavailable"
+    } else if body.starts_with("recall: query embedding failed") {
+        "embed_failed"
+    } else if body.starts_with("recall:") && body.contains("vector") {
+        "vector_degraded"
+    } else if body.starts_with("recall:") {
+        "recall_other"
+    } else {
+        "other"
+    };
+    match prefix {
+        Some(session) => format!("[{session}] {kind}"),
+        None => kind.to_owned(),
+    }
+}
+
+/// One disclosed hit of one side.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct VerifyHit {
     /// 1-based position in the answer.
@@ -160,19 +218,25 @@ pub struct VerifyHit {
     pub node_id: NodeId,
     /// The session the split assigned the origin to.
     pub primary: String,
-    /// The origin is a shared hub (placed in more than one session).
+    /// The origin is a shared hub of the plan (a concept with `copy_into`).
     pub hub: bool,
     pub included_in_context: bool,
     /// The hit's annotation kinds, sorted.
     pub annotations: Vec<String>,
-    /// Origins of the copies layered dedupe merged into this hit (same
-    /// canonical key, or holder vectors at the dedupe threshold), as
-    /// `(session, origin)`. Empty before.
+    /// Disclosed origins of the copies layered dedupe merged into this hit,
+    /// as `(session, origin)`. Empty before.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub also: Vec<(String, NodeId)>,
+    /// Merged copies whose origin is not disclosed.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub also_undisclosed: usize,
 }
 
-/// A hit present on both sides, and how far it moved.
+fn is_zero(n: &usize) -> bool {
+    *n == 0
+}
+
+/// A disclosed hit present on both sides, and how far it moved.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RankShift {
     pub origin: NodeId,
@@ -186,35 +250,48 @@ pub struct RankShift {
     pub annotations_removed: Vec<String>,
 }
 
-/// One query's comparison.
+/// One query's comparison. Origin ids appear only when disclosed (see the
+/// module docs); every count covers all hits.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct QueryComparison {
     pub query: String,
+    /// Disclosed before hits.
     pub before: Vec<VerifyHit>,
+    /// Undisclosed before hits, by the session the split assigned them to.
+    pub before_undisclosed_by_primary: BTreeMap<String, usize>,
+    /// Disclosed after hits.
     pub after: Vec<VerifyHit>,
-    /// Before hits the project can still see after the split (placed in it
-    /// or in one of its layers).
+    /// Undisclosed after hits, by assigned session.
+    pub after_undisclosed_by_primary: BTreeMap<String, usize>,
+    /// Before hits (any rank) the project can still see after the split
+    /// (placed in it or in one of its layers), and those that are after hits.
     pub before_in_scope: usize,
-    /// In-scope before hits that are also after hits.
     pub overlap_in_scope: usize,
-    /// `overlap_in_scope / before_in_scope`; `None` with nothing in scope.
+    /// The same, both sides cut at rank `k`.
+    pub before_in_scope_at_k: usize,
+    pub overlap_at_k: usize,
+    /// `overlap_at_k / before_in_scope_at_k`; `None` with nothing in scope.
     pub recall_at_k: Option<f64>,
-    /// In-scope before hits missing after: real losses.
-    pub lost: Vec<NodeId>,
-    /// In-scope before hits missing after as hits of their own, because
-    /// layered dedupe merged them into another memory's hit (they are in
-    /// that hit's `also`). Not counted in `lost` or in the overlap.
-    pub deduped: Vec<NodeId>,
+    /// In-scope before hits missing after (any rank).
+    pub lost: usize,
+    /// In-scope before hits missing as hits of their own because layered
+    /// dedupe merged them into another memory's hit (its `also`).
+    pub deduped: usize,
     /// After hits that were not before hits.
-    pub gained: Vec<NodeId>,
-    /// Before hits placed only in sessions this project does not read:
-    /// other projects' memories, correctly removed by the split.
-    pub removed_foreign: Vec<NodeId>,
-    /// After hits whose origin the split did not place in the session they
-    /// answered from. A correct split has none.
-    pub leaked: Vec<NodeId>,
+    pub gained: usize,
+    /// Disclosed origins of the three lists above.
+    pub lost_ids: Vec<NodeId>,
+    pub deduped_ids: Vec<NodeId>,
+    pub gained_ids: Vec<NodeId>,
+    /// Before hits placed only in sessions this project does not read
+    /// (removed by the split), by assigned session.
+    pub removed_foreign_by_primary: BTreeMap<String, usize>,
+    /// After hits whose assigned session is not one this project reads: a
+    /// shared hub copied in from another project, by assigned session.
+    pub foreign_primary_after_by_primary: BTreeMap<String, usize>,
+    /// Disclosed hits on both sides.
     pub shifts: Vec<RankShift>,
-    /// Warning lines only before, and only after.
+    /// Warning kinds only before, and only after (see [`warning_kind`]).
     pub warnings_removed: Vec<String>,
     pub warnings_added: Vec<String>,
     /// Response annotation kinds only before, and only after.
@@ -232,7 +309,9 @@ pub struct ProjectSummary {
     pub after_hits: usize,
     pub before_in_scope: usize,
     pub overlap_in_scope: usize,
-    /// Micro recall@k: `overlap_in_scope / before_in_scope`.
+    pub before_in_scope_at_k: usize,
+    pub overlap_at_k: usize,
+    /// Micro recall@k: `overlap_at_k / before_in_scope_at_k`.
     pub recall_at_k: Option<f64>,
     /// Macro recall@k: the mean over queries with something in scope.
     pub mean_recall_at_k: Option<f64>,
@@ -240,13 +319,15 @@ pub struct ProjectSummary {
     pub deduped: usize,
     pub gained: usize,
     pub removed_foreign: usize,
-    /// Removed foreign hits by the session the split assigned them to.
     pub removed_foreign_by_primary: BTreeMap<String, usize>,
-    pub leaked: usize,
+    /// After hits assigned to a session the project does not read.
+    pub foreign_primary_after: usize,
+    pub foreign_primary_after_by_primary: BTreeMap<String, usize>,
     /// After hits by the session they answered from.
     pub after_by_session: BTreeMap<String, usize>,
-    /// After hits that are shared-hub copies.
+    /// After hits that are shared-hub copies (the plan's `copy_into`).
     pub after_hub_hits: usize,
+    /// Hits on both sides, all of them (disclosed or not).
     pub common: usize,
     pub moved: usize,
     pub mean_abs_shift: Option<f64>,
@@ -254,7 +335,10 @@ pub struct ProjectSummary {
     /// Annotation kinds gained or lost by hits on both sides, by kind.
     pub annotations_added: BTreeMap<String, usize>,
     pub annotations_removed: BTreeMap<String, usize>,
-    /// Queries whose warning lines or response annotations changed.
+    /// Warning kinds gained or lost, by kind (one per query that changed).
+    pub warnings_added: BTreeMap<String, usize>,
+    pub warnings_removed: BTreeMap<String, usize>,
+    /// Queries whose warning kinds or response annotations changed.
     pub queries_with_changed_warnings: usize,
 }
 
@@ -262,6 +346,8 @@ pub struct ProjectSummary {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct VerifyReport {
     pub report_version: u32,
+    /// What the replay measures (see the module docs).
+    pub measures: String,
     pub source_session: String,
     pub source_sha256: String,
     pub plan_sha256: String,
@@ -269,11 +355,21 @@ pub struct VerifyReport {
     pub split_algorithm_version: u32,
     pub embedding: EmbeddingContract,
     pub params: VerifyParams,
+    /// The sessions the serving `[serve]` table pins, and its default.
+    pub pinned: Vec<String>,
+    pub default_session: String,
+    /// Sessions that appear only as counts.
+    pub aggregate_only: Vec<String>,
     /// The layer weight and floor of each layered project, as resolved.
     pub layer_knobs: BTreeMap<String, Vec<(String, f64, f64)>>,
     pub projects: BTreeMap<String, ProjectSummary>,
     pub queries: BTreeMap<String, Vec<QueryComparison>>,
 }
+
+/// What the report's `measures` field and the summary say.
+pub const MEASURES: &str = "SQLite holder behaviour: holder-graph vector ranking, first-cycle \
+scores and hot list at the pinned clock, no access history; a serve on another store kind or \
+with a [recall] tier can rank differently";
 
 /// Where each target id came from.
 struct Origins {
@@ -281,10 +377,12 @@ struct Origins {
     by_target: HashMap<(String, NodeId), NodeId>,
     /// source id -> (primary, every session it is placed in).
     placed: HashMap<NodeId, (String, BTreeSet<String>)>,
+    /// The plan's shared hubs: concepts with a `copy_into`.
+    hubs: HashSet<NodeId>,
 }
 
 impl Origins {
-    fn new(split: &SplitOutput) -> Self {
+    fn new(split: &SplitOutput, plan: &ClassificationPlan) -> Self {
         let mut by_target = HashMap::new();
         let mut placed = HashMap::new();
         for p in &split.placements {
@@ -296,7 +394,27 @@ impl Origins {
                 (p.primary.clone(), p.targets.keys().cloned().collect()),
             );
         }
-        Self { by_target, placed }
+        let hubs = plan
+            .assignments
+            .iter()
+            .filter(|a| a.kind == ItemKind::Concept && !a.copy_into.is_empty())
+            .map(|a| a.id)
+            .collect();
+        Self {
+            by_target,
+            placed,
+            hubs,
+        }
+    }
+
+    fn primary(&self, origin: &NodeId) -> &str {
+        self.placed.get(origin).map_or("", |(p, _)| p.as_str())
+    }
+
+    fn placed_in_any(&self, origin: &NodeId, sessions: &BTreeSet<String>) -> bool {
+        self.placed
+            .get(origin)
+            .is_some_and(|(_, placed)| placed.iter().any(|s| sessions.contains(s)))
     }
 }
 
@@ -340,51 +458,35 @@ impl Replay {
     }
 
     /// `Memory::recall_text_with`: the session's own text pipeline.
-    async fn own(
-        &self,
-        query: RecallQuery,
-        vector: Option<&[f32]>,
-        warning: Option<String>,
-        ctx: &Ctx<'_>,
-    ) -> crate::recall::detail::DetailedRecall {
+    async fn own(&self, query: RecallQuery, vector: &[f32], ctx: &Ctx<'_>) -> DetailedRecall {
         let mut cache = RecallCache::<RecallPipeline>::new();
-        let mut result = self
-            .daemon
+        self.daemon
             .recall_with(
                 &self.session,
                 query,
                 self.vectors(),
-                vector.map(|v| (v, ctx.embedding)),
+                Some((vector, ctx.embedding)),
                 ctx.config.recall_weights,
                 &mut cache,
             )
-            .await;
-        let mut warnings: Vec<String> = warning.into_iter().collect();
-        warnings.append(&mut result.warnings);
-        result.warnings = warnings;
-        result
+            .await
     }
 
     /// `Memory::recall_as_layer`: the daemon's `Route::Layer` pipeline.
-    async fn as_layer(
-        &self,
-        query: RecallQuery,
-        vector: Option<&[f32]>,
-        ctx: &Ctx<'_>,
-    ) -> crate::recall::detail::DetailedRecall {
+    async fn as_layer(&self, query: RecallQuery, vector: &[f32], ctx: &Ctx<'_>) -> DetailedRecall {
         self.daemon
             .recall_layer_with(
                 &self.session,
                 query,
                 self.vectors(),
-                vector.map(|v| (v, ctx.embedding)),
+                Some((vector, ctx.embedding)),
                 ctx.config.recall_weights,
             )
             .await
     }
 
     /// `Memory::hit_identities`.
-    fn identities(&self, recall: &crate::recall::detail::DetailedRecall) -> Vec<HitIdentity> {
+    fn identities(&self, recall: &DetailedRecall) -> Vec<HitIdentity> {
         let g = self.graph.read();
         recall
             .hits
@@ -398,19 +500,9 @@ impl Replay {
             })
             .collect()
     }
-
-    /// The query embedding, once (`Memory::embed_recall_query` without the
-    /// cache): `None` and a warning on an embed failure.
-    async fn embed(&self, text: &str, ctx: &Ctx<'_>) -> (Option<Vec<f32>>, Option<String>) {
-        match candidates::embed_query(self.vectors(), ctx.embedder, text).await {
-            Ok(v) => (v, None),
-            Err(w) => (None, Some(w)),
-        }
-    }
 }
 
 struct Ctx<'a> {
-    embedder: &'a dyn Embedder,
     embedding: &'a EmbeddingContract,
     config: &'a Config,
 }
@@ -424,32 +516,34 @@ fn recall_query(text: &str, params: &VerifyParams) -> RecallQuery {
     }
 }
 
-/// Plain recall: `Memory::recall_detailed` without the access note.
-async fn plain(replay: &Replay, text: &str, params: &VerifyParams, ctx: &Ctx<'_>) -> LayeredRecall {
-    let (vector, warning) = replay.embed(text, ctx).await;
-    let detail = replay
-        .own(recall_query(text, params), vector.as_deref(), warning, ctx)
-        .await;
+/// Plain recall: `Memory::recall_detailed` without the access note, with
+/// the query vector already in hand.
+async fn plain(
+    replay: &Replay,
+    text: &str,
+    vector: &[f32],
+    params: &VerifyParams,
+    ctx: &Ctx<'_>,
+) -> LayeredRecall {
+    let detail = replay.own(recall_query(text, params), vector, ctx).await;
     LayeredRecall::single(&replay.session, detail)
 }
 
 /// Layered recall: `Memory::recall_layered_slots` over live layers, without
-/// the access note. Every layer is graph-backed here, so the primary always
-/// embeds and searches (its vector source is available).
+/// the access note. Every session is graph-backed (SQLite holder), so the
+/// primary searches vectors and every layer gets the same query vector.
 async fn layered_recall(
     primary: &Replay,
     layers: &[(&Replay, &LayerSpec)],
     text: &str,
+    vector: &[f32],
     params: &VerifyParams,
     ctx: &Ctx<'_>,
 ) -> LayeredRecall {
     if layers.is_empty() {
-        return plain(primary, text, params, ctx).await;
+        return plain(primary, text, vector, params, ctx).await;
     }
-    let (vector, warning) = primary.embed(text, ctx).await;
-    let own = primary
-        .own(recall_query(text, params), vector.as_deref(), warning, ctx)
-        .await;
+    let own = primary.own(recall_query(text, params), vector, ctx).await;
     let identities = primary.identities(&own);
     let mut lists = vec![TierList {
         session: primary.session.clone(),
@@ -462,7 +556,7 @@ async fn layered_recall(
     }];
     for (replay, spec) in layers {
         let recall = replay
-            .as_layer(recall_query(text, params), vector.as_deref(), ctx)
+            .as_layer(recall_query(text, params), vector, ctx)
             .await;
         let identities = replay.identities(&recall);
         lists.push(TierList {
@@ -491,47 +585,59 @@ fn kind_name<T: Serialize>(kind: &T) -> String {
         .unwrap_or_default()
 }
 
-/// The hits of one side, mapped to their origins.
+/// One hit of one side, before disclosure.
+struct Hit {
+    rank: usize,
+    origin: NodeId,
+    session: String,
+    node_id: NodeId,
+    included_in_context: bool,
+    annotations: Vec<String>,
+    also: Vec<(String, NodeId)>,
+}
+
+/// The hits of one side, mapped to their origins. An after hit (or a
+/// merged copy) that the split did not place in the session it answered
+/// from means the output and the placements disagree, and refuses.
 fn side_hits(
     recall: &LayeredRecall,
     origins: &Origins,
-    source_session: Option<&str>,
-) -> Result<Vec<VerifyHit>, VerifyError> {
+    before: bool,
+) -> Result<Vec<Hit>, VerifyError> {
+    let origin_of = |session: &str, id: NodeId| -> Result<NodeId, VerifyError> {
+        if before {
+            return origins
+                .placed
+                .contains_key(&id)
+                .then_some(id)
+                .ok_or_else(|| {
+                    VerifyError::Refused(
+                        "a source hit has no placement in this split; the plan does not match \
+                         the source"
+                            .into(),
+                    )
+                });
+        }
+        origins
+            .by_target
+            .get(&(session.to_string(), id))
+            .copied()
+            .ok_or_else(|| {
+                VerifyError::Refused(format!(
+                    "a hit in {session} has no placement in this split; the split output does \
+                     not match the plan"
+                ))
+            })
+    };
     let mut out = Vec::with_capacity(recall.hits.len());
     for (i, (hit, detail)) in recall.hits.iter().zip(&recall.detail.detailed).enumerate() {
         let session = hit.session.0.clone();
-        let origin = match source_session {
-            // Before: the source's ids are the origins.
-            Some(_) => hit.hit.node_id,
-            None => *origins
-                .by_target
-                .get(&(session.clone(), hit.hit.node_id))
-                .ok_or_else(|| {
-                    VerifyError::Refused(format!(
-                        "a hit in {session} has no placement in this split; the split output \
-                         does not match the plan"
-                    ))
-                })?,
-        };
-        let (primary, placed) = origins.placed.get(&origin).ok_or_else(|| {
-            VerifyError::Refused(
-                "a source hit has no placement in this split; the plan does not match the source"
-                    .into(),
-            )
-        })?;
+        let origin = origin_of(&session, hit.hit.node_id)?;
         let mut also = Vec::with_capacity(hit.also.len());
         for copy in &hit.also {
-            let session = copy.session.0.clone();
-            let origin = *origins
-                .by_target
-                .get(&(session.clone(), copy.node_id))
-                .ok_or_else(|| {
-                    VerifyError::Refused(format!(
-                        "a deduplicated copy in {session} has no placement in this split; the \
-                         split output does not match the plan"
-                    ))
-                })?;
-            also.push((session, origin));
+            let s = copy.session.0.clone();
+            let o = origin_of(&s, copy.node_id)?;
+            also.push((s, o));
         }
         let mut annotations: Vec<String> = detail
             .annotations
@@ -540,13 +646,11 @@ fn side_hits(
             .collect();
         annotations.sort();
         annotations.dedup();
-        out.push(VerifyHit {
+        out.push(Hit {
             rank: i + 1,
             origin,
             session,
             node_id: hit.hit.node_id,
-            primary: primary.clone(),
-            hub: placed.len() > 1,
             included_in_context: hit.included_in_context,
             annotations,
             also,
@@ -559,156 +663,232 @@ fn set_diff(a: &BTreeSet<String>, b: &BTreeSet<String>) -> Vec<String> {
     a.difference(b).cloned().collect()
 }
 
+/// What one query's comparison may name, and which sessions the project
+/// reads.
+struct Scope<'a> {
+    visible: &'a BTreeSet<String>,
+    disclosed: &'a BTreeSet<String>,
+    k: usize,
+}
+
 fn compare(
     query: &str,
     before_recall: &LayeredRecall,
     after_recall: &LayeredRecall,
-    before: Vec<VerifyHit>,
-    after: Vec<VerifyHit>,
-    visible: &BTreeSet<String>,
+    before: &[Hit],
+    after: &[Hit],
+    scope: &Scope<'_>,
     origins: &Origins,
 ) -> QueryComparison {
-    let in_scope = |o: &NodeId| {
-        origins
-            .placed
-            .get(o)
-            .is_some_and(|(_, placed)| placed.iter().any(|s| visible.contains(s)))
+    let disclosed = |o: &NodeId| scope.disclosed.contains(origins.primary(o));
+    let in_scope = |o: &NodeId| origins.placed_in_any(o, scope.visible);
+    let first_rank = |hits: &[Hit]| {
+        let mut m: HashMap<NodeId, usize> = HashMap::new();
+        for h in hits {
+            m.entry(h.origin).or_insert(h.rank);
+        }
+        m
     };
-    let after_rank: HashMap<NodeId, &VerifyHit> =
-        after.iter().rev().map(|h| (h.origin, h)).collect();
-    let before_rank: HashMap<NodeId, &VerifyHit> =
-        before.iter().rev().map(|h| (h.origin, h)).collect();
-
-    let mut before_in_scope = 0;
-    let mut overlap_in_scope = 0;
-    let mut lost = Vec::new();
-    let mut deduped = Vec::new();
+    let (before_rank, after_rank) = (first_rank(before), first_rank(after));
     let merged: HashSet<NodeId> = after
         .iter()
         .flat_map(|h| h.also.iter().map(|(_, o)| *o))
         .collect();
-    let mut removed_foreign = Vec::new();
-    let mut shifts = Vec::new();
+
+    let mut q = QueryComparison {
+        query: query.to_string(),
+        before: Vec::new(),
+        before_undisclosed_by_primary: BTreeMap::new(),
+        after: Vec::new(),
+        after_undisclosed_by_primary: BTreeMap::new(),
+        before_in_scope: 0,
+        overlap_in_scope: 0,
+        before_in_scope_at_k: 0,
+        overlap_at_k: 0,
+        recall_at_k: None,
+        lost: 0,
+        deduped: 0,
+        gained: 0,
+        lost_ids: Vec::new(),
+        deduped_ids: Vec::new(),
+        gained_ids: Vec::new(),
+        removed_foreign_by_primary: BTreeMap::new(),
+        foreign_primary_after_by_primary: BTreeMap::new(),
+        shifts: Vec::new(),
+        warnings_removed: Vec::new(),
+        warnings_added: Vec::new(),
+        response_annotations_removed: Vec::new(),
+        response_annotations_added: Vec::new(),
+    };
+    let disclose = |h: &Hit| VerifyHit {
+        rank: h.rank,
+        origin: h.origin,
+        session: h.session.clone(),
+        node_id: h.node_id,
+        primary: origins.primary(&h.origin).to_owned(),
+        hub: origins.hubs.contains(&h.origin),
+        included_in_context: h.included_in_context,
+        annotations: h.annotations.clone(),
+        also: h
+            .also
+            .iter()
+            .filter(|(_, o)| disclosed(o))
+            .cloned()
+            .collect(),
+        also_undisclosed: h.also.iter().filter(|(_, o)| !disclosed(o)).count(),
+    };
+
     let mut seen = HashSet::new();
-    for h in &before {
+    for h in before {
+        let primary = origins.primary(&h.origin).to_owned();
+        if disclosed(&h.origin) {
+            q.before.push(disclose(h));
+        } else {
+            *q.before_undisclosed_by_primary
+                .entry(primary.clone())
+                .or_default() += 1;
+        }
         if !seen.insert(h.origin) {
             continue;
         }
         if !in_scope(&h.origin) {
-            removed_foreign.push(h.origin);
+            *q.removed_foreign_by_primary.entry(primary).or_default() += 1;
             continue;
         }
-        before_in_scope += 1;
-        match after_rank.get(&h.origin) {
-            Some(a) => {
-                overlap_in_scope += 1;
-                let b: BTreeSet<String> = h.annotations.iter().cloned().collect();
-                let n: BTreeSet<String> = a.annotations.iter().cloned().collect();
-                shifts.push(RankShift {
-                    origin: h.origin,
-                    before: h.rank,
-                    after: a.rank,
-                    shift: h.rank as i64 - a.rank as i64,
-                    annotations_added: set_diff(&n, &b),
-                    annotations_removed: set_diff(&b, &n),
-                });
+        q.before_in_scope += 1;
+        if h.rank <= scope.k {
+            q.before_in_scope_at_k += 1;
+            if after_rank.get(&h.origin).is_some_and(|r| *r <= scope.k) {
+                q.overlap_at_k += 1;
             }
-            None if merged.contains(&h.origin) => deduped.push(h.origin),
-            None => lost.push(h.origin),
+        }
+        match after_rank.get(&h.origin) {
+            Some(&a) => {
+                q.overlap_in_scope += 1;
+                let after_hit = after.iter().find(|x| x.rank == a).expect("ranked hit");
+                if disclosed(&h.origin) {
+                    let b: BTreeSet<String> = h.annotations.iter().cloned().collect();
+                    let n: BTreeSet<String> = after_hit.annotations.iter().cloned().collect();
+                    q.shifts.push(RankShift {
+                        origin: h.origin,
+                        before: h.rank,
+                        after: a,
+                        shift: h.rank as i64 - a as i64,
+                        annotations_added: set_diff(&n, &b),
+                        annotations_removed: set_diff(&b, &n),
+                    });
+                }
+            }
+            None if merged.contains(&h.origin) => {
+                q.deduped += 1;
+                if disclosed(&h.origin) {
+                    q.deduped_ids.push(h.origin);
+                }
+            }
+            None => {
+                q.lost += 1;
+                if disclosed(&h.origin) {
+                    q.lost_ids.push(h.origin);
+                }
+            }
         }
     }
-    let mut gained = Vec::new();
-    let mut leaked = Vec::new();
     let mut seen = HashSet::new();
-    for h in &after {
-        let placed_here = origins
-            .placed
-            .get(&h.origin)
-            .is_some_and(|(_, placed)| placed.contains(&h.session));
-        if !placed_here || !visible.contains(&h.session) {
-            leaked.push(h.origin);
+    for h in after {
+        let primary = origins.primary(&h.origin).to_owned();
+        if disclosed(&h.origin) {
+            q.after.push(disclose(h));
+        } else {
+            *q.after_undisclosed_by_primary
+                .entry(primary.clone())
+                .or_default() += 1;
+        }
+        if !scope.visible.contains(&primary) {
+            *q.foreign_primary_after_by_primary
+                .entry(primary)
+                .or_default() += 1;
         }
         if seen.insert(h.origin) && !before_rank.contains_key(&h.origin) {
-            gained.push(h.origin);
+            q.gained += 1;
+            if disclosed(&h.origin) {
+                q.gained_ids.push(h.origin);
+            }
         }
     }
-    let lines = |r: &LayeredRecall| r.warnings.iter().cloned().collect::<BTreeSet<String>>();
-    let kinds = |r: &LayeredRecall| {
+    q.recall_at_k =
+        (q.before_in_scope_at_k > 0).then(|| q.overlap_at_k as f64 / q.before_in_scope_at_k as f64);
+    let kinds = |r: &LayeredRecall| -> BTreeSet<String> {
+        r.warnings.iter().map(|w| warning_kind(w)).collect()
+    };
+    let responses = |r: &LayeredRecall| -> BTreeSet<String> {
         r.detail
             .response_annotations
             .iter()
             .map(|a| kind_name(&a.kind))
-            .collect::<BTreeSet<String>>()
+            .collect()
     };
-    let (wb, wa) = (lines(before_recall), lines(after_recall));
-    let (kb, ka) = (kinds(before_recall), kinds(after_recall));
-    QueryComparison {
-        query: query.to_string(),
-        before_in_scope,
-        overlap_in_scope,
-        recall_at_k: (before_in_scope > 0)
-            .then(|| overlap_in_scope as f64 / before_in_scope as f64),
-        lost,
-        deduped,
-        gained,
-        removed_foreign,
-        leaked,
-        shifts,
-        warnings_removed: set_diff(&wb, &wa),
-        warnings_added: set_diff(&wa, &wb),
-        response_annotations_removed: set_diff(&kb, &ka),
-        response_annotations_added: set_diff(&ka, &kb),
-        before,
-        after,
-    }
+    let (wb, wa) = (kinds(before_recall), kinds(after_recall));
+    let (kb, ka) = (responses(before_recall), responses(after_recall));
+    q.warnings_removed = set_diff(&wb, &wa);
+    q.warnings_added = set_diff(&wa, &wb);
+    q.response_annotations_removed = set_diff(&kb, &ka);
+    q.response_annotations_added = set_diff(&ka, &kb);
+    q
 }
 
-fn summarize(layers: Vec<String>, rows: &[QueryComparison]) -> ProjectSummary {
+/// Aggregates over one project's queries. `common_all` and `shifts_all`
+/// cover every hit on both sides, disclosed or not.
+fn summarize(
+    layers: Vec<String>,
+    rows: &[QueryComparison],
+    all_shifts: &[(usize, usize)],
+    after_hub_hits: usize,
+    after_by_session: BTreeMap<String, usize>,
+    before_hits: usize,
+    after_hits: usize,
+) -> ProjectSummary {
     let mut s = ProjectSummary {
         queries: rows.len(),
         layers,
+        before_hits,
+        after_hits,
+        after_hub_hits,
+        after_by_session,
         ..ProjectSummary::default()
     };
     let mut recalls = Vec::new();
-    let mut abs_shifts = Vec::new();
     for q in rows {
-        s.before_hits += q.before.len();
-        s.after_hits += q.after.len();
         s.before_in_scope += q.before_in_scope;
         s.overlap_in_scope += q.overlap_in_scope;
+        s.before_in_scope_at_k += q.before_in_scope_at_k;
+        s.overlap_at_k += q.overlap_at_k;
         recalls.extend(q.recall_at_k);
-        s.lost += q.lost.len();
-        s.deduped += q.deduped.len();
-        s.gained += q.gained.len();
-        s.removed_foreign += q.removed_foreign.len();
-        for origin in &q.removed_foreign {
-            if let Some(h) = q.before.iter().find(|h| &h.origin == origin) {
-                *s.removed_foreign_by_primary
-                    .entry(h.primary.clone())
-                    .or_default() += 1;
-            }
+        s.lost += q.lost;
+        s.deduped += q.deduped;
+        s.gained += q.gained;
+        for (k, v) in &q.removed_foreign_by_primary {
+            s.removed_foreign += v;
+            *s.removed_foreign_by_primary.entry(k.clone()).or_default() += v;
         }
-        s.leaked += q.leaked.len();
-        for h in &q.after {
-            *s.after_by_session.entry(h.session.clone()).or_default() += 1;
-            if h.hub {
-                s.after_hub_hits += 1;
-            }
+        for (k, v) in &q.foreign_primary_after_by_primary {
+            s.foreign_primary_after += v;
+            *s.foreign_primary_after_by_primary
+                .entry(k.clone())
+                .or_default() += v;
         }
-        s.common += q.shifts.len();
         for shift in &q.shifts {
-            let abs = shift.shift.unsigned_abs() as usize;
-            abs_shifts.push(abs);
-            if abs > 0 {
-                s.moved += 1;
-            }
-            s.max_abs_shift = s.max_abs_shift.max(abs);
             for k in &shift.annotations_added {
                 *s.annotations_added.entry(k.clone()).or_default() += 1;
             }
             for k in &shift.annotations_removed {
                 *s.annotations_removed.entry(k.clone()).or_default() += 1;
             }
+        }
+        for k in &q.warnings_added {
+            *s.warnings_added.entry(k.clone()).or_default() += 1;
+        }
+        for k in &q.warnings_removed {
+            *s.warnings_removed.entry(k.clone()).or_default() += 1;
         }
         if !(q.warnings_added.is_empty()
             && q.warnings_removed.is_empty()
@@ -718,12 +898,25 @@ fn summarize(layers: Vec<String>, rows: &[QueryComparison]) -> ProjectSummary {
             s.queries_with_changed_warnings += 1;
         }
     }
+    s.common = all_shifts.len();
+    for (b, a) in all_shifts {
+        let abs = b.abs_diff(*a);
+        if abs > 0 {
+            s.moved += 1;
+        }
+        s.max_abs_shift = s.max_abs_shift.max(abs);
+    }
     s.recall_at_k =
-        (s.before_in_scope > 0).then(|| s.overlap_in_scope as f64 / s.before_in_scope as f64);
+        (s.before_in_scope_at_k > 0).then(|| s.overlap_at_k as f64 / s.before_in_scope_at_k as f64);
     s.mean_recall_at_k =
         (!recalls.is_empty()).then(|| recalls.iter().sum::<f64>() / recalls.len() as f64);
-    s.mean_abs_shift = (!abs_shifts.is_empty())
-        .then(|| abs_shifts.iter().sum::<usize>() as f64 / abs_shifts.len() as f64);
+    s.mean_abs_shift = (!all_shifts.is_empty()).then(|| {
+        all_shifts
+            .iter()
+            .map(|(b, a)| b.abs_diff(*a))
+            .sum::<usize>() as f64
+            / all_shifts.len() as f64
+    });
     s
 }
 
@@ -731,33 +924,52 @@ fn summarize(layers: Vec<String>, rows: &[QueryComparison]) -> ProjectSummary {
 pub struct VerifyInputs<'a> {
     /// The immutable source session.
     pub source: GraphSnapshot,
+    /// The plan the split was made from.
+    pub plan: &'a ClassificationPlan,
     /// The split rebuilt from the source and plan ([`super::build_split`]):
     /// its placements map every target id back to its origin.
     pub split: &'a SplitOutput,
     /// Every target session as the split output stores it, already checked
     /// against `split` (receipts and target digests).
     pub targets: BTreeMap<String, GraphSnapshot>,
-    /// The layer stacks a serve pinning every target would resolve.
-    pub layers: &'a ServeLayers,
+    /// The serving `[serve]` table: its pinned sessions, default and layers.
+    pub serve: &'a ServeConfig,
     pub queries: &'a VerifyQueries,
+    /// Sessions that appear only as counts and may not be queried or read
+    /// as a layer (an excluded project such as an employer's docs).
+    pub aggregate_only: &'a BTreeSet<String>,
     pub params: VerifyParams,
     pub embedder: &'a dyn Embedder,
     pub embedding: &'a EmbeddingContract,
     pub config: &'a Config,
 }
 
+/// The pinned sessions an HTTP serve of `serve` runs with no `--session`,
+/// its default, and the layer stacks it resolves.
+fn serving(serve: &ServeConfig) -> Result<(Vec<String>, String, ServeLayers), VerifyError> {
+    let pinned = crate::mcp::serve::pin_sessions(&[], serve, crate::mcp::serve::Transport::Http)
+        .map_err(|e| VerifyError::Refused(format!("the serving [serve] table: {e}")))?;
+    let layers = serve
+        .resolve_layers(&pinned.sessions)
+        .map_err(|e| VerifyError::Refused(format!("the serving [serve] table: {e}")))?;
+    Ok((pinned.sessions, pinned.default, layers))
+}
+
 /// Run the before/after comparison. Deterministic: the same inputs give
-/// the same report. Refused when a target is missing or does not match the
-/// split, when a session's embedding contract is not the embedder's, when
-/// the query set names a project the split did not produce, or when a hit
-/// cannot be mapped back to its origin.
+/// the same report. Refused when the source, plan and split disagree, when
+/// a target is missing or does not match the split, when a session's
+/// embedding contract is not the embedder's, when a queried project is not
+/// a pinned split target or reads an aggregate-only or missing layer, when
+/// a query does not embed, or when a hit cannot be mapped to its origin.
 pub async fn verify_split(inputs: VerifyInputs<'_>) -> Result<VerifyReport, VerifyError> {
     let VerifyInputs {
         source,
+        plan,
         split,
         targets,
-        layers,
+        serve,
         queries,
+        aggregate_only,
         params,
         embedder,
         embedding,
@@ -769,6 +981,15 @@ pub async fn verify_split(inputs: VerifyInputs<'_>) -> Result<VerifyReport, Veri
     }
     if source.session_id.0 != split.source_session {
         return refuse("the source is not the split's source session");
+    }
+    let source_sha = super::plan::source_binding(&source)
+        .map_err(|e| VerifyError::Refused(e.to_string()))?
+        .sha256;
+    if source_sha != split.source_sha256
+        || plan.source.sha256 != split.source_sha256
+        || plan.plan_sha256 != split.plan_sha256
+    {
+        return refuse("the source, plan and split digests disagree");
     }
     let expected: BTreeMap<&str, &str> = split
         .targets
@@ -786,31 +1007,60 @@ pub async fn verify_split(inputs: VerifyInputs<'_>) -> Result<VerifyReport, Veri
             ));
         }
     }
-    for project in queries.queries.keys() {
-        if !targets.contains_key(project) {
+    for name in aggregate_only {
+        if !targets.contains_key(name) {
             return refuse(format!(
-                "the query set names {project}, which is not a target of this split"
+                "aggregate-only session {name} is not a target of this split"
             ));
         }
     }
-    let origins = Origins::new(split);
-    let ctx = Ctx {
-        embedder,
-        embedding,
-        config,
-    };
+    let (pinned, default_session, layers) = serving(serve)?;
+    let mut disclosed: BTreeSet<String> = BTreeSet::new();
+    for project in queries.queries.keys() {
+        if aggregate_only.contains(project) {
+            return refuse(format!(
+                "{project} is aggregate-only: it appears only as counts and cannot be queried"
+            ));
+        }
+        if !targets.contains_key(project) {
+            return refuse(format!(
+                "the query set names {project}, which is not a target of this split (the split \
+                 wrote no rows for it)"
+            ));
+        }
+        if !pinned.contains(project) {
+            return refuse(format!(
+                "{project} is not pinned by the serving [serve] table, so a serve would attach \
+                 it on demand, unlayered; pin it in [serve] sessions or drop it from the query \
+                 set"
+            ));
+        }
+        disclosed.insert(project.clone());
+        for spec in layers.stack(project) {
+            if aggregate_only.contains(&spec.session) {
+                return refuse(format!(
+                    "{project} reads aggregate-only {} as a layer",
+                    spec.session
+                ));
+            }
+            if !targets.contains_key(&spec.session) {
+                return refuse(format!(
+                    "{project} is layered with {}, which is not a target of this split (the \
+                     split wrote no rows for it)",
+                    spec.session
+                ));
+            }
+            disclosed.insert(spec.session.clone());
+        }
+    }
+
+    let origins = Origins::new(split, plan);
+    let ctx = Ctx { embedding, config };
     let at = params.at;
     let before_replay = Replay::new(source, config, embedding, at)?;
-
-    // Materialize only what the query set reads: its projects and their layers.
-    let mut needed: BTreeSet<&str> = BTreeSet::new();
-    for project in queries.queries.keys() {
-        needed.insert(project);
-        needed.extend(layers.stack(project).iter().map(|l| l.session.as_str()));
-    }
     let mut replays: BTreeMap<String, Replay> = BTreeMap::new();
     for (name, snapshot) in targets {
-        if needed.contains(name.as_str()) {
+        if disclosed.contains(&name) {
             let replay = Replay::new(snapshot, config, embedding, at)?;
             replays.insert(name, replay);
         }
@@ -821,16 +1071,10 @@ pub async fn verify_split(inputs: VerifyInputs<'_>) -> Result<VerifyReport, Veri
     let mut layer_knobs = BTreeMap::new();
     for (project, list) in &queries.queries {
         let stack = layers.stack(project);
-        let mut stack_replays = Vec::with_capacity(stack.len());
-        for spec in stack {
-            let replay = replays.get(&spec.session).ok_or_else(|| {
-                VerifyError::Refused(format!(
-                    "{project} is layered with {}, which is not a target of this split",
-                    spec.session
-                ))
-            })?;
-            stack_replays.push((replay, spec));
-        }
+        let stack_replays: Vec<(&Replay, &LayerSpec)> = stack
+            .iter()
+            .map(|spec| (&replays[&spec.session], spec))
+            .collect();
         if !stack.is_empty() {
             layer_knobs.insert(
                 project.clone(),
@@ -843,28 +1087,73 @@ pub async fn verify_split(inputs: VerifyInputs<'_>) -> Result<VerifyReport, Veri
         let primary = &replays[project];
         let mut visible: BTreeSet<String> = BTreeSet::from([project.clone()]);
         visible.extend(stack.iter().map(|l| l.session.clone()));
+        let scope = Scope {
+            visible: &visible,
+            disclosed: &disclosed,
+            k: params.top_k,
+        };
         let mut rows = Vec::with_capacity(list.len());
-        for text in list {
-            let before_recall = plain(&before_replay, text, &params, &ctx).await;
-            let after_recall = layered_recall(primary, &stack_replays, text, &params, &ctx).await;
-            let before = side_hits(&before_recall, &origins, Some(&split.source_session))?;
-            let after = side_hits(&after_recall, &origins, None)?;
+        let mut all_shifts = Vec::new();
+        let (mut hub_hits, mut by_session) = (0, BTreeMap::new());
+        let (mut before_hits, mut after_hits) = (0, 0);
+        for (n, text) in list.iter().enumerate() {
+            // Embedded once, shared by both sides. A failure would turn one
+            // side keyword-only and make the comparison meaningless.
+            let vector = embedder.embed_query(text).await.map_err(|e| {
+                VerifyError::Refused(format!(
+                    "query {} of {project} did not embed ({e}); nothing is reported",
+                    n + 1
+                ))
+            })?;
+            let before_recall = plain(&before_replay, text, &vector, &params, &ctx).await;
+            let after_recall =
+                layered_recall(primary, &stack_replays, text, &vector, &params, &ctx).await;
+            let before = side_hits(&before_recall, &origins, true)?;
+            let after = side_hits(&after_recall, &origins, false)?;
+            before_hits += before.len();
+            after_hits += after.len();
+            for h in &after {
+                *by_session.entry(h.session.clone()).or_insert(0) += 1;
+                if origins.hubs.contains(&h.origin) {
+                    hub_hits += 1;
+                }
+            }
+            let mut seen = HashSet::new();
+            for h in &before {
+                if seen.insert(h.origin)
+                    && let Some(a) = after.iter().find(|a| a.origin == h.origin)
+                {
+                    all_shifts.push((h.rank, a.rank));
+                }
+            }
             rows.push(compare(
                 text,
                 &before_recall,
                 &after_recall,
-                before,
-                after,
-                &visible,
+                &before,
+                &after,
+                &scope,
                 &origins,
             ));
         }
         let layer_names = stack.iter().map(|l| l.session.clone()).collect();
-        projects.insert(project.clone(), summarize(layer_names, &rows));
+        projects.insert(
+            project.clone(),
+            summarize(
+                layer_names,
+                &rows,
+                &all_shifts,
+                hub_hits,
+                by_session,
+                before_hits,
+                after_hits,
+            ),
+        );
         per_query.insert(project.clone(), rows);
     }
     Ok(VerifyReport {
         report_version: VERIFY_REPORT_VERSION,
+        measures: MEASURES.to_owned(),
         source_session: split.source_session.clone(),
         source_sha256: split.source_sha256.clone(),
         plan_sha256: split.plan_sha256.clone(),
@@ -872,6 +1161,9 @@ pub async fn verify_split(inputs: VerifyInputs<'_>) -> Result<VerifyReport, Veri
         split_algorithm_version: split.algorithm_version,
         embedding: embedding.clone(),
         params,
+        pinned,
+        default_session,
+        aggregate_only: aggregate_only.iter().cloned().collect(),
         layer_knobs,
         projects,
         queries: per_query,

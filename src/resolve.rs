@@ -607,8 +607,10 @@ impl VerifySplitOutput {
 /// follows [`resolve_classification_source`]; the split output must be a
 /// completed standalone SQLite file and is opened the same immutable,
 /// read-only way. From `config` it reads `[embedder]`, `[daemon]`, the
-/// promotion policy and `[serve]`; it never reads or builds `[store]` or
-/// `[recall]`, so no configured (possibly live) store is ever opened. The
+/// promotion policy and `[serve]`. `[store]` is parsed with its environment
+/// overlays, and only its kind is read (it must be SQLite, with no
+/// `[recall]` tier, because the replay measures a SQLite holder); no store
+/// is ever built or opened from it, so no live store is touched. The
 /// embedder is built once, here; its contract is checked against every
 /// session the verifier loads.
 pub fn resolve_verify_io(
@@ -618,6 +620,24 @@ pub fn resolve_verify_io(
     split_database: &std::path::Path,
 ) -> Result<VerifyIo, LamboError> {
     let file = LamboFile::load_resolved(Some(config))?;
+    // The replay measures a SQLite holder (graph-ranked vectors, exact
+    // scan). `[store]` is parsed and its environment overlays applied by
+    // the load above, but the store is never built or opened: only its kind
+    // is read, to refuse a serving configuration the replay does not model.
+    if file.store.kind != crate::store::StoreKind::Sqlite {
+        return Err(LamboError::Config(format!(
+            "session verify measures SQLite-holder behaviour, and this serving config's [store] \
+             kind is {:?}; verify against the SQLite serving config",
+            file.store.kind
+        )));
+    }
+    if file.recall.is_some() {
+        return Err(LamboError::Config(
+            "session verify measures a SQLite holder without a recall tier, and this config has \
+             [recall]: a tier ranks vectors elsewhere, which the replay does not model"
+                .into(),
+        ));
+    }
     let process = process_config(&file.daemon, file.promotion_policy, &file.embedder)?;
     file.serve.validate()?;
     let source = resolve_classification_source(database, snapshot)?;
