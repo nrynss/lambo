@@ -774,3 +774,54 @@ fn soft_origin_mention_blocks_unaudited_general_after_reseal_or_review() {
     assert!(classify_reviewed(&source, &rules, &labels, &[]).is_err());
     classify_reviewed(&source, &rules, &labels, &[audit]).unwrap();
 }
+
+#[test]
+fn non_excluded_origin_mention_does_not_block_general_on_any_path() {
+    let (mut source, rules) = fixture();
+    source.interactions[2].prompt_text =
+        Some("all projects follow operator-wide review conventions, as alpha does".into());
+    let mut sibling = source.concepts[2].clone();
+    sibling.id = id(18);
+    sibling.content = "alpha rollout notes".into();
+    sibling.canonical_key = sibling.content.clone();
+    sibling.concept_type = ConceptType::Observation;
+    source.concepts.push(sibling);
+    // Automatic: the classifier's guard covers excluded projects only, and the
+    // validator agrees, so the run succeeds.
+    let generated = classify(&source, &rules, &[]).unwrap();
+    assert_eq!(row(&generated, 13).session, "general");
+    validate_plan(&generated, &source).unwrap();
+    // Resealed: a general ruling under that prompt validates without an audit.
+    let mut plan = generated.clone();
+    plan.overrides.clear();
+    plan.seal().unwrap();
+    validate_plan(&plan, &source).unwrap();
+    // Reviewed: an unaudited reviewed general label is accepted.
+    let labels: Vec<_> = generated
+        .assignments
+        .iter()
+        .map(|a| ReviewedAssignment {
+            kind: a.kind,
+            id: a.id,
+            project: a.session.clone(),
+            confidence: a.confidence,
+            signals: a.signals.clone(),
+            pass2: a.pass2,
+            copy_into: a.copy_into.clone(),
+        })
+        .collect();
+    let reviewed = classify_reviewed(&source, &rules, &labels, &[]).unwrap();
+    assert_eq!(row(&reviewed, 13).session, "general");
+    // The same mention of an excluded project still needs an audit.
+    source.interactions[2].prompt_text =
+        Some("all projects follow operator-wide review conventions, as beta does".into());
+    assert_ne!(
+        row(&classify(&source, &rules, &[]).unwrap(), 13).session,
+        "general"
+    );
+    let mut plan = generated.clone();
+    plan.source = super::plan::source_binding(&source).unwrap();
+    plan.seal().unwrap();
+    assert!(validate_plan(&plan, &source).is_err());
+    assert!(classify_reviewed(&source, &rules, &labels, &[]).is_err());
+}

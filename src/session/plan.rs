@@ -492,8 +492,10 @@ pub fn validate_plan(
                                 .iter()
                                 .any(|p| super::signals::glob(p, &i.agent_id.0))
                     });
-                // A project mention in the origin prompt or a sibling concept is
-                // soft evidence: only an explicit audit may waive it.
+                // A mention of a project excluded from general, in the origin
+                // prompt or a sibling concept, is soft evidence: only an
+                // explicit audit may waive it. This matches the classifier's
+                // automatic guard; other projects' mentions do not block general.
                 let soft_origin_mention = snapshot
                     .interactions
                     .iter()
@@ -506,7 +508,13 @@ pub fn validate_plan(
                             .filter(|s| s.origin_interaction == c.origin_interaction)
                             .map(|s| s.content.as_str()),
                     )
-                    .any(|text| !super::signals::content(&plan.rules, text).0.is_empty());
+                    .any(|text| {
+                        let mentioned = super::signals::content(&plan.rules, text).0;
+                        plan.rules
+                            .projects
+                            .iter()
+                            .any(|p| p.exclude_from_general && mentioned.contains_key(&p.session))
+                    });
                 if (plan.reviewed_assignments_sha256.is_none() && !auto_origin && !audited_general)
                     || (soft_origin_mention && !audited_general)
                     || protected_concepts.contains(&a.id.0)
