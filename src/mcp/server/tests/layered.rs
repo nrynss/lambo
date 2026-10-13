@@ -15,12 +15,14 @@ use crate::surface::session::{
     SessionScope,
 };
 
-const PROJECT_FACT: &str = "worktree cleanup removes the target directory of a merged branch";
-const GENERAL_RULING: &str = "worktree branches are always rebased onto origin main first";
+pub(super) const PROJECT_FACT: &str =
+    "worktree cleanup removes the target directory of a merged branch";
+pub(super) const GENERAL_RULING: &str =
+    "worktree branches are always rebased onto origin main first";
 
 /// A layer source holding one session, which a test can take away (as a
 /// detach does) or put back.
-struct Fixed(parking_lot::Mutex<Option<Arc<Memory>>>);
+pub(super) struct Fixed(pub(super) parking_lot::Mutex<Option<Arc<Memory>>>);
 
 impl LayerSource for Fixed {
     fn live_layer(&self, session: &str, _read: LayerRead) -> Result<LiveLayer, LayerDown> {
@@ -37,7 +39,7 @@ impl LayerSource for Fixed {
 
 /// `own` layered with `layer` through a [`Fixed`] source, which is returned
 /// so the test owns it: the server holds it weakly, as it holds a registry.
-fn layered(own: &LamboServer, layer: &LamboServer) -> (LamboServer, Arc<Fixed>) {
+pub(super) fn layered(own: &LamboServer, layer: &LamboServer) -> (LamboServer, Arc<Fixed>) {
     let source = Arc::new(Fixed(parking_lot::Mutex::new(Some(Arc::clone(
         layer.memory(),
     )))));
@@ -57,7 +59,7 @@ fn layered(own: &LamboServer, layer: &LamboServer) -> (LamboServer, Arc<Fixed>) 
 
 /// A project session and a `general` session, each holding one fact about
 /// worktrees, and the project server layered with `general`.
-async fn project_and_general(tag: &str) -> (LamboServer, LamboServer, Arc<Fixed>) {
+pub(super) async fn project_and_general(tag: &str) -> (LamboServer, LamboServer, Arc<Fixed>) {
     let own = server(&format!("{tag}-proj")).await;
     let general = server("general").await;
     derive(&own, PROJECT_FACT).await;
@@ -66,7 +68,7 @@ async fn project_and_general(tag: &str) -> (LamboServer, LamboServer, Arc<Fixed>
     (layered, general, source)
 }
 
-async fn derive(s: &LamboServer, content: &str) {
+pub(super) async fn derive(s: &LamboServer, content: &str) {
     call(
         s,
         "lambo_derive",
@@ -81,7 +83,7 @@ async fn recall(s: &LamboServer, args: serde_json::Value) -> CallToolResult {
     call(s, "lambo_recall", args).await
 }
 
-fn structured(out: &CallToolResult) -> &serde_json::Value {
+pub(super) fn structured(out: &CallToolResult) -> &serde_json::Value {
     out.structured_content.as_ref().expect("structured content")
 }
 
@@ -700,7 +702,7 @@ async fn inspect_scope_on_an_unlayered_session_and_a_layer_that_is_down() {
 /// recall with a non-empty warning (another agent's reservation) whose
 /// blocks fit the budget. The second recall of the query is served from
 /// the session's recall cache, so both read one answer. `tools/list` is
-/// not covered: `scope` is new in the recall and inspect schemas.
+/// not covered: `scope` is new in every tool schema but lambo_stats's.
 #[tokio::test]
 async fn an_unlayered_recall_matches_the_frozen_v0_5_0_projection() {
     let plain = server("frozen-proj").await;

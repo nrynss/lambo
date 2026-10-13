@@ -90,6 +90,7 @@ mod writes;
 pub use crate::recall::layered::{LayerCopy, LayeredHit, LayeredRecall};
 pub(crate) use builder::AttachShutdown;
 pub use builder::{Attach, LeaseHeldElsewhere, MemoryBuilder};
+pub(crate) use image::embed_server_image;
 pub use layered::LayerRef;
 pub(crate) use layered::LayerSlot;
 pub(crate) use lease_refusal::{holder_looks_gone, lease_held_message, lease_remaining};

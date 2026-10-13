@@ -670,11 +670,14 @@ single-URL recommendation once the split is approved.
   dimension. A different width or model is not a layering workaround.
 - Record the old binary/config, session/default/URL map and last write boundary
   privately. Have rollback destinations before stopping any client.
-- **TODO #33 PR4 (write scope):** document `scope` on derive, record_action,
-  derive_image, reserve and saints only after that implementation merges.
-  Today only recall/inspect take read scope; writing an operator-wide ruling
-  requires a deliberate connection to `/mcp/s/general`. A scoped read never
-  redirects a later project write. Do not perform a live cut-over as this docs PR.
+- **Write scope (#33 PR 4):** derive, record_action, derive_image, reserve and
+  saints take `scope`. An agent writes an operator-wide ruling with
+  `scope = "general"` through its project URL; writes to different sessions
+  have no ordering between them, a write into `general` (scoped or at
+  `/mcp/s/general`) refuses relative file paths, and a scoped receipt is
+  delivered only through the project that wrote it. A scoped read never
+  redirects a later project write. Do not perform a live cut-over as this
+  docs PR.
 
 ### 7.2 Proposed serving configuration
 
@@ -834,8 +837,10 @@ automatically copied into a new checkout by git.
    `scope: "general"`; unrelated-project scope must refuse.
 6. **Check writes without mixing scopes.** In an approved disposable test
    session, derive/action without scope must write only to its addressed URL.
-   Verify the call/receipt there and no copy in general. Do not pass write scope
-   until PR4 merges. No cross-session edges are supported in v1.
+   Verify the call/receipt there and no copy in general. Then, with
+   `scope: "general"`, a write must land only in general, its receipt must
+   answer at the project URL, and a relative path must be refused. No
+   cross-session edges are supported in v1.
 7. **Check degradation and observation.** In the staged verification setup,
    unavailable general must yield project-only merged recall plus a warning;
    direct scoped general reads refuse. Ledger recall rows identify hit sessions
