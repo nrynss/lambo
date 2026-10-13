@@ -300,8 +300,10 @@ pub struct RecordActionParams {
     #[schemars(length(max = 16_384))]
     pub scope: Option<String>,
     /// Optional: the repository this action's path-like `produces`,
-    /// `modifies` and `depends_on` entries belong to, so that `README.md` in
-    /// two repositories is two concepts. Not the session written to (that is
+    /// `modifies` and `depends_on` entries, and a path-like `action` text
+    /// itself, belong to, so that `README.md` in two repositories is two
+    /// concepts (the action text is checked against a shared layer the same
+    /// way). Not the session written to (that is
     /// `scope`). Send one stable id per repository, the same from every clone
     /// and worktree: its remote as `host/owner/repo` (no scheme, credentials,
     /// query or `.git`), or for a local-only repository an agreed unique root
