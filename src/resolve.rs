@@ -1119,6 +1119,7 @@ mod tests {
             recall: None,
             serve: Default::default(),
             web: Default::default(),
+            canonization_supersede: None,
         };
         let r = resolve_backends(file).unwrap();
         assert_eq!(r.embedding.kind, "gemini");
@@ -1469,6 +1470,7 @@ mod tests {
                 recall: None,
                 serve: Default::default(),
                 web: Default::default(),
+                canonization_supersede: None,
             }
         }
 

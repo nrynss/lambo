@@ -493,18 +493,8 @@ async fn supersession_on_the_fixture() {
             supersede: true,
             ..params(policy)
         };
-        let stores: Vec<(&str, Box<dyn GraphStore>)> = {
-            let mut v: Vec<(&str, Box<dyn GraphStore>)> =
-                vec![("MemoryStore", Box::new(MemoryStore::new()))];
-            #[cfg(feature = "store-sqlite")]
-            {
-                let s = crate::store::SqliteStore::connect("sqlite::memory:").unwrap();
-                s.init_schema().await.unwrap();
-                v.push(("SQLite", Box::new(s)));
-            }
-            v
-        };
-        for (name, store) in stores {
+        for name in STORES {
+            let store = fresh_store(name).await;
             let snap = snapshot();
             store.flush(&fair::batch_of(&snap), None).await.unwrap();
             let held = fair::fixed_point(store.as_ref(), snap.clone(), &on, 3).await;
@@ -517,18 +507,7 @@ async fn supersession_on_the_fixture() {
             );
 
             // A second store: off to a fixed point, then on.
-            let store2: Box<dyn GraphStore> = if name == "MemoryStore" {
-                Box::new(MemoryStore::new())
-            } else {
-                #[cfg(feature = "store-sqlite")]
-                {
-                    let s = crate::store::SqliteStore::connect("sqlite::memory:").unwrap();
-                    s.init_schema().await.unwrap();
-                    Box::new(s)
-                }
-                #[cfg(not(feature = "store-sqlite"))]
-                unreachable!()
-            };
+            let store2 = fresh_store(name).await;
             store2.flush(&fair::batch_of(&snap), None).await.unwrap();
             let (g, t) = fair::fixed_point_from(
                 store2.as_ref(),
@@ -549,9 +528,10 @@ async fn supersession_on_the_fixture() {
                 .map(|e| (e.from_status, e.to_status, e.reason))
                 .collect();
             use CanonizationStatus::{Candidate, Canonical, Venerable};
-            let superseded = Some(DemotionReason::Superseded {
+            let reason = DemotionReason::Superseded {
                 by: fair::concept_id("retry_bounded"),
-            });
+            };
+            let superseded = Some(reason);
             assert_eq!(
                 hops,
                 vec![
@@ -579,7 +559,25 @@ async fn supersession_on_the_fixture() {
                 .filter(|e| e.node_id == forever)
                 .filter_map(|e| e.demotion_reason())
                 .collect();
-            assert_eq!(durable, vec![superseded.unwrap()], "{policy:?} {name}");
+            assert_eq!(durable, vec![reason], "{policy:?} {name}");
         }
+    }
+}
+
+/// The stores the supersession fixture test runs on.
+#[cfg(feature = "store-sqlite")]
+const STORES: [&str; 2] = ["MemoryStore", "SQLite"];
+#[cfg(not(feature = "store-sqlite"))]
+const STORES: [&str; 1] = ["MemoryStore"];
+
+async fn fresh_store(name: &str) -> Box<dyn GraphStore> {
+    match name {
+        #[cfg(feature = "store-sqlite")]
+        "SQLite" => {
+            let s = crate::store::SqliteStore::connect("sqlite::memory:").unwrap();
+            s.init_schema().await.unwrap();
+            Box::new(s)
+        }
+        _ => Box::new(MemoryStore::new()),
     }
 }

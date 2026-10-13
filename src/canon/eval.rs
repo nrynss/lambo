@@ -366,7 +366,13 @@ impl Evaluator {
     /// Takes the lock itself, in three short scopes, so the `!Send` guards
     /// structurally cannot span the store I/O — the future this returns is
     /// `Send` and can be `tokio::spawn`ed.
-    #[allow(clippy::too_many_arguments)] // one cycle's full input; mirrors eval_cycle()
+    #[allow(clippy::too_many_arguments)]
+    // one cycle's full input; mirrors eval_cycle()
+    // EvalError carries the partial EvalOutcome by value (a public field);
+    // #20's `supersessions` vector took it past clippy's size bound. The
+    // error path is once per failed 60 s cycle, so boxing buys nothing and
+    // would break the field's type.
+    #[allow(clippy::result_large_err)]
     pub async fn eval_cycle(
         &mut self,
         graph: &RwLock<Graph>,
@@ -965,6 +971,7 @@ async fn record(
 
 /// Free-function form of [`Evaluator::eval_cycle`].
 #[allow(clippy::too_many_arguments)] // mirrors the method; one cycle's full input
+#[allow(clippy::result_large_err)] // see `Evaluator::eval_cycle`
 pub async fn eval_cycle(
     evaluator: &mut Evaluator,
     graph: &RwLock<Graph>,

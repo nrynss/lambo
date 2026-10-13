@@ -258,13 +258,16 @@ pub fn graph() -> crate::graph::Graph {
     g
 }
 
-/// `(node, min_age, exclude, expected)` for the watermark.
-pub fn expected_latest() -> Vec<(
+/// One watermark expectation: `(node, min_age, exclude, expected)`.
+pub type LatestCase = (
     &'static str,
     std::time::Duration,
     Vec<NodeId>,
     Option<DateTime<Utc>>,
-)> {
+);
+
+/// The watermark expectations.
+pub fn expected_latest() -> Vec<LatestCase> {
     use std::time::Duration;
     vec![
         // D2's child edge is the newest eligible; Dc is own-origin; Dy and
