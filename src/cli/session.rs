@@ -84,9 +84,62 @@ fn read_snapshot(path: &Path) -> Result<GraphSnapshot, CliError> {
     serde_json::from_value(value).map_err(|e| CliError::Usage(format!("snapshot schema: {e}")))
 }
 
+/// Publishes a complete private file at `path`, never replacing anything.
+///
+/// The bytes go to a `create_new` sibling first, are synced, then hard-linked
+/// to `path`. `link` refuses any existing entry (file, symlink or alias), so an
+/// output spelling cannot truncate an input, and a failed write never leaves a
+/// partial plan at `path`. The temporary name is removed on every outcome.
+fn write_new_private(
+    path: &Path,
+    write: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>,
+) -> Result<(), CliError> {
+    let name = path.file_name().ok_or_else(|| {
+        CliError::Usage(format!(
+            "classification plan {} must name a file",
+            path.display()
+        ))
+    })?;
+    let mut temp_name = std::ffi::OsString::from(".");
+    temp_name.push(name);
+    temp_name.push(format!(".{}.partial", uuid::Uuid::new_v4()));
+    let temp = path.with_file_name(temp_name);
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&temp)
+        .map_err(|e| {
+            CliError::Usage(format!(
+                "create new classification plan {}: {e}",
+                path.display()
+            ))
+        })?;
+    let written = write(&mut file)
+        .and_then(|_| file.sync_all())
+        .map_err(|e| CliError::Runtime(format!("write classification plan: {e}")))
+        .and_then(|_| {
+            std::fs::hard_link(&temp, path).map_err(|e| {
+                CliError::Usage(format!(
+                    "create new classification plan {}: {e}",
+                    path.display()
+                ))
+            })
+        });
+    drop(file);
+    let removed = std::fs::remove_file(&temp);
+    written?;
+    removed.map_err(|e| {
+        CliError::Runtime(format!(
+            "remove temporary classification plan {}: {e}",
+            temp.display()
+        ))
+    })
+}
+
 /// Produces a private plan, printing only aggregate counts and its path.
-/// `create_new` refuses existing targets including source/config symlinks and
-/// hardlinks, so an output spelling cannot truncate an input.
+/// The output is published create-new (see [`write_new_private`]), so an
+/// output spelling cannot truncate an input.
 pub async fn classify_session(
     source: ClassificationSource,
     args: ClassifyArgs,
@@ -152,23 +205,11 @@ pub async fn classify_session(
     .map_err(|e| CliError::Usage(e.to_string()))?;
     let bytes = serde_json::to_vec_pretty(&plan)
         .map_err(|e| CliError::Runtime(format!("render classification plan: {e}")))?;
-    let mut output = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&args.output)
-        .map_err(|e| {
-            CliError::Usage(format!(
-                "create new classification plan {}: {e}",
-                args.output.display()
-            ))
-        })?;
-    output
-        .write_all(&bytes)
-        .and_then(|_| output.write_all(b"\n"))
-        .and_then(|_| output.sync_all())
-        .map_err(|e| CliError::Runtime(format!("write classification plan: {e}")))?;
-    Ok(format!("classification plan {}: {} interactions, {} concepts, {} low-confidence items, {} shared hubs; source unchanged", args.output.display(), plan.source.interactions, plan.source.concepts, plan.low_confidence.len(), plan.assignments.iter().filter(|a| !a.copy_into.is_empty()).count()))
+    write_new_private(&args.output, |output| {
+        output.write_all(&bytes)?;
+        output.write_all(b"\n")
+    })?;
+    Ok(format!("classification plan {}: {} interactions, {} concepts, {} low-confidence items, {} shared hubs; source opened read-only", args.output.display(), plan.source.interactions, plan.source.concepts, plan.low_confidence.len(), plan.assignments.iter().filter(|a| !a.copy_into.is_empty()).count()))
 }
 
 #[cfg(test)]
@@ -242,6 +283,7 @@ mod tests {
         .await
         .unwrap();
         assert!(summary.contains("4 interactions, 6 concepts"));
+        assert!(summary.ends_with("source opened read-only"));
         let plan: crate::session::ClassificationPlan =
             serde_json::from_slice(&std::fs::read(&out).unwrap()).unwrap();
         let source: GraphSnapshot =
@@ -252,6 +294,30 @@ mod tests {
             std::fs::metadata(out).unwrap().permissions().mode() & 0o777,
             0o600
         );
+    }
+
+    #[test]
+    fn failed_or_clobbering_writes_leave_no_partial_or_replaced_plan() {
+        let dir = std::env::temp_dir().join(format!("lambo-publish-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let out = dir.join("plan.json");
+        let failed = write_new_private(&out, |f| {
+            f.write_all(b"{\"partial\":")?;
+            Err(std::io::Error::other("disk full"))
+        });
+        assert!(matches!(failed, Err(CliError::Runtime(_))));
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+        std::fs::write(&out, b"existing").unwrap();
+        assert!(write_new_private(&out, |f| f.write_all(b"new")).is_err());
+        assert_eq!(std::fs::read(&out).unwrap(), b"existing");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        let fresh = dir.join("fresh.json");
+        write_new_private(&fresh, |f| f.write_all(b"new")).unwrap();
+        assert_eq!(std::fs::read(&fresh).unwrap(), b"new");
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!(std::fs::metadata(&fresh).unwrap().nlink(), 1);
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[tokio::test]
