@@ -400,9 +400,9 @@ sessions and `general-usage` read it. A per-session empty list can opt a
 consumer out, as in the preceding example.
 
 This configuration does not copy memories or move existing sessions. Each
-project's text recall reads its own session plus `general`; its writes still
-go to the addressed project. Only MCP `lambo_recall` and `lambo_inspect` accept
-the read-only `scope` field in this release. See the
+project's text recall reads its own session plus `general`; its writes
+go to the addressed project unless a call passes `scope = "general"` (see
+[Writing to a layer](/mcp#lambo_derive)). See the
 [read examples](/mcp#reading-a-layer-hit) and the operator's
 [cut-over runbook](https://github.com/nrynss/lambo/blob/main/dev-diary/lambo-for-mooshik/DOGFOOD-SETUP.md#7-multi-session-cut-over-runbook).
 

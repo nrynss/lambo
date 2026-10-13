@@ -448,8 +448,8 @@
   shared `general` rulings, distinguish MCP recall/inspect read scope from
   CLI session readers, and document verified Claude Code, Codex and Cursor
   project overrides. The runbook includes worktree checks and rollback
-  boundaries; applying it remains the operator's action. Write scope waits
-  for #33 PR 4.
+  boundaries; applying it remains the operator's action. Write scope
+  arrived with #33 PR 4 (see Added), and the runbook's checks cover it.
 - **`lambo_record_action` `depends_on` entries that are concept ids cite
   those concepts** (#36 PR 4). See Upgrading from 0.5.0. The
   `lambo_derive` and `lambo_record_action` tool descriptions and the
