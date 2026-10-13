@@ -48,22 +48,27 @@ pub(super) fn protected_source_items(
 ) -> (BTreeSet<uuid::Uuid>, BTreeSet<uuid::Uuid>) {
     // A product-name mention is soft classification evidence, not immutable
     // provenance. Actual source actors and configured repository paths are hard.
+    let protected_session = rules
+        .projects
+        .iter()
+        .any(|p| p.exclude_from_general && p.session == snapshot.session_id.0);
     let protected_interactions: BTreeSet<_> = snapshot
         .interactions
         .iter()
         .filter(|i| {
             let actor = signals::actor(rules, &i.agent_id.0);
             rules.projects.iter().any(|p| {
-                p.exclude_from_general
-                    && (actor.contains_key(&p.session)
-                        || p.folders.iter().any(|folder| {
-                            signals::folder(i.prompt_text.as_deref().unwrap_or(""), folder)
-                                || snapshot
-                                    .concepts
-                                    .iter()
-                                    .filter(|c| c.origin_interaction == i.id)
-                                    .any(|c| signals::folder(&c.content, folder))
-                        }))
+                protected_session
+                    || p.exclude_from_general
+                        && (actor.contains_key(&p.session)
+                            || p.folders.iter().any(|folder| {
+                                signals::folder(i.prompt_text.as_deref().unwrap_or(""), folder)
+                                    || snapshot
+                                        .concepts
+                                        .iter()
+                                        .filter(|c| c.origin_interaction == i.id)
+                                        .any(|c| signals::folder(&c.content, folder))
+                            }))
             })
         })
         .map(|i| i.id.0)
@@ -72,7 +77,8 @@ pub(super) fn protected_source_items(
         .concepts
         .iter()
         .filter(|c| {
-            protected_interactions.contains(&c.origin_interaction.0)
+            protected_session
+                || protected_interactions.contains(&c.origin_interaction.0)
                 || rules.projects.iter().any(|p| {
                     p.exclude_from_general
                         && (signals::actor(rules, &c.origin_agent.0).contains_key(&p.session)
@@ -251,7 +257,8 @@ fn classify_internal(
         let i = interactions[&c.origin_interaction.0];
         let protected = rules.projects.iter().any(|p| {
             p.exclude_from_general
-                && (p.session == origin.session
+                && (p.session == snapshot.session_id.0
+                    || p.session == origin.session
                     || actor.contains_key(&p.session)
                     || actors[&i.id.0].contains_key(&p.session)
                     || texts[&i.id.0].contains_key(&p.session)

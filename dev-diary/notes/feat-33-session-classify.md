@@ -31,7 +31,7 @@ ids and store content remain outside the repo.
 ## Review remediation
 
 An adversarial review identified that imported origin labels could erase excluded
-project provenance. Protection now captures source actors and text evidence before
+project provenance. Protection now captures source actors and repository-path evidence before
 imports or overrides, including a concept's recorded origin actor. Both concept
 and interaction general placements refuse protected provenance. Reviewed general
 interactions require a nonempty set of all-general origin concepts. Regression
@@ -87,3 +87,13 @@ D2 performs copying and exact edge accounting; D3 compares layered recall. Neith
 a live rig run nor owner cut-over belongs to D1. A later run on the prepared backup
 copy can import the owner-reviewed labels; automatic classification alone is not
 a promise to reproduce those reviewed placements.
+
+
+The audited legacy import exposed a product-name mention in a global privacy
+rule. The root distinguished mention from provenance: excluded source session
+attribution, matching source actors and configured repository folder evidence
+are immutable barriers. A literal product keyword alone remains soft evidence
+that blocks automatic general classification but may be addressed by an explicit
+audited operator assertion. This applies to all configured projects, with no
+owner-specific exception. Synthetic neutral-actor privacy, excluded actor/folder
+and declared excluded source-session regressions exercise that distinction.

@@ -675,3 +675,30 @@ fn project_name_mention_is_soft_evidence_but_actor_and_folder_are_hard() {
     source.interactions[2].prompt_text = Some("Operator-wide task from /work/beta".into());
     assert!(classify(&source, &rules, &[audit]).is_err());
 }
+
+#[test]
+fn excluded_source_session_is_immutable_known_provenance() {
+    let (mut source, rules) = fixture();
+    source.session_id = SessionId::from("beta");
+    for i in &mut source.interactions {
+        i.session_id = source.session_id.clone();
+    }
+    for c in &mut source.concepts {
+        c.session_id = source.session_id.clone();
+    }
+    for e in &mut source.edges {
+        e.session_id = source.session_id.clone();
+    }
+    let plan = classify(&source, &rules, &[]).unwrap();
+    assert_ne!(row(&plan, 13).session, "general");
+    let audit = OperatorOverride {
+        shared_hub_assertion: false,
+        kind: ItemKind::Concept,
+        id: id(13),
+        session: "general".into(),
+        reason: "Reviewed statement".into(),
+        from: None,
+        copy_into: vec![],
+    };
+    assert!(classify(&source, &rules, &[audit]).is_err());
+}

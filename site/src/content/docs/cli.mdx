@@ -850,7 +850,10 @@ row has `kind`, `id`, `session` (or `to`), a nonempty `reason`, optional `from`
 (the expected prior session) and optional `copy_into`. Unknown ids, duplicate
 corrections and stale `from` values are refused. An audited general correction
 can exempt a ruling from automatic reference guards, but cannot move protected
-project provenance or identity records into general. Hub corrections must name
+project provenance or identity records into general. A product-name mention
+alone is soft evidence; audited operator-wide assertions may address it. Source
+actors, configured repository paths and an excluded source session remain hard
+provenance barriers. Hub corrections must name
 a Resource or Entity identity, include the primary placement and exclude general.
 
 The versioned plan binds the complete durable source snapshot and rules with
