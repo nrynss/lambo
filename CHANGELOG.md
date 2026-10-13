@@ -127,9 +127,10 @@
   CANONIZATION section now narrates the nine other promotions. Agent B's
   recall carries eight warnings, as in 0.5.0: `auth middleware` (five
   dependents) is not high-value.
-- **Downgrading or mixing versions with `Contradicts` edges (#19).** No
-  0.6.0 tool writes a `Contradicts` edge yet; only a library caller or a
-  hand-built batch can. A 0.5.0 (or older) binary refuses to load a
+- **Downgrading or mixing versions with `Contradicts` edges (#19).**
+  `against` on `lambo_derive` and `lambo_record_action` (and the CLI's
+  `--against`) now writes `Contradicts` edges (#19(b)), as can a library
+  caller or a hand-built batch. A 0.5.0 (or older) binary refuses to load a
   session, and to read a snapshot, that holds one: `load_session` fails on
   the unknown edge type. Before downgrading, or before a 0.5.0 writer
   opens a store a newer one wrote, remove them on that store:
@@ -137,6 +138,10 @@
   ```sql
   DELETE FROM edges WHERE edge_type = 'Contradicts';
   ```
+
+  A derive's `against` rides in the `derive_cited` intent and an action's
+  in a new `action_cited` intent; both settle to the empty `derive` 0.5.0
+  decodes, and an unconsumed one stops a 0.5.0 load by name, as above.
 
 ### Breaking (library API)
 
@@ -146,14 +151,22 @@
   `ReferenceRefusalKind::{Missing, Ambiguous, NotAConcept, ForeignScope,
   SelfReference, Cycle, Changed, Limit, UnknownConcept}`), and its message is shown to callers intact, with the
   class `reference refused`.
-- **`DeriveOutcome` gains `cited`** (#36 PR 4); a struct literal needs it
-  (or `..Default::default()`).
+- **`DeriveOutcome` gains `cited`** (#36 PR 4) **and `contradicted`**
+  (#19(b)); a struct literal needs them (or `..Default::default()`).
 - **`WriteIntentPayload` gains the `DeriveCited` variant, and its `Action`
-  variant gains `depends_on_pins`** (#36 PR 4). An exhaustive `match` needs
-  the new arm, and an `Action { .. }` literal the new field. A payload
-  without citations or id entries serializes byte for byte as before.
+  variant gains `depends_on_pins`** (#36 PR 4), **and the `ActionCited`
+  variant** (#19(b): an action with `against`, settled like `DeriveCited`;
+  its SQL settle pattern is `ACTION_CITED_PAYLOAD_LIKE`). An exhaustive
+  `match` needs the new arms, and an `Action { .. }` literal the new field.
+  A payload without citations, contradictions or id entries serializes
+  byte for byte as before.
 - **`mcp::server::WireConcept` and `cli::derive::Args` gain
-  `depends_on`** (#36 PR 4); struct literals need it.
+  `depends_on`** (#36 PR 4) **and `against`** (#19(b)), and
+  **`RecordActionParams` and `cli::record_action::Args` gain `against`**
+  (#19(b)); struct literals need them (`RecordActionParams` also takes
+  `..Default::default()`). `ConceptCitations` and `PinnedCitations` gain
+  `against`, and `ReferenceField` (`#[non_exhaustive]`) gains `Against` and
+  `ActionAgainst`.
 - **`graph::action::record_action` resolves id-shaped `depends_on`
   entries** (#36 PR 4; see Upgrading from 0.5.0), and can return
   `LamboError::Reference`.
@@ -268,10 +281,31 @@
   library: `Memory::derive_cited_as`, `derive_cited_for_ingest_as`,
   `derive_cited_async_as`, `ConceptCitations`, `PinnedCitations`,
   `PinnedReference`, and `graph::cite`'s limits.
+- **Contradictions on `lambo_derive` and `lambo_record_action`**
+  ([#19](https://github.com/nrynss/lambo/issues/19) part b). A concept, or
+  an action, may carry `against`: existing concepts it says are wrong (at
+  most 8 per concept or action, and 32 per derive call, counted apart from
+  `depends_on`). Each is written as a `Contradicts` edge, newer to older,
+  which is informational only: no dependent, blast radius, score or
+  verdict. References resolve exactly like citations, through the same
+  resolver, and are refused the same typed ways before the ack (missing,
+  ambiguous, an interaction id, the concept or action itself, in another
+  scope: "cross-session contradictions are not recorded"); a contradiction
+  is never created. What each named is pinned at the ack and resolved again
+  inside the commit's transaction, so a target removed or shadowed in
+  between fails the receipt (owner decision: not part of hybrid's plan
+  check). Two concepts may contradict each other; a similarity merge keeps
+  the contradiction; re-sending reinforces the one edge. Durable intents
+  carry them, and a replay re-resolves. The receipt says `; N
+  contradiction(s) recorded`. The CLI takes `--against <REF>` on `lambo
+  derive` (first concept) and `lambo record-action`; the library,
+  `ConceptCitations::against`, `Memory::record_action_against_async_as` and
+  `record_action_against_embedded_as`. Recall does not yet annotate a
+  contradicted concept (#19 part c).
 - **One strict resolver for references in writes** (`crate::surface::resolve`,
   crate-internal): no substring leg, never creates. `lambo_inspect`'s
-  short-id leg now shares its prefix matcher. #19's `contradicts` and #33's
-  scoped writes use it.
+  short-id leg now shares its prefix matcher. #19(b)'s `against` uses it,
+  and #33's scoped writes will.
 - **Inspect explains each concept's next promotion (#36 PR 3).**
   `lambo_inspect` and `lambo inspect` print a `canonization (<policy>):
   <status> -> <next> eligible|refused` line with one reason per gate that
@@ -390,7 +424,8 @@
   those concepts** (#36 PR 4). See Upgrading from 0.5.0. The
   `lambo_derive` and `lambo_record_action` tool descriptions and the
   server's instructions now ask agents to cite the rulings they rely on by
-  id, and the schemas describe the new field.
+  id, and the schemas describe the new field. Since #19(b) they also ask
+  agents to name a concept a write shows to be wrong in `against`.
 - **Swarm admits Candidates on evidence; Solo needs the stage evidence for
   every later hop** ([#36](https://github.com/nrynss/lambo/issues/36) PR 3).
   See Upgrading from 0.5.0. The `lambo_inspect` tool description now
