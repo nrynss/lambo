@@ -81,7 +81,7 @@ pub async fn load_session_async(
     store: &dyn GraphStore,
     session: &SessionId,
 ) -> Result<LoadedSession, StoreError> {
-    let mut snap = match store.load_session(session).await {
+    let snap = match store.load_session(session).await {
         Ok(snap) => snap,
         Err(StoreError::SessionNotFound(_)) => {
             return Ok(LoadedSession {
@@ -92,6 +92,16 @@ pub async fn load_session_async(
         }
         Err(e) => return Err(e),
     };
+    materialize(snap)
+}
+
+/// Materialize a loaded snapshot exactly as [`load_session_async`] does:
+/// quarantine legacy vectors, take the write intents out, rebuild the index
+/// and validate the graph. Also the offline replay's path (#33 D3), so a
+/// snapshot it reads becomes the same graph a holder would load.
+pub(crate) fn materialize(
+    mut snap: crate::types::GraphSnapshot,
+) -> Result<LoadedSession, StoreError> {
     quarantine_legacy_vectors(&mut snap);
     // Intents are not graph state (Graph::snapshot documents why): take them
     // out before the snapshot is consumed, for the owner's replay task.

@@ -416,6 +416,26 @@ impl Daemon {
         self.scores.clone()
     }
 
+    /// The read state a holder's first cycle gives an **unspawned** daemon
+    /// (#33 D3, `lambo session verify`): rescore the graph and publish the
+    /// table at the graph's epoch (so recall is not in cold mode), then run
+    /// every detector into the hot list at the daemon's clock, exactly as a
+    /// cycle's steps 1 and 2 do. No access ledger is applied, no event is
+    /// published and GC does not run, so the graph is never written. Recall
+    /// re-validates hot-list entries at the same clock, so a replay pins it
+    /// with [`Daemon::with_clock`] to be repeatable.
+    pub(crate) fn prime_offline(&self) {
+        let now = (self.clock)();
+        let g = self.graph.read();
+        let ranked = score::rescore(&g, &self.weights);
+        *self.scores.write() = ScoreTable {
+            epoch: g.epoch(),
+            ranked,
+        };
+        let mut h = self.hot.write();
+        detect_into_hot_list(&mut h, &g, &self.params, now);
+    }
+
     /// Three-phase recall (spec §8; P5).
     ///
     /// Store I/O happens in [`crate::recall::candidates::gather`] BEFORE any
@@ -957,6 +977,54 @@ struct LoopState {
     rescore_faults: Arc<std::sync::atomic::AtomicUsize>,
 }
 
+/// What one cycle's detection found: conflict, drift, stale and high-risk
+/// hits, and their condition set (contradictions are hot-list only).
+type Detected = (
+    Vec<conflict::ConflictHit>,
+    Vec<drift::DriftHit>,
+    Vec<events::StaleHit>,
+    Vec<events::HighRiskHit>,
+    HashSet<(Condition, NodeId)>,
+);
+
+/// Step 2 of a cycle without the publish: run every detector at `now` and
+/// keep the hot list equal to what they found. Shared by [`run_cycle`] and
+/// [`Daemon::prime_offline`], so an offline replay detects exactly as a
+/// holder does. Lock order is the caller's: graph read, then hot write.
+fn detect_into_hot_list(
+    h: &mut HotList,
+    g: &Graph,
+    params: &CycleParams,
+    now: DateTime<Utc>,
+) -> Detected {
+    // #19(c): hot-list only, so its pairs keep their entries below but
+    // never enter `fresh`, which drives events. Inserted FIRST (review
+    // L3): it shares conflict's severity tier, and within a tier the
+    // entry inserted last ranks higher and is evicted last, so a
+    // persistent contradiction never pushes a transient conflict off a
+    // full hot list. Lower tiers are evicted before either.
+    let contradiction_hits =
+        contradiction::insert_contradictions(h, g, params.contradiction_evidence_min_age, now);
+    let conflict_hits = conflict::insert_conflicts(h, g, params.conflict_window, now);
+    let drift_hits = drift::record(h, g, params.drift_threshold);
+    let stale_hits = events::insert_stale(h, g, params.stale_window, now);
+    let high_risk_hits = events::insert_high_risk(h, g, params.high_risk_window, now);
+    // Hot list = this cycle's fresh hits (finding 2): drop entries
+    // whose (condition, node) is no longer detected — a HighRisk
+    // entry whose 30s window elapsed ages out here, not in a frozen
+    // captured-`now` predicate. Also removes the old
+    // O(hot_len × full-graph scan) per-cycle revalidation.
+    let fresh = condition_set(&conflict_hits, &drift_hits, &stale_hits, &high_risk_hits);
+    let mut held = fresh.clone();
+    held.extend(
+        contradiction_hits
+            .iter()
+            .map(|c| (Condition::Contradiction, c.node)),
+    );
+    h.retain_conditions(&held);
+    (conflict_hits, drift_hits, stale_hits, high_risk_hits, fresh)
+}
+
 /// The detected condition set for one cycle — `(condition, node)` pairs.
 ///
 /// Both the emit-on-transition diff (finding 3) and the hot-list sync
@@ -1266,36 +1334,7 @@ fn run_cycle(
     let (conflict_hits, drift_hits, stale_hits, high_risk_hits, fresh) = {
         let g = graph.read();
         let mut h = hot.write();
-        // #19(c): hot-list only, so its pairs keep their entries below but
-        // never enter `fresh`, which drives events. Inserted FIRST (review
-        // L3): it shares conflict's severity tier, and within a tier the
-        // entry inserted last ranks higher and is evicted last, so a
-        // persistent contradiction never pushes a transient conflict off a
-        // full hot list. Lower tiers are evicted before either.
-        let contradiction_hits = contradiction::insert_contradictions(
-            &mut h,
-            &g,
-            params.contradiction_evidence_min_age,
-            now,
-        );
-        let conflict_hits = conflict::insert_conflicts(&mut h, &g, params.conflict_window, now);
-        let drift_hits = drift::record(&mut h, &g, params.drift_threshold);
-        let stale_hits = events::insert_stale(&mut h, &g, params.stale_window, now);
-        let high_risk_hits = events::insert_high_risk(&mut h, &g, params.high_risk_window, now);
-        // Hot list = this cycle's fresh hits (finding 2): drop entries
-        // whose (condition, node) is no longer detected — a HighRisk
-        // entry whose 30s window elapsed ages out here, not in a frozen
-        // captured-`now` predicate. Also removes the old
-        // O(hot_len × full-graph scan) per-cycle revalidation.
-        let fresh = condition_set(&conflict_hits, &drift_hits, &stale_hits, &high_risk_hits);
-        let mut held = fresh.clone();
-        held.extend(
-            contradiction_hits
-                .iter()
-                .map(|h| (Condition::Contradiction, h.node)),
-        );
-        h.retain_conditions(&held);
-        (conflict_hits, drift_hits, stale_hits, high_risk_hits, fresh)
+        detect_into_hot_list(&mut h, &g, params, now)
     };
 
     // Publish — fire-and-forget (spec §6.1): zero receivers → the event

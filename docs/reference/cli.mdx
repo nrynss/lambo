@@ -993,3 +993,95 @@ low-confidence items, which the plan places but nobody reviewed, and the
 general-provenance notice, which lists interactions of a project excluded from
 general that are copied into general as origins of audited general rulings
 (as stubs, unless the report lists them as full-text).
+
+## Verify a split
+
+`lambo session verify` compares recall before and after a split, as agents
+will see it, and writes a private report. It reads the same source the split
+was made from (`--database` or `--snapshot`), the plan, and the split's output
+database, all read-only: the output is opened immutable, and nothing takes a
+lease, flushes, initializes a schema or notes an access on either input. It
+needs the `store-sqlite` feature and `--config`, which must be the serving
+`lambo.toml`: the same `[embedder]` (to embed the queries), `[daemon]` and
+`[serve]` the split will be served with. The `[store]` table is parsed and its
+environment overlays applied, but no store is built or opened from it; only
+its kind is read, and it must be `sqlite`, set explicitly (`[store] kind =
+"sqlite"`: with no `[store]` table the kind defaults to `memory` and verify
+refuses), with no `[recall]` tier, because
+verify measures **SQLite-holder behaviour** (vectors ranked in the session's
+own graph). A serve on another store kind, or with a recall tier, can rank
+differently, and is refused.
+
+```bash
+lambo --config ./serving.toml session verify --session mixed \
+  --database ./backup-copy.db --plan ./plan.json \
+  --split-database ./split.db --queries ./queries.toml \
+  --aggregate-only private-project \
+  --report ./verify-report.json
+# --top-k, --max-tokens and --traversal-depth default to the config's
+# defaults; --at pins the detector clock (default: the newest source row).
+```
+
+The query set lists the queries an agent for each project would ask. Every
+project must be a target of the split:
+
+```toml
+[queries]
+alpha = ["how is the store schema checked", "release checklist"]
+beta = ["deploy steps"]
+```
+
+Before any recall, the command rebuilds the split from the source and plan
+(the same build `session split` runs, so a plan that does not seal against
+this source is refused) and requires the output to hold exactly that split's
+targets: each target receipted by this split, with rows equal to the rebuilt
+target, read in one transaction per target. A changed, missing, unreceipted or
+foreign target is refused, and so is a source whose digest is not the split's.
+Every session's embedding contract must match the configured embedder's.
+
+The pinned sessions are worked out as `lambo serve --transport http` works
+them out with no `--session`: `[serve] sessions`, with `default_session`, and
+each pinned session's layer stack from `[serve] layers`,
+`[serve.session_layers]` and `[[serve.layer]]`. A queried project the serve
+would not pin (and so would attach on demand, unlayered), a layer that is not
+pinned, and a project or layer the split wrote no rows for are refused. Each
+query is embedded once; the vector is shared by both sides, and a query that
+does not embed refuses the run. For each query it runs:
+
+- **before**: plain recall on the mixed source session;
+- **after**: layered recall for the project, its target session plus its
+  layer stack, merged exactly as a serve merges it (same weights, floors,
+  dedupe and token budget).
+
+Each session is loaded as a holder loads it, scored and checked for hot-list
+conditions once at the pinned clock, and recalled without noting accesses, so
+a query never changes the next one's answer and the same inputs give the same
+report.
+
+Hits are compared by origin: an after hit's id maps back to its source id
+through the split's placements, so a hub copy or a memory now answered from
+`general` counts as the memory it was. A hit the placements cannot map
+refuses the run. Per query and per project the report gives:
+
+- recall@k: in-scope before hits (placed in the project or one of its layers)
+  ranked at most `k` that are also after hits ranked at most `k`;
+- lost (in scope, missing after), merged by dedupe (missing as a hit of its
+  own, but in another hit's `also`), and gained hits;
+- rank shifts of hits on both sides;
+- other sessions' hits that were in the before answer and are removed, by
+  the session the split assigned them to;
+- **foreign-primary after hits**: after hits assigned to a session the
+  project does not read, such as another project's shared hub copied in, by
+  assigned session;
+- the session each after hit came from, and the plan's shared-hub hits;
+- annotation kinds a hit gained or lost, and warning kinds (`stale_session`,
+  `conflict`, ...) and response annotations that changed.
+
+**Disclosure.** The report names an origin id only when the session the split
+assigned it to is a queried project or one of their layers. Every other hit
+appears only as counts by assigned session. `--aggregate-only <session>`
+(repeatable) makes a session count-only explicitly: it cannot be queried or
+read as a layer, so its ids never appear. Warning lines are kept only as their
+kind, never verbatim (a line can quote an agent id or a concept's text). The
+report is new, private and never overwritten, and carries no hit content. The
+summary prints aggregate counts per project only.
