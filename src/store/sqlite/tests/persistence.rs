@@ -137,8 +137,7 @@ async fn root_goal_roundtrips_flush_and_load() {
     {
         let memory = MemoryStore::new();
         memory.flush(&batch, None).await.unwrap();
-        let mut want = memory.load_session(&sid).await.unwrap();
-        include_persisted_session_metadata(&store, &sid, &mut want).await;
+        let want = memory.load_session(&sid).await.unwrap();
         assert_eq!(
             want.root_goal.as_ref(),
             Some(&goal),
