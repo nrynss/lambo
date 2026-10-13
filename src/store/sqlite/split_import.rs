@@ -34,7 +34,7 @@ use super::SqliteStore;
 use crate::session::canonical_target;
 use crate::store::batch::{seed_concept_rows, seed_edge_rows};
 use crate::store::map_write_err;
-use crate::types::{GraphSnapshot, StoreError};
+use crate::types::{DemotionReason, GraphSnapshot, StoreError};
 
 /// The receipt table, created only in a new split destination.
 pub(crate) const SPLIT_IMPORTS_DDL: &str = "CREATE TABLE split_imports (\
@@ -347,10 +347,14 @@ async fn insert_target(
     }
     step(hook, "synonyms")?;
     for ev in &s.canonization_events {
+        // #20: the demotion reason goes with the row, through the same write
+        // gate as every other insert of an audit event.
+        ev.check_reason()?;
+        let (reason, superseded_by) = DemotionReason::to_columns(ev.reason.as_ref());
         sqlx::query(
             "INSERT INTO canonization_events (id, session_id, node_id, from_status, to_status, \
-                 blast_radius, last_demotion_time, occurred_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                 blast_radius, last_demotion_time, occurred_at, reason, superseded_by) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(ev.id.0.to_string())
         .bind(&ev.session_id.0)
@@ -360,6 +364,8 @@ async fn insert_target(
         .bind(ev.blast_radius)
         .bind(ev.last_demotion_time.map(ts_to_text))
         .bind(ts_to_text(ev.occurred_at))
+        .bind(reason)
+        .bind(superseded_by.map(|by| by.0.to_string()))
         .execute(&mut *tx)
         .await
         .map_err(|e| map_write_err(e, |m| format!("split: insert canonization event: {m}")))?;
