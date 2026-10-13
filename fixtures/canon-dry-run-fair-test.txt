@@ -1,0 +1,111 @@
+canon dry-run: session=session-fair-test at=2026-09-22T12:00:00+00:00 concepts=63 interactions=21 edges=152 survival_raised=0
+
+== Swarm ==
+  start: None 63 (Constraint 4, Entity 2, Logic 21, Observation 1, Resource 35)
+  first evaluation (unbatched):
+    eligible None->Candidate: 7 (0 Resource; Constraint 3, Entity 1, Logic 3)
+    unmet None->Candidate stage1/dependent_interactions: 56
+    one gate away None->Candidate stage1/dependent_interactions: 2 (0 Resource; Constraint 1, Logic 1)
+      20c5e2b4-c4a7-8c48-b0ed-0b877c53a122 Constraint None dependents=6 distinct=1 coverage=0.000 unmet=stage1/dependent_interactions
+      2df3d8f1-e39c-8bb1-a236-9625947e76d2 Logic None dependents=6 distinct=0 coverage=0.000 unmet=stage1/dependent_interactions
+    more than five dependents, not Canonical: 7
+      037957a9-981b-8769-a7a1-6af5197da68e Logic None dependents=6 distinct=3 coverage=0.006 unmet=stage2/coverage
+      20c5e2b4-c4a7-8c48-b0ed-0b877c53a122 Constraint None dependents=6 distinct=1 coverage=0.000 unmet=stage1/dependent_interactions,stage2/distinct_interactions,stage2/coverage
+      2dea2dac-6e60-8b68-968f-6b010adaa2cb Logic None dependents=6 distinct=5 coverage=0.786
+      2df3d8f1-e39c-8bb1-a236-9625947e76d2 Logic None dependents=6 distinct=0 coverage=0.000 unmet=stage1/dependent_interactions,stage2/distinct_interactions,stage2/coverage
+      9e430a51-c989-86ae-a319-3a6fcbd89e8c Constraint None dependents=6 distinct=6 coverage=0.929
+      e04ef0bb-6ead-893d-93bc-3a93e535c873 Constraint None dependents=6 distinct=4 coverage=0.857
+      e162553f-d31d-8727-aecc-81d5e0dd6dbb Logic None dependents=6 distinct=5 coverage=0.857
+  run: 8 cycles, stop FixedPoint after 5 quiet cycles, budget saturated false
+  first cycle hops: {"None->Candidate non-Resource": 7}
+  all hops: {"Candidate->Venerable non-Resource": 6, "None->Candidate non-Resource": 7, "Venerable->Canonical non-Resource": 4}
+  new Candidate: 7 (0 Resource; Constraint 3, Entity 1, Logic 3)
+  new Venerable: 6 (0 Resource; Constraint 3, Entity 1, Logic 2)
+  new Canonical: 4 (0 Resource; Constraint 2, Logic 2)
+  demoted: 0 (0 Resource; none)
+  end: Candidate 1 (Logic 1); Canonical 4 (Constraint 2, Logic 2); None 56 (Constraint 1, Entity 1, Logic 18, Observation 1, Resource 35); Venerable 2 (Constraint 1, Entity 1)
+  fixed point:
+    eligible: none
+    unmet Candidate->Venerable stage2/coverage: 1
+    unmet None->Candidate stage1/dependent_interactions: 56
+    unmet Venerable->Canonical stage3/blast_radius: 2
+    one gate away Candidate->Venerable stage2/coverage: 1 (0 Resource; Logic 1)
+    one gate away None->Candidate stage1/dependent_interactions: 2 (0 Resource; Constraint 1, Logic 1)
+    one gate away Venerable->Canonical stage3/blast_radius: 2 (0 Resource; Constraint 1, Entity 1)
+      037957a9-981b-8769-a7a1-6af5197da68e Logic Candidate dependents=6 distinct=3 coverage=0.006 unmet=stage2/coverage
+      20c5e2b4-c4a7-8c48-b0ed-0b877c53a122 Constraint None dependents=6 distinct=1 coverage=0.000 unmet=stage1/dependent_interactions
+      2df3d8f1-e39c-8bb1-a236-9625947e76d2 Logic None dependents=6 distinct=0 coverage=0.000 unmet=stage1/dependent_interactions
+      4649574b-2aae-8672-b512-81622b77843f Constraint Venerable dependents=5 distinct=4 coverage=0.857 unmet=stage3/blast_radius
+      a4d3986a-9b62-8a59-a81c-a4107c50d397 Entity Venerable dependents=3 distinct=3 coverage=0.857 unmet=stage3/blast_radius
+    more than five dependents, not Canonical: 3
+      037957a9-981b-8769-a7a1-6af5197da68e Logic Candidate dependents=6 distinct=3 coverage=0.006 unmet=stage2/coverage
+      20c5e2b4-c4a7-8c48-b0ed-0b877c53a122 Constraint None dependents=6 distinct=1 coverage=0.000 unmet=stage1/dependent_interactions,stage2/distinct_interactions,stage2/coverage
+      2df3d8f1-e39c-8bb1-a236-9625947e76d2 Logic None dependents=6 distinct=0 coverage=0.000 unmet=stage1/dependent_interactions,stage2/distinct_interactions,stage2/coverage
+  canonical at the stop: 4
+    2dea2dac-6e60-8b68-968f-6b010adaa2cb Logic Canonical dependents=6 distinct=5 coverage=0.786
+    9e430a51-c989-86ae-a319-3a6fcbd89e8c Constraint Canonical dependents=6 distinct=6 coverage=0.929
+    e04ef0bb-6ead-893d-93bc-3a93e535c873 Constraint Canonical dependents=6 distinct=4 coverage=0.857
+    e162553f-d31d-8727-aecc-81d5e0dd6dbb Logic Canonical dependents=6 distinct=5 coverage=0.857
+  invariants:
+    ok   fixed_point (8 cycles, 5 quiet cycles needed)
+    ok   one_legal_hop_per_cycle
+    ok   canonical_within_budget (4 of 1000)
+    ok   promoted_canonicals_hold_stage2_and_stage3
+    ok   nothing_eligible_at_the_stop (0 concepts explained eligible)
+    ok   graph_invariants
+
+== Solo ==
+  start: None 63 (Constraint 4, Entity 2, Logic 21, Observation 1, Resource 35)
+  first evaluation (unbatched):
+    eligible None->Candidate: 8 (0 Resource; Constraint 4, Entity 1, Logic 3)
+    unmet None->Candidate stage1/solo_score: 55
+    one gate away None->Candidate stage1/solo_score: 1 (0 Resource; Logic 1)
+      2df3d8f1-e39c-8bb1-a236-9625947e76d2 Logic None dependents=6 distinct=0 coverage=0.000 unmet=stage1/solo_score
+    more than five dependents, not Canonical: 7
+      037957a9-981b-8769-a7a1-6af5197da68e Logic None dependents=6 distinct=3 coverage=0.006 unmet=stage2/coverage
+      20c5e2b4-c4a7-8c48-b0ed-0b877c53a122 Constraint None dependents=6 distinct=1 coverage=0.000 unmet=stage2/distinct_interactions,stage2/coverage
+      2dea2dac-6e60-8b68-968f-6b010adaa2cb Logic None dependents=6 distinct=5 coverage=0.786
+      2df3d8f1-e39c-8bb1-a236-9625947e76d2 Logic None dependents=6 distinct=0 coverage=0.000 unmet=stage1/solo_score,stage2/distinct_interactions,stage2/coverage
+      9e430a51-c989-86ae-a319-3a6fcbd89e8c Constraint None dependents=6 distinct=6 coverage=0.929
+      e04ef0bb-6ead-893d-93bc-3a93e535c873 Constraint None dependents=6 distinct=4 coverage=0.857
+      e162553f-d31d-8727-aecc-81d5e0dd6dbb Logic None dependents=6 distinct=5 coverage=0.857
+  run: 8 cycles, stop FixedPoint after 5 quiet cycles, budget saturated false
+  first cycle hops: {"None->Candidate non-Resource": 8}
+  all hops: {"Candidate->Venerable non-Resource": 6, "None->Candidate non-Resource": 8, "Venerable->Canonical non-Resource": 4}
+  new Candidate: 8 (0 Resource; Constraint 4, Entity 1, Logic 3)
+  new Venerable: 6 (0 Resource; Constraint 3, Entity 1, Logic 2)
+  new Canonical: 4 (0 Resource; Constraint 2, Logic 2)
+  demoted: 0 (0 Resource; none)
+  end: Candidate 2 (Constraint 1, Logic 1); Canonical 4 (Constraint 2, Logic 2); None 55 (Entity 1, Logic 18, Observation 1, Resource 35); Venerable 2 (Constraint 1, Entity 1)
+  fixed point:
+    eligible: none
+    unmet Candidate->Venerable stage2/coverage: 2
+    unmet Candidate->Venerable stage2/distinct_interactions: 1
+    unmet None->Candidate stage1/solo_score: 55
+    unmet Venerable->Canonical stage3/blast_radius: 2
+    one gate away Candidate->Venerable stage2/coverage: 1 (0 Resource; Logic 1)
+    one gate away None->Candidate stage1/solo_score: 1 (0 Resource; Logic 1)
+    one gate away Venerable->Canonical stage3/blast_radius: 2 (0 Resource; Constraint 1, Entity 1)
+      037957a9-981b-8769-a7a1-6af5197da68e Logic Candidate dependents=6 distinct=3 coverage=0.006 unmet=stage2/coverage
+      2df3d8f1-e39c-8bb1-a236-9625947e76d2 Logic None dependents=6 distinct=0 coverage=0.000 unmet=stage1/solo_score
+      4649574b-2aae-8672-b512-81622b77843f Constraint Venerable dependents=5 distinct=4 coverage=0.857 unmet=stage3/blast_radius
+      a4d3986a-9b62-8a59-a81c-a4107c50d397 Entity Venerable dependents=3 distinct=3 coverage=0.857 unmet=stage3/blast_radius
+    more than five dependents, not Canonical: 3
+      037957a9-981b-8769-a7a1-6af5197da68e Logic Candidate dependents=6 distinct=3 coverage=0.006 unmet=stage2/coverage
+      20c5e2b4-c4a7-8c48-b0ed-0b877c53a122 Constraint Candidate dependents=6 distinct=1 coverage=0.000 unmet=stage2/distinct_interactions,stage2/coverage
+      2df3d8f1-e39c-8bb1-a236-9625947e76d2 Logic None dependents=6 distinct=0 coverage=0.000 unmet=stage1/solo_score,stage2/distinct_interactions,stage2/coverage
+  canonical at the stop: 4
+    2dea2dac-6e60-8b68-968f-6b010adaa2cb Logic Canonical dependents=6 distinct=5 coverage=0.786
+    9e430a51-c989-86ae-a319-3a6fcbd89e8c Constraint Canonical dependents=6 distinct=6 coverage=0.929
+    e04ef0bb-6ead-893d-93bc-3a93e535c873 Constraint Canonical dependents=6 distinct=4 coverage=0.857
+    e162553f-d31d-8727-aecc-81d5e0dd6dbb Logic Canonical dependents=6 distinct=5 coverage=0.857
+  invariants:
+    ok   fixed_point (8 cycles, 5 quiet cycles needed)
+    ok   one_legal_hop_per_cycle
+    ok   canonical_within_budget (4 of 1000)
+    ok   promoted_canonicals_hold_stage2_and_stage3
+    ok   nothing_eligible_at_the_stop (0 concepts explained eligible)
+    ok   graph_invariants
+
+run invariants:
+  ok   clock_after_the_data

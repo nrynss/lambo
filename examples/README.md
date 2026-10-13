@@ -24,26 +24,12 @@ Pin `--at` to make two runs over the same copy comparable.
 
 ---
 
-## `canon36_admission.rs` — what evidence-led admission does on a store
+## `canon36_admission.rs` (removed)
 
-Measures #36 PR 3 on one session under both policies: how many concepts
-would newly become Candidate, Venerable or Canonical on the first evaluation
-(every concept's next hop through the evaluator's own gates and the real
-SQLite queries, unbatched), what one real cycle with the default batch
-commits, and where the evaluator settles when run to a fixed point on an
-in-memory copy. Every count is split Resource versus non-Resource or by
-concept type, and every concept that would turn Canonical is listed by node
-id and type. It prints no concept text and carries no data of its own. The
-database is opened read-only; run it on a copy of a store, never on a live
-writer's file.
-
-```text
-cargo run --features store-sqlite --example canon36_admission -- \
-    <store.db> <session-id> [--at <RFC3339>] [--assume-survived] [--quiet 30]
-```
-
-`--assume-survived` raises every `gc_survived` below 3 to 3 first, the state
-after three GC sweeps.
+Measured #36 PR 3's admission on a copy of a store. It became an operator
+command in #36 PR 5: `lambo canon dry-run --store <copy.db> --session <id>`
+reports the same figures and more (see the CLI reference, "Preview
+canonization").
 
 ---
 

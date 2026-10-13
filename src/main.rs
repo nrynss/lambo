@@ -278,6 +278,14 @@ enum Commands {
         )]
         confirm: String,
     },
+    /// Read-only canonization tools for operators: a dry run of the evaluator and an alias backfill preview, on a private copy of a SQLite store.
+    ///
+    /// Operator-only. Reads no lambo.toml, builds no embedder, takes no lease
+    /// and writes nothing but a scratch copy it removes.
+    Canon {
+        #[command(subcommand)]
+        action: CanonAction,
+    },
     /// Maintain the recall tier's index ([recall] in lambo.toml).
     ///
     /// Operator-only. Does not construct the embedder.
@@ -519,6 +527,146 @@ enum Commands {
     },
 }
 
+/// `lambo canon` actions (#36 PR 5).
+#[derive(Debug, Subcommand)]
+enum CanonAction {
+    /// Run the canonization evaluator to its fixed point on an in-memory copy of a session and report per-stage gate failures, new Candidates, Venerables and Canonicals, the concepts one gate away and the run's invariants. Nothing is persisted.
+    DryRun {
+        /// The SQLite store file to read. It is copied byte for byte into a private scratch directory and only the copy is opened (read-only); the input is hashed before and after.
+        #[arg(
+            long,
+            value_name = "PATH",
+            help = "The SQLite store file to read. It is copied byte for byte into a private scratch directory and only the copy is opened (read-only); the input is hashed before and after."
+        )]
+        store: PathBuf,
+        /// Session to evaluate.
+        #[arg(long, help = "Session to evaluate.")]
+        session: String,
+        /// Promotion policy to run: swarm, solo or both.
+        #[arg(
+            long,
+            default_value = "both",
+            help = "Promotion policy to run: swarm, solo or both."
+        )]
+        policy: String,
+        /// Evaluation clock for the first cycle, RFC 3339 (default: now). To compare runs, pin it at or after the newest row in the store (the backup's time): rows dated after the clock would be left out, so a clock earlier than the data fails the clock_after_the_data invariant (exit 1).
+        #[arg(
+            long,
+            value_name = "RFC3339",
+            help = "Evaluation clock for the first cycle, RFC 3339 (default: now). To compare runs, pin it at or after the newest row in the store (the backup's time): rows dated after the clock would be left out, so a clock earlier than the data fails the clock_after_the_data invariant (exit 1)."
+        )]
+        at: Option<String>,
+        /// Print the report as JSON.
+        #[arg(long, help = "Print the report as JSON.")]
+        json: bool,
+        /// Fewest consecutive empty cycles that end a run. More are needed when the Stage 2 or Stage 3 queue takes longer to go round once at the batch size, and the count pauses (resets) while any re-promotion cooldown is running.
+        #[arg(long, default_value_t = lambo::canon::dry_run_defaults::DEFAULT_MIN_QUIET, help = "Fewest consecutive empty cycles that end a run. More are needed when the Stage 2 or Stage 3 queue takes longer to go round once at the batch size, and the count pauses (resets) while any re-promotion cooldown is running.")]
+        quiet: usize,
+        /// Safety limit on cycles; reaching it fails the fixed_point invariant.
+        #[arg(long, default_value_t = lambo::canon::dry_run_defaults::DEFAULT_MAX_CYCLES, help = "Safety limit on cycles; reaching it fails the fixed_point invariant.")]
+        max_cycles: usize,
+        /// Ids listed per list.
+        #[arg(long, default_value_t = lambo::canon::dry_run_defaults::DEFAULT_TOP, help = "Ids listed per list.")]
+        top: usize,
+        /// Raise every survival count below 3 to 3 first: the state after three GC sweeps. The dry run runs no GC, so without it a concept short of three sweeps stays short; use it to see what Swarm would admit once survival no longer binds.
+        #[arg(
+            long,
+            help = "Raise every survival count below 3 to 3 first: the state after three GC sweeps. The dry run runs no GC, so without it a concept short of three sweeps stays short; use it to see what Swarm would admit once survival no longer binds."
+        )]
+        assume_survived: bool,
+        /// Directory the private copy goes under (default: the system temp directory). Removed afterwards.
+        #[arg(
+            long,
+            value_name = "DIR",
+            help = "Directory the private copy goes under (default: the system temp directory). Removed afterwards."
+        )]
+        scratch: Option<PathBuf>,
+        /// A concept to report by id at the start and the stop, whatever its state: a full node id or an 8-character short id. Repeatable.
+        #[arg(
+            long,
+            value_name = "ID",
+            help = "A concept to report by id at the start and the stop, whatever its state: a full node id or an 8-character short id. Repeatable."
+        )]
+        watch: Vec<String>,
+        /// An earlier `canon dry-run --json` report to compare with.
+        #[arg(
+            long,
+            value_name = "PATH",
+            help = "An earlier `canon dry-run --json` report to compare with."
+        )]
+        baseline: Option<PathBuf>,
+    },
+    /// Preview the alias backfill: move citations of short names to the ruling each names, on an in-memory copy, and report what the dry run would do differently. Nothing is applied.
+    AliasPreview {
+        /// The SQLite store file to read. It is copied byte for byte into a private scratch directory and only the copy is opened (read-only); the input is hashed before and after.
+        #[arg(
+            long,
+            value_name = "PATH",
+            help = "The SQLite store file to read. It is copied byte for byte into a private scratch directory and only the copy is opened (read-only); the input is hashed before and after."
+        )]
+        store: PathBuf,
+        /// Session to evaluate.
+        #[arg(long, help = "Session to evaluate.")]
+        session: String,
+        /// Promotion policy to run: swarm, solo or both.
+        #[arg(
+            long,
+            default_value = "both",
+            help = "Promotion policy to run: swarm, solo or both."
+        )]
+        policy: String,
+        /// Evaluation clock for the first cycle, RFC 3339 (default: now). To compare runs, pin it at or after the newest row in the store (the backup's time): rows dated after the clock would be left out, so a clock earlier than the data fails the clock_after_the_data invariant (exit 1).
+        #[arg(
+            long,
+            value_name = "RFC3339",
+            help = "Evaluation clock for the first cycle, RFC 3339 (default: now). To compare runs, pin it at or after the newest row in the store (the backup's time): rows dated after the clock would be left out, so a clock earlier than the data fails the clock_after_the_data invariant (exit 1)."
+        )]
+        at: Option<String>,
+        /// Print the report as JSON.
+        #[arg(long, help = "Print the report as JSON.")]
+        json: bool,
+        /// Fewest consecutive empty cycles that end a run. More are needed when the Stage 2 or Stage 3 queue takes longer to go round once at the batch size, and the count pauses (resets) while any re-promotion cooldown is running.
+        #[arg(long, default_value_t = lambo::canon::dry_run_defaults::DEFAULT_MIN_QUIET, help = "Fewest consecutive empty cycles that end a run. More are needed when the Stage 2 or Stage 3 queue takes longer to go round once at the batch size, and the count pauses (resets) while any re-promotion cooldown is running.")]
+        quiet: usize,
+        /// Safety limit on cycles; reaching it fails the fixed_point invariant.
+        #[arg(long, default_value_t = lambo::canon::dry_run_defaults::DEFAULT_MAX_CYCLES, help = "Safety limit on cycles; reaching it fails the fixed_point invariant.")]
+        max_cycles: usize,
+        /// Ids listed per list.
+        #[arg(long, default_value_t = lambo::canon::dry_run_defaults::DEFAULT_TOP, help = "Ids listed per list.")]
+        top: usize,
+        /// Raise every survival count below 3 to 3 first: the state after three GC sweeps. The dry run runs no GC, so without it a concept short of three sweeps stays short; use it to see what Swarm would admit once survival no longer binds.
+        #[arg(
+            long,
+            help = "Raise every survival count below 3 to 3 first: the state after three GC sweeps. The dry run runs no GC, so without it a concept short of three sweeps stays short; use it to see what Swarm would admit once survival no longer binds."
+        )]
+        assume_survived: bool,
+        /// Directory the private copy goes under (default: the system temp directory). Removed afterwards.
+        #[arg(
+            long,
+            value_name = "DIR",
+            help = "Directory the private copy goes under (default: the system temp directory). Removed afterwards."
+        )]
+        scratch: Option<PathBuf>,
+        /// A concept to report by id at the start and the stop, whatever its state: a full node id or an 8-character short id. Repeatable.
+        #[arg(
+            long,
+            value_name = "ID",
+            help = "A concept to report by id at the start and the stop, whatever its state: a full node id or an 8-character short id. Repeatable."
+        )]
+        watch: Vec<String>,
+        /// A reviewed map: one `alias-id ruling-id` pair per line (full or 8-hex ids, `#` comments). Without it, the leading-phrase rule proposes the pairs.
+        #[arg(
+            long,
+            value_name = "PATH",
+            help = "A reviewed map: one `alias-id ruling-id` pair per line (full or 8-hex ids, `#` comments). Without it, the leading-phrase rule proposes the pairs."
+        )]
+        map: Option<PathBuf>,
+        /// Also print both full dry runs per policy.
+        #[arg(long, help = "Also print both full dry runs per policy.")]
+        verbose: bool,
+    },
+}
+
 /// `lambo recall-index` actions.
 #[derive(Debug, Subcommand)]
 enum RecallIndexAction {
@@ -543,6 +691,7 @@ impl Commands {
             Self::Provision => "provision",
             Self::EraseSession { .. } => "erase-session",
             Self::RecallIndex { .. } => "recall-index",
+            Self::Canon { .. } => "canon",
             Self::Derive { .. } => "derive",
             Self::DeriveImage { .. } => "derive-image",
             Self::RecordAction { .. } => "record-action",
@@ -556,6 +705,7 @@ impl Commands {
         !matches!(
             self,
             Self::Provision
+                | Self::Canon { .. }
                 | Self::EraseSession { .. }
                 | Self::RecallIndex { .. }
                 | Self::Saints { .. }
@@ -840,6 +990,153 @@ fn emit_stdout(out: &str) {
     }
 }
 
+/// `lambo canon <action>`: print the report, exit 1 when an invariant
+/// failed, 2 on a usage error.
+fn run_canon(action: CanonAction) -> ExitCode {
+    use lambo::cli::canon::{self, CommonArgs, PolicyChoice};
+    #[allow(clippy::too_many_arguments)]
+    fn common(
+        store: PathBuf,
+        session: String,
+        policy: &str,
+        at: Option<&str>,
+        json: bool,
+        quiet: usize,
+        max_cycles: usize,
+        top: usize,
+        assume_survived: bool,
+        scratch: Option<PathBuf>,
+        watch: Vec<String>,
+    ) -> Result<CommonArgs, CliError> {
+        Ok(CommonArgs {
+            store,
+            session,
+            policy: PolicyChoice::parse(policy)?,
+            at: at.map(canon::parse_at).transpose()?,
+            json,
+            quiet,
+            max_cycles,
+            top,
+            assume_survived,
+            scratch: scratch.as_deref().map(canon::check_scratch).transpose()?,
+            watch,
+        })
+    }
+    match action {
+        CanonAction::DryRun {
+            store,
+            session,
+            policy,
+            at,
+            json,
+            quiet,
+            max_cycles,
+            top,
+            assume_survived,
+            scratch,
+            watch,
+            baseline,
+        } => {
+            let name = "canon dry-run";
+            match common(
+                store,
+                session,
+                &policy,
+                at.as_deref(),
+                json,
+                quiet,
+                max_cycles,
+                top,
+                assume_survived,
+                scratch,
+                watch,
+            ) {
+                Ok(common) => {
+                    canon_exit(name, canon::dry_run(canon::DryRunArgs { common, baseline }))
+                }
+                Err(e) => {
+                    eprintln!("lambo {name}: {e}");
+                    ExitCode::from(e.exit_code())
+                }
+            }
+        }
+        CanonAction::AliasPreview {
+            store,
+            session,
+            policy,
+            at,
+            json,
+            quiet,
+            max_cycles,
+            top,
+            assume_survived,
+            scratch,
+            watch,
+            map,
+            verbose,
+        } => {
+            let name = "canon alias-preview";
+            match common(
+                store,
+                session,
+                &policy,
+                at.as_deref(),
+                json,
+                quiet,
+                max_cycles,
+                top,
+                assume_survived,
+                scratch,
+                watch,
+            ) {
+                Ok(common) => canon_exit(
+                    name,
+                    canon::alias_preview(canon::AliasPreviewArgs {
+                        common,
+                        map,
+                        verbose,
+                    }),
+                ),
+                Err(e) => {
+                    eprintln!("lambo {name}: {e}");
+                    ExitCode::from(e.exit_code())
+                }
+            }
+        }
+    }
+}
+
+/// Run one `lambo canon` future and map its outcome to an exit code.
+fn canon_exit(
+    name: &str,
+    fut: impl std::future::Future<Output = Result<lambo::cli::canon::Outcome, CliError>>,
+) -> ExitCode {
+    let runtime = match tokio::runtime::Runtime::new() {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("lambo {name}: failed to start tokio runtime: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let result = runtime.block_on(fut);
+    runtime.shutdown_background();
+    match result {
+        Ok(outcome) => {
+            emit_stdout(&outcome.output);
+            if outcome.ok {
+                ExitCode::SUCCESS
+            } else {
+                eprintln!("lambo {name}: an invariant failed (see the report)");
+                ExitCode::FAILURE
+            }
+        }
+        Err(e) => {
+            eprintln!("lambo {name}: {e}");
+            ExitCode::from(e.exit_code())
+        }
+    }
+}
+
 fn run_async(
     name: &str,
     fut: impl std::future::Future<Output = Result<String, CliError>>,
@@ -999,6 +1296,13 @@ fn main() -> ExitCode {
     let Some(cmd) = cli.command else {
         eprintln!("lambo: pass a subcommand (try --help)");
         return ExitCode::from(2);
+    };
+
+    // `lambo canon` reads a store file it is given, not lambo.toml, and
+    // builds no backend (#36 PR 5).
+    let cmd = match cmd {
+        Commands::Canon { action } => return run_canon(action),
+        other => other,
     };
 
     let allow_embedding_mismatch = cmd.allow_embedding_mismatch();
@@ -1522,6 +1826,54 @@ mod tests {
     #[test]
     fn cli_parses_help_structure() {
         Cli::command().debug_assert();
+    }
+
+    /// #36 PR 5: `lambo canon` parses its two actions and needs no backend.
+    #[test]
+    fn canon_actions_parse_and_need_no_backend() {
+        let dry = Cli::try_parse_from([
+            "lambo",
+            "canon",
+            "dry-run",
+            "--store",
+            "copy.db",
+            "--session",
+            "s",
+            "--policy",
+            "solo",
+            "--at",
+            "2026-10-12T12:00:00Z",
+            "--json",
+            "--baseline",
+            "before.json",
+        ])
+        .unwrap();
+        let cmd = dry.command.unwrap();
+        assert_eq!(cmd.name(), "canon");
+        assert!(!cmd.needs_embedder());
+        assert!(!cmd.allow_embedding_mismatch());
+        let preview = Cli::try_parse_from([
+            "lambo",
+            "canon",
+            "alias-preview",
+            "--store",
+            "copy.db",
+            "--session",
+            "s",
+            "--map",
+            "aliases.map",
+            "--verbose",
+        ])
+        .unwrap();
+        assert!(matches!(
+            preview.command,
+            Some(Commands::Canon {
+                action: CanonAction::AliasPreview { verbose: true, .. }
+            })
+        ));
+        // --store and --session are required.
+        assert!(Cli::try_parse_from(["lambo", "canon", "dry-run", "--session", "s"]).is_err());
+        assert!(Cli::try_parse_from(["lambo", "canon", "dry-run", "--store", "x"]).is_err());
     }
 
     #[test]
