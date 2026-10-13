@@ -513,6 +513,7 @@ enum Commands {
 enum SessionAction {
     /// Classify a copied standalone SQLite backup or exported GraphSnapshot.
     Classify {
+        /// Source session id; must match the snapshot.
         #[arg(long)]
         session: String,
         /// Copied, completed standalone backup; never a live writer database.
@@ -522,12 +523,14 @@ enum SessionAction {
             required_unless_present = "snapshot"
         )]
         database: Option<PathBuf>,
+        /// Complete exported GraphSnapshot JSON instead of a database.
         #[arg(
             long,
             conflicts_with = "database",
             required_unless_present = "database"
         )]
         snapshot: Option<PathBuf>,
+        /// Project classification rules in TOML or JSON.
         #[arg(long)]
         rules: PathBuf,
         /// Explicit operator-supplied complete JSONL labels (v2 shape).
