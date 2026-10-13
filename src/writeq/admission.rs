@@ -183,7 +183,7 @@ pub(super) enum JobPayload {
     Derive {
         concepts: Vec<(String, ConceptType)>,
         pairs: Vec<(String, String)>,
-        /// #36 PR 4: the citations and names accepted at the ack; empty for
+        /// #36 PR 4: the citations accepted at the ack; empty for
         /// a derive without them (whose intent is then a plain `Derive`).
         citations: PinnedCitations,
     },

@@ -919,7 +919,7 @@ pub enum WriteIntentPayload {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         depends_on_pins: Vec<Option<NodeId>>,
     },
-    /// A `lambo_derive` job with citations or names (#36 PR 4): the derive
+    /// A `lambo_derive` job with citations (#36 PR 4): the derive
     /// above plus what its references resolved to at the ack.
     ///
     /// Its own variant, not a defaulted field on [`Self::Derive`], for the
@@ -933,7 +933,7 @@ pub enum WriteIntentPayload {
         concepts: Vec<(String, ConceptType)>,
         /// `(parent, child)` hierarchy pairs, in submission order.
         pairs: Vec<(String, String)>,
-        /// The citations and names as accepted at the ack. A replay
+        /// The citations as accepted at the ack. A replay
         /// re-resolves every reference and refuses one that resolves
         /// differently.
         citations: PinnedCitations,
@@ -1961,7 +1961,7 @@ pub enum LamboError {
     #[error("image id taken: a text concept in this session already holds the caption with image id {0:?}; derive the image with another image id")]
     ImageIdTaken(String),
     /// A reference to an existing concept was refused (#36 PR 4): a derive's
-    /// `depends_on` or `name`, or a `record_action` `depends_on` entry that
+    /// `depends_on`, or a `record_action` `depends_on` entry that
     /// names a concept by id, did not resolve to exactly one concept of the
     /// session the write targets, or would cite the concept itself, close a
     /// cycle, or resolved differently at apply than at the ack.
