@@ -169,6 +169,81 @@ bucket: one token drawn; receipts, probes and merged reads draw none).
 - `lambo_stats` takes no `scope`: the receipt routes itself, and the
   session figures are the addressed session's (design section 3 lists
   seven tools).
-- `general`'s own endpoint does not refuse relative paths (above).
+- (Reversed in review round 1, L2: `general`'s own endpoint now refuses
+  relative paths too.)
 - No change to `Cargo.toml`, `Cargo.lock`, workflows or
   `src/store/pg/postgres/tests.rs`.
+
+## Review round 1 (2 High, 3 Medium, 4 Low): resolutions
+
+- **H1, a layer's receipts reached another project's agent.** A layer's
+  undelivered queue was keyed by agent id alone, and agent ids are
+  caller-asserted and shared across projects. Each receipt entry now
+  carries `deliver_to: Option<SessionId>`: a write scoped to a layer is
+  submitted with the writing session's name (`submit_*` and the crate's
+  `*_scoped` Memory paths take it), and a session's own writes carry
+  `None`. A layered server drains a layer's pipeline only for its own
+  name, and every server drains its own pipeline only for `None`, so
+  `general`'s own server hands out only direct writes' receipts.
+  `lambo_stats` uses `lookup_for` / `wait_for`, which answer `forbidden`
+  for a receipt held for another destination. Accepted residual: a
+  receipt answered from a previous process's durable intents (the
+  restart map) carries no destination, as intents record none; adding it
+  would change the durable intent format, and an id is needed to ask.
+  Test: `two_projects_sharing_an_agent_id_get_only_their_own_layer_receipts`
+  (two projects and a direct writer, one agent id).
+- **H2, the image embed held the layer.** A scoped server-side image is
+  now embedded by `memory::embed_server_image` with the layer's embedder
+  and contract after `Target::release` (no `Memory`, guard or gate
+  permit held), then `LamboServer::retake` looks the layer up again with
+  `LayerRead::Retake` (no second token), refusing as "stopped serving"
+  when it is down, closed or fenced, and `derive_image_async_scoped`
+  submits the pre-embedded vector, refusing one embedded under another
+  contract. Test: `a_scoped_image_embed_holds_nothing_of_the_layer`
+  (parked embedder; the layer's `Memory` is held by nobody else mid-embed;
+  a re-attach during the embed receives the write; one token).
+- **M1, the path predicate.** Rewritten: line references stripped; lone
+  names only by an extension allowlist, dotfiles or known extensionless
+  names; separated names skip domain-led, URL and scp-like forms;
+  product names spelled like files (`Node.js`, `next.js`, `docs.rs`)
+  pass; `..\` handled. Table test with every input the review listed plus
+  prose. PR 7's per-entry seam is `Target::path_exempt` (its `repo:path`
+  form or an explicit repo field returns true there), beside the
+  call-wide `Target::refuses_relative_paths`.
+- **M2, `restart_lost` while a layer is down.** `route_receipt` reports a
+  readable layer that is not serving; when no serving pipeline knows the
+  id, `lambo_stats` answers `pending` with a detail naming the layer and
+  "ask again", in the full stats payload. Test:
+  `a_receipt_asked_while_its_layer_is_down_is_ask_again`.
+- **M3, lease lost between the gate and the submit.** After a scoped
+  write's submit, `stopped_serving` is asked again; a closed or fenced
+  layer answers `layer_lost` instead of an ack. Chosen against keeping
+  the previous layer pipeline for routing: a `Weak` dies with the old
+  `Memory` (it owns the pipeline), and a strong reference would keep the
+  previous graph and store handle resident for the retention window,
+  while what the old handle durably owed (its intents) is already found
+  by the re-attached pipeline's restart map. Test:
+  `a_lease_lost_between_the_gate_and_the_ack_is_refused`.
+- **L1.** In a layer, every concept's content and every `parent_of` end
+  is path-checked. `ForeignScopes::text_holder_of` (default none) lets
+  `record_action` refuse a `depends_on` text that names nothing in the
+  target but a concept of the caller's own session, on a write scoped to
+  a layer; an unscoped write keeps the 0.5.0 text rule. Test:
+  `a_layer_write_checks_every_concept_and_never_copies_the_project_in`.
+- **L2.** `ServeLayers::is_layer`; the registry marks a layer's own
+  server (`serving_a_layer`), and `refuses_relative_paths` is true for a
+  scoped write or a layer's own server. Tests:
+  `a_layers_own_server_refuses_relative_paths` and the registry
+  end-to-end test (a direct `/mcp/s/general` write).
+- **L3.** The drain gives each pipeline with receipts waiting one slot
+  first, then fills in tier order (extended
+  `the_piggyback_budget_is_shared_across_pipelines`).
+- **L4.** mcp.mdx "below" to "above"; the cross-session message quoted
+  as printed (`is in scope "general"`, also #36's line); the
+  record_action exception says "another session the call reads"; the
+  CHANGELOG notes the five descriptions changed for every session;
+  scoped image refusals name "layer general's" settings (unscoped
+  refusals unchanged).
+- The scope.rs header claim about what a call holds was corrected.
+- **The decision above about `/mcp/s/general` is reversed by L2:** direct
+  writes there now refuse relative paths too.

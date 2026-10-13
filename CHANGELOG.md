@@ -403,25 +403,41 @@
   token from the layer's `per_session_rps`, and its ack adds a line and a
   `session` key naming the layer. **Writes to different sessions have no
   ordering between them**, as the tool descriptions and server
-  instructions now say. Receipts keep their format: settled outcomes from
-  every pipeline the session writes to come back on the next tool
-  response (one budget of 8 across them), and `lambo_stats` with a
-  receipt finds it in the pipeline that issued it (by its epoch). A write
-  resolves its references against the session it writes to, and one held
-  elsewhere, the caller's own session included, is refused as
-  cross-session, naming the reference; no edge ever joins two sessions. A
-  write into a layer refuses a bare relative file path (`README.md`,
-  `src/main.rs`, `../x/y.toml`) in `record_action`'s `produces`,
-  `modifies` and `depends_on` and in a derived `resource` concept, since
-  every project reads the layer; absolute paths, URLs and prose pass. A
-  layer that stops serving or loses its lease during a scoped call is a
-  retryable "stopped serving during this call" refusal with nothing
-  applied, never the store's lease error. With `--ledger`, a scoped
-  call's line carries `scope`. A layered session's server instructions
-  now say how to write to a layer. Unscoped calls on an unlayered session
-  answer byte for byte as before (`tools/list` gains the optional
-  `scope`). New library items: `WritePipeline::knows_receipt` and
-  `WritePipeline::take_piggyback_at_most`.
+  instructions now say. Receipts keep their format and are delivered only
+  through the session that wrote: settled outcomes from every pipeline
+  the session writes to come back on its next tool response (one budget
+  of 8, each pipeline with receipts waiting getting a slot), and
+  `lambo_stats` with a receipt finds it in the pipeline that issued it (by
+  its epoch); another project's server, or the layer's own address, never
+  hands it out, even to the same `agent_id`, and answers `forbidden` by
+  id. A receipt asked for while a layer is not serving, which no serving
+  pipeline knows, answers `pending` (ask again) rather than
+  `restart_lost`. A write resolves its references against the session it
+  writes to; one held elsewhere, the caller's own session included, is
+  refused as cross-session, naming the reference, and so is a
+  `record_action` `depends_on` text naming a concept of the caller's own
+  session on a write scoped to a layer. No edge ever joins two sessions.
+  Every write into a layer, scoped to it or sent to the layer's own
+  address, refuses a bare relative file path (`README.md`, `.env`,
+  `Makefile`, `src/main.rs:12`, `../x/y.toml`) in any concept's content,
+  a `parent_of` end, or `record_action`'s `produces`, `modifies` and
+  `depends_on`, since every project reads the layer; absolute paths, URLs,
+  `git@host:path` remotes, domain and library names (`crates.io`,
+  `Node.js`, `vercel/next.js`) and prose pass. A layer that stops serving
+  or loses its lease during a scoped call, up to its ack, is a retryable
+  "stopped serving during this call" refusal with nothing applied, never
+  the store's lease error. A scoped `lambo_derive_image` embeds its image
+  holding nothing of the layer (so a slow embed cannot delay the layer's
+  re-attach), and its configuration refusals name the layer's settings.
+  With `--ledger`, a scoped call's line carries `scope`. A layered
+  session's server instructions now say how to write to a layer. The
+  five tools' descriptions changed for every session, layered or not
+  (each mentions `scope`, and the writes say that writes to different
+  sessions are not ordered); unscoped calls on an unlayered session
+  otherwise answer byte for byte as before (`tools/list` gains the
+  optional `scope`). New library items: `WritePipeline::knows_receipt`,
+  `take_piggyback_at_most`, `lookup_for` and `wait_for`, and
+  `ServeLayers::is_layer`.
 
 ### Changed
 
