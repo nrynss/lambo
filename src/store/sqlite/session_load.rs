@@ -374,7 +374,7 @@ impl SqliteStore {
         // read is what a writer restart resumes it from.
         let row = sqlx::query(
             "SELECT embedding_kind, embedding_model, embedding_dim, root_goal, mutation_epoch, \
-                    last_gc_epoch, last_gc_at \
+                    last_gc_epoch, last_gc_at, created_at, closed_at \
              FROM sessions WHERE session_id = ?",
         )
         .bind(&session.0)
@@ -402,6 +402,8 @@ impl SqliteStore {
         // Issue #29: GC's sweep accounting, resumed with the epoch.
         let last_gc_epoch: i64 = row.try_get(5).map_err(|e| db_err("lookup session", e))?;
         let last_gc_at: Option<String> = row.try_get(6).map_err(|e| db_err("lookup session", e))?;
+        let created_at: Option<String> = row.try_get(7).map_err(|e| db_err("lookup session", e))?;
+        let closed_at: Option<String> = row.try_get(8).map_err(|e| db_err("lookup session", e))?;
         let gc_mark = GcMark {
             last_gc_epoch: u64::try_from(last_gc_epoch).unwrap_or(0),
             last_gc_at: last_gc_at.as_deref().map(text_to_ts).transpose()?,
@@ -429,10 +431,8 @@ impl SqliteStore {
         Ok(GraphSnapshot {
             session_id: session.clone(),
             root_goal,
-            // `created_at`/`closed_at` are still snapshot-only (no Mutation
-            // kind) — None, matching MemoryStore (see module doc).
-            created_at: None,
-            closed_at: None,
+            created_at: created_at.as_deref().map(text_to_ts).transpose()?,
+            closed_at: closed_at.as_deref().map(text_to_ts).transpose()?,
             interactions,
             concepts,
             edges,

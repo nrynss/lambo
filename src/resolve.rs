@@ -395,6 +395,40 @@ pub fn resolve_store_only(
     .map_err(|e| LamboError::Config(e.to_string()))
 }
 
+/// Explicit immutable inputs for session planning. No serving backend,
+/// recall tier, embedder or schema bootstrap is constructed on this path.
+pub enum ClassificationSource {
+    Database(Box<dyn GraphStore>),
+    Snapshot(std::path::PathBuf),
+}
+
+/// One construction site for the classifier's read-only source. Database
+/// input must be a copied, finished standalone SQLite backup, never a writer.
+pub fn resolve_classification_source(
+    database: Option<&std::path::Path>,
+    snapshot: Option<&std::path::Path>,
+) -> Result<ClassificationSource, LamboError> {
+    match (database, snapshot) {
+        (None, Some(path)) => Ok(ClassificationSource::Snapshot(path.to_path_buf())),
+        (Some(path), None) => {
+            #[cfg(feature = "store-sqlite")]
+            {
+                Ok(ClassificationSource::Database(Box::new(
+                    crate::store::SqliteStore::connect_read_only(path)?,
+                )))
+            }
+            #[cfg(not(feature = "store-sqlite"))]
+            {
+                let _ = path;
+                Err(LamboError::Config("classification database input requires --features store-sqlite; exported snapshot input works without it".into()))
+            }
+        }
+        _ => Err(LamboError::Config(
+            "classification requires exactly one of --database or --snapshot".into(),
+        )),
+    }
+}
+
 /// Refuse to use an embedder that disagrees with the session's stamped contract.
 ///
 /// Call on `load_session` / serve attach when `GraphSnapshot.embedding` is `Some`.

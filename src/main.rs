@@ -24,6 +24,11 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
+    /// Produce reviewable session plans without modifying the source.
+    Session {
+        #[command(subcommand)]
+        action: SessionAction,
+    },
     /// Run the MCP server for a session (primary artifact).
     Serve {
         /// Session id this process owns (single-writer model, spec §2.2).
@@ -527,6 +532,43 @@ enum Commands {
     },
 }
 
+/// Read-only session planning. Splitting is a separate future command.
+#[derive(Debug, Subcommand)]
+enum SessionAction {
+    /// Classify a copied standalone SQLite backup or exported GraphSnapshot.
+    Classify {
+        /// Source session id; must match the snapshot.
+        #[arg(long)]
+        session: String,
+        /// Copied, completed standalone backup; never a live writer database.
+        #[arg(
+            long,
+            conflicts_with = "snapshot",
+            required_unless_present = "snapshot"
+        )]
+        database: Option<PathBuf>,
+        /// Complete exported GraphSnapshot JSON instead of a database.
+        #[arg(
+            long,
+            conflicts_with = "database",
+            required_unless_present = "database"
+        )]
+        snapshot: Option<PathBuf>,
+        /// Project classification rules in TOML or JSON.
+        #[arg(long)]
+        rules: PathBuf,
+        /// Explicit operator-supplied complete JSONL labels (v2 shape).
+        #[arg(long)]
+        reviewed_assignments: Option<PathBuf>,
+        /// Operator corrections as JSONL; never silently accepts foreign ids.
+        #[arg(long)]
+        overrides: Option<PathBuf>,
+        /// New private plan file. Existing files are never overwritten.
+        #[arg(long)]
+        output: PathBuf,
+    },
+}
+
 /// `lambo canon` actions (#36 PR 5).
 #[derive(Debug, Subcommand)]
 enum CanonAction {
@@ -681,6 +723,7 @@ enum RecallIndexAction {
 impl Commands {
     fn name(&self) -> &'static str {
         match self {
+            Self::Session { .. } => "session",
             Self::Serve { .. } => "serve",
             Self::ServeWeb { .. } => "serve-web",
             Self::Demo { .. } => "demo",
@@ -704,7 +747,8 @@ impl Commands {
     fn needs_embedder(&self) -> bool {
         !matches!(
             self,
-            Self::Provision
+            Self::Session { .. }
+                | Self::Provision
                 | Self::Canon { .. }
                 | Self::EraseSession { .. }
                 | Self::RecallIndex { .. }
@@ -755,6 +799,7 @@ impl Commands {
 
 /// Single construction site for store + embedder (T8.x must reuse this, not rebuild).
 enum Resolved {
+    Classification(lambo::resolve::ClassificationSource),
     Full(Box<ResolvedBackends>),
     StoreOnly {
         store: Box<dyn GraphStore>,
@@ -776,6 +821,25 @@ fn resolve_for_command(
     config: Option<&std::path::Path>,
     loaded: Option<LamboFile>,
 ) -> Result<Resolved, String> {
+    if let Commands::Session {
+        action: SessionAction::Classify {
+            database, snapshot, ..
+        },
+    } = cmd
+    {
+        if config.is_some() {
+            return Err(
+                "session classify uses explicit source/rules inputs; --config is not supported"
+                    .into(),
+            );
+        }
+        return lambo::resolve::resolve_classification_source(
+            database.as_deref(),
+            snapshot.as_deref(),
+        )
+        .map(Resolved::Classification)
+        .map_err(|e| e.to_string());
+    }
     if cmd.needs_embedder() {
         // `serve` reads `lambo.toml` once, in `serve_preflight`, and hands
         // the file down; every other writer loads it here.
@@ -1381,11 +1445,40 @@ fn main() -> ExitCode {
     if allow_embedding_mismatch {
         match &mut resolved {
             Resolved::Full(backends) => backends.allow_embedding_mismatch = true,
-            Resolved::StoreOnly { .. } => unreachable!("writer override requires full backends"),
+            Resolved::StoreOnly { .. } | Resolved::Classification(_) => {
+                unreachable!("writer override requires full backends")
+            }
         }
     }
 
     match (cmd, resolved) {
+        (
+            Commands::Session {
+                action:
+                    SessionAction::Classify {
+                        session,
+                        rules,
+                        overrides,
+                        reviewed_assignments,
+                        output,
+                        ..
+                    },
+            },
+            Resolved::Classification(source),
+        ) => run_async(
+            "session classify",
+            lambo::cli::session::classify_session(
+                source,
+                lambo::cli::session::ClassifyArgs {
+                    session,
+                    rules,
+                    overrides,
+                    reviewed_assignments,
+                    output,
+                },
+            ),
+        ),
+
         (
             Commands::Serve {
                 session: _,

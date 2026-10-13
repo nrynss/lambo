@@ -15,6 +15,7 @@ mod connection;
 mod erase;
 mod leases;
 mod persistence;
+mod read_only;
 mod schema;
 mod structural;
 mod vectors;
