@@ -194,9 +194,8 @@ use parking_lot::RwLock;
 use crate::embed::Embedder;
 use crate::graph::canonical::CanonicalizeResult;
 use crate::graph::cite::PinnedCitations;
-use crate::graph::derive::{
-    DeriveOutcome, ParentOf, COOCCURRENCE_WEIGHT, HIERARCHICAL_WEIGHT,
-};
+use crate::graph::derive::{DeriveOutcome, ParentOf, COOCCURRENCE_WEIGHT, HIERARCHICAL_WEIGHT};
+use crate::graph::resource::{canonicalize_resource, RESOURCE_KEY_PREFIX};
 use crate::graph::Graph;
 use crate::store::vector_source::VectorCandidates;
 use crate::store::GraphStore;
@@ -823,7 +822,11 @@ pub fn validate_graph_inputs(graph: &Graph, parent_of: &ParentOf<'_>) -> Result<
     validate_graph_inputs_scoped(graph, parent_of, &[])
 }
 
-pub(crate) fn validate_graph_inputs_scoped(graph: &Graph, parent_of: &ParentOf<'_>, concepts: &[(&str, ConceptType)]) -> Result<(), LamboError> {
+pub(crate) fn validate_graph_inputs_scoped(
+    graph: &Graph,
+    parent_of: &ParentOf<'_>,
+    concepts: &[(&str, ConceptType)],
+) -> Result<(), LamboError> {
     validate_pairs(graph, parent_of, concepts)?;
     // A pair that would close a longer Hierarchical cycle (spec §5.7), with
     // the graph's edges or the call's other pairs; see `derive::cycles`.
@@ -835,7 +838,11 @@ pub(crate) fn validate_graph_inputs_scoped(graph: &Graph, parent_of: &ParentOf<'
 /// one, under the write lock: the cycle check that counts there is
 /// `reject_closing_edge` at each edge write, inside the transaction, so
 /// walking the hierarchy a second time under the lock buys nothing.
-fn validate_pairs(graph: &Graph, parent_of: &ParentOf<'_>, concepts: &[(&str, ConceptType)]) -> Result<(), LamboError> {
+fn validate_pairs(
+    graph: &Graph,
+    parent_of: &ParentOf<'_>,
+    concepts: &[(&str, ConceptType)],
+) -> Result<(), LamboError> {
     crate::graph::resource::validate_repo_scope(parent_of.repo_scope())?;
     for &(parent, child) in parent_of.pairs() {
         if parent == child {
@@ -844,10 +851,20 @@ fn validate_pairs(graph: &Graph, parent_of: &ParentOf<'_>, concepts: &[(&str, Co
                  Hierarchical self-loop is a cycle (spec §5.7)"
             ))));
         }
-        let pk = match crate::graph::resource::canonicalize_resource(parent, graph, parent_of.end_type(parent, concepts), parent_of.repo_scope())? {
+        let pk = match canonicalize_resource(
+            parent,
+            graph,
+            parent_of.end_type(parent, concepts),
+            parent_of.repo_scope(),
+        )? {
             CanonicalizeResult::Matched { key, .. } | CanonicalizeResult::Unmatched { key } => key,
         };
-        let ck = match crate::graph::resource::canonicalize_resource(child, graph, parent_of.end_type(child, concepts), parent_of.repo_scope())? {
+        let ck = match canonicalize_resource(
+            child,
+            graph,
+            parent_of.end_type(child, concepts),
+            parent_of.repo_scope(),
+        )? {
             CanonicalizeResult::Matched { key, .. } | CanonicalizeResult::Unmatched { key } => key,
         };
         reject_empty_key(parent, &pk)?;
@@ -883,10 +900,11 @@ fn plan_inputs<'a>(
         if !seen.insert(content) {
             continue;
         }
-        let (key, matched) = match crate::graph::resource::canonicalize_resource(content, g, concept_type, parent_of.repo_scope())? {
-            CanonicalizeResult::Matched { key, node } => (key, Some(node)),
-            CanonicalizeResult::Unmatched { key } => (key, None),
-        };
+        let (key, matched) =
+            match canonicalize_resource(content, g, concept_type, parent_of.repo_scope())? {
+                CanonicalizeResult::Matched { key, node } => (key, Some(node)),
+                CanonicalizeResult::Unmatched { key } => (key, None),
+            };
         reject_empty_key(content, &key)?;
         items.push((content, concept_type, key, matched));
     }
@@ -901,8 +919,12 @@ fn plan_inputs<'a>(
     let mut parent_ends: PlannedEnds<'a> = Vec::new();
     for &(parent, child) in parent_of.pairs() {
         for content in [parent, child] {
-            if let CanonicalizeResult::Unmatched { key } = crate::graph::resource::canonicalize_resource(content, g, parent_of.end_type(content, concepts), parent_of.repo_scope())?
-                && !item_keys.contains(key.as_str())
+            if let CanonicalizeResult::Unmatched { key } = canonicalize_resource(
+                content,
+                g,
+                parent_of.end_type(content, concepts),
+                parent_of.repo_scope(),
+            )? && !item_keys.contains(key.as_str())
                 && end_keys.insert(key.clone())
             {
                 parent_ends.push((content, key));
@@ -1072,7 +1094,9 @@ async fn derive_planned(
             }
 
             // #22: the image-sourced concepts a text item may not merge into
-            // (design section 4.4), read under this lock. A concept written
+            // (design section 4.4), and #129: the repository-scoped path
+            // Resources, whose identity is their exact key and never a
+            // vector neighbour's, read under this lock. A concept written
             // after this read is in the commit's node-write window; if the
             // store hands it back as a merge target, the commit replans
             // (`plan_still_holds`).
@@ -1082,7 +1106,10 @@ async fn derive_planned(
                     .any(|(content, _, _, matched)| matched.is_none() && !is_supplied(content));
             let image_nodes: HashSet<NodeId> = if text_will_rank {
                 g.concepts()
-                    .filter(|c| c.embedding_source.is_some())
+                    .filter(|c| {
+                        c.embedding_source.is_some()
+                            || c.canonical_key.starts_with(RESOURCE_KEY_PREFIX)
+                    })
                     .map(|c| c.id)
                     .collect()
             } else {
@@ -1102,9 +1129,6 @@ async fn derive_planned(
             )
         };
 
-        let scoped_nodes: HashSet<NodeId> = graph.read().concepts()
-            .filter(|c| c.canonical_key.starts_with(crate::graph::resource::RESOURCE_KEY_PREFIX))
-            .map(|c| c.id).collect();
         embeds.observe_stamp(stamped.as_ref());
 
         // Mid-session contract check — refuse a kind/model/dim swap BEFORE any embed
@@ -1177,11 +1201,21 @@ async fn derive_planned(
                         source: None,
                     }
                 }
-                None if *concept_type == ConceptType::Resource && key.starts_with(crate::graph::resource::RESOURCE_KEY_PREFIX) => {
+                // #129: a repository-scoped path is its exact key. It is
+                // embedded, so recall's vector leg finds it, but never merged
+                // into a neighbour: two repositories' `README.md` are two
+                // files however close their vectors.
+                None if *concept_type == ConceptType::Resource
+                    && key.starts_with(RESOURCE_KEY_PREFIX) =>
+                {
                     let context = context_text(content, origin_text.as_deref());
                     let emb = embeds.embed(embedder, context, io_deadline).await?;
                     attempted_embed = true;
-                    Resolution::Fresh { key: key.clone(), embedding: Some(emb), source: None }
+                    Resolution::Fresh {
+                        key: key.clone(),
+                        embedding: Some(emb),
+                        source: None,
+                    }
                 }
                 None => {
                     let context = context_text(content, origin_text.as_deref());
@@ -1208,8 +1242,9 @@ async fn derive_planned(
                     {
                         Some(mut hits) => {
                             // #22: a text item never merges into an image
-                            // concept (design section 4.4).
-                            hits.retain(|hit| !image_nodes.contains(&hit.item) && !scoped_nodes.contains(&hit.item));
+                            // concept (design section 4.4); #129: nor into a
+                            // repository-scoped path Resource.
+                            hits.retain(|hit| !image_nodes.contains(&hit.item));
                             // The tier tied at the highest score
                             // at/above threshold (store results are not
                             // guaranteed sorted). Every member is
@@ -1456,7 +1491,8 @@ async fn derive_planned(
                 // (hard error + partial write). `plan_still_holds` proved every
                 // item's canonical match is what it was at plan, so the only newly
                 // Matched node here is one written earlier in THIS call.
-                if let CanonicalizeResult::Matched { node, .. } = crate::graph::resource::canonicalize_resource(content, g, *concept_type, parent_of.repo_scope())?
+                if let CanonicalizeResult::Matched { node, .. } =
+                    canonicalize_resource(content, g, *concept_type, parent_of.repo_scope())?
                     && written.contains(&node)
                 {
                     cited.by_content.insert((*content).to_string(), node);
@@ -1954,7 +1990,9 @@ fn plan_still_holds(g: &Graph, plan: &PlanRead<'_, '_>) -> Result<Verdict, Lambo
                 key,
                 embedding: Some(embedding),
                 source: None,
-            } if !key.starts_with(crate::graph::resource::RESOURCE_KEY_PREFIX) => ranked.push((embedding, None)),
+                // #129: a scoped path never merges, so no rival can
+                // change its plan.
+            } if !key.starts_with(RESOURCE_KEY_PREFIX) => ranked.push((embedding, None)),
             _ => {}
         }
     }
@@ -1976,7 +2014,7 @@ fn plan_still_holds(g: &Graph, plan: &PlanRead<'_, '_>) -> Result<Verdict, Lambo
         }
         if let Some(Node::Concept(c)) = g.node(id)
             && c.embedding_source.is_none()
-            && !c.canonical_key.starts_with(crate::graph::resource::RESOURCE_KEY_PREFIX)
+            && !c.canonical_key.starts_with(RESOURCE_KEY_PREFIX)
             && let Some(vector) = c.embedding.as_deref()
         {
             rivals.push(vector);
@@ -2323,7 +2361,7 @@ fn resolve_concept(
     parent_vectors: &HashMap<String, Vec<f32>>,
     repo_scope: Option<&str>,
 ) -> Result<NodeId, LamboError> {
-    match crate::graph::resource::canonicalize_resource(content, graph, concept_type, repo_scope)? {
+    match canonicalize_resource(content, graph, concept_type, repo_scope)? {
         CanonicalizeResult::Unmatched { key } => {
             // C4: `canonicalize` returns Unmatched for a key whose only holder
             // is an `Observation` (GRAPH-1). When that holder is a concept

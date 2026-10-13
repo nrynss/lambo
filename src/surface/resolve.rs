@@ -154,7 +154,11 @@ pub(crate) fn resolve_reference(g: &Graph, reference: &str) -> Resolved {
     resolve_reference_scoped(g, reference, None)
 }
 
-pub(crate) fn resolve_reference_scoped(g: &Graph, reference: &str, repo_scope: Option<&str>) -> Resolved {
+pub(crate) fn resolve_reference_scoped(
+    g: &Graph,
+    reference: &str,
+    repo_scope: Option<&str>,
+) -> Resolved {
     let reference = reference.trim();
     if let Some(id) = is_hyphenated_id(reference)
         .then(|| parse_full_id(reference))
@@ -240,7 +244,10 @@ pub(crate) fn resolve_existing(
 }
 
 pub(crate) fn resolve_existing_scoped(
-    g: &Graph, field: ReferenceField, concept: Option<&str>, reference: &str,
+    g: &Graph,
+    field: ReferenceField,
+    concept: Option<&str>,
+    reference: &str,
     repo_scope: Option<&str>,
 ) -> Result<(NodeId, Leg), LamboError> {
     let kind = match resolve_reference_scoped(g, reference, repo_scope) {

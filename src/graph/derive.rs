@@ -129,13 +129,19 @@ pub struct ParentOf<'a> {
 impl<'a> ParentOf<'a> {
     /// No hierarchical relationships.
     pub fn none() -> Self {
-        Self { pairs: &[], repo_scope: None }
+        Self {
+            pairs: &[],
+            repo_scope: None,
+        }
     }
 
     /// Hierarchical pairs `(parent, child)` in declaration order. Both ends of
     /// each pair resolve (and may be created) as concepts.
     pub fn from_pairs(pairs: &'a [(&'a str, &'a str)]) -> Self {
-        Self { pairs, repo_scope: None }
+        Self {
+            pairs,
+            repo_scope: None,
+        }
     }
 
     /// Repository identity for all path-like Resources of this derive, including
@@ -146,13 +152,22 @@ impl<'a> ParentOf<'a> {
     }
 
     /// Caller-asserted repository identity for this derive.
-    pub fn repo_scope(&self) -> Option<&'a str> { self.repo_scope }
+    pub fn repo_scope(&self) -> Option<&'a str> {
+        self.repo_scope
+    }
 
     pub(crate) fn end_type(&self, content: &str, concepts: &[(&str, ConceptType)]) -> ConceptType {
-        concepts.iter().find(|(c, _)| *c == content).map(|(_, t)| *t)
-            .unwrap_or_else(|| if self.repo_scope.is_some() && crate::graph::resource::is_path_like(content) {
-                ConceptType::Resource
-            } else { PARENT_OF_CONCEPT_TYPE })
+        concepts
+            .iter()
+            .find(|(c, _)| *c == content)
+            .map(|(_, t)| *t)
+            .unwrap_or_else(|| {
+                if self.repo_scope.is_some() && crate::graph::resource::is_path_like(content) {
+                    ConceptType::Resource
+                } else {
+                    PARENT_OF_CONCEPT_TYPE
+                }
+            })
     }
 
     /// Raw `(parent, child)` pairs in declaration order (read-only accessor so
@@ -348,7 +363,12 @@ pub fn validate(
     // FIRST-time Observation (key not yet present) still derives normally: it
     // is a fresh context-overflow record, exactly what demote produces.
     for &(content, concept_type) in concepts {
-        let key = match crate::graph::resource::canonicalize_resource(content, graph, concept_type, parent_of.repo_scope())? {
+        let key = match crate::graph::resource::canonicalize_resource(
+            content,
+            graph,
+            concept_type,
+            parent_of.repo_scope(),
+        )? {
             CanonicalizeResult::Matched { key, .. } | CanonicalizeResult::Unmatched { key } => key,
         };
         reject_empty_key(content, &key)?;
@@ -367,10 +387,20 @@ pub fn validate(
                  self-loop is a cycle (spec §5.7)"
             ))));
         }
-        let parent_key = match crate::graph::resource::canonicalize_resource(parent, graph, parent_of.end_type(parent, concepts), parent_of.repo_scope())? {
+        let parent_key = match crate::graph::resource::canonicalize_resource(
+            parent,
+            graph,
+            parent_of.end_type(parent, concepts),
+            parent_of.repo_scope(),
+        )? {
             CanonicalizeResult::Matched { key, .. } | CanonicalizeResult::Unmatched { key } => key,
         };
-        let child_key = match crate::graph::resource::canonicalize_resource(child, graph, parent_of.end_type(child, concepts), parent_of.repo_scope())? {
+        let child_key = match crate::graph::resource::canonicalize_resource(
+            child,
+            graph,
+            parent_of.end_type(child, concepts),
+            parent_of.repo_scope(),
+        )? {
             CanonicalizeResult::Matched { key, .. } | CanonicalizeResult::Unmatched { key } => key,
         };
         reject_empty_key(parent, &parent_key)?;

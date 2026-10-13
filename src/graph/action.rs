@@ -36,6 +36,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::graph::canonical::{canonicalize, CanonicalizeResult};
+use crate::graph::resource::{canonicalize_resource, scoped_resource_key};
 use crate::graph::Graph;
 use crate::surface::resolve::{
     is_hyphenated_id, is_short_id_shaped, parse_full_id, short_id_matches,
@@ -418,7 +419,14 @@ fn plan(graph: &Graph, action: &Action, expected: &[Option<NodeId>]) -> Result<P
     let mut planned_edges: Vec<(NodeId, NodeId, EdgeType)> = Vec::new();
     let mut edge_keys: HashSet<(NodeId, NodeId, EdgeType)> = HashSet::new();
     for p in action.produces {
-        let tgt = resolve(graph, &mut resolved, &mut planned, p, ConceptType::Resource, action.repo_scope)?;
+        let tgt = resolve(
+            graph,
+            &mut resolved,
+            &mut planned,
+            p,
+            ConceptType::Resource,
+            action.repo_scope,
+        )?;
         plan_edge(
             &mut planned_edges,
             &mut edge_keys,
@@ -428,7 +436,14 @@ fn plan(graph: &Graph, action: &Action, expected: &[Option<NodeId>]) -> Result<P
         );
     }
     for m in action.modifies {
-        let tgt = resolve(graph, &mut resolved, &mut planned, m, ConceptType::Resource, action.repo_scope)?;
+        let tgt = resolve(
+            graph,
+            &mut resolved,
+            &mut planned,
+            m,
+            ConceptType::Resource,
+            action.repo_scope,
+        )?;
         plan_edge(
             &mut planned_edges,
             &mut edge_keys,
@@ -531,7 +546,7 @@ fn resolve(
     concept_type: ConceptType,
     repo_scope: Option<&str>,
 ) -> Result<NodeId, LamboError> {
-    match crate::graph::resource::canonicalize_resource(content, graph, concept_type, repo_scope)? {
+    match canonicalize_resource(content, graph, concept_type, repo_scope)? {
         CanonicalizeResult::Matched { key, node } => {
             // GRAPH-8: a concept with an empty canonical key is junk regardless
             // of how it got in — reject at the entry point.
@@ -609,6 +624,14 @@ fn resolve_dependency(
     let refuse = |kind| {
         crate::surface::resolve::refusal(ReferenceField::ActionDependsOn, Some(action), entry, kind)
     };
+    // #129: under a repo scope a path-like entry is a Resource, as the
+    // action's `produces` and `modifies` are, so depending on a file and
+    // producing it name the same scoped concept.
+    let text_kind = if scoped_resource_key(entry, repo_scope).is_some() {
+        ConceptType::Resource
+    } else {
+        ConceptType::Entity
+    };
     let pin = if is_hyphenated_id(entry) {
         match parse_full_id(entry).map(|id| (id, graph.node(id))) {
             Some((id, Some(Node::Concept(_)))) => Some(id),
@@ -619,7 +642,7 @@ fn resolve_dependency(
         }
     } else if is_short_id_shaped(entry)
         && !matches!(
-            canonicalize(entry, graph)?,
+            canonicalize_resource(entry, graph, text_kind, repo_scope)?,
             CanonicalizeResult::Matched { .. }
         )
     {
@@ -643,7 +666,7 @@ fn resolve_dependency(
     match pin {
         Some(node) => Ok((node, pin)),
         None => Ok((
-            resolve(graph, resolved, planned, entry, if crate::graph::resource::scoped_resource_key(entry, repo_scope).is_some() { ConceptType::Resource } else { ConceptType::Entity }, repo_scope)?,
+            resolve(graph, resolved, planned, entry, text_kind, repo_scope)?,
             None,
         )),
     }

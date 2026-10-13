@@ -78,10 +78,17 @@ pub(crate) fn reject_parent_of_cycles(
         return Ok(());
     }
     let resolve = |content: &str| -> Result<(Option<NodeId>, String), LamboError> {
-        Ok(match crate::graph::resource::canonicalize_resource(content, graph, parent_of.end_type(content, concepts), parent_of.repo_scope())? {
-            CanonicalizeResult::Matched { node, key } => (Some(node), key),
-            CanonicalizeResult::Unmatched { key } => (None, key),
-        })
+        Ok(
+            match crate::graph::resource::canonicalize_resource(
+                content,
+                graph,
+                parent_of.end_type(content, concepts),
+                parent_of.repo_scope(),
+            )? {
+                CanonicalizeResult::Matched { node, key } => (Some(node), key),
+                CanonicalizeResult::Unmatched { key } => (None, key),
+            },
+        )
     };
     let mut resolved: Vec<[(Option<NodeId>, String); 2]> = Vec::with_capacity(pairs.len());
     for &(parent, child) in pairs {
@@ -321,14 +328,24 @@ mod tests {
         .unwrap();
         let leaf = format!("chain node {}", N - 1);
         let started = std::time::Instant::now();
-        let err = reject_parent_of_cycles(&g, &crate::graph::derive::ParentOf::from_pairs(&[(leaf.as_str(), "chain node 0")]), &[]).unwrap_err();
+        let err = reject_parent_of_cycles(
+            &g,
+            &crate::graph::derive::ParentOf::from_pairs(&[(leaf.as_str(), "chain node 0")]),
+            &[],
+        )
+        .unwrap_err();
         let prepass = started.elapsed();
         assert!(err.to_string().contains("Hierarchical cycle"));
         let started = std::time::Instant::now();
         assert!(reject_closing_edge(&g, "leaf", "root", ids[N as usize - 1], ids[0]).is_err());
         let write_time = started.elapsed();
         let started = std::time::Instant::now();
-        reject_parent_of_cycles(&g, &crate::graph::derive::ParentOf::from_pairs(&[("a new parent", "chain node 0")]), &[]).unwrap();
+        reject_parent_of_cycles(
+            &g,
+            &crate::graph::derive::ParentOf::from_pairs(&[("a new parent", "chain node 0")]),
+            &[],
+        )
+        .unwrap();
         let no_cycle = started.elapsed();
         println!(
             "cycle walk over a {N}-node chain: pre-pass {prepass:?}, write-time {write_time:?}, \
