@@ -848,6 +848,16 @@ impl WritePipeline {
         id
     }
 
+    /// Whether this pipeline can answer for receipt `id` (#33 PR 4): it
+    /// issued it (its epoch), or it knows the id's fate from a previous
+    /// process's durable intents. A server whose calls write to several
+    /// sessions routes a `lambo_stats` receipt to the pipeline that knows
+    /// it; an id no pipeline knows is answered by the server's own, which
+    /// says `restart_lost`.
+    pub fn knows_receipt(&self, id: ReceiptId) -> bool {
+        id.epoch == self.epoch || self.restart.lock().contains_key(&id)
+    }
+
     /// Look up a receipt for `agent`.
     ///
     /// Every non-answer is a *specific* non-answer: see [`ReceiptAnswer`].
@@ -994,12 +1004,25 @@ impl WritePipeline {
     /// Take-once. A response that never reaches its client loses its
     /// piggyback, which is why the fetch-by-id surface exists as well.
     pub fn take_piggyback(&self, agent: &AgentId) -> (Vec<(ReceiptId, ReceiptAnswer)>, usize) {
+        self.take_piggyback_at_most(agent, MAX_PIGGYBACK_RECEIPTS)
+    }
+
+    /// [`WritePipeline::take_piggyback`] taking at most `max` receipts
+    /// (#33 PR 4): a call that drains several pipelines (a layered
+    /// session's own and each layer's) shares one
+    /// [`MAX_PIGGYBACK_RECEIPTS`] budget across them. `max = 0` takes
+    /// nothing and only counts what is waiting.
+    pub fn take_piggyback_at_most(
+        &self,
+        agent: &AgentId,
+        max: usize,
+    ) -> (Vec<(ReceiptId, ReceiptAnswer)>, usize) {
         let mut r = self.receipts.lock();
         r.expire((self.clock)());
         let mut ids = Vec::new();
         match r.undelivered.get_mut(agent) {
             Some(queue) => {
-                while ids.len() < MAX_PIGGYBACK_RECEIPTS {
+                while ids.len() < max {
                     match queue.pop_front() {
                         Some(id) => ids.push(id),
                         None => break,
