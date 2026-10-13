@@ -458,6 +458,50 @@ impl SqliteStore {
         Ok(receipted)
     }
 
+    /// Read one committed target of this split for `lambo session verify`
+    /// (#33 D3), in one read transaction: the destination holds this split's
+    /// targets and nothing else, every target in `targets` is receipted, the
+    /// stored receipt equals `receipt`, and the stored rows equal `expected`
+    /// (in canonical order). Returns the stored snapshot. Runs no DDL and no
+    /// DML; on a read-only connection.
+    pub(crate) async fn read_verified_split_target(
+        &self,
+        receipt: &SplitReceipt,
+        expected: &GraphSnapshot,
+        targets: &BTreeSet<String>,
+    ) -> Result<GraphSnapshot, StoreError> {
+        let mut tx = self
+            .pool()
+            .begin()
+            .await
+            .map_err(|e| db_err("split: begin verify read", e))?;
+        let receipted = check_ownership(&mut tx, &receipt.split_sha256, targets).await?;
+        if &receipted != targets {
+            return Err(refused(
+                "the split output does not hold every target of this split; finish the split \
+                 (rerun it) before verifying",
+            ));
+        }
+        let target = &receipt.target_session;
+        if read_receipt(&mut tx, target).await?.as_ref() != Some(receipt) {
+            return Err(refused(format!(
+                "target {target}'s receipt does not match this source and plan"
+            )));
+        }
+        let stored = load_snapshot_in(&mut tx, &expected.session_id)
+            .await?
+            .ok_or_else(|| refused(format!("target {target} is receipted but missing")))?;
+        tx.rollback()
+            .await
+            .map_err(|e| db_err("split: end verify read", e))?;
+        if canonical_target(stored.clone()) != canonical_target(expected.clone()) {
+            return Err(refused(format!(
+                "target {target} changed after its import; it no longer verifies"
+            )));
+        }
+        Ok(stored)
+    }
+
     /// Import one target atomically, or verify it when this split already
     /// committed it. See the module doc for the transaction boundaries.
     pub(crate) async fn import_split_target(

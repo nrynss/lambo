@@ -398,13 +398,16 @@ impl SqliteStore {
         Ok(Self::new(options))
     }
 
-    /// Open a completed standalone backup without creation, migrations,
-    /// journal changes or sidecars. The caller must copy a finished backup
-    /// first: an empty WAL alone does not prove a live database is immutable.
+    /// Open a completed standalone file (a backup copy, or a split output)
+    /// without creation, migrations, journal changes or sidecars, for the
+    /// session classify, split and verify inputs. The caller must copy a
+    /// finished backup first: an empty WAL alone does not prove a live
+    /// database is immutable.
     pub fn connect_read_only(path: &std::path::Path) -> Result<Self, StoreError> {
         if !path.is_file() {
             return Err(StoreError::Invariant(
-                "classification database must be an existing standalone backup file".into(),
+                "a read-only input database (session classify, split or verify) must be an existing \
+                 standalone file".into(),
             ));
         }
         let info = std::fs::symlink_metadata(path)
@@ -412,7 +415,8 @@ impl SqliteStore {
         use std::os::unix::fs::MetadataExt;
         if info.file_type().is_symlink() || info.nlink() != 1 {
             return Err(StoreError::Invariant(
-                "classification needs a standalone backup copy, not a symlink or hardlink".into(),
+                "a read-only input database must be a standalone copy, not a symlink or hardlink"
+                    .into(),
             ));
         }
         let mut wal = path.as_os_str().to_os_string();
@@ -420,7 +424,8 @@ impl SqliteStore {
         match std::fs::metadata(&wal) {
             Ok(m) if m.len() > 0 => {
                 return Err(StoreError::Invariant(
-                    "classification refuses a nonempty WAL; use a completed standalone backup copy"
+                    "a read-only input database must not have a nonempty WAL; use a completed \
+                     standalone copy"
                         .into(),
                 ))
             }
