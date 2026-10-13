@@ -42,7 +42,12 @@ fn queries() -> VerifyQueries {
             ),
             (
                 "beta".to_string(),
-                q(&["beta result is green", "alpha cache is warm", "README.md"]),
+                q(&[
+                    "beta result is green",
+                    "alpha cache is warm",
+                    "README.md",
+                    "operator-wide review conventions",
+                ]),
             ),
         ]),
     }
@@ -253,7 +258,7 @@ async fn other_projects_hits_are_removed_and_none_leak() {
     assert!(report.projects["alpha"].removed_foreign_by_primary["beta"] >= 1);
 
     // The operator ruling answers from the general layer, for both projects.
-    for project in ["alpha"] {
+    for project in ["alpha", "beta"] {
         let q = query(&report, project, "operator-wide review conventions");
         let hit = q.after.iter().find(|h| h.origin == id(17)).unwrap();
         assert_eq!(hit.session, "general");
