@@ -7,6 +7,7 @@
 //! <content> [<ConceptType>{, canonical}] (score <final>, id <short>, blast radius <n>)
 //! <⚑ load-bearing-pillar line>        (only when the concept is Canonical)
 //! <hot-list condition line(s)>        (only for re-validated hot nodes)
+//! <contradicts line(s)>               (only on a contradicting companion, #19(c))
 //! <reservation line>                  (only while an active reservation holds)
 //! ```
 //!
@@ -264,7 +265,68 @@ pub fn hot_warning(payload: &HotListPayload) -> String {
         HotListPayload::Stale { seconds_inactive } => {
             format!("Session inactive {seconds_inactive} seconds")
         }
+        HotListPayload::Contradiction { by, writer, at } => {
+            contradiction_warning(*by, writer, *at, None)
+        }
     }
+}
+
+/// Longest excerpt of a concept's content a contradiction line quotes, in
+/// characters (#19(c)). Long enough to recognise the claim, short enough
+/// that a warning line stays one line.
+pub const CONTRADICTION_EXCERPT_CHARS: usize = 80;
+
+/// `content` on one line (whitespace runs collapsed to one space), cut to
+/// [`CONTRADICTION_EXCERPT_CHARS`] characters with a trailing `…` when cut.
+pub fn excerpt(content: &str) -> String {
+    let flat = content.split_whitespace().collect::<Vec<_>>().join(" ");
+    match flat.char_indices().nth(CONTRADICTION_EXCERPT_CHARS) {
+        Some((cut, _)) => format!("{}…", &flat[..cut]),
+        None => flat,
+    }
+}
+
+/// The contradiction line on a contradicted hit (#19(c)):
+///
+/// ```text
+/// ⚠ Contradicted at 2026-09-30T12:00:00Z by agent-b: "brand x fits true to size" (id 1a2b3c4d)
+/// ```
+///
+/// `at` is the declaring write's about-time, `writer` the agent that
+/// declared it, and the id is the contradicting concept's [`short_id`],
+/// a valid inspect focus. The line always names the contradicting concept,
+/// so nothing is lost when its own block is cut by the token budget or a
+/// layer floor. `by_content` is `None` only when the concept is not in the
+/// graph being rendered, and then the quote is left out.
+pub fn contradiction_warning(
+    by: NodeId,
+    writer: &AgentId,
+    at: chrono::DateTime<chrono::Utc>,
+    by_content: Option<&str>,
+) -> String {
+    let at = at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    match by_content {
+        Some(content) => format!(
+            "⚠ Contradicted at {at} by {writer}: \"{}\" (id {})",
+            excerpt(content),
+            short_id(by)
+        ),
+        None => format!("⚠ Contradicted at {at} by {writer} (id {})", short_id(by)),
+    }
+}
+
+/// The companion line on a contradicting concept recall pulled in beside a
+/// contradicted hit (#19(c)): which shown concept it contradicts.
+///
+/// ```text
+/// ⚠ Contradicts "brand x runs small" (id 5e6f7a8b)
+/// ```
+pub fn contradicts_warning(target: NodeId, target_content: &str) -> String {
+    format!(
+        "⚠ Contradicts \"{}\" (id {})",
+        excerpt(target_content),
+        short_id(target)
+    )
 }
 
 /// The active soft-lock line (spec §10.3.3, T2.7): agent + expiry.
@@ -335,6 +397,43 @@ mod tests {
     use super::*;
     use chrono::{DateTime, TimeZone, Utc};
     use uuid::Uuid;
+
+    /// #19(c): excerpts are one line, at most
+    /// `CONTRADICTION_EXCERPT_CHARS` characters plus `…`, cut on a char
+    /// boundary.
+    #[test]
+    fn excerpts_are_one_bounded_line() {
+        assert_eq!(excerpt("  a\n b\t c "), "a b c");
+        let long = "é".repeat(CONTRADICTION_EXCERPT_CHARS + 5);
+        let cut = excerpt(&long);
+        assert_eq!(cut.chars().count(), CONTRADICTION_EXCERPT_CHARS + 1);
+        assert!(cut.ends_with('…'));
+        let exact = "x".repeat(CONTRADICTION_EXCERPT_CHARS);
+        assert_eq!(excerpt(&exact), exact);
+    }
+
+    #[test]
+    fn contradiction_lines_name_the_other_side_by_short_id() {
+        let at = Utc.timestamp_opt(1_760_000_000, 0).unwrap();
+        let by = NodeId(Uuid::from_u64_pair(0xabcd_ef01_0000_0000, 1));
+        let line = contradiction_warning(by, &AgentId::from("agent-b"), at, Some("runs\ntrue"));
+        assert_eq!(
+            line,
+            "⚠ Contradicted at 2025-10-09T08:53:20Z by agent-b: \"runs true\" (id abcdef01)"
+        );
+        assert_eq!(
+            hot_warning(&HotListPayload::Contradiction {
+                by,
+                writer: AgentId::from("agent-b"),
+                at,
+            }),
+            "⚠ Contradicted at 2025-10-09T08:53:20Z by agent-b (id abcdef01)"
+        );
+        assert_eq!(
+            contradicts_warning(by, "x"),
+            "⚠ Contradicts \"x\" (id abcdef01)"
+        );
+    }
 
     use crate::types::{CanonizationStatus, Concept, ConceptType, Interaction, SessionId};
 

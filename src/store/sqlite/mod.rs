@@ -21,6 +21,8 @@
 //!   transaction) and candidate selection.
 //! * `structural` — keyword candidates, `blast_radius`, `interaction_span`.
 //! * `leases` — lease rows and the refusal log.
+//! * `split_import` — the offline split's destination (#33 D2): its own
+//!   transaction per target, receipt and in-transaction verification.
 //! * `codec` — value codecs shared by all of the above.
 //!
 //! ## Vector search (F1/F2 — issue #5)
@@ -286,6 +288,7 @@ mod leases;
 mod persistence;
 mod schema;
 mod session_load;
+mod split_import;
 mod structural;
 mod vector_candidates;
 mod write_rows;
@@ -305,6 +308,7 @@ use crate::types::{
     Scored, SessionId, StoreError,
 };
 use leases::acquire_or_refresh;
+pub(crate) use split_import::{SplitImportOutcome, SplitReceipt};
 
 // The unit tests in `tests/` reach the adapter's items through `use super::*`,
 // as they did when this was one file. These test-only imports keep every name

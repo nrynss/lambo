@@ -26,7 +26,8 @@ because metric 2 and metric 3 **join** to it, and leaves `startup`/`lease` in
     + recall    query, top_k, hit_count, hits[], canonical_marker,
                 blast_radius_warning, conflict_line, hot_warning,
                 reservation_warning, response_annotations[], warning_count,
-                cold_start (#79; absent on lines written before it)
+                cold_start (#79; absent on lines written before it),
+                contradiction_warning (#19(c); absent on older lines)
       hits[i]   node_id, content (truncated), score, legs{}, is_canonical,
                 blast_radius, included_in_context, annotations[]
       legs{}    any of bm25 / recent / vector_cosine -> float. A key is present

@@ -150,7 +150,7 @@ pub struct ConflictHit {
 /// One `O(interactions)` build per pass, `O(1)` per edge: a whole-graph
 /// [`detect`] builds it once and shares it across every node, and a per-node
 /// [`conflict_at`] (recall's path, CONC-5) builds it once for that node.
-struct WriterTimeline {
+pub(crate) struct WriterTimeline {
     /// `created_at -> every (interaction id, agent) written at that instant`,
     /// id-ascending.
     ///
@@ -163,8 +163,16 @@ struct WriterTimeline {
     by_time: HashMap<DateTime<Utc>, Vec<(NodeId, AgentId)>>,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Timeline builds on this thread (#19(c) review M2's assertion).
+    pub(crate) static TIMELINE_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 impl WriterTimeline {
-    fn of(graph: &Graph) -> Self {
+    pub(crate) fn of(graph: &Graph) -> Self {
+        #[cfg(test)]
+        TIMELINE_BUILDS.with(|n| n.set(n.get() + 1));
         let mut by_time: HashMap<DateTime<Utc>, Vec<(NodeId, AgentId)>> = HashMap::new();
         for i in graph.interactions() {
             by_time
@@ -196,9 +204,41 @@ impl WriterTimeline {
     }
 }
 
+/// One [`WriterTimeline`] shared by every hot-list predicate a detector pass
+/// inserts, rebuilt only when the graph's epoch moved (#19(c) review M2).
+///
+/// Recall re-validates the hot entries of every expanded member under the
+/// hot-list write guard. Each predicate building its own timeline made that
+/// `O(hot members × interactions)`; with this, one recall pays for at most
+/// one build (the first predicate to run after a write), and the rest reuse
+/// it. The timeline depends only on the session's interactions, and every
+/// interaction insert bumps the epoch, so an epoch match is a valid cache
+/// hit. The lock is a leaf: held only to read or swap the `Arc`.
+pub(crate) struct SharedTimeline(parking_lot::Mutex<Option<(u64, std::sync::Arc<WriterTimeline>)>>);
+
+impl SharedTimeline {
+    pub(crate) fn new() -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self(parking_lot::Mutex::new(None)))
+    }
+
+    /// The timeline for `graph` as of its current epoch.
+    pub(crate) fn get(&self, graph: &Graph) -> std::sync::Arc<WriterTimeline> {
+        let epoch = graph.epoch();
+        let mut slot = self.0.lock();
+        if let Some((at, timeline)) = slot.as_ref()
+            && *at == epoch
+        {
+            return timeline.clone();
+        }
+        let timeline = std::sync::Arc::new(WriterTimeline::of(graph));
+        *slot = Some((epoch, timeline.clone()));
+        timeline
+    }
+}
+
 /// Who wrote an edge — one agent, or every same-instant candidate when the
 /// timeline cannot separate them (NEW-4).
-enum EdgeWriters<'a> {
+pub(crate) enum EdgeWriters<'a> {
     /// Exactly attributed: an interaction-sourced edge, or the structural
     /// fallback to the source concept's `origin_agent`.
     Certain(AgentId),
@@ -212,7 +252,7 @@ impl EdgeWriters<'_> {
     /// Every candidate writer. All of them join the contested node's agent set:
     /// "agent X has an edge to node N" is true of each, and dropping the ones a
     /// tie-break did not pick is what made a real conflict invisible (NEW-4).
-    fn all(&self) -> impl Iterator<Item = &AgentId> {
+    pub(crate) fn all(&self) -> impl Iterator<Item = &AgentId> {
         let (certain, acting): (&[AgentId], &[(NodeId, AgentId)]) = match self {
             Self::Certain(agent) => (std::slice::from_ref(agent), &[]),
             Self::Acting(candidates) => (&[], candidates),
@@ -222,7 +262,7 @@ impl EdgeWriters<'_> {
 
     /// The single agent to *name* as the writer: the only candidate, or the
     /// smallest interaction id at a collided instant (the slice is id-ascending).
-    fn named(&self) -> &AgentId {
+    pub(crate) fn named(&self) -> &AgentId {
         match self {
             Self::Certain(agent) => agent,
             // Non-empty by construction (`Acting` is only built from a hit).
@@ -264,10 +304,40 @@ fn edge_writers<'a>(
     if edge.edge_type == EdgeType::Contradicts {
         return None;
     }
+    attribute(graph, edge, timeline)
+}
+
+/// The agents that may have written `edge`, by the resolution order of
+/// [`edge_writers`], for every edge type (`Contradicts` included). `None`
+/// only for a source node missing from the graph.
+fn attribute<'a>(
+    graph: &'a Graph,
+    edge: &Edge,
+    timeline: &'a WriterTimeline,
+) -> Option<EdgeWriters<'a>> {
+    attribute_at(
+        graph,
+        edge,
+        edge.last_reinforced.max(edge.created_at),
+        timeline,
+    )
+}
+
+/// [`attribute`], resolving a concept-sourced edge's writer at the write
+/// instant `at` instead of the edge's latest write. #19(c) passes the
+/// edge's `created_at`: a contradiction (or a piece of evidence) is dated by
+/// its first declaration, so it is attributed to that declaration's writer
+/// too, not to whoever re-sent it.
+pub(crate) fn attribute_at<'a>(
+    graph: &'a Graph,
+    edge: &Edge,
+    at: DateTime<Utc>,
+    timeline: &'a WriterTimeline,
+) -> Option<EdgeWriters<'a>> {
     match graph.node(edge.source) {
         Some(Node::Interaction(i)) => Some(EdgeWriters::Certain(i.agent_id.clone())),
         Some(Node::Concept(c)) => {
-            let acting = timeline.acting(edge.last_reinforced.max(edge.created_at));
+            let acting = timeline.acting(at);
             Some(if acting.is_empty() {
                 EdgeWriters::Certain(c.origin_agent.clone())
             } else {
@@ -299,7 +369,7 @@ fn conflict_at_with(
     now: DateTime<Utc>,
     timeline: &WriterTimeline,
 ) -> Option<ConflictHit> {
-    let window_start = now - chrono_window(window);
+    let window_start = window_start(window, now);
 
     let mut agents: Vec<AgentId> = Vec::new();
     // The newest qualifying write and *who made it* travel together (ALGO-2).
@@ -349,6 +419,15 @@ fn chrono_window(window: Duration) -> ChronoDuration {
     ChronoDuration::from_std(window).unwrap_or(ChronoDuration::MAX)
 }
 
+/// `now - window`, or the earliest representable instant when that
+/// underflows: a window reaching past chrono's range covers all of time.
+/// `now - ChronoDuration::MAX` panicked (`DateTime - TimeDelta`
+/// overflowed), so saturating the duration alone was not enough.
+fn window_start(window: Duration, now: DateTime<Utc>) -> DateTime<Utc> {
+    now.checked_sub_signed(chrono_window(window))
+        .unwrap_or(DateTime::<Utc>::MIN_UTC)
+}
+
 /// Detect every conflict in the graph (spec §9).
 ///
 /// Pure: no locks, no I/O, no hot-list mutation. `now` is passed in so callers
@@ -389,14 +468,19 @@ pub fn insert_conflicts(
     now: DateTime<Utc>,
 ) -> Vec<ConflictHit> {
     let hits = detect(graph, window, now);
+    let shared = SharedTimeline::new();
     for hit in &hits {
         let node = hit.node;
         // The predicate re-runs the same per-node check against the *caller's*
         // `now` and hands back the payload it computed, so recall renders a
-        // read-time `seconds_ago` and writer (XP-3 / ALGO-2). Only `node` and
-        // `window` are captured — both `Copy` (spec §6.4: no lock re-entry).
-        let holds =
-            move |g: &Graph, at: DateTime<Utc>| conflict_at(g, node, window, at).map(payload_of);
+        // read-time `seconds_ago` and writer (XP-3 / ALGO-2). It captures
+        // `node`, `window` and the pass's shared timeline (#19(c) review M2:
+        // one timeline build per recall, not one per conflicted member); no
+        // graph or hot-list lock is re-entered (spec §6.4).
+        let shared = shared.clone();
+        let holds = move |g: &Graph, at: DateTime<Utc>| {
+            conflict_at_with(g, node, window, at, &shared.get(g)).map(payload_of)
+        };
         let _ = hot.insert(HotListEntry::new(
             node,
             Condition::Conflict,
@@ -996,5 +1080,15 @@ mod tests {
         // smallest interaction id at the instant (documented ambiguity).
         assert_eq!(hit.writer, AgentId::from("agent-a"));
         assert_eq!(hit.seconds_ago, 10);
+    }
+
+    /// A window past chrono's range covers all of time instead of panicking
+    /// on `now - ChronoDuration::MAX` (#19(c) review M5).
+    #[test]
+    fn an_unrepresentable_window_saturates_instead_of_panicking() {
+        let (g, c1, _) = two_agent_graph(100, 120);
+        let hit = conflict_at(&g, c1, Duration::MAX, t(130)).expect("fires");
+        assert_eq!(hit.seconds_ago, 10);
+        assert_eq!(detect(&g, Duration::MAX, t(130)).len(), 1);
     }
 }

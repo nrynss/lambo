@@ -28,6 +28,8 @@ mod sqlite;
 
 #[cfg(feature = "store-sqlite")]
 pub use sqlite::SqliteStore;
+#[cfg(feature = "store-sqlite")]
+pub(crate) use sqlite::{SplitImportOutcome, SplitReceipt};
 
 // STORE-4 — shared backend-error classification (sqlx-backed adapters only;
 // `store-cockroach` / `store-postgres` / `store-sqlite` pull `sqlx`).

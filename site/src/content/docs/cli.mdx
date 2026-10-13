@@ -840,7 +840,7 @@ when actor, text and neighbour evidence agree; inference does not cascade.
 
 Every interaction and concept has one primary session, confidence and signals.
 The plan lists low-confidence items and identity hub `copy_into` placements.
-These placements are hints for a future split command; classification copies
+These placements are hints for `lambo session split`; classification copies
 nothing. Automatic `general` classification requires a Logic or Constraint,
 operator-wide text and prompt, a configured operator actor, and no project,
 path, issue, PR, commit or version reference. Protected project provenance
@@ -874,8 +874,8 @@ preserved; volatile reservations are excluded. `lambo::session::validate_plan`
 refuses a stale source, missing or duplicate assignments, unsupported versions
 and a changed plan fingerprint. The seal detects accidental corruption; it is
 not a signature or authorization mechanism. To correct a plan, regenerate it
-with reviewed labels or audited overrides. Splitting and cut-over are separate
-steps and are not implemented by this command.
+with reviewed labels or audited overrides. Splitting is `lambo session split`
+(below); cut-over is a separate, manual step.
 
 
 A complete reviewed import can preserve an explicitly reviewed historical shared
@@ -886,3 +886,112 @@ bound to the reviewed import hash; the original type and content are preserved.
 Without that audit, nonidentity replication is refused. Automatic inference never
 replicates narrative records. Every copied placement must exclude `general`, and
 `validate_plan` checks the audit evidence even for a newly sealed plan.
+
+
+## Split a classified session
+
+`lambo session split` writes a validated classification plan's target sessions
+into a new offline SQLite file. It reads the same source the plan was made from
+(`--database` with a copied, completed standalone backup, or `--snapshot`),
+exactly as `classify` does: read-only, with no lease, schema change, flush or
+canonization. It needs the `store-sqlite` feature, except with `--dry-run`.
+It never cuts a writer over to the new file.
+
+```bash
+lambo session split --session mixed --database ./backup-copy.db \
+  --plan ./plan.json --rules ./classification.toml \
+  --reviewed-assignments ./labels.jsonl --overrides ./corrections.jsonl \
+  --output-database ./split.db --report ./split-report.json
+# --dry-run builds, validates and reports without touching --output-database.
+```
+
+The plan must reproduce: the command reruns classification with `--rules`,
+`--reviewed-assignments` (required exactly when the plan imported labels) and
+`--overrides` (required exactly when the plan carries corrections; the plan's
+own copy never authorizes itself), and refuses a plan that differs in any way.
+Reproduction shows the plan follows from those input files. It does not show
+the files themselves are authorized: keep them with the plan, privately.
+
+Every target is then built in memory and checked as a complete graph before
+anything is written:
+
+- A concept goes to its session, or to every session in its `copy_into`
+  (a shared hub).
+- An interaction goes to its session and to every session holding a concept
+  that originated in it (an origin replica), so each concept keeps its origin
+  and Derives edge local. This includes hub copies: a hub copy needs its
+  origin in each session it is copied into, so the summary splits replicas
+  into those assigned concepts need and those only hub copies need. A replica
+  can carry one project's interaction into another project's session, not
+  only into `general`. The report's replica matrix counts replicas by origin
+  session and target session.
+- An interaction with hard protected provenance (the actor or a repository
+  folder of a project excluded from general) is never copied out of its own
+  session; such a plan is refused.
+- A replica, hub-only replicas included, is a stub: the same agent, creation and event times, with no
+  prompt text. The full text stays in the interaction's own target, so
+  nothing is lost and no project's prompt is copied into another project's
+  session. A stub is a state Lambo already produces (chunk-ingest
+  interactions have no prompt text). The one exception is `general`: a
+  replica there keeps its text when the interaction would itself pass the
+  general-interaction test (it has origin concepts and all of them are in
+  general). The report lists every stub with its own session, and every
+  replica in `general`; the summary prints the counts.
+- Every row gets a new id per target, derived deterministically from the
+  source and plan fingerprints. The report maps every original id to its
+  target ids.
+- Each target's Temporal chain is the subsequence of the original chain formed
+  by its interactions. A link between interactions that were adjacent keeps
+  the original edge's metadata; a new adjacency gets weight 1, no
+  reinforcements and the newer interaction's times.
+- Other edges are written into every target that holds both ends, except
+  dropped edges.
+- `root_goal` and `closed_at` are cleared. `created_at`, the mutation epoch and
+  the GC watermark are inherited. Vectors, statuses, counters and the
+  canonization history are copied verbatim. Reservations are not migrated.
+- Consumed write intents are receipts only: they are counted and not
+  migrated, so no payload text crosses sessions.
+
+The command refuses, before any write, a source with pending write intents
+(serve the source once so they settle, take a new backup and reclassify), a
+synonym or canonization event that names no concept, sub-millisecond
+timestamps, a non-finite vector component or edge weight, a hard-provenance
+replica, and any target that would be an invalid graph.
+
+Every source edge is counted exactly once, by the original primary sessions of
+its ends: intra-session; cross-session Temporal (rebuilt); hub reattached (one
+end is a hub with a copy in the other end's session); Derives reattached (a
+Derives edge whose interaction is copied into the concept's session); or
+dropped, with a reason: `cross_session_structural` (a concept-to-concept edge
+with no hub on either side) or `derives_without_replica` (a Derives edge whose
+interaction is not copied into the concept's session). Only Temporal and
+Derives edges may touch an interaction, so no other edge can attach to a
+replica. Output rows are counted separately: chain links kept and new, and
+structural rows, including extra rows for hubs that share several sessions.
+
+`--output-database` must be a plain file path. URIs, `:memory:` and other store
+kinds are refused: no other store implements this import. A new output is
+provisioned in a private temporary file and linked into place. Each target is
+then imported in one transaction with a `split_imports` receipt, re-read on
+that transaction (rows and receipt) and compared with the expected values
+before it commits. A failure rolls that target back entirely; targets
+committed earlier stay. An existing output is accepted only when it holds this
+same split's targets and nothing else, so a rerun verifies committed targets
+without writing anything, then imports the rest. A changed, foreign or
+unreceipted target, and an output a writer has attached to, are refused. The
+receipt table has no foreign key, so a split output also works as an ordinary
+store afterwards, `erase-session` included.
+
+The output and the report must not name, link to or share a file with any
+input, each other or a SQLite sidecar; hardlinks and symlinked directories are
+checked by device and inode. The report is new, private, written to a
+temporary file and linked into place after the imports; if it cannot be
+written, the error says the imports are committed and a rerun with a new
+`--report` verifies them without writing. The report lists the accounting
+(replica matrix included), the edge ledger, the id maps, the low-confidence
+inventory and every dropped edge id, but no content. The summary prints
+aggregate counts. Two notices need the owner before any cut-over:
+low-confidence items, which the plan places but nobody reviewed, and the
+general-provenance notice, which lists interactions of a project excluded from
+general that are copied into general as origins of audited general rulings
+(as stubs, unless the report lists them as full-text).

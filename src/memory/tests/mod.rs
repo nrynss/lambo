@@ -34,6 +34,7 @@ mod attach;
 mod calibration;
 mod citations;
 mod context_limit;
+mod contradiction;
 mod image;
 mod layered;
 mod leases;

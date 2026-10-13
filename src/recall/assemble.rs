@@ -237,17 +237,35 @@ where
         let daemon_part = if cold { 0.0 } else { d * w_daemon };
         (d, r, daemon_part, daemon_part + r * w_query)
     };
+    // #19(c): each contradicted hit pulls its contradicting concept into the
+    // result, force-included like the hit itself (it lifts `top_k`, never a
+    // layer floor; the token budget still applies to its block).
+    let companions = contradiction_companions(graph, hot_payloads);
+    let expanded_ids: HashSet<NodeId> = expanded
+        .required
+        .iter()
+        .chain(expanded.siblings.iter())
+        .map(|s| s.item)
+        .collect();
+    let mut extra: Vec<NodeId> = companions
+        .keys()
+        .copied()
+        .filter(|id| !expanded_ids.contains(id))
+        .collect();
+    extra.sort_by_key(|id| id.0);
     let scored = |cold: bool| -> Vec<Scored<NodeId>> {
         let mut members: Vec<Scored<NodeId>> = expanded
             .required
             .iter()
             .chain(expanded.siblings.iter())
-            .map(|s| Scored::new(s.item, score_of(s.item, cold).3))
+            .map(|s| s.item)
+            .chain(extra.iter().copied())
+            .map(|id| Scored::new(id, score_of(id, cold).3))
             .collect();
         rank_members(graph, &mut members);
         members
     };
-    let hot = |id: NodeId| hot_payloads.contains_key(&id);
+    let hot = |id: NodeId| hot_payloads.contains_key(&id) || companions.contains_key(&id);
     let any_fresh = w_query > 0.0
         && expanded
             .required
@@ -375,16 +393,38 @@ where
         }
         if let Some(payloads) = hot_payloads.get(&c.id) {
             for p in payloads {
-                let kind = match p {
-                    HotListPayload::Conflict { .. } => AnnotationKind::Conflict,
+                let (kind, text) = match p {
+                    HotListPayload::Conflict { .. } => {
+                        (AnnotationKind::Conflict, format::hot_warning(p))
+                    }
                     HotListPayload::HighRisk { .. }
                     | HotListPayload::Drift { .. }
-                    | HotListPayload::Stale { .. } => AnnotationKind::Hot,
+                    | HotListPayload::Stale { .. } => (AnnotationKind::Hot, format::hot_warning(p)),
+                    HotListPayload::Contradiction { by, writer, at } => (
+                        AnnotationKind::Contradiction,
+                        format::contradiction_warning(
+                            *by,
+                            writer,
+                            *at,
+                            same_session_concept(graph, c, *by).map(|b| b.content.as_str()),
+                        ),
+                    ),
                 };
-                let text = format::hot_warning(p);
                 detailed_hit
                     .annotations
                     .push(Annotation::new(kind, text.clone()));
+                lines.push(text);
+            }
+        }
+        if let Some(targets) = companions.get(&c.id) {
+            for target in targets {
+                let Some(Node::Concept(t)) = graph.node(*target) else {
+                    continue;
+                };
+                let text = format::contradicts_warning(t.id, &t.content);
+                detailed_hit
+                    .annotations
+                    .push(Annotation::new(AnnotationKind::Contradicts, text.clone()));
                 lines.push(text);
             }
         }
@@ -436,6 +476,48 @@ where
         detailed,
         response_annotations: Vec::new(),
     }
+}
+
+/// `id` as a concept of `of`'s own session, or `None` (#19(c): a
+/// contradiction never reaches across sessions, so neither does recall).
+fn same_session_concept<'g>(
+    graph: &'g Graph,
+    of: &crate::types::Concept,
+    id: NodeId,
+) -> Option<&'g crate::types::Concept> {
+    match graph.node(id) {
+        Some(Node::Concept(c)) if c.session_id == of.session_id && c.id != of.id => Some(c),
+        _ => None,
+    }
+}
+
+/// The contradicting concepts recall pulls in (#19(c)): every `by` of a
+/// `Contradiction` payload on a concept in `hot_payloads`, mapped to the
+/// contradicted concepts it is shown beside, id-ascending. A `by` that is
+/// not a concept of the target's session (collected since the payload was
+/// built, or foreign) is not pulled in; its target's line still names it.
+fn contradiction_companions(
+    graph: &Graph,
+    hot_payloads: &HashMap<NodeId, Vec<HotListPayload>>,
+) -> HashMap<NodeId, Vec<NodeId>> {
+    let mut out: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+    for (target, payloads) in hot_payloads {
+        let Some(Node::Concept(t)) = graph.node(*target) else {
+            continue;
+        };
+        for p in payloads {
+            if let HotListPayload::Contradiction { by, .. } = p
+                && same_session_concept(graph, t, *by).is_some()
+            {
+                out.entry(*by).or_default().push(*target);
+            }
+        }
+    }
+    for targets in out.values_mut() {
+        targets.sort_by_key(|id| id.0);
+        targets.dedup();
+    }
+    out
 }
 
 /// Sort members into recall order.
@@ -1170,6 +1252,168 @@ mod tests {
         // with its read-time payload, is the hot list's own contract since
         // #25 moved re-validation into the daemon:
         // `daemon::hotlist::tests::revalidate_members_keeps_live_and_drops_lapsed`.
+    }
+
+    // -----------------------------------------------------------------------
+    // #19(c): contradiction warnings and their companions
+    // -----------------------------------------------------------------------
+
+    fn contradiction(by: u64) -> HotListPayload {
+        HotListPayload::Contradiction {
+            by: uid(by),
+            writer: AgentId::from("agent-c"),
+            at: ts(30),
+        }
+    }
+
+    fn assemble_contradicted(
+        g: &Graph,
+        in_expanded: &[u64],
+        payloads: &[(u64, u64)],
+        q: RecallQuery,
+    ) -> DetailedRecall {
+        // Daemon-only scores: the higher the id, the higher the rank.
+        let scores = ScoreTable {
+            epoch: 0,
+            ranked: in_expanded
+                .iter()
+                .map(|&id| Scored::new(uid(id), id as f64))
+                .collect(),
+        };
+        let expanded = ExpandedSet {
+            required: in_expanded
+                .iter()
+                .map(|&id| Scored::new(uid(id), 0.0))
+                .collect(),
+            siblings: Vec::new(),
+        };
+        let mut hot: HashMap<NodeId, Vec<HotListPayload>> = HashMap::new();
+        for &(target, by) in payloads {
+            hot.entry(uid(target)).or_default().push(contradiction(by));
+        }
+        assemble(
+            g,
+            &expanded,
+            &[],
+            &scores,
+            &hot,
+            &q,
+            RecallWeights::default(),
+            ts(60),
+            default_token_count,
+        )
+    }
+
+    fn kinds(result: &DetailedRecall, id: u64) -> Vec<AnnotationKind> {
+        result
+            .detailed
+            .iter()
+            .find(|h| h.node_id == uid(id))
+            .map(|h| h.annotations.iter().map(|a| a.kind).collect())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn a_contradicted_hit_is_forced_and_pulls_in_its_contradicting_concept() {
+        let g = graph_with(5);
+        // c1 (lowest rank) is contradicted by c5, which is not in the
+        // expanded set at all; top_k 1 keeps only c3.
+        let result = assemble_contradicted(&g, &[1, 2, 3], &[(1, 5)], query(1, 10_000));
+        assert_eq!(ids_of(&result), vec![uid(3), uid(1), uid(5)]);
+        assert_eq!(kinds(&result, 1), vec![AnnotationKind::Contradiction]);
+        assert_eq!(kinds(&result, 5), vec![AnnotationKind::Contradicts]);
+        let short = format::short_id(uid(5));
+        assert_eq!(
+            result.warnings,
+            vec![
+                format!(
+                    "⚠ Contradicted at {} by agent-c: \"concept 5\" (id {short})",
+                    ts(30).to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+                ),
+                format!(
+                    "⚠ Contradicts \"concept 1\" (id {})",
+                    format::short_id(uid(1))
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_companion_already_in_the_result_is_not_duplicated() {
+        let g = graph_with(3);
+        let result = assemble_contradicted(&g, &[1, 2, 3], &[(1, 3)], query(1, 10_000));
+        // c3 is forced as a companion, so it takes no top_k slot and c2
+        // fills it; c3 appears once.
+        assert_eq!(ids_of(&result), vec![uid(3), uid(2), uid(1)]);
+        assert_eq!(kinds(&result, 3), vec![AnnotationKind::Contradicts]);
+    }
+
+    #[test]
+    fn a_companion_contradicting_two_hits_names_both_in_id_order() {
+        let g = graph_with(5);
+        let result = assemble_contradicted(&g, &[1, 2, 3], &[(2, 5), (1, 5)], query(1, 10_000));
+        assert_eq!(
+            kinds(&result, 5),
+            vec![AnnotationKind::Contradicts, AnnotationKind::Contradicts]
+        );
+        let lines: Vec<String> = result
+            .detailed
+            .iter()
+            .find(|h| h.node_id == uid(5))
+            .unwrap()
+            .annotations
+            .iter()
+            .map(|a| a.text.clone())
+            .collect();
+        assert!(lines[0].contains("concept 1") && lines[1].contains("concept 2"));
+        assert_eq!(
+            ids_of(&result).iter().filter(|&&id| id == uid(5)).count(),
+            1
+        );
+    }
+
+    /// The token budget still applies to the companion's block, but the
+    /// contradicted hit's line names it, so nothing is lost.
+    #[test]
+    fn a_companion_cut_by_the_budget_is_still_named_on_its_target() {
+        let g = graph_with(5);
+        let full = assemble_contradicted(&g, &[1, 2, 3], &[(1, 5)], query(1, 10_000));
+        let first_two: usize = full
+            .context
+            .split("\n\n")
+            .take(2)
+            .map(|b| b.len() + 2)
+            .sum();
+        let budget = (first_two as f64 / 3.5).ceil() as usize;
+        let cut = assemble_contradicted(&g, &[1, 2, 3], &[(1, 5)], query(1, budget));
+        assert_eq!(ids_of(&cut), vec![uid(3), uid(1), uid(5)], "still a hit");
+        assert!(
+            !cut.context.contains("[Entity] (score 5"),
+            "{}",
+            cut.context
+        );
+        let companion = cut.detailed.iter().find(|h| h.node_id == uid(5)).unwrap();
+        assert!(!companion.included_in_context);
+        assert!(cut.context.contains(&format::short_id(uid(5))));
+        assert!(cut.context.contains("\"concept 5\""));
+    }
+
+    /// A payload whose contradicting concept left the graph (collected after
+    /// the last revalidation would drop it, or never present) pulls nothing
+    /// in, and the line keeps the id without a quote.
+    #[test]
+    fn a_missing_contradicting_concept_is_named_by_id_only() {
+        let g = graph_with(3);
+        let result = assemble_contradicted(&g, &[1, 2, 3], &[(1, 9)], query(1, 10_000));
+        assert_eq!(ids_of(&result), vec![uid(3), uid(1)]);
+        assert_eq!(
+            result.warnings,
+            vec![format!(
+                "⚠ Contradicted at {} by agent-c (id {})",
+                ts(30).to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                format::short_id(uid(9))
+            )]
+        );
     }
 
     // -----------------------------------------------------------------------
