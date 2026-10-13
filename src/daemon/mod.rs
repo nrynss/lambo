@@ -419,11 +419,13 @@ impl Daemon {
     /// The read state a holder's first cycle gives an **unspawned** daemon
     /// (#33 D3, `lambo session verify`): rescore the graph and publish the
     /// table at the graph's epoch (so recall is not in cold mode), then run
-    /// every detector at `now` into the hot list, exactly as a cycle's steps
-    /// 1 and 2 do. No access ledger is applied, no event is published and GC
-    /// does not run, so the graph is never written. `now` is the caller's
-    /// pinned clock, which makes a replay repeatable.
-    pub(crate) fn prime_offline(&self, now: DateTime<Utc>) {
+    /// every detector into the hot list at the daemon's clock, exactly as a
+    /// cycle's steps 1 and 2 do. No access ledger is applied, no event is
+    /// published and GC does not run, so the graph is never written. Recall
+    /// re-validates hot-list entries at the same clock, so a replay pins it
+    /// with [`Daemon::with_clock`] to be repeatable.
+    pub(crate) fn prime_offline(&self) {
+        let now = (self.clock)();
         let g = self.graph.read();
         let ranked = score::rescore(&g, &self.weights);
         *self.scores.write() = ScoreTable {

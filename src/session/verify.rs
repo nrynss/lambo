@@ -18,8 +18,9 @@
 //!
 //! The replay is offline and read-only. Each session is materialized as a
 //! holder loads it (`store::load::materialize`) into an **unspawned**
-//! daemon, primed once at a pinned clock (`Daemon::prime_offline`: rescore
-//! and hot-list detection, no events, no GC, no access ledger). The vector
+//! daemon whose clock is pinned, primed once (`Daemon::prime_offline`:
+//! rescore and hot-list detection, no events, no GC, no access ledger).
+//! Recall re-validates hot-list entries at that same clock. The vector
 //! leg ranks in the session's own graph, as a SQLite holder's does
 //! (`VectorCandidates::for_holder`). Nothing notes accesses, so one query
 //! never changes the next one's answer, and the same inputs always give the
@@ -320,9 +321,13 @@ impl Replay {
             .map_err(|e| VerifyError::Refused(format!("session {name} does not load: {e}")))?;
         let session = loaded.graph.session_id().clone();
         let graph = Arc::new(RwLock::new(loaded.graph));
+        // One pinned clock for detection and for recall's read-time
+        // re-validation of hot-list entries (stale seconds, high-risk and
+        // conflict windows), so a rerun renders the same warnings.
         let daemon = Daemon::from_config(graph.clone(), config)
-            .with_index(Arc::new(RwLock::new(loaded.index)));
-        daemon.prime_offline(at);
+            .with_index(Arc::new(RwLock::new(loaded.index)))
+            .with_clock(Arc::new(move || at));
+        daemon.prime_offline();
         Ok(Self {
             session,
             graph,

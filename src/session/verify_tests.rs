@@ -72,6 +72,8 @@ struct Run {
     queries: VerifyQueries,
     dim: usize,
     top_k: usize,
+    /// Added to the default clock (the source's newest row).
+    later: chrono::Duration,
 }
 
 impl Run {
@@ -90,6 +92,7 @@ impl Run {
             queries: queries(),
             dim: 2,
             top_k: 10,
+            later: chrono::Duration::zero(),
         }
     }
 
@@ -111,7 +114,7 @@ impl Run {
                 top_k: self.top_k,
                 max_tokens: 4000,
                 traversal_depth: 1,
-                at: newest_row(&self.source).unwrap(),
+                at: newest_row(&self.source).unwrap() + self.later,
             },
             embedder: &embedder,
             embedding: &embedding,
@@ -141,6 +144,28 @@ async fn the_report_is_deterministic_and_independent_of_source_row_order() {
     reordered.source.edges.reverse();
     let third = serde_json::to_vec(&reordered.go().await.unwrap()).unwrap();
     assert_eq!(first, third, "source row order changed the report");
+}
+
+/// Stale-session warnings are re-validated at read time; the pinned clock
+/// keeps their seconds, and so the report, independent of the wall clock.
+#[tokio::test]
+async fn clock_bound_warnings_follow_the_pinned_clock_not_the_wall_clock() {
+    let mut run = Run::new();
+    run.later = chrono::Duration::days(10);
+    let first = run.go().await.unwrap();
+    let stale = first
+        .queries
+        .values()
+        .flatten()
+        .flat_map(|q| q.warnings_added.iter().chain(&q.warnings_removed))
+        .any(|w| w.contains("Session inactive"));
+    assert!(stale, "ten days after the newest row a session is stale");
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let second = run.go().await.unwrap();
+    assert_eq!(
+        serde_json::to_vec(&first).unwrap(),
+        serde_json::to_vec(&second).unwrap()
+    );
 }
 
 #[tokio::test]
