@@ -14,11 +14,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 const RULING: &str = "the writer lease stays with its holder until the holder releases it";
 const OTHER_RULING: &str = "flush batches commit in one store transaction";
 
-fn cite(content: &str, depends_on: &[&str], name: Option<&str>) -> ConceptCitations {
+fn cite(content: &str, depends_on: &[&str]) -> ConceptCitations {
     ConceptCitations {
         content: content.to_string(),
         depends_on: depends_on.iter().map(|s| s.to_string()).collect(),
-        name: name.map(str::to_string),
     }
 }
 
@@ -104,7 +103,7 @@ async fn a_refused_reference_is_an_error_before_the_ack_and_writes_nothing() {
             &agent,
             &[("a decision", ConceptType::Logic)],
             &ParentOf::none(),
-            &[cite("a decision", &["no such ruling"], None)],
+            &[cite("a decision", &["no such ruling"])],
             None,
         )
         .await
@@ -112,29 +111,13 @@ async fn a_refused_reference_is_an_error_before_the_ack_and_writes_nothing() {
     assert_eq!(kind(&err), ReferenceRefusalKind::Missing);
     assert_eq!(mem.graph.read().snapshot(), before);
     assert_eq!(mem.pipeline().counters().accepted(), accepted);
-    // The same for record_action's id entries.
-    let missing = NodeId::new().0.to_string();
-    let err = mem
-        .record_action_async_as(
-            &agent,
-            &Action {
-                event_time: None,
-                action: "ran it",
-                produces: &[],
-                modifies: &[],
-                depends_on: &[missing.as_str()],
-            },
-        )
-        .await
-        .unwrap_err();
-    assert_eq!(kind(&err), ReferenceRefusalKind::Missing);
-    assert_eq!(mem.graph.read().snapshot(), before);
     mem.close().await.unwrap();
 }
 
 /// What the pre-pass accepts, the background applies, under both
-/// strategies: a citation by short id plus a name, then an action citing
-/// the name, which lands on the ruling and mints no alias Entity.
+/// strategies: a citation by short id, then an action citing the decision
+/// by its full node id, which lands on it and mints no Entity named by the
+/// id.
 #[tokio::test]
 async fn an_accepted_citation_applies_in_the_background_under_both_strategies() {
     for strategy in [MatchStrategy::Canonical, MatchStrategy::Hybrid] {
@@ -154,7 +137,7 @@ async fn an_accepted_citation_applies_in_the_background_under_both_strategies() 
                 &agent,
                 &[(decision, ConceptType::Logic)],
                 &ParentOf::none(),
-                &[cite(decision, &[&short], Some("retry lease rule"))],
+                &[cite(decision, &[&short])],
                 None,
             )
             .await
@@ -164,9 +147,7 @@ async fn an_accepted_citation_applies_in_the_background_under_both_strategies() 
             panic!("{strategy:?}: {}", answer.describe())
         };
         assert!(
-            summary
-                .summary
-                .ends_with("; 1 citation(s) recorded, 1 name(s) registered"),
+            summary.summary.ends_with("; 1 citation(s) recorded"),
             "{}",
             summary.summary
         );
@@ -178,6 +159,7 @@ async fn an_accepted_citation_applies_in_the_background_under_both_strategies() 
             .is_some());
 
         let concepts = mem.graph.read().concepts().count();
+        let full = d.0.to_string();
         let acted = mem
             .record_action_async_as(
                 &agent,
@@ -186,7 +168,7 @@ async fn an_accepted_citation_applies_in_the_background_under_both_strategies() 
                     action: "retried a flush under the lease",
                     produces: &[],
                     modifies: &[],
-                    depends_on: &["retry lease rule"],
+                    depends_on: &[full.as_str()],
                 },
             )
             .await
@@ -222,7 +204,7 @@ async fn the_sync_and_async_paths_refuse_the_same_references() {
                 (OTHER_RULING, ConceptType::Logic),
             ],
             &ParentOf::none(),
-            &[cite(OTHER_RULING, &[RULING], None)],
+            &[cite(OTHER_RULING, &[RULING])],
         )
         .await
         .unwrap_err();
@@ -234,16 +216,15 @@ async fn the_sync_and_async_paths_refuse_the_same_references() {
         &agent,
         &[(OTHER_RULING, ConceptType::Logic)],
         &ParentOf::none(),
-        &[cite(OTHER_RULING, &[RULING], None)],
+        &[cite(OTHER_RULING, &[RULING])],
     )
     .await
     .unwrap();
     let cases = [
-        (RULING, cite(RULING, &["nothing like it"], None)),
-        (RULING, cite(RULING, &[RULING], None)),
-        (RULING, cite(RULING, &[OTHER_RULING], None)),
-        ("fresh", cite("fresh", &[], Some(RULING))),
-        ("fresh", cite("fresh", &[], Some("deadbeef"))),
+        (RULING, cite(RULING, &["nothing like it"])),
+        (RULING, cite(RULING, &[RULING])),
+        (RULING, cite(RULING, &[OTHER_RULING])),
+        ("fresh", cite("fresh", &["deadbeef"])),
     ];
     for (content, c) in cases {
         let concepts = [(content, ConceptType::Logic)];
@@ -331,7 +312,7 @@ async fn a_cited_concept_removed_between_the_ack_and_the_commit_fails_the_receip
             &agent,
             &[(decision, ConceptType::Logic)],
             &ParentOf::none(),
-            &[cite(decision, &[&format::short_id(ruling)], None)],
+            &[cite(decision, &[&format::short_id(ruling)])],
             None,
         )
         .await
@@ -363,9 +344,9 @@ async fn a_cited_concept_removed_between_the_ack_and_the_commit_fails_the_receip
 }
 
 /// Durable intents re-resolve at replay: after a restart, a citation whose
-/// target is still there applies; one whose target was removed, and one by
-/// a name (names do not survive a restart), settle `failed` with the typed
-/// refusal. Nothing dangles.
+/// target is still there applies (by short id and by full id); one whose
+/// target was removed settles `failed` with the typed refusal. Nothing
+/// dangles.
 #[tokio::test]
 async fn a_replayed_citation_re_resolves_and_settles_applied_or_failed() {
     let inner = Arc::new(MemoryStore::new());
@@ -406,19 +387,18 @@ async fn a_replayed_citation_re_resolves_and_settles_applied_or_failed() {
         }),
     )
     .await;
-    mem1.declare_synonym("kept rule", RULING).unwrap();
     let mut receipts = Vec::new();
     for (content, reference) in [
         ("cites the kept ruling", format::short_id(kept)),
         ("cites the removed ruling", format::short_id(removed)),
-        ("cites by a name", "kept rule".to_string()),
+        ("cites by the full id", kept.0.to_string()),
     ] {
         let s = mem1
             .derive_cited_async_as(
                 &agent,
                 &[(content, ConceptType::Logic)],
                 &ParentOf::none(),
-                &[cite(content, &[&reference], None)],
+                &[cite(content, &[&reference])],
                 None,
             )
             .await
@@ -457,11 +437,12 @@ async fn a_replayed_citation_re_resolves_and_settles_applied_or_failed() {
         tokio::time::sleep(Duration::from_millis(5)).await;
     };
     let tags: Vec<&str> = answers.iter().map(ReceiptAnswer::tag).collect();
-    assert_eq!(tags, ["applied_after_restart", "failed", "failed"]);
-    for a in &answers[1..] {
-        let shown = a.describe();
-        assert!(shown.contains("reference refused"), "{shown}");
-    }
+    assert_eq!(
+        tags,
+        ["applied_after_restart", "failed", "applied_after_restart"]
+    );
+    let shown = answers[1].describe();
+    assert!(shown.contains("reference refused"), "{shown}");
     {
         let g = mem2.graph.read();
         let citing = g
@@ -473,7 +454,14 @@ async fn a_replayed_citation_re_resolves_and_settles_applied_or_failed() {
         assert!(g
             .concepts()
             .all(|c| c.content != "cites the removed ruling"));
-        assert!(g.concepts().all(|c| c.content != "cites by a name"));
+        let by_full = g
+            .concepts()
+            .find(|c| c.content == "cites by the full id")
+            .expect("applied")
+            .id;
+        assert!(g
+            .edge_between(by_full, kept, EdgeType::Dependency)
+            .is_some());
         g.assert_invariants().unwrap();
     }
     mem2.close().await.unwrap();
@@ -513,7 +501,7 @@ async fn the_foreign_probe_runs_with_this_sessions_lock_released() {
             &agent,
             &[("a decision", ConceptType::Logic)],
             &ParentOf::none(),
-            &[cite("a decision", &["8baad4e0"], None)],
+            &[cite("a decision", &["8baad4e0"])],
             None,
             &probe,
         )
@@ -578,7 +566,7 @@ async fn cited_writes_recalls_and_the_daemon_run_together_without_deadlock() {
                         &agent,
                         &[(content.as_str(), ConceptType::Logic)],
                         &ParentOf::none(),
-                        &[cite(&content, &[&short], None)],
+                        &[cite(&content, &[&short])],
                         None,
                     )
                     .await
@@ -642,5 +630,66 @@ async fn a_derive_without_citations_is_unchanged() {
         0
     );
     assert_eq!(mem.graph.read().synonyms().count(), 0);
+    mem.close().await.unwrap();
+}
+
+/// Review M2: a hybrid similarity merge that makes the citing concept the
+/// same as its cited target (cosine at or over the 0.85 threshold, with the
+/// fixture embedder's near pair) drops that citation and counts it as a
+/// reinforcement; the call applies, with the merge's `Semantic` edge and no
+/// `Dependency` from the merged concept to its own twin. Other citations of
+/// the same call are still written.
+#[tokio::test]
+async fn a_similarity_merge_into_the_cited_target_drops_that_citation() {
+    use crate::embed::{NEAR_A, NEAR_B};
+    let mem = memory_with(
+        // Ranked in the holder's graph, so the merge sees unflushed vectors.
+        Arc::new(super::writes::VectorSearchStore::graph_ranked(Arc::new(
+            MemoryStore::new(),
+        ))),
+        "cite-mem-selfmerge",
+        MatchStrategy::Hybrid,
+        Arc::new(super::writes::ContextTolerantEmbedder(
+            FixtureEmbedder::new(),
+        )),
+    )
+    .await;
+    let agent = AgentId::new("agent-a");
+    for content in [NEAR_A, RULING] {
+        mem.derive_as(&agent, &[(content, ConceptType::Logic)], &ParentOf::none())
+            .await
+            .unwrap();
+    }
+    let target = node_of(&mem, NEAR_A);
+    let ruling = node_of(&mem, RULING);
+    let out = mem
+        .derive_cited_as(
+            &agent,
+            &[(NEAR_B, ConceptType::Logic)],
+            &ParentOf::none(),
+            &[cite(
+                NEAR_B,
+                &[&format::short_id(target), &format::short_id(ruling)],
+            )],
+        )
+        .await
+        .expect("the merge drops the self-citation instead of refusing");
+    assert_eq!(out.semantic_merged, vec![target], "the merge happened");
+    assert_eq!(out.cited, 1, "the other citation is written");
+    assert!(
+        out.reinforced >= 1,
+        "the dropped one counts as a reinforcement"
+    );
+    {
+        let g = mem.graph.read();
+        let merged = node_of(&mem, NEAR_B);
+        assert!(g
+            .edge_between(merged, target, EdgeType::Dependency)
+            .is_none());
+        assert!(g
+            .edge_between(merged, ruling, EdgeType::Dependency)
+            .is_some());
+        g.assert_invariants().unwrap();
+    }
     mem.close().await.unwrap();
 }

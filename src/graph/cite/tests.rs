@@ -1,10 +1,10 @@
-//! Citations and names on the canonical derive path and on
+//! Citations on the canonical derive path and on
 //! `record_action` (#36 PR 4). The write-queue, hybrid, replay and MCP
 //! halves are in `memory::tests::citations` and `mcp::server::tests`.
 
 use super::*;
 use crate::graph::action::{record_action, record_action_pinned, validate_pinned, Action};
-use crate::graph::derive::derive_cited;
+use crate::graph::derive::{derive_cited, ParentOf};
 use crate::recall::format;
 use crate::test_util::citations::{concept, concept_with_id, graph, id_with_prefix};
 use crate::types::{AgentId, ReferenceRefusal};
@@ -16,11 +16,10 @@ fn agent() -> AgentId {
     AgentId::from("agent-a")
 }
 
-fn cite(content: &str, depends_on: &[&str], name: Option<&str>) -> ConceptCitations {
+fn cite(content: &str, depends_on: &[&str]) -> ConceptCitations {
     ConceptCitations {
         content: content.to_string(),
         depends_on: depends_on.iter().map(|s| s.to_string()).collect(),
-        name: name.map(str::to_string),
     }
 }
 
@@ -31,7 +30,7 @@ fn derive_with_citations(
     concepts: &[(&str, ConceptType)],
     citations: &[ConceptCitations],
 ) -> Result<DeriveOutcome, LamboError> {
-    let pinned = validate(g, concepts, &ParentOf::none(), citations)?;
+    let pinned = validate(g, concepts, citations)?;
     derive_cited(g, i, &agent(), concepts, &ParentOf::none(), 10, &pinned)
 }
 
@@ -60,7 +59,7 @@ fn a_citation_makes_the_cited_concept_load_bearing() {
         &mut g,
         i,
         &[(DECISION, ConceptType::Logic)],
-        &[cite(DECISION, &[&format::short_id(ruling)], None)],
+        &[cite(DECISION, &[&format::short_id(ruling)])],
     )
     .unwrap();
     assert_eq!(out.cited, 1);
@@ -73,8 +72,9 @@ fn a_citation_makes_the_cited_concept_load_bearing() {
     g.assert_invariants().unwrap();
 }
 
-/// Every reference form reaches the same concept, so four references to one
-/// ruling write one edge.
+/// Every reference form reaches the same concept, so three references to one
+/// ruling write one edge. A synonym the session holds is not a reference
+/// form (review H1): it is refused as missing.
 #[test]
 fn every_reference_form_writes_the_same_one_edge() {
     let (mut g, i) = graph("cite-forms");
@@ -82,11 +82,19 @@ fn every_reference_form_writes_the_same_one_edge() {
     g.declare_synonym("lease rule", RULING);
     let full = ruling.0.to_string();
     let short = format::short_id(ruling);
+    let err = derive_with_citations(
+        &mut g,
+        i,
+        &[(DECISION, ConceptType::Logic)],
+        &[cite(DECISION, &["lease rule"])],
+    )
+    .unwrap_err();
+    assert_eq!(refusal(&err).kind, ReferenceRefusalKind::Missing);
     let out = derive_with_citations(
         &mut g,
         i,
         &[(DECISION, ConceptType::Logic)],
-        &[cite(DECISION, &[&full, &short, "lease rule", RULING], None)],
+        &[cite(DECISION, &[&full, &short, RULING])],
     )
     .unwrap();
     assert_eq!(out.cited, 1);
@@ -100,22 +108,18 @@ fn every_reference_form_writes_the_same_one_edge() {
 }
 
 /// Natural-key idempotency: the same cited derive twice is one edge,
-/// reinforced, and one name; nothing new on the second call.
+/// reinforced; nothing new on the second call.
 #[test]
-fn a_resent_citation_reinforces_one_edge_and_one_name() {
+fn a_resent_citation_reinforces_one_edge() {
     let (mut g, i) = graph("cite-idem");
     let ruling = concept(&mut g, i, RULING, ConceptType::Logic);
-    let call = [cite(
-        DECISION,
-        &[&format::short_id(ruling)],
-        Some("flush keeps lease"),
-    )];
+    let call = [cite(DECISION, &[&format::short_id(ruling)])];
     let first = derive_with_citations(&mut g, i, &[(DECISION, ConceptType::Logic)], &call).unwrap();
-    assert_eq!((first.cited, first.named), (1, 1));
+    assert_eq!(first.cited, 1);
     let (nodes, edges) = (g.node_count(), g.edge_count());
     let second =
         derive_with_citations(&mut g, i, &[(DECISION, ConceptType::Logic)], &call).unwrap();
-    assert_eq!((second.cited, second.named), (0, 0));
+    assert_eq!(second.cited, 0);
     assert!(second.reinforced >= 1);
     assert_eq!((g.node_count(), g.edge_count()), (nodes, edges));
     let decision = node_of(&g, DECISION);
@@ -125,7 +129,6 @@ fn a_resent_citation_reinforces_one_edge_and_one_name() {
             .reinforcements,
         2
     );
-    assert_eq!(g.synonym("flush keeps lease"), Some(DECISION));
 }
 
 /// The refusals the pre-pass owes, each typed, each before anything is
@@ -154,7 +157,7 @@ fn every_bad_reference_is_refused_with_its_kind_and_nothing_is_written() {
         &mut g,
         i,
         &[(DECISION, ConceptType::Logic)],
-        &[cite(DECISION, &[RULING], None)],
+        &[cite(DECISION, &[RULING])],
     )
     .unwrap();
     let before = g.snapshot();
@@ -164,85 +167,38 @@ fn every_bad_reference_is_refused_with_its_kind_and_nothing_is_written() {
     let cases: Vec<Case> = vec![
         (
             vec![("fresh", ConceptType::Logic)],
-            vec![cite("fresh", &["nothing like it"], None)],
+            vec![cite("fresh", &["nothing like it"])],
             "missing",
         ),
         (
             vec![("fresh", ConceptType::Logic)],
-            vec![cite("fresh", &["8baad4e0"], None)],
+            vec![cite("fresh", &["8baad4e0"])],
             "ambiguous",
         ),
         (
             vec![("fresh", ConceptType::Logic)],
-            vec![cite("fresh", &[&i.0.to_string()], None)],
+            vec![cite("fresh", &[&i.0.to_string()])],
             "interaction",
         ),
         (
             vec![(RULING, ConceptType::Logic)],
-            vec![cite(RULING, &[&format::short_id(ruling)], None)],
+            vec![cite(RULING, &[&format::short_id(ruling)])],
             "self",
         ),
         (
             vec![(RULING, ConceptType::Logic)],
-            vec![cite(RULING, &[DECISION], None)],
+            vec![cite(RULING, &[DECISION])],
             "cycle",
         ),
         (
             vec![("fresh", ConceptType::Logic)],
-            vec![cite("fresh", &nine, None)],
+            vec![cite("fresh", &nine)],
             "limit",
         ),
         (
             vec![("fresh", ConceptType::Logic)],
-            vec![cite("not in the call", &[RULING], None)],
+            vec![cite("not in the call", &[RULING])],
             "unknown",
-        ),
-        (
-            vec![("fresh", ConceptType::Logic)],
-            vec![cite("fresh", &[], Some(RULING))],
-            "taken",
-        ),
-        (
-            vec![("fresh", ConceptType::Logic)],
-            vec![cite("fresh", &[], Some("deadbeef"))],
-            "unusable",
-        ),
-        (
-            vec![("fresh", ConceptType::Logic)],
-            vec![cite("fresh", &[], Some("the of"))],
-            "unusable",
-        ),
-        (
-            vec![("fresh", ConceptType::Observation)],
-            vec![cite("fresh", &[], Some("a fresh name"))],
-            "unusable",
-        ),
-        (
-            vec![
-                ("fresh", ConceptType::Logic),
-                ("other one", ConceptType::Logic),
-            ],
-            vec![cite("fresh", &[], Some("other one"))],
-            "unusable",
-        ),
-        (
-            vec![
-                ("fresh", ConceptType::Logic),
-                ("other one", ConceptType::Logic),
-            ],
-            vec![
-                cite("fresh", &[], Some("shared")),
-                cite("other one", &[], Some("shared")),
-            ],
-            "unusable",
-        ),
-        (
-            vec![("fresh", ConceptType::Logic)],
-            vec![
-                cite("fresh", &[], Some("one name")),
-                cite("fresh", &[], Some("another")),
-            ],
-            "unusable",
         ),
     ];
     for (concepts, citations, want) in cases {
@@ -256,8 +212,6 @@ fn every_bad_reference_is_refused_with_its_kind_and_nothing_is_written() {
             ReferenceRefusalKind::Cycle => "cycle",
             ReferenceRefusalKind::Limit { .. } => "limit",
             ReferenceRefusalKind::UnknownConcept => "unknown",
-            ReferenceRefusalKind::NameTaken { .. } => "taken",
-            ReferenceRefusalKind::NameUnusable { .. } => "unusable",
             other => panic!("{other:?}"),
         };
         assert_eq!(got, want, "{err}");
@@ -278,7 +232,7 @@ fn the_call_wide_reference_limit_is_enforced() {
         .collect();
     // 5 concepts x 7 references = 35 > 32.
     let refs: Vec<&str> = std::iter::repeat_n(short.as_str(), 7).collect();
-    let citations: Vec<ConceptCitations> = contents.iter().map(|c| cite(c, &refs, None)).collect();
+    let citations: Vec<ConceptCitations> = contents.iter().map(|c| cite(c, &refs)).collect();
     let err = derive_with_citations(&mut g, i, &concepts, &citations).unwrap_err();
     assert!(matches!(
         refusal(&err).kind,
@@ -290,11 +244,11 @@ fn the_call_wide_reference_limit_is_enforced() {
 }
 
 /// Pinned at the ack, re-resolved at the commit: a cited concept removed,
-/// a name re-pointed, or a short id made ambiguous in between refuses the
-/// write and leaves the graph exactly as it was.
+/// or a short id made ambiguous, in between refuses the write and leaves
+/// the graph exactly as it was.
 #[test]
 fn a_reference_that_changes_after_the_ack_refuses_at_the_commit() {
-    for change in ["removed", "renamed", "shadowed"] {
+    for change in ["removed", "shadowed"] {
         let (mut g, i) = graph("cite-changed");
         let ruling = concept_with_id(
             &mut g,
@@ -303,29 +257,14 @@ fn a_reference_that_changes_after_the_ack_refuses_at_the_commit() {
             RULING,
             ConceptType::Logic,
         );
-        let other = concept(&mut g, i, "another ruling entirely", ConceptType::Logic);
-        g.declare_synonym("lease rule", RULING);
-        let reference = match change {
-            "renamed" => "lease rule".to_string(),
-            _ => "c0ffee00".to_string(),
-        };
+        let reference = "c0ffee00".to_string();
         let concepts = [(DECISION, ConceptType::Logic)];
-        let pinned = validate(
-            &g,
-            &concepts,
-            &ParentOf::none(),
-            &[cite(DECISION, &[&reference], None)],
-        )
-        .unwrap();
+        let pinned = validate(&g, &concepts, &[cite(DECISION, &[&reference])]).unwrap();
         assert_eq!(pinned.references[0].target, ruling);
         let now = match change {
             "removed" => {
                 g.remove_node(ruling).unwrap();
                 None
-            }
-            "renamed" => {
-                g.declare_synonym("lease rule", "another ruling entirely");
-                Some(other)
             }
             _ => {
                 concept_with_id(
@@ -364,21 +303,16 @@ fn a_reference_that_changes_after_the_ack_refuses_at_the_commit() {
 }
 
 /// The commit runs the self and cycle checks again on the sources as
-/// written: here a name declared between the ack and the commit makes the
-/// citing content resolve to the cited concept itself, and an edge added in
+/// written: here a synonym declared (through the library) between the ack
+/// and the commit makes the citing content canonical-match the cited
+/// concept itself, and an edge added in
 /// between closes a cycle.
 #[test]
 fn the_commit_refuses_self_and_cycle_it_could_not_see_at_the_ack() {
     let (mut g, i) = graph("cite-commit-self");
     concept(&mut g, i, RULING, ConceptType::Logic);
     let concepts = [("an alias of the ruling", ConceptType::Logic)];
-    let pinned = validate(
-        &g,
-        &concepts,
-        &ParentOf::none(),
-        &[cite("an alias of the ruling", &[RULING], None)],
-    )
-    .unwrap();
+    let pinned = validate(&g, &concepts, &[cite("an alias of the ruling", &[RULING])]).unwrap();
     g.declare_synonym("an alias of the ruling", RULING);
     let before = g.snapshot();
     let err = derive_cited(
@@ -398,19 +332,13 @@ fn the_commit_refuses_self_and_cycle_it_could_not_see_at_the_ack() {
     let ruling = concept(&mut g, i, RULING, ConceptType::Logic);
     let decision = concept(&mut g, i, DECISION, ConceptType::Logic);
     let concepts = [(DECISION, ConceptType::Logic)];
-    let pinned = validate(
-        &g,
-        &concepts,
-        &ParentOf::none(),
-        &[cite(DECISION, &[RULING], None)],
-    )
-    .unwrap();
+    let pinned = validate(&g, &concepts, &[cite(DECISION, &[RULING])]).unwrap();
     // In between, the ruling comes to depend on the decision.
     derive_with_citations(
         &mut g,
         i,
         &[(RULING, ConceptType::Logic)],
-        &[cite(RULING, &[DECISION], None)],
+        &[cite(RULING, &[DECISION])],
     )
     .unwrap();
     assert!(g
@@ -443,25 +371,18 @@ fn the_commit_and_the_pre_pass_refuse_the_same_kinds() {
         &mut g,
         i,
         &[(DECISION, ConceptType::Logic)],
-        &[cite(DECISION, &[RULING], None)],
+        &[cite(DECISION, &[RULING])],
     )
     .unwrap();
     for (content, target, reference) in [(RULING, ruling, RULING), (RULING, decision, DECISION)] {
         let concepts = [(content, ConceptType::Logic)];
-        let pre = validate(
-            &g,
-            &concepts,
-            &ParentOf::none(),
-            &[cite(content, &[reference], None)],
-        )
-        .unwrap_err();
+        let pre = validate(&g, &concepts, &[cite(content, &[reference])]).unwrap_err();
         let forged = PinnedCitations {
             references: vec![PinnedReference {
                 content: content.to_string(),
                 reference: reference.to_string(),
                 target,
             }],
-            names: vec![],
         };
         let commit = derive_cited(
             &mut g,
@@ -481,58 +402,6 @@ fn the_commit_and_the_pre_pass_refuse_the_same_kinds() {
     }
 }
 
-/// The alias defect, going forward: once a ruling carries a name, a later
-/// `record_action` citing that name lands on the ruling and mints no alias
-/// Entity. A name an existing alias Entity already holds is refused, not
-/// taken over (the reviewed backfill redirects existing aliases).
-#[test]
-fn a_named_ruling_takes_later_citations_and_an_existing_alias_is_not_taken_over() {
-    let (mut g, i) = graph("cite-alias");
-    let concepts = [(RULING, ConceptType::Logic)];
-    let out = derive_with_citations(
-        &mut g,
-        i,
-        &concepts,
-        &[cite(RULING, &[], Some("writer lease"))],
-    )
-    .unwrap();
-    assert_eq!(out.named, 1);
-    let ruling = node_of(&g, RULING);
-    let entities = g.concepts().count();
-    let act = record_action(
-        &mut g,
-        i,
-        &agent(),
-        &Action {
-            event_time: None,
-            action: "kept the lease across a flush retry",
-            produces: &[],
-            modifies: &[],
-            depends_on: &["writer lease"],
-        },
-    )
-    .unwrap();
-    assert_eq!(act.created, vec![act.action_node], "no alias Entity minted");
-    assert_eq!(g.concepts().count(), entities + 1);
-    assert!(g
-        .edge_between(act.action_node, ruling, EdgeType::Dependency)
-        .is_some());
-
-    let (mut g, i) = graph("cite-alias-taken");
-    let alias = concept(&mut g, i, "writer lease", ConceptType::Entity);
-    let err = derive_with_citations(
-        &mut g,
-        i,
-        &concepts,
-        &[cite(RULING, &[], Some("writer lease"))],
-    )
-    .unwrap_err();
-    match &refusal(&err).kind {
-        ReferenceRefusalKind::NameTaken { holder } => assert_eq!(holder.node, alias),
-        other => panic!("{other:?}"),
-    }
-}
-
 fn action<'a>(depends_on: &'a [&'a str]) -> Action<'a> {
     Action {
         event_time: None,
@@ -543,13 +412,12 @@ fn action<'a>(depends_on: &'a [&'a str]) -> Action<'a> {
     }
 }
 
-/// `record_action`'s `depends_on`: an id resolves to the existing concept
-/// (no Entity named by the hex), a full id that names nothing or an
-/// interaction is refused, an ambiguous short id is refused, and a
-/// short-id-shaped string that names nothing is an artifact name as
-/// before (a commit hash). Text entries are unchanged.
+/// `record_action`'s `depends_on` (review M1): a hyphenated node id or a
+/// unique short id of an existing concept cites it; an interaction's id and
+/// a short id two concepts share are refused; everything else is the 0.5.0
+/// text rule, including an id that names nothing.
 #[test]
-fn record_action_resolves_ids_first_and_keeps_its_legacy_text_rule() {
+fn record_action_cites_ids_and_refuses_only_interactions_and_shared_prefixes() {
     let (mut g, i) = graph("cite-action");
     let ruling = concept(&mut g, i, RULING, ConceptType::Logic);
     concept_with_id(
@@ -566,7 +434,11 @@ fn record_action_resolves_ids_first_and_keeps_its_legacy_text_rule() {
         "two",
         ConceptType::Entity,
     );
-    for reference in [format::short_id(ruling), ruling.0.to_string()] {
+    for reference in [
+        format::short_id(ruling),
+        ruling.0.to_string(),
+        ruling.0.to_string().to_uppercase(),
+    ] {
         let deps = [reference.as_str()];
         let before = g.concepts().count();
         let out = record_action(&mut g, i, &agent(), &action(&deps)).unwrap();
@@ -577,7 +449,6 @@ fn record_action_resolves_ids_first_and_keeps_its_legacy_text_rule() {
         assert!(g.concepts().count() <= before + 1);
     }
     for (reference, want) in [
-        (NodeId::new().0.to_string(), "missing"),
         (i.0.to_string(), "interaction"),
         ("8baad4e0".to_string(), "ambiguous"),
     ] {
@@ -587,7 +458,6 @@ fn record_action_resolves_ids_first_and_keeps_its_legacy_text_rule() {
         let r = refusal(&err);
         assert_eq!(r.field, ReferenceField::ActionDependsOn);
         let got = match r.kind {
-            ReferenceRefusalKind::Missing => "missing",
             ReferenceRefusalKind::NotAConcept => "interaction",
             ReferenceRefusalKind::Ambiguous { .. } => "ambiguous",
             ref other => panic!("{other:?}"),
@@ -595,16 +465,99 @@ fn record_action_resolves_ids_first_and_keeps_its_legacy_text_rule() {
         assert_eq!(got, want);
         assert_eq!(g.snapshot(), before);
     }
-    // A commit hash that names no concept is still an artifact.
-    let out = record_action(&mut g, i, &agent(), &action(&["9bef6ec8"])).unwrap();
-    let hash = node_of(&g, "9bef6ec8");
-    assert!(out.created.contains(&hash));
     // Plain text is the legacy rule: canonical match, else create.
     let out = record_action(&mut g, i, &agent(), &action(&[RULING, "schema v1"])).unwrap();
     assert!(g
         .edge_between(out.action_node, ruling, EdgeType::Dependency)
         .is_some());
     node_of(&g, "schema v1");
+}
+
+/// Review M1, with what dogfood agents actually send in `depends_on`: every
+/// one of these was accepted by 0.5.0 as text and still is, created on first
+/// use and matched after.
+#[test]
+fn realistic_depends_on_entries_keep_the_0_5_0_text_rule() {
+    let (mut g, i) = graph("cite-action-dogfood");
+    let ruling = concept(&mut g, i, RULING, ConceptType::Logic);
+    let urn = format!("urn:uuid:{}", ruling.0);
+    let braced = format!("{{{}}}", ruling.0);
+    let unknown = NodeId::new().0.to_string();
+    let entries = [
+        "3df6812",                          // 7-char commit hash
+        "9bef6ec8",                         // 8-char commit hash, no concept prefix
+        "d41d8cd98f00b204e9800998ecf8427e", // 32-hex (MD5)
+        urn.as_str(),                       // urn:uuid: form
+        braced.as_str(),                    // braced form
+        unknown.as_str(),                   // a hyphenated id that names nothing
+        "src/graph/cite.rs",                // a file path
+        "#36",                              // an issue ref
+        "nrynss/lambo#145",                 // a cross-repo issue ref
+    ];
+    for entry in entries {
+        // The id-shaped ones never collide with these few concepts' ids.
+        assert!(!format::short_id(ruling).starts_with(&entry[..entry.len().min(8)]));
+        let deps = [entry];
+        let out = record_action(&mut g, i, &agent(), &action(&deps)).unwrap();
+        let node = node_of(&g, entry);
+        assert!(
+            g.edge_between(out.action_node, node, EdgeType::Dependency)
+                .is_some(),
+            "{entry}"
+        );
+        assert_ne!(node, ruling, "{entry}");
+        // Re-sent: matched, nothing new.
+        let before = g.concepts().count();
+        record_action(&mut g, i, &agent(), &action(&deps)).unwrap();
+        assert_eq!(g.concepts().count(), before, "{entry} re-sent");
+    }
+}
+
+/// A 0.5.0 request re-sent: its id text was minted as an Entity back then
+/// (the id names no node), so it matches that Entity, as it did.
+#[test]
+fn a_resent_0_5_0_request_lands_on_the_entity_its_id_text_minted() {
+    let (mut g, i) = graph("cite-action-resend");
+    let text = NodeId::new().0.to_string();
+    let minted = concept(&mut g, i, &text, ConceptType::Entity);
+    let before = g.concepts().count();
+    let deps = [text.as_str()];
+    let out = record_action(&mut g, i, &agent(), &action(&deps)).unwrap();
+    assert!(g
+        .edge_between(out.action_node, minted, EdgeType::Dependency)
+        .is_some());
+    assert_eq!(g.concepts().count(), before + 1, "only the action is new");
+}
+
+/// Review L4: an 8-hex commit hash that happens to prefix a concept's id
+/// (chance about concepts / 2^32) cites that concept; a text match wins
+/// over the prefix, as 0.5.0 matched text.
+#[test]
+fn a_commit_hash_that_prefixes_a_concept_id_cites_it_unless_its_text_exists() {
+    let (mut g, i) = graph("cite-action-l4");
+    let unlucky = concept_with_id(
+        &mut g,
+        i,
+        id_with_prefix("9bef6ec8", 1),
+        "an unlucky concept",
+        ConceptType::Logic,
+    );
+    let out = record_action(&mut g, i, &agent(), &action(&["9bef6ec8"])).unwrap();
+    assert!(g
+        .edge_between(out.action_node, unlucky, EdgeType::Dependency)
+        .is_some());
+    let hash = concept(&mut g, i, "57eca7d6", ConceptType::Entity);
+    concept_with_id(
+        &mut g,
+        i,
+        id_with_prefix("57eca7d6", 2),
+        "another unlucky concept",
+        ConceptType::Logic,
+    );
+    let out = record_action(&mut g, i, &agent(), &action(&["57eca7d6"])).unwrap();
+    assert!(g
+        .edge_between(out.action_node, hash, EdgeType::Dependency)
+        .is_some());
 }
 
 /// An id entry is pinned at the ack and checked at the apply; a request

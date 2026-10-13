@@ -218,18 +218,15 @@ impl Memory {
             .await
     }
 
-    /// [`Memory::derive_as`] with citations and names (#36 PR 4): each
-    /// [`ConceptCitations`] names one of `concepts` by its content, the
-    /// existing concepts it depends on (`citing -Dependency-> cited`), and
-    /// optionally a name later references can use. Every reference must
-    /// resolve to exactly one existing concept of this session, by full node
-    /// id, recall's short id, a name or its content; one that does not, or
-    /// that would cite the concept itself or close a `Dependency` cycle,
-    /// refuses the whole call with [`LamboError::Reference`] and writes
-    /// nothing. With no citations this is exactly [`Memory::derive_as`].
-    ///
-    /// Names are synonyms ([`Memory::declare_synonym`]): RAM-local, so a
-    /// name is forgotten when the writer restarts (pinned contract S5).
+    /// [`Memory::derive_as`] with citations (#36 PR 4): each
+    /// [`ConceptCitations`] names one of `concepts` by its content and the
+    /// existing concepts it depends on (`citing -Dependency-> cited`). Every
+    /// reference must resolve to exactly one existing concept of this
+    /// session, by full node id, recall's short id or its canonical key (no
+    /// synonym is consulted); one that does not, or that would cite the
+    /// concept itself or close a `Dependency` cycle, refuses the whole call
+    /// with [`LamboError::Reference`] and writes nothing. With no citations
+    /// this is exactly [`Memory::derive_as`].
     pub async fn derive_cited_as(
         &self,
         agent: &AgentId,
@@ -261,7 +258,7 @@ impl Memory {
         // so a refused reference leaves nothing behind. The guard is dropped
         // at the end of the statement; the commit re-resolves under the
         // write lock.
-        let pinned = cite::validate(&self.graph.read(), concepts, parent_of, citations)?;
+        let pinned = cite::validate(&self.graph.read(), concepts, citations)?;
         let prompt = hybrid::derive_prompt(concepts.iter().map(|(content, _)| *content));
         let interaction = self.begin_interaction_full(agent, Some(prompt), event_time)?;
 
@@ -492,7 +489,7 @@ impl Memory {
         .await
     }
 
-    /// [`Memory::derive_async_as`] with citations and names (#36 PR 4); see
+    /// [`Memory::derive_async_as`] with citations (#36 PR 4); see
     /// [`Memory::derive_cited_as`] for what they are.
     ///
     /// The citations join the call-path pre-pass: every reference is
@@ -576,7 +573,7 @@ impl Memory {
             }
             // #36 PR 4: the citations, against the same graph read. The
             // background commit re-resolves them (`cite::recheck`).
-            cite::validate(&g, concepts, parent_of, citations)
+            cite::validate(&g, concepts, citations)
         };
         // This session's guard is gone: only now may another session's be
         // read for the foreign-scope label.
@@ -631,6 +628,9 @@ impl Memory {
     /// #36 PR 4: a `depends_on` entry that names a concept by full node id or
     /// recall's short id resolves to it, and is pinned on the job; the
     /// background apply refuses the call if it names something else by then.
+    /// A hyphenated node id that names nothing here and no concept by its
+    /// text is text, as in 0.5.0, unless `foreign` finds it in another
+    /// scope: then it is refused as cross-session rather than minted here.
     pub(crate) async fn record_action_async_scoped(
         &self,
         agent: &AgentId,
@@ -642,6 +642,20 @@ impl Memory {
         // another session in the next one, after it is gone.
         let pins = crate::graph::action::validate_pinned(&self.graph.read(), action);
         let pins = pins.map_err(|e| attribute_foreign(e, foreign))?;
+        // Hyphenated ids that will be taken as new text (the guard is again a
+        // temporary of its statement)...
+        let unresolved = crate::graph::action::unresolved_ids(&self.graph.read(), action)?;
+        // ...are refused when another scope holds them.
+        for entry in unresolved {
+            if let Some(scope) = foreign.holder_of(entry) {
+                return Err(crate::surface::resolve::refusal(
+                    crate::types::ReferenceField::ActionDependsOn,
+                    Some(action.action),
+                    entry,
+                    crate::types::ReferenceRefusalKind::ForeignScope { scope },
+                ));
+            }
+        }
         let interaction =
             self.begin_interaction_full(agent, Some(action.action.to_string()), action.event_time)?;
         Ok(self

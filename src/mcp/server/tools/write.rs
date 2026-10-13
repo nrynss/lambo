@@ -5,7 +5,7 @@ use rmcp::model::{CallToolResult, ContentBlock};
 use serde_json::json;
 
 use crate::graph::action::Action;
-use crate::graph::cite::{MAX_NAME_BYTES, MAX_REFERENCES_PER_CONCEPT, MAX_REFERENCES_PER_DERIVE};
+use crate::graph::cite::{MAX_REFERENCES_PER_CONCEPT, MAX_REFERENCES_PER_DERIVE};
 use crate::graph::derive::ParentOf;
 use crate::graph::hybrid;
 use crate::mcp::server::params::{check_size, DeriveParams, RecordActionParams};
@@ -19,16 +19,16 @@ use crate::types::{ConceptCitations, ConceptType};
 
 use super::scope::LayerProbe;
 
-/// A derive's per-concept `depends_on` and `name` as core citations (#36 PR
-/// 4), refused with `bad_param` when one is empty, too long or over a count
-/// limit. Concepts with neither are left out, so a call without citations
+/// A derive's per-concept `depends_on` as core citations (#36 PR 4),
+/// refused with `bad_param` when one is empty, too long or over a count
+/// limit. Concepts without any are left out, so a call without citations
 /// is exactly the call it was before.
 fn wire_citations(p: &DeriveParams) -> Result<Vec<ConceptCitations>, CallToolResult> {
     let mut out = Vec::new();
     let mut total = 0usize;
     for c in &p.concepts {
         let depends_on: Vec<String> = c.depends_on.iter().flatten().map(|r| r.0.clone()).collect();
-        if depends_on.is_empty() && c.name.is_none() {
+        if depends_on.is_empty() {
             continue;
         }
         if depends_on.len() > MAX_REFERENCES_PER_CONCEPT {
@@ -48,21 +48,9 @@ fn wire_citations(p: &DeriveParams) -> Result<Vec<ConceptCitations>, CallToolRes
             }
             check_size("concept.depends_on entry", r)?;
         }
-        if let Some(name) = &c.name {
-            if let Err(e) = require_nonempty("concept.name", name) {
-                return Err(bad_param(e));
-            }
-            check_size("concept.name", name)?;
-            if name.len() > MAX_NAME_BYTES {
-                return Err(bad_param(format!(
-                    "concept.name may be at most {MAX_NAME_BYTES} bytes"
-                )));
-            }
-        }
         out.push(ConceptCitations {
             content: c.content.clone(),
             depends_on,
-            name: c.name.clone(),
         });
     }
     Ok(out)

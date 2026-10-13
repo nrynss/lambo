@@ -37,7 +37,9 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::graph::canonical::{canonicalize, CanonicalizeResult};
 use crate::graph::Graph;
-use crate::surface::resolve::{parse_full_id, resolve_reference, Resolved};
+use crate::surface::resolve::{
+    is_hyphenated_id, is_short_id_shaped, parse_full_id, short_id_matches,
+};
 use crate::types::{
     AgentId, CanonizationStatus, Concept, ConceptType, Edge, EdgeType, LamboError, Node, NodeId,
     ReferenceField, ReferenceRefusalKind, StoreError,
@@ -548,14 +550,43 @@ fn resolve(
     }
 }
 
-/// Resolve one `depends_on` entry (#36 PR 4): an entry that names an
-/// existing concept by full node id or by recall's short id resolves to it
-/// through the shared strict resolver (`crate::surface::resolve`), and is
-/// pinned; an ambiguous entry, an interaction's id, or a full node id that
-/// names nothing in this session is refused; every other entry keeps the
-/// legacy rule, canonical match (a name included, through the synonyms
-/// canonicalization reads) or create. A short-id-shaped entry that names
-/// nothing is an artifact name like any other (a commit hash), as before.
+/// The `depends_on` entries in the hyphenated id form that name no concept
+/// of `graph`, by id or by text: the ones `record_action` would mint as new
+/// text. The caller asks other scopes about them (a cross-session id is
+/// refused, not minted). Read-only.
+pub(crate) fn unresolved_ids<'a>(
+    graph: &Graph,
+    action: &Action<'a>,
+) -> Result<Vec<&'a str>, LamboError> {
+    let mut out = Vec::new();
+    for &d in action.depends_on {
+        if !is_hyphenated_id(d) {
+            continue;
+        }
+        let by_id = parse_full_id(d).is_some_and(|id| graph.node(id).is_some());
+        let by_text = matches!(canonicalize(d, graph)?, CanonicalizeResult::Matched { .. });
+        if !by_id && !by_text {
+            out.push(d);
+        }
+    }
+    Ok(out)
+}
+
+/// Resolve one `depends_on` entry (#36 PR 4, review M1).
+///
+/// * An entry in the canonical hyphenated id form that names a concept of
+///   this session cites it, and is pinned; one that names an interaction is
+///   refused. One that names nothing is text (below), so a re-sent 0.5.0
+///   request whose id text was minted as an Entity still lands on it.
+/// * An entry with a short id's shape (8 to 32 hex characters) whose text
+///   names no concept cites the one concept whose id it prefixes, and is
+///   pinned; a prefix two concepts share is refused. So a commit hash that
+///   happens to prefix a concept's id cites that concept: the chance is
+///   about (concepts in the session) / 2^32 for 8 characters. A text match
+///   wins over the prefix, as in 0.5.0.
+/// * Every other entry, and an id-shaped one that names nothing, keeps the
+///   0.5.0 rule: canonical match, else create (`urn:uuid:`, braced and
+///   other spellings included).
 ///
 /// `expected` is the pin from the ack, when the caller has one: the entry
 /// must resolve the same way now, or the call is refused as
@@ -571,27 +602,38 @@ fn resolve_dependency(
     let refuse = |kind| {
         crate::surface::resolve::refusal(ReferenceField::ActionDependsOn, Some(action), entry, kind)
     };
-    let strict = resolve_reference(graph, entry);
-    let (node, pin) = match strict {
-        Resolved::Concept { node, leg } if leg.is_id() => (Some(node), Some(node)),
-        Resolved::Concept { node, .. } => (Some(node), None),
-        Resolved::Ambiguous(ids) => {
-            return Err(refuse(ReferenceRefusalKind::Ambiguous {
-                candidates: crate::surface::resolve::candidates(graph, &ids),
-            }))
+    let pin = if is_hyphenated_id(entry) {
+        match parse_full_id(entry).map(|id| (id, graph.node(id))) {
+            Some((id, Some(Node::Concept(_)))) => Some(id),
+            Some((_, Some(Node::Interaction(_)))) => {
+                return Err(refuse(ReferenceRefusalKind::NotAConcept))
+            }
+            _ => None,
         }
-        Resolved::NotAConcept(_) => return Err(refuse(ReferenceRefusalKind::NotAConcept)),
-        Resolved::Missing if parse_full_id(entry).is_some() => {
-            return Err(refuse(ReferenceRefusalKind::Missing))
+    } else if is_short_id_shaped(entry)
+        && !matches!(
+            canonicalize(entry, graph)?,
+            CanonicalizeResult::Matched { .. }
+        )
+    {
+        match short_id_matches(graph, entry).as_slice() {
+            [] => None,
+            [one] => Some(*one),
+            many => {
+                return Err(refuse(ReferenceRefusalKind::Ambiguous {
+                    candidates: crate::surface::resolve::candidates(graph, many),
+                }))
+            }
         }
-        Resolved::Missing => (None, None),
+    } else {
+        None
     };
     if let Some(accepted) = expected
         && accepted != pin
     {
         return Err(refuse(ReferenceRefusalKind::Changed { accepted, now: pin }));
     }
-    match node {
+    match pin {
         Some(node) => Ok((node, pin)),
         None => Ok((
             resolve(graph, resolved, planned, entry, ConceptType::Entity)?,

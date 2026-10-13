@@ -1,7 +1,7 @@
 //! The typed refusal of a reference to an existing concept (#36 PR 4).
 //!
-//! A derive's `depends_on` and `name`, and a `record_action` `depends_on`
-//! entry that names a concept by id, must resolve to exactly one existing
+//! A derive's `depends_on`, and a `record_action` `depends_on` entry that
+//! names a concept by id, must resolve to exactly one existing
 //! concept in the session the write targets. When one does not, the write is
 //! refused whole with a [`ReferenceRefusal`]: what was sent, where, and why,
 //! worded so the caller can fix it. The resolver that produces these lives in
@@ -25,8 +25,6 @@ use super::NodeId;
 pub enum ReferenceField {
     /// A derive concept's `depends_on` entry.
     DependsOn,
-    /// A derive concept's `name`.
-    Name,
     /// A `record_action` `depends_on` entry.
     ActionDependsOn,
 }
@@ -36,7 +34,6 @@ impl ReferenceField {
     pub fn wire_name(self) -> &'static str {
         match self {
             ReferenceField::DependsOn => "depends_on",
-            ReferenceField::Name => "name",
             ReferenceField::ActionDependsOn => "depends_on",
         }
     }
@@ -78,23 +75,13 @@ pub enum ReferenceRefusalKind {
     Cycle,
     /// It resolved to `accepted` when the write was acknowledged and resolves
     /// to `now` (or to nothing) when the write is applied: the cited concept
-    /// was removed, renamed or shadowed in between.
+    /// was removed or shadowed in between.
     Changed {
         /// What it named at the ack (`None`: it named nothing and was to be
         /// created, for a `record_action` entry).
         accepted: Option<NodeId>,
         /// What it names now.
         now: Option<NodeId>,
-    },
-    /// A `name` that already names another concept.
-    NameTaken {
-        /// The concept the name already names.
-        holder: ReferenceCandidate,
-    },
-    /// A `name` that cannot be used: the reason, in words.
-    NameUnusable {
-        /// Why.
-        reason: &'static str,
     },
     /// Too many references, or one too long.
     Limit {
@@ -178,8 +165,8 @@ impl fmt::Display for ReferenceRefusal {
             ReferenceRefusalKind::Missing => write!(
                 f,
                 "{field} {r}{on} names no concept in this session; cite a concept that already \
-                 exists, by the id recall shows (8 hex characters), its full node id, its exact \
-                 content or a name given with `name`"
+                 exists, by the id recall shows (8 hex characters), its full node id or its exact \
+                 content"
             ),
             ReferenceRefusalKind::Ambiguous { candidates } => write!(
                 f,
@@ -214,18 +201,9 @@ impl fmt::Display for ReferenceRefusal {
                 write!(
                     f,
                     "{field} {r}{on} named {then} when the write was accepted and names {now} \
-                     now (the concept was removed, renamed or shadowed in between); check the \
+                     now (the concept was removed or shadowed in between); check the \
                      reference and resend"
                 )
-            }
-            ReferenceRefusalKind::NameTaken { holder } => write!(
-                f,
-                "name {r}{on} already names another concept ({}); choose another name, or cite \
-                 that concept",
-                candidate(holder)
-            ),
-            ReferenceRefusalKind::NameUnusable { reason } => {
-                write!(f, "name {r}{on} cannot be used: {reason}")
             }
             ReferenceRefusalKind::Limit { what, limit } => {
                 write!(f, "{field} {r}{on}: {what} (the limit is {limit})")
@@ -252,16 +230,18 @@ pub struct ConceptCitations {
     /// The citing concept's content: one of the call's `concepts`.
     pub content: String,
     /// Existing concepts it rests on, each by full node id, recall's short
-    /// id, a name or its content.
+    /// id or its content.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub depends_on: Vec<String>,
-    /// A name for it that later references can use.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
 }
 
 /// A citation as accepted at the ack: the reference and what it resolved to.
+///
+/// `deny_unknown_fields`, here and on [`PinnedCitations`]: a durable intent
+/// written by a later build with a field this one does not know is refused
+/// at decode rather than applied with that field silently dropped.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PinnedReference {
     /// The citing concept's content.
     pub content: String,
@@ -271,21 +251,20 @@ pub struct PinnedReference {
     pub target: NodeId,
 }
 
-/// A derive's citations and names as accepted at the ack ([`validate`]).
+/// A derive's citations as accepted at the ack
+/// (`crate::graph::cite::validate`).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PinnedCitations {
-    /// One per distinct `(content, target)`.
+    /// One per distinct `(content, target)`: `depends_on`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub references: Vec<PinnedReference>,
-    /// `(content, name)`, one per named concept.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub names: Vec<(String, String)>,
 }
 
 impl PinnedCitations {
-    /// Whether there is nothing to cite or name.
+    /// Whether there is nothing to cite.
     pub fn is_empty(&self) -> bool {
-        self.references.is_empty() && self.names.is_empty()
+        self.references.is_empty()
     }
 
     /// Retained bytes, for the write queue's byte admission.
@@ -294,11 +273,6 @@ impl PinnedCitations {
             .iter()
             .map(|r| r.content.len() + r.reference.len() + 16)
             .sum::<usize>()
-            + self
-                .names
-                .iter()
-                .map(|(c, n)| c.len() + n.len())
-                .sum::<usize>()
     }
 }
 
@@ -326,7 +300,7 @@ mod tests {
         let kinds = [
             ReferenceRefusalKind::Missing,
             ReferenceRefusalKind::Ambiguous {
-                candidates: vec![cand.clone(), cand.clone()],
+                candidates: vec![cand.clone(), cand],
             },
             ReferenceRefusalKind::NotAConcept,
             ReferenceRefusalKind::ForeignScope {
@@ -338,8 +312,6 @@ mod tests {
                 accepted: Some(node),
                 now: None,
             },
-            ReferenceRefusalKind::NameTaken { holder: cand },
-            ReferenceRefusalKind::NameUnusable { reason: "why" },
             ReferenceRefusalKind::Limit {
                 what: "too many",
                 limit: 8,

@@ -179,9 +179,6 @@ pub struct DeriveOutcome {
     /// re-sent citation reinforces its edge and is counted in
     /// [`Self::reinforced`] instead.
     pub cited: usize,
-    /// Names this call registered or changed (#36 PR 4); a name declared
-    /// again for the same concept is not counted.
-    pub named: usize,
 }
 
 /// The primary write path (spec §7): derive `concepts` from `interaction`,
@@ -225,15 +222,13 @@ pub fn derive(
     )
 }
 
-/// [`derive`](fn@derive) with citations and names (#36 PR 4), as accepted
-/// by [`crate::graph::cite::validate`]. With none it is exactly `derive`.
+/// [`derive`](fn@derive) with citations (#36 PR 4), as accepted by
+/// [`crate::graph::cite::validate`]. With none it is exactly `derive`.
 ///
 /// Inside the one transaction: the pinned references are re-resolved
 /// against the graph before anything is written (`cite::recheck`), the
-/// concepts and their edges are written, then the citation edges and the
-/// name checks (`cite::write_edges`); any refusal undoes the whole write.
-/// The names are declared after the commit, because synonyms are outside the
-/// transaction's undo log.
+/// concepts and their edges are written, then the citation edges
+/// (`cite::write_edges`); any refusal undoes the whole write.
 pub(crate) fn derive_cited(
     graph: &mut Graph,
     interaction: NodeId,
@@ -266,10 +261,10 @@ pub(crate) fn derive_cited(
     // and the write loop's own refusal (a Hierarchical cycle a concurrent
     // writer closed after the pre-pass could have seen it) undoes whatever
     // the loop wrote before it.
-    let mut names: Vec<(String, String)> = Vec::new();
-    let mut outcome = graph.transaction(|graph| {
-        crate::graph::cite::recheck(graph, pinned)?;
-        let mut by_content: HashMap<String, NodeId> = HashMap::new();
+    graph.transaction(|graph| {
+        let spec = &crate::graph::cite::DEPENDS_ON;
+        crate::graph::cite::recheck(graph, spec, &pinned.references)?;
+        let mut written = crate::graph::cite::Written::default();
         let mut outcome = derive_after_validation(
             graph,
             interaction,
@@ -280,13 +275,14 @@ pub(crate) fn derive_cited(
             interaction_created_at,
             interaction_event_time,
             session_id.clone(),
-            &mut by_content,
+            &mut written.by_content,
         )?;
         if !pinned.is_empty() {
-            names = crate::graph::cite::write_edges(
+            crate::graph::cite::write_edges(
                 graph,
-                pinned,
-                &by_content,
+                spec,
+                &pinned.references,
+                &written,
                 crate::graph::cite::Stamp {
                     created_at: interaction_created_at,
                     event_time: interaction_event_time,
@@ -296,9 +292,7 @@ pub(crate) fn derive_cited(
             )?;
         }
         Ok(outcome)
-    })?;
-    crate::graph::cite::declare_names(graph, &names, &mut outcome);
-    Ok(outcome)
+    })
 }
 
 /// [`derive`](fn@derive)'s read-only pre-pass, on its own so a caller can run

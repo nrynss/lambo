@@ -270,11 +270,10 @@ impl LamboServer {
                        It is not a log: record activity with lambo_record_action. To group \
                        facts under a decision, send each as its own concept and add parent_of \
                        pairs with the decision as parent and each fact as child. When a \
-                       concept rests on one already in memory (a ruling it applies), list that \
-                       one in the concept's depends_on, by the id recall shows or its exact \
-                       content: it must already exist and match exactly one concept, or the \
-                       whole call is refused. name gives a concept a short name later \
-                       depends_on entries can cite. \
+                       concept rests on a ruling or decision already in memory, cite it by id \
+                       (the 8 hex characters recall shows) in that concept's depends_on: it \
+                       must already exist and match exactly one concept, or the whole call is \
+                       refused. \
                        created_at is stamped server-side. event_time is optional RFC3339 \
                        historical about-time, such as a commit or document date; omit it for \
                        a live fact, which is about now. Returns as soon \
@@ -299,7 +298,9 @@ impl LamboServer {
         description = "Record an action the agent took, with what it produces, modifies and \
                        depends on. This is where activity goes: name the act in a short line \
                        (e.g. 'merged PR #52'), not a narrative. A fact or decision that later \
-                       work should recall is a concept for lambo_derive. created_at is stamped server-side. event_time is optional \
+                       work should recall is a concept for lambo_derive. When the action relied \
+                       on a ruling or decision from memory, cite it by id (the 8 hex characters \
+                       recall shows) in depends_on. created_at is stamped server-side. event_time is optional \
                        RFC3339 historical about-time, such as a commit or document date; omit \
                        it for a live fact, which is about now. \
                        Returns as soon as the input is validated and ordered — the write is \
@@ -461,7 +462,10 @@ impl ServerHandler for LamboServer {
                  before editing a shared concept, and lambo_inspect / lambo_saints / \
                  lambo_stats to look around. A concept is one fact, stated atomically \
                  and short, such as a decision with its reason; it is not a log line or a \
-                 paragraph, and activity goes to lambo_record_action. Every tool takes \
+                 paragraph, and activity goes to lambo_record_action. When a write rests \
+                 on a ruling or decision recall showed you, cite it by its id (the 8 hex \
+                 characters recall shows) in depends_on: lambo_record_action's, or the \
+                 concept's on lambo_derive. Every tool takes \
                  your agent_id: use one stable id for as long as you run, never one per \
                  call, task or topic: your model or client id (<your-model-id>), with a \
                  stable instance suffix if several of you run at once. It is \

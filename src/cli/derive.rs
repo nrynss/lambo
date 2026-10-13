@@ -2,7 +2,7 @@
 
 use super::caps::{check_size_cli, require_nonempty, CliError, ConceptKind};
 use super::{close_writer, open_writer};
-use crate::graph::cite::{MAX_NAME_BYTES, MAX_REFERENCES_PER_CONCEPT};
+use crate::graph::cite::MAX_REFERENCES_PER_CONCEPT;
 use crate::graph::derive::ParentOf;
 use crate::graph::hybrid;
 use crate::resolve::ResolvedBackends;
@@ -20,8 +20,6 @@ pub struct Args {
     /// `--depends-on` (#36 PR 4): existing concepts the first concept rests
     /// on.
     pub depends_on: Vec<String>,
-    /// `--name` (#36 PR 4): a name for the first concept.
-    pub name: Option<String>,
 }
 
 /// `--parent-of CHILD:PARENT` → `(parent, child)` for [`ParentOf::from_pairs`].
@@ -99,22 +97,12 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
         require_nonempty("depends-on", r)?;
         check_size_cli("depends-on", r)?;
     }
-    if let Some(name) = &args.name {
-        require_nonempty("name", name)?;
-        check_size_cli("name", name)?;
-        if name.len() > MAX_NAME_BYTES {
-            return Err(CliError::Usage(format!(
-                "name may be at most {MAX_NAME_BYTES} bytes"
-            )));
-        }
-    }
-    let citations: Vec<ConceptCitations> = if args.depends_on.is_empty() && args.name.is_none() {
+    let citations: Vec<ConceptCitations> = if args.depends_on.is_empty() {
         Vec::new()
     } else {
         vec![ConceptCitations {
             content: args.content.clone(),
             depends_on: args.depends_on.clone(),
-            name: args.name.clone(),
         }]
     };
 
@@ -147,13 +135,10 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
                 outcome.created.len(),
                 outcome.matched.len()
             );
-            // #36 PR 4: said only when the call cited or named something,
-            // so a derive without them prints exactly what it printed.
+            // #36 PR 4: said only when the call cited something, so a
+            // derive without citations prints exactly what it printed.
             if !citations.is_empty() {
-                summary.push_str(&format!(
-                    "; {} citation(s) recorded, {} name(s) registered",
-                    outcome.cited, outcome.named
-                ));
+                summary.push_str(&format!("; {} citation(s) recorded", outcome.cited));
             }
             Ok(summary)
         }

@@ -430,7 +430,6 @@ mod tests {
                 parent_of: vec!["auth middleware:user schema".into()],
                 concept: vec!["auth middleware:entity".into()],
                 depends_on: Vec::new(),
-                name: None,
             },
         )
         .await
@@ -445,13 +444,11 @@ mod tests {
                         content: "user schema".into(),
                         concept_type: WireConceptType::Entity,
                         depends_on: None,
-                        name: None,
                     },
                     WireConcept {
                         content: "auth middleware".into(),
                         concept_type: WireConceptType::Entity,
                         depends_on: None,
-                        name: None,
                     },
                 ],
                 parent_of: Some(vec![WireParentOf {
@@ -552,7 +549,6 @@ mod tests {
                 parent_of: vec![],
                 concept: vec![],
                 depends_on: Vec::new(),
-                name: None,
             },
         )
         .await
@@ -570,7 +566,6 @@ mod tests {
                 parent_of: vec![],
                 concept: vec![],
                 depends_on: Vec::new(),
-                name: None,
             },
         )
         .await
@@ -601,7 +596,6 @@ mod tests {
                     parent_of: vec![],
                     concept,
                     depends_on: Vec::new(),
-                    name: None,
                 },
             )
             .await
@@ -683,7 +677,6 @@ mod tests {
                     .map(|i| format!("c{i}:entity"))
                     .collect(),
                 depends_on: Vec::new(),
-                name: None,
             },
         )
         .await
@@ -696,7 +689,6 @@ mod tests {
                         content: format!("c{i}"),
                         concept_type: WireConceptType::Entity,
                         depends_on: None,
-                        name: None,
                     })
                     .collect(),
                 parent_of: None,
@@ -762,7 +754,6 @@ mod tests {
                 parent_of: vec!["auth middleware:user schema".into()],
                 concept: vec!["auth middleware:entity".into()],
                 depends_on: Vec::new(),
-                name: None,
             },
         )
         .await
@@ -815,7 +806,6 @@ mod tests {
                 parent_of: vec![],
                 concept: vec![],
                 depends_on: Vec::new(),
-                name: None,
             },
         )
         .await
@@ -897,7 +887,6 @@ mod tests {
                 parent_of: vec![],
                 concept: vec![],
                 depends_on: Vec::new(),
-                name: None,
             },
         )
         .await
@@ -1190,7 +1179,6 @@ mod sqlite_tests {
                 parent_of: vec![],
                 concept: vec!["auth middleware:entity".into()],
                 depends_on: Vec::new(),
-                name: None,
             },
         )
         .await
@@ -1343,7 +1331,6 @@ mod sqlite_tests {
                 parent_of: vec![],
                 concept: vec![],
                 depends_on: Vec::new(),
-                name: None,
             },
         )
         .await
@@ -1362,7 +1349,6 @@ mod sqlite_tests {
                 parent_of: vec![],
                 concept: vec![],
                 depends_on: Vec::new(),
-                name: None,
             },
         )
         .await
@@ -1386,7 +1372,6 @@ mod sqlite_tests {
                 parent_of: vec![],
                 concept: vec![],
                 depends_on: Vec::new(),
-                name: None,
             },
         )
         .await
@@ -1433,7 +1418,6 @@ mod sqlite_tests {
                 parent_of: vec![],
                 concept: vec![],
                 depends_on: Vec::new(),
-                name: None,
             },
         )
         .await

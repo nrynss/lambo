@@ -59,7 +59,6 @@ fn a_cited_derive_is_its_own_variant_and_round_trips() {
             reference: "00000000".into(),
             target,
         }],
-        names: vec![("a decision".into(), "a name".into())],
     };
     let intent = derive(citations.clone()).to_intent_payload();
     let json = serde_json::to_string(&intent).unwrap();
@@ -85,8 +84,17 @@ fn a_cited_job_is_charged_its_citations() {
             reference: "a long reference to a ruling".into(),
             target: NodeId::new(),
         }],
-        names: vec![],
     })
     .bytes();
     assert!(cited > bare);
+}
+
+/// L1: a pinned payload with a field this build does not know is refused,
+/// not decoded with the field dropped.
+#[test]
+fn an_unknown_pin_field_is_refused() {
+    let json = r#"{"kind":"derive_cited","concepts":[],"pairs":[],"citations":{"references":[],"against":[]}}"#;
+    assert!(serde_json::from_str::<WriteIntentPayload>(json).is_err());
+    let json = r#"{"kind":"derive_cited","concepts":[],"pairs":[],"citations":{"references":[{"content":"a","reference":"b","target":"00000000-0000-0000-0000-000000000001","edge":"x"}]}}"#;
+    assert!(serde_json::from_str::<WriteIntentPayload>(json).is_err());
 }

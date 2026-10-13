@@ -276,10 +276,8 @@ async fn f18_tool_schemas_match_the_golden_property_set() {
                 "concepts",
                 "concepts[].concept_type",
                 "concepts[].content",
-                // #36 PR 4: references to existing concepts and a name;
-                // neither is a time.
+                // #36 PR 4: references to existing concepts, not a time.
                 "concepts[].depends_on",
-                "concepts[].name",
                 "event_time",
                 "parent_of",
                 "parent_of[].child",
@@ -531,10 +529,6 @@ async fn published_schemas_carry_runtime_maxima() {
                     }
                     ("lambo_derive_image", "caption") => {
                         crate::surface::image::MAX_CAPTION_BYTES as u64
-                    }
-                    // #36 PR 4: a name has its own cap.
-                    ("lambo_derive", "concepts[].name") => {
-                        crate::graph::cite::MAX_NAME_BYTES as u64
                     }
                     _ => 16_384,
                 };

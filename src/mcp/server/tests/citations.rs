@@ -1,4 +1,4 @@
-//! #36 PR 4 over MCP: `lambo_derive`'s `depends_on` and `name`, and
+//! #36 PR 4 over MCP: `lambo_derive`'s `depends_on`, and
 //! `lambo_record_action`'s id entries. The cross-session refusal is in
 //! `layered`.
 
@@ -19,7 +19,7 @@ async fn ruling(s: &LamboServer) -> NodeId {
 }
 
 #[tokio::test]
-async fn a_cited_derive_and_a_named_action_land_on_the_ruling() {
+async fn a_cited_derive_and_an_id_citing_action_land_on_their_targets() {
     let s = server("mcp-cite").await;
     let ruling = ruling(&s).await;
     let out = call(
@@ -29,23 +29,29 @@ async fn a_cited_derive_and_a_named_action_land_on_the_ruling() {
             "content": "flush retries keep the lease",
             "concept_type": "logic",
             "depends_on": [format::short_id(ruling)],
-            "name": "retry lease rule",
         }]}),
     )
     .await;
     assert_eq!(out.is_error, Some(false), "{}", text_of(&out));
+    let decision = s
+        .mem
+        .graph()
+        .read()
+        .concepts()
+        .find(|c| c.content == "flush retries keep the lease")
+        .unwrap()
+        .id;
     let out = call(
         &s,
         "lambo_record_action",
         json!({"agent_id": "agent-a", "action": "retried a flush",
-               "depends_on": ["retry lease rule", ruling.0.to_string()]}),
+               "depends_on": [format::short_id(decision), ruling.0.to_string()]}),
     )
     .await;
     assert_eq!(out.is_error, Some(false), "{}", text_of(&out));
     {
         let g = s.mem.graph().read();
         let id = |content: &str| g.concepts().find(|c| c.content == content).unwrap().id;
-        let decision = id("flush retries keep the lease");
         let action = id("retried a flush");
         assert!(g
             .edge_between(decision, ruling, EdgeType::Dependency)
@@ -56,7 +62,9 @@ async fn a_cited_derive_and_a_named_action_land_on_the_ruling() {
         assert!(g
             .edge_between(action, ruling, EdgeType::Dependency)
             .is_some());
-        assert!(g.concepts().all(|c| c.content != "retry lease rule"));
+        assert!(g
+            .concepts()
+            .all(|c| c.content != format::short_id(decision)));
     }
     // Inspect names the citing work as dependents.
     let out = call(
@@ -95,19 +103,22 @@ async fn a_bad_reference_is_refused_before_the_ack_with_its_reason() {
     assert!(text.ends_with("nothing was written"), "{text}");
     assert!(out.structured_content.is_none() || !text.contains("receipt"));
 
+    // Review M1: record_action keeps 0.5.0's text rule for an id that
+    // names nothing (no layer holds it here): the entry is created as text.
     let unknown = NodeId::new().0.to_string();
-    let out = call_raw(
+    let out = call(
         &s,
         "lambo_record_action",
-        json!({"agent_id": "agent-a", "action": "ran it", "depends_on": [unknown]}),
+        json!({"agent_id": "agent-a", "action": "ran it", "depends_on": [unknown.clone()]}),
     )
     .await;
-    assert_eq!(out.is_error, Some(true));
-    assert!(
-        text_of(&out).contains("reference refused"),
-        "{}",
-        text_of(&out)
-    );
+    assert_eq!(out.is_error, Some(false), "{}", text_of(&out));
+    assert!(s
+        .mem
+        .graph()
+        .read()
+        .concepts()
+        .any(|c| c.content == unknown));
     s.mem.close().await.expect("close");
 }
 
@@ -124,10 +135,6 @@ async fn the_surface_limits_are_bad_params() {
             json!([{"content": "a", "concept_type": "logic", "depends_on": [""]}]),
             "concept.depends_on entry",
         ),
-        (
-            json!([{"content": "a", "concept_type": "logic", "name": "n".repeat(257)}]),
-            "at most 256 bytes",
-        ),
     ] {
         let out = call_raw(
             &s,
@@ -138,6 +145,11 @@ async fn the_surface_limits_are_bad_params() {
         assert_eq!(out.is_error, Some(true));
         assert!(text_of(&out).contains(says), "{}", text_of(&out));
     }
+    // Review H1: `name` was removed before release; the wire refuses it.
+    let err = serde_json::from_value::<DeriveParams>(json!({"agent_id": "agent-a",
+        "concepts": [{"content": "a", "concept_type": "logic", "name": "a name"}]}))
+    .unwrap_err();
+    assert!(err.to_string().contains("unknown field `name`"), "{err}");
     let five: Vec<serde_json::Value> = (0..5)
         .map(|n| {
             json!({"content": format!("c{n}"), "concept_type": "logic",

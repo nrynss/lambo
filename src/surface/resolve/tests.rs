@@ -12,7 +12,7 @@ fn short(id: NodeId) -> String {
     crate::recall::format::short_id(id)
 }
 
-/// The design's first PR 4 test: an id, a short id, a name and the content
+/// The design's first PR 4 test: an id, a short id and the content
 /// (in another case, word order and Unicode composition) all reach the same
 /// node.
 #[test]
@@ -31,7 +31,6 @@ fn every_leg_reaches_the_same_concept() {
         &short(ruling),
         &upper_short,
         &simple[..12],
-        "lease rule",
         RULING,
         "  THE Writer Lease stays with its holder until the holder releases it ",
         "lease writer the stays with its holder until the holder releases it",
@@ -42,7 +41,6 @@ fn every_leg_reaches_the_same_concept() {
                 node: ruling,
                 leg: match reference {
                     r if r == full || r == simple => Leg::NodeId,
-                    "lease rule" => Leg::Name,
                     r if is_short_id_shaped(r) => Leg::ShortId,
                     _ => Leg::Key,
                 },
@@ -50,6 +48,9 @@ fn every_leg_reaches_the_same_concept() {
             "{reference:?}"
         );
     }
+    // A synonym the session holds is not a reference (review H1): it is
+    // in-memory state, so it could mean something else after a restart.
+    assert_eq!(resolve_reference(&g, "lease rule"), Resolved::Missing);
     // Composed and decomposed spellings are one key (graph::canonical's NFC).
     assert_eq!(
         resolve_reference(&g, "cafe\u{301} opening rule"),

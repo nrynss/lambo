@@ -148,13 +148,10 @@ pub(super) fn derive_sentence_of(
     image: bool,
 ) -> String {
     let sentence = derive_sentence_core(strategy, submitted, outcome, image);
-    // #36 PR 4: what the call's citations and names added, only when they
-    // added something, so a derive without them reads exactly as before.
-    if outcome.cited > 0 || outcome.named > 0 {
-        format!(
-            "{sentence}; {} citation(s) recorded, {} name(s) registered",
-            outcome.cited, outcome.named
-        )
+    // #36 PR 4: what the call's citations added, only when they added
+    // something, so a derive without them reads exactly as before.
+    if outcome.cited > 0 {
+        format!("{sentence}; {} citation(s) recorded", outcome.cited)
     } else {
         sentence
     }

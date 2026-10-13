@@ -1,8 +1,8 @@
 //! The shared, typed resolve-or-refuse resolver (#36 PR 4): what an existing
 //! concept a **write** names, in the session the write targets.
 //!
-//! A derive's `depends_on` and `name`, a `record_action` `depends_on` entry
-//! that names a concept by id, and #19's `contradicts` all call
+//! A derive's `depends_on`, a `record_action` `depends_on` entry that names
+//! a concept by id, and #19's `contradicts` all call
 //! [`resolve_reference`] against the graph of the session they write. It is
 //! deliberately not `inspect`'s resolver ([`super::focus`]): a focus may
 //! resolve by **substring** and tells the caller which concept it picked,
@@ -14,16 +14,16 @@
 //! 2. the **short id** recall renders: [`SHORT_ID_CHARS`] to 31 hex
 //!    characters, a unique prefix of a concept's id (the same prefix match
 //!    `inspect` uses, [`short_id_matches`]);
-//! 3. a **name**: a raw synonym the session holds (a derive's `name`
-//!    registers one), looked up exactly as derive's canonicalization looks it
-//!    up;
-//! 4. its **canonical key**: the reference canonicalized as derive would
-//!    canonicalize it, so composed and decomposed spellings, case and word
-//!    order reach the same concept. Normalization is
-//!    `crate::graph::canonical`'s (NFC, invisible-character stripping,
-//!    lowercasing, stemming); this module adds none of its own.
+//! 3. its **canonical key**: the reference's key as derive computes it, so
+//!    composed and decomposed spellings, case and word order reach the same
+//!    concept. Normalization is `crate::graph::canonical`'s (NFC,
+//!    invisible-character stripping, lowercasing, stemming); this module adds
+//!    none of its own. **No synonym is consulted**: a synonym is in-memory
+//!    session state (pinned contract S5), so a reference resolved through one
+//!    could mean something else after a restart. Nothing a write declares can
+//!    redirect a reference.
 //!
-//! Legs 2 to 4 are all asked, and the distinct concepts they find decide:
+//! Legs 2 and 3 are both asked, and the distinct concepts they find decide:
 //! none is [`Resolved::Missing`], one is [`Resolved::Concept`], more is
 //! [`Resolved::Ambiguous`]. A key two concepts hold would be ambiguous too,
 //! where canonicalization picks the lowest id; the graph's own invariants
@@ -38,7 +38,7 @@
 //! layers as the foreign scopes; nothing else changes.
 
 use super::limits::MAX_INSPECT_CANDIDATES;
-use crate::graph::canonical::{canonicalize, CanonicalizeResult};
+use crate::graph::canonical::canonical_key;
 use crate::graph::Graph;
 use crate::types::{
     shown, tie_break_by_key, LamboError, Node, NodeId, ReferenceCandidate, ReferenceField,
@@ -54,17 +54,8 @@ pub(crate) enum Leg {
     NodeId,
     /// A unique short-id prefix.
     ShortId,
-    /// A name (a raw synonym).
-    Name,
     /// The canonical key.
     Key,
-}
-
-impl Leg {
-    /// Whether this leg reads an id: a full one or a short prefix.
-    pub(crate) fn is_id(self) -> bool {
-        matches!(self, Leg::NodeId | Leg::ShortId)
-    }
 }
 
 /// What a reference names in one graph.
@@ -92,10 +83,25 @@ pub(crate) fn is_short_id_shaped(reference: &str) -> bool {
     (SHORT_ID_CHARS..=32).contains(&b.len()) && b.iter().all(u8::is_ascii_hexdigit)
 }
 
-/// Whether `reference` reads as an id, full or short: such a string is
-/// resolved and never taken as an artifact's name.
+/// Whether `reference` is a node id in its canonical hyphenated form
+/// (`8-4-4-4-12` hex digits, either case), the form recall, inspect and
+/// receipts print. `record_action` treats only this form as a full id
+/// (#36 PR 4 review M1): `urn:uuid:`, braced and 32-hex spellings are text
+/// there, as in 0.5.0.
+pub(crate) fn is_hyphenated_id(reference: &str) -> bool {
+    let b = reference.trim().as_bytes();
+    b.len() == 36
+        && b.iter().enumerate().all(|(i, c)| match i {
+            8 | 13 | 18 | 23 => *c == b'-',
+            _ => c.is_ascii_hexdigit(),
+        })
+}
+
+/// Whether `reference` reads as an id to `record_action`: the hyphenated
+/// form, or a short id's shape. Used to decide whether a request carries
+/// pins at all.
 pub(crate) fn is_id_shaped(reference: &str) -> bool {
-    parse_full_id(reference).is_some() || is_short_id_shaped(reference)
+    is_hyphenated_id(reference) || is_short_id_shaped(reference)
 }
 
 /// Whether `id`'s simple hex form starts with `prefix` (ASCII hex, either
@@ -159,20 +165,11 @@ pub(crate) fn resolve_reference(g: &Graph, reference: &str) -> Resolved {
             push(node, Leg::ShortId);
         }
     }
-    let leg = if g.synonym(reference).is_some() {
-        Leg::Name
-    } else {
-        Leg::Key
-    };
-    // `canonicalize` cannot fail (its `Result` is a pinned contract), and it
-    // is the one place the raw synonym lookup and the key normalization live.
-    let key = match canonicalize(reference, g) {
-        Ok(CanonicalizeResult::Matched { key, .. } | CanonicalizeResult::Unmatched { key }) => key,
-        Err(_) => String::new(),
-    };
+    // The key without the synonym lookup (see the module docs).
+    let key = canonical_key(reference, |_| None);
     if !key.is_empty() {
         for &node in g.concepts_by_key(&key) {
-            push(node, leg);
+            push(node, Leg::Key);
         }
     }
     match found.len() {
