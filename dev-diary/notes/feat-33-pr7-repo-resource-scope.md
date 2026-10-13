@@ -217,14 +217,16 @@ Existing conflated hubs stay untouched by design (provenance, not cost).
 
 Gate on the merged head (fresh `XDG_RUNTIME_DIR` per cargo call): fmt
 pass; the 8 clippy rows pass; `cargo test --features store-sqlite,fixtures`
-2468 passed, 0 failed, 7 ignored (lib 2385/0/5) against 2449/0/7 on
-`1c5a6bc2`: +19 tests, none lost, the same ignored set; SQLite-only
+2469 passed, 0 failed, 7 ignored (lib 2386/0/5, final head after the
+inspect-label commit) against 2449/0/7 on `1c5a6bc2`: +20 tests, none
+lost, the same ignored set; SQLite-only
 `--no-run`, `cargo check --no-default-features`, Postgres and
 Postgres+SQLite all-targets `--no-run` pass; Postgres non-live 1272/0/18
 (live Postgres and Cockroach not run); goldens and mirror drift pass;
 `git diff --check` clean. Each new intermediate commit compiles.
 
-Still open: `lambo_inspect`'s neighbourhood view of a scoped node still
-shows only its content; the label carries the repository in recall only.
-Root goals naming a path match every same-content concept (all, not one),
-unchanged.
+- **Inspect labels** (own commit after the docs): `lambo_inspect`'s
+  neighbourhood label names a scoped node's repository the same way.
+
+Still open: root goals naming a path match every same-content concept (all
+of them, not one of them quietly), unchanged; nothing else known.

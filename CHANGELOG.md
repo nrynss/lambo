@@ -573,8 +573,8 @@
   `depends_on`, and a scoped write with `against` is durably the same
   `repo_scoped` wrapper. A recall hit for a scoped path carries
   `repo_scope` and its label names the repository (`README.md [Resource,
-  repo "github.com/acme/widgets"]`); unscoped hits and recall output are
-  unchanged. Text that matches a scoped path and another concept is no
+  repo "github.com/acme/widgets"]`), as does `lambo_inspect`'s label for
+  the node; unscoped hits, nodes and recall output are unchanged. Text that matches a scoped path and another concept is no
   longer resolved to one of them quietly: `lambo_inspect`'s focus and
   `Memory::retract` refuse it as ambiguous, listing each candidate's id and
   repository, and `retract` now also takes a concept's full node id.
