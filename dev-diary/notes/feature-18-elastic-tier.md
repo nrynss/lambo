@@ -208,7 +208,7 @@ nothing re-mirrors it.
 would multiply shards with the session count, and every query and delete is
 already session-filtered.
 
-## Tests
+## Tests (original implementation, 2026-10-09)
 
 No Elasticsearch runs locally and none was started. `src/store/tiered/tests.rs`
 drives `TieredStore` over `MemoryStore` (and SQLite under `store-sqlite`) and an
@@ -334,3 +334,12 @@ under "Versioning".
   before sweeping; a repair that does not stop is aborted and the erase
   reports failure, to be rerun.
 - **F7** see M3 above: the fetch is capped at the candidate limit.
+
+## Running the live Elasticsearch tests (2026-10-13)
+
+The historical validation above describes the original implementation.
+The manual Docker suite is now in `src/store/tiered/elastic_live.rs`; see
+[test-18-elastic-live.md](test-18-elastic-live.md) for the approved Docker
+command, exact invocation, coverage, cleanup and measured results. It remains
+ignored in ordinary runs and adds no live CI step. Its outage and client
+reopen checks use synthetic fixtures only.
