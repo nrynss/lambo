@@ -396,6 +396,31 @@ pub fn validate_plan(
             ));
         }
     }
+    // General interaction provenance must remain general after corrections.
+    for a in plan
+        .assignments
+        .iter()
+        .filter(|a| a.kind == ItemKind::Interaction && a.session == plan.rules.general_session)
+    {
+        let children: Vec<_> = snapshot
+            .concepts
+            .iter()
+            .filter(|c| c.origin_interaction == a.id)
+            .collect();
+        if children.is_empty()
+            || children.iter().any(|c| {
+                !plan.assignments.iter().any(|r| {
+                    r.kind == ItemKind::Concept
+                        && r.id == c.id
+                        && r.session == plan.rules.general_session
+                })
+            })
+        {
+            return Err(ClassifyError::Plan(
+                "general interaction requires all origin concepts in general".into(),
+            ));
+        }
+    }
     let low: Vec<_> = plan
         .assignments
         .iter()

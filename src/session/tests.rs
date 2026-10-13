@@ -514,3 +514,40 @@ fn nonpath_resource_and_entity_hubs_use_fixed_incident_assignments() {
         assert_eq!(row(&plan, 15).copy_into, vec!["alpha", "beta"]);
     }
 }
+
+#[test]
+fn final_general_interaction_guard_runs_after_child_overrides() {
+    let (source, rules) = fixture();
+    let plan = classify(&source, &rules, &[]).unwrap();
+    let labels: Vec<_> = plan
+        .assignments
+        .iter()
+        .map(|a| ReviewedAssignment {
+            kind: a.kind,
+            id: a.id,
+            project: a.session.clone(),
+            confidence: a.confidence,
+            signals: a.signals.clone(),
+            pass2: a.pass2,
+            copy_into: a.copy_into.clone(),
+        })
+        .collect();
+    let correction = OperatorOverride {
+        kind: ItemKind::Concept,
+        id: id(13),
+        session: "general-usage".into(),
+        reason: "Operator moves child".into(),
+        from: Some("general".into()),
+        copy_into: vec![],
+    };
+    assert!(classify_reviewed(&source, &rules, &labels, &[correction]).is_err());
+    let mut altered = plan;
+    altered
+        .assignments
+        .iter_mut()
+        .find(|a| a.id == id(13))
+        .unwrap()
+        .session = "general-usage".into();
+    altered.seal().unwrap();
+    assert!(validate_plan(&altered, &source).is_err());
+}
