@@ -188,20 +188,75 @@ fn evidence_at_the_same_instant_outweighs_it() {
     assert_eq!(at(&s, 1000), None);
 }
 
+/// Review M1: a future `event_time` is clamped to the write time on both
+/// sides. A contradiction dated ahead fires now, dated when it was written;
+/// a citation dated ahead counts as written (once old enough), dated when
+/// it was written.
 #[test]
-fn a_future_dated_contradiction_does_not_fire_and_future_evidence_does_not_count() {
+fn future_dates_are_clamped_to_the_write_time() {
     let mut s = base(CanonizationStatus::Canonical);
     s.interaction(4, "agent-e", 300, Some(5000));
     s.concept(4, 4, "agent-e", "brand x was resized", 300);
     s.edge(12, EdgeType::Contradicts, 4, 1, 300, Some(5000));
-    // Y (t200) still fires; Z (about t5000) is not declared yet at t1000.
-    assert_eq!(at(&s, 1000).map(|h| h.by), Some(cid(3)));
+    let hit = at(&s, 1000).unwrap();
+    assert_eq!((hit.by, hit.at), (cid(4), t(300)));
 
     let mut s = base(CanonizationStatus::Canonical);
     s.interaction(4, "agent-d", 300, Some(5000));
     s.concept(4, 4, "agent-d", "brand x size chart", 300);
     s.edge(12, EdgeType::Dependency, 4, 1, 300, Some(5000));
-    assert!(at(&s, 1000).is_some(), "future evidence outweighs nothing");
+    assert_eq!(at(&s, 1000), None, "dated t300, it outweighs Y at t200");
+}
+
+/// Review M1's scenario: a contradiction written at t200 but dated 30 days
+/// ahead, and a citation written at t300 dated t500. Before the clamp the
+/// contradiction stayed hidden for 30 days and then outranked the citation
+/// written before its date. Now it is dated t200 and outweighed, now and
+/// in 30 days.
+#[test]
+fn a_contradiction_dated_30_days_ahead_does_not_outrank_earlier_writes() {
+    let ahead = 30 * 86_400 + 200;
+    let mut s = Session::new();
+    s.interaction(1, "agent-a", 0, None);
+    s.concept_with(1, 1, "agent-a", "x", 0, CanonizationStatus::Canonical);
+    s.interaction(3, "agent-c", 200, Some(ahead));
+    s.concept(3, 3, "agent-c", "not x", 200);
+    s.edge(11, EdgeType::Contradicts, 3, 1, 200, Some(ahead));
+    s.interaction(4, "agent-d", 300, Some(500));
+    s.concept(4, 4, "agent-d", "cites x", 300);
+    s.edge(12, EdgeType::Dependency, 4, 1, 300, Some(500));
+    assert_eq!(at(&s, 1000), None);
+    assert_eq!(at(&s, ahead + 1000), None);
+    // Without the citation it fires at once, dated when it was written.
+    let mut s = Session::new();
+    s.interaction(1, "agent-a", 0, None);
+    s.concept_with(1, 1, "agent-a", "x", 0, CanonizationStatus::Canonical);
+    s.interaction(3, "agent-c", 200, Some(ahead));
+    s.concept(3, 3, "agent-c", "not x", 200);
+    s.edge(11, EdgeType::Contradicts, 3, 1, 200, Some(ahead));
+    assert_eq!(at(&s, 1000).map(|h| h.at), Some(t(200)));
+}
+
+/// Review M3: eligibility is by write time. A citation written at t990
+/// but backdated to t300 is not eligible 10 seconds later, whatever its
+/// date says; once 60 s old it counts, dated t300.
+#[test]
+fn a_backdated_citation_does_not_skip_the_age_floor() {
+    let mut s = base(CanonizationStatus::Canonical);
+    s.interaction(4, "agent-d", 990, Some(300));
+    s.concept(4, 4, "agent-d", "brand x size chart", 990);
+    s.edge(12, EdgeType::Dependency, 4, 1, 990, Some(300));
+    assert!(at(&s, 1000).is_some(), "written 10 s ago");
+    assert_eq!(at(&s, 1050), None, "written 60 s ago, dated t300 > t200");
+}
+
+/// Review M5: a `min_age` whose cutoff is out of range makes no evidence
+/// eligible instead of panicking.
+#[test]
+fn an_unrepresentable_min_age_makes_no_evidence_eligible() {
+    let mut s = base(CanonizationStatus::Canonical);
+    later_citation(&mut s, 300);
+    assert!(contradiction_at(&s.g, cid(1), Duration::MAX, t(1000)).is_some());
 }
 
 #[test]
@@ -259,18 +314,20 @@ fn causal_and_contradicts_edges_are_not_evidence() {
 
 #[test]
 fn without_evidence_the_targets_origin_about_time_is_the_baseline() {
+    // X's origin is written at t250 and backdated to `origin_event`; the
+    // contradiction is written at t300, backdated to t200.
     let build = |origin_event: i64| {
         let mut s = Session::new();
-        s.interaction(1, "agent-a", 0, Some(origin_event));
-        s.concept_with(1, 1, "agent-a", "x", 0, CanonizationStatus::Canonical);
-        s.interaction(3, "agent-c", 200, None);
-        s.concept(3, 3, "agent-c", "not x", 200);
-        s.edge(11, EdgeType::Contradicts, 3, 1, 200, None);
+        s.interaction(1, "agent-a", 250, Some(origin_event));
+        s.concept_with(1, 1, "agent-a", "x", 250, CanonizationStatus::Canonical);
+        s.interaction(3, "agent-c", 300, Some(200));
+        s.concept(3, 3, "agent-c", "not x", 300);
+        s.edge(11, EdgeType::Contradicts, 3, 1, 300, Some(200));
         s
     };
     assert!(at(&build(150), 1000).is_some(), "newer than X's about-time");
     assert_eq!(at(&build(200), 1000), None, "equal: not newer");
-    assert_eq!(at(&build(250), 1000), None, "X is about a later time");
+    assert_eq!(at(&build(240), 1000), None, "X is about a later time");
 }
 
 /// The owner's dating rule (option A): both sides on the about-time clock.
@@ -514,5 +571,48 @@ fn revalidation_moves_to_the_next_contradiction_when_one_lapses() {
             writer: AgentId::from("agent-c"),
             at: t(200),
         })
+    );
+}
+
+/// Review M2: recall's re-validation builds the writer timeline at most
+/// once per graph epoch across every contradicted member, not once each.
+#[test]
+fn revalidating_many_contradictions_builds_the_timeline_once_per_epoch() {
+    use crate::daemon::conflict::TIMELINE_BUILDS;
+    let mut s = base(CanonizationStatus::Canonical);
+    for (n, k) in [(5u64, 400i64), (6, 500)] {
+        s.interaction(n, "agent-d", k, None);
+        s.concept_with(
+            n,
+            n,
+            "agent-d",
+            &format!("w{n}"),
+            k,
+            CanonizationStatus::Venerable,
+        );
+    }
+    s.interaction(7, "agent-c", 600, None);
+    s.edge(20, EdgeType::Contradicts, 3, 5, 600, None);
+    s.edge(21, EdgeType::Contradicts, 3, 6, 600, None);
+    let mut hot = HotList::new();
+    assert_eq!(
+        insert_contradictions(&mut hot, &s.g, MIN_AGE, t(1000)).len(),
+        3
+    );
+    let members = [cid(1), cid(5), cid(6)];
+    let builds = || TIMELINE_BUILDS.with(|n| n.get());
+    let before = builds();
+    assert_eq!(hot.revalidate_members(&s.g, members, t(1000)).len(), 3);
+    assert_eq!(builds() - before, 1, "one build for three predicates");
+    let before = builds();
+    hot.revalidate_members(&s.g, members, t(1001));
+    assert_eq!(builds() - before, 0, "same epoch: reused");
+    s.interaction(8, "agent-e", 700, None);
+    let before = builds();
+    assert_eq!(hot.revalidate_members(&s.g, members, t(1002)).len(), 3);
+    assert_eq!(
+        builds() - before,
+        1,
+        "a write moved the epoch: rebuilt once"
     );
 }

@@ -7,11 +7,11 @@
 //!    just memory);
 //! 2. it has an inbound `Contradicts` edge from another concept of the
 //!    session (`by -Contradicts-> node`, written by `against`, #19(b));
-//! 3. that edge's **about-time** ([`Edge::about_time`]: the declaring write's
-//!    `event_time` when one was given, else its write time) is not after
-//!    `now`, and is **strictly later** than the node's latest **eligible
-//!    dependent evidence**, or, with none, than the node's own origin
-//!    about-time.
+//! 3. that edge's **declaration date** ([`declared_at`]: the declaring
+//!    write's `event_time` when one was given, else its write time, and
+//!    never later than its write time) is **strictly later** than the
+//!    node's latest **eligible dependent evidence**, or, with none, than the
+//!    node's own origin about-time.
 //!
 //! ## Dating (owner-approved, option A)
 //!
@@ -20,10 +20,14 @@
 //! old concept for a new assertion is a new assertion. The evidence side
 //! uses the same clock, so a historical ingest that backdates a
 //! contradiction to 2018 and its supporting citations to 2020 reads as
-//! outweighed, exactly as it happened. Re-sending a contradiction reinforces
-//! its edge (`last_reinforced`, weight) and does **not** re-date it: the
-//! edge keeps its first `event_time` and `created_at`. To restate a
-//! contradiction as new, write a new assertion.
+//! outweighed, exactly as it happened. A **future** `event_time` is clamped
+//! to the write time (review M1): it may not hide a contradiction until its
+//! date and then let it outrank everything written in between. Re-sending a
+//! contradiction reinforces its edge (`last_reinforced`, weight) and does
+//! **not** re-date it: the edge keeps its first `event_time` and
+//! `created_at`. To restate it as new, write a concept with different
+//! content (the same content resolves to the same concept and the same
+//! edge).
 //!
 //! ## Eligible dependent evidence (#36)
 //!
@@ -32,9 +36,13 @@
 //! of this graph. One piece of evidence per dependence edge, dated by that
 //! edge's about-time. Guards, the same as Stage 2's:
 //!
-//! * **age**: the edge's about-time is at or before `now - min_age` (the
-//!   session's `canonization_edge_min_age`). Evidence younger than that, or
-//!   dated in the future, does not count yet.
+//! * **age**: the edge was **written** at or before `now - min_age` (the
+//!   session's `canonization_edge_min_age`); a backdated `event_time` does
+//!   not skip the floor (review M3). Its date for the comparison is its
+//!   [`declared_at`]. Re-sending an existing dependence reinforces the same
+//!   edge and keeps its first dates, so it is not new evidence: only a new
+//!   dependence edge (a concept that did not depend on the node before, or
+//!   a new `parent_of` child) outweighs a contradiction.
 //! * **own origin**: a dependent written by the node's own origin
 //!   interaction never supports it.
 //! * **self-suppression**: evidence never counts against the contradiction
@@ -76,10 +84,10 @@ use std::time::Duration;
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 
-use crate::daemon::conflict::{attribute_at, WriterTimeline};
+use crate::daemon::conflict::{attribute_at, SharedTimeline, WriterTimeline};
 use crate::daemon::hotlist::{Condition, HotList, HotListEntry, HotListPayload};
 use crate::graph::Graph;
-use crate::types::{AgentId, CanonizationStatus, Concept, EdgeType, Node, NodeId};
+use crate::types::{AgentId, CanonizationStatus, Concept, Edge, EdgeType, Node, NodeId};
 
 /// One detected contradiction: the contradicted node and the payload fields.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -92,6 +100,19 @@ pub struct ContradictionHit {
     pub writer: AgentId,
     /// The declaring write's about-time.
     pub at: DateTime<Utc>,
+}
+
+/// When an edge's declaration counts as made: its about-time
+/// ([`Edge::about_time`]), clamped to its write time (#19(c) review M1).
+///
+/// The clamp only moves a **future** `event_time` back to when the edge was
+/// written. A contradiction (or a citation) dated 30 days ahead would
+/// otherwise stay invisible for 30 days and then outrank everything written
+/// in between; a backdated one keeps its earlier date, which is the point of
+/// about-time (owner-approved dating, option A). The same date drives the
+/// detector, recall and GC's protection (`daemon::gc`).
+pub(crate) fn declared_at(e: &Edge) -> DateTime<Utc> {
+    e.about_time().min(e.created_at)
 }
 
 fn concept(graph: &Graph, id: NodeId) -> Option<&Concept> {
@@ -143,11 +164,17 @@ fn contradiction_at_with(
     if !promoted(target) {
         return None;
     }
-    let cutoff = now - ChronoDuration::from_std(min_age).unwrap_or(ChronoDuration::MAX);
-    // With no eligible evidence, the node's own origin about-time is the
-    // baseline a contradiction must be newer than.
+    // Evidence written at or before this instant is old enough to count.
+    // `None` when `now - min_age` is out of chrono's range (review M5, as
+    // Stage 1's `age_cutoff`): then no evidence is eligible.
+    let cutoff = ChronoDuration::from_std(min_age)
+        .ok()
+        .and_then(|age| now.checked_sub_signed(age));
+    // With no eligible evidence, the node's own origin about-time (clamped
+    // like every date here) is the baseline a contradiction must be newer
+    // than.
     let baseline = match graph.node(target.origin_interaction) {
-        Some(Node::Interaction(i)) => i.about_time(),
+        Some(Node::Interaction(i)) => i.about_time().min(i.created_at),
         _ => target.created_at,
     };
 
@@ -168,10 +195,13 @@ fn contradiction_at_with(
         {
             continue;
         }
-        let about = e.about_time();
-        if about > cutoff {
+        // Eligibility is by write time (review M3): a citation backdated by
+        // its event_time does not skip the age floor. Its date for the
+        // comparison is still its (clamped) about-time.
+        if cutoff.is_none_or(|cutoff| e.created_at > cutoff) {
             continue;
         }
+        let about = declared_at(e);
         let writers = attribute_at(graph, e, e.created_at, timeline)
             .map(|w| w.all().cloned().collect())
             .unwrap_or_default();
@@ -191,9 +221,9 @@ fn contradiction_at_with(
         if by.session_id != target.session_id {
             continue;
         }
-        let at = e.about_time();
+        let at = declared_at(e);
         if at > now {
-            continue; // not declared yet at the instant examined
+            continue; // not written yet at the instant examined (a mocked clock)
         }
         let Some(writers) = attribute_at(graph, e, e.created_at, timeline) else {
             continue;
@@ -253,6 +283,22 @@ pub fn detect(graph: &Graph, min_age: Duration, now: DateTime<Utc>) -> Vec<Contr
         .collect()
 }
 
+/// [`contradiction_at`] against a shared, epoch-keyed timeline: the hot-list
+/// predicate's path (review M2).
+fn contradiction_at_shared(
+    graph: &Graph,
+    node: NodeId,
+    min_age: Duration,
+    now: DateTime<Utc>,
+    shared: &SharedTimeline,
+) -> Option<ContradictionHit> {
+    let target = concept(graph, node)?;
+    if !promoted(target) || !has_inbound_contradiction(graph, node) {
+        return None;
+    }
+    contradiction_at_with(graph, node, min_age, now, &shared.get(graph))
+}
+
 /// Detect contradictions and refresh the hot list with one
 /// [`Condition::Contradiction`] entry per hit. The predicate re-runs
 /// [`contradiction_at`] at the caller's `now` (XP-3), capturing only `node`
@@ -266,10 +312,15 @@ pub fn insert_contradictions(
     now: DateTime<Utc>,
 ) -> Vec<ContradictionHit> {
     let hits = detect(graph, min_age, now);
+    // One timeline for every entry this pass inserts, rebuilt only when the
+    // graph's epoch moves, so a recall re-validating many contradicted
+    // members under the hot-list write guard builds it at most once.
+    let shared = SharedTimeline::new();
     for hit in &hits {
         let node = hit.node;
+        let shared = shared.clone();
         let holds = move |g: &Graph, at: DateTime<Utc>| {
-            contradiction_at(g, node, min_age, at).map(payload_of)
+            contradiction_at_shared(g, node, min_age, at, &shared).map(payload_of)
         };
         let _ = hot.insert(HotListEntry::new(
             node,

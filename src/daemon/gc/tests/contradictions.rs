@@ -181,3 +181,29 @@ fn the_score_cut_spares_a_protected_contradicting_concept() {
     let cut = run(&mut g, params);
     assert!(cut.concepts_collected.contains(&nid(30)));
 }
+
+/// Review M1: GC dates a contradiction as the detector does (about-time
+/// clamped to the write time). One dated 30 days ahead but written now
+/// protects now, as its recall warning fires now; one not yet written at
+/// the sweep's clock protects nothing yet.
+#[test]
+fn protection_uses_the_detectors_declaration_date() {
+    let mut g = session_with_island();
+    promote(&mut g, 50, 10, CanonizationStatus::Venerable);
+    g.upsert_edge(Edge {
+        event_time: Some(ts(0) + ChronoDuration::days(30)),
+        ..edge(200, 20, 10, EdgeType::Contradicts, 1.0, 0)
+    })
+    .unwrap();
+    assert!(run(&mut g, default_params()).concepts_collected.is_empty());
+
+    let mut g = session_with_island();
+    promote(&mut g, 50, 10, CanonizationStatus::Venerable);
+    // Written at ts(200), after the sweep's clock (ts(100)).
+    g.upsert_edge(edge(200, 20, 10, EdgeType::Contradicts, 1.0, 200))
+        .unwrap();
+    assert_eq!(
+        run(&mut g, default_params()).concepts_collected,
+        vec![nid(20)]
+    );
+}

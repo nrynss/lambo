@@ -163,8 +163,16 @@ pub(crate) struct WriterTimeline {
     by_time: HashMap<DateTime<Utc>, Vec<(NodeId, AgentId)>>,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Timeline builds on this thread (#19(c) review M2's assertion).
+    pub(crate) static TIMELINE_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 impl WriterTimeline {
     pub(crate) fn of(graph: &Graph) -> Self {
+        #[cfg(test)]
+        TIMELINE_BUILDS.with(|n| n.set(n.get() + 1));
         let mut by_time: HashMap<DateTime<Utc>, Vec<(NodeId, AgentId)>> = HashMap::new();
         for i in graph.interactions() {
             by_time
@@ -193,6 +201,38 @@ impl WriterTimeline {
     /// invent an author. Callers fall back to structural attribution instead.
     fn acting(&self, at: DateTime<Utc>) -> &[(NodeId, AgentId)] {
         self.by_time.get(&at).map_or(&[], Vec::as_slice)
+    }
+}
+
+/// One [`WriterTimeline`] shared by every hot-list predicate a detector pass
+/// inserts, rebuilt only when the graph's epoch moved (#19(c) review M2).
+///
+/// Recall re-validates the hot entries of every expanded member under the
+/// hot-list write guard. Each predicate building its own timeline made that
+/// `O(hot members × interactions)`; with this, one recall pays for at most
+/// one build (the first predicate to run after a write), and the rest reuse
+/// it. The timeline depends only on the session's interactions, and every
+/// interaction insert bumps the epoch, so an epoch match is a valid cache
+/// hit. The lock is a leaf: held only to read or swap the `Arc`.
+pub(crate) struct SharedTimeline(parking_lot::Mutex<Option<(u64, std::sync::Arc<WriterTimeline>)>>);
+
+impl SharedTimeline {
+    pub(crate) fn new() -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self(parking_lot::Mutex::new(None)))
+    }
+
+    /// The timeline for `graph` as of its current epoch.
+    pub(crate) fn get(&self, graph: &Graph) -> std::sync::Arc<WriterTimeline> {
+        let epoch = graph.epoch();
+        let mut slot = self.0.lock();
+        if let Some((at, timeline)) = slot.as_ref()
+            && *at == epoch
+        {
+            return timeline.clone();
+        }
+        let timeline = std::sync::Arc::new(WriterTimeline::of(graph));
+        *slot = Some((epoch, timeline.clone()));
+        timeline
     }
 }
 
@@ -428,14 +468,19 @@ pub fn insert_conflicts(
     now: DateTime<Utc>,
 ) -> Vec<ConflictHit> {
     let hits = detect(graph, window, now);
+    let shared = SharedTimeline::new();
     for hit in &hits {
         let node = hit.node;
         // The predicate re-runs the same per-node check against the *caller's*
         // `now` and hands back the payload it computed, so recall renders a
-        // read-time `seconds_ago` and writer (XP-3 / ALGO-2). Only `node` and
-        // `window` are captured — both `Copy` (spec §6.4: no lock re-entry).
-        let holds =
-            move |g: &Graph, at: DateTime<Utc>| conflict_at(g, node, window, at).map(payload_of);
+        // read-time `seconds_ago` and writer (XP-3 / ALGO-2). It captures
+        // `node`, `window` and the pass's shared timeline (#19(c) review M2:
+        // one timeline build per recall, not one per conflicted member); no
+        // graph or hot-list lock is re-entered (spec §6.4).
+        let shared = shared.clone();
+        let holds = move |g: &Graph, at: DateTime<Utc>| {
+            conflict_at_with(g, node, window, at, &shared.get(g)).map(payload_of)
+        };
         let _ = hot.insert(HotListEntry::new(
             node,
             Condition::Conflict,

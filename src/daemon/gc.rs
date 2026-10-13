@@ -478,7 +478,9 @@ pub fn run(graph: &mut Graph, params: GcParams) -> GcOutcome {
     // Canonical target is protected while the target holds that status.
     let protected: HashSet<NodeId> = graph
         .concepts()
-        .filter(|c| is_protected(c, &goal_texts) || contradicts_a_promoted_concept(graph, c.id))
+        .filter(|c| {
+            is_protected(c, &goal_texts) || contradicts_a_promoted_concept(graph, c.id, params.now)
+        })
         .map(|c| c.id)
         .collect();
 
@@ -706,19 +708,28 @@ fn has_gc_connection(graph: &Graph, node: NodeId) -> bool {
 /// protection lapses and the concept is judged like any other, with its
 /// `Contradicts` edges counting for nothing. Self-edges and non-concept
 /// targets never protect.
-fn contradicts_a_promoted_concept(graph: &Graph, node: NodeId) -> bool {
+///
+/// The edge counts from the date the detector gives it
+/// ([`crate::daemon::contradiction::declared_at`]: its about-time clamped
+/// to its write time, #19(c) review M1), so GC protects exactly the
+/// contradictions recall can warn about: none dated after the sweep's `now`.
+fn contradicts_a_promoted_concept(graph: &Graph, node: NodeId, now: DateTime<Utc>) -> bool {
     graph
         .out_neighbors_typed(node, EdgeType::Contradicts)
         .into_iter()
         .filter(|&t| t != node)
         .any(|t| {
-            matches!(
+            let promoted = matches!(
                 graph.node(t),
                 Some(crate::types::Node::Concept(c)) if matches!(
                     c.canonization_status,
                     CanonizationStatus::Venerable | CanonizationStatus::Canonical
                 )
-            )
+            );
+            promoted
+                && graph
+                    .edge_between(node, t, EdgeType::Contradicts)
+                    .is_some_and(|e| crate::daemon::contradiction::declared_at(e) <= now)
         })
 }
 
