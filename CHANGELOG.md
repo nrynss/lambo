@@ -539,6 +539,11 @@
 
 ### Fixed
 
+- SQLite session loads preserve persisted creation and close timestamps,
+  including in immutable classification source fingerprints. Writable schema
+  initialization converges these existing DDL columns on partial legacy
+  session tables; classification does not migrate them.
+
 - **A dependency question no longer anchors on a word fragment.**
   Substring matching picked `db` in `dbadmin`, and shortest-first picked
   `db` over a named `user db schema`. Under layered recall (#134), the wrong

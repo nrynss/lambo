@@ -631,9 +631,8 @@ async fn flush_load_roundtrip_deep_equals_graph() {
     assert!(!batch.is_empty());
 
     store.flush(&batch, None).await.unwrap();
-    let loaded = load_session(&store, &sid).unwrap();
-
     include_persisted_session_metadata(&store, &sid, &mut expected).await;
+    let loaded = load_session(&store, &sid).unwrap();
     assert_eq!(loaded.graph.snapshot(), expected);
     assert_eq!(loaded.graph.log_len(), 0, "load must not seed mutations");
     // Issue #17: the batch's stamp is durable, so the load resumes the
