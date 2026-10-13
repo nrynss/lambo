@@ -49,6 +49,9 @@ impl Graph {
                 event.node_id, event.from_status, event.to_status, concept.canonization_status
             )));
         }
+        // #20: a demotion reason only on a demotion, and never "superseded
+        // by itself". Checked before the concept is touched.
+        event.check_reason()?;
         if !legal_canonization_transition(event.from_status, event.to_status) {
             return Err(invariant(format!(
                 "illegal canonization transition {:?} -> {:?} for concept {} \

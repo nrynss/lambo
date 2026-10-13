@@ -173,6 +173,24 @@ impl SqliteStore {
             "ALTER TABLE canonization_events ADD COLUMN last_demotion_time TEXT",
         )
         .await?;
+        // #20: why a demotion happened. Nullable and additive: a historical
+        // row's NULL pair reads as a budget demotion (or no reason, on a
+        // promotion). `superseded_by` is a bare id with no foreign key, so
+        // collecting the superseding concept never deletes audit rows.
+        ensure_column(
+            self.pool(),
+            "canonization_events",
+            "reason",
+            "ALTER TABLE canonization_events ADD COLUMN reason TEXT",
+        )
+        .await?;
+        ensure_column(
+            self.pool(),
+            "canonization_events",
+            "superseded_by",
+            "ALTER TABLE canonization_events ADD COLUMN superseded_by TEXT",
+        )
+        .await?;
         ensure_column(
             self.pool(),
             "session_leases",

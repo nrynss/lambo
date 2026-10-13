@@ -14,6 +14,7 @@ fn transition_applies_status_and_appends_event() {
         blast_radius: Some(3),
         last_demotion_time: None,
         occurred_at: ts(10),
+        reason: None,
     };
     g.apply_canonization_transition(ev.clone()).unwrap();
     let c = match g.node(cid).unwrap() {
@@ -44,6 +45,7 @@ fn transition_from_status_mismatch_is_rejected() {
         blast_radius: Some(5),
         last_demotion_time: None,
         occurred_at: ts(10),
+        reason: None,
     };
     let err = g.apply_canonization_transition(ev).unwrap_err().to_string();
     assert!(err.contains("current status"), "{err}");
@@ -80,6 +82,7 @@ fn illegal_transition_pairs_are_rejected() {
         blast_radius: Some(5),
         last_demotion_time: None,
         occurred_at: ts(10),
+        reason: None,
     };
     let err = g
         .apply_canonization_transition(skip)
@@ -96,6 +99,7 @@ fn illegal_transition_pairs_are_rejected() {
         blast_radius: None,
         last_demotion_time: None,
         occurred_at: ts(11),
+        reason: None,
     };
     assert!(g.apply_canonization_transition(self_loop).is_err());
     // Downgrade: demotion is only Canonical -> None.
@@ -108,6 +112,7 @@ fn illegal_transition_pairs_are_rejected() {
         blast_radius: None,
         last_demotion_time: None,
         occurred_at: ts(12),
+        reason: None,
     };
     g.apply_canonization_transition(promote).unwrap();
     let downgrade = CanonizationEvent {
@@ -119,6 +124,7 @@ fn illegal_transition_pairs_are_rejected() {
         blast_radius: None,
         last_demotion_time: Some(ts(13)),
         occurred_at: ts(13),
+        reason: None,
     };
     let err = g
         .apply_canonization_transition(downgrade)
@@ -146,6 +152,7 @@ fn legal_transitions_apply_and_demotion_carries_last_demotion_time() {
         blast_radius: blast,
         last_demotion_time: last_demotion,
         occurred_at: ts(at),
+        reason: None,
     };
     g.apply_canonization_transition(promote(
         crate::types::CanonizationStatus::None,
@@ -218,4 +225,55 @@ fn legal_transitions_apply_and_demotion_carries_last_demotion_time() {
     assert_eq!(demote_ev.last_demotion_time, Some(ts(4)));
     assert_eq!(h.canonization_events().len(), 5);
     g.assert_invariants().unwrap();
+}
+
+/// #20: the graph's write gate refuses a demotion reason on a promotion and a
+/// self-supersession before anything is written, and keeps a supersession's
+/// `by` in the audit trail.
+#[test]
+fn the_write_gate_checks_the_demotion_reason() {
+    use crate::types::{CanonizationStatus as S, DemotionReason};
+    let (mut g, _, cid) = small_graph();
+    let event = |from, to, reason| CanonizationEvent {
+        id: NodeId::new(),
+        session_id: sid(),
+        node_id: cid,
+        from_status: from,
+        to_status: to,
+        blast_radius: None,
+        last_demotion_time: (to == S::None).then(|| ts(9)),
+        occurred_at: ts(9),
+        reason,
+    };
+    let err = g
+        .apply_canonization_transition(event(S::None, S::Candidate, Some(DemotionReason::Budget)))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("demotion reason"), "{err}");
+    assert!(g.canonization_events().is_empty());
+    g.apply_canonization_transition(event(S::None, S::Venerable, None))
+        .unwrap();
+    g.apply_canonization_transition(event(S::Venerable, S::Canonical, None))
+        .unwrap();
+    let err = g
+        .apply_canonization_transition(event(
+            S::Canonical,
+            S::None,
+            Some(DemotionReason::Superseded { by: cid }),
+        ))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("superseded itself"), "{err}");
+    let by = NodeId::new();
+    let demotion = event(
+        S::Canonical,
+        S::None,
+        Some(DemotionReason::Superseded { by }),
+    );
+    g.apply_canonization_transition(demotion.clone()).unwrap();
+    assert_eq!(g.canonization_events().last(), Some(&demotion));
+    assert_eq!(
+        demotion.demotion_reason(),
+        Some(DemotionReason::Superseded { by })
+    );
 }

@@ -343,8 +343,8 @@ WHERE id = $1 AND session_id = $4
 pub(super) const INSERT_CANONIZATION_EVENT_SQL: &str = r#"
 INSERT INTO canonization_events (
     id, session_id, node_id, from_status, to_status, blast_radius,
-    last_demotion_time, occurred_at
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+    last_demotion_time, occurred_at, reason, superseded_by
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 ON CONFLICT (id) DO NOTHING
 "#;
 
@@ -635,7 +635,8 @@ ORDER BY id
             select_canonization_events: format!(
                 r#"
 SELECT id{s} AS id, session_id, node_id{s} AS node_id,
-       from_status, to_status, blast_radius, last_demotion_time, occurred_at
+       from_status, to_status, blast_radius, last_demotion_time, occurred_at,
+       reason, superseded_by{s} AS superseded_by
 FROM canonization_events
 WHERE session_id = $1
 ORDER BY occurred_at, id

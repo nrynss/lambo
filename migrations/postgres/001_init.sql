@@ -175,13 +175,21 @@ CREATE TABLE IF NOT EXISTS canonization_events (
     to_status       TEXT NOT NULL,
     blast_radius    BIGINT,
     last_demotion_time TIMESTAMPTZ,
-    occurred_at     TIMESTAMPTZ NOT NULL
+    occurred_at     TIMESTAMPTZ NOT NULL,
+    reason          TEXT,
+    superseded_by   UUID
 );
 
 CREATE INDEX IF NOT EXISTS canonization_events_session_time_idx
     ON canonization_events (session_id, occurred_at);
 
 ALTER TABLE canonization_events ADD COLUMN IF NOT EXISTS last_demotion_time TIMESTAMPTZ;
+-- #20: why a demotion happened ('budget' | 'superseded') and the superseding
+-- concept. Nullable and additive: a historical row's NULL pair reads as a
+-- budget demotion (no reason on a promotion). No foreign key, so collecting the
+-- superseding concept never deletes audit rows.
+ALTER TABLE canonization_events ADD COLUMN IF NOT EXISTS reason TEXT;
+ALTER TABLE canonization_events ADD COLUMN IF NOT EXISTS superseded_by UUID;
 
 CREATE TABLE IF NOT EXISTS reservations (
     session_id      TEXT NOT NULL,

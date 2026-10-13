@@ -1563,6 +1563,7 @@ async fn check_record_canonization_appends_and_is_idempotent(store: &CockroachSt
         blast_radius: Some(9),
         last_demotion_time: None,
         occurred_at: Utc::now(),
+        reason: None,
     };
     store.record_canonization(&event, None).await.unwrap();
     // Same event re-recorded (retried flush) must not duplicate the audit row.
@@ -1591,6 +1592,7 @@ async fn check_record_canonization_appends_and_is_idempotent(store: &CockroachSt
         blast_radius: None,
         last_demotion_time: None,
         occurred_at: Utc::now(),
+        reason: None,
     };
     let err = store.record_canonization(&ghost, None).await.unwrap_err();
     assert!(matches!(err, StoreError::NotFound(_)));

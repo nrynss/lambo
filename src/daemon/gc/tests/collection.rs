@@ -18,6 +18,7 @@ fn transition(
         blast_radius: None,
         last_demotion_time: None,
         occurred_at: ts(1),
+        reason: None,
     }
 }
 

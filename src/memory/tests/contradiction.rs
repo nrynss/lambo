@@ -56,6 +56,7 @@ fn transition(mem: &Memory, id: NodeId, from: CanonizationStatus, to: Canonizati
             blast_radius: None,
             last_demotion_time: (to == CanonizationStatus::None).then_some(now),
             occurred_at: now,
+            reason: None,
         })
         .unwrap();
 }

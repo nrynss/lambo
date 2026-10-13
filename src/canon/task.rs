@@ -897,6 +897,7 @@ mod tests {
                 blast_radius: None,
                 last_demotion_time: None,
                 occurred_at: ts(),
+                reason: None,
             },
         );
         assert!(matches!(rx.try_recv(), Ok(DaemonEvent::Canonized { .. })));

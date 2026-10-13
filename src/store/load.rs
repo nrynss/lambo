@@ -346,6 +346,7 @@ mod tests {
             blast_radius: Some(2),
             last_demotion_time: None,
             occurred_at: ts(12),
+            reason: None,
         })
         .unwrap();
 
@@ -483,6 +484,7 @@ mod tests {
             blast_radius: None,
             last_demotion_time: None,
             occurred_at: ts(20),
+            reason: None,
         })
         .unwrap();
         let epoch_2 = g2.epoch();

@@ -511,6 +511,7 @@ fn revalidation_drops_the_entry_when_the_target_is_demoted() {
         blast_radius: None,
         last_demotion_time: None,
         occurred_at: t(500),
+        reason: None,
     })
     .unwrap();
     assert!(
@@ -526,6 +527,7 @@ fn revalidation_drops_the_entry_when_the_target_is_demoted() {
         blast_radius: None,
         last_demotion_time: Some(t(600)),
         occurred_at: t(600),
+        reason: None,
     })
     .unwrap();
     assert_eq!(revalidated(&mut hot, &s.g, 1000), None);

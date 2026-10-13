@@ -827,6 +827,9 @@ fn apply(
             blast_radius: None,
             last_demotion_time: Some(now),
             occurred_at: now,
+            // A budget demotion still writes no reason, so its audit row is
+            // byte-identical to a pre-#20 one; it reads as Budget.
+            reason: None,
         };
         outcome
             .demotions
@@ -914,6 +917,7 @@ fn promotion_event(
         blast_radius,
         last_demotion_time: None,
         occurred_at: now,
+        reason: None,
     }
 }
 

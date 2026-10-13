@@ -128,7 +128,12 @@ CREATE TABLE IF NOT EXISTS canonization_events (
     to_status       TEXT NOT NULL,
     blast_radius    INTEGER,
     last_demotion_time TEXT,
-    occurred_at     TEXT NOT NULL
+    occurred_at     TEXT NOT NULL,
+    -- #20: demotion reason ('budget' | 'superseded') and the superseding
+    -- concept's id. NULL pair = a historical row (a demotion reads as budget).
+    -- No foreign key: collecting the superseding concept keeps the audit row.
+    reason          TEXT,
+    superseded_by   TEXT
 );
 
 -- Soft locks (S5): an expired row persists until a later write overwrites it,

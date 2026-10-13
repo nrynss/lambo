@@ -92,6 +92,7 @@ impl Graph {
                         blast_radius: None,
                         last_demotion_time: None,
                         occurred_at,
+                        reason: None,
                     };
                     // The only rejection modes are invariant violations that
                     // cannot occur here (the concept exists; the pair is a

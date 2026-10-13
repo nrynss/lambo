@@ -105,6 +105,7 @@ async fn failed_apply_does_not_record_or_emit() {
         blast_radius: Some(8),
         last_demotion_time: None,
         occurred_at: ts(),
+        reason: None,
     };
     let err = commit_transition(&mut g, &tx, bad).unwrap_err();
     assert!(

@@ -18,7 +18,8 @@ use crate::store::batch::{AccessUpdate, ConceptRow, FlushStep};
 use crate::store::map_write_err;
 use crate::store::vector::encode_vector_blob;
 use crate::types::{
-    CanonizationEvent, Edge, Interaction, Mutation, Node, NodeId, SessionId, StoreError,
+    CanonizationEvent, DemotionReason, Edge, Interaction, Mutation, Node, NodeId, SessionId,
+    StoreError,
 };
 
 /// Apply one planned [`FlushStep`].
@@ -793,13 +794,15 @@ pub(super) async fn apply_canonization_transition(
     tx: &mut sqlx::SqliteConnection,
     event: &CanonizationEvent,
 ) -> Result<(), StoreError> {
+    event.check_reason()?;
     let to_status = enum_to_text(&event.to_status, "to_status")?;
     let from_status = enum_to_text(&event.from_status, "from_status")?;
+    let (reason, superseded_by) = DemotionReason::to_columns(event.reason);
     let appended = sqlx::query(
         "INSERT INTO canonization_events (\
              id, session_id, node_id, from_status, to_status, blast_radius, \
-             last_demotion_time, occurred_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
+             last_demotion_time, occurred_at, reason, superseded_by) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT (id) DO NOTHING",
     )
     .bind(event.id.0.to_string())
@@ -810,6 +813,8 @@ pub(super) async fn apply_canonization_transition(
     .bind(event.blast_radius)
     .bind(event.last_demotion_time.map(ts_to_text))
     .bind(ts_to_text(event.occurred_at))
+    .bind(reason)
+    .bind(superseded_by.map(|by| by.0.to_string()))
     .execute(&mut *tx)
     .await
     .map_err(|e| map_write_err(e, |m| format!("append canonization event: {m}")))?;

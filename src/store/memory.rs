@@ -288,6 +288,9 @@ impl MemoryStore {
                 // an already-recorded transition would otherwise regress the
                 // status (or erase a demotion cooldown) with the repair
                 // skipped. See `Mutation::UpsertNode`.
+                // #20: a reason only on a demotion, never "superseded by
+                // itself" (the SQL adapters refuse the same rows).
+                event.check_reason()?;
                 if data.recorded_events.contains(&event.id) {
                     return Ok(());
                 }
@@ -1456,6 +1459,7 @@ mod tests {
             blast_radius: None,
             last_demotion_time: None,
             occurred_at: at,
+            reason: None,
         };
         let hop1 = hop(CanonizationStatus::None, CanonizationStatus::Candidate, ts);
         let hop2 = hop(
@@ -1574,6 +1578,7 @@ mod tests {
             blast_radius: None,
             last_demotion_time: None,
             occurred_at: ts,
+            reason: None,
         };
         // The evaluator's immediate durable write.
         store.record_canonization(&hop, None).await.unwrap();
@@ -1653,6 +1658,7 @@ mod tests {
             blast_radius: Some(8),
             last_demotion_time: None,
             occurred_at: ts,
+            reason: None,
         };
         store.record_canonization(&promote, None).await.unwrap();
 
@@ -1666,6 +1672,7 @@ mod tests {
             blast_radius: None,
             last_demotion_time: Some(demote_at),
             occurred_at: demote_at,
+            reason: None,
         };
         store.record_canonization(&demote, None).await.unwrap();
 
@@ -2327,6 +2334,7 @@ mod tests {
                         blast_radius: None,
                         last_demotion_time: None,
                         occurred_at: ts,
+                        reason: None,
                     },
                 },
             ],
@@ -2407,6 +2415,7 @@ mod tests {
             blast_radius: None,
             last_demotion_time: None,
             occurred_at: ts,
+            reason: None,
         };
         let err = store.record_canonization(&ev, Some(0)).await.unwrap_err();
         assert!(
