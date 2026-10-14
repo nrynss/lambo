@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Performance
+
+- **Structural recall is fast again (#165).** Anchor resolution, which
+  every structural query runs (`blast radius`, `depends on`, ...), Unicode
+  normalized every concept's text on every query, and since 0.6.0 that cost
+  about 260 ms per query on a 9,100-concept store. ASCII text now skips
+  normalization, which is the identity there, and a concept longer than the
+  query is skipped before any work. Non-ASCII concepts are still normalized
+  in full, so matching is unchanged. On a synthetic 9,100-concept store,
+  release build: about 70 ms per query on 0.6.0 against about 1 ms now.
+
 ## 0.6.0 (2026-10-13)
 
 ### Highlights
