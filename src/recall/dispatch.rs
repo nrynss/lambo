@@ -103,7 +103,37 @@ const MAX_ANCHOR_SPANS: usize = 256;
 /// NFC followed by per-character lowercase avoids contextual final-sigma
 /// folding and makes composed and decomposed names equivalent.
 pub(crate) fn anchor_text(text: &str) -> String {
+    #[cfg(test)]
+    SLOW_NORMALIZATIONS.with(|n| n.set(n.get() + 1));
     text.nfc().flat_map(char::to_lowercase).nfc().collect()
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Full Unicode [`anchor_text`] passes on this thread, so a test can pin
+    /// that ASCII concepts never take the slow path (#165).
+    static SLOW_NORMALIZATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// A concept's [`anchor_text`] for the per-query scan, or `None` when it
+/// cannot occur in a normalized query of `max_len` bytes (#165).
+///
+/// For ASCII content NFC is the identity and lowercasing keeps the byte
+/// length, so `anchor_text` is exactly the ASCII lowercase and a content
+/// longer than the query is skipped before allocating. Only non-ASCII content
+/// pays for the two NFC passes; its normalized length is not bounded by its
+/// raw length (NFC composes, and U+212A KELVIN SIGN folds to one byte), so it is
+/// filtered only after normalizing.
+fn concept_anchor_text(content: &str, max_len: usize) -> Option<String> {
+    let lower = if content.is_ascii() {
+        if content.len() > max_len {
+            return None;
+        }
+        content.to_ascii_lowercase()
+    } else {
+        anchor_text(content)
+    };
+    (lower.len() <= max_len).then_some(lower)
 }
 
 fn is_word_char(c: char) -> bool {
@@ -228,7 +258,10 @@ pub(crate) fn resolve_anchor_choice(graph: &Graph, query: &str) -> Option<Anchor
     let mut spans = Vec::new();
     let mut marker_clauses = Vec::new();
     for c in graph.concepts() {
-        let lower_c = anchor_text(&c.content);
+        // A needle longer than the haystack has no occurrence.
+        let Some(lower_c) = concept_anchor_text(&c.content, lower_q.len()) else {
+            continue;
+        };
         if !lower_c.chars().any(char::is_alphanumeric) {
             continue;
         }
@@ -1764,5 +1797,122 @@ mod tests {
             3,
             "the sweep must cover empty, truncated and whole: {regimes:?}"
         );
+    }
+
+    /// #165: a synthetic store of `n` ASCII concepts of realistic length
+    /// (most far longer than a query), plus the anchor `SG-Base` and one
+    /// non-ASCII concept that the query names.
+    fn many_concepts(n: u64) -> Graph {
+        let mut g = Graph::new(sid());
+        let i1 = Interaction {
+            event_time: None,
+            id: NodeId(uuid::Uuid::from_u64_pair(1, 1)),
+            session_id: sid(),
+            agent_id: AgentId::from("agent-a"),
+            prompt_text: Some("q".into()),
+            previous_id: None,
+            created_at: ts(0),
+        };
+        g.insert_interaction(i1.clone()).unwrap();
+        for i in 0..n {
+            let content = format!(
+                "Decision {i}: the recall path keeps its ranking stable across \
+                 restarts because the canonical key orders ties; see note {i} \
+                 for the measurements and the rationale behind the bound."
+            );
+            g.insert_concept(concept(1_000 + i, &content, ConceptType::Logic), i1.id)
+                .unwrap();
+        }
+        g.insert_concept(concept(1, "SG-Base", ConceptType::Entity), i1.id)
+            .unwrap();
+        g.insert_concept(concept(2, "Cafe\u{301}", ConceptType::Entity), i1.id)
+            .unwrap();
+        g
+    }
+
+    /// #165: ASCII content takes the fast path and matches `anchor_text`
+    /// byte for byte; non-ASCII content still gets full normalization.
+    #[test]
+    fn concept_anchor_text_matches_anchor_text() {
+        for s in [
+            "SG-Base",
+            "README.md",
+            "/etc/Hosts",
+            "",
+            "MiXeD 42_x",
+            "a\tb",
+        ] {
+            assert_eq!(
+                concept_anchor_text(s, usize::MAX),
+                Some(anchor_text(s)),
+                "{s:?}"
+            );
+        }
+        for s in [
+            "Cafe\u{301}",
+            "\u{130}stanbul",
+            "\u{212A}elvin",
+            "\u{3A3}\u{391}\u{3A3}",
+        ] {
+            assert_eq!(
+                concept_anchor_text(s, usize::MAX),
+                Some(anchor_text(s)),
+                "{s:?}"
+            );
+        }
+        // Too long for the query: skipped, on either path.
+        assert_eq!(concept_anchor_text("SG-Base", 6), None);
+        assert_eq!(concept_anchor_text("Cafe\u{301}", 4), None);
+        // NFC shrinks this below its raw length; the bound is on the normalized form.
+        assert_eq!(
+            concept_anchor_text("Cafe\u{301}", 5),
+            Some("caf\u{e9}".into())
+        );
+    }
+
+    /// #165 regression guard: a structural query over thousands of ASCII
+    /// concepts runs the full Unicode normalization only for the query, its
+    /// matches and the non-ASCII concept, never once per ASCII concept.
+    #[test]
+    fn structural_anchor_resolution_skips_normalizing_ascii_concepts() {
+        let g = many_concepts(5_000);
+        let before = SLOW_NORMALIZATIONS.with(std::cell::Cell::get);
+        let anchored = resolve_anchor(&g, "blast radius of SG-Base");
+        let slow = SLOW_NORMALIZATIONS.with(std::cell::Cell::get) - before;
+        assert_eq!(anchored, Some(NodeId(uuid::Uuid::from_u64_pair(2, 1))));
+        assert!(
+            slow < 10,
+            "{slow} full normalizations for one query over 5,000 ASCII concepts"
+        );
+        // The non-ASCII concept still resolves through full normalization.
+        assert_eq!(
+            resolve_anchor(&g, "what depends on caf\u{e9}"),
+            Some(NodeId(uuid::Uuid::from_u64_pair(2, 2)))
+        );
+    }
+
+    /// #165 measurement, not a gate: time `resolve_anchor_choice` on a
+    /// 9,100-concept synthetic store, the size of the store in the issue.
+    /// `cargo test --release --features fixtures --lib \
+    ///  recall::dispatch::tests::anchor_resolution_timing -- --ignored --nocapture`
+    #[test]
+    #[ignore = "measurement; run in release with --nocapture"]
+    fn anchor_resolution_timing() {
+        let g = many_concepts(9_100);
+        let queries = [
+            "blast radius warning dependents",
+            "blast radius",
+            "what depends on SG-Base",
+        ];
+        for q in queries {
+            let _ = resolve_anchor_choice(&g, q);
+            let runs = 20;
+            let start = std::time::Instant::now();
+            for _ in 0..runs {
+                std::hint::black_box(resolve_anchor_choice(&g, q));
+            }
+            let per = start.elapsed() / runs;
+            println!("anchor_resolution_timing {q:?}: {per:?} per query");
+        }
     }
 }

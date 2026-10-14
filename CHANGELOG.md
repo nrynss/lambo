@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+### Performance
+
+- **Structural recall is fast again (#165).** Anchor resolution, which
+  every structural query runs (`blast radius`, `depends on`, ...), Unicode
+  normalized every concept's text on every query, and since 0.6.0 that cost
+  about 260 ms per query on a 9,100-concept store. ASCII text now skips
+  normalization, which is the identity there, and a concept longer than the
+  query is skipped before any work. Non-ASCII concepts are still normalized
+  in full, so matching is unchanged. On a synthetic 9,100-concept store,
+  release build: about 70 ms per query on 0.6.0 against about 1 ms now.
+- **SQLite vectors are packed `f32` (#55).** About 3x smaller on disk and no
+  decimal parsing on session load or the recall scan. Measured on a
+  generated 3,600-concept store at dim 1024 (release build): file 47.3 MB
+  as text against 17.1 MB packed; decoding every vector 161 ms as text
+  against 3.4 ms packed; `load_session` on the packed store 83 ms. The
+  transcode itself took 0.44 s. Round-trips are bit-exact.
+  
 ### Upgrading from 0.6.0
 
 - **SQLite stores need `lambo provision` once (#55).** Concept vectors are
@@ -15,15 +32,6 @@
   writing text rows. A 0.6.0 binary cannot read a migrated store's vectors
   (it fails loudly on load), so keep a backup if you may roll back.
   Postgres and Cockroach are unaffected.
-
-### Performance
-
-- **SQLite vectors are packed `f32` (#55).** About 3x smaller on disk and no
-  decimal parsing on session load or the recall scan. Measured on a
-  generated 3,600-concept store at dim 1024 (release build): file 47.3 MB
-  as text against 17.1 MB packed; decoding every vector 161 ms as text
-  against 3.4 ms packed; `load_session` on the packed store 83 ms. The
-  transcode itself took 0.44 s. Round-trips are bit-exact.
 
 ## 0.6.0 (2026-10-13)
 
