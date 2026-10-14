@@ -245,7 +245,28 @@ fn split_camel_case(s: &str) -> String {
 /// Pure ASCII contains none of these, so every committed fixture and every
 /// pinned canonicalization case is byte-identical through this change — the same
 /// argument the NFC change above rests on.
+///
+/// ## Identifier tokens are not stemmed (#148)
+///
+/// A token containing an ASCII digit, `/` or `.` is an identifier (a hash, a
+/// short id, a version, a path, a file name), not an English word, and is
+/// kept as it is after lowercasing. Stemming it merged distinct identifiers:
+/// the Porter stemmer drops a trailing `e`, so `2122de39e47e` and
+/// `2122de39e47` were one key and one concept. This is a deliberate, approved
+/// change to spec section 7.1 step 2; `lambo provision` re-keys stored
+/// concepts written under the old rule (see [`legacy_canonical_key`]).
 pub fn normalize_tokens(content: &str) -> Vec<String> {
+    tokens(content, true)
+}
+
+/// Whether `token` is identifier-like and therefore not stemmed (#148).
+pub fn is_identifier_token(token: &str) -> bool {
+    token
+        .chars()
+        .any(|c| c.is_ascii_digit() || c == '/' || c == '.')
+}
+
+fn tokens(content: &str, keep_identifiers: bool) -> Vec<String> {
     let nfc: String = content
         .chars()
         .filter(|c| !is_invisible(*c))
@@ -256,8 +277,23 @@ pub fn normalize_tokens(content: &str) -> Vec<String> {
         .filter(|t| !t.is_empty())
         .map(str::to_lowercase)
         .filter(|t| !STOPWORDS.contains(&t.as_str()))
-        .map(|t| STEMMER.stem(&t).into_owned())
+        .map(|t| {
+            if keep_identifiers && is_identifier_token(&t) {
+                t
+            } else {
+                STEMMER.stem(&t).into_owned()
+            }
+        })
         .collect()
+}
+
+/// The canonical key as builds before #148 derived it, stemming every token.
+/// Used only by the `lambo provision` re-key to recognise a stored key the
+/// old rule wrote; nothing derives new keys with it.
+pub fn legacy_canonical_key(content: &str, synonyms: impl Fn(&str) -> Option<&str>) -> String {
+    let raw = content.trim();
+    let effective = synonyms(raw).unwrap_or(raw);
+    tokens_to_key(&mut tokens(effective, false))
 }
 
 /// Step 3 — sort stems and join with single spaces.
@@ -1019,5 +1055,41 @@ mod tests {
                 "category {category}, input {input:?}"
             );
         }
+    }
+
+    /// #148: a token holding a digit, `/` or `.` is an identifier and is not
+    /// stemmed; plain words still are, in the same text.
+    #[test]
+    fn identifier_tokens_are_not_stemmed() {
+        assert!(is_identifier_token("2122de39e47e"));
+        assert!(is_identifier_token("src/main.rs"));
+        assert!(is_identifier_token("v2"));
+        assert!(!is_identifier_token("schemas"));
+        assert_eq!(
+            normalize_tokens("Release 2122de39e47e schemas"),
+            vec!["releas", "2122de39e47e", "schema"]
+        );
+        assert_eq!(
+            normalize_tokens("configs/release.yaml"),
+            vec!["configs/release.yaml"]
+        );
+        assert_ne!(
+            canonical_key("2122de39e47e", no_synonym),
+            canonical_key("2122de39e47", no_synonym)
+        );
+        assert_ne!(
+            canonical_key("data.base", no_synonym),
+            canonical_key("data.bas", no_synonym)
+        );
+        // The pre-#148 rule, kept for the provision re-key, still stems them.
+        assert_eq!(
+            legacy_canonical_key("2122de39e47e", no_synonym),
+            legacy_canonical_key("2122de39e47", no_synonym)
+        );
+        // No word-only text changes key, so the pinned fixture cases hold.
+        assert_eq!(
+            canonical_key("registering users", no_synonym),
+            legacy_canonical_key("registering users", no_synonym)
+        );
     }
 }

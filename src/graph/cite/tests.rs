@@ -564,10 +564,10 @@ fn a_commit_hash_that_prefixes_a_concept_id_cites_it_unless_its_text_exists() {
 }
 
 /// Fixed ids for the id-shape tests, so no run depends on a random id. The
-/// first is the shape CI flaked on: its 12- and 11-character prefixes
-/// (`2122de39e47e`, `2122de39e47`) share one canonical key, because the
-/// Porter stemmer drops a trailing `e` (see
-/// `hex_text_that_stems_alike_is_one_concept`).
+/// first is the shape CI flaked on: before #148 its 12- and 11-character
+/// prefixes (`2122de39e47e`, `2122de39e47`) shared one canonical key, because
+/// the Porter stemmer dropped a trailing `e` (see
+/// `hex_text_that_stems_alike_is_two_concepts`).
 const FIXED_IDS: [u128; 4] = [
     0x2122de39_e47e_4a51_9c3b_0d6f8e2a1b47,
     0xabcdef01_2345_4678_9abc_def012345678,
@@ -599,8 +599,7 @@ fn only_the_hyphenated_id_and_exactly_eight_hex_characters_are_ids() {
             let deps = [text.as_str()];
             let out = record_action(&mut g, i, &agent(), &action(&deps)).unwrap();
             // The text rule's own answer: the concept carrying the text's
-            // canonical key (created now, or by an earlier text that stems
-            // alike), never the concept whose id the text spells.
+            // canonical key, never the concept whose id the text spells.
             let key = crate::graph::canonical::canonical_key(text, |_| None);
             let target = g.concept_by_key(&key).expect("the text rule wrote it");
             assert_ne!(target, ruling, "{text}");
@@ -654,24 +653,26 @@ fn only_the_hyphenated_id_and_exactly_eight_hex_characters_are_ids() {
     }
 }
 
-/// The CI flake's root cause, pinned: canonicalization (spec section 7.1,
-/// unchanged since 0.5.0) stems every token, and the Porter stemmer drops
-/// a trailing `e`, so `2122de39e47e` and `2122de39e47` are one canonical key
-/// and one concept, whichever came first. The same holds in 0.5.0; it is
-/// the text rule, not anything #36 PR 4 resolves.
+/// #148 (formerly `hex_text_that_stems_alike_is_one_concept`, the CI flake's
+/// root cause): canonicalization used to stem every token, and the Porter
+/// stemmer drops a trailing `e`, so `2122de39e47e` and `2122de39e47` were one
+/// key and one concept. Identifier tokens (a digit, `/` or `.`) are no longer
+/// stemmed, so they are two concepts.
 #[test]
-fn hex_text_that_stems_alike_is_one_concept() {
+fn hex_text_that_stems_alike_is_two_concepts() {
     let key = |t: &str| crate::graph::canonical::canonical_key(t, |_| None);
-    assert_eq!(key("2122de39e47e"), key("2122de39e47"));
+    assert_ne!(key("2122de39e47e"), key("2122de39e47"));
     let (mut g, i) = graph("cite-hex-stem");
     let first = record_action(&mut g, i, &agent(), &action(&["2122de39e47"])).unwrap();
     let minted = node_of(&g, "2122de39e47");
     assert!(first.created.contains(&minted));
     let second = record_action(&mut g, i, &agent(), &action(&["2122de39e47e"])).unwrap();
+    let other = node_of(&g, "2122de39e47e");
+    assert_ne!(other, minted);
+    assert!(second.created.contains(&other));
     assert!(g
-        .edge_between(second.action_node, minted, EdgeType::Dependency)
+        .edge_between(second.action_node, other, EdgeType::Dependency)
         .is_some());
-    assert!(g.concepts().all(|c| c.content != "2122de39e47e"));
 }
 
 /// An id entry is pinned at the ack and checked at the apply; a request

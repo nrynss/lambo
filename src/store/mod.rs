@@ -60,6 +60,8 @@ pub(crate) mod vector;
 // SQLite scan and the pg-family queries implement, plus the shared exact scorer.
 // Ungated: #8's graph-backed source implements it in Memory-only builds too.
 pub(crate) mod vector_source;
+// #148: the provision re-key plan for unstemmed identifier tokens.
+pub mod rekey;
 
 // DSN spelling -> DSN identity. Store-agnostic and always compiled: both the
 // session endpoint (J2) and `StoreConfig::overlay_env` (E2E-F2) need the rule,
@@ -353,6 +355,15 @@ pub trait GraphStore: Send + Sync {
     /// test doubles) has nothing to check.
     async fn preflight_schema(&self) -> Result<(), StoreError> {
         Ok(())
+    }
+
+    /// #148: re-key every stored concept whose key the pre-#148 rule
+    /// (stemming identifier tokens) wrote, run by `lambo provision` after the
+    /// schema. Refuses while a session lease is live; idempotent. Default: an
+    /// adapter with no durable keys (`MemoryStore`, test doubles) has nothing
+    /// to re-key.
+    async fn rekey_canonical_keys(&self) -> Result<rekey::RekeyPlan, StoreError> {
+        Ok(rekey::RekeyPlan::default())
     }
 
     /// Dense-vector width this store will accept, when it persists embeddings.

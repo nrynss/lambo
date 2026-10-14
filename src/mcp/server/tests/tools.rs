@@ -88,7 +88,7 @@ async fn record_action_and_saints_and_stats_round_trip() {
 }
 
 /// #22 PR 4: a concept's own text may not hold a token that canonicalizes
-/// to an image suffix (review M1: including `[image:r17]s`, which stems to
+/// to an image suffix (review M1: including `[image:rab]s`, which stems to
 /// one), while prose that only mentions the suffix, and a reference that
 /// names an image concept, are accepted.
 #[tokio::test]
@@ -112,7 +112,7 @@ async fn the_image_suffix_is_refused_in_concept_text_but_not_in_references() {
         ),
         (
             "lambo_record_action",
-            json!({"agent_id": "agent-a", "action": "dismissed the [image:r17]s"}),
+            json!({"agent_id": "agent-a", "action": "dismissed the [image:rab]s"}),
         ),
     ] {
         let out = call_raw(&s, tool, args).await;

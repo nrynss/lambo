@@ -444,4 +444,16 @@ mod tests {
             assert!(idx.doc_tokens.contains_key(&c.id));
         }
     }
+
+    /// #148: the keyword index tokenizes through `normalize_tokens`, so an
+    /// identifier query term matches only the identifier, not one that
+    /// stems alike.
+    #[test]
+    fn identifier_query_terms_are_not_stemmed() {
+        assert_eq!(normalize_tokens("2122de39e47e"), vec!["2122de39e47e"]);
+        assert_ne!(
+            normalize_tokens("2122de39e47e"),
+            normalize_tokens("2122de39e47")
+        );
+    }
 }

@@ -887,7 +887,7 @@
     {
       "access_count": 0,
       "blast_radius": null,
-      "canonical_key": "src/store/flush.r",
+      "canonical_key": "src/store/flush.rs",
       "canonization_status": "None",
       "concept_type": "Resource",
       "content": "src/store/flush.rs",
@@ -1139,7 +1139,7 @@
     {
       "access_count": 0,
       "blast_radius": null,
-      "canonical_key": "src/store/lease.r",
+      "canonical_key": "src/store/lease.rs",
       "canonization_status": "None",
       "concept_type": "Resource",
       "content": "src/store/lease.rs",
