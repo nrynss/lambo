@@ -187,6 +187,26 @@ async fn a_live_lease_refuses_the_marker_even_with_no_vectors() {
     assert_eq!(codec(&store).await, None);
 }
 
+/// An erased session's tombstone (and a released row) never expires but
+/// names no running holder, so it does not block the transcode.
+#[tokio::test]
+async fn reserved_lease_rows_do_not_block_the_transcode() {
+    let (store, _, _) = text_codec_store().await;
+    for (sid, holder) in [("gone", "lambo:erased"), ("done", "lambo:released")] {
+        sqlx::query(
+            "INSERT INTO session_leases (session_id, holder, acquired_at, expires_at) \
+             VALUES (?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now'), '9999-12-31T00:00:00.000Z')",
+        )
+        .bind(sid)
+        .bind(holder)
+        .execute(store.pool())
+        .await
+        .unwrap();
+    }
+    store.init_schema().await.unwrap();
+    assert_eq!(codec(&store).await.as_deref(), Some(SQLITE_VECTOR_CODEC));
+}
+
 /// A codec this build does not know (a newer lambo's) is refused by both
 /// provision and preflight, never overwritten.
 #[tokio::test]

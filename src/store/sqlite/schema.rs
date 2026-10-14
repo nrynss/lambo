@@ -376,6 +376,12 @@ async fn transcode_text_vectors(conn: &mut SqliteConnection) -> Result<(), Store
         .fetch_all(&mut *conn)
         .await
         .map_err(|e| db_err("init_schema: read live leases", e))?;
+        // An erased session's tombstone never expires and a released row
+        // names no process: neither is a running holder.
+        let live: Vec<_> = live
+            .into_iter()
+            .filter(|(_, holder)| !crate::store::lease::is_reserved_holder(holder))
+            .collect();
         if let Some((session, holder)) = live.first() {
             return Err(StoreError::Capability(format!(
                 "cannot transcode concept vectors to packed f32 while session {session:?} is \
