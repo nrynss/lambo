@@ -1409,7 +1409,7 @@ CREATE INDEX IF NOT EXISTS sessions_idx ON sessions (session_id);
                 sqlite.contains(&"write_intents") && sqlite.contains(&"sessions"),
                 "{sqlite:?}"
             );
-            assert_eq!(sqlite.len(), 11, "sqlite DDL table count: {sqlite:?}");
+            assert_eq!(sqlite.len(), 12, "sqlite DDL table count: {sqlite:?}");
         }
         #[cfg(feature = "store-cockroach")]
         {

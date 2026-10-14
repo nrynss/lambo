@@ -1,8 +1,8 @@
 //! T3.3 — SQLite GraphStore adapter (offline / test tier, spec §3.2–§3.3, §4).
 //!
 //! Same trait surface as [`super::memory::MemoryStore`] over `sqlx::SqlitePool`.
-//! `Concept.embedding` is written and read for flush→load round-trip parity (CON-8 — the
-//! shared text form lives in the `embedding BLOB`) **and**, since F1/F2, queried: the
+//! `Concept.embedding` is written and read for flush→load round-trip parity (CON-8 — packed
+//! little-endian `f32` in the `embedding BLOB` since #55) **and**, since F1/F2, queried: the
 //! adapter advertises `VECTOR_SEARCH` and answers
 //! [`GraphStore::vector_candidates_checked`] with an exact cosine scan over that column.
 //!

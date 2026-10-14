@@ -556,10 +556,9 @@ pub(super) async fn upsert_edges(
 pub(super) struct ConceptBinds {
     concept_type: String,
     status: String,
-    /// CON-8: the embedding is written for flush→load round-trip parity. Same
-    /// wire form as Cockroach's VECTOR text literal (shared store::vector
-    /// codec), stored in the BLOB column; never NULL for a present vector, NULL
-    /// otherwise.
+    /// CON-8: the embedding is written for flush→load round-trip parity, as
+    /// packed little-endian `f32` (#55, `store::vector::encode_vector_blob`)
+    /// in the BLOB column; never NULL for a present vector, NULL otherwise.
     embedding: Option<Vec<u8>>,
     /// #22: the supplied vector's provenance as compact JSON, NULL for a
     /// concept embedded from its own text. Rides with `embedding` on every

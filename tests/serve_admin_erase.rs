@@ -283,6 +283,10 @@ fn census(db: &std::path::Path, session: &str) -> (Vec<(String, i64)>, Option<St
         ));
         let mut rows = Vec::new();
         for table in lambo::store::tables_in_ddl(ddl) {
+            // #55: store-wide (the vector codec), holds no session's rows.
+            if table == "store_meta" {
+                continue;
+            }
             let n: i64 = sqlx::query_scalar(&format!(
                 "SELECT COUNT(*) FROM {table} WHERE session_id = ?1"
             ))
