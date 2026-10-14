@@ -24,7 +24,7 @@ fn plant_concept_with_vector(
 }
 
 /// Seed a session with a durable contract and the given vector-bearing concepts.
-async fn seed_vectors(
+pub(super) async fn seed_vectors(
     store: &SqliteStore,
     sid: &SessionId,
     contract: &EmbeddingContract,
@@ -525,10 +525,13 @@ async fn vector_candidates_refuse_a_malformed_stored_blob() {
     // that surface). What remains reachable is an externally edited database —
     // which is exactly why the read path still cannot trust the stored width.
     for (what, blob) in [
-        ("short", b"[1,0,0]".to_vec()),
-        ("long", b"[1,0,0,0,0]".to_vec()),
-        ("unparseable", b"[1,0,oops,0]".to_vec()),
-        ("not utf-8", vec![0xff, 0xfe, 0x00]),
+        // #55: rows are packed f32, so a wrong width is a whole number of
+        // f32s that disagrees with the contract, and a ragged length (or an
+        // untranscoded text row) is not whole f32s at all.
+        ("short", packed(&[1.0, 0.0, 0.0])),
+        ("long", packed(&[1.0, 0.0, 0.0, 0.0, 0.0])),
+        ("ragged", vec![0x00, 0x00, 0x80, 0x3f, 0x00]),
+        ("text row", b"[1,0,0]".to_vec()),
     ] {
         sqlx::query("UPDATE concepts SET embedding = ? WHERE id = ?")
             .bind(&blob)
@@ -1243,4 +1246,8 @@ async fn vector_candidates_agree_with_an_exact_cosine_oracle_on_both_fixtures() 
     }
     // 2 fixtures × 4 probes × 5 limits.
     assert_eq!(total_assertions, 40, "matrix dimensions drifted");
+}
+
+fn packed(v: &[f32]) -> Vec<u8> {
+    v.iter().flat_map(|x| x.to_le_bytes()).collect()
 }

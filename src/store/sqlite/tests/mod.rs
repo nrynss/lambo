@@ -20,6 +20,8 @@ mod read_only;
 mod schema;
 mod structural;
 mod vectors;
+// #55: packed f32 vectors and the transcode of text-codec stores.
+mod packed_codec;
 // #8: the holder's graph-backed vector source against the SQLite scan.
 mod vector_graph_parity;
 

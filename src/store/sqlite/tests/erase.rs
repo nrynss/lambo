@@ -36,6 +36,10 @@ async fn rows(store: &SqliteStore, table: &str, sid: &SessionId) -> i64 {
 async fn census(store: &SqliteStore, sid: &SessionId) -> Vec<(String, i64)> {
     let mut out = Vec::new();
     for t in tables_in_ddl(INIT_SQL) {
+        // #55: `store_meta` is store-wide (the vector codec), not session data.
+        if t == "store_meta" {
+            continue;
+        }
         out.push((t.to_string(), rows(store, t, sid).await));
     }
     out
@@ -119,6 +123,8 @@ fn erase_covers_every_table_in_the_ddl() {
         .map(|(t, _)| *t)
         .collect();
     covered.insert("session_leases");
+    // #55: store-wide, holds no session's rows, so erase never touches it.
+    covered.insert("store_meta");
     assert_eq!(covered, ddl);
     for (table, sql) in write_rows::ERASE_STATEMENTS {
         assert_eq!(

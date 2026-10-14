@@ -165,8 +165,8 @@ pub(super) async fn load_concepts(
         let blast_radius: Option<i32> = row.try_get(12).map_err(|e| db_err("load concepts", e))?;
         let last_demotion: Option<String> =
             row.try_get(13).map_err(|e| db_err("load concepts", e))?;
-        // CON-8: decode the BLOB back to the shared text form. A corrupt blob
-        // (invalid UTF-8 / unparseable elements) is a backend error, not a panic.
+        // CON-8: decode the packed-f32 BLOB (#55). A corrupt blob (not whole
+        // f32s) is a backend error, not a panic.
         let embedding: Option<Vec<u8>> = row.try_get(14).map_err(|e| db_err("load concepts", e))?;
         let embedding = embedding
             .map(|bytes| decode_vector_blob(&id, &bytes))

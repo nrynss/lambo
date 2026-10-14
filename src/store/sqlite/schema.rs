@@ -4,10 +4,11 @@
 //! (`preflight_schema`). `migrations/sqlite/001_init.sql` is the only source
 //! of table and column names; nothing here re-spells them.
 
-use sqlx::SqlitePool;
+use sqlx::{SqliteConnection, SqlitePool};
 
 use super::codec::db_err;
 use super::SqliteStore;
+use crate::store::vector::{decode_legacy_text_blob, SQLITE_VECTOR_CODEC};
 use crate::store::{
     columns_in_ddl, tables_in_ddl, unprovisioned_column_err, unprovisioned_store_err,
 };
@@ -238,6 +239,43 @@ impl SqliteStore {
             "ALTER TABLE sessions ADD COLUMN last_gc_at TEXT",
         )
         .await?;
+        // #55: last, so every column the transcode reads already exists.
+        self.converge_vector_codec().await?;
+        Ok(())
+    }
+
+    /// #55: bring `concepts.embedding` to packed `f32` and record it.
+    ///
+    /// The codec is never sniffed from the bytes (a packed vector can start
+    /// with `[`): `store_meta.vector_codec = 'f32le'` says the rows are packed,
+    /// and its absence says the store was written by a pre-#55 build, whose
+    /// rows are the CON-8 text literal. Text rows are decoded and re-encoded
+    /// here, without an embedder, and the marker is written in the same
+    /// `BEGIN IMMEDIATE` transaction: a crash leaves the old codec and the old
+    /// rows together, and a rerun on a migrated store reads the marker and
+    /// writes nothing.
+    ///
+    /// Refused while a session lease is live: a running pre-#55 holder would
+    /// keep writing text rows into a store marked packed.
+    async fn converge_vector_codec(&self) -> Result<(), StoreError> {
+        let mut conn = self
+            .pool()
+            .acquire()
+            .await
+            .map_err(|e| db_err("init_schema: vector codec: acquire", e))?;
+        sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut *conn)
+            .await
+            .map_err(|e| db_err("init_schema: vector codec: begin", e))?;
+        let outcome = transcode_text_vectors(&mut conn).await;
+        let end = if outcome.is_ok() {
+            "COMMIT"
+        } else {
+            "ROLLBACK"
+        };
+        let ended = sqlx::query(end).execute(&mut *conn).await;
+        outcome?;
+        ended.map_err(|e| db_err("init_schema: vector codec: commit", e))?;
         Ok(())
     }
 
@@ -285,6 +323,90 @@ impl SqliteStore {
                 return Err(unprovisioned_column_err("sqlite", table, &missing));
             }
         }
+        // #55: the table can exist (an interrupted provision) without the
+        // marker; only the marker says the rows are packed.
+        let codec = read_vector_codec(self.pool()).await?;
+        if codec.as_deref() != Some(SQLITE_VECTOR_CODEC) {
+            return Err(StoreError::Capability(format!(
+                "sqlite store holds concept vectors as {}, and this build reads only packed \
+                 f32 ({SQLITE_VECTOR_CODEC}). Run `lambo provision` (idempotent) against this \
+                 store to transcode them in place, with no session holder running, then retry",
+                codec.map_or_else(
+                    || "decimal text (written before #55)".to_string(),
+                    |c| format!("codec {c:?}")
+                ),
+            )));
+        }
         Ok(())
     }
+}
+
+const VECTOR_CODEC_SQL: &str = "SELECT value FROM store_meta WHERE key = 'vector_codec'";
+
+async fn read_vector_codec(pool: &SqlitePool) -> Result<Option<String>, StoreError> {
+    sqlx::query_scalar(VECTOR_CODEC_SQL)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| db_err("preflight_schema: read store_meta.vector_codec", e))
+}
+
+/// The body of [`SqliteStore::converge_vector_codec`], inside its transaction.
+async fn transcode_text_vectors(conn: &mut SqliteConnection) -> Result<(), StoreError> {
+    let codec: Option<String> = sqlx::query_scalar(VECTOR_CODEC_SQL)
+        .fetch_optional(&mut *conn)
+        .await
+        .map_err(|e| db_err("init_schema: read store_meta.vector_codec", e))?;
+    match codec.as_deref() {
+        Some(SQLITE_VECTOR_CODEC) => return Ok(()),
+        None => {}
+        Some(other) => {
+            return Err(StoreError::Backend(format!(
+                "store_meta.vector_codec is {other:?}, which this build does not know; \
+                 it was written by a newer lambo"
+            )))
+        }
+    }
+    // Checked even when no row holds a vector yet: a live pre-#55 holder
+    // would write its first text rows after the marker said packed.
+    {
+        let live: Vec<(String, String)> = sqlx::query_as(
+            "SELECT session_id, holder FROM session_leases \
+             WHERE expires_at > strftime('%Y-%m-%dT%H:%M:%fZ','now')",
+        )
+        .fetch_all(&mut *conn)
+        .await
+        .map_err(|e| db_err("init_schema: read live leases", e))?;
+        if let Some((session, holder)) = live.first() {
+            return Err(StoreError::Capability(format!(
+                "cannot transcode concept vectors to packed f32 while session {session:?} is \
+                 held by {holder:?} ({} live lease(s)): a running older holder would keep \
+                 writing text rows. Stop every holder on this store, then rerun `lambo provision`",
+                live.len()
+            )));
+        }
+    }
+    let rows: Vec<(String, Vec<u8>)> =
+        sqlx::query_as("SELECT id, embedding FROM concepts WHERE embedding IS NOT NULL")
+            .fetch_all(&mut *conn)
+            .await
+            .map_err(|e| db_err("init_schema: read text vectors", e))?;
+    for (id, text) in &rows {
+        let v = decode_legacy_text_blob(id, text)?;
+        // Not `encode_vector_blob`: a stored row is transcoded as it is. A
+        // legacy row the encoder would now refuse (zero norm) is the data the
+        // store already holds, and re-encoding must not lose it.
+        let packed: Vec<u8> = v.iter().flat_map(|x| x.to_le_bytes()).collect();
+        sqlx::query("UPDATE concepts SET embedding = ? WHERE id = ?")
+            .bind(packed)
+            .bind(id)
+            .execute(&mut *conn)
+            .await
+            .map_err(|e| db_err("init_schema: write packed vector", e))?;
+    }
+    sqlx::query("INSERT INTO store_meta (key, value) VALUES ('vector_codec', ?)")
+        .bind(SQLITE_VECTOR_CODEC)
+        .execute(&mut *conn)
+        .await
+        .map_err(|e| db_err("init_schema: record store_meta.vector_codec", e))?;
+    Ok(())
 }
