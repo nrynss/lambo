@@ -175,3 +175,35 @@ async fn reserved_lease_rows_do_not_block_the_rekey() {
     }
     assert_eq!(store.rekey_canonical_keys().await.unwrap().changes.len(), 1);
 }
+
+/// Keys are caller-supplied, so a concept may already hold another row's
+/// staging placeholder. Without the planner's check the first update pass
+/// trips the unique index and provision rolls back; with it, that row keeps
+/// its old key, is reported, and every other row is still re-keyed.
+#[tokio::test]
+async fn an_occupied_placeholder_is_reported_and_the_rest_rekeyed() {
+    let (store, _) =
+        legacy_store(&["build 2122de39e47e", "release 2122de39e47e", "squatter"]).await;
+    let id: String = sqlx::query_scalar("SELECT id FROM concepts WHERE content = ?")
+        .bind("build 2122de39e47e")
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    sqlx::query("UPDATE concepts SET canonical_key = ? WHERE content = 'squatter'")
+        .bind(crate::store::rekey::placeholder_key(&id))
+        .execute(store.pool())
+        .await
+        .unwrap();
+    let plan = store.rekey_canonical_keys().await.unwrap();
+    assert_eq!(plan.collisions, vec![id], "{plan:?}");
+    assert_eq!(plan.changes.len(), 1, "{plan:?}");
+    let after = keys(&store).await;
+    assert_eq!(
+        after[0],
+        (
+            "build 2122de39e47e".to_string(),
+            legacy_canonical_key("build 2122de39e47e", |_| None)
+        )
+    );
+    assert_eq!(after[1].1, canonical_key("release 2122de39e47e", |_| None));
+}

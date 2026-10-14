@@ -17,7 +17,9 @@
 //! A new key that another concept in the session already holds (possible
 //! only when a current build wrote that concept before the re-key ran) would
 //! break `UNIQUE (session_id, canonical_key)`; that row keeps its old key and
-//! is reported, never merged.
+//! is reported, never merged. So does a row whose staging placeholder
+//! ([`placeholder_key`]) another concept already holds: keys are
+//! caller-supplied, so the planner checks rather than assumes.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -46,7 +48,8 @@ pub struct KeyChange {
 pub struct RekeyPlan {
     /// Rows to re-key, sorted by id.
     pub changes: Vec<KeyChange>,
-    /// Rows that keep their old key because the new one is taken, by id.
+    /// Rows that keep their old key because the new one (or the row's
+    /// staging placeholder) is taken, by id.
     pub collisions: Vec<String>,
 }
 
@@ -69,9 +72,27 @@ pub fn plan_rekey(rows: &[KeyRow], synonyms: &HashMap<(String, String), String>)
             candidates.insert(r.id.clone(), (i, new_key));
         }
     }
+    // A changed row parks on its placeholder between the two update passes.
+    // Keys are caller-supplied, so a non-Observation concept in the same
+    // session may already hold that placeholder; parking there would break
+    // the unique index and roll the whole re-key back. Refuse such a row up
+    // front (it keeps its old key and is reported).
+    let all_keys: HashSet<(&str, &str)> = rows
+        .iter()
+        .filter(|r| !r.observation)
+        .map(|r| (r.session_id.as_str(), r.canonical_key.as_str()))
+        .collect();
+    let mut refused: HashSet<String> = candidates
+        .iter()
+        .filter(|(id, (i, _))| {
+            let r = &rows[*i];
+            !r.observation
+                && all_keys.contains(&(r.session_id.as_str(), placeholder_key(id).as_str()))
+        })
+        .map(|(id, _)| id.clone())
+        .collect();
     // Fixpoint: a candidate whose new key is held by a row that keeps its key
     // is refused, and then its own old key stays held too.
-    let mut refused: HashSet<String> = HashSet::new();
     loop {
         let mut held: HashSet<(&str, &str)> = HashSet::new();
         for r in rows.iter().filter(|r| !r.observation) {
@@ -144,8 +165,8 @@ pub fn report(plan: &RekeyPlan) -> String {
     );
     if !plan.collisions.is_empty() {
         out.push_str(&format!(
-            "; {} kept their old key because a concept written since already holds the new \
-             one: {}",
+            "; {} kept their old key because another concept already holds the new key \
+             (or its re-key placeholder): {}",
             plan.collisions.len(),
             plan.collisions.join(", ")
         ));
@@ -348,6 +369,27 @@ mod tests {
         // Observations are exempt from uniqueness, so they are re-keyed.
         let mut obs = rows.clone();
         obs[0].observation = true;
+        assert_eq!(plan_rekey(&obs, &none()).changes.len(), 1);
+    }
+
+    #[test]
+    fn an_occupied_placeholder_is_refused_before_any_update() {
+        let legacy = legacy_canonical_key("build 2122de39e47e", |_| None);
+        let rows = [
+            row("a", "build 2122de39e47e", &legacy),
+            // A caller-supplied key that happens to be a's staging placeholder.
+            row("p", "anything", &placeholder_key("a")),
+        ];
+        let plan = plan_rekey(&rows, &none());
+        assert!(plan.changes.is_empty(), "{plan:?}");
+        assert_eq!(plan.collisions, vec!["a".to_string()]);
+        // Another session's placeholder text does not block it.
+        let mut other = rows.clone();
+        other[1].session_id = "t".into();
+        assert_eq!(plan_rekey(&other, &none()).changes.len(), 1);
+        // An Observation holding it is exempt from the index.
+        let mut obs = rows.clone();
+        obs[1].observation = true;
         assert_eq!(plan_rekey(&obs, &none()).changes.len(), 1);
     }
 }
