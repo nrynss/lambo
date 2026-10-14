@@ -22,9 +22,10 @@
 --   JSONB         -> TEXT (serialized JSON; adapter marshals/unmarshals)
 --   INT           -> INTEGER
 --   FLOAT         -> REAL
---   VECTOR(1024)  -> BLOB. Written and read for flush->load round-trip parity
---                    (CON-8) as the shared '[x,y,z]' text form; SQLite has no
---                    VECTOR_SEARCH capability, so the column is never queried.
+--   VECTOR(1024)  -> BLOB of packed little-endian f32 (#55), bit-exact for
+--                    flush->load parity (CON-8). Pre-#55 stores hold the
+--                    '[x,y,z]' text form; `store_meta` records which, and
+--                    init_schema transcodes text rows.
 --   now() default -> strftime('%Y-%m-%dT%H:%M:%fZ','now') as the ISO-8601 UTC
 --                    equivalent of Cockroach's now(). (Plain SQLite
 --                    CURRENT_TIMESTAMP would yield 'YYYY-MM-DD HH:MM:SS' UTC;
@@ -88,7 +89,7 @@ CREATE TABLE IF NOT EXISTS concepts (
     canonization_status TEXT NOT NULL DEFAULT 'None',
     blast_radius        INTEGER,
     last_demotion_time  TEXT,
-    embedding           BLOB,   -- shared text form (CON-8); width-agnostic, scanned by vector_candidates_checked
+    embedding           BLOB,   -- packed little-endian f32 (#55; codec in store_meta); width-agnostic, scanned by vector_candidates_checked
     chunk_group_id      TEXT,   -- T2.5 demote sibling co-retrieval key (spec §7/§8, read by T5.2)
     human_confirmed     INTEGER NOT NULL DEFAULT 0, -- C2: explicit human confirmations (solo score)
     embedding_source    TEXT    -- #22: supplied-vector provenance (compact JSON), NULL = embedded from content
@@ -248,3 +249,14 @@ CREATE INDEX IF NOT EXISTS canonization_events_session_time_idx ON canonization_
 -- re-provisioned keeps working — the preflight checks tables and columns, never
 -- indexes, so a missing index costs a scan and never a refusal.
 CREATE INDEX IF NOT EXISTS lease_refusals_session_time_idx ON lease_refusals (session_id, refused_at);
+
+-- #55: store-wide facts the adapter must not guess. `vector_codec` names the
+-- form of every concepts.embedding: 'f32le' (packed little-endian f32). A
+-- store without the row was written by a pre-#55 build, whose rows are the
+-- CON-8 text literal; init_schema (`lambo provision`) transcodes them and
+-- records 'f32le' in one transaction, and the preflight refuses the store
+-- until then.
+CREATE TABLE IF NOT EXISTS store_meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);

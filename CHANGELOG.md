@@ -12,6 +12,26 @@
   query is skipped before any work. Non-ASCII concepts are still normalized
   in full, so matching is unchanged. On a synthetic 9,100-concept store,
   release build: about 70 ms per query on 0.6.0 against about 1 ms now.
+- **SQLite vectors are packed `f32` (#55).** About 3x smaller on disk and no
+  decimal parsing on session load or the recall scan. Measured on a
+  generated 3,600-concept store at dim 1024 (release build): file 47.3 MB
+  as text against 17.1 MB packed; decoding every vector 161 ms as text
+  against 3.4 ms packed; `load_session` on the packed store 83 ms. The
+  transcode itself took 0.44 s. Round-trips are bit-exact.
+  
+### Upgrading from 0.6.0
+
+- **SQLite stores need `lambo provision` once (#55).** Concept vectors are
+  now stored as packed little-endian `f32` instead of decimal text. Until
+  the store is provisioned, every attach, reader and `lambo session`
+  command refuses it with a message naming `lambo provision`. Provision
+  transcodes every existing vector in place, in one transaction, with no
+  embedder call, and records the codec in a new `store_meta` table; a rerun
+  changes nothing. Stop every session holder on the store first: provision
+  refuses while a lease is live, because a running 0.6.0 holder would keep
+  writing text rows. A 0.6.0 binary cannot read a migrated store's vectors
+  (it fails loudly on load), so keep a backup if you may roll back.
+  Postgres and Cockroach are unaffected.
 
 ## 0.6.0 (2026-10-13)
 
