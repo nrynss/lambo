@@ -85,6 +85,7 @@ mod dialect;
 mod leases;
 mod persistence;
 mod pool;
+mod rekey;
 mod schema;
 mod session_load;
 mod sql;
@@ -336,6 +337,10 @@ impl<D: Dialect> GraphStore for PgStore<D> {
 
     async fn preflight_schema(&self) -> Result<(), StoreError> {
         self.verify_schema().await
+    }
+
+    async fn rekey_canonical_keys(&self) -> Result<crate::store::rekey::RekeyPlan, StoreError> {
+        self.rekey_keys().await
     }
 
     fn capabilities(&self) -> Capabilities {

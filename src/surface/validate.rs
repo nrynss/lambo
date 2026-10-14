@@ -183,7 +183,8 @@ pub fn check_action_targets(total: usize) -> Result<(), String> {
 /// ([`crate::graph::image::holds_image_suffix`]): after the canonical
 /// key's own normalization and stemming, a token exactly `[image:<id>]`
 /// with a valid id. That catches `[IMAGE:R17]`, a suffix split by an
-/// invisible character, and `[image:r17]s` (which stems to `[image:r17]`).
+/// invisible character, and `[image:rab]s` (which stems to `[image:rab]`; an id
+/// with a digit is an unstemmed identifier token since #148).
 /// Prose that only mentions the suffix, such as `"see [image: diagram]"`
 /// or `"the [image:<id>] suffix"`, is allowed: none of its tokens is a
 /// suffix, so it can never share an image's key.
@@ -524,14 +525,19 @@ mod tests {
             "render 17 [image:r17]",
             "Render 17 [IMAGE:R17]",
             "[ima\u{200B}ge:r17] render",
-            // Porter strips the trailing `s`, so these stem to `[image:r17]`.
-            "render 17 [image:r17]s",
-            "render 17 [Image:R17]S",
+            // Porter strips the trailing `s`, so these stem to `[image:rab]`.
+            "render [image:rab]s",
+            "render [Image:RAB]S",
         ] {
             let err = check_no_image_suffix("concept.content", text).unwrap_err();
             assert!(err.starts_with("concept.content may not contain"), "{err}");
             assert!(!err.contains("r17") && !err.contains("R17"), "{err}");
+            assert!(!err.contains("rab") && !err.contains("RAB"), "{err}");
         }
+        // #148: a token holding a digit is an identifier and is not stemmed,
+        // so `[image:r17]s` keeps its `s`, is not a suffix and cannot share
+        // an image's key.
+        check_no_image_suffix("concept.content", "render 17 [image:r17]s").unwrap();
     }
 
     /// #22 PR 4 review M1: prose that only mentions the suffix holds no

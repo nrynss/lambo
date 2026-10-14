@@ -286,6 +286,7 @@
 mod codec;
 mod leases;
 mod persistence;
+mod rekey;
 mod schema;
 mod session_load;
 mod split_import;
@@ -503,6 +504,10 @@ impl GraphStore for SqliteStore {
 
     async fn preflight_schema(&self) -> Result<(), StoreError> {
         self.verify_schema().await
+    }
+
+    async fn rekey_canonical_keys(&self) -> Result<crate::store::rekey::RekeyPlan, StoreError> {
+        self.rekey_keys().await
     }
 
     fn capabilities(&self) -> Capabilities {

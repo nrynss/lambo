@@ -440,7 +440,7 @@ The same caption and `image_id` derived again is the same concept, and two image
 
 **One image per call, and only inline.** There is no file path or URL argument.
 
-**Referring to an image concept.** `lambo_derive` and `lambo_record_action`'s `action` refuse an image suffix in a concept's own text: any word that reads as `[image:<id>]` once case is folded, invisible characters are dropped and the word is stemmed (so `[IMAGE:R17]` and `[image:r17]s` are refused, and `see [image: diagram]` is not). To link a text write to an image, name the image concept in `parent_of` or in an action's `produces`, `modifies` or `depends_on`, as `caption [image:<image_id>]`. If the image concept does not exist yet, that creates a text concept with the same content, and a later `lambo_derive_image` with that caption and id fails with `image id taken`; derive the image first.
+**Referring to an image concept.** `lambo_derive` and `lambo_record_action`'s `action` refuse an image suffix in a concept's own text: any word that reads as `[image:<id>]` once case is folded, invisible characters are dropped and the word is stemmed (so `[IMAGE:R17]` and `[image:abc]s` are refused, and `see [image: diagram]` is not). A word containing a digit, `/` or `.` is not stemmed, so `[image:r17]s` is ordinary text: it cannot share an image's key. To link a text write to an image, name the image concept in `parent_of` or in an action's `produces`, `modifies` or `depends_on`, as `caption [image:<image_id>]`. If the image concept does not exist yet, that creates a text concept with the same content, and a later `lambo_derive_image` with that caption and id fails with `image id taken`; derive the image first.
 
 ### lambo_record_action
 

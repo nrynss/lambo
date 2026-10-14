@@ -589,7 +589,8 @@ segmentation, `chunk_group_id` for sibling co-retrieval. Custom `chunk_split_fn`
 v0.6.0 §5.6 steps 1–5, plus step 6.
 
 1. Normalize — lowercase, split hyphens/underscores/camelCase, strip stopwords.
-2. Stem — Porter only (`snowball` and custom `stem_fn` cut).
+2. Stem — Porter only (`snowball` and custom `stem_fn` cut). Identifier tokens (any token
+   containing a digit, `/` or `.`) are not stemmed (errata 2026-10-14, below).
 3. Token-sort → canonical key.
 4. Synonym resolution — **direct lookup only**. Transitive chains, cycle detection, path
    compression, and the merge token (§14.4) are cut.
@@ -600,6 +601,17 @@ v0.6.0 §5.6 steps 1–5, plus step 6.
 Step 6 is the vector index doing real work: it merges concepts that normalization cannot
 ("register user" / "create account"), which is exactly what keeps the graph from
 fragmenting into islands.
+
+**Errata (2026-10-14, issue #148): a deliberate, owner-approved change to this frozen
+section.** Step 2 stemmed every token, and Porter drops a trailing `e`, so identifiers
+that differ only in a stemmed suffix (`2122de39e47e` / `2122de39e47`) shared one key and
+silently became one concept, with one set of dependents and one status. A token
+containing an ASCII digit, `/` or `.` (hashes, short ids, versions, paths, file names) is
+now kept as it is after lowercasing; every other token is stemmed as before, so word-only
+keys and the pinned canonicalization cases are unchanged. The keyword index tokenizes
+through the same normalizer. `lambo provision` re-keys stored concepts whose key the old
+rule wrote (SQLite, Postgres, Cockroach), refusing while a session is held; a rerun is a
+no-op. Concepts that the old rule had already merged stay merged.
 
 ---
 

@@ -1481,6 +1481,10 @@ impl GraphStore for TieredStore {
         self.primary.preflight_schema().await
     }
 
+    async fn rekey_canonical_keys(&self) -> Result<crate::store::rekey::RekeyPlan, StoreError> {
+        self.primary.rekey_canonical_keys().await
+    }
+
     fn vector_dimensions(&self) -> Option<usize> {
         self.primary.vector_dimensions().or(self.vector_dim)
     }

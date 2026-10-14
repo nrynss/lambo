@@ -17,6 +17,8 @@ mod erase;
 mod leases;
 mod persistence;
 mod read_only;
+// #148: the provision re-key for unstemmed identifier tokens.
+mod rekey;
 mod schema;
 mod structural;
 mod vectors;

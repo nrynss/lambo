@@ -18,7 +18,7 @@
   as text against 17.1 MB packed; decoding every vector 161 ms as text
   against 3.4 ms packed; `load_session` on the packed store 83 ms. The
   transcode itself took 0.44 s. Round-trips are bit-exact.
-  
+
 ### Upgrading from 0.6.0
 
 - **SQLite stores need `lambo provision` once (#55).** Concept vectors are
@@ -32,6 +32,25 @@
   writing text rows. A 0.6.0 binary cannot read a migrated store's vectors
   (it fails loudly on load), so keep a backup if you may roll back.
   Postgres and Cockroach are unaffected.
+- **Run `lambo provision` once, with no session holder running (#148).**
+  Canonical keys no longer stem identifier tokens (below), so a concept an
+  older build keyed from text like `release 2122de39e47e` carries a key the
+  new build does not derive. Provision re-keys those concepts in one
+  transaction on SQLite, Postgres and Cockroach, refuses while any session
+  lease is live, and a rerun changes nothing. Until it runs, a write of such
+  text creates a second concept beside the old one; provision then leaves
+  the old one on its key and names it. Concepts the old rule had already
+  merged stay merged.
+
+### Fixed
+
+- **Distinct identifiers no longer merge into one concept (#148).**
+  Canonicalization stemmed every token, and the Porter stemmer drops a
+  trailing `e`, so `2122de39e47e` and `2122de39e47` were one concept that
+  shared dependents and status. A token containing a digit, `/` or `.`
+  (hashes, ids, versions, paths, file names) is now kept as written after
+  lowercasing; words are stemmed as before. Recall's keyword index uses the
+  same rule. This changes spec section 7.1 step 2 (recorded as errata).
 
 ## 0.6.0 (2026-10-13)
 
