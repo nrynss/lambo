@@ -906,3 +906,93 @@ async fn the_alias_preview_previews_similar_suggestions_and_honours_overrides() 
         .unwrap();
     assert!(!bad.held);
 }
+
+/// #178 regression: `prepare` used to clear embeddings before the similar
+/// detector ran, so the vector source never saw any pair. With embeddings
+/// present and `--no-vectors` off, a near-duplicate under the cosine floor
+/// must be suggested.
+#[tokio::test]
+async fn the_alias_preview_similar_vector_source_sees_embeddings() {
+    use crate::canon::alias::PairSource;
+    use crate::canon::alias_preview::SimilarInput;
+    use crate::canon::similar::SimilarParams;
+    use crate::graph::canonical::canonical_key;
+
+    let mut snap = fair::snapshot(true);
+    let template = snap
+        .concepts
+        .iter()
+        .find(|c| c.id == fair::concept_id("lease_alias"))
+        .unwrap()
+        .clone();
+    // Two texts far apart in Jaccard (different wording) but with identical
+    // embeddings so only the vector source can pair them. Same digit runs
+    // and no identifier tokens, so the guards pass.
+    let a_text = "alpha claim about the queue draining cleanly before a checkpoint";
+    let b_text = "omega statement that the buffer empties fully ahead of a snapshot";
+    // Same width as the fair-test fixture's contract; identical unit-ish
+    // vectors so cosine is 1.0 and only the vector source can pair them.
+    let dim = template.embedding.as_ref().map(|v| v.len()).unwrap_or(1024);
+    let shared: Vec<f32> = (0..dim).map(|i| if i == 0 { 1.0 } else { 0.0 }).collect();
+    let mut make = |name: &str, content: &str| {
+        let mut c = template.clone();
+        c.id = fair::hashed_id(&format!("similar-vector/{name}"));
+        c.content = content.into();
+        c.canonical_key = canonical_key(content, |_| None);
+        c.canonization_status = CanonizationStatus::None;
+        c.embedding = Some(shared.clone());
+        let mut d = snap.edges[0].clone();
+        d.id = fair::hashed_id(&format!("similar-vector-derives/{name}"));
+        d.source = c.origin_interaction;
+        d.target = c.id;
+        d.edge_type = EdgeType::Derives;
+        snap.edges.push(d);
+        snap.concepts.push(c.clone());
+        c.id
+    };
+    let a = make("a", a_text);
+    let b = make("b", b_text);
+    snap.embedding = Some(crate::types::EmbeddingContract {
+        kind: "fixture".into(),
+        model: None,
+        dim,
+    });
+    let mut e = snap.edges[0].clone();
+    e.id = fair::hashed_id("similar-vector-cite");
+    e.source = fair::concept_id("a01");
+    e.target = a;
+    e.edge_type = EdgeType::Dependency;
+    snap.edges.push(e);
+
+    let input = PairInput::Similar(Box::new(SimilarInput {
+        params: SimilarParams {
+            // Lexical Jaccard of these texts is well below 0.7; vector only.
+            jaccard: 0.99,
+            cosine: Some(0.99),
+            min_chars: 12,
+            ..SimilarParams::default()
+        },
+        overrides: String::new(),
+    }));
+    let r = alias_preview(
+        snap,
+        &input,
+        &[PromotionPolicy::Swarm],
+        &params(PromotionPolicy::Swarm),
+    )
+    .await
+    .unwrap();
+    assert_eq!(r.pairs_from, PairSource::Similar);
+    let sim = r.similar.as_ref().expect("similarity report");
+    assert!(
+        sim.vector_candidates > 0,
+        "vector source must see the embeddings: {sim:?}"
+    );
+    assert!(
+        sim.pairs
+            .iter()
+            .any(|p| { (p.alias == a && p.ruling == b) || (p.alias == b && p.ruling == a) }),
+        "expected the embedded pair among {:?}",
+        sim.pairs
+    );
+}

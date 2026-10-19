@@ -286,9 +286,20 @@ pub async fn alias_preview(
     policies: &[PromotionPolicy],
     base: &DryRunParams,
 ) -> Result<AliasPreviewReport, LamboError> {
+    // #178: `prepare` clears every embedding (dry-run gates do not read
+    // them). The similar detector's vector source needs them, so detect
+    // before prepare when the input asks for it; Detect/Map are unchanged.
+    let precomputed = if matches!(input, PairInput::Similar(_)) {
+        Some(plan_with(&snap, input)?)
+    } else {
+        None
+    };
     let raised = prepare(&mut snap, base.assume_survived);
     let (clock, rows_after_clock) = clock_check(&snap, base.now);
-    let (plan, planned, similar) = plan_with(&snap, input)?;
+    let (plan, planned, similar) = match precomputed {
+        Some(v) => v,
+        None => plan_with(&snap, input)?,
+    };
     let overlaid = alias::apply(&snap, &plan);
     let mut invariants = plan_invariants(&snap, &overlaid, &plan, input, &planned)?;
 
