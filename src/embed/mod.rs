@@ -953,10 +953,11 @@ fn missing_feature(kind: EmbedderKind) -> EmbedError {
 /// Build the Gemini embedder from resolved config (feature `embed-gemini`).
 ///
 /// Resolves credentials from `gemini_credentials` (explicit path) else the shared chain
-/// [`crate::gcp_auth::credentials_path_from_env`] (`GCP_LAMBO_CREDENTIALS`, falling back to
-/// `GOOGLE_APPLICATION_CREDENTIALS`), which is the same chain the Postgres store's Cloud SQL
-/// IAM login resolves, so one export names one identity for both. Missing credentials are a
-/// clear `Unavailable` naming both variables and the config key. No network is touched here:
+/// [`crate::gcp_auth::credentials_path`] (`GCP_LAMBO_CREDENTIALS`, then
+/// `GOOGLE_APPLICATION_CREDENTIALS`, then gcloud's application-default credentials file),
+/// which is the same chain the Postgres store's Cloud SQL IAM login resolves, so one export
+/// names one identity for both. Missing credentials are a clear `Unavailable` naming both
+/// variables, the config key and the gcloud file it looked for. No network is touched here:
 /// token minting / OAuth happen on first `embed`.
 #[cfg(feature = "embed-gemini")]
 fn build_gemini_embedder(cfg: &EmbedderConfig) -> Result<Box<dyn Embedder>, EmbedError> {
@@ -972,20 +973,21 @@ fn build_gemini_embedder(cfg: &EmbedderConfig) -> Result<Box<dyn Embedder>, Embe
         )));
     }
     // One credential variable, one identity. The store resolves its Cloud SQL credential
-    // through `gcp_auth::credentials_path_from_env` (GCP_LAMBO_CREDENTIALS, falling back
-    // to GOOGLE_APPLICATION_CREDENTIALS); the embedder resolving it any other way is how
+    // through `gcp_auth::credentials_path` (GCP_LAMBO_CREDENTIALS, then
+    // GOOGLE_APPLICATION_CREDENTIALS, then the gcloud ADC file); the embedder resolving it any other way is how
     // the shared-service-account design breaks in the operator's hands, with the store
     // authenticating and the embedder refusing to build off the same export block.
     let creds_path = cfg
         .gemini_credentials
         .clone()
-        .or_else(crate::gcp_auth::credentials_path_from_env)
+        .or_else(crate::gcp_auth::credentials_path)
         .ok_or_else(|| {
-            EmbedError::Unavailable(
-                "Gemini embedder needs service-account credentials: set `gemini_credentials` \
-                 or GCP_LAMBO_CREDENTIALS / GOOGLE_APPLICATION_CREDENTIALS"
-                    .into(),
-            )
+            EmbedError::Unavailable(format!(
+                "Gemini embedder needs Google credentials: set `gemini_credentials` or \
+                 GCP_LAMBO_CREDENTIALS / GOOGLE_APPLICATION_CREDENTIALS, or run `gcloud auth \
+                 application-default login` ({})",
+                crate::gcp_auth::describe_gcloud_adc_path()
+            ))
         })?;
     let creds = load_credentials(&creds_path)?;
     let project = cfg
@@ -1734,8 +1736,7 @@ mod tests {
         // either exported would otherwise see this test build an embedder instead of
         // refusing, and a sibling test setting one would race it.
         let env = crate::test_util::env_lock();
-        env.remove("GCP_LAMBO_CREDENTIALS");
-        env.remove("GOOGLE_APPLICATION_CREDENTIALS");
+        env.clear_google_credentials();
         let r = build_embedder(EmbedderConfig {
             kind: EmbedderKind::Gemini,
             dim: 1536,
@@ -1837,8 +1838,7 @@ mod tests {
 
         // Arm 3: neither. The refusal must name both variables and the config key, so an
         // operator reading it knows every way to answer it.
-        env.remove("GCP_LAMBO_CREDENTIALS");
-        env.remove("GOOGLE_APPLICATION_CREDENTIALS");
+        env.clear_google_credentials();
         let arm3 = build_embedder(cfg()).err().map(|e| e.to_string());
 
         // Arm 4 (L1-R2-2): the config key outranks BOTH variables. Both point at a file
@@ -1873,9 +1873,48 @@ mod tests {
             "gemini_credentials",
             "GCP_LAMBO_CREDENTIALS",
             "GOOGLE_APPLICATION_CREDENTIALS",
+            "gcloud auth application-default login",
+            crate::test_util::NO_GCLOUD_CONFIG_DIR,
         ] {
             assert!(msg.contains(named), "refusal must name {named}, got: {msg}");
         }
+    }
+
+    /// Issue #7: with no config key and neither variable, the embedder builds from the
+    /// authorized-user file `gcloud auth application-default login` writes, found through
+    /// `CLOUDSDK_CONFIG` so the test never reads the real `HOME`. No network: the token is
+    /// minted on first `embed`.
+    #[test]
+    #[cfg(feature = "embed-gemini")]
+    fn gemini_builds_from_the_gcloud_adc_file() {
+        let env = crate::test_util::env_lock();
+        let dir = crate::test_util::ScratchDir::new("lambo-i7-gemini-gcloud-adc");
+        std::fs::write(
+            dir.join("application_default_credentials.json"),
+            serde_json::json!({
+                "type": "authorized_user",
+                "client_id": "id.apps.googleusercontent.com",
+                "client_secret": "not-a-secret",
+                "refresh_token": "not-a-token",
+            })
+            .to_string(),
+        )
+        .unwrap();
+        env.remove("GCP_LAMBO_CREDENTIALS");
+        env.remove("GOOGLE_APPLICATION_CREDENTIALS");
+        env.set("CLOUDSDK_CONFIG", &*dir);
+        let built = build_embedder(EmbedderConfig {
+            kind: EmbedderKind::Gemini,
+            dim: 1536,
+            gemini_project: Some("proj".to_string()),
+            gemini_location: Some("us-central1".to_string()),
+            gemini_credentials: None,
+            ..Default::default()
+        });
+        let id = built
+            .map(|e| crate::embed::gemini_identity(e.as_ref()))
+            .unwrap_or_else(|e| panic!("the gcloud ADC file must build the embedder: {e}"));
+        assert_eq!(id.as_deref(), Some("gemini-embedding-001"));
     }
 
     /// A4 dim guard: any configured dim outside {768, 1536, 3072} is rejected at

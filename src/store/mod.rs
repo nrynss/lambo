@@ -1453,7 +1453,8 @@ CREATE INDEX IF NOT EXISTS sessions_idx ON sessions (session_id);
                 crdb.contains(&"write_intents") && crdb.contains(&"sessions"),
                 "{crdb:?}"
             );
-            assert_eq!(crdb.len(), 11, "cockroach DDL table count: {crdb:?}");
+            // 12 with `store_meta` (#171).
+            assert_eq!(crdb.len(), 12, "cockroach DDL table count: {crdb:?}");
         }
         #[cfg(feature = "store-postgres")]
         {
@@ -1462,7 +1463,8 @@ CREATE INDEX IF NOT EXISTS sessions_idx ON sessions (session_id);
                 pg.contains(&"write_intents") && pg.contains(&"sessions"),
                 "{pg:?}"
             );
-            assert_eq!(pg.len(), 11, "postgres DDL table count: {pg:?}");
+            // 12 with `store_meta` (#171).
+            assert_eq!(pg.len(), 12, "postgres DDL table count: {pg:?}");
         }
     }
 

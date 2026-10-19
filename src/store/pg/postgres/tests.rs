@@ -1008,6 +1008,37 @@ async fn iam_without_credentials_fails_closed_naming_the_variables() {
     let err = store.pool().await.expect_err("must refuse").to_string();
     assert!(err.contains("LAMBO_POSTGRES_IAM"), "{err}");
     assert!(err.contains("GCP_LAMBO_CREDENTIALS"), "{err}");
+    // Issue #7: and it says where it looked for the gcloud file.
+    assert!(
+        err.contains("gcloud") && err.contains(crate::test_util::NO_GCLOUD_CONFIG_DIR),
+        "{err}"
+    );
+}
+
+/// Issue #7: with neither variable set, the IAM login takes the file `gcloud auth
+/// application-default login` wrote, found through `CLOUDSDK_CONFIG` here so the test
+/// never reads the real `HOME`. Construction resolves the path; nothing is loaded yet.
+#[test]
+fn iam_takes_the_gcloud_adc_file_when_no_variable_names_one() {
+    let dir = crate::test_util::ScratchDir::new("lambo-pg-iam-gcloud-adc");
+    let adc = dir.join("application_default_credentials.json");
+    std::fs::write(&adc, "{}").unwrap();
+    let store = {
+        let env = crate::test_util::env_lock();
+        env.set("LAMBO_POSTGRES_IAM", "1");
+        env.remove("GCP_LAMBO_CREDENTIALS");
+        env.remove("GOOGLE_APPLICATION_CREDENTIALS");
+        env.set("CLOUDSDK_CONFIG", &*dir);
+        PostgresStore::new(StoreConfig {
+            kind: StoreKind::Postgres,
+            dsn: Some("postgres://u@127.0.0.1:1/lambo".into()),
+            path: None,
+            vector_dim: Some(8),
+        })
+        .expect("construct")
+    };
+    let setup = store.iam_setup.as_ref().expect("IAM requested");
+    assert_eq!(setup.credentials.as_deref(), Some(adc.as_path()));
 }
 
 /// `LAMBO_POSTGRES_IAM=` (set, but empty) is the ordinary password path, deliberately.
@@ -1104,6 +1135,8 @@ fn with_iam_env_value<T>(
         None => env.remove("GCP_LAMBO_CREDENTIALS"),
     }
     env.remove("GOOGLE_APPLICATION_CREDENTIALS");
+    // Issue #7: and no gcloud ADC file under the developer's real HOME either.
+    env.set("CLOUDSDK_CONFIG", crate::test_util::NO_GCLOUD_CONFIG_DIR);
     build()
 }
 

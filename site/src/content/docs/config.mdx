@@ -195,6 +195,16 @@ A store that persists vectors declares its own width, and Lambo refuses to start
 
 While `lambo serve` sits idle, the operating system can compress or swap out model weights that nothing is touching, and the next call pays to bring them back. On Apple silicon the candle embedder's weights live in unified memory, so this is where it shows. Keep-warm embeds one short fixed probe on an interval and discards the vector. It writes nothing to the store, the graph or the call ledger, and it is not part of the embedding contract, so you can change it without re-embedding. The first touch comes one interval after startup, never during it.
 
+### Google credentials
+
+The `gemini` embedder and a Cloud SQL IAM login (`LAMBO_POSTGRES_IAM=1` on the `postgres` store) authenticate as one Google identity. The embedder's `gemini_credentials` key (or `LAMBO_GEMINI_CREDENTIALS`) names its file directly; otherwise both use the first of these that answers:
+
+1. `GCP_LAMBO_CREDENTIALS`, the path of a service-account key or an authorized-user credentials file.
+2. `GOOGLE_APPLICATION_CREDENTIALS`, the same.
+3. The file `gcloud auth application-default login` writes: `$CLOUDSDK_CONFIG/application_default_credentials.json` when `CLOUDSDK_CONFIG` is set, otherwise `~/.config/gcloud/application_default_credentials.json` (`%APPDATA%\gcloud\application_default_credentials.json` on Windows).
+
+An empty variable counts as unset. A variable naming a missing file is an error that names the path; it never falls through to the gcloud file. The gcloud file is used only if it exists and is a file, so after `gcloud auth application-default login` no variable is needed.
+
 ### Hosted endpoints
 
 The `bge_m3` kind speaks the OpenAI embeddings API (`POST <url>/v1/embeddings`), so it also reaches a hosted OpenAI-compatible endpoint when you give it a token. Cloudflare Workers AI serves BGE-M3 at 1024 dimensions:

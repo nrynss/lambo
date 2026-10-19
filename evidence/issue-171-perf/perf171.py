@@ -149,6 +149,18 @@ def main():
             subprocess.run([o.bin, "provision", "--config", cfg], check=True, capture_output=True)
             prov.append((time.perf_counter() - t) * 1000)
         res["provision_ms"] = summ(prov)
+        # #171 part 3: the forced full re-key scan, on a binary that has
+        # `--rekey` (older ones refuse the flag, and the row is left out).
+        forced = []
+        for _ in range(5):
+            t = time.perf_counter()
+            r = subprocess.run([o.bin, "provision", "--rekey", "--config", cfg], capture_output=True)
+            if r.returncode != 0:
+                forced = []
+                break
+            forced.append((time.perf_counter() - t) * 1000)
+        if forced:
+            res["provision_rekey_ms"] = summ(forced)
 
         p, url, startup = start(o.bin, cfg, o.port, runtime, log)
         procs.append(p)

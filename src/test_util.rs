@@ -117,6 +117,10 @@ pub fn env_lock() -> EnvGuard {
     }
 }
 
+/// A gcloud configuration directory that does not exist, for tests that must see no
+/// gcloud application-default credentials. See [`EnvGuard::clear_google_credentials`].
+pub const NO_GCLOUD_CONFIG_DIR: &str = "/nonexistent/lambo-test-no-gcloud-config";
+
 /// Proof that the caller holds the process-environment lock, and the scope of
 /// its mutations. See [`env_lock`].
 pub struct EnvGuard {
@@ -140,6 +144,17 @@ impl EnvGuard {
         self.remember(key);
         // SAFETY: see `mutate`.
         unsafe { Self::mutate(key, None) }
+    }
+
+    /// Leave this process no Google credential to find (issue #7): both credential
+    /// variables unset, and `CLOUDSDK_CONFIG` pointed at a directory that does not exist,
+    /// so the chain cannot fall through to a developer's own `gcloud auth
+    /// application-default login` file under the real `HOME`. Removing the two variables
+    /// alone is no longer "no credential" on a machine that has run gcloud.
+    pub fn clear_google_credentials(&self) {
+        self.remove("GCP_LAMBO_CREDENTIALS");
+        self.remove("GOOGLE_APPLICATION_CREDENTIALS");
+        self.set("CLOUDSDK_CONFIG", NO_GCLOUD_CONFIG_DIR);
     }
 
     fn remember(&self, key: &std::ffi::OsStr) {

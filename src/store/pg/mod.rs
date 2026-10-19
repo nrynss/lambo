@@ -298,7 +298,8 @@ impl<D: Dialect> PgStore<D> {
             pool: tokio::sync::OnceCell::new(),
             #[cfg(feature = "store-postgres")]
             iam_setup: (D::SUPPORTS_CLOUD_SQL_IAM_AUTH && iam_auth_requested()).then(|| IamSetup {
-                credentials: crate::gcp_auth::credentials_path_from_env(),
+                credentials: crate::gcp_auth::credentials_path(),
+                gcloud_adc: crate::gcp_auth::describe_gcloud_adc_path(),
             }),
             #[cfg(feature = "store-postgres")]
             iam: tokio::sync::Mutex::new(None),
