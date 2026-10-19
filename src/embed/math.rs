@@ -46,12 +46,9 @@ fn lane_sums(a: &[f32], b: &[f32]) -> (f32, f32, f32) {
     let mut dot = [0.0f32; LANES];
     let mut na = [0.0f32; LANES];
     let mut nb = [0.0f32; LANES];
-    let a_chunks = a.chunks_exact(LANES);
-    let b_chunks = b.chunks_exact(LANES);
-    let (a_tail, b_tail) = (a_chunks.remainder(), b_chunks.remainder());
-    for (x, y) in a_chunks.zip(b_chunks) {
-        let x: &[f32; LANES] = x.try_into().expect("chunks_exact yields LANES");
-        let y: &[f32; LANES] = y.try_into().expect("chunks_exact yields LANES");
+    let (a_chunks, a_tail) = a.as_chunks::<LANES>();
+    let (b_chunks, b_tail) = b.as_chunks::<LANES>();
+    for (x, y) in a_chunks.iter().zip(b_chunks) {
         for j in 0..LANES {
             dot[j] += x[j] * y[j];
             na[j] += x[j] * x[j];
