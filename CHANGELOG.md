@@ -32,6 +32,17 @@
   1,104 recalls per second (`evidence/issue-171-perf/`). Scores can differ
   from 0.6.0 in the last bit or so; rankings break ties by key and id as
   before.
+- **A stream of writes no longer pays a full rescore per write (#171).** A
+  rescore walked each concept's incident edges three times. It now walks
+  them once, with the same result to the bit (checked against the old path
+  in the tests): 201 ms to 31 ms per rescore of a 9,100-concept session. A
+  wake-triggered daemon cycle within 25 ms of the previous one now waits
+  out the gap, so the writes in a burst share one rescore of the graph as
+  it then stands. Ticks are not delayed, and the first wake after an idle
+  spell still runs at once, and a tick due inside the gap ends it. End to end over MCP on a 9,500-concept SQLite
+  store, a back-to-back `lambo_derive` is acknowledged in 0.8 ms p50
+  instead of 24.8 ms, and applied in 6.3 ms instead of 32.4 ms. The score
+  table can trail a burst by up to 25 ms more than before.
 
 - **`lambo provision` skips the #148 re-key scan once it has run clean
   (#171).** The re-key read and re-derived every concept's key on every

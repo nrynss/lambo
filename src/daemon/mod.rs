@@ -1205,10 +1205,39 @@ async fn run_loop(state: LoopState, weights: ScoringWeights, tick: Duration, par
     let mut interval = tokio::time::interval(tick);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut cycle_state = CycleState::default();
+    let mut last_cycle_end: Option<tokio::time::Instant> = None;
     loop {
-        tokio::select! {
-            _ = interval.tick() => {}
-            _ = state.wake.notified() => {}
+        let woken = tokio::select! {
+            _ = interval.tick() => false,
+            _ = state.wake.notified() => true,
+        };
+        // #171 B4: a wake within `WAKE_CYCLE_MIN_GAP` of the last cycle waits
+        // out the gap (see the const). Writes landing meanwhile coalesce into
+        // the one stored `Notify` permit, and the cycle that runs at the end
+        // of the gap rescores the latest epoch, so the table still ends equal
+        // to a full rescore of the final graph.
+        if woken
+            && let Some(end) = last_cycle_end
+            && let at = end + WAKE_CYCLE_MIN_GAP
+            && tokio::time::Instant::now() < at
+        {
+            // A tick that falls due inside the gap ends it early: ticks are
+            // never delayed by the deferral, and the cycle that runs answers
+            // the pending wake too.
+            tokio::select! {
+                biased;
+                _ = interval.tick() => {}
+                () = tokio::time::sleep_until(at) => {}
+            }
+            // The wakes that arrived while we slept are answered by the cycle
+            // about to run, so drop their stored permit instead of running a
+            // second cycle for them. A wake during the cycle itself still
+            // stores one, and gets its own cycle.
+            tokio::select! {
+                biased;
+                _ = state.wake.notified() => {}
+                _ = std::future::ready(()) => {}
+            }
         }
         // CONC-4: contain a panic in the cycle body — log it, keep the loop.
         let contained = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1222,8 +1251,26 @@ async fn run_loop(state: LoopState, weights: ScoringWeights, tick: Duration, par
                  next tick (see run_loop's panic-containment note)"
             );
         }
+        last_cycle_end = Some(tokio::time::Instant::now());
     }
 }
+
+/// The least idle time between the end of one daemon cycle and a
+/// wake-triggered start of the next (#171 B4).
+///
+/// Every write wakes the daemon, and a woken cycle whose epoch moved rescores
+/// every concept under the graph read guard. Under a steady stream of writes
+/// that is a full rescore per write, back to back, and each one holds off the
+/// next write's apply (it needs the write guard). Waiting out this gap caps
+/// the rescore's share of the lock at `R / (R + gap)` for a rescore of `R`,
+/// while the writes in between coalesce into one rescore. Nothing is
+/// approximated: the deferred cycle scores the graph as it is when it runs.
+///
+/// The cost is staleness: the score table may trail the graph by up to this
+/// much longer after a burst, and a recall in that window is computed fresh
+/// rather than cached (P5-3). Ticks are not delayed (a tick due inside the
+/// gap ends it), and the first wake after an idle spell runs at once.
+pub(crate) const WAKE_CYCLE_MIN_GAP: Duration = Duration::from_millis(25);
 
 /// The loop's carry-over state between cycles.
 ///
