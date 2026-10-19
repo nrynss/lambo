@@ -45,7 +45,7 @@ pub(crate) const LAMBO_CREDENTIAL_ENVS: &[&str] = &[
     "LAMBO_COCKROACH_DSN",
     "LAMBO_POSTGRES_DSN",
     "DATABASE_URL",
-    // `gcp_auth::credentials_path_from_env` and the Gemini embedder
+    // `gcp_auth::credentials_path` and the Gemini embedder
     "GCP_LAMBO_CREDENTIALS",
     "GOOGLE_APPLICATION_CREDENTIALS",
     "LAMBO_GEMINI_CREDENTIALS",
@@ -300,7 +300,7 @@ mod tests {
                 env.remove("GOOGLE_APPLICATION_CREDENTIALS");
                 env.set(name, "/nonexistent/lambo-l2-pin.json");
                 assert_eq!(
-                    crate::gcp_auth::credentials_path_from_env(),
+                    crate::gcp_auth::credentials_path(),
                     Some(std::path::PathBuf::from("/nonexistent/lambo-l2-pin.json")),
                     "{name}"
                 );

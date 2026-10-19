@@ -44,9 +44,14 @@ pub(crate) fn iam_auth_requested() -> bool {
 #[cfg(feature = "store-postgres")]
 #[derive(Debug, Clone)]
 pub(super) struct IamSetup {
-    /// Shared credential file, or `None` when neither variable named one (which is an
-    /// error the first pool reports, naming both variables).
+    /// Shared credential file, or `None` when neither variable named one and there is no
+    /// gcloud application-default credentials file (an error the first pool reports,
+    /// naming both variables and where it looked for the gcloud file).
     pub(super) credentials: Option<std::path::PathBuf>,
+    /// Where the chain looked for the gcloud file, captured with `credentials` so the
+    /// refusal describes the environment the store was built from, not the one the
+    /// first pool happens to run in.
+    pub(super) gcloud_adc: String,
 }
 
 /// The shared-service-account login state: the token source, and the pool the current
@@ -304,17 +309,16 @@ impl<D: Dialect> PgStore<D> {
     async fn iam_pool(&self) -> Result<PgPool, StoreError> {
         let mut guard = self.iam.lock().await;
         if guard.is_none() {
-            let path = self
-                .iam_setup
-                .as_ref()
-                .and_then(|s| s.credentials.clone())
-                .ok_or_else(|| {
-                    backend(format!(
-                        "{} IAM auth setup: {LAMBO_POSTGRES_IAM_ENV} is set but \
-                         GCP_LAMBO_CREDENTIALS / GOOGLE_APPLICATION_CREDENTIALS is unset",
-                        D::STORE_TYPE_NAME
-                    ))
-                })?;
+            let setup = self.iam_setup.as_ref();
+            let path = setup.and_then(|s| s.credentials.clone()).ok_or_else(|| {
+                backend(format!(
+                    "{} IAM auth setup: {LAMBO_POSTGRES_IAM_ENV} is set but \
+                         GCP_LAMBO_CREDENTIALS / GOOGLE_APPLICATION_CREDENTIALS is unset and \
+                         there is no gcloud application-default credentials file ({})",
+                    D::STORE_TYPE_NAME,
+                    setup.map_or("not resolved", |s| s.gcloud_adc.as_str())
+                ))
+            })?;
             let creds = crate::gcp_auth::load_credentials(&path)
                 .map_err(|e| backend(format!("{} IAM auth setup: {e}", D::STORE_TYPE_NAME)))?;
             let client = crate::gcp_auth::build_client()
