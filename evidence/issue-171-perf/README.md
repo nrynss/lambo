@@ -157,7 +157,9 @@ only.
 A provision on a store whose re-key already ran clean drops from 143 ms to
 5.6 ms: it reads one `store_meta` row instead of re-deriving 9,508 keys.
 `--rekey` costs what every provision cost before. This branch does not
-touch the recall or write paths, so the other rows are noise; they move by
-up to about 1 ms in both directions between two back-to-back runs.
+touch the recall or write paths. The other rows above are a single pair of
+runs: concurrent-recall p90 moved by 7.5 ms and identifier-recall p90 by
+3.0 ms; the rest stay within about 1–2 ms. That is not enough to call them
+noise or a regression.
 
 Raw: `main-a94942b2.json`, `pr-171c.json`.
