@@ -37,18 +37,21 @@ use crate::store::{GraphStore, StoreKind};
 /// After the schema, every durable kind re-keys concepts whose key the
 /// pre-#148 rule wrote (identifier tokens stemmed); see
 /// [`crate::store::rekey`]. Refused while a session is held; a rerun is a
-/// no-op.
+/// no-op. Once a re-key has finished with no collision the store records it
+/// and later runs skip the scan (#171); `force_rekey` (`--rekey`) runs it
+/// anyway.
 pub async fn run(
     store: Box<dyn GraphStore>,
     kind: StoreKind,
     dsn: Option<&str>,
+    force_rekey: bool,
 ) -> Result<String, CliError> {
     let schema = provision_schema(store.as_ref(), kind, dsn).await?;
     if kind == StoreKind::Memory {
         return Ok(schema);
     }
     let plan = store
-        .rekey_canonical_keys()
+        .rekey_canonical_keys(force_rekey)
         .await
         .map_err(|e| CliError::Runtime(format!("rekey canonical keys: {e}")))?;
     Ok(format!("{schema}; {}", crate::store::rekey::report(&plan)))
@@ -195,7 +198,7 @@ mod tests {
     #[tokio::test]
     async fn provision_memory_store_succeeds_without_sql() {
         let store: Box<dyn GraphStore> = Box::new(MemoryStore::new());
-        let out = run(store, StoreKind::Memory, None)
+        let out = run(store, StoreKind::Memory, None, false)
             .await
             .expect("memory provision");
         assert!(
@@ -301,7 +304,7 @@ mod postgres_arm_tests {
         let store: Box<dyn GraphStore> = Box::new(RecordingStore {
             init_calls: calls.clone(),
         });
-        let out = run(store, StoreKind::Postgres, None)
+        let out = run(store, StoreKind::Postgres, None, false)
             .await
             .expect("postgres provision must init_schema in B2");
         assert_eq!(calls.load(Ordering::SeqCst), 1, "init_schema must run once");

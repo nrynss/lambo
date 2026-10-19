@@ -1,0 +1,115 @@
+{
+  "label": "pr-171c",
+  "ack_all_writes_s": 141.3,
+  "derive_batch_ack_ms": {
+    "n": 142,
+    "p50": 1.78,
+    "p90": 2.33,
+    "p99": 5.41,
+    "mean": 1.93,
+    "max": 8.1
+  },
+  "derive_batch_drain_ms": {
+    "n": 142,
+    "p50": 1005.04,
+    "p90": 1006.01,
+    "p99": 1007.0,
+    "mean": 990.99,
+    "max": 1007.11
+  },
+  "derive_batch_drain_total_s": 140.7,
+  "drain_after_acks_s": 0.5,
+  "populate_s": 141.8,
+  "store_after_populate": {
+    "concept_count": 9508,
+    "edge_count": 11669,
+    "node_count": 9850,
+    "embedded_concepts": 9508
+  },
+  "db_mb": 52.5,
+  "provision_ms": {
+    "n": 5,
+    "p50": 5.58,
+    "p90": 7.58,
+    "p99": 7.58,
+    "mean": 5.93,
+    "max": 7.58
+  },
+  "provision_rekey_ms": {
+    "n": 5,
+    "p50": 143.01,
+    "p90": 156.48,
+    "p99": 156.48,
+    "mean": 145.4,
+    "max": 156.48
+  },
+  "startup_loaded_ms": 560.6,
+  "latency_ms": {
+    "keyword_semantic_recall": {
+      "n": 60,
+      "p50": 8.05,
+      "p90": 9.69,
+      "p99": 10.37,
+      "mean": 8.04,
+      "max": 10.85
+    },
+    "structural_hit": {
+      "n": 30,
+      "p50": 2.21,
+      "p90": 2.54,
+      "p99": 2.68,
+      "mean": 2.18,
+      "max": 2.68
+    },
+    "structural_miss": {
+      "n": 30,
+      "p50": 8.03,
+      "p90": 10.58,
+      "p99": 12.24,
+      "mean": 8.44,
+      "max": 12.24
+    },
+    "identifier_recall": {
+      "n": 30,
+      "p50": 5.75,
+      "p90": 9.53,
+      "p99": 31.82,
+      "mean": 7.19,
+      "max": 31.82
+    },
+    "recall_16_concurrent": {
+      "n": 320,
+      "p50": 12.6,
+      "p90": 17.21,
+      "p99": 22.25,
+      "mean": 12.96,
+      "max": 23.36,
+      "rps": 1112.1,
+      "errors": 0
+    },
+    "derive_ack_back_to_back": {
+      "n": 30,
+      "p50": 0.86,
+      "p90": 30.53,
+      "p99": 31.99,
+      "mean": 6.95,
+      "max": 31.99
+    },
+    "derive_applied_back_to_back": {
+      "n": 30,
+      "p50": 8.86,
+      "p90": 38.99,
+      "p99": 39.97,
+      "mean": 15.59,
+      "max": 39.97
+    },
+    "derive_ack_isolated": {
+      "n": 15,
+      "p50": 1.51,
+      "p90": 2.0,
+      "p99": 2.1,
+      "mean": 1.62,
+      "max": 2.1
+    }
+  }
+}

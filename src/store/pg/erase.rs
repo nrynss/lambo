@@ -29,6 +29,9 @@ use crate::types::{AgentId, SessionId, StoreError};
 fn erase_covers_every_table_in_both_ddls() {
     let mut covered: BTreeSet<&str> = ERASE_STATEMENTS.iter().map(|(t, _)| *t).collect();
     covered.insert("session_leases");
+    // #171: `store_meta` is store-wide (the re-key marker), not session data,
+    // so erasing a session never touches it.
+    covered.insert("store_meta");
     for (dialect, ddl) in [
         (
             "postgres",
@@ -60,6 +63,11 @@ async fn census<D: Dialect>(store: &PgStore<D>, sid: &SessionId) -> Vec<(String,
     let pool = store.pool().await.expect("pool");
     let mut out = Vec::new();
     for table in tables_in_ddl(&store.ddl) {
+        // #171 / #55: store_meta is store-wide (re-key marker, vector codec),
+        // not session data — it has no session_id column.
+        if table == "store_meta" {
+            continue;
+        }
         let n: i64 = sqlx::query_scalar(&format!(
             "SELECT COUNT(*) FROM {table} WHERE session_id = $1"
         ))

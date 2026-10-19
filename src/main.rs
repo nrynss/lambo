@@ -266,7 +266,16 @@ enum Commands {
     ///
     /// Does **not** construct the embedder (ops-only path). Still validates Level B
     /// store selection so a misconfigured `kind` fails closed early.
-    Provision,
+    Provision {
+        /// Re-check every concept's canonical key even if the store records that
+        /// a previous provision already re-keyed it (#148, #171). Use it after a
+        /// pre-0.7.0 binary has written to a Postgres or Cockroach store.
+        #[arg(
+            long,
+            help = "Re-check every concept's canonical key even if the store records that a previous provision already re-keyed it (#148, #171). Use it after a pre-0.7.0 binary has written to a Postgres or Cockroach store."
+        )]
+        rekey: bool,
+    },
     /// Erase a whole session for account deletion: every node, edge, vector, canonization record and write intent, plus the session row with its embedding contract. A tombstone keeps the id from being written again. Safe to repeat. Refused while a live writer holds the session.
     ///
     /// Operator-only: the authority is access to the store, never an agent id.
@@ -841,7 +850,7 @@ impl Commands {
             Self::Saints { .. } => "saints",
             Self::Inspect { .. } => "inspect",
             Self::Stats { .. } => "stats",
-            Self::Provision => "provision",
+            Self::Provision { .. } => "provision",
             Self::EraseSession { .. } => "erase-session",
             Self::RecallIndex { .. } => "recall-index",
             Self::Canon { .. } => "canon",
@@ -858,7 +867,7 @@ impl Commands {
         !matches!(
             self,
             Self::Session { .. }
-                | Self::Provision
+                | Self::Provision { .. }
                 | Self::Canon { .. }
                 | Self::EraseSession { .. }
                 | Self::RecallIndex { .. }
@@ -1938,13 +1947,13 @@ fn main() -> ExitCode {
             run_async("stats", lambo::cli::stats::run(store.as_ref(), &session))
         }
         (
-            Commands::Provision,
+            Commands::Provision { rekey },
             Resolved::StoreOnly {
                 store, kind, dsn, ..
             },
         ) => run_async(
             "provision",
-            lambo::cli::provision::run(store, kind, dsn.as_deref()),
+            lambo::cli::provision::run(store, kind, dsn.as_deref(), rekey),
         ),
         (
             Commands::RecallIndex {
