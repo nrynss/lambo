@@ -356,6 +356,10 @@ impl<D: Dialect> GraphStore for PgStore<D> {
         self.write_meta(key, value).await
     }
 
+    async fn write_store_meta_if_absent(&self, key: &str, value: &str) -> Result<bool, StoreError> {
+        self.write_meta_if_absent(key, value).await
+    }
+
     fn capabilities(&self) -> Capabilities {
         Capabilities::VECTOR_SEARCH
     }

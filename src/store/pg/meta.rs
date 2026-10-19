@@ -29,4 +29,21 @@ impl<D: Dialect> PgStore<D> {
         .map_err(backend)?;
         Ok(())
     }
+
+    pub(super) async fn write_meta_if_absent(
+        &self,
+        key: &str,
+        value: &str,
+    ) -> Result<bool, StoreError> {
+        let pool = self.pool().await?;
+        let result = sqlx::query(
+            "INSERT INTO store_meta (key, value) VALUES ($1, $2) ON CONFLICT (key) DO NOTHING",
+        )
+        .bind(key)
+        .bind(value)
+        .execute(&pool)
+        .await
+        .map_err(backend)?;
+        Ok(result.rows_affected() > 0)
+    }
 }

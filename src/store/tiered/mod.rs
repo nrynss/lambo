@@ -1496,6 +1496,10 @@ impl GraphStore for TieredStore {
         self.primary.write_store_meta(key, value).await
     }
 
+    async fn write_store_meta_if_absent(&self, key: &str, value: &str) -> Result<bool, StoreError> {
+        self.primary.write_store_meta_if_absent(key, value).await
+    }
+
     fn vector_dimensions(&self) -> Option<usize> {
         self.primary.vector_dimensions().or(self.vector_dim)
     }

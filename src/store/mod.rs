@@ -400,6 +400,16 @@ pub trait GraphStore: Send + Sync {
         Ok(())
     }
 
+    /// #176: insert one store-wide `store_meta` value only when the key is
+    /// absent. Returns `true` when this call inserted the row. Used by the
+    /// embedder canary's first pin so two writer sessions cannot both invent
+    /// a fingerprint for the same contract. Default: always "inserted" (the
+    /// no-op adapters have nothing to race).
+    async fn write_store_meta_if_absent(&self, key: &str, value: &str) -> Result<bool, StoreError> {
+        let _ = (key, value);
+        Ok(true)
+    }
+
     /// Dense-vector width this store will accept, when it persists embeddings.
     ///
     /// * `Some(n)` — embedder output must be exactly `n`. Cockroach's `n` is its

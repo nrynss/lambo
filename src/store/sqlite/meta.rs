@@ -26,4 +26,20 @@ impl SqliteStore {
         .map_err(|e| db_err("write store_meta", e))?;
         Ok(())
     }
+
+    pub(super) async fn write_meta_if_absent(
+        &self,
+        key: &str,
+        value: &str,
+    ) -> Result<bool, StoreError> {
+        let result = sqlx::query(
+            "INSERT INTO store_meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO NOTHING",
+        )
+        .bind(key)
+        .bind(value)
+        .execute(self.pool())
+        .await
+        .map_err(|e| db_err("write store_meta if absent", e))?;
+        Ok(result.rows_affected() > 0)
+    }
 }

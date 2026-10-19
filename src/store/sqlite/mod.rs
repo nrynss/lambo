@@ -522,6 +522,10 @@ impl GraphStore for SqliteStore {
         self.write_meta(key, value).await
     }
 
+    async fn write_store_meta_if_absent(&self, key: &str, value: &str) -> Result<bool, StoreError> {
+        self.write_meta_if_absent(key, value).await
+    }
+
     fn capabilities(&self) -> Capabilities {
         // F2: the query path exists (`vector_candidates_checked` below), so the
         // capability is honest. It must never be advertised without that

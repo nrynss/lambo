@@ -407,6 +407,35 @@ async fn write_fingerprint(
         .map_err(LamboError::Store)
 }
 
+/// Insert the fingerprint only when the key is free. `Ok(true)` means this
+/// call won the race; `Ok(false)` means another writer already pinned it.
+async fn write_fingerprint_if_absent(
+    store: &dyn GraphStore,
+    key: &str,
+    fingerprint: &Fingerprint,
+) -> Result<bool, LamboError> {
+    let value = serde_json::to_string(fingerprint).map_err(|e| store_err("encode", e))?;
+    store
+        .write_store_meta_if_absent(key, &value)
+        .await
+        .map_err(LamboError::Store)
+}
+
+fn verdict_against(pinned: &[Vec<f32>], live: &[Vec<f32>]) -> CanaryVerdict {
+    let (worst, min_cosine) = pinned
+        .iter()
+        .zip(live)
+        .map(|(p, l)| cosine64(p, l))
+        .enumerate()
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .expect("20 canaries");
+    if min_cosine < CANARY_MIN_COSINE {
+        CanaryVerdict::Drifted { min_cosine, worst }
+    } else {
+        CanaryVerdict::Verified { min_cosine, worst }
+    }
+}
+
 /// Embed the canaries and pin them as this contract's fingerprint,
 /// replacing any earlier one (`lambo re-embed` after a deliberate model
 /// change). A cached #87 threshold is dropped with the old vectors.
@@ -542,11 +571,14 @@ pub(crate) async fn check_at(
         return Ok(configured);
     }
     let key = fingerprint_key(contract);
-    let stored = store
+    let raw_row = store
         .read_store_meta(&key)
         .await
         .map_err(LamboError::Store)?;
-    let stored: Option<Fingerprint> = match stored {
+    // A present but unusable row (wrong canary version, corrupt vectors) must
+    // be overwritten, not raced with insert-if-absent — the key is occupied.
+    let row_occupied = raw_row.is_some();
+    let stored: Option<Fingerprint> = match raw_row {
         None => None,
         Some(raw) => match serde_json::from_str::<Fingerprint>(&raw) {
             Ok(f) if f.version == CANARY_VERSION && f.decoded().is_some() => Some(f),
@@ -554,8 +586,7 @@ pub(crate) async fn check_at(
                 tracing::info!(
                     stored_version = f.version,
                     version = CANARY_VERSION,
-                    "embedder canary set changed or the stored vectors are malformed; pinning \
-                     it again"
+                    "embedder canary set changed or the stored vectors are malformed; pinning                      it again"
                 );
                 None
             }
@@ -616,21 +647,42 @@ pub(crate) async fn check_at(
     };
 
     let (mut fingerprint, verdict) = match stored {
-        None => (fingerprint_of(contract, &live), CanaryVerdict::Pinned),
+        None if row_occupied => {
+            // Stale or corrupt row: replace it. No concurrent first-pin race.
+            let candidate = fingerprint_of(contract, &live);
+            write_fingerprint(store, &key, &candidate).await?;
+            (candidate, CanaryVerdict::Pinned)
+        }
+        None => {
+            // Store-wide atomic insert: two sessions must not both invent a
+            // fingerprint for the same contract. The loser re-reads and
+            // compares its live vectors against the winner's pin.
+            let candidate = fingerprint_of(contract, &live);
+            if write_fingerprint_if_absent(store, &key, &candidate).await? {
+                (candidate, CanaryVerdict::Pinned)
+            } else {
+                let raw = store
+                    .read_store_meta(&key)
+                    .await
+                    .map_err(LamboError::Store)?
+                    .ok_or_else(|| {
+                        store_err(
+                            "pin race",
+                            "another writer claimed the fingerprint and then deleted it",
+                        )
+                    })?;
+                let winner: Fingerprint =
+                    serde_json::from_str(&raw).map_err(|e| store_err("decode winner", e))?;
+                let pinned = winner
+                    .decoded()
+                    .ok_or_else(|| store_err("decode winner", "stored vectors are malformed"))?;
+                let verdict = verdict_against(&pinned, &live);
+                (winner, verdict)
+            }
+        }
         Some(f) => {
             let pinned = f.decoded().expect("checked above");
-            let (worst, min_cosine) = pinned
-                .iter()
-                .zip(&live)
-                .map(|(p, l)| cosine64(p, l))
-                .enumerate()
-                .min_by(|a, b| a.1.total_cmp(&b.1))
-                .expect("20 canaries");
-            let verdict = if min_cosine < CANARY_MIN_COSINE {
-                CanaryVerdict::Drifted { min_cosine, worst }
-            } else {
-                CanaryVerdict::Verified { min_cosine, worst }
-            };
+            let verdict = verdict_against(&pinned, &live);
             (f, verdict)
         }
     };
@@ -643,7 +695,9 @@ pub(crate) async fn check_at(
         });
     }
 
-    let mut dirty = verdict == CanaryVerdict::Pinned;
+    // A fresh Pin already sat down via write_fingerprint_if_absent. Only a
+    // Verified (or a related_pairs update below) needs another write.
+    let mut dirty = false;
     if matches!(verdict, CanaryVerdict::Verified { .. }) {
         fingerprint.verified_at = Some(now);
         dirty = true;
@@ -662,7 +716,15 @@ pub(crate) async fn check_at(
                         "[embedder] related_pairs has fewer than {MIN_RELATED_PAIRS} pairs; \
                          keeping semantic_match_threshold"
                     );
-                    fingerprint.merge_threshold = None;
+                    // Record the unusable verdict against this file's SHA so
+                    // the Warn recheck window still applies; effective_threshold
+                    // refuses pairs < MIN_RELATED_PAIRS.
+                    fingerprint.merge_threshold = Some(DerivedThreshold {
+                        value: 0.0,
+                        pairs: pairs.len(),
+                        source_sha256: sha.clone(),
+                    });
+                    dirty = true;
                 } else {
                     match derive_threshold(embedder, contract, pairs, sha.clone()).await {
                         Ok(d) => {

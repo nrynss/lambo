@@ -622,3 +622,75 @@ async fn a_short_batch_leaves_the_check_unverified_and_pins_nothing() {
         .unwrap()
         .is_none());
 }
+
+#[tokio::test]
+async fn two_sessions_racing_the_first_pin_share_one_fingerprint() {
+    // The second attach must compare against the winner's pin, not invent
+    // another. Pre-seed the store with a pin, then a second check with a
+    // drifted embedder must see Drifted (it lost any chance to pin).
+    let store = store();
+    let key = fingerprint_key(&contract());
+    let probe = Probe::new(0.0);
+    let first = check(&store, &probe, &contract(), &warn(), 0.85)
+        .await
+        .unwrap();
+    assert_eq!(first.verdict, CanaryVerdict::Pinned);
+    let winner = store.read_store_meta(&key).await.unwrap().unwrap();
+
+    // A second "first pin" path: clear is not available, so simulate the
+    // race loser by calling write_store_meta_if_absent ourselves with a
+    // different payload — it must refuse — then check with a drifted probe.
+    let inserted = store
+        .write_store_meta_if_absent(&key, "should-not-land")
+        .await
+        .unwrap();
+    assert!(!inserted);
+    assert_eq!(
+        store.read_store_meta(&key).await.unwrap().as_deref(),
+        Some(winner.as_str())
+    );
+
+    let drifted = Probe::new(0.3);
+    let out = check(&store, &drifted, &contract(), &warn(), 0.85)
+        .await
+        .unwrap();
+    assert!(
+        matches!(out.verdict, CanaryVerdict::Drifted { .. }),
+        "{out:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_too_short_related_pairs_file_is_cached_for_the_recheck_window() {
+    let dir = Scratch::new();
+    let path = dir.0.join("pairs.json");
+    // Fewer than MIN_RELATED_PAIRS.
+    let pairs: Vec<_> = (0..10)
+        .map(|i| serde_json::json!({"a": format!("rel:{i}:a"), "b": format!("rel:{i}:b")}))
+        .collect();
+    std::fs::write(&path, serde_json::to_string(&pairs).unwrap()).unwrap();
+    let opts = CanaryOptions {
+        mode: CanaryMode::Warn,
+        related_pairs: Some(path),
+    };
+    let store = store();
+    let t0 = chrono::Utc::now();
+    let at = |secs: i64| t0 + chrono::Duration::seconds(secs);
+    let probe = Probe::new(0.0);
+    let first = check_at(&store, &probe, &contract(), &opts, 0.85, at(0))
+        .await
+        .unwrap();
+    assert_eq!(first.verdict, CanaryVerdict::Pinned);
+    assert_eq!(first.merge_threshold, 0.85);
+    let verified = check_at(&store, &probe, &contract(), &opts, 0.85, at(1))
+        .await
+        .unwrap();
+    assert!(matches!(verified.verdict, CanaryVerdict::Verified { .. }));
+    let calls = probe.calls();
+    // Inside the window the unusable cache must still short-circuit.
+    let recent = check_at(&store, &probe, &contract(), &opts, 0.85, at(60))
+        .await
+        .unwrap();
+    assert_eq!(recent.verdict, CanaryVerdict::RecentlyVerified);
+    assert_eq!(probe.calls(), calls);
+}

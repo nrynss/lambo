@@ -469,6 +469,17 @@ impl GraphStore for MemoryStore {
         Ok(())
     }
 
+    async fn write_store_meta_if_absent(&self, key: &str, value: &str) -> Result<bool, StoreError> {
+        use std::collections::hash_map::Entry;
+        match self.meta.write().entry(key.to_owned()) {
+            Entry::Vacant(e) => {
+                e.insert(value.to_owned());
+                Ok(true)
+            }
+            Entry::Occupied(_) => Ok(false),
+        }
+    }
+
     fn capabilities(&self) -> Capabilities {
         Capabilities::empty()
     }
