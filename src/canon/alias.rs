@@ -63,6 +63,8 @@ pub enum PairSource {
     Detected,
     /// An operator's reviewed map named it.
     Reviewed,
+    /// The near-duplicate detector suggested it (#178).
+    Similar,
 }
 
 /// One proposed alias-to-ruling pair, before planning.

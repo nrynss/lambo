@@ -822,6 +822,47 @@ enum CanonAction {
             help = "A reviewed map: one `alias-id ruling-id` pair per line (full or 8-hex ids, `#` comments). Without it, the leading-phrase rule proposes the pairs."
         )]
         map: Option<PathBuf>,
+        /// Suggest near-duplicate pairs instead (#178): concepts whose folded text has a character 3-gram Jaccard of at least --jaccard, or whose vectors have a cosine of at least --cosine, and that pass every guard (same digit runs, same identifier tokens, same type unless the text is identical, no Contradicts edge, not Canonical). Suggestions only: nothing is applied.
+        #[arg(
+            long,
+            conflicts_with = "map",
+            help = "Suggest near-duplicate pairs instead (#178): concepts whose folded text has a character 3-gram Jaccard of at least --jaccard, or whose vectors have a cosine of at least --cosine, and that pass every guard (same digit runs, same identifier tokens, same type unless the text is identical, no Contradicts edge, not Canonical). Suggestions only: nothing is applied."
+        )]
+        similar: bool,
+        /// With --similar: the exact 3-gram Jaccard floor.
+        #[arg(long, value_name = "F", default_value_t = lambo::canon::similar::DEFAULT_JACCARD, requires = "similar", help = "With --similar: the exact 3-gram Jaccard floor.")]
+        jaccard: f64,
+        /// With --similar: folded characters a concept needs for the lexical source.
+        #[arg(long, value_name = "N", default_value_t = lambo::canon::similar::DEFAULT_MIN_CHARS, requires = "similar", help = "With --similar: folded characters a concept needs for the lexical source.")]
+        min_chars: usize,
+        /// With --similar: the cosine floor for vector pairs. Defaults to the default semantic_match_threshold; the preview reads no lambo.toml, so pass yours.
+        #[arg(long, value_name = "F", default_value_t = lambo::graph::hybrid::SEMANTIC_MATCH_THRESHOLD_DEFAULT, requires = "similar", help = "With --similar: the cosine floor for vector pairs. Defaults to the default semantic_match_threshold; the preview reads no lambo.toml, so pass yours.")]
+        cosine: f64,
+        /// With --similar: no vector pairs, text only.
+        #[arg(
+            long,
+            requires = "similar",
+            help = "With --similar: no vector pairs, text only."
+        )]
+        no_vectors: bool,
+        /// With --similar: also suggest pairs where a concept is Canonical.
+        #[arg(
+            long,
+            requires = "similar",
+            help = "With --similar: also suggest pairs where a concept is Canonical."
+        )]
+        include_canonical: bool,
+        /// With --similar: recorded decisions, one `accept <alias-id> <ruling-id>` or `reject <id> <id>` per line (full or 8-hex ids, `#` comments). Accepted pairs are previewed as reviewed pairs; neither kind is suggested again.
+        #[arg(
+            long,
+            value_name = "PATH",
+            requires = "similar",
+            help = "With --similar: recorded decisions, one `accept <alias-id> <ruling-id>` or `reject <id> <id>` per line (full or 8-hex ids, `#` comments). Accepted pairs are previewed as reviewed pairs; neither kind is suggested again."
+        )]
+        overrides: Option<PathBuf>,
+        /// With --similar: at most this many suggestions, strongest first.
+        #[arg(long, value_name = "N", default_value_t = lambo::canon::similar::DEFAULT_MAX_PAIRS, requires = "similar", help = "With --similar: at most this many suggestions, strongest first.")]
+        max_pairs: usize,
         /// Also print both full dry runs per policy.
         #[arg(long, help = "Also print both full dry runs per policy.")]
         verbose: bool,
@@ -1321,9 +1362,25 @@ fn run_canon(action: CanonAction) -> ExitCode {
             scratch,
             watch,
             map,
+            similar,
+            jaccard,
+            min_chars,
+            cosine,
+            no_vectors,
+            include_canonical,
+            overrides,
+            max_pairs,
             verbose,
         } => {
             let name = "canon alias-preview";
+            let similar = similar.then(|| canon::SimilarArgs {
+                jaccard,
+                min_chars,
+                cosine: (!no_vectors).then_some(cosine),
+                include_canonical,
+                overrides,
+                max_pairs,
+            });
             match common(
                 store,
                 session,
@@ -1343,6 +1400,7 @@ fn run_canon(action: CanonAction) -> ExitCode {
                     canon::alias_preview(canon::AliasPreviewArgs {
                         common,
                         map,
+                        similar,
                         verbose,
                     }),
                 ),
@@ -2230,6 +2288,43 @@ mod tests {
                 action: CanonAction::AliasPreview { verbose: true, .. }
             })
         ));
+        // #178: --similar and its options; the options need --similar, and
+        // --similar and --map are exclusive. Defaults do not trip `requires`.
+        let base = [
+            "lambo",
+            "canon",
+            "alias-preview",
+            "--store",
+            "c.db",
+            "--session",
+            "s",
+        ];
+        assert!(Cli::try_parse_from(base).is_ok());
+        let with = |extra: &[&str]| {
+            Cli::try_parse_from(base.iter().chain(extra.iter()).copied().collect::<Vec<_>>())
+        };
+        let similar = with(&[
+            "--similar",
+            "--jaccard",
+            "0.8",
+            "--no-vectors",
+            "--overrides",
+            "o.txt",
+        ])
+        .unwrap();
+        assert!(matches!(
+            similar.command,
+            Some(Commands::Canon {
+                action: CanonAction::AliasPreview {
+                    similar: true,
+                    no_vectors: true,
+                    ..
+                }
+            })
+        ));
+        assert!(with(&["--jaccard", "0.8"]).is_err());
+        assert!(with(&["--overrides", "o.txt"]).is_err());
+        assert!(with(&["--similar", "--map", "m.txt"]).is_err());
         // --store and --session are required.
         assert!(Cli::try_parse_from(["lambo", "canon", "dry-run", "--session", "s"]).is_err());
         assert!(Cli::try_parse_from(["lambo", "canon", "dry-run", "--store", "x"]).is_err());
