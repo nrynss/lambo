@@ -332,3 +332,23 @@ async fn a_refused_rekey_records_no_marker_and_an_empty_one_does() {
     );
     assert!(empty.rekey_canonical_keys(false).await.unwrap().skipped);
 }
+
+/// #171: a marker recorded under another key rule is not this rule's, so
+/// provision re-keys and records the current value.
+#[tokio::test]
+async fn a_marker_from_another_key_rule_re_keys() {
+    let (store, _) = legacy_store(&["release 2122de39e47e"]).await;
+    sqlx::query("INSERT INTO store_meta (key, value) VALUES (?, ?)")
+        .bind(crate::store::rekey::REKEY_MARKER_KEY)
+        .bind("147-some-earlier-rule")
+        .execute(store.pool())
+        .await
+        .unwrap();
+    let plan = store.rekey_canonical_keys(false).await.unwrap();
+    assert!(!plan.skipped, "{plan:?}");
+    assert_eq!(plan.changes.len(), 1, "{plan:?}");
+    assert_eq!(
+        marker(&store).await.as_deref(),
+        Some(crate::store::rekey::REKEY_MARKER_VALUE)
+    );
+}
