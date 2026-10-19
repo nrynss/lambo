@@ -56,7 +56,29 @@
   the old one on its key and names it. Concepts the old rule had already
   merged stay merged.
 
+### Breaking (library API)
+
+- **`gcp_auth::credentials_path_from_env` is now `gcp_auth::credentials_path`
+  (#7).** It no longer reads only the environment, so the old name was wrong.
+  It returns the same answer whenever either credential variable is set.
+- **`canon::alias_preview::PairInput` is no longer `Eq` (#178).** Its new
+  `Similar` variant carries `f64` parameters. `PartialEq` remains.
+
 ### Added
+
+- **Gemini and Cloud SQL IAM find gcloud's application-default credentials
+  (#7).** With neither `GCP_LAMBO_CREDENTIALS` nor
+  `GOOGLE_APPLICATION_CREDENTIALS` set, the shared Google credential chain
+  now uses the file `gcloud auth application-default login` writes:
+  `$CLOUDSDK_CONFIG/application_default_credentials.json` when
+  `CLOUDSDK_CONFIG` is set, else
+  `~/.config/gcloud/application_default_credentials.json`
+  (`%APPDATA%\gcloud\...` on Windows). The file is used only if it exists
+  and is a file; a variable naming a missing file still fails loudly naming
+  the path. Exporting `GOOGLE_APPLICATION_CREDENTIALS` by hand after a
+  gcloud login is no longer needed. `CLOUDSDK_CONFIG` joins
+  `RESOLVE_ENV_VARS`; clearing it falls back to the gcloud directory under
+  `HOME`, so a hermetic harness should point it at an empty directory.
 
 - **Near-duplicate alias suggestions: `lambo canon alias-preview --similar`
   (#178).** Concepts the canonical key keeps apart although they are the
@@ -76,7 +98,7 @@
   source takes about 0.4 s and the vector source, 1024 wide, about 1.4 s
   more. Precision on labelled pairs: `evidence/issue-178-similar/`.
   Library: `canon::similar`, `PairInput::Similar`, `PairSource::Similar` and
-  `AliasPreviewReport::similar` are new; `PairInput` is no longer `Eq`.
+  `AliasPreviewReport::similar` are new.
 
 ### Fixed
 
