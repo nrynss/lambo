@@ -409,3 +409,103 @@ async fn wake_without_mutation_publishes_nothing() {
     }
     handle.abort();
 }
+
+/// #171 B4: wakes that arrive within `WAKE_CYCLE_MIN_GAP` of a cycle are held
+/// to the end of the gap and coalesce into one cycle, and that cycle publishes
+/// the table a full rescore of the final graph gives.
+#[tokio::test(start_paused = true)]
+async fn a_burst_of_wakes_coalesces_into_one_deferred_rescore_of_the_final_graph() {
+    let (graph, cid) = locked_graph_with_one_concept();
+    let daemon = Daemon::new(
+        graph.clone(),
+        ScoringWeights::default(),
+        Duration::from_secs(3600),
+    );
+    let handle = daemon.spawn();
+    wait_until(|| daemon.cycles() == 1).await;
+    let iid = match graph.read().node(cid).unwrap() {
+        crate::types::Node::Concept(c) => c.origin_interaction,
+        _ => unreachable!(),
+    };
+
+    // Five writes, each waking the daemon, all inside the gap.
+    let start = tokio::time::Instant::now();
+    for n in 2..7 {
+        graph
+            .write()
+            .insert_concept(concept(n, iid, &format!("burst concept {n}")), iid)
+            .unwrap();
+        daemon.wake();
+        tokio::task::yield_now().await;
+    }
+    let final_epoch = graph.read().epoch();
+    wait_until(|| daemon.scores().epoch == final_epoch).await;
+    assert!(
+        start.elapsed() >= crate::daemon::WAKE_CYCLE_MIN_GAP,
+        "the woken cycle waited out the gap"
+    );
+    assert_eq!(daemon.cycles(), 2, "five wakes in the gap ran one cycle");
+    let expected = crate::daemon::score::rescore(&graph.read(), &ScoringWeights::default());
+    let table = daemon.scores();
+    assert_eq!(table.ranked.len(), expected.len());
+    for (a, b) in table.ranked.iter().zip(&expected) {
+        assert_eq!(a.item, b.item);
+        assert_eq!(a.score.to_bits(), b.score.to_bits());
+    }
+
+    // An idle spell longer than the gap: the next wake runs at once.
+    tokio::time::sleep(crate::daemon::WAKE_CYCLE_MIN_GAP * 4).await;
+    assert_eq!(
+        daemon.cycles(),
+        2,
+        "the coalesced wakes left no stored permit behind"
+    );
+    let before = tokio::time::Instant::now();
+    daemon.wake();
+    wait_until(|| daemon.cycles() == 3).await;
+    assert!(before.elapsed() < crate::daemon::WAKE_CYCLE_MIN_GAP);
+    handle.abort();
+}
+
+/// #171 B4 (CodeRabbit on #185): a tick that falls due inside the wake gap
+/// ends the gap. The cycle runs at the tick, answers the pending wake, and
+/// nothing more runs when the gap would have ended.
+#[tokio::test(start_paused = true)]
+async fn a_tick_due_inside_the_wake_gap_ends_it() {
+    use tokio::time::{sleep_until, Instant};
+    let (graph, cid) = locked_graph_with_one_concept();
+    let iid = match graph.read().node(cid).unwrap() {
+        crate::types::Node::Concept(c) => c.origin_interaction,
+        _ => unreachable!(),
+    };
+    let ms = Duration::from_millis;
+    let start = Instant::now();
+    let daemon = Daemon::new(graph.clone(), ScoringWeights::default(), ms(100));
+    let handle = daemon.spawn();
+    wait_until(|| daemon.cycles() == 1).await;
+    let write = |n: u64| {
+        graph
+            .write()
+            .insert_concept(concept(n, iid, &format!("tick gap concept {n}")), iid)
+            .unwrap();
+        daemon.wake();
+    };
+
+    // 90 ms: long after the first cycle, so the wake runs at once.
+    sleep_until(start + ms(90)).await;
+    write(2);
+    sleep_until(start + ms(91)).await;
+    assert_eq!(daemon.cycles(), 2);
+
+    // 95 ms: inside the gap (to about 115 ms). The tick due at 100 ms ends it.
+    sleep_until(start + ms(95)).await;
+    write(3);
+    sleep_until(start + ms(99)).await;
+    assert_eq!(daemon.cycles(), 2, "the wake waits in the gap");
+    sleep_until(start + ms(101)).await;
+    assert_eq!(daemon.cycles(), 3, "the tick at 100 ms ran the cycle");
+    assert_eq!(daemon.scores().epoch, graph.read().epoch());
+    sleep_until(start + ms(150)).await;
+    assert_eq!(daemon.cycles(), 3, "the gap's end ran nothing more");
+    handle.abort();
+}
