@@ -574,6 +574,31 @@ async fn init_schema_at_two_widths_creates_hnsw() {
             .preflight_schema()
             .await
             .unwrap_or_else(|e| panic!("preflight dim {dim}: {e}"));
+        // #176: the store-wide rows the canary keeps round-trip and upsert
+        // on the `store_meta` table this schema created.
+        assert_eq!(
+            store
+                .read_store_meta("embedder_fingerprint:t")
+                .await
+                .unwrap(),
+            None
+        );
+        store
+            .write_store_meta("embedder_fingerprint:t", "one")
+            .await
+            .unwrap();
+        store
+            .write_store_meta("embedder_fingerprint:t", "two")
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .read_store_meta("embedder_fingerprint:t")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("two")
+        );
 
         let pool = sqlx::PgPool::connect(&dsn)
             .await

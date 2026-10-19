@@ -62,6 +62,12 @@ pub const MIN_RELATED_PAIRS: usize = 100;
 /// startup for ever. A timeout leaves the check unverified, not failed.
 pub const CANARY_EMBED_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// A fingerprint verified this recently is trusted without embedding the
+/// canaries again, so a burst of one-shot CLI writers (each a writer attach)
+/// costs one store read each, not twenty embeds. A pin is never trusted this
+/// way: the first attach after it always verifies.
+pub const CANARY_RECHECK: Duration = Duration::from_secs(10 * 60);
+
 /// The fixed canary set: mixed domains and languages, prose, code,
 /// identifiers and numbers. Versioned by [`CANARY_VERSION`].
 pub const CANARY_PHRASES: [&str; 20] = [
@@ -188,6 +194,10 @@ pub struct Fingerprint {
     pub random_pair: PairQuantiles,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merge_threshold: Option<DerivedThreshold>,
+    /// The last attach that embedded the canaries and found them within
+    /// [`CANARY_MIN_COSINE`]. `None` until the first verification after a pin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl Fingerprint {
@@ -215,6 +225,8 @@ pub enum CanaryVerdict {
     Pinned,
     /// Every phrase is at or above [`CANARY_MIN_COSINE`].
     Verified { min_cosine: f64, worst: usize },
+    /// Verified less than [`CANARY_RECHECK`] ago; nothing was embedded.
+    RecentlyVerified,
     /// At least one phrase is below [`CANARY_MIN_COSINE`].
     Drifted { min_cosine: f64, worst: usize },
     /// The canaries could not be embedded (the embedder is down or slow).
@@ -358,6 +370,7 @@ fn fingerprint_of(contract: &EmbeddingContract, vectors: &[Vec<f32>]) -> Fingerp
         vectors: vectors.iter().map(|v| pack(v)).collect(),
         random_pair: random_pair_quantiles(vectors),
         merge_threshold: None,
+        verified_at: None,
     }
 }
 
@@ -479,6 +492,26 @@ pub async fn check(
     options: &CanaryOptions,
     configured_threshold: f64,
 ) -> Result<CanaryOutcome, LamboError> {
+    check_at(
+        store,
+        embedder,
+        contract,
+        options,
+        configured_threshold,
+        chrono::Utc::now(),
+    )
+    .await
+}
+
+/// [`check`] at a given time (tests drive the [`CANARY_RECHECK`] window).
+pub(crate) async fn check_at(
+    store: &dyn GraphStore,
+    embedder: &dyn Embedder,
+    contract: &EmbeddingContract,
+    options: &CanaryOptions,
+    configured_threshold: f64,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<CanaryOutcome, LamboError> {
     let configured = CanaryOutcome {
         verdict: CanaryVerdict::Off,
         merge_threshold: configured_threshold,
@@ -516,6 +549,27 @@ pub async fn check(
         .as_deref()
         .map(read_related_pairs)
         .transpose()?;
+
+    let cached_sha_matches = |f: &Fingerprint| match (&related, &f.merge_threshold) {
+        (None, _) => true,
+        (Some((_, sha)), Some(d)) => *sha == d.source_sha256,
+        (Some(_), None) => false,
+    };
+    if let Some(f) = &stored {
+        let recent = f.verified_at.is_some_and(|at| {
+            now >= at && (now - at).to_std().is_ok_and(|age| age < CANARY_RECHECK)
+        });
+        if recent && cached_sha_matches(f) {
+            let derived = f.merge_threshold.as_ref().filter(|_| related.is_some());
+            let (merge_threshold, threshold_source) =
+                effective_threshold(derived, Some(&f.random_pair), configured_threshold);
+            return Ok(CanaryOutcome {
+                verdict: CanaryVerdict::RecentlyVerified,
+                merge_threshold,
+                threshold_source,
+            });
+        }
+    }
 
     let live = match embed_all(embedder, &CANARY_PHRASES, contract.dim).await {
         Ok(v) => v,
@@ -569,6 +623,10 @@ pub async fn check(
     }
 
     let mut dirty = verdict == CanaryVerdict::Pinned;
+    if matches!(verdict, CanaryVerdict::Verified { .. }) {
+        fingerprint.verified_at = Some(now);
+        dirty = true;
+    }
     match &related {
         None => {}
         Some((pairs, sha)) => {

@@ -20,6 +20,8 @@ mod read_only;
 // #148: the provision re-key for unstemmed identifier tokens.
 mod rekey;
 mod schema;
+// #176: store-wide rows and the canary pin across a reopen.
+mod store_meta;
 mod structural;
 mod vectors;
 // #55: packed f32 vectors and the transcode of text-codec stores.

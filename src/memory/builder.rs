@@ -972,7 +972,7 @@ async fn canary_gate(
     use crate::embed::canary::{self, CanaryMode, CanaryVerdict, ThresholdSource};
     let outcome = canary::check(store, embedder, contract, options, configured_threshold).await?;
     match &outcome.verdict {
-        CanaryVerdict::Off => {}
+        CanaryVerdict::Off | CanaryVerdict::RecentlyVerified => {}
         CanaryVerdict::Pinned => tracing::info!(
             session = %session,
             embedder = %contract.kind,

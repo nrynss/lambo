@@ -138,12 +138,63 @@ async fn the_first_check_pins_and_the_second_verifies() {
         CanaryVerdict::Verified { min_cosine, .. } => assert!(min_cosine > 0.999_999),
         other => panic!("{other:?}"),
     }
-    // Verifying writes nothing: the pin is the one the first check made.
-    let again = store
-        .read_store_meta(&fingerprint_key(&contract()))
+    // Verifying records when, and keeps the pinned vectors.
+    let again: Fingerprint = serde_json::from_str(
+        &store
+            .read_store_meta(&fingerprint_key(&contract()))
+            .await
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(again.verified_at.is_some());
+    assert_eq!(again.vectors, fp.vectors);
+    assert_eq!(again.pinned_at, fp.pinned_at);
+}
+
+#[tokio::test]
+async fn a_recent_verification_is_trusted_and_an_old_one_is_not() {
+    let store = store();
+    let t0 = chrono::Utc::now();
+    let probe = Probe::new(0.0);
+    let at = |secs: i64| t0 + chrono::Duration::seconds(secs);
+    check_at(&store, &probe, &contract(), &warn(), 0.85, at(0))
         .await
         .unwrap();
-    assert_eq!(again.as_deref(), Some(raw.as_str()));
+    // The first check after a pin always embeds.
+    let first = check_at(&store, &probe, &contract(), &warn(), 0.85, at(1))
+        .await
+        .unwrap();
+    assert!(matches!(first.verdict, CanaryVerdict::Verified { .. }));
+    let calls = probe.calls();
+
+    // Inside the window: one store read, no embed, even for a drifted
+    // embedder. That is the documented trade.
+    let drifted = Probe::new(0.3);
+    let recent = check_at(&store, &drifted, &contract(), &warn(), 0.85, at(60))
+        .await
+        .unwrap();
+    assert_eq!(recent.verdict, CanaryVerdict::RecentlyVerified);
+    assert_eq!(drifted.calls(), 0);
+    assert_eq!(probe.calls(), calls);
+
+    // Past it, the drift is caught.
+    let late = CANARY_RECHECK.as_secs() as i64 + 2;
+    let out = check_at(&store, &drifted, &contract(), &warn(), 0.85, at(late))
+        .await
+        .unwrap();
+    assert!(
+        matches!(out.verdict, CanaryVerdict::Drifted { .. }),
+        "{out:?}"
+    );
+    // A clock that went backwards is not "recent" either.
+    let back = check_at(&store, &drifted, &contract(), &warn(), 0.85, at(-60))
+        .await
+        .unwrap();
+    assert!(
+        matches!(back.verdict, CanaryVerdict::Drifted { .. }),
+        "{back:?}"
+    );
 }
 
 #[tokio::test]

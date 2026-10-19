@@ -73,6 +73,33 @@
   Run that after a pre-0.7.0 binary has written to a Postgres or Cockroach
   store, since such a writer still derives the old keys.
 
+### Added
+
+- **Embedder canary (#176).** A model change behind the same contract name
+  (a re-quantised GGUF, another llama.cpp build, a provider revision) used
+  to pass the `{kind, model, dim}` check and mix two vector spaces in one
+  store. A writer attach now embeds 20 fixed phrases and compares them with
+  the vectors pinned for that contract in `store_meta`. Any phrase below
+  cosine 0.99 is a drift. `[embedder] canary` (`LAMBO_EMBED_CANARY`) picks
+  what follows: `verify` refuses the attach unless
+  `--allow-embedding-mismatch` is passed, `warn` (the default for this
+  release) logs it, and `off` skips the check. An unpinned store is pinned
+  at its next writer attach. A check that passed within the last 10
+  minutes is trusted without embedding again, and an unreachable embedder
+  leaves the check unverified rather than refused. `lambo re-embed` pins
+  again after its rewrite. The pin also records cosine quantiles over pairs
+  of different canary phrases, as a relevance floor only, never as a merge
+  threshold.
+- **`[embedder] related_pairs` derives the merge threshold (#87, #176).**
+  Given a JSON file of at least 100 labelled related-but-distinct pairs,
+  `semantic_match_threshold` becomes their p99 cosine under the configured
+  embedder, provided that sits above the canary's random-pair floor.
+  Otherwise the configured value stays. The result is cached in the pin
+  against the file's SHA-256.
+- **`GraphStore::read_store_meta` / `write_store_meta` (#176).** Store-wide
+  key/value rows on SQLite, Postgres, Cockroach and the memory store, with
+  defaults (nothing recorded) for other implementations.
+
 ### Fixed
 
 - **Distinct identifiers no longer merge into one concept (#148).**
