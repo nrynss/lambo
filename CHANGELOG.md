@@ -114,10 +114,13 @@
   what follows: `verify` refuses the attach unless
   `--allow-embedding-mismatch` is passed, `warn` (the default for this
   release) logs it, and `off` skips the check. An unpinned store is pinned
-  at its next writer attach. A check that passed within the last 10
-  minutes is trusted without embedding again, and an unreachable embedder
-  leaves the check unverified rather than refused. `lambo re-embed` pins
-  again after its rewrite. The pin also records cosine quantiles over pairs
+  at its next writer attach. Under `warn`, a check that passed within the
+  last 10 minutes is trusted without embedding again; `verify` embeds at
+  every writer attach. An unreachable embedder leaves the check unverified
+  rather than refused. `lambo re-embed` pins again after its rewrite. The
+  pin is per store and contract, so after re-embedding one session under an
+  unchanged contract name, re-embed the store's other sessions under it too;
+  re-embed says so. The pin also records cosine quantiles over pairs
   of different canary phrases, as a relevance floor only, never as a merge
   threshold.
 - **`[embedder] related_pairs` derives the merge threshold (#87, #176).**

@@ -153,6 +153,36 @@ async fn the_first_check_pins_and_the_second_verifies() {
 }
 
 #[tokio::test]
+async fn verify_mode_never_trusts_the_recheck_window() {
+    // A daemon restarted on a swapped embedder inside the window attaches
+    // once and then runs for days: under verify it must embed every time.
+    let store = store();
+    let t0 = chrono::Utc::now();
+    let at = |secs: i64| t0 + chrono::Duration::seconds(secs);
+    let verify = CanaryOptions {
+        mode: CanaryMode::Verify,
+        related_pairs: None,
+    };
+    let probe = Probe::new(0.0);
+    check_at(&store, &probe, &contract(), &verify, 0.85, at(0))
+        .await
+        .unwrap();
+    let first = check_at(&store, &probe, &contract(), &verify, 0.85, at(1))
+        .await
+        .unwrap();
+    assert!(matches!(first.verdict, CanaryVerdict::Verified { .. }));
+    let drifted = Probe::new(0.3);
+    let out = check_at(&store, &drifted, &contract(), &verify, 0.85, at(60))
+        .await
+        .unwrap();
+    assert!(
+        matches!(out.verdict, CanaryVerdict::Drifted { .. }),
+        "{out:?}"
+    );
+    assert_eq!(drifted.calls(), CANARY_PHRASES.len());
+}
+
+#[tokio::test]
 async fn a_recent_verification_is_trusted_and_an_old_one_is_not() {
     let store = store();
     let t0 = chrono::Utc::now();
@@ -546,4 +576,49 @@ async fn verify_refuses_a_drifted_attach_and_warn_attaches() {
         let mem = attach(0.2, mode, allow, session).await.unwrap();
         mem.close().await.unwrap();
     }
+}
+
+/// Answers every batch one vector short.
+struct Short(Probe);
+
+#[async_trait::async_trait]
+impl Embedder for Short {
+    fn dimensions(&self) -> usize {
+        DIM
+    }
+    async fn embed(&self, text: &str) -> Result<Vec<f32>, EmbedError> {
+        self.0.embed(text).await
+    }
+    fn batch_capacity(&self) -> usize {
+        64
+    }
+    async fn embed_batch(
+        &self,
+        texts: &[&str],
+        _deadline: tokio::time::Instant,
+    ) -> Vec<Result<Vec<f32>, EmbedError>> {
+        let mut out = Vec::new();
+        for t in &texts[..texts.len().saturating_sub(1)] {
+            out.push(self.0.embed(t).await);
+        }
+        out
+    }
+}
+
+#[tokio::test]
+async fn a_short_batch_leaves_the_check_unverified_and_pins_nothing() {
+    let store = store();
+    let short = Short(Probe::new(0.0));
+    let out = check(&store, &short, &contract(), &warn(), 0.85)
+        .await
+        .unwrap();
+    assert!(
+        matches!(&out.verdict, CanaryVerdict::Unverified(why) if why.contains("19 vectors for 20")),
+        "{out:?}"
+    );
+    assert!(store
+        .read_store_meta(&fingerprint_key(&contract()))
+        .await
+        .unwrap()
+        .is_none());
 }

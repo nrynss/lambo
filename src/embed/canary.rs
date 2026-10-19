@@ -62,10 +62,14 @@ pub const MIN_RELATED_PAIRS: usize = 100;
 /// startup for ever. A timeout leaves the check unverified, not failed.
 pub const CANARY_EMBED_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// A fingerprint verified this recently is trusted without embedding the
-/// canaries again, so a burst of one-shot CLI writers (each a writer attach)
-/// costs one store read each, not twenty embeds. A pin is never trusted this
-/// way: the first attach after it always verifies.
+/// Under [`CanaryMode::Warn`], a fingerprint verified this recently is
+/// trusted without embedding the canaries again, so a burst of one-shot CLI
+/// writers (each a writer attach) costs one store read each, not twenty
+/// embeds. A pin is never trusted this way: the first attach after it always
+/// verifies. [`CanaryMode::Verify`] never uses the window: the verification
+/// is the store's, not this process's, so an embedder swapped and restarted
+/// inside it (a daemon attaches once and then runs for days) would go
+/// unchecked.
 pub const CANARY_RECHECK: Duration = Duration::from_secs(10 * 60);
 
 /// The fixed canary set: mixed domains and languages, prose, code,
@@ -202,6 +206,9 @@ pub struct Fingerprint {
 
 impl Fingerprint {
     fn decoded(&self) -> Option<Vec<Vec<f32>>> {
+        if self.vectors.len() != CANARY_PHRASES.len() {
+            return None;
+        }
         self.vectors
             .iter()
             .map(|v| {
@@ -330,10 +337,15 @@ async fn embed_all(
     let mut out = Vec::with_capacity(texts.len());
     let cap = embedder.batch_capacity().max(1);
     for chunk in texts.chunks(cap) {
-        for (text, vector) in chunk
-            .iter()
-            .zip(embedder.embed_batch(chunk, deadline).await)
-        {
+        // The trait asks callers to guard a little past the deadline, so a
+        // batching adapter that overruns it cannot hold the startup.
+        let answers = tokio::time::timeout_at(
+            deadline + Duration::from_secs(5),
+            embedder.embed_batch(chunk, deadline),
+        )
+        .await
+        .map_err(|_| format!("the canary embeds overran {CANARY_EMBED_TIMEOUT:?}"))?;
+        for (text, vector) in chunk.iter().zip(answers) {
             let vector = vector.map_err(|e| format!("embedding {text:?}: {e}"))?;
             if vector.len() != dim {
                 return Err(format!(
@@ -343,6 +355,15 @@ async fn embed_all(
             }
             out.push(vector);
         }
+    }
+    // A batch that answers short would misalign every later phrase (and
+    // every labelled pair) with its vector.
+    if out.len() != texts.len() {
+        return Err(format!(
+            "the embedder returned {} vectors for {} texts",
+            out.len(),
+            texts.len()
+        ));
     }
     Ok(out)
 }
@@ -559,7 +580,7 @@ pub(crate) async fn check_at(
         let recent = f.verified_at.is_some_and(|at| {
             now >= at && (now - at).to_std().is_ok_and(|age| age < CANARY_RECHECK)
         });
-        if recent && cached_sha_matches(f) {
+        if recent && options.mode == CanaryMode::Warn && cached_sha_matches(f) {
             let derived = f.merge_threshold.as_ref().filter(|_| related.is_some());
             let (merge_threshold, threshold_source) =
                 effective_threshold(derived, Some(&f.random_pair), configured_threshold);
