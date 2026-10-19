@@ -198,7 +198,7 @@ mod tests {
     #[tokio::test]
     async fn provision_memory_store_succeeds_without_sql() {
         let store: Box<dyn GraphStore> = Box::new(MemoryStore::new());
-        let out = run(store, StoreKind::Memory, None)
+        let out = run(store, StoreKind::Memory, None, false)
             .await
             .expect("memory provision");
         assert!(
@@ -304,7 +304,7 @@ mod postgres_arm_tests {
         let store: Box<dyn GraphStore> = Box::new(RecordingStore {
             init_calls: calls.clone(),
         });
-        let out = run(store, StoreKind::Postgres, None)
+        let out = run(store, StoreKind::Postgres, None, false)
             .await
             .expect("postgres provision must init_schema in B2");
         assert_eq!(calls.load(Ordering::SeqCst), 1, "init_schema must run once");
