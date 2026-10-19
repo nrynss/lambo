@@ -76,12 +76,20 @@ use crate::LamboFile;
 /// is worse than choosing a database:
 ///
 /// * `GCP_LAMBO_CREDENTIALS` and `GOOGLE_APPLICATION_CREDENTIALS`, through
-///   `gcp_auth::credentials_path_from_env`, which `build_gemini_embedder` calls
+///   `gcp_auth::credentials_path`, which `build_gemini_embedder` calls
 ///   eagerly and `PgStore::new` calls when the IAM opt-in is set. A harness that
 ///   cleared the old list, wrote `embedder.kind = "gemini"` with no
 ///   `gemini_credentials`, and believed itself hermetic authenticated as
 ///   whatever service account the developer's shell was pointing at — and
 ///   billed real Vertex calls against it.
+/// * `CLOUDSDK_CONFIG`, the third link of that chain (issue #7): where it looks
+///   for the file `gcloud auth application-default login` writes. Clearing it
+///   does **not** leave that chain with nothing to find: unset, it falls back to
+///   gcloud's default directory under `HOME` (`APPDATA` on Windows), which is
+///   deliberately not on this list, because `HOME` means far more to a process
+///   than this resolve. A harness that must not authenticate as the developer's
+///   gcloud login sets `CLOUDSDK_CONFIG` to a directory with no credentials file
+///   in it after clearing this list, as `tests/common::lambo_command` does.
 /// * `LAMBO_POSTGRES_IAM` (`store::POSTGRES_IAM_ENV`), read in `PgStore::new`
 ///   at construction, so an ambient `1` flips the login mode of a store built
 ///   from a DSN the harness wrote with a password in it.
@@ -125,23 +133,30 @@ pub const RESOLVE_ENV_VARS: &[&str] = &[
     // only the file overlay" above.
     GCP_CREDENTIALS_ENV,
     ADC_CREDENTIALS_ENV,
+    CLOUDSDK_CONFIG_ENV,
     crate::store::POSTGRES_IAM_ENV,
 ];
 
 /// Lambo's own service-account credential variable, as
-/// `gcp_auth::credentials_path_from_env` reads it.
+/// `gcp_auth::credentials_path` reads it.
 ///
 /// Spelled here rather than referenced because `gcp_auth` is compiled only
 /// under `embed-gemini` / `store-postgres` while this list is unconditional.
 /// The drift pin is behavioural instead of structural: the hermeticity test
-/// below observes `credentials_path_from_env()` itself under those features, so
+/// below observes `credentials_path()` itself under those features, so
 /// a rename there fails the test rather than silently orphaning a name.
 const GCP_CREDENTIALS_ENV: &str = "GCP_LAMBO_CREDENTIALS";
 
-/// The conventional Google ADC variable `credentials_path_from_env` falls back
-/// to. Kept for the same reason `DATABASE_URL` is: a name shared with unrelated
-/// tooling is an argument for clearing it in a hermetic harness, not against.
+/// The conventional Google ADC variable `credentials_path` falls back to. Kept
+/// for the same reason `DATABASE_URL` is: a name shared with unrelated tooling
+/// is an argument for clearing it in a hermetic harness, not against.
 const ADC_CREDENTIALS_ENV: &str = "GOOGLE_APPLICATION_CREDENTIALS";
+
+/// gcloud's configuration directory, where `credentials_path` looks for the
+/// application-default credentials file when neither variable above is set
+/// (issue #7). Pinned behaviourally like the two above, through
+/// `gcp_auth::gcloud_adc_path`.
+const CLOUDSDK_CONFIG_ENV: &str = "CLOUDSDK_CONFIG";
 
 /// Fully resolved Level B backends ready for `Memory` / CLI.
 ///
@@ -935,7 +950,7 @@ mod tests {
                 file: MEMORY,
                 resolved: Some(|p| format!("{:?}", load(p).promotion_policy)),
             },
-            // R4-1: the three below are read *past* the file, while
+            // R4-1: the four below are read *past* the file, while
             // `resolve_backends` builds the backends, so none of them lands on a
             // `LamboFile` field and `load(p)` cannot see them. They are observed
             // at their real read sites instead.
@@ -955,6 +970,17 @@ mod tests {
                 resolved: credentials_observation(),
             },
             Override {
+                // Issue #7. Observed as the gcloud file the chain *would* consult,
+                // not as `credentials_path()`: a sentinel directory holds no file,
+                // so the existence-checked answer could not move, and writing a
+                // real file into it would make the table depend on the scratch
+                // directory. `credentials_path` reads exactly this path.
+                var: CLOUDSDK_CONFIG_ENV,
+                value: "/nonexistent/sentinel-gcloud-config",
+                file: MEMORY,
+                resolved: gcloud_adc_observation(),
+            },
+            Override {
                 var: crate::store::POSTGRES_IAM_ENV,
                 value: "1",
                 file: POSTGRES,
@@ -963,12 +989,23 @@ mod tests {
         ]
     }
 
-    /// `gcp_auth::credentials_path_from_env` — the function
-    /// `build_gemini_embedder` and `PgStore::new` both call — or `None` where
-    /// the module is not compiled.
+    /// `gcp_auth::credentials_path` — the function `build_gemini_embedder` and
+    /// `PgStore::new` both call — or `None` where the module is not compiled.
     #[cfg(any(feature = "embed-gemini", feature = "store-postgres"))]
     fn credentials_observation() -> Option<fn(&std::path::Path) -> String> {
-        Some(|_| format!("{:?}", crate::gcp_auth::credentials_path_from_env()))
+        Some(|_| format!("{:?}", crate::gcp_auth::credentials_path()))
+    }
+
+    /// `gcp_auth::gcloud_adc_path`, the gcloud file `credentials_path` looks
+    /// for, or `None` where the module is not compiled.
+    #[cfg(any(feature = "embed-gemini", feature = "store-postgres"))]
+    fn gcloud_adc_observation() -> Option<fn(&std::path::Path) -> String> {
+        Some(|_| format!("{:?}", crate::gcp_auth::gcloud_adc_path()))
+    }
+
+    #[cfg(not(any(feature = "embed-gemini", feature = "store-postgres")))]
+    fn gcloud_adc_observation() -> Option<fn(&std::path::Path) -> String> {
+        None
     }
 
     #[cfg(not(any(feature = "embed-gemini", feature = "store-postgres")))]

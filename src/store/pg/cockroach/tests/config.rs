@@ -15,8 +15,7 @@ async fn cockroach_ignores_the_cloud_sql_iam_opt_in() {
     let store = {
         let env = crate::test_util::env_lock();
         env.set("LAMBO_POSTGRES_IAM", "1");
-        env.remove("GCP_LAMBO_CREDENTIALS");
-        env.remove("GOOGLE_APPLICATION_CREDENTIALS");
+        env.clear_google_credentials();
         CockroachStore::new(StoreConfig {
             kind: crate::store::StoreKind::Cockroach,
             dsn: Some("postgresql://u@127.0.0.1:1/lambo?sslmode=disable".into()),
