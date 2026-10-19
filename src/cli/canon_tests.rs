@@ -131,6 +131,7 @@ async fn the_alias_preview_reads_a_map_and_flips_the_alias_on_the_copy() {
     let out = alias_preview(AliasPreviewArgs {
         common: common(path.clone(), &scratch, false),
         map: Some(map),
+        similar: None,
         verbose: false,
     })
     .await
@@ -245,6 +246,7 @@ async fn a_reviewed_map_with_a_refused_line_fails_the_command() {
     let out = alias_preview(AliasPreviewArgs {
         common: common(path, &scratch, false),
         map: Some(map),
+        similar: None,
         verbose: false,
     })
     .await

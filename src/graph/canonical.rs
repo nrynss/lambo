@@ -1044,7 +1044,7 @@ mod tests {
     fn fixture_canonicalization_cases_all_pass() {
         let cases = crate::fixtures::load_canonicalization_cases().unwrap();
         let cases = cases.as_array().expect("cases file is an array");
-        assert_eq!(cases.len(), 11, "fixture row count is part of the contract");
+        assert_eq!(cases.len(), 21, "fixture row count is part of the contract");
         for case in cases {
             let input = case["input"].as_str().expect("case input");
             let expected = case["expected_key"].as_str().expect("case expected_key");

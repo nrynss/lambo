@@ -774,3 +774,225 @@ async fn the_dry_run_with_supersession_reaches_the_held_fixed_point() {
         .get("supersede")
         .is_none());
 }
+
+/// #178: `--similar` suggestions go through the same plan and preview as
+/// any pair, and an overrides file's decisions hold.
+#[tokio::test]
+async fn the_alias_preview_previews_similar_suggestions_and_honours_overrides() {
+    use crate::canon::alias::PairSource;
+    use crate::canon::alias_preview::SimilarInput;
+    use crate::canon::similar::SimilarParams;
+    use crate::graph::canonical::canonical_key;
+
+    let mut snap = fair::snapshot(true);
+    let template = snap
+        .concepts
+        .iter()
+        .find(|c| c.id == fair::concept_id("lease_alias"))
+        .unwrap()
+        .clone();
+    let mut make = |name: &str, content: &str| {
+        let mut c = template.clone();
+        c.id = fair::hashed_id(&format!("similar-preview/{name}"));
+        c.content = content.into();
+        c.canonical_key = canonical_key(content, |_| None);
+        c.canonization_status = CanonizationStatus::None;
+        let mut d = snap.edges[0].clone();
+        d.id = fair::hashed_id(&format!("similar-preview-derives/{name}"));
+        d.source = c.origin_interaction;
+        d.target = c.id;
+        d.edge_type = EdgeType::Derives;
+        snap.edges.push(d);
+        snap.concepts.push(c.clone());
+        c.id
+    };
+    let base = make("base", "the flush queue is drained before every checkpoint");
+    let typo = make("typo", "the flush queue is drained before every chekpoint");
+    let cite = |snap: &mut crate::types::GraphSnapshot, from: &str, to: NodeId, n: &str| {
+        let mut e = snap.edges[0].clone();
+        e.id = fair::hashed_id(&format!("similar-preview-cite/{n}"));
+        e.source = fair::concept_id(from);
+        e.target = to;
+        e.edge_type = EdgeType::Dependency;
+        snap.edges.push(e);
+    };
+    cite(&mut snap, "a01", base, "1");
+    cite(&mut snap, "a02", base, "2");
+    cite(&mut snap, "a03", typo, "3");
+
+    let similar = |overrides: String| {
+        PairInput::Similar(Box::new(SimilarInput {
+            params: SimilarParams {
+                cosine: None,
+                ..SimilarParams::default()
+            },
+            overrides,
+        }))
+    };
+    let p = params(PromotionPolicy::Swarm);
+    let r = alias_preview(
+        snap.clone(),
+        &similar(String::new()),
+        &[PromotionPolicy::Swarm],
+        &p,
+    )
+    .await
+    .unwrap();
+    assert_eq!(r.pairs_from, PairSource::Similar);
+    let sim = r.similar.as_ref().expect("the similarity report");
+    let pair = sim
+        .pairs
+        .iter()
+        .find(|x| x.alias == typo)
+        .expect("the typo is suggested");
+    assert_eq!(pair.ruling, base, "the more-cited concept rules");
+    assert_eq!((pair.alias_citations, pair.ruling_citations), (1, 2));
+    let redirect = r.redirects.iter().find(|x| x.alias == typo).unwrap();
+    assert_eq!(redirect.ruling, base);
+    assert_eq!(redirect.redirected, 1);
+    for i in &r.invariants {
+        assert!(i.held, "{} failed ({})", i.name, i.detail);
+    }
+    let text = render_alias_preview(&r, false);
+    assert!(text.contains("similar: "), "{text}");
+    assert!(
+        text.contains(&format!("record: accept {typo} {base}")),
+        "{text}"
+    );
+
+    // A rejection is never suggested again; an acceptance is planned as a
+    // reviewed pair and not suggested twice.
+    let r = alias_preview(
+        snap.clone(),
+        &similar(format!("reject {} {}\n", base.0, typo.0)),
+        &[PromotionPolicy::Swarm],
+        &p,
+    )
+    .await
+    .unwrap();
+    assert!(r.redirects.iter().all(|x| x.alias != typo));
+    assert_eq!(r.similar.as_ref().unwrap().guarded.rejected, 1);
+    let r = alias_preview(
+        snap.clone(),
+        &similar(format!("# decided\naccept {} {}\n", typo.0, base.0)),
+        &[PromotionPolicy::Swarm],
+        &p,
+    )
+    .await
+    .unwrap();
+    assert_eq!(r.redirects.iter().filter(|x| x.alias == typo).count(), 1);
+    assert!(r
+        .similar
+        .as_ref()
+        .unwrap()
+        .pairs
+        .iter()
+        .all(|x| x.alias != typo));
+    assert!(r.invariants.iter().all(|i| i.held));
+
+    // An override line that names nothing fails the preview.
+    let r = alias_preview(
+        snap,
+        &similar("accept deadbeef cafebabe\n".into()),
+        &[PromotionPolicy::Swarm],
+        &p,
+    )
+    .await
+    .unwrap();
+    let bad = r
+        .invariants
+        .iter()
+        .find(|i| i.name == "every_reviewed_line_accepted")
+        .unwrap();
+    assert!(!bad.held);
+}
+
+/// #178 regression: `prepare` used to clear embeddings before the similar
+/// detector ran, so the vector source never saw any pair. With embeddings
+/// present and `--no-vectors` off, a near-duplicate under the cosine floor
+/// must be suggested.
+#[tokio::test]
+async fn the_alias_preview_similar_vector_source_sees_embeddings() {
+    use crate::canon::alias::PairSource;
+    use crate::canon::alias_preview::SimilarInput;
+    use crate::canon::similar::SimilarParams;
+    use crate::graph::canonical::canonical_key;
+
+    let mut snap = fair::snapshot(true);
+    let template = snap
+        .concepts
+        .iter()
+        .find(|c| c.id == fair::concept_id("lease_alias"))
+        .unwrap()
+        .clone();
+    // Two texts far apart in Jaccard (different wording) but with identical
+    // embeddings so only the vector source can pair them. Same digit runs
+    // and no identifier tokens, so the guards pass.
+    let a_text = "alpha claim about the queue draining cleanly before a checkpoint";
+    let b_text = "omega statement that the buffer empties fully ahead of a snapshot";
+    // Same width as the fair-test fixture's contract; identical unit-ish
+    // vectors so cosine is 1.0 and only the vector source can pair them.
+    let dim = template.embedding.as_ref().map(|v| v.len()).unwrap_or(1024);
+    let shared: Vec<f32> = (0..dim).map(|i| if i == 0 { 1.0 } else { 0.0 }).collect();
+    let mut make = |name: &str, content: &str| {
+        let mut c = template.clone();
+        c.id = fair::hashed_id(&format!("similar-vector/{name}"));
+        c.content = content.into();
+        c.canonical_key = canonical_key(content, |_| None);
+        c.canonization_status = CanonizationStatus::None;
+        c.embedding = Some(shared.clone());
+        let mut d = snap.edges[0].clone();
+        d.id = fair::hashed_id(&format!("similar-vector-derives/{name}"));
+        d.source = c.origin_interaction;
+        d.target = c.id;
+        d.edge_type = EdgeType::Derives;
+        snap.edges.push(d);
+        snap.concepts.push(c.clone());
+        c.id
+    };
+    let a = make("a", a_text);
+    let b = make("b", b_text);
+    snap.embedding = Some(crate::types::EmbeddingContract {
+        kind: "fixture".into(),
+        model: None,
+        dim,
+    });
+    let mut e = snap.edges[0].clone();
+    e.id = fair::hashed_id("similar-vector-cite");
+    e.source = fair::concept_id("a01");
+    e.target = a;
+    e.edge_type = EdgeType::Dependency;
+    snap.edges.push(e);
+
+    let input = PairInput::Similar(Box::new(SimilarInput {
+        params: SimilarParams {
+            // Lexical Jaccard of these texts is well below 0.7; vector only.
+            jaccard: 0.99,
+            cosine: Some(0.99),
+            min_chars: 12,
+            ..SimilarParams::default()
+        },
+        overrides: String::new(),
+    }));
+    let r = alias_preview(
+        snap,
+        &input,
+        &[PromotionPolicy::Swarm],
+        &params(PromotionPolicy::Swarm),
+    )
+    .await
+    .unwrap();
+    assert_eq!(r.pairs_from, PairSource::Similar);
+    let sim = r.similar.as_ref().expect("similarity report");
+    assert!(
+        sim.vector_candidates > 0,
+        "vector source must see the embeddings: {sim:?}"
+    );
+    assert!(
+        sim.pairs
+            .iter()
+            .any(|p| { (p.alias == a && p.ruling == b) || (p.alias == b && p.ruling == a) }),
+        "expected the embedded pair among {:?}",
+        sim.pairs
+    );
+}

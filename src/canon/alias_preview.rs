@@ -10,24 +10,91 @@ use std::fmt::Write as _;
 use serde::{Deserialize, Serialize};
 
 use crate::canon::alias::{
-    self, AliasPlan, AliasRedirect, AliasRefusal, AliasWarning, PairSource, RefusalKind,
+    self, AliasPair, AliasPlan, AliasRedirect, AliasRefusal, AliasWarning, PairSource, RefusalKind,
 };
 use crate::canon::dry_run::{
     self, clock_check, prepare, render_policy_for_preview, DryRunParams, Invariant, PolicyDelta,
     PolicyReport, RowsAfterClock, SourceFacts, REPORT_VERSION,
 };
+use crate::canon::similar::{self, SimilarParams, SimilarReport};
 use crate::canon::PromotionPolicy;
+use crate::graph::Graph;
 use crate::types::{
     CanonizationStatus, ConceptType, EdgeType, GraphSnapshot, LamboError, NodeId, SessionId,
 };
 
 /// Where the pairs come from.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum PairInput {
     /// The leading-phrase rule ([`alias::detect`]).
     Detect,
     /// A reviewed map's text ([`alias::parse_map`]); detection is not run.
     Map(String),
+    /// Near-duplicate suggestions ([`similar::detect_similar`], #178), plus
+    /// the accepted pairs of an overrides file as reviewed pairs.
+    Similar(Box<SimilarInput>),
+}
+
+/// [`PairInput::Similar`]'s inputs.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SimilarInput {
+    /// Thresholds and flags. [`SimilarParams::rejected`] and
+    /// [`SimilarParams::accepted`] are filled from `overrides`.
+    pub params: SimilarParams,
+    /// An overrides file's text ([`similar::split_overrides`]), or empty.
+    pub overrides: String,
+}
+
+/// What [`pairs_for`] planned from.
+struct Pairs {
+    pairs: Vec<AliasPair>,
+    refusals: Vec<AliasRefusal>,
+    similar: Option<SimilarReport>,
+}
+
+/// The pairs `input` names on `g`.
+fn pairs_for(g: &Graph, input: &PairInput) -> Result<Pairs, LamboError> {
+    Ok(match input {
+        PairInput::Detect => {
+            let (pairs, refusals) = alias::detect(g);
+            Pairs {
+                pairs,
+                refusals,
+                similar: None,
+            }
+        }
+        PairInput::Map(text) => {
+            let (pairs, refusals) = alias::parse_map(g, text);
+            Pairs {
+                pairs,
+                refusals,
+                similar: None,
+            }
+        }
+        PairInput::Similar(input) => {
+            let (accept, reject) = similar::split_overrides(&input.overrides)
+                .map_err(|e| LamboError::Config(format!("overrides: {e}")))?;
+            let (accepted, mut refusals) = alias::parse_map(g, &accept);
+            let (rejected, rejected_refusals) = alias::parse_map(g, &reject);
+            refusals.extend(rejected_refusals);
+            let mut params = input.params.clone();
+            params.accepted = accepted.iter().map(|p| (p.alias, p.ruling)).collect();
+            params.rejected = rejected.iter().map(|p| (p.alias, p.ruling)).collect();
+            let report = similar::detect_similar(g, &params);
+            let mut pairs = accepted;
+            pairs.extend(report.pairs.iter().map(|p| AliasPair {
+                alias: p.alias,
+                ruling: p.ruling,
+                source: PairSource::Similar,
+                line: None,
+            }));
+            Pairs {
+                pairs,
+                refusals,
+                similar: Some(report),
+            }
+        }
+    })
 }
 
 /// A concept's role in a flip.
@@ -97,8 +164,12 @@ pub struct AliasPreviewReport {
     /// The source, when the CLI read one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<SourceFacts>,
-    /// Detected or reviewed pairs.
+    /// Detected, reviewed or similar pairs.
     pub pairs_from: PairSource,
+    /// The near-duplicate suggestions and what the guards removed, for
+    /// [`PairInput::Similar`] (#178).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub similar: Option<SimilarReport>,
     /// Accepted pairs and what each does.
     pub redirects: Vec<AliasRedirect>,
     /// Refused pairs and map lines.
@@ -126,12 +197,21 @@ pub struct AliasPreviewReport {
 
 /// Plan the pairs from `input` against `snap`.
 pub fn plan_for(snap: &GraphSnapshot, input: &PairInput) -> Result<AliasPlan, LamboError> {
+    Ok(plan_with(snap, input)?.0)
+}
+
+/// [`plan_for`], with the pairs it planned and the similarity report.
+fn plan_with(
+    snap: &GraphSnapshot,
+    input: &PairInput,
+) -> Result<(AliasPlan, Vec<AliasPair>, Option<SimilarReport>), LamboError> {
     let g = dry_run::graph_of(snap)?;
-    let (pairs, refusals) = match input {
-        PairInput::Detect => alias::detect(&g),
-        PairInput::Map(text) => alias::parse_map(&g, text),
-    };
-    Ok(alias::plan(&g, &pairs, refusals))
+    let Pairs {
+        pairs,
+        refusals,
+        similar,
+    } = pairs_for(&g, input)?;
+    Ok((alias::plan(&g, &pairs, refusals), pairs, similar))
 }
 
 /// The plan's own checks: it moves only alias citations to their ruling,
@@ -141,6 +221,7 @@ fn plan_invariants(
     after: &GraphSnapshot,
     plan: &AliasPlan,
     input: &PairInput,
+    planned: &[AliasPair],
 ) -> Result<Vec<Invariant>, LamboError> {
     let pairs: HashSet<(NodeId, NodeId)> =
         plan.redirects.iter().map(|r| (r.alias, r.ruling)).collect();
@@ -162,16 +243,17 @@ fn plan_invariants(
         snap.concepts == after.concepts && snap.interactions == after.interactions;
 
     // A second plan of the same pairs on the result (for a map, the same
-    // text; for detection, detection again).
+    // text; for detection, detection again; for similarity, the same pairs:
+    // moving citations can change which pairs a fresh detection suggests,
+    // and the plan, not the detector, is what has to be idempotent).
     let g = dry_run::graph_of(after)?;
     let again = match input {
-        PairInput::Detect => {
-            let (p, r) = alias::detect(&g);
-            alias::plan(&g, &p, r)
-        }
-        PairInput::Map(text) => {
-            let (p, r) = alias::parse_map(&g, text);
-            alias::plan(&g, &p, r)
+        PairInput::Similar(_) => alias::plan(&g, planned, Vec::new()),
+        _ => {
+            let Pairs {
+                pairs, refusals, ..
+            } = pairs_for(&g, input)?;
+            alias::plan(&g, &pairs, refusals)
         }
     };
     Ok(vec![
@@ -204,11 +286,22 @@ pub async fn alias_preview(
     policies: &[PromotionPolicy],
     base: &DryRunParams,
 ) -> Result<AliasPreviewReport, LamboError> {
+    // #178: `prepare` clears every embedding (dry-run gates do not read
+    // them). The similar detector's vector source needs them, so detect
+    // before prepare when the input asks for it; Detect/Map are unchanged.
+    let precomputed = if matches!(input, PairInput::Similar(_)) {
+        Some(plan_with(&snap, input)?)
+    } else {
+        None
+    };
     let raised = prepare(&mut snap, base.assume_survived);
     let (clock, rows_after_clock) = clock_check(&snap, base.now);
-    let plan = plan_for(&snap, input)?;
+    let (plan, planned, similar) = match precomputed {
+        Some(v) => v,
+        None => plan_with(&snap, input)?,
+    };
     let overlaid = alias::apply(&snap, &plan);
-    let mut invariants = plan_invariants(&snap, &overlaid, &plan, input)?;
+    let mut invariants = plan_invariants(&snap, &overlaid, &plan, input, &planned)?;
 
     let aliases: HashSet<NodeId> = plan.redirects.iter().map(|r| r.alias).collect();
     let rulings: HashSet<NodeId> = plan.redirects.iter().map(|r| r.ruling).collect();
@@ -294,11 +387,18 @@ pub async fn alias_preview(
     ));
     // Review H2: a reviewed map is the owner's decision, so a line it
     // cannot honour fails the preview; detected refusals are information.
-    if let PairInput::Map(_) = input {
+    // The same for an overrides file: its lines are decisions too. A
+    // refused suggested pair is not (they come from the detector).
+    if matches!(input, PairInput::Map(_) | PairInput::Similar(_)) {
+        let refused: Vec<&AliasRefusal> = plan
+            .refusals
+            .iter()
+            .filter(|r| r.source == PairSource::Reviewed)
+            .collect();
         invariants.push(Invariant::new(
             "every_reviewed_line_accepted",
-            plan.refusals.is_empty(),
-            format!("{} refused: {:?}", plan.refusals.len(), refusal_counts),
+            refused.is_empty(),
+            format!("{} refused: {:?}", refused.len(), refusal_counts),
         ));
     }
     invariants.push(clock);
@@ -324,7 +424,9 @@ pub async fn alias_preview(
         pairs_from: match input {
             PairInput::Detect => PairSource::Detected,
             PairInput::Map(_) => PairSource::Reviewed,
+            PairInput::Similar(_) => PairSource::Similar,
         },
+        similar,
         redirects: plan.redirects,
         refusals: plan.refusals,
         refusal_counts,
@@ -340,6 +442,58 @@ pub async fn alias_preview(
 
 fn kind_label(k: RefusalKind) -> String {
     format!("{k:?}")
+}
+
+/// The `--similar` suggestions: one line of scores and direction, the two
+/// texts, and the overrides line that records the decision.
+fn render_similar(out: &mut String, sim: &SimilarReport) {
+    let g = &sim.guarded;
+    let _ = writeln!(
+        out,
+        "similar: {} suggested from {} lexical and {} vector candidates (suggestions only); guarded: too_short={} below_jaccard={} digits={} identifiers={} type={} contradicts={} canonical={} rejected={} accepted={} overlap={} capped={}",
+        sim.pairs.len(),
+        sim.lexical_candidates,
+        sim.vector_candidates,
+        g.too_short,
+        g.below_jaccard,
+        g.digits_differ,
+        g.identifiers_differ,
+        g.type_differs,
+        g.contradicts,
+        g.canonical,
+        g.rejected,
+        g.accepted,
+        g.overlap,
+        g.capped
+    );
+    let clip = |t: &str| {
+        let t = t.replace(['\n', '\r'], " ");
+        match t.char_indices().nth(100) {
+            Some((i, _)) => format!("{}…", &t[..i]),
+            None => t,
+        }
+    };
+    for p in &sim.pairs {
+        let _ = writeln!(
+            out,
+            "  {:?} jaccard={:.3} cosine={} alias {} (cited {}) -> ruling {} (cited {})",
+            p.source,
+            p.jaccard,
+            p.cosine
+                .map_or_else(|| "-".to_string(), |c| format!("{c:.3}")),
+            p.alias,
+            p.alias_citations,
+            p.ruling,
+            p.ruling_citations
+        );
+        let _ = writeln!(out, "    alias:  {}", clip(&p.alias_content));
+        let _ = writeln!(out, "    ruling: {}", clip(&p.ruling_content));
+        let _ = writeln!(
+            out,
+            "    record: accept {} {}  |  reject {} {}",
+            p.alias, p.ruling, p.alias, p.ruling
+        );
+    }
 }
 
 /// An alias preview as text.
@@ -361,6 +515,9 @@ pub fn render_alias_preview(r: &AliasPreviewReport, verbose: bool) -> String {
             "source: {} sha256 {} -> {} lease_present={}",
             s.path, s.sha256_before, s.sha256_after, s.lease_present
         );
+    }
+    if let Some(sim) = &r.similar {
+        render_similar(&mut out, sim);
     }
     let _ = writeln!(
         out,

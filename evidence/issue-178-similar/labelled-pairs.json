@@ -1,0 +1,1523 @@
+[
+ {
+  "id": "i3-00",
+  "source": "dogfood-i3",
+  "family": "identical",
+  "a": "CORRECTION to the same-day claim that the 512-token clamp was a plausible contributor to the unembedded-concept damage — measured against the live dogfood store 2026-08-22, it is NOT the dominant cause. Coverage is 34 embedded of 509 concepts (93% unembedded), and the gap does not track length: concepts under 400 chars are 2/247 embedded, worse than the 400-1200 band at 32/232, while 1200-2400 is 0/30. Sub-400-char concepts never reach the 512-token clamp, so something else — the originally recorded cause, the embedder unreachable or refusing silently across whole sessions — accounts for the bulk. The clamp is still real and still worth its fix (it hard-fails every long input), but it is a second failure mode, not the explanation. Recency confirms the split: the ten newest concepts are 9/10 embedded (written after the clamp fix, with the embedder up), every earlier 100-row band is 2-8%.",
+  "b": "CORRECTION to the same-day claim that the 512-token clamp was a plausible contributor to the unembedded-concept damage — measured against the live dogfood store 2026-08-22, it is NOT the dominant cause. Coverage is 34 embedded of 509 concepts (93% unembedded), and the gap does not track length: concepts under 400 chars are 2/247 embedded, worse than the 400-1200 band at 32/232, while 1200-2400 is 0/30. Sub-400-char concepts never reach the 512-token clamp, so something else — the originally recorded cause, the embedder unreachable or refusing silently across whole sessions — accounts for the bulk. The clamp is still real and still worth its fix (it hard-fails every long input), but it is a second failure mode, not the explanation. Recency confirms the split: the ten newest concepts are 9/10 embedded (written after the clamp fix, with the embedder up), every earlier 100-row band is 2-8%.",
+  "cosine": 1.0,
+  "label": "duplicate"
+ },
+ {
+  "id": "i3-01",
+  "source": "dogfood-i3",
+  "family": "identical",
+  "a": "Dogfood finding (2026-08-20, DOGFOOD-FINDINGS.md): 92 of 100 concepts in the lambo-dev store carry no durable embedding — interleaved in time, not one outage window; all 44 record_action Resources plus most Constraints/Logics/Entities. Semantic recall and dedup are blind to them and the damage is cumulative with no backfill path. Candidate product work: embedding-coverage counter in lambo_stats, and a re-embed backfill verb. Cause unsettled: record_action-never-embeds by design, intermittent embedder unavailability degrading hybrid to keyword, or a flush gap.",
+  "b": "Dogfood finding (2026-08-20, DOGFOOD-FINDINGS.md): 92 of 100 concepts in the lambo-dev store carry no durable embedding — interleaved in time, not one outage window; all 44 record_action Resources plus most Constraints/Logics/Entities. Semantic recall and dedup are blind to them and the damage is cumulative with no backfill path. Candidate product work: embedding-coverage counter in lambo_stats, and a re-embed backfill verb. Cause unsettled: record_action-never-embeds by design, intermittent embedder unavailability degrading hybrid to keyword, or a flush gap.",
+  "cosine": 1.0,
+  "label": "duplicate"
+ },
+ {
+  "id": "i3-02",
+  "source": "dogfood-i3",
+  "family": "identical",
+  "a": "J1 round-3 advisory (J1-R3-3, caps.rs not J1): the INVISIBLE_RANGES decision recorded at is_disallowed_format states U+2028/U+2029 meet the table's own 'invisible structural character' criterion, then declines on the ground 'content already permits \\n, so a forced line break buys an author nothing' — which answers the break half but not the invisibility half that is the criterion. Its revisit trigger ('if content ever stops permitting \\n') is therefore the wrong trigger; the condition that makes the gap matter is a renderer treating U+2028 differently from \\n, and serve_web plus any terminal already do. The conclusion is nevertheless right, and for a stronger reason the docstring does not give: normalize_tokens splits on char::is_whitespace(), which includes U+2028/U+2029, so a U+2028 in content cannot fork a canonical key (verified — the two contents merged). Separately, INVISIBLE_RANGES also jumps the unassigned Default_Ignorable codepoints U+2065, U+FFF0..U+FFF8, U+E0080..U+E00FF and U+E01F0..U+E0FFF: all four probed pass check_size while rendering as nothing, which is the table's stated criterion.",
+  "b": "J1 round-3 advisory (J1-R3-3, caps.rs not J1): the INVISIBLE_RANGES decision recorded at is_disallowed_format states U+2028/U+2029 meet the table's own 'invisible structural character' criterion, then declines on the ground 'content already permits \\n, so a forced line break buys an author nothing' — which answers the break half but not the invisibility half that is the criterion. Its revisit trigger ('if content ever stops permitting \\n') is therefore the wrong trigger; the condition that makes the gap matter is a renderer treating U+2028 differently from \\n, and serve_web plus any terminal already do. The conclusion is nevertheless right, and for a stronger reason the docstring does not give: normalize_tokens splits on char::is_whitespace(), which includes U+2028/U+2029, so a U+2028 in content cannot fork a canonical key (verified — the two contents merged). Separately, INVISIBLE_RANGES also jumps the unassigned Default_Ignorable codepoints U+2065, U+FFF0..U+FFF8, U+E0080..U+E00FF and U+E01F0..U+E0FFF: all four probed pass check_size while rendering as nothing, which is the table's stated criterion.",
+  "cosine": 1.0,
+  "label": "duplicate"
+ },
+ {
+  "id": "i3-03",
+  "source": "dogfood-i3",
+  "family": "identical",
+  "a": "J3 round-3 residual handed outside J3, for E2E/J4: a concept applied with a NULL embedding is unfindable by semantic recall, and neither the ack, the receipt, nor a warning says so — the receipt reads 'applied — derived 1 concept(s): 1 created, 0 matched existing' with warnings: []. Pre-existing hybrid-derive degradation, not touched by these commits, but J3 is what made a fast vector-less Ok load-bearing for durability (J3-R3-1). Any E2E durability measurement must therefore assert on the STORE's embedding column, not on applied counts: 'applied' does not mean 'embedded'. Reviewer note for future rounds: read back store state with sqlite3 rather than trusting lambo_stats' applied count, and burst MULTI-AGENT as well as multi-size — round 2's single-agent-only red/green is what let J3-R3-2 through.",
+  "b": "J3 round-3 residual handed outside J3, for E2E/J4: a concept applied with a NULL embedding is unfindable by semantic recall, and neither the ack, the receipt, nor a warning says so — the receipt reads 'applied — derived 1 concept(s): 1 created, 0 matched existing' with warnings: []. Pre-existing hybrid-derive degradation, not touched by these commits, but J3 is what made a fast vector-less Ok load-bearing for durability (J3-R3-1). Any E2E durability measurement must therefore assert on the STORE's embedding column, not on applied counts: 'applied' does not mean 'embedded'. Reviewer note for future rounds: read back store state with sqlite3 rather than trusting lambo_stats' applied count, and burst MULTI-AGENT as well as multi-size — round 2's single-agent-only red/green is what let J3-R3-2 through.",
+  "cosine": 1.0,
+  "label": "duplicate"
+ },
+ {
+  "id": "i3-04",
+  "source": "dogfood-i3",
+  "family": "identical",
+  "a": "The dogfood store's embedding damage is 475 of 509 concepts, far larger than the '92 of 100' figure carried in K's motivating table — that number is stale and understates the backfill by roughly 5x. Two consequences. First, semantic recall on this store is effectively not running: any lambo_recall here matches on keywords for 93% of the corpus, so recall-quality judgements made against the dogfood graph are judgements about the keyword path, not the hybrid one. Second, this raises the value of K2's re-embed verb and its embedded/total counter in lambo_stats — the counter would have made the drift visible the day it started, and the verb is now repairing 93% of the store rather than a tenth of it. Worth re-measuring coverage before any G recall-calibration work, since calibration against a 7%-embedded corpus would measure the wrong pipeline.",
+  "b": "The dogfood store's embedding damage is 475 of 509 concepts, far larger than the '92 of 100' figure carried in K's motivating table — that number is stale and understates the backfill by roughly 5x. Two consequences. First, semantic recall on this store is effectively not running: any lambo_recall here matches on keywords for 93% of the corpus, so recall-quality judgements made against the dogfood graph are judgements about the keyword path, not the hybrid one. Second, this raises the value of K2's re-embed verb and its embedded/total counter in lambo_stats — the counter would have made the drift visible the day it started, and the verb is now repairing 93% of the store rather than a tenth of it. Worth re-measuring coverage before any G recall-calibration work, since calibration against a 7%-embedded corpus would measure the wrong pipeline.",
+  "cosine": 1.0,
+  "label": "duplicate"
+ },
+ {
+  "id": "i3-05",
+  "source": "dogfood-i3",
+  "family": "file/commit name",
+  "a": "dev-diary/adversarial-review/adve-review-mooshik-J3-round1.md",
+  "b": "dev-diary/adversarial-review/adve-review-mooshik-J3-round3.md",
+  "cosine": 0.9932,
+  "label": "distinct"
+ },
+ {
+  "id": "i3-06",
+  "source": "dogfood-i3",
+  "family": "file/commit name",
+  "a": "dev-diary/adversarial-review/adve-review-mooshik-J1-round3.md",
+  "b": "dev-diary/adversarial-review/adve-review-mooshik-J3-round1.md",
+  "cosine": 0.9892,
+  "label": "distinct"
+ },
+ {
+  "id": "i3-07",
+  "source": "dogfood-i3",
+  "family": "file/commit name",
+  "a": "dev-diary/adversarial-review/adve-review-mooshik-J2-round1.md",
+  "b": "dev-diary/adversarial-review/adve-review-mooshik-J2-round2.md",
+  "cosine": 0.988,
+  "label": "distinct"
+ },
+ {
+  "id": "i3-08",
+  "source": "dogfood-i3",
+  "family": "file/commit name",
+  "a": "dev-diary/adversarial-review/adve-review-mooshik-J3-redesign-round1.md",
+  "b": "dev-diary/adversarial-review/adve-review-mooshik-J3-redesign-round2.md",
+  "cosine": 0.9872,
+  "label": "distinct"
+ },
+ {
+  "id": "i3-09",
+  "source": "dogfood-i3",
+  "family": "file/commit name",
+  "a": "dev-diary/adversarial-review/adve-review-mooshik-J3-round2.md",
+  "b": "dev-diary/adversarial-review/adve-review-mooshik-J3-round3.md",
+  "cosine": 0.9864,
+  "label": "distinct"
+ },
+ {
+  "id": "i3-10",
+  "source": "dogfood-i3",
+  "family": "file/commit name",
+  "a": "dev-diary/adversarial-review/adve-review-mooshik-J3-round1.md",
+  "b": "dev-diary/adversarial-review/adve-review-mooshik-J3-round2.md",
+  "cosine": 0.9831,
+  "label": "distinct"
+ },
+ {
+  "id": "i3-11",
+  "source": "dogfood-i3",
+  "family": "file/commit name",
+  "a": "dev-diary/adversarial-review/adve-review-mooshik-J1-round2.md",
+  "b": "dev-diary/adversarial-review/adve-review-mooshik-J2-round1.md",
+  "cosine": 0.983,
+  "label": "distinct"
+ },
+ {
+  "id": "i3-12",
+  "source": "dogfood-i3",
+  "family": "file/commit name",
+  "a": "dev-diary/adversarial-review/adve-review-mooshik-J1-round1.md",
+  "b": "dev-diary/adversarial-review/adve-review-mooshik-J1-round2.md",
+  "cosine": 0.9819,
+  "label": "distinct"
+ },
+ {
+  "id": "i3-13",
+  "source": "dogfood-i3",
+  "family": "file/commit name",
+  "a": "dev-diary/adversarial-review/adve-review-mooshik-J0-round1.md",
+  "b": "dev-diary/adversarial-review/adve-review-mooshik-J0-round2.md",
+  "cosine": 0.9799,
+  "label": "distinct"
+ },
+ {
+  "id": "i3-14",
+  "source": "dogfood-i3",
+  "family": "file/commit name",
+  "a": "dev-diary/adversarial-review/adve-review-mooshik-J1-round3.md",
+  "b": "dev-diary/adversarial-review/adve-review-mooshik-J3-round3.md",
+  "cosine": 0.9784,
+  "label": "distinct"
+ },
+ {
+  "id": "i3-15",
+  "source": "dogfood-i3",
+  "family": "file/commit name",
+  "a": "dev-diary/adversarial-review/adve-review-mooshik-J2-round1.md",
+  "b": "dev-diary/adversarial-review/adve-review-mooshik-J2-round3.md",
+  "cosine": 0.9781,
+  "label": "distinct"
+ },
+ {
+  "id": "i3-16",
+  "source": "dogfood-i3",
+  "family": "file/commit name",
+  "a": "dev-diary/adversarial-review/adve-review-mooshik-J2-round3.md",
+  "b": "dev-diary/adversarial-review/adve-review-mooshik-J3-round2.md",
+  "cosine": 0.978,
+  "label": "distinct"
+ },
+ {
+  "id": "i3-17",
+  "source": "dogfood-i3",
+  "family": "file/commit name",
+  "a": "adve-review-mooshik-J2-round1.md",
+  "b": "adve-review-mooshik-J2-round2.md",
+  "cosine": 0.9765,
+  "label": "distinct"
+ },
+ {
+  "id": "i3-18",
+  "source": "dogfood-i3",
+  "family": "file/commit name",
+  "a": "dev-diary/adversarial-review/adve-review-mooshik-J2-round2.md",
+  "b": "dev-diary/adversarial-review/adve-review-mooshik-J2-round3.md",
+  "cosine": 0.9735,
+  "label": "distinct"
+ },
+ {
+  "id": "i3-19",
+  "source": "dogfood-i3",
+  "family": "file/commit name",
+  "a": "dev-diary/adversarial-review/adve-review-mooshik-J0-round1.md",
+  "b": "dev-diary/adversarial-review/adve-review-mooshik-J1-round1.md",
+  "cosine": 0.9728,
+  "label": "distinct"
+ },
+ {
+  "id": "i3-20",
+  "source": "dogfood-i3",
+  "family": "file/commit name",
+  "a": "dev-diary/adversarial-review/adve-review-mooshik-J1-round1.md",
+  "b": "dev-diary/adversarial-review/adve-review-mooshik-J1-round3.md",
+  "cosine": 0.972,
+  "label": "distinct"
+ },
+ {
+  "id": "i3-21",
+  "source": "dogfood-i3",
+  "family": "file/commit name",
+  "a": "adve-review-mooshik-J3-round1.md",
+  "b": "adve-review-mooshik-J3-round2.md",
+  "cosine": 0.9711,
+  "label": "distinct"
+ },
+ {
+  "id": "i3-22",
+  "source": "dogfood-i3",
+  "family": "file/commit name",
+  "a": "dev-diary/adversarial-review/adve-review-mooshik-J1-round3.md",
+  "b": "dev-diary/adversarial-review/adve-review-mooshik-J3-round2.md",
+  "cosine": 0.9692,
+  "label": "distinct"
+ },
+ {
+  "id": "i3-23",
+  "source": "dogfood-i3",
+  "family": "file/commit name",
+  "a": "adve-review-mooshik-J2-round1.md",
+  "b": "adve-review-mooshik-J2-round3.md",
+  "cosine": 0.9682,
+  "label": "distinct"
+ },
+ {
+  "id": "i3-24",
+  "source": "dogfood-i3",
+  "family": "file/commit name",
+  "a": "src/mcp/serve.rs",
+  "b": "src/mcp/server.rs",
+  "cosine": 0.9661,
+  "label": "distinct"
+ },
+ {
+  "id": "i3-25",
+  "source": "dogfood-i3",
+  "family": "file/commit name",
+  "a": "J1 Status note in dev-diary/lambo-for-mooshik/J-multi-client.md",
+  "b": "dev-diary/lambo-for-mooshik/J-multi-client.md",
+  "cosine": 0.8498,
+  "label": "distinct"
+ },
+ {
+  "id": "i3-26",
+  "source": "dogfood-i3",
+  "family": "file/commit name",
+  "a": "spikes/g3-laplacian/step2_diffusion.py",
+  "b": "spikes/g3-laplacian/step2b_cliff.py",
+  "cosine": 0.8497,
+  "label": "distinct"
+ },
+ {
+  "id": "i3-27",
+  "source": "dogfood-i3",
+  "family": "file/commit name",
+  "a": "evidence/mooshik-j3-durable-intents/j3_n1_outage_demo.py",
+  "b": "evidence/mooshik-j3-durable-intents/n1-outage-run-2026-08-21.txt",
+  "cosine": 0.8486,
+  "label": "distinct"
+ },
+ {
+  "id": "i3-28",
+  "source": "dogfood-i3",
+  "family": "file/commit name",
+  "a": "spikes/g3-laplacian/step1_census.py",
+  "b": "spikes/g3-laplacian/step3_resistance.py",
+  "cosine": 0.8478,
+  "label": "distinct"
+ },
+ {
+  "id": "i3-29",
+  "source": "dogfood-i3",
+  "family": "file/commit name",
+  "a": "adve-review-mooshik-J3-round2.md",
+  "b": "dev-diary/adversarial-review/adve-review-mooshik-J3-round3.md",
+  "cosine": 0.8473,
+  "label": "distinct"
+ },
+ {
+  "id": "i3-30",
+  "source": "dogfood-i3",
+  "family": "paraphrase",
+  "a": "Closed J3 durable-intent redesign review round 1: REQUEST_CHANGES, 1 P1 / 3 P2 / 1 unconfirmed P2 / 6 P3. Review file written but UNCOMMITTED — macOS TCC revoked filesystem access mid-session, so bash/git/cargo return Operation not permitted for the orchestrator and every subagent; no further lambo work possible until the operator grants Full Disk Access. P1 (N1): a transient embedder outage at attach destroys the whole durable-intent backlog — replay runs unconditionally with no liveness check, the failure arm cannot distinguish a content refusal from an unreachable embedder (a distinction THIS branch created by making the timeout an Err), and replay-failure consumes; J2's lease TTL aims the attach at the outage. The redesign's own deviation voids the WAL's acked-implies-eventually-applied promise. Invariant itself verified at an independently built binary including kill -9 (receipts do not lie; 64 lost with the tail as declared; undeclared consequence: post-crash replay blocked for the remaining lease TTL with restart_lost receipts in that window). Deviations: timeout arm upheld on argument, rejected as stated and untested (boundary in code is the STORE capability not the embedder, so default config fails every write on a dead llama, undeclared); Part-2 deferral upheld; intent_durable upheld as necessary. Twelve estimator-era stated reasons survive in writeq.rs including two production log lines claiming measured bounds. PAUSED by operator instruction before remediation.",
+  "b": "J3 redesign round-1 review VERDICT: REQUEST_CHANGES. One P1 (transient embedder outage at attach burns the durable backlog), three P2 (untested timeout deviation; twelve estimator-era stated reasons incl. two production log lines; the reversed pin's undeclared blast radius), one P2-candidate unconfirmed (un-migrated store voids the invariant), six P3. The founding invariant HOLDS at the binary: 64 acked == 1 applied-with-embedding + 63 durable intents at a clean close, replay applies all 63, final store 64 embedded / 0 NULL / 0 unconsumed, reproduced at an independently built binary; and at kill -9 nothing is durable and nothing claims to be. What does not hold is the durable half's promise of EVENTUAL APPLICATION. Review written to dev-diary/adversarial-review/adve-review-mooshik-J3-redesign-round1.md but NOT COMMITTED — the same macOS TCC revocation that interrupted the first run persists: bash cannot reach the repo at all (git, cargo, rg all denied), and even the Read tool is restricted to a per-file allowlist, so gates could not be re-run in this pass, the live matrix could not be extended, and no commit could be made.",
+  "cosine": 0.8467,
+  "label": "duplicate"
+ },
+ {
+  "id": "i3-31",
+  "source": "dogfood-i3",
+  "family": "file/commit name",
+  "a": "dev-diary/adversarial-review/adve-review-mooshik-I-round1.md",
+  "b": "dev-diary/adversarial-review/adve-review-mooshik-J3-redesign-round2.md",
+  "cosine": 0.8461,
+  "label": "distinct"
+ },
+ {
+  "id": "i3-32",
+  "source": "dogfood-i3",
+  "family": "file/commit name",
+  "a": "spikes/g3-laplacian/step1_census.py",
+  "b": "spikes/g3-laplacian/step2_diffusion.py",
+  "cosine": 0.8461,
+  "label": "distinct"
+ },
+ {
+  "id": "i3-33",
+  "source": "dogfood-i3",
+  "family": "file/commit name",
+  "a": "~/lambo-dogfood/bin/lambo-3039b82",
+  "b": "~/lambo-dogfood/lambo.toml",
+  "cosine": 0.8461,
+  "label": "distinct"
+ },
+ {
+  "id": "i3-34",
+  "source": "dogfood-i3",
+  "family": "file/commit name",
+  "a": "src/mcp/endpoint.rs",
+  "b": "src/mcp/serve.rs",
+  "cosine": 0.8459,
+  "label": "distinct"
+ },
+ {
+  "id": "i3-35",
+  "source": "dogfood-i3",
+  "family": "file/commit name",
+  "a": "commit 3a4a6b8 on wt/j3",
+  "b": "commit d9eef3b on wt/j3",
+  "cosine": 0.8457,
+  "label": "distinct"
+ },
+ {
+  "id": "i3-36",
+  "source": "dogfood-i3",
+  "family": "file/commit name",
+  "a": "src/cli/serve_web.rs",
+  "b": "src/mcp/server.rs",
+  "cosine": 0.8455,
+  "label": "distinct"
+ },
+ {
+  "id": "i3-37",
+  "source": "dogfood-i3",
+  "family": "file/commit name",
+  "a": "adve-review-mooshik-J3-round2.md",
+  "b": "dev-diary/adversarial-review/adve-review-mooshik-J3-round1.md",
+  "cosine": 0.8448,
+  "label": "distinct"
+ },
+ {
+  "id": "i3-38",
+  "source": "dogfood-i3",
+  "family": "file/commit name",
+  "a": "adve-review-mooshik-J2-round1.md",
+  "b": "dev-diary/adversarial-review/adve-review-mooshik-J0-round2.md",
+  "cosine": 0.8447,
+  "label": "distinct"
+ },
+ {
+  "id": "i3-39",
+  "source": "dogfood-i3",
+  "family": "file/commit name",
+  "a": "adve-review-mooshik-J2-round3.md",
+  "b": "dev-diary/adversarial-review/adve-review-mooshik-J3-round3.md",
+  "cosine": 0.8441,
+  "label": "distinct"
+ },
+ {
+  "id": "i3-40",
+  "source": "dogfood-i3",
+  "family": "file/commit name",
+  "a": "spikes/g3-laplacian/step1_census.py",
+  "b": "spikes/g3-laplacian/step2b_cliff.py",
+  "cosine": 0.843,
+  "label": "distinct"
+ },
+ {
+  "id": "i3-41",
+  "source": "dogfood-i3",
+  "family": "paraphrase",
+  "a": "Committed the J2 round-3 adversarial review on wt/j2 as aefda87 — verdict CLEAN. All 7 round-2 findings (2 P2 / 5 P3) verified closed over 920e096..6442d95; five new P3 doc-precision advisories, no P2/P1. Nine gates exact at 6442d95 and 72050b7 spot-checked green; all seven declared mutations reproduced and reverted from byte copies; the worst-case store-timeout table re-derived independently from sqlx-core 0.8.6 source and confirmed (38s/50s); J2-R2-1 demonstrated at the binary with a SIGTERM inside a live dial window honoured in 4 ms. J2 is ready to integrate. Nothing pushed, nothing merged, no commit amended.",
+  "b": "J2 round-3 adversarial review (adve-review-mooshik-J2-round3.md) — verdict CLEAN. All 7 round-2 findings (2 P2 / 5 P3) verified closed at the artifact over 920e096..6442d95. Nine gates exact at 6442d95 (fmt clean, 4x clippy clean, 858/0/3 fixtures, 946/0/3 sqlite, 550/0/0 cockroach, verify.sh 40 ok); 72050b7 spot-checked green on fmt + 856/0/3 fixtures. All seven declared mutations reproduced. Six tests added, none removed, deltas reconcile exactly (+5 lib, +6 sqlite). Five new P3 doc-precision advisories, no P2/P1. J2 is ready to integrate now.",
+  "cosine": 0.8423,
+  "label": "duplicate"
+ },
+ {
+  "id": "i3-42",
+  "source": "dogfood-i3",
+  "family": "file/commit name",
+  "a": "J2 round-3 residual coupling, handed to J3 as ONE item: the pump's un-raced client-facing writes and the uncapped `inflight` list are the same problem. answer_lost (src/mcp/proxy.rs:1457) writes one frame per in-flight id, so the ceiling J3 chooses for outstanding receipts is also the worst-case LENGTH of an un-raced write burst to a client that may not be reading. Neither §J2 nor DIAL_BUDGET's residual section says the other exists, and both undercount the writes as 'two' when there are six un-raced Self::send sites (proxy.rs:1298, 1321, 1349, 1375, 1393, 1457).",
+  "b": "J3 resolution of the COUPLED ceiling residual handed over by J2-R2-7 / J2-R3-3. The coupling is real and its mechanism is receipt WAITING: a lambo_receipt call that waits is a long-lived in-flight request at the proxy, so N concurrent receipt waits are N entries in the pump's `inflight` list and therefore N frames in answer_lost's un-raced write burst. J3 therefore bounds BOTH ends: RECEIPT_WAIT_MAX caps how long any one wait can occupy an inflight slot, and a concurrent-waiter cap keeps the population under proxy.rs's INFLIGHT_DEPTH_WARN = 64. The queue bound itself does NOT feed the inflight list — a non-waiting ack returns immediately — so the residual's phrasing (the receipt ceiling IS the burst length) is true only of the waiting surface, and that correction belongs in the record.",
+  "cosine": 0.8417,
+  "label": "distinct"
+ },
+ {
+  "id": "i3-43",
+  "source": "dogfood-i3",
+  "family": "file/commit name",
+  "a": "adve-review-mooshik-J2-round3.md",
+  "b": "dev-diary/adversarial-review/adve-review-mooshik-J3-round1.md",
+  "cosine": 0.8413,
+  "label": "distinct"
+ },
+ {
+  "id": "i3-44",
+  "source": "dogfood-i3",
+  "family": "file/commit name",
+  "a": "adve-review-mooshik-J2-round3.md",
+  "b": "dev-diary/adversarial-review/adve-review-mooshik-J1-round3.md",
+  "cosine": 0.8386,
+  "label": "distinct"
+ },
+ {
+  "id": "i3-45",
+  "source": "dogfood-i3",
+  "family": "file/commit name",
+  "a": "src/store/memory.rs",
+  "b": "src/store/mod.rs",
+  "cosine": 0.8374,
+  "label": "distinct"
+ },
+ {
+  "id": "i3-46",
+  "source": "dogfood-i3",
+  "family": "file/commit name",
+  "a": "adve-review-mooshik-J2-round3.md",
+  "b": "dev-diary/adversarial-review/adve-review-mooshik-J1-round2.md",
+  "cosine": 0.8373,
+  "label": "distinct"
+ },
+ {
+  "id": "i3-47",
+  "source": "dogfood-i3",
+  "family": "related, distinct",
+  "a": "J2 round-1 adversarial review",
+  "b": "J3 round-2 adversarial review on wt/j3",
+  "cosine": 0.837,
+  "label": "distinct"
+ },
+ {
+  "id": "i3-48",
+  "source": "dogfood-i3",
+  "family": "file/commit name",
+  "a": "adve-review-mooshik-J3-round1.md",
+  "b": "dev-diary/adversarial-review/adve-review-mooshik-J3-redesign-round2.md",
+  "cosine": 0.8367,
+  "label": "distinct"
+ },
+ {
+  "id": "i3-49",
+  "source": "dogfood-i3",
+  "family": "file/commit name",
+  "a": "spikes/g3-laplacian/step3_resistance.py",
+  "b": "spikes/g3-laplacian/step5_cost.py",
+  "cosine": 0.8366,
+  "label": "distinct"
+ },
+ {
+  "id": "syn-pos-000",
+  "source": "synthetic",
+  "family": "transposition",
+  "a": "the writer lease renews every tick",
+  "b": "the writer lease reenws every tick",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-001",
+  "source": "synthetic",
+  "family": "deletion",
+  "a": "the writer lease renews every tick",
+  "b": "the writer lease renws every tick",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-002",
+  "source": "synthetic",
+  "family": "doubled letter",
+  "a": "the writer lease renews every tick",
+  "b": "the writer lease reneews every tick",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-003",
+  "source": "synthetic",
+  "family": "transposition",
+  "a": "write queue receipt is durable",
+  "b": "write queue receipt is duarble",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-004",
+  "source": "synthetic",
+  "family": "deletion",
+  "a": "write queue receipt is durable",
+  "b": "write queue receipt is durble",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-005",
+  "source": "synthetic",
+  "family": "doubled letter",
+  "a": "write queue receipt is durable",
+  "b": "write queue receipt is duraable",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-006",
+  "source": "synthetic",
+  "family": "transposition",
+  "a": "recall cache is keyed by graph epoch",
+  "b": "reacll cache is keyed by graph epoch",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-007",
+  "source": "synthetic",
+  "family": "deletion",
+  "a": "recall cache is keyed by graph epoch",
+  "b": "recll cache is keyed by graph epoch",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-008",
+  "source": "synthetic",
+  "family": "doubled letter",
+  "a": "recall cache is keyed by graph epoch",
+  "b": "recaall cache is keyed by graph epoch",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-009",
+  "source": "synthetic",
+  "family": "transposition",
+  "a": "canonization promotes a candidate after review",
+  "b": "caonnization promotes a candidate after review",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-010",
+  "source": "synthetic",
+  "family": "deletion",
+  "a": "canonization promotes a candidate after review",
+  "b": "cannization promotes a candidate after review",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-011",
+  "source": "synthetic",
+  "family": "doubled letter",
+  "a": "canonization promotes a candidate after review",
+  "b": "canoonization promotes a candidate after review",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-012",
+  "source": "synthetic",
+  "family": "transposition",
+  "a": "the daemon rescores when the epoch changes",
+  "b": "the daemon recsores when the epoch changes",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-013",
+  "source": "synthetic",
+  "family": "deletion",
+  "a": "the daemon rescores when the epoch changes",
+  "b": "the daemon resores when the epoch changes",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-014",
+  "source": "synthetic",
+  "family": "doubled letter",
+  "a": "the daemon rescores when the epoch changes",
+  "b": "the daemon resccores when the epoch changes",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-015",
+  "source": "synthetic",
+  "family": "transposition",
+  "a": "hybrid derive merges near duplicates",
+  "b": "hybrid derive merges near dulpicates",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-016",
+  "source": "synthetic",
+  "family": "deletion",
+  "a": "hybrid derive merges near duplicates",
+  "b": "hybrid derive merges near dupicates",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-017",
+  "source": "synthetic",
+  "family": "doubled letter",
+  "a": "hybrid derive merges near duplicates",
+  "b": "hybrid derive merges near dupllicates",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-018",
+  "source": "synthetic",
+  "family": "transposition",
+  "a": "provision transcodes every stored vector",
+  "b": "provision trnascodes every stored vector",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-019",
+  "source": "synthetic",
+  "family": "deletion",
+  "a": "provision transcodes every stored vector",
+  "b": "provision trascodes every stored vector",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-020",
+  "source": "synthetic",
+  "family": "doubled letter",
+  "a": "provision transcodes every stored vector",
+  "b": "provision trannscodes every stored vector",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-021",
+  "source": "synthetic",
+  "family": "transposition",
+  "a": "the flush tick batches pending writes",
+  "b": "the flush tick batches pedning writes",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-022",
+  "source": "synthetic",
+  "family": "deletion",
+  "a": "the flush tick batches pending writes",
+  "b": "the flush tick batches pening writes",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-023",
+  "source": "synthetic",
+  "family": "doubled letter",
+  "a": "the flush tick batches pending writes",
+  "b": "the flush tick batches pendding writes",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-024",
+  "source": "synthetic",
+  "family": "transposition",
+  "a": "structural recall answers dependency questions",
+  "b": "structural recall answers deepndency questions",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-025",
+  "source": "synthetic",
+  "family": "deletion",
+  "a": "structural recall answers dependency questions",
+  "b": "structural recall answers depndency questions",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-026",
+  "source": "synthetic",
+  "family": "doubled letter",
+  "a": "structural recall answers dependency questions",
+  "b": "structural recall answers depeendency questions",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-027",
+  "source": "synthetic",
+  "family": "transposition",
+  "a": "blast radius lists every dependent concept",
+  "b": "blast radius lists every deepndent concept",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-028",
+  "source": "synthetic",
+  "family": "deletion",
+  "a": "blast radius lists every dependent concept",
+  "b": "blast radius lists every depndent concept",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-029",
+  "source": "synthetic",
+  "family": "doubled letter",
+  "a": "blast radius lists every dependent concept",
+  "b": "blast radius lists every depeendent concept",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-030",
+  "source": "synthetic",
+  "family": "transposition",
+  "a": "the embedder refuses inputs over the token clamp",
+  "b": "the emebdder refuses inputs over the token clamp",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-031",
+  "source": "synthetic",
+  "family": "deletion",
+  "a": "the embedder refuses inputs over the token clamp",
+  "b": "the embdder refuses inputs over the token clamp",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-032",
+  "source": "synthetic",
+  "family": "doubled letter",
+  "a": "the embedder refuses inputs over the token clamp",
+  "b": "the embeedder refuses inputs over the token clamp",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-033",
+  "source": "synthetic",
+  "family": "transposition",
+  "a": "an observation is demoted context",
+  "b": "an obesrvation is demoted context",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-034",
+  "source": "synthetic",
+  "family": "deletion",
+  "a": "an observation is demoted context",
+  "b": "an obsrvation is demoted context",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-035",
+  "source": "synthetic",
+  "family": "doubled letter",
+  "a": "an observation is demoted context",
+  "b": "an obseervation is demoted context",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-036",
+  "source": "synthetic",
+  "family": "transposition",
+  "a": "the inverted index serves the keyword leg",
+  "b": "the inevrted index serves the keyword leg",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-037",
+  "source": "synthetic",
+  "family": "deletion",
+  "a": "the inverted index serves the keyword leg",
+  "b": "the invrted index serves the keyword leg",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-038",
+  "source": "synthetic",
+  "family": "doubled letter",
+  "a": "the inverted index serves the keyword leg",
+  "b": "the inveerted index serves the keyword leg",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-039",
+  "source": "synthetic",
+  "family": "deletion",
+  "a": "session layers merge shared memory",
+  "b": "sesion layers merge shared memory",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-040",
+  "source": "synthetic",
+  "family": "doubled letter",
+  "a": "session layers merge shared memory",
+  "b": "sesssion layers merge shared memory",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-041",
+  "source": "synthetic",
+  "family": "transposition",
+  "a": "contradiction edges keep claims apart",
+  "b": "cotnradiction edges keep claims apart",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-042",
+  "source": "synthetic",
+  "family": "deletion",
+  "a": "contradiction edges keep claims apart",
+  "b": "conradiction edges keep claims apart",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-043",
+  "source": "synthetic",
+  "family": "doubled letter",
+  "a": "contradiction edges keep claims apart",
+  "b": "conttradiction edges keep claims apart",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-044",
+  "source": "synthetic",
+  "family": "transposition",
+  "a": "the hot list force includes fresh payloads",
+  "b": "the hot list force includes fresh palyoads",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-045",
+  "source": "synthetic",
+  "family": "deletion",
+  "a": "the hot list force includes fresh payloads",
+  "b": "the hot list force includes fresh payoads",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-046",
+  "source": "synthetic",
+  "family": "doubled letter",
+  "a": "the hot list force includes fresh payloads",
+  "b": "the hot list force includes fresh paylloads",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-047",
+  "source": "synthetic",
+  "family": "transposition",
+  "a": "write behind acknowledges before applying",
+  "b": "write behind acnkowledges before applying",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-048",
+  "source": "synthetic",
+  "family": "deletion",
+  "a": "write behind acknowledges before applying",
+  "b": "write behind ackowledges before applying",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-049",
+  "source": "synthetic",
+  "family": "doubled letter",
+  "a": "write behind acknowledges before applying",
+  "b": "write behind acknnowledges before applying",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-050",
+  "source": "synthetic",
+  "family": "transposition",
+  "a": "durable intents replay after restart",
+  "b": "durable intents replay after retsart",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-051",
+  "source": "synthetic",
+  "family": "deletion",
+  "a": "durable intents replay after restart",
+  "b": "durable intents replay after resart",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-052",
+  "source": "synthetic",
+  "family": "doubled letter",
+  "a": "durable intents replay after restart",
+  "b": "durable intents replay after resttart",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-053",
+  "source": "synthetic",
+  "family": "transposition",
+  "a": "the lease holder owns the socket",
+  "b": "the lease holder owns the sokcet",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-054",
+  "source": "synthetic",
+  "family": "deletion",
+  "a": "the lease holder owns the socket",
+  "b": "the lease holder owns the socet",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-055",
+  "source": "synthetic",
+  "family": "doubled letter",
+  "a": "the lease holder owns the socket",
+  "b": "the lease holder owns the sockket",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-056",
+  "source": "synthetic",
+  "family": "transposition",
+  "a": "alias preview moves citations to the ruling",
+  "b": "alias preview moves ciattions to the ruling",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-057",
+  "source": "synthetic",
+  "family": "deletion",
+  "a": "alias preview moves citations to the ruling",
+  "b": "alias preview moves cittions to the ruling",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-058",
+  "source": "synthetic",
+  "family": "doubled letter",
+  "a": "alias preview moves citations to the ruling",
+  "b": "alias preview moves citaations to the ruling",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-059",
+  "source": "synthetic",
+  "family": "transposition",
+  "a": "supersession retires an older ruling",
+  "b": "sueprsession retires an older ruling",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-060",
+  "source": "synthetic",
+  "family": "deletion",
+  "a": "supersession retires an older ruling",
+  "b": "suprsession retires an older ruling",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-061",
+  "source": "synthetic",
+  "family": "doubled letter",
+  "a": "supersession retires an older ruling",
+  "b": "supeersession retires an older ruling",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-062",
+  "source": "synthetic",
+  "family": "transposition",
+  "a": "the scratch copy is removed afterwards",
+  "b": "the scratch copy is removed afetrwards",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-063",
+  "source": "synthetic",
+  "family": "deletion",
+  "a": "the scratch copy is removed afterwards",
+  "b": "the scratch copy is removed aftrwards",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-064",
+  "source": "synthetic",
+  "family": "doubled letter",
+  "a": "the scratch copy is removed afterwards",
+  "b": "the scratch copy is removed afteerwards",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-065",
+  "source": "synthetic",
+  "family": "transposition",
+  "a": "recall budget caps the rendered tokens",
+  "b": "recall budget caps the rednered tokens",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-066",
+  "source": "synthetic",
+  "family": "deletion",
+  "a": "recall budget caps the rendered tokens",
+  "b": "recall budget caps the renered tokens",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-067",
+  "source": "synthetic",
+  "family": "doubled letter",
+  "a": "recall budget caps the rendered tokens",
+  "b": "recall budget caps the renddered tokens",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-068",
+  "source": "synthetic",
+  "family": "transposition",
+  "a": "graph snapshot carries the mutation epoch",
+  "b": "graph snapshot carries the muattion epoch",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-069",
+  "source": "synthetic",
+  "family": "deletion",
+  "a": "graph snapshot carries the mutation epoch",
+  "b": "graph snapshot carries the muttion epoch",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-070",
+  "source": "synthetic",
+  "family": "doubled letter",
+  "a": "graph snapshot carries the mutation epoch",
+  "b": "graph snapshot carries the mutaation epoch",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-071",
+  "source": "synthetic",
+  "family": "transposition",
+  "a": "stage two evidence needs separated sessions",
+  "b": "stage two evidence needs seaprated sessions",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-072",
+  "source": "synthetic",
+  "family": "deletion",
+  "a": "stage two evidence needs separated sessions",
+  "b": "stage two evidence needs seprated sessions",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-073",
+  "source": "synthetic",
+  "family": "doubled letter",
+  "a": "stage two evidence needs separated sessions",
+  "b": "stage two evidence needs sepaarated sessions",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-074",
+  "source": "synthetic",
+  "family": "transposition",
+  "a": "the canonical key sorts stemmed tokens",
+  "b": "the caonnical key sorts stemmed tokens",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-075",
+  "source": "synthetic",
+  "family": "deletion",
+  "a": "the canonical key sorts stemmed tokens",
+  "b": "the cannical key sorts stemmed tokens",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-076",
+  "source": "synthetic",
+  "family": "doubled letter",
+  "a": "the canonical key sorts stemmed tokens",
+  "b": "the canoonical key sorts stemmed tokens",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-077",
+  "source": "synthetic",
+  "family": "transposition",
+  "a": "packed vectors shrink the sqlite file",
+  "b": "packed vetcors shrink the sqlite file",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-078",
+  "source": "synthetic",
+  "family": "deletion",
+  "a": "packed vectors shrink the sqlite file",
+  "b": "packed vecors shrink the sqlite file",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-079",
+  "source": "synthetic",
+  "family": "doubled letter",
+  "a": "packed vectors shrink the sqlite file",
+  "b": "packed vecttors shrink the sqlite file",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-080",
+  "source": "synthetic",
+  "family": "transposition",
+  "a": "anchor resolution normalizes concept text",
+  "b": "anchor resolution nomralizes concept text",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-081",
+  "source": "synthetic",
+  "family": "deletion",
+  "a": "anchor resolution normalizes concept text",
+  "b": "anchor resolution noralizes concept text",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-082",
+  "source": "synthetic",
+  "family": "doubled letter",
+  "a": "anchor resolution normalizes concept text",
+  "b": "anchor resolution normmalizes concept text",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-083",
+  "source": "synthetic",
+  "family": "transposition",
+  "a": "the cost meter tracks a durable budget",
+  "b": "the cost meter tracks a duarble budget",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-084",
+  "source": "synthetic",
+  "family": "deletion",
+  "a": "the cost meter tracks a durable budget",
+  "b": "the cost meter tracks a durble budget",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-085",
+  "source": "synthetic",
+  "family": "doubled letter",
+  "a": "the cost meter tracks a durable budget",
+  "b": "the cost meter tracks a duraable budget",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-086",
+  "source": "synthetic",
+  "family": "transposition",
+  "a": "semantic match threshold gates merges",
+  "b": "semantic match thershold gates merges",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-087",
+  "source": "synthetic",
+  "family": "deletion",
+  "a": "semantic match threshold gates merges",
+  "b": "semantic match thrshold gates merges",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-pos-088",
+  "source": "synthetic",
+  "family": "doubled letter",
+  "a": "semantic match threshold gates merges",
+  "b": "semantic match threeshold gates merges",
+  "cosine": null,
+  "label": "duplicate"
+ },
+ {
+  "id": "syn-neg-000",
+  "source": "synthetic",
+  "family": "version",
+  "a": "cut the release v0.5.0 today",
+  "b": "cut the release v0.6.0 today",
+  "cosine": null,
+  "label": "distinct"
+ },
+ {
+  "id": "syn-neg-001",
+  "source": "synthetic",
+  "family": "version",
+  "a": "cut the release v0.5.0 today",
+  "b": "cut the release v0.5.1 today",
+  "cosine": null,
+  "label": "distinct"
+ },
+ {
+  "id": "syn-neg-002",
+  "source": "synthetic",
+  "family": "version",
+  "a": "pin the crate to 1.99 for edition 2024",
+  "b": "pin the crate to 1.89 for edition 2024",
+  "cosine": null,
+  "label": "distinct"
+ },
+ {
+  "id": "syn-neg-003",
+  "source": "synthetic",
+  "family": "rfc number",
+  "a": "the server follows rfc 7231",
+  "b": "the server follows rfc 7230",
+  "cosine": null,
+  "label": "distinct"
+ },
+ {
+  "id": "syn-neg-004",
+  "source": "synthetic",
+  "family": "rfc number",
+  "a": "the server follows rfc 9110",
+  "b": "the server follows rfc 9111",
+  "cosine": null,
+  "label": "distinct"
+ },
+ {
+  "id": "syn-neg-005",
+  "source": "synthetic",
+  "family": "hash family",
+  "a": "checksums are sha256 digests",
+  "b": "checksums are sha512 digests",
+  "cosine": null,
+  "label": "distinct"
+ },
+ {
+  "id": "syn-neg-006",
+  "source": "synthetic",
+  "family": "hash family",
+  "a": "checksums are sha256 digests",
+  "b": "checksums are sha384 digests",
+  "cosine": null,
+  "label": "distinct"
+ },
+ {
+  "id": "syn-neg-007",
+  "source": "synthetic",
+  "family": "host name",
+  "a": "route traffic to host1.svc first",
+  "b": "route traffic to host2.svc first",
+  "cosine": null,
+  "label": "distinct"
+ },
+ {
+  "id": "syn-neg-008",
+  "source": "synthetic",
+  "family": "host name",
+  "a": "route traffic to db-01.internal",
+  "b": "route traffic to db-02.internal",
+  "cosine": null,
+  "label": "distinct"
+ },
+ {
+  "id": "syn-neg-009",
+  "source": "synthetic",
+  "family": "issue number",
+  "a": "tracked as issue #148 upstream",
+  "b": "tracked as issue #146 upstream",
+  "cosine": null,
+  "label": "distinct"
+ },
+ {
+  "id": "syn-neg-010",
+  "source": "synthetic",
+  "family": "issue number",
+  "a": "fixed in pull request #170",
+  "b": "fixed in pull request #107",
+  "cosine": null,
+  "label": "distinct"
+ },
+ {
+  "id": "syn-neg-011",
+  "source": "synthetic",
+  "family": "port",
+  "a": "the daemon listens on port 7700",
+  "b": "the daemon listens on port 7701",
+  "cosine": null,
+  "label": "distinct"
+ },
+ {
+  "id": "syn-neg-012",
+  "source": "synthetic",
+  "family": "port",
+  "a": "the web ui listens on port 8080",
+  "b": "the web ui listens on port 8081",
+  "cosine": null,
+  "label": "distinct"
+ },
+ {
+  "id": "syn-neg-013",
+  "source": "synthetic",
+  "family": "model version",
+  "a": "served by embedding model v1",
+  "b": "served by embedding model v2",
+  "cosine": null,
+  "label": "distinct"
+ },
+ {
+  "id": "syn-neg-014",
+  "source": "synthetic",
+  "family": "model version",
+  "a": "served by bge-m3 at dim 1024",
+  "b": "served by bge-m3 at dim 768",
+  "cosine": null,
+  "label": "distinct"
+ },
+ {
+  "id": "syn-neg-015",
+  "source": "synthetic",
+  "family": "runtime version",
+  "a": "the build needs node 18 installed",
+  "b": "the build needs node 20 installed",
+  "cosine": null,
+  "label": "distinct"
+ },
+ {
+  "id": "syn-neg-016",
+  "source": "synthetic",
+  "family": "runtime version",
+  "a": "the build needs python 3.11",
+  "b": "the build needs python 3.12",
+  "cosine": null,
+  "label": "distinct"
+ },
+ {
+  "id": "syn-neg-017",
+  "source": "synthetic",
+  "family": "hex hash",
+  "a": "commit 2122de39e47e fixed the bug",
+  "b": "commit 2122de39e48e fixed the bug",
+  "cosine": null,
+  "label": "distinct"
+ },
+ {
+  "id": "syn-neg-018",
+  "source": "synthetic",
+  "family": "hex hash",
+  "a": "commit 3a4a6b8 on wt/j3",
+  "b": "commit d9eef3b on wt/j3",
+  "cosine": null,
+  "label": "distinct"
+ },
+ {
+  "id": "syn-neg-019",
+  "source": "synthetic",
+  "family": "path",
+  "a": "the entry point is src/main.rs",
+  "b": "the entry point is src/mein.rs",
+  "cosine": null,
+  "label": "distinct"
+ },
+ {
+  "id": "syn-neg-020",
+  "source": "synthetic",
+  "family": "path",
+  "a": "the handler lives in src/mcp/serve.rs",
+  "b": "the handler lives in src/mcp/server.rs",
+  "cosine": null,
+  "label": "distinct"
+ },
+ {
+  "id": "syn-neg-021",
+  "source": "synthetic",
+  "family": "path",
+  "a": "review notes in adve-review-J2-round1.md",
+  "b": "review notes in adve-review-J2-round2.md",
+  "cosine": null,
+  "label": "distinct"
+ },
+ {
+  "id": "syn-neg-022",
+  "source": "synthetic",
+  "family": "quantity",
+  "a": "the retry budget is 3 attempts",
+  "b": "the retry budget is 5 attempts",
+  "cosine": null,
+  "label": "distinct"
+ },
+ {
+  "id": "syn-neg-023",
+  "source": "synthetic",
+  "family": "quantity",
+  "a": "the cache holds 256 entries",
+  "b": "the cache holds 512 entries",
+  "cosine": null,
+  "label": "distinct"
+ },
+ {
+  "id": "syn-neg-024",
+  "source": "synthetic",
+  "family": "related, distinct",
+  "a": "the writer lease renews every tick",
+  "b": "the reader lease expires every tick",
+  "cosine": null,
+  "label": "distinct"
+ },
+ {
+  "id": "syn-neg-025",
+  "source": "synthetic",
+  "family": "related, distinct",
+  "a": "recall cache is keyed by graph epoch",
+  "b": "score cache is keyed by graph epoch",
+  "cosine": null,
+  "label": "distinct"
+ },
+ {
+  "id": "syn-neg-026",
+  "source": "synthetic",
+  "family": "related, distinct",
+  "a": "the flush tick batches pending writes",
+  "b": "the flush tick drops pending writes",
+  "cosine": null,
+  "label": "distinct"
+ },
+ {
+  "id": "syn-neg-027",
+  "source": "synthetic",
+  "family": "related, distinct",
+  "a": "stage two evidence needs separated sessions",
+  "b": "stage three evidence needs separated sessions",
+  "cosine": null,
+  "label": "distinct"
+ },
+ {
+  "id": "syn-neg-028",
+  "source": "synthetic",
+  "family": "related, distinct",
+  "a": "the embedder refuses inputs over the token clamp",
+  "b": "the embedder truncates inputs over the token clamp",
+  "cosine": null,
+  "label": "distinct"
+ },
+ {
+  "id": "syn-neg-029",
+  "source": "synthetic",
+  "family": "related, distinct",
+  "a": "alias preview moves citations to the ruling",
+  "b": "alias preview keeps citations on the alias",
+  "cosine": null,
+  "label": "distinct"
+ }
+]

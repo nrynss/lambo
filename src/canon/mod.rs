@@ -26,6 +26,9 @@ mod explain;
 mod fair_test_tests;
 mod gate;
 mod policy;
+pub mod similar;
+#[cfg(test)]
+mod similar_tests;
 mod stage1;
 mod stage2;
 mod stage3;

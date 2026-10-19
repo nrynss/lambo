@@ -91,6 +91,8 @@
 - **`gcp_auth::credentials_path_from_env` is now `gcp_auth::credentials_path`
   (#7).** It no longer reads only the environment, so the old name was wrong.
   It returns the same answer whenever either credential variable is set.
+- **`canon::alias_preview::PairInput` is no longer `Eq` (#178).** Its new
+  `Similar` variant carries `f64` parameters. `PartialEq` remains.
 
 ### Added
 
@@ -107,6 +109,26 @@
   gcloud login is no longer needed. `CLOUDSDK_CONFIG` joins
   `RESOLVE_ENV_VARS`; clearing it falls back to the gcloud directory under
   `HOME`, so a hermetic harness should point it at an empty directory.
+
+- **Near-duplicate alias suggestions: `lambo canon alias-preview --similar`
+  (#178).** Concepts the canonical key keeps apart although they are the
+  same thing (separator, case and typo variants; the same text stored as an
+  Entity and as an Observation; pairs a write-time vector merge never
+  compared because the older concept had no vector yet) are suggested as
+  alias pairs and previewed like any other. Two sources: character 3-gram
+  Jaccard of the folded text (128-permutation MinHash, 32×4 LSH, exact
+  Jaccard ≥ 0.7, at least 12 characters) and vector cosine at or above
+  `--cosine`. Guards, on both: equal digit runs, equal identifier tokens,
+  the same type unless the text is identical, no `Contradicts` edge, and no
+  Canonical concept without `--include-canonical`, so versions, ports,
+  hashes, issue numbers and file names are never suggested (#148). The
+  more-cited concept rules. `--overrides` records `accept` and `reject`
+  decisions so a decided pair is not suggested again. Suggestions only:
+  nothing is merged. On 10,000 concepts (release build, 8 cores) the text
+  source takes about 0.4 s and the vector source, 1024 wide, about 1.4 s
+  more. Precision on labelled pairs: `evidence/issue-178-similar/`.
+  Library: `canon::similar`, `PairInput::Similar`, `PairSource::Similar` and
+  `AliasPreviewReport::similar` are new.
 
 ### Fixed
 
