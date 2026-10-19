@@ -1,6 +1,27 @@
 # Changelog
 
-## Unreleased
+## 0.7.0 (2026-10-19)
+
+### Highlights
+
+- **Faster recall, writes and provision (#171).** Keyword recall p50 18.7 ms
+  to 7.5 ms and 16 concurrent clients 63 to 1,104 recalls per second; a
+  back-to-back write is acknowledged in 0.8 ms instead of 24.8 ms; a clean
+  provision takes 5.6 ms instead of 143 ms (synthetic SQLite stores, p50,
+  `evidence/issue-171-perf/`). SQLite vectors are packed `f32` (#55), and
+  structural recall no longer normalizes every concept per query (#165).
+- **Embedder canary (#176).** Twenty fixed phrases pinned per store and
+  contract catch a model change behind the same `{kind, model, dim}`.
+  `[embedder] canary = "verify"` refuses the writer attach on a drift
+  (unless `--allow-embedding-mismatch`); `"warn"`, the default, logs it.
+  An optional labelled `related_pairs` file derives the merge threshold
+  (#87).
+- **Near-duplicate alias suggestions (#178).** `lambo canon alias-preview
+  --similar` suggests alias pairs from 3-gram MinHash and vector cosine,
+  with identifier, digit, type and contradiction guards and an
+  accept/reject overrides file. It only suggests; nothing is merged.
+- **Distinct identifiers no longer merge (#148)**, and Gemini / Cloud SQL
+  IAM find gcloud's application-default credentials (#7).
 
 ### Performance
 
@@ -54,6 +75,14 @@
   `evidence/issue-171-perf/`).
 
 ### Upgrading from 0.6.0
+
+In short: run `lambo provision` once per store, with no session holder
+running. It transcodes SQLite vectors (#55), creates `store_meta` on
+Postgres and Cockroach (#171), and re-keys identifier concepts (#148). A 0.6.0 binary
+cannot read a migrated SQLite store's vectors, so keep a backup if you may
+roll back. Postgres and Cockroach stores refuse attach until provisioned.
+The first writer attach after upgrading pins the embedder canary (#176);
+`[embedder] canary = "off"` skips it.
 
 - **SQLite stores need `lambo provision` once (#55).** Concept vectors are
   now stored as packed little-endian `f32` instead of decimal text. Until
