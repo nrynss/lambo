@@ -26,6 +26,7 @@ mod explain;
 mod fair_test_tests;
 mod gate;
 mod policy;
+pub mod similar;
 mod stage1;
 mod stage2;
 mod stage3;

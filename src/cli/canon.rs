@@ -103,8 +103,27 @@ pub struct AliasPreviewArgs {
     pub common: CommonArgs,
     /// A reviewed map (`alias-id ruling-id` per line); detection otherwise.
     pub map: Option<PathBuf>,
+    /// `--similar` (#178): near-duplicate suggestions instead of detection.
+    pub similar: Option<SimilarArgs>,
     /// Also print both full dry runs per policy.
     pub verbose: bool,
+}
+
+/// `lambo canon alias-preview --similar`'s options.
+#[derive(Clone, Debug)]
+pub struct SimilarArgs {
+    /// Exact 3-gram Jaccard floor.
+    pub jaccard: f64,
+    /// Folded characters a concept needs for the lexical source.
+    pub min_chars: usize,
+    /// Cosine floor for vector pairs; `None` for text only.
+    pub cosine: Option<f64>,
+    /// Also suggest pairs with a Canonical concept.
+    pub include_canonical: bool,
+    /// An overrides file (`accept`/`reject` lines).
+    pub overrides: Option<PathBuf>,
+    /// At most this many suggestions.
+    pub max_pairs: usize,
 }
 
 /// What a command printed and whether every invariant held.
@@ -131,7 +150,10 @@ mod imp {
     use sqlx::sqlite::SqliteConnectOptions;
 
     use super::{AliasPreviewArgs, CommonArgs, DryRunArgs, Outcome};
-    use crate::canon::alias_preview::{alias_preview, render_alias_preview, PairInput};
+    use crate::canon::alias_preview::{
+        alias_preview, render_alias_preview, PairInput, SimilarInput,
+    };
+    use crate::canon::similar::SimilarParams;
     use crate::canon::dry_run::{
         baseline_mismatch, compare, dry_run_all, redact, render_report, resolve_watch,
         DryRunParams, DryRunReport, Invariant, SourceFacts,
@@ -544,13 +566,46 @@ mod imp {
         Ok(Outcome { output, ok })
     }
 
+    /// Validate `--similar`'s options and read the overrides file.
+    fn similar_input(s: &super::SimilarArgs) -> Result<SimilarInput, CliError> {
+        let unit = |name: &str, v: f64| {
+            if v.is_finite() && (0.0..=1.0).contains(&v) {
+                Ok(v)
+            } else {
+                Err(CliError::Usage(format!("--{name} must be in [0, 1], got {v}")))
+            }
+        };
+        let overrides = match &s.overrides {
+            Some(p) => std::fs::read_to_string(p)
+                .map_err(|e| CliError::Usage(format!("--overrides {}: {e}", p.display())))?,
+            None => String::new(),
+        };
+        crate::canon::similar::split_overrides(&overrides)
+            .map_err(|e| CliError::Usage(format!("--overrides: {e}")))?;
+        Ok(SimilarInput {
+            params: SimilarParams {
+                jaccard: unit("jaccard", s.jaccard)?,
+                min_chars: s.min_chars,
+                cosine: s.cosine.map(|c| unit("cosine", c)).transpose()?,
+                include_canonical: s.include_canonical,
+                max_pairs: s.max_pairs,
+                ..SimilarParams::default()
+            },
+            overrides,
+        })
+    }
+
     pub(super) async fn alias_preview_run(args: AliasPreviewArgs) -> Result<Outcome, CliError> {
-        let input = match &args.map {
-            Some(p) => PairInput::Map(
+        let input = match (&args.map, &args.similar) {
+            (Some(_), Some(_)) => {
+                return Err(CliError::Usage("--map and --similar are exclusive".into()));
+            }
+            (Some(p), None) => PairInput::Map(
                 std::fs::read_to_string(p)
                     .map_err(|e| CliError::Usage(format!("--map {}: {e}", p.display())))?,
             ),
-            None => PairInput::Detect,
+            (None, Some(s)) => PairInput::Similar(Box::new(similar_input(s)?)),
+            (None, None) => PairInput::Detect,
         };
         let stop = install_signals()?;
         let scratch = Scratch::new(args.common.scratch.as_deref())?;
