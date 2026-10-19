@@ -49,7 +49,9 @@
   provision. It now records a finished, collision-free pass in `store_meta`
   (`canonical_key_rule`) and later provisions skip the scan; a pass that
   leaves a collision records nothing, so the store is checked again until
-  the operator resolves it. `--rekey` forces the full pass.
+  the operator resolves it. `--rekey` forces the full pass. On a
+  9,508-concept store a provision now takes 5.6 ms instead of 143 ms (p50,
+  `evidence/issue-171-perf/`).
 
 ### Upgrading from 0.6.0
 

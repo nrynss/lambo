@@ -126,3 +126,38 @@ against.
 |---:|---:|---:|
 | 5,000 | 62.4 ms | 8.0 ms |
 | 9,100 | 201.2 ms | 31.3 ms |
+
+## PR 171c: a `store_meta` marker so provision skips the #148 re-key
+
+Same method as 171b: both binaries are `cargo build --release --features
+store-sqlite`, run one after the other with nothing else running. "main" is
+a94942b2 (171b merged); this branch adds the re-key marker and nothing
+else. `provision_ms` is a plain `lambo provision` on the populated
+9,508-concept store, five runs after the first (which records the marker
+on this branch). `provision_rekey_ms` is `lambo provision --rekey`, which
+forces the full pass; main has no such flag, so the row is this branch's
+only.
+
+| measure | main (a94942b2) | this PR |
+|---|---:|---:|
+| provision_ms (p50 / p90) | 143.35 / 146.33 | 5.58 / 7.58 |
+| provision_rekey_ms (p50 / p90) | n/a | 143.01 / 156.48 |
+| populate_s (settled) | 141.8 | 141.8 |
+| startup_loaded_ms | 611.6 | 560.6 |
+| store after populate (concepts / edges) | 9508 / 11669 | 9508 / 11669 |
+| keyword_semantic_recall p50 / p90 ms | 6.94 / 8.49 | 8.05 / 9.69 |
+| structural_hit p50 / p90 ms | 1.75 / 2.06 | 2.21 / 2.54 |
+| structural_miss p50 / p90 ms | 7.25 / 9.05 | 8.03 / 10.58 |
+| identifier_recall p50 / p90 ms | 5.63 / 6.48 | 5.75 / 9.53 |
+| recall_16_concurrent p50 / p90 ms | 13.17 / 24.73, 920.2 rps | 12.6 / 17.21, 1112.1 rps |
+| derive_ack_back_to_back p50 / p90 ms | 0.79 / 30.22 | 0.86 / 30.53 |
+| derive_applied_back_to_back p50 / p90 ms | 10.58 / 38.62 | 8.86 / 38.99 |
+| derive_ack_isolated p50 / p90 ms | 1.6 / 2.12 | 1.51 / 2.0 |
+
+A provision on a store whose re-key already ran clean drops from 143 ms to
+5.6 ms: it reads one `store_meta` row instead of re-deriving 9,508 keys.
+`--rekey` costs what every provision cost before. This branch does not
+touch the recall or write paths, so the other rows are noise; they move by
+up to about 1 ms in both directions between two back-to-back runs.
+
+Raw: `main-a94942b2.json`, `pr-171c.json`.
