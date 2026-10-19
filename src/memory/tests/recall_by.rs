@@ -105,7 +105,7 @@ async fn a_similar_image_and_a_client_vector_find_the_dismissed_look() {
         // Not cached (design 7.2): the query-embedding cache holds nothing,
         // and the session's pipeline cache was never handed over.
         assert!(mem.query_embeddings.lock().is_empty(), "{source:?}");
-        assert!(mem.recall_cache.lock().await.is_empty(), "{source:?}");
+        assert!(mem.recall_cache.is_empty(), "{source:?}");
 
         // The text path still works beside it, and the dismissed look is
         // what a text query for its label finds too (design 7.1).

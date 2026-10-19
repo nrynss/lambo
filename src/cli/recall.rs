@@ -21,7 +21,7 @@ use super::caps::{
 use super::{load_reader_graph, LoadedReader};
 use crate::config::Config;
 use crate::daemon::{Daemon, RecallPipeline};
-use crate::recall::cache::RecallCache;
+use crate::recall::cache::SharedRecallCache;
 use crate::recall::candidates;
 use crate::recall::detail::{Annotation, AnnotationKind, DetailedHit, DetailedRecall};
 use crate::recall::query_cache::{embed_query_cached, QueryEmbeddingCache};
@@ -351,7 +351,7 @@ async fn run_on(
     // vector leg consistent with assembly and drop the second vector parse
     // (a follow-up in dev-diary/notes/feature-8-vector-source.md).
     let vectors = VectorCandidates::from_store(backends.store.as_ref());
-    let mut cache = RecallCache::<RecallPipeline>::new();
+    let cache = SharedRecallCache::<RecallPipeline>::new();
     let rq = RecallQuery {
         query: query.to_string(),
         top_k: request.top_k,
@@ -391,7 +391,7 @@ async fn run_on(
                         .as_deref()
                         .map(|vector| (vector, &backends.embedding)),
                     cfg.recall_weights,
-                    &mut cache,
+                    &cache,
                 )
                 .await
         }
@@ -408,7 +408,7 @@ async fn run_on(
                     vectors,
                     (&vector, &backends.embedding),
                     cfg.recall_weights,
-                    &mut cache,
+                    &cache,
                 )
                 .await
                 .map_err(crate::types::LamboError::Store)?
