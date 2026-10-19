@@ -29,6 +29,9 @@ use crate::types::{AgentId, SessionId, StoreError};
 fn erase_covers_every_table_in_both_ddls() {
     let mut covered: BTreeSet<&str> = ERASE_STATEMENTS.iter().map(|(t, _)| *t).collect();
     covered.insert("session_leases");
+    // #171: `store_meta` is store-wide (the re-key marker), not session data,
+    // so erasing a session never touches it.
+    covered.insert("store_meta");
     for (dialect, ddl) in [
         (
             "postgres",

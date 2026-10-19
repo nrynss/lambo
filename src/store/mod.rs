@@ -362,7 +362,14 @@ pub trait GraphStore: Send + Sync {
     /// schema. Refuses while a session lease is live; idempotent. Default: an
     /// adapter with no durable keys (`MemoryStore`, test doubles) has nothing
     /// to re-key.
-    async fn rekey_canonical_keys(&self) -> Result<rekey::RekeyPlan, StoreError> {
+    ///
+    /// #171: a re-key that finishes with no collision records
+    /// [`rekey::REKEY_MARKER_KEY`] in `store_meta`, and a later call returns
+    /// at once with [`rekey::RekeyPlan::skipped`] set, reading no concept.
+    /// `force` ignores the marker and checks every concept (`lambo provision
+    /// --rekey`).
+    async fn rekey_canonical_keys(&self, force: bool) -> Result<rekey::RekeyPlan, StoreError> {
+        let _ = force;
         Ok(rekey::RekeyPlan::default())
     }
 

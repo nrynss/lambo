@@ -7,13 +7,34 @@ use std::collections::HashMap;
 use super::codec::backend;
 use super::dialect::Dialect;
 use super::PgStore;
-use crate::store::rekey::{live_lease_err, placeholder_key, plan_rekey, KeyRow, RekeyPlan};
+use crate::store::rekey::{
+    live_lease_err, placeholder_key, plan_rekey, KeyRow, RekeyPlan, REKEY_MARKER_KEY,
+    REKEY_MARKER_VALUE,
+};
 use crate::types::StoreError;
 
 impl<D: Dialect> PgStore<D> {
-    pub(super) async fn rekey_keys(&self) -> Result<RekeyPlan, StoreError> {
+    pub(super) async fn rekey_keys(&self, force: bool) -> Result<RekeyPlan, StoreError> {
         let pool = self.pool().await?;
         let mut tx = pool.begin().await.map_err(backend)?;
+        // #171. `FOR UPDATE` on the marker row, when there is one, so a
+        // concurrent forced re-key cannot withdraw it between this read and
+        // the skip; without a row the concept scan below locks every concept.
+        if !force {
+            let marker: Option<String> =
+                sqlx::query_scalar("SELECT value FROM store_meta WHERE key = $1 FOR UPDATE")
+                    .bind(REKEY_MARKER_KEY)
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(backend)?;
+            if marker.as_deref() == Some(REKEY_MARKER_VALUE) {
+                tx.rollback().await.map_err(backend)?;
+                return Ok(RekeyPlan {
+                    skipped: true,
+                    ..RekeyPlan::default()
+                });
+            }
+        }
         let rows: Vec<(uuid::Uuid, String, String, String, String)> = sqlx::query_as(
             "SELECT id, session_id, content, canonical_key, concept_type FROM concepts \
              ORDER BY id FOR UPDATE",
@@ -40,7 +61,8 @@ impl<D: Dialect> PgStore<D> {
             synonyms.into_iter().map(|(s, k, v)| ((s, k), v)).collect();
         let plan = plan_rekey(&rows, &synonyms);
         if plan.changes.is_empty() {
-            tx.rollback().await.map_err(backend)?;
+            record_marker(&mut tx, &plan).await?;
+            tx.commit().await.map_err(backend)?;
             return Ok(plan);
         }
         let live: Vec<(String, String)> = sqlx::query_as(
@@ -77,9 +99,31 @@ impl<D: Dialect> PgStore<D> {
                 }
             }
         }
+        record_marker(&mut tx, &plan).await?;
         tx.commit().await.map_err(backend)?;
         Ok(plan)
     }
+}
+
+/// Record the clean re-key, or withdraw a stale record when this pass left a
+/// collision (#171, [`REKEY_MARKER_KEY`]). Plain `INSERT .. ON CONFLICT`
+/// works on both Postgres and Cockroach.
+async fn record_marker(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    plan: &RekeyPlan,
+) -> Result<(), StoreError> {
+    let query = if plan.collisions.is_empty() {
+        sqlx::query(
+            "INSERT INTO store_meta (key, value) VALUES ($1, $2) \
+             ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+        )
+        .bind(REKEY_MARKER_KEY)
+        .bind(REKEY_MARKER_VALUE)
+    } else {
+        sqlx::query("DELETE FROM store_meta WHERE key = $1").bind(REKEY_MARKER_KEY)
+    };
+    query.execute(&mut **tx).await.map_err(backend)?;
+    Ok(())
 }
 
 /// #148 on live Postgres: a session keyed by the old rule is re-keyed by the
@@ -125,7 +169,7 @@ async fn postgres_rekeys_identifier_concepts() {
     };
     plant_legacy(&store, &sid, Some(lease.token)).await;
     let err = store
-        .rekey_canonical_keys()
+        .rekey_canonical_keys(true)
         .await
         .expect_err("a held session refuses the re-key");
     assert!(err.to_string().contains("lambo provision"), "{err}");

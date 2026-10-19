@@ -37,18 +37,21 @@ use crate::store::{GraphStore, StoreKind};
 /// After the schema, every durable kind re-keys concepts whose key the
 /// pre-#148 rule wrote (identifier tokens stemmed); see
 /// [`crate::store::rekey`]. Refused while a session is held; a rerun is a
-/// no-op.
+/// no-op. Once a re-key has finished with no collision the store records it
+/// and later runs skip the scan (#171); `force_rekey` (`--rekey`) runs it
+/// anyway.
 pub async fn run(
     store: Box<dyn GraphStore>,
     kind: StoreKind,
     dsn: Option<&str>,
+    force_rekey: bool,
 ) -> Result<String, CliError> {
     let schema = provision_schema(store.as_ref(), kind, dsn).await?;
     if kind == StoreKind::Memory {
         return Ok(schema);
     }
     let plan = store
-        .rekey_canonical_keys()
+        .rekey_canonical_keys(force_rekey)
         .await
         .map_err(|e| CliError::Runtime(format!("rekey canonical keys: {e}")))?;
     Ok(format!("{schema}; {}", crate::store::rekey::report(&plan)))

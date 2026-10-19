@@ -337,3 +337,12 @@ CREATE TABLE IF NOT EXISTS session_stats (
     log_depth    INT NOT NULL,
     updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Store-wide facts, not session data (#171), one row per key. The first is
+-- `canonical_key_rule`: a clean #148 re-key records it so `lambo provision`
+-- skips the full concept scan next time (`lambo provision --rekey` forces
+-- it). Never erased with a session.
+CREATE TABLE IF NOT EXISTS store_meta (
+    key   STRING PRIMARY KEY,
+    value STRING NOT NULL
+);

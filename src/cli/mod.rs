@@ -1307,7 +1307,7 @@ mod sqlite_tests {
             assert_eq!(file.store.kind, StoreKind::Sqlite);
             crate::resolve_store_only(Some(&cfg)).expect("store")
         };
-        let out = crate::cli::provision::run(store, StoreKind::Sqlite, None)
+        let out = crate::cli::provision::run(store, StoreKind::Sqlite, None, false)
             .await
             .expect("provision");
         assert!(out.contains("sqlite"), "{out}");
@@ -1472,7 +1472,7 @@ mod sqlite_tests {
             }
             crate::resolve_store_only(Some(&cfg)).expect("store")
         };
-        crate::cli::provision::run(store, StoreKind::Sqlite, None)
+        crate::cli::provision::run(store, StoreKind::Sqlite, None, false)
             .await
             .expect("provision");
         let derive = |repo_scope: Option<&str>| crate::cli::derive::Args {
@@ -1537,7 +1537,7 @@ mod sqlite_tests {
     async fn h1_sqlite_reopen_checks_models_allows_explicit_rename_and_accepts_legacy() {
         let (_dir, cfg) = scratch();
         let store = resolve_clean(&cfg).store;
-        crate::cli::provision::run(store, StoreKind::Sqlite, None)
+        crate::cli::provision::run(store, StoreKind::Sqlite, None, false)
             .await
             .expect("provision");
 
