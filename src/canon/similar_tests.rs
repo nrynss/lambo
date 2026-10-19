@@ -485,3 +485,78 @@ fn similar_timing() {
     );
 }
 
+
+/// The labelled precision report (`evidence/issue-178-similar/`): every
+/// labelled pair on its own, then the synthetic texts as one corpus. Prints
+/// `EVAL` JSON lines that `evidence/issue-178-similar/report.py` tabulates.
+/// `cargo test --release --lib similar_precision_report -- --ignored --nocapture`
+#[test]
+#[ignore = "evidence; prints the labelled report"]
+fn similar_precision_report() {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/evidence/issue-178-similar/labelled-pairs.json");
+    let rows: Vec<serde_json::Value> =
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    for r in &rows {
+        let (a, b) = (r["a"].as_str().unwrap(), r["b"].as_str().unwrap());
+        let mut sa = spec("a", E, a);
+        let mut sb = spec("b", E, b);
+        // Concepts that share a canonical key are one concept unless one
+        // is an Observation: store the second as one, as the duplicates
+        // the dogfood store holds are.
+        if canonical_key(a, |_| None) == canonical_key(b, |_| None) {
+            sb.t = ConceptType::Observation;
+        }
+        if let Some(c) = r["cosine"].as_f64() {
+            sa.embedding = Some(vec![1.0, 0.0]);
+            sb.embedding = Some(vec![c as f32, (1.0 - c * c).max(0.0).sqrt() as f32]);
+        }
+        let rep = detect_similar(&graph(&[sa, sb], &[]), &SimilarParams::default());
+        println!(
+            "EVAL {}",
+            serde_json::json!({
+                "mode": "pair",
+                "id": r["id"],
+                "suggested": !rep.pairs.is_empty(),
+                "source": rep.pairs.first().map(|p| p.source),
+                "jaccard": rep.pairs.first().map(|p| p.jaccard),
+                "guarded": rep.guarded,
+            })
+        );
+    }
+    // One corpus: every distinct synthetic text, text source only.
+    let mut texts: Vec<&str> = rows
+        .iter()
+        .filter(|r| r["source"] == "synthetic")
+        .flat_map(|r| [r["a"].as_str().unwrap(), r["b"].as_str().unwrap()])
+        .collect();
+    texts.sort_unstable();
+    texts.dedup();
+    let names: Vec<String> = (0..texts.len()).map(|i| format!("corpus{i}")).collect();
+    // A text whose key an earlier text already holds is stored as an
+    // Observation, as in the pair mode.
+    let mut keys = HashSet::new();
+    let specs: Vec<Spec<'_>> = names
+        .iter()
+        .zip(&texts)
+        .map(|(n, t)| {
+            let mut s = spec(n, E, t);
+            if !keys.insert(canonical_key(t, |_| None)) {
+                s.t = ConceptType::Observation;
+            }
+            s
+        })
+        .collect();
+    let rep = detect_similar(&graph(&specs, &[]), &text_only());
+    for p in &rep.pairs {
+        println!(
+            "EVAL {}",
+            serde_json::json!({
+                "mode": "corpus",
+                "a": p.alias_content,
+                "b": p.ruling_content,
+                "jaccard": p.jaccard,
+            })
+        );
+    }
+    println!("EVAL {}", serde_json::json!({"mode": "corpus-summary", "concepts": texts.len(), "guarded": rep.guarded, "lexical_candidates": rep.lexical_candidates}));
+}
