@@ -19,6 +19,20 @@
   against 3.4 ms packed; `load_session` on the packed store 83 ms. The
   transcode itself took 0.44 s. Round-trips are bit-exact.
 
+- **Recall is 2-3x faster and concurrent recalls no longer queue (#171).**
+  The cosine kernel accumulates in 16 independent lanes, which the compiler
+  vectorizes (a fixed order, so every target scores the same bits), and the
+  vector scan sorts only the top `k` instead of every candidate. Recall no
+  longer holds the session's recall-cache lock or the daemon's hot-list
+  write lock for the whole recall: the cache locks for one lookup and one
+  insert, the hot list for its revalidation. A structural recall resolves
+  its anchor once instead of three times. Release builds use thin LTO with
+  one codegen unit. Measured end to end over MCP on a 9,500-concept SQLite
+  store: keyword recall p50 18.7 ms to 7.5 ms, 16 concurrent clients 63 to
+  1,104 recalls per second (`evidence/issue-171-perf/`). Scores can differ
+  from 0.6.0 in the last bit or so; rankings break ties by key and id as
+  before.
+
 ### Upgrading from 0.6.0
 
 - **SQLite stores need `lambo provision` once (#55).** Concept vectors are

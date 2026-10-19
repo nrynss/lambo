@@ -76,7 +76,7 @@ async fn every_returned_hit_counts_once_per_recall_cache_served_or_not() {
         assert_eq!(returned, ["user schema"], "top_k 1 returns only the match");
     }
     assert_eq!(
-        mem.recall_cache.lock().await.len(),
+        mem.recall_cache.len(),
         1,
         "MemoryStore has no vector leg, so recalls 2 and 3 were cache-served"
     );

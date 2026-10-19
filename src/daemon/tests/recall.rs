@@ -14,7 +14,7 @@ async fn recall_entry_reproduces_context_golden() {
     use crate::config::RecallWeights;
     use crate::daemon::score::rescore;
     use crate::fixtures;
-    use crate::recall::cache::RecallCache;
+    use crate::recall::cache::SharedRecallCache;
 
     // T5.3's pinned clock: base + 60 minutes (its ts(60)).
     let now = Utc.timestamp_opt(1_752_000_000, 0).unwrap() + chrono::Duration::minutes(60);
@@ -61,7 +61,7 @@ async fn recall_entry_reproduces_context_golden() {
     let _ = daemon.hot.write().insert(entry);
 
     let store = fixtures::load_store("session-rest-api").unwrap();
-    let mut cache = RecallCache::new();
+    let cache = SharedRecallCache::new();
     let query = RecallQuery {
         query: "update user schema".into(),
         top_k: 5,
@@ -82,7 +82,7 @@ async fn recall_entry_reproduces_context_golden() {
             &store,
             None,
             RecallWeights::default(),
-            &mut cache,
+            &cache,
         )
         .await;
     assert_eq!(
@@ -99,7 +99,7 @@ async fn recall_entry_reproduces_context_golden() {
             &store,
             None,
             RecallWeights::default(),
-            &mut cache,
+            &cache,
         )
         .await;
     assert_eq!(again.context, golden);
@@ -138,7 +138,7 @@ async fn recall_entry_reproduces_context_golden() {
             &store,
             None,
             RecallWeights::default(),
-            &mut cache,
+            &cache,
         )
         .await;
     assert_eq!(
@@ -157,7 +157,7 @@ async fn recall_reservation_transition_invalidates_cache_and_renders() {
     use crate::config::RecallWeights;
     use crate::daemon::score::rescore;
     use crate::fixtures;
-    use crate::recall::cache::RecallCache;
+    use crate::recall::cache::SharedRecallCache;
     use crate::types::Reservation;
 
     let now = Utc.timestamp_opt(1_752_000_000, 0).unwrap() + chrono::Duration::minutes(60);
@@ -175,7 +175,7 @@ async fn recall_reservation_transition_invalidates_cache_and_renders() {
     daemon.scores.write().epoch = graph.read().epoch();
 
     let store = fixtures::load_store("session-rest-api").unwrap();
-    let mut cache = RecallCache::new();
+    let cache = SharedRecallCache::new();
     let session = SessionId::from("session-rest-api");
     let query = RecallQuery {
         query: "update user schema".into(),
@@ -190,7 +190,7 @@ async fn recall_reservation_transition_invalidates_cache_and_renders() {
             &store,
             None,
             RecallWeights::default(),
-            &mut cache,
+            &cache,
         )
         .await;
     assert_eq!(cache.len(), 1);
@@ -213,7 +213,7 @@ async fn recall_reservation_transition_invalidates_cache_and_renders() {
             &store,
             None,
             RecallWeights::default(),
-            &mut cache,
+            &cache,
         )
         .await;
     assert_eq!(
@@ -242,7 +242,7 @@ async fn recall_cache_hit_rerenders_fresh_warning_lines() {
     use crate::config::RecallWeights;
     use crate::daemon::score::rescore;
     use crate::fixtures;
-    use crate::recall::cache::RecallCache;
+    use crate::recall::cache::SharedRecallCache;
     use std::sync::Mutex;
 
     let base = Utc.timestamp_opt(1_752_000_000, 0).unwrap();
@@ -292,7 +292,7 @@ async fn recall_cache_hit_rerenders_fresh_warning_lines() {
     let _ = daemon.hot.write().insert(entry);
 
     let store = fixtures::load_store("session-rest-api").unwrap();
-    let mut cache = RecallCache::new();
+    let cache = SharedRecallCache::new();
     let session = SessionId::from("session-rest-api");
     let query = RecallQuery {
         query: "update user schema".into(),
@@ -308,7 +308,7 @@ async fn recall_cache_hit_rerenders_fresh_warning_lines() {
             &store,
             None,
             RecallWeights::default(),
-            &mut cache,
+            &cache,
         )
         .await;
     assert!(
@@ -327,7 +327,7 @@ async fn recall_cache_hit_rerenders_fresh_warning_lines() {
             &store,
             None,
             RecallWeights::default(),
-            &mut cache,
+            &cache,
         )
         .await;
     assert_eq!(cache.len(), 1, "same epoch -> cache hit, no new key");
@@ -350,7 +350,7 @@ async fn recall_cache_hit_rerenders_fresh_warning_lines() {
             &store,
             None,
             RecallWeights::default(),
-            &mut cache,
+            &cache,
         )
         .await;
     assert_eq!(cache.len(), 1, "same epoch -> cache hit");
@@ -378,7 +378,7 @@ async fn recall_rescore_lag_guard_skips_cache_insert_while_scores_lag() {
     use crate::config::RecallWeights;
     use crate::daemon::score::rescore;
     use crate::fixtures;
-    use crate::recall::cache::RecallCache;
+    use crate::recall::cache::SharedRecallCache;
 
     let now = Utc.timestamp_opt(1_752_000_000, 0).unwrap() + chrono::Duration::minutes(60);
     let snap = fixtures::load_snapshot("session-rest-api").unwrap();
@@ -395,7 +395,7 @@ async fn recall_rescore_lag_guard_skips_cache_insert_while_scores_lag() {
     daemon.scores.write().epoch = graph.read().epoch();
 
     let store = fixtures::load_store("session-rest-api").unwrap();
-    let mut cache = RecallCache::new();
+    let cache = SharedRecallCache::new();
     let session = SessionId::from("session-rest-api");
     let query = RecallQuery {
         query: "update user schema".into(),
@@ -411,7 +411,7 @@ async fn recall_rescore_lag_guard_skips_cache_insert_while_scores_lag() {
             &store,
             None,
             RecallWeights::default(),
-            &mut cache,
+            &cache,
         )
         .await;
     assert!(!first.context.is_empty());
@@ -445,7 +445,7 @@ async fn recall_rescore_lag_guard_skips_cache_insert_while_scores_lag() {
             &store,
             None,
             RecallWeights::default(),
-            &mut cache,
+            &cache,
         )
         .await;
     assert_eq!(
@@ -465,7 +465,7 @@ async fn recall_rescore_lag_guard_skips_cache_insert_while_scores_lag() {
             &store,
             None,
             RecallWeights::default(),
-            &mut cache,
+            &cache,
         )
         .await;
     assert_eq!(
@@ -485,7 +485,7 @@ async fn recall_never_caches_vector_dependent_results() {
     use crate::config::RecallWeights;
     use crate::daemon::score::rescore;
     use crate::fixtures;
-    use crate::recall::cache::RecallCache;
+    use crate::recall::cache::SharedRecallCache;
 
     let now = Utc.timestamp_opt(1_752_000_000, 0).unwrap() + chrono::Duration::minutes(60);
     let snap = fixtures::load_snapshot("session-rest-api").unwrap();
@@ -502,7 +502,7 @@ async fn recall_never_caches_vector_dependent_results() {
     daemon.scores.write().epoch = graph.read().epoch();
 
     let store = fixtures::load_store("session-rest-api").unwrap();
-    let mut cache = RecallCache::new();
+    let cache = SharedRecallCache::new();
     let session = SessionId::from("session-rest-api");
     let query = RecallQuery {
         query: "update user schema".into(),
@@ -525,7 +525,7 @@ async fn recall_never_caches_vector_dependent_results() {
             &store,
             Some((&emb, &contract)),
             RecallWeights::default(),
-            &mut cache,
+            &cache,
         )
         .await;
     assert_eq!(cache.len(), 0, "vector-dependent result must not be cached");
@@ -538,7 +538,7 @@ async fn recall_never_caches_vector_dependent_results() {
             &store,
             None,
             RecallWeights::default(),
-            &mut cache,
+            &cache,
         )
         .await;
     assert_eq!(cache.len(), 1, "keyword+recent result cached");
@@ -552,7 +552,7 @@ async fn recall_without_index_keeps_recent_leg() {
     use crate::config::RecallWeights;
     use crate::daemon::score::rescore;
     use crate::fixtures;
-    use crate::recall::cache::RecallCache;
+    use crate::recall::cache::SharedRecallCache;
 
     let now = Utc.timestamp_opt(1_752_000_000, 0).unwrap() + chrono::Duration::minutes(60);
     let snap = fixtures::load_snapshot("session-rest-api").unwrap();
@@ -568,7 +568,7 @@ async fn recall_without_index_keeps_recent_leg() {
     daemon.scores.write().epoch = graph.read().epoch();
 
     let store = fixtures::load_store("session-rest-api").unwrap();
-    let mut cache = RecallCache::new();
+    let cache = SharedRecallCache::new();
     let session = SessionId::from("session-rest-api");
     let query = RecallQuery {
         query: "zzz".into(), // matches no keyword; recent leg is the only source
@@ -583,7 +583,7 @@ async fn recall_without_index_keeps_recent_leg() {
             &store,
             None,
             RecallWeights::default(),
-            &mut cache,
+            &cache,
         )
         .await;
     assert!(
@@ -621,7 +621,7 @@ async fn recall_rejects_mismatched_session() {
     daemon.scores.write().epoch = graph.read().epoch();
 
     let store = fixtures::load_store("session-rest-api").unwrap();
-    let mut cache = crate::recall::cache::RecallCache::new();
+    let cache = crate::recall::cache::SharedRecallCache::new();
     let other = SessionId::from("session-drift"); // differs from graph's session
     let query = RecallQuery {
         query: "update user schema".into(),
@@ -636,7 +636,7 @@ async fn recall_rejects_mismatched_session() {
             &store,
             None,
             RecallWeights::default(),
-            &mut cache,
+            &cache,
         )
         .await;
     assert!(
@@ -661,7 +661,7 @@ async fn recall_rejects_mismatched_session() {
 #[tokio::test]
 async fn gather_contract_race_annotates_vector_degraded() {
     use crate::config::RecallWeights;
-    use crate::recall::cache::RecallCache;
+    use crate::recall::cache::SharedRecallCache;
     use crate::recall::detail::AnnotationKind;
     use crate::store::Capabilities;
     use crate::types::{EmbeddingContract, MutationBatch};
@@ -798,7 +798,7 @@ async fn gather_contract_race_annotates_vector_degraded() {
 
     let (graph, _cid) = locked_graph_with_one_concept();
     let daemon = Daemon::new(graph, ScoringWeights::default(), Duration::from_secs(3600));
-    let mut cache = RecallCache::new();
+    let cache = SharedRecallCache::new();
     let query = RecallQuery {
         query: "user schema".into(),
         top_k: 5,
@@ -817,7 +817,7 @@ async fn gather_contract_race_annotates_vector_degraded() {
             &ContractRaceStore,
             Some((&vec![0.0; 1024], &contract)),
             RecallWeights::default(),
-            &mut cache,
+            &cache,
         )
         .await;
 
@@ -860,7 +860,7 @@ async fn recall_renders_a_contradiction_and_pulls_in_its_source() {
     use crate::config::RecallWeights;
     use crate::daemon::score::rescore;
     use crate::fixtures;
-    use crate::recall::cache::RecallCache;
+    use crate::recall::cache::SharedRecallCache;
 
     // After the fixture's last write (2026-08-10T09:55:00Z).
     let now = Utc.with_ymd_and_hms(2026, 8, 10, 10, 30, 0).unwrap();
@@ -944,7 +944,7 @@ async fn recall_renders_a_contradiction_and_pulls_in_its_source() {
     assert_eq!(hits.len(), 1, "user schema is contradicted");
 
     let store = fixtures::load_store("session-rest-api").unwrap();
-    let mut cache = RecallCache::new();
+    let cache = SharedRecallCache::new();
     let query = RecallQuery {
         query: "update user schema".into(),
         top_k: 2,
@@ -958,7 +958,7 @@ async fn recall_renders_a_contradiction_and_pulls_in_its_source() {
             &store,
             None,
             RecallWeights::default(),
-            &mut cache,
+            &cache,
         )
         .await;
 
