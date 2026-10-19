@@ -128,6 +128,9 @@ pub const RESOLVE_ENV_VARS: &[&str] = &[
     // #22: read unconditionally by `overlay_env`, like the names above. It
     // decides whether this process trusts a client's vector label.
     crate::embed::ACCEPT_CLIENT_VECTORS_ENV,
+    // #176: read unconditionally by `overlay_env`; it decides whether a
+    // writer attach checks (or refuses on) the embedder canary.
+    crate::embed::CANARY_ENV,
     "LAMBO_PROMOTION_POLICY",
     // Read past the file, while the backends are built — see "A resolve is not
     // only the file overlay" above.
@@ -943,6 +946,13 @@ mod tests {
                 value: "true",
                 file: MEMORY,
                 resolved: Some(|p| format!("{:?}", load(p).embedder.accept_client_vectors)),
+            },
+            Override {
+                // #176: read unconditionally by `overlay_env`, whatever the kind.
+                var: crate::embed::CANARY_ENV,
+                value: "verify",
+                file: MEMORY,
+                resolved: Some(|p| format!("{:?}", load(p).embedder.canary)),
             },
             Override {
                 var: "LAMBO_PROMOTION_POLICY",

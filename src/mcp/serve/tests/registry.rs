@@ -34,7 +34,13 @@ fn backends_over(store: Box<dyn GraphStore>, config: crate::Config) -> ResolvedB
         store,
         embedder: Box::new(FixtureEmbedder::new()),
         store_cfg: StoreConfig::default(),
-        embedder_cfg: Default::default(),
+        embedder_cfg: crate::embed::EmbedderConfig {
+            // #176: tests that count embeds (and every other hand-built
+            // ResolvedBackends here) turn the canary off; Warn is the
+            // resolved-config default, not what a unit test wants.
+            canary: crate::embed::canary::CanaryMode::Off,
+            ..Default::default()
+        },
         embedding: EmbeddingContract {
             kind: "fixture".into(),
             model: None,

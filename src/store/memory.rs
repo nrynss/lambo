@@ -96,6 +96,9 @@ pub struct MemoryStore {
     /// Separate lock so refusal recording never touches the graph or lease
     /// locks.
     refusals: RwLock<Vec<crate::store::lease::LeaseRefusal>>,
+    /// #176: the store-wide `store_meta` rows (the embedder canary
+    /// fingerprint), in memory for the life of this store.
+    meta: RwLock<HashMap<String, String>>,
 }
 
 impl MemoryStore {
@@ -455,6 +458,26 @@ impl MemoryStore {
 impl GraphStore for MemoryStore {
     async fn init_schema(&self) -> Result<(), StoreError> {
         Ok(())
+    }
+
+    async fn read_store_meta(&self, key: &str) -> Result<Option<String>, StoreError> {
+        Ok(self.meta.read().get(key).cloned())
+    }
+
+    async fn write_store_meta(&self, key: &str, value: &str) -> Result<(), StoreError> {
+        self.meta.write().insert(key.to_owned(), value.to_owned());
+        Ok(())
+    }
+
+    async fn write_store_meta_if_absent(&self, key: &str, value: &str) -> Result<bool, StoreError> {
+        use std::collections::hash_map::Entry;
+        match self.meta.write().entry(key.to_owned()) {
+            Entry::Vacant(e) => {
+                e.insert(value.to_owned());
+                Ok(true)
+            }
+            Entry::Occupied(_) => Ok(false),
+        }
     }
 
     fn capabilities(&self) -> Capabilities {
@@ -1095,6 +1118,8 @@ impl MemoryStore {
             leases,
             flush_stats,
             refusals,
+            // Store-wide (#176), like SQLite's `store_meta`: no session rows.
+            meta: _,
         } = self;
         let inner = inner.read();
         let snap = inner.get(&sid.0).map(|d| &d.snapshot);

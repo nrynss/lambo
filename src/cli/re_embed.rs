@@ -104,6 +104,7 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
     // unused here), and `reembed_mode(true)` bypasses the contract check by its
     // own mechanism, never by flipping the override.
     let config = backends.config.clone();
+    let canary_mode = backends.embedder_cfg.canary;
     let store: std::sync::Arc<dyn crate::store::GraphStore> = Arc::from(backends.store);
     let embedder: std::sync::Arc<dyn Embedder> = Arc::from(backends.embedder);
     let live_contract: EmbeddingContract = backends.embedding.clone();
@@ -129,8 +130,9 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
     // still carries a vector blocks a full migration unless
     // --drop-image-vectors, and one whose vector is missing is skipped by
     // both modes (re-deriving the image restores it).
-    let (concepts, images, total) = {
+    let (concepts, images, total, prior_contract) = {
         let g = mem.graph().read();
+        let prior_contract = g.embedding().cloned();
         let mut images = ImageCounts::default();
         let mut snapshot: Vec<(NodeId, String)> = Vec::new();
         for c in g.concepts() {
@@ -145,7 +147,7 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
             }
         }
         snapshot.sort_by_key(|(id, _)| id.0);
-        (snapshot, images, g.concepts().count())
+        (snapshot, images, g.concepts().count(), prior_contract)
     };
 
     // Every path below — success or any mid-run abort — funnels into
@@ -201,7 +203,33 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
         .await
         .map(|out| out + &images.skipped_note())
     };
-    close_writer(mem, out).await
+    // #176: a full rewrite moved this session into the live space, so the
+    // store's canary is pinned again from the live embedder — after the
+    // rewrite is durable, never before. A backfill changes no space.
+    let full_rewrite = out.is_ok() && !args.missing_only && total > 0;
+    let out = close_writer(mem, out).await?;
+    if !full_rewrite || canary_mode == crate::embed::canary::CanaryMode::Off {
+        return Ok(out);
+    }
+    Ok(
+        match crate::embed::canary::pin(store.as_ref(), embedder.as_ref(), &live_contract).await {
+            // The canary is store-wide per contract. A rewrite under the
+            // same contract name (the drift the canary exists for) leaves the
+            // store's other sessions under that name in the old space, and
+            // after this pin nothing flags them any more: say so.
+            Ok(()) if prior_contract.as_ref() == Some(&live_contract) => format!(
+                "{out}\nembedder canary pinned again for the live contract. This session kept \
+                 its contract name, so any other session in this store under the same contract \
+                 still holds vectors from the previous embedder and the canary no longer flags \
+                 it: re-embed each of them too"
+            ),
+            Ok(()) => format!("{out}\nembedder canary pinned again for the live contract"),
+            Err(e) => format!(
+                "{out}\nwarning: the embedder canary could not be pinned again ({e}); the next \
+                 writer attach compares against the old pin"
+            ),
+        },
+    )
 }
 
 /// The image concepts (#22) a re-embed found, which it never embeds.

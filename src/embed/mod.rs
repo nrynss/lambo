@@ -6,6 +6,7 @@
 //! `dev-diary/notes/level-b-pluggability.md`.
 
 pub mod api_key;
+pub mod canary;
 pub mod keep_warm;
 pub(crate) mod math;
 
@@ -619,6 +620,9 @@ fn default_embed_dim() -> usize {
     1024
 }
 
+/// Overrides `[embedder] canary` (#176).
+pub const CANARY_ENV: &str = "LAMBO_EMBED_CANARY";
+
 /// Resolved configuration for building an embedder.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -703,6 +707,18 @@ pub struct EmbedderConfig {
     /// any other kind refuses it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub images: Option<bool>,
+    /// The embedder canary (#176, [`canary`]): `verify` refuses a writer
+    /// attach whose embedder no longer reproduces the store's pinned canary
+    /// vectors, `warn` (the default) logs it, `off` skips the check.
+    /// `LAMBO_EMBED_CANARY` overrides it. Not part of the embedding contract.
+    #[serde(default)]
+    pub canary: canary::CanaryMode,
+    /// Labelled related-but-distinct pairs (a JSON array of `{"a": .., "b":
+    /// ..}`) to derive the merge threshold from, per #87: their p99 cosine,
+    /// once there are at least [`canary::MIN_RELATED_PAIRS`]. Absent keeps
+    /// `semantic_match_threshold`. Needs `canary` on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub related_pairs: Option<std::path::PathBuf>,
 }
 
 impl Default for EmbedderConfig {
@@ -727,6 +743,8 @@ impl Default for EmbedderConfig {
             keep_warm_secs: None,
             accept_client_vectors: false,
             images: None,
+            canary: canary::CanaryMode::Warn,
+            related_pairs: None,
         }
     }
 }
@@ -806,6 +824,13 @@ impl EmbedderConfig {
                          0 disables keep-warm)"
                 ))
             })?);
+        }
+        if let Ok(v) = env::var(CANARY_ENV)
+            && !v.is_empty()
+        {
+            self.canary = v.parse().map_err(|e: String| {
+                EmbedError::Unavailable(format!("invalid {CANARY_ENV}: {e}"))
+            })?;
         }
         if let Ok(v) = env::var(ACCEPT_CLIENT_VECTORS_ENV)
             && !v.is_empty()

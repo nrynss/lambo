@@ -173,6 +173,10 @@ pub struct MemoryBuilder {
     /// pipeline reads its probe from. `None` (the default) spawns a probe of
     /// the pipeline's own, as every session did before.
     pub(super) calibration: Option<EmbedderCalibration>,
+    /// #176: the embedder canary the writer attach runs. Off unless set by
+    /// [`MemoryBuilder::canary`] or taken from `[embedder]` by
+    /// [`MemoryBuilder::backends`].
+    pub(super) canary: crate::embed::canary::CanaryOptions,
 }
 
 impl MemoryBuilder {
@@ -258,6 +262,24 @@ impl MemoryBuilder {
         self.embedder = Some(Arc::from(backends.embedder));
         self.embedding = Some(backends.embedding);
         self.allow_embedding_mismatch = backends.allow_embedding_mismatch;
+        self.canary = crate::embed::canary::CanaryOptions {
+            mode: backends.embedder_cfg.canary,
+            related_pairs: backends.embedder_cfg.related_pairs.clone(),
+        };
+        self
+    }
+
+    /// The embedder canary (#176, [`crate::embed::canary`]). A builder given
+    /// [`MemoryBuilder::backends`] takes `[embedder] canary` and
+    /// `related_pairs`; one assembled by hand runs none unless this is set.
+    ///
+    /// The check runs once per writer attach, after the embedder's
+    /// `prepare`: twenty embeds (one batch on a batching adapter). A drift
+    /// under [`CanaryMode::Verify`](crate::embed::canary::CanaryMode::Verify)
+    /// refuses the attach unless [`MemoryBuilder::allow_embedding_mismatch`]
+    /// is set.
+    pub fn canary(mut self, options: crate::embed::canary::CanaryOptions) -> Self {
+        self.canary = options;
         self
     }
 
@@ -694,7 +716,30 @@ impl MemoryBuilder {
                     LamboError::Config(message)
                 }
             })?;
-            Ok::<_, LamboError>((existing, graph, loaded.index, write_intents))
+            // (2c) #176 — the embedder canary, now the weights are loaded.
+            // Skipped for the re-embed migration, which re-pins it after its
+            // rewrite is durable.
+            let merge_threshold = if self.reembed_mode {
+                None
+            } else {
+                canary_gate(
+                    store.as_ref(),
+                    embedder.as_ref(),
+                    &embedding,
+                    &self.canary,
+                    config.semantic_match_threshold,
+                    self.allow_embedding_mismatch,
+                    &session,
+                )
+                .await?
+            };
+            Ok::<_, LamboError>((
+                existing,
+                graph,
+                loaded.index,
+                write_intents,
+                merge_threshold,
+            ))
         };
         // J6 — the one unbounded `await` under the pre-arm, and therefore the
         // one place the pre-arm could have become the immunity J2-R1-7
@@ -732,7 +777,7 @@ impl MemoryBuilder {
             }
             None => startup.await,
         };
-        let (existing, graph, index, write_intents) = match startup {
+        let (existing, graph, index, write_intents, merge_threshold) = match startup {
             Ok(startup) => startup,
             Err(startup_error) => {
                 // Stop beating before releasing, so no refresh races the release.
@@ -751,6 +796,11 @@ impl MemoryBuilder {
 
         let graph = Arc::new(RwLock::new(graph));
         let index = Arc::new(RwLock::new(index));
+        let mut config = config;
+        if let Some(threshold) = merge_threshold {
+            config.semantic_match_threshold = threshold;
+        }
+        let config = config;
 
         // (3) Daemon first — the canonization task borrows its score table and
         // event sender, so it must exist before `CanonizationTask::from_daemon`.
@@ -905,4 +955,73 @@ impl Drop for AbortOnDrop {
             task.abort();
         }
     }
+}
+
+/// #176: run the canary check and apply its mode. `Some(t)` when the merge
+/// threshold was derived from labelled pairs (#87) and replaces the
+/// configured one for this session.
+async fn canary_gate(
+    store: &dyn crate::store::GraphStore,
+    embedder: &dyn Embedder,
+    contract: &EmbeddingContract,
+    options: &crate::embed::canary::CanaryOptions,
+    configured_threshold: f64,
+    allow_mismatch: bool,
+    session: &SessionId,
+) -> Result<Option<f64>, LamboError> {
+    use crate::embed::canary::{self, CanaryMode, CanaryVerdict, ThresholdSource};
+    let outcome = canary::check(store, embedder, contract, options, configured_threshold).await?;
+    match &outcome.verdict {
+        CanaryVerdict::Off | CanaryVerdict::RecentlyVerified => {}
+        CanaryVerdict::Pinned => tracing::info!(
+            session = %session,
+            embedder = %contract.kind,
+            model = ?contract.model,
+            "embedder canary pinned: this store had no fingerprint for this embedding contract"
+        ),
+        CanaryVerdict::Verified { min_cosine, .. } => tracing::debug!(
+            session = %session,
+            min_cosine,
+            "embedder canary verified"
+        ),
+        CanaryVerdict::Unverified(reason) => tracing::warn!(
+            session = %session,
+            reason = %reason,
+            "embedder canary could not be checked; the next writer attach checks again"
+        ),
+        CanaryVerdict::Drifted { min_cosine, worst } => {
+            let message = format!(
+                "session {session}: embedder canary drifted — canary {worst} ({:?}) has cosine \
+                 {min_cosine:.5} against the vector this store pinned for kind={} model={} \
+                 dim={}, below {}. The embedder behind this contract no longer produces the \
+                 vectors already stored (a re-quantised model, another server build, a provider \
+                 revision), and new vectors would land in a different space. Re-embed the \
+                 store's sessions with `lambo re-embed` (which re-pins the canary), restore the \
+                 previous embedder, or, knowing the spaces still agree, attach with \
+                 --allow-embedding-mismatch or set [embedder] canary = \"warn\".",
+                canary::CANARY_PHRASES[*worst],
+                contract.kind,
+                contract.model.as_deref().unwrap_or("(default)"),
+                contract.dim,
+                canary::CANARY_MIN_COSINE,
+            );
+            if options.mode == CanaryMode::Verify && !allow_mismatch {
+                return Err(LamboError::Config(message));
+            }
+            tracing::warn!(session = %session, mode = %options.mode, allow_mismatch, "{message}");
+        }
+    }
+    Ok(match outcome.threshold_source {
+        ThresholdSource::Configured => None,
+        ThresholdSource::RelatedPairs { pairs } => {
+            tracing::info!(
+                session = %session,
+                threshold = outcome.merge_threshold,
+                pairs,
+                configured = configured_threshold,
+                "semantic_match_threshold derived from labelled related pairs (#87)"
+            );
+            Some(outcome.merge_threshold)
+        }
+    })
 }

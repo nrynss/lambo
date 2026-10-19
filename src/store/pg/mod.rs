@@ -83,6 +83,7 @@
 mod codec;
 mod dialect;
 mod leases;
+mod meta;
 mod persistence;
 mod pool;
 mod rekey;
@@ -345,6 +346,18 @@ impl<D: Dialect> GraphStore for PgStore<D> {
         force: bool,
     ) -> Result<crate::store::rekey::RekeyPlan, StoreError> {
         self.rekey_keys(force).await
+    }
+
+    async fn read_store_meta(&self, key: &str) -> Result<Option<String>, StoreError> {
+        self.read_meta(key).await
+    }
+
+    async fn write_store_meta(&self, key: &str, value: &str) -> Result<(), StoreError> {
+        self.write_meta(key, value).await
+    }
+
+    async fn write_store_meta_if_absent(&self, key: &str, value: &str) -> Result<bool, StoreError> {
+        self.write_meta_if_absent(key, value).await
     }
 
     fn capabilities(&self) -> Capabilities {

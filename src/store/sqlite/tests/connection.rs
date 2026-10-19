@@ -86,14 +86,14 @@ async fn build_store_registry_returns_working_sqlite_adapter() {
 /// RAII cleanup for a file-backed test database: removes the db file and
 /// any WAL/SHM sidecars on drop (the pool is dropped with the store, so
 /// WAL sidecars are normally already checkpointed away).
-struct TempDb(std::path::PathBuf);
+pub(super) struct TempDb(std::path::PathBuf);
 
 impl TempDb {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self(std::env::temp_dir().join(format!("lambo-sqlite-test-{}.db", uuid::Uuid::new_v4())))
     }
 
-    fn path(&self) -> &std::path::Path {
+    pub(super) fn path(&self) -> &std::path::Path {
         &self.0
     }
 }

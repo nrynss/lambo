@@ -383,6 +383,33 @@ pub trait GraphStore: Send + Sync {
         Ok(rekey::RekeyPlan::default())
     }
 
+    /// #176: read one store-wide `store_meta` value (the embedder canary
+    /// fingerprint is the first caller outside this module). `None` when the
+    /// key has no row. Default: an adapter with no store-wide table (test
+    /// doubles) has nothing recorded.
+    async fn read_store_meta(&self, key: &str) -> Result<Option<String>, StoreError> {
+        let _ = key;
+        Ok(None)
+    }
+
+    /// #176: insert or replace one store-wide `store_meta` value. Not fenced
+    /// by any session lease: the rows describe the store, not a session.
+    /// Default: dropped, so a test double re-pins on every attach.
+    async fn write_store_meta(&self, key: &str, value: &str) -> Result<(), StoreError> {
+        let _ = (key, value);
+        Ok(())
+    }
+
+    /// #176: insert one store-wide `store_meta` value only when the key is
+    /// absent. Returns `true` when this call inserted the row. Used by the
+    /// embedder canary's first pin so two writer sessions cannot both invent
+    /// a fingerprint for the same contract. Default: always "inserted" (the
+    /// no-op adapters have nothing to race).
+    async fn write_store_meta_if_absent(&self, key: &str, value: &str) -> Result<bool, StoreError> {
+        let _ = (key, value);
+        Ok(true)
+    }
+
     /// Dense-vector width this store will accept, when it persists embeddings.
     ///
     /// * `Some(n)` — embedder output must be exactly `n`. Cockroach's `n` is its

@@ -70,7 +70,13 @@ fn backends(db: &Path, embedder: Box<dyn Embedder>) -> ResolvedBackends {
             path: Some(path),
             vector_dim: None,
         },
-        embedder_cfg: Default::default(),
+        embedder_cfg: crate::embed::EmbedderConfig {
+            // #176: tests that count embeds (and every other hand-built
+            // ResolvedBackends here) turn the canary off; Warn is the
+            // resolved-config default, not what a unit test wants.
+            canary: crate::embed::canary::CanaryMode::Off,
+            ..Default::default()
+        },
         embedding: EmbeddingContract {
             kind: "fixture".into(),
             model: None,
