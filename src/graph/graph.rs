@@ -670,6 +670,17 @@ impl Graph {
     /// edge ids are deduplicated.
     pub fn incident_edges(&self, node: NodeId) -> Vec<&Edge> {
         let mut ids: Vec<NodeId> = Vec::new();
+        self.incident_edge_ids_into(node, &mut ids);
+        ids.iter().filter_map(|id| self.edges.get(id)).collect()
+    }
+
+    /// The ids of [`Graph::incident_edges`], in the same id-ascending order,
+    /// written into `ids` (cleared first) so a caller walking every concept
+    /// reuses one buffer instead of allocating two vectors per concept (#171
+    /// B4: `rescore` runs this for every concept on every graph change).
+    /// Resolve each id with [`Graph::edge`].
+    pub fn incident_edge_ids_into(&self, node: NodeId, ids: &mut Vec<NodeId>) {
+        ids.clear();
         if let Some(by_type) = self.out.get(&node) {
             for (ty, targets) in by_type {
                 for &tgt in targets {
@@ -688,9 +699,8 @@ impl Graph {
                 }
             }
         }
-        ids.sort_by_key(|id| id.0);
+        ids.sort_unstable_by_key(|id| id.0);
         ids.dedup();
-        ids.iter().filter_map(|id| self.edges.get(id)).collect()
     }
 
     // -----------------------------------------------------------------------
