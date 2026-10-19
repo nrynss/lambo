@@ -37,7 +37,7 @@ use crate::config::{Config, ScoringWeights};
 use crate::daemon::access::AccessLedger;
 use crate::daemon::{Clock, Daemon};
 use crate::embed::Embedder;
-use crate::recall::cache::RecallCache;
+use crate::recall::cache::SharedRecallCache;
 use crate::recall::query_cache::QueryEmbeddingCache;
 use crate::resolve::{
     embedding_mismatch_error, session_embedding_compatibility, ResolvedBackends,
@@ -877,7 +877,7 @@ impl MemoryBuilder {
             canon_handle: PlMutex::new(Some(canon_handle)),
             heartbeat_handle: PlMutex::new(Some(heartbeat_handle)),
             startup_events: PlMutex::new(Some(startup_events)),
-            recall_cache: tokio::sync::Mutex::new(RecallCache::new()),
+            recall_cache: SharedRecallCache::new(),
             query_embeddings: PlMutex::new(QueryEmbeddingCache::new()),
             accesses,
             writers: AsyncRwLock::new(()),

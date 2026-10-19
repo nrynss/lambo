@@ -5,9 +5,10 @@
 //! shutdown); they are refused after close by `ensure_open`. Recall's order
 //! is: `ensure_open`, then the query embedding (only when the vector leg can
 //! run; served from the session's query-embedding cache when this exact text
-//! was embedded before under this contract, #14), take the recall cache, run
-//! the daemon's three-phase recall (which takes and releases the graph lock
-//! itself, after its own store I/O), then note every returned hit as an
+//! was embedded before under this contract, #14), run the daemon's
+//! three-phase recall (which takes and releases the graph lock itself, after
+//! its own store I/O, and touches the shared recall cache only for one
+//! lookup and one insert, #171 B2), then note every returned hit as an
 //! access. The access note comes after the pipeline returns and is a leaf
 //! lock. Both caches are consulted only after `ensure_open`, so a closed or
 //! erased session never answers from either (#23).
@@ -20,7 +21,7 @@ use tokio::sync::broadcast;
 
 use super::{CanonicalMemory, GcStats, GcSweepSummary, Memory, MemoryStats};
 use crate::daemon::RecallPipeline;
-use crate::recall::cache::RecallCache;
+use crate::recall::cache::SharedRecallCache;
 use crate::recall::format;
 use crate::recall::query_cache;
 use crate::recall::query_vector::{self, QueryBy};
@@ -119,10 +120,9 @@ impl Memory {
         let vectors = self.vector_candidates();
         let mut warnings: Vec<String> = warning.into_iter().collect();
 
-        // The recall cache is `&mut` across `Daemon::recall`'s awaits. This is
-        // NOT the graph lock — `Daemon::recall` takes and releases that itself,
-        // after its own store I/O.
-        let mut cache = self.recall_cache.lock().await;
+        // #171 B2: the recall cache is shared, not held. The pipeline locks
+        // it for one lookup and one insert, so concurrent recalls on this
+        // session run side by side instead of queueing for the whole recall.
         let mut result = self
             .daemon
             .recall_with(
@@ -131,10 +131,9 @@ impl Memory {
                 vectors,
                 embedding.map(|vector| (vector, &self.embedding)),
                 self.config.recall_weights,
-                &mut cache,
+                &self.recall_cache,
             )
             .await;
-        drop(cache);
 
         warnings.append(&mut result.warnings);
         result.warnings = warnings;
@@ -191,7 +190,7 @@ impl Memory {
             ));
         }
         let vector = query_vector::resolve(by, self.embedder.as_ref(), &self.embedding).await?;
-        let mut uncached = RecallCache::<RecallPipeline>::new();
+        let uncached = SharedRecallCache::<RecallPipeline>::new();
         let result = self
             .daemon
             .recall_by_vector_with(
@@ -200,7 +199,7 @@ impl Memory {
                 vectors,
                 (&vector, &self.embedding),
                 self.config.recall_weights,
-                &mut uncached,
+                &uncached,
             )
             .await?;
         self.note_accesses(result.hits.iter().map(|h| h.node_id));

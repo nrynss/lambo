@@ -231,13 +231,26 @@ pub(crate) type VectorCandidate = (NodeId, Vec<f32>, String);
 ///
 /// Candidates are borrowed, so a source that already holds its vectors (#8's
 /// graph-backed source over the in-memory graph) scores them in place
-/// instead of copying every vector and key per call. The sort is stable, so
-/// candidates that compare equal keep their input order.
+/// instead of copying every vector and key per call.
+///
+/// # Top-k without a full sort (#171 B1)
+///
+/// Scoring uses the vectorizable kernel ([`crate::embed::cosine`]), and only
+/// the best `limit` candidates are sorted: `select_nth_unstable_by` partitions
+/// them to the front in linear time, and the sort then runs over those `limit`
+/// alone. That is the same answer the old full sort plus truncate gave,
+/// because the comparator is a total order: two candidates compare equal only
+/// when they carry the same id, key and score, and then they are the same
+/// `Scored` value whichever one is kept. An unstable selection cannot reorder
+/// anything a stable sort would have kept apart.
 pub(crate) fn rank_by_cosine<'a>(
     probe: &[f32],
     candidates: impl IntoIterator<Item = (NodeId, &'a [f32], &'a str)>,
     limit: usize,
 ) -> Vec<Scored<NodeId>> {
+    if limit == 0 {
+        return Vec::new();
+    }
     let mut scored: Vec<(Scored<NodeId>, &str)> = candidates
         .into_iter()
         .map(|(id, vector, key)| {
@@ -247,14 +260,17 @@ pub(crate) fn rank_by_cosine<'a>(
             )
         })
         .collect();
-    scored.sort_by(|(a, a_key), (b, b_key)| {
+    let order = |(a, a_key): &(Scored<NodeId>, &str), (b, b_key): &(Scored<NodeId>, &str)| {
         b.score
             .total_cmp(&a.score)
             .then_with(|| tie_break_by_key(Some(a_key), &a.item, Some(b_key), &b.item))
-    });
-    let mut scored: Vec<Scored<NodeId>> = scored.into_iter().map(|(s, _)| s).collect();
-    scored.truncate(limit);
-    scored
+    };
+    if scored.len() > limit {
+        scored.select_nth_unstable_by(limit - 1, order);
+        scored.truncate(limit);
+    }
+    scored.sort_by(order);
+    scored.into_iter().map(|(s, _)| s).collect()
 }
 
 /// The precondition `store::vector::encode_vector` enforces, callable on its
@@ -582,5 +598,162 @@ mod tests {
             assert_eq!(derive.available(), available, "{case}");
             assert_eq!(recall.available(), available, "{case}");
         }
+    }
+
+    /// A seeded splitmix64 stream: deterministic vectors without a crate.
+    fn splitmix(seed: &mut u64) -> f32 {
+        *seed = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = *seed;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^= z >> 31;
+        // 24 bits of mantissa, centred on zero.
+        ((z >> 40) as f32 / (1u64 << 24) as f32) - 0.5
+    }
+
+    fn vectors(n: usize, dim: usize, seed: u64) -> Vec<Vec<f32>> {
+        let mut s = seed;
+        (0..n)
+            .map(|_| (0..dim).map(|_| splitmix(&mut s)).collect())
+            .collect()
+    }
+
+    /// The pre-#171 ranking, kept as the reference: score everything, stable
+    /// sort everything with the same comparator, truncate.
+    fn rank_by_full_sort<'a>(
+        probe: &[f32],
+        candidates: impl IntoIterator<Item = (NodeId, &'a [f32], &'a str)>,
+        limit: usize,
+    ) -> Vec<Scored<NodeId>> {
+        let mut scored: Vec<(Scored<NodeId>, &str)> = candidates
+            .into_iter()
+            .map(|(id, v, key)| {
+                (
+                    Scored::new(id, f64::from(crate::embed::cosine(probe, v))),
+                    key,
+                )
+            })
+            .collect();
+        scored.sort_by(|(a, ak), (b, bk)| {
+            b.score
+                .total_cmp(&a.score)
+                .then_with(|| tie_break_by_key(Some(ak), &a.item, Some(bk), &b.item))
+        });
+        scored.truncate(limit);
+        scored.into_iter().map(|(s, _)| s).collect()
+    }
+
+    /// #171 B1: the partial selection returns exactly what the full sort did,
+    /// for every limit, including heavy exact-score ties (repeated vectors)
+    /// that only the key and id tie-break can order, and a pool smaller than
+    /// the limit.
+    #[test]
+    fn partial_top_k_matches_the_full_sort_for_every_limit() {
+        let dim = 37; // not a multiple of the kernel's lane count
+        let distinct = vectors(40, dim, 7);
+        // 120 candidates over 40 distinct vectors: every score appears three
+        // times, under keys that sometimes collide and ids that never do.
+        let pool: Vec<(NodeId, Vec<f32>, String)> = (0..120u64)
+            .map(|i| {
+                (
+                    NodeId(uuid::Uuid::from_u64_pair(0, 1_000 - i)),
+                    distinct[(i % 40) as usize].clone(),
+                    format!("key-{}", i % 7),
+                )
+            })
+            .collect();
+        let probe = vectors(1, dim, 99).remove(0);
+        let view = || {
+            pool.iter()
+                .map(|(id, v, k)| (*id, v.as_slice(), k.as_str()))
+        };
+        for limit in [0, 1, 2, 3, 5, 39, 40, 41, 119, 120, 121, 500] {
+            assert_eq!(
+                rank_by_cosine(&probe, view(), limit),
+                rank_by_full_sort(&probe, view(), limit),
+                "limit {limit}"
+            );
+        }
+    }
+
+    /// The probe's prepared norm changes nothing: every score is the bits
+    /// `cosine` gives the same pair.
+    #[test]
+    fn rank_by_cosine_scores_are_exactly_cosine() {
+        let pool = vectors(50, 1024, 3);
+        let probe = vectors(1, 1024, 4).remove(0);
+        let ranked = rank_by_cosine(
+            &probe,
+            pool.iter().enumerate().map(|(i, v)| {
+                (
+                    NodeId(uuid::Uuid::from_u64_pair(0, i as u64)),
+                    v.as_slice(),
+                    "k",
+                )
+            }),
+            50,
+        );
+        assert_eq!(ranked.len(), 50);
+        for s in ranked {
+            let i = s.item.0.as_u64_pair().1 as usize;
+            assert_eq!(
+                s.score.to_bits(),
+                f64::from(crate::embed::cosine(&probe, &pool[i])).to_bits()
+            );
+        }
+    }
+
+    /// #171 measurement, not a gate: the exact vector scan at the issue's
+    /// size (9,000 candidates at dim 1024, top 10), before and after.
+    /// `cargo test --release --features fixtures --lib \
+    ///  store::vector_source::tests::rank_by_cosine_timing -- --ignored --nocapture`
+    #[test]
+    #[ignore = "measurement; run in release with --nocapture"]
+    fn rank_by_cosine_timing() {
+        let pool = vectors(9_000, 1024, 11);
+        let keys: Vec<String> = (0..pool.len()).map(|i| format!("concept {i}")).collect();
+        let probe = vectors(1, 1024, 12).remove(0);
+        let view = || {
+            pool.iter().zip(&keys).enumerate().map(|(i, (v, k))| {
+                (
+                    NodeId(uuid::Uuid::from_u64_pair(0, i as u64)),
+                    v.as_slice(),
+                    k.as_str(),
+                )
+            })
+        };
+        let time = |name: &str, f: &dyn Fn() -> Vec<Scored<NodeId>>| {
+            let _ = f();
+            let runs = 50;
+            let start = std::time::Instant::now();
+            for _ in 0..runs {
+                std::hint::black_box(f());
+            }
+            println!(
+                "rank_by_cosine_timing {name}: {:?} per scan",
+                start.elapsed() / runs
+            );
+        };
+        time("scalar cosine + full sort (pre-#171)", &|| {
+            let mut scored: Vec<(Scored<NodeId>, &str)> = view()
+                .map(|(id, v, k)| {
+                    let c = crate::embed::math::tests::cosine_scalar(&probe, v);
+                    (Scored::new(id, f64::from(c)), k)
+                })
+                .collect();
+            scored.sort_by(|(a, ak), (b, bk)| {
+                b.score
+                    .total_cmp(&a.score)
+                    .then_with(|| tie_break_by_key(Some(ak), &a.item, Some(bk), &b.item))
+            });
+            scored.truncate(10);
+            scored.into_iter().map(|(s, _)| s).collect()
+        });
+        time("lane kernel + full sort", &|| {
+            rank_by_full_sort(&probe, view(), 10)
+        });
+        time("lane kernel + partial top-k (#171)", &|| {
+            rank_by_cosine(&probe, view(), 10)
+        });
     }
 }

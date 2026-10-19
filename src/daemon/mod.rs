@@ -57,7 +57,7 @@ use crate::config::{Config, RecallWeights, ScoringWeights};
 use crate::daemon::hotlist::{Condition, HotList};
 use crate::graph::index::InvertedIndex;
 use crate::graph::Graph;
-use crate::recall::cache::{CacheKey, RecallCache};
+use crate::recall::cache::{CacheKey, SharedRecallCache};
 use crate::recall::detail::{Annotation, AnnotationKind, DetailedRecall};
 use crate::recall::dispatch::{self, RecallKind};
 use crate::recall::{assemble, candidates, expand};
@@ -446,8 +446,9 @@ impl Daemon {
     /// an empty hit list with a warning (P8 wires the owner's index).
     ///
     /// `cache` is session-scoped: spec §8's key carries no session id, so the
-    /// caller owns one [`RecallCache`] per session and hands it over by
-    /// `&mut` (the cache has no interior synchronization). The cache stores
+    /// caller owns one [`SharedRecallCache`] per session and shares it by
+    /// reference; it locks per lookup and per insert only (#171 B2), so
+    /// concurrent recalls never queue behind each other's pipelines. It stores
     /// the epoch-stable [`RecallPipeline`]; phase-3 assembly, hot-list
     /// re-validation and context rendering run on EVERY call with the
     /// caller's current `now`, so warning lines are always fresh.
@@ -466,7 +467,7 @@ impl Daemon {
         store: &dyn crate::store::GraphStore,
         embedding: Option<(&[f32], &crate::types::EmbeddingContract)>,
         weights: RecallWeights,
-        cache: &mut RecallCache<RecallPipeline>,
+        cache: &SharedRecallCache<RecallPipeline>,
     ) -> RecallResult {
         self.recall_detailed(session, query, store, embedding, weights, cache)
             .await
@@ -484,8 +485,9 @@ impl Daemon {
     /// with a warning (P8 wires the owner's index).
     ///
     /// `cache` is session-scoped: spec §8's key carries no session id, so the
-    /// caller owns one [`RecallCache`] per session and hands it over by
-    /// `&mut` (the cache has no interior synchronization). The cache stores
+    /// caller owns one [`SharedRecallCache`] per session and shares it by
+    /// reference; it locks per lookup and per insert only (#171 B2), so
+    /// concurrent recalls never queue behind each other's pipelines. It stores
     /// the epoch-stable [`RecallPipeline`]; phase-3 assembly, hot-list
     /// re-validation and context rendering run on EVERY call with the
     /// caller's current `now`, so warning lines are always fresh.
@@ -501,7 +503,7 @@ impl Daemon {
         store: &dyn crate::store::GraphStore,
         embedding: Option<(&[f32], &crate::types::EmbeddingContract)>,
         weights: RecallWeights,
-        cache: &mut RecallCache<RecallPipeline>,
+        cache: &SharedRecallCache<RecallPipeline>,
     ) -> DetailedRecall {
         self.recall_with(
             session,
@@ -525,7 +527,7 @@ impl Daemon {
         vectors: crate::store::vector_source::VectorCandidates<'_>,
         embedding: Option<(&[f32], &crate::types::EmbeddingContract)>,
         weights: RecallWeights,
-        cache: &mut RecallCache<RecallPipeline>,
+        cache: &SharedRecallCache<RecallPipeline>,
     ) -> DetailedRecall {
         match self
             .recall_routed(
@@ -578,7 +580,7 @@ impl Daemon {
         vectors: crate::store::vector_source::VectorCandidates<'_>,
         embedding: (&[f32], &crate::types::EmbeddingContract),
         weights: RecallWeights,
-        cache: &mut RecallCache<RecallPipeline>,
+        cache: &SharedRecallCache<RecallPipeline>,
     ) -> Result<DetailedRecall, StoreError> {
         self.recall_routed(
             session,
@@ -605,7 +607,7 @@ impl Daemon {
         embedding: Option<(&[f32], &crate::types::EmbeddingContract)>,
         weights: RecallWeights,
     ) -> DetailedRecall {
-        let mut uncached = RecallCache::<RecallPipeline>::new();
+        let uncached = SharedRecallCache::<RecallPipeline>::new();
         match self
             .recall_routed(
                 session,
@@ -613,7 +615,7 @@ impl Daemon {
                 vectors,
                 embedding,
                 weights,
-                &mut uncached,
+                &uncached,
                 Route::Layer,
             )
             .await
@@ -638,7 +640,7 @@ impl Daemon {
         vectors: crate::store::vector_source::VectorCandidates<'_>,
         embedding: Option<(&[f32], &crate::types::EmbeddingContract)>,
         weights: RecallWeights,
-        cache: &mut RecallCache<RecallPipeline>,
+        cache: &SharedRecallCache<RecallPipeline>,
         route: Route,
     ) -> Result<DetailedRecall, StoreError> {
         if let Err(err) = crate::store::validate_vector_candidate_limit(query.top_k) {
@@ -668,11 +670,17 @@ impl Daemon {
         // can the (async, vector-I/O) gather be skipped (T9-R1-3); a structural
         // phrasing that does not dispatch falls through to the FULL blend below,
         // never a degraded keyword-only answer.
-        let dispatch_ready = if structural {
+        //
+        // #171: the anchor is resolved here once, stamped with the epoch, and
+        // reused by the dispatch and the subject text below unless a write
+        // moved the graph in between.
+        let (anchor, dispatch_ready) = if structural {
             let g = self.graph.read();
-            dispatch::fits_structural(&g, &query.query)
+            let anchor = dispatch::ResolvedAnchor::resolve(&g, &query.query);
+            let ready = dispatch::fits_structural_with(&g, anchor.choice());
+            (Some(anchor), ready)
         } else {
-            false
+            (None, false)
         };
 
         // Gather store I/O BEFORE any lock (the vector leg is async). Uses the
@@ -748,16 +756,21 @@ impl Daemon {
         // mutation. The daemon HotList tracks conflict/condition entries, not recall
         // recency - neither the blend nor this path bumps recall recency - so there
         // is no recency to refresh here.
-        if structural
-            && let Some(result) =
-                dispatch::try_structural(&graph, &query.query, query.top_k, query.max_tokens)
+        let anchor = anchor.map(|a| a.current(&graph, &query.query));
+        if let Some(anchor) = &anchor
+            && let Some(result) = dispatch::try_structural_with(
+                &graph,
+                &query.query,
+                anchor.choice(),
+                query.top_k,
+                query.max_tokens,
+            )
         {
             return Ok(result);
         }
 
         let scores = self.scores.read().clone();
         let index = self.index.as_ref().map(|i| i.read());
-        let mut hot = self.hot.write();
         let epoch = graph.epoch();
         let key = CacheKey::new(&query.query, query.top_k, query.traversal_depth, epoch);
 
@@ -791,8 +804,11 @@ impl Daemon {
             }
         };
         let pipeline = if can_cache {
+            // #171 B2: the cache locks for this lookup and for the insert
+            // below, never across the build, so concurrent recalls of one
+            // session run their pipelines in parallel.
             match cache.get(&key) {
-                Some(cached) => cached.clone(),
+                Some(cached) => cached,
                 None => {
                     let pipeline = build_pipeline(&graph, index.as_deref(), input, &query);
                     // P5-3: never cache a compute whose daemon scores lag the
@@ -814,7 +830,11 @@ impl Daemon {
         // are evicted here; the survivors' freshly rebuilt payloads are what
         // assembly force-includes and renders. Done here rather than inside
         // `assemble` so recall reads a map and never mutates daemon state.
-        let hot_payloads = hot.revalidate_members(
+        // #171 B2: the hot-list write lock is taken for this revalidation
+        // only, not across the cache lookup, the pipeline build or assembly,
+        // so concurrent recalls do not serialize on it. The order still
+        // holds: graph and index guards are held while it is taken.
+        let hot_payloads = self.hot.write().revalidate_members(
             &graph,
             pipeline
                 .expanded
@@ -838,9 +858,9 @@ impl Daemon {
         );
         // Capture the subject under the same guard as assembly. A caller with
         // no dependents still constrains a layer's traversal exemption.
-        result.anchor = structural
-            .then(|| dispatch::resolved_anchor_text(&graph, &query.query))
-            .flatten();
+        result.anchor = anchor
+            .as_ref()
+            .and_then(|a| dispatch::resolved_anchor_text_from(&graph, a.choice()));
         // I1: attach the phase-1 leg provenance for the hits that survived
         // assembly. Filtered to the returned hits rather than passed whole —
         // phase 1 is a bounded over-approximation (keyword is over-fetched by

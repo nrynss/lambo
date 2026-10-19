@@ -186,6 +186,19 @@ ship = [
 # Convenience: hackathon / ship profile (store adapters as they land).
 demo = ["store-memory", "store-cockroach", "embed-bge", "embed-fixture", "fixtures"]
 
+# #171: release builds were on cargo's defaults (no LTO, 16 codegen units),
+# leaving cross-crate inlining on the table in the hot paths (the vector scan,
+# the score table, SipHash on node-id maps). Thin LTO with one codegen unit is
+# the usual cheap win; measured numbers are in the PR for #171.
+#
+# `panic` stays `unwind` on purpose: the daemon contains a panicking cycle
+# with `catch_unwind` (CONC-4) and the write queue reports a panicked flush
+# (`store::flush::panic_message`), and `abort` would turn both into a dead
+# process.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }
 httpmock = "0.7"

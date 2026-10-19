@@ -223,3 +223,57 @@ async fn unrelated_recent_only_unscored_hit_keeps_keyword_recall_blended() {
     // the repeated public read above still cannot misclassify recent-only.
     mem.close().await.unwrap();
 }
+
+/// #171 B2: one session's recalls no longer queue behind each other. The
+/// first recall parks inside its vector read (the await the recall cache's
+/// `tokio` mutex used to be held across); a second recall on the same
+/// session must finish while it is parked. Before #171 the second waited on
+/// the cache lock until the first was released, so this timed out.
+#[tokio::test]
+async fn a_parked_recall_does_not_block_another_recall_on_the_same_session() {
+    let parking = Arc::new(ParkingStore::new(
+        Arc::new(MemoryStore::new()),
+        ParkPoint::VectorCandidates,
+    ));
+    let entered = parking.entered();
+    let store: Arc<dyn GraphStore> = parking.clone();
+    // Canonical matching, so the one parked call is the first recall's:
+    // hybrid `derive` would otherwise consume the park on its own vector leg.
+    let mem = Arc::new(
+        Memory::builder()
+            .session("b2-concurrent-recall")
+            .agent("agent-a")
+            .flush_interval(Duration::from_secs(3_600))
+            .match_strategy(MatchStrategy::Canonical)
+            .store(store)
+            .embedder(Arc::new(FixtureEmbedder::new()) as Arc<dyn Embedder>)
+            .embedding_contract(contract("fixture", 1024))
+            .build()
+            .await
+            .unwrap(),
+    );
+    mem.derive(&[("user schema", ConceptType::Entity)], &ParentOf::none())
+        .await
+        .unwrap();
+
+    let first = tokio::spawn({
+        let mem = mem.clone();
+        async move { mem.recall(query("user schema")).await }
+    });
+    entered.notified().await;
+
+    let second = tokio::time::timeout(Duration::from_secs(10), mem.recall(query("user schema")))
+        .await
+        .expect("a second recall must not wait for the parked one")
+        .unwrap();
+    assert!(
+        second.hits.iter().any(|h| h.content == "user schema"),
+        "{:?}",
+        second.hits
+    );
+    assert!(!first.is_finished(), "the first recall is still parked");
+
+    parking.release();
+    let first = first.await.unwrap().unwrap();
+    assert!(first.hits.iter().any(|h| h.content == "user schema"));
+}
