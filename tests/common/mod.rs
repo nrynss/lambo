@@ -48,6 +48,9 @@ pub const RUNTIME_DIR_VAR: &str = "XDG_RUNTIME_DIR";
 /// `LAMBO_`-prefixed variable present in this process. A test that means to set
 /// one does so on the returned command, after this clears it.
 ///
+/// `CLOUDSDK_CONFIG` is set rather than cleared, to a directory that does not
+/// exist: see the comment in the body.
+///
 /// `RUST_LOG` is cleared too: the serve's log filter reads it (`init_tracing`),
 /// and the tests that wait on a serve log line ("session attached", "proxying
 /// to the session holder", ...) only see it at the default `lambo=info`. A
@@ -65,6 +68,14 @@ pub fn lambo_command() -> Command {
             cmd.env_remove(k);
         }
     }
+    // Issue #7: with both credential variables cleared, the Google credential chain
+    // falls back to the file `gcloud auth application-default login` writes under the
+    // developer's real HOME. A configuration directory that does not exist leaves it
+    // nothing to find, so no test serve authenticates as whoever ran gcloud here.
+    cmd.env(
+        "CLOUDSDK_CONFIG",
+        "/nonexistent/lambo-test-no-gcloud-config",
+    );
     cmd
 }
 
