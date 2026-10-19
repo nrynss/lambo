@@ -466,3 +466,46 @@ async fn a_burst_of_wakes_coalesces_into_one_deferred_rescore_of_the_final_graph
     assert!(before.elapsed() < crate::daemon::WAKE_CYCLE_MIN_GAP);
     handle.abort();
 }
+
+/// #171 B4 (CodeRabbit on #185): a tick that falls due inside the wake gap
+/// ends the gap. The cycle runs at the tick, answers the pending wake, and
+/// nothing more runs when the gap would have ended.
+#[tokio::test(start_paused = true)]
+async fn a_tick_due_inside_the_wake_gap_ends_it() {
+    use tokio::time::{sleep_until, Instant};
+    let (graph, cid) = locked_graph_with_one_concept();
+    let iid = match graph.read().node(cid).unwrap() {
+        crate::types::Node::Concept(c) => c.origin_interaction,
+        _ => unreachable!(),
+    };
+    let ms = Duration::from_millis;
+    let start = Instant::now();
+    let daemon = Daemon::new(graph.clone(), ScoringWeights::default(), ms(100));
+    let handle = daemon.spawn();
+    wait_until(|| daemon.cycles() == 1).await;
+    let write = |n: u64| {
+        graph
+            .write()
+            .insert_concept(concept(n, iid, &format!("tick gap concept {n}")), iid)
+            .unwrap();
+        daemon.wake();
+    };
+
+    // 90 ms: long after the first cycle, so the wake runs at once.
+    sleep_until(start + ms(90)).await;
+    write(2);
+    sleep_until(start + ms(91)).await;
+    assert_eq!(daemon.cycles(), 2);
+
+    // 95 ms: inside the gap (to about 115 ms). The tick due at 100 ms ends it.
+    sleep_until(start + ms(95)).await;
+    write(3);
+    sleep_until(start + ms(99)).await;
+    assert_eq!(daemon.cycles(), 2, "the wake waits in the gap");
+    sleep_until(start + ms(101)).await;
+    assert_eq!(daemon.cycles(), 3, "the tick at 100 ms ran the cycle");
+    assert_eq!(daemon.scores().epoch, graph.read().epoch());
+    sleep_until(start + ms(150)).await;
+    assert_eq!(daemon.cycles(), 3, "the gap's end ran nothing more");
+    handle.abort();
+}

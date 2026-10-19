@@ -115,12 +115,14 @@ Raw: `main-a182136a.json`, `pr-171b.json`.
 ### Rescore micro-measurement (release, this branch's profile)
 
 `cargo test --release --features fixtures --lib daemon::score::tests::rescore_timing -- --ignored --nocapture`
-times one full rescore on a generated session. `rescore_reference` is the
-pre-#171 three-walk scoring, kept in the tests as the oracle that
+times one full rescore on a generated session (20 runs each, nothing else
+running). `rescore_reference` is the pre-#171 three-walk scoring (an
+earlier revision walked a fourth time in the reference and overstated the
+gain slightly; corrected after review), kept in the tests as the oracle that
 `single_walk_rescore_matches_the_reference_bit_for_bit` checks the new path
 against.
 
 | concepts | pre-#171 (three walks) | single walk (this PR) |
 |---:|---:|---:|
-| 5,000 | 63.3 ms | 7.5 ms |
-| 9,100 | 207.2 ms | 27.2 ms |
+| 5,000 | 62.4 ms | 8.0 ms |
+| 9,100 | 201.2 ms | 31.3 ms |

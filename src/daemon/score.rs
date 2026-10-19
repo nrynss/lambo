@@ -622,13 +622,14 @@ mod tests {
     /// `density_degree` walk per concept, then [`score_concept_reference`]
     /// per concept, then the same sort.
     fn rescore_reference(graph: &Graph, weights: &ScoringWeights) -> Vec<Scored<NodeId>> {
-        let ctx = SessionContext::compute(graph);
+        // Three walks per concept, as before #171: this baseline pass, then
+        // `incident_edges` and `density_degree` inside the scoring.
         let max_incident = graph
             .concepts()
             .map(|c| density_degree(graph, c.id))
             .max()
             .unwrap_or(0);
-        assert_eq!(ctx.max_incident, max_incident, "connectivity baseline");
+        let ctx = SessionContext::with_max_incident(graph, max_incident);
         let key = |id: NodeId| match graph.node(id) {
             Some(Node::Concept(c)) => Some(c.canonical_key.as_str()),
             _ => None,
@@ -653,6 +654,16 @@ mod tests {
     /// #171 B4: the single-walk `rescore` is the reference's table, bit for
     /// bit and in the same order.
     fn assert_rescore_matches_reference(g: &Graph) {
+        let max_incident = g
+            .concepts()
+            .map(|c| density_degree(g, c.id))
+            .max()
+            .unwrap_or(0);
+        assert_eq!(
+            SessionContext::compute(g).max_incident,
+            max_incident,
+            "connectivity baseline"
+        );
         let weights = ScoringWeights::default();
         let fast = rescore(g, &weights);
         let reference = rescore_reference(g, &weights);

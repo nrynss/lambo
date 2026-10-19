@@ -1221,7 +1221,14 @@ async fn run_loop(state: LoopState, weights: ScoringWeights, tick: Duration, par
             && let at = end + WAKE_CYCLE_MIN_GAP
             && tokio::time::Instant::now() < at
         {
-            tokio::time::sleep_until(at).await;
+            // A tick that falls due inside the gap ends it early: ticks are
+            // never delayed by the deferral, and the cycle that runs answers
+            // the pending wake too.
+            tokio::select! {
+                biased;
+                _ = interval.tick() => {}
+                () = tokio::time::sleep_until(at) => {}
+            }
             // The wakes that arrived while we slept are answered by the cycle
             // about to run, so drop their stored permit instead of running a
             // second cycle for them. A wake during the cycle itself still
@@ -1261,8 +1268,8 @@ async fn run_loop(state: LoopState, weights: ScoringWeights, tick: Duration, par
 ///
 /// The cost is staleness: the score table may trail the graph by up to this
 /// much longer after a burst, and a recall in that window is computed fresh
-/// rather than cached (P5-3). Ticks are not delayed, and the first wake after
-/// an idle spell runs at once.
+/// rather than cached (P5-3). Ticks are not delayed (a tick due inside the
+/// gap ends it), and the first wake after an idle spell runs at once.
 pub(crate) const WAKE_CYCLE_MIN_GAP: Duration = Duration::from_millis(25);
 
 /// The loop's carry-over state between cycles.
