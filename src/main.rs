@@ -270,7 +270,10 @@ enum Commands {
         /// Re-check every concept's canonical key even if the store records that
         /// a previous provision already re-keyed it (#148, #171). Use it after a
         /// pre-0.7.0 binary has written to a Postgres or Cockroach store.
-        #[arg(long)]
+        #[arg(
+            long,
+            help = "Re-check every concept's canonical key even if the store records that a previous provision already re-keyed it (#148, #171). Use it after a pre-0.7.0 binary has written to a Postgres or Cockroach store."
+        )]
         rekey: bool,
     },
     /// Erase a whole session for account deletion: every node, edge, vector, canonization record and write intent, plus the session row with its embedding contract. A tombstone keeps the id from being written again. Safe to repeat. Refused while a live writer holds the session.

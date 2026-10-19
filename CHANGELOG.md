@@ -33,6 +33,13 @@
   from 0.6.0 in the last bit or so; rankings break ties by key and id as
   before.
 
+- **`lambo provision` skips the #148 re-key scan once it has run clean
+  (#171).** The re-key read and re-derived every concept's key on every
+  provision. It now records a finished, collision-free pass in `store_meta`
+  (`canonical_key_rule`) and later provisions skip the scan; a pass that
+  leaves a collision records nothing, so the store is checked again until
+  the operator resolves it. `--rekey` forces the full pass.
+
 ### Upgrading from 0.6.0
 
 - **SQLite stores need `lambo provision` once (#55).** Concept vectors are
@@ -45,7 +52,14 @@
   refuses while a lease is live, because a running 0.6.0 holder would keep
   writing text rows. A 0.6.0 binary cannot read a migrated store's vectors
   (it fails loudly on load), so keep a backup if you may roll back.
-  Postgres and Cockroach are unaffected.
+  (Postgres and Cockroach gain their own `store_meta` table too; see the
+  next entry.)
+- **Postgres and Cockroach stores need `lambo provision` once for the new
+  `store_meta` table (#171).** Attach checks every table the shipped schema
+  names, so until provision creates it (`CREATE TABLE IF NOT EXISTS`, no
+  data touched) every attach, reader and `lambo session` command refuses
+  the store with a message naming `lambo provision`. The #148 re-key below
+  needs that provision anyway.
 - **Run `lambo provision` once, with no session holder running (#148).**
   Canonical keys no longer stem identifier tokens (below), so a concept an
   older build keyed from text like `release 2122de39e47e` carries a key the
@@ -54,7 +68,10 @@
   lease is live, and a rerun changes nothing. Until it runs, a write of such
   text creates a second concept beside the old one; provision then leaves
   the old one on its key and names it. Concepts the old rule had already
-  merged stay merged.
+  merged stay merged. A clean re-key is recorded in `store_meta`, and later
+  provisions skip the concept scan; `lambo provision --rekey` runs it again.
+  Run that after a pre-0.7.0 binary has written to a Postgres or Cockroach
+  store, since such a writer still derives the old keys.
 
 ### Fixed
 
