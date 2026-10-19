@@ -72,3 +72,55 @@ Anchor resolution (`anchor_resolution_timing`, 9,100 concepts) costs about
 0.95 ms per resolution. A dispatched structural recall used to resolve it
 three times (`fits_structural`, `try_structural`, `resolved_anchor_text`);
 it now resolves once and reuses it while the graph epoch is unchanged.
+
+## PR 171b: B4 (one walk per rescore, coalesced wake-triggered cycles)
+
+Both binaries are `cargo build --release --features store-sqlite` with the
+`[profile.release]` from 171a, run one after the other with nothing else
+running. "main" is a182136a (171a merged); this branch adds the B4 changes
+and nothing else.
+
+| measure | main (a182136a) | this PR |
+|---|---:|---:|
+| populate_s (settled) | 222.9 | 141.7 |
+| provision_ms (p50) | 149.39 | 135.54 |
+| startup_loaded_ms | 509.3 | 508.4 |
+| store after populate (concepts / edges) | 9508 / 11669 | 9508 / 11669 |
+| keyword_semantic_recall p50 / p90 ms | 6.3 / 7.73 | 6.28 / 7.57 |
+| structural_hit p50 / p90 ms | 1.73 / 2.18 | 1.64 / 1.89 |
+| structural_miss p50 / p90 ms | 6.49 / 8.89 | 6.37 / 9.68 |
+| identifier_recall p50 / p90 ms | 4.94 / 5.32 | 5.11 / 6.23 |
+| recall_16_concurrent p50 / p90 ms | 12.14 / 18.96, 1112.3 rps | 12.12 / 16.82, 1096.4 rps |
+| derive_ack_back_to_back p50 / p90 ms | 24.79 / 27.84 | 0.81 / 14.21 |
+| derive_applied_back_to_back p50 / p90 ms | 32.42 / 36.15 | 6.25 / 20.36 |
+| derive_ack_isolated p50 / p90 ms | 1.53 / 2.1 | 1.52 / 1.87 |
+
+Back-to-back writes are what B4 targets. On main every write wakes the
+daemon, which rescores all 9,500 concepts under the graph read guard, and
+the next write's apply waits for it. Here a rescore walks each concept's
+incident edges once instead of three times, and a wake within 25 ms of the
+last cycle waits out the gap, so a burst of writes shares one rescore.
+Recall rows are unchanged within noise, as they should be.
+
+About `populate_s`: one of main's 142 settled batches took 75.6 s to drain
+(`derive_batch_drain_ms` max 75648.69 ms); its other batches drained in the
+same ~1.0 s as this branch's (p50 1005.0 ms on both, p99 1273 ms on main
+and 1006.7 ms here). This branch's slowest batch drained in 1.0 s.
+Excluding that one batch, both populates take about 141 s. The run was not
+repeated to find out whether main's stall reproduces, so read 222.9 s as one
+observation.
+
+Raw: `main-a182136a.json`, `pr-171b.json`.
+
+### Rescore micro-measurement (release, this branch's profile)
+
+`cargo test --release --features fixtures --lib daemon::score::tests::rescore_timing -- --ignored --nocapture`
+times one full rescore on a generated session. `rescore_reference` is the
+pre-#171 three-walk scoring, kept in the tests as the oracle that
+`single_walk_rescore_matches_the_reference_bit_for_bit` checks the new path
+against.
+
+| concepts | pre-#171 (three walks) | single walk (this PR) |
+|---:|---:|---:|
+| 5,000 | 63.3 ms | 7.5 ms |
+| 9,100 | 207.2 ms | 27.2 ms |
