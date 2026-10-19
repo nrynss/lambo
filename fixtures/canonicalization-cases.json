@@ -64,5 +64,75 @@
     "input": "create account",
     "expected_key": "account creat",
     "note": "distinct from A; hybrid step 6 merges"
+  },
+  {
+    "category": "similar-negative",
+    "input": "cut the release v0.5.0 today",
+    "expected_key": "cut releas today v0.5.0",
+    "not_similar_to": "cut the release v0.6.0 today",
+    "note": "#148/#178: version pair; canon alias-preview --similar must never suggest it"
+  },
+  {
+    "category": "similar-negative",
+    "input": "the server follows rfc 7231",
+    "expected_key": "7231 follow rfc server",
+    "not_similar_to": "the server follows rfc 7230",
+    "note": "#148/#178: rfc number pair; canon alias-preview --similar must never suggest it"
+  },
+  {
+    "category": "similar-negative",
+    "input": "checksums are sha256 digests",
+    "expected_key": "checksum digest sha256",
+    "not_similar_to": "checksums are sha512 digests",
+    "note": "#148/#178: hash family pair; canon alias-preview --similar must never suggest it"
+  },
+  {
+    "category": "similar-negative",
+    "input": "route traffic to host1.svc first",
+    "expected_key": "first host1.svc rout traffic",
+    "not_similar_to": "route traffic to host2.svc first",
+    "note": "#148/#178: host name pair; canon alias-preview --similar must never suggest it"
+  },
+  {
+    "category": "similar-negative",
+    "input": "tracked as issue #148 upstream",
+    "expected_key": "#148 as issu track upstream",
+    "not_similar_to": "tracked as issue #146 upstream",
+    "note": "#148/#178: issue number pair; canon alias-preview --similar must never suggest it"
+  },
+  {
+    "category": "similar-negative",
+    "input": "the daemon listens on port 7700",
+    "expected_key": "7700 daemon listen port",
+    "not_similar_to": "the daemon listens on port 7701",
+    "note": "#148/#178: port pair; canon alias-preview --similar must never suggest it"
+  },
+  {
+    "category": "similar-negative",
+    "input": "served by embedding model v1",
+    "expected_key": "by embed model serv v1",
+    "not_similar_to": "served by embedding model v2",
+    "note": "#148/#178: model version pair; canon alias-preview --similar must never suggest it"
+  },
+  {
+    "category": "similar-negative",
+    "input": "the build needs node 18 installed",
+    "expected_key": "18 build instal need node",
+    "not_similar_to": "the build needs node 20 installed",
+    "note": "#148/#178: runtime version pair; canon alias-preview --similar must never suggest it"
+  },
+  {
+    "category": "similar-negative",
+    "input": "commit 2122de39e47e fixed the bug",
+    "expected_key": "2122de39e47e bug commit fix",
+    "not_similar_to": "commit 2122de39e48e fixed the bug",
+    "note": "#148/#178: hex hash pair; canon alias-preview --similar must never suggest it"
+  },
+  {
+    "category": "similar-negative",
+    "input": "the entry point is src/main.rs",
+    "expected_key": "entri point src/main.rs",
+    "not_similar_to": "the entry point is src/mein.rs",
+    "note": "#148/#178: path pair; canon alias-preview --similar must never suggest it"
   }
 ]

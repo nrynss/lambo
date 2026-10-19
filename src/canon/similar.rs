@@ -24,8 +24,10 @@
 //! concept had no embedding when the newer one was written was never
 //! compared. With [`SimilarParams::cosine`] set (the session's
 //! `semantic_match_threshold`), every pair of embedded concepts at or above
-//! it is a candidate too. That is a full pairwise scan, `O(n²)` cosines, so
-//! it is an offline tool's cost; `--no-vectors` turns it off.
+//! it is a candidate too. That is a full pairwise scan, `O(n²)` dot products
+//! of unit vectors split across the cores: an offline tool's cost (about
+//! 1.5 s for 10k 1024-wide vectors on 8 cores, see `similar_timing`);
+//! `--no-vectors` turns it off.
 //!
 //! # Guards (applied to both sources)
 //!
@@ -246,17 +248,17 @@ fn mix(x: u64) -> u64 {
     z ^ (z >> 31)
 }
 
-/// The deterministic seed of permutation `i`.
-fn seed(i: usize) -> u64 {
-    mix(0x5EED_0178_u64 ^ (i as u64).wrapping_mul(0xA24B_AED4_963E_E407))
+/// The deterministic seeds of the permutations.
+fn seeds() -> [u64; PERMUTATIONS] {
+    std::array::from_fn(|i| mix(0x5EED_0178_u64 ^ (i as u64).wrapping_mul(0xA24B_AED4_963E_E407)))
 }
 
 /// A MinHash signature: per permutation, the least permuted 3-gram hash.
-fn signature(shingles: &[u64]) -> [u64; PERMUTATIONS] {
+fn signature(shingles: &[u64], seeds: &[u64; PERMUTATIONS]) -> [u64; PERMUTATIONS] {
     let mut sig = [u64::MAX; PERMUTATIONS];
     for &s in shingles {
-        for (i, slot) in sig.iter_mut().enumerate() {
-            let v = mix(s ^ seed(i));
+        for (slot, seed) in sig.iter_mut().zip(seeds) {
+            let v = mix(s ^ seed);
             if v < *slot {
                 *slot = v;
             }
@@ -341,6 +343,77 @@ fn citation_counts(g: &Graph) -> HashMap<NodeId, usize> {
     out
 }
 
+/// A unit-length copy of `v`, or `None` for a zero or non-finite vector.
+fn unit(v: &[f32]) -> Option<Vec<f32>> {
+    let n = v.iter().map(|x| f64::from(*x) * f64::from(*x)).sum::<f64>().sqrt();
+    (n.is_finite() && n > 0.0).then(|| v.iter().map(|x| (f64::from(*x) / n) as f32).collect())
+}
+
+/// The dot product of two unit vectors, in 16 independent lanes so the
+/// compiler vectorizes it.
+fn dot(a: &[f32], b: &[f32]) -> f32 {
+    let (ca, ta) = a.as_chunks::<16>();
+    let (cb, tb) = b.as_chunks::<16>();
+    let mut acc = [0f32; 16];
+    for (x, y) in ca.iter().zip(cb) {
+        for k in 0..16 {
+            acc[k] += x[k] * y[k];
+        }
+    }
+    acc.iter().sum::<f32>() + ta.iter().zip(tb).map(|(x, y)| x * y).sum::<f32>()
+}
+
+/// Every pair `(i, j)`, `i < j`, of embedded entries whose cosine is at or
+/// above `floor`, sorted. A full pairwise scan, split by rows across the
+/// machine's cores: the order of the result does not depend on the split.
+/// The unit-vector dot is only the filter; a pair within `1e-4` of the
+/// floor is decided by the exact [`crate::embed::cosine`], so the source
+/// agrees with the cosine the report prints.
+fn vector_pairs(entries: &[Entry<'_>], floor: f64) -> Vec<(usize, usize)> {
+    let units: Vec<(usize, Vec<f32>)> = entries
+        .iter()
+        .enumerate()
+        .filter_map(|(i, e)| e.embedding.and_then(unit).map(|u| (i, u)))
+        .collect();
+    let threads = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .clamp(1, 16)
+        .min(units.len().max(1));
+    let exact = |a: usize, b: usize| match (entries[a].embedding, entries[b].embedding) {
+        (Some(x), Some(y)) => f64::from(crate::embed::cosine(x, y)) >= floor,
+        _ => false,
+    };
+    let scan = |t: usize| {
+        let mut out = Vec::new();
+        for x in (t..units.len()).step_by(threads) {
+            let (a, ua) = &units[x];
+            for (b, ub) in &units[x + 1..] {
+                if ua.len() != ub.len() {
+                    continue;
+                }
+                let d = f64::from(dot(ua, ub));
+                if d >= floor + 1e-4 || (d >= floor - 1e-4 && exact(*a, *b)) {
+                    out.push((*a, *b));
+                }
+            }
+        }
+        out
+    };
+    let mut pairs: Vec<(usize, usize)> = if threads == 1 {
+        scan(0)
+    } else {
+        std::thread::scope(|s| {
+            let handles: Vec<_> = (0..threads).map(|t| s.spawn(move || scan(t))).collect();
+            handles
+                .into_iter()
+                .flat_map(|h| h.join().expect("a vector scan thread panicked"))
+                .collect()
+        })
+    };
+    pairs.sort_unstable();
+    pairs
+}
+
 /// Find near-duplicate pairs in `g` (see the module docs). Deterministic:
 /// the same graph and parameters give the same report.
 pub fn detect_similar(g: &Graph, params: &SimilarParams) -> SimilarReport {
@@ -368,32 +441,38 @@ pub fn detect_similar(g: &Graph, params: &SimilarParams) -> SimilarReport {
     let mut candidates: BTreeMap<(usize, usize), (bool, bool)> = BTreeMap::new();
 
     // Lexical: LSH over MinHash signatures.
-    let mut buckets: HashMap<(usize, [u64; ROWS]), Vec<usize>> = HashMap::new();
+    let seeds = seeds();
+    let mut buckets: HashMap<(usize, [u64; ROWS]), Vec<u32>> = HashMap::new();
     for (i, e) in entries.iter().enumerate() {
         if e.folded.chars().count() < params.min_chars {
             report.guarded.too_short += 1;
             continue;
         }
-        let sig = signature(&e.shingles);
+        let sig = signature(&e.shingles, &seeds);
         for band in 0..BANDS {
             let mut key = [0u64; ROWS];
             key.copy_from_slice(&sig[band * ROWS..(band + 1) * ROWS]);
-            buckets.entry((band, key)).or_default().push(i);
+            buckets.entry((band, key)).or_default().push(i as u32);
         }
     }
-    let mut lexical: HashSet<(usize, usize)> = HashSet::new();
+    // Members are pushed in index order, so every pair is (lower, higher).
+    let mut lexical: Vec<(u32, u32)> = Vec::new();
     for members in buckets.values() {
         if members.len() < 2 || members.len() > MAX_BUCKET {
             continue;
         }
         for (x, &a) in members.iter().enumerate() {
             for &b in &members[x + 1..] {
-                lexical.insert((a.min(b), a.max(b)));
+                lexical.push((a, b));
             }
         }
     }
+    drop(buckets);
+    lexical.sort_unstable();
+    lexical.dedup();
     report.lexical_candidates = lexical.len();
     for (a, b) in lexical {
+        let (a, b) = (a as usize, b as usize);
         if jaccard(&entries[a].shingles, &entries[b].shingles) >= params.jaccard {
             candidates.entry((a, b)).or_default().0 = true;
         } else {
@@ -407,16 +486,9 @@ pub fn detect_similar(g: &Graph, params: &SimilarParams) -> SimilarReport {
         _ => None,
     };
     if let Some(floor) = params.cosine {
-        let embedded: Vec<usize> = (0..entries.len())
-            .filter(|&i| entries[i].embedding.is_some())
-            .collect();
-        for (x, &a) in embedded.iter().enumerate() {
-            for &b in &embedded[x + 1..] {
-                if cosine_of(&entries[a], &entries[b]).is_some_and(|c| c >= floor) {
-                    report.vector_candidates += 1;
-                    candidates.entry((a, b)).or_default().1 = true;
-                }
-            }
+        for (a, b) in vector_pairs(&entries, floor) {
+            report.vector_candidates += 1;
+            candidates.entry((a, b)).or_default().1 = true;
         }
     }
 
