@@ -596,7 +596,7 @@ Every request and every open tab reads one shared view of each session, loaded a
 
 ## Provision a store
 
-`lambo provision` creates or migrates the durable store schema. It reads the store choice from your config and takes no other flags. It does not build the embedder, so it works on a machine that has no embedding service, and it still refuses a store kind your binary was not built with.
+`lambo provision` creates or migrates the durable store schema. It reads the store choice from your config. It does not build the embedder, so it works on a machine that has no embedding service, and it still refuses a store kind your binary was not built with.
 
 ```bash
 $ lambo --config lambo.toml provision
@@ -604,6 +604,12 @@ sqlite schema provisioned (init_schema, idempotent)
 ```
 
 Running it again is safe. For a CockroachDB store it runs the repository's provisioning script, so run it from inside a checkout. See [Configuration](/lambo/config/).
+
+After the schema it re-keys concepts whose canonical key an older build derived (#148), and refuses while any session is held. A re-key that finishes with no collision is recorded in the store's `store_meta` table, and later runs skip the scan of every concept and say so. Pass `--rekey` to check every concept anyway, for example after a binary older than 0.7.0 has written to a Postgres or CockroachDB store (a 0.6.0 binary cannot open a migrated SQLite store).
+
+| Flag | Required | Default |
+|---|---|---|
+| `--rekey` | No | Off. Re-check every concept's canonical key even if the store records a finished re-key. |
 
 ## Erase a session
 

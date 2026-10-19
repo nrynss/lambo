@@ -20,6 +20,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "..", "scripts", "loadtest"))
 import mcp_ab  # noqa: E402
 
+# Seconds: a provision that stalls this long is a failed run.
+PROVISION_TIMEOUT = 120
+
 TOPICS = ["vpc", "subnet", "route table", "security group", "load balancer", "rds instance",
           "lambda function", "s3 bucket", "iam role", "kms key", "cloudwatch alarm",
           "dynamodb table", "sqs queue", "sns topic", "ecs service", "eks cluster"]
@@ -104,7 +107,7 @@ def main():
         cfg = os.path.join(work, "lambo.toml")
         with open(cfg, "w") as f:
             f.write(f'[store]\nkind = "sqlite"\npath = "{db}"\n\n[embedder]\nkind = "fixture"\ndim = 1024\n')
-        subprocess.run([o.bin, "provision", "--config", cfg], check=True, capture_output=True)
+        subprocess.run([o.bin, "provision", "--config", cfg], check=True, capture_output=True, timeout=PROVISION_TIMEOUT)
         log = open(os.path.join(work, "serve.log"), "w")
         p, url, _ = start(o.bin, cfg, o.port, runtime, log)
         procs.append(p)
@@ -146,9 +149,41 @@ def main():
         prov = []
         for _ in range(5):
             t = time.perf_counter()
-            subprocess.run([o.bin, "provision", "--config", cfg], check=True, capture_output=True)
+            subprocess.run([o.bin, "provision", "--config", cfg], check=True, capture_output=True, timeout=PROVISION_TIMEOUT)
             prov.append((time.perf_counter() - t) * 1000)
         res["provision_ms"] = summ(prov)
+        # #171 part 3: the forced full re-key scan, on a binary that has
+        # `--rekey` (older ones refuse the flag, and the row is left out).
+        forced = []
+        for _ in range(5):
+            t = time.perf_counter()
+            try:
+                r = subprocess.run(
+                    [o.bin, "provision", "--rekey", "--config", cfg],
+                    capture_output=True,
+                    timeout=PROVISION_TIMEOUT,
+                )
+            except subprocess.TimeoutExpired as e:
+                raise RuntimeError(
+                    f"provision --rekey timed out after {PROVISION_TIMEOUT}s"
+                ) from e
+            if r.returncode != 0:
+                err = (r.stderr or b"").decode("utf-8", "replace")
+                # Older binaries have no --rekey: leave the row out. Any other
+                # failure is a regression and must not look like a clean skip.
+                if "--rekey" in err and (
+                    "unexpected argument" in err
+                    or "unrecognized" in err.lower()
+                    or "unknown" in err.lower()
+                ):
+                    forced = []
+                    break
+                raise RuntimeError(
+                    f"provision --rekey failed (rc={r.returncode}): {err.strip() or '(no stderr)'}"
+                )
+            forced.append((time.perf_counter() - t) * 1000)
+        if forced:
+            res["provision_rekey_ms"] = summ(forced)
 
         p, url, startup = start(o.bin, cfg, o.port, runtime, log)
         procs.append(p)

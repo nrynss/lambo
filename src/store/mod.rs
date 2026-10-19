@@ -272,6 +272,16 @@ pub fn unprovisioned_column_err(kind: &str, table: &str, missing: &[&str]) -> St
 /// The refusal [`GraphStore::preflight_schema`] returns, shared by both SQL
 /// adapters so the operator reads one sentence whichever store they run.
 pub fn unprovisioned_store_err(kind: &str, missing: &[&str]) -> StoreError {
+    // #171: `store_meta` alone is a schema upgrade (re-key marker / vector
+    // codec), not a table a flush writes. Refuse attach the same way, but
+    // do not claim that writes would roll back for want of it.
+    if missing == ["store_meta"] {
+        return StoreError::Capability(format!(
+            "{kind} store is missing the store_meta table the current build requires — \
+             its schema was provisioned by an older lambo and never migrated. Run \
+             `lambo provision` (idempotent) against this store, then retry"
+        ));
+    }
     StoreError::Capability(format!(
         "{kind} store is missing {} the current build requires ({}) — its schema was \
          provisioned by an older lambo and never migrated. Nothing would become durable: \
@@ -362,7 +372,14 @@ pub trait GraphStore: Send + Sync {
     /// schema. Refuses while a session lease is live; idempotent. Default: an
     /// adapter with no durable keys (`MemoryStore`, test doubles) has nothing
     /// to re-key.
-    async fn rekey_canonical_keys(&self) -> Result<rekey::RekeyPlan, StoreError> {
+    ///
+    /// #171: a re-key that finishes with no collision records
+    /// [`rekey::REKEY_MARKER_KEY`] in `store_meta`, and a later call returns
+    /// at once with [`rekey::RekeyPlan::skipped`] set, reading no concept.
+    /// `force` ignores the marker and checks every concept (`lambo provision
+    /// --rekey`).
+    async fn rekey_canonical_keys(&self, force: bool) -> Result<rekey::RekeyPlan, StoreError> {
+        let _ = force;
         Ok(rekey::RekeyPlan::default())
     }
 
@@ -1429,7 +1446,8 @@ CREATE INDEX IF NOT EXISTS sessions_idx ON sessions (session_id);
                 crdb.contains(&"write_intents") && crdb.contains(&"sessions"),
                 "{crdb:?}"
             );
-            assert_eq!(crdb.len(), 11, "cockroach DDL table count: {crdb:?}");
+            // 12 with `store_meta` (#171).
+            assert_eq!(crdb.len(), 12, "cockroach DDL table count: {crdb:?}");
         }
         #[cfg(feature = "store-postgres")]
         {
@@ -1438,7 +1456,8 @@ CREATE INDEX IF NOT EXISTS sessions_idx ON sessions (session_id);
                 pg.contains(&"write_intents") && pg.contains(&"sessions"),
                 "{pg:?}"
             );
-            assert_eq!(pg.len(), 11, "postgres DDL table count: {pg:?}");
+            // 12 with `store_meta` (#171).
+            assert_eq!(pg.len(), 12, "postgres DDL table count: {pg:?}");
         }
     }
 
@@ -1454,6 +1473,14 @@ CREATE INDEX IF NOT EXISTS sessions_idx ON sessions (session_id);
         let two = unprovisioned_store_err("cockroach", &["write_intents", "sessions"]).to_string();
         assert!(two.contains("missing tables"), "{two}");
         assert!(two.contains("write_intents, sessions"), "{two}");
+        // #171: store_meta alone is a schema upgrade, not a flush table.
+        let meta = unprovisioned_store_err("postgres", &["store_meta"]).to_string();
+        assert!(meta.contains("store_meta"), "{meta}");
+        assert!(meta.contains("lambo provision"), "{meta}");
+        assert!(
+            !meta.contains("Nothing would become durable"),
+            "store_meta is not required for write durability: {meta}"
+        );
     }
 
     #[test]

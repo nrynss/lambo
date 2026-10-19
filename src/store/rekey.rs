@@ -51,7 +51,28 @@ pub struct RekeyPlan {
     /// Rows that keep their old key because the new one (or the row's
     /// staging placeholder) is taken, by id.
     pub collisions: Vec<String>,
+    /// The store's `store_meta` marker ([`REKEY_MARKER_KEY`]) said a previous
+    /// re-key finished clean, so nothing was read or planned (#171).
+    pub skipped: bool,
 }
+
+/// The `store_meta` key a clean re-key records (#171), so the next
+/// `lambo provision` skips the full concept scan.
+///
+/// Written in the re-key's own transaction, and only when it left no
+/// collision behind: a store with a reported collision is checked again on
+/// every provision, since the operator may resolve it. Removed again by a
+/// forced re-key (`lambo provision --rekey`) that finds one.
+///
+/// The marker records what this build did, not what every writer since has
+/// done: a pre-#148 binary still writing to a Postgres or Cockroach store
+/// after the re-key (a 0.6.0 cannot open a migrated SQLite store) writes
+/// stemmed keys the skip will not see. `lambo provision --rekey` runs the
+/// full pass whatever the marker says.
+pub const REKEY_MARKER_KEY: &str = "canonical_key_rule";
+
+/// The value [`REKEY_MARKER_KEY`] holds once every key follows #148's rule.
+pub const REKEY_MARKER_VALUE: &str = "148-identifiers-unstemmed";
 
 /// Plan the re-key. `synonyms` maps `(session_id, source_key)` to the
 /// synonym's target text, as the `synonyms` table stores it.
@@ -159,6 +180,11 @@ pub fn live_lease_err(session: &str, holder: &str, pending: usize) -> crate::typ
 
 /// The provision line for a plan that was applied.
 pub fn report(plan: &RekeyPlan) -> String {
+    if plan.skipped {
+        return "canonical keys already follow the #148 rule (recorded in store_meta; \
+                `lambo provision --rekey` checks every concept again)"
+            .to_owned();
+    }
     let mut out = format!(
         "re-keyed {} concept(s) for unstemmed identifiers (#148)",
         plan.changes.len()
@@ -256,7 +282,9 @@ pub(crate) mod testkit {
             before[1].1, "2122de39e47 releas",
             "planted under the old rule"
         );
-        let plan = store.rekey_canonical_keys().await.expect("rekey");
+        // Forced: in a shared live database an earlier run may have recorded
+        // the #171 marker, which would skip the scan this kit plants for.
+        let plan = store.rekey_canonical_keys(true).await.expect("rekey");
         assert!(
             plan.changes
                 .iter()
@@ -267,7 +295,7 @@ pub(crate) mod testkit {
         for (content, key) in &after {
             assert_eq!(key, &canonical_key(content, |_| None), "{content}");
         }
-        let again = store.rekey_canonical_keys().await.expect("rerun");
+        let again = store.rekey_canonical_keys(true).await.expect("rerun");
         assert!(
             again.changes.is_empty(),
             "a rerun re-keys nothing: {again:?}"

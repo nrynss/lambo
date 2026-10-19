@@ -506,8 +506,11 @@ impl GraphStore for SqliteStore {
         self.verify_schema().await
     }
 
-    async fn rekey_canonical_keys(&self) -> Result<crate::store::rekey::RekeyPlan, StoreError> {
-        self.rekey_keys().await
+    async fn rekey_canonical_keys(
+        &self,
+        force: bool,
+    ) -> Result<crate::store::rekey::RekeyPlan, StoreError> {
+        self.rekey_keys(force).await
     }
 
     fn capabilities(&self) -> Capabilities {
