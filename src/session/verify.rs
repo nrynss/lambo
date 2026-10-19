@@ -52,7 +52,7 @@ use crate::daemon::{Daemon, RecallPipeline};
 use crate::embed::Embedder;
 use crate::graph::vector_source::GraphVectorSource;
 use crate::graph::Graph;
-use crate::recall::cache::RecallCache;
+use crate::recall::cache::SharedRecallCache;
 use crate::recall::detail::DetailedRecall;
 use crate::recall::format;
 use crate::recall::layered::{
@@ -459,7 +459,7 @@ impl Replay {
 
     /// `Memory::recall_text_with`: the session's own text pipeline.
     async fn own(&self, query: RecallQuery, vector: &[f32], ctx: &Ctx<'_>) -> DetailedRecall {
-        let mut cache = RecallCache::<RecallPipeline>::new();
+        let cache = SharedRecallCache::<RecallPipeline>::new();
         self.daemon
             .recall_with(
                 &self.session,
@@ -467,7 +467,7 @@ impl Replay {
                 self.vectors(),
                 Some((vector, ctx.embedding)),
                 ctx.config.recall_weights,
-                &mut cache,
+                &cache,
             )
             .await
     }

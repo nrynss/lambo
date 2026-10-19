@@ -214,6 +214,14 @@ fn is_stop_content(lower_content: &str) -> bool {
     any && all
 }
 
+#[cfg(test)]
+thread_local! {
+    /// How many times this thread ran [`resolve_anchor_choice`]: the #171
+    /// tests count resolutions per recall with it. Per thread, so tests
+    /// running in parallel do not see each other's.
+    pub(crate) static ANCHOR_RESOLUTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// What a structural question's named subject resolved to.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum AnchorChoice {
@@ -226,7 +234,9 @@ pub(crate) enum AnchorChoice {
 }
 
 /// [`resolve_anchor_choice`] for the callers that need one concept: an
-/// ambiguous subject resolves to none.
+/// ambiguous subject resolves to none. Production resolves through
+/// [`ResolvedAnchor`] (#171); the tests ask this directly.
+#[cfg(test)]
 pub(crate) fn resolve_anchor(graph: &Graph, query: &str) -> Option<NodeId> {
     match resolve_anchor_choice(graph, query)? {
         AnchorChoice::One(id) => Some(id),
@@ -245,6 +255,8 @@ pub(crate) fn resolve_anchor(graph: &Graph, query: &str) -> Option<NodeId> {
 /// repositories (its id appears in the question) picks that repository's
 /// concept; otherwise the subject is [`AnchorChoice::Ambiguous`].
 pub(crate) fn resolve_anchor_choice(graph: &Graph, query: &str) -> Option<AnchorChoice> {
+    #[cfg(test)]
+    ANCHOR_RESOLUTIONS.with(|n| n.set(n.get() + 1));
     if query.len() > MAX_ANCHOR_QUERY_BYTES {
         return None;
     }
@@ -476,10 +488,69 @@ fn ambiguous_anchor_answer(graph: &Graph, ids: &[NodeId]) -> DetailedRecall {
 
 /// Normalized resolved subject, even when it has no dependents. The caller
 /// must use its pipeline's graph snapshot, never reconstruct it after recall.
+#[cfg(test)]
 pub(crate) fn resolved_anchor_text(graph: &Graph, query: &str) -> Option<String> {
-    match graph.node(resolve_anchor(graph, query)?) {
+    resolved_anchor_text_from(graph, resolve_anchor_choice(graph, query).as_ref())
+}
+
+/// The resolved subject's normalized text, even when it has no dependents,
+/// from a resolution already made on `graph` (#171: one resolution per
+/// query). The caller must use its pipeline's graph snapshot, never
+/// reconstruct it after recall.
+pub(crate) fn resolved_anchor_text_from(
+    graph: &Graph,
+    choice: Option<&AnchorChoice>,
+) -> Option<String> {
+    let Some(AnchorChoice::One(id)) = choice else {
+        return None;
+    };
+    match graph.node(*id) {
         Some(Node::Concept(c)) => Some(anchor_label(c)),
         _ => None,
+    }
+}
+
+/// One query's anchor resolution, stamped with the graph epoch it was made at
+/// (#171).
+///
+/// Recall asks three questions of a structural query's subject: may the store
+/// gather be skipped (a brief graph read before the gather), does the
+/// traversal dispatch fire (under the final graph read), and what is the
+/// subject's text. Each used to resolve the anchor from scratch, an `O(N)`
+/// scan of every concept's text, so a structural query paid it two or three
+/// times. Resolving is a pure function of the graph and the query, and every
+/// graph mutation advances [`Graph::epoch`] (the recall cache rests on the
+/// same fact), so a resolution made at the epoch the final guard still shows
+/// is the resolution that guard would make. A mutation in between (the gather
+/// releases the lock) moves the epoch, and the dispatch resolves again rather
+/// than answer from a graph it no longer holds.
+#[derive(Clone, Debug)]
+pub(crate) struct ResolvedAnchor {
+    epoch: u64,
+    choice: Option<AnchorChoice>,
+}
+
+impl ResolvedAnchor {
+    /// Resolve `query`'s subject on `graph`.
+    pub(crate) fn resolve(graph: &Graph, query: &str) -> Self {
+        Self {
+            epoch: graph.epoch(),
+            choice: resolve_anchor_choice(graph, query),
+        }
+    }
+
+    /// This resolution when `graph` is still at its epoch, else a fresh one.
+    pub(crate) fn current(self, graph: &Graph, query: &str) -> Self {
+        if self.epoch == graph.epoch() {
+            self
+        } else {
+            Self::resolve(graph, query)
+        }
+    }
+
+    /// What the subject resolved to.
+    pub(crate) fn choice(&self) -> Option<&AnchorChoice> {
+        self.choice.as_ref()
     }
 }
 
@@ -496,8 +567,14 @@ pub fn fits_structural(graph: &Graph, query: &str) -> bool {
     if !matches!(classify(query), RecallKind::Structural) {
         return false;
     }
-    match resolve_anchor_choice(graph, query) {
-        Some(AnchorChoice::One(anchor)) => !dependents(graph, anchor).is_empty(),
+    fits_structural_with(graph, resolve_anchor_choice(graph, query).as_ref())
+}
+
+/// [`fits_structural`]'s anchor half, from a resolution already made on
+/// `graph` for a query that classifies `Structural` (#171).
+pub(crate) fn fits_structural_with(graph: &Graph, choice: Option<&AnchorChoice>) -> bool {
+    match choice {
+        Some(AnchorChoice::One(anchor)) => !dependents(graph, *anchor).is_empty(),
         // #129: the dispatch answers an ambiguous subject itself.
         Some(AnchorChoice::Ambiguous(_)) => true,
         None => false,
@@ -558,7 +635,10 @@ pub fn dependents(graph: &Graph, anchor: NodeId) -> Vec<Scored<NodeId>> {
 ///
 /// Returns `Some(DetailedRecall)` only when the query is structural AND an
 /// anchor resolves AND it has at least one dependent. Otherwise `None`
-/// (refusal — caller falls through to the blended pipeline).
+/// (refusal — caller falls through to the blended pipeline). The daemon
+/// calls [`try_structural_with`] with the resolution it already holds; this
+/// resolving form is the tests'.
+#[cfg(test)]
 pub(crate) fn try_structural(
     graph: &Graph,
     query: &str,
@@ -568,10 +648,31 @@ pub(crate) fn try_structural(
     if !matches!(classify(query), RecallKind::Structural) {
         return None;
     }
-    let anchor = match resolve_anchor_choice(graph, query)? {
-        AnchorChoice::One(id) => id,
+    try_structural_with(
+        graph,
+        query,
+        resolve_anchor_choice(graph, query).as_ref(),
+        top_k,
+        max_tokens,
+    )
+}
+
+/// Answer a structural query by traversal, from a resolution already made on
+/// `graph` for a query that classifies `Structural` (#171: the daemon
+/// resolves once per query). `Some` only when the subject resolves and has
+/// at least one dependent, or is ambiguous (#129); otherwise `None`, and the
+/// caller falls through to the blended pipeline.
+pub(crate) fn try_structural_with(
+    graph: &Graph,
+    query: &str,
+    choice: Option<&AnchorChoice>,
+    top_k: usize,
+    max_tokens: usize,
+) -> Option<DetailedRecall> {
+    let anchor = match choice? {
+        AnchorChoice::One(id) => *id,
         // #129: never answer for whichever repository sorts first.
-        AnchorChoice::Ambiguous(ids) => return Some(ambiguous_anchor_answer(graph, &ids)),
+        AnchorChoice::Ambiguous(ids) => return Some(ambiguous_anchor_answer(graph, ids)),
     };
     let deps = dependents(graph, anchor);
     if deps.is_empty() {
@@ -1458,7 +1559,7 @@ mod tests {
         // End-to-end through Daemon::recall: a structural query short-circuits
         // to the traversal answer.
         use crate::daemon::Daemon;
-        use crate::recall::cache::RecallCache;
+        use crate::recall::cache::SharedRecallCache;
 
         let g = exhibit();
         let graph = Arc::new(RwLock::new(g));
@@ -1474,7 +1575,7 @@ mod tests {
         .with_index(Arc::new(RwLock::new(index)));
 
         let store = crate::fixtures::load_store("session-rest-api").unwrap();
-        let mut cache = RecallCache::new();
+        let cache = SharedRecallCache::new();
         let res = daemon
             .recall(
                 &sid(),
@@ -1482,7 +1583,7 @@ mod tests {
                 &store,
                 None,
                 crate::config::RecallWeights::default(),
-                &mut cache,
+                &cache,
             )
             .await;
         let contents: Vec<&str> = res.hits.iter().map(|h| h.content.as_str()).collect();
@@ -1490,6 +1591,95 @@ mod tests {
             contents.contains(&"RDS-Lambo-Demo-DB"),
             "Daemon::recall must dispatch the dependency question, got {contents:?}"
         );
+    }
+
+    /// #171: a structural recall resolves its anchor once, whether the
+    /// dispatch fires (gather skipped, traversal answer) or not (a structural
+    /// phrasing whose subject has no dependents falls through to the blend
+    /// and still reports its subject). It used to resolve two or three times.
+    #[cfg(feature = "fixtures")]
+    #[tokio::test]
+    async fn a_structural_recall_resolves_its_anchor_once() {
+        use crate::daemon::Daemon;
+        use crate::recall::cache::SharedRecallCache;
+
+        let graph = Arc::new(RwLock::new(exhibit()));
+        let mut index = crate::graph::index::InvertedIndex::new();
+        for c in graph.read().concepts() {
+            index.add(c);
+        }
+        let daemon = Daemon::new(
+            graph.clone(),
+            crate::config::ScoringWeights::default(),
+            std::time::Duration::from_secs(3600),
+        )
+        .with_index(Arc::new(RwLock::new(index)));
+        let store = crate::fixtures::load_store("session-rest-api").unwrap();
+        let cache = SharedRecallCache::new();
+        let leaf_q = "what depends on RDS-Lambo-Demo-DB is not publicly accessible";
+        let expected_anchor = resolved_anchor_text(&graph.read(), leaf_q);
+        assert!(expected_anchor.is_some(), "the leaf query names a subject");
+        assert!(
+            !fits_structural(&graph.read(), leaf_q),
+            "and the subject has no dependents"
+        );
+        for (q, dispatched) in [("what depends on SG-Base-VPC", true), (leaf_q, false)] {
+            ANCHOR_RESOLUTIONS.with(|n| n.set(0));
+            let res = daemon
+                .recall_detailed(
+                    &sid(),
+                    query(q),
+                    &store,
+                    None,
+                    crate::config::RecallWeights::default(),
+                    &cache,
+                )
+                .await;
+            assert_eq!(ANCHOR_RESOLUTIONS.with(|n| n.get()), 1, "{q}");
+            let traversal = res
+                .response_annotations
+                .iter()
+                .any(|a| a.kind == crate::recall::detail::AnnotationKind::Traversal);
+            assert_eq!(traversal, dispatched, "{q}");
+            if !dispatched {
+                assert_eq!(res.anchor, expected_anchor, "{q}");
+            }
+        }
+    }
+
+    /// The reuse is keyed on the epoch: a write between the gather-skip check
+    /// and the dispatch makes the dispatch resolve again, on the graph it
+    /// actually holds, and an unchanged graph reuses the first answer.
+    #[test]
+    fn a_resolved_anchor_is_reused_only_at_its_epoch() {
+        let mut g = exhibit();
+        let q = "what depends on SG-Base-VPC";
+        let first = ResolvedAnchor::resolve(&g, q);
+        assert!(matches!(first.choice(), Some(AnchorChoice::One(_))));
+
+        ANCHOR_RESOLUTIONS.with(|n| n.set(0));
+        let same = first.clone().current(&g, q);
+        assert_eq!(
+            ANCHOR_RESOLUTIONS.with(|n| n.get()),
+            0,
+            "same epoch: reused"
+        );
+        assert_eq!(same.choice(), first.choice());
+
+        // Retire the anchor's concept: the stale resolution names a node
+        // that no longer answers, and the epoch moved.
+        let Some(AnchorChoice::One(id)) = first.choice().cloned() else {
+            unreachable!()
+        };
+        g.remove_node(id).unwrap();
+        let moved = first.current(&g, q);
+        assert_eq!(
+            ANCHOR_RESOLUTIONS.with(|n| n.get()),
+            1,
+            "epoch moved: resolved again"
+        );
+        assert_eq!(moved.choice().cloned(), resolve_anchor_choice(&g, q));
+        assert_ne!(moved.choice(), Some(&AnchorChoice::One(id)));
     }
 
     /// A dedicated structural graph: a canonical `users handler` and a plain
