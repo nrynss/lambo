@@ -290,7 +290,8 @@ pub struct SessionContext {
 
 /// A concept's incident-edge count for the `density` dimension: every
 /// incident edge whose type [`EdgeType::counts_toward_density`] (all but
-/// `Contradicts`, #19).
+/// `Contradicts`, #19). The reference form [`incidence`] must agree with.
+#[cfg(test)]
 fn density_degree(graph: &Graph, node: NodeId) -> usize {
     graph
         .incident_edges(node)
@@ -306,6 +307,19 @@ impl SessionContext {
     /// [`EdgeType::counts_toward_density`]) of the session's most connected
     /// concept; density is normalized against it.
     pub fn compute(graph: &Graph) -> Self {
+        let mut scratch = IncidenceScratch::default();
+        let max_incident = graph
+            .concepts()
+            .map(|c| incidence(graph, c.id, &mut scratch).density_degree)
+            .max()
+            .unwrap_or(0);
+        Self::with_max_incident(graph, max_incident)
+    }
+
+    /// [`SessionContext::compute`] with the connectivity baseline already
+    /// known, for `rescore`, which has every concept's density degree in hand
+    /// from its own pass (#171 B4).
+    fn with_max_incident(graph: &Graph, max_incident: usize) -> Self {
         let interactions: Vec<_> = graph.interactions().collect();
         let total_interactions = interactions.len();
         let start = interactions
@@ -318,11 +332,6 @@ impl SessionContext {
             .map(|i| i.created_at)
             .max()
             .unwrap_or(start);
-        let max_incident = graph
-            .concepts()
-            .map(|c| density_degree(graph, c.id))
-            .max()
-            .unwrap_or(0);
         let mut derived_by: HashMap<NodeId, usize> = HashMap::new();
         for e in graph.edges() {
             if e.edge_type == EdgeType::Derives
@@ -371,8 +380,58 @@ fn concept_recency(last_touch: DateTime<Utc>, ctx: &SessionContext) -> f64 {
     recency.clamp(0.0, 1.0)
 }
 
+/// What scoring needs from a concept's incident edges, from one walk of its
+/// adjacency (#171 B4). Scoring used to walk it three times per concept, each
+/// walk allocating and sorting: once for `max_incident`, once for the bonus
+/// and once more for the density degree.
+struct Incidence {
+    /// Incident edges that [`EdgeType::counts_toward_density`].
+    density_degree: usize,
+    /// `Σ` [`edge_type_bonus_value`] over every incident edge, summed in edge-id
+    /// order with `Iterator::sum`, exactly as [`Graph::incident_edges`] fed it
+    /// before, so the bits do not move.
+    edge_type_bonus: f64,
+}
+
+/// Reusable buffers for [`incidence`], one set per rescore.
+#[derive(Default)]
+struct IncidenceScratch {
+    ids: Vec<NodeId>,
+    types: Vec<EdgeType>,
+}
+
+fn incidence(graph: &Graph, node: NodeId, scratch: &mut IncidenceScratch) -> Incidence {
+    graph.incident_edge_ids_into(node, &mut scratch.ids);
+    scratch.types.clear();
+    scratch.types.extend(
+        scratch
+            .ids
+            .iter()
+            .filter_map(|id| graph.edge(*id))
+            .map(|e| e.edge_type),
+    );
+    Incidence {
+        density_degree: scratch
+            .types
+            .iter()
+            .filter(|t| t.counts_toward_density())
+            .count(),
+        edge_type_bonus: scratch
+            .types
+            .iter()
+            .map(|t| edge_type_bonus_value(*t))
+            .sum(),
+    }
+}
+
 /// Compute the six dimension values for one concept from graph state.
 pub fn score_concept(graph: &Graph, c: &Concept, ctx: &SessionContext) -> ScoreDims {
+    let inc = incidence(graph, c.id, &mut IncidenceScratch::default());
+    score_concept_with(c, ctx, &inc)
+}
+
+/// [`score_concept`] with the concept's [`Incidence`] already walked.
+fn score_concept_with(c: &Concept, ctx: &SessionContext, inc: &Incidence) -> ScoreDims {
     // The later of the two: a concept is never "touched" before it existed. A
     // read stamped from a different clock than the write (issue #30 — reads
     // use the wall clock, `lambo demo` scripts its writes) must not move a
@@ -392,23 +451,18 @@ pub fn score_concept(graph: &Graph, c: &Concept, ctx: &SessionContext) -> ScoreD
         derived_by as f64 / ctx.total_interactions as f64
     };
 
-    let incident = graph.incident_edges(c.id);
     let density = if ctx.max_incident == 0 {
         0.0
     } else {
-        density_degree(graph, c.id) as f64 / ctx.max_incident as f64
+        inc.density_degree as f64 / ctx.max_incident as f64
     };
-    let edge_type_bonus = incident
-        .iter()
-        .map(|e| edge_type_bonus_value(e.edge_type))
-        .sum();
 
     ScoreDims {
         recency,
         frequency,
         session_activity,
         density,
-        edge_type_bonus,
+        edge_type_bonus: inc.edge_type_bonus,
         concept_type_modifier: concept_type_modifier(c.concept_type),
     }
 }
@@ -420,15 +474,30 @@ pub fn score_concept(graph: &Graph, c: &Concept, ctx: &SessionContext) -> ScoreD
 /// Deterministic for a given graph AND across runs: the canonical key is
 /// persisted, so equal-score concepts keep one order no matter which ids a run
 /// minted (issue #2), and no wall-clock value enters the formula.
+///
+/// Each concept's incident edges are walked once, into reused buffers, and
+/// the walk serves both the session's connectivity baseline and the
+/// concept's own score (#171 B4); the result is bit-identical to scoring
+/// every concept with [`score_concept`].
 pub fn rescore(graph: &Graph, weights: &ScoringWeights) -> Vec<Scored<NodeId>> {
-    let ctx = SessionContext::compute(graph);
+    let mut scratch = IncidenceScratch::default();
+    let walked: Vec<(&Concept, Incidence)> = graph
+        .concepts()
+        .map(|c| (c, incidence(graph, c.id, &mut scratch)))
+        .collect();
+    let max_incident = walked
+        .iter()
+        .map(|(_, inc)| inc.density_degree)
+        .max()
+        .unwrap_or(0);
+    let ctx = SessionContext::with_max_incident(graph, max_incident);
     let key = |id: NodeId| match graph.node(id) {
         Some(crate::types::Node::Concept(c)) => Some(c.canonical_key.as_str()),
         _ => None,
     };
-    let mut ranked: Vec<Scored<NodeId>> = graph
-        .concepts()
-        .map(|c| Scored::new(c.id, score(score_concept(graph, c, &ctx), weights)))
+    let mut ranked: Vec<Scored<NodeId>> = walked
+        .iter()
+        .map(|(c, inc)| Scored::new(c.id, score(score_concept_with(c, &ctx, inc), weights)))
         .collect();
     ranked.sort_by(|a, b| {
         b.score
@@ -549,6 +618,167 @@ mod tests {
         }
     }
 
+    /// The pre-#171 `rescore`, kept as an oracle: the baseline from a
+    /// `density_degree` walk per concept, then [`score_concept_reference`]
+    /// per concept, then the same sort.
+    fn rescore_reference(graph: &Graph, weights: &ScoringWeights) -> Vec<Scored<NodeId>> {
+        // Three walks per concept, as before #171: this baseline pass, then
+        // `incident_edges` and `density_degree` inside the scoring.
+        let max_incident = graph
+            .concepts()
+            .map(|c| density_degree(graph, c.id))
+            .max()
+            .unwrap_or(0);
+        let ctx = SessionContext::with_max_incident(graph, max_incident);
+        let key = |id: NodeId| match graph.node(id) {
+            Some(Node::Concept(c)) => Some(c.canonical_key.as_str()),
+            _ => None,
+        };
+        let mut ranked: Vec<Scored<NodeId>> = graph
+            .concepts()
+            .map(|c| {
+                Scored::new(
+                    c.id,
+                    score(score_concept_reference(graph, c, &ctx), weights),
+                )
+            })
+            .collect();
+        ranked.sort_by(|a, b| {
+            b.score
+                .total_cmp(&a.score)
+                .then_with(|| tie_break_by_key(key(a.item), &a.item, key(b.item), &b.item))
+        });
+        ranked
+    }
+
+    /// #171 B4: the single-walk `rescore` is the reference's table, bit for
+    /// bit and in the same order.
+    fn assert_rescore_matches_reference(g: &Graph) {
+        let max_incident = g
+            .concepts()
+            .map(|c| density_degree(g, c.id))
+            .max()
+            .unwrap_or(0);
+        assert_eq!(
+            SessionContext::compute(g).max_incident,
+            max_incident,
+            "connectivity baseline"
+        );
+        let weights = ScoringWeights::default();
+        let fast = rescore(g, &weights);
+        let reference = rescore_reference(g, &weights);
+        assert_eq!(fast.len(), reference.len());
+        for (a, b) in fast.iter().zip(&reference) {
+            assert_eq!(a.item, b.item);
+            assert_eq!(a.score.to_bits(), b.score.to_bits(), "{}", a.item);
+        }
+    }
+
+    /// A generated session: `n` concepts over a few interactions, with
+    /// deterministic edges of every concept-to-concept type between them,
+    /// `Contradicts` and self-loops included, and skewed degrees so the
+    /// connectivity baseline is one hub's.
+    fn generated_session(n: u64) -> Graph {
+        let mut g = Graph::new(sid());
+        let interactions = 8;
+        for i in 1..=interactions {
+            g.insert_interaction(interaction(i, (i > 1).then(|| i - 1), i as i64 * 3))
+                .unwrap();
+        }
+        let types = [
+            EdgeType::CoOccurrence,
+            EdgeType::Causal,
+            EdgeType::Dependency,
+            EdgeType::Hierarchical,
+            EdgeType::Semantic,
+            EdgeType::Contradicts,
+        ];
+        let mut s = 0x5EED_u64;
+        let mut next = move || {
+            s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            s >> 33
+        };
+        for c in 0..n {
+            let origin = NodeId(Uuid::from_u64_pair(0, 1 + c % interactions));
+            let mut concept = concept(c, origin, &format!("concept {c}"), (c % 20) as i64);
+            concept.access_count = (next() % 7) as i32;
+            concept.concept_type = match c % 3 {
+                0 => ConceptType::Entity,
+                1 => ConceptType::Logic,
+                _ => ConceptType::Constraint,
+            };
+            g.insert_concept(concept, origin).unwrap();
+        }
+        let id = |c: u64| NodeId(Uuid::from_u64_pair(1, c));
+        for e in 0..n * 3 {
+            let src = next() % n;
+            // Skew: a third of the edges land on the first ten concepts.
+            let tgt = if e % 3 == 0 {
+                next() % 10.min(n)
+            } else {
+                next() % n
+            };
+            let ty = types[(next() % types.len() as u64) as usize];
+            let edge = crate::types::Edge {
+                event_time: None,
+                id: NodeId(Uuid::from_u64_pair(7, next())),
+                session_id: sid(),
+                source: id(src),
+                target: id(tgt),
+                edge_type: ty,
+                weight: 0.5,
+                reinforcements: 1,
+                created_at: ts(0),
+                last_reinforced: ts(0),
+            };
+            // A rejected edge (a type the graph refuses for this pair) is
+            // simply not part of the fixture.
+            let _ = g.upsert_edge(edge);
+        }
+        g
+    }
+
+    #[test]
+    fn single_walk_rescore_matches_the_reference_bit_for_bit() {
+        for n in [1, 2, 10, 97, 400] {
+            let g = generated_session(n);
+            assert_scores_match_reference(&g);
+            assert_rescore_matches_reference(&g);
+        }
+        let (g, _, _) = graph_with_two_concepts();
+        assert_rescore_matches_reference(&g);
+        assert_rescore_matches_reference(&Graph::new(sid()));
+    }
+
+    /// `cargo test --release --features fixtures --lib \
+    ///  daemon::score::tests::rescore_timing -- --ignored --nocapture`
+    #[test]
+    #[ignore = "measurement; run in release with --nocapture"]
+    fn rescore_timing() {
+        for n in [5_000, 9_100] {
+            let g = generated_session(n);
+            let weights = ScoringWeights::default();
+            let time = |name: &str, f: &dyn Fn() -> Vec<Scored<NodeId>>| {
+                let _ = f();
+                let runs = 20;
+                let start = std::time::Instant::now();
+                for _ in 0..runs {
+                    std::hint::black_box(f());
+                }
+                println!(
+                    "rescore_timing {n} concepts, {name}: {:?} per rescore",
+                    start.elapsed() / runs
+                );
+            };
+            time("pre-#171 (three walks per concept)", &|| {
+                rescore_reference(&g, &weights)
+            });
+            time("single walk (#171)", &|| rescore(&g, &weights));
+        }
+    }
+
     fn assert_scores_match_reference(g: &Graph) {
         let ctx = SessionContext::compute(g);
         let mut n = 0;
@@ -639,6 +869,7 @@ mod tests {
             let snap = crate::fixtures::load_snapshot(name).expect("fixture");
             let g = Graph::from_snapshot(snap).unwrap();
             assert_scores_match_reference(&g);
+            assert_rescore_matches_reference(&g);
         }
     }
 
