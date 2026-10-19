@@ -1,0 +1,90 @@
+{
+  "label": "main",
+  "ack_all_writes_s": 155.9,
+  "drain_after_acks_s": 0.5,
+  "populate_s": 156.4,
+  "store_after_populate": {
+    "concept_count": 9508,
+    "edge_count": 11669,
+    "node_count": 9850,
+    "embedded_concepts": 9508
+  },
+  "db_mb": 52.2,
+  "provision_ms": {
+    "n": 5,
+    "p50": 144.63,
+    "p90": 151.97,
+    "p99": 151.97,
+    "mean": 144.25,
+    "max": 151.97
+  },
+  "startup_loaded_ms": 559.3,
+  "latency_ms": {
+    "keyword_semantic_recall": {
+      "n": 60,
+      "p50": 14.21,
+      "p90": 16.36,
+      "p99": 18.65,
+      "mean": 14.44,
+      "max": 19.02
+    },
+    "structural_hit": {
+      "n": 30,
+      "p50": 2.33,
+      "p90": 2.63,
+      "p99": 2.8,
+      "mean": 2.36,
+      "max": 2.8
+    },
+    "structural_miss": {
+      "n": 30,
+      "p50": 16.47,
+      "p90": 18.64,
+      "p99": 20.71,
+      "mean": 16.81,
+      "max": 20.71
+    },
+    "identifier_recall": {
+      "n": 30,
+      "p50": 14.25,
+      "p90": 15.09,
+      "p99": 17.46,
+      "mean": 14.4,
+      "max": 17.46
+    },
+    "recall_16_concurrent": {
+      "n": 320,
+      "p50": 237.29,
+      "p90": 260.51,
+      "p99": 280.07,
+      "mean": 234.71,
+      "max": 293.02,
+      "rps": 66.5,
+      "errors": 0
+    },
+    "derive_ack_back_to_back": {
+      "n": 30,
+      "p50": 27.81,
+      "p90": 32.69,
+      "p99": 34.7,
+      "mean": 26.44,
+      "max": 34.7
+    },
+    "derive_applied_back_to_back": {
+      "n": 30,
+      "p50": 44.9,
+      "p90": 49.56,
+      "p99": 52.37,
+      "mean": 44.37,
+      "max": 52.37
+    },
+    "derive_ack_isolated": {
+      "n": 15,
+      "p50": 1.54,
+      "p90": 1.86,
+      "p99": 8.04,
+      "mean": 1.98,
+      "max": 8.04
+    }
+  }
+}

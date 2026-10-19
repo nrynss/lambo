@@ -8,8 +8,9 @@
 //! so an entry whose key carries a stale epoch is simply a miss. There are no
 //! generation counters (the arena is gone).
 //!
-//! The cache is deliberately plain: no interior mutability, no locks. The
-//! integrator decides locking at the call site.
+//! [`RecallCache`] is deliberately plain: no interior mutability, no locks.
+//! [`SharedRecallCache`] is the locked form recall shares across concurrent
+//! calls (#171 B2); it locks per lookup and per insert, never per recall.
 //!
 //! Eviction policy: classic LRU via a monotonic access tick. `get` and `insert`
 //! stamp the entry with the current tick; insertion at capacity evicts the
@@ -171,6 +172,81 @@ impl<V> RecallCache<V> {
     }
 }
 
+/// A [`RecallCache`] several recalls share (#171 B2).
+///
+/// Recall used to hold a `tokio::sync::Mutex` around the whole cache for the
+/// whole recall, embed and vector scan included, so one session served one
+/// recall at a time: 16 concurrent clients topped out at one core's worth of
+/// recalls. The cache only needs exclusive access for a lookup and for an
+/// insert, and both happen synchronously inside the pipeline, so this type
+/// takes a short `parking_lot` lock for exactly those two operations and
+/// nothing else.
+///
+/// No guard ever leaves a method, so the lock cannot be held across an
+/// `.await` or while the caller takes another lock: it is a leaf in the
+/// recall lock order (graph read, then index read, then hot write, then
+/// this).
+///
+/// Two concurrent misses on one key both compute the pipeline and both insert
+/// it. That costs one duplicate in-memory computation per concurrent caller,
+/// bounded by the number of callers and involving no I/O (the store gather
+/// runs before the cache is consulted, cached or not). Both inserts carry the
+/// same key, and so the same graph epoch, and a pipeline is a pure function
+/// of the graph snapshot that epoch names and the query, so the second write
+/// replaces an equal value. Single-flighting it would mean parking callers
+/// on a lock while the pipeline runs under the graph read guard, which is the
+/// serialization this type exists to remove.
+pub struct SharedRecallCache<V = RecallResult> {
+    inner: parking_lot::Mutex<RecallCache<V>>,
+}
+
+impl<V: Clone> SharedRecallCache<V> {
+    /// An empty shared cache with [`DEFAULT_CACHE_CAPACITY`].
+    pub fn new() -> Self {
+        Self::with_capacity(DEFAULT_CACHE_CAPACITY)
+    }
+
+    /// An empty shared cache with the given capacity (panics on zero, as
+    /// [`RecallCache::with_capacity`] does).
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            inner: parking_lot::Mutex::new(RecallCache::with_capacity(capacity)),
+        }
+    }
+
+    /// A clone of the cached value, marking it most recently used. The lock
+    /// is held for the lookup and the clone only.
+    pub fn get(&self, key: &CacheKey) -> Option<V> {
+        self.inner.lock().get(key).cloned()
+    }
+
+    /// Store a value (see [`RecallCache::insert`]).
+    pub fn insert(&self, key: CacheKey, value: V) {
+        self.inner.lock().insert(key, value);
+    }
+
+    /// Number of cached entries.
+    pub fn len(&self) -> usize {
+        self.inner.lock().len()
+    }
+
+    /// True when no entries are cached.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Drop every entry.
+    pub fn clear(&self) {
+        self.inner.lock().clear();
+    }
+}
+
+impl<V: Clone> Default for SharedRecallCache<V> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Default for RecallCache {
     fn default() -> Self {
         Self::new()
@@ -285,5 +361,34 @@ mod tests {
         cache.insert(k.clone(), result("second"));
         assert_eq!(cache.len(), 1, "same key must not duplicate");
         assert_eq!(cache.get(&k), Some(&result("second")));
+    }
+
+    /// #171 B2: the shared form hands out clones and never a guard, so many
+    /// threads can look up and insert at once; concurrent inserts of one key
+    /// leave one entry, and LRU eviction still bounds it.
+    #[test]
+    fn shared_cache_serves_concurrent_readers_and_writers() {
+        let cache = std::sync::Arc::new(SharedRecallCache::<RecallResult>::with_capacity(4));
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                let cache = cache.clone();
+                scope.spawn(move || {
+                    for i in 0..200u64 {
+                        let k = key("q", 5, 2, i % 6);
+                        if cache.get(&k).is_none() {
+                            cache.insert(k, result(&format!("epoch {}", i % 6)));
+                        }
+                    }
+                });
+            }
+        });
+        assert!(cache.len() <= 4, "capacity still bounds the shared cache");
+        let k = key("q", 5, 2, 99);
+        assert!(cache.get(&k).is_none());
+        cache.insert(k.clone(), result("one"));
+        cache.insert(k.clone(), result("two"));
+        assert_eq!(cache.get(&k).unwrap().context, "two", "same key overwrites");
+        cache.clear();
+        assert!(cache.is_empty());
     }
 }
