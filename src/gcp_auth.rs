@@ -2,9 +2,10 @@
 //!
 //! Lambo talks to two Google services with **one identity**: the Gemini embedder calls
 //! Vertex, and the Postgres store logs in to Cloud SQL with IAM database authentication.
-//! Both read the same credential file (`GCP_LAMBO_CREDENTIALS`, falling back to
-//! `GOOGLE_APPLICATION_CREDENTIALS`) and both exchange it for an OAuth access token. This
-//! module is that exchange, once.
+//! Both read the same credential file ([`credentials_path`]: `GCP_LAMBO_CREDENTIALS`, then
+//! `GOOGLE_APPLICATION_CREDENTIALS`, then the file `gcloud auth application-default login`
+//! writes) and both exchange it for an OAuth access token. This module is that exchange,
+//! once.
 //!
 //! It was two implementations until 2026-08-24: the embedder's in `embed/gemini.rs` and a
 //! service-account-only copy here for the store. The copy was not merely duplication, it was
@@ -47,6 +48,7 @@
 //! dependencies this module needs; neither is in the default feature set.
 
 use serde::{Deserialize, Serialize};
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -152,24 +154,101 @@ struct AuthorizedUserJson {
     token_uri: Option<String>,
 }
 
-/// The shared credential file, if this process was given one.
+/// The credential file this process should use, if it has one.
 ///
-/// `GCP_LAMBO_CREDENTIALS` first so a deployment can point lambo at one identity without
-/// disturbing whatever `GOOGLE_APPLICATION_CREDENTIALS` means to the rest of the machine.
+/// In order, the first that answers wins:
+///
+/// 1. `GCP_LAMBO_CREDENTIALS`, so a deployment can point lambo at one identity without
+///    disturbing whatever `GOOGLE_APPLICATION_CREDENTIALS` means to the rest of the machine;
+/// 2. `GOOGLE_APPLICATION_CREDENTIALS`;
+/// 3. the file `gcloud auth application-default login` writes (issue #7), at
+///    [`gcloud_adc_path`]: `$CLOUDSDK_CONFIG/application_default_credentials.json` when
+///    `CLOUDSDK_CONFIG` is set, else `~/.config/gcloud/application_default_credentials.json`
+///    (`%APPDATA%\gcloud\application_default_credentials.json` on Windows).
+///
+/// The two variables are returned as given, without looking at the file, so a variable
+/// naming a missing file still fails loudly in [`load_credentials`], naming the path,
+/// instead of falling through to some other identity. The gcloud file is only an answer if
+/// it exists and is a file (a symlink to one counts): it is a default the operator may never
+/// have created, and its absence means "no credential", not "a broken one".
 ///
 /// **An empty value is an absent value**, the same rule `Config::overlay_env` applies
 /// everywhere else: `GCP_LAMBO_CREDENTIALS=` in a shell profile must not shadow a working
-/// `GOOGLE_APPLICATION_CREDENTIALS` and leave the caller refusing with a nameless path.
-pub fn credentials_path_from_env() -> Option<PathBuf> {
-    non_empty_env("GCP_LAMBO_CREDENTIALS")
-        .or_else(|| non_empty_env("GOOGLE_APPLICATION_CREDENTIALS"))
-        .map(PathBuf::from)
+/// `GOOGLE_APPLICATION_CREDENTIALS` and leave the caller refusing with a nameless path, and
+/// `CLOUDSDK_CONFIG=` means gcloud's default directory, as it does to gcloud.
+pub fn credentials_path() -> Option<PathBuf> {
+    credentials_path_with(|var| std::env::var_os(var), cfg!(windows), Path::is_file)
 }
 
-/// An environment variable's value, treating empty as unset.
-fn non_empty_env(var: &str) -> Option<std::ffi::OsString> {
-    std::env::var_os(var).filter(|v| !v.is_empty())
+/// The gcloud application-default credentials file this process would consult, whether or
+/// not it exists: `$CLOUDSDK_CONFIG/application_default_credentials.json` when
+/// `CLOUDSDK_CONFIG` is set, else gcloud's default configuration directory under `$HOME`
+/// (`%APPDATA%` on Windows). `None` when neither is set, or the home directory is not an
+/// absolute path, which leaves nothing to look in.
+pub fn gcloud_adc_path() -> Option<PathBuf> {
+    gcloud_adc_path_with(|var| std::env::var_os(var), cfg!(windows))
 }
+
+/// [`gcloud_adc_path`] for an error message: the path lambo looked for, or why it had
+/// none to look for.
+pub fn describe_gcloud_adc_path() -> String {
+    match gcloud_adc_path() {
+        Some(p) => format!("looked for {}", p.display()),
+        None if cfg!(windows) => "no CLOUDSDK_CONFIG or APPDATA to find it by".to_owned(),
+        None => "no CLOUDSDK_CONFIG or absolute HOME to find it by".to_owned(),
+    }
+}
+
+/// [`credentials_path`] with the environment, the platform and the existence check
+/// injected, so the precedence can be tested without the real `HOME` or a real gcloud.
+fn credentials_path_with(
+    lookup: impl Fn(&str) -> Option<OsString>,
+    windows: bool,
+    is_file: impl Fn(&Path) -> bool,
+) -> Option<PathBuf> {
+    let var = |name: &str| lookup(name).filter(|v| !v.is_empty());
+    var(GCP_CREDENTIALS_ENV)
+        .or_else(|| var(ADC_CREDENTIALS_ENV))
+        .map(PathBuf::from)
+        .or_else(|| gcloud_adc_path_with(&lookup, windows).filter(|p| is_file(p)))
+}
+
+/// [`gcloud_adc_path`] with the environment and the platform injected.
+fn gcloud_adc_path_with(
+    lookup: impl Fn(&str) -> Option<OsString>,
+    windows: bool,
+) -> Option<PathBuf> {
+    let var = |name: &str| lookup(name).filter(|v| !v.is_empty());
+    let dir = match var(CLOUDSDK_CONFIG_ENV) {
+        // gcloud takes this directory as given, relative or not.
+        Some(dir) => PathBuf::from(dir),
+        None => {
+            let (home_var, below): (&str, &[&str]) = if windows {
+                ("APPDATA", &["gcloud"])
+            } else {
+                ("HOME", &[".config", "gcloud"])
+            };
+            // A relative home would resolve against whatever directory lambo was started
+            // in, which is not where gcloud wrote anything.
+            let home = PathBuf::from(var(home_var)?);
+            if !home.is_absolute() {
+                return None;
+            }
+            below.iter().fold(home, |p, part| p.join(part))
+        }
+    };
+    Some(dir.join(ADC_FILE_NAME))
+}
+
+/// Lambo's own credential variable: first in [`credentials_path`]'s chain.
+pub const GCP_CREDENTIALS_ENV: &str = "GCP_LAMBO_CREDENTIALS";
+/// Google's conventional credential variable: second in [`credentials_path`]'s chain.
+pub const ADC_CREDENTIALS_ENV: &str = "GOOGLE_APPLICATION_CREDENTIALS";
+/// gcloud's configuration-directory override, which moves the file `gcloud auth
+/// application-default login` writes: third in [`credentials_path`]'s chain.
+pub const CLOUDSDK_CONFIG_ENV: &str = "CLOUDSDK_CONFIG";
+/// The file `gcloud auth application-default login` writes in its configuration directory.
+const ADC_FILE_NAME: &str = "application_default_credentials.json";
 
 /// Read and parse a Google credentials file (service-account key or authorized-user ADC).
 pub fn load_credentials(path: &Path) -> Result<GoogleCredentials, GoogleAuthError> {
@@ -599,40 +678,189 @@ mod tests {
         );
     }
 
+    /// An injected environment: `(name, value)` pairs, everything else unset.
+    fn env_of<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<OsString> + 'a {
+        move |name| {
+            pairs
+                .iter()
+                .find(|(k, _)| *k == name)
+                .map(|(_, v)| OsString::from(v))
+        }
+    }
+
+    /// The chain with every gcloud candidate "existing", so the answer is the first
+    /// candidate the chain reaches.
+    fn first_candidate(pairs: &[(&str, &str)], windows: bool) -> Option<PathBuf> {
+        credentials_path_with(env_of(pairs), windows, |_| true)
+    }
+
     /// L1-R2-2 and L1-R2-3. Precedence is only meaningful when both variables are set, and
     /// an empty value is an absent value: `GCP_LAMBO_CREDENTIALS=` left in a shell profile
-    /// must not shadow a working `GOOGLE_APPLICATION_CREDENTIALS`.
+    /// must not shadow a working `GOOGLE_APPLICATION_CREDENTIALS`. No gcloud file exists
+    /// here, so the variables are the whole answer.
     #[test]
     fn the_shared_variable_wins_but_an_empty_one_does_not_shadow() {
-        let env = crate::test_util::env_lock();
-        env.set("GCP_LAMBO_CREDENTIALS", "/shared/creds.json");
-        env.set("GOOGLE_APPLICATION_CREDENTIALS", "/adc/creds.json");
-        let both = credentials_path_from_env();
-
-        env.set("GCP_LAMBO_CREDENTIALS", "");
-        let shared_empty = credentials_path_from_env();
-
-        env.remove("GCP_LAMBO_CREDENTIALS");
-        let shared_unset = credentials_path_from_env();
-
-        env.set("GOOGLE_APPLICATION_CREDENTIALS", "");
-        let both_empty = credentials_path_from_env();
+        let none = |_: &Path| false;
+        let path = |pairs: &[(&str, &str)]| credentials_path_with(env_of(pairs), false, none);
+        let both = path(&[
+            (GCP_CREDENTIALS_ENV, "/shared/creds.json"),
+            (ADC_CREDENTIALS_ENV, "/adc/creds.json"),
+            ("HOME", "/home/op"),
+        ]);
+        let shared_empty = path(&[
+            (GCP_CREDENTIALS_ENV, ""),
+            (ADC_CREDENTIALS_ENV, "/adc/creds.json"),
+        ]);
+        let shared_unset = path(&[(ADC_CREDENTIALS_ENV, "/adc/creds.json")]);
+        let both_empty = path(&[
+            (GCP_CREDENTIALS_ENV, ""),
+            (ADC_CREDENTIALS_ENV, ""),
+            ("HOME", "/home/op"),
+        ]);
 
         assert_eq!(
             both.as_deref(),
-            Some(std::path::Path::new("/shared/creds.json")),
+            Some(Path::new("/shared/creds.json")),
             "the shared variable outranks the Google-standard one when both are set"
         );
         assert_eq!(
             shared_empty.as_deref(),
-            Some(std::path::Path::new("/adc/creds.json")),
+            Some(Path::new("/adc/creds.json")),
             "an empty shared variable must not shadow a working one"
         );
+        assert_eq!(shared_unset.as_deref(), Some(Path::new("/adc/creds.json")));
         assert_eq!(
-            shared_unset.as_deref(),
-            Some(std::path::Path::new("/adc/creds.json"))
+            both_empty, None,
+            "two empty values and no gcloud file name no credential file"
         );
-        assert_eq!(both_empty, None, "two empty values name no credential file");
+    }
+
+    /// Issue #7: each link of the chain outranks the ones after it, and the gcloud file is
+    /// `$CLOUDSDK_CONFIG/...` when that is set and the platform default otherwise.
+    #[test]
+    fn the_chain_is_shared_then_google_then_cloudsdk_config_then_the_gcloud_default() {
+        let all = [
+            (GCP_CREDENTIALS_ENV, "/shared/creds.json"),
+            (ADC_CREDENTIALS_ENV, "/adc/creds.json"),
+            (CLOUDSDK_CONFIG_ENV, "/opt/gcloud-cfg"),
+            ("HOME", "/home/op"),
+            ("APPDATA", "/appdata/op/Roaming"),
+        ];
+        for windows in [false, true] {
+            let at = |skip: usize| first_candidate(&all[skip..], windows);
+            assert_eq!(at(0), Some(PathBuf::from("/shared/creds.json")));
+            assert_eq!(at(1), Some(PathBuf::from("/adc/creds.json")));
+            assert_eq!(
+                at(2),
+                Some(Path::new("/opt/gcloud-cfg").join("application_default_credentials.json")),
+                "CLOUDSDK_CONFIG outranks the home directory (windows: {windows})"
+            );
+        }
+        assert_eq!(
+            first_candidate(&all[3..], false),
+            Some(PathBuf::from(
+                "/home/op/.config/gcloud/application_default_credentials.json"
+            )),
+            "Unix default"
+        );
+        assert_eq!(
+            first_candidate(&all[3..], true),
+            Some(
+                PathBuf::from("/appdata/op/Roaming")
+                    .join("gcloud")
+                    .join("application_default_credentials.json")
+            ),
+            "Windows default reads APPDATA, not HOME"
+        );
+        assert_eq!(
+            first_candidate(&[("APPDATA", "/appdata")], false),
+            None,
+            "Unix never reads APPDATA"
+        );
+    }
+
+    /// The gcloud file is a default the operator may never have created: it answers only
+    /// when it exists as a file, and an absent one falls through to "no credential" rather
+    /// than to a path that fails to load. The variables, by contrast, are never checked.
+    #[test]
+    fn the_gcloud_file_answers_only_when_it_is_a_file() {
+        let dir = crate::test_util::ScratchDir::new("lambo-gcp-adc-chain");
+        let cfg_dir = dir.join("gcloud");
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        let cfg = cfg_dir.to_str().unwrap();
+        let adc = cfg_dir.join("application_default_credentials.json");
+        let real =
+            |pairs: &[(&str, &str)]| credentials_path_with(env_of(pairs), false, Path::is_file);
+
+        assert_eq!(
+            real(&[(CLOUDSDK_CONFIG_ENV, cfg)]),
+            None,
+            "absent: no credential"
+        );
+
+        std::fs::create_dir(&adc).unwrap();
+        assert_eq!(
+            real(&[(CLOUDSDK_CONFIG_ENV, cfg)]),
+            None,
+            "a directory is not a credential"
+        );
+        std::fs::remove_dir(&adc).unwrap();
+
+        std::fs::write(&adc, "{}").unwrap();
+        assert_eq!(real(&[(CLOUDSDK_CONFIG_ENV, cfg)]), Some(adc.clone()));
+
+        // gcloud's default layout under an injected home, so the real HOME is never read.
+        let home = dir.join("home");
+        let default_dir = home.join(".config").join("gcloud");
+        std::fs::create_dir_all(&default_dir).unwrap();
+        let home_str = home.to_str().unwrap();
+        assert_eq!(real(&[("HOME", home_str)]), None);
+        let default_adc = default_dir.join("application_default_credentials.json");
+        std::fs::write(&default_adc, "{}").unwrap();
+        assert_eq!(real(&[("HOME", home_str)]), Some(default_adc));
+
+        // A set CLOUDSDK_CONFIG replaces the default directory, it does not add to it:
+        // gcloud would not look in ~/.config/gcloud either.
+        let empty_cfg = dir.join("empty-cfg");
+        std::fs::create_dir_all(&empty_cfg).unwrap();
+        assert_eq!(
+            real(&[
+                (CLOUDSDK_CONFIG_ENV, empty_cfg.to_str().unwrap()),
+                ("HOME", home_str)
+            ]),
+            None
+        );
+
+        // A variable naming a missing file is returned as given and fails loudly later.
+        let missing = dir.join("missing.json");
+        assert_eq!(
+            real(&[
+                (ADC_CREDENTIALS_ENV, missing.to_str().unwrap()),
+                (CLOUDSDK_CONFIG_ENV, cfg)
+            ]),
+            Some(missing)
+        );
+    }
+
+    /// Empty and relative values: an empty `CLOUDSDK_CONFIG` is gcloud's default directory,
+    /// an empty or relative home leaves nothing to look in.
+    #[test]
+    fn empty_and_relative_locations_are_absent() {
+        assert_eq!(
+            first_candidate(&[(CLOUDSDK_CONFIG_ENV, ""), ("HOME", "/home/op")], false),
+            Some(PathBuf::from(
+                "/home/op/.config/gcloud/application_default_credentials.json"
+            ))
+        );
+        assert_eq!(first_candidate(&[("HOME", "")], false), None);
+        assert_eq!(first_candidate(&[("HOME", "relative/home")], false), None);
+        assert_eq!(first_candidate(&[("APPDATA", "Roaming")], true), None);
+        assert_eq!(first_candidate(&[], false), None);
+        assert_eq!(
+            first_candidate(&[(CLOUDSDK_CONFIG_ENV, "rel-cfg")], false),
+            Some(Path::new("rel-cfg").join("application_default_credentials.json")),
+            "CLOUDSDK_CONFIG is taken as given, as gcloud takes it"
+        );
     }
 
     #[tokio::test]
