@@ -57,11 +57,19 @@ fn pairs_for(g: &Graph, input: &PairInput) -> Result<Pairs, LamboError> {
     Ok(match input {
         PairInput::Detect => {
             let (pairs, refusals) = alias::detect(g);
-            Pairs { pairs, refusals, similar: None }
+            Pairs {
+                pairs,
+                refusals,
+                similar: None,
+            }
         }
         PairInput::Map(text) => {
             let (pairs, refusals) = alias::parse_map(g, text);
-            Pairs { pairs, refusals, similar: None }
+            Pairs {
+                pairs,
+                refusals,
+                similar: None,
+            }
         }
         PairInput::Similar(input) => {
             let (accept, reject) = similar::split_overrides(&input.overrides)
@@ -80,7 +88,11 @@ fn pairs_for(g: &Graph, input: &PairInput) -> Result<Pairs, LamboError> {
                 source: PairSource::Similar,
                 line: None,
             }));
-            Pairs { pairs, refusals, similar: Some(report) }
+            Pairs {
+                pairs,
+                refusals,
+                similar: Some(report),
+            }
         }
     })
 }
@@ -194,7 +206,11 @@ fn plan_with(
     input: &PairInput,
 ) -> Result<(AliasPlan, Vec<AliasPair>, Option<SimilarReport>), LamboError> {
     let g = dry_run::graph_of(snap)?;
-    let Pairs { pairs, refusals, similar } = pairs_for(&g, input)?;
+    let Pairs {
+        pairs,
+        refusals,
+        similar,
+    } = pairs_for(&g, input)?;
     Ok((alias::plan(&g, &pairs, refusals), pairs, similar))
 }
 
@@ -234,7 +250,9 @@ fn plan_invariants(
     let again = match input {
         PairInput::Similar(_) => alias::plan(&g, planned, Vec::new()),
         _ => {
-            let Pairs { pairs, refusals, .. } = pairs_for(&g, input)?;
+            let Pairs {
+                pairs, refusals, ..
+            } = pairs_for(&g, input)?;
             alias::plan(&g, &pairs, refusals)
         }
     };
@@ -450,7 +468,8 @@ fn render_similar(out: &mut String, sim: &SimilarReport) {
             "  {:?} jaccard={:.3} cosine={} alias {} (cited {}) -> ruling {} (cited {})",
             p.source,
             p.jaccard,
-            p.cosine.map_or_else(|| "-".to_string(), |c| format!("{c:.3}")),
+            p.cosine
+                .map_or_else(|| "-".to_string(), |c| format!("{c:.3}")),
             p.alias,
             p.alias_citations,
             p.ruling,
@@ -458,7 +477,11 @@ fn render_similar(out: &mut String, sim: &SimilarReport) {
         );
         let _ = writeln!(out, "    alias:  {}", clip(&p.alias_content));
         let _ = writeln!(out, "    ruling: {}", clip(&p.ruling_content));
-        let _ = writeln!(out, "    record: accept {} {}  |  reject {} {}", p.alias, p.ruling, p.alias, p.ruling);
+        let _ = writeln!(
+            out,
+            "    record: accept {} {}  |  reject {} {}",
+            p.alias, p.ruling, p.alias, p.ruling
+        );
     }
 }
 

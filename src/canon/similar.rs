@@ -200,11 +200,14 @@ pub struct SimilarReport {
     pub vector_candidates: usize,
 }
 
-/// Lowercase, fold every run of `_`, `-` and whitespace to one space, trim.
+/// NFC, lowercase, fold every run of `_`, `-` and whitespace to one space,
+/// trim. NFC first, so a composed and a decomposed accent fold alike, as
+/// they do in the canonical key.
 pub fn fold(content: &str) -> String {
+    use unicode_normalization::UnicodeNormalization;
     let mut out = String::with_capacity(content.len());
     let mut gap = false;
-    for c in content.chars() {
+    for c in content.nfc() {
         if c == '_' || c == '-' || c.is_whitespace() {
             gap = true;
             continue;
@@ -345,7 +348,11 @@ fn citation_counts(g: &Graph) -> HashMap<NodeId, usize> {
 
 /// A unit-length copy of `v`, or `None` for a zero or non-finite vector.
 fn unit(v: &[f32]) -> Option<Vec<f32>> {
-    let n = v.iter().map(|x| f64::from(*x) * f64::from(*x)).sum::<f64>().sqrt();
+    let n = v
+        .iter()
+        .map(|x| f64::from(*x) * f64::from(*x))
+        .sum::<f64>()
+        .sqrt();
     (n.is_finite() && n > 0.0).then(|| v.iter().map(|x| (f64::from(*x) / n) as f32).collect())
 }
 
@@ -520,8 +527,10 @@ pub fn detect_similar(g: &Graph, params: &SimilarParams) -> SimilarReport {
             guarded.type_differs += 1;
             continue;
         }
-        if g.edge_between(ea.id, eb.id, EdgeType::Contradicts).is_some()
-            || g.edge_between(eb.id, ea.id, EdgeType::Contradicts).is_some()
+        if g.edge_between(ea.id, eb.id, EdgeType::Contradicts)
+            .is_some()
+            || g.edge_between(eb.id, ea.id, EdgeType::Contradicts)
+                .is_some()
         {
             guarded.contradicts += 1;
             continue;
@@ -542,7 +551,11 @@ pub fn detect_similar(g: &Graph, params: &SimilarParams) -> SimilarReport {
                 e.id.0,
             )
         };
-        let (ruling, alias) = if rank(ea) <= rank(eb) { (ea, eb) } else { (eb, ea) };
+        let (ruling, alias) = if rank(ea) <= rank(eb) {
+            (ea, eb)
+        } else {
+            (eb, ea)
+        };
         kept.push(SimilarPair {
             alias: alias.id,
             ruling: ruling.id,
@@ -572,10 +585,7 @@ pub fn detect_similar(g: &Graph, params: &SimilarParams) -> SimilarReport {
     let mut aliases: HashSet<NodeId> = params.accepted.iter().map(|p| p.0).collect();
     let mut rulings: HashSet<NodeId> = params.accepted.iter().map(|p| p.1).collect();
     for p in kept {
-        if aliases.contains(&p.alias)
-            || rulings.contains(&p.alias)
-            || aliases.contains(&p.ruling)
-        {
+        if aliases.contains(&p.alias) || rulings.contains(&p.alias) || aliases.contains(&p.ruling) {
             report.guarded.overlap += 1;
             continue;
         }

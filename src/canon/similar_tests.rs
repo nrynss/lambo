@@ -6,7 +6,9 @@ use super::similar::*;
 use crate::graph::canonical::canonical_key;
 use crate::graph::Graph;
 use crate::test_util::fair_test as fair;
-use crate::types::{CanonizationStatus, Concept, ConceptType, Edge, EdgeType, GraphSnapshot, NodeId};
+use crate::types::{
+    CanonizationStatus, Concept, ConceptType, Edge, EdgeType, GraphSnapshot, NodeId,
+};
 
 /// One concept to put in a test graph.
 struct Spec<'a> {
@@ -62,7 +64,10 @@ fn snapshot(specs: &[Spec<'_>], extra: &[(&str, &str, EdgeType)]) -> GraphSnapsh
         snap.edges.push(d);
         snap.concepts.push(c);
     }
-    if let Some(dim) = specs.iter().find_map(|s| s.embedding.as_ref().map(Vec::len)) {
+    if let Some(dim) = specs
+        .iter()
+        .find_map(|s| s.embedding.as_ref().map(Vec::len))
+    {
         snap.embedding = Some(crate::types::EmbeddingContract {
             kind: "fixture".into(),
             model: None,
@@ -116,6 +121,7 @@ fn fold_lowercases_and_collapses_separators() {
     assert_eq!(fold("  write \t queue__receipt  "), "write queue receipt");
     assert_eq!(fold("v0.5.0"), "v0.5.0");
     assert_eq!(fold(""), "");
+    assert_eq!(fold("cafe\u{301} au lait"), fold("caf\u{e9} au lait"));
 }
 
 #[test]
@@ -142,16 +148,43 @@ fn spelling_variants_are_suggested() {
 /// Every #148 / #178 identifier family, as near-identical texts and with
 /// identical vectors: never suggested by either source.
 pub(crate) const IDENTIFIER_PAIRS: &[(&str, &str)] = &[
-    ("cut the release v0.5.0 today", "cut the release v0.6.0 today"),
+    (
+        "cut the release v0.5.0 today",
+        "cut the release v0.6.0 today",
+    ),
     ("the server follows rfc 7231", "the server follows rfc 7230"),
-    ("checksums are sha256 digests", "checksums are sha512 digests"),
-    ("route traffic to host1.svc first", "route traffic to host2.svc first"),
-    ("tracked as issue #148 upstream", "tracked as issue #146 upstream"),
-    ("the daemon listens on port 7700", "the daemon listens on port 7701"),
-    ("served by embedding model v1", "served by embedding model v2"),
-    ("the build needs node 18 installed", "the build needs node 20 installed"),
-    ("commit 2122de39e47e fixed the bug", "commit 2122de39e48e fixed the bug"),
-    ("the entry point is src/main.rs", "the entry point is src/mein.rs"),
+    (
+        "checksums are sha256 digests",
+        "checksums are sha512 digests",
+    ),
+    (
+        "route traffic to host1.svc first",
+        "route traffic to host2.svc first",
+    ),
+    (
+        "tracked as issue #148 upstream",
+        "tracked as issue #146 upstream",
+    ),
+    (
+        "the daemon listens on port 7700",
+        "the daemon listens on port 7701",
+    ),
+    (
+        "served by embedding model v1",
+        "served by embedding model v2",
+    ),
+    (
+        "the build needs node 18 installed",
+        "the build needs node 20 installed",
+    ),
+    (
+        "commit 2122de39e47e fixed the bug",
+        "commit 2122de39e48e fixed the bug",
+    ),
+    (
+        "the entry point is src/main.rs",
+        "the entry point is src/mein.rs",
+    ),
 ];
 
 #[test]
@@ -188,8 +221,16 @@ fn types_must_match_unless_the_text_is_the_same() {
     let g = graph(
         &[
             spec("ent", E, "the writer lease renews every tick"),
-            spec("logic", ConceptType::Logic, "the writer lease renews evry tick"),
-            spec("obs", ConceptType::Observation, "The writer lease renews every tick"),
+            spec(
+                "logic",
+                ConceptType::Logic,
+                "the writer lease renews evry tick",
+            ),
+            spec(
+                "obs",
+                ConceptType::Observation,
+                "The writer lease renews every tick",
+            ),
         ],
         &[],
     );
@@ -234,7 +275,10 @@ fn canonical_concepts_need_the_operator_flag() {
 
 #[test]
 fn short_texts_are_left_to_the_key() {
-    let g = graph(&[spec("a", E, "lease tick"), spec("b", E, "lease tikc")], &[]);
+    let g = graph(
+        &[spec("a", E, "lease tick"), spec("b", E, "lease tikc")],
+        &[],
+    );
     let r = detect_similar(&g, &text_only());
     assert!(r.pairs.is_empty());
     assert_eq!(r.guarded.too_short, 2);
@@ -308,7 +352,8 @@ fn overrides_are_not_suggested_again() {
 
 #[test]
 fn split_overrides_keeps_line_numbers_and_refuses_other_verbs() {
-    let (a, r) = split_overrides("# decisions\naccept aaaa bbbb\nreject cccc dddd # no\n\n").unwrap();
+    let (a, r) =
+        split_overrides("# decisions\naccept aaaa bbbb\nreject cccc dddd # no\n\n").unwrap();
     assert_eq!(a, "\naaaa bbbb\n\n\n");
     assert_eq!(r, "\n\ncccc dddd\n\n");
     let e = split_overrides("accept a b\nmerge a b\n").unwrap_err();
@@ -371,7 +416,10 @@ fn fixture_negative_pairs_are_never_suggested() {
             ))
         })
         .collect();
-    assert!(rows.len() >= 8, "the negative rows are part of the contract");
+    assert!(
+        rows.len() >= 8,
+        "the negative rows are part of the contract"
+    );
     let names: Vec<(String, String)> = (0..rows.len())
         .map(|i| (format!("n{i}"), format!("m{i}")))
         .collect();
@@ -433,7 +481,10 @@ fn similar_timing() {
             c[1] = if c[1] == 'z' { 'y' } else { 'z' };
             c.into_iter().collect()
         } else {
-            (0..8).map(|_| word(next() % 4096)).collect::<Vec<_>>().join(" ")
+            (0..8)
+                .map(|_| word(next() % 4096))
+                .collect::<Vec<_>>()
+                .join(" ")
         };
         texts.push(t);
     }
@@ -485,7 +536,6 @@ fn similar_timing() {
     );
 }
 
-
 /// The labelled precision report (`evidence/issue-178-similar/`): every
 /// labelled pair on its own, then the synthetic texts as one corpus. Prints
 /// `EVAL` JSON lines that `evidence/issue-178-similar/report.py` tabulates.
@@ -493,7 +543,10 @@ fn similar_timing() {
 #[test]
 #[ignore = "evidence; prints the labelled report"]
 fn similar_precision_report() {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/evidence/issue-178-similar/labelled-pairs.json");
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/evidence/issue-178-similar/labelled-pairs.json"
+    );
     let rows: Vec<serde_json::Value> =
         serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
     for r in &rows {
@@ -558,5 +611,8 @@ fn similar_precision_report() {
             })
         );
     }
-    println!("EVAL {}", serde_json::json!({"mode": "corpus-summary", "concepts": texts.len(), "guarded": rep.guarded, "lexical_candidates": rep.lexical_candidates}));
+    println!(
+        "EVAL {}",
+        serde_json::json!({"mode": "corpus-summary", "concepts": texts.len(), "guarded": rep.guarded, "lexical_candidates": rep.lexical_candidates})
+    );
 }

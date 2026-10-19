@@ -153,11 +153,11 @@ mod imp {
     use crate::canon::alias_preview::{
         alias_preview, render_alias_preview, PairInput, SimilarInput,
     };
-    use crate::canon::similar::SimilarParams;
     use crate::canon::dry_run::{
         baseline_mismatch, compare, dry_run_all, redact, render_report, resolve_watch,
         DryRunParams, DryRunReport, Invariant, SourceFacts,
     };
+    use crate::canon::similar::SimilarParams;
     use crate::cli::caps::{check_size_cli, require_nonempty, CliError};
     use crate::store::{GraphStore, SqliteStore};
     use crate::types::{GraphSnapshot, SessionId, StoreError};
@@ -572,7 +572,9 @@ mod imp {
             if v.is_finite() && (0.0..=1.0).contains(&v) {
                 Ok(v)
             } else {
-                Err(CliError::Usage(format!("--{name} must be in [0, 1], got {v}")))
+                Err(CliError::Usage(format!(
+                    "--{name} must be in [0, 1], got {v}"
+                )))
             }
         };
         let overrides = match &s.overrides {
