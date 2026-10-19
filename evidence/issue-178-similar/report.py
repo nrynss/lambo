@@ -14,7 +14,7 @@ pairs = [e for e in evals if e["mode"] == "pair"]
 
 def guard_of(g):
     hit = [k for k, v in g.items() if v and k not in ("too_short",)]
-    return ",".join(hit) or ("too_short" if g.get("too_short") else "-")
+    return ",".join(hit) or ("too_short" if g.get("too_short") else "no candidate (no shared LSH band, cosine below the floor)")
 
 print("## Each labelled pair on its own (default parameters, cosine 0.85)\n")
 for src in ("dogfood-i3", "synthetic"):
