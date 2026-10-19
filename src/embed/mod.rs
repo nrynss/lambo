@@ -7,7 +7,7 @@
 
 pub mod api_key;
 pub mod keep_warm;
-mod math;
+pub(crate) mod math;
 
 #[cfg(feature = "embed-bge")]
 mod bge_m3;

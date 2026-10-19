@@ -68,7 +68,7 @@ use crate::daemon::{Clock, Daemon, RecallPipeline};
 use crate::embed::Embedder;
 use crate::graph::index::InvertedIndex;
 use crate::graph::Graph;
-use crate::recall::cache::RecallCache;
+use crate::recall::cache::SharedRecallCache;
 use crate::recall::query_cache::QueryEmbeddingCache;
 use crate::store::flush::FlushTask;
 use crate::store::lease::LeaseHolder;
@@ -224,11 +224,10 @@ pub struct Memory {
     /// [`Memory::events`] caller so the warm-up condition set is not lost.
     startup_events: PlMutex<Option<broadcast::Receiver<DaemonEvent>>>,
     /// Session-scoped recall cache (spec §8's key carries no session id, so the
-    /// owner holds one per session). A `tokio` mutex, not `parking_lot`:
-    /// `Daemon::recall` needs `&mut` across its `.await`s. This is not the
-    /// graph lock — holding it across an await is fine and only serializes
-    /// concurrent recalls on this handle.
-    recall_cache: tokio::sync::Mutex<RecallCache<RecallPipeline>>,
+    /// owner holds one per session). Locked per lookup and per insert inside
+    /// the pipeline, never across a recall (#171 B2): before, a `tokio` mutex
+    /// held for the whole recall serialized every recall on this handle.
+    recall_cache: SharedRecallCache<RecallPipeline>,
     /// Session-scoped LRU of recall query embeddings (#14). Keyed by the
     /// exact query text and checked against the embedding contract, with no
     /// epoch: a query vector does not depend on the graph, so a write
