@@ -771,7 +771,6 @@ impl Daemon {
 
         let scores = self.scores.read().clone();
         let index = self.index.as_ref().map(|i| i.read());
-        let mut hot = self.hot.write();
         let epoch = graph.epoch();
         let key = CacheKey::new(&query.query, query.top_k, query.traversal_depth, epoch);
 
@@ -831,7 +830,11 @@ impl Daemon {
         // are evicted here; the survivors' freshly rebuilt payloads are what
         // assembly force-includes and renders. Done here rather than inside
         // `assemble` so recall reads a map and never mutates daemon state.
-        let hot_payloads = hot.revalidate_members(
+        // #171 B2: the hot-list write lock is taken for this revalidation
+        // only, not across the cache lookup, the pipeline build or assembly,
+        // so concurrent recalls do not serialize on it. The order still
+        // holds: graph and index guards are held while it is taken.
+        let hot_payloads = self.hot.write().revalidate_members(
             &graph,
             pipeline
                 .expanded

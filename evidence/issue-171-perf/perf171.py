@@ -75,7 +75,9 @@ def wait_drained(c, timeout=900):
     """Poll lambo_stats until the write queue, log and flush are all empty."""
     t0 = time.time()
     while time.time() - t0 < timeout:
-        _, st, _ = c.tool("lambo_stats")
+        _, st, err = c.tool("lambo_stats")
+        if err:
+            raise RuntimeError(f"lambo_stats refused while draining: {st}")
         if all((st.get(k) or 0) == 0 for k in DRAIN_KEYS):
             return round(time.time() - t0, 1)
         time.sleep(0.5)
@@ -96,6 +98,7 @@ def main():
     work = tempfile.mkdtemp(prefix="perf171-")
     runtime = tempfile.mkdtemp(prefix="l171-", dir="/tmp")
     res = {"label": o.label}
+    procs = []
     try:
         db = os.path.join(work, "perf171.db")
         cfg = os.path.join(work, "lambo.toml")
@@ -104,16 +107,22 @@ def main():
         subprocess.run([o.bin, "provision", "--config", cfg], check=True, capture_output=True)
         log = open(os.path.join(work, "serve.log"), "w")
         p, url, _ = start(o.bin, cfg, o.port, runtime, log)
+        procs.append(p)
         c = mcp_ab.Mcp(url)
         t0 = time.perf_counter()
+        batch_ack, batch_drain = [], []
         for b in range(o.batches):
+            tb = time.perf_counter()
             concepts = [{"content": concept_text(b, i), "concept_type": "observation" if i % 3 else "entity"}
                         for i in range(64)]
             _, body, err = c.tool("lambo_derive", concepts=concepts)
             if err:
                 raise RuntimeError(f"derive batch {b} refused")
+            batch_ack.append((time.perf_counter() - tb) * 1000)
             if o.settle:
+                td = time.perf_counter()
                 wait_drained(c)
+                batch_drain.append((time.perf_counter() - td) * 1000)
         for k in range(200):
             _, body, err = c.tool("lambo_record_action",
                                   action=f"deploy service s{k} into SG-Base-VPC-{k % 20}",
@@ -122,6 +131,10 @@ def main():
             if err:
                 raise RuntimeError(f"record_action {k} refused")
         res["ack_all_writes_s"] = round(time.perf_counter() - t0, 1)
+        res["derive_batch_ack_ms"] = summ(batch_ack)
+        if batch_drain:
+            res["derive_batch_drain_ms"] = summ(batch_drain)
+            res["derive_batch_drain_total_s"] = round(sum(batch_drain) / 1000, 1)
         res["drain_after_acks_s"] = wait_drained(c)
         res["populate_s"] = round(time.perf_counter() - t0, 1)
         _, st, _ = c.tool("lambo_stats")
@@ -138,6 +151,7 @@ def main():
         res["provision_ms"] = summ(prov)
 
         p, url, startup = start(o.bin, cfg, o.port, runtime, log)
+        procs.append(p)
         res["startup_loaded_ms"] = round(startup, 1)
         c = mcp_ab.Mcp(url)
         lat = {}
@@ -161,15 +175,21 @@ def main():
 
         # 16 concurrent sessions x 20 recalls.
         clients = [mcp_ab.Mcp(url) for _ in range(16)]
-        conc, errs, lock = [], [0], threading.Lock()
+        conc, errs, failures, lock = [], [0], [], threading.Lock()
 
         def worker(cl, w):
-            for j in range(20):
-                q = KEYWORD_QUERIES[(w * 20 + j) % len(KEYWORD_QUERIES)] + f" {w}-{j}"
-                ms, _, err = cl.tool("lambo_recall", query=q, top_k=8)
+            try:
+                for j in range(20):
+                    q = KEYWORD_QUERIES[(w * 20 + j) % len(KEYWORD_QUERIES)] + f" {w}-{j}"
+                    ms, _, err = cl.tool("lambo_recall", query=q, top_k=8)
+                    with lock:
+                        if err:
+                            errs[0] += 1
+                        else:
+                            conc.append(ms)
+            except Exception as e:  # surfaced on the main thread below
                 with lock:
-                    conc.append(ms)
-                    errs[0] += err
+                    failures.append(repr(e))
         ts = [threading.Thread(target=worker, args=(cl, w)) for w, cl in enumerate(clients)]
         t = time.perf_counter()
         for th in ts:
@@ -177,6 +197,9 @@ def main():
         for th in ts:
             th.join()
         wall = time.perf_counter() - t
+        if failures or errs[0] or len(conc) != 16 * 20:
+            raise RuntimeError(
+                f"concurrent recall: {len(conc)}/320 ok, {errs[0]} refused, failures {failures[:3]}")
         lat["recall_16_concurrent"] = dict(summ(conc), rps=round(len(conc) / wall, 1), errors=errs[0])
 
         # 30 back-to-back single-concept derives: ack, then applied.
@@ -186,7 +209,9 @@ def main():
                 {"content": f"perf171 back-to-back observation {i} {time.time_ns()}", "concept_type": "observation"}])
             ack.append(ms)
             t = time.perf_counter()
-            _, st, _ = c.tool("lambo_stats", receipt=body["receipt"], wait_ms=10000)
+            _, st, err = c.tool("lambo_stats", receipt=body["receipt"], wait_ms=10000)
+            if err:
+                raise RuntimeError(f"receipt poll {i} refused: {st}")
             applied.append(ms + (time.perf_counter() - t) * 1000)
         lat["derive_ack_back_to_back"] = summ(ack)
         lat["derive_applied_back_to_back"] = summ(applied)
@@ -201,6 +226,11 @@ def main():
         stop(p)
         log.close()
     finally:
+        # A failed step skips the success-path stops: never leave a server on
+        # the benchmark port.
+        for p in procs:
+            if p.poll() is None:
+                stop(p)
         shutil.rmtree(work, ignore_errors=True)
         shutil.rmtree(runtime, ignore_errors=True)
     with open(o.out, "w") as f:
