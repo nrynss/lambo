@@ -202,6 +202,10 @@ pub struct CycleParams {
     pub high_risk_window: Duration,
     /// Hot-list bound (`hot_list_max`, spec §9).
     pub hot_list_max: usize,
+    /// At most this many contradiction entries (#196,
+    /// `hot_list_contradiction_max`); `None` is half of `hot_list_max`
+    /// ([`hotlist::default_contradiction_max`]).
+    pub hot_list_contradiction_max: Option<usize>,
     /// GC runs every this many session mutations (`gc_interval`, spec §9).
     pub gc_interval: u64,
     /// ...or once this much time has passed since the last sweep
@@ -234,6 +238,7 @@ impl From<&Config> for CycleParams {
             stale_window: events::STALE_WINDOW,
             high_risk_window: events::HIGH_RISK_WRITE_WINDOW,
             hot_list_max: config.hot_list_max,
+            hot_list_contradiction_max: config.hot_list_contradiction_max,
             gc_interval: config.gc_interval,
             gc_max_interval: config.gc_max_interval,
             gc_idle_floor: config.gc_idle_floor,
@@ -278,7 +283,12 @@ impl Daemon {
             tick,
             wake: Arc::new(Notify::new()),
             scores: Arc::new(RwLock::new(ScoreTable::default())),
-            hot: Arc::new(RwLock::new(HotList::with_max(params.hot_list_max))),
+            hot: Arc::new(RwLock::new(HotList::with_budget(
+                params.hot_list_max,
+                params
+                    .hot_list_contradiction_max
+                    .unwrap_or_else(|| hotlist::default_contradiction_max(params.hot_list_max)),
+            ))),
             events: sender,
             index: None,
             last_gc: Arc::new(RwLock::new(None)),

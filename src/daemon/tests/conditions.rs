@@ -883,6 +883,64 @@ async fn a_contradiction_is_held_on_the_hot_list_without_an_event() {
     handle.abort();
 }
 
+/// #196: the daemon builds its hot list with the configured contradiction
+/// budget, and a full budget keeps the most recently declared
+/// contradictions (not the lowest node ids).
+#[tokio::test(start_paused = true)]
+async fn the_contradiction_budget_keeps_the_newest_declared() {
+    let (graph, c1_id, _, _) = conflicted_graph();
+    let i1_id = NodeId(Uuid::from_u64_pair(0, 1));
+    let c2_id = NodeId(Uuid::from_u64_pair(1, 2));
+    {
+        let mut g = graph.write();
+        // Node id order is the reverse of declaration order.
+        for (n, declared) in [(3u64, 30i64), (4, 40), (5, 50)] {
+            let mut c = concept_at(n, i1_id, "agent-a", &format!("fact {n} holds"), wall_ts(60));
+            c.canonization_status = CanonizationStatus::Canonical;
+            let id = c.id;
+            g.insert_concept(c, i1_id).unwrap();
+            g.upsert_edge(Edge {
+                edge_type: EdgeType::Contradicts,
+                ..dep_edge_at(10 + n, c2_id, id, wall_ts(declared))
+            })
+            .unwrap();
+        }
+    }
+    let params = CycleParams {
+        hot_list_max: 10,
+        hot_list_contradiction_max: Some(1),
+        ..Default::default()
+    };
+    let daemon = Daemon::with_params(
+        graph.clone(),
+        ScoringWeights::default(),
+        Duration::from_secs(3600),
+        params,
+    );
+    let handle = daemon.spawn();
+    wait_until(|| daemon.cycles() >= 1).await;
+    let hot = daemon.hot_list();
+    let hot = hot.read();
+    assert_eq!(hot.contradiction_max(), 1);
+    let contradicted: Vec<NodeId> = hot
+        .iter()
+        .filter(|e| e.condition() == Condition::Contradiction)
+        .map(|e| e.node())
+        .collect();
+    assert_eq!(
+        contradicted,
+        vec![NodeId(Uuid::from_u64_pair(1, 3))],
+        "{hot:?}"
+    );
+    assert!(
+        hot.iter()
+            .any(|e| e.node() == c1_id && e.condition() == Condition::Conflict),
+        "{hot:?}"
+    );
+    drop(hot);
+    handle.abort();
+}
+
 /// #19(c) review L3: contradictions share conflict's tier and are inserted
 /// before conflicts each cycle, so on a full hot list the persistent
 /// contradictions are evicted before the transient conflict.

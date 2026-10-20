@@ -129,6 +129,13 @@ pub struct Config {
     pub daemon_tick_interval: Duration,
 
     pub hot_list_max: usize,
+    /// At most this many of the hot list's entries may be contradictions
+    /// (#196), so live contradictions cannot evict the high-risk, drift and
+    /// stale warnings. `None` (the default) is half of `hot_list_max`. Must
+    /// not exceed `hot_list_max`; equal to it reserves nothing. Library
+    /// setting only, like `hot_list_max`.
+    #[serde(default)]
+    pub hot_list_contradiction_max: Option<usize>,
     pub conflict_recency_window: Duration,
     /// `drift_threshold` in hops (spec §9). `usize` — the metric is a hop
     /// count, which every consumer (`drift::detect`, `CycleParams`) indexes
@@ -237,6 +244,7 @@ impl Default for Config {
             daemon_tick_interval: crate::daemon::DAEMON_TICK_INTERVAL,
 
             hot_list_max: crate::daemon::hotlist::HOT_LIST_MAX,
+            hot_list_contradiction_max: None,
             conflict_recency_window: crate::daemon::conflict::CONFLICT_RECENCY_WINDOW,
             drift_threshold: crate::daemon::drift::DRIFT_THRESHOLD,
 
@@ -283,6 +291,14 @@ impl Config {
             return Err(LamboError::Config(format!(
                 "semantic_match_threshold must be finite and in [0, 1], got {}",
                 self.semantic_match_threshold
+            )));
+        }
+        if let Some(budget) = self.hot_list_contradiction_max
+            && budget > self.hot_list_max
+        {
+            return Err(LamboError::Config(format!(
+                "hot_list_contradiction_max {budget} exceeds hot_list_max {}",
+                self.hot_list_max
             )));
         }
         if self.default_top_k > crate::store::MAX_VECTOR_CANDIDATE_LIMIT {
@@ -763,6 +779,7 @@ mod tests {
         // between the two is exactly what CycleParams' literal duplication hid.
         assert_eq!(c.daemon_tick_interval, Duration::from_secs(1));
         assert_eq!(c.hot_list_max, 1000);
+        assert_eq!(c.hot_list_contradiction_max, None);
         assert_eq!(c.conflict_recency_window, Duration::from_secs(30));
         assert_eq!(c.drift_threshold, 5);
 
@@ -831,6 +848,21 @@ mod tests {
     /// above and silently break every session.
     ///
     /// Mutation: make `validate` refuse unconditionally → red here.
+    /// #196: the contradiction budget may not exceed the hot-list bound.
+    #[test]
+    fn the_hot_list_contradiction_budget_is_validated() {
+        let ok = |b| Config {
+            hot_list_max: 10,
+            hot_list_contradiction_max: b,
+            ..Default::default()
+        };
+        assert!(ok(None).validate().is_ok());
+        assert!(ok(Some(0)).validate().is_ok());
+        assert!(ok(Some(10)).validate().is_ok());
+        let err = ok(Some(11)).validate().unwrap_err().to_string();
+        assert!(err.contains("hot_list_contradiction_max"), "{err}");
+    }
+
     #[test]
     fn the_default_promotion_policy_validates() {
         assert_eq!(Config::default().promotion_policy, PromotionPolicy::Swarm);

@@ -25,6 +25,23 @@
 //! Eviction on overflow removes the **lowest** priority entry (oldest of the
 //! least-severe condition); `recall()` consumes from the **highest**.
 //!
+//! ## The contradiction budget (#196)
+//!
+//! Contradictions share the top severity tier, persist until newer evidence
+//! outweighs them, and since #179 every live one is an entry, so a store
+//! with many could fill the whole list and evict every high-risk, drift and
+//! stale warning. They are held to a budget instead: at most
+//! [`HotList::contradiction_max`] contradiction entries, by default half
+//! the bound ([`default_contradiction_max`]). Over it, the lowest-priority
+//! contradictions go first; the overall bound then evicts as before. The
+//! rest of the list is reserved for the other kinds: no number of
+//! contradictions can evict them from it. Conflicts are not counted
+//! against the budget. Under the budget nothing is evicted
+//! that the bound alone would not evict. The daemon inserts a cycle's
+//! contradictions oldest-declared first, so a full budget keeps the most
+//! recently declared. A contradiction dropped by the budget carries no
+//! recall warning until it fits again, exactly as one dropped by the bound.
+//!
 //! ## One entry per (node, condition)
 //!
 //! Re-inserting an entry for a `(node, condition)` pair already present
@@ -79,6 +96,13 @@ use crate::types::NodeId;
 /// default (1000). `Config` drives the daemon's construction; this const is
 /// the module-level default for [`HotList::new`].
 pub const HOT_LIST_MAX: usize = 1000;
+
+/// The contradiction budget for a hot list bounded at `max` when none is
+/// configured (#196): half the bound, rounded down, so the other half is
+/// reserved for the other kinds.
+pub fn default_contradiction_max(max: usize) -> usize {
+    max / 2
+}
 
 /// Hot-list entry conditions (spec §9, plus #19(c)). Declared in priority
 /// order, `Contradiction` last but sharing `Conflict`'s tier — see
@@ -232,6 +256,9 @@ fn higher_priority(a: &HotListEntry, b: &HotListEntry) -> Ordering {
 /// as a parameter.
 pub struct HotList {
     max: usize,
+    /// At most this many `Contradiction` entries (#196); `>= max` means no
+    /// budget beyond the bound.
+    contradiction_max: usize,
     /// Priority-descending (`entries[0]` = highest priority).
     entries: Vec<HotListEntry>,
     /// Monotonic insertion sequence — recency rank.
@@ -239,28 +266,78 @@ pub struct HotList {
 }
 
 impl HotList {
-    /// A hot list bounded at [`HOT_LIST_MAX`] (spec §9 `hot_list_max=1000`).
+    /// A hot list bounded at [`HOT_LIST_MAX`] (spec §9 `hot_list_max=1000`),
+    /// with the default contradiction budget.
     pub fn new() -> Self {
         Self::with_max(HOT_LIST_MAX)
     }
 
-    /// A hot list with a custom bound (tests / `Config::hot_list_max`).
+    /// A hot list with a custom bound (tests / `Config::hot_list_max`) and
+    /// the default contradiction budget ([`default_contradiction_max`]).
     pub fn with_max(max: usize) -> Self {
+        Self::with_budget(max, default_contradiction_max(max))
+    }
+
+    /// A hot list bounded at `max` holding at most `contradiction_max`
+    /// contradictions (#196, `Config::hot_list_contradiction_max`). A budget
+    /// at or above `max` reserves nothing.
+    pub fn with_budget(max: usize, contradiction_max: usize) -> Self {
         Self {
             max,
+            contradiction_max,
             entries: Vec::new(),
             next_seq: 0,
         }
+    }
+
+    /// The contradiction budget (#196).
+    pub fn contradiction_max(&self) -> usize {
+        self.contradiction_max
+    }
+
+    /// Sort, then enforce the contradiction budget and the bound: the
+    /// lowest-priority contradictions beyond the budget go first, then the
+    /// lowest entries beyond `max`. Returns what was evicted: the budget's
+    /// drops (priority-descending), then the bound's.
+    fn enforce(&mut self) -> Vec<HotListEntry> {
+        self.entries.sort_by(higher_priority);
+        let mut evicted = Vec::new();
+        let over = self
+            .entries
+            .iter()
+            .filter(|e| e.condition == Condition::Contradiction)
+            .count()
+            .saturating_sub(self.contradiction_max);
+        if over > 0 {
+            // The lowest-priority contradictions sit nearest the tail.
+            let mut seen = 0usize;
+            let budget = self.contradiction_max;
+            let (kept, dropped): (Vec<_>, Vec<_>) = std::mem::take(&mut self.entries)
+                .into_iter()
+                .partition(|e| {
+                    if e.condition != Condition::Contradiction {
+                        return true;
+                    }
+                    seen += 1;
+                    seen <= budget
+                });
+            self.entries = kept;
+            evicted.extend(dropped);
+        }
+        let keep = self.entries.len().min(self.max);
+        evicted.extend(self.entries.split_off(keep));
+        evicted
     }
 
     /// Insert (or refresh) an entry. If the `(node, condition)` pair is
     /// already present it is replaced — payload, predicate, and recency all
     /// refresh — so a persisting condition never duplicates.
     ///
-    /// Returns the entry evicted by the bound, if any (`None` while the list
-    /// stays within `max`). Discarding the result silently drops the evicted
-    /// entry, so the compiler enforces it as `#[must_use]`: bind or `let _ =`
-    /// the value explicitly if you don't need it.
+    /// Returns the entry evicted by the contradiction budget or the bound, if
+    /// any (`None` while the list stays within both). Discarding the result
+    /// silently drops the evicted entry, so the compiler enforces it as
+    /// `#[must_use]`: bind or `let _ =` the value explicitly if you don't
+    /// need it.
     #[must_use]
     pub fn insert(&mut self, entry: HotListEntry) -> Option<HotListEntry> {
         let mut entry = entry;
@@ -276,24 +353,22 @@ impl HotList {
             Some(existing) => *existing = entry,
             None => self.entries.push(entry),
         }
-        self.entries.sort_by(higher_priority);
-
-        // Enforce the bound: evict the lowest-priority entry from the tail.
-        let mut evicted = None;
-        while self.entries.len() > self.max {
-            evicted = self.entries.pop();
-        }
-        evicted
+        // Enforce the budget and the bound (#196). The list was within both
+        // and one entry was added, so at most one goes.
+        self.enforce().pop()
     }
 
     /// [`HotList::insert`] for many entries at once, in order: the same
     /// final list (each entry gets the next `seq`, a present `(node,
-    /// condition)` is refreshed in place, then the bound evicts the lowest),
-    /// sorted once instead of once per entry. Returns what the bound evicted.
+    /// condition)` is refreshed in place, then the contradiction budget and
+    /// the bound evict the lowest), sorted once instead of once per entry.
+    /// Returns what was evicted.
     ///
     /// Equivalent to inserting one by one because priority is a fixed total
-    /// order per entry: an entry evicted at some step has `max` entries
-    /// above it, and none of them can later be replaced by one below it.
+    /// order per entry and a refresh only raises one: an entry evicted at
+    /// some step has `max` entries above it (a contradiction: `max` or the
+    /// budget's worth of contradictions), and none of them can later be
+    /// replaced by one below it.
     /// #179 made every contradiction an entry, so a daemon cycle can insert
     /// hundreds; per-entry insertion re-sorted the whole list each time,
     /// under the hot-list write lock recall also takes.
@@ -318,9 +393,7 @@ impl HotList {
                 }
             }
         }
-        self.entries.sort_by(higher_priority);
-        let keep = self.entries.len().min(self.max);
-        self.entries.split_off(keep)
+        self.enforce()
     }
 
     /// Re-validate every entry for `node` against the current graph **at
@@ -931,10 +1004,17 @@ mod tests {
         let plan: Vec<(u64, Condition)> = (0..40u64)
             .map(|i| ((i * 7) % 13, conds[(i as usize * 3) % conds.len()]))
             .collect();
-        for max in [0, 3, 8, 100] {
-            let mut one = HotList::with_max(max);
+        let runs = [0, 3, 8, 100]
+            .into_iter()
+            .flat_map(|max| [None, Some(0), Some(2), Some(max)].map(|b| (max, b)));
+        for (max, budget) in runs {
+            let make = || match budget {
+                Some(b) => HotList::with_budget(max, b),
+                None => HotList::with_max(max),
+            };
+            let mut one = make();
             one.insert_many(std::iter::once(entry(nid(99), Condition::Drift)));
-            let mut seq = HotList::with_max(max);
+            let mut seq = make();
             let _ = seq.insert(entry(nid(99), Condition::Drift));
             for &(n, c) in &plan {
                 let _ = seq.insert(entry(nid(n), c));
@@ -947,8 +1027,13 @@ mod tests {
             let shape = |l: &HotList| -> Vec<(NodeId, Condition)> {
                 l.iter().map(|e| (e.node, e.condition)).collect()
             };
-            assert_eq!(shape(&one), shape(&seq), "max {max}");
+            assert_eq!(shape(&one), shape(&seq), "max {max} budget {budget:?}");
             assert!(one.len() <= max);
+            let contradictions = one
+                .iter()
+                .filter(|e| e.condition == Condition::Contradiction)
+                .count();
+            assert!(contradictions <= one.contradiction_max());
             // What the batch evicted is not on the list. (A one-by-one run
             // can evict an entry and take it back on a later refresh, so its
             // eviction log is not comparable.)
@@ -957,5 +1042,99 @@ mod tests {
                 assert!(!kept.contains(e), "max {max}: {e:?} evicted and kept");
             }
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Contradiction budget (#196)
+    // ------------------------------------------------------------------
+
+    fn count(list: &HotList, c: Condition) -> usize {
+        list.iter().filter(|e| e.condition == c).count()
+    }
+
+    #[test]
+    fn the_default_contradiction_budget_is_half_the_bound() {
+        assert_eq!(HotList::new().contradiction_max(), HOT_LIST_MAX / 2);
+        assert_eq!(HotList::with_max(7).contradiction_max(), 3);
+        assert_eq!(default_contradiction_max(0), 0);
+    }
+
+    /// A flood of contradictions, inserted after the other kinds and
+    /// outranking every one of them, leaves the drift, stale and high-risk
+    /// warnings in place: contradictions stop at the budget.
+    #[test]
+    fn a_flood_of_contradictions_does_not_evict_the_other_kinds() {
+        let mut list = HotList::with_max(10);
+        let _ = list.insert(entry(nid(1), Condition::Drift));
+        let _ = list.insert(entry(nid(2), Condition::StaleSession));
+        let _ = list.insert(entry(nid(3), Condition::HighRiskModification));
+        let evicted = list.insert_many((100..200).map(|n| entry(nid(n), Condition::Contradiction)));
+        assert_eq!(count(&list, Condition::Contradiction), 5);
+        assert_eq!(count(&list, Condition::Drift), 1);
+        assert_eq!(count(&list, Condition::StaleSession), 1);
+        assert_eq!(count(&list, Condition::HighRiskModification), 1);
+        assert_eq!(evicted.len(), 95);
+        assert!(evicted
+            .iter()
+            .all(|e| e.condition == Condition::Contradiction));
+        // The latest-inserted contradictions are the ones kept.
+        let kept: Vec<NodeId> = list
+            .iter()
+            .filter(|e| e.condition == Condition::Contradiction)
+            .map(|e| e.node)
+            .collect();
+        assert_eq!(kept, (195..200).rev().map(nid).collect::<Vec<_>>());
+        // One-by-one: a further contradiction evicts a contradiction, never
+        // the drift warning.
+        let gone = list
+            .insert(entry(nid(500), Condition::Contradiction))
+            .unwrap();
+        assert_eq!(gone.node, nid(195));
+        assert!(list.contains(nid(1)));
+    }
+
+    /// The budget caps contradictions only; it never evicts anything while
+    /// the list is within it, and conflicts (the same tier) are not counted.
+    #[test]
+    fn under_the_budget_nothing_changes() {
+        let mut list = HotList::with_max(6);
+        for n in 1..=3 {
+            assert!(list
+                .insert(entry(nid(n), Condition::Contradiction))
+                .is_none());
+        }
+        for n in 10..13 {
+            assert!(list.insert(entry(nid(n), Condition::Conflict)).is_none());
+        }
+        assert_eq!(list.len(), 6);
+        // Over the bound, the lowest entry goes as before.
+        let gone = list.insert(entry(nid(20), Condition::Conflict)).unwrap();
+        assert_eq!(gone.node, nid(1));
+    }
+
+    /// Spare budget is not reserved for contradictions: other kinds may
+    /// fill the whole list, and a later contradiction still takes its place
+    /// by priority.
+    #[test]
+    fn other_kinds_can_use_the_whole_list() {
+        let mut list = HotList::with_max(4);
+        for n in 1..=4 {
+            assert!(list.insert(entry(nid(n), Condition::Drift)).is_none());
+        }
+        let gone = list
+            .insert(entry(nid(9), Condition::Contradiction))
+            .unwrap();
+        assert_eq!(gone.node, nid(1));
+        assert!(list.contains(nid(9)));
+    }
+
+    /// A budget at the bound reserves nothing (the pre-#196 behaviour).
+    #[test]
+    fn a_budget_at_the_bound_reserves_nothing() {
+        let mut list = HotList::with_budget(3, 3);
+        let _ = list.insert(entry(nid(1), Condition::Drift));
+        let _ = list.insert_many((10..13).map(|n| entry(nid(n), Condition::Contradiction)));
+        assert_eq!(count(&list, Condition::Contradiction), 3);
+        assert!(!list.contains(nid(1)));
     }
 }
