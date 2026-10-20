@@ -134,7 +134,12 @@ The detector keeps one `HotListPayload::Contradiction { by, writer, at }` per
 contradicted concept on the hot list under `Condition::Contradiction`, which
 shares `Condition::Conflict`'s severity; the daemon inserts contradictions
 before conflicts each cycle, so on a full hot list a contradiction is
-evicted before a conflict. It is the newest qualifying
+evicted before a conflict. At most `Config::hot_list_contradiction_max`
+entries (default half of `hot_list_max`) are contradictions (#196): over that
+budget the oldest-declared contradictions are dropped first, so contradictions
+never evict the high-risk, drift and stale warnings from the rest of the list.
+A contradiction dropped by the budget or the bound carries no recall warning
+until it fits again. The entry is the newest qualifying
 contradiction, ties going to the smaller canonical key and then the smaller
 id of `by`. `writer` is the agent acting when the edge was first written,
 falling back to `by`'s origin agent. No `DaemonEvent` is published for it.

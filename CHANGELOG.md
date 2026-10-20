@@ -50,8 +50,25 @@
   `DeriveOutcome::merge_guarded` counts the refused hits, and the receipt
   adds `N similarity merge(s) refused (...)` only when one was.
 
+- **Contradictions can no longer starve the other hot-list warnings
+  (#196).** Since #179 every live contradiction is a hot-list entry, in the
+  top severity tier, and contradictions persist; a store with more than
+  `hot_list_max` of them evicted every high-risk, drift and stale warning.
+  Contradictions now have a budget, `Config::hot_list_contradiction_max`
+  (default half of `hot_list_max`): over it the lowest-priority
+  contradictions are dropped first, and the rest of the list stays
+  available to the other kinds. A cycle's contradictions are inserted
+  oldest-declared first, so a full budget keeps the most recently declared
+  ones (before, node-id order decided which survived a full list). Under
+  the budget nothing else changes. Set the budget equal to `hot_list_max`
+  for the old single bound.
+
 ### Added
 
+- **`Config::hot_list_contradiction_max`, `HotList::with_budget`,
+  `HotList::contradiction_max` and `hotlist::default_contradiction_max`**
+  (#196), with `CycleParams::hot_list_contradiction_max`. `validate` refuses
+  a budget above `hot_list_max`.
 - **`daemon::contradiction::forces_inclusion` and
   `daemon::contradiction::contradicts_either_way`.** The status rule above,
   and the either-direction `Contradicts` pair check that
