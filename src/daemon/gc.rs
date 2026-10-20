@@ -763,11 +763,13 @@ fn contradicts_a_promoted_concept(graph: &Graph, node: NodeId, now: DateTime<Utc
 /// is itself kept through an anchored target (a chain: C corrects B, which
 /// corrects A). Two concepts that only contradict each other, or a longer
 /// cycle of them, anchor nothing and are judged like any other concept;
-/// otherwise they would keep each other forever. Nothing here is
-/// permanent: an anchored target is judged on its own merits, and once it
+/// otherwise they would keep each other forever. No protection outlives
+/// its anchor: an anchored target is judged on its own merits, and once it
 /// is collected, or newer eligible evidence outweighs the contradiction,
 /// the detector stops reporting the hit and the next sweep judges the
-/// correction normally. The detector is the same one recall and the hot
+/// correction normally. Only the newest qualifying contradiction of a
+/// concept is a hit, so only the correction recall shows is kept. The
+/// detector is the same one recall and the hot
 /// list use, over the session graph every backend collects through, so
 /// one rule holds on every store.
 fn live_corrections(graph: &Graph, base: &HashSet<NodeId>, params: GcParams) -> HashSet<NodeId> {
