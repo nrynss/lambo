@@ -489,11 +489,7 @@ pub fn detect_similar(g: &Graph, params: &SimilarParams) -> SimilarReport {
             guarded.type_differs += 1;
             continue;
         }
-        if g.edge_between(ea.id, eb.id, EdgeType::Contradicts)
-            .is_some()
-            || g.edge_between(eb.id, ea.id, EdgeType::Contradicts)
-                .is_some()
-        {
+        if crate::daemon::contradiction::contradicts_either_way(g, ea.id, eb.id) {
             guarded.contradicts += 1;
             continue;
         }
