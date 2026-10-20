@@ -361,6 +361,7 @@ fn cycle_params_come_from_config_with_no_duplicated_defaults() {
     // `drift_threshold`, whose u32/usize split forced a cast at every use.
     let config = Config {
         hot_list_max: 7,
+        hot_list_contradiction_max: Some(2),
         conflict_recency_window: Duration::from_secs(11),
         drift_threshold: 9,
         gc_interval: 13,
@@ -370,6 +371,7 @@ fn cycle_params_come_from_config_with_no_duplicated_defaults() {
     };
     let params = CycleParams::from(&config);
     assert_eq!(params.hot_list_max, 7);
+    assert_eq!(params.hot_list_contradiction_max, Some(2));
     assert_eq!(params.conflict_window, Duration::from_secs(11));
     assert_eq!(params.drift_threshold, 9);
     assert_eq!(params.gc_interval, 13);

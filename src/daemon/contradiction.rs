@@ -347,7 +347,12 @@ pub fn insert_contradictions(
     // members under the hot-list write guard builds it at most once.
     let shared = SharedTimeline::new();
     // One sort for the whole pass (#179: every contradiction is an entry).
-    let _ = hot.insert_many(hits.iter().map(|hit| {
+    // Oldest-declared first (#196): within the tier the later insert ranks
+    // higher, so a full contradiction budget keeps the most recently
+    // declared contradictions, node id breaking ties.
+    let mut order: Vec<&ContradictionHit> = hits.iter().collect();
+    order.sort_by(|a, b| a.at.cmp(&b.at).then_with(|| a.node.0.cmp(&b.node.0)));
+    let _ = hot.insert_many(order.into_iter().map(|hit| {
         let node = hit.node;
         let shared = shared.clone();
         let holds = move |g: &Graph, at: DateTime<Utc>| {
