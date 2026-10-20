@@ -354,3 +354,119 @@ async fn a_layered_recall_keeps_contradictions_inside_their_session() {
     project.close().await.unwrap();
     general.close().await.unwrap();
 }
+
+/// #197 through `Memory` on a durable store, with the daemon's own GC:
+/// the orphaned correction of an ordinary fact survives the sweeps while
+/// the fact is there (an equivalent orphan without a contradiction is
+/// collected), and once the fact is gone the next sweep collects it. The
+/// store mirrors both outcomes. (Orphaning by hand stands in for the score
+/// cut, which needs a year-old clock; the protected set is the same.)
+#[cfg(feature = "store-sqlite")]
+#[tokio::test]
+async fn gc_keeps_the_correction_while_the_contradicted_fact_is_here() {
+    use crate::store::SqliteStore;
+    const PLAIN: &str = "the staging bucket is in region two";
+    let dir = crate::test_util::ScratchDir::new("lambo-issue197");
+    let path = dir.join("memory.db");
+    let sqlite = SqliteStore::connect(path.to_str().unwrap()).unwrap();
+    sqlite.init_schema().await.unwrap();
+    let store = Arc::new(sqlite) as Arc<dyn GraphStore>;
+    let mem = Memory::builder()
+        .session("issue-197")
+        .agent("agent-a")
+        .config(Config {
+            daemon_tick_interval: Duration::from_secs(3_600),
+            // Every mutation is a sweep's worth.
+            gc_interval: 1,
+            ..Config::default()
+        })
+        .flush_interval(Duration::from_millis(20))
+        .store(store.clone())
+        .embedder(Arc::new(FixtureEmbedder::new()) as Arc<dyn Embedder>)
+        .embedding_contract(contract("fixture", 1024))
+        .match_strategy(MatchStrategy::Canonical)
+        .build()
+        .await
+        .expect("build");
+    // Cut a concept's connecting edges, as decay would; its contradiction
+    // stays.
+    let orphan = |id: NodeId| {
+        let mut g = mem.graph.write();
+        let ids: Vec<NodeId> = g
+            .incident_edges(id)
+            .iter()
+            .filter(|e| e.edge_type != crate::types::EdgeType::Contradicts)
+            .map(|e| e.id)
+            .collect();
+        for e in ids {
+            g.remove_edge(e).unwrap();
+        }
+    };
+    let has = |content: &str| mem.graph.read().concepts().any(|c| c.content == content);
+    let stored = |want: Vec<(&'static str, bool)>| {
+        let store = store.clone();
+        async move {
+            tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    let snap = store
+                        .load_session(&SessionId::new("issue-197"))
+                        .await
+                        .unwrap();
+                    if want.iter().all(|&(c, present)| {
+                        snap.concepts.iter().any(|k| k.content == c) == present
+                    }) {
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("the store never showed {want:?}"));
+        }
+    };
+
+    mem.derive_as(
+        &AgentId::new("agent-a"),
+        &[(BELIEF, ConceptType::Logic), (PLAIN, ConceptType::Logic)],
+        &ParentOf::none(),
+    )
+    .await
+    .unwrap();
+    let belief = node_of(&mem, BELIEF);
+    let agent_b = AgentId::new("agent-b");
+    let submitted = mem
+        .derive_cited_async_as(
+            &agent_b,
+            &[(NEWER, ConceptType::Observation)],
+            &ParentOf::none(),
+            &[ConceptCitations {
+                content: NEWER.to_string(),
+                depends_on: Vec::new(),
+                against: vec![format::short_id(belief)],
+            }],
+            None,
+        )
+        .await
+        .unwrap();
+    let answer = mem
+        .pipeline()
+        .wait(&agent_b, submitted.receipt, RECEIPT_WAIT_MAX)
+        .await;
+    assert!(answer.is_settled(), "{}", answer.tag());
+    mem.settle_daemon().await;
+    orphan(node_of(&mem, NEWER));
+    orphan(node_of(&mem, PLAIN));
+    mem.settle_daemon().await;
+    assert!(mem.gc_stats().last_sweep.is_some(), "the daemon swept");
+    assert!(!has(PLAIN), "the plain orphan is collected");
+    assert!(has(NEWER), "the live correction is kept");
+    assert!(has(BELIEF));
+    stored(vec![(PLAIN, false), (NEWER, true), (BELIEF, true)]).await;
+
+    // The contradicted fact goes: the next sweep collects the correction.
+    mem.graph.write().remove_node(belief).unwrap();
+    mem.settle_daemon().await;
+    assert!(!has(NEWER), "the protection lapsed");
+    stored(vec![(NEWER, false)]).await;
+    mem.close().await.unwrap();
+}

@@ -78,6 +78,14 @@
 //!    warning on the promoted concept names it. When the target is demoted
 //!    below Venerable, the next sweep judges the contradicting concept like
 //!    any other.
+//!
+//!    **Live corrections (#197).** Recall shows the contradicting concept
+//!    beside any contradicted concept (#179), so the `by` of every
+//!    contradiction the detector reports at the sweep's clock is protected
+//!    for that sweep too, through an anchored target (`live_corrections`):
+//!    two concepts that only contradict each other keep neither alive. The
+//!    protection lapses once the contradicted concept is collected or the
+//!    contradiction is outweighed.
 //! 4. **Index maintenance** — the inverted index (T2.6) is owner-side (P3
 //!    contract, `src/graph/mod.rs`), so `run(&mut Graph, …)` cannot reach it.
 //!    [`GcOutcome::concepts_collected`] + [`sync_index`] are the hook: the
@@ -283,6 +291,11 @@ pub struct GcParams {
     pub max_collect_fraction: f64,
     /// Steps 2+3: collection cap floor ([`GC_MIN_COLLECT_CAP`]).
     pub min_collect_cap: usize,
+    /// #197: the contradiction detector's evidence age floor (the session's
+    /// `canonization_edge_min_age`, as the daemon's
+    /// `CycleParams::contradiction_evidence_min_age`), so the sweep keeps
+    /// exactly the corrections recall shows. Default: `Config`'s default.
+    pub contradiction_evidence_min_age: std::time::Duration,
 }
 
 impl Default for GcParams {
@@ -299,6 +312,7 @@ impl Default for GcParams {
             recency_window: GC_RECENCY_WINDOW,
             max_collect_fraction: GC_MAX_COLLECT_FRACTION,
             min_collect_cap: GC_MIN_COLLECT_CAP,
+            contradiction_evidence_min_age: std::time::Duration::from_secs(60),
         }
     }
 }
@@ -476,13 +490,16 @@ pub fn run(graph: &mut Graph, params: GcParams) -> GcOutcome {
     let goal_texts = graph.root_goal_texts();
     // #19(c) owner decision 1C: a concept contradicting a Venerable or
     // Canonical target is protected while the target holds that status.
-    let protected: HashSet<NodeId> = graph
+    let mut protected: HashSet<NodeId> = graph
         .concepts()
         .filter(|c| {
             is_protected(c, &goal_texts) || contradicts_a_promoted_concept(graph, c.id, params.now)
         })
         .map(|c| c.id)
         .collect();
+    // #197: and the live correction of a contradicted concept still here.
+    let corrections = live_corrections(graph, &protected, params);
+    protected.extend(corrections);
 
     // Step 1 — edge cleanup: below min weight AND past TTL.
     for eid in dead_edge_ids(graph, params) {
@@ -733,6 +750,53 @@ fn contradicts_a_promoted_concept(graph: &Graph, node: NodeId, now: DateTime<Utc
                     .edge_between(node, t, EdgeType::Contradicts)
                     .is_some_and(|e| crate::daemon::contradiction::written_by(e, now))
         })
+}
+
+/// The concepts kept as **live corrections** this sweep (#197): the
+/// contradicting concept (`by`) of each contradiction the detector reports
+/// right now ([`crate::daemon::contradiction::detect`], at the sweep's
+/// clock and the session's evidence age floor), so recall's warning on a
+/// contradicted concept always has its correction beside it.
+///
+/// A correction is kept only through an **anchored** target: one that is
+/// not itself a live correction, or is protected on its own (`base`), or
+/// is itself kept through an anchored target (a chain: C corrects B, which
+/// corrects A). Two concepts that only contradict each other, or a longer
+/// cycle of them, anchor nothing and are judged like any other concept;
+/// otherwise they would keep each other forever. No protection outlives
+/// its anchor: an anchored target is judged on its own merits, and once it
+/// is collected, or newer eligible evidence outweighs the contradiction,
+/// the detector stops reporting the hit and the next sweep judges the
+/// correction normally. Only the newest qualifying contradiction of a
+/// concept is a hit, so only the correction recall shows is kept. The
+/// detector is the same one recall and the hot
+/// list use, over the session graph every backend collects through, so
+/// one rule holds on every store.
+fn live_corrections(graph: &Graph, base: &HashSet<NodeId>, params: GcParams) -> HashSet<NodeId> {
+    let hits = crate::daemon::contradiction::detect(
+        graph,
+        params.contradiction_evidence_min_age,
+        params.now,
+    );
+    // One hit per contradicted node: target -> its correction.
+    let corrector: std::collections::HashMap<NodeId, NodeId> =
+        hits.iter().map(|h| (h.node, h.by)).collect();
+    let corrections: HashSet<NodeId> = corrector.values().copied().collect();
+    let mut kept = HashSet::new();
+    let mut queue: Vec<NodeId> = hits
+        .iter()
+        .filter(|h| !corrections.contains(&h.node) || base.contains(&h.node))
+        .map(|h| h.by)
+        .collect();
+    while let Some(by) = queue.pop() {
+        if kept.insert(by) {
+            // A kept correction anchors its own correction.
+            if let Some(&next) = corrector.get(&by) {
+                queue.push(next);
+            }
+        }
+    }
+    kept
 }
 
 /// The order a sweep's survivor bumps are applied in (issue #29): the
