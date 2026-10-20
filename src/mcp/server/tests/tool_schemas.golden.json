@@ -7,7 +7,7 @@
           "additionalProperties": false,
           "properties": {
             "against": {
-              "description": "Optional: up to 8 existing concepts this one contradicts, such as an\nolder belief a newer observation shows is wrong. Name each as for\n`depends_on`: its id (the 8 hex characters recall shows) or full\nnode id (its exact content also works). Each must already exist in\nthe session the write goes to and match exactly one concept other\nthan this one, or the whole call is refused before the ack and\nnothing is written, as is a concept this one also lists in\n`depends_on`. Recorded as this concept contradicting each, dated by\nthis write's `event_time` (else when it is written) whatever the two\nconcepts' ages; sending it again does not re-date it. It adds no\ndependent and changes no score or promotion, and raises no conflict;\nit does count as a fresh write to the contradicted concept. When the\ncontradicted concept is canonical or venerable, recall warns about\nit. At most 32 across the call.",
+              "description": "Optional: up to 8 existing concepts this one contradicts, such as an\nolder belief a newer observation shows is wrong. Name each as for\n`depends_on`: its id (the 8 hex characters recall shows) or full\nnode id (its exact content also works). Each must already exist in\nthe session the write goes to and match exactly one concept other\nthan this one, or the whole call is refused before the ack and\nnothing is written, as is a concept this one also lists in\n`depends_on`. Recorded as this concept contradicting each, dated by\nthis write's `event_time` (else when it is written) whatever the two\nconcepts' ages; sending it again does not re-date it. It adds no\ndependent and changes no score or promotion, and raises no conflict;\nit does count as a fresh write to the contradicted concept. Recall\nthen warns on the contradicted concept and shows this one beside it.\nAt most 32 across the call.",
               "items": {
                 "$ref": "#/$defs/WireReference"
               },
@@ -377,7 +377,7 @@
     }
   },
   "lambo_recall": {
-    "description": "Recall relevant memory for a query and return the Lambo context block (canonical markers, blast-radius warnings, conflict lines, and contradiction warnings: a canonical or venerable concept that a newer concept contradicts is shown with that concept beside it).",
+    "description": "Recall relevant memory for a query and return the Lambo context block (canonical markers, blast-radius warnings, conflict lines, and contradiction warnings: a concept that a newer concept contradicts is shown with that concept beside it).",
     "inputSchema": {
       "$defs": {
         "WireEmbeddingContract": {

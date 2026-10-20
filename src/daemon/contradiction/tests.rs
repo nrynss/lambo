@@ -161,13 +161,52 @@ fn a_newer_contradiction_of_a_canonical_or_venerable_concept_fires() {
     }
 }
 
+/// #179: ordinary memory is contradicted exactly like a promoted belief.
+/// Through 0.7.0 a `None` or `Candidate` target was never flagged, so a stale
+/// ordinary fact ranked first with no warning.
 #[test]
-fn a_none_or_candidate_concept_is_never_contradicted() {
+fn a_none_or_candidate_concept_is_contradicted_too() {
     for status in [CanonizationStatus::None, CanonizationStatus::Candidate] {
         let s = base(status);
-        assert_eq!(at(&s, 1000), None, "{status:?}");
-        assert!(detect(&s.g, MIN_AGE, t(1000)).is_empty());
+        assert_eq!(
+            at(&s, 1000),
+            Some(ContradictionHit {
+                node: cid(1),
+                by: cid(3),
+                writer: AgentId::from("agent-c"),
+                at: t(200),
+            }),
+            "{status:?}"
+        );
+        assert_eq!(detect(&s.g, MIN_AGE, t(1000)).len(), 1, "{status:?}");
     }
+}
+
+/// The status decides only what recall does with the contradicted hit.
+#[test]
+fn only_a_canonical_or_venerable_target_forces_its_inclusion() {
+    for (status, forced) in [
+        (CanonizationStatus::None, false),
+        (CanonizationStatus::Candidate, false),
+        (CanonizationStatus::Venerable, true),
+        (CanonizationStatus::Canonical, true),
+    ] {
+        let s = base(status);
+        let Some(crate::types::Node::Concept(c)) = s.g.node(cid(1)) else {
+            panic!("concept 1");
+        };
+        assert_eq!(forces_inclusion(c), forced, "{status:?}");
+    }
+}
+
+#[test]
+fn contradicts_either_way_is_symmetric_and_ignores_other_edges() {
+    let s = base(CanonizationStatus::None);
+    assert!(contradicts_either_way(&s.g, cid(3), cid(1)));
+    assert!(contradicts_either_way(&s.g, cid(1), cid(3)));
+    // A dependency is not a disagreement, and nothing contradicts itself.
+    assert!(!contradicts_either_way(&s.g, cid(2), cid(1)));
+    assert!(!contradicts_either_way(&s.g, cid(1), cid(1)));
 }
 
 #[test]
@@ -497,8 +536,10 @@ fn insert_then_revalidate_keeps_a_live_contradiction() {
     );
 }
 
+/// #179: a demotion no longer drops the entry; the target stays
+/// contradicted whatever its status.
 #[test]
-fn revalidation_drops_the_entry_when_the_target_is_demoted() {
+fn revalidation_keeps_the_entry_when_the_target_is_demoted() {
     let mut s = base(CanonizationStatus::Venerable);
     let mut hot = HotList::new();
     insert_contradictions(&mut hot, &s.g, MIN_AGE, t(1000));
@@ -530,8 +571,16 @@ fn revalidation_drops_the_entry_when_the_target_is_demoted() {
         reason: None,
     })
     .unwrap();
-    assert_eq!(revalidated(&mut hot, &s.g, 1000), None);
-    assert!(hot.is_empty());
+    assert_eq!(
+        revalidated(&mut hot, &s.g, 1000),
+        Some(HotListPayload::Contradiction {
+            by: cid(3),
+            writer: AgentId::from("agent-c"),
+            at: t(200),
+        }),
+        "a demoted target stays contradicted"
+    );
+    assert_eq!(hot.len(), 1);
 }
 
 #[test]
@@ -649,4 +698,75 @@ fn a_contradiction_written_after_now_does_not_fire_even_if_backdated() {
     s.edge(11, EdgeType::Contradicts, 3, 1, 2000, Some(200));
     assert_eq!(at(&s, 1000), None, "written at t2000, examined at t1000");
     assert_eq!(at(&s, 3000).map(|h| h.at), Some(t(200)));
+}
+
+/// #179 cost, measured, not asserted: a 9,500-concept session where 1,000
+/// ordinary concepts are contradicted (one interaction per concept). Times
+/// one detector pass into the hot list (the daemon cycle's share) and one
+/// recall's re-validation of 60 members, 30 of them contradicted, on a
+/// fresh epoch (it rebuilds the writer timeline) and again on the same
+/// epoch. Run with `--release -- --ignored --nocapture`.
+#[test]
+#[ignore = "timing: run by hand with --release"]
+fn contradiction_timing() {
+    const CONCEPTS: u64 = 9_500;
+    const CONTRADICTED: u64 = 1_000;
+    let mut s = Session::new();
+    for n in 1..=CONCEPTS {
+        s.interaction(
+            n,
+            if n % 2 == 0 { "agent-a" } else { "agent-b" },
+            n as i64,
+            None,
+        );
+        s.concept(n, n, "agent-a", &format!("concept {n}"), n as i64);
+    }
+    // Concept CONCEPTS - k contradicts concept k, written after both.
+    for k in 1..=CONTRADICTED {
+        let by = CONCEPTS - k + 1;
+        s.edge(
+            100_000 + k,
+            EdgeType::Contradicts,
+            by,
+            k,
+            CONCEPTS as i64 + k as i64,
+            None,
+        );
+    }
+    let now = t(100_000);
+    let reps = 20;
+    let mut detect_us = Vec::new();
+    let mut hot = HotList::new();
+    for _ in 0..reps {
+        let started = std::time::Instant::now();
+        let hits = insert_contradictions(&mut hot, &s.g, MIN_AGE, now);
+        detect_us.push(started.elapsed().as_secs_f64() * 1e6);
+        assert_eq!(hits.len(), CONTRADICTED as usize);
+    }
+    let members: Vec<NodeId> = (1..=30).chain(5_000..5_030).map(cid).collect();
+    let mut cold_us = Vec::new();
+    let mut warm_us = Vec::new();
+    for _ in 0..reps {
+        let mut fresh = HotList::new();
+        insert_contradictions(&mut fresh, &s.g, MIN_AGE, now);
+        let started = std::time::Instant::now();
+        let got = fresh.revalidate_members(&s.g, members.iter().copied(), now);
+        cold_us.push(started.elapsed().as_secs_f64() * 1e6);
+        assert_eq!(got.len(), 30);
+        let started = std::time::Instant::now();
+        let got = fresh.revalidate_members(&s.g, members.iter().copied(), now);
+        warm_us.push(started.elapsed().as_secs_f64() * 1e6);
+        assert_eq!(got.len(), 30);
+    }
+    let p50 = |mut v: Vec<f64>| {
+        v.sort_by(f64::total_cmp);
+        v[v.len() / 2]
+    };
+    println!(
+        "contradiction_timing concepts={CONCEPTS} contradicted={CONTRADICTED}: \
+         detect+insert p50 {:.0} us; revalidate 60 members p50 {:.0} us first, {:.0} us again",
+        p50(detect_us),
+        p50(cold_us),
+        p50(warm_us)
+    );
 }

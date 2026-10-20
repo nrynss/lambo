@@ -268,8 +268,8 @@ impl LamboServer {
         name = "lambo_recall",
         description = "Recall relevant memory for a query and return the Lambo context block \
                        (canonical markers, blast-radius warnings, conflict lines, and \
-                       contradiction warnings: a canonical or venerable concept that a newer \
-                       concept contradicts is shown with that concept beside it)."
+                       contradiction warnings: a concept that a newer concept contradicts is \
+                       shown with that concept beside it)."
     )]
     async fn lambo_recall(&self, Parameters(p): Parameters<RecallParams>) -> CallToolResult {
         let agent_id = p.agent_id.clone();

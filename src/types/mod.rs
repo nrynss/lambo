@@ -1734,8 +1734,8 @@ pub enum HotListPayload {
     },
     /// The node's session has been inactive this long, in seconds.
     Stale { seconds_inactive: u64 },
-    /// A Canonical or Venerable node is contradicted by a newer assertion
-    /// (#19(c)): a `by -Contradicts-> node` edge whose declaration date is
+    /// A node is contradicted by a newer assertion (#19(c); any status
+    /// since #179): a `by -Contradicts-> node` edge whose declaration date is
     /// strictly later than the node's latest age-eligible dependent evidence. When
     /// several qualify, the newest, then `by`'s canonical key, then its id.
     /// See [`crate::daemon::contradiction`].

@@ -170,9 +170,9 @@ pub struct WireConcept {
     /// this write's `event_time` (else when it is written) whatever the two
     /// concepts' ages; sending it again does not re-date it. It adds no
     /// dependent and changes no score or promotion, and raises no conflict;
-    /// it does count as a fresh write to the contradicted concept. When the
-    /// contradicted concept is canonical or venerable, recall warns about
-    /// it. At most 32 across the call.
+    /// it does count as a fresh write to the contradicted concept. Recall
+    /// then warns on the contradicted concept and shows this one beside it.
+    /// At most 32 across the call.
     #[schemars(length(max = 8))]
     pub against: Option<Vec<WireReference>>,
 }
