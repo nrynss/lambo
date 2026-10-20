@@ -286,6 +286,43 @@ impl HotList {
         evicted
     }
 
+    /// [`HotList::insert`] for many entries at once, in order: the same
+    /// final list (each entry gets the next `seq`, a present `(node,
+    /// condition)` is refreshed in place, then the bound evicts the lowest),
+    /// sorted once instead of once per entry. Returns what the bound evicted.
+    ///
+    /// Equivalent to inserting one by one because priority is a fixed total
+    /// order per entry: an entry evicted at some step has `max` entries
+    /// above it, and none of them can later be replaced by one below it.
+    /// #179 made every contradiction an entry, so a daemon cycle can insert
+    /// hundreds; per-entry insertion re-sorted the whole list each time,
+    /// under the hot-list write lock recall also takes.
+    pub fn insert_many(
+        &mut self,
+        entries: impl IntoIterator<Item = HotListEntry>,
+    ) -> Vec<HotListEntry> {
+        let mut at: std::collections::HashMap<(NodeId, Condition), usize> = self
+            .entries
+            .iter()
+            .enumerate()
+            .map(|(i, e)| ((e.node, e.condition), i))
+            .collect();
+        for mut entry in entries {
+            entry.seq = self.next_seq;
+            self.next_seq += 1;
+            match at.get(&(entry.node, entry.condition)) {
+                Some(&i) => self.entries[i] = entry,
+                None => {
+                    at.insert((entry.node, entry.condition), self.entries.len());
+                    self.entries.push(entry);
+                }
+            }
+        }
+        self.entries.sort_by(higher_priority);
+        let keep = self.entries.len().min(self.max);
+        self.entries.split_off(keep)
+    }
+
     /// Re-validate every entry for `node` against the current graph **at
     /// `now`**, dropping those whose condition no longer holds and refreshing
     /// the payload of those that do (spec §9: conditions re-validated on each
@@ -878,5 +915,47 @@ mod tests {
             other => panic!("unexpected payload {other:?}"),
         }
         assert_eq!(e.node, nid(9));
+    }
+
+    /// `insert_many` leaves exactly the list one-by-one `insert` would:
+    /// order, refreshes and the bound.
+    #[test]
+    fn insert_many_matches_inserting_one_by_one() {
+        let conds = [
+            Condition::Contradiction,
+            Condition::StaleSession,
+            Condition::Conflict,
+            Condition::Drift,
+            Condition::HighRiskModification,
+        ];
+        let plan: Vec<(u64, Condition)> = (0..40u64)
+            .map(|i| ((i * 7) % 13, conds[(i as usize * 3) % conds.len()]))
+            .collect();
+        for max in [0, 3, 8, 100] {
+            let mut one = HotList::with_max(max);
+            one.insert_many(std::iter::once(entry(nid(99), Condition::Drift)));
+            let mut seq = HotList::with_max(max);
+            let _ = seq.insert(entry(nid(99), Condition::Drift));
+            for &(n, c) in &plan {
+                let _ = seq.insert(entry(nid(n), c));
+            }
+            let evicted_one: Vec<(NodeId, Condition)> = one
+                .insert_many(plan.iter().map(|&(n, c)| entry(nid(n), c)))
+                .into_iter()
+                .map(|e| (e.node, e.condition))
+                .collect();
+            let shape = |l: &HotList| -> Vec<(NodeId, Condition)> {
+                l.iter().map(|e| (e.node, e.condition)).collect()
+            };
+            assert_eq!(shape(&one), shape(&seq), "max {max}");
+            assert!(one.len() <= max);
+            // What the batch evicted is not on the list. (A one-by-one run
+            // can evict an entry and take it back on a later refresh, so its
+            // eviction log is not comparable.)
+            let kept = shape(&one);
+            for e in &evicted_one {
+                assert!(!kept.contains(e), "max {max}: {e:?} evicted and kept");
+            }
+        }
     }
 }

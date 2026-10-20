@@ -699,3 +699,74 @@ fn a_contradiction_written_after_now_does_not_fire_even_if_backdated() {
     assert_eq!(at(&s, 1000), None, "written at t2000, examined at t1000");
     assert_eq!(at(&s, 3000).map(|h| h.at), Some(t(200)));
 }
+
+/// #179 cost, measured, not asserted: a 9,500-concept session where 1,000
+/// ordinary concepts are contradicted (one interaction per concept). Times
+/// one detector pass into the hot list (the daemon cycle's share) and one
+/// recall's re-validation of 60 members, 30 of them contradicted, on a
+/// fresh epoch (it rebuilds the writer timeline) and again on the same
+/// epoch. Run with `--release -- --ignored --nocapture`.
+#[test]
+#[ignore = "timing: run by hand with --release"]
+fn contradiction_timing() {
+    const CONCEPTS: u64 = 9_500;
+    const CONTRADICTED: u64 = 1_000;
+    let mut s = Session::new();
+    for n in 1..=CONCEPTS {
+        s.interaction(
+            n,
+            if n % 2 == 0 { "agent-a" } else { "agent-b" },
+            n as i64,
+            None,
+        );
+        s.concept(n, n, "agent-a", &format!("concept {n}"), n as i64);
+    }
+    // Concept CONCEPTS - k contradicts concept k, written after both.
+    for k in 1..=CONTRADICTED {
+        let by = CONCEPTS - k + 1;
+        s.edge(
+            100_000 + k,
+            EdgeType::Contradicts,
+            by,
+            k,
+            CONCEPTS as i64 + k as i64,
+            None,
+        );
+    }
+    let now = t(100_000);
+    let reps = 20;
+    let mut detect_us = Vec::new();
+    let mut hot = HotList::new();
+    for _ in 0..reps {
+        let started = std::time::Instant::now();
+        let hits = insert_contradictions(&mut hot, &s.g, MIN_AGE, now);
+        detect_us.push(started.elapsed().as_secs_f64() * 1e6);
+        assert_eq!(hits.len(), CONTRADICTED as usize);
+    }
+    let members: Vec<NodeId> = (1..=30).chain(5_000..5_030).map(cid).collect();
+    let mut cold_us = Vec::new();
+    let mut warm_us = Vec::new();
+    for _ in 0..reps {
+        let mut fresh = HotList::new();
+        insert_contradictions(&mut fresh, &s.g, MIN_AGE, now);
+        let started = std::time::Instant::now();
+        let got = fresh.revalidate_members(&s.g, members.iter().copied(), now);
+        cold_us.push(started.elapsed().as_secs_f64() * 1e6);
+        assert_eq!(got.len(), 30);
+        let started = std::time::Instant::now();
+        let got = fresh.revalidate_members(&s.g, members.iter().copied(), now);
+        warm_us.push(started.elapsed().as_secs_f64() * 1e6);
+        assert_eq!(got.len(), 30);
+    }
+    let p50 = |mut v: Vec<f64>| {
+        v.sort_by(f64::total_cmp);
+        v[v.len() / 2]
+    };
+    println!(
+        "contradiction_timing concepts={CONCEPTS} contradicted={CONTRADICTED}: \
+         detect+insert p50 {:.0} us; revalidate 60 members p50 {:.0} us first, {:.0} us again",
+        p50(detect_us),
+        p50(cold_us),
+        p50(warm_us)
+    );
+}

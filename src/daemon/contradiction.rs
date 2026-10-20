@@ -345,19 +345,20 @@ pub fn insert_contradictions(
     // graph's epoch moves, so a recall re-validating many contradicted
     // members under the hot-list write guard builds it at most once.
     let shared = SharedTimeline::new();
-    for hit in &hits {
+    // One sort for the whole pass (#179: every contradiction is an entry).
+    let _ = hot.insert_many(hits.iter().map(|hit| {
         let node = hit.node;
         let shared = shared.clone();
         let holds = move |g: &Graph, at: DateTime<Utc>| {
             contradiction_at_shared(g, node, min_age, at, &shared).map(payload_of)
         };
-        let _ = hot.insert(HotListEntry::new(
+        HotListEntry::new(
             node,
             Condition::Contradiction,
             payload_of(hit.clone()),
             holds,
-        ));
-    }
+        )
+    }));
     hits
 }
 
