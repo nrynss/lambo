@@ -156,9 +156,11 @@ hits it contradicts), serialized as `companion_of` only when non-empty.
 direction) that #178's suggestion guard uses. Both lines quote at most
 `CONTRADICTION_EXCERPT_CHARS` (80) characters of the other concept and name
 its short id. The detailed recall's annotation kinds are `contradiction` and
-`contradicts`; a layered merge forces a `contradicts` hit and a
-Canonical or Venerable `contradiction` hit past `top_k`, never past a
-floor. The pulled-in concept is not itself re-validated, so it carries
+`contradicts`; a layered merge forces a Canonical or Venerable
+`contradiction` hit and its `contradicts` companion past `top_k`, never
+past a floor. The companion of an ordinary hit is settled after the walk:
+added past `top_k` when a hit of its session that it contradicts
+(`DetailedHit::contradicts`) reached the answer, else cut. The pulled-in concept is not itself re-validated, so it carries
 only the `contradicts` line, and a concept contradicting it is not pulled
 in after it. A structural (dependency-question) recall answers by
 traversal and renders no hot-list warnings, contradictions included.

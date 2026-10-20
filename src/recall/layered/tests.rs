@@ -1033,3 +1033,59 @@ fn contradiction_kinds_are_snake_case_on_the_wire() {
         "\"contradicts\""
     );
 }
+
+/// #179 review: a pending companion is one memory with its copies in other
+/// layers. A forced copy emitted later in the walk absorbs it, and one
+/// added after the walk absorbs the cut copies, so the memory is never
+/// shown twice.
+#[test]
+fn a_pending_companion_and_its_copies_are_shown_once() {
+    let lists = |forced_copy: bool| {
+        let copy = kw("g-shared").key("shared");
+        let copy = if forced_copy {
+            copy.with(AnnotationKind::Hot, "⚠ hot")
+        } else {
+            copy
+        };
+        [
+            primary(&[
+                kw("p1"),
+                kw("p-contradicted").with(
+                    AnnotationKind::Contradiction,
+                    "⚠ Contradicted at t by agent-c: \"p-companion\" (id aaaaaaaa)",
+                ),
+                expanded("p-companion")
+                    .key("shared")
+                    .contradicts(1, "⚠ Contradicts \"p-contradicted\""),
+            ]),
+            layer(1, "general", 0.5, &[kw("g1"), kw("g2"), copy]),
+        ]
+    };
+    // A forced copy later in the walk takes the companion in as its nearer
+    // copy; the memory is shown once, holding no slot as a forced hit.
+    let r = run(&lists(true), params(3));
+    assert_eq!(
+        order(&r),
+        [
+            "lambo/p1",
+            "lambo/p-contradicted",
+            "general/g1",
+            "lambo/p-companion"
+        ]
+    );
+    assert_eq!(r.hits[3].also.len(), 1, "the general copy");
+    // Not forced: the companion is added after the walk and takes the cut
+    // copy in; it stays the shown copy and still names its target.
+    let r = run(&lists(false), params(3));
+    assert_eq!(
+        order(&r),
+        [
+            "lambo/p1",
+            "lambo/p-contradicted",
+            "general/g1",
+            "lambo/p-companion"
+        ]
+    );
+    assert_eq!(r.hits[3].also.len(), 1, "the cut general copy");
+    assert_eq!(r.hits[3].companion_of, vec![nid(0, 1)]);
+}

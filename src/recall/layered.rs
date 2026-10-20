@@ -47,8 +47,10 @@
 //!    Reservation annotation, design 2.2, #19(c)'s Contradiction annotation
 //!    on a Canonical or Venerable hit, or a Contradicts annotation naming
 //!    one). An ordinary contradicted hit (#179) must earn its slot; its
-//!    companion is settled after the walk: shown, beyond `top_k`, exactly
-//!    when a hit of its session that it contradicts was. Forcing only
+//!    companion is settled after the walk: shown, beyond `top_k`, when a
+//!    hit of its session that it contradicts was, and deduplicated against
+//!    the shown groups like any candidate (a copy already shown takes it
+//!    in; cut copies join it). Forcing only
 //!    lifts the `top_k`
 //!    cut, never a floor. The set is design 2.2's and is wider than
 //!    assembly's own: assembly forces hot-list payloads (Conflict and the
@@ -338,7 +340,9 @@ struct Group {
     /// companion after the walk. Then `Some` with the hits of its session
     /// it is a companion of (empty when forced for another reason).
     companion: Option<Vec<NodeId>>,
-    /// The shown copy: the nearest tier's.
+    /// The shown copy: the nearest tier's, except that a contradiction
+    /// companion stays shown (its `companion_of` names hits of its own
+    /// session).
     shown: (usize, usize),
     /// The other copies, in the order they joined.
     also: Vec<(usize, usize)>,
@@ -351,6 +355,18 @@ impl Group {
 
     fn has_tier(&self, tier: usize) -> bool {
         self.members().any(|(t, _)| t == tier)
+    }
+
+    /// Add a copy of the group's memory: shown when it is nearer, unless the
+    /// shown copy is a contradiction companion.
+    fn join(&mut self, m: (usize, usize)) {
+        let pinned = self.companion.as_ref().is_some_and(|of| !of.is_empty());
+        if m.0 < self.shown.0 && !pinned {
+            let previous = std::mem::replace(&mut self.shown, m);
+            self.also.push(previous);
+        } else {
+            self.also.push(m);
+        }
     }
 }
 
@@ -408,6 +424,14 @@ where
     let mut vector_budget = params.vector_pairs;
     let mut slots = 0usize;
     let mut pending: Vec<(usize, (usize, usize))> = Vec::new();
+    // #129 (review M2): a repository-scoped path is its exact key. Two
+    // repositories' `README.md` embed alike, so a scoped copy joins a
+    // group only by an equal key, never by vector, and no copy joins a
+    // scoped one by vector.
+    let scoped = |i: Option<&HitIdentity>| {
+        i.and_then(|i| i.canonical_key.as_deref())
+            .is_some_and(crate::graph::resource::is_scoped_key)
+    };
     for (order, c) in candidates.into_iter().enumerate() {
         let member = (c.tier, c.pos);
         let ci = identity(member);
@@ -415,14 +439,6 @@ where
             .and_then(|ci| ci.canonical_key.as_deref())
             .and_then(|k| by_key.get(k))
             .and_then(|gs| gs.iter().copied().find(|&g| !groups[g].has_tier(c.tier)));
-        // #129 (review M2): a repository-scoped path is its exact key. Two
-        // repositories' `README.md` embed alike, so a scoped copy joins a
-        // group only by an equal key, never by vector, and no copy joins a
-        // scoped one by vector.
-        let scoped = |i: Option<&HitIdentity>| {
-            i.and_then(|i| i.canonical_key.as_deref())
-                .is_some_and(crate::graph::resource::is_scoped_key)
-        };
         if found.is_none()
             && !scoped(ci)
             && let Some(cv) = ci.and_then(|ci| ci.embedding.as_deref())
@@ -451,13 +467,7 @@ where
         }
         let g = match found {
             Some(g) => {
-                let group = &mut groups[g];
-                if c.tier < group.shown.0 {
-                    let previous = std::mem::replace(&mut group.shown, member);
-                    group.also.push(previous);
-                } else {
-                    group.also.push(member);
-                }
+                groups[g].join(member);
                 g
             }
             None => {
@@ -465,7 +475,13 @@ where
                     if slots >= params.top_k {
                         if c.pending {
                             // Settled after the walk, by its targets.
+                            // Remembered by key too, so a copy of the same
+                            // memory emitted later absorbs it like any cut
+                            // nearer copy.
                             pending.push((order, member));
+                            if let Some(k) = ci.and_then(|ci| ci.canonical_key.as_deref()) {
+                                cut_by_key.entry(k).or_default().push(member);
+                            }
                             continue;
                         }
                         // Cut, but remembered by key: a forced farther copy
@@ -502,12 +518,7 @@ where
                     if group.has_tier(m.0) {
                         return true;
                     }
-                    if m.0 < group.shown.0 {
-                        let previous = std::mem::replace(&mut group.shown, m);
-                        group.also.push(previous);
-                    } else {
-                        group.also.push(m);
-                    }
+                    group.join(m);
                     false
                 });
             }
@@ -523,22 +534,81 @@ where
             .flat_map(Group::members)
             .filter_map(|(t, p)| Some((t, recall_of(t)?.recall.hits.get(p)?.node_id)))
             .collect();
-        for (order, (tier, pos)) in pending {
+        for (order, member) in pending {
+            let (tier, pos) = member;
             let Some(t) = recall_of(tier) else { continue };
+            if groups.iter().any(|g| g.members().any(|m| m == member)) {
+                continue; // absorbed by a later copy of the same memory
+            }
             let of: Vec<NodeId> = t.recall.detailed[pos]
                 .contradicts
                 .iter()
                 .copied()
                 .filter(|target| reached.contains(&(tier, *target)))
                 .collect();
-            if !of.is_empty() {
-                groups.push(Group {
-                    order,
-                    companion: Some(of),
-                    shown: (tier, pos),
-                    also: Vec::new(),
+            if of.is_empty() {
+                continue;
+            }
+            // A copy of the same memory already shown from another layer
+            // (equal key, or near vector within the walk's budget) takes it
+            // as a copy: the memory is in the answer already.
+            let ci = identity(member);
+            let mut found = ci
+                .and_then(|ci| ci.canonical_key.as_deref())
+                .and_then(|k| by_key.get(k))
+                .and_then(|gs| gs.iter().copied().find(|&g| !groups[g].has_tier(tier)));
+            if found.is_none()
+                && !scoped(ci)
+                && let Some(cv) = ci.and_then(|ci| ci.embedding.as_deref())
+            {
+                'near: for (g, group) in groups.iter().enumerate() {
+                    if group.has_tier(tier) {
+                        continue;
+                    }
+                    for m in group.members() {
+                        if scoped(identity(m)) {
+                            continue;
+                        }
+                        let Some(mv) = identity(m).and_then(|i| i.embedding.as_deref()) else {
+                            continue;
+                        };
+                        if vector_budget == 0 {
+                            break 'near;
+                        }
+                        vector_budget -= 1;
+                        if same_vector(cv, mv, params.dedupe_threshold) {
+                            found = Some(g);
+                            break 'near;
+                        }
+                    }
+                }
+            }
+            if let Some(g) = found {
+                groups[g].join(member);
+                continue;
+            }
+            let mut group = Group {
+                order,
+                companion: Some(of),
+                shown: member,
+                also: Vec::new(),
+            };
+            // Cut copies of the same memory in other layers join it as
+            // copies. The companion stays the shown copy, even against a
+            // nearer one: its `companion_of` names hits of its own session.
+            if let Some(cut) = ci
+                .and_then(|ci| ci.canonical_key.as_deref())
+                .and_then(|k| cut_by_key.get_mut(k))
+            {
+                cut.retain(|&m| {
+                    if m == member || group.has_tier(m.0) {
+                        return true;
+                    }
+                    group.join(m);
+                    false
                 });
             }
+            groups.push(group);
         }
         groups.sort_by_key(|g| g.order);
     }

@@ -25,8 +25,8 @@
 
   Scores and statuses are unchanged; only the result's membership and its
   warnings change. A layered merge follows the same rule: an ordinary
-  contradicted hit needs a merged slot, and its companion is shown exactly
-  when it is. A demotion no longer lifts the warning.
+  contradicted hit needs a merged slot, and when it gets one its companion
+  is added past `top_k`. A demotion no longer lifts the warning.
 - **`companion_of` on a contradiction companion (#179).** A hit that is in
   the result only as the contradicting concept of a shown hit carries the
   ids of the hits it contradicts: `companion_of` in `lambo_recall`'s
