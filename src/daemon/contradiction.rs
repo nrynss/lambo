@@ -12,7 +12,7 @@
 //!    node's own origin about-time.
 //!
 //! Any concept can be contradicted, whatever its canonization status
-//! (#179). Until 0.7.0 only `Canonical` and `Venerable` concepts were
+//! (#179). Through 0.7.0 only `Canonical` and `Venerable` concepts were
 //! ("contradicting ordinary memory is just memory"), so a stale ordinary
 //! fact kept ranking first with no warning. The status still decides what
 //! recall does with a contradicted hit (`crate::recall::assemble`): a

@@ -162,7 +162,7 @@ fn a_newer_contradiction_of_a_canonical_or_venerable_concept_fires() {
 }
 
 /// #179: ordinary memory is contradicted exactly like a promoted belief.
-/// Until 0.7.0 a `None` or `Candidate` target was never flagged, so a stale
+/// Through 0.7.0 a `None` or `Candidate` target was never flagged, so a stale
 /// ordinary fact ranked first with no warning.
 #[test]
 fn a_none_or_candidate_concept_is_contradicted_too() {

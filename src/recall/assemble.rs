@@ -655,6 +655,9 @@ fn with_ordinary_companions(
         .collect();
     let mut added: Vec<Scored<NodeId>> = Vec::new();
     for s in &emitted {
+        if forced.contains(&s.item) {
+            continue; // a forced companion brings nothing further (one level)
+        }
         let Some(Node::Concept(t)) = graph.node(s.item) else {
             continue;
         };
@@ -1687,6 +1690,19 @@ mod tests {
         let g = graph_with(6);
         let result = assemble_contradicted(&g, &[1, 2, 3], &[(3, 5), (5, 6)], query(1, 10_000));
         assert_eq!(ids_of(&result), vec![uid(3), uid(5)]);
+    }
+
+    /// CodeRabbit on #194: a forced companion of a Venerable hit is not a
+    /// source either. `2` contradicts Venerable `1` and is itself
+    /// contradicted by `6`; `6` is not pulled in after it.
+    #[test]
+    fn a_forced_companion_brings_nothing_further() {
+        let g = venerable(6, &[1]);
+        let result = assemble_contradicted(&g, &[1, 2, 3], &[(1, 2), (2, 6)], query(1, 10_000));
+        let mut ids = ids_of(&result);
+        ids.sort_by_key(|id| id.0);
+        assert_eq!(ids, vec![uid(1), uid(2), uid(3)]);
+        assert_eq!(companion_of(&result, 2), vec![uid(1)]);
     }
 
     /// The Canonical/Venerable control: #19's forced path is unchanged by
