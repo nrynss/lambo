@@ -1,17 +1,27 @@
 //! Contradiction detection (#19(c)): "you believe X, but something newer
 //! says not-X".
 //!
-//! A concept is **contradicted** when all of these hold:
+//! A concept is **contradicted** when both of these hold:
 //!
-//! 1. it is `Canonical` or `Venerable` (contradicting ordinary memory is
-//!    just memory);
-//! 2. it has an inbound `Contradicts` edge from another concept of the
+//! 1. it has an inbound `Contradicts` edge from another concept of the
 //!    session (`by -Contradicts-> node`, written by `against`, #19(b));
-//! 3. that edge's **declaration date** ([`declared_at`]: the declaring
+//! 2. that edge's **declaration date** ([`declared_at`]: the declaring
 //!    write's `event_time` when one was given, else its write time, and
 //!    never later than its write time) is **strictly later** than the
 //!    node's latest **eligible dependent evidence**, or, with none, than the
 //!    node's own origin about-time.
+//!
+//! Any concept can be contradicted, whatever its canonization status
+//! (#179). Until 0.7.0 only `Canonical` and `Venerable` concepts were
+//! ("contradicting ordinary memory is just memory"), so a stale ordinary
+//! fact kept ranking first with no warning. The status still decides what
+//! recall does with a contradicted hit (`crate::recall::assemble`): a
+//! Canonical or Venerable one is force-included (#19), an ordinary one has
+//! to earn its own slot, and either way its contradicting concept is shown
+//! beside it.
+//!
+//! Only declared contradictions are seen: an agent that supersedes a fact
+//! without `against` leaves nothing for this check to find.
 //!
 //! ## Dating (owner-approved, option A)
 //!
@@ -74,8 +84,7 @@
 //!
 //! [`insert_contradictions`] refreshes one [`Condition::Contradiction`]
 //! entry per hit; its predicate re-runs [`contradiction_at`] at the
-//! caller's `now`, so recall drops the entry when the node loses its
-//! status, when newer eligible evidence arrives (or ages in), or when the
+//! caller's `now`, so recall drops the entry when newer eligible evidence arrives (or ages in), or when the
 //! contradicting concept is collected, and otherwise renders the payload
 //! as of the read. Unlike conflict, it emits no `DaemonEvent`.
 
@@ -92,7 +101,7 @@ use crate::types::{AgentId, CanonizationStatus, Concept, Edge, EdgeType, Node, N
 /// One detected contradiction: the contradicted node and the payload fields.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ContradictionHit {
-    /// The contradicted (Canonical or Venerable) node.
+    /// The contradicted node.
     pub node: NodeId,
     /// The contradicting concept.
     pub by: NodeId,
@@ -140,14 +149,18 @@ pub fn contradiction_at(
     now: DateTime<Utc>,
 ) -> Option<ContradictionHit> {
     // Cheap exits before the timeline is built.
-    let target = concept(graph, node)?;
-    if !promoted(target) || !has_inbound_contradiction(graph, node) {
+    concept(graph, node)?;
+    if !has_inbound_contradiction(graph, node) {
         return None;
     }
     contradiction_at_with(graph, node, min_age, now, &WriterTimeline::of(graph))
 }
 
-fn promoted(c: &Concept) -> bool {
+/// Whether recall force-includes `c` when it is contradicted (#19): a
+/// Canonical or Venerable concept is a belief the reader should be warned
+/// about whatever its rank. An ordinary contradicted concept is shown only
+/// when it earns its slot (#179).
+pub fn forces_inclusion(c: &Concept) -> bool {
     matches!(
         c.canonization_status,
         CanonizationStatus::Canonical | CanonizationStatus::Venerable
@@ -161,6 +174,17 @@ fn has_inbound_contradiction(graph: &Graph, node: NodeId) -> bool {
         .any(|s| s != node)
 }
 
+/// Whether `a` and `b` are joined by a `Contradicts` edge in either
+/// direction: a declared disagreement, whatever its date or the
+/// detector's verdict. The pair test a redundancy or merge check needs
+/// (#178's suggestion guard, #181): two claims that contradict each other
+/// are never the same memory. `O(degree of a)`.
+pub fn contradicts_either_way(graph: &Graph, a: NodeId, b: NodeId) -> bool {
+    a != b
+        && (graph.edge_between(a, b, EdgeType::Contradicts).is_some()
+            || graph.edge_between(b, a, EdgeType::Contradicts).is_some())
+}
+
 fn contradiction_at_with(
     graph: &Graph,
     node: NodeId,
@@ -169,9 +193,6 @@ fn contradiction_at_with(
     timeline: &WriterTimeline,
 ) -> Option<ContradictionHit> {
     let target = concept(graph, node)?;
-    if !promoted(target) {
-        return None;
-    }
     // Evidence written at or before this instant is old enough to count.
     // `None` when `now - min_age` is out of chrono's range (review M5, as
     // Stage 1's `age_cutoff`): then no evidence is eligible.
@@ -276,7 +297,7 @@ pub fn detect(graph: &Graph, min_age: Duration, now: DateTime<Utc>) -> Vec<Contr
         .edges()
         .filter(|e| e.edge_type == EdgeType::Contradicts && e.source != e.target)
         .map(|e| e.target)
-        .filter(|&t| concept(graph, t).is_some_and(promoted))
+        .filter(|&t| concept(graph, t).is_some())
         .collect::<HashSet<_>>()
         .into_iter()
         .collect();
@@ -300,8 +321,8 @@ fn contradiction_at_shared(
     now: DateTime<Utc>,
     shared: &SharedTimeline,
 ) -> Option<ContradictionHit> {
-    let target = concept(graph, node)?;
-    if !promoted(target) || !has_inbound_contradiction(graph, node) {
+    concept(graph, node)?;
+    if !has_inbound_contradiction(graph, node) {
         return None;
     }
     contradiction_at_with(graph, node, min_age, now, &shared.get(graph))

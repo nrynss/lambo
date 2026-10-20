@@ -93,8 +93,8 @@ pub enum Condition {
     Drift,
     /// The node's session has gone stale.
     StaleSession,
-    /// A Canonical or Venerable node is contradicted by a newer assertion
-    /// (#19(c), [`crate::daemon::contradiction`]). Hot-list only: it emits no
+    /// A node is contradicted by a newer assertion (#19(c); any status since
+    /// #179, [`crate::daemon::contradiction`]). Hot-list only: it emits no
     /// `DaemonEvent` (the §6.1 enum is frozen).
     Contradiction,
 }

@@ -56,7 +56,7 @@ pub(crate) enum AnnotationKind {
     /// (#33) — response-global, one per unavailable layer.
     LayerUnavailable,
     /// `HotListPayload::Contradiction`: a newer assertion contradicts this
-    /// Canonical or Venerable hit (#19(c)) — hit-owned.
+    /// hit (#19(c); any status since #179) — hit-owned.
     Contradiction,
     /// This hit contradicts a contradicted hit of the same result, and was
     /// pulled in beside it (#19(c)) — hit-owned.
@@ -123,6 +123,20 @@ pub(crate) struct DetailedHit {
     /// The hit's typed warning lines, in producer order. Token exclusion
     /// discards the hit's complete block, never these annotations.
     pub(crate) annotations: Vec<Annotation>,
+    /// Set when the hit is in the result **only** as a contradiction
+    /// companion (#19(c), #179): the ids of the shown hits it contradicts,
+    /// id-ascending. Such a hit holds no `top_k` slot, so a result can have
+    /// up to one more hit than `top_k` per contradicted hit; its
+    /// `contradicts` annotations say why. A contradicting concept that
+    /// ranked into the result on its own carries the annotations but not
+    /// this field. Additive on the wire: serialized only when non-empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) companion_of: Vec<NodeId>,
+    /// The shown hits this hit's `contradicts` lines name, id-ascending,
+    /// whether or not it is a forced companion: what a layered merge needs
+    /// to show a companion only beside a hit it contradicts. Internal only.
+    #[serde(skip)]
+    pub(crate) contradicts: Vec<NodeId>,
 }
 
 impl DetailedHit {
@@ -140,6 +154,8 @@ impl DetailedHit {
             included_in_context: false,
             truncated_in_context: false,
             annotations: Vec::new(),
+            companion_of: Vec::new(),
+            contradicts: Vec::new(),
         }
     }
 }

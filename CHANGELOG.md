@@ -1,5 +1,47 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **Behaviour change: contradictions of ordinary memory now warn, and the
+  correction is shown with the stale fact (#179).** Until now `against`
+  only flagged a Canonical or Venerable concept ("contradicting ordinary
+  memory is just memory"). Most stale knowledge is ordinary memory, so a
+  superseded fact with a high score kept ranking first with no warning:
+  the paper's "embedder question came back stale twice" result. Now any
+  concept that a newer concept contradicts, more recently than anything
+  that supports it, carries the `⚠ Contradicted` line. What recall
+  includes depends on the hit's status:
+  - **Canonical or Venerable:** unchanged (#19). The hit is kept past
+    `top_k`, and the contradicting concept is shown beside it.
+  - **Any other status:** the hit must earn its own place in the first
+    `top_k`. When it does, the contradicting concept is added beside it,
+    past `top_k` if it did not rank in by itself. That is at most one extra
+    hit per contradicted hit, so a recall can return more than `top_k`
+    hits. The added concept holds no `top_k` slot, so the hits that earned
+    slots are the same as before. It is not chased further: a concept that
+    contradicts the companion is not added after it.
+
+  Scores and statuses are unchanged; only the result's membership and its
+  warnings change. A layered merge follows the same rule: an ordinary
+  contradicted hit needs a merged slot, and its companion is shown exactly
+  when it is. A demotion no longer lifts the warning.
+- **`companion_of` on a contradiction companion (#179).** A hit that is in
+  the result only as the contradicting concept of a shown hit carries the
+  ids of the hits it contradicts: `companion_of` in `lambo_recall`'s
+  `structuredContent` hits and in the web portal's `/api/recall` hits
+  (both only when non-empty), and `LayeredHit::companion_of` in the
+  library. A contradicting concept that ranked in by itself carries the
+  `contradicts` line but not the field.
+
+### Added
+
+- **`daemon::contradiction::forces_inclusion` and
+  `daemon::contradiction::contradicts_either_way`.** The status rule above,
+  and the either-direction `Contradicts` pair check that
+  `canon alias-preview --similar` uses (and #181's redundancy rule will).
+
 ## 0.7.0 (2026-10-19)
 
 ### Highlights

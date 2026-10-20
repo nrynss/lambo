@@ -100,14 +100,13 @@ above and the MCP reference). Supersession is a separate follow-up (#20).
 
 ## Contradiction warnings
 
-Recall warns when a Canonical or Venerable concept is contradicted by a newer
-assertion (#19(c)). The daemon's detector, `daemon::contradiction`
+Recall warns when a concept is contradicted by a newer assertion (#19(c);
+any status since #179). The daemon's detector, `daemon::contradiction`
 (`detect`, `contradiction_at`, `insert_contradictions`, `ContradictionHit`),
 fires on a concept when:
 
-1. it is Canonical or Venerable;
-2. another concept of its session has a `Contradicts` edge to it; and
-3. that edge's declaration date (`declared_at`: `Edge::about_time`, the
+1. another concept of its session has a `Contradicts` edge to it; and
+2. that edge's declaration date (`declared_at`: `Edge::about_time`, the
    declaring write's `event_time`, else its write time, clamped to its write
    time) is strictly later than both the concept's own origin interaction's
    about-time (clamped the same way) and its latest eligible dependent
@@ -138,18 +137,28 @@ contradiction, ties going to the smaller canonical key and then the smaller
 id of `by`. `writer` is the agent acting when the edge was first written,
 falling back to `by`'s origin agent. No `DaemonEvent` is published for it.
 Recall re-validates it at read time like every hot entry, so it lapses when
-the concept is demoted below Venerable, when newer evidence becomes eligible,
-or when `by` is collected. The entries of one detector pass share one writer
+newer evidence becomes eligible, or when `by` is collected. The entries of one detector pass share one writer
 timeline, rebuilt only when the graph's epoch moves.
 
 Recall renders `recall::format::contradiction_warning` on the hit and
-force-includes it, and pulls `by` into the result, force-included too, with
-`recall::format::contradicts_warning`. Both lines quote at most
+`recall::format::contradicts_warning` on `by`. What it includes depends on
+the hit's status (`daemon::contradiction::forces_inclusion`): a Canonical
+or Venerable hit is force-included and pulls `by` in, force-included too
+(#19); any other hit must earn a `top_k` slot, and then `by` is added
+beside it, beyond `top_k` when it did not rank in itself (#179). A forced
+companion holds no slot, so the hits that earned slots never change, and
+a result holds at most one forced companion per contradicted hit. It
+carries `DetailedHit::companion_of` / `LayeredHit::companion_of` (the
+hits it contradicts), serialized as `companion_of` only when non-empty.
+`daemon::contradiction::contradicts_either_way` is the pair check (either
+direction) that #178's suggestion guard uses. Both lines quote at most
 `CONTRADICTION_EXCERPT_CHARS` (80) characters of the other concept and name
 its short id. The detailed recall's annotation kinds are `contradiction` and
-`contradicts`; a layered merge forces both past `top_k`, never past a floor.
-The pulled-in concept is not itself re-validated, so it carries only the
-`contradicts` line. A structural (dependency-question) recall answers by
+`contradicts`; a layered merge forces a `contradicts` hit and a
+Canonical or Venerable `contradiction` hit past `top_k`, never past a
+floor. The pulled-in concept is not itself re-validated, so it carries
+only the `contradicts` line, and a concept contradicting it is not pulled
+in after it. A structural (dependency-question) recall answers by
 traversal and renders no hot-list warnings, contradictions included.
 
 Garbage collection does not count a `Contradicts` edge as connectivity

@@ -237,17 +237,19 @@ where
         let daemon_part = if cold { 0.0 } else { d * w_daemon };
         (d, r, daemon_part, daemon_part + r * w_query)
     };
-    // #19(c): each contradicted hit pulls its contradicting concept into the
-    // result, force-included like the hit itself (it lifts `top_k`, never a
-    // layer floor; the token budget still applies to its block).
-    let companions = contradiction_companions(graph, hot_payloads);
+    // #19(c): a contradicted Canonical or Venerable hit is force-included
+    // and pulls its contradicting concept in beside it, force-included too
+    // (it lifts `top_k`, never a layer floor; the token budget still applies
+    // to its block). An ordinary contradicted hit (#179) is not forced: its
+    // companion is added below, once the hit has earned its own slot.
+    let forced_companions = contradiction_companions(graph, hot_payloads);
     let expanded_ids: HashSet<NodeId> = expanded
         .required
         .iter()
         .chain(expanded.siblings.iter())
         .map(|s| s.item)
         .collect();
-    let mut extra: Vec<NodeId> = companions
+    let mut extra: Vec<NodeId> = forced_companions
         .keys()
         .copied()
         .filter(|id| !expanded_ids.contains(id))
@@ -265,7 +267,7 @@ where
         rank_members(graph, &mut members);
         members
     };
-    let hot = |id: NodeId| hot_payloads.contains_key(&id) || companions.contains_key(&id);
+    let hot = |id: NodeId| forces(graph, id, hot_payloads) || forced_companions.contains_key(&id);
     let any_fresh = w_query > 0.0
         && expanded
             .required
@@ -352,7 +354,14 @@ where
     let mut warnings: Vec<String> = Vec::new();
     let mut detailed: Vec<DetailedHit> = Vec::new();
     let mut hit_blocks: Vec<format::ContextBlock> = Vec::new(); // block per emitted hit, score order
-    for s in emitted(graph, &members, forced, query.top_k) {
+    let shown = with_ordinary_companions(
+        graph,
+        emitted(graph, &members, forced, query.top_k),
+        hot_payloads,
+        &forced_companions,
+        |id| score_of(id, cold).3,
+    );
+    for s in shown.hits {
         let Some(Node::Concept(c)) = graph.node(s.item) else {
             continue; // `emitted` yields graph concepts only
         };
@@ -417,7 +426,8 @@ where
                 lines.push(text);
             }
         }
-        if let Some(targets) = companions.get(&c.id) {
+        if let Some(targets) = shown.companions.get(&c.id) {
+            detailed_hit.contradicts = targets.clone();
             for target in targets {
                 let Some(Node::Concept(t)) = graph.node(*target) else {
                     continue;
@@ -428,6 +438,9 @@ where
                     .push(Annotation::new(AnnotationKind::Contradicts, text.clone()));
                 lines.push(text);
             }
+        }
+        if shown.forced.contains(&c.id) {
+            detailed_hit.companion_of = shown.companions.get(&c.id).cloned().unwrap_or_default();
         }
         // #20: history, after the live lines. Not a hot-list condition and
         // never forced: it annotates a hit that is already in the result.
@@ -531,8 +544,9 @@ fn superseded_by(graph: &Graph) -> HashMap<NodeId, (NodeId, chrono::DateTime<chr
         .collect()
 }
 
-/// The contradicting concepts recall pulls in (#19(c)): every `by` of a
-/// `Contradiction` payload on a concept in `hot_payloads`, mapped to the
+/// The contradicting concepts recall force-includes (#19(c)): every `by` of
+/// a `Contradiction` payload on a Canonical or Venerable concept in
+/// `hot_payloads`, mapped to the
 /// contradicted concepts it is shown beside, id-ascending. A `by` that is
 /// not a concept of the target's session (collected since the payload was
 /// built, or foreign) is not pulled in; its target's line still names it.
@@ -545,6 +559,9 @@ fn contradiction_companions(
         let Some(Node::Concept(t)) = graph.node(*target) else {
             continue;
         };
+        if !crate::daemon::contradiction::forces_inclusion(t) {
+            continue; // #179: an ordinary target's companion waits for its slot
+        }
         for p in payloads {
             if let HotListPayload::Contradiction { by, .. } = p
                 && same_session_concept(graph, t, *by).is_some()
@@ -558,6 +575,115 @@ fn contradiction_companions(
         targets.dedup();
     }
     out
+}
+
+/// Whether a hot member is force-included: every hot-list condition does,
+/// except a contradiction of an ordinary concept (#179), which annotates the
+/// hit but leaves its rank to decide whether it is shown.
+fn forces(graph: &Graph, id: NodeId, hot_payloads: &HashMap<NodeId, Vec<HotListPayload>>) -> bool {
+    let Some(payloads) = hot_payloads.get(&id) else {
+        return false;
+    };
+    payloads.iter().any(|p| match p {
+        HotListPayload::Contradiction { .. } => matches!(
+            graph.node(id),
+            Some(Node::Concept(c)) if crate::daemon::contradiction::forces_inclusion(c)
+        ),
+        _ => true,
+    })
+}
+
+/// The contradicting concept recall shows beside a contradicted hit: the
+/// `by` of the hit's `Contradiction` payload when it is a live concept of
+/// the hit's session, else `None`. A node carries at most one contradiction
+/// payload (the hot list keeps one entry per node and condition, the
+/// detector's newest-first pick), so this is at most one companion per hit.
+///
+/// The one contradiction check recall makes per hit, shared by assembly and
+/// meant for #181's redundancy rule: a hit and its companion are two
+/// different claims, never duplicates.
+pub(crate) fn contradiction_companion(
+    graph: &Graph,
+    hit: NodeId,
+    hot_payloads: &HashMap<NodeId, Vec<HotListPayload>>,
+) -> Option<NodeId> {
+    let Some(Node::Concept(t)) = graph.node(hit) else {
+        return None;
+    };
+    hot_payloads.get(&hit)?.iter().find_map(|p| match p {
+        HotListPayload::Contradiction { by, .. } => {
+            same_session_concept(graph, t, *by).map(|b| b.id)
+        }
+        _ => None,
+    })
+}
+
+/// What a recall shows once contradiction companions are settled.
+struct Shown {
+    /// The emitted hits, in recall order.
+    hits: Vec<Scored<NodeId>>,
+    /// Each shown contradicting concept, mapped to the shown hits it
+    /// contradicts, id-ascending.
+    companions: HashMap<NodeId, Vec<NodeId>>,
+    /// The companions that hold no `top_k` slot: in the result only as a
+    /// contradiction companion (the wire's `companion_of`).
+    forced: HashSet<NodeId>,
+}
+
+/// #179: after the `top_k` cut, every shown ordinary contradicted hit brings
+/// its contradicting concept ([`contradiction_companion`]) into the result.
+/// A companion already shown is not added again; one that is not is added
+/// beyond `top_k`, at most one per contradicted hit, and ranked among the
+/// hits by its own score. Adding one never moves the cut: a companion holds
+/// no slot, so the hits that earned slots are exactly the ones `emitted`
+/// chose. Companions are not chased further: a companion that is itself
+/// contradicted brings nothing in (one level, so a chain cannot grow the
+/// result).
+fn with_ordinary_companions(
+    graph: &Graph,
+    emitted: Vec<Scored<NodeId>>,
+    hot_payloads: &HashMap<NodeId, Vec<HotListPayload>>,
+    forced_companions: &HashMap<NodeId, Vec<NodeId>>,
+    score: impl Fn(NodeId) -> f64,
+) -> Shown {
+    let mut in_result: HashSet<NodeId> = emitted.iter().map(|s| s.item).collect();
+    let mut companions = forced_companions.clone();
+    let mut forced: HashSet<NodeId> = forced_companions
+        .keys()
+        .copied()
+        .filter(|id| in_result.contains(id))
+        .collect();
+    let mut added: Vec<Scored<NodeId>> = Vec::new();
+    for s in &emitted {
+        let Some(Node::Concept(t)) = graph.node(s.item) else {
+            continue;
+        };
+        if crate::daemon::contradiction::forces_inclusion(t) {
+            continue; // #19's path: its companion is already forced
+        }
+        let Some(by) = contradiction_companion(graph, s.item, hot_payloads) else {
+            continue;
+        };
+        companions.entry(by).or_default().push(s.item);
+        if in_result.insert(by) {
+            forced.insert(by);
+            added.push(Scored::new(by, score(by)));
+        }
+    }
+    for targets in companions.values_mut() {
+        targets.sort_by_key(|id| id.0);
+        targets.dedup();
+    }
+    let mut hits = emitted;
+    if !added.is_empty() {
+        hits.extend(added);
+        rank_members(graph, &mut hits);
+    }
+    Shown {
+        hits,
+        companions,
+        forced,
+    }
 }
 
 /// Sort members into recall order.
@@ -1354,9 +1480,29 @@ mod tests {
             .unwrap_or_default()
     }
 
+    /// `graph_with(n)` with `ids` Venerable: #19's forced path (a Venerable
+    /// concept is not partitioned ahead like a Canonical one, so the score
+    /// order of the tests stays the id order).
+    fn venerable(n: u64, ids: &[u64]) -> Graph {
+        let mut g = graph_with(n);
+        for &id in ids {
+            promote_to(&mut g, id, CanonizationStatus::Venerable);
+        }
+        g
+    }
+
+    fn companion_of(result: &DetailedRecall, id: u64) -> Vec<NodeId> {
+        result
+            .detailed
+            .iter()
+            .find(|h| h.node_id == uid(id))
+            .map(|h| h.companion_of.clone())
+            .unwrap_or_default()
+    }
+
     #[test]
     fn a_contradicted_hit_is_forced_and_pulls_in_its_contradicting_concept() {
-        let g = graph_with(5);
+        let g = venerable(5, &[1]);
         // c1 (lowest rank) is contradicted by c5, which is not in the
         // expanded set at all; top_k 1 keeps only c3.
         let result = assemble_contradicted(&g, &[1, 2, 3], &[(1, 5)], query(1, 10_000));
@@ -1381,7 +1527,7 @@ mod tests {
 
     #[test]
     fn a_companion_already_in_the_result_is_not_duplicated() {
-        let g = graph_with(3);
+        let g = venerable(3, &[1]);
         let result = assemble_contradicted(&g, &[1, 2, 3], &[(1, 3)], query(1, 10_000));
         // c3 is forced as a companion, so it takes no top_k slot and c2
         // fills it; c3 appears once.
@@ -1391,7 +1537,7 @@ mod tests {
 
     #[test]
     fn a_companion_contradicting_two_hits_names_both_in_id_order() {
-        let g = graph_with(5);
+        let g = venerable(5, &[1, 2]);
         let result = assemble_contradicted(&g, &[1, 2, 3], &[(2, 5), (1, 5)], query(1, 10_000));
         assert_eq!(
             kinds(&result, 5),
@@ -1417,7 +1563,7 @@ mod tests {
     /// contradicted hit's line names it, so nothing is lost.
     #[test]
     fn a_companion_cut_by_the_budget_is_still_named_on_its_target() {
-        let g = graph_with(5);
+        let g = venerable(5, &[1]);
         let full = assemble_contradicted(&g, &[1, 2, 3], &[(1, 5)], query(1, 10_000));
         let first_two: usize = full
             .context
@@ -1444,7 +1590,7 @@ mod tests {
     /// in, and the line keeps the id without a quote.
     #[test]
     fn a_missing_contradicting_concept_is_named_by_id_only() {
-        let g = graph_with(3);
+        let g = venerable(3, &[1]);
         let result = assemble_contradicted(&g, &[1, 2, 3], &[(1, 9)], query(1, 10_000));
         assert_eq!(ids_of(&result), vec![uid(3), uid(1)]);
         assert_eq!(
@@ -1455,6 +1601,112 @@ mod tests {
                 format::short_id(uid(9))
             )]
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // #179: contradictions of ordinary memory
+    // -----------------------------------------------------------------------
+
+    /// An ordinary contradicted hit is not forced: ranked below the cut, it
+    /// stays out, and so does its companion.
+    #[test]
+    fn an_ordinary_contradicted_hit_below_the_cut_is_not_forced() {
+        let g = graph_with(5);
+        let result = assemble_contradicted(&g, &[1, 2, 3], &[(1, 5)], query(1, 10_000));
+        assert_eq!(ids_of(&result), vec![uid(3)]);
+        assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+    }
+
+    /// The #179 case: the stale ordinary fact earns its slot, and the newer
+    /// concept that contradicts it is added beside it although retrieval
+    /// never found it. One extra hit, beyond `top_k`, marked as a companion.
+    #[test]
+    fn a_shown_ordinary_contradicted_hit_brings_its_contradicting_concept() {
+        let g = graph_with(5);
+        let result = assemble_contradicted(&g, &[1, 2, 3], &[(3, 5)], query(1, 10_000));
+        assert_eq!(ids_of(&result), vec![uid(3), uid(5)], "top_k 1, plus one");
+        assert_eq!(kinds(&result, 3), vec![AnnotationKind::Contradiction]);
+        assert_eq!(kinds(&result, 5), vec![AnnotationKind::Contradicts]);
+        assert_eq!(companion_of(&result, 5), vec![uid(3)]);
+        assert!(companion_of(&result, 3).is_empty());
+        assert!(result.context.contains("concept 5"), "{}", result.context);
+        let wire = serde_json::to_value(&result).unwrap();
+        assert_eq!(
+            wire["hits"][1]["companion_of"],
+            serde_json::json!([uid(3)]),
+            "{wire}"
+        );
+        assert!(wire["hits"][0].get("companion_of").is_none(), "{wire}");
+    }
+
+    /// A companion that ranked in on its own keeps its slot: nothing is
+    /// added, the cut does not move, and it is not marked as a companion.
+    #[test]
+    fn an_ordinary_companion_already_shown_is_not_added_again() {
+        let g = graph_with(3);
+        let result = assemble_contradicted(&g, &[1, 2, 3], &[(2, 3)], query(2, 10_000));
+        assert_eq!(ids_of(&result), vec![uid(3), uid(2)]);
+        assert_eq!(kinds(&result, 3), vec![AnnotationKind::Contradicts]);
+        assert!(companion_of(&result, 3).is_empty(), "it earned its slot");
+    }
+
+    /// The contradicting concept is gone from the graph (collected): the
+    /// warning names it by id, and nothing is added.
+    #[test]
+    fn an_ordinary_contradicted_hit_with_a_missing_companion_is_annotated_only() {
+        let g = graph_with(3);
+        let result = assemble_contradicted(&g, &[1, 2, 3], &[(3, 9)], query(1, 10_000));
+        assert_eq!(ids_of(&result), vec![uid(3)]);
+        assert_eq!(kinds(&result, 3), vec![AnnotationKind::Contradiction]);
+        assert!(result.warnings[0].contains(&format::short_id(uid(9))));
+    }
+
+    /// Two shown hits contradicted by one concept bring it in once, naming
+    /// both; two contradicted hits with different companions bring one each.
+    #[test]
+    fn ordinary_companions_are_one_per_contradicted_hit_and_never_duplicated() {
+        let g = graph_with(6);
+        let shared = assemble_contradicted(&g, &[1, 2, 3], &[(3, 5), (2, 5)], query(2, 10_000));
+        assert_eq!(ids_of(&shared), vec![uid(3), uid(2), uid(5)]);
+        assert_eq!(companion_of(&shared, 5), vec![uid(2), uid(3)]);
+        let two = assemble_contradicted(&g, &[1, 2, 3], &[(3, 5), (2, 6)], query(2, 10_000));
+        let ids = ids_of(&two);
+        assert_eq!(ids.len(), 4, "{ids:?}");
+        assert_eq!(
+            &ids[..2],
+            &[uid(3), uid(2)],
+            "the earned slots are unchanged"
+        );
+        assert!(ids.contains(&uid(5)) && ids.contains(&uid(6)));
+    }
+
+    /// Companions are not chased: a companion that is itself contradicted
+    /// brings nothing more in, so a chain cannot grow the result.
+    #[test]
+    fn a_contradicted_companion_brings_nothing_further() {
+        let g = graph_with(6);
+        let result = assemble_contradicted(&g, &[1, 2, 3], &[(3, 5), (5, 6)], query(1, 10_000));
+        assert_eq!(ids_of(&result), vec![uid(3), uid(5)]);
+    }
+
+    /// The Canonical/Venerable control: #19's forced path is unchanged by
+    /// #179 (the contradicted hit is kept past `top_k`, its companion too).
+    #[test]
+    fn a_venerable_contradicted_hit_below_the_cut_is_still_forced() {
+        let g = venerable(5, &[1]);
+        let result = assemble_contradicted(&g, &[1, 2, 3], &[(1, 5)], query(1, 10_000));
+        assert_eq!(ids_of(&result), vec![uid(3), uid(1), uid(5)]);
+        assert_eq!(companion_of(&result, 5), vec![uid(1)]);
+    }
+
+    /// Deterministic: the same inputs give the same result.
+    #[test]
+    fn ordinary_companions_are_deterministic() {
+        let g = graph_with(6);
+        let a = assemble_contradicted(&g, &[1, 2, 3], &[(3, 5), (2, 6)], query(2, 10_000));
+        let b = assemble_contradicted(&g, &[1, 2, 3], &[(3, 5), (2, 6)], query(2, 10_000));
+        assert_eq!(ids_of(&a), ids_of(&b));
+        assert_eq!(a.context, b.context);
     }
 
     // -----------------------------------------------------------------------

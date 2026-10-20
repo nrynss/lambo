@@ -44,8 +44,12 @@
 //!    against emitted groups alone, which bounds the work).
 //!    Otherwise the candidate is emitted while fewer than `top_k`
 //!    non-forced hits are, or when it is **forced** (a Conflict, Hot or
-//!    Reservation annotation, design 2.2, or #19(c)'s Contradiction or
-//!    Contradicts annotation). Forcing only lifts the `top_k`
+//!    Reservation annotation, design 2.2, #19(c)'s Contradiction annotation
+//!    on a Canonical or Venerable hit, or a Contradicts annotation naming
+//!    one). An ordinary contradicted hit (#179) must earn its slot; its
+//!    companion is settled after the walk: shown, beyond `top_k`, exactly
+//!    when a hit of its session that it contradicts was. Forcing only
+//!    lifts the `top_k`
 //!    cut, never a floor. The set is design 2.2's and is wider than
 //!    assembly's own: assembly forces hot-list payloads (Conflict and the
 //!    Hot kinds), and reservations only in cold mode.
@@ -83,12 +87,12 @@
 //! rules still fit the merged context. Other embedders need calibration
 //! (#87); both knobs remain configurable per layer.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::recall::candidates::LegScores;
 use crate::recall::detail::{Annotation, AnnotationKind, DetailedHit, DetailedRecall};
 use crate::recall::format::{self, ContextBlock};
-use crate::types::{NodeId, RecallHit, SessionId};
+use crate::types::{CanonizationStatus, NodeId, RecallHit, SessionId};
 
 /// The default merge weight of a layer: its hit at position `r` ranks as
 /// `0.5 / r`, against `1 / r` for the caller's own session.
@@ -177,6 +181,10 @@ pub struct LayeredHit {
     /// Whether the hit's block is in the context truncated, with a marker
     /// (#130). Only ever the first hit.
     pub truncated_in_context: bool,
+    /// When the hit is in the result only as a contradiction companion
+    /// (#19(c), #179), the ids of the hits of the same session it
+    /// contradicts; empty otherwise. Such a hit holds no `top_k` slot.
+    pub companion_of: Vec<NodeId>,
 }
 
 /// The answer of [`Memory::recall_layered`](crate::Memory::recall_layered):
@@ -227,6 +235,7 @@ impl LayeredRecall {
                 also: Vec::new(),
                 included_in_context: d.included_in_context,
                 truncated_in_context: d.truncated_in_context,
+                companion_of: d.companion_of.clone(),
             })
             .collect();
         Self {
@@ -245,20 +254,40 @@ impl LayeredRecall {
 /// comparisons of 1024-wide vectors is about 67 M multiply-adds.
 pub(crate) const MAX_VECTOR_DEDUPE_PAIRS: usize = 65_536;
 
+fn promoted(d: &DetailedHit) -> bool {
+    matches!(
+        d.status,
+        Some(CanonizationStatus::Canonical | CanonizationStatus::Venerable)
+    )
+}
+
 /// A hit is forced (kept beyond `top_k`, never past a floor) when it
-/// carries a Conflict, Hot or Reservation annotation (design 2.2), or a
-/// contradiction annotation on either side (#19(c)).
-fn is_forced(d: &DetailedHit) -> bool {
-    d.annotations.iter().any(|a| {
-        matches!(
-            a.kind,
-            AnnotationKind::Conflict
-                | AnnotationKind::Hot
-                | AnnotationKind::Reservation
-                | AnnotationKind::Contradiction
-                | AnnotationKind::Contradicts
-        )
+/// carries a Conflict, Hot or Reservation annotation (design 2.2), a
+/// contradiction annotation on a Canonical or Venerable hit (#19(c)), or a
+/// contradicts annotation naming such a hit (its companion).
+///
+/// #179: an ordinary contradicted hit is not forced; it is shown when it
+/// earns a merged slot. The companion of ordinary hits only is
+/// [`is_pending`] instead.
+fn is_forced(d: &DetailedHit, of: &[DetailedHit]) -> bool {
+    d.annotations.iter().any(|a| match a.kind {
+        AnnotationKind::Conflict | AnnotationKind::Hot | AnnotationKind::Reservation => true,
+        AnnotationKind::Contradiction => promoted(d),
+        AnnotationKind::Contradicts => d
+            .contradicts
+            .iter()
+            .any(|t| of.iter().any(|o| o.node_id == *t && promoted(o))),
+        _ => false,
     })
+}
+
+/// A companion of ordinary contradicted hits only (#179): shown after the
+/// walk if one of them is.
+fn is_pending(d: &DetailedHit, of: &[DetailedHit]) -> bool {
+    !is_forced(d, of)
+        && d.annotations
+            .iter()
+            .any(|a| a.kind == AnnotationKind::Contradicts)
 }
 
 /// Whether a session's recall answered a dependency question by traversal
@@ -293,10 +322,22 @@ struct Candidate {
     pos: usize,
     key: f64,
     forced: bool,
+    /// #179: a contradicting companion of ordinary hits only. Not forced in
+    /// the walk; added after it when one of the hits it contradicts was
+    /// shown, so a shown contradicted hit is never without it and a
+    /// companion is never shown for a hit the merge cut.
+    pending: bool,
 }
 
 /// An emitted hit and the copies of the same memory merged into it.
 struct Group {
+    /// Walk position of the candidate that opened it: groups render in this
+    /// order.
+    order: usize,
+    /// Opened past `top_k`: by a forced candidate, or as a pending
+    /// companion after the walk. Then `Some` with the hits of its session
+    /// it is a companion of (empty when forced for another reason).
+    companion: Option<Vec<NodeId>>,
     /// The shown copy: the nearest tier's.
     shown: (usize, usize),
     /// The other copies, in the order they joined.
@@ -347,7 +388,8 @@ where
                     tier,
                     pos,
                     key: list.weight / (pos as f64 + 1.0),
-                    forced: is_forced(&t.recall.detailed[pos]),
+                    forced: is_forced(&t.recall.detailed[pos], &t.recall.detailed),
+                    pending: is_pending(&t.recall.detailed[pos], &t.recall.detailed),
                 });
             }
         }
@@ -365,7 +407,8 @@ where
     let mut cut_by_key: HashMap<&str, Vec<(usize, usize)>> = HashMap::new();
     let mut vector_budget = params.vector_pairs;
     let mut slots = 0usize;
-    for c in candidates {
+    let mut pending: Vec<(usize, (usize, usize))> = Vec::new();
+    for (order, c) in candidates.into_iter().enumerate() {
         let member = (c.tier, c.pos);
         let ci = identity(member);
         let mut found = ci
@@ -420,6 +463,11 @@ where
             None => {
                 if !c.forced {
                     if slots >= params.top_k {
+                        if c.pending {
+                            // Settled after the walk, by its targets.
+                            pending.push((order, member));
+                            continue;
+                        }
                         // Cut, but remembered by key: a forced farther copy
                         // emitted later is still shown as this nearer one.
                         if let Some(k) = ci.and_then(|ci| ci.canonical_key.as_deref()) {
@@ -429,7 +477,14 @@ where
                     }
                     slots += 1;
                 }
+                let companion = c.forced.then(|| {
+                    recall_of(c.tier)
+                        .map(|t| t.recall.detailed[c.pos].companion_of.clone())
+                        .unwrap_or_default()
+                });
                 groups.push(Group {
+                    order,
+                    companion,
                     shown: member,
                     also: Vec::new(),
                 });
@@ -457,6 +512,35 @@ where
                 });
             }
         }
+    }
+
+    // #179: a pending companion is shown, beyond `top_k`, when a hit of its
+    // own session that it contradicts reached the answer; otherwise it stays
+    // cut. One level only: adding one never adds another.
+    if !pending.is_empty() {
+        let reached: HashSet<(usize, NodeId)> = groups
+            .iter()
+            .flat_map(Group::members)
+            .filter_map(|(t, p)| Some((t, recall_of(t)?.recall.hits.get(p)?.node_id)))
+            .collect();
+        for (order, (tier, pos)) in pending {
+            let Some(t) = recall_of(tier) else { continue };
+            let of: Vec<NodeId> = t.recall.detailed[pos]
+                .contradicts
+                .iter()
+                .copied()
+                .filter(|target| reached.contains(&(tier, *target)))
+                .collect();
+            if !of.is_empty() {
+                groups.push(Group {
+                    order,
+                    companion: Some(of),
+                    shown: (tier, pos),
+                    also: Vec::new(),
+                });
+            }
+        }
+        groups.sort_by_key(|g| g.order);
     }
 
     // Every (tier, pos) whose copy reached the answer, shown or as `also`.
@@ -487,6 +571,8 @@ where
         let mut d = t.recall.detailed[pos].clone();
         d.included_in_context = false;
         d.truncated_in_context = false;
+        // #179: `companion_of` says the hit holds no merged `top_k` slot.
+        d.companion_of = g.companion.clone().unwrap_or_default();
         let also: Vec<LayerCopy> = g
             .also
             .iter()
@@ -632,6 +718,7 @@ where
             also,
             included_in_context: d.included_in_context,
             truncated_in_context: d.truncated_in_context,
+            companion_of: d.companion_of.clone(),
         })
         .collect();
     LayeredRecall {

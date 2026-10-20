@@ -875,9 +875,10 @@ async fn a_contradiction_is_held_on_the_hot_list_without_an_event() {
         })
         .unwrap();
     wake_and_settle(&daemon).await;
+    // #179: a demotion no longer lifts it; any concept can be contradicted.
     assert!(
-        !daemon.hot_list().read().contains(c1_id),
-        "demoted: the contradiction no longer holds"
+        daemon.hot_list().read().contains(c1_id),
+        "demoted: the contradiction still holds"
     );
     handle.abort();
 }

@@ -18,6 +18,9 @@ struct H {
     annotations: Vec<(AnnotationKind, String)>,
     key: Option<String>,
     embedding: Option<Vec<f32>>,
+    status: Option<CanonizationStatus>,
+    /// Positions, in the same list, of the hits its `contradicts` lines name.
+    contradicts: Vec<usize>,
 }
 
 /// A hit found by keyword and vector legs, with its content as canonical key.
@@ -29,6 +32,8 @@ fn kw(content: &str) -> H {
         annotations: Vec::new(),
         key: Some(content.into()),
         embedding: None,
+        status: None,
+        contradicts: Vec::new(),
     }
 }
 
@@ -63,6 +68,15 @@ impl H {
         self.embedding = Some(v);
         self
     }
+    fn status(mut self, s: CanonizationStatus) -> Self {
+        self.status = Some(s);
+        self
+    }
+    /// A `contradicts` line on the hit at `pos` of the same list.
+    fn contradicts(mut self, pos: usize, text: &str) -> Self {
+        self.contradicts.push(pos);
+        self.with(AnnotationKind::Contradicts, text)
+    }
 }
 
 /// A node id unique to `(tier, pos)`.
@@ -90,7 +104,8 @@ fn recall(tier: usize, hits: &[H], extra: &[&str]) -> TierRecall {
             is_canonical: false,
             blast_radius: None,
         };
-        let mut d = DetailedHit::new(&hit, None);
+        let mut d = DetailedHit::new(&hit, h.status);
+        d.contradicts = h.contradicts.iter().map(|&p| nid(tier, p)).collect();
         d.included_in_context = true;
         for (kind, text) in &h.annotations {
             d.annotations.push(Annotation::new(*kind, text.clone()));
@@ -909,23 +924,22 @@ fn a_different_layer_anchor_cannot_admit_dependents_past_the_floor() {
     assert!(order(&accepted).contains(&"general/db dependent".to_string()));
 }
 
-/// #19(c): a contradicted hit and its companion are forced (they lift
-/// `top_k`) on either side of the merge, and never past a layer's floor.
-/// A companion floored out of a layer is still named, prefixed, on its
-/// target's line.
-#[test]
-fn contradiction_annotations_force_past_top_k_but_never_the_floor() {
-    let lists = [
+/// The two-list shape of the contradiction tests: in each list a hit at
+/// position 1 contradicted by the companion at position 2. The layer's
+/// companion has no leg evidence, so its floor holds.
+fn contradicted_lists(status: Option<CanonizationStatus>) -> [TierList; 2] {
+    let target = |h: H| match status {
+        Some(s) => h.status(s),
+        None => h,
+    };
+    [
         primary(&[
             kw("p1"),
-            kw("p-contradicted").with(
+            target(kw("p-contradicted").with(
                 AnnotationKind::Contradiction,
                 "⚠ Contradicted at t by agent-c: \"p-companion\" (id aaaaaaaa)",
-            ),
-            expanded("p-companion").with(
-                AnnotationKind::Contradicts,
-                "⚠ Contradicts \"p-contradicted\"",
-            ),
+            )),
+            expanded("p-companion").contradicts(1, "⚠ Contradicts \"p-contradicted\""),
         ]),
         layer(
             1,
@@ -933,19 +947,26 @@ fn contradiction_annotations_force_past_top_k_but_never_the_floor() {
             0.5,
             &[
                 kw("g1"),
-                kw("g-contradicted").with(
+                target(kw("g-contradicted").with(
                     AnnotationKind::Contradiction,
                     "⚠ Contradicted at t by agent-d: \"g-companion\" (id bbbbbbbb)",
-                ),
-                // The layer's companion has no leg evidence: the floor holds.
-                expanded("g-companion").with(
-                    AnnotationKind::Contradicts,
-                    "⚠ Contradicts \"g-contradicted\"",
-                ),
+                )),
+                expanded("g-companion").contradicts(1, "⚠ Contradicts \"g-contradicted\""),
             ],
         ),
-    ];
-    let r = run(&lists, params(1));
+    ]
+}
+
+/// #19(c): a contradicted Venerable hit and its companion are forced (they
+/// lift `top_k`) on either side of the merge, and never past a layer's
+/// floor. A companion floored out of a layer is still named, prefixed, on
+/// its target's line.
+#[test]
+fn contradiction_annotations_force_past_top_k_but_never_the_floor() {
+    let r = run(
+        &contradicted_lists(Some(CanonizationStatus::Venerable)),
+        params(1),
+    );
     assert_eq!(
         order(&r),
         [
@@ -955,6 +976,11 @@ fn contradiction_annotations_force_past_top_k_but_never_the_floor() {
             "general/g-contradicted"
         ]
     );
+    assert_eq!(
+        r.hits[2].companion_of,
+        Vec::<NodeId>::new(),
+        "test hit has none"
+    );
     assert!(r
         .warnings
         .iter()
@@ -963,6 +989,37 @@ fn contradiction_annotations_force_past_top_k_but_never_the_floor() {
         .warnings
         .iter()
         .any(|w| w.contains("Contradicts \"g-contradicted\"")));
+}
+
+/// #179: an ordinary contradicted hit is not forced. Cut by `top_k`, it is
+/// not shown, and neither is its companion; given a slot, it brings its
+/// companion in beyond `top_k`, marked as one.
+#[test]
+fn an_ordinary_contradicted_hit_must_earn_its_merged_slot() {
+    let cut = run(&contradicted_lists(None), params(1));
+    assert_eq!(order(&cut), ["lambo/p1"]);
+
+    let shown = run(&contradicted_lists(None), params(2));
+    assert_eq!(
+        order(&shown),
+        ["lambo/p1", "lambo/p-contradicted", "lambo/p-companion"],
+        "g1 ties p-contradicted's key and loses on tier; the companion holds no slot"
+    );
+    assert_eq!(shown.hits[2].companion_of, vec![nid(0, 1)]);
+    assert!(shown.hits[1].companion_of.is_empty());
+
+    // With room for everything, the companion earns a slot of its own.
+    let all = run(&contradicted_lists(None), params(10));
+    let p = all
+        .hits
+        .iter()
+        .find(|h| h.hit.content == "p-companion")
+        .expect("shown");
+    assert!(p.companion_of.is_empty(), "it holds a slot");
+    assert!(
+        !order(&all).contains(&"general/g-companion".to_string()),
+        "floored"
+    );
 }
 
 #[test]

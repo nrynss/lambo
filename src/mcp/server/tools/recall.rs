@@ -300,6 +300,18 @@ impl LamboServer {
                     if lh.truncated_in_context {
                         map.insert("truncated_in_context".into(), json!(true));
                     }
+                    // #179: additive, on a contradiction companion only: the
+                    // ids of the hits it contradicts. It holds no top_k slot.
+                    if !lh.companion_of.is_empty() {
+                        map.insert(
+                            "companion_of".into(),
+                            json!(lh
+                                .companion_of
+                                .iter()
+                                .map(|id| id.0.to_string())
+                                .collect::<Vec<_>>()),
+                        );
+                    }
                     // #33: additive, on every hit of a layered session only.
                     if layered {
                         map.insert("session".into(), json!(lh.session.as_str()));
