@@ -161,6 +161,18 @@ pub(super) fn derive_sentence_of(
             outcome.contradicted
         );
     }
+    // #193: said only when a merge guard refused a hit, so a write that
+    // merged (or had nothing near) reads as before.
+    let guarded = outcome.merge_guarded;
+    if !guarded.is_empty() {
+        sentence = format!(
+            "{sentence}; {} similarity merge(s) refused ({} for differing identifiers, {} for \
+             `against`)",
+            guarded.identifiers + guarded.contradicts,
+            guarded.identifiers,
+            guarded.contradicts
+        );
+    }
     sentence
 }
 

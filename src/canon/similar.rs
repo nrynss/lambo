@@ -66,7 +66,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
-use crate::graph::canonical::{canonical_key, is_identifier_token};
+pub use crate::graph::canonical::fold;
+use crate::graph::canonical::{canonical_key, digit_runs, identifier_tokens};
 use crate::graph::Graph;
 use crate::types::{CanonizationStatus, ConceptType, EdgeType, Node, NodeId};
 
@@ -200,27 +201,6 @@ pub struct SimilarReport {
     pub vector_candidates: usize,
 }
 
-/// NFC, lowercase, fold every run of `_`, `-` and whitespace to one space,
-/// trim. NFC first, so a composed and a decomposed accent fold alike, as
-/// they do in the canonical key.
-pub fn fold(content: &str) -> String {
-    use unicode_normalization::UnicodeNormalization;
-    let mut out = String::with_capacity(content.len());
-    let mut gap = false;
-    for c in content.nfc() {
-        if c == '_' || c == '-' || c.is_whitespace() {
-            gap = true;
-            continue;
-        }
-        if gap && !out.is_empty() {
-            out.push(' ');
-        }
-        gap = false;
-        out.extend(c.to_lowercase());
-    }
-    out
-}
-
 /// FNV-1a over a 3-gram's UTF-8 bytes: stable across runs and platforms.
 fn hash_gram(gram: &[char]) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
@@ -288,24 +268,6 @@ fn jaccard(a: &[u64], b: &[u64]) -> f64 {
         }
     }
     both as f64 / (a.len() + b.len() - both) as f64
-}
-
-/// The maximal runs of ASCII digits, in order.
-fn digit_runs(s: &str) -> Vec<&str> {
-    s.split(|c: char| !c.is_ascii_digit())
-        .filter(|r| !r.is_empty())
-        .collect()
-}
-
-/// The identifier-shaped tokens of folded text, in order. Splits on spaces
-/// only, so `v0.5.0` and `src/main.rs` stay whole.
-fn identifier_tokens(folded: &str) -> Vec<&str> {
-    folded
-        .split(' ')
-        .map(|t| t.trim_matches(|c: char| !c.is_alphanumeric() && c != '/' && c != '.'))
-        .map(|t| t.trim_end_matches('.'))
-        .filter(|t| !t.is_empty() && is_identifier_token(t))
-        .collect()
 }
 
 /// One concept as the detector sees it.

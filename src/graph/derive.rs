@@ -332,6 +332,35 @@ pub struct DeriveOutcome {
     /// re-sent contradiction reinforces its edge and is counted in
     /// [`Self::reinforced`] instead.
     pub contradicted: usize,
+    /// Vector hits at or above the merge threshold that the merge guards
+    /// refused (#193, hybrid only): the write did not merge into them.
+    pub merge_guarded: MergeGuarded,
+}
+
+/// What the hybrid merge guards refused in one call (#193), per guard:
+/// vector hits at or above `semantic_match_threshold` that were not merge
+/// candidates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct MergeGuarded {
+    /// The hit's text names other identifiers (digit runs or identifier
+    /// tokens differ).
+    pub identifiers: usize,
+    /// The written content is declared `against` the hit.
+    pub contradicts: usize,
+}
+
+impl MergeGuarded {
+    pub(crate) fn count(&mut self, why: crate::graph::hybrid::MergeGuard) {
+        match why {
+            crate::graph::hybrid::MergeGuard::Identifiers => self.identifiers += 1,
+            crate::graph::hybrid::MergeGuard::Contradicts => self.contradicts += 1,
+        }
+    }
+
+    /// Whether nothing was refused.
+    pub fn is_empty(&self) -> bool {
+        self.identifiers == 0 && self.contradicts == 0
+    }
 }
 
 /// The primary write path (spec §7): derive `concepts` from `interaction`,

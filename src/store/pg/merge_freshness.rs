@@ -67,6 +67,12 @@ pub(crate) const PARAPHRASE: &str = "create account";
 /// and about 0.978 to [`PARAPHRASE`], so its top tier is [`ORIGINAL`] alone.
 pub(crate) const REPHRASE: &str = "sign up user";
 
+/// #193: a fact naming a version, on its own axis.
+pub(crate) const VERSIONED: &str = "release v0.5.0 is current";
+/// [`VERSIONED`] with another version: cosine about 0.989 to it, so only
+/// the identifier guard keeps them apart.
+pub(crate) const REVERSIONED: &str = "release v0.6.0 is current";
+
 /// A deterministic embedder that needs no feature: the two labels above are
 /// near, every other text lands on its own axis. Hybrid embeds a concept with
 /// its origin context (`"Concept: <label> — <prompt>"`); the label is what is
@@ -111,6 +117,12 @@ impl LabelVectors {
             REPHRASE => {
                 let n = (1.0f32 + 0.15 * 0.15).sqrt();
                 v[0] = 1.0 / n;
+                v[2] = 0.15 / n;
+            }
+            VERSIONED => v[1] = 1.0,
+            REVERSIONED => {
+                let n = (1.0f32 + 0.15 * 0.15).sqrt();
+                v[1] = 1.0 / n;
                 v[2] = 0.15 / n;
             }
             other => {
@@ -635,6 +647,55 @@ async fn a_holder_merges_into_unflushed_and_reloaded_concepts() {
             store.vector_calls() > 0,
             "{name}: the durable leg must ask the database"
         );
+    }
+    for_each_dialect!(check);
+}
+
+/// **#193 on the family path.** The merge guards hold over the union
+/// source too: an unflushed near concept naming another version is not
+/// merged into, nor is one the write is declared `against`, while the
+/// plain paraphrase still merges (the #60 control).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_merge_guards_hold_over_unflushed_concepts() {
+    async fn check<D: Dialect>(kind: StoreKind, name: &str) {
+        let store = Arc::new(LaggingDatabase::<D>::new(kind));
+        let embedder = Arc::new(LabelVectors::new(DIM));
+        let mem = open_holder(store.clone(), &format!("pg-guards-{name}"), embedder, None).await;
+        let derive = |content: &'static str| {
+            let mem = &mem;
+            async move {
+                mem.derive(&[(content, ConceptType::Entity)], &ParentOf::none())
+                    .await
+                    .unwrap()
+            }
+        };
+        let versioned = derive(VERSIONED).await.created[0];
+        let other = derive(REVERSIONED).await;
+        assert!(other.semantic_merged.is_empty(), "{name}: {other:?}");
+        assert_eq!(other.merge_guarded.identifiers, 1, "{name}");
+        let _ = versioned;
+
+        let original = derive(ORIGINAL).await.created[0];
+        let refuting = mem
+            .derive_cited_as(
+                &crate::types::AgentId::new("agent-a"),
+                &[(PARAPHRASE, ConceptType::Entity)],
+                &ParentOf::none(),
+                &[crate::types::ConceptCitations {
+                    content: PARAPHRASE.to_string(),
+                    depends_on: Vec::new(),
+                    against: vec![original.0.to_string()],
+                }],
+            )
+            .await
+            .unwrap();
+        assert!(refuting.semantic_merged.is_empty(), "{name}: {refuting:?}");
+        assert_eq!(refuting.merge_guarded.contradicts, 1, "{name}");
+        assert_eq!(refuting.contradicted, 1, "{name}");
+        // The control: a paraphrase with no `against` still merges.
+        let rephrase = derive(REPHRASE).await;
+        assert_eq!(rephrase.semantic_merged, vec![original], "{name}");
+        mem.close().await.unwrap();
     }
     for_each_dialect!(check);
 }
