@@ -135,6 +135,8 @@ $$
 \text{sim}(u,v) = \frac{u \cdot v}{\lVert u \rVert \, \lVert v \rVert} \ge 0.85
 $$
 
+Two guards refuse a merge whatever the similarity (#193). A new concept never merges into one whose text names other identifiers: the runs of digits and the identifier-shaped tokens (anything with a digit, `/` or `.`, such as `v0.5.0`, `src/mcp/server.rs` or `round3`) must be the same, so `release v0.5.0 is current` and `release v0.6.0 is current` stay two facts. And it never merges into a concept it names in `against`, since a claim and the claim it refutes are not one memory. A refused hit leaves the new concept fresh, with its vector, unless another hit at or above the threshold passes both guards. These are the guards `canon alias-preview --similar` applies to its suggestions.
+
 Without an embedder you keep the whole canonization path and lose this check, which degrades recall over very long sessions as near-duplicates accumulate.
 
 ## The constants, in one place

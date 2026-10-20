@@ -266,6 +266,54 @@ pub fn is_identifier_token(token: &str) -> bool {
         .any(|c| c.is_ascii_digit() || c == '/' || c == '.')
 }
 
+/// NFC, lowercase, fold every run of `_`, `-` and whitespace to one space,
+/// trim. NFC first, so a composed and a decomposed accent fold alike, as
+/// they do in the canonical key. The text the identifier guards compare
+/// (`canon alias-preview --similar`, #178; hybrid merge, #193).
+pub fn fold(content: &str) -> String {
+    let mut out = String::with_capacity(content.len());
+    let mut gap = false;
+    for c in content.nfc() {
+        if c == '_' || c == '-' || c.is_whitespace() {
+            gap = true;
+            continue;
+        }
+        if gap && !out.is_empty() {
+            out.push(' ');
+        }
+        gap = false;
+        out.extend(c.to_lowercase());
+    }
+    out
+}
+
+/// The maximal runs of ASCII digits, in order.
+pub fn digit_runs(s: &str) -> Vec<&str> {
+    s.split(|c: char| !c.is_ascii_digit())
+        .filter(|r| !r.is_empty())
+        .collect()
+}
+
+/// The identifier-shaped tokens of folded text ([`fold`]), in order. Splits
+/// on spaces only, so `v0.5.0` and `src/main.rs` stay whole.
+pub fn identifier_tokens(folded: &str) -> Vec<&str> {
+    folded
+        .split(' ')
+        .map(|t| t.trim_matches(|c: char| !c.is_alphanumeric() && c != '/' && c != '.'))
+        .map(|t| t.trim_end_matches('.'))
+        .filter(|t| !t.is_empty() && is_identifier_token(t))
+        .collect()
+}
+
+/// Whether two texts name the same identifiers: once [`fold`]ed, their
+/// [`digit_runs`] and their [`identifier_tokens`] are equal lists. Two
+/// texts that differ in a version, hash, path, port or issue number are
+/// different facts however close their vectors (#148, #178, #193).
+pub fn same_identifiers(a: &str, b: &str) -> bool {
+    let (a, b) = (fold(a), fold(b));
+    digit_runs(&a) == digit_runs(&b) && identifier_tokens(&a) == identifier_tokens(&b)
+}
+
 fn tokens(content: &str, keep_identifiers: bool) -> Vec<String> {
     let nfc: String = content
         .chars()

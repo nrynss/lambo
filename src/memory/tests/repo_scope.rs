@@ -521,14 +521,20 @@ async fn scoped_paths_neither_merge_nor_are_merged_into_at_similarity_one() {
         path_id(&mem, "repo-a", "src/main.rs"),
         path_id(&mem, "repo-b", "src/main.rs"),
     ];
-    // An unrelated text merges by vector, but only into the unscoped hub.
+    // An unrelated text merges by vector, but only into an unscoped hub,
+    // and (#193) not into the legacy path, whose text names an identifier
+    // the new text does not.
+    let hub = derive("entry module", ConceptType::Resource, None)
+        .await
+        .created[0];
     let out = derive(
-        "the main entry point",
+        "the program entry module",
         ConceptType::Resource,
         Some("repo-a"),
     )
     .await;
-    assert_eq!(out.semantic_merged, [legacy], "{out:?}");
+    assert_eq!(out.semantic_merged, [hub], "{out:?}");
+    assert!(!out.semantic_merged.contains(&legacy));
     assert!(scoped.iter().all(|s| !out.semantic_merged.contains(s)));
     mem.close().await.unwrap();
 }

@@ -209,6 +209,7 @@ fn plan_validation_worst_case_is_bounded() {
         items: &items,
         parent_ends: &parent_ends,
         resolutions: &resolutions,
+        pinned: &PinnedCitations::default(),
         semantic_match_threshold: SEMANTIC_MATCH_THRESHOLD_DEFAULT,
         rescore_cap: MAX_PLAN_RESCORES,
     };

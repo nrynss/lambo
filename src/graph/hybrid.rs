@@ -183,6 +183,29 @@
 //! and a text item's merge tier drops those candidates, so a text claim is
 //! never absorbed into a picture. An image item never takes the merge leg at
 //! all (see `derive_with`).
+//!
+//! ## Merge guards (#193)
+//!
+//! Two more hard refusals, applied to the vector hits before the tier is
+//! taken ([`merge_guard`]), and again to the rivals the commit's re-plan
+//! check rescores (`plan_still_holds`), so a retried write is guarded alike:
+//!
+//! * **Identifiers.** The new content and the hit must name the same
+//!   identifiers: equal digit runs and identifier tokens once folded
+//!   ([`crate::graph::canonical::same_identifiers`], the guard of
+//!   `canon alias-preview --similar`, #178). Since #148 the canonical keys of
+//!   `release v0.5.0` and `release v0.6.0` differ, so the exact-key path no
+//!   longer folds them, and their cosine alone would.
+//! * **Contradicts.** The new content never merges into a concept its own
+//!   `against` names: a claim and the claim it refutes are two memories
+//!   (#19), and a `Semantic` edge would put the stale fact in its
+//!   refutation's recall neighbourhood.
+//!
+//! A guarded hit is not a candidate: another hit at or above the threshold
+//! may still take the merge, and with none the concept is fresh (vector
+//! kept, no `Semantic` edge). Guarded hits at or above the threshold are
+//! counted in [`DeriveOutcome::merge_guarded`] and named on the receipt.
+//! The guards only ever refuse a merge (the under-merging bias).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock, Mutex};
@@ -194,7 +217,9 @@ use parking_lot::RwLock;
 use crate::embed::Embedder;
 use crate::graph::canonical::CanonicalizeResult;
 use crate::graph::cite::PinnedCitations;
-use crate::graph::derive::{DeriveOutcome, ParentOf, COOCCURRENCE_WEIGHT, HIERARCHICAL_WEIGHT};
+use crate::graph::derive::{
+    DeriveOutcome, MergeGuarded, ParentOf, COOCCURRENCE_WEIGHT, HIERARCHICAL_WEIGHT,
+};
 use crate::graph::resource::{canonicalize_keyed, RESOURCE_KEY_PREFIX};
 use crate::graph::Graph;
 use crate::store::vector_source::VectorCandidates;
@@ -1160,6 +1185,9 @@ async fn derive_planned(
         // concept did.
         let mut probed_store = false;
         let mut resolutions: Vec<Resolution> = Vec::with_capacity(items.len());
+        // #193: the vector hits at or above the threshold this attempt's
+        // merge guards refused.
+        let mut merge_guarded = MergeGuarded::default();
         for (content, concept_type, key, matched) in &items {
             let res = match matched {
                 Some(node) => Resolution::CanonicalMatch { node: *node },
@@ -1232,6 +1260,23 @@ async fn derive_planned(
                             // concept (design section 4.4); #129: nor into a
                             // repository-scoped path Resource.
                             hits.retain(|hit| !image_nodes.contains(&hit.item));
+                            // #193: never into a concept that names other
+                            // identifiers, nor into one this content is
+                            // declared `against`. A brief read: the hits'
+                            // texts are in the graph.
+                            {
+                                let g = graph.read();
+                                hits.retain(|hit| {
+                                    let Some(why) = merge_guard(&g, content, pinned, hit.item)
+                                    else {
+                                        return true;
+                                    };
+                                    if hit.score >= semantic_match_threshold {
+                                        merge_guarded.count(why);
+                                    }
+                                    false
+                                });
+                            }
                             // The tier tied at the highest score
                             // at/above threshold (store results are not
                             // guaranteed sorted). Every member is
@@ -1362,6 +1407,7 @@ async fn derive_planned(
                 items: &items,
                 parent_ends: &parent_ends,
                 resolutions: &resolutions,
+                pinned,
                 semantic_match_threshold,
                 rescore_cap: if last_attempt {
                     MAX_PLAN_RESCORES_FINAL
@@ -1440,7 +1486,10 @@ async fn derive_planned(
             // citations.
             let mut cited = crate::graph::cite::Written::default();
 
-            let mut outcome = DeriveOutcome::default();
+            let mut outcome = DeriveOutcome {
+                merge_guarded,
+                ..DeriveOutcome::default()
+            };
             let mut written: HashSet<NodeId> = HashSet::new();
             let mut call_nodes: Vec<NodeId> = Vec::with_capacity(items.len());
             // C4: the concepts THIS call wrote, by canonical key, so step 6's
@@ -1863,6 +1912,47 @@ const MAX_PLAN_RESCORES: usize = 8_192;
 /// this ceiling.
 const MAX_PLAN_RESCORES_FINAL: usize = 32 * MAX_PLAN_RESCORES;
 
+/// Why a merge guard refused a vector hit (#193).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MergeGuard {
+    /// The two texts name different identifiers: digit runs or
+    /// identifier tokens differ ([`crate::graph::canonical::same_identifiers`]).
+    Identifiers,
+    /// The content is declared `against` the hit.
+    Contradicts,
+}
+
+/// The merge guards (#193): whether `content` may not merge into the
+/// concept `target` by similarity, and why. A concept the content's own
+/// `against` names is two claims, one refuting the other (#19); a concept
+/// whose text names other identifiers (a version, hash, path, port or issue
+/// number) is another fact however close the vectors (#148, the same guard
+/// as `canon alias-preview --similar`, #178). `None` when neither applies,
+/// and for a target that is not a concept of `g` (the commit validates it).
+/// Only ever refuses a merge, never forces one.
+pub(crate) fn merge_guard(
+    g: &Graph,
+    content: &str,
+    pinned: &PinnedCitations,
+    target: NodeId,
+) -> Option<MergeGuard> {
+    if pinned
+        .against
+        .iter()
+        .any(|r| r.target == target && r.content == content)
+    {
+        return Some(MergeGuard::Contradicts);
+    }
+    match g.node(target) {
+        Some(Node::Concept(c))
+            if !crate::graph::canonical::same_identifiers(content, &c.content) =>
+        {
+            Some(MergeGuard::Identifiers)
+        }
+        _ => None,
+    }
+}
+
 /// What a plan read from the graph, for [`plan_still_holds`].
 struct PlanRead<'p, 'a> {
     planned_epoch: u64,
@@ -1877,6 +1967,9 @@ struct PlanRead<'p, 'a> {
     items: &'p PlannedItems<'a>,
     parent_ends: &'p PlannedEnds<'a>,
     resolutions: &'p [Resolution],
+    /// The call's accepted citations: `against` feeds the merge guards
+    /// (#193), so a rival they refuse cannot make the plan stale.
+    pinned: &'p PinnedCitations,
     semantic_match_threshold: f64,
     /// [`MAX_PLAN_RESCORES`], or [`MAX_PLAN_RESCORES_FINAL`] on the final
     /// attempt.
@@ -1960,10 +2053,10 @@ fn plan_still_holds(g: &Graph, plan: &PlanRead<'_, '_>) -> Result<Verdict, Lambo
         return Ok(Verdict::Holds);
     }
     let mut targets: HashSet<NodeId> = HashSet::new();
-    // Each ranked item's vector, with its planned merge score (`None`: it
-    // planned a fresh concept, below the threshold).
-    let mut ranked: Vec<(&[f32], Option<f64>)> = Vec::new();
-    for res in plan.resolutions {
+    // Each ranked item's content and vector, with its planned merge score
+    // (`None`: it planned a fresh concept, below the threshold).
+    let mut ranked: Vec<(&str, &[f32], Option<f64>)> = Vec::new();
+    for ((content, ..), res) in plan.items.iter().zip(plan.resolutions) {
         match res {
             Resolution::HybridMerge {
                 targets: tier,
@@ -1972,7 +2065,7 @@ fn plan_still_holds(g: &Graph, plan: &PlanRead<'_, '_>) -> Result<Verdict, Lambo
                 ..
             } => {
                 targets.extend(tier.iter().copied());
-                ranked.push((embedding, Some(*score)));
+                ranked.push((content, embedding, Some(*score)));
             }
             Resolution::Fresh {
                 key,
@@ -1980,7 +2073,7 @@ fn plan_still_holds(g: &Graph, plan: &PlanRead<'_, '_>) -> Result<Verdict, Lambo
                 source: None,
                 // #129: a scoped path never merges, so no rival can
                 // change its plan.
-            } if !key.starts_with(RESOURCE_KEY_PREFIX) => ranked.push((embedding, None)),
+            } if !key.starts_with(RESOURCE_KEY_PREFIX) => ranked.push((content, embedding, None)),
             _ => {}
         }
     }
@@ -1989,7 +2082,7 @@ fn plan_still_holds(g: &Graph, plan: &PlanRead<'_, '_>) -> Result<Verdict, Lambo
     // concept), carrying a vector. Collected first so the rescoring below is
     // bounded before any of it runs.
     let mut seen: HashSet<NodeId> = HashSet::with_capacity(written.len());
-    let mut rivals: Vec<&[f32]> = Vec::new();
+    let mut rivals: Vec<(NodeId, &[f32])> = Vec::new();
     for id in written {
         if !seen.insert(id) {
             continue;
@@ -2005,7 +2098,7 @@ fn plan_still_holds(g: &Graph, plan: &PlanRead<'_, '_>) -> Result<Verdict, Lambo
             && !c.canonical_key.starts_with(RESOURCE_KEY_PREFIX)
             && let Some(vector) = c.embedding.as_deref()
         {
-            rivals.push(vector);
+            rivals.push((id, vector));
         }
     }
     // Review L1: the rescoring runs under the write lock, so it is capped.
@@ -2013,16 +2106,22 @@ fn plan_still_holds(g: &Graph, plan: &PlanRead<'_, '_>) -> Result<Verdict, Lambo
     if rivals.len().saturating_mul(ranked.len()) > plan.rescore_cap {
         return Ok(Verdict::OverBudget);
     }
-    for vector in rivals {
-        for (probe, planned) in &ranked {
+    for (rival, vector) in rivals {
+        for (content, probe, planned) in &ranked {
             if vector.len() != probe.len() {
                 continue;
             }
+            // #193: a rival the merge guards refuse could never have been
+            // merged into, so it changes no choice. Checked only for a
+            // rival at or above the threshold, below.
             let score = f64::from(crate::embed::cosine(probe, vector));
             if !score.is_finite()
                 || !(0.0..=1.0).contains(&score)
                 || score < plan.semantic_match_threshold
             {
+                continue;
+            }
+            if merge_guard(g, content, plan.pinned, rival).is_some() {
                 continue;
             }
             match planned {

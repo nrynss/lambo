@@ -21,6 +21,7 @@ mod batching;
 mod commit_cost;
 mod concurrency;
 mod embedding;
+mod guards;
 mod merging;
 mod planning;
 mod supplied;
