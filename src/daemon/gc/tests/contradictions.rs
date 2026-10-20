@@ -222,3 +222,189 @@ fn protection_uses_the_detectors_declaration_date() {
         vec![nid(20)]
     );
 }
+
+// ------------------------------------------------------------------
+// #197: the live correction of a contradicted ordinary concept
+// ------------------------------------------------------------------
+
+/// A contradiction the detector reports: written at `ts(1)`, after every
+/// origin about-time (`ts(0)`), so it is strictly newer than the target.
+fn live(id: u64, src: u64, tgt: u64) -> Edge {
+    edge(id, src, tgt, EdgeType::Contradicts, 1.0, 1)
+}
+
+#[test]
+fn the_live_correction_of_an_ordinary_concept_survives() {
+    let mut g = session_with_island();
+    // Island 20 corrects the anchored ordinary concept 10.
+    g.upsert_edge(live(200, 20, 10)).unwrap();
+    // Control: island 21 has no contradiction at all.
+    insert_isolated(
+        &mut g,
+        concept(21, 1, "plain island", ConceptType::Entity),
+        1,
+    );
+    for sweep in 0..3 {
+        let outcome = run(&mut g, default_params());
+        let want: Vec<NodeId> = if sweep == 0 { vec![nid(21)] } else { vec![] };
+        assert_eq!(outcome.concepts_collected, want, "sweep {sweep}");
+        assert!(g.node(nid(20)).is_some(), "sweep {sweep}");
+        // Protected concepts are outside the collection cap's base.
+        assert!(outcome.deferred.is_empty());
+        let mut pending = outcome.survivors_pending.clone();
+        drain_survivor_bumps(&mut g, &mut pending, usize::MAX);
+    }
+    // The contradicted concept is not protected by being contradicted.
+    let mut g = session_with_island();
+    g.upsert_edge(live(200, 10, 20)).unwrap();
+    assert_eq!(
+        run(&mut g, default_params()).concepts_collected,
+        vec![nid(20)]
+    );
+}
+
+#[test]
+fn the_protection_lapses_once_the_contradicted_concept_is_gone() {
+    // Two islands: 21 corrects 20. 20 is the anchor (not a correction) and
+    // an orphan, so this sweep collects it and keeps 21; the next sweep
+    // collects 21.
+    let mut g = session_with_island();
+    insert_isolated(&mut g, concept(21, 1, "correction", ConceptType::Entity), 1);
+    g.upsert_edge(live(200, 21, 20)).unwrap();
+    let first = run(&mut g, default_params());
+    assert_eq!(first.concepts_collected, vec![nid(20)]);
+    assert!(g.node(nid(21)).is_some());
+    let mut pending = first.survivors_pending.clone();
+    drain_survivor_bumps(&mut g, &mut pending, usize::MAX);
+    let second = run(&mut g, default_params());
+    assert_eq!(second.concepts_collected, vec![nid(21)]);
+}
+
+#[test]
+fn the_protection_lapses_once_the_contradiction_is_outweighed() {
+    let mut g = session_with_island();
+    g.upsert_edge(live(200, 20, 10)).unwrap();
+    assert!(run(&mut g.clone(), default_params())
+        .concepts_collected
+        .is_empty());
+    // Newer eligible evidence for 10: a concept from another interaction
+    // (another agent) depends on it, written after the contradiction.
+    let i2 = Interaction {
+        agent_id: AgentId::from("agent-b"),
+        created_at: ts(2),
+        ..interaction(2, Some(1))
+    };
+    let i2_id = i2.id;
+    g.insert_interaction(i2).unwrap();
+    let supporter = Concept {
+        origin_agent: AgentId::from("agent-b"),
+        ..concept(30, 2, "still holds", ConceptType::Entity)
+    };
+    g.insert_concept(supporter, i2_id).unwrap();
+    g.upsert_edge(edge(201, 30, 10, EdgeType::Dependency, 1.0, 3))
+        .unwrap();
+    assert!(
+        crate::daemon::contradiction::detect(
+            &g,
+            default_params().contradiction_evidence_min_age,
+            default_params().now
+        )
+        .is_empty(),
+        "the contradiction is outweighed"
+    );
+    assert_eq!(
+        run(&mut g, default_params()).concepts_collected,
+        vec![nid(20)]
+    );
+}
+
+#[test]
+fn concepts_that_only_contradict_each_other_keep_neither_alive() {
+    // A pair, then a three-cycle, of islands.
+    for ring in [&[20u64, 21][..], &[20, 21, 22]] {
+        let mut g = session_with_island();
+        for &n in ring {
+            if n != 20 {
+                insert_isolated(
+                    &mut g,
+                    concept(n, 1, &format!("island {n}"), ConceptType::Entity),
+                    1,
+                );
+            }
+        }
+        for (i, &n) in ring.iter().enumerate() {
+            let next = ring[(i + 1) % ring.len()];
+            g.upsert_edge(live(200 + n, n, next)).unwrap();
+        }
+        let hits = crate::daemon::contradiction::detect(
+            &g,
+            default_params().contradiction_evidence_min_age,
+            default_params().now,
+        );
+        assert_eq!(hits.len(), ring.len(), "every member is contradicted");
+        let outcome = run(&mut g, default_params());
+        assert_eq!(
+            outcome.concepts_collected,
+            ring.iter().map(|&n| nid(n)).collect::<Vec<_>>(),
+            "{ring:?}"
+        );
+    }
+}
+
+/// A chain is anchored at its end: 22 corrects 21, which corrects 20, which
+/// is not a correction. 21 and 22 are kept; 20 is judged normally.
+#[test]
+fn a_chain_of_corrections_is_kept_through_its_anchor() {
+    let mut g = session_with_island();
+    // 20 is the anchored target; give it a connection so it stays.
+    g.upsert_edge(edge(199, 20, 10, EdgeType::Dependency, 1.0, 0))
+        .unwrap();
+    insert_isolated(
+        &mut g,
+        concept(21, 1, "first correction", ConceptType::Entity),
+        1,
+    );
+    insert_isolated(
+        &mut g,
+        concept(22, 1, "second correction", ConceptType::Entity),
+        1,
+    );
+    g.upsert_edge(live(200, 21, 20)).unwrap();
+    g.upsert_edge(Edge {
+        created_at: ts(2),
+        last_reinforced: ts(2),
+        ..live(201, 22, 21)
+    })
+    .unwrap();
+    let outcome = run(&mut g, default_params());
+    assert!(outcome.concepts_collected.is_empty(), "{outcome:?}");
+
+    // A cycle hanging off an anchor is kept through it: 21 and 22
+    // contradict each other, and 21 also corrects 20.
+    let mut g = session_with_island();
+    g.upsert_edge(edge(199, 20, 10, EdgeType::Dependency, 1.0, 0))
+        .unwrap();
+    insert_isolated(
+        &mut g,
+        concept(21, 1, "first correction", ConceptType::Entity),
+        1,
+    );
+    insert_isolated(
+        &mut g,
+        concept(22, 1, "second correction", ConceptType::Entity),
+        1,
+    );
+    g.upsert_edge(live(200, 21, 20)).unwrap();
+    g.upsert_edge(live(201, 22, 21)).unwrap();
+    g.upsert_edge(live(202, 21, 22)).unwrap();
+    let outcome = run(&mut g, default_params());
+    assert!(outcome.concepts_collected.is_empty(), "{outcome:?}");
+}
+
+#[test]
+fn the_default_evidence_age_is_the_configs() {
+    assert_eq!(
+        GcParams::default().contradiction_evidence_min_age,
+        crate::config::Config::default().canonization_edge_min_age
+    );
+}

@@ -57,6 +57,23 @@
   and the either-direction `Contradicts` pair check that
   `canon alias-preview --similar` uses (and #181's redundancy rule will).
 
+### Fixed
+
+- **GC no longer collects the correction of a contradicted ordinary concept
+  (#197).** Since #179 recall shows the contradicting concept beside any
+  contradicted concept, but GC protected it only when the contradicted
+  concept was Venerable or Canonical, so a stale ordinary fact could
+  outlive its correction and be recalled with a warning naming a concept
+  that was gone. A sweep now also protects the correction of every
+  contradiction the detector reports at the sweep's clock (the same check
+  recall uses), as long as the contradicted concept is still in memory. The
+  protection ends once that concept is collected or newer evidence
+  outweighs the contradiction. Concepts that only contradict each other, in
+  a pair or a longer cycle, keep none of themselves alive. GC runs on the
+  session graph for every store, so the rule holds on all of them.
+  `GcParams::contradiction_evidence_min_age` carries the session's
+  `canonization_edge_min_age` from the daemon.
+
 ## 0.7.0 (2026-10-19)
 
 ### Highlights

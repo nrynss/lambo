@@ -1555,6 +1555,8 @@ fn run_cycle(
                     weights: *weights,
                     max_canonical_nodes: params.max_canonical_nodes,
                     max_survivor_bumps: params.gc_survivor_bump_chunk,
+                    // #197: keep the corrections recall shows.
+                    contradiction_evidence_min_age: params.contradiction_evidence_min_age,
                     ..Default::default()
                 },
             );
