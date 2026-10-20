@@ -532,11 +532,12 @@ async fn a_replayed_contradiction_re_resolves_and_settles_applied_or_failed() {
     mem2.close().await.unwrap();
 }
 
-/// A hybrid similarity merge keeps the contradiction (it drops a citation,
-/// #36 PR 4 review M2): the merged concept is its own node, tied to its
-/// near twin by `Semantic`, and contradicts it.
+/// #193: a concept is never merged by similarity into what it is declared
+/// `against`. Through 0.7.0 the near twin merged (a `Semantic` edge) and
+/// contradicted it too (#36 PR 4 review M2); now the veto refuses the
+/// merge, the contradiction is written, and the receipt counts the veto.
 #[tokio::test]
-async fn a_similarity_merge_into_the_contradicted_target_keeps_the_contradiction() {
+async fn a_near_twin_declared_against_is_not_merged_into() {
     use crate::embed::{NEAR_A, NEAR_B};
     let mem = memory_with(
         Arc::new(super::writes::VectorSearchStore::graph_ranked(Arc::new(
@@ -559,8 +560,9 @@ async fn a_similarity_merge_into_the_contradicted_target_keeps_the_contradiction
             &[against(NEAR_B, &[&format::short_id(target)])],
         )
         .await
-        .expect("a merge does not refuse a contradiction");
-    assert_eq!(out.semantic_merged, vec![target], "the merge happened");
+        .expect("the veto does not refuse the write");
+    assert!(out.semantic_merged.is_empty(), "vetoed: {out:?}");
+    assert_eq!(out.merge_guarded.contradicts, 1);
     assert_eq!(out.contradicted, 1);
     {
         let g = mem.graph.read();
@@ -569,6 +571,8 @@ async fn a_similarity_merge_into_the_contradicted_target_keeps_the_contradiction
         assert!(g
             .edge_between(merged, target, EdgeType::Contradicts)
             .is_some());
+        assert!(g.edge_between(merged, target, EdgeType::Semantic).is_none());
+        assert!(g.edge_between(target, merged, EdgeType::Semantic).is_none());
         g.assert_invariants().unwrap();
     }
     mem.close().await.unwrap();

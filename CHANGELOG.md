@@ -34,6 +34,21 @@
   (both only when non-empty), and `LayeredHit::companion_of` in the
   library. A contradicting concept that ranked in by itself carries the
   `contradicts` line but not the field.
+- **Behaviour change: hybrid derive refuses two similarity merges (#193).**
+  A new concept is no longer merged by vector similarity into a concept
+  whose text names different identifiers (digit runs or identifier tokens
+  such as `v0.5.0`, `src/mcp/server.rs`, `round3`), so `release v0.5.0 is
+  current` and `release v0.6.0 is current` stay two facts at any cosine.
+  It is also never merged into a concept that its own `against` names: the
+  `Contradicts` edge is still written, but no `Semantic` edge beside it.
+  These are the guards `canon alias-preview --similar` already applies
+  (#178), now shared through `graph::canonical::same_identifiers`. A
+  refused hit leaves the concept fresh (its vector kept) unless another
+  hit at or above the threshold passes. The commit's re-plan check
+  ignores rivals the guards refuse. Every store is covered, including
+  the Postgres family's unflushed union. Merges can only become rarer.
+  `DeriveOutcome::merge_guarded` counts the refused hits, and the receipt
+  adds `N similarity merge(s) refused (...)` only when one was.
 
 ### Added
 

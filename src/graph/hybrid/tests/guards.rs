@@ -88,7 +88,10 @@ async fn differing_identifiers_never_merge() {
             "review notes for J3-round1.md: two findings",
             "review notes for J3-round3.md: two findings",
         ),
-        ("the embedder listens on port 8080", "the embedder listens on port 8081"),
+        (
+            "the embedder listens on port 8080",
+            "the embedder listens on port 8081",
+        ),
     ] {
         let (graph, interaction, ids) = seeded(&[old]).await;
         let out = derive_one(
@@ -159,7 +162,14 @@ async fn a_write_never_merges_into_what_it_is_against() {
     const NEW: &str = "the dogfood embedder is candle bge-m3";
     let (graph, interaction, ids) = seeded(&[OLD]).await;
     let old = ids[0];
-    let out = derive_one(&graph, interaction, NEW, vec![hit(old, 0.97)], &against(NEW, old)).await;
+    let out = derive_one(
+        &graph,
+        interaction,
+        NEW,
+        vec![hit(old, 0.97)],
+        &against(NEW, old),
+    )
+    .await;
     let new = out.created[0];
     assert!(out.semantic_merged.is_empty());
     assert!(!semantic(&graph, old, new));
@@ -292,7 +302,11 @@ fn a_guarded_rival_does_not_make_a_plan_stale() {
             semantic_match_threshold: SEMANTIC_MATCH_THRESHOLD_DEFAULT,
             rescore_cap: MAX_PLAN_RESCORES,
         };
-        let want = if stale { Verdict::Stale } else { Verdict::Holds };
+        let want = if stale {
+            Verdict::Stale
+        } else {
+            Verdict::Holds
+        };
         assert_eq!(
             plan_still_holds(&g, &plan).unwrap(),
             want,
