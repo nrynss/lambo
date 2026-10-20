@@ -88,6 +88,8 @@
   outweighs the contradiction. Concepts that only contradict each other, in
   a pair or a longer cycle, keep none of themselves alive. GC runs on the
   session graph for every store, so the rule holds on all of them.
+  Like the promoted-target rule, it lets any agent keep a concept alive
+  by contradicting a long-lived one; the docs say so.
   `GcParams::contradiction_evidence_min_age` carries the session's
   `canonization_edge_min_age` from the daemon.
 
