@@ -35,8 +35,8 @@
 //! the bound ([`default_contradiction_max`]). Over it, the lowest-priority
 //! contradictions go first; the overall bound then evicts as before. The
 //! rest of the list is reserved for the other kinds: no number of
-//! contradictions can evict them from it. Conflicts are not counted; they
-//! outrank every other kind anyway. Under the budget nothing is evicted
+//! contradictions can evict them from it. Conflicts are not counted
+//! against the budget. Under the budget nothing is evicted
 //! that the bound alone would not evict. The daemon inserts a cycle's
 //! contradictions oldest-declared first, so a full budget keeps the most
 //! recently declared. A contradiction dropped by the budget carries no
@@ -297,8 +297,8 @@ impl HotList {
 
     /// Sort, then enforce the contradiction budget and the bound: the
     /// lowest-priority contradictions beyond the budget go first, then the
-    /// lowest entries beyond `max`. Returns what was evicted, lowest
-    /// priority last.
+    /// lowest entries beyond `max`. Returns what was evicted: the budget's
+    /// drops (priority-descending), then the bound's.
     fn enforce(&mut self) -> Vec<HotListEntry> {
         self.entries.sort_by(higher_priority);
         let mut evicted = Vec::new();
@@ -334,9 +334,10 @@ impl HotList {
     /// refresh — so a persisting condition never duplicates.
     ///
     /// Returns the entry evicted by the contradiction budget or the bound, if
-    /// any (`None` while the list stays within both). Discarding the result silently drops the evicted
-    /// entry, so the compiler enforces it as `#[must_use]`: bind or `let _ =`
-    /// the value explicitly if you don't need it.
+    /// any (`None` while the list stays within both). Discarding the result
+    /// silently drops the evicted entry, so the compiler enforces it as
+    /// `#[must_use]`: bind or `let _ =` the value explicitly if you don't
+    /// need it.
     #[must_use]
     pub fn insert(&mut self, entry: HotListEntry) -> Option<HotListEntry> {
         let mut entry = entry;
@@ -352,8 +353,8 @@ impl HotList {
             Some(existing) => *existing = entry,
             None => self.entries.push(entry),
         }
-        // Enforce the budget and the bound (#196). One entry was added, so
-        // at most one goes; the lowest-priority is the last evicted.
+        // Enforce the budget and the bound (#196). The list was within both
+        // and one entry was added, so at most one goes.
         self.enforce().pop()
     }
 
