@@ -84,8 +84,9 @@
 //!
 //! [`insert_contradictions`] refreshes one [`Condition::Contradiction`]
 //! entry per hit; its predicate re-runs [`contradiction_at`] at the
-//! caller's `now`, so recall drops the entry when newer eligible evidence arrives (or ages in), or when the
-//! contradicting concept is collected, and otherwise renders the payload
+//! caller's `now`, so recall drops the entry when newer eligible evidence
+//! arrives (or ages in), or when the contradicting concept is collected
+//! (a demotion no longer drops it, #179), and otherwise renders the payload
 //! as of the read. Unlike conflict, it emits no `DaemonEvent`.
 
 use std::collections::HashSet;
