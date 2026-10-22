@@ -694,3 +694,475 @@ async fn a_too_short_related_pairs_file_is_cached_for_the_recheck_window() {
     assert_eq!(recent.verdict, CanaryVerdict::RecentlyVerified);
     assert_eq!(probe.calls(), calls);
 }
+
+/// #191: answers the canaries, but fails every labelled-pair text while
+/// `pairs_down` is set (an embedder that is down or slow for the large file).
+struct PairsDown {
+    probe: Probe,
+    pairs_down: std::sync::atomic::AtomicBool,
+    /// How long a failing pair text hangs first (a slow embedder).
+    hang: Duration,
+}
+
+impl PairsDown {
+    fn new() -> Self {
+        Self {
+            probe: Probe::new(0.0),
+            pairs_down: std::sync::atomic::AtomicBool::new(true),
+            hang: Duration::ZERO,
+        }
+    }
+    fn recover(&self) {
+        self.pairs_down.store(false, Ordering::SeqCst);
+    }
+    fn calls(&self) -> usize {
+        self.probe.calls()
+    }
+}
+
+#[async_trait::async_trait]
+impl Embedder for PairsDown {
+    fn dimensions(&self) -> usize {
+        DIM
+    }
+
+    async fn embed(&self, text: &str) -> Result<Vec<f32>, EmbedError> {
+        if text.starts_with("rel:") && self.pairs_down.load(Ordering::SeqCst) {
+            self.probe.calls.fetch_add(1, Ordering::SeqCst);
+            tokio::time::sleep(self.hang).await;
+            return Err(EmbedError::Unavailable("pairs embed timed out".into()));
+        }
+        self.probe.embed(text).await
+    }
+}
+
+async fn stored_fingerprint(store: &crate::MemoryStore) -> Fingerprint {
+    let raw = store
+        .read_store_meta(&fingerprint_key(&contract()))
+        .await
+        .unwrap()
+        .expect("pinned");
+    serde_json::from_str(&raw).unwrap()
+}
+
+// Paused: the wait is counted from the failure, so the attempt must take
+// no time for the deadlines below to be exact.
+#[tokio::test(start_paused = true)]
+async fn failing_related_pairs_back_off_and_are_measured_once_the_embedder_recovers() {
+    let dir = Scratch::new();
+    let opts = CanaryOptions {
+        mode: CanaryMode::Warn,
+        related_pairs: Some(write_pairs(dir.path(), 120, "b")),
+    };
+    let store = store();
+    let embedder = PairsDown::new();
+    let t0 = chrono::Utc::now();
+    let at = |secs: i64| t0 + chrono::Duration::seconds(secs);
+
+    // Attach 1: pins, fails the pairs, records a retry.
+    let first = check_at(&store, &embedder, &contract(), &opts, 0.85, at(0))
+        .await
+        .unwrap();
+    assert_eq!(first.verdict, CanaryVerdict::Pinned);
+    assert_eq!(first.threshold_source, ThresholdSource::Configured);
+    let retry = stored_fingerprint(&store)
+        .await
+        .related_pairs_retry
+        .expect("a retry is recorded");
+    assert_eq!(retry.failures, 1);
+    assert_eq!(retry.next_attempt_at, at(60));
+    assert!(
+        retry.last_error.contains("timed out"),
+        "{}",
+        retry.last_error
+    );
+
+    // Attach 2, inside the backoff: the canaries verify, the pairs are not
+    // embedded again.
+    let before = embedder.calls();
+    let second = check_at(&store, &embedder, &contract(), &opts, 0.85, at(1))
+        .await
+        .unwrap();
+    assert!(matches!(second.verdict, CanaryVerdict::Verified { .. }));
+    assert_eq!(second.merge_threshold, 0.85);
+    assert_eq!(embedder.calls() - before, CANARY_PHRASES.len());
+
+    // Attach 3, inside the backoff and the recheck window: nothing embedded.
+    let before = embedder.calls();
+    let third = check_at(&store, &embedder, &contract(), &opts, 0.85, at(2))
+        .await
+        .unwrap();
+    assert_eq!(third.verdict, CanaryVerdict::RecentlyVerified);
+    assert_eq!(third.merge_threshold, 0.85);
+    assert_eq!(embedder.calls(), before);
+
+    // Attach 4, after next_attempt_at, with the embedder back: measured,
+    // cached, and the retry cleared.
+    embedder.recover();
+    let before = embedder.calls();
+    let fourth = check_at(&store, &embedder, &contract(), &opts, 0.85, at(60))
+        .await
+        .unwrap();
+    assert_eq!(
+        fourth.threshold_source,
+        ThresholdSource::RelatedPairs { pairs: 120 }
+    );
+    assert_eq!(embedder.calls() - before, CANARY_PHRASES.len() + 240);
+    let fp = stored_fingerprint(&store).await;
+    assert!(fp.related_pairs_retry.is_none());
+    assert_eq!(fp.merge_threshold.unwrap().pairs, 120);
+}
+
+#[test]
+fn the_pairs_backoff_doubles_up_to_the_cap() {
+    let secs: Vec<u64> = (1..=9).map(|n| PairsRetry::delay(n).as_secs()).collect();
+    assert_eq!(secs, [60, 120, 240, 480, 960, 1920, 3600, 3600, 3600]);
+    assert_eq!(PairsRetry::delay(0), PAIRS_RETRY_BASE);
+    assert_eq!(PairsRetry::delay(u32::MAX), PAIRS_RETRY_CAP);
+}
+
+// Paused: the wait is counted from the failure, so the attempt must take
+// no time for the deadlines below to be exact.
+#[tokio::test(start_paused = true)]
+async fn repeated_pairs_failures_grow_the_wait() {
+    let dir = Scratch::new();
+    let opts = CanaryOptions {
+        mode: CanaryMode::Verify,
+        related_pairs: Some(write_pairs(dir.path(), 120, "g")),
+    };
+    let store = store();
+    let embedder = PairsDown::new();
+    let t0 = chrono::Utc::now();
+    let mut now = t0;
+    for (failures, wait) in [(1, 60), (2, 120), (3, 240), (4, 480)] {
+        check_at(&store, &embedder, &contract(), &opts, 0.85, now)
+            .await
+            .unwrap();
+        let retry = stored_fingerprint(&store)
+            .await
+            .related_pairs_retry
+            .unwrap();
+        assert_eq!(retry.failures, failures);
+        assert_eq!(retry.next_attempt_at, now + chrono::Duration::seconds(wait));
+        // One second short of the wait: still backing off, so the count
+        // does not move.
+        check_at(
+            &store,
+            &embedder,
+            &contract(),
+            &opts,
+            0.85,
+            retry.next_attempt_at - chrono::Duration::seconds(1),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            stored_fingerprint(&store)
+                .await
+                .related_pairs_retry
+                .unwrap()
+                .failures,
+            failures
+        );
+        now = retry.next_attempt_at;
+    }
+}
+
+#[tokio::test]
+async fn a_changed_pairs_file_is_measured_during_a_backoff() {
+    let dir = Scratch::new();
+    let store = store();
+    let embedder = PairsDown::new();
+    let t0 = chrono::Utc::now();
+    let at = |secs: i64| t0 + chrono::Duration::seconds(secs);
+    let old = CanaryOptions {
+        mode: CanaryMode::Warn,
+        related_pairs: Some(write_pairs(dir.path(), 120, "o")),
+    };
+    check_at(&store, &embedder, &contract(), &old, 0.85, at(0))
+        .await
+        .unwrap();
+    check_at(&store, &embedder, &contract(), &old, 0.85, at(1))
+        .await
+        .unwrap();
+    assert!(stored_fingerprint(&store)
+        .await
+        .related_pairs_retry
+        .is_some());
+
+    // Inside both the backoff and the recheck window, a new file is
+    // measured, not trusted.
+    embedder.recover();
+    let new = CanaryOptions {
+        related_pairs: Some(write_pairs(dir.path(), 110, "n")),
+        ..old.clone()
+    };
+    let before = embedder.calls();
+    let out = check_at(&store, &embedder, &contract(), &new, 0.85, at(2))
+        .await
+        .unwrap();
+    assert_eq!(
+        out.threshold_source,
+        ThresholdSource::RelatedPairs { pairs: 110 }
+    );
+    assert_eq!(embedder.calls() - before, CANARY_PHRASES.len() + 220);
+    assert!(stored_fingerprint(&store)
+        .await
+        .related_pairs_retry
+        .is_none());
+}
+
+#[tokio::test]
+async fn a_new_file_that_fails_starts_its_own_count_and_never_uses_the_old_threshold() {
+    let dir = Scratch::new();
+    let store = store();
+    let embedder = PairsDown::new();
+    embedder.recover();
+    let t0 = chrono::Utc::now();
+    let at = |secs: i64| t0 + chrono::Duration::seconds(secs);
+    let old = CanaryOptions {
+        mode: CanaryMode::Warn,
+        related_pairs: Some(write_pairs(dir.path(), 120, "p")),
+    };
+    let first = check_at(&store, &embedder, &contract(), &old, 0.85, at(0))
+        .await
+        .unwrap();
+    assert_eq!(
+        first.threshold_source,
+        ThresholdSource::RelatedPairs { pairs: 120 }
+    );
+    check_at(&store, &embedder, &contract(), &old, 0.85, at(1))
+        .await
+        .unwrap();
+
+    // The file changes and the embedder goes down for the pairs.
+    embedder.pairs_down.store(true, Ordering::SeqCst);
+    let new = CanaryOptions {
+        related_pairs: Some(write_pairs(dir.path(), 130, "q")),
+        ..old.clone()
+    };
+    let failed = check_at(&store, &embedder, &contract(), &new, 0.85, at(2))
+        .await
+        .unwrap();
+    assert_eq!(failed.threshold_source, ThresholdSource::Configured);
+    let fp = stored_fingerprint(&store).await;
+    assert_eq!(fp.related_pairs_retry.as_ref().unwrap().failures, 1);
+    // The old file's derivation is kept, but never applied to the new file,
+    // also on the recheck-window shortcut.
+    assert_eq!(fp.merge_threshold.unwrap().pairs, 120);
+    let recent = check_at(&store, &embedder, &contract(), &new, 0.85, at(3))
+        .await
+        .unwrap();
+    assert_eq!(recent.verdict, CanaryVerdict::RecentlyVerified);
+    assert_eq!(recent.threshold_source, ThresholdSource::Configured);
+    assert_eq!(recent.merge_threshold, 0.85);
+}
+
+#[tokio::test]
+async fn verify_still_embeds_the_canaries_during_a_pairs_backoff() {
+    let dir = Scratch::new();
+    let opts = CanaryOptions {
+        mode: CanaryMode::Verify,
+        related_pairs: Some(write_pairs(dir.path(), 120, "v")),
+    };
+    let store = store();
+    let embedder = PairsDown::new();
+    let t0 = chrono::Utc::now();
+    let at = |secs: i64| t0 + chrono::Duration::seconds(secs);
+    check_at(&store, &embedder, &contract(), &opts, 0.85, at(0))
+        .await
+        .unwrap();
+    for secs in [1, 2, 30] {
+        let before = embedder.calls();
+        let out = check_at(&store, &embedder, &contract(), &opts, 0.85, at(secs))
+            .await
+            .unwrap();
+        assert!(matches!(out.verdict, CanaryVerdict::Verified { .. }));
+        assert_eq!(embedder.calls() - before, CANARY_PHRASES.len());
+    }
+}
+
+#[test]
+fn a_backoff_the_clock_moved_back_past_is_not_honoured() {
+    let now = chrono::Utc::now();
+    let retry = PairsRetry {
+        source_sha256: "s".into(),
+        failures: 7,
+        next_attempt_at: now + chrono::Duration::from_std(PAIRS_RETRY_CAP).unwrap(),
+        last_error: String::new(),
+    };
+    assert!(retry.holds("s", now));
+    assert!(!retry.holds("other", now));
+    assert!(!retry.holds("s", now - chrono::Duration::seconds(1)));
+    assert!(!retry.holds("s", retry.next_attempt_at));
+}
+
+#[tokio::test]
+async fn a_pin_written_without_the_retry_field_still_decodes() {
+    let store = store();
+    let probe = Probe::new(0.0);
+    check(&store, &probe, &contract(), &warn(), 0.85)
+        .await
+        .unwrap();
+    let raw = store
+        .read_store_meta(&fingerprint_key(&contract()))
+        .await
+        .unwrap()
+        .unwrap();
+    // A pin with no retry writes no field, as 0.7.0 did.
+    assert!(!raw.contains("related_pairs_retry"), "{raw}");
+    let fp: Fingerprint = serde_json::from_str(&raw).unwrap();
+    assert!(fp.related_pairs_retry.is_none());
+    // And with one set, it round-trips.
+    let with = Fingerprint {
+        related_pairs_retry: Some(PairsRetry {
+            source_sha256: "abc".into(),
+            failures: 2,
+            next_attempt_at: chrono::Utc::now(),
+            last_error: "down".into(),
+        }),
+        ..fp
+    };
+    let back: Fingerprint = serde_json::from_str(&serde_json::to_string(&with).unwrap()).unwrap();
+    assert_eq!(back, with);
+}
+
+#[tokio::test]
+async fn a_retry_for_another_file_is_dropped() {
+    let dir = Scratch::new();
+    let store = store();
+    let embedder = PairsDown::new();
+    let t0 = chrono::Utc::now();
+    let at = |secs: i64| t0 + chrono::Duration::seconds(secs);
+    let failing = CanaryOptions {
+        mode: CanaryMode::Verify,
+        related_pairs: Some(write_pairs(dir.path(), 120, "f")),
+    };
+    check_at(&store, &embedder, &contract(), &failing, 0.85, at(0))
+        .await
+        .unwrap();
+    assert!(stored_fingerprint(&store)
+        .await
+        .related_pairs_retry
+        .is_some());
+
+    // A too-short file (cached as unusable, nothing embedded for it) drops
+    // the other file's retry, so going back to the failing file measures it.
+    let short = CanaryOptions {
+        related_pairs: Some(write_pairs(dir.path(), 10, "s")),
+        ..failing.clone()
+    };
+    check_at(&store, &embedder, &contract(), &short, 0.85, at(1))
+        .await
+        .unwrap();
+    assert!(stored_fingerprint(&store)
+        .await
+        .related_pairs_retry
+        .is_none());
+
+    embedder.recover();
+    let back = check_at(&store, &embedder, &contract(), &failing, 0.85, at(2))
+        .await
+        .unwrap();
+    assert_eq!(
+        back.threshold_source,
+        ThresholdSource::RelatedPairs { pairs: 120 }
+    );
+
+    // No file at all drops a retry too.
+    embedder.pairs_down.store(true, Ordering::SeqCst);
+    let other = CanaryOptions {
+        related_pairs: Some(write_pairs(dir.path(), 120, "h")),
+        ..failing.clone()
+    };
+    check_at(&store, &embedder, &contract(), &other, 0.85, at(3))
+        .await
+        .unwrap();
+    assert!(stored_fingerprint(&store)
+        .await
+        .related_pairs_retry
+        .is_some());
+    let none = CanaryOptions {
+        related_pairs: None,
+        ..failing
+    };
+    check_at(&store, &embedder, &contract(), &none, 0.85, at(4))
+        .await
+        .unwrap();
+    assert!(stored_fingerprint(&store)
+        .await
+        .related_pairs_retry
+        .is_none());
+}
+
+// Paused: the hang advances tokio's clock, not the test's wall time.
+#[tokio::test(start_paused = true)]
+async fn a_slow_pairs_failure_still_waits_the_full_delay() {
+    let dir = Scratch::new();
+    let opts = CanaryOptions {
+        mode: CanaryMode::Verify,
+        related_pairs: Some(write_pairs(dir.path(), 120, "w")),
+    };
+    let store = store();
+    // Hangs past the budget: the attempt fails at the deadline, 60 s in.
+    let embedder = PairsDown {
+        hang: Duration::from_secs(90),
+        ..PairsDown::new()
+    };
+    let t0 = chrono::Utc::now();
+    let at = |secs: i64| t0 + chrono::Duration::seconds(secs);
+    check_at(&store, &embedder, &contract(), &opts, 0.85, at(0))
+        .await
+        .unwrap();
+    let retry = stored_fingerprint(&store)
+        .await
+        .related_pairs_retry
+        .unwrap();
+    let budget = CANARY_EMBED_TIMEOUT.as_secs() as i64;
+    assert_eq!(retry.next_attempt_at, at(budget + 60));
+
+    // Past `now + delay` but inside the wait counted from the failure: the
+    // pairs are not tried again.
+    let before = embedder.calls();
+    check_at(&store, &embedder, &contract(), &opts, 0.85, at(budget + 59))
+        .await
+        .unwrap();
+    assert_eq!(embedder.calls() - before, CANARY_PHRASES.len());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_pairs_failure_keeps_no_pair_text_in_the_pin() {
+    let dir = Scratch::new();
+    let opts = CanaryOptions {
+        mode: CanaryMode::Verify,
+        related_pairs: Some(write_pairs(dir.path(), 120, "secret")),
+    };
+    let store = store();
+    let embedder = PairsDown::new();
+    check_at(
+        &store,
+        &embedder,
+        &contract(),
+        &opts,
+        0.85,
+        chrono::Utc::now(),
+    )
+    .await
+    .unwrap();
+    let raw = store
+        .read_store_meta(&fingerprint_key(&contract()))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(raw.contains("related_pairs_retry"), "{raw}");
+    assert!(!raw.contains("rel:secret"), "{raw}");
+    let retry = stored_fingerprint(&store)
+        .await
+        .related_pairs_retry
+        .unwrap();
+    assert!(
+        retry.last_error.starts_with("embedding text 1 of 240"),
+        "{}",
+        retry.last_error
+    );
+}

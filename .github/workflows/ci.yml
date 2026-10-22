@@ -452,6 +452,26 @@ jobs:
             store::pg::embedding_source_live::postgres_round_trips_the_embedding_source \
             2>&1 | tee postgres-embedding-source.log
           grep -q 'test store::pg::embedding_source_live::postgres_round_trips_the_embedding_source ... ok' postgres-embedding-source.log
+      # #148 (PR #170): the provision re-key on live Postgres (old-rule keys
+      # re-keyed, a held session refuses, a rerun is a no-op).
+      - name: Live Postgres canonical-key re-key
+        run: |
+          set -o pipefail
+          cargo test --no-default-features --features store-postgres --lib \
+            -- --ignored --nocapture --exact \
+            store::pg::rekey::postgres_rekeys_identifier_concepts \
+            2>&1 | tee postgres-rekey.log
+          grep -q 'test store::pg::rekey::postgres_rekeys_identifier_concepts ... ok' postgres-rekey.log
+      # #60 (PR #104): derive's merge on Postgres sees a paraphrase the holder
+      # has not flushed yet.
+      - name: Live Postgres merge freshness (unflushed paraphrase)
+        run: |
+          set -o pipefail
+          cargo test --no-default-features --features store-postgres --lib \
+            -- --ignored --nocapture --exact \
+            store::pg::merge_freshness::postgres_holder_merges_an_unflushed_paraphrase \
+            2>&1 | tee postgres-merge-freshness.log
+          grep -q 'test store::pg::merge_freshness::postgres_holder_merges_an_unflushed_paraphrase ... ok' postgres-merge-freshness.log
 
   # Live CockroachDB tier (secret-gated): runs the `#[ignore]`d live tests
   # (CRDB conformance suite, canon progression, vector EXPLAIN) against the

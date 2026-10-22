@@ -33,7 +33,11 @@
 //! [`MIN_RELATED_PAIRS`] of them. With fewer, or none, the configured
 //! `semantic_match_threshold` stays. The derived value is cached in the
 //! fingerprint against the file's SHA-256, so the pairs are embedded again
-//! only when the file changes.
+//! only when the file changes. A pairs file that fails to embed while the
+//! canaries do (a slow or flaky embedder, or a file overrunning
+//! [`CANARY_EMBED_TIMEOUT`]) is not cached; it is retried with an
+//! exponential backoff ([`PairsRetry`], #191), so a failing file does not
+//! cost every writer attach a full re-embed.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -71,6 +75,16 @@ pub const CANARY_EMBED_TIMEOUT: Duration = Duration::from_secs(60);
 /// inside it (a daemon attaches once and then runs for days) would go
 /// unchecked.
 pub const CANARY_RECHECK: Duration = Duration::from_secs(10 * 60);
+
+/// #191: the first wait after the related pairs fail to embed. Each further
+/// failure of the same file doubles it, up to [`PAIRS_RETRY_CAP`].
+pub const PAIRS_RETRY_BASE: Duration = Duration::from_secs(60);
+
+/// #191: the longest wait between attempts to embed a failing pairs file.
+pub const PAIRS_RETRY_CAP: Duration = Duration::from_secs(60 * 60);
+
+/// #191: the most characters of a pairs failure kept in the pin.
+const LAST_ERROR_MAX: usize = 300;
 
 /// The fixed canary set: mixed domains and languages, prose, code,
 /// identifiers and numbers. Versioned by [`CANARY_VERSION`].
@@ -182,6 +196,40 @@ pub struct DerivedThreshold {
     pub source_sha256: String,
 }
 
+/// #191: the related pairs failed to embed; when to try again. Kept against
+/// the file's SHA-256, so a changed file is measured at the next attach.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PairsRetry {
+    pub source_sha256: String,
+    /// Consecutive failures of this file.
+    pub failures: u32,
+    /// No attach embeds this file's pairs before this time.
+    pub next_attempt_at: chrono::DateTime<chrono::Utc>,
+    pub last_error: String,
+}
+
+impl PairsRetry {
+    /// The wait after `failures` consecutive failures:
+    /// `PAIRS_RETRY_BASE · 2^(failures − 1)`, at most [`PAIRS_RETRY_CAP`].
+    pub fn delay(failures: u32) -> Duration {
+        let doublings = failures.saturating_sub(1).min(31);
+        PAIRS_RETRY_BASE
+            .saturating_mul(1u32 << doublings)
+            .min(PAIRS_RETRY_CAP)
+    }
+
+    /// Whether `now` is inside this retry's wait for the file `sha`. A wait
+    /// longer than [`PAIRS_RETRY_CAP`] from `now` (the clock moved back) is
+    /// not honoured, so a skewed clock cannot park the pairs for ever.
+    fn holds(&self, sha: &str, now: chrono::DateTime<chrono::Utc>) -> bool {
+        self.source_sha256 == sha
+            && now < self.next_attempt_at
+            && (self.next_attempt_at - now)
+                .to_std()
+                .is_ok_and(|wait| wait <= PAIRS_RETRY_CAP)
+    }
+}
+
 /// What `store_meta` keeps for one contract.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Fingerprint {
@@ -202,6 +250,9 @@ pub struct Fingerprint {
     /// [`CANARY_MIN_COSINE`]. `None` until the first verification after a pin.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verified_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// #191: set while the related pairs file keeps failing to embed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub related_pairs_retry: Option<PairsRetry>,
 }
 
 impl Fingerprint {
@@ -327,7 +378,10 @@ fn random_pair_quantiles(vectors: &[Vec<f32>]) -> PairQuantiles {
     pair_quantiles(cosines).expect("20 canaries make 190 pairs")
 }
 
-/// Embed `texts` in order, every vector `dim` wide.
+/// Embed `texts` in order, every vector `dim` wide. An error names a text by
+/// its position, never by its content: a pairs failure is kept in the pin
+/// (#191), and the operator's labelled texts must not be copied into the
+/// store with it.
 async fn embed_all(
     embedder: &dyn Embedder,
     texts: &[&str],
@@ -336,7 +390,7 @@ async fn embed_all(
     let deadline = tokio::time::Instant::now() + CANARY_EMBED_TIMEOUT;
     let mut out = Vec::with_capacity(texts.len());
     let cap = embedder.batch_capacity().max(1);
-    for chunk in texts.chunks(cap) {
+    for (c, chunk) in texts.chunks(cap).enumerate() {
         // The trait asks callers to guard a little past the deadline, so a
         // batching adapter that overruns it cannot hold the startup.
         let answers = tokio::time::timeout_at(
@@ -345,11 +399,13 @@ async fn embed_all(
         )
         .await
         .map_err(|_| format!("the canary embeds overran {CANARY_EMBED_TIMEOUT:?}"))?;
-        for (text, vector) in chunk.iter().zip(answers) {
-            let vector = vector.map_err(|e| format!("embedding {text:?}: {e}"))?;
+        for (j, vector) in answers.into_iter().take(chunk.len()).enumerate() {
+            let n = c * cap + j + 1;
+            let total = texts.len();
+            let vector = vector.map_err(|e| format!("embedding text {n} of {total}: {e}"))?;
             if vector.len() != dim {
                 return Err(format!(
-                    "embedding {text:?}: {} values, the contract says {dim}",
+                    "embedding text {n} of {total}: {} values, the contract says {dim}",
                     vector.len()
                 ));
             }
@@ -392,6 +448,7 @@ fn fingerprint_of(contract: &EmbeddingContract, vectors: &[Vec<f32>]) -> Fingerp
         random_pair: random_pair_quantiles(vectors),
         merge_threshold: None,
         verified_at: None,
+        related_pairs_retry: None,
     }
 }
 
@@ -602,17 +659,30 @@ pub(crate) async fn check_at(
         .map(read_related_pairs)
         .transpose()?;
 
-    let cached_sha_matches = |f: &Fingerprint| match (&related, &f.merge_threshold) {
-        (None, _) => true,
-        (Some((_, sha)), Some(d)) => *sha == d.source_sha256,
-        (Some(_), None) => false,
+    // Settled for this file: measured (usable or not), or inside its #191
+    // backoff, so nothing would be embedded for it now.
+    let cached_sha_matches = |f: &Fingerprint| match &related {
+        None => true,
+        Some((_, sha)) => {
+            f.merge_threshold
+                .as_ref()
+                .is_some_and(|d| d.source_sha256 == *sha)
+                || f.related_pairs_retry
+                    .as_ref()
+                    .is_some_and(|r| r.holds(sha, now))
+        }
     };
     if let Some(f) = &stored {
         let recent = f.verified_at.is_some_and(|at| {
             now >= at && (now - at).to_std().is_ok_and(|age| age < CANARY_RECHECK)
         });
         if recent && options.mode == CanaryMode::Warn && cached_sha_matches(f) {
-            let derived = f.merge_threshold.as_ref().filter(|_| related.is_some());
+            // During a backoff the cached derivation may be an older file's.
+            let derived = f.merge_threshold.as_ref().filter(|d| {
+                related
+                    .as_ref()
+                    .is_some_and(|(_, sha)| *sha == d.source_sha256)
+            });
             let (merge_threshold, threshold_source) =
                 effective_threshold(derived, Some(&f.random_pair), configured_threshold);
             return Ok(CanaryOutcome {
@@ -702,6 +772,16 @@ pub(crate) async fn check_at(
         fingerprint.verified_at = Some(now);
         dirty = true;
     }
+    // #191: a retry for another file, or for no file, is stale. The current
+    // file is cached, measured, or gets its own retry below.
+    if fingerprint.related_pairs_retry.as_ref().is_some_and(|r| {
+        related
+            .as_ref()
+            .is_none_or(|(_, sha)| r.source_sha256 != *sha)
+    }) {
+        fingerprint.related_pairs_retry = None;
+        dirty = true;
+    }
     match &related {
         None => {}
         Some((pairs, sha)) => {
@@ -725,7 +805,19 @@ pub(crate) async fn check_at(
                         source_sha256: sha.clone(),
                     });
                     dirty = true;
+                } else if let Some(r) = fingerprint
+                    .related_pairs_retry
+                    .as_ref()
+                    .filter(|r| r.holds(sha, now))
+                {
+                    tracing::info!(
+                        failures = r.failures,
+                        next_attempt_at = %r.next_attempt_at,
+                        "the related pairs are backing off after failing to embed; keeping \
+                         semantic_match_threshold"
+                    );
                 } else {
+                    let started = tokio::time::Instant::now();
                     match derive_threshold(embedder, contract, pairs, sha.clone()).await {
                         Ok(d) => {
                             tracing::info!(
@@ -735,16 +827,67 @@ pub(crate) async fn check_at(
                                 "derived the merge threshold from the related pairs (#87)"
                             );
                             fingerprint.merge_threshold = Some(d);
+                            fingerprint.related_pairs_retry = None;
                             dirty = true;
                         }
                         Err(e) => {
-                            tracing::warn!(error = %e, "could not embed the related pairs; keeping semantic_match_threshold");
+                            // #191: not cached (the next attempt may find the
+                            // embedder back), but not retried at every attach
+                            // either. A new file starts the count again.
+                            let failures = fingerprint
+                                .related_pairs_retry
+                                .as_ref()
+                                .filter(|r| r.source_sha256 == *sha)
+                                .map_or(0, |r| r.failures)
+                                .saturating_add(1);
+                            let delay = PairsRetry::delay(failures);
+                            // Counted from the failure, not from `now`: a
+                            // slow failure (up to the embed budget) must not
+                            // leave the next attach already due.
+                            let failed_at = now
+                                + chrono::Duration::from_std(started.elapsed()).unwrap_or_default();
+                            let next_attempt_at = failed_at
+                                + chrono::Duration::from_std(delay)
+                                    .expect("the delay is at most PAIRS_RETRY_CAP");
+                            if delay == PAIRS_RETRY_CAP {
+                                // Hourly for good: likely the file, not the
+                                // embedder (too large for the budget, or the
+                                // wrong width).
+                                tracing::warn!(
+                                    error = %e,
+                                    failures,
+                                    %next_attempt_at,
+                                    "the related pairs keep failing to embed and are retried \
+                                     hourly; check that the file embeds within \
+                                     {CANARY_EMBED_TIMEOUT:?}"
+                                );
+                            } else {
+                                tracing::warn!(
+                                    error = %e,
+                                    failures,
+                                    %next_attempt_at,
+                                    "could not embed the related pairs; keeping \
+                                     semantic_match_threshold and backing off"
+                                );
+                            }
+                            fingerprint.related_pairs_retry = Some(PairsRetry {
+                                source_sha256: sha.clone(),
+                                failures,
+                                next_attempt_at,
+                                // embed_all never names a text's content;
+                                // bound what an embedder's own message adds.
+                                last_error: e.chars().take(LAST_ERROR_MAX).collect(),
+                            });
+                            dirty = true;
                         }
                     }
                 }
             }
         }
     }
+    // Last writer wins, as for a derived threshold: a concurrent writer's
+    // update read before this attach's embeds can be overwritten. A lost
+    // retry or derivation heals at a later attach.
     if dirty {
         write_fingerprint(store, &key, &fingerprint).await?;
     }
