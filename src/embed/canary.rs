@@ -83,6 +83,9 @@ pub const PAIRS_RETRY_BASE: Duration = Duration::from_secs(60);
 /// #191: the longest wait between attempts to embed a failing pairs file.
 pub const PAIRS_RETRY_CAP: Duration = Duration::from_secs(60 * 60);
 
+/// #191: the most characters of a pairs failure kept in the pin.
+const LAST_ERROR_MAX: usize = 300;
+
 /// The fixed canary set: mixed domains and languages, prose, code,
 /// identifiers and numbers. Versioned by [`CANARY_VERSION`].
 pub const CANARY_PHRASES: [&str; 20] = [
@@ -375,7 +378,10 @@ fn random_pair_quantiles(vectors: &[Vec<f32>]) -> PairQuantiles {
     pair_quantiles(cosines).expect("20 canaries make 190 pairs")
 }
 
-/// Embed `texts` in order, every vector `dim` wide.
+/// Embed `texts` in order, every vector `dim` wide. An error names a text by
+/// its position, never by its content: a pairs failure is kept in the pin
+/// (#191), and the operator's labelled texts must not be copied into the
+/// store with it.
 async fn embed_all(
     embedder: &dyn Embedder,
     texts: &[&str],
@@ -384,7 +390,7 @@ async fn embed_all(
     let deadline = tokio::time::Instant::now() + CANARY_EMBED_TIMEOUT;
     let mut out = Vec::with_capacity(texts.len());
     let cap = embedder.batch_capacity().max(1);
-    for chunk in texts.chunks(cap) {
+    for (c, chunk) in texts.chunks(cap).enumerate() {
         // The trait asks callers to guard a little past the deadline, so a
         // batching adapter that overruns it cannot hold the startup.
         let answers = tokio::time::timeout_at(
@@ -393,11 +399,13 @@ async fn embed_all(
         )
         .await
         .map_err(|_| format!("the canary embeds overran {CANARY_EMBED_TIMEOUT:?}"))?;
-        for (text, vector) in chunk.iter().zip(answers) {
-            let vector = vector.map_err(|e| format!("embedding {text:?}: {e}"))?;
+        for (j, vector) in answers.into_iter().take(chunk.len()).enumerate() {
+            let n = c * cap + j + 1;
+            let total = texts.len();
+            let vector = vector.map_err(|e| format!("embedding text {n} of {total}: {e}"))?;
             if vector.len() != dim {
                 return Err(format!(
-                    "embedding {text:?}: {} values, the contract says {dim}",
+                    "embedding text {n} of {total}: {} values, the contract says {dim}",
                     vector.len()
                 ));
             }
@@ -809,6 +817,7 @@ pub(crate) async fn check_at(
                          semantic_match_threshold"
                     );
                 } else {
+                    let started = tokio::time::Instant::now();
                     match derive_threshold(embedder, contract, pairs, sha.clone()).await {
                         Ok(d) => {
                             tracing::info!(
@@ -832,7 +841,12 @@ pub(crate) async fn check_at(
                                 .map_or(0, |r| r.failures)
                                 .saturating_add(1);
                             let delay = PairsRetry::delay(failures);
-                            let next_attempt_at = now
+                            // Counted from the failure, not from `now`: a
+                            // slow failure (up to the embed budget) must not
+                            // leave the next attach already due.
+                            let failed_at = now
+                                + chrono::Duration::from_std(started.elapsed()).unwrap_or_default();
+                            let next_attempt_at = failed_at
                                 + chrono::Duration::from_std(delay)
                                     .expect("the delay is at most PAIRS_RETRY_CAP");
                             if delay == PAIRS_RETRY_CAP {
@@ -860,7 +874,9 @@ pub(crate) async fn check_at(
                                 source_sha256: sha.clone(),
                                 failures,
                                 next_attempt_at,
-                                last_error: e,
+                                // embed_all never names a text's content;
+                                // bound what an embedder's own message adds.
+                                last_error: e.chars().take(LAST_ERROR_MAX).collect(),
                             });
                             dirty = true;
                         }

@@ -85,7 +85,9 @@
   failure is now recorded in the canary pin against the file's SHA-256
   (`Fingerprint::related_pairs_retry`, a `PairsRetry`), and the file is
   retried after `PAIRS_RETRY_BASE` (1 minute), doubling per failure up to
-  `PAIRS_RETRY_CAP` (1 hour). Inside the wait the configured threshold
+  `PAIRS_RETRY_CAP` (1 hour), counted from when the attempt failed. The
+  stored error names a text by its position, never by its content, so no
+  labelled text is copied into the store. Inside the wait the configured threshold
   stays, nothing is re-embedded for the pairs, and under `warn` the recheck
   window applies again. `verify` still embeds the canaries at every attach.
   A file whose contents changed is measured at the next attach; a success

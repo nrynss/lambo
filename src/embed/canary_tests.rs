@@ -700,6 +700,8 @@ async fn a_too_short_related_pairs_file_is_cached_for_the_recheck_window() {
 struct PairsDown {
     probe: Probe,
     pairs_down: std::sync::atomic::AtomicBool,
+    /// How long a failing pair text hangs first (a slow embedder).
+    hang: Duration,
 }
 
 impl PairsDown {
@@ -707,6 +709,7 @@ impl PairsDown {
         Self {
             probe: Probe::new(0.0),
             pairs_down: std::sync::atomic::AtomicBool::new(true),
+            hang: Duration::ZERO,
         }
     }
     fn recover(&self) {
@@ -726,6 +729,7 @@ impl Embedder for PairsDown {
     async fn embed(&self, text: &str) -> Result<Vec<f32>, EmbedError> {
         if text.starts_with("rel:") && self.pairs_down.load(Ordering::SeqCst) {
             self.probe.calls.fetch_add(1, Ordering::SeqCst);
+            tokio::time::sleep(self.hang).await;
             return Err(EmbedError::Unavailable("pairs embed timed out".into()));
         }
         self.probe.embed(text).await
@@ -741,7 +745,9 @@ async fn stored_fingerprint(store: &crate::MemoryStore) -> Fingerprint {
     serde_json::from_str(&raw).unwrap()
 }
 
-#[tokio::test]
+// Paused: the wait is counted from the failure, so the attempt must take
+// no time for the deadlines below to be exact.
+#[tokio::test(start_paused = true)]
 async fn failing_related_pairs_back_off_and_are_measured_once_the_embedder_recovers() {
     let dir = Scratch::new();
     let opts = CanaryOptions {
@@ -815,7 +821,9 @@ fn the_pairs_backoff_doubles_up_to_the_cap() {
     assert_eq!(PairsRetry::delay(u32::MAX), PAIRS_RETRY_CAP);
 }
 
-#[tokio::test]
+// Paused: the wait is counted from the failure, so the attempt must take
+// no time for the deadlines below to be exact.
+#[tokio::test(start_paused = true)]
 async fn repeated_pairs_failures_grow_the_wait() {
     let dir = Scratch::new();
     let opts = CanaryOptions {
@@ -1085,4 +1093,76 @@ async fn a_retry_for_another_file_is_dropped() {
         .await
         .related_pairs_retry
         .is_none());
+}
+
+// Paused: the hang advances tokio's clock, not the test's wall time.
+#[tokio::test(start_paused = true)]
+async fn a_slow_pairs_failure_still_waits_the_full_delay() {
+    let dir = Scratch::new();
+    let opts = CanaryOptions {
+        mode: CanaryMode::Verify,
+        related_pairs: Some(write_pairs(dir.path(), 120, "w")),
+    };
+    let store = store();
+    // Hangs past the budget: the attempt fails at the deadline, 60 s in.
+    let embedder = PairsDown {
+        hang: Duration::from_secs(90),
+        ..PairsDown::new()
+    };
+    let t0 = chrono::Utc::now();
+    let at = |secs: i64| t0 + chrono::Duration::seconds(secs);
+    check_at(&store, &embedder, &contract(), &opts, 0.85, at(0))
+        .await
+        .unwrap();
+    let retry = stored_fingerprint(&store)
+        .await
+        .related_pairs_retry
+        .unwrap();
+    let budget = CANARY_EMBED_TIMEOUT.as_secs() as i64;
+    assert_eq!(retry.next_attempt_at, at(budget + 60));
+
+    // Past `now + delay` but inside the wait counted from the failure: the
+    // pairs are not tried again.
+    let before = embedder.calls();
+    check_at(&store, &embedder, &contract(), &opts, 0.85, at(budget + 59))
+        .await
+        .unwrap();
+    assert_eq!(embedder.calls() - before, CANARY_PHRASES.len());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_pairs_failure_keeps_no_pair_text_in_the_pin() {
+    let dir = Scratch::new();
+    let opts = CanaryOptions {
+        mode: CanaryMode::Verify,
+        related_pairs: Some(write_pairs(dir.path(), 120, "secret")),
+    };
+    let store = store();
+    let embedder = PairsDown::new();
+    check_at(
+        &store,
+        &embedder,
+        &contract(),
+        &opts,
+        0.85,
+        chrono::Utc::now(),
+    )
+    .await
+    .unwrap();
+    let raw = store
+        .read_store_meta(&fingerprint_key(&contract()))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(raw.contains("related_pairs_retry"), "{raw}");
+    assert!(!raw.contains("rel:secret"), "{raw}");
+    let retry = stored_fingerprint(&store)
+        .await
+        .related_pairs_retry
+        .unwrap();
+    assert!(
+        retry.last_error.starts_with("embedding text 1 of 240"),
+        "{}",
+        retry.last_error
+    );
 }
