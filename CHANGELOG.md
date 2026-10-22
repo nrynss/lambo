@@ -76,6 +76,22 @@
 
 ### Fixed
 
+- **A `related_pairs` file that fails to embed no longer costs every writer
+  attach a full re-embed (#191).** A transient failure (the embedder down or
+  slow, or a large file overrunning the canary's 60 s budget) was not
+  recorded, so every later attach re-embedded the canaries and all the pair
+  texts and failed again, and the `warn` recheck window never applied. The
+  failure is now recorded in the canary pin against the file's SHA-256
+  (`Fingerprint::related_pairs_retry`, a `PairsRetry`), and the file is
+  retried after `PAIRS_RETRY_BASE` (1 minute), doubling per failure up to
+  `PAIRS_RETRY_CAP` (1 hour). Inside the wait the configured threshold
+  stays, nothing is re-embedded for the pairs, and under `warn` the recheck
+  window applies again. `verify` still embeds the canaries at every attach.
+  A changed file is measured at the next attach; a success caches the
+  threshold and clears the retry. A cached derivation of an older file is
+  never applied to the current one, also on the recheck-window shortcut.
+  The field is optional, so a pin written by 0.7.0 still decodes.
+
 - **GC no longer collects the correction of a contradicted ordinary concept
   (#197).** Since #179 recall shows the contradicting concept beside any
   contradicted concept, but GC protected it only when the contradicted
