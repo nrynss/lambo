@@ -1184,9 +1184,9 @@ async fn the_merge_threshold_is_inclusive_on_exact_cosine() {
     for_each_dialect!(check);
 }
 
-/// **#60 live, Postgres.** Run by name by the `postgres-live` CI step once
-/// that step is added (the #60 CI request); until then, by hand with
-/// `--ignored` against a database.
+/// **#60 live, Postgres.** Run by name by the `postgres-live` CI step "Live
+/// Postgres merge freshness" (#192); by hand, with `--ignored` against a
+/// database.
 #[cfg(feature = "store-postgres")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: requires LAMBO_POSTGRES_DSN against pinned pgvector/pgvector:pg17"]
