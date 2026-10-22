@@ -21,8 +21,8 @@
 //! flushed, vectors included, so a reopened holder is tested too. The scenario
 //! [`run_merge_freshness`] runs offline against it and live against a real
 //! database: the Postgres leg is the `#[ignore]`d test at the bottom, run by
-//! name by the `postgres-live` CI step once that step is added (see the #60
-//! CI request); the Cockroach leg runs inside
+//! name by the `postgres-live` CI step "Live Postgres merge freshness"
+//! (#192); the Cockroach leg runs inside
 //! `cockroach::conformance::conformance_suite`, whose job is disabled.
 //!
 //! # What changes at the threshold edge
