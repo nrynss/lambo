@@ -1018,3 +1018,71 @@ async fn a_pin_written_without_the_retry_field_still_decodes() {
     let back: Fingerprint = serde_json::from_str(&serde_json::to_string(&with).unwrap()).unwrap();
     assert_eq!(back, with);
 }
+
+#[tokio::test]
+async fn a_retry_for_another_file_is_dropped() {
+    let dir = Scratch::new();
+    let store = store();
+    let embedder = PairsDown::new();
+    let t0 = chrono::Utc::now();
+    let at = |secs: i64| t0 + chrono::Duration::seconds(secs);
+    let failing = CanaryOptions {
+        mode: CanaryMode::Verify,
+        related_pairs: Some(write_pairs(dir.path(), 120, "f")),
+    };
+    check_at(&store, &embedder, &contract(), &failing, 0.85, at(0))
+        .await
+        .unwrap();
+    assert!(stored_fingerprint(&store)
+        .await
+        .related_pairs_retry
+        .is_some());
+
+    // A too-short file (cached as unusable, nothing embedded for it) drops
+    // the other file's retry, so going back to the failing file measures it.
+    let short = CanaryOptions {
+        related_pairs: Some(write_pairs(dir.path(), 10, "s")),
+        ..failing.clone()
+    };
+    check_at(&store, &embedder, &contract(), &short, 0.85, at(1))
+        .await
+        .unwrap();
+    assert!(stored_fingerprint(&store)
+        .await
+        .related_pairs_retry
+        .is_none());
+
+    embedder.recover();
+    let back = check_at(&store, &embedder, &contract(), &failing, 0.85, at(2))
+        .await
+        .unwrap();
+    assert_eq!(
+        back.threshold_source,
+        ThresholdSource::RelatedPairs { pairs: 120 }
+    );
+
+    // No file at all drops a retry too.
+    embedder.pairs_down.store(true, Ordering::SeqCst);
+    let other = CanaryOptions {
+        related_pairs: Some(write_pairs(dir.path(), 120, "h")),
+        ..failing.clone()
+    };
+    check_at(&store, &embedder, &contract(), &other, 0.85, at(3))
+        .await
+        .unwrap();
+    assert!(stored_fingerprint(&store)
+        .await
+        .related_pairs_retry
+        .is_some());
+    let none = CanaryOptions {
+        related_pairs: None,
+        ..failing
+    };
+    check_at(&store, &embedder, &contract(), &none, 0.85, at(4))
+        .await
+        .unwrap();
+    assert!(stored_fingerprint(&store)
+        .await
+        .related_pairs_retry
+        .is_none());
+}

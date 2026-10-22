@@ -33,8 +33,9 @@
 //! [`MIN_RELATED_PAIRS`] of them. With fewer, or none, the configured
 //! `semantic_match_threshold` stays. The derived value is cached in the
 //! fingerprint against the file's SHA-256, so the pairs are embedded again
-//! only when the file changes. A pairs file that fails to embed (the
-//! embedder is down or slow) is not cached; it is retried with an
+//! only when the file changes. A pairs file that fails to embed while the
+//! canaries do (a slow or flaky embedder, or a file overrunning
+//! [`CANARY_EMBED_TIMEOUT`]) is not cached; it is retried with an
 //! exponential backoff ([`PairsRetry`], #191), so a failing file does not
 //! cost every writer attach a full re-embed.
 
@@ -763,6 +764,16 @@ pub(crate) async fn check_at(
         fingerprint.verified_at = Some(now);
         dirty = true;
     }
+    // #191: a retry for another file, or for no file, is stale. The current
+    // file is cached, measured, or gets its own retry below.
+    if fingerprint.related_pairs_retry.as_ref().is_some_and(|r| {
+        related
+            .as_ref()
+            .is_none_or(|(_, sha)| r.source_sha256 != *sha)
+    }) {
+        fingerprint.related_pairs_retry = None;
+        dirty = true;
+    }
     match &related {
         None => {}
         Some((pairs, sha)) => {
@@ -824,13 +835,27 @@ pub(crate) async fn check_at(
                             let next_attempt_at = now
                                 + chrono::Duration::from_std(delay)
                                     .expect("the delay is at most PAIRS_RETRY_CAP");
-                            tracing::warn!(
-                                error = %e,
-                                failures,
-                                %next_attempt_at,
-                                "could not embed the related pairs; keeping \
-                                 semantic_match_threshold and backing off"
-                            );
+                            if delay == PAIRS_RETRY_CAP {
+                                // Hourly for good: likely the file, not the
+                                // embedder (too large for the budget, or the
+                                // wrong width).
+                                tracing::warn!(
+                                    error = %e,
+                                    failures,
+                                    %next_attempt_at,
+                                    "the related pairs keep failing to embed and are retried \
+                                     hourly; check that the file embeds within \
+                                     {CANARY_EMBED_TIMEOUT:?}"
+                                );
+                            } else {
+                                tracing::warn!(
+                                    error = %e,
+                                    failures,
+                                    %next_attempt_at,
+                                    "could not embed the related pairs; keeping \
+                                     semantic_match_threshold and backing off"
+                                );
+                            }
                             fingerprint.related_pairs_retry = Some(PairsRetry {
                                 source_sha256: sha.clone(),
                                 failures,
@@ -844,6 +869,9 @@ pub(crate) async fn check_at(
             }
         }
     }
+    // Last writer wins, as for a derived threshold: a concurrent writer's
+    // update read before this attach's embeds can be overwritten. A lost
+    // retry or derivation heals at a later attach.
     if dirty {
         write_fingerprint(store, &key, &fingerprint).await?;
     }
