@@ -164,6 +164,11 @@ fn args() -> Result<Args, String> {
             other => return Err(format!("unknown argument {other:?}\n{usage}")),
         }
     }
+    if a.export_only && a.detail.is_some() {
+        return Err(format!(
+            "--detail lists pairs and queries, which --export-only skips\n{usage}"
+        ));
+    }
     Ok(a)
 }
 
