@@ -19,7 +19,30 @@ import sys
 from pathlib import Path
 
 OUT = Path(__file__).resolve().parents[2] / "fixtures/eval/authoring"
-LABELS = {"related_distinct", "paraphrase", "unrelated"}
+# Mirrors examples/eval_measure/schema.rs, so a bad row fails here, before
+# build.py writes a set the schema rejects.
+FAMILIES = {
+    "related_distinct": {"identifier", "quantity", "polarity", "repository",
+                         "correction", "exception", "topic-neighbour"},
+    "paraphrase": {"rewording", "terse", "near-verbatim", "same-event"},
+    "unrelated": {"cross-area"},
+}
+LABELS = set(FAMILIES)
+RELATIONS = {"supersedes", "distinct_entity", "contradicts"}
+RELATION_REQUIRED = {"identifier", "correction"}
+
+
+def pair_problem(r: dict) -> str | None:
+    family, relation = r.get("family"), r.get("relation")
+    if family not in FAMILIES[r["label"]]:
+        return f"family {family!r} is not one of {sorted(FAMILIES[r['label']])}"
+    if relation is not None and r["label"] != "related_distinct":
+        return "only related_distinct pairs carry a relation"
+    if relation is not None and relation not in RELATIONS:
+        return f"relation {relation!r} is not one of {sorted(RELATIONS)}"
+    if family in RELATION_REQUIRED and relation is None:
+        return f"family {family} needs a relation"
+    return None
 
 
 def pair_id(a: str, b: str) -> str:
@@ -48,6 +71,10 @@ def main() -> int:
     a = ap.parse_args()
     if a.pairs:
         rows = json.loads(Path(a.pairs).read_text())
+        eligible = [r for r in rows if r.get("label") in LABELS and r.get("private") is False]
+        bad = [f"{r.get('id', '?')}: {p}" for r in eligible if (p := pair_problem(r))]
+        if bad:
+            sys.exit("fix these rows and fold again (nothing was written):\n" + "\n".join(bad))
         keep = [{"id": pair_id(r["a"], r["b"]), "a": r["a"], "b": r["b"], "label": r["label"], "family": r["family"],
                  "relation": r.get("relation"), "labeller": a.labeller, "labelled_on": a.date,
                  "note": r.get("note")}

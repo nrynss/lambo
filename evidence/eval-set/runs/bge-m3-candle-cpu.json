@@ -461,13 +461,14 @@
       "p90": 0.4574095607682704,
       "p99": 0.5235569100344382
     },
-    "embed_secs": 65.4,
+    "embed_secs": 70.2,
+    "embed_texts": 340,
     "max": 0.9932901532606944,
     "p50": 0.8365426037960173,
     "p90": 0.9719620326320275,
     "p99": 0.989214895987068,
     "pairs": 170,
-    "prepare_secs": 35.5,
+    "prepare_secs": 6.5,
     "threshold_rules_met": true,
     "within_canary_timeout": false
   },

@@ -46,7 +46,7 @@ def main() -> int:
                 row["times"] += 1
                 # The weakest view of a repeated query is kept: a query that
                 # once found nothing close is the no-answer candidate.
-                if best is None or (row["best_vector_cosine"] is not None and best < row["best_vector_cosine"]):
+                if best is not None and (row["best_vector_cosine"] is None or best < row["best_vector_cosine"]):
                     row["best_vector_cosine"] = best
                     row["hit_count"] = e.get("hit_count")
                     row["top_hits"] = [(h.get("content") or "")[:120] for h in hits[: a.heads]]

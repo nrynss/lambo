@@ -26,11 +26,18 @@ def sha256(path: str) -> str:
 
 
 def codec(con: sqlite3.Connection) -> str:
+    """`store_meta.vector_codec`; a store with no store_meta table or no
+    codec row is the legacy text codec. Any other value is refused."""
     try:
         row = con.execute("SELECT value FROM store_meta WHERE key = 'vector_codec'").fetchone()
-    except sqlite3.Error:
-        return "text"
-    return (row[0] if row else "text") or "text"
+    except sqlite3.OperationalError as e:
+        if "no such table" in str(e):
+            return "text"
+        raise
+    value = (row[0] if row else None) or "text"
+    if value not in ("text", "f32le"):
+        raise SystemExit(f"unknown store_meta.vector_codec {value!r}: expected text or f32le")
+    return value
 
 
 def decode(blob: Any, packed: bool) -> list[float] | None:

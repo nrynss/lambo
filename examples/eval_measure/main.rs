@@ -182,7 +182,6 @@ struct Cache<'e> {
     docs: HashMap<String, Vec<f32>>,
     queries: HashMap<String, Vec<f32>>,
     done: usize,
-    hits: usize,
     contract: String,
     stored: HashMap<String, Vec<f32>>,
     file: Option<std::fs::File>,
@@ -225,10 +224,8 @@ impl Cache<'_> {
         h.finalize().iter().map(|b| format!("{b:02x}")).collect()
     }
 
-    fn recall(&mut self, role: &str, text: &str) -> Option<Vec<f32>> {
-        let v = self.stored.get(&self.key(role, text)).cloned();
-        self.hits += usize::from(v.is_some());
-        v
+    fn recall(&self, role: &str, text: &str) -> Option<Vec<f32>> {
+        self.stored.get(&self.key(role, text)).cloned()
     }
 
     fn keep(&mut self, role: &str, text: &str, v: &[f32]) -> Result<(), String> {
@@ -313,6 +310,42 @@ async fn main() {
     }
 }
 
+/// Embed the export the way the canary does (`embed_all` in
+/// `src/embed/canary.rs`): `texts` in order, duplicates included, chunked
+/// by `batch_capacity`, timed as one pass. The deadline handed to the
+/// embedder is generous so the pass always finishes and the report can say
+/// by how much it is over or under `CANARY_EMBED_TIMEOUT`. Returns the
+/// unrounded seconds; the vectors go into the cache for the rest of the run.
+async fn canary_export_pass(cache: &mut Cache<'_>, texts: &[&str]) -> Result<f64, String> {
+    let cap = cache.embedder.batch_capacity().max(1);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(600);
+    let t0 = Instant::now();
+    let mut vectors = Vec::with_capacity(texts.len());
+    for chunk in texts.chunks(cap) {
+        let answers = cache.embedder.embed_batch(chunk, deadline).await;
+        if answers.len() < chunk.len() {
+            return Err(format!(
+                "the embedder returned {} vectors for a batch of {}",
+                answers.len(),
+                chunk.len()
+            ));
+        }
+        for v in answers.into_iter().take(chunk.len()) {
+            vectors.push(v.map_err(|e| format!("embedding an export text: {e}"))?);
+        }
+    }
+    let secs = t0.elapsed().as_secs_f64();
+    for (text, v) in texts.iter().zip(vectors) {
+        if !cache.docs.contains_key(*text) {
+            if !cache.stored.contains_key(&cache.key("doc", text)) {
+                cache.keep("doc", text, &v)?;
+            }
+            cache.docs.insert(text.to_string(), v);
+        }
+    }
+    Ok(secs)
+}
+
 async fn run() -> Result<(), String> {
     let args = args()?;
     let set = schema::load(&args.dir)?;
@@ -357,7 +390,6 @@ async fn run() -> Result<(), String> {
         docs: HashMap::new(),
         queries: HashMap::new(),
         done: 0,
-        hits: 0,
         // Everything that picks the vectors (endpoint, local weights, model,
         // project) keys the cache, so a different server or weights never
         // reuses another's vectors; credentials are left out. Only a SHA-256
@@ -373,17 +405,16 @@ async fn run() -> Result<(), String> {
         cache.open(path)?;
     }
 
-    // 1. The export first, raw and alone, timed as the canary would embed it.
-    let export_texts: Vec<String> = set
+    // 1. The export first, raw and alone, embedded as the canary embeds it:
+    // every pair's a then b in file order, duplicates included, in batches
+    // of the embedder's capacity, under one clock. Never from the cache, so
+    // the timing is always the canary's own workload.
+    let export_texts: Vec<&str> = set
         .export
         .iter()
-        .flat_map(|p| [p.a.clone(), p.b.clone()])
+        .flat_map(|p| [p.a.as_str(), p.b.as_str()])
         .collect();
-    let t0 = Instant::now();
-    cache.docs(&export_texts, false).await?;
-    // A timing is only meaningful when every export text was embedded now.
-    // Compared with the timeout unrounded; rounded only for the report.
-    let export_secs = (cache.hits == 0).then(|| t0.elapsed().as_secs_f64());
+    let export_secs = canary_export_pass(&mut cache, &export_texts).await?;
 
     // 2. Canary phrases, for the random-pair floor.
     let canaries: Vec<String> = CANARY_PHRASES.iter().map(|s| s.to_string()).collect();
@@ -405,9 +436,9 @@ async fn run() -> Result<(), String> {
     )?;
     // The count and floor rules `[embedder] related_pairs` applies to the
     // derived p99. The canary also has to embed the file within its timeout,
-    // which `within_canary_timeout` reports when the timing is a cold one.
+    // which `within_canary_timeout` reports.
     let eligible = derived.pairs >= MIN_RELATED_PAIRS && derived.p99 > floor.p99;
-    let within_timeout = export_secs.map(|s| s <= CANARY_EMBED_TIMEOUT.as_secs_f64());
+    let within_timeout = export_secs <= CANARY_EMBED_TIMEOUT.as_secs_f64();
 
     let mut report = BTreeMap::new();
     report.insert(
@@ -427,7 +458,8 @@ async fn run() -> Result<(), String> {
             "canary_random_pair_floor": { "p50": floor.p50, "p90": floor.p90, "p99": floor.p99, "max": floor.max },
             "threshold_rules_met": eligible,
             "within_canary_timeout": within_timeout,
-            "embed_secs": export_secs.map(|s| (s * 10.0).round() / 10.0),
+            "embed_texts": export_texts.len(),
+            "embed_secs": (export_secs * 10.0).round() / 10.0,
             "canary_embed_timeout_secs": CANARY_EMBED_TIMEOUT.as_secs(),
             "prepare_secs": (prepare_secs * 10.0).round() / 10.0,
         }),
