@@ -181,14 +181,17 @@ enforces the guard above on every file here.
    draws 60 pairs per cosine bin ([0.55, 0.65) to [0.85, 1]) and writes the
    store's SHA-256 into the key file.
 2. `python3 scripts/eval/ledger_misses.py --ledger calls.jsonl --out misses.json`
-   lists every distinct recall query, weakest best cosine first.
+   lists every distinct recall query, weakest view first: queries that once
+   returned nothing, then the lowest best cosine, then unranked ones.
 3. Label both sheets. A row is kept only when its `label` is set and its
    `private` is set to `false`, after checking that both texts may be
    published; leave `private` as `null` (or set `true`) on anything unsure,
    and that row is never written. Then
    `python3 scripts/eval/fold_owner_labels.py --pairs sheet.json --queries misses.json --labeller "<name>" --date <YYYY-MM-DD>`,
    rerun `build.py` and `cargo test --test eval_set`. Private, skipped and
-   unlabelled rows are never written.
+   unlabelled rows are never written. Folding a corrected sheet later also
+   withdraws: a row now marked private, skip or unlabelled removes the
+   earlier owner row for the same texts or query.
 4. Settle the review items above (drop the `review` note or relabel in the
    authoring module), and record the store SHA-256 here.
 

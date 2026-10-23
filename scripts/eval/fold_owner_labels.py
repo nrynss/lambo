@@ -3,9 +3,10 @@
 ledger_misses.py into fixtures/eval/authoring/owner_{pairs,queries}.json,
 which build.py picks up. Rows marked `private`, `skip` or unlabelled are
 dropped and never written. Folding another sheet merges into what is there:
-a row for the same two texts (pairs) or the same query replaces the earlier
-one, and every other earlier row is kept. Then rerun build.py and the
-eval_set test.
+a kept row for the same two texts (pairs) or the same query replaces the
+earlier one, a dropped row withdraws the earlier one (so marking a folded
+row private or skip later takes it out), and every row the sheet does not
+mention is kept. Then rerun build.py and the eval_set test.
 
     python3 scripts/eval/fold_owner_labels.py --pairs sheet.json --queries misses.json \
         --labeller "<name>" --date <YYYY-MM-DD>
@@ -51,15 +52,23 @@ def pair_id(a: str, b: str) -> str:
     return "store-" + hashlib.sha256("\x00".join(sorted((a, b))).encode()).hexdigest()[:10]
 
 
-def merge(path: Path, rows: list, key) -> int:
-    """Write the earlier rows of `path` plus `rows`, a new row replacing an
-    earlier one with the same key. Returns the total written."""
+def merge(path: Path, rows: list, withdrawn: set, key) -> tuple[int, int]:
+    """Write the earlier rows of `path` plus `rows`: a new row replaces an
+    earlier one with the same key, and an earlier row whose key is in
+    `withdrawn` is removed and not re-added. Returns (total written, rows removed)."""
     merged = {key(r): r for r in (json.loads(path.read_text(encoding="utf-8")) if path.exists() else [])}
+    removed = [k for k in withdrawn if merged.pop(k, None) is not None]
+    # A key the sheet both keeps and withdraws (a repeated row) stays out.
     for r in rows:
-        merged[key(r)] = r
+        if key(r) not in withdrawn:
+            merged[key(r)] = r
     out = list(merged.values())
     path.write_text(json.dumps(out, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
-    return len(out)
+    return len(out), len(removed)
+
+
+def pair_key(r: dict) -> tuple[str, str]:
+    return tuple(sorted((r["a"], r["b"])))
 
 
 def main() -> int:
@@ -78,15 +87,19 @@ def main() -> int:
         keep = [{"id": pair_id(r["a"], r["b"]), "a": r["a"], "b": r["b"], "label": r["label"], "family": r["family"],
                  "relation": r.get("relation"), "labeller": a.labeller, "labelled_on": a.date,
                  "note": r.get("note")}
-                for r in rows if r.get("label") in LABELS and r.get("private") is False]
-        total = merge(OUT / "owner_pairs.json", keep, lambda r: tuple(sorted((r["a"], r["b"]))))
-        print(f"pairs: kept {len(keep)} of {len(rows)}; {total} owner pairs in all")
+                for r in eligible]
+        withdrawn = {pair_key(r) for r in rows
+                     if r not in eligible and isinstance(r.get("a"), str) and isinstance(r.get("b"), str)}
+        total, removed = merge(OUT / "owner_pairs.json", keep, withdrawn, pair_key)
+        print(f"pairs: kept {len(keep)} of {len(rows)}; withdrew {removed}; {total} owner pairs in all")
     if a.queries:
         rows = json.loads(Path(a.queries).read_text(encoding="utf-8"))
+        eligible = [r for r in rows if r.get("label") == "no_answer" and r.get("private") is False]
         keep = [{"query": r["query"], "labeller": a.labeller, "labelled_on": a.date, "note": r.get("note")}
-                for r in rows if r.get("label") == "no_answer" and r.get("private") is False]
-        total = merge(OUT / "owner_queries.json", keep, lambda r: r["query"])
-        print(f"no-answer queries: kept {len(keep)} of {len(rows)}; {total} in all")
+                for r in eligible]
+        withdrawn = {r["query"] for r in rows if r not in eligible and isinstance(r.get("query"), str)}
+        total, removed = merge(OUT / "owner_queries.json", keep, withdrawn, lambda r: r["query"])
+        print(f"no-answer queries: kept {len(keep)} of {len(rows)}; withdrew {removed}; {total} in all")
     return 0
 
 
