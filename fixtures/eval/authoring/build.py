@@ -75,8 +75,9 @@ for n, na in enumerate(common.NO_ANSWER, 1):
 # Real ledger misses the owner labelled (scripts/eval/ledger_misses.py, then
 # fold_owner_labels.py). Absent until the owner runs those tools.
 owner_q = HERE / "owner_queries.json"
-for n, oq in enumerate(json.loads(owner_q.read_text()) if owner_q.exists() else [], 1):
-    qid = f"na-ledger-{n:03d}"
+for oq in json.loads(owner_q.read_text()) if owner_q.exists() else []:
+    # Keyed by the query's text, so a later fold keeps every id and split.
+    qid = "na-ledger-" + hashlib.sha256(oq["query"].encode()).hexdigest()[:10]
     queries.append(dict(id=qid, query=oq["query"], kind="no_answer", family="ledger-miss",
                         topic="ledger", split=split_of(qid), relevant=[], facets=[],
                         source="dogfood ledger recall, labelled no-answer by the owner",
