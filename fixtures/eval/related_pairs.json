@@ -301,7 +301,7 @@
  },
  {
   "a": "0.6.0 (#36): canonization promotes rulings, not artifacts: support comes from the concepts that depend on a ruling, counted by their distinct origin interactions with the ruling's own origin excluded, so several dependents from one interaction count once.",
-  "b": "0.6.0 (#36): canonization support counts every action that touched a file, so a frequently edited file becomes Canonical."
+  "b": "Before 0.6.0, canonization support counted the actions that touched a file, so a frequently edited file could become Canonical."
  },
  {
   "a": "Across the five J0 agent runs, before the protocol block existed in prompts, zero lambo calls were made, although AGENTS.md obliged it and every agent had read AGENTS.md: compliance came from the prompt, not the agent's judgement or the tool's affordances.",

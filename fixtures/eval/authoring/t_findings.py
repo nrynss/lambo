@@ -81,7 +81,7 @@ C('fnd-10', 'Observation',
   DF, topic=T,
   q=["What happened to a client when the lease holder was killed mid-call before the J2 fix?",
      ("MCP error -32001", 'exact-identifier')],
-  rbd=[("J2-R1-1: with the holder killed mid-call, the proxy returned an immediate honest error carrying the in-flight id within 18 ms.", 'correction', 'contradicts')],
+  rbd=[("J2-R1-1: with the holder killed mid-call, the proxy returned an immediate honest error carrying the in-flight id within 18 ms.", 'polarity', 'contradicts')],
   facets=["detected in 18 ms", "client hung 121.7 s"])
 C('fnd-11', 'Constraint',
   "cursor-agent needs --trust and --force for lambo's MCP tools, otherwise every MCP tool call is silently rejected; macOS also has no timeout(1).",

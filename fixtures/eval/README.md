@@ -38,12 +38,12 @@ answers #198: `supersedes`, `distinct_entity` or `contradicts`):
 
 | Label | Family | Pairs |
 |---|---|---:|
-| related_distinct | identifier | 75 |
-| | polarity | 33 |
+| related_distinct | identifier | 68 |
+| | polarity | 36 |
 | | topic-neighbour | 25 |
-| | correction | 14 |
-| | exception | 14 |
-| | quantity | 8 |
+| | quantity | 15 |
+| | exception | 13 |
+| | correction | 12 |
 | | repository | 4 |
 | paraphrase | rewording | 97 |
 | | terse | 10 |
@@ -145,6 +145,13 @@ enforces the guard above on every file here.
   lose or corrupt a fact (a different identifier, the opposite claim, an
   exception, an older value). `paraphrase`: the same facts, reworded; a merge
   loses nothing. `unrelated`: different subjects.
+- Related-distinct families: `identifier` (a different name, path, hash,
+  version, flag or model: the #198 case), `quantity` (a different number for
+  the same setting or measurement), `polarity` (the opposite or a false claim
+  about the same thing), `exception` (a rule against the rule with its
+  exception dropped or inverted), `correction` (an older or mistaken value
+  against its correction), `repository` (the same path in two repositories),
+  `topic-neighbour` (a different fact on the same subject).
 - `relation` on identifier and correction pairs: `supersedes` (b is the newer
   value of the same fact, a merge would hide the change), `contradicts` (the
   same slot with incompatible values, neither marked newer),

@@ -64,6 +64,22 @@ fn frame(text: &str, framing: &str) -> String {
     }
 }
 
+/// The candle identity names a local weights directory when one overrides
+/// the hub artifact (`dir:<path> <file> sha256:<12 hex>`); a run file keeps
+/// the file name and digest, which pin the weights, and drops the path.
+fn public_identity(identity: &str) -> String {
+    match identity.strip_prefix("dir:") {
+        Some(rest) => {
+            let tail: Vec<&str> = rest.rsplitn(3, ' ').collect();
+            match tail.as_slice() {
+                [sha, file, _dir] => format!("dir:<local> {file} {sha}"),
+                _ => "dir:<local>".to_string(),
+            }
+        }
+        None => identity.to_string(),
+    }
+}
+
 fn quantile(sorted: &[f64], q: f64) -> f64 {
     let rank = ((q * sorted.len() as f64).ceil() as usize).clamp(1, sorted.len());
     sorted[rank - 1]
@@ -362,7 +378,7 @@ async fn run() -> Result<(), String> {
         json!({
             "kind": kind,
             "config": contract,
-            "identity": identity,
+            "identity": identity.as_deref().map(public_identity),
             "dimensions": embedder.dimensions(),
         }),
     );
