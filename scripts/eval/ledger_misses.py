@@ -27,7 +27,7 @@ def main() -> int:
     a = ap.parse_args()
     seen: dict[str, dict] = {}
     for path in a.ledger:
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             for line in f:
                 try:
                     e = json.loads(line)
@@ -51,7 +51,7 @@ def main() -> int:
                     row["hit_count"] = e.get("hit_count")
                     row["top_hits"] = [(h.get("content") or "")[:120] for h in hits[: a.heads]]
     rows = sorted(seen.values(), key=lambda r: (r["best_vector_cosine"] is not None, r["best_vector_cosine"] or 0.0))
-    with open(a.out, "w") as f:
+    with open(a.out, "w", encoding="utf-8") as f:
         json.dump(rows, f, indent=1, ensure_ascii=False)
     print(f"{len(rows)} distinct recall queries")
     return 0

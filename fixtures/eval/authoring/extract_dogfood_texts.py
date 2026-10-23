@@ -37,27 +37,29 @@ def main():
     ap.add_argument("--paper", required=True)
     a = ap.parse_args()
     out = {}
-    pairs = json.loads((ROOT / "evidence/issue-178-similar/labelled-pairs.json").read_text())
+    pairs = json.loads((ROOT / "evidence/issue-178-similar/labelled-pairs.json").read_text(encoding="utf-8"))
     for p in pairs:
         if p["source"] == "dogfood-i3":
             add(out, p["a"], "evidence/issue-178-similar/labelled-pairs.json")
             add(out, p["b"], "evidence/issue-178-similar/labelled-pairs.json")
-    for line in (ROOT / "evidence/mooshik-i3-live-ledger/duplicates.txt").read_text().splitlines():
+    for line in (ROOT / "evidence/mooshik-i3-live-ledger/duplicates.txt").read_text(encoding="utf-8").splitlines():
         m = DUP.match(line)
         if m:
             add(out, m.group(2), "evidence/mooshik-i3-live-ledger/duplicates.txt")
     paper = Path(a.paper)
     rev = subprocess.run(["git", "-C", str(paper), "rev-parse", "--short", "HEAD"],
-                         capture_output=True, text=True, check=True).stdout.strip()
+                         capture_output=True, encoding="utf-8", check=True).stdout.strip()
     run = paper / "evaluation/results/2026-09-07/lambo-2026-09-07/exports/lambo"
     for f in sorted(run.glob("*.full.json")):
-        ctx = json.loads(f.read_text())["structuredContent"]["context"]
+        ctx = json.loads(f.read_text(encoding="utf-8"))["structuredContent"]["context"]
         for chunk in ctx.split("\n\n"):
             m = HIT.match(chunk.strip())
             if m:
                 rel = f.relative_to(paper)
                 add(out, m.group(1), f"nrynss/lambo-paper@{rev}:{rel}", m.group(2))
     rows = sorted(out.values(), key=lambda e: e["text"])
+    # The texts are not ASCII; write UTF-8 whatever the locale says.
+    sys.stdout.reconfigure(encoding="utf-8")
     json.dump(rows, sys.stdout, indent=1, ensure_ascii=False)
     sys.stdout.write("\n")
 

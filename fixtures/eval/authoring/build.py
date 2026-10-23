@@ -75,7 +75,7 @@ for n, na in enumerate(common.NO_ANSWER, 1):
 # Real ledger misses the owner labelled (scripts/eval/ledger_misses.py, then
 # fold_owner_labels.py). Absent until the owner runs those tools.
 owner_q = HERE / "owner_queries.json"
-for oq in json.loads(owner_q.read_text()) if owner_q.exists() else []:
+for oq in json.loads(owner_q.read_text(encoding="utf-8")) if owner_q.exists() else []:
     # Keyed by the query's text, so a later fold keeps every id and split.
     qid = "na-ledger-" + hashlib.sha256(oq["query"].encode()).hexdigest()[:10]
     queries.append(dict(id=qid, query=oq["query"], kind="no_answer", family="ledger-miss",
@@ -153,7 +153,7 @@ SYN = {  # id -> (family, relation, review)
     "syn-neg-028": ("polarity", "contradicts", None), "syn-neg-029": ("polarity", "contradicts", None),
 }
 L178 = "evidence/issue-178-similar/labelled-pairs.json"
-for p in json.loads((ROOT / L178).read_text()):
+for p in json.loads((ROOT / L178).read_text(encoding="utf-8")):
     if p["source"] == "dogfood-i3" and p["family"] == "file/commit name":
         add_pair(f"p-178-{p['id']}", p["a"], p["b"], "related_distinct", "identifier",
                  f"{L178}#{p['id']} (dogfood store)", relation="distinct_entity")
@@ -198,7 +198,7 @@ while n < UNRELATED_PAIRS:
 # in after every agent pair, so agent ids do not move and an owner label on
 # the same two texts as an agent pair relabels that pair in place.
 owner_p = HERE / "owner_pairs.json"
-for op in json.loads(owner_p.read_text()) if owner_p.exists() else []:
+for op in json.loads(owner_p.read_text(encoding="utf-8")) if owner_p.exists() else []:
     key = frozenset((op["a"], op["b"]))
     if key in seen:
         # The owner's label takes precedence over an agent label on the same
@@ -222,7 +222,7 @@ export = [{"a": p["a"], "b": p["b"]} for p in pairs
 
 
 def write(name, obj):
-    (OUT / name).write_text(json.dumps(obj, indent=1, ensure_ascii=False) + "\n")
+    (OUT / name).write_text(json.dumps(obj, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
 write("corpus.json", corpus)

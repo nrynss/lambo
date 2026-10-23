@@ -54,11 +54,11 @@ def pair_id(a: str, b: str) -> str:
 def merge(path: Path, rows: list, key) -> int:
     """Write the earlier rows of `path` plus `rows`, a new row replacing an
     earlier one with the same key. Returns the total written."""
-    merged = {key(r): r for r in (json.loads(path.read_text()) if path.exists() else [])}
+    merged = {key(r): r for r in (json.loads(path.read_text(encoding="utf-8")) if path.exists() else [])}
     for r in rows:
         merged[key(r)] = r
     out = list(merged.values())
-    path.write_text(json.dumps(out, indent=1, ensure_ascii=False) + "\n")
+    path.write_text(json.dumps(out, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
     return len(out)
 
 
@@ -70,7 +70,7 @@ def main() -> int:
     ap.add_argument("--date", required=True)
     a = ap.parse_args()
     if a.pairs:
-        rows = json.loads(Path(a.pairs).read_text())
+        rows = json.loads(Path(a.pairs).read_text(encoding="utf-8"))
         eligible = [r for r in rows if r.get("label") in LABELS and r.get("private") is False]
         bad = [f"{r.get('id', '?')}: {p}" for r in eligible if (p := pair_problem(r))]
         if bad:
@@ -82,7 +82,7 @@ def main() -> int:
         total = merge(OUT / "owner_pairs.json", keep, lambda r: tuple(sorted((r["a"], r["b"]))))
         print(f"pairs: kept {len(keep)} of {len(rows)}; {total} owner pairs in all")
     if a.queries:
-        rows = json.loads(Path(a.queries).read_text())
+        rows = json.loads(Path(a.queries).read_text(encoding="utf-8"))
         keep = [{"query": r["query"], "labeller": a.labeller, "labelled_on": a.date, "note": r.get("note")}
                 for r in rows if r.get("label") == "no_answer" and r.get("private") is False]
         total = merge(OUT / "owner_queries.json", keep, lambda r: r["query"])

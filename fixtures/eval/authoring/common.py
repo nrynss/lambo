@@ -12,7 +12,7 @@ HERE = Path(__file__).resolve().parent
 CONCEPTS = []
 NO_ANSWER = []
 EXTRA_PAIRS = []
-_DOGFOOD = json.loads((HERE / "dogfood_texts.json").read_text())
+_DOGFOOD = json.loads((HERE / "dogfood_texts.json").read_text(encoding="utf-8"))
 
 
 def D(prefix):

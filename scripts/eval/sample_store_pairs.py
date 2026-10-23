@@ -78,9 +78,9 @@ def main() -> int:
             key.append({"id": pid, "cosine": round(c, 4), "bin": [BINS[k], BINS[k + 1]],
                         "node_ids": [ia, ib]})
     rng.shuffle(sheet)
-    with open(a.out, "w") as f:
+    with open(a.out, "w", encoding="utf-8") as f:
         json.dump(sheet, f, indent=1, ensure_ascii=False)
-    with open(a.key, "w") as f:
+    with open(a.key, "w", encoding="utf-8") as f:
         json.dump({"store_sha256": _store.sha256(a.store), "session": a.session, "seed": a.seed,
                    "embedded_concepts": len(rows),
                    "pairs_in_bin": {f"{BINS[k]}-{BINS[k + 1]}": seen[k] for k in bins}, "pairs": key}, f, indent=1)
