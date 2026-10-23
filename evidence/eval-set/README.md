@@ -8,12 +8,7 @@ awaiting owner review (5 pairs, 0 queries) are left out of every number.
 
 | File | Embedder | Where |
 |---|---|---|
-| `runs/bge-m3-candle-cpu.json` | candle BGE-M3, CPU, 1024 dims, `BAAI/bge-m3@5617a9f…`, weights sha256 `68440cc1b73b…` | Linux box, 8 vCPU, no accelerator; 2026-10-23 |
-| `runs/bge-m3-candle-cpu.export-timing.json` | same | same box, a separate `--export-only` run with no cache, so the export's embed time is a cold measurement |
-
-The full run reused vectors from an earlier run of the same contract
-(`--cache`), so its `embed_secs` is `null` by design; the timing comes from
-the export-only run.
+| `runs/bge-m3-candle-cpu.json` | candle BGE-M3, CPU, 1024 dims, `BAAI/bge-m3@5617a9f…`, weights sha256 `68440cc1b73b…` | Linux box, 8 vCPU, no accelerator; 2026-10-23; one cold run (no cached vectors), so `embed_secs` is the export's cold embed time |
 
 ## What the baseline says
 
@@ -34,8 +29,10 @@ them. Cosine quantiles are nearest rank, as the canary computes them.
 | self | unrelated | 120 | 0.345 | 0.461 | 0.526 | 0.538 |
 
 - **#87.** `related_pairs` pointed at `fixtures/eval/related_pairs.json`
-  (170 pairs) derives a threshold of **0.989** (p99). It clears the canary's
-  random-pair floor (p99 0.524), so it would apply. At 0.989 only 1 of 108
+  (170 pairs) derives a threshold of **0.989** (p99). It meets the count
+  rule and clears the canary's random-pair floor (p99 0.524)
+  (`threshold_rules_met`), and the export embedded inside the canary's
+  timeout on this box (`within_canary_timeout`, barely: see below). At 0.989 only 1 of 108
   paraphrases (0.9%) would still merge: on this set, the p99 rule turns
   semantic merging almost off.
 - **The default 0.85** merges 35% (raw) / 43% (self) of the related-distinct
@@ -50,9 +47,9 @@ them. Cosine quantiles are nearest rank, as the canary computes them.
 
 ### Canary timing (#191)
 
-Embedding the 170-pair export (274 distinct texts) took **59.3 s** cold on
-this CPU box, against `CANARY_EMBED_TIMEOUT` of 60 s, after a 4.6 s
-prepare. On CPU, a related_pairs file of this size sits at the edge of the
+Embedding the 170-pair export (274 distinct texts) took **59.2 s** cold on
+this CPU box (59.3 s in an earlier cold run), against `CANARY_EMBED_TIMEOUT`
+of 60 s, after a 6.5 s prepare. On CPU, a related_pairs file of this size sits at the edge of the
 canary's budget; the owner's Metal rig will be faster, but this is the
 case #191's backoff is for.
 
@@ -89,9 +86,8 @@ no-answer queries, short of its 100 until the owner adds ledger misses.
 LAMBO_EMBEDDER=candle LAMBO_EMBED_DEVICE=cpu \
   cargo run --release --features embed-candle --example eval_measure -- \
   --cache /tmp/vectors.jsonl --out evidence/eval-set/runs/<name>.json
-# cold timing of the export alone:
-LAMBO_EMBEDDER=... cargo run --release ... --example eval_measure -- \
-  --export-only --out evidence/eval-set/runs/<name>.export-timing.json
+# with a warm --cache the export's embed_secs is null; for a cold timing
+# of the export alone, add --export-only and leave out --cache.
 ```
 
 The run file records only the fields that name the model (kind, dim,

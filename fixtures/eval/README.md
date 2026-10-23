@@ -181,8 +181,10 @@ enforces the guard above on every file here.
    store's SHA-256 into the key file.
 2. `python3 scripts/eval/ledger_misses.py --ledger calls.jsonl --out misses.json`
    lists every distinct recall query, weakest best cosine first.
-3. Label both sheets (and set `private` on anything that must not be
-   published), then
+3. Label both sheets. A row is kept only when its `label` is set and its
+   `private` is set to `false`, after checking that both texts may be
+   published; leave `private` as `null` (or set `true`) on anything unsure,
+   and that row is never written. Then
    `python3 scripts/eval/fold_owner_labels.py --pairs sheet.json --queries misses.json --labeller "<name>" --date <YYYY-MM-DD>`,
    rerun `build.py` and `cargo test --test eval_set`. Private, skipped and
    unlabelled rows are never written.

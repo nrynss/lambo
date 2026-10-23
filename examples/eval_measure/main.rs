@@ -349,7 +349,10 @@ async fn run() -> Result<(), String> {
         queries: HashMap::new(),
         done: 0,
         hits: 0,
-        contract: format!("{kind}|{contract}|{identity:?}"),
+        // The whole config (endpoint, local weights, model) keys the cache, so
+        // a different server or weights never reuses another's vectors. Only
+        // its SHA-256 reaches the cache file, and none of it the report.
+        contract: format!("{cfg:?}|{identity:?}"),
         stored: HashMap::new(),
         file: None,
     };
@@ -383,8 +386,14 @@ async fn run() -> Result<(), String> {
         .iter()
         .map(|p| cosine64(&cache.docs[&p.a], &cache.docs[&p.b]))
         .collect();
-    let derived = pair_quantiles(export_cos).expect("non-empty export");
-    let applied = derived.pairs >= MIN_RELATED_PAIRS && derived.p99 > floor.p99;
+    let derived = pair_quantiles(export_cos).ok_or(
+        "related_pairs.json holds no adjudicated related_distinct pairs: nothing to derive",
+    )?;
+    // The count and floor rules `[embedder] related_pairs` applies to the
+    // derived p99. The canary also has to embed the file within its timeout,
+    // which `within_canary_timeout` reports when the timing is a cold one.
+    let eligible = derived.pairs >= MIN_RELATED_PAIRS && derived.p99 > floor.p99;
+    let within_timeout = export_secs.map(|s| s <= CANARY_EMBED_TIMEOUT.as_secs_f64());
 
     let mut report = BTreeMap::new();
     report.insert(
@@ -402,7 +411,8 @@ async fn run() -> Result<(), String> {
             "pairs": derived.pairs,
             "p50": derived.p50, "p90": derived.p90, "p99": derived.p99, "max": derived.max,
             "canary_random_pair_floor": { "p50": floor.p50, "p90": floor.p90, "p99": floor.p99, "max": floor.max },
-            "would_apply": applied,
+            "threshold_rules_met": eligible,
+            "within_canary_timeout": within_timeout,
             "embed_secs": export_secs,
             "canary_embed_timeout_secs": CANARY_EMBED_TIMEOUT.as_secs(),
             "prepare_secs": (prepare_secs * 10.0).round() / 10.0,

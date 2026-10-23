@@ -1,7 +1,8 @@
 """Authoring helpers for the #190 evaluation set.
 
 Each topic module calls C() once per corpus concept and NA() once per
-no-answer query. build_eval_set.py imports every t_*.py module and writes
+no-answer query, and P() once per extra pair. build.py imports every t_*.py
+module and writes
 fixtures/eval/{corpus,queries,pairs,related_pairs}.json.
 """
 import json
@@ -30,7 +31,8 @@ def C(id, type, text, src=None, q=(), para=None, rbd=(), facets=(), topic=None):
     q     answerable queries: str, (str, family) or (str, family, {id: grade});
           this concept is grade 2 unless the dict says otherwise
     para  a rewording that keeps every fact: a paraphrase pair
-    rbd   related-but-distinct partners: (text, family[, relation])
+    rbd   related-but-distinct partners: (text, family[, relation[, review]]);
+          a review note keeps the pair out of the export and the numbers
     facets  short strings a correct answer has to carry (#181)
     """
     if isinstance(text, dict):

@@ -16,7 +16,8 @@ concepts take minutes.
 
 Then fill every row's `label` (related_distinct | paraphrase | unrelated |
 skip), `family`, `relation` (identifier and correction families) and
-`private` (true if either text must not be published), and fold the sheet in
+`private` (false only once both texts are confirmed publishable; a row left
+null or true is never folded in), and fold the sheet in
 with `fold_owner_labels.py`.
 """
 from __future__ import annotations

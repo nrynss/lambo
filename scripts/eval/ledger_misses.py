@@ -6,7 +6,8 @@ A ledger records no relevance judgement, so a "miss" cannot be detected; this
 lists every distinct recall query with its best vector cosine and the heads of
 its top hits, weakest first, as a sheet for the owner to label
 (`no_answer` when the store held no answer at the time, `answerable`
-otherwise, `skip`), plus `private` for any query that must not be published.
+otherwise, `skip`), plus `private`: set it to false only once the query is confirmed
+publishable; a row left null or true is never folded in.
 Fold the sheet in with `fold_owner_labels.py`.
 
     python3 scripts/eval/ledger_misses.py --ledger calls.jsonl --out misses.json

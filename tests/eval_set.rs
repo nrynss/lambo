@@ -195,7 +195,7 @@ fn nothing_private_or_secret() {
                 found.push(format!("{name}: {m:?}"));
             }
         }
-        for token in text.split(|c: char| c.is_whitespace() || "\"'`()[]{}<>,;|".contains(c)) {
+        for token in text.split(|c: char| c.is_whitespace() || "\"'`()[]{}<>,;|:/=".contains(c)) {
             let t = token.trim_matches(|c: char| c == '.' || c == ':');
             if is_ipv4(t) && t != "127.0.0.1" && t != "0.0.0.0" {
                 found.push(format!("{name}: IP address {t}"));
