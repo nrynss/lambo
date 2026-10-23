@@ -68,7 +68,7 @@ C('srv-03', 'Logic', D("J1 round-2 lesson: matching an error VARIANT"), topic=T,
 C('srv-04', 'Logic', D("J2 round-3 residual coupling, handed to J3"), topic=T,
   q=["How many un-raced Self::send sites did the J2 round-3 residual find in proxy.rs?",
      ("answer_lost un-raced write burst", 'exact-identifier', {'srv-05': 1})],
-  rbd=[(D("J3 resolution of the COUPLED ceiling residual")['text'], 'correction', 'supersedes',
+  rbd=[(D("J3 resolution of the COUPLED ceiling residual")['text'], 'correction', 'superseded_by',
         "#178 labelled this pair related-but-distinct (i3-42); whether J3's resolution supersedes the residual or only narrows it is the owner's call")],
   facets=["six un-raced Self::send sites", "inflight list"])
 C('srv-05', 'Logic', D("J3 resolution of the COUPLED ceiling residual"), topic=T,

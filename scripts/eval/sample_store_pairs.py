@@ -48,7 +48,11 @@ def main() -> int:
     if len(rows) > a.max_concepts:
         print(f"{len(rows)} embedded concepts is over --max-concepts {a.max_concepts}", file=sys.stderr)
         return 2
+    # One reservoir of --per-bin pairs per bin (memory stays bounded however
+    # many pairs fall in a bin), plus the full count of each bin.
+    rng = random.Random(a.seed)
     bins: dict[int, list[tuple[float, str, str, str, str]]] = {i: [] for i in range(len(BINS) - 1)}
+    seen = {i: 0 for i in bins}
     cosines = _store.pairwise_cosines([v for _, _, v in rows])
     for (x, (ia, ca, va)), (y, (ib, cb, vb)) in itertools.combinations(enumerate(rows), 2):
         if len(va) != len(vb) or ca == cb:
@@ -56,12 +60,17 @@ def main() -> int:
         c = cosines(x, y)
         for k in range(len(BINS) - 1):
             if BINS[k] <= c < BINS[k + 1]:
-                bins[k].append((c, ia, ca, ib, cb))
+                seen[k] += 1
+                if len(bins[k]) < a.per_bin:
+                    bins[k].append((c, ia, ca, ib, cb))
+                else:
+                    j = rng.randrange(seen[k])
+                    if j < a.per_bin:
+                        bins[k][j] = (c, ia, ca, ib, cb)
                 break
-    rng = random.Random(a.seed)
     sheet, key = [], []
     for k, items in bins.items():
-        for c, ia, ca, ib, cb in rng.sample(items, min(a.per_bin, len(items))):
+        for c, ia, ca, ib, cb in items:
             pid = f"store-{len(sheet) + 1:04d}"
             a_text, b_text = (ca, cb) if rng.random() < 0.5 else (cb, ca)
             sheet.append({"id": pid, "a": a_text, "b": b_text, "label": None, "family": None,
@@ -73,9 +82,10 @@ def main() -> int:
         json.dump(sheet, f, indent=1, ensure_ascii=False)
     with open(a.key, "w") as f:
         json.dump({"store_sha256": _store.sha256(a.store), "session": a.session, "seed": a.seed,
-                   "embedded_concepts": len(rows), "pairs": key}, f, indent=1)
+                   "embedded_concepts": len(rows),
+                   "pairs_in_bin": {f"{BINS[k]}-{BINS[k + 1]}": seen[k] for k in bins}, "pairs": key}, f, indent=1)
     print(f"{len(sheet)} pairs from {len(rows)} embedded concepts; per bin "
-          + ", ".join(f"[{BINS[k]}, {BINS[k + 1]}): {len(v)}" for k, v in bins.items()))
+          + ", ".join(f"[{BINS[k]}, {BINS[k + 1]}): {seen[k]}" for k in bins))
     return 0
 
 

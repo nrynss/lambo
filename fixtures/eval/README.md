@@ -152,8 +152,9 @@ enforces the guard above on every file here.
   exception dropped or inverted), `correction` (an older or mistaken value
   against its correction), `repository` (the same path in two repositories),
   `topic-neighbour` (a different fact on the same subject).
-- `relation` on identifier and correction pairs: `supersedes` (b is the newer
-  value of the same fact, a merge would hide the change), `contradicts` (the
+- `relation` on identifier and correction pairs: `supersedes` (a is the newer
+  value of the same fact and b the older one; a merge would hide the
+  change), `contradicts` (the
   same slot with incompatible values, neither marked newer),
   `distinct_entity` (two things that can both be true).
 - Graded relevance: 2 if the concept answers the query on its own, 1 if it

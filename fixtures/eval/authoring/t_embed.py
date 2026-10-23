@@ -4,7 +4,7 @@ C('emb-01', 'Observation', D("Dogfood finding (2026-08-20, DOGFOOD-FINDINGS.md):
   q=["How many dogfood concepts were missing embeddings in the first count?",
      ("Were the unembedded dogfood concepts from a single embedder outage window?", 'fact-lookup')],
   para="Finding from DOGFOOD-FINDINGS.md, 2026-08-20: of the 100 concepts in the lambo-dev store, 92 have no durable vector, spread through time rather than grouped in one outage; that covers all 44 Resources written by record_action and most of the Constraints, Logics and Entities. Semantic recall and dedup cannot see them, and the damage keeps accumulating with no way to backfill. Possible product work: an embedding-coverage counter in lambo_stats and a re-embed backfill verb. The cause is open: record_action never embedding by design, an intermittently unavailable embedder dropping hybrid to keyword, or a flush gap.",
-  rbd=[("Dogfood finding 2026-08-22: the embedding damage is 475 of 509 concepts, not 92 of 100; the earlier figure is stale and understates the backfill by roughly five times.", 'correction', 'supersedes')],
+  rbd=[("Dogfood finding 2026-08-22: the embedding damage is 475 of 509 concepts, not 92 of 100; the earlier figure is stale and understates the backfill by roughly five times.", 'correction', 'superseded_by')],
   facets=["92 of 100", "not one outage window"])
 C('emb-02', 'Observation', D("The dogfood store's embedding damage is 475 of 509"), topic=T,
   q=[("What share of the dogfood store was unembedded once it reached about 500 concepts?", 'superseded', {'emb-01': 1}),

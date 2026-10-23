@@ -1,7 +1,7 @@
 [
  {
-  "a": "Dogfood finding (2026-08-20, DOGFOOD-FINDINGS.md): 92 of 100 concepts in the lambo-dev store carry no durable embedding — interleaved in time, not one outage window; all 44 record_action Resources plus most Constraints/Logics/Entities. Semantic recall and dedup are blind to them and the damage is cumulative with no backfill path. Candidate product work: embedding-coverage counter in lambo_stats, and a re-embed backfill verb. Cause unsettled: record_action-never-embeds by design, intermittent embedder unavailability degrading hybrid to keyword, or a flush gap.",
-  "b": "Dogfood finding 2026-08-22: the embedding damage is 475 of 509 concepts, not 92 of 100; the earlier figure is stale and understates the backfill by roughly five times."
+  "a": "Dogfood finding 2026-08-22: the embedding damage is 475 of 509 concepts, not 92 of 100; the earlier figure is stale and understates the backfill by roughly five times.",
+  "b": "Dogfood finding (2026-08-20, DOGFOOD-FINDINGS.md): 92 of 100 concepts in the lambo-dev store carry no durable embedding — interleaved in time, not one outage window; all 44 record_action Resources plus most Constraints/Logics/Entities. Semantic recall and dedup are blind to them and the damage is cumulative with no backfill path. Candidate product work: embedding-coverage counter in lambo_stats, and a re-embed backfill verb. Cause unsettled: record_action-never-embeds by design, intermittent embedder unavailability degrading hybrid to keyword, or a flush gap."
  },
  {
   "a": "CORRECTION to the same-day claim that the 512-token clamp was a plausible contributor to the unembedded-concept damage — measured against the live dogfood store 2026-08-22, it is NOT the dominant cause. Coverage is 34 embedded of 509 concepts (93% unembedded), and the gap does not track length: concepts under 400 chars are 2/247 embedded, worse than the 400-1200 band at 32/232, while 1200-2400 is 0/30. Sub-400-char concepts never reach the 512-token clamp, so something else — the originally recorded cause, the embedder unreachable or refusing silently across whole sessions — accounts for the bulk. The clamp is still real and still worth its fix (it hard-fails every long input), but it is a second failure mode, not the explanation. Recency confirms the split: the ten newest concepts are 9/10 embedded (written after the clamp fix, with the embedder up), every earlier 100-row band is 2-8%.",
@@ -380,7 +380,7 @@
   "b": "Paired memory comparison 2026-09-07, lambo project run: the Lambo arm scored 8/12 and file memory 2/12."
  },
  {
-  "a": "Over the seven questions with an answer-bearing concept in the 990-concept store copy: covered@1 was 2, @2 through @10 was 4, and @20 was 6; first answer-bearing ranks were 1, 1, 2, 2, 3, 7 and beyond 20. The rendered context held only two or three hits.",
+  "a": "Over the seven questions with an answer-bearing concept in the 990-concept store copy: first answer-bearing ranks were 1, 1, 2, 2, 3, 7 and beyond 20, so covered@1 was 2, @2 was 4, @10 was 6 and @20 was 6. The rendered context held only two or three hits.",
   "b": "Over the seven answerable questions, covered@1 was 4 and covered@20 was 7; every answer-bearing concept ranked in the top ten."
  },
  {

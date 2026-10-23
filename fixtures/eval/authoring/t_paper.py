@@ -19,11 +19,11 @@ C('eff-02', 'Observation',
   para="In the 2026-09-07 comparison on the vimanam project, the file arm scored 10 of 12 and Lambo 8 of 12. Each side won exactly the questions only it had ingested: Lambo the in-session implementation decision that never reached a note, file memory the two June 2026 decisions older than the store.",
   facets=["file 10/12, Lambo 8/12", "each won what only it had ingested"])
 C('eff-03', 'Observation',
-  "Over the seven questions with an answer-bearing concept in the 990-concept store copy: covered@1 was 2, @2 through @10 was 4, and @20 was 6; first answer-bearing ranks were 1, 1, 2, 2, 3, 7 and beyond 20. The rendered context held only two or three hits.",
+  "Over the seven questions with an answer-bearing concept in the 990-concept store copy: first answer-bearing ranks were 1, 1, 2, 2, 3, 7 and beyond 20, so covered@1 was 2, @2 was 4, @10 was 6 and @20 was 6. The rendered context held only two or three hits.",
   PR, topic=T,
   q=["What was retrieval coverage by depth in the 2026-09-07 efficacy readout?",
      ("Why did readers effectively see only four of seven answers?", 'multi-hop', {'eff-04': 1})],
-  para="Of the seven questions whose answer existed in the 990-concept store copy, 2 were covered at rank 1, 4 within ranks 2 to 10, and 6 within 20; the first answer-bearing hit came at ranks 1, 1, 2, 2, 3, 7 and past 20, while the rendered recall text carried just two or three hits.",
+  para="Of the seven questions whose answer existed in the 990-concept store copy, the first answer-bearing hit came at ranks 1, 1, 2, 2, 3, 7 and past 20, so 2 were covered at rank 1, 4 by rank 2, and 6 by rank 10 and by rank 20, while the rendered recall text carried just two or three hits.",
   rbd=[("Over the seven answerable questions, covered@1 was 4 and covered@20 was 7; every answer-bearing concept ranked in the top ten.", 'quantity', 'contradicts')],
   facets=["covered@1 2", "@20 6", "context held 2-3 hits"])
 C('eff-04', 'Observation',

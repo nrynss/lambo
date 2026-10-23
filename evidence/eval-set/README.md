@@ -49,8 +49,8 @@ them. Cosine quantiles are nearest rank, as the canary computes them.
 ### Canary timing (#191)
 
 Embedding the 170-pair export (274 distinct texts) cold on this CPU box
-took **62.1 s** in the committed run; three earlier cold runs of the same
-export took 59.3 s, 59.2 s and 65.3 s, against `CANARY_EMBED_TIMEOUT` of 60 s. On CPU,
+took **65.4 s** in the committed run; four earlier cold runs of the same
+export took 59.3 s, 59.2 s, 65.3 s and 62.1 s, against `CANARY_EMBED_TIMEOUT` of 60 s. On CPU,
 a related_pairs file of this size straddles the canary's budget. The
 owner's Metal rig will be faster, but this is the case #191's backoff is
 for.

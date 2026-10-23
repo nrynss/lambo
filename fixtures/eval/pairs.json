@@ -15,8 +15,8 @@
  },
  {
   "id": "p-emb-01-rbd1",
-  "a": "Dogfood finding (2026-08-20, DOGFOOD-FINDINGS.md): 92 of 100 concepts in the lambo-dev store carry no durable embedding — interleaved in time, not one outage window; all 44 record_action Resources plus most Constraints/Logics/Entities. Semantic recall and dedup are blind to them and the damage is cumulative with no backfill path. Candidate product work: embedding-coverage counter in lambo_stats, and a re-embed backfill verb. Cause unsettled: record_action-never-embeds by design, intermittent embedder unavailability degrading hybrid to keyword, or a flush gap.",
-  "b": "Dogfood finding 2026-08-22: the embedding damage is 475 of 509 concepts, not 92 of 100; the earlier figure is stale and understates the backfill by roughly five times.",
+  "a": "Dogfood finding 2026-08-22: the embedding damage is 475 of 509 concepts, not 92 of 100; the earlier figure is stale and understates the backfill by roughly five times.",
+  "b": "Dogfood finding (2026-08-20, DOGFOOD-FINDINGS.md): 92 of 100 concepts in the lambo-dev store carry no durable embedding — interleaved in time, not one outage window; all 44 record_action Resources plus most Constraints/Logics/Entities. Semantic recall and dedup are blind to them and the damage is cumulative with no backfill path. Candidate product work: embedding-coverage counter in lambo_stats, and a re-embed backfill verb. Cause unsettled: record_action-never-embeds by design, intermittent embedder unavailability degrading hybrid to keyword, or a flush gap.",
   "label": "related_distinct",
   "family": "correction",
   "relation": "supersedes",
@@ -1037,8 +1037,8 @@
  },
  {
   "id": "p-srv-04-rbd1",
-  "a": "J2 round-3 residual coupling, handed to J3 as ONE item: the pump's un-raced client-facing writes and the uncapped `inflight` list are the same problem. answer_lost (src/mcp/proxy.rs:1457) writes one frame per in-flight id, so the ceiling J3 chooses for outstanding receipts is also the worst-case LENGTH of an un-raced write burst to a client that may not be reading. Neither §J2 nor DIAL_BUDGET's residual section says the other exists, and both undercount the writes as 'two' when there are six un-raced Self::send sites (proxy.rs:1298, 1321, 1349, 1375, 1393, 1457).",
-  "b": "J3 resolution of the COUPLED ceiling residual handed over by J2-R2-7 / J2-R3-3. The coupling is real and its mechanism is receipt WAITING: a lambo_receipt call that waits is a long-lived in-flight request at the proxy, so N concurrent receipt waits are N entries in the pump's `inflight` list and therefore N frames in answer_lost's un-raced write burst. J3 therefore bounds BOTH ends: RECEIPT_WAIT_MAX caps how long any one wait can occupy an inflight slot, and a concurrent-waiter cap keeps the population under proxy.rs's INFLIGHT_DEPTH_WARN = 64. The queue bound itself does NOT feed the inflight list — a non-waiting ack returns immediately — so the residual's phrasing (the receipt ceiling IS the burst length) is true only of the waiting surface, and that correction belongs in the record.",
+  "a": "J3 resolution of the COUPLED ceiling residual handed over by J2-R2-7 / J2-R3-3. The coupling is real and its mechanism is receipt WAITING: a lambo_receipt call that waits is a long-lived in-flight request at the proxy, so N concurrent receipt waits are N entries in the pump's `inflight` list and therefore N frames in answer_lost's un-raced write burst. J3 therefore bounds BOTH ends: RECEIPT_WAIT_MAX caps how long any one wait can occupy an inflight slot, and a concurrent-waiter cap keeps the population under proxy.rs's INFLIGHT_DEPTH_WARN = 64. The queue bound itself does NOT feed the inflight list — a non-waiting ack returns immediately — so the residual's phrasing (the receipt ceiling IS the burst length) is true only of the waiting surface, and that correction belongs in the record.",
+  "b": "J2 round-3 residual coupling, handed to J3 as ONE item: the pump's un-raced client-facing writes and the uncapped `inflight` list are the same problem. answer_lost (src/mcp/proxy.rs:1457) writes one frame per in-flight id, so the ceiling J3 chooses for outstanding receipts is also the worst-case LENGTH of an un-raced write burst to a client that may not be reading. Neither §J2 nor DIAL_BUDGET's residual section says the other exists, and both undercount the writes as 'two' when there are six un-raced Self::send sites (proxy.rs:1298, 1321, 1349, 1375, 1393, 1457).",
   "label": "related_distinct",
   "family": "correction",
   "relation": "supersedes",
@@ -2823,8 +2823,8 @@
  },
  {
   "id": "p-eff-03-para",
-  "a": "Over the seven questions with an answer-bearing concept in the 990-concept store copy: covered@1 was 2, @2 through @10 was 4, and @20 was 6; first answer-bearing ranks were 1, 1, 2, 2, 3, 7 and beyond 20. The rendered context held only two or three hits.",
-  "b": "Of the seven questions whose answer existed in the 990-concept store copy, 2 were covered at rank 1, 4 within ranks 2 to 10, and 6 within 20; the first answer-bearing hit came at ranks 1, 1, 2, 2, 3, 7 and past 20, while the rendered recall text carried just two or three hits.",
+  "a": "Over the seven questions with an answer-bearing concept in the 990-concept store copy: first answer-bearing ranks were 1, 1, 2, 2, 3, 7 and beyond 20, so covered@1 was 2, @2 was 4, @10 was 6 and @20 was 6. The rendered context held only two or three hits.",
+  "b": "Of the seven questions whose answer existed in the 990-concept store copy, the first answer-bearing hit came at ranks 1, 1, 2, 2, 3, 7 and past 20, so 2 were covered at rank 1, 4 by rank 2, and 6 by rank 10 and by rank 20, while the rendered recall text carried just two or three hits.",
   "label": "paraphrase",
   "family": "rewording",
   "split": "held_out",
@@ -2837,7 +2837,7 @@
  },
  {
   "id": "p-eff-03-rbd1",
-  "a": "Over the seven questions with an answer-bearing concept in the 990-concept store copy: covered@1 was 2, @2 through @10 was 4, and @20 was 6; first answer-bearing ranks were 1, 1, 2, 2, 3, 7 and beyond 20. The rendered context held only two or three hits.",
+  "a": "Over the seven questions with an answer-bearing concept in the 990-concept store copy: first answer-bearing ranks were 1, 1, 2, 2, 3, 7 and beyond 20, so covered@1 was 2, @2 was 4, @10 was 6 and @20 was 6. The rendered context held only two or three hits.",
   "b": "Over the seven answerable questions, covered@1 was 4 and covered@20 was 7; every answer-bearing concept ranked in the top ten.",
   "label": "related_distinct",
   "family": "quantity",

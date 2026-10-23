@@ -32,6 +32,8 @@ def C(id, type, text, src=None, q=(), para=None, rbd=(), facets=(), topic=None):
           this concept is grade 2 unless the dict says otherwise
     para  a rewording that keeps every fact: a paraphrase pair
     rbd   related-but-distinct partners: (text, family[, relation[, review]]);
+          relation 'supersedes' when this concept is the newer value,
+          'superseded_by' when the partner is (build.py swaps it into a);
           a review note keeps the pair out of the export and the numbers
     facets  short strings a correct answer has to carry (#181)
     """

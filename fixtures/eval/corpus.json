@@ -944,7 +944,7 @@
   "id": "eff-03",
   "topic": "efficacy",
   "type": "Observation",
-  "text": "Over the seven questions with an answer-bearing concept in the 990-concept store copy: covered@1 was 2, @2 through @10 was 4, and @20 was 6; first answer-bearing ranks were 1, 1, 2, 2, 3, 7 and beyond 20. The rendered context held only two or three hits.",
+  "text": "Over the seven questions with an answer-bearing concept in the 990-concept store copy: first answer-bearing ranks were 1, 1, 2, 2, 3, 7 and beyond 20, so covered@1 was 2, @2 was 4, @10 was 6 and @20 was 6. The rendered context held only two or three hits.",
   "origin": "authored",
   "sources": [
    "nrynss/lambo-paper:evaluation/results/2026-09-07/README.md"

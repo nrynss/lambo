@@ -116,7 +116,12 @@ for c in common.CONCEPTS:
         text, family = r[0], r[1]
         relation = r[2] if len(r) > 2 else None
         review = r[3] if len(r) > 3 else None
-        add_pair(f"p-{c['id']}-rbd{n}", c["text"], text, "related_distinct", family,
+        a, b = c["text"], text
+        # `supersedes` means a is the newer value; `superseded_by` in a
+        # module marks a partner newer than its concept, swapped here.
+        if relation == "superseded_by":
+            a, b, relation = b, a, "supersedes"
+        add_pair(f"p-{c['id']}-rbd{n}", a, b, "related_distinct", family,
                  f"corpus {c['id']} + authored contrast", relation=relation, review=review,
                  concepts=[c["id"]])
 
@@ -161,6 +166,19 @@ for p in json.loads((ROOT / L178).read_text()):
 # then fold_owner_labels.py). Absent until the owner runs those tools.
 owner_p = HERE / "owner_pairs.json"
 for op in json.loads(owner_p.read_text()) if owner_p.exists() else []:
+    key = frozenset((op["a"], op["b"]))
+    if key in seen:
+        # The owner's label takes precedence over an agent label on the same
+        # two texts; the pair keeps its id and says it was relabelled.
+        old = next(p for p in pairs if frozenset((p["a"], p["b"])) == key)
+        for k in ("relation", "review"):
+            old.pop(k, None)
+        old.update(a=op["a"], b=op["b"], label=op["label"], family=op["family"],
+                   labeller=op["labeller"], labelled_on=op["labelled_on"],
+                   source=old["source"] + f"; relabelled by the owner (sheet {op['id']})")
+        if op.get("relation"):
+            old["relation"] = op["relation"]
+        continue
     add_pair(f"p-owner-{op['id']}", op["a"], op["b"], op["label"], op["family"],
              "dogfood store copy, cosine-stratified sample", relation=op.get("relation"),
              labeller=op["labeller"], labelled_on=op["labelled_on"])
