@@ -43,6 +43,12 @@ def main() -> int:
                                           "top_hits": [(h.get("content") or "")[:120] for h in hits[: a.heads]],
                                           "label": None, "private": None, "note": None})
                 row["times"] += 1
+                # The weakest view of a repeated query is kept: a query that
+                # once found nothing close is the no-answer candidate.
+                if best is None or (row["best_vector_cosine"] is not None and best < row["best_vector_cosine"]):
+                    row["best_vector_cosine"] = best
+                    row["hit_count"] = e.get("hit_count")
+                    row["top_hits"] = [(h.get("content") or "")[:120] for h in hits[: a.heads]]
     rows = sorted(seen.values(), key=lambda r: (r["best_vector_cosine"] is not None, r["best_vector_cosine"] or 0.0))
     with open(a.out, "w") as f:
         json.dump(rows, f, indent=1, ensure_ascii=False)

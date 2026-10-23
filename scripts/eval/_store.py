@@ -70,3 +70,21 @@ def cosine(a: list[float], b: list[float]) -> float:
     na = math.sqrt(sum(x * x for x in a))
     nb = math.sqrt(sum(x * x for x in b))
     return 0.0 if na == 0.0 or nb == 0.0 else dot / (na * nb)
+
+
+def pairwise_cosines(vectors: list[list[float]]):
+    """A cosine lookup by row index: one matrix product with numpy when it is
+    installed, the plain loop otherwise (minutes for a few thousand rows)."""
+    try:
+        import numpy as np
+    except ImportError:
+        return lambda i, j: cosine(vectors[i], vectors[j])
+    widths = {len(v) for v in vectors}
+    if len(widths) != 1:
+        return lambda i, j: cosine(vectors[i], vectors[j])
+    m = np.asarray(vectors, dtype=np.float64)
+    norms = np.linalg.norm(m, axis=1)
+    norms[norms == 0.0] = 1.0
+    m = m / norms[:, None]
+    sims = m @ m.T
+    return lambda i, j: float(sims[i, j])

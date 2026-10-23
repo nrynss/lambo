@@ -5,7 +5,11 @@ labelling, stratified by cosine, without showing the cosines.
 Writes a labelling sheet (pairs with empty labels, texts only) and a separate
 key file (the cosines and node ids), so the labeller judges the texts blind,
 as the labelling protocol in fixtures/eval/README.md asks. Never run it
-against a live writer's file.
+against a live writer's file. The cosines are between the stored vectors,
+which embed each concept framed by its derive prompt, so they are the
+store's own similarities, not those of the bare texts on the sheet. With
+numpy installed the scan is one matrix product; without it, a few thousand
+concepts take minutes.
 
     python3 scripts/eval/sample_store_pairs.py --store /path/to/copy.db \
         --session lambo-dev --out sheet.json --key key.json
@@ -44,10 +48,11 @@ def main() -> int:
         print(f"{len(rows)} embedded concepts is over --max-concepts {a.max_concepts}", file=sys.stderr)
         return 2
     bins: dict[int, list[tuple[float, str, str, str, str]]] = {i: [] for i in range(len(BINS) - 1)}
-    for (ia, ca, va), (ib, cb, vb) in itertools.combinations(rows, 2):
+    cosines = _store.pairwise_cosines([v for _, _, v in rows])
+    for (x, (ia, ca, va)), (y, (ib, cb, vb)) in itertools.combinations(enumerate(rows), 2):
         if len(va) != len(vb) or ca == cb:
             continue
-        c = _store.cosine(va, vb)
+        c = cosines(x, y)
         for k in range(len(BINS) - 1):
             if BINS[k] <= c < BINS[k + 1]:
                 bins[k].append((c, ia, ca, ib, cb))

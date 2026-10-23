@@ -105,7 +105,8 @@ fn export_loads_as_related_pairs() {
     }
 }
 
-/// Every file under fixtures/eval, the authoring sources included.
+/// Every file under fixtures/eval (the authoring sources included) and
+/// evidence/eval-set (the committed measurement runs).
 fn files(dir: &Path, out: &mut Vec<PathBuf>) {
     for entry in std::fs::read_dir(dir).unwrap() {
         let path = entry.unwrap().path();
