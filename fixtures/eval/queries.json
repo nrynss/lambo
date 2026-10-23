@@ -208,6 +208,10 @@
   "split": "held_out",
   "relevant": [
    {
+    "concept": "ack-04",
+    "grade": 1
+   },
+   {
     "concept": "emb-05",
     "grade": 2
    }
@@ -1061,6 +1065,10 @@
   "split": "dev",
   "relevant": [
    {
+    "concept": "cal-02",
+    "grade": 1
+   },
+   {
     "concept": "cal-04",
     "grade": 2
    }
@@ -1153,6 +1161,10 @@
    {
     "concept": "top-02",
     "grade": 2
+   },
+   {
+    "concept": "top-03",
+    "grade": 2
    }
   ],
   "facets": [
@@ -1195,6 +1207,10 @@
    {
     "concept": "top-02",
     "grade": 2
+   },
+   {
+    "concept": "top-03",
+    "grade": 1
    }
   ],
   "facets": [
@@ -1328,6 +1344,10 @@
   "split": "dev",
   "relevant": [
    {
+    "concept": "fnd-01",
+    "grade": 1
+   },
+   {
     "concept": "top-04",
     "grade": 1
    },
@@ -1377,6 +1397,10 @@
    {
     "concept": "srv-01",
     "grade": 2
+   },
+   {
+    "concept": "srv-06",
+    "grade": 1
    }
   ],
   "facets": [
@@ -1508,6 +1532,10 @@
    {
     "concept": "srv-04",
     "grade": 2
+   },
+   {
+    "concept": "srv-05",
+    "grade": 1
    }
   ],
   "facets": [
@@ -1639,6 +1667,10 @@
   "split": "dev",
   "relevant": [
    {
+    "concept": "srv-04",
+    "grade": 1
+   },
+   {
     "concept": "srv-07",
     "grade": 2
    }
@@ -1704,6 +1736,10 @@
    {
     "concept": "ack-01",
     "grade": 2
+   },
+   {
+    "concept": "ack-04",
+    "grade": 2
    }
   ],
   "facets": [
@@ -1724,6 +1760,10 @@
   "relevant": [
    {
     "concept": "ack-02",
+    "grade": 2
+   },
+   {
+    "concept": "ack-03",
     "grade": 2
    }
   ],
@@ -2076,6 +2116,10 @@
   "relevant": [
    {
     "concept": "pro-06",
+    "grade": 2
+   },
+   {
+    "concept": "pro-07",
     "grade": 2
    }
   ],
@@ -3463,6 +3507,10 @@
     "grade": 2
    },
    {
+    "concept": "top-04",
+    "grade": 1
+   },
+   {
     "concept": "top-05",
     "grade": 1
    }
@@ -4108,6 +4156,10 @@
    {
     "concept": "eff-01",
     "grade": 2
+   },
+   {
+    "concept": "eff-07",
+    "grade": 1
    }
   ],
   "facets": [
@@ -5079,7 +5131,7 @@
  },
  {
   "id": "na-047",
-  "query": "How many components does the dogfood graph have today?",
+  "query": "How many components did the dogfood graph have on 2026-09-07?",
   "kind": "no_answer",
   "family": "near-domain",
   "topic": "g3-graph",

@@ -13,9 +13,9 @@ C('top-01', 'Constraint',
        ("The isolated evaluation copy of the dogfood store was served on port 7701 over HTTP, so the live writer on 7700 was never touched.", 'identifier', 'distinct_entity')],
   facets=["single launchd lambo serve", "HTTP port 7700", "clients connect to http://127.0.0.1:7700/mcp"])
 C('top-02', 'Resource', D("Re-pinned the dogfood binary to lambo-4c6fc93"), topic=T,
-  q=["What is the launchd unit name for the dogfood writer?",
+  q=[("What is the launchd unit name for the dogfood writer?", 'fact-lookup', {'top-03': 2}),
      ("How many nodes did the dogfood graph have at the lambo-4c6fc93 re-pin?", 'fact-lookup'),
-     ("dev.lambo.dogfood", 'exact-identifier')],
+     ("dev.lambo.dogfood", 'exact-identifier', {'top-03': 1})],
   facets=["dev.lambo.dogfood", "lease holder http-shared-writer"])
 C('top-03', 'Logic',
   "The launchd ThrottleInterval for dev.lambo.dogfood is 60 seconds because the default 10 s restart falls inside the 45 s single-writer lease TTL: a restarted serve would find the lease still held and exit. At 60 s every retry lands after the lease has lapsed.",
@@ -36,7 +36,7 @@ C('top-04', 'Logic', D("Claude Code enforcement layer 2026-09-01"), topic=T,
 C('top-05', 'Observation',
   "Dogfood ledger (the I3 snapshot): recall-first compliance was 0.0% for claude-orchestrator (0 of 22 work sequences began with lambo_recall, and 37 derives had no prior recall), against 35.2% across all agents.",
   'evidence/mooshik-i3-live-ledger/recall_first.txt', topic=T,
-  q=[("Did agents call lambo_recall before acting when only told to?", 'fact-lookup', {'top-04': 1})],
+  q=[("Did agents call lambo_recall before acting when only told to?", 'fact-lookup', {'top-04': 1, 'fnd-01': 1})],
   rbd=[("Dogfood ledger (the I3 snapshot): j2-implementor and j2-remediation-r1 began every work sequence with lambo_recall, 100% recall-first compliance.", 'topic-neighbour')],
   facets=["0.0% for claude-orchestrator", "35.2% overall"])
 NA(T, "What port does the dogfood writer use on the Linux rig?")
@@ -50,7 +50,7 @@ C('srv-01', 'Constraint',
   "The single-writer lease has a 45 s TTL (LEASE_TTL), refreshed every 15 s (LEASE_HEARTBEAT_INTERVAL), so a holder gets three refresh chances inside one TTL and is meant to lose the lease if it misses all three.",
   JMC, topic=T,
   q=["How long is the single-writer lease TTL and how often is it refreshed?",
-     ("LEASE_HEARTBEAT_INTERVAL", 'exact-identifier')],
+     ("LEASE_HEARTBEAT_INTERVAL", 'exact-identifier', {'srv-06': 1})],
   para="LEASE_TTL is 45 seconds and LEASE_HEARTBEAT_INTERVAL is 15 seconds: the writer refreshes three times per TTL and should lose the lease only after missing all three.",
   rbd=[("The single-writer lease has a 15 s TTL, refreshed every 5 s.", 'quantity', 'contradicts')],
   facets=["45 s", "15 s", "three chances"])
@@ -67,7 +67,7 @@ C('srv-03', 'Logic', D("J1 round-2 lesson: matching an error VARIANT"), topic=T,
   facets=["variant is not a path", "lease_lost_error is also a Conflict", "discriminate structurally"])
 C('srv-04', 'Logic', D("J2 round-3 residual coupling, handed to J3"), topic=T,
   q=["How many un-raced Self::send sites did the J2 round-3 residual find in proxy.rs?",
-     ("answer_lost un-raced write burst", 'exact-identifier')],
+     ("answer_lost un-raced write burst", 'exact-identifier', {'srv-05': 1})],
   rbd=[(D("J3 resolution of the COUPLED ceiling residual")['text'], 'correction', 'supersedes',
         "#178 labelled this pair related-but-distinct (i3-42); whether J3's resolution supersedes the residual or only narrows it is the owner's call")],
   facets=["six un-raced Self::send sites", "inflight list"])
@@ -83,7 +83,7 @@ C('srv-06', 'Logic', D("Register-discipline technique that paid off twice"), top
 C('srv-07', 'Constraint',
   "The proxy's DIAL_BUDGET is 6 seconds and bounds the client's wait: past it the dial to the holder is abandoned and the call is answered 'nothing happened, retry later'. It sits above the dial's own connect and replay budgets (about 4.1 s) and below sqlite's 8 s busy_timeout.",
   'src/mcp/proxy/dialing.rs', topic=T,
-  q=[("DIAL_BUDGET", 'exact-identifier'), "How long does a proxying serve wait on a dial to the writer before answering the client?"],
+  q=[("DIAL_BUDGET", 'exact-identifier', {'srv-04': 1}), "How long does a proxying serve wait on a dial to the writer before answering the client?"],
   rbd=[("The proxy's dial budget is 60 seconds, one lease TTL plus slack.", 'quantity', 'contradicts'),
        ("A SIGTERM arriving mid-dial is honoured at the next poll, because the dial is raced against the shutdown future rather than bounded by a budget.", 'topic-neighbour')],
   facets=["6 seconds", "abandoned, retry later"])
@@ -94,12 +94,12 @@ NA(T, "Which J-series review found the lease clock-skew bug?")
 T = 'async-ack'
 C('ack-01', 'Observation', D("J3 latency claim VERIFIED at the release binary"), topic=T,
   q=["How fast is a lambo_derive ack after J3 compared with before?",
-     ("Is the embedder still in the derive call path after J3?", 'vocabulary-mismatch')],
+     ("Is the embedder still in the derive call path after J3?", 'vocabulary-mismatch', {'ack-04': 2})],
   para="Measured on 2026-08-20 at the release binary over real stdio MCP (SQLite, 20 calls, median) against the rig's live llama.cpp BGE-M3 q8_0 on CPU: a lambo_derive ack dropped from 14.111 ms on synchronous base 166a3c8 to 0.048 ms with J3, at or under the same binary's 0.076 ms ack against FixtureEmbedder, so the embedder is out of the call. Both runs applied all 21 concepts, so the fast case did real work; the 27 ms in the doc came from the dogfood client stack on pinned 3039b82, and the delta is J3's.",
   rbd=[("After J3 a lambo_derive ack still waits for the embedder, so it costs about 14 ms against a CPU llama.cpp BGE-M3.", 'polarity', 'contradicts')],
   facets=["14.111 ms to 0.048 ms", "below FixtureEmbedder 0.076 ms"])
 C('ack-02', 'Logic', D("J3 redesign round-1 review VERDICT: REQUEST_CHANGES"), topic=T,
-  q=["What was the P1 finding in the J3 durable-intent redesign round-1 review?",
+  q=[("What was the P1 finding in the J3 durable-intent redesign round-1 review?", 'fact-lookup', {'ack-03': 2}),
      ("Did the J3 founding invariant hold at kill -9?", 'contrast')],
   facets=["transient embedder outage at attach burns the backlog", "64 acked"])
 C('ack-03', 'Observation', D("Closed J3 durable-intent redesign review round 1"), topic=T,
@@ -147,7 +147,7 @@ C('pro-05', 'Logic', D("Alias split: config strings postgres/pg"), topic=T,
   rbd=[("Alias split: the config string postgres resolves to PgStore<CockroachDialect> when the server reports Cockroach, so a crossed config keeps working.", 'exception', 'contradicts')],
   facets=["postgres/pg -> PostgresDialect", "cockroach/crdb -> CockroachDialect", "fails loud"])
 C('pro-06', 'Observation', D("Committed the J2 round-3 adversarial review on wt/j2"), topic=T,
-  q=["What was the verdict of the J2 round-3 adversarial review?"],
+  q=[("What was the verdict of the J2 round-3 adversarial review?", 'fact-lookup', {'pro-07': 2})],
   facets=["CLEAN", "aefda87"])
 C('pro-07', 'Observation', D("J2 round-3 adversarial review (adve-review-mooshik-J2-round3.md)"), topic=T,
   q=[("How many fixtures tests passed at 6442d95 in the J2 round-3 review?", 'fact-lookup')],

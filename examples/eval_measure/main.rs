@@ -115,17 +115,19 @@ struct Args {
     out: Option<PathBuf>,
     cache: Option<PathBuf>,
     export_only: bool,
+    detail: Option<PathBuf>,
     allow_fixture: bool,
 }
 
 fn args() -> Result<Args, String> {
     let usage = "usage: eval_measure [--dir fixtures/eval] [--out run.json] \
-                 [--cache vectors.jsonl] [--export-only] [--allow-fixture]";
+                 [--cache vectors.jsonl] [--export-only] [--detail items.json] [--allow-fixture]";
     let mut a = Args {
         dir: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/eval"),
         out: None,
         cache: None,
         export_only: false,
+        detail: None,
         allow_fixture: false,
     };
     let mut it = std::env::args().skip(1);
@@ -135,6 +137,7 @@ fn args() -> Result<Args, String> {
             "--out" => a.out = Some(it.next().ok_or(usage)?.into()),
             "--cache" => a.cache = Some(it.next().ok_or(usage)?.into()),
             "--export-only" => a.export_only = true,
+            "--detail" => a.detail = Some(it.next().ok_or(usage)?.into()),
             "--allow-fixture" => a.allow_fixture = true,
             "-h" | "--help" => {
                 println!("{usage}");
@@ -407,6 +410,9 @@ async fn run() -> Result<(), String> {
     let qtexts: Vec<String> = set.queries.iter().map(|q| q.query.clone()).collect();
     cache.queries(&qtexts).await?;
 
+    // Per-item cosines and rankings, for reading the labels against the
+    // embedder (`--detail`); they quote the set's own texts by id only.
+    let mut detail: BTreeMap<&str, Vec<Value>> = BTreeMap::new();
     let mut pairs_out = BTreeMap::new();
     let mut retrieval_out = BTreeMap::new();
     for f in FRAMINGS {
@@ -416,6 +422,13 @@ async fn run() -> Result<(), String> {
         let mut by_label: BTreeMap<String, Vec<f64>> = BTreeMap::new();
         let mut by_family: BTreeMap<String, Vec<f64>> = BTreeMap::new();
         let mut by_split: BTreeMap<String, Vec<f64>> = BTreeMap::new();
+        for p in &set.pairs {
+            detail.entry("pairs").or_default().push(json!({
+                "framing": f, "id": p.id, "label": p.label, "family": p.family,
+                "cosine": (cos(p) * 10_000.0).round() / 10_000.0,
+                "review": p.review.is_some(),
+            }));
+        }
         for p in set.pairs.iter().filter(|p| p.adjudicated()) {
             let c = cos(p);
             by_label.entry(p.label.clone()).or_default().push(c);
@@ -479,6 +492,11 @@ async fn run() -> Result<(), String> {
                 .collect();
             ranked.sort_by(|x, y| y.0.total_cmp(&x.0).then(x.1.cmp(y.1)));
             let top1 = ranked[0].0;
+            detail.entry("queries").or_default().push(json!({
+                "framing": f, "id": q.id, "kind": q.kind, "family": q.family,
+                "top": ranked.iter().take(3).map(|(c, id)| json!([id, (c * 10_000.0).round() / 10_000.0])).collect::<Vec<_>>(),
+                "relevant": q.relevant.iter().map(|r| json!([r.concept, r.grade])).collect::<Vec<_>>(),
+            }));
             if q.kind == "no_answer" {
                 top1_none.entry(q.split.clone()).or_default().push(top1);
                 continue;
@@ -594,6 +612,10 @@ async fn run() -> Result<(), String> {
         }),
     );
 
+    if let Some(path) = &args.detail {
+        let text = serde_json::to_string_pretty(&detail).expect("json");
+        std::fs::write(path, text).map_err(|e| format!("{}: {e}", path.display()))?;
+    }
     emit(&report, args.out.as_deref())
 }
 

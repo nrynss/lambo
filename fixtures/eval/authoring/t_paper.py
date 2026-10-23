@@ -5,7 +5,7 @@ T = 'efficacy'
 C('eff-01', 'Observation',
   "Paired memory comparison 2026-09-07, lambo project run: Claude Code file memory scored 8/12 and the Lambo arm 2/12, with a reader on claude-sonnet-5 and a blind Opus grader.",
   PR, topic=T,
-  q=["How did Lambo recall compare with file memory on the lambo project in the 2026-09-07 comparison?",
+  q=[("How did Lambo recall compare with file memory on the lambo project in the 2026-09-07 comparison?", 'fact-lookup', {'eff-07': 1}),
      ("What did the Lambo arm score in the lambo-project memory comparison?", 'fact-lookup')],
   para="In the 2026-09-07 paired comparison on the lambo project, file memory got 8 of 12 graded answers right and the Lambo arm 2 of 12; answers were read by claude-sonnet-5 and graded blind by Opus.",
   rbd=[("Paired memory comparison 2026-09-07, vimanam project run: file memory scored 10/12 and the Lambo arm 8/12.", 'repository', 'distinct_entity'),

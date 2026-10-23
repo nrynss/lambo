@@ -24,7 +24,7 @@ C('emb-04', 'Constraint', D("The dogfood embedder's capacity flags are LOAD-BEAR
        ("The dogfood llama-server must be started with --batch-size 4096 --ubatch-size 4096 -c 4096, and -u is accepted as the short form.", 'identifier', 'contradicts')],
   facets=["--batch-size 8192", "--ubatch-size 8192", "verify with a >512-token embed"])
 C('emb-05', 'Logic', D("J3 round-3 residual handed outside J3"), topic=T,
-  q=["Does an applied receipt prove the concept was embedded?",
+  q=[("Does an applied receipt prove the concept was embedded?", 'fact-lookup', {'ack-04': 1}),
      ("Where should an end-to-end durability test check that a write was embedded?", 'vocabulary-mismatch')],
   rbd=[("A concept applied with a NULL embedding is flagged in its receipt as 'applied (unembedded)' and a warning names the failed embed, so the ack alone tells the caller.", 'polarity', 'contradicts')],
   facets=["NULL embedding is unfindable", "assert on the store"])
@@ -187,7 +187,7 @@ C('cal-03', 'Constraint',
 C('cal-04', 'Observation',
   "Under the 0.85 threshold, G records real paraphrases below it that create duplicates by design: register user / create account (0.8230), make an account / register user (0.8152), roll out the service / deploy service (0.8294).",
   G, topic=T,
-  q=["Which paraphrase pairs fall below the 0.85 merge threshold?"],
+  q=[("Which paraphrase pairs fall below the 0.85 merge threshold?", 'fact-lookup', {'cal-02': 1})],
   facets=["register user / create account 0.8230"])
 NA(T, "What is the measured p99 of related-but-distinct pairs on the dogfood store?", note="this is what #190 has to produce")
 NA(T, "How was the Gemini embedder calibrated against BGE-M3?")

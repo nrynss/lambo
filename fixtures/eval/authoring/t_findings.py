@@ -5,7 +5,7 @@ C('fnd-01', 'Observation',
   "Across the five J0 agent runs, before the protocol block existed in prompts, zero lambo calls were made, although AGENTS.md obliged it and every agent had read AGENTS.md: compliance came from the prompt, not the agent's judgement or the tool's affordances.",
   DF, topic=T,
   q=["Did agents use lambo when only AGENTS.md told them to?",
-     ("Where did lambo-protocol compliance come from in the early dogfood runs?", 'rationale', {'top-05': 1})],
+     ("Where did lambo-protocol compliance come from in the early dogfood runs?", 'rationale', {'top-05': 1, 'top-04': 1})],
   para="In the five J0 agent runs, which predate the protocol block in prompts, agents made no lambo calls at all, even though AGENTS.md required it and all of them had read it. Compliance came from the prompt, not from agent judgement or tool affordances; the obligation has to travel in the prompt.",
   rbd=[("Across the five J0 agent runs, agents called lambo_recall at session start because AGENTS.md obliged it, so prompt text was unnecessary.", 'polarity', 'contradicts'),
        ("Claude Code skips the lambo-dogfood protocol even when it is in the prompt, unlike other harnesses, so it needs hooks.", 'exception', 'distinct_entity')],
@@ -122,5 +122,5 @@ C('g3-03', 'Observation',
   rbd=[("G3 shelved its diffusion hypothesis with numbers: no expansion algorithm can reach what has no edges, which is why diffusion could not beat fixed-depth here.", 'topic-neighbour')],
   facets=["exclusivity filter", "13 dependents, blast_radius 4"])
 NA(T, "Did lambo adopt symmetric phase-2 expansion after G3?")
-NA(T, "How many components does the dogfood graph have today?")
+NA(T, "How many components did the dogfood graph have on 2026-09-07?")
 NA(T, "What is the average degree of a Logic concept in the dogfood graph?")
