@@ -31,8 +31,9 @@ them. Cosine quantiles are nearest rank, as the canary computes them.
 - **#87.** `related_pairs` pointed at `fixtures/eval/related_pairs.json`
   (170 pairs) derives a threshold of **0.989** (p99). It meets the count
   rule and clears the canary's random-pair floor (p99 0.524)
-  (`threshold_rules_met`), and the export embedded inside the canary's
-  timeout on this box (`within_canary_timeout`, barely: see below). At 0.989 only 1 of 108
+  (`threshold_rules_met`). Whether the canary gets to apply it depends on
+  embedding the file inside its timeout, which on this box it sometimes
+  does not (`within_canary_timeout`; see below). At 0.989 only 1 of 108
   paraphrases (0.9%) would still merge: on this set, the p99 rule turns
   semantic merging almost off.
 - **The default 0.85** merges 35% (raw) / 43% (self) of the related-distinct
@@ -47,11 +48,12 @@ them. Cosine quantiles are nearest rank, as the canary computes them.
 
 ### Canary timing (#191)
 
-Embedding the 170-pair export (274 distinct texts) took **59.2 s** cold on
-this CPU box (59.3 s in an earlier cold run), against `CANARY_EMBED_TIMEOUT`
-of 60 s, after a 6.5 s prepare. On CPU, a related_pairs file of this size sits at the edge of the
-canary's budget; the owner's Metal rig will be faster, but this is the
-case #191's backoff is for.
+Embedding the 170-pair export (274 distinct texts) cold on this CPU box
+took **65.3 s** in the committed run, and 59.2 s and 59.3 s in two earlier
+cold runs of the same set, against `CANARY_EMBED_TIMEOUT` of 60 s. On CPU,
+a related_pairs file of this size straddles the canary's budget. The
+owner's Metal rig will be faster, but this is the case #191's backoff is
+for.
 
 ### Retrieval over the 100-concept corpus (#173)
 

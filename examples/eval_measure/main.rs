@@ -31,9 +31,9 @@
 //!   cargo run --release --example eval_measure
 //! ```
 //!
-//! The fixture embedder (the default when `LAMBO_EMBEDDER` is unset) gives
-//! meaningless numbers, so it is refused unless `--allow-fixture` is passed
-//! (a smoke run of the harness itself).
+//! The fixture embedder (`LAMBO_EMBEDDER=fixture`) gives meaningless
+//! numbers, so it is refused unless `--allow-fixture` is passed (a smoke run
+//! of the harness itself).
 
 mod schema;
 
@@ -331,6 +331,7 @@ async fn run() -> Result<(), String> {
         "repo": cfg.repo,
         "revision": cfg.revision,
         "weights_file": cfg.weights_file,
+        "gemini_model": cfg.gemini_model,
     });
     let kind = format!("{:?}", cfg.kind);
     if kind.to_ascii_lowercase().contains("fixture") && !args.allow_fixture {
@@ -354,10 +355,14 @@ async fn run() -> Result<(), String> {
         queries: HashMap::new(),
         done: 0,
         hits: 0,
-        // The whole config (endpoint, local weights, model) keys the cache, so
-        // a different server or weights never reuses another's vectors. Only
-        // its SHA-256 reaches the cache file, and none of it the report.
-        contract: format!("{cfg:?}|{identity:?}"),
+        // Everything that picks the vectors (endpoint, local weights, model,
+        // project) keys the cache, so a different server or weights never
+        // reuses another's vectors; credentials are left out. Only a SHA-256
+        // of it reaches the cache file, and none of it the report.
+        contract: format!(
+            "{kind}|{contract}|{:?}|{:?}|{:?}|{:?}|{identity:?}",
+            cfg.llama_url, cfg.weights_dir, cfg.gemini_project, cfg.gemini_location
+        ),
         stored: HashMap::new(),
         file: None,
     };
