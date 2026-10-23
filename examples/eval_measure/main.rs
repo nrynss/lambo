@@ -114,16 +114,18 @@ struct Args {
     dir: PathBuf,
     out: Option<PathBuf>,
     cache: Option<PathBuf>,
+    export_only: bool,
     allow_fixture: bool,
 }
 
 fn args() -> Result<Args, String> {
     let usage = "usage: eval_measure [--dir fixtures/eval] [--out run.json] \
-                 [--cache vectors.jsonl] [--allow-fixture]";
+                 [--cache vectors.jsonl] [--export-only] [--allow-fixture]";
     let mut a = Args {
         dir: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/eval"),
         out: None,
         cache: None,
+        export_only: false,
         allow_fixture: false,
     };
     let mut it = std::env::args().skip(1);
@@ -132,6 +134,7 @@ fn args() -> Result<Args, String> {
             "--dir" => a.dir = it.next().ok_or(usage)?.into(),
             "--out" => a.out = Some(it.next().ok_or(usage)?.into()),
             "--cache" => a.cache = Some(it.next().ok_or(usage)?.into()),
+            "--export-only" => a.export_only = true,
             "--allow-fixture" => a.allow_fixture = true,
             "-h" | "--help" => {
                 println!("{usage}");
@@ -212,7 +215,9 @@ impl Cache<'_> {
         Ok(())
     }
 
-    async fn docs(&mut self, texts: &[String]) -> Result<(), String> {
+    /// `by_length` embeds the missing texts shortest first, so a batch pads
+    /// little; the export keeps its own order, as the canary embeds it.
+    async fn docs(&mut self, texts: &[String], by_length: bool) -> Result<(), String> {
         let mut todo: Vec<&str> = Vec::new();
         let mut seen = std::collections::HashSet::new();
         for t in texts {
@@ -225,6 +230,9 @@ impl Cache<'_> {
                 }
                 None => todo.push(t),
             }
+        }
+        if by_length {
+            todo.sort_by_key(|t| t.len());
         }
         let cap = self.embedder.batch_capacity().max(1);
         for chunk in todo.chunks(cap) {
@@ -335,13 +343,13 @@ async fn run() -> Result<(), String> {
         .flat_map(|p| [p.a.clone(), p.b.clone()])
         .collect();
     let t0 = Instant::now();
-    cache.docs(&export_texts).await?;
+    cache.docs(&export_texts, false).await?;
     // A timing is only meaningful when every export text was embedded now.
     let export_secs = (cache.hits == 0).then(|| (t0.elapsed().as_secs_f64() * 10.0).round() / 10.0);
 
     // 2. Canary phrases, for the random-pair floor.
     let canaries: Vec<String> = CANARY_PHRASES.iter().map(|s| s.to_string()).collect();
-    cache.docs(&canaries).await?;
+    cache.docs(&canaries, false).await?;
     let mut floor = Vec::new();
     for (i, a) in canaries.iter().enumerate() {
         for b in &canaries[i + 1..] {
@@ -356,21 +364,6 @@ async fn run() -> Result<(), String> {
         .collect();
     let derived = pair_quantiles(export_cos).expect("non-empty export");
     let applied = derived.pairs >= MIN_RELATED_PAIRS && derived.p99 > floor.p99;
-
-    // 3. Every text in every framing.
-    let mut docs = Vec::new();
-    for f in FRAMINGS {
-        for p in &set.pairs {
-            docs.push(frame(&p.a, f));
-            docs.push(frame(&p.b, f));
-        }
-        for c in &set.corpus {
-            docs.push(frame(&c.text, f));
-        }
-    }
-    cache.docs(&docs).await?;
-    let qtexts: Vec<String> = set.queries.iter().map(|q| q.query.clone()).collect();
-    cache.queries(&qtexts).await?;
 
     let mut report = BTreeMap::new();
     report.insert(
@@ -394,6 +387,25 @@ async fn run() -> Result<(), String> {
             "prepare_secs": (prepare_secs * 10.0).round() / 10.0,
         }),
     );
+
+    if args.export_only {
+        return emit(&report, args.out.as_deref());
+    }
+
+    // 3. Every text in every framing.
+    let mut docs = Vec::new();
+    for f in FRAMINGS {
+        for p in &set.pairs {
+            docs.push(frame(&p.a, f));
+            docs.push(frame(&p.b, f));
+        }
+        for c in &set.corpus {
+            docs.push(frame(&c.text, f));
+        }
+    }
+    cache.docs(&docs, true).await?;
+    let qtexts: Vec<String> = set.queries.iter().map(|q| q.query.clone()).collect();
+    cache.queries(&qtexts).await?;
 
     let mut pairs_out = BTreeMap::new();
     let mut retrieval_out = BTreeMap::new();
@@ -582,10 +594,14 @@ async fn run() -> Result<(), String> {
         }),
     );
 
-    let text = serde_json::to_string_pretty(&report).expect("json");
+    emit(&report, args.out.as_deref())
+}
+
+fn emit(report: &BTreeMap<&str, Value>, out: Option<&std::path::Path>) -> Result<(), String> {
+    let text = serde_json::to_string_pretty(report).expect("json");
     println!("{text}");
-    if let Some(out) = args.out {
-        std::fs::write(&out, format!("{text}\n")).map_err(|e| format!("{}: {e}", out.display()))?;
+    if let Some(out) = out {
+        std::fs::write(out, format!("{text}\n")).map_err(|e| format!("{}: {e}", out.display()))?;
         eprintln!("wrote {}", out.display());
     }
     Ok(())
