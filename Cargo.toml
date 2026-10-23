@@ -19,6 +19,7 @@ include = [
     "web/**",            # include_str! into cli/serve_web.rs (index.html/app.css/app.js)
     "migrations/**",     # include_str! into store/cockroach.rs + store/sqlite.rs
     "fixtures/**",       # include_str! (mutations-batch.json) + golden files at test time
+    "!fixtures/eval/**", # #190 evaluation set: read by tests/eval_set.rs and a measurement example only
     "examples/**",
     "lambo.example.toml",  # include_str! in config.rs — a tested contract
     "rust-toolchain.toml", # deliberately kept: governs consumer-side cargo-install toolchain
