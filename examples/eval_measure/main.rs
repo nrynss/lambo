@@ -320,6 +320,9 @@ async fn run() -> Result<(), String> {
     if !errors.is_empty() {
         return Err(format!("the set fails its schema:\n{}", errors.join("\n")));
     }
+    if set.corpus.is_empty() && !args.export_only {
+        return Err("corpus.json holds no concepts: there is nothing to retrieve over".into());
+    }
 
     let cfg = EmbedderConfig::from_env().map_err(|e| e.to_string())?;
     // Only fields that name the model: no URL, credential or local path, so
@@ -379,7 +382,8 @@ async fn run() -> Result<(), String> {
     let t0 = Instant::now();
     cache.docs(&export_texts, false).await?;
     // A timing is only meaningful when every export text was embedded now.
-    let export_secs = (cache.hits == 0).then(|| (t0.elapsed().as_secs_f64() * 10.0).round() / 10.0);
+    // Compared with the timeout unrounded; rounded only for the report.
+    let export_secs = (cache.hits == 0).then(|| t0.elapsed().as_secs_f64());
 
     // 2. Canary phrases, for the random-pair floor.
     let canaries: Vec<String> = CANARY_PHRASES.iter().map(|s| s.to_string()).collect();
@@ -423,7 +427,7 @@ async fn run() -> Result<(), String> {
             "canary_random_pair_floor": { "p50": floor.p50, "p90": floor.p90, "p99": floor.p99, "max": floor.max },
             "threshold_rules_met": eligible,
             "within_canary_timeout": within_timeout,
-            "embed_secs": export_secs,
+            "embed_secs": export_secs.map(|s| (s * 10.0).round() / 10.0),
             "canary_embed_timeout_secs": CANARY_EMBED_TIMEOUT.as_secs(),
             "prepare_secs": (prepare_secs * 10.0).round() / 10.0,
         }),

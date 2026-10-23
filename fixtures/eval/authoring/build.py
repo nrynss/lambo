@@ -162,27 +162,6 @@ for p in json.loads((ROOT / L178).read_text()):
         add_pair(f"p-178-{p['id']}", p["a"], p["b"], "related_distinct", fam,
                  f"{L178}#{p['id']} (synthetic)", relation=relation, review=review)
 
-# Store-sampled pairs the owner labelled (scripts/eval/sample_store_pairs.py,
-# then fold_owner_labels.py). Absent until the owner runs those tools.
-owner_p = HERE / "owner_pairs.json"
-for op in json.loads(owner_p.read_text()) if owner_p.exists() else []:
-    key = frozenset((op["a"], op["b"]))
-    if key in seen:
-        # The owner's label takes precedence over an agent label on the same
-        # two texts; the pair keeps its id and says it was relabelled.
-        old = next(p for p in pairs if frozenset((p["a"], p["b"])) == key)
-        for k in ("relation", "review"):
-            old.pop(k, None)
-        old.update(a=op["a"], b=op["b"], label=op["label"], family=op["family"],
-                   labeller=op["labeller"], labelled_on=op["labelled_on"],
-                   source=old["source"] + f"; relabelled by the owner (sheet {op['id']})")
-        if op.get("relation"):
-            old["relation"] = op["relation"]
-        continue
-    add_pair(f"p-owner-{op['id']}", op["a"], op["b"], op["label"], op["family"],
-             "dogfood store copy, cosine-stratified sample", relation=op.get("relation"),
-             labeller=op["labeller"], labelled_on=op["labelled_on"])
-
 # Unrelated: concept pairs drawn across areas with a fixed seed.
 AREA = {"embedding-coverage": "embed", "candle": "embed", "canary": "embed", "calibration": "embed",
         "dogfood-topology": "serve", "multi-client": "serve", "async-ack": "serve",
@@ -213,6 +192,29 @@ while n < UNRELATED_PAIRS:
              f"corpus {x['id']} x {y['id']}, drawn across areas (seed 190)", concepts=[x["id"], y["id"]])
     if len(pairs) > before:
         n += 1
+
+# Store-sampled pairs the owner labelled (scripts/eval/sample_store_pairs.py,
+# then fold_owner_labels.py). Absent until the owner runs those tools. Folded
+# in after every agent pair, so agent ids do not move and an owner label on
+# the same two texts as an agent pair relabels that pair in place.
+owner_p = HERE / "owner_pairs.json"
+for op in json.loads(owner_p.read_text()) if owner_p.exists() else []:
+    key = frozenset((op["a"], op["b"]))
+    if key in seen:
+        # The owner's label takes precedence over an agent label on the same
+        # two texts; the pair keeps its id and says it was relabelled.
+        old = next(p for p in pairs if frozenset((p["a"], p["b"])) == key)
+        for k in ("relation", "review"):
+            old.pop(k, None)
+        old.update(a=op["a"], b=op["b"], label=op["label"], family=op["family"],
+                   labeller=op["labeller"], labelled_on=op["labelled_on"],
+                   source=old["source"] + f"; relabelled by the owner ({op['id']})")
+        if op.get("relation"):
+            old["relation"] = op["relation"]
+        continue
+    add_pair(f"p-owner-{op['id']}", op["a"], op["b"], op["label"], op["family"],
+             "dogfood store copy, cosine-stratified sample", relation=op.get("relation"),
+             labeller=op["labeller"], labelled_on=op["labelled_on"])
 
 assert len({p["id"] for p in pairs}) == len(pairs)
 export = [{"a": p["a"], "b": p["b"]} for p in pairs

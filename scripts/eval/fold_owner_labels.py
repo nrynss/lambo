@@ -13,12 +13,19 @@ eval_set test.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from pathlib import Path
 
 OUT = Path(__file__).resolve().parents[2] / "fixtures/eval/authoring"
 LABELS = {"related_distinct", "paraphrase", "unrelated"}
+
+
+def pair_id(a: str, b: str) -> str:
+    """A pair id from its two texts, whatever their order: sheet ids
+    (store-0001, ...) restart in every sheet, so they cannot be the id."""
+    return "store-" + hashlib.sha256("\x00".join(sorted((a, b))).encode()).hexdigest()[:10]
 
 
 def merge(path: Path, rows: list, key) -> int:
@@ -41,7 +48,7 @@ def main() -> int:
     a = ap.parse_args()
     if a.pairs:
         rows = json.loads(Path(a.pairs).read_text())
-        keep = [{"id": r["id"], "a": r["a"], "b": r["b"], "label": r["label"], "family": r["family"],
+        keep = [{"id": pair_id(r["a"], r["b"]), "a": r["a"], "b": r["b"], "label": r["label"], "family": r["family"],
                  "relation": r.get("relation"), "labeller": a.labeller, "labelled_on": a.date,
                  "note": r.get("note")}
                 for r in rows if r.get("label") in LABELS and r.get("private") is False]
