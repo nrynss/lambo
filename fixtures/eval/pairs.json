@@ -2810,7 +2810,7 @@
  {
   "id": "p-eff-02-para",
   "a": "Paired memory comparison 2026-09-07, vimanam project run: file memory 10/12, Lambo 8/12; each system won exactly the questions only it had ingested, and the two June 2026 decisions predate the store.",
-  "b": "On the vimanam project the file arm scored 10 of 12 and Lambo 8 of 12. Each side won exactly the questions only it had ingested: Lambo the in-session implementation decision that never reached a note, file memory the two June 2026 decisions older than the store.",
+  "b": "In the 2026-09-07 comparison on the vimanam project, the file arm scored 10 of 12 and Lambo 8 of 12. Each side won exactly the questions only it had ingested: Lambo the in-session implementation decision that never reached a note, file memory the two June 2026 decisions older than the store.",
   "label": "paraphrase",
   "family": "rewording",
   "split": "held_out",
@@ -2923,7 +2923,7 @@
  {
   "id": "p-eff-07-para",
   "a": "Caveat on the 2026-09-07 comparison: the file arm received the whole memory directory (8,222 or 12,113 bytes) while the Lambo arm received only the rendered recall text, 1,154 to 1,533 bytes holding two or three of five or six hits.",
-  "b": "The comparison was not budget-matched: file memory got its entire directory, 8,222 or 12,113 bytes, while Lambo got only the rendered recall text of 1,154-1,533 bytes, carrying two or three of its five or six hits.",
+  "b": "The 2026-09-07 comparison was not budget-matched: file memory got its entire directory, 8,222 or 12,113 bytes, while Lambo got only the rendered recall text of 1,154-1,533 bytes, carrying two or three of its five or six hits.",
   "label": "paraphrase",
   "family": "rewording",
   "split": "dev",

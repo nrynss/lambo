@@ -208,14 +208,14 @@
       "separation": {
         "all_related_distinct": {
           "paraphrase_above_rbd_p99": 0.0093,
-          "paraphrase_at_or_above_0.85": 0.8981,
+          "paraphrase_at_or_above_0.85": 0.9074,
           "rbd_at_or_above_0.85": 0.3529,
           "rbd_p99": 0.9892,
           "related_distinct": 170
         },
         "at_or_above_0.85_by_family": {
           "paraphrase/near-verbatim": 1.0,
-          "paraphrase/rewording": 0.9175,
+          "paraphrase/rewording": 0.9278,
           "paraphrase/terse": 0.7,
           "related_distinct/correction": 0.1818,
           "related_distinct/exception": 0.0769,
@@ -228,7 +228,7 @@
         },
         "related_distinct_without_identifier": {
           "paraphrase_above_rbd_p99": 0.2222,
-          "paraphrase_at_or_above_0.85": 0.8981,
+          "paraphrase_at_or_above_0.85": 0.9074,
           "rbd_at_or_above_0.85": 0.2115,
           "rbd_p99": 0.9548,
           "related_distinct": 104
@@ -250,7 +250,7 @@
           "max": 0.9853,
           "min": 0.8151,
           "n": 97,
-          "p05": 0.8409,
+          "p05": 0.8412,
           "p50": 0.9221,
           "p95": 0.9718,
           "p99": 0.9853
@@ -342,8 +342,8 @@
           "max": 0.9939,
           "min": 0.7794,
           "n": 108,
-          "p05": 0.8287,
-          "p50": 0.917,
+          "p05": 0.8338,
+          "p50": 0.9203,
           "p95": 0.9718,
           "p99": 0.9853
         },
@@ -372,15 +372,15 @@
           "min": 0.7794,
           "n": 76,
           "p05": 0.8227,
-          "p50": 0.917,
+          "p50": 0.9203,
           "p95": 0.9753,
           "p99": 0.9939
         },
         "paraphrase/held_out": {
           "max": 0.966,
-          "min": 0.8253,
+          "min": 0.8287,
           "n": 32,
-          "p05": 0.8287,
+          "p05": 0.8338,
           "p50": 0.9138,
           "p95": 0.9629,
           "p99": 0.966
@@ -425,14 +425,14 @@
       "separation": {
         "all_related_distinct": {
           "paraphrase_above_rbd_p99": 0.0093,
-          "paraphrase_at_or_above_0.85": 0.8611,
+          "paraphrase_at_or_above_0.85": 0.8704,
           "rbd_at_or_above_0.85": 0.4294,
           "rbd_p99": 0.9906,
           "related_distinct": 170
         },
         "at_or_above_0.85_by_family": {
           "paraphrase/near-verbatim": 1.0,
-          "paraphrase/rewording": 0.8866,
+          "paraphrase/rewording": 0.8969,
           "paraphrase/terse": 0.6,
           "related_distinct/correction": 0.1818,
           "related_distinct/exception": 0.1538,
@@ -445,7 +445,7 @@
         },
         "related_distinct_without_identifier": {
           "paraphrase_above_rbd_p99": 0.1204,
-          "paraphrase_at_or_above_0.85": 0.8611,
+          "paraphrase_at_or_above_0.85": 0.8704,
           "rbd_at_or_above_0.85": 0.2212,
           "rbd_p99": 0.9603,
           "related_distinct": 104
@@ -461,13 +461,13 @@
       "p90": 0.4574095607682704,
       "p99": 0.5235569100344382
     },
-    "embed_secs": 65.3,
+    "embed_secs": 62.1,
     "max": 0.9932901532606944,
     "p50": 0.8365426037960173,
     "p90": 0.9719620326320275,
     "p99": 0.989214895987068,
     "pairs": 170,
-    "prepare_secs": 4.7,
+    "prepare_secs": 4.4,
     "threshold_rules_met": true,
     "within_canary_timeout": false
   },

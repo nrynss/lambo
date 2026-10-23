@@ -24,7 +24,7 @@ them. Cosine quantiles are nearest rank, as the canary computes them.
 | raw | paraphrase | 108 | 0.838 | 0.924 | 0.970 | 0.984 |
 | raw | related_distinct | 170 | 0.549 | 0.837 | 0.980 | 0.989 |
 | raw | unrelated | 120 | 0.342 | 0.453 | 0.534 | 0.542 |
-| self | paraphrase | 108 | 0.829 | 0.917 | 0.972 | 0.985 |
+| self | paraphrase | 108 | 0.834 | 0.920 | 0.972 | 0.985 |
 | self | related_distinct | 170 | 0.562 | 0.823 | 0.975 | 0.991 |
 | self | unrelated | 120 | 0.345 | 0.461 | 0.526 | 0.538 |
 
@@ -37,20 +37,20 @@ them. Cosine quantiles are nearest rank, as the canary computes them.
   paraphrases (0.9%) would still merge: on this set, the p99 rule turns
   semantic merging almost off.
 - **The default 0.85** merges 35% (raw) / 43% (self) of the related-distinct
-  pairs and keeps 90% / 86% of the paraphrases.
+  pairs and keeps 91% / 87% of the paraphrases.
 - **Without the identifier family** (the pairs #193's guard refuses before
   any threshold), the related-distinct p99 drops to 0.955 (raw) / 0.960
   (self); 22% / 12% of paraphrases sit above it, and 21% / 22% of the
   remaining related-distinct pairs are at or above 0.85.
 - Share at or above 0.85 by family (raw): identifier 58%, quantity 67%,
   repository 25%, correction 18%, polarity 14%, topic-neighbour 12%,
-  exception 8%; paraphrase rewording 92%, terse 70%.
+  exception 8%; paraphrase rewording 93%, terse 70%.
 
 ### Canary timing (#191)
 
 Embedding the 170-pair export (274 distinct texts) cold on this CPU box
-took **65.3 s** in the committed run, and 59.2 s and 59.3 s in two earlier
-cold runs of the same set, against `CANARY_EMBED_TIMEOUT` of 60 s. On CPU,
+took **62.1 s** in the committed run; three earlier cold runs of the same
+export took 59.3 s, 59.2 s and 65.3 s, against `CANARY_EMBED_TIMEOUT` of 60 s. On CPU,
 a related_pairs file of this size straddles the canary's budget. The
 owner's Metal rig will be faster, but this is the case #191's backoff is
 for.
