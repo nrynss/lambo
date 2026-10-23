@@ -97,14 +97,17 @@ fn fraction(num: usize, den: usize) -> Value {
 struct Args {
     dir: PathBuf,
     out: Option<PathBuf>,
+    cache: Option<PathBuf>,
     allow_fixture: bool,
 }
 
 fn args() -> Result<Args, String> {
-    let usage = "usage: eval_measure [--dir fixtures/eval] [--out run.json] [--allow-fixture]";
+    let usage = "usage: eval_measure [--dir fixtures/eval] [--out run.json] \
+                 [--cache vectors.jsonl] [--allow-fixture]";
     let mut a = Args {
         dir: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/eval"),
         out: None,
+        cache: None,
         allow_fixture: false,
     };
     let mut it = std::env::args().skip(1);
@@ -112,6 +115,7 @@ fn args() -> Result<Args, String> {
         match flag.as_str() {
             "--dir" => a.dir = it.next().ok_or(usage)?.into(),
             "--out" => a.out = Some(it.next().ok_or(usage)?.into()),
+            "--cache" => a.cache = Some(it.next().ok_or(usage)?.into()),
             "--allow-fixture" => a.allow_fixture = true,
             "-h" | "--help" => {
                 println!("{usage}");
@@ -124,30 +128,95 @@ fn args() -> Result<Args, String> {
 }
 
 /// Embeds texts once each, in the document or query role, with progress on
-/// stderr.
+/// stderr. With `--cache`, vectors are also appended to a JSON-lines file
+/// keyed by SHA-256 of (contract, role, text), so a rerun after an edit only
+/// embeds what changed, and an interrupted run keeps its progress. The file
+/// holds vectors and hashes, never text; keep it out of the repository.
 struct Cache<'e> {
     embedder: &'e dyn Embedder,
     docs: HashMap<String, Vec<f32>>,
     queries: HashMap<String, Vec<f32>>,
     done: usize,
+    hits: usize,
+    contract: String,
+    stored: HashMap<String, Vec<f32>>,
+    file: Option<std::fs::File>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CacheLine {
+    key: String,
+    v: Vec<f32>,
 }
 
 impl Cache<'_> {
+    fn open(&mut self, path: &std::path::Path) -> Result<(), String> {
+        use std::io::BufRead;
+        if let Ok(f) = std::fs::File::open(path) {
+            for line in std::io::BufReader::new(f).lines() {
+                let line = line.map_err(|e| format!("{}: {e}", path.display()))?;
+                // A torn last line from an interrupted run is skipped.
+                if let Ok(l) = serde_json::from_str::<CacheLine>(&line) {
+                    self.stored.insert(l.key, l.v);
+                }
+            }
+        }
+        let f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        self.file = Some(f);
+        Ok(())
+    }
+
+    fn key(&self, role: &str, text: &str) -> String {
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        for part in [self.contract.as_str(), role, text] {
+            h.update((part.len() as u64).to_le_bytes());
+            h.update(part.as_bytes());
+        }
+        h.finalize().iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    fn recall(&mut self, role: &str, text: &str) -> Option<Vec<f32>> {
+        let v = self.stored.get(&self.key(role, text)).cloned();
+        self.hits += usize::from(v.is_some());
+        v
+    }
+
+    fn keep(&mut self, role: &str, text: &str, v: &[f32]) -> Result<(), String> {
+        use std::io::Write;
+        let key = self.key(role, text);
+        if let Some(f) = self.file.as_mut() {
+            let line = serde_json::to_string(&CacheLine { key, v: v.to_vec() }).expect("json");
+            writeln!(f, "{line}").map_err(|e| format!("writing the cache: {e}"))?;
+        }
+        Ok(())
+    }
+
     async fn docs(&mut self, texts: &[String]) -> Result<(), String> {
-        let todo: Vec<&str> = {
-            let mut seen = std::collections::HashSet::new();
-            texts
-                .iter()
-                .filter(|t| !self.docs.contains_key(*t) && seen.insert(t.as_str()))
-                .map(String::as_str)
-                .collect()
-        };
+        let mut todo: Vec<&str> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for t in texts {
+            if self.docs.contains_key(t) || !seen.insert(t.as_str()) {
+                continue;
+            }
+            match self.recall("doc", t) {
+                Some(v) => {
+                    self.docs.insert(t.clone(), v);
+                }
+                None => todo.push(t),
+            }
+        }
         let cap = self.embedder.batch_capacity().max(1);
         for chunk in todo.chunks(cap) {
             let deadline = tokio::time::Instant::now() + Duration::from_secs(600);
             let answers = self.embedder.embed_batch(chunk, deadline).await;
             for (text, v) in chunk.iter().zip(answers) {
                 let v = v.map_err(|e| format!("embedding a document text: {e}"))?;
+                self.keep("doc", text, &v)?;
                 self.docs.insert(text.to_string(), v);
                 self.tick();
             }
@@ -157,12 +226,20 @@ impl Cache<'_> {
 
     async fn queries(&mut self, texts: &[String]) -> Result<(), String> {
         for t in texts {
-            if !self.queries.contains_key(t) {
+            if self.queries.contains_key(t) {
+                continue;
+            }
+            if let Some(v) = self.recall("query", t) {
+                self.queries.insert(t.clone(), v);
+                continue;
+            }
+            {
                 let v = self
                     .embedder
                     .embed_query(t)
                     .await
                     .map_err(|e| format!("embedding a query: {e}"))?;
+                self.keep("query", t, &v)?;
                 self.queries.insert(t.clone(), v);
                 self.tick();
             }
@@ -195,7 +272,16 @@ async fn run() -> Result<(), String> {
     }
 
     let cfg = EmbedderConfig::from_env().map_err(|e| e.to_string())?;
-    let contract = format!("{cfg:?}");
+    // Only fields that name the model: no URL, credential or local path, so
+    // a run file can be committed as it is.
+    let contract = json!({
+        "dim": cfg.dim,
+        "llama_model": cfg.llama_model,
+        "device": cfg.device,
+        "repo": cfg.repo,
+        "revision": cfg.revision,
+        "weights_file": cfg.weights_file,
+    });
     let kind = format!("{:?}", cfg.kind);
     if kind.to_ascii_lowercase().contains("fixture") && !args.allow_fixture {
         return Err(
@@ -211,12 +297,20 @@ async fn run() -> Result<(), String> {
         .await
         .map_err(|e| format!("preparing the embedder: {e}"))?;
     let prepare_secs = started.elapsed().as_secs_f64();
+    let identity = lambo::embed::candle_identity(embedder.as_ref());
     let mut cache = Cache {
         embedder: embedder.as_ref(),
         docs: HashMap::new(),
         queries: HashMap::new(),
         done: 0,
+        hits: 0,
+        contract: format!("{kind}|{contract}|{identity:?}"),
+        stored: HashMap::new(),
+        file: None,
     };
+    if let Some(path) = &args.cache {
+        cache.open(path)?;
+    }
 
     // 1. The export first, raw and alone, timed as the canary would embed it.
     let export_texts: Vec<String> = set
@@ -226,7 +320,8 @@ async fn run() -> Result<(), String> {
         .collect();
     let t0 = Instant::now();
     cache.docs(&export_texts).await?;
-    let export_secs = t0.elapsed().as_secs_f64();
+    // A timing is only meaningful when every export text was embedded now.
+    let export_secs = (cache.hits == 0).then(|| (t0.elapsed().as_secs_f64() * 10.0).round() / 10.0);
 
     // 2. Canary phrases, for the random-pair floor.
     let canaries: Vec<String> = CANARY_PHRASES.iter().map(|s| s.to_string()).collect();
@@ -264,7 +359,12 @@ async fn run() -> Result<(), String> {
     let mut report = BTreeMap::new();
     report.insert(
         "embedder",
-        json!({ "kind": kind, "config": contract, "dimensions": embedder.dimensions() }),
+        json!({
+            "kind": kind,
+            "config": contract,
+            "identity": identity,
+            "dimensions": embedder.dimensions(),
+        }),
     );
     report.insert(
         "related_pairs_export",
@@ -273,7 +373,7 @@ async fn run() -> Result<(), String> {
             "p50": derived.p50, "p90": derived.p90, "p99": derived.p99, "max": derived.max,
             "canary_random_pair_floor": { "p50": floor.p50, "p90": floor.p90, "p99": floor.p99, "max": floor.max },
             "would_apply": applied,
-            "embed_secs": (export_secs * 10.0).round() / 10.0,
+            "embed_secs": export_secs,
             "canary_embed_timeout_secs": CANARY_EMBED_TIMEOUT.as_secs(),
             "prepare_secs": (prepare_secs * 10.0).round() / 10.0,
         }),

@@ -17,8 +17,8 @@ owner review" below).
 |---|---|
 | `corpus.json` | The retrieval universe: 100 concepts `{id, topic, type, text, origin, sources}`. `origin` is `dogfood` (23 concepts, verbatim text of a dogfood-store concept) or `authored` (77 atomic facts restated from the repo's own records, each citing its source file). A query is "no-answer" relative to this corpus. |
 | `queries.json` | 310 queries `{id, query, kind, family, topic, split, relevant[{concept, grade}], facets[], source, labeller, labelled_on, review?}`. 204 `answerable` (graded relevance 2 = answers it, 1 = partial or supporting; `facets` = what a correct answer must say, for #181) and 106 `no_answer`. |
-| `pairs.json` | 402 pairs `{id, a, b, label, family, relation?, split, source, labeller, labelled_on, concepts?, review?}`: 172 `related_distinct`, 110 `paraphrase`, 120 `unrelated`. |
-| `related_pairs.json` | Generated export in the `[embedder] related_pairs` format (`[{"a", "b"}]`): the 169 adjudicated `related_distinct` pairs. Point `related_pairs` at it to derive the merge threshold (#87). |
+| `pairs.json` | 403 pairs `{id, a, b, label, family, relation?, split, source, labeller, labelled_on, concepts?, review?}`: 173 `related_distinct`, 110 `paraphrase`, 120 `unrelated`. |
+| `related_pairs.json` | Generated export in the `[embedder] related_pairs` format (`[{"a", "b"}]`): the 170 adjudicated `related_distinct` pairs. Point `related_pairs` at it to derive the merge threshold (#87). |
 | `authoring/` | The sources: `t_*.py` topic modules (one `C()` per concept with its queries, rewordings, contrasts and facets), `dogfood_texts.json` (the public dogfood texts, from `extract_dogfood_texts.py`) and `build.py`, which writes the four files above deterministically. |
 
 `tests/eval_set.rs` checks all of it in CI: the schema (required fields,
@@ -40,7 +40,7 @@ answers #198: `supersedes`, `distinct_entity` or `contradicts`):
 |---|---|---:|
 | related_distinct | identifier | 75 |
 | | polarity | 33 |
-| | topic-neighbour | 24 |
+| | topic-neighbour | 25 |
 | | correction | 14 |
 | | exception | 14 |
 | | quantity | 8 |
@@ -51,9 +51,9 @@ answers #198: `supersedes`, `distinct_entity` or `contradicts`):
 | | near-verbatim | 1 |
 | unrelated | cross-area | 120 |
 
-Splits (a hash of the id, about 70/30): pairs 276 dev / 126 held-out;
+Splits (a hash of the id, about 70/30): pairs 276 dev / 127 held-out;
 queries 199 dev / 111 held-out. Related-distinct relations: 84 contradicts,
-52 distinct_entity, 12 supersedes, 24 none (families that need none).
+52 distinct_entity, 12 supersedes, 25 none (families that need none).
 
 Queries by family:
 
@@ -66,17 +66,17 @@ Queries by family:
 | | rationale | 8 |
 | | superseded | 6 |
 | | multi-hop | 2 |
-| no_answer | near-domain | 81 |
-| | false-premise | 12 |
+| no_answer | near-domain | 80 |
+| | false-premise | 13 |
 | | efficacy | 7 |
 | | off-domain | 6 |
 | | ledger-miss | 0 (owner step, below) |
 
 Per consumer:
 
-- **#87 / #176**: 169 adjudicated related-but-distinct pairs in the export,
+- **#87 / #176**: 170 adjudicated related-but-distinct pairs in the export,
   over `MIN_RELATED_PAIRS` (100); #190's 150-before-adjudication target is
-  met with 172.
+  met with 173.
 - **#173**: 204 answerable queries with graded ids; nDCG@10 is computed by
   the measurement example.
 - **#174**: 106 no-answer queries (32 in held-out); #174 wants at least 100

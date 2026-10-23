@@ -16,7 +16,7 @@ for t in [
   "What is the retention period for ledger heartbeats?",
   "How does lambo handle daylight-saving changes in the event-time clock?",
   "Which embedding model did the G3 spike use for its diffusion experiments?",
-  "How long does a full daemon cycle take on a 10,000-concept session?",
+  "How often does the daemon tick by default?",
   "What is the GC age threshold for an unreferenced Observation concept?",
   "Which Cockroach version does the live CI job run against?",
   "How do I migrate a lambo store from SQLite to CockroachDB?",

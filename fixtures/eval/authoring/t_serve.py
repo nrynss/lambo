@@ -34,11 +34,11 @@ C('top-04', 'Logic', D("Claude Code enforcement layer 2026-09-01"), topic=T,
        ("The dogfood hooks fail closed when the writer is down: Edit and Write stay denied until the writer comes back.", 'exception', 'contradicts')],
   facets=["hooks at user scope", "PreToolUse denies edits until one lambo_recall", "fails open when the writer is down"])
 C('top-05', 'Observation',
-  "Dogfood finding: recall-first compliance was 0% for the orchestrator, which never called lambo_recall before acting even with the protocol in its instructions; only mechanical enforcement changed that.",
-  'dev-diary/lambo-for-mooshik/DOGFOOD-FINDINGS.md', topic=T,
+  "Dogfood ledger (the I3 snapshot): recall-first compliance was 0.0% for claude-orchestrator (0 of 22 work sequences began with lambo_recall, and 37 derives had no prior recall), against 35.2% across all agents.",
+  'evidence/mooshik-i3-live-ledger/recall_first.txt', topic=T,
   q=[("Did agents call lambo_recall before acting when only told to?", 'fact-lookup', {'top-04': 1})],
-  rbd=[("Dogfood finding: subagents recalled before acting in most sessions once the protocol was in AGENTS.md.", 'topic-neighbour')],
-  facets=["0% recall-first", "orchestrator"])
+  rbd=[("Dogfood ledger (the I3 snapshot): j2-implementor and j2-remediation-r1 began every work sequence with lambo_recall, 100% recall-first compliance.", 'topic-neighbour')],
+  facets=["0.0% for claude-orchestrator", "35.2% overall"])
 NA(T, "What port does the dogfood writer use on the Linux rig?")
 NA(T, "How many agents connect to the dogfood writer at peak?")
 NA(T, "What is the monthly cost of the lambo-pg Cloud SQL instance used for the hosted Postgres workstream?", family='efficacy',
@@ -57,7 +57,7 @@ C('srv-01', 'Constraint',
 C('srv-02', 'Constraint', D("J1 gates everything multi-client"), topic=T,
   q=["Why must per-call agent_id be accepted before a shared writer is honest?",
      ("Why does lambo_reserve refuse every client but one behind a single serve?", 'rationale')],
-  para="Before J1, a serve stamps its own --agent on every connected client, and lambo_reserve refuses any caller with a different agent_id. That fail-closed rule is right, but it leaves all but one client without lambo's only mutual-exclusion primitive, so Memory must accept a per-call agent_id and record it on the interaction before a proxy or shared writer can be honest.",
+  para="J1 is the gate for all multi-client work: a serve stamps its own --agent on every connected client, and lambo_reserve refuses any caller with a different agent_id. That fail-closed rule is right, but it leaves all but one client without lambo's only mutual-exclusion primitive, so Memory must accept a per-call agent_id and record it on the interaction before a proxy or shared writer can be honest.",
   rbd=[("lambo_reserve accepts any caller's agent_id as long as the reservation does not overlap another one, so many clients can share one serve without per-call identity.", 'polarity', 'contradicts')],
   facets=["serve applies its own --agent", "lambo_reserve hard-refuses other agent_ids", "per-call agent_id"])
 C('srv-03', 'Logic', D("J1 round-2 lesson: matching an error VARIANT"), topic=T,
@@ -81,11 +81,12 @@ C('srv-06', 'Logic', D("Register-discipline technique that paid off twice"), top
      ("What was wrong with ELECTION_SLACK's stated reason?", 'fact-lookup', {'srv-01': 1})],
   facets=["check every constant the sentence cites", "LEASE_HEARTBEAT_INTERVAL = 15s"])
 C('srv-07', 'Constraint',
-  "The proxy's dial budget DIAL_BUDGET is 6 seconds: a serve that finds a live writer keeps dialing it for at most that long before reporting the writer unreachable.",
+  "The proxy's DIAL_BUDGET is 6 seconds and bounds the client's wait: past it the dial to the holder is abandoned and the call is answered 'nothing happened, retry later'. It sits above the dial's own connect and replay budgets (about 4.1 s) and below sqlite's 8 s busy_timeout.",
   'src/mcp/proxy/dialing.rs', topic=T,
-  q=[("DIAL_BUDGET", 'exact-identifier'), "How long does a proxying serve keep dialing the writer?"],
-  rbd=[("The proxy's dial budget is 60 seconds, one lease TTL plus slack.", 'identifier', 'contradicts')],
-  facets=["6 seconds"])
+  q=[("DIAL_BUDGET", 'exact-identifier'), "How long does a proxying serve wait on a dial to the writer before answering the client?"],
+  rbd=[("The proxy's dial budget is 60 seconds, one lease TTL plus slack.", 'identifier', 'contradicts'),
+       ("A SIGTERM arriving mid-dial is honoured at the next poll, because the dial is raced against the shutdown future rather than bounded by a budget.", 'topic-neighbour')],
+  facets=["6 seconds", "abandoned, retry later"])
 NA(T, "What is the maximum number of clients a proxying serve accepts?")
 NA(T, "How does lambo elect a new writer across two machines?")
 NA(T, "Which J-series review found the lease clock-skew bug?")
@@ -155,8 +156,8 @@ C('pro-08', 'Logic', D("J1 round-3 advisory (J1-R3-3, caps.rs not J1): the INVIS
   q=["Why can a U+2028 in content not fork a canonical key?",
      ("INVISIBLE_RANGES", 'exact-identifier')],
   facets=["normalize_tokens splits on char::is_whitespace", "Default_Ignorable codepoints pass check_size"])
-NA(T, "Which model ran the J3 per-task adversarial reviews?")
-NA(T, "When does workstream E start?")
+NA(T, "How many adversarial review rounds did workstream C take?")
+NA(T, "Who owns workstream E, and what does it deliver?")
 NA(T, "How many P1 findings did the full-stack sweep review find?")
 
 # Two records of the same review event, written minutes apart, each with

@@ -63,7 +63,7 @@ NA(T, "How does vimanam's diff subcommand (#45) compare two spec versions, and w
 NA(T, "How are pull requests merged into vimanam's main branch, and why is that path used?", family='efficacy', note="efficacy question merge-workflow (vimanam run)")
 NA(T, "How many downloads has vimanam had to date on crates.io and through its Homebrew tap?", family='efficacy', note="efficacy question missing-downloads (vimanam run): absent by design")
 NA(T, "Which release-automation tool did vimanam adopt to resolve issue #32, and which alternative was rejected?", family='efficacy', note="efficacy question packaging-decision (vimanam run)")
-NA(T, "What did the matched-corpus control run of the memory comparison show?")
+NA(T, "What did the matched-corpus control run of the memory comparison show?", family='false-premise', note="the control was not run")
 NA(T, "What was the inter-grader agreement between the Opus grader and a human?")
 NA(T, "How did Lambo score against file memory with a GPT reader?")
 

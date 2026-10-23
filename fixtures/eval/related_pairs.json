@@ -124,8 +124,8 @@
   "b": "The dogfood hooks fail closed when the writer is down: Edit and Write stay denied until the writer comes back."
  },
  {
-  "a": "Dogfood finding: recall-first compliance was 0% for the orchestrator, which never called lambo_recall before acting even with the protocol in its instructions; only mechanical enforcement changed that.",
-  "b": "Dogfood finding: subagents recalled before acting in most sessions once the protocol was in AGENTS.md."
+  "a": "Dogfood ledger (the I3 snapshot): recall-first compliance was 0.0% for claude-orchestrator (0 of 22 work sequences began with lambo_recall, and 37 derives had no prior recall), against 35.2% across all agents.",
+  "b": "Dogfood ledger (the I3 snapshot): j2-implementor and j2-remediation-r1 began every work sequence with lambo_recall, 100% recall-first compliance."
  },
  {
   "a": "The single-writer lease has a 45 s TTL (LEASE_TTL), refreshed every 15 s (LEASE_HEARTBEAT_INTERVAL), so a holder gets three refresh chances inside one TTL and is meant to lose the lease if it misses all three.",
@@ -140,8 +140,12 @@
   "b": "When selectively unhiding an error class to the model, matching on the error variant is enough, because each variant has exactly one producer."
  },
  {
-  "a": "The proxy's dial budget DIAL_BUDGET is 6 seconds: a serve that finds a live writer keeps dialing it for at most that long before reporting the writer unreachable.",
+  "a": "The proxy's DIAL_BUDGET is 6 seconds and bounds the client's wait: past it the dial to the holder is abandoned and the call is answered 'nothing happened, retry later'. It sits above the dial's own connect and replay budgets (about 4.1 s) and below sqlite's 8 s busy_timeout.",
   "b": "The proxy's dial budget is 60 seconds, one lease TTL plus slack."
+ },
+ {
+  "a": "The proxy's DIAL_BUDGET is 6 seconds and bounds the client's wait: past it the dial to the holder is abandoned and the call is answered 'nothing happened, retry later'. It sits above the dial's own connect and replay budgets (about 4.1 s) and below sqlite's 8 s busy_timeout.",
+  "b": "A SIGTERM arriving mid-dial is honoured at the next poll, because the dial is raced against the shutdown future rather than bounded by a budget."
  },
  {
   "a": "J3 latency claim VERIFIED at the release binary over real stdio MCP (2026-08-20, SQLite store, 20 calls, median): against the rig's live llama.cpp BGE-M3 q8_0 on CPU, a lambo_derive ack went from 14.111 ms (base 166a3c8, synchronous) to 0.048 ms (J3). That 0.048 ms is at or BELOW the same binary's ack against FixtureEmbedder (0.076 ms), which is what 'the embedder is no longer in the call' means. Both runs applied all 21 concepts, so the fast number is not a fast no-op. The absolute figures differ from the doc's 27 ms warm derive because that was the dogfood client stack on pinned 3039b82; the delta is what J3 owns.",

@@ -3,13 +3,13 @@ T = 'embedding-coverage'
 C('emb-01', 'Observation', D("Dogfood finding (2026-08-20, DOGFOOD-FINDINGS.md): 92 of 100"), topic=T,
   q=["How many dogfood concepts were missing embeddings in the first count?",
      ("Were the unembedded dogfood concepts from a single embedder outage window?", 'fact-lookup')],
-  para="On 2026-08-20 the lambo-dev dogfood store held 100 concepts and only 8 of them carried a durable vector. The missing ones were spread through time rather than grouped in one outage, and every one of the 44 Resources written by record_action lacked a vector.",
+  para="Finding from DOGFOOD-FINDINGS.md, 2026-08-20: of the 100 concepts in the lambo-dev store, 92 have no durable vector, spread through time rather than grouped in one outage; that covers all 44 Resources written by record_action and most of the Constraints, Logics and Entities. Semantic recall and dedup cannot see them, and the damage keeps accumulating with no way to backfill. Possible product work: an embedding-coverage counter in lambo_stats and a re-embed backfill verb. The cause is open: record_action never embedding by design, an intermittently unavailable embedder dropping hybrid to keyword, or a flush gap.",
   rbd=[("Dogfood finding 2026-08-22: the embedding damage is 475 of 509 concepts, not 92 of 100; the earlier figure is stale and understates the backfill by roughly five times.", 'correction', 'supersedes')],
   facets=["92 of 100", "not one outage window"])
 C('emb-02', 'Observation', D("The dogfood store's embedding damage is 475 of 509"), topic=T,
   q=[("What share of the dogfood store was unembedded once it reached about 500 concepts?", 'superseded', {'emb-01': 1}),
      ("Why were recall-quality judgements on the dogfood graph really about the keyword path?", 'rationale')],
-  para="Once the dogfood store reached 509 concepts, 475 of them had no vector, about 93 percent, roughly five times the damage the older 92-of-100 number suggested. Semantic recall there was effectively off, so recall-quality judgements measured the keyword path, and K2's re-embed verb and embedded/total counter became more valuable; coverage should be re-measured before any G calibration.",
+  para="475 of the dogfood store's 509 concepts lack a vector, much worse than the 92-of-100 figure in K's motivating table, which is out of date and understates the backfill about fivefold. Two consequences follow. Semantic recall on this store is effectively off: lambo_recall matches by keyword for 93% of the corpus, so any judgement of recall quality made on the dogfood graph is about the keyword path, not hybrid recall. And K2's re-embed verb and the embedded/total counter in lambo_stats matter more: the counter would have shown the drift on its first day, and the verb now repairs 93% of the store instead of a tenth. Coverage should be measured again before any G recall-calibration work, because calibrating against a corpus only 7% embedded would measure the wrong pipeline.",
   facets=["475 of 509", "93%"])
 C('emb-03', 'Logic', D("CORRECTION to the same-day claim that the 512-token clamp"), topic=T,
   q=[("Was the 512-token clamp the main reason dogfood concepts lacked vectors?", 'contrast', {'emb-04': 1}),
@@ -190,5 +190,5 @@ C('cal-04', 'Observation',
   q=["Which paraphrase pairs fall below the 0.85 merge threshold?"],
   facets=["register user / create account 0.8230"])
 NA(T, "What is the measured p99 of related-but-distinct pairs on the dogfood store?", note="this is what #190 has to produce")
-NA(T, "What merge threshold does lambo use for Gemini embeddings?")
+NA(T, "How was the Gemini embedder calibrated against BGE-M3?")
 NA(T, "How many paraphrase pairs did G1 measure under EmbeddingGemma 2?")

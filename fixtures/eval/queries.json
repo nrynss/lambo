@@ -1337,8 +1337,8 @@
    }
   ],
   "facets": [
-   "0% recall-first",
-   "orchestrator"
+   "0.0% for claude-orchestrator",
+   "35.2% overall"
   ],
   "source": "authored against the corpus text",
   "labeller": "Grok Bot (agent)",
@@ -1644,7 +1644,8 @@
    }
   ],
   "facets": [
-   "6 seconds"
+   "6 seconds",
+   "abandoned, retry later"
   ],
   "source": "authored against the corpus text",
   "labeller": "Grok Bot (agent)",
@@ -1652,7 +1653,7 @@
  },
  {
   "id": "q-srv-07-2",
-  "query": "How long does a proxying serve keep dialing the writer?",
+  "query": "How long does a proxying serve wait on a dial to the writer before answering the client?",
   "kind": "answerable",
   "family": "fact-lookup",
   "topic": "multi-client",
@@ -1664,7 +1665,8 @@
    }
   ],
   "facets": [
-   "6 seconds"
+   "6 seconds",
+   "abandoned, retry later"
   ],
   "source": "authored against the corpus text",
   "labeller": "Grok Bot (agent)",
@@ -4622,7 +4624,7 @@
  },
  {
   "id": "na-012",
-  "query": "What merge threshold does lambo use for Gemini embeddings?",
+  "query": "How was the Gemini embedder calibrated against BGE-M3?",
   "kind": "no_answer",
   "family": "near-domain",
   "topic": "calibration",
@@ -4765,7 +4767,7 @@
  },
  {
   "id": "na-023",
-  "query": "Which model ran the J3 per-task adversarial reviews?",
+  "query": "How many adversarial review rounds did workstream C take?",
   "kind": "no_answer",
   "family": "near-domain",
   "topic": "process",
@@ -4778,7 +4780,7 @@
  },
  {
   "id": "na-024",
-  "query": "When does workstream E start?",
+  "query": "Who owns workstream E, and what does it deliver?",
   "kind": "no_answer",
   "family": "near-domain",
   "topic": "process",
@@ -5183,12 +5185,12 @@
   "id": "na-055",
   "query": "What did the matched-corpus control run of the memory comparison show?",
   "kind": "no_answer",
-  "family": "near-domain",
+  "family": "false-premise",
   "topic": "efficacy",
   "split": "dev",
   "relevant": [],
   "facets": [],
-  "source": "hand-written; no concept in the corpus answers it",
+  "source": "the control was not run",
   "labeller": "Grok Bot (agent)",
   "labelled_on": "2026-10-23"
  },
@@ -5428,7 +5430,7 @@
  },
  {
   "id": "na-074",
-  "query": "How long does a full daemon cycle take on a 10,000-concept session?",
+  "query": "How often does the daemon tick by default?",
   "kind": "no_answer",
   "family": "near-domain",
   "topic": "near-domain",

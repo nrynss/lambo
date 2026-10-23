@@ -278,10 +278,10 @@
   "id": "top-05",
   "topic": "dogfood-topology",
   "type": "Observation",
-  "text": "Dogfood finding: recall-first compliance was 0% for the orchestrator, which never called lambo_recall before acting even with the protocol in its instructions; only mechanical enforcement changed that.",
+  "text": "Dogfood ledger (the I3 snapshot): recall-first compliance was 0.0% for claude-orchestrator (0 of 22 work sequences began with lambo_recall, and 37 derives had no prior recall), against 35.2% across all agents.",
   "origin": "authored",
   "sources": [
-   "dev-diary/lambo-for-mooshik/DOGFOOD-FINDINGS.md"
+   "evidence/mooshik-i3-live-ledger/recall_first.txt"
   ]
  },
  {
@@ -350,7 +350,7 @@
   "id": "srv-07",
   "topic": "multi-client",
   "type": "Constraint",
-  "text": "The proxy's dial budget DIAL_BUDGET is 6 seconds: a serve that finds a live writer keeps dialing it for at most that long before reporting the writer unreachable.",
+  "text": "The proxy's DIAL_BUDGET is 6 seconds and bounds the client's wait: past it the dial to the holder is abandoned and the call is answered 'nothing happened, retry later'. It sits above the dial's own connect and replay budgets (about 4.1 s) and below sqlite's 8 s busy_timeout.",
   "origin": "authored",
   "sources": [
    "src/mcp/proxy/dialing.rs"

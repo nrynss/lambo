@@ -2,7 +2,7 @@
  {
   "id": "p-emb-01-para",
   "a": "Dogfood finding (2026-08-20, DOGFOOD-FINDINGS.md): 92 of 100 concepts in the lambo-dev store carry no durable embedding — interleaved in time, not one outage window; all 44 record_action Resources plus most Constraints/Logics/Entities. Semantic recall and dedup are blind to them and the damage is cumulative with no backfill path. Candidate product work: embedding-coverage counter in lambo_stats, and a re-embed backfill verb. Cause unsettled: record_action-never-embeds by design, intermittent embedder unavailability degrading hybrid to keyword, or a flush gap.",
-  "b": "On 2026-08-20 the lambo-dev dogfood store held 100 concepts and only 8 of them carried a durable vector. The missing ones were spread through time rather than grouped in one outage, and every one of the 44 Resources written by record_action lacked a vector.",
+  "b": "Finding from DOGFOOD-FINDINGS.md, 2026-08-20: of the 100 concepts in the lambo-dev store, 92 have no durable vector, spread through time rather than grouped in one outage; that covers all 44 Resources written by record_action and most of the Constraints, Logics and Entities. Semantic recall and dedup cannot see them, and the damage keeps accumulating with no way to backfill. Possible product work: an embedding-coverage counter in lambo_stats and a re-embed backfill verb. The cause is open: record_action never embedding by design, an intermittently unavailable embedder dropping hybrid to keyword, or a flush gap.",
   "label": "paraphrase",
   "family": "rewording",
   "split": "held_out",
@@ -31,7 +31,7 @@
  {
   "id": "p-emb-02-para",
   "a": "The dogfood store's embedding damage is 475 of 509 concepts, far larger than the '92 of 100' figure carried in K's motivating table — that number is stale and understates the backfill by roughly 5x. Two consequences. First, semantic recall on this store is effectively not running: any lambo_recall here matches on keywords for 93% of the corpus, so recall-quality judgements made against the dogfood graph are judgements about the keyword path, not the hybrid one. Second, this raises the value of K2's re-embed verb and its embedded/total counter in lambo_stats — the counter would have made the drift visible the day it started, and the verb is now repairing 93% of the store rather than a tenth of it. Worth re-measuring coverage before any G recall-calibration work, since calibration against a 7%-embedded corpus would measure the wrong pipeline.",
-  "b": "Once the dogfood store reached 509 concepts, 475 of them had no vector, about 93 percent, roughly five times the damage the older 92-of-100 number suggested. Semantic recall there was effectively off, so recall-quality judgements measured the keyword path, and K2's re-embed verb and embedded/total counter became more valuable; coverage should be re-measured before any G calibration.",
+  "b": "475 of the dogfood store's 509 concepts lack a vector, much worse than the 92-of-100 figure in K's motivating table, which is out of date and understates the backfill about fivefold. Two consequences follow. Semantic recall on this store is effectively off: lambo_recall matches by keyword for 93% of the corpus, so any judgement of recall quality made on the dogfood graph is about the keyword path, not hybrid recall. And K2's re-embed verb and the embedded/total counter in lambo_stats matter more: the counter would have shown the drift on its first day, and the verb now repairs 93% of the store instead of a tenth. Coverage should be measured again before any G recall-calibration work, because calibrating against a corpus only 7% embedded would measure the wrong pipeline.",
   "label": "paraphrase",
   "family": "rewording",
   "split": "dev",
@@ -807,7 +807,7 @@
  {
   "id": "p-top-03-terse",
   "a": "The launchd ThrottleInterval for dev.lambo.dogfood is 60 seconds because the default 10 s restart falls inside the 45 s single-writer lease TTL: a restarted serve would find the lease still held and exit. At 60 s every retry lands after the lease has lapsed.",
-  "b": "dev.lambo.dogfood ThrottleInterval = 60 s because launchd's default 10 s restart lands inside the 45 s lease TTL and the new serve would exit on the held lease.",
+  "b": "dev.lambo.dogfood ThrottleInterval = 60 s: launchd's default 10 s restart lands inside the 45 s lease TTL, so the new serve would find the lease held and exit; at 60 s every retry comes after the lease lapses.",
   "label": "paraphrase",
   "family": "terse",
   "split": "dev",
@@ -894,8 +894,8 @@
  },
  {
   "id": "p-top-05-para",
-  "a": "Dogfood finding: recall-first compliance was 0% for the orchestrator, which never called lambo_recall before acting even with the protocol in its instructions; only mechanical enforcement changed that.",
-  "b": "On the dogfood rig the orchestrator recalled first 0% of the time: even with the protocol in its instructions it never ran lambo_recall before acting, and only mechanical enforcement changed that.",
+  "a": "Dogfood ledger (the I3 snapshot): recall-first compliance was 0.0% for claude-orchestrator (0 of 22 work sequences began with lambo_recall, and 37 derives had no prior recall), against 35.2% across all agents.",
+  "b": "In the I3 snapshot of the dogfood ledger, claude-orchestrator never opened a work sequence with lambo_recall (0 of 22, 0.0%) and made 37 derives without a prior recall, while all agents together managed 35.2%.",
   "label": "paraphrase",
   "family": "rewording",
   "split": "held_out",
@@ -908,8 +908,8 @@
  },
  {
   "id": "p-top-05-rbd1",
-  "a": "Dogfood finding: recall-first compliance was 0% for the orchestrator, which never called lambo_recall before acting even with the protocol in its instructions; only mechanical enforcement changed that.",
-  "b": "Dogfood finding: subagents recalled before acting in most sessions once the protocol was in AGENTS.md.",
+  "a": "Dogfood ledger (the I3 snapshot): recall-first compliance was 0.0% for claude-orchestrator (0 of 22 work sequences began with lambo_recall, and 37 derives had no prior recall), against 35.2% across all agents.",
+  "b": "Dogfood ledger (the I3 snapshot): j2-implementor and j2-remediation-r1 began every work sequence with lambo_recall, 100% recall-first compliance.",
   "label": "related_distinct",
   "family": "topic-neighbour",
   "split": "dev",
@@ -966,7 +966,7 @@
  {
   "id": "p-srv-02-para",
   "a": "J1 gates everything multi-client: the serve applies its own --agent to every connected client, and lambo_reserve hard-refuses any caller whose agent_id differs — correct fail-closed behaviour that leaves every client but one without lambo's only mutual-exclusion primitive. Per-call agent_id must be accepted at the Memory level and recorded on the interaction before a proxy or shared writer can be honest.",
-  "b": "Before J1, a serve stamps its own --agent on every connected client, and lambo_reserve refuses any caller with a different agent_id. That fail-closed rule is right, but it leaves all but one client without lambo's only mutual-exclusion primitive, so Memory must accept a per-call agent_id and record it on the interaction before a proxy or shared writer can be honest.",
+  "b": "J1 is the gate for all multi-client work: a serve stamps its own --agent on every connected client, and lambo_reserve refuses any caller with a different agent_id. That fail-closed rule is right, but it leaves all but one client without lambo's only mutual-exclusion primitive, so Memory must accept a per-call agent_id and record it on the interaction before a proxy or shared writer can be honest.",
   "label": "paraphrase",
   "family": "rewording",
   "split": "dev",
@@ -1081,8 +1081,8 @@
  },
  {
   "id": "p-srv-07-para",
-  "a": "The proxy's dial budget DIAL_BUDGET is 6 seconds: a serve that finds a live writer keeps dialing it for at most that long before reporting the writer unreachable.",
-  "b": "DIAL_BUDGET, the proxy's dialing budget, is six seconds: once a serve finds a live writer it keeps trying to dial it for no more than that before reporting the writer unreachable.",
+  "a": "The proxy's DIAL_BUDGET is 6 seconds and bounds the client's wait: past it the dial to the holder is abandoned and the call is answered 'nothing happened, retry later'. It sits above the dial's own connect and replay budgets (about 4.1 s) and below sqlite's 8 s busy_timeout.",
+  "b": "DIAL_BUDGET, six seconds, caps how long a proxy's client waits on a dial: after that the dial is dropped and the call gets 'nothing happened, retry later'. The value is above the roughly 4.1 s the connect and replay steps budget for themselves and under sqlite's 8 s busy_timeout.",
   "label": "paraphrase",
   "family": "rewording",
   "split": "dev",
@@ -1095,12 +1095,26 @@
  },
  {
   "id": "p-srv-07-rbd1",
-  "a": "The proxy's dial budget DIAL_BUDGET is 6 seconds: a serve that finds a live writer keeps dialing it for at most that long before reporting the writer unreachable.",
+  "a": "The proxy's DIAL_BUDGET is 6 seconds and bounds the client's wait: past it the dial to the holder is abandoned and the call is answered 'nothing happened, retry later'. It sits above the dial's own connect and replay budgets (about 4.1 s) and below sqlite's 8 s busy_timeout.",
   "b": "The proxy's dial budget is 60 seconds, one lease TTL plus slack.",
   "label": "related_distinct",
   "family": "identifier",
   "relation": "contradicts",
   "split": "dev",
+  "source": "corpus srv-07 + authored contrast",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23",
+  "concepts": [
+   "srv-07"
+  ]
+ },
+ {
+  "id": "p-srv-07-rbd2",
+  "a": "The proxy's DIAL_BUDGET is 6 seconds and bounds the client's wait: past it the dial to the holder is abandoned and the call is answered 'nothing happened, retry later'. It sits above the dial's own connect and replay budgets (about 4.1 s) and below sqlite's 8 s busy_timeout.",
+  "b": "A SIGTERM arriving mid-dial is honoured at the next poll, because the dial is raced against the shutdown future rather than bounded by a budget.",
+  "label": "related_distinct",
+  "family": "topic-neighbour",
+  "split": "held_out",
   "source": "corpus srv-07 + authored contrast",
   "labeller": "Grok Bot (agent)",
   "labelled_on": "2026-10-23",
@@ -4123,7 +4137,7 @@
  },
  {
   "id": "p-u017",
-  "a": "Dogfood finding: recall-first compliance was 0% for the orchestrator, which never called lambo_recall before acting even with the protocol in its instructions; only mechanical enforcement changed that.",
+  "a": "Dogfood ledger (the I3 snapshot): recall-first compliance was 0.0% for claude-orchestrator (0 of 22 work sequences began with lambo_recall, and 37 derives had no prior recall), against 35.2% across all agents.",
   "b": "0.7.0 (#171): the cosine kernel accumulates in 16 independent lanes in a fixed order, so the compiler vectorizes it and every target scores the same bits; the vector scan sorts only the top k.",
   "label": "unrelated",
   "family": "cross-area",
@@ -4243,7 +4257,7 @@
  },
  {
   "id": "p-u025",
-  "a": "Dogfood finding: recall-first compliance was 0% for the orchestrator, which never called lambo_recall before acting even with the protocol in its instructions; only mechanical enforcement changed that.",
+  "a": "Dogfood ledger (the I3 snapshot): recall-first compliance was 0.0% for claude-orchestrator (0 of 22 work sequences began with lambo_recall, and 37 derives had no prior recall), against 35.2% across all agents.",
   "b": "0.6.0 (#20): with canonization_supersede = true (off by default), a contradicting concept that earns its own newer evidence demotes the Canonical concept it contradicts, and the audit records why.",
   "label": "unrelated",
   "family": "cross-area",
@@ -4303,7 +4317,7 @@
  },
  {
   "id": "p-u029",
-  "a": "Dogfood finding: recall-first compliance was 0% for the orchestrator, which never called lambo_recall before acting even with the protocol in its instructions; only mechanical enforcement changed that.",
+  "a": "Dogfood ledger (the I3 snapshot): recall-first compliance was 0.0% for claude-orchestrator (0 of 22 work sequences began with lambo_recall, and 37 derives had no prior recall), against 35.2% across all agents.",
   "b": "J2-R1-1 reproduced against real products: with the holder killed mid-call, the proxy saw the closed connection in 18 ms but sent the client nothing, and the client hung 121.7 s, exactly its configured timeout (MCP error -32001).",
   "label": "unrelated",
   "family": "cross-area",
@@ -4723,7 +4737,7 @@
  },
  {
   "id": "p-u057",
-  "a": "The proxy's dial budget DIAL_BUDGET is 6 seconds: a serve that finds a live writer keeps dialing it for at most that long before reporting the writer unreachable.",
+  "a": "The proxy's DIAL_BUDGET is 6 seconds and bounds the client's wait: past it the dial to the holder is abandoned and the call is answered 'nothing happened, retry later'. It sits above the dial's own connect and replay budgets (about 4.1 s) and below sqlite's 8 s busy_timeout.",
   "b": "dedup_rate.py over the early ledger window: 7 write calls, 24 concepts created, 2 matched, a dedup rate of 0.077; j1-reviewer-r1 was the only agent to match anything (0.333).",
   "label": "unrelated",
   "family": "cross-area",
@@ -5098,7 +5112,7 @@
  },
  {
   "id": "p-u082",
-  "a": "The proxy's dial budget DIAL_BUDGET is 6 seconds: a serve that finds a live writer keeps dialing it for at most that long before reporting the writer unreachable.",
+  "a": "The proxy's DIAL_BUDGET is 6 seconds and bounds the client's wait: past it the dial to the holder is abandoned and the call is answered 'nothing happened, retry later'. It sits above the dial's own connect and replay budgets (about 4.1 s) and below sqlite's 8 s busy_timeout.",
   "b": "Unreleased (#193): hybrid derive no longer merges a new concept by vector similarity into a concept whose text names different identifiers (digit runs or identifier tokens such as v0.5.0, src/mcp/server.rs, round3), so 'release v0.5.0 is current' and 'release v0.6.0 is current' stay two facts at any cosine.",
   "label": "unrelated",
   "family": "cross-area",
@@ -5309,7 +5323,7 @@
  {
   "id": "p-u096",
   "a": "Under the 0.85 threshold, G records real paraphrases below it that create duplicates by design: register user / create account (0.8230), make an account / register user (0.8152), roll out the service / deploy service (0.8294).",
-  "b": "Dogfood finding: recall-first compliance was 0% for the orchestrator, which never called lambo_recall before acting even with the protocol in its instructions; only mechanical enforcement changed that.",
+  "b": "Dogfood ledger (the I3 snapshot): recall-first compliance was 0.0% for claude-orchestrator (0 of 22 work sequences began with lambo_recall, and 37 derives had no prior recall), against 35.2% across all agents.",
   "label": "unrelated",
   "family": "cross-area",
   "split": "dev",
@@ -5369,7 +5383,7 @@
  {
   "id": "p-u100",
   "a": "Paired memory comparison 2026-09-07, vimanam project run: file memory 10/12, Lambo 8/12; each system won exactly the questions only it had ingested, and the two June 2026 decisions predate the store.",
-  "b": "The proxy's dial budget DIAL_BUDGET is 6 seconds: a serve that finds a live writer keeps dialing it for at most that long before reporting the writer unreachable.",
+  "b": "The proxy's DIAL_BUDGET is 6 seconds and bounds the client's wait: past it the dial to the holder is abandoned and the call is answered 'nothing happened, retry later'. It sits above the dial's own connect and replay budgets (about 4.1 s) and below sqlite's 8 s busy_timeout.",
   "label": "unrelated",
   "family": "cross-area",
   "split": "dev",
@@ -5383,7 +5397,7 @@
  },
  {
   "id": "p-u101",
-  "a": "Dogfood finding: recall-first compliance was 0% for the orchestrator, which never called lambo_recall before acting even with the protocol in its instructions; only mechanical enforcement changed that.",
+  "a": "Dogfood ledger (the I3 snapshot): recall-first compliance was 0.0% for claude-orchestrator (0 of 22 work sequences began with lambo_recall, and 37 derives had no prior recall), against 35.2% across all agents.",
   "b": "G2 set RECENT_SCORE to 0.35, below the lowest durable true-recall hit (0.3991), so max-merge keeps the correct vector ranking; the old 0.50 recent floor masked the 'changes that do not break existing clients' query.",
   "label": "unrelated",
   "family": "cross-area",
