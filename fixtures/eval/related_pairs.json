@@ -1,0 +1,682 @@
+[
+ {
+  "a": "Dogfood finding 2026-08-22: the embedding damage is 475 of 509 concepts, not 92 of 100; the earlier figure is stale and understates the backfill by roughly five times.",
+  "b": "Dogfood finding (2026-08-20, DOGFOOD-FINDINGS.md): 92 of 100 concepts in the lambo-dev store carry no durable embedding — interleaved in time, not one outage window; all 44 record_action Resources plus most Constraints/Logics/Entities. Semantic recall and dedup are blind to them and the damage is cumulative with no backfill path. Candidate product work: embedding-coverage counter in lambo_stats, and a re-embed backfill verb. Cause unsettled: record_action-never-embeds by design, intermittent embedder unavailability degrading hybrid to keyword, or a flush gap."
+ },
+ {
+  "a": "CORRECTION to the same-day claim that the 512-token clamp was a plausible contributor to the unembedded-concept damage — measured against the live dogfood store 2026-08-22, it is NOT the dominant cause. Coverage is 34 embedded of 509 concepts (93% unembedded), and the gap does not track length: concepts under 400 chars are 2/247 embedded, worse than the 400-1200 band at 32/232, while 1200-2400 is 0/30. Sub-400-char concepts never reach the 512-token clamp, so something else — the originally recorded cause, the embedder unreachable or refusing silently across whole sessions — accounts for the bulk. The clamp is still real and still worth its fix (it hard-fails every long input), but it is a second failure mode, not the explanation. Recency confirms the split: the ten newest concepts are 9/10 embedded (written after the clamp fix, with the embedder up), every earlier 100-row band is 2-8%.",
+  "b": "The 512-token llama-server clamp is a plausible contributor to the 92 of 100 unembedded dogfood concepts: any input over about 512 tokens fails with HTTP 500 and, on a pre-J3 binary, the write applied with a NULL embedding."
+ },
+ {
+  "a": "The dogfood embedder's capacity flags are LOAD-BEARING, not tuning (found by K1's NVIDIA leg 2026-08-22, reproduced and fixed live on the Mac rig the same day, DOGFOOD-SETUP.md updated). llama-server clamps n_batch = n_ubatch = 512 by default, so ANY input over ~512 tokens fails HTTP 500 'input too large to process' — the J3-R3-1 failure class reachable by plain input length, no network fault needed. BGE-M3 carries 8192-token capacity; the defaults throw away fifteen sixteenths of it. On a pre-J3 binary such a write applied with embedding = NULL while the receipt said 'applied', so this is a plausible contributor to the 92/100 unembedded dogfood concepts. Run with --batch-size 8192 --ubatch-size 8192 -c 8192 (long flags only; this build rejects -u), and verify with a >512-token embed, NOT /health — health passes either way, which is how it hid.",
+  "b": "The dogfood llama-server's capacity flags are tuning only: the defaults handle every input and only change throughput."
+ },
+ {
+  "a": "The dogfood embedder's capacity flags are LOAD-BEARING, not tuning (found by K1's NVIDIA leg 2026-08-22, reproduced and fixed live on the Mac rig the same day, DOGFOOD-SETUP.md updated). llama-server clamps n_batch = n_ubatch = 512 by default, so ANY input over ~512 tokens fails HTTP 500 'input too large to process' — the J3-R3-1 failure class reachable by plain input length, no network fault needed. BGE-M3 carries 8192-token capacity; the defaults throw away fifteen sixteenths of it. On a pre-J3 binary such a write applied with embedding = NULL while the receipt said 'applied', so this is a plausible contributor to the 92/100 unembedded dogfood concepts. Run with --batch-size 8192 --ubatch-size 8192 -c 8192 (long flags only; this build rejects -u), and verify with a >512-token embed, NOT /health — health passes either way, which is how it hid.",
+  "b": "The dogfood llama-server must be started with --batch-size 4096 --ubatch-size 4096 -c 4096, and -u is accepted as the short form."
+ },
+ {
+  "a": "J3 round-3 residual handed outside J3, for E2E/J4: a concept applied with a NULL embedding is unfindable by semantic recall, and neither the ack, the receipt, nor a warning says so — the receipt reads 'applied — derived 1 concept(s): 1 created, 0 matched existing' with warnings: []. Pre-existing hybrid-derive degradation, not touched by these commits, but J3 is what made a fast vector-less Ok load-bearing for durability (J3-R3-1). Any E2E durability measurement must therefore assert on the STORE's embedding column, not on applied counts: 'applied' does not mean 'embedded'. Reviewer note for future rounds: read back store state with sqlite3 rather than trusting lambo_stats' applied count, and burst MULTI-AGENT as well as multi-size — round 2's single-agent-only red/green is what let J3-R3-2 through.",
+  "b": "A concept applied with a NULL embedding is flagged in its receipt as 'applied (unembedded)' and a warning names the failed embed, so the ack alone tells the caller."
+ },
+ {
+  "a": "Re-pinned the dogfood binary to lambo-e11fb06 (lambo-for-mooshik @ e11fb06, clean tree, LAMBO_GIT_SHA set, features store-sqlite,embed-candle-metal,embed-bge). This pin carries the record_action embedder-hop fix (record_action concepts previously stored embedding NULL — everything an agent DID was invisible to semantic recall) and the new re-embed --missing-only repair verb. Ran the repair with serve stopped: backfilled 42 NULL-vector concepts, coverage 534/576 -> 576/576, contract untouched (candle BAAI/bge-m3, dim 1024). Repointed launchd from lambo-4c6fc93, restarted, verified: lease http-shared-writer pid 35655, MCP stats embedded=576/576, ledger heartbeat git_sha=e11fb06.",
+  "b": "Re-pinned the dogfood binary to lambo-4c6fc93 (branch lambo-for-mooshik @ 4c6fc93, clean tree, LAMBO_GIT_SHA set, features store-sqlite,embed-candle-metal,embed-bge). Provisioned the sqlite store with the new binary, repointed the launchd unit dev.lambo.dogfood from lambo-21e4cf8, restarted, and verified: lease holder http-shared-writer, ledger heartbeat git_sha=4c6fc93, graph intact (702 nodes / 554 concepts). Config unchanged: sqlite + candle BGE-M3 on Metal. Added the operator start/stop script ~/Documents/work/scripts/lambo-dogfood.sh (start|stop|restart|status|log) and verified a full stop/start cycle releases and reacquires the lease."
+ },
+ {
+  "a": "record_action created its Resource and Entity concepts with NULL embeddings because it had no embedder hop, so everything an agent did was reachable only by keyword or graph traversal while derive-created concepts were vector-searchable, an inversion of what recall should favour. Commit bef53e6 added the hop.",
+  "b": "derive created its concepts with NULL embeddings while record_action Resources were embedded, so derived knowledge was keyword-only until the fix."
+ },
+ {
+  "a": "The 184 historical dogfood pairs at or above the 0.85 merge threshold never merged (semantic_merged stayed 0) because a pair cannot merge when the older concept had no embedding at the time the newer one was written; the embedding gap disabled deduplication as well as semantic recall.",
+  "b": "In the dogfood store 4,962 concept pairs sit in the cosine band from 0.65 to 0.85, below the merge threshold and unlabelled."
+ },
+ {
+  "a": "Workstream K moves BGE-M3 in-process through candle instead of a llama.cpp server: with no transport, 'embedder unreachable' stops being a runtime state, and what remains is a startup condition such as missing or corrupt weights.",
+  "b": "A hosted embedder such as Gemini fails over the network by definition, so it keeps needing J3's classification of transport failures."
+ },
+ {
+  "a": "The candle adapter loads BGE-M3 weights from nrynss/bge-m3-f16-safetensors on Hugging Face, an f16 cast of BAAI/bge-m3 verified tensor by tensor (391 of 391 tensors f16-equal).",
+  "b": "The candle adapter loads BGE-M3 weights directly from BAAI/bge-m3 in f32; there is no f16 cast."
+ },
+ {
+  "a": "The candle adapter loads BGE-M3 weights from nrynss/bge-m3-f16-safetensors on Hugging Face, an f16 cast of BAAI/bge-m3 verified tensor by tensor (391 of 391 tensors f16-equal).",
+  "b": "The llama.cpp rig serves a q8_0 GGUF quantisation of BGE-M3 on 127.0.0.1:8080."
+ },
+ {
+  "a": "candle device selection: device = auto resolves Metal on Apple silicon and CUDA elsewhere, and refuses to start when neither accelerator exists; device = cpu is the only way to serve without an accelerator.",
+  "b": "candle device selection: device = auto falls back to the CPU silently when neither Metal nor CUDA is available."
+ },
+ {
+  "a": "K1's first gate is cosine parity: embed the dogfood corpus through the candle spike and through the rig's llama-server and compare; a median self-agreement below 0.99 means the pooling is wrong. Subtly wrong pooling yields plausible but wrong vectors, so recall would degrade silently.",
+  "b": "K1's second number is throughput on CPU and Metal by the J3 probe method: representative input sizes, warm-up discarded, serial and concurrent legs."
+ },
+ {
+  "a": "The Mac dogfood rig embeds with in-process candle BGE-M3 on Metal (kind = candle, device = metal, 1024 dimensions). It replaced the llama-server bge_m3 embedder on 127.0.0.1:8080 in the K2 migration on 2026-08-23.",
+  "b": "The Mac dogfood rig embeds through the llama-server bge_m3 embedder on 127.0.0.1:8080, with candle kept only as a fallback."
+ },
+ {
+  "a": "Embedder canary (#176): a writer attach embeds 20 fixed phrases and compares them with the vectors pinned for that contract in store_meta; any phrase below cosine 0.99 is a drift, which catches a model change behind the same kind, model and dim.",
+  "b": "Embedder canary: a writer attach embeds 10 fixed phrases and treats any phrase below cosine 0.95 as a drift."
+ },
+ {
+  "a": "Embedder canary (#176): a writer attach embeds 20 fixed phrases and compares them with the vectors pinned for that contract in store_meta; any phrase below cosine 0.99 is a drift, which catches a model change behind the same kind, model and dim.",
+  "b": "The canary pin also records cosine quantiles over pairs of different canary phrases, used as a relevance floor and never as a merge threshold."
+ },
+ {
+  "a": "[embedder] canary modes: verify refuses the writer attach on a drift unless --allow-embedding-mismatch is passed, warn (the default) logs it, and off skips the check. An unreachable embedder leaves the check unverified rather than refused.",
+  "b": "[embedder] canary modes: verify is the default and refuses the writer attach on any drift; warn has to be chosen explicitly."
+ },
+ {
+  "a": "[embedder] canary modes: verify refuses the writer attach on a drift unless --allow-embedding-mismatch is passed, warn (the default) logs it, and off skips the check. An unreachable embedder leaves the check unverified rather than refused.",
+  "b": "[embedder] canary modes: an unreachable embedder fails the check and refuses the attach under verify."
+ },
+ {
+  "a": "Under canary = warn, a canary check that passed within the last 10 minutes is trusted without embedding again; verify embeds at every writer attach.",
+  "b": "Under canary = verify, a check that passed within the last 10 minutes is trusted without embedding again; warn embeds at every attach."
+ },
+ {
+  "a": "[embedder] related_pairs (#87, #176): given a JSON file of at least 100 labelled related-but-distinct pairs, semantic_match_threshold becomes their p99 cosine under the configured embedder, provided that sits above the canary's random-pair floor; the result is cached against the file's SHA-256.",
+  "b": "[embedder] related_pairs: with at least 50 labelled pairs, semantic_match_threshold becomes their median cosine."
+ },
+ {
+  "a": "[embedder] related_pairs (#87, #176): given a JSON file of at least 100 labelled related-but-distinct pairs, semantic_match_threshold becomes their p99 cosine under the configured embedder, provided that sits above the canary's random-pair floor; the result is cached against the file's SHA-256.",
+  "b": "A related_pairs file that fails to embed while the canary phrases succeed is retried with an exponential backoff (#191) instead of costing every attach a full re-embed."
+ },
+ {
+  "a": "G1 measured BGE-M3 on the llama.cpp rig: true recall (bare query to stored concept vector) 0.4599 to 0.6577; paraphrase merge pairs 0.6889 to 0.8984; related-but-distinct pairs 0.6348 to 0.8913; unrelated pairs 0.4999 to 0.6249.",
+  "b": "G1 measured BGE-M3 paraphrase pairs at 0.80 to 0.95 and related-but-distinct pairs at 0.50 to 0.70, so the two classes separate cleanly at 0.75."
+ },
+ {
+  "a": "G2 kept semantic_match_threshold at 0.85 as a calibrated decision: 0.85 already accepts the related-but-distinct pair reset password / forgot password (0.8913), and lowering it to 0.84 would accept three more related-distinct pairs while rescuing only one paraphrase.",
+  "b": "G2 lowered semantic_match_threshold from 0.85 to 0.80 so that BGE-M3 paraphrases like register user / create account would merge."
+ },
+ {
+  "a": "G2 set RECENT_SCORE to 0.35, below the lowest durable true-recall hit (0.3991), so max-merge keeps the correct vector ranking; the old 0.50 recent floor masked the 'changes that do not break existing clients' query.",
+  "b": "RECENT_SCORE is 0.50, a flat score given to every recent concept and above most true-recall cosines."
+ },
+ {
+  "a": "G2 set RECENT_SCORE to 0.35, below the lowest durable true-recall hit (0.3991), so max-merge keeps the correct vector ranking; the old 0.50 recent floor masked the 'changes that do not break existing clients' query.",
+  "b": "In a session younger than 10 minutes, recency divides by a 10-minute floor, so a scheduler stall can no longer flip two scores."
+ },
+ {
+  "a": "The Mac dogfood writer is a single launchd-supervised lambo serve over HTTP on port 7700, running as agent http-shared-writer; every client connects to http://127.0.0.1:7700/mcp instead of spawning its own serve.",
+  "b": "Each agent on the Mac dogfood machine spawns its own stdio lambo serve, and the serves coordinate through the store's single-writer lease."
+ },
+ {
+  "a": "The Mac dogfood writer is a single launchd-supervised lambo serve over HTTP on port 7700, running as agent http-shared-writer; every client connects to http://127.0.0.1:7700/mcp instead of spawning its own serve.",
+  "b": "The isolated evaluation copy of the dogfood store was served on port 7701 over HTTP, so the live writer on 7700 was never touched."
+ },
+ {
+  "a": "The launchd ThrottleInterval for dev.lambo.dogfood is 60 seconds because the default 10 s restart falls inside the 45 s single-writer lease TTL: a restarted serve would find the lease still held and exit. At 60 s every retry lands after the lease has lapsed.",
+  "b": "The launchd ThrottleInterval for dev.lambo.dogfood is 60 seconds simply to avoid a tight restart loop when the binary crashes at start; the lease plays no part."
+ },
+ {
+  "a": "The launchd ThrottleInterval for dev.lambo.dogfood is 60 seconds because the default 10 s restart falls inside the 45 s single-writer lease TTL: a restarted serve would find the lease still held and exit. At 60 s every retry lands after the lease has lapsed.",
+  "b": "The launchd ThrottleInterval for dev.lambo.dogfood is 30 seconds, comfortably above the 15 s lease heartbeat."
+ },
+ {
+  "a": "Claude Code enforcement layer 2026-09-01: instructions alone do not make Claude Code follow the lambo-dogfood protocol (operator observation: other harnesses comply from AGENTS.md text; Claude Code is notorious for skipping it). Fix is mechanical, at user scope so it covers every project: ~/.claude/settings.json hooks driving ~/lambo-dogfood/hooks/lambo-hook.sh. SessionStart injects the protocol + writer health; PreToolUse denies Edit/Write/NotebookEdit until the session has made one lambo_recall (bounded at 2 denials so restricted-toolset agents cannot deadlock); PostToolUse markers track recall/derive/edit per session_id under ~/lambo-dogfood/hooks/state; Stop blocks ending a turn that edited files without a derive or record_action, once per session, honoring stop_hook_active. Every gate fails open when the writer is down. Verified live: a Write was denied, lambo_recall lifted the gate, the retry succeeded.",
+  "b": "Claude Code follows the lambo-dogfood protocol from AGENTS.md text alone, like the other harnesses, so no hooks are needed."
+ },
+ {
+  "a": "Claude Code enforcement layer 2026-09-01: instructions alone do not make Claude Code follow the lambo-dogfood protocol (operator observation: other harnesses comply from AGENTS.md text; Claude Code is notorious for skipping it). Fix is mechanical, at user scope so it covers every project: ~/.claude/settings.json hooks driving ~/lambo-dogfood/hooks/lambo-hook.sh. SessionStart injects the protocol + writer health; PreToolUse denies Edit/Write/NotebookEdit until the session has made one lambo_recall (bounded at 2 denials so restricted-toolset agents cannot deadlock); PostToolUse markers track recall/derive/edit per session_id under ~/lambo-dogfood/hooks/state; Stop blocks ending a turn that edited files without a derive or record_action, once per session, honoring stop_hook_active. Every gate fails open when the writer is down. Verified live: a Write was denied, lambo_recall lifted the gate, the retry succeeded.",
+  "b": "The dogfood hooks fail closed when the writer is down: Edit and Write stay denied until the writer comes back."
+ },
+ {
+  "a": "Dogfood ledger (the I3 snapshot): recall-first compliance was 0.0% for claude-orchestrator (0 of 22 work sequences began with lambo_recall, and 37 derives had no prior recall), against 35.2% across all agents.",
+  "b": "Dogfood ledger (the I3 snapshot): j2-implementor and j2-remediation-r1 began every work sequence with lambo_recall, 100% recall-first compliance."
+ },
+ {
+  "a": "The single-writer lease has a 45 s TTL (LEASE_TTL), refreshed every 15 s (LEASE_HEARTBEAT_INTERVAL), so a holder gets three refresh chances inside one TTL and is meant to lose the lease if it misses all three.",
+  "b": "The single-writer lease has a 15 s TTL, refreshed every 5 s."
+ },
+ {
+  "a": "J1 gates everything multi-client: the serve applies its own --agent to every connected client, and lambo_reserve hard-refuses any caller whose agent_id differs — correct fail-closed behaviour that leaves every client but one without lambo's only mutual-exclusion primitive. Per-call agent_id must be accepted at the Memory level and recorded on the interaction before a proxy or shared writer can be honest.",
+  "b": "lambo_reserve accepts any caller's agent_id as long as the reservation does not overlap another one, so many clients can share one serve without per-call identity."
+ },
+ {
+  "a": "J1 round-2 lesson: matching an error VARIANT is not matching a PATH. conflict_err matched LamboError::Conflict to surface §11 reserve conflicts, but lease_lost_error() is also a Conflict and interpolates OPERATOR_OVERRIDE (a SQL DELETE), so the fix disclosed to the model what the parent had flattened. When selectively unhiding an error class, discriminate structurally (distinct variant or typed payload, or match at the site where sources are distinguishable), never by variant alone — and probe every producer of that variant before shipping.",
+  "b": "When selectively unhiding an error class to the model, matching on the error variant is enough, because each variant has exactly one producer."
+ },
+ {
+  "a": "The proxy's DIAL_BUDGET is 6 seconds and bounds the client's wait: past it the dial to the holder is abandoned and the call is answered 'nothing happened, retry later'. It sits above the dial's own connect and replay budgets (about 4.1 s) and below sqlite's 8 s busy_timeout.",
+  "b": "The proxy's dial budget is 60 seconds, one lease TTL plus slack."
+ },
+ {
+  "a": "The proxy's DIAL_BUDGET is 6 seconds and bounds the client's wait: past it the dial to the holder is abandoned and the call is answered 'nothing happened, retry later'. It sits above the dial's own connect and replay budgets (about 4.1 s) and below sqlite's 8 s busy_timeout.",
+  "b": "A SIGTERM arriving mid-dial is honoured at the next poll, because the dial is raced against the shutdown future rather than bounded by a budget."
+ },
+ {
+  "a": "J3 latency claim VERIFIED at the release binary over real stdio MCP (2026-08-20, SQLite store, 20 calls, median): against the rig's live llama.cpp BGE-M3 q8_0 on CPU, a lambo_derive ack went from 14.111 ms (base 166a3c8, synchronous) to 0.048 ms (J3). That 0.048 ms is at or BELOW the same binary's ack against FixtureEmbedder (0.076 ms), which is what 'the embedder is no longer in the call' means. Both runs applied all 21 concepts, so the fast number is not a fast no-op. The absolute figures differ from the doc's 27 ms warm derive because that was the dogfood client stack on pinned 3039b82; the delta is what J3 owns.",
+  "b": "After J3 a lambo_derive ack still waits for the embedder, so it costs about 14 ms against a CPU llama.cpp BGE-M3."
+ },
+ {
+  "a": "J3 acks a derive once its intent is durable in the write queue, before the embedder runs; the receipt (lambo_receipt) later reports applied, refused or lost, and is the only place a write's real outcome appears.",
+  "b": "J3 acks a derive only after the concept is applied and embedded, so the ack itself is the outcome and receipts are optional."
+ },
+ {
+  "a": "Lambo agent roles: all remediation runs on Opus, and whole-workstream end-to-end review runs on Fable; per-task review also runs on Opus.",
+  "b": "Lambo agent roles: remediation runs on Fable, and whole-workstream end-to-end review runs on Opus."
+ },
+ {
+  "a": "Workstream B is extract-then-extend, not copy-then-edit: B0 extracts PgStore<D: Dialect> from the hardened Cockroach adapter (move-only commit first, then carve), with postgres and cockroach as dialect files. A function enters the shared base only when its SQL is byte-identical across dialects — never forced together with a bool parameter. Copy-then-edit was rejected: it makes Postgres a second-class citizen and dual maintenance reliably fails (F-R2-2 demonstrated it).",
+  "b": "Workstream B is copy-then-edit: the Postgres adapter starts as a copy of the Cockroach adapter and the two are edited independently."
+ },
+ {
+  "a": "Alias split: config strings postgres/pg resolve to PgStore<PostgresDialect>, cockroach/crdb to PgStore<CockroachDialect> — nothing maps across the boundary. This is a recorded behaviour change that fails loud, never silently mis-ranks: the Postgres dialect's CREATE EXTENSION vector and <=> operator do not exist on Cockroach, so cross-misconfiguration dies at provision or first vector query.",
+  "b": "Alias split: the config string postgres resolves to PgStore<CockroachDialect> when the server reports Cockroach, so a crossed config keeps working."
+ },
+ {
+  "a": "0.7.0 (#171): keyword recall p50 went from 18.7 ms to 7.5 ms, and 16 concurrent clients from 63 to 1,104 recalls per second, measured end to end over MCP on a 9,500-concept SQLite store.",
+  "b": "0.4.0 (#8, #14): warm recall p50 went from 219 ms to 4.3 ms on a 3,600-concept SQLite session because the session holder ranks vectors from memory."
+ },
+ {
+  "a": "0.7.0 (#171): keyword recall p50 went from 18.7 ms to 7.5 ms, and 16 concurrent clients from 63 to 1,104 recalls per second, measured end to end over MCP on a 9,500-concept SQLite store.",
+  "b": "0.7.0 (#171): keyword recall p50 went from 18.7 ms to 7.5 ms, measured on a 9,500-concept Postgres store over HTTP."
+ },
+ {
+  "a": "0.7.0 (#171): a back-to-back lambo_derive is acknowledged in 0.8 ms p50 instead of 24.8 ms and applied in 6.3 ms instead of 32.4 ms, because a wake-triggered daemon cycle within 25 ms of the previous one waits out the gap and the burst shares one rescore.",
+  "b": "0.7.0 (#171): a rescore walks each concept's incident edges once instead of three times, 201 ms to 31 ms per rescore of a 9,100-concept session."
+ },
+ {
+  "a": "0.7.0 (#171): a back-to-back lambo_derive is acknowledged in 0.8 ms p50 instead of 24.8 ms and applied in 6.3 ms instead of 32.4 ms, because a wake-triggered daemon cycle within 25 ms of the previous one waits out the gap and the burst shares one rescore.",
+  "b": "0.7.0 (#171): a back-to-back lambo_derive is acknowledged in 8 ms p50 instead of 24.8 ms because wake-triggered cycles are skipped entirely during a burst."
+ },
+ {
+  "a": "0.7.0 (#171): lambo provision records a clean #148 re-key pass in store_meta (canonical_key_rule) and later provisions skip the scan; a pass that leaves a collision records nothing, and --rekey forces the full pass. On a 9,508-concept store provision takes 5.6 ms instead of 143 ms.",
+  "b": "lambo provision skips the re-key scan once it has run, even when that pass left a collision; --rekey is the only way to check again."
+ },
+ {
+  "a": "SQLite vectors are packed f32 since 0.7.0 (#55): on a 3,600-concept store at dim 1024 the file shrank from 47.3 MB as text to 17.1 MB, and decoding every vector from 161 ms to 3.4 ms; round-trips are bit-exact.",
+  "b": "SQLite vectors are packed f16 since 0.7.0, halving the file again at a small, measured precision cost."
+ },
+ {
+  "a": "Structural recall is fast again in 0.7.0 (#165): anchor resolution Unicode-normalized every concept per query, about 260 ms on a 9,100-concept store; ASCII text now skips normalization, so a query takes about 1 ms instead of about 70 ms in a release build.",
+  "b": "Structural recall in 0.7.0 normalizes every concept on every query, including ASCII, but caches the normalized text per concept."
+ },
+ {
+  "a": "0.7.0 (#171): the cosine kernel accumulates in 16 independent lanes in a fixed order, so the compiler vectorizes it and every target scores the same bits; the vector scan sorts only the top k.",
+  "b": "0.7.0 (#171): the cosine kernel uses platform SIMD intrinsics, so scores can differ by target in the last bits."
+ },
+ {
+  "a": "0.5.0 (#116): with 8 agents, 0.4.0 failed 249 of 519 writes ('hybrid derive could not commit after 8 concurrent graph changes'); 0.5.0 applied 522 of 522, and with 16 agents 1,999 of 1,999, none failed or dropped.",
+  "b": "0.5.0 (#116): with 16 agents, 0.4.0 failed 249 of 519 writes; 0.5.0 still drops a few writes at 16 agents under the 120 s mix."
+ },
+ {
+  "a": "0.5.0 (#102): a derive's commit write-lock hold fell from 6.8 ms to 16.5 µs at 10,000 concepts, from 36.2 ms to 17 µs at 50,000, and from 168 ms to 21 µs at 100,000; every recall and write on the session used to wait behind it.",
+  "b": "0.5.0 (#102): a derive's commit write-lock hold fell from 168 ms to 21 µs at 10,000 concepts."
+ },
+ {
+  "a": "0.5.0 (#116 review): a parent_of pair or a record_action edge that would close a cycle in an acyclic relationship is refused with nothing written, and the caller is told why.",
+  "b": "0.5.0: a parent_of pair that would close a cycle is written, and the daemon breaks the cycle at the next sweep by dropping the newest edge."
+ },
+ {
+  "a": "0.5.0 (#117): a write the close could not flush answers the receipt state close_unflushed instead of 'durable intent', and a lease refusal reports the lease row's facts (last refresh, expiry) instead of claiming the holder is alive.",
+  "b": "0.5.0: a write the close could not flush still answers 'durable intent', since it will be replayed at the next attach."
+ },
+ {
+  "a": "0.4.0 (#22) added the embeddinggemma2 embedder (feature embed-eg2), which runs EmbeddingGemma 2 on llama-server and embeds text, and images when the server is started with --mmproj, into one space. Every image is sent as a lossless PNG whose longer side is 768 px.",
+  "b": "0.4.0 (#22): images are embedded by the candle BGE-M3 adapter after OCR, and sent as JPEG at 1024 px."
+ },
+ {
+  "a": "0.4.0 (#22) added the embeddinggemma2 embedder (feature embed-eg2), which runs EmbeddingGemma 2 on llama-server and embeds text, and images when the server is started with --mmproj, into one space. Every image is sent as a lossless PNG whose longer side is 768 px.",
+  "b": "Under EmbeddingGemma 2 with --image-min-tokens 280 --image-max-tokens 280, llama.cpp resizes images to a grid of 48 px cells, and the same picture embedded at 512 and at 1024 px came out at cosine 0.97 to 0.999, not 1."
+ },
+ {
+  "a": "0.4.0 (#101): stdio and the session endpoint refuse a request over 4 MiB before parsing it, as HTTP already did.",
+  "b": "0.4.0 (#101): stdio refuses a request over 16 MiB; HTTP has no cap."
+ },
+ {
+  "a": "0.4.0 (#23): lambo erase-session erases a whole session in one transaction on every store and leaves a tombstone that no writer can take over.",
+  "b": "0.4.0 (#23): lambo erase-session deletes a session's concepts but keeps its ledger, and a new writer can attach to the empty session."
+ },
+ {
+  "a": "0.4.0 (#4, #92): lambo serve-web serves an allowlist of sessions; each [[web.credential]] token has its own read scope, and without a credential the portal checks Host against DNS rebinding and sends a strict Content-Security-Policy.",
+  "b": "[[serve.credential]] tokens reach only their own sessions on the multi-session HTTP serve, which attaches sessions on demand."
+ },
+ {
+  "a": "0.4.0 (#18): [recall] kind = \"elastic\" (feature recall-elastic) mirrors each flush to an Elasticsearch index that serves recall's vector leg; the store stays the source of truth.",
+  "b": "[recall] kind = \"elastic\" makes Elasticsearch the source of truth and the store a cache rebuilt from it."
+ },
+ {
+  "a": "0.5.0 (#111): embed-candle-cuda builds against CUDA 13.4 directly and no longer needs CUDARC_CUDA_VERSION=13030.",
+  "b": "0.5.0 (#111): embed-candle-cuda needs CUDARC_CUDA_VERSION=13040 to build against CUDA 13.4."
+ },
+ {
+  "a": "0.6.0 (#33): a serve can hold one session per project and layer a shared session such as general under each ([serve] layers, per-project URLs /mcp/s/<session>); recall merges the layers and says which session each hit came from.",
+  "b": "0.6.0 (#33): lambo session split writes the target sessions into a new SQLite file with exact accounting, and re-runs write nothing."
+ },
+ {
+  "a": "A shared-layer hit must be similar to the query by vector; a keyword match alone no longer admits it (#157, floor 0.50).",
+  "b": "A shared-layer hit is admitted by a keyword match alone; the 0.50 vector floor applies only to the project's own hits."
+ },
+ {
+  "a": "A shared-layer hit must be similar to the query by vector; a keyword match alone no longer admits it (#157, floor 0.50).",
+  "b": "A shared-layer hit must reach cosine 0.85 to be admitted, the same as the merge threshold."
+ },
+ {
+  "a": "0.6.0 (#129): with repo_scope, README.md in two repositories is two concepts, not one hub; recall and inspect show the repository, and an ambiguous lookup is refused rather than guessed.",
+  "b": "With repo_scope, README.md in two repositories stays one concept and the repository is recorded as an attribute on each edge."
+ },
+ {
+  "a": "Unreleased (#179): any concept that a newer concept contradicts, more recently than anything that supports it, carries the Contradicted warning. Before, against only flagged a Canonical or Venerable concept.",
+  "b": "0.6.0 (#19): recall warns only when a Canonical or Venerable concept is contradicted by something newer than its support; contradicting ordinary memory is just memory."
+ },
+ {
+  "a": "Unreleased (#179): an ordinary contradicted hit must earn its own place in the first top_k; when it does, its contradicting concept is added beside it, past top_k if needed, at most one extra hit per contradicted hit, carrying companion_of.",
+  "b": "Unreleased (#179): a Canonical or Venerable contradicted hit is kept past top_k, and the contradicting concept is shown beside it."
+ },
+ {
+  "a": "Unreleased (#197): GC no longer collects the correction of a contradicted ordinary concept; a sweep protects the correction of every contradiction the detector reports, as long as the contradicted concept is still in memory. Concepts that only contradict each other keep none of themselves alive.",
+  "b": "0.6.0: GC protects a concept that contradicts a Venerable or Canonical concept until that target is demoted; contradicting ordinary memory protects nothing."
+ },
+ {
+  "a": "0.6.0 (#19): against on lambo_derive and lambo_record_action records that a write shows an existing concept to be wrong. A contradiction never changes a score or a status and no longer counts as a GC connection.",
+  "b": "0.6.0 (#19): against on lambo_derive lowers the contradicted concept's score by half and demotes it one status."
+ },
+ {
+  "a": "Unreleased (#196): contradictions get a hot-list budget, hot_list_contradiction_max (default half of hot_list_max); over it the lowest-priority contradictions are dropped first, and a full budget keeps the most recently declared ones.",
+  "b": "Unreleased (#196): contradictions get a hot-list budget equal to hot_list_max, and a full budget keeps the oldest declared contradictions."
+ },
+ {
+  "a": "0.6.0 (#20): with canonization_supersede = true (off by default), a contradicting concept that earns its own newer evidence demotes the Canonical concept it contradicts, and the audit records why.",
+  "b": "Supersession is on by default: any contradiction of a Canonical concept demotes it immediately."
+ },
+ {
+  "a": "Unreleased (#193): hybrid derive no longer merges a new concept by vector similarity into a concept whose text names different identifiers (digit runs or identifier tokens such as v0.5.0, src/mcp/server.rs, round3), so 'release v0.5.0 is current' and 'release v0.6.0 is current' stay two facts at any cosine.",
+  "b": "Unreleased (#193): a new concept is never merged into a concept that its own against names; the Contradicts edge is still written, but no Semantic edge beside it."
+ },
+ {
+  "a": "Unreleased (#193): hybrid derive no longer merges a new concept by vector similarity into a concept whose text names different identifiers (digit runs or identifier tokens such as v0.5.0, src/mcp/server.rs, round3), so 'release v0.5.0 is current' and 'release v0.6.0 is current' stay two facts at any cosine.",
+  "b": "Hybrid derive merges 'release v0.5.0 is current' into 'release v0.6.0 is current' when their cosine passes 0.85, keeping the newer version string."
+ },
+ {
+  "a": "0.7.0 (#178): lambo canon alias-preview --similar suggests alias pairs from 3-gram MinHash and vector cosine, with identifier, digit, type and contradiction guards and an accept/reject overrides file; it only suggests, nothing is merged.",
+  "b": "lambo canon alias-preview --similar merges every suggested pair above cosine 0.9 unless the overrides file rejects it."
+ },
+ {
+  "a": "0.7.0 (#148): canonical keys no longer stem identifier tokens, so distinct identifiers no longer merge through the key. Run lambo provision once with no session holder: it re-keys older concepts in one transaction, refuses while any session lease is live, and a rerun changes nothing; concepts the old rule had already merged stay merged.",
+  "b": "0.7.0 (#148): lambo provision splits concepts that the old key rule had merged back into one concept per identifier."
+ },
+ {
+  "a": "0.6.0 (#36): canonization promotes rulings, not artifacts: support comes from the concepts that depend on a ruling, counted by their distinct origin interactions with the ruling's own origin excluded, so several dependents from one interaction count once.",
+  "b": "Before 0.6.0, canonization support counted the actions that touched a file, so a frequently edited file could become Canonical."
+ },
+ {
+  "a": "Across the five J0 agent runs, before the protocol block existed in prompts, zero lambo calls were made, although AGENTS.md obliged it and every agent had read AGENTS.md: compliance came from the prompt, not the agent's judgement or the tool's affordances.",
+  "b": "Across the five J0 agent runs, agents called lambo_recall at session start because AGENTS.md obliged it, so prompt text was unnecessary."
+ },
+ {
+  "a": "Across the five J0 agent runs, before the protocol block existed in prompts, zero lambo calls were made, although AGENTS.md obliged it and every agent had read AGENTS.md: compliance came from the prompt, not the agent's judgement or the tool's affordances.",
+  "b": "Claude Code skips the lambo-dogfood protocol even when it is in the prompt, unlike other harnesses, so it needs hooks."
+ },
+ {
+  "a": "dedup_rate.py over the early ledger window: 7 write calls, 24 concepts created, 2 matched, a dedup rate of 0.077; j1-reviewer-r1 was the only agent to match anything (0.333).",
+  "b": "dedup_rate.py over the early ledger window: 24 write calls, 7 concepts created, a dedup rate of 0.333 for the orchestrator."
+ },
+ {
+  "a": "The recall-twice protocol: recall the topic before reading code, then a targeted recall on the real names afterwards. It came from the J0 arithmetic-deviation reasoning (accepted − written − write_failed), which was in the graph all along but only findable once the reader knew the key name.",
+  "b": "The recall-first protocol: one lambo_recall before any edit, enforced in Claude Code by a PreToolUse hook bounded at two denials."
+ },
+ {
+  "a": "Before the J1 re-pin, every write from every subagent was attributed to claude-orchestrator, so from the graph's side there had only ever been one agent and independent multi-agent convergence was impossible; the swarm-policy clock had not started.",
+  "b": "Before the J1 re-pin, each subagent's writes carried its own agent id, so convergence was measurable but slow."
+ },
+ {
+  "a": "The 2026-08-27 fair test is precision and recall against ground truth named before the fact: do the four canon-shaped invariants promote while the other ~96 concepts do not. Either direction failing is a finding.",
+  "b": "The 2026-08-27 fair test passes if any concept promotes within a week of distinct per-call ids."
+ },
+ {
+  "a": "Ground truth for the fair test, the four canon-shaped invariants: (1) the lease stays, a proxy moves the call not the write; (2) the wedge invariant, never acquire a lease you cannot serve; (3) the cooperative-identity ruling; (4) the async-ack rule, a write may be acked asynchronously only when its result does not gate the caller's next action.",
+  "b": "The async-ack rule: every write is acknowledged asynchronously, including those whose result gates the caller's next action."
+ },
+ {
+  "a": "Blast radius cannot fire on concepts nobody linked: the orchestrator's derives are mostly free-floating prose with almost no parent_of pairs, so 'nothing is load-bearing' is partly a statement about how agents write; nothing on the write surface nudges a caller to declare what a constraint supports.",
+  "b": "Canonization had never completed on the dogfood store: 0 of 386 concepts carried a stored blast_radius after thousands of daemon cycles."
+ },
+ {
+  "a": "Two-product probe (2026-08-20, J2-L1): cursor-agent scrubs TMPDIR from its MCP child while opencode passes macOS's per-user TMPDIR through, so the same binary, store and session derived two endpoint directories and cross-client memory was silently absent on default wiring.",
+  "b": "Two-product probe: with TMPDIR aligned, everything J2 promises worked across products, including cross-product read-your-writes in both directions."
+ },
+ {
+  "a": "Two-product probe (2026-08-20, J2-L1): cursor-agent scrubs TMPDIR from its MCP child while opencode passes macOS's per-user TMPDIR through, so the same binary, store and session derived two endpoint directories and cross-client memory was silently absent on default wiring.",
+  "b": "Two-product probe: cursor-agent passes macOS's per-user TMPDIR through while opencode scrubs it."
+ },
+ {
+  "a": "Server-side wait budgets must fit under client spawn gates (J2-L2): serve's 50 s lease-lapse wait exceeded opencode's ~32 s MCP startup tolerance, turning a recoverable wait into 'server unavailable, no tools'.",
+  "b": "J2-R1-1 reproduced against real products: with the holder killed mid-call, the client hung 121.7 s, exactly its configured timeout."
+ },
+ {
+  "a": "J2-R1-1 reproduced against real products: with the holder killed mid-call, the proxy saw the closed connection in 18 ms but sent the client nothing, and the client hung 121.7 s, exactly its configured timeout (MCP error -32001).",
+  "b": "J2-R1-1: with the holder killed mid-call, the proxy returned an immediate honest error carrying the in-flight id within 18 ms."
+ },
+ {
+  "a": "cursor-agent needs --trust and --force for lambo's MCP tools, otherwise every MCP tool call is silently rejected; macOS also has no timeout(1).",
+  "b": "opencode needs --trust and --force for MCP tools; cursor-agent accepts them by default."
+ },
+ {
+  "a": "G3 spike (2026-08-21): the dogfood graph had 386 concepts in 41 components; the giant component held 92% of Resources and 85% of Entities but only 37% of Logic and 30% of Observation concepts, because lambo_derive writes only intra-call CoOccurrence cliques plus the rarely used parent_of, while record_action links artifacts to shared file and commit hubs.",
+  "b": "Adding the Derives co-parent projection to the G3 graph collapses its 41 islands to only 40."
+ },
+ {
+  "a": "G3 spike (2026-08-21): the dogfood graph had 386 concepts in 41 components; the giant component held 92% of Resources and 85% of Entities but only 37% of Logic and 30% of Observation concepts, because lambo_derive writes only intra-call CoOccurrence cliques plus the rarely used parent_of, while record_action links artifacts to shared file and commit hubs.",
+  "b": "G3 spike: the dogfood graph had 386 concepts in one connected component, with Logic and Observation concepts as well linked as Resources."
+ },
+ {
+  "a": "Recall phase-2 expansion follows out-edges only: 248 of 386 single seeds expand to nothing, and symmetrizing the same BFS multiplies expansion 2 to 4 times for one function call.",
+  "b": "Recall phase-2 expansion follows in-edges and out-edges, so every seed with any edge expands."
+ },
+ {
+  "a": "G3: the exclusivity filter hides pillars. A dependent with path multiplicity is excluded by construction, so 156 of 159 counted pairs sit at identical resistance; the J3-implementation concept had 13 dependents yet blast_radius 4, below the warning bar, while a pendant-6 concept warns.",
+  "b": "G3 shelved its diffusion hypothesis with numbers: no expansion algorithm can reach what has no edges, which is why diffusion could not beat fixed-depth here."
+ },
+ {
+  "a": "Paired memory comparison 2026-09-07, lambo project run: Claude Code file memory scored 8/12 and the Lambo arm 2/12, with a reader on claude-sonnet-5 and a blind Opus grader.",
+  "b": "Paired memory comparison 2026-09-07, vimanam project run: file memory scored 10/12 and the Lambo arm 8/12."
+ },
+ {
+  "a": "Paired memory comparison 2026-09-07, lambo project run: Claude Code file memory scored 8/12 and the Lambo arm 2/12, with a reader on claude-sonnet-5 and a blind Opus grader.",
+  "b": "Paired memory comparison 2026-09-07, lambo project run: the Lambo arm scored 8/12 and file memory 2/12."
+ },
+ {
+  "a": "Over the seven questions with an answer-bearing concept in the 990-concept store copy: first answer-bearing ranks were 1, 1, 2, 2, 3, 7 and beyond 20, so covered@1 was 2, @2 was 4, @10 was 6 and @20 was 6. The rendered context held only two or three hits.",
+  "b": "Over the seven answerable questions, covered@1 was 4 and covered@20 was 7; every answer-bearing concept ranked in the top ten."
+ },
+ {
+  "a": "Efficacy readout: readers were correct on 6 of 8 answers where the rendered context covered the rubric and 0 of 6 where it did not; 0 of 48 answers invented a fact, and abstention was the failure mode.",
+  "b": "Efficacy readout: in the lambo run's Lambo arm, 2 of 12 answers presented superseded facts as current and 2 of 12 repeated a stale hypothesis."
+ },
+ {
+  "a": "Efficacy readout, efficiency: evidence tokens per correct answer were 2,467 for file against 477 for Lambo in the vimanam run, and 4,542 against 2,058 in the lambo run; server-side recall p50 was 86 to 94 ms at 990 concepts.",
+  "b": "Efficacy readout: full prompt tokens per correct answer were 4,334 for file against 2,994 for Lambo in the vimanam run, and 6,628 against 12,270 in the lambo run."
+ },
+ {
+  "a": "Caveat on the 2026-09-07 comparison: the file arm received the whole memory directory (8,222 or 12,113 bytes) while the Lambo arm received only the rendered recall text, 1,154 to 1,533 bytes holding two or three of five or six hits.",
+  "b": "Controls not run: a matched-corpus run that ingests the same notes into a fresh Lambo session, and an equal-budget run that caps the file arm at the Lambo byte budget."
+ },
+ {
+  "a": "0.7.0 (#7): with neither GCP_LAMBO_CREDENTIALS nor GOOGLE_APPLICATION_CREDENTIALS set, Gemini and Cloud SQL IAM use the file gcloud auth application-default login writes: $CLOUDSDK_CONFIG/application_default_credentials.json when CLOUDSDK_CONFIG is set, else ~/.config/gcloud/application_default_credentials.json.",
+  "b": "A credential variable naming a missing file fails loudly and names the path; the gcloud default file is used only if it exists and is a file."
+ },
+ {
+  "a": "0.7.0 (#7): with neither GCP_LAMBO_CREDENTIALS nor GOOGLE_APPLICATION_CREDENTIALS set, Gemini and Cloud SQL IAM use the file gcloud auth application-default login writes: $CLOUDSDK_CONFIG/application_default_credentials.json when CLOUDSDK_CONFIG is set, else ~/.config/gcloud/application_default_credentials.json.",
+  "b": "0.7.0 (#7): Gemini reads only GOOGLE_APPLICATION_CREDENTIALS; without it, it refuses to start even after gcloud login."
+ },
+ {
+  "a": "CLOUDSDK_CONFIG joins RESOLVE_ENV_VARS; clearing it falls back to the gcloud directory under HOME, so a hermetic test harness should point it at an empty directory.",
+  "b": "Clearing CLOUDSDK_CONFIG disables the gcloud fallback entirely, so a hermetic harness only needs to unset it."
+ },
+ {
+  "a": "dev-diary/adversarial-review/adve-review-mooshik-J3-round1.md",
+  "b": "dev-diary/adversarial-review/adve-review-mooshik-J3-round3.md"
+ },
+ {
+  "a": "dev-diary/adversarial-review/adve-review-mooshik-J1-round3.md",
+  "b": "dev-diary/adversarial-review/adve-review-mooshik-J3-round1.md"
+ },
+ {
+  "a": "dev-diary/adversarial-review/adve-review-mooshik-J2-round1.md",
+  "b": "dev-diary/adversarial-review/adve-review-mooshik-J2-round2.md"
+ },
+ {
+  "a": "dev-diary/adversarial-review/adve-review-mooshik-J3-redesign-round1.md",
+  "b": "dev-diary/adversarial-review/adve-review-mooshik-J3-redesign-round2.md"
+ },
+ {
+  "a": "dev-diary/adversarial-review/adve-review-mooshik-J3-round2.md",
+  "b": "dev-diary/adversarial-review/adve-review-mooshik-J3-round3.md"
+ },
+ {
+  "a": "dev-diary/adversarial-review/adve-review-mooshik-J3-round1.md",
+  "b": "dev-diary/adversarial-review/adve-review-mooshik-J3-round2.md"
+ },
+ {
+  "a": "dev-diary/adversarial-review/adve-review-mooshik-J1-round2.md",
+  "b": "dev-diary/adversarial-review/adve-review-mooshik-J2-round1.md"
+ },
+ {
+  "a": "dev-diary/adversarial-review/adve-review-mooshik-J1-round1.md",
+  "b": "dev-diary/adversarial-review/adve-review-mooshik-J1-round2.md"
+ },
+ {
+  "a": "dev-diary/adversarial-review/adve-review-mooshik-J0-round1.md",
+  "b": "dev-diary/adversarial-review/adve-review-mooshik-J0-round2.md"
+ },
+ {
+  "a": "dev-diary/adversarial-review/adve-review-mooshik-J1-round3.md",
+  "b": "dev-diary/adversarial-review/adve-review-mooshik-J3-round3.md"
+ },
+ {
+  "a": "dev-diary/adversarial-review/adve-review-mooshik-J2-round1.md",
+  "b": "dev-diary/adversarial-review/adve-review-mooshik-J2-round3.md"
+ },
+ {
+  "a": "dev-diary/adversarial-review/adve-review-mooshik-J2-round3.md",
+  "b": "dev-diary/adversarial-review/adve-review-mooshik-J3-round2.md"
+ },
+ {
+  "a": "adve-review-mooshik-J2-round1.md",
+  "b": "adve-review-mooshik-J2-round2.md"
+ },
+ {
+  "a": "dev-diary/adversarial-review/adve-review-mooshik-J2-round2.md",
+  "b": "dev-diary/adversarial-review/adve-review-mooshik-J2-round3.md"
+ },
+ {
+  "a": "dev-diary/adversarial-review/adve-review-mooshik-J0-round1.md",
+  "b": "dev-diary/adversarial-review/adve-review-mooshik-J1-round1.md"
+ },
+ {
+  "a": "dev-diary/adversarial-review/adve-review-mooshik-J1-round1.md",
+  "b": "dev-diary/adversarial-review/adve-review-mooshik-J1-round3.md"
+ },
+ {
+  "a": "adve-review-mooshik-J3-round1.md",
+  "b": "adve-review-mooshik-J3-round2.md"
+ },
+ {
+  "a": "dev-diary/adversarial-review/adve-review-mooshik-J1-round3.md",
+  "b": "dev-diary/adversarial-review/adve-review-mooshik-J3-round2.md"
+ },
+ {
+  "a": "adve-review-mooshik-J2-round1.md",
+  "b": "adve-review-mooshik-J2-round3.md"
+ },
+ {
+  "a": "src/mcp/serve.rs",
+  "b": "src/mcp/server.rs"
+ },
+ {
+  "a": "J1 Status note in dev-diary/lambo-for-mooshik/J-multi-client.md",
+  "b": "dev-diary/lambo-for-mooshik/J-multi-client.md"
+ },
+ {
+  "a": "spikes/g3-laplacian/step2_diffusion.py",
+  "b": "spikes/g3-laplacian/step2b_cliff.py"
+ },
+ {
+  "a": "evidence/mooshik-j3-durable-intents/j3_n1_outage_demo.py",
+  "b": "evidence/mooshik-j3-durable-intents/n1-outage-run-2026-08-21.txt"
+ },
+ {
+  "a": "spikes/g3-laplacian/step1_census.py",
+  "b": "spikes/g3-laplacian/step3_resistance.py"
+ },
+ {
+  "a": "adve-review-mooshik-J3-round2.md",
+  "b": "dev-diary/adversarial-review/adve-review-mooshik-J3-round3.md"
+ },
+ {
+  "a": "dev-diary/adversarial-review/adve-review-mooshik-I-round1.md",
+  "b": "dev-diary/adversarial-review/adve-review-mooshik-J3-redesign-round2.md"
+ },
+ {
+  "a": "spikes/g3-laplacian/step1_census.py",
+  "b": "spikes/g3-laplacian/step2_diffusion.py"
+ },
+ {
+  "a": "~/lambo-dogfood/bin/lambo-3039b82",
+  "b": "~/lambo-dogfood/lambo.toml"
+ },
+ {
+  "a": "src/mcp/endpoint.rs",
+  "b": "src/mcp/serve.rs"
+ },
+ {
+  "a": "commit 3a4a6b8 on wt/j3",
+  "b": "commit d9eef3b on wt/j3"
+ },
+ {
+  "a": "src/cli/serve_web.rs",
+  "b": "src/mcp/server.rs"
+ },
+ {
+  "a": "adve-review-mooshik-J3-round2.md",
+  "b": "dev-diary/adversarial-review/adve-review-mooshik-J3-round1.md"
+ },
+ {
+  "a": "adve-review-mooshik-J2-round1.md",
+  "b": "dev-diary/adversarial-review/adve-review-mooshik-J0-round2.md"
+ },
+ {
+  "a": "adve-review-mooshik-J2-round3.md",
+  "b": "dev-diary/adversarial-review/adve-review-mooshik-J3-round3.md"
+ },
+ {
+  "a": "spikes/g3-laplacian/step1_census.py",
+  "b": "spikes/g3-laplacian/step2b_cliff.py"
+ },
+ {
+  "a": "adve-review-mooshik-J2-round3.md",
+  "b": "dev-diary/adversarial-review/adve-review-mooshik-J3-round1.md"
+ },
+ {
+  "a": "adve-review-mooshik-J2-round3.md",
+  "b": "dev-diary/adversarial-review/adve-review-mooshik-J1-round3.md"
+ },
+ {
+  "a": "src/store/memory.rs",
+  "b": "src/store/mod.rs"
+ },
+ {
+  "a": "adve-review-mooshik-J2-round3.md",
+  "b": "dev-diary/adversarial-review/adve-review-mooshik-J1-round2.md"
+ },
+ {
+  "a": "adve-review-mooshik-J3-round1.md",
+  "b": "dev-diary/adversarial-review/adve-review-mooshik-J3-redesign-round2.md"
+ },
+ {
+  "a": "spikes/g3-laplacian/step3_resistance.py",
+  "b": "spikes/g3-laplacian/step5_cost.py"
+ },
+ {
+  "a": "cut the release v0.5.0 today",
+  "b": "cut the release v0.6.0 today"
+ },
+ {
+  "a": "cut the release v0.5.0 today",
+  "b": "cut the release v0.5.1 today"
+ },
+ {
+  "a": "pin the crate to 1.99 for edition 2024",
+  "b": "pin the crate to 1.89 for edition 2024"
+ },
+ {
+  "a": "the server follows rfc 7231",
+  "b": "the server follows rfc 7230"
+ },
+ {
+  "a": "the server follows rfc 9110",
+  "b": "the server follows rfc 9111"
+ },
+ {
+  "a": "checksums are sha256 digests",
+  "b": "checksums are sha512 digests"
+ },
+ {
+  "a": "checksums are sha256 digests",
+  "b": "checksums are sha384 digests"
+ },
+ {
+  "a": "route traffic to host1.svc first",
+  "b": "route traffic to host2.svc first"
+ },
+ {
+  "a": "route traffic to db-01.internal",
+  "b": "route traffic to db-02.internal"
+ },
+ {
+  "a": "tracked as issue #148 upstream",
+  "b": "tracked as issue #146 upstream"
+ },
+ {
+  "a": "fixed in pull request #170",
+  "b": "fixed in pull request #107"
+ },
+ {
+  "a": "the daemon listens on port 7700",
+  "b": "the daemon listens on port 7701"
+ },
+ {
+  "a": "the web ui listens on port 8080",
+  "b": "the web ui listens on port 8081"
+ },
+ {
+  "a": "served by embedding model v1",
+  "b": "served by embedding model v2"
+ },
+ {
+  "a": "served by bge-m3 at dim 1024",
+  "b": "served by bge-m3 at dim 768"
+ },
+ {
+  "a": "the build needs node 18 installed",
+  "b": "the build needs node 20 installed"
+ },
+ {
+  "a": "the build needs python 3.11",
+  "b": "the build needs python 3.12"
+ },
+ {
+  "a": "the handler lives in src/mcp/serve.rs",
+  "b": "the handler lives in src/mcp/server.rs"
+ },
+ {
+  "a": "review notes in adve-review-J2-round1.md",
+  "b": "review notes in adve-review-J2-round2.md"
+ },
+ {
+  "a": "the retry budget is 3 attempts",
+  "b": "the retry budget is 5 attempts"
+ },
+ {
+  "a": "the cache holds 256 entries",
+  "b": "the cache holds 512 entries"
+ },
+ {
+  "a": "the writer lease renews every tick",
+  "b": "the reader lease expires every tick"
+ },
+ {
+  "a": "recall cache is keyed by graph epoch",
+  "b": "score cache is keyed by graph epoch"
+ },
+ {
+  "a": "the flush tick batches pending writes",
+  "b": "the flush tick drops pending writes"
+ },
+ {
+  "a": "stage two evidence needs separated sessions",
+  "b": "stage three evidence needs separated sessions"
+ },
+ {
+  "a": "the embedder refuses inputs over the token clamp",
+  "b": "the embedder truncates inputs over the token clamp"
+ },
+ {
+  "a": "alias preview moves citations to the ruling",
+  "b": "alias preview keeps citations on the alias"
+ }
+]

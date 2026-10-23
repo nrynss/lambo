@@ -1,0 +1,501 @@
+[
+ {
+  "text": "Alias split: config strings postgres/pg resolve to PgStore<PostgresDialect>, cockroach/crdb to PgStore<CockroachDialect> — nothing maps across the boundary. This is a recorded behaviour change that fails loud, never silently mis-ranks: the Postgres dialect's CREATE EXTENSION vector and <=> operator do not exist on Cockroach, so cross-misconfiguration dies at provision or first vector query.",
+  "sources": [
+   "nrynss/lambo-paper@696283e:evaluation/results/2026-09-07/lambo-2026-09-07/exports/lambo/missing-cloud-cost.full.json"
+  ],
+  "type": "Logic"
+ },
+ {
+  "text": "CORRECTION to the same-day claim that the 512-token clamp was a plausible contributor to the unembedded-concept damage — measured against the live dogfood store 2026-08-22, it is NOT the dominant cause. Coverage is 34 embedded of 509 concepts (93% unembedded), and the gap does not track length: concepts under 400 chars are 2/247 embedded, worse than the 400-1200 band at 32/232, while 1200-2400 is 0/30. Sub-400-char concepts never reach the 512-token clamp, so something else — the originally recorded cause, the embedder unreachable or refusing silently across whole sessions — accounts for the bulk. The clamp is still real and still worth its fix (it hard-fails every long input), but it is a second failure mode, not the explanation. Recency confirms the split: the ten newest concepts are 9/10 embedded (written after the clamp fix, with the embedder up), every earlier 100-row band is 2-8%.",
+  "sources": [
+   "evidence/issue-178-similar/labelled-pairs.json",
+   "evidence/mooshik-i3-live-ledger/duplicates.txt"
+  ],
+  "type": null
+ },
+ {
+  "text": "Claude Code enforcement layer 2026-09-01: instructions alone do not make Claude Code follow the lambo-dogfood protocol (operator observation: other harnesses comply from AGENTS.md text; Claude Code is notorious for skipping it). Fix is mechanical, at user scope so it covers every project: ~/.claude/settings.json hooks driving ~/lambo-dogfood/hooks/lambo-hook.sh. SessionStart injects the protocol + writer health; PreToolUse denies Edit/Write/NotebookEdit until the session has made one lambo_recall (bounded at 2 denials so restricted-toolset agents cannot deadlock); PostToolUse markers track recall/derive/edit per session_id under ~/lambo-dogfood/hooks/state; Stop blocks ending a turn that edited files without a derive or record_action, once per session, honoring stop_hook_active. Every gate fails open when the writer is down. Verified live: a Write was denied, lambo_recall lifted the gate, the retry succeeded.",
+  "sources": [
+   "nrynss/lambo-paper@696283e:evaluation/results/2026-09-07/lambo-2026-09-07/exports/lambo/dogfood-topology.full.json"
+  ],
+  "type": "Logic"
+ },
+ {
+  "text": "Closed J3 durable-intent redesign review round 1: REQUEST_CHANGES, 1 P1 / 3 P2 / 1 unconfirmed P2 / 6 P3. Review file written but UNCOMMITTED — macOS TCC revoked filesystem access mid-session, so bash/git/cargo return Operation not permitted for the orchestrator and every subagent; no further lambo work possible until the operator grants Full Disk Access. P1 (N1): a transient embedder outage at attach destroys the whole durable-intent backlog — replay runs unconditionally with no liveness check, the failure arm cannot distinguish a content refusal from an unreachable embedder (a distinction THIS branch created by making the timeout an Err), and replay-failure consumes; J2's lease TTL aims the attach at the outage. The redesign's own deviation voids the WAL's acked-implies-eventually-applied promise. Invariant itself verified at an independently built binary including kill -9 (receipts do not lie; 64 lost with the tail as declared; undeclared consequence: post-crash replay blocked for the remaining lease TTL with restart_lost receipts in that window). Deviations: timeout arm upheld on argument, rejected as stated and untested (boundary in code is the STORE capability not the embedder, so default config fails every write on a dead llama, undeclared); Part-2 deferral upheld; intent_durable upheld as necessary. Twelve estimator-era stated reasons survive in writeq.rs including two production log lines claiming measured bounds. PAUSED by operator instruction before remediation.",
+  "sources": [
+   "evidence/issue-178-similar/labelled-pairs.json",
+   "evidence/mooshik-i3-live-ledger/duplicates.txt"
+  ],
+  "type": null
+ },
+ {
+  "text": "Committed the J2 round-3 adversarial review on wt/j2 as aefda87 — verdict CLEAN. All 7 round-2 findings (2 P2 / 5 P3) verified closed over 920e096..6442d95; five new P3 doc-precision advisories, no P2/P1. Nine gates exact at 6442d95 and 72050b7 spot-checked green; all seven declared mutations reproduced and reverted from byte copies; the worst-case store-timeout table re-derived independently from sqlx-core 0.8.6 source and confirmed (38s/50s); J2-R2-1 demonstrated at the binary with a SIGTERM inside a live dial window honoured in 4 ms. J2 is ready to integrate. Nothing pushed, nothing merged, no commit amended.",
+  "sources": [
+   "evidence/issue-178-similar/labelled-pairs.json",
+   "evidence/mooshik-i3-live-ledger/duplicates.txt"
+  ],
+  "type": null
+ },
+ {
+  "text": "Dogfood finding (2026-08-20, DOGFOOD-FINDINGS.md): 92 of 100 concepts in the lambo-dev store carry no durable embedding — interleaved in time, not one outage window; all 44 record_action Resources plus most Constraints/Logics/Entities. Semantic recall and dedup are blind to them and the damage is cumulative with no backfill path. Candidate product work: embedding-coverage counter in lambo_stats, and a re-embed backfill verb. Cause unsettled: record_action-never-embeds by design, intermittent embedder unavailability degrading hybrid to keyword, or a flush gap.",
+  "sources": [
+   "evidence/issue-178-similar/labelled-pairs.json",
+   "evidence/mooshik-i3-live-ledger/duplicates.txt",
+   "nrynss/lambo-paper@696283e:evaluation/results/2026-09-07/lambo-2026-09-07/exports/lambo/record-action-embedding.full.json"
+  ],
+  "type": "Entity"
+ },
+ {
+  "text": "J1 Status note in dev-diary/lambo-for-mooshik/J-multi-client.md",
+  "sources": [
+   "evidence/issue-178-similar/labelled-pairs.json",
+   "evidence/mooshik-i3-live-ledger/duplicates.txt"
+  ],
+  "type": null
+ },
+ {
+  "text": "J1 gates everything multi-client: the serve applies its own --agent to every connected client, and lambo_reserve hard-refuses any caller whose agent_id differs — correct fail-closed behaviour that leaves every client but one without lambo's only mutual-exclusion primitive. Per-call agent_id must be accepted at the Memory level and recorded on the interaction before a proxy or shared writer can be honest.",
+  "sources": [
+   "nrynss/lambo-paper@696283e:evaluation/results/2026-09-07/lambo-2026-09-07/exports/lambo/dogfood-topology.full.json"
+  ],
+  "type": "Constraint"
+ },
+ {
+  "text": "J1 round-2 lesson: matching an error VARIANT is not matching a PATH. conflict_err matched LamboError::Conflict to surface §11 reserve conflicts, but lease_lost_error() is also a Conflict and interpolates OPERATOR_OVERRIDE (a SQL DELETE), so the fix disclosed to the model what the parent had flattened. When selectively unhiding an error class, discriminate structurally (distinct variant or typed payload, or match at the site where sources are distinguishable), never by variant alone — and probe every producer of that variant before shipping.",
+  "sources": [
+   "nrynss/lambo-paper@696283e:evaluation/results/2026-09-07/lambo-2026-09-07/exports/lambo/missing-cloud-cost.full.json"
+  ],
+  "type": "Logic"
+ },
+ {
+  "text": "J1 round-3 advisory (J1-R3-3, caps.rs not J1): the INVISIBLE_RANGES decision recorded at is_disallowed_format states U+2028/U+2029 meet the table's own 'invisible structural character' criterion, then declines on the ground 'content already permits \\\\n, so a forced line break buys an author nothing' — which answers the break half but not the invisibility half that is the criterion. Its revisit trigger ('if content ever stops permitting \\\\n') is therefore the wrong trigger; the condition that makes the gap matter is a renderer treating U+2028 differently from \\\\n, and serve_web plus any terminal already do. The conclusion is nevertheless right, and for a stronger reason the docstring does not give: normalize_tokens splits on char::is_whitespace(), which includes U+2028/U+2029, so a U+2028 in content cannot fork a canonical key (verified — the two contents merged). Separately, INVISIBLE_RANGES also jumps the unassigned Default_Ignorable codepoints U+2065, U+FFF0..U+FFF8, U+E0080..U+E00FF and U+E01F0..U+E0FFF: all four probed pass check_size while rendering as nothing, which is the table's stated criterion.",
+  "sources": [
+   "evidence/mooshik-i3-live-ledger/duplicates.txt"
+  ],
+  "type": null
+ },
+ {
+  "text": "J1 round-3 advisory (J1-R3-3, caps.rs not J1): the INVISIBLE_RANGES decision recorded at is_disallowed_format states U+2028/U+2029 meet the table's own 'invisible structural character' criterion, then declines on the ground 'content already permits \\n, so a forced line break buys an author nothing' — which answers the break half but not the invisibility half that is the criterion. Its revisit trigger ('if content ever stops permitting \\n') is therefore the wrong trigger; the condition that makes the gap matter is a renderer treating U+2028 differently from \\n, and serve_web plus any terminal already do. The conclusion is nevertheless right, and for a stronger reason the docstring does not give: normalize_tokens splits on char::is_whitespace(), which includes U+2028/U+2029, so a U+2028 in content cannot fork a canonical key (verified — the two contents merged). Separately, INVISIBLE_RANGES also jumps the unassigned Default_Ignorable codepoints U+2065, U+FFF0..U+FFF8, U+E0080..U+E00FF and U+E01F0..U+E0FFF: all four probed pass check_size while rendering as nothing, which is the table's stated criterion.",
+  "sources": [
+   "evidence/issue-178-similar/labelled-pairs.json"
+  ],
+  "type": null
+ },
+ {
+  "text": "J2 round-1 adversarial review",
+  "sources": [
+   "evidence/issue-178-similar/labelled-pairs.json",
+   "evidence/mooshik-i3-live-ledger/duplicates.txt"
+  ],
+  "type": null
+ },
+ {
+  "text": "J2 round-3 adversarial review (adve-review-mooshik-J2-round3.md) — verdict CLEAN. All 7 round-2 findings (2 P2 / 5 P3) verified closed at the artifact over 920e096..6442d95. Nine gates exact at 6442d95 (fmt clean, 4x clippy clean, 858/0/3 fixtures, 946/0/3 sqlite, 550/0/0 cockroach, verify.sh 40 ok); 72050b7 spot-checked green on fmt + 856/0/3 fixtures. All seven declared mutations reproduced. Six tests added, none removed, deltas reconcile exactly (+5 lib, +6 sqlite). Five new P3 doc-precision advisories, no P2/P1. J2 is ready to integrate now.",
+  "sources": [
+   "evidence/issue-178-similar/labelled-pairs.json",
+   "evidence/mooshik-i3-live-ledger/duplicates.txt"
+  ],
+  "type": null
+ },
+ {
+  "text": "J2 round-3 residual coupling, handed to J3 as ONE item: the pump's un-raced client-facing writes and the uncapped `inflight` list are the same problem. answer_lost (src/mcp/proxy.rs:1457) writes one frame per in-flight id, so the ceiling J3 chooses for outstanding receipts is also the worst-case LENGTH of an un-raced write burst to a client that may not be reading. Neither §J2 nor DIAL_BUDGET's residual section says the other exists, and both undercount the writes as 'two' when there are six un-raced Self::send sites (proxy.rs:1298, 1321, 1349, 1375, 1393, 1457).",
+  "sources": [
+   "evidence/issue-178-similar/labelled-pairs.json",
+   "evidence/mooshik-i3-live-ledger/duplicates.txt"
+  ],
+  "type": null
+ },
+ {
+  "text": "J3 latency claim VERIFIED at the release binary over real stdio MCP (2026-08-20, SQLite store, 20 calls, median): against the rig's live llama.cpp BGE-M3 q8_0 on CPU, a lambo_derive ack went from 14.111 ms (base 166a3c8, synchronous) to 0.048 ms (J3). That 0.048 ms is at or BELOW the same binary's ack against FixtureEmbedder (0.076 ms), which is what 'the embedder is no longer in the call' means. Both runs applied all 21 concepts, so the fast number is not a fast no-op. The absolute figures differ from the doc's 27 ms warm derive because that was the dogfood client stack on pinned 3039b82; the delta is what J3 owns.",
+  "sources": [
+   "nrynss/lambo-paper@696283e:evaluation/results/2026-09-07/lambo-2026-09-07/exports/lambo/embedder-superseded.full.json"
+  ],
+  "type": "Logic"
+ },
+ {
+  "text": "J3 redesign round-1 review VERDICT: REQUEST_CHANGES. One P1 (transient embedder outage at attach burns the durable backlog), three P2 (untested timeout deviation; twelve estimator-era stated reasons incl. two production log lines; the reversed pin's undeclared blast radius), one P2-candidate unconfirmed (un-migrated store voids the invariant), six P3. The founding invariant HOLDS at the binary: 64 acked == 1 applied-with-embedding + 63 durable intents at a clean close, replay applies all 63, final store 64 embedded / 0 NULL / 0 unconsumed, reproduced at an independently built binary; and at kill -9 nothing is durable and nothing claims to be. What does not hold is the durable half's promise of EVENTUAL APPLICATION. Review written to dev-diary/adversarial-review/adve-review-mooshik-J3-redesign-round1.md but NOT COMMITTED — the same macOS TCC revocation that interrupted the first run persists: bash cannot reach the repo at all (git, cargo, rg all denied), and even the Read tool is restricted to a per-file allowlist, so gates could not be re-run in this pass, the live matrix could not be extended, and no commit could be made.",
+  "sources": [
+   "evidence/issue-178-similar/labelled-pairs.json",
+   "evidence/mooshik-i3-live-ledger/duplicates.txt"
+  ],
+  "type": null
+ },
+ {
+  "text": "J3 resolution of the COUPLED ceiling residual handed over by J2-R2-7 / J2-R3-3. The coupling is real and its mechanism is receipt WAITING: a lambo_receipt call that waits is a long-lived in-flight request at the proxy, so N concurrent receipt waits are N entries in the pump's `inflight` list and therefore N frames in answer_lost's un-raced write burst. J3 therefore bounds BOTH ends: RECEIPT_WAIT_MAX caps how long any one wait can occupy an inflight slot, and a concurrent-waiter cap keeps the population under proxy.rs's INFLIGHT_DEPTH_WARN = 64. The queue bound itself does NOT feed the inflight list — a non-waiting ack returns immediately — so the residual's phrasing (the receipt ceiling IS the burst length) is true only of the waiting surface, and that correction belongs in the record.",
+  "sources": [
+   "evidence/issue-178-similar/labelled-pairs.json",
+   "evidence/mooshik-i3-live-ledger/duplicates.txt"
+  ],
+  "type": null
+ },
+ {
+  "text": "J3 round-2 adversarial review on wt/j3",
+  "sources": [
+   "evidence/issue-178-similar/labelled-pairs.json",
+   "evidence/mooshik-i3-live-ledger/duplicates.txt"
+  ],
+  "type": null
+ },
+ {
+  "text": "J3 round-3 residual handed outside J3, for E2E/J4: a concept applied with a NULL embedding is unfindable by semantic recall, and neither the ack, the receipt, nor a warning says so — the receipt reads 'applied — derived 1 concept(s): 1 created, 0 matched existing' with warnings: []. Pre-existing hybrid-derive degradation, not touched by these commits, but J3 is what made a fast vector-less Ok load-bearing for durability (J3-R3-1). Any E2E durability measurement must therefore assert on the STORE's embedding column, not on applied counts: 'applied' does not mean 'embedded'. Reviewer note for future rounds: read back store state with sqlite3 rather than trusting lambo_stats' applied count, and burst MULTI-AGENT as well as multi-size — round 2's single-agent-only red/green is what let J3-R3-2 through.",
+  "sources": [
+   "evidence/issue-178-similar/labelled-pairs.json",
+   "evidence/mooshik-i3-live-ledger/duplicates.txt"
+  ],
+  "type": null
+ },
+ {
+  "text": "Post-J plan (operator, 2026-08-20): after J closes (J3 → J4 → J5 → phase close with rig re-pin + DOGFOOD-SETUP rewrite in one commit), run an END-TO-END adversarial review + remediation cycle over the whole branch — precedent: the adve-review-e2e-* and full-stack-sweep reviews — covering everything J landed as one system (identity + proxy + async acks + ledger states) rather than per-task. Then start workstream D (event-time clock, D1→D2), expected to run hours; D is the only remaining blocker of other work (C2) and carries the phase's built-in day-2 fallback decision point. Order after D: C (SoloPolicy; C1 may ride alongside D), the embedding-backfill/re-embed verb before A, H1 before B0, then B (pgvector service container, no cockroach), A parallel to B if attention allows, E last. H2 parked (no DSN); H3 runs sqlite/postgres/memory parity.",
+  "sources": [
+   "nrynss/lambo-paper@696283e:evaluation/results/2026-09-07/lambo-2026-09-07/exports/lambo/model-roles.full.json"
+  ],
+  "type": "Logic"
+ },
+ {
+  "text": "Re-pinned the dogfood binary to lambo-4c6fc93 (branch lambo-for-mooshik @ 4c6fc93, clean tree, LAMBO_GIT_SHA set, features store-sqlite,embed-candle-metal,embed-bge). Provisioned the sqlite store with the new binary, repointed the launchd unit dev.lambo.dogfood from lambo-21e4cf8, restarted, and verified: lease holder http-shared-writer, ledger heartbeat git_sha=4c6fc93, graph intact (702 nodes / 554 concepts). Config unchanged: sqlite + candle BGE-M3 on Metal. Added the operator start/stop script ~/Documents/work/scripts/lambo-dogfood.sh (start|stop|restart|status|log) and verified a full stop/start cycle releases and reacquires the lease.",
+  "sources": [
+   "nrynss/lambo-paper@696283e:evaluation/results/2026-09-07/lambo-2026-09-07/exports/lambo/throttle-interval-why.full.json"
+  ],
+  "type": "Resource"
+ },
+ {
+  "text": "Re-pinned the dogfood binary to lambo-e11fb06 (lambo-for-mooshik @ e11fb06, clean tree, LAMBO_GIT_SHA set, features store-sqlite,embed-candle-metal,embed-bge). This pin carries the record_action embedder-hop fix (record_action concepts previously stored embedding NULL — everything an agent DID was invisible to semantic recall) and the new re-embed --missing-only repair verb. Ran the repair with serve stopped: backfilled 42 NULL-vector concepts, coverage 534/576 -> 576/576, contract untouched (candle BAAI/bge-m3, dim 1024). Repointed launchd from lambo-4c6fc93, restarted, verified: lease http-shared-writer pid 35655, MCP stats embedded=576/576, ledger heartbeat git_sha=e11fb06.",
+  "sources": [
+   "nrynss/lambo-paper@696283e:evaluation/results/2026-09-07/lambo-2026-09-07/exports/lambo/record-action-embedding.full.json"
+  ],
+  "type": "Resource"
+ },
+ {
+  "text": "Register-discipline technique that paid off twice in J2 round 2: when a stale claim is corrected, also check the claims of every constant the corrected sentence now cites. Rewriting ELECTION_BUDGET's docstring to name ELECTION_SLACK exposed a SECOND false stated reason the reviewer had not found — ELECTION_SLACK 'absorbs store-clock skew and one missed refresh interval', where a missed refresh interval is LEASE_HEARTBEAT_INTERVAL = 15s, three times the 5s constant, and needs no absorbing anyway (a holder gets three chances inside one TTL and is supposed to lose the lease if it misses all three). Citing a constant is a commitment to its docstring being true.",
+  "sources": [
+   "nrynss/lambo-paper@696283e:evaluation/results/2026-09-07/lambo-2026-09-07/exports/lambo/throttle-interval-why.full.json"
+  ],
+  "type": "Logic"
+ },
+ {
+  "text": "The dogfood embedder's capacity flags are LOAD-BEARING, not tuning (found by K1's NVIDIA leg 2026-08-22, reproduced and fixed live on the Mac rig the same day, DOGFOOD-SETUP.md updated). llama-server clamps n_batch = n_ubatch = 512 by default, so ANY input over ~512 tokens fails HTTP 500 'input too large to process' — the J3-R3-1 failure class reachable by plain input length, no network fault needed. BGE-M3 carries 8192-token capacity; the defaults throw away fifteen sixteenths of it. On a pre-J3 binary such a write applied with embedding = NULL while the receipt said 'applied', so this is a plausible contributor to the 92/100 unembedded dogfood concepts. Run with --batch-size 8192 --ubatch-size 8192 -c 8192 (long flags only; this build rejects -u), and verify with a >512-token embed, NOT /health — health passes either way, which is how it hid.",
+  "sources": [
+   "nrynss/lambo-paper@696283e:evaluation/results/2026-09-07/lambo-2026-09-07/exports/lambo/embedder-superseded.full.json"
+  ],
+  "type": "Constraint"
+ },
+ {
+  "text": "The dogfood store's embedding damage is 475 of 509 concepts, far larger than the '92 of 100' figure carried in K's motivating table — that number is stale and understates the backfill by roughly 5x. Two consequences. First, semantic recall on this store is effectively not running: any lambo_recall here matches on keywords for 93% of the corpus, so recall-quality judgements made against the dogfood graph are judgements about the keyword path, not the hybrid one. Second, this raises the value of K2's re-embed verb and its embedded/total counter in lambo_stats — the counter would have made the drift visible the day it started, and the verb is now repairing 93% of the store rather than a tenth of it. Worth re-measuring coverage before any G recall-calibration work, since calibration against a 7%-embedded corpus would measure the wrong pipeline.",
+  "sources": [
+   "evidence/issue-178-similar/labelled-pairs.json",
+   "evidence/mooshik-i3-live-ledger/duplicates.txt"
+  ],
+  "type": null
+ },
+ {
+  "text": "Workstream B is extract-then-extend, not copy-then-edit: B0 extracts PgStore<D: Dialect> from the hardened Cockroach adapter (move-only commit first, then carve), with postgres and cockroach as dialect files. A function enters the shared base only when its SQL is byte-identical across dialects — never forced together with a bool parameter. Copy-then-edit was rejected: it makes Postgres a second-class citizen and dual maintenance reliably fails (F-R2-2 demonstrated it).",
+  "sources": [
+   "nrynss/lambo-paper@696283e:evaluation/results/2026-09-07/lambo-2026-09-07/exports/lambo/missing-cloud-cost.full.json"
+  ],
+  "type": "Logic"
+ },
+ {
+  "text": "Workstream I (observability) runs before all further implementation cycles — decided 2026-08-19. Lambo is strong on state observability (canonization audit rows, stats, the store, serve-web) but has no flow record: recall scores vanish with the response and a fired blast-radius warning exists only in the conversation that saw it, which is unverifiable and therefore unclaimable. Every cycle run before I lands is dogfood data lost.",
+  "sources": [
+   "nrynss/lambo-paper@696283e:evaluation/results/2026-09-07/lambo-2026-09-07/exports/lambo/model-roles.full.json"
+  ],
+  "type": "Logic"
+ },
+ {
+  "text": "adve-review-mooshik-J2-round1.md",
+  "sources": [
+   "evidence/issue-178-similar/labelled-pairs.json",
+   "evidence/mooshik-i3-live-ledger/duplicates.txt"
+  ],
+  "type": null
+ },
+ {
+  "text": "adve-review-mooshik-J2-round2.md",
+  "sources": [
+   "evidence/issue-178-similar/labelled-pairs.json",
+   "evidence/mooshik-i3-live-ledger/duplicates.txt"
+  ],
+  "type": null
+ },
+ {
+  "text": "adve-review-mooshik-J2-round3.md",
+  "sources": [
+   "evidence/issue-178-similar/labelled-pairs.json",
+   "evidence/mooshik-i3-live-ledger/duplicates.txt"
+  ],
+  "type": null
+ },
+ {
+  "text": "adve-review-mooshik-J3-round1.md",
+  "sources": [
+   "evidence/issue-178-similar/labelled-pairs.json",
+   "evidence/mooshik-i3-live-ledger/duplicates.txt"
+  ],
+  "type": null
+ },
+ {
+  "text": "adve-review-mooshik-J3-round2.md",
+  "sources": [
+   "evidence/issue-178-similar/labelled-pairs.json",
+   "evidence/mooshik-i3-live-ledger/duplicates.txt"
+  ],
+  "type": null
+ },
+ {
+  "text": "commit 3a4a6b8 on wt/j3",
+  "sources": [
+   "evidence/issue-178-similar/labelled-pairs.json",
+   "evidence/mooshik-i3-live-ledger/duplicates.txt"
+  ],
+  "type": null
+ },
+ {
+  "text": "commit d9eef3b on wt/j3",
+  "sources": [
+   "evidence/issue-178-similar/labelled-pairs.json",
+   "evidence/mooshik-i3-live-ledger/duplicates.txt"
+  ],
+  "type": null
+ },
+ {
+  "text": "dev-diary/adversarial-review/adve-review-mooshik-I-round1.md",
+  "sources": [
+   "evidence/issue-178-similar/labelled-pairs.json",
+   "evidence/mooshik-i3-live-ledger/duplicates.txt"
+  ],
+  "type": null
+ },
+ {
+  "text": "dev-diary/adversarial-review/adve-review-mooshik-J0-round1.md",
+  "sources": [
+   "evidence/issue-178-similar/labelled-pairs.json",
+   "evidence/mooshik-i3-live-ledger/duplicates.txt"
+  ],
+  "type": null
+ },
+ {
+  "text": "dev-diary/adversarial-review/adve-review-mooshik-J0-round2.md",
+  "sources": [
+   "evidence/issue-178-similar/labelled-pairs.json",
+   "evidence/mooshik-i3-live-ledger/duplicates.txt"
+  ],
+  "type": null
+ },
+ {
+  "text": "dev-diary/adversarial-review/adve-review-mooshik-J1-round1.md",
+  "sources": [
+   "evidence/issue-178-similar/labelled-pairs.json",
+   "evidence/mooshik-i3-live-ledger/duplicates.txt"
+  ],
+  "type": null
+ },
+ {
+  "text": "dev-diary/adversarial-review/adve-review-mooshik-J1-round2.md",
+  "sources": [
+   "evidence/issue-178-similar/labelled-pairs.json",
+   "evidence/mooshik-i3-live-ledger/duplicates.txt"
+  ],
+  "type": null
+ },
+ {
+  "text": "dev-diary/adversarial-review/adve-review-mooshik-J1-round3.md",
+  "sources": [
+   "evidence/issue-178-similar/labelled-pairs.json",
+   "evidence/mooshik-i3-live-ledger/duplicates.txt"
+  ],
+  "type": null
+ },
+ {
+  "text": "dev-diary/adversarial-review/adve-review-mooshik-J2-round1.md",
+  "sources": [
+   "evidence/issue-178-similar/labelled-pairs.json",
+   "evidence/mooshik-i3-live-ledger/duplicates.txt"
+  ],
+  "type": null
+ },
+ {
+  "text": "dev-diary/adversarial-review/adve-review-mooshik-J2-round2.md",
+  "sources": [
+   "evidence/issue-178-similar/labelled-pairs.json",
+   "evidence/mooshik-i3-live-ledger/duplicates.txt"
+  ],
+  "type": null
+ },
+ {
+  "text": "dev-diary/adversarial-review/adve-review-mooshik-J2-round3.md",
+  "sources": [
+   "evidence/issue-178-similar/labelled-pairs.json",
+   "evidence/mooshik-i3-live-ledger/duplicates.txt"
+  ],
+  "type": null
+ },
+ {
+  "text": "dev-diary/adversarial-review/adve-review-mooshik-J3-redesign-round1.md",
+  "sources": [
+   "evidence/issue-178-similar/labelled-pairs.json",
+   "evidence/mooshik-i3-live-ledger/duplicates.txt"
+  ],
+  "type": null
+ },
+ {
+  "text": "dev-diary/adversarial-review/adve-review-mooshik-J3-redesign-round2.md",
+  "sources": [
+   "evidence/issue-178-similar/labelled-pairs.json",
+   "evidence/mooshik-i3-live-ledger/duplicates.txt"
+  ],
+  "type": null
+ },
+ {
+  "text": "dev-diary/adversarial-review/adve-review-mooshik-J3-round1.md",
+  "sources": [
+   "evidence/issue-178-similar/labelled-pairs.json",
+   "evidence/mooshik-i3-live-ledger/duplicates.txt"
+  ],
+  "type": null
+ },
+ {
+  "text": "dev-diary/adversarial-review/adve-review-mooshik-J3-round2.md",
+  "sources": [
+   "evidence/issue-178-similar/labelled-pairs.json",
+   "evidence/mooshik-i3-live-ledger/duplicates.txt"
+  ],
+  "type": null
+ },
+ {
+  "text": "dev-diary/adversarial-review/adve-review-mooshik-J3-round3.md",
+  "sources": [
+   "evidence/issue-178-similar/labelled-pairs.json",
+   "evidence/mooshik-i3-live-ledger/duplicates.txt"
+  ],
+  "type": null
+ },
+ {
+  "text": "dev-diary/lambo-for-mooshik/J-multi-client.md",
+  "sources": [
+   "evidence/issue-178-similar/labelled-pairs.json",
+   "evidence/mooshik-i3-live-ledger/duplicates.txt"
+  ],
+  "type": null
+ },
+ {
+  "text": "evidence/mooshik-j3-durable-intents/j3_n1_outage_demo.py",
+  "sources": [
+   "evidence/issue-178-similar/labelled-pairs.json",
+   "evidence/mooshik-i3-live-ledger/duplicates.txt"
+  ],
+  "type": null
+ },
+ {
+  "text": "evidence/mooshik-j3-durable-intents/n1-outage-run-2026-08-21.txt",
+  "sources": [
+   "evidence/issue-178-similar/labelled-pairs.json",
+   "evidence/mooshik-i3-live-ledger/duplicates.txt"
+  ],
+  "type": null
+ },
+ {
+  "text": "spikes/g3-laplacian/step1_census.py",
+  "sources": [
+   "evidence/issue-178-similar/labelled-pairs.json",
+   "evidence/mooshik-i3-live-ledger/duplicates.txt"
+  ],
+  "type": null
+ },
+ {
+  "text": "spikes/g3-laplacian/step2_diffusion.py",
+  "sources": [
+   "evidence/issue-178-similar/labelled-pairs.json",
+   "evidence/mooshik-i3-live-ledger/duplicates.txt"
+  ],
+  "type": null
+ },
+ {
+  "text": "spikes/g3-laplacian/step2b_cliff.py",
+  "sources": [
+   "evidence/issue-178-similar/labelled-pairs.json",
+   "evidence/mooshik-i3-live-ledger/duplicates.txt"
+  ],
+  "type": null
+ },
+ {
+  "text": "spikes/g3-laplacian/step3_resistance.py",
+  "sources": [
+   "evidence/issue-178-similar/labelled-pairs.json",
+   "evidence/mooshik-i3-live-ledger/duplicates.txt"
+  ],
+  "type": null
+ },
+ {
+  "text": "spikes/g3-laplacian/step5_cost.py",
+  "sources": [
+   "evidence/issue-178-similar/labelled-pairs.json",
+   "evidence/mooshik-i3-live-ledger/duplicates.txt"
+  ],
+  "type": null
+ },
+ {
+  "text": "src/cli/serve_web.rs",
+  "sources": [
+   "evidence/issue-178-similar/labelled-pairs.json",
+   "evidence/mooshik-i3-live-ledger/duplicates.txt"
+  ],
+  "type": null
+ },
+ {
+  "text": "src/mcp/endpoint.rs",
+  "sources": [
+   "evidence/issue-178-similar/labelled-pairs.json",
+   "evidence/mooshik-i3-live-ledger/duplicates.txt"
+  ],
+  "type": null
+ },
+ {
+  "text": "src/mcp/serve.rs",
+  "sources": [
+   "evidence/issue-178-similar/labelled-pairs.json",
+   "evidence/mooshik-i3-live-ledger/duplicates.txt"
+  ],
+  "type": null
+ },
+ {
+  "text": "src/mcp/server.rs",
+  "sources": [
+   "evidence/issue-178-similar/labelled-pairs.json",
+   "evidence/mooshik-i3-live-ledger/duplicates.txt"
+  ],
+  "type": null
+ },
+ {
+  "text": "src/store/memory.rs",
+  "sources": [
+   "evidence/issue-178-similar/labelled-pairs.json",
+   "evidence/mooshik-i3-live-ledger/duplicates.txt"
+  ],
+  "type": null
+ },
+ {
+  "text": "src/store/mod.rs",
+  "sources": [
+   "evidence/issue-178-similar/labelled-pairs.json",
+   "evidence/mooshik-i3-live-ledger/duplicates.txt"
+  ],
+  "type": null
+ },
+ {
+  "text": "~/lambo-dogfood/bin/lambo-3039b82",
+  "sources": [
+   "evidence/issue-178-similar/labelled-pairs.json",
+   "evidence/mooshik-i3-live-ledger/duplicates.txt"
+  ],
+  "type": null
+ },
+ {
+  "text": "~/lambo-dogfood/lambo.toml",
+  "sources": [
+   "evidence/issue-178-similar/labelled-pairs.json",
+   "evidence/mooshik-i3-live-ledger/duplicates.txt"
+  ],
+  "type": null
+ }
+]

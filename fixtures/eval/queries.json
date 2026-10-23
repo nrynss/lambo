@@ -1,0 +1,5912 @@
+[
+ {
+  "id": "q-emb-01-1",
+  "query": "How many dogfood concepts were missing embeddings in the first count?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "embedding-coverage",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "emb-01",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "92 of 100",
+   "not one outage window"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-emb-01-2",
+  "query": "Were the unembedded dogfood concepts from a single embedder outage window?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "embedding-coverage",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "emb-01",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "92 of 100",
+   "not one outage window"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-emb-02-1",
+  "query": "What share of the dogfood store was unembedded once it reached about 500 concepts?",
+  "kind": "answerable",
+  "family": "superseded",
+  "topic": "embedding-coverage",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "emb-01",
+    "grade": 1
+   },
+   {
+    "concept": "emb-02",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "475 of 509",
+   "93%"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-emb-02-2",
+  "query": "Why were recall-quality judgements on the dogfood graph really about the keyword path?",
+  "kind": "answerable",
+  "family": "rationale",
+  "topic": "embedding-coverage",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "emb-02",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "475 of 509",
+   "93%"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-emb-03-1",
+  "query": "Was the 512-token clamp the main reason dogfood concepts lacked vectors?",
+  "kind": "answerable",
+  "family": "contrast",
+  "topic": "embedding-coverage",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "emb-03",
+    "grade": 2
+   },
+   {
+    "concept": "emb-04",
+    "grade": 1
+   }
+  ],
+  "facets": [
+   "not the dominant cause",
+   "2/247"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-emb-03-2",
+  "query": "What evidence showed that short dogfood concepts were unembedded too?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "embedding-coverage",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "emb-03",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "not the dominant cause",
+   "2/247"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-emb-04-1",
+  "query": "Which llama-server flags does the BGE-M3 dogfood embedder need?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "embedding-coverage",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "emb-04",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "--batch-size 8192",
+   "--ubatch-size 8192",
+   "verify with a >512-token embed"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-emb-04-2",
+  "query": "Why is /health not enough to check the llama embedding server?",
+  "kind": "answerable",
+  "family": "rationale",
+  "topic": "embedding-coverage",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "emb-04",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "--batch-size 8192",
+   "--ubatch-size 8192",
+   "verify with a >512-token embed"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-emb-04-3",
+  "query": "--ubatch-size 8192",
+  "kind": "answerable",
+  "family": "exact-identifier",
+  "topic": "embedding-coverage",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "emb-04",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "--batch-size 8192",
+   "--ubatch-size 8192",
+   "verify with a >512-token embed"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-emb-05-1",
+  "query": "Does an applied receipt prove the concept was embedded?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "embedding-coverage",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "ack-04",
+    "grade": 1
+   },
+   {
+    "concept": "emb-05",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "NULL embedding is unfindable",
+   "assert on the store"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-emb-05-2",
+  "query": "Where should an end-to-end durability test check that a write was embedded?",
+  "kind": "answerable",
+  "family": "vocabulary-mismatch",
+  "topic": "embedding-coverage",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "emb-05",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "NULL embedding is unfindable",
+   "assert on the store"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-emb-06-1",
+  "query": "What did the record_action embedder fix change in the dogfood store?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "embedding-coverage",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "emb-06",
+    "grade": 2
+   },
+   {
+    "concept": "emb-07",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "record_action stored NULL embeddings",
+   "42 backfilled",
+   "576/576"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-emb-06-2",
+  "query": "How many NULL-vector concepts did re-embed --missing-only backfill on the dogfood rig?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "embedding-coverage",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "emb-06",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "record_action stored NULL embeddings",
+   "42 backfilled",
+   "576/576"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-emb-06-3",
+  "query": "lambo-e11fb06",
+  "kind": "answerable",
+  "family": "exact-identifier",
+  "topic": "embedding-coverage",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "emb-06",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "record_action stored NULL embeddings",
+   "42 backfilled",
+   "576/576"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-emb-07-1",
+  "query": "What defect did the record_action embedder fix in commit bef53e6 correct?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "embedding-coverage",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "emb-06",
+    "grade": 1
+   },
+   {
+    "concept": "emb-07",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "NULL embeddings",
+   "no embedder hop",
+   "inversion"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-emb-07-2",
+  "query": "Why could agents not semantically recall the actions they had recorded?",
+  "kind": "answerable",
+  "family": "vocabulary-mismatch",
+  "topic": "embedding-coverage",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "emb-06",
+    "grade": 1
+   },
+   {
+    "concept": "emb-07",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "NULL embeddings",
+   "no embedder hop",
+   "inversion"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-emb-08-1",
+  "query": "Why did the dogfood store keep 184 near-duplicate pairs above the merge threshold?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "embedding-coverage",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "emb-08",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "184 pairs",
+   "older concept had no embedding"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-emb-08-2",
+  "query": "Why was semantic_merged zero on the dogfood ledger?",
+  "kind": "answerable",
+  "family": "vocabulary-mismatch",
+  "topic": "embedding-coverage",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "emb-08",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "184 pairs",
+   "older concept had no embedding"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-cnd-01-1",
+  "query": "Why embed in-process with candle rather than through llama.cpp?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "candle",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "cnd-01",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "no transport",
+   "startup condition"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-cnd-01-2",
+  "query": "What failure mode does an in-process embedder remove?",
+  "kind": "answerable",
+  "family": "vocabulary-mismatch",
+  "topic": "candle",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "cnd-01",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "no transport",
+   "startup condition"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-cnd-02-1",
+  "query": "nrynss/bge-m3-f16-safetensors",
+  "kind": "answerable",
+  "family": "exact-identifier",
+  "topic": "candle",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "cnd-02",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "nrynss/bge-m3-f16-safetensors",
+   "391/391 tensors"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-cnd-02-2",
+  "query": "Where do the candle BGE-M3 weights come from?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "candle",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "cnd-02",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "nrynss/bge-m3-f16-safetensors",
+   "391/391 tensors"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-cnd-03-1",
+  "query": "What does the candle embedder do on a machine with no GPU?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "candle",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "cnd-03",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "auto refuses without an accelerator",
+   "device = cpu"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-cnd-03-2",
+  "query": "How do I run the candle embedder on CPU?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "candle",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "cnd-03",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "auto refuses without an accelerator",
+   "device = cpu"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-cnd-04-1",
+  "query": "How much memory does a proxying serve's embedder use on Metal after #31?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "candle",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "cnd-04",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "about 4 MB",
+   "1.4 GB",
+   "digest cached"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-cnd-04-2",
+  "query": "Why does starting a serve no longer hash the 1.1 GB weights?",
+  "kind": "answerable",
+  "family": "rationale",
+  "topic": "candle",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "cnd-04",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "about 4 MB",
+   "1.4 GB",
+   "digest cached"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-cnd-05-1",
+  "query": "What threshold did K1 use for candle versus llama cosine parity?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "candle",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "cnd-05",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "median self-agreement 0.99",
+   "wrong pooling degrades silently"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-cnd-05-2",
+  "query": "Why is pooling correctness the most important gate for an in-process embedder?",
+  "kind": "answerable",
+  "family": "rationale",
+  "topic": "candle",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "cnd-05",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "median self-agreement 0.99",
+   "wrong pooling degrades silently"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-cnd-06-1",
+  "query": "Which embedder does the Mac dogfood rig use today, and what did it replace?",
+  "kind": "answerable",
+  "family": "superseded",
+  "topic": "candle",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "cnd-06",
+    "grade": 2
+   },
+   {
+    "concept": "emb-04",
+    "grade": 1
+   }
+  ],
+  "facets": [
+   "candle BGE-M3 on Metal",
+   "replaced llama-server on 127.0.0.1:8080",
+   "2026-08-23"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-cnd-06-2",
+  "query": "When did the dogfood rig stop using llama-server for embeddings?",
+  "kind": "answerable",
+  "family": "superseded",
+  "topic": "candle",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "cnd-06",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "candle BGE-M3 on Metal",
+   "replaced llama-server on 127.0.0.1:8080",
+   "2026-08-23"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-can-01-1",
+  "query": "How does lambo detect a model change behind an unchanged embedding contract?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "canary",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "can-01",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "20 fixed phrases",
+   "0.99",
+   "store_meta"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-can-01-2",
+  "query": "What cosine counts as canary drift?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "canary",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "can-01",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "20 fixed phrases",
+   "0.99",
+   "store_meta"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-can-01-3",
+  "query": "store_meta canary pin",
+  "kind": "answerable",
+  "family": "exact-identifier",
+  "topic": "canary",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "can-01",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "20 fixed phrases",
+   "0.99",
+   "store_meta"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-can-02-1",
+  "query": "What happens on canary drift when canary = verify?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "canary",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "can-02",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "verify refuses",
+   "warn is the default",
+   "unreachable leaves it unverified"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-can-02-2",
+  "query": "What is the default embedder canary mode?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "canary",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "can-02",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "verify refuses",
+   "warn is the default",
+   "unreachable leaves it unverified"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-can-02-3",
+  "query": "Does an unreachable embedder fail the canary check?",
+  "kind": "answerable",
+  "family": "contrast",
+  "topic": "canary",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "can-02",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "verify refuses",
+   "warn is the default",
+   "unreachable leaves it unverified"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-can-03-1",
+  "query": "Does warn mode re-embed the canary phrases at every attach?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "canary",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "can-03",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "10 minutes",
+   "verify embeds every attach"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-can-04-1",
+  "query": "How can the semantic merge threshold be derived from labelled data?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "canary",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "can-04",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "at least 100 pairs",
+   "p99",
+   "above the random-pair floor"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-can-04-2",
+  "query": "How many related pairs does lambo need before it derives a threshold?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "canary",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "can-04",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "at least 100 pairs",
+   "p99",
+   "above the random-pair floor"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-can-04-3",
+  "query": "MIN_RELATED_PAIRS",
+  "kind": "answerable",
+  "family": "exact-identifier",
+  "topic": "canary",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "can-04",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "at least 100 pairs",
+   "p99",
+   "above the random-pair floor"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-can-05-1",
+  "query": "Why can't the canary's random-pair cosines be used as the merge threshold?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "canary",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "can-05",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "0.5 to 0.62",
+   "relevance floor only"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-cal-01-1",
+  "query": "What cosine range did G1 measure for paraphrase pairs under BGE-M3?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "calibration",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "cal-01",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "paraphrase 0.6889-0.8984",
+   "related-distinct 0.6348-0.8913"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-cal-01-2",
+  "query": "How much do BGE-M3 paraphrase and related-but-distinct cosines overlap?",
+  "kind": "answerable",
+  "family": "vocabulary-mismatch",
+  "topic": "calibration",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "cal-01",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "paraphrase 0.6889-0.8984",
+   "related-distinct 0.6348-0.8913"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-cal-02-1",
+  "query": "Why was the semantic merge threshold kept at 0.85?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "calibration",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "cal-02",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "kept at 0.85",
+   "0.84 adds three related-distinct pairs"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-cal-02-2",
+  "query": "Would lowering the merge threshold to 0.84 help?",
+  "kind": "answerable",
+  "family": "contrast",
+  "topic": "calibration",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "cal-02",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "kept at 0.85",
+   "0.84 adds three related-distinct pairs"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-cal-03-1",
+  "query": "What is RECENT_SCORE and why is it 0.35?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "calibration",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "cal-03",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "0.35",
+   "below 0.3991"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-cal-03-2",
+  "query": "What did the old 0.50 recency floor break?",
+  "kind": "answerable",
+  "family": "superseded",
+  "topic": "calibration",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "cal-03",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "0.35",
+   "below 0.3991"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-cal-03-3",
+  "query": "RECENT_SCORE",
+  "kind": "answerable",
+  "family": "exact-identifier",
+  "topic": "calibration",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "cal-03",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "0.35",
+   "below 0.3991"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-cal-04-1",
+  "query": "Which paraphrase pairs fall below the 0.85 merge threshold?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "calibration",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "cal-02",
+    "grade": 1
+   },
+   {
+    "concept": "cal-04",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "register user / create account 0.8230"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-top-01-1",
+  "query": "How is the Lambo dogfood writer deployed on the Mac, and how do agents connect to it?",
+  "kind": "answerable",
+  "family": "multi-hop",
+  "topic": "dogfood-topology",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "top-01",
+    "grade": 2
+   },
+   {
+    "concept": "top-02",
+    "grade": 1
+   }
+  ],
+  "facets": [
+   "single launchd lambo serve",
+   "HTTP port 7700",
+   "clients connect to http://127.0.0.1:7700/mcp"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-top-01-2",
+  "query": "http://127.0.0.1:7700/mcp",
+  "kind": "answerable",
+  "family": "exact-identifier",
+  "topic": "dogfood-topology",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "top-01",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "single launchd lambo serve",
+   "HTTP port 7700",
+   "clients connect to http://127.0.0.1:7700/mcp"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-top-01-3",
+  "query": "Should each agent on the dogfood machine start its own stdio serve?",
+  "kind": "answerable",
+  "family": "contrast",
+  "topic": "dogfood-topology",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "top-01",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "single launchd lambo serve",
+   "HTTP port 7700",
+   "clients connect to http://127.0.0.1:7700/mcp"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-top-02-1",
+  "query": "What is the launchd unit name for the dogfood writer?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "dogfood-topology",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "top-02",
+    "grade": 2
+   },
+   {
+    "concept": "top-03",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "dev.lambo.dogfood",
+   "lease holder http-shared-writer"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-top-02-2",
+  "query": "How many nodes did the dogfood graph have at the lambo-4c6fc93 re-pin?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "dogfood-topology",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "top-02",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "dev.lambo.dogfood",
+   "lease holder http-shared-writer"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-top-02-3",
+  "query": "dev.lambo.dogfood",
+  "kind": "answerable",
+  "family": "exact-identifier",
+  "topic": "dogfood-topology",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "top-02",
+    "grade": 2
+   },
+   {
+    "concept": "top-03",
+    "grade": 1
+   }
+  ],
+  "facets": [
+   "dev.lambo.dogfood",
+   "lease holder http-shared-writer"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-top-03-1",
+  "query": "Why is the launchd ThrottleInterval for the dogfood unit 60 seconds instead of the default?",
+  "kind": "answerable",
+  "family": "rationale",
+  "topic": "dogfood-topology",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "srv-01",
+    "grade": 1
+   },
+   {
+    "concept": "top-03",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "default 10 s restart",
+   "inside the 45 s lease TTL",
+   "60 s retries after the lease lapses"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-top-03-2",
+  "query": "What goes wrong if launchd restarts the dogfood serve after 10 seconds?",
+  "kind": "answerable",
+  "family": "vocabulary-mismatch",
+  "topic": "dogfood-topology",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "top-03",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "default 10 s restart",
+   "inside the 45 s lease TTL",
+   "60 s retries after the lease lapses"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-top-04-1",
+  "query": "How is Claude Code forced to follow the lambo-dogfood protocol?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "dogfood-topology",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "top-04",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "hooks at user scope",
+   "PreToolUse denies edits until one lambo_recall",
+   "fails open when the writer is down"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-top-04-2",
+  "query": "What happens to the dogfood hooks when the writer is down?",
+  "kind": "answerable",
+  "family": "contrast",
+  "topic": "dogfood-topology",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "top-04",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "hooks at user scope",
+   "PreToolUse denies edits until one lambo_recall",
+   "fails open when the writer is down"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-top-04-3",
+  "query": "Why can't a restricted-toolset agent deadlock on the recall gate?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "dogfood-topology",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "top-04",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "hooks at user scope",
+   "PreToolUse denies edits until one lambo_recall",
+   "fails open when the writer is down"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-top-05-1",
+  "query": "Did agents call lambo_recall before acting when only told to?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "dogfood-topology",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "fnd-01",
+    "grade": 1
+   },
+   {
+    "concept": "top-04",
+    "grade": 1
+   },
+   {
+    "concept": "top-05",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "0.0% for claude-orchestrator",
+   "35.2% overall"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-srv-01-1",
+  "query": "How long is the single-writer lease TTL and how often is it refreshed?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "multi-client",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "srv-01",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "45 s",
+   "15 s",
+   "three chances"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-srv-01-2",
+  "query": "LEASE_HEARTBEAT_INTERVAL",
+  "kind": "answerable",
+  "family": "exact-identifier",
+  "topic": "multi-client",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "srv-01",
+    "grade": 2
+   },
+   {
+    "concept": "srv-06",
+    "grade": 1
+   }
+  ],
+  "facets": [
+   "45 s",
+   "15 s",
+   "three chances"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-srv-02-1",
+  "query": "Why must per-call agent_id be accepted before a shared writer is honest?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "multi-client",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "srv-02",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "serve applies its own --agent",
+   "lambo_reserve hard-refuses other agent_ids",
+   "per-call agent_id"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-srv-02-2",
+  "query": "Why does lambo_reserve refuse every client but one behind a single serve?",
+  "kind": "answerable",
+  "family": "rationale",
+  "topic": "multi-client",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "srv-02",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "serve applies its own --agent",
+   "lambo_reserve hard-refuses other agent_ids",
+   "per-call agent_id"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-srv-03-1",
+  "query": "Why is matching on an error variant not enough when unhiding errors to a model?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "multi-client",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "srv-03",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "variant is not a path",
+   "lease_lost_error is also a Conflict",
+   "discriminate structurally"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-srv-03-2",
+  "query": "What did lease_lost_error disclose through conflict_err?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "multi-client",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "srv-03",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "variant is not a path",
+   "lease_lost_error is also a Conflict",
+   "discriminate structurally"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-srv-04-1",
+  "query": "How many un-raced Self::send sites did the J2 round-3 residual find in proxy.rs?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "multi-client",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "srv-04",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "six un-raced Self::send sites",
+   "inflight list"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-srv-04-2",
+  "query": "answer_lost un-raced write burst",
+  "kind": "answerable",
+  "family": "exact-identifier",
+  "topic": "multi-client",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "srv-04",
+    "grade": 2
+   },
+   {
+    "concept": "srv-05",
+    "grade": 1
+   }
+  ],
+  "facets": [
+   "six un-raced Self::send sites",
+   "inflight list"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-srv-05-1",
+  "query": "How did J3 bound the proxy's in-flight list for receipt waits?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "multi-client",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "srv-05",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "RECEIPT_WAIT_MAX",
+   "concurrent-waiter cap",
+   "INFLIGHT_DEPTH_WARN = 64"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-srv-05-2",
+  "query": "RECEIPT_WAIT_MAX",
+  "kind": "answerable",
+  "family": "exact-identifier",
+  "topic": "multi-client",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "srv-05",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "RECEIPT_WAIT_MAX",
+   "concurrent-waiter cap",
+   "INFLIGHT_DEPTH_WARN = 64"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-srv-05-3",
+  "query": "Does the write-queue bound feed the proxy's inflight list?",
+  "kind": "answerable",
+  "family": "contrast",
+  "topic": "multi-client",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "srv-05",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "RECEIPT_WAIT_MAX",
+   "concurrent-waiter cap",
+   "INFLIGHT_DEPTH_WARN = 64"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-srv-06-1",
+  "query": "What should you check when you correct a stale claim in a docstring?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "multi-client",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "srv-06",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "check every constant the sentence cites",
+   "LEASE_HEARTBEAT_INTERVAL = 15s"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-srv-06-2",
+  "query": "What was wrong with ELECTION_SLACK's stated reason?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "multi-client",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "srv-01",
+    "grade": 1
+   },
+   {
+    "concept": "srv-06",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "check every constant the sentence cites",
+   "LEASE_HEARTBEAT_INTERVAL = 15s"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-srv-07-1",
+  "query": "DIAL_BUDGET",
+  "kind": "answerable",
+  "family": "exact-identifier",
+  "topic": "multi-client",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "srv-04",
+    "grade": 1
+   },
+   {
+    "concept": "srv-07",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "6 seconds",
+   "abandoned, retry later"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-srv-07-2",
+  "query": "How long does a proxying serve wait on a dial to the writer before answering the client?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "multi-client",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "srv-07",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "6 seconds",
+   "abandoned, retry later"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-ack-01-1",
+  "query": "How fast is a lambo_derive ack after J3 compared with before?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "async-ack",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "ack-01",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "14.111 ms to 0.048 ms",
+   "below FixtureEmbedder 0.076 ms"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-ack-01-2",
+  "query": "Is the embedder still in the derive call path after J3?",
+  "kind": "answerable",
+  "family": "vocabulary-mismatch",
+  "topic": "async-ack",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "ack-01",
+    "grade": 2
+   },
+   {
+    "concept": "ack-04",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "14.111 ms to 0.048 ms",
+   "below FixtureEmbedder 0.076 ms"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-ack-02-1",
+  "query": "What was the P1 finding in the J3 durable-intent redesign round-1 review?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "async-ack",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "ack-02",
+    "grade": 2
+   },
+   {
+    "concept": "ack-03",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "transient embedder outage at attach burns the backlog",
+   "64 acked"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-ack-02-2",
+  "query": "Did the J3 founding invariant hold at kill -9?",
+  "kind": "answerable",
+  "family": "contrast",
+  "topic": "async-ack",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "ack-02",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "transient embedder outage at attach burns the backlog",
+   "64 acked"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-ack-03-1",
+  "query": "Why could the J3 redesign review not be committed?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "async-ack",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "ack-03",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "macOS TCC revoked access",
+   "paused before remediation"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-ack-03-2",
+  "query": "macOS TCC revoked filesystem access",
+  "kind": "answerable",
+  "family": "exact-identifier",
+  "topic": "async-ack",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "ack-03",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "macOS TCC revoked access",
+   "paused before remediation"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-ack-04-1",
+  "query": "When does lambo acknowledge a derive after J3?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "async-ack",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "ack-04",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "ack once the intent is durable",
+   "lambo_receipt reports the outcome"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-ack-04-2",
+  "query": "How does a client learn whether an acked write was applied?",
+  "kind": "answerable",
+  "family": "vocabulary-mismatch",
+  "topic": "async-ack",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "ack-04",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "ack once the intent is durable",
+   "lambo_receipt reports the outcome"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-pro-01-1",
+  "query": "Which Claude model runs Lambo remediation agents, and which runs whole-workstream end-to-end review?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "process",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "pro-01",
+    "grade": 2
+   },
+   {
+    "concept": "pro-02",
+    "grade": 1
+   }
+  ],
+  "facets": [
+   "remediation on Opus",
+   "E2E review on Fable"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-pro-01-2",
+  "query": "Who does the end-to-end adversarial review of a workstream?",
+  "kind": "answerable",
+  "family": "vocabulary-mismatch",
+  "topic": "process",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "pro-01",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "remediation on Opus",
+   "E2E review on Fable"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-pro-02-1",
+  "query": "What was the planned order of workstreams after J closed?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "process",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "pro-02",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "end-to-end adversarial review over the whole branch",
+   "then workstream D",
+   "D blocks C2"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-pro-02-2",
+  "query": "Which workstream was the only remaining blocker of C2?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "process",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "pro-02",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "end-to-end adversarial review over the whole branch",
+   "then workstream D",
+   "D blocks C2"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-pro-03-1",
+  "query": "Why did observability (workstream I) run before further implementation cycles?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "process",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "pro-03",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "decided 2026-08-19",
+   "no flow record",
+   "dogfood data lost"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-pro-03-2",
+  "query": "What is a flow record and why did lambo lack one?",
+  "kind": "answerable",
+  "family": "vocabulary-mismatch",
+  "topic": "process",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "pro-03",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "decided 2026-08-19",
+   "no flow record",
+   "dogfood data lost"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-pro-04-1",
+  "query": "Why did workstream B extract PgStore from the Cockroach adapter instead of copying it?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "process",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "pro-04",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "extract-then-extend",
+   "byte-identical SQL",
+   "copy-then-edit rejected"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-pro-04-2",
+  "query": "When does a function enter the shared PgStore base?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "process",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "pro-04",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "extract-then-extend",
+   "byte-identical SQL",
+   "copy-then-edit rejected"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-pro-05-1",
+  "query": "What do the store aliases pg and crdb resolve to?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "process",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "pro-05",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "postgres/pg -> PostgresDialect",
+   "cockroach/crdb -> CockroachDialect",
+   "fails loud"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-pro-05-2",
+  "query": "What happens if a Postgres config is pointed at Cockroach?",
+  "kind": "answerable",
+  "family": "contrast",
+  "topic": "process",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "pro-04",
+    "grade": 1
+   },
+   {
+    "concept": "pro-05",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "postgres/pg -> PostgresDialect",
+   "cockroach/crdb -> CockroachDialect",
+   "fails loud"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-pro-06-1",
+  "query": "What was the verdict of the J2 round-3 adversarial review?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "process",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "pro-06",
+    "grade": 2
+   },
+   {
+    "concept": "pro-07",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "CLEAN",
+   "aefda87"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-pro-07-1",
+  "query": "How many fixtures tests passed at 6442d95 in the J2 round-3 review?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "process",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "pro-07",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "858/0/3 fixtures",
+   "verify.sh 40 ok"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-pro-08-1",
+  "query": "Why can a U+2028 in content not fork a canonical key?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "process",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "pro-08",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "normalize_tokens splits on char::is_whitespace",
+   "Default_Ignorable codepoints pass check_size"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-pro-08-2",
+  "query": "INVISIBLE_RANGES",
+  "kind": "answerable",
+  "family": "exact-identifier",
+  "topic": "process",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "pro-08",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "normalize_tokens splits on char::is_whitespace",
+   "Default_Ignorable codepoints pass check_size"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-prf-01-1",
+  "query": "How much faster did keyword recall get in 0.7.0?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "performance",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "prf-01",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "18.7 ms to 7.5 ms",
+   "63 to 1,104"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-prf-01-2",
+  "query": "How many recalls per second do 16 concurrent clients get after #171?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "performance",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "prf-01",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "18.7 ms to 7.5 ms",
+   "63 to 1,104"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-prf-02-1",
+  "query": "Why are back-to-back writes acknowledged faster in 0.7.0?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "performance",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "prf-02",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "0.8 ms instead of 24.8 ms",
+   "25 ms gap",
+   "one rescore per burst"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-prf-02-2",
+  "query": "How long can the score table trail a write burst after #171?",
+  "kind": "answerable",
+  "family": "contrast",
+  "topic": "performance",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "prf-02",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "0.8 ms instead of 24.8 ms",
+   "25 ms gap",
+   "one rescore per burst"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-prf-03-1",
+  "query": "Why is lambo provision faster in 0.7.0?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "performance",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "prf-03",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "canonical_key_rule in store_meta",
+   "collision records nothing",
+   "5.6 ms instead of 143 ms"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-prf-03-2",
+  "query": "canonical_key_rule",
+  "kind": "answerable",
+  "family": "exact-identifier",
+  "topic": "performance",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "prf-03",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "canonical_key_rule in store_meta",
+   "collision records nothing",
+   "5.6 ms instead of 143 ms"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-prf-03-3",
+  "query": "Does provision skip the re-key scan if the last pass found a collision?",
+  "kind": "answerable",
+  "family": "contrast",
+  "topic": "performance",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "prf-03",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "canonical_key_rule in store_meta",
+   "collision records nothing",
+   "5.6 ms instead of 143 ms"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-prf-04-1",
+  "query": "How much smaller are packed f32 vectors on SQLite?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "performance",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "prf-04",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "47.3 MB to 17.1 MB",
+   "161 ms to 3.4 ms",
+   "bit-exact"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-prf-04-2",
+  "query": "Are SQLite packed vectors lossy?",
+  "kind": "answerable",
+  "family": "contrast",
+  "topic": "performance",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "prf-04",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "47.3 MB to 17.1 MB",
+   "161 ms to 3.4 ms",
+   "bit-exact"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-prf-05-1",
+  "query": "Why was structural recall slow in 0.6.0?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "performance",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "prf-05",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "Unicode normalization per query",
+   "ASCII skips it",
+   "about 1 ms"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-prf-05-2",
+  "query": "What does #165 skip for ASCII concepts?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "performance",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "prf-05",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "Unicode normalization per query",
+   "ASCII skips it",
+   "about 1 ms"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-prf-06-1",
+  "query": "Why does the 16-lane cosine kernel give identical scores on every target?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "performance",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "prf-06",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "16 lanes",
+   "fixed order"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-rel-01-1",
+  "query": "Why did concurrent writes fail on 0.4.0?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "releases",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "rel-01",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "249 of 519 failed",
+   "522 of 522",
+   "1,999 of 1,999"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-rel-01-2",
+  "query": "How many writes failed with 8 agents on 0.4.0?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "releases",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "rel-01",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "249 of 519 failed",
+   "522 of 522",
+   "1,999 of 1,999"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-rel-02-1",
+  "query": "How long did a derive's commit hold the session write lock before 0.5.0?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "releases",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "rel-02",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "168 ms to 21 µs at 100,000"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-rel-03-1",
+  "query": "What happens when a write would create a parent_of cycle?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "releases",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "rel-03",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "refused",
+   "nothing written"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-rel-04-1",
+  "query": "close_unflushed",
+  "kind": "answerable",
+  "family": "exact-identifier",
+  "topic": "releases",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "rel-04",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "close_unflushed",
+   "lease row's facts"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-rel-04-2",
+  "query": "Does a lease refusal claim the holder is alive?",
+  "kind": "answerable",
+  "family": "contrast",
+  "topic": "releases",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "rel-04",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "close_unflushed",
+   "lease row's facts"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-rel-05-1",
+  "query": "How does lambo embed images?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "releases",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "rel-05",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "embeddinggemma2 / embed-eg2",
+   "--mmproj",
+   "lossless PNG, 768 px"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-rel-05-2",
+  "query": "Which llama-server flag enables image embedding for EmbeddingGemma 2?",
+  "kind": "answerable",
+  "family": "exact-identifier",
+  "topic": "releases",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "rel-05",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "embeddinggemma2 / embed-eg2",
+   "--mmproj",
+   "lossless PNG, 768 px"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-rel-05-3",
+  "query": "What canonical form is an image sent in before embedding?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "releases",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "rel-05",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "embeddinggemma2 / embed-eg2",
+   "--mmproj",
+   "lossless PNG, 768 px"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-rel-06-1",
+  "query": "What is the request size cap on lambo transports?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "releases",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "rel-06",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "4 MiB",
+   "before parsing"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-rel-07-1",
+  "query": "How do I delete a whole lambo session?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "releases",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "rel-07",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "one transaction",
+   "tombstone"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-rel-07-2",
+  "query": "Can a writer reuse an erased session's name?",
+  "kind": "answerable",
+  "family": "contrast",
+  "topic": "releases",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "rel-07",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "one transaction",
+   "tombstone"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-rel-08-1",
+  "query": "How does lambo serve-web protect against DNS rebinding?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "releases",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "rel-08",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "allowlist",
+   "Host check",
+   "Content-Security-Policy"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-rel-08-2",
+  "query": "[[web.credential]]",
+  "kind": "answerable",
+  "family": "exact-identifier",
+  "topic": "releases",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "rel-08",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "allowlist",
+   "Host check",
+   "Content-Security-Policy"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-rel-09-1",
+  "query": "Can lambo use Elasticsearch for recall?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "releases",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "rel-09",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "recall-elastic",
+   "store stays the source of truth"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-rel-09-2",
+  "query": "Is the Elasticsearch index the source of truth?",
+  "kind": "answerable",
+  "family": "contrast",
+  "topic": "releases",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "rel-09",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "recall-elastic",
+   "store stays the source of truth"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-rel-10-1",
+  "query": "CUDARC_CUDA_VERSION",
+  "kind": "answerable",
+  "family": "exact-identifier",
+  "topic": "releases",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "rel-10",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "CUDA 13.4",
+   "no CUDARC_CUDA_VERSION"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-ses-01-1",
+  "query": "How does lambo share memory across projects?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "sessions",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "ses-01",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "one session per project",
+   "shared layer",
+   "hit names its session"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-ses-01-2",
+  "query": "/mcp/s/<session>",
+  "kind": "answerable",
+  "family": "exact-identifier",
+  "topic": "sessions",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "ses-01",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "one session per project",
+   "shared layer",
+   "hit names its session"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-ses-02-1",
+  "query": "Can a keyword-only match bring in a hit from the shared layer?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "sessions",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "ses-02",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "vector similarity required",
+   "floor 0.50"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-ses-02-2",
+  "query": "What vector floor applies to shared-layer hits?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "sessions",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "ses-02",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "vector similarity required",
+   "floor 0.50"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-ses-03-1",
+  "query": "How does lambo keep README.md from two repositories apart?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "sessions",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "ses-03",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "two concepts, not one hub",
+   "ambiguous lookup refused"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-ses-03-2",
+  "query": "What does lambo do with an ambiguous path lookup under repo_scope?",
+  "kind": "answerable",
+  "family": "contrast",
+  "topic": "sessions",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "ses-03",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "two concepts, not one hub",
+   "ambiguous lookup refused"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-con-01-1",
+  "query": "Does recall warn when ordinary memory is contradicted?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "contradictions",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "con-01",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "any contradicted concept warns",
+   "newer than its support"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-con-01-2",
+  "query": "Which concepts carry the Contradicted warning after #179?",
+  "kind": "answerable",
+  "family": "superseded",
+  "topic": "contradictions",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "con-01",
+    "grade": 2
+   },
+   {
+    "concept": "con-04",
+    "grade": 1
+   }
+  ],
+  "facets": [
+   "any contradicted concept warns",
+   "newer than its support"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-con-02-1",
+  "query": "Can a recall return more than top_k hits?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "contradictions",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "con-02",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "ordinary hit must earn top_k",
+   "companion added past top_k",
+   "at most one extra"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-con-02-2",
+  "query": "companion_of",
+  "kind": "answerable",
+  "family": "exact-identifier",
+  "topic": "contradictions",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "con-02",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "ordinary hit must earn top_k",
+   "companion added past top_k",
+   "at most one extra"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-con-02-3",
+  "query": "Is a Canonical contradicted hit treated the same as an ordinary one?",
+  "kind": "answerable",
+  "family": "contrast",
+  "topic": "contradictions",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "con-02",
+    "grade": 2
+   },
+   {
+    "concept": "con-04",
+    "grade": 1
+   }
+  ],
+  "facets": [
+   "ordinary hit must earn top_k",
+   "companion added past top_k",
+   "at most one extra"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-con-03-1",
+  "query": "Can GC collect a correction while the stale fact is still in memory?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "contradictions",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "con-03",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "correction protected while the contradicted concept lives",
+   "mutual contradictions keep nothing alive"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-con-03-2",
+  "query": "Do two concepts that contradict each other keep each other alive?",
+  "kind": "answerable",
+  "family": "contrast",
+  "topic": "contradictions",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "con-03",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "correction protected while the contradicted concept lives",
+   "mutual contradictions keep nothing alive"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-con-04-1",
+  "query": "How does an agent record that a concept is wrong?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "contradictions",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "con-04",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "against",
+   "never changes a score or status"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-con-04-2",
+  "query": "Does a contradiction lower a concept's score?",
+  "kind": "answerable",
+  "family": "contrast",
+  "topic": "contradictions",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "con-04",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "against",
+   "never changes a score or status"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-con-05-1",
+  "query": "Can contradictions crowd other warnings out of the hot list?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "contradictions",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "con-05",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "default half of hot_list_max",
+   "lowest priority dropped first",
+   "most recently declared kept"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-con-05-2",
+  "query": "hot_list_contradiction_max",
+  "kind": "answerable",
+  "family": "exact-identifier",
+  "topic": "contradictions",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "con-05",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "default half of hot_list_max",
+   "lowest priority dropped first",
+   "most recently declared kept"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-con-06-1",
+  "query": "Can a contradiction demote a Canonical concept?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "contradictions",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "con-06",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "off by default",
+   "needs its own newer evidence"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-con-06-2",
+  "query": "canonization_supersede",
+  "kind": "answerable",
+  "family": "exact-identifier",
+  "topic": "contradictions",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "con-06",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "off by default",
+   "needs its own newer evidence"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-mg-01-1",
+  "query": "Why do 'release v0.5.0 is current' and 'release v0.6.0 is current' not merge?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "merge-guards",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "mg-01",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "different identifiers never merge",
+   "v0.5.0 vs v0.6.0 stay two facts"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-mg-01-2",
+  "query": "same_identifiers",
+  "kind": "answerable",
+  "family": "exact-identifier",
+  "topic": "merge-guards",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "mg-01",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "different identifiers never merge",
+   "v0.5.0 vs v0.6.0 stay two facts"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-mg-01-3",
+  "query": "Can two concepts that differ only in a version number merge by similarity?",
+  "kind": "answerable",
+  "family": "contrast",
+  "topic": "merge-guards",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "mg-01",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "different identifiers never merge",
+   "v0.5.0 vs v0.6.0 stay two facts"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-mg-02-1",
+  "query": "Does lambo canon alias-preview --similar merge anything?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "merge-guards",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "mg-02",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "MinHash and cosine",
+   "guards",
+   "only suggests"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-mg-02-2",
+  "query": "How does alias-preview find near-duplicate pairs?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "merge-guards",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "mg-02",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "MinHash and cosine",
+   "guards",
+   "only suggests"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-mg-03-1",
+  "query": "What did #148 change about canonical keys, and what must an operator run?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "merge-guards",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "mg-03",
+    "grade": 2
+   },
+   {
+    "concept": "prf-03",
+    "grade": 1
+   }
+  ],
+  "facets": [
+   "keys no longer stem identifier tokens",
+   "provision re-keys once",
+   "already merged stay merged"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-mg-03-2",
+  "query": "Does the #148 re-key split concepts that were already merged?",
+  "kind": "answerable",
+  "family": "contrast",
+  "topic": "merge-guards",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "mg-03",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "keys no longer stem identifier tokens",
+   "provision re-keys once",
+   "already merged stay merged"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-cn-01-1",
+  "query": "What counts as support for canonizing a ruling?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "canonization",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "cn-01",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "dependents' distinct origin interactions",
+   "own origin excluded",
+   "one interaction counts once"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-cn-01-2",
+  "query": "Do several dependents from one interaction count as separate support?",
+  "kind": "answerable",
+  "family": "contrast",
+  "topic": "canonization",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "cn-01",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "dependents' distinct origin interactions",
+   "own origin excluded",
+   "one interaction counts once"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-cn-02-1",
+  "query": "How do agents cite a ruling?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "canonization",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "cn-02",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "depends_on by id",
+   "dry-run on a backup"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-cn-02-2",
+  "query": "lambo canon dry-run",
+  "kind": "answerable",
+  "family": "exact-identifier",
+  "topic": "canonization",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "cn-02",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "depends_on by id",
+   "dry-run on a backup"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-fnd-01-1",
+  "query": "Did agents use lambo when only AGENTS.md told them to?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "dogfood-findings",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "fnd-01",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "zero lambo calls",
+   "compliance came from the prompt"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-fnd-01-2",
+  "query": "Where did lambo-protocol compliance come from in the early dogfood runs?",
+  "kind": "answerable",
+  "family": "rationale",
+  "topic": "dogfood-findings",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "fnd-01",
+    "grade": 2
+   },
+   {
+    "concept": "top-04",
+    "grade": 1
+   },
+   {
+    "concept": "top-05",
+    "grade": 1
+   }
+  ],
+  "facets": [
+   "zero lambo calls",
+   "compliance came from the prompt"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-fnd-02-1",
+  "query": "What dedup rate did the early dogfood ledger show?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "dogfood-findings",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "fnd-02",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "0.077",
+   "j1-reviewer-r1 0.333"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-fnd-02-2",
+  "query": "dedup_rate.py",
+  "kind": "answerable",
+  "family": "exact-identifier",
+  "topic": "dogfood-findings",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "fnd-02",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "0.077",
+   "j1-reviewer-r1 0.333"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-fnd-03-1",
+  "query": "What is the recall-twice protocol and why does it exist?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "dogfood-findings",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "fnd-03",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "topic recall before code",
+   "targeted recall on real names after"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-fnd-03-2",
+  "query": "Why was the J0 arithmetic-deviation concept hard to find?",
+  "kind": "answerable",
+  "family": "vocabulary-mismatch",
+  "topic": "dogfood-findings",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "fnd-03",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "topic recall before code",
+   "targeted recall on real names after"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-fnd-04-1",
+  "query": "Why could the swarm canonization policy not be tested before the J1 re-pin?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "dogfood-findings",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "fnd-04",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "all attributed to claude-orchestrator",
+   "convergence impossible"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-fnd-04-2",
+  "query": "Which agent were all subagent writes attributed to before J1?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "dogfood-findings",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "fnd-04",
+    "grade": 2
+   },
+   {
+    "concept": "srv-02",
+    "grade": 1
+   }
+  ],
+  "facets": [
+   "all attributed to claude-orchestrator",
+   "convergence impossible"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-fnd-05-1",
+  "query": "What was the 2026-08-27 canonization fair test?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "dogfood-findings",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "fnd-05",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "four invariants promote",
+   "~96 do not",
+   "either direction failing is a finding"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-fnd-05-2",
+  "query": "Why can the fair test not just ask whether anything promotes?",
+  "kind": "answerable",
+  "family": "rationale",
+  "topic": "dogfood-findings",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "fnd-05",
+    "grade": 2
+   },
+   {
+    "concept": "fnd-06",
+    "grade": 1
+   }
+  ],
+  "facets": [
+   "four invariants promote",
+   "~96 do not",
+   "either direction failing is a finding"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-fnd-06-1",
+  "query": "What are the four canon-shaped invariants in the dogfood store?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "dogfood-findings",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "fnd-06",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "proxy moves the call not the write",
+   "never acquire a lease you cannot serve",
+   "async ack only if the result does not gate the next action"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-fnd-06-2",
+  "query": "What is the wedge invariant?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "dogfood-findings",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "fnd-06",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "proxy moves the call not the write",
+   "never acquire a lease you cannot serve",
+   "async ack only if the result does not gate the next action"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-fnd-06-3",
+  "query": "When may a write be acknowledged asynchronously?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "dogfood-findings",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "ack-04",
+    "grade": 1
+   },
+   {
+    "concept": "fnd-06",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "proxy moves the call not the write",
+   "never acquire a lease you cannot serve",
+   "async ack only if the result does not gate the next action"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-fnd-07-1",
+  "query": "Why did the blast-radius warning never fire on the dogfood store?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "dogfood-findings",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "fnd-07",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "concepts nobody linked",
+   "almost no parent_of pairs",
+   "write surface favours islands"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-fnd-07-2",
+  "query": "Do lambo's write tools encourage declaring what a constraint supports?",
+  "kind": "answerable",
+  "family": "contrast",
+  "topic": "dogfood-findings",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "fnd-07",
+    "grade": 2
+   },
+   {
+    "concept": "g3-01",
+    "grade": 1
+   }
+  ],
+  "facets": [
+   "concepts nobody linked",
+   "almost no parent_of pairs",
+   "write surface favours islands"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-fnd-08-1",
+  "query": "Why did cursor-agent and opencode end up with different lambo endpoints?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "dogfood-findings",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "fnd-08",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "cursor-agent scrubs TMPDIR",
+   "opencode passes it",
+   "two endpoint directories"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-fnd-08-2",
+  "query": "TMPDIR",
+  "kind": "answerable",
+  "family": "exact-identifier",
+  "topic": "dogfood-findings",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "fnd-08",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "cursor-agent scrubs TMPDIR",
+   "opencode passes it",
+   "two endpoint directories"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-fnd-08-3",
+  "query": "What did the two-product live probe find about endpoint derivation?",
+  "kind": "answerable",
+  "family": "vocabulary-mismatch",
+  "topic": "dogfood-findings",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "fnd-08",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "cursor-agent scrubs TMPDIR",
+   "opencode passes it",
+   "two endpoint directories"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-fnd-09-1",
+  "query": "Why did opencode report lambo as unavailable while the serve was waiting for the lease?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "dogfood-findings",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "fnd-09",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "50 s lease-lapse wait",
+   "~32 s startup tolerance"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-fnd-09-2",
+  "query": "How long does opencode wait for an MCP server to start?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "dogfood-findings",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "fnd-09",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "50 s lease-lapse wait",
+   "~32 s startup tolerance"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-fnd-10-1",
+  "query": "What happened to a client when the lease holder was killed mid-call before the J2 fix?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "dogfood-findings",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "fnd-10",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "detected in 18 ms",
+   "client hung 121.7 s"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-fnd-10-2",
+  "query": "MCP error -32001",
+  "kind": "answerable",
+  "family": "exact-identifier",
+  "topic": "dogfood-findings",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "fnd-10",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "detected in 18 ms",
+   "client hung 121.7 s"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-fnd-11-1",
+  "query": "Why are cursor-agent's lambo tool calls silently rejected?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "dogfood-findings",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "fnd-11",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "--trust and --force"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-g3-01-1",
+  "query": "Why do derived decisions end up disconnected in the lambo graph?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "g3-graph",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "g3-01",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "386 concepts, 41 components",
+   "37% of Logic, 30% of Observation",
+   "derive writes only CoOccurrence cliques"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-g3-01-2",
+  "query": "How many components did the dogfood graph have in the G3 spike?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "g3-graph",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "g3-01",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "386 concepts, 41 components",
+   "37% of Logic, 30% of Observation",
+   "derive writes only CoOccurrence cliques"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-g3-01-3",
+  "query": "Is the islands problem a graph-algorithm problem?",
+  "kind": "answerable",
+  "family": "contrast",
+  "topic": "g3-graph",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "g3-01",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "386 concepts, 41 components",
+   "37% of Logic, 30% of Observation",
+   "derive writes only CoOccurrence cliques"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-g3-02-1",
+  "query": "Does recall's graph expansion follow in-edges?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "g3-graph",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "g3-02",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "out-edge only",
+   "248/386 expand to nothing",
+   "symmetrizing 2-4x"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-g3-02-2",
+  "query": "How many single seeds expanded to nothing in G3?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "g3-graph",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "g3-01",
+    "grade": 1
+   },
+   {
+    "concept": "g3-02",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "out-edge only",
+   "248/386 expand to nothing",
+   "symmetrizing 2-4x"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-g3-03-1",
+  "query": "Why did the J3-implementation concept not trigger a blast-radius warning?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "g3-graph",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "g3-03",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "exclusivity filter",
+   "13 dependents, blast_radius 4"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-g3-03-2",
+  "query": "What does the blast-radius exclusivity filter exclude?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "g3-graph",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "g3-03",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "exclusivity filter",
+   "13 dependents, blast_radius 4"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-eff-01-1",
+  "query": "How did Lambo recall compare with file memory on the lambo project in the 2026-09-07 comparison?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "efficacy",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "eff-01",
+    "grade": 2
+   },
+   {
+    "concept": "eff-07",
+    "grade": 1
+   }
+  ],
+  "facets": [
+   "file 8/12",
+   "Lambo 2/12"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-eff-01-2",
+  "query": "What did the Lambo arm score in the lambo-project memory comparison?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "efficacy",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "eff-01",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "file 8/12",
+   "Lambo 2/12"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-eff-02-1",
+  "query": "Why did Lambo lose the packaging and brand questions in the vimanam run?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "efficacy",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "eff-02",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "file 10/12, Lambo 8/12",
+   "each won what only it had ingested"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-eff-02-2",
+  "query": "What did each arm score in the vimanam run?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "efficacy",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "eff-01",
+    "grade": 1
+   },
+   {
+    "concept": "eff-02",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "file 10/12, Lambo 8/12",
+   "each won what only it had ingested"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-eff-03-1",
+  "query": "What was retrieval coverage by depth in the 2026-09-07 efficacy readout?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "efficacy",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "eff-03",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "covered@1 2",
+   "@20 6",
+   "context held 2-3 hits"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-eff-03-2",
+  "query": "Why did readers effectively see only four of seven answers?",
+  "kind": "answerable",
+  "family": "multi-hop",
+  "topic": "efficacy",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "eff-03",
+    "grade": 2
+   },
+   {
+    "concept": "eff-04",
+    "grade": 1
+   }
+  ],
+  "facets": [
+   "covered@1 2",
+   "@20 6",
+   "context held 2-3 hits"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-eff-04-1",
+  "query": "Did the reader hallucinate when Lambo's context lacked the answer?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "efficacy",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "eff-04",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "6 of 8 covered",
+   "0 of 6 uncovered",
+   "0 of 48 invented"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-eff-04-2",
+  "query": "How accurate were readers when the recall context covered the rubric?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "efficacy",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "eff-04",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "6 of 8 covered",
+   "0 of 6 uncovered",
+   "0 of 48 invented"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-eff-05-1",
+  "query": "How often did Lambo-arm answers present superseded facts as current?",
+  "kind": "answerable",
+  "family": "superseded",
+  "topic": "efficacy",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "con-01",
+    "grade": 1
+   },
+   {
+    "concept": "eff-05",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "2 of 12 superseded",
+   "embedder question",
+   "file arm 0"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-eff-05-2",
+  "query": "Which question came back stale in the Lambo arm?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "efficacy",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "cnd-06",
+    "grade": 1
+   },
+   {
+    "concept": "eff-05",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "2 of 12 superseded",
+   "embedder question",
+   "file arm 0"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-eff-06-1",
+  "query": "How many evidence tokens per correct answer did Lambo use compared with file memory?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "efficacy",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "eff-06",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "2,467 vs 477",
+   "4,542 vs 2,058"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-eff-07-1",
+  "query": "Was the 2026-09-07 comparison budget-matched between the arms?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "efficacy",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "eff-07",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "file arm whole directory",
+   "Lambo 1,154-1,533 bytes"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-eff-07-2",
+  "query": "How many bytes of context did the Lambo arm get?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "efficacy",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "eff-07",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "file arm whole directory",
+   "Lambo 1,154-1,533 bytes"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-gcp-01-1",
+  "query": "Do I still need to export GOOGLE_APPLICATION_CREDENTIALS after gcloud login?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "credentials",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "gcp-01",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "neither variable set",
+   "application_default_credentials.json",
+   "CLOUDSDK_CONFIG"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-gcp-01-2",
+  "query": "Where does lambo look for gcloud application-default credentials?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "credentials",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "gcp-01",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "neither variable set",
+   "application_default_credentials.json",
+   "CLOUDSDK_CONFIG"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-gcp-01-3",
+  "query": "GCP_LAMBO_CREDENTIALS",
+  "kind": "answerable",
+  "family": "exact-identifier",
+  "topic": "credentials",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "gcp-01",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "neither variable set",
+   "application_default_credentials.json",
+   "CLOUDSDK_CONFIG"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-gcp-02-1",
+  "query": "How should a hermetic test harness handle gcloud credentials?",
+  "kind": "answerable",
+  "family": "fact-lookup",
+  "topic": "credentials",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "gcp-02",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "RESOLVE_ENV_VARS",
+   "point it at an empty directory"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-001",
+  "query": "What was the embedding coverage of the dogfood store on 2026-09-15?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "embedding-coverage",
+  "split": "held_out",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-002",
+  "query": "Which agent wrote the most unembedded concepts in the dogfood store?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "embedding-coverage",
+  "split": "dev",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-003",
+  "query": "How long did lambo re-embed take to backfill the 42 dogfood concepts?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "embedding-coverage",
+  "split": "dev",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-004",
+  "query": "Did the dogfood store lose any concepts during the re-embed backfill?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "embedding-coverage",
+  "split": "held_out",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-005",
+  "query": "What is the candle BGE-M3 throughput on CUDA in embeddings per second?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "candle",
+  "split": "dev",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-006",
+  "query": "Does the candle adapter use BGE-M3's sparse or ColBERT outputs?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "candle",
+  "split": "dev",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-007",
+  "query": "Which candle crate version does lambo pin?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "candle",
+  "split": "dev",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-008",
+  "query": "Which twenty phrases make up the embedder canary?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "canary",
+  "split": "held_out",
+  "relevant": [],
+  "facets": [],
+  "source": "the phrases live in source, not in this corpus",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-009",
+  "query": "How often has the canary caught a real drift on the dogfood store?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "canary",
+  "split": "held_out",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-010",
+  "query": "What related-pairs threshold has been derived for EmbeddingGemma 2?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "canary",
+  "split": "held_out",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-011",
+  "query": "What is the measured p99 of related-but-distinct pairs on the dogfood store?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "calibration",
+  "split": "dev",
+  "relevant": [],
+  "facets": [],
+  "source": "this is what #190 has to produce",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-012",
+  "query": "How was the Gemini embedder calibrated against BGE-M3?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "calibration",
+  "split": "dev",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-013",
+  "query": "How many paraphrase pairs did G1 measure under EmbeddingGemma 2?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "calibration",
+  "split": "held_out",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-014",
+  "query": "What port does the dogfood writer use on the Linux rig?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "dogfood-topology",
+  "split": "held_out",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-015",
+  "query": "How many agents connect to the dogfood writer at peak?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "dogfood-topology",
+  "split": "held_out",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-016",
+  "query": "What is the monthly cost of the lambo-pg Cloud SQL instance used for the hosted Postgres workstream?",
+  "kind": "no_answer",
+  "family": "efficacy",
+  "topic": "dogfood-topology",
+  "split": "dev",
+  "relevant": [],
+  "facets": [],
+  "source": "efficacy question missing-cloud-cost (2026-09-07): absent by design",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-017",
+  "query": "Which launchd KeepAlive settings does the dogfood unit use?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "dogfood-topology",
+  "split": "dev",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-018",
+  "query": "What is the maximum number of clients a proxying serve accepts?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "multi-client",
+  "split": "dev",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-019",
+  "query": "How does lambo elect a new writer across two machines?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "multi-client",
+  "split": "dev",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-020",
+  "query": "Which J-series review found the lease clock-skew bug?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "multi-client",
+  "split": "held_out",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-021",
+  "query": "What is the p99 lambo_derive ack latency on Postgres after J3?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "async-ack",
+  "split": "dev",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-022",
+  "query": "How many durable intents were lost in the dogfood store in September?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "async-ack",
+  "split": "held_out",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-023",
+  "query": "How many adversarial review rounds did workstream C take?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "process",
+  "split": "dev",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-024",
+  "query": "Who owns workstream E, and what does it deliver?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "process",
+  "split": "dev",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-025",
+  "query": "How many P1 findings did the full-stack sweep review find?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "process",
+  "split": "dev",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-026",
+  "query": "What is lambo's recall p50 on a 100,000-concept Postgres store?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "performance",
+  "split": "held_out",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-027",
+  "query": "How much memory does a 9,500-concept SQLite session use?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "performance",
+  "split": "held_out",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-028",
+  "query": "What is the write throughput of lambo on CockroachDB with 32 agents?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "performance",
+  "split": "held_out",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-029",
+  "query": "When is lambo 0.8.0 planned for release?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "releases",
+  "split": "dev",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-030",
+  "query": "Which Linux distributions ship lambo packages?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "releases",
+  "split": "dev",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-031",
+  "query": "Does lambo publish a Docker image, and under which registry?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "releases",
+  "split": "dev",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-032",
+  "query": "How many downloads has lambo had on crates.io?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "releases",
+  "split": "dev",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-033",
+  "query": "How many sessions does the dogfood serve hold?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "sessions",
+  "split": "dev",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-034",
+  "query": "Can a shared layer itself be layered over another shared layer?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "sessions",
+  "split": "dev",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-035",
+  "query": "How many live contradictions does the dogfood store hold?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "contradictions",
+  "split": "held_out",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-036",
+  "query": "Can an agent retract an against it recorded by mistake?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "contradictions",
+  "split": "dev",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-037",
+  "query": "Does lambo notify a human when a Canonical concept is contradicted?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "contradictions",
+  "split": "dev",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-038",
+  "query": "How many merges did #193's guards refuse on the dogfood store?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "merge-guards",
+  "split": "dev",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-039",
+  "query": "Which identifier tokenizer does alias-preview use for Chinese text?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "merge-guards",
+  "split": "dev",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-040",
+  "query": "How many Canonical concepts does the dogfood store have?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "canonization",
+  "split": "dev",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-041",
+  "query": "What is the Venerable promotion threshold in support count?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "canonization",
+  "split": "held_out",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-042",
+  "query": "What did the 2026-08-27 fair test find?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "dogfood-findings",
+  "split": "held_out",
+  "relevant": [],
+  "facets": [],
+  "source": "the outcome is not in this corpus",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-043",
+  "query": "Which client products other than cursor-agent and opencode were probed against J2?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "dogfood-findings",
+  "split": "dev",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-044",
+  "query": "How many dogfood sessions ran between 2026-08-20 and 2026-08-27?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "dogfood-findings",
+  "split": "dev",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-045",
+  "query": "What dedup rate did the dogfood ledger show in September?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "dogfood-findings",
+  "split": "held_out",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-046",
+  "query": "Did lambo adopt symmetric phase-2 expansion after G3?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "g3-graph",
+  "split": "dev",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-047",
+  "query": "How many components did the dogfood graph have on 2026-09-07?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "g3-graph",
+  "split": "dev",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-048",
+  "query": "What is the average degree of a Logic concept in the dogfood graph?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "g3-graph",
+  "split": "dev",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-049",
+  "query": "Under which GitHub organization does vimanam ship its distribution, and why was the personal handle not used?",
+  "kind": "no_answer",
+  "family": "efficacy",
+  "topic": "efficacy",
+  "split": "held_out",
+  "relevant": [],
+  "facets": [],
+  "source": "efficacy question brand-org (vimanam run); the vimanam project is outside this corpus",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-050",
+  "query": "Why did CI fail on vimanam pull requests #91 and #92 on 2026-09-04, and what was done about it?",
+  "kind": "no_answer",
+  "family": "efficacy",
+  "topic": "efficacy",
+  "split": "held_out",
+  "relevant": [],
+  "facets": [],
+  "source": "efficacy question ci-clippy-failure (vimanam run)",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-051",
+  "query": "How does vimanam's diff subcommand (#45) compare two spec versions, and which design option was chosen?",
+  "kind": "no_answer",
+  "family": "efficacy",
+  "topic": "efficacy",
+  "split": "dev",
+  "relevant": [],
+  "facets": [],
+  "source": "efficacy question diff-design (vimanam run)",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-052",
+  "query": "How are pull requests merged into vimanam's main branch, and why is that path used?",
+  "kind": "no_answer",
+  "family": "efficacy",
+  "topic": "efficacy",
+  "split": "dev",
+  "relevant": [],
+  "facets": [],
+  "source": "efficacy question merge-workflow (vimanam run)",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-053",
+  "query": "How many downloads has vimanam had to date on crates.io and through its Homebrew tap?",
+  "kind": "no_answer",
+  "family": "efficacy",
+  "topic": "efficacy",
+  "split": "held_out",
+  "relevant": [],
+  "facets": [],
+  "source": "efficacy question missing-downloads (vimanam run): absent by design",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-054",
+  "query": "Which release-automation tool did vimanam adopt to resolve issue #32, and which alternative was rejected?",
+  "kind": "no_answer",
+  "family": "efficacy",
+  "topic": "efficacy",
+  "split": "dev",
+  "relevant": [],
+  "facets": [],
+  "source": "efficacy question packaging-decision (vimanam run)",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-055",
+  "query": "What did the matched-corpus control run of the memory comparison show?",
+  "kind": "no_answer",
+  "family": "false-premise",
+  "topic": "efficacy",
+  "split": "dev",
+  "relevant": [],
+  "facets": [],
+  "source": "the control was not run",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-056",
+  "query": "What was the inter-grader agreement between the Opus grader and a human?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "efficacy",
+  "split": "dev",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-057",
+  "query": "How did Lambo score against file memory with a GPT reader?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "efficacy",
+  "split": "dev",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-058",
+  "query": "Does lambo support AWS IAM authentication for RDS Postgres?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "credentials",
+  "split": "held_out",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-059",
+  "query": "How does lambo rotate Cloud SQL IAM tokens?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "credentials",
+  "split": "dev",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-060",
+  "query": "Which Gemini embedding model and dimension does lambo default to?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "credentials",
+  "split": "dev",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-061",
+  "query": "What is lambo's license?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "near-domain",
+  "split": "held_out",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-062",
+  "query": "Which Rust edition and minimum supported Rust version does lambo require?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "near-domain",
+  "split": "dev",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-063",
+  "query": "How does lambo shard a session across several Postgres databases?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "near-domain",
+  "split": "dev",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-064",
+  "query": "What is the recommended pgvector HNSW ef_search for lambo?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "near-domain",
+  "split": "held_out",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-065",
+  "query": "How do I export a lambo session to Neo4j?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "near-domain",
+  "split": "held_out",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-066",
+  "query": "Which MCP protocol version does lambo serve negotiate by default?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "near-domain",
+  "split": "dev",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-067",
+  "query": "How many concepts can a single lambo session hold before recall degrades?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "near-domain",
+  "split": "held_out",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-068",
+  "query": "What is the default top_k for lambo_recall?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "near-domain",
+  "split": "dev",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-069",
+  "query": "Does lambo encrypt the SQLite store at rest?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "near-domain",
+  "split": "dev",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-070",
+  "query": "How are lambo credentials stored on Windows?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "near-domain",
+  "split": "dev",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-071",
+  "query": "What is the retention period for ledger heartbeats?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "near-domain",
+  "split": "dev",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-072",
+  "query": "How does lambo handle daylight-saving changes in the event-time clock?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "near-domain",
+  "split": "dev",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-073",
+  "query": "Which embedding model did the G3 spike use for its diffusion experiments?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "near-domain",
+  "split": "dev",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-074",
+  "query": "How often does the daemon tick by default?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "near-domain",
+  "split": "dev",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-075",
+  "query": "What is the GC age threshold for an unreferenced Observation concept?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "near-domain",
+  "split": "dev",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-076",
+  "query": "Which Cockroach version does the live CI job run against?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "near-domain",
+  "split": "dev",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-077",
+  "query": "How do I migrate a lambo store from SQLite to CockroachDB?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "near-domain",
+  "split": "dev",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-078",
+  "query": "What does lambo_stats report as the p99 recall latency?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "near-domain",
+  "split": "dev",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-079",
+  "query": "How many tools does the lambo MCP server expose?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "near-domain",
+  "split": "dev",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-080",
+  "query": "Which agent harness has the highest recall-first compliance on the dogfood rig in October?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "near-domain",
+  "split": "dev",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-081",
+  "query": "What did the K1 NVIDIA leg measure for candle throughput on an RTX GPU?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "near-domain",
+  "split": "held_out",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-082",
+  "query": "How much did the hosted Postgres workstream cost in August?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "near-domain",
+  "split": "dev",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-083",
+  "query": "When was workstream D's event-time clock merged?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "near-domain",
+  "split": "dev",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-084",
+  "query": "Which reviewer found the most P1 findings across the J series?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "near-domain",
+  "split": "dev",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-085",
+  "query": "What is the default hot_list_max?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "near-domain",
+  "split": "dev",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-086",
+  "query": "Does lambo support BM25F field weighting in keyword recall?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "near-domain",
+  "split": "dev",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-087",
+  "query": "Which languages does lambo's tokenizer stem?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "near-domain",
+  "split": "dev",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-088",
+  "query": "What was the dogfood store's concept count on 2026-10-01?",
+  "kind": "no_answer",
+  "family": "near-domain",
+  "topic": "near-domain",
+  "split": "dev",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-089",
+  "query": "Why did lambo drop SQLite support in 0.7.0?",
+  "kind": "no_answer",
+  "family": "false-premise",
+  "topic": "false-premise",
+  "split": "held_out",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-090",
+  "query": "Why does the embedder canary refuse attach by default?",
+  "kind": "no_answer",
+  "family": "false-premise",
+  "topic": "false-premise",
+  "split": "held_out",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-091",
+  "query": "When did lambo switch its default embedder to OpenAI text-embedding-3-large?",
+  "kind": "no_answer",
+  "family": "false-premise",
+  "topic": "false-premise",
+  "split": "dev",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-092",
+  "query": "Why was the semantic merge threshold raised to 0.95 in 0.6.0?",
+  "kind": "no_answer",
+  "family": "false-premise",
+  "topic": "false-premise",
+  "split": "dev",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-093",
+  "query": "How does lambo's Redis recall tier mirror flushes?",
+  "kind": "no_answer",
+  "family": "false-premise",
+  "topic": "false-premise",
+  "split": "dev",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-094",
+  "query": "Why does lambo_recall return at most three hits?",
+  "kind": "no_answer",
+  "family": "false-premise",
+  "topic": "false-premise",
+  "split": "dev",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-095",
+  "query": "Why did #193 allow merges across different version numbers?",
+  "kind": "no_answer",
+  "family": "false-premise",
+  "topic": "false-premise",
+  "split": "held_out",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-096",
+  "query": "How does the vimanam store share concepts with lambo's dogfood store over gRPC?",
+  "kind": "no_answer",
+  "family": "false-premise",
+  "topic": "false-premise",
+  "split": "dev",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-097",
+  "query": "Why does serve-web allow writes from credentialed tokens?",
+  "kind": "no_answer",
+  "family": "false-premise",
+  "topic": "false-premise",
+  "split": "dev",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-098",
+  "query": "Which release removed the related_pairs option?",
+  "kind": "no_answer",
+  "family": "false-premise",
+  "topic": "false-premise",
+  "split": "dev",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-099",
+  "query": "Why does GC collect corrections before the facts they correct?",
+  "kind": "no_answer",
+  "family": "false-premise",
+  "topic": "false-premise",
+  "split": "held_out",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-100",
+  "query": "How does lambo's built-in LLM summarize sessions overnight?",
+  "kind": "no_answer",
+  "family": "false-premise",
+  "topic": "false-premise",
+  "split": "dev",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-101",
+  "query": "What is the capital of Australia?",
+  "kind": "no_answer",
+  "family": "off-domain",
+  "topic": "off-domain",
+  "split": "held_out",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-102",
+  "query": "How do I make sourdough starter from scratch?",
+  "kind": "no_answer",
+  "family": "off-domain",
+  "topic": "off-domain",
+  "split": "dev",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-103",
+  "query": "What were the main causes of the 2008 financial crisis?",
+  "kind": "no_answer",
+  "family": "off-domain",
+  "topic": "off-domain",
+  "split": "held_out",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-104",
+  "query": "How many moons does Neptune have?",
+  "kind": "no_answer",
+  "family": "off-domain",
+  "topic": "off-domain",
+  "split": "dev",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-105",
+  "query": "What is the best way to learn Carnatic music as an adult?",
+  "kind": "no_answer",
+  "family": "off-domain",
+  "topic": "off-domain",
+  "split": "dev",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "na-106",
+  "query": "How do I change a bicycle inner tube?",
+  "kind": "no_answer",
+  "family": "off-domain",
+  "topic": "off-domain",
+  "split": "dev",
+  "relevant": [],
+  "facets": [],
+  "source": "hand-written; no concept in the corpus answers it",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-23"
+ }
+]
