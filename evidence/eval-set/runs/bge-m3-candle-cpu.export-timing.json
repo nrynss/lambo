@@ -1,0 +1,32 @@
+{
+  "embedder": {
+    "config": {
+      "device": "cpu",
+      "dim": 1024,
+      "llama_model": null,
+      "repo": null,
+      "revision": null,
+      "weights_file": null
+    },
+    "dimensions": 1024,
+    "identity": "BAAI/bge-m3@5617a9f61b028005a4858fdac845db406aefb181 model.safetensors sha256:68440cc1b73b",
+    "kind": "Candle"
+  },
+  "related_pairs_export": {
+    "canary_embed_timeout_secs": 60,
+    "canary_random_pair_floor": {
+      "max": 0.5313349198346196,
+      "p50": 0.37382893453545585,
+      "p90": 0.4574095607682704,
+      "p99": 0.5235569100344382
+    },
+    "embed_secs": 59.3,
+    "max": 0.9932901532606944,
+    "p50": 0.8365426037960173,
+    "p90": 0.9719620326320275,
+    "p99": 0.989214895987068,
+    "pairs": 170,
+    "prepare_secs": 4.6,
+    "would_apply": true
+  }
+}

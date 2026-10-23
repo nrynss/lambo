@@ -102,6 +102,24 @@ fn summary(mut v: Vec<f64>) -> Value {
     })
 }
 
+/// How a merge threshold at the related-but-distinct p99 (#87) and at the
+/// default 0.85 would treat the paraphrases and the related-distinct pairs.
+fn separation(rbd: &[f64], para: &[f64]) -> Value {
+    if rbd.is_empty() {
+        return Value::Null;
+    }
+    let mut sorted = rbd.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    let p99 = quantile(&sorted, 0.99);
+    json!({
+        "related_distinct": rbd.len(),
+        "rbd_p99": (p99 * 10_000.0).round() / 10_000.0,
+        "paraphrase_above_rbd_p99": fraction(para.iter().filter(|c| **c > p99).count(), para.len()),
+        "rbd_at_or_above_0.85": fraction(rbd.iter().filter(|c| **c >= 0.85).count(), rbd.len()),
+        "paraphrase_at_or_above_0.85": fraction(para.iter().filter(|c| **c >= 0.85).count(), para.len()),
+    })
+}
+
 fn fraction(num: usize, den: usize) -> Value {
     if den == 0 {
         Value::Null
@@ -441,19 +459,33 @@ async fn run() -> Result<(), String> {
                 .or_default()
                 .push(c);
         }
+        let para = by_label.get("paraphrase").cloned().unwrap_or_default();
         let rbd = by_label
             .get("related_distinct")
             .cloned()
             .unwrap_or_default();
-        let para = by_label.get("paraphrase").cloned().unwrap_or_default();
-        let mut sorted_rbd = rbd.clone();
-        sorted_rbd.sort_by(f64::total_cmp);
-        let rbd_p99 = quantile(&sorted_rbd, 0.99);
+        // The identifier family is what #193's guard refuses to merge before
+        // any threshold applies, so the rest is reported on its own too.
+        let rbd_other: Vec<f64> = by_family
+            .iter()
+            .filter(|(k, _)| {
+                k.starts_with("related_distinct/") && *k != "related_distinct/identifier"
+            })
+            .flat_map(|(_, v)| v.iter().copied())
+            .collect();
+        let at_085: BTreeMap<&String, Value> = by_family
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k,
+                    fraction(v.iter().filter(|c| **c >= 0.85).count(), v.len()),
+                )
+            })
+            .collect();
         let sep = json!({
-            "rbd_p99": (rbd_p99 * 10_000.0).round() / 10_000.0,
-            "paraphrase_above_rbd_p99": fraction(para.iter().filter(|c| **c > rbd_p99).count(), para.len()),
-            "rbd_at_or_above_0.85": fraction(rbd.iter().filter(|c| **c >= 0.85).count(), rbd.len()),
-            "paraphrase_at_or_above_0.85": fraction(para.iter().filter(|c| **c >= 0.85).count(), para.len()),
+            "all_related_distinct": separation(&rbd, &para),
+            "related_distinct_without_identifier": separation(&rbd_other, &para),
+            "at_or_above_0.85_by_family": at_085,
         });
         pairs_out.insert(
             f,

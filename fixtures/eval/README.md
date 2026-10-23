@@ -203,6 +203,13 @@ enforces the guard above on every file here.
 - Contrast partners are short single-claim edits of their anchor, which is
   close to the hardest case for an embedder; real related-but-distinct pairs
   in a store differ more.
+- Relevance was first labelled from the text alone, then pooled once
+  against BGE-M3 (candle, CPU): for each answerable query whose top-1 was
+  not a grade-2 concept, the top three were read, and 13 queries gained a
+  concept that does answer or support them (two corpus concepts record the
+  same review event twice). Labels were added only where the text answers;
+  none was removed to suit the ranking. That pooling favours BGE-M3 slightly
+  when another embedder is compared against it.
 - The topics are the lambo project only; the corpus holds no other project's
   text, so cross-project confusions (the shared-layer case) are not covered.
 - 106 no-answer queries are all hand-written or efficacy-derived; none comes

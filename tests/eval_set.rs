@@ -169,6 +169,15 @@ fn nothing_private_or_secret() {
     let mut found = Vec::new();
     let mut all = Vec::new();
     files(&dir(), &mut all);
+    // The committed measurement runs quote the embedder's identity.
+    files(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("evidence/eval-set"),
+        &mut all,
+    );
+    assert!(
+        all.len() > 4,
+        "the hygiene guard found too few files to scan"
+    );
     for path in all {
         let Ok(text) = std::fs::read_to_string(&path) else {
             continue;
