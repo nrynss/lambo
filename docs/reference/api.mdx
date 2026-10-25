@@ -294,7 +294,7 @@ on.
 
 `Config` holds the product settings: recall defaults, flush timing, canonization thresholds, and scoring weights. Pass it to the builder with `.config(...)`.
 
-These are library settings you pass in Rust when you build a `Memory`. Six of them can also come from the process file. `promotion_policy` is a top-level `lambo.toml` key with a `LAMBO_PROMOTION_POLICY` override, so a `lambo serve` process can select a policy without a code change; `canonization_supersede` is a top-level boolean; `[daemon]` carries the cadence settings: `canonization_eval_interval` (spelled `canonization_eval_interval_secs` there), `gc_interval`, and GC's time bound, `gc_max_interval` (spelled `gc_max_interval_secs`) and `gc_idle_floor`. Everything else is code-only, and the file refuses it along with any key it does not know. No canonization *threshold* is settable from the file under either policy. See [Configuration](/config).
+These are library settings you pass in Rust when you build a `Memory`. Eight of them can also come from the process file. `promotion_policy` is a top-level `lambo.toml` key with a `LAMBO_PROMOTION_POLICY` override, so a `lambo serve` process can select a policy without a code change; `canonization_supersede` is a top-level boolean; `[daemon]` carries the cadence settings: `canonization_eval_interval` (spelled `canonization_eval_interval_secs` there), `gc_interval`, and GC's time bound, `gc_max_interval` (spelled `gc_max_interval_secs`) and `gc_idle_floor`; `[embedder]` carries `calibration` and `calibrated_merge_threshold` (#87). Everything else is code-only, and the file refuses it along with any key it does not know. No canonization *threshold* is settable from the file under either policy. See [Configuration](/config).
 
 ```rust
 let mem = Memory::builder()
@@ -313,6 +313,8 @@ let mem = Memory::builder()
 | `default_traversal_depth` | `2` | Graph expansion depth during recall. |
 | `match_strategy` | `Hybrid` | `Canonical` or `Hybrid` — selects the recall matching scope, whether a derive embeds, **and** the call-time validation rule set (see `MatchStrategy` in the source authority). J3-R2R-7: `Canonical` adds `reject_repeated_observation` and the single-`Hierarchical`-parent rule. |
 | `semantic_match_threshold` | `0.85` | Similarity above which two concepts match. Must be between `0` and `1`. |
+| `calibration` | `Builtin` | Whether recall uses the built-in per-contract recent-leg score (#87): `Builtin` or `Off`. Set from `[embedder] calibration`. |
+| `calibrated_merge_threshold` | `false` | Whether a writer attach replaces `semantic_match_threshold` with its embedding contract's measured threshold (#87). Set from `[embedder] calibrated_merge_threshold`. |
 | `backend_flush_interval` | 1 second | How often pending writes flush, which sets how far behind durable storage a session can be. |
 | `backend_flush_max_batch` | `500` | Mutations per flush batch. |
 | `backend_flush_retries` | `3` | Attempts before a batch is dead-lettered. |
