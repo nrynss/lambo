@@ -34,8 +34,9 @@
 //! Vector scores themselves are **not** rescaled. A `(cos − floor) / (1 −
 //! floor)` map would move every reported cosine, the layer floors, the dedupe
 //! and the BGE-M3 goldens; moving the few constants that compete with a cosine
-//! keeps BGE-M3 exact and changes nothing a caller reads. Fusing BM25 with
-//! cosine on one scale is #173's (rank fusion), not this.
+//! keeps BGE-M3 exact and leaves every reported cosine as it was (the recent
+//! leg's own score, in a recall's leg detail, is the one value that moves).
+//! Fusing BM25 with cosine on one scale is #173's (rank fusion), not this.
 //!
 //! # What applies by default
 //!
@@ -45,7 +46,7 @@
 //!   It keeps BGE-M3's rank position: below every true hit on the set, and
 //!   above about half of all irrelevant concepts (none before). It does not
 //!   lift recency above the irrelevant hits a recall returns: BGE-M3's 0.35
-//!   never did either, and any value that would also outranks true hits
+//!   never did either, and any value that did would also outrank true hits
 //!   (the trade-off table in the evidence README).
 //! * **Merge threshold**: **off**. A built-in threshold applies only with
 //!   `[embedder] calibrated_merge_threshold = true`, so no existing store's
