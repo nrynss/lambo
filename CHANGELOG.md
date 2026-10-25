@@ -4,6 +4,24 @@
 
 ### Changed
 
+- **Behaviour change, EmbeddingGemma 2 only: the recent leg is calibrated
+  per embedding contract (#87).** The recent-interactions leg scored a flat
+  0.35, a value set on BGE-M3's cosine scale. Under EmbeddingGemma 2 (768
+  dims, `ggml-org/embeddinggemma-2-GGUF@bfcd2987/Q8_0`, prompt profile
+  `lambo-eg2-v2`) every irrelevant concept scores above that (median 0.63),
+  so every vector hit outranked recency. Under that contract the leg now
+  scores 0.63, the value with the same rank under EG2 that 0.35 has under
+  BGE-M3: below every true hit on the #190 evaluation set, and above about
+  half of all irrelevant concepts instead of none. It applies only when the
+  vector leg runs. BGE-M3 and every other contract are unchanged.
+  `[embedder] calibration = "off"` restores 0.35. Evidence and method:
+  `evidence/issue-87-calibration/`.
+- **`[embedder] calibrated_merge_threshold` (#87), off by default.** Under the
+  EG2 contract above, the default `semantic_match_threshold` 0.85 merges
+  about 78% of the set's related-but-distinct pairs (BGE-M3: 35–44%). Set
+  this to `true` to merge at 0.93 under that contract, which matches
+  BGE-M3's rate. While it is off, a writer attach under that contract logs a
+  warning. Merges do not change unless you opt in.
 - **Behaviour change: contradictions of ordinary memory now warn, and the
   correction is shown with the stale fact (#179).** Until now `against`
   only flagged a Canonical or Venerable concept ("contradicting ordinary

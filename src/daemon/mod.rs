@@ -174,6 +174,9 @@ pub struct Daemon {
     /// Completed cycles, for [`Daemon::cycles`] (XP-6).
     cycles: Arc<AtomicU64>,
     params: CycleParams,
+    /// #87: whether recall uses the per-contract recent-leg score
+    /// ([`crate::embed::calibration`]).
+    calibration: crate::embed::calibration::CalibrationMode,
     clock: Clock,
     started: AtomicBool,
     /// Test seam: the next this-many rescores panic (#79 review L1).
@@ -295,6 +298,7 @@ impl Daemon {
             accesses: None,
             cycles: Arc::new(AtomicU64::new(0)),
             params,
+            calibration: crate::embed::calibration::CalibrationMode::default(),
             clock: Arc::new(Utc::now),
             started: AtomicBool::new(false),
             #[cfg(test)]
@@ -306,12 +310,14 @@ impl Daemon {
     /// `daemon_tick_interval`, the rest from [`CycleParams::from`]. P8's entry
     /// point — nothing has to re-derive a default.
     pub fn from_config(graph: Arc<RwLock<Graph>>, config: &Config) -> Self {
-        Self::with_params(
+        let mut daemon = Self::with_params(
             graph,
             config.scoring,
             config.daemon_tick_interval,
             CycleParams::from(config),
-        )
+        );
+        daemon.calibration = config.calibration;
+        daemon
     }
 
     /// Use `clock` as the cycle's `now` source instead of the wall clock
@@ -701,11 +707,23 @@ impl Daemon {
         // the lock, appended to the result's response annotations below.
         let mut vector_leg_refused: Vec<Annotation> = Vec::new();
 
+        // #87: the recent leg's score is on the vector leg's scale, so it
+        // follows the contract that leg runs under. With no vector leg (no
+        // capability, no query embedding, or a failed read) the recent leg
+        // competes only with BM25 and keeps its BGE-M3 value.
+        let recent_score = if vectors.available() {
+            crate::embed::calibration::recent_score(self.calibration, embedding.map(|(_, c)| c))
+        } else {
+            candidates::RECENT_SCORE
+        };
         let input = if dispatch_ready {
             candidates::Phase1Input::default()
         } else {
             match candidates::gather_from(vectors, &graph_session, embedding, query.top_k).await {
-                Ok(input) => input,
+                Ok(input) => candidates::Phase1Input {
+                    recent_score,
+                    ..input
+                },
                 // #22 PR 6: a recall by image or vector has nothing to
                 // degrade to; its vector leg is the question.
                 Err(err) if route.vector_required() => {

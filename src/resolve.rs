@@ -283,6 +283,9 @@ fn process_config(
     // #22: a process setting the surfaces read through `Memory::config`, set
     // here so every session this process attaches carries the same value.
     config.accept_client_vectors = embedder_cfg.accept_client_vectors;
+    // #87: the per-contract calibration switches, for the same reason.
+    config.calibration = embedder_cfg.calibration;
+    config.calibrated_merge_threshold = embedder_cfg.calibrated_merge_threshold;
     config.validate()?;
     // Accepted-but-inert settings (issue #29: an idle floor that makes the
     // time trigger unreachable) are logged, not refused.

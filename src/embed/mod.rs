@@ -6,6 +6,7 @@
 //! `dev-diary/notes/level-b-pluggability.md`.
 
 pub mod api_key;
+pub mod calibration;
 pub mod canary;
 pub mod keep_warm;
 pub(crate) mod math;
@@ -719,6 +720,18 @@ pub struct EmbedderConfig {
     /// `semantic_match_threshold`. Needs `canary` on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub related_pairs: Option<std::path::PathBuf>,
+    /// #87: whether the built-in per-contract recall constants apply
+    /// ([`calibration`]). `builtin` (the default) gives a measured contract
+    /// its own recent-leg score; `off` keeps the BGE-M3 constants for every
+    /// contract. A contract without a measured row is unaffected either way.
+    #[serde(default)]
+    pub calibration: calibration::CalibrationMode,
+    /// #87: merge at the contract's measured threshold instead of
+    /// `semantic_match_threshold`. Off by default, so upgrading never changes
+    /// an existing store's merges. A usable `related_pairs` derivation still
+    /// takes precedence; a contract without a measured row is unaffected.
+    #[serde(default)]
+    pub calibrated_merge_threshold: bool,
 }
 
 impl Default for EmbedderConfig {
@@ -745,6 +758,8 @@ impl Default for EmbedderConfig {
             images: None,
             canary: canary::CanaryMode::Warn,
             related_pairs: None,
+            calibration: calibration::CalibrationMode::Builtin,
+            calibrated_merge_threshold: false,
         }
     }
 }

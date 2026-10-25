@@ -331,7 +331,12 @@ async fn run_on(
     };
     compatible.map_err(|e| CliError::Runtime(e.to_string()))?;
 
-    let cfg = Config::default();
+    let cfg = Config {
+        // #87: `[embedder] calibration` is a recall setting, so the one-shot
+        // reader honours it like a session does.
+        calibration: backends.config.calibration,
+        ..Config::default()
+    };
     let query = request.query.as_str();
     // Do NOT spawn: spawn would run GC, which is a writer. Config::default()
     // for knobs — same as `lambo serve` today (T82-12 is not T8.3's to fix).

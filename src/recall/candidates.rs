@@ -77,6 +77,10 @@ pub const RECENT_INTERACTIONS: usize = 3;
 /// `0.3991`; `0.35` keeps the recency leg useful without masking that ranking
 /// under max-merge. The exact value is not spec-pinned, only its rank position
 /// relative to real matches. See `evidence/mooshik-g-recall-calibration/`.
+///
+/// This is the BGE-M3 value. A recall whose vector leg runs under a contract
+/// with a measured row uses that contract's equivalent instead (#87,
+/// [`crate::embed::calibration`]).
 pub const RECENT_SCORE: f64 = 0.35;
 
 /// Phase-1 keyword over-fetch multiplier: the keyword leg is over-fetched so
@@ -100,7 +104,8 @@ pub(crate) const KEYWORD_OVERFETCH: usize = 4;
 pub struct LegScores {
     /// BM25 score from [`InvertedIndex::search`].
     pub keyword: Option<f64>,
-    /// The flat [`RECENT_SCORE`] floor, when this node belongs to one of the
+    /// The flat recent-leg score ([`RECENT_SCORE`], or the contract's
+    /// calibrated value, #87), when this node belongs to one of the
     /// [`RECENT_INTERACTIONS`] most recent interactions.
     pub recent: Option<f64>,
     /// Store-provided similarity (cosine, for every shipped vector store).
@@ -146,11 +151,24 @@ pub type LegProvenance = HashMap<NodeId, LegScores>;
 /// This is the only channel by which store I/O reaches phase 1: [`gather`]
 /// produces it before any graph lock is taken, and [`candidates`] consumes it
 /// under the lock without touching the store.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Phase1Input {
     /// Vector-leg candidates straight from the store (empty when the capability
     /// is absent or no query embedding was available).
     pub vector: Vec<Scored<NodeId>>,
+    /// The recent leg's flat score: [`RECENT_SCORE`] unless the recall's
+    /// vector leg runs under a contract with its own measured value (#87,
+    /// [`crate::embed::calibration::recent_score`]).
+    pub recent_score: f64,
+}
+
+impl Default for Phase1Input {
+    fn default() -> Self {
+        Self {
+            vector: Vec::new(),
+            recent_score: RECENT_SCORE,
+        }
+    }
 }
 
 /// Gather phase-1 store I/O BEFORE taking any graph lock.
@@ -203,7 +221,10 @@ pub(crate) async fn gather_from(
     let vector = vectors
         .checked(session, emb, expected_contract, limit)
         .await?;
-    Ok(Phase1Input { vector })
+    Ok(Phase1Input {
+        vector,
+        ..Phase1Input::default()
+    })
 }
 
 /// Recall's query embed, as its own step (#27, for #14).
@@ -278,7 +299,7 @@ pub fn candidates_with_legs(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RecentLeg {
     /// Members of the [`RECENT_INTERACTIONS`] most recent interactions join
-    /// at [`RECENT_SCORE`].
+    /// at [`Phase1Input::recent_score`].
     Run,
     /// No recent leg.
     Skip,
@@ -305,7 +326,7 @@ pub(crate) fn candidates_with_legs_as(
     }
     if recent == RecentLeg::Run {
         for id in recent_concepts(graph) {
-            legs.entry(id).or_default().recent = Some(RECENT_SCORE);
+            legs.entry(id).or_default().recent = Some(input.recent_score);
         }
     }
     for s in input.vector {
@@ -401,7 +422,7 @@ pub(crate) fn candidates_without_keyword_with_legs_as(
     let mut legs: LegProvenance = HashMap::new();
     if recent == RecentLeg::Run {
         for id in recent_concepts(graph) {
-            legs.entry(id).or_default().recent = Some(RECENT_SCORE);
+            legs.entry(id).or_default().recent = Some(input.recent_score);
         }
     }
     for s in input.vector {
@@ -839,6 +860,7 @@ mod tests {
             &index,
             Phase1Input {
                 vector: vec![Scored::new(target, 0.3991)],
+                ..Phase1Input::default()
             },
             "changes that do not break existing clients",
             3,
@@ -856,6 +878,28 @@ mod tests {
             RECENT_SCORE < out[0].score,
             "the calibrated recent floor must not mask the recorded true hit"
         );
+    }
+
+    /// #87: the recent leg scores at the input's `recent_score` on both
+    /// phase-1 paths, and a vector hit below it no longer surfaces over
+    /// recency (the calibrated value's purpose: an irrelevant EG2 hit at
+    /// 0.60 is not a true hit).
+    #[test]
+    fn recent_leg_uses_the_inputs_recent_score() {
+        let (graph, index) = planted_graph();
+        let target = NodeId(Uuid::from_u64_pair(2, 3));
+        let input = || Phase1Input {
+            vector: vec![Scored::new(target, 0.60)],
+            recent_score: 0.63,
+        };
+        let (out, legs) = candidates_with_legs(&graph, &index, input(), "zzz", 10);
+        let (bare, bare_legs) = candidates_without_keyword_with_legs(&graph, input());
+        for (out, legs) in [(&out, &legs), (&bare, &bare_legs)] {
+            assert_eq!(out.len(), 3);
+            assert!(out.iter().all(|s| s.score == 0.63), "{out:?}");
+            assert!(legs.values().all(|l| l.recent == Some(0.63)), "{legs:?}");
+            assert_eq!(legs[&target].vector, Some(0.60));
+        }
     }
 
     #[test]
@@ -952,6 +996,7 @@ mod tests {
             &index,
             Phase1Input {
                 vector: vec![Scored::new(c5, 0.8), Scored::new(c9, 0.7)],
+                ..Phase1Input::default()
             },
             "pagination",
             10,
@@ -961,6 +1006,7 @@ mod tests {
             &index,
             Phase1Input {
                 vector: vec![Scored::new(c9, 0.7), Scored::new(c5, 0.8)],
+                ..Phase1Input::default()
             },
             "pagination",
             10,
@@ -970,6 +1016,7 @@ mod tests {
             &index,
             Phase1Input {
                 vector: vec![Scored::new(c5, 0.8), Scored::new(c9, 0.7)],
+                ..Phase1Input::default()
             },
             "pagination",
             10,
@@ -1004,6 +1051,7 @@ mod tests {
                     Scored::new(c8, 0.9), // keyword hit too: max-merge keeps BM25
                     Scored::new(c5, 0.8), // vector-only member
                 ],
+                ..Phase1Input::default()
             },
             "pagination",
             10,
@@ -1184,6 +1232,7 @@ mod tests {
         let vector_only = NodeId(Uuid::from_u64_pair(9, 77));
         let input = Phase1Input {
             vector: vec![Scored::new(shared, 0.42), Scored::new(vector_only, 0.91)],
+            ..Phase1Input::default()
         };
 
         let (ranked, legs) = candidates_with_legs(&g, &index, input, "alpha", 5);
@@ -1194,6 +1243,7 @@ mod tests {
             &index,
             Phase1Input {
                 vector: vec![Scored::new(shared, 0.42), Scored::new(vector_only, 0.91)],
+                ..Phase1Input::default()
             },
             "alpha",
             5,
@@ -1251,6 +1301,7 @@ mod tests {
             &index,
             Phase1Input {
                 vector: vec![Scored::new(dup, 0.90), Scored::new(dup, 0.10)],
+                ..Phase1Input::default()
             },
             "zzzznomatch",
             5,
@@ -1310,6 +1361,7 @@ mod tests {
             &g,
             Phase1Input {
                 vector: vec![Scored::new(vector_only, 0.8)],
+                ..Phase1Input::default()
             },
         );
         assert_eq!(ranked.first().map(|s| s.item), Some(vector_only));

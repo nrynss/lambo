@@ -385,6 +385,12 @@ async fn run() -> Result<(), String> {
         .map_err(|e| format!("preparing the embedder: {e}"))?;
     let prepare_secs = started.elapsed().as_secs_f64();
     let identity = lambo::embed::candle_identity(embedder.as_ref());
+    // #87: the EG2 contract's `model` (weights artifact and prompt profile),
+    // which the calibration table keys on. Reported only: the cache key keeps
+    // `identity` above, so existing caches stay valid.
+    let reported_identity = identity
+        .clone()
+        .or_else(|| lambo::embed::eg2_identity(embedder.as_ref()));
     let mut cache = Cache {
         embedder: embedder.as_ref(),
         docs: HashMap::new(),
@@ -446,7 +452,7 @@ async fn run() -> Result<(), String> {
         json!({
             "kind": kind,
             "config": contract,
-            "identity": identity.as_deref().map(public_identity),
+            "identity": reported_identity.as_deref().map(public_identity),
             "dimensions": embedder.dimensions(),
         }),
     );
@@ -562,6 +568,9 @@ async fn run() -> Result<(), String> {
         let mut true_recall = Vec::new();
         let mut top1_answerable: BTreeMap<String, Vec<f64>> = BTreeMap::new();
         let mut top1_none: BTreeMap<String, Vec<f64>> = BTreeMap::new();
+        // Query against every concept it does not name as relevant (all of
+        // them, for a no-answer query): the null a vector floor rests on.
+        let mut irrelevant: BTreeMap<String, Vec<f64>> = BTreeMap::new();
         #[derive(Default)]
         struct Acc {
             n: usize,
@@ -585,6 +594,25 @@ async fn run() -> Result<(), String> {
                 "top": ranked.iter().take(3).map(|(c, id)| json!([id, (c * 10_000.0).round() / 10_000.0])).collect::<Vec<_>>(),
                 "relevant": q.relevant.iter().map(|r| json!([r.concept, r.grade])).collect::<Vec<_>>(),
             }));
+            {
+                let grade_of: HashMap<&str, u8> = q
+                    .relevant
+                    .iter()
+                    .map(|r| (r.concept.as_str(), r.grade))
+                    .collect();
+                for (c, id) in &ranked {
+                    let g = grade_of.get(id).copied().unwrap_or(0);
+                    if g == 0 {
+                        irrelevant.entry(q.split.clone()).or_default().push(*c);
+                    }
+                    if args.detail.is_some() {
+                        detail.entry("query_concepts").or_default().push(json!({
+                            "framing": f, "query": q.id, "split": q.split, "concept": id,
+                            "grade": g, "cosine": (c * 10_000.0).round() / 10_000.0,
+                        }));
+                    }
+                }
+            }
             if q.kind == "no_answer" {
                 top1_none.entry(q.split.clone()).or_default().push(top1);
                 continue;
@@ -675,6 +703,7 @@ async fn run() -> Result<(), String> {
             f,
             json!({
                 "true_recall_grade2": summary(true_recall),
+                "query_to_irrelevant": irrelevant.into_iter().map(|(k, v)| (k, summary(v))).collect::<BTreeMap<_, _>>(),
                 "metrics": metrics,
                 "top1_answerable": top1_answerable.into_iter().map(|(k, v)| (k, summary(v))).collect::<BTreeMap<_, _>>(),
                 "top1_no_answer": top1_none.into_iter().map(|(k, v)| (k, summary(v))).collect::<BTreeMap<_, _>>(),

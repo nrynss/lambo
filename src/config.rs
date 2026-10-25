@@ -203,6 +203,16 @@ pub struct Config {
     pub canonization_supersede: bool,
 
     pub semantic_match_threshold: f64,
+    /// #87: `[embedder] calibration`. Whether recall uses the built-in
+    /// per-contract constants ([`crate::embed::calibration`]) for the
+    /// contract its vector leg runs under.
+    #[serde(default)]
+    pub calibration: crate::embed::calibration::CalibrationMode,
+    /// #87: `[embedder] calibrated_merge_threshold`. Whether a writer attach
+    /// replaces `semantic_match_threshold` with its contract's measured one.
+    /// Off by default.
+    #[serde(default)]
+    pub calibrated_merge_threshold: bool,
     pub max_cooccurrence_per_derive: usize,
 
     pub default_top_k: usize,
@@ -264,6 +274,8 @@ impl Default for Config {
             canonization_supersede: false,
 
             semantic_match_threshold: crate::graph::hybrid::SEMANTIC_MATCH_THRESHOLD_DEFAULT,
+            calibration: crate::embed::calibration::CalibrationMode::Builtin,
+            calibrated_merge_threshold: false,
             max_cooccurrence_per_derive: 10,
 
             default_top_k: 5,
