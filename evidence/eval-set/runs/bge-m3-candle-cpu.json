@@ -14,7 +14,7 @@
     "kind": "Candle"
   },
   "excluded_for_review": {
-    "pairs": 5,
+    "pairs": 3,
     "queries": 0
   },
   "pairs": {
@@ -104,9 +104,9 @@
         "related_distinct/topic-neighbour": {
           "max": 0.9218,
           "min": 0.4456,
-          "n": 25,
+          "n": 27,
           "p05": 0.4807,
-          "p50": 0.6277,
+          "p50": 0.6449,
           "p95": 0.8557,
           "p99": 0.9218
         },
@@ -133,9 +133,9 @@
         "related_distinct": {
           "max": 0.9933,
           "min": 0.4456,
-          "n": 170,
+          "n": 172,
           "p05": 0.5492,
-          "p50": 0.8365,
+          "p50": 0.8369,
           "p95": 0.9799,
           "p99": 0.9892
         },
@@ -171,18 +171,18 @@
         "related_distinct/dev": {
           "max": 0.9933,
           "min": 0.4456,
-          "n": 112,
+          "n": 113,
           "p05": 0.5339,
-          "p50": 0.8371,
+          "p50": 0.8373,
           "p95": 0.9832,
           "p99": 0.9892
         },
         "related_distinct/held_out": {
           "max": 0.983,
           "min": 0.4977,
-          "n": 58,
+          "n": 59,
           "p05": 0.5492,
-          "p50": 0.828,
+          "p50": 0.8292,
           "p95": 0.9786,
           "p99": 0.983
         },
@@ -209,9 +209,9 @@
         "all_related_distinct": {
           "paraphrase_above_rbd_p99": 0.0093,
           "paraphrase_at_or_above_0.85": 0.9074,
-          "rbd_at_or_above_0.85": 0.3529,
+          "rbd_at_or_above_0.85": 0.3488,
           "rbd_p99": 0.9892,
-          "related_distinct": 170
+          "related_distinct": 172
         },
         "at_or_above_0.85_by_family": {
           "paraphrase/near-verbatim": 1.0,
@@ -223,15 +223,15 @@
           "related_distinct/polarity": 0.1389,
           "related_distinct/quantity": 0.6667,
           "related_distinct/repository": 0.25,
-          "related_distinct/topic-neighbour": 0.12,
+          "related_distinct/topic-neighbour": 0.1111,
           "unrelated/cross-area": 0.0
         },
         "related_distinct_without_identifier": {
           "paraphrase_above_rbd_p99": 0.2222,
           "paraphrase_at_or_above_0.85": 0.9074,
-          "rbd_at_or_above_0.85": 0.2115,
+          "rbd_at_or_above_0.85": 0.2075,
           "rbd_p99": 0.9548,
-          "related_distinct": 104
+          "related_distinct": 106
         }
       }
     },
@@ -321,9 +321,9 @@
         "related_distinct/topic-neighbour": {
           "max": 0.8979,
           "min": 0.4531,
-          "n": 25,
+          "n": 27,
           "p05": 0.4738,
-          "p50": 0.6572,
+          "p50": 0.6639,
           "p95": 0.8761,
           "p99": 0.8979
         },
@@ -350,9 +350,9 @@
         "related_distinct": {
           "max": 0.9928,
           "min": 0.4531,
-          "n": 170,
+          "n": 172,
           "p05": 0.5615,
-          "p50": 0.8177,
+          "p50": 0.8225,
           "p95": 0.9754,
           "p99": 0.9906
         },
@@ -388,18 +388,18 @@
         "related_distinct/dev": {
           "max": 0.9928,
           "min": 0.4531,
-          "n": 112,
+          "n": 113,
           "p05": 0.5411,
-          "p50": 0.8152,
+          "p50": 0.8165,
           "p95": 0.9703,
           "p99": 0.9812
         },
         "related_distinct/held_out": {
           "max": 0.9906,
           "min": 0.4738,
-          "n": 58,
+          "n": 59,
           "p05": 0.5615,
-          "p50": 0.8225,
+          "p50": 0.8263,
           "p95": 0.9799,
           "p99": 0.9906
         },
@@ -426,9 +426,9 @@
         "all_related_distinct": {
           "paraphrase_above_rbd_p99": 0.0093,
           "paraphrase_at_or_above_0.85": 0.8704,
-          "rbd_at_or_above_0.85": 0.4294,
+          "rbd_at_or_above_0.85": 0.4302,
           "rbd_p99": 0.9906,
-          "related_distinct": 170
+          "related_distinct": 172
         },
         "at_or_above_0.85_by_family": {
           "paraphrase/near-verbatim": 1.0,
@@ -440,15 +440,15 @@
           "related_distinct/polarity": 0.1667,
           "related_distinct/quantity": 0.6,
           "related_distinct/repository": 0.25,
-          "related_distinct/topic-neighbour": 0.12,
+          "related_distinct/topic-neighbour": 0.1481,
           "unrelated/cross-area": 0.0
         },
         "related_distinct_without_identifier": {
           "paraphrase_above_rbd_p99": 0.1204,
           "paraphrase_at_or_above_0.85": 0.8704,
-          "rbd_at_or_above_0.85": 0.2212,
+          "rbd_at_or_above_0.85": 0.2264,
           "rbd_p99": 0.9603,
-          "related_distinct": 104
+          "related_distinct": 106
         }
       }
     }
@@ -461,14 +461,14 @@
       "p90": 0.4574095607682704,
       "p99": 0.5235569100344382
     },
-    "embed_secs": 70.2,
-    "embed_texts": 340,
+    "embed_secs": 68.0,
+    "embed_texts": 344,
     "max": 0.9932901532606944,
-    "p50": 0.8365426037960173,
+    "p50": 0.8369140856650258,
     "p90": 0.9719620326320275,
     "p99": 0.989214895987068,
-    "pairs": 170,
-    "prepare_secs": 6.5,
+    "pairs": 172,
+    "prepare_secs": 11.2,
     "threshold_rules_met": true,
     "within_canary_timeout": false
   },
@@ -755,8 +755,8 @@
   "set": {
     "corpus": 100,
     "pairs": {
-      "paraphrase": 110,
-      "related_distinct": 173,
+      "paraphrase": 108,
+      "related_distinct": 175,
       "unrelated": 120
     },
     "queries": {

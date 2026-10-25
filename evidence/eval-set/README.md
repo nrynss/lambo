@@ -2,7 +2,7 @@
 
 Runs of `examples/eval_measure` over the set in `fixtures/eval/` (v0: agent
 labels, pending owner adjudication; see `fixtures/eval/README.md`). Items
-awaiting owner review (5 pairs, 0 queries) are left out of every number.
+awaiting owner review (3 pairs, 0 queries) are left out of every number.
 
 ## Runs
 
@@ -22,14 +22,14 @@ them. Cosine quantiles are nearest rank, as the canary computes them.
 | Framing | Label | n | p05 | p50 | p95 | p99 |
 |---|---|---:|---:|---:|---:|---:|
 | raw | paraphrase | 108 | 0.838 | 0.924 | 0.970 | 0.984 |
-| raw | related_distinct | 170 | 0.549 | 0.837 | 0.980 | 0.989 |
+| raw | related_distinct | 172 | 0.549 | 0.837 | 0.980 | 0.989 |
 | raw | unrelated | 120 | 0.342 | 0.453 | 0.534 | 0.542 |
 | self | paraphrase | 108 | 0.834 | 0.920 | 0.972 | 0.985 |
-| self | related_distinct | 170 | 0.562 | 0.818 | 0.975 | 0.991 |
+| self | related_distinct | 172 | 0.562 | 0.823 | 0.975 | 0.991 |
 | self | unrelated | 120 | 0.345 | 0.461 | 0.526 | 0.538 |
 
 - **#87.** `related_pairs` pointed at `fixtures/eval/related_pairs.json`
-  (170 pairs) derives a threshold of **0.989** (p99). It meets the count
+  (172 pairs) derives a threshold of **0.989** (p99). It meets the count
   rule and clears the canary's random-pair floor (p99 0.524)
   (`threshold_rules_met`). Whether the canary gets to apply it depends on
   embedding the file inside its timeout, which on this box it does
@@ -40,18 +40,19 @@ them. Cosine quantiles are nearest rank, as the canary computes them.
   pairs and keeps 91% / 87% of the paraphrases.
 - **Without the identifier family** (the pairs #193's guard refuses before
   any threshold), the related-distinct p99 drops to 0.955 (raw) / 0.960
-  (self); 22% / 12% of paraphrases sit above it, and 21% / 22% of the
+  (self); 22% / 12% of paraphrases sit above it, and 21% / 23% of the
   remaining related-distinct pairs are at or above 0.85.
 - Share at or above 0.85 by family (raw): identifier 58%, quantity 67%,
-  repository 25%, correction 18%, polarity 14%, topic-neighbour 12%,
+  repository 25%, correction 18%, polarity 14%, topic-neighbour 11%,
   exception 8%; paraphrase rewording 93%, terse 70%.
 
 ### Canary timing (#191)
 
 `eval_measure` embeds the export as the canary's `embed_all` does: every
-pair's `a` then `b` in file order, duplicates included (**340 texts** for
-the 170 pairs), in batches of the embedder's capacity, timed as one pass
-and never from the cache. That took **70.2 s** in the committed run,
+pair's `a` then `b` in file order, duplicates included (**344 texts** for
+the 172 pairs), in batches of the embedder's capacity, timed as one pass
+and never from the cache. That took **68.0 s** in the committed run (70.2 s for the
+earlier 170-pair export),
 against `CANARY_EMBED_TIMEOUT` of 60 s (`within_canary_timeout: false`).
 Four earlier runs that embedded only the 274 distinct texts took 59.3 s,
 59.2 s, 65.3 s and 62.1 s, so even the deduplicated workload straddles

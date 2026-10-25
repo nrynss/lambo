@@ -17,8 +17,8 @@ owner review" below).
 |---|---|
 | `corpus.json` | The retrieval universe: 100 concepts `{id, topic, type, text, origin, sources}`. `origin` is `dogfood` (23 concepts, verbatim text of a dogfood-store concept) or `authored` (77 atomic facts restated from the repo's own records, each citing its source file). A query is "no-answer" relative to this corpus. |
 | `queries.json` | 310 queries `{id, query, kind, family, topic, split, relevant[{concept, grade}], facets[], source, labeller, labelled_on, review?}`. 204 `answerable` (graded relevance 2 = answers it, 1 = partial or supporting; `facets` = what a correct answer must say, for #181) and 106 `no_answer`. |
-| `pairs.json` | 403 pairs `{id, a, b, label, family, relation?, split, source, labeller, labelled_on, concepts?, review?}`: 173 `related_distinct`, 110 `paraphrase`, 120 `unrelated`. |
-| `related_pairs.json` | Generated export in the `[embedder] related_pairs` format (`[{"a", "b"}]`): the 170 adjudicated `related_distinct` pairs. Point `related_pairs` at it to derive the merge threshold (#87). |
+| `pairs.json` | 403 pairs `{id, a, b, label, family, relation?, split, source, labeller, labelled_on, concepts?, review?}`: 175 `related_distinct`, 108 `paraphrase`, 120 `unrelated`. |
+| `related_pairs.json` | Generated export in the `[embedder] related_pairs` format (`[{"a", "b"}]`): the 172 adjudicated `related_distinct` pairs. Point `related_pairs` at it to derive the merge threshold (#87). |
 | `authoring/` | The sources: `t_*.py` topic modules (one `C()` per concept with its queries, rewordings, contrasts and facets), `dogfood_texts.json` (the public dogfood texts, from `extract_dogfood_texts.py`) and `build.py`, which writes the four files above deterministically. |
 
 `tests/eval_set.rs` checks all of it in CI: the schema (required fields,
@@ -40,20 +40,19 @@ answers #198: `supersedes`, `distinct_entity` or `contradicts`):
 |---|---|---:|
 | related_distinct | identifier | 68 |
 | | polarity | 36 |
-| | topic-neighbour | 25 |
+| | topic-neighbour | 27 |
 | | quantity | 15 |
 | | exception | 13 |
 | | correction | 12 |
 | | repository | 4 |
 | paraphrase | rewording | 97 |
 | | terse | 10 |
-| | same-event | 2 |
 | | near-verbatim | 1 |
 | unrelated | cross-area | 120 |
 
 Splits (a hash of the id, about 70/30): pairs 276 dev / 127 held-out;
 queries 199 dev / 111 held-out. Related-distinct relations: 84 contradicts,
-52 distinct_entity, 12 supersedes, 25 none (families that need none).
+52 distinct_entity, 12 supersedes, 27 none (families that need none).
 
 Queries by family:
 
@@ -74,9 +73,9 @@ Queries by family:
 
 Per consumer:
 
-- **#87 / #176**: 170 adjudicated related-but-distinct pairs in the export,
+- **#87 / #176**: 172 adjudicated related-but-distinct pairs in the export,
   over `MIN_RELATED_PAIRS` (100); #190's 150-before-adjudication target is
-  met with 173.
+  met with 175.
 - **#173**: 204 answerable queries with graded ids; nDCG@10 is computed by
   the measurement example.
 - **#174**: 106 no-answer queries (32 in held-out); #174 wants at least 100
@@ -167,9 +166,15 @@ enforces the guard above on every file here.
 
 ## Awaiting owner review
 
+Settled by the owner: `p-x01` and `p-x02` (two dogfood records of the same
+review event, each with details the other lacks; #178 had them as
+paraphrase duplicates) are related-but-distinct, family `topic-neighbour`
+(Narayan SS, 2026-10-25). The label is recorded in
+`authoring/owner_pairs.json` and folded in by `build.py`, so both pairs are
+now in the export.
+
 | Id | Question |
 |---|---|
-| `p-x01`, `p-x02` | Two dogfood records of the same review event, each with details the other lacks. #178 labelled them paraphrase duplicates; is a merge (which keeps one text) acceptable? |
 | `p-srv-04-rbd1` | J3's resolution of the J2 coupled-ceiling residual against the residual itself: does it supersede it or only narrow it? (#178 said related-but-distinct.) |
 | `p-178-syn-neg-017` | Two commit hashes one hex digit apart: a typo of one commit (duplicate) or two commits? |
 | `p-178-syn-neg-019` | `src/main.rs` against `src/mein.rs`: a typo or a distinct path? |

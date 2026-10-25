@@ -1,0 +1,24 @@
+[
+ {
+  "id": "store-67cf5c9623",
+  "a": "Closed J3 durable-intent redesign review round 1: REQUEST_CHANGES, 1 P1 / 3 P2 / 1 unconfirmed P2 / 6 P3. Review file written but UNCOMMITTED — macOS TCC revoked filesystem access mid-session, so bash/git/cargo return Operation not permitted for the orchestrator and every subagent; no further lambo work possible until the operator grants Full Disk Access. P1 (N1): a transient embedder outage at attach destroys the whole durable-intent backlog — replay runs unconditionally with no liveness check, the failure arm cannot distinguish a content refusal from an unreachable embedder (a distinction THIS branch created by making the timeout an Err), and replay-failure consumes; J2's lease TTL aims the attach at the outage. The redesign's own deviation voids the WAL's acked-implies-eventually-applied promise. Invariant itself verified at an independently built binary including kill -9 (receipts do not lie; 64 lost with the tail as declared; undeclared consequence: post-crash replay blocked for the remaining lease TTL with restart_lost receipts in that window). Deviations: timeout arm upheld on argument, rejected as stated and untested (boundary in code is the STORE capability not the embedder, so default config fails every write on a dead llama, undeclared); Part-2 deferral upheld; intent_durable upheld as necessary. Twelve estimator-era stated reasons survive in writeq.rs including two production log lines claiming measured bounds. PAUSED by operator instruction before remediation.",
+  "b": "J3 redesign round-1 review VERDICT: REQUEST_CHANGES. One P1 (transient embedder outage at attach burns the durable backlog), three P2 (untested timeout deviation; twelve estimator-era stated reasons incl. two production log lines; the reversed pin's undeclared blast radius), one P2-candidate unconfirmed (un-migrated store voids the invariant), six P3. The founding invariant HOLDS at the binary: 64 acked == 1 applied-with-embedding + 63 durable intents at a clean close, replay applies all 63, final store 64 embedded / 0 NULL / 0 unconsumed, reproduced at an independently built binary; and at kill -9 nothing is durable and nothing claims to be. What does not hold is the durable half's promise of EVENTUAL APPLICATION. Review written to dev-diary/adversarial-review/adve-review-mooshik-J3-redesign-round1.md but NOT COMMITTED — the same macOS TCC revocation that interrupted the first run persists: bash cannot reach the repo at all (git, cargo, rg all denied), and even the Read tool is restricted to a per-file allowlist, so gates could not be re-run in this pass, the live matrix could not be extended, and no commit could be made.",
+  "label": "related_distinct",
+  "family": "topic-neighbour",
+  "relation": null,
+  "labeller": "Narayan SS (owner)",
+  "labelled_on": "2026-10-25",
+  "note": "owner decision 2026-10-25: related but distinct; each record of the same review event carries facts the other lacks, so a merge would drop them"
+ },
+ {
+  "id": "store-b7abb3b8c3",
+  "a": "Committed the J2 round-3 adversarial review on wt/j2 as aefda87 — verdict CLEAN. All 7 round-2 findings (2 P2 / 5 P3) verified closed over 920e096..6442d95; five new P3 doc-precision advisories, no P2/P1. Nine gates exact at 6442d95 and 72050b7 spot-checked green; all seven declared mutations reproduced and reverted from byte copies; the worst-case store-timeout table re-derived independently from sqlx-core 0.8.6 source and confirmed (38s/50s); J2-R2-1 demonstrated at the binary with a SIGTERM inside a live dial window honoured in 4 ms. J2 is ready to integrate. Nothing pushed, nothing merged, no commit amended.",
+  "b": "J2 round-3 adversarial review (adve-review-mooshik-J2-round3.md) — verdict CLEAN. All 7 round-2 findings (2 P2 / 5 P3) verified closed at the artifact over 920e096..6442d95. Nine gates exact at 6442d95 (fmt clean, 4x clippy clean, 858/0/3 fixtures, 946/0/3 sqlite, 550/0/0 cockroach, verify.sh 40 ok); 72050b7 spot-checked green on fmt + 856/0/3 fixtures. All seven declared mutations reproduced. Six tests added, none removed, deltas reconcile exactly (+5 lib, +6 sqlite). Five new P3 doc-precision advisories, no P2/P1. J2 is ready to integrate now.",
+  "label": "related_distinct",
+  "family": "topic-neighbour",
+  "relation": null,
+  "labeller": "Narayan SS (owner)",
+  "labelled_on": "2026-10-25",
+  "note": "owner decision 2026-10-25: related but distinct; each record of the same review event carries facts the other lacks, so a merge would drop them"
+ }
+]
