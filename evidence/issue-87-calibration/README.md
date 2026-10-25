@@ -100,22 +100,44 @@ constant.
 
 ### Merge threshold (opt-in: `[embedder] calibrated_merge_threshold = true`)
 
-| Split | Run | Threshold | Related-distinct merged | Paraphrases merged |
+Derived by cosine over every labelled pair. #193's identifier guard refuses
+a merge between texts that name different identifiers (digit runs, versions,
+paths) before any threshold applies. It refuses 154 of the 173
+related-but-distinct pairs and 59 of the 110 paraphrases (reordered dates and
+counts), and it refuses them under both embedders alike. That leaves 6
+related-distinct pairs on the dev split, too few to match on. So the
+threshold is matched on the cosine scale, and the rates a writer would see
+are reported separately, on the 19 guard-eligible related-distinct pairs and
+51 guard-eligible paraphrases.
+
+By cosine (every pair):
+
+| Split | Run | Threshold | Related-distinct ≥ threshold | Paraphrases ≥ threshold |
 |---|---|---:|---:|---:|
-| dev | BGE-M3 | 0.85 | 43.9% | 87.0% |
+| dev | BGE-M3 | 0.85 | 43.9% (n 114) | 87.0% (n 77) |
 | dev | EG2 before | 0.85 | 78.1% | 100% |
 | dev | EG2 after | 0.93 | 43.0% | 83.1% |
-| held-out | BGE-M3 | 0.85 | 40.7% | 87.9% |
+| held-out | BGE-M3 | 0.85 | 40.7% (n 59) | 87.9% (n 33) |
 | held-out | EG2 before | 0.85 | 76.3% | 100% |
 | held-out | EG2 after | 0.93 | 45.8% | 87.9% |
-| held-out | EG2, p99 rule (0.997, via `related_pairs`) | 0.997 | 0% | 0% |
+| held-out | EG2, p99 rule (`related_pairs`) | 0.997 | 0% | 0% |
+
+What a writer merges (guard-eligible pairs only; dev + held-out, since
+the counts are small):
+
+| Run | Threshold | Related-distinct merged | Paraphrases merged |
+|---|---:|---:|---:|
+| BGE-M3 | 0.85 | 9 of 19 (47%) | 47 of 51 (92%) |
+| EG2 before | 0.85 | 19 of 19 (100%) | 51 of 51 (100%) |
+| EG2 after | 0.93 | 12 of 19 (63%) | 44 of 51 (86%) |
 
 The issue expected 0.85 to leave EG2 paraphrases unmerged, on 8 pairs. On
-these 403 pairs it does the opposite: it merges every paraphrase and three
-quarters of the related-but-distinct pairs, so 0.80 would be worse. The
-calibrated 0.93 brings EG2 back to BGE-M3's rate. That rate is itself high
-(BGE-M3 merges about 41–44% of related-but-distinct pairs at 0.85), but
-changing it is a decision about BGE-M3's default, not this calibration.
+these 403 pairs it does the opposite: it merges every paraphrase, and every
+related-but-distinct pair the identifier guard lets through, so 0.80 would be
+worse. The calibrated 0.93 brings EG2 back to BGE-M3's rate by cosine. On
+the 19 guard-eligible pairs it still merges more than BGE-M3 does (12 against
+9), a small sample. BGE-M3's own rate is high (about 41–44% by cosine); changing
+that is a decision about BGE-M3's default, not this calibration.
 
 ### Layer floor (recorded, not applied)
 
@@ -130,7 +152,7 @@ changing it is a decision about BGE-M3's default, not this calibration.
 | Run | Framing | hit@1 | nDCG@10 |
 |---|---|---:|---:|
 | BGE-M3 | raw / self | 0.794 / 0.779 | 0.883 / 0.876 |
-| EG2 | raw / self | 0.775 / 0.799 | 0.888 / 0.897 |
+| EG2 | raw / self | 0.779 / 0.799 | 0.890 / 0.897 |
 
 ## Not measured
 

@@ -100,8 +100,9 @@ pub struct ContractCalibration {
     pub layer_min_similarity: f64,
     /// The merge threshold equivalent to BGE-M3 at 0.85. Opt-in.
     pub merge_threshold: f64,
-    /// Share of the set's related-but-distinct pairs the *default* 0.85
-    /// merges under this contract, for the attach warning.
+    /// Share of the set's related-but-distinct pairs at or above the
+    /// *default* 0.85 under this contract, by cosine (before #193's
+    /// identifier guard), for the attach warning.
     pub default_threshold_merges: f64,
     /// Where the numbers come from.
     pub evidence: &'static str,
@@ -159,9 +160,9 @@ pub fn merge_threshold(opt_in: bool, contract: &EmbeddingContract, configured: f
             configured,
             calibrated = row.merge_threshold,
             "semantic_match_threshold {configured} was calibrated on BGE-M3: under this \
-             embedding contract 0.85 merged {:.0}% of the labelled related-but-distinct pairs \
-             (BGE-M3: 35-44%). Set [embedder] calibrated_merge_threshold = true to merge at {} \
-             instead (evidence: {})",
+             embedding contract {:.0}% of the labelled related-but-distinct pairs score 0.85 or \
+             more (BGE-M3: 35-44%). Set [embedder] calibrated_merge_threshold = true to merge \
+             at {} instead (evidence: {})",
             row.default_threshold_merges * 100.0,
             row.merge_threshold,
             row.evidence,

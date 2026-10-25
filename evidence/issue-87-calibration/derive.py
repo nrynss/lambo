@@ -14,7 +14,10 @@ For a reference constant c and a null distribution F (dev split):
     c_X = quantile_X(q)       nearest rank, as the canary computes quantiles
 Nulls: query-to-irrelevant-concept cosine (grade 0) for the recent score and
 the layer floor; related-but-distinct pair cosine for the merge threshold
-(matched on the share merged, i.e. at or above the threshold).
+(matched on the share merged, i.e. at or above the threshold) over every
+labelled pair. #193's identifier guard refuses a pair whose texts name
+different identifiers before any threshold applies, so the rates a writer
+would actually see are reported separately, on the guard-eligible pairs.
 """
 
 import argparse
@@ -60,6 +63,8 @@ class Detail:
             for r in d["pairs"]
             if r["framing"] == framing and not r.get("review")
         ]
+        if any("same_identifiers" not in r for r, _ in self.pairs):
+            raise SystemExit(f"{path}: pairs lack same_identifiers; rerun eval_measure")
 
     def top_irrelevant(self, split, k=5):
         """Cosines of the grade-0 concepts among each query's top k: the
@@ -77,8 +82,14 @@ class Detail:
     def query(self, split, grade):
         return [r["cosine"] for r in self.rows if r["split"] == split and r["grade"] == grade]
 
-    def pair(self, split, label):
-        return [r["cosine"] for r, s in self.pairs if s == split and r["label"] == label]
+    def pair(self, split, label, mergeable_only=True):
+        """Pair cosines. By default only the pairs a writer could merge:
+        #193's identifier guard refuses the rest before any threshold."""
+        return [
+            r["cosine"]
+            for r, s in self.pairs
+            if s == split and r["label"] == label and (r["same_identifiers"] or not mergeable_only)
+        ]
 
 
 def r4(x):
@@ -107,27 +118,40 @@ def recall_constant(ref, tgt, c):
 
 
 def merge_constant(ref, tgt, c):
-    m = share_at_or_above(ref.pair("dev", "related_distinct"), c)
-    derived = quantile(tgt.pair("dev", "related_distinct"), 1 - m)
+    # Derived on every labelled pair: the scale map is a property of the
+    # embedder, and the identifier guard (#193) removes the same pairs under
+    # both contracts, leaving too few on the dev split (6 related-distinct)
+    # to match on. What a writer would actually merge is reported beside it
+    # ("writer": the guard-eligible pairs only).
+    m = share_at_or_above(ref.pair("dev", "related_distinct", mergeable_only=False), c)
+    derived = quantile(tgt.pair("dev", "related_distinct", mergeable_only=False), 1 - m)
     shipped = round(derived, SHIP_DECIMALS)
     out = {"reference": c, "reference_related_distinct_merged": r4(m), "derived": r4(derived), "shipped": shipped}
-    for split in ("dev", "held_out"):
-        rows = {}
-        for name, d, x in (("reference", ref, c), ("target_before", tgt, c), ("target_after", tgt, shipped)):
-            rbd, para = d.pair(split, "related_distinct"), d.pair(split, "paraphrase")
-            rows[name] = {
-                "at": x,
-                "related_distinct_merged": r4(share_at_or_above(rbd, x)),
-                "paraphrase_merged": r4(share_at_or_above(para, x)),
-                "related_distinct_n": len(rbd),
-                "paraphrase_n": len(para),
-            }
-        out[split] = rows
-    p99 = quantile(tgt.pair("dev", "related_distinct"), 0.99)
+    for view, only in (("cosine_only", False), ("writer", True)):
+        out[view] = {}
+        for split in ("dev", "held_out"):
+            rows = {}
+            for name, d, x in (("reference", ref, c), ("target_before", tgt, c), ("target_after", tgt, shipped)):
+                rbd = d.pair(split, "related_distinct", mergeable_only=only)
+                para = d.pair(split, "paraphrase", mergeable_only=only)
+                rows[name] = {
+                    "at": x,
+                    "related_distinct_merged": r4(share_at_or_above(rbd, x)),
+                    "paraphrase_merged": r4(share_at_or_above(para, x)),
+                    "related_distinct_n": len(rbd),
+                    "paraphrase_n": len(para),
+                }
+            out[view][split] = rows
+    # The related_pairs rule (#176) embeds every labelled pair, guard ignored.
+    p99 = quantile(tgt.pair("dev", "related_distinct", mergeable_only=False), 0.99)
     out["p99_rule"] = {
         "value": r4(p99),
-        "held_out_related_distinct_merged": r4(share_at_or_above(tgt.pair("held_out", "related_distinct"), p99)),
-        "held_out_paraphrase_merged": r4(share_at_or_above(tgt.pair("held_out", "paraphrase"), p99)),
+        "held_out_related_distinct_merged": r4(
+            share_at_or_above(tgt.pair("held_out", "related_distinct", mergeable_only=False), p99)
+        ),
+        "held_out_paraphrase_merged": r4(
+            share_at_or_above(tgt.pair("held_out", "paraphrase", mergeable_only=False), p99)
+        ),
     }
     return out
 
@@ -155,7 +179,9 @@ def main():
             "layer_min_similarity": recall_constant(ref, tgt, LAYER_MIN_SIMILARITY),
             "merge_threshold": merge_constant(ref, tgt, MERGE_THRESHOLD),
             "default_threshold_merges": r4(
-                share_at_or_above(tgt.pair("dev", "related_distinct"), MERGE_THRESHOLD)
+                share_at_or_above(
+                    tgt.pair("dev", "related_distinct", mergeable_only=False), MERGE_THRESHOLD
+                )
             ),
         }
         if framing == a.framing:

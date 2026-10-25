@@ -507,6 +507,10 @@ async fn run() -> Result<(), String> {
                 "framing": f, "id": p.id, "label": p.label, "family": p.family,
                 "cosine": (cos(p) * 10_000.0).round() / 10_000.0,
                 "review": p.review.is_some(),
+                // #193's identifier guard refuses a vector merge between
+                // these two texts before any threshold applies (#87 derives
+                // merge rates on the pairs a writer could merge).
+                "same_identifiers": lambo::graph::canonical::same_identifiers(&p.a, &p.b),
             }));
         }
         for p in set.pairs.iter().filter(|p| p.adjudicated()) {

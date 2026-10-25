@@ -17,8 +17,10 @@
   `[embedder] calibration = "off"` restores 0.35. Evidence and method:
   `evidence/issue-87-calibration/`.
 - **`[embedder] calibrated_merge_threshold` (#87), off by default.** Under the
-  EG2 contract above, the default `semantic_match_threshold` 0.85 merges
-  about 78% of the set's related-but-distinct pairs (BGE-M3: 35–44%). Set
+  EG2 contract above, the default `semantic_match_threshold` 0.85 puts
+  about 78% of the set's related-but-distinct pairs over the threshold by
+  cosine (BGE-M3: 35–44%), and merges every one the identifier guard lets
+  through. Set
   this to `true` to merge at 0.93 under that contract, which matches
   BGE-M3's rate. While it is off, a writer attach under that contract logs a
   warning. Merges do not change unless you opt in.
