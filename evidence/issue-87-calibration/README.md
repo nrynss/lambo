@@ -78,6 +78,26 @@ without also putting it above true ones. Dev split, EG2:
 (BGE-M3 for comparison: 0.45 gives 81.1% / 11.0% / 96.9%, and 0.50 gives
 48.8% / 3.3% / 89.1%.)
 
+**Second trade-off: the blend.** The final score is linear in the phase-1
+score `q` (`w_daemon · d + w_query · q`), so what a recent-only concept
+loses to a true hit is the *gap* in `q`, not the rank. EG2's scale is
+narrower: from the irrelevant median to the true-hit median is 0.632 →
+0.788 (0.156) against BGE-M3's 0.354 → 0.606 (0.253). Measured from the
+median true hit, the gap down to the recent leg is:
+
+| | Gap |
+|---|---:|
+| BGE-M3 | 0.256 |
+| EG2 before | 0.438 |
+| EG2 after | 0.158 |
+
+So under EG2 a recent-only concept with a high daemon score now overtakes a
+true hit more easily than under BGE-M3. An affine map that sends BGE-M3's
+two medians onto EG2's also gives 0.63, because 0.35 sits at BGE-M3's
+irrelevant median. Getting BGE-M3's gaps back, relative to `d`, means
+rescaling the cosines themselves, which is #173's rank fusion and not a
+constant.
+
 ### Merge threshold (opt-in: `[embedder] calibrated_merge_threshold = true`)
 
 | Split | Run | Threshold | Related-distinct merged | Paraphrases merged |

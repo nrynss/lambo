@@ -39,7 +39,9 @@
 //!
 //! # What applies by default
 //!
-//! * **Recent score**: on. `[embedder] calibration = "off"` keeps 0.35.
+//! * **Recent score**: on, for a text recall whose vector leg runs (the
+//!   rows were measured on text queries, so a recall by an image or a client
+//!   vector keeps 0.35). `[embedder] calibration = "off"` keeps 0.35.
 //!   It keeps BGE-M3's rank position: below every true hit on the set, and
 //!   above about half of all irrelevant concepts (none before). It does not
 //!   lift recency above the irrelevant hits a recall returns: BGE-M3's 0.35
