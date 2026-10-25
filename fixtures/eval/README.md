@@ -5,11 +5,11 @@ are the shared yardstick for #87 / #176 (the `[embedder] related_pairs`
 threshold), #173 (RRF fusion), #174 (conformal abstention), #175 (PPR
 expansion), #181 (redundancy) and #198 (what a refused identifier merge is).
 
-**Status: v0, labelled by an agent, pending owner adjudication.** Every item
-says who labelled it (`labeller`, `labelled_on`). Items whose label needs the
-owner's judgment carry a `review` note; they are kept out of the export and
-out of every reported number until the owner settles them (see "Awaiting
-owner review" below).
+**Status: v0, labelled by an agent; the five items that needed the owner's
+judgment are settled by the owner** (see "Owner rulings" below). Every item
+says who labelled it (`labeller`, `labelled_on`). An item whose label needs
+the owner carries a `review` note and is kept out of the export and out of
+every reported number until the owner settles it; none does now.
 
 ## Files
 
@@ -17,8 +17,8 @@ owner review" below).
 |---|---|
 | `corpus.json` | The retrieval universe: 100 concepts `{id, topic, type, text, origin, sources}`. `origin` is `dogfood` (23 concepts, verbatim text of a dogfood-store concept) or `authored` (77 atomic facts restated from the repo's own records, each citing its source file). A query is "no-answer" relative to this corpus. |
 | `queries.json` | 310 queries `{id, query, kind, family, topic, split, relevant[{concept, grade}], facets[], source, labeller, labelled_on, review?}`. 204 `answerable` (graded relevance 2 = answers it, 1 = partial or supporting; `facets` = what a correct answer must say, for #181) and 106 `no_answer`. |
-| `pairs.json` | 403 pairs `{id, a, b, label, family, relation?, split, source, labeller, labelled_on, concepts?, review?}`: 175 `related_distinct`, 108 `paraphrase`, 120 `unrelated`. |
-| `related_pairs.json` | Generated export in the `[embedder] related_pairs` format (`[{"a", "b"}]`): the 172 adjudicated `related_distinct` pairs. Point `related_pairs` at it to derive the merge threshold (#87). |
+| `pairs.json` | 403 pairs `{id, a, b, label, family, relation?, split, source, labeller, labelled_on, concepts?, review?}`: 173 `related_distinct`, 110 `paraphrase`, 120 `unrelated`. |
+| `related_pairs.json` | Generated export in the `[embedder] related_pairs` format (`[{"a", "b"}]`): the 173 adjudicated `related_distinct` pairs. Point `related_pairs` at it to derive the merge threshold (#87). |
 | `authoring/` | The sources: `t_*.py` topic modules (one `C()` per concept with its queries, rewordings, contrasts and facets), `dogfood_texts.json` (the public dogfood texts, from `extract_dogfood_texts.py`) and `build.py`, which writes the four files above deterministically. |
 
 `tests/eval_set.rs` checks all of it in CI: the schema (required fields,
@@ -38,7 +38,7 @@ answers #198: `supersedes`, `distinct_entity` or `contradicts`):
 
 | Label | Family | Pairs |
 |---|---|---:|
-| related_distinct | identifier | 68 |
+| related_distinct | identifier | 66 |
 | | polarity | 36 |
 | | topic-neighbour | 27 |
 | | quantity | 15 |
@@ -47,11 +47,11 @@ answers #198: `supersedes`, `distinct_entity` or `contradicts`):
 | | repository | 4 |
 | paraphrase | rewording | 97 |
 | | terse | 10 |
-| | near-verbatim | 1 |
+| | near-verbatim | 3 |
 | unrelated | cross-area | 120 |
 
 Splits (a hash of the id, about 70/30): pairs 276 dev / 127 held-out;
-queries 199 dev / 111 held-out. Related-distinct relations: 84 contradicts,
+queries 199 dev / 111 held-out. Related-distinct relations: 82 contradicts,
 52 distinct_entity, 12 supersedes, 27 none (families that need none).
 
 Queries by family:
@@ -73,9 +73,9 @@ Queries by family:
 
 Per consumer:
 
-- **#87 / #176**: 172 adjudicated related-but-distinct pairs in the export,
+- **#87 / #176**: 173 adjudicated related-but-distinct pairs in the export,
   over `MIN_RELATED_PAIRS` (100); #190's 150-before-adjudication target is
-  met with 175.
+  met with 173.
 - **#173**: 204 answerable queries with graded ids; nDCG@10 is computed by
   the measurement example.
 - **#174**: 106 no-answer queries (32 in held-out); #174 wants at least 100
@@ -114,7 +114,8 @@ Per consumer:
   a synthetic pair) and the 30 synthetic distinct pairs are reused, with
   family and relation added. The 89 synthetic typo duplicates are left out: a
   one-letter typo is not a paraphrase and would pull the paraphrase quantiles
-  toward 1.0. The 5 identical dogfood duplicates are left out too (cosine 1
+  toward 1.0. (Two synthetic distinct pairs, `syn-neg-017` and `syn-neg-019`,
+  are paraphrase duplicates by the owner's ruling below.) The 5 identical dogfood duplicates are left out too (cosine 1
   by construction).
 - **Unrelated pairs** are drawn with a fixed seed across four topic areas,
   then read: nine draws judged related after all are rejected in `build.py`.
@@ -164,20 +165,20 @@ enforces the guard above on every file here.
 - The 20% double-labelled overlap #190 asks for has not been done: v0 has one
   labeller. The owner's adjudication pass is the second label.
 
-## Awaiting owner review
+## Owner rulings
 
-Settled by the owner: `p-x01` and `p-x02` (two dogfood records of the same
-review event, each with details the other lacks; #178 had them as
-paraphrase duplicates) are related-but-distinct, family `topic-neighbour`
-(Narayan SS, 2026-10-25). The label is recorded in
-`authoring/owner_pairs.json` and folded in by `build.py`, so both pairs are
-now in the export.
+Every item that needed the owner's judgment was settled by the owner
+(Narayan SS, 2026-10-25). The labels are recorded in
+`authoring/owner_pairs.json` through `scripts/eval/fold_owner_labels.py`,
+and `build.py` relabels each pair in place (labeller "Narayan SS (owner)").
+No item awaits review.
 
-| Id | Question |
+| Id | Ruling |
 |---|---|
-| `p-srv-04-rbd1` | J3's resolution of the J2 coupled-ceiling residual against the residual itself: does it supersede it or only narrow it? (#178 said related-but-distinct.) |
-| `p-178-syn-neg-017` | Two commit hashes one hex digit apart: a typo of one commit (duplicate) or two commits? |
-| `p-178-syn-neg-019` | `src/main.rs` against `src/mein.rs`: a typo or a distinct path? |
+| `p-x01`, `p-x02` | Two dogfood records of the same review event, each with details the other lacks (#178 had them as paraphrase duplicates): related-but-distinct, family `topic-neighbour`. |
+| `p-srv-04-rbd1` | J3's resolution supersedes the J2 coupled-ceiling residual: related-but-distinct, `correction`, relation `supersedes` (a, the J3 resolution, is the newer). |
+| `p-178-syn-neg-017` | Two commit hashes one hex digit apart are a typo of the same commit: paraphrase, `near-verbatim`. |
+| `p-178-syn-neg-019` | `src/main.rs` against `src/mein.rs` is a typo of the same path: paraphrase, `near-verbatim`. |
 
 ## Owner steps (to complete #190 from the store)
 
@@ -197,8 +198,8 @@ now in the export.
    unlabelled rows are never written. Folding a corrected sheet later also
    withdraws: a row now marked private, skip or unlabelled removes the
    earlier owner row for the same texts or query.
-4. Settle the review items above (drop the `review` note or relabel in the
-   authoring module), and record the store SHA-256 here.
+4. Settle any new review items the same way (an owner sheet folded in, or
+   a relabel in the authoring module), and record the store SHA-256 here.
 
 ## Measuring
 

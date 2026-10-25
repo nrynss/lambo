@@ -1041,15 +1041,14 @@
   "b": "J2 round-3 residual coupling, handed to J3 as ONE item: the pump's un-raced client-facing writes and the uncapped `inflight` list are the same problem. answer_lost (src/mcp/proxy.rs:1457) writes one frame per in-flight id, so the ceiling J3 chooses for outstanding receipts is also the worst-case LENGTH of an un-raced write burst to a client that may not be reading. Neither §J2 nor DIAL_BUDGET's residual section says the other exists, and both undercount the writes as 'two' when there are six un-raced Self::send sites (proxy.rs:1298, 1321, 1349, 1375, 1393, 1457).",
   "label": "related_distinct",
   "family": "correction",
-  "relation": "supersedes",
   "split": "dev",
-  "source": "corpus srv-04 + authored contrast",
-  "labeller": "Grok Bot (agent)",
-  "labelled_on": "2026-10-23",
+  "source": "corpus srv-04 + authored contrast; relabelled by the owner (store-d39e131d77)",
+  "labeller": "Narayan SS (owner)",
+  "labelled_on": "2026-10-25",
   "concepts": [
    "srv-04"
   ],
-  "review": "#178 labelled this pair related-but-distinct (i3-42); whether J3's resolution supersedes the residual or only narrows it is the owner's call"
+  "relation": "supersedes"
  },
  {
   "id": "p-srv-05-para",
@@ -3754,27 +3753,23 @@
   "id": "p-178-syn-neg-017",
   "a": "commit 2122de39e47e fixed the bug",
   "b": "commit 2122de39e48e fixed the bug",
-  "label": "related_distinct",
-  "family": "identifier",
-  "relation": "contradicts",
+  "label": "paraphrase",
+  "family": "near-verbatim",
   "split": "dev",
-  "source": "evidence/issue-178-similar/labelled-pairs.json#syn-neg-017 (synthetic)",
-  "labeller": "Grok Bot (agent)",
-  "labelled_on": "2026-10-23",
-  "review": "the two hashes differ in one hex digit; it may be a typo of the same commit (a duplicate), not a second commit"
+  "source": "evidence/issue-178-similar/labelled-pairs.json#syn-neg-017 (synthetic); relabelled by the owner (store-094c2c5fb2)",
+  "labeller": "Narayan SS (owner)",
+  "labelled_on": "2026-10-25"
  },
  {
   "id": "p-178-syn-neg-019",
   "a": "the entry point is src/main.rs",
   "b": "the entry point is src/mein.rs",
-  "label": "related_distinct",
-  "family": "identifier",
-  "relation": "contradicts",
+  "label": "paraphrase",
+  "family": "near-verbatim",
   "split": "held_out",
-  "source": "evidence/issue-178-similar/labelled-pairs.json#syn-neg-019 (synthetic)",
-  "labeller": "Grok Bot (agent)",
-  "labelled_on": "2026-10-23",
-  "review": "src/mein.rs reads as a typo of src/main.rs; whether this is a duplicate or a distinct path is the owner's call"
+  "source": "evidence/issue-178-similar/labelled-pairs.json#syn-neg-019 (synthetic); relabelled by the owner (store-b6f31e7bd0)",
+  "labeller": "Narayan SS (owner)",
+  "labelled_on": "2026-10-25"
  },
  {
   "id": "p-178-syn-neg-020",

@@ -20,5 +20,38 @@
   "labeller": "Narayan SS (owner)",
   "labelled_on": "2026-10-25",
   "note": "owner decision 2026-10-25: related but distinct; each record of the same review event carries facts the other lacks, so a merge would drop them"
+ },
+ {
+  "id": "store-094c2c5fb2",
+  "a": "commit 2122de39e47e fixed the bug",
+  "b": "commit 2122de39e48e fixed the bug",
+  "label": "paraphrase",
+  "family": "near-verbatim",
+  "relation": null,
+  "labeller": "Narayan SS (owner)",
+  "labelled_on": "2026-10-25",
+  "note": "owner decision 2026-10-25: a typo of the same thing, so a paraphrase duplicate"
+ },
+ {
+  "id": "store-b6f31e7bd0",
+  "a": "the entry point is src/main.rs",
+  "b": "the entry point is src/mein.rs",
+  "label": "paraphrase",
+  "family": "near-verbatim",
+  "relation": null,
+  "labeller": "Narayan SS (owner)",
+  "labelled_on": "2026-10-25",
+  "note": "owner decision 2026-10-25: a typo of the same thing, so a paraphrase duplicate"
+ },
+ {
+  "id": "store-d39e131d77",
+  "a": "J3 resolution of the COUPLED ceiling residual handed over by J2-R2-7 / J2-R3-3. The coupling is real and its mechanism is receipt WAITING: a lambo_receipt call that waits is a long-lived in-flight request at the proxy, so N concurrent receipt waits are N entries in the pump's `inflight` list and therefore N frames in answer_lost's un-raced write burst. J3 therefore bounds BOTH ends: RECEIPT_WAIT_MAX caps how long any one wait can occupy an inflight slot, and a concurrent-waiter cap keeps the population under proxy.rs's INFLIGHT_DEPTH_WARN = 64. The queue bound itself does NOT feed the inflight list — a non-waiting ack returns immediately — so the residual's phrasing (the receipt ceiling IS the burst length) is true only of the waiting surface, and that correction belongs in the record.",
+  "b": "J2 round-3 residual coupling, handed to J3 as ONE item: the pump's un-raced client-facing writes and the uncapped `inflight` list are the same problem. answer_lost (src/mcp/proxy.rs:1457) writes one frame per in-flight id, so the ceiling J3 chooses for outstanding receipts is also the worst-case LENGTH of an un-raced write burst to a client that may not be reading. Neither §J2 nor DIAL_BUDGET's residual section says the other exists, and both undercount the writes as 'two' when there are six un-raced Self::send sites (proxy.rs:1298, 1321, 1349, 1375, 1393, 1457).",
+  "label": "related_distinct",
+  "family": "correction",
+  "relation": "supersedes",
+  "labeller": "Narayan SS (owner)",
+  "labelled_on": "2026-10-25",
+  "note": "owner decision 2026-10-25: J3's resolution supersedes the J2 residual (a newer, b older)"
  }
 ]

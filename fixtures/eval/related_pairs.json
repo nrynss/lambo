@@ -140,6 +140,10 @@
   "b": "When selectively unhiding an error class to the model, matching on the error variant is enough, because each variant has exactly one producer."
  },
  {
+  "a": "J3 resolution of the COUPLED ceiling residual handed over by J2-R2-7 / J2-R3-3. The coupling is real and its mechanism is receipt WAITING: a lambo_receipt call that waits is a long-lived in-flight request at the proxy, so N concurrent receipt waits are N entries in the pump's `inflight` list and therefore N frames in answer_lost's un-raced write burst. J3 therefore bounds BOTH ends: RECEIPT_WAIT_MAX caps how long any one wait can occupy an inflight slot, and a concurrent-waiter cap keeps the population under proxy.rs's INFLIGHT_DEPTH_WARN = 64. The queue bound itself does NOT feed the inflight list — a non-waiting ack returns immediately — so the residual's phrasing (the receipt ceiling IS the burst length) is true only of the waiting surface, and that correction belongs in the record.",
+  "b": "J2 round-3 residual coupling, handed to J3 as ONE item: the pump's un-raced client-facing writes and the uncapped `inflight` list are the same problem. answer_lost (src/mcp/proxy.rs:1457) writes one frame per in-flight id, so the ceiling J3 chooses for outstanding receipts is also the worst-case LENGTH of an un-raced write burst to a client that may not be reading. Neither §J2 nor DIAL_BUDGET's residual section says the other exists, and both undercount the writes as 'two' when there are six un-raced Self::send sites (proxy.rs:1298, 1321, 1349, 1375, 1393, 1457)."
+ },
+ {
   "a": "The proxy's DIAL_BUDGET is 6 seconds and bounds the client's wait: past it the dial to the holder is abandoned and the call is answered 'nothing happened, retry later'. It sits above the dial's own connect and replay budgets (about 4.1 s) and below sqlite's 8 s busy_timeout.",
   "b": "The proxy's dial budget is 60 seconds, one lease TTL plus slack."
  },
