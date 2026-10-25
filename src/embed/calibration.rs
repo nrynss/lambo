@@ -129,9 +129,10 @@ pub fn lookup(contract: &EmbeddingContract) -> Option<&'static ContractCalibrati
     })
 }
 
-/// The recent leg's score for a recall whose vector leg runs under
+/// The recent leg's score for a text recall whose vector leg runs under
 /// `contract`. `None` (no vector leg) keeps the BGE-M3 value: the recent leg
-/// then competes only with BM25, as it always has.
+/// then competes only with BM25, as it always has. The daemon calls this for
+/// text recalls only; the rows were measured on text queries.
 pub fn recent_score(mode: CalibrationMode, contract: Option<&EmbeddingContract>) -> f64 {
     match (mode, contract.and_then(lookup)) {
         (CalibrationMode::Builtin, Some(row)) => row.recent_score,

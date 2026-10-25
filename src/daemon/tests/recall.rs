@@ -913,7 +913,7 @@ async fn recent_leg_follows_the_vector_contracts_calibration() {
         (CalibrationMode::Off, Some(eg2_contract.clone()), false),
         (CalibrationMode::Builtin, Some(other), false),
         (CalibrationMode::Builtin, None, false),
-        (CalibrationMode::Builtin, Some(eg2_contract), true),
+        (CalibrationMode::Builtin, Some(eg2_contract.clone()), true),
     ] {
         assert_eq!(
             recent_of(mode, contract.clone(), race).await,
@@ -921,6 +921,34 @@ async fn recent_leg_follows_the_vector_contracts_calibration() {
             "{mode} {contract:?} race={race}"
         );
     }
+
+    // A recall by an image or a client vector beside text runs the recent
+    // leg, but the table was measured on text queries: BGE-M3's value stays.
+    let (graph, cid) = locked_graph_with_one_concept();
+    let daemon = Daemon::from_config(graph, &crate::Config::default());
+    let vector = vec![0.0; eg2.dim];
+    let result = daemon
+        .recall_by_vector_with(
+            &sid(),
+            RecallQuery {
+                query: "zzz".into(),
+                top_k: 5,
+                max_tokens: 500,
+                traversal_depth: 0,
+            },
+            crate::store::vector_source::VectorCandidates::from_store(&StubVectorStore {
+                race: false,
+            }),
+            (&vector, &eg2_contract),
+            RecallWeights::default(),
+            &SharedRecallCache::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        result.legs.get(&cid).and_then(|l| l.recent),
+        Some(RECENT_SCORE)
+    );
 }
 
 /// #19(c) end to end through `Daemon::recall_detailed`: a newer

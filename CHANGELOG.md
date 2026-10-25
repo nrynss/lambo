@@ -12,8 +12,8 @@
   so every vector hit outranked recency. Under that contract the leg now
   scores 0.63, the value with the same rank under EG2 that 0.35 has under
   BGE-M3: below every true hit on the #190 evaluation set, and above about
-  half of all irrelevant concepts instead of none. It applies only when the
-  vector leg runs. BGE-M3 and every other contract are unchanged.
+  half of all irrelevant concepts instead of none. It applies to a text
+  recall whose vector leg runs (a recall by image or vector keeps 0.35). BGE-M3 and every other contract are unchanged.
   `[embedder] calibration = "off"` restores 0.35. Evidence and method:
   `evidence/issue-87-calibration/`.
 - **`[embedder] calibrated_merge_threshold` (#87), off by default.** Under the
@@ -22,6 +22,11 @@
   this to `true` to merge at 0.93 under that contract, which matches
   BGE-M3's rate. While it is off, a writer attach under that contract logs a
   warning. Merges do not change unless you opt in.
+- **`Config` and `EmbedderConfig` gain `calibration` and
+  `calibrated_merge_threshold`, and `recall::candidates::Phase1Input` gains
+  `recent_score`** (#87). A struct literal that names every field no longer
+  compiles; `..Default::default()` keeps compiling (`Phase1Input::default()`
+  sets `recent_score` to `RECENT_SCORE`).
 - **Behaviour change: contradictions of ordinary memory now warn, and the
   correction is shown with the stale fact (#179).** Until now `against`
   only flagged a Canonical or Venerable concept ("contradicting ordinary

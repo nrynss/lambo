@@ -710,8 +710,10 @@ impl Daemon {
         // #87: the recent leg's score is on the vector leg's scale, so it
         // follows the contract that leg runs under. With no vector leg (no
         // capability, no query embedding, or a failed read) the recent leg
-        // competes only with BM25 and keeps its BGE-M3 value.
-        let recent_score = if vectors.available() {
+        // competes only with BM25 and keeps its BGE-M3 value. The table was
+        // measured on text queries, so a recall by an image or a client
+        // vector (its recent leg runs only beside text) keeps it too.
+        let recent_score = if vectors.available() && route == Route::Text {
             crate::embed::calibration::recent_score(self.calibration, embedding.map(|(_, c)| c))
         } else {
             candidates::RECENT_SCORE
