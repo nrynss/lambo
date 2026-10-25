@@ -188,10 +188,13 @@ fn nothing_private_or_secret() {
             .unwrap_or(&path)
             .display()
             .to_string();
-        // The extractor's own code names the redaction marker it drops.
-        let code = path.extension().is_some_and(|e| e == "py");
+        // The extractor's own code names the redaction marker it drops; no
+        // other file may contain it.
+        let extractor = path
+            == std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("fixtures/eval/authoring/extract_dogfood_texts.py");
         for m in MARKERS {
-            if text.contains(m) && !(code && m == "[REDACTED") {
+            if text.contains(m) && !(extractor && m == "[REDACTED") {
                 found.push(format!("{name}: {m:?}"));
             }
         }
