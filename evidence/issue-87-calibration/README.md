@@ -148,6 +148,9 @@ user set always applies, 0.50 included, and `lambo serve` warns when it is below
 0.72 under this contract. `[embedder] calibrated_layer_floor =
 false`, or `calibration = "off"`, keeps 0.50. The cost: about 7.5% of true
 hits, the lowest-scoring ones, no longer pass a layer's floor (100% to 92.5%).
+The set is text only, so a layer's image concepts (a text query against an
+image vector, usually a lower cosine) were not measured against this floor; set
+that layer's `min_similarity` if its image hits matter.
 
 | Split | Run | Floor | All irrelevant above | True hits above |
 |---|---|---:|---:|---:|
