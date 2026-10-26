@@ -13,7 +13,7 @@
 //! [[serve.layer]]               # per-layer ranking knobs
 //! session = "general"
 //! weight = 0.5                  # BGE-M3 tuning: #157
-//! min_similarity = 0.50         # absolute vector relevance; unset: the
+//! # min_similarity = 0.50       # absolute vector relevance; unset: the
 //!                               # contract's calibrated floor (#87)
 //! ```
 //!
