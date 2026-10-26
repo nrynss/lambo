@@ -55,8 +55,14 @@
 //!   calibrated_merge_threshold = false` restores the configured threshold,
 //!   and a writer attach then logs a warning when the configured one is
 //!   lower. A usable `related_pairs` derivation (#176) still wins over both.
-//! * **Layer floor**: recorded, not applied: a layer's `min_similarity` is a
-//!   per-layer setting resolved before any embedder is known.
+//! * **Layer floor**: on (owner decision, the follow-up to #203). A layer
+//!   whose `min_similarity` nobody set (no `[[serve.layer]] min_similarity`,
+//!   no [`LayerRef::with_min_similarity`](crate::LayerRef::with_min_similarity))
+//!   takes the row's floor instead of BGE-M3's 0.50. It is resolved at
+//!   recall time from the calling session's contract (a layer must share
+//!   it), because a layer's knobs are read before any embedder is known. A
+//!   floor the user set always wins. `[embedder] calibrated_layer_floor =
+//!   false`, or `calibration = "off"`, keeps 0.50.
 //!
 //! A contract with no row (any other model string, prompt profile, dimension
 //! or kind) keeps the BGE-M3 constants, as before. The evidence for each row is
@@ -99,7 +105,7 @@ pub struct ContractCalibration {
     /// The recent leg's flat phase-1 score (BGE-M3: 0.35).
     pub recent_score: f64,
     /// The layered-recall similarity floor equivalent to 0.50 under BGE-M3.
-    /// Recorded only (module docs).
+    /// Applied by default to a layer whose floor nobody set (module docs).
     pub layer_min_similarity: f64,
     /// The merge threshold equivalent to BGE-M3 at 0.85. Applied by default
     /// (`calibrated_merge_threshold = false` switches it off).
@@ -145,6 +151,88 @@ pub fn recent_score(mode: CalibrationMode, contract: Option<&EmbeddingContract>)
         (CalibrationMode::Builtin, Some(row)) => row.recent_score,
         _ => crate::recall::candidates::RECENT_SCORE,
     }
+}
+
+/// `[embedder] calibrated_layer_floor`'s default: on.
+pub fn default_calibrated_layer_floor() -> bool {
+    true
+}
+
+/// The floor of a layer whose `min_similarity` nobody set, in a layered
+/// recall whose calling session runs under `contract`: the row's floor when
+/// `mode` is `builtin`, `enabled` (`[embedder] calibrated_layer_floor`, on
+/// by default) and the contract has a row; otherwise BGE-M3's
+/// [`DEFAULT_LAYER_MIN_SIMILARITY`](crate::recall::layered::DEFAULT_LAYER_MIN_SIMILARITY).
+/// A floor the user set is never passed through here.
+pub fn layer_min_similarity(
+    mode: CalibrationMode,
+    enabled: bool,
+    contract: &EmbeddingContract,
+) -> f64 {
+    match (mode, enabled, lookup(contract)) {
+        (CalibrationMode::Builtin, true, Some(row)) => row.layer_min_similarity,
+        _ => crate::recall::layered::DEFAULT_LAYER_MIN_SIMILARITY,
+    }
+}
+
+/// A layer's effective floor: `configured` (a floor the user set) when
+/// `Some`, else [`layer_min_similarity`] under `config`'s switches.
+pub(crate) fn resolve_layer_floor(
+    configured: Option<f64>,
+    config: &crate::Config,
+    contract: &EmbeddingContract,
+) -> f64 {
+    configured.unwrap_or_else(|| {
+        layer_min_similarity(config.calibration, config.calibrated_layer_floor, contract)
+    })
+}
+
+/// Why a layer's effective floor sits below its contract's calibrated one,
+/// if it does: a floor the user set lower (the old documentation's example
+/// set 0.50), or the calibration switched off. `None` when the floor is the
+/// calibrated one or higher, or the contract has no row. A serve logs this
+/// when it builds a layered session's server.
+pub fn layer_floor_warning(
+    layer: &str,
+    configured: Option<f64>,
+    config: &crate::Config,
+    contract: &EmbeddingContract,
+) -> Option<String> {
+    let row = lookup(contract)?;
+    let floor = resolve_layer_floor(configured, config, contract);
+    if floor >= row.layer_min_similarity {
+        return None;
+    }
+    let why = match configured {
+        Some(set) => format!("[[serve.layer]] {layer:?} sets min_similarity = {set}"),
+        None => format!(
+            "layer {layer:?} keeps BGE-M3's floor {floor}: [embedder] {}",
+            if config.calibration == CalibrationMode::Off {
+                "calibration = \"off\""
+            } else {
+                "calibrated_layer_floor = false"
+            }
+        ),
+    };
+    let switched_off =
+        !(config.calibration == CalibrationMode::Builtin && config.calibrated_layer_floor);
+    let fix = match (configured.is_some(), switched_off) {
+        (true, false) => "Remove that line",
+        (true, true) => {
+            "Remove that line and turn the calibration back on (remove `[embedder] calibration \
+             = \"off\"` and `calibrated_layer_floor = false`)"
+        }
+        (false, _) => {
+            "Turn the calibration back on (remove `[embedder] calibration = \"off\"` and \
+             `calibrated_layer_floor = false`)"
+        }
+    };
+    Some(format!(
+        "{why}, below the {} calibrated for this embedding contract, so the layer admits more \
+         irrelevant concepts than 0.50 does under BGE-M3. {fix} to use the calibrated floor \
+         (evidence: {})",
+        row.layer_min_similarity, row.evidence,
+    ))
 }
 
 /// `[embedder] calibrated_merge_threshold`'s default: on.

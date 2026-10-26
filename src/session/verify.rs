@@ -562,7 +562,11 @@ async fn layered_recall(
         lists.push(TierList {
             session: replay.session.clone(),
             weight: spec.weight,
-            floor: Some(spec.min_similarity),
+            floor: Some(crate::embed::calibration::resolve_layer_floor(
+                spec.configured_min_similarity(),
+                ctx.config,
+                ctx.embedding,
+            )),
             recall: Some(TierRecall { recall, identities }),
         });
     }
@@ -1080,7 +1084,14 @@ pub async fn verify_split(inputs: VerifyInputs<'_>) -> Result<VerifyReport, Veri
                 project.clone(),
                 stack
                     .iter()
-                    .map(|l| (l.session.clone(), l.weight, l.min_similarity))
+                    .map(|l| {
+                        let floor = crate::embed::calibration::resolve_layer_floor(
+                            l.configured_min_similarity(),
+                            config,
+                            embedding,
+                        );
+                        (l.session.clone(), l.weight, floor)
+                    })
                     .collect::<Vec<_>>(),
             );
         }

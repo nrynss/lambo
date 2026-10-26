@@ -31,7 +31,7 @@ tuned on.
 | Constant | Null | BGE-M3 | q (dev) | EG2 derived (self / raw) | Shipped |
 |---|---|---:|---:|---:|---:|
 | recent score | query to irrelevant concept (grade 0) | 0.35 | 0.482 | 0.630 / 0.627 | **0.63** |
-| layer floor | query to irrelevant concept (grade 0) | 0.50 | 0.967 | 0.720 / 0.718 | **0.72** (recorded only) |
+| layer floor | query to irrelevant concept (grade 0) | 0.50 | 0.967 | 0.720 / 0.718 | **0.72** (default for an unset floor) |
 | merge threshold | related-but-distinct pair, share merged | 0.85 | 0.439 merged | 0.926 / 0.934 | **0.93** (default) |
 
 The two framings agree to within 0.008. Vector cosines are not rescaled: a
@@ -139,7 +139,18 @@ the 19 guard-eligible pairs it still merges more than BGE-M3 does (12 against
 9), a small sample. BGE-M3's own rate is high (about 41–44% by cosine); changing
 that is a decision about BGE-M3's default, not this calibration.
 
-### Layer floor (recorded, not applied)
+### Layer floor (the default for an unset floor; owner decision, the follow-up to #203)
+
+A layer whose `[[serve.layer]] min_similarity` (or `LayerRef` floor) is unset
+takes 0.72 under this contract. The value is resolved at recall time from the
+calling session's embedding contract, which every live layer shares. A floor the
+user set always applies, 0.50 included, and `lambo serve` warns when it is below
+0.72 under this contract. `[embedder] calibrated_layer_floor =
+false`, or `calibration = "off"`, keeps 0.50. The cost: about 7.5% of true
+hits, the lowest-scoring ones, no longer pass a layer's floor (100% to 92.5%).
+The set is text only, so a layer's image concepts (a text query against an
+image vector, usually a lower cosine) were not measured against this floor; set
+that layer's `min_similarity` if its image hits matter.
 
 | Split | Run | Floor | All irrelevant above | True hits above |
 |---|---|---:|---:|---:|

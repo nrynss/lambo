@@ -208,3 +208,33 @@ fn the_table_round_trips_through_serde() {
     let back: ServeConfig = toml::from_str(&text).expect("deserialize");
     assert_eq!(back, f.serve);
 }
+
+/// #87 follow-up: a set `min_similarity` is the user's (it always applies,
+/// 0.50 included); an unset one is left to the contract's calibration.
+#[test]
+fn a_set_floor_is_marked_configured_and_an_unset_one_is_not() {
+    for (knob, configured) in [
+        ("", None),
+        ("min_similarity = 0.50\n", Some(0.50)),
+        ("min_similarity = 0.60\n", Some(0.60)),
+    ] {
+        let f = parse(&format!(
+            "sessions = [\"lambo\", \"general\"]\nlayers = [\"general\"]\n\n[[serve.layer]]\nsession = \"general\"\nweight = 0.5\n{knob}"
+        ))
+        .expect("parse");
+        let layers = f.serve.resolve_layers(&f.serve.sessions).expect("resolve");
+        let spec = &layers.stack("lambo")[0];
+        assert_eq!(spec.configured_min_similarity(), configured, "{knob:?}");
+        assert_eq!(spec.min_similarity_configured, configured.is_some());
+        assert_eq!(
+            spec.min_similarity,
+            configured.unwrap_or(DEFAULT_LAYER_MIN_SIMILARITY)
+        );
+        // The stdio view resolves the same way.
+        let stdio = f.serve.stdio_layers("lambo");
+        assert_eq!(
+            stdio.stack("lambo")[0].configured_min_similarity(),
+            configured
+        );
+    }
+}

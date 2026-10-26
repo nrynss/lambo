@@ -29,6 +29,35 @@
   calibrated_merge_threshold = false` restores `semantic_match_threshold`
   (and logs a warning at each writer attach under that contract). BGE-M3 and
   every other contract are unchanged.
+- **Behaviour change, EmbeddingGemma 2 layers only: an unset layer floor
+  is 0.72, not 0.50 (#87).** A layer's `min_similarity` (the vector cosine
+  an ordinary layer hit must reach to merge) defaulted to BGE-M3's 0.50.
+  Under the EG2 contract above, 0.50 admits 99.9% of irrelevant concepts on
+  the #190 held-out split (BGE-M3: 3.2%), so the floor filtered nothing. A
+  layer whose `[[serve.layer]] min_similarity` is unset, or a `LayerRef`
+  left at its default, now takes that contract's calibrated 0.72 in a
+  layered recall. That floor admits 3.1% of irrelevant concepts and keeps
+  92.5% of true hits. **For an EG2 session that reads a layer, about 7.5% of
+  true hits (the lowest-scoring ones) can drop out of its layered recall.**
+  The floor is resolved at recall time from the calling session's embedding
+  contract. A `min_similarity` you set always applies, 0.50 included: a
+  `lambo.toml` that copied the old documentation example
+  (`min_similarity = 0.50`) keeps 0.50 until that line is removed, and
+  `lambo serve` logs a warning for a layer floor below its contract's
+  calibrated one. `[embedder] calibrated_layer_floor = false`, or
+  `calibration = "off"`, restores 0.50. `lambo session verify` replays the same floor. BGE-M3,
+  every other contract and sessions without layers are unchanged.
+- **`LayerRef::min_similarity` is now `Option<f64>` (#87).** `None`, what
+  `LayerRef::new` gives, is an unset floor that takes the contract's
+  calibrated one; `Some(x)` always applies. An assignment
+  `layer.min_similarity = 0.5` no longer compiles: write
+  `Some(0.5)` or use `with_min_similarity`, which is unchanged. This keeps
+  an explicit 0.50 from being read as unset.
+- **`Config` and `EmbedderConfig` gain `calibrated_layer_floor`, and
+  `LayerSpec` gains `min_similarity_configured`** (#87). A `Config` or
+  `EmbedderConfig` struct literal that names every field no longer compiles;
+  `..Default::default()` keeps compiling. `LayerSpec` is `#[non_exhaustive]`,
+  so no caller builds one with a literal.
 - **`Config` and `EmbedderConfig` gain `calibration` and
   `calibrated_merge_threshold`, and `recall::candidates::Phase1Input` gains
   `recent_score`** (#87). A struct literal that names every field no longer

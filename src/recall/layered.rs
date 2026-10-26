@@ -86,8 +86,10 @@
 //! measured on BGE-M3 in #157 (see `dev-diary/notes/feat-157-layer-tuning.md`).
 //! Keywords do not bypass the absolute cosine floor: shared vocabulary
 //! alone admitted unrelated general rules. The weight stays 0.5 so admitted
-//! rules still fit the merged context. Other embedders need calibration
-//! (#87); both knobs remain configurable per layer.
+//! rules still fit the merged context. An unset floor is calibrated per
+//! embedding contract (#87, [`crate::embed::calibration`]): a measured
+//! contract (EmbeddingGemma 2 at 768 dims: 0.72) replaces 0.50 at recall
+//! time. Both knobs remain configurable per layer, and a set floor wins.
 
 use std::collections::{HashMap, HashSet};
 
@@ -103,6 +105,7 @@ pub const DEFAULT_LAYER_WEIGHT: f64 = 0.5;
 
 /// The default absolute vector-cosine floor of a layer, measured on BGE-M3
 /// in #157. Keywords and warnings do not bypass it; anchored traversal does.
+/// A contract with a calibration row uses its own floor instead (#87).
 pub const DEFAULT_LAYER_MIN_SIMILARITY: f64 = 0.50;
 
 /// The merge weight of the caller's own session.

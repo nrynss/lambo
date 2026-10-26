@@ -558,3 +558,18 @@ async fn a_scoped_write_draws_the_layers_rate() {
         session.mem.close().await.expect("close");
     }
 }
+
+/// #87 follow-up: a layer with no `[[serve.layer]] min_similarity` reaches
+/// the server unset, so its recall resolves the floor under the session's
+/// embedding contract (not 0.50 fixed at config time).
+#[tokio::test]
+async fn an_unset_layer_floor_reaches_the_server_unset() {
+    let registry = started_registry().await;
+    let project_server = session_of(&registry, PROJECT).server.clone();
+    let handle = &project_server.layers().handles[0];
+    assert_eq!(handle.session.as_str(), GENERAL);
+    assert_eq!(handle.min_similarity, None);
+    for session in registry.close_set().await {
+        session.mem.close().await.expect("close");
+    }
+}

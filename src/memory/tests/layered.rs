@@ -560,3 +560,140 @@ async fn a_layer_cannot_traverse_from_a_shorter_anchor_than_the_callers_subject(
     project.close().await.unwrap();
     general.close().await.unwrap();
 }
+
+/// #87: the EmbeddingGemma 2 contract the calibration table has a row for.
+fn eg2_contract() -> EmbeddingContract {
+    let row = &crate::embed::calibration::BUILTIN[0];
+    EmbeddingContract {
+        kind: row.kind.into(),
+        model: Some(row.model.into()),
+        dim: row.dim,
+    }
+}
+
+/// A session under [`eg2_contract`] with `config`'s calibration switches,
+/// seeded with `concepts`; `vectors` gives it a store that searches them.
+async fn eg2_seeded(
+    session: &str,
+    concepts: &[(&str, ConceptType)],
+    vectors: bool,
+    calibration: crate::embed::calibration::CalibrationMode,
+    calibrated_layer_floor: bool,
+) -> Memory {
+    let store: Arc<dyn GraphStore> = if vectors {
+        Arc::new(crate::test_util::GraphRanked(
+            crate::test_util::VectorSearchable(Arc::new(MemoryStore::new())),
+        ))
+    } else {
+        Arc::new(MemoryStore::new())
+    };
+    let contract = eg2_contract();
+    let mem = Memory::builder()
+        .session(session)
+        .agent("agent-a")
+        .config(Config {
+            daemon_tick_interval: Duration::from_secs(3_600),
+            calibration,
+            calibrated_layer_floor,
+            ..Config::default()
+        })
+        .flush_interval(Duration::from_secs(3_600))
+        .store(store)
+        .embedder(
+            Arc::new(FixtureEmbedder::with_dimensions(contract.dim).unwrap()) as Arc<dyn Embedder>,
+        )
+        .embedding_contract(contract)
+        .build()
+        .await
+        .expect("build");
+    mem.derive(concepts, &ParentOf::none()).await.unwrap();
+    mem.settle_daemon().await;
+    mem
+}
+
+/// #87 follow-up: under the EG2 contract a layer whose floor nobody set
+/// takes the calibrated 0.72, so a layer hit at cosine 0.70 (above BGE-M3's
+/// 0.50) no longer merges; a floor the caller set always wins, 0.50
+/// included, and either off switch restores 0.50.
+#[tokio::test]
+async fn an_unset_layer_floor_is_the_contracts_calibrated_one() {
+    use crate::embed::calibration::CalibrationMode::{Builtin, Off};
+    const LAYER_HIT: &str = "auth tokens rotate weekly";
+    let general = eg2_seeded(
+        "layered-eg2-general",
+        &[(LAYER_HIT, ConceptType::Logic)],
+        true,
+        Builtin,
+        true,
+    )
+    .await;
+    // Cosine 0.70 to the query: between the two floors.
+    crate::test_util::seed_layer_match(&general, LAYER_HIT, "auth tokens").await;
+    let project_concepts = [("auth middleware checks tokens", ConceptType::Entity)];
+    let has_layer_hit = |r: &LayeredRecall| {
+        r.hits
+            .iter()
+            .any(|h| h.session == *general.session() && h.hit.content == LAYER_HIT)
+    };
+
+    let project = eg2_seeded(
+        "layered-eg2-project",
+        &project_concepts,
+        false,
+        Builtin,
+        true,
+    )
+    .await;
+    let unset = project
+        .recall_layered(&[LayerRef::new(&general)], query("auth tokens"))
+        .await
+        .unwrap();
+    assert!(!has_layer_hit(&unset), "0.70 < 0.72: {:?}", unset.hits);
+    assert!(unset.unavailable_layers.is_empty());
+    // The caller's floor wins over the calibrated one, at the BGE-M3 value
+    // too: set explicitly, 0.50 is the user's choice, not "unset".
+    for set in [0.50, 0.65] {
+        let r = project
+            .recall_layered(
+                &[LayerRef::new(&general).with_min_similarity(set)],
+                query("auth tokens"),
+            )
+            .await
+            .unwrap();
+        assert!(has_layer_hit(&r), "set {set}: {:?}", r.hits);
+    }
+    // The public field is the same setting: `Some(0.50)` is not "unset".
+    let mut direct = LayerRef::new(&general);
+    assert_eq!(direct.min_similarity, None);
+    direct.min_similarity = Some(0.50);
+    let r = project
+        .recall_layered(&[direct], query("auth tokens"))
+        .await
+        .unwrap();
+    assert!(has_layer_hit(&r), "direct Some(0.50): {:?}", r.hits);
+    // A user floor above the calibrated one also wins.
+    let strict = project
+        .recall_layered(
+            &[LayerRef::new(&general).with_min_similarity(0.90)],
+            query("auth tokens"),
+        )
+        .await
+        .unwrap();
+    assert!(!has_layer_hit(&strict), "{:?}", strict.hits);
+    project.close().await.unwrap();
+
+    // The off switches are the calling session's: either restores 0.50.
+    for (name, mode, on) in [
+        ("layered-eg2-floor-off", Builtin, false),
+        ("layered-eg2-calibration-off", Off, true),
+    ] {
+        let project = eg2_seeded(name, &project_concepts, false, mode, on).await;
+        let r = project
+            .recall_layered(&[LayerRef::new(&general)], query("auth tokens"))
+            .await
+            .unwrap();
+        assert!(has_layer_hit(&r), "{name}: {:?}", r.hits);
+        project.close().await.unwrap();
+    }
+    general.close().await.unwrap();
+}

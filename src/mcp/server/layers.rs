@@ -109,8 +109,10 @@ pub(crate) struct LayerHandle {
     pub(crate) session: SessionId,
     /// Its merge weight.
     pub(crate) weight: f64,
-    /// Its floor.
-    pub(crate) min_similarity: f64,
+    /// Its floor as configured; `None` (no `[[serve.layer]]
+    /// min_similarity`) takes the contract's calibrated floor at recall
+    /// time (#87).
+    pub(crate) min_similarity: Option<f64>,
     /// The registry, weakly: see the module docs.
     source: Weak<dyn LayerSource>,
 }
@@ -120,7 +122,7 @@ impl LayerHandle {
     pub(crate) fn new(
         session: &str,
         weight: f64,
-        min_similarity: f64,
+        min_similarity: Option<f64>,
         source: Weak<dyn LayerSource>,
     ) -> Self {
         Self {

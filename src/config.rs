@@ -213,6 +213,13 @@ pub struct Config {
     /// On by default; a contract without a measured row is unaffected.
     #[serde(default = "crate::embed::calibration::default_calibrated_merge_threshold")]
     pub calibrated_merge_threshold: bool,
+    /// #87: `[embedder] calibrated_layer_floor`. Whether a layer whose
+    /// `min_similarity` nobody set takes its contract's measured floor
+    /// instead of 0.50 in this session's layered recall. On by default
+    /// (also needs `calibration = "builtin"`); a floor the user set always
+    /// wins, and a contract without a measured row is unaffected.
+    #[serde(default = "crate::embed::calibration::default_calibrated_layer_floor")]
+    pub calibrated_layer_floor: bool,
     pub max_cooccurrence_per_derive: usize,
 
     pub default_top_k: usize,
@@ -276,6 +283,7 @@ impl Default for Config {
             semantic_match_threshold: crate::graph::hybrid::SEMANTIC_MATCH_THRESHOLD_DEFAULT,
             calibration: crate::embed::calibration::CalibrationMode::Builtin,
             calibrated_merge_threshold: true,
+            calibrated_layer_floor: true,
             max_cooccurrence_per_derive: 10,
 
             default_top_k: 5,

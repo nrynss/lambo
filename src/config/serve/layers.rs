@@ -13,7 +13,8 @@
 //! [[serve.layer]]               # per-layer ranking knobs
 //! session = "general"
 //! weight = 0.5                  # BGE-M3 tuning: #157
-//! min_similarity = 0.50         # absolute vector relevance
+//! # min_similarity = 0.50       # absolute vector relevance; unset: the
+//!                               # contract's calibrated floor (#87)
 //! ```
 //!
 //! Every shape is a list, so N tiers later is one relaxed check
@@ -58,7 +59,9 @@ pub struct LayerConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub weight: Option<f64>,
     /// The layer's absolute floor: an ordinary hit merges only at
-    /// vector cosine at or above this. In `[0, 1]`.
+    /// vector cosine at or above this. In `[0, 1]`. Unset, it is the
+    /// embedding contract's calibrated floor (#87; EmbeddingGemma 2 at 768
+    /// dims: 0.72), else 0.50; a value set here always applies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_similarity: Option<f64>,
 }
@@ -71,8 +74,22 @@ pub struct LayerSpec {
     pub session: String,
     /// Its merge weight.
     pub weight: f64,
-    /// Its floor.
+    /// Its floor: the configured one, else [`DEFAULT_LAYER_MIN_SIMILARITY`].
+    /// An unset floor is replaced at recall time by the calling session's
+    /// contract's calibrated floor when it has one (#87; see
+    /// [`LayerSpec::configured_min_similarity`]).
     pub min_similarity: f64,
+    /// Whether `[[serve.layer]] min_similarity` set the floor.
+    pub min_similarity_configured: bool,
+}
+
+impl LayerSpec {
+    /// The floor `[[serve.layer]]` set, if any; `None` leaves it to the
+    /// contract's calibration (#87).
+    pub fn configured_min_similarity(&self) -> Option<f64> {
+        self.min_similarity_configured
+            .then_some(self.min_similarity)
+    }
 }
 
 /// The layer stack of every layered session a serve pins, resolved by
@@ -278,12 +295,12 @@ impl ServeConfig {
             .iter()
             .map(|layer| {
                 let k = self.layer.iter().find(|k| &k.session == layer);
+                let configured = k.and_then(|k| k.min_similarity);
                 LayerSpec {
                     session: layer.clone(),
                     weight: k.and_then(|k| k.weight).unwrap_or(DEFAULT_LAYER_WEIGHT),
-                    min_similarity: k
-                        .and_then(|k| k.min_similarity)
-                        .unwrap_or(DEFAULT_LAYER_MIN_SIMILARITY),
+                    min_similarity: configured.unwrap_or(DEFAULT_LAYER_MIN_SIMILARITY),
+                    min_similarity_configured: configured.is_some(),
                 }
             })
             .collect()

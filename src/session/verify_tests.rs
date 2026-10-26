@@ -659,6 +659,7 @@ async fn the_replay_matches_memory_recall_layered_on_a_sqlite_split_output() {
         session: "general".into(),
         weight: layered::DEFAULT_LAYER_WEIGHT,
         min_similarity: layered::DEFAULT_LAYER_MIN_SIMILARITY,
+        min_similarity_configured: false,
     };
     let params = VerifyParams {
         top_k: 10,

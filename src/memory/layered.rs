@@ -16,8 +16,8 @@ use std::task::Poll;
 use super::Memory;
 use crate::recall::format;
 use crate::recall::layered::{
-    self, HitIdentity, LayeredRecall, MergeParams, TierList, TierRecall,
-    DEFAULT_LAYER_MIN_SIMILARITY, DEFAULT_LAYER_WEIGHT, PRIMARY_WEIGHT,
+    self, HitIdentity, LayeredRecall, MergeParams, TierList, TierRecall, DEFAULT_LAYER_WEIGHT,
+    PRIMARY_WEIGHT,
 };
 use crate::types::{EmbeddingContract, LamboError, Node, RecallHit, RecallQuery, SessionId};
 
@@ -37,9 +37,18 @@ pub struct LayerRef<'a> {
     pub weight: f64,
     /// The layer's absolute floor: a hit outside a
     /// traversal answer anchored in this layer merges only at vector
-    /// cosine `>=` this; no warning lifts it. In `[0, 1]`. Defaults to
-    /// [`DEFAULT_LAYER_MIN_SIMILARITY`] (measured on BGE-M3 in #157).
-    pub min_similarity: f64,
+    /// cosine `>=` this; no warning lifts it. In `[0, 1]`.
+    ///
+    /// `None` (what [`LayerRef::new`] gives) is unset: the recall uses the
+    /// calling session's contract's calibrated floor when it has one (#87;
+    /// EmbeddingGemma 2 at 768 dims: 0.72), else
+    /// [`DEFAULT_LAYER_MIN_SIMILARITY`](crate::recall::layered::DEFAULT_LAYER_MIN_SIMILARITY)
+    /// (measured on BGE-M3 in #157), which
+    /// is also what `Config::calibrated_layer_floor = false` or
+    /// `calibration = Off` gives. `Some` floor (set with
+    /// [`LayerRef::with_min_similarity`] or here) always applies, 0.50
+    /// included.
+    pub min_similarity: Option<f64>,
 }
 
 impl<'a> LayerRef<'a> {
@@ -48,7 +57,7 @@ impl<'a> LayerRef<'a> {
         Self {
             memory,
             weight: DEFAULT_LAYER_WEIGHT,
-            min_similarity: DEFAULT_LAYER_MIN_SIMILARITY,
+            min_similarity: None,
         }
     }
 
@@ -58,9 +67,10 @@ impl<'a> LayerRef<'a> {
         self
     }
 
-    /// This layer with floor `min_similarity`.
+    /// This layer with floor `min_similarity`, which then applies under
+    /// every contract (no calibrated floor replaces it).
     pub fn with_min_similarity(mut self, min_similarity: f64) -> Self {
-        self.min_similarity = min_similarity;
+        self.min_similarity = Some(min_similarity);
         self
     }
 }
@@ -77,7 +87,8 @@ pub(crate) enum LayerSlot<'a> {
     Unavailable {
         session: &'a SessionId,
         weight: f64,
-        min_similarity: f64,
+        /// The floor the user set; `None` takes the calibrated default.
+        min_similarity: Option<f64>,
     },
 }
 
@@ -85,7 +96,8 @@ pub(crate) enum LayerSlot<'a> {
 struct SlotKnobs<'a> {
     session: &'a SessionId,
     weight: f64,
-    min_similarity: f64,
+    /// The floor the user set, if any (the calibrated one is in range).
+    min_similarity: Option<f64>,
 }
 
 impl LayerSlot<'_> {
@@ -135,8 +147,10 @@ impl Memory {
     /// With layers, each session's list is merged by weighted rank
     /// interleave (`weight / rank`, this session at 1.0). A layer hit
     /// merges only with vector cosine at or above the
-    /// layer's floor, or as a dependent in the layer's traversal answer to
-    /// a dependency question whose anchor is in that layer. Hits with a
+    /// layer's floor (an unset floor is this session's contract's
+    /// calibrated one, #87: see [`LayerRef::min_similarity`]), or as a
+    /// dependent in the layer's traversal answer to a dependency question
+    /// whose anchor is in that layer. Hits with a
     /// Conflict, Hot or Reservation warning are kept past `top_k` (never
     /// past a floor). The same memory in two tiers (equal canonical key, or
     /// holder vectors at cosine at or above this session's
@@ -249,24 +263,27 @@ impl Memory {
         });
         let mut results = layer_results.into_iter();
         for slot in layers {
-            let (session, weight, floor, result) = match slot {
+            // #87: an unset floor is resolved here, under this session's
+            // contract (every live layer shares it) and switches.
+            let floor = crate::embed::calibration::resolve_layer_floor(
+                slot.knobs().min_similarity,
+                &self.config,
+                &self.embedding,
+            );
+            let (session, weight, result) = match slot {
                 LayerSlot::Live(layer) => (
                     &layer.memory.session,
                     layer.weight,
-                    layer.min_similarity,
                     results
                         .next()
                         .unwrap_or_else(|| Err("no result".to_string()))
                         .and_then(|r| r),
                 ),
                 LayerSlot::Unavailable {
-                    session,
-                    weight,
-                    min_similarity,
+                    session, weight, ..
                 } => (
                     *session,
                     *weight,
-                    *min_similarity,
                     Err("not attached in this process".to_string()),
                 ),
             };
@@ -339,10 +356,12 @@ impl Memory {
                     layer.weight
                 )));
             }
-            if !(layer.min_similarity.is_finite() && (0.0..=1.0).contains(&layer.min_similarity)) {
+            if let Some(m) = layer
+                .min_similarity
+                .filter(|m| !(m.is_finite() && (0.0..=1.0).contains(m)))
+            {
                 return Err(LamboError::Config(format!(
-                    "layered recall: layer {session} min_similarity must be finite and in [0, 1], got {}",
-                    layer.min_similarity
+                    "layered recall: layer {session} min_similarity must be finite and in [0, 1], got {m}"
                 )));
             }
         }

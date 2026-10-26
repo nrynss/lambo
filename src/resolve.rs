@@ -286,6 +286,7 @@ fn process_config(
     // #87: the per-contract calibration switches, for the same reason.
     config.calibration = embedder_cfg.calibration;
     config.calibrated_merge_threshold = embedder_cfg.calibrated_merge_threshold;
+    config.calibrated_layer_floor = embedder_cfg.calibrated_layer_floor;
     config.validate()?;
     // Accepted-but-inert settings (issue #29: an idle floor that makes the
     // time trigger unreachable) are logged, not refused.
