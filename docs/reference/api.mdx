@@ -314,7 +314,7 @@ let mem = Memory::builder()
 | `match_strategy` | `Hybrid` | `Canonical` or `Hybrid` — selects the recall matching scope, whether a derive embeds, **and** the call-time validation rule set (see `MatchStrategy` in the source authority). J3-R2R-7: `Canonical` adds `reject_repeated_observation` and the single-`Hierarchical`-parent rule. |
 | `semantic_match_threshold` | `0.85` | Similarity above which two concepts match. Must be between `0` and `1`. |
 | `calibration` | `Builtin` | Whether recall uses the built-in per-contract recent-leg score (#87): `Builtin` or `Off`. Set from `[embedder] calibration`. |
-| `calibrated_merge_threshold` | `false` | Whether a writer attach replaces `semantic_match_threshold` with its embedding contract's measured threshold (#87). Set from `[embedder] calibrated_merge_threshold`. |
+| `calibrated_merge_threshold` | `true` | Whether a writer attach replaces `semantic_match_threshold` with its embedding contract's measured threshold (#87); `false` keeps `semantic_match_threshold`. Set from `[embedder] calibrated_merge_threshold`. |
 | `backend_flush_interval` | 1 second | How often pending writes flush, which sets how far behind durable storage a session can be. |
 | `backend_flush_max_batch` | `500` | Mutations per flush batch. |
 | `backend_flush_retries` | `3` | Attempts before a batch is dead-lettered. |

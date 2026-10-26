@@ -48,11 +48,13 @@
 //!   lift recency above the irrelevant hits a recall returns: BGE-M3's 0.35
 //!   never did either, and any value that did would also outrank true hits
 //!   (the trade-off table in the evidence README).
-//! * **Merge threshold**: **off**. A built-in threshold applies only with
-//!   `[embedder] calibrated_merge_threshold = true`, so no existing store's
-//!   merge behaviour changes on upgrade. A contract whose measured threshold
-//!   is above the configured one logs a warning at the writer attach instead.
-//!   A usable `related_pairs` derivation (#176) still wins over both.
+//! * **Merge threshold**: on (owner decision on #203). A writer attach under
+//!   a contract with a row merges at the row's threshold instead of
+//!   `semantic_match_threshold`, so an existing EG2 store merges less after
+//!   the upgrade (0.93 instead of 0.85). `[embedder]
+//!   calibrated_merge_threshold = false` restores the configured threshold,
+//!   and a writer attach then logs a warning when the configured one is
+//!   lower. A usable `related_pairs` derivation (#176) still wins over both.
 //! * **Layer floor**: recorded, not applied: a layer's `min_similarity` is a
 //!   per-layer setting resolved before any embedder is known.
 //!
@@ -99,7 +101,8 @@ pub struct ContractCalibration {
     /// The layered-recall similarity floor equivalent to 0.50 under BGE-M3.
     /// Recorded only (module docs).
     pub layer_min_similarity: f64,
-    /// The merge threshold equivalent to BGE-M3 at 0.85. Opt-in.
+    /// The merge threshold equivalent to BGE-M3 at 0.85. Applied by default
+    /// (`calibrated_merge_threshold = false` switches it off).
     pub merge_threshold: f64,
     /// Share of the set's related-but-distinct pairs at or above the
     /// *default* 0.85 under this contract, by cosine (before #193's
@@ -144,13 +147,22 @@ pub fn recent_score(mode: CalibrationMode, contract: Option<&EmbeddingContract>)
     }
 }
 
+/// `[embedder] calibrated_merge_threshold`'s default: on.
+pub fn default_calibrated_merge_threshold() -> bool {
+    true
+}
+
 /// The built-in merge threshold for a writer attach that did not derive one
-/// from labelled pairs. `Some` only when `opt_in` and the contract has a row;
-/// otherwise the configured threshold stays, with a warning when the contract
-/// is known to merge far more under it than BGE-M3 does.
-pub fn merge_threshold(opt_in: bool, contract: &EmbeddingContract, configured: f64) -> Option<f64> {
+/// from labelled pairs. `Some` when `enabled` (the default) and the contract
+/// has a row; otherwise the configured threshold stays, with a warning when
+/// the contract is known to merge far more under it than BGE-M3 does.
+pub fn merge_threshold(
+    enabled: bool,
+    contract: &EmbeddingContract,
+    configured: f64,
+) -> Option<f64> {
     let row = lookup(contract)?;
-    if opt_in {
+    if enabled {
         return Some(row.merge_threshold);
     }
     if configured < row.merge_threshold {
@@ -160,10 +172,10 @@ pub fn merge_threshold(opt_in: bool, contract: &EmbeddingContract, configured: f
             dim = row.dim,
             configured,
             calibrated = row.merge_threshold,
-            "semantic_match_threshold {configured} was calibrated on BGE-M3: under this \
-             embedding contract {:.0}% of the labelled related-but-distinct pairs score 0.85 or \
-             more (BGE-M3: 35-44%). Set [embedder] calibrated_merge_threshold = true to merge \
-             at {} instead (evidence: {})",
+            "[embedder] calibrated_merge_threshold = false: merging at semantic_match_threshold \
+             {configured}, which was calibrated on BGE-M3. Under this embedding contract {:.0}% \
+             of the labelled related-but-distinct pairs score 0.85 or more (BGE-M3: 35-44%). \
+             Remove the setting to merge at the calibrated {} (evidence: {})",
             row.default_threshold_merges * 100.0,
             row.merge_threshold,
             row.evidence,

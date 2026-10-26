@@ -727,10 +727,10 @@ pub struct EmbedderConfig {
     #[serde(default)]
     pub calibration: calibration::CalibrationMode,
     /// #87: merge at the contract's measured threshold instead of
-    /// `semantic_match_threshold`. Off by default, so upgrading never changes
-    /// an existing store's merges. A usable `related_pairs` derivation still
-    /// takes precedence; a contract without a measured row is unaffected.
-    #[serde(default)]
+    /// `semantic_match_threshold`. On by default; `false` restores the
+    /// configured threshold. A usable `related_pairs` derivation still takes
+    /// precedence; a contract without a measured row is unaffected.
+    #[serde(default = "calibration::default_calibrated_merge_threshold")]
     pub calibrated_merge_threshold: bool,
 }
 
@@ -759,7 +759,7 @@ impl Default for EmbedderConfig {
             canary: canary::CanaryMode::Warn,
             related_pairs: None,
             calibration: calibration::CalibrationMode::Builtin,
-            calibrated_merge_threshold: false,
+            calibrated_merge_threshold: true,
         }
     }
 }

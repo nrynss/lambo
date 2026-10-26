@@ -732,8 +732,9 @@ impl MemoryBuilder {
                     &session,
                 )
                 .await?;
-                // #87: labelled pairs first, then (opt-in only) the
-                // contract's measured threshold, else the configured one.
+                // #87: labelled pairs first, then the contract's measured
+                // threshold (unless `calibrated_merge_threshold = false`),
+                // else the configured one.
                 derived.or_else(|| {
                     let calibrated = crate::embed::calibration::merge_threshold(
                         config.calibrated_merge_threshold,

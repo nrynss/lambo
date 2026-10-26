@@ -210,8 +210,8 @@ pub struct Config {
     pub calibration: crate::embed::calibration::CalibrationMode,
     /// #87: `[embedder] calibrated_merge_threshold`. Whether a writer attach
     /// replaces `semantic_match_threshold` with its contract's measured one.
-    /// Off by default.
-    #[serde(default)]
+    /// On by default; a contract without a measured row is unaffected.
+    #[serde(default = "crate::embed::calibration::default_calibrated_merge_threshold")]
     pub calibrated_merge_threshold: bool,
     pub max_cooccurrence_per_derive: usize,
 
@@ -275,7 +275,7 @@ impl Default for Config {
 
             semantic_match_threshold: crate::graph::hybrid::SEMANTIC_MATCH_THRESHOLD_DEFAULT,
             calibration: crate::embed::calibration::CalibrationMode::Builtin,
-            calibrated_merge_threshold: false,
+            calibrated_merge_threshold: true,
             max_cooccurrence_per_derive: 10,
 
             default_top_k: 5,

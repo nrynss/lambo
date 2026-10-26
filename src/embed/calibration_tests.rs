@@ -60,10 +60,10 @@ fn recent_score_is_calibrated_only_when_on_and_known() {
 }
 
 #[test]
-fn merge_threshold_applies_only_on_opt_in() {
+fn merge_threshold_applies_unless_switched_off() {
     let default = crate::graph::hybrid::SEMANTIC_MATCH_THRESHOLD_DEFAULT;
     assert_eq!(merge_threshold(true, &eg2(), default), Some(0.93));
-    // Off by default: the configured threshold stays (a warning is logged).
+    // Switched off: the configured threshold stays (a warning is logged).
     assert_eq!(merge_threshold(false, &eg2(), default), None);
     assert_eq!(merge_threshold(false, &eg2(), 0.99), None);
     let mut unknown = eg2();
@@ -71,14 +71,42 @@ fn merge_threshold_applies_only_on_opt_in() {
     assert_eq!(merge_threshold(true, &unknown, default), None);
 }
 
+/// Owner decision on #203: the calibrated merge threshold is the default.
 #[test]
-fn defaults_change_nothing_for_merges() {
+fn calibrated_merge_threshold_is_on_by_default() {
     let cfg = crate::embed::EmbedderConfig::default();
     assert_eq!(cfg.calibration, CalibrationMode::Builtin);
-    assert!(!cfg.calibrated_merge_threshold);
+    assert!(cfg.calibrated_merge_threshold);
     let config = crate::Config::default();
     assert_eq!(config.calibration, CalibrationMode::Builtin);
-    assert!(!config.calibrated_merge_threshold);
+    assert!(config.calibrated_merge_threshold);
+}
+
+/// The file's default matches the struct's: absent means on, and `false`
+/// is the off switch.
+#[test]
+fn calibrated_merge_threshold_parses_with_default_on() {
+    let parse = |extra: &str| {
+        toml::from_str::<crate::embed::EmbedderConfig>(&format!("kind = \"bge_m3\"\n{extra}"))
+            .unwrap()
+            .calibrated_merge_threshold
+    };
+    assert!(parse(""));
+    assert!(parse("calibrated_merge_threshold = true"));
+    assert!(!parse("calibrated_merge_threshold = false"));
+    let config: crate::Config =
+        serde_json::from_value(serde_json::to_value(crate::Config::default()).unwrap()).unwrap();
+    assert!(config.calibrated_merge_threshold);
+    let mut value = serde_json::to_value(crate::Config::default()).unwrap();
+    value
+        .as_object_mut()
+        .unwrap()
+        .remove("calibrated_merge_threshold");
+    let config: crate::Config = serde_json::from_value(value).unwrap();
+    assert!(
+        config.calibrated_merge_threshold,
+        "an absent field defaults on"
+    );
 }
 
 #[test]

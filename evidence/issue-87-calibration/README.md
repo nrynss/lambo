@@ -32,7 +32,7 @@ tuned on.
 |---|---|---:|---:|---:|---:|
 | recent score | query to irrelevant concept (grade 0) | 0.35 | 0.482 | 0.630 / 0.627 | **0.63** |
 | layer floor | query to irrelevant concept (grade 0) | 0.50 | 0.967 | 0.720 / 0.718 | **0.72** (recorded only) |
-| merge threshold | related-but-distinct pair, share merged | 0.85 | 0.439 merged | 0.926 / 0.934 | **0.93** (opt-in) |
+| merge threshold | related-but-distinct pair, share merged | 0.85 | 0.439 merged | 0.926 / 0.934 | **0.93** (default) |
 
 The two framings agree to within 0.008. Vector cosines are not rescaled: a
 `(cos − floor) / (1 − floor)` map would move every reported cosine, the
@@ -98,7 +98,7 @@ irrelevant median. Getting BGE-M3's gaps back, relative to `d`, means
 rescaling the cosines themselves, which is #173's rank fusion and not a
 constant.
 
-### Merge threshold (opt-in: `[embedder] calibrated_merge_threshold = true`)
+### Merge threshold (the default since the owner's decision on #203; `[embedder] calibrated_merge_threshold = false` restores 0.85)
 
 Derived by cosine over every labelled pair. #193's identifier guard refuses
 a merge between texts that name different identifiers (digit runs, versions,

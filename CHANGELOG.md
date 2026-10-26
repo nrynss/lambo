@@ -16,14 +16,19 @@
   recall whose vector leg runs (a recall by image or vector keeps 0.35). BGE-M3 and every other contract are unchanged.
   `[embedder] calibration = "off"` restores 0.35. Evidence and method:
   `evidence/issue-87-calibration/`.
-- **`[embedder] calibrated_merge_threshold` (#87), off by default.** Under the
-  EG2 contract above, the default `semantic_match_threshold` 0.85 puts
-  about 78% of the set's related-but-distinct pairs over the threshold by
-  cosine (BGE-M3: 35–44%), and merges every one the identifier guard lets
-  through. Set
-  this to `true` to merge at 0.93 under that contract, which matches
-  BGE-M3's rate. While it is off, a writer attach under that contract logs a
-  warning. Merges do not change unless you opt in.
+- **Behaviour change, EmbeddingGemma 2 only: writers merge at 0.93, not
+  0.85 (#87).** Under the EG2 contract above, the default
+  `semantic_match_threshold` 0.85 puts about 78% of the set's
+  related-but-distinct pairs over the threshold by cosine (BGE-M3: 35–44%),
+  and merges every one the identifier guard lets through. A writer attach
+  under that contract now merges at its calibrated 0.93, which matches
+  BGE-M3's rate. **Existing EG2 stores merge less from this version on:** a
+  new concept that would have merged into a near neighbour at 0.85–0.93 is
+  kept as its own concept. Concepts merged before stay merged. A usable
+  `related_pairs` derivation still wins. `[embedder]
+  calibrated_merge_threshold = false` restores `semantic_match_threshold`
+  (and logs a warning at each writer attach under that contract). BGE-M3 and
+  every other contract are unchanged.
 - **`Config` and `EmbedderConfig` gain `calibration` and
   `calibrated_merge_threshold`, and `recall::candidates::Phase1Input` gains
   `recent_score`** (#87). A struct literal that names every field no longer
