@@ -16,8 +16,8 @@ use std::task::Poll;
 use super::Memory;
 use crate::recall::format;
 use crate::recall::layered::{
-    self, HitIdentity, LayeredRecall, MergeParams, TierList, TierRecall,
-    DEFAULT_LAYER_MIN_SIMILARITY, DEFAULT_LAYER_WEIGHT, PRIMARY_WEIGHT,
+    self, HitIdentity, LayeredRecall, MergeParams, TierList, TierRecall, DEFAULT_LAYER_WEIGHT,
+    PRIMARY_WEIGHT,
 };
 use crate::types::{EmbeddingContract, LamboError, Node, RecallHit, RecallQuery, SessionId};
 
@@ -37,19 +37,18 @@ pub struct LayerRef<'a> {
     pub weight: f64,
     /// The layer's absolute floor: a hit outside a
     /// traversal answer anchored in this layer merges only at vector
-    /// cosine `>=` this; no warning lifts it. In `[0, 1]`. Defaults to
-    /// [`DEFAULT_LAYER_MIN_SIMILARITY`] (measured on BGE-M3 in #157).
+    /// cosine `>=` this; no warning lifts it. In `[0, 1]`.
     ///
-    /// Left at that default (by [`LayerRef::new`], unset), the recall uses
-    /// the calling session's contract's calibrated floor instead when it has
-    /// one (#87; EmbeddingGemma 2 at 768 dims: 0.72), unless the caller's
-    /// `Config::calibrated_layer_floor` is off or its `calibration` is `off`.
-    /// A floor set with [`LayerRef::with_min_similarity`] always applies,
-    /// 0.50 included; one assigned to this field directly applies unless it
-    /// equals the default.
-    pub min_similarity: f64,
-    /// Whether [`LayerRef::with_min_similarity`] set the floor.
-    min_similarity_set: bool,
+    /// `None` (what [`LayerRef::new`] gives) is unset: the recall uses the
+    /// calling session's contract's calibrated floor when it has one (#87;
+    /// EmbeddingGemma 2 at 768 dims: 0.72), else
+    /// [`DEFAULT_LAYER_MIN_SIMILARITY`](crate::recall::layered::DEFAULT_LAYER_MIN_SIMILARITY)
+    /// (measured on BGE-M3 in #157), which
+    /// is also what `Config::calibrated_layer_floor = false` or
+    /// `calibration = Off` gives. `Some` floor (set with
+    /// [`LayerRef::with_min_similarity`] or here) always applies, 0.50
+    /// included.
+    pub min_similarity: Option<f64>,
 }
 
 impl<'a> LayerRef<'a> {
@@ -58,8 +57,7 @@ impl<'a> LayerRef<'a> {
         Self {
             memory,
             weight: DEFAULT_LAYER_WEIGHT,
-            min_similarity: DEFAULT_LAYER_MIN_SIMILARITY,
-            min_similarity_set: false,
+            min_similarity: None,
         }
     }
 
@@ -72,18 +70,8 @@ impl<'a> LayerRef<'a> {
     /// This layer with floor `min_similarity`, which then applies under
     /// every contract (no calibrated floor replaces it).
     pub fn with_min_similarity(mut self, min_similarity: f64) -> Self {
-        self.min_similarity = min_similarity;
-        self.min_similarity_set = true;
+        self.min_similarity = Some(min_similarity);
         self
-    }
-
-    /// The floor the user set, if any: `None` when it was left at
-    /// [`DEFAULT_LAYER_MIN_SIMILARITY`] without
-    /// [`LayerRef::with_min_similarity`].
-    fn configured_min_similarity(&self) -> Option<f64> {
-        #[allow(clippy::float_cmp)] // the exact default constant, not a computed value
-        let unset = !self.min_similarity_set && self.min_similarity == DEFAULT_LAYER_MIN_SIMILARITY;
-        (!unset).then_some(self.min_similarity)
     }
 }
 
@@ -118,7 +106,7 @@ impl LayerSlot<'_> {
             LayerSlot::Live(l) => SlotKnobs {
                 session: &l.memory.session,
                 weight: l.weight,
-                min_similarity: l.configured_min_similarity(),
+                min_similarity: l.min_similarity,
             },
             LayerSlot::Unavailable {
                 session,
@@ -139,7 +127,6 @@ impl std::fmt::Debug for LayerRef<'_> {
             .field("session", self.memory.session())
             .field("weight", &self.weight)
             .field("min_similarity", &self.min_similarity)
-            .field("min_similarity_set", &self.min_similarity_set)
             .finish()
     }
 }

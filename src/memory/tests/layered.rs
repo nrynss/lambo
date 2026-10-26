@@ -662,6 +662,15 @@ async fn an_unset_layer_floor_is_the_contracts_calibrated_one() {
             .unwrap();
         assert!(has_layer_hit(&r), "set {set}: {:?}", r.hits);
     }
+    // The public field is the same setting: `Some(0.50)` is not "unset".
+    let mut direct = LayerRef::new(&general);
+    assert_eq!(direct.min_similarity, None);
+    direct.min_similarity = Some(0.50);
+    let r = project
+        .recall_layered(&[direct], query("auth tokens"))
+        .await
+        .unwrap();
+    assert!(has_layer_hit(&r), "direct Some(0.50): {:?}", r.hits);
     // A user floor above the calibrated one also wins.
     let strict = project
         .recall_layered(

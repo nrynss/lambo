@@ -47,6 +47,12 @@
   calibrated one. `[embedder] calibrated_layer_floor = false`, or
   `calibration = "off"`, restores 0.50. `lambo session verify` replays the same floor. BGE-M3,
   every other contract and sessions without layers are unchanged.
+- **`LayerRef::min_similarity` is now `Option<f64>` (#87).** `None`, what
+  `LayerRef::new` gives, is an unset floor that takes the contract's
+  calibrated one; `Some(x)` always applies. An assignment
+  `layer.min_similarity = 0.5` no longer compiles: write
+  `Some(0.5)` or use `with_min_similarity`, which is unchanged. This keeps
+  an explicit 0.50 from being read as unset.
 - **`Config` and `EmbedderConfig` gain `calibrated_layer_floor`, and
   `LayerSpec` gains `min_similarity_configured`** (#87). A `Config` or
   `EmbedderConfig` struct literal that names every field no longer compiles;
