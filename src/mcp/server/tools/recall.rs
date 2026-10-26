@@ -202,11 +202,15 @@ impl LamboServer {
                     .iter()
                     .zip(&live)
                     .map(|(handle, live)| match live {
-                        Some(live) => LayerSlot::Live(
-                            LayerRef::new(&live.mem)
-                                .with_weight(handle.weight)
-                                .with_min_similarity(handle.min_similarity),
-                        ),
+                        Some(live) => {
+                            let layer = LayerRef::new(&live.mem).with_weight(handle.weight);
+                            // #87: an unset floor stays unset, so the recall
+                            // resolves it under the session's contract.
+                            LayerSlot::Live(match handle.min_similarity {
+                                Some(m) => layer.with_min_similarity(m),
+                                None => layer,
+                            })
+                        }
                         None => LayerSlot::Unavailable {
                             session: &handle.session,
                             weight: handle.weight,

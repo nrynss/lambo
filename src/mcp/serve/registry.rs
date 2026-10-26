@@ -1293,13 +1293,30 @@ impl SessionRegistry {
             server = server.serving_a_layer(attacher.layers.is_layer(mem.session().as_str()));
             let stack = attacher.layers.stack(mem.session().as_str());
             if !stack.is_empty() {
+                // #87: a floor below the contract's calibrated one is the
+                // user's choice, but likely a stale one; say so.
+                for l in stack {
+                    if let Some(warning) = crate::embed::calibration::layer_floor_warning(
+                        &l.session,
+                        l.configured_min_similarity(),
+                        mem.config(),
+                        mem.embedding_contract(),
+                    ) {
+                        tracing::warn!(session = %mem.session(), "lambo serve: {warning}");
+                    }
+                }
                 let weak: Weak<SessionRegistry> = Arc::downgrade(self);
                 let source: Weak<dyn LayerSource> = weak;
                 server = server.with_layers(ServerLayers {
                     handles: stack
                         .iter()
                         .map(|l| {
-                            LayerHandle::new(&l.session, l.weight, l.min_similarity, source.clone())
+                            LayerHandle::new(
+                                &l.session,
+                                l.weight,
+                                l.configured_min_similarity(),
+                                source.clone(),
+                            )
                         })
                         .collect(),
                     authority: attacher.authority.clone(),

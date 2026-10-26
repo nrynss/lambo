@@ -13,7 +13,7 @@ use crate::mcp::server::layers::{
     LayerDown, LayerHandle, LayerRead, LayerSource, LiveLayer, ServerLayers,
 };
 use crate::mcp::server::trace::{with_caller, CallAuth};
-use crate::recall::layered::{DEFAULT_LAYER_MIN_SIMILARITY, DEFAULT_LAYER_WEIGHT};
+use crate::recall::layered::DEFAULT_LAYER_WEIGHT;
 use crate::surface::session::{
     parse_addressed, HostedSessions, SessionAuthority, SessionCapabilities, SessionGrant,
     SessionScope,
@@ -746,7 +746,7 @@ fn counted(
         handles: vec![LayerHandle::new(
             "general",
             DEFAULT_LAYER_WEIGHT,
-            DEFAULT_LAYER_MIN_SIMILARITY,
+            None,
             weak,
         )],
         authority: None,
@@ -1306,7 +1306,7 @@ async fn losing_the_layers_lease_mid_call_is_a_clear_refusal() {
         handles: vec![LayerHandle::new(
             "general",
             DEFAULT_LAYER_WEIGHT,
-            DEFAULT_LAYER_MIN_SIMILARITY,
+            None,
             Arc::downgrade(&source),
         )],
         authority: None,
@@ -1669,14 +1669,8 @@ async fn a_lease_lost_between_the_gate_and_the_ack_is_refused() {
         first: Arc::clone(general.memory()),
         second: Arc::clone(other.memory()),
     });
-    let handle = |name: &str| {
-        LayerHandle::new(
-            name,
-            DEFAULT_LAYER_WEIGHT,
-            DEFAULT_LAYER_MIN_SIMILARITY,
-            Arc::downgrade(&source),
-        )
-    };
+    let handle =
+        |name: &str| LayerHandle::new(name, DEFAULT_LAYER_WEIGHT, None, Arc::downgrade(&source));
     let s = own.clone().with_layers(ServerLayers {
         handles: vec![handle("general"), handle("other")],
         authority: None,
@@ -1840,14 +1834,8 @@ async fn a_layer_that_closes_after_the_submit_acks_with_a_warning() {
         first: Arc::clone(general.memory()),
         second: Arc::clone(other.memory()),
     });
-    let handle = |name: &str| {
-        LayerHandle::new(
-            name,
-            DEFAULT_LAYER_WEIGHT,
-            DEFAULT_LAYER_MIN_SIMILARITY,
-            Arc::downgrade(&source),
-        )
-    };
+    let handle =
+        |name: &str| LayerHandle::new(name, DEFAULT_LAYER_WEIGHT, None, Arc::downgrade(&source));
     let s = own.clone().with_layers(ServerLayers {
         handles: vec![handle("general"), handle("other")],
         authority: None,

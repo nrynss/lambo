@@ -9,7 +9,7 @@ use crate::mcp::server::layers::{
     LayerDown, LayerHandle, LayerRead, LayerSource, LiveLayer, ServerLayers,
 };
 use crate::mcp::server::trace::{with_caller, CallAuth};
-use crate::recall::layered::{DEFAULT_LAYER_MIN_SIMILARITY, DEFAULT_LAYER_WEIGHT};
+use crate::recall::layered::DEFAULT_LAYER_WEIGHT;
 use crate::surface::session::{
     parse_addressed, HostedSessions, SessionAuthority, SessionCapabilities, SessionGrant,
     SessionScope,
@@ -49,7 +49,7 @@ pub(super) fn layered(own: &LamboServer, layer: &LamboServer) -> (LamboServer, A
         handles: vec![LayerHandle::new(
             layer.memory().session().as_str(),
             DEFAULT_LAYER_WEIGHT,
-            DEFAULT_LAYER_MIN_SIMILARITY,
+            None,
             weak,
         )],
         authority: None,
@@ -572,7 +572,7 @@ async fn a_scoped_read_of_a_layer_that_will_not_come_back_says_so() {
             handles: vec![LayerHandle::new(
                 "general",
                 DEFAULT_LAYER_WEIGHT,
-                DEFAULT_LAYER_MIN_SIMILARITY,
+                None,
                 Arc::downgrade(&source),
             )],
             authority: None,
@@ -693,7 +693,7 @@ async fn inspect_scope_on_an_unlayered_session_and_a_layer_that_is_down() {
         handles: vec![LayerHandle::new(
             "general",
             DEFAULT_LAYER_WEIGHT,
-            DEFAULT_LAYER_MIN_SIMILARITY,
+            None,
             Arc::downgrade(&source),
         )],
         authority: None,

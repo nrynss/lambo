@@ -178,3 +178,99 @@ fn rows_are_ordered_cosines() {
         assert!(row.layer_min_similarity < row.merge_threshold, "{row:?}");
     }
 }
+
+/// #87 follow-up: the unset layer floor is the row's under `builtin` with
+/// the switch on, BGE-M3's 0.50 otherwise; a configured floor always wins.
+#[test]
+fn layer_floor_resolves_from_the_contract_unless_set_or_switched_off() {
+    use crate::recall::layered::DEFAULT_LAYER_MIN_SIMILARITY as BGE;
+    let row = &BUILTIN[0];
+    let eg2 = EmbeddingContract {
+        kind: row.kind.into(),
+        model: Some(row.model.into()),
+        dim: row.dim,
+    };
+    let other = EmbeddingContract {
+        dim: 512,
+        ..eg2.clone()
+    };
+    assert_eq!(
+        layer_min_similarity(CalibrationMode::Builtin, true, &eg2),
+        0.72
+    );
+    assert_eq!(
+        layer_min_similarity(CalibrationMode::Builtin, false, &eg2),
+        BGE
+    );
+    assert_eq!(layer_min_similarity(CalibrationMode::Off, true, &eg2), BGE);
+    assert_eq!(
+        layer_min_similarity(CalibrationMode::Builtin, true, &other),
+        BGE
+    );
+
+    let on = crate::Config::default();
+    assert!(on.calibrated_layer_floor);
+    assert_eq!(resolve_layer_floor(None, &on, &eg2), 0.72);
+    for set in [0.0, 0.5, 0.6, 0.9, 1.0] {
+        assert_eq!(resolve_layer_floor(Some(set), &on, &eg2), set);
+    }
+    let off = crate::Config {
+        calibrated_layer_floor: false,
+        ..crate::Config::default()
+    };
+    assert_eq!(resolve_layer_floor(None, &off, &eg2), BGE);
+    assert_eq!(resolve_layer_floor(Some(0.6), &off, &eg2), 0.6);
+}
+
+/// `[embedder] calibrated_layer_floor` parses, defaulting on, and reaches
+/// a `Config` serialised before the field existed as on.
+#[test]
+fn calibrated_layer_floor_parses_with_default_on() {
+    let parse = |extra: &str| -> crate::embed::EmbedderConfig {
+        toml::from_str(&format!("kind = \"bge_m3\"\n{extra}")).expect("parse")
+    };
+    assert!(parse("").calibrated_layer_floor);
+    assert!(parse("calibrated_layer_floor = true").calibrated_layer_floor);
+    assert!(!parse("calibrated_layer_floor = false").calibrated_layer_floor);
+    assert!(crate::embed::EmbedderConfig::default().calibrated_layer_floor);
+    let mut json = serde_json::to_value(crate::Config::default()).unwrap();
+    json.as_object_mut()
+        .unwrap()
+        .remove("calibrated_layer_floor");
+    let back: crate::Config = serde_json::from_value(json).unwrap();
+    assert!(back.calibrated_layer_floor);
+}
+
+/// A floor below the calibrated one, set or switched off, is warned of;
+/// the calibrated floor, a higher one and a contract without a row are not.
+#[test]
+fn a_floor_below_the_calibrated_one_is_warned_of() {
+    let row = &BUILTIN[0];
+    let eg2 = EmbeddingContract {
+        kind: row.kind.into(),
+        model: Some(row.model.into()),
+        dim: row.dim,
+    };
+    let bge = EmbeddingContract {
+        kind: "bge_m3".into(),
+        model: None,
+        dim: 1024,
+    };
+    let on = crate::Config::default();
+    let off = crate::Config {
+        calibrated_layer_floor: false,
+        ..crate::Config::default()
+    };
+    let set = layer_floor_warning("general", Some(0.5), &on, &eg2).expect("0.50 < 0.72");
+    assert!(set.contains("min_similarity = 0.5"), "{set}");
+    assert!(set.contains("0.72") && set.contains(row.evidence), "{set}");
+    let switched = layer_floor_warning("general", None, &off, &eg2).expect("off");
+    assert!(
+        switched.contains("calibrated_layer_floor = false"),
+        "{switched}"
+    );
+    assert_eq!(layer_floor_warning("general", None, &on, &eg2), None);
+    assert_eq!(layer_floor_warning("general", Some(0.72), &on, &eg2), None);
+    assert_eq!(layer_floor_warning("general", Some(0.8), &off, &eg2), None);
+    assert_eq!(layer_floor_warning("general", Some(0.5), &on, &bge), None);
+}

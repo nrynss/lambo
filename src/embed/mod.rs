@@ -724,7 +724,7 @@ pub struct EmbedderConfig {
     pub related_pairs: Option<std::path::PathBuf>,
     /// #87: whether the built-in per-contract recall constants apply
     /// ([`calibration`]). `builtin` (the default) gives a measured contract
-    /// its own recent-leg score; `off` keeps the BGE-M3 constants for every
+    /// its own recent-leg score and unset layer floor; `off` keeps the BGE-M3 constants for every
     /// contract. A contract without a measured row is unaffected either way.
     #[serde(default)]
     pub calibration: calibration::CalibrationMode,
@@ -734,6 +734,13 @@ pub struct EmbedderConfig {
     /// precedence; a contract without a measured row is unaffected.
     #[serde(default = "calibration::default_calibrated_merge_threshold")]
     pub calibrated_merge_threshold: bool,
+    /// #87: a layer whose `min_similarity` nobody set takes the contract's
+    /// measured floor (EmbeddingGemma 2 at 768 dims: 0.72) instead of 0.50.
+    /// On by default; `false` keeps 0.50, as does `calibration = "off"`. A
+    /// floor the user set always wins; a contract without a measured row is
+    /// unaffected.
+    #[serde(default = "calibration::default_calibrated_layer_floor")]
+    pub calibrated_layer_floor: bool,
 }
 
 impl Default for EmbedderConfig {
@@ -762,6 +769,7 @@ impl Default for EmbedderConfig {
             related_pairs: None,
             calibration: calibration::CalibrationMode::Builtin,
             calibrated_merge_threshold: true,
+            calibrated_layer_floor: true,
         }
     }
 }
