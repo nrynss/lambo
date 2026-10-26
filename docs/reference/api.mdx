@@ -17,6 +17,9 @@ Use the builder. Prefer `backends`, which supplies the store, embedder, and thei
 let mem = Memory::builder()
     .session("my-session")
     .agent("agent-a")
+    // The process file's settings (cadence, calibration, ...) live in
+    // `resolved.config`; `backends` does not carry them, so pass them first.
+    .config(resolved.config.clone())
     .backends(resolved)
     .build()
     .await?;
@@ -300,8 +303,8 @@ These are library settings you pass in Rust when you build a `Memory`. Eight of 
 let mem = Memory::builder()
     .session("my-session")
     .agent("agent-a")
+    .config(Config { default_top_k: 10, ..resolved.config.clone() })
     .backends(resolved)
-    .config(Config { default_top_k: 10, ..Config::default() })
     .build()
     .await?;
 ```

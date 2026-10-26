@@ -30,8 +30,9 @@
 //! The merge threshold may instead be derived per #87: the p99 cosine of
 //! operator-labelled related-but-distinct pairs (`[embedder] related_pairs`,
 //! a JSON array of `{"a": .., "b": ..}`), with at least
-//! [`MIN_RELATED_PAIRS`] of them. With fewer, or none, the configured
-//! `semantic_match_threshold` stays. The derived value is cached in the
+//! [`MIN_RELATED_PAIRS`] of them. With fewer, or none, the writer keeps
+//! its fallback: the contract's calibrated threshold when it has one
+//! ([`super::calibration`]), else the configured `semantic_match_threshold`. The derived value is cached in the
 //! fingerprint against the file's SHA-256, so the pairs are embedded again
 //! only when the file changes. A pairs file that fails to embed while the
 //! canaries do (a slow or flaky embedder, or a file overrunning
@@ -295,7 +296,8 @@ pub enum CanaryVerdict {
 /// Which merge threshold the attach runs with.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ThresholdSource {
-    /// `semantic_match_threshold` as configured.
+    /// `semantic_match_threshold` as configured. The writer attach may still
+    /// replace it with the contract's calibrated threshold (#87).
     Configured,
     /// #87: the p99 of this many labelled related-but-distinct pairs.
     RelatedPairs { pairs: usize },
@@ -583,7 +585,8 @@ fn effective_threshold(
             random_pair_p99 = floor.map(|f| f.p99),
             configured,
             "the related-pairs merge threshold is not usable (fewer than {MIN_RELATED_PAIRS} \
-             pairs, or not above the random-pair floor); keeping semantic_match_threshold"
+             pairs, or not above the random-pair floor); falling back to the contract's \
+             calibrated threshold (#87) or semantic_match_threshold"
         );
         (configured, ThresholdSource::Configured)
     }
@@ -794,7 +797,8 @@ pub(crate) async fn check_at(
                     tracing::warn!(
                         pairs = pairs.len(),
                         "[embedder] related_pairs has fewer than {MIN_RELATED_PAIRS} pairs; \
-                         keeping semantic_match_threshold"
+                         falling back to the contract's calibrated threshold (#87) or \
+                         semantic_match_threshold"
                     );
                     // Record the unusable verdict against this file's SHA so
                     // the Warn recheck window still applies; effective_threshold
@@ -814,7 +818,7 @@ pub(crate) async fn check_at(
                         failures = r.failures,
                         next_attempt_at = %r.next_attempt_at,
                         "the related pairs are backing off after failing to embed; keeping \
-                         semantic_match_threshold"
+                         the fallback merge threshold"
                     );
                 } else {
                     let started = tokio::time::Instant::now();
@@ -867,7 +871,7 @@ pub(crate) async fn check_at(
                                     failures,
                                     %next_attempt_at,
                                     "could not embed the related pairs; keeping \
-                                     semantic_match_threshold and backing off"
+                                     the fallback merge threshold and backing off"
                                 );
                             }
                             fingerprint.related_pairs_retry = Some(PairsRetry {

@@ -98,7 +98,7 @@ irrelevant median. Getting BGE-M3's gaps back, relative to `d`, means
 rescaling the cosines themselves, which is #173's rank fusion and not a
 constant.
 
-### Merge threshold (the default since the owner's decision on #203; `[embedder] calibrated_merge_threshold = false` restores 0.85)
+### Merge threshold (the default since the owner's decision on #203; `[embedder] calibrated_merge_threshold = false` restores `semantic_match_threshold`, 0.85 by default)
 
 Derived by cosine over every labelled pair. #193's identifier guard refuses
 a merge between texts that name different identifiers (digit runs, versions,
@@ -159,6 +159,15 @@ that is a decision about BGE-M3's default, not this calibration.
 Image embeddings (the set is text only), EG2 at 512/256/128 dims, other
 quantisations, a llama.cpp build other than b11517, and BGE-M3 served by
 llama.cpp (`bge_m3`). A contract without a row keeps the BGE-M3 constants.
+
+**Server build.** A row is keyed on the embedding contract (weights artifact,
+prompt profile, dimension), the same identity the store's vectors are
+checked against. The contract records no llama.cpp build, so another build
+serving the same artifact gets this row too. That is deliberate: a build
+that changes the vectors is what the embedder canary (#176) exists to catch
+(a pinned phrase below cosine 0.99 is a drift: `warn` by default, `verify`
+refuses the attach). Only b11517 was measured; a build that passes the
+canary but shifts the cosine scale would need its own measurement.
 
 ## Reproduce
 
