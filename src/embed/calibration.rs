@@ -205,14 +205,20 @@ pub fn layer_floor_warning(
     }
     let why = match configured {
         Some(set) => format!("[[serve.layer]] {layer:?} sets min_similarity = {set}"),
-        None => "[embedder] calibration = \"off\" or calibrated_layer_floor = false keeps 0.50"
-            .to_string(),
+        None => format!(
+            "layer {layer:?} keeps BGE-M3's floor {floor} ([embedder] calibration = \"off\" or \
+             calibrated_layer_floor = false)"
+        ),
+    };
+    let fix = if configured.is_some() {
+        "Remove that line"
+    } else {
+        "Remove the setting"
     };
     Some(format!(
-        "{why}: layer {layer:?} admits hits at cosine {floor} or more, a floor calibrated on \
-         BGE-M3. Under this embedding contract the equivalent floor is {} (at 0.50, 99.9% of \
-         the labelled irrelevant concepts pass it; BGE-M3: 3.2%). Remove the setting to use the \
-         calibrated floor (evidence: {})",
+        "{why}, below the {} calibrated for this embedding contract, so the layer admits more \
+         irrelevant concepts than 0.50 does under BGE-M3. {fix} to use the calibrated floor \
+         (evidence: {})",
         row.layer_min_similarity, row.evidence,
     ))
 }

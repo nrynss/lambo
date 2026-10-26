@@ -161,8 +161,9 @@ impl Memory {
     /// interleave (`weight / rank`, this session at 1.0). A layer hit
     /// merges only with vector cosine at or above the
     /// layer's floor (an unset floor is this session's contract's
-    /// calibrated one, #87: see [`LayerRef::min_similarity`]), or as a dependent in the layer's traversal answer to
-    /// a dependency question whose anchor is in that layer. Hits with a
+    /// calibrated one, #87: see [`LayerRef::min_similarity`]), or as a
+    /// dependent in the layer's traversal answer to a dependency question
+    /// whose anchor is in that layer. Hits with a
     /// Conflict, Hot or Reservation warning are kept past `top_k` (never
     /// past a floor). The same memory in two tiers (equal canonical key, or
     /// holder vectors at cosine at or above this session's
