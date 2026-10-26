@@ -266,8 +266,31 @@ fn a_floor_below_the_calibrated_one_is_warned_of() {
     assert!(set.contains("0.72") && set.contains(row.evidence), "{set}");
     let switched = layer_floor_warning("general", None, &off, &eg2).expect("off");
     assert!(
-        switched.contains("calibrated_layer_floor = false"),
+        switched.contains("[embedder] calibrated_layer_floor = false"),
         "{switched}"
+    );
+    assert!(
+        switched.contains("Turn the calibration back on"),
+        "{switched}"
+    );
+    let mode_off = crate::Config {
+        calibration: CalibrationMode::Off,
+        ..crate::Config::default()
+    };
+    let by_mode = layer_floor_warning("general", None, &mode_off, &eg2).expect("mode off");
+    assert!(
+        by_mode.contains("[embedder] calibration = \"off\""),
+        "{by_mode}"
+    );
+    // Set and switched off: removing the line alone would still leave 0.50.
+    let both = layer_floor_warning("general", Some(0.5), &off, &eg2).expect("both");
+    assert!(
+        both.contains("Remove that line and turn the calibration back on"),
+        "{both}"
+    );
+    assert!(
+        set.starts_with("[[serve.layer]]") && set.contains("Remove that line to"),
+        "{set}"
     );
     assert_eq!(layer_floor_warning("general", None, &on, &eg2), None);
     assert_eq!(layer_floor_warning("general", Some(0.72), &on, &eg2), None);

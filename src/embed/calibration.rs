@@ -206,14 +206,26 @@ pub fn layer_floor_warning(
     let why = match configured {
         Some(set) => format!("[[serve.layer]] {layer:?} sets min_similarity = {set}"),
         None => format!(
-            "layer {layer:?} keeps BGE-M3's floor {floor} ([embedder] calibration = \"off\" or \
-             calibrated_layer_floor = false)"
+            "layer {layer:?} keeps BGE-M3's floor {floor}: [embedder] {}",
+            if config.calibration == CalibrationMode::Off {
+                "calibration = \"off\""
+            } else {
+                "calibrated_layer_floor = false"
+            }
         ),
     };
-    let fix = if configured.is_some() {
-        "Remove that line"
-    } else {
-        "Remove the setting"
+    let switched_off =
+        !(config.calibration == CalibrationMode::Builtin && config.calibrated_layer_floor);
+    let fix = match (configured.is_some(), switched_off) {
+        (true, false) => "Remove that line",
+        (true, true) => {
+            "Remove that line and turn the calibration back on (remove `[embedder] calibration \
+             = \"off\"` and `calibrated_layer_floor = false`)"
+        }
+        (false, _) => {
+            "Turn the calibration back on (remove `[embedder] calibration = \"off\"` and \
+             `calibrated_layer_floor = false`)"
+        }
     };
     Some(format!(
         "{why}, below the {} calibrated for this embedding contract, so the layer admits more \
