@@ -4,6 +4,36 @@
 
 ### Changed
 
+- **Behaviour change, EmbeddingGemma 2 only: the recent leg is calibrated
+  per embedding contract (#87).** The recent-interactions leg scored a flat
+  0.35, a value set on BGE-M3's cosine scale. Under EmbeddingGemma 2 (768
+  dims, `ggml-org/embeddinggemma-2-GGUF@bfcd2987/Q8_0`, prompt profile
+  `lambo-eg2-v2`) every irrelevant concept scores above that (median 0.63),
+  so every vector hit outranked recency. Under that contract the leg now
+  scores 0.63, the value with the same rank under EG2 that 0.35 has under
+  BGE-M3: below every true hit on the #190 evaluation set, and above about
+  half of all irrelevant concepts instead of none. It applies to a text
+  recall whose vector leg runs (a recall by image or vector keeps 0.35). BGE-M3 and every other contract are unchanged.
+  `[embedder] calibration = "off"` restores 0.35. Evidence and method:
+  `evidence/issue-87-calibration/`.
+- **Behaviour change, EmbeddingGemma 2 only: writers merge at 0.93, not
+  0.85 (#87).** Under the EG2 contract above, the default
+  `semantic_match_threshold` 0.85 puts about 78% of the set's
+  related-but-distinct pairs over the threshold by cosine (BGE-M3: 35–44%),
+  and merges every one the identifier guard lets through. A writer attach
+  under that contract now merges at its calibrated 0.93, which matches
+  BGE-M3's rate. **Existing EG2 stores merge less from this version on:** a
+  new concept that would have merged into a near neighbour at 0.85–0.93 is
+  kept as its own concept. Concepts merged before stay merged. A usable
+  `related_pairs` derivation still wins. `[embedder]
+  calibrated_merge_threshold = false` restores `semantic_match_threshold`
+  (and logs a warning at each writer attach under that contract). BGE-M3 and
+  every other contract are unchanged.
+- **`Config` and `EmbedderConfig` gain `calibration` and
+  `calibrated_merge_threshold`, and `recall::candidates::Phase1Input` gains
+  `recent_score`** (#87). A struct literal that names every field no longer
+  compiles; `..Default::default()` keeps compiling (`Phase1Input::default()`
+  sets `recent_score` to `RECENT_SCORE`).
 - **Behaviour change: contradictions of ordinary memory now warn, and the
   correction is shown with the stale fact (#179).** Until now `against`
   only flagged a Canonical or Venerable concept ("contradicting ordinary

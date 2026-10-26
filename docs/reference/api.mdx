@@ -17,6 +17,9 @@ Use the builder. Prefer `backends`, which supplies the store, embedder, and thei
 let mem = Memory::builder()
     .session("my-session")
     .agent("agent-a")
+    // The process file's settings (cadence, calibration, ...) live in
+    // `resolved.config`; `backends` does not carry them, so pass them first.
+    .config(resolved.config.clone())
     .backends(resolved)
     .build()
     .await?;
@@ -294,14 +297,14 @@ on.
 
 `Config` holds the product settings: recall defaults, flush timing, canonization thresholds, and scoring weights. Pass it to the builder with `.config(...)`.
 
-These are library settings you pass in Rust when you build a `Memory`. Six of them can also come from the process file. `promotion_policy` is a top-level `lambo.toml` key with a `LAMBO_PROMOTION_POLICY` override, so a `lambo serve` process can select a policy without a code change; `canonization_supersede` is a top-level boolean; `[daemon]` carries the cadence settings: `canonization_eval_interval` (spelled `canonization_eval_interval_secs` there), `gc_interval`, and GC's time bound, `gc_max_interval` (spelled `gc_max_interval_secs`) and `gc_idle_floor`. Everything else is code-only, and the file refuses it along with any key it does not know. No canonization *threshold* is settable from the file under either policy. See [Configuration](/config).
+These are library settings you pass in Rust when you build a `Memory`. Eight of them can also come from the process file. `promotion_policy` is a top-level `lambo.toml` key with a `LAMBO_PROMOTION_POLICY` override, so a `lambo serve` process can select a policy without a code change; `canonization_supersede` is a top-level boolean; `[daemon]` carries the cadence settings: `canonization_eval_interval` (spelled `canonization_eval_interval_secs` there), `gc_interval`, and GC's time bound, `gc_max_interval` (spelled `gc_max_interval_secs`) and `gc_idle_floor`; `[embedder]` carries `calibration` and `calibrated_merge_threshold` (#87). Everything else is code-only, and the file refuses it along with any key it does not know. No canonization *threshold* is settable from the file under either policy. See [Configuration](/config).
 
 ```rust
 let mem = Memory::builder()
     .session("my-session")
     .agent("agent-a")
+    .config(Config { default_top_k: 10, ..resolved.config.clone() })
     .backends(resolved)
-    .config(Config { default_top_k: 10, ..Config::default() })
     .build()
     .await?;
 ```
@@ -313,6 +316,8 @@ let mem = Memory::builder()
 | `default_traversal_depth` | `2` | Graph expansion depth during recall. |
 | `match_strategy` | `Hybrid` | `Canonical` or `Hybrid` — selects the recall matching scope, whether a derive embeds, **and** the call-time validation rule set (see `MatchStrategy` in the source authority). J3-R2R-7: `Canonical` adds `reject_repeated_observation` and the single-`Hierarchical`-parent rule. |
 | `semantic_match_threshold` | `0.85` | Similarity above which two concepts match. Must be between `0` and `1`. |
+| `calibration` | `Builtin` | Whether recall uses the built-in per-contract recent-leg score (#87): `Builtin` or `Off`. Set from `[embedder] calibration`. |
+| `calibrated_merge_threshold` | `true` | Whether a writer attach replaces `semantic_match_threshold` with its embedding contract's measured threshold (#87); `false` keeps `semantic_match_threshold`. Set from `[embedder] calibrated_merge_threshold`. |
 | `backend_flush_interval` | 1 second | How often pending writes flush, which sets how far behind durable storage a session can be. |
 | `backend_flush_max_batch` | `500` | Mutations per flush batch. |
 | `backend_flush_retries` | `3` | Attempts before a batch is dead-lettered. |
@@ -330,7 +335,7 @@ let mem = Memory::builder()
 | `scoring` | `0.25`, `0.20`, `0.20`, `0.35` | Recency, frequency, session activity, and density weights. |
 | `recall_weights` | `0.5`, `0.5` | How much the background score and the query relevance each contribute. |
 
-A newly derived concept has no daemon score until the daemon completes its next cycle. The derive wakes the daemon, but the window is the rest of any cycle already running plus the next rescore, not the rescore alone. On a fixture graph at dogfood scale (6,466 nodes, 11,600 edges, release build) a cycle takes about 9 ms (rescore about 5 ms, the four detectors about 6 ms), a garbage-collection sweep adds about 11 ms, and an isolated derive is scored within 6 ms median, 23 ms worst of 60. Under a sustained write burst the window does not close: with a derive every 2 ms some concept was unscored for the whole 3 s burst, and with one every 10 ms for 44% of it. If a recall in that window finds such a concept through the keyword or vector leg, and query relevance alone would rank it within `top_k` (or a live hot-list warning would force it in), the recall ranks every hit by query relevance alone, at the configured query weight. A fresh concept that could not make the result leaves the normal blend in place. The recall's ledger line reports this as `cold_start`. A fresh match is then compared with older hits on one scale, and a fresh weak match stays below a stronger established one. Canonical hits remain first and live hot-list warnings are still force-included. A concept found only through the recent leg does not start this mode, and an explicit daemon score of zero counts as scored. Each query leg keeps its own scale: at the default weight a recent-only hit (0.35) scores 0.175, below a vector match at 0.75 (0.375); a recall by vector with no text skips the recent leg. In this mode traversal and sibling members score 0, so they rank after every query hit, and a concept with an active reservation that the normal blend would have shown is kept, with its reservation warning, in addition to `top_k`: a cold result can therefore exceed `top_k` by the reservation holders it keeps. Once the daemon publishes its next score table, the normal background-plus-query blend returns, so hit scores and order can change. With `w_query = 0`, recall keeps using daemon scores throughout.
+A newly derived concept has no daemon score until the daemon completes its next cycle. The derive wakes the daemon, but the window is the rest of any cycle already running plus the next rescore, not the rescore alone. On a fixture graph at dogfood scale (6,466 nodes, 11,600 edges, release build) a cycle takes about 9 ms (rescore about 5 ms, the four detectors about 6 ms), a garbage-collection sweep adds about 11 ms, and an isolated derive is scored within 6 ms median, 23 ms worst of 60. Under a sustained write burst the window does not close: with a derive every 2 ms some concept was unscored for the whole 3 s burst, and with one every 10 ms for 44% of it. If a recall in that window finds such a concept through the keyword or vector leg, and query relevance alone would rank it within `top_k` (or a live hot-list warning would force it in), the recall ranks every hit by query relevance alone, at the configured query weight. A fresh concept that could not make the result leaves the normal blend in place. The recall's ledger line reports this as `cold_start`. A fresh match is then compared with older hits on one scale, and a fresh weak match stays below a stronger established one. Canonical hits remain first and live hot-list warnings are still force-included. A concept found only through the recent leg does not start this mode, and an explicit daemon score of zero counts as scored. Each query leg keeps its own scale: at the default weight a recent-only hit (0.35) scores 0.175, below a vector match at 0.75 (0.375). Under a contract with a calibrated recent score (EmbeddingGemma 2 at 768 dims: 0.63, [`[embedder] calibration`](/config), #87) a recent-only hit scores 0.315; a recall by vector with no text skips the recent leg. In this mode traversal and sibling members score 0, so they rank after every query hit, and a concept with an active reservation that the normal blend would have shown is kept, with its reservation warning, in addition to `top_k`: a cold result can therefore exceed `top_k` by the reservation holders it keeps. Once the daemon publishes its next score table, the normal background-plus-query blend returns, so hit scores and order can change. With `w_query = 0`, recall keeps using daemon scores throughout.
 
 `Config::validate()` checks the settings that must fail closed rather than quietly poison selection. A scoring weight that is negative or not a number drops that one dimension to zero instead of failing the session.
 

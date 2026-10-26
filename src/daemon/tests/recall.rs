@@ -652,6 +652,142 @@ async fn recall_rejects_mismatched_session() {
     );
 }
 
+use crate::store::Capabilities;
+use crate::types::{EmbeddingContract, MutationBatch};
+use async_trait::async_trait;
+
+/// A `VECTOR_SEARCH` store with only the items `recall_detailed` touches:
+/// the capability probe and the checked read, which refuses with E2E-6's
+/// contract race when `race` is set and finds nothing otherwise. Everything
+/// else is unreachable on this path.
+struct StubVectorStore {
+    race: bool,
+}
+#[async_trait]
+impl crate::store::GraphStore for StubVectorStore {
+    async fn init_schema(&self) -> Result<(), StoreError> {
+        panic!("stub: init_schema")
+    }
+    fn capabilities(&self) -> Capabilities {
+        Capabilities::VECTOR_SEARCH
+    }
+    fn vector_dimensions(&self) -> Option<usize> {
+        Some(1024)
+    }
+    async fn flush(&self, _batch: &MutationBatch, _token: Option<u64>) -> Result<(), StoreError> {
+        panic!("stub: flush")
+    }
+    async fn load_session(
+        &self,
+        _session: &SessionId,
+    ) -> Result<crate::types::GraphSnapshot, StoreError> {
+        panic!("stub: load_session")
+    }
+    async fn keyword_candidates(
+        &self,
+        _session: &SessionId,
+        _tokens: &[String],
+        _limit: usize,
+    ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+        panic!("stub: keyword_candidates")
+    }
+    async fn vector_candidates(
+        &self,
+        _session: &SessionId,
+        _embedding: &[f32],
+        _limit: usize,
+    ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+        panic!("stub: vector_candidates")
+    }
+    async fn vector_candidates_checked(
+        &self,
+        _session: &SessionId,
+        _embedding: &[f32],
+        _expected_contract: &EmbeddingContract,
+        _limit: usize,
+    ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+        if !self.race {
+            return Ok(Vec::new());
+        }
+        Err(StoreError::Invariant(
+            "vector candidate lookup refused after embedding contract changed: \
+                 durable kind=bge_m3 vs live kind=bge_m3"
+                .to_string(),
+        ))
+    }
+    async fn blast_radius(
+        &self,
+        _session: &SessionId,
+        _node: NodeId,
+        _min_edge_age: Duration,
+        _now: DateTime<Utc>,
+    ) -> Result<u64, StoreError> {
+        panic!("stub: blast_radius")
+    }
+    async fn interaction_span(
+        &self,
+        _session: &SessionId,
+        _node: NodeId,
+        _min_age: Duration,
+        _now: DateTime<Utc>,
+    ) -> Result<crate::types::InteractionSpan, StoreError> {
+        panic!("stub: interaction_span")
+    }
+    async fn interaction_span_with_window(
+        &self,
+        _session: &SessionId,
+        _node: NodeId,
+        _min_age: Duration,
+        _now: DateTime<Utc>,
+        _window: Duration,
+    ) -> Result<crate::types::InteractionSpan, StoreError> {
+        panic!("stub: interaction_span_with_window")
+    }
+    async fn record_canonization(
+        &self,
+        _event: &crate::types::CanonizationEvent,
+        _token: Option<u64>,
+    ) -> Result<(), StoreError> {
+        panic!("stub: record_canonization")
+    }
+    async fn acquire_lease(
+        &self,
+        _session: &SessionId,
+        _holder: &crate::store::lease::LeaseHolder,
+        _ttl: Duration,
+    ) -> Result<crate::store::lease::LeaseOutcome, StoreError> {
+        panic!("stub: acquire_lease")
+    }
+    async fn refresh_lease(
+        &self,
+        _session: &SessionId,
+        _holder: &crate::store::lease::LeaseHolder,
+        _ttl: Duration,
+    ) -> Result<crate::store::lease::LeaseOutcome, StoreError> {
+        panic!("stub: refresh_lease")
+    }
+    async fn release_lease(
+        &self,
+        _session: &SessionId,
+        _holder: &crate::store::lease::LeaseHolder,
+    ) -> Result<(), StoreError> {
+        panic!("stub: release_lease")
+    }
+    async fn write_flush_stats(
+        &self,
+        _session: &SessionId,
+        _stats: &crate::store::SessionFlushStats,
+    ) -> Result<(), StoreError> {
+        panic!("stub: write_flush_stats")
+    }
+    async fn read_flush_stats(
+        &self,
+        _session: &SessionId,
+    ) -> Result<Option<crate::store::SessionFlushStats>, StoreError> {
+        panic!("stub: read_flush_stats")
+    }
+}
+
 /// E2E-6: a contract-race `Invariant` from the checked vector read
 /// mid-flight must surface a client-visible `vector_degraded` annotation
 /// on the detailed result (both the CLI header and the portal's card /
@@ -663,138 +799,6 @@ async fn gather_contract_race_annotates_vector_degraded() {
     use crate::config::RecallWeights;
     use crate::recall::cache::SharedRecallCache;
     use crate::recall::detail::AnnotationKind;
-    use crate::store::Capabilities;
-    use crate::types::{EmbeddingContract, MutationBatch};
-    use async_trait::async_trait;
-
-    // The only trait items recall_detailed touches: the capability probe
-    // and the checked read. Everything else is unreachable on this path.
-    struct ContractRaceStore;
-    #[async_trait]
-    impl crate::store::GraphStore for ContractRaceStore {
-        async fn init_schema(&self) -> Result<(), StoreError> {
-            panic!("E2E-6 stub: init_schema")
-        }
-        fn capabilities(&self) -> Capabilities {
-            Capabilities::VECTOR_SEARCH
-        }
-        fn vector_dimensions(&self) -> Option<usize> {
-            Some(1024)
-        }
-        async fn flush(
-            &self,
-            _batch: &MutationBatch,
-            _token: Option<u64>,
-        ) -> Result<(), StoreError> {
-            panic!("E2E-6 stub: flush")
-        }
-        async fn load_session(
-            &self,
-            _session: &SessionId,
-        ) -> Result<crate::types::GraphSnapshot, StoreError> {
-            panic!("E2E-6 stub: load_session")
-        }
-        async fn keyword_candidates(
-            &self,
-            _session: &SessionId,
-            _tokens: &[String],
-            _limit: usize,
-        ) -> Result<Vec<Scored<NodeId>>, StoreError> {
-            panic!("E2E-6 stub: keyword_candidates")
-        }
-        async fn vector_candidates(
-            &self,
-            _session: &SessionId,
-            _embedding: &[f32],
-            _limit: usize,
-        ) -> Result<Vec<Scored<NodeId>>, StoreError> {
-            panic!("E2E-6 stub: vector_candidates")
-        }
-        async fn vector_candidates_checked(
-            &self,
-            _session: &SessionId,
-            _embedding: &[f32],
-            _expected_contract: &EmbeddingContract,
-            _limit: usize,
-        ) -> Result<Vec<Scored<NodeId>>, StoreError> {
-            Err(StoreError::Invariant(
-                "vector candidate lookup refused after embedding contract changed: \
-                     durable kind=bge_m3 vs live kind=bge_m3"
-                    .to_string(),
-            ))
-        }
-        async fn blast_radius(
-            &self,
-            _session: &SessionId,
-            _node: NodeId,
-            _min_edge_age: Duration,
-            _now: DateTime<Utc>,
-        ) -> Result<u64, StoreError> {
-            panic!("E2E-6 stub: blast_radius")
-        }
-        async fn interaction_span(
-            &self,
-            _session: &SessionId,
-            _node: NodeId,
-            _min_age: Duration,
-            _now: DateTime<Utc>,
-        ) -> Result<crate::types::InteractionSpan, StoreError> {
-            panic!("E2E-6 stub: interaction_span")
-        }
-        async fn interaction_span_with_window(
-            &self,
-            _session: &SessionId,
-            _node: NodeId,
-            _min_age: Duration,
-            _now: DateTime<Utc>,
-            _window: Duration,
-        ) -> Result<crate::types::InteractionSpan, StoreError> {
-            panic!("E2E-6 stub: interaction_span_with_window")
-        }
-        async fn record_canonization(
-            &self,
-            _event: &crate::types::CanonizationEvent,
-            _token: Option<u64>,
-        ) -> Result<(), StoreError> {
-            panic!("E2E-6 stub: record_canonization")
-        }
-        async fn acquire_lease(
-            &self,
-            _session: &SessionId,
-            _holder: &crate::store::lease::LeaseHolder,
-            _ttl: Duration,
-        ) -> Result<crate::store::lease::LeaseOutcome, StoreError> {
-            panic!("E2E-6 stub: acquire_lease")
-        }
-        async fn refresh_lease(
-            &self,
-            _session: &SessionId,
-            _holder: &crate::store::lease::LeaseHolder,
-            _ttl: Duration,
-        ) -> Result<crate::store::lease::LeaseOutcome, StoreError> {
-            panic!("E2E-6 stub: refresh_lease")
-        }
-        async fn release_lease(
-            &self,
-            _session: &SessionId,
-            _holder: &crate::store::lease::LeaseHolder,
-        ) -> Result<(), StoreError> {
-            panic!("E2E-6 stub: release_lease")
-        }
-        async fn write_flush_stats(
-            &self,
-            _session: &SessionId,
-            _stats: &crate::store::SessionFlushStats,
-        ) -> Result<(), StoreError> {
-            panic!("E2E-6 stub: write_flush_stats")
-        }
-        async fn read_flush_stats(
-            &self,
-            _session: &SessionId,
-        ) -> Result<Option<crate::store::SessionFlushStats>, StoreError> {
-            panic!("E2E-6 stub: read_flush_stats")
-        }
-    }
 
     let (graph, _cid) = locked_graph_with_one_concept();
     let daemon = Daemon::new(graph, ScoringWeights::default(), Duration::from_secs(3600));
@@ -814,7 +818,7 @@ async fn gather_contract_race_annotates_vector_degraded() {
         .recall_detailed(
             &sid(),
             query,
-            &ContractRaceStore,
+            &StubVectorStore { race: true },
             Some((&vec![0.0; 1024], &contract)),
             RecallWeights::default(),
             &cache,
@@ -846,6 +850,104 @@ async fn gather_contract_race_annotates_vector_degraded() {
         result.warnings.contains(&degraded[0].text),
         "the caller's warnings carry the same line: {:?}",
         result.warnings
+    );
+}
+
+/// #87 through `Daemon::recall_detailed`: the recent leg scores at the
+/// calibrated value only when the vector leg runs under a contract with a
+/// built-in row and `calibration` is on. Every other case keeps BGE-M3's
+/// `RECENT_SCORE`: a contract without a row, `calibration = "off"`, no query
+/// embedding, and a vector read that failed.
+#[tokio::test]
+async fn recent_leg_follows_the_vector_contracts_calibration() {
+    use crate::config::RecallWeights;
+    use crate::embed::calibration::{self, CalibrationMode};
+    use crate::recall::cache::SharedRecallCache;
+    use crate::recall::candidates::RECENT_SCORE;
+
+    let eg2 = calibration::BUILTIN[0];
+    let eg2_contract = EmbeddingContract {
+        kind: eg2.kind.into(),
+        model: Some(eg2.model.into()),
+        dim: eg2.dim,
+    };
+    let other = EmbeddingContract {
+        kind: "bge_m3".into(),
+        model: None,
+        dim: 1024,
+    };
+    let recent_of = |mode: CalibrationMode, contract: Option<EmbeddingContract>, race: bool| async move {
+        let (graph, cid) = locked_graph_with_one_concept();
+        let config = crate::Config {
+            calibration: mode,
+            ..crate::Config::default()
+        };
+        let daemon = Daemon::from_config(graph, &config);
+        let query = RecallQuery {
+            // No index and no keyword: the recent leg is the only source.
+            query: "zzz".into(),
+            top_k: 5,
+            max_tokens: 500,
+            traversal_depth: 0,
+        };
+        let vector = vec![0.0; contract.as_ref().map_or(1, |c| c.dim)];
+        let result = daemon
+            .recall_detailed(
+                &sid(),
+                query,
+                &StubVectorStore { race },
+                contract.as_ref().map(|c| (vector.as_slice(), c)),
+                RecallWeights::default(),
+                &SharedRecallCache::new(),
+            )
+            .await;
+        result.legs.get(&cid).and_then(|l| l.recent)
+    };
+
+    assert_eq!(
+        recent_of(CalibrationMode::Builtin, Some(eg2_contract.clone()), false).await,
+        Some(eg2.recent_score)
+    );
+    assert!(eg2.recent_score > RECENT_SCORE);
+    for (mode, contract, race) in [
+        (CalibrationMode::Off, Some(eg2_contract.clone()), false),
+        (CalibrationMode::Builtin, Some(other), false),
+        (CalibrationMode::Builtin, None, false),
+        (CalibrationMode::Builtin, Some(eg2_contract.clone()), true),
+    ] {
+        assert_eq!(
+            recent_of(mode, contract.clone(), race).await,
+            Some(RECENT_SCORE),
+            "{mode} {contract:?} race={race}"
+        );
+    }
+
+    // A recall by an image or a client vector beside text runs the recent
+    // leg, but the table was measured on text queries: BGE-M3's value stays.
+    let (graph, cid) = locked_graph_with_one_concept();
+    let daemon = Daemon::from_config(graph, &crate::Config::default());
+    let vector = vec![0.0; eg2.dim];
+    let result = daemon
+        .recall_by_vector_with(
+            &sid(),
+            RecallQuery {
+                query: "zzz".into(),
+                top_k: 5,
+                max_tokens: 500,
+                traversal_depth: 0,
+            },
+            crate::store::vector_source::VectorCandidates::from_store(&StubVectorStore {
+                race: false,
+            }),
+            (&vector, &eg2_contract),
+            RecallWeights::default(),
+            &SharedRecallCache::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        result.legs.get(&cid).and_then(|l| l.recent),
+        Some(RECENT_SCORE)
     );
 }
 

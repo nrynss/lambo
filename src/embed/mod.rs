@@ -6,6 +6,7 @@
 //! `dev-diary/notes/level-b-pluggability.md`.
 
 pub mod api_key;
+pub mod calibration;
 pub mod canary;
 pub mod keep_warm;
 pub(crate) mod math;
@@ -715,10 +716,24 @@ pub struct EmbedderConfig {
     pub canary: canary::CanaryMode,
     /// Labelled related-but-distinct pairs (a JSON array of `{"a": .., "b":
     /// ..}`) to derive the merge threshold from, per #87: their p99 cosine,
-    /// once there are at least [`canary::MIN_RELATED_PAIRS`]. Absent keeps
-    /// `semantic_match_threshold`. Needs `canary` on.
+    /// once there are at least [`canary::MIN_RELATED_PAIRS`]. Absent, or with
+    /// no usable derivation, the writer uses the contract's calibrated
+    /// threshold when `calibrated_merge_threshold` is on and the contract has
+    /// one (#87), else `semantic_match_threshold`. Needs `canary` on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub related_pairs: Option<std::path::PathBuf>,
+    /// #87: whether the built-in per-contract recall constants apply
+    /// ([`calibration`]). `builtin` (the default) gives a measured contract
+    /// its own recent-leg score; `off` keeps the BGE-M3 constants for every
+    /// contract. A contract without a measured row is unaffected either way.
+    #[serde(default)]
+    pub calibration: calibration::CalibrationMode,
+    /// #87: merge at the contract's measured threshold instead of
+    /// `semantic_match_threshold`. On by default; `false` restores the
+    /// configured threshold. A usable `related_pairs` derivation still takes
+    /// precedence; a contract without a measured row is unaffected.
+    #[serde(default = "calibration::default_calibrated_merge_threshold")]
+    pub calibrated_merge_threshold: bool,
 }
 
 impl Default for EmbedderConfig {
@@ -745,6 +760,8 @@ impl Default for EmbedderConfig {
             images: None,
             canary: canary::CanaryMode::Warn,
             related_pairs: None,
+            calibration: calibration::CalibrationMode::Builtin,
+            calibrated_merge_threshold: true,
         }
     }
 }

@@ -722,7 +722,7 @@ impl MemoryBuilder {
             let merge_threshold = if self.reembed_mode {
                 None
             } else {
-                canary_gate(
+                let derived = canary_gate(
                     store.as_ref(),
                     embedder.as_ref(),
                     &embedding,
@@ -731,7 +731,27 @@ impl MemoryBuilder {
                     self.allow_embedding_mismatch,
                     &session,
                 )
-                .await?
+                .await?;
+                // #87: labelled pairs first, then the contract's measured
+                // threshold (unless `calibrated_merge_threshold = false`),
+                // else the configured one.
+                derived.or_else(|| {
+                    let calibrated = crate::embed::calibration::merge_threshold(
+                        config.calibrated_merge_threshold,
+                        &embedding,
+                        config.semantic_match_threshold,
+                    );
+                    if let Some(threshold) = calibrated {
+                        tracing::info!(
+                            session = %session,
+                            threshold,
+                            configured = config.semantic_match_threshold,
+                            "semantic_match_threshold from the built-in calibration of this \
+                             embedding contract (#87)"
+                        );
+                    }
+                    calibrated
+                })
             };
             Ok::<_, LamboError>((
                 existing,
