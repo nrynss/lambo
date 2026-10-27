@@ -195,7 +195,11 @@ queries were written from the corpus text before this re-run, not from its
 results. Same harness; `dev` swept first (k = 2, 3, 5, 10, 60 and
 `k=3,wd=0`), then `held_out` once with the same three variants as before.
 Files: `runs-v2/`, from `run-v2.sh`; tables from
-`python3 summarise.py runs-v2`.
+`python3 summarise.py runs-v2`. One `dev` query (`q-prf-01-3`) was reworded
+after the first pass (it guessed a release season the corpus does not
+state) and `dev` was re-run; `held_out` was not, as none of its queries
+changed. The `-confirm` files' `split/dev` metrics therefore predate that
+rewording: read `dev` from the `-dev` files.
 
 | | `max` | `rrf` (k = 3) BGE-M3 | `rrf` (k = 3) EmbeddingGemma 2 |
 |---|---|---|---|
@@ -239,6 +243,11 @@ not and two classes lose there, so the default stays `max`.
   independent of fusion).
 
 ## Reproduce
+
+`run.sh` regenerates `runs/` and `run-v2.sh` regenerates `runs-v2/`, both
+from the current `fixtures/eval/`; `runs/` was produced on the 310-query set
+(before `t_more173.py`), so re-running `run.sh` now gives the 368-query
+numbers instead.
 
 ```
 CACHE_BGE=bge.jsonl CACHE_EG2=eg2.jsonl bash evidence/issue-173-fusion/run.sh
