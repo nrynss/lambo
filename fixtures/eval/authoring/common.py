@@ -52,10 +52,24 @@ def NA(topic, text, family="near-domain", note=None):
     NO_ANSWER.append(dict(topic=topic, text=text, family=family, note=note))
 
 
-def P(a, b, label, family, src, relation=None, review=None):
-    """A pair outside the concept-anchored ones (e.g. two dogfood texts)."""
+def P(a, b, label, family, src, relation=None, review=None, types=None, id=None,
+      labelled_on=None, labeller=None, split=None):
+    """A pair outside the concept-anchored ones (e.g. two dogfood texts).
+
+    types        (type of a, type of b): the concept type each text would be
+                 derived as (#198); required with relation 'supersedes'
+    id           a stable pair id; p-xNN by position otherwise
+    labelled_on  the pair's own date; build.py's LABELLED_ON otherwise
+    labeller     who labelled the pair; build.py's LABELLER otherwise
+    split        "dev" or "held_out", set by the author; the id hash otherwise
+    """
+    if relation == "supersedes" and not types:
+        raise SystemExit(f"P({a[:40]!r}): a supersedes pair needs types")
     EXTRA_PAIRS.append(dict(a=a, b=b, label=label, family=family, source=src,
-                            relation=relation, review=review))
+                            relation=relation, review=review,
+                            types=list(types) if types else None, id=id,
+                            labelled_on=labelled_on, labeller=labeller,
+                            split=split))
 
 
 def Q(cid, text, family, extra=None, labelled_on="2026-10-27", facets=None):

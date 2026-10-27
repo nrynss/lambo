@@ -87,6 +87,28 @@ queries (13 of 32). A cosine-only gate separates the two poorly on this
 corpus, which is near-domain by construction; #174's held-out slice is 32
 no-answer queries, short of its 100 until the owner adds ledger misses.
 
+## The #198 pairs (2026-10-27)
+
+The set gained 144 pairs for #198 after the run above (see
+`fixtures/eval/README.md`, "Added for #198"): 62 `supersedes`, 74
+`distinct_entity` (two of them relabelled from `supersedes` by the owner)
+in the suspected-supersession trigger's regime and 8
+`same-event` paraphrases, all refused by the identifier guard and typed
+with `concept_types`. The committed run measured the 403-pair set. The
+#198 pairs are kept out of the export (owner decision, 2026-10-27), so it
+is still the 173 pairs the run's canary timing and threshold are for:
+the identifier guard refuses every one of them before any threshold
+applies, so they barely move the threshold the export derives (BGE-M3 p99
+0.98921 with them out, 0.98934 with them in) while they push the canary's
+embed of the export from 62.6 s to 87.6 s, past its 60 s timeout. A rerun's pair tables will lean further toward the
+identifier family, since they cover every pair in `pairs.json`. No run here measures the
+trigger: tuning its masked token Jaccard and reporting its precision per
+embedder are #198's own work. When it does, precision counts a flagged
+`supersedes` pair as a true positive and a flagged `distinct_entity` or
+`same-event` pair as a false positive (owner decision, 2026-10-27: a
+"possibly superseded" warning on two records of one event would mislead
+a reader), per split, over the in-regime pairs.
+
 ## Adding a run
 
 ```text

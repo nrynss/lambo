@@ -16,7 +16,8 @@ sys.path.insert(0, str(HERE))
 import common  # noqa: E402
 
 MODULES = ["t_embed", "t_serve", "t_release", "t_findings", "t_paper", "t_noanswer", "t_para",
-           "t_more173"]
+           "t_more173", "t_supersede198"]
+CONCEPT_TYPES = ("Entity", "Logic", "Constraint", "Resource", "Observation")
 LABELLER = "Grok Bot (agent)"
 LABELLED_ON = "2026-10-23"
 HELD_OUT_PERCENT = 30
@@ -92,10 +93,12 @@ assert len(qtexts) == len(set(qtexts)), "duplicate query text"
 
 # ---- pairs --------------------------------------------------------------
 pairs, seen = [], set()
+KEY_ORDER = ("id", "a", "b", "label", "family", "relation", "concept_types", "split", "source",
+             "labeller", "labelled_on", "concepts", "review")
 
 
 def add_pair(pid, a, b, label, family, source, relation=None, review=None, concepts=None,
-             labeller=LABELLER, labelled_on=LABELLED_ON):
+             labeller=LABELLER, labelled_on=LABELLED_ON, types=None, split=None):
     key = frozenset((a, b))
     if a == b or key in seen:
         return
@@ -103,7 +106,11 @@ def add_pair(pid, a, b, label, family, source, relation=None, review=None, conce
     e = dict(id=pid, a=a, b=b, label=label, family=family)
     if relation:
         e["relation"] = relation
-    e.update(split=split_of(pid), source=source, labeller=labeller, labelled_on=labelled_on)
+    if types:
+        assert len(types) == 2 and all(t in CONCEPT_TYPES for t in types), (pid, types)
+        e["concept_types"] = list(types)
+    assert split in (None, "dev", "held_out"), (pid, split)
+    e.update(split=split or split_of(pid), source=source, labeller=labeller, labelled_on=labelled_on)
     if concepts:
         e["concepts"] = concepts
     if review:
@@ -131,8 +138,10 @@ for c in common.CONCEPTS:
                  concepts=[c["id"]])
 
 for n, p in enumerate(common.EXTRA_PAIRS, 1):
-    add_pair(f"p-x{n:02d}", p["a"], p["b"], p["label"], p["family"], p["source"],
-             relation=p["relation"], review=p["review"])
+    add_pair(p["id"] or f"p-x{n:02d}", p["a"], p["b"], p["label"], p["family"], p["source"],
+             relation=p["relation"], review=p["review"], types=p["types"],
+             labelled_on=p["labelled_on"] or LABELLED_ON, labeller=p["labeller"] or LABELLER,
+             split=p["split"])
 
 # #178's labelled pairs: the dogfood-i3 file/commit-name pairs and the
 # synthetic distinct pairs. The 89 synthetic typo duplicates are left out: a
@@ -160,8 +169,11 @@ SYN = {  # id -> (family, relation, review)
 L178 = "evidence/issue-178-similar/labelled-pairs.json"
 for p in json.loads((ROOT / L178).read_text(encoding="utf-8")):
     if p["source"] == "dogfood-i3" and p["family"] == "file/commit name":
+        # File, commit and note names: a writer derives them as Resources,
+        # which #198's trigger never considers.
         add_pair(f"p-178-{p['id']}", p["a"], p["b"], "related_distinct", "identifier",
-                 f"{L178}#{p['id']} (dogfood store)", relation="distinct_entity")
+                 f"{L178}#{p['id']} (dogfood store)", relation="distinct_entity",
+                 types=("Resource", "Resource"))
     elif p["source"] == "synthetic" and p["label"] == "distinct":
         fam, relation, review = SYN[p["id"]]
         add_pair(f"p-178-{p['id']}", p["a"], p["b"], "related_distinct", fam,
@@ -203,6 +215,9 @@ while n < UNRELATED_PAIRS:
 # in after every agent pair, so agent ids do not move and an owner label on
 # the same two texts as an agent pair relabels that pair in place.
 owner_p = HERE / "owner_pairs.json"
+# The concept types belong to the two texts, not to the label: a relabel keeps
+# them unless the owner's row gives its own.
+typed_before = {p["id"] for p in pairs if p.get("concept_types")}
 for op in json.loads(owner_p.read_text(encoding="utf-8")) if owner_p.exists() else []:
     key = frozenset((op["a"], op["b"]))
     if key in seen:
@@ -216,14 +231,111 @@ for op in json.loads(owner_p.read_text(encoding="utf-8")) if owner_p.exists() el
                    source=old["source"] + f"; relabelled by the owner ({op['id']})")
         if op.get("relation"):
             old["relation"] = op["relation"]
+        if op.get("concept_types"):
+            old["concept_types"] = list(op["concept_types"])
+        # Back into add_pair's key order, so a relabel moves no field.
+        order = {k: old[k] for k in KEY_ORDER if k in old}
+        assert len(order) == len(old), (old["id"], set(old) - set(order))
+        old.clear()
+        old.update(order)
         continue
     add_pair(f"p-owner-{op['id']}", op["a"], op["b"], op["label"], op["family"],
              "dogfood store copy, cosine-stratified sample", relation=op.get("relation"),
-             labeller=op["labeller"], labelled_on=op["labelled_on"])
+             labeller=op["labeller"], labelled_on=op["labelled_on"], types=op.get("concept_types"))
+lost = sorted(i for i in typed_before if not next(p for p in pairs if p["id"] == i).get("concept_types"))
+assert not lost, f"an owner relabel dropped concept_types: {lost}"
+
+# #198: the concept type each text of the earlier supersedes pairs would be
+# derived as (the anchor concept's corpus type; emb-06 is a re-pin action).
+EARLIER_TYPES = {
+    "p-emb-01-rbd1": "Observation", "p-emb-03-rbd1": "Logic", "p-emb-06-rbd1": "Resource",
+    "p-cnd-06-rbd1": "Observation", "p-cal-03-rbd1": "Constraint", "p-top-01-rbd1": "Constraint",
+    "p-srv-04-rbd1": "Logic", "p-rel-04-rbd1": "Constraint", "p-con-01-rbd1": "Constraint",
+    "p-con-03-rbd1": "Constraint", "p-cn-01-rbd1": "Constraint", "p-fnd-05-rbd1": "Logic",
+}
+for p in pairs:
+    t = EARLIER_TYPES.get(p["id"])
+    if t and "concept_types" not in p:
+        # Kept in key order: after relation, before split.
+        rest = {k: p.pop(k) for k in list(p) if k not in ("id", "a", "b", "label", "family", "relation")}
+        p["concept_types"] = [t, t]
+        p.update(rest)
+missing = [p["id"] for p in pairs if p.get("relation") == "supersedes" and "concept_types" not in p]
+assert not missing, f"supersedes pairs without concept_types: {missing}"
+
+
+def _fold(s):
+    """src/graph/canonical.rs's fold, mirrored: NFC, lowercase, and every run
+    of `_`, `-` or whitespace one space."""
+    import unicodedata
+    out, gap = [], False
+    for ch in unicodedata.normalize("NFC", s):
+        if ch in "_-" or ch.isspace():
+            gap = True
+            continue
+        if gap and out:
+            out.append(" ")
+        gap = False
+        out.append(ch.lower())
+    return "".join(out)
+
+
+def _tokens(f):
+    """A folded text's tokens, edge punctuation trimmed, each marked whether
+    it is identifier-shaped (an ASCII digit, `/` or `.` in it)."""
+    import re
+    for t in f.split(" "):
+        t = re.sub(r"^[^\w/.]+|[^\w/.]+$", "", t).rstrip(".")
+        if t:
+            yield t, any((c.isascii() and c.isdigit()) or c in "/." for c in t)
+
+
+def same_identifiers(a, b):
+    """src/graph/canonical.rs same_identifiers, mirrored: fold, then compare
+    the digit runs and the identifier-shaped tokens. A pre-check only:
+    tests/eval_set.rs calls the real one on every in-regime pair."""
+    import re
+    fa, fb = _fold(a), _fold(b)
+    return (re.findall(r"[0-9]+", fa) == re.findall(r"[0-9]+", fb)
+            and [t for t, i in _tokens(fa) if i] == [t for t, i in _tokens(fb) if i])
+
+
+def masked_jaccard(a, b):
+    """Token-set Jaccard once every identifier-shaped token is masked: the
+    shape #198's trigger compares. Approximate (the trigger's own masking is
+    #198's to tune); used here only to stratify the split."""
+    def masked(s):
+        return {"<id>" if i else t for t, i in _tokens(_fold(s))}
+    x, y = masked(a), masked(b)
+    return len(x & y) / len(x | y)
+
+
+# Every #198 pair is one the #195 identifier guard refuses; otherwise it
+# would merge and never reach the trigger.
+for p in pairs:
+    if p["id"].startswith("p-198-"):
+        assert not same_identifiers(p["a"], p["b"]), f"{p['id']}: the identifier guard would not refuse it"
+
+# #198's split is stratified by sub-kind (t_supersede198.py): within each
+# kind, cut by whether the masked texts are identical, held-out holds 30-50%
+# of the adjudicated pairs, so it gets its share of the hardest negatives.
+strata = {}
+for p in pairs:
+    if p["id"].startswith("p-198-") and "review" not in p:
+        kind = p.get("relation") or p["family"]
+        strata.setdefault((kind, masked_jaccard(p["a"], p["b"]) == 1.0), []).append(p["split"])
+for k, splits in sorted(strata.items()):
+    share = splits.count("held_out") / len(splits)
+    assert len(splits) < 5 or 0.30 <= share <= 0.50, f"#198 stratum {k}: held_out share {share:.2f}"
 
 assert len({p["id"] for p in pairs}) == len(pairs)
+# #198's pairs stay out of the export: the identifier guard refuses every one
+# before any threshold applies, so they barely move the threshold it derives
+# (BGE-M3 p99 0.98921 to 0.98934) but lengthen the canary's embed from 62.6 s
+# to 87.6 s, past its 60 s timeout.
 export = [{"a": p["a"], "b": p["b"]} for p in pairs
-          if p["label"] == "related_distinct" and "review" not in p]
+          if p["label"] == "related_distinct" and "review" not in p
+          and not p["id"].startswith("p-198-")]
 
 
 def write(name, obj):

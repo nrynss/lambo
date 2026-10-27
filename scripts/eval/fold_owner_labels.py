@@ -31,6 +31,7 @@ FAMILIES = {
 LABELS = set(FAMILIES)
 RELATIONS = {"supersedes", "distinct_entity", "contradicts"}
 RELATION_REQUIRED = {"identifier", "correction"}
+CONCEPT_TYPES = {"Entity", "Logic", "Constraint", "Resource", "Observation"}
 
 
 def pair_problem(r: dict) -> str | None:
@@ -43,6 +44,12 @@ def pair_problem(r: dict) -> str | None:
         return f"relation {relation!r} is not one of {sorted(RELATIONS)}"
     if family in RELATION_REQUIRED and relation is None:
         return f"family {family} needs a relation"
+    types = r.get("concept_types")
+    if types is not None and (not isinstance(types, list) or len(types) != 2
+                              or any(t not in CONCEPT_TYPES for t in types)):
+        return f"concept_types {types!r} is not two of {sorted(CONCEPT_TYPES)}"
+    if relation == "supersedes" and not types:
+        return "a supersedes pair needs concept_types [type of a, type of b], a the newer text"
     return None
 
 
@@ -85,7 +92,8 @@ def main() -> int:
         if bad:
             sys.exit("fix these rows and fold again (nothing was written):\n" + "\n".join(bad))
         keep = [{"id": pair_id(r["a"], r["b"]), "a": r["a"], "b": r["b"], "label": r["label"], "family": r["family"],
-                 "relation": r.get("relation"), "labeller": a.labeller, "labelled_on": a.date,
+                 "relation": r.get("relation"), "concept_types": r.get("concept_types"),
+                 "labeller": a.labeller, "labelled_on": a.date,
                  "note": r.get("note")}
                 for r in eligible]
         withdrawn = {pair_key(r) for r in rows

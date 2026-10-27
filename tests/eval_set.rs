@@ -13,6 +13,7 @@ mod schema;
 use std::path::{Path, PathBuf};
 
 use lambo::embed::canary::{RelatedPair, MIN_RELATED_PAIRS};
+use lambo::graph::canonical::same_identifiers;
 use lambo::surface::limits::MAX_CONTENT_BYTES;
 
 fn dir() -> PathBuf {
@@ -39,6 +40,14 @@ fn schema_holds() {
 /// 150 so that 100 survive adjudication, and 100 each of paraphrase and
 /// unrelated pairs; #173 about 200 answerable queries; #174 at least 100
 /// no-answer queries.
+/// In #198's regime: both texts typed as the same Logic, Constraint or
+/// Observation (the types the suspected-supersession trigger considers).
+fn in_regime(p: &schema::Pair) -> bool {
+    p.concept_types.len() == 2
+        && p.concept_types[0] == p.concept_types[1]
+        && ["Logic", "Constraint", "Observation"].contains(&p.concept_types[0].as_str())
+}
+
 #[test]
 fn sizes_meet_the_consumers() {
     let s = set();
@@ -58,6 +67,42 @@ fn sizes_meet_the_consumers() {
     );
     assert!(count("paraphrase", true) >= 100, "paraphrase pairs");
     assert!(count("unrelated", true) >= 100, "unrelated pairs");
+    // #198: supersession pairs to measure the suspected-supersession
+    // trigger's precision on, and hard negatives, both in the trigger's own
+    // regime (both texts the same Logic, Constraint or Observation type);
+    // `in_regime` (below) also requires the identifier guard to refuse them.
+    // Held-out, where the precision is reported, needs at least 25 of each.
+    let regime = |r: &str, split: Option<&str>| {
+        s.pairs
+            .iter()
+            .filter(|p| {
+                p.adjudicated()
+                    && p.relation.as_deref() == Some(r)
+                    && in_regime(p)
+                    && split.is_none_or(|sp| p.split == sp)
+            })
+            .count()
+    };
+    assert!(
+        regime("supersedes", None) >= 60,
+        "supersedes pairs in #198's regime"
+    );
+    assert!(
+        regime("distinct_entity", None) >= 60,
+        "distinct_entity pairs in #198's regime"
+    );
+    for r in ["supersedes", "distinct_entity"] {
+        assert!(
+            regime(r, Some("held_out")) >= 25,
+            "{r} pairs in #198's regime in held_out: {}",
+            regime(r, Some("held_out"))
+        );
+        assert!(
+            regime(r, Some("dev")) >= 25,
+            "{r} pairs in #198's regime in dev: {}",
+            regime(r, Some("dev"))
+        );
+    }
     let kind = |k: &str| {
         s.queries
             .iter()
@@ -86,6 +131,37 @@ fn sizes_meet_the_consumers() {
     }
 }
 
+/// #198's trigger only sees a pair the #195 identifier guard refused: every
+/// in-regime supersedes, distinct_entity and same-event pair must be one
+/// `same_identifiers` says differs, or it would merge and never reach the
+/// trigger. build.py's Python mirror is only a pre-check; this is the guard.
+#[test]
+fn the_identifier_guard_refuses_every_in_regime_pair() {
+    let s = set();
+    let mut checked = [0usize; 3];
+    let mut merged = Vec::new();
+    for p in s.pairs.iter().filter(|p| in_regime(p)) {
+        let k = match (p.relation.as_deref(), p.family.as_str()) {
+            (Some("supersedes"), _) => 0,
+            (Some("distinct_entity"), _) => 1,
+            (_, "same-event") => 2,
+            _ => continue,
+        };
+        checked[k] += 1;
+        if same_identifiers(&p.a, &p.b) {
+            merged.push(p.id.as_str());
+        }
+    }
+    assert!(
+        merged.is_empty(),
+        "the identifier guard would not refuse: {merged:?}"
+    );
+    assert!(
+        checked[0] >= 60 && checked[1] >= 60 && checked[2] >= 8,
+        "too few in-regime pairs checked: {checked:?}"
+    );
+}
+
 /// The export is what `[embedder] related_pairs` reads: the canary's own
 /// type, with unknown fields refused.
 #[test]
@@ -95,11 +171,25 @@ fn export_loads_as_related_pairs() {
     assert!(pairs.len() >= MIN_RELATED_PAIRS, "{} pairs", pairs.len());
     let s = set();
     assert_eq!(pairs.len(), schema::expected_export(&s.pairs).len());
-    // Items awaiting the owner's review never reach the export.
-    for p in s.pairs.iter().filter(|p| !p.adjudicated()) {
+    // Every adjudicated related-but-distinct pair outside #198 is exported...
+    for p in s.pairs.iter().filter(|p| schema::exported(p)) {
+        assert!(
+            pairs.iter().any(|e| e.a == p.a && e.b == p.b),
+            "{} is missing from the export",
+            p.id
+        );
+    }
+    // ...and the export is exactly the 173 pairs it held before #198 added
+    // its pairs, which the identifier guard refuses before any threshold.
+    assert_eq!(pairs.len(), 173, "the pre-#198 export");
+    // Items awaiting the owner's review, and #198's pairs, never reach it.
+    for p in s.pairs.iter().filter(|p| {
+        !p.adjudicated()
+            || (p.label == "related_distinct" && p.id.starts_with(schema::ISSUE_198_PREFIX))
+    }) {
         assert!(
             !pairs.iter().any(|e| e.a == p.a && e.b == p.b),
-            "{} is under review",
+            "{} is under review or one of #198's",
             p.id
         );
     }
