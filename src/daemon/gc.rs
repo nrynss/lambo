@@ -25,7 +25,12 @@
 //!    nothing else uses), scores each concept over the live dimensions plus
 //!    its own frequency term
 //!    ([`crate::daemon::score::score_live_plus_frequency`], issue #29 — an
-//!    access can only raise a score, never another concept's), and compares against a per-type bar
+//!    access can only raise a score, never another concept's). The activity
+//!    term in that composite is the per-interaction ratio, not the
+//!    max-normalized value recall uses (issue #180): the bar was calibrated
+//!    on the ratio, and max-normalization would clear it for an ordinary
+//!    once-derived concept whenever the session maximum is 1 or 2. The
+//!    comparison is against a per-type bar
 //!    scaled by [`crate::types::ConceptType::eviction_resistance`] (ALGO-11).
 //!    See [`MIN_CONCEPT_SCORE`] for the calibration and its evidence.
 //!
@@ -1021,6 +1026,12 @@ fn eviction_score(
     // Issue #29: GC's cut measures recency from the last touch, not from the
     // concept's position in the session span (see `eviction_recency`).
     dims.recency = eviction_recency(c, params.now, params.recency_window);
+    // Issue #180: recall's activity is `derived_by / max derived_by`. The cut
+    // keeps `derived_by / |interactions|`. At a session maximum of 1 or 2 the
+    // max-normalized value alone sits on or above [`MIN_CONCEPT_SCORE`] for
+    // an aged, unread Resource or Entity, which would exempt every ordinary
+    // once-derived concept from this comparison.
+    dims.session_activity = ctx.per_interaction_activity(c.id);
     crate::daemon::score::score_live_plus_frequency(dims, &params.weights)
 }
 

@@ -1545,7 +1545,10 @@ async fn wait_until<F: FnMut() -> bool>(label: &str, mut cond: F) -> Result<(), 
 /// `1 − x/window`, because both terms of that `max` are at most the window:
 /// the span by assumption, and the 10-minute recency floor is far under 365
 /// days. So the headroom printed here is a lower bound on GC's, and a wider
-/// window only widens it. Every concept is measured, including the types the score cut
+/// window only widens it. Activity is GC's per-interaction ratio, not the
+/// max-normalized value [`crate::daemon::score::score_concept`] returns for
+/// recall (#180): that larger value would overstate headroom and could hide
+/// a concept the sweep would collect. Every concept is measured, including the types the score cut
 /// exempts, which makes the bound conservative rather than exact.
 pub fn gc_headroom(graph: &Graph) -> Vec<(String, f64)> {
     use crate::daemon::gc::MIN_CONCEPT_SCORE;
@@ -1556,7 +1559,8 @@ pub fn gc_headroom(graph: &Graph) -> Vec<(String, f64)> {
     let mut out: Vec<(String, f64)> = graph
         .concepts()
         .map(|c| {
-            let dims = score_concept(graph, c, &ctx);
+            let mut dims = score_concept(graph, c, &ctx);
+            dims.session_activity = ctx.per_interaction_activity(c.id);
             let value = score_live_plus_frequency(dims, &weights);
             let bar = MIN_CONCEPT_SCORE / c.concept_type.eviction_resistance();
             (c.content.clone(), value / bar)
@@ -2342,5 +2346,107 @@ mod tests {
             "{once}"
         );
         assert!(once.contains("blast_radius=15"), "{once}");
+    }
+
+    /// Issue #180. The printed headroom is a lower bound on GC's sweep, so it
+    /// has to use the per-interaction activity. The max-normalized value
+    /// would report a concept as safer than the cut that actually runs.
+    #[test]
+    fn gc_headroom_uses_the_interaction_ratio() {
+        use crate::daemon::gc::MIN_CONCEPT_SCORE;
+        use crate::daemon::score::{score_concept, score_live_plus_frequency, SessionContext};
+        use crate::graph::Graph;
+        use crate::types::{
+            AgentId, CanonizationStatus, Concept, ConceptType, Edge, NodeId, SessionId,
+        };
+        use chrono::{TimeZone, Utc};
+        use uuid::Uuid;
+
+        let sid = SessionId::from("demo-headroom");
+        let ts = |m: i64| Utc.timestamp_opt(1_700_000_000 + m * 60, 0).unwrap();
+        let nid = |n: u64| NodeId(Uuid::from_u64_pair(0, n));
+        let mut g = Graph::new(sid.clone());
+        for i in 1..=6u64 {
+            g.insert_interaction(crate::types::Interaction {
+                event_time: None,
+                id: nid(i),
+                session_id: sid.clone(),
+                agent_id: AgentId::from("agent-a"),
+                prompt_text: Some("p".into()),
+                previous_id: (i > 1).then(|| nid(i - 1)),
+                created_at: ts(i as i64 * 10),
+            })
+            .unwrap();
+        }
+        let concept = |id: u64, content: &str| Concept {
+            id: nid(id),
+            session_id: sid.clone(),
+            content: content.into(),
+            canonical_key: content.into(),
+            concept_type: ConceptType::Entity,
+            origin_interaction: nid(1),
+            origin_agent: AgentId::from("agent-a"),
+            created_at: ts(10),
+            access_count: 0,
+            last_accessed: None,
+            gc_survived: 0,
+            canonization_status: CanonizationStatus::None,
+            blast_radius: None,
+            last_demotion_time: None,
+            embedding: None,
+            human_confirmed: 0,
+            embedding_source: None,
+            chunk_group_id: None,
+        };
+        g.insert_concept(concept(10, "subject"), nid(1)).unwrap();
+        g.insert_concept(concept(11, "heavy"), nid(1)).unwrap();
+        for (eid, src) in [(20u64, 2u64), (21, 3), (22, 4)] {
+            g.upsert_edge(Edge {
+                event_time: None,
+                id: nid(eid),
+                session_id: sid.clone(),
+                source: nid(src),
+                target: nid(11),
+                edge_type: crate::types::EdgeType::Derives,
+                weight: 0.9,
+                reinforcements: 1,
+                created_at: ts(0),
+                last_reinforced: ts(0),
+            })
+            .unwrap();
+        }
+
+        let ctx = SessionContext::compute(&g);
+        let subject = match g.node(nid(10)).unwrap() {
+            crate::types::Node::Concept(c) => c.clone(),
+            _ => unreachable!(),
+        };
+        assert_eq!(ctx.max_derivations(), 4);
+        assert_eq!(ctx.derivations(subject.id), 1);
+        let recall = score_concept(&g, &subject, &ctx).session_activity;
+        let ratio = ctx.per_interaction_activity(subject.id);
+        assert_eq!(recall, 0.25);
+        assert_eq!(ratio, 1.0 / 6.0);
+        assert_ne!(recall.to_bits(), ratio.to_bits());
+
+        let headroom = gc_headroom(&g);
+        let (_, got) = headroom
+            .iter()
+            .find(|(content, _)| content == "subject")
+            .cloned()
+            .expect("subject is scored");
+        let mut dims = score_concept(&g, &subject, &ctx);
+        dims.session_activity = ratio;
+        let bar = MIN_CONCEPT_SCORE / subject.concept_type.eviction_resistance();
+        let expect =
+            score_live_plus_frequency(dims, &crate::config::Config::default().scoring) / bar;
+        assert_eq!(got.to_bits(), expect.to_bits());
+        dims.session_activity = recall;
+        let overstated =
+            score_live_plus_frequency(dims, &crate::config::Config::default().scoring) / bar;
+        assert!(
+            overstated > got,
+            "max-normalization would overstate headroom"
+        );
     }
 }
