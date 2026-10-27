@@ -271,5 +271,74 @@ pub fn pairs(g: &Graph) -> Vec<SuspectedPair> {
     out
 }
 
+/// One pair the trigger would flag in an existing session
+/// (`lambo canon suspected`, owner decision 6 on #198).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ScannedPair {
+    /// The pair, newer -> older.
+    pub pair: SuspectedPair,
+    /// The cosine of the two concepts' stored vectors.
+    pub cosine: f64,
+    /// Whether the session already holds its `SuspectedSupersedes` edge.
+    pub recorded: bool,
+}
+
+/// Every pair of `g` the trigger would flag if its newer concept were
+/// written now: two concepts whose stored **text** vectors (an image
+/// vector is never a merge candidate) are at cosine `>= threshold` and
+/// that pass [`candidate`] (which includes the identifier guard refusing
+/// them). Strongest first, then by the older and the newer id.
+///
+/// A superset of what writing would have flagged: the write path judges
+/// only the store's top vector candidates
+/// ([`crate::graph::hybrid::VECTOR_CANDIDATE_LIMIT`]), this compares every
+/// pair. Quadratic per concept type; a session of a few thousand concepts
+/// takes seconds.
+pub fn scan(g: &Graph, threshold: f64) -> Vec<ScannedPair> {
+    let mut by_type: std::collections::BTreeMap<u8, Vec<&Concept>> = Default::default();
+    for c in g.concepts() {
+        if eligible_type(c.concept_type) && c.embedding_source.is_none() && c.embedding.is_some() {
+            by_type.entry(c.concept_type as u8).or_default().push(c);
+        }
+    }
+    let mut out = Vec::new();
+    for concepts in by_type.values_mut() {
+        concepts.sort_by_key(|c| c.id.0);
+        for (i, a) in concepts.iter().enumerate() {
+            let Some(va) = a.embedding.as_deref() else {
+                continue;
+            };
+            for b in &concepts[i + 1..] {
+                let Some(vb) = b.embedding.as_deref() else {
+                    continue;
+                };
+                if va.len() != vb.len() {
+                    continue;
+                }
+                let cosine = f64::from(crate::embed::cosine(va, vb));
+                if !cosine.is_finite() || cosine < threshold {
+                    continue;
+                }
+                if let Some(pair) = candidate(g, a, b) {
+                    out.push(ScannedPair {
+                        pair,
+                        cosine,
+                        recorded: g
+                            .edge_between(pair.newer, pair.older, EdgeType::SuspectedSupersedes)
+                            .is_some(),
+                    });
+                }
+            }
+        }
+    }
+    out.sort_by(|x, y| {
+        y.cosine
+            .total_cmp(&x.cosine)
+            .then(x.pair.older.0.cmp(&y.pair.older.0))
+            .then(x.pair.newer.0.cmp(&y.pair.newer.0))
+    });
+    out
+}
+
 #[cfg(test)]
 mod tests;

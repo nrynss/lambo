@@ -867,6 +867,42 @@ enum CanonAction {
         #[arg(long, help = "Also print both full dry runs per policy.")]
         verbose: bool,
     },
+    /// Report the pairs of an existing session the suspected-supersession trigger would flag (#198): two Logic, Constraint or Observation concepts of one type whose stored vectors are at or above --cosine, whose identifiers differ, and whose texts differ in one value after the predicate. Prints ids, short texts, cosine and direction (newer -> older). Reads a private copy and writes nothing, unless --apply.
+    Suspected {
+        /// The SQLite store file. Without --apply it is copied byte for byte into a private scratch directory and only the copy is opened (read-only); with --apply the file itself is opened and the session's lease taken.
+        #[arg(
+            long,
+            value_name = "PATH",
+            help = "The SQLite store file. Without --apply it is copied byte for byte into a private scratch directory and only the copy is opened (read-only); with --apply the file itself is opened and the session's lease taken."
+        )]
+        store: PathBuf,
+        /// Session to scan.
+        #[arg(long, help = "Session to scan.")]
+        session: String,
+        /// The cosine floor. Defaults to the merge threshold the session's embedding contract calibrates to, else the default semantic_match_threshold; the command reads no lambo.toml, so pass yours.
+        #[arg(
+            long,
+            value_name = "F",
+            help = "The cosine floor. Defaults to the merge threshold the session's embedding contract calibrates to, else the default semantic_match_threshold; the command reads no lambo.toml, so pass yours."
+        )]
+        cosine: Option<f64>,
+        /// Record every pair not yet recorded as a SuspectedSupersedes edge, in one flush under the session's lease (refused while a writer holds it).
+        #[arg(
+            long,
+            help = "Record every pair not yet recorded as a SuspectedSupersedes edge, in one flush under the session's lease (refused while a writer holds it)."
+        )]
+        apply: bool,
+        /// Print the report as JSON.
+        #[arg(long, help = "Print the report as JSON.")]
+        json: bool,
+        /// Directory the private copy goes under (default: the system temp directory). Removed afterwards.
+        #[arg(
+            long,
+            value_name = "DIR",
+            help = "Directory the private copy goes under (default: the system temp directory). Removed afterwards."
+        )]
+        scratch: Option<PathBuf>,
+    },
 }
 
 /// `lambo recall-index` actions.
@@ -1402,6 +1438,33 @@ fn run_canon(action: CanonAction) -> ExitCode {
                         map,
                         similar,
                         verbose,
+                    }),
+                ),
+                Err(e) => {
+                    eprintln!("lambo {name}: {e}");
+                    ExitCode::from(e.exit_code())
+                }
+            }
+        }
+        CanonAction::Suspected {
+            store,
+            session,
+            cosine,
+            apply,
+            json,
+            scratch,
+        } => {
+            let name = "canon suspected";
+            match scratch.as_deref().map(canon::check_scratch).transpose() {
+                Ok(scratch) => canon_exit(
+                    name,
+                    canon::suspected(canon::SuspectedArgs {
+                        store,
+                        session,
+                        cosine,
+                        apply,
+                        json,
+                        scratch,
                     }),
                 ),
                 Err(e) => {
