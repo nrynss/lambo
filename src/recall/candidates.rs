@@ -27,8 +27,11 @@
 //! and costs no I/O. The vector leg likewise skips (one log line, zero calls)
 //! when no query embedding is available.
 //!
-//! Merge rule: the three legs are unioned by node id and a node present in more
-//! than one leg keeps its HIGHEST score (max-merge). Keyword members keep their
+//! Merge rule ([`FusionKind::Max`], the default; #173 adds
+//! [`FusionKind::Rrf`], see [`crate::recall::fusion`]): the three legs are
+//! unioned by node id and a node present in more than one leg keeps its
+//! HIGHEST score (max-merge). Under RRF the union is the same and only the
+//! value it ranks on changes; [`LegScores`] carries both. Keyword members keep their
 //! BM25 score; recent-interaction members score a flat [`RECENT_SCORE`] (a
 //! secondary signal below a genuine BM25 or similarity hit); vector members
 //! keep the store-provided similarity score. The merged list is sorted
@@ -57,10 +60,11 @@
 //! (spec §8), not a fixture defect; the golden EXACT assertion is authoritative
 //! for the keyword leg and must not regress.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use crate::graph::index::InvertedIndex;
 use crate::graph::Graph;
+pub use crate::recall::fusion::{FusionKind, RecallFusion};
 use crate::store::vector_source::VectorCandidates;
 use crate::store::{validate_vector_candidate_limit, GraphStore};
 use crate::types::{
@@ -110,18 +114,42 @@ pub struct LegScores {
     pub recent: Option<f64>,
     /// Store-provided similarity (cosine, for every shipped vector store).
     pub vector: Option<f64>,
+    /// #173: this node's 1-based rank within the keyword leg (BM25
+    /// descending, the issue-2 tie-break).
+    pub keyword_rank: Option<usize>,
+    /// #173: its rank within the recent leg: 1 for the newest interaction's
+    /// concepts, and one more than the number of members in newer
+    /// interactions otherwise (members of one interaction share a rank).
+    pub recent_rank: Option<usize>,
+    /// #173: its rank within the vector leg (similarity descending, the
+    /// issue-2 tie-break).
+    pub vector_rank: Option<usize>,
+    /// #173: the reciprocal-rank-fusion value of these ranks under the
+    /// recall's [`RecallFusion`], in `[0, 1]`. Computed whichever
+    /// [`FusionKind`] ranks, so a ledger can shadow-score the other.
+    pub rrf: Option<f64>,
 }
 
 impl LegScores {
-    /// The max-merged score these legs produce — the value phase 1 ranks on.
+    /// The max-merged score these legs produce: the value phase 1 ranks on
+    /// under [`FusionKind::Max`] (the default).
     ///
     /// Kept next to the legs so the two can never disagree: the merge rule is
-    /// stated once, here, and [`candidates_with_legs`] is its only caller.
-    fn merged(&self) -> f64 {
+    /// stated once, here. [`Self::fused`] ranks on it, and the ledger records
+    /// it beside `rrf` (#173).
+    pub fn merged(&self) -> f64 {
         [self.keyword, self.recent, self.vector]
             .into_iter()
             .flatten()
             .fold(f64::NEG_INFINITY, f64::max)
+    }
+
+    /// The value phase 1 ranks on under `kind`.
+    pub fn fused(&self, kind: FusionKind) -> f64 {
+        match kind {
+            FusionKind::Max => self.merged(),
+            FusionKind::Rrf => self.rrf.unwrap_or(0.0),
+        }
     }
 
     /// Highest-scoring leg name, for a one-word "where did this come from".
@@ -160,6 +188,8 @@ pub struct Phase1Input {
     /// vector leg runs under a contract with its own measured value (#87,
     /// [`crate::embed::calibration::recent_score`]).
     pub recent_score: f64,
+    /// How the legs are combined (#173): [`FusionKind::Max`] by default.
+    pub fusion: RecallFusion,
 }
 
 impl Default for Phase1Input {
@@ -167,6 +197,7 @@ impl Default for Phase1Input {
         Self {
             vector: Vec::new(),
             recent_score: RECENT_SCORE,
+            fusion: RecallFusion::default(),
         }
     }
 }
@@ -325,14 +356,16 @@ pub(crate) fn candidates_with_legs_as(
         legs.entry(s.item).or_default().keyword = Some(s.score);
     }
     if recent == RecentLeg::Run {
-        for id in recent_concepts(graph) {
-            legs.entry(id).or_default().recent = Some(input.recent_score);
+        for (id, rank) in recent_concepts(graph) {
+            let leg = legs.entry(id).or_default();
+            leg.recent = Some(input.recent_score);
+            leg.recent_rank = Some(rank);
         }
     }
     for s in input.vector {
         merge_max(&mut legs.entry(s.item).or_default().vector, s.score);
     }
-    let out = rank(&legs, graph);
+    let out = rank(&mut legs, graph, &input.fusion, !query.trim().is_empty());
     // T9 instrumentation: which phase-1 leg(s) produced each candidate, so a
     // trace-enabled run can say whether the lexical (keyword), recent, or
     // vector arm produced an identifier-shaped hit. Unchanged output; it now
@@ -370,28 +403,96 @@ fn arm_names(legs: LegScores) -> Vec<&'static str> {
     .collect()
 }
 
-/// Max-merge and sort: score descending, ties by canonical key ascending then
-/// node id ascending ([`tie_break_by_key`]).
+/// Rank each leg, fuse, and sort: the fused value descending ([`LegScores::fused`]
+/// under `fusion.kind`), ties by canonical key ascending then node id ascending
+/// ([`tie_break_by_key`]).
 ///
 /// A total order (f64 `total_cmp`, then canonical key, then UUID), so the
 /// output is deterministic regardless of leg iteration or store result order,
-/// and stable across runs (issue #2). The key is resolved from `graph` inside
-/// the comparator, so the lookup only runs on exact score ties and the hot
-/// path is untouched.
-fn rank(legs: &LegProvenance, graph: &Graph) -> Vec<Scored<NodeId>> {
+/// and stable across runs (issue #2). The keyword and vector legs' own ranks
+/// use the same order on their own scores; the recent leg's rank is set by
+/// [`recent_concepts`]. Every node's `rrf` is filled in whichever kind ranks.
+///
+/// RRF divides by the most the recall's legs could give (rank 1 in each). A
+/// leg counts when it ran: the keyword leg whenever `keyword_ran` (a text
+/// query searched the index), even with no hit, and the vector and recent
+/// legs when they produced a member. So a recall whose query matched nothing
+/// does not score a recent-only concept as a perfect match: it is
+/// `w_recent / (w_keyword + w_recent)` at best, not 1.
+fn rank(
+    legs: &mut LegProvenance,
+    graph: &Graph,
+    fusion: &RecallFusion,
+    keyword_ran: bool,
+) -> Vec<Scored<NodeId>> {
     let key = |id: NodeId| match graph.node(id) {
         Some(Node::Concept(c)) => Some(c.canonical_key.as_str()),
         _ => None,
     };
+    let order = |a: (NodeId, f64), b: (NodeId, f64)| {
+        b.1.total_cmp(&a.1)
+            .then_with(|| tie_break_by_key(key(a.0), &a.0, key(b.0), &b.0))
+    };
+    let leg_ranks = |pick: fn(&LegScores) -> Option<f64>, legs: &LegProvenance| {
+        let mut members: Vec<(NodeId, f64)> = legs
+            .iter()
+            // A non-finite leg score (a bad store cosine) earns no rank:
+            // total_cmp would put a positive NaN first. The raw score stays
+            // on the hit for the ledger, and `max` still sanitises it.
+            .filter_map(|(id, l)| pick(l).filter(|s| s.is_finite()).map(|s| (*id, s)))
+            .collect();
+        members.sort_by(|a, b| order(*a, *b));
+        members
+            .into_iter()
+            .enumerate()
+            .map(|(i, (id, _))| (id, i + 1))
+            .collect::<Vec<_>>()
+    };
+    let keyword = leg_ranks(|l| l.keyword, legs);
+    let vector = leg_ranks(|l| l.vector, legs);
+    for (id, r) in &keyword {
+        legs.get_mut(id).expect("ranked from legs").keyword_rank = Some(*r);
+    }
+    for (id, r) in &vector {
+        legs.get_mut(id).expect("ranked from legs").vector_rank = Some(*r);
+    }
+    // Weights are scaled by the largest so no term or sum can overflow to
+    // infinity (validation admits any finite weight, and k may be 0). The
+    // fused value is a ratio, so the scale cancels; at the defaults (largest
+    // weight 1) nothing changes.
+    let largest = fusion
+        .keyword_weight
+        .max(fusion.vector_weight)
+        .max(fusion.recent_weight);
+    let scale = if largest > 0.0 { largest } else { 1.0 };
+    let term = |weight: f64, rank: usize| fusion.term(weight / scale, rank);
+    // The most the legs that ran can give: rank 1 in each.
+    let has_recent = legs.values().any(|l| l.recent_rank.is_some());
+    let best: f64 = [
+        (keyword_ran || !keyword.is_empty(), fusion.keyword_weight),
+        (!vector.is_empty(), fusion.vector_weight),
+        (has_recent, fusion.recent_weight),
+    ]
+    .into_iter()
+    .filter(|(active, _)| *active)
+    .map(|(_, w)| term(w, 1))
+    .sum();
+    for l in legs.values_mut() {
+        let sum: f64 = [
+            (l.keyword_rank, fusion.keyword_weight),
+            (l.vector_rank, fusion.vector_weight),
+            (l.recent_rank, fusion.recent_weight),
+        ]
+        .into_iter()
+        .filter_map(|(r, w)| r.map(|r| term(w, r)))
+        .sum();
+        l.rrf = Some(if best > 0.0 { sum / best } else { 0.0 });
+    }
     let mut out: Vec<Scored<NodeId>> = legs
         .iter()
-        .map(|(item, legs)| Scored::new(*item, legs.merged()))
+        .map(|(item, l)| Scored::new(*item, l.fused(fusion.kind)))
         .collect();
-    out.sort_by(|a, b| {
-        b.score
-            .total_cmp(&a.score)
-            .then_with(|| tie_break_by_key(key(a.item), &a.item, key(b.item), &b.item))
-    });
+    out.sort_by(|a, b| order((a.item, a.score), (b.item, b.score)));
     out
 }
 
@@ -421,14 +522,16 @@ pub(crate) fn candidates_without_keyword_with_legs_as(
 ) -> (Vec<Scored<NodeId>>, LegProvenance) {
     let mut legs: LegProvenance = HashMap::new();
     if recent == RecentLeg::Run {
-        for id in recent_concepts(graph) {
-            legs.entry(id).or_default().recent = Some(input.recent_score);
+        for (id, rank) in recent_concepts(graph) {
+            let leg = legs.entry(id).or_default();
+            leg.recent = Some(input.recent_score);
+            leg.recent_rank = Some(rank);
         }
     }
     for s in input.vector {
         merge_max(&mut legs.entry(s.item).or_default().vector, s.score);
     }
-    let out = rank(&legs, graph);
+    let out = rank(&mut legs, graph, &input.fusion, false);
     (out, legs)
 }
 
@@ -451,28 +554,39 @@ fn merge_max(slot: &mut Option<f64>, score: f64) {
     });
 }
 
-/// Ids of the concepts owned by the [`RECENT_INTERACTIONS`] most recent
-/// interactions (by `created_at`; ties broken by node id ascending). The tie
-/// stays on the bare id, deliberately: interactions carry no canonical key, so
-/// at this step the id fallback is the only stable order available (the
+/// The concepts owned by the [`RECENT_INTERACTIONS`] most recent
+/// interactions (by `created_at`; ties broken by node id ascending), each
+/// with its recent-leg rank (#173): 1 for the newest interaction's
+/// concepts, otherwise one more than the number of members in newer
+/// interactions, so the concepts of one interaction share a rank. The tie
+/// stays on the bare id, deliberately: interactions carry no canonical key,
+/// so at this step the id fallback is the only stable order available (the
 /// residual named in [`tie_break_by_key`]).
-fn recent_concepts(graph: &Graph) -> Vec<NodeId> {
+fn recent_concepts(graph: &Graph) -> Vec<(NodeId, usize)> {
     let mut recent: Vec<&crate::types::Interaction> = graph.interactions().collect();
     recent.sort_by(|a, b| {
         b.created_at
             .cmp(&a.created_at)
             .then_with(|| a.id.0.cmp(&b.id.0))
     });
-    let keep: HashSet<NodeId> = recent
+    let keep: HashMap<NodeId, usize> = recent
         .iter()
         .take(RECENT_INTERACTIONS)
-        .map(|i| i.id)
+        .enumerate()
+        .map(|(i, interaction)| (interaction.id, i))
         .collect();
-    graph
+    let mut members: Vec<(NodeId, usize)> = graph
         .concepts()
-        .filter(|c| keep.contains(&c.origin_interaction))
-        .map(|c| c.id)
-        .collect()
+        .filter_map(|c| keep.get(&c.origin_interaction).map(|i| (c.id, *i)))
+        .collect();
+    let mut per_interaction = [0usize; RECENT_INTERACTIONS];
+    for (_, i) in &members {
+        per_interaction[*i] += 1;
+    }
+    for (_, i) in members.iter_mut() {
+        *i = 1 + per_interaction[..*i].iter().sum::<usize>();
+    }
+    members
 }
 
 #[cfg(test)]
@@ -891,6 +1005,7 @@ mod tests {
         let input = || Phase1Input {
             vector: vec![Scored::new(target, 0.60)],
             recent_score: 0.63,
+            fusion: RecallFusion::default(),
         };
         let (out, legs) = candidates_with_legs(&graph, &index, input(), "zzz", 10);
         let (bare, bare_legs) = candidates_without_keyword_with_legs(&graph, input());
@@ -1097,12 +1212,12 @@ mod tests {
                 .cmp(&a.created_at)
                 .then_with(|| a.id.0.cmp(&b.id.0))
         });
-        let recent_interactions: HashSet<NodeId> = recent
+        let recent_interactions: std::collections::HashSet<NodeId> = recent
             .iter()
             .take(RECENT_INTERACTIONS)
             .map(|i| i.id)
             .collect();
-        let recent_concept_ids: HashSet<NodeId> = snap
+        let recent_concept_ids: std::collections::HashSet<NodeId> = snap
             .concepts
             .iter()
             .filter(|c| recent_interactions.contains(&c.origin_interaction))
@@ -1435,5 +1550,233 @@ mod tests {
         assert_eq!(vector, None);
         assert_eq!(embedder.queries.load(Ordering::SeqCst), 0);
         assert_eq!(embedder.documents.load(Ordering::SeqCst), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // #173: reciprocal rank fusion
+    // -----------------------------------------------------------------------
+
+    /// RRF at the literature's k = 60, so the arithmetic below is explicit.
+    fn rrf() -> RecallFusion {
+        RecallFusion {
+            kind: FusionKind::Rrf,
+            k: 60.0,
+            ..RecallFusion::default()
+        }
+    }
+
+    fn cid(id: u64) -> NodeId {
+        NodeId(Uuid::from_u64_pair(2, id))
+    }
+
+    fn leg(keyword: Option<f64>, vector: Option<f64>) -> LegScores {
+        LegScores {
+            keyword,
+            vector,
+            ..LegScores::default()
+        }
+    }
+
+    #[test]
+    fn the_default_fusion_ranks_on_the_max_and_still_records_rrf() {
+        let (g, index) = planted_graph();
+        let input = Phase1Input {
+            vector: vec![Scored::new(cid(4), 0.9)],
+            ..Phase1Input::default()
+        };
+        assert_eq!(input.fusion.kind, FusionKind::Max);
+        let (out, legs) = candidates_with_legs(&g, &index, input, "alpha", 10);
+        for s in &out {
+            let l = legs[&s.item];
+            assert_eq!(s.score, l.merged(), "max ranks on the raw max");
+            assert!(l.rrf.is_some(), "rrf is shadow-computed under max");
+        }
+        assert_eq!(legs[&cid(4)].vector_rank, Some(1));
+        assert_eq!(legs[&cid(1)].keyword_rank, Some(1));
+    }
+
+    #[test]
+    fn rrf_ranks_two_leg_agreement_above_one_leg_with_a_bigger_raw_score() {
+        let g = planted_graph().0;
+        // a: keyword rank 1 with an unbounded BM25 of 9.0, nothing else.
+        // b: keyword rank 2 AND vector rank 1.
+        let mut legs: LegProvenance = HashMap::from([
+            (cid(1), leg(Some(9.0), None)),
+            (cid(2), leg(Some(2.0), Some(0.8))),
+            (cid(3), leg(None, Some(0.5))),
+        ]);
+        let max = rank(&mut legs.clone(), &g, &RecallFusion::default(), true);
+        assert_eq!(max[0].item, cid(1), "max: the biggest unit wins");
+        let out = rank(&mut legs, &g, &rrf(), true);
+        assert_eq!(ids(out.clone()), vec![cid(2), cid(1), cid(3)]);
+        // Normalised by the active legs' best (keyword + vector, rank 1 each).
+        let best = 2.0 / 61.0;
+        assert!((out[0].score - (1.0 / 62.0 + 1.0 / 61.0) / best).abs() < 1e-12);
+        assert!((out[1].score - (1.0 / 61.0) / best).abs() < 1e-12);
+        assert_eq!(legs[&cid(2)].keyword_rank, Some(2));
+        assert_eq!(legs[&cid(2)].vector_rank, Some(1));
+        assert_eq!(legs[&cid(3)].vector_rank, Some(2));
+    }
+
+    #[test]
+    fn rrf_is_one_for_rank_one_in_every_active_leg_and_ignores_empty_legs() {
+        let g = planted_graph().0;
+        let mut legs: LegProvenance = HashMap::from([
+            (cid(1), leg(Some(1.0), None)),
+            (cid(2), leg(Some(0.5), None)),
+        ]);
+        let out = rank(&mut legs, &g, &rrf(), true);
+        assert_eq!(out[0].score, 1.0, "no vector or recent leg ran");
+        assert!(out.iter().all(|s| s.score > 0.0 && s.score <= 1.0));
+    }
+
+    #[test]
+    fn rrf_ranks_the_recent_leg_by_recency_with_one_rank_per_interaction() {
+        let (mut g, _) = planted_graph();
+        // A second concept from i2 (the newest) shares its rank.
+        let i2 = NodeId(Uuid::from_u64_pair(1, 2));
+        g.insert_concept(concept(5, i2, "epsilon"), i2).unwrap();
+        let ranks: HashMap<NodeId, usize> = recent_concepts(&g).into_iter().collect();
+        assert_eq!(ranks[&cid(2)], 1);
+        assert_eq!(ranks[&cid(5)], 1);
+        assert_eq!(ranks[&cid(3)], 3, "two members in newer interactions");
+        assert_eq!(ranks[&cid(1)], 4);
+        assert!(!ranks.contains_key(&cid(4)), "only the 3 most recent");
+
+        let index = InvertedIndex::from_snapshot(&g.snapshot());
+        let input = Phase1Input {
+            fusion: rrf(),
+            ..Phase1Input::default()
+        };
+        let (out, legs) = candidates_with_legs(&g, &index, input, "no such words", 10);
+        assert_eq!(legs[&cid(2)].recent_rank, Some(1));
+        assert_eq!(legs[&cid(2)].recent, Some(RECENT_SCORE), "#87 score kept");
+        // Recency order, tie inside i2 by canonical key (beta < epsilon).
+        assert_eq!(ids(out.clone()), vec![cid(2), cid(5), cid(3), cid(1)]);
+        // The keyword leg ran and found nothing: it still counts toward the
+        // normaliser, so a recent-only concept is not a perfect match.
+        let w = RecallFusion::default().recent_weight;
+        assert!(
+            (out[0].score - w / (1.0 + w)).abs() < 1e-12,
+            "{}",
+            out[0].score
+        );
+    }
+
+    #[test]
+    fn rrf_counts_a_keyword_leg_that_ran_empty_but_not_one_that_did_not_run() {
+        let (g, index) = planted_graph();
+        let input = || Phase1Input {
+            fusion: rrf(),
+            ..Phase1Input::default()
+        };
+        let w = RecallFusion::default().recent_weight;
+        let text = candidates(&g, &index, input(), "no such words", 10);
+        assert!((text[0].score - w / (1.0 + w)).abs() < 1e-12);
+        // A blank query searches nothing, and the no-keyword path has no leg.
+        let blank = candidates(&g, &index, input(), "  ", 10);
+        assert_eq!(blank[0].score, 1.0);
+        let bare = candidates_without_keyword(&g, input());
+        assert_eq!(bare[0].score, 1.0);
+    }
+
+    #[test]
+    fn a_non_finite_leg_score_earns_no_rrf_rank() {
+        let g = planted_graph().0;
+        let mut legs: LegProvenance = HashMap::from([
+            (cid(1), leg(None, Some(f64::NAN))),
+            (cid(3), leg(None, Some(0.4))),
+            (cid(4), leg(None, Some(f64::INFINITY))),
+        ]);
+        let out = rank(&mut legs, &g, &rrf(), false);
+        assert_eq!(out[0].item, cid(3), "{out:?}");
+        assert_eq!(legs[&cid(3)].vector_rank, Some(1));
+        assert_eq!(legs[&cid(1)].vector_rank, None);
+        assert_eq!(legs[&cid(4)].vector_rank, None);
+        assert!(out.iter().all(|s| s.score.is_finite()), "{out:?}");
+    }
+
+    #[test]
+    fn rrf_with_huge_weights_and_k_zero_stays_finite_and_scale_free() {
+        let g = planted_graph().0;
+        let legs = || -> LegProvenance {
+            HashMap::from([
+                (cid(1), leg(Some(2.0), Some(0.9))),
+                (cid(3), leg(Some(1.0), None)),
+            ])
+        };
+        let huge = RecallFusion {
+            k: 0.0,
+            keyword_weight: f64::MAX,
+            vector_weight: f64::MAX,
+            ..rrf()
+        };
+        let unit = RecallFusion {
+            keyword_weight: 1.0,
+            vector_weight: 1.0,
+            recent_weight: huge.recent_weight / f64::MAX,
+            ..huge
+        };
+        let big = rank(&mut legs(), &g, &huge, true);
+        assert!(big.iter().all(|s| s.score.is_finite()), "{big:?}");
+        assert_eq!(big[0].item, cid(1));
+        assert_eq!(big[0].score, 1.0, "rank 1 in both legs that ran");
+        let small = rank(&mut legs(), &g, &unit, true);
+        for (a, b) in big.iter().zip(&small) {
+            assert_eq!(a.item, b.item);
+            assert!((a.score - b.score).abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn under_rrf_the_calibrated_recent_score_no_longer_ranks() {
+        let (g, index) = planted_graph();
+        let run = |recent_score: f64| {
+            let input = Phase1Input {
+                fusion: rrf(),
+                recent_score,
+                vector: vec![Scored::new(cid(4), 0.5)],
+            };
+            candidates(&g, &index, input, "", 10)
+        };
+        assert_eq!(run(0.35), run(0.63));
+    }
+
+    #[test]
+    fn rrf_ties_break_by_canonical_key_and_a_zero_weight_leg_scores_zero() {
+        let g = planted_graph().0;
+        let mut legs: LegProvenance = HashMap::from([
+            (cid(3), leg(Some(1.0), None)),
+            (cid(1), leg(None, Some(0.9))),
+        ]);
+        let out = rank(&mut legs, &g, &rrf(), true);
+        assert_eq!(out[0].score, out[1].score, "rank 1 in one leg each");
+        assert_eq!(ids(out), vec![cid(1), cid(3)], "alpha < gamma");
+
+        let only_recent = RecallFusion {
+            recent_weight: 0.0,
+            ..rrf()
+        };
+        let mut legs: LegProvenance = HashMap::from([(
+            cid(1),
+            LegScores {
+                recent: Some(RECENT_SCORE),
+                recent_rank: Some(1),
+                ..LegScores::default()
+            },
+        )]);
+        let out = rank(&mut legs, &g, &only_recent, false);
+        assert_eq!(out[0].score, 0.0, "no NaN from a zero normaliser");
+    }
+
+    #[test]
+    fn rrf_with_no_candidates_is_empty() {
+        let g = Graph::new(sid());
+        let index = InvertedIndex::from_snapshot(&g.snapshot());
+        let input = Phase1Input {
+            fusion: rrf(),
+            ..Phase1Input::default()
+        };
+        assert!(candidates(&g, &index, input, "anything", 10).is_empty());
     }
 }

@@ -160,6 +160,8 @@ Recall combines keyword matching with vector similarity, then expands through th
 
 Recall still works without a vector leg. You get matches on the words you use rather than on meaning, so a query that shares no vocabulary with a stored concept may miss it.
 
+By default a hit's query relevance is the highest of its raw keyword, vector and recent scores; an operator can rank by reciprocal rank fusion instead ([`[fusion]`](/config#recall-fusion)). With `--ledger`, a hit a query leg found carries `fusion` on its recall line: its rank in each leg it came from (`bm25_rank`, `recent_rank`, `vector_rank`) and both fused values (`max`, `rrf`), whichever ranked the recall.
+
 | Argument | Type | Required | Range or default |
 |---|---|---|---|
 | `agent_id` | string | Yes | |

@@ -118,6 +118,7 @@ fn recall(tier: usize, hits: &[H], extra: &[&str]) -> TierRecall {
                     keyword: h.keyword,
                     recent: None,
                     vector: h.vector,
+                    ..LegScores::default()
                 },
             );
         }

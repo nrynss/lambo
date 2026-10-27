@@ -7,7 +7,7 @@ Lambo reads a `lambo.toml` file. It looks for the file in this order: the `--con
 
 ## What lambo.toml contains
 
-The file has `[store]`, `[embedder]` and `[daemon]` sections, an optional `[serve]` section for [multi-session serving](#multi-session-serving), an optional `[web]` section for [the read-only window's views](#read-only-window-views), plus a small number of top-level process settings. It chooses which compiled backends this process runs, the cadence the background work runs at, and the canonization policy the serving verbs run them under.
+The file has `[store]`, `[embedder]` and `[daemon]` sections, an optional `[serve]` section for [multi-session serving](#multi-session-serving), an optional `[web]` section for [the read-only window's views](#read-only-window-views), an optional `[fusion]` section for [recall fusion](#recall-fusion), plus a small number of top-level process settings. It chooses which compiled backends this process runs, the cadence the background work runs at, and the canonization policy the serving verbs run them under.
 
 ```toml
 # Top-level keys must come BEFORE the first [table] header, or TOML scopes them
@@ -28,7 +28,7 @@ url = "http://127.0.0.1:8080"
 Unknown keys are refused, so a typo fails at startup instead of silently falling back to a default. A misspelled `knd`, a misspelled `[embeder]` section, and a key that belongs to the library rather than the file all stop the process before it attaches a session.
 </Warning>
 
-Recall defaults, flush timing, canonization thresholds, and scoring weights are not `lambo.toml` keys. They are library settings you pass when you build a `Memory` in Rust, so putting one in the file stops the process rather than tuning anything. Six settings are exceptions, and none of them is a threshold: `promotion_policy` and `canonization_supersede` below, and the four cadence keys in [Daemon cadence](#daemon-cadence). `promotion_policy` is a selector — it sets no number. But do not read that as "the numbers stay the same": `Solo` replaces the ladder rather than re-tuning it, and the store-evidence gates stop deciding anything. See [Library API](/api) for what each policy actually measures.
+Recall defaults, flush timing, canonization thresholds, and scoring weights are not `lambo.toml` keys. They are library settings you pass when you build a `Memory` in Rust, so putting one in the file stops the process rather than tuning anything. Six settings are exceptions, and none of them is a threshold: `promotion_policy` and `canonization_supersede` below, and the four cadence keys in [Daemon cadence](#daemon-cadence). `promotion_policy` is a selector — it sets no number. But do not read that as "the numbers stay the same": `Solo` replaces the ladder rather than re-tuning it, and the store-evidence gates stop deciding anything. See [Library API](/api) for what each policy actually measures. `[fusion]` is one more: it chooses how recall combines its legs, and its numbers are the fusion's own, not canonization's. See [Recall fusion](#recall-fusion).
 
 ```
 $ lambo --config lambo.toml provision
@@ -85,6 +85,41 @@ The demoted concept enters the usual re-promotion cooldown, and a concept inside
 <Warning>
 **Give agents distinct ids before turning this on.** Support written by the agent that declared a contradiction never counts for the concept it contradicted: a writer cannot defend a belief against its own contradiction. So with a single writer, or several agents sharing one `agent_id`, nothing that writer adds for the contradicted concept can ever release it from a contradiction it declared; only another agent's support can. Who wrote a piece of support is decided by the agent acting when it was written; when two agents acted at the same instant and it cannot be told whose it is, that pair is not probed at all, so an ambiguity never demotes anything.
 </Warning>
+
+## Recall fusion
+
+`[fusion]` (#173) chooses how recall combines its three query legs (keyword, vector, and the concepts of the three most recent interactions) into a hit's query relevance, the `w_query` half of its score. It is optional, and a file without it ranks exactly as before.
+
+```toml
+[fusion]
+kind = "rrf"   # optional; the default is "max"
+k = 3.0        # optional; RRF only
+```
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `kind` | string | `"max"` | `"max"` takes the highest raw leg score. `"rrf"` is reciprocal rank fusion. |
+| `k` | number | `3.0` | RRF's constant. Larger values flatten the gap between ranks. |
+| `keyword_weight` | number | `1.0` | The keyword leg's RRF weight. |
+| `vector_weight` | number | `1.0` | The vector leg's RRF weight. |
+| `recent_weight` | number | `0.3` | The recent leg's RRF weight. |
+
+**`max`.** The legs score on different scales: keyword matching is BM25, which is unbounded and routinely above 1; vector similarity is a cosine, at most 1; a recent concept scores a flat 0.35 (0.63 under the calibrated EmbeddingGemma 2 contract, see `[embedder] calibration`). The highest of the three wins, so in practice a keyword match outranks any vector match.
+
+**`rrf`.** Each leg ranks its own members (score descending, the usual tie-break by canonical key), the recent leg by recency (the newest interaction's concepts share rank 1). A hit's relevance is `Σ weight / (k + rank)` over the legs it is in, divided by the most the legs that ran could give (rank 1 in each; the keyword leg counts whenever the query has text, even when nothing matched), so it lies between 0 and 1, and on a text query a recent concept alone does not score as a perfect match. The recent leg's score is still recorded, but no longer ranks anything.
+
+**Why `max` stays the default.** Measured on the evaluation set (`fixtures/eval/`) through the whole recall pipeline, `k` chosen on the `dev` split and `held_out` used only to confirm (`evidence/issue-173-fusion/`):
+
+| | nDCG@10 dev | hit@1 dev | nDCG@10 held-out | hit@1 held-out |
+|---|---|---|---|---|
+| BGE-M3, `max` | 0.848 | 0.728 | 0.865 | 0.785 |
+| BGE-M3, `rrf`, k = 3 | 0.893 | 0.784 | 0.887 | 0.785 |
+| EmbeddingGemma 2, `max` | 0.848 | 0.728 | 0.865 | 0.785 |
+| EmbeddingGemma 2, `rrf`, k = 3 | 0.889 | 0.768 | 0.881 | 0.760 |
+
+RRF ranks better overall, but not everywhere, and the gain is below the +0.05 nDCG@10 that #173 set as the bar for a new default. On the held-out split exact-identifier queries drop (nDCG@10 0.948 to 0.899 under BGE-M3, 0.881 under EmbeddingGemma 2) and contrast queries drop (0.897 to 0.859 and 0.872). Telling a query with no answer from one with an answer by its top score does not get consistently better or worse: the chance that an answerable query's top score beats a no-answer query's falls on `dev` (0.775 to 0.682 under BGE-M3) and rises on `held_out` (0.673 to 0.717). Neither kind separates them well enough to gate on. The literature's `k = 60` is much worse here (nDCG@10 0.698 on `dev`): it puts a leg's first and tenth hit within about 0.06 of each other, so the daemon's share of the score decides the order.
+
+`k` and the weights must be finite and at least 0, and `"rrf"` needs at least one weight above 0; anything else, or an unknown key, stops the process at startup. With `serve --ledger`, every recall hit found by a query leg records its rank in each leg and both fused values (`fusion` on the hit), whichever kind ranked, so one can be compared against the other on live traffic.
 
 ## Store
 

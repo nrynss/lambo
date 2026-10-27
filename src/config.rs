@@ -120,6 +120,11 @@ pub struct Config {
 
     pub scoring: ScoringWeights,
     pub recall_weights: RecallWeights,
+    /// #173: `[fusion]`. How phase 1 combines its keyword, vector and recent
+    /// legs ([`crate::recall::fusion`]): `max` (the default) keeps the
+    /// highest raw leg score, `rrf` is reciprocal rank fusion.
+    #[serde(default)]
+    pub recall_fusion: crate::recall::fusion::RecallFusion,
 
     /// Daemon poll interval — how often the loop rescores and re-runs the
     /// detectors (XP-7). This is the one daemon parameter nothing else can
@@ -257,6 +262,7 @@ impl Default for Config {
 
             scoring: ScoringWeights::default(),
             recall_weights: RecallWeights::default(),
+            recall_fusion: crate::recall::fusion::RecallFusion::default(),
 
             daemon_tick_interval: crate::daemon::DAEMON_TICK_INTERVAL,
 
@@ -303,6 +309,7 @@ impl Config {
     /// should invoke this before starting a session; the hybrid entry point
     /// repeats the threshold check at the trust boundary.
     pub fn validate(&self) -> Result<(), LamboError> {
+        self.recall_fusion.validate()?;
         crate::store::validate_coverage_window(self.canonization_coverage_window)
             .map_err(|e| LamboError::Config(e.to_string()))?;
         if !self.semantic_match_threshold.is_finite()
@@ -546,6 +553,12 @@ pub struct LamboFile {
     /// [`LamboFile`] without it stays readable by a binary that predates it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub canonization_supersede: Option<bool>,
+    /// `[fusion]` (#173): how recall combines its legs. `None` (no section)
+    /// keeps the product default (`max`). Not serialized when unset, so a
+    /// file written from a [`LamboFile`] without it stays readable by a
+    /// binary that predates it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fusion: Option<crate::recall::fusion::RecallFusion>,
     /// `[recall]`: an optional recall tier beside the durable store (#18).
     /// `None` (no section) keeps the store exactly as `[store]` builds it. A
     /// section naming a tier this binary was not built with is refused at
@@ -1632,6 +1645,7 @@ kind = "fake"
             serve: Default::default(),
             web: Default::default(),
             canonization_supersede: None,
+            fusion: None,
         };
         let s = toml::to_string(&f).unwrap();
         let back: LamboFile = toml::from_str(&s).unwrap();

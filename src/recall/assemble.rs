@@ -41,8 +41,10 @@
 //!   the window. A holder the blend would not show is not promoted, and the
 //!   blend itself forces no holder.
 //!
-//! * **query_relevance** — the member's phase-1 candidate score (BM25 for
-//!   keyword hits, the max-merged score otherwise). Members that were never
+//! * **query_relevance** — the member's phase-1 candidate score: under the
+//!   default [`FusionKind::Max`](crate::recall::fusion::FusionKind::Max) its
+//!   highest raw leg score (BM25 for keyword hits), under `Rrf` its
+//!   reciprocal-rank-fusion value in `[0, 1]` (#173). Members that were never
 //!   phase-1 candidates — BFS-reached concepts and force-included
 //!   `chunk_group_id` siblings — score **0.0**: they were not keyword hits,
 //!   so phase 1 has no relevance evidence for them; their only signal is the

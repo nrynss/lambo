@@ -270,6 +270,7 @@ fn process_config(
     daemon_cfg: &crate::config::DaemonConfig,
     promotion_policy: Option<crate::canon::PromotionPolicy>,
     canonization_supersede: Option<bool>,
+    fusion: Option<crate::recall::fusion::RecallFusion>,
     embedder_cfg: &EmbedderConfig,
 ) -> Result<crate::Config, LamboError> {
     let mut config = crate::Config::default();
@@ -279,6 +280,10 @@ fn process_config(
     }
     if let Some(supersede) = canonization_supersede {
         config.canonization_supersede = supersede;
+    }
+    // #173: `[fusion]`, a recall setting every session of the process runs.
+    if let Some(fusion) = fusion {
+        config.recall_fusion = fusion;
     }
     // #22: a process setting the surfaces read through `Memory::config`, set
     // here so every session this process attaches carries the same value.
@@ -335,6 +340,7 @@ pub fn resolve_backends(file: LamboFile) -> Result<ResolvedBackends, LamboError>
         &daemon_cfg,
         promotion_policy,
         file.canonization_supersede,
+        file.fusion,
         &embedder_cfg,
     )?;
     // A store whose vector column carries no width of its own (SQLite's BLOB) reports
@@ -673,6 +679,7 @@ pub fn resolve_verify_io(
         &file.daemon,
         file.promotion_policy,
         file.canonization_supersede,
+        file.fusion,
         &file.embedder,
     )?;
     file.serve.validate()?;
@@ -1326,6 +1333,7 @@ mod tests {
             serve: Default::default(),
             web: Default::default(),
             canonization_supersede: None,
+            fusion: None,
         };
         let r = resolve_backends(file).unwrap();
         assert_eq!(r.embedder.dimensions(), 1024);
@@ -1357,6 +1365,34 @@ mod tests {
             !r.config.accept_client_vectors,
             "client vectors are off unless the operator opts in (#22)"
         );
+    }
+
+    /// #173: `[fusion]` reaches `Memory`'s `Config`; no table keeps `max`,
+    /// and a bad value is refused at the file boundary.
+    #[test]
+    #[cfg(all(feature = "store-memory", feature = "embed-fixture"))]
+    fn fusion_table_reaches_config_and_is_validated() {
+        use crate::recall::fusion::{FusionKind, RecallFusion};
+        let base = "[store]\nkind = \"memory\"\n[embedder]\nkind = \"fixture\"\ndim = 1024\n";
+        let off = resolve_backends(LamboFile::from_toml_str(base).unwrap()).unwrap();
+        assert_eq!(off.config.recall_fusion, RecallFusion::default());
+        assert_eq!(off.config.recall_fusion.kind, FusionKind::Max);
+        let on = resolve_backends(
+            LamboFile::from_toml_str(&format!("{base}[fusion]\nkind = \"rrf\"\nk = 20.0\n"))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(on.config.recall_fusion.kind, FusionKind::Rrf);
+        assert_eq!(on.config.recall_fusion.k, 20.0);
+        let err = resolve_backends(
+            LamboFile::from_toml_str(&format!("{base}[fusion]\nkind = \"rrf\"\nk = -1.0\n"))
+                .unwrap(),
+        )
+        .err()
+        .expect("a negative k is refused")
+        .to_string();
+        assert!(err.contains("[fusion] k"), "{err}");
+        assert!(LamboFile::from_toml_str(&format!("{base}[fusion]\nkid = 1.0\n")).is_err());
     }
 
     /// #22: `[embedder] accept_client_vectors` reaches `Memory`'s `Config`,
@@ -1415,6 +1451,7 @@ mod tests {
             serve: Default::default(),
             web: Default::default(),
             canonization_supersede: None,
+            fusion: None,
         };
         let r = resolve_backends(file).unwrap();
         assert_eq!(r.embedding.kind, "gemini");
@@ -1461,6 +1498,7 @@ mod tests {
             serve: Default::default(),
             web: Default::default(),
             canonization_supersede: None,
+            fusion: None,
         };
 
         // The pin asserts this deployment's vectors are 768 wide; the embedder emits
@@ -1766,6 +1804,7 @@ mod tests {
                 serve: Default::default(),
                 web: Default::default(),
                 canonization_supersede: None,
+                fusion: None,
             }
         }
 

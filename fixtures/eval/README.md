@@ -16,7 +16,7 @@ every reported number until the owner settles it; none does now.
 | File | What |
 |---|---|
 | `corpus.json` | The retrieval universe: 100 concepts `{id, topic, type, text, origin, sources}`. `origin` is `dogfood` (23 concepts, verbatim text of a dogfood-store concept) or `authored` (77 atomic facts restated from the repo's own records, each citing its source file). A query is "no-answer" relative to this corpus. |
-| `queries.json` | 310 queries `{id, query, kind, family, topic, split, relevant[{concept, grade}], facets[], source, labeller, labelled_on, review?}`. 204 `answerable` (graded relevance 2 = answers it, 1 = partial or supporting; `facets` = what a correct answer must say, for #181) and 106 `no_answer`. |
+| `queries.json` | 368 queries `{id, query, kind, family, topic, split, relevant[{concept, grade}], facets[], source, labeller, labelled_on, review?}`. 262 `answerable` (graded relevance 2 = answers it, 1 = partial or supporting; `facets` = what a correct answer must say, for #181) and 106 `no_answer`. |
 | `pairs.json` | 403 pairs `{id, a, b, label, family, relation?, split, source, labeller, labelled_on, concepts?, review?}`: 173 `related_distinct`, 110 `paraphrase`, 120 `unrelated`. |
 | `related_pairs.json` | Generated export in the `[embedder] related_pairs` format (`[{"a", "b"}]`): the 173 adjudicated `related_distinct` pairs. Point `related_pairs` at it to derive the merge threshold (#87). |
 | `authoring/` | The sources: `t_*.py` topic modules (one `C()` per concept with its queries, rewordings, contrasts and facets), `dogfood_texts.json` (the public dogfood texts, from `extract_dogfood_texts.py`) and `build.py`, which writes the four files above deterministically. |
@@ -51,7 +51,7 @@ answers #198: `supersedes`, `distinct_entity` or `contradicts`):
 | unrelated | cross-area | 120 |
 
 Splits (a hash of the id, about 70/30): pairs 276 dev / 127 held-out;
-queries 199 dev / 111 held-out. Related-distinct relations: 82 contradicts,
+queries 239 dev / 129 held-out. Related-distinct relations: 82 contradicts,
 52 distinct_entity, 12 supersedes, 27 none (families that need none).
 
 Queries by family:
@@ -60,9 +60,9 @@ Queries by family:
 |---|---|---:|
 | answerable | fact-lookup | 124 |
 | | exact-identifier | 29 |
-| | contrast | 23 |
-| | vocabulary-mismatch | 12 |
-| | rationale | 8 |
+| | contrast | 36 |
+| | vocabulary-mismatch | 48 |
+| | rationale | 17 |
 | | superseded | 6 |
 | | multi-hop | 2 |
 | no_answer | near-domain | 80 |
@@ -76,7 +76,7 @@ Per consumer:
 - **#87 / #176**: 173 adjudicated related-but-distinct pairs in the export,
   over `MIN_RELATED_PAIRS` (100); #190's 150-before-adjudication target is
   met with 173.
-- **#173**: 204 answerable queries with graded ids; nDCG@10 is computed by
+- **#173**: 262 answerable queries with graded ids; nDCG@10 is computed by
   the measurement example.
 - **#174**: 106 no-answer queries (32 in held-out); #174 wants at least 100
   per contract, so a held-out-only evaluation is short until the owner adds
@@ -103,6 +103,16 @@ Per consumer:
   990 concepts and was served on `lambo-e11fb06` with candle BGE-M3 on Metal
   (the paper's README). The six lambo-run efficacy questions seed the
   queries; their rubrics are the facets.
+- **Added for #173 (2026-10-27).** `authoring/t_more173.py` appends 58
+  answerable queries to existing concepts (36 vocabulary-mismatch, 9
+  rationale, 13 contrast; 40 dev / 18 held-out by the usual hash), written
+  against the corpus text only, after the owner asked for more
+  vocabulary-mismatch coverage (dev had 5). They carry `labelled_on`
+  2026-10-27; every earlier id, text and split is unchanged. A
+  vocabulary-mismatch query avoids the concept's identifiers, numbers and
+  names, asking for the fact as a user who does not know them would.
+  A query takes its concept's `facets` unless `Q(..., facets=[...])` gives
+  its own, for a query about a different part of the concept.
 - **Authored text.** Concepts, rewordings and contrasts restate facts from
   this repository's records (`CHANGELOG.md`,
   `dev-diary/lambo-for-mooshik/DOGFOOD-FINDINGS.md` and `K-candle-embedder.md`,

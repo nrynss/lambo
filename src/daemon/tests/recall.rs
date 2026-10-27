@@ -951,6 +951,67 @@ async fn recent_leg_follows_the_vector_contracts_calibration() {
     );
 }
 
+/// #173 through `Daemon::recall_detailed`: `Config::recall_fusion` reaches
+/// phase 1 on the text path, with and without a vector leg. The fixture's one
+/// concept is a recent-leg-only candidate, so under `max` its relevance is
+/// the flat recent score and under `rrf` it is rank 1 of the only active leg
+/// (1.0); the final score (daemon share + relevance share) moves with it.
+#[tokio::test]
+async fn recall_fusion_reaches_phase_one() {
+    use crate::config::RecallWeights;
+    use crate::embed::calibration;
+    use crate::recall::cache::SharedRecallCache;
+    use crate::recall::fusion::{FusionKind, RecallFusion};
+
+    let eg2 = calibration::BUILTIN[0];
+    let eg2_contract = EmbeddingContract {
+        kind: eg2.kind.into(),
+        model: Some(eg2.model.into()),
+        dim: eg2.dim,
+    };
+    let score_of = |kind: FusionKind, contract: Option<EmbeddingContract>| async move {
+        let (graph, cid) = locked_graph_with_one_concept();
+        let config = crate::Config {
+            recall_fusion: RecallFusion {
+                kind,
+                ..RecallFusion::default()
+            },
+            ..crate::Config::default()
+        };
+        let daemon = Daemon::from_config(graph, &config);
+        let vector = vec![0.0; contract.as_ref().map_or(1, |c| c.dim)];
+        let result = daemon
+            .recall_detailed(
+                &sid(),
+                RecallQuery {
+                    query: "zzz".into(),
+                    top_k: 5,
+                    max_tokens: 500,
+                    traversal_depth: 0,
+                },
+                &StubVectorStore { race: false },
+                contract.as_ref().map(|c| (vector.as_slice(), c)),
+                RecallWeights::default(),
+                &SharedRecallCache::new(),
+            )
+            .await;
+        let legs = result.legs.get(&cid).copied().expect("a phase-1 hit");
+        assert_eq!(legs.recent_rank, Some(1));
+        assert_eq!(legs.rrf, Some(1.0), "rrf is recorded under either kind");
+        let hit = result.hits.iter().find(|h| h.node_id == cid).expect("hit");
+        (hit.score, legs.recent.expect("recent leg"))
+    };
+    for contract in [None, Some(eg2_contract)] {
+        let (max, recent) = score_of(FusionKind::Max, contract.clone()).await;
+        let (rrf, _) = score_of(FusionKind::Rrf, contract.clone()).await;
+        let w = RecallWeights::default().w_query;
+        assert!(
+            (rrf - max - w * (1.0 - recent)).abs() < 1e-9,
+            "{contract:?}: max {max}, rrf {rrf}, recent {recent}"
+        );
+    }
+}
+
 /// #19(c) end to end through `Daemon::recall_detailed`: a newer
 /// contradiction of the fixture's Canonical "user schema" renders the
 /// contradiction line on it, force-includes it, and pulls the contradicting

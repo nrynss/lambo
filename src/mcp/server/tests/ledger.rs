@@ -235,6 +235,21 @@ async fn i1_recall_lines_carry_per_leg_scores_and_the_warning_flags() {
         }
         if !legs.is_empty() {
             legged += 1;
+            // #173: a phase-1 hit carries its leg ranks and both fused values.
+            let fusion = hit["fusion"].as_object().expect("fusion beside legs");
+            assert!(fusion["max"].is_number(), "{hit}");
+            let rrf = fusion["rrf"].as_f64().expect("rrf recorded");
+            assert!((0.0..=1.0).contains(&rrf), "{hit}");
+            for name in legs.keys() {
+                let rank = match name.as_str() {
+                    "bm25" => "bm25_rank",
+                    "recent" => "recent_rank",
+                    _ => "vector_rank",
+                };
+                assert!(fusion[rank].as_u64().is_some_and(|r| r >= 1), "{hit}");
+            }
+        } else {
+            assert!(hit.get("fusion").is_none(), "{hit}");
         }
     }
     assert!(
