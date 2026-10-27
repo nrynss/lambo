@@ -17,7 +17,8 @@ V, R, X = 'vocabulary-mismatch', 'rationale', 'contrast'
 # ---- vocabulary-mismatch ------------------------------------------------
 Q('emb-01', "In the first audit of the test machine's memory, what fraction of entries had no meaning-based index?", V, {'emb-02': 1})
 Q('emb-03', "Did very long notes explain why so many stored notes could not be found by meaning?", V, {'emb-04': 1})
-Q('emb-04', "Why did the local text-to-number server reject anything longer than a paragraph or so?", V, {'emb-03': 1})
+Q('emb-04', "Why did the local text-to-number server reject anything longer than a paragraph or so?", V, {'emb-03': 1},
+  facets=['llama-server clamps n_batch = n_ubatch = 512 by default', 'over ~512 tokens fails HTTP 500'])
 Q('emb-06', "After the binary was rebuilt with the actions fix, how many old records got their missing numbers filled in?", V, {'emb-07': 1})
 Q('emb-08', "Why did near-identical notes on the test machine pile up instead of being folded together?", V)
 Q('cnd-02', "Which hosted model files does the built-in encoder download, and were they checked against the originals?", V)
@@ -56,9 +57,11 @@ Q('eff-07', "Was the comparison between file notes and lambo fair in how much te
 Q('can-05', "Why is the level unrelated pairs reach not a safe level for merging notes?", R)
 Q('cal-02', "Why did G2 keep the merge threshold where it was instead of lowering it?", R)
 Q('srv-01', "Why is the lease refreshed three times within one TTL?", R)
-Q('srv-07', "Why does DIAL_BUDGET sit between the dial's own budgets and sqlite's busy_timeout?", R)
+Q('srv-07', "Why does DIAL_BUDGET sit between the dial's own budgets and sqlite's busy_timeout?", R,
+  facets=['6 seconds', 'above the connect and replay budgets (about 4.1 s)', 'below sqlite busy_timeout 8 s'])
 Q('pro-03', "Why was observability prioritised ahead of more implementation work?", R)
-Q('pro-05', "Why is the postgres/cockroach alias split a loud failure rather than a silent one?", R)
+Q('pro-05', "Why is the postgres/cockroach alias split a loud failure rather than a silent one?", R,
+  facets=['fails loud', 'CREATE EXTENSION vector and <=> do not exist on Cockroach', 'dies at provision or first vector query'])
 Q('fnd-07', "Why can blast-radius warnings not fire on most orchestrator derives?", R)
 Q('g3-03', "Why did the J3-implementation concept with 13 dependents not trigger a warning?", R)
 Q('fnd-08', "Why was cross-client memory silently absent on default wiring in the two-product probe?", R)
@@ -66,7 +69,8 @@ Q('fnd-08', "Why was cross-client memory silently absent on default wiring in th
 # ---- contrast -----------------------------------------------------------
 Q('cnd-04', "Does a proxying serve on Metal still load the full model?", X)
 Q('can-03', "Does canary = verify trust a recent passing check like warn does?", X)
-Q('cal-03', "Was the old 0.50 recent floor harmless for vector ranking?", X)
+Q('cal-03', "Was the old 0.50 recent floor harmless for vector ranking?", X,
+  facets=['the old 0.50 floor masked a true vector hit', 'now 0.35, below 0.3991'])
 Q('srv-02', "Did one serve with several clients give each client its own lambo_reserve identity before J1?", X)
 Q('ack-01', "Was the J3 derive ack slower than the FixtureEmbedder baseline?", X)
 Q('rel-09', "Does [recall] kind = elastic move the source of truth to Elasticsearch?", X)
@@ -77,4 +81,5 @@ Q('mg-02', "Does canon alias-preview --similar merge the pairs it finds?", X)
 Q('eff-05', "Did the file-memory arm present superseded facts as current?", X)
 Q('fnd-11', "Does cursor-agent run lambo's MCP tools without extra flags?", X)
 # mg-03 states the rule, not its reason, so it is asked as a contrast.
-Q('mg-03', "Can lambo provision re-key older concepts while a session lease is live?", X)
+Q('mg-03', "Can lambo provision re-key older concepts while a session lease is live?", X,
+  facets=['refuses while any session lease is live', 'run once with no session holder'])

@@ -267,9 +267,8 @@
    }
   ],
   "facets": [
-   "--batch-size 8192",
-   "--ubatch-size 8192",
-   "verify with a >512-token embed"
+   "llama-server clamps n_batch = n_ubatch = 512 by default",
+   "over ~512 tokens fails HTTP 500"
   ],
   "source": "authored against the corpus text",
   "labeller": "Grok Bot (agent)",
@@ -1453,8 +1452,8 @@
    }
   ],
   "facets": [
-   "0.35",
-   "below 0.3991"
+   "the old 0.50 floor masked a true vector hit",
+   "now 0.35, below 0.3991"
   ],
   "source": "authored against the corpus text",
   "labeller": "Grok Bot (agent)",
@@ -2278,7 +2277,8 @@
   ],
   "facets": [
    "6 seconds",
-   "abandoned, retry later"
+   "above the connect and replay budgets (about 4.1 s)",
+   "below sqlite busy_timeout 8 s"
   ],
   "source": "authored against the corpus text",
   "labeller": "Grok Bot (agent)",
@@ -2812,9 +2812,9 @@
    }
   ],
   "facets": [
-   "postgres/pg -> PostgresDialect",
-   "cockroach/crdb -> CockroachDialect",
-   "fails loud"
+   "fails loud",
+   "CREATE EXTENSION vector and <=> do not exist on Cockroach",
+   "dies at provision or first vector query"
   ],
   "source": "authored against the corpus text",
   "labeller": "Grok Bot (agent)",
@@ -4392,9 +4392,8 @@
    }
   ],
   "facets": [
-   "keys no longer stem identifier tokens",
-   "provision re-keys once",
-   "already merged stay merged"
+   "refuses while any session lease is live",
+   "run once with no session holder"
   ],
   "source": "authored against the corpus text",
   "labeller": "Grok Bot (agent)",
