@@ -276,4 +276,6 @@ pub(crate) fn skips_json(skipped: &[RedundantSkip]) -> serde_json::Value {
 }
 
 #[cfg(test)]
+mod assembly_tests;
+#[cfg(test)]
 mod tests;

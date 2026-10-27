@@ -43,6 +43,7 @@ mod live_eg2_cold;
 mod query_cache;
 mod reads;
 mod recall_by;
+mod redundancy;
 mod replay;
 mod repo_scope;
 mod shutdown;

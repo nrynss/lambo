@@ -1094,3 +1094,55 @@ fn a_pending_companion_and_its_copies_are_shown_once() {
     assert_eq!(r.hits[3].also.len(), 1, "the cut general copy");
     assert_eq!(r.hits[3].companion_of, vec![nid(0, 1)]);
 }
+
+/// #181: what each session skipped as redundant with a hit stays on it in
+/// the merge: its block names those members after `from <session>` and
+/// before any farther tier's copy (`also <id>` ids are its session's), and
+/// `LayeredHit::skipped_redundant` carries them. A hit that skipped
+/// nothing renders exactly as before.
+#[test]
+fn each_tiers_redundancy_skips_stay_on_their_hit() {
+    use crate::recall::redundancy::{RedundancySignal, RedundantSkip};
+    let skipped = |tier: usize, pos: usize| RedundantSkip {
+        node_id: NodeId(Uuid::from_u64_pair(0x5c1b << 48, (tier * 10 + pos) as u64)),
+        signal: RedundancySignal::SameContent,
+    };
+    let mut lists = vec![
+        primary(&[kw("p1"), kw("p2")]),
+        layer(1, "general", 0.5, &[kw("g1"), kw("p1")]),
+    ];
+    for (tier, pos) in [(0, 0), (1, 0)] {
+        lists[tier].recall.as_mut().unwrap().recall.detailed[pos].skipped_redundant =
+            vec![skipped(tier, pos)];
+    }
+    let r = run(&lists, params(10));
+    assert_eq!(order(&r), ["lambo/p1", "lambo/p2", "general/g1"]);
+    let block = |i: usize| r.context.split("\n\n").nth(i).unwrap().to_string();
+    let also = |s: RedundantSkip| format!("also {}", short_id(s.node_id));
+    assert!(
+        block(0).ends_with(&format!(
+            "id {}, {}, also {} in general)",
+            short_id(nid(0, 0)),
+            also(skipped(0, 0)),
+            short_id(nid(1, 1))
+        )),
+        "{}",
+        block(0)
+    );
+    assert!(
+        block(2).ends_with(&format!(
+            "id {}, from general, {})",
+            short_id(nid(1, 0)),
+            also(skipped(1, 0))
+        )),
+        "{}",
+        block(2)
+    );
+    assert_eq!(
+        block(1),
+        block_with_meta(&r.detail.hits[1], &[], &[], None).text
+    );
+    assert_eq!(r.hits[0].skipped_redundant, vec![skipped(0, 0)]);
+    assert_eq!(r.hits[2].skipped_redundant, vec![skipped(1, 0)]);
+    assert!(r.hits[1].skipped_redundant.is_empty());
+}

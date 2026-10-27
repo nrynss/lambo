@@ -102,6 +102,8 @@ struct Run {
     later: chrono::Duration,
     /// Edits the rebuilt split before the run.
     edit: Option<fn(&mut SplitOutput)>,
+    /// The serving config the replay runs with.
+    config: Config,
 }
 
 impl Run {
@@ -124,6 +126,7 @@ impl Run {
             failing: false,
             later: chrono::Duration::zero(),
             edit: None,
+            config: Config::default(),
         }
     }
 
@@ -160,7 +163,7 @@ impl Run {
             },
             embedder,
             embedding: &contract(self.dim),
-            config: &Config::default(),
+            config: &self.config,
         })
         .await
     }
@@ -386,6 +389,53 @@ async fn layered_dedupe_is_not_a_loss() {
         .iter()
         .any(|h| h.also.contains(&("general".to_string(), id(17)))));
     assert!(report.projects["alpha"].deduped >= 1);
+}
+
+/// #181: with `[selection] skip_redundant` the replay skips a restated
+/// concept inside each session, as a serve would, and the report lists it
+/// among the kept hit's `also` copies: deduped, never lost. Off, both
+/// copies are hits.
+#[tokio::test]
+async fn a_redundancy_skip_is_replayed_and_is_not_a_loss() {
+    let restated = |skip_redundant: bool| {
+        let mut run = Run::new();
+        // 18 ("alpha note", an alpha Observation) restates 11 word for word.
+        let c = run
+            .source
+            .concepts
+            .iter_mut()
+            .find(|c| c.id == id(18))
+            .unwrap();
+        c.content = "alpha cache is warm".into();
+        c.canonical_key = "alpha cache is warm".into();
+        run.split_source = run.source.clone();
+        run.config.recall_selection.skip_redundant = skip_redundant;
+        run
+    };
+    let pair = [id(11), id(18)];
+    let off = restated(false).go().await.unwrap();
+    let q = query(&off, "alpha", "alpha cache is warm");
+    for side in [&q.before, &q.after] {
+        assert!(pair.iter().all(|p| side.iter().any(|h| h.origin == *p)));
+    }
+
+    let on = restated(true).go().await.unwrap();
+    let q = query(&on, "alpha", "alpha cache is warm");
+    for side in [&q.before, &q.after] {
+        let shown: Vec<NodeId> = pair
+            .iter()
+            .copied()
+            .filter(|p| side.iter().any(|h| h.origin == *p))
+            .collect();
+        assert_eq!(shown.len(), 1, "one copy is a hit: {side:#?}");
+        let other = pair.iter().copied().find(|p| *p != shown[0]).unwrap();
+        let kept = side.iter().find(|h| h.origin == shown[0]).unwrap();
+        assert!(
+            kept.also.iter().any(|(_, o)| *o == other),
+            "the skipped copy is named: {kept:#?}"
+        );
+    }
+    assert!(pair.iter().all(|p| !q.lost_ids.contains(p)), "{q:#?}");
 }
 
 /// Disclosure: an aggregate-only session (and any session nobody queried)
