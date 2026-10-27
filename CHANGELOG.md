@@ -19,7 +19,13 @@
   and companions are unchanged, and neither the cited nor the
   contradicting concept is pulled in for it. It is checked on every
   recall (single-session, layered, `lambo session verify`), so it shows
-  on the first recall after the `against` write. The detailed recall's
+  on the first recall after the `against` write, and also when the #196
+  contradiction budget has dropped the cited concept's own hot-list entry
+  (the hit warns; the cited concept, if shown, has no *Contradicted*
+  line). The lines count against `max_tokens` inside the hit's block, as
+  #179's lines do, so under a tight budget a later hit can fall out of
+  the rendered context (`included_in_context` false); hits, scores, order
+  and `top_k` are unchanged. The detailed recall's
   annotation kind is `rests_on_contradicted` (web portal `/api/recall`,
   `--ledger` recall lines; `lambo session verify` reports that kind). A
   recall with no stale citation renders exactly as before. The predicate

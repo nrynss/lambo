@@ -184,7 +184,12 @@ a `daemon::contradiction::direct_citation` written by `now`, dropped when
 contradicts it). The inverse question, "which concepts cite this one",
 must use the same edge test. Recall runs it on every shown hit at the recall's `now` with
 `CycleParams::contradiction_evidence_min_age`, so it reads the graph rather
-than the hot list. It is a warning only: nothing is forced, added or
+than the hot list: when the #196 contradiction budget has dropped the cited
+concept's entry, the citing hit still warns while the cited concept shows
+no `contradiction` line. The lines are part of the hit's context block and
+count against `max_tokens`, so under a tight budget a later hit can fall
+out of the rendered context (`included_in_context` false), as with #179's
+lines; hits, scores, order and `top_k` are unchanged. It is a warning only: nothing is forced, added or
 reordered, and a result with no stale citation is byte-identical to one
 without the check. The annotation kind is `rests_on_contradicted`, never
 forced in a layered merge.
