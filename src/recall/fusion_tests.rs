@@ -86,6 +86,6 @@ fn k_zero_is_allowed_and_rank_one_is_the_weight() {
 fn a_term_falls_with_rank() {
     let f = RecallFusion::default();
     assert!(f.term(1.0, 1) > f.term(1.0, 2));
-    assert_eq!(f.term(1.0, 1), 1.0 / 61.0);
+    assert_eq!(f.term(1.0, 1), 1.0 / (DEFAULT_RRF_K + 1.0));
     assert_eq!(f.term(0.0, 1), 0.0);
 }

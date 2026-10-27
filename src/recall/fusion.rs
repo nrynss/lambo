@@ -13,8 +13,9 @@
 //! Σ_leg w_leg / (k + rank_leg)  /  Σ_active w_leg / (k + 1)
 //! ```
 //!
-//! over the legs it is in, divided by the most that the legs which produced
-//! a candidate in this recall can give (rank 1 in every one), so it is in
+//! over the legs it is in, divided by the most that the legs which ran in
+//! this recall can give (rank 1 in every one; the keyword leg ran whenever a
+//! text query searched the index, even with no hit), so it is in
 //! `[0, 1]` and `final = daemon × w_daemon + relevance × w_query` keeps its
 //! shape. Under RRF the recent leg is a real leg, ranked by recency (newest
 //! interaction first), instead of a flat floor: its calibrated score (#87)
@@ -49,8 +50,16 @@ impl std::fmt::Display for FusionKind {
     }
 }
 
-/// The RRF constant `k` by default.
-pub const DEFAULT_RRF_K: f64 = 60.0;
+/// The RRF constant `k` by default: 3, chosen on the evaluation set's `dev`
+/// split under BGE-M3 and EmbeddingGemma 2 (flat for k from 1 to 3 on both).
+///
+/// Not the 60 of the RRF literature (and of #173's synthetic study, which
+/// scored relevance alone). Normalised RRF at k = 60 puts a leg's rank 1 and
+/// rank 10 within about 0.06 of each other, so inside `final = daemon ×
+/// w_daemon + relevance × w_query` the daemon score decides the order: on
+/// `dev` it measured nDCG@10 0.70 against max-merge's 0.85. See
+/// `evidence/issue-173-fusion/`.
+pub const DEFAULT_RRF_K: f64 = 3.0;
 /// The keyword and vector legs' default RRF weight.
 pub const DEFAULT_LEG_WEIGHT: f64 = 1.0;
 /// The recent leg's default RRF weight.
@@ -63,9 +72,9 @@ pub struct RecallFusion {
     /// `max` (the default) or `rrf`.
     #[serde(default)]
     pub kind: FusionKind,
-    /// RRF's `k`: finite and at least 0. Larger values flatten the gap
-    /// between ranks; with the daemon blend it also sets how much a rank
-    /// difference moves the final score.
+    /// RRF's `k`: finite and at least 0 (default [`DEFAULT_RRF_K`]). Larger
+    /// values flatten the gap between ranks, and with it how much a rank
+    /// difference can move the final score against the daemon's share.
     #[serde(default = "default_k")]
     pub k: f64,
     /// The keyword leg's RRF weight. Finite and at least 0.

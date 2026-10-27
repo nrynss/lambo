@@ -53,6 +53,12 @@
   `layer.min_similarity = 0.5` no longer compiles: write
   `Some(0.5)` or use `with_min_similarity`, which is unchanged. This keeps
   an explicit 0.50 from being read as unset.
+- **`Config` gains `recall_fusion`, `LamboFile` gains `fusion`,
+  `recall::candidates::Phase1Input` gains `fusion`, and
+  `recall::candidates::LegScores` gains `keyword_rank`, `recent_rank`,
+  `vector_rank` and `rrf`** (#173). A struct literal that names every field
+  no longer compiles; `..Default::default()` keeps compiling, and every
+  default ranks exactly as before (`FusionKind::Max`).
 - **`Config` and `EmbedderConfig` gain `calibrated_layer_floor`, and
   `LayerSpec` gains `min_similarity_configured`** (#87). A `Config` or
   `EmbedderConfig` struct literal that names every field no longer compiles;
@@ -124,6 +130,23 @@
 
 ### Added
 
+- **Opt-in reciprocal rank fusion of recall's legs: `[fusion]` (#173).**
+  `kind = "rrf"` ranks each of the keyword, vector and recent legs on its
+  own (the recent leg by recency) and scores a hit `Σ w / (k + rank)`,
+  normalised to [0, 1], instead of the highest raw leg score, where BM25's
+  unbounded scale beats any cosine. Defaults `k = 3`, weights 1, 1 and 0.3.
+  **The default stays `kind = "max"`, so nothing changes unless you opt
+  in.** On the #190 set, through the whole pipeline, RRF raised nDCG@10
+  from 0.848 to 0.893 (BGE-M3) and 0.889 (EmbeddingGemma 2) on `dev`, and
+  from 0.865 to 0.887 and 0.881 on `held_out` (below #173's +0.05 bar for
+  a new default), but lowered held-out exact-identifier queries (0.948 to
+  0.899 and 0.881) and contrast queries, and did not consistently change
+  how a no-answer query's top score compares. The literature's `k = 60` scored 0.698
+  on `dev`: so flat that the daemon's half of the score decides the order.
+  The ledger records each phase-1 hit's leg ranks and both fused values
+  (`fusion` on the hit) under either kind. New `recall::fusion` module
+  (`RecallFusion`, `FusionKind`); harness `examples/eval_fusion`; evidence
+  `evidence/issue-173-fusion/`.
 - **`Config::hot_list_contradiction_max`, `HotList::with_budget`,
   `HotList::contradiction_max` and `hotlist::default_contradiction_max`**
   (#196), with `CycleParams::hot_list_contradiction_max`. `validate` refuses
