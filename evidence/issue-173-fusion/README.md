@@ -196,19 +196,14 @@ the switch can be evaluated on live traffic before a default changes.
 ## Reproduce
 
 ```
-LAMBO_EMBEDDER=candle LAMBO_EMBED_DEVICE=cpu \
-  cargo run --release --features embed-candle,store-sqlite --example eval_fusion -- \
-  --cache bge.jsonl --variant max --variant rrf:k=3 ... \
-  --out evidence/issue-173-fusion/runs/bge-m3-candle-cpu-dev.json
-LAMBO_EMBEDDER=eg2 LAMBO_EMBED_DIM=768 LAMBO_LLAMA_EMBED_URL=http://127.0.0.1:8080 \
-  LAMBO_LLAMA_MODEL=ggml-org/embeddinggemma-2-GGUF@bfcd2987/Q8_0 \
-  cargo run --release --features embed-eg2,store-sqlite --example eval_fusion -- \
-  --variant max ... --out evidence/issue-173-fusion/runs/eg2-q8-768-dev.json
-# add --held-out for the confirmation runs
-python3 evidence/issue-173-fusion/summarise.py
+CACHE_BGE=bge.jsonl CACHE_EG2=eg2.jsonl bash evidence/issue-173-fusion/run.sh
 ```
 
-Each run file lists its variants, so the exact sweep is in the file. The
-`--cache` file is `eval_measure`'s embedding cache (optional; misses are
-embedded and appended). Run files hold query and concept ids, families and
-numbers only: no concept or query text, path, URL or credential.
+`run.sh` builds `examples/eval_fusion`, runs the `dev` sweep and the held-out
+confirmation under both embedders (EmbeddingGemma 2 from a llama.cpp server at
+`LAMBO_LLAMA_EMBED_URL`), and prints the tables above with `summarise.py`. The
+caches are `eval_measure`'s embedding cache format and optional: misses are
+embedded and appended. Each `runs/*.json` holds the metrics per variant, and
+`runs/*.queries.jsonl` each query's top three concept ids and top score per
+variant: ids, families and numbers only, no concept or query text, path, URL
+or credential.

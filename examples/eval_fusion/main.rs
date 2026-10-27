@@ -29,8 +29,9 @@
 //! and `wd=` (the daemon's share of the final score; `w_query = 1 − wd`).
 //! A trailing `@label` names a repeat of the same variant (a noise check).
 //!
-//! The report names no path, URL or concept text: query ids, families and
-//! numbers only.
+//! With `--out X.json`, per-query results (top three concept ids and the top
+//! score, per variant) go to `X.queries.jsonl` beside it. Neither names a
+//! path, URL or concept text: query ids, families and numbers only.
 
 #[path = "../eval_measure/schema.rs"]
 #[allow(dead_code)]
@@ -400,6 +401,8 @@ async fn run() -> Result<(), String> {
         .collect();
 
     let mut report = BTreeMap::new();
+    // Per-query results, one JSON line each, beside the report.
+    let mut query_lines: Vec<String> = Vec::new();
     for (i, (name, fusion, weights)) in variants.iter().enumerate() {
         let db = work.join(format!("v{i}.db"));
         for suffix in ["", "-wal", "-shm"] {
@@ -518,6 +521,11 @@ async fn run() -> Result<(), String> {
             })
             .collect();
         eprintln!("{name}: {}", json!(metrics.get("split/dev")));
+        for q in per_query {
+            let mut q = q;
+            q["variant"] = json!(name);
+            query_lines.push(q.to_string());
+        }
         report.insert(
             name.clone(),
             json!({
@@ -530,7 +538,6 @@ async fn run() -> Result<(), String> {
                 "recall_weights": {"w_daemon": weights.w_daemon, "w_query": weights.w_query},
                 "metrics": metrics,
                 "no_answer": no_answer,
-                "queries": per_query,
             }),
         );
     }
@@ -551,6 +558,8 @@ async fn run() -> Result<(), String> {
                 std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
             }
             std::fs::write(path, text + "\n").map_err(|e| e.to_string())?;
+            let lines = path.with_extension("queries.jsonl");
+            std::fs::write(&lines, query_lines.join("\n") + "\n").map_err(|e| e.to_string())?;
         }
         None => println!("{text}"),
     }
