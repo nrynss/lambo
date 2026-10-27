@@ -898,6 +898,11 @@ fn a_missing_node_has_no_stale_citations() {
 /// recall's re-validation of 60 members, 30 of them contradicted, on a
 /// fresh epoch (it rebuilds the writer timeline) and again on the same
 /// epoch. Run with `--release -- --ignored --nocapture`.
+///
+/// The default hot list holds at most `default_contradiction_max` (500)
+/// contradictions since #196 and keeps the most recently declared, so the
+/// 30 contradicted members are the last 30 declared (concepts 971..=1000),
+/// which are on the list; the first 30 were evicted by the budget.
 #[test]
 #[ignore = "timing: run by hand with --release"]
 fn contradiction_timing() {
@@ -935,7 +940,13 @@ fn contradiction_timing() {
         detect_us.push(started.elapsed().as_secs_f64() * 1e6);
         assert_eq!(hits.len(), CONTRADICTED as usize);
     }
-    let members: Vec<NodeId> = (1..=30).chain(5_000..5_030).map(cid).collect();
+    // Contradiction k is declared at CONCEPTS + k: the last 30 are the most
+    // recently declared, inside the #196 budget.
+    assert!(crate::daemon::hotlist::default_contradiction_max(hot.max()) >= 30);
+    let members: Vec<NodeId> = (CONTRADICTED - 29..=CONTRADICTED)
+        .chain(5_000..5_030)
+        .map(cid)
+        .collect();
     let mut cold_us = Vec::new();
     let mut warm_us = Vec::new();
     for _ in 0..reps {
