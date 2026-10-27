@@ -294,6 +294,7 @@ fn recall_facts_with(
                     }
                     AnnotationKind::Contradicts => kinds.push("contradicts"),
                     AnnotationKind::Superseded => kinds.push("superseded"),
+                    AnnotationKind::RestsOnContradicted => kinds.push("rests_on_contradicted"),
                     // Response-global kinds are never hit-owned (H3 contract),
                     // so they are reported once, below.
                     AnnotationKind::Traversal
@@ -349,6 +350,7 @@ fn recall_facts_with(
             AnnotationKind::Contradiction => "contradiction",
             AnnotationKind::Contradicts => "contradicts",
             AnnotationKind::Superseded => "superseded",
+            AnnotationKind::RestsOnContradicted => "rests_on_contradicted",
         })
         .collect();
 

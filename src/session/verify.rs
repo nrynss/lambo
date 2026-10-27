@@ -181,6 +181,8 @@ pub fn warning_kind(line: &str) -> String {
         "contradicted"
     } else if body.starts_with("⚠ Contradicts") {
         "contradicts"
+    } else if body.starts_with("⚠ Rests on ") {
+        "rests_on_contradicted"
     } else if body.starts_with("⚑ Load-bearing pillar") {
         "load_bearing"
     } else if body.starts_with("Reserved by ") {

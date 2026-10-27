@@ -700,6 +700,148 @@ fn a_contradiction_written_after_now_does_not_fire_even_if_backdated() {
     assert_eq!(at(&s, 3000).map(|h| h.at), Some(t(200)));
 }
 
+// ---------------------------------------------------------------------------
+// #207: stale by dependency
+// ---------------------------------------------------------------------------
+
+fn stale(s: &Session, node: u64, now: i64) -> Vec<ContradictionHit> {
+    stale_citations(&s.g, cid(node), MIN_AGE, t(now))
+}
+
+/// In `base`, D (2) cites X (1) and Y (3) contradicts X: D rests on a
+/// contradicted concept, reported as exactly `contradiction_at`'s hit.
+#[test]
+fn a_concept_citing_a_contradicted_concept_is_stale() {
+    let s = base(CanonizationStatus::None);
+    let hits = stale(&s, 2, 1000);
+    assert_eq!(hits, vec![at(&s, 1000).expect("X is contradicted")]);
+    assert_eq!((hits[0].node, hits[0].by), (cid(1), cid(3)));
+}
+
+/// Before the contradiction is written, nothing is stale; the citation
+/// alone flags nothing.
+#[test]
+fn a_citation_of_an_uncontradicted_concept_is_not_stale() {
+    let mut s = Session::new();
+    s.interaction(1, "agent-a", 0, None);
+    s.concept(1, 1, "agent-a", "brand x runs small", 0);
+    s.interaction(2, "agent-b", 100, None);
+    s.concept(2, 2, "agent-b", "size up for brand x", 100);
+    s.edge(10, EdgeType::Dependency, 2, 1, 100, None);
+    assert!(stale(&s, 2, 1000).is_empty());
+    // At an instant before the contradiction was written, `base` is clean
+    // too.
+    assert!(stale(&base(CanonizationStatus::None), 2, 150).is_empty());
+}
+
+/// #179's rule decides: once newer eligible evidence supports X, X is not
+/// contradicted, so nothing that cites it is stale either.
+#[test]
+fn a_cited_concept_supported_after_its_contradiction_is_not_stale() {
+    let mut s = base(CanonizationStatus::None);
+    later_citation(&mut s, 300);
+    assert_eq!(at(&s, 1000), None);
+    assert!(stale(&s, 2, 1000).is_empty());
+    assert!(stale(&s, 4, 1000).is_empty());
+    // Before the later citation ages in, X is still contradicted, and both
+    // of its citers are stale.
+    assert_eq!(stale(&s, 2, 320).len(), 1);
+    assert_eq!(stale(&s, 4, 320).len(), 1);
+}
+
+/// Several contradicted citations come back in the cited concepts' id
+/// order; an uncontradicted citation in between is skipped.
+#[test]
+fn several_stale_citations_are_in_cited_id_order() {
+    let mut s = Session::new();
+    s.interaction(1, "agent-a", 0, None);
+    for n in [1, 2, 3, 4] {
+        s.concept(n, 1, "agent-a", &format!("claim {n}"), 0);
+    }
+    s.interaction(2, "agent-b", 100, None);
+    s.concept(10, 2, "agent-b", "the citer", 100);
+    // Written in reverse order, so the result's order is not edge order.
+    for (e, cited) in [(20, 4), (21, 3), (22, 2), (23, 1)] {
+        s.edge(e, EdgeType::Dependency, 10, cited, 100, None);
+    }
+    s.interaction(3, "agent-c", 200, None);
+    s.concept(11, 3, "agent-c", "correction", 200);
+    for (e, target) in [(30, 4), (31, 1), (32, 3)] {
+        s.edge(e, EdgeType::Contradicts, 11, target, 200, None);
+    }
+    let cited: Vec<NodeId> = stale(&s, 10, 1000).iter().map(|h| h.node).collect();
+    assert_eq!(cited, vec![cid(1), cid(3), cid(4)]);
+}
+
+/// Only a direct `Dependency` citation counts: not a chain through an
+/// uncontradicted concept, not a `parent_of` child, not the contradicting
+/// edge itself, and not another edge type.
+#[test]
+fn only_a_direct_dependency_citation_counts() {
+    let mut s = base(CanonizationStatus::None);
+    // 5 cites D (2), which cites the contradicted X: a chain.
+    s.interaction(5, "agent-e", 300, None);
+    s.concept(5, 5, "agent-e", "chain end", 300);
+    s.edge(20, EdgeType::Dependency, 5, 2, 300, None);
+    assert!(stale(&s, 5, 1000).is_empty());
+    // 6 is X's parent_of parent: it does not cite X. (A child of X would
+    // be #179 evidence for X instead.)
+    s.concept(6, 5, "agent-e", "x's parent", 300);
+    s.edge(21, EdgeType::Hierarchical, 6, 1, 300, None);
+    // 8 reaches X through other edge types only.
+    s.concept(8, 5, "agent-e", "x's neighbour", 300);
+    for (e, ty) in [
+        (23, EdgeType::Causal),
+        (24, EdgeType::Semantic),
+        (25, EdgeType::CoOccurrence),
+    ] {
+        s.edge(e, ty, 8, 1, 300, None);
+    }
+    assert!(at(&s, 1000).is_some(), "X is still contradicted");
+    for n in [6, 8] {
+        assert!(stale(&s, n, 1000).is_empty(), "concept {n}");
+    }
+    // Y contradicts X; it does not cite it.
+    assert!(stale(&s, 3, 1000).is_empty());
+    let dependency = s.g.edges().find(|e| e.id == eid(10)).expect("D's citation");
+    assert_eq!(direct_citation(&s.g, dependency), Some((cid(2), cid(1))));
+    let contradicts = s.g.edges().find(|e| e.id == eid(11)).unwrap();
+    assert_eq!(direct_citation(&s.g, contradicts), None);
+}
+
+/// A concept that both cites X and is X's contradiction is never warned
+/// that it rests on what it contradicts.
+#[test]
+fn the_contradicting_concept_is_not_stale_on_its_own_target() {
+    let mut s = base(CanonizationStatus::None);
+    s.edge(20, EdgeType::Dependency, 3, 1, 250, None);
+    assert!(
+        at(&s, 1000).is_some(),
+        "Y's own citation does not support X"
+    );
+    assert!(stale(&s, 3, 1000).is_empty());
+    assert_eq!(stale(&s, 2, 1000).len(), 1, "D still rests on X");
+}
+
+/// A citation written after `now` (a mocked clock) is not one yet.
+#[test]
+fn a_citation_written_after_now_is_not_stale_yet() {
+    let mut s = base(CanonizationStatus::None);
+    // Written at 980: at 1000 it is not yet age-eligible evidence for X.
+    s.interaction(5, "agent-e", 980, None);
+    s.concept(5, 5, "agent-e", "late citer", 980);
+    s.edge(20, EdgeType::Dependency, 5, 1, 980, None);
+    assert!(stale(&s, 5, 500).is_empty());
+    assert_eq!(stale(&s, 5, 1000).len(), 1);
+}
+
+/// A node that is not a concept of the graph has no citations.
+#[test]
+fn a_missing_node_has_no_stale_citations() {
+    let s = base(CanonizationStatus::None);
+    assert!(stale(&s, 99, 1000).is_empty());
+}
+
 /// #179 cost, measured, not asserted: a 9,500-concept session where 1,000
 /// ordinary concepts are contradicted (one interaction per concept). Times
 /// one detector pass into the hot list (the daemon cycle's share) and one

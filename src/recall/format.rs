@@ -329,6 +329,48 @@ pub fn contradicts_warning(target: NodeId, target_content: &str) -> String {
     )
 }
 
+/// The most stale-citation lines one hit carries (#207). A concept that
+/// cites more contradicted concepts than this shows the first ones in id
+/// order and one [`rests_on_more_warning`] line for the rest, so a hit's
+/// block stays bounded whatever its `depends_on` grew to.
+pub const STALE_CITATION_LINES: usize = 3;
+
+/// The stale-by-dependency line on a hit that directly cites (its own
+/// `depends_on`) a contradicted concept (#207):
+///
+/// ```text
+/// ⚠ Rests on a contradicted concept: "GET /api/v1/memo lists all memos" (id 1a2b3c4d), contradicted by "list-all removed in v0.22" (id 5e6f7a8b)
+/// ```
+///
+/// The first quote and id are the cited concept's, the second its
+/// contradicting concept's, each cut like the #19(c) lines ([`excerpt`])
+/// and named by [`short_id`], a valid inspect focus.
+pub fn rests_on_contradicted_warning(
+    cited: NodeId,
+    cited_content: &str,
+    by: NodeId,
+    by_content: &str,
+) -> String {
+    format!(
+        "⚠ Rests on a contradicted concept: \"{}\" (id {}), contradicted by \"{}\" (id {})",
+        excerpt(cited_content),
+        short_id(cited),
+        excerpt(by_content),
+        short_id(by)
+    )
+}
+
+/// The overflow line after [`STALE_CITATION_LINES`] stale-citation lines
+/// (#207): how many more contradicted concepts the hit cites.
+///
+/// ```text
+/// ⚠ Rests on 2 more contradicted concepts
+/// ```
+pub fn rests_on_more_warning(more: usize) -> String {
+    let noun = if more == 1 { "concept" } else { "concepts" };
+    format!("⚠ Rests on {more} more contradicted {noun}")
+}
+
 /// The historical supersession line on a demoted hit (#20):
 ///
 /// ```text

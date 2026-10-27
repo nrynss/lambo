@@ -26,6 +26,8 @@
 //! `contradiction` from `HotListPayload::Contradiction`, `contradicts` on
 //! the contradicting concept pulled in beside it (#19(c)), `superseded` on a
 //! hit whose latest demotion was a supersession (#20, history, not forced),
+//! `rests_on_contradicted` on a hit whose own `depends_on` cites a
+//! contradicted concept (#207, not forced),
 //! `reservation` from an active reservation, `traversal` from the
 //! structural-dispatch explanation, and `vector_degraded` from a query
 //! embedding failure. The two response-global kinds are never attached to a
@@ -64,6 +66,11 @@ pub(crate) enum AnnotationKind {
     /// History (#20): this hit's latest demotion was a supersession and it is
     /// not Canonical again. Never forces the hit into the result — hit-owned.
     Superseded,
+    /// Stale by dependency (#207): this hit's own `depends_on` cites a
+    /// concept that is contradicted. One per cited concept (bounded, see
+    /// `format::STALE_CITATION_LINES`). Never forces the hit, nor anything
+    /// else, into the result — hit-owned.
+    RestsOnContradicted,
 }
 
 /// One typed warning: its kind and the exact line that renders it.

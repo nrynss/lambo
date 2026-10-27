@@ -80,6 +80,17 @@
 //! self-suppression; when one instant has several candidate agents, evidence
 //! sharing any of them is excluded (erring toward the warning).
 //!
+//! ## Stale by dependency (#207)
+//!
+//! [`stale_citations`] answers "does this concept rest on a contradicted
+//! one": the concepts it directly cites ([`direct_citation`]: its own
+//! `Dependency` edges, from `depends_on`) for which [`contradiction_at`]
+//! holds at the caller's `now`. It is the predicate itself, not a second
+//! definition, and it reads the graph, not the hot list, so a write-time
+//! caller (#208, reporting the concepts that cite one just contradicted)
+//! gets the same answer recall shows. Direct citations only; a concept is
+//! never stale on a concept it contradicts itself.
+//!
 //! ## Hot list
 //!
 //! [`insert_contradictions`] refreshes one [`Condition::Contradiction`]
@@ -310,6 +321,82 @@ pub fn detect(graph: &Graph, min_age: Duration, now: DateTime<Utc>) -> Vec<Contr
     targets
         .into_iter()
         .filter_map(|t| contradiction_at_with(graph, t, min_age, now, &timeline))
+        .collect()
+}
+
+/// A **direct citation** (#207): `e` is a `Dependency` edge from one concept
+/// of the graph to another concept of the same session, written by
+/// `depends_on` (the citing concept is the edge's source). Returns
+/// `(citer, cited)`.
+///
+/// Only `Dependency` counts: a `Hierarchical` child, a `Contradicts` edge
+/// and any other type (#198's `SuspectedSupersedes` among them) is not a
+/// citation. The one edge test shared by [`stale_citations`] and its
+/// inverse (#208's "who cites the concept just contradicted"), so the two
+/// always agree on what a citation is.
+pub fn direct_citation(graph: &Graph, e: &Edge) -> Option<(NodeId, NodeId)> {
+    if e.edge_type != EdgeType::Dependency || e.source == e.target {
+        return None;
+    }
+    let citer = concept(graph, e.source)?;
+    let cited = concept(graph, e.target)?;
+    (citer.session_id == cited.session_id).then_some((citer.id, cited.id))
+}
+
+/// **Stale by dependency** (#207): the concepts `node` directly cites
+/// ([`direct_citation`], written by `now`) that are contradicted at `now`,
+/// each as the [`ContradictionHit`] [`contradiction_at`] gives it (its
+/// `node` is the cited concept, `by` its contradicting concept), in
+/// node-id order of the cited concept.
+///
+/// The contradicted test is exactly [`contradiction_at`]'s, at the same
+/// `min_age` and `now`: no second definition. Direct citations only, so a
+/// chain (`node` cites A, A cites a contradicted B) flags nothing. A
+/// citation whose contradicting concept is `node` itself is skipped: a
+/// concept is never warned that it rests on what it contradicts.
+///
+/// `O(degree + interactions)`, the timeline built only when a cited
+/// concept has an inbound `Contradicts` edge. Empty when `node` is not a
+/// concept of the graph.
+pub fn stale_citations(
+    graph: &Graph,
+    node: NodeId,
+    min_age: Duration,
+    now: DateTime<Utc>,
+) -> Vec<ContradictionHit> {
+    stale_citations_shared(graph, node, min_age, now, &SharedTimeline::new())
+}
+
+/// [`stale_citations`] against a shared, epoch-keyed timeline, so a recall
+/// checking many hits builds it at most once.
+pub(crate) fn stale_citations_shared(
+    graph: &Graph,
+    node: NodeId,
+    min_age: Duration,
+    now: DateTime<Utc>,
+    shared: &SharedTimeline,
+) -> Vec<ContradictionHit> {
+    if concept(graph, node).is_none() {
+        return Vec::new();
+    }
+    let mut cited: Vec<NodeId> = graph
+        .incident_edges(node)
+        .into_iter()
+        .filter(|e| written_by(e, now))
+        .filter_map(|e| direct_citation(graph, e))
+        .filter(|(citer, _)| *citer == node)
+        .map(|(_, cited)| cited)
+        .filter(|&cited| has_inbound_contradiction(graph, cited))
+        .collect();
+    if cited.is_empty() {
+        return Vec::new();
+    }
+    cited.sort_by_key(|id| id.0);
+    cited.dedup();
+    cited
+        .into_iter()
+        .filter_map(|cited| contradiction_at_with(graph, cited, min_age, now, &shared.get(graph)))
+        .filter(|hit| hit.by != node)
         .collect()
 }
 

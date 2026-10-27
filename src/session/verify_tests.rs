@@ -458,6 +458,14 @@ fn warning_kinds_keep_no_text() {
         ),
         ("⚠ Contradicts \"text\" (id 1)", "contradicts"),
         (
+            "⚠ Rests on a contradicted concept: \"a\" (id 1), contradicted by \"b\" (id 2)",
+            "rests_on_contradicted",
+        ),
+        (
+            "[general] ⚠ Rests on 2 more contradicted concepts",
+            "[general] rests_on_contradicted",
+        ),
+        (
             "Reserved by agent-c until 2025-07-08T18:45:00Z",
             "reservation",
         ),
@@ -470,6 +478,42 @@ fn warning_kinds_keep_no_text() {
     for (line, kind) in cases {
         assert_eq!(warning_kind(line), kind, "{line}");
     }
+}
+
+/// #207 reaches the replay: in the mixed source, "alpha cache is warm"
+/// (11) cites README.md (13), which "beta parser is strict" (12)
+/// contradicts, so the before recall warns on 11. The split leaves the
+/// contradiction in beta, out of alpha's sight, so the line is gone after,
+/// and the report keeps only its kind.
+#[tokio::test]
+async fn a_stale_citation_is_replayed_and_reported_by_kind() {
+    let mut run = Run::new();
+    let newest = newest_row(&run.source).unwrap();
+    let mut contradicts = run
+        .source
+        .edges
+        .iter()
+        .find(|e| e.id == id(302))
+        .unwrap()
+        .clone();
+    contradicts.id = id(310);
+    contradicts.edge_type = crate::types::EdgeType::Contradicts;
+    contradicts.event_time = None;
+    contradicts.created_at = newest;
+    contradicts.last_reinforced = newest;
+    run.source.edges.push(contradicts);
+    run.split_source = run.source.clone();
+    let report = run.go().await.unwrap();
+    let q = query(&report, "alpha", "alpha cache is warm");
+    assert!(
+        q.warnings_removed
+            .iter()
+            .any(|k| k == "rests_on_contradicted"),
+        "{:?}",
+        q.warnings_removed
+    );
+    let json = serde_json::to_string(&report).unwrap();
+    assert!(!json.contains("Rests on"), "no raw line is kept");
 }
 
 /// A recall@k cut at rank `k` on both sides: forced hits past `k` do not
