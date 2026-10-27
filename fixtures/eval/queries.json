@@ -42,6 +42,31 @@
   "labelled_on": "2026-10-23"
  },
  {
+  "id": "q-emb-01-3",
+  "query": "In the first audit of the test machine's memory, what fraction of entries had no meaning-based index?",
+  "kind": "answerable",
+  "family": "vocabulary-mismatch",
+  "topic": "embedding-coverage",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "emb-01",
+    "grade": 2
+   },
+   {
+    "concept": "emb-02",
+    "grade": 1
+   }
+  ],
+  "facets": [
+   "92 of 100",
+   "not one outage window"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-27"
+ },
+ {
   "id": "q-emb-02-1",
   "query": "What share of the dogfood store was unembedded once it reached about 500 concepts?",
   "kind": "answerable",
@@ -134,6 +159,31 @@
   "labelled_on": "2026-10-23"
  },
  {
+  "id": "q-emb-03-3",
+  "query": "Did very long notes explain why so many stored notes could not be found by meaning?",
+  "kind": "answerable",
+  "family": "vocabulary-mismatch",
+  "topic": "embedding-coverage",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "emb-03",
+    "grade": 2
+   },
+   {
+    "concept": "emb-04",
+    "grade": 1
+   }
+  ],
+  "facets": [
+   "not the dominant cause",
+   "2/247"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-27"
+ },
+ {
   "id": "q-emb-04-1",
   "query": "Which llama-server flags does the BGE-M3 dogfood embedder need?",
   "kind": "answerable",
@@ -198,6 +248,31 @@
   "source": "authored against the corpus text",
   "labeller": "Grok Bot (agent)",
   "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-emb-04-4",
+  "query": "Why did the local text-to-number server reject anything longer than a paragraph or so?",
+  "kind": "answerable",
+  "family": "vocabulary-mismatch",
+  "topic": "embedding-coverage",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "emb-03",
+    "grade": 1
+   },
+   {
+    "concept": "emb-04",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "llama-server clamps n_batch = n_ubatch = 512 by default",
+   "over ~512 tokens fails HTTP 500"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-27"
  },
  {
   "id": "q-emb-05-1",
@@ -316,6 +391,32 @@
   "labelled_on": "2026-10-23"
  },
  {
+  "id": "q-emb-06-4",
+  "query": "After the binary was rebuilt with the actions fix, how many old records got their missing numbers filled in?",
+  "kind": "answerable",
+  "family": "vocabulary-mismatch",
+  "topic": "embedding-coverage",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "emb-06",
+    "grade": 2
+   },
+   {
+    "concept": "emb-07",
+    "grade": 1
+   }
+  ],
+  "facets": [
+   "record_action stored NULL embeddings",
+   "42 backfilled",
+   "576/576"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-27"
+ },
+ {
   "id": "q-emb-07-1",
   "query": "What defect did the record_action embedder fix in commit bef53e6 correct?",
   "kind": "answerable",
@@ -410,6 +511,27 @@
   "labelled_on": "2026-10-23"
  },
  {
+  "id": "q-emb-08-3",
+  "query": "Why did near-identical notes on the test machine pile up instead of being folded together?",
+  "kind": "answerable",
+  "family": "vocabulary-mismatch",
+  "topic": "embedding-coverage",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "emb-08",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "184 pairs",
+   "older concept had no embedding"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-27"
+ },
+ {
   "id": "q-cnd-01-1",
   "query": "Why embed in-process with candle rather than through llama.cpp?",
   "kind": "answerable",
@@ -494,6 +616,27 @@
   "labelled_on": "2026-10-23"
  },
  {
+  "id": "q-cnd-02-3",
+  "query": "Which hosted model files does the built-in encoder download, and were they checked against the originals?",
+  "kind": "answerable",
+  "family": "vocabulary-mismatch",
+  "topic": "candle",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "cnd-02",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "nrynss/bge-m3-f16-safetensors",
+   "391/391 tensors"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-27"
+ },
+ {
   "id": "q-cnd-03-1",
   "query": "What does the candle embedder do on a machine with no GPU?",
   "kind": "answerable",
@@ -534,6 +677,27 @@
   "source": "authored against the corpus text",
   "labeller": "Grok Bot (agent)",
   "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-cnd-03-3",
+  "query": "What happens if the built-in encoder is started on a laptop without a graphics card?",
+  "kind": "answerable",
+  "family": "vocabulary-mismatch",
+  "topic": "candle",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "cnd-03",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "auto refuses without an accelerator",
+   "device = cpu"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-27"
  },
  {
   "id": "q-cnd-04-1",
@@ -580,6 +744,28 @@
   "labelled_on": "2026-10-23"
  },
  {
+  "id": "q-cnd-04-3",
+  "query": "Does a proxying serve on Metal still load the full model?",
+  "kind": "answerable",
+  "family": "contrast",
+  "topic": "candle",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "cnd-04",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "about 4 MB",
+   "1.4 GB",
+   "digest cached"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-27"
+ },
+ {
   "id": "q-cnd-05-1",
   "query": "What threshold did K1 use for candle versus llama cosine parity?",
   "kind": "answerable",
@@ -620,6 +806,27 @@
   "source": "authored against the corpus text",
   "labeller": "Grok Bot (agent)",
   "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-cnd-05-3",
+  "query": "How did the team check that the in-process encoder produced the same numbers as the old server?",
+  "kind": "answerable",
+  "family": "vocabulary-mismatch",
+  "topic": "candle",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "cnd-05",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "median self-agreement 0.99",
+   "wrong pooling degrades silently"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-27"
  },
  {
   "id": "q-cnd-06-1",
@@ -668,6 +875,32 @@
   "source": "authored against the corpus text",
   "labeller": "Grok Bot (agent)",
   "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-cnd-06-3",
+  "query": "What produces the meaning vectors on the Apple test machine now?",
+  "kind": "answerable",
+  "family": "vocabulary-mismatch",
+  "topic": "candle",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "cnd-01",
+    "grade": 1
+   },
+   {
+    "concept": "cnd-06",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "candle BGE-M3 on Metal",
+   "replaced llama-server on 127.0.0.1:8080",
+   "2026-08-23"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-27"
  },
  {
   "id": "q-can-01-1",
@@ -734,6 +967,28 @@
   "source": "authored against the corpus text",
   "labeller": "Grok Bot (agent)",
   "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-can-01-4",
+  "query": "How does lambo notice that the model behind an unchanged settings name was quietly swapped?",
+  "kind": "answerable",
+  "family": "vocabulary-mismatch",
+  "topic": "canary",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "can-01",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "20 fixed phrases",
+   "0.99",
+   "store_meta"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-27"
  },
  {
   "id": "q-can-02-1",
@@ -823,6 +1078,48 @@
   "labelled_on": "2026-10-23"
  },
  {
+  "id": "q-can-03-2",
+  "query": "Is the startup self-test repeated on every attach when it only logs problems?",
+  "kind": "answerable",
+  "family": "vocabulary-mismatch",
+  "topic": "canary",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "can-03",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "10 minutes",
+   "verify embeds every attach"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-27"
+ },
+ {
+  "id": "q-can-03-3",
+  "query": "Does canary = verify trust a recent passing check like warn does?",
+  "kind": "answerable",
+  "family": "contrast",
+  "topic": "canary",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "can-03",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "10 minutes",
+   "verify embeds every attach"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-27"
+ },
+ {
   "id": "q-can-04-1",
   "query": "How can the semantic merge threshold be derived from labelled data?",
   "kind": "answerable",
@@ -889,6 +1186,28 @@
   "labelled_on": "2026-10-23"
  },
  {
+  "id": "q-can-04-4",
+  "query": "Can the similarity cut-off for folding notes together be learned from examples a person marked?",
+  "kind": "answerable",
+  "family": "vocabulary-mismatch",
+  "topic": "canary",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "can-04",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "at least 100 pairs",
+   "p99",
+   "above the random-pair floor"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-27"
+ },
+ {
   "id": "q-can-05-1",
   "query": "Why can't the canary's random-pair cosines be used as the merge threshold?",
   "kind": "answerable",
@@ -908,6 +1227,27 @@
   "source": "authored against the corpus text",
   "labeller": "Grok Bot (agent)",
   "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-can-05-2",
+  "query": "Why is the level unrelated pairs reach not a safe level for merging notes?",
+  "kind": "answerable",
+  "family": "rationale",
+  "topic": "canary",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "can-05",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "0.5 to 0.62",
+   "relevance floor only"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-27"
  },
  {
   "id": "q-cal-01-1",
@@ -994,6 +1334,27 @@
   "labelled_on": "2026-10-23"
  },
  {
+  "id": "q-cal-02-3",
+  "query": "Why did G2 keep the merge threshold where it was instead of lowering it?",
+  "kind": "answerable",
+  "family": "rationale",
+  "topic": "calibration",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "cal-02",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "kept at 0.85",
+   "0.84 adds three related-distinct pairs"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-27"
+ },
+ {
   "id": "q-cal-03-1",
   "query": "What is RECENT_SCORE and why is it 0.35?",
   "kind": "answerable",
@@ -1057,6 +1418,48 @@
   "labelled_on": "2026-10-23"
  },
  {
+  "id": "q-cal-03-4",
+  "query": "Why does a note from the last few turns score lower than a weak meaning match?",
+  "kind": "answerable",
+  "family": "vocabulary-mismatch",
+  "topic": "calibration",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "cal-03",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "0.35",
+   "below 0.3991"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-27"
+ },
+ {
+  "id": "q-cal-03-5",
+  "query": "Was the old 0.50 recent floor harmless for vector ranking?",
+  "kind": "answerable",
+  "family": "contrast",
+  "topic": "calibration",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "cal-03",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "the old 0.50 floor masked a true vector hit",
+   "now 0.35, below 0.3991"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-27"
+ },
+ {
   "id": "q-cal-04-1",
   "query": "Which paraphrase pairs fall below the 0.85 merge threshold?",
   "kind": "answerable",
@@ -1079,6 +1482,26 @@
   "source": "authored against the corpus text",
   "labeller": "Grok Bot (agent)",
   "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-cal-04-2",
+  "query": "Do some genuinely equivalent phrasings still end up stored twice, and which ones?",
+  "kind": "answerable",
+  "family": "vocabulary-mismatch",
+  "topic": "calibration",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "cal-04",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "register user / create account 0.8230"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-27"
  },
  {
   "id": "q-top-01-1",
@@ -1149,6 +1572,28 @@
   "source": "authored against the corpus text",
   "labeller": "Grok Bot (agent)",
   "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-top-01-4",
+  "query": "How do the agents on the test machine all reach one shared memory process?",
+  "kind": "answerable",
+  "family": "vocabulary-mismatch",
+  "topic": "dogfood-topology",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "top-01",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "single launchd lambo serve",
+   "HTTP port 7700",
+   "clients connect to http://127.0.0.1:7700/mcp"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-27"
  },
  {
   "id": "q-top-02-1",
@@ -1413,6 +1858,54 @@
   "labelled_on": "2026-10-23"
  },
  {
+  "id": "q-srv-01-3",
+  "query": "How long can the process holding a session go silent before another one may take over?",
+  "kind": "answerable",
+  "family": "vocabulary-mismatch",
+  "topic": "multi-client",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "srv-01",
+    "grade": 2
+   },
+   {
+    "concept": "top-03",
+    "grade": 1
+   }
+  ],
+  "facets": [
+   "45 s",
+   "15 s",
+   "three chances"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-27"
+ },
+ {
+  "id": "q-srv-01-4",
+  "query": "Why is the lease refreshed three times within one TTL?",
+  "kind": "answerable",
+  "family": "rationale",
+  "topic": "multi-client",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "srv-01",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "45 s",
+   "15 s",
+   "three chances"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-27"
+ },
+ {
   "id": "q-srv-02-1",
   "query": "Why must per-call agent_id be accepted before a shared writer is honest?",
   "kind": "answerable",
@@ -1455,6 +1948,50 @@
   "source": "authored against the corpus text",
   "labeller": "Grok Bot (agent)",
   "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-srv-02-3",
+  "query": "Why could only one of several connected clients use the locking tool?",
+  "kind": "answerable",
+  "family": "vocabulary-mismatch",
+  "topic": "multi-client",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "srv-02",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "serve applies its own --agent",
+   "lambo_reserve hard-refuses other agent_ids",
+   "per-call agent_id"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-27"
+ },
+ {
+  "id": "q-srv-02-4",
+  "query": "Did one serve with several clients give each client its own lambo_reserve identity before J1?",
+  "kind": "answerable",
+  "family": "contrast",
+  "topic": "multi-client",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "srv-02",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "serve applies its own --agent",
+   "lambo_reserve hard-refuses other agent_ids",
+   "per-call agent_id"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-27"
  },
  {
   "id": "q-srv-03-1",
@@ -1705,6 +2242,49 @@
   "labelled_on": "2026-10-23"
  },
  {
+  "id": "q-srv-07-3",
+  "query": "How long does a forwarding process keep a caller waiting before telling it to try again?",
+  "kind": "answerable",
+  "family": "vocabulary-mismatch",
+  "topic": "multi-client",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "srv-07",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "6 seconds",
+   "abandoned, retry later"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-27"
+ },
+ {
+  "id": "q-srv-07-4",
+  "query": "Why does DIAL_BUDGET sit between the dial's own budgets and sqlite's busy_timeout?",
+  "kind": "answerable",
+  "family": "rationale",
+  "topic": "multi-client",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "srv-07",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "6 seconds",
+   "above the connect and replay budgets (about 4.1 s)",
+   "below sqlite busy_timeout 8 s"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-27"
+ },
+ {
   "id": "q-ack-01-1",
   "query": "How fast is a lambo_derive ack after J3 compared with before?",
   "kind": "answerable",
@@ -1749,6 +2329,27 @@
   "source": "authored against the corpus text",
   "labeller": "Grok Bot (agent)",
   "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-ack-01-3",
+  "query": "Was the J3 derive ack slower than the FixtureEmbedder baseline?",
+  "kind": "answerable",
+  "family": "contrast",
+  "topic": "async-ack",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "ack-01",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "14.111 ms to 0.048 ms",
+   "below FixtureEmbedder 0.076 ms"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-27"
  },
  {
   "id": "q-ack-02-1",
@@ -1879,6 +2480,31 @@
   "source": "authored against the corpus text",
   "labeller": "Grok Bot (agent)",
   "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-ack-04-3",
+  "query": "When a client is told its note was accepted, has the note actually been stored and indexed yet?",
+  "kind": "answerable",
+  "family": "vocabulary-mismatch",
+  "topic": "async-ack",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "ack-04",
+    "grade": 2
+   },
+   {
+    "concept": "emb-05",
+    "grade": 1
+   }
+  ],
+  "facets": [
+   "ack once the intent is durable",
+   "lambo_receipt reports the outcome"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-27"
  },
  {
   "id": "q-pro-01-1",
@@ -2015,6 +2641,28 @@
   "labelled_on": "2026-10-23"
  },
  {
+  "id": "q-pro-03-3",
+  "query": "Why was observability prioritised ahead of more implementation work?",
+  "kind": "answerable",
+  "family": "rationale",
+  "topic": "process",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "pro-03",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "decided 2026-08-19",
+   "no flow record",
+   "dogfood data lost"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-27"
+ },
+ {
   "id": "q-pro-04-1",
   "query": "Why did workstream B extract PgStore from the Cockroach adapter instead of copying it?",
   "kind": "answerable",
@@ -2057,6 +2705,28 @@
   "source": "authored against the corpus text",
   "labeller": "Grok Bot (agent)",
   "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-pro-04-3",
+  "query": "How was the second SQL database supported without maintaining two copies of the code?",
+  "kind": "answerable",
+  "family": "vocabulary-mismatch",
+  "topic": "process",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "pro-04",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "extract-then-extend",
+   "byte-identical SQL",
+   "copy-then-edit rejected"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-27"
  },
  {
   "id": "q-pro-05-1",
@@ -2105,6 +2775,50 @@
   "source": "authored against the corpus text",
   "labeller": "Grok Bot (agent)",
   "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-pro-05-3",
+  "query": "Do the short names for the two SQL databases ever point at the other one?",
+  "kind": "answerable",
+  "family": "vocabulary-mismatch",
+  "topic": "process",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "pro-05",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "postgres/pg -> PostgresDialect",
+   "cockroach/crdb -> CockroachDialect",
+   "fails loud"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-27"
+ },
+ {
+  "id": "q-pro-05-4",
+  "query": "Why is the postgres/cockroach alias split a loud failure rather than a silent one?",
+  "kind": "answerable",
+  "family": "rationale",
+  "topic": "process",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "pro-05",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "fails loud",
+   "CREATE EXTENSION vector and <=> do not exist on Cockroach",
+   "dies at provision or first vector query"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-27"
  },
  {
   "id": "q-pro-06-1",
@@ -2235,6 +2949,27 @@
   "source": "authored against the corpus text",
   "labeller": "Grok Bot (agent)",
   "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-prf-01-3",
+  "query": "How much faster did plain word search get, and how many requests a second could many clients make afterwards?",
+  "kind": "answerable",
+  "family": "vocabulary-mismatch",
+  "topic": "performance",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "prf-01",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "18.7 ms to 7.5 ms",
+   "63 to 1,104"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-27"
  },
  {
   "id": "q-prf-02-1",
@@ -2389,6 +3124,28 @@
   "source": "authored against the corpus text",
   "labeller": "Grok Bot (agent)",
   "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-prf-04-3",
+  "query": "Did storing vectors more compactly in the single-file database lose precision?",
+  "kind": "answerable",
+  "family": "vocabulary-mismatch",
+  "topic": "performance",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "prf-04",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "47.3 MB to 17.1 MB",
+   "161 ms to 3.4 ms",
+   "bit-exact"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-27"
  },
  {
   "id": "q-prf-05-1",
@@ -2670,6 +3427,27 @@
   "labelled_on": "2026-10-23"
  },
  {
+  "id": "q-rel-06-2",
+  "query": "What happens to an oversized request sent over standard input?",
+  "kind": "answerable",
+  "family": "vocabulary-mismatch",
+  "topic": "releases",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "rel-06",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "4 MiB",
+   "before parsing"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-27"
+ },
+ {
   "id": "q-rel-07-1",
   "query": "How do I delete a whole lambo session?",
   "kind": "answerable",
@@ -2710,6 +3488,27 @@
   "source": "authored against the corpus text",
   "labeller": "Grok Bot (agent)",
   "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-rel-07-3",
+  "query": "Can someone delete a whole project's memory, and can its name be taken again afterwards?",
+  "kind": "answerable",
+  "family": "vocabulary-mismatch",
+  "topic": "releases",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "rel-07",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "one transaction",
+   "tombstone"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-27"
  },
  {
   "id": "q-rel-08-1",
@@ -2798,6 +3597,27 @@
   "labelled_on": "2026-10-23"
  },
  {
+  "id": "q-rel-09-3",
+  "query": "Does [recall] kind = elastic move the source of truth to Elasticsearch?",
+  "kind": "answerable",
+  "family": "contrast",
+  "topic": "releases",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "rel-09",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "recall-elastic",
+   "store stays the source of truth"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-27"
+ },
+ {
   "id": "q-rel-10-1",
   "query": "CUDARC_CUDA_VERSION",
   "kind": "answerable",
@@ -2863,6 +3683,28 @@
   "labelled_on": "2026-10-23"
  },
  {
+  "id": "q-ses-01-3",
+  "query": "Can one running server keep separate memories per project and still share a common one underneath?",
+  "kind": "answerable",
+  "family": "vocabulary-mismatch",
+  "topic": "sessions",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "ses-01",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "one session per project",
+   "shared layer",
+   "hit names its session"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-27"
+ },
+ {
   "id": "q-ses-02-1",
   "query": "Can a keyword-only match bring in a hit from the shared layer?",
   "kind": "answerable",
@@ -2905,6 +3747,27 @@
   "labelled_on": "2026-10-23"
  },
  {
+  "id": "q-ses-02-3",
+  "query": "Why does a word match alone no longer pull in an entry from the shared memory?",
+  "kind": "answerable",
+  "family": "vocabulary-mismatch",
+  "topic": "sessions",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "ses-02",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "vector similarity required",
+   "floor 0.50"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-27"
+ },
+ {
   "id": "q-ses-03-1",
   "query": "How does lambo keep README.md from two repositories apart?",
   "kind": "answerable",
@@ -2945,6 +3808,27 @@
   "source": "authored against the corpus text",
   "labeller": "Grok Bot (agent)",
   "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-ses-03-3",
+  "query": "With repo_scope, does README.md in two repositories become one shared hub concept?",
+  "kind": "answerable",
+  "family": "contrast",
+  "topic": "sessions",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "ses-03",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "two concepts, not one hub",
+   "ambiguous lookup refused"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-27"
  },
  {
   "id": "q-con-01-1",
@@ -3105,6 +3989,27 @@
   "labelled_on": "2026-10-23"
  },
  {
+  "id": "q-con-03-3",
+  "query": "Does cleanup throw away the note that corrected an older mistaken note?",
+  "kind": "answerable",
+  "family": "vocabulary-mismatch",
+  "topic": "contradictions",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "con-03",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "correction protected while the contradicted concept lives",
+   "mutual contradictions keep nothing alive"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-27"
+ },
+ {
   "id": "q-con-04-1",
   "query": "How does an agent record that a concept is wrong?",
   "kind": "answerable",
@@ -3191,6 +4096,28 @@
   "labelled_on": "2026-10-23"
  },
  {
+  "id": "q-con-05-3",
+  "query": "When the contradiction budget is full, are the oldest declared contradictions kept?",
+  "kind": "answerable",
+  "family": "contrast",
+  "topic": "contradictions",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "con-05",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "default half of hot_list_max",
+   "lowest priority dropped first",
+   "most recently declared kept"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-27"
+ },
+ {
   "id": "q-con-06-1",
   "query": "Can a contradiction demote a Canonical concept?",
   "kind": "answerable",
@@ -3231,6 +4158,27 @@
   "source": "authored against the corpus text",
   "labeller": "Grok Bot (agent)",
   "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-con-06-3",
+  "query": "Is canonization_supersede on by default?",
+  "kind": "answerable",
+  "family": "contrast",
+  "topic": "contradictions",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "con-06",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "off by default",
+   "needs its own newer evidence"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-27"
  },
  {
   "id": "q-mg-01-1",
@@ -3296,6 +4244,27 @@
   "labelled_on": "2026-10-23"
  },
  {
+  "id": "q-mg-01-4",
+  "query": "Why do two notes that differ only in a release number stay separate?",
+  "kind": "answerable",
+  "family": "vocabulary-mismatch",
+  "topic": "merge-guards",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "mg-01",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "different identifiers never merge",
+   "v0.5.0 vs v0.6.0 stay two facts"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-27"
+ },
+ {
   "id": "q-mg-02-1",
   "query": "Does lambo canon alias-preview --similar merge anything?",
   "kind": "answerable",
@@ -3338,6 +4307,28 @@
   "source": "authored against the corpus text",
   "labeller": "Grok Bot (agent)",
   "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-mg-02-3",
+  "query": "Does canon alias-preview --similar merge the pairs it finds?",
+  "kind": "answerable",
+  "family": "contrast",
+  "topic": "merge-guards",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "mg-02",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "MinHash and cosine",
+   "guards",
+   "only suggests"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-27"
  },
  {
   "id": "q-mg-03-1",
@@ -3388,6 +4379,27 @@
   "labelled_on": "2026-10-23"
  },
  {
+  "id": "q-mg-03-3",
+  "query": "Can lambo provision re-key older concepts while a session lease is live?",
+  "kind": "answerable",
+  "family": "contrast",
+  "topic": "merge-guards",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "mg-03",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "refuses while any session lease is live",
+   "run once with no session holder"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-27"
+ },
+ {
   "id": "q-cn-01-1",
   "query": "What counts as support for canonizing a ruling?",
   "kind": "answerable",
@@ -3430,6 +4442,28 @@
   "source": "authored against the corpus text",
   "labeller": "Grok Bot (agent)",
   "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-cn-01-3",
+  "query": "Why do many follow-up notes from a single exchange count only once toward promotion?",
+  "kind": "answerable",
+  "family": "vocabulary-mismatch",
+  "topic": "canonization",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "cn-01",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "dependents' distinct origin interactions",
+   "own origin excluded",
+   "one interaction counts once"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-27"
  },
  {
   "id": "q-cn-02-1",
@@ -3522,6 +4556,27 @@
   "source": "authored against the corpus text",
   "labeller": "Grok Bot (agent)",
   "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-fnd-01-3",
+  "query": "Did agents use the memory tools just because the repository instructions told them to?",
+  "kind": "answerable",
+  "family": "vocabulary-mismatch",
+  "topic": "dogfood-findings",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "fnd-01",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "zero lambo calls",
+   "compliance came from the prompt"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-27"
  },
  {
   "id": "q-fnd-02-1",
@@ -3820,6 +4875,28 @@
   "labelled_on": "2026-10-23"
  },
  {
+  "id": "q-fnd-07-3",
+  "query": "Why can blast-radius warnings not fire on most orchestrator derives?",
+  "kind": "answerable",
+  "family": "rationale",
+  "topic": "dogfood-findings",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "fnd-07",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "concepts nobody linked",
+   "almost no parent_of pairs",
+   "write surface favours islands"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-27"
+ },
+ {
   "id": "q-fnd-08-1",
   "query": "Why did cursor-agent and opencode end up with different lambo endpoints?",
   "kind": "answerable",
@@ -3886,6 +4963,28 @@
   "labelled_on": "2026-10-23"
  },
  {
+  "id": "q-fnd-08-4",
+  "query": "Why was cross-client memory silently absent on default wiring in the two-product probe?",
+  "kind": "answerable",
+  "family": "rationale",
+  "topic": "dogfood-findings",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "fnd-08",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "cursor-agent scrubs TMPDIR",
+   "opencode passes it",
+   "two endpoint directories"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-27"
+ },
+ {
   "id": "q-fnd-09-1",
   "query": "Why did opencode report lambo as unavailable while the serve was waiting for the lease?",
   "kind": "answerable",
@@ -3926,6 +5025,27 @@
   "source": "authored against the corpus text",
   "labeller": "Grok Bot (agent)",
   "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-fnd-09-3",
+  "query": "Why did one coding client report that the memory server had no tools?",
+  "kind": "answerable",
+  "family": "vocabulary-mismatch",
+  "topic": "dogfood-findings",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "fnd-09",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "50 s lease-lapse wait",
+   "~32 s startup tolerance"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-27"
  },
  {
   "id": "q-fnd-10-1",
@@ -3970,6 +5090,27 @@
   "labelled_on": "2026-10-23"
  },
  {
+  "id": "q-fnd-10-3",
+  "query": "When the process doing the writing died mid-request, what did the waiting client see?",
+  "kind": "answerable",
+  "family": "vocabulary-mismatch",
+  "topic": "dogfood-findings",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "fnd-10",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "detected in 18 ms",
+   "client hung 121.7 s"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-27"
+ },
+ {
   "id": "q-fnd-11-1",
   "query": "Why are cursor-agent's lambo tool calls silently rejected?",
   "kind": "answerable",
@@ -3988,6 +5129,26 @@
   "source": "authored against the corpus text",
   "labeller": "Grok Bot (agent)",
   "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-fnd-11-2",
+  "query": "Does cursor-agent run lambo's MCP tools without extra flags?",
+  "kind": "answerable",
+  "family": "contrast",
+  "topic": "dogfood-findings",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "fnd-11",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "--trust and --force"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-27"
  },
  {
   "id": "q-g3-01-1",
@@ -4104,6 +5265,28 @@
   "labelled_on": "2026-10-23"
  },
  {
+  "id": "q-g3-02-3",
+  "query": "Why does expanding from a single search hit so often add nothing?",
+  "kind": "answerable",
+  "family": "vocabulary-mismatch",
+  "topic": "g3-graph",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "g3-02",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "out-edge only",
+   "248/386 expand to nothing",
+   "symmetrizing 2-4x"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-27"
+ },
+ {
   "id": "q-g3-03-1",
   "query": "Why did the J3-implementation concept not trigger a blast-radius warning?",
   "kind": "answerable",
@@ -4144,6 +5327,27 @@
   "source": "authored against the corpus text",
   "labeller": "Grok Bot (agent)",
   "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-g3-03-3",
+  "query": "Why did the J3-implementation concept with 13 dependents not trigger a warning?",
+  "kind": "answerable",
+  "family": "rationale",
+  "topic": "g3-graph",
+  "split": "held_out",
+  "relevant": [
+   {
+    "concept": "g3-03",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "exclusivity filter",
+   "13 dependents, blast_radius 4"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-27"
  },
  {
   "id": "q-eff-01-1",
@@ -4330,6 +5534,28 @@
   "labelled_on": "2026-10-23"
  },
  {
+  "id": "q-eff-04-3",
+  "query": "When readers had the right material in front of them, how often did they answer correctly, and did they make things up?",
+  "kind": "answerable",
+  "family": "vocabulary-mismatch",
+  "topic": "efficacy",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "eff-04",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "6 of 8 covered",
+   "0 of 6 uncovered",
+   "0 of 48 invented"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-27"
+ },
+ {
   "id": "q-eff-05-1",
   "query": "How often did Lambo-arm answers present superseded facts as current?",
   "kind": "answerable",
@@ -4380,6 +5606,28 @@
   "source": "authored against the corpus text",
   "labeller": "Grok Bot (agent)",
   "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-eff-05-3",
+  "query": "Did the file-memory arm present superseded facts as current?",
+  "kind": "answerable",
+  "family": "contrast",
+  "topic": "efficacy",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "eff-05",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "2 of 12 superseded",
+   "embedder question",
+   "file arm 0"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-27"
  },
  {
   "id": "q-eff-06-1",
@@ -4443,6 +5691,27 @@
   "source": "authored against the corpus text",
   "labeller": "Grok Bot (agent)",
   "labelled_on": "2026-10-23"
+ },
+ {
+  "id": "q-eff-07-3",
+  "query": "Was the comparison between file notes and lambo fair in how much text each side got?",
+  "kind": "answerable",
+  "family": "vocabulary-mismatch",
+  "topic": "efficacy",
+  "split": "dev",
+  "relevant": [
+   {
+    "concept": "eff-07",
+    "grade": 2
+   }
+  ],
+  "facets": [
+   "file arm whole directory",
+   "Lambo 1,154-1,533 bytes"
+  ],
+  "source": "authored against the corpus text",
+  "labeller": "Grok Bot (agent)",
+  "labelled_on": "2026-10-27"
  },
  {
   "id": "q-gcp-01-1",
