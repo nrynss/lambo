@@ -271,6 +271,7 @@ fn process_config(
     promotion_policy: Option<crate::canon::PromotionPolicy>,
     canonization_supersede: Option<bool>,
     fusion: Option<crate::recall::fusion::RecallFusion>,
+    selection: Option<crate::recall::redundancy::RecallSelection>,
     embedder_cfg: &EmbedderConfig,
 ) -> Result<crate::Config, LamboError> {
     let mut config = crate::Config::default();
@@ -284,6 +285,10 @@ fn process_config(
     // #173: `[fusion]`, a recall setting every session of the process runs.
     if let Some(fusion) = fusion {
         config.recall_fusion = fusion;
+    }
+    // #181: `[selection]`, likewise.
+    if let Some(selection) = selection {
+        config.recall_selection = selection;
     }
     // #22: a process setting the surfaces read through `Memory::config`, set
     // here so every session this process attaches carries the same value.
@@ -341,6 +346,7 @@ pub fn resolve_backends(file: LamboFile) -> Result<ResolvedBackends, LamboError>
         promotion_policy,
         file.canonization_supersede,
         file.fusion,
+        file.selection,
         &embedder_cfg,
     )?;
     // A store whose vector column carries no width of its own (SQLite's BLOB) reports
@@ -680,6 +686,7 @@ pub fn resolve_verify_io(
         file.promotion_policy,
         file.canonization_supersede,
         file.fusion,
+        file.selection,
         &file.embedder,
     )?;
     file.serve.validate()?;
@@ -1334,6 +1341,7 @@ mod tests {
             web: Default::default(),
             canonization_supersede: None,
             fusion: None,
+            selection: None,
         };
         let r = resolve_backends(file).unwrap();
         assert_eq!(r.embedder.dimensions(), 1024);
@@ -1395,6 +1403,34 @@ mod tests {
         assert!(LamboFile::from_toml_str(&format!("{base}[fusion]\nkid = 1.0\n")).is_err());
     }
 
+    /// #181: `[selection]` reaches `Memory`'s `Config`; no table, or an
+    /// empty one, leaves the rule off, and an unknown key is refused.
+    #[test]
+    #[cfg(all(feature = "store-memory", feature = "embed-fixture"))]
+    fn selection_table_reaches_config() {
+        let base = "[store]\nkind = \"memory\"\n[embedder]\nkind = \"fixture\"\ndim = 1024\n";
+        let off = resolve_backends(LamboFile::from_toml_str(base).unwrap()).unwrap();
+        assert!(!off.config.recall_selection.skip_redundant);
+        let empty =
+            resolve_backends(LamboFile::from_toml_str(&format!("{base}[selection]\n")).unwrap())
+                .unwrap();
+        assert!(!empty.config.recall_selection.skip_redundant);
+        let on = resolve_backends(
+            LamboFile::from_toml_str(&format!("{base}[selection]\nskip_redundant = true\n"))
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(on.config.recall_selection.skip_redundant);
+        assert!(
+            LamboFile::from_toml_str(&format!("{base}[selection]\nskip_redundnt = true\n"))
+                .is_err()
+        );
+        assert!(LamboFile::from_toml_str(&format!(
+            "{base}[selection]\nskip_redundant = \"yes\"\n"
+        ))
+        .is_err());
+    }
+
     /// #22: `[embedder] accept_client_vectors` reaches `Memory`'s `Config`,
     /// which is where the MCP and CLI surfaces read it.
     #[test]
@@ -1452,6 +1488,7 @@ mod tests {
             web: Default::default(),
             canonization_supersede: None,
             fusion: None,
+            selection: None,
         };
         let r = resolve_backends(file).unwrap();
         assert_eq!(r.embedding.kind, "gemini");
@@ -1499,6 +1536,7 @@ mod tests {
             web: Default::default(),
             canonization_supersede: None,
             fusion: None,
+            selection: None,
         };
 
         // The pin asserts this deployment's vectors are 768 wide; the embedder emits
@@ -1805,6 +1843,7 @@ mod tests {
                 web: Default::default(),
                 canonization_supersede: None,
                 fusion: None,
+                selection: None,
             }
         }
 

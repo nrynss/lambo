@@ -125,6 +125,10 @@ pub struct Config {
     /// highest raw leg score, `rrf` is reciprocal rank fusion.
     #[serde(default)]
     pub recall_fusion: crate::recall::fusion::RecallFusion,
+    /// #181: `[selection]`. Whether assembly skips a member redundant with
+    /// a hit already taken ([`crate::recall::redundancy`]). Off by default.
+    #[serde(default)]
+    pub recall_selection: crate::recall::redundancy::RecallSelection,
 
     /// Daemon poll interval — how often the loop rescores and re-runs the
     /// detectors (XP-7). This is the one daemon parameter nothing else can
@@ -263,6 +267,7 @@ impl Default for Config {
             scoring: ScoringWeights::default(),
             recall_weights: RecallWeights::default(),
             recall_fusion: crate::recall::fusion::RecallFusion::default(),
+            recall_selection: crate::recall::redundancy::RecallSelection::default(),
 
             daemon_tick_interval: crate::daemon::DAEMON_TICK_INTERVAL,
 
@@ -559,6 +564,13 @@ pub struct LamboFile {
     /// binary that predates it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fusion: Option<crate::recall::fusion::RecallFusion>,
+    /// `[selection]` (#181): how assembly fills `top_k`. `None` (no
+    /// section) keeps the product default (`skip_redundant = false`). A
+    /// table of its own rather than a key under `[recall]`, which is the
+    /// #18 recall tier: its presence configures a tier and needs `kind`
+    /// and `url`. Not serialized when unset, like `fusion`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection: Option<crate::recall::redundancy::RecallSelection>,
     /// `[recall]`: an optional recall tier beside the durable store (#18).
     /// `None` (no section) keeps the store exactly as `[store]` builds it. A
     /// section naming a tier this binary was not built with is refused at
@@ -846,6 +858,8 @@ mod tests {
         assert_eq!(c.default_traversal_depth, 2);
 
         assert_eq!(c.match_strategy, MatchStrategy::Hybrid);
+        // #181: redundancy-aware selection is opt-in.
+        assert!(!c.recall_selection.skip_redundant);
     }
 
     #[test]
@@ -1059,6 +1073,25 @@ mod tests {
         assert_eq!(recall.api_key.unwrap().env, "LAMBO_ES_API_KEY");
         assert_eq!(recall.index_prefix, "lambo");
         assert_eq!(recall.timeout_ms, Some(5000));
+    }
+
+    /// #181: the example's commented `[selection]` block turns the rule on
+    /// once uncommented, and leaving it commented keeps it off.
+    #[test]
+    fn lambo_file_example_selection_block_parses_when_uncommented() {
+        let raw = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/lambo.example.toml"));
+        assert_eq!(LamboFile::from_toml_str(raw).unwrap().selection, None);
+        let start = raw
+            .find("# [selection]")
+            .expect("the example documents [selection]");
+        let block: String = raw[start..]
+            .lines()
+            .take_while(|l| !l.trim().is_empty())
+            .map(|l| l.strip_prefix("# ").unwrap_or(l))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let f = LamboFile::from_toml_str(&block).unwrap();
+        assert!(f.selection.expect("the block is a section").skip_redundant);
     }
 
     #[test]
@@ -1646,6 +1679,7 @@ kind = "fake"
             web: Default::default(),
             canonization_supersede: None,
             fusion: None,
+            selection: None,
         };
         let s = toml::to_string(&f).unwrap();
         let back: LamboFile = toml::from_str(&s).unwrap();

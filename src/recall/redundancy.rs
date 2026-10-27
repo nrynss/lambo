@@ -188,7 +188,7 @@ pub fn never_redundant(graph: &Graph, a: NodeId, b: NodeId) -> bool {
     crate::daemon::contradiction::contradicts_either_way(graph, a, b)
 }
 
-/// The redundancy test of one recall: the session's effective merge
+/// The redundancy test of one session's recalls: its effective merge
 /// threshold for the cosine signal.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Redundancy {

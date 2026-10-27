@@ -331,7 +331,7 @@ async fn run_on(
     };
     compatible.map_err(|e| CliError::Runtime(e.to_string()))?;
 
-    let cfg = reader_config(&backends.config);
+    let cfg = reader_config(&backends.config, &backends.embedding);
     let query = request.query.as_str();
     // Do NOT spawn: spawn would run GC, which is a writer. Config::default()
     // for knobs — same as `lambo serve` today (T82-12 is not T8.3's to fix).
@@ -534,11 +534,20 @@ pub(crate) fn render_cli_text(detail: &DetailedRecall) -> String {
 
 /// The one-shot reader's daemon config: the defaults, plus the resolved
 /// settings that shape recall itself, so `lambo recall` and `serve-web` rank
-/// like a session does. #87: `[embedder] calibration`; #173: `[fusion]`.
-fn reader_config(resolved: &Config) -> Config {
+/// like a session does. #87: `[embedder] calibration`; #173: `[fusion]`;
+/// #181: `[selection]`, with the merge threshold its cosine signal uses
+/// resolved for `contract` as a writer attach would without labelled pairs
+/// ([`crate::embed::calibration::reader_merge_threshold`]).
+fn reader_config(resolved: &Config, contract: &crate::types::EmbeddingContract) -> Config {
     Config {
         calibration: resolved.calibration,
         recall_fusion: resolved.recall_fusion,
+        recall_selection: resolved.recall_selection,
+        semantic_match_threshold: crate::embed::calibration::reader_merge_threshold(
+            resolved.calibrated_merge_threshold,
+            contract,
+            resolved.semantic_match_threshold,
+        ),
         ..Config::default()
     }
 }
@@ -560,9 +569,57 @@ mod tests {
             },
             ..Config::default()
         };
-        let cfg = reader_config(&resolved);
+        let cfg = reader_config(&resolved, &bge_contract());
         assert_eq!(cfg.recall_fusion, resolved.recall_fusion);
         assert_eq!(cfg.calibration, resolved.calibration);
+    }
+
+    fn bge_contract() -> crate::types::EmbeddingContract {
+        crate::types::EmbeddingContract {
+            kind: "candle".into(),
+            model: None,
+            dim: 1024,
+        }
+    }
+
+    /// #181: `[selection]` reaches the one-shot reader, and its cosine
+    /// signal uses the contract's calibrated merge threshold (#87) unless
+    /// `calibrated_merge_threshold = false`, else the configured one.
+    #[test]
+    fn the_reader_config_carries_selection_and_the_effective_threshold() {
+        use crate::recall::redundancy::RecallSelection;
+        let resolved = Config {
+            recall_selection: RecallSelection {
+                skip_redundant: true,
+            },
+            semantic_match_threshold: 0.8,
+            ..Config::default()
+        };
+        let cfg = reader_config(&resolved, &bge_contract());
+        assert!(cfg.recall_selection.skip_redundant);
+        assert_eq!(
+            cfg.semantic_match_threshold, 0.8,
+            "no row: the configured one"
+        );
+
+        let row = &crate::embed::calibration::BUILTIN[0];
+        let calibrated = crate::types::EmbeddingContract {
+            kind: row.kind.into(),
+            model: Some(row.model.into()),
+            dim: row.dim,
+        };
+        assert_eq!(
+            reader_config(&resolved, &calibrated).semantic_match_threshold,
+            row.merge_threshold
+        );
+        let off = Config {
+            calibrated_merge_threshold: false,
+            ..resolved
+        };
+        assert_eq!(
+            reader_config(&off, &calibrated).semantic_match_threshold,
+            0.8
+        );
     }
 
     /// E2E-5: a warnings-only detailed result (the daemon's early refusal
