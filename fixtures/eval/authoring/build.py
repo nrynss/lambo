@@ -93,6 +93,8 @@ assert len(qtexts) == len(set(qtexts)), "duplicate query text"
 
 # ---- pairs --------------------------------------------------------------
 pairs, seen = [], set()
+KEY_ORDER = ("id", "a", "b", "label", "family", "relation", "concept_types", "split", "source",
+             "labeller", "labelled_on", "concepts", "review")
 
 
 def add_pair(pid, a, b, label, family, source, relation=None, review=None, concepts=None,
@@ -211,13 +213,16 @@ while n < UNRELATED_PAIRS:
 # in after every agent pair, so agent ids do not move and an owner label on
 # the same two texts as an agent pair relabels that pair in place.
 owner_p = HERE / "owner_pairs.json"
+# The concept types belong to the two texts, not to the label: a relabel keeps
+# them unless the owner's row gives its own.
+typed_before = {p["id"] for p in pairs if p.get("concept_types")}
 for op in json.loads(owner_p.read_text(encoding="utf-8")) if owner_p.exists() else []:
     key = frozenset((op["a"], op["b"]))
     if key in seen:
         # The owner's label takes precedence over an agent label on the same
         # two texts; the pair keeps its id and says it was relabelled.
         old = next(p for p in pairs if frozenset((p["a"], p["b"])) == key)
-        for k in ("relation", "review", "concept_types"):
+        for k in ("relation", "review"):
             old.pop(k, None)
         old.update(a=op["a"], b=op["b"], label=op["label"], family=op["family"],
                    labeller=op["labeller"], labelled_on=op["labelled_on"],
@@ -226,10 +231,17 @@ for op in json.loads(owner_p.read_text(encoding="utf-8")) if owner_p.exists() el
             old["relation"] = op["relation"]
         if op.get("concept_types"):
             old["concept_types"] = list(op["concept_types"])
+        # Back into add_pair's key order, so a relabel moves no field.
+        order = {k: old[k] for k in KEY_ORDER if k in old}
+        assert len(order) == len(old), (old["id"], set(old) - set(order))
+        old.clear()
+        old.update(order)
         continue
     add_pair(f"p-owner-{op['id']}", op["a"], op["b"], op["label"], op["family"],
              "dogfood store copy, cosine-stratified sample", relation=op.get("relation"),
              labeller=op["labeller"], labelled_on=op["labelled_on"], types=op.get("concept_types"))
+lost = sorted(i for i in typed_before if not next(p for p in pairs if p["id"] == i).get("concept_types"))
+assert not lost, f"an owner relabel dropped concept_types: {lost}"
 
 # #198: the concept type each text of the earlier supersedes pairs would be
 # derived as (the anchor concept's corpus type; emb-06 is a re-pin action).
