@@ -171,6 +171,29 @@ only the `contradicts` line, and a concept contradicting it is not pulled
 in after it. A structural (dependency-question) recall answers by
 traversal and renders no hot-list warnings, contradictions included.
 
+A hit that directly cites a contradicted concept (#207) carries
+`recall::format::rests_on_contradicted_warning`, one line per such
+citation, at most `recall::format::STALE_CITATION_LINES` (3) in the cited
+concepts' id order, then `recall::format::rests_on_more_warning` with the
+count of the rest. The predicate is
+`daemon::contradiction::stale_citations(graph, node, min_age, now)`: the
+`ContradictionHit` that `contradiction_at` gives each concept `node`
+cites through a `Dependency` edge (`daemon::contradiction::supporting_citation`:
+a `daemon::contradiction::direct_citation` written by `now`, dropped when
+`node` itself has a `Contradicts` edge to the cited concept, whoever else
+contradicts it). The inverse question, "which concepts cite this one",
+must use the same edge test. Recall runs it on every shown hit at the recall's `now` with
+`CycleParams::contradiction_evidence_min_age`, so it reads the graph rather
+than the hot list: when the #196 contradiction budget has dropped the cited
+concept's entry, the citing hit still warns while the cited concept shows
+no `contradiction` line. The lines are part of the hit's context block and
+count against `max_tokens`, so under a tight budget a later hit can fall
+out of the rendered context (`included_in_context` false), as with #179's
+lines; hits, scores, order and `top_k` are unchanged. It is a warning only: nothing is forced, added or
+reordered, and a result with no stale citation is byte-identical to one
+without the check. The annotation kind is `rests_on_contradicted`, never
+forced in a layered merge.
+
 Garbage collection does not count a `Contradicts` edge as connectivity
 (`EdgeType::counts_toward_gc_connectivity`). A concept with a `Contradicts`
 edge to a concept that is Venerable or Canonical when a sweep starts is a

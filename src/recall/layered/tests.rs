@@ -1033,6 +1033,10 @@ fn contradiction_kinds_are_snake_case_on_the_wire() {
         serde_json::to_string(&AnnotationKind::Contradicts).unwrap(),
         "\"contradicts\""
     );
+    assert_eq!(
+        serde_json::to_string(&AnnotationKind::RestsOnContradicted).unwrap(),
+        "\"rests_on_contradicted\""
+    );
 }
 
 /// #179 review: a pending companion is one memory with its copies in other

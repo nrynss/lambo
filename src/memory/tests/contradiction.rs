@@ -17,11 +17,11 @@ const BELIEF: &str = "brand y chargers are safe to leave plugged in";
 /// brings it into a result.
 const NEWER: &str = "units overheated overnight and were recalled";
 
-async fn session(name: &str) -> Memory {
+pub(super) async fn session(name: &str) -> Memory {
     session_on(name, Arc::new(MemoryStore::new())).await
 }
 
-async fn session_on(name: &str, store: Arc<dyn GraphStore>) -> Memory {
+pub(super) async fn session_on(name: &str, store: Arc<dyn GraphStore>) -> Memory {
     Memory::builder()
         .session(name)
         .agent("agent-a")
@@ -39,7 +39,7 @@ async fn session_on(name: &str, store: Arc<dyn GraphStore>) -> Memory {
         .expect("build")
 }
 
-fn node_of(mem: &Memory, content: &str) -> NodeId {
+pub(super) fn node_of(mem: &Memory, content: &str) -> NodeId {
     mem.graph
         .read()
         .concepts()
@@ -112,7 +112,7 @@ async fn contradicted(mem: &Memory) -> (NodeId, NodeId) {
     (belief, node_of(mem, NEWER))
 }
 
-fn kinds(r: &crate::recall::detail::DetailedRecall, id: NodeId) -> Vec<AnnotationKind> {
+pub(super) fn kinds(r: &crate::recall::detail::DetailedRecall, id: NodeId) -> Vec<AnnotationKind> {
     r.detailed
         .iter()
         .find(|h| h.node_id == id)

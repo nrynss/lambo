@@ -4,6 +4,43 @@
 
 ### Changed
 
+- **Behaviour change: a memory that cites a contradicted concept is
+  warned (#207).** #179 warns on a concept that a newer concept
+  contradicts, but not on a memory that only cites it through
+  `depends_on`, so a fact built on a withdrawn one (a memo that "list-all
+  returns every memo" citing `GET /api/v1/memo`, after "list-all removed
+  in v0.22" was written `against` it) came back with no warning. Recall
+  now adds `⚠ Rests on a contradicted concept: "…" (id …), contradicted by
+  "…" (id …)` to a hit for each concept its own `depends_on` cites that is
+  contradicted, by exactly #179's rule at the recall's clock: at most 3
+  lines in the cited concepts' id order, then one `⚠ Rests on N more
+  contradicted concepts` line. Direct citations only (no chains, no
+  `parent_of`). It is a warning only: scores, statuses, ranking, `top_k`
+  and companions are unchanged, and neither the cited nor the
+  contradicting concept is pulled in for it. It is checked on every
+  recall (single-session, layered, `lambo session verify`), so it shows
+  on the first recall after the `against` write, and also when the #196
+  contradiction budget has dropped the cited concept's own hot-list entry
+  (the hit warns; the cited concept, if shown, has no *Contradicted*
+  line). The lines count against `max_tokens` inside the hit's block, as
+  #179's lines do, so under a tight budget a later hit can fall out of
+  the rendered context (`included_in_context` false); hits, scores, order
+  and `top_k` are unchanged. The detailed recall's
+  annotation kind is `rests_on_contradicted` (web portal `/api/recall`,
+  `--ledger` recall lines; `lambo session verify` reports that kind). A
+  recall with no stale citation renders exactly as before. The predicate
+  is `daemon::contradiction::stale_citations`, with the edge test
+  `daemon::contradiction::supporting_citation` (a
+  `daemon::contradiction::direct_citation` whose citing concept does not
+  itself contradict the cited one: a memory that contradicts what it
+  cites gets no line for it, whoever else contradicts it).
+- **Contract change: the `lambo_recall` tool description names the
+  stale-citation warning (#207).** The published description, which
+  since #179 covers contradiction warnings on any contradicted concept
+  (not only a Canonical or Venerable one), now also says that a concept
+  whose `depends_on` cites a contradicted concept is warned that it rests
+  on it. The input schema is unchanged; a client that pins tool
+  descriptions sees the new text.
 - **Behaviour change: `session_activity` is the derivation count over the
   session maximum, not over the interaction count (#180).** Recall and the
   daemon score table used `derived_by / |interactions|`. The term shrinks as

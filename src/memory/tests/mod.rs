@@ -46,6 +46,7 @@ mod recall_by;
 mod replay;
 mod repo_scope;
 mod shutdown;
+mod stale_dependency;
 mod supersession;
 mod writes;
 

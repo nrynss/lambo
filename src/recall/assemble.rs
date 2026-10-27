@@ -188,6 +188,7 @@ where
         hot_payloads,
         query,
         weights,
+        crate::Config::default().canonization_edge_min_age,
         now,
         token_fn,
     )
@@ -197,6 +198,10 @@ where
 /// unscored hit is not evidence of a fresh match and cannot switch the whole
 /// result to query-only ordering. `None` is for direct callers that already
 /// supplied query-backed phase-1 hits.
+///
+/// `contradiction_min_age` is the session's evidence age floor
+/// (`CycleParams::contradiction_evidence_min_age`), which the stale-citation
+/// check (#207) passes to the contradiction detector at `now`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn assemble_with_legs<F>(
     graph: &Graph,
@@ -207,6 +212,7 @@ pub(crate) fn assemble_with_legs<F>(
     hot_payloads: &HashMap<NodeId, Vec<HotListPayload>>,
     query: &RecallQuery,
     weights: RecallWeights,
+    contradiction_min_age: std::time::Duration,
     now: DateTime<Utc>,
     token_fn: F,
 ) -> DetailedRecall
@@ -355,7 +361,14 @@ where
     let mut hits: Vec<RecallHit> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
     let mut detailed: Vec<DetailedHit> = Vec::new();
-    let mut hit_blocks: Vec<format::ContextBlock> = Vec::new(); // block per emitted hit, score order
+    // Block per emitted hit, score order.
+    let mut hit_blocks: Vec<format::ContextBlock> = Vec::new();
+    // #207: one writer timeline for every stale-citation check below, built
+    // only if some shown hit cites a concept with an inbound contradiction,
+    // and one verdict per cited concept, however many shown hits cite it.
+    let timeline = crate::daemon::conflict::SharedTimeline::new();
+    let mut stale_memo: HashMap<NodeId, Option<crate::daemon::contradiction::ContradictionHit>> =
+        HashMap::new();
     let shown = with_ordinary_companions(
         graph,
         emitted(graph, &members, forced, query.top_k),
@@ -444,6 +457,22 @@ where
         if shown.forced.contains(&c.id) {
             detailed_hit.companion_of = shown.companions.get(&c.id).cloned().unwrap_or_default();
         }
+        // #207: stale by dependency. A warning only: nothing is forced or
+        // added, so membership and order are exactly as without it.
+        for text in stale_citation_lines(
+            graph,
+            c.id,
+            contradiction_min_age,
+            now,
+            &timeline,
+            &mut stale_memo,
+        ) {
+            detailed_hit.annotations.push(Annotation::new(
+                AnnotationKind::RestsOnContradicted,
+                text.clone(),
+            ));
+            lines.push(text);
+        }
         // #20: history, after the live lines. Not a hot-list condition and
         // never forced: it annotates a hit that is already in the result.
         if c.canonization_status != CanonizationStatus::Canonical
@@ -517,6 +546,43 @@ fn same_session_concept<'g>(
         Some(Node::Concept(c)) if c.session_id == of.session_id && c.id != of.id => Some(c),
         _ => None,
     }
+}
+
+/// The stale-by-dependency lines of one hit (#207): one per contradicted
+/// concept its own `depends_on` cites
+/// ([`crate::daemon::contradiction::stale_citations`]), in the cited
+/// concepts' id order, at most [`format::STALE_CITATION_LINES`] of them,
+/// then one overflow line counting the rest. Empty for a hit that cites
+/// nothing contradicted, so its block is unchanged. `memo` holds the
+/// assembly's verdict per cited concept, so hits citing one concept
+/// evaluate it once.
+fn stale_citation_lines(
+    graph: &Graph,
+    hit: NodeId,
+    min_age: std::time::Duration,
+    now: DateTime<Utc>,
+    timeline: &crate::daemon::conflict::SharedTimeline,
+    memo: &mut HashMap<NodeId, Option<crate::daemon::contradiction::ContradictionHit>>,
+) -> Vec<String> {
+    let stale = crate::daemon::contradiction::stale_citations_memo(
+        graph, hit, min_age, now, timeline, memo,
+    );
+    let mut lines: Vec<String> = stale
+        .iter()
+        .take(format::STALE_CITATION_LINES)
+        .filter_map(|s| match (graph.node(s.node), graph.node(s.by)) {
+            (Some(Node::Concept(cited)), Some(Node::Concept(by))) => Some(
+                format::rests_on_contradicted_warning(cited.id, &cited.content, by.id, &by.content),
+            ),
+            _ => None, // the detector only names live concepts
+        })
+        .collect();
+    if stale.len() > format::STALE_CITATION_LINES {
+        lines.push(format::rests_on_more_warning(
+            stale.len() - format::STALE_CITATION_LINES,
+        ));
+    }
+    lines
 }
 
 /// #20's history: every concept whose **latest** demotion in the graph's
@@ -1609,6 +1675,150 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // #207: stale by dependency
+    // -----------------------------------------------------------------------
+
+    /// A `Contradicts` edge `src -> dst`, written at `ts(10)`: after every
+    /// concept's origin (`ts(0)`) and before the tests' `now` (`ts(60)`).
+    fn contradicts_edge(src: u64, dst: u64) -> crate::types::Edge {
+        crate::types::Edge {
+            edge_type: crate::types::EdgeType::Contradicts,
+            created_at: ts(10),
+            last_reinforced: ts(10),
+            ..dep_edge(src, dst)
+        }
+    }
+
+    /// `graph_with(6)` where c2 cites c1 (`depends_on`) and, with
+    /// `contradicted`, c5 contradicts c1. The citation shares c1's origin,
+    /// so it is not #179 evidence for c1.
+    fn citing_graph(contradicted: bool) -> Graph {
+        let mut g = graph_with(6);
+        g.upsert_edge(dep_edge(2, 1)).unwrap();
+        if contradicted {
+            g.upsert_edge(contradicts_edge(5, 1)).unwrap();
+        }
+        g
+    }
+
+    fn rests_on(cited: u64, by: u64) -> String {
+        format!(
+            "⚠ Rests on a contradicted concept: \"concept {cited}\" (id {}), contradicted by \"concept {by}\" (id {})",
+            format::short_id(uid(cited)),
+            format::short_id(uid(by))
+        )
+    }
+
+    fn texts(result: &DetailedRecall, id: u64) -> Vec<String> {
+        result
+            .detailed
+            .iter()
+            .find(|h| h.node_id == uid(id))
+            .map(|h| h.annotations.iter().map(|a| a.text.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    /// The hit that cites the contradicted c1 carries one line naming c1
+    /// and c5; neither is added, and hits, scores and order are exactly
+    /// those of the same recall before c5 contradicted c1. A Venerable c1
+    /// changes nothing: the warning never forces anything.
+    #[test]
+    fn a_hit_citing_a_contradicted_concept_is_warned_and_nothing_else_changes() {
+        for status in [CanonizationStatus::None, CanonizationStatus::Venerable] {
+            let mut before = citing_graph(false);
+            let mut after = citing_graph(true);
+            if status != CanonizationStatus::None {
+                promote_to(&mut before, 1, status);
+                promote_to(&mut after, 1, status);
+            }
+            let clean = assemble_contradicted(&before, &[2, 3], &[], query(1, 10_000));
+            let warned = assemble_contradicted(&after, &[2, 3], &[], query(1, 10_000));
+            assert!(clean.warnings.is_empty(), "{status:?}");
+            assert!(kinds(&clean, 2).is_empty(), "{status:?}");
+
+            let line = rests_on(1, 5);
+            assert_eq!(kinds(&warned, 3), Vec::<AnnotationKind>::new());
+            // top_k 1: c3 outranks c2, so c2 is not shown; at top_k 2 it is.
+            assert_eq!(ids_of(&warned), ids_of(&clean), "{status:?}");
+            assert_eq!(ids_of(&warned), vec![uid(3)]);
+            let clean = assemble_contradicted(&before, &[2, 3], &[], query(2, 10_000));
+            let warned = assemble_contradicted(&after, &[2, 3], &[], query(2, 10_000));
+            assert_eq!(ids_of(&warned), vec![uid(3), uid(2)], "{status:?}");
+            assert_eq!(ids_of(&warned), ids_of(&clean));
+            let scores = |r: &DetailedRecall| r.hits.iter().map(|h| h.score).collect::<Vec<_>>();
+            assert_eq!(scores(&warned), scores(&clean));
+            assert_eq!(kinds(&warned, 2), vec![AnnotationKind::RestsOnContradicted]);
+            assert_eq!(texts(&warned, 2), vec![line.clone()]);
+            assert_eq!(warned.warnings, vec![line.clone()]);
+            assert!(warned.context.contains(&line), "{}", warned.context);
+            assert!(warned.detailed.iter().all(|h| h.companion_of.is_empty()));
+        }
+    }
+
+    /// No stale citation anywhere: the result is byte-identical to a graph
+    /// with neither the citation nor any contradiction, although a hit cites
+    /// an uncontradicted concept and another concept is contradicted by a
+    /// concept nothing shown cites.
+    #[test]
+    fn without_a_stale_citation_the_result_is_byte_identical() {
+        let plain = graph_with(6);
+        let mut busy = graph_with(6);
+        busy.upsert_edge(dep_edge(2, 1)).unwrap(); // c1 is not contradicted
+        busy.upsert_edge(contradicts_edge(5, 4)).unwrap(); // nobody cites c4
+        let a = assemble_contradicted(&plain, &[1, 2, 3], &[], query(3, 10_000));
+        let b = assemble_contradicted(&busy, &[1, 2, 3], &[], query(3, 10_000));
+        assert_eq!(a.context, b.context);
+        assert_eq!(a.warnings, b.warnings);
+        assert_eq!(
+            serde_json::to_string(&a).unwrap(),
+            serde_json::to_string(&b).unwrap()
+        );
+        assert!(b.warnings.is_empty());
+    }
+
+    /// Two shown hits citing one contradicted concept each carry the same
+    /// line: the per-assembly verdict memo evaluates c1 once and serves
+    /// both, in score order, exactly as two separate evaluations would.
+    #[test]
+    fn hits_citing_one_contradicted_concept_share_its_verdict() {
+        let mut g = citing_graph(true);
+        g.upsert_edge(dep_edge(3, 1)).unwrap();
+        let result = assemble_contradicted(&g, &[2, 3], &[], query(2, 10_000));
+        assert_eq!(ids_of(&result), vec![uid(3), uid(2)]);
+        assert_eq!(texts(&result, 3), vec![rests_on(1, 5)]);
+        assert_eq!(texts(&result, 2), vec![rests_on(1, 5)]);
+        assert_eq!(result.warnings, vec![rests_on(1, 5), rests_on(1, 5)]);
+    }
+
+    /// A hit citing more contradicted concepts than `STALE_CITATION_LINES`
+    /// shows the first ones in id order, then one count line.
+    #[test]
+    fn several_stale_citations_are_bounded_and_in_id_order() {
+        let mut g = graph_with(6);
+        // Cited in reverse id order: the lines must not follow edge order.
+        for cited in [4, 3, 2, 1] {
+            g.upsert_edge(dep_edge(6, cited)).unwrap();
+            g.upsert_edge(contradicts_edge(5, cited)).unwrap();
+        }
+        let result = assemble_contradicted(&g, &[6], &[], query(1, 10_000));
+        assert_eq!(ids_of(&result), vec![uid(6)]);
+        assert_eq!(format::STALE_CITATION_LINES, 3);
+        assert_eq!(
+            texts(&result, 6),
+            vec![
+                rests_on(1, 5),
+                rests_on(2, 5),
+                rests_on(3, 5),
+                "⚠ Rests on 1 more contradicted concept".to_string(),
+            ]
+        );
+        assert_eq!(
+            kinds(&result, 6),
+            vec![AnnotationKind::RestsOnContradicted; 4]
+        );
+    }
+
+    // -----------------------------------------------------------------------
     // #179: contradictions of ordinary memory
     // -----------------------------------------------------------------------
 
@@ -2612,6 +2822,7 @@ mod tests {
                 &HashMap::new(),
                 &query(2, 10_000),
                 RecallWeights::default(),
+                crate::Config::default().canonization_edge_min_age,
                 ts(0),
                 default_token_count,
             )
@@ -2703,6 +2914,7 @@ mod tests {
                 &HashMap::new(),
                 &query(2, 10_000),
                 RecallWeights::default(),
+                crate::Config::default().canonization_edge_min_age,
                 ts(0),
                 default_token_count,
             );
@@ -2757,6 +2969,7 @@ mod tests {
                 &HashMap::new(),
                 &query(2, 10_000),
                 RecallWeights::default(),
+                crate::Config::default().canonization_edge_min_age,
                 ts(0),
                 default_token_count,
             )
