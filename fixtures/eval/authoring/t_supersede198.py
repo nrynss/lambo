@@ -14,9 +14,14 @@ moves when a pair is added, removed or reordered.
        measurement, a count of this set) and only the value changed; the
        first text is the newer one (pairs.json's a).
   N()  distinct_entity hard negatives in the trigger's own regime: same
-       type, same shape, differing in identifiers or digits, and both stay
-       true, because each names its own scope (a version, a review round,
-       an issue, an embedder, a size, a split).
+       type, same template, and both stay true, because each names its own
+       scope (a version, a review round, an issue, an embedder, a size, a
+       split). Where the facts allow, the two texts differ only in
+       identifiers and digits (an embedder is named by its model id, a
+       count in digits, both texts in one tense); where they cannot (a
+       verdict word, a constant's name, dev against held_out, with against
+       without fusion), the differing words stay, and such a pair is not
+       counted as identifier-only.
   E()  same-event hard negatives: two records of one event whose digit runs
        differ (a date added, the order changed), so the guard refuses them;
        a paraphrase, never a replacement.
@@ -205,26 +210,26 @@ S("s41", "Of the #190 related-distinct pairs, 82 carry the relation contradicts.
 N("n01", "J1 round-1 adversarial review verdict: REQUEST_CHANGES with one P1.",
   "J2 round-1 adversarial review verdict: REQUEST_CHANGES with one P1.",
   O, f"{AR}adve-review-mooshik-J1-round1.md, adve-review-mooshik-J2-round1.md")
-N("n02", "J3 round-1 adversarial review verdict: REQUEST_CHANGES, one P1, four P2, eight P3.",
-  "J3 round-2 adversarial review verdict: REQUEST_CHANGES, one P1, three P2, six P3.",
+N("n02", "J3 round-1 adversarial review verdict: REQUEST_CHANGES, 1 P1, 4 P2, 8 P3.",
+  "J3 round-2 adversarial review verdict: REQUEST_CHANGES, 1 P1, 3 P2, 6 P3.",
   O, f"{AR}adve-review-mooshik-J3-round1.md, adve-review-mooshik-J3-round2.md")
 N("n03", "J3 round-2 adversarial review verdict: REQUEST_CHANGES, 1 P1, 3 P2, 6 P3.",
   "J3 redesign round-2 adversarial review verdict: REQUEST_CHANGES, 1 P1, 3 P2, 5 P3.",
   O, f"{AR}adve-review-mooshik-J3-round2.md, adve-review-mooshik-J3-redesign-round2.md")
-N("n04", "J3 round-3 adversarial review verdict: REQUEST_CHANGES with two new P1, one P2 and three P3.",
-  "J3 round-2 adversarial review verdict: REQUEST_CHANGES with one new P1, three P2 and six P3.",
+N("n04", "J3 round-3 adversarial review verdict: REQUEST_CHANGES with 2 new P1, 1 P2 and 3 P3.",
+  "J3 round-2 adversarial review verdict: REQUEST_CHANGES with 1 new P1, 3 P2 and 6 P3.",
   O, f"{AR}adve-review-mooshik-J3-round2.md, adve-review-mooshik-J3-round3.md")
-N("n05", "J1 round-2 adversarial review verdict: REQUEST_CHANGES, two blocking P2 and two P3.",
-  "J1 round-3 adversarial review verdict: CLEAN, three P3 advisories and none blocking.",
+N("n05", "J1 round-2 adversarial review verdict: REQUEST_CHANGES, 0 P1, 2 P2 and 2 P3.",
+  "J1 round-3 adversarial review verdict: CLEAN, 0 P1, 0 P2 and 3 P3.",
   O, f"{AR}adve-review-mooshik-J1-round2.md, adve-review-mooshik-J1-round3.md")
-N("n06", "J0 round-1 adversarial review verdict: CLEAN, six P3 advisory findings, none blocking.",
-  "J0 round-2 adversarial review verdict: CLEAN, one P2 and five P3 advisory findings, none blocking.",
+N("n06", "J0 round-1 adversarial review verdict: CLEAN, 0 P2 and 6 P3 advisory findings, none blocking.",
+  "J0 round-2 adversarial review verdict: CLEAN, 1 P2 and 5 P3 advisory findings, none blocking.",
   O, f"{AR}adve-review-mooshik-J0-round1.md, adve-review-mooshik-J0-round2.md")
-N("n07", "J3 redesign round-1 review verdict: REQUEST_CHANGES, 1 P1, 3 P2, 1 unconfirmed P2, 6 P3.",
+N("n07", "J3 redesign round-1 review verdict: REQUEST_CHANGES, 1 P1, 3 P2, 6 P3.",
   "J3 redesign round-2 review verdict: REQUEST_CHANGES, 1 P1, 3 P2, 5 P3.",
   O, f"{AR}adve-review-mooshik-J3-redesign-round1.md, adve-review-mooshik-J3-redesign-round2.md")
-N("n08", "J end-to-end round-1 review verdict: REQUEST_CHANGES, no P1, five P2, seven P3.",
-  "J end-to-end round-2 review verdict: REQUEST_CHANGES, no P1 and no P2.",
+N("n08", "J end-to-end round-1 review verdict: REQUEST_CHANGES, 0 P1, 5 P2, 7 P3.",
+  "J end-to-end round-2 review verdict: REQUEST_CHANGES, 0 P1, 0 P2, 7 P3.",
   O, f"{AR}adve-review-mooshik-J-e2e-round1.md, adve-review-mooshik-J-e2e-round2.md")
 N("n09", "J2 round-3 adversarial review verdict: CLEAN.",
   "J1 round-3 adversarial review verdict: CLEAN.",
@@ -241,16 +246,16 @@ N("n12", "Review notes for J3 round 1 are in adve-review-mooshik-J3-round1.md.",
 
 # ---- distinct_entity: version-scoped measurements -------------------------
 N("n13", "On 0.7.0, keyword recall over MCP on a 9,500-concept SQLite store runs at 7.5 ms p50.",
-  "On 0.6.0, keyword recall over MCP on a 9,500-concept SQLite store ran at 18.7 ms p50.",
+  "On 0.6.0, keyword recall over MCP on a 9,500-concept SQLite store runs at 18.7 ms p50.",
   O, f"{CL} (0.7.0, #171)")
 N("n14", "On 0.7.0, 16 concurrent clients get 1,104 recalls per second from a 9,500-concept store.",
-  "On 0.6.0, 16 concurrent clients got 63 recalls per second from a 9,500-concept store.",
+  "On 0.6.0, 16 concurrent clients get 63 recalls per second from a 9,500-concept store.",
   O, f"{CL} (0.7.0, #171)")
 N("n15", "0.7.0 acknowledges a back-to-back lambo_derive in 0.8 ms p50.",
-  "0.6.0 acknowledged a back-to-back lambo_derive in 24.8 ms p50.",
+  "0.6.0 acknowledges a back-to-back lambo_derive in 24.8 ms p50.",
   O, f"{CL} (0.7.0, #171)")
 N("n16", "On 0.7.0 a structural recall on a 9,100-concept store takes about 1 ms.",
-  "On 0.6.0 a structural recall on a 9,100-concept store took about 70 ms.",
+  "On 0.6.0 a structural recall on a 9,100-concept store takes about 70 ms.",
   O, f"{CL} (0.7.0, #165)")
 N("n17", "At 10,000 concepts a derive commit holds the write lock for 16.5 µs (0.5.0).",
   "At 50,000 concepts a derive commit holds the write lock for 17 µs (0.5.0).",
@@ -261,8 +266,8 @@ N("n18", "At 50,000 concepts a derive commit holds the write lock for 17 µs.",
 N("n19", "With RRF fusion, whole-pipeline nDCG@10 on the #190 dev split under BGE-M3 is 0.893.",
   "Without RRF fusion, whole-pipeline nDCG@10 on the #190 dev split under BGE-M3 is 0.848.",
   O, f"{CL} (Unreleased, #173)")
-N("n20", "With RRF fusion, nDCG@10 on the #190 dev split is 0.893 under BGE-M3.",
-  "With RRF fusion, nDCG@10 on the #190 dev split is 0.889 under EmbeddingGemma 2.",
+N("n20", "With RRF fusion, nDCG@10 on the #190 dev split is 0.893 under BAAI/bge-m3.",
+  "With RRF fusion, nDCG@10 on the #190 dev split is 0.889 under google/embeddinggemma-2.",
   O, f"{CL} (Unreleased, #173)")
 N("n21", "With RRF fusion, nDCG@10 under BGE-M3 is 0.893 on the #190 dev split.",
   "With RRF fusion, nDCG@10 under BGE-M3 is 0.887 on the #190 held_out split.",
@@ -272,34 +277,34 @@ N("n22", "Without fusion, nDCG@10 under BGE-M3 is 0.848 on the #190 dev split.",
   O, f"{CL} (Unreleased, #173)")
 
 # ---- distinct_entity: per-embedder calibrations (#87) ---------------------
-N("n23", "Under EmbeddingGemma 2 the recent-interactions leg scores 0.63.",
-  "Under BGE-M3 the recent-interactions leg scores 0.35.",
+N("n23", "Under google/embeddinggemma-2 the recent-interactions leg scores 0.63.",
+  "Under BAAI/bge-m3 the recent-interactions leg scores 0.35.",
   L, f"{CL} (Unreleased, #87)")
-N("n24", "Under EmbeddingGemma 2 a writer merges at a calibrated threshold of 0.93.",
-  "Under BGE-M3 a writer merges at the default threshold of 0.85.",
+N("n24", "Under google/embeddinggemma-2 a writer merges at a threshold of 0.93.",
+  "Under BAAI/bge-m3 a writer merges at a threshold of 0.85.",
   L, f"{CL} (Unreleased, #87)")
-N("n25", "Under EmbeddingGemma 2 an unset layer floor is 0.72.",
-  "Under BGE-M3 an unset layer floor is 0.50.",
+N("n25", "Under google/embeddinggemma-2 an unset layer floor is 0.72.",
+  "Under BAAI/bge-m3 an unset layer floor is 0.50.",
   L, f"{CL} (Unreleased, #87)")
-N("n26", "At a 0.50 layer floor, 99.9% of irrelevant concepts on the #190 held-out split pass under EmbeddingGemma 2.",
-  "At a 0.50 layer floor, 3.2% of irrelevant concepts on the #190 held-out split pass under BGE-M3.",
+N("n26", "At a 0.50 layer floor, 99.9% of irrelevant concepts on the #190 held-out split pass under google/embeddinggemma-2.",
+  "At a 0.50 layer floor, 3.2% of irrelevant concepts on the #190 held-out split pass under BAAI/bge-m3.",
   O, f"{CL} (Unreleased, #87); evidence/issue-87-calibration/")
-N("n27", "At the 0.85 threshold, about 78% of the #190 related-but-distinct pairs are over it by cosine under EmbeddingGemma 2.",
-  "At the 0.85 threshold, 35-44% of the #190 related-but-distinct pairs are over it by cosine under BGE-M3.",
+N("n27", "At the 0.85 threshold, about 78% of the #190 related-but-distinct pairs are over it by cosine under google/embeddinggemma-2.",
+  "At the 0.85 threshold, about 35-44% of the #190 related-but-distinct pairs are over it by cosine under BAAI/bge-m3.",
   O, f"{CL} (Unreleased, #87)")
 
 # ---- distinct_entity: constants and caps that share a template ------------
 N("n28", "lambo::store::batch::CONCEPT_COLUMNS is 18.",
   "lambo::store::batch::EDGE_COLUMNS is 10.",
   C, "src/store/batch.rs")
-N("n29", "lambo::store::batch::INTERACTION_COLUMNS is 7.",
-  "lambo::store::batch::EDGE_COLUMNS is 10 too.",
+N("n29", "lambo::store::batch::INTERACTION_COLUMNS is 7 (src/store/batch.rs).",
+  "lambo::store::batch::EDGE_COLUMNS is 10 (src/store/batch.rs).",
   C, "src/store/batch.rs")
-N("n30", "At most 16 lambo_stats waits run at once across the server.",
-  "At most 8 lambo_stats waits run at once for one agent_id.",
+N("n30", "At most 16 lambo_stats waits run at once per server.",
+  "At most 8 lambo_stats waits run at once per agent_id.",
   C, f"{CL} (0.4.0, #11: wait caps)")
-N("n31", "lambo::graph::hybrid::MAX_HYBRID_CONCEPTS is 256.",
-  "lambo::graph::hybrid::MAX_HYBRID_WORK_ITEMS, the most concepts plus pairs one call may carry, is 512.",
+N("n31", "lambo::graph::hybrid::MAX_HYBRID_CONCEPTS is 256 (src/graph/hybrid.rs).",
+  "lambo::graph::hybrid::MAX_HYBRID_WORK_ITEMS is 512 (src/graph/hybrid.rs).",
   C, "src/graph/hybrid.rs")
 
 # ---- distinct_entity: rigs, releases, merges, milestones ------------------
@@ -312,20 +317,20 @@ N("n33", "lambo 0.7.0 was released on 2026-10-19.",
 N("n34", "lambo 0.5.0 was released on 2026-10-12.",
   "lambo 0.4.0 was released on 2026-10-11.",
   O, f"{CL} (release headings)")
-N("n35", "lambo 0.3.0 was released on 2026-10-07.",
-  "lambo 0.4.0 was released on 2026-10-11 too.",
+N("n35", "Release 0.3.0 of lambo is dated 2026-10-07 in CHANGELOG.md.",
+  "Release 0.4.0 of lambo is dated 2026-10-11 in CHANGELOG.md.",
   O, f"{CL} (release headings)")
-N("n36", "PR #205 (#173 RRF fusion) merged to main as c3ba6722 on 2026-10-27.",
-  "PR #206 (#173 more labelled queries) merged to main as 1ac09bf8 on 2026-10-27.",
+N("n36", "PR #205 merged to main as c3ba6722 on 2026-10-27.",
+  "PR #206 merged to main as 1ac09bf8 on 2026-10-27.",
   O, "git log --merges (c3ba6722, 1ac09bf8)")
-N("n37", "PR #203 (#87 calibration) merged to main as 266f8bea on 2026-10-26.",
-  "PR #204 (#87 layer floor) merged to main as 8c92a5e9 on 2026-10-26.",
+N("n37", "PR #203 merged to main as 266f8bea on 2026-10-26.",
+  "PR #204 merged to main as 8c92a5e9 on 2026-10-26.",
   O, "git log --merges (266f8bea, 8c92a5e9)")
-N("n38", "PR #199 (#196 hot-list budget) merged to main as b8177774 on 2026-10-20.",
-  "PR #200 (#197 GC keeps the live correction) merged to main as 437d3d58 on 2026-10-20.",
+N("n38", "PR #199 merged to main as b8177774 on 2026-10-20.",
+  "PR #200 merged to main as 437d3d58 on 2026-10-20.",
   O, "git log --merges (b8177774, 437d3d58)")
-N("n39", "PR #195 (#193 merge guards) merged to main as 5e44c692 on 2026-10-20.",
-  "PR #194 (#179 ordinary contradictions) merged to main as 3a76def7 on 2026-10-20.",
+N("n39", "PR #195 merged to main as 5e44c692 on 2026-10-20.",
+  "PR #194 merged to main as 3a76def7 on 2026-10-20.",
   O, "git log --merges (5e44c692, 3a76def7)")
 N("n40", "Issue #198 is planned for milestone 0.8.0.",
   "Issue #181 is planned for milestone 0.8.0.",
@@ -336,29 +341,29 @@ N("n41", "Issue #207 is planned for milestone 0.8.0.",
 N("n42", "Issue #117 belongs to milestone 0.5.0.",
   "Issue #118 belongs to milestone 0.5.0.",
   L, "nrynss/lambo issues #117, #118 (milestone 0.5.0); CHANGELOG.md 0.5.0")
-N("n43", "Issue #180 is planned for milestone 0.8.0.",
+N("n43", "Issue #180 belongs to milestone 0.8.0.",
   "Issue #116 belongs to milestone 0.5.0.",
   L, "nrynss/lambo issues #116 (0.5.0), #180 (0.8.0)")
-N("n44", "#176 (the embedder canary) shipped in 0.7.0.",
-  "#178 (near-duplicate alias suggestions) shipped in 0.7.0.",
+N("n44", "Issue #176 shipped in lambo 0.7.0.",
+  "Issue #178 shipped in lambo 0.7.0.",
   O, f"{CL} (0.7.0 highlights)")
-N("n45", "#55 (packed f32 SQLite vectors) shipped in 0.7.0.",
-  "#165 (fast structural recall) shipped in 0.7.0.",
+N("n45", "Issue #55 shipped in lambo 0.7.0.",
+  "Issue #165 shipped in lambo 0.7.0.",
   O, f"{CL} (0.7.0 performance)")
-N("n46", "#102 (the commit no longer stalls the session) shipped in 0.5.0.",
-  "#31 (a proxying serve no longer loads the model) shipped in 0.5.0.",
+N("n46", "Issue #102 shipped in lambo 0.5.0.",
+  "Issue #31 shipped in lambo 0.5.0.",
   O, f"{CL} (0.5.0)")
 N("n47", "The dogfood writer listens on 127.0.0.1:7700.",
   "The old llama-server embedder listened on 127.0.0.1:8080.",
   O, "dev-diary/lambo-for-mooshik/DOGFOOD-SETUP.md (MCP url on 7700); DOGFOOD.md (bge_m3 at 127.0.0.1:8080)")
-N("n48", "Phase 3 of the build is the stores phase (dev-diary/PHASE-3-stores.md).",
-  "Phase 4 of the build is the daemon phase (dev-diary/PHASE-4-daemon.md).",
+N("n48", "Phase 3 of the build is written up in dev-diary/PHASE-3-stores.md.",
+  "Phase 4 of the build is written up in dev-diary/PHASE-4-daemon.md.",
   O, "dev-diary/PHASE-3-stores.md, dev-diary/PHASE-4-daemon.md")
-N("n49", "Phase 5 of the build is the recall phase (dev-diary/PHASE-5-recall.md).",
-  "Phase 6 of the build is the canonization phase (dev-diary/PHASE-6-canonization.md).",
+N("n49", "Phase 5 of the build is written up in dev-diary/PHASE-5-recall.md.",
+  "Phase 6 of the build is written up in dev-diary/PHASE-6-canonization.md.",
   O, "dev-diary/PHASE-5-recall.md, dev-diary/PHASE-6-canonization.md")
-N("n50", "PR #188 (#176 embedder canary) merged to main as d327bf77 on 2026-10-19.",
-  "PR #187 (#178 similar aliases) merged to main as d38c81ee on 2026-10-19.",
+N("n50", "PR #188 merged to main as d327bf77 on 2026-10-19.",
+  "PR #187 merged to main as d38c81ee on 2026-10-19.",
   O, "git log --merges (d327bf77, d38c81ee)")
 N("n51", "Issue #209 belongs to milestone 0.8.0.",
   "Issue #181 belongs to milestone 0.8.0.",
