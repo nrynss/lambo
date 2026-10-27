@@ -26,6 +26,9 @@
 //! skipping drops a member's block and warnings, and a duplicate's warning
 //! (say, a contradiction declared against that copy) is not on the copy
 //! that was kept. Canonical-first order is untouched: the rule only skips.
+//! A dependency question answered by traversal (`recall::dispatch`) lists
+//! an anchor's dependents without assembly, so the rule does not apply to
+//! it.
 //!
 //! ## Redundancy signals, cheapest first
 //!
