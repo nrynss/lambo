@@ -149,7 +149,10 @@ Per consumer:
   by construction).
 - **Added for #198 (2026-10-27).** `authoring/t_supersede198.py` adds 102
   pairs, ids `p-198-sNN` (41 `supersedes`), `p-198-nNN` (53
-  `distinct_entity`) and `p-198-eNN` (8 `same-event`), every one authored
+  `distinct_entity`) and `p-198-eNN` (8 `same-event`), each id written at
+  its call so it never depends on the order of the calls, labelled by
+  `claude-opus-5-5 (agent)` (the set's other agent items carry build.py's
+  default labeller, `Grok Bot (agent)`), every one authored
   from this repository's records (`CHANGELOG.md`, `DOGFOOD.md`, the
   adversarial-review files, evidence READMEs, `src/` constants, the git
   history of this README and of merges, the issue milestones) and citing

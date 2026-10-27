@@ -3114,7 +3114,7 @@
   ],
   "split": "dev",
   "source": "dev-diary/lambo-for-mooshik/DOGFOOD.md (open question 1: pin 21e4cf8; superseded pins 3039b82, then 19f51d3)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -3130,7 +3130,7 @@
   ],
   "split": "dev",
   "source": "dev-diary/lambo-for-mooshik/DOGFOOD.md (open question 1: superseded pins 3039b82, then 19f51d3)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -3146,7 +3146,7 @@
   ],
   "split": "dev",
   "source": "dev-diary/lambo-for-mooshik/DOGFOOD.md (Linux rig, 2026-08-24: re-pinned fe4d63d to bbef4b3)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -3162,7 +3162,7 @@
   ],
   "split": "dev",
   "source": "evidence/0.6.0-vs-0.5.0/README.md (Builds; Re-pin)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -3178,7 +3178,7 @@
   ],
   "split": "dev",
   "source": "evidence/0.5.0-vs-0.4.0/README.md (the 0.5.0 re-pin); evidence/0.6.0-vs-0.5.0/README.md (0.5.0 is the rig's pinned binary)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -3194,7 +3194,7 @@
   ],
   "split": "dev",
   "source": "CHANGELOG.md (0.4.0: the pinned toolchain moves from 1.97.1 to 1.99.0, #42)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -3210,7 +3210,7 @@
   ],
   "split": "dev",
   "source": "CHANGELOG.md (0.4.0: the crate moves from edition 2021 to edition 2024, #42)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -3226,7 +3226,7 @@
   ],
   "split": "dev",
   "source": "src/store/batch.rs (CONCEPT_COLUMNS = 18); CHANGELOG.md 0.3.0 (16 to 17)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -3242,7 +3242,7 @@
   ],
   "split": "held_out",
   "source": "CHANGELOG.md (0.3.0: CONCEPT_COLUMNS 16 to 17)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -3258,7 +3258,7 @@
   ],
   "split": "dev",
   "source": "CHANGELOG.md (0.3.0: INTERACTION_COLUMNS 6 to 7)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -3274,7 +3274,7 @@
   ],
   "split": "held_out",
   "source": "CHANGELOG.md (0.3.0: EDGE_COLUMNS 9 to 10)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -3290,7 +3290,7 @@
   ],
   "split": "dev",
   "source": "CHANGELOG.md (0.4.0: the longest wait_ms is now 34000, was 4000, #11)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -3306,7 +3306,7 @@
   ],
   "split": "dev",
   "source": "CHANGELOG.md (Unreleased, #87: the recent leg is calibrated per contract)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -3322,7 +3322,7 @@
   ],
   "split": "held_out",
   "source": "CHANGELOG.md (Unreleased, #87: EG2 writers merge at 0.93, not 0.85)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -3338,7 +3338,7 @@
   ],
   "split": "dev",
   "source": "CHANGELOG.md (Unreleased, #87: an unset EG2 layer floor is 0.72, not 0.50)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -3354,7 +3354,7 @@
   ],
   "split": "dev",
   "source": "CHANGELOG.md (0.5.0: CUDA 13.4 builds directly, #111)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -3370,7 +3370,7 @@
   ],
   "split": "held_out",
   "source": "CHANGELOG.md (release headings 0.6.0 and 0.7.0)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -3386,7 +3386,7 @@
   ],
   "split": "held_out",
   "source": "CHANGELOG.md (0.7.0, #171); evidence/issue-171-perf/",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -3402,7 +3402,7 @@
   ],
   "split": "dev",
   "source": "CHANGELOG.md (0.7.0, #171); evidence/issue-171-perf/",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -3418,7 +3418,7 @@
   ],
   "split": "dev",
   "source": "CHANGELOG.md (0.7.0, #171)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -3434,7 +3434,7 @@
   ],
   "split": "dev",
   "source": "CHANGELOG.md (0.7.0, #171)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -3450,7 +3450,7 @@
   ],
   "split": "dev",
   "source": "CHANGELOG.md (0.7.0, #171: provision skips the #148 re-key scan once it has run clean)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -3466,7 +3466,7 @@
   ],
   "split": "dev",
   "source": "CHANGELOG.md (0.7.0, #171: a rescore walks incident edges once)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -3482,7 +3482,7 @@
   ],
   "split": "held_out",
   "source": "CHANGELOG.md (0.7.0, #165)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -3498,7 +3498,7 @@
   ],
   "split": "dev",
   "source": "CHANGELOG.md (0.5.0, #102)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -3514,7 +3514,7 @@
   ],
   "split": "held_out",
   "source": "CHANGELOG.md (0.5.0, #102)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -3530,7 +3530,7 @@
   ],
   "split": "dev",
   "source": "CHANGELOG.md (0.5.0, #31)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -3546,7 +3546,7 @@
   ],
   "split": "dev",
   "source": "CHANGELOG.md (0.4.0, #8, #14: the session holder ranks vectors from memory)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -3562,7 +3562,7 @@
   ],
   "split": "dev",
   "source": "CHANGELOG.md (0.7.0, #55: packed f32 vectors)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27",
   "review": "the two values are #55's text and packed codecs of one store; a store not yet provisioned on 0.7.0 still measures the older value, so this may be two codecs (distinct_entity) rather than a replacement"
  },
@@ -3579,7 +3579,7 @@
   ],
   "split": "dev",
   "source": "CHANGELOG.md (0.7.0, #55)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27",
   "review": "the two values are #55's text and packed codecs of one store; a store not yet provisioned on 0.7.0 still measures the older value, so this may be two codecs (distinct_entity) rather than a replacement"
  },
@@ -3596,7 +3596,7 @@
   ],
   "split": "held_out",
   "source": "CHANGELOG.md (0.3.0, GC: the first sweep now collects nothing, was 537)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -3612,7 +3612,7 @@
   ],
   "split": "dev",
   "source": "CHANGELOG.md (0.3.0, GC: sweeps are cheap)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -3628,7 +3628,7 @@
   ],
   "split": "dev",
   "source": "CHANGELOG.md (0.4.0: user schema's eight fields are parent_of children, 14 dependents, was 8)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -3644,7 +3644,7 @@
   ],
   "split": "held_out",
   "source": "CHANGELOG.md (0.4.0: the demo's user schema reports 15, was 9)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -3660,7 +3660,7 @@
   ],
   "split": "held_out",
   "source": "fixtures/eval/README.md (git 3d421739: 310 to 368 queries)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -3676,7 +3676,7 @@
   ],
   "split": "dev",
   "source": "fixtures/eval/README.md (git 3d421739: 204 to 262 answerable)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -3692,7 +3692,7 @@
   ],
   "split": "dev",
   "source": "fixtures/eval/README.md (git 3d421739)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -3708,7 +3708,7 @@
   ],
   "split": "dev",
   "source": "fixtures/eval/README.md (git 3d421739: 12 to 48)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -3724,7 +3724,7 @@
   ],
   "split": "dev",
   "source": "fixtures/eval/README.md (git 3d421739: 8 to 17)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -3740,7 +3740,7 @@
   ],
   "split": "dev",
   "source": "fixtures/eval/README.md (git 3d421739: 23 to 36)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -3756,7 +3756,7 @@
   ],
   "split": "dev",
   "source": "fixtures/eval/README.md (git 8d2269a9: the owner's rulings, 84 to 82)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -3772,7 +3772,7 @@
   ],
   "split": "dev",
   "source": "dev-diary/adversarial-review/adve-review-mooshik-J1-round1.md, adve-review-mooshik-J2-round1.md",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -3788,7 +3788,7 @@
   ],
   "split": "dev",
   "source": "dev-diary/adversarial-review/adve-review-mooshik-J3-round1.md, adve-review-mooshik-J3-round2.md",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -3804,7 +3804,7 @@
   ],
   "split": "held_out",
   "source": "dev-diary/adversarial-review/adve-review-mooshik-J3-round2.md, adve-review-mooshik-J3-redesign-round2.md",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -3820,7 +3820,7 @@
   ],
   "split": "dev",
   "source": "dev-diary/adversarial-review/adve-review-mooshik-J3-round2.md, adve-review-mooshik-J3-round3.md",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -3836,7 +3836,7 @@
   ],
   "split": "dev",
   "source": "dev-diary/adversarial-review/adve-review-mooshik-J1-round2.md, adve-review-mooshik-J1-round3.md",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -3852,7 +3852,7 @@
   ],
   "split": "dev",
   "source": "dev-diary/adversarial-review/adve-review-mooshik-J0-round1.md, adve-review-mooshik-J0-round2.md",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -3868,7 +3868,7 @@
   ],
   "split": "dev",
   "source": "dev-diary/adversarial-review/adve-review-mooshik-J3-redesign-round1.md, adve-review-mooshik-J3-redesign-round2.md",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -3884,7 +3884,7 @@
   ],
   "split": "dev",
   "source": "dev-diary/adversarial-review/adve-review-mooshik-J-e2e-round1.md, adve-review-mooshik-J-e2e-round2.md",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -3900,7 +3900,7 @@
   ],
   "split": "dev",
   "source": "dev-diary/adversarial-review/adve-review-mooshik-J1-round3.md, adve-review-mooshik-J2-round3.md",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -3916,7 +3916,7 @@
   ],
   "split": "dev",
   "source": "dev-diary/adversarial-review/adve-review-mooshik-J3-redesign-round2.md, adve-review-mooshik-J3-redesign-round3.md",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -3932,7 +3932,7 @@
   ],
   "split": "dev",
   "source": "dev-diary/adversarial-review/ (one file per round; #178's real pairs i3-07, i3-17)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -3948,7 +3948,7 @@
   ],
   "split": "dev",
   "source": "dev-diary/adversarial-review/ (one file per round; #178's real pair i3-05)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -3964,7 +3964,7 @@
   ],
   "split": "dev",
   "source": "CHANGELOG.md (0.7.0, #171)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -3980,7 +3980,7 @@
   ],
   "split": "held_out",
   "source": "CHANGELOG.md (0.7.0, #171)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -3996,7 +3996,7 @@
   ],
   "split": "dev",
   "source": "CHANGELOG.md (0.7.0, #171)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -4012,7 +4012,7 @@
   ],
   "split": "dev",
   "source": "CHANGELOG.md (0.7.0, #165)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -4028,7 +4028,7 @@
   ],
   "split": "dev",
   "source": "CHANGELOG.md (0.5.0, #102)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -4044,7 +4044,7 @@
   ],
   "split": "dev",
   "source": "CHANGELOG.md (0.5.0, #102)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -4060,7 +4060,7 @@
   ],
   "split": "held_out",
   "source": "CHANGELOG.md (Unreleased, #173)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -4076,7 +4076,7 @@
   ],
   "split": "dev",
   "source": "CHANGELOG.md (Unreleased, #173)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -4092,7 +4092,7 @@
   ],
   "split": "dev",
   "source": "CHANGELOG.md (Unreleased, #173)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -4108,7 +4108,7 @@
   ],
   "split": "held_out",
   "source": "CHANGELOG.md (Unreleased, #173)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -4124,7 +4124,7 @@
   ],
   "split": "dev",
   "source": "CHANGELOG.md (Unreleased, #87)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -4140,7 +4140,7 @@
   ],
   "split": "dev",
   "source": "CHANGELOG.md (Unreleased, #87)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -4156,7 +4156,7 @@
   ],
   "split": "held_out",
   "source": "CHANGELOG.md (Unreleased, #87)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -4172,7 +4172,7 @@
   ],
   "split": "held_out",
   "source": "CHANGELOG.md (Unreleased, #87); evidence/issue-87-calibration/",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -4188,7 +4188,7 @@
   ],
   "split": "dev",
   "source": "CHANGELOG.md (Unreleased, #87)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -4204,7 +4204,7 @@
   ],
   "split": "dev",
   "source": "src/store/batch.rs",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -4220,7 +4220,7 @@
   ],
   "split": "dev",
   "source": "src/store/batch.rs",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -4236,7 +4236,7 @@
   ],
   "split": "dev",
   "source": "CHANGELOG.md (0.4.0, #11: wait caps)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -4252,7 +4252,7 @@
   ],
   "split": "held_out",
   "source": "src/graph/hybrid.rs",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -4268,7 +4268,7 @@
   ],
   "split": "held_out",
   "source": "dev-diary/lambo-for-mooshik/DOGFOOD.md (open question 1, both rigs as of 2026-08-24)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -4284,7 +4284,7 @@
   ],
   "split": "dev",
   "source": "CHANGELOG.md (release headings)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -4300,7 +4300,7 @@
   ],
   "split": "dev",
   "source": "CHANGELOG.md (release headings)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -4316,7 +4316,7 @@
   ],
   "split": "dev",
   "source": "CHANGELOG.md (release headings)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -4332,7 +4332,7 @@
   ],
   "split": "held_out",
   "source": "git log --merges (c3ba6722, 1ac09bf8)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -4348,7 +4348,7 @@
   ],
   "split": "dev",
   "source": "git log --merges (266f8bea, 8c92a5e9)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -4364,7 +4364,7 @@
   ],
   "split": "dev",
   "source": "git log --merges (b8177774, 437d3d58)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -4380,7 +4380,7 @@
   ],
   "split": "dev",
   "source": "git log --merges (5e44c692, 3a76def7)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -4396,7 +4396,7 @@
   ],
   "split": "dev",
   "source": "nrynss/lambo issues #181, #198 (milestone 0.8.0)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -4412,7 +4412,7 @@
   ],
   "split": "dev",
   "source": "nrynss/lambo issues #207, #208 (milestone 0.8.0)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -4428,7 +4428,7 @@
   ],
   "split": "dev",
   "source": "nrynss/lambo issues #117, #118 (milestone 0.5.0); CHANGELOG.md 0.5.0",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -4444,7 +4444,7 @@
   ],
   "split": "dev",
   "source": "nrynss/lambo issues #116 (0.5.0), #180 (0.8.0)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -4460,7 +4460,7 @@
   ],
   "split": "held_out",
   "source": "CHANGELOG.md (0.7.0 highlights)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -4476,7 +4476,7 @@
   ],
   "split": "dev",
   "source": "CHANGELOG.md (0.7.0 performance)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -4492,7 +4492,7 @@
   ],
   "split": "dev",
   "source": "CHANGELOG.md (0.5.0)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -4508,7 +4508,7 @@
   ],
   "split": "dev",
   "source": "dev-diary/lambo-for-mooshik/DOGFOOD-SETUP.md (MCP url on 7700); DOGFOOD.md (bge_m3 at 127.0.0.1:8080)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -4524,7 +4524,7 @@
   ],
   "split": "dev",
   "source": "dev-diary/PHASE-3-stores.md, dev-diary/PHASE-4-daemon.md",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -4540,7 +4540,7 @@
   ],
   "split": "dev",
   "source": "dev-diary/PHASE-5-recall.md, dev-diary/PHASE-6-canonization.md",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -4556,7 +4556,7 @@
   ],
   "split": "dev",
   "source": "git log --merges (d327bf77, d38c81ee)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -4572,7 +4572,7 @@
   ],
   "split": "dev",
   "source": "nrynss/lambo issues #181, #209 (milestone 0.8.0)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -4588,7 +4588,7 @@
   ],
   "split": "dev",
   "source": "src/graph/hybrid.rs",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -4604,7 +4604,7 @@
   ],
   "split": "dev",
   "source": "src/surface/limits.rs; src/graph/hybrid.rs",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -4619,7 +4619,7 @@
   ],
   "split": "dev",
   "source": "git log --merges (c3ba6722)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -4634,7 +4634,7 @@
   ],
   "split": "dev",
   "source": "CHANGELOG.md (0.7.0); git log --merges (21942f6f)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -4649,7 +4649,7 @@
   ],
   "split": "held_out",
   "source": "CHANGELOG.md (0.3.0, GC)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -4664,7 +4664,7 @@
   ],
   "split": "held_out",
   "source": "CHANGELOG.md (Unreleased, #87)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -4679,7 +4679,7 @@
   ],
   "split": "dev",
   "source": "fixtures/eval/README.md (Added for #173)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -4694,7 +4694,7 @@
   ],
   "split": "held_out",
   "source": "CHANGELOG.md (0.5.0: same write outcomes as 0.4.0)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -4709,7 +4709,7 @@
   ],
   "split": "dev",
   "source": "CHANGELOG.md (0.4.0, #42)",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {
@@ -4724,7 +4724,7 @@
   ],
   "split": "held_out",
   "source": "dev-diary/adversarial-review/adve-review-mooshik-J3-redesign-round3.md",
-  "labeller": "Grok Bot (agent)",
+  "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
  {

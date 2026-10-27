@@ -139,7 +139,7 @@ for c in common.CONCEPTS:
 for n, p in enumerate(common.EXTRA_PAIRS, 1):
     add_pair(p["id"] or f"p-x{n:02d}", p["a"], p["b"], p["label"], p["family"], p["source"],
              relation=p["relation"], review=p["review"], types=p["types"],
-             labelled_on=p["labelled_on"] or LABELLED_ON)
+             labelled_on=p["labelled_on"] or LABELLED_ON, labeller=p["labeller"] or LABELLER)
 
 # #178's labelled pairs: the dogfood-i3 file/commit-name pairs and the
 # synthetic distinct pairs. The 89 synthetic typo duplicates are left out: a
