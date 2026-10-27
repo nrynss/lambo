@@ -116,6 +116,12 @@ pub(super) fn call_auth() -> Option<CallAuth> {
 /// phase-2 traversal expansion (or the query was answered by structural
 /// dispatch, which skips the blend).
 ///
+/// `fusion` (#173, additive) carries the hit's 1-based rank in each leg it
+/// came from (`bm25_rank`, `recent_rank`, `vector_rank`) and both fused
+/// values, `max` and `rrf` (see [`crate::recall::fusion`]), whichever of the
+/// two ranked the recall, so one kind can be shadow-scored while the other
+/// runs. It is absent where `legs` is empty.
+///
 /// `score` and `legs` describe different stages and are not expected to agree:
 /// `score` is the FINAL ranking score (phase-3 assembly, daemon score table and
 /// `RecallWeights` applied), while `legs` are the raw phase-1 retrieval inputs.
@@ -230,7 +236,25 @@ fn recall_facts_with(
             canonical_marker |=
                 hit.is_canonical && (d.included_in_context || (i == 0 && truncated_label));
             let mut legs = serde_json::Map::new();
+            let mut fusion = serde_json::Map::new();
             if let Some(l) = legs_of(i, hit) {
+                // #173: the leg ranks and both fused values, whichever ranked,
+                // so a ledger can shadow-score the kind that did not.
+                for (name, rank) in [
+                    ("bm25_rank", l.keyword_rank),
+                    ("recent_rank", l.recent_rank),
+                    ("vector_rank", l.vector_rank),
+                ] {
+                    if let Some(r) = rank {
+                        fusion.insert(name.into(), json!(r));
+                    }
+                }
+                if l.keyword.is_some() || l.recent.is_some() || l.vector.is_some() {
+                    fusion.insert("max".into(), json!(l.merged()));
+                }
+                if let Some(r) = l.rrf {
+                    fusion.insert("rrf".into(), json!(r));
+                }
                 if let Some(s) = l.keyword {
                     legs.insert("bm25".into(), json!(s));
                 }
@@ -293,6 +317,13 @@ fn recall_facts_with(
                 && let Some(map) = line.as_object_mut()
             {
                 map.insert("truncated_in_context".into(), json!(true));
+            }
+            // #173: additive, and only on a phase-1 hit, so a line without
+            // it reads as before (`v` stays 1).
+            if !fusion.is_empty()
+                && let Some(map) = line.as_object_mut()
+            {
+                map.insert("fusion".into(), serde_json::Value::Object(fusion));
             }
             // #33: additive, on a layered session's lines only.
             if let Some(session) = sessions.and_then(|s| s.get(i))

@@ -177,6 +177,8 @@ pub struct Daemon {
     /// #87: whether recall uses the per-contract recent-leg score
     /// ([`crate::embed::calibration`]).
     calibration: crate::embed::calibration::CalibrationMode,
+    /// #173: how phase 1 combines its legs.
+    fusion: crate::recall::fusion::RecallFusion,
     clock: Clock,
     started: AtomicBool,
     /// Test seam: the next this-many rescores panic (#79 review L1).
@@ -299,6 +301,7 @@ impl Daemon {
             cycles: Arc::new(AtomicU64::new(0)),
             params,
             calibration: crate::embed::calibration::CalibrationMode::default(),
+            fusion: crate::recall::fusion::RecallFusion::default(),
             clock: Arc::new(Utc::now),
             started: AtomicBool::new(false),
             #[cfg(test)]
@@ -317,6 +320,7 @@ impl Daemon {
             CycleParams::from(config),
         );
         daemon.calibration = config.calibration;
+        daemon.fusion = config.recall_fusion;
         daemon
     }
 
@@ -718,12 +722,17 @@ impl Daemon {
         } else {
             candidates::RECENT_SCORE
         };
+        let fusion = self.fusion;
         let input = if dispatch_ready {
-            candidates::Phase1Input::default()
+            candidates::Phase1Input {
+                fusion,
+                ..candidates::Phase1Input::default()
+            }
         } else {
             match candidates::gather_from(vectors, &graph_session, embedding, query.top_k).await {
                 Ok(input) => candidates::Phase1Input {
                     recent_score,
+                    fusion,
                     ..input
                 },
                 // #22 PR 6: a recall by image or vector has nothing to
@@ -763,7 +772,10 @@ impl Daemon {
                          skipped, results are keyword-only"
                     };
                     vector_leg_refused.push(Annotation::new(AnnotationKind::VectorDegraded, text));
-                    candidates::Phase1Input::default()
+                    candidates::Phase1Input {
+                        fusion,
+                        ..candidates::Phase1Input::default()
+                    }
                 }
             }
         };
