@@ -162,7 +162,7 @@
           "gate_pass_no_answer": 0.6216,
           "gate_tau_from_dev": 3.7116,
           "median_top1_answerable": 6.1345,
-          "median_top1_no_answer": 3.9868
+          "median_top1_no_answer": 3.9664
         },
         "held_out": {
           "auc_top1": 0.6731,
@@ -175,7 +175,7 @@
           "gate_pass_no_answer": 0.6563,
           "gate_tau_from_dev": 3.7116,
           "median_top1_answerable": 6.1856,
-          "median_top1_no_answer": 4.5591
+          "median_top1_no_answer": 4.5387
         }
       },
       "recall_weights": {
@@ -338,7 +338,7 @@
           "gate_pass_no_answer": 0.7188,
           "gate_tau_from_dev": 0.6422,
           "median_top1_answerable": 0.7607,
-          "median_top1_no_answer": 0.6856
+          "median_top1_no_answer": 0.6799
         }
       },
       "recall_weights": {
@@ -488,7 +488,7 @@
           "gate_pass_no_answer": 0.8514,
           "gate_tau_from_dev": 0.747,
           "median_top1_answerable": 0.7969,
-          "median_top1_no_answer": 0.7844
+          "median_top1_no_answer": 0.7836
         },
         "held_out": {
           "auc_top1": 0.5815,
@@ -501,7 +501,7 @@
           "gate_pass_no_answer": 0.7813,
           "gate_tau_from_dev": 0.747,
           "median_top1_answerable": 0.797,
-          "median_top1_no_answer": 0.7849
+          "median_top1_no_answer": 0.7821
         }
       },
       "recall_weights": {

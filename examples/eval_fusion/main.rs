@@ -115,6 +115,9 @@ fn parse_variant(spec: &str) -> Result<(RecallFusion, RecallWeights), String> {
             "vector" => fusion.vector_weight = v,
             "recent" => fusion.recent_weight = v,
             "wd" => {
+                if !(0.0..=1.0).contains(&v) {
+                    return Err(format!("variant {spec}: wd must be in [0, 1], got {v}"));
+                }
                 weights.w_daemon = v;
                 weights.w_query = 1.0 - v;
             }
@@ -131,6 +134,8 @@ struct CachedEmbedder {
     inner: Arc<dyn Embedder>,
     contract: String,
     stored: HashMap<String, Vec<f32>>,
+    /// Vectors embedded this run, so a later variant does not embed them again.
+    fresh: Mutex<HashMap<String, Vec<f32>>>,
     file: Option<Mutex<std::fs::File>>,
     hits: AtomicUsize,
     misses: AtomicUsize,
@@ -148,7 +153,12 @@ impl CachedEmbedder {
     }
 
     fn lookup(&self, role: &str, text: &str) -> Option<Vec<f32>> {
-        let v = self.stored.get(&self.key(role, text)).cloned();
+        let key = self.key(role, text);
+        let v = self
+            .stored
+            .get(&key)
+            .cloned()
+            .or_else(|| self.fresh.lock().expect("fresh cache").get(&key).cloned());
         if v.is_some() {
             self.hits.fetch_add(1, Ordering::Relaxed);
         } else {
@@ -159,8 +169,13 @@ impl CachedEmbedder {
 
     fn keep(&self, role: &str, text: &str, v: &[f32]) {
         use std::io::Write;
+        let key = self.key(role, text);
+        self.fresh
+            .lock()
+            .expect("fresh cache")
+            .insert(key.clone(), v.to_vec());
         if let Some(f) = &self.file {
-            let line = json!({"key": self.key(role, text), "v": v}).to_string();
+            let line = json!({"key": key, "v": v}).to_string();
             let _ = writeln!(f.lock().expect("cache file"), "{line}");
         }
     }
@@ -335,6 +350,7 @@ async fn run() -> Result<(), String> {
             cfg.llama_url, cfg.weights_dir, cfg.gemini_project, cfg.gemini_location
         ),
         stored: HashMap::new(),
+        fresh: Mutex::new(HashMap::new()),
         file: None,
         hits: AtomicUsize::new(0),
         misses: AtomicUsize::new(0),
@@ -589,7 +605,11 @@ fn separation(ans: &[f64], none: &[f64], all: &BTreeMap<String, Vec<f64>>) -> Va
     let median = |v: &[f64]| {
         let mut v = v.to_vec();
         v.sort_by(f64::total_cmp);
-        v.get(v.len() / 2).copied().unwrap_or(0.0)
+        match v.len() {
+            0 => 0.0,
+            n if n % 2 == 1 => v[n / 2],
+            n => (v[n / 2 - 1] + v[n / 2]) / 2.0,
+        }
     };
     let mut dev = all.get("dev/answerable").cloned().unwrap_or_default();
     dev.sort_by(f64::total_cmp);

@@ -1370,6 +1370,7 @@ mod tests {
     /// #173: `[fusion]` reaches `Memory`'s `Config`; no table keeps `max`,
     /// and a bad value is refused at the file boundary.
     #[test]
+    #[cfg(all(feature = "store-memory", feature = "embed-fixture"))]
     fn fusion_table_reaches_config_and_is_validated() {
         use crate::recall::fusion::{FusionKind, RecallFusion};
         let base = "[store]\nkind = \"memory\"\n[embedder]\nkind = \"fixture\"\ndim = 1024\n";

@@ -12,7 +12,7 @@ def row(name, v, split):
     na = v["no_answer"].get(split, {})
     return (f"| `{name}` | {m['ndcg@10']:.3f} | {m['mrr@10']:.3f} | {m['hit@1']:.3f} | "
             f"{m['hit@5']:.3f} | {m['hit@10']:.3f} | {na.get('auc_top1', float('nan')):.3f} | "
-            f"{na.get('gate_pass_no_answer') or float('nan'):.3f} |")
+            f"{gate if (gate := na.get('gate_pass_no_answer')) is not None else float('nan'):.3f} |")
 
 
 def families(name, v, split):

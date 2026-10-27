@@ -44,7 +44,7 @@
 {"family":"fact-lookup","id":"q-cal-02-1","kind":"answerable","split":"held_out","top":["emb-08","cal-02","can-05"],"top1_score":6.6614,"variant":"max"}
 {"family":"contrast","id":"q-cal-02-2","kind":"answerable","split":"held_out","top":["cal-02","can-05","emb-08"],"top1_score":8.2234,"variant":"max"}
 {"family":"fact-lookup","id":"q-cal-03-1","kind":"answerable","split":"held_out","top":["cal-03","con-05","prf-06"],"top1_score":4.6009,"variant":"max"}
-{"family":"superseded","id":"q-cal-03-2","kind":"answerable","split":"dev","top":["cal-03","emb-07","ses-02"],"top1_score":7.0745,"variant":"max"}
+{"family":"superseded","id":"q-cal-03-2","kind":"answerable","split":"dev","top":["cal-03","emb-07","ses-02"],"top1_score":7.0746,"variant":"max"}
 {"family":"exact-identifier","id":"q-cal-03-3","kind":"answerable","split":"dev","top":["cal-03","con-01","con-05"],"top1_score":4.6009,"variant":"max"}
 {"family":"fact-lookup","id":"q-cal-04-1","kind":"answerable","split":"dev","top":["emb-08","cal-01","cal-04"],"top1_score":6.0106,"variant":"max"}
 {"family":"multi-hop","id":"q-top-01-1","kind":"answerable","split":"dev","top":["top-01","srv-02","top-04"],"top1_score":6.5306,"variant":"max"}
@@ -316,7 +316,7 @@
 {"family":"fact-lookup","id":"q-emb-03-2","kind":"answerable","split":"held_out","top":["emb-04","emb-03","emb-06"],"top1_score":0.7765,"variant":"rrf:k=60"}
 {"family":"fact-lookup","id":"q-emb-04-1","kind":"answerable","split":"dev","top":["emb-04","cnd-02","cnd-01"],"top1_score":0.8071,"variant":"rrf:k=60"}
 {"family":"rationale","id":"q-emb-04-2","kind":"answerable","split":"dev","top":["emb-04","emb-03","rel-05"],"top1_score":0.8107,"variant":"rrf:k=60"}
-{"family":"exact-identifier","id":"q-emb-04-3","kind":"answerable","split":"held_out","top":["emb-04","eff-07","rel-06"],"top1_score":0.8038,"variant":"rrf:k=60"}
+{"family":"exact-identifier","id":"q-emb-04-3","kind":"answerable","split":"held_out","top":["emb-04","eff-07","rel-06"],"top1_score":0.8037,"variant":"rrf:k=60"}
 {"family":"fact-lookup","id":"q-emb-05-1","kind":"answerable","split":"held_out","top":["ack-04","emb-05","emb-03"],"top1_score":0.782,"variant":"rrf:k=60"}
 {"family":"vocabulary-mismatch","id":"q-emb-05-2","kind":"answerable","split":"held_out","top":["ack-04","can-03","can-02"],"top1_score":0.7843,"variant":"rrf:k=60"}
 {"family":"fact-lookup","id":"q-emb-06-1","kind":"answerable","split":"held_out","top":["emb-04","emb-06","emb-03"],"top1_score":0.7584,"variant":"rrf:k=60"}

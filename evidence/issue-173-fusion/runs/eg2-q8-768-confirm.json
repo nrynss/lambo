@@ -162,7 +162,7 @@
           "gate_pass_no_answer": 0.6216,
           "gate_tau_from_dev": 3.7116,
           "median_top1_answerable": 6.1345,
-          "median_top1_no_answer": 3.9868
+          "median_top1_no_answer": 3.9664
         },
         "held_out": {
           "auc_top1": 0.6731,
@@ -175,7 +175,7 @@
           "gate_pass_no_answer": 0.6563,
           "gate_tau_from_dev": 3.7116,
           "median_top1_answerable": 6.1856,
-          "median_top1_no_answer": 4.5591
+          "median_top1_no_answer": 4.5387
         }
       },
       "recall_weights": {
@@ -317,8 +317,8 @@
         "dev": {
           "auc_top1": 0.6958,
           "distinct_top1_values": {
-            "answerable": 36,
-            "no_answer": 40
+            "answerable": 34,
+            "no_answer": 39
           },
           "gate_alpha": 0.1,
           "gate_pass_answerable": 0.912,
@@ -330,7 +330,7 @@
         "held_out": {
           "auc_top1": 0.6924,
           "distinct_top1_values": {
-            "answerable": 30,
+            "answerable": 29,
             "no_answer": 25
           },
           "gate_alpha": 0.1,
@@ -480,7 +480,7 @@
         "dev": {
           "auc_top1": 0.6029,
           "distinct_top1_values": {
-            "answerable": 65,
+            "answerable": 64,
             "no_answer": 55
           },
           "gate_alpha": 0.1,
@@ -488,12 +488,12 @@
           "gate_pass_no_answer": 0.7973,
           "gate_tau_from_dev": 0.747,
           "median_top1_answerable": 0.7969,
-          "median_top1_no_answer": 0.7814
+          "median_top1_no_answer": 0.7812
         },
         "held_out": {
           "auc_top1": 0.5382,
           "distinct_top1_values": {
-            "answerable": 48,
+            "answerable": 47,
             "no_answer": 24
           },
           "gate_alpha": 0.1,
@@ -501,7 +501,7 @@
           "gate_pass_no_answer": 0.75,
           "gate_tau_from_dev": 0.747,
           "median_top1_answerable": 0.8006,
-          "median_top1_no_answer": 0.8005
+          "median_top1_no_answer": 0.8004
         }
       },
       "recall_weights": {
