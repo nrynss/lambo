@@ -1821,6 +1821,8 @@ async fn conformance_suite() {
     // #20: the supersession accessors and the demotion-reason columns.
     crate::store::pg::supersession_live::check_supersession_case(&store).await;
     crate::store::pg::supersession_live::check_unreadable_reason(&store).await;
+    // #198: the suspected-supersession edge.
+    crate::store::pg::suspected_live::check_suspected_case(&store).await;
     check_record_canonization_appends_and_is_idempotent(&store).await;
     check_corrupt_contract_row_load_errors(&store).await;
     check_unstamped_vector_candidates_are_empty_until_contract_commit(&store).await;

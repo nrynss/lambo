@@ -22,6 +22,7 @@ fn enum_column_strings_roundtrip_all_variants() {
         EdgeType::Hierarchical,
         EdgeType::Semantic,
         EdgeType::Contradicts,
+        EdgeType::SuspectedSupersedes,
     ] {
         assert_eq!(parse_edge_type(edge_type_sql(et)).unwrap(), et);
     }

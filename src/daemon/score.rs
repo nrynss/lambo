@@ -122,7 +122,10 @@ pub fn edge_type_bonus_value(ty: EdgeType) -> f64 {
         EdgeType::Hierarchical => 0.015,
         EdgeType::Semantic => 0.01,
         EdgeType::CoOccurrence => 0.005,
-        EdgeType::Derives | EdgeType::Temporal | EdgeType::Contradicts => 0.0,
+        EdgeType::Derives
+        | EdgeType::Temporal
+        | EdgeType::Contradicts
+        | EdgeType::SuspectedSupersedes => 0.0,
     }
 }
 
@@ -1454,6 +1457,7 @@ mod tests {
         assert_eq!(edge_type_bonus_value(EdgeType::Derives), 0.0);
         assert_eq!(edge_type_bonus_value(EdgeType::Temporal), 0.0);
         assert_eq!(edge_type_bonus_value(EdgeType::Contradicts), 0.0);
+        assert_eq!(edge_type_bonus_value(EdgeType::SuspectedSupersedes), 0.0);
         for ty in [
             EdgeType::Causal,
             EdgeType::Dependency,
@@ -1777,7 +1781,7 @@ mod tests {
     }
 
     /// #19: being contradicted (or contradicting) moves no score. A
-    /// `Contradicts` pair leaves every dimension, the composite and the
+    /// `Contradicts` pair (and, #198, a `SuspectedSupersedes` edge) leaves every dimension, the composite and the
     /// ranking bit-identical, both for the endpoints' own density and for
     /// the session's `max_incident` baseline every other concept is
     /// normalized against.
@@ -1820,6 +1824,11 @@ mod tests {
         let c4_id = c4.id;
         g.insert_concept(c4, i1).unwrap();
         g.upsert_edge(edge(4, c4_id, c2, EdgeType::Contradicts))
+            .unwrap();
+        // #198: a suspected supersession moves no score either.
+        g.upsert_edge(edge(5, c4_id, c1, EdgeType::SuspectedSupersedes))
+            .unwrap();
+        g.upsert_edge(edge(6, c2, c3_id, EdgeType::SuspectedSupersedes))
             .unwrap();
         let after_rank: Vec<_> = rescore(&g, &weights)
             .into_iter()
