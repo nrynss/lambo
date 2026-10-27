@@ -641,8 +641,26 @@ fn distinct(v: &[f64]) -> usize {
     v.len()
 }
 
+/// A new, empty directory for this run. `create_dir` (not `create_dir_all`)
+/// fails on an existing path, so a directory left by an interrupted earlier
+/// run with the same pid is never reused: its partial `base.db` would change
+/// the derive and the recent leg.
 fn tempdir() -> Result<PathBuf, String> {
-    let dir = std::env::temp_dir().join(format!("lambo-eval-fusion-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    Ok(dir)
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_nanos();
+    let root = std::env::temp_dir();
+    for attempt in 0..16u32 {
+        let dir = root.join(format!(
+            "lambo-eval-fusion-{}-{nanos}-{attempt}",
+            std::process::id()
+        ));
+        match std::fs::create_dir(&dir) {
+            Ok(()) => return Ok(dir),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+    Err("could not create a fresh eval directory".into())
 }
