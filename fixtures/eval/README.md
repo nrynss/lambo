@@ -126,6 +126,14 @@ Per consumer:
   action. `contradicts` pairs name no newer text; whether a trigger hit on
   one counts against precision is #198's call.
 
+  Precision is TP / (TP + FP) over the adjudicated in-regime pairs the
+  trigger flags: a flagged `supersedes` pair is a true positive, and a
+  flagged `distinct_entity` **or `same-event`** pair is a false positive
+  (owner decision, 2026-10-27): a same-event pair is two records of one
+  event, not a replacement, and a "possibly superseded" warning on it
+  would mislead a reader. Report it per split, tuning on dev and quoting
+  held-out.
+
 ## Provenance
 
 - **Dogfood text.** `authoring/dogfood_texts.json` holds the 64 dogfood-store
@@ -277,6 +285,7 @@ place (labeller "Narayan SS (owner)"), keeping its id, split and
 | `p-178-syn-neg-017` | Two commit hashes one hex digit apart are a typo of the same commit: paraphrase, `near-verbatim`. |
 | `p-178-syn-neg-019` | `src/main.rs` against `src/mein.rs` is a typo of the same path: paraphrase, `near-verbatim`. |
 | `p-con-01-rbd1`, `p-con-03-rbd1`, `p-cn-01-rbd1` | 2026-10-27: version-scoped, so `distinct_entity`, not `supersedes`: each text names its own version (Unreleased or 0.6.0 against 0.6.0 or before it) and both stay true of that version. They keep `correction` and their `concept_types`. |
+| `same-event` pairs | 2026-10-27: they count against the trigger's precision; a trigger hit on one is a false positive (see #198 above). |
 | `p-198-s29`, `p-198-s30` | 2026-10-27: `distinct_entity`, not `supersedes` (their review notes are gone): 17.1 MB / 3.4 ms against 47.3 MB / 161 ms for one 3,600-concept store, where each text names its own storage format (packed `f32` or text), and a store not yet provisioned on 0.7.0 still shows the text value, so both stay true. They keep their ids (with the `s`) and `concept_types`. |
 
 ## Owner steps (to complete #190 from the store)

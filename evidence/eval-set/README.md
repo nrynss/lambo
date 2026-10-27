@@ -103,7 +103,11 @@ applies, so they barely move the threshold the export derives (BGE-M3 p99
 embed of the export from 62.6 s to 87.6 s, past its 60 s timeout. A rerun's pair tables will lean further toward the
 identifier family, since they cover every pair in `pairs.json`. No run here measures the
 trigger: tuning its masked token Jaccard and reporting its precision per
-embedder are #198's own work.
+embedder are #198's own work. When it does, precision counts a flagged
+`supersedes` pair as a true positive and a flagged `distinct_entity` or
+`same-event` pair as a false positive (owner decision, 2026-10-27: a
+"possibly superseded" warning on two records of one event would mislead
+a reader), per split, over the in-regime pairs.
 
 ## Adding a run
 

@@ -30,7 +30,8 @@ the hardest negatives and at least 25 in-regime pairs of each kind.
        counted as identifier-only.
   E()  same-event hard negatives: two records of one event whose digit runs
        differ (a date added, the order changed), so the guard refuses them;
-       a paraphrase, never a replacement.
+       a paraphrase, never a replacement. A trigger hit on one is a false
+       positive (owner decision, 2026-10-27).
 
 Every pair says the type each text would be derived as (`types`, a then b).
 Every text restates a fact from this repository's records, cited as `src`.
