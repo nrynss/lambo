@@ -22,7 +22,7 @@ The four weighted dimensions are session-relative, so the same graph scores iden
 |---|---|---|
 | $R$ | recency | $1 - \dfrac{t_{\text{end}} - t_{\text{last}}}{\max(t_{\text{end}} - t_{\text{start}},\ 10\text{ min})}$, clamped to $[0,1]$, in integer milliseconds. A session of at least 10 minutes uses its own span, and those scores match the historical ratio. A younger session scores every concept near 1, so a few milliseconds between derives cannot sweep the dimension. |
 | $F$ | frequency | $\min\!\left(1,\ \dfrac{\text{access count}}{10}\right)$ |
-| $A$ | session activity | share of the session's interactions that derived this concept |
+| $A$ | session activity | how many interactions derived this concept, divided by the most-derived concept in the session. The busiest concept scores 1 and a concept nothing derived scores 0. GC's eviction cut does not read this value; it still divides by the interaction count, which is the scale its threshold was set on. |
 | $D$ | density | incident edge count, excluding `Contradicts`, normalized by the most connected concept in the session |
 
 The two additive terms are where the shape of the graph leaks into the number.
