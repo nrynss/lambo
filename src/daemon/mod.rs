@@ -896,6 +896,7 @@ impl Daemon {
             &query,
             weights,
             self.params.contradiction_evidence_min_age,
+            None,
             now,
             assemble::default_token_count,
         );

@@ -1,0 +1,307 @@
+//! #181's predicates: the normalization, the text guard, the vetoes and
+//! each redundancy signal on its own.
+
+use chrono::{TimeZone, Utc};
+use uuid::Uuid;
+
+use super::*;
+use crate::types::{
+    AgentId, CanonizationStatus, Concept, ConceptType, Edge, EmbeddingContract, Interaction,
+    SessionId,
+};
+
+fn sid() -> SessionId {
+    SessionId::from("redundancy")
+}
+
+fn id(n: u64) -> NodeId {
+    NodeId(Uuid::from_u64_pair(5, n))
+}
+
+fn origin() -> NodeId {
+    NodeId(Uuid::from_u64_pair(4, 1))
+}
+
+fn concept(n: u64, content: &str, ty: ConceptType, embedding: Option<Vec<f32>>) -> Concept {
+    Concept {
+        id: id(n),
+        session_id: sid(),
+        content: content.into(),
+        canonical_key: format!("key {n}"),
+        concept_type: ty,
+        origin_interaction: origin(),
+        origin_agent: AgentId::from("agent-a"),
+        created_at: Utc.timestamp_opt(1_760_000_000, 0).unwrap(),
+        access_count: 0,
+        last_accessed: None,
+        gc_survived: 0,
+        canonization_status: CanonizationStatus::None,
+        blast_radius: None,
+        last_demotion_time: None,
+        embedding,
+        human_confirmed: 0,
+        embedding_source: None,
+        chunk_group_id: None,
+    }
+}
+
+/// A graph with a 2-d contract and the given concepts.
+fn graph(concepts: &[Concept]) -> Graph {
+    let mut g = Graph::new(sid());
+    g.stamp_embedding(EmbeddingContract {
+        kind: "fixture".into(),
+        model: None,
+        dim: 2,
+    })
+    .unwrap();
+    g.insert_interaction(Interaction {
+        event_time: None,
+        id: origin(),
+        session_id: sid(),
+        agent_id: AgentId::from("agent-a"),
+        prompt_text: None,
+        previous_id: None,
+        created_at: Utc.timestamp_opt(1_760_000_000, 0).unwrap(),
+    })
+    .unwrap();
+    for c in concepts {
+        g.insert_concept(c.clone(), origin()).unwrap();
+    }
+    g
+}
+
+fn edge(n: u64, source: NodeId, target: NodeId, edge_type: EdgeType) -> Edge {
+    let at = Utc.timestamp_opt(1_760_000_100, 0).unwrap();
+    Edge {
+        event_time: None,
+        id: NodeId(Uuid::from_u64_pair(6, n)),
+        session_id: sid(),
+        source,
+        target,
+        edge_type,
+        weight: 1.0,
+        reinforcements: 1,
+        created_at: at,
+        last_reinforced: at,
+    }
+}
+
+fn signal(g: &Graph, threshold: f64, a: u64, b: u64) -> Option<RedundancySignal> {
+    let concept = |n: u64| match g.node(id(n)) {
+        Some(crate::types::Node::Concept(c)) => c,
+        _ => panic!("concept {n}"),
+    };
+    let (a, b) = (concept(a), concept(b));
+    let (an, bn) = (
+        normalized_content(&a.content),
+        normalized_content(&b.content),
+    );
+    Redundancy { threshold }.signal(g, (a, &an), (b, &bn))
+}
+
+#[test]
+fn the_window_is_four_per_slot_up_to_twenty() {
+    assert_eq!(window(0), 0);
+    assert_eq!(window(1), 4);
+    assert_eq!(window(3), 12);
+    assert_eq!(window(5), 20);
+    assert_eq!(window(6), 20);
+    assert_eq!(window(usize::MAX), WINDOW_MAX);
+}
+
+#[test]
+fn normalization_folds_case_whitespace_composition_and_invisibles_only() {
+    assert_eq!(
+        normalized_content("  The  Dogfood\tstore\n holds 92 of 100 "),
+        "the dogfood store holds 92 of 100"
+    );
+    // NFC: a decomposed accent equals the composed one.
+    assert_eq!(
+        normalized_content("cafe\u{301}"),
+        normalized_content("café")
+    );
+    // An invisible codepoint cannot make two identical renderings differ.
+    assert_eq!(
+        normalized_content("billing\u{200B} retries"),
+        normalized_content("billing retries")
+    );
+    // Nothing that carries meaning is erased.
+    for (a, b) in [
+        ("release v0.5.0 is current", "release v0.6.0 is current"),
+        ("the cap is 280", "the cap is 281"),
+        ("see src/main.rs", "see src/mein.rs"),
+        ("use the candle embedder", "do not use the candle embedder"),
+        ("X replaces Y", "Y replaces X"),
+    ] {
+        assert_ne!(
+            normalized_content(a),
+            normalized_content(b),
+            "{a:?} / {b:?}"
+        );
+    }
+    // Strict by design: punctuation is kept too, so a near-copy is left to
+    // the edge and cosine signals rather than the same-content one.
+    assert_ne!(
+        normalized_content("the leases expire."),
+        normalized_content("the leases expire")
+    );
+}
+
+#[test]
+fn negations_are_counted_by_word_and_contraction() {
+    assert_eq!(negation_count("use the candle embedder"), 0);
+    assert_eq!(negation_count("do not use the candle embedder"), 1);
+    assert_eq!(negation_count("Don't use it; never retry, no cap"), 3);
+    assert_eq!(negation_count("it isn\u{2019}t cached"), 1);
+    assert_eq!(negation_count("nothing is cached without a lease"), 2);
+    // Words that merely start like one do not count.
+    assert_eq!(negation_count("note the notation: nodes are nominal"), 0);
+}
+
+#[test]
+fn distinct_claims_are_different_identifiers_digits_or_negation() {
+    assert!(distinct_claims(
+        "release v0.5.0 is current",
+        "release v0.6.0 is current"
+    ));
+    assert!(distinct_claims("the cap is 280", "the cap is 281"));
+    assert!(distinct_claims("see src/main.rs", "see src/mein.rs"));
+    assert!(distinct_claims(
+        "use the candle embedder",
+        "do not use the candle embedder"
+    ));
+    // A paraphrase with the same identifiers and polarity is not.
+    assert!(!distinct_claims(
+        "the dogfood embedder is BAAI/bge-m3 on Metal",
+        "on Metal, the dogfood embedder runs BAAI/bge-m3"
+    ));
+    assert!(!distinct_claims("never retry", "do not retry"));
+}
+
+#[test]
+fn identical_content_across_types_is_the_same_content_signal() {
+    let text = "Dogfood finding: 92 of 100 concepts carry no durable embedding";
+    let g = graph(&[
+        concept(1, text, ConceptType::Entity, None),
+        concept(
+            2,
+            &format!("  {}", text.to_uppercase()),
+            ConceptType::Observation,
+            None,
+        ),
+    ]);
+    assert_eq!(signal(&g, 0.85, 1, 2), Some(RedundancySignal::SameContent));
+    assert_eq!(signal(&g, 0.85, 2, 1), Some(RedundancySignal::SameContent));
+    assert_eq!(
+        signal(&g, 0.85, 1, 1),
+        None,
+        "a member is not its own duplicate"
+    );
+}
+
+#[test]
+fn a_semantic_edge_either_way_is_the_edge_signal() {
+    let mut g = graph(&[
+        concept(1, "lease ttl is 45 seconds", ConceptType::Logic, None),
+        concept(2, "the lease lasts 45 seconds", ConceptType::Logic, None),
+        concept(
+            3,
+            "the lease lasts 45 seconds, renewed",
+            ConceptType::Logic,
+            None,
+        ),
+    ]);
+    assert_eq!(signal(&g, 0.85, 1, 2), None);
+    g.upsert_edge(edge(1, id(2), id(1), EdgeType::Semantic))
+        .unwrap();
+    assert_eq!(signal(&g, 0.85, 1, 2), Some(RedundancySignal::SemanticEdge));
+    assert_eq!(signal(&g, 0.85, 2, 1), Some(RedundancySignal::SemanticEdge));
+    assert_eq!(signal(&g, 0.85, 1, 3), None, "no edge, no vector");
+}
+
+#[test]
+fn cosine_needs_two_contract_vectors_and_the_threshold() {
+    let g = graph(&[
+        concept(1, "alpha one", ConceptType::Logic, Some(vec![1.0, 0.0])),
+        concept(2, "alpha two", ConceptType::Logic, Some(vec![0.99, 0.141])),
+        concept(3, "alpha three", ConceptType::Logic, None),
+        concept(4, "alpha four", ConceptType::Logic, Some(vec![0.0, 1.0])),
+    ]);
+    // cos(1, 2) is about 0.990.
+    assert_eq!(signal(&g, 0.95, 1, 2), Some(RedundancySignal::Cosine));
+    assert_eq!(signal(&g, 0.995, 1, 2), None, "below the threshold");
+    assert_eq!(
+        signal(&g, 0.0, 1, 3),
+        None,
+        "a member without a vector gives no evidence"
+    );
+    assert_eq!(signal(&g, 0.0, 3, 1), None);
+    assert_eq!(signal(&g, 0.5, 1, 4), None);
+}
+
+#[test]
+fn a_session_without_a_contract_gives_no_cosine_evidence() {
+    let mut g = Graph::new(sid());
+    g.insert_interaction(Interaction {
+        event_time: None,
+        id: origin(),
+        session_id: sid(),
+        agent_id: AgentId::from("agent-a"),
+        prompt_text: None,
+        previous_id: None,
+        created_at: Utc.timestamp_opt(1_760_000_000, 0).unwrap(),
+    })
+    .unwrap();
+    g.insert_concept(concept(1, "alpha one", ConceptType::Logic, None), origin())
+        .unwrap();
+    g.insert_concept(concept(2, "alpha two", ConceptType::Logic, None), origin())
+        .unwrap();
+    assert_eq!(signal(&g, 0.0, 1, 2), None);
+}
+
+#[test]
+fn a_contradicts_edge_either_way_vetoes_every_signal() {
+    let text = "the dogfood embedder is candle BGE-M3";
+    for (source, target) in [(1, 2), (2, 1)] {
+        let mut g = graph(&[
+            concept(1, text, ConceptType::Logic, Some(vec![1.0, 0.0])),
+            concept(2, text, ConceptType::Observation, Some(vec![1.0, 0.0])),
+        ]);
+        g.upsert_edge(edge(1, id(1), id(2), EdgeType::Semantic))
+            .unwrap();
+        assert_eq!(signal(&g, 0.5, 1, 2), Some(RedundancySignal::SameContent));
+        g.upsert_edge(edge(2, id(source), id(target), EdgeType::Contradicts))
+            .unwrap();
+        assert!(never_redundant(&g, id(1), id(2)));
+        assert!(never_redundant(&g, id(2), id(1)));
+        assert_eq!(signal(&g, 0.5, 1, 2), None);
+        assert_eq!(signal(&g, 0.5, 2, 1), None);
+    }
+}
+
+#[test]
+fn different_identifiers_digits_or_negation_veto_the_edge_and_cosine_signals() {
+    let v = Some(vec![1.0, 0.0]);
+    for (n, (a, b)) in [
+        ("release v0.5.0 is current", "release v0.6.0 is current"),
+        ("the gc cap is 280 concepts", "the gc cap is 281 concepts"),
+        (
+            "the config is lambo.toml",
+            "the config is lambo.example.toml",
+        ),
+        ("use the candle embedder", "do not use the candle embedder"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let n = n as u64 * 2;
+        let mut g = graph(&[
+            concept(n + 1, a, ConceptType::Logic, v.clone()),
+            concept(n + 2, b, ConceptType::Logic, v.clone()),
+        ]);
+        assert_eq!(signal(&g, 0.5, n + 1, n + 2), None, "cosine: {a:?} / {b:?}");
+        g.upsert_edge(edge(n, id(n + 1), id(n + 2), EdgeType::Semantic))
+            .unwrap();
+        assert_eq!(signal(&g, 0.5, n + 1, n + 2), None, "edge: {a:?} / {b:?}");
+    }
+}

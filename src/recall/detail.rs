@@ -144,6 +144,13 @@ pub(crate) struct DetailedHit {
     /// to show a companion only beside a hit it contradicts. Internal only.
     #[serde(skip)]
     pub(crate) contradicts: Vec<NodeId>,
+    /// #181: the members skipped as redundant with this hit, in skip
+    /// (recall) order, each with the signal that found it redundant. Its
+    /// label names them (`also <id>`). Additive on the wire: serialized
+    /// only when non-empty, so a recall that skipped nothing is
+    /// byte-identical to before.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) skipped_redundant: Vec<crate::recall::redundancy::RedundantSkip>,
 }
 
 impl DetailedHit {
@@ -163,6 +170,7 @@ impl DetailedHit {
             annotations: Vec::new(),
             companion_of: Vec::new(),
             contradicts: Vec::new(),
+            skipped_redundant: Vec::new(),
         }
     }
 }

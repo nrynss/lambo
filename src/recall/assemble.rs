@@ -146,6 +146,7 @@ use crate::recall::candidates::LegScores;
 use crate::recall::detail::{Annotation, AnnotationKind, DetailedHit, DetailedRecall};
 use crate::recall::expand::ExpandedSet;
 use crate::recall::format;
+use crate::recall::redundancy::{self, Redundancy, RedundantSkip};
 use crate::types::{
     tie_break_by_key, CanonizationStatus, HotListPayload, Node, NodeId, RecallHit, RecallQuery,
     ScoreTable, Scored,
@@ -189,6 +190,7 @@ where
         query,
         weights,
         crate::Config::default().canonization_edge_min_age,
+        None,
         now,
         token_fn,
     )
@@ -202,6 +204,9 @@ where
 /// `contradiction_min_age` is the session's evidence age floor
 /// (`CycleParams::contradiction_evidence_min_age`), which the stale-citation
 /// check (#207) passes to the contradiction detector at `now`.
+///
+/// `redundancy` is `Some` when the session skips redundant members (#181,
+/// [`crate::recall::redundancy`]); `None` assembles exactly as before.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn assemble_with_legs<F>(
     graph: &Graph,
@@ -213,6 +218,7 @@ pub(crate) fn assemble_with_legs<F>(
     query: &RecallQuery,
     weights: RecallWeights,
     contradiction_min_age: std::time::Duration,
+    redundancy: Option<Redundancy>,
     now: DateTime<Utc>,
     token_fn: F,
 ) -> DetailedRecall
@@ -276,6 +282,38 @@ where
         members
     };
     let hot = |id: NodeId| forces(graph, id, hot_payloads) || forced_companions.contains_key(&id);
+    let superseded = superseded_by(graph);
+    // #207: one writer timeline for every stale-citation check below, built
+    // only if some shown hit cites a concept with an inbound contradiction,
+    // and one verdict per cited concept, however many shown hits cite it.
+    let timeline = crate::daemon::conflict::SharedTimeline::new();
+    let mut stale_memo: HashMap<NodeId, Option<crate::daemon::contradiction::ContradictionHit>> =
+        HashMap::new();
+    // #181: a member that would carry a warning line of its own is never
+    // skipped as redundant; the copy kept may not carry the same warning.
+    // Asked only of a member some signal found redundant.
+    let mut warns = |id: NodeId| {
+        hot_payloads.get(&id).is_some_and(|p| !p.is_empty())
+            || active_reservation(graph, id, now).is_some()
+            || (superseded.contains_key(&id)
+                && !matches!(
+                    graph.node(id),
+                    Some(Node::Concept(c)) if c.canonization_status == CanonizationStatus::Canonical
+                ))
+            || !crate::daemon::contradiction::stale_citations_memo(
+                graph,
+                id,
+                contradiction_min_age,
+                now,
+                &timeline,
+                &mut stale_memo,
+            )
+            .is_empty()
+    };
+    let mut selection = redundancy.as_ref().map(|r| Selection {
+        redundancy: r,
+        warns: &mut warns,
+    });
     let any_fresh = w_query > 0.0
         && expanded
             .required
@@ -288,7 +326,8 @@ where
     // must not drop it for the length of the window. A holder the blend
     // would not show either is not promoted.
     let reserved_keep: HashSet<NodeId> = if any_fresh {
-        emitted(graph, &scored(false), hot, query.top_k)
+        emitted(graph, &scored(false), hot, query.top_k, selection.as_mut())
+            .hits
             .into_iter()
             .map(|s| s.item)
             .filter(|id| active_reservation(graph, *id, now).is_some())
@@ -302,9 +341,16 @@ where
     // under query-only order; if query-only order would not emit it within
     // top_k, neither mode can, and every returned hit keeps its daemon share.
     let cold = any_fresh
-        && emitted(graph, &scored(true), cold_forced, query.top_k)
-            .iter()
-            .any(|s| fresh_unscored(s.item));
+        && emitted(
+            graph,
+            &scored(true),
+            cold_forced,
+            query.top_k,
+            selection.as_mut(),
+        )
+        .hits
+        .iter()
+        .any(|s| fresh_unscored(s.item));
     // Forcing the kept holders only in cold mode: in the blend they already
     // hold their slots, and a forced member would free one for another hit.
     let forced = |id: NodeId| if cold { cold_forced(id) } else { hot(id) };
@@ -357,21 +403,16 @@ where
     // GPT5.6sol P2-5), plus every force-included hot member, in score order.
     // Blast radii for every canonical hit, computed ONCE (P2-7).
     let radii = format::blast_radii(graph);
-    let superseded = superseded_by(graph);
     let mut hits: Vec<RecallHit> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
     let mut detailed: Vec<DetailedHit> = Vec::new();
     // Block per emitted hit, score order.
     let mut hit_blocks: Vec<format::ContextBlock> = Vec::new();
-    // #207: one writer timeline for every stale-citation check below, built
-    // only if some shown hit cites a concept with an inbound contradiction,
-    // and one verdict per cited concept, however many shown hits cite it.
-    let timeline = crate::daemon::conflict::SharedTimeline::new();
-    let mut stale_memo: HashMap<NodeId, Option<crate::daemon::contradiction::ContradictionHit>> =
-        HashMap::new();
+    let emission = emitted(graph, &members, forced, query.top_k, selection.as_mut());
+    let skipped = emission.skipped;
     let shown = with_ordinary_companions(
         graph,
-        emitted(graph, &members, forced, query.top_k),
+        emission.hits,
         hot_payloads,
         &forced_companions,
         |id| score_of(id, cold).3,
@@ -404,6 +445,9 @@ where
             &hit,
             (c.canonization_status != CanonizationStatus::None).then_some(c.canonization_status),
         );
+        if let Some(s) = skipped.get(&c.id) {
+            detailed_hit.skipped_redundant = s.clone();
+        }
 
         // Warning lines for this hit: ⚑ (canonical), hot-list conditions,
         // then the active reservation (soft lock). Each line carries its
@@ -786,6 +830,23 @@ fn rank_members(graph: &Graph, members: &mut [Scored<NodeId>]) {
     });
 }
 
+/// #181's rule for one assembly: the redundancy test, and which members
+/// would carry a warning line of their own (never skipped).
+struct Selection<'s> {
+    redundancy: &'s Redundancy,
+    warns: &'s mut dyn FnMut(NodeId) -> bool,
+}
+
+/// What [`emitted`] chose.
+struct Emission {
+    /// The emitted members, in recall order.
+    hits: Vec<Scored<NodeId>>,
+    /// #181: each emitted hit that a member was skipped as redundant with,
+    /// mapped to those members in skip (recall) order. Empty without a
+    /// [`Selection`].
+    skipped: HashMap<NodeId, Vec<RedundantSkip>>,
+}
+
 /// The members a recall emits, in order: the first `top_k` graph concepts
 /// of `ranked`, plus every `forced` member wherever it sorts.
 ///
@@ -793,28 +854,72 @@ fn rank_members(graph: &Graph, members: &mut [Scored<NodeId>]) {
 /// a top_k slot (GPT5.6sol P2-5), and a forced member never consumes one.
 /// The cold-mode trigger runs this over the query-only order to ask whether
 /// a fresh concept could be shown at all, so both callers share one rule.
+///
+/// With a `selection` (#181), each of the first
+/// [`redundancy::window`]`(top_k)` ordinary members is compared with the
+/// first [`redundancy::WINDOW_MAX`] members already emitted; one some signal
+/// finds redundant is skipped, unless it would carry a warning of its own,
+/// and the next member takes its slot. A forced member is never skipped.
+/// When nothing is skipped the result is exactly the one without it.
 fn emitted(
     graph: &Graph,
     ranked: &[Scored<NodeId>],
     forced: impl Fn(NodeId) -> bool,
     top_k: usize,
-) -> Vec<Scored<NodeId>> {
+    mut selection: Option<&mut Selection<'_>>,
+) -> Emission {
     let mut out = Vec::new();
+    let mut skipped: HashMap<NodeId, Vec<RedundantSkip>> = HashMap::new();
     let mut slots = 0usize; // valid non-forced hits accepted toward top_k
+    let window = redundancy::window(top_k);
+    let mut checked = 0usize; // ordinary members the rule has looked at
+                              // The members a later one may be redundant with, with their normalized
+                              // text: the first WINDOW_MAX emitted, which bounds the pair checks.
+    let mut taken: Vec<(&crate::types::Concept, String)> = Vec::new();
     for s in ranked {
-        if !matches!(graph.node(s.item), Some(Node::Concept(_))) {
+        let Some(Node::Concept(c)) = graph.node(s.item) else {
             continue; // graph-missing (e.g. stale vector id): skip, no slot
-        }
+        };
         let force = forced(s.item);
         if !force && slots >= top_k {
             continue; // keep scanning: a force-included member may sort lower
         }
+        let mut norm = None;
+        if let Some(sel) = selection.as_deref_mut() {
+            let check = !force && checked < window;
+            if check || taken.len() < redundancy::WINDOW_MAX {
+                let text = redundancy::normalized_content(&c.content);
+                if check {
+                    checked += 1;
+                    let found = taken.iter().find_map(|(t, t_norm)| {
+                        sel.redundancy
+                            .signal(graph, (t, t_norm), (c, &text))
+                            .map(|signal| (t.id, signal))
+                    });
+                    if let Some((kept, signal)) = found
+                        && !(sel.warns)(c.id)
+                    {
+                        skipped.entry(kept).or_default().push(RedundantSkip {
+                            node_id: c.id,
+                            signal,
+                        });
+                        continue;
+                    }
+                }
+                norm = Some(text);
+            }
+        }
         if !force {
             slots += 1;
         }
+        if let Some(text) = norm
+            && taken.len() < redundancy::WINDOW_MAX
+        {
+            taken.push((c, text));
+        }
         out.push(s.clone());
     }
-    out
+    Emission { hits: out, skipped }
 }
 
 /// Finite, non-negative weight, else `0.0` (mirrors ALGO-10 sanitization).
@@ -2823,6 +2928,7 @@ mod tests {
                 &query(2, 10_000),
                 RecallWeights::default(),
                 crate::Config::default().canonization_edge_min_age,
+                None,
                 ts(0),
                 default_token_count,
             )
@@ -2915,6 +3021,7 @@ mod tests {
                 &query(2, 10_000),
                 RecallWeights::default(),
                 crate::Config::default().canonization_edge_min_age,
+                None,
                 ts(0),
                 default_token_count,
             );
@@ -2970,6 +3077,7 @@ mod tests {
                 &query(2, 10_000),
                 RecallWeights::default(),
                 crate::Config::default().canonization_edge_min_age,
+                None,
                 ts(0),
                 default_token_count,
             )
