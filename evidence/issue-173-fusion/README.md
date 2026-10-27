@@ -184,6 +184,50 @@ with `k = 3` and #173's weights as its defaults. The gain does not meet
 ranks are recorded on every `--ledger` recall line (`fusion` on the hit), so
 the switch can be evaluated on live traffic before a default changes.
 
+## Re-run on the 368-query set (2026-10-27)
+
+After the first run the owner asked for more labelled queries, mostly
+vocabulary-mismatch (`dev` had 5). `fixtures/eval/authoring/t_more173.py`
+adds 58 answerable queries (36 vocabulary-mismatch, 10 rationale, 12
+contrast), appended so no earlier id or split moves: `dev` now has 165
+answerable queries (30 vocabulary-mismatch), `held_out` 97 (18). The new
+queries were written from the corpus text before this re-run, not from its
+results. Same harness; `dev` swept first (k = 2, 3, 5, 10, 60 and
+`k=3,wd=0`), then `held_out` once with the same three variants as before.
+Files: `runs-v2/`, from `run-v2.sh`; tables from
+`python3 summarise.py runs-v2`.
+
+| | `max` | `rrf` (k = 3) BGE-M3 | `rrf` (k = 3) EmbeddingGemma 2 |
+|---|---|---|---|
+| `dev` nDCG@10 | 0.790 | 0.856 (+0.066) | 0.848 (+0.058) |
+| `dev` hit@1 | 0.679 | 0.751 | 0.721 |
+| `held_out` nDCG@10 | 0.840 | 0.872 (+0.032) | 0.863 (+0.023) |
+| `held_out` hit@1 | 0.742 | 0.773 | 0.742 |
+| `dev` vocabulary-mismatch (30) | 0.446 | 0.669 | 0.634 |
+| `held_out` vocabulary-mismatch (18) | 0.672 | 0.724 | 0.744 |
+| `held_out` exact-identifier (11) | 0.948 | 0.899 | 0.881 |
+| `held_out` contrast (14) | 0.912 | 0.879 | 0.864 |
+| no-answer AUC, `dev` / `held_out` | 0.771 / 0.669 | 0.668 / 0.694 | 0.699 / 0.681 |
+
+What holds and what moves:
+
+* **The direction holds, the size grows.** The new vocabulary-mismatch
+  queries are where `max` is weakest (0.446 on `dev`: BM25 has little to
+  match and the vector leg only orders what it did not), so RRF's `dev` gain
+  rises above #173's +0.05. On `held_out` it stays below it (+0.032, +0.023).
+* **k = 3 still holds**: k = 2 and k = 3 are within 0.002 of each other on
+  both embedders (k = 2 is the higher on EmbeddingGemma 2), and k = 5, 10
+  and 60 are lower on both. `wd=0` is again a little higher on `dev`; it is not
+  tried on `held_out`.
+* **The same classes lose on `held_out`**: exact-identifier and contrast,
+  both by more than 0.02; none of those exact-identifier queries and 2 of the
+  14 contrast queries are new.
+  Rationale now gains on `held_out` (0.916 to 0.978).
+* **No-answer AUC** still falls on `dev` and rises a little on `held_out`.
+
+The decision stands: the `dev` gain now clears the bar, but `held_out` does
+not and two classes lose there, so the default stays `max`.
+
 ## Not measured
 
 * How often the top hit comes from each leg: `Memory::recall` does not expose

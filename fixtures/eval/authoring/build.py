@@ -15,7 +15,8 @@ ROOT = HERE.parents[2]
 sys.path.insert(0, str(HERE))
 import common  # noqa: E402
 
-MODULES = ["t_embed", "t_serve", "t_release", "t_findings", "t_paper", "t_noanswer", "t_para"]
+MODULES = ["t_embed", "t_serve", "t_release", "t_findings", "t_paper", "t_noanswer", "t_para",
+           "t_more173"]
 LABELLER = "Grok Bot (agent)"
 LABELLED_ON = "2026-10-23"
 HELD_OUT_PERCENT = 30
@@ -32,10 +33,13 @@ def split_of(key):
 
 
 def norm(q):
+    """(text, family, extra grades, labelled_on)."""
     if isinstance(q, str):
-        return q, "fact-lookup", {}
+        return q, "fact-lookup", {}, LABELLED_ON
     if len(q) == 2:
-        return q[0], q[1], {}
+        return q[0], q[1], {}, LABELLED_ON
+    if len(q) == 3:
+        return q[0], q[1], q[2], LABELLED_ON
     return q
 
 
@@ -53,7 +57,7 @@ assert len(texts) == len(set(texts)), "duplicate corpus text"
 queries = []
 for c in common.CONCEPTS:
     for n, q in enumerate(c["q"], 1):
-        text, family, extra = norm(q)
+        text, family, extra, labelled_on = norm(q)
         rel = {c["id"]: 2}
         rel.update(extra)
         for k in rel:
@@ -64,7 +68,7 @@ for c in common.CONCEPTS:
             split=split_of(qid),
             relevant=[{"concept": k, "grade": g} for k, g in sorted(rel.items())],
             facets=c["facets"], source="authored against the corpus text",
-            labeller=LABELLER, labelled_on=LABELLED_ON))
+            labeller=LABELLER, labelled_on=labelled_on))
 for n, na in enumerate(common.NO_ANSWER, 1):
     qid = f"na-{n:03d}"
     e = dict(id=qid, query=na["text"], kind="no_answer", family=na["family"], topic=na["topic"],

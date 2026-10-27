@@ -2,8 +2,11 @@
 """Print the #173 fusion tables from the run files in runs/ (stdlib only)."""
 import json
 import pathlib
+import sys
 
-RUNS = pathlib.Path(__file__).parent / "runs"
+# Optional argument: the runs directory (default runs/; runs-v2/ holds the
+# re-run on the 368-query set).
+RUNS = pathlib.Path(sys.argv[1]) if len(sys.argv) > 1 else pathlib.Path(__file__).parent / "runs"
 SLICES = ["exact-identifier", "vocabulary-mismatch", "contrast", "fact-lookup", "rationale"]
 
 
@@ -39,5 +42,5 @@ for model in ["bge-m3-candle-cpu", "eg2-q8-768"]:
             print(row(name, v, split))
         print(f"\nnDCG@10 by query family (n), {split}:\n\n{FHEAD}")
         for name, v in d["variants"].items():
-            if kind == "confirm" or name in ("max", "rrf:k=60", "rrf:k=3"):
+            if kind == "confirm" or name in ("max", "rrf:k=60", "rrf:k=3", "rrf"):
                 print(families(name, v, split))

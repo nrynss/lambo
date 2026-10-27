@@ -56,3 +56,15 @@ def P(a, b, label, family, src, relation=None, review=None):
     """A pair outside the concept-anchored ones (e.g. two dogfood texts)."""
     EXTRA_PAIRS.append(dict(a=a, b=b, label=label, family=family, source=src,
                             relation=relation, review=review))
+
+
+def Q(cid, text, family, extra=None, labelled_on="2026-10-27"):
+    """Append one answerable query to an existing concept (#173 follow-up).
+
+    Appended after the concept's own queries, so existing ids and splits
+    are unchanged; the query carries its own labelled_on date.
+    """
+    hits = [c for c in CONCEPTS if c["id"] == cid]
+    if len(hits) != 1:
+        raise SystemExit(f"Q({cid!r}): no such concept")
+    hits[0]["q"].append((text, family, dict(extra or {}), labelled_on))
