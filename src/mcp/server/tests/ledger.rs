@@ -1075,6 +1075,53 @@ fn i1_the_recall_line_reports_a_truncated_top_hit() {
     assert!(facts["hits"][0].get("truncated_in_context").is_none());
 }
 
+/// #207: a stale-citation line is named `rests_on_contradicted` on the
+/// hit's ledger line, beside the hit's other kinds. It is not a #179
+/// contradiction of the hit, so `contradiction_warning` stays false.
+#[test]
+fn i1_the_recall_line_names_a_stale_citation() {
+    use crate::recall::detail::{Annotation, AnnotationKind, DetailedHit, DetailedRecall};
+    use crate::recall::format;
+    use crate::types::{ConceptType, NodeId, RecallHit};
+
+    let hit = RecallHit {
+        repo_scope: None,
+        node_id: NodeId(uuid::Uuid::from_u64_pair(2, 7)),
+        content: "list-all returns every memo".into(),
+        concept_type: Some(ConceptType::Logic),
+        score: 0.5,
+        is_canonical: false,
+        blast_radius: Some(1),
+    };
+    let line = format::rests_on_contradicted_warning(
+        NodeId(uuid::Uuid::from_u64_pair(2, 1)),
+        "GET /api/v1/memo (list all)",
+        NodeId(uuid::Uuid::from_u64_pair(2, 5)),
+        "list-all removed in v0.22",
+    );
+    let mut d = DetailedHit::new(&hit, None);
+    d.annotations.push(Annotation::new(
+        AnnotationKind::LoadBearing,
+        format::blast_radius_warning(1),
+    ));
+    d.annotations.push(Annotation::new(
+        AnnotationKind::RestsOnContradicted,
+        line.clone(),
+    ));
+    let mut r = DetailedRecall::warn_only(String::new());
+    r.warnings = vec![format::blast_radius_warning(1), line];
+    r.hits = vec![hit];
+    r.detailed = vec![d];
+    let facts = recall_facts("q", 8, &r);
+    assert_eq!(
+        facts["hits"][0]["annotations"],
+        json!(["load_bearing", "rests_on_contradicted"]),
+        "{facts}"
+    );
+    assert_eq!(facts["contradiction_warning"], json!(false));
+    assert_eq!(facts["warning_count"], json!(2));
+}
+
 /// **I2 acceptance.** A heartbeat line carries the stats payload, uptime,
 /// the crate version and a `git_sha` field.
 ///
