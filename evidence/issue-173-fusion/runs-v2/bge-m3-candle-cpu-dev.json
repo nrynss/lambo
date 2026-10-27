@@ -29,12 +29,12 @@
       },
       "metrics": {
         "dev/family/contrast": {
-          "hit@1": 0.8571,
-          "hit@10": 0.9524,
-          "hit@5": 0.9524,
-          "mrr@10": 0.8905,
-          "n": 21,
-          "ndcg@10": 0.9069
+          "hit@1": 0.8636,
+          "hit@10": 0.9545,
+          "hit@5": 0.9545,
+          "mrr@10": 0.8955,
+          "n": 22,
+          "ndcg@10": 0.9112
         },
         "dev/family/exact-identifier": {
           "hit@1": 0.8333,
@@ -65,8 +65,8 @@
           "hit@10": 1.0,
           "hit@5": 1.0,
           "mrr@10": 1.0,
-          "n": 10,
-          "ndcg@10": 0.9941
+          "n": 9,
+          "ndcg@10": 0.9934
         },
         "dev/family/superseded": {
           "hit@1": 0.75,
@@ -95,7 +95,7 @@
       },
       "no_answer": {
         "dev": {
-          "auc_top1": 0.7717,
+          "auc_top1": 0.7719,
           "distinct_top1_values": {
             "answerable": 163,
             "no_answer": 73
@@ -123,12 +123,12 @@
       },
       "metrics": {
         "dev/family/contrast": {
-          "hit@1": 0.8095,
+          "hit@1": 0.8182,
           "hit@10": 1.0,
           "hit@5": 1.0,
-          "mrr@10": 0.8968,
-          "n": 21,
-          "ndcg@10": 0.9217
+          "mrr@10": 0.9015,
+          "n": 22,
+          "ndcg@10": 0.9253
         },
         "dev/family/exact-identifier": {
           "hit@1": 0.8889,
@@ -155,12 +155,12 @@
           "ndcg@10": 0.8529
         },
         "dev/family/rationale": {
-          "hit@1": 0.9,
+          "hit@1": 0.8889,
           "hit@10": 1.0,
           "hit@5": 1.0,
-          "mrr@10": 0.95,
-          "n": 10,
-          "ndcg@10": 0.9821
+          "mrr@10": 0.9444,
+          "n": 9,
+          "ndcg@10": 0.9801
         },
         "dev/family/superseded": {
           "hit@1": 0.75,
@@ -217,12 +217,12 @@
       },
       "metrics": {
         "dev/family/contrast": {
-          "hit@1": 0.7619,
+          "hit@1": 0.7727,
           "hit@10": 1.0,
           "hit@5": 1.0,
-          "mrr@10": 0.8611,
-          "n": 21,
-          "ndcg@10": 0.8964
+          "mrr@10": 0.8674,
+          "n": 22,
+          "ndcg@10": 0.9011
         },
         "dev/family/exact-identifier": {
           "hit@1": 0.8333,
@@ -249,12 +249,12 @@
           "ndcg@10": 0.8549
         },
         "dev/family/rationale": {
-          "hit@1": 0.8,
+          "hit@1": 0.7778,
           "hit@10": 1.0,
           "hit@5": 1.0,
-          "mrr@10": 0.8833,
-          "n": 10,
-          "ndcg@10": 0.9555
+          "mrr@10": 0.8704,
+          "n": 9,
+          "ndcg@10": 0.9505
         },
         "dev/family/superseded": {
           "hit@1": 0.25,
@@ -311,12 +311,12 @@
       },
       "metrics": {
         "dev/family/contrast": {
-          "hit@1": 0.8095,
+          "hit@1": 0.8182,
           "hit@10": 1.0,
           "hit@5": 1.0,
-          "mrr@10": 0.8968,
-          "n": 21,
-          "ndcg@10": 0.9217
+          "mrr@10": 0.9015,
+          "n": 22,
+          "ndcg@10": 0.9253
         },
         "dev/family/exact-identifier": {
           "hit@1": 0.8889,
@@ -343,12 +343,12 @@
           "ndcg@10": 0.8115
         },
         "dev/family/rationale": {
-          "hit@1": 0.9,
+          "hit@1": 0.8889,
           "hit@10": 1.0,
           "hit@5": 1.0,
-          "mrr@10": 0.95,
-          "n": 10,
-          "ndcg@10": 0.9821
+          "mrr@10": 0.9444,
+          "n": 9,
+          "ndcg@10": 0.9801
         },
         "dev/family/superseded": {
           "hit@1": 0.75,
@@ -405,12 +405,12 @@
       },
       "metrics": {
         "dev/family/contrast": {
-          "hit@1": 0.9048,
+          "hit@1": 0.9091,
           "hit@10": 1.0,
           "hit@5": 1.0,
-          "mrr@10": 0.9524,
-          "n": 21,
-          "ndcg@10": 0.9649
+          "mrr@10": 0.9545,
+          "n": 22,
+          "ndcg@10": 0.9664
         },
         "dev/family/exact-identifier": {
           "hit@1": 0.8889,
@@ -437,12 +437,12 @@
           "ndcg@10": 0.8574
         },
         "dev/family/rationale": {
-          "hit@1": 0.9,
+          "hit@1": 0.8889,
           "hit@10": 1.0,
           "hit@5": 1.0,
-          "mrr@10": 0.95,
-          "n": 10,
-          "ndcg@10": 0.9821
+          "mrr@10": 0.9444,
+          "n": 9,
+          "ndcg@10": 0.9801
         },
         "dev/family/superseded": {
           "hit@1": 0.75,
@@ -499,12 +499,12 @@
       },
       "metrics": {
         "dev/family/contrast": {
-          "hit@1": 0.7619,
+          "hit@1": 0.7727,
           "hit@10": 1.0,
           "hit@5": 1.0,
-          "mrr@10": 0.8667,
-          "n": 21,
-          "ndcg@10": 0.9005
+          "mrr@10": 0.8727,
+          "n": 22,
+          "ndcg@10": 0.905
         },
         "dev/family/exact-identifier": {
           "hit@1": 0.8889,
@@ -531,12 +531,12 @@
           "ndcg@10": 0.8549
         },
         "dev/family/rationale": {
-          "hit@1": 0.9,
+          "hit@1": 0.8889,
           "hit@10": 1.0,
           "hit@5": 1.0,
-          "mrr@10": 0.9333,
-          "n": 10,
-          "ndcg@10": 0.9758
+          "mrr@10": 0.9259,
+          "n": 9,
+          "ndcg@10": 0.9731
         },
         "dev/family/superseded": {
           "hit@1": 0.25,
@@ -593,12 +593,12 @@
       },
       "metrics": {
         "dev/family/contrast": {
-          "hit@1": 0.619,
+          "hit@1": 0.6364,
           "hit@10": 1.0,
-          "hit@5": 0.9524,
-          "mrr@10": 0.7675,
-          "n": 21,
-          "ndcg@10": 0.8331
+          "hit@5": 0.9545,
+          "mrr@10": 0.778,
+          "n": 22,
+          "ndcg@10": 0.8406
         },
         "dev/family/exact-identifier": {
           "hit@1": 0.6111,
@@ -625,12 +625,12 @@
           "ndcg@10": 0.8574
         },
         "dev/family/rationale": {
-          "hit@1": 0.7,
+          "hit@1": 0.6667,
           "hit@10": 1.0,
-          "hit@5": 0.9,
-          "mrr@10": 0.8,
-          "n": 10,
-          "ndcg@10": 0.8891
+          "hit@5": 0.8889,
+          "mrr@10": 0.7778,
+          "n": 9,
+          "ndcg@10": 0.8768
         },
         "dev/family/superseded": {
           "hit@1": 0.25,

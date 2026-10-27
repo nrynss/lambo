@@ -29,12 +29,12 @@
       },
       "metrics": {
         "dev/family/contrast": {
-          "hit@1": 0.8571,
-          "hit@10": 0.9524,
-          "hit@5": 0.9524,
-          "mrr@10": 0.8905,
-          "n": 21,
-          "ndcg@10": 0.9069
+          "hit@1": 0.8636,
+          "hit@10": 0.9545,
+          "hit@5": 0.9545,
+          "mrr@10": 0.8955,
+          "n": 22,
+          "ndcg@10": 0.9112
         },
         "dev/family/exact-identifier": {
           "hit@1": 0.8333,
@@ -65,8 +65,8 @@
           "hit@10": 1.0,
           "hit@5": 1.0,
           "mrr@10": 1.0,
-          "n": 10,
-          "ndcg@10": 0.9941
+          "n": 9,
+          "ndcg@10": 0.9934
         },
         "dev/family/superseded": {
           "hit@1": 0.75,
@@ -95,7 +95,7 @@
       },
       "no_answer": {
         "dev": {
-          "auc_top1": 0.7717,
+          "auc_top1": 0.7719,
           "distinct_top1_values": {
             "answerable": 163,
             "no_answer": 73
@@ -123,12 +123,12 @@
       },
       "metrics": {
         "dev/family/contrast": {
-          "hit@1": 0.7619,
+          "hit@1": 0.7727,
           "hit@10": 1.0,
           "hit@5": 1.0,
-          "mrr@10": 0.869,
-          "n": 21,
-          "ndcg@10": 0.9039
+          "mrr@10": 0.875,
+          "n": 22,
+          "ndcg@10": 0.9083
         },
         "dev/family/exact-identifier": {
           "hit@1": 0.8333,
@@ -155,12 +155,12 @@
           "ndcg@10": 0.8033
         },
         "dev/family/rationale": {
-          "hit@1": 0.9,
+          "hit@1": 0.8889,
           "hit@10": 1.0,
           "hit@5": 1.0,
-          "mrr@10": 0.95,
-          "n": 10,
-          "ndcg@10": 0.978
+          "mrr@10": 0.9444,
+          "n": 9,
+          "ndcg@10": 0.9755
         },
         "dev/family/superseded": {
           "hit@1": 0.75,
@@ -191,14 +191,14 @@
         "dev": {
           "auc_top1": 0.699,
           "distinct_top1_values": {
-            "answerable": 45,
-            "no_answer": 40
+            "answerable": 43,
+            "no_answer": 39
           },
           "gate_alpha": 0.1,
           "gate_pass_answerable": 0.9091,
           "gate_pass_no_answer": 0.6351,
           "gate_tau_from_dev": 0.6658,
-          "median_top1_answerable": 0.7606,
+          "median_top1_answerable": 0.7607,
           "median_top1_no_answer": 0.6858
         }
       },
@@ -217,12 +217,12 @@
       },
       "metrics": {
         "dev/family/contrast": {
-          "hit@1": 0.619,
+          "hit@1": 0.6364,
           "hit@10": 1.0,
           "hit@5": 1.0,
-          "mrr@10": 0.7897,
-          "n": 21,
-          "ndcg@10": 0.845
+          "mrr@10": 0.7992,
+          "n": 22,
+          "ndcg@10": 0.852
         },
         "dev/family/exact-identifier": {
           "hit@1": 0.7778,
@@ -249,12 +249,12 @@
           "ndcg@10": 0.8033
         },
         "dev/family/rationale": {
-          "hit@1": 0.9,
+          "hit@1": 0.8889,
           "hit@10": 1.0,
           "hit@5": 1.0,
-          "mrr@10": 0.95,
-          "n": 10,
-          "ndcg@10": 0.978
+          "mrr@10": 0.9444,
+          "n": 9,
+          "ndcg@10": 0.9755
         },
         "dev/family/superseded": {
           "hit@1": 0.25,
@@ -285,7 +285,7 @@
         "dev": {
           "auc_top1": 0.6849,
           "distinct_top1_values": {
-            "answerable": 59,
+            "answerable": 58,
             "no_answer": 52
           },
           "gate_alpha": 0.1,
@@ -311,12 +311,12 @@
       },
       "metrics": {
         "dev/family/contrast": {
-          "hit@1": 0.8095,
+          "hit@1": 0.8182,
           "hit@10": 1.0,
           "hit@5": 1.0,
-          "mrr@10": 0.8929,
-          "n": 21,
-          "ndcg@10": 0.9215
+          "mrr@10": 0.8977,
+          "n": 22,
+          "ndcg@10": 0.9251
         },
         "dev/family/exact-identifier": {
           "hit@1": 0.8333,
@@ -343,12 +343,12 @@
           "ndcg@10": 0.8008
         },
         "dev/family/rationale": {
-          "hit@1": 0.9,
+          "hit@1": 0.8889,
           "hit@10": 1.0,
           "hit@5": 1.0,
-          "mrr@10": 0.95,
-          "n": 10,
-          "ndcg@10": 0.978
+          "mrr@10": 0.9444,
+          "n": 9,
+          "ndcg@10": 0.9755
         },
         "dev/family/superseded": {
           "hit@1": 0.75,
@@ -379,7 +379,7 @@
         "dev": {
           "auc_top1": 0.7154,
           "distinct_top1_values": {
-            "answerable": 38,
+            "answerable": 36,
             "no_answer": 41
           },
           "gate_alpha": 0.1,
@@ -405,12 +405,12 @@
       },
       "metrics": {
         "dev/family/contrast": {
-          "hit@1": 0.8571,
+          "hit@1": 0.8636,
           "hit@10": 1.0,
           "hit@5": 1.0,
-          "mrr@10": 0.9286,
-          "n": 21,
-          "ndcg@10": 0.9486
+          "mrr@10": 0.9318,
+          "n": 22,
+          "ndcg@10": 0.9509
         },
         "dev/family/exact-identifier": {
           "hit@1": 0.8333,
@@ -437,12 +437,12 @@
           "ndcg@10": 0.8605
         },
         "dev/family/rationale": {
-          "hit@1": 0.9,
+          "hit@1": 0.8889,
           "hit@10": 1.0,
           "hit@5": 1.0,
-          "mrr@10": 0.95,
-          "n": 10,
-          "ndcg@10": 0.9797
+          "mrr@10": 0.9444,
+          "n": 9,
+          "ndcg@10": 0.9774
         },
         "dev/family/superseded": {
           "hit@1": 0.75,
@@ -499,12 +499,12 @@
       },
       "metrics": {
         "dev/family/contrast": {
-          "hit@1": 0.7619,
+          "hit@1": 0.7727,
           "hit@10": 1.0,
           "hit@5": 1.0,
-          "mrr@10": 0.873,
-          "n": 21,
-          "ndcg@10": 0.9072
+          "mrr@10": 0.8788,
+          "n": 22,
+          "ndcg@10": 0.9114
         },
         "dev/family/exact-identifier": {
           "hit@1": 0.8333,
@@ -531,12 +531,12 @@
           "ndcg@10": 0.8033
         },
         "dev/family/rationale": {
-          "hit@1": 0.9,
+          "hit@1": 0.8889,
           "hit@10": 1.0,
           "hit@5": 1.0,
-          "mrr@10": 0.95,
-          "n": 10,
-          "ndcg@10": 0.978
+          "mrr@10": 0.9444,
+          "n": 9,
+          "ndcg@10": 0.9755
         },
         "dev/family/superseded": {
           "hit@1": 0.25,
@@ -567,8 +567,8 @@
         "dev": {
           "auc_top1": 0.6943,
           "distinct_top1_values": {
-            "answerable": 50,
-            "no_answer": 40
+            "answerable": 48,
+            "no_answer": 41
           },
           "gate_alpha": 0.1,
           "gate_pass_answerable": 0.9091,
@@ -593,12 +593,12 @@
       },
       "metrics": {
         "dev/family/contrast": {
-          "hit@1": 0.5714,
+          "hit@1": 0.5909,
           "hit@10": 1.0,
-          "hit@5": 0.9524,
-          "mrr@10": 0.7108,
-          "n": 21,
-          "ndcg@10": 0.7915
+          "hit@5": 0.9545,
+          "mrr@10": 0.7239,
+          "n": 22,
+          "ndcg@10": 0.801
         },
         "dev/family/exact-identifier": {
           "hit@1": 0.6667,
@@ -625,12 +625,12 @@
           "ndcg@10": 0.7058
         },
         "dev/family/rationale": {
-          "hit@1": 0.6,
+          "hit@1": 0.5556,
           "hit@10": 1.0,
-          "hit@5": 0.9,
-          "mrr@10": 0.7417,
-          "n": 10,
-          "ndcg@10": 0.835
+          "hit@5": 0.8889,
+          "mrr@10": 0.713,
+          "n": 9,
+          "ndcg@10": 0.8167
         },
         "dev/family/superseded": {
           "hit@1": 0.25,
@@ -661,7 +661,7 @@
         "dev": {
           "auc_top1": 0.6277,
           "distinct_top1_values": {
-            "answerable": 78,
+            "answerable": 77,
             "no_answer": 55
           },
           "gate_alpha": 0.1,

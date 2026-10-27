@@ -4380,9 +4380,9 @@
  },
  {
   "id": "q-mg-03-3",
-  "query": "Why must lambo provision run with no session holder for the #148 re-key?",
+  "query": "Can lambo provision re-key older concepts while a session lease is live?",
   "kind": "answerable",
-  "family": "rationale",
+  "family": "contrast",
   "topic": "merge-guards",
   "split": "dev",
   "relevant": [

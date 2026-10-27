@@ -188,18 +188,19 @@ the switch can be evaluated on live traffic before a default changes.
 
 After the first run the owner asked for more labelled queries, mostly
 vocabulary-mismatch (`dev` had 5). `fixtures/eval/authoring/t_more173.py`
-adds 58 answerable queries (36 vocabulary-mismatch, 10 rationale, 12
+adds 58 answerable queries (36 vocabulary-mismatch, 9 rationale, 13
 contrast), appended so no earlier id or split moves: `dev` now has 165
 answerable queries (30 vocabulary-mismatch), `held_out` 97 (18). The new
 queries were written from the corpus text before this re-run, not from its
 results. Same harness; `dev` swept first (k = 2, 3, 5, 10, 60 and
 `k=3,wd=0`), then `held_out` once with the same three variants as before.
 Files: `runs-v2/`, from `run-v2.sh`; tables from
-`python3 summarise.py runs-v2`. One `dev` query (`q-prf-01-3`) was reworded
-after the first pass (it guessed a release season the corpus does not
-state) and `dev` was re-run; `held_out` was not, as none of its queries
-changed. The `-confirm` files' `split/dev` metrics therefore predate that
-rewording: read `dev` from the `-dev` files.
+`python3 summarise.py runs-v2`. Two `dev` queries were corrected after the
+first pass and `dev` was re-run: `q-prf-01-3` guessed a release season the
+corpus does not state, and `q-mg-03-3` asked why where the concept states
+only the rule (it is now a contrast query). `held_out` was not re-run, as
+none of its queries changed. The `-confirm` files' `split/dev` metrics
+therefore predate those corrections: read `dev` from the `-dev` files.
 
 | | `max` | `rrf` (k = 3) BGE-M3 | `rrf` (k = 3) EmbeddingGemma 2 |
 |---|---|---|---|

@@ -60,9 +60,9 @@ Queries by family:
 |---|---|---:|
 | answerable | fact-lookup | 124 |
 | | exact-identifier | 29 |
-| | contrast | 35 |
+| | contrast | 36 |
 | | vocabulary-mismatch | 48 |
-| | rationale | 18 |
+| | rationale | 17 |
 | | superseded | 6 |
 | | multi-hop | 2 |
 | no_answer | near-domain | 80 |
@@ -104,8 +104,8 @@ Per consumer:
   (the paper's README). The six lambo-run efficacy questions seed the
   queries; their rubrics are the facets.
 - **Added for #173 (2026-10-27).** `authoring/t_more173.py` appends 58
-  answerable queries to existing concepts (36 vocabulary-mismatch, 10
-  rationale, 12 contrast; 40 dev / 18 held-out by the usual hash), written
+  answerable queries to existing concepts (36 vocabulary-mismatch, 9
+  rationale, 13 contrast; 40 dev / 18 held-out by the usual hash), written
   against the corpus text only, after the owner asked for more
   vocabulary-mismatch coverage (dev had 5). They carry `labelled_on`
   2026-10-27; every earlier id, text and split is unchanged. A
