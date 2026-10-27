@@ -106,7 +106,7 @@ k = 3.0        # optional; RRF only
 
 **`max`.** The legs score on different scales: keyword matching is BM25, which is unbounded and routinely above 1; vector similarity is a cosine, at most 1; a recent concept scores a flat 0.35 (0.63 under the calibrated EmbeddingGemma 2 contract, see `[embedder] calibration`). The highest of the three wins, so in practice a keyword match outranks any vector match.
 
-**`rrf`.** Each leg ranks its own members (score descending, the usual tie-break by canonical key), the recent leg by recency (the newest interaction's concepts share rank 1). A hit's relevance is `Σ weight / (k + rank)` over the legs it is in, divided by the most the legs that ran could give (rank 1 in each; the keyword leg counts whenever the query has text, even when nothing matched), so it lies between 0 and 1 and a recent concept alone never scores as a perfect match. The recent leg's score is still recorded, but no longer ranks anything.
+**`rrf`.** Each leg ranks its own members (score descending, the usual tie-break by canonical key), the recent leg by recency (the newest interaction's concepts share rank 1). A hit's relevance is `Σ weight / (k + rank)` over the legs it is in, divided by the most the legs that ran could give (rank 1 in each; the keyword leg counts whenever the query has text, even when nothing matched), so it lies between 0 and 1, and on a text query a recent concept alone does not score as a perfect match. The recent leg's score is still recorded, but no longer ranks anything.
 
 **Why `max` stays the default.** Measured on the evaluation set (`fixtures/eval/`) through the whole recall pipeline, `k` chosen on the `dev` split and `held_out` used only to confirm (`evidence/issue-173-fusion/`):
 
