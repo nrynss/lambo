@@ -28,6 +28,13 @@
   `daemon::contradiction::direct_citation` whose citing concept does not
   itself contradict the cited one: a memory that contradicts what it
   cites gets no line for it, whoever else contradicts it).
+- **Contract change: the `lambo_recall` tool description names the
+  stale-citation warning (#207).** The published description, which
+  since #179 covers contradiction warnings on any contradicted concept
+  (not only a Canonical or Venerable one), now also says that a concept
+  whose `depends_on` cites a contradicted concept is warned that it rests
+  on it. The input schema is unchanged; a client that pins tool
+  descriptions sees the new text.
 - **Behaviour change, EmbeddingGemma 2 only: the recent leg is calibrated
   per embedding contract (#87).** The recent-interactions leg scored a flat
   0.35, a value set on BGE-M3's cosine scale. Under EmbeddingGemma 2 (768
