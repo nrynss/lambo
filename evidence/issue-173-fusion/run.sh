@@ -9,9 +9,14 @@ cd "$(dirname "$0")/../.."
 # and is never overwritten (the fixture set may have changed since). Compare
 # with: python3 evidence/issue-173-fusion/summarise.py "$OUT"
 OUT="${OUT:-evidence/issue-173-fusion/runs-rerun}"
-case "$(basename "$OUT")" in
-  runs|runs-v2) echo "refusing to overwrite the archived $OUT; set OUT to a new directory" >&2; exit 2 ;;
-esac
+# Compare resolved paths, so runs/., ./runs/ or a symlink cannot slip past.
+real() { python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$1"; }
+for archived in evidence/issue-173-fusion/runs evidence/issue-173-fusion/runs-v2; do
+  if [ "$(real "$OUT")" = "$(real "$archived")" ]; then
+    echo "refusing to overwrite the archived $archived; set OUT to a new directory" >&2
+    exit 2
+  fi
+done
 DEV="max max:wd=0 rrf:k=60 rrf:k=60,wd=0 rrf:k=60,recent=0 rrf:k=0 rrf:k=1 rrf:k=2
  rrf:k=3 rrf:k=5 rrf:k=10 rrf:k=20 rrf:k=30 rrf:k=100 rrf:k=3,recent=0 rrf:k=3,recent=0.6
  rrf:k=3,keyword=0.5 rrf:k=3,vector=0.5 rrf:k=3,wd=0 rrf:k=3,wd=0.3"

@@ -215,6 +215,16 @@ impl Embedder for CachedEmbedder {
     }
 }
 
+/// One cached vector, or `None` (a cache miss) unless every element is a
+/// number and there are exactly `dim` of them: a damaged line is embedded
+/// again rather than served short or misaligned.
+fn cached_vector(vs: &[Value], dim: usize) -> Option<Vec<f32>> {
+    if vs.len() != dim {
+        return None;
+    }
+    vs.iter().map(|x| x.as_f64().map(|x| x as f32)).collect()
+}
+
 fn concept_type(kind: &str) -> Result<ConceptType, String> {
     Ok(match kind {
         "Entity" => ConceptType::Entity,
@@ -366,16 +376,13 @@ async fn run() -> Result<(), String> {
     };
     if let Some(path) = &args.cache {
         use std::io::BufRead;
+        let dim = cached.inner.dimensions();
         if let Ok(f) = std::fs::File::open(path) {
             for line in std::io::BufReader::new(f).lines().map_while(Result::ok) {
                 if let Ok(v) = serde_json::from_str::<Value>(&line)
                     && let (Some(k), Some(vs)) = (v["key"].as_str(), v["v"].as_array())
+                    && let Some(vec) = cached_vector(vs, dim)
                 {
-                    let vec: Vec<f32> = vs
-                        .iter()
-                        .filter_map(|x| x.as_f64())
-                        .map(|x| x as f32)
-                        .collect();
                     cached.stored.insert(k.to_string(), vec);
                 }
             }
