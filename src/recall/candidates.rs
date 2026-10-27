@@ -436,7 +436,10 @@ fn rank(
     let leg_ranks = |pick: fn(&LegScores) -> Option<f64>, legs: &LegProvenance| {
         let mut members: Vec<(NodeId, f64)> = legs
             .iter()
-            .filter_map(|(id, l)| pick(l).map(|s| (*id, s)))
+            // A non-finite leg score (a bad store cosine) earns no rank:
+            // total_cmp would put a positive NaN first. The raw score stays
+            // on the hit for the ledger, and `max` still sanitises it.
+            .filter_map(|(id, l)| pick(l).filter(|s| s.is_finite()).map(|s| (*id, s)))
             .collect();
         members.sort_by(|a, b| order(*a, *b));
         members
@@ -1675,6 +1678,22 @@ mod tests {
         assert_eq!(blank[0].score, 1.0);
         let bare = candidates_without_keyword(&g, input());
         assert_eq!(bare[0].score, 1.0);
+    }
+
+    #[test]
+    fn a_non_finite_leg_score_earns_no_rrf_rank() {
+        let g = planted_graph().0;
+        let mut legs: LegProvenance = HashMap::from([
+            (cid(1), leg(None, Some(f64::NAN))),
+            (cid(3), leg(None, Some(0.4))),
+            (cid(4), leg(None, Some(f64::INFINITY))),
+        ]);
+        let out = rank(&mut legs, &g, &rrf(), false);
+        assert_eq!(out[0].item, cid(3), "{out:?}");
+        assert_eq!(legs[&cid(3)].vector_rank, Some(1));
+        assert_eq!(legs[&cid(1)].vector_rank, None);
+        assert_eq!(legs[&cid(4)].vector_rank, None);
+        assert!(out.iter().all(|s| s.score.is_finite()), "{out:?}");
     }
 
     #[test]

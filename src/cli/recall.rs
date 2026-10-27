@@ -331,12 +331,7 @@ async fn run_on(
     };
     compatible.map_err(|e| CliError::Runtime(e.to_string()))?;
 
-    let cfg = Config {
-        // #87: `[embedder] calibration` is a recall setting, so the one-shot
-        // reader honours it like a session does.
-        calibration: backends.config.calibration,
-        ..Config::default()
-    };
+    let cfg = reader_config(&backends.config);
     let query = request.query.as_str();
     // Do NOT spawn: spawn would run GC, which is a writer. Config::default()
     // for knobs — same as `lambo serve` today (T82-12 is not T8.3's to fix).
@@ -537,9 +532,38 @@ pub(crate) fn render_cli_text(detail: &DetailedRecall) -> String {
     }
 }
 
+/// The one-shot reader's daemon config: the defaults, plus the resolved
+/// settings that shape recall itself, so `lambo recall` and `serve-web` rank
+/// like a session does. #87: `[embedder] calibration`; #173: `[fusion]`.
+fn reader_config(resolved: &Config) -> Config {
+    Config {
+        calibration: resolved.calibration,
+        recall_fusion: resolved.recall_fusion,
+        ..Config::default()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #173: `[fusion]` reaches the one-shot reader (`lambo recall`,
+    /// `serve-web`), not only a session.
+    #[test]
+    fn the_reader_config_carries_calibration_and_fusion() {
+        use crate::recall::fusion::{FusionKind, RecallFusion};
+        let resolved = Config {
+            recall_fusion: RecallFusion {
+                kind: FusionKind::Rrf,
+                k: 7.0,
+                ..RecallFusion::default()
+            },
+            ..Config::default()
+        };
+        let cfg = reader_config(&resolved);
+        assert_eq!(cfg.recall_fusion, resolved.recall_fusion);
+        assert_eq!(cfg.calibration, resolved.calibration);
+    }
 
     /// E2E-5: a warnings-only detailed result (the daemon's early refusal
     /// paths — limit validation, session mismatch — and the missing-index
