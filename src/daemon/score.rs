@@ -402,6 +402,10 @@ impl SessionContext {
     }
 
     /// Highest [`Self::derivations`] over the session's concepts.
+    ///
+    /// Test-only: production scoring reads the field directly, and a
+    /// non-test build does not call this.
+    #[cfg(test)]
     pub(crate) fn max_derivations(&self) -> usize {
         self.max_derived_by
     }
