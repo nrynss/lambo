@@ -378,7 +378,17 @@ pub fn stale_dependents(
     min_age: Duration,
     now: DateTime<Utc>,
 ) -> Vec<NodeId> {
-    if contradiction_at(graph, cited, min_age, now).is_none() {
+    stale_dependents_with(graph, cited, min_age, now, &WriterTimeline::of(graph))
+}
+
+fn stale_dependents_with(
+    graph: &Graph,
+    cited: NodeId,
+    min_age: Duration,
+    now: DateTime<Utc>,
+    timeline: &WriterTimeline,
+) -> Vec<NodeId> {
+    if contradiction_at_with(graph, cited, min_age, now, timeline).is_none() {
         return Vec::new();
     }
     let mut dependents: Vec<_> = graph
@@ -409,6 +419,20 @@ pub struct StaleReport {
 
 pub const STALE_REPORT_LIMIT: usize = 50;
 
+/// Maximum retained UTF-8 bytes of entry strings per write receipt.
+pub const STALE_RECEIPT_BYTES: usize = 2048;
+
+impl StaleReport {
+    pub fn bound_for_receipt(&mut self) {
+        let mut bytes = 0;
+        self.dependents.retain(|entry| {
+            bytes += entry.id.len() + entry.cited_id.len() + entry.content.len();
+            bytes <= STALE_RECEIPT_BYTES
+        });
+        self.dependents.shrink_to_fit();
+    }
+}
+
 pub fn stale_report(
     graph: &Graph,
     targets: impl IntoIterator<Item = NodeId>,
@@ -430,8 +454,9 @@ pub fn stale_report_page(
     targets.dedup();
     let mut dependents = Vec::new();
     let mut total = 0;
+    let timeline = WriterTimeline::of(graph);
     for cited in targets {
-        for id in stale_dependents(graph, cited, min_age, now) {
+        for id in stale_dependents_with(graph, cited, min_age, now, &timeline) {
             if total >= offset && dependents.len() < STALE_REPORT_LIMIT {
                 if let Some(c) = concept(graph, id) {
                     dependents.push(StaleDependent {

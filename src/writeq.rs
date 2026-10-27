@@ -77,6 +77,8 @@ mod calibration;
 mod counters;
 mod drain;
 mod execution;
+#[cfg(test)]
+pub(crate) use execution::REPORT_GATE;
 mod receipts;
 mod replay;
 

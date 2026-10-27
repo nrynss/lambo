@@ -645,3 +645,160 @@ async fn an_against_write_by_another_agent_raises_no_conflict() {
     );
     mem.close().await.unwrap();
 }
+
+/// The graph persists stale dependencies; durable receipts retain their summary,
+/// not the in-process report payload.
+#[cfg(feature = "store-sqlite")]
+#[tokio::test]
+async fn stale_dependencies_survive_restart_but_receipt_payload_does_not() {
+    let dir = crate::test_util::ScratchDir::new("stale-restart");
+    let path = dir.join("memory.db");
+    let open = |path: std::path::PathBuf| async move {
+        let store = crate::store::SqliteStore::connect(path.to_str().unwrap()).unwrap();
+        store.init_schema().await.unwrap();
+        Arc::new(store) as Arc<dyn GraphStore>
+    };
+    let store = open(path.clone()).await;
+    let mem = memory_with(
+        store.clone(),
+        "stale-restart",
+        MatchStrategy::Canonical,
+        Arc::new(FixtureEmbedder::new()),
+    )
+    .await;
+    let agent = AgentId::new("agent-a");
+    let target = belief(&mem, BELIEF).await;
+    mem.record_action_as(
+        &agent,
+        &Action {
+            repo_scope: None,
+            event_time: None,
+            action: "continue using charger",
+            produces: &[],
+            modifies: &[],
+            depends_on: &[BELIEF],
+        },
+    )
+    .unwrap();
+    let newer = "the charger overheated";
+    let submitted = mem
+        .derive_cited_async_as(
+            &agent,
+            &[(newer, ConceptType::Logic)],
+            &ParentOf::none(),
+            &[against(newer, &[&target.0.to_string()])],
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        settle(&mem, submitted.receipt).await,
+        ReceiptAnswer::Applied(_)
+    ));
+    mem.close().await.unwrap();
+    drop(mem);
+    let reopened = memory_with(
+        open(path).await,
+        "stale-restart",
+        MatchStrategy::Canonical,
+        Arc::new(FixtureEmbedder::new()),
+    )
+    .await;
+    let report = crate::daemon::contradiction::stale_report(
+        &reopened.graph.read(),
+        [target],
+        Duration::ZERO,
+        chrono::Utc::now(),
+    );
+    assert_eq!(report.total, 1);
+    assert_eq!(report.dependents[0].content, "continue using charger");
+    let recovered = reopened.pipeline().lookup(&agent, submitted.receipt);
+    assert!(
+        matches!(recovered, ReceiptAnswer::AppliedAfterRestart(_)),
+        "{recovered:?}"
+    );
+    reopened.close().await.unwrap();
+}
+
+/// Pause report construction at the commit boundary and race a writer for
+/// the graph lock. The writer cannot alter the graph before capture.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stale_receipt_capture_excludes_interleaving_writers() {
+    for (strategy, is_action) in [
+        (MatchStrategy::Canonical, false),
+        (MatchStrategy::Hybrid, false),
+        (MatchStrategy::Canonical, true),
+        (MatchStrategy::Hybrid, true),
+    ] {
+        let mem = if strategy == MatchStrategy::Hybrid {
+            hybrid("stale-lock-h").await
+        } else {
+            canonical("stale-lock-c").await
+        };
+        let agent = AgentId::new("agent-c");
+        let target = belief(&mem, BELIEF).await;
+        mem.record_action_as(
+            &AgentId::new("agent-b"),
+            &Action {
+                repo_scope: None,
+                event_time: None,
+                action: "dependent charger advice",
+                produces: &[],
+                modifies: &[],
+                depends_on: &[BELIEF],
+            },
+        )
+        .unwrap();
+        let dependent = node_of(&mem, "dependent charger advice");
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        *crate::writeq::REPORT_GATE.lock().unwrap() = Some((target, entered_tx, release_rx));
+        let newer = "charger is unsafe";
+        let submitted = if is_action {
+            mem.record_action_against_async_as(&agent, &action(newer), &[target.0.to_string()])
+                .await
+                .unwrap()
+        } else {
+            mem.derive_cited_async_as(
+                &agent,
+                &[(newer, ConceptType::Logic)],
+                &ParentOf::none(),
+                &[against(newer, &[&target.0.to_string()])],
+                None,
+            )
+            .await
+            .unwrap()
+        };
+        tokio::task::spawn_blocking(move || {
+            entered_rx.recv_timeout(Duration::from_secs(10)).unwrap()
+        })
+        .await
+        .unwrap();
+        assert!(
+            mem.graph.try_write().is_none(),
+            "{strategy:?}, action={is_action}: report capture must hold the commit lock"
+        );
+        let graph = mem.graph.clone();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let writer = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            graph.write().remove_node(dependent).unwrap();
+        });
+        started_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        release_tx.send(()).unwrap();
+        writer.join().unwrap();
+        let answer = mem
+            .pipeline()
+            .wait(&agent, submitted.receipt, RECEIPT_WAIT_MAX)
+            .await;
+        let ReceiptAnswer::Applied(summary) = answer else {
+            panic!("{answer:?}")
+        };
+        assert_eq!(
+            summary.stale_report.unwrap().total,
+            1,
+            "receipt must describe the commit before the dependent was removed"
+        );
+        mem.close().await.unwrap();
+    }
+}

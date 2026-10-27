@@ -51,6 +51,7 @@ use crate::types::{
 /// tasks, and `Memory`'s `Drop` is load-bearing (it aborts tasks and lets the
 /// lease lapse). Every field here is already an `Arc` inside `Memory`, so this
 /// is clones of shared state, not a second copy of anything.
+#[derive(Clone)]
 pub(crate) struct WriteCtx {
     pub(crate) session: SessionId,
     pub(crate) clock: crate::daemon::Clock,
@@ -236,21 +237,52 @@ pub(super) fn action_sentence(
     }
 }
 
+#[cfg(test)]
+pub(crate) static REPORT_GATE: std::sync::Mutex<
+    Option<(
+        crate::types::NodeId,
+        std::sync::mpsc::Sender<()>,
+        std::sync::mpsc::Receiver<()>,
+    )>,
+> = std::sync::Mutex::new(None);
+
 impl WriteCtx {
     fn stale_report(
         &self,
+        graph: &Graph,
         targets: &[crate::types::PinnedReference],
     ) -> Option<crate::daemon::contradiction::StaleReport> {
         if targets.is_empty() {
             return None;
         }
-        let graph = self.graph.read();
-        Some(crate::daemon::contradiction::stale_report(
-            &graph,
+        #[cfg(test)]
+        {
+            let gate = {
+                let mut gate = REPORT_GATE.lock().unwrap();
+                if gate
+                    .as_ref()
+                    .is_some_and(|(id, _, _)| targets.iter().any(|p| p.target == *id))
+                {
+                    gate.take()
+                } else {
+                    None
+                }
+            };
+            if let Some((_, entered, release)) = gate {
+                entered.send(()).unwrap();
+                release
+                    .recv_timeout(std::time::Duration::from_secs(10))
+                    .unwrap();
+            }
+        }
+        let mut report = crate::daemon::contradiction::stale_report(
+            graph,
             targets.iter().map(|p| p.target),
             self.contradiction_evidence_min_age,
             (self.clock)(),
-        ))
+        );
+        report.bound_for_receipt();
+        Some(report)
     }
     /// The vector-candidate source a background job's hybrid derive and
     /// record-action embed gate are given (#27's caller-side seam): the twin
@@ -330,13 +362,16 @@ impl WriteCtx {
                             .into(),
                     ));
                 }
+                let report_slot = std::sync::Arc::new(parking_lot::Mutex::new(None));
                 let outcome = match strategy {
                     MatchStrategy::Hybrid => {
-                        let on_commit: Option<hybrid::CommitHook> = consume.map(|stamp| {
-                            let receipt = job.receipt.to_string();
-                            Box::new(
-                                move |g: &mut Graph,
-                                      outcome: &crate::graph::derive::DeriveOutcome| {
+                        let receipt = job.receipt.to_string();
+                        let report_slot = report_slot.clone();
+                        let targets = pinned.against.clone();
+                        let ctx = self.clone();
+                        let on_commit: Option<hybrid::CommitHook> = Some(Box::new(
+                            move |g: &mut Graph, outcome: &crate::graph::derive::DeriveOutcome| {
+                                if let Some(stamp) = consume {
                                     g.consume_write_intent(
                                         receipt,
                                         WriteIntentOutcome {
@@ -347,9 +382,10 @@ impl WriteCtx {
                                             consumed_at: stamp.at,
                                         },
                                     );
-                                },
-                            ) as hybrid::CommitHook
-                        });
+                                }
+                                *report_slot.lock() = ctx.stale_report(g, &targets);
+                            },
+                        ));
                         hybrid::derive_with(
                             self.graph.clone(),
                             self.derive_vector_candidates(),
@@ -389,6 +425,7 @@ impl WriteCtx {
                                 },
                             );
                         }
+                        *report_slot.lock() = self.stale_report(&g, &pinned.against);
                         outcome
                     }
                 };
@@ -417,7 +454,7 @@ impl WriteCtx {
                     reinforced: Some(outcome.reinforced),
                     edges: None,
                     embedded,
-                    stale_report: self.stale_report(&pinned.against),
+                    stale_report: report_slot.lock().take(),
                 })
             }
             JobPayload::Action {
@@ -458,7 +495,7 @@ impl WriteCtx {
                     }
                     MatchStrategy::Hybrid | MatchStrategy::Canonical => ActionEmbeddings::new(),
                 };
-                let outcome = {
+                let (outcome, stale_report) = {
                     let mut g = self.graph.write();
                     // Stamp the space this call's vectors live in, or verify the
                     // stamp already there. Same rule as `hybrid::derive`'s
@@ -489,7 +526,8 @@ impl WriteCtx {
                             },
                         );
                     }
-                    outcome
+                    let report = self.stale_report(&g, against);
+                    (outcome, report)
                 };
                 let mut touched = outcome.created.clone();
                 touched.push(outcome.action_node);
@@ -513,7 +551,7 @@ impl WriteCtx {
                         MatchStrategy::Hybrid => Some(outcome.embedded),
                         MatchStrategy::Canonical => None,
                     },
-                    stale_report: self.stale_report(against),
+                    stale_report,
                 })
             }
         }

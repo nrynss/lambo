@@ -670,7 +670,8 @@ impl ReceiptAnswer {
             ReceiptAnswer::Failed(why) => format!("FAILED, nothing was written — {why}"),
             ReceiptAnswer::AppliedAfterRestart(summary) => format!(
                 "applied after a restart — {summary} (confirmed from the durable intent \
-                 record; recall to see the concepts)"
+                 record; recall to see the concepts; stale report details are not retained \
+                 across restart — use lambo_stale for the current state)"
             ),
             ReceiptAnswer::IntentRecorded => "not applied before this session closed — the \
                                               validated write is recorded as a DURABLE INTENT \

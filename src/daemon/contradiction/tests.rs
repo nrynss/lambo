@@ -1025,3 +1025,39 @@ fn contradiction_timing() {
         p50(warm_us)
     );
 }
+
+#[test]
+fn stale_page_builds_one_timeline_for_many_targets() {
+    let mut s = base(CanonizationStatus::None);
+    for n in 10..30 {
+        s.concept(n, 2, "agent-b", &format!("target {n}"), 100);
+        s.edge(100 + n, EdgeType::Contradicts, 2, n, 200, None);
+    }
+    crate::daemon::conflict::TIMELINE_BUILDS.with(|n| n.set(0));
+    let _ = stale_report(&s.g, (10..30).map(cid), MIN_AGE, t(1000));
+    crate::daemon::conflict::TIMELINE_BUILDS.with(|n| assert_eq!(n.get(), 1));
+}
+
+#[test]
+fn receipt_report_bounds_worst_case_utf8_and_keeps_total() {
+    let mut report = StaleReport {
+        dependents: (0..STALE_REPORT_LIMIT)
+            .map(|_| StaleDependent {
+                id: "a".repeat(36),
+                cited_id: "b".repeat(36),
+                content: "😀".repeat(160),
+            })
+            .collect(),
+        total: 500,
+    };
+    report.bound_for_receipt();
+    let bytes: usize = report
+        .dependents
+        .iter()
+        .map(|d| d.id.len() + d.cited_id.len() + d.content.len())
+        .sum();
+    assert!(bytes <= STALE_RECEIPT_BYTES);
+    assert_eq!(report.dependents.len(), 2);
+    assert_eq!(report.total, 500);
+    assert!(report.total > report.dependents.len());
+}
