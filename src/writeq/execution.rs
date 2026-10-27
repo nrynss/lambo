@@ -53,6 +53,8 @@ use crate::types::{
 /// is clones of shared state, not a second copy of anything.
 pub(crate) struct WriteCtx {
     pub(crate) session: SessionId,
+    pub(crate) clock: crate::daemon::Clock,
+    pub(crate) contradiction_evidence_min_age: std::time::Duration,
     pub(crate) graph: Arc<RwLock<Graph>>,
     pub(crate) index: Arc<RwLock<InvertedIndex>>,
     pub(crate) store: Arc<dyn GraphStore>,
@@ -235,6 +237,21 @@ pub(super) fn action_sentence(
 }
 
 impl WriteCtx {
+    fn stale_report(
+        &self,
+        targets: &[crate::types::PinnedReference],
+    ) -> Option<crate::daemon::contradiction::StaleReport> {
+        if targets.is_empty() {
+            return None;
+        }
+        let graph = self.graph.read();
+        Some(crate::daemon::contradiction::stale_report(
+            &graph,
+            targets.iter().map(|p| p.target),
+            self.contradiction_evidence_min_age,
+            (self.clock)(),
+        ))
+    }
     /// The vector-candidate source a background job's hybrid derive and
     /// record-action embed gate are given (#27's caller-side seam): the twin
     /// of `Memory::vector_candidates`, built by the same constructor
@@ -400,6 +417,7 @@ impl WriteCtx {
                     reinforced: Some(outcome.reinforced),
                     edges: None,
                     embedded,
+                    stale_report: self.stale_report(&pinned.against),
                 })
             }
             JobPayload::Action {
@@ -495,6 +513,7 @@ impl WriteCtx {
                         MatchStrategy::Hybrid => Some(outcome.embedded),
                         MatchStrategy::Canonical => None,
                     },
+                    stale_report: self.stale_report(against),
                 })
             }
         }

@@ -299,7 +299,8 @@ impl WritePipeline {
                                 Some(serde_json::Value::Object(summary.ledger_facts())),
                             ));
                         }
-                        ReceiptAnswer::AppliedAfterRestart(summary.summary)
+                        let detail = ReceiptAnswer::Applied(summary).describe();
+                        ReceiptAnswer::AppliedAfterRestart(detail)
                     }
                     // #125 (Sonnet review): a vector-candidate lookup that
                     // did not answer within its own budget. The embedder answered before it, so

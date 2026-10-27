@@ -3,7 +3,7 @@
 use super::*;
 
 /// A text-only deployment (BGE-M3, candle, Gemini; client vectors off)
-/// publishes exactly the seven spec tools: #22's image tool is not listed
+/// publishes the seven spec tools and `lambo_stale`: #22's image tool is not listed
 /// where it cannot work (design 6.1).
 #[tokio::test]
 async fn the_router_publishes_exactly_the_seven_spec_tools() {
@@ -19,9 +19,10 @@ async fn the_router_publishes_exactly_the_seven_spec_tools() {
             "lambo_record_action",
             "lambo_reserve",
             "lambo_saints",
+            "lambo_stale",
             "lambo_stats",
         ],
-        "spec §6.2 names the seven tools exactly; adding or renaming one is a spec change"
+        "the spec tools and #208's read tool must be published"
     );
     s.mem.close().await.expect("close");
 }
@@ -51,7 +52,7 @@ async fn the_image_tool_is_listed_only_where_it_can_work() {
 
     let images = server("mcp-list-images").await;
     assert!(listed(&images), "an image embedder makes the tool useful");
-    assert_eq!(tools(&images).len(), 8);
+    assert_eq!(tools(&images).len(), 9);
     images.mem.close().await.expect("close");
 }
 
@@ -88,10 +89,10 @@ async fn published_tool_schemas_are_pinned_to_the_golden() {
         }
     };
     let text = text_only_server("mcp-golden-text", Config::default()).await;
-    check(&text, 7);
+    check(&text, 8);
     text.mem.close().await.expect("close");
     let images = server("mcp-golden-images").await;
-    check(&images, 8);
+    check(&images, 9);
     images.mem.close().await.expect("close");
 }
 
@@ -338,6 +339,7 @@ async fn f18_tool_schemas_match_the_golden_property_set() {
             vec!["agent_id", "node_id", "release", "scope", "ttl_seconds"],
         ),
         ("lambo_saints", vec!["agent_id", "scope"]),
+        ("lambo_stale", vec!["agent_id", "offset", "scope"]),
         ("lambo_stats", vec!["agent_id", "receipt", "wait_ms"]),
         // #22 PR 4. `event_time` is the same historical about-time as on the
         // two text writes; nothing else here is a time.
@@ -687,6 +689,7 @@ async fn every_published_tool_name_is_exercised_by_the_test_harness() {
                     | "lambo_reserve"
                     | "lambo_inspect"
                     | "lambo_saints"
+                    | "lambo_stale"
                     | "lambo_stats"
                     | "lambo_derive_image"
             ),

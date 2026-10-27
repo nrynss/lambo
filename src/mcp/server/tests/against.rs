@@ -7,6 +7,53 @@ use crate::types::EdgeType;
 
 const BELIEF: &str = "brand y chargers are safe to leave plugged in";
 
+#[tokio::test]
+async fn stale_report_is_delivered_on_receipt_and_session_read() {
+    let s = server("mcp-stale-report").await;
+    let belief = belief(&s).await;
+    let dependent = derive_created(
+        &s,
+        "agent-b",
+        json!([{
+            "content": "keep using this charger", "concept_type": "logic",
+            "depends_on": [belief.0.to_string()]
+        }]),
+    )
+    .await
+    .remove(0);
+    for (tool, args) in [
+        (
+            "lambo_derive",
+            json!({"agent_id":"agent-c", "concepts":[{"content":"charger is unsafe", "concept_type":"logic", "against":[belief.0.to_string()]}]}),
+        ),
+        (
+            "lambo_record_action",
+            json!({"agent_id":"agent-d", "action":"recall the charger", "against":[belief.0.to_string()]}),
+        ),
+    ] {
+        let ack = call_raw(&s, tool, args.clone()).await;
+        let receipt = ack.structured_content.unwrap()["receipt"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let out = call_raw(
+            &s,
+            "lambo_stats",
+            json!({"agent_id":args["agent_id"], "receipt":receipt, "wait_ms":34000}),
+        )
+        .await;
+        let report = &out.structured_content.as_ref().unwrap()["receipt"]["stale_report"];
+        assert_eq!(report["total"], 1, "{report}");
+        assert_eq!(report["dependents"][0]["id"], dependent);
+        assert_eq!(report["dependents"][0]["cited_id"], belief.0.to_string());
+    }
+    let read = call_raw(&s, "lambo_stale", json!({"agent_id":"agent-b"})).await;
+    let report = &read.structured_content.as_ref().unwrap()["stale_report"];
+    assert_eq!(report["total"], 1);
+    assert_eq!(report["dependents"][0]["id"], dependent);
+    s.mem.close().await.expect("close");
+}
+
 async fn belief(s: &LamboServer) -> NodeId {
     let ids = derive_created(
         s,

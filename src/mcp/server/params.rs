@@ -400,6 +400,28 @@ pub struct SaintsParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub struct StaleParams {
+    /// Id of the agent making this call. Use one stable id for the agent's
+    /// whole life, never one per call, task or topic (good: your model or
+    /// client id, such as `claude-opus-5-5` or `gpt-5.6`, with a stable
+    /// instance suffix such as `-worker-2` if several run at once; bad:
+    /// `b1-review`, `implement-m12`). Caller-asserted and unverified: work is
+    /// recorded under exactly the id you send, so a stable id keeps your
+    /// attribution whole. Agents sharing an id share soft locks and can
+    /// release each other's; concurrent agents that must keep out of each
+    /// other's edits need distinct stable ids.
+    #[schemars(length(max = 16_384))]
+    pub agent_id: String,
+    /// Session or shared layer; omitted selects this session.
+    #[schemars(length(max = 16_384))]
+    pub scope: Option<String>,
+    /// Zero-based offset in the deterministic list; pages reflect current state.
+    #[schemars(range(min = 0, max = 2147483647))]
+    pub offset: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct StatsParams {
     /// Id of the agent making this call. Use one stable id for the agent's
     /// whole life, never one per call, task or topic (good: your model or

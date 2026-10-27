@@ -3,13 +3,50 @@
 use rmcp::model::{CallToolResult, ContentBlock};
 use serde_json::json;
 
-use crate::mcp::server::params::SaintsParams;
+use crate::mcp::server::params::{SaintsParams, StaleParams};
 use crate::mcp::server::trace::note_facts;
 use crate::mcp::server::LamboServer;
 
 use super::scope::{with_scope, with_session};
 
 impl LamboServer {
+    pub(in crate::mcp::server) async fn stale_impl(&self, p: StaleParams) -> CallToolResult {
+        if let Err(e) = self.check_agent_id(&p.agent_id) {
+            return e;
+        }
+        if p.offset.is_some_and(|offset| offset > i32::MAX as u32) {
+            return crate::mcp::server::response::bad_param("offset must be at most 2147483647");
+        }
+        let target = match self.target("lambo_stale", p.scope.as_deref()) {
+            Ok(t) => t,
+            Err(e) => return e,
+        };
+        let mem = target.mem(&self.mem);
+        let graph = mem.graph().read();
+        let report = crate::daemon::contradiction::stale_report_page(
+            &graph,
+            graph.concepts().map(|c| c.id),
+            mem.config().canonization_edge_min_age,
+            mem.now(),
+            p.offset.unwrap_or(0) as usize,
+        );
+        let text = format!(
+            "{} stale direct dependenc(ies), showing {} from offset {}",
+            report.total,
+            report.dependents.len(),
+            p.offset.unwrap_or(0)
+        );
+        let mut out = CallToolResult::success(vec![ContentBlock::text(format!(
+            "{}\n{}",
+            text,
+            serde_json::to_string(&report.dependents).unwrap_or_default()
+        ))]);
+        out.structured_content = Some(with_session(
+            json!({"summary": text, "stale_report": report, "offset": p.offset.unwrap_or(0), "warnings": []}),
+            &target,
+        ));
+        out
+    }
     pub(in crate::mcp::server) async fn saints_impl(&self, p: SaintsParams) -> CallToolResult {
         if let Err(e) = self.check_agent_id(&p.agent_id) {
             return e;

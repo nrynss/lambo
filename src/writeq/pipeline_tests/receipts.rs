@@ -694,6 +694,7 @@ async fn one_agent_cannot_hold_every_receipt_wait_slot() {
 #[test]
 fn ledger_facts_carry_the_metric_two_set_with_absent_keys_kept_absent() {
     let derive = AppliedSummary {
+        stale_report: None,
         kind: WriteKind::Derive,
         summary: "a sentence that must not reach the ledger".into(),
         created: vec!["id-1".into()],
@@ -713,6 +714,7 @@ fn ledger_facts_carry_the_metric_two_set_with_absent_keys_kept_absent() {
         })
     );
     let action = AppliedSummary {
+        stale_report: None,
         kind: WriteKind::RecordAction,
         semantic_merged: None,
         reinforced: None,

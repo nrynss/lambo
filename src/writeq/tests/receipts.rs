@@ -104,6 +104,7 @@ fn every_answer_has_a_distinct_tag_and_none_of_them_is_unknown() {
         ReceiptAnswer::Pending,
         ReceiptAnswer::PendingReplay,
         ReceiptAnswer::Applied(AppliedSummary {
+            stale_report: None,
             kind: WriteKind::Derive,
             summary: "x".into(),
             created: Vec::new(),

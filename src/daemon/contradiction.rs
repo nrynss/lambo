@@ -371,6 +371,82 @@ pub fn supporting_citation(
     (!contradicts_it).then_some((citer, cited))
 }
 
+/// Direct concepts currently resting on a contradicted concept, in id order.
+pub fn stale_dependents(
+    graph: &Graph,
+    cited: NodeId,
+    min_age: Duration,
+    now: DateTime<Utc>,
+) -> Vec<NodeId> {
+    if contradiction_at(graph, cited, min_age, now).is_none() {
+        return Vec::new();
+    }
+    let mut dependents: Vec<_> = graph
+        .incident_edges(cited)
+        .into_iter()
+        .filter_map(|e| supporting_citation(graph, e, now))
+        .filter_map(|(citer, target)| (target == cited).then_some(citer))
+        .collect();
+    dependents.sort_by_key(|id| id.0);
+    dependents.dedup();
+    dependents
+}
+
+/// A direct dependent and the contradicted concept it cites.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct StaleDependent {
+    pub id: String,
+    pub content: String,
+    pub cited_id: String,
+}
+
+/// Bounded report of direct stale dependencies, ordered by cited and dependent id.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct StaleReport {
+    pub dependents: Vec<StaleDependent>,
+    pub total: usize,
+}
+
+pub const STALE_REPORT_LIMIT: usize = 50;
+
+pub fn stale_report(
+    graph: &Graph,
+    targets: impl IntoIterator<Item = NodeId>,
+    min_age: Duration,
+    now: DateTime<Utc>,
+) -> StaleReport {
+    stale_report_page(graph, targets, min_age, now, 0)
+}
+
+pub fn stale_report_page(
+    graph: &Graph,
+    targets: impl IntoIterator<Item = NodeId>,
+    min_age: Duration,
+    now: DateTime<Utc>,
+    offset: usize,
+) -> StaleReport {
+    let mut targets: Vec<_> = targets.into_iter().collect();
+    targets.sort_by_key(|id| id.0);
+    targets.dedup();
+    let mut dependents = Vec::new();
+    let mut total = 0;
+    for cited in targets {
+        for id in stale_dependents(graph, cited, min_age, now) {
+            if total >= offset && dependents.len() < STALE_REPORT_LIMIT {
+                if let Some(c) = concept(graph, id) {
+                    dependents.push(StaleDependent {
+                        id: id.0.to_string(),
+                        content: c.content.chars().take(160).collect(),
+                        cited_id: cited.0.to_string(),
+                    });
+                }
+            }
+            total += 1;
+        }
+    }
+    StaleReport { dependents, total }
+}
+
 /// **Stale by dependency** (#207): the concepts `node` directly cites
 /// ([`supporting_citation`]: written by `now`, and not contradicted by
 /// `node` itself) that are contradicted at `now`,

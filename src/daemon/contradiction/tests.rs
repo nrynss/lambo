@@ -721,6 +721,58 @@ fn a_concept_citing_a_contradicted_concept_is_stale() {
     assert!(stale(&s, 1, 1000).is_empty());
 }
 
+#[test]
+fn inverse_report_matches_recall_and_pages() {
+    let mut s = base(CanonizationStatus::None);
+    // A citing contradictor is excluded even if another contradictor wins.
+    s.edge(40, EdgeType::Dependency, 3, 1, 200, None);
+    for now in [150, 320, 1000] {
+        let report = stale_report(&s.g, [cid(1), cid(1)], MIN_AGE, t(now));
+        let expected: Vec<_> =
+            s.g.concepts()
+                .filter(|c| {
+                    stale_citations(&s.g, c.id, MIN_AGE, t(now))
+                        .iter()
+                        .any(|h| h.node == cid(1))
+                })
+                .map(|c| c.id.0.to_string())
+                .collect();
+        let actual: Vec<_> = report.dependents.iter().map(|d| d.id.clone()).collect();
+        assert_eq!(actual.len(), expected.len());
+        assert!(actual.iter().all(|id| expected.contains(id)));
+        assert_eq!(report.total, expected.len());
+        assert_eq!(
+            stale_report_page(&s.g, [cid(1)], MIN_AGE, t(now), report.total)
+                .dependents
+                .len(),
+            0
+        );
+    }
+    later_citation(&mut s, 300);
+    assert!(stale_report(&s.g, [cid(1)], MIN_AGE, t(1000))
+        .dependents
+        .is_empty());
+}
+
+#[test]
+fn inverse_report_is_bounded_and_pages_every_pair() {
+    let mut s = base(CanonizationStatus::None);
+    for n in 10..70 {
+        s.concept(n, 2, "agent-b", &format!("dependent {n}"), 100);
+        s.edge(100 + n, EdgeType::Dependency, n, 1, 100, None);
+    }
+    let first = stale_report(&s.g, [cid(1)], MIN_AGE, t(1000));
+    let second = stale_report_page(&s.g, [cid(1)], MIN_AGE, t(1000), STALE_REPORT_LIMIT);
+    assert_eq!(first.total, 61);
+    assert_eq!(first.dependents.len(), STALE_REPORT_LIMIT);
+    assert_eq!(second.total, 61);
+    assert_eq!(second.dependents.len(), 11);
+    assert!(first
+        .dependents
+        .iter()
+        .all(|a| second.dependents.iter().all(|b| a.id != b.id)));
+}
+
 /// Before the contradiction is written, nothing is stale; the citation
 /// alone flags nothing.
 #[test]

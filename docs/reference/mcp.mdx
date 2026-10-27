@@ -534,6 +534,14 @@ Lambo resolves `focus` exactly first, then as the short id a recall block render
 {"name": "lambo_inspect", "arguments": {"agent_id": "agent-a", "focus": "user schema", "depth": 2}}
 ```
 
+### lambo_stale
+
+`lambo_stale` lists direct dependencies that currently rest on a contradicted concept in one session. Pass `agent_id`, and optionally `scope` for a shared layer and `offset` for the next page. Each row gives the dependent's full id, a content snippet, and the cited concept's id. The result has at most 50 rows and a `total` count. Pages read the current graph, so changes between calls can change the ordering and count.
+
+The report uses the same contradiction and supporting-citation rules, clock, and evidence age as recall. A concept that itself contradicts the cited concept is excluded; indirect dependencies do not count. New supporting evidence can make an earlier contradiction no longer current.
+
+For a derive or action carrying `against`, the settled receipt reports the affected targets' current stale dependents in `stale_report`, with the same bound and total. The immediate acknowledgement cannot report them. The report also appears in the piggybacked receipt text. After a restart, use `lambo_stale` to re-check the current graph; a recovered durable receipt may only retain its original summary.
+
 ### lambo_saints
 
 List the session's canonical memories, which are the concepts Lambo has promoted to canonical facts. Each row carries the node id, the content, the type, the blast radius, the access count, and when it was created. This tool takes `agent_id`, and `scope` to list one of the session's layers instead (resolved and refused as `lambo_recall`'s `scope` is).

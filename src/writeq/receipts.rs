@@ -400,6 +400,8 @@ impl WriteKind {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AppliedSummary {
     pub kind: WriteKind,
+    /// Direct dependencies currently stale on targets of this write's contradictions.
+    pub stale_report: Option<crate::daemon::contradiction::StaleReport>,
     /// One-line human summary, the same sentence the synchronous path returns.
     pub summary: String,
     /// Node ids created, truncated to [`MAX_RECEIPT_IDS`].
@@ -646,7 +648,25 @@ impl ReceiptAnswer {
                                              later one; ask again, and recall rather than \
                                              re-deriving."
                 .into(),
-            ReceiptAnswer::Applied(s) => format!("applied — {}", s.summary),
+            ReceiptAnswer::Applied(s) => {
+                let mut detail = format!("applied — {}", s.summary);
+                if let Some(report) = &s.stale_report {
+                    detail.push_str(&format!("; {} stale direct dependenc(ies)", report.total));
+                    for entry in &report.dependents {
+                        detail.push_str(&format!(
+                            "\n  - {}: {} (cites {})",
+                            entry.id, entry.content, entry.cited_id
+                        ));
+                    }
+                    if report.total > report.dependents.len() {
+                        detail.push_str(&format!(
+                            "\n  ({} more)",
+                            report.total - report.dependents.len()
+                        ));
+                    }
+                }
+                detail
+            }
             ReceiptAnswer::Failed(why) => format!("FAILED, nothing was written — {why}"),
             ReceiptAnswer::AppliedAfterRestart(summary) => format!(
                 "applied after a restart — {summary} (confirmed from the durable intent \
