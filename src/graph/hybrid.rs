@@ -1188,7 +1188,11 @@ async fn derive_planned(
         // #193: the vector hits at or above the threshold this attempt's
         // merge guards refused.
         let mut merge_guarded = MergeGuarded::default();
+        // #198: per item, the hits the identifier guard refused at or above
+        // the threshold, for the suspected-supersession trigger at commit.
+        let mut refused_by_identifiers: Vec<Vec<NodeId>> = Vec::with_capacity(items.len());
         for (content, concept_type, key, matched) in &items {
+            let mut refused_here: Vec<NodeId> = Vec::new();
             let res = match matched {
                 Some(node) => Resolution::CanonicalMatch { node: *node },
                 // #22: the image item takes its supplied vector. No embed, no
@@ -1273,6 +1277,9 @@ async fn derive_planned(
                                     };
                                     if hit.score >= semantic_match_threshold {
                                         merge_guarded.count(why);
+                                        if why == MergeGuard::Identifiers {
+                                            refused_here.push(hit.item);
+                                        }
                                     }
                                     false
                                 });
@@ -1336,6 +1343,7 @@ async fn derive_planned(
                 }
             };
             resolutions.push(res);
+            refused_by_identifiers.push(refused_here);
         }
 
         // Issue #16 §2: embed the `parent_of` ends this call will create, under
@@ -1511,9 +1519,14 @@ async fn derive_planned(
             // normalize together ("UserSchema" / "user schema") resolve to one
             // node, matching what the non-Observation path already does.
             let mut call_by_key: HashMap<String, NodeId> = HashMap::with_capacity(items.len());
+            // #198: the concepts this call created, with the hits the
+            // identifier guard refused for them, judged after step 7.
+            let mut suspects: Vec<(NodeId, &[NodeId])> = Vec::new();
 
-            for ((content, concept_type, _key, _matched), res) in
-                items.iter().zip(resolutions.iter())
+            for (((content, concept_type, _key, _matched), res), refused) in items
+                .iter()
+                .zip(resolutions.iter())
+                .zip(refused_by_identifiers.iter())
             {
                 // MAJOR-1 (P7 remediation): re-canonicalize `content` against the graph
                 // AS WRITTEN THIS CALL. Phase-1 canonicalization ran under the read
@@ -1603,6 +1616,9 @@ async fn derive_planned(
                             outcome.embedded += 1;
                         }
                         this_node = id;
+                        if !refused.is_empty() {
+                            suspects.push((id, refused));
+                        }
                     }
                     Resolution::HybridMerge {
                         key,
@@ -1698,6 +1714,9 @@ async fn derive_planned(
                             }
                         }
                         this_node = id;
+                        if !refused.is_empty() {
+                            suspects.push((id, refused));
+                        }
                     }
                 }
                 cited.by_content.insert((*content).to_string(), this_node);
@@ -1832,6 +1851,22 @@ async fn derive_planned(
                     },
                     &session_id,
                     &mut outcome,
+                )?;
+            }
+
+            // Step 8 (#198) — suspected supersession: each concept this call
+            // created against the hits the identifier guard refused for it,
+            // after the citations so a relation the call declared settles
+            // it first. Warning-only: it changes no merge, rank or score.
+            for (new, refused) in suspects {
+                outcome.suspected += crate::graph::suspected::record_refused_hits(
+                    g,
+                    new,
+                    refused,
+                    crate::graph::suspected::Stamp {
+                        created_at: interaction_created_at,
+                        event_time: interaction_event_time,
+                    },
                 )?;
             }
 

@@ -335,6 +335,10 @@ pub struct DeriveOutcome {
     /// Vector hits at or above the merge threshold that the merge guards
     /// refused (#193, hybrid only): the write did not merge into them.
     pub merge_guarded: MergeGuarded,
+    /// `SuspectedSupersedes` edges this call added (#198, hybrid only): an
+    /// identifier-refused hit that the trigger judged a possible undeclared
+    /// replacement ([`crate::graph::suspected`]).
+    pub suspected: usize,
 }
 
 /// What the hybrid merge guards refused in one call (#193), per guard:

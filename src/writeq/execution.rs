@@ -173,6 +173,14 @@ pub(super) fn derive_sentence_of(
             guarded.contradicts
         );
     }
+    // #198: said only when the trigger flagged a pair, so every other
+    // receipt reads as before.
+    if outcome.suspected > 0 {
+        sentence = format!(
+            "{sentence}; {} possible undeclared supersession(s) flagged",
+            outcome.suspected
+        );
+    }
     sentence
 }
 
