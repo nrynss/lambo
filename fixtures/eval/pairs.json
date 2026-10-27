@@ -1994,15 +1994,15 @@
   "b": "0.6.0 (#19): recall warns only when a Canonical or Venerable concept is contradicted by something newer than its support; contradicting ordinary memory is just memory.",
   "label": "related_distinct",
   "family": "correction",
-  "relation": "supersedes",
+  "relation": "distinct_entity",
   "concept_types": [
    "Constraint",
    "Constraint"
   ],
   "split": "dev",
-  "source": "corpus con-01 + authored contrast",
-  "labeller": "Grok Bot (agent)",
-  "labelled_on": "2026-10-23",
+  "source": "corpus con-01 + authored contrast; relabelled by the owner (store-3f8330e61d)",
+  "labeller": "Narayan SS (owner)",
+  "labelled_on": "2026-10-27",
   "concepts": [
    "con-01"
   ]
@@ -2056,15 +2056,15 @@
   "b": "0.6.0: GC protects a concept that contradicts a Venerable or Canonical concept until that target is demoted; contradicting ordinary memory protects nothing.",
   "label": "related_distinct",
   "family": "correction",
-  "relation": "supersedes",
+  "relation": "distinct_entity",
   "concept_types": [
    "Constraint",
    "Constraint"
   ],
   "split": "dev",
-  "source": "corpus con-03 + authored contrast",
-  "labeller": "Grok Bot (agent)",
-  "labelled_on": "2026-10-23",
+  "source": "corpus con-03 + authored contrast; relabelled by the owner (store-616a2935d7)",
+  "labeller": "Narayan SS (owner)",
+  "labelled_on": "2026-10-27",
   "concepts": [
    "con-03"
   ]
@@ -2305,15 +2305,15 @@
   "b": "Before 0.6.0, canonization support counted the actions that touched a file, so a frequently edited file could become Canonical.",
   "label": "related_distinct",
   "family": "correction",
-  "relation": "supersedes",
+  "relation": "distinct_entity",
   "concept_types": [
    "Constraint",
    "Constraint"
   ],
   "split": "dev",
-  "source": "corpus cn-01 + authored contrast",
-  "labeller": "Grok Bot (agent)",
-  "labelled_on": "2026-10-23",
+  "source": "corpus cn-01 + authored contrast; relabelled by the owner (store-b70ed53db6)",
+  "labeller": "Narayan SS (owner)",
+  "labelled_on": "2026-10-27",
   "concepts": [
    "cn-01"
   ]

@@ -57,8 +57,8 @@ answers #198: `supersedes`, `distinct_entity` or `contradicts`):
 Splits (a hash of the id, about 70/30, except the #198 pairs, whose split
 is set in their module and stratified by sub-kind, about 60/40; see
 "Added for #198"): pairs 362 dev / 185 held-out; queries 239 dev / 129
-held-out. Related-distinct relations: 82 contradicts, 124 distinct_entity,
-76 supersedes (74 adjudicated: 47 dev / 27 held-out), 27 none (families
+held-out. Related-distinct relations: 82 contradicts, 127 distinct_entity,
+73 supersedes (71 adjudicated: 44 dev / 27 held-out), 27 none (families
 that need none).
 
 Queries by family:
@@ -110,14 +110,14 @@ Per consumer:
 
   | Kind | dev | held_out | All |
   |---|---:|---:|---:|
-  | `supersedes` (positives) | 46 | 27 | 73 |
-  | `distinct_entity` (hard negatives) | 43 | 29 | 72 |
+  | `supersedes` (positives) | 43 | 27 | 70 |
+  | `distinct_entity` (hard negatives) | 46 | 29 | 75 |
   | `same-event` paraphrases (hard negatives) | 5 | 3 | 8 |
 
   How many positives an embedder's merge threshold lets reach the trigger
   (a pair under the threshold is never a vector hit): under BGE-M3 at its
   0.85, measured (candle on CPU, `BAAI/bge-m3@5617a9f6`, self-framed), 62
-  of the 73 (37 dev / 25 held-out); the 11 below it are 10 earlier
+  of the 70 (37 dev / 25 held-out); the 8 below it are 7 earlier
   `correction`-family pairs, reworded rather than templated, and
   `p-198-s16`. Under EmbeddingGemma 2 at its calibrated 0.93: not measured.
   The tests require at least 60 in-regime positives and 60 in-regime
@@ -264,7 +264,7 @@ enforces the guard above on every file here.
 ## Owner rulings
 
 Every item that needed the owner's judgment was settled by the owner
-(Narayan SS, 2026-10-25). The labels are recorded in
+(Narayan SS, 2026-10-25; the version-scoped relabels on 2026-10-27). The labels are recorded in
 `authoring/owner_pairs.json` through `scripts/eval/fold_owner_labels.py`,
 and `build.py` relabels each pair in place (labeller "Narayan SS (owner)").
 The two #198 review items below await the owner.
@@ -275,6 +275,7 @@ The two #198 review items below await the owner.
 | `p-srv-04-rbd1` | J3's resolution supersedes the J2 coupled-ceiling residual: related-but-distinct, `correction`, relation `supersedes` (a, the J3 resolution, is the newer). |
 | `p-178-syn-neg-017` | Two commit hashes one hex digit apart are a typo of the same commit: paraphrase, `near-verbatim`. |
 | `p-178-syn-neg-019` | `src/main.rs` against `src/mein.rs` is a typo of the same path: paraphrase, `near-verbatim`. |
+| `p-con-01-rbd1`, `p-con-03-rbd1`, `p-cn-01-rbd1` | 2026-10-27: version-scoped, so `distinct_entity`, not `supersedes`: each text names its own version (Unreleased or 0.6.0 against 0.6.0 or before it) and both stay true of that version. They keep `correction` and their `concept_types`. |
 
 Awaiting the owner (#198):
 

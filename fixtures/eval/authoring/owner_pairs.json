@@ -53,5 +53,50 @@
   "labeller": "Narayan SS (owner)",
   "labelled_on": "2026-10-25",
   "note": "owner decision 2026-10-25: J3's resolution supersedes the J2 residual (a newer, b older)"
+ },
+ {
+  "id": "store-3f8330e61d",
+  "a": "Unreleased (#179): any concept that a newer concept contradicts, more recently than anything that supports it, carries the Contradicted warning. Before, against only flagged a Canonical or Venerable concept.",
+  "b": "0.6.0 (#19): recall warns only when a Canonical or Venerable concept is contradicted by something newer than its support; contradicting ordinary memory is just memory.",
+  "label": "related_distinct",
+  "family": "correction",
+  "relation": "distinct_entity",
+  "concept_types": [
+   "Constraint",
+   "Constraint"
+  ],
+  "labeller": "Narayan SS (owner)",
+  "labelled_on": "2026-10-27",
+  "note": "owner decision 2026-10-27: version-scoped; each text names its own version and both stay true, so distinct_entity, not supersedes"
+ },
+ {
+  "id": "store-616a2935d7",
+  "a": "Unreleased (#197): GC no longer collects the correction of a contradicted ordinary concept; a sweep protects the correction of every contradiction the detector reports, as long as the contradicted concept is still in memory. Concepts that only contradict each other keep none of themselves alive.",
+  "b": "0.6.0: GC protects a concept that contradicts a Venerable or Canonical concept until that target is demoted; contradicting ordinary memory protects nothing.",
+  "label": "related_distinct",
+  "family": "correction",
+  "relation": "distinct_entity",
+  "concept_types": [
+   "Constraint",
+   "Constraint"
+  ],
+  "labeller": "Narayan SS (owner)",
+  "labelled_on": "2026-10-27",
+  "note": "owner decision 2026-10-27: version-scoped; each text names its own version and both stay true, so distinct_entity, not supersedes"
+ },
+ {
+  "id": "store-b70ed53db6",
+  "a": "0.6.0 (#36): canonization promotes rulings, not artifacts: support comes from the concepts that depend on a ruling, counted by their distinct origin interactions with the ruling's own origin excluded, so several dependents from one interaction count once.",
+  "b": "Before 0.6.0, canonization support counted the actions that touched a file, so a frequently edited file could become Canonical.",
+  "label": "related_distinct",
+  "family": "correction",
+  "relation": "distinct_entity",
+  "concept_types": [
+   "Constraint",
+   "Constraint"
+  ],
+  "labeller": "Narayan SS (owner)",
+  "labelled_on": "2026-10-27",
+  "note": "owner decision 2026-10-27: version-scoped; each text names its own version and both stay true, so distinct_entity, not supersedes"
  }
 ]
