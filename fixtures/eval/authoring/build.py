@@ -17,6 +17,7 @@ import common  # noqa: E402
 
 MODULES = ["t_embed", "t_serve", "t_release", "t_findings", "t_paper", "t_noanswer", "t_para",
            "t_more173"]
+CONCEPT_TYPES = ("Entity", "Logic", "Constraint", "Resource", "Observation")
 LABELLER = "Grok Bot (agent)"
 LABELLED_ON = "2026-10-23"
 HELD_OUT_PERCENT = 30
@@ -95,7 +96,7 @@ pairs, seen = [], set()
 
 
 def add_pair(pid, a, b, label, family, source, relation=None, review=None, concepts=None,
-             labeller=LABELLER, labelled_on=LABELLED_ON):
+             labeller=LABELLER, labelled_on=LABELLED_ON, types=None):
     key = frozenset((a, b))
     if a == b or key in seen:
         return
@@ -103,6 +104,9 @@ def add_pair(pid, a, b, label, family, source, relation=None, review=None, conce
     e = dict(id=pid, a=a, b=b, label=label, family=family)
     if relation:
         e["relation"] = relation
+    if types:
+        assert len(types) == 2 and all(t in CONCEPT_TYPES for t in types), (pid, types)
+        e["concept_types"] = list(types)
     e.update(split=split_of(pid), source=source, labeller=labeller, labelled_on=labelled_on)
     if concepts:
         e["concepts"] = concepts
@@ -131,8 +135,9 @@ for c in common.CONCEPTS:
                  concepts=[c["id"]])
 
 for n, p in enumerate(common.EXTRA_PAIRS, 1):
-    add_pair(f"p-x{n:02d}", p["a"], p["b"], p["label"], p["family"], p["source"],
-             relation=p["relation"], review=p["review"])
+    add_pair(p["id"] or f"p-x{n:02d}", p["a"], p["b"], p["label"], p["family"], p["source"],
+             relation=p["relation"], review=p["review"], types=p["types"],
+             labelled_on=p["labelled_on"] or LABELLED_ON)
 
 # #178's labelled pairs: the dogfood-i3 file/commit-name pairs and the
 # synthetic distinct pairs. The 89 synthetic typo duplicates are left out: a
@@ -160,8 +165,11 @@ SYN = {  # id -> (family, relation, review)
 L178 = "evidence/issue-178-similar/labelled-pairs.json"
 for p in json.loads((ROOT / L178).read_text(encoding="utf-8")):
     if p["source"] == "dogfood-i3" and p["family"] == "file/commit name":
+        # File, commit and note names: a writer derives them as Resources,
+        # which #198's trigger never considers.
         add_pair(f"p-178-{p['id']}", p["a"], p["b"], "related_distinct", "identifier",
-                 f"{L178}#{p['id']} (dogfood store)", relation="distinct_entity")
+                 f"{L178}#{p['id']} (dogfood store)", relation="distinct_entity",
+                 types=("Resource", "Resource"))
     elif p["source"] == "synthetic" and p["label"] == "distinct":
         fam, relation, review = SYN[p["id"]]
         add_pair(f"p-178-{p['id']}", p["a"], p["b"], "related_distinct", fam,
@@ -209,17 +217,74 @@ for op in json.loads(owner_p.read_text(encoding="utf-8")) if owner_p.exists() el
         # The owner's label takes precedence over an agent label on the same
         # two texts; the pair keeps its id and says it was relabelled.
         old = next(p for p in pairs if frozenset((p["a"], p["b"])) == key)
-        for k in ("relation", "review"):
+        for k in ("relation", "review", "concept_types"):
             old.pop(k, None)
         old.update(a=op["a"], b=op["b"], label=op["label"], family=op["family"],
                    labeller=op["labeller"], labelled_on=op["labelled_on"],
                    source=old["source"] + f"; relabelled by the owner ({op['id']})")
         if op.get("relation"):
             old["relation"] = op["relation"]
+        if op.get("concept_types"):
+            old["concept_types"] = list(op["concept_types"])
         continue
     add_pair(f"p-owner-{op['id']}", op["a"], op["b"], op["label"], op["family"],
              "dogfood store copy, cosine-stratified sample", relation=op.get("relation"),
-             labeller=op["labeller"], labelled_on=op["labelled_on"])
+             labeller=op["labeller"], labelled_on=op["labelled_on"], types=op.get("concept_types"))
+
+# #198: the concept type each text of the earlier supersedes pairs would be
+# derived as (the anchor concept's corpus type; emb-06 is a re-pin action).
+EARLIER_TYPES = {
+    "p-emb-01-rbd1": "Observation", "p-emb-03-rbd1": "Logic", "p-emb-06-rbd1": "Resource",
+    "p-cnd-06-rbd1": "Observation", "p-cal-03-rbd1": "Constraint", "p-top-01-rbd1": "Constraint",
+    "p-srv-04-rbd1": "Logic", "p-rel-04-rbd1": "Constraint", "p-con-01-rbd1": "Constraint",
+    "p-con-03-rbd1": "Constraint", "p-cn-01-rbd1": "Constraint", "p-fnd-05-rbd1": "Logic",
+}
+for p in pairs:
+    t = EARLIER_TYPES.get(p["id"])
+    if t and "concept_types" not in p:
+        # Kept in key order: after relation, before split.
+        rest = {k: p.pop(k) for k in list(p) if k not in ("id", "a", "b", "label", "family", "relation")}
+        p["concept_types"] = [t, t]
+        p.update(rest)
+missing = [p["id"] for p in pairs if p.get("relation") == "supersedes" and "concept_types" not in p]
+assert not missing, f"supersedes pairs without concept_types: {missing}"
+
+
+def same_identifiers(a, b):
+    """src/graph/canonical.rs same_identifiers, mirrored: fold, then compare
+    the digit runs and the identifier-shaped tokens."""
+    import re
+    import unicodedata
+
+    def fold(s):
+        out, gap = [], False
+        for ch in unicodedata.normalize("NFC", s):
+            if ch in "_-" or ch.isspace():
+                gap = True
+                continue
+            if gap and out:
+                out.append(" ")
+            gap = False
+            out.append(ch.lower())
+        return "".join(out)
+
+    def ident(f):
+        toks = []
+        for t in f.split(" "):
+            t = re.sub(r"^[^\w/.]+|[^\w/.]+$", "", t).rstrip(".")
+            if t and any((c.isascii() and c.isdigit()) or c in "/." for c in t):
+                toks.append(t)
+        return toks
+
+    fa, fb = fold(a), fold(b)
+    return re.findall(r"[0-9]+", fa) == re.findall(r"[0-9]+", fb) and ident(fa) == ident(fb)
+
+
+# Every #198 pair is one the #195 identifier guard refuses; otherwise it
+# would merge and never reach the trigger.
+for p in pairs:
+    if p["id"].startswith("p-198-"):
+        assert not same_identifiers(p["a"], p["b"]), f"{p['id']}: the identifier guard would not refuse it"
 
 assert len({p["id"] for p in pairs}) == len(pairs)
 export = [{"a": p["a"], "b": p["b"]} for p in pairs

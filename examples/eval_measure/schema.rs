@@ -26,6 +26,9 @@ pub const UNRELATED_FAMILIES: [&str; 1] = ["cross-area"];
 /// Families whose pairs must say how the two texts relate (#198).
 pub const RELATION_REQUIRED: [&str; 2] = ["identifier", "correction"];
 pub const RELATIONS: [&str; 3] = ["supersedes", "distinct_entity", "contradicts"];
+/// What a pair's `concept_types` may name: the concept type each text would
+/// be derived as (#198's trigger compares them).
+pub const CONCEPT_TYPES: [&str; 5] = ["Entity", "Logic", "Constraint", "Resource", "Observation"];
 /// Query families.
 pub const ANSWERABLE_FAMILIES: [&str; 7] = [
     "fact-lookup",
@@ -94,6 +97,10 @@ pub struct Pair {
     pub family: String,
     #[serde(default)]
     pub relation: Option<String>,
+    /// `[type of a, type of b]` (#198), required on a `supersedes` pair,
+    /// whose `a` is the newer text.
+    #[serde(default)]
+    pub concept_types: Vec<String>,
     pub split: String,
     pub source: String,
     pub labeller: String,
@@ -350,6 +357,20 @@ pub fn validate(set: &EvalSet, max_bytes: usize) -> Vec<String> {
                 errors.push(format!("{what}: family {} needs a relation", p.family))
             }
             _ => {}
+        }
+        if !p.concept_types.is_empty()
+            && (p.concept_types.len() != 2
+                || p.concept_types
+                    .iter()
+                    .any(|t| !CONCEPT_TYPES.contains(&t.as_str())))
+        {
+            errors.push(format!(
+                "{what}: concept_types {:?} is not two of {CONCEPT_TYPES:?}",
+                p.concept_types
+            ));
+        }
+        if p.relation.as_deref() == Some("supersedes") && p.concept_types.is_empty() {
+            errors.push(format!("{what}: a supersedes pair needs concept_types"));
         }
         for c in &p.concepts {
             if !ids.contains(c.as_str()) {

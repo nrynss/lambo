@@ -20,6 +20,10 @@
   "label": "related_distinct",
   "family": "correction",
   "relation": "supersedes",
+  "concept_types": [
+   "Observation",
+   "Observation"
+  ],
   "split": "dev",
   "source": "corpus emb-01 + authored contrast",
   "labeller": "Grok Bot (agent)",
@@ -63,6 +67,10 @@
   "label": "related_distinct",
   "family": "correction",
   "relation": "supersedes",
+  "concept_types": [
+   "Logic",
+   "Logic"
+  ],
   "split": "dev",
   "source": "corpus emb-03 + authored contrast",
   "labeller": "Grok Bot (agent)",
@@ -165,6 +173,10 @@
   "label": "related_distinct",
   "family": "identifier",
   "relation": "supersedes",
+  "concept_types": [
+   "Resource",
+   "Resource"
+  ],
   "split": "dev",
   "source": "corpus emb-06 + authored contrast",
   "labeller": "Grok Bot (agent)",
@@ -394,6 +406,10 @@
   "label": "related_distinct",
   "family": "correction",
   "relation": "supersedes",
+  "concept_types": [
+   "Observation",
+   "Observation"
+  ],
   "split": "dev",
   "source": "corpus cnd-06 + authored contrast",
   "labeller": "Grok Bot (agent)",
@@ -696,6 +712,10 @@
   "label": "related_distinct",
   "family": "correction",
   "relation": "supersedes",
+  "concept_types": [
+   "Constraint",
+   "Constraint"
+  ],
   "split": "dev",
   "source": "corpus cal-03 + authored contrast",
   "labeller": "Grok Bot (agent)",
@@ -753,6 +773,10 @@
   "label": "related_distinct",
   "family": "correction",
   "relation": "supersedes",
+  "concept_types": [
+   "Constraint",
+   "Constraint"
+  ],
   "split": "dev",
   "source": "corpus top-01 + authored contrast",
   "labeller": "Grok Bot (agent)",
@@ -1041,14 +1065,18 @@
   "b": "J2 round-3 residual coupling, handed to J3 as ONE item: the pump's un-raced client-facing writes and the uncapped `inflight` list are the same problem. answer_lost (src/mcp/proxy.rs:1457) writes one frame per in-flight id, so the ceiling J3 chooses for outstanding receipts is also the worst-case LENGTH of an un-raced write burst to a client that may not be reading. Neither §J2 nor DIAL_BUDGET's residual section says the other exists, and both undercount the writes as 'two' when there are six un-raced Self::send sites (proxy.rs:1298, 1321, 1349, 1375, 1393, 1457).",
   "label": "related_distinct",
   "family": "correction",
+  "relation": "supersedes",
+  "concept_types": [
+   "Logic",
+   "Logic"
+  ],
   "split": "dev",
   "source": "corpus srv-04 + authored contrast; relabelled by the owner (store-d39e131d77)",
   "labeller": "Narayan SS (owner)",
   "labelled_on": "2026-10-25",
   "concepts": [
    "srv-04"
-  ],
-  "relation": "supersedes"
+  ]
  },
  {
   "id": "p-srv-05-para",
@@ -1632,6 +1660,10 @@
   "label": "related_distinct",
   "family": "correction",
   "relation": "supersedes",
+  "concept_types": [
+   "Constraint",
+   "Constraint"
+  ],
   "split": "held_out",
   "source": "corpus rel-04 + authored contrast",
   "labeller": "Grok Bot (agent)",
@@ -1963,6 +1995,10 @@
   "label": "related_distinct",
   "family": "correction",
   "relation": "supersedes",
+  "concept_types": [
+   "Constraint",
+   "Constraint"
+  ],
   "split": "dev",
   "source": "corpus con-01 + authored contrast",
   "labeller": "Grok Bot (agent)",
@@ -2021,6 +2057,10 @@
   "label": "related_distinct",
   "family": "correction",
   "relation": "supersedes",
+  "concept_types": [
+   "Constraint",
+   "Constraint"
+  ],
   "split": "dev",
   "source": "corpus con-03 + authored contrast",
   "labeller": "Grok Bot (agent)",
@@ -2266,6 +2306,10 @@
   "label": "related_distinct",
   "family": "correction",
   "relation": "supersedes",
+  "concept_types": [
+   "Constraint",
+   "Constraint"
+  ],
   "split": "dev",
   "source": "corpus cn-01 + authored contrast",
   "labeller": "Grok Bot (agent)",
@@ -2453,6 +2497,10 @@
   "label": "related_distinct",
   "family": "correction",
   "relation": "supersedes",
+  "concept_types": [
+   "Logic",
+   "Logic"
+  ],
   "split": "held_out",
   "source": "corpus fnd-05 + authored contrast",
   "labeller": "Grok Bot (agent)",
@@ -3060,6 +3108,10 @@
   "label": "related_distinct",
   "family": "identifier",
   "relation": "distinct_entity",
+  "concept_types": [
+   "Resource",
+   "Resource"
+  ],
   "split": "dev",
   "source": "evidence/issue-178-similar/labelled-pairs.json#i3-05 (dogfood store)",
   "labeller": "Grok Bot (agent)",
@@ -3072,6 +3124,10 @@
   "label": "related_distinct",
   "family": "identifier",
   "relation": "distinct_entity",
+  "concept_types": [
+   "Resource",
+   "Resource"
+  ],
   "split": "dev",
   "source": "evidence/issue-178-similar/labelled-pairs.json#i3-06 (dogfood store)",
   "labeller": "Grok Bot (agent)",
@@ -3084,6 +3140,10 @@
   "label": "related_distinct",
   "family": "identifier",
   "relation": "distinct_entity",
+  "concept_types": [
+   "Resource",
+   "Resource"
+  ],
   "split": "dev",
   "source": "evidence/issue-178-similar/labelled-pairs.json#i3-07 (dogfood store)",
   "labeller": "Grok Bot (agent)",
@@ -3096,6 +3156,10 @@
   "label": "related_distinct",
   "family": "identifier",
   "relation": "distinct_entity",
+  "concept_types": [
+   "Resource",
+   "Resource"
+  ],
   "split": "dev",
   "source": "evidence/issue-178-similar/labelled-pairs.json#i3-08 (dogfood store)",
   "labeller": "Grok Bot (agent)",
@@ -3108,6 +3172,10 @@
   "label": "related_distinct",
   "family": "identifier",
   "relation": "distinct_entity",
+  "concept_types": [
+   "Resource",
+   "Resource"
+  ],
   "split": "dev",
   "source": "evidence/issue-178-similar/labelled-pairs.json#i3-09 (dogfood store)",
   "labeller": "Grok Bot (agent)",
@@ -3120,6 +3188,10 @@
   "label": "related_distinct",
   "family": "identifier",
   "relation": "distinct_entity",
+  "concept_types": [
+   "Resource",
+   "Resource"
+  ],
   "split": "dev",
   "source": "evidence/issue-178-similar/labelled-pairs.json#i3-10 (dogfood store)",
   "labeller": "Grok Bot (agent)",
@@ -3132,6 +3204,10 @@
   "label": "related_distinct",
   "family": "identifier",
   "relation": "distinct_entity",
+  "concept_types": [
+   "Resource",
+   "Resource"
+  ],
   "split": "held_out",
   "source": "evidence/issue-178-similar/labelled-pairs.json#i3-11 (dogfood store)",
   "labeller": "Grok Bot (agent)",
@@ -3144,6 +3220,10 @@
   "label": "related_distinct",
   "family": "identifier",
   "relation": "distinct_entity",
+  "concept_types": [
+   "Resource",
+   "Resource"
+  ],
   "split": "dev",
   "source": "evidence/issue-178-similar/labelled-pairs.json#i3-12 (dogfood store)",
   "labeller": "Grok Bot (agent)",
@@ -3156,6 +3236,10 @@
   "label": "related_distinct",
   "family": "identifier",
   "relation": "distinct_entity",
+  "concept_types": [
+   "Resource",
+   "Resource"
+  ],
   "split": "dev",
   "source": "evidence/issue-178-similar/labelled-pairs.json#i3-13 (dogfood store)",
   "labeller": "Grok Bot (agent)",
@@ -3168,6 +3252,10 @@
   "label": "related_distinct",
   "family": "identifier",
   "relation": "distinct_entity",
+  "concept_types": [
+   "Resource",
+   "Resource"
+  ],
   "split": "held_out",
   "source": "evidence/issue-178-similar/labelled-pairs.json#i3-14 (dogfood store)",
   "labeller": "Grok Bot (agent)",
@@ -3180,6 +3268,10 @@
   "label": "related_distinct",
   "family": "identifier",
   "relation": "distinct_entity",
+  "concept_types": [
+   "Resource",
+   "Resource"
+  ],
   "split": "dev",
   "source": "evidence/issue-178-similar/labelled-pairs.json#i3-15 (dogfood store)",
   "labeller": "Grok Bot (agent)",
@@ -3192,6 +3284,10 @@
   "label": "related_distinct",
   "family": "identifier",
   "relation": "distinct_entity",
+  "concept_types": [
+   "Resource",
+   "Resource"
+  ],
   "split": "held_out",
   "source": "evidence/issue-178-similar/labelled-pairs.json#i3-16 (dogfood store)",
   "labeller": "Grok Bot (agent)",
@@ -3204,6 +3300,10 @@
   "label": "related_distinct",
   "family": "identifier",
   "relation": "distinct_entity",
+  "concept_types": [
+   "Resource",
+   "Resource"
+  ],
   "split": "dev",
   "source": "evidence/issue-178-similar/labelled-pairs.json#i3-17 (dogfood store)",
   "labeller": "Grok Bot (agent)",
@@ -3216,6 +3316,10 @@
   "label": "related_distinct",
   "family": "identifier",
   "relation": "distinct_entity",
+  "concept_types": [
+   "Resource",
+   "Resource"
+  ],
   "split": "dev",
   "source": "evidence/issue-178-similar/labelled-pairs.json#i3-18 (dogfood store)",
   "labeller": "Grok Bot (agent)",
@@ -3228,6 +3332,10 @@
   "label": "related_distinct",
   "family": "identifier",
   "relation": "distinct_entity",
+  "concept_types": [
+   "Resource",
+   "Resource"
+  ],
   "split": "held_out",
   "source": "evidence/issue-178-similar/labelled-pairs.json#i3-19 (dogfood store)",
   "labeller": "Grok Bot (agent)",
@@ -3240,6 +3348,10 @@
   "label": "related_distinct",
   "family": "identifier",
   "relation": "distinct_entity",
+  "concept_types": [
+   "Resource",
+   "Resource"
+  ],
   "split": "dev",
   "source": "evidence/issue-178-similar/labelled-pairs.json#i3-20 (dogfood store)",
   "labeller": "Grok Bot (agent)",
@@ -3252,6 +3364,10 @@
   "label": "related_distinct",
   "family": "identifier",
   "relation": "distinct_entity",
+  "concept_types": [
+   "Resource",
+   "Resource"
+  ],
   "split": "dev",
   "source": "evidence/issue-178-similar/labelled-pairs.json#i3-21 (dogfood store)",
   "labeller": "Grok Bot (agent)",
@@ -3264,6 +3380,10 @@
   "label": "related_distinct",
   "family": "identifier",
   "relation": "distinct_entity",
+  "concept_types": [
+   "Resource",
+   "Resource"
+  ],
   "split": "dev",
   "source": "evidence/issue-178-similar/labelled-pairs.json#i3-22 (dogfood store)",
   "labeller": "Grok Bot (agent)",
@@ -3276,6 +3396,10 @@
   "label": "related_distinct",
   "family": "identifier",
   "relation": "distinct_entity",
+  "concept_types": [
+   "Resource",
+   "Resource"
+  ],
   "split": "dev",
   "source": "evidence/issue-178-similar/labelled-pairs.json#i3-23 (dogfood store)",
   "labeller": "Grok Bot (agent)",
@@ -3288,6 +3412,10 @@
   "label": "related_distinct",
   "family": "identifier",
   "relation": "distinct_entity",
+  "concept_types": [
+   "Resource",
+   "Resource"
+  ],
   "split": "dev",
   "source": "evidence/issue-178-similar/labelled-pairs.json#i3-24 (dogfood store)",
   "labeller": "Grok Bot (agent)",
@@ -3300,6 +3428,10 @@
   "label": "related_distinct",
   "family": "identifier",
   "relation": "distinct_entity",
+  "concept_types": [
+   "Resource",
+   "Resource"
+  ],
   "split": "held_out",
   "source": "evidence/issue-178-similar/labelled-pairs.json#i3-25 (dogfood store)",
   "labeller": "Grok Bot (agent)",
@@ -3312,6 +3444,10 @@
   "label": "related_distinct",
   "family": "identifier",
   "relation": "distinct_entity",
+  "concept_types": [
+   "Resource",
+   "Resource"
+  ],
   "split": "dev",
   "source": "evidence/issue-178-similar/labelled-pairs.json#i3-26 (dogfood store)",
   "labeller": "Grok Bot (agent)",
@@ -3324,6 +3460,10 @@
   "label": "related_distinct",
   "family": "identifier",
   "relation": "distinct_entity",
+  "concept_types": [
+   "Resource",
+   "Resource"
+  ],
   "split": "dev",
   "source": "evidence/issue-178-similar/labelled-pairs.json#i3-27 (dogfood store)",
   "labeller": "Grok Bot (agent)",
@@ -3336,6 +3476,10 @@
   "label": "related_distinct",
   "family": "identifier",
   "relation": "distinct_entity",
+  "concept_types": [
+   "Resource",
+   "Resource"
+  ],
   "split": "dev",
   "source": "evidence/issue-178-similar/labelled-pairs.json#i3-28 (dogfood store)",
   "labeller": "Grok Bot (agent)",
@@ -3348,6 +3492,10 @@
   "label": "related_distinct",
   "family": "identifier",
   "relation": "distinct_entity",
+  "concept_types": [
+   "Resource",
+   "Resource"
+  ],
   "split": "held_out",
   "source": "evidence/issue-178-similar/labelled-pairs.json#i3-29 (dogfood store)",
   "labeller": "Grok Bot (agent)",
@@ -3360,6 +3508,10 @@
   "label": "related_distinct",
   "family": "identifier",
   "relation": "distinct_entity",
+  "concept_types": [
+   "Resource",
+   "Resource"
+  ],
   "split": "dev",
   "source": "evidence/issue-178-similar/labelled-pairs.json#i3-31 (dogfood store)",
   "labeller": "Grok Bot (agent)",
@@ -3372,6 +3524,10 @@
   "label": "related_distinct",
   "family": "identifier",
   "relation": "distinct_entity",
+  "concept_types": [
+   "Resource",
+   "Resource"
+  ],
   "split": "dev",
   "source": "evidence/issue-178-similar/labelled-pairs.json#i3-32 (dogfood store)",
   "labeller": "Grok Bot (agent)",
@@ -3384,6 +3540,10 @@
   "label": "related_distinct",
   "family": "identifier",
   "relation": "distinct_entity",
+  "concept_types": [
+   "Resource",
+   "Resource"
+  ],
   "split": "held_out",
   "source": "evidence/issue-178-similar/labelled-pairs.json#i3-33 (dogfood store)",
   "labeller": "Grok Bot (agent)",
@@ -3396,6 +3556,10 @@
   "label": "related_distinct",
   "family": "identifier",
   "relation": "distinct_entity",
+  "concept_types": [
+   "Resource",
+   "Resource"
+  ],
   "split": "dev",
   "source": "evidence/issue-178-similar/labelled-pairs.json#i3-34 (dogfood store)",
   "labeller": "Grok Bot (agent)",
@@ -3408,6 +3572,10 @@
   "label": "related_distinct",
   "family": "identifier",
   "relation": "distinct_entity",
+  "concept_types": [
+   "Resource",
+   "Resource"
+  ],
   "split": "held_out",
   "source": "evidence/issue-178-similar/labelled-pairs.json#i3-35 (dogfood store)",
   "labeller": "Grok Bot (agent)",
@@ -3420,6 +3588,10 @@
   "label": "related_distinct",
   "family": "identifier",
   "relation": "distinct_entity",
+  "concept_types": [
+   "Resource",
+   "Resource"
+  ],
   "split": "dev",
   "source": "evidence/issue-178-similar/labelled-pairs.json#i3-36 (dogfood store)",
   "labeller": "Grok Bot (agent)",
@@ -3432,6 +3604,10 @@
   "label": "related_distinct",
   "family": "identifier",
   "relation": "distinct_entity",
+  "concept_types": [
+   "Resource",
+   "Resource"
+  ],
   "split": "dev",
   "source": "evidence/issue-178-similar/labelled-pairs.json#i3-37 (dogfood store)",
   "labeller": "Grok Bot (agent)",
@@ -3444,6 +3620,10 @@
   "label": "related_distinct",
   "family": "identifier",
   "relation": "distinct_entity",
+  "concept_types": [
+   "Resource",
+   "Resource"
+  ],
   "split": "dev",
   "source": "evidence/issue-178-similar/labelled-pairs.json#i3-38 (dogfood store)",
   "labeller": "Grok Bot (agent)",
@@ -3456,6 +3636,10 @@
   "label": "related_distinct",
   "family": "identifier",
   "relation": "distinct_entity",
+  "concept_types": [
+   "Resource",
+   "Resource"
+  ],
   "split": "held_out",
   "source": "evidence/issue-178-similar/labelled-pairs.json#i3-39 (dogfood store)",
   "labeller": "Grok Bot (agent)",
@@ -3468,6 +3652,10 @@
   "label": "related_distinct",
   "family": "identifier",
   "relation": "distinct_entity",
+  "concept_types": [
+   "Resource",
+   "Resource"
+  ],
   "split": "held_out",
   "source": "evidence/issue-178-similar/labelled-pairs.json#i3-40 (dogfood store)",
   "labeller": "Grok Bot (agent)",
@@ -3480,6 +3668,10 @@
   "label": "related_distinct",
   "family": "identifier",
   "relation": "distinct_entity",
+  "concept_types": [
+   "Resource",
+   "Resource"
+  ],
   "split": "dev",
   "source": "evidence/issue-178-similar/labelled-pairs.json#i3-43 (dogfood store)",
   "labeller": "Grok Bot (agent)",
@@ -3492,6 +3684,10 @@
   "label": "related_distinct",
   "family": "identifier",
   "relation": "distinct_entity",
+  "concept_types": [
+   "Resource",
+   "Resource"
+  ],
   "split": "held_out",
   "source": "evidence/issue-178-similar/labelled-pairs.json#i3-44 (dogfood store)",
   "labeller": "Grok Bot (agent)",
@@ -3504,6 +3700,10 @@
   "label": "related_distinct",
   "family": "identifier",
   "relation": "distinct_entity",
+  "concept_types": [
+   "Resource",
+   "Resource"
+  ],
   "split": "dev",
   "source": "evidence/issue-178-similar/labelled-pairs.json#i3-45 (dogfood store)",
   "labeller": "Grok Bot (agent)",
@@ -3516,6 +3716,10 @@
   "label": "related_distinct",
   "family": "identifier",
   "relation": "distinct_entity",
+  "concept_types": [
+   "Resource",
+   "Resource"
+  ],
   "split": "dev",
   "source": "evidence/issue-178-similar/labelled-pairs.json#i3-46 (dogfood store)",
   "labeller": "Grok Bot (agent)",
@@ -3528,6 +3732,10 @@
   "label": "related_distinct",
   "family": "identifier",
   "relation": "distinct_entity",
+  "concept_types": [
+   "Resource",
+   "Resource"
+  ],
   "split": "dev",
   "source": "evidence/issue-178-similar/labelled-pairs.json#i3-48 (dogfood store)",
   "labeller": "Grok Bot (agent)",
@@ -3540,6 +3748,10 @@
   "label": "related_distinct",
   "family": "identifier",
   "relation": "distinct_entity",
+  "concept_types": [
+   "Resource",
+   "Resource"
+  ],
   "split": "dev",
   "source": "evidence/issue-178-similar/labelled-pairs.json#i3-49 (dogfood store)",
   "labeller": "Grok Bot (agent)",
