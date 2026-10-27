@@ -361,10 +361,11 @@ where
     let mut hits: Vec<RecallHit> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
     let mut detailed: Vec<DetailedHit> = Vec::new();
-    let mut hit_blocks: Vec<format::ContextBlock> = Vec::new(); // block per emitted hit, score order
-                                                                // #207: one writer timeline for every stale-citation check below, built
-                                                                // only if some shown hit cites a concept with an inbound contradiction,
-                                                                // and one verdict per cited concept, however many shown hits cite it.
+    // Block per emitted hit, score order.
+    let mut hit_blocks: Vec<format::ContextBlock> = Vec::new();
+    // #207: one writer timeline for every stale-citation check below, built
+    // only if some shown hit cites a concept with an inbound contradiction,
+    // and one verdict per cited concept, however many shown hits cite it.
     let timeline = crate::daemon::conflict::SharedTimeline::new();
     let mut stale_memo: HashMap<NodeId, Option<crate::daemon::contradiction::ContradictionHit>> =
         HashMap::new();
