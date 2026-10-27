@@ -181,6 +181,24 @@ url = "http://127.0.0.1:8080"
 # label. It applies to every session this process serves.
 # LAMBO_ACCEPT_CLIENT_VECTORS (true/false) overrides it.
 # accept_client_vectors = false
+#
+# Suspected supersession (#198), any kind. When a new Logic, Constraint or
+# Observation concept is a near vector hit of an older one of the same type
+# that the identifier guard refused to merge, and the two texts differ in one
+# value after the predicate ("listens on port 8080" / "... 8081"), Lambo
+# records that the newer one may replace the older without saying so. Recall
+# then names it on the older hit when both are shown. This key decides only
+# whether that is a warning line (`⚠ Possibly superseded by "…" (id …), not
+# declared`) or the structured field alone (`possibly_superseded_by` in the
+# recall detail and the --ledger line):
+#   validated (default) = the line only under an embedding contract whose
+#             trigger precision was measured at 0.90 or better: BGE-M3
+#             (candle BAAI/bge-m3 or bge_m3, 1024 dimensions; held-out 0.96
+#             on the #190 set). EmbeddingGemma 2 is unmeasured: field only.
+#   on      = the line for every contract
+#   off     = never the line; field only
+# The record itself (a SuspectedSupersedes edge) is written either way.
+# suspected_supersession_line = "validated"
 
 # Daemon cadence. Optional; omit the whole section to use the defaults.
 #

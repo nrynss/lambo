@@ -534,10 +534,12 @@ pub(crate) fn render_cli_text(detail: &DetailedRecall) -> String {
 
 /// The one-shot reader's daemon config: the defaults, plus the resolved
 /// settings that shape recall itself, so `lambo recall` and `serve-web` rank
-/// like a session does. #87: `[embedder] calibration`; #173: `[fusion]`.
+/// like a session does. #87: `[embedder] calibration`; #173: `[fusion]`;
+/// #198: `[embedder] suspected_supersession_line`.
 fn reader_config(resolved: &Config) -> Config {
     Config {
         calibration: resolved.calibration,
+        suspected_supersession_line: resolved.suspected_supersession_line,
         recall_fusion: resolved.recall_fusion,
         ..Config::default()
     }
@@ -558,11 +560,63 @@ mod tests {
                 k: 7.0,
                 ..RecallFusion::default()
             },
+            suspected_supersession_line: crate::recall::suspected::SuspectedLine::Off,
             ..Config::default()
         };
         let cfg = reader_config(&resolved);
         assert_eq!(cfg.recall_fusion, resolved.recall_fusion);
         assert_eq!(cfg.calibration, resolved.calibration);
+        // #198: and the suspected-supersession line switch.
+        assert_eq!(
+            cfg.suspected_supersession_line,
+            crate::recall::suspected::SuspectedLine::Off
+        );
+    }
+
+    /// #198 H3 losslessness: a shown `possibly_superseded` line is printed
+    /// exactly once, in its block or, when the block is cut, in the header;
+    /// the structured field alone prints nothing.
+    #[test]
+    fn a_possibly_superseded_line_renders_once() {
+        use crate::recall::detail::{Annotation, AnnotationKind, DetailedHit};
+        use crate::types::{ConceptType, NodeId, RecallHit};
+        let hit = RecallHit {
+            repo_scope: None,
+            node_id: NodeId(uuid::Uuid::from_u64_pair(2, 1)),
+            content: "the embedder listens on port 8080".into(),
+            concept_type: Some(ConceptType::Logic),
+            score: 0.5,
+            is_canonical: false,
+            blast_radius: None,
+        };
+        let by = NodeId(uuid::Uuid::from_u64_pair(2, 2));
+        let line = crate::recall::format::possibly_superseded_warning(
+            by,
+            "the embedder listens on port 8081",
+        );
+        for included in [true, false] {
+            let mut d = DetailedHit::new(&hit, None);
+            d.possibly_superseded_by = Some(by);
+            d.included_in_context = included;
+            d.annotations.push(Annotation::new(
+                AnnotationKind::PossiblySuperseded,
+                line.clone(),
+            ));
+            let mut detail = DetailedRecall::warn_only(line.clone());
+            detail.hits = vec![hit.clone()];
+            detail.detailed = vec![d];
+            let text = render_cli_text(&detail);
+            assert_eq!(text.matches(&line).count(), 1, "{included}: {text}");
+        }
+        // Field only: no line anywhere.
+        let mut d = DetailedHit::new(&hit, None);
+        d.possibly_superseded_by = Some(by);
+        d.included_in_context = true;
+        let mut detail = DetailedRecall::warn_only(String::new());
+        detail.warnings.clear();
+        detail.hits = vec![hit.clone()];
+        detail.detailed = vec![d];
+        assert!(!render_cli_text(&detail).contains("Possibly superseded"));
     }
 
     /// E2E-5: a warnings-only detailed result (the daemon's early refusal

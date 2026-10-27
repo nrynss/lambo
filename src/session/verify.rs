@@ -183,6 +183,8 @@ pub fn warning_kind(line: &str) -> String {
         "contradicts"
     } else if body.starts_with("⚠ Rests on ") {
         "rests_on_contradicted"
+    } else if body.starts_with("⚠ Possibly superseded") {
+        "possibly_superseded"
     } else if body.starts_with("⚑ Load-bearing pillar") {
         "load_bearing"
     } else if body.starts_with("Reserved by ") {
@@ -650,6 +652,13 @@ fn side_hits(
             .iter()
             .map(|a| kind_name(&a.kind))
             .collect();
+        // #198: a suspected pair is reported by its kind whether or not the
+        // session's embedder shows the line (the structured field).
+        if detail.possibly_superseded_by.is_some() {
+            annotations.push(kind_name(
+                &crate::recall::detail::AnnotationKind::PossiblySuperseded,
+            ));
+        }
         annotations.sort();
         annotations.dedup();
         out.push(Hit {

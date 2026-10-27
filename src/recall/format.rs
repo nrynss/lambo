@@ -371,6 +371,24 @@ pub fn rests_on_more_warning(more: usize) -> String {
     format!("⚠ Rests on {more} more contradicted {noun}")
 }
 
+/// The suspected-supersession line on an older hit (#198), shown only when
+/// the newer concept is in the same result:
+///
+/// ```text
+/// ⚠ Possibly superseded by "the embedder listens on port 8081" (id 1a2b3c4d), not declared
+/// ```
+///
+/// The quote and id are the suspected replacement's, cut like the #19(c)
+/// lines ([`excerpt`]) and named by [`short_id`]. "Not declared" says what
+/// the line is: Lambo's suspicion, not a writer's `against`.
+pub fn possibly_superseded_warning(by: NodeId, by_content: &str) -> String {
+    format!(
+        "⚠ Possibly superseded by \"{}\" (id {}), not declared",
+        excerpt(by_content),
+        short_id(by)
+    )
+}
+
 /// The historical supersession line on a demoted hit (#20):
 ///
 /// ```text

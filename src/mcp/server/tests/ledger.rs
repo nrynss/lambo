@@ -1122,6 +1122,64 @@ fn i1_the_recall_line_names_a_stale_citation() {
     assert_eq!(facts["warning_count"], json!(2));
 }
 
+/// #198: a suspected pair is named on the older hit's ledger line, by
+/// kind when the line is shown and by `possibly_superseded_by` either way,
+/// with a top-level `possibly_superseded` flag. A line with no pair has
+/// neither key.
+#[test]
+fn i1_the_recall_line_names_a_suspected_supersession() {
+    use crate::recall::detail::{Annotation, AnnotationKind, DetailedHit, DetailedRecall};
+    use crate::recall::format;
+    use crate::types::{ConceptType, NodeId, RecallHit};
+
+    let hit = RecallHit {
+        repo_scope: None,
+        node_id: NodeId(uuid::Uuid::from_u64_pair(2, 7)),
+        content: "the embedder listens on port 8080".into(),
+        concept_type: Some(ConceptType::Logic),
+        score: 0.5,
+        is_canonical: false,
+        blast_radius: None,
+    };
+    let by = NodeId(uuid::Uuid::from_u64_pair(2, 8));
+    let plain = || {
+        let mut r = DetailedRecall::warn_only(String::new());
+        r.warnings = Vec::new();
+        r.hits = vec![hit.clone()];
+        r.detailed = vec![DetailedHit::new(&hit, None)];
+        r
+    };
+    let facts = recall_facts("q", 8, &plain());
+    assert!(facts.get("possibly_superseded").is_none(), "{facts}");
+    assert!(facts["hits"][0].get("possibly_superseded_by").is_none());
+
+    for shown in [true, false] {
+        let mut r = plain();
+        r.detailed[0].possibly_superseded_by = Some(by);
+        if shown {
+            let line = format::possibly_superseded_warning(by, "the embedder listens on port 8081");
+            r.detailed[0].annotations.push(Annotation::new(
+                AnnotationKind::PossiblySuperseded,
+                line.clone(),
+            ));
+            r.warnings = vec![line];
+        }
+        let facts = recall_facts("q", 8, &r);
+        let want: Vec<&str> = if shown {
+            vec!["possibly_superseded"]
+        } else {
+            Vec::new()
+        };
+        assert_eq!(facts["hits"][0]["annotations"], json!(want), "{facts}");
+        assert_eq!(
+            facts["hits"][0]["possibly_superseded_by"],
+            json!(by.0.to_string())
+        );
+        assert_eq!(facts["possibly_superseded"], json!(true));
+        assert_eq!(facts["contradiction_warning"], json!(false));
+    }
+}
+
 /// **I2 acceptance.** A heartbeat line carries the stats payload, uptime,
 /// the crate version and a `git_sha` field.
 ///

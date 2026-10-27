@@ -177,6 +177,9 @@ pub struct Daemon {
     /// #87: whether recall uses the per-contract recent-leg score
     /// ([`crate::embed::calibration`]).
     calibration: crate::embed::calibration::CalibrationMode,
+    /// #198: when recall shows the suspected-supersession line
+    /// ([`crate::recall::suspected`]).
+    suspected_line: crate::recall::suspected::SuspectedLine,
     /// #173: how phase 1 combines its legs.
     fusion: crate::recall::fusion::RecallFusion,
     clock: Clock,
@@ -301,6 +304,7 @@ impl Daemon {
             cycles: Arc::new(AtomicU64::new(0)),
             params,
             calibration: crate::embed::calibration::CalibrationMode::default(),
+            suspected_line: crate::recall::suspected::SuspectedLine::default(),
             fusion: crate::recall::fusion::RecallFusion::default(),
             clock: Arc::new(Utc::now),
             started: AtomicBool::new(false),
@@ -320,6 +324,7 @@ impl Daemon {
             CycleParams::from(config),
         );
         daemon.calibration = config.calibration;
+        daemon.suspected_line = config.suspected_supersession_line;
         daemon.fusion = config.recall_fusion;
         daemon
     }
@@ -896,6 +901,7 @@ impl Daemon {
             &query,
             weights,
             self.params.contradiction_evidence_min_age,
+            crate::recall::suspected::shows_line(self.suspected_line, graph.embedding()),
             now,
             assemble::default_token_count,
         );

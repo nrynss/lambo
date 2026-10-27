@@ -292,6 +292,8 @@ fn process_config(
     config.calibration = embedder_cfg.calibration;
     config.calibrated_merge_threshold = embedder_cfg.calibrated_merge_threshold;
     config.calibrated_layer_floor = embedder_cfg.calibrated_layer_floor;
+    // #198: when recall shows the suspected-supersession line.
+    config.suspected_supersession_line = embedder_cfg.suspected_supersession_line;
     config.validate()?;
     // Accepted-but-inert settings (issue #29: an idle floor that makes the
     // time trigger unreachable) are logged, not refused.

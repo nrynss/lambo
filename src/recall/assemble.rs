@@ -189,6 +189,7 @@ where
         query,
         weights,
         crate::Config::default().canonization_edge_min_age,
+        true,
         now,
         token_fn,
     )
@@ -202,6 +203,11 @@ where
 /// `contradiction_min_age` is the session's evidence age floor
 /// (`CycleParams::contradiction_evidence_min_age`), which the stale-citation
 /// check (#207) passes to the contradiction detector at `now`.
+///
+/// `suspected_line` is whether a suspected-supersession pair (#198) is
+/// shown as a `possibly_superseded` line, or as the structured
+/// [`DetailedHit::possibly_superseded_by`] field only
+/// ([`crate::recall::suspected::shows_line`]).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn assemble_with_legs<F>(
     graph: &Graph,
@@ -213,6 +219,7 @@ pub(crate) fn assemble_with_legs<F>(
     query: &RecallQuery,
     weights: RecallWeights,
     contradiction_min_age: std::time::Duration,
+    suspected_line: bool,
     now: DateTime<Utc>,
     token_fn: F,
 ) -> DetailedRecall
@@ -376,6 +383,9 @@ where
         &forced_companions,
         |id| score_of(id, cold).3,
     );
+    // #198: what the result shows, so a suspected pair is named only when
+    // both of its concepts are in it. Read only, after membership is final.
+    let shown_ids: HashSet<NodeId> = shown.hits.iter().map(|s| s.item).collect();
     for s in shown.hits {
         let Some(Node::Concept(c)) = graph.node(s.item) else {
             continue; // `emitted` yields graph concepts only
@@ -473,6 +483,20 @@ where
             ));
             lines.push(text);
         }
+        // #198: suspected supersession, when the suspected replacement is
+        // shown too. A warning only, at most one per hit; the structured
+        // field is set whether or not the line is shown.
+        if let Some(by) = possibly_superseded_by(graph, c, &shown_ids) {
+            detailed_hit.possibly_superseded_by = Some(by.id);
+            if suspected_line {
+                let text = format::possibly_superseded_warning(by.id, &by.content);
+                detailed_hit.annotations.push(Annotation::new(
+                    AnnotationKind::PossiblySuperseded,
+                    text.clone(),
+                ));
+                lines.push(text);
+            }
+        }
         // #20: history, after the live lines. Not a hot-list condition and
         // never forced: it annotates a hit that is already in the result.
         if c.canonization_status != CanonizationStatus::Canonical
@@ -546,6 +570,28 @@ fn same_session_concept<'g>(
         Some(Node::Concept(c)) if c.session_id == of.session_id && c.id != of.id => Some(c),
         _ => None,
     }
+}
+
+/// The shown concept suspected of replacing `of` without declaring it
+/// (#198): a source of a `SuspectedSupersedes` edge into `of`, of `of`'s
+/// session, in `shown`. With several, the newest by the trigger's clock
+/// ([`crate::graph::suspected::dated_at`]), then the smallest id, so the
+/// line is deterministic and there is at most one per hit.
+fn possibly_superseded_by<'g>(
+    graph: &'g Graph,
+    of: &crate::types::Concept,
+    shown: &HashSet<NodeId>,
+) -> Option<&'g crate::types::Concept> {
+    graph
+        .in_neighbors_typed(of.id, crate::types::EdgeType::SuspectedSupersedes)
+        .into_iter()
+        .filter(|id| shown.contains(id))
+        .filter_map(|id| same_session_concept(graph, of, id))
+        .max_by(|a, b| {
+            crate::graph::suspected::dated_at(graph, a)
+                .cmp(&crate::graph::suspected::dated_at(graph, b))
+                .then_with(|| b.id.0.cmp(&a.id.0))
+        })
 }
 
 /// The stale-by-dependency lines of one hit (#207): one per contradicted
@@ -2823,6 +2869,7 @@ mod tests {
                 &query(2, 10_000),
                 RecallWeights::default(),
                 crate::Config::default().canonization_edge_min_age,
+                true,
                 ts(0),
                 default_token_count,
             )
@@ -2915,6 +2962,7 @@ mod tests {
                 &query(2, 10_000),
                 RecallWeights::default(),
                 crate::Config::default().canonization_edge_min_age,
+                true,
                 ts(0),
                 default_token_count,
             );
@@ -2970,6 +3018,7 @@ mod tests {
                 &query(2, 10_000),
                 RecallWeights::default(),
                 crate::Config::default().canonization_edge_min_age,
+                true,
                 ts(0),
                 default_token_count,
             )
@@ -3161,4 +3210,7 @@ mod tests {
         );
         assert_eq!(result.warnings.len(), holders.len());
     }
+
+    // #198: the suspected-supersession surface.
+    mod suspected;
 }

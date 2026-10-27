@@ -21,6 +21,9 @@ struct H {
     status: Option<CanonizationStatus>,
     /// Positions, in the same list, of the hits its `contradicts` lines name.
     contradicts: Vec<usize>,
+    /// #198: the position, in the same list, of the hit suspected of
+    /// replacing it.
+    superseded_by: Option<usize>,
 }
 
 /// A hit found by keyword and vector legs, with its content as canonical key.
@@ -34,6 +37,7 @@ fn kw(content: &str) -> H {
         embedding: None,
         status: None,
         contradicts: Vec::new(),
+        superseded_by: None,
     }
 }
 
@@ -77,6 +81,15 @@ impl H {
         self.contradicts.push(pos);
         self.with(AnnotationKind::Contradicts, text)
     }
+    /// #198: the hit at `pos` of the same list is suspected of replacing
+    /// this one; with `text`, the line is shown too.
+    fn superseded_by(mut self, pos: usize, text: Option<&str>) -> Self {
+        self.superseded_by = Some(pos);
+        match text {
+            Some(text) => self.with(AnnotationKind::PossiblySuperseded, text),
+            None => self,
+        }
+    }
 }
 
 /// A node id unique to `(tier, pos)`.
@@ -106,6 +119,7 @@ fn recall(tier: usize, hits: &[H], extra: &[&str]) -> TierRecall {
         };
         let mut d = DetailedHit::new(&hit, h.status);
         d.contradicts = h.contradicts.iter().map(|&p| nid(tier, p)).collect();
+        d.possibly_superseded_by = h.superseded_by.map(|p| nid(tier, p));
         d.included_in_context = true;
         for (kind, text) in &h.annotations {
             d.annotations.push(Annotation::new(*kind, text.clone()));
@@ -1093,4 +1107,92 @@ fn a_pending_companion_and_its_copies_are_shown_once() {
     );
     assert_eq!(r.hits[3].also.len(), 1, "the cut general copy");
     assert_eq!(r.hits[3].companion_of, vec![nid(0, 1)]);
+}
+
+/// #198: a suspected pair of one session keeps its line and field in the
+/// merged answer when both of its hits are shown, prefixed like any layer
+/// line; when the merge cuts the newer one, the older hit loses both and
+/// the line leaves `warnings` and the context.
+#[test]
+fn a_suspected_pair_is_named_only_when_the_merge_shows_both() {
+    const LINE: &str = "⚠ Possibly superseded by \"g-new\" (id bbbbbbbb), not declared";
+    let lists = || {
+        [
+            primary(&[kw("p1"), kw("p2")]),
+            layer(
+                1,
+                "general",
+                0.5,
+                &[kw("g-new"), kw("g-old").superseded_by(0, Some(LINE))],
+            ),
+        ]
+    };
+    let both = run(&lists(), params(4));
+    assert!(order(&both).contains(&"general/g-new".to_string()));
+    let old = both
+        .detail
+        .detailed
+        .iter()
+        .find(|d| d.content == "g-old")
+        .expect("shown");
+    assert_eq!(old.possibly_superseded_by, Some(nid(1, 0)));
+    assert_eq!(old.annotations[0].kind, AnnotationKind::PossiblySuperseded);
+    assert!(both.warnings.contains(&format!("[general] {LINE}")));
+    assert!(both.context.contains(LINE), "{}", both.context);
+
+    // Rank alone never shows g-old without the better-ranked g-new, so
+    // force g-old in (a hot line) at top_k 2, where g-new is cut.
+    let forced = [
+        primary(&[kw("p1"), kw("p2")]),
+        layer(
+            1,
+            "general",
+            0.5,
+            &[
+                kw("g-new"),
+                kw("g-old")
+                    .superseded_by(0, Some(LINE))
+                    .with(AnnotationKind::Hot, "Drifted 3 hops from root goal x"),
+            ],
+        ),
+    ];
+    let split = run(&forced, params(2));
+    assert!(
+        !order(&split).contains(&"general/g-new".to_string()),
+        "{:?}",
+        order(&split)
+    );
+    let old = split
+        .detail
+        .detailed
+        .iter()
+        .find(|d| d.content == "g-old")
+        .expect("forced in");
+    assert_eq!(old.possibly_superseded_by, None);
+    assert!(old
+        .annotations
+        .iter()
+        .all(|a| a.kind != AnnotationKind::PossiblySuperseded));
+    assert!(
+        !split
+            .warnings
+            .iter()
+            .any(|w| w.contains("Possibly superseded")),
+        "{:?}",
+        split.warnings
+    );
+    assert!(
+        !split.context.contains("Possibly superseded"),
+        "{}",
+        split.context
+    );
+    assert!(split.warnings.iter().any(|w| w.contains("Drifted")));
+}
+
+#[test]
+fn possibly_superseded_is_snake_case_on_the_wire() {
+    assert_eq!(
+        serde_json::to_string(&AnnotationKind::PossiblySuperseded).unwrap(),
+        "\"possibly_superseded\""
+    );
 }
