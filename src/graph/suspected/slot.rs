@@ -123,9 +123,15 @@ pub fn normalize(token: &str) -> String {
 /// whose [normalized](normalize) form is in [`PREDICATE_CUES`], or which
 /// ends in `:`. `None` when the text has none.
 pub fn first_cue(tokens: &[&str]) -> Option<usize> {
+    first_cue_in(tokens, PREDICATE_CUES)
+}
+
+/// [`first_cue`] against another lexicon (the measurement compares the
+/// reference script's list without `reports`).
+pub fn first_cue_in(tokens: &[&str], cues: &[&str]) -> Option<usize> {
     tokens.iter().position(|t| {
         let n = normalize(t);
-        PREDICATE_CUES.contains(&n.as_str()) || t.ends_with(':')
+        cues.contains(&n.as_str()) || t.ends_with(':')
     })
 }
 
@@ -286,9 +292,15 @@ impl SlotVerdict {
 /// `a` aligned against `b` as the reference script does. The trigger passes
 /// the older text first.
 pub fn judge(a: &str, b: &str) -> SlotVerdict {
+    judge_with(a, b, PREDICATE_CUES)
+}
+
+/// [`judge`] against another cue lexicon, for measuring a change to
+/// [`PREDICATE_CUES`] before making it.
+pub fn judge_with(a: &str, b: &str, cues: &[&str]) -> SlotVerdict {
     let (ta, tb) = (tokens(a), tokens(b));
     let spans = differing_spans(&ta, &tb);
-    let value_slot = match (first_cue(&ta), first_cue(&tb)) {
+    let value_slot = match (first_cue_in(&ta, cues), first_cue_in(&tb, cues)) {
         (Some(ca), Some(cb)) => {
             !spans.is_empty() && spans.iter().all(|s| s.a_start > ca && s.b_start > cb)
         }
