@@ -194,7 +194,7 @@ answerable queries (30 vocabulary-mismatch), `held_out` 97 (18). The new
 queries were written from the corpus text before this re-run, not from its
 results. Same harness; `dev` swept first (k = 2, 3, 5, 10, 60 and
 `k=3,wd=0`), then `held_out` once with the same three variants as before.
-Files: `runs-v2/`, from `run-v2.sh`; tables from
+Files: `runs-v2/` (`run-v2.sh` repeats it into `runs-v2-rerun/`); tables from
 `python3 summarise.py runs-v2`. Two `dev` queries were corrected after the
 first pass and `dev` was re-run: `q-prf-01-3` guessed a release season the
 corpus does not state, and `q-mg-03-3` asked why where the concept states
@@ -245,10 +245,11 @@ not and two classes lose there, so the default stays `max`.
 
 ## Reproduce
 
-`run.sh` regenerates `runs/` and `run-v2.sh` regenerates `runs-v2/`, both
-from the current `fixtures/eval/`; `runs/` was produced on the 310-query set
-(before `t_more173.py`), so re-running `run.sh` now gives the 368-query
-numbers instead.
+`run.sh` repeats the `runs/` variants and `run-v2.sh` the `runs-v2/` ones,
+both on the current `fixtures/eval/`. They write to `runs-rerun/` and
+`runs-v2-rerun/` (or `$OUT`) and refuse to overwrite the archived `runs/`
+and `runs-v2/`. `runs/` was produced on the 310-query set (before
+`t_more173.py`), so `run.sh` now gives the 368-query numbers instead.
 
 ```
 CACHE_BGE=bge.jsonl CACHE_EG2=eg2.jsonl bash evidence/issue-173-fusion/run.sh

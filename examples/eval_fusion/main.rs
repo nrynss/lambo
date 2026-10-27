@@ -139,6 +139,9 @@ struct CachedEmbedder {
     file: Option<Mutex<std::fs::File>>,
     hits: AtomicUsize,
     misses: AtomicUsize,
+    /// The first failed cache append. The embed itself succeeded, so the
+    /// run goes on, but it ends in an error rather than a silent short cache.
+    write_error: Mutex<Option<String>>,
 }
 
 impl CachedEmbedder {
@@ -176,7 +179,12 @@ impl CachedEmbedder {
             .insert(key.clone(), v.to_vec());
         if let Some(f) = &self.file {
             let line = json!({"key": key, "v": v}).to_string();
-            let _ = writeln!(f.lock().expect("cache file"), "{line}");
+            if let Err(e) = writeln!(f.lock().expect("cache file"), "{line}") {
+                self.write_error
+                    .lock()
+                    .expect("write error")
+                    .get_or_insert_with(|| format!("cache append failed: {e}"));
+            }
         }
     }
 }
@@ -354,6 +362,7 @@ async fn run() -> Result<(), String> {
         file: None,
         hits: AtomicUsize::new(0),
         misses: AtomicUsize::new(0),
+        write_error: Mutex::new(None),
     };
     if let Some(path) = &args.cache {
         use std::io::BufRead;
@@ -560,6 +569,9 @@ async fn run() -> Result<(), String> {
         );
     }
     let _ = std::fs::remove_dir_all(&work);
+    if let Some(e) = embedder.write_error.lock().expect("write error").take() {
+        return Err(e);
+    }
     let out = json!({
         "issue": 173,
         "embedder_kind": kind,

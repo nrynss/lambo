@@ -5,7 +5,13 @@
 # Usage: CACHE_BGE=bge.jsonl CACHE_EG2=eg2.jsonl bash evidence/issue-173-fusion/run-v2.sh
 set -euo pipefail
 cd "$(dirname "$0")/../.."
-OUT=evidence/issue-173-fusion/runs-v2
+# Writes to a new directory by default: the archived runs-v2/ is the evidence
+# and is never overwritten (the fixture set may have changed since). Compare
+# with: python3 evidence/issue-173-fusion/summarise.py "$OUT"
+OUT="${OUT:-evidence/issue-173-fusion/runs-v2-rerun}"
+case "$(basename "$OUT")" in
+  runs|runs-v2) echo "refusing to overwrite the archived $OUT; set OUT to a new directory" >&2; exit 2 ;;
+esac
 DEV="max rrf rrf:k=60 rrf:k=2 rrf:k=5 rrf:k=10 rrf:k=3,wd=0"
 CONFIRM="max rrf:k=60 rrf"
 args() { for v in $1; do printf -- '--variant %s ' "$v"; done; }
