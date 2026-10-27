@@ -3555,16 +3555,15 @@
   "b": "A 3,600-concept SQLite store at dim 1024 takes 47.3 MB on disk.",
   "label": "related_distinct",
   "family": "identifier",
-  "relation": "supersedes",
+  "relation": "distinct_entity",
   "concept_types": [
    "Observation",
    "Observation"
   ],
   "split": "dev",
-  "source": "CHANGELOG.md (0.7.0, #55: packed f32 vectors)",
-  "labeller": "claude-opus-5-5 (agent)",
-  "labelled_on": "2026-10-27",
-  "review": "the two values are #55's text and packed codecs of one store; a store not yet provisioned on 0.7.0 still measures the older value, so this may be two codecs (distinct_entity) rather than a replacement"
+  "source": "CHANGELOG.md (0.7.0, #55: packed f32 vectors); relabelled by the owner (store-31e52ae3ea)",
+  "labeller": "Narayan SS (owner)",
+  "labelled_on": "2026-10-27"
  },
  {
   "id": "p-198-s30",
@@ -3572,16 +3571,15 @@
   "b": "Decoding every vector of a 3,600-concept SQLite store at dim 1024 takes 161 ms.",
   "label": "related_distinct",
   "family": "identifier",
-  "relation": "supersedes",
+  "relation": "distinct_entity",
   "concept_types": [
    "Observation",
    "Observation"
   ],
   "split": "held_out",
-  "source": "CHANGELOG.md (0.7.0, #55)",
-  "labeller": "claude-opus-5-5 (agent)",
-  "labelled_on": "2026-10-27",
-  "review": "the two values are #55's text and packed codecs of one store; a store not yet provisioned on 0.7.0 still measures the older value, so this may be two codecs (distinct_entity) rather than a replacement"
+  "source": "CHANGELOG.md (0.7.0, #55); relabelled by the owner (store-f6d35c2178)",
+  "labeller": "Narayan SS (owner)",
+  "labelled_on": "2026-10-27"
  },
  {
   "id": "p-198-s31",

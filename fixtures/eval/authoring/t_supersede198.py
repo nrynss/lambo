@@ -168,14 +168,16 @@ S("s27", "held_out", "On Metal, the embedder of a lambo serve that becomes a pro
 S("s28", "held_out", "Warm recall p50 on a 3,600-concept SQLite session is 4.3 ms.",
   "Warm recall p50 on a 3,600-concept SQLite session is 219 ms.",
   O, f"{CL} (0.4.0, #8, #14: the session holder ranks vectors from memory)")
+# s29 and s30 are distinct_entity by the owner's ruling of 2026-10-27 (each
+# text names its own storage format, text or packed f32, and a store not yet
+# provisioned on 0.7.0 still shows the text value), folded in from
+# owner_pairs.json; their ids keep the s.
 S("s29", "dev", "A 3,600-concept SQLite store at dim 1024 takes 17.1 MB on disk.",
   "A 3,600-concept SQLite store at dim 1024 takes 47.3 MB on disk.",
-  O, f"{CL} (0.7.0, #55: packed f32 vectors)",
-  review="the two values are #55's text and packed codecs of one store; a store not yet provisioned on 0.7.0 still measures the older value, so this may be two codecs (distinct_entity) rather than a replacement")
+  O, f"{CL} (0.7.0, #55: packed f32 vectors)")
 S("s30", "held_out", "Decoding every vector of a 3,600-concept SQLite store at dim 1024 takes 3.4 ms.",
   "Decoding every vector of a 3,600-concept SQLite store at dim 1024 takes 161 ms.",
-  O, f"{CL} (0.7.0, #55)",
-  review="the two values are #55's text and packed codecs of one store; a store not yet provisioned on 0.7.0 still measures the older value, so this may be two codecs (distinct_entity) rather than a replacement")
+  O, f"{CL} (0.7.0, #55)")
 S("s31", "dev", "On a copy of the Metal rig store, GC's first sweep collects 0 concepts.",
   "On a copy of the Metal rig store, GC's first sweep collects 537 concepts.",
   O, f"{CL} (0.3.0, GC: the first sweep now collects nothing, was 537)")

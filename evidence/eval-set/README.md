@@ -90,8 +90,9 @@ no-answer queries, short of its 100 until the owner adds ledger misses.
 ## The #198 pairs (2026-10-27)
 
 The set gained 144 pairs for #198 after the run above (see
-`fixtures/eval/README.md`, "Added for #198"): 64 `supersedes`, 72
-`distinct_entity` in the suspected-supersession trigger's regime and 8
+`fixtures/eval/README.md`, "Added for #198"): 62 `supersedes`, 74
+`distinct_entity` (two of them relabelled from `supersedes` by the owner)
+in the suspected-supersession trigger's regime and 8
 `same-event` paraphrases, all refused by the identifier guard and typed
 with `concept_types`. The committed run measured the 403-pair set. The
 #198 pairs are kept out of the export (owner decision, 2026-10-27), so it

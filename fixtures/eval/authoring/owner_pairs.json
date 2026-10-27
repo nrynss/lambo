@@ -98,5 +98,35 @@
   "labeller": "Narayan SS (owner)",
   "labelled_on": "2026-10-27",
   "note": "owner decision 2026-10-27: version-scoped; each text names its own version and both stay true, so distinct_entity, not supersedes"
+ },
+ {
+  "id": "store-31e52ae3ea",
+  "a": "A 3,600-concept SQLite store at dim 1024 takes 17.1 MB on disk.",
+  "b": "A 3,600-concept SQLite store at dim 1024 takes 47.3 MB on disk.",
+  "label": "related_distinct",
+  "family": "identifier",
+  "relation": "distinct_entity",
+  "concept_types": [
+   "Observation",
+   "Observation"
+  ],
+  "labeller": "Narayan SS (owner)",
+  "labelled_on": "2026-10-27",
+  "note": "owner decision 2026-10-27: each text names its own storage format (text against packed f32); a store not yet provisioned on 0.7.0 still shows the text value, so both stay true: distinct_entity"
+ },
+ {
+  "id": "store-f6d35c2178",
+  "a": "Decoding every vector of a 3,600-concept SQLite store at dim 1024 takes 3.4 ms.",
+  "b": "Decoding every vector of a 3,600-concept SQLite store at dim 1024 takes 161 ms.",
+  "label": "related_distinct",
+  "family": "identifier",
+  "relation": "distinct_entity",
+  "concept_types": [
+   "Observation",
+   "Observation"
+  ],
+  "labeller": "Narayan SS (owner)",
+  "labelled_on": "2026-10-27",
+  "note": "owner decision 2026-10-27: each text names its own storage format (text against packed f32); a store not yet provisioned on 0.7.0 still shows the text value, so both stay true: distinct_entity"
  }
 ]

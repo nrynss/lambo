@@ -6,12 +6,12 @@ threshold), #173 (RRF fusion), #174 (conformal abstention), #175 (PPR
 expansion), #181 (redundancy) and #198 (what a refused identifier merge is,
 and the precision of its suspected-supersession trigger).
 
-**Status: v0, labelled by an agent; the five items that needed the owner's
-judgment are settled by the owner** (see "Owner rulings" below). Every item
-says who labelled it (`labeller`, `labelled_on`). An item whose label needs
-the owner carries a `review` note and is kept out of the export and out of
-every reported number until the owner settles it; two #198 pairs do now
-(`p-198-s29`, `p-198-s30`, below).
+**Status: v0, labelled by agents; every item that needed the owner's
+judgment is settled by the owner** (see "Owner rulings" below), and none
+awaits the owner now. Every item says who labelled it (`labeller`,
+`labelled_on`). An item whose label needs the owner carries a `review`
+note and is kept out of the export and out of every reported number until
+the owner settles it.
 
 ## Files
 
@@ -57,9 +57,8 @@ answers #198: `supersedes`, `distinct_entity` or `contradicts`):
 Splits (a hash of the id, about 70/30, except the #198 pairs, whose split
 is set in their module and stratified by sub-kind, about 60/40; see
 "Added for #198"): pairs 362 dev / 185 held-out; queries 239 dev / 129
-held-out. Related-distinct relations: 82 contradicts, 127 distinct_entity,
-73 supersedes (71 adjudicated: 44 dev / 27 held-out), 27 none (families
-that need none).
+held-out. Related-distinct relations: 82 contradicts, 129 distinct_entity,
+71 supersedes (44 dev / 27 held-out), 27 none (families that need none).
 
 Queries by family:
 
@@ -111,7 +110,7 @@ Per consumer:
   | Kind | dev | held_out | All |
   |---|---:|---:|---:|
   | `supersedes` (positives) | 43 | 27 | 70 |
-  | `distinct_entity` (hard negatives) | 46 | 29 | 75 |
+  | `distinct_entity` (hard negatives) | 47 | 30 | 77 |
   | `same-event` paraphrases (hard negatives) | 5 | 3 | 8 |
 
   How many positives an embedder's merge threshold lets reach the trigger
@@ -164,8 +163,9 @@ Per consumer:
   are paraphrase duplicates by the owner's ruling below.) The 5 identical dogfood duplicates are left out too (cosine 1
   by construction).
 - **Added for #198 (2026-10-27).** `authoring/t_supersede198.py` adds 144
-  pairs, ids `p-198-sNN` (64 `supersedes`), `p-198-nNN` (72
-  `distinct_entity`) and `p-198-eNN` (8 `same-event`), each id and split
+  pairs, ids `p-198-sNN` (64 written as `supersedes`; the owner relabelled
+  `s29` and `s30` `distinct_entity`), `p-198-nNN` (72 `distinct_entity`)
+  and `p-198-eNN` (8 `same-event`), each id and split
   written at its call so neither depends on the order of the calls,
   labelled by `claude-opus-5-5 (agent)` (the set's other agent items carry
   build.py's default labeller, `Grok Bot (agent)`), every one authored
@@ -193,7 +193,7 @@ Per consumer:
     where the facts allow, the two texts differ only in identifiers and
     digits (counts in digits, one tense, an embedder by its model id,
     `BAAI/bge-m3` or `google/embeddinggemma-2`). Masked-token Jaccard is
-    1.0 for 58 of the 72 `distinct_entity` pairs, 57 of the 64 #198
+    1.0 for 60 of the 74 #198 `distinct_entity` pairs, 57 of the 62 #198
     `supersedes` pairs and 1 of the 8 `same-event` pairs. The other 14
     negatives keep the words their facts need (a verdict, a constant's
     name, dev against held_out, with against without fusion, Mac against
@@ -264,10 +264,11 @@ enforces the guard above on every file here.
 ## Owner rulings
 
 Every item that needed the owner's judgment was settled by the owner
-(Narayan SS, 2026-10-25; the version-scoped relabels on 2026-10-27). The labels are recorded in
-`authoring/owner_pairs.json` through `scripts/eval/fold_owner_labels.py`,
-and `build.py` relabels each pair in place (labeller "Narayan SS (owner)").
-The two #198 review items below await the owner.
+(Narayan SS, 2026-10-25; the #198 rulings on 2026-10-27). The labels are
+recorded in `authoring/owner_pairs.json` through
+`scripts/eval/fold_owner_labels.py`, and `build.py` relabels each pair in
+place (labeller "Narayan SS (owner)"), keeping its id, split and
+`concept_types`.
 
 | Id | Ruling |
 |---|---|
@@ -276,12 +277,7 @@ The two #198 review items below await the owner.
 | `p-178-syn-neg-017` | Two commit hashes one hex digit apart are a typo of the same commit: paraphrase, `near-verbatim`. |
 | `p-178-syn-neg-019` | `src/main.rs` against `src/mein.rs` is a typo of the same path: paraphrase, `near-verbatim`. |
 | `p-con-01-rbd1`, `p-con-03-rbd1`, `p-cn-01-rbd1` | 2026-10-27: version-scoped, so `distinct_entity`, not `supersedes`: each text names its own version (Unreleased or 0.6.0 against 0.6.0 or before it) and both stay true of that version. They keep `correction` and their `concept_types`. |
-
-Awaiting the owner (#198):
-
-| Id | Question |
-|---|---|
-| `p-198-s29`, `p-198-s30` | Labelled `supersedes`: 17.1 MB / 3.4 ms (packed `f32`) against 47.3 MB / 161 ms (text) for one 3,600-concept store. The values are #55's two codecs; a store not yet provisioned on 0.7.0 still measures the older one, so they may be `distinct_entity`. |
+| `p-198-s29`, `p-198-s30` | 2026-10-27: `distinct_entity`, not `supersedes` (their review notes are gone): 17.1 MB / 3.4 ms against 47.3 MB / 161 ms for one 3,600-concept store, where each text names its own storage format (packed `f32` or text), and a store not yet provisioned on 0.7.0 still shows the text value, so both stay true. They keep their ids (with the `s`) and `concept_types`. |
 
 ## Owner steps (to complete #190 from the store)
 
