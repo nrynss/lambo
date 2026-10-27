@@ -410,8 +410,10 @@ async fn stale_replay_report_is_structured_on_piggyback_and_lookup() {
         let clock = clock.clone();
         let store = store();
         async move {
-            let mut config = Config::default();
-            config.canonization_edge_min_age = Duration::ZERO;
+            let config = Config {
+                canonization_edge_min_age: Duration::ZERO,
+                ..Config::default()
+            };
             let mem = Memory::builder()
                 .session("stale-replay-mcp")
                 .agent("agent-a")

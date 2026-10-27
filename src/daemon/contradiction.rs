@@ -457,14 +457,15 @@ pub fn stale_report_page(
     let timeline = WriterTimeline::of(graph);
     for cited in targets {
         for id in stale_dependents_with(graph, cited, min_age, now, &timeline) {
-            if total >= offset && dependents.len() < STALE_REPORT_LIMIT {
-                if let Some(c) = concept(graph, id) {
-                    dependents.push(StaleDependent {
-                        id: id.0.to_string(),
-                        content: c.content.chars().take(160).collect(),
-                        cited_id: cited.0.to_string(),
-                    });
-                }
+            if total >= offset
+                && dependents.len() < STALE_REPORT_LIMIT
+                && let Some(c) = concept(graph, id)
+            {
+                dependents.push(StaleDependent {
+                    id: id.0.to_string(),
+                    content: c.content.chars().take(160).collect(),
+                    cited_id: cited.0.to_string(),
+                });
             }
             total += 1;
         }

@@ -72,12 +72,15 @@ use crate::types::AgentId;
 
 // One module per responsibility; the struct they all extend,
 // `WritePipeline`, stays here so its fields remain private to `writeq`.
+type RestartReceipts =
+    HashMap<ReceiptId, (AgentId, Option<crate::types::SessionId>, ReceiptAnswer)>;
+
 mod admission;
 mod calibration;
 mod counters;
 mod drain;
 mod execution;
-#[cfg(test)]
+#[cfg(all(test, feature = "store-memory", feature = "embed-fixture"))]
 pub(crate) use execution::REPORT_GATE;
 mod receipts;
 mod replay;
@@ -162,7 +165,7 @@ pub struct WritePipeline {
     /// by [`WritePipeline::lookup`] before the epoch fallback, so these ids
     /// answer their truth instead of `restart_lost`. Agent-scoped like the
     /// live store.
-    restart: PlMutex<HashMap<ReceiptId, (AgentId, Option<crate::types::SessionId>, ReceiptAnswer)>>,
+    restart: PlMutex<RestartReceipts>,
     /// The replay task (J3), when this session attached over a durable intent
     /// backlog. Aborted at close — unconsumed intents stay durable for the
     /// next serve.

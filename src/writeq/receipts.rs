@@ -1184,7 +1184,7 @@ impl WritePipeline {
         self.wait_impl(agent, id, budget, Some(deliver_to)).await
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "store-memory", feature = "embed-fixture"))]
     pub(crate) fn forget_live_receipt_for_test(&self, id: ReceiptId) {
         self.receipts.lock().forget(&id);
     }

@@ -238,13 +238,13 @@ pub(super) fn action_sentence(
 }
 
 #[cfg(test)]
-pub(crate) static REPORT_GATE: std::sync::Mutex<
-    Option<(
-        crate::types::NodeId,
-        std::sync::mpsc::Sender<()>,
-        std::sync::mpsc::Receiver<()>,
-    )>,
-> = std::sync::Mutex::new(None);
+type ReportGate = (
+    crate::types::NodeId,
+    std::sync::mpsc::Sender<()>,
+    std::sync::mpsc::Receiver<()>,
+);
+#[cfg(test)]
+pub(crate) static REPORT_GATE: std::sync::Mutex<Option<ReportGate>> = std::sync::Mutex::new(None);
 
 impl WriteCtx {
     fn stale_report(

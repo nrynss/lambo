@@ -13,7 +13,11 @@
 //! lock. Both caches are consulted only after `ensure_open`, so a closed or
 //! erased session never answers from either (#23).
 
-#[cfg(all(test, feature = "store-memory", feature = "embed-fixture"))]
+#[cfg(all(
+    test,
+    feature = "embed-fixture",
+    any(feature = "store-memory", feature = "store-sqlite")
+))]
 use std::time::Duration;
 
 use chrono::Utc;
