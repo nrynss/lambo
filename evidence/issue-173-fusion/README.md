@@ -13,8 +13,9 @@ stores it), 5 ms apart so the recent leg's three newest interactions are the
 same on every run. For each variant it reopens a copy of that session with
 the variant's `Config`, waits for the daemon's first cycle (so no recall is in
 cold mode), and recalls every query with `top_k = 10` and the default
-traversal depth. Each run is deterministic: repeating a variant gives the same
-numbers.
+traversal depth. Repeating a run gives the same ranking metrics. The top scores
+can differ in the fourth decimal between runs, because the daemon's recency
+term reads the wall clock.
 
 * **Ranking:** hit@k and MRR@10 on the first grade-2 concept, nDCG@10 with
   gain `2^grade − 1`, over answerable queries, per split and per family. The

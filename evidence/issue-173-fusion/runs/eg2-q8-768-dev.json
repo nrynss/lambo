@@ -285,7 +285,7 @@
         "dev": {
           "auc_top1": 0.7154,
           "distinct_top1_values": {
-            "answerable": 30,
+            "answerable": 29,
             "no_answer": 30
           },
           "gate_alpha": 0.1,
@@ -379,8 +379,8 @@
         "dev": {
           "auc_top1": 0.7189,
           "distinct_top1_values": {
-            "answerable": 33,
-            "no_answer": 31
+            "answerable": 32,
+            "no_answer": 32
           },
           "gate_alpha": 0.1,
           "gate_pass_answerable": 0.912,
@@ -661,8 +661,8 @@
         "dev": {
           "auc_top1": 0.7186,
           "distinct_top1_values": {
-            "answerable": 31,
-            "no_answer": 40
+            "answerable": 30,
+            "no_answer": 41
           },
           "gate_alpha": 0.1,
           "gate_pass_answerable": 0.912,
@@ -849,8 +849,8 @@
         "dev": {
           "auc_top1": 0.6958,
           "distinct_top1_values": {
-            "answerable": 35,
-            "no_answer": 38
+            "answerable": 34,
+            "no_answer": 39
           },
           "gate_alpha": 0.1,
           "gate_pass_answerable": 0.912,
@@ -944,7 +944,7 @@
           "auc_top1": 0.7125,
           "distinct_top1_values": {
             "answerable": 41,
-            "no_answer": 45
+            "no_answer": 46
           },
           "gate_alpha": 0.1,
           "gate_pass_answerable": 0.912,
@@ -1037,7 +1037,7 @@
         "dev": {
           "auc_top1": 0.7171,
           "distinct_top1_values": {
-            "answerable": 26,
+            "answerable": 25,
             "no_answer": 31
           },
           "gate_alpha": 0.1,
@@ -1226,7 +1226,7 @@
           "auc_top1": 0.6548,
           "distinct_top1_values": {
             "answerable": 41,
-            "no_answer": 33
+            "no_answer": 34
           },
           "gate_alpha": 0.1,
           "gate_pass_answerable": 0.912,
@@ -1508,7 +1508,7 @@
           "auc_top1": 0.6382,
           "distinct_top1_values": {
             "answerable": 62,
-            "no_answer": 56
+            "no_answer": 57
           },
           "gate_alpha": 0.1,
           "gate_pass_answerable": 0.912,
@@ -1601,8 +1601,8 @@
         "dev": {
           "auc_top1": 0.6855,
           "distinct_top1_values": {
-            "answerable": 39,
-            "no_answer": 39
+            "answerable": 38,
+            "no_answer": 40
           },
           "gate_alpha": 0.1,
           "gate_pass_answerable": 0.912,

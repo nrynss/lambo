@@ -317,7 +317,7 @@
         "dev": {
           "auc_top1": 0.6823,
           "distinct_top1_values": {
-            "answerable": 35,
+            "answerable": 36,
             "no_answer": 41
           },
           "gate_alpha": 0.1,
@@ -480,7 +480,7 @@
         "dev": {
           "auc_top1": 0.5756,
           "distinct_top1_values": {
-            "answerable": 72,
+            "answerable": 73,
             "no_answer": 56
           },
           "gate_alpha": 0.1,
@@ -494,7 +494,7 @@
           "auc_top1": 0.5815,
           "distinct_top1_values": {
             "answerable": 48,
-            "no_answer": 27
+            "no_answer": 26
           },
           "gate_alpha": 0.1,
           "gate_pass_answerable": 0.9241,

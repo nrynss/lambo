@@ -135,7 +135,8 @@ impl LegScores {
     /// under [`FusionKind::Max`] (the default).
     ///
     /// Kept next to the legs so the two can never disagree: the merge rule is
-    /// stated once, here, and [`rank`] is its only caller.
+    /// stated once, here. [`Self::fused`] ranks on it, and the ledger records
+    /// it beside `rrf` (#173).
     pub fn merged(&self) -> f64 {
         [self.keyword, self.recent, self.vector]
             .into_iter()

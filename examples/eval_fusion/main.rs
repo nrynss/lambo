@@ -228,7 +228,7 @@ struct Acc {
 async fn open(
     db: &std::path::Path,
     embedder: Arc<dyn Embedder>,
-    config: Option<lambo::Config>,
+    variant: Option<(RecallFusion, RecallWeights)>,
 ) -> Result<Memory, String> {
     let toml = format!(
         "[store]\nkind = \"sqlite\"\npath = {}\n",
@@ -244,12 +244,20 @@ async fn open(
         .await
         .map_err(|e| format!("init_schema: {e}"))?;
     resolved.embedder = Box::new(Shared(embedder));
-    let base = resolved.config.clone();
+    // The resolved process config, as a serve would run it, with only the
+    // variant's fusion and weights changed. An hour's tick: the warm-up cycle
+    // scores the reopened session, and no later cycle runs mid-measurement.
+    let mut config = resolved.config.clone();
+    if let Some((fusion, weights)) = variant {
+        config.recall_fusion = fusion;
+        config.recall_weights = weights;
+        config.daemon_tick_interval = Duration::from_secs(3600);
+    }
     Memory::builder()
         .session(SESSION)
         .agent("eval")
         .backends(resolved)
-        .config(config.unwrap_or(base))
+        .config(config)
         .build()
         .await
         .map_err(|e| e.to_string())
@@ -412,13 +420,7 @@ async fn run() -> Result<(), String> {
                     .map_err(|e| format!("copying the session: {e}"))?;
             }
         }
-        let config = lambo::Config {
-            recall_fusion: *fusion,
-            recall_weights: *weights,
-            daemon_tick_interval: Duration::from_secs(3600),
-            ..lambo::Config::default()
-        };
-        let mem = open(&db, as_dyn.clone(), Some(config)).await?;
+        let mem = open(&db, as_dyn.clone(), Some((*fusion, *weights))).await?;
         let waited = Instant::now();
         while mem.stats().daemon_cycles == 0 {
             if waited.elapsed() > Duration::from_secs(60) {
