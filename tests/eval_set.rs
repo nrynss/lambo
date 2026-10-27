@@ -13,6 +13,7 @@ mod schema;
 use std::path::{Path, PathBuf};
 
 use lambo::embed::canary::{RelatedPair, MIN_RELATED_PAIRS};
+use lambo::graph::canonical::same_identifiers;
 use lambo::surface::limits::MAX_CONTENT_BYTES;
 
 fn dir() -> PathBuf {
@@ -128,6 +129,37 @@ fn sizes_meet_the_consumers() {
             );
         }
     }
+}
+
+/// #198's trigger only sees a pair the #195 identifier guard refused: every
+/// in-regime supersedes, distinct_entity and same-event pair must be one
+/// `same_identifiers` says differs, or it would merge and never reach the
+/// trigger. build.py's Python mirror is only a pre-check; this is the guard.
+#[test]
+fn the_identifier_guard_refuses_every_in_regime_pair() {
+    let s = set();
+    let mut checked = [0usize; 3];
+    let mut merged = Vec::new();
+    for p in s.pairs.iter().filter(|p| in_regime(p)) {
+        let k = match (p.relation.as_deref(), p.family.as_str()) {
+            (Some("supersedes"), _) => 0,
+            (Some("distinct_entity"), _) => 1,
+            (_, "same-event") => 2,
+            _ => continue,
+        };
+        checked[k] += 1;
+        if same_identifiers(&p.a, &p.b) {
+            merged.push(p.id.as_str());
+        }
+    }
+    assert!(
+        merged.is_empty(),
+        "the identifier guard would not refuse: {merged:?}"
+    );
+    assert!(
+        checked[0] >= 60 && checked[1] >= 60 && checked[2] >= 8,
+        "too few in-regime pairs checked: {checked:?}"
+    );
 }
 
 /// The export is what `[embedder] related_pairs` reads: the canary's own
