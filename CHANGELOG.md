@@ -121,6 +121,12 @@
   `layer.min_similarity = 0.5` no longer compiles: write
   `Some(0.5)` or use `with_min_similarity`, which is unchanged. This keeps
   an explicit 0.50 from being read as unset.
+- **`Config` gains `recall_selection`, `LamboFile` gains `selection`, and
+  `LayeredHit` gains `skipped_redundant`** (#181). A `Config` or
+  `LamboFile` struct literal that names every field no longer compiles;
+  `..Default::default()` keeps compiling, and the defaults recall exactly
+  as before (`skip_redundant = false`). `LayeredHit` is
+  `#[non_exhaustive]`, so no caller builds one with a literal.
 - **`Config` gains `recall_fusion`, `LamboFile` gains `fusion`,
   `recall::candidates::Phase1Input` gains `fusion`, and
   `recall::candidates::LegScores` gains `keyword_rank`, `recent_rank`,
@@ -198,6 +204,54 @@
 
 ### Added
 
+- **Opt-in redundancy-aware selection: `[selection] skip_redundant`
+  (#181).** A reader sees the first two or three hits, and two copies of
+  one fact could take two of those slots: a semantic match writes its own
+  node beside the one it matched, and stores written before embedding
+  coverage hold one text twice (the 2026-09-07 efficacy run had an
+  `Entity` and an `Observation` copy at ranks 2 and 3 in two of twelve
+  queries). With `skip_redundant = true`, recall walks its hits in the
+  usual order and skips one redundant with a hit already taken, so the next
+  distinct hit gets the slot; then `top_k` and `max_tokens` apply as
+  before. Redundant means the same text once case, spacing, Unicode
+  composition and invisible characters are set aside (across concept
+  types; `canonical_key` is not used, since it sorts and stems words), a
+  `Semantic` edge, or vectors of the session's contract at or above its
+  effective merge threshold (the #87 calibrated or labelled-pairs one; the
+  one-shot readers and `lambo session verify` use the calibrated row, as
+  they do not embed labelled pairs). A member without a vector is never
+  judged by cosine. A pair joined by `Contradicts` either way, or whose
+  texts differ in an identifier, a digit or a count of negation words, is
+  never redundant. Forced hits (hot-list, #19 forcing and companions, kept
+  reservation holders) and hits carrying a warning line of their own
+  (hot-list or contradiction, #207 stale citation, #20 supersession,
+  reservation) are never skipped; Canonical concepts still come first.
+  Only the first `min(20, 4 × top_k)` hits are checked, each against at
+  most 20 taken. The kept hit names what it replaced in its label, `(score
+  …, id …, also 5e6f7a8b)`, at most three ids and then `+N more`, so the
+  mention counts against `max_tokens`; the skips, each with its signal
+  (`same_content`, `semantic_edge`, `cosine`), are `skipped_redundant` on
+  the hit in `lambo_recall`'s `structuredContent`, the web portal's
+  `/api/recall` and the `--ledger` recall line, present only on a hit that
+  skipped something. **Off by default; off, or with nothing redundant in
+  the window, recall is byte-identical** (goldens included). A layered
+  merge applies each session's setting inside that session's recall and
+  keeps the `also` items after `from <session>`; across tiers the #33
+  dedupe is unchanged. `lambo session verify` replays the setting and
+  counts a skipped hit as merged, not lost. Nothing is written or merged:
+  this is selection only. On the #190 set under BGE-M3, with copies and
+  rewordings injected, the distinct memories in a 500-token context at
+  `top_k = 3` rose from 1.45 to 2.18 (dev) and 2.31 (held-out); with
+  related-but-distinct partners and no declared contradiction it dropped
+  a few (polarity, exception, quantity), every one through a `Semantic`
+  edge the write path had put between the pair, and none once the
+  contradiction was declared. MMR and facility location were compared
+  offline and did not beat it. In-process recall cost is a few
+  microseconds. New `recall::redundancy` module (`RecallSelection`,
+  `RedundancySignal`, `RedundantSkip`, `normalized_content`,
+  `negation_count`, `distinct_claims`, `never_redundant`, `window`);
+  harnesses `examples/eval_redundancy` and `examples/bench_redundancy`;
+  evidence `evidence/issue-181/`.
 - **Opt-in reciprocal rank fusion of recall's legs: `[fusion]` (#173).**
   `kind = "rrf"` ranks each of the keyword, vector and recent legs on its
   own (the recent leg by recency) and scores a hit `Σ w / (k + rank)`,

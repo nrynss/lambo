@@ -9,7 +9,7 @@ Lambo reads a `lambo.toml` file. It looks for the file in this order: the `--con
 
 ## What lambo.toml contains
 
-The file has `[store]`, `[embedder]` and `[daemon]` sections, an optional `[serve]` section for [multi-session serving](#multi-session-serving), an optional `[web]` section for [the read-only window's views](#read-only-window-views), an optional `[fusion]` section for [recall fusion](#recall-fusion), plus a small number of top-level process settings. It chooses which compiled backends this process runs, the cadence the background work runs at, and the canonization policy the serving verbs run them under.
+The file has `[store]`, `[embedder]` and `[daemon]` sections, an optional `[serve]` section for [multi-session serving](#multi-session-serving), an optional `[web]` section for [the read-only window's views](#read-only-window-views), an optional `[fusion]` section for [recall fusion](#recall-fusion), an optional `[selection]` section for [redundancy-aware selection](#redundancy-aware-selection), plus a small number of top-level process settings. It chooses which compiled backends this process runs, the cadence the background work runs at, and the canonization policy the serving verbs run them under.
 
 ```toml
 # Top-level keys must come BEFORE the first [table] header, or TOML scopes them
@@ -30,7 +30,7 @@ url = "http://127.0.0.1:8080"
 Unknown keys are refused, so a typo fails at startup instead of silently falling back to a default. A misspelled `knd`, a misspelled `[embeder]` section, and a key that belongs to the library rather than the file all stop the process before it attaches a session.
 </Warning>
 
-Recall defaults, flush timing, canonization thresholds, and scoring weights are not `lambo.toml` keys. They are library settings you pass when you build a `Memory` in Rust, so putting one in the file stops the process rather than tuning anything. Six settings are exceptions, and none of them is a threshold: `promotion_policy` and `canonization_supersede` below, and the four cadence keys in [Daemon cadence](#daemon-cadence). `promotion_policy` is a selector — it sets no number. But do not read that as "the numbers stay the same": `Solo` replaces the ladder rather than re-tuning it, and the store-evidence gates stop deciding anything. See [Library API](/lambo/api/) for what each policy actually measures. `[fusion]` is one more: it chooses how recall combines its legs, and its numbers are the fusion's own, not canonization's. See [Recall fusion](#recall-fusion).
+Recall defaults, flush timing, canonization thresholds, and scoring weights are not `lambo.toml` keys. They are library settings you pass when you build a `Memory` in Rust, so putting one in the file stops the process rather than tuning anything. Six settings are exceptions, and none of them is a threshold: `promotion_policy` and `canonization_supersede` below, and the four cadence keys in [Daemon cadence](#daemon-cadence). `promotion_policy` is a selector — it sets no number. But do not read that as "the numbers stay the same": `Solo` replaces the ladder rather than re-tuning it, and the store-evidence gates stop deciding anything. See [Library API](/lambo/api/) for what each policy actually measures. `[fusion]` is one more: it chooses how recall combines its legs, and its numbers are the fusion's own, not canonization's. See [Recall fusion](#recall-fusion). `[selection]` is another, a switch with no number of its own: see [Redundancy-aware selection](#redundancy-aware-selection).
 
 ```
 $ lambo --config lambo.toml provision
@@ -122,6 +122,37 @@ k = 3.0        # optional; RRF only
 RRF ranks better overall, but not everywhere, and the gain is below the +0.05 nDCG@10 that #173 set as the bar for a new default. On the held-out split exact-identifier queries drop (nDCG@10 0.948 to 0.899 under BGE-M3, 0.881 under EmbeddingGemma 2) and contrast queries drop (0.897 to 0.859 and 0.872). Telling a query with no answer from one with an answer by its top score does not get consistently better or worse: the chance that an answerable query's top score beats a no-answer query's falls on `dev` (0.775 to 0.682 under BGE-M3) and rises on `held_out` (0.673 to 0.717). Neither kind separates them well enough to gate on. The literature's `k = 60` is much worse here (nDCG@10 0.698 on `dev`): it puts a leg's first and tenth hit within about 0.06 of each other, so the daemon's share of the score decides the order.
 
 `k` and the weights must be finite and at least 0, and `"rrf"` needs at least one weight above 0; anything else, or an unknown key, stops the process at startup. With `serve --ledger`, every recall hit found by a query leg records its rank in each leg and both fused values (`fusion` on the hit), whichever kind ranked, so one can be compared against the other on live traffic.
+
+## Redundancy-aware selection
+
+`[selection]` (#181) decides whether recall skips a hit that repeats one it already took. A reader sees the first two or three hits, so two copies of one fact can take two of those slots: a semantic match writes its own node beside the one it matched, and a store written before embedding coverage can hold the same text twice (an `Entity` and an `Observation`). It is optional and off by default, and a file without it, or with it off, recalls exactly as before.
+
+```toml
+[selection]
+skip_redundant = true   # optional; the default is false
+```
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `skip_redundant` | boolean | `false` | Skip a member redundant with a hit already taken; the next distinct member fills its slot. |
+
+**What counts as redundant**, checked cheapest first:
+
+- the same text, once case, spacing, Unicode composition and invisible characters are set aside, whatever the two concept types (nothing else is erased, so a different identifier, number, path, punctuation or word order is different text);
+- a `Semantic` edge between the two;
+- vectors at or above the session's merge threshold (`semantic_match_threshold`, or the calibrated or labelled-pairs threshold that replaces it, see `[embedder] calibration`), when both carry a vector. A concept without a vector is never judged by this one. `lambo recall`, `serve-web` and `lambo session verify` do not embed labelled pairs, so they use the contract's calibrated threshold, or the configured one.
+
+**Never redundant:** a pair one of which contradicts the other (`against`, in either direction); two texts that name different identifiers or digits, or negate a different number of times (`not`, `never`, `don't`, ...). **Never skipped:** a hit forced into the result (hot-list conditions, a contradicted Canonical or Venerable concept and its contradicting concept, a kept reservation holder), and a hit that carries a warning line of its own (a hot-list or contradiction line, a stale citation, a supersession line, a reservation), because the copy kept may not carry it. Canonical concepts still come first.
+
+Only the first `min(20, 4 × top_k)` hits are checked, each against at most 20 hits already taken; past that, hits fill the remaining slots as before. When nothing in that window is redundant, the result is byte-identical to the rule being off. `top_k` and `max_tokens` then apply as usual.
+
+**What the reader sees.** The kept hit names what was skipped in its label, after its id: `(score 0.42, id 1a2b3c4d, also 5e6f7a8b)`, at most three ids and then `+N more`. Each id is an inspect focus. These items count against `max_tokens`, so under a tight budget a later hit can fall out of the rendered context. The skipped members, each with the signal that found it (`same_content`, `semantic_edge`, `cosine`), are `skipped_redundant` on the hit in `lambo_recall`'s `structuredContent`, the web portal's `/api/recall` and the `--ledger` recall line; that key is absent on every other hit.
+
+**Layered recall** applies each session's own setting inside that session's recall, where the concepts' edges are; across layers, the existing deduplication still keeps the nearest tier's copy. `lambo session verify` replays the setting and counts a skipped member as deduplicated, not lost.
+
+**Why it is off by default.** On the evaluation set under BGE-M3 (`evidence/issue-181/`), with copies and rewordings injected, it raised the distinct memories in a 500-token context at `top_k = 3` from 1.45 to 2.18 (dev) and 2.31 (held-out), and changed nothing without redundancy or with declared contradictions. With related but different facts that were never declared contradictory, it skipped a few (polarity, exception and quantity pairs), every one through a `Semantic` edge the write path had put between them. Turn it on where duplicates are common, and declare contradictions with `against`.
+
+`skip_redundant` must be `true` or `false`; anything else, or an unknown key, stops the process at startup. It is a table of its own, not a key under `[recall]`, which configures the recall tier.
 
 ## Store
 
