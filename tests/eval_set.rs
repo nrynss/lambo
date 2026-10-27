@@ -58,6 +58,34 @@ fn sizes_meet_the_consumers() {
     );
     assert!(count("paraphrase", true) >= 100, "paraphrase pairs");
     assert!(count("unrelated", true) >= 100, "unrelated pairs");
+    // #198: about 50 supersession pairs to measure the suspected-supersession
+    // trigger's precision on, and as many hard negatives in its own regime
+    // (same Logic, Constraint or Observation type, refused by the identifier
+    // guard, both texts true), each with both concept types.
+    let relation = |r: &str| {
+        s.pairs
+            .iter()
+            .filter(|p| p.adjudicated() && p.relation.as_deref() == Some(r))
+            .collect::<Vec<_>>()
+    };
+    assert!(relation("supersedes").len() >= 50, "supersedes pairs");
+    let in_regime = relation("distinct_entity")
+        .into_iter()
+        .filter(|p| {
+            p.concept_types.len() == 2
+                && p.concept_types[0] == p.concept_types[1]
+                && ["Logic", "Constraint", "Observation"].contains(&p.concept_types[0].as_str())
+        })
+        .count();
+    assert!(in_regime >= 50, "distinct_entity pairs in #198's regime");
+    for r in ["supersedes", "distinct_entity"] {
+        for split in schema::SPLITS {
+            assert!(
+                relation(r).iter().any(|p| p.split == split),
+                "no {r} pair in {split}"
+            );
+        }
+    }
     let kind = |k: &str| {
         s.queries
             .iter()

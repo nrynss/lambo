@@ -16,7 +16,7 @@ sys.path.insert(0, str(HERE))
 import common  # noqa: E402
 
 MODULES = ["t_embed", "t_serve", "t_release", "t_findings", "t_paper", "t_noanswer", "t_para",
-           "t_more173"]
+           "t_more173", "t_supersede198"]
 CONCEPT_TYPES = ("Entity", "Logic", "Constraint", "Resource", "Observation")
 LABELLER = "Grok Bot (agent)"
 LABELLED_ON = "2026-10-23"

@@ -420,6 +420,374 @@
   "b": "J2 round-3 adversarial review (adve-review-mooshik-J2-round3.md) — verdict CLEAN. All 7 round-2 findings (2 P2 / 5 P3) verified closed at the artifact over 920e096..6442d95. Nine gates exact at 6442d95 (fmt clean, 4x clippy clean, 858/0/3 fixtures, 946/0/3 sqlite, 550/0/0 cockroach, verify.sh 40 ok); 72050b7 spot-checked green on fmt + 856/0/3 fixtures. All seven declared mutations reproduced. Six tests added, none removed, deltas reconcile exactly (+5 lib, +6 sqlite). Five new P3 doc-precision advisories, no P2/P1. J2 is ready to integrate now."
  },
  {
+  "a": "The Mac dogfood rig serves the pinned binary lambo-21e4cf8, built with store-sqlite,embed-candle-metal,embed-bge.",
+  "b": "The Mac dogfood rig serves the pinned binary lambo-19f51d3, built with store-sqlite,embed-candle-metal,embed-bge."
+ },
+ {
+  "a": "Current Mac rig pin: 19f51d3, the binary every client's MCP registration spawns.",
+  "b": "Current Mac rig pin: 3039b82, the binary every client's MCP registration spawns."
+ },
+ {
+  "a": "The Linux dogfood rig (CUDA build) is pinned to bbef4b3.",
+  "b": "The Linux dogfood rig (CUDA build) is pinned to fe4d63d."
+ },
+ {
+  "a": "The dogfood writer and portal run the pinned lambo 0.6.0 binary.",
+  "b": "The dogfood writer and portal run the pinned lambo 0.5.0 binary."
+ },
+ {
+  "a": "The dogfood writer runs the pinned lambo 0.5.0 release.",
+  "b": "The dogfood writer runs the pinned lambo 0.4.0 release."
+ },
+ {
+  "a": "The pinned Rust toolchain is 1.99.0; CI and the release workflow install it directly.",
+  "b": "The pinned Rust toolchain is 1.97.1; CI and the release workflow install it directly."
+ },
+ {
+  "a": "The lambo crate is built on Rust edition 2024.",
+  "b": "The lambo crate is built on Rust edition 2021."
+ },
+ {
+  "a": "lambo::store::batch::CONCEPT_COLUMNS, the bind-parameter count of one concept row, is 18.",
+  "b": "lambo::store::batch::CONCEPT_COLUMNS, the bind-parameter count of one concept row, is 17."
+ },
+ {
+  "a": "lambo::store::batch::CONCEPT_COLUMNS, the bind-parameter count of one concept row, is 17.",
+  "b": "lambo::store::batch::CONCEPT_COLUMNS, the bind-parameter count of one concept row, is 16."
+ },
+ {
+  "a": "lambo::store::batch::INTERACTION_COLUMNS, the bind-parameter count of one interaction row, is 7.",
+  "b": "lambo::store::batch::INTERACTION_COLUMNS, the bind-parameter count of one interaction row, is 6."
+ },
+ {
+  "a": "lambo::store::batch::EDGE_COLUMNS, the bind-parameter count of one edge row, is 10.",
+  "b": "lambo::store::batch::EDGE_COLUMNS, the bind-parameter count of one edge row, is 9."
+ },
+ {
+  "a": "The longest lambo_stats wait_ms a caller may ask for is 34000.",
+  "b": "The longest lambo_stats wait_ms a caller may ask for is 4000."
+ },
+ {
+  "a": "Under the EmbeddingGemma 2 contract, the recent-interactions recall leg scores 0.63.",
+  "b": "Under the EmbeddingGemma 2 contract, the recent-interactions recall leg scores 0.35."
+ },
+ {
+  "a": "A writer attaching under the EmbeddingGemma 2 contract merges at a semantic match threshold of 0.93.",
+  "b": "A writer attaching under the EmbeddingGemma 2 contract merges at a semantic match threshold of 0.85."
+ },
+ {
+  "a": "Under EmbeddingGemma 2, a layer whose min_similarity is unset takes a floor of 0.72.",
+  "b": "Under EmbeddingGemma 2, a layer whose min_similarity is unset takes a floor of 0.50."
+ },
+ {
+  "a": "embed-candle-cuda builds against CUDA 13.4 directly, with no version override.",
+  "b": "embed-candle-cuda needs CUDARC_CUDA_VERSION=13030 set to build against CUDA 13.4."
+ },
+ {
+  "a": "The latest published lambo release is 0.7.0 (2026-10-19).",
+  "b": "The latest published lambo release is 0.6.0 (2026-10-13)."
+ },
+ {
+  "a": "Keyword recall over MCP on a 9,500-concept SQLite store runs at 7.5 ms p50.",
+  "b": "Keyword recall over MCP on a 9,500-concept SQLite store runs at 18.7 ms p50."
+ },
+ {
+  "a": "With 16 concurrent clients, a 9,500-concept SQLite store serves 1,104 recalls per second.",
+  "b": "With 16 concurrent clients, a 9,500-concept SQLite store serves 63 recalls per second."
+ },
+ {
+  "a": "A back-to-back lambo_derive on a 9,500-concept SQLite store is acknowledged in 0.8 ms p50.",
+  "b": "A back-to-back lambo_derive on a 9,500-concept SQLite store is acknowledged in 24.8 ms p50."
+ },
+ {
+  "a": "A back-to-back lambo_derive on a 9,500-concept SQLite store is applied in 6.3 ms p50.",
+  "b": "A back-to-back lambo_derive on a 9,500-concept SQLite store is applied in 32.4 ms p50."
+ },
+ {
+  "a": "A clean lambo provision of a 9,508-concept store takes 5.6 ms p50.",
+  "b": "A clean lambo provision of a 9,508-concept store takes 143 ms p50."
+ },
+ {
+  "a": "One daemon rescore of a 9,100-concept session takes 31 ms.",
+  "b": "One daemon rescore of a 9,100-concept session takes 201 ms."
+ },
+ {
+  "a": "A structural recall on a synthetic 9,100-concept store takes about 1 ms per query (release build).",
+  "b": "A structural recall on a synthetic 9,100-concept store takes about 70 ms per query (release build)."
+ },
+ {
+  "a": "A derive commit holds the session write lock for 16.5 µs at 10,000 concepts (release build).",
+  "b": "A derive commit holds the session write lock for 6.8 ms at 10,000 concepts (release build)."
+ },
+ {
+  "a": "A derive commit holds the session write lock for 21 µs at 100,000 concepts (release build).",
+  "b": "A derive commit holds the session write lock for 168 ms at 100,000 concepts (release build)."
+ },
+ {
+  "a": "On Metal, the embedder of a lambo serve that becomes a proxy takes about 4 MB.",
+  "b": "On Metal, the embedder of a lambo serve that becomes a proxy takes about 1.4 GB."
+ },
+ {
+  "a": "Warm recall p50 on a 3,600-concept SQLite session is 4.3 ms.",
+  "b": "Warm recall p50 on a 3,600-concept SQLite session is 219 ms."
+ },
+ {
+  "a": "On a copy of the Metal rig store, GC's first sweep collects 0 concepts.",
+  "b": "On a copy of the Metal rig store, GC's first sweep collects 537 concepts."
+ },
+ {
+  "a": "GC's first sweep on the Metal rig copy holds the write lock for 9.0 ms.",
+  "b": "GC's first sweep on the Metal rig copy holds the write lock for 67.5 ms."
+ },
+ {
+  "a": "In the REST API fixture, user schema has 14 dependents.",
+  "b": "In the REST API fixture, user schema has 8 dependents."
+ },
+ {
+  "a": "The demo's user schema reports 15 dependents.",
+  "b": "The demo's user schema reports 9 dependents."
+ },
+ {
+  "a": "The #190 evaluation set holds 368 queries.",
+  "b": "The #190 evaluation set holds 310 queries."
+ },
+ {
+  "a": "The #190 set has 262 answerable queries.",
+  "b": "The #190 set has 204 answerable queries."
+ },
+ {
+  "a": "The #190 queries split 239 dev / 129 held-out.",
+  "b": "The #190 queries split 199 dev / 111 held-out."
+ },
+ {
+  "a": "The #190 set has 48 vocabulary-mismatch queries.",
+  "b": "The #190 set has 12 vocabulary-mismatch queries."
+ },
+ {
+  "a": "The #190 set has 17 rationale queries.",
+  "b": "The #190 set has 8 rationale queries."
+ },
+ {
+  "a": "The #190 set has 36 contrast queries.",
+  "b": "The #190 set has 23 contrast queries."
+ },
+ {
+  "a": "Of the #190 related-distinct pairs, 82 carry the relation contradicts.",
+  "b": "Of the #190 related-distinct pairs, 84 carry the relation contradicts."
+ },
+ {
+  "a": "J1 round-1 adversarial review verdict: REQUEST_CHANGES with one P1.",
+  "b": "J2 round-1 adversarial review verdict: REQUEST_CHANGES with one P1."
+ },
+ {
+  "a": "J3 round-1 adversarial review verdict: REQUEST_CHANGES, one P1, four P2, eight P3.",
+  "b": "J3 round-2 adversarial review verdict: REQUEST_CHANGES, one P1, three P2, six P3."
+ },
+ {
+  "a": "J3 round-2 adversarial review verdict: REQUEST_CHANGES, 1 P1, 3 P2, 6 P3.",
+  "b": "J3 redesign round-2 adversarial review verdict: REQUEST_CHANGES, 1 P1, 3 P2, 5 P3."
+ },
+ {
+  "a": "J3 round-3 adversarial review verdict: REQUEST_CHANGES with two new P1, one P2 and three P3.",
+  "b": "J3 round-2 adversarial review verdict: REQUEST_CHANGES with one new P1, three P2 and six P3."
+ },
+ {
+  "a": "J1 round-2 adversarial review verdict: REQUEST_CHANGES, two blocking P2 and two P3.",
+  "b": "J1 round-3 adversarial review verdict: CLEAN, three P3 advisories and none blocking."
+ },
+ {
+  "a": "J0 round-1 adversarial review verdict: CLEAN, six P3 advisory findings, none blocking.",
+  "b": "J0 round-2 adversarial review verdict: CLEAN, one P2 and five P3 advisory findings, none blocking."
+ },
+ {
+  "a": "J3 redesign round-1 review verdict: REQUEST_CHANGES, 1 P1, 3 P2, 1 unconfirmed P2, 6 P3.",
+  "b": "J3 redesign round-2 review verdict: REQUEST_CHANGES, 1 P1, 3 P2, 5 P3."
+ },
+ {
+  "a": "J end-to-end round-1 review verdict: REQUEST_CHANGES, no P1, five P2, seven P3.",
+  "b": "J end-to-end round-2 review verdict: REQUEST_CHANGES, no P1 and no P2."
+ },
+ {
+  "a": "J2 round-3 adversarial review verdict: CLEAN.",
+  "b": "J1 round-3 adversarial review verdict: CLEAN."
+ },
+ {
+  "a": "J3 redesign round-3 review verdict: APPROVE.",
+  "b": "J3 redesign round-2 review verdict: REQUEST_CHANGES."
+ },
+ {
+  "a": "Review notes for J2 round 1 are in adve-review-mooshik-J2-round1.md.",
+  "b": "Review notes for J2 round 2 are in adve-review-mooshik-J2-round2.md."
+ },
+ {
+  "a": "Review notes for J3 round 1 are in adve-review-mooshik-J3-round1.md.",
+  "b": "Review notes for J3 round 3 are in adve-review-mooshik-J3-round3.md."
+ },
+ {
+  "a": "On 0.7.0, keyword recall over MCP on a 9,500-concept SQLite store runs at 7.5 ms p50.",
+  "b": "On 0.6.0, keyword recall over MCP on a 9,500-concept SQLite store ran at 18.7 ms p50."
+ },
+ {
+  "a": "On 0.7.0, 16 concurrent clients get 1,104 recalls per second from a 9,500-concept store.",
+  "b": "On 0.6.0, 16 concurrent clients got 63 recalls per second from a 9,500-concept store."
+ },
+ {
+  "a": "0.7.0 acknowledges a back-to-back lambo_derive in 0.8 ms p50.",
+  "b": "0.6.0 acknowledged a back-to-back lambo_derive in 24.8 ms p50."
+ },
+ {
+  "a": "On 0.7.0 a structural recall on a 9,100-concept store takes about 1 ms.",
+  "b": "On 0.6.0 a structural recall on a 9,100-concept store took about 70 ms."
+ },
+ {
+  "a": "At 10,000 concepts a derive commit holds the write lock for 16.5 µs (0.5.0).",
+  "b": "At 50,000 concepts a derive commit holds the write lock for 17 µs (0.5.0)."
+ },
+ {
+  "a": "At 50,000 concepts a derive commit holds the write lock for 17 µs.",
+  "b": "At 100,000 concepts a derive commit holds the write lock for 21 µs."
+ },
+ {
+  "a": "With RRF fusion, whole-pipeline nDCG@10 on the #190 dev split under BGE-M3 is 0.893.",
+  "b": "Without RRF fusion, whole-pipeline nDCG@10 on the #190 dev split under BGE-M3 is 0.848."
+ },
+ {
+  "a": "With RRF fusion, nDCG@10 on the #190 dev split is 0.893 under BGE-M3.",
+  "b": "With RRF fusion, nDCG@10 on the #190 dev split is 0.889 under EmbeddingGemma 2."
+ },
+ {
+  "a": "With RRF fusion, nDCG@10 under BGE-M3 is 0.893 on the #190 dev split.",
+  "b": "With RRF fusion, nDCG@10 under BGE-M3 is 0.887 on the #190 held_out split."
+ },
+ {
+  "a": "Without fusion, nDCG@10 under BGE-M3 is 0.848 on the #190 dev split.",
+  "b": "Without fusion, nDCG@10 under BGE-M3 is 0.865 on the #190 held_out split."
+ },
+ {
+  "a": "Under EmbeddingGemma 2 the recent-interactions leg scores 0.63.",
+  "b": "Under BGE-M3 the recent-interactions leg scores 0.35."
+ },
+ {
+  "a": "Under EmbeddingGemma 2 a writer merges at a calibrated threshold of 0.93.",
+  "b": "Under BGE-M3 a writer merges at the default threshold of 0.85."
+ },
+ {
+  "a": "Under EmbeddingGemma 2 an unset layer floor is 0.72.",
+  "b": "Under BGE-M3 an unset layer floor is 0.50."
+ },
+ {
+  "a": "At a 0.50 layer floor, 99.9% of irrelevant concepts on the #190 held-out split pass under EmbeddingGemma 2.",
+  "b": "At a 0.50 layer floor, 3.2% of irrelevant concepts on the #190 held-out split pass under BGE-M3."
+ },
+ {
+  "a": "At the 0.85 threshold, about 78% of the #190 related-but-distinct pairs are over it by cosine under EmbeddingGemma 2.",
+  "b": "At the 0.85 threshold, 35-44% of the #190 related-but-distinct pairs are over it by cosine under BGE-M3."
+ },
+ {
+  "a": "lambo::store::batch::CONCEPT_COLUMNS is 18.",
+  "b": "lambo::store::batch::EDGE_COLUMNS is 10."
+ },
+ {
+  "a": "lambo::store::batch::INTERACTION_COLUMNS is 7.",
+  "b": "lambo::store::batch::EDGE_COLUMNS is 10 too."
+ },
+ {
+  "a": "At most 16 lambo_stats waits run at once across the server.",
+  "b": "At most 8 lambo_stats waits run at once for one agent_id."
+ },
+ {
+  "a": "lambo::graph::hybrid::MAX_HYBRID_CONCEPTS is 256.",
+  "b": "lambo::graph::hybrid::MAX_HYBRID_WORK_ITEMS, the most concepts plus pairs one call may carry, is 512."
+ },
+ {
+  "a": "The Mac dogfood rig is pinned to 21e4cf8 (candle on Metal).",
+  "b": "The Linux dogfood rig is pinned to bbef4b3 (candle on CUDA)."
+ },
+ {
+  "a": "lambo 0.7.0 was released on 2026-10-19.",
+  "b": "lambo 0.6.0 was released on 2026-10-13."
+ },
+ {
+  "a": "lambo 0.5.0 was released on 2026-10-12.",
+  "b": "lambo 0.4.0 was released on 2026-10-11."
+ },
+ {
+  "a": "lambo 0.3.0 was released on 2026-10-07.",
+  "b": "lambo 0.4.0 was released on 2026-10-11 too."
+ },
+ {
+  "a": "PR #205 (#173 RRF fusion) merged to main as c3ba6722 on 2026-10-27.",
+  "b": "PR #206 (#173 more labelled queries) merged to main as 1ac09bf8 on 2026-10-27."
+ },
+ {
+  "a": "PR #203 (#87 calibration) merged to main as 266f8bea on 2026-10-26.",
+  "b": "PR #204 (#87 layer floor) merged to main as 8c92a5e9 on 2026-10-26."
+ },
+ {
+  "a": "PR #199 (#196 hot-list budget) merged to main as b8177774 on 2026-10-20.",
+  "b": "PR #200 (#197 GC keeps the live correction) merged to main as 437d3d58 on 2026-10-20."
+ },
+ {
+  "a": "PR #195 (#193 merge guards) merged to main as 5e44c692 on 2026-10-20.",
+  "b": "PR #194 (#179 ordinary contradictions) merged to main as 3a76def7 on 2026-10-20."
+ },
+ {
+  "a": "Issue #198 is planned for milestone 0.8.0.",
+  "b": "Issue #181 is planned for milestone 0.8.0."
+ },
+ {
+  "a": "Issue #207 is planned for milestone 0.8.0.",
+  "b": "Issue #208 is planned for milestone 0.8.0."
+ },
+ {
+  "a": "Issue #117 belongs to milestone 0.5.0.",
+  "b": "Issue #118 belongs to milestone 0.5.0."
+ },
+ {
+  "a": "Issue #180 is planned for milestone 0.8.0.",
+  "b": "Issue #116 belongs to milestone 0.5.0."
+ },
+ {
+  "a": "#176 (the embedder canary) shipped in 0.7.0.",
+  "b": "#178 (near-duplicate alias suggestions) shipped in 0.7.0."
+ },
+ {
+  "a": "#55 (packed f32 SQLite vectors) shipped in 0.7.0.",
+  "b": "#165 (fast structural recall) shipped in 0.7.0."
+ },
+ {
+  "a": "#102 (the commit no longer stalls the session) shipped in 0.5.0.",
+  "b": "#31 (a proxying serve no longer loads the model) shipped in 0.5.0."
+ },
+ {
+  "a": "The dogfood writer listens on 127.0.0.1:7700.",
+  "b": "The old llama-server embedder listened on 127.0.0.1:8080."
+ },
+ {
+  "a": "Phase 3 of the build is the stores phase (dev-diary/PHASE-3-stores.md).",
+  "b": "Phase 4 of the build is the daemon phase (dev-diary/PHASE-4-daemon.md)."
+ },
+ {
+  "a": "Phase 5 of the build is the recall phase (dev-diary/PHASE-5-recall.md).",
+  "b": "Phase 6 of the build is the canonization phase (dev-diary/PHASE-6-canonization.md)."
+ },
+ {
+  "a": "PR #188 (#176 embedder canary) merged to main as d327bf77 on 2026-10-19.",
+  "b": "PR #187 (#178 similar aliases) merged to main as d38c81ee on 2026-10-19."
+ },
+ {
+  "a": "Issue #209 belongs to milestone 0.8.0.",
+  "b": "Issue #181 belongs to milestone 0.8.0."
+ },
+ {
+  "a": "lambo::graph::hybrid::MAX_HYBRID_PARENT_PAIRS is 256.",
+  "b": "lambo::graph::hybrid::MAX_HYBRID_WORK_ITEMS is 512."
+ },
+ {
+  "a": "lambo::surface::limits::MAX_CONTENT_BYTES is 16,384 bytes.",
+  "b": "lambo::graph::hybrid::MAX_HYBRID_CONTEXT_BYTES is 16 * 1024 bytes."
+ },
+ {
   "a": "dev-diary/adversarial-review/adve-review-mooshik-J3-round1.md",
   "b": "dev-diary/adversarial-review/adve-review-mooshik-J3-round3.md"
  },

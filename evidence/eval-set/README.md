@@ -87,6 +87,20 @@ queries (13 of 32). A cosine-only gate separates the two poorly on this
 corpus, which is near-domain by construction; #174's held-out slice is 32
 no-answer queries, short of its 100 until the owner adds ledger misses.
 
+## The #198 pairs (2026-10-27)
+
+The set gained 102 pairs for #198 after the run above (see
+`fixtures/eval/README.md`, "Added for #198"): 41 `supersedes`, 53
+`distinct_entity` in the suspected-supersession trigger's regime and 8
+`same-event` paraphrases, all refused by the identifier guard and typed
+with `concept_types`. The committed run measured the 403-pair set, and its
+pair tables and canary timing are for the 173-pair export; the export now
+holds 265 pairs (530 texts for the canary to embed, against 346), so a
+rerun's canary timing will be longer and its related-distinct quantiles
+will lean further toward the identifier family. No run here measures the
+trigger: tuning its masked token Jaccard and reporting its precision per
+embedder are #198's own work.
+
 ## Adding a run
 
 ```text
