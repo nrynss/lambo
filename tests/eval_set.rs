@@ -123,11 +123,25 @@ fn export_loads_as_related_pairs() {
     assert!(pairs.len() >= MIN_RELATED_PAIRS, "{} pairs", pairs.len());
     let s = set();
     assert_eq!(pairs.len(), schema::expected_export(&s.pairs).len());
-    // Items awaiting the owner's review never reach the export.
-    for p in s.pairs.iter().filter(|p| !p.adjudicated()) {
+    // Every adjudicated related-but-distinct pair outside #198 is exported...
+    for p in s.pairs.iter().filter(|p| schema::exported(p)) {
+        assert!(
+            pairs.iter().any(|e| e.a == p.a && e.b == p.b),
+            "{} is missing from the export",
+            p.id
+        );
+    }
+    // ...and the export is exactly the 173 pairs it held before #198 added
+    // its pairs, which the identifier guard refuses before any threshold.
+    assert_eq!(pairs.len(), 173, "the pre-#198 export");
+    // Items awaiting the owner's review, and #198's pairs, never reach it.
+    for p in s.pairs.iter().filter(|p| {
+        !p.adjudicated()
+            || (p.label == "related_distinct" && p.id.starts_with(schema::ISSUE_198_PREFIX))
+    }) {
         assert!(
             !pairs.iter().any(|e| e.a == p.a && e.b == p.b),
-            "{} is under review",
+            "{} is under review or one of #198's",
             p.id
         );
     }

@@ -154,11 +154,23 @@ impl Query {
     }
 }
 
+/// Id prefix of the pairs added for #198's suspected-supersession trigger.
+/// They stay out of the export: the identifier guard refuses every one of
+/// them before any threshold applies, so they barely move the threshold the
+/// export derives, while they lengthen the canary's embed past its timeout.
+pub const ISSUE_198_PREFIX: &str = "p-198-";
+
+/// Whether the export carries this pair: an adjudicated related-but-distinct
+/// pair that is not one of #198's.
+pub fn exported(p: &Pair) -> bool {
+    p.label == "related_distinct" && p.adjudicated() && !p.id.starts_with(ISSUE_198_PREFIX)
+}
+
 /// The related-but-distinct pairs the export must hold, in order.
 pub fn expected_export(pairs: &[Pair]) -> Vec<ExportPair> {
     pairs
         .iter()
-        .filter(|p| p.label == "related_distinct" && p.adjudicated())
+        .filter(|p| exported(p))
         .map(|p| ExportPair {
             a: p.a.clone(),
             b: p.b.clone(),
@@ -381,7 +393,7 @@ pub fn validate(set: &EvalSet, max_bytes: usize) -> Vec<String> {
 
     if set.export != expected_export(&set.pairs) {
         errors.push(
-            "related_pairs.json is not the adjudicated related_distinct pairs of pairs.json, in order \
+            "related_pairs.json is not the adjudicated, non-#198 related_distinct pairs of pairs.json, in order \
              (rerun fixtures/eval/authoring/build.py)"
                 .to_string(),
         );

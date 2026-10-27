@@ -299,8 +299,13 @@ for p in pairs:
         assert not same_identifiers(p["a"], p["b"]), f"{p['id']}: the identifier guard would not refuse it"
 
 assert len({p["id"] for p in pairs}) == len(pairs)
+# #198's pairs stay out of the export: the identifier guard refuses every one
+# before any threshold applies, so they barely move the threshold it derives
+# (BGE-M3 p99 0.98921 to 0.98934) but lengthen the canary's embed from 62.6 s
+# to 87.6 s, past its 60 s timeout.
 export = [{"a": p["a"], "b": p["b"]} for p in pairs
-          if p["label"] == "related_distinct" and "review" not in p]
+          if p["label"] == "related_distinct" and "review" not in p
+          and not p["id"].startswith("p-198-")]
 
 
 def write(name, obj):

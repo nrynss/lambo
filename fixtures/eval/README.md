@@ -20,14 +20,15 @@ every reported number until the owner settles it; two #198 pairs do now
 | `corpus.json` | The retrieval universe: 100 concepts `{id, topic, type, text, origin, sources}`. `origin` is `dogfood` (23 concepts, verbatim text of a dogfood-store concept) or `authored` (77 atomic facts restated from the repo's own records, each citing its source file). A query is "no-answer" relative to this corpus. |
 | `queries.json` | 368 queries `{id, query, kind, family, topic, split, relevant[{concept, grade}], facets[], source, labeller, labelled_on, review?}`. 262 `answerable` (graded relevance 2 = answers it, 1 = partial or supporting; `facets` = what a correct answer must say, for #181) and 106 `no_answer`. |
 | `pairs.json` | 505 pairs `{id, a, b, label, family, relation?, concept_types?, split, source, labeller, labelled_on, concepts?, review?}`: 267 `related_distinct`, 118 `paraphrase`, 120 `unrelated`. `concept_types` is `[type of a, type of b]`, the concept type each text would be derived as (#198); every `supersedes` pair has it. |
-| `related_pairs.json` | Generated export in the `[embedder] related_pairs` format (`[{"a", "b"}]`): the 265 adjudicated `related_distinct` pairs. Point `related_pairs` at it to derive the merge threshold (#87). |
+| `related_pairs.json` | Generated export in the `[embedder] related_pairs` format (`[{"a", "b"}]`): the 173 adjudicated `related_distinct` pairs outside #198 (no `p-198-*` pair is exported). Point `related_pairs` at it to derive the merge threshold (#87). |
 | `authoring/` | The sources: `t_*.py` topic modules (one `C()` per concept with its queries, rewordings, contrasts and facets), `dogfood_texts.json` (the public dogfood texts, from `extract_dogfood_texts.py`) and `build.py`, which writes the four files above deterministically. |
 
 `tests/eval_set.rs` checks all of it in CI: the schema (required fields,
 unique ids and texts, known families, splits and relations, grades 1 or 2,
 every text non-empty and within `MAX_CONTENT_BYTES`), the sizes below, that
-the export equals the adjudicated `related_distinct` pairs and loads as the
-canary's `RelatedPair`, and a hygiene guard over every file here (no home
+the export equals the adjudicated `related_distinct` pairs outside #198
+(exactly the 173 it held before #198) and loads as the canary's
+`RelatedPair`, and a hygiene guard over every file here (no home
 paths, e-mail addresses, IP addresses other than loopback, keys, tokens or
 redaction markers). Edit `authoring/`, then run
 `python3 fixtures/eval/authoring/build.py` and commit what it writes; the
@@ -77,12 +78,15 @@ Queries by family:
 
 Per consumer:
 
-- **#87 / #176**: 265 adjudicated related-but-distinct pairs in the export,
+- **#87 / #176**: 173 adjudicated related-but-distinct pairs in the export,
   over `MIN_RELATED_PAIRS` (100); #190's 150-before-adjudication target is
-  met. 92 of them are the #198 identifier pairs below, which the identifier
-  guard refuses before any threshold; the committed runs in
-  `evidence/eval-set/` and `evidence/issue-87-calibration/` were measured
-  on the 173-pair export before they were added.
+  met. The #198 pairs below are kept out of it (owner decision,
+  2026-10-27): the identifier guard refuses every one of them before any threshold
+  applies, so they barely move the threshold the export derives (BGE-M3 p99
+  0.98921 with them out, 0.98934 with them in) while they push the canary's
+  embed of the export from 62.6 s to 87.6 s, past its 60 s timeout. The export is
+  therefore the one the committed runs in `evidence/eval-set/` and
+  `evidence/issue-87-calibration/` measured.
 - **#173**: 262 answerable queries with graded ids; nDCG@10 is computed by
   the measurement example.
 - **#174**: 106 no-answer queries (32 in held-out); #174 wants at least 100
