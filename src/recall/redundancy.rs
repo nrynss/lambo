@@ -243,5 +243,37 @@ impl Redundancy {
     }
 }
 
+/// The label meta items naming `skipped` (`also <short id>`, at most
+/// [`ALSO_MENTIONS`], then `+N more`), in skip order. Empty for none, so a
+/// hit that skipped nothing renders as before. The ids are
+/// [`crate::recall::format::short_id`]s, valid inspect foci.
+pub(crate) fn also_meta(skipped: &[RedundantSkip]) -> Vec<String> {
+    let mut meta: Vec<String> = skipped
+        .iter()
+        .take(ALSO_MENTIONS)
+        .map(|s| format!("also {}", crate::recall::format::short_id(s.node_id)))
+        .collect();
+    if skipped.len() > ALSO_MENTIONS {
+        meta.push(format!("+{} more", skipped.len() - ALSO_MENTIONS));
+    }
+    meta
+}
+
+/// `skipped` as the wire and ledger carry it:
+/// `[{"node_id": "<uuid>", "signal": "same_content"}, …]`, in skip order.
+pub(crate) fn skips_json(skipped: &[RedundantSkip]) -> serde_json::Value {
+    serde_json::Value::Array(
+        skipped
+            .iter()
+            .map(|s| {
+                serde_json::json!({
+                    "node_id": s.node_id.0.to_string(),
+                    "signal": s.signal.as_str(),
+                })
+            })
+            .collect(),
+    )
+}
+
 #[cfg(test)]
 mod tests;

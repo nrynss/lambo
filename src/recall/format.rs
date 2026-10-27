@@ -4,7 +4,7 @@
 //! One hit renders as a block of lines, in this order:
 //!
 //! ```text
-//! <content> [<ConceptType>{, canonical}] (score <final>, id <short>, blast radius <n>)
+//! <content> [<ConceptType>{, canonical}] (score <final>, id <short>, blast radius <n>{, also <short>})
 //! <⚑ load-bearing-pillar line>        (only when the concept is Canonical)
 //! <hot-list condition line(s)>        (only for re-validated hot nodes)
 //! <contradicts line(s)>               (only on a contradicting companion, #19(c))
@@ -18,6 +18,11 @@
 //! score, and [`short_id`] is a valid `inspect` focus by construction (the
 //! short-form id leg in `resolve_focus` resolves it), so a caller working only
 //! from this text can reach the durable node-id path.
+//!
+//! The `also <short>` items (#181) name the members skipped as redundant
+//! with the hit under `[selection] skip_redundant`: at most
+//! [`crate::recall::redundancy::ALSO_MENTIONS`], then `+N more`. A hit
+//! that skipped nothing renders without them.
 //!
 //! Blocks are joined with a blank line ([`render_context`]). The token budget
 //! is applied once, by [`fit_blocks`] (submodule `fit`): the longest ranked
@@ -444,7 +449,9 @@ pub(crate) fn render_detailed_block(h: &crate::recall::detail::DetailedHit) -> S
         repo_scope: h.repo_scope.clone(),
     };
     let lines: Vec<String> = h.annotations.iter().map(|a| a.text.clone()).collect();
-    render_block(&hit, &lines)
+    ContextBlock::for_hit(&hit, &lines)
+        .with_meta(&crate::recall::redundancy::also_meta(&h.skipped_redundant))
+        .text
 }
 
 /// The full context: rendered blocks in final-score order, separated by one

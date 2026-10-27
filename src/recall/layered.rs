@@ -39,6 +39,10 @@
 //!    memory is never lost because its nearer copy ranked low; the other
 //!    copies are named in its meta (`also <id> in <session>`), leave the
 //!    hits and the context, and keep their warning lines in `warnings`.
+//!    This is the only redundancy check across tiers: #181's
+//!    `[selection] skip_redundant` runs inside each session's own
+//!    assembly, where node ids and edges belong, and a hit's meta keeps
+//!    the `also <id>` items of what its session skipped for it.
 //!    A copy cut by `top_k` before its group was emitted still joins it
 //!    when their canonical keys are equal (by key only: vectors are compared
 //!    against emitted groups alone, which bounds the work).
@@ -190,6 +194,10 @@ pub struct LayeredHit {
     /// (#19(c), #179), the ids of the hits of the same session it
     /// contradicts; empty otherwise. Such a hit holds no `top_k` slot.
     pub companion_of: Vec<NodeId>,
+    /// #181: the members of the hit's own session skipped as redundant with
+    /// it (`[selection] skip_redundant`), in skip order; empty otherwise.
+    /// Its block names them (`also <id>`).
+    pub skipped_redundant: Vec<crate::recall::redundancy::RedundantSkip>,
 }
 
 /// The answer of [`Memory::recall_layered`](crate::Memory::recall_layered):
@@ -241,6 +249,7 @@ impl LayeredRecall {
                 included_in_context: d.included_in_context,
                 truncated_in_context: d.truncated_in_context,
                 companion_of: d.companion_of.clone(),
+                skipped_redundant: d.skipped_redundant.clone(),
             })
             .collect();
         Self {
@@ -662,6 +671,9 @@ where
         if tier > 0 {
             meta.push(format!("from {}", list.session));
         }
+        // #181: what the hit's own session skipped as redundant with it;
+        // those ids belong to the hit's session, like its own.
+        meta.extend(crate::recall::redundancy::also_meta(&d.skipped_redundant));
         meta.extend(
             also.iter()
                 .map(|a| format!("also {} in {}", format::short_id(a.node_id), a.session)),
@@ -792,6 +804,7 @@ where
             included_in_context: d.included_in_context,
             truncated_in_context: d.truncated_in_context,
             companion_of: d.companion_of.clone(),
+            skipped_redundant: d.skipped_redundant.clone(),
         })
         .collect();
     LayeredRecall {
@@ -815,12 +828,7 @@ pub(crate) fn block_with_meta(
     meta: &[String],
     scope: Option<String>,
 ) -> ContextBlock {
-    let mut block = ContextBlock::for_hit(hit, warnings);
-    if !meta.is_empty() && block.label_end > 0 && block.text[..block.label_end].ends_with(')') {
-        let extra = format!(", {}", meta.join(", "));
-        block.text.insert_str(block.label_end - 1, &extra);
-        block.label_end += extra.len();
-    }
+    let mut block = ContextBlock::for_hit(hit, warnings).with_meta(meta);
     block.scope = scope;
     block
 }

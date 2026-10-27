@@ -540,7 +540,10 @@ where
         // Warning lines reflect the included hit set, independent of the token
         // budget (see module docs); a block truncated from the context still
         // reports its conditions.
-        let block = format::ContextBlock::for_hit(&hit, &lines);
+        // #181: the members skipped as redundant with this hit are named
+        // in its label (`also <id>`), so the reader can inspect them.
+        let block = format::ContextBlock::for_hit(&hit, &lines)
+            .with_meta(&redundancy::also_meta(&detailed_hit.skipped_redundant));
         warnings.extend(lines);
         hit_blocks.push(block);
         hits.push(hit);

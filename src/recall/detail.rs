@@ -16,6 +16,8 @@
 //! originally pinned fields), `content`, `concept_type`, `status` (absent only
 //! for `None`), `score`, `blast_radius` (when present),
 //! `included_in_context`, `truncated_in_context` (#130, only when true),
+//! `skipped_redundant` (#181, only when non-empty: `{node_id, signal}`
+//! pairs, `signal` one of `same_content`, `semantic_edge`, `cosine`),
 //! and `annotations` as zero or more `{kind, text}` pairs;
 //! `response_annotations` carries the response-global explanations.
 //! Producer order is preserved within both arrays.

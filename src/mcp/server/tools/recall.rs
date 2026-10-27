@@ -320,6 +320,14 @@ impl LamboServer {
                     if layered {
                         map.insert("session".into(), json!(lh.session.as_str()));
                     }
+                    // #181: additive, on a hit that members were skipped
+                    // as redundant with only.
+                    if !lh.skipped_redundant.is_empty() {
+                        map.insert(
+                            "skipped_redundant".into(),
+                            crate::recall::redundancy::skips_json(&lh.skipped_redundant),
+                        );
+                    }
                 }
                 hit
             })

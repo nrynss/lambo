@@ -134,6 +134,11 @@ pub(super) fn call_auth() -> Option<CallAuth> {
 /// warning fired over without a store join. It is truncated rather than whole
 /// so one recall of `MAX_TOP_K` long concepts cannot turn into a megabyte line.
 ///
+/// `skipped_redundant` (#181, additive) is on a hit that `[selection]
+/// skip_redundant` skipped members for: each skipped member's `node_id`
+/// and the `signal` that found it redundant (`same_content`,
+/// `semantic_edge`, `cosine`). It is absent everywhere else.
+///
 /// `cold_start` (#79) says the recall was ranked in cold mode: a fresh concept
 /// the daemon had not scored yet would be shown, so every hit's `score` is
 /// `w_query × q` with no daemon share. It is always present on a recall line
@@ -331,6 +336,16 @@ fn recall_facts_with(
                 && let Some(map) = line.as_object_mut()
             {
                 map.insert("session".into(), json!(session));
+            }
+            // #181: additive, and only on a hit that members were skipped
+            // as redundant with, so a line without it reads as before.
+            if !d.skipped_redundant.is_empty()
+                && let Some(map) = line.as_object_mut()
+            {
+                map.insert(
+                    "skipped_redundant".into(),
+                    crate::recall::redundancy::skips_json(&d.skipped_redundant),
+                );
             }
             line
         })
