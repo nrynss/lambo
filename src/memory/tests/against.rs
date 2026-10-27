@@ -713,6 +713,30 @@ async fn stale_dependencies_survive_restart_but_receipt_payload_does_not() {
         settle(&mem, submitted.receipt).await,
         ReceiptAnswer::Applied(_)
     ));
+    let scoped_agent = AgentId::new("scoped-writer");
+    let destination = SessionId::new("project-caller");
+    let scoped = mem
+        .record_action_async_scoped(
+            &scoped_agent,
+            &action("recall the dangerous charger"),
+            &[target.0.to_string()],
+            &crate::surface::resolve::NoForeignScopes,
+            Some(&destination),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        mem.pipeline()
+            .wait_for(
+                &scoped_agent,
+                Some(&destination),
+                scoped.receipt,
+                RECEIPT_WAIT_MAX
+            )
+            .await
+            .tag(),
+        "applied"
+    );
     let check = |mem: &Memory| {
         let graph = mem.graph.read();
         let now = clock();
@@ -733,6 +757,20 @@ async fn stale_dependencies_survive_restart_but_receipt_payload_does_not() {
     drop(mem);
     let reopened = build(open(path).await, clock.clone()).await;
     check(&reopened);
+    assert_eq!(
+        reopened
+            .pipeline()
+            .lookup_for(&scoped_agent, None, scoped.receipt)
+            .tag(),
+        "forbidden"
+    );
+    assert_eq!(
+        reopened
+            .pipeline()
+            .lookup_for(&scoped_agent, Some(&destination), scoped.receipt)
+            .tag(),
+        "applied_after_restart"
+    );
     let recovered = reopened.pipeline().lookup(&agent, submitted.receipt);
     assert!(
         matches!(recovered, ReceiptAnswer::AppliedAfterRestart(..)),

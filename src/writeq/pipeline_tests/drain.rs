@@ -501,6 +501,7 @@ async fn a_cancelled_stop_replay_leaves_the_replay_joinable() {
         lane_seq: 1,
         issued_ms: receipt.issued_ms(),
         payload: crate::types::WriteIntentPayload::Derive {
+            receipt_destination: None,
             concepts: vec![("gamma concept".into(), ConceptType::Entity)],
             pairs: Vec::new(),
         },

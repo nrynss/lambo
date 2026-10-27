@@ -160,14 +160,26 @@ impl WritePipeline {
                     );
                     continue;
                 };
-                let answer = match &intent.outcome {
-                    // J3 round-1 N8: `pending_replay`, not `pending` — this one
-                    // is owed to a replay that may not finish in this process.
-                    None => ReceiptAnswer::PendingReplay,
-                    Some(o) if o.tag == "failed" => ReceiptAnswer::Failed(o.summary.clone()),
-                    Some(o) => ReceiptAnswer::AppliedAfterRestart(o.summary.clone(), None),
+                let (answer, destination) = match &intent.outcome {
+                    None => (
+                        ReceiptAnswer::PendingReplay,
+                        intent.payload.receipt_destination().cloned(),
+                    ),
+                    Some(o) => {
+                        let (summary, destination) =
+                            super::receipts::unpack_durable_summary(&o.summary);
+                        let answer = if o.tag == "failed" {
+                            ReceiptAnswer::Failed(summary)
+                        } else {
+                            ReceiptAnswer::AppliedAfterRestart(summary, None)
+                        };
+                        (
+                            answer,
+                            destination.or_else(|| intent.payload.receipt_destination().cloned()),
+                        )
+                    }
                 };
-                map.insert(id, (intent.agent.clone(), answer));
+                map.insert(id, (intent.agent.clone(), destination, answer));
             }
         }
         let pending: Vec<WriteIntent> = intents
@@ -245,23 +257,7 @@ impl WritePipeline {
                 let Ok(receipt) = ReceiptId::from_str(&intent.receipt) else {
                     continue;
                 };
-                let routed = match &intent.payload {
-                    crate::types::WriteIntentPayload::RepoScoped { payload, .. } => {
-                        payload.as_ref()
-                    }
-                    payload => payload,
-                };
-                let destination = match routed {
-                    crate::types::WriteIntentPayload::DeriveCited {
-                        receipt_destination,
-                        ..
-                    }
-                    | crate::types::WriteIntentPayload::ActionCited {
-                        receipt_destination,
-                        ..
-                    } => receipt_destination.clone(),
-                    _ => None,
-                };
+                let destination = intent.payload.receipt_destination().cloned();
                 let (payload, decode_error) = match JobPayload::from_intent_payload(intent.payload)
                 {
                     Ok(payload) => (payload, None),
@@ -278,6 +274,7 @@ impl WritePipeline {
                 let job = Job {
                     receipt,
                     agent: intent.agent.clone(),
+                    receipt_destination: destination.clone(),
                     interaction: intent.interaction,
                     bytes: 0,
                     payload,
@@ -368,7 +365,10 @@ impl WritePipeline {
                             intent.receipt.clone(),
                             WriteIntentOutcome {
                                 tag: "failed".into(),
-                                summary: why.clone(),
+                                summary: super::receipts::durable_summary(
+                                    &why,
+                                    destination.as_ref(),
+                                ),
                                 consumed_at: (this.clock)(),
                             },
                         );
@@ -500,7 +500,10 @@ impl WritePipeline {
                             intent.receipt.clone(),
                             WriteIntentOutcome {
                                 tag: "failed".into(),
-                                summary: why.clone(),
+                                summary: super::receipts::durable_summary(
+                                    &why,
+                                    destination.as_ref(),
+                                ),
                                 consumed_at: (this.clock)(),
                             },
                         );
@@ -566,7 +569,7 @@ impl WritePipeline {
                     }
                     other => other.clone(),
                 };
-                {
+                if destination.is_some() {
                     let mut receipts = this.receipts.lock();
                     let now = (this.clock)();
                     receipts.entries.insert(
@@ -594,7 +597,7 @@ impl WritePipeline {
                 }
                 this.restart
                     .lock()
-                    .insert(receipt, (intent.agent.clone(), durable_answer));
+                    .insert(receipt, (intent.agent.clone(), destination, durable_answer));
                 this.settled.notify_waiters();
                 // The throttle: yield between jobs so a deep backlog cannot
                 // monopolize the runtime between two of the fresh session's

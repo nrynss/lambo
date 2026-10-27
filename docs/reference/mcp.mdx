@@ -582,7 +582,7 @@ The `state` is one of twelve (the eleven below, and `forbidden`), and none of th
 | `restart_lost` | A **different** server process issued it and no durable record of it survived. The outcome is unknowable from here: the write may or may not have been applied before that process ended. A write acked in the last flush interval before a crash answers this way. Recall before re-deriving. |
 | `never_issued` | This server has never handed out that id. |
 
-A receipt is scoped to the agent that created it, so asking about someone else's answers `forbidden` and discloses nothing about the write.
+A receipt is scoped to the agent that created it and to the session that submitted it, so asking from a different agent or session answers `forbidden` and does not consume its piggyback. Older durable intents that lack a recorded destination also answer `forbidden` after restart because the server cannot determine which session should receive them; use recall to inspect the current graph.
 
 **Write queue keys**, always present because every write goes through the queue: `write_queue_bound`, `write_queue_lane_bound`, `write_queue_measured`, `write_queue_bound_source`, `write_queue_items_per_sec`, `write_queue_serial_items_per_sec`, `write_queue_probe_serial_items_per_sec`, `write_queue_probe_optimism`, `write_queue_apply_samples`, `write_queue_apply_ms_p50`, `write_queue_apply_ms_p90`, `write_queue_apply_ms_max`, `write_queue_outstanding`, `write_queue_accepted`, `write_queue_applied`, `write_queue_failed`, `write_queue_abandoned`, `write_queue_deferred`, `write_queue_replayed`, `write_queue_replay_owed`, `write_queue_dropped`, `write_queue_dropped_closed`, and `receipts_retained`.
 

@@ -272,6 +272,7 @@ pub(crate) fn source() -> GraphSnapshot {
             lane_seq: 1,
             issued_ms: 1000,
             payload: WriteIntentPayload::Action {
+                receipt_destination: None,
                 action: "planned".into(),
                 produces: vec![],
                 modifies: vec![],

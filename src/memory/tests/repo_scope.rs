@@ -404,6 +404,7 @@ async fn a_malformed_scoped_intent_settles_failed_and_the_replay_goes_on() {
     let interaction = NodeId::new();
     let now = Utc::now();
     let derive = WriteIntentPayload::Derive {
+        receipt_destination: None,
         concepts: vec![("src/main.rs".into(), ConceptType::Resource)],
         pairs: vec![],
     };

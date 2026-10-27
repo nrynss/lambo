@@ -162,7 +162,7 @@ pub struct WritePipeline {
     /// by [`WritePipeline::lookup`] before the epoch fallback, so these ids
     /// answer their truth instead of `restart_lost`. Agent-scoped like the
     /// live store.
-    restart: PlMutex<HashMap<ReceiptId, (AgentId, ReceiptAnswer)>>,
+    restart: PlMutex<HashMap<ReceiptId, (AgentId, Option<crate::types::SessionId>, ReceiptAnswer)>>,
     /// The replay task (J3), when this session attached over a durable intent
     /// backlog. Aborted at close — unconsumed intents stay durable for the
     /// next serve.

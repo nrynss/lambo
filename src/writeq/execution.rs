@@ -369,6 +369,7 @@ impl WriteCtx {
                         let report_slot = report_slot.clone();
                         let targets = pinned.against.clone();
                         let ctx = self.clone();
+                        let destination = job.receipt_destination.clone();
                         let on_commit: Option<hybrid::CommitHook> = Some(Box::new(
                             move |g: &mut Graph, outcome: &crate::graph::derive::DeriveOutcome| {
                                 if let Some(stamp) = consume {
@@ -376,8 +377,11 @@ impl WriteCtx {
                                         receipt,
                                         WriteIntentOutcome {
                                             tag: stamp.tag.into(),
-                                            summary: derive_sentence_of(
-                                                strategy, submitted, outcome, image,
+                                            summary: super::receipts::durable_summary(
+                                                &derive_sentence_of(
+                                                    strategy, submitted, outcome, image,
+                                                ),
+                                                destination.as_ref(),
                                             ),
                                             consumed_at: stamp.at,
                                         },
@@ -420,7 +424,10 @@ impl WriteCtx {
                                 job.receipt.to_string(),
                                 WriteIntentOutcome {
                                     tag: stamp.tag.into(),
-                                    summary: derive_sentence(strategy, submitted, &outcome),
+                                    summary: super::receipts::durable_summary(
+                                        &derive_sentence(strategy, submitted, &outcome),
+                                        job.receipt_destination.as_ref(),
+                                    ),
                                     consumed_at: stamp.at,
                                 },
                             );
@@ -521,7 +528,10 @@ impl WriteCtx {
                             job.receipt.to_string(),
                             WriteIntentOutcome {
                                 tag: stamp.tag.into(),
-                                summary: action_sentence(self.match_strategy, &outcome),
+                                summary: super::receipts::durable_summary(
+                                    &action_sentence(self.match_strategy, &outcome),
+                                    job.receipt_destination.as_ref(),
+                                ),
                                 consumed_at: stamp.at,
                             },
                         );
@@ -685,7 +695,10 @@ impl WritePipeline {
                                     // copy is the completion line and the
                                     // WARN below, both written from `detail`.
                                     tag: "failed".into(),
-                                    summary: model_safe_failure(e),
+                                    summary: super::receipts::durable_summary(
+                                        &model_safe_failure(e),
+                                        job.receipt_destination.as_ref(),
+                                    ),
                                     consumed_at: (clock)(),
                                 },
                             );

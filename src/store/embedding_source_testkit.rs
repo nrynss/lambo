@@ -353,6 +353,7 @@ pub(crate) async fn check_a_settled_image_intent_keeps_no_vector(
     };
     let content = format!("outfit for pongal [image:{}]", interaction.0.simple());
     let image_payload = WriteIntentPayload::DeriveImage {
+        receipt_destination: None,
         concepts: vec![(content.clone(), ConceptType::Resource)],
         pairs: vec![],
         supplied: SuppliedVector {
@@ -363,6 +364,7 @@ pub(crate) async fn check_a_settled_image_intent_keeps_no_vector(
         },
     };
     let text_payload = WriteIntentPayload::Derive {
+        receipt_destination: None,
         concepts: vec![("prefers silk".into(), ConceptType::Entity)],
         pairs: vec![],
     };
@@ -548,6 +550,7 @@ pub(crate) async fn check_a_settled_image_intent_keeps_no_vector(
     assert_eq!(
         consumed.payload,
         WriteIntentPayload::Derive {
+            receipt_destination: None,
             concepts: vec![],
             pairs: vec![],
         },
@@ -561,6 +564,7 @@ pub(crate) async fn check_a_settled_image_intent_keeps_no_vector(
     assert_eq!(
         stored(&cited.receipt).await.payload,
         WriteIntentPayload::Derive {
+            receipt_destination: None,
             concepts: vec![],
             pairs: vec![],
         },
@@ -573,6 +577,7 @@ pub(crate) async fn check_a_settled_image_intent_keeps_no_vector(
         assert_eq!(
             stored(receipt).await.payload,
             WriteIntentPayload::Derive {
+                receipt_destination: None,
                 concepts: vec![],
                 pairs: vec![],
             },

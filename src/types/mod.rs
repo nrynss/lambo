@@ -902,6 +902,8 @@ pub enum WriteIntentPayload {
         concepts: Vec<(String, ConceptType)>,
         /// `(parent, child)` hierarchy pairs, in submission order.
         pairs: Vec<(String, String)>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        receipt_destination: Option<SessionId>,
     },
     /// An image derive (#22): one concept whose vector was supplied rather
     /// than embedded from its text.
@@ -921,6 +923,8 @@ pub enum WriteIntentPayload {
         pairs: Vec<(String, String)>,
         /// The vector, the contract it was declared under, and its source.
         supplied: SuppliedVector,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        receipt_destination: Option<SessionId>,
     },
     /// A `lambo_record_action` job.
     Action {
@@ -940,6 +944,8 @@ pub enum WriteIntentPayload {
         /// rule.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         depends_on_pins: Vec<Option<NodeId>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        receipt_destination: Option<SessionId>,
     },
     /// A `lambo_derive` job with citations (#36 PR 4) or contradictions
     /// (#19(b), `against`): the derive above plus what its references
@@ -1008,6 +1014,33 @@ pub enum WriteIntentPayload {
 }
 
 impl WriteIntentPayload {
+    /// Recorded delivery session, absent on payloads predating destination tracking.
+    pub fn receipt_destination(&self) -> Option<&SessionId> {
+        match self {
+            Self::Derive {
+                receipt_destination,
+                ..
+            }
+            | Self::DeriveImage {
+                receipt_destination,
+                ..
+            }
+            | Self::Action {
+                receipt_destination,
+                ..
+            }
+            | Self::DeriveCited {
+                receipt_destination,
+                ..
+            }
+            | Self::ActionCited {
+                receipt_destination,
+                ..
+            } => receipt_destination.as_ref(),
+            Self::RepoScoped { payload, .. } => payload.receipt_destination(),
+        }
+    }
+
     /// The payload a **settled** (consumed: applied or failed) intent keeps
     /// in the store (#22 review L1).
     ///
@@ -1039,6 +1072,7 @@ impl WriteIntentPayload {
             | Self::RepoScoped { .. } => Some(Self::Derive {
                 concepts: Vec::new(),
                 pairs: Vec::new(),
+                receipt_destination: None,
             }),
             Self::Derive { .. } | Self::Action { .. } => None,
         }
@@ -1274,7 +1308,8 @@ pub struct WriteIntentOutcome {
     /// answer tag the outcome renders as.
     pub tag: String,
     /// The human sentence the receipt carries (an applied summary, or the
-    /// failure reason).
+    /// failure reason). New outcomes may wrap it with the receipt destination
+    /// for recovery after the intent payload is scrubbed.
     pub summary: String,
     /// When the intent was consumed (process clock of the consumer).
     ///
@@ -2354,6 +2389,7 @@ mod tests {
             },
         };
         let payload = WriteIntentPayload::DeriveImage {
+            receipt_destination: None,
             concepts: vec![],
             pairs: vec![],
             supplied: supplied.clone(),
@@ -2374,6 +2410,7 @@ mod tests {
     #[test]
     fn the_settled_image_payload_constants_match_the_serialized_forms() {
         let image = WriteIntentPayload::DeriveImage {
+            receipt_destination: None,
             concepts: vec![("red [image:a1]".into(), ConceptType::Resource)],
             pairs: vec![],
             supplied: SuppliedVector {
@@ -2397,6 +2434,7 @@ mod tests {
         let scoped = WriteIntentPayload::RepoScoped {
             repo_scope: "host/owner/repo".into(),
             payload: Box::new(WriteIntentPayload::Derive {
+                receipt_destination: None,
                 concepts: vec![("README.md".into(), ConceptType::Resource)],
                 pairs: vec![],
             }),
@@ -2415,10 +2453,12 @@ mod tests {
             .starts_with(like_prefix));
         for text in [
             WriteIntentPayload::Derive {
+                receipt_destination: None,
                 concepts: vec![("x".into(), ConceptType::Entity)],
                 pairs: vec![],
             },
             WriteIntentPayload::Action {
+                receipt_destination: None,
                 action: "a".into(),
                 produces: vec![],
                 modifies: vec![],

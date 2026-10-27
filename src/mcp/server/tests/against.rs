@@ -380,7 +380,7 @@ async fn the_per_concept_limit_counts_per_content() {
 #[tokio::test]
 async fn stale_replay_report_is_structured_on_piggyback_and_lookup() {
     use std::sync::atomic::{AtomicI64, Ordering};
-    struct Gate(FixtureEmbedder);
+    struct Gate(FixtureEmbedder, tokio::sync::watch::Receiver<bool>);
     #[async_trait::async_trait]
     impl Embedder for Gate {
         fn dimensions(&self) -> usize {
@@ -388,7 +388,12 @@ async fn stale_replay_report_is_structured_on_piggyback_and_lookup() {
         }
         async fn embed(&self, text: &str) -> Result<Vec<f32>, crate::embed::EmbedError> {
             if !text.contains(crate::writeq::PROBE_TEXT) {
-                std::future::pending::<()>().await;
+                let mut hold = self.1.clone();
+                while *hold.borrow() {
+                    if hold.changed().await.is_err() {
+                        break;
+                    }
+                }
             }
             self.0.embed(text).await
         }
@@ -434,8 +439,9 @@ async fn stale_replay_report_is_structured_on_piggyback_and_lookup() {
     s0.mem.close().await.unwrap();
     drop(s0);
     seconds.fetch_add(2, Ordering::SeqCst);
+    let (_first_tx, first_rx) = tokio::sync::watch::channel(true);
     let s1 = build(
-        Arc::new(Gate(FixtureEmbedder::new())),
+        Arc::new(Gate(FixtureEmbedder::new(), first_rx)),
         crate::types::MatchStrategy::Hybrid,
     )
     .await;
@@ -466,11 +472,51 @@ async fn stale_replay_report_is_structured_on_piggyback_and_lookup() {
         .unwrap();
     s1.mem.close().await.unwrap();
     drop(s1);
+    let (replay_tx, replay_rx) = tokio::sync::watch::channel(true);
     let s2 = build(
-        Arc::new(FixtureEmbedder::new()),
+        Arc::new(Gate(FixtureEmbedder::new(), replay_rx)),
         crate::types::MatchStrategy::Hybrid,
     )
     .await;
+    assert_eq!(
+        s2.mem
+            .pipeline()
+            .lookup_for(&scoped_agent, Some(&destination), scoped.receipt)
+            .tag(),
+        "pending_replay"
+    );
+    assert_eq!(
+        s2.mem
+            .pipeline()
+            .lookup_for(&scoped_agent, None, scoped.receipt)
+            .tag(),
+        "forbidden"
+    );
+    assert_eq!(
+        s2.mem
+            .pipeline()
+            .wait_for(&scoped_agent, None, scoped.receipt, Duration::from_secs(1))
+            .await
+            .tag(),
+        "forbidden"
+    );
+    let pipeline = s2.mem.pipeline().clone();
+    let wait_agent = scoped_agent.clone();
+    let wait_destination = destination.clone();
+    let scoped_id = scoped.receipt;
+    let rightful_wait = tokio::spawn(async move {
+        pipeline
+            .wait_for(
+                &wait_agent,
+                Some(&wait_destination),
+                scoped_id,
+                Duration::from_secs(10),
+            )
+            .await
+    });
+    tokio::task::yield_now().await;
+    replay_tx.send(false).unwrap();
+    assert_eq!(rightful_wait.await.unwrap().tag(), "applied_after_restart");
     let id = receipt.parse().unwrap();
     let answer = s2
         .mem
@@ -500,22 +546,53 @@ async fn stale_replay_report_is_structured_on_piggyback_and_lookup() {
             .tag(),
         "forbidden"
     );
+    let forbidden = call_raw(
+        &s2,
+        "lambo_stats",
+        json!({"agent_id":"agent-d", "receipt":scoped.receipt.to_string()}),
+    )
+    .await;
+    assert_eq!(
+        forbidden.structured_content.unwrap()["receipt"]["state"],
+        "forbidden"
+    );
     assert!(s2
         .mem
         .pipeline()
         .take_piggyback_at_most(&scoped_agent, None, 10)
         .0
         .is_empty());
-    let scoped_piggy = s2
-        .mem
+    let project = server("project-caller").await;
+    let (rightful_server, _source) = super::layered::layered(&project, &s2);
+    let rightful = call_raw(
+        &rightful_server,
+        "lambo_saints",
+        json!({"agent_id":"agent-d"}),
+    )
+    .await;
+    let payload = rightful.structured_content.unwrap();
+    let scoped_piggy = &payload["write_receipts"][0];
+    assert_eq!(scoped_piggy["id"], scoped.receipt.to_string());
+    assert_eq!(scoped_piggy["state"], "applied_after_restart");
+    assert_eq!(scoped_piggy["stale_report"]["total"], 1);
+    project.mem.close().await.unwrap();
+    s2.mem
         .pipeline()
-        .take_piggyback_at_most(&scoped_agent, Some(&destination), 10)
-        .0;
-    assert_eq!(scoped_piggy.len(), 1);
-    assert!(matches!(
-        &scoped_piggy[0].1,
-        crate::writeq::ReceiptAnswer::AppliedAfterRestart(_, Some(_))
-    ));
+        .forget_live_receipt_for_test(scoped.receipt);
+    assert_eq!(
+        s2.mem
+            .pipeline()
+            .lookup_for(&scoped_agent, None, scoped.receipt)
+            .tag(),
+        "forbidden"
+    );
+    assert_eq!(
+        s2.mem
+            .pipeline()
+            .lookup_for(&scoped_agent, Some(&destination), scoped.receipt)
+            .tag(),
+        "applied_after_restart"
+    );
     let other = call_raw(&s2, "lambo_saints", json!({"agent_id":"agent-b"})).await;
     assert!(other
         .structured_content
@@ -544,6 +621,28 @@ async fn stale_replay_report_is_structured_on_piggyback_and_lookup() {
         crate::types::MatchStrategy::Hybrid,
     )
     .await;
+    assert_eq!(
+        s3.mem
+            .pipeline()
+            .lookup_for(&scoped_agent, None, scoped.receipt)
+            .tag(),
+        "forbidden"
+    );
+    assert_eq!(
+        s3.mem
+            .pipeline()
+            .lookup_for(&scoped_agent, Some(&destination), scoped.receipt)
+            .tag(),
+        "applied_after_restart"
+    );
+    assert_eq!(
+        s3.mem
+            .pipeline()
+            .wait_for(&scoped_agent, None, scoped.receipt, Duration::from_secs(1))
+            .await
+            .tag(),
+        "forbidden"
+    );
     let fetched = call_raw(
         &s3,
         "lambo_stats",

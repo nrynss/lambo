@@ -61,8 +61,19 @@ fn intent(
     interaction: NodeId,
     agent: &str,
     seq: u64,
-    payload: WriteIntentPayload,
+    mut payload: WriteIntentPayload,
 ) -> WriteIntent {
+    match &mut payload {
+        WriteIntentPayload::Derive {
+            receipt_destination,
+            ..
+        }
+        | WriteIntentPayload::Action {
+            receipt_destination,
+            ..
+        } => *receipt_destination = Some(session.clone()),
+        _ => unreachable!("test seeds text derives and actions"),
+    }
     WriteIntent {
         session_id: session.clone(),
         receipt: receipt_id(seq),
@@ -78,6 +89,7 @@ fn intent(
 
 fn derive_payload(content: &str) -> WriteIntentPayload {
     WriteIntentPayload::Derive {
+        receipt_destination: None,
         concepts: vec![(content.to_string(), ConceptType::Entity)],
         pairs: Vec::new(),
     }
@@ -400,6 +412,7 @@ fn seeded_intents_replay_in_lane_order_and_answer_applied_after_restart() {
             "agent-b",
             3,
             WriteIntentPayload::Action {
+                receipt_destination: None,
                 action: "seeded action replayed after restart".into(),
                 produces: vec!["seeded artifact".into()],
                 modifies: Vec::new(),

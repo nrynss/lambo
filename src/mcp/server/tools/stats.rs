@@ -77,8 +77,8 @@ impl LamboServer {
                 // Delivered here, explicitly, so `answered`'s piggyback does
                 // not state the same outcome a second time in the same response
                 // (J3-R1-9). Take-once is unaffected — this *is* the take.
-                if answer.is_settled() {
-                    pipeline.mark_delivered(&acting, id);
+                if answer.is_settled() && !matches!(answer, ReceiptAnswer::Forbidden) {
+                    pipeline.mark_delivered_for(&acting, deliver_to.as_ref(), id);
                 }
                 Some((id, answer, None))
             }
