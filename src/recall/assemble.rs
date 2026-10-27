@@ -363,8 +363,11 @@ where
     let mut detailed: Vec<DetailedHit> = Vec::new();
     let mut hit_blocks: Vec<format::ContextBlock> = Vec::new(); // block per emitted hit, score order
                                                                 // #207: one writer timeline for every stale-citation check below, built
-                                                                // only if some shown hit cites a concept with an inbound contradiction.
+                                                                // only if some shown hit cites a concept with an inbound contradiction,
+                                                                // and one verdict per cited concept, however many shown hits cite it.
     let timeline = crate::daemon::conflict::SharedTimeline::new();
+    let mut stale_memo: HashMap<NodeId, Option<crate::daemon::contradiction::ContradictionHit>> =
+        HashMap::new();
     let shown = with_ordinary_companions(
         graph,
         emitted(graph, &members, forced, query.top_k),
@@ -455,7 +458,14 @@ where
         }
         // #207: stale by dependency. A warning only: nothing is forced or
         // added, so membership and order are exactly as without it.
-        for text in stale_citation_lines(graph, c.id, contradiction_min_age, now, &timeline) {
+        for text in stale_citation_lines(
+            graph,
+            c.id,
+            contradiction_min_age,
+            now,
+            &timeline,
+            &mut stale_memo,
+        ) {
             detailed_hit.annotations.push(Annotation::new(
                 AnnotationKind::RestsOnContradicted,
                 text.clone(),
@@ -542,16 +552,20 @@ fn same_session_concept<'g>(
 /// ([`crate::daemon::contradiction::stale_citations`]), in the cited
 /// concepts' id order, at most [`format::STALE_CITATION_LINES`] of them,
 /// then one overflow line counting the rest. Empty for a hit that cites
-/// nothing contradicted, so its block is unchanged.
+/// nothing contradicted, so its block is unchanged. `memo` holds the
+/// assembly's verdict per cited concept, so hits citing one concept
+/// evaluate it once.
 fn stale_citation_lines(
     graph: &Graph,
     hit: NodeId,
     min_age: std::time::Duration,
     now: DateTime<Utc>,
     timeline: &crate::daemon::conflict::SharedTimeline,
+    memo: &mut HashMap<NodeId, Option<crate::daemon::contradiction::ContradictionHit>>,
 ) -> Vec<String> {
-    let stale =
-        crate::daemon::contradiction::stale_citations_shared(graph, hit, min_age, now, timeline);
+    let stale = crate::daemon::contradiction::stale_citations_memo(
+        graph, hit, min_age, now, timeline, memo,
+    );
     let mut lines: Vec<String> = stale
         .iter()
         .take(format::STALE_CITATION_LINES)
@@ -1759,6 +1773,20 @@ mod tests {
             serde_json::to_string(&b).unwrap()
         );
         assert!(b.warnings.is_empty());
+    }
+
+    /// Two shown hits citing one contradicted concept each carry the same
+    /// line: the per-assembly verdict memo evaluates c1 once and serves
+    /// both, in score order, exactly as two separate evaluations would.
+    #[test]
+    fn hits_citing_one_contradicted_concept_share_its_verdict() {
+        let mut g = citing_graph(true);
+        g.upsert_edge(dep_edge(3, 1)).unwrap();
+        let result = assemble_contradicted(&g, &[2, 3], &[], query(2, 10_000));
+        assert_eq!(ids_of(&result), vec![uid(3), uid(2)]);
+        assert_eq!(texts(&result, 3), vec![rests_on(1, 5)]);
+        assert_eq!(texts(&result, 2), vec![rests_on(1, 5)]);
+        assert_eq!(result.warnings, vec![rests_on(1, 5), rests_on(1, 5)]);
     }
 
     /// A hit citing more contradicted concepts than `STALE_CITATION_LINES`

@@ -102,7 +102,7 @@
 //! (a demotion no longer drops it, #179), and otherwise renders the payload
 //! as of the read. Unlike conflict, it emits no `DaemonEvent`.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
@@ -395,17 +395,29 @@ pub fn stale_citations(
     min_age: Duration,
     now: DateTime<Utc>,
 ) -> Vec<ContradictionHit> {
-    stale_citations_shared(graph, node, min_age, now, &SharedTimeline::new())
+    stale_citations_memo(
+        graph,
+        node,
+        min_age,
+        now,
+        &SharedTimeline::new(),
+        &mut HashMap::new(),
+    )
 }
 
-/// [`stale_citations`] against a shared, epoch-keyed timeline, so a recall
-/// checking many hits builds it at most once.
-pub(crate) fn stale_citations_shared(
+/// [`stale_citations`] against a shared, epoch-keyed timeline and a memo of
+/// verdicts keyed by cited concept, so a recall checking many hits builds
+/// the timeline at most once (and only when some cited concept has an
+/// inbound `Contradicts` edge) and evaluates each cited concept once
+/// however many hits cite it. The memo is valid for one `graph`, `min_age`
+/// and `now` only: one recall's assembly.
+pub(crate) fn stale_citations_memo(
     graph: &Graph,
     node: NodeId,
     min_age: Duration,
     now: DateTime<Utc>,
     shared: &SharedTimeline,
+    memo: &mut HashMap<NodeId, Option<ContradictionHit>>,
 ) -> Vec<ContradictionHit> {
     if concept(graph, node).is_none() {
         return Vec::new();
@@ -425,7 +437,13 @@ pub(crate) fn stale_citations_shared(
     cited.dedup();
     cited
         .into_iter()
-        .filter_map(|cited| contradiction_at_with(graph, cited, min_age, now, &shared.get(graph)))
+        .filter_map(|cited| {
+            memo.entry(cited)
+                .or_insert_with(|| {
+                    contradiction_at_with(graph, cited, min_age, now, &shared.get(graph))
+                })
+                .clone()
+        })
         .collect()
 }
 
