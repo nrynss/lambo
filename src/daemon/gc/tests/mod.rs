@@ -11,6 +11,8 @@ use uuid::Uuid;
 mod cap_and_bumps;
 mod collection;
 mod contradictions;
+#[cfg(feature = "store-sqlite")]
+mod issue180;
 mod score_cut;
 mod triggers;
 

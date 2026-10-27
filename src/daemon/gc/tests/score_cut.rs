@@ -688,9 +688,10 @@ fn eviction_recency_ignores_the_session_span() {
         eviction_score(g, &leaf(g), &ctx, params)
     };
     let (a, b) = (gc_score(&short), gc_score(&long));
-    // The extra interaction does not change the leaf's degree or the hub,
-    // only `session_activity`'s denominator (1/2 → 1/3); recency itself
-    // is identical.
+    // The extra interaction does not change the leaf's degree or the hub.
+    // GC still divides activity by the interaction count (#180), so the
+    // denominator moves from 1/2 to 1/3. Recall's max-normalized activity
+    // would not move. Recency itself is identical.
     let expected = eviction_recency(&leaf(&short), params.now, params.recency_window);
     let window_days = params.recency_window.num_days() as f64;
     assert!((expected - (1.0 - 10.0 / window_days)).abs() < 1e-3);
@@ -776,4 +777,127 @@ fn daemon_ranking_keeps_span_relative_recency() {
         eviction_recency(&c, ts(100), GC_RECENCY_WINDOW),
         1.0 - 100.0 / GC_RECENCY_WINDOW.num_minutes() as f64,
     );
+}
+
+/// Issue #180. An aged, unread, non-protected concept derived once, with the
+/// session's derivation maximum at 1, 2 and 3.
+///
+/// Step-2 eligibility is the score comparison alone: the concept has a GC
+/// connection and is reachable from the temporal chain, so it is neither an
+/// orphan nor a disconnected component, and a Resource here has no structural
+/// dependent. The cut must use `1/|interactions|`. Max-normalization
+/// (`1/max`) puts the same concept over the default bar.
+#[test]
+fn once_derived_concepts_keep_the_interaction_ratio_at_the_default_cut() {
+    for max_derived in [1usize, 2, 3] {
+        for ty in [ConceptType::Resource, ConceptType::Entity] {
+            let (g, subject) = once_derived_against_a_maximum(max_derived, ty);
+            assert_activity_cut_unchanged(&g, subject, max_derived, ty);
+        }
+    }
+}
+
+/// 98 interactions, so a single derivation is `1/98` on GC's ratio. The
+/// subject has one `Derives` edge. One other concept is derived
+/// `max_derived` times. The hub's density degree is 10, so the subject's
+/// density is `1/10`: low enough that the ratio score stays under the
+/// default bar, high enough that `1/3` of activity plus that density clears
+/// the Resource bar. Those two inequalities are why the degree is 10.
+fn once_derived_against_a_maximum(max_derived: usize, ty: ConceptType) -> (Graph, NodeId) {
+    let mut g = Graph::new(sid());
+    let n_interactions = 98u64;
+    for i in 1..=n_interactions {
+        let prev = (i > 1).then_some(i - 1);
+        g.insert_interaction(interaction(i, prev)).unwrap();
+    }
+    let origin = nid(1);
+    g.insert_concept(concept(300, 1, "hub", ConceptType::Entity), origin)
+        .unwrap();
+    for s in 0..9u64 {
+        let id = 301 + s;
+        g.insert_concept(
+            concept(id, 1, &format!("sat {id}"), ConceptType::Entity),
+            origin,
+        )
+        .unwrap();
+        g.upsert_edge(edge(1_000 + s, 300, id, EdgeType::Dependency, 1.0, 0))
+            .unwrap();
+    }
+    // Satellite 301 is the derivation maximum. `insert_concept` already
+    // counts interaction 1; the rest come from later interactions.
+    for k in 2..=max_derived as u64 {
+        g.upsert_edge(edge(1_100 + k, k, 301, EdgeType::Derives, 0.9, 0))
+            .unwrap();
+    }
+    let subject = nid(200);
+    g.insert_concept(concept(200, 1, "subject", ty), origin)
+        .unwrap();
+    (g, subject)
+}
+
+fn assert_activity_cut_unchanged(g: &Graph, subject: NodeId, max_derived: usize, ty: ConceptType) {
+    let ctx = crate::daemon::score::SessionContext::compute(g);
+    let c = match g.node(subject).unwrap() {
+        Node::Concept(c) => c.clone(),
+        _ => unreachable!(),
+    };
+    let params = aged_params();
+    assert_eq!(c.access_count, 0, "unread");
+    assert!(c.last_accessed.is_none());
+    assert_eq!(c.canonization_status, CanonizationStatus::None);
+    assert!(g.root_goal_texts().is_empty());
+    assert!(!ty.exempt_from_gc_score_cut());
+    assert!(
+        has_gc_connection(g, subject),
+        "the subject is not an orphan"
+    );
+    assert!(
+        reachable_from_temporal_chain(g).contains(&subject),
+        "the subject is not a disconnected component"
+    );
+    assert!(
+        !resources_with_dependents(g).contains(&subject),
+        "a Resource subject must not be spared for dependents"
+    );
+    assert_eq!(ctx.derivations(subject), 1);
+    assert_eq!(ctx.max_derivations(), max_derived);
+    assert_eq!(
+        ctx.per_interaction_activity(subject).to_bits(),
+        (1.0_f64 / 98.0).to_bits()
+    );
+
+    let recall = crate::daemon::score::score_concept(g, &c, &ctx);
+    assert_eq!(
+        recall.session_activity.to_bits(),
+        (1.0 / max_derived as f64).to_bits()
+    );
+    assert_eq!(recall.frequency, 0.0);
+    assert_eq!(recall.edge_type_bonus, 0.0);
+    assert_eq!(recall.density.to_bits(), (1.0_f64 / 10.0).to_bits());
+    assert_eq!(eviction_recency(&c, params.now, params.recency_window), 0.0);
+
+    let with_activity = |activity: f64| {
+        let mut dims = recall;
+        dims.recency = 0.0;
+        dims.session_activity = activity;
+        crate::daemon::score::score_live_plus_frequency(dims, &params.weights)
+    };
+    let ratio_score = with_activity(1.0 / 98.0);
+    let maxnorm_score = with_activity(1.0 / max_derived as f64);
+    let actual = eviction_score(g, &c, &ctx, params);
+    let bar = eviction_threshold(MIN_CONCEPT_SCORE, ty);
+    assert_eq!(
+        actual.to_bits(),
+        ratio_score.to_bits(),
+        "{ty:?} max {max_derived}: the cut must score the interaction ratio"
+    );
+    assert!(
+        actual < bar && bar - actual > 1e-3,
+        "{ty:?} max {max_derived}: ratio score {actual} must stay under {bar}"
+    );
+    assert!(
+        maxnorm_score >= bar && maxnorm_score - bar > 1e-3,
+        "{ty:?} max {max_derived}: max-normalized score {maxnorm_score} would clear {bar}"
+    );
+    assert_ne!(actual.to_bits(), maxnorm_score.to_bits());
 }

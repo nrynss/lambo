@@ -32,8 +32,14 @@
 //!   clock enters.
 //! * **frequency** — `access_count` normalized by [`FREQUENCY_NORMALIZER`]
 //!   (10 accesses = full frequency), clamped.
-//! * **session_activity** — the share of the session's interactions that
-//!   derived this concept (a `Derives` edge from the interaction), clamped.
+//! * **session_activity** — how many interactions derived this concept,
+//!   divided by the most-derived concept in the session
+//!   (`derived_by(c) / max derived_by`, issue #180). Same shape as density:
+//!   the busiest concept is `1.0`, a concept nothing derived is `0.0`, and a
+//!   session with no derivations is `0.0` rather than `NaN`. [`score`] clamps
+//!   it with every other weighted dimension, and a non-finite value counts as
+//!   `0.0`. Dividing by the interaction count sent the term to about `1/|I|`
+//!   in any real session, so a fifth of the composite carried nothing.
 //! * **density** — incident-edge count normalized by the session's most
 //!   connected concept (densest concept = `1.0`), clamped. `Contradicts`
 //!   edges are not counted ([`EdgeType::counts_toward_density`], #19).
@@ -47,6 +53,33 @@
 //!   formula is additive (`+ concept_type_modifier`), so the existing
 //!   multiplier consts are converted to offsets rather than applied
 //!   multiplicatively.
+//!
+//! ## Which activity each caller reads (#180)
+//!
+//! [`score_concept`] returns the max-normalized value. Recall, [`rescore`]
+//! and swarm Stage 1's queue all read [`score`] of that. GC's step-2 cut
+//! does not. [`SessionContext::per_interaction_activity`] is still
+//! `derived_by / |interactions|`, and `eviction_score` substitutes it before
+//! the comparison with [`crate::daemon::gc::MIN_CONCEPT_SCORE`].
+//! Max-normalization would score a concept derived once at `1/max`. At a
+//! session maximum of 1 or 2 that floor alone clears the Resource bar (0.12)
+//! and the Entity bar (0.10), so every aged, unread, ordinary concept would
+//! survive the cut. The bar stays on the ratio it was calibrated against.
+//!
+//! Swarm Stage 1 does not threshold the composite. Membership is
+//! `gc_survived >= 3` and two aged dependent interactions
+//! ([`crate::canon::stage1_candidates`]); the composite only orders who a
+//! bounded cycle takes first. Solo promotion ([`crate::canon::SoloScorer`])
+//! scores a separate evidence sum and does not read this dimension. Neither
+//! admission bar moves with the scale, so neither is recalibrated. Ordering
+//! does: a concept derived more often ranks earlier in the swarm queue,
+//! which is the signal #180 puts back.
+//!
+//! The log form `ln(1+k) / ln(1+k_max)` was not taken. On the dogfood
+//! snapshot measured for this change the busiest concept is derived 5 times
+//! and almost every other concept once, so `1/5` is already on a usable
+//! scale and damping the top would shrink the only variation the dimension
+//! has. Method and the Kendall τ: `evidence/issue-180/`.
 
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
@@ -279,13 +312,19 @@ pub struct SessionContext {
     total_interactions: usize,
     max_incident: usize,
     /// Per concept, how many interactions carry a `Derives` edge to it — the
-    /// numerator of `session_activity`. Counted once for the whole session
+    /// numerator of both activity formulas. Counted once for the whole session
     /// (one pass over the edge set) so scoring a concept is `O(its degree)`
     /// instead of a scan of every interaction per concept: a GC sweep scores
     /// every concept under the write lock, and the per-concept scan made that
     /// `O(concepts × interactions)`. A concept absent from the map is derived
-    /// by none.
+    /// by none. One `Derives` edge per interaction is what the graph writes;
+    /// the count is edges whose source is an interaction.
     derived_by: HashMap<NodeId, usize>,
+    /// Highest [`Self::derivations`] over the session's concepts. The
+    /// denominator of recall's `session_activity` (#180). Zero when the
+    /// session has no concept, or none of them is derived. A `Derives` edge
+    /// whose target is not a concept does not raise it.
+    max_derived_by: usize,
 }
 
 /// A concept's incident-edge count for the `density` dimension: every
@@ -340,12 +379,49 @@ impl SessionContext {
                 *derived_by.entry(e.target).or_default() += 1;
             }
         }
+        // Over concepts only. A derivation aimed at something else must not
+        // set the denominator the concepts are scored against.
+        let max_derived_by = graph
+            .concepts()
+            .map(|c| derived_by.get(&c.id).copied().unwrap_or(0))
+            .max()
+            .unwrap_or(0);
         Self {
             start,
             end,
             total_interactions,
             max_incident,
             derived_by,
+            max_derived_by,
+        }
+    }
+
+    /// How many interactions derived `id`. Zero when none did.
+    pub(crate) fn derivations(&self, id: NodeId) -> usize {
+        self.derived_by.get(&id).copied().unwrap_or(0)
+    }
+
+    /// Highest [`Self::derivations`] over the session's concepts.
+    ///
+    /// Test-only: production scoring reads the field directly, and a
+    /// non-test build does not call this.
+    #[cfg(test)]
+    pub(crate) fn max_derivations(&self) -> usize {
+        self.max_derived_by
+    }
+
+    /// `derivations(id) / |interactions|`, the activity GC's step-2 cut still
+    /// scores (#180).
+    ///
+    /// Recall and the daemon score table use the max-normalized value on
+    /// [`ScoreDims::session_activity`]. This ratio is the scale
+    /// [`crate::daemon::gc::MIN_CONCEPT_SCORE`] was calibrated on. A session
+    /// with no interactions returns `0.0`.
+    pub(crate) fn per_interaction_activity(&self, id: NodeId) -> f64 {
+        if self.total_interactions == 0 {
+            0.0
+        } else {
+            self.derivations(id) as f64 / self.total_interactions as f64
         }
     }
 }
@@ -444,11 +520,14 @@ fn score_concept_with(c: &Concept, ctx: &SessionContext, inc: &Incidence) -> Sco
 
     let frequency = c.access_count as f64 / FREQUENCY_NORMALIZER;
 
-    let derived_by = ctx.derived_by.get(&c.id).copied().unwrap_or(0);
-    let session_activity = if ctx.total_interactions == 0 {
+    let derived_by = ctx.derivations(c.id);
+    // Max-normalized, like density (#180). `max_derived_by == 0` is an empty
+    // derivation set: return 0 rather than dividing into NaN. `score` still
+    // clamps a non-finite dimension to 0.
+    let session_activity = if ctx.max_derived_by == 0 {
         0.0
     } else {
-        derived_by as f64 / ctx.total_interactions as f64
+        derived_by as f64 / ctx.max_derived_by as f64
     };
 
     let density = if ctx.max_incident == 0 {
@@ -575,11 +654,14 @@ mod tests {
         (g, c1_id, c2_id)
     }
 
-    /// The pre-optimization `score_concept`, kept verbatim as a test oracle:
+    /// The pre-optimization `score_concept`, kept as a test oracle:
     /// `session_activity`'s numerator is found by scanning every interaction
     /// for a `Derives` edge to the concept (`O(interactions)` per concept).
-    /// [`score_concept`] now reads a once-per-sweep count from the
-    /// [`SessionContext`]; the two must agree bit for bit.
+    /// The denominator is the session maximum (#180). [`score_concept`] reads
+    /// both from the [`SessionContext`]; [`assert_scores_match_reference`]
+    /// checks the maximum against this same scan. The two scores must agree
+    /// bit for bit. The oracle's job is that scan, not a second recency
+    /// formula.
     fn score_concept_reference(graph: &Graph, c: &Concept, ctx: &SessionContext) -> ScoreDims {
         // Same touch rule and the same recency as [`score_concept`]. The
         // oracle's job is the per-concept `session_activity` scan, not a
@@ -593,10 +675,10 @@ mod tests {
             .interactions()
             .filter(|i| graph.edge_between(i.id, c.id, EdgeType::Derives).is_some())
             .count();
-        let session_activity = if ctx.total_interactions == 0 {
+        let session_activity = if ctx.max_derivations() == 0 {
             0.0
         } else {
-            derived_by as f64 / ctx.total_interactions as f64
+            derived_by as f64 / ctx.max_derivations() as f64
         };
         let incident = graph.incident_edges(c.id);
         let density = if ctx.max_incident == 0 {
@@ -781,6 +863,20 @@ mod tests {
 
     fn assert_scores_match_reference(g: &Graph) {
         let ctx = SessionContext::compute(g);
+        let scanned_max = g
+            .concepts()
+            .map(|c| {
+                g.interactions()
+                    .filter(|i| g.edge_between(i.id, c.id, EdgeType::Derives).is_some())
+                    .count()
+            })
+            .max()
+            .unwrap_or(0);
+        assert_eq!(
+            ctx.max_derivations(),
+            scanned_max,
+            "the activity denominator is the scanned maximum"
+        );
         let mut n = 0;
         for c in g.concepts() {
             let (a, b) = (
@@ -849,16 +945,131 @@ mod tests {
             Some(Node::Concept(c)) => c.clone(),
             _ => unreachable!(),
         };
-        let total = ctx.total_interactions as f64;
-        assert_eq!(
-            score_concept(&g, &c(c1), &ctx).session_activity,
-            3.0 / total
-        );
-        assert_eq!(
-            score_concept(&g, &c(c2), &ctx).session_activity,
-            1.0 / total
-        );
+        // Recall: count / session maximum (3). GC: count / interactions (3).
+        assert_eq!(ctx.max_derivations(), 3);
+        assert_eq!(ctx.total_interactions, 3);
+        assert_eq!(score_concept(&g, &c(c1), &ctx).session_activity, 1.0);
+        assert_eq!(score_concept(&g, &c(c2), &ctx).session_activity, 1.0 / 3.0);
         assert_eq!(score_concept(&g, &c(lone_id), &ctx).session_activity, 0.0);
+        assert_eq!(ctx.per_interaction_activity(c1), 1.0);
+        assert_eq!(ctx.per_interaction_activity(c2), 1.0 / 3.0);
+        assert_eq!(ctx.per_interaction_activity(lone_id), 0.0);
+    }
+
+    /// Issue #180. An empty graph has no derivations, so the dimension is 0
+    /// rather than a division by zero.
+    #[test]
+    fn session_activity_is_zero_on_an_empty_session() {
+        let g = Graph::new(sid());
+        let ctx = SessionContext::compute(&g);
+        assert_eq!(ctx.total_interactions, 0);
+        assert_eq!(ctx.max_derivations(), 0);
+        let absent = concept(1, NodeId(Uuid::from_u64_pair(0, 1)), "absent", 0);
+        let activity = score_concept(&g, &absent, &ctx).session_activity;
+        assert_eq!(activity, 0.0);
+        assert!(activity.is_finite());
+        assert_eq!(ctx.per_interaction_activity(absent.id), 0.0);
+    }
+
+    /// Issue #180. When every concept was derived once, each scores 1.0.
+    /// Activity is then a constant, so it cannot reorder the table.
+    #[test]
+    fn session_activity_is_one_when_every_concept_is_derived_once() {
+        let (g, c1, c2) = graph_with_two_concepts();
+        let ctx = SessionContext::compute(&g);
+        assert_eq!(ctx.max_derivations(), 1);
+        assert_eq!(ctx.total_interactions, 2);
+        let concept = |id: NodeId| match g.node(id) {
+            Some(Node::Concept(c)) => c.clone(),
+            _ => unreachable!(),
+        };
+        let d1 = score_concept(&g, &concept(c1), &ctx);
+        let d2 = score_concept(&g, &concept(c2), &ctx);
+        assert_eq!(d1.session_activity, 1.0);
+        assert_eq!(d2.session_activity, 1.0);
+        // The old ratio would have been 1/2. GC still uses that.
+        assert_eq!(ctx.per_interaction_activity(c1), 0.5);
+        assert_eq!(ctx.per_interaction_activity(c2), 0.5);
+    }
+
+    /// Issue #180. Activity is the derivation count over the session maximum,
+    /// and it rises strictly with that count.
+    #[test]
+    fn session_activity_is_max_normalized_and_monotonic() {
+        let mut g = Graph::new(sid());
+        let mut prev = None;
+        let mut ids = Vec::new();
+        // Six interactions, and the busiest concept is derived by only four
+        // of them, so `k/4` (recall) and `k/6` (GC) are different scales.
+        for i in 1..=6 {
+            let interaction = interaction(i, prev, i as i64 * 10);
+            prev = Some(i);
+            ids.push(interaction.id);
+            g.insert_interaction(interaction).unwrap();
+        }
+        let origin = ids[0];
+        // Derived 4, 2, 1 and 0 times. The zero is an inserted concept whose
+        // provenance edge was removed.
+        let heavy = concept(1, origin, "heavy", 0);
+        let mid = concept(2, origin, "mid", 0);
+        let once = concept(3, origin, "once", 0);
+        let none = concept(4, origin, "none", 0);
+        let (heavy_id, mid_id, once_id, none_id) = (heavy.id, mid.id, once.id, none.id);
+        for c in [heavy, mid, once, none] {
+            g.insert_concept(c, origin).unwrap();
+        }
+        let edge = |id: u64, src: NodeId, tgt: NodeId| crate::types::Edge {
+            event_time: None,
+            id: NodeId(Uuid::from_u64_pair(5, id)),
+            session_id: sid(),
+            source: src,
+            target: tgt,
+            edge_type: EdgeType::Derives,
+            weight: 0.9,
+            reinforcements: 1,
+            created_at: ts(0),
+            last_reinforced: ts(0),
+        };
+        // insert_concept already derived each once from `origin` (ids[0]).
+        g.upsert_edge(edge(1, ids[1], heavy_id)).unwrap();
+        g.upsert_edge(edge(2, ids[2], heavy_id)).unwrap();
+        g.upsert_edge(edge(3, ids[3], heavy_id)).unwrap();
+        g.upsert_edge(edge(4, ids[1], mid_id)).unwrap();
+        g.remove_edge(
+            g.edge_between(origin, none_id, EdgeType::Derives)
+                .unwrap()
+                .id,
+        )
+        .unwrap();
+
+        let ctx = SessionContext::compute(&g);
+        assert_eq!(ctx.max_derivations(), 4);
+        assert_eq!(ctx.total_interactions, 6);
+        let activity = |id: NodeId| {
+            let c = match g.node(id) {
+                Some(Node::Concept(c)) => c.clone(),
+                _ => unreachable!(),
+            };
+            score_concept(&g, &c, &ctx).session_activity
+        };
+        let got = [
+            activity(none_id),
+            activity(once_id),
+            activity(mid_id),
+            activity(heavy_id),
+        ];
+        assert_eq!(got, [0.0, 0.25, 0.5, 1.0]);
+        for w in got.windows(2) {
+            assert!(w[0] < w[1], "activity must rise with derived_by: {got:?}");
+        }
+        // GC still divides by the interaction count. That matches recall at
+        // 0 derivations only; a concept derived once is 1/4 on the table and
+        // 1/6 on the cut.
+        assert_eq!(ctx.per_interaction_activity(none_id), 0.0);
+        assert_eq!(ctx.per_interaction_activity(once_id), 1.0 / 6.0);
+        assert_eq!(ctx.per_interaction_activity(mid_id), 2.0 / 6.0);
+        assert_eq!(ctx.per_interaction_activity(heavy_id), 4.0 / 6.0);
+        assert_ne!(ctx.per_interaction_activity(once_id), activity(once_id));
     }
 
     /// The shipped fixture session scores identically under both.
@@ -1642,9 +1853,8 @@ mod tests {
 
     #[test]
     fn session_activity_weights_clamped_value() {
-        // Mirror of frequency_weights_clamped_value: session_activity is the
-        // share of the session's interactions that derived the concept, an
-        // already-[0,1] ratio, clamped before weighting — 0.5 * 0.20.
+        // Mirror of frequency_weights_clamped_value: a session_activity of
+        // 0.5 is already inside [0, 1] and is clamped before weighting.
         let dims = ScoreDims {
             recency: 0.0,
             frequency: 0.0,

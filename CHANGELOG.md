@@ -41,6 +41,37 @@
   whose `depends_on` cites a contradicted concept is warned that it rests
   on it. The input schema is unchanged; a client that pins tool
   descriptions sees the new text.
+- **Behaviour change: `session_activity` is the derivation count over the
+  session maximum, not over the interaction count (#180).** Recall and the
+  daemon score table used `derived_by / |interactions|`. The term shrinks as
+  a session ages — about 0.01 in a 98-interaction census — so a fifth of the
+  composite carried nothing. It is now `derived_by / max derived_by`, the
+  same shape as density. The most-derived concept scores 1, a concept
+  nothing derived scores 0, and a session with no derivations scores 0
+  rather than NaN. On the 2026-10-27 `lambo-dev` snapshot (5599 concepts,
+  2069 interactions, maximum 5) Kendall τ of the daemon table against the
+  old ratio is 0.9983 (13,275 discordant pairs). The concept derived five
+  times climbs 1212 places. The log form `ln(1+k) / ln(1+k_max)` was not
+  taken: the maximum is 5, so `1/5` is already on a usable scale, and the
+  log form inverted more pairs (14,920). **GC's step-2 cut is unchanged.**
+  It still scores `derived_by / |interactions|`, the scale
+  `MIN_CONCEPT_SCORE` was calibrated on. Max-normalization would clear that
+  bar for an aged, unread Resource or Entity whenever the session maximum
+  is 1 or 2. On the snapshot, a sweep at measurement time has an empty
+  step-2 candidate set under either formula. With the clock moved 366 days
+  past the recency window, that set is 844 concepts on the ratio and 154
+  on the max-normalized activity (690 only on the ratio). The collection
+  cap is 280 and nothing structural is ahead of the cut, so one sweep
+  takes 280 of the ratio set and all 154 of the other; it does not take
+  the whole 844. `eviction_score` matches the ratio on every concept.
+  Swarm Stage 1 does not
+  threshold the composite: membership is `gc_survived >= 3` and two aged
+  dependent interactions, and the score only orders that queue. Solo
+  promotion does not read the daemon composite. Neither admission bar was
+  recalibrated. `session-rest-api` still ranks `user schema` first. Its
+  recall goldens keep that hit order; the printed scores rise by about
+  0.09, because each of those concepts is derived once and the blended
+  score shows half of the activity weight. Evidence: `evidence/issue-180/`.
 - **Behaviour change, EmbeddingGemma 2 only: the recent leg is calibrated
   per embedding contract (#87).** The recent-interactions leg scored a flat
   0.35, a value set on BGE-M3's cosine scale. Under EmbeddingGemma 2 (768

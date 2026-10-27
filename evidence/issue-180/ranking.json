@@ -1,0 +1,194 @@
+{
+  "aged_at": "2027-10-28T16:23:33.180223+00:00",
+  "concepts": 5599,
+  "derivation_histogram": {
+    "1": 5579,
+    "2": 19,
+    "5": 1
+  },
+  "gc": {
+    "below_bar_scored_maxnorm": 0,
+    "below_bar_scored_ratio": 0,
+    "collection_cap": 280,
+    "eviction_score_matches_ratio": true,
+    "one_sweep_score_cut_taken_maxnorm": 0,
+    "one_sweep_score_cut_taken_ratio": 0,
+    "step2_candidates_maxnorm": 0,
+    "step2_candidates_only_in_ratio": 0,
+    "step2_candidates_ratio": 0,
+    "structural_before_score_cut": 0
+  },
+  "gc_aged_366d": {
+    "below_bar_scored_maxnorm": 1522,
+    "below_bar_scored_ratio": 2549,
+    "collection_cap": 280,
+    "eviction_score_matches_ratio": true,
+    "one_sweep_score_cut_taken_maxnorm": 154,
+    "one_sweep_score_cut_taken_ratio": 280,
+    "step2_candidates_maxnorm": 154,
+    "step2_candidates_only_in_ratio": 690,
+    "step2_candidates_ratio": 844,
+    "structural_before_score_cut": 0
+  },
+  "interactions": 2069,
+  "kendall": {
+    "definition": "(concordant - discordant) / (concordant + discordant) on the daemon table order, tie-broken the way rescore breaks ties",
+    "linear_vs_ratio": {
+      "concordant": 15658326,
+      "discordant": 13275,
+      "largest_climb": 1212,
+      "ranks_moved": 4538,
+      "tau": 0.9983058527332338
+    },
+    "log_vs_ratio": {
+      "concordant": 15656681,
+      "discordant": 14920,
+      "tau": 0.9980959188534726
+    }
+  },
+  "max_derivations": 5,
+  "measured_at": "2026-10-27T16:23:33.180223+00:00",
+  "multi_derived_rank_moves": [
+    {
+      "climb": 1212,
+      "content": "J3 async-ack rule: a write may be acknowledged asynchronously only when its result does not gate the…",
+      "derivations": 5,
+      "new_rank": 165,
+      "old_rank": 1377
+    },
+    {
+      "climb": 849,
+      "content": "The dogfood embedder's capacity flags are LOAD-BEARING, not tuning (found by K1's NVIDIA leg 2026-08…",
+      "derivations": 2,
+      "new_rank": 2226,
+      "old_rank": 3075
+    },
+    {
+      "climb": 762,
+      "content": "J3 round 1 finding N1",
+      "derivations": 2,
+      "new_rank": 3676,
+      "old_rank": 4438
+    },
+    {
+      "climb": 746,
+      "content": "J2's 'serve always binds a local endpoint even under --transport stdio' collides with authorize_bind…",
+      "derivations": 2,
+      "new_rank": 2356,
+      "old_rank": 3102
+    },
+    {
+      "climb": 746,
+      "content": "J2 hazard found by the J0 round-1 review before J2 was written: a REFUSED serve never reaches build_…",
+      "derivations": 2,
+      "new_rank": 2357,
+      "old_rank": 3103
+    },
+    {
+      "climb": 701,
+      "content": "J2 round-1 adversarial review",
+      "derivations": 2,
+      "new_rank": 3427,
+      "old_rank": 4128
+    },
+    {
+      "climb": 701,
+      "content": "J2 WEDGE INVARIANT",
+      "derivations": 2,
+      "new_rank": 3432,
+      "old_rank": 4133
+    },
+    {
+      "climb": 696,
+      "content": "J2 socket-path scheme decision",
+      "derivations": 2,
+      "new_rank": 3489,
+      "old_rank": 4185
+    },
+    {
+      "climb": 692,
+      "content": "Export output duration must stay within 10 ms of the source video. Video codec, tag, and nb_frames m…",
+      "derivations": 2,
+      "new_rank": 951,
+      "old_rank": 1643
+    },
+    {
+      "climb": 680,
+      "content": "J1 identity decision (operator, 2026-08-20)",
+      "derivations": 2,
+      "new_rank": 3804,
+      "old_rank": 4484
+    },
+    {
+      "climb": 669,
+      "content": "J3 round 1 finding F3",
+      "derivations": 2,
+      "new_rank": 4193,
+      "old_rank": 4862
+    },
+    {
+      "climb": 667,
+      "content": "J3 round 1 finding F5",
+      "derivations": 2,
+      "new_rank": 4196,
+      "old_rank": 4863
+    },
+    {
+      "climb": 626,
+      "content": "J2 WEDGE INVARIANT (operator/orchestrator ruling 2026-08-20, hard): a proxy that cannot serve its ow…",
+      "derivations": 2,
+      "new_rank": 2533,
+      "old_rank": 3159
+    },
+    {
+      "climb": 438,
+      "content": "breaks_one_line predicate",
+      "derivations": 2,
+      "new_rank": 4658,
+      "old_rank": 5096
+    },
+    {
+      "climb": 412,
+      "content": "J3 round-1 P1 cluster, one root cause: A PROJECTION IS NOT A BOUND. The queue admitted at a 4-wide p…",
+      "derivations": 2,
+      "new_rank": 2976,
+      "old_rank": 3388
+    },
+    {
+      "climb": 370,
+      "content": "T7.0 server entrypoint",
+      "derivations": 2,
+      "new_rank": 3096,
+      "old_rank": 3466
+    },
+    {
+      "climb": 336,
+      "content": "Event-time MCP round-1 review verdict: REQUEST CHANGES. Optional RFC3339 event_time is correctly des…",
+      "derivations": 2,
+      "new_rank": 636,
+      "old_rank": 972
+    },
+    {
+      "climb": 246,
+      "content": "J2 scope cut, argued not assumed: NO in-process promotion of a proxy to holder, and the proxy path i…",
+      "derivations": 2,
+      "new_rank": 406,
+      "old_rank": 652
+    },
+    {
+      "climb": 246,
+      "content": "J2 deviation argued, not taken: the reconnect hoist",
+      "derivations": 2,
+      "new_rank": 4964,
+      "old_rank": 5210
+    },
+    {
+      "climb": 203,
+      "content": "Workstream J (multi-client survivability), found by the first live dogfood session 2026-08-19: two c…",
+      "derivations": 2,
+      "new_rank": 228,
+      "old_rank": 431
+    }
+  ],
+  "session": "lambo-dev"
+}
