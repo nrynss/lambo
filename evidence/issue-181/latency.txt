@@ -1,0 +1,22 @@
+# cargo run --release --example bench_redundancy (Apple M3 Pro, 2026-10-28, branch feat/181-redundancy-aware-selection)
+run 1
+distinct: off p50 0.133 ms, p90 0.142 ms, mean 0.134 ms (n 1000)
+distinct: on  p50 0.139 ms, p90 0.148 ms, mean 0.152 ms (n 1000)
+distinct: queries whose context names a skip: 0/40
+duplicated: off p50 1.293 ms, p90 1.316 ms, mean 1.292 ms (n 1000)
+duplicated: on  p50 1.304 ms, p90 1.325 ms, mean 1.303 ms (n 1000)
+duplicated: queries whose context names a skip: 40/40
+run 2
+distinct: off p50 0.135 ms, p90 0.142 ms, mean 0.135 ms (n 1000)
+distinct: on  p50 0.138 ms, p90 0.146 ms, mean 0.140 ms (n 1000)
+distinct: queries whose context names a skip: 0/40
+duplicated: off p50 1.288 ms, p90 1.312 ms, mean 1.288 ms (n 1000)
+duplicated: on  p50 1.296 ms, p90 1.317 ms, mean 1.296 ms (n 1000)
+duplicated: queries whose context names a skip: 40/40
+run 3
+distinct: off p50 0.134 ms, p90 0.141 ms, mean 0.135 ms (n 1000)
+distinct: on  p50 0.139 ms, p90 0.147 ms, mean 0.140 ms (n 1000)
+distinct: queries whose context names a skip: 0/40
+duplicated: off p50 1.287 ms, p90 1.310 ms, mean 1.286 ms (n 1000)
+duplicated: on  p50 1.305 ms, p90 1.329 ms, mean 1.305 ms (n 1000)
+duplicated: queries whose context names a skip: 40/40

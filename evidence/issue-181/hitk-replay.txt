@@ -1,0 +1,30 @@
+
+top_k = 3 (window 12)
+question                     before           after            skips (kept rank, skipped rank, text)
+brand-org                    [1, 2, 3]        [1, 2, 3]        [] pairs in top 20: []
+ci-clippy-failure            [1, 2, 3]        [1, 2, 3]        [] pairs in top 20: []
+diff-design                  [1, 2, 3]        [1, 2, 3]        [] pairs in top 20: []
+dogfood-topology             [1, 2, 3]        [1, 2, 3]        [] pairs in top 20: []
+embedder-superseded          [1, 2, 3]        [1, 2, 3]        [] pairs in top 20: [(14, 15)]
+merge-workflow               [1, 2, 3]        [1, 2, 3]        [] pairs in top 20: []
+missing-cloud-cost           [1, 2, 3]        [1, 2, 3]        [] pairs in top 20: []
+missing-downloads            [1, 2, 3]        [1, 2, 4]        [(2, 3, 'full')] pairs in top 20: [(2, 3)]
+model-roles                  [1, 2, 3]        [1, 2, 3]        [] pairs in top 20: []
+packaging-decision           [1, 2, 3]        [1, 2, 3]        [] pairs in top 20: []
+record-action-embedding      [1, 2, 3]        [1, 2, 4]        [(2, 3, 'full')] pairs in top 20: [(2, 3), (12, 14)]
+throttle-interval-why        [1, 2, 3]        [1, 2, 3]        [] pairs in top 20: []
+
+top_k = 5 (window 20)
+question                     before           after            skips (kept rank, skipped rank, text)
+brand-org                    [1, 2, 3, 4, 5]  [1, 2, 3, 4, 5]  [] pairs in top 20: []
+ci-clippy-failure            [1, 2, 3, 4, 5]  [1, 2, 3, 4, 5]  [] pairs in top 20: []
+diff-design                  [1, 2, 3, 4, 5]  [1, 2, 3, 4, 5]  [] pairs in top 20: []
+dogfood-topology             [1, 2, 3, 4, 5]  [1, 2, 3, 4, 5]  [] pairs in top 20: []
+embedder-superseded          [1, 2, 3, 4, 5]  [1, 2, 3, 4, 5]  [] pairs in top 20: [(14, 15)]
+merge-workflow               [1, 2, 3, 4, 5]  [1, 2, 3, 4, 5]  [] pairs in top 20: []
+missing-cloud-cost           [1, 2, 3, 4, 5]  [1, 2, 3, 4, 5]  [] pairs in top 20: []
+missing-downloads            [1, 2, 3, 4, 5]  [1, 2, 4, 5, 6]  [(2, 3, 'full')] pairs in top 20: [(2, 3)]
+model-roles                  [1, 2, 3, 4, 5]  [1, 2, 3, 4, 5]  [] pairs in top 20: []
+packaging-decision           [1, 2, 3, 4, 5]  [1, 2, 3, 4, 5]  [] pairs in top 20: []
+record-action-embedding      [1, 2, 3, 4, 5]  [1, 2, 4, 5, 6]  [(2, 3, 'full')] pairs in top 20: [(2, 3), (12, 14)]
+throttle-interval-why        [1, 2, 3, 4, 5]  [1, 2, 3, 4, 5]  [] pairs in top 20: []
