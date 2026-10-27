@@ -250,6 +250,7 @@ impl JobPayload {
                 concepts: concepts.clone(),
                 pairs: pairs.clone(),
                 citations: citations.clone(),
+                receipt_destination: None,
             },
             JobPayload::DeriveImage {
                 concepts,
@@ -290,6 +291,7 @@ impl JobPayload {
                 depends_on: depends_on.clone(),
                 depends_on_pins: depends_on_pins.clone(),
                 against: against.clone(),
+                receipt_destination: None,
             },
         };
         match repo_scope {
@@ -351,6 +353,7 @@ impl JobPayload {
                 concepts,
                 pairs,
                 citations,
+                ..
             } => JobPayload::Derive {
                 concepts,
                 pairs,
@@ -388,6 +391,7 @@ impl JobPayload {
                 depends_on,
                 depends_on_pins,
                 against,
+                ..
             } => JobPayload::Action {
                 repo_scope: None,
                 action,
@@ -619,6 +623,28 @@ impl WritePipeline {
                 // close-time final flush ("session closed, tail durable")
                 // carries it — acked ⇒ (applied ∨ durable intent) at a clean
                 // close by construction, independent of any drain estimate.
+                let mut intent_payload = payload.to_intent_payload();
+                let mut routed = &mut intent_payload;
+                if let WriteIntentPayload::RepoScoped { payload, .. } = routed {
+                    routed = payload;
+                }
+                match routed {
+                    WriteIntentPayload::DeriveCited {
+                        receipt_destination,
+                        ..
+                    }
+                    | WriteIntentPayload::ActionCited {
+                        receipt_destination,
+                        ..
+                    } => {
+                        *receipt_destination = Some(
+                            deliver_to
+                                .clone()
+                                .unwrap_or_else(|| self.ctx.session.clone()),
+                        );
+                    }
+                    _ => {}
+                }
                 graph.record_write_intent(WriteIntent {
                     session_id: self.ctx.session.clone(),
                     receipt: receipt.to_string(),
@@ -626,7 +652,7 @@ impl WritePipeline {
                     interaction,
                     lane_seq: receipt.seq(),
                     issued_ms: receipt.issued_ms(),
-                    payload: payload.to_intent_payload(),
+                    payload: intent_payload,
                     created_at: now,
                     outcome: None,
                 });

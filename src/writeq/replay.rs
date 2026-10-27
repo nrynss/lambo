@@ -165,7 +165,7 @@ impl WritePipeline {
                     // is owed to a replay that may not finish in this process.
                     None => ReceiptAnswer::PendingReplay,
                     Some(o) if o.tag == "failed" => ReceiptAnswer::Failed(o.summary.clone()),
-                    Some(o) => ReceiptAnswer::AppliedAfterRestart(o.summary.clone()),
+                    Some(o) => ReceiptAnswer::AppliedAfterRestart(o.summary.clone(), None),
                 };
                 map.insert(id, (intent.agent.clone(), answer));
             }
@@ -245,6 +245,23 @@ impl WritePipeline {
                 let Ok(receipt) = ReceiptId::from_str(&intent.receipt) else {
                     continue;
                 };
+                let routed = match &intent.payload {
+                    crate::types::WriteIntentPayload::RepoScoped { payload, .. } => {
+                        payload.as_ref()
+                    }
+                    payload => payload,
+                };
+                let destination = match routed {
+                    crate::types::WriteIntentPayload::DeriveCited {
+                        receipt_destination,
+                        ..
+                    }
+                    | crate::types::WriteIntentPayload::ActionCited {
+                        receipt_destination,
+                        ..
+                    } => receipt_destination.clone(),
+                    _ => None,
+                };
                 let (payload, decode_error) = match JobPayload::from_intent_payload(intent.payload)
                 {
                     Ok(payload) => (payload, None),
@@ -299,8 +316,7 @@ impl WritePipeline {
                                 Some(serde_json::Value::Object(summary.ledger_facts())),
                             ));
                         }
-                        let detail = ReceiptAnswer::Applied(summary).describe();
-                        ReceiptAnswer::AppliedAfterRestart(detail)
+                        ReceiptAnswer::AppliedAfterRestart(summary.summary, summary.stale_report)
                     }
                     // #125 (Sonnet review): a vector-candidate lookup that
                     // did not answer within its own budget. The embedder answered before it, so
@@ -542,9 +558,43 @@ impl WritePipeline {
                         break;
                     }
                 };
+                // Durable rows carry only the summary. The bounded live entry
+                // carries the replay report and participates in normal eviction.
+                let durable_answer = match &answer {
+                    ReceiptAnswer::AppliedAfterRestart(summary, _) => {
+                        ReceiptAnswer::AppliedAfterRestart(summary.clone(), None)
+                    }
+                    other => other.clone(),
+                };
+                {
+                    let mut receipts = this.receipts.lock();
+                    let now = (this.clock)();
+                    receipts.entries.insert(
+                        receipt,
+                        super::receipts::Entry {
+                            agent: intent.agent.clone(),
+                            deliver_to: destination
+                                .as_ref()
+                                .filter(|d| **d != this.ctx.session)
+                                .cloned(),
+                            settled_at: Some(now),
+                            answer,
+                        },
+                    );
+                    receipts.order.push_back(receipt);
+                    if destination.is_some() {
+                        receipts
+                            .undelivered
+                            .entry(intent.agent.clone())
+                            .or_default()
+                            .push_back(receipt);
+                    }
+                    receipts.expire(now);
+                    receipts.evict();
+                }
                 this.restart
                     .lock()
-                    .insert(receipt, (intent.agent.clone(), answer));
+                    .insert(receipt, (intent.agent.clone(), durable_answer));
                 this.settled.notify_waiters();
                 // The throttle: yield between jobs so a deep backlog cannot
                 // monopolize the runtime between two of the fresh session's

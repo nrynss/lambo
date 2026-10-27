@@ -369,6 +369,7 @@ pub(crate) async fn check_a_settled_image_intent_keeps_no_vector(
     // #36 PR 4 review H2: a cited derive settles the same way, so a 0.5.0
     // build (which cannot decode `derive_cited`) still loads the session.
     let cited_payload = WriteIntentPayload::DeriveCited {
+        receipt_destination: None,
         concepts: vec![("wears silk at pongal".into(), ConceptType::Logic)],
         pairs: vec![],
         citations: crate::types::PinnedCitations {
@@ -388,6 +389,7 @@ pub(crate) async fn check_a_settled_image_intent_keeps_no_vector(
     // #19(b): an action with `against` is its own kind and settles the same
     // way.
     let action_cited_payload = WriteIntentPayload::ActionCited {
+        receipt_destination: None,
         action: "returned the silk shirt".into(),
         produces: vec![],
         modifies: vec![],

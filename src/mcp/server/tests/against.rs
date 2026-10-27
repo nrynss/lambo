@@ -374,3 +374,184 @@ async fn the_per_concept_limit_counts_per_content() {
     }
     s.mem.close().await.expect("close");
 }
+
+/// A deferred contradiction replayed at attach publishes the same typed report
+/// on the piggyback and explicit lookup; a later restart has only the durable summary.
+#[tokio::test]
+async fn stale_replay_report_is_structured_on_piggyback_and_lookup() {
+    use std::sync::atomic::{AtomicI64, Ordering};
+    struct Gate(FixtureEmbedder);
+    #[async_trait::async_trait]
+    impl Embedder for Gate {
+        fn dimensions(&self) -> usize {
+            self.0.dimensions()
+        }
+        async fn embed(&self, text: &str) -> Result<Vec<f32>, crate::embed::EmbedError> {
+            if !text.contains(crate::writeq::PROBE_TEXT) {
+                std::future::pending::<()>().await;
+            }
+            self.0.embed(text).await
+        }
+    }
+    let inner = Arc::new(MemoryStore::new());
+    let store =
+        || Arc::new(crate::test_util::VectorSearchable(inner.clone())) as Arc<dyn GraphStore>;
+    let seconds = Arc::new(AtomicI64::new(Utc::now().timestamp()));
+    let clock: crate::daemon::Clock = {
+        let s = seconds.clone();
+        Arc::new(move || DateTime::from_timestamp(s.load(Ordering::SeqCst), 0).unwrap())
+    };
+    let build = |embedder: Arc<dyn Embedder>, strategy| {
+        let clock = clock.clone();
+        let store = store();
+        async move {
+            let mut config = Config::default();
+            config.canonization_edge_min_age = Duration::ZERO;
+            let mem = Memory::builder()
+                .session("stale-replay-mcp")
+                .agent("agent-a")
+                .config(config)
+                .flush_interval(Duration::from_secs(3600))
+                .store(store)
+                .embedder(embedder)
+                .embedding_contract(fixture_contract())
+                .match_strategy(strategy)
+                .clock(clock)
+                .build()
+                .await
+                .unwrap();
+            LamboServer::new(Arc::new(mem))
+        }
+    };
+    let s0 = build(
+        Arc::new(FixtureEmbedder::new()),
+        crate::types::MatchStrategy::Canonical,
+    )
+    .await;
+    let target = belief(&s0).await;
+    seconds.fetch_add(2, Ordering::SeqCst);
+    let dependent = derive_created(&s0, "agent-b", json!([{"content":"replay dependent", "concept_type":"logic", "depends_on":[target.0.to_string()]}])).await.remove(0);
+    s0.mem.close().await.unwrap();
+    drop(s0);
+    seconds.fetch_add(2, Ordering::SeqCst);
+    let s1 = build(
+        Arc::new(Gate(FixtureEmbedder::new())),
+        crate::types::MatchStrategy::Hybrid,
+    )
+    .await;
+    let ack = call_raw(&s1, "lambo_derive", json!({"agent_id":"agent-c", "concepts":[{"content":"replay contradiction", "concept_type":"logic", "against":[target.0.to_string()]}]})).await;
+    let receipt = ack.structured_content.unwrap()["receipt"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let destination = crate::types::SessionId::new("project-caller");
+    let scoped_agent = AgentId::new("agent-d");
+    let scoped = s1
+        .mem
+        .record_action_async_scoped(
+            &scoped_agent,
+            &Action {
+                repo_scope: Some("host/owner/repo"),
+                event_time: None,
+                action: "scoped replay contradiction",
+                produces: &[],
+                modifies: &[],
+                depends_on: &[],
+            },
+            &[target.0.to_string()],
+            &crate::surface::resolve::NoForeignScopes,
+            Some(&destination),
+        )
+        .await
+        .unwrap();
+    s1.mem.close().await.unwrap();
+    drop(s1);
+    let s2 = build(
+        Arc::new(FixtureEmbedder::new()),
+        crate::types::MatchStrategy::Hybrid,
+    )
+    .await;
+    let id = receipt.parse().unwrap();
+    let answer = s2
+        .mem
+        .pipeline()
+        .wait(
+            &AgentId::new("agent-c"),
+            id,
+            crate::writeq::RECEIPT_WAIT_MAX,
+        )
+        .await;
+    assert_eq!(answer.tag(), "applied_after_restart", "{answer:?}");
+    let scoped_answer = s2
+        .mem
+        .pipeline()
+        .wait_for(
+            &scoped_agent,
+            Some(&destination),
+            scoped.receipt,
+            crate::writeq::RECEIPT_WAIT_MAX,
+        )
+        .await;
+    assert_eq!(scoped_answer.tag(), "applied_after_restart");
+    assert_eq!(
+        s2.mem
+            .pipeline()
+            .lookup_for(&scoped_agent, None, scoped.receipt)
+            .tag(),
+        "forbidden"
+    );
+    assert!(s2
+        .mem
+        .pipeline()
+        .take_piggyback_at_most(&scoped_agent, None, 10)
+        .0
+        .is_empty());
+    let scoped_piggy = s2
+        .mem
+        .pipeline()
+        .take_piggyback_at_most(&scoped_agent, Some(&destination), 10)
+        .0;
+    assert_eq!(scoped_piggy.len(), 1);
+    assert!(matches!(
+        &scoped_piggy[0].1,
+        crate::writeq::ReceiptAnswer::AppliedAfterRestart(_, Some(_))
+    ));
+    let other = call_raw(&s2, "lambo_saints", json!({"agent_id":"agent-b"})).await;
+    assert!(other
+        .structured_content
+        .unwrap()
+        .get("write_receipts")
+        .is_none());
+    let piggy = call_raw(&s2, "lambo_saints", json!({"agent_id":"agent-c"})).await;
+    let p = &piggy.structured_content.unwrap()["write_receipts"][0];
+    assert_eq!(p["id"], receipt);
+    assert_eq!(p["state"], "applied_after_restart");
+    assert_eq!(p["stale_report"]["total"], 1);
+    assert_eq!(p["stale_report"]["dependents"][0]["id"], dependent);
+    let fetched = call_raw(
+        &s2,
+        "lambo_stats",
+        json!({"agent_id":"agent-c", "receipt":receipt}),
+    )
+    .await;
+    let r = &fetched.structured_content.unwrap()["receipt"];
+    assert_eq!(r["state"], "applied_after_restart");
+    assert_eq!(r["stale_report"], p["stale_report"]);
+    s2.mem.close().await.unwrap();
+    drop(s2);
+    let s3 = build(
+        Arc::new(FixtureEmbedder::new()),
+        crate::types::MatchStrategy::Hybrid,
+    )
+    .await;
+    let fetched = call_raw(
+        &s3,
+        "lambo_stats",
+        json!({"agent_id":"agent-c", "receipt":receipt}),
+    )
+    .await;
+    let payload = fetched.structured_content.unwrap();
+    assert_eq!(payload["receipt"]["state"], "applied_after_restart");
+    assert!(payload["receipt"].get("stale_report").is_none());
+    s3.mem.close().await.unwrap();
+}

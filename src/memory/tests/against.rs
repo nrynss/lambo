@@ -658,16 +658,33 @@ async fn stale_dependencies_survive_restart_but_receipt_payload_does_not() {
         store.init_schema().await.unwrap();
         Arc::new(store) as Arc<dyn GraphStore>
     };
-    let store = open(path.clone()).await;
-    let mem = memory_with(
-        store.clone(),
-        "stale-restart",
-        MatchStrategy::Canonical,
-        Arc::new(FixtureEmbedder::new()),
-    )
-    .await;
+    let seconds = Arc::new(std::sync::atomic::AtomicI64::new(
+        chrono::Utc::now().timestamp(),
+    ));
+    let clock: crate::daemon::Clock = {
+        let seconds = seconds.clone();
+        Arc::new(move || {
+            chrono::DateTime::from_timestamp(seconds.load(Ordering::SeqCst), 0).unwrap()
+        })
+    };
+    let build = |store: Arc<dyn GraphStore>, clock: crate::daemon::Clock| async move {
+        Memory::builder()
+            .session("stale-restart")
+            .agent("agent-a")
+            .flush_interval(Duration::from_secs(3600))
+            .store(store)
+            .embedder(Arc::new(FixtureEmbedder::new()) as Arc<dyn Embedder>)
+            .embedding_contract(contract("fixture", 1024))
+            .match_strategy(MatchStrategy::Canonical)
+            .clock(clock)
+            .build()
+            .await
+            .unwrap()
+    };
+    let mem = build(open(path.clone()).await, clock.clone()).await;
     let agent = AgentId::new("agent-a");
     let target = belief(&mem, BELIEF).await;
+    seconds.fetch_add(2, Ordering::SeqCst);
     mem.record_action_as(
         &agent,
         &Action {
@@ -680,6 +697,7 @@ async fn stale_dependencies_survive_restart_but_receipt_payload_does_not() {
         },
     )
     .unwrap();
+    seconds.fetch_add(2, Ordering::SeqCst);
     let newer = "the charger overheated";
     let submitted = mem
         .derive_cited_async_as(
@@ -695,26 +713,29 @@ async fn stale_dependencies_survive_restart_but_receipt_payload_does_not() {
         settle(&mem, submitted.receipt).await,
         ReceiptAnswer::Applied(_)
     ));
+    let check = |mem: &Memory| {
+        let graph = mem.graph.read();
+        let now = clock();
+        assert!(crate::daemon::contradiction::contradiction_at(
+            &graph,
+            target,
+            Duration::ZERO,
+            now
+        )
+        .is_some());
+        let report =
+            crate::daemon::contradiction::stale_report(&graph, [target], Duration::ZERO, now);
+        assert_eq!(report.total, 1);
+        assert_eq!(report.dependents[0].content, "continue using charger");
+    };
+    check(&mem);
     mem.close().await.unwrap();
     drop(mem);
-    let reopened = memory_with(
-        open(path).await,
-        "stale-restart",
-        MatchStrategy::Canonical,
-        Arc::new(FixtureEmbedder::new()),
-    )
-    .await;
-    let report = crate::daemon::contradiction::stale_report(
-        &reopened.graph.read(),
-        [target],
-        Duration::ZERO,
-        chrono::Utc::now(),
-    );
-    assert_eq!(report.total, 1);
-    assert_eq!(report.dependents[0].content, "continue using charger");
+    let reopened = build(open(path).await, clock.clone()).await;
+    check(&reopened);
     let recovered = reopened.pipeline().lookup(&agent, submitted.receipt);
     assert!(
-        matches!(recovered, ReceiptAnswer::AppliedAfterRestart(_)),
+        matches!(recovered, ReceiptAnswer::AppliedAfterRestart(..)),
         "{recovered:?}"
     );
     reopened.close().await.unwrap();

@@ -117,7 +117,7 @@ fn every_answer_has_a_distinct_tag_and_none_of_them_is_unknown() {
             embedded: Some(0),
         }),
         ReceiptAnswer::Failed("x".into()),
-        ReceiptAnswer::AppliedAfterRestart("x".into()),
+        ReceiptAnswer::AppliedAfterRestart("x".into(), None),
         ReceiptAnswer::IntentRecorded,
         ReceiptAnswer::CloseUnflushed,
         ReceiptAnswer::Dropped("x".into()),
@@ -173,7 +173,7 @@ fn only_the_two_pendings_are_unsettled() {
     );
     for a in [
         ReceiptAnswer::Failed("x".into()),
-        ReceiptAnswer::AppliedAfterRestart("x".into()),
+        ReceiptAnswer::AppliedAfterRestart("x".into(), None),
         // Terminal FOR THIS PROCESS: the next process's answer for the
         // same id is applied_after_restart or failed, but nothing in this
         // one can change it again.

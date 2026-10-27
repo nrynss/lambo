@@ -534,9 +534,10 @@ pub enum ReceiptAnswer {
     /// close (or crash-with-flushed-tail) as a durable intent, and a later
     /// serve of the session applied it — or applied it before restarting and
     /// the consumed intent record carried the fact across. The payload is the
-    /// applied summary sentence; node ids are not retained across the restart
-    /// (recall finds the concepts).
-    AppliedAfterRestart(String),
+    /// applied summary sentence and, when this process performed the replay,
+    /// its bounded stale report. Consumed durable rows retain only the sentence;
+    /// a later restart cannot recover the original report.
+    AppliedAfterRestart(String, Option<crate::daemon::contradiction::StaleReport>),
     /// Not applied before this session closed, and **not lost**: the validated
     /// job is recorded as a durable intent, and the next serve of this session
     /// re-attempts it — idempotently, in submission order (J3 durable
@@ -600,7 +601,7 @@ impl ReceiptAnswer {
             ReceiptAnswer::PendingReplay => "pending_replay",
             ReceiptAnswer::Applied(_) => "applied",
             ReceiptAnswer::Failed(_) => "failed",
-            ReceiptAnswer::AppliedAfterRestart(_) => "applied_after_restart",
+            ReceiptAnswer::AppliedAfterRestart(..) => "applied_after_restart",
             ReceiptAnswer::IntentRecorded => "intent_durable",
             ReceiptAnswer::CloseUnflushed => "close_unflushed",
             ReceiptAnswer::Dropped(_) => "dropped",
@@ -626,7 +627,7 @@ impl ReceiptAnswer {
             ReceiptAnswer::PendingReplay => 1,
             ReceiptAnswer::Applied(_) => 2,
             ReceiptAnswer::Failed(_) => 3,
-            ReceiptAnswer::AppliedAfterRestart(_) => 4,
+            ReceiptAnswer::AppliedAfterRestart(..) => 4,
             ReceiptAnswer::IntentRecorded => 5,
             ReceiptAnswer::Dropped(_) => 6,
             ReceiptAnswer::Expired => 7,
@@ -668,11 +669,33 @@ impl ReceiptAnswer {
                 detail
             }
             ReceiptAnswer::Failed(why) => format!("FAILED, nothing was written — {why}"),
-            ReceiptAnswer::AppliedAfterRestart(summary) => format!(
-                "applied after a restart — {summary} (confirmed from the durable intent \
+            ReceiptAnswer::AppliedAfterRestart(summary, report) => {
+                if let Some(report) = report {
+                    let mut detail = format!(
+                        "applied after a restart — {summary}; {} stale direct dependenc(ies)",
+                        report.total
+                    );
+                    for entry in &report.dependents {
+                        detail.push_str(&format!(
+                            "\n  - {}: {} (cites {})",
+                            entry.id, entry.content, entry.cited_id
+                        ));
+                    }
+                    if report.total > report.dependents.len() {
+                        detail.push_str(&format!(
+                            "\n  ({} more)",
+                            report.total - report.dependents.len()
+                        ));
+                    }
+                    detail
+                } else {
+                    format!(
+                        "applied after a restart — {summary} (confirmed from the durable intent \
                  record; recall to see the concepts; stale report details are not retained \
                  across restart — use lambo_stale for the current state)"
-            ),
+                    )
+                }
+            }
             ReceiptAnswer::IntentRecorded => "not applied before this session closed — the \
                                               validated write is recorded as a DURABLE INTENT \
                                               and the next serve of this session will \

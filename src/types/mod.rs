@@ -960,6 +960,9 @@ pub enum WriteIntentPayload {
         /// re-resolves every reference and refuses one that resolves
         /// differently.
         citations: PinnedCitations,
+        /// Session that should receive the replayed receipt; absent on legacy intents.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        receipt_destination: Option<SessionId>,
     },
     /// A `lambo_record_action` job with `against` (#19(b)): the action
     /// above plus the concepts it contradicts, as resolved at the ack.
@@ -987,6 +990,9 @@ pub enum WriteIntentPayload {
         /// (`content` is the action). A replay re-resolves each and refuses
         /// one that resolves differently.
         against: Vec<PinnedReference>,
+        /// Session that should receive the replayed receipt; absent on legacy intents.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        receipt_destination: Option<SessionId>,
     },
     /// #129: a text derive or action whose path-like Resources take the
     /// repository-scoped key. A wrapper, not a field, so a build that
