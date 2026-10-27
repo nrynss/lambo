@@ -4,6 +4,27 @@
 
 ### Changed
 
+- **Behaviour change: a memory that cites a contradicted concept is
+  warned (#207).** #179 warns on a concept that a newer concept
+  contradicts, but not on a memory that only cites it through
+  `depends_on`, so a fact built on a withdrawn one (a memo that "list-all
+  returns every memo" citing `GET /api/v1/memo`, after "list-all removed
+  in v0.22" was written `against` it) came back with no warning. Recall
+  now adds `⚠ Rests on a contradicted concept: "…" (id …), contradicted by
+  "…" (id …)` to a hit for each concept its own `depends_on` cites that is
+  contradicted, by exactly #179's rule at the recall's clock: at most 3
+  lines in the cited concepts' id order, then one `⚠ Rests on N more
+  contradicted concepts` line. Direct citations only (no chains, no
+  `parent_of`). It is a warning only: scores, statuses, ranking, `top_k`
+  and companions are unchanged, and neither the cited nor the
+  contradicting concept is pulled in for it. It is checked on every
+  recall (single-session, layered, `lambo session verify`), so it shows
+  on the first recall after the `against` write. The detailed recall's
+  annotation kind is `rests_on_contradicted` (web portal `/api/recall`,
+  `--ledger` recall lines; `lambo session verify` reports that kind). A
+  recall with no stale citation renders exactly as before. The predicate
+  is `daemon::contradiction::stale_citations`, with the edge test
+  `daemon::contradiction::direct_citation`.
 - **Behaviour change, EmbeddingGemma 2 only: the recent leg is calibrated
   per embedding contract (#87).** The recent-interactions leg scored a flat
   0.35, a value set on BGE-M3's cosine scale. Under EmbeddingGemma 2 (768
