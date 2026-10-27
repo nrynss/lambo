@@ -39,6 +39,14 @@ fn schema_holds() {
 /// 150 so that 100 survive adjudication, and 100 each of paraphrase and
 /// unrelated pairs; #173 about 200 answerable queries; #174 at least 100
 /// no-answer queries.
+/// In #198's regime: both texts typed as the same Logic, Constraint or
+/// Observation (the types the suspected-supersession trigger considers).
+fn in_regime(p: &schema::Pair) -> bool {
+    p.concept_types.len() == 2
+        && p.concept_types[0] == p.concept_types[1]
+        && ["Logic", "Constraint", "Observation"].contains(&p.concept_types[0].as_str())
+}
+
 #[test]
 fn sizes_meet_the_consumers() {
     let s = set();
@@ -58,33 +66,41 @@ fn sizes_meet_the_consumers() {
     );
     assert!(count("paraphrase", true) >= 100, "paraphrase pairs");
     assert!(count("unrelated", true) >= 100, "unrelated pairs");
-    // #198: about 50 supersession pairs to measure the suspected-supersession
-    // trigger's precision on, and as many hard negatives in its own regime
-    // (same Logic, Constraint or Observation type, refused by the identifier
-    // guard, both texts true), each with both concept types.
-    let relation = |r: &str| {
+    // #198: supersession pairs to measure the suspected-supersession
+    // trigger's precision on, and hard negatives, both in the trigger's own
+    // regime (both texts the same Logic, Constraint or Observation type);
+    // `in_regime` (below) also requires the identifier guard to refuse them.
+    // Held-out, where the precision is reported, needs at least 25 of each.
+    let regime = |r: &str, split: Option<&str>| {
         s.pairs
             .iter()
-            .filter(|p| p.adjudicated() && p.relation.as_deref() == Some(r))
-            .collect::<Vec<_>>()
+            .filter(|p| {
+                p.adjudicated()
+                    && p.relation.as_deref() == Some(r)
+                    && in_regime(p)
+                    && split.is_none_or(|sp| p.split == sp)
+            })
+            .count()
     };
-    assert!(relation("supersedes").len() >= 50, "supersedes pairs");
-    let in_regime = relation("distinct_entity")
-        .into_iter()
-        .filter(|p| {
-            p.concept_types.len() == 2
-                && p.concept_types[0] == p.concept_types[1]
-                && ["Logic", "Constraint", "Observation"].contains(&p.concept_types[0].as_str())
-        })
-        .count();
-    assert!(in_regime >= 50, "distinct_entity pairs in #198's regime");
+    assert!(
+        regime("supersedes", None) >= 60,
+        "supersedes pairs in #198's regime"
+    );
+    assert!(
+        regime("distinct_entity", None) >= 60,
+        "distinct_entity pairs in #198's regime"
+    );
     for r in ["supersedes", "distinct_entity"] {
-        for split in schema::SPLITS {
-            assert!(
-                relation(r).iter().any(|p| p.split == split),
-                "no {r} pair in {split}"
-            );
-        }
+        assert!(
+            regime(r, Some("held_out")) >= 25,
+            "{r} pairs in #198's regime in held_out: {}",
+            regime(r, Some("held_out"))
+        );
+        assert!(
+            regime(r, Some("dev")) >= 25,
+            "{r} pairs in #198's regime in dev: {}",
+            regime(r, Some("dev"))
+        );
     }
     let kind = |k: &str| {
         s.queries

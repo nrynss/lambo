@@ -98,7 +98,7 @@ KEY_ORDER = ("id", "a", "b", "label", "family", "relation", "concept_types", "sp
 
 
 def add_pair(pid, a, b, label, family, source, relation=None, review=None, concepts=None,
-             labeller=LABELLER, labelled_on=LABELLED_ON, types=None):
+             labeller=LABELLER, labelled_on=LABELLED_ON, types=None, split=None):
     key = frozenset((a, b))
     if a == b or key in seen:
         return
@@ -109,7 +109,8 @@ def add_pair(pid, a, b, label, family, source, relation=None, review=None, conce
     if types:
         assert len(types) == 2 and all(t in CONCEPT_TYPES for t in types), (pid, types)
         e["concept_types"] = list(types)
-    e.update(split=split_of(pid), source=source, labeller=labeller, labelled_on=labelled_on)
+    assert split in (None, "dev", "held_out"), (pid, split)
+    e.update(split=split or split_of(pid), source=source, labeller=labeller, labelled_on=labelled_on)
     if concepts:
         e["concepts"] = concepts
     if review:
@@ -139,7 +140,8 @@ for c in common.CONCEPTS:
 for n, p in enumerate(common.EXTRA_PAIRS, 1):
     add_pair(p["id"] or f"p-x{n:02d}", p["a"], p["b"], p["label"], p["family"], p["source"],
              relation=p["relation"], review=p["review"], types=p["types"],
-             labelled_on=p["labelled_on"] or LABELLED_ON, labeller=p["labeller"] or LABELLER)
+             labelled_on=p["labelled_on"] or LABELLED_ON, labeller=p["labeller"] or LABELLER,
+             split=p["split"])
 
 # #178's labelled pairs: the dogfood-i3 file/commit-name pairs and the
 # synthetic distinct pairs. The 89 synthetic typo duplicates are left out: a
@@ -262,34 +264,50 @@ missing = [p["id"] for p in pairs if p.get("relation") == "supersedes" and "conc
 assert not missing, f"supersedes pairs without concept_types: {missing}"
 
 
+def _fold(s):
+    """src/graph/canonical.rs's fold, mirrored: NFC, lowercase, and every run
+    of `_`, `-` or whitespace one space."""
+    import unicodedata
+    out, gap = [], False
+    for ch in unicodedata.normalize("NFC", s):
+        if ch in "_-" or ch.isspace():
+            gap = True
+            continue
+        if gap and out:
+            out.append(" ")
+        gap = False
+        out.append(ch.lower())
+    return "".join(out)
+
+
+def _tokens(f):
+    """A folded text's tokens, edge punctuation trimmed, each marked whether
+    it is identifier-shaped (an ASCII digit, `/` or `.` in it)."""
+    import re
+    for t in f.split(" "):
+        t = re.sub(r"^[^\w/.]+|[^\w/.]+$", "", t).rstrip(".")
+        if t:
+            yield t, any((c.isascii() and c.isdigit()) or c in "/." for c in t)
+
+
 def same_identifiers(a, b):
     """src/graph/canonical.rs same_identifiers, mirrored: fold, then compare
-    the digit runs and the identifier-shaped tokens."""
+    the digit runs and the identifier-shaped tokens. A pre-check only:
+    tests/eval_set.rs calls the real one on every in-regime pair."""
     import re
-    import unicodedata
+    fa, fb = _fold(a), _fold(b)
+    return (re.findall(r"[0-9]+", fa) == re.findall(r"[0-9]+", fb)
+            and [t for t, i in _tokens(fa) if i] == [t for t, i in _tokens(fb) if i])
 
-    def fold(s):
-        out, gap = [], False
-        for ch in unicodedata.normalize("NFC", s):
-            if ch in "_-" or ch.isspace():
-                gap = True
-                continue
-            if gap and out:
-                out.append(" ")
-            gap = False
-            out.append(ch.lower())
-        return "".join(out)
 
-    def ident(f):
-        toks = []
-        for t in f.split(" "):
-            t = re.sub(r"^[^\w/.]+|[^\w/.]+$", "", t).rstrip(".")
-            if t and any((c.isascii() and c.isdigit()) or c in "/." for c in t):
-                toks.append(t)
-        return toks
-
-    fa, fb = fold(a), fold(b)
-    return re.findall(r"[0-9]+", fa) == re.findall(r"[0-9]+", fb) and ident(fa) == ident(fb)
+def masked_jaccard(a, b):
+    """Token-set Jaccard once every identifier-shaped token is masked: the
+    shape #198's trigger compares. Approximate (the trigger's own masking is
+    #198's to tune); used here only to stratify the split."""
+    def masked(s):
+        return {"<id>" if i else t for t, i in _tokens(_fold(s))}
+    x, y = masked(a), masked(b)
+    return len(x & y) / len(x | y)
 
 
 # Every #198 pair is one the #195 identifier guard refuses; otherwise it
@@ -297,6 +315,18 @@ def same_identifiers(a, b):
 for p in pairs:
     if p["id"].startswith("p-198-"):
         assert not same_identifiers(p["a"], p["b"]), f"{p['id']}: the identifier guard would not refuse it"
+
+# #198's split is stratified by sub-kind (t_supersede198.py): within each
+# kind, cut by whether the masked texts are identical, held-out holds 30-50%
+# of the adjudicated pairs, so it gets its share of the hardest negatives.
+strata = {}
+for p in pairs:
+    if p["id"].startswith("p-198-") and "review" not in p:
+        kind = p.get("relation") or p["family"]
+        strata.setdefault((kind, masked_jaccard(p["a"], p["b"]) == 1.0), []).append(p["split"])
+for k, splits in sorted(strata.items()):
+    share = splits.count("held_out") / len(splits)
+    assert len(splits) < 5 or 0.30 <= share <= 0.50, f"#198 stratum {k}: held_out share {share:.2f}"
 
 assert len({p["id"] for p in pairs}) == len(pairs)
 # #198's pairs stay out of the export: the identifier guard refuses every one

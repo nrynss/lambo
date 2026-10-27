@@ -3128,7 +3128,7 @@
    "Logic",
    "Logic"
   ],
-  "split": "dev",
+  "split": "held_out",
   "source": "dev-diary/lambo-for-mooshik/DOGFOOD.md (open question 1: superseded pins 3039b82, then 19f51d3)",
   "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
@@ -3160,7 +3160,7 @@
    "Logic",
    "Logic"
   ],
-  "split": "dev",
+  "split": "held_out",
   "source": "evidence/0.6.0-vs-0.5.0/README.md (Builds; Re-pin)",
   "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
@@ -3208,7 +3208,7 @@
    "Constraint",
    "Constraint"
   ],
-  "split": "dev",
+  "split": "held_out",
   "source": "CHANGELOG.md (0.4.0: the crate moves from edition 2021 to edition 2024, #42)",
   "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
@@ -3272,7 +3272,7 @@
    "Constraint",
    "Constraint"
   ],
-  "split": "held_out",
+  "split": "dev",
   "source": "CHANGELOG.md (0.3.0: EDGE_COLUMNS 9 to 10)",
   "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
@@ -3288,7 +3288,7 @@
    "Constraint",
    "Constraint"
   ],
-  "split": "dev",
+  "split": "held_out",
   "source": "CHANGELOG.md (0.4.0: the longest wait_ms is now 34000, was 4000, #11)",
   "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
@@ -3368,7 +3368,7 @@
    "Observation",
    "Observation"
   ],
-  "split": "held_out",
+  "split": "dev",
   "source": "CHANGELOG.md (release headings 0.6.0 and 0.7.0)",
   "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
@@ -3416,7 +3416,7 @@
    "Observation",
    "Observation"
   ],
-  "split": "dev",
+  "split": "held_out",
   "source": "CHANGELOG.md (0.7.0, #171)",
   "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
@@ -3464,7 +3464,7 @@
    "Observation",
    "Observation"
   ],
-  "split": "dev",
+  "split": "held_out",
   "source": "CHANGELOG.md (0.7.0, #171: a rescore walks incident edges once)",
   "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
@@ -3480,7 +3480,7 @@
    "Observation",
    "Observation"
   ],
-  "split": "held_out",
+  "split": "dev",
   "source": "CHANGELOG.md (0.7.0, #165)",
   "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
@@ -3496,7 +3496,7 @@
    "Observation",
    "Observation"
   ],
-  "split": "dev",
+  "split": "held_out",
   "source": "CHANGELOG.md (0.5.0, #102)",
   "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
@@ -3512,7 +3512,7 @@
    "Observation",
    "Observation"
   ],
-  "split": "held_out",
+  "split": "dev",
   "source": "CHANGELOG.md (0.5.0, #102)",
   "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
@@ -3528,7 +3528,7 @@
    "Observation",
    "Observation"
   ],
-  "split": "dev",
+  "split": "held_out",
   "source": "CHANGELOG.md (0.5.0, #31)",
   "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
@@ -3544,7 +3544,7 @@
    "Observation",
    "Observation"
   ],
-  "split": "dev",
+  "split": "held_out",
   "source": "CHANGELOG.md (0.4.0, #8, #14: the session holder ranks vectors from memory)",
   "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
@@ -3577,7 +3577,7 @@
    "Observation",
    "Observation"
   ],
-  "split": "dev",
+  "split": "held_out",
   "source": "CHANGELOG.md (0.7.0, #55)",
   "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27",
@@ -3594,7 +3594,7 @@
    "Observation",
    "Observation"
   ],
-  "split": "held_out",
+  "split": "dev",
   "source": "CHANGELOG.md (0.3.0, GC: the first sweep now collects nothing, was 537)",
   "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
@@ -3626,7 +3626,7 @@
    "Observation",
    "Observation"
   ],
-  "split": "dev",
+  "split": "held_out",
   "source": "CHANGELOG.md (0.4.0: user schema's eight fields are parent_of children, 14 dependents, was 8)",
   "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
@@ -3642,7 +3642,7 @@
    "Observation",
    "Observation"
   ],
-  "split": "held_out",
+  "split": "dev",
   "source": "CHANGELOG.md (0.4.0: the demo's user schema reports 15, was 9)",
   "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
@@ -3706,7 +3706,7 @@
    "Observation",
    "Observation"
   ],
-  "split": "dev",
+  "split": "held_out",
   "source": "fixtures/eval/README.md (git 3d421739: 12 to 48)",
   "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
@@ -3738,7 +3738,7 @@
    "Observation",
    "Observation"
   ],
-  "split": "dev",
+  "split": "held_out",
   "source": "fixtures/eval/README.md (git 3d421739: 23 to 36)",
   "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
@@ -3756,6 +3756,374 @@
   ],
   "split": "dev",
   "source": "fixtures/eval/README.md (git 8d2269a9: the owner's rulings, 84 to 82)",
+  "labeller": "claude-opus-5-5 (agent)",
+  "labelled_on": "2026-10-27"
+ },
+ {
+  "id": "p-198-s42",
+  "a": "Under BAAI/bge-m3, a layer with no min_similarity set takes a floor of 0.50.",
+  "b": "Under BAAI/bge-m3, a layer with no min_similarity set takes a floor of 0.40.",
+  "label": "related_distinct",
+  "family": "identifier",
+  "relation": "supersedes",
+  "concept_types": [
+   "Logic",
+   "Logic"
+  ],
+  "split": "dev",
+  "source": "CHANGELOG.md (0.6.0, Upgrading from 0.5.0, #157: the default min_similarity rises from 0.40 to 0.50)",
+  "labeller": "claude-opus-5-5 (agent)",
+  "labelled_on": "2026-10-27"
+ },
+ {
+  "id": "p-198-s43",
+  "a": "lambo::recall::candidates::RECENT_SCORE, the recent-interactions leg's flat score, is 0.35.",
+  "b": "lambo::recall::candidates::RECENT_SCORE, the recent-interactions leg's flat score, is 0.5.",
+  "label": "related_distinct",
+  "family": "identifier",
+  "relation": "supersedes",
+  "concept_types": [
+   "Constraint",
+   "Constraint"
+  ],
+  "split": "held_out",
+  "source": "CHANGELOG.md (0.3.0: RECENT_SCORE dropped from 0.5 to 0.35); src/recall/candidates.rs",
+  "labeller": "claude-opus-5-5 (agent)",
+  "labelled_on": "2026-10-27"
+ },
+ {
+  "id": "p-198-s44",
+  "a": "A derive commit holds the session write lock for 17 µs at 50,000 concepts (release build).",
+  "b": "A derive commit holds the session write lock for 36.2 ms at 50,000 concepts (release build).",
+  "label": "related_distinct",
+  "family": "identifier",
+  "relation": "supersedes",
+  "concept_types": [
+   "Observation",
+   "Observation"
+  ],
+  "split": "dev",
+  "source": "CHANGELOG.md (0.5.0, #102)",
+  "labeller": "claude-opus-5-5 (agent)",
+  "labelled_on": "2026-10-27"
+ },
+ {
+  "id": "p-198-s45",
+  "a": "On a 3,600-concept session, a one-concept derive goes from acknowledged to applied in 14 ms (fixture embedder, release build).",
+  "b": "On a 3,600-concept session, a one-concept derive goes from acknowledged to applied in 246 ms (fixture embedder, release build).",
+  "label": "related_distinct",
+  "family": "identifier",
+  "relation": "supersedes",
+  "concept_types": [
+   "Observation",
+   "Observation"
+  ],
+  "split": "dev",
+  "source": "CHANGELOG.md (0.4.0, #8)",
+  "labeller": "claude-opus-5-5 (agent)",
+  "labelled_on": "2026-10-27"
+ },
+ {
+  "id": "p-198-s46",
+  "a": "On a 3,600-concept session, a three-concept derive goes from acknowledged to applied in 20 ms (fixture embedder, release build).",
+  "b": "On a 3,600-concept session, a three-concept derive goes from acknowledged to applied in 670 ms (fixture embedder, release build).",
+  "label": "related_distinct",
+  "family": "identifier",
+  "relation": "supersedes",
+  "concept_types": [
+   "Observation",
+   "Observation"
+  ],
+  "split": "held_out",
+  "source": "CHANGELOG.md (0.4.0, #8)",
+  "labeller": "claude-opus-5-5 (agent)",
+  "labelled_on": "2026-10-27"
+ },
+ {
+  "id": "p-198-s47",
+  "a": "With candle BGE-M3 on Metal, a repeated warm recall on a 3,600-concept SQLite session takes 4.1 ms p50.",
+  "b": "With candle BGE-M3 on Metal, a repeated warm recall on a 3,600-concept SQLite session takes 22.3 ms p50.",
+  "label": "related_distinct",
+  "family": "identifier",
+  "relation": "supersedes",
+  "concept_types": [
+   "Observation",
+   "Observation"
+  ],
+  "split": "dev",
+  "source": "CHANGELOG.md (0.4.0, #14: the session holder keeps recent query vectors)",
+  "labeller": "claude-opus-5-5 (agent)",
+  "labelled_on": "2026-10-27"
+ },
+ {
+  "id": "p-198-s48",
+  "a": "With candle BGE-M3 on Metal, a repeated recall with a derive applied in between takes 3.6 ms p50 on a 3,600-concept SQLite session.",
+  "b": "With candle BGE-M3 on Metal, a repeated recall with a derive applied in between takes 21.5 ms p50 on a 3,600-concept SQLite session.",
+  "label": "related_distinct",
+  "family": "identifier",
+  "relation": "supersedes",
+  "concept_types": [
+   "Observation",
+   "Observation"
+  ],
+  "split": "dev",
+  "source": "CHANGELOG.md (0.4.0, #14)",
+  "labeller": "claude-opus-5-5 (agent)",
+  "labelled_on": "2026-10-27"
+ },
+ {
+  "id": "p-198-s49",
+  "a": "The Mac dogfood rig serves the pinned binary lambo-4c6fc93, built with store-sqlite,embed-candle-metal,embed-bge.",
+  "b": "The Mac dogfood rig serves the pinned binary lambo-21e4cf8, built with store-sqlite,embed-candle-metal,embed-bge.",
+  "label": "related_distinct",
+  "family": "identifier",
+  "relation": "supersedes",
+  "concept_types": [
+   "Logic",
+   "Logic"
+  ],
+  "split": "held_out",
+  "source": "corpus emb-06 and its contrast (dogfood texts: launchd repointed from lambo-21e4cf8 to lambo-4c6fc93)",
+  "labeller": "claude-opus-5-5 (agent)",
+  "labelled_on": "2026-10-27"
+ },
+ {
+  "id": "p-198-s50",
+  "a": "The Mac dogfood rig serves the pinned binary lambo-e11fb06, built with store-sqlite,embed-candle-metal,embed-bge.",
+  "b": "The Mac dogfood rig serves the pinned binary lambo-4c6fc93, built with store-sqlite,embed-candle-metal,embed-bge.",
+  "label": "related_distinct",
+  "family": "identifier",
+  "relation": "supersedes",
+  "concept_types": [
+   "Logic",
+   "Logic"
+  ],
+  "split": "dev",
+  "source": "corpus emb-06 (dogfood text: re-pinned to lambo-e11fb06, repointed from lambo-4c6fc93)",
+  "labeller": "claude-opus-5-5 (agent)",
+  "labelled_on": "2026-10-27"
+ },
+ {
+  "id": "p-198-s51",
+  "a": "Identifier recall over MCP on a 9,508-concept SQLite store runs at 6.7 ms p50.",
+  "b": "Identifier recall over MCP on a 9,508-concept SQLite store runs at 14.8 ms p50.",
+  "label": "related_distinct",
+  "family": "identifier",
+  "relation": "supersedes",
+  "concept_types": [
+   "Observation",
+   "Observation"
+  ],
+  "split": "held_out",
+  "source": "evidence/issue-171-perf/README.md (PR #183 table: identifier_recall p50 14.82 to 6.71 ms)",
+  "labeller": "claude-opus-5-5 (agent)",
+  "labelled_on": "2026-10-27"
+ },
+ {
+  "id": "p-198-s52",
+  "a": "A structural recall that misses its anchor on a 9,508-concept SQLite store runs at 9.3 ms p50.",
+  "b": "A structural recall that misses its anchor on a 9,508-concept SQLite store runs at 20.5 ms p50.",
+  "label": "related_distinct",
+  "family": "identifier",
+  "relation": "supersedes",
+  "concept_types": [
+   "Observation",
+   "Observation"
+  ],
+  "split": "dev",
+  "source": "evidence/issue-171-perf/README.md (PR #183 table: structural_miss p50 20.45 to 9.33 ms)",
+  "labeller": "claude-opus-5-5 (agent)",
+  "labelled_on": "2026-10-27"
+ },
+ {
+  "id": "p-198-s53",
+  "a": "A structural recall that hits its anchor on a 9,508-concept SQLite store runs at 1.85 ms p50.",
+  "b": "A structural recall that hits its anchor on a 9,508-concept SQLite store runs at 2.35 ms p50.",
+  "label": "related_distinct",
+  "family": "identifier",
+  "relation": "supersedes",
+  "concept_types": [
+   "Observation",
+   "Observation"
+  ],
+  "split": "dev",
+  "source": "evidence/issue-171-perf/README.md (PR #183 table: structural_hit p50 2.35 to 1.85 ms)",
+  "labeller": "claude-opus-5-5 (agent)",
+  "labelled_on": "2026-10-27"
+ },
+ {
+  "id": "p-198-s54",
+  "a": "Keyword recall over MCP on a 9,508-concept SQLite store runs at 9.7 ms p90.",
+  "b": "Keyword recall over MCP on a 9,508-concept SQLite store runs at 23.2 ms p90.",
+  "label": "related_distinct",
+  "family": "identifier",
+  "relation": "supersedes",
+  "concept_types": [
+   "Observation",
+   "Observation"
+  ],
+  "split": "held_out",
+  "source": "evidence/issue-171-perf/README.md (PR #183 table: keyword_semantic_recall p90 23.2 to 9.68 ms)",
+  "labeller": "claude-opus-5-5 (agent)",
+  "labelled_on": "2026-10-27"
+ },
+ {
+  "id": "p-198-s55",
+  "a": "With 16 concurrent clients on a 9,508-concept SQLite store, one recall takes 13.1 ms p50.",
+  "b": "With 16 concurrent clients on a 9,508-concept SQLite store, one recall takes 249.8 ms p50.",
+  "label": "related_distinct",
+  "family": "identifier",
+  "relation": "supersedes",
+  "concept_types": [
+   "Observation",
+   "Observation"
+  ],
+  "split": "dev",
+  "source": "evidence/issue-171-perf/README.md (PR #183 table: recall_16_concurrent p50 249.8 to 13.06 ms)",
+  "labeller": "claude-opus-5-5 (agent)",
+  "labelled_on": "2026-10-27"
+ },
+ {
+  "id": "p-198-s56",
+  "a": "One daemon rescore of a 5,000-concept session takes 8.0 ms.",
+  "b": "One daemon rescore of a 5,000-concept session takes 62.4 ms.",
+  "label": "related_distinct",
+  "family": "identifier",
+  "relation": "supersedes",
+  "concept_types": [
+   "Observation",
+   "Observation"
+  ],
+  "split": "held_out",
+  "source": "evidence/issue-171-perf/README.md (rescore table: 5,000 concepts 62.4 to 8.0 ms)",
+  "labeller": "claude-opus-5-5 (agent)",
+  "labelled_on": "2026-10-27"
+ },
+ {
+  "id": "p-198-s57",
+  "a": "Ranking 9,000 vector candidates at dim 1024 for a top 10 takes 1.85 ms per scan.",
+  "b": "Ranking 9,000 vector candidates at dim 1024 for a top 10 takes 8.93 ms per scan.",
+  "label": "related_distinct",
+  "family": "identifier",
+  "relation": "supersedes",
+  "concept_types": [
+   "Observation",
+   "Observation"
+  ],
+  "split": "dev",
+  "source": "evidence/issue-171-perf/README.md (micro-measurements: scalar cosine and full sort 8.93 ms, lane kernel and partial top-k 1.85 ms)",
+  "labeller": "claude-opus-5-5 (agent)",
+  "labelled_on": "2026-10-27"
+ },
+ {
+  "id": "p-198-s58",
+  "a": "A clean lambo provision of a 9,508-concept store takes 7.6 ms p90.",
+  "b": "A clean lambo provision of a 9,508-concept store takes 146.3 ms p90.",
+  "label": "related_distinct",
+  "family": "identifier",
+  "relation": "supersedes",
+  "concept_types": [
+   "Observation",
+   "Observation"
+  ],
+  "split": "dev",
+  "source": "evidence/issue-171-perf/README.md (PR #186 table: provision_ms p90 146.33 to 7.58)",
+  "labeller": "claude-opus-5-5 (agent)",
+  "labelled_on": "2026-10-27"
+ },
+ {
+  "id": "p-198-s59",
+  "a": "A back-to-back lambo_derive on a 9,508-concept SQLite store is acknowledged in 14.2 ms p90.",
+  "b": "A back-to-back lambo_derive on a 9,508-concept SQLite store is acknowledged in 27.8 ms p90.",
+  "label": "related_distinct",
+  "family": "identifier",
+  "relation": "supersedes",
+  "concept_types": [
+   "Observation",
+   "Observation"
+  ],
+  "split": "held_out",
+  "source": "evidence/issue-171-perf/README.md (PR #185 table: derive_ack_back_to_back p90 27.84 to 14.21 ms)",
+  "labeller": "claude-opus-5-5 (agent)",
+  "labelled_on": "2026-10-27"
+ },
+ {
+  "id": "p-198-s60",
+  "a": "On the Metal dogfood rig (4,949 concepts), lambo_recall with top_k 8 runs at 5.7 ms p50.",
+  "b": "On the Metal dogfood rig (4,949 concepts), lambo_recall with top_k 8 runs at 310.0 ms p50.",
+  "label": "related_distinct",
+  "family": "identifier",
+  "relation": "supersedes",
+  "concept_types": [
+   "Observation",
+   "Observation"
+  ],
+  "split": "dev",
+  "source": "evidence/issue-108-perf/README.md (Metal rig: 0.3.0 pin 310.0 ms, 0.4.0 pin 5.7 ms)",
+  "labeller": "claude-opus-5-5 (agent)",
+  "labelled_on": "2026-10-27"
+ },
+ {
+  "id": "p-198-s61",
+  "a": "On the Metal dogfood rig (4,949 concepts), lambo_recall with top_k 8 runs at 12.2 ms p90.",
+  "b": "On the Metal dogfood rig (4,949 concepts), lambo_recall with top_k 8 runs at 332.7 ms p90.",
+  "label": "related_distinct",
+  "family": "identifier",
+  "relation": "supersedes",
+  "concept_types": [
+   "Observation",
+   "Observation"
+  ],
+  "split": "held_out",
+  "source": "evidence/issue-108-perf/README.md (Metal rig p90: 332.7 to 12.2 ms)",
+  "labeller": "claude-opus-5-5 (agent)",
+  "labelled_on": "2026-10-27"
+ },
+ {
+  "id": "p-198-s62",
+  "a": "On the Metal dogfood rig (4,949 concepts), a lambo_derive goes from ack to applied in 35.9 ms p50.",
+  "b": "On the Metal dogfood rig (4,949 concepts), a lambo_derive goes from ack to applied in 317.8 ms p50.",
+  "label": "related_distinct",
+  "family": "identifier",
+  "relation": "supersedes",
+  "concept_types": [
+   "Observation",
+   "Observation"
+  ],
+  "split": "dev",
+  "source": "evidence/issue-108-perf/README.md (Metal rig: 317.8 to 35.9 ms)",
+  "labeller": "claude-opus-5-5 (agent)",
+  "labelled_on": "2026-10-27"
+ },
+ {
+  "id": "p-198-s63",
+  "a": "On the CUDA dogfood rig (8,496 concepts), lambo_recall with top_k 8 runs at 15.4 ms p50.",
+  "b": "On the CUDA dogfood rig (8,496 concepts), lambo_recall with top_k 8 runs at 804.8 ms p50.",
+  "label": "related_distinct",
+  "family": "identifier",
+  "relation": "supersedes",
+  "concept_types": [
+   "Observation",
+   "Observation"
+  ],
+  "split": "dev",
+  "source": "evidence/issue-108-perf/README.md (CUDA rig, #108: bef53e6 804.8 ms, 0.4.0 15.4 ms)",
+  "labeller": "claude-opus-5-5 (agent)",
+  "labelled_on": "2026-10-27"
+ },
+ {
+  "id": "p-198-s64",
+  "a": "On the CUDA dogfood rig (8,496 concepts), a lambo_derive goes from ack to applied in 165.3 ms p50.",
+  "b": "On the CUDA dogfood rig (8,496 concepts), a lambo_derive goes from ack to applied in 2,933.5 ms p50.",
+  "label": "related_distinct",
+  "family": "identifier",
+  "relation": "supersedes",
+  "concept_types": [
+   "Observation",
+   "Observation"
+  ],
+  "split": "held_out",
+  "source": "evidence/issue-108-perf/README.md (CUDA rig, #108: 2,933.5 to 165.3 ms)",
   "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
@@ -3786,7 +4154,7 @@
    "Observation",
    "Observation"
   ],
-  "split": "dev",
+  "split": "held_out",
   "source": "dev-diary/adversarial-review/adve-review-mooshik-J3-round1.md, adve-review-mooshik-J3-round2.md",
   "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
@@ -3802,7 +4170,7 @@
    "Observation",
    "Observation"
   ],
-  "split": "held_out",
+  "split": "dev",
   "source": "dev-diary/adversarial-review/adve-review-mooshik-J3-round2.md, adve-review-mooshik-J3-redesign-round2.md",
   "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
@@ -3834,7 +4202,7 @@
    "Observation",
    "Observation"
   ],
-  "split": "dev",
+  "split": "held_out",
   "source": "dev-diary/adversarial-review/adve-review-mooshik-J1-round2.md, adve-review-mooshik-J1-round3.md",
   "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
@@ -3850,7 +4218,7 @@
    "Observation",
    "Observation"
   ],
-  "split": "dev",
+  "split": "held_out",
   "source": "dev-diary/adversarial-review/adve-review-mooshik-J0-round1.md, adve-review-mooshik-J0-round2.md",
   "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
@@ -3898,7 +4266,7 @@
    "Observation",
    "Observation"
   ],
-  "split": "dev",
+  "split": "held_out",
   "source": "dev-diary/adversarial-review/adve-review-mooshik-J1-round3.md, adve-review-mooshik-J2-round3.md",
   "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
@@ -3946,7 +4314,7 @@
    "Observation",
    "Observation"
   ],
-  "split": "dev",
+  "split": "held_out",
   "source": "dev-diary/adversarial-review/ (one file per round; #178's real pair i3-05)",
   "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
@@ -3978,7 +4346,7 @@
    "Observation",
    "Observation"
   ],
-  "split": "held_out",
+  "split": "dev",
   "source": "CHANGELOG.md (0.7.0, #171)",
   "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
@@ -3994,7 +4362,7 @@
    "Observation",
    "Observation"
   ],
-  "split": "dev",
+  "split": "held_out",
   "source": "CHANGELOG.md (0.7.0, #171)",
   "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
@@ -4026,7 +4394,7 @@
    "Observation",
    "Observation"
   ],
-  "split": "dev",
+  "split": "held_out",
   "source": "CHANGELOG.md (0.5.0, #102)",
   "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
@@ -4106,7 +4474,7 @@
    "Observation",
    "Observation"
   ],
-  "split": "held_out",
+  "split": "dev",
   "source": "CHANGELOG.md (Unreleased, #173)",
   "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
@@ -4122,7 +4490,7 @@
    "Logic",
    "Logic"
   ],
-  "split": "dev",
+  "split": "held_out",
   "source": "CHANGELOG.md (Unreleased, #87)",
   "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
@@ -4170,7 +4538,7 @@
    "Observation",
    "Observation"
   ],
-  "split": "held_out",
+  "split": "dev",
   "source": "CHANGELOG.md (Unreleased, #87); evidence/issue-87-calibration/",
   "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
@@ -4202,7 +4570,7 @@
    "Constraint",
    "Constraint"
   ],
-  "split": "dev",
+  "split": "held_out",
   "source": "src/store/batch.rs",
   "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
@@ -4234,7 +4602,7 @@
    "Constraint",
    "Constraint"
   ],
-  "split": "dev",
+  "split": "held_out",
   "source": "CHANGELOG.md (0.4.0, #11: wait caps)",
   "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
@@ -4250,7 +4618,7 @@
    "Constraint",
    "Constraint"
   ],
-  "split": "held_out",
+  "split": "dev",
   "source": "src/graph/hybrid.rs",
   "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
@@ -4266,7 +4634,7 @@
    "Logic",
    "Logic"
   ],
-  "split": "held_out",
+  "split": "dev",
   "source": "dev-diary/lambo-for-mooshik/DOGFOOD.md (open question 1, both rigs as of 2026-08-24)",
   "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
@@ -4282,7 +4650,7 @@
    "Observation",
    "Observation"
   ],
-  "split": "dev",
+  "split": "held_out",
   "source": "CHANGELOG.md (release headings)",
   "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
@@ -4314,7 +4682,7 @@
    "Observation",
    "Observation"
   ],
-  "split": "dev",
+  "split": "held_out",
   "source": "CHANGELOG.md (release headings)",
   "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
@@ -4330,7 +4698,7 @@
    "Observation",
    "Observation"
   ],
-  "split": "held_out",
+  "split": "dev",
   "source": "git log --merges (c3ba6722, 1ac09bf8)",
   "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
@@ -4362,7 +4730,7 @@
    "Observation",
    "Observation"
   ],
-  "split": "dev",
+  "split": "held_out",
   "source": "git log --merges (b8177774, 437d3d58)",
   "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
@@ -4394,7 +4762,7 @@
    "Logic",
    "Logic"
   ],
-  "split": "dev",
+  "split": "held_out",
   "source": "nrynss/lambo issues #181, #198 (milestone 0.8.0)",
   "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
@@ -4442,7 +4810,7 @@
    "Logic",
    "Logic"
   ],
-  "split": "dev",
+  "split": "held_out",
   "source": "nrynss/lambo issues #116 (0.5.0), #180 (0.8.0)",
   "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
@@ -4458,7 +4826,7 @@
    "Observation",
    "Observation"
   ],
-  "split": "held_out",
+  "split": "dev",
   "source": "CHANGELOG.md (0.7.0 highlights)",
   "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
@@ -4474,7 +4842,7 @@
    "Observation",
    "Observation"
   ],
-  "split": "dev",
+  "split": "held_out",
   "source": "CHANGELOG.md (0.7.0 performance)",
   "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
@@ -4506,7 +4874,7 @@
    "Observation",
    "Observation"
   ],
-  "split": "dev",
+  "split": "held_out",
   "source": "dev-diary/lambo-for-mooshik/DOGFOOD-SETUP.md (MCP url on 7700); DOGFOOD.md (bge_m3 at 127.0.0.1:8080)",
   "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
@@ -4538,7 +4906,7 @@
    "Observation",
    "Observation"
   ],
-  "split": "dev",
+  "split": "held_out",
   "source": "dev-diary/PHASE-5-recall.md, dev-diary/PHASE-6-canonization.md",
   "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
@@ -4570,7 +4938,7 @@
    "Logic",
    "Logic"
   ],
-  "split": "dev",
+  "split": "held_out",
   "source": "nrynss/lambo issues #181, #209 (milestone 0.8.0)",
   "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
@@ -4602,8 +4970,312 @@
    "Constraint",
    "Constraint"
   ],
-  "split": "dev",
+  "split": "held_out",
   "source": "src/surface/limits.rs; src/graph/hybrid.rs",
+  "labeller": "claude-opus-5-5 (agent)",
+  "labelled_on": "2026-10-27"
+ },
+ {
+  "id": "p-198-n54",
+  "a": "B0 round-1 adversarial review verdict: REQUEST_CHANGES, 0 P1, 1 P2, 5 P3.",
+  "b": "B1 round-1 adversarial review verdict: REQUEST_CHANGES, 0 P1, 1 P2, 4 P3.",
+  "label": "related_distinct",
+  "family": "identifier",
+  "relation": "distinct_entity",
+  "concept_types": [
+   "Observation",
+   "Observation"
+  ],
+  "split": "dev",
+  "source": "dev-diary/adversarial-review/adve-review-mooshik-B-B0-round1.md, adve-review-mooshik-B-B1-round1.md",
+  "labeller": "claude-opus-5-5 (agent)",
+  "labelled_on": "2026-10-27"
+ },
+ {
+  "id": "p-198-n55",
+  "a": "B2 round-1 adversarial review verdict: REQUEST_CHANGES, 0 P1, 1 P2, 0 P3.",
+  "b": "B3 round-1 adversarial review verdict: REQUEST_CHANGES, 0 P1, 1 P2, 0 P3.",
+  "label": "related_distinct",
+  "family": "identifier",
+  "relation": "distinct_entity",
+  "concept_types": [
+   "Observation",
+   "Observation"
+  ],
+  "split": "dev",
+  "source": "dev-diary/adversarial-review/adve-review-mooshik-B-B2-round1.md, adve-review-mooshik-B-B3-round1.md",
+  "labeller": "claude-opus-5-5 (agent)",
+  "labelled_on": "2026-10-27"
+ },
+ {
+  "id": "p-198-n56",
+  "a": "B3 round-2 adversarial review verdict: APPROVE, the single closure holds.",
+  "b": "B4 round-2 adversarial review verdict: APPROVE, the single closure holds.",
+  "label": "related_distinct",
+  "family": "identifier",
+  "relation": "distinct_entity",
+  "concept_types": [
+   "Observation",
+   "Observation"
+  ],
+  "split": "held_out",
+  "source": "dev-diary/adversarial-review/adve-review-mooshik-B-B3-round2.md, adve-review-mooshik-B-B4-round2.md",
+  "labeller": "claude-opus-5-5 (agent)",
+  "labelled_on": "2026-10-27"
+ },
+ {
+  "id": "p-198-n57",
+  "a": "B0 round-2 adversarial review verdict: APPROVE, all 6 closures hold.",
+  "b": "B1 round-2 adversarial review verdict: APPROVE, all 5 closures hold.",
+  "label": "related_distinct",
+  "family": "identifier",
+  "relation": "distinct_entity",
+  "concept_types": [
+   "Observation",
+   "Observation"
+  ],
+  "split": "dev",
+  "source": "dev-diary/adversarial-review/adve-review-mooshik-B-B0-round2.md, adve-review-mooshik-B-B1-round2.md",
+  "labeller": "claude-opus-5-5 (agent)",
+  "labelled_on": "2026-10-27"
+ },
+ {
+  "id": "p-198-n58",
+  "a": "B end-to-end round-2 review verdict: REQUEST_CHANGES, 0 P1, 1 P2, 5 P3.",
+  "b": "B end-to-end round-1 review verdict: REQUEST_CHANGES, 2 P1, 2 P2, 7 P3.",
+  "label": "related_distinct",
+  "family": "identifier",
+  "relation": "distinct_entity",
+  "concept_types": [
+   "Observation",
+   "Observation"
+  ],
+  "split": "held_out",
+  "source": "dev-diary/adversarial-review/adve-review-mooshik-B-e2e-round1.md, adve-review-mooshik-B-e2e-round2.md",
+  "labeller": "claude-opus-5-5 (agent)",
+  "labelled_on": "2026-10-27"
+ },
+ {
+  "id": "p-198-n59",
+  "a": "B end-to-end round-3 review verdict: REQUEST_CHANGES, 0 P1, 0 P2, 1 P3.",
+  "b": "B end-to-end round-5 review verdict: REQUEST_CHANGES, 0 P1, 0 P2, 1 P3.",
+  "label": "related_distinct",
+  "family": "identifier",
+  "relation": "distinct_entity",
+  "concept_types": [
+   "Observation",
+   "Observation"
+  ],
+  "split": "dev",
+  "source": "dev-diary/adversarial-review/adve-review-mooshik-B-e2e-round3.md, adve-review-mooshik-B-e2e-round5.md",
+  "labeller": "claude-opus-5-5 (agent)",
+  "labelled_on": "2026-10-27"
+ },
+ {
+  "id": "p-198-n60",
+  "a": "J4 round-1 adversarial review verdict: APPROVE.",
+  "b": "J5 round-1 adversarial review verdict: APPROVE.",
+  "label": "related_distinct",
+  "family": "identifier",
+  "relation": "distinct_entity",
+  "concept_types": [
+   "Observation",
+   "Observation"
+  ],
+  "split": "dev",
+  "source": "dev-diary/adversarial-review/adve-review-mooshik-J4-round1.md, adve-review-mooshik-J5-round1.md",
+  "labeller": "claude-opus-5-5 (agent)",
+  "labelled_on": "2026-10-27"
+ },
+ {
+  "id": "p-198-n61",
+  "a": "L1 round-1 adversarial review verdict: REQUEST_CHANGES, 1 P1, 3 P2, 6 P3.",
+  "b": "J3 round-2 adversarial review verdict: REQUEST_CHANGES, 1 P1, 3 P2, 6 P3.",
+  "label": "related_distinct",
+  "family": "identifier",
+  "relation": "distinct_entity",
+  "concept_types": [
+   "Observation",
+   "Observation"
+  ],
+  "split": "held_out",
+  "source": "dev-diary/adversarial-review/adve-review-mooshik-L1-round1.md, adve-review-mooshik-J3-round2.md",
+  "labeller": "claude-opus-5-5 (agent)",
+  "labelled_on": "2026-10-27"
+ },
+ {
+  "id": "p-198-n62",
+  "a": "A3 round-1 adversarial review verdict: REQUEST_CHANGES, 1 P1, 0 P2, 1 P3.",
+  "b": "B2 round-1 adversarial review verdict: REQUEST_CHANGES, 0 P1, 1 P2, 0 P3.",
+  "label": "related_distinct",
+  "family": "identifier",
+  "relation": "distinct_entity",
+  "concept_types": [
+   "Observation",
+   "Observation"
+  ],
+  "split": "dev",
+  "source": "dev-diary/adversarial-review/adve-review-mooshik-A-A3-round1.md, adve-review-mooshik-B-B2-round1.md",
+  "labeller": "claude-opus-5-5 (agent)",
+  "labelled_on": "2026-10-27"
+ },
+ {
+  "id": "p-198-n63",
+  "a": "A2 round-3 adversarial review verdict: APPROVE, zero findings.",
+  "b": "A4 round-1 adversarial review verdict: APPROVE, zero findings.",
+  "label": "related_distinct",
+  "family": "identifier",
+  "relation": "distinct_entity",
+  "concept_types": [
+   "Observation",
+   "Observation"
+  ],
+  "split": "held_out",
+  "source": "dev-diary/adversarial-review/adve-review-mooshik-A-A2-round3.md, adve-review-mooshik-A-A4-round1.md",
+  "labeller": "claude-opus-5-5 (agent)",
+  "labelled_on": "2026-10-27"
+ },
+ {
+  "id": "p-198-n64",
+  "a": "PR #183 merged to main as a182136a on 2026-10-19.",
+  "b": "PR #185 merged to main as a94942b2 on 2026-10-19.",
+  "label": "related_distinct",
+  "family": "identifier",
+  "relation": "distinct_entity",
+  "concept_types": [
+   "Observation",
+   "Observation"
+  ],
+  "split": "dev",
+  "source": "git log --merges (a182136a, a94942b2)",
+  "labeller": "claude-opus-5-5 (agent)",
+  "labelled_on": "2026-10-27"
+ },
+ {
+  "id": "p-198-n65",
+  "a": "PR #169 merged to main as 31b212f3 on 2026-10-14.",
+  "b": "PR #170 merged to main as 3d126d4c on 2026-10-14.",
+  "label": "related_distinct",
+  "family": "identifier",
+  "relation": "distinct_entity",
+  "concept_types": [
+   "Observation",
+   "Observation"
+  ],
+  "split": "dev",
+  "source": "git log --merges (31b212f3, 3d126d4c)",
+  "labeller": "claude-opus-5-5 (agent)",
+  "labelled_on": "2026-10-27"
+ },
+ {
+  "id": "p-198-n66",
+  "a": "PR #166 merged to main as d12b09f4 on 2026-10-13.",
+  "b": "PR #167 merged to main as 3083df5a on 2026-10-13.",
+  "label": "related_distinct",
+  "family": "identifier",
+  "relation": "distinct_entity",
+  "concept_types": [
+   "Observation",
+   "Observation"
+  ],
+  "split": "held_out",
+  "source": "git log --merges (d12b09f4, 3083df5a)",
+  "labeller": "claude-opus-5-5 (agent)",
+  "labelled_on": "2026-10-27"
+ },
+ {
+  "id": "p-198-n67",
+  "a": "PR #186 merged to main as a6ad3323 on 2026-10-19.",
+  "b": "PR #184 merged to main as f19940bb on 2026-10-19.",
+  "label": "related_distinct",
+  "family": "identifier",
+  "relation": "distinct_entity",
+  "concept_types": [
+   "Observation",
+   "Observation"
+  ],
+  "split": "dev",
+  "source": "git log --merges (a6ad3323, f19940bb)",
+  "labeller": "claude-opus-5-5 (agent)",
+  "labelled_on": "2026-10-27"
+ },
+ {
+  "id": "p-198-n68",
+  "a": "On 0.4.0, lambo_recall with top_k 8 on the Metal dogfood rig runs at 5.7 ms p50.",
+  "b": "On 0.3.0, lambo_recall with top_k 8 on the Metal dogfood rig runs at 310.0 ms p50.",
+  "label": "related_distinct",
+  "family": "identifier",
+  "relation": "distinct_entity",
+  "concept_types": [
+   "Observation",
+   "Observation"
+  ],
+  "split": "held_out",
+  "source": "evidence/issue-108-perf/README.md (Metal rig, 0.3.0 against 0.4.0)",
+  "labeller": "claude-opus-5-5 (agent)",
+  "labelled_on": "2026-10-27"
+ },
+ {
+  "id": "p-198-n69",
+  "a": "On 0.4.0, a lambo_derive on the CUDA dogfood rig goes from ack to applied in 165.3 ms p50.",
+  "b": "On bef53e6, a lambo_derive on the CUDA dogfood rig goes from ack to applied in 2,933.5 ms p50.",
+  "label": "related_distinct",
+  "family": "identifier",
+  "relation": "distinct_entity",
+  "concept_types": [
+   "Observation",
+   "Observation"
+  ],
+  "split": "dev",
+  "source": "evidence/issue-108-perf/README.md (CUDA rig, #108: bef53e6 against 0.4.0)",
+  "labeller": "claude-opus-5-5 (agent)",
+  "labelled_on": "2026-10-27"
+ },
+ {
+  "id": "p-198-n70",
+  "a": "One daemon rescore of a 5,000-concept session takes 8.0 ms.",
+  "b": "One daemon rescore of a 9,100-concept session takes 31.3 ms.",
+  "label": "related_distinct",
+  "family": "identifier",
+  "relation": "distinct_entity",
+  "concept_types": [
+   "Observation",
+   "Observation"
+  ],
+  "split": "dev",
+  "source": "evidence/issue-171-perf/README.md (rescore table, single walk)",
+  "labeller": "claude-opus-5-5 (agent)",
+  "labelled_on": "2026-10-27"
+ },
+ {
+  "id": "p-198-n71",
+  "a": "Issue #8 shipped in lambo 0.4.0.",
+  "b": "Issue #14 shipped in lambo 0.4.0.",
+  "label": "related_distinct",
+  "family": "identifier",
+  "relation": "distinct_entity",
+  "concept_types": [
+   "Observation",
+   "Observation"
+  ],
+  "split": "held_out",
+  "source": "CHANGELOG.md (0.4.0: #8, #14)",
+  "labeller": "claude-opus-5-5 (agent)",
+  "labelled_on": "2026-10-27"
+ },
+ {
+  "id": "p-198-n72",
+  "a": "Issue #157 shipped in lambo 0.6.0.",
+  "b": "Issue #36 shipped in lambo 0.6.0.",
+  "label": "related_distinct",
+  "family": "identifier",
+  "relation": "distinct_entity",
+  "concept_types": [
+   "Observation",
+   "Observation"
+  ],
+  "split": "dev",
+  "source": "CHANGELOG.md (0.6.0: #157, #36)",
   "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
  },
@@ -4632,7 +5304,7 @@
    "Observation",
    "Observation"
   ],
-  "split": "dev",
+  "split": "held_out",
   "source": "CHANGELOG.md (0.7.0); git log --merges (21942f6f)",
   "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
@@ -4647,7 +5319,7 @@
    "Observation",
    "Observation"
   ],
-  "split": "held_out",
+  "split": "dev",
   "source": "CHANGELOG.md (0.3.0, GC)",
   "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"
@@ -4692,7 +5364,7 @@
    "Observation",
    "Observation"
   ],
-  "split": "held_out",
+  "split": "dev",
   "source": "CHANGELOG.md (0.5.0: same write outcomes as 0.4.0)",
   "labeller": "claude-opus-5-5 (agent)",
   "labelled_on": "2026-10-27"

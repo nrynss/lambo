@@ -19,7 +19,7 @@ every reported number until the owner settles it; two #198 pairs do now
 |---|---|
 | `corpus.json` | The retrieval universe: 100 concepts `{id, topic, type, text, origin, sources}`. `origin` is `dogfood` (23 concepts, verbatim text of a dogfood-store concept) or `authored` (77 atomic facts restated from the repo's own records, each citing its source file). A query is "no-answer" relative to this corpus. |
 | `queries.json` | 368 queries `{id, query, kind, family, topic, split, relevant[{concept, grade}], facets[], source, labeller, labelled_on, review?}`. 262 `answerable` (graded relevance 2 = answers it, 1 = partial or supporting; `facets` = what a correct answer must say, for #181) and 106 `no_answer`. |
-| `pairs.json` | 505 pairs `{id, a, b, label, family, relation?, concept_types?, split, source, labeller, labelled_on, concepts?, review?}`: 267 `related_distinct`, 118 `paraphrase`, 120 `unrelated`. `concept_types` is `[type of a, type of b]`, the concept type each text would be derived as (#198); every `supersedes` pair has it. |
+| `pairs.json` | 547 pairs `{id, a, b, label, family, relation?, concept_types?, split, source, labeller, labelled_on, concepts?, review?}`: 309 `related_distinct`, 118 `paraphrase`, 120 `unrelated`. `concept_types` is `[type of a, type of b]`, the concept type each text would be derived as (#198); every `supersedes` pair has it. |
 | `related_pairs.json` | Generated export in the `[embedder] related_pairs` format (`[{"a", "b"}]`): the 173 adjudicated `related_distinct` pairs outside #198 (no `p-198-*` pair is exported). Point `related_pairs` at it to derive the merge threshold (#87). |
 | `authoring/` | The sources: `t_*.py` topic modules (one `C()` per concept with its queries, rewordings, contrasts and facets), `dogfood_texts.json` (the public dogfood texts, from `extract_dogfood_texts.py`) and `build.py`, which writes the four files above deterministically. |
 
@@ -41,7 +41,7 @@ answers #198: `supersedes`, `distinct_entity` or `contradicts`):
 
 | Label | Family | Pairs |
 |---|---|---:|
-| related_distinct | identifier | 160 |
+| related_distinct | identifier | 202 |
 | | polarity | 36 |
 | | topic-neighbour | 27 |
 | | quantity | 15 |
@@ -54,10 +54,12 @@ answers #198: `supersedes`, `distinct_entity` or `contradicts`):
 | | near-verbatim | 3 |
 | unrelated | cross-area | 120 |
 
-Splits (a hash of the id, about 70/30): pairs 354 dev / 151 held-out;
-queries 239 dev / 129 held-out. Related-distinct relations: 82 contradicts,
-105 distinct_entity, 53 supersedes (51 adjudicated: 39 dev / 12
-held-out), 27 none (families that need none).
+Splits (a hash of the id, about 70/30, except the #198 pairs, whose split
+is set in their module and stratified by sub-kind, about 60/40; see
+"Added for #198"): pairs 362 dev / 185 held-out; queries 239 dev / 129
+held-out. Related-distinct relations: 82 contradicts, 124 distinct_entity,
+76 supersedes (74 adjudicated: 47 dev / 27 held-out), 27 none (families
+that need none).
 
 Queries by family:
 
@@ -101,15 +103,29 @@ Per consumer:
   (polarity, repository, correction = old config vs correction, exception =
   rule plus exception, identifier); every answerable query carries `facets`.
 - **#198**: identifier and correction pairs carry `relation`. For the
-  suspected-supersession trigger's precision bar (0.90 per embedder): 51
-  adjudicated `supersedes` pairs (the positives), 53 adjudicated
-  `distinct_entity` pairs in the trigger's own regime (both texts the same
-  Logic, Constraint or Observation type, refused by the identifier guard,
-  both true), 8 `same-event` paraphrases the guard refuses (two records of
-  one event, never a replacement), and the 41 #178 file and commit-name
-  pairs, typed Resource, which the trigger's type condition excludes.
-  `contradicts` pairs name no newer text; whether a trigger hit on one
-  counts against precision is #198's call.
+  suspected-supersession trigger's precision bar (0.90 per embedder), in
+  the trigger's regime (both texts the same Logic, Constraint or
+  Observation type, refused by the identifier guard; `tests/eval_set.rs`
+  checks both with the guard itself) and adjudicated:
+
+  | Kind | dev | held_out | All |
+  |---|---:|---:|---:|
+  | `supersedes` (positives) | 46 | 27 | 73 |
+  | `distinct_entity` (hard negatives) | 43 | 29 | 72 |
+  | `same-event` paraphrases (hard negatives) | 5 | 3 | 8 |
+
+  How many positives an embedder's merge threshold lets reach the trigger
+  (a pair under the threshold is never a vector hit): under BGE-M3 at its
+  0.85, measured (candle on CPU, `BAAI/bge-m3@5617a9f6`, self-framed), 62
+  of the 73 (37 dev / 25 held-out); the 11 below it are 10 earlier
+  `correction`-family pairs, reworded rather than templated, and
+  `p-198-s16`. Under EmbeddingGemma 2 at its calibrated 0.93: not measured.
+  The tests require at least 60 in-regime positives and 60 in-regime
+  `distinct_entity` negatives, with at least 25 of each in each split. The
+  41 #178 file and commit-name pairs are typed Resource, which the
+  trigger's type condition excludes; so is `p-emb-06-rbd1`, a re-pin
+  action. `contradicts` pairs name no newer text; whether a trigger hit on
+  one counts against precision is #198's call.
 
 ## Provenance
 
@@ -147,24 +163,42 @@ Per consumer:
   toward 1.0. (Two synthetic distinct pairs, `syn-neg-017` and `syn-neg-019`,
   are paraphrase duplicates by the owner's ruling below.) The 5 identical dogfood duplicates are left out too (cosine 1
   by construction).
-- **Added for #198 (2026-10-27).** `authoring/t_supersede198.py` adds 102
-  pairs, ids `p-198-sNN` (41 `supersedes`), `p-198-nNN` (53
-  `distinct_entity`) and `p-198-eNN` (8 `same-event`), each id written at
-  its call so it never depends on the order of the calls, labelled by
-  `claude-opus-5-5 (agent)` (the set's other agent items carry build.py's
-  default labeller, `Grok Bot (agent)`), every one authored
+- **Added for #198 (2026-10-27).** `authoring/t_supersede198.py` adds 144
+  pairs, ids `p-198-sNN` (64 `supersedes`), `p-198-nNN` (72
+  `distinct_entity`) and `p-198-eNN` (8 `same-event`), each id and split
+  written at its call so neither depends on the order of the calls,
+  labelled by `claude-opus-5-5 (agent)` (the set's other agent items carry
+  build.py's default labeller, `Grok Bot (agent)`), every one authored
   from this repository's records (`CHANGELOG.md`, `DOGFOOD.md`, the
   adversarial-review files, evidence READMEs, `src/` constants, the git
   history of this README and of merges, the issue milestones) and citing
   its source. `build.py` checks each with a mirror of `same_identifiers`
-  (`src/graph/canonical.rs`): all differ in a digit run or an
-  identifier-shaped token, so the #195 guard refuses all of them. The 12
-  earlier `supersedes` pairs gained `concept_types` (their anchor's corpus
-  type), the #178 file and commit-name pairs `Resource`; no earlier id,
-  text, label or split changed. None is from the dogfood store: its own
-  texts are not public, and real store pairs reach the set only through
-  the owner's sheet (owner steps below; `fold_owner_labels.py` carries a
-  sheet row's `concept_types`, and refuses a `supersedes` row without them).
+  (`src/graph/canonical.rs`), and `tests/eval_set.rs` with the function
+  itself: all differ in a digit run or an identifier-shaped token, so the
+  #195 guard refuses all of them. The 12 earlier `supersedes` pairs gained
+  `concept_types` (their anchor's corpus type), the #178 file and
+  commit-name pairs `Resource`; no earlier id, text, label or split
+  changed. None is from the dogfood store: its own texts are not public,
+  and real store pairs reach the set only through the owner's sheet (owner
+  steps below; `fold_owner_labels.py` carries a sheet row's
+  `concept_types`, and refuses a `supersedes` row without them).
+  - **Split.** Not the id hash: it is stratified by sub-kind, so held-out,
+    where the trigger's precision is reported, gets its share of the
+    hardest negatives. Within each of `supersedes`, `distinct_entity` and
+    `same-event`, cut again by whether the two texts are identical once
+    identifiers and digits are masked, every second and fourth of each
+    five (by id) is held-out, about 40%; `build.py` fails if an adjudicated
+    stratum of five or more holds under 30% or over 50% held-out.
+  - **Template.** Negatives are written to share the positives' template:
+    where the facts allow, the two texts differ only in identifiers and
+    digits (counts in digits, one tense, an embedder by its model id,
+    `BAAI/bge-m3` or `google/embeddinggemma-2`). Masked-token Jaccard is
+    1.0 for 58 of the 72 `distinct_entity` pairs, 57 of the 64 #198
+    `supersedes` pairs and 1 of the 8 `same-event` pairs. The other 14
+    negatives keep the words their facts need (a verdict, a constant's
+    name, dev against held_out, with against without fusion, Mac against
+    Linux, the old embedder's tense, a redesign round) and are not
+    identifier-only.
 - **Unrelated pairs** are drawn with a fixed seed across four topic areas,
   then read: nine draws judged related after all are rejected in `build.py`.
 - **Not yet from the store itself.** The store and its ledger live on the
@@ -295,7 +329,7 @@ Awaiting the owner (#198):
 - 106 no-answer queries are all hand-written or efficacy-derived; none comes
   from a real ledger yet.
 - The 41 dogfood file-name pairs are very short texts; with the #198 pairs
-  (92 of the 160) they make the identifier family mostly template pairs.
+  (136 of the 202) they make the identifier family mostly template pairs.
 - Every #198 pair is authored, and the near-identical template shape the
   trigger looks for is how they were written. Real supersessions in the
   dogfood store are mostly reworded restatements, and its guard-refused
