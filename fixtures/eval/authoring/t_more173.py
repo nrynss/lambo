@@ -36,7 +36,7 @@ Q('srv-07', "How long does a forwarding process keep a caller waiting before tel
 Q('ack-04', "When a client is told its note was accepted, has the note actually been stored and indexed yet?", V, {'emb-05': 1})
 Q('pro-04', "How was the second SQL database supported without maintaining two copies of the code?", V)
 Q('pro-05', "Do the short names for the two SQL databases ever point at the other one?", V)
-Q('prf-01', "How much did text search speed up in the summer release, and how many clients could it serve?", V)
+Q('prf-01', "How much faster did plain word search get, and how many requests a second could many clients make afterwards?", V)
 Q('prf-04', "Did storing vectors more compactly in the single-file database lose precision?", V)
 Q('rel-06', "What happens to an oversized request sent over standard input?", V)
 Q('rel-07', "Can someone delete a whole project's memory, and can its name be taken again afterwards?", V)

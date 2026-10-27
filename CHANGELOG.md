@@ -143,7 +143,7 @@
   0.899 and 0.881) and contrast queries, and did not consistently change
   how a no-answer query's top score compares. With 58 more labelled queries
   (36 vocabulary-mismatch, where keyword-led `max` is weakest) the `dev`
-  gain rises to +0.066 and +0.058 and `held_out` to +0.032 and +0.023,
+  gain rises to +0.064 and +0.059 and `held_out` to +0.032 and +0.023,
   with the same held-out losses. The literature's `k = 60` scored 0.698
   on `dev`: so flat that the daemon's half of the score decides the order.
   The ledger records each phase-1 hit's leg ranks and both fused values

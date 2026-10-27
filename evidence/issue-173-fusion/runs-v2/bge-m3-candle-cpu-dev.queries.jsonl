@@ -82,7 +82,7 @@
 {"family":"fact-lookup","id":"q-pro-07-1","kind":"answerable","split":"dev","top":["pro-07","pro-06","srv-04"],"top1_score":6.9988,"variant":"max"}
 {"family":"exact-identifier","id":"q-pro-08-2","kind":"answerable","split":"dev","top":["pro-08","emb-06","mg-01"],"top1_score":4.5924,"variant":"max"}
 {"family":"fact-lookup","id":"q-prf-01-1","kind":"answerable","split":"dev","top":["emb-07","prf-01","emb-02"],"top1_score":4.3175,"variant":"max"}
-{"family":"vocabulary-mismatch","id":"q-prf-01-3","kind":"answerable","split":"dev","top":["eff-04","emb-07","fnd-10"],"top1_score":2.7491,"variant":"max"}
+{"family":"vocabulary-mismatch","id":"q-prf-01-3","kind":"answerable","split":"dev","top":["srv-07","ack-02","pro-04"],"top1_score":3.2478,"variant":"max"}
 {"family":"fact-lookup","id":"q-prf-02-1","kind":"answerable","split":"dev","top":["prf-02","gcp-02","ack-04"],"top1_score":5.0682,"variant":"max"}
 {"family":"contrast","id":"q-prf-02-2","kind":"answerable","split":"dev","top":["srv-05","con-04","fnd-07"],"top1_score":5.6908,"variant":"max"}
 {"family":"fact-lookup","id":"q-prf-03-1","kind":"answerable","split":"dev","top":["prf-03","mg-03","top-02"],"top1_score":3.3726,"variant":"max"}
@@ -118,7 +118,7 @@
 {"family":"contrast","id":"q-con-06-3","kind":"answerable","split":"dev","top":["con-06","cn-02","cn-01"],"top1_score":5.6201,"variant":"max"}
 {"family":"fact-lookup","id":"q-mg-01-1","kind":"answerable","split":"dev","top":["mg-01","cal-03","fnd-05"],"top1_score":9.7769,"variant":"max"}
 {"family":"vocabulary-mismatch","id":"q-mg-01-4","kind":"answerable","split":"dev","top":["mg-01","ack-01","rel-09"],"top1_score":7.1024,"variant":"max"}
-{"family":"fact-lookup","id":"q-mg-02-1","kind":"answerable","split":"dev","top":["mg-02","cn-02","mg-03"],"top1_score":9.058,"variant":"max"}
+{"family":"fact-lookup","id":"q-mg-02-1","kind":"answerable","split":"dev","top":["mg-02","cn-02","mg-03"],"top1_score":9.0581,"variant":"max"}
 {"family":"contrast","id":"q-mg-02-3","kind":"answerable","split":"dev","top":["mg-02","cn-02","can-05"],"top1_score":10.3609,"variant":"max"}
 {"family":"rationale","id":"q-mg-03-3","kind":"answerable","split":"dev","top":["mg-03","prf-03","top-02"],"top1_score":7.8744,"variant":"max"}
 {"family":"fact-lookup","id":"q-cn-01-1","kind":"answerable","split":"dev","top":["cn-01","con-01","con-04"],"top1_score":6.3693,"variant":"max"}
@@ -208,7 +208,7 @@
 {"family":"near-domain","id":"na-068","kind":"no_answer","split":"dev","top":["con-02","cnd-01","gcp-01"],"top1_score":4.9363,"variant":"max"}
 {"family":"near-domain","id":"na-069","kind":"no_answer","split":"dev","top":["top-02","prf-04","emb-05"],"top1_score":3.8352,"variant":"max"}
 {"family":"near-domain","id":"na-070","kind":"no_answer","split":"dev","top":["gcp-01","rel-08","rel-07"],"top1_score":3.7012,"variant":"max"}
-{"family":"near-domain","id":"na-071","kind":"no_answer","split":"dev","top":["fnd-02","top-05","cnd-01"],"top1_score":2.037,"variant":"max"}
+{"family":"near-domain","id":"na-071","kind":"no_answer","split":"dev","top":["fnd-02","top-05","cnd-01"],"top1_score":2.0371,"variant":"max"}
 {"family":"near-domain","id":"na-072","kind":"no_answer","split":"dev","top":["con-04","srv-05","mg-03"],"top1_score":2.9839,"variant":"max"}
 {"family":"near-domain","id":"na-073","kind":"no_answer","split":"dev","top":["g3-01","can-01","emb-07"],"top1_score":5.6456,"variant":"max"}
 {"family":"near-domain","id":"na-074","kind":"no_answer","split":"dev","top":["srv-05","prf-02","emb-04"],"top1_score":2.8857,"variant":"max"}
@@ -221,7 +221,7 @@
 {"family":"near-domain","id":"na-082","kind":"no_answer","split":"dev","top":["pro-04","rel-08","pro-01"],"top1_score":3.8101,"variant":"max"}
 {"family":"near-domain","id":"na-083","kind":"no_answer","split":"dev","top":["emb-08","pro-02","fnd-04"],"top1_score":4.1494,"variant":"max"}
 {"family":"near-domain","id":"na-084","kind":"no_answer","split":"dev","top":["pro-02","ack-02","emb-01"],"top1_score":3.9941,"variant":"max"}
-{"family":"near-domain","id":"na-085","kind":"no_answer","split":"dev","top":["con-05","gcp-01","srv-05"],"top1_score":6.8357,"variant":"max"}
+{"family":"near-domain","id":"na-085","kind":"no_answer","split":"dev","top":["con-05","gcp-01","srv-05"],"top1_score":6.8358,"variant":"max"}
 {"family":"near-domain","id":"na-086","kind":"no_answer","split":"dev","top":["cnd-04","con-01","cnd-02"],"top1_score":2.8263,"variant":"max"}
 {"family":"near-domain","id":"na-087","kind":"no_answer","split":"dev","top":["pro-08","eff-06","emb-04"],"top1_score":3.2732,"variant":"max"}
 {"family":"near-domain","id":"na-088","kind":"no_answer","split":"dev","top":["eff-03","cn-01","emb-03"],"top1_score":3.6992,"variant":"max"}
@@ -321,7 +321,7 @@
 {"family":"fact-lookup","id":"q-pro-07-1","kind":"answerable","split":"dev","top":["pro-07","srv-04","pro-06"],"top1_score":0.6857,"variant":"rrf"}
 {"family":"exact-identifier","id":"q-pro-08-2","kind":"answerable","split":"dev","top":["pro-08","emb-06","pro-03"],"top1_score":0.7607,"variant":"rrf"}
 {"family":"fact-lookup","id":"q-prf-01-1","kind":"answerable","split":"dev","top":["prf-01","eff-07","ses-02"],"top1_score":0.6422,"variant":"rrf"}
-{"family":"vocabulary-mismatch","id":"q-prf-01-3","kind":"answerable","split":"dev","top":["prf-01","srv-07","eff-07"],"top1_score":0.5118,"variant":"rrf"}
+{"family":"vocabulary-mismatch","id":"q-prf-01-3","kind":"answerable","split":"dev","top":["srv-07","prf-01","emb-04"],"top1_score":0.702,"variant":"rrf"}
 {"family":"fact-lookup","id":"q-prf-02-1","kind":"answerable","split":"dev","top":["prf-02","gcp-02","ack-04"],"top1_score":0.6857,"variant":"rrf"}
 {"family":"contrast","id":"q-prf-02-2","kind":"answerable","split":"dev","top":["srv-05","con-04","prf-02"],"top1_score":0.6882,"variant":"rrf"}
 {"family":"fact-lookup","id":"q-prf-03-1","kind":"answerable","split":"dev","top":["prf-03","mg-03","eff-07"],"top1_score":0.6857,"variant":"rrf"}
@@ -360,8 +360,8 @@
 {"family":"fact-lookup","id":"q-mg-02-1","kind":"answerable","split":"dev","top":["mg-02","mg-03","cn-02"],"top1_score":0.8107,"variant":"rrf"}
 {"family":"contrast","id":"q-mg-02-3","kind":"answerable","split":"dev","top":["mg-02","cn-02","can-05"],"top1_score":0.8107,"variant":"rrf"}
 {"family":"rationale","id":"q-mg-03-3","kind":"answerable","split":"dev","top":["mg-03","rel-07","prf-03"],"top1_score":0.8107,"variant":"rrf"}
-{"family":"fact-lookup","id":"q-cn-01-1","kind":"answerable","split":"dev","top":["cn-01","con-06","con-01"],"top1_score":0.8107,"variant":"rrf"}
-{"family":"contrast","id":"q-cn-01-2","kind":"answerable","split":"dev","top":["cn-01","srv-02","g3-03"],"top1_score":0.8107,"variant":"rrf"}
+{"family":"fact-lookup","id":"q-cn-01-1","kind":"answerable","split":"dev","top":["cn-01","con-06","con-01"],"top1_score":0.8108,"variant":"rrf"}
+{"family":"contrast","id":"q-cn-01-2","kind":"answerable","split":"dev","top":["cn-01","srv-02","g3-03"],"top1_score":0.8108,"variant":"rrf"}
 {"family":"rationale","id":"q-fnd-01-2","kind":"answerable","split":"dev","top":["top-05","fnd-01","top-04"],"top1_score":0.6132,"variant":"rrf"}
 {"family":"fact-lookup","id":"q-fnd-02-1","kind":"answerable","split":"dev","top":["top-05","fnd-02","emb-04"],"top1_score":0.5925,"variant":"rrf"}
 {"family":"exact-identifier","id":"q-fnd-02-2","kind":"answerable","split":"dev","top":["fnd-02","emb-01","gcp-02"],"top1_score":0.6858,"variant":"rrf"}
@@ -448,7 +448,7 @@
 {"family":"near-domain","id":"na-069","kind":"no_answer","split":"dev","top":["top-02","rel-07","prf-03"],"top1_score":0.6922,"variant":"rrf"}
 {"family":"near-domain","id":"na-070","kind":"no_answer","split":"dev","top":["gcp-01","rel-08","mg-03"],"top1_score":0.7422,"variant":"rrf"}
 {"family":"near-domain","id":"na-071","kind":"no_answer","split":"dev","top":["srv-01","ack-01","srv-06"],"top1_score":0.5933,"variant":"rrf"}
-{"family":"near-domain","id":"na-072","kind":"no_answer","split":"dev","top":["mg-03","con-04","pro-03"],"top1_score":0.6078,"variant":"rrf"}
+{"family":"near-domain","id":"na-072","kind":"no_answer","split":"dev","top":["mg-03","con-04","pro-03"],"top1_score":0.6079,"variant":"rrf"}
 {"family":"near-domain","id":"na-073","kind":"no_answer","split":"dev","top":["g3-01","ack-02","can-01"],"top1_score":0.5926,"variant":"rrf"}
 {"family":"near-domain","id":"na-074","kind":"no_answer","split":"dev","top":["emb-04","prf-02","srv-05"],"top1_score":0.6657,"variant":"rrf"}
 {"family":"near-domain","id":"na-075","kind":"no_answer","split":"dev","top":["con-03","con-04","emb-05"],"top1_score":0.7673,"variant":"rrf"}
@@ -560,7 +560,7 @@
 {"family":"fact-lookup","id":"q-pro-07-1","kind":"answerable","split":"dev","top":["srv-04","srv-05","emb-05"],"top1_score":0.7469,"variant":"rrf:k=60"}
 {"family":"exact-identifier","id":"q-pro-08-2","kind":"answerable","split":"dev","top":["pro-08","emb-06","mg-01"],"top1_score":0.7607,"variant":"rrf:k=60"}
 {"family":"fact-lookup","id":"q-prf-01-1","kind":"answerable","split":"dev","top":["eff-07","ses-03","fnd-03"],"top1_score":0.8008,"variant":"rrf:k=60"}
-{"family":"vocabulary-mismatch","id":"q-prf-01-3","kind":"answerable","split":"dev","top":["prf-05","prf-04","prf-01"],"top1_score":0.6536,"variant":"rrf:k=60"}
+{"family":"vocabulary-mismatch","id":"q-prf-01-3","kind":"answerable","split":"dev","top":["srv-07","srv-06","prf-01"],"top1_score":0.7973,"variant":"rrf:k=60"}
 {"family":"fact-lookup","id":"q-prf-02-1","kind":"answerable","split":"dev","top":["fnd-03","prf-02","rel-02"],"top1_score":0.7026,"variant":"rrf:k=60"}
 {"family":"contrast","id":"q-prf-02-2","kind":"answerable","split":"dev","top":["srv-05","emb-03","srv-04"],"top1_score":0.7538,"variant":"rrf:k=60"}
 {"family":"fact-lookup","id":"q-prf-03-1","kind":"answerable","split":"dev","top":["eff-07","mg-03","prf-03"],"top1_score":0.8049,"variant":"rrf:k=60"}
@@ -570,7 +570,7 @@
 {"family":"vocabulary-mismatch","id":"q-prf-04-3","kind":"answerable","split":"dev","top":["eff-07","cal-03","prf-04"],"top1_score":0.8024,"variant":"rrf:k=60"}
 {"family":"fact-lookup","id":"q-prf-05-1","kind":"answerable","split":"dev","top":["eff-07","ses-03","fnd-03"],"top1_score":0.7959,"variant":"rrf:k=60"}
 {"family":"fact-lookup","id":"q-prf-06-1","kind":"answerable","split":"dev","top":["can-05","cnd-05","can-04"],"top1_score":0.7286,"variant":"rrf:k=60"}
-{"family":"fact-lookup","id":"q-rel-01-1","kind":"answerable","split":"dev","top":["rel-04","top-04","rel-01"],"top1_score":0.7586,"variant":"rrf:k=60"}
+{"family":"fact-lookup","id":"q-rel-01-1","kind":"answerable","split":"dev","top":["rel-04","top-04","rel-01"],"top1_score":0.7587,"variant":"rrf:k=60"}
 {"family":"fact-lookup","id":"q-rel-02-1","kind":"answerable","split":"dev","top":["ack-04","mg-03","rel-02"],"top1_score":0.7871,"variant":"rrf:k=60"}
 {"family":"fact-lookup","id":"q-rel-03-1","kind":"answerable","split":"dev","top":["rel-03","fnd-07","srv-04"],"top1_score":0.8072,"variant":"rrf:k=60"}
 {"family":"exact-identifier","id":"q-rel-04-1","kind":"answerable","split":"dev","top":["rel-04","pro-07","rel-03"],"top1_score":0.8107,"variant":"rrf:k=60"}
@@ -599,8 +599,8 @@
 {"family":"fact-lookup","id":"q-mg-02-1","kind":"answerable","split":"dev","top":["mg-02","mg-03","cn-02"],"top1_score":0.8107,"variant":"rrf:k=60"}
 {"family":"contrast","id":"q-mg-02-3","kind":"answerable","split":"dev","top":["mg-02","cn-02","mg-03"],"top1_score":0.8107,"variant":"rrf:k=60"}
 {"family":"rationale","id":"q-mg-03-3","kind":"answerable","split":"dev","top":["mg-03","rel-07","srv-02"],"top1_score":0.8107,"variant":"rrf:k=60"}
-{"family":"fact-lookup","id":"q-cn-01-1","kind":"answerable","split":"dev","top":["cn-01","con-06","con-01"],"top1_score":0.8107,"variant":"rrf:k=60"}
-{"family":"contrast","id":"q-cn-01-2","kind":"answerable","split":"dev","top":["cn-01","srv-02","g3-03"],"top1_score":0.8107,"variant":"rrf:k=60"}
+{"family":"fact-lookup","id":"q-cn-01-1","kind":"answerable","split":"dev","top":["cn-01","con-06","con-01"],"top1_score":0.8108,"variant":"rrf:k=60"}
+{"family":"contrast","id":"q-cn-01-2","kind":"answerable","split":"dev","top":["cn-01","srv-02","g3-03"],"top1_score":0.8108,"variant":"rrf:k=60"}
 {"family":"rationale","id":"q-fnd-01-2","kind":"answerable","split":"dev","top":["top-04","emb-04","pro-03"],"top1_score":0.7404,"variant":"rrf:k=60"}
 {"family":"fact-lookup","id":"q-fnd-02-1","kind":"answerable","split":"dev","top":["emb-04","cnd-05","top-05"],"top1_score":0.746,"variant":"rrf:k=60"}
 {"family":"exact-identifier","id":"q-fnd-02-2","kind":"answerable","split":"dev","top":["fnd-02","emb-01","prf-02"],"top1_score":0.6858,"variant":"rrf:k=60"}
@@ -799,7 +799,7 @@
 {"family":"fact-lookup","id":"q-pro-07-1","kind":"answerable","split":"dev","top":["pro-07","srv-04","pro-06"],"top1_score":0.6857,"variant":"rrf:k=2"}
 {"family":"exact-identifier","id":"q-pro-08-2","kind":"answerable","split":"dev","top":["pro-08","emb-06","pro-03"],"top1_score":0.7607,"variant":"rrf:k=2"}
 {"family":"fact-lookup","id":"q-prf-01-1","kind":"answerable","split":"dev","top":["prf-01","eff-07","ses-02"],"top1_score":0.6314,"variant":"rrf:k=2"}
-{"family":"vocabulary-mismatch","id":"q-prf-01-3","kind":"answerable","split":"dev","top":["prf-01","srv-07","eff-07"],"top1_score":0.5026,"variant":"rrf:k=2"}
+{"family":"vocabulary-mismatch","id":"q-prf-01-3","kind":"answerable","split":"dev","top":["srv-07","prf-01","ack-02"],"top1_score":0.6865,"variant":"rrf:k=2"}
 {"family":"fact-lookup","id":"q-prf-02-1","kind":"answerable","split":"dev","top":["prf-02","gcp-02","ack-04"],"top1_score":0.6857,"variant":"rrf:k=2"}
 {"family":"contrast","id":"q-prf-02-2","kind":"answerable","split":"dev","top":["srv-05","con-04","prf-02"],"top1_score":0.6737,"variant":"rrf:k=2"}
 {"family":"fact-lookup","id":"q-prf-03-1","kind":"answerable","split":"dev","top":["prf-03","mg-03","eff-07"],"top1_score":0.6857,"variant":"rrf:k=2"}
@@ -838,8 +838,8 @@
 {"family":"fact-lookup","id":"q-mg-02-1","kind":"answerable","split":"dev","top":["mg-02","mg-03","cn-02"],"top1_score":0.8107,"variant":"rrf:k=2"}
 {"family":"contrast","id":"q-mg-02-3","kind":"answerable","split":"dev","top":["mg-02","cn-02","can-05"],"top1_score":0.8107,"variant":"rrf:k=2"}
 {"family":"rationale","id":"q-mg-03-3","kind":"answerable","split":"dev","top":["mg-03","rel-07","prf-03"],"top1_score":0.8107,"variant":"rrf:k=2"}
-{"family":"fact-lookup","id":"q-cn-01-1","kind":"answerable","split":"dev","top":["cn-01","con-06","con-01"],"top1_score":0.8107,"variant":"rrf:k=2"}
-{"family":"contrast","id":"q-cn-01-2","kind":"answerable","split":"dev","top":["cn-01","srv-02","g3-03"],"top1_score":0.8107,"variant":"rrf:k=2"}
+{"family":"fact-lookup","id":"q-cn-01-1","kind":"answerable","split":"dev","top":["cn-01","con-06","con-01"],"top1_score":0.8108,"variant":"rrf:k=2"}
+{"family":"contrast","id":"q-cn-01-2","kind":"answerable","split":"dev","top":["cn-01","srv-02","g3-03"],"top1_score":0.8108,"variant":"rrf:k=2"}
 {"family":"rationale","id":"q-fnd-01-2","kind":"answerable","split":"dev","top":["top-05","fnd-01","top-04"],"top1_score":0.5987,"variant":"rrf:k=2"}
 {"family":"fact-lookup","id":"q-fnd-02-1","kind":"answerable","split":"dev","top":["top-05","fnd-02","emb-04"],"top1_score":0.577,"variant":"rrf:k=2"}
 {"family":"exact-identifier","id":"q-fnd-02-2","kind":"answerable","split":"dev","top":["fnd-02","emb-01","gcp-02"],"top1_score":0.6858,"variant":"rrf:k=2"}
@@ -926,7 +926,7 @@
 {"family":"near-domain","id":"na-069","kind":"no_answer","split":"dev","top":["top-02","rel-07","prf-03"],"top1_score":0.6813,"variant":"rrf:k=2"}
 {"family":"near-domain","id":"na-070","kind":"no_answer","split":"dev","top":["gcp-01","rel-08","mg-03"],"top1_score":0.7238,"variant":"rrf:k=2"}
 {"family":"near-domain","id":"na-071","kind":"no_answer","split":"dev","top":["srv-01","srv-06","ack-01"],"top1_score":0.5933,"variant":"rrf:k=2"}
-{"family":"near-domain","id":"na-072","kind":"no_answer","split":"dev","top":["con-04","mg-03","pro-03"],"top1_score":0.5933,"variant":"rrf:k=2"}
+{"family":"near-domain","id":"na-072","kind":"no_answer","split":"dev","top":["con-04","mg-03","pro-03"],"top1_score":0.5934,"variant":"rrf:k=2"}
 {"family":"near-domain","id":"na-073","kind":"no_answer","split":"dev","top":["g3-01","ack-02","can-01"],"top1_score":0.5771,"variant":"rrf:k=2"}
 {"family":"near-domain","id":"na-074","kind":"no_answer","split":"dev","top":["emb-04","prf-02","srv-05"],"top1_score":0.6367,"variant":"rrf:k=2"}
 {"family":"near-domain","id":"na-075","kind":"no_answer","split":"dev","top":["con-03","con-04","pro-08"],"top1_score":0.7564,"variant":"rrf:k=2"}
@@ -1032,13 +1032,13 @@
 {"family":"fact-lookup","id":"q-pro-04-1","kind":"answerable","split":"dev","top":["pro-04","cnd-01","pro-05"],"top1_score":0.7607,"variant":"rrf:k=5"}
 {"family":"fact-lookup","id":"q-pro-04-2","kind":"answerable","split":"dev","top":["pro-04","pro-05","ses-01"],"top1_score":0.7607,"variant":"rrf:k=5"}
 {"family":"fact-lookup","id":"q-pro-05-1","kind":"answerable","split":"dev","top":["gcp-02","pro-05","gcp-01"],"top1_score":0.7673,"variant":"rrf:k=5"}
-{"family":"contrast","id":"q-pro-05-2","kind":"answerable","split":"dev","top":["pro-05","pro-04","gcp-02"],"top1_score":0.7296,"variant":"rrf:k=5"}
+{"family":"contrast","id":"q-pro-05-2","kind":"answerable","split":"dev","top":["pro-05","pro-04","gcp-02"],"top1_score":0.7297,"variant":"rrf:k=5"}
 {"family":"vocabulary-mismatch","id":"q-pro-05-3","kind":"answerable","split":"dev","top":["ses-03","gcp-02","mg-01"],"top1_score":0.6067,"variant":"rrf:k=5"}
 {"family":"fact-lookup","id":"q-pro-06-1","kind":"answerable","split":"dev","top":["pro-07","pro-06","emb-05"],"top1_score":0.6547,"variant":"rrf:k=5"}
 {"family":"fact-lookup","id":"q-pro-07-1","kind":"answerable","split":"dev","top":["pro-07","srv-04","pro-06"],"top1_score":0.6857,"variant":"rrf:k=5"}
 {"family":"exact-identifier","id":"q-pro-08-2","kind":"answerable","split":"dev","top":["pro-08","emb-06","pro-03"],"top1_score":0.7607,"variant":"rrf:k=5"}
 {"family":"fact-lookup","id":"q-prf-01-1","kind":"answerable","split":"dev","top":["prf-01","eff-07","ses-03"],"top1_score":0.6547,"variant":"rrf:k=5"}
-{"family":"vocabulary-mismatch","id":"q-prf-01-3","kind":"answerable","split":"dev","top":["prf-01","srv-07","eff-07"],"top1_score":0.5276,"variant":"rrf:k=5"}
+{"family":"vocabulary-mismatch","id":"q-prf-01-3","kind":"answerable","split":"dev","top":["srv-07","prf-01","emb-04"],"top1_score":0.7237,"variant":"rrf:k=5"}
 {"family":"fact-lookup","id":"q-prf-02-1","kind":"answerable","split":"dev","top":["prf-02","gcp-02","ack-04"],"top1_score":0.6857,"variant":"rrf:k=5"}
 {"family":"contrast","id":"q-prf-02-2","kind":"answerable","split":"dev","top":["srv-05","emb-03","con-04"],"top1_score":0.7063,"variant":"rrf:k=5"}
 {"family":"fact-lookup","id":"q-prf-03-1","kind":"answerable","split":"dev","top":["prf-03","mg-03","eff-07"],"top1_score":0.6857,"variant":"rrf:k=5"}
@@ -1077,8 +1077,8 @@
 {"family":"fact-lookup","id":"q-mg-02-1","kind":"answerable","split":"dev","top":["mg-02","mg-03","cn-02"],"top1_score":0.8107,"variant":"rrf:k=5"}
 {"family":"contrast","id":"q-mg-02-3","kind":"answerable","split":"dev","top":["mg-02","cn-02","can-05"],"top1_score":0.8107,"variant":"rrf:k=5"}
 {"family":"rationale","id":"q-mg-03-3","kind":"answerable","split":"dev","top":["mg-03","rel-07","prf-03"],"top1_score":0.8107,"variant":"rrf:k=5"}
-{"family":"fact-lookup","id":"q-cn-01-1","kind":"answerable","split":"dev","top":["cn-01","con-06","con-01"],"top1_score":0.8107,"variant":"rrf:k=5"}
-{"family":"contrast","id":"q-cn-01-2","kind":"answerable","split":"dev","top":["cn-01","srv-02","g3-03"],"top1_score":0.8107,"variant":"rrf:k=5"}
+{"family":"fact-lookup","id":"q-cn-01-1","kind":"answerable","split":"dev","top":["cn-01","con-06","con-01"],"top1_score":0.8108,"variant":"rrf:k=5"}
+{"family":"contrast","id":"q-cn-01-2","kind":"answerable","split":"dev","top":["cn-01","srv-02","g3-03"],"top1_score":0.8108,"variant":"rrf:k=5"}
 {"family":"rationale","id":"q-fnd-01-2","kind":"answerable","split":"dev","top":["top-05","top-04","fnd-01"],"top1_score":0.6313,"variant":"rrf:k=5"}
 {"family":"fact-lookup","id":"q-fnd-02-1","kind":"answerable","split":"dev","top":["top-05","fnd-02","emb-01"],"top1_score":0.6132,"variant":"rrf:k=5"}
 {"family":"exact-identifier","id":"q-fnd-02-2","kind":"answerable","split":"dev","top":["fnd-02","emb-01","gcp-02"],"top1_score":0.6858,"variant":"rrf:k=5"}
@@ -1277,7 +1277,7 @@
 {"family":"fact-lookup","id":"q-pro-07-1","kind":"answerable","split":"dev","top":["srv-04","pro-07","pro-06"],"top1_score":0.6938,"variant":"rrf:k=10"}
 {"family":"exact-identifier","id":"q-pro-08-2","kind":"answerable","split":"dev","top":["pro-08","emb-06","pro-03"],"top1_score":0.7607,"variant":"rrf:k=10"}
 {"family":"fact-lookup","id":"q-prf-01-1","kind":"answerable","split":"dev","top":["prf-01","eff-07","ses-03"],"top1_score":0.6676,"variant":"rrf:k=10"}
-{"family":"vocabulary-mismatch","id":"q-prf-01-3","kind":"answerable","split":"dev","top":["prf-05","eff-07","prf-01"],"top1_score":0.5607,"variant":"rrf:k=10"}
+{"family":"vocabulary-mismatch","id":"q-prf-01-3","kind":"answerable","split":"dev","top":["srv-07","prf-01","emb-04"],"top1_score":0.7527,"variant":"rrf:k=10"}
 {"family":"fact-lookup","id":"q-prf-02-1","kind":"answerable","split":"dev","top":["prf-02","gcp-02","rel-02"],"top1_score":0.6857,"variant":"rrf:k=10"}
 {"family":"contrast","id":"q-prf-02-2","kind":"answerable","split":"dev","top":["srv-05","emb-03","srv-04"],"top1_score":0.7272,"variant":"rrf:k=10"}
 {"family":"fact-lookup","id":"q-prf-03-1","kind":"answerable","split":"dev","top":["mg-03","prf-03","eff-07"],"top1_score":0.7006,"variant":"rrf:k=10"}
@@ -1316,8 +1316,8 @@
 {"family":"fact-lookup","id":"q-mg-02-1","kind":"answerable","split":"dev","top":["mg-02","mg-03","cn-02"],"top1_score":0.8107,"variant":"rrf:k=10"}
 {"family":"contrast","id":"q-mg-02-3","kind":"answerable","split":"dev","top":["mg-02","cn-02","can-05"],"top1_score":0.8107,"variant":"rrf:k=10"}
 {"family":"rationale","id":"q-mg-03-3","kind":"answerable","split":"dev","top":["mg-03","rel-07","prf-03"],"top1_score":0.8107,"variant":"rrf:k=10"}
-{"family":"fact-lookup","id":"q-cn-01-1","kind":"answerable","split":"dev","top":["cn-01","con-06","con-01"],"top1_score":0.8107,"variant":"rrf:k=10"}
-{"family":"contrast","id":"q-cn-01-2","kind":"answerable","split":"dev","top":["cn-01","srv-02","g3-03"],"top1_score":0.8107,"variant":"rrf:k=10"}
+{"family":"fact-lookup","id":"q-cn-01-1","kind":"answerable","split":"dev","top":["cn-01","con-06","con-01"],"top1_score":0.8108,"variant":"rrf:k=10"}
+{"family":"contrast","id":"q-cn-01-2","kind":"answerable","split":"dev","top":["cn-01","srv-02","g3-03"],"top1_score":0.8108,"variant":"rrf:k=10"}
 {"family":"rationale","id":"q-fnd-01-2","kind":"answerable","split":"dev","top":["top-04","top-05","fnd-01"],"top1_score":0.6693,"variant":"rrf:k=10"}
 {"family":"fact-lookup","id":"q-fnd-02-1","kind":"answerable","split":"dev","top":["top-05","fnd-02","emb-04"],"top1_score":0.6391,"variant":"rrf:k=10"}
 {"family":"exact-identifier","id":"q-fnd-02-2","kind":"answerable","split":"dev","top":["fnd-02","emb-01","prf-02"],"top1_score":0.6858,"variant":"rrf:k=10"}
@@ -1516,7 +1516,7 @@
 {"family":"fact-lookup","id":"q-pro-07-1","kind":"answerable","split":"dev","top":["pro-07","pro-06","srv-04"],"top1_score":0.8696,"variant":"rrf:k=3,wd=0"}
 {"family":"exact-identifier","id":"q-pro-08-2","kind":"answerable","split":"dev","top":["pro-08","emb-06","pro-03"],"top1_score":0.8696,"variant":"rrf:k=3,wd=0"}
 {"family":"fact-lookup","id":"q-prf-01-1","kind":"answerable","split":"dev","top":["prf-01","emb-07","prf-05"],"top1_score":0.7826,"variant":"rrf:k=3,wd=0"}
-{"family":"vocabulary-mismatch","id":"q-prf-01-3","kind":"answerable","split":"dev","top":["prf-01","prf-05","eff-04"],"top1_score":0.5217,"variant":"rrf:k=3,wd=0"}
+{"family":"vocabulary-mismatch","id":"q-prf-01-3","kind":"answerable","split":"dev","top":["srv-07","prf-01","ack-02"],"top1_score":0.6522,"variant":"rrf:k=3,wd=0"}
 {"family":"fact-lookup","id":"q-prf-02-1","kind":"answerable","split":"dev","top":["prf-02","gcp-02","rel-02"],"top1_score":0.8696,"variant":"rrf:k=3,wd=0"}
 {"family":"contrast","id":"q-prf-02-2","kind":"answerable","split":"dev","top":["srv-05","prf-02","emb-03"],"top1_score":0.7246,"variant":"rrf:k=3,wd=0"}
 {"family":"fact-lookup","id":"q-prf-03-1","kind":"answerable","split":"dev","top":["prf-03","mg-03","eff-06"],"top1_score":0.8696,"variant":"rrf:k=3,wd=0"}

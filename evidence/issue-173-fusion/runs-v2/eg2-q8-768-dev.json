@@ -1,7 +1,7 @@
 {
   "cache": {
-    "hits": 1989,
-    "misses": 40
+    "hits": 2028,
+    "misses": 1
   },
   "embedder_kind": "EmbeddingGemma2",
   "issue": 173,
@@ -95,7 +95,7 @@
       },
       "no_answer": {
         "dev": {
-          "auc_top1": 0.7708,
+          "auc_top1": 0.7717,
           "distinct_top1_values": {
             "answerable": 163,
             "no_answer": 73
@@ -173,32 +173,32 @@
         "dev/family/vocabulary-mismatch": {
           "hit@1": 0.4667,
           "hit@10": 0.8333,
-          "hit@5": 0.7333,
-          "mrr@10": 0.5767,
+          "hit@5": 0.7667,
+          "mrr@10": 0.5844,
           "n": 30,
-          "ndcg@10": 0.6338
+          "ndcg@10": 0.6408
         },
         "split/dev": {
           "hit@1": 0.7212,
           "hit@10": 0.9515,
-          "hit@5": 0.9212,
-          "mrr@10": 0.8114,
+          "hit@5": 0.9273,
+          "mrr@10": 0.8128,
           "n": 165,
-          "ndcg@10": 0.8479
+          "ndcg@10": 0.8492
         }
       },
       "no_answer": {
         "dev": {
-          "auc_top1": 0.6986,
+          "auc_top1": 0.699,
           "distinct_top1_values": {
-            "answerable": 43,
-            "no_answer": 39
+            "answerable": 45,
+            "no_answer": 40
           },
           "gate_alpha": 0.1,
           "gate_pass_answerable": 0.9091,
           "gate_pass_no_answer": 0.6351,
           "gate_tau_from_dev": 0.6658,
-          "median_top1_answerable": 0.7607,
+          "median_top1_answerable": 0.7606,
           "median_top1_no_answer": 0.6858
         }
       },
@@ -267,25 +267,25 @@
         "dev/family/vocabulary-mismatch": {
           "hit@1": 0.4,
           "hit@10": 0.8333,
-          "hit@5": 0.7333,
-          "mrr@10": 0.5169,
+          "hit@5": 0.7667,
+          "mrr@10": 0.5225,
           "n": 30,
-          "ndcg@10": 0.5888
+          "ndcg@10": 0.5936
         },
         "split/dev": {
           "hit@1": 0.6,
           "hit@10": 0.9515,
-          "hit@5": 0.9152,
-          "mrr@10": 0.7361,
+          "hit@5": 0.9212,
+          "mrr@10": 0.7371,
           "n": 165,
-          "ndcg@10": 0.7919
+          "ndcg@10": 0.7928
         }
       },
       "no_answer": {
         "dev": {
-          "auc_top1": 0.6851,
+          "auc_top1": 0.6849,
           "distinct_top1_values": {
-            "answerable": 57,
+            "answerable": 59,
             "no_answer": 52
           },
           "gate_alpha": 0.1,
@@ -361,25 +361,25 @@
         "dev/family/vocabulary-mismatch": {
           "hit@1": 0.4333,
           "hit@10": 0.8333,
-          "hit@5": 0.7333,
-          "mrr@10": 0.5638,
+          "hit@5": 0.7667,
+          "mrr@10": 0.5768,
           "n": 30,
-          "ndcg@10": 0.6216
+          "ndcg@10": 0.6326
         },
         "split/dev": {
           "hit@1": 0.7273,
           "hit@10": 0.9515,
-          "hit@5": 0.9273,
-          "mrr@10": 0.8143,
+          "hit@5": 0.9333,
+          "mrr@10": 0.8167,
           "n": 165,
-          "ndcg@10": 0.8497
+          "ndcg@10": 0.8517
         }
       },
       "no_answer": {
         "dev": {
-          "auc_top1": 0.7145,
+          "auc_top1": 0.7154,
           "distinct_top1_values": {
-            "answerable": 37,
+            "answerable": 38,
             "no_answer": 41
           },
           "gate_alpha": 0.1,
@@ -453,27 +453,27 @@
           "ndcg@10": 0.8635
         },
         "dev/family/vocabulary-mismatch": {
-          "hit@1": 0.4667,
+          "hit@1": 0.5,
           "hit@10": 0.8667,
           "hit@5": 0.8,
-          "mrr@10": 0.5942,
+          "mrr@10": 0.6164,
           "n": 30,
-          "ndcg@10": 0.6586
+          "ndcg@10": 0.6753
         },
         "split/dev": {
-          "hit@1": 0.7455,
+          "hit@1": 0.7515,
           "hit@10": 0.9697,
           "hit@5": 0.9515,
-          "mrr@10": 0.8363,
+          "mrr@10": 0.8403,
           "n": 165,
-          "ndcg@10": 0.8718
+          "ndcg@10": 0.8748
         }
       },
       "no_answer": {
         "dev": {
-          "auc_top1": 0.6797,
+          "auc_top1": 0.6794,
           "distinct_top1_values": {
-            "answerable": 17,
+            "answerable": 18,
             "no_answer": 17
           },
           "gate_alpha": 0.1,
@@ -549,26 +549,26 @@
         "dev/family/vocabulary-mismatch": {
           "hit@1": 0.4333,
           "hit@10": 0.8333,
-          "hit@5": 0.7,
-          "mrr@10": 0.5603,
+          "hit@5": 0.7333,
+          "mrr@10": 0.5667,
           "n": 30,
-          "ndcg@10": 0.6217
+          "ndcg@10": 0.6272
         },
         "split/dev": {
           "hit@1": 0.6909,
           "hit@10": 0.9576,
-          "hit@5": 0.9152,
-          "mrr@10": 0.7955,
+          "hit@5": 0.9212,
+          "mrr@10": 0.7967,
           "n": 165,
-          "ndcg@10": 0.8374
+          "ndcg@10": 0.8384
         }
       },
       "no_answer": {
         "dev": {
-          "auc_top1": 0.6941,
+          "auc_top1": 0.6943,
           "distinct_top1_values": {
-            "answerable": 48,
-            "no_answer": 41
+            "answerable": 50,
+            "no_answer": 40
           },
           "gate_alpha": 0.1,
           "gate_pass_answerable": 0.9091,
@@ -643,25 +643,25 @@
         "dev/family/vocabulary-mismatch": {
           "hit@1": 0.2333,
           "hit@10": 0.7667,
-          "hit@5": 0.6667,
-          "mrr@10": 0.397,
+          "hit@5": 0.7,
+          "mrr@10": 0.4081,
           "n": 30,
-          "ndcg@10": 0.4822
+          "ndcg@10": 0.4914
         },
         "split/dev": {
           "hit@1": 0.4121,
           "hit@10": 0.9394,
-          "hit@5": 0.8242,
-          "mrr@10": 0.5729,
+          "hit@5": 0.8303,
+          "mrr@10": 0.5749,
           "n": 165,
-          "ndcg@10": 0.6671
+          "ndcg@10": 0.6688
         }
       },
       "no_answer": {
         "dev": {
-          "auc_top1": 0.6282,
+          "auc_top1": 0.6277,
           "distinct_top1_values": {
-            "answerable": 77,
+            "answerable": 78,
             "no_answer": 55
           },
           "gate_alpha": 0.1,

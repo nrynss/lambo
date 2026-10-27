@@ -199,15 +199,15 @@ Files: `runs-v2/`, from `run-v2.sh`; tables from
 
 | | `max` | `rrf` (k = 3) BGE-M3 | `rrf` (k = 3) EmbeddingGemma 2 |
 |---|---|---|---|
-| `dev` nDCG@10 | 0.790 | 0.856 (+0.066) | 0.848 (+0.058) |
-| `dev` hit@1 | 0.679 | 0.751 | 0.721 |
+| `dev` nDCG@10 | 0.790 | 0.854 (+0.064) | 0.849 (+0.059) |
+| `dev` hit@1 | 0.679 | 0.746 | 0.721 |
 | `held_out` nDCG@10 | 0.840 | 0.872 (+0.032) | 0.863 (+0.023) |
 | `held_out` hit@1 | 0.742 | 0.773 | 0.742 |
-| `dev` vocabulary-mismatch (30) | 0.446 | 0.669 | 0.634 |
+| `dev` vocabulary-mismatch (30) | 0.446 | 0.657 | 0.641 |
 | `held_out` vocabulary-mismatch (18) | 0.672 | 0.724 | 0.744 |
 | `held_out` exact-identifier (11) | 0.948 | 0.899 | 0.881 |
 | `held_out` contrast (14) | 0.912 | 0.879 | 0.864 |
-| no-answer AUC, `dev` / `held_out` | 0.771 / 0.669 | 0.668 / 0.694 | 0.699 / 0.681 |
+| no-answer AUC, `dev` / `held_out` | 0.772 / 0.669 | 0.672 / 0.694 | 0.699 / 0.681 |
 
 What holds and what moves:
 
@@ -215,7 +215,7 @@ What holds and what moves:
   queries are where `max` is weakest (0.446 on `dev`: BM25 has little to
   match and the vector leg only orders what it did not), so RRF's `dev` gain
   rises above #173's +0.05. On `held_out` it stays below it (+0.032, +0.023).
-* **k = 3 still holds**: k = 2 and k = 3 are within 0.002 of each other on
+* **k = 3 still holds**: k = 2 and k = 3 are within 0.003 of each other on
   both embedders (k = 2 is the higher on EmbeddingGemma 2), and k = 5, 10
   and 60 are lower on both. `wd=0` is again a little higher on `dev`; it is not
   tried on `held_out`.

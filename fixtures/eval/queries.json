@@ -2952,7 +2952,7 @@
  },
  {
   "id": "q-prf-01-3",
-  "query": "How much did text search speed up in the summer release, and how many clients could it serve?",
+  "query": "How much faster did plain word search get, and how many requests a second could many clients make afterwards?",
   "kind": "answerable",
   "family": "vocabulary-mismatch",
   "topic": "performance",
