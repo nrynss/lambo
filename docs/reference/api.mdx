@@ -178,9 +178,11 @@ concepts' id order, then `recall::format::rests_on_more_warning` with the
 count of the rest. The predicate is
 `daemon::contradiction::stale_citations(graph, node, min_age, now)`: the
 `ContradictionHit` that `contradiction_at` gives each concept `node`
-cites through a `Dependency` edge (`daemon::contradiction::direct_citation`,
-a citation written by `now`), skipping one whose contradicting concept is
-`node` itself. Recall runs it on every shown hit at the recall's `now` with
+cites through a `Dependency` edge (`daemon::contradiction::supporting_citation`:
+a `daemon::contradiction::direct_citation` written by `now`, dropped when
+`node` itself has a `Contradicts` edge to the cited concept, whoever else
+contradicts it). The inverse question, "which concepts cite this one",
+must use the same edge test. Recall runs it on every shown hit at the recall's `now` with
 `CycleParams::contradiction_evidence_min_age`, so it reads the graph rather
 than the hot list. It is a warning only: nothing is forced, added or
 reordered, and a result with no stale citation is byte-identical to one

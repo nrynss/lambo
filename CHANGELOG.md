@@ -24,7 +24,10 @@
   `--ledger` recall lines; `lambo session verify` reports that kind). A
   recall with no stale citation renders exactly as before. The predicate
   is `daemon::contradiction::stale_citations`, with the edge test
-  `daemon::contradiction::direct_citation`.
+  `daemon::contradiction::supporting_citation` (a
+  `daemon::contradiction::direct_citation` whose citing concept does not
+  itself contradict the cited one: a memory that contradicts what it
+  cites gets no line for it, whoever else contradicts it).
 - **Behaviour change, EmbeddingGemma 2 only: the recent leg is calibrated
   per embedding contract (#87).** The recent-interactions leg scored a flat
   0.35, a value set on BGE-M3's cosine scale. Under EmbeddingGemma 2 (768

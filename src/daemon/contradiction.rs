@@ -89,7 +89,9 @@
 //! definition, and it reads the graph, not the hot list, so a write-time
 //! caller (#208, reporting the concepts that cite one just contradicted)
 //! gets the same answer recall shows. Direct citations only; a concept is
-//! never stale on a concept it contradicts itself.
+//! never stale on a concept it contradicts itself ([`supporting_citation`]
+//! drops such a citation before anything is evaluated, so it holds whoever
+//! else contradicts the cited concept).
 //!
 //! ## Hot list
 //!
@@ -343,8 +345,35 @@ pub fn direct_citation(graph: &Graph, e: &Edge) -> Option<(NodeId, NodeId)> {
     (citer.session_id == cited.session_id).then_some((citer.id, cited.id))
 }
 
+/// A **supporting citation** (#207): `e` is a [`direct_citation`] written
+/// by `now` whose citing concept does not itself contradict the cited one
+/// (no `Contradicts` edge citer -> cited written by `now`). Returns
+/// `(citer, cited)`.
+///
+/// A concept that cites what it contradicts does not rest on it, so such a
+/// citation is never a stale one, whoever else contradicts the cited
+/// concept and whichever contradictor [`contradiction_at`] names. This is
+/// the edge test [`stale_citations`] applies, and the one its inverse
+/// (#208's "who cites the concept just contradicted") must apply, so both
+/// directions exclude a self-contradicting citer the same way.
+pub fn supporting_citation(
+    graph: &Graph,
+    e: &Edge,
+    now: DateTime<Utc>,
+) -> Option<(NodeId, NodeId)> {
+    if !written_by(e, now) {
+        return None;
+    }
+    let (citer, cited) = direct_citation(graph, e)?;
+    let contradicts_it = graph
+        .edge_between(citer, cited, EdgeType::Contradicts)
+        .is_some_and(|c| written_by(c, now));
+    (!contradicts_it).then_some((citer, cited))
+}
+
 /// **Stale by dependency** (#207): the concepts `node` directly cites
-/// ([`direct_citation`], written by `now`) that are contradicted at `now`,
+/// ([`supporting_citation`]: written by `now`, and not contradicted by
+/// `node` itself) that are contradicted at `now`,
 /// each as the [`ContradictionHit`] [`contradiction_at`] gives it (its
 /// `node` is the cited concept, `by` its contradicting concept), in
 /// node-id order of the cited concept.
@@ -352,8 +381,10 @@ pub fn direct_citation(graph: &Graph, e: &Edge) -> Option<(NodeId, NodeId)> {
 /// The contradicted test is exactly [`contradiction_at`]'s, at the same
 /// `min_age` and `now`: no second definition. Direct citations only, so a
 /// chain (`node` cites A, A cites a contradicted B) flags nothing. A
-/// citation whose contradicting concept is `node` itself is skipped: a
-/// concept is never warned that it rests on what it contradicts.
+/// concept is never warned that it rests on what it contradicts: a cited
+/// concept `node` has a `Contradicts` edge to is dropped before it is
+/// evaluated, even when a newer contradictor than `node` is the one
+/// [`contradiction_at`] would name.
 ///
 /// `O(degree + interactions)`, the timeline built only when a cited
 /// concept has an inbound `Contradicts` edge. Empty when `node` is not a
@@ -382,8 +413,7 @@ pub(crate) fn stale_citations_shared(
     let mut cited: Vec<NodeId> = graph
         .incident_edges(node)
         .into_iter()
-        .filter(|e| written_by(e, now))
-        .filter_map(|e| direct_citation(graph, e))
+        .filter_map(|e| supporting_citation(graph, e, now))
         .filter(|(citer, _)| *citer == node)
         .map(|(_, cited)| cited)
         .filter(|&cited| has_inbound_contradiction(graph, cited))
@@ -396,7 +426,6 @@ pub(crate) fn stale_citations_shared(
     cited
         .into_iter()
         .filter_map(|cited| contradiction_at_with(graph, cited, min_age, now, &shared.get(graph)))
-        .filter(|hit| hit.by != node)
         .collect()
 }
 

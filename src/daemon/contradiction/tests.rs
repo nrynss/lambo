@@ -716,6 +716,9 @@ fn a_concept_citing_a_contradicted_concept_is_stale() {
     let hits = stale(&s, 2, 1000);
     assert_eq!(hits, vec![at(&s, 1000).expect("X is contradicted")]);
     assert_eq!((hits[0].node, hits[0].by), (cid(1), cid(3)));
+    // X is cited, it cites nothing: an inbound citation never makes the
+    // cited concept stale on itself.
+    assert!(stale(&s, 1, 1000).is_empty());
 }
 
 /// Before the contradiction is written, nothing is stale; the citation
@@ -821,6 +824,53 @@ fn the_contradicting_concept_is_not_stale_on_its_own_target() {
     );
     assert!(stale(&s, 3, 1000).is_empty());
     assert_eq!(stale(&s, 2, 1000).len(), 1, "D still rests on X");
+}
+
+/// Review regression (#207): Y contradicts X and cites it, then a newer Z
+/// contradicts X too, so `contradiction_at` names Z, not Y. Y is still
+/// not warned that it rests on X: the exclusion is by Y's own
+/// `Contradicts` edge, not by which contradictor wins. D is still warned,
+/// naming Z.
+#[test]
+fn a_self_contradicting_citer_is_not_stale_when_a_newer_contradictor_wins() {
+    let mut s = base(CanonizationStatus::None);
+    s.edge(20, EdgeType::Dependency, 3, 1, 250, None);
+    s.interaction(6, "agent-f", 300, None);
+    s.concept(6, 6, "agent-f", "brand x was resized in 2026", 300);
+    s.edge(21, EdgeType::Contradicts, 6, 1, 300, None);
+    assert_eq!(at(&s, 1000).map(|h| h.by), Some(cid(6)), "Z wins");
+    assert!(stale(&s, 3, 1000).is_empty(), "Y contradicts X itself");
+    assert_eq!(
+        stale(&s, 2, 1000)
+            .iter()
+            .map(|h| (h.node, h.by))
+            .collect::<Vec<_>>(),
+        vec![(cid(1), cid(6))]
+    );
+    // The reusable edge test drops Y's citation and keeps D's, so an
+    // inverse "who cites X" caller gets the same exclusion.
+    let ys = s.g.edges().find(|e| e.id == eid(20)).unwrap();
+    assert_eq!(supporting_citation(&s.g, ys, t(1000)), None);
+    assert_eq!(direct_citation(&s.g, ys), Some((cid(3), cid(1))));
+    let ds = s.g.edges().find(|e| e.id == eid(10)).unwrap();
+    assert_eq!(
+        supporting_citation(&s.g, ds, t(1000)),
+        Some((cid(2), cid(1)))
+    );
+    // Before Y's contradiction is written, Y's citation is an ordinary one.
+    let mut early = Session::new();
+    early.interaction(1, "agent-a", 0, None);
+    early.concept(1, 1, "agent-a", "brand x runs small", 0);
+    early.interaction(3, "agent-c", 100, None);
+    early.concept(3, 3, "agent-c", "brand x fits true to size", 100);
+    early.edge(20, EdgeType::Dependency, 3, 1, 100, None);
+    early.edge(11, EdgeType::Contradicts, 3, 1, 500, None);
+    let ys = early.g.edges().find(|e| e.id == eid(20)).unwrap();
+    assert_eq!(
+        supporting_citation(&early.g, ys, t(200)),
+        Some((cid(3), cid(1)))
+    );
+    assert_eq!(supporting_citation(&early.g, ys, t(1000)), None);
 }
 
 /// A citation written after `now` (a mocked clock) is not one yet.
