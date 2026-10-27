@@ -111,6 +111,8 @@ Per consumer:
   2026-10-27; every earlier id, text and split is unchanged. A
   vocabulary-mismatch query avoids the concept's identifiers, numbers and
   names, asking for the fact as a user who does not know them would.
+  A query takes its concept's `facets` unless `Q(..., facets=[...])` gives
+  its own, for a query about a different part of the concept.
 - **Authored text.** Concepts, rewordings and contrasts restate facts from
   this repository's records (`CHANGELOG.md`,
   `dev-diary/lambo-for-mooshik/DOGFOOD-FINDINGS.md` and `K-candle-embedder.md`,
