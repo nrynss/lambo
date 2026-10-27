@@ -194,6 +194,32 @@ reordered, and a result with no stale citation is byte-identical to one
 without the check. The annotation kind is `rests_on_contradicted`, never
 forced in a layered merge.
 
+A suspected supersession (#198) is an `EdgeType::SuspectedSupersedes` edge,
+`newer -> older`, written by the hybrid write path
+(`graph::suspected::record_refused_hits`, at commit under the write lock)
+when a vector hit at or above the merge threshold was refused by the
+identifier guard, both concepts are the same `Logic`, `Constraint` or
+`Observation` type with the same recorded repository scope and no
+`against`/`depends_on` between them, and
+`graph::suspected::one_span_value_slot(older, newer)` holds (one differing
+token span, after the first `graph::suspected::PREDICATE_CUES` cue in
+both). The direction is `graph::suspected::dated_at` (the origin
+interaction's about-time clamped to its write time); a tie writes nothing.
+The edge is informational: no density, edge bonus, blast radius,
+dependents, recall expansion, decay or GC connectivity. It is removed when
+either concept is collected and by `graph::suspected::settle`, which
+`against` and `depends_on` writes call. #207 never follows it. #181's
+redundancy-aware selection must treat a pair as never redundant:
+`graph::suspected::is_suspected_pair(graph, a, b)`. Recall sets
+`DetailedHit::possibly_superseded_by` on the older hit when both are shown
+(one per hit, the newest replacement), and adds the
+`recall::format::possibly_superseded_warning` line with annotation kind
+`possibly_superseded` when `recall::suspected::shows_line` holds for the
+session's contract and `[embedder] suspected_supersession_line`. Nothing
+is forced, and a result with no shown pair is byte-identical.
+`graph::suspected::scan(graph, cosine)` lists the pairs an existing
+session holds (`lambo canon suspected`).
+
 Garbage collection does not count a `Contradicts` edge as connectivity
 (`EdgeType::counts_toward_gc_connectivity`). A concept with a `Contradicts`
 edge to a concept that is Venerable or Canonical when a sweep starts is a
