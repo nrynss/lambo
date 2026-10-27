@@ -453,6 +453,16 @@ fn rank(
     for (id, r) in &vector {
         legs.get_mut(id).expect("ranked from legs").vector_rank = Some(*r);
     }
+    // Weights are scaled by the largest so no term or sum can overflow to
+    // infinity (validation admits any finite weight, and k may be 0). The
+    // fused value is a ratio, so the scale cancels; at the defaults (largest
+    // weight 1) nothing changes.
+    let largest = fusion
+        .keyword_weight
+        .max(fusion.vector_weight)
+        .max(fusion.recent_weight);
+    let scale = if largest > 0.0 { largest } else { 1.0 };
+    let term = |weight: f64, rank: usize| fusion.term(weight / scale, rank);
     // The most the legs that ran can give: rank 1 in each.
     let has_recent = legs.values().any(|l| l.recent_rank.is_some());
     let best: f64 = [
@@ -462,7 +472,7 @@ fn rank(
     ]
     .into_iter()
     .filter(|(active, _)| *active)
-    .map(|(_, w)| fusion.term(w, 1))
+    .map(|(_, w)| term(w, 1))
     .sum();
     for l in legs.values_mut() {
         let sum: f64 = [
@@ -471,7 +481,7 @@ fn rank(
             (l.recent_rank, fusion.recent_weight),
         ]
         .into_iter()
-        .filter_map(|(r, w)| r.map(|r| fusion.term(w, r)))
+        .filter_map(|(r, w)| r.map(|r| term(w, r)))
         .sum();
         l.rrf = Some(if best > 0.0 { sum / best } else { 0.0 });
     }
@@ -1665,6 +1675,38 @@ mod tests {
         assert_eq!(blank[0].score, 1.0);
         let bare = candidates_without_keyword(&g, input());
         assert_eq!(bare[0].score, 1.0);
+    }
+
+    #[test]
+    fn rrf_with_huge_weights_and_k_zero_stays_finite_and_scale_free() {
+        let g = planted_graph().0;
+        let legs = || -> LegProvenance {
+            HashMap::from([
+                (cid(1), leg(Some(2.0), Some(0.9))),
+                (cid(3), leg(Some(1.0), None)),
+            ])
+        };
+        let huge = RecallFusion {
+            k: 0.0,
+            keyword_weight: f64::MAX,
+            vector_weight: f64::MAX,
+            ..rrf()
+        };
+        let unit = RecallFusion {
+            keyword_weight: 1.0,
+            vector_weight: 1.0,
+            recent_weight: huge.recent_weight / f64::MAX,
+            ..huge
+        };
+        let big = rank(&mut legs(), &g, &huge, true);
+        assert!(big.iter().all(|s| s.score.is_finite()), "{big:?}");
+        assert_eq!(big[0].item, cid(1));
+        assert_eq!(big[0].score, 1.0, "rank 1 in both legs that ran");
+        let small = rank(&mut legs(), &g, &unit, true);
+        for (a, b) in big.iter().zip(&small) {
+            assert_eq!(a.item, b.item);
+            assert!((a.score - b.score).abs() < 1e-12);
+        }
     }
 
     #[test]
