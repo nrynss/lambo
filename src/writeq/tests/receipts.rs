@@ -105,6 +105,7 @@ fn every_answer_has_a_distinct_tag_and_none_of_them_is_unknown() {
         ReceiptAnswer::PendingReplay,
         ReceiptAnswer::Applied(AppliedSummary {
             stale_report: None,
+            replacement: None,
             kind: WriteKind::Derive,
             summary: "x".into(),
             created: Vec::new(),
@@ -117,7 +118,7 @@ fn every_answer_has_a_distinct_tag_and_none_of_them_is_unknown() {
             embedded: Some(0),
         }),
         ReceiptAnswer::Failed("x".into()),
-        ReceiptAnswer::AppliedAfterRestart("x".into(), None),
+        ReceiptAnswer::AppliedAfterRestart("x".into(), None, None),
         ReceiptAnswer::IntentRecorded,
         ReceiptAnswer::CloseUnflushed,
         ReceiptAnswer::Dropped("x".into()),
@@ -173,7 +174,7 @@ fn only_the_two_pendings_are_unsettled() {
     );
     for a in [
         ReceiptAnswer::Failed("x".into()),
-        ReceiptAnswer::AppliedAfterRestart("x".into(), None),
+        ReceiptAnswer::AppliedAfterRestart("x".into(), None, None),
         // Terminal FOR THIS PROCESS: the next process's answer for the
         // same id is applied_after_restart or failed, but nothing in this
         // one can change it again.
@@ -250,5 +251,61 @@ fn the_receipt_names_flagged_suspected_supersessions() {
     assert_eq!(
         after,
         format!("{before}; 2 possible undeclared supersession(s) flagged")
+    );
+}
+
+/// #198 part c: a receipt with no replacement candidates reads exactly as
+/// before (byte for byte), and one with candidates adds the clause and one
+/// line per candidate, after any stale report; the after-restart answer
+/// carries them the same way.
+#[test]
+fn replacement_candidates_ride_the_receipt_only_when_present() {
+    use crate::graph::suspected::replacement::{ReplacementCandidate, ReplacementReport};
+    use crate::types::NodeId;
+    let summary = AppliedSummary {
+        stale_report: None,
+        replacement: None,
+        kind: WriteKind::Derive,
+        summary: "derived 1 concept(s): 1 created (1 embedded), 0 matched existing".into(),
+        created: Vec::new(),
+        matched: Vec::new(),
+        created_count: 1,
+        matched_count: 0,
+        semantic_merged: Some(0),
+        reinforced: Some(0),
+        edges: None,
+        embedded: Some(1),
+    };
+    let quiet = ReceiptAnswer::Applied(summary.clone());
+    assert_eq!(
+        quiet.describe(),
+        "applied — derived 1 concept(s): 1 created (1 embedded), 0 matched existing"
+    );
+    let restart = ReceiptAnswer::AppliedAfterRestart(summary.summary.clone(), None, None);
+    assert!(restart
+        .describe()
+        .ends_with("use lambo_stale for the current state)"));
+
+    let old = NodeId(uuid::Uuid::from_u64_pair(0x1234_5678_0000_0000, 9));
+    let new = NodeId(uuid::Uuid::from_u64_pair(0x9abc_def0_0000_0000, 9));
+    let report = ReplacementReport::for_receipt(&[ReplacementCandidate {
+        new,
+        id: old,
+        excerpt: "the embedder listens on port 8080".into(),
+        cosine: 0.8684,
+    }]);
+    let listed = ReceiptAnswer::Applied(AppliedSummary {
+        replacement: report.clone(),
+        ..summary.clone()
+    });
+    let want = "applied — derived 1 concept(s): 1 created (1 embedded), 0 matched existing; \
+                1 replacement candidate(s): existing concepts this write may replace (nothing \
+                recorded; cite one in against on a later call only if it really is replaced)\
+                \n  - 12345678 \"the embedder listens on port 8080\" (cosine 0.8684, for 9abcdef0)";
+    assert_eq!(listed.describe(), want);
+    let restart = ReceiptAnswer::AppliedAfterRestart(summary.summary.clone(), None, report);
+    assert_eq!(
+        restart.describe(),
+        want.replace("applied — ", "applied after a restart — ")
     );
 }

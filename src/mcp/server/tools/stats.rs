@@ -168,15 +168,23 @@ impl LamboServer {
                 // `applied`, and absent — not empty — otherwise, for the same
                 // reason the ack omits them: an empty list would be a claim.
                 // An agent that needs a node id to reserve it gets it here.
-                if let ReceiptAnswer::AppliedAfterRestart(_, Some(report)) = answer {
-                    r.as_object_mut()
-                        .expect("json! built an object")
-                        .insert("stale_report".into(), json!(report));
+                if let ReceiptAnswer::AppliedAfterRestart(_, report, replacement) = answer {
+                    let obj = r.as_object_mut().expect("json! built an object");
+                    if let Some(report) = report {
+                        obj.insert("stale_report".into(), json!(report));
+                    }
+                    if let Some(replacement) = replacement {
+                        obj.insert("replacement_candidates".into(), json!(replacement));
+                    }
                 }
                 if let ReceiptAnswer::Applied(s) = answer {
                     let obj = r.as_object_mut().expect("json! built an object");
                     if let Some(report) = &s.stale_report {
                         obj.insert("stale_report".into(), json!(report));
+                    }
+                    // #198 part c: only on a derive that listed candidates.
+                    if let Some(replacement) = &s.replacement {
+                        obj.insert("replacement_candidates".into(), json!(replacement));
                     }
                     obj.insert("kind".into(), json!(s.kind.tool()));
                     obj.insert("created".into(), json!(s.created));

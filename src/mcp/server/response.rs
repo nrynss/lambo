@@ -301,14 +301,34 @@ pub(super) fn attach_receipts(
         ));
     }
     out.content.push(ContentBlock::text(text));
-    let reports: Vec<_> = taken.iter().filter_map(|(id, answer)| {
-        let report = match answer {
-            ReceiptAnswer::Applied(s) => s.stale_report.as_ref(),
-            ReceiptAnswer::AppliedAfterRestart(_, report) => report.as_ref(),
-            _ => None,
-        }?;
-        Some(serde_json::json!({"id": id.to_string(), "state": answer.tag(), "stale_report": report}))
-    }).collect();
+    let reports: Vec<_> = taken
+        .iter()
+        .filter_map(|(id, answer)| {
+            let (report, replacement) = match answer {
+                ReceiptAnswer::Applied(s) => (s.stale_report.as_ref(), s.replacement.as_ref()),
+                ReceiptAnswer::AppliedAfterRestart(_, report, replacement) => {
+                    (report.as_ref(), replacement.as_ref())
+                }
+                _ => (None, None),
+            };
+            if report.is_none() && replacement.is_none() {
+                return None;
+            }
+            let mut entry = serde_json::json!({"id": id.to_string(), "state": answer.tag()});
+            let obj = entry.as_object_mut().expect("json! built an object");
+            if let Some(report) = report {
+                obj.insert("stale_report".into(), serde_json::json!(report));
+            }
+            // #198 part c: only on a derive that listed candidates.
+            if let Some(replacement) = replacement {
+                obj.insert(
+                    "replacement_candidates".into(),
+                    serde_json::json!(replacement),
+                );
+            }
+            Some(entry)
+        })
+        .collect();
     if !reports.is_empty() {
         if out.structured_content.is_none() {
             out.structured_content = Some(serde_json::json!({}));

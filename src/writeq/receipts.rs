@@ -402,6 +402,10 @@ pub struct AppliedSummary {
     pub kind: WriteKind,
     /// Direct dependencies currently stale on targets of this write's contradictions.
     pub stale_report: Option<crate::daemon::contradiction::StaleReport>,
+    /// Replacement candidates (#198 part c): existing concepts a hybrid
+    /// derive's new concepts most likely replace, bounded for the receipt.
+    /// `None` when there are none, so such a receipt reads as before.
+    pub replacement: Option<crate::graph::suspected::replacement::ReplacementReport>,
     /// One-line human summary, the same sentence the synchronous path returns.
     pub summary: String,
     /// Node ids created, truncated to [`MAX_RECEIPT_IDS`].
@@ -466,6 +470,19 @@ impl AppliedSummary {
             if let Some(v) = value {
                 facts.insert(key.into(), serde_json::Value::from(v));
             }
+        }
+        // #198 part c: only when a derive listed candidates, so every other
+        // line reads as before. The count and the rounded cosines: numbers
+        // only, like the rest of the line.
+        if let Some(report) = &self.replacement {
+            facts.insert(
+                "replacement_candidates".into(),
+                serde_json::Value::from(report.total),
+            );
+            facts.insert(
+                "replacement_cosines".into(),
+                serde_json::Value::from(report.cosines()),
+            );
         }
         facts
     }
@@ -535,9 +552,14 @@ pub enum ReceiptAnswer {
     /// serve of the session applied it — or applied it before restarting and
     /// the consumed intent record carried the fact across. The payload is the
     /// applied summary sentence and, when this process performed the replay,
-    /// its bounded stale report. Consumed durable rows retain only the sentence;
-    /// a later restart cannot recover the original report.
-    AppliedAfterRestart(String, Option<crate::daemon::contradiction::StaleReport>),
+    /// its bounded stale report and its replacement candidates (#198 part
+    /// c). Consumed durable rows retain only the sentence; a later restart
+    /// cannot recover either report.
+    AppliedAfterRestart(
+        String,
+        Option<crate::daemon::contradiction::StaleReport>,
+        Option<crate::graph::suspected::replacement::ReplacementReport>,
+    ),
     /// Not applied before this session closed, and **not lost**: the validated
     /// job is recorded as a durable intent, and the next serve of this session
     /// re-attempts it — idempotently, in submission order (J3 durable
@@ -666,10 +688,17 @@ impl ReceiptAnswer {
                         ));
                     }
                 }
+                if let Some(replacement) = &s.replacement {
+                    detail.push_str(&replacement.describe());
+                }
                 detail
             }
             ReceiptAnswer::Failed(why) => format!("FAILED, nothing was written — {why}"),
-            ReceiptAnswer::AppliedAfterRestart(summary, report) => {
+            ReceiptAnswer::AppliedAfterRestart(summary, report, replacement) => {
+                let replacement = replacement
+                    .as_ref()
+                    .map(|r| r.describe())
+                    .unwrap_or_default();
                 if let Some(report) = report {
                     let mut detail = format!(
                         "applied after a restart — {summary}; {} stale direct dependenc(ies)",
@@ -687,7 +716,10 @@ impl ReceiptAnswer {
                             report.total - report.dependents.len()
                         ));
                     }
+                    detail.push_str(&replacement);
                     detail
+                } else if !replacement.is_empty() {
+                    format!("applied after a restart — {summary}{replacement}")
                 } else {
                     format!(
                         "applied after a restart — {summary} (confirmed from the durable intent \
