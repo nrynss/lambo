@@ -129,16 +129,21 @@ RRF ranks better overall, but not everywhere, and the gain is below the +0.05 nD
 
 ```toml
 [selection]
-skip_redundant = true   # optional; the default is false
+skip_redundant = true    # optional; the default is false
+similar_signals = false  # optional; the default is false
 ```
 
 | Key | Type | Default | Notes |
 |---|---|---|---|
-| `skip_redundant` | boolean | `false` | Skip a member redundant with a hit already taken; the next distinct member fills its slot. |
+| `skip_redundant` | boolean | `false` | Skip a member redundant with a hit already taken; the next distinct member fills its slot. On its own, only identical text counts as redundant. |
+| `similar_signals` | boolean | `false` | Also count a `Semantic` edge, or vectors at or above the merge threshold, as redundant. Needs `skip_redundant = true`. |
 
 **What counts as redundant**, checked cheapest first:
 
-- the same text, once case, spacing, Unicode composition and invisible characters are set aside, whatever the two concept types (nothing else is erased, so a different identifier, number, path, punctuation or word order is different text);
+- the same text, once case, spacing, Unicode composition and invisible characters are set aside, whatever the two concept types (nothing else is erased, so a different identifier, number, path, punctuation or word order is different text). This is the only signal by default.
+
+With `similar_signals = true`, two more:
+
 - a `Semantic` edge between the two;
 - vectors at or above the session's merge threshold (`semantic_match_threshold`, or the calibrated or labelled-pairs threshold that replaces it, see `[embedder] calibration`), when both carry a vector. A concept without a vector is never judged by this one. `lambo recall`, `serve-web` and `lambo session verify` do not embed labelled pairs, so they use the contract's calibrated threshold, or the configured one.
 
@@ -150,9 +155,11 @@ Only the first `min(20, 4 × top_k)` hits are checked, each against at most 20 h
 
 **Layered recall** applies each session's own setting inside that session's recall, where the concepts' edges are; across layers, the existing deduplication still keeps the nearest tier's copy. `lambo session verify` replays the setting and counts a skipped member as deduplicated, not lost.
 
-**Why it is off by default.** On the evaluation set under BGE-M3 (`evidence/issue-181/`), with copies and rewordings injected, it raised the distinct memories in a 500-token context at `top_k = 3` from 1.45 to 2.18 (dev) and 2.31 (held-out), and changed nothing without redundancy or with declared contradictions. With related but different facts that were never declared contradictory, it skipped a few (polarity, exception and quantity pairs), every one through a `Semantic` edge the write path had put between them. Turn it on where duplicates are common, and declare contradictions with `against`.
+**Why it is off by default.** On the evaluation set under BGE-M3 (`evidence/issue-181/`), with copies and rewordings injected, identical-text skipping raised the distinct memories in a 500-token context at `top_k = 3` from 1.45 to 2.04 (dev) and 2.03 (held-out), and changed nothing without redundancy, with declared contradictions, or with related but different facts. Turn it on where duplicates are common.
 
-`skip_redundant` must be `true` or `false`; anything else, or an unknown key, stops the process at startup. It is a table of its own, not a key under `[recall]`, which configures the recall tier.
+**Why `similar_signals` is off by default.** Against identical-text skipping alone, the `Semantic`-edge and cosine signals added 3 answer facets over the 16 cells with injected copies, and lost 42 over the 16 cells with labelled related-but-different facts. Every wrong skip came from five such pairs that the write path had merged with a `Semantic` edge (two names swapped, a default moved, an exception inverted, a value given in words), which the text guards do not see. Turn it on only where near-copies are common and related facts are declared contradictory with `against`.
+
+`skip_redundant` and `similar_signals` must be `true` or `false`, and `similar_signals = true` needs `skip_redundant = true`; anything else, or an unknown key, stops the process at startup. It is a table of its own, not a key under `[recall]`, which configures the recall tier.
 
 ## Store
 

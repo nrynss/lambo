@@ -190,18 +190,31 @@ async fn a_write_never_merges_into_what_it_is_against() {
 
 /// #181 over the merge path: the #179 shape (a newer fact, a close
 /// rewording, declared `against` the stale one) written through hybrid
-/// derive, then recalled with `[selection] skip_redundant` and a cosine
-/// threshold every pair clears. Both facts are emitted, the stale one
-/// first, as without the rule. The pair also differs in an identifier
-/// (`llama.cpp`), so the second, identifier-free pair isolates the
-/// `Contradicts` veto: written without `against` it merges (a `Semantic`
-/// edge) and its rewording is skipped; written `against`, both stay.
+/// derive, then recalled with `[selection] skip_redundant`, under both
+/// configurations: the shipped default (identical content only) and
+/// `similar_signals = true` with a cosine threshold every pair clears.
+/// Both facts are emitted, the stale one first, as without the rule. The
+/// pair also differs in an identifier (`llama.cpp`), so the second,
+/// identifier-free pair isolates the declaration: written `against`, the
+/// write path refuses the merge and the `Contradicts` veto stops the cosine
+/// signal, so both stay. Written without `against` it merges (a `Semantic`
+/// edge): `similar_signals = true` skips the rewording, the default keeps
+/// both.
 #[tokio::test]
 async fn a_contradiction_written_through_the_merge_path_is_never_skipped() {
     use crate::recall::redundancy::{Redundancy, RedundancySignal};
+    const DEFAULT: Redundancy = Redundancy {
+        threshold: -1.0,
+        similar: false,
+    };
+    const SIMILAR: Redundancy = Redundancy {
+        threshold: -1.0,
+        similar: true,
+    };
     async fn recall(
         pairs: &[(&str, &str)],
         declare: bool,
+        config: Redundancy,
     ) -> Vec<(Vec<NodeId>, Vec<NodeId>, Vec<RedundancySignal>)> {
         let mut out = Vec::new();
         for (old_text, new_text) in pairs {
@@ -248,7 +261,7 @@ async fn a_contradiction_written_through_the_merge_path_is_never_skipped() {
                 },
                 crate::config::RecallWeights::default(),
                 crate::Config::default().canonization_edge_min_age,
-                Some(Redundancy { threshold: -1.0 }),
+                Some(config),
                 chrono::Utc::now(),
                 crate::recall::assemble::default_token_count,
             );
@@ -269,22 +282,33 @@ async fn a_contradiction_written_through_the_merge_path_is_never_skipped() {
     const NEW: &str = "the dogfood embedder is candle bge-m3";
     const PLAIN_OLD: &str = "the dogfood embedder runs on the GPU";
     const PLAIN_NEW: &str = "the dogfood embedder runs on the GPU now";
-    for (hits, [old, new, _], skipped) in recall(&[(OLD, NEW), (PLAIN_OLD, PLAIN_NEW)], true)
-        .await
-        .into_iter()
-        .map(|(h, ids, s)| (h, [ids[0], ids[1], ids[2]], s))
-    {
-        assert_eq!(hits, vec![old, new], "both facts, stale first");
-        assert!(skipped.is_empty());
+    for config in [DEFAULT, SIMILAR] {
+        for (hits, [old, new, _], skipped) in
+            recall(&[(OLD, NEW), (PLAIN_OLD, PLAIN_NEW)], true, config)
+                .await
+                .into_iter()
+                .map(|(h, ids, s)| (h, [ids[0], ids[1], ids[2]], s))
+        {
+            assert_eq!(hits, vec![old, new], "both facts, stale first: {config:?}");
+            assert!(skipped.is_empty(), "{config:?}");
+        }
     }
-    let undeclared = recall(&[(PLAIN_OLD, PLAIN_NEW)], false).await;
+    let undeclared = recall(&[(PLAIN_OLD, PLAIN_NEW)], false, SIMILAR).await;
     let (hits, ids, skipped) = &undeclared[0];
     assert_eq!(
         hits,
         &vec![ids[0], ids[2]],
-        "the merged rewording is skipped"
+        "similar_signals: the merged rewording is skipped"
     );
     assert_eq!(skipped, &vec![RedundancySignal::SemanticEdge]);
+    let undeclared = recall(&[(PLAIN_OLD, PLAIN_NEW)], false, DEFAULT).await;
+    let (hits, ids, skipped) = &undeclared[0];
+    assert_eq!(
+        hits,
+        &vec![ids[0], ids[1]],
+        "the default: a Semantic edge alone is not redundancy"
+    );
+    assert!(skipped.is_empty());
 }
 
 /// A hit vetoed for being `against` does not stop a merge into another,

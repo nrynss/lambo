@@ -86,7 +86,31 @@ fn edge(n: u64, source: NodeId, target: NodeId, edge_type: EdgeType) -> Edge {
     }
 }
 
+/// The signal under `[selection] skip_redundant = true, similar_signals =
+/// true` at `threshold`: every signal counts.
 fn signal(g: &Graph, threshold: f64, a: u64, b: u64) -> Option<RedundancySignal> {
+    signal_under(
+        g,
+        Redundancy {
+            threshold,
+            similar: true,
+        },
+        a,
+        b,
+    )
+}
+
+/// The signal under the shipped default (`skip_redundant = true` alone):
+/// identical content only, whatever the threshold.
+fn default_signal(g: &Graph, threshold: f64, a: u64, b: u64) -> Option<RedundancySignal> {
+    let selection = RecallSelection {
+        skip_redundant: true,
+        ..RecallSelection::default()
+    };
+    signal_under(g, Redundancy::of(&selection, threshold).unwrap(), a, b)
+}
+
+fn signal_under(g: &Graph, r: Redundancy, a: u64, b: u64) -> Option<RedundancySignal> {
     let concept = |n: u64| match g.node(id(n)) {
         Some(crate::types::Node::Concept(c)) => c,
         _ => panic!("concept {n}"),
@@ -96,7 +120,70 @@ fn signal(g: &Graph, threshold: f64, a: u64, b: u64) -> Option<RedundancySignal>
         normalized_content(&a.content),
         normalized_content(&b.content),
     );
-    Redundancy { threshold }.signal(g, (a, &an), (b, &bn))
+    r.signal(g, (a, &an), (b, &bn))
+}
+
+#[test]
+fn the_selection_defaults_to_identical_content_only() {
+    assert_eq!(
+        RecallSelection::default(),
+        RecallSelection {
+            skip_redundant: false,
+            similar_signals: false
+        }
+    );
+    assert_eq!(Redundancy::of(&RecallSelection::default(), 0.85), None);
+    let on = RecallSelection {
+        skip_redundant: true,
+        ..RecallSelection::default()
+    };
+    assert_eq!(
+        Redundancy::of(&on, 0.85),
+        Some(Redundancy {
+            threshold: 0.85,
+            similar: false
+        })
+    );
+    assert!(on.validate().is_ok());
+    assert!(RecallSelection {
+        skip_redundant: false,
+        similar_signals: true
+    }
+    .validate()
+    .is_err());
+}
+
+/// The shipped default does not skip a pair joined only by a `Semantic`
+/// edge, or only by cosine, however low the threshold; identical content
+/// still is.
+#[test]
+fn the_default_ignores_a_semantic_edge_only_or_cosine_only_pair() {
+    let mut g = graph(&[
+        concept(
+            1,
+            "lease ttl is long",
+            ConceptType::Logic,
+            Some(vec![1.0, 0.0]),
+        ),
+        concept(2, "the lease lasts long", ConceptType::Logic, None),
+        concept(
+            3,
+            "leases last long",
+            ConceptType::Logic,
+            Some(vec![1.0, 0.0]),
+        ),
+        concept(4, "lease ttl is long", ConceptType::Entity, None),
+    ]);
+    g.upsert_edge(edge(1, id(2), id(1), EdgeType::Semantic))
+        .unwrap();
+    assert_eq!(signal(&g, 0.85, 1, 2), Some(RedundancySignal::SemanticEdge));
+    assert_eq!(default_signal(&g, 0.85, 1, 2), None, "edge only");
+    assert_eq!(signal(&g, -1.0, 1, 3), Some(RedundancySignal::Cosine));
+    assert_eq!(default_signal(&g, -1.0, 1, 3), None, "cosine only");
+    assert_eq!(
+        default_signal(&g, 0.85, 1, 4),
+        Some(RedundancySignal::SameContent)
+    );
 }
 
 #[test]
@@ -199,6 +286,7 @@ fn identical_content_across_types_is_the_same_content_signal() {
     );
 }
 
+/// Under `similar_signals = true`.
 #[test]
 fn a_semantic_edge_either_way_is_the_edge_signal() {
     let mut g = graph(&[
@@ -219,6 +307,7 @@ fn a_semantic_edge_either_way_is_the_edge_signal() {
     assert_eq!(signal(&g, 0.85, 1, 3), None, "no edge, no vector");
 }
 
+/// Under `similar_signals = true`.
 #[test]
 fn cosine_needs_two_contract_vectors_and_the_threshold() {
     let g = graph(&[
@@ -239,6 +328,7 @@ fn cosine_needs_two_contract_vectors_and_the_threshold() {
     assert_eq!(signal(&g, 0.5, 1, 4), None);
 }
 
+/// Under `similar_signals = true`.
 #[test]
 fn a_session_without_a_contract_gives_no_cosine_evidence() {
     let mut g = Graph::new(sid());
@@ -259,6 +349,8 @@ fn a_session_without_a_contract_gives_no_cosine_evidence() {
     assert_eq!(signal(&g, 0.0, 1, 2), None);
 }
 
+/// Under both configurations: the default (identical content only) and
+/// `similar_signals = true` (every signal).
 #[test]
 fn a_contradicts_edge_either_way_vetoes_every_signal() {
     let text = "the dogfood embedder is candle BGE-M3";
@@ -270,15 +362,22 @@ fn a_contradicts_edge_either_way_vetoes_every_signal() {
         g.upsert_edge(edge(1, id(1), id(2), EdgeType::Semantic))
             .unwrap();
         assert_eq!(signal(&g, 0.5, 1, 2), Some(RedundancySignal::SameContent));
+        assert_eq!(
+            default_signal(&g, 0.5, 1, 2),
+            Some(RedundancySignal::SameContent)
+        );
         g.upsert_edge(edge(2, id(source), id(target), EdgeType::Contradicts))
             .unwrap();
         assert!(never_redundant(&g, id(1), id(2)));
         assert!(never_redundant(&g, id(2), id(1)));
         assert_eq!(signal(&g, 0.5, 1, 2), None);
         assert_eq!(signal(&g, 0.5, 2, 1), None);
+        assert_eq!(default_signal(&g, 0.5, 1, 2), None);
     }
 }
 
+/// Under `similar_signals = true`, the only configuration in which the
+/// edge and cosine signals fire.
 #[test]
 fn different_identifiers_digits_or_negation_veto_the_edge_and_cosine_signals() {
     let v = Some(vec![1.0, 0.0]);

@@ -10,7 +10,8 @@
 //!
 //! ## The rule (skip if redundant)
 //!
-//! Opt-in (`[selection] skip_redundant = true`, [`RecallSelection`]).
+//! Opt-in (`[selection] skip_redundant = true`, [`RecallSelection`]; the
+//! signals beyond identical content need `similar_signals = true` too).
 //! After final scoring, assembly walks its members in recall order exactly
 //! as before. Within the first [`window`]`(top_k)` ordinary members (at most
 //! [`WINDOW_MAX`]), a member redundant with a hit already taken is skipped
@@ -37,12 +38,22 @@
 //!    concept types. Required, not a fallback: the store's existing
 //!    duplicates carry no `Semantic` edge. `canonical_key` is not reused: it
 //!    sorts tokens, stems words and drops stopwords, so "X replaces Y" and
-//!    "Y replaces X" share a key.
+//!    "Y replaces X" share a key. **The only signal by default.**
+//!
+//! Only under `[selection] similar_signals = true`:
+//!
 //! 2. **A `Semantic` edge** between the two, in either direction.
 //! 3. **Cosine** at or above the session's effective
 //!    `semantic_match_threshold` (the #87 calibrated or derived one), when
 //!    both members carry a vector of the session's embedding contract. A
 //!    member without one gives no cosine evidence; nothing is guessed.
+//!
+//! The two are off by default (owner decision, 2026-10-28). Against the
+//! same-content-only control on the #190 set they added 3 facets over the
+//! 16 injected-duplicate cells and lost 42 over the 16 labelled
+//! related-but-distinct cells, every wrong skip from one of five pairs
+//! hybrid derive had merged at write time (`p-can-02-rbd1`,
+//! `p-can-02-rbd2`, `p-can-03-rbd1`, `p-con-05-rbd1`, `p-pro-01-rbd1`).
 //!
 //! ## Never redundant
 //!
@@ -88,9 +99,30 @@ pub fn window(top_k: usize) -> usize {
 pub struct RecallSelection {
     /// Skip a member redundant with a hit already taken, so the next
     /// distinct member fills its slot. Default `false`: assembly takes the
-    /// first `top_k` members in score order, as before.
+    /// first `top_k` members in score order, as before. On its own it uses
+    /// the same-content signal only.
     #[serde(default)]
     pub skip_redundant: bool,
+    /// Also count a `Semantic` edge and cosine at or above the session's
+    /// merge threshold as redundancy. Default `false`: on the #190 set they
+    /// added 3 facets over 16 injected-duplicate cells and cost 42 over 16
+    /// related-but-distinct cells, every wrong skip from a pair the write
+    /// path had merged (`evidence/issue-181/`). Needs `skip_redundant`.
+    #[serde(default)]
+    pub similar_signals: bool,
+}
+
+impl RecallSelection {
+    /// Refuse `similar_signals` without `skip_redundant`, which would
+    /// otherwise read as on while doing nothing.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.similar_signals && !self.skip_redundant {
+            return Err(
+                "[selection] similar_signals = true needs skip_redundant = true".to_string(),
+            );
+        }
+        Ok(())
+    }
 }
 
 /// Which signal found a skipped member redundant (cheapest first).
@@ -191,18 +223,33 @@ pub fn never_redundant(graph: &Graph, a: NodeId, b: NodeId) -> bool {
     crate::daemon::contradiction::contradicts_either_way(graph, a, b)
 }
 
-/// The redundancy test of one session's recalls: its effective merge
-/// threshold for the cosine signal.
+/// The redundancy test of one session's recalls: which signals count, and
+/// its effective merge threshold for the cosine signal.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Redundancy {
-    /// Cosine at or above which two vectors are the same memory.
+    /// Cosine at or above which two vectors are the same memory. Read only
+    /// when `similar` is set.
     pub(crate) threshold: f64,
+    /// `[selection] similar_signals`: the `Semantic`-edge and cosine
+    /// signals count too. Without it only the same content does.
+    pub(crate) similar: bool,
 }
 
 impl Redundancy {
+    /// The test a session under `selection` applies, `None` when it does
+    /// not skip redundant members (the default). `threshold` is the
+    /// session's effective merge threshold.
+    pub(crate) fn of(selection: &RecallSelection, threshold: f64) -> Option<Self> {
+        selection.skip_redundant.then_some(Self {
+            threshold,
+            similar: selection.similar_signals,
+        })
+    }
+
     /// The first signal that finds `b` redundant with `a`, cheapest first,
     /// or `None`; `None` too for a pair [`never_redundant`] or
-    /// [`distinct_claims`] rules out. `norm` is each one's
+    /// [`distinct_claims`] rules out. Without `similar`, only
+    /// [`RedundancySignal::SameContent`] is tried. `norm` is each one's
     /// [`normalized_content`].
     pub(crate) fn signal(
         &self,
@@ -215,6 +262,8 @@ impl Redundancy {
         }
         let signal = if a_norm == b_norm {
             RedundancySignal::SameContent
+        } else if !self.similar {
+            return None;
         } else if graph.edge_between(a.id, b.id, EdgeType::Semantic).is_some()
             || graph.edge_between(b.id, a.id, EdgeType::Semantic).is_some()
         {

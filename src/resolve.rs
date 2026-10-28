@@ -1404,7 +1404,8 @@ mod tests {
     }
 
     /// #181: `[selection]` reaches `Memory`'s `Config`; no table, or an
-    /// empty one, leaves the rule off, and an unknown key is refused.
+    /// empty one, leaves the rule off; `similar_signals` is off unless set,
+    /// and refused without `skip_redundant`; an unknown key is refused.
     #[test]
     #[cfg(all(feature = "store-memory", feature = "embed-fixture"))]
     fn selection_table_reaches_config() {
@@ -1421,6 +1422,25 @@ mod tests {
         )
         .unwrap();
         assert!(on.config.recall_selection.skip_redundant);
+        assert!(
+            !on.config.recall_selection.similar_signals,
+            "identical content only by default"
+        );
+        let similar = resolve_backends(
+            LamboFile::from_toml_str(&format!(
+                "{base}[selection]\nskip_redundant = true\nsimilar_signals = true\n"
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(similar.config.recall_selection.similar_signals);
+        let Err(err) = resolve_backends(
+            LamboFile::from_toml_str(&format!("{base}[selection]\nsimilar_signals = true\n"))
+                .unwrap(),
+        ) else {
+            panic!("similar_signals without skip_redundant must be refused");
+        };
+        assert!(err.to_string().contains("similar_signals"), "{err}");
         assert!(
             LamboFile::from_toml_str(&format!("{base}[selection]\nskip_redundnt = true\n"))
                 .is_err()

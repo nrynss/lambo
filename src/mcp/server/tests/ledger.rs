@@ -1122,7 +1122,8 @@ fn i1_the_recall_line_names_a_stale_citation() {
     assert_eq!(facts["warning_count"], json!(2));
 }
 
-/// #181 over the real tool: with `[selection] skip_redundant`, one text
+/// #181 over the real tool: with `[selection] skip_redundant` (the shipped
+/// default, identical content only), one text
 /// written as an Observation and then as an Entity comes back once; the
 /// kept hit names the other in `content[0]` (`also <id>`), in its
 /// structured hit and on its ledger line, and no other hit carries the key.
@@ -1133,6 +1134,7 @@ async fn i1_a_skipped_duplicate_is_named_in_the_response_and_the_ledger() {
     let config = crate::Config {
         recall_selection: crate::recall::redundancy::RecallSelection {
             skip_redundant: true,
+            ..Default::default()
         },
         ..crate::Config::default()
     };

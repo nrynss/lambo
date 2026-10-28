@@ -62,7 +62,12 @@ async fn session(name: &str, skip_redundant: bool, duplicated: bool) -> Result<M
     .map_err(|e| e.to_string())?;
     let resolved = lambo::resolve::resolve_backends(file).map_err(|e| e.to_string())?;
     let mut config = resolved.config.clone();
-    config.recall_selection = RecallSelection { skip_redundant };
+    // Every signal on: the costlier configuration, so the timing bounds
+    // the shipped default (identical content only) from above.
+    config.recall_selection = RecallSelection {
+        skip_redundant,
+        similar_signals: skip_redundant,
+    };
     config.daemon_tick_interval = Duration::from_secs(3600);
     let mem = Memory::builder()
         .session(name)

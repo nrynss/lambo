@@ -241,7 +241,7 @@ list-all returns every memo [Logic] (score 1.38, id 4bf3835a)
 * **Same scope as the contradiction line.** It stays inside its session, a layer hit's line starts with the layer's name in a merged recall, and a dependency question (graph traversal) carries none.
 * Its annotation kind is `rests_on_contradicted`, in the web portal's REST API (`/api/recall`'s `hits[].annotations`) and on the `--ledger` recall line. The line is in `warnings` and the context; `lambo session verify` reports it by that kind.
 
-**Duplicate hits.** When the operator turns on `[selection] skip_redundant` (off by default, see [Configuration](/config#redundancy-aware-selection)), recall skips a hit that repeats one it already took, and the next distinct hit takes its slot (#181). A repeat is the same text (case, spacing and invisible characters aside, whatever the two concept types), two concepts joined by a semantic match, or vectors at or above the session's merge threshold. The hit kept names what it replaced, after its id:
+**Duplicate hits.** When the operator turns on `[selection] skip_redundant` (off by default, see [Configuration](/config#redundancy-aware-selection)), recall skips a hit that repeats one it already took, and the next distinct hit takes its slot (#181). A repeat is the same text (case, spacing and invisible characters aside, whatever the two concept types); with `[selection] similar_signals = true` (off by default), also two concepts joined by a semantic match, or vectors at or above the session's merge threshold. The hit kept names what it replaced, after its id:
 
 ```text
 dogfood store carries no durable embedding for 92 of 100 concepts [Entity] (score 1.38, id 4bf3835a, also 82c3dcb0)

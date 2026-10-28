@@ -215,12 +215,13 @@
   distinct hit gets the slot; then `top_k` and `max_tokens` apply as
   before. Redundant means the same text once case, spacing, Unicode
   composition and invisible characters are set aside (across concept
-  types; `canonical_key` is not used, since it sorts and stems words), a
-  `Semantic` edge, or vectors of the session's contract at or above its
-  effective merge threshold (the #87 calibrated or labelled-pairs one; the
-  one-shot readers and `lambo session verify` use the calibrated row, as
-  they do not embed labelled pairs). A member without a vector is never
-  judged by cosine. A pair joined by `Contradicts` either way, or whose
+  types; `canonical_key` is not used, since it sorts and stems words).
+  **`similar_signals = true` (off by default, needs `skip_redundant`)**
+  also counts a `Semantic` edge, or vectors of the session's contract at
+  or above its effective merge threshold (the #87 calibrated or
+  labelled-pairs one; the one-shot readers and `lambo session verify` use
+  the calibrated row, as they do not embed labelled pairs). A member
+  without a vector is never judged by cosine. A pair joined by `Contradicts` either way, or whose
   texts differ in an identifier, a digit or a count of negation words, is
   never redundant. Forced hits (hot-list, #19 forcing and companions, kept
   reservation holders) and hits carrying a warning line of their own
@@ -240,13 +241,17 @@
   dedupe is unchanged. `lambo session verify` replays the setting and
   counts a skipped hit as merged, not lost. Nothing is written or merged:
   this is selection only. On the #190 set under BGE-M3, with copies and
-  rewordings injected, the distinct memories in a 500-token context at
-  `top_k = 3` rose from 1.45 to 2.18 (dev) and 2.31 (held-out); with
-  related-but-distinct partners and no declared contradiction it dropped
-  a few (polarity, exception, quantity), every one through a `Semantic`
-  edge the write path had put between the pair, and none once the
-  contradiction was declared. MMR and facility location were compared
-  offline and did not beat it. In-process recall cost is a few
+  rewordings injected, the shipped default (identical text only) raised
+  the distinct memories in a 500-token context at `top_k = 3` from 1.45
+  to 2.04 (dev) and 2.03 (held-out), and skipped no related-but-distinct
+  partner. The similarity signals are off by default because, against
+  that control, they added 3 answer facets over the 16 cells with
+  injected copies and lost 42 over the 16 cells with labelled
+  related-but-distinct partners, every wrong skip from one of five pairs
+  the write path had merged with a `Semantic` edge (`p-can-02-rbd1`,
+  `p-can-02-rbd2`, `p-can-03-rbd1`, `p-con-05-rbd1`, `p-pro-01-rbd1`).
+  MMR and facility location were compared offline and did not beat
+  either. In-process recall cost is a few
   microseconds. New `recall::redundancy` module (`RecallSelection`,
   `RedundancySignal`, `RedundantSkip`, `normalized_content`,
   `negation_count`, `distinct_claims`, `never_redundant`, `window`);

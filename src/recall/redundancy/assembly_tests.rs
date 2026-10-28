@@ -1,6 +1,11 @@
 //! #181 through assembly: which members a recall emits with
 //! `[selection] skip_redundant`, what the kept hit says, and that nothing
 //! changes when the rule is off or finds nothing.
+//!
+//! Every test runs under the shipped default ([`DEFAULT`], identical
+//! content only) unless it says otherwise; one that needs the `Semantic`
+//! edge or cosine signal runs under `similar_signals = true` ([`SIMILAR`])
+//! and says so.
 
 use std::collections::HashMap;
 
@@ -137,6 +142,20 @@ impl Fixture {
     }
 }
 
+/// `[selection] skip_redundant = true` alone, the shipped default:
+/// identical content only.
+const DEFAULT: Redundancy = Redundancy {
+    threshold: 0.85,
+    similar: false,
+};
+
+/// `[selection] skip_redundant = true, similar_signals = true` at BGE-M3's
+/// merge threshold: every signal.
+const SIMILAR: Redundancy = Redundancy {
+    threshold: 0.85,
+    similar: true,
+};
+
 /// One recall's knobs.
 struct Run<'a> {
     /// `(id, daemon score)`: the expanded members and their rank.
@@ -148,14 +167,21 @@ struct Run<'a> {
 }
 
 impl<'a> Run<'a> {
+    /// Under the shipped default ([`DEFAULT`]).
     fn new(ranked: &'a [(u64, f64)], top_k: usize) -> Self {
         Self {
             ranked,
             top_k,
             max_tokens: 10_000,
             hot: HashMap::new(),
-            redundancy: Some(Redundancy { threshold: 0.85 }),
+            redundancy: Some(DEFAULT),
         }
+    }
+
+    /// Under `similar_signals = true` ([`SIMILAR`]).
+    fn similar(mut self) -> Self {
+        self.redundancy = Some(SIMILAR);
+        self
     }
 
     fn off(mut self) -> Self {
@@ -233,13 +259,15 @@ fn observed(r: &DetailedRecall) -> (String, String, Vec<String>, String) {
 
 const RANKED4: [(u64, f64); 4] = [(1, 0.9), (2, 0.8), (3, 0.7), (4, 0.6)];
 
-/// (1) Two members joined by a `Semantic` edge: only the higher-scored is
-/// emitted, and the next distinct member takes the freed slot.
+/// (1) Under `similar_signals = true`, two members joined by a `Semantic`
+/// edge: only the higher-scored is emitted, and the next distinct member
+/// takes the freed slot. Under the default the edge is not a signal, so
+/// both are emitted, as with the rule off.
 #[test]
 fn a_semantic_edge_pair_keeps_the_higher_and_the_next_distinct_fills_the_slot() {
     let mut f = Fixture::distinct(4);
     f.edge(1, 2, 1, EdgeType::Semantic);
-    let on = Run::new(&RANKED4, 2).go(&f.g);
+    let on = Run::new(&RANKED4, 2).similar().go(&f.g);
     assert_eq!(ids(&on), vec![uid(1), uid(3)]);
     assert_eq!(
         skipped_for(&on, 1),
@@ -247,6 +275,8 @@ fn a_semantic_edge_pair_keeps_the_higher_and_the_next_distinct_fills_the_slot() 
     );
     let off = Run::new(&RANKED4, 2).off().go(&f.g);
     assert_eq!(ids(&off), vec![uid(1), uid(2)]);
+    let default = Run::new(&RANKED4, 2).go(&f.g);
+    assert_eq!(observed(&default), observed(&off));
 }
 
 /// (2) The efficacy run's shape: one text stored as an Entity and as an
@@ -383,8 +413,9 @@ fn a_duplicate_with_a_warning_of_its_own_is_not_skipped() {
     assert_eq!(ids(&on), vec![uid(1), uid(2)]);
 }
 
-/// (4) A member without a vector gives no cosine evidence, however low
-/// the threshold; with a vector the same pair is redundant.
+/// (4) Under `similar_signals = true` at a -1 threshold: a member without
+/// a vector gives no cosine evidence; with a vector the same pair is
+/// redundant. Under the default the cosine pair is not redundant either.
 #[test]
 fn a_member_without_a_vector_is_not_redundant_by_cosine() {
     let rows = |second: Option<[f32; 2]>| {
@@ -396,7 +427,10 @@ fn a_member_without_a_vector_is_not_redundant_by_cosine() {
     };
     let ranked = [(1, 0.9), (2, 0.8), (3, 0.7)];
     let mut run = Run::new(&ranked, 2);
-    run.redundancy = Some(Redundancy { threshold: -1.0 });
+    run.redundancy = Some(Redundancy {
+        threshold: -1.0,
+        similar: true,
+    });
     assert_eq!(ids(&run.go(&rows(None).g)), vec![uid(1), uid(2)]);
     let with = run.go(&rows(Some([1.0, 0.0])).g);
     assert_eq!(ids(&with), vec![uid(1), uid(3)]);
@@ -404,10 +438,17 @@ fn a_member_without_a_vector_is_not_redundant_by_cosine() {
         skipped_for(&with, 1),
         vec![skip(2, RedundancySignal::Cosine)]
     );
+    run.redundancy = Some(Redundancy {
+        threshold: -1.0,
+        similar: false,
+    });
+    let default = run.go(&rows(Some([1.0, 0.0])).g);
+    assert_eq!(ids(&default), vec![uid(1), uid(2)], "cosine only");
 }
 
 /// (5) A `Contradicts` edge in either direction keeps both, under the
-/// same-content, edge and cosine signals at once.
+/// default (the same content) and under `similar_signals = true` (the
+/// same content, edge and cosine signals at once).
 #[test]
 fn a_contradicts_pair_is_never_skipped() {
     for (source, target) in [(1, 2), (2, 1)] {
@@ -418,13 +459,17 @@ fn a_contradicts_pair_is_never_skipped() {
         ]);
         f.edge(1, 2, 1, EdgeType::Semantic)
             .edge(2, source, target, EdgeType::Contradicts);
-        let on = Run::new(&[(1, 0.9), (2, 0.8), (3, 0.7)], 2).go(&f.g);
-        assert_eq!(ids(&on), vec![uid(1), uid(2)], "{source} -> {target}");
+        let ranked = [(1, 0.9), (2, 0.8), (3, 0.7)];
+        for run in [Run::new(&ranked, 2), Run::new(&ranked, 2).similar()] {
+            let on = run.go(&f.g);
+            assert_eq!(ids(&on), vec![uid(1), uid(2)], "{source} -> {target}");
+        }
     }
 }
 
-/// (6) Texts that differ in an identifier, a number or a negation are
-/// never redundant, even with a `Semantic` edge and equal vectors.
+/// (6) Under `similar_signals = true`: texts that differ in an identifier,
+/// a number or a negation are never redundant, even with a `Semantic` edge
+/// and equal vectors.
 #[test]
 fn differing_identifiers_digits_or_negation_are_never_skipped() {
     for (a, b) in [
@@ -445,13 +490,16 @@ fn differing_identifiers_digits_or_negation_are_never_skipped() {
             (3, "a third fact", ConceptType::Logic, None),
         ]);
         f.edge(1, 2, 1, EdgeType::Semantic);
-        let on = Run::new(&[(1, 0.9), (2, 0.8), (3, 0.7)], 2).go(&f.g);
+        let on = Run::new(&[(1, 0.9), (2, 0.8), (3, 0.7)], 2)
+            .similar()
+            .go(&f.g);
         assert_eq!(ids(&on), vec![uid(1), uid(2)], "{a:?} / {b:?}");
     }
 }
 
-/// (7) Off, or on with nothing redundant in the window, the result is
-/// byte-identical: hits, detail (wire shape), context and warnings.
+/// (7) Off, or on (under either configuration) with nothing redundant in
+/// the window, the result is byte-identical: hits, detail (wire shape),
+/// context and warnings.
 #[test]
 fn off_or_with_nothing_redundant_the_result_is_byte_identical() {
     let mut f = Fixture::new(&[
@@ -461,23 +509,25 @@ fn off_or_with_nothing_redundant_the_result_is_byte_identical() {
         (4, "delta fact four", ConceptType::Logic, Some([0.6, 0.8])),
     ]);
     f.edge(1, 1, 2, EdgeType::Dependency);
-    let mut on = Run::new(&RANKED4, 3);
-    on.max_tokens = 30;
     let mut off = Run::new(&RANKED4, 3).off();
     off.max_tokens = 30;
-    assert_eq!(observed(&on.go(&f.g)), observed(&off.go(&f.g)));
+    for mut on in [Run::new(&RANKED4, 3), Run::new(&RANKED4, 3).similar()] {
+        on.max_tokens = 30;
+        assert_eq!(observed(&on.go(&f.g)), observed(&off.go(&f.g)));
+    }
     // A redundant pair outside the window changes nothing either: top_k 1
     // checks four members, and the duplicate is the fifth.
     let mut g = Fixture::distinct(5);
     g.edge(1, 5, 1, EdgeType::Semantic);
     let ranked = [(1, 0.9), (2, 0.8), (3, 0.7), (4, 0.6), (5, 0.5)];
-    let on = Run::new(&ranked, 1).go(&g.g);
+    let on = Run::new(&ranked, 1).similar().go(&g.g);
     let off = Run::new(&ranked, 1).off().go(&g.g);
     assert_eq!(observed(&on), observed(&off));
 }
 
-/// (7) The shipped demo golden renders byte-for-byte with the rule on: the
-/// fixture session has no redundant pair in its window.
+/// (7) The shipped demo golden renders byte-for-byte with the rule on,
+/// under either configuration: the fixture session has no redundant pair
+/// in its window.
 #[cfg(feature = "fixtures")]
 #[test]
 fn the_demo_golden_is_byte_identical_with_the_rule_on() {
@@ -541,11 +591,13 @@ fn the_demo_golden_is_byte_identical_with_the_rule_on() {
                 default_token_count,
             )
         };
-        let on = run(Some(Redundancy { threshold: 0.85 }));
-        assert!(on.detailed.iter().all(|d| d.skipped_redundant.is_empty()));
-        assert_eq!(observed(&on), observed(&run(None)), "{text}");
-        if text == "update user schema" {
-            assert_eq!(on.context, golden);
+        for config in [DEFAULT, SIMILAR] {
+            let on = run(Some(config));
+            assert!(on.detailed.iter().all(|d| d.skipped_redundant.is_empty()));
+            assert_eq!(observed(&on), observed(&run(None)), "{text}");
+            if text == "update user schema" {
+                assert_eq!(on.context, golden);
+            }
         }
     }
 }
@@ -576,9 +628,10 @@ fn equal_scores_keep_the_copy_the_tie_break_ranks_first() {
     }
 }
 
-/// (9) A member that came in through phase-2 expansion (over the
-/// `Semantic` edge, with no phase-1 relevance) is treated like a direct
-/// hit: skipped when it duplicates a higher hit, kept when it ranks first.
+/// (9) Under `similar_signals = true`: a member that came in through
+/// phase-2 expansion (over the `Semantic` edge, with no phase-1 relevance)
+/// is treated like a direct hit: skipped when it duplicates a higher hit,
+/// kept when it ranks first.
 #[test]
 fn expanded_members_are_treated_like_direct_hits() {
     let mut f = Fixture::new(&[
@@ -615,7 +668,7 @@ fn expanded_members_are_treated_like_direct_hits() {
             },
             RecallWeights::default(),
             crate::Config::default().canonization_edge_min_age,
-            Some(Redundancy { threshold: 0.85 }),
+            Some(SIMILAR),
             ts(60),
             default_token_count,
         )

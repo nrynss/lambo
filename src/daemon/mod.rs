@@ -328,10 +328,9 @@ impl Daemon {
         // #181: the cosine signal compares against the session's effective
         // merge threshold, which a writer attach has already put in its
         // config and a reader's config carries from `reader_config`.
-        daemon.redundancy = config.recall_selection.skip_redundant.then_some(
-            crate::recall::redundancy::Redundancy {
-                threshold: config.semantic_match_threshold,
-            },
+        daemon.redundancy = crate::recall::redundancy::Redundancy::of(
+            &config.recall_selection,
+            config.semantic_match_threshold,
         );
         daemon
     }

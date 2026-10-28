@@ -268,6 +268,7 @@ async fn open(db: &Path, embedder: Arc<dyn Embedder>, skip: bool) -> Result<Memo
     let mut config = resolved.config.clone();
     config.recall_selection = RecallSelection {
         skip_redundant: skip,
+        similar_signals: skip,
     };
     // An hour's tick: the warm-up cycle scores the session, and no later
     // cycle runs mid-measurement.

@@ -591,6 +591,7 @@ mod tests {
         let resolved = Config {
             recall_selection: RecallSelection {
                 skip_redundant: true,
+                similar_signals: true,
             },
             semantic_match_threshold: 0.8,
             ..Config::default()

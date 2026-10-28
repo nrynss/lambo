@@ -31,7 +31,12 @@ async fn session(
         .agent("agent-a")
         .config(Config {
             daemon_tick_interval: Duration::from_secs(3_600),
-            recall_selection: RecallSelection { skip_redundant },
+            // `similar_signals` stays at its default (off): these tests
+            // run the shipped configuration, identical content only.
+            recall_selection: RecallSelection {
+                skip_redundant,
+                ..RecallSelection::default()
+            },
             ..Config::default()
         })
         .flush_interval(Duration::from_secs(3_600))

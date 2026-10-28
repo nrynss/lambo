@@ -126,7 +126,9 @@ pub struct Config {
     #[serde(default)]
     pub recall_fusion: crate::recall::fusion::RecallFusion,
     /// #181: `[selection]`. Whether assembly skips a member redundant with
-    /// a hit already taken ([`crate::recall::redundancy`]). Off by default.
+    /// a hit already taken ([`crate::recall::redundancy`]), and whether the
+    /// similarity signals count beside identical content. Both off by
+    /// default.
     #[serde(default)]
     pub recall_selection: crate::recall::redundancy::RecallSelection,
 
@@ -315,6 +317,9 @@ impl Config {
     /// repeats the threshold check at the trust boundary.
     pub fn validate(&self) -> Result<(), LamboError> {
         self.recall_fusion.validate()?;
+        self.recall_selection
+            .validate()
+            .map_err(LamboError::Config)?;
         crate::store::validate_coverage_window(self.canonization_coverage_window)
             .map_err(|e| LamboError::Config(e.to_string()))?;
         if !self.semantic_match_threshold.is_finite()
@@ -858,8 +863,10 @@ mod tests {
         assert_eq!(c.default_traversal_depth, 2);
 
         assert_eq!(c.match_strategy, MatchStrategy::Hybrid);
-        // #181: redundancy-aware selection is opt-in.
+        // #181: redundancy-aware selection is opt-in, and so are its
+        // similarity signals.
         assert!(!c.recall_selection.skip_redundant);
+        assert!(!c.recall_selection.similar_signals);
     }
 
     #[test]
@@ -1076,7 +1083,8 @@ mod tests {
     }
 
     /// #181: the example's commented `[selection]` block turns the rule on
-    /// once uncommented, and leaving it commented keeps it off.
+    /// once uncommented, with the similarity signals still off (the shipped
+    /// default), and leaving it commented keeps it off.
     #[test]
     fn lambo_file_example_selection_block_parses_when_uncommented() {
         let raw = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/lambo.example.toml"));
@@ -1091,7 +1099,9 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         let f = LamboFile::from_toml_str(&block).unwrap();
-        assert!(f.selection.expect("the block is a section").skip_redundant);
+        let selection = f.selection.expect("the block is a section");
+        assert!(selection.skip_redundant);
+        assert!(!selection.similar_signals, "{block}");
     }
 
     #[test]
