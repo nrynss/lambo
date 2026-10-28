@@ -766,6 +766,69 @@ fn a_contradicts_pair_is_never_skipped() {
     }
 }
 
+/// #198: under the default, two members with the same content joined by a
+/// `SuspectedSupersedes` edge in either direction are both kept. With the
+/// edge newer -> older pointing from the second-ranked member, only the
+/// veto keeps it; the other way the older one would also be kept as a
+/// member that may carry its own `possibly_superseded` line.
+#[test]
+fn a_suspected_supersession_pair_with_the_same_content_is_never_skipped() {
+    let rows = [
+        (1, EFFICACY, ConceptType::Entity, None),
+        (2, EFFICACY, ConceptType::Observation, None),
+        (3, "a third fact", ConceptType::Logic, None),
+    ];
+    let ranked = [(1, 0.9), (2, 0.8), (3, 0.7)];
+    let premise = Run::new(&ranked, 2).go(&Fixture::new(&rows).g);
+    assert_eq!(ids(&premise), vec![uid(1), uid(3)], "premise: a duplicate");
+    for (source, target) in [(1, 2), (2, 1)] {
+        let mut f = Fixture::new(&rows);
+        f.edge(1, source, target, EdgeType::SuspectedSupersedes);
+        let on = Run::new(&ranked, 2).go(&f.g);
+        assert_eq!(ids(&on), vec![uid(1), uid(2)], "{source} -> {target}");
+        assert!(on.detailed.iter().all(|d| d.skipped_redundant.is_empty()));
+    }
+}
+
+/// #198: under `similar_signals = true`, two members joined by both a
+/// `Semantic` edge and a `SuspectedSupersedes` edge in either direction
+/// are both kept, though the `Semantic` edge alone finds them redundant.
+#[test]
+fn a_suspected_supersession_pair_with_a_semantic_edge_is_never_skipped() {
+    let rows = [
+        (
+            1,
+            "the default recall fusion is max",
+            ConceptType::Logic,
+            None,
+        ),
+        (
+            2,
+            "the default recall fusion is rrf",
+            ConceptType::Logic,
+            None,
+        ),
+        (3, "a third fact", ConceptType::Logic, None),
+    ];
+    let ranked = [(1, 0.9), (2, 0.8), (3, 0.7)];
+    let mut semantic = Fixture::new(&rows);
+    semantic.edge(1, 1, 2, EdgeType::Semantic);
+    let premise = Run::new(&ranked, 2).similar().go(&semantic.g);
+    assert_eq!(ids(&premise), vec![uid(1), uid(3)], "premise: redundant");
+    assert_eq!(
+        skipped_for(&premise, 1),
+        vec![skip(2, RedundancySignal::SemanticEdge)]
+    );
+    for (source, target) in [(1, 2), (2, 1)] {
+        let mut f = Fixture::new(&rows);
+        f.edge(1, 1, 2, EdgeType::Semantic)
+            .edge(2, source, target, EdgeType::SuspectedSupersedes);
+        let on = Run::new(&ranked, 2).similar().go(&f.g);
+        assert_eq!(ids(&on), vec![uid(1), uid(2)], "{source} -> {target}");
+        assert!(on.detailed.iter().all(|d| d.skipped_redundant.is_empty()));
+    }
+}
+
 /// (6) Under `similar_signals = true`: texts that differ in an identifier,
 /// a number or a negation are never redundant, even with a `Semantic` edge
 /// and equal vectors.

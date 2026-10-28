@@ -58,9 +58,9 @@
 //!
 //! ## Never redundant
 //!
-//! Under any signal: a pair joined by a `Contradicts` edge either way
-//! ([`never_redundant`], the one predicate #198's `SuspectedSupersedes`
-//! extends), and a pair whose texts are different claims by their surface
+//! Under any signal: a pair joined by a `Contradicts` or (#198) a
+//! `SuspectedSupersedes` edge either way ([`never_redundant`]), and a pair
+//! whose texts are different claims by their surface
 //! ([`distinct_claims`]: different identifiers (snake_case, CamelCase,
 //! hex-like, all-caps, paths, versions) or digits of any script, a
 //! different count of negation words, a word against its opposite, or
@@ -412,15 +412,16 @@ pub fn distinct_claims(a: &str, b: &str) -> bool {
 
 /// Whether the graph records `a` and `b` as two different claims, so they
 /// are never redundant under any signal: a `Contradicts` edge either way
-/// ([`crate::daemon::contradiction::contradicts_either_way`]). A
-/// contradiction written as a close paraphrase can carry a `Semantic` edge
-/// too (the #179 repro); the newer fact must not be skipped as a duplicate
-/// of the stale one.
-///
-/// #198's `SuspectedSupersedes` edge belongs here as a second arm, so a
-/// suspected supersession is never redundant either.
+/// ([`crate::daemon::contradiction::contradicts_either_way`]), or a
+/// `SuspectedSupersedes` edge either way
+/// ([`crate::graph::suspected::is_suspected_pair`], owner decision on
+/// #198). A contradiction written as a close paraphrase can carry a
+/// `Semantic` edge too (the #179 repro), and a suspected pair is a near
+/// vector match by construction; either way the newer fact must not be
+/// skipped as a duplicate of the stale one.
 pub fn never_redundant(graph: &Graph, a: NodeId, b: NodeId) -> bool {
     crate::daemon::contradiction::contradicts_either_way(graph, a, b)
+        || crate::graph::suspected::is_suspected_pair(graph, a, b)
 }
 
 #[cfg(test)]

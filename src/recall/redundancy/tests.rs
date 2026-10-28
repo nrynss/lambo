@@ -521,6 +521,37 @@ fn a_contradicts_edge_either_way_vetoes_every_signal() {
     }
 }
 
+/// #198: a `SuspectedSupersedes` edge either way vetoes every signal,
+/// under both configurations, like `Contradicts`.
+#[test]
+fn a_suspected_supersedes_edge_either_way_vetoes_every_signal() {
+    let text = "the default recall fusion is max";
+    for (source, target) in [(1, 2), (2, 1)] {
+        let mut g = graph(&[
+            concept(1, text, ConceptType::Logic, Some(vec![1.0, 0.0])),
+            concept(2, text, ConceptType::Logic, Some(vec![1.0, 0.0])),
+        ]);
+        g.upsert_edge(edge(1, id(1), id(2), EdgeType::Semantic))
+            .unwrap();
+        assert_eq!(
+            default_signal(&g, 0.5, 1, 2),
+            Some(RedundancySignal::SameContent)
+        );
+        g.upsert_edge(edge(
+            2,
+            id(source),
+            id(target),
+            EdgeType::SuspectedSupersedes,
+        ))
+        .unwrap();
+        assert!(never_redundant(&g, id(1), id(2)));
+        assert!(never_redundant(&g, id(2), id(1)));
+        assert_eq!(signal(&g, 0.5, 1, 2), None);
+        assert_eq!(signal(&g, 0.5, 2, 1), None);
+        assert_eq!(default_signal(&g, 0.5, 1, 2), None);
+    }
+}
+
 /// Under `similar_signals = true`, the only configuration in which the
 /// edge and cosine signals fire.
 #[test]

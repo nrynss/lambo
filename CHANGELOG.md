@@ -30,8 +30,9 @@
   concept is collected or an `against`/`depends_on` between the two is
   written. It confers no score, dependents, blast radius, expansion,
   decay, GC connectivity or conflict agent; #207 never follows it, and
-  #181 must treat a pair as never redundant
-  (`graph::suspected::is_suspected_pair`). Only new writes are flagged:
+  #181's `[selection] skip_redundant` treats a pair as never redundant
+  (`recall::redundancy::never_redundant` calls
+  `graph::suspected::is_suspected_pair`). Only new writes are flagged:
   `lambo canon suspected --store <file> --session <s>` reports the pairs
   an existing store holds and records them with `--apply` (under the
   session's lease). Recall on real memory will be low: real dogfood
@@ -278,8 +279,10 @@
   labelled-pairs one; the one-shot readers and `lambo session verify`
   read the labelled-pairs threshold the store caches for the configured
   file, so they use the threshold a serve does). A member without a
-  vector is never judged by cosine. A pair joined by `Contradicts` either
-  way is never redundant, nor is one whose texts differ in an identifier
+  vector is never judged by cosine. A pair joined by `Contradicts` or by
+  #198's `SuspectedSupersedes` either way is never redundant (owner
+  decision on #198: the newer of a suspected pair is never skipped as a
+  copy of the stale one), nor is one whose texts differ in an identifier
   (snake_case, CamelCase, all-caps, paths, versions and file names, seven
   or more hex digits; case kept) or a digit of any script, negate a
   different number of times (negators, `n't` with any apostrophe,
@@ -289,7 +292,10 @@
   path's `same_identifiers`, which is unchanged. Forced hits (hot-list,
   #19 forcing and companions, kept reservation holders) and hits
   carrying a warning line of their own (hot-list or contradiction, #207
-  stale citation, #20 supersession, reservation) are never skipped; Canonical concepts still come first.
+  stale citation, #20 supersession, reservation) are never skipped, nor
+  is a hit a concept of its session is suspected of replacing (#198), so
+  its `possibly_superseded_by` field and line are not dropped; Canonical
+  concepts still come first.
   Only the first `min(20, 4 × top_k)` hits are checked, each against at
   most 20 taken. The kept hit names what it replaced in its label, `(score
   …, id …, also 5e6f7a8b)`, at most three ids and then `+N more`, so the
