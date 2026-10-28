@@ -122,11 +122,11 @@
   `Some(0.5)` or use `with_min_similarity`, which is unchanged. This keeps
   an explicit 0.50 from being read as unset.
 - **`Config` gains `recall_selection`, `LamboFile` gains `selection`, and
-  `LayeredHit` gains `skipped_redundant`** (#181). A `Config` or
-  `LamboFile` struct literal that names every field no longer compiles;
-  `..Default::default()` keeps compiling, and the defaults recall exactly
-  as before (`skip_redundant = false`). `LayeredHit` is
-  `#[non_exhaustive]`, so no caller builds one with a literal.
+  `LayeredHit` and `LayerCopy` gain `skipped_redundant`** (#181). A
+  `Config` or `LamboFile` struct literal that names every field no longer
+  compiles; `..Default::default()` keeps compiling, and the defaults
+  recall exactly as before (`skip_redundant = false`). `LayeredHit` and `LayerCopy`
+  are `#[non_exhaustive]`, so no caller builds one with a literal.
   `resolve::VerifyIo` gains `canary`, the `[embedder]` canary options the
   replay reads the cached merge threshold with.
 - **`Config` gains `recall_fusion`, `LamboFile` gains `fusion`,
@@ -224,10 +224,10 @@
   or above its effective merge threshold (the #87 calibrated or
   labelled-pairs one; the one-shot readers and `lambo session verify`
   read the labelled-pairs threshold the store caches for the configured
-  file, so they use the threshold a serve does). A member
-  without a vector is never judged by cosine. A pair joined by `Contradicts` either way, or whose
-  texts differ in an identifier, a digit or a count of negation words, is
-  never redundant. Forced hits (hot-list, #19 forcing and companions, kept
+  file, so they use the threshold a serve does). A member without a
+  vector is never judged by cosine. A pair joined by `Contradicts` either
+  way, or whose texts differ in an identifier, a digit or a count of
+  negation words, is never redundant. Forced hits (hot-list, #19 forcing and companions, kept
   reservation holders) and hits carrying a warning line of their own
   (hot-list or contradiction, #207 stale citation, #20 supersession,
   reservation) are never skipped; Canonical concepts still come first.
@@ -242,8 +242,9 @@
   the window, recall is byte-identical** (goldens included). A layered
   merge applies each session's setting inside that session's recall and
   keeps the `also` items after `from <session>`; across tiers the #33
-  dedupe is unchanged. `lambo session verify` replays the setting and
-  counts a skipped hit as merged, not lost. Nothing is written or merged:
+  dedupe is unchanged, and a copy it merges keeps what its own session
+  skipped for it (`also <id> in <session>`). `lambo session verify`
+  replays the setting and counts a skipped hit as merged, not lost. Nothing is written or merged:
   this is selection only. On the #190 set under BGE-M3, with copies and
   rewordings injected, the shipped default (identical text only) raised
   the distinct memories in a 500-token context at `top_k = 3` from 1.45

@@ -519,6 +519,30 @@ pub(crate) fn also_meta(skipped: &[RedundantSkip]) -> Vec<String> {
     meta
 }
 
+/// [`also_meta`] for a farther tier's copy merged into a layered hit: the
+/// members its own session skipped for it, `also <short id> in <session>`
+/// (at most [`ALSO_MENTIONS`], then `+N more in <session>`), so a reader
+/// knows which session each id resolves in. Empty for none.
+pub(crate) fn also_in_meta(skipped: &[RedundantSkip], session: &str) -> Vec<String> {
+    let mut meta: Vec<String> = skipped
+        .iter()
+        .take(ALSO_MENTIONS)
+        .map(|s| {
+            format!(
+                "also {} in {session}",
+                crate::recall::format::short_id(s.node_id)
+            )
+        })
+        .collect();
+    if skipped.len() > ALSO_MENTIONS {
+        meta.push(format!(
+            "+{} more in {session}",
+            skipped.len() - ALSO_MENTIONS
+        ));
+    }
+    meta
+}
+
 /// `skipped` as the wire and ledger carry it:
 /// `[{"node_id": "<uuid>", "signal": "same_content"}, …]`, in skip order.
 pub(crate) fn skips_json(skipped: &[RedundantSkip]) -> serde_json::Value {

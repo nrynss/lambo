@@ -646,7 +646,12 @@ fn side_hits(
         for copy in &hit.also {
             let s = copy.session.0.clone();
             let o = origin_of(&s, copy.node_id)?;
-            also.push((s, o));
+            also.push((s.clone(), o));
+            // #181: what the copy's session skipped as redundant with it
+            // merged into this hit with the copy.
+            for skip in &copy.skipped_redundant {
+                also.push((s.clone(), origin_of(&s, skip.node_id)?));
+            }
         }
         // #181: a member skipped as redundant with this hit is a copy merged
         // into it inside its own session, so it is reported (and counted

@@ -438,6 +438,97 @@ async fn a_redundancy_skip_is_replayed_and_is_not_a_loss() {
     assert!(pair.iter().all(|p| !q.lost_ids.contains(p)), "{q:#?}");
 }
 
+/// #181: when a layer's hit merges into a nearer tier's hit by layered
+/// dedupe, the members the layer's session skipped as redundant with it
+/// travel with the copy, so the report lists them in the kept hit's `also`
+/// and counts them as deduped, not lost. Beta serves as alpha's layer:
+/// beta's copy of Cargo.toml (20) merges into alpha's, and beta had skipped
+/// its ruling (12) for it.
+#[test]
+fn a_merged_copys_redundancy_skips_are_deduped_not_lost() {
+    use crate::recall::detail::DetailedHit;
+    use crate::recall::layered::{LayerCopy, LayeredHit};
+    use crate::recall::redundancy::{RedundancySignal, RedundantSkip};
+    use crate::types::{ConceptType, RecallHit};
+    let run = Run::new();
+    let (plan, split) = (run.plan(), run.split());
+    let origins = Origins::new(&split, &plan);
+    let recall_hit = |node_id: NodeId| RecallHit {
+        repo_scope: None,
+        node_id,
+        content: String::new(),
+        concept_type: Some(ConceptType::Logic),
+        score: 0.5,
+        is_canonical: false,
+        blast_radius: None,
+    };
+    let recall = |hits: Vec<LayeredHit>| {
+        let mut detail = DetailedRecall::warn_only(String::new());
+        detail.warnings.clear();
+        detail.hits = hits.iter().map(|h| h.hit.clone()).collect();
+        detail.detailed = hits
+            .iter()
+            .map(|h| DetailedHit::new(&h.hit, None))
+            .collect();
+        LayeredRecall {
+            hits,
+            context: String::new(),
+            warnings: Vec::new(),
+            unavailable_layers: Vec::new(),
+            detail,
+            hit_legs: Vec::new(),
+        }
+    };
+    let layered_hit = |session: &str, node_id: NodeId, also: Vec<LayerCopy>| LayeredHit {
+        session: SessionId::from(session),
+        hit: recall_hit(node_id),
+        also,
+        included_in_context: true,
+        truncated_in_context: false,
+        companion_of: Vec::new(),
+        skipped_redundant: Vec::new(),
+    };
+    let before_recall = recall(vec![
+        layered_hit("mixed", id(20), Vec::new()),
+        layered_hit("mixed", id(12), Vec::new()),
+    ]);
+    let after_recall = recall(vec![layered_hit(
+        "alpha",
+        mapped(&split, 20, "alpha"),
+        vec![LayerCopy {
+            session: SessionId::from("beta"),
+            node_id: mapped(&split, 20, "beta"),
+            skipped_redundant: vec![RedundantSkip {
+                node_id: mapped(&split, 12, "beta"),
+                signal: RedundancySignal::SameContent,
+            }],
+        }],
+    )]);
+    let before = side_hits(&before_recall, &origins, true).unwrap();
+    let after = side_hits(&after_recall, &origins, false).unwrap();
+    assert!(
+        after[0].also.contains(&("beta".to_string(), id(12))),
+        "{:?}",
+        after[0].also
+    );
+    let sessions: BTreeSet<String> = ["alpha", "beta"].map(String::from).into();
+    let q = compare(
+        "Cargo.toml",
+        &before_recall,
+        &after_recall,
+        &before,
+        &after,
+        &Scope {
+            visible: &sessions,
+            disclosed: &sessions,
+            k: 5,
+        },
+        &origins,
+    );
+    assert!(q.deduped_ids.contains(&id(12)), "{q:#?}");
+    assert!(!q.lost_ids.contains(&id(12)), "{q:#?}");
+}
+
 /// Disclosure: an aggregate-only session (and any session nobody queried)
 /// appears only as counts, and no raw warning line is kept.
 #[tokio::test]

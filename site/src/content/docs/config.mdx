@@ -153,7 +153,7 @@ Only the first `min(20, 4 × top_k)` hits are checked, each against at most 20 h
 
 **What the reader sees.** The kept hit names what was skipped in its label, after its id: `(score 0.42, id 1a2b3c4d, also 5e6f7a8b)`, at most three ids and then `+N more`. Each id is an inspect focus. These items count against `max_tokens`, so under a tight budget a later hit can fall out of the rendered context. The skipped members, each with the signal that found it (`same_content`, `semantic_edge`, `cosine`), are `skipped_redundant` on the hit in `lambo_recall`'s `structuredContent`, the web portal's `/api/recall` and the `--ledger` recall line; that key is absent on every other hit.
 
-**Layered recall** applies each session's own setting inside that session's recall, where the concepts' edges are; across layers, the existing deduplication still keeps the nearest tier's copy. `lambo session verify` replays the setting and counts a skipped member as deduplicated, not lost.
+**Layered recall** applies each session's own setting inside that session's recall, where the concepts' edges are; across layers, the existing deduplication still keeps the nearest tier's copy, and the hits a merged copy's session skipped for it follow it (`also <id> in <session>`). `lambo session verify` replays the setting and counts a skipped member as deduplicated, not lost.
 
 **Why it is off by default.** On the evaluation set under BGE-M3 (`evidence/issue-181/`), with copies and rewordings injected, identical-text skipping raised the distinct memories in a 500-token context at `top_k = 3` from 1.45 to 2.04 (dev) and 2.03 (held-out), and changed nothing without redundancy, with declared contradictions, or with related but different facts. Turn it on where duplicates are common.
 

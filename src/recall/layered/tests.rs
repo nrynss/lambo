@@ -525,7 +525,8 @@ fn dedupe_keeps_the_nearer_tier_at_the_better_rank() {
         kept.also,
         [LayerCopy {
             session: SessionId::new("general"),
-            node_id: nid(1, 0)
+            node_id: nid(1, 0),
+            skipped_redundant: Vec::new(),
         }]
     );
     let also = format!("also {} in general)", short_id(nid(1, 0)));
@@ -1145,4 +1146,40 @@ fn each_tiers_redundancy_skips_stay_on_their_hit() {
     assert_eq!(r.hits[0].skipped_redundant, vec![skipped(0, 0)]);
     assert_eq!(r.hits[2].skipped_redundant, vec![skipped(1, 0)]);
     assert!(r.hits[1].skipped_redundant.is_empty());
+}
+
+/// #181: a farther tier's hit that merges into a nearer tier's group keeps
+/// what its own session skipped as redundant with it: the copy carries the
+/// skips (`LayerCopy::skipped_redundant`), and the block names them after
+/// the copy, in the copy's session.
+#[test]
+fn a_merged_copy_keeps_its_sessions_redundancy_skips() {
+    use crate::recall::redundancy::{RedundancySignal, RedundantSkip};
+    let skipped = RedundantSkip {
+        node_id: NodeId(Uuid::from_u64_pair(0x5c1b << 48, 11)),
+        signal: RedundancySignal::SameContent,
+    };
+    let mut lists = vec![
+        primary(&[kw("p1"), kw("p2")]),
+        layer(1, "general", 0.5, &[kw("g1"), kw("p1")]),
+    ];
+    // General's copy of p1 (position 1) skipped a member of general.
+    lists[1].recall.as_mut().unwrap().recall.detailed[1].skipped_redundant = vec![skipped];
+    let r = run(&lists, params(10));
+    assert_eq!(order(&r), ["lambo/p1", "lambo/p2", "general/g1"]);
+    assert_eq!(r.hits[0].also.len(), 1, "general's p1 merged into lambo's");
+    assert_eq!(r.hits[0].also[0].skipped_redundant, vec![skipped]);
+    assert!(
+        r.hits[0].skipped_redundant.is_empty(),
+        "lambo skipped nothing"
+    );
+    let block = r.context.split("\n\n").next().unwrap();
+    assert!(
+        block.ends_with(&format!(
+            "also {} in general, also {} in general)",
+            short_id(nid(1, 1)),
+            short_id(skipped.node_id)
+        )),
+        "{block}"
+    );
 }

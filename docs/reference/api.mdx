@@ -216,7 +216,10 @@ is one that would carry a warning line of its own. The kept hit carries
 `+N more`), inside the block, so they count against `max_tokens`. With the
 setting off, or nothing redundant in the window, the result is
 byte-identical. A layered merge applies it inside each session's recall
-and keeps each hit's `also` items after `from <session>`.
+and keeps each hit's `also` items after `from <session>`; a farther tier's
+copy merged into a nearer hit keeps what its own session skipped for it
+(`LayerCopy::skipped_redundant`), named `also <short id> in <session>`
+after the copy.
 
 Garbage collection does not count a `Contradicts` edge as connectivity
 (`EdgeType::counts_toward_gc_connectivity`). A concept with a `Contradicts`
