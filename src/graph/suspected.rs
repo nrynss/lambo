@@ -113,9 +113,30 @@ pub fn dated_at(g: &Graph, c: &Concept) -> DateTime<Utc> {
 /// (`against`) or `Dependency` (`depends_on`) edge, either way. Such a pair
 /// is settled, so it is never suspected and an existing suspicion lapses.
 pub fn settled(g: &Graph, a: NodeId, b: NodeId) -> bool {
-    [EdgeType::Contradicts, EdgeType::Dependency]
+    SETTLING
         .into_iter()
         .any(|ty| g.edge_between(a, b, ty).is_some() || g.edge_between(b, a, ty).is_some())
+}
+
+/// The declared relations that settle a suspected pair: `against`
+/// (`Contradicts`) and `depends_on` (`Dependency`).
+pub const SETTLING: [EdgeType; 2] = [EdgeType::Contradicts, EdgeType::Dependency];
+
+/// [`settle`] on a snapshot's edge list, for a writer that edits edges
+/// outside a [`Graph`] (the alias redirect overlay, `crate::canon::alias`):
+/// every suspected-supersession edge between the ends of a `SETTLING` edge
+/// in `declared`, either way, is dropped from `edges`. Returns how many.
+pub fn settle_edges(edges: &mut Vec<Edge>, declared: &[Edge]) -> usize {
+    let pairs: std::collections::HashSet<(NodeId, NodeId)> = declared
+        .iter()
+        .filter(|e| SETTLING.contains(&e.edge_type))
+        .flat_map(|e| [(e.source, e.target), (e.target, e.source)])
+        .collect();
+    let before = edges.len();
+    edges.retain(|e| {
+        e.edge_type != EdgeType::SuspectedSupersedes || !pairs.contains(&(e.source, e.target))
+    });
+    before - edges.len()
 }
 
 /// Whether `a` and `b` are a suspected pair, either way. #181's

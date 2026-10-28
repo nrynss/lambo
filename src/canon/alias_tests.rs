@@ -421,3 +421,30 @@ fn reviewed_pairs_carry_status_fan_in_and_type_warnings() {
         ]
     );
 }
+
+/// #198: a redirected citation is a declared `depends_on` between citer and
+/// ruling, so applying the plan drops a suspected-supersession edge
+/// between them (either way), as a citation by id does. One between other
+/// concepts stays.
+#[test]
+fn a_redirect_settles_a_suspected_pair_between_citer_and_ruling() {
+    let mut snap = fair::snapshot(true);
+    let g = graph(&snap);
+    let map = format!("{} {}\n", id("lease_alias").0, id("lease_stays").0);
+    let (pairs, refusals) = parse_map(&g, &map);
+    let p = plan(&g, &pairs, refusals);
+    assert!(!p.add.is_empty());
+    let citer = p.add[0].source;
+    let suspected = |name: &str, source: NodeId, target: NodeId| {
+        let mut e = cite(&snap, source, target, name);
+        e.edge_type = EdgeType::SuspectedSupersedes;
+        e
+    };
+    let settled = suspected("s1", id("lease_stays"), citer);
+    let kept = suspected("s2", id("wedge"), id("d01"));
+    let (settled_id, kept_id) = (settled.id, kept.id);
+    snap.edges.extend([settled, kept]);
+    let out = apply(&snap, &p);
+    assert!(!out.edges.iter().any(|e| e.id == settled_id));
+    assert!(out.edges.iter().any(|e| e.id == kept_id));
+}
