@@ -49,8 +49,9 @@
 //!    member without one gives no cosine evidence; nothing is guessed.
 //!
 //! The two are off by default (owner decision, 2026-10-28). Against the
-//! same-content-only control on the #190 set they added 3 facets over the
-//! 16 injected-duplicate cells and lost 42 over the 16 labelled
+//! same-content-only control on the #190 set (the archived run, under the
+//! older guard) they added 3 facets over the 8 injected-duplicate cells
+//! (split × `top_k` × budget) and lost 42 over the 8 labelled
 //! related-but-distinct cells, every wrong skip from one of five pairs
 //! hybrid derive had merged at write time (`p-can-02-rbd1`,
 //! `p-can-02-rbd2`, `p-can-03-rbd1`, `p-con-05-rbd1`, `p-pro-01-rbd1`).
@@ -118,7 +119,7 @@ pub struct RecallSelection {
     pub skip_redundant: bool,
     /// Also count a `Semantic` edge and cosine at or above the session's
     /// merge threshold as redundancy. Default `false`: on the #190 set they
-    /// added 3 facets over 16 injected-duplicate cells and cost 42 over 16
+    /// added 3 facets over 8 injected-duplicate cells and cost 42 over 8
     /// related-but-distinct cells, every wrong skip from a pair the write
     /// path had merged (`evidence/issue-181/`). Needs `skip_redundant`.
     #[serde(default)]

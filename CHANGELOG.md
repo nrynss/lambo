@@ -250,17 +250,20 @@
   keeps the `also` items after `from <session>`; across tiers the #33
   dedupe is unchanged, and a copy it merges keeps what its own session
   skipped for it (`also <id> in <session>`). `lambo session verify`
-  replays the setting and counts a skipped hit as merged, not lost. Nothing is written or merged:
-  this is selection only. On the #190 set under BGE-M3, with copies and
-  rewordings injected, the shipped default (identical text only) raised
-  the distinct memories in a 500-token context at `top_k = 3` from 1.45
-  to 2.04 (dev) and 2.03 (held-out), and skipped no related-but-distinct
-  partner. The similarity signals are off by default because, against
-  that control, they added 3 answer facets over the 16 cells with
-  injected copies and lost 42 over the 16 cells with labelled
+  replays the setting and counts a skipped hit as merged, not lost.
+  Nothing is written or merged: this is selection only. On the #190 set
+  under BGE-M3, with copies and rewordings injected, the shipped default
+  (identical text only) raised the distinct memories in a 500-token
+  context at `top_k = 3` from 1.44 to 2.05 (dev) and 1.45 to 2.03
+  (held-out), and skipped no related-but-distinct partner. The
+  similarity signals are off by default because, against that control in
+  the run before the review fixes, they added 3 answer facets over the 8
+  cells with injected copies and lost 42 over the 8 cells with labelled
   related-but-distinct partners, every wrong skip from one of five pairs
   the write path had merged with a `Semantic` edge (`p-can-02-rbd1`,
   `p-can-02-rbd2`, `p-can-03-rbd1`, `p-con-05-rbd1`, `p-pro-01-rbd1`).
+  The stricter guard now rejects all five there, but the signals stay off
+  until measured on real stores.
   Declaring the contradiction with `against` protects such a pair mainly
   because the write path then refuses the merge, not through recall's
   `Contradicts` veto. MMR and facility location were compared offline
