@@ -993,7 +993,9 @@ its ends: intra-session; cross-session Temporal (rebuilt); hub reattached (one
 end is a hub with a copy in the other end's session); Derives reattached (a
 Derives edge whose interaction is copied into the concept's session); or
 dropped, with a reason: `cross_session_structural` (a concept-to-concept edge
-with no hub on either side) or `derives_without_replica` (a Derives edge whose
+with no hub on either side), `cross_session_informational` (the same for a
+`Contradicts` or `SuspectedSupersedes` edge, which declared no structure and is
+read within one session only) or `derives_without_replica` (a Derives edge whose
 interaction is not copied into the concept's session). Only Temporal and
 Derives edges may touch an interaction, so no other edge can attach to a
 replica. Output rows are counted separately: chain links kept and new, and

@@ -288,6 +288,25 @@ impl EdgeType {
         }
     }
 
+    /// Whether this edge type is **informational**: it records Lambo's or a
+    /// writer's reading of two concepts (`Contradicts`, #19;
+    /// `SuspectedSupersedes`, #198) and declares no structure: no
+    /// dependence, density, GC connectivity or decay. `lambo session split`
+    /// drops one between concepts placed in different sessions as
+    /// informational, not structural.
+    pub const fn is_informational(self) -> bool {
+        match self {
+            Self::Temporal
+            | Self::Derives
+            | Self::CoOccurrence
+            | Self::Causal
+            | Self::Dependency
+            | Self::Hierarchical
+            | Self::Semantic => false,
+            Self::Contradicts | Self::SuspectedSupersedes => true,
+        }
+    }
+
     /// Whether writing an edge of this type is **write activity** on its
     /// endpoints: a fresh incident edge makes a concept freshly written for
     /// the high-risk modification check, and refreshes the session's last
