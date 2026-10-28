@@ -34,7 +34,7 @@
 //! ## Redundancy signals, cheapest first
 //!
 //! 1. **Same content** ([`normalized_content`]): equal after NFC, invisible
-//!    codepoints stripped, lowercase and whitespace runs collapsed, across
+//!    codepoints stripped and whitespace runs collapsed, case kept, across
 //!    concept types. Required, not a fallback: the store's existing
 //!    duplicates carry no `Semantic` edge. `canonical_key` is not reused: it
 //!    sorts tokens, stems words and drops stopwords, so "X replaces Y" and
@@ -142,7 +142,7 @@ impl RecallSelection {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RedundancySignal {
-    /// The same text once normalized ([`normalized_content`]).
+    /// The same text once normalized ([`normalized_content`], case kept).
     SameContent,
     /// A `Semantic` edge joins the two.
     SemanticEdge,
@@ -171,9 +171,10 @@ pub struct RedundantSkip {
 }
 
 /// The text the same-content signal compares: NFC, invisible codepoints
-/// ([`crate::graph::canonical::INVISIBLE_RANGES`]) stripped, lowercase,
-/// whitespace runs collapsed to one space, trimmed. Nothing else is erased,
-/// so identifiers, digits, punctuation, word order and negation all count.
+/// ([`crate::graph::canonical::INVISIBLE_RANGES`]) stripped, whitespace
+/// runs collapsed to one space, trimmed. Nothing else is erased, so case
+/// (`src/Foo.rs` is not `src/foo.rs`, `PATH` is not `path`), identifiers,
+/// digits, punctuation, word order and negation all count.
 pub fn normalized_content(content: &str) -> String {
     let mut out = String::with_capacity(content.len());
     let mut gap = false;
@@ -189,7 +190,7 @@ pub fn normalized_content(content: &str) -> String {
             out.push(' ');
         }
         gap = false;
-        out.extend(c.to_lowercase());
+        out.push(c);
     }
     out
 }

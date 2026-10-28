@@ -201,7 +201,7 @@ skips a member redundant with a hit already taken, within the first
 `recall::redundancy::window(top_k)` (`min(20, 4 × top_k)`) ordinary members,
 and the next distinct member takes its slot. The signals, cheapest first,
 are `RedundancySignal::SameContent` (`recall::redundancy::normalized_content`
-equal: NFC, invisible codepoints stripped, lowercase, whitespace collapsed),
+equal: NFC, invisible codepoints stripped, whitespace collapsed, case kept),
 the only one by default, then, under `RecallSelection::similar_signals`
 (off by default), `SemanticEdge` and `Cosine` (both members carry a vector
 of the session's contract and their cosine is at or above its effective

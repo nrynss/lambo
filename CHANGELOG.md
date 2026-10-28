@@ -215,9 +215,10 @@
   queries). With `skip_redundant = true`, recall walks its hits in the
   usual order and skips one redundant with a hit already taken, so the next
   distinct hit gets the slot; then `top_k` and `max_tokens` apply as
-  before. Redundant means the same text once case, spacing, Unicode
-  composition and invisible characters are set aside (across concept
-  types; `canonical_key` is not used, since it sorts and stems words).
+  before. Redundant means the same text once spacing, Unicode
+  composition and invisible characters are set aside, case kept
+  (across concept types; `canonical_key` is not used, since it sorts and
+  stems words).
   **`similar_signals = true` (off by default, needs `skip_redundant`)**
   also counts a `Semantic` edge, or vectors of the session's contract at
   or above its effective merge threshold (the #87 calibrated or

@@ -197,11 +197,23 @@ fn the_window_is_four_per_slot_up_to_twenty() {
 }
 
 #[test]
-fn normalization_folds_case_whitespace_composition_and_invisibles_only() {
+fn normalization_folds_whitespace_composition_and_invisibles_only() {
     assert_eq!(
         normalized_content("  The  Dogfood\tstore\n holds 92 of 100 "),
-        "the dogfood store holds 92 of 100"
+        "The Dogfood store holds 92 of 100"
     );
+    // Case is kept: a path or a variable that differs only in case is
+    // another one.
+    for (a, b) in [
+        ("see src/Foo.rs", "see src/foo.rs"),
+        ("PATH is read at startup", "path is read at startup"),
+    ] {
+        assert_ne!(
+            normalized_content(a),
+            normalized_content(b),
+            "{a:?} / {b:?}"
+        );
+    }
     // NFC: a decomposed accent equals the composed one.
     assert_eq!(
         normalized_content("cafe\u{301}"),
@@ -384,6 +396,40 @@ fn identical_content_across_types_is_the_same_content_signal() {
         "a member is not its own duplicate"
     );
 }
+
+/// Texts that differ only in case are not the same content, under either
+/// configuration; byte-identical copies (the 2026-09-07 efficacy run's
+/// Entity and Observation pairs) still are.
+#[test]
+fn texts_differing_only_in_case_are_not_the_same_content() {
+    let g = graph(&[
+        concept(1, "see src/Foo.rs", ConceptType::Logic, None),
+        concept(2, "see src/foo.rs", ConceptType::Observation, None),
+        concept(3, "PATH is read at startup", ConceptType::Logic, None),
+        concept(4, "path is read at startup", ConceptType::Entity, None),
+        concept(5, EFFICACY_COPY, ConceptType::Entity, None),
+        concept(6, EFFICACY_COPY, ConceptType::Observation, None),
+    ]);
+    for (a, b) in [(1, 2), (3, 4)] {
+        assert_eq!(default_signal(&g, 0.85, a, b), None);
+        assert_eq!(signal(&g, 0.85, a, b), None);
+    }
+    assert_eq!(EFFICACY_COPY.len(), 374, "the published length");
+    assert_eq!(
+        default_signal(&g, 0.85, 5, 6),
+        Some(RedundancySignal::SameContent)
+    );
+}
+
+/// The 2026-09-07 `missing-downloads` duplicate (ranks 2 and 3, an Entity
+/// and an Observation), as both copies stored it (lambo-paper,
+/// `evaluation/results/2026-09-07/vimanam-2026-09-07/exports/lambo/
+/// missing-downloads.full.json`).
+const EFFICACY_COPY: &str = "Event-time MCP round-1 review verdict: REQUEST CHANGES. Optional \
+    RFC3339 event_time is correctly deserialized into DateTime<Utc>, threaded through \
+    derive_async_as and Action.event_time, preserved through the J2 byte proxy, stamped onto \
+    interactions and action edges, and restores Solo separated-session evidence; focused tests \
+    plus cargo test --all --features fixtures pass.";
 
 /// Under `similar_signals = true`.
 #[test]

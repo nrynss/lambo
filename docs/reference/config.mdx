@@ -138,7 +138,7 @@ similar_signals = false  # optional; the default is false
 
 **What counts as redundant**, checked cheapest first:
 
-- the same text, once case, spacing, Unicode composition and invisible characters are set aside, whatever the two concept types (nothing else is erased, so a different identifier, number, path, punctuation or word order is different text). This is the only signal by default.
+- the same text, once spacing, Unicode composition and invisible characters are set aside, whatever the two concept types (nothing else is erased, so a different case, identifier, number, path, punctuation or word order is different text: `src/Foo.rs` is not `src/foo.rs`). This is the only signal by default.
 
 With `similar_signals = true`, two more:
 

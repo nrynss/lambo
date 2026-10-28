@@ -13,7 +13,7 @@ what can be replayed from the published, redacted outputs
 Only the same-content signal is replayed. The Semantic-edge and cosine
 signals need the store's edges and vectors, which these files do not carry.
 Content is compared as lambo normalizes it (NFC, format characters
-stripped, lowercase, whitespace collapsed). Where only the 120-character cut
+stripped, whitespace collapsed, case kept). Where only the 120-character cut
 is known, equality of the cuts is a proxy, and a full export, when there is
 one, decides. A redacted entry is never equal to anything.
 
@@ -30,7 +30,7 @@ from pathlib import Path
 def normalized(text):
     text = "".join(c for c in text if unicodedata.category(c) != "Cf")
     text = unicodedata.normalize("NFC", text)
-    return " ".join(text.lower().split())
+    return " ".join(text.split())
 
 
 def full_texts(root):

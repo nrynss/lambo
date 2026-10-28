@@ -233,7 +233,7 @@ url = "http://127.0.0.1:8080"
 # Optional; off by default. With skip_redundant = true, recall skips a hit that
 # repeats one it already took, so the next distinct hit gets the slot: two
 # copies of one fact no longer take two of the two or three hits a reader sees.
-# Redundant means the same text (case and spacing aside, across concept types).
+# Redundant means the same text (spacing aside, case kept, across concept types).
 # similar_signals = true (off by default; needs skip_redundant) also counts a
 # Semantic edge, or vectors at or above the session's merge threshold. It is off
 # because on the #190 set it added 3 facets on injected copies and lost 42 on

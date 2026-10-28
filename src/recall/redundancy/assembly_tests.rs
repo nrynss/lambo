@@ -838,7 +838,9 @@ fn only_the_window_is_checked() {
 /// three passes without the memo.
 #[test]
 fn the_pair_bound_holds_per_recall_across_passes() {
-    let texts: Vec<String> = (0..21).map(|i| format!("distinct fact number {i}")).collect();
+    let texts: Vec<String> = (0..21)
+        .map(|i| format!("distinct fact number {i}"))
+        .collect();
     let rows: Vec<(u64, &str, ConceptType, Option<[f32; 2]>)> = texts
         .iter()
         .enumerate()
