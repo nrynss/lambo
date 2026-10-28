@@ -200,6 +200,16 @@ impl ResolvedBackends {
             crate::embed::weights_in_unified_memory(self.embedder.as_ref()),
         )
     }
+
+    /// The canary a writer attach of this bundle runs (#176): `[embedder]
+    /// canary` and `related_pairs`. Readers ask it for the labelled-pairs
+    /// merge threshold the store caches (#181).
+    pub fn canary_options(&self) -> crate::embed::canary::CanaryOptions {
+        crate::embed::canary::CanaryOptions {
+            mode: self.embedder_cfg.canary,
+            related_pairs: self.embedder_cfg.related_pairs.clone(),
+        }
+    }
 }
 
 /// Store vector width vs embedder output dim.
@@ -607,6 +617,10 @@ pub struct VerifyIo {
     pub config: crate::Config,
     /// The file's `[serve]` table: its layer stacks are the "after" side.
     pub serve: crate::config::ServeConfig,
+    /// The canary a serve of this file runs (`[embedder] canary` and
+    /// `related_pairs`), so the replay can read the labelled-pairs merge
+    /// threshold the stores cache (#181).
+    pub canary: crate::embed::canary::CanaryOptions,
 }
 
 /// A split output database, opened read-only (`lambo session verify`).
@@ -626,6 +640,19 @@ impl VerifySplitOutput {
     #[cfg(feature = "store-sqlite")]
     pub(crate) fn store(&self) -> &crate::store::SqliteStore {
         &self.store
+    }
+
+    /// The read-only store as a [`GraphStore`], `None` in a build without
+    /// SQLite (where no split output opens).
+    pub(crate) fn graph_store(&self) -> Option<&dyn GraphStore> {
+        #[cfg(feature = "store-sqlite")]
+        {
+            Some(&self.store)
+        }
+        #[cfg(not(feature = "store-sqlite"))]
+        {
+            None
+        }
     }
 
     #[cfg(feature = "store-sqlite")]
@@ -709,6 +736,10 @@ pub fn resolve_verify_io(
         embedding,
         config: process,
         serve: file.serve,
+        canary: crate::embed::canary::CanaryOptions {
+            mode: file.embedder.canary,
+            related_pairs: file.embedder.related_pairs.clone(),
+        },
     })
 }
 

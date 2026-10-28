@@ -127,6 +127,8 @@
   `..Default::default()` keeps compiling, and the defaults recall exactly
   as before (`skip_redundant = false`). `LayeredHit` is
   `#[non_exhaustive]`, so no caller builds one with a literal.
+  `resolve::VerifyIo` gains `canary`, the `[embedder]` canary options the
+  replay reads the cached merge threshold with.
 - **`Config` gains `recall_fusion`, `LamboFile` gains `fusion`,
   `recall::candidates::Phase1Input` gains `fusion`, and
   `recall::candidates::LegScores` gains `keyword_rank`, `recent_rank`,
@@ -219,8 +221,9 @@
   **`similar_signals = true` (off by default, needs `skip_redundant`)**
   also counts a `Semantic` edge, or vectors of the session's contract at
   or above its effective merge threshold (the #87 calibrated or
-  labelled-pairs one; the one-shot readers and `lambo session verify` use
-  the calibrated row, as they do not embed labelled pairs). A member
+  labelled-pairs one; the one-shot readers and `lambo session verify`
+  read the labelled-pairs threshold the store caches for the configured
+  file, so they use the threshold a serve does). A member
   without a vector is never judged by cosine. A pair joined by `Contradicts` either way, or whose
   texts differ in an identifier, a digit or a count of negation words, is
   never redundant. Forced hits (hot-list, #19 forcing and companions, kept

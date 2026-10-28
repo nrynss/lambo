@@ -444,20 +444,10 @@ impl Replay {
             .map_err(|e| VerifyError::Refused(format!("session {name} does not load: {e}")))?;
         let session = loaded.graph.session_id().clone();
         let graph = Arc::new(RwLock::new(loaded.graph));
-        // #181: the cosine signal of `[selection]` uses the merge threshold
-        // a reader of this contract uses, as `lambo recall` does.
-        let config = Config {
-            semantic_match_threshold: crate::embed::calibration::reader_merge_threshold(
-                config.calibrated_merge_threshold,
-                embedding,
-                config.semantic_match_threshold,
-            ),
-            ..config.clone()
-        };
         // One pinned clock for detection and for recall's read-time
         // re-validation of hot-list entries (stale seconds, high-risk and
         // conflict windows), so a rerun renders the same warnings.
-        let daemon = Daemon::from_config(graph.clone(), &config)
+        let daemon = Daemon::from_config(graph.clone(), config)
             .with_index(Arc::new(RwLock::new(loaded.index)))
             .with_clock(Arc::new(move || at));
         daemon.prime_offline();
@@ -966,6 +956,10 @@ pub struct VerifyInputs<'a> {
     pub params: VerifyParams,
     pub embedder: &'a dyn Embedder,
     pub embedding: &'a EmbeddingContract,
+    /// The config a serve of this file runs its sessions with. Its
+    /// `semantic_match_threshold` is the effective merge threshold a writer
+    /// attach settles on, which `[selection]`'s cosine signal uses (#181;
+    /// `lambo session verify` reads the cached labelled-pairs one).
     pub config: &'a Config,
 }
 

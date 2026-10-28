@@ -452,6 +452,91 @@ async fn the_merge_threshold_is_the_p99_of_enough_related_pairs_and_is_cached() 
     assert_eq!(plain.merge_threshold, 0.85);
 }
 
+/// #181: a reader gets the writer's derived threshold from the cache, for
+/// the same file only, and nothing when the canary is off, the file is
+/// unreadable, too short, or not yet measured, or there is no fingerprint.
+#[tokio::test]
+async fn a_reader_reads_the_derivation_the_writer_cached() {
+    let dir = Scratch::new();
+    let store = store();
+    let probe = Probe::new(0.0);
+    let options = CanaryOptions {
+        mode: CanaryMode::Warn,
+        related_pairs: Some(write_pairs(dir.path(), 120, "r")),
+    };
+    assert_eq!(
+        cached_merge_threshold(&store, &contract(), &options).await,
+        None,
+        "no fingerprint yet"
+    );
+    let out = check(&store, &probe, &contract(), &options, 0.85)
+        .await
+        .unwrap();
+    assert_eq!(
+        out.threshold_source,
+        ThresholdSource::RelatedPairs { pairs: 120 }
+    );
+    let calls = probe.calls();
+    assert_eq!(
+        cached_merge_threshold(&store, &contract(), &options).await,
+        Some(out.merge_threshold)
+    );
+    assert_eq!(probe.calls(), calls, "a reader embeds nothing");
+    let config = crate::Config::default();
+    assert_eq!(
+        reader_merge_threshold(&store, &contract(), &options, &config).await,
+        out.merge_threshold
+    );
+
+    let changed = CanaryOptions {
+        related_pairs: Some(write_pairs(dir.path(), 130, "s")),
+        ..options.clone()
+    };
+    assert_eq!(
+        cached_merge_threshold(&store, &contract(), &changed).await,
+        None
+    );
+    assert_eq!(
+        reader_merge_threshold(&store, &contract(), &changed, &config).await,
+        config.semantic_match_threshold,
+        "falls back as the writer does before it measures the new file"
+    );
+    let off = CanaryOptions {
+        mode: CanaryMode::Off,
+        ..options.clone()
+    };
+    assert_eq!(
+        cached_merge_threshold(&store, &contract(), &off).await,
+        None
+    );
+    let missing = CanaryOptions {
+        related_pairs: Some("/nonexistent/lambo-pairs.json".into()),
+        ..options.clone()
+    };
+    assert_eq!(
+        cached_merge_threshold(&store, &contract(), &missing).await,
+        None
+    );
+    assert_eq!(
+        cached_merge_threshold(&store, &contract(), &warn()).await,
+        None
+    );
+
+    let short = CanaryOptions {
+        related_pairs: Some(write_pairs(dir.path(), MIN_RELATED_PAIRS - 1, "t")),
+        ..options
+    };
+    let out = check(&store, &probe, &contract(), &short, 0.85)
+        .await
+        .unwrap();
+    assert_eq!(out.threshold_source, ThresholdSource::Configured);
+    assert_eq!(
+        cached_merge_threshold(&store, &contract(), &short).await,
+        None,
+        "a cached but unusable derivation"
+    );
+}
+
 #[tokio::test]
 async fn fewer_than_a_hundred_pairs_keep_the_configured_threshold() {
     let dir = Scratch::new();

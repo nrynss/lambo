@@ -794,6 +794,39 @@ fn verify_summary(report: &crate::session::VerifyReport, path: &Path) -> String 
     out
 }
 
+/// #181: the merge threshold the replay's `[selection]` cosine signal uses
+/// on both sides: the one a serve of this file runs with. The labelled-pairs
+/// derivation the split output caches for the configured pairs file, else
+/// the source database's (the same embedder and file give a writer of the
+/// split output the same derivation), else the writer's fallback
+/// ([`crate::embed::calibration::reader_merge_threshold`]). Looked up only
+/// when `similar_signals` lets the cosine signal fire.
+pub(crate) async fn verify_merge_threshold(io: &crate::resolve::VerifyIo) -> f64 {
+    let config = &io.config;
+    let selection = config.recall_selection;
+    if !(selection.skip_redundant && selection.similar_signals) {
+        return config.semantic_match_threshold;
+    }
+    let source = match &io.source {
+        ClassificationSource::Database(store) => Some(store.as_ref()),
+        ClassificationSource::Snapshot(_) => None,
+    };
+    let mut derived = None;
+    for store in [io.split.graph_store(), source].into_iter().flatten() {
+        derived =
+            crate::embed::canary::cached_merge_threshold(store, &io.embedding, &io.canary).await;
+        if derived.is_some() {
+            break;
+        }
+    }
+    crate::embed::calibration::reader_merge_threshold(
+        derived,
+        config.calibrated_merge_threshold,
+        &io.embedding,
+        config.semantic_match_threshold,
+    )
+}
+
 /// `lambo session verify` (#33 D3). Rebuilds the split from the source and
 /// plan, requires the output's receipts and target digests to match it,
 /// replays the query set before (plain recall on the source) and after
@@ -820,6 +853,10 @@ pub async fn verify_session(
     check_in_range_cli("max-tokens", max_tokens, 1, MAX_MAX_TOKENS)?;
     check_in_range_cli("traversal-depth", traversal_depth, 0, MAX_TRAVERSAL_DEPTH)?;
     let queries = read_queries(&args.queries)?;
+    let config = crate::Config {
+        semantic_match_threshold: verify_merge_threshold(&io).await,
+        ..io.config.clone()
+    };
 
     let plan: ClassificationPlan =
         serde_json::from_str(&read_bounded(&args.plan, 512 * 1024 * 1024)?)
@@ -858,7 +895,7 @@ pub async fn verify_session(
         },
         embedder: io.embedder.as_ref(),
         embedding: &io.embedding,
-        config: cfg,
+        config: &config,
     })
     .await
     .map_err(|e| CliError::Usage(e.to_string()))?;

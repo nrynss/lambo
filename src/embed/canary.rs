@@ -561,6 +561,15 @@ async fn derive_threshold(
     })
 }
 
+/// Whether a cached derivation is one an attach may run with: enough pairs,
+/// a cosine in `[0, 1]`, above the random-pair floor.
+fn usable(d: &DerivedThreshold, floor: Option<&PairQuantiles>) -> bool {
+    d.pairs >= MIN_RELATED_PAIRS
+        && d.value.is_finite()
+        && (0.0..=1.0).contains(&d.value)
+        && floor.is_none_or(|f| d.value > f.p99)
+}
+
 /// The threshold an attach runs with, given the (possibly updated) cached
 /// derivation and the random-pair floor it must sit above.
 fn effective_threshold(
@@ -571,12 +580,7 @@ fn effective_threshold(
     let Some(d) = derived else {
         return (configured, ThresholdSource::Configured);
     };
-    let above_floor = floor.is_none_or(|f| d.value > f.p99);
-    if d.pairs >= MIN_RELATED_PAIRS
-        && d.value.is_finite()
-        && (0.0..=1.0).contains(&d.value)
-        && above_floor
-    {
+    if usable(d, floor) {
         (d.value, ThresholdSource::RelatedPairs { pairs: d.pairs })
     } else {
         tracing::warn!(
@@ -590,6 +594,68 @@ fn effective_threshold(
         );
         (configured, ThresholdSource::Configured)
     }
+}
+
+/// #181: the labelled-pairs merge threshold a writer attach of this store
+/// runs with, read from the cached fingerprint without embedding or
+/// writing anything: `Some` when `options` turn the canary on and name a
+/// `related_pairs` file, and the fingerprint for `contract` holds a usable
+/// derivation of that file (the same SHA-256). `None` otherwise: the
+/// reader then falls back as the writer does, to the contract's calibrated
+/// threshold or the configured one. A pairs file or fingerprint that cannot
+/// be read is `None` with a warning, where the writer attach would refuse
+/// to start. A file changed since the last writer attach is `None` until a
+/// writer measures it, and a reader cannot see a canary drift, which makes
+/// the writer fall back too.
+pub(crate) async fn cached_merge_threshold(
+    store: &dyn GraphStore,
+    contract: &EmbeddingContract,
+    options: &CanaryOptions,
+) -> Option<f64> {
+    if options.mode == CanaryMode::Off {
+        return None;
+    }
+    let path = options.related_pairs.as_deref()?;
+    let sha = match read_related_pairs(path) {
+        Ok((_, sha)) => sha,
+        Err(e) => {
+            tracing::warn!(error = %e, "reader: using the fallback merge threshold");
+            return None;
+        }
+    };
+    let raw = match store.read_store_meta(&fingerprint_key(contract)).await {
+        Ok(raw) => raw?,
+        Err(e) => {
+            tracing::warn!(error = %e, "reader: cannot read the embedder fingerprint; using the fallback merge threshold");
+            return None;
+        }
+    };
+    let f: Fingerprint = serde_json::from_str(&raw).ok()?;
+    if f.version != CANARY_VERSION {
+        return None;
+    }
+    f.merge_threshold
+        .filter(|d| d.source_sha256 == sha && usable(d, Some(&f.random_pair)))
+        .map(|d| d.value)
+}
+
+/// #181: the merge threshold a reader of a session under `contract` uses
+/// for `[selection]`'s cosine signal: what a writer attach of `store` with
+/// `options` and `config` runs with, from what the store has cached.
+/// [`cached_merge_threshold`] first, then
+/// [`super::calibration::reader_merge_threshold`]'s fallback.
+pub(crate) async fn reader_merge_threshold(
+    store: &dyn GraphStore,
+    contract: &EmbeddingContract,
+    options: &CanaryOptions,
+    config: &crate::Config,
+) -> f64 {
+    super::calibration::reader_merge_threshold(
+        cached_merge_threshold(store, contract, options).await,
+        config.calibrated_merge_threshold,
+        contract,
+        config.semantic_match_threshold,
+    )
 }
 
 /// The writer attach's check: pin, verify or skip the canary, and settle the

@@ -258,14 +258,11 @@ impl MemoryBuilder {
     /// `[daemon]` cadence overrides the resolver applied are silently lost and
     /// the session behaves as `Config::default()`.
     pub fn backends(mut self, backends: ResolvedBackends) -> Self {
+        self.canary = backends.canary_options();
         self.store = Some(Arc::from(backends.store));
         self.embedder = Some(Arc::from(backends.embedder));
         self.embedding = Some(backends.embedding);
         self.allow_embedding_mismatch = backends.allow_embedding_mismatch;
-        self.canary = crate::embed::canary::CanaryOptions {
-            mode: backends.embedder_cfg.canary,
-            related_pairs: backends.embedder_cfg.related_pairs.clone(),
-        };
         self
     }
 
