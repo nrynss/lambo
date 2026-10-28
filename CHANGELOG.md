@@ -19,7 +19,7 @@
   candidate, so every other response is byte-identical: `lambo_stats`'s
   `receipt` and the piggybacked `structuredContent.write_receipts[]` gain
   `replacement_candidates` (`{"candidates": [{"id", "node_id", "excerpt",
-  "cosine", "new_id"}], "total"}`, rows bounded at 2048 bytes); the
+  "cosine", "new_id"}], "total"}`, rows bounded at 2048 bytes of serialized JSON); the
   receipt text and `lambo derive`'s output gain `; N replacement
   candidate(s): …` and one line per candidate; the `--ledger` completion
   line gains `replacement_candidates` and `replacement_cosines`. The

@@ -309,8 +309,22 @@ fn the_receipt_report() {
     assert_eq!(report.total, 40);
     let kept = report.candidates.len();
     assert!(kept > 0 && kept < 40, "{kept}");
-    let bytes: usize = report.candidates.iter().map(|c| 72 + c.excerpt.len()).sum();
+    // The bound is the serialized rows' exact size: what is kept fits, and
+    // one more row would not.
+    let rows: Vec<serde_json::Value> = serde_json::to_value(&report).unwrap()["candidates"]
+        .as_array()
+        .unwrap()
+        .clone();
+    let bytes: usize = rows.iter().map(|r| r.to_string().len()).sum();
+    assert_eq!(
+        bytes,
+        report.candidates.iter().map(row_bytes).sum::<usize>()
+    );
     assert!(bytes <= REPLACEMENT_RECEIPT_BYTES, "{bytes}");
+    assert!(
+        bytes + row_bytes(&many[0]) > REPLACEMENT_RECEIPT_BYTES,
+        "{bytes}"
+    );
     assert!(report
         .describe()
         .ends_with(&format!("\n  ({} more)", 40 - kept)));

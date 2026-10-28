@@ -60,10 +60,21 @@ use crate::types::{Concept, Node, NodeId, Scored};
 /// The most candidates listed for one created concept.
 pub const REPLACEMENT_CANDIDATE_LIMIT: usize = 3;
 
-/// Maximum retained UTF-8 bytes of candidate strings (ids and excerpts) per
-/// write receipt, as #208's stale report bounds its rows
-/// ([`crate::daemon::contradiction::STALE_RECEIPT_BYTES`]).
+/// Maximum retained bytes of candidate rows per write receipt, as #208's
+/// stale report bounds its rows
+/// ([`crate::daemon::contradiction::STALE_RECEIPT_BYTES`]). Counted
+/// exactly: the sum of each kept row's serialized JSON size, the object
+/// `replacement_candidates.candidates[]` carries on the wire (the array's
+/// brackets and commas, and `total`, are not counted).
 pub const REPLACEMENT_RECEIPT_BYTES: usize = 2048;
+
+/// A candidate row's serialized JSON size, as
+/// [`REPLACEMENT_RECEIPT_BYTES`] counts it.
+pub fn row_bytes(c: &ReplacementCandidate) -> usize {
+    // Serializing a struct of strings and a finite f64 cannot fail; a
+    // failure would count as unbounded and drop the row.
+    serde_json::to_vec(c).map_or(usize::MAX, |v| v.len())
+}
 
 /// One existing concept a created concept may replace.
 #[derive(Clone, Debug)]
@@ -126,12 +137,11 @@ impl ReplacementReport {
         if candidates.is_empty() {
             return None;
         }
-        let mut bytes = 0;
+        let mut bytes: usize = 0;
         let kept = candidates
             .iter()
             .take_while(|c| {
-                // Both ids as their 36-byte rendered form, and the excerpt.
-                bytes += 2 * 36 + c.excerpt.len();
+                bytes = bytes.saturating_add(row_bytes(c));
                 bytes <= REPLACEMENT_RECEIPT_BYTES
             })
             .cloned()

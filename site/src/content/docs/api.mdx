@@ -269,7 +269,7 @@ call wrote, ranked by cosine then id and capped at
 `id`, `excerpt` and `cosine`. It is informational: nothing is written for
 it. A sync derive leaves it empty. The write pipeline puts it on
 `AppliedSummary::replacement` (`ReplacementReport::for_receipt`, `None` when
-empty, rows bounded at `REPLACEMENT_RECEIPT_BYTES`), and
+empty, rows bounded at `REPLACEMENT_RECEIPT_BYTES` of serialized JSON), and
 `ReceiptAnswer::AppliedAfterRestart` gains a third field carrying it for a
 replay this process ran.
 
