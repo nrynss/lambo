@@ -744,6 +744,7 @@ fn ledger_facts_carry_replacement_candidates_only_when_listed() {
         id: crate::types::NodeId::new(),
         excerpt: "concept text that must not reach the ledger".into(),
         cosine,
+        newer: false,
     };
     let derive = AppliedSummary {
         stale_report: None,
@@ -769,6 +770,21 @@ fn ledger_facts_carry_replacement_candidates_only_when_listed() {
         })
     );
     assert!(!facts.to_string().contains("concept text"));
+
+    // A row dated after the write adds the aligned `replacement_newer`
+    // flags; an unmarked report (above) has no such key.
+    let mut later = candidate(0.85);
+    later.newer = true;
+    let marked = AppliedSummary {
+        replacement: ReplacementReport::for_receipt(&[candidate(0.91234), later]),
+        ..derive
+    };
+    let facts = serde_json::Value::Object(marked.ledger_facts());
+    assert_eq!(facts["replacement_newer"], serde_json::json!([false, true]));
+    assert_eq!(
+        facts["replacement_cosines"],
+        serde_json::json!([0.9123, 0.85])
+    );
 }
 
 #[tokio::test]

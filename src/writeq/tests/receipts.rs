@@ -293,6 +293,7 @@ fn replacement_candidates_ride_the_receipt_only_when_present() {
         id: old,
         excerpt: "the embedder listens on port 8080".into(),
         cosine: 0.8684,
+        newer: false,
     }]);
     let listed = ReceiptAnswer::Applied(AppliedSummary {
         replacement: report.clone(),

@@ -10,12 +10,19 @@ use crate::types::PinnedReference;
 const SESS: &str = "hybrid-replacement";
 
 fn graph_with_interactions() -> (Arc<RwLock<Graph>>, [NodeId; 3]) {
+    graph_with_about_times([None; 3])
+}
+
+/// Three interactions written at minutes 0, 10 and 20, each with the given
+/// about-time (`event_time`, in minutes) when one is set.
+fn graph_with_about_times(about: [Option<i64>; 3]) -> (Arc<RwLock<Graph>>, [NodeId; 3]) {
     let mut g = Graph::new(sid(SESS));
     let mut prev = None;
     let mut ids = [NodeId::default(); 3];
     for (k, at) in [0, 10, 20].into_iter().enumerate() {
         let mut i = interaction(k as u64 + 1, prev, at, "notes");
         i.session_id = sid(SESS);
+        i.event_time = about[k].map(ts);
         ids[k] = i.id;
         prev = Some(i.id);
         g.insert_interaction(i).unwrap();
@@ -107,6 +114,7 @@ async fn a_reworded_predecessor_is_listed_and_nothing_is_recorded() {
     let c = &out.replacement_candidates[0];
     assert_eq!(c.new, new);
     assert_eq!(c.excerpt, OLD);
+    assert!(!c.newer, "the predecessor is dated before the write");
     assert_eq!(out.suspected, 0);
     assert!(out.semantic_merged.is_empty());
     assert_eq!(out.merge_guarded.identifiers, 1);
@@ -352,5 +360,28 @@ fn a_sync_derive_lists_nothing() {
         )
         .unwrap();
         assert!(out.replacement_candidates.is_empty());
+    }
+}
+
+/// M1 on the write path: a write backfilled (`event_time`) to before an
+/// existing concept still lists it, marked `newer`, since that concept may
+/// replace this write; a write at the same about-time is not marked.
+#[tokio::test]
+async fn a_backfilled_write_marks_the_later_concept_newer() {
+    for (about, want) in [(Some(-30), true), (Some(0), false), (None, false)] {
+        let (graph, [i0, i1, _]) = graph_with_about_times([None, about, None]);
+        let old = derive_at(&graph, i0, OLD, ConceptType::Logic, Vec::new())
+            .await
+            .created[0];
+        let out = derive_at(
+            &graph,
+            i1,
+            REWORDED,
+            ConceptType::Logic,
+            vec![hit(old, 0.88)],
+        )
+        .await;
+        assert_eq!(listed(&out), vec![(old, 0.88)], "{about:?}");
+        assert_eq!(out.replacement_candidates[0].newer, want, "{about:?}");
     }
 }

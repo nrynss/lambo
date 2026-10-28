@@ -22,10 +22,17 @@
   "cosine", "new_id"}], "total"}`, rows bounded at 2048 bytes of serialized JSON); the
   receipt text and `lambo derive`'s output gain `; N replacement
   candidate(s): …` and one line per candidate; the `--ledger` completion
-  line gains `replacement_candidates` and `replacement_cosines`. The
+  line gains `replacement_candidates` and `replacement_cosines`. A
+  candidate dated after the new concept (a backfilled `event_time`, or an
+  older decision recorded after its replacement), by the clamped
+  about-time the trigger orders a pair by, is still listed but marked: a
+  `"newer": true` field (absent otherwise), a text line saying it may
+  replace this write and is not one to cite, and a `replacement_newer`
+  flag list on the ledger line when any row is marked; a tie is not
+  marked. The
   published tool list changes: `lambo_derive`'s description says what the
-  list means and to cite a candidate in `against` only if it really is
-  replaced. Library: `DeriveOutcome::replacement_candidates`,
+  list means, to cite a candidate in `against` only if it really is
+  replaced, and never to cite one marked newer. Library: `DeriveOutcome::replacement_candidates`,
   `AppliedSummary::replacement`, and `ReceiptAnswer::AppliedAfterRestart`
   gains a third field. Measured (`evidence/issue-198c-candidates/`): on the
   #211 pairs the floor lists 37/43 dev and 25/27 held-out supersessions

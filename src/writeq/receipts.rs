@@ -483,6 +483,11 @@ impl AppliedSummary {
                 "replacement_cosines".into(),
                 serde_json::Value::from(report.cosines()),
             );
+            // Aligned with the cosines, and only when a row is marked: a
+            // candidate dated after the write (it may replace the write).
+            if let Some(newer) = report.newer_flags() {
+                facts.insert("replacement_newer".into(), serde_json::Value::from(newer));
+            }
         }
         facts
     }

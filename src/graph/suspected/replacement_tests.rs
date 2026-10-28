@@ -271,6 +271,7 @@ fn the_receipt_report() {
         id: NodeId(Uuid::from_u64_pair(0xabcd_ef01_0000_0000, 1)),
         excerpt: "an older rule".into(),
         cosine: 0.867_891,
+        newer: false,
     };
     let report = ReplacementReport::for_receipt(std::slice::from_ref(&c)).unwrap();
     assert_eq!(report.total, 1);
@@ -328,4 +329,107 @@ fn the_receipt_report() {
     assert!(report
         .describe()
         .ends_with(&format!("\n  ({} more)", 40 - kept)));
+}
+
+/// A graph whose new concept (id 0) and old concept (id 1) come from two
+/// interactions, each with its own write time and optional about-time.
+fn dated_graph(new_at: (i64, Option<i64>), old_at: (i64, Option<i64>)) -> Graph {
+    let mut g = Graph::new(sid());
+    let mut ids = Vec::new();
+    for (n, (created, about)) in [(1, new_at), (2, old_at)] {
+        let i = Interaction {
+            id: NodeId(Uuid::from_u64_pair(0x198e, n)),
+            created_at: t(created),
+            event_time: about.map(t),
+            previous_id: ids.last().copied(),
+            ..interaction()
+        };
+        ids.push(i.id);
+        g.insert_interaction(i).unwrap();
+    }
+    for (c, origin) in [
+        (concept(0, NEW, ConceptType::Logic), ids[0]),
+        (concept(1, OLD, ConceptType::Logic), ids[1]),
+    ] {
+        let c = Concept {
+            origin_interaction: origin,
+            ..c
+        };
+        g.insert_concept(c, origin).unwrap();
+    }
+    g
+}
+
+/// M1: a candidate dated after the new concept is listed but marked
+/// `newer`, compared by the trigger's clamped about-time; an older one is
+/// not, and a tie is not (the trigger's tie rule records no direction, so
+/// nothing says the candidate is the later fact).
+#[test]
+fn a_later_dated_candidate_is_marked_newer_both_ways_and_a_tie_is_not() {
+    let newer = |new_at, old_at| {
+        let g = dated_graph(new_at, old_at);
+        let got = select(&g, id(0), &[hit(1, 0.9)], 0.85, &[]);
+        assert_eq!(got.len(), 1, "a newer candidate is still listed");
+        got[0].newer
+    };
+    // The ordinary case: the old concept was written first.
+    assert!(!newer((10, None), (0, None)));
+    // Written later, but backfilled to before the old one's about-time.
+    assert!(newer((10, Some(-30)), (0, None)));
+    // The other way round: the old concept was recorded later.
+    assert!(newer((0, None), (10, None)));
+    // A tie, by write time or by about-time, is not newer.
+    assert!(!newer((0, None), (0, None)));
+    assert!(!newer((10, Some(0)), (0, None)));
+    // About-time is clamped to the write time, as the trigger clamps it: a
+    // future-dated old concept written first is not newer.
+    assert!(!newer((10, None), (0, Some(100))));
+}
+
+/// The `newer` mark on every surface: `"newer": true` on the wire only
+/// when set, a marked text line that says not to cite it, and the ledger's
+/// aligned flags only when a row is marked.
+#[test]
+fn the_newer_mark_on_the_wire_text_and_ledger() {
+    let plain = ReplacementCandidate {
+        new: id(0),
+        id: NodeId(Uuid::from_u64_pair(0xabcd_ef01_0000_0000, 1)),
+        excerpt: "an older rule".into(),
+        cosine: 0.9,
+        newer: false,
+    };
+    let later = ReplacementCandidate {
+        id: NodeId(Uuid::from_u64_pair(0x1234_5678_0000_0000, 1)),
+        excerpt: "a later rule".into(),
+        newer: true,
+        ..plain.clone()
+    };
+    let quiet = ReplacementReport::for_receipt(std::slice::from_ref(&plain)).unwrap();
+    assert!(serde_json::to_value(&quiet).unwrap()["candidates"][0]
+        .get("newer")
+        .is_none());
+    assert_eq!(quiet.newer_flags(), None);
+    assert!(!quiet.describe().contains("newer"));
+
+    let report = ReplacementReport::for_receipt(&[plain, later]).unwrap();
+    let wire = serde_json::to_value(&report).unwrap();
+    assert!(wire["candidates"][0].get("newer").is_none(), "{wire}");
+    assert_eq!(wire["candidates"][1]["newer"], true, "{wire}");
+    assert_eq!(report.newer_flags(), Some(vec![false, true]));
+    let text = report.describe();
+    let new = crate::recall::format::short_id(id(0));
+    assert!(
+        text.contains(&format!(
+            "\n  - 12345678 \"a later rule\" (cosine 0.9000, for {new}; newer: dated after \
+             this write, so it may replace this write, not the other way round; do not cite \
+             it in against)"
+        )),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!(
+            "\n  - abcdef01 \"an older rule\" (cosine 0.9000, for {new})"
+        )),
+        "{text}"
+    );
 }

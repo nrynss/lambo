@@ -62,8 +62,10 @@ row leaves the private copy; the numbers below are all that is recorded.
 the replacing concept was written second, so its writer sees the
 predecessor. In the other 2 the store holds the replacing record first (the
 older decision was recorded later), so the pair surfaces on that later
-write, naming the replacing concept. At a floor of 0.86, 3 of 4 remain; at
-0.88, 1.
+write, naming the replacing concept. Such a candidate is dated after the
+write that lists it, so it is now marked `newer` (it may replace that
+write, and is not one to cite in `against`) rather than listed as a
+predecessor. At a floor of 0.86, 3 of 4 remain; at 0.88, 1.
 
 **Siblings are not candidates.** 91 of the 100 labelled pairs are two
 concepts of one call. The write reads the store before it commits, so a
@@ -101,8 +103,12 @@ A whole-session search instead of the top 8 changes one write's list at
   vector (embedded with its call's text, as the write was) and the concepts
   still in the store; concepts collected since, and the vectors of their
   time, are not seen.
-* **Direction is not judged.** The list names close neighbours; which one
-  replaces which is the writer's call.
+* **Direction is marked, not judged.** The list names close neighbours;
+  which one replaces which is the writer's call. A candidate dated after
+  the write (`suspected::dated_at`, the trigger's clamped about-time) is
+  marked `newer`, so the writer is not steered to contradict the later
+  fact; a tie is not marked. The public measurement writes both texts in
+  one interaction, so none of its pairs is marked.
 
 ## Re-run
 

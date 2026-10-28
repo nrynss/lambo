@@ -36,6 +36,21 @@
 //! Ranked by cosine (then id, so ties are deterministic) and capped at
 //! [`REPLACEMENT_CANDIDATE_LIMIT`] per created concept.
 //!
+//! # Direction: a newer candidate
+//!
+//! The list does not assume the new concept is the later fact. A write
+//! with a backfilled `event_time`, or one that records an older decision
+//! after its replacement, finds a concept dated **after** it: that concept
+//! may replace this write, not the other way round, and citing it in
+//! `against` would contradict the correct fact. It is still listed (the
+//! writer learns a newer fact exists) but marked
+//! [`newer`](ReplacementCandidate::newer) on every surface, and worded as
+//! one that may replace this write, never as one to cite. The two concepts
+//! are compared by [`super::dated_at`], the clamped about-time the
+//! suspected-supersession trigger orders a pair by. The trigger records no
+//! direction on a tie; here a tie is not marked newer, since nothing says
+//! the candidate is the later fact.
+//!
 //! # Why these defaults (measured, `evidence/issue-198c-candidates/`)
 //!
 //! * **Hits the write already has.** The candidates come from the store's
@@ -87,6 +102,11 @@ pub struct ReplacementCandidate {
     pub excerpt: String,
     /// The vector hit's cosine.
     pub cosine: f64,
+    /// The existing concept is dated **after** the new one ([`super::dated_at`],
+    /// the clamped about-time the suspected-supersession trigger compares):
+    /// it may replace the new concept, not the other way round, so it is
+    /// never one to cite in `against`. A tie is not newer (module docs).
+    pub newer: bool,
 }
 
 // The cosine is compared by its bits so the outcome structs that carry it
@@ -97,6 +117,7 @@ impl PartialEq for ReplacementCandidate {
             && self.id == other.id
             && self.excerpt == other.excerpt
             && self.cosine.to_bits() == other.cosine.to_bits()
+            && self.newer == other.newer
     }
 }
 
@@ -111,13 +132,17 @@ pub fn reported_cosine(cosine: f64) -> f64 {
 impl serde::Serialize for ReplacementCandidate {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
-        let mut st = s.serialize_struct("ReplacementCandidate", 5)?;
+        let mut st = s.serialize_struct("ReplacementCandidate", 5 + usize::from(self.newer))?;
         // The id recall shows, which `against` accepts, then the full one.
         st.serialize_field("id", &crate::recall::format::short_id(self.id))?;
         st.serialize_field("node_id", &self.id.0.to_string())?;
         st.serialize_field("excerpt", &self.excerpt)?;
         st.serialize_field("cosine", &reported_cosine(self.cosine))?;
         st.serialize_field("new_id", &crate::recall::format::short_id(self.new))?;
+        // Present only when true, so an unmarked row reads as before.
+        if self.newer {
+            st.serialize_field("newer", &true)?;
+        }
         st.end()
     }
 }
@@ -163,11 +188,12 @@ impl ReplacementReport {
         );
         for c in &self.candidates {
             out.push_str(&format!(
-                "\n  - {} \"{}\" (cosine {:.4}, for {})",
+                "\n  - {} \"{}\" (cosine {:.4}, for {}{})",
                 crate::recall::format::short_id(c.id),
                 c.excerpt,
                 reported_cosine(c.cosine),
-                crate::recall::format::short_id(c.new)
+                crate::recall::format::short_id(c.new),
+                marks(c)
             ));
         }
         if self.total > self.candidates.len() {
@@ -187,6 +213,29 @@ impl ReplacementReport {
             .map(|c| reported_cosine(c.cosine))
             .collect()
     }
+
+    /// Per kept row, aligned with [`Self::cosines`], whether the candidate
+    /// is [newer](ReplacementCandidate::newer); `None` when none is, so the
+    /// ledger line gains the key only when a row is marked.
+    pub fn newer_flags(&self) -> Option<Vec<bool>> {
+        self.candidates
+            .iter()
+            .any(|c| c.newer)
+            .then(|| self.candidates.iter().map(|c| c.newer).collect())
+    }
+}
+
+/// The marks a candidate's text line carries after its `for <id>`: empty
+/// for an unmarked candidate, so its line reads as before.
+fn marks(c: &ReplacementCandidate) -> String {
+    let mut out = String::new();
+    if c.newer {
+        out.push_str(
+            "; newer: dated after this write, so it may replace this write, not the other \
+             way round; do not cite it in against",
+        );
+    }
+    out
 }
 
 /// Every condition but the vector ones: `old` may be listed for `new`.
@@ -218,6 +267,7 @@ pub fn select(
     let Some(Node::Concept(new_c)) = g.node(new) else {
         return Vec::new();
     };
+    let new_at = super::dated_at(g, new_c);
     let mut kept: Vec<(&Concept, f64)> = Vec::new();
     for hit in hits {
         // A non-finite score is a store fault, never a similarity. A
@@ -248,6 +298,9 @@ pub fn select(
             id: old.id,
             excerpt: crate::recall::format::excerpt(&old.content),
             cosine,
+            // Strictly later: the trigger's tie rule records no direction
+            // on equal dates, so a tie is listed unmarked.
+            newer: super::dated_at(g, old) > new_at,
         })
         .collect()
 }

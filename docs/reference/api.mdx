@@ -264,7 +264,9 @@ session, type and repository scope, an eligible type, not an image, no
 `against`/`depends_on` either way), never the merged-into concept or one the
 call wrote, ranked by cosine then id and capped at
 `REPLACEMENT_CANDIDATE_LIMIT` (3). Each `ReplacementCandidate` has `new`,
-`id`, `excerpt` and `cosine`. It is informational: nothing is written for
+`id`, `excerpt`, `cosine` and `newer` (the existing concept is dated after
+the new one by `graph::suspected::dated_at`, strictly: a tie is not newer;
+it may replace the new concept, so it is not one to cite in `against`). It is informational: nothing is written for
 it. A sync derive leaves it empty. The write pipeline puts it on
 `AppliedSummary::replacement` (`ReplacementReport::for_receipt`, `None` when
 empty, rows bounded at `REPLACEMENT_RECEIPT_BYTES` of serialized JSON), and

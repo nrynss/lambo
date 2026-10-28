@@ -156,3 +156,41 @@ async fn the_piggybacked_receipt_carries_them_too() {
     assert!(text_of(&out).contains("1 replacement candidate(s)"));
     s.mem.close().await.unwrap();
 }
+
+/// M1 on the wire: a write backfilled with an `event_time` before an
+/// existing concept lists it with `"newer": true`, and the receipt text
+/// says it may replace this write and is not one to cite.
+#[tokio::test]
+async fn a_backfilled_write_marks_a_later_candidate_newer() {
+    let s = hybrid_server("mcp-replacement-newer").await;
+    let first = settled(&s, &ack(&s, OLD).await).await;
+    let old = first["created"][0].as_str().unwrap().to_string();
+    let out = call_raw(
+        &s,
+        "lambo_derive",
+        json!({
+            "agent_id": "agent-a",
+            "event_time": "2020-01-01T00:00:00Z",
+            "concepts": [{"content": REWORDED, "concept_type": "logic"}],
+        }),
+    )
+    .await;
+    assert_eq!(out.is_error, Some(false), "{out:?}");
+    let receipt = out.structured_content.unwrap()["receipt"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let r = settled(&s, &receipt).await;
+    let row = &r["replacement_candidates"]["candidates"][0];
+    assert_eq!(row["node_id"], old, "{r}");
+    assert_eq!(row["newer"], true, "{r}");
+    let detail = r["detail"].as_str().unwrap();
+    assert!(
+        detail.contains(
+            "; newer: dated after this write, so it may replace this write, not the other way \
+             round; do not cite it in against)"
+        ),
+        "{detail}"
+    );
+    s.mem.close().await.unwrap();
+}
