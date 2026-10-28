@@ -413,6 +413,52 @@ fn a_duplicate_with_a_warning_of_its_own_is_not_skipped() {
     assert_eq!(ids(&on), vec![uid(1), uid(2)]);
 }
 
+/// A skipped copy that contradicts a shown hit comes back as that hit's
+/// companion (#179). It is then a hit of its own, so the kept copy does not
+/// also name it: no skip list holds a member of the result.
+#[test]
+fn a_skipped_copy_brought_back_as_a_companion_is_not_also_named() {
+    let f = Fixture::new(&[
+        (1, EFFICACY, ConceptType::Entity, None),
+        (2, EFFICACY, ConceptType::Observation, None),
+        (
+            3,
+            "the backfill landed, coverage is complete",
+            ConceptType::Logic,
+            None,
+        ),
+        (4, "a fourth fact", ConceptType::Logic, None),
+    ]);
+    let mut run = Run::new(&RANKED4, 2);
+    run.hot.insert(
+        uid(3),
+        vec![HotListPayload::Contradiction {
+            by: uid(2),
+            writer: AgentId::from("agent-b"),
+            at: ts(30),
+        }],
+    );
+    let on = run.go(&f.g);
+    assert!(ids(&on).contains(&uid(2)), "the companion: {:?}", ids(&on));
+    assert!(ids(&on).contains(&uid(1)) && ids(&on).contains(&uid(3)));
+    let shown: Vec<NodeId> = ids(&on);
+    for d in &on.detailed {
+        for s in &d.skipped_redundant {
+            assert!(
+                !shown.contains(&s.node_id),
+                "{:?} is a hit and a skip",
+                s.node_id
+            );
+        }
+    }
+    assert!(
+        !on.context
+            .contains(&format!("also {}", crate::recall::format::short_id(uid(2)))),
+        "{}",
+        on.context
+    );
+}
+
 /// (4) Under `similar_signals = true` at a -1 threshold: a member without
 /// a vector gives no cosine evidence; with a vector the same pair is
 /// redundant. Under the default the cosine pair is not redundant either.

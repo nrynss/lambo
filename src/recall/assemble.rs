@@ -409,7 +409,7 @@ where
     // Block per emitted hit, score order.
     let mut hit_blocks: Vec<format::ContextBlock> = Vec::new();
     let emission = emitted(graph, &members, forced, query.top_k, selection.as_mut());
-    let skipped = emission.skipped;
+    let mut skipped = emission.skipped;
     let shown = with_ordinary_companions(
         graph,
         emission.hits,
@@ -417,6 +417,13 @@ where
         &forced_companions,
         |id| score_of(id, cold).3,
     );
+    // #181: a skipped member the companion step brought back (it
+    // contradicts a shown hit) is a hit of its own, not a copy named on the
+    // kept one, so no skip list lists anything in the result.
+    let in_result: HashSet<NodeId> = shown.hits.iter().map(|s| s.item).collect();
+    for list in skipped.values_mut() {
+        list.retain(|s| !in_result.contains(&s.node_id));
+    }
     for s in shown.hits {
         let Some(Node::Concept(c)) = graph.node(s.item) else {
             continue; // `emitted` yields graph concepts only
