@@ -60,10 +60,15 @@
 //! Under any signal: a pair joined by a `Contradicts` edge either way
 //! ([`never_redundant`], the one predicate #198's `SuspectedSupersedes`
 //! extends), and a pair whose texts are different claims by their surface
-//! ([`distinct_claims`]: different identifiers or digits, or a different
-//! count of negation words). The text guard is trivially false for
-//! identical content; it guards the edge signal too, because a `Semantic`
-//! edge written before #193 can join two version-distinct facts.
+//! ([`distinct_claims`]: different identifiers (snake_case, CamelCase,
+//! hex-like, all-caps, paths, versions) or digits of any script, a
+//! different count of negation words, a word against its opposite, or
+//! their shared content words in another order). The text guard is
+//! trivially false for identical content; it guards the edge signal too,
+//! because a `Semantic` edge written before #193 can join two
+//! version-distinct facts. It is stricter than the write path's merge
+//! guard (`graph::canonical::same_identifiers`), which it includes and
+//! leaves unchanged.
 //!
 //! ## Cost
 //!
@@ -181,33 +186,218 @@ pub fn normalized_content(content: &str) -> String {
     out
 }
 
-/// Words that negate (contractions are counted by their `n't`).
-const NEGATIONS: [&str; 26] = [
+/// Words that negate (contractions are counted by their `n't`): the plain
+/// negators, `avoid` and its forms, `unless`, and `non` (a hyphenated
+/// `non-` splits into its own word).
+const NEGATIONS: [&str; 32] = [
     "not", "no", "never", "none", "nobody", "nothing", "nowhere", "neither", "nor", "cannot",
     "without", "dont", "doesnt", "didnt", "isnt", "arent", "wasnt", "werent", "cant", "couldnt",
-    "wont", "wouldnt", "shouldnt", "mustnt", "hasnt", "havent",
+    "wont", "wouldnt", "shouldnt", "mustnt", "hasnt", "havent", "avoid", "avoids", "avoided",
+    "avoiding", "unless", "non",
 ];
 
-/// How many negation words `content` holds: [`NEGATIONS`] and every word
-/// ending in `n't` (either apostrophe), case-insensitive.
-pub fn negation_count(content: &str) -> usize {
-    crate::graph::canonical::fold(content)
-        .replace('\u{2019}', "'")
-        .split(|c: char| !(c.is_alphanumeric() || c == '\''))
-        .filter(|w| {
-            let w = w.trim_matches('\'');
-            w.ends_with("n't") || NEGATIONS.contains(&w)
-        })
-        .count()
+/// Pairs of words that state opposites; a text with one where the other
+/// text has the other is a different claim. Prefix antonyms (`safe` /
+/// `unsafe`) are found by [`ANTONYM_PREFIXES`] instead.
+const ANTONYMS: [(&str, &str); 22] = [
+    ("enable", "disable"),
+    ("enabled", "disabled"),
+    ("enables", "disables"),
+    ("allow", "deny"),
+    ("allowed", "denied"),
+    ("allows", "denies"),
+    ("accept", "reject"),
+    ("accepted", "rejected"),
+    ("include", "exclude"),
+    ("included", "excluded"),
+    ("add", "remove"),
+    ("added", "removed"),
+    ("true", "false"),
+    ("before", "after"),
+    ("increase", "decrease"),
+    ("increased", "decreased"),
+    ("minimum", "maximum"),
+    ("min", "max"),
+    ("start", "stop"),
+    ("first", "last"),
+    ("success", "failure"),
+    ("pass", "fail"),
+];
+
+/// Prefixes that negate the word they precede: a text with `w` where the
+/// other has `un` + `w` (`dis`, `non`, `in`, `im`) states the opposite.
+const ANTONYM_PREFIXES: [&str; 5] = ["un", "dis", "non", "in", "im"];
+
+/// Words the order check skips: they move with phrasing, not meaning.
+const ORDER_STOPWORDS: [&str; 26] = [
+    "a", "an", "the", "is", "are", "was", "were", "be", "been", "to", "of", "in", "on", "at",
+    "for", "by", "with", "and", "or", "it", "its", "this", "that", "as", "do", "does",
+];
+
+/// The token a negation word becomes in [`claim_words`], so the order
+/// check sees where a text negates.
+const NEGATED: &str = "\u{ac}";
+
+/// `content` with invisible codepoints stripped, then NFC: what every
+/// surface check reads, so two texts that render alike read alike.
+fn visible(content: &str) -> String {
+    content
+        .chars()
+        .filter(|c| !crate::graph::canonical::is_invisible(*c))
+        .nfc()
+        .collect()
 }
 
-/// Whether two texts are different claims by their surface alone: they
-/// name different identifiers or digits
-/// ([`crate::graph::canonical::same_identifiers`] false), or one negates
-/// more often than the other. Such a pair is never redundant (#181), however
-/// close its vectors or whatever edge joins it.
+/// The words of `content`, lowercase, typographic apostrophes (U+2019,
+/// U+2018, U+02BC) read as `'`, split on everything but letters, digits
+/// and `'`, which is trimmed from each end.
+fn words(content: &str) -> Vec<String> {
+    visible(content)
+        .to_lowercase()
+        .replace(['\u{2019}', '\u{2018}', '\u{2BC}'], "'")
+        .split(|c: char| !(c.is_alphanumeric() || c == '\''))
+        .map(|w| w.trim_matches('\'').to_string())
+        .filter(|w| !w.is_empty())
+        .collect()
+}
+
+fn is_negation(word: &str) -> bool {
+    word.ends_with("n't") || NEGATIONS.contains(&word)
+}
+
+/// How many negation words `content` holds: [`NEGATIONS`] and every word
+/// ending in `n't` (any apostrophe, U+02BC included), case-insensitive.
+/// Invisible codepoints are ignored.
+pub fn negation_count(content: &str) -> usize {
+    words(content).iter().filter(|w| is_negation(w)).count()
+}
+
+/// The identifier-shaped tokens of `content`, case kept, in order. A token
+/// is a whitespace-separated run with leading and trailing punctuation
+/// trimmed (`_` kept); it is an identifier when it holds a digit of any
+/// script (`is_numeric`, so full-width digits count), a `_`, `/` or `.`
+/// (snake_case, paths, file names, versions), a lowercase letter followed
+/// later by an uppercase one (CamelCase), at least two uppercase letters
+/// and no lowercase (`PATH`, `API`), or is seven or more hex digits
+/// (`deadbeef`, a hash without digits).
+pub fn claim_identifiers(content: &str) -> Vec<String> {
+    visible(content)
+        .split_whitespace()
+        .map(|t| t.trim_matches(|c: char| !(c.is_alphanumeric() || c == '_')))
+        .filter(|t| is_claim_identifier(t))
+        .map(str::to_string)
+        .collect()
+}
+
+fn is_claim_identifier(t: &str) -> bool {
+    if t.is_empty() {
+        return false;
+    }
+    let numeric = t.chars().any(char::is_numeric);
+    let joined = t.contains(['_', '/', '.']);
+    let camel = t
+        .chars()
+        .skip_while(|c| !c.is_lowercase())
+        .any(char::is_uppercase);
+    let upper = t.chars().filter(|c| c.is_uppercase()).count();
+    let caps = upper >= 2 && !t.chars().any(char::is_lowercase);
+    let hex = t.len() >= 7 && t.chars().all(|c| c.is_ascii_hexdigit());
+    numeric || joined || camel || caps || hex
+}
+
+/// The maximal runs of digits of any script (`is_numeric`), in order.
+fn numeric_runs(content: &str) -> Vec<String> {
+    visible(content)
+        .split(|c: char| !c.is_numeric())
+        .filter(|r| !r.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// [`words`] with every negation word replaced by one marker, for the
+/// order and antonym checks.
+fn claim_words(content: &str) -> Vec<String> {
+    words(content)
+        .into_iter()
+        .map(|w| {
+            if is_negation(&w) {
+                NEGATED.to_string()
+            } else {
+                w
+            }
+        })
+        .collect()
+}
+
+/// Whether the content words two texts share (negation included, the
+/// [`ORDER_STOPWORDS`] aside) come in the same order in both, each counted
+/// at its first occurrence. "warn replaces verify" and "verify replaces
+/// warn" do not; neither do "use A, not B" and "do not use A".
+fn same_order(a: &[String], b: &[String]) -> bool {
+    fn shared<'w>(x: &'w [String], y: &[String]) -> Vec<&'w str> {
+        let mut seen = std::collections::HashSet::new();
+        x.iter()
+            .map(String::as_str)
+            .filter(|w| !ORDER_STOPWORDS.contains(w) && y.iter().any(|v| v == w))
+            .filter(|w| seen.insert(*w))
+            .collect()
+    }
+    shared(a, b) == shared(b, a)
+}
+
+/// Whether one text has a word where the other has its opposite: an
+/// [`ANTONYMS`] pair, or a word and its [`ANTONYM_PREFIXES`] form.
+fn opposite_words(a: &[String], b: &[String]) -> bool {
+    use std::collections::HashSet;
+    let (sa, sb): (HashSet<&str>, HashSet<&str>) = (
+        a.iter().map(String::as_str).collect(),
+        b.iter().map(String::as_str).collect(),
+    );
+    // `x` in one text and `y` in the other, which lacks `x`.
+    let swapped = |x: &str, y: &str| {
+        (sa.contains(x) && sb.contains(y) && !sb.contains(x))
+            || (sb.contains(x) && sa.contains(y) && !sa.contains(x))
+    };
+    if ANTONYMS
+        .iter()
+        .any(|&(x, y)| swapped(x, y) || swapped(y, x))
+    {
+        return true;
+    }
+    sa.iter().chain(&sb).any(|w| {
+        w.chars().count() >= 3
+            && w.chars().all(char::is_alphabetic)
+            && ANTONYM_PREFIXES
+                .iter()
+                .any(|p| swapped(w, &format!("{p}{w}")))
+    })
+}
+
+/// Whether two texts are different claims by their surface alone, so the
+/// pair is never redundant (#181) however close its vectors or whatever
+/// edge joins it. Stricter than the write path's merge guard
+/// ([`crate::graph::canonical::same_identifiers`], which it includes):
+///
+/// * different [`claim_identifiers`] (snake_case, CamelCase, hex-like,
+///   all-caps, paths, versions; case kept) or different digit runs of any
+///   script;
+/// * a different [`negation_count`];
+/// * a word in one where the other has its opposite (`enable` / `disable`,
+///   `safe` / `unsafe`: [`ANTONYMS`], [`ANTONYM_PREFIXES`]);
+/// * the content words both share, negation included, in a different
+///   order (swapped roles, or a negation that moved).
+///
+/// Identical texts are never distinct claims.
 pub fn distinct_claims(a: &str, b: &str) -> bool {
-    !crate::graph::canonical::same_identifiers(a, b) || negation_count(a) != negation_count(b)
+    if !crate::graph::canonical::same_identifiers(a, b)
+        || claim_identifiers(a) != claim_identifiers(b)
+        || numeric_runs(a) != numeric_runs(b)
+        || negation_count(a) != negation_count(b)
+    {
+        return true;
+    }
+    let (wa, wb) = (claim_words(a), claim_words(b));
+    opposite_words(&wa, &wb) || !same_order(&wa, &wb)
 }
 
 /// Whether the graph records `a` and `b` as two different claims, so they

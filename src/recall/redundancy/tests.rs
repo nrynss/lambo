@@ -243,6 +243,15 @@ fn negations_are_counted_by_word_and_contraction() {
     assert_eq!(negation_count("nothing is cached without a lease"), 2);
     // Words that merely start like one do not count.
     assert_eq!(negation_count("note the notation: nodes are nominal"), 0);
+    // U+02BC, `avoid`, `non-` and `unless`.
+    assert_eq!(negation_count("it isn\u{2bc}t cached"), 1);
+    assert_eq!(
+        negation_count("Avoid retries; use non-blocking reads unless told"),
+        3
+    );
+    assert_eq!(negation_count("nonce and union are words"), 0);
+    // An invisible codepoint inside a negator does not hide it.
+    assert_eq!(negation_count("do n\u{200B}ot retry"), 1);
 }
 
 #[test]
@@ -257,12 +266,102 @@ fn distinct_claims_are_different_identifiers_digits_or_negation() {
         "use the candle embedder",
         "do not use the candle embedder"
     ));
-    // A paraphrase with the same identifiers and polarity is not.
+    // A paraphrase with the same identifiers, polarity and order is not.
     assert!(!distinct_claims(
+        "the dogfood embedder is BAAI/bge-m3 on Metal",
+        "the dogfood embedder runs BAAI/bge-m3 on Metal now"
+    ));
+    assert!(!distinct_claims("never retry", "do not retry"));
+    // Conservative by design: a paraphrase that moves a phrase reads as a
+    // different claim, so both are kept.
+    assert!(distinct_claims(
         "the dogfood embedder is BAAI/bge-m3 on Metal",
         "on Metal, the dogfood embedder runs BAAI/bge-m3"
     ));
-    assert!(!distinct_claims("never retry", "do not retry"));
+    // Identical texts never are, whatever they hold.
+    for text in [
+        "UserSchema replaces OrderSchema in store_sqlite, not deadbeef",
+        "enable the unsafe path unless PATH is set: port \u{ff18}\u{ff10}",
+        "",
+    ] {
+        assert!(!distinct_claims(text, text), "{text:?}");
+    }
+}
+
+/// The #181 review's probes: each pair is a different claim that the
+/// write path's `same_identifiers` and a plain negation count passed.
+#[test]
+fn the_review_probes_are_distinct_claims() {
+    for (a, b) in [
+        // snake_case and CamelCase identifiers.
+        (
+            "store_sqlite owns the vector leg",
+            "store_postgres owns the vector leg",
+        ),
+        (
+            "UserSchema validates the request body",
+            "OrderSchema validates the request body",
+        ),
+        // Hashes without a digit.
+        ("the fix landed in deadbeef", "the fix landed in cafebabe"),
+        // Swapped roles.
+        ("warn replaces verify", "verify replaces warn"),
+        // A negation that moved.
+        ("Use A, not B", "Do not use A"),
+        ("use candle, not llama", "do not use candle"),
+        // Antonyms, listed and by prefix.
+        ("enable the canary", "disable the canary"),
+        ("the cache is safe", "the cache is unsafe"),
+        ("allow writes from layers", "deny writes from layers"),
+        ("the input is valid", "the input is invalid"),
+        // Full-width digits.
+        (
+            "the port is \u{ff18}\u{ff10}",
+            "the port is \u{ff18}\u{ff11}",
+        ),
+        // Negators the old count missed: U+02BC, avoid, non-, unless.
+        ("it isn\u{2bc}t cached", "it is cached"),
+        ("avoid caching the index", "caching the index"),
+        ("non-blocking reads", "blocking reads"),
+        (
+            "retry unless the lease expired",
+            "retry if the lease expired",
+        ),
+        // Case in an identifier.
+        ("see src/Foo.rs", "see src/foo.rs"),
+        ("PATH is read at startup", "path is read at startup"),
+    ] {
+        assert!(
+            crate::graph::canonical::same_identifiers(a, b),
+            "premise: the write-path guard does not tell {a:?} from {b:?}"
+        );
+        assert!(distinct_claims(a, b), "{a:?} / {b:?}");
+        assert!(distinct_claims(b, a), "{b:?} / {a:?}");
+    }
+}
+
+#[test]
+fn claim_identifiers_cover_snake_camel_hex_caps_and_unicode_digits() {
+    assert_eq!(
+        claim_identifiers(
+            "(UserSchema) uses store_sqlite, deadbeef, PATH, src/Foo.rs and port \u{ff18}\u{ff10}."
+        ),
+        [
+            "UserSchema",
+            "store_sqlite",
+            "deadbeef",
+            "PATH",
+            "src/Foo.rs",
+            "\u{ff18}\u{ff10}"
+        ]
+    );
+    // Plain words, a capitalised word and a short hex-letter word are not.
+    assert!(claim_identifiers("Use the decaf cache, then retry").is_empty());
+    // Invisible codepoints are ignored.
+    assert_eq!(
+        claim_identifiers("store\u{200B}_sqlite"),
+        claim_identifiers("store_sqlite")
+    );
 }
 
 #[test]
@@ -272,7 +371,7 @@ fn identical_content_across_types_is_the_same_content_signal() {
         concept(1, text, ConceptType::Entity, None),
         concept(
             2,
-            &format!("  {}", text.to_uppercase()),
+            &format!("  {}\n", text.replace(' ', " \t")),
             ConceptType::Observation,
             None,
         ),
