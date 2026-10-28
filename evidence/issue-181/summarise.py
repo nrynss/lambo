@@ -34,16 +34,40 @@ def main():
     scored = [(dev_score(f"mmr@{l}"), float(l)) for l in lambdas]
     best = max(scored)[1]
     mmr = f"mmr@{best:.1f}"
-    shipped = run["shipped"]
-    arms = ["current", "content", shipped, mmr, "fl"]
+    # Runs before the 2026-10-28 owner decision named the all-signal arm
+    # `shipped`; later runs name the default (`content`) and carry the
+    # all-signal arm as `similar_signals`.
+    if "similar_signals" in run:
+        shipped, similar = run["shipped"], run["similar_signals"]
+    else:
+        shipped, similar = "content", run["shipped"]
+    arms = ["current", shipped, similar, mmr, "fl"]
+    label = {shipped: f"{shipped} (shipped default)",
+             similar: f"{similar} (similar_signals)"}
+    names = lambda xs: [label.get(a, a) for a in xs]
 
     print("## Validation (offline rule (a) against the pipeline, top_k 20)\n")
-    print("| condition | concepts | Semantic edges | Contradicts edges | queries | agree | with a skip |")
-    print("|---|---:|---:|---:|---:|---:|---:|")
+    has_similar = all("validation_similar" in cond[c] for c in CONDITIONS)
+    if has_similar:
+        print(f"Agree / queries (with a skip): the shipped default against `{shipped}`, "
+              f"and `similar_signals = true` against `{similar}`.\n")
+        print("| condition | concepts | Semantic edges | Contradicts edges | shipped default | "
+              "similar_signals |")
+        print("|---|---:|---:|---:|---:|---:|")
+    else:
+        print(f"The pipeline with every signal against `{similar}`.\n")
+        print("| condition | concepts | Semantic edges | Contradicts edges | queries | agree | "
+              "with a skip |")
+        print("|---|---:|---:|---:|---:|---:|---:|")
+    cell = lambda v: f"{v['agree']}/{v['compared']} ({v['with_skip']})"
     for c in CONDITIONS:
         v = cond[c]["validation"]
-        print(f"| {c} | {cond[c]['concepts']} | {cond[c]['semantic_edges']} | "
-              f"{cond[c]['contradicts_edges']} | {v['compared']} | {v['agree']} | {v['with_skip']} |")
+        head = (f"| {c} | {cond[c]['concepts']} | {cond[c]['semantic_edges']} | "
+                f"{cond[c]['contradicts_edges']} | ")
+        if has_similar:
+            print(head + f"{cell(v)} | {cell(cond[c]['validation_similar'])} |")
+        else:
+            print(head + f"{v['compared']} | {v['agree']} | {v['with_skip']} |")
 
     print(f"\n## MMR lambda, chosen on dev: {best:.1f}\n")
     print("| lambda | mean dev facet coverage |")
@@ -55,7 +79,7 @@ def main():
         print(f"\n## Facet coverage in the rendered context, budget {b} tokens\n")
         print("Mean share of each answerable query's labelled facets covered by the rendered "
               "context; dev / held-out. In brackets: distinct memories rendered per query.\n")
-        header = "| condition | k | " + " | ".join(arms) + " |"
+        header = "| condition | k | " + " | ".join(names(arms)) + " |"
         print(header)
         print("|---|---:|" + "---:|" * len(arms))
         for c in CONDITIONS:
@@ -69,7 +93,7 @@ def main():
                 print(f"| {c} | {k} | " + " | ".join(cells) + " |")
 
     print("\n## Queries whose rendered context changed (budget 500), dev / held-out\n")
-    print("| condition | k | " + " | ".join(arms[1:]) + " |")
+    print("| condition | k | " + " | ".join(names(arms[1:])) + " |")
     print("|---|---:|" + "---:|" * (len(arms) - 1))
     for c in CONDITIONS:
         for k in KS:
@@ -94,7 +118,7 @@ def main():
           "suppressed / both rendered by `current`, dev | held-out.\n")
     for c in ["contrast", "contrast-declared"]:
         print(f"\n### {c}\n")
-        print("| family | k | " + " | ".join(arms[1:]) + " |")
+        print("| family | k | " + " | ".join(names(arms[1:])) + " |")
         print("|---|---:|" + "---:|" * (len(arms) - 1))
         for fam in FAMILIES:
             for k in KS:
@@ -107,21 +131,22 @@ def main():
                     cells.append(" \\| ".join(parts))
                 print(f"| {fam} | {k} | " + " | ".join(cells) + " |")
 
-    print(f"\n## What {shipped} skipped, by signal (both splits)\n")
-    print("`copy`: an exact copy or labelled rewording of the kept concept's fact. "
-          "`partner`: a labelled related-but-distinct partner (a false suppression).\n")
-    print("| condition | k | joined | signal | skips |")
-    print("|---|---:|---|---|---:|")
-    for c in ["dup", "contrast", "contrast-declared"]:
-        agg = defaultdict(int)
-        for key, n in cond[c]["skips"].items():
-            split, k, arm, what, signal = key.split("/")
-            if arm == shipped:
-                agg[(k, what, signal)] += n
-        for (k, what, signal), n in sorted(agg.items()):
-            print(f"| {c} | {k[1:]} | {what} | {signal} | {n} |")
-        if not agg:
-            print(f"| {c} | 3, 5 | none | none | 0 |")
+    for arm in [shipped, similar]:
+        print(f"\n## What {label[arm]} skipped, by signal (both splits)\n")
+        print("`copy`: an exact copy or labelled rewording of the kept concept's fact. "
+              "`partner`: a labelled related-but-distinct partner (a false suppression).\n")
+        print("| condition | k | joined | signal | skips |")
+        print("|---|---:|---|---|---:|")
+        for c in ["dup", "contrast", "contrast-declared"]:
+            agg = defaultdict(int)
+            for key, n in cond[c]["skips"].items():
+                split, k, a, what, signal = key.split("/")
+                if a == arm:
+                    agg[(k, what, signal)] += n
+            for (k, what, signal), n in sorted(agg.items()):
+                print(f"| {c} | {k[1:]} | {what} | {signal} | {n} |")
+            if not agg:
+                print(f"| {c} | 3, 5 | none | none | 0 |")
 
 
 def arm_names(cond):

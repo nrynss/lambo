@@ -20,10 +20,12 @@
 //!
 //! * `current`: the first `k`;
 //! * `content`: rule (a) with the same-content signal only (the issue's
-//!   exact-duplicate control);
+//!   exact-duplicate control), **the shipped default** (`[selection]
+//!   skip_redundant = true`);
 //! * `a@T`: rule (a), skip-if-redundant, signals same content, `Semantic`
 //!   edge and cosine >= `T`, with the `Contradicts` and text vetoes; `a@0.85`
-//!   is what ships under BGE-M3 (its merge threshold);
+//!   is what `similar_signals = true` runs under BGE-M3 (its merge
+//!   threshold);
 //! * `mmr@L`: maximal marginal relevance, `L · rel − (1 − L) · max sim`,
 //!   `rel` the final score over the window's best, `sim` 1 for the same
 //!   content else the cosine (0 without two vectors);
@@ -31,11 +33,13 @@
 //!   `w_ij = rel(i) · max(0, cos(e_i, e_j))`, `F(S) = Σ_i max_{j∈S} w_ij`
 //!   over the window, greedy.
 //!
-//! `mmr` and `fl` are gated like rule (a): when rule (a)'s detector finds no
-//! redundant pair in the window they return `current`. They are offline
-//! comparisons only; rule (a) is the shipped code path, and the harness
-//! checks its offline replay against the real pipeline with the rule on
-//! (`validation` in the output).
+//! `mmr` and `fl` are gated like rule (a) with every signal: when its
+//! detector at 0.85 finds no redundant pair in the window they return
+//! `current`. They are offline comparisons only; rule (a) is the shipped
+//! code path, and the harness checks its offline replay against the real
+//! pipeline with the rule on, under the shipped default against `content`
+//! (`validation` in the output) and under `similar_signals = true` against
+//! `a@0.85` (`validation_similar`).
 //!
 //! The rendered context is each selected hit's block as recall renders it
 //! (`also <id>` items on rule (a)'s kept hits), joined by blank lines and
@@ -78,8 +82,10 @@ const KS: [usize; 2] = [3, 5];
 const BUDGETS: [usize; 2] = [250, 500];
 const THRESHOLDS: [f64; 3] = [0.85, 0.90, 0.95];
 const LAMBDAS: [f64; 5] = [0.5, 0.6, 0.7, 0.8, 0.9];
-/// The shipped arm: rule (a) at BGE-M3's merge threshold.
-const SHIPPED: f64 = 0.85;
+/// The arm the shipped default runs (`skip_redundant = true` alone).
+const SHIPPED: &str = "content";
+/// `similar_signals = true` under BGE-M3: rule (a) at its merge threshold.
+const SIMILAR: f64 = 0.85;
 
 // ---------------------------------------------------------------------------
 // The embedding cache (eval_measure's format and key, as eval_fusion's).
@@ -262,14 +268,15 @@ async fn backends(db: &Path) -> Result<lambo::resolve::ResolvedBackends, String>
     Ok(resolved)
 }
 
-async fn open(db: &Path, embedder: Arc<dyn Embedder>, skip: bool) -> Result<Memory, String> {
+async fn open(
+    db: &Path,
+    embedder: Arc<dyn Embedder>,
+    selection: RecallSelection,
+) -> Result<Memory, String> {
     let mut resolved = backends(db).await?;
     resolved.embedder = Box::new(Shared(embedder));
     let mut config = resolved.config.clone();
-    config.recall_selection = RecallSelection {
-        skip_redundant: skip,
-        similar_signals: skip,
-    };
+    config.recall_selection = selection;
     // An hour's tick: the warm-up cycle scores the session, and no later
     // cycle runs mid-measurement.
     config.daemon_tick_interval = Duration::from_secs(3600);
@@ -372,7 +379,7 @@ async fn derive_store(
     let mut role = HashMap::new();
     let mut node_of: HashMap<String, NodeId> = HashMap::new();
     {
-        let mem = open(&db, embedder.clone(), false).await?;
+        let mem = open(&db, embedder.clone(), RecallSelection::default()).await?;
         let agent = AgentId::from("eval");
         for plan in plans(set, condition)? {
             let citations: Vec<ConceptCitations> = match &plan.against {
@@ -506,6 +513,22 @@ impl Store {
     }
 }
 
+/// One validation: the pipeline against the offline replay of its arm.
+#[derive(Default)]
+struct Validation {
+    compared: usize,
+    agree: usize,
+    fired: usize,
+    disagreements: Vec<String>,
+}
+
+impl Validation {
+    fn json(&self) -> Value {
+        json!({"compared": self.compared, "agree": self.agree, "with_skip": self.fired,
+               "disagreements": self.disagreements})
+    }
+}
+
 /// A selection: the chosen members in rendered order, and for rule (a)
 /// what each kept member skipped (with the signal).
 #[derive(Clone, Debug, Default)]
@@ -546,7 +569,7 @@ fn rule_a(store: &Store, w: &[Member], k: usize, threshold: Option<f64>) -> Sele
 /// Whether rule (a)'s detector finds any redundant pair in the window.
 fn gate(store: &Store, w: &[Member], k: usize) -> bool {
     let win = window(k).min(w.len());
-    (0..win).any(|i| (0..i).any(|j| store.redundant(&w[j], &w[i], Some(SHIPPED)).is_some()))
+    (0..win).any(|i| (0..i).any(|j| store.redundant(&w[j], &w[i], Some(SIMILAR)).is_some()))
 }
 
 fn mmr(store: &Store, w: &[Member], k: usize, lambda: f64) -> Selection {
@@ -916,11 +939,12 @@ async fn run() -> Result<(), String> {
             store.contradicts.len(),
             started.elapsed().as_secs_f64()
         );
-        // Two copies of the derived session, opened together: the windows
-        // come from one with the rule off, the validation from the other
-        // with it on. Same rows and the same warm-up, and reads never wake
-        // the daemon, so the two rank alike (recency differs only by the
-        // seconds between the two warm-ups).
+        // Three copies of the derived session, opened together: the windows
+        // come from one with the rule off, the validations from the others,
+        // one under the shipped default and one with `similar_signals`. Same
+        // rows and the same warm-up, and reads never wake the daemon, so
+        // they rank alike (recency differs only by the seconds between the
+        // warm-ups).
         let copy = |tag: &str| -> Result<PathBuf, String> {
             let to = work.join(format!("{condition}-{tag}.db"));
             for suffix in ["", "-wal", "-shm"] {
@@ -932,17 +956,22 @@ async fn run() -> Result<(), String> {
             }
             Ok(to)
         };
-        let (off_db, on_db) = (copy("off")?, copy("on")?);
-        let off = open(&off_db, as_dyn.clone(), false).await?;
-        let on = open(&on_db, as_dyn.clone(), true).await?;
+        let (off_db, on_db, similar_db) = (copy("off")?, copy("on")?, copy("similar")?);
+        let selection = |similar_signals| RecallSelection {
+            skip_redundant: true,
+            similar_signals,
+        };
+        let off = open(&off_db, as_dyn.clone(), RecallSelection::default()).await?;
+        let on = open(&on_db, as_dyn.clone(), selection(false)).await?;
+        let similar = open(&similar_db, as_dyn.clone(), selection(true)).await?;
         wait_warm(&off).await?;
         wait_warm(&on).await?;
+        wait_warm(&similar).await?;
         let mut windows: Vec<Vec<Member>> = Vec::new();
-        let (mut agree, mut compared, mut fired) = (0usize, 0usize, 0usize);
-        let mut disagreements = Vec::new();
+        let mut checks = [Validation::default(), Validation::default()];
         for q in &queries {
             let base = recall(&off, q).await?;
-            let r = recall(&on, q).await?;
+            let piped = [recall(&on, q).await?, recall(&similar, q).await?];
             windows.push(
                 base.hits
                     .into_iter()
@@ -956,23 +985,35 @@ async fn run() -> Result<(), String> {
             );
             let w = windows.last().expect("just pushed");
             // Validation: the pipeline with the rule on at top_k 20
-            // (window 20) against the offline replay of rule (a) on the
-            // same window.
-            let replay = rule_a(&store, w, WINDOW_K, Some(SHIPPED));
-            let replayed: Vec<NodeId> = replay.picked.iter().map(|&i| w[i].id).collect();
-            let piped: Vec<NodeId> = r.hits.iter().map(|h| h.node_id).collect();
-            compared += 1;
-            fired += usize::from(!replay.skipped.is_empty());
-            // The pipeline may fill freed slots from past the window's 20.
-            if piped.len() >= replayed.len() && piped[..replayed.len()] == replayed[..] {
-                agree += 1;
-            } else if disagreements.len() < 5 {
-                disagreements.push(q.id.clone());
+            // (window 20) against the offline replay of its arm on the same
+            // window: `content` for the shipped default, `a@0.85` for
+            // `similar_signals`.
+            for (check, (r, threshold)) in checks
+                .iter_mut()
+                .zip(piped.iter().zip([None, Some(SIMILAR)]))
+            {
+                let replay = rule_a(&store, w, WINDOW_K, threshold);
+                let replayed: Vec<NodeId> = replay.picked.iter().map(|&i| w[i].id).collect();
+                let piped: Vec<NodeId> = r.hits.iter().map(|h| h.node_id).collect();
+                check.compared += 1;
+                check.fired += usize::from(!replay.skipped.is_empty());
+                // The pipeline may fill freed slots from past the window's 20.
+                if piped.len() >= replayed.len() && piped[..replayed.len()] == replayed[..] {
+                    check.agree += 1;
+                } else if check.disagreements.len() < 5 {
+                    check.disagreements.push(q.id.clone());
+                }
             }
         }
         off.close().await.map_err(|e| e.to_string())?;
         on.close().await.map_err(|e| e.to_string())?;
-        eprintln!("{condition}: validation {agree}/{compared} agree ({fired} with a skip)");
+        similar.close().await.map_err(|e| e.to_string())?;
+        for (name, c) in ["validation", "validation_similar"].iter().zip(&checks) {
+            eprintln!(
+                "{condition}: {name} {}/{} agree ({} with a skip)",
+                c.agree, c.compared, c.fired
+            );
+        }
 
         // The arms.
         let mut acc: BTreeMap<String, Acc> = BTreeMap::new();
@@ -1090,8 +1131,8 @@ async fn run() -> Result<(), String> {
                 "concepts": store.role.len(),
                 "semantic_edges": store.semantic.len(),
                 "contradicts_edges": store.contradicts.len(),
-                "validation": {"compared": compared, "agree": agree, "with_skip": fired,
-                               "disagreements": disagreements},
+                "validation": checks[0].json(),
+                "validation_similar": checks[1].json(),
                 "metrics": acc.into_iter().map(|(k, a)| (k, a.json())).collect::<BTreeMap<_, _>>(),
                 "suppression": supp.into_iter().map(|(k, s)| (k, json!({
                     "both_in_current": s.both_in_current, "suppressed": s.suppressed,
@@ -1109,7 +1150,8 @@ async fn run() -> Result<(), String> {
         "window_k": WINDOW_K,
         "ks": KS,
         "budgets": BUDGETS,
-        "shipped": format!("a@{SHIPPED:.2}"),
+        "shipped": SHIPPED,
+        "similar_signals": format!("a@{SIMILAR:.2}"),
         "cache": {"hits": embedder.hits.load(Ordering::Relaxed), "misses": embedder.misses.load(Ordering::Relaxed)},
         "conditions": report,
     });

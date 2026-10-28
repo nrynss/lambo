@@ -1,0 +1,25 @@
+# target/release/examples/bench_redundancy (Apple M3 Pro, 2026-10-28, branch feat/181-redundancy-aware-selection
+# after the review fixes: stricter claim guard, case-kept content, per-recall verdict memo).
+# "on" runs skip_redundant = true with similar_signals = true, the costlier configuration;
+# the shipped default (identical content only) does less work.
+run 1
+distinct: off p50 0.138 ms, p90 0.149 ms, mean 0.139 ms (n 1000)
+distinct: on  p50 0.143 ms, p90 0.155 ms, mean 0.158 ms (n 1000)
+distinct: queries whose context names a skip: 0/40
+duplicated: off p50 1.332 ms, p90 1.442 ms, mean 1.354 ms (n 1000)
+duplicated: on  p50 1.373 ms, p90 1.476 ms, mean 1.391 ms (n 1000)
+duplicated: queries whose context names a skip: 40/40
+run 2
+distinct: off p50 0.139 ms, p90 0.152 ms, mean 0.141 ms (n 1000)
+distinct: on  p50 0.144 ms, p90 0.157 ms, mean 0.157 ms (n 1000)
+distinct: queries whose context names a skip: 0/40
+duplicated: off p50 1.356 ms, p90 1.491 ms, mean 1.381 ms (n 1000)
+duplicated: on  p50 1.386 ms, p90 1.520 ms, mean 1.412 ms (n 1000)
+duplicated: queries whose context names a skip: 40/40
+run 3
+distinct: off p50 0.147 ms, p90 0.164 ms, mean 0.148 ms (n 1000)
+distinct: on  p50 0.151 ms, p90 0.169 ms, mean 0.163 ms (n 1000)
+distinct: queries whose context names a skip: 0/40
+duplicated: off p50 1.338 ms, p90 1.447 ms, mean 1.359 ms (n 1000)
+duplicated: on  p50 1.365 ms, p90 1.493 ms, mean 1.391 ms (n 1000)
+duplicated: queries whose context names a skip: 40/40
