@@ -21,7 +21,9 @@
 //! ```
 //!
 //! It is run by hand (it reads committed files and needs no model), and is
-//! compiled by every `--all-targets` CI row.
+//! compiled by every `--all-targets` CI row. `tests/suspected_measure.rs`
+//! includes this file and asserts the shipped lexicon's per-split counts
+//! through the same [`rows`] and [`tally`], so the measurement is in CI.
 
 use std::collections::BTreeMap;
 
@@ -32,12 +34,51 @@ use serde_json::Value;
 
 const THRESHOLD: f64 = 0.85;
 
-struct Row {
-    id: String,
-    kind: String,
-    split: String,
-    verdict_shipped: SlotVerdict,
-    verdict_reference: SlotVerdict,
+/// One in-regime pair and the trigger's verdicts on it.
+pub struct Row {
+    pub id: String,
+    pub kind: String,
+    pub split: String,
+    pub verdict_shipped: SlotVerdict,
+    pub verdict_reference: SlotVerdict,
+}
+
+/// One split's counts under one rule.
+pub struct Tally {
+    pub tp: usize,
+    pub fp: usize,
+    /// `supersedes` pairs in the split.
+    pub positives: usize,
+    /// Flagged pairs that are not `supersedes`.
+    pub false_positives: Vec<String>,
+    /// `supersedes` pairs not flagged.
+    pub missed: Vec<String>,
+}
+
+/// Count `split` of `rows` under `rule`.
+pub fn tally(rows: &[Row], split: &str, rule: impl Fn(&Row) -> bool) -> Tally {
+    let mut t = Tally {
+        tp: 0,
+        fp: 0,
+        positives: 0,
+        false_positives: Vec::new(),
+        missed: Vec::new(),
+    };
+    for r in rows.iter().filter(|r| r.split == split) {
+        let positive = r.kind == "supersedes";
+        let flagged = rule(r);
+        t.positives += usize::from(positive);
+        match (flagged, positive) {
+            (true, true) => t.tp += 1,
+            (true, false) => {
+                t.fp += 1;
+                t.false_positives.push(r.id.clone());
+            }
+            (false, true) => t.missed.push(r.id.clone()),
+            (false, false) => {}
+        }
+    }
+    t
 }
 
 fn wilson_lo(k: usize, n: usize) -> f64 {
@@ -58,52 +99,46 @@ fn read(path: &str) -> Value {
 fn report(name: &str, rows: &[Row], rule: impl Fn(&Row) -> bool, list: bool) {
     println!("\n== {name}");
     for split in ["dev", "held_out"] {
-        let in_split: Vec<&Row> = rows.iter().filter(|r| r.split == split).collect();
-        let positives = in_split.iter().filter(|r| r.kind == "supersedes").count();
-        let hit: Vec<&&Row> = in_split.iter().filter(|r| rule(r)).collect();
-        let tp = hit.iter().filter(|r| r.kind == "supersedes").count();
-        let fp = hit.len() - tp;
-        let precision = if hit.is_empty() {
+        let t = tally(rows, split, &rule);
+        let flagged = t.tp + t.fp;
+        let precision = if flagged == 0 {
             f64::NAN
         } else {
-            tp as f64 / hit.len() as f64
+            t.tp as f64 / flagged as f64
         };
         println!(
-            "  {split:8} TP {tp:2} FP {fp:2} precision {precision:.2} (95% low {:.2}) recall {tp}/{positives}",
-            wilson_lo(tp, hit.len())
+            "  {split:8} TP {:2} FP {:2} precision {precision:.2} (95% low {:.2}) recall {}/{}",
+            t.tp,
+            t.fp,
+            wilson_lo(t.tp, flagged),
+            t.tp,
+            t.positives
         );
     }
     if list {
         for split in ["dev", "held_out"] {
-            let fps: Vec<&str> = rows
-                .iter()
-                .filter(|r| r.split == split && rule(r) && r.kind != "supersedes")
-                .map(|r| r.id.as_str())
-                .collect();
-            let fns: Vec<&str> = rows
-                .iter()
-                .filter(|r| r.split == split && !rule(r) && r.kind == "supersedes")
-                .map(|r| r.id.as_str())
-                .collect();
-            println!("  {split} false positives: {fps:?}");
-            println!("  {split} missed supersedes: {fns:?}");
+            let t = tally(rows, split, &rule);
+            println!("  {split} false positives: {:?}", t.false_positives);
+            println!("  {split} missed supersedes: {:?}", t.missed);
         }
     }
 }
 
-fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+/// The committed pairs file and cosine file.
+pub fn default_paths() -> (String, String) {
     let root = env!("CARGO_MANIFEST_DIR");
-    let pairs_path = args
-        .first()
-        .cloned()
-        .unwrap_or_else(|| format!("{root}/fixtures/eval/pairs.json"));
-    let cosines_path = args
-        .get(1)
-        .cloned()
-        .unwrap_or_else(|| format!("{root}/evidence/issue-198-trigger/cosines-bge-m3-self.json"));
-    let pairs = read(&pairs_path);
-    let cosines = read(&cosines_path);
+    (
+        format!("{root}/fixtures/eval/pairs.json"),
+        format!("{root}/evidence/issue-198-trigger/cosines-bge-m3-self.json"),
+    )
+}
+
+/// The in-regime pairs of `pairs_path` at cosine >= [`THRESHOLD`] (cosines
+/// from `cosines_path`), each judged with the shipped and the reference
+/// lexicon, plus the per-(split, label) counts.
+pub fn rows(pairs_path: &str, cosines_path: &str) -> (Vec<Row>, BTreeMap<(String, String), usize>) {
+    let pairs = read(pairs_path);
+    let cosines = read(cosines_path);
     let cosine: BTreeMap<String, f64> = cosines["pairs"]
         .as_array()
         .expect("pairs")
@@ -168,6 +203,15 @@ fn main() {
             verdict_reference: judge_with(a, b, &reference),
         });
     }
+    (rows, counts)
+}
+
+fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let (default_pairs, default_cosines) = default_paths();
+    let pairs_path = args.first().cloned().unwrap_or(default_pairs);
+    let cosines_path = args.get(1).cloned().unwrap_or(default_cosines);
+    let (rows, counts) = rows(&pairs_path, &cosines_path);
     println!("in-regime pairs at cosine >= {THRESHOLD}: {counts:?}");
     report(
         "one span (reference lexicon)",
