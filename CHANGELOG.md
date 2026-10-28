@@ -226,11 +226,17 @@
   read the labelled-pairs threshold the store caches for the configured
   file, so they use the threshold a serve does). A member without a
   vector is never judged by cosine. A pair joined by `Contradicts` either
-  way, or whose texts differ in an identifier, a digit or a count of
-  negation words, is never redundant. Forced hits (hot-list, #19 forcing and companions, kept
-  reservation holders) and hits carrying a warning line of their own
-  (hot-list or contradiction, #207 stale citation, #20 supersession,
-  reservation) are never skipped; Canonical concepts still come first.
+  way is never redundant, nor is one whose texts differ in an identifier
+  (snake_case, CamelCase, all-caps, paths, versions and file names, seven
+  or more hex digits; case kept) or a digit of any script, negate a
+  different number of times (negators, `n't` with any apostrophe,
+  `avoid`, `unless`, `non-`), set a word against its opposite (`enable` /
+  `disable`, `safe` / `unsafe`), or share content words in another order
+  (swapped roles); this recall-side guard is stricter than the write
+  path's `same_identifiers`, which is unchanged. Forced hits (hot-list,
+  #19 forcing and companions, kept reservation holders) and hits
+  carrying a warning line of their own (hot-list or contradiction, #207
+  stale citation, #20 supersession, reservation) are never skipped; Canonical concepts still come first.
   Only the first `min(20, 4 × top_k)` hits are checked, each against at
   most 20 taken. The kept hit names what it replaced in its label, `(score
   …, id …, also 5e6f7a8b)`, at most three ids and then `+N more`, so the
@@ -255,11 +261,14 @@
   related-but-distinct partners, every wrong skip from one of five pairs
   the write path had merged with a `Semantic` edge (`p-can-02-rbd1`,
   `p-can-02-rbd2`, `p-can-03-rbd1`, `p-con-05-rbd1`, `p-pro-01-rbd1`).
-  MMR and facility location were compared offline and did not beat
-  either. In-process recall cost is a few
+  Declaring the contradiction with `against` protects such a pair mainly
+  because the write path then refuses the merge, not through recall's
+  `Contradicts` veto. MMR and facility location were compared offline
+  and did not beat either. In-process recall cost is a few
   microseconds. New `recall::redundancy` module (`RecallSelection`,
   `RedundancySignal`, `RedundantSkip`, `normalized_content`,
-  `negation_count`, `distinct_claims`, `never_redundant`, `window`);
+  `negation_count`, `claim_identifiers`, `distinct_claims`,
+  `never_redundant`, `window`, `PAIR_BUDGET`);
   harnesses `examples/eval_redundancy` and `examples/bench_redundancy`;
   evidence `evidence/issue-181/`.
 - **Opt-in reciprocal rank fusion of recall's legs: `[fusion]` (#173).**

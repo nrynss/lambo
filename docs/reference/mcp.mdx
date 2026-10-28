@@ -247,7 +247,8 @@ list-all returns every memo [Logic] (score 1.38, id 4bf3835a)
 dogfood store carries no durable embedding for 92 of 100 concepts [Entity] (score 1.38, id 4bf3835a, also 82c3dcb0)
 ```
 
-* **Never skipped:** a pair one of which contradicts the other, two texts that differ in an identifier, a number or a negation, a hit kept past `top_k` for a warning, and a hit with a warning line of its own (the copy kept may not carry it).
+* **Never a repeat:** a pair one of which contradicts the other, and two texts that differ in an identifier (snake_case, CamelCase, all-caps, a path, version or hash; case counts), a number, a negation, a word against its opposite (`enable` and `disable`), or the order of their shared words.
+* **Never skipped:** a hit kept past `top_k` for a warning, and a hit with a warning line of its own (the copy kept may not carry it).
 * **Bounded.** Only the first `min(20, 4 × top_k)` hits are checked; the label names at most three ids, then `+N more`. Each id is an inspect focus. The `also` items count against `max_tokens`.
 * **Nothing else changes.** With the setting off, or nothing repeated among the hits checked, the result is byte-identical. Scores and the order of the hits kept are unchanged.
 * In `structuredContent`, the hit kept carries `skipped_redundant`: each skipped hit's `node_id` and the `signal` that found it (`same_content`, `semantic_edge` or `cosine`); no other hit has the key. The web portal's `/api/recall` and the `--ledger` recall line carry the same key. In a layered recall each session skips inside its own hits, and the `also` items follow `from <session>`; when a layer's copy merges into a nearer hit, what that layer skipped for it is named after it, `also <id> in <session>`.

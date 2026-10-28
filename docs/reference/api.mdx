@@ -206,8 +206,14 @@ of the session's contract and their cosine is at or above its effective
 merge threshold). A
 pair is never redundant when `recall::redundancy::never_redundant` (a
 `Contradicts` edge either way) or `recall::redundancy::distinct_claims`
-(different identifiers or digits, `graph::canonical::same_identifiers`, or
-a different `negation_count`) holds. A forced member is never skipped, nor
+holds: different `recall::redundancy::claim_identifiers` (snake_case,
+CamelCase, all-caps words, paths, versions and file names, seven or more
+hex digits; case kept) or digit runs of any script, a different
+`negation_count` (negators, `n't` with any apostrophe, `avoid`, `unless`,
+`non-`), a word against its opposite (a short antonym list, and
+`un`/`dis`/`non`/`in`/`im` prefixes), or the content words both texts
+share in another order. It includes, and is stricter than, the write
+path's `graph::canonical::same_identifiers`, which is unchanged. A forced member is never skipped, nor
 is one that would carry a warning line of its own. The kept hit carries
 `DetailedHit::skipped_redundant` / `LayeredHit::skipped_redundant`
 (`RedundantSkip { node_id, signal }`, in skip order), serialized as
