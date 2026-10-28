@@ -625,7 +625,14 @@ fn structural_query_placeholder_order_and_counts() {
             sql.contains("e.source = $2 AND e.edge_type = 'Hierarchical'"),
             "{sql}"
         );
-        for absent in ["Causal", "Derives", "Temporal", "CoOccurrence", "Semantic"] {
+        for absent in [
+            "Causal",
+            "Derives",
+            "Temporal",
+            "CoOccurrence",
+            "Semantic",
+            "SuspectedSupersedes",
+        ] {
             assert!(!sql.contains(absent), "{absent} in {sql}");
         }
         // Dependents are concepts of the session, never the node itself.

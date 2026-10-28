@@ -16,6 +16,7 @@
 //! originally pinned fields), `content`, `concept_type`, `status` (absent only
 //! for `None`), `score`, `blast_radius` (when present),
 //! `included_in_context`, `truncated_in_context` (#130, only when true),
+//! `possibly_superseded_by` (#198, only when present),
 //! `skipped_redundant` (#181, only when non-empty: `{node_id, signal}`
 //! pairs, `signal` one of `same_content`, `semantic_edge`, `cosine`),
 //! and `annotations` as zero or more `{kind, text}` pairs;
@@ -29,8 +30,10 @@
 //! the contradicting concept pulled in beside it (#19(c)), `superseded` on a
 //! hit whose latest demotion was a supersession (#20, history, not forced),
 //! `rests_on_contradicted` on a hit whose own `depends_on` cites a
-//! contradicted concept (#207, not forced),
-//! `reservation` from an active reservation, `traversal` from the
+//! contradicted concept (#207, not forced), `possibly_superseded` on a hit
+//! a newer shown hit is suspected of replacing without declaring it (#198,
+//! not forced, and only where the session's embedder is validated: see
+//! `crate::recall::suspected`), `reservation` from an active reservation, `traversal` from the
 //! structural-dispatch explanation, and `vector_degraded` from a query
 //! embedding failure. The two response-global kinds are never attached to a
 //! hit and never duplicated across hits.
@@ -73,6 +76,15 @@ pub(crate) enum AnnotationKind {
     /// `format::STALE_CITATION_LINES`). Never forces the hit, nor anything
     /// else, into the result — hit-owned.
     RestsOnContradicted,
+    /// Suspected supersession (#198): a newer hit of the same result is
+    /// suspected of replacing this one without declaring it
+    /// (`SuspectedSupersedes`). At most one per hit. Shown only where the
+    /// line is enabled for the session's embedder
+    /// ([`crate::recall::suspected::shows_line`]); the hit's
+    /// [`DetailedHit::possibly_superseded_by`] carries the same pair
+    /// whether or not it is. Never forces anything into the result —
+    /// hit-owned.
+    PossiblySuperseded,
 }
 
 /// One typed warning: its kind and the exact line that renders it.
@@ -146,6 +158,15 @@ pub(crate) struct DetailedHit {
     /// to show a companion only beside a hit it contradicts. Internal only.
     #[serde(skip)]
     pub(crate) contradicts: Vec<NodeId>,
+    /// #198: the newer hit of this result suspected of replacing this one
+    /// without declaring it (a `SuspectedSupersedes` edge), when both are
+    /// shown. The structured form of the `possibly_superseded` line, set
+    /// whether or not the line is shown (owner decision 1: below the
+    /// precision bar the signal is this field only). Additive on the wire:
+    /// serialized only when present, so a recall with no suspected pair is
+    /// byte-identical to before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) possibly_superseded_by: Option<NodeId>,
     /// #181: the members skipped as redundant with this hit, in skip
     /// (recall) order, each with the signal that found it redundant. Its
     /// label names them (`also <id>`). Additive on the wire: serialized
@@ -172,6 +193,7 @@ impl DetailedHit {
             annotations: Vec::new(),
             companion_of: Vec::new(),
             contradicts: Vec::new(),
+            possibly_superseded_by: None,
             skipped_redundant: Vec::new(),
         }
     }

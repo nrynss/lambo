@@ -22,7 +22,7 @@ use super::Memory;
 use crate::types::LamboError;
 
 impl Memory {
-    pub(super) fn ensure_open(&self) -> Result<(), LamboError> {
+    pub(crate) fn ensure_open(&self) -> Result<(), LamboError> {
         if self.closed.load(Ordering::Acquire) {
             return Err(self.closed_error());
         }

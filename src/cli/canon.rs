@@ -334,7 +334,7 @@ mod imp {
         }
     }
 
-    fn removal_invariant(removed: Result<(), String>) -> Invariant {
+    pub(super) fn removal_invariant(removed: Result<(), String>) -> Invariant {
         match removed {
             Ok(()) => Invariant::new("scratch_removed", true, String::new()),
             Err(why) => Invariant::new("scratch_removed", false, why),
@@ -441,7 +441,7 @@ mod imp {
     }
 
     /// A store error, with an invariant message's text withheld (L3).
-    fn redact_store(e: &StoreError) -> String {
+    pub(super) fn redact_store(e: &StoreError) -> String {
         match e {
             StoreError::Invariant(m) => format!("store invariant: {}", redact(m)),
             other => other.to_string(),
@@ -464,7 +464,11 @@ mod imp {
     }
 
     /// Hash the input again and say whether it is unchanged.
-    fn source_check(c: &CommonArgs, before: &Fingerprint, facts: &mut SourceFacts) -> Invariant {
+    pub(super) fn source_check(
+        c: &CommonArgs,
+        before: &Fingerprint,
+        facts: &mut SourceFacts,
+    ) -> Invariant {
         match fingerprint(&c.store) {
             Ok(after) => {
                 facts.sha256_after = after.digest.clone();
@@ -663,6 +667,41 @@ pub async fn alias_preview(args: AliasPreviewArgs) -> Result<Outcome, CliError> 
         let _ = args;
         Err(unavailable())
     }
+}
+
+/// `lambo canon suspected` (#198): report, and with `--apply` record, the
+/// pairs of an existing session the suspected-supersession trigger would
+/// flag. See `canon_suspected.rs`.
+#[cfg(all(feature = "store-sqlite", feature = "store-memory"))]
+#[path = "canon_suspected.rs"]
+mod suspected_imp;
+#[cfg(all(feature = "store-sqlite", feature = "store-memory"))]
+pub use suspected_imp::{SuspectedArgs, SuspectedReport, SUSPECTED_AGENT};
+
+/// `lambo canon suspected`.
+#[cfg(all(feature = "store-sqlite", feature = "store-memory"))]
+pub async fn suspected(args: SuspectedArgs) -> Result<Outcome, CliError> {
+    suspected_imp::run(args).await
+}
+
+/// `lambo canon suspected`'s options, in a build without SQLite (the
+/// command is refused).
+#[cfg(not(all(feature = "store-sqlite", feature = "store-memory")))]
+#[derive(Clone, Debug)]
+pub struct SuspectedArgs {
+    pub store: PathBuf,
+    pub session: String,
+    pub cosine: Option<f64>,
+    pub apply: bool,
+    pub json: bool,
+    pub scratch: Option<PathBuf>,
+}
+
+/// `lambo canon suspected`, refused in a build without SQLite.
+#[cfg(not(all(feature = "store-sqlite", feature = "store-memory")))]
+pub async fn suspected(args: SuspectedArgs) -> Result<Outcome, CliError> {
+    let _ = args;
+    Err(unavailable())
 }
 
 #[cfg(not(all(feature = "store-sqlite", feature = "store-memory")))]

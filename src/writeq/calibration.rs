@@ -1330,7 +1330,7 @@ impl EmbedderCalibration {
 
     /// A calibration whose re-probe backoff is `backoff` rather than
     /// [`PROBE_RETRY_BACKOFF`], so a test can re-probe without waiting.
-    #[cfg(all(test, feature = "embed-fixture"))]
+    #[cfg(all(test, feature = "store-memory", feature = "embed-fixture"))]
     pub(crate) fn with_retry_backoff(backoff: Duration) -> Self {
         Self {
             inner: Arc::new(CalibrationProbes {

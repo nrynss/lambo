@@ -897,6 +897,8 @@ impl MemoryBuilder {
         let pipeline = Arc::new(WritePipeline::spawn(
             WriteCtx {
                 session: session.clone(),
+                clock: clock.clone(),
+                contradiction_evidence_min_age: config.canonization_edge_min_age,
                 graph: graph.clone(),
                 index: index.clone(),
                 store: store.clone(),

@@ -332,6 +332,10 @@ impl Memory {
         &self.session
     }
 
+    pub(crate) fn now(&self) -> chrono::DateTime<chrono::Utc> {
+        (self.clock)()
+    }
+
     /// This handle's **default** agent id: the one stamped on writes made
     /// through the plain write methods ([`Memory::derive`],
     /// [`Memory::record_action`], [`Memory::reserve`], [`Memory::release`],

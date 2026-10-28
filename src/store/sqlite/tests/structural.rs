@@ -634,7 +634,14 @@ fn structural_span_sql_gates_both_timestamps() {
     for sql in [sql, with_dependents(BLAST_RADIUS_SQL)] {
         assert!(sql.contains("e.edge_type = 'Dependency'"), "{sql}");
         assert!(sql.contains("e.edge_type = 'Hierarchical'"), "{sql}");
-        for absent in ["Causal", "Derives", "Temporal", "CoOccurrence", "Semantic"] {
+        for absent in [
+            "Causal",
+            "Derives",
+            "Temporal",
+            "CoOccurrence",
+            "Semantic",
+            "SuspectedSupersedes",
+        ] {
             assert!(!sql.contains(absent), "{absent} in {sql}");
         }
         assert!(!sql.contains("{DEPENDENTS_CTE}"), "{sql}");
@@ -865,6 +872,14 @@ async fn supersession_case() {
     store.init_schema().await.unwrap();
     crate::test_util::supersession::check_accessors(&store).await;
     crate::test_util::supersession::check_reason_persistence(&store).await;
+}
+
+/// #198: the shared suspected-supersession edge case.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn suspected_supersession_case() {
+    let store = test_store();
+    store.init_schema().await.unwrap();
+    crate::test_util::suspected::check_round_trip(&store).await;
 }
 
 #[tokio::test]

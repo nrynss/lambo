@@ -708,6 +708,7 @@ pub(crate) mod testkit {
                         lane_seq: 1,
                         issued_ms: ts.timestamp_millis(),
                         payload: WriteIntentPayload::Derive {
+                            receipt_destination: None,
                             concepts: vec![("prefers linen".into(), ConceptType::Entity)],
                             pairs: vec![("wardrobe".into(), "prefers linen".into())],
                         },
@@ -727,6 +728,7 @@ pub(crate) mod testkit {
                         // vector and source in the intent row; erase
                         // removes it with the session like any intent.
                         payload: WriteIntentPayload::DeriveImage {
+                            receipt_destination: None,
                             concepts: vec![(
                                 "prefers navy [image:n1]".into(),
                                 ConceptType::Resource,

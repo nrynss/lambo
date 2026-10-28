@@ -7,6 +7,53 @@ use crate::types::EdgeType;
 
 const BELIEF: &str = "brand y chargers are safe to leave plugged in";
 
+#[tokio::test]
+async fn stale_report_is_delivered_on_receipt_and_session_read() {
+    let s = server("mcp-stale-report").await;
+    let belief = belief(&s).await;
+    let dependent = derive_created(
+        &s,
+        "agent-b",
+        json!([{
+            "content": "keep using this charger", "concept_type": "logic",
+            "depends_on": [belief.0.to_string()]
+        }]),
+    )
+    .await
+    .remove(0);
+    for (tool, args) in [
+        (
+            "lambo_derive",
+            json!({"agent_id":"agent-c", "concepts":[{"content":"charger is unsafe", "concept_type":"logic", "against":[belief.0.to_string()]}]}),
+        ),
+        (
+            "lambo_record_action",
+            json!({"agent_id":"agent-d", "action":"recall the charger", "against":[belief.0.to_string()]}),
+        ),
+    ] {
+        let ack = call_raw(&s, tool, args.clone()).await;
+        let receipt = ack.structured_content.unwrap()["receipt"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let out = call_raw(
+            &s,
+            "lambo_stats",
+            json!({"agent_id":args["agent_id"], "receipt":receipt, "wait_ms":34000}),
+        )
+        .await;
+        let report = &out.structured_content.as_ref().unwrap()["receipt"]["stale_report"];
+        assert_eq!(report["total"], 1, "{report}");
+        assert_eq!(report["dependents"][0]["id"], dependent);
+        assert_eq!(report["dependents"][0]["cited_id"], belief.0.to_string());
+    }
+    let read = call_raw(&s, "lambo_stale", json!({"agent_id":"agent-b"})).await;
+    let report = &read.structured_content.as_ref().unwrap()["stale_report"];
+    assert_eq!(report["total"], 1);
+    assert_eq!(report["dependents"][0]["id"], dependent);
+    s.mem.close().await.expect("close");
+}
+
 async fn belief(s: &LamboServer) -> NodeId {
     let ids = derive_created(
         s,
@@ -326,4 +373,408 @@ async fn the_per_concept_limit_counts_per_content() {
         );
     }
     s.mem.close().await.expect("close");
+}
+
+/// A deferred contradiction replayed at attach publishes the same typed report
+/// on the piggyback and explicit lookup; a later restart has only the durable summary.
+#[tokio::test]
+async fn stale_replay_report_is_structured_on_piggyback_and_lookup() {
+    use std::sync::atomic::{AtomicI64, Ordering};
+    struct Gate(FixtureEmbedder, tokio::sync::watch::Receiver<bool>);
+    #[async_trait::async_trait]
+    impl Embedder for Gate {
+        fn dimensions(&self) -> usize {
+            self.0.dimensions()
+        }
+        async fn embed(&self, text: &str) -> Result<Vec<f32>, crate::embed::EmbedError> {
+            if !text.contains(crate::writeq::PROBE_TEXT) {
+                let mut hold = self.1.clone();
+                while *hold.borrow() {
+                    if hold.changed().await.is_err() {
+                        break;
+                    }
+                }
+            }
+            self.0.embed(text).await
+        }
+    }
+    let inner = Arc::new(MemoryStore::new());
+    let store =
+        || Arc::new(crate::test_util::VectorSearchable(inner.clone())) as Arc<dyn GraphStore>;
+    let seconds = Arc::new(AtomicI64::new(Utc::now().timestamp()));
+    let clock: crate::daemon::Clock = {
+        let s = seconds.clone();
+        Arc::new(move || DateTime::from_timestamp(s.load(Ordering::SeqCst), 0).unwrap())
+    };
+    let build = |embedder: Arc<dyn Embedder>, strategy| {
+        let clock = clock.clone();
+        let store = store();
+        async move {
+            let config = Config {
+                canonization_edge_min_age: Duration::ZERO,
+                ..Config::default()
+            };
+            let mem = Memory::builder()
+                .session("stale-replay-mcp")
+                .agent("agent-a")
+                .config(config)
+                .flush_interval(Duration::from_secs(3600))
+                .store(store)
+                .embedder(embedder)
+                .embedding_contract(fixture_contract())
+                .match_strategy(strategy)
+                .clock(clock)
+                .build()
+                .await
+                .unwrap();
+            LamboServer::new(Arc::new(mem))
+        }
+    };
+    let s0 = build(
+        Arc::new(FixtureEmbedder::new()),
+        crate::types::MatchStrategy::Canonical,
+    )
+    .await;
+    let target = belief(&s0).await;
+    seconds.fetch_add(2, Ordering::SeqCst);
+    let dependent = derive_created(&s0, "agent-b", json!([{"content":"replay dependent", "concept_type":"logic", "depends_on":[target.0.to_string()]}])).await.remove(0);
+    s0.mem.close().await.unwrap();
+    drop(s0);
+    seconds.fetch_add(2, Ordering::SeqCst);
+    let (_first_tx, first_rx) = tokio::sync::watch::channel(true);
+    let s1 = build(
+        Arc::new(Gate(FixtureEmbedder::new(), first_rx)),
+        crate::types::MatchStrategy::Hybrid,
+    )
+    .await;
+    let ack = call_raw(&s1, "lambo_derive", json!({"agent_id":"agent-c", "concepts":[{"content":"replay contradiction", "concept_type":"logic", "against":[target.0.to_string()]}]})).await;
+    let receipt = ack.structured_content.unwrap()["receipt"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let destination = crate::types::SessionId::new("project-caller");
+    let scoped_agent = AgentId::new("agent-d");
+    let scoped = s1
+        .mem
+        .record_action_async_scoped(
+            &scoped_agent,
+            &Action {
+                repo_scope: Some("host/owner/repo"),
+                event_time: None,
+                action: "scoped replay contradiction",
+                produces: &[],
+                modifies: &[],
+                depends_on: &[],
+            },
+            &[target.0.to_string()],
+            &crate::surface::resolve::NoForeignScopes,
+            Some(&destination),
+        )
+        .await
+        .unwrap();
+    s1.mem.close().await.unwrap();
+    drop(s1);
+    let (replay_tx, replay_rx) = tokio::sync::watch::channel(true);
+    let s2 = build(
+        Arc::new(Gate(FixtureEmbedder::new(), replay_rx)),
+        crate::types::MatchStrategy::Hybrid,
+    )
+    .await;
+    assert_eq!(
+        s2.mem
+            .pipeline()
+            .lookup_for(&scoped_agent, Some(&destination), scoped.receipt)
+            .tag(),
+        "pending_replay"
+    );
+    assert_eq!(
+        s2.mem
+            .pipeline()
+            .lookup_for(&scoped_agent, None, scoped.receipt)
+            .tag(),
+        "forbidden"
+    );
+    assert_eq!(
+        s2.mem
+            .pipeline()
+            .wait_for(&scoped_agent, None, scoped.receipt, Duration::from_secs(1))
+            .await
+            .tag(),
+        "forbidden"
+    );
+    let pipeline = s2.mem.pipeline().clone();
+    let wait_agent = scoped_agent.clone();
+    let wait_destination = destination.clone();
+    let scoped_id = scoped.receipt;
+    let rightful_wait = tokio::spawn(async move {
+        pipeline
+            .wait_for(
+                &wait_agent,
+                Some(&wait_destination),
+                scoped_id,
+                Duration::from_secs(10),
+            )
+            .await
+    });
+    tokio::task::yield_now().await;
+    replay_tx.send(false).unwrap();
+    assert_eq!(rightful_wait.await.unwrap().tag(), "applied_after_restart");
+    let id = receipt.parse().unwrap();
+    let answer = s2
+        .mem
+        .pipeline()
+        .wait(
+            &AgentId::new("agent-c"),
+            id,
+            crate::writeq::RECEIPT_WAIT_MAX,
+        )
+        .await;
+    assert_eq!(answer.tag(), "applied_after_restart", "{answer:?}");
+    let scoped_answer = s2
+        .mem
+        .pipeline()
+        .wait_for(
+            &scoped_agent,
+            Some(&destination),
+            scoped.receipt,
+            crate::writeq::RECEIPT_WAIT_MAX,
+        )
+        .await;
+    assert_eq!(scoped_answer.tag(), "applied_after_restart");
+    assert_eq!(
+        s2.mem
+            .pipeline()
+            .lookup_for(&scoped_agent, None, scoped.receipt)
+            .tag(),
+        "forbidden"
+    );
+    let forbidden = call_raw(
+        &s2,
+        "lambo_stats",
+        json!({"agent_id":"agent-d", "receipt":scoped.receipt.to_string()}),
+    )
+    .await;
+    assert_eq!(
+        forbidden.structured_content.unwrap()["receipt"]["state"],
+        "forbidden"
+    );
+    assert!(s2
+        .mem
+        .pipeline()
+        .take_piggyback_at_most(&scoped_agent, None, 10)
+        .0
+        .is_empty());
+    let project = server("project-caller").await;
+    let (rightful_server, _source) = super::layered::layered(&project, &s2);
+    let rightful = call_raw(
+        &rightful_server,
+        "lambo_saints",
+        json!({"agent_id":"agent-d"}),
+    )
+    .await;
+    let payload = rightful.structured_content.unwrap();
+    let scoped_piggy = &payload["write_receipts"][0];
+    assert_eq!(scoped_piggy["id"], scoped.receipt.to_string());
+    assert_eq!(scoped_piggy["state"], "applied_after_restart");
+    assert_eq!(scoped_piggy["stale_report"]["total"], 1);
+    project.mem.close().await.unwrap();
+    s2.mem
+        .pipeline()
+        .forget_live_receipt_for_test(scoped.receipt);
+    assert_eq!(
+        s2.mem
+            .pipeline()
+            .lookup_for(&scoped_agent, None, scoped.receipt)
+            .tag(),
+        "forbidden"
+    );
+    assert_eq!(
+        s2.mem
+            .pipeline()
+            .lookup_for(&scoped_agent, Some(&destination), scoped.receipt)
+            .tag(),
+        "applied_after_restart"
+    );
+    let other = call_raw(&s2, "lambo_saints", json!({"agent_id":"agent-b"})).await;
+    assert!(other
+        .structured_content
+        .unwrap()
+        .get("write_receipts")
+        .is_none());
+    let piggy = call_raw(&s2, "lambo_saints", json!({"agent_id":"agent-c"})).await;
+    let p = &piggy.structured_content.unwrap()["write_receipts"][0];
+    assert_eq!(p["id"], receipt);
+    assert_eq!(p["state"], "applied_after_restart");
+    assert_eq!(p["stale_report"]["total"], 1);
+    assert_eq!(p["stale_report"]["dependents"][0]["id"], dependent);
+    let fetched = call_raw(
+        &s2,
+        "lambo_stats",
+        json!({"agent_id":"agent-c", "receipt":receipt}),
+    )
+    .await;
+    let r = &fetched.structured_content.unwrap()["receipt"];
+    assert_eq!(r["state"], "applied_after_restart");
+    assert_eq!(r["stale_report"], p["stale_report"]);
+    s2.mem.close().await.unwrap();
+    drop(s2);
+    let s3 = build(
+        Arc::new(FixtureEmbedder::new()),
+        crate::types::MatchStrategy::Hybrid,
+    )
+    .await;
+    assert_eq!(
+        s3.mem
+            .pipeline()
+            .lookup_for(&scoped_agent, None, scoped.receipt)
+            .tag(),
+        "forbidden"
+    );
+    assert_eq!(
+        s3.mem
+            .pipeline()
+            .lookup_for(&scoped_agent, Some(&destination), scoped.receipt)
+            .tag(),
+        "applied_after_restart"
+    );
+    assert_eq!(
+        s3.mem
+            .pipeline()
+            .wait_for(&scoped_agent, None, scoped.receipt, Duration::from_secs(1))
+            .await
+            .tag(),
+        "forbidden"
+    );
+    let fetched = call_raw(
+        &s3,
+        "lambo_stats",
+        json!({"agent_id":"agent-c", "receipt":receipt}),
+    )
+    .await;
+    let payload = fetched.structured_content.unwrap();
+    assert_eq!(payload["receipt"]["state"], "applied_after_restart");
+    assert!(payload["receipt"].get("stale_report").is_none());
+    s3.mem.close().await.unwrap();
+}
+
+/// A registry can return a retained handle just as its layer stops serving.
+/// No stale rows may escape through that handle, even though its graph remains.
+#[tokio::test]
+async fn stale_refuses_stopped_layer_handles_and_closed_or_erased_own_sessions() {
+    for state in ["closed", "lease_lost", "erased"] {
+        let own = server(&format!("stale-owner-{state}")).await;
+        let layer = server(&format!("stale-layer-{state}")).await;
+        let target = belief(&layer).await;
+        let dependent = "private stale dependent";
+        derive_created(
+            &layer,
+            "agent-b",
+            json!([{
+                "content": dependent, "concept_type": "logic", "depends_on": [target.0.to_string()]
+            }]),
+        )
+        .await;
+        call(&layer, "lambo_derive", json!({"agent_id":"agent-c", "concepts":[{
+            "content":"contradicting fact", "concept_type":"logic", "against":[target.0.to_string()]
+        }]})).await;
+        let (layered, _source) = super::layered::layered(&own, &layer);
+        let args = json!({"agent_id":"reader", "scope":layer.mem.session().as_str()});
+        let before = call_raw(&layered, "lambo_stale", args.clone()).await;
+        assert_eq!(before.is_error, Some(false), "{before:?}");
+        assert_eq!(
+            before.structured_content.as_ref().unwrap()["stale_report"]["total"],
+            1
+        );
+        match state {
+            "closed" => layer.mem.close().await.unwrap(),
+            "lease_lost" => layer.mem.simulate_lease_loss(),
+            "erased" => layer.mem.fence_for_erase(),
+            _ => unreachable!(),
+        }
+        let after = call_raw(&layered, "lambo_stale", args).await;
+        assert_eq!(after.is_error, Some(true), "{state}: {after:?}");
+        assert!(!text_of(&after).contains(dependent), "{state}: {after:?}");
+        assert!(after
+            .structured_content
+            .as_ref()
+            .is_none_or(|p| p.get("stale_report").is_none()));
+        if state != "lease_lost" {
+            // The direct own-session path must also refuse a retained graph.
+            let direct = call_raw(&layer, "lambo_stale", json!({"agent_id":"reader"})).await;
+            assert_eq!(direct.is_error, Some(true), "{state}: {direct:?}");
+            assert!(!text_of(&direct).contains(dependent));
+        }
+        own.mem.close().await.unwrap();
+        let _ = layer.mem.close().await;
+    }
+}
+
+/// Stop the layer from its clock during the scan, after the initial check
+/// and while the graph guard is held. The completed report must be discarded.
+#[tokio::test]
+async fn stale_discards_a_report_when_layer_stops_during_scan() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    for state in ["closed", "lease_lost", "erased"] {
+        let armed = Arc::new(AtomicBool::new(false));
+        let handle = Arc::new(parking_lot::Mutex::new(std::sync::Weak::<Memory>::new()));
+        let clock: crate::daemon::Clock = {
+            let armed = armed.clone();
+            let handle = handle.clone();
+            Arc::new(move || {
+                if armed.swap(false, Ordering::SeqCst) {
+                    let layer = handle.lock().upgrade().expect("layer retained");
+                    match state {
+                        "closed" => layer.latch_closed_for_test(),
+                        "lease_lost" => layer.simulate_lease_loss(),
+                        "erased" => layer.fence_for_erase(),
+                        _ => unreachable!(),
+                    }
+                }
+                Utc::now()
+            })
+        };
+        let mem = Memory::builder()
+            .session("stale-scan-fence")
+            .agent("agent-a")
+            .store(Arc::new(MemoryStore::new()) as Arc<dyn GraphStore>)
+            .embedder(Arc::new(FixtureEmbedder::new()) as Arc<dyn Embedder>)
+            .embedding_contract(fixture_contract())
+            .clock(clock)
+            .build()
+            .await
+            .unwrap();
+        let layer = LamboServer::new(Arc::new(mem));
+        *handle.lock() = Arc::downgrade(layer.memory());
+        let target = belief(&layer).await;
+        let dependent = "private in-flight dependent";
+        derive_created(
+            &layer,
+            "agent-b",
+            json!([{
+                "content": dependent, "concept_type":"logic", "depends_on":[target.0.to_string()]
+            }]),
+        )
+        .await;
+        call(&layer, "lambo_derive", json!({"agent_id":"agent-c", "concepts":[{
+        "content":"in-flight contradiction", "concept_type":"logic", "against":[target.0.to_string()]
+    }]})).await;
+        let own = server("stale-scan-owner").await;
+        let (layered, _source) = super::layered::layered(&own, &layer);
+        let args = json!({"agent_id":"reader", "scope":"stale-scan-fence"});
+        let before = call_raw(&layered, "lambo_stale", args.clone()).await;
+        assert_eq!(
+            before.structured_content.as_ref().unwrap()["stale_report"]["total"],
+            1
+        );
+        armed.store(true, Ordering::SeqCst);
+        let after = call_raw(&layered, "lambo_stale", args).await;
+        assert_eq!(after.is_error, Some(true), "{after:?}");
+        assert!(!text_of(&after).contains(dependent));
+        assert!(after
+            .structured_content
+            .as_ref()
+            .is_none_or(|p| p.get("stale_report").is_none()));
+        own.mem.close().await.unwrap();
+        let _ = layer.mem.close().await;
+    }
 }

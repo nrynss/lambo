@@ -49,6 +49,7 @@ mod repo_scope;
 mod shutdown;
 mod stale_dependency;
 mod supersession;
+mod suspected;
 mod writes;
 
 fn contract(kind: &str, dim: usize) -> EmbeddingContract {

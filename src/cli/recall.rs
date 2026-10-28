@@ -535,6 +535,7 @@ pub(crate) fn render_cli_text(detail: &DetailedRecall) -> String {
 /// The one-shot reader's daemon config: the defaults, plus the resolved
 /// settings that shape recall itself, so `lambo recall` and `serve-web` rank
 /// like a session does. #87: `[embedder] calibration`; #173: `[fusion]`;
+/// #198: `[embedder] suspected_supersession_line`;
 /// #181: `[selection]`, with the merge threshold its cosine signal uses:
 /// the one a writer attach of this store runs with, the labelled-pairs
 /// derivation the store caches first
@@ -557,6 +558,7 @@ pub(crate) async fn reader_config(backends: &ResolvedBackends) -> Config {
     };
     Config {
         calibration: resolved.calibration,
+        suspected_supersession_line: resolved.suspected_supersession_line,
         recall_fusion: resolved.recall_fusion,
         recall_selection: selection,
         semantic_match_threshold,
@@ -567,6 +569,52 @@ pub(crate) async fn reader_config(backends: &ResolvedBackends) -> Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #198 H3 losslessness: a shown `possibly_superseded` line is printed
+    /// exactly once, in its block or, when the block is cut, in the header;
+    /// the structured field alone prints nothing.
+    #[test]
+    fn a_possibly_superseded_line_renders_once() {
+        use crate::recall::detail::{Annotation, AnnotationKind, DetailedHit};
+        use crate::types::{ConceptType, NodeId, RecallHit};
+        let hit = RecallHit {
+            repo_scope: None,
+            node_id: NodeId(uuid::Uuid::from_u64_pair(2, 1)),
+            content: "the embedder listens on port 8080".into(),
+            concept_type: Some(ConceptType::Logic),
+            score: 0.5,
+            is_canonical: false,
+            blast_radius: None,
+        };
+        let by = NodeId(uuid::Uuid::from_u64_pair(2, 2));
+        let line = crate::recall::format::possibly_superseded_warning(
+            by,
+            "the embedder listens on port 8081",
+        );
+        for included in [true, false] {
+            let mut d = DetailedHit::new(&hit, None);
+            d.possibly_superseded_by = Some(by);
+            d.included_in_context = included;
+            d.annotations.push(Annotation::new(
+                AnnotationKind::PossiblySuperseded,
+                line.clone(),
+            ));
+            let mut detail = DetailedRecall::warn_only(line.clone());
+            detail.hits = vec![hit.clone()];
+            detail.detailed = vec![d];
+            let text = render_cli_text(&detail);
+            assert_eq!(text.matches(&line).count(), 1, "{included}: {text}");
+        }
+        // Field only: no line anywhere.
+        let mut d = DetailedHit::new(&hit, None);
+        d.possibly_superseded_by = Some(by);
+        d.included_in_context = true;
+        let mut detail = DetailedRecall::warn_only(String::new());
+        detail.warnings.clear();
+        detail.hits = vec![hit.clone()];
+        detail.detailed = vec![d];
+        assert!(!render_cli_text(&detail).contains("Possibly superseded"));
+    }
 
     /// E2E-5: a warnings-only detailed result (the daemon's early refusal
     /// paths — limit validation, session mismatch — and the missing-index
@@ -1006,9 +1054,10 @@ mod by_tests {
         assert!(m.contains("VECTOR_SEARCH"), "{m}");
     }
 
-    /// #173, #87, #181: `[fusion]`, `[embedder] calibration` and
-    /// `[selection]` reach the one-shot reader (`lambo recall`,
-    /// `serve-web`), not only a session. With `similar_signals` the cosine
+    /// #173, #87, #198, #181: `[fusion]`, `[embedder] calibration`,
+    /// `[embedder] suspected_supersession_line` and `[selection]` reach the
+    /// one-shot reader (`lambo recall`, `serve-web`), not only a session.
+    /// With `similar_signals` the cosine
     /// signal uses the contract's calibrated merge threshold unless
     /// `calibrated_merge_threshold = false`, else the configured one (no
     /// labelled pairs here); without it the threshold is not looked up.
@@ -1027,9 +1076,14 @@ mod by_tests {
             skip_redundant: true,
             similar_signals: true,
         };
+        b.config.suspected_supersession_line = crate::recall::suspected::SuspectedLine::Off;
         let cfg = reader_config(&b).await;
         assert_eq!(cfg.recall_fusion, b.config.recall_fusion);
         assert_eq!(cfg.calibration, b.config.calibration);
+        assert_eq!(
+            cfg.suspected_supersession_line,
+            crate::recall::suspected::SuspectedLine::Off
+        );
         assert_eq!(cfg.recall_selection, b.config.recall_selection);
         assert_eq!(
             cfg.semantic_match_threshold, 0.8,

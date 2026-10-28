@@ -261,6 +261,7 @@ async fn a_contradiction_written_through_the_merge_path_is_never_skipped() {
                 },
                 crate::config::RecallWeights::default(),
                 crate::Config::default().canonization_edge_min_age,
+                true,
                 Some(config),
                 chrono::Utc::now(),
                 crate::recall::assemble::default_token_count,

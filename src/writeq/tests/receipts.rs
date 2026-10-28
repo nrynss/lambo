@@ -104,6 +104,7 @@ fn every_answer_has_a_distinct_tag_and_none_of_them_is_unknown() {
         ReceiptAnswer::Pending,
         ReceiptAnswer::PendingReplay,
         ReceiptAnswer::Applied(AppliedSummary {
+            stale_report: None,
             kind: WriteKind::Derive,
             summary: "x".into(),
             created: Vec::new(),
@@ -116,7 +117,7 @@ fn every_answer_has_a_distinct_tag_and_none_of_them_is_unknown() {
             embedded: Some(0),
         }),
         ReceiptAnswer::Failed("x".into()),
-        ReceiptAnswer::AppliedAfterRestart("x".into()),
+        ReceiptAnswer::AppliedAfterRestart("x".into(), None),
         ReceiptAnswer::IntentRecorded,
         ReceiptAnswer::CloseUnflushed,
         ReceiptAnswer::Dropped("x".into()),
@@ -172,7 +173,7 @@ fn only_the_two_pendings_are_unsettled() {
     );
     for a in [
         ReceiptAnswer::Failed("x".into()),
-        ReceiptAnswer::AppliedAfterRestart("x".into()),
+        ReceiptAnswer::AppliedAfterRestart("x".into(), None),
         // Terminal FOR THIS PROCESS: the next process's answer for the
         // same id is applied_after_restart or failed, but nothing in this
         // one can change it again.
@@ -226,5 +227,28 @@ fn the_apply_latency_window_reports_recent_percentiles() {
             Duration::from_millis(7),
             Duration::from_millis(7)
         )
+    );
+}
+
+/// #198: the receipt names the suspected supersessions a derive flagged,
+/// and only when it flagged one.
+#[test]
+fn the_receipt_names_flagged_suspected_supersessions() {
+    use crate::graph::derive::DeriveOutcome;
+    let quiet = DeriveOutcome {
+        created: vec![crate::types::NodeId::new()],
+        embedded: 1,
+        ..DeriveOutcome::default()
+    };
+    let before = super::execution::derive_sentence(crate::types::MatchStrategy::Hybrid, 1, &quiet);
+    assert!(!before.contains("supersession"), "{before}");
+    let flagged = DeriveOutcome {
+        suspected: 2,
+        ..quiet.clone()
+    };
+    let after = super::execution::derive_sentence(crate::types::MatchStrategy::Hybrid, 1, &flagged);
+    assert_eq!(
+        after,
+        format!("{before}; 2 possible undeclared supersession(s) flagged")
     );
 }

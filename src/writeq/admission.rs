@@ -172,6 +172,7 @@ impl DropReason {
 pub(super) struct Job {
     pub(super) receipt: ReceiptId,
     pub(super) agent: AgentId,
+    pub(super) receipt_destination: Option<SessionId>,
     pub(super) interaction: NodeId,
     pub(super) bytes: usize,
     pub(super) payload: JobPayload,
@@ -240,6 +241,7 @@ impl JobPayload {
             } if citations.is_empty() => WriteIntentPayload::Derive {
                 concepts: concepts.clone(),
                 pairs: pairs.clone(),
+                receipt_destination: None,
             },
             JobPayload::Derive {
                 concepts,
@@ -250,6 +252,7 @@ impl JobPayload {
                 concepts: concepts.clone(),
                 pairs: pairs.clone(),
                 citations: citations.clone(),
+                receipt_destination: None,
             },
             JobPayload::DeriveImage {
                 concepts,
@@ -259,6 +262,7 @@ impl JobPayload {
                 concepts: concepts.clone(),
                 pairs: pairs.clone(),
                 supplied: supplied.clone(),
+                receipt_destination: None,
             },
             JobPayload::Action {
                 repo_scope: _,
@@ -274,6 +278,7 @@ impl JobPayload {
                 modifies: modifies.clone(),
                 depends_on: depends_on.clone(),
                 depends_on_pins: depends_on_pins.clone(),
+                receipt_destination: None,
             },
             JobPayload::Action {
                 repo_scope: _,
@@ -290,6 +295,7 @@ impl JobPayload {
                 depends_on: depends_on.clone(),
                 depends_on_pins: depends_on_pins.clone(),
                 against: against.clone(),
+                receipt_destination: None,
             },
         };
         match repo_scope {
@@ -341,7 +347,9 @@ impl JobPayload {
     /// `RepoScoped` wrapper; one that is is refused.
     fn from_unscoped_intent(p: WriteIntentPayload) -> Result<Self, LamboError> {
         Ok(match p {
-            WriteIntentPayload::Derive { concepts, pairs } => JobPayload::Derive {
+            WriteIntentPayload::Derive {
+                concepts, pairs, ..
+            } => JobPayload::Derive {
                 concepts,
                 pairs,
                 citations: PinnedCitations::default(),
@@ -351,6 +359,7 @@ impl JobPayload {
                 concepts,
                 pairs,
                 citations,
+                ..
             } => JobPayload::Derive {
                 concepts,
                 pairs,
@@ -361,6 +370,7 @@ impl JobPayload {
                 concepts,
                 pairs,
                 supplied,
+                ..
             } => JobPayload::DeriveImage {
                 concepts,
                 pairs,
@@ -372,6 +382,7 @@ impl JobPayload {
                 modifies,
                 depends_on,
                 depends_on_pins,
+                ..
             } => JobPayload::Action {
                 repo_scope: None,
                 action,
@@ -388,6 +399,7 @@ impl JobPayload {
                 depends_on,
                 depends_on_pins,
                 against,
+                ..
             } => JobPayload::Action {
                 repo_scope: None,
                 action,
@@ -619,6 +631,41 @@ impl WritePipeline {
                 // close-time final flush ("session closed, tail durable")
                 // carries it — acked ⇒ (applied ∨ durable intent) at a clean
                 // close by construction, independent of any drain estimate.
+                let mut intent_payload = payload.to_intent_payload();
+                let mut routed = &mut intent_payload;
+                if let WriteIntentPayload::RepoScoped { payload, .. } = routed {
+                    routed = payload;
+                }
+                match routed {
+                    WriteIntentPayload::Derive {
+                        receipt_destination,
+                        ..
+                    }
+                    | WriteIntentPayload::DeriveImage {
+                        receipt_destination,
+                        ..
+                    }
+                    | WriteIntentPayload::Action {
+                        receipt_destination,
+                        ..
+                    }
+                    | WriteIntentPayload::DeriveCited {
+                        receipt_destination,
+                        ..
+                    }
+                    | WriteIntentPayload::ActionCited {
+                        receipt_destination,
+                        ..
+                    } => {
+                        *receipt_destination = Some(
+                            deliver_to
+                                .clone()
+                                .unwrap_or_else(|| self.ctx.session.clone()),
+                        );
+                    }
+                    WriteIntentPayload::RepoScoped { .. } => unreachable!(),
+                }
+                let receipt_destination = intent_payload.receipt_destination().cloned();
                 graph.record_write_intent(WriteIntent {
                     session_id: self.ctx.session.clone(),
                     receipt: receipt.to_string(),
@@ -626,7 +673,7 @@ impl WritePipeline {
                     interaction,
                     lane_seq: receipt.seq(),
                     issued_ms: receipt.issued_ms(),
-                    payload: payload.to_intent_payload(),
+                    payload: intent_payload,
                     created_at: now,
                     outcome: None,
                 });
@@ -639,6 +686,7 @@ impl WritePipeline {
                     .push_back(Job {
                         receipt,
                         agent: agent.clone(),
+                        receipt_destination,
                         interaction,
                         bytes,
                         payload,

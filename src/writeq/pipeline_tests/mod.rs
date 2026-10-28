@@ -102,6 +102,8 @@ impl Rig {
         let clock: crate::daemon::Clock = Arc::new(move || *clock_now.lock());
         let ctx = WriteCtx {
             session,
+            clock: clock.clone(),
+            contradiction_evidence_min_age: crate::Config::default().canonization_edge_min_age,
             graph: graph.clone(),
             index,
             store: Arc::new(MemoryStore::new()),

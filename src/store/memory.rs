@@ -2001,6 +2001,12 @@ mod tests {
         crate::test_util::supersession::check_reason_persistence(&store).await;
     }
 
+    /// #198: the shared suspected-supersession edge case.
+    #[tokio::test]
+    async fn suspected_supersession_case() {
+        crate::test_util::suspected::check_round_trip(&MemoryStore::new()).await;
+    }
+
     #[tokio::test]
     async fn capped_span_follows_window_case() {
         crate::test_util::dependents::check_window_case(&MemoryStore::new()).await;

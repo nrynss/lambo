@@ -117,6 +117,12 @@ pub enum DropReason {
     /// A concept-to-concept edge between sessions with no hub copy on either
     /// side (design decision: no cross-session edges in v1).
     CrossSessionStructural,
+    /// An informational concept-to-concept edge (`Contradicts`,
+    /// `SuspectedSupersedes`; [`EdgeType::is_informational`]) between
+    /// sessions with no hub copy on either side. It declared no structure,
+    /// and a contradiction or a suspected supersession is read within one
+    /// session only, so it lapses with the split.
+    CrossSessionInformational,
     /// A Derives edge whose interaction is not copied into the concept's
     /// session; the concept keeps its own origin's Derives edge.
     DerivesWithoutReplica,
@@ -650,6 +656,11 @@ pub(super) fn build_validated(
                     Some(DropReason::DerivesWithoutReplica),
                 )
             }
+        } else if e.edge_type.is_informational() {
+            (
+                EdgeDisposition::Dropped,
+                Some(DropReason::CrossSessionInformational),
+            )
         } else {
             (
                 EdgeDisposition::Dropped,

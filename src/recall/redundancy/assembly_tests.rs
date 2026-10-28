@@ -233,6 +233,7 @@ impl<'a> Run<'a> {
             },
             RecallWeights::default(),
             crate::Config::default().canonization_edge_min_age,
+            true,
             self.redundancy,
             ts(60),
             default_token_count,
@@ -585,6 +586,31 @@ fn a_duplicate_with_only_a_supersession_line_is_not_skipped() {
     assert!(on.detailed.iter().all(|d| d.skipped_redundant.is_empty()));
 }
 
+/// A duplicate that a newer concept is suspected of replacing (#198) is
+/// not skipped: skipping it would drop its `possibly_superseded_by` field
+/// and line, which the kept copy does not carry.
+#[test]
+fn a_duplicate_that_may_be_superseded_is_not_skipped() {
+    let mut f = Fixture::new(&[
+        (1, EFFICACY, ConceptType::Entity, None),
+        (2, EFFICACY, ConceptType::Observation, None),
+        (3, "the newer fact", ConceptType::Logic, None),
+        (5, "a fifth fact", ConceptType::Logic, None),
+    ]);
+    f.edge(1, 3, 2, EdgeType::SuspectedSupersedes);
+    let ranked = [(1, 0.9), (2, 0.8), (3, 0.7), (5, 0.6)];
+    let on = Run::new(&ranked, 3).go(&f.g);
+    assert_eq!(ids(&on), vec![uid(1), uid(2), uid(3)]);
+    assert_eq!(on.detailed[1].possibly_superseded_by, Some(uid(3)));
+    let kinds: Vec<_> = on.detailed[1].annotations.iter().map(|a| a.kind).collect();
+    assert_eq!(
+        kinds,
+        vec![crate::recall::detail::AnnotationKind::PossiblySuperseded],
+        "premise: the copy's own line"
+    );
+    assert!(on.detailed.iter().all(|d| d.skipped_redundant.is_empty()));
+}
+
 /// A recall over `daemon` scores and `phase1` relevance (a member with
 /// relevance and no daemon score is fresh, which runs the reservation and
 /// cold-start passes), at `top_k`, under the shipped default.
@@ -625,6 +651,7 @@ fn go_with_phase1(
         },
         RecallWeights::default(),
         crate::Config::default().canonization_edge_min_age,
+        true,
         Some(DEFAULT),
         ts(60),
         default_token_count,
@@ -858,6 +885,7 @@ fn the_demo_golden_is_byte_identical_with_the_rule_on() {
                 &query,
                 RecallWeights::default(),
                 crate::Config::default().canonization_edge_min_age,
+                true,
                 redundancy,
                 ts(60),
                 default_token_count,
@@ -940,6 +968,7 @@ fn expanded_members_are_treated_like_direct_hits() {
             },
             RecallWeights::default(),
             crate::Config::default().canonization_edge_min_age,
+            true,
             Some(SIMILAR),
             ts(60),
             default_token_count,
@@ -1101,6 +1130,7 @@ fn the_pair_bound_holds_per_recall_across_passes() {
         },
         RecallWeights::default(),
         crate::Config::default().canonization_edge_min_age,
+        true,
         Some(DEFAULT),
         ts(60),
         default_token_count,

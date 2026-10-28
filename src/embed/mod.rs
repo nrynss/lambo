@@ -741,6 +741,13 @@ pub struct EmbedderConfig {
     /// unaffected.
     #[serde(default = "calibration::default_calibrated_layer_floor")]
     pub calibrated_layer_floor: bool,
+    /// #198: when recall shows the suspected-supersession line
+    /// ([`crate::recall::suspected::SuspectedLine`]): `validated` (the
+    /// default) only for a contract whose trigger precision was measured
+    /// (BGE-M3), `on` always, `off` never. The structured field is present
+    /// either way. Not part of the embedding contract.
+    #[serde(default)]
+    pub suspected_supersession_line: crate::recall::suspected::SuspectedLine,
 }
 
 impl Default for EmbedderConfig {
@@ -770,6 +777,7 @@ impl Default for EmbedderConfig {
             calibration: calibration::CalibrationMode::Builtin,
             calibrated_merge_threshold: true,
             calibrated_layer_floor: true,
+            suspected_supersession_line: crate::recall::suspected::SuspectedLine::Validated,
         }
     }
 }

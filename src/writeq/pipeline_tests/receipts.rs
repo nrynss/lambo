@@ -694,6 +694,7 @@ async fn one_agent_cannot_hold_every_receipt_wait_slot() {
 #[test]
 fn ledger_facts_carry_the_metric_two_set_with_absent_keys_kept_absent() {
     let derive = AppliedSummary {
+        stale_report: None,
         kind: WriteKind::Derive,
         summary: "a sentence that must not reach the ledger".into(),
         created: vec!["id-1".into()],
@@ -713,6 +714,7 @@ fn ledger_facts_carry_the_metric_two_set_with_absent_keys_kept_absent() {
         })
     );
     let action = AppliedSummary {
+        stale_report: None,
         kind: WriteKind::RecordAction,
         semantic_merged: None,
         reinforced: None,
@@ -726,5 +728,33 @@ fn ledger_facts_carry_the_metric_two_set_with_absent_keys_kept_absent() {
         serde_json::json!({
             "created_count": 4, "matched_count": 0, "edges": 5, "embedded": 2,
         })
+    );
+}
+
+#[tokio::test]
+async fn legacy_restart_receipts_without_a_destination_fail_closed_for_every_session() {
+    let rig = Rig::fixture("wq-legacy-destination");
+    let agent = AgentId::new("agent-a");
+    let id: ReceiptId = "lwr1.00000000deadbeef.18f00000000.1".parse().unwrap();
+    rig.pipeline.restart.lock().insert(
+        id,
+        (
+            agent.clone(),
+            None,
+            ReceiptAnswer::AppliedAfterRestart("legacy summary".into(), None),
+        ),
+    );
+    assert_eq!(rig.pipeline.lookup_for(&agent, None, id).tag(), "forbidden");
+    let project = SessionId::new("project");
+    assert_eq!(
+        rig.pipeline.lookup_for(&agent, Some(&project), id).tag(),
+        "forbidden"
+    );
+    assert_eq!(
+        rig.pipeline
+            .wait_for(&agent, None, id, Duration::from_millis(20))
+            .await
+            .tag(),
+        "forbidden"
     );
 }

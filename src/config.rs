@@ -231,6 +231,13 @@ pub struct Config {
     /// wins, and a contract without a measured row is unaffected.
     #[serde(default = "crate::embed::calibration::default_calibrated_layer_floor")]
     pub calibrated_layer_floor: bool,
+    /// #198: `[embedder] suspected_supersession_line`. When recall shows the
+    /// `⚠ Possibly superseded by …` line for a suspected pair: `validated`
+    /// (the default) only under an embedding contract whose trigger
+    /// precision was measured at 0.90 or better (BGE-M3), `on` always, `off`
+    /// never. The structured field is present either way.
+    #[serde(default)]
+    pub suspected_supersession_line: crate::recall::suspected::SuspectedLine,
     pub max_cooccurrence_per_derive: usize,
 
     pub default_top_k: usize,
@@ -297,6 +304,7 @@ impl Default for Config {
             calibration: crate::embed::calibration::CalibrationMode::Builtin,
             calibrated_merge_threshold: true,
             calibrated_layer_floor: true,
+            suspected_supersession_line: crate::recall::suspected::SuspectedLine::Validated,
             max_cooccurrence_per_derive: 10,
 
             default_top_k: 5,

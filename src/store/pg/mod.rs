@@ -158,6 +158,16 @@ pub(crate) mod fair_test_live;
     )
 ))]
 pub(crate) mod supersession_live;
+// #198: the suspected-supersession edge, live and by hand only (Postgres
+// test here, Cockroach leg in its conformance suite).
+#[cfg(all(
+    test,
+    any(
+        feature = "store-postgres",
+        all(feature = "store-cockroach", feature = "fixtures")
+    )
+))]
+pub(crate) mod suspected_live;
 
 // Postgres-only: the flush fence's lease row stays locked until commit.
 #[cfg(all(test, feature = "store-postgres"))]

@@ -227,6 +227,32 @@ copy merged into a nearer hit keeps what its own session skipped for it
 (`LayerCopy::skipped_redundant`), named `also <short id> in <session>`
 after the copy.
 
+A suspected supersession (#198) is an `EdgeType::SuspectedSupersedes` edge,
+`newer -> older`, written by the hybrid write path
+(`graph::suspected::record_refused_hits`, at commit under the write lock)
+when a vector hit at or above the merge threshold was refused by the
+identifier guard, both concepts are the same `Logic`, `Constraint` or
+`Observation` type with the same recorded repository scope and no
+`against`/`depends_on` between them, and
+`graph::suspected::one_span_value_slot(older, newer)` holds (one differing
+token span, after the first `graph::suspected::PREDICATE_CUES` cue in
+both). The direction is `graph::suspected::dated_at` (the origin
+interaction's about-time clamped to its write time); a tie writes nothing.
+The edge is informational: no density, edge bonus, blast radius,
+dependents, recall expansion, decay or GC connectivity. It is removed when
+either concept is collected and by `graph::suspected::settle`, which
+`against` and `depends_on` writes call. #207 never follows it. #181's
+redundancy-aware selection must treat a pair as never redundant:
+`graph::suspected::is_suspected_pair(graph, a, b)`. Recall sets
+`DetailedHit::possibly_superseded_by` on the older hit when both are shown
+(one per hit, the newest replacement), and adds the
+`recall::format::possibly_superseded_warning` line with annotation kind
+`possibly_superseded` when `recall::suspected::shows_line` holds for the
+session's contract and `[embedder] suspected_supersession_line`. Nothing
+is forced, and a result with no shown pair is byte-identical.
+`graph::suspected::scan(graph, cosine)` lists the pairs an existing
+session holds (`lambo canon suspected`).
+
 Garbage collection does not count a `Contradicts` edge as connectivity
 (`EdgeType::counts_toward_gc_connectivity`). A concept with a `Contradicts`
 edge to a concept that is Venerable or Canonical when a sweep starts is a
@@ -353,7 +379,7 @@ on.
 
 `Config` holds the product settings: recall defaults, flush timing, canonization thresholds, and scoring weights. Pass it to the builder with `.config(...)`.
 
-These are library settings you pass in Rust when you build a `Memory`. Twelve of them can also come from the process file. `promotion_policy` is a top-level `lambo.toml` key with a `LAMBO_PROMOTION_POLICY` override, so a `lambo serve` process can select a policy without a code change; `canonization_supersede` is a top-level boolean; `[daemon]` carries the cadence settings: `canonization_eval_interval` (spelled `canonization_eval_interval_secs` there), `gc_interval`, and GC's time bound, `gc_max_interval` (spelled `gc_max_interval_secs`) and `gc_idle_floor`; `[embedder]` carries `accept_client_vectors` (with a `LAMBO_ACCEPT_CLIENT_VECTORS` override) and `calibration`, `calibrated_merge_threshold` and `calibrated_layer_floor` (#87). `[fusion]` carries `recall_fusion` (#173). `[selection]` carries `recall_selection` (#181). Everything else is code-only, and the file refuses it along with any key it does not know. No canonization *threshold* is settable from the file under either policy. See [Configuration](/config).
+These are library settings you pass in Rust when you build a `Memory`. Thirteen of them can also come from the process file. `promotion_policy` is a top-level `lambo.toml` key with a `LAMBO_PROMOTION_POLICY` override, so a `lambo serve` process can select a policy without a code change; `canonization_supersede` is a top-level boolean; `[daemon]` carries the cadence settings: `canonization_eval_interval` (spelled `canonization_eval_interval_secs` there), `gc_interval`, and GC's time bound, `gc_max_interval` (spelled `gc_max_interval_secs`) and `gc_idle_floor`; `[embedder]` carries `accept_client_vectors` (with a `LAMBO_ACCEPT_CLIENT_VECTORS` override), `calibration`, `calibrated_merge_threshold` and `calibrated_layer_floor` (#87), and `suspected_supersession_line` (#198). `[fusion]` carries `recall_fusion` (#173). `[selection]` carries `recall_selection` (#181). Everything else is code-only, and the file refuses it along with any key it does not know. No canonization *threshold* is settable from the file under either policy. See [Configuration](/config).
 
 ```rust
 let mem = Memory::builder()
@@ -376,6 +402,7 @@ let mem = Memory::builder()
 | `calibration` | `Builtin` | Whether recall uses the built-in per-contract recent-leg score and layer floor (#87): `Builtin` or `Off`. Set from `[embedder] calibration`. |
 | `calibrated_merge_threshold` | `true` | Whether a writer attach replaces `semantic_match_threshold` with its embedding contract's measured threshold (#87); `false` keeps `semantic_match_threshold`. Set from `[embedder] calibrated_merge_threshold`. |
 | `calibrated_layer_floor` | `true` | Whether, in this session's layered recall, a layer whose floor was not set takes its embedding contract's measured floor (#87; EmbeddingGemma 2 at 768 dims: 0.72) instead of 0.50. Needs `calibration` at `Builtin`. A floor set with `with_min_similarity` always applies. Set from `[embedder] calibrated_layer_floor`. |
+| `suspected_supersession_line` | `Validated` | When recall shows the `⚠ Possibly superseded by "…" (id …), not declared` line on the older hit of a suspected supersession (#198): `Validated` only under an embedding contract whose trigger precision was measured at 0.90 or better (BGE-M3), `On` for every contract, `Off` for none. The `possibly_superseded_by` field is set either way. Set from `[embedder] suspected_supersession_line`; see [Configuration](/config). |
 | `backend_flush_interval` | 1 second | How often pending writes flush, which sets how far behind durable storage a session can be. |
 | `backend_flush_max_batch` | `500` | Mutations per flush batch. |
 | `backend_flush_retries` | `3` | Attempts before a batch is dead-lettered. |

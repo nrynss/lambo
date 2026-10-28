@@ -186,7 +186,8 @@ impl ConceptType {
     }
 }
 
-/// Seven edge types retained in v0.1 (spec §5), plus explicit contradiction (#19).
+/// Seven edge types retained in v0.1 (spec §5), plus explicit contradiction (#19)
+/// and suspected supersession (#198).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub enum EdgeType {
@@ -211,6 +212,17 @@ pub enum EdgeType {
     /// decay. Written by `against` on `lambo_derive` and
     /// `lambo_record_action` (#19(b)).
     Contradicts,
+    /// The source is **suspected** of replacing the target without saying
+    /// so (#198), directed `suspected replacement -> older concept`, concept
+    /// to concept. Written only by the hybrid write path's deterministic
+    /// trigger ([`crate::graph::suspected`]), never by an agent. Informational
+    /// like [`Self::Contradicts`] and never read as one: it declares no
+    /// dependence, support or blast, counts toward neither score density,
+    /// the edge bonus nor GC connectivity, is not followed by recall
+    /// expansion and does not decay. It lapses (is removed) when either
+    /// concept is collected, or when an explicit `against` or `depends_on`
+    /// between the two is written.
+    SuspectedSupersedes,
 }
 
 impl EdgeType {
@@ -218,7 +230,7 @@ impl EdgeType {
     /// keyed by edge type (for example GC's decaying set) be checked in both
     /// directions. The test `edge_type_all_is_complete` stops compiling (under
     /// `cargo test`, not a plain build) until a new variant is added here too.
-    pub(crate) const ALL: [EdgeType; 8] = [
+    pub(crate) const ALL: [EdgeType; 9] = [
         Self::Temporal,
         Self::Derives,
         Self::CoOccurrence,
@@ -227,6 +239,7 @@ impl EdgeType {
         Self::Hierarchical,
         Self::Semantic,
         Self::Contradicts,
+        Self::SuspectedSupersedes,
     ];
 
     /// Whether this edge type participates in weight decay (spec §5 table).
@@ -236,9 +249,10 @@ impl EdgeType {
 
     /// Whether an edge of this type counts toward a concept's score
     /// `density` (spec §9): the incident-edge numerator and the session's
-    /// `max_incident` baseline. Every type does except `Contradicts`, so
-    /// being contradicted never raises the composite that feeds Stage 1
-    /// candidate selection, recall ranking or the GC score cut (#19).
+    /// `max_incident` baseline. Every type does except `Contradicts` and
+    /// `SuspectedSupersedes`, so being contradicted (#19), or suspected of
+    /// being superseded (#198), never raises the composite that feeds Stage 1
+    /// candidate selection, recall ranking or the GC score cut.
     pub const fn counts_toward_density(self) -> bool {
         match self {
             Self::Temporal
@@ -248,7 +262,7 @@ impl EdgeType {
             | Self::Dependency
             | Self::Hierarchical
             | Self::Semantic => true,
-            Self::Contradicts => false,
+            Self::Contradicts | Self::SuspectedSupersedes => false,
         }
     }
 
@@ -259,7 +273,8 @@ impl EdgeType {
     /// decision 1, option C): being contradicted, or contradicting, keeps
     /// nothing alive. GC's one exception, a concept contradicting a target
     /// that is Venerable or Canonical, is a protection in
-    /// `crate::daemon::gc`, not connectivity.
+    /// `crate::daemon::gc`, not connectivity. `SuspectedSupersedes` (#198)
+    /// connects nothing either, and has no such exception.
     pub const fn counts_toward_gc_connectivity(self) -> bool {
         match self {
             Self::Temporal
@@ -269,7 +284,52 @@ impl EdgeType {
             | Self::Dependency
             | Self::Hierarchical
             | Self::Semantic => true,
-            Self::Contradicts => false,
+            Self::Contradicts | Self::SuspectedSupersedes => false,
+        }
+    }
+
+    /// Whether this edge type is **informational**: it records Lambo's or a
+    /// writer's reading of two concepts (`Contradicts`, #19;
+    /// `SuspectedSupersedes`, #198) and declares no structure: no
+    /// dependence, density, GC connectivity or decay. `lambo session split`
+    /// drops one between concepts placed in different sessions as
+    /// informational, not structural.
+    pub const fn is_informational(self) -> bool {
+        match self {
+            Self::Temporal
+            | Self::Derives
+            | Self::CoOccurrence
+            | Self::Causal
+            | Self::Dependency
+            | Self::Hierarchical
+            | Self::Semantic => false,
+            Self::Contradicts | Self::SuspectedSupersedes => true,
+        }
+    }
+
+    /// Whether writing an edge of this type is **write activity** on its
+    /// endpoints: a fresh incident edge makes a concept freshly written for
+    /// the high-risk modification check, and refreshes the session's last
+    /// activity for the stale-session check (`crate::daemon::events`).
+    ///
+    /// Every type is, `Contradicts` included (an `against` is a declared
+    /// write to the contradicted concept, the owner's #19(c) decision),
+    /// except `SuspectedSupersedes` (#198): Lambo's own inference from two
+    /// texts, never an agent's write to the older concept. Counting it would
+    /// raise a "High-risk modification" warning on a Canonical older concept,
+    /// which leaks the suspicion past the line gate, and would let
+    /// `lambo canon suspected --apply` refresh a stale session.
+    pub const fn marks_write_activity(self) -> bool {
+        match self {
+            Self::Temporal
+            | Self::Derives
+            | Self::CoOccurrence
+            | Self::Causal
+            | Self::Dependency
+            | Self::Hierarchical
+            | Self::Semantic
+            | Self::Contradicts => true,
+            Self::SuspectedSupersedes => false,
         }
     }
 
@@ -284,7 +344,8 @@ impl EdgeType {
     /// * Every other type declares no dependence. `Causal` is provenance
     ///   (`action -> produced/modified artifact`) and confers no load;
     ///   `Derives`/`Temporal` are provenance and `CoOccurrence`/`Semantic`
-    ///   are association. `Contradicts` declares opposition, never support.
+    ///   are association. `Contradicts` declares opposition, never support,
+    ///   and `SuspectedSupersedes` (#198) is a suspicion, never support.
     ///
     /// This one table is the definition every implementation follows: the
     /// stores' `blast_radius`/`interaction_span`, the graph-side
@@ -301,7 +362,8 @@ impl EdgeType {
             | Self::CoOccurrence
             | Self::Causal
             | Self::Semantic
-            | Self::Contradicts => None,
+            | Self::Contradicts
+            | Self::SuspectedSupersedes => None,
         }
     }
 }
@@ -902,6 +964,8 @@ pub enum WriteIntentPayload {
         concepts: Vec<(String, ConceptType)>,
         /// `(parent, child)` hierarchy pairs, in submission order.
         pairs: Vec<(String, String)>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        receipt_destination: Option<SessionId>,
     },
     /// An image derive (#22): one concept whose vector was supplied rather
     /// than embedded from its text.
@@ -921,6 +985,8 @@ pub enum WriteIntentPayload {
         pairs: Vec<(String, String)>,
         /// The vector, the contract it was declared under, and its source.
         supplied: SuppliedVector,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        receipt_destination: Option<SessionId>,
     },
     /// A `lambo_record_action` job.
     Action {
@@ -940,6 +1006,8 @@ pub enum WriteIntentPayload {
         /// rule.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         depends_on_pins: Vec<Option<NodeId>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        receipt_destination: Option<SessionId>,
     },
     /// A `lambo_derive` job with citations (#36 PR 4) or contradictions
     /// (#19(b), `against`): the derive above plus what its references
@@ -960,6 +1028,9 @@ pub enum WriteIntentPayload {
         /// re-resolves every reference and refuses one that resolves
         /// differently.
         citations: PinnedCitations,
+        /// Session that should receive the replayed receipt; absent on legacy intents.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        receipt_destination: Option<SessionId>,
     },
     /// A `lambo_record_action` job with `against` (#19(b)): the action
     /// above plus the concepts it contradicts, as resolved at the ack.
@@ -987,6 +1058,9 @@ pub enum WriteIntentPayload {
         /// (`content` is the action). A replay re-resolves each and refuses
         /// one that resolves differently.
         against: Vec<PinnedReference>,
+        /// Session that should receive the replayed receipt; absent on legacy intents.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        receipt_destination: Option<SessionId>,
     },
     /// #129: a text derive or action whose path-like Resources take the
     /// repository-scoped key. A wrapper, not a field, so a build that
@@ -1002,6 +1076,33 @@ pub enum WriteIntentPayload {
 }
 
 impl WriteIntentPayload {
+    /// Recorded delivery session, absent on payloads predating destination tracking.
+    pub fn receipt_destination(&self) -> Option<&SessionId> {
+        match self {
+            Self::Derive {
+                receipt_destination,
+                ..
+            }
+            | Self::DeriveImage {
+                receipt_destination,
+                ..
+            }
+            | Self::Action {
+                receipt_destination,
+                ..
+            }
+            | Self::DeriveCited {
+                receipt_destination,
+                ..
+            }
+            | Self::ActionCited {
+                receipt_destination,
+                ..
+            } => receipt_destination.as_ref(),
+            Self::RepoScoped { payload, .. } => payload.receipt_destination(),
+        }
+    }
+
     /// The payload a **settled** (consumed: applied or failed) intent keeps
     /// in the store (#22 review L1).
     ///
@@ -1033,6 +1134,7 @@ impl WriteIntentPayload {
             | Self::RepoScoped { .. } => Some(Self::Derive {
                 concepts: Vec::new(),
                 pairs: Vec::new(),
+                receipt_destination: None,
             }),
             Self::Derive { .. } | Self::Action { .. } => None,
         }
@@ -1268,7 +1370,8 @@ pub struct WriteIntentOutcome {
     /// answer tag the outcome renders as.
     pub tag: String,
     /// The human sentence the receipt carries (an applied summary, or the
-    /// failure reason).
+    /// failure reason). New outcomes may wrap it with the receipt destination
+    /// for recovery after the intent payload is scrubbed.
     pub summary: String,
     /// When the intent was consumed (process clock of the consumer).
     ///
@@ -2348,6 +2451,7 @@ mod tests {
             },
         };
         let payload = WriteIntentPayload::DeriveImage {
+            receipt_destination: None,
             concepts: vec![],
             pairs: vec![],
             supplied: supplied.clone(),
@@ -2368,6 +2472,7 @@ mod tests {
     #[test]
     fn the_settled_image_payload_constants_match_the_serialized_forms() {
         let image = WriteIntentPayload::DeriveImage {
+            receipt_destination: None,
             concepts: vec![("red [image:a1]".into(), ConceptType::Resource)],
             pairs: vec![],
             supplied: SuppliedVector {
@@ -2391,6 +2496,7 @@ mod tests {
         let scoped = WriteIntentPayload::RepoScoped {
             repo_scope: "host/owner/repo".into(),
             payload: Box::new(WriteIntentPayload::Derive {
+                receipt_destination: None,
                 concepts: vec![("README.md".into(), ConceptType::Resource)],
                 pairs: vec![],
             }),
@@ -2409,10 +2515,12 @@ mod tests {
             .starts_with(like_prefix));
         for text in [
             WriteIntentPayload::Derive {
+                receipt_destination: None,
                 concepts: vec![("x".into(), ConceptType::Entity)],
                 pairs: vec![],
             },
             WriteIntentPayload::Action {
+                receipt_destination: None,
                 action: "a".into(),
                 produces: vec![],
                 modifies: vec![],
@@ -2459,6 +2567,7 @@ mod tests {
         assert!(!EdgeType::Hierarchical.decays());
         assert!(EdgeType::Semantic.decays());
         assert!(!EdgeType::Contradicts.decays());
+        assert!(!EdgeType::SuspectedSupersedes.decays());
     }
 
     /// `EdgeType::ALL` lists every variant once, in declaration order: the
@@ -2475,6 +2584,7 @@ mod tests {
                 EdgeType::Hierarchical => 5,
                 EdgeType::Semantic => 6,
                 EdgeType::Contradicts => 7,
+                EdgeType::SuspectedSupersedes => 8,
             }
         }
         for (i, ty) in EdgeType::ALL.iter().enumerate() {
@@ -2498,16 +2608,17 @@ mod tests {
             assert!(ty.counts_toward_density(), "{ty:?}");
         }
         assert!(!EdgeType::Contradicts.counts_toward_density());
+        assert!(!EdgeType::SuspectedSupersedes.counts_toward_density());
     }
 
     /// #19(c) owner decision 1C: every edge type connects for GC except
-    /// `Contradicts`.
+    /// `Contradicts` and (#198) `SuspectedSupersedes`.
     #[test]
     fn edge_type_gc_connectivity_table() {
         for ty in EdgeType::ALL {
             assert_eq!(
                 ty.counts_toward_gc_connectivity(),
-                ty != EdgeType::Contradicts,
+                !matches!(ty, EdgeType::Contradicts | EdgeType::SuspectedSupersedes),
                 "{ty:?}"
             );
         }
@@ -2535,6 +2646,7 @@ mod tests {
             EdgeType::Causal,
             EdgeType::Semantic,
             EdgeType::Contradicts,
+            EdgeType::SuspectedSupersedes,
         ] {
             assert_eq!(ty.dependent_end(), None, "{ty:?} must confer no load");
         }
@@ -2797,11 +2909,17 @@ mod tests {
             EdgeType::Hierarchical,
             EdgeType::Semantic,
             EdgeType::Contradicts,
+            EdgeType::SuspectedSupersedes,
         ] {
             let s = serde_json::to_string(&et).unwrap();
             let back: EdgeType = serde_json::from_str(&s).unwrap();
             assert_eq!(et, back);
         }
+        // #198: the wire name is PascalCase, like every other edge type.
+        assert_eq!(
+            serde_json::to_string(&EdgeType::SuspectedSupersedes).unwrap(),
+            "\"SuspectedSupersedes\""
+        );
     }
 
     /// Issue-2 remediation round 1: the old comparator compared keys only when

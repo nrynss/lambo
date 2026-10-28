@@ -23,6 +23,12 @@ name: ci
 #                         read via CARGO_MANIFEST_DIR at test time
 #   * lambo.example.toml  `include_str!` in config.rs — it is a tested contract,
 #                         not documentation, despite the name
+#   * examples/**         compiled by every --all-targets row, and included by
+#                         tests via #[path] (tests/eval_set.rs,
+#                         tests/suspected_measure.rs)
+#   * evidence/issue-198-trigger/cosines-bge-m3-self.json
+#                         read via CARGO_MANIFEST_DIR by tests/suspected_measure.rs
+#                         (the rest of evidence/** is not a test input)
 # Adding a new include_str!/CARGO_MANIFEST_DIR read outside these paths means
 # adding that path here, or CI goes blind to it.
 #
@@ -55,6 +61,8 @@ on:
       - 'tests/**'
       - 'migrations/**'
       - 'fixtures/**'
+      - 'examples/**'
+      - 'evidence/issue-198-trigger/cosines-bge-m3-self.json'
       - 'lambo.example.toml'
       - 'Cargo.toml'
       - 'Cargo.lock'
@@ -71,6 +79,8 @@ on:
       - 'tests/**'
       - 'migrations/**'
       - 'fixtures/**'
+      - 'examples/**'
+      - 'evidence/issue-198-trigger/cosines-bge-m3-self.json'
       - 'lambo.example.toml'
       - 'Cargo.toml'
       - 'Cargo.lock'

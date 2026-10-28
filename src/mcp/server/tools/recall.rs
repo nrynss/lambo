@@ -316,6 +316,12 @@ impl LamboServer {
                                 .collect::<Vec<_>>()),
                         );
                     }
+                    // #198: additive, on the older hit of a suspected pair
+                    // whose newer concept is also shown, whatever the line
+                    // gate says (the structured form of the line).
+                    if let Some(by) = lh.possibly_superseded_by {
+                        map.insert("possibly_superseded_by".into(), json!(by.0.to_string()));
+                    }
                     // #33: additive, on every hit of a layered session only.
                     if layered {
                         map.insert("session".into(), json!(lh.session.as_str()));

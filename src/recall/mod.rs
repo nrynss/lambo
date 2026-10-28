@@ -11,3 +11,4 @@ pub mod layered;
 pub mod query_cache;
 pub mod query_vector;
 pub mod redundancy;
+pub mod suspected;
