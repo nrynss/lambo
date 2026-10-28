@@ -288,6 +288,32 @@ impl EdgeType {
         }
     }
 
+    /// Whether writing an edge of this type is **write activity** on its
+    /// endpoints: a fresh incident edge makes a concept freshly written for
+    /// the high-risk modification check, and refreshes the session's last
+    /// activity for the stale-session check (`crate::daemon::events`).
+    ///
+    /// Every type is, `Contradicts` included (an `against` is a declared
+    /// write to the contradicted concept, the owner's #19(c) decision),
+    /// except `SuspectedSupersedes` (#198): Lambo's own inference from two
+    /// texts, never an agent's write to the older concept. Counting it would
+    /// raise a "High-risk modification" warning on a Canonical older concept,
+    /// which leaks the suspicion past the line gate, and would let
+    /// `lambo canon suspected --apply` refresh a stale session.
+    pub const fn marks_write_activity(self) -> bool {
+        match self {
+            Self::Temporal
+            | Self::Derives
+            | Self::CoOccurrence
+            | Self::Causal
+            | Self::Dependency
+            | Self::Hierarchical
+            | Self::Semantic
+            | Self::Contradicts => true,
+            Self::SuspectedSupersedes => false,
+        }
+    }
+
     /// Which end of an edge of this type is the **dependent**: the concept
     /// that rests on the other end (#36, read-time dependents semantics).
     ///

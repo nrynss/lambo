@@ -335,7 +335,7 @@ fn session_last_activity(graph: &Graph, now: DateTime<Utc>) -> Option<(NodeId, D
             consider(c.id, read_at);
         }
     }
-    for e in graph.edges() {
+    for e in graph.edges().filter(|e| e.edge_type.marks_write_activity()) {
         let w = e.last_reinforced.max(e.created_at);
         // Only concept endpoints anchor a *concept* activity claim; an edge from
         // an interaction still refreshes the concept it lands on.
@@ -428,7 +428,9 @@ pub fn high_risk_at(
     let edge_write = own_write
         || graph.incident_edges(node).iter().any(|e| {
             let w = e.last_reinforced.max(e.created_at);
-            w >= window_start && w <= now
+            // #198: a suspected-supersession edge is not a write to either
+            // concept ([`EdgeType::marks_write_activity`]).
+            e.edge_type.marks_write_activity() && w >= window_start && w <= now
         });
     if !(own_write || edge_write) {
         return None;
@@ -1032,6 +1034,63 @@ mod tests {
         assert!(!nodes.contains(&ordinary_id), "an ordinary target does not");
         // Short-lived: gone once the write leaves the window.
         assert!(detect_high_risk(&g, window, ts(200)).is_empty());
+    }
+
+    /// #198: a `SuspectedSupersedes` edge is Lambo's inference, not a write
+    /// to either concept. A fresh one on a Canonical older concept raises no
+    /// high-risk alert (that would leak the suspicion past the line gate),
+    /// and one written into a long-idle session (`lambo canon suspected
+    /// --apply`) does not refresh its activity. A fresh `Contradicts` edge
+    /// does both (control).
+    #[test]
+    fn a_suspected_supersession_edge_is_not_write_activity() {
+        let (mut g, i1_id, i2_id) = base_graph();
+        let older = concept(
+            1,
+            i1_id,
+            "agent-a",
+            "older",
+            0,
+            CanonizationStatus::Canonical,
+            None,
+        );
+        let older_id = older.id;
+        g.insert_concept(older, i1_id).unwrap();
+        let newer = concept(
+            2,
+            i2_id,
+            "agent-b",
+            "newer",
+            10,
+            CanonizationStatus::None,
+            None,
+        );
+        let newer_id = newer.id;
+        g.insert_concept(newer, i2_id).unwrap();
+        // Written long after both concepts and every Derives/Temporal edge.
+        let fresh = 10_000;
+        g.upsert_edge(Edge {
+            edge_type: EdgeType::SuspectedSupersedes,
+            ..edge(1, newer_id, older_id, fresh)
+        })
+        .unwrap();
+        let now = ts(fresh + 5);
+        let window = Duration::from_secs(30);
+        assert!(high_risk_at(&g, older_id, window, now).is_none());
+        assert!(detect_high_risk(&g, window, now).is_empty());
+        assert!(
+            session_stale_at(&g, STALE_WINDOW, now).is_some(),
+            "the suspected edge does not refresh session activity"
+        );
+
+        // Control: a Contradicts edge at the same instant is a write.
+        g.upsert_edge(Edge {
+            edge_type: EdgeType::Contradicts,
+            ..edge(2, newer_id, older_id, fresh)
+        })
+        .unwrap();
+        assert!(high_risk_at(&g, older_id, window, now).is_some());
+        assert!(session_stale_at(&g, STALE_WINDOW, now).is_none());
     }
 
     #[test]
