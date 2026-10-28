@@ -92,9 +92,9 @@ warning line, only the structured `possibly_superseded_by` field.
 From the repository root:
 
 ```text
-python3 -I evidence/issue-198-trigger/slot.py > slot.txt
-python3 -I evidence/issue-198-trigger/slot.py --with-reports > slot-reports.txt
-cargo run --example suspected_measure > rust-measure.txt
+python3 -I evidence/issue-198-trigger/slot.py > evidence/issue-198-trigger/slot.txt
+python3 -I evidence/issue-198-trigger/slot.py --with-reports > evidence/issue-198-trigger/slot-reports.txt
+cargo run --example suspected_measure > evidence/issue-198-trigger/rust-measure.txt
 ```
 
 New cosines (another embedder, or new pairs): run `eval_measure` with

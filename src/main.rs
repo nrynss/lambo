@@ -292,10 +292,12 @@ enum Commands {
         )]
         confirm: String,
     },
-    /// Read-only canonization tools for operators: a dry run of the evaluator and an alias backfill preview, on a private copy of a SQLite store.
+    /// Canonization tools for operators: a dry run of the evaluator, an alias backfill preview and a suspected-supersession report, each on a private copy of a SQLite store by default.
     ///
-    /// Operator-only. Reads no lambo.toml, builds no embedder, takes no lease
-    /// and writes nothing but a scratch copy it removes.
+    /// Operator-only. Reads no lambo.toml and builds no embedder. Each command
+    /// takes no lease and writes nothing but a scratch copy it removes, except
+    /// `canon suspected --apply`, which takes the session's lease and records
+    /// edges in the store file.
     Canon {
         #[command(subcommand)]
         action: CanonAction,

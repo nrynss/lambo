@@ -347,6 +347,10 @@ async fn apply(args: SuspectedArgs) -> Result<Outcome, CliError> {
 pub(super) async fn run(args: SuspectedArgs) -> Result<Outcome, CliError> {
     require_nonempty("session", &args.session)?;
     check_size_cli("session", &args.session)?;
+    // A bad --cosine is refused before the store is copied or the lease taken.
+    if args.cosine.is_some() {
+        floor(args.cosine, None)?;
+    }
     if args.apply {
         apply(args).await
     } else {
@@ -625,6 +629,28 @@ mod tests {
         let store = SqliteStore::new(SqliteConnectOptions::new().filename(&path).read_only(true));
         assert!(store
             .read_lease(&SessionId::new("no-such-session"))
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    /// An out-of-range --cosine is refused before the lease is taken.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_bad_cosine_with_apply_takes_no_lease() {
+        let input = ScratchDir::new("lambo-suspected-input");
+        let scratch = ScratchDir::new("lambo-suspected-scratch");
+        let path = fixture_db(&input).await;
+        let err = run(SuspectedArgs {
+            cosine: Some(1.5),
+            ..args(path.clone(), &scratch, true)
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(err.exit_code(), 2, "{err}");
+        assert!(err.to_string().contains("--cosine"), "{err}");
+        let store = SqliteStore::new(SqliteConnectOptions::new().filename(&path).read_only(true));
+        assert!(store
+            .read_lease(&SessionId::new(SESSION))
             .await
             .unwrap()
             .is_none());
