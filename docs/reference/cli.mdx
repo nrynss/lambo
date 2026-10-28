@@ -1098,7 +1098,10 @@ refuses the run. Per query and per project the report gives:
 - recall@k: in-scope before hits (placed in the project or one of its layers)
   ranked at most `k` that are also after hits ranked at most `k`;
 - lost (in scope, missing after), merged by dedupe (missing as a hit of its
-  own, but in another hit's `also`), and gained hits;
+  own, but in another hit's `also`), and gained hits. Under the serving
+  config's `[selection] skip_redundant`, both sides skip redundant hits as a
+  serve would, and a hit skipped as a repeat of another is listed in that
+  hit's `also` and counts as merged, not lost;
 - rank shifts of hits on both sides;
 - other sessions' hits that were in the before answer and are removed, by
   the session the split assigned them to;

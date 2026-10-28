@@ -102,6 +102,8 @@ struct Run {
     later: chrono::Duration,
     /// Edits the rebuilt split before the run.
     edit: Option<fn(&mut SplitOutput)>,
+    /// The serving config the replay runs with.
+    config: Config,
 }
 
 impl Run {
@@ -124,6 +126,7 @@ impl Run {
             failing: false,
             later: chrono::Duration::zero(),
             edit: None,
+            config: Config::default(),
         }
     }
 
@@ -160,7 +163,7 @@ impl Run {
             },
             embedder,
             embedding: &contract(self.dim),
-            config: &Config::default(),
+            config: &self.config,
         })
         .await
     }
@@ -386,6 +389,145 @@ async fn layered_dedupe_is_not_a_loss() {
         .iter()
         .any(|h| h.also.contains(&("general".to_string(), id(17)))));
     assert!(report.projects["alpha"].deduped >= 1);
+}
+
+/// #181: with `[selection] skip_redundant` the replay skips a restated
+/// concept inside each session, as a serve would, and the report lists it
+/// among the kept hit's `also` copies: deduped, never lost. Off, both
+/// copies are hits.
+#[tokio::test]
+async fn a_redundancy_skip_is_replayed_and_is_not_a_loss() {
+    let restated = |skip_redundant: bool| {
+        let mut run = Run::new();
+        // 18 ("alpha note", an alpha Observation) restates 11 word for word.
+        let c = run
+            .source
+            .concepts
+            .iter_mut()
+            .find(|c| c.id == id(18))
+            .unwrap();
+        c.content = "alpha cache is warm".into();
+        c.canonical_key = "alpha cache is warm".into();
+        run.split_source = run.source.clone();
+        run.config.recall_selection.skip_redundant = skip_redundant;
+        run
+    };
+    let pair = [id(11), id(18)];
+    let off = restated(false).go().await.unwrap();
+    let q = query(&off, "alpha", "alpha cache is warm");
+    for side in [&q.before, &q.after] {
+        assert!(pair.iter().all(|p| side.iter().any(|h| h.origin == *p)));
+    }
+
+    let on = restated(true).go().await.unwrap();
+    let q = query(&on, "alpha", "alpha cache is warm");
+    for side in [&q.before, &q.after] {
+        let shown: Vec<NodeId> = pair
+            .iter()
+            .copied()
+            .filter(|p| side.iter().any(|h| h.origin == *p))
+            .collect();
+        assert_eq!(shown.len(), 1, "one copy is a hit: {side:#?}");
+        let other = pair.iter().copied().find(|p| *p != shown[0]).unwrap();
+        let kept = side.iter().find(|h| h.origin == shown[0]).unwrap();
+        assert!(
+            kept.also.iter().any(|(_, o)| *o == other),
+            "the skipped copy is named: {kept:#?}"
+        );
+    }
+    assert!(pair.iter().all(|p| !q.lost_ids.contains(p)), "{q:#?}");
+}
+
+/// #181: when a layer's hit merges into a nearer tier's hit by layered
+/// dedupe, the members the layer's session skipped as redundant with it
+/// travel with the copy, so the report lists them in the kept hit's `also`
+/// and counts them as deduped, not lost. Beta serves as alpha's layer:
+/// beta's copy of Cargo.toml (20) merges into alpha's, and beta had skipped
+/// its ruling (12) for it.
+#[test]
+fn a_merged_copys_redundancy_skips_are_deduped_not_lost() {
+    use crate::recall::detail::DetailedHit;
+    use crate::recall::layered::{LayerCopy, LayeredHit};
+    use crate::recall::redundancy::{RedundancySignal, RedundantSkip};
+    use crate::types::{ConceptType, RecallHit};
+    let run = Run::new();
+    let (plan, split) = (run.plan(), run.split());
+    let origins = Origins::new(&split, &plan);
+    let recall_hit = |node_id: NodeId| RecallHit {
+        repo_scope: None,
+        node_id,
+        content: String::new(),
+        concept_type: Some(ConceptType::Logic),
+        score: 0.5,
+        is_canonical: false,
+        blast_radius: None,
+    };
+    let recall = |hits: Vec<LayeredHit>| {
+        let mut detail = DetailedRecall::warn_only(String::new());
+        detail.warnings.clear();
+        detail.hits = hits.iter().map(|h| h.hit.clone()).collect();
+        detail.detailed = hits
+            .iter()
+            .map(|h| DetailedHit::new(&h.hit, None))
+            .collect();
+        LayeredRecall {
+            hits,
+            context: String::new(),
+            warnings: Vec::new(),
+            unavailable_layers: Vec::new(),
+            detail,
+            hit_legs: Vec::new(),
+        }
+    };
+    let layered_hit = |session: &str, node_id: NodeId, also: Vec<LayerCopy>| LayeredHit {
+        session: SessionId::from(session),
+        hit: recall_hit(node_id),
+        also,
+        included_in_context: true,
+        truncated_in_context: false,
+        companion_of: Vec::new(),
+        possibly_superseded_by: None,
+        skipped_redundant: Vec::new(),
+    };
+    let before_recall = recall(vec![
+        layered_hit("mixed", id(20), Vec::new()),
+        layered_hit("mixed", id(12), Vec::new()),
+    ]);
+    let after_recall = recall(vec![layered_hit(
+        "alpha",
+        mapped(&split, 20, "alpha"),
+        vec![LayerCopy {
+            session: SessionId::from("beta"),
+            node_id: mapped(&split, 20, "beta"),
+            skipped_redundant: vec![RedundantSkip {
+                node_id: mapped(&split, 12, "beta"),
+                signal: RedundancySignal::SameContent,
+            }],
+        }],
+    )]);
+    let before = side_hits(&before_recall, &origins, true).unwrap();
+    let after = side_hits(&after_recall, &origins, false).unwrap();
+    assert!(
+        after[0].also.contains(&("beta".to_string(), id(12))),
+        "{:?}",
+        after[0].also
+    );
+    let sessions: BTreeSet<String> = ["alpha", "beta"].map(String::from).into();
+    let q = compare(
+        "Cargo.toml",
+        &before_recall,
+        &after_recall,
+        &before,
+        &after,
+        &Scope {
+            visible: &sessions,
+            disclosed: &sessions,
+            k: 5,
+        },
+        &origins,
+    );
+    assert!(q.deduped_ids.contains(&id(12)), "{q:#?}");
+    assert!(!q.lost_ids.contains(&id(12)), "{q:#?}");
 }
 
 /// Disclosure: an aggregate-only session (and any session nobody queried)

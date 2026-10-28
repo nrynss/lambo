@@ -53,6 +53,7 @@ fn assemble_gated(g: &Graph, in_expanded: &[u64], q: RecallQuery, line: bool) ->
         RecallWeights::default(),
         crate::Config::default().canonization_edge_min_age,
         line,
+        None,
         ts(60),
         default_token_count,
     )

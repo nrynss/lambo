@@ -250,6 +250,30 @@ url = "http://127.0.0.1:8080"
 # Seconds between canonization evaluation passes. Default 60.
 # canonization_eval_interval_secs = 5
 
+# --- Redundancy-aware selection (issue #181) ---------------------------------
+# Optional; off by default. With skip_redundant = true, recall skips a hit that
+# repeats one it already took, so the next distinct hit gets the slot: two
+# copies of one fact no longer take two of the two or three hits a reader sees.
+# Redundant means the same text (spacing aside, case kept, across concept types).
+# similar_signals = true (off by default; needs skip_redundant) also counts a
+# Semantic edge, or vectors at or above the session's merge threshold. It is off
+# because on the #190 set it added 3 facets on injected copies and lost 42 on
+# related-but-distinct facts the write path had merged (evidence/issue-181/).
+# Never redundant: a pair one of which contradicts the other or is suspected of
+# replacing it (suspected_supersession_line), or two texts that
+# differ in an identifier (snake_case, CamelCase, all-caps, a path, version or
+# hash; case counts), a number, a negation, a word against its opposite
+# (enable / disable), or the order of their shared words. Never skipped: a
+# forced hit, a hit with a warning of its own, or either end of a suspected
+# supersession pair. The kept hit names what it
+# replaced: `also <id>`. Only the
+# first min(20, 4 x top_k) hits are checked. Off, or with nothing redundant,
+# recall is byte-identical to before. A top-level table, not under [recall].
+#
+# [selection]
+# skip_redundant = true
+# similar_signals = false
+
 # --- Recall tier (issue #18, feature recall-elastic) -------------------------
 # Optional. An Elasticsearch index beside the durable [store] that serves the
 # vector leg of recall. The store above stays the source of truth: leases,

@@ -228,7 +228,9 @@ pub struct VerifyHit {
     /// The hit's annotation kinds, sorted.
     pub annotations: Vec<String>,
     /// Disclosed origins of the copies layered dedupe merged into this hit,
-    /// as `(session, origin)`. Empty before.
+    /// as `(session, origin)`, then (#181, under `[selection]
+    /// skip_redundant`, on either side) the members its own session
+    /// skipped as redundant with it. Without that setting, empty before.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub also: Vec<(String, NodeId)>,
     /// Merged copies whose origin is not disclosed.
@@ -279,7 +281,8 @@ pub struct QueryComparison {
     /// In-scope before hits missing after (any rank).
     pub lost: usize,
     /// In-scope before hits missing as hits of their own because layered
-    /// dedupe merged them into another memory's hit (its `also`).
+    /// dedupe merged them into another memory's hit (its `also`), or #181
+    /// skipped them as redundant with one.
     pub deduped: usize,
     /// After hits that were not before hits.
     pub gained: usize,
@@ -645,7 +648,18 @@ fn side_hits(
         for copy in &hit.also {
             let s = copy.session.0.clone();
             let o = origin_of(&s, copy.node_id)?;
-            also.push((s, o));
+            also.push((s.clone(), o));
+            // #181: what the copy's session skipped as redundant with it
+            // merged into this hit with the copy.
+            for skip in &copy.skipped_redundant {
+                also.push((s.clone(), origin_of(&s, skip.node_id)?));
+            }
+        }
+        // #181: a member skipped as redundant with this hit is a copy merged
+        // into it inside its own session, so it is reported (and counted
+        // as deduped, not lost) like a layered dedupe copy.
+        for skip in &hit.skipped_redundant {
+            also.push((session.clone(), origin_of(&session, skip.node_id)?));
         }
         let mut annotations: Vec<String> = detail
             .annotations
@@ -956,6 +970,10 @@ pub struct VerifyInputs<'a> {
     pub params: VerifyParams,
     pub embedder: &'a dyn Embedder,
     pub embedding: &'a EmbeddingContract,
+    /// The config a serve of this file runs its sessions with. Its
+    /// `semantic_match_threshold` is the effective merge threshold a writer
+    /// attach settles on, which `[selection]`'s cosine signal uses (#181;
+    /// `lambo session verify` reads the cached labelled-pairs one).
     pub config: &'a Config,
 }
 

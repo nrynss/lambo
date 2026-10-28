@@ -331,7 +331,7 @@ async fn run_on(
     };
     compatible.map_err(|e| CliError::Runtime(e.to_string()))?;
 
-    let cfg = reader_config(&backends.config);
+    let cfg = reader_config(backends).await;
     let query = request.query.as_str();
     // Do NOT spawn: spawn would run GC, which is a writer. Config::default()
     // for knobs — same as `lambo serve` today (T82-12 is not T8.3's to fix).
@@ -535,12 +535,33 @@ pub(crate) fn render_cli_text(detail: &DetailedRecall) -> String {
 /// The one-shot reader's daemon config: the defaults, plus the resolved
 /// settings that shape recall itself, so `lambo recall` and `serve-web` rank
 /// like a session does. #87: `[embedder] calibration`; #173: `[fusion]`;
-/// #198: `[embedder] suspected_supersession_line`.
-fn reader_config(resolved: &Config) -> Config {
+/// #198: `[embedder] suspected_supersession_line`;
+/// #181: `[selection]`, with the merge threshold its cosine signal uses:
+/// the one a writer attach of this store runs with, the labelled-pairs
+/// derivation the store caches first
+/// ([`crate::embed::canary::reader_merge_threshold`]). Looked up only when
+/// `similar_signals` lets the cosine signal fire; nothing else in a reader
+/// reads it.
+pub(crate) async fn reader_config(backends: &ResolvedBackends) -> Config {
+    let resolved = &backends.config;
+    let selection = resolved.recall_selection;
+    let semantic_match_threshold = if selection.skip_redundant && selection.similar_signals {
+        crate::embed::canary::reader_merge_threshold(
+            backends.store.as_ref(),
+            &backends.embedding,
+            &backends.canary_options(),
+            resolved,
+        )
+        .await
+    } else {
+        resolved.semantic_match_threshold
+    };
     Config {
         calibration: resolved.calibration,
         suspected_supersession_line: resolved.suspected_supersession_line,
         recall_fusion: resolved.recall_fusion,
+        recall_selection: selection,
+        semantic_match_threshold,
         ..Config::default()
     }
 }
@@ -548,30 +569,6 @@ fn reader_config(resolved: &Config) -> Config {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// #173: `[fusion]` reaches the one-shot reader (`lambo recall`,
-    /// `serve-web`), not only a session.
-    #[test]
-    fn the_reader_config_carries_calibration_and_fusion() {
-        use crate::recall::fusion::{FusionKind, RecallFusion};
-        let resolved = Config {
-            recall_fusion: RecallFusion {
-                kind: FusionKind::Rrf,
-                k: 7.0,
-                ..RecallFusion::default()
-            },
-            suspected_supersession_line: crate::recall::suspected::SuspectedLine::Off,
-            ..Config::default()
-        };
-        let cfg = reader_config(&resolved);
-        assert_eq!(cfg.recall_fusion, resolved.recall_fusion);
-        assert_eq!(cfg.calibration, resolved.calibration);
-        // #198: and the suspected-supersession line switch.
-        assert_eq!(
-            cfg.suspected_supersession_line,
-            crate::recall::suspected::SuspectedLine::Off
-        );
-    }
 
     /// #198 H3 losslessness: a shown `possibly_superseded` line is printed
     /// exactly once, in its block or, when the block is cut, in the header;
@@ -1055,5 +1052,173 @@ mod by_tests {
             panic!("runtime error: {e:?}")
         };
         assert!(m.contains("VECTOR_SEARCH"), "{m}");
+    }
+
+    /// #173, #87, #198, #181: `[fusion]`, `[embedder] calibration`,
+    /// `[embedder] suspected_supersession_line` and `[selection]` reach the
+    /// one-shot reader (`lambo recall`, `serve-web`), not only a session.
+    /// With `similar_signals` the cosine
+    /// signal uses the contract's calibrated merge threshold unless
+    /// `calibrated_merge_threshold = false`, else the configured one (no
+    /// labelled pairs here); without it the threshold is not looked up.
+    #[tokio::test]
+    async fn the_reader_config_carries_fusion_selection_and_the_threshold() {
+        use crate::recall::fusion::{FusionKind, RecallFusion};
+        use crate::recall::redundancy::RecallSelection;
+        let mut b = backends(Box::new(MemoryStore::new()), false);
+        b.config.recall_fusion = RecallFusion {
+            kind: FusionKind::Rrf,
+            k: 7.0,
+            ..RecallFusion::default()
+        };
+        b.config.semantic_match_threshold = 0.8;
+        b.config.recall_selection = RecallSelection {
+            skip_redundant: true,
+            similar_signals: true,
+        };
+        b.config.suspected_supersession_line = crate::recall::suspected::SuspectedLine::Off;
+        let cfg = reader_config(&b).await;
+        assert_eq!(cfg.recall_fusion, b.config.recall_fusion);
+        assert_eq!(cfg.calibration, b.config.calibration);
+        assert_eq!(
+            cfg.suspected_supersession_line,
+            crate::recall::suspected::SuspectedLine::Off
+        );
+        assert_eq!(cfg.recall_selection, b.config.recall_selection);
+        assert_eq!(
+            cfg.semantic_match_threshold, 0.8,
+            "no row: the configured one"
+        );
+
+        let row = &crate::embed::calibration::BUILTIN[0];
+        b.embedding = EmbeddingContract {
+            kind: row.kind.into(),
+            model: Some(row.model.into()),
+            dim: row.dim,
+        };
+        assert_eq!(
+            reader_config(&b).await.semantic_match_threshold,
+            row.merge_threshold
+        );
+        b.config.calibrated_merge_threshold = false;
+        assert_eq!(reader_config(&b).await.semantic_match_threshold, 0.8);
+        b.config.calibrated_merge_threshold = true;
+        b.config.recall_selection.similar_signals = false;
+        assert_eq!(
+            reader_config(&b).await.semantic_match_threshold,
+            0.8,
+            "identical content only: the cosine signal never fires"
+        );
+    }
+
+    /// #181: the merge threshold of `[selection]`'s cosine signal is the
+    /// same for a serve's session (the writer attach `lambo_recall` runs
+    /// in), `lambo recall` / `serve-web` and `lambo session verify`: with
+    /// labelled pairs, the derivation the store's fingerprint caches for
+    /// that file; without them, the configured one.
+    #[cfg(feature = "store-sqlite")]
+    #[tokio::test]
+    async fn a_serve_the_cli_and_verify_use_one_merge_threshold() {
+        use crate::embed::canary::{
+            self, CanaryMode, CanaryOptions, DerivedThreshold, Fingerprint,
+        };
+        use sha2::{Digest, Sha256};
+        const DERIVED: f64 = 0.9734;
+        let dir = ScratchDir::new("lambo-181-threshold");
+        let db = dir.join("lambo.db");
+        let pairs: Vec<serde_json::Value> = (0..120)
+            .map(|i| serde_json::json!({"a": format!("pair {i} a"), "b": format!("pair {i} b")}))
+            .collect();
+        let pairs_bytes = serde_json::to_vec(&pairs).unwrap();
+        let pairs_path = write(&dir, "pairs.json", &pairs_bytes);
+        let config_file = |pairs: bool| {
+            let related = if pairs {
+                format!("related_pairs = {:?}\n", pairs_path.display().to_string())
+            } else {
+                String::new()
+            };
+            let text = format!(
+                "[store]\nkind = \"sqlite\"\npath = {:?}\n[embedder]\nkind = \"fixture\"\n\
+                 dim = 1024\ncanary = \"warn\"\n{related}[selection]\nskip_redundant = true\n\
+                 similar_signals = true\n",
+                db.display().to_string()
+            );
+            write(&dir, &format!("lambo-{pairs}.toml"), text.as_bytes())
+        };
+        let (with_pairs, without_pairs) = (config_file(true), config_file(false));
+
+        // A store whose fingerprint caches a usable derivation of the file,
+        // as a writer attach that embedded the pairs leaves it.
+        let seed = crate::resolve::resolve_from_config_path(Some(&with_pairs)).unwrap();
+        seed.store.init_schema().await.unwrap();
+        let plain = CanaryOptions {
+            mode: CanaryMode::Warn,
+            related_pairs: None,
+        };
+        canary::check(
+            seed.store.as_ref(),
+            seed.embedder.as_ref(),
+            &seed.embedding,
+            &plain,
+            0.85,
+        )
+        .await
+        .unwrap();
+        let key = canary::fingerprint_key(&seed.embedding);
+        let raw = seed.store.read_store_meta(&key).await.unwrap().unwrap();
+        let mut fp: Fingerprint = serde_json::from_str(&raw).unwrap();
+        fp.random_pair.p99 = 0.5;
+        fp.merge_threshold = Some(DerivedThreshold {
+            value: DERIVED,
+            pairs: 120,
+            source_sha256: Sha256::digest(&pairs_bytes)
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect(),
+        });
+        seed.store
+            .write_store_meta(&key, &serde_json::to_string(&fp).unwrap())
+            .await
+            .unwrap();
+        drop(seed);
+
+        for (file, expected, session) in [
+            (&with_pairs, DERIVED, "t181-pairs"),
+            (&without_pairs, 0.85, "t181-plain"),
+        ] {
+            let resolved = crate::resolve::resolve_from_config_path(Some(file)).unwrap();
+            let config = resolved.config.clone();
+            let mem = crate::Memory::builder()
+                .session(session)
+                .agent("agent-a")
+                .backends(resolved)
+                .config(config)
+                .build()
+                .await
+                .unwrap();
+            let serve = mem.config().semantic_match_threshold;
+            mem.close().await.unwrap();
+            let cli = reader_config(&crate::resolve::resolve_from_config_path(Some(file)).unwrap())
+                .await
+                .semantic_match_threshold;
+            // Verify reads a completed standalone copy, as an operator makes.
+            let backup = dir.join(format!("{session}-backup.db"));
+            let raw = sqlx::SqlitePool::connect(&format!("sqlite://{}", db.display()))
+                .await
+                .unwrap();
+            sqlx::query("VACUUM INTO ?")
+                .bind(backup.to_str().unwrap())
+                .execute(&raw)
+                .await
+                .unwrap();
+            raw.close().await;
+            let io = crate::resolve::resolve_verify_io(file, Some(&backup), None, &backup).unwrap();
+            let verify = crate::cli::session::verify_merge_threshold(&io).await;
+            assert_eq!(
+                (serve, cli, verify),
+                (expected, expected, expected),
+                "{file:?}"
+            );
+        }
     }
 }

@@ -539,7 +539,8 @@ fn dedupe_keeps_the_nearer_tier_at_the_better_rank() {
         kept.also,
         [LayerCopy {
             session: SessionId::new("general"),
-            node_id: nid(1, 0)
+            node_id: nid(1, 0),
+            skipped_redundant: Vec::new(),
         }]
     );
     let also = format!("also {} in general)", short_id(nid(1, 0)));
@@ -1107,6 +1108,105 @@ fn a_pending_companion_and_its_copies_are_shown_once() {
     );
     assert_eq!(r.hits[3].also.len(), 1, "the cut general copy");
     assert_eq!(r.hits[3].companion_of, vec![nid(0, 1)]);
+}
+
+/// #181: what each session skipped as redundant with a hit stays on it in
+/// the merge: its block names those members after `from <session>` and
+/// before any farther tier's copy (`also <id>` ids are its session's), and
+/// `LayeredHit::skipped_redundant` carries them. A hit that skipped
+/// nothing renders exactly as before.
+#[test]
+fn each_tiers_redundancy_skips_stay_on_their_hit() {
+    use crate::recall::redundancy::{RedundancySignal, RedundantSkip};
+    let skipped = |tier: usize, pos: usize| RedundantSkip {
+        node_id: NodeId(Uuid::from_u64_pair(0x5c1b << 48, (tier * 10 + pos) as u64)),
+        signal: RedundancySignal::SameContent,
+    };
+    let mut lists = vec![
+        primary(&[kw("p1"), kw("p2")]),
+        layer(1, "general", 0.5, &[kw("g1"), kw("p1")]),
+    ];
+    for (tier, pos) in [(0, 0), (1, 0)] {
+        lists[tier].recall.as_mut().unwrap().recall.detailed[pos].skipped_redundant =
+            vec![skipped(tier, pos)];
+    }
+    let r = run(&lists, params(10));
+    assert_eq!(order(&r), ["lambo/p1", "lambo/p2", "general/g1"]);
+    let block = |i: usize| r.context.split("\n\n").nth(i).unwrap().to_string();
+    let also = |s: RedundantSkip| format!("also {}", short_id(s.node_id));
+    assert!(
+        block(0).ends_with(&format!(
+            "id {}, {}, also {} in general)",
+            short_id(nid(0, 0)),
+            also(skipped(0, 0)),
+            short_id(nid(1, 1))
+        )),
+        "{}",
+        block(0)
+    );
+    assert!(
+        block(2).ends_with(&format!(
+            "id {}, from general, {})",
+            short_id(nid(1, 0)),
+            also(skipped(1, 0))
+        )),
+        "{}",
+        block(2)
+    );
+    assert_eq!(
+        block(1),
+        block_with_meta(&r.detail.hits[1], &[], &[], None).text
+    );
+    assert_eq!(r.hits[0].skipped_redundant, vec![skipped(0, 0)]);
+    assert_eq!(r.hits[2].skipped_redundant, vec![skipped(1, 0)]);
+    assert!(r.hits[1].skipped_redundant.is_empty());
+}
+
+/// #181: a farther tier's hit that merges into a nearer tier's group keeps
+/// what its own session skipped as redundant with it: the copy carries the
+/// skips (`LayerCopy::skipped_redundant`), and the block names them after
+/// the copy, in the copy's session.
+#[test]
+fn a_merged_copy_keeps_its_sessions_redundancy_skips() {
+    use crate::recall::redundancy::{RedundancySignal, RedundantSkip};
+    let skipped = RedundantSkip {
+        node_id: NodeId(Uuid::from_u64_pair(0x5c1b << 48, 11)),
+        signal: RedundancySignal::SameContent,
+    };
+    let mut lists = vec![
+        primary(&[kw("p1"), kw("p2")]),
+        layer(1, "general", 0.5, &[kw("g1"), kw("p1")]),
+    ];
+    // General's copy of p1 (position 1) skipped a member of general.
+    lists[1].recall.as_mut().unwrap().recall.detailed[1].skipped_redundant = vec![skipped];
+    let r = run(&lists, params(10));
+    assert_eq!(order(&r), ["lambo/p1", "lambo/p2", "general/g1"]);
+    assert_eq!(r.hits[0].also.len(), 1, "general's p1 merged into lambo's");
+    assert_eq!(r.hits[0].also[0].skipped_redundant, vec![skipped]);
+    assert!(
+        r.hits[0].skipped_redundant.is_empty(),
+        "lambo skipped nothing"
+    );
+    let block = r.context.split("\n\n").next().unwrap();
+    assert!(
+        block.ends_with(&format!(
+            "also {} in general, also {} in general)",
+            short_id(nid(1, 1)),
+            short_id(skipped.node_id)
+        )),
+        "{block}"
+    );
+    // The MCP hit and the ledger line carry them too, session-qualified,
+    // so a `+N more` label never hides which members were skipped.
+    assert_eq!(
+        crate::recall::redundancy::copy_skips_json(&r.hits[0].also),
+        Some(serde_json::json!([{
+            "session": "general",
+            "node_id": skipped.node_id.0.to_string(),
+            "signal": "same_content",
+        }]))
+    );
+    assert!(crate::recall::redundancy::copy_skips_json(&r.hits[1].also).is_none());
 }
 
 /// #198: a suspected pair of one session keeps its line and field in the

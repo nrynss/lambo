@@ -108,6 +108,19 @@ impl ContextBlock {
             scope: None,
         }
     }
+
+    /// This block with `meta` items appended inside the label's closing
+    /// parenthesis: `(score 0.42, id 1a2b3c4d, also 5e6f7a8b)`. With no
+    /// `meta` it is unchanged. The one place label meta is inserted: #181's
+    /// `also` items and #33's layer items (`from`, `also … in …`).
+    pub(crate) fn with_meta(mut self, meta: &[String]) -> Self {
+        if !meta.is_empty() && self.label_end > 0 && self.text[..self.label_end].ends_with(')') {
+            let extra = format!(", {}", meta.join(", "));
+            self.text.insert_str(self.label_end - 1, &extra);
+            self.label_end += extra.len();
+        }
+        self
+    }
 }
 
 /// How the first block was truncated, from the most kept to the least.

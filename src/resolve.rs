@@ -200,6 +200,16 @@ impl ResolvedBackends {
             crate::embed::weights_in_unified_memory(self.embedder.as_ref()),
         )
     }
+
+    /// The canary a writer attach of this bundle runs (#176): `[embedder]
+    /// canary` and `related_pairs`. Readers ask it for the labelled-pairs
+    /// merge threshold the store caches (#181).
+    pub fn canary_options(&self) -> crate::embed::canary::CanaryOptions {
+        crate::embed::canary::CanaryOptions {
+            mode: self.embedder_cfg.canary,
+            related_pairs: self.embedder_cfg.related_pairs.clone(),
+        }
+    }
 }
 
 /// Store vector width vs embedder output dim.
@@ -271,6 +281,7 @@ fn process_config(
     promotion_policy: Option<crate::canon::PromotionPolicy>,
     canonization_supersede: Option<bool>,
     fusion: Option<crate::recall::fusion::RecallFusion>,
+    selection: Option<crate::recall::redundancy::RecallSelection>,
     embedder_cfg: &EmbedderConfig,
 ) -> Result<crate::Config, LamboError> {
     let mut config = crate::Config::default();
@@ -284,6 +295,10 @@ fn process_config(
     // #173: `[fusion]`, a recall setting every session of the process runs.
     if let Some(fusion) = fusion {
         config.recall_fusion = fusion;
+    }
+    // #181: `[selection]`, likewise.
+    if let Some(selection) = selection {
+        config.recall_selection = selection;
     }
     // #22: a process setting the surfaces read through `Memory::config`, set
     // here so every session this process attaches carries the same value.
@@ -343,6 +358,7 @@ pub fn resolve_backends(file: LamboFile) -> Result<ResolvedBackends, LamboError>
         promotion_policy,
         file.canonization_supersede,
         file.fusion,
+        file.selection,
         &embedder_cfg,
     )?;
     // A store whose vector column carries no width of its own (SQLite's BLOB) reports
@@ -603,6 +619,10 @@ pub struct VerifyIo {
     pub config: crate::Config,
     /// The file's `[serve]` table: its layer stacks are the "after" side.
     pub serve: crate::config::ServeConfig,
+    /// The canary a serve of this file runs (`[embedder] canary` and
+    /// `related_pairs`), so the replay can read the labelled-pairs merge
+    /// threshold the stores cache (#181).
+    pub canary: crate::embed::canary::CanaryOptions,
 }
 
 /// A split output database, opened read-only (`lambo session verify`).
@@ -622,6 +642,19 @@ impl VerifySplitOutput {
     #[cfg(feature = "store-sqlite")]
     pub(crate) fn store(&self) -> &crate::store::SqliteStore {
         &self.store
+    }
+
+    /// The read-only store as a [`GraphStore`], `None` in a build without
+    /// SQLite (where no split output opens).
+    pub(crate) fn graph_store(&self) -> Option<&dyn GraphStore> {
+        #[cfg(feature = "store-sqlite")]
+        {
+            Some(&self.store)
+        }
+        #[cfg(not(feature = "store-sqlite"))]
+        {
+            None
+        }
     }
 
     #[cfg(feature = "store-sqlite")]
@@ -682,6 +715,7 @@ pub fn resolve_verify_io(
         file.promotion_policy,
         file.canonization_supersede,
         file.fusion,
+        file.selection,
         &file.embedder,
     )?;
     file.serve.validate()?;
@@ -704,6 +738,10 @@ pub fn resolve_verify_io(
         embedding,
         config: process,
         serve: file.serve,
+        canary: crate::embed::canary::CanaryOptions {
+            mode: file.embedder.canary,
+            related_pairs: file.embedder.related_pairs.clone(),
+        },
     })
 }
 
@@ -1336,6 +1374,7 @@ mod tests {
             web: Default::default(),
             canonization_supersede: None,
             fusion: None,
+            selection: None,
         };
         let r = resolve_backends(file).unwrap();
         assert_eq!(r.embedder.dimensions(), 1024);
@@ -1397,6 +1436,54 @@ mod tests {
         assert!(LamboFile::from_toml_str(&format!("{base}[fusion]\nkid = 1.0\n")).is_err());
     }
 
+    /// #181: `[selection]` reaches `Memory`'s `Config`; no table, or an
+    /// empty one, leaves the rule off; `similar_signals` is off unless set,
+    /// and refused without `skip_redundant`; an unknown key is refused.
+    #[test]
+    #[cfg(all(feature = "store-memory", feature = "embed-fixture"))]
+    fn selection_table_reaches_config() {
+        let base = "[store]\nkind = \"memory\"\n[embedder]\nkind = \"fixture\"\ndim = 1024\n";
+        let off = resolve_backends(LamboFile::from_toml_str(base).unwrap()).unwrap();
+        assert!(!off.config.recall_selection.skip_redundant);
+        let empty =
+            resolve_backends(LamboFile::from_toml_str(&format!("{base}[selection]\n")).unwrap())
+                .unwrap();
+        assert!(!empty.config.recall_selection.skip_redundant);
+        let on = resolve_backends(
+            LamboFile::from_toml_str(&format!("{base}[selection]\nskip_redundant = true\n"))
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(on.config.recall_selection.skip_redundant);
+        assert!(
+            !on.config.recall_selection.similar_signals,
+            "identical content only by default"
+        );
+        let similar = resolve_backends(
+            LamboFile::from_toml_str(&format!(
+                "{base}[selection]\nskip_redundant = true\nsimilar_signals = true\n"
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(similar.config.recall_selection.similar_signals);
+        let Err(err) = resolve_backends(
+            LamboFile::from_toml_str(&format!("{base}[selection]\nsimilar_signals = true\n"))
+                .unwrap(),
+        ) else {
+            panic!("similar_signals without skip_redundant must be refused");
+        };
+        assert!(err.to_string().contains("similar_signals"), "{err}");
+        assert!(
+            LamboFile::from_toml_str(&format!("{base}[selection]\nskip_redundnt = true\n"))
+                .is_err()
+        );
+        assert!(LamboFile::from_toml_str(&format!(
+            "{base}[selection]\nskip_redundant = \"yes\"\n"
+        ))
+        .is_err());
+    }
+
     /// #22: `[embedder] accept_client_vectors` reaches `Memory`'s `Config`,
     /// which is where the MCP and CLI surfaces read it.
     #[test]
@@ -1454,6 +1541,7 @@ mod tests {
             web: Default::default(),
             canonization_supersede: None,
             fusion: None,
+            selection: None,
         };
         let r = resolve_backends(file).unwrap();
         assert_eq!(r.embedding.kind, "gemini");
@@ -1501,6 +1589,7 @@ mod tests {
             web: Default::default(),
             canonization_supersede: None,
             fusion: None,
+            selection: None,
         };
 
         // The pin asserts this deployment's vectors are 768 wide; the embedder emits
@@ -1807,6 +1896,7 @@ mod tests {
                 web: Default::default(),
                 canonization_supersede: None,
                 fusion: None,
+                selection: None,
             }
         }
 

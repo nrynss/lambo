@@ -1123,6 +1123,135 @@ fn i1_the_recall_line_names_a_stale_citation() {
     assert_eq!(facts["warning_count"], json!(2));
 }
 
+/// #181 over the real tool: with `[selection] skip_redundant` (the shipped
+/// default, identical content only), one text
+/// written as an Observation and then as an Entity comes back once; the
+/// kept hit names the other in `content[0]` (`also <id>`), in its
+/// structured hit and on its ledger line, and no other hit carries the key.
+#[tokio::test]
+async fn i1_a_skipped_duplicate_is_named_in_the_response_and_the_ledger() {
+    let dir = ledger_dir("skipped-duplicate");
+    let path = dir.join("calls.jsonl");
+    let config = crate::Config {
+        recall_selection: crate::recall::redundancy::RecallSelection {
+            skip_redundant: true,
+            ..Default::default()
+        },
+        ..crate::Config::default()
+    };
+    let plain = server_with_config("t181-skipped", config).await;
+    let s = LamboServer::with_ledger(Arc::clone(plain.memory()), Ledger::open(&path));
+    let ledger = Arc::clone(s.ledger().expect("ledger attached"));
+    const TEXT: &str = "the pagination cursor is opaque to clients";
+    for concept_type in ["observation", "entity"] {
+        call(
+            &s,
+            "lambo_derive",
+            json!({
+                "agent_id": "agent-a",
+                "concepts": [{"content": TEXT, "concept_type": concept_type}],
+            }),
+        )
+        .await;
+    }
+    call(
+        &s,
+        "lambo_derive",
+        json!({
+            "agent_id": "agent-a",
+            "concepts": [{"content": "pagination pages hold fifty rows", "concept_type": "logic"}],
+        }),
+    )
+    .await;
+    let out = call(
+        &s,
+        "lambo_recall",
+        json!({"agent_id": "agent-a", "query": "pagination cursor clients", "top_k": 2}),
+    )
+    .await;
+    let text = out.content[0].as_text().expect("context text").text.clone();
+    let structured = out.structured_content.clone().expect("structured content");
+    let hits = structured["hits"].as_array().expect("hits");
+    assert_eq!(
+        hits.iter().filter(|h| h["content"] == json!(TEXT)).count(),
+        1,
+        "{structured}"
+    );
+    let skipped = hits[0]["skipped_redundant"]
+        .as_array()
+        .expect("on the kept hit");
+    assert_eq!(skipped.len(), 1, "{structured}");
+    assert_eq!(skipped[0]["signal"], json!("same_content"));
+    assert!(hits[1..]
+        .iter()
+        .all(|h| h.get("skipped_redundant").is_none()));
+    let id: crate::types::NodeId =
+        crate::types::NodeId(skipped[0]["node_id"].as_str().unwrap().parse().unwrap());
+    assert!(
+        text.contains(&format!("also {})", crate::recall::format::short_id(id))),
+        "{text}"
+    );
+
+    let lines = read_ledger(&ledger, 4);
+    let recall = lines
+        .iter()
+        .find(|l| l["tool"] == json!("lambo_recall"))
+        .expect("a recall line");
+    assert_eq!(
+        recall["hits"][0]["skipped_redundant"], hits[0]["skipped_redundant"],
+        "{recall}"
+    );
+
+    ledger.shutdown();
+    s.mem.close().await.expect("close");
+}
+
+/// #181: a hit that members were skipped as redundant with carries
+/// `skipped_redundant` on its ledger line (each skipped id and the signal
+/// that found it), and only that hit does.
+#[test]
+fn i1_the_recall_line_names_skipped_redundant_members() {
+    use crate::recall::detail::{DetailedHit, DetailedRecall};
+    use crate::recall::redundancy::{RedundancySignal, RedundantSkip};
+    use crate::types::{ConceptType, NodeId, RecallHit};
+
+    let hit = |n: u64| RecallHit {
+        repo_scope: None,
+        node_id: NodeId(uuid::Uuid::from_u64_pair(2, n)),
+        content: format!("fact {n}"),
+        concept_type: Some(ConceptType::Logic),
+        score: 0.5,
+        is_canonical: false,
+        blast_radius: None,
+    };
+    let skipped = [
+        RedundantSkip {
+            node_id: NodeId(uuid::Uuid::from_u64_pair(2, 8)),
+            signal: RedundancySignal::SameContent,
+        },
+        RedundantSkip {
+            node_id: NodeId(uuid::Uuid::from_u64_pair(2, 9)),
+            signal: RedundancySignal::Cosine,
+        },
+    ];
+    let mut kept = DetailedHit::new(&hit(1), None);
+    kept.skipped_redundant = skipped.to_vec();
+    let mut r = DetailedRecall::warn_only(String::new());
+    r.warnings.clear();
+    r.hits = vec![hit(1), hit(2)];
+    r.detailed = vec![kept, DetailedHit::new(&hit(2), None)];
+    let facts = recall_facts("q", 2, &r);
+    assert_eq!(
+        facts["hits"][0]["skipped_redundant"],
+        json!([
+            {"node_id": skipped[0].node_id.0.to_string(), "signal": "same_content"},
+            {"node_id": skipped[1].node_id.0.to_string(), "signal": "cosine"},
+        ]),
+        "{facts}"
+    );
+    assert!(facts["hits"][1].get("skipped_redundant").is_none());
+}
+
 /// #198: a suspected pair is named on the older hit's ledger line, by
 /// kind when the line is shown and by `possibly_superseded_by` either way,
 /// with a top-level `possibly_superseded` flag. A line with no pair has

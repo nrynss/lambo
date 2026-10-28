@@ -16,6 +16,9 @@
 //! originally pinned fields), `content`, `concept_type`, `status` (absent only
 //! for `None`), `score`, `blast_radius` (when present),
 //! `included_in_context`, `truncated_in_context` (#130, only when true),
+//! `possibly_superseded_by` (#198, only when present),
+//! `skipped_redundant` (#181, only when non-empty: `{node_id, signal}`
+//! pairs, `signal` one of `same_content`, `semantic_edge`, `cosine`),
 //! and `annotations` as zero or more `{kind, text}` pairs;
 //! `response_annotations` carries the response-global explanations.
 //! Producer order is preserved within both arrays.
@@ -164,6 +167,13 @@ pub(crate) struct DetailedHit {
     /// byte-identical to before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) possibly_superseded_by: Option<NodeId>,
+    /// #181: the members skipped as redundant with this hit, in skip
+    /// (recall) order, each with the signal that found it redundant. Its
+    /// label names them (`also <id>`). Additive on the wire: serialized
+    /// only when non-empty, so a recall that skipped nothing is
+    /// byte-identical to before.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) skipped_redundant: Vec<crate::recall::redundancy::RedundantSkip>,
 }
 
 impl DetailedHit {
@@ -184,6 +194,7 @@ impl DetailedHit {
             companion_of: Vec::new(),
             contradicts: Vec::new(),
             possibly_superseded_by: None,
+            skipped_redundant: Vec::new(),
         }
     }
 }

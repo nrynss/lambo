@@ -182,6 +182,9 @@ pub struct Daemon {
     suspected_line: crate::recall::suspected::SuspectedLine,
     /// #173: how phase 1 combines its legs.
     fusion: crate::recall::fusion::RecallFusion,
+    /// #181: the redundancy test assembly applies, `None` when the session
+    /// does not skip redundant members (the default).
+    redundancy: Option<crate::recall::redundancy::Redundancy>,
     clock: Clock,
     started: AtomicBool,
     /// Test seam: the next this-many rescores panic (#79 review L1).
@@ -306,6 +309,7 @@ impl Daemon {
             calibration: crate::embed::calibration::CalibrationMode::default(),
             suspected_line: crate::recall::suspected::SuspectedLine::default(),
             fusion: crate::recall::fusion::RecallFusion::default(),
+            redundancy: None,
             clock: Arc::new(Utc::now),
             started: AtomicBool::new(false),
             #[cfg(test)]
@@ -326,6 +330,13 @@ impl Daemon {
         daemon.calibration = config.calibration;
         daemon.suspected_line = config.suspected_supersession_line;
         daemon.fusion = config.recall_fusion;
+        // #181: the cosine signal compares against the session's effective
+        // merge threshold, which a writer attach has already put in its
+        // config and a reader's config carries from `reader_config`.
+        daemon.redundancy = crate::recall::redundancy::Redundancy::of(
+            &config.recall_selection,
+            config.semantic_match_threshold,
+        );
         daemon
     }
 
@@ -902,6 +913,7 @@ impl Daemon {
             weights,
             self.params.contradiction_evidence_min_age,
             crate::recall::suspected::shows_line(self.suspected_line, graph.embedding()),
+            self.redundancy,
             now,
             assemble::default_token_count,
         );

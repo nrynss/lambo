@@ -243,6 +243,18 @@ list-all returns every memo [Logic] (score 1.38, id 4bf3835a)
 * **Same scope as the contradiction line.** It stays inside its session, a layer hit's line starts with the layer's name in a merged recall, and a dependency question (graph traversal) carries none.
 * Its annotation kind is `rests_on_contradicted`, in the web portal's REST API (`/api/recall`'s `hits[].annotations`) and on the `--ledger` recall line. The line is in `warnings` and the context; `lambo session verify` reports it by that kind.
 
+**Duplicate hits.** When the operator turns on `[selection] skip_redundant` (off by default, see [Configuration](/lambo/config/#redundancy-aware-selection)), recall skips a hit that repeats one it already took, and the next distinct hit takes its slot (#181). A repeat is the same text (spacing and invisible characters aside, case kept, whatever the two concept types); with `[selection] similar_signals = true` (off by default), also two concepts joined by a semantic match, or vectors at or above the session's merge threshold. The hit kept names what it replaced, after its id:
+
+```text
+dogfood store carries no durable embedding for 92 of 100 concepts [Entity] (score 1.38, id 4bf3835a, also 82c3dcb0)
+```
+
+* **Never a repeat:** a pair one of which contradicts the other or is suspected of replacing it (the possibly-superseded pair below), and two texts that differ in an identifier (snake_case, CamelCase, all-caps, a path, version or hash; case counts), a number, a negation, a word against its opposite (`enable` and `disable`), or the order of their shared words.
+* **Never skipped:** a hit kept past `top_k` for a warning, and a hit with a warning line of its own (the copy kept may not carry it).
+* **Bounded.** Only the first `min(20, 4 × top_k)` hits are checked; the label names at most three ids, then `+N more`. Each id is an inspect focus. The `also` items count against `max_tokens`.
+* **Nothing else changes.** With the setting off, or nothing repeated among the hits checked, the result is byte-identical. Scores and the order of the hits kept are unchanged.
+* In `structuredContent`, the hit kept carries `skipped_redundant`: each skipped hit's `node_id` and the `signal` that found it (`same_content`, `semantic_edge` or `cosine`); no other hit has the key. The web portal's `/api/recall` and the `--ledger` recall line carry the same key. In a layered recall each session skips inside its own hits, and the `also` items follow `from <session>`; when a layer's copy merges into a nearer hit, what that layer skipped for it is named after it, `also <id> in <session>`, and carried as `also_skipped_redundant` on the hit in `structuredContent` and on its `--ledger` line: each skipped member's `session` (the one its id resolves in), `node_id` and `signal`. That key is absent when no merged copy skipped anything.
+
 **Possibly superseded, not declared.** A newer fact written without `against` used to leave the older one ranking with no warning. Since #198 a write that is a near vector match of an older concept of the same type (`logic`, `constraint` or `observation`), which the merge refused because their identifiers differ, and whose text differs from it in one value after the predicate, records that it may replace that concept. When both are in the same result, the older hit says so:
 
 ```text

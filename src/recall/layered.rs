@@ -39,6 +39,13 @@
 //!    memory is never lost because its nearer copy ranked low; the other
 //!    copies are named in its meta (`also <id> in <session>`), leave the
 //!    hits and the context, and keep their warning lines in `warnings`.
+//!    This is the only redundancy check across tiers: #181's
+//!    `[selection] skip_redundant` runs inside each session's own
+//!    assembly, where node ids and edges belong, and a hit's meta keeps
+//!    the `also <id>` items of what its session skipped for it. A copy
+//!    merged into a nearer tier's hit brings what its own session skipped
+//!    for it along ([`LayerCopy::skipped_redundant`], named `also <id> in
+//!    <session>` after the copy), so a dedupe never drops those.
 //!    A copy cut by `top_k` before its group was emitted still joins it
 //!    when their canonical keys are equal (by key only: vectors are compared
 //!    against emitted groups alone, which bounds the work).
@@ -166,6 +173,11 @@ pub struct LayerCopy {
     pub session: SessionId,
     /// The dropped copy's node id in that session.
     pub node_id: NodeId,
+    /// #181: the members of that session skipped as redundant with the
+    /// dropped copy (`[selection] skip_redundant`), in skip order; empty
+    /// otherwise. Copies of the same memory in that session, so the hit's
+    /// block names them like the copy (`also <id> in <session>`).
+    pub skipped_redundant: Vec<crate::recall::redundancy::RedundantSkip>,
 }
 
 /// One hit of a layered recall.
@@ -195,6 +207,10 @@ pub struct LayeredHit {
     /// the `suspected_supersession_line` gate says: it is the structured
     /// form of the `Possibly superseded` line.
     pub possibly_superseded_by: Option<NodeId>,
+    /// #181: the members of the hit's own session skipped as redundant with
+    /// it (`[selection] skip_redundant`), in skip order; empty otherwise.
+    /// Its block names them (`also <id>`).
+    pub skipped_redundant: Vec<crate::recall::redundancy::RedundantSkip>,
 }
 
 /// The answer of [`Memory::recall_layered`](crate::Memory::recall_layered):
@@ -247,6 +263,7 @@ impl LayeredRecall {
                 truncated_in_context: d.truncated_in_context,
                 companion_of: d.companion_of.clone(),
                 possibly_superseded_by: d.possibly_superseded_by,
+                skipped_redundant: d.skipped_redundant.clone(),
             })
             .collect();
         Self {
@@ -680,23 +697,35 @@ where
         let also: Vec<LayerCopy> = g
             .also
             .iter()
-            .map(|&(at, ap)| LayerCopy {
-                session: lists[at].session.clone(),
-                node_id: recall_of(at)
-                    .expect("merged from an available tier")
-                    .recall
-                    .hits[ap]
-                    .node_id,
+            .map(|&(at, ap)| {
+                let copy = &recall_of(at).expect("merged from an available tier").recall;
+                LayerCopy {
+                    session: lists[at].session.clone(),
+                    node_id: copy.hits[ap].node_id,
+                    // #181: what the copy's session skipped for it merges
+                    // with it, not lost with the copy.
+                    skipped_redundant: copy.detailed[ap].skipped_redundant.clone(),
+                }
             })
             .collect();
         let mut meta = Vec::new();
         if tier > 0 {
             meta.push(format!("from {}", list.session));
         }
-        meta.extend(
-            also.iter()
-                .map(|a| format!("also {} in {}", format::short_id(a.node_id), a.session)),
-        );
+        // #181: what the hit's own session skipped as redundant with it;
+        // those ids belong to the hit's session, like its own.
+        meta.extend(crate::recall::redundancy::also_meta(&d.skipped_redundant));
+        for a in &also {
+            meta.push(format!(
+                "also {} in {}",
+                format::short_id(a.node_id),
+                a.session
+            ));
+            meta.extend(crate::recall::redundancy::also_in_meta(
+                &a.skipped_redundant,
+                a.session.as_str(),
+            ));
+        }
         let lines: Vec<String> = d.annotations.iter().map(|a| a.text.clone()).collect();
         let scope = (tier > 0).then(|| list.session.to_string());
         blocks.push(block_with_meta(hit, &lines, &meta, scope));
@@ -829,6 +858,7 @@ where
             truncated_in_context: d.truncated_in_context,
             companion_of: d.companion_of.clone(),
             possibly_superseded_by: d.possibly_superseded_by,
+            skipped_redundant: d.skipped_redundant.clone(),
         })
         .collect();
     LayeredRecall {
@@ -852,12 +882,7 @@ pub(crate) fn block_with_meta(
     meta: &[String],
     scope: Option<String>,
 ) -> ContextBlock {
-    let mut block = ContextBlock::for_hit(hit, warnings);
-    if !meta.is_empty() && block.label_end > 0 && block.text[..block.label_end].ends_with(')') {
-        let extra = format!(", {}", meta.join(", "));
-        block.text.insert_str(block.label_end - 1, &extra);
-        block.label_end += extra.len();
-    }
+    let mut block = ContextBlock::for_hit(hit, warnings).with_meta(meta);
     block.scope = scope;
     block
 }

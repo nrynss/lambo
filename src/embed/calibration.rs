@@ -240,6 +240,25 @@ pub fn default_calibrated_merge_threshold() -> bool {
     true
 }
 
+/// The merge threshold a reader of a session under `contract` uses (#181),
+/// in the writer attach's order: `derived`, the labelled-pairs threshold the
+/// store caches for the configured pairs file
+/// ([`super::canary::cached_merge_threshold`]); else the contract's
+/// calibrated one when `enabled` and it has a row; else the configured one.
+/// Like [`merge_threshold`] without its warning, for a path that runs per
+/// recall.
+pub(crate) fn reader_merge_threshold(
+    derived: Option<f64>,
+    enabled: bool,
+    contract: &EmbeddingContract,
+    configured: f64,
+) -> f64 {
+    derived.unwrap_or(match lookup(contract) {
+        Some(row) if enabled => row.merge_threshold,
+        _ => configured,
+    })
+}
+
 /// The built-in merge threshold for a writer attach that did not derive one
 /// from labelled pairs. `Some` when `enabled` (the default) and the contract
 /// has a row; otherwise the configured threshold stays, with a warning when

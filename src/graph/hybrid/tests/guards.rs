@@ -188,6 +188,130 @@ async fn a_write_never_merges_into_what_it_is_against() {
     graph.read().assert_invariants().unwrap();
 }
 
+/// #181 over the merge path: the #179 shape (a newer fact, a close
+/// rewording, declared `against` the stale one) written through hybrid
+/// derive, then recalled with `[selection] skip_redundant`, under both
+/// configurations: the shipped default (identical content only) and
+/// `similar_signals = true` with a cosine threshold every pair clears.
+/// Both facts are emitted, the stale one first, as without the rule. The
+/// pair also differs in an identifier (`llama.cpp`), so the second,
+/// identifier-free pair isolates the declaration: written `against`, the
+/// write path refuses the merge and the `Contradicts` veto stops the cosine
+/// signal, so both stay. Written without `against` it merges (a `Semantic`
+/// edge): `similar_signals = true` skips the rewording, the default keeps
+/// both.
+#[tokio::test]
+async fn a_contradiction_written_through_the_merge_path_is_never_skipped() {
+    use crate::recall::redundancy::{Redundancy, RedundancySignal};
+    const DEFAULT: Redundancy = Redundancy {
+        threshold: -1.0,
+        similar: false,
+    };
+    const SIMILAR: Redundancy = Redundancy {
+        threshold: -1.0,
+        similar: true,
+    };
+    async fn recall(
+        pairs: &[(&str, &str)],
+        declare: bool,
+        config: Redundancy,
+    ) -> Vec<(Vec<NodeId>, Vec<NodeId>, Vec<RedundancySignal>)> {
+        let mut out = Vec::new();
+        for (old_text, new_text) in pairs {
+            // The third fact names a port, so no signal can join it to
+            // either (the identifier guard) at this test's -1 threshold.
+            let (graph, interaction, ids) =
+                seeded(&[old_text, "the metrics exporter listens on port 9100"]).await;
+            let (old, third) = (ids[0], ids[1]);
+            let pinned = if declare {
+                against(new_text, old)
+            } else {
+                PinnedCitations::default()
+            };
+            let derived =
+                derive_one(&graph, interaction, new_text, vec![hit(old, 0.97)], &pinned).await;
+            let new = derived.created[0];
+            let g = graph.read();
+            // #179: the stale fact scores 0.498, the correction 0.412.
+            let phase1 = vec![
+                Scored::new(old, 0.498),
+                Scored::new(new, 0.412),
+                Scored::new(third, 0.1),
+            ];
+            let expanded = crate::recall::expand::expand(&g, phase1.clone(), 0);
+            let result = crate::recall::assemble::assemble_with_legs(
+                &g,
+                &expanded,
+                &phase1,
+                None,
+                &crate::types::ScoreTable {
+                    epoch: 0,
+                    ranked: vec![
+                        Scored::new(old, 0.0),
+                        Scored::new(new, 0.0),
+                        Scored::new(third, 0.0),
+                    ],
+                },
+                &std::collections::HashMap::new(),
+                &crate::types::RecallQuery {
+                    query: "dogfood embedder".into(),
+                    top_k: 2,
+                    max_tokens: 10_000,
+                    traversal_depth: 0,
+                },
+                crate::config::RecallWeights::default(),
+                crate::Config::default().canonization_edge_min_age,
+                true,
+                Some(config),
+                chrono::Utc::now(),
+                crate::recall::assemble::default_token_count,
+            );
+            let skipped = result
+                .detailed
+                .iter()
+                .flat_map(|d| d.skipped_redundant.iter())
+                .collect::<Vec<_>>();
+            out.push((
+                result.hits.iter().map(|h| h.node_id).collect(),
+                vec![old, new, third],
+                skipped.iter().map(|s| s.signal).collect(),
+            ));
+        }
+        out
+    }
+    const OLD: &str = "the dogfood embedder is llama.cpp bge-m3";
+    const NEW: &str = "the dogfood embedder is candle bge-m3";
+    const PLAIN_OLD: &str = "the dogfood embedder runs on the GPU";
+    const PLAIN_NEW: &str = "the dogfood embedder runs on the GPU now";
+    for config in [DEFAULT, SIMILAR] {
+        for (hits, [old, new, _], skipped) in
+            recall(&[(OLD, NEW), (PLAIN_OLD, PLAIN_NEW)], true, config)
+                .await
+                .into_iter()
+                .map(|(h, ids, s)| (h, [ids[0], ids[1], ids[2]], s))
+        {
+            assert_eq!(hits, vec![old, new], "both facts, stale first: {config:?}");
+            assert!(skipped.is_empty(), "{config:?}");
+        }
+    }
+    let undeclared = recall(&[(PLAIN_OLD, PLAIN_NEW)], false, SIMILAR).await;
+    let (hits, ids, skipped) = &undeclared[0];
+    assert_eq!(
+        hits,
+        &vec![ids[0], ids[2]],
+        "similar_signals: the merged rewording is skipped"
+    );
+    assert_eq!(skipped, &vec![RedundancySignal::SemanticEdge]);
+    let undeclared = recall(&[(PLAIN_OLD, PLAIN_NEW)], false, DEFAULT).await;
+    let (hits, ids, skipped) = &undeclared[0];
+    assert_eq!(
+        hits,
+        &vec![ids[0], ids[1]],
+        "the default: a Semantic edge alone is not redundancy"
+    );
+    assert!(skipped.is_empty());
+}
+
 /// A hit vetoed for being `against` does not stop a merge into another,
 /// unguarded hit at or above the threshold.
 #[tokio::test]
