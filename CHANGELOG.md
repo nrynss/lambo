@@ -46,6 +46,13 @@
   `possibly_superseded`, both only when set (`v` stays 1); `lambo session
   verify` reports the kind. A derive receipt adds `; N possible
   undeclared supersession(s) flagged` only when a write flagged one.
+  MCP `lambo_recall`'s `structuredContent.hits[]` gains
+  `possibly_superseded_by` on the older hit, only when set and whatever
+  the line gate says, so an agent under an unvalidated embedder still
+  sees the pair. The published tool list changes: the `lambo_recall`
+  description names the possibly-superseded line and field, and
+  `lambo_derive`'s `against` and `depends_on` say that naming the other
+  concept of a marked pair settles it.
 - **Behaviour change: a memory that cites a contradicted concept is
   warned (#207).** #179 warns on a concept that a newer concept
   contradicts, but not on a memory that only cites it through

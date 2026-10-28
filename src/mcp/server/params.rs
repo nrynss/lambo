@@ -156,7 +156,9 @@ pub struct WireConcept {
     /// concept; one that does not, or that names this concept itself,
     /// refuses the whole call before the ack and writes nothing. Recorded as
     /// this concept depending on each, which makes the cited concept
-    /// load-bearing. At most 32 across the call.
+    /// load-bearing. Citing the other concept of a pair recall marks
+    /// possibly superseded settles it: the mark is removed. At most 32
+    /// across the call.
     #[schemars(length(max = 8))]
     pub depends_on: Option<Vec<WireReference>>,
     /// Optional: up to 8 existing concepts this one contradicts, such as an
@@ -172,7 +174,8 @@ pub struct WireConcept {
     /// dependent and changes no score or promotion, and raises no conflict;
     /// it does count as a fresh write to the contradicted concept. Recall
     /// then warns on the contradicted concept and shows this one beside it.
-    /// At most 32 across the call.
+    /// Naming the other concept of a pair recall marks possibly superseded
+    /// settles it: the mark is removed. At most 32 across the call.
     #[schemars(length(max = 8))]
     pub against: Option<Vec<WireReference>>,
 }
