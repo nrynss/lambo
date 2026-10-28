@@ -11,7 +11,9 @@
   lists, for each concept it created, the existing concepts it most likely
   replaces: its vector hits at or above the write's merge threshold (0.85
   under BGE-M3, 0.93 under EmbeddingGemma 2 by #87), of the same session,
-  type (`Logic`, `Constraint` or `Observation`) and repository scope, with
+  type (`Logic`, `Constraint` or `Observation`) and recorded repository
+  scope (a condition that filters only once a scope is recorded on these
+  types; today it never excludes), with
   no `against`/`depends_on` between the two, never one the same call
   wrote, closest first, at most 3 per concept. The concept the write
   merged with is listed, marked `"merged": true` (every member of a tied
@@ -55,7 +57,9 @@
   when a vector hit at or above the merge threshold (the calibrated one
   where #87 applies) was refused by the identifier guard, both concepts
   are the same `Logic`, `Constraint` or `Observation` type with the same
-  repository scope and no `against`/`depends_on` between them, and the
+  recorded repository scope (which filters only once a scope is recorded
+  on these types; today it never excludes) and no `against`/`depends_on`
+  between them, and the
   texts differ in exactly one token span that starts after the first
   predicate cue in both ("one span and value slot", owner decision; the
   cue list is `graph::suspected::PREDICATE_CUES`, hand-written English).

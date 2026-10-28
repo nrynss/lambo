@@ -26,7 +26,10 @@
 //!   dimensions, else a #176 derivation or the configured threshold);
 //! * it is a concept of the same session, of the same type, and that type
 //!   is `Logic`, `Constraint` or `Observation` ([`super::eligible_type`]);
-//! * it has the same repository scope ([`super::repo_scope`]);
+//! * it has the same recorded repository scope ([`super::repo_scope`]).
+//!   This filters only once a scope is recorded on these types: today
+//!   `repo_scope` is `None` for every `Logic`, `Constraint` and
+//!   `Observation` concept, so it never excludes a candidate;
 //! * no `against` or `depends_on` already joins the two, either way
 //!   ([`super::settled`]);
 //! * it is not a concept the same call wrote or re-derived (the writer just
