@@ -7,9 +7,23 @@ use crate::mcp::server::params::{SaintsParams, StaleParams};
 use crate::mcp::server::trace::note_facts;
 use crate::mcp::server::LamboServer;
 
-use super::scope::{with_scope, with_session};
+use super::scope::{with_scope, with_session, Target};
 
 impl LamboServer {
+    /// Recheck after taking the graph lock and after scanning: a live layer
+    /// handle does not prevent close, erase, or lease fencing during the call.
+    fn stale_unavailable(&self, target: &Target) -> Option<CallToolResult> {
+        if let Some(refusal) = self.stopped_serving("lambo_stale", target) {
+            return Some(refusal);
+        }
+        target.mem(&self.mem).ensure_open().err().map(|e| {
+            // A layer may have stopped between the two checks; preserve the
+            // layer-specific refusal when possible.
+            self.stopped_serving("lambo_stale", target)
+                .unwrap_or_else(|| crate::mcp::server::response::tool_err("lambo_stale", e))
+        })
+    }
+
     pub(in crate::mcp::server) async fn stale_impl(&self, p: StaleParams) -> CallToolResult {
         if let Err(e) = self.check_agent_id(&p.agent_id) {
             return e;
@@ -21,8 +35,14 @@ impl LamboServer {
             Ok(t) => t,
             Err(e) => return e,
         };
+        if let Some(refusal) = self.stale_unavailable(&target) {
+            return refusal;
+        }
         let mem = target.mem(&self.mem);
         let graph = mem.graph().read();
+        if let Some(refusal) = self.stale_unavailable(&target) {
+            return refusal;
+        }
         let report = crate::daemon::contradiction::stale_report_page(
             &graph,
             graph.concepts().map(|c| c.id),
@@ -30,6 +50,9 @@ impl LamboServer {
             mem.now(),
             p.offset.unwrap_or(0) as usize,
         );
+        if let Some(refusal) = self.stale_unavailable(&target) {
+            return refusal;
+        }
         let text = format!(
             "{} stale direct dependenc(ies), showing {} from offset {}",
             report.total,
@@ -45,6 +68,9 @@ impl LamboServer {
             json!({"summary": text, "stale_report": report, "offset": p.offset.unwrap_or(0), "warnings": []}),
             &target,
         ));
+        if let Some(refusal) = self.stale_unavailable(&target) {
+            return refusal;
+        }
         out
     }
     pub(in crate::mcp::server) async fn saints_impl(&self, p: SaintsParams) -> CallToolResult {

@@ -656,3 +656,125 @@ async fn stale_replay_report_is_structured_on_piggyback_and_lookup() {
     assert!(payload["receipt"].get("stale_report").is_none());
     s3.mem.close().await.unwrap();
 }
+
+/// A registry can return a retained handle just as its layer stops serving.
+/// No stale rows may escape through that handle, even though its graph remains.
+#[tokio::test]
+async fn stale_refuses_stopped_layer_handles_and_closed_or_erased_own_sessions() {
+    for state in ["closed", "lease_lost", "erased"] {
+        let own = server(&format!("stale-owner-{state}")).await;
+        let layer = server(&format!("stale-layer-{state}")).await;
+        let target = belief(&layer).await;
+        let dependent = "private stale dependent";
+        derive_created(
+            &layer,
+            "agent-b",
+            json!([{
+                "content": dependent, "concept_type": "logic", "depends_on": [target.0.to_string()]
+            }]),
+        )
+        .await;
+        call(&layer, "lambo_derive", json!({"agent_id":"agent-c", "concepts":[{
+            "content":"contradicting fact", "concept_type":"logic", "against":[target.0.to_string()]
+        }]})).await;
+        let (layered, _source) = super::layered::layered(&own, &layer);
+        let args = json!({"agent_id":"reader", "scope":layer.mem.session().as_str()});
+        let before = call_raw(&layered, "lambo_stale", args.clone()).await;
+        assert_eq!(before.is_error, Some(false), "{before:?}");
+        assert_eq!(
+            before.structured_content.as_ref().unwrap()["stale_report"]["total"],
+            1
+        );
+        match state {
+            "closed" => layer.mem.close().await.unwrap(),
+            "lease_lost" => layer.mem.simulate_lease_loss(),
+            "erased" => layer.mem.fence_for_erase(),
+            _ => unreachable!(),
+        }
+        let after = call_raw(&layered, "lambo_stale", args).await;
+        assert_eq!(after.is_error, Some(true), "{state}: {after:?}");
+        assert!(!text_of(&after).contains(dependent), "{state}: {after:?}");
+        assert!(after
+            .structured_content
+            .as_ref()
+            .is_none_or(|p| p.get("stale_report").is_none()));
+        if state != "lease_lost" {
+            // The direct own-session path must also refuse a retained graph.
+            let direct = call_raw(&layer, "lambo_stale", json!({"agent_id":"reader"})).await;
+            assert_eq!(direct.is_error, Some(true), "{state}: {direct:?}");
+            assert!(!text_of(&direct).contains(dependent));
+        }
+        own.mem.close().await.unwrap();
+        let _ = layer.mem.close().await;
+    }
+}
+
+/// Stop the layer from its clock during the scan, after the initial check
+/// and while the graph guard is held. The completed report must be discarded.
+#[tokio::test]
+async fn stale_discards_a_report_when_layer_stops_during_scan() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    for state in ["closed", "lease_lost", "erased"] {
+        let armed = Arc::new(AtomicBool::new(false));
+        let handle = Arc::new(parking_lot::Mutex::new(std::sync::Weak::<Memory>::new()));
+        let clock: crate::daemon::Clock = {
+            let armed = armed.clone();
+            let handle = handle.clone();
+            Arc::new(move || {
+                if armed.swap(false, Ordering::SeqCst) {
+                    let layer = handle.lock().upgrade().expect("layer retained");
+                    match state {
+                        "closed" => layer.latch_closed_for_test(),
+                        "lease_lost" => layer.simulate_lease_loss(),
+                        "erased" => layer.fence_for_erase(),
+                        _ => unreachable!(),
+                    }
+                }
+                Utc::now()
+            })
+        };
+        let mem = Memory::builder()
+            .session("stale-scan-fence")
+            .agent("agent-a")
+            .store(Arc::new(MemoryStore::new()) as Arc<dyn GraphStore>)
+            .embedder(Arc::new(FixtureEmbedder::new()) as Arc<dyn Embedder>)
+            .embedding_contract(fixture_contract())
+            .clock(clock)
+            .build()
+            .await
+            .unwrap();
+        let layer = LamboServer::new(Arc::new(mem));
+        *handle.lock() = Arc::downgrade(layer.memory());
+        let target = belief(&layer).await;
+        let dependent = "private in-flight dependent";
+        derive_created(
+            &layer,
+            "agent-b",
+            json!([{
+                "content": dependent, "concept_type":"logic", "depends_on":[target.0.to_string()]
+            }]),
+        )
+        .await;
+        call(&layer, "lambo_derive", json!({"agent_id":"agent-c", "concepts":[{
+        "content":"in-flight contradiction", "concept_type":"logic", "against":[target.0.to_string()]
+    }]})).await;
+        let own = server("stale-scan-owner").await;
+        let (layered, _source) = super::layered::layered(&own, &layer);
+        let args = json!({"agent_id":"reader", "scope":"stale-scan-fence"});
+        let before = call_raw(&layered, "lambo_stale", args.clone()).await;
+        assert_eq!(
+            before.structured_content.as_ref().unwrap()["stale_report"]["total"],
+            1
+        );
+        armed.store(true, Ordering::SeqCst);
+        let after = call_raw(&layered, "lambo_stale", args).await;
+        assert_eq!(after.is_error, Some(true), "{after:?}");
+        assert!(!text_of(&after).contains(dependent));
+        assert!(after
+            .structured_content
+            .as_ref()
+            .is_none_or(|p| p.get("stale_report").is_none()));
+        own.mem.close().await.unwrap();
+        let _ = layer.mem.close().await;
+    }
+}
