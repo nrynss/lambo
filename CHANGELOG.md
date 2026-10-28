@@ -4,6 +4,35 @@
 
 ### Changed
 
+- **Contract change: a derive's settled outcome lists replacement
+  candidates (#198 part c).** Real replacements are mostly reworded, so
+  the one-span trigger rarely flags them, and the writer usually knows
+  what it replaced without saying so in `against`. A hybrid derive now
+  lists, for each concept it created, the existing concepts it most likely
+  replaces: its vector hits at or above the write's merge threshold (0.85
+  under BGE-M3, 0.93 under EmbeddingGemma 2 by #87), of the same session,
+  type (`Logic`, `Constraint` or `Observation`) and repository scope, with
+  no `against`/`depends_on` between the two, never the concept it merged
+  into or one the same call wrote, closest first, at most 3 per concept.
+  Lambo records nothing for them: no edge, score, merge, canonization or
+  recall change. Wire additions, each present only when a write listed a
+  candidate, so every other response is byte-identical: `lambo_stats`'s
+  `receipt` and the piggybacked `structuredContent.write_receipts[]` gain
+  `replacement_candidates` (`{"candidates": [{"id", "node_id", "excerpt",
+  "cosine", "new_id"}], "total"}`, rows bounded at 2048 bytes); the
+  receipt text and `lambo derive`'s output gain `; N replacement
+  candidate(s): …` and one line per candidate; the `--ledger` completion
+  line gains `replacement_candidates` and `replacement_cosines`. The
+  published tool list changes: `lambo_derive`'s description says what the
+  list means and to cite a candidate in `against` only if it really is
+  replaced. Library: `DeriveOutcome::replacement_candidates`,
+  `AppliedSummary::replacement`, and `ReceiptAnswer::AppliedAfterRestart`
+  gains a third field. Measured (`evidence/issue-198c-candidates/`): on the
+  #211 pairs the floor lists 37/43 dev and 25/27 held-out supersessions
+  (the misses are reworded pairs below 0.85); on a private copy of the
+  dogfood store the list is non-empty for 2.8% of writes and never longer
+  than 3, and the 4 labelled real supersessions (cosine 0.857 to 0.899)
+  each rank first on the later write.
 - **Behaviour change: an undeclared supersession is suspected and named
   (#198).** Only contradictions declared with `against` were seen, so an
   agent that wrote "the embedder listens on port 8081" without citing
