@@ -1,0 +1,10 @@
+in-regime pairs (same eligible type, not under review): 147
+floor | dev supersedes | dev distinct | held-out supersedes | held-out distinct
+0.75 | 39/43 | 44/47 | 26/27 | 29/30
+0.78 | 39/43 | 43/47 | 25/27 | 27/30
+0.80 | 39/43 | 42/47 | 25/27 | 26/30
+0.82 | 39/43 | 39/47 | 25/27 | 26/30
+0.85 (shipped) | 37/43 | 34/47 | 25/27 | 23/30
+0.86 | 36/43 | 33/47 | 25/27 | 20/30
+0.88 | 35/43 | 31/47 | 25/27 | 20/30
+supersedes not listed at the shipped floor: ["p-emb-01-rbd1", "p-emb-03-rbd1", "p-cal-03-rbd1", "p-top-01-rbd1", "p-srv-04-rbd1", "p-rel-04-rbd1", "p-fnd-05-rbd1", "p-198-s16"]
