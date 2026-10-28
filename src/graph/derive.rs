@@ -339,6 +339,12 @@ pub struct DeriveOutcome {
     /// identifier-refused hit that the trigger judged a possible undeclared
     /// replacement ([`crate::graph::suspected`]).
     pub suspected: usize,
+    /// Replacement candidates (#198 part c, hybrid only): for each concept
+    /// this call created, the existing concepts it most likely replaces
+    /// ([`crate::graph::suspected::replacement`]), ranked by cosine and
+    /// capped per concept. Informational only: nothing is recorded for
+    /// them. Empty for a sync derive, which has no vectors.
+    pub replacement_candidates: Vec<crate::graph::suspected::replacement::ReplacementCandidate>,
 }
 
 /// What the hybrid merge guards refused in one call (#193), per guard:

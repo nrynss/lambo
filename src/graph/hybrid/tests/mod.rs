@@ -24,6 +24,7 @@ mod embedding;
 mod guards;
 mod merging;
 mod planning;
+mod replacement;
 mod supplied;
 mod suspected;
 

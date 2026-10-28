@@ -1191,8 +1191,14 @@ async fn derive_planned(
         // #198: per item, the hits the identifier guard refused at or above
         // the threshold, for the suspected-supersession trigger at commit.
         let mut refused_by_identifiers: Vec<Vec<NodeId>> = Vec::with_capacity(items.len());
+        // #198 part c: per item, its text vector hits at or above the
+        // candidate floor (the merge threshold), before the merge guards
+        // drop any, for the replacement candidates at commit.
+        let mut near_by_item: Vec<Vec<crate::types::Scored<NodeId>>> =
+            Vec::with_capacity(items.len());
         for (content, concept_type, key, matched) in &items {
             let mut refused_here: Vec<NodeId> = Vec::new();
+            let mut near_here: Vec<crate::types::Scored<NodeId>> = Vec::new();
             let res = match matched {
                 Some(node) => Resolution::CanonicalMatch { node: *node },
                 // #22: the image item takes its supplied vector. No embed, no
@@ -1264,6 +1270,18 @@ async fn derive_planned(
                             // concept (design section 4.4); #129: nor into a
                             // repository-scoped path Resource.
                             hits.retain(|hit| !image_nodes.contains(&hit.item));
+                            // #198 part c: the replacement candidates read
+                            // the same hits, guarded or not (a hit the
+                            // identifier guard refuses is the likeliest
+                            // replaced fact). Judged at commit.
+                            near_here.extend(
+                                hits.iter()
+                                    .filter(|hit| {
+                                        hit.score.is_finite()
+                                            && hit.score >= semantic_match_threshold
+                                    })
+                                    .cloned(),
+                            );
                             // #193: never into a concept that names other
                             // identifiers, nor into one this content is
                             // declared `against`. A brief read: the hits'
@@ -1344,6 +1362,7 @@ async fn derive_planned(
             };
             resolutions.push(res);
             refused_by_identifiers.push(refused_here);
+            near_by_item.push(near_here);
         }
 
         // Issue #16 §2: embed the `parent_of` ends this call will create, under
@@ -1522,11 +1541,15 @@ async fn derive_planned(
             // #198: the concepts this call created, with the hits the
             // identifier guard refused for them, judged after step 7.
             let mut suspects: Vec<(NodeId, &[NodeId])> = Vec::new();
+            // #198 part c: the concepts this call created, with their
+            // vector hits at or above the floor, judged after step 8.
+            let mut replacing: Vec<(NodeId, &[crate::types::Scored<NodeId>])> = Vec::new();
 
-            for (((content, concept_type, _key, _matched), res), refused) in items
+            for ((((content, concept_type, _key, _matched), res), refused), near) in items
                 .iter()
                 .zip(resolutions.iter())
                 .zip(refused_by_identifiers.iter())
+                .zip(near_by_item.iter())
             {
                 // MAJOR-1 (P7 remediation): re-canonicalize `content` against the graph
                 // AS WRITTEN THIS CALL. Phase-1 canonicalization ran under the read
@@ -1618,6 +1641,9 @@ async fn derive_planned(
                         this_node = id;
                         if !refused.is_empty() {
                             suspects.push((id, refused));
+                        }
+                        if !near.is_empty() {
+                            replacing.push((id, near));
                         }
                     }
                     Resolution::HybridMerge {
@@ -1716,6 +1742,9 @@ async fn derive_planned(
                         this_node = id;
                         if !refused.is_empty() {
                             suspects.push((id, refused));
+                        }
+                        if !near.is_empty() {
+                            replacing.push((id, near));
                         }
                     }
                 }
@@ -1868,6 +1897,27 @@ async fn derive_planned(
                         event_time: interaction_event_time,
                     },
                 )?;
+            }
+
+            // Step 9 (#198 part c) — replacement candidates: for each
+            // concept this call created, the hits at or above the floor
+            // that may be what it replaces, judged on the graph as
+            // committed (so a relation this call declared, or the concept
+            // it merged into, is excluded). A concept this call wrote or
+            // re-derived is never one: the writer just restated it.
+            // Informational only: it reads the graph and writes nothing.
+            for (new, near) in replacing {
+                let mut skip = call_nodes.clone();
+                skip.extend(cited.merged_into.get(&new).copied());
+                outcome.replacement_candidates.extend(
+                    crate::graph::suspected::replacement::select(
+                        g,
+                        new,
+                        near,
+                        semantic_match_threshold,
+                        &skip,
+                    ),
+                );
             }
 
             Ok(outcome)
