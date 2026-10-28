@@ -66,6 +66,7 @@
 //! explicit `against` or `depends_on` between the two is written
 //! ([`settle`], called by `crate::graph::cite::write_edges`).
 
+pub mod replacement;
 pub mod slot;
 
 use chrono::{DateTime, Utc};

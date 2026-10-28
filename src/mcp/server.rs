@@ -300,7 +300,12 @@ impl LamboServer {
                        refused. When a concept says an existing one is wrong, name that one \
                        the same way in the concept's against: it records the contradiction, \
                        dated by this write's event_time (else now), and adds no dependent, \
-                       score or promotion. \
+                       score or promotion. A settled outcome may list replacement_candidates: \
+                       existing concepts of the same type, very close to a new one, that it \
+                       may replace. Nothing is recorded for them; cite one in against on a \
+                       later call only if the new concept really replaces it. A candidate marked \
+                       newer is dated after the new concept: it may replace the new one, so \
+                       never cite it in against. \
                        created_at is stamped server-side. event_time is optional RFC3339 \
                        historical about-time, such as a commit or document date; omit it for \
                        a live fact, which is about now. Returns as soon \

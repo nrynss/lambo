@@ -39,6 +39,7 @@ mod recall_image;
 #[path = "fixtures/recall_v0_5_0.rs"]
 mod recall_v0_5_0;
 mod receipts;
+mod replacement;
 mod schemas;
 mod scoped_writes;
 mod stats;

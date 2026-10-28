@@ -470,6 +470,10 @@ impl WriteCtx {
                     edges: None,
                     embedded,
                     stale_report: report_slot.lock().take(),
+                    replacement:
+                        crate::graph::suspected::replacement::ReplacementReport::for_receipt(
+                            &outcome.replacement_candidates,
+                        ),
                 })
             }
             JobPayload::Action {
@@ -570,6 +574,7 @@ impl WriteCtx {
                         MatchStrategy::Canonical => None,
                     },
                     stale_report,
+                    replacement: None,
                 })
             }
         }

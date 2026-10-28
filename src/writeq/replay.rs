@@ -171,7 +171,7 @@ impl WritePipeline {
                         let answer = if o.tag == "failed" {
                             ReceiptAnswer::Failed(summary)
                         } else {
-                            ReceiptAnswer::AppliedAfterRestart(summary, None)
+                            ReceiptAnswer::AppliedAfterRestart(summary, None, None)
                         };
                         (
                             answer,
@@ -313,7 +313,11 @@ impl WritePipeline {
                                 Some(serde_json::Value::Object(summary.ledger_facts())),
                             ));
                         }
-                        ReceiptAnswer::AppliedAfterRestart(summary.summary, summary.stale_report)
+                        ReceiptAnswer::AppliedAfterRestart(
+                            summary.summary,
+                            summary.stale_report,
+                            summary.replacement,
+                        )
                     }
                     // #125 (Sonnet review): a vector-candidate lookup that
                     // did not answer within its own budget. The embedder answered before it, so
@@ -564,8 +568,8 @@ impl WritePipeline {
                 // Durable rows carry only the summary. The bounded live entry
                 // carries the replay report and participates in normal eviction.
                 let durable_answer = match &answer {
-                    ReceiptAnswer::AppliedAfterRestart(summary, _) => {
-                        ReceiptAnswer::AppliedAfterRestart(summary.clone(), None)
+                    ReceiptAnswer::AppliedAfterRestart(summary, ..) => {
+                        ReceiptAnswer::AppliedAfterRestart(summary.clone(), None, None)
                     }
                     other => other.clone(),
                 };

@@ -695,6 +695,7 @@ async fn one_agent_cannot_hold_every_receipt_wait_slot() {
 fn ledger_facts_carry_the_metric_two_set_with_absent_keys_kept_absent() {
     let derive = AppliedSummary {
         stale_report: None,
+        replacement: None,
         kind: WriteKind::Derive,
         summary: "a sentence that must not reach the ledger".into(),
         created: vec!["id-1".into()],
@@ -715,6 +716,7 @@ fn ledger_facts_carry_the_metric_two_set_with_absent_keys_kept_absent() {
     );
     let action = AppliedSummary {
         stale_report: None,
+        replacement: None,
         kind: WriteKind::RecordAction,
         semantic_merged: None,
         reinforced: None,
@@ -731,6 +733,61 @@ fn ledger_facts_carry_the_metric_two_set_with_absent_keys_kept_absent() {
     );
 }
 
+/// #198 part c: a derive that listed replacement candidates adds their
+/// count and rounded cosines to its completion line; one that listed none
+/// adds no key (the line above pins that).
+#[test]
+fn ledger_facts_carry_replacement_candidates_only_when_listed() {
+    use crate::graph::suspected::replacement::{ReplacementCandidate, ReplacementReport};
+    let candidate = |cosine| ReplacementCandidate {
+        new: crate::types::NodeId::new(),
+        id: crate::types::NodeId::new(),
+        excerpt: "concept text that must not reach the ledger".into(),
+        cosine,
+        newer: false,
+        merged: false,
+    };
+    let derive = AppliedSummary {
+        stale_report: None,
+        replacement: ReplacementReport::for_receipt(&[candidate(0.91234), candidate(0.85)]),
+        kind: WriteKind::Derive,
+        summary: "s".into(),
+        created: Vec::new(),
+        matched: Vec::new(),
+        created_count: 1,
+        matched_count: 0,
+        semantic_merged: Some(0),
+        reinforced: Some(0),
+        edges: None,
+        embedded: Some(1),
+    };
+    let facts = serde_json::Value::Object(derive.ledger_facts());
+    assert_eq!(
+        facts,
+        serde_json::json!({
+            "created_count": 1, "matched_count": 0, "semantic_merged": 0,
+            "reinforced": 0, "embedded": 1,
+            "replacement_candidates": 2, "replacement_cosines": [0.9123, 0.85],
+        })
+    );
+    assert!(!facts.to_string().contains("concept text"));
+
+    // A row dated after the write adds the aligned `replacement_newer`
+    // flags; an unmarked report (above) has no such key.
+    let mut later = candidate(0.85);
+    later.newer = true;
+    let marked = AppliedSummary {
+        replacement: ReplacementReport::for_receipt(&[candidate(0.91234), later]),
+        ..derive
+    };
+    let facts = serde_json::Value::Object(marked.ledger_facts());
+    assert_eq!(facts["replacement_newer"], serde_json::json!([false, true]));
+    assert_eq!(
+        facts["replacement_cosines"],
+        serde_json::json!([0.9123, 0.85])
+    );
+}
+
 #[tokio::test]
 async fn legacy_restart_receipts_without_a_destination_fail_closed_for_every_session() {
     let rig = Rig::fixture("wq-legacy-destination");
@@ -741,7 +798,7 @@ async fn legacy_restart_receipts_without_a_destination_fail_closed_for_every_ses
         (
             agent.clone(),
             None,
-            ReceiptAnswer::AppliedAfterRestart("legacy summary".into(), None),
+            ReceiptAnswer::AppliedAfterRestart("legacy summary".into(), None, None),
         ),
     );
     assert_eq!(rig.pipeline.lookup_for(&agent, None, id).tag(), "forbidden");

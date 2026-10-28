@@ -4,6 +4,50 @@
 
 ### Changed
 
+- **Contract change: a derive's settled outcome lists replacement
+  candidates (#198 part c).** Real replacements are mostly reworded, so
+  the one-span trigger rarely flags them, and the writer usually knows
+  what it replaced without saying so in `against`. A hybrid derive now
+  lists, for each concept it created, the existing concepts it most likely
+  replaces: its vector hits at or above the write's merge threshold (0.85
+  under BGE-M3, 0.93 under EmbeddingGemma 2 by #87), of the same session,
+  type (`Logic`, `Constraint` or `Observation`) and recorded repository
+  scope (a condition that filters only once a scope is recorded on these
+  types; today it never excludes), with
+  no `against`/`depends_on` between the two, never one the same call
+  wrote, closest first, at most 3 per concept. The concept the write
+  merged with is listed, marked `"merged": true` (every member of a tied
+  merge tier; a text line saying it was merged with and may be replaced;
+  `replacement_merged` flags on the ledger line): a similarity merge
+  declares no replacement, and a reworded reversal with no conflicting
+  identifiers merges. A merge refused because the store returned a
+  non-concept candidate lists nothing.
+  Lambo records nothing for them: no edge, score, merge, canonization or
+  recall change. Wire additions, each present only when a write listed a
+  candidate, so every other response is byte-identical: `lambo_stats`'s
+  `receipt` and the piggybacked `structuredContent.write_receipts[]` gain
+  `replacement_candidates` (`{"candidates": [{"id", "node_id", "excerpt",
+  "cosine", "new_id"}], "total"}`, rows bounded at 2048 bytes of serialized JSON); the
+  receipt text and `lambo derive`'s output gain `; N replacement
+  candidate(s): …` and one line per candidate; the `--ledger` completion
+  line gains `replacement_candidates` and `replacement_cosines`. A
+  candidate dated after the new concept (a backfilled `event_time`, or an
+  older decision recorded after its replacement), by the clamped
+  about-time the trigger orders a pair by, is still listed but marked: a
+  `"newer": true` field (absent otherwise), a text line saying it may
+  replace this write and is not one to cite, and a `replacement_newer`
+  flag list on the ledger line when any row is marked; a tie is not
+  marked. The
+  published tool list changes: `lambo_derive`'s description says what the
+  list means, to cite a candidate in `against` only if it really is
+  replaced, and never to cite one marked newer. Library: `DeriveOutcome::replacement_candidates`,
+  `AppliedSummary::replacement`, and `ReceiptAnswer::AppliedAfterRestart`
+  gains a third field. Measured (`evidence/issue-198c-candidates/`): on the
+  #211 pairs the floor lists 37/43 dev and 25/27 held-out supersessions
+  (the misses are reworded pairs below 0.85); on a private copy of the
+  dogfood store the list is non-empty for 2.8% of writes and never longer
+  than 3, and the 4 labelled real supersessions (cosine 0.857 to 0.899)
+  each rank first on the later write.
 - **Behaviour change: an undeclared supersession is suspected and named
   (#198).** Only contradictions declared with `against` were seen, so an
   agent that wrote "the embedder listens on port 8081" without citing
@@ -13,7 +57,9 @@
   when a vector hit at or above the merge threshold (the calibrated one
   where #87 applies) was refused by the identifier guard, both concepts
   are the same `Logic`, `Constraint` or `Observation` type with the same
-  repository scope and no `against`/`depends_on` between them, and the
+  recorded repository scope (which filters only once a scope is recorded
+  on these types; today it never excludes) and no `against`/`depends_on`
+  between them, and the
   texts differ in exactly one token span that starts after the first
   predicate cue in both ("one span and value slot", owner decision; the
   cue list is `graph::suspected::PREDICATE_CUES`, hand-written English).
