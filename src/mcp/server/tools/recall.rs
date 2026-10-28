@@ -334,6 +334,12 @@ impl LamboServer {
                             crate::recall::redundancy::skips_json(&lh.skipped_redundant),
                         );
                     }
+                    // #181: additive, on a layered hit whose merged copies
+                    // had members skipped as redundant with them; each id
+                    // resolves in the session it names.
+                    if let Some(skips) = crate::recall::redundancy::copy_skips_json(&lh.also) {
+                        map.insert("also_skipped_redundant".into(), skips);
+                    }
                 }
                 hit
             })

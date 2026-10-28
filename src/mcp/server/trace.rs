@@ -198,13 +198,26 @@ pub(super) fn layered_recall_facts(
     recalled: &crate::memory::LayeredRecall,
 ) -> serde_json::Value {
     let sessions: Vec<&str> = recalled.hits.iter().map(|h| h.session.as_str()).collect();
-    recall_facts_with(
+    let mut facts = recall_facts_with(
         query,
         top_k,
         &recalled.detail,
         |i, _| recalled.hit_legs.get(i).copied().flatten(),
         Some(&sessions),
-    )
+    );
+    // #181: additive, on a line whose hit's merged copies had members
+    // skipped as redundant with them (session-qualified).
+    if let Some(lines) = facts.get_mut("hits").and_then(|h| h.as_array_mut()) {
+        for (line, hit) in lines.iter_mut().zip(&recalled.hits) {
+            if let (Some(skips), Some(map)) = (
+                crate::recall::redundancy::copy_skips_json(&hit.also),
+                line.as_object_mut(),
+            ) {
+                map.insert("also_skipped_redundant".into(), skips);
+            }
+        }
+    }
+    facts
 }
 
 /// The recall line's facts, with each hit's legs from `legs_of(position,

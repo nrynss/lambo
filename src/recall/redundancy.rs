@@ -561,6 +561,29 @@ pub(crate) fn skips_json(skipped: &[RedundantSkip]) -> serde_json::Value {
     )
 }
 
+/// What a layered hit's merged copies skipped, as the wire and ledger carry
+/// it: `[{"session": "<id>", "node_id": "<uuid>", "signal": "same_content"},
+/// …]`, copy by copy in merge order, each copy's skips in skip order. The
+/// ids resolve in the named session only. `None` when no copy skipped
+/// anything, so the key is absent.
+pub(crate) fn copy_skips_json(
+    also: &[crate::recall::layered::LayerCopy],
+) -> Option<serde_json::Value> {
+    let rows: Vec<serde_json::Value> = also
+        .iter()
+        .flat_map(|copy| {
+            copy.skipped_redundant.iter().map(|s| {
+                serde_json::json!({
+                    "session": copy.session.as_str(),
+                    "node_id": s.node_id.0.to_string(),
+                    "signal": s.signal.as_str(),
+                })
+            })
+        })
+        .collect();
+    (!rows.is_empty()).then_some(serde_json::Value::Array(rows))
+}
+
 #[cfg(test)]
 mod assembly_tests;
 #[cfg(test)]

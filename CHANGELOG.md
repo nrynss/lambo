@@ -303,7 +303,9 @@
   (`same_content`, `semantic_edge`, `cosine`), are `skipped_redundant` on
   the hit in `lambo_recall`'s `structuredContent`, the web portal's
   `/api/recall` and the `--ledger` recall line, present only on a hit that
-  skipped something. **Off by default; off, or with nothing redundant in
+  skipped something; in a layered recall, what a merged layer copy skipped
+  is `also_skipped_redundant` on the hit (`session`, `node_id`, `signal`),
+  present only when a copy skipped something. **Off by default; off, or with nothing redundant in
   the window, recall is byte-identical** (goldens included). A layered
   merge applies each session's setting inside that session's recall and
   keeps the `also` items after `from <session>`; across tiers the #33

@@ -1196,6 +1196,17 @@ fn a_merged_copy_keeps_its_sessions_redundancy_skips() {
         )),
         "{block}"
     );
+    // The MCP hit and the ledger line carry them too, session-qualified,
+    // so a `+N more` label never hides which members were skipped.
+    assert_eq!(
+        crate::recall::redundancy::copy_skips_json(&r.hits[0].also),
+        Some(serde_json::json!([{
+            "session": "general",
+            "node_id": skipped.node_id.0.to_string(),
+            "signal": "same_content",
+        }]))
+    );
+    assert!(crate::recall::redundancy::copy_skips_json(&r.hits[1].also).is_none());
 }
 
 /// #198: a suspected pair of one session keeps its line and field in the
