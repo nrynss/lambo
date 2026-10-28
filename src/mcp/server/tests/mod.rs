@@ -42,6 +42,7 @@ mod receipts;
 mod schemas;
 mod scoped_writes;
 mod stats;
+mod suspected;
 mod tools;
 
 async fn server(session: &str) -> LamboServer {

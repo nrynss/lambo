@@ -229,3 +229,26 @@ fn the_apply_latency_window_reports_recent_percentiles() {
         )
     );
 }
+
+/// #198: the receipt names the suspected supersessions a derive flagged,
+/// and only when it flagged one.
+#[test]
+fn the_receipt_names_flagged_suspected_supersessions() {
+    use crate::graph::derive::DeriveOutcome;
+    let quiet = DeriveOutcome {
+        created: vec![crate::types::NodeId::new()],
+        embedded: 1,
+        ..DeriveOutcome::default()
+    };
+    let before = super::execution::derive_sentence(crate::types::MatchStrategy::Hybrid, 1, &quiet);
+    assert!(!before.contains("supersession"), "{before}");
+    let flagged = DeriveOutcome {
+        suspected: 2,
+        ..quiet.clone()
+    };
+    let after = super::execution::derive_sentence(crate::types::MatchStrategy::Hybrid, 1, &flagged);
+    assert_eq!(
+        after,
+        format!("{before}; 2 possible undeclared supersession(s) flagged")
+    );
+}

@@ -134,6 +134,7 @@ pub(super) fn edge_type_sql(et: EdgeType) -> &'static str {
         EdgeType::Hierarchical => "Hierarchical",
         EdgeType::Semantic => "Semantic",
         EdgeType::Contradicts => "Contradicts",
+        EdgeType::SuspectedSupersedes => "SuspectedSupersedes",
     }
 }
 
@@ -147,6 +148,7 @@ pub(super) fn parse_edge_type(s: &str) -> Result<EdgeType, StoreError> {
         "Hierarchical" => EdgeType::Hierarchical,
         "Semantic" => EdgeType::Semantic,
         "Contradicts" => EdgeType::Contradicts,
+        "SuspectedSupersedes" => EdgeType::SuspectedSupersedes,
         other => return Err(backend(format!("unknown edge_type {other:?} in store"))),
     })
 }
@@ -162,6 +164,20 @@ mod contradiction_tests {
         assert_eq!(parse_edge_type("Contradicts").unwrap(), ty);
         assert_eq!(serde_json::to_string(&ty).unwrap(), "\"Contradicts\"");
         assert!(parse_edge_type("contradicts").is_err());
+    }
+
+    /// #198: the suspected-supersession edge's column string is its serde
+    /// wire name, so SQLite (serde text) and the Postgres family agree.
+    #[test]
+    fn suspected_supersession_codec_matches_serde() {
+        let ty = EdgeType::SuspectedSupersedes;
+        assert_eq!(edge_type_sql(ty), "SuspectedSupersedes");
+        assert_eq!(parse_edge_type("SuspectedSupersedes").unwrap(), ty);
+        assert_eq!(
+            serde_json::to_string(&ty).unwrap(),
+            "\"SuspectedSupersedes\""
+        );
+        assert!(parse_edge_type("suspected_supersedes").is_err());
     }
 }
 

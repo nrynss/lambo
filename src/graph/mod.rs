@@ -77,6 +77,9 @@ pub mod action;
 // derive for MatchStrategy::Hybrid (see `hybrid.rs`). Additive: cutting the
 // feature is deleting this line + `hybrid.rs`.
 pub mod hybrid;
+// #198 — suspected supersession: the hybrid write path's warning-only
+// trigger for an undeclared replacement (see `suspected.rs`).
+pub mod suspected;
 // #22 — image concepts: the image derive request and the pure rules that make
 // it one concept with a supplied vector (see `image.rs`).
 pub mod image;

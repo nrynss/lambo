@@ -14,6 +14,7 @@ mod contradictions;
 #[cfg(feature = "store-sqlite")]
 mod issue180;
 mod score_cut;
+mod suspected;
 mod triggers;
 
 fn ts(m: i64) -> DateTime<Utc> {

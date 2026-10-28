@@ -190,6 +190,11 @@ pub struct LayeredHit {
     /// (#19(c), #179), the ids of the hits of the same session it
     /// contradicts; empty otherwise. Such a hit holds no `top_k` slot.
     pub companion_of: Vec<NodeId>,
+    /// #198: the newer concept of the same session this hit is suspected to
+    /// be superseded by, when both are shown; `None` otherwise. Set whatever
+    /// the `suspected_supersession_line` gate says: it is the structured
+    /// form of the `Possibly superseded` line.
+    pub possibly_superseded_by: Option<NodeId>,
 }
 
 /// The answer of [`Memory::recall_layered`](crate::Memory::recall_layered):
@@ -241,6 +246,7 @@ impl LayeredRecall {
                 included_in_context: d.included_in_context,
                 truncated_in_context: d.truncated_in_context,
                 companion_of: d.companion_of.clone(),
+                possibly_superseded_by: d.possibly_superseded_by,
             })
             .collect();
         Self {
@@ -627,6 +633,19 @@ where
         }
     }
 
+    // #198: the hits the merged answer shows, by tier. A suspected pair is
+    // named only when both of its concepts are shown (the newer one in its
+    // own session's copy); a pair the merge split keeps neither the line
+    // nor the field, and its line leaves `warnings` too.
+    let shown_by_tier: HashSet<(usize, NodeId)> = groups
+        .iter()
+        .filter_map(|g| {
+            let (t, p) = g.shown;
+            Some((t, recall_of(t)?.recall.hits.get(p)?.node_id))
+        })
+        .collect();
+    let mut split_pairs: Vec<(usize, String)> = Vec::new();
+
     // Rule 4: re-render and cut once.
     let mut hits = Vec::with_capacity(groups.len());
     let mut detailed = Vec::with_capacity(groups.len());
@@ -646,6 +665,18 @@ where
         d.truncated_in_context = false;
         // #179: `companion_of` says the hit holds no merged `top_k` slot.
         d.companion_of = g.companion.clone().unwrap_or_default();
+        if let Some(by) = d.possibly_superseded_by
+            && !shown_by_tier.contains(&(tier, by))
+        {
+            d.possibly_superseded_by = None;
+            d.annotations.retain(|a| {
+                let keep = a.kind != AnnotationKind::PossiblySuperseded;
+                if !keep {
+                    split_pairs.push((tier, a.text.clone()));
+                }
+                keep
+            });
+        }
         let also: Vec<LayerCopy> = g
             .also
             .iter()
@@ -698,6 +729,11 @@ where
             continue;
         };
         let mut lines = t.recall.warnings.clone();
+        for (_, text) in split_pairs.iter().filter(|(t, _)| *t == tier) {
+            if let Some(i) = lines.iter().position(|l| l == text) {
+                lines.remove(i);
+            }
+        }
         for (pos, d) in t.recall.detailed.iter().enumerate() {
             if contributed[tier].get(pos).copied().unwrap_or(false) {
                 continue;
@@ -792,6 +828,7 @@ where
             included_in_context: d.included_in_context,
             truncated_in_context: d.truncated_in_context,
             companion_of: d.companion_of.clone(),
+            possibly_superseded_by: d.possibly_superseded_by,
         })
         .collect();
     LayeredRecall {

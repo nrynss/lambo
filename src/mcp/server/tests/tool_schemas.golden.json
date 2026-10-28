@@ -43,7 +43,7 @@
           "additionalProperties": false,
           "properties": {
             "against": {
-              "description": "Optional: up to 8 existing concepts this one contradicts, such as an\nolder belief a newer observation shows is wrong. Name each as for\n`depends_on`: its id (the 8 hex characters recall shows) or full\nnode id (its exact content also works). Each must already exist in\nthe session the write goes to and match exactly one concept other\nthan this one, or the whole call is refused before the ack and\nnothing is written, as is a concept this one also lists in\n`depends_on`. Recorded as this concept contradicting each, dated by\nthis write's `event_time` (else when it is written) whatever the two\nconcepts' ages; sending it again does not re-date it. It adds no\ndependent and changes no score or promotion, and raises no conflict;\nit does count as a fresh write to the contradicted concept. Recall\nthen warns on the contradicted concept and shows this one beside it.\nAt most 32 across the call.",
+              "description": "Optional: up to 8 existing concepts this one contradicts, such as an\nolder belief a newer observation shows is wrong. Name each as for\n`depends_on`: its id (the 8 hex characters recall shows) or full\nnode id (its exact content also works). Each must already exist in\nthe session the write goes to and match exactly one concept other\nthan this one, or the whole call is refused before the ack and\nnothing is written, as is a concept this one also lists in\n`depends_on`. Recorded as this concept contradicting each, dated by\nthis write's `event_time` (else when it is written) whatever the two\nconcepts' ages; sending it again does not re-date it. It adds no\ndependent and changes no score or promotion, and raises no conflict;\nit does count as a fresh write to the contradicted concept. Recall\nthen warns on the contradicted concept and shows this one beside it.\nNaming the other concept of a pair recall marks possibly superseded\nsettles it: the mark is removed. At most 32 across the call.",
               "items": {
                 "$ref": "#/$defs/WireReference"
               },
@@ -63,7 +63,7 @@
               "type": "string"
             },
             "depends_on": {
-              "description": "Optional: up to 8 existing concepts this one rests on, such as the\nruling a decision applies. Cite each by its id: the 8 hex characters\nrecall shows, or its full node id (its exact content also works).\nEach must already exist in this session and match exactly one\nconcept; one that does not, or that names this concept itself,\nrefuses the whole call before the ack and writes nothing. Recorded as\nthis concept depending on each, which makes the cited concept\nload-bearing. At most 32 across the call.",
+              "description": "Optional: up to 8 existing concepts this one rests on, such as the\nruling a decision applies. Cite each by its id: the 8 hex characters\nrecall shows, or its full node id (its exact content also works).\nEach must already exist in this session and match exactly one\nconcept; one that does not, or that names this concept itself,\nrefuses the whole call before the ack and writes nothing. Recorded as\nthis concept depending on each, which makes the cited concept\nload-bearing. Citing the other concept of a pair recall marks\npossibly superseded settles it: the mark is removed. At most 32\nacross the call.",
               "items": {
                 "$ref": "#/$defs/WireReference"
               },
@@ -413,7 +413,7 @@
     }
   },
   "lambo_recall": {
-    "description": "Recall relevant memory for a query and return the Lambo context block (canonical markers, blast-radius warnings, conflict lines, and contradiction warnings: a concept that a newer concept contradicts is shown with that concept beside it, and a concept whose depends_on cites a contradicted concept is warned that it rests on it).",
+    "description": "Recall relevant memory for a query and return the Lambo context block (canonical markers, blast-radius warnings, conflict lines, and contradiction warnings: a concept that a newer concept contradicts is shown with that concept beside it, a concept whose depends_on cites a contradicted concept is warned that it rests on it, and a concept a newer one may replace without declaring it is marked possibly superseded: a 'Possibly superseded by' line where the embedder is validated, and the hit's possibly_superseded_by field either way).",
     "inputSchema": {
       "$defs": {
         "WireEmbeddingContract": {

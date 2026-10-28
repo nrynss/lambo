@@ -1,0 +1,25 @@
+in-regime pairs at cosine >= 0.85: {("dev", "distinct_entity"): 34, ("dev", "same-event"): 4, ("dev", "supersedes"): 37, ("held_out", "distinct_entity"): 23, ("held_out", "same-event"): 1, ("held_out", "supersedes"): 25}
+
+== one span (reference lexicon)
+  dev      TP 35 FP 10 precision 0.78 (95% low 0.64) recall 35/37
+  held_out TP 25 FP  9 precision 0.74 (95% low 0.57) recall 25/25
+
+== value slot (reference lexicon)
+  dev      TP 34 FP  5 precision 0.87 (95% low 0.73) recall 34/37
+  held_out TP 25 FP  3 precision 0.89 (95% low 0.73) recall 25/25
+
+== one span + value slot (reference lexicon, = slot.py)
+  dev      TP 34 FP  1 precision 0.97 (95% low 0.85) recall 34/37
+  held_out TP 25 FP  1 precision 0.96 (95% low 0.81) recall 25/25
+  dev false positives: ["p-198-s29"]
+  dev missed supersedes: ["p-cnd-06-rbd1", "p-198-s34", "p-198-s37"]
+  held_out false positives: ["p-198-s30"]
+  held_out missed supersedes: []
+
+== one span + value slot (shipped PREDICATE_CUES, + "reports")
+  dev      TP 35 FP  1 precision 0.97 (95% low 0.86) recall 35/37
+  held_out TP 25 FP  1 precision 0.96 (95% low 0.81) recall 25/25
+  dev false positives: ["p-198-s29"]
+  dev missed supersedes: ["p-cnd-06-rbd1", "p-198-s37"]
+  held_out false positives: ["p-198-s30"]
+  held_out missed supersedes: []

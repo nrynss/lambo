@@ -3096,6 +3096,17 @@ async fn a_recall_by_vector_fails_when_the_tier_and_its_fallback_both_fail() {
     mem.close().await.unwrap();
 }
 
+/// #198: the suspected-supersession edge round-trips through the tier.
+#[tokio::test]
+async fn tier_round_trips_suspected_supersession_edges() {
+    let store = TieredStore::new(
+        Box::new(MemoryStore::new()),
+        Box::new(Arc::new(FakeIndex::new())),
+        Some(4),
+    );
+    crate::test_util::suspected::check_round_trip(&store).await;
+}
+
 /// #20: the tier forwards both supersession accessors to its primary.
 #[tokio::test]
 async fn tier_forwards_supersession_evidence_to_primary() {

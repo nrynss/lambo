@@ -20,6 +20,7 @@ pub mod dependents;
 pub mod dresscode;
 pub mod fair_test;
 pub mod supersession;
+pub mod suspected;
 #[cfg(feature = "store-memory")]
 mod vector_searchable;
 #[cfg(feature = "store-memory")]

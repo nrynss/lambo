@@ -217,6 +217,7 @@ fn recall_facts_with(
     let mut hot_warning = false;
     let mut reservation_warning = false;
     let mut contradiction_warning = false;
+    let mut possibly_superseded = false;
 
     // #130: the truncated first hit, if any, and whether its cut kept the
     // label line (and so `[…, canonical]`).
@@ -295,6 +296,7 @@ fn recall_facts_with(
                     AnnotationKind::Contradicts => kinds.push("contradicts"),
                     AnnotationKind::Superseded => kinds.push("superseded"),
                     AnnotationKind::RestsOnContradicted => kinds.push("rests_on_contradicted"),
+                    AnnotationKind::PossiblySuperseded => kinds.push("possibly_superseded"),
                     // Response-global kinds are never hit-owned (H3 contract),
                     // so they are reported once, below.
                     AnnotationKind::Traversal
@@ -318,6 +320,15 @@ fn recall_facts_with(
                 && let Some(map) = line.as_object_mut()
             {
                 map.insert("truncated_in_context".into(), json!(true));
+            }
+            // #198: additive, and only on a hit a shown newer concept is
+            // suspected of replacing, so a line without it reads as before
+            // (`v` stays 1). Present whether or not the prose line is shown.
+            if let Some(by) = d.possibly_superseded_by
+                && let Some(map) = line.as_object_mut()
+            {
+                possibly_superseded = true;
+                map.insert("possibly_superseded_by".into(), json!(by.0.to_string()));
             }
             // #173: additive, and only on a phase-1 hit, so a line without
             // it reads as before (`v` stays 1).
@@ -351,6 +362,7 @@ fn recall_facts_with(
             AnnotationKind::Contradicts => "contradicts",
             AnnotationKind::Superseded => "superseded",
             AnnotationKind::RestsOnContradicted => "rests_on_contradicted",
+            AnnotationKind::PossiblySuperseded => "possibly_superseded",
         })
         .collect();
 
@@ -369,6 +381,11 @@ fn recall_facts_with(
         "warning_count": detailed.warnings.len(),
         "cold_start": detailed.cold_start,
     });
+    // #198: additive, only when some hit carries a suspected pair, so a
+    // line without one reads as before (`v` stays 1).
+    if possibly_superseded && let Some(map) = facts.as_object_mut() {
+        map.insert("possibly_superseded".into(), json!(true));
+    }
     // #33: per-session hit counts, on a layered session's lines only.
     if let Some(sessions) = sessions
         && let Some(map) = facts.as_object_mut()

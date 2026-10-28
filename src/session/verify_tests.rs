@@ -466,6 +466,14 @@ fn warning_kinds_keep_no_text() {
             "[general] rests_on_contradicted",
         ),
         (
+            "⚠ Possibly superseded by \"a\" (id 1), not declared",
+            "possibly_superseded",
+        ),
+        (
+            "[general] ⚠ Possibly superseded by \"a\" (id 1), not declared",
+            "[general] possibly_superseded",
+        ),
+        (
             "Reserved by agent-c until 2025-07-08T18:45:00Z",
             "reservation",
         ),
@@ -514,6 +522,43 @@ async fn a_stale_citation_is_replayed_and_reported_by_kind() {
     );
     let json = serde_json::to_string(&report).unwrap();
     assert!(!json.contains("Rests on"), "no raw line is kept");
+}
+
+/// #198 reaches the replay: a suspected pair inside the source session is
+/// reported by its kind on the older concept's before hit, whether or not
+/// the session's embedder shows the line (this fixture's `fixture`
+/// contract does not: the structured field alone), and no raw line is
+/// kept.
+#[tokio::test]
+async fn a_suspected_pair_is_replayed_and_reported_by_kind() {
+    let mut run = Run::new();
+    let newest = newest_row(&run.source).unwrap();
+    let mut suspected = run
+        .source
+        .edges
+        .iter()
+        .find(|e| e.id == id(302))
+        .unwrap()
+        .clone();
+    suspected.id = id(311);
+    suspected.edge_type = crate::types::EdgeType::SuspectedSupersedes;
+    suspected.event_time = None;
+    suspected.created_at = newest;
+    suspected.last_reinforced = newest;
+    let (newer, older) = (suspected.source, suspected.target);
+    run.source.edges.push(suspected);
+    run.split_source = run.source.clone();
+    let report = run.go().await.unwrap();
+    let flagged = report
+        .queries
+        .values()
+        .flatten()
+        .flat_map(|q| q.before.iter())
+        .any(|h| h.origin == older && h.annotations.iter().any(|k| k == "possibly_superseded"));
+    assert!(flagged, "the older concept's before hit names the kind");
+    assert_ne!(newer, older);
+    let json = serde_json::to_string(&report).unwrap();
+    assert!(!json.contains("Possibly superseded"), "no raw line is kept");
 }
 
 /// A recall@k cut at rank `k` on both sides: forced hits past `k` do not

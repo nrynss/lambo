@@ -547,6 +547,9 @@ pub(crate) fn write_edges(
             created_at: stamp.created_at,
             last_reinforced: stamp.created_at,
         })?;
+        // #198: a declared relation settles a suspected supersession
+        // between the two, whichever way either edge points.
+        crate::graph::suspected::settle(g, source, target)?;
     }
     Ok(counts)
 }

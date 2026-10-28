@@ -4,6 +4,55 @@
 
 ### Changed
 
+- **Behaviour change: an undeclared supersession is suspected and named
+  (#198).** Only contradictions declared with `against` were seen, so an
+  agent that wrote "the embedder listens on port 8081" without citing
+  "... port 8080" left the stale fact ranking with no warning, and since
+  #195 the identifier guard refuses the merge that used to tie the two. A
+  hybrid write now records a `SuspectedSupersedes` edge, newer -> older,
+  when a vector hit at or above the merge threshold (the calibrated one
+  where #87 applies) was refused by the identifier guard, both concepts
+  are the same `Logic`, `Constraint` or `Observation` type with the same
+  repository scope and no `against`/`depends_on` between them, and the
+  texts differ in exactly one token span that starts after the first
+  predicate cue in both ("one span and value slot", owner decision; the
+  cue list is `graph::suspected::PREDICATE_CUES`, hand-written English).
+  The later concept by clamped about-time is the replacement; a tie
+  records nothing. When both are in a recall's result, the older hit gets
+  `⚠ Possibly superseded by "…" (id …), not declared`, at most once, and
+  nothing is forced, moved or rescored: a recall with no shown pair
+  renders exactly as before. The line is shown only under a contract whose
+  trigger precision was measured at 0.90 or better, today BGE-M3 (0.97
+  dev, 0.96 held-out on the #211 pairs, 95% lower bound 0.81;
+  `evidence/issue-198-trigger/`); EmbeddingGemma 2 is unmeasured and gets
+  the structured field only. `[embedder] suspected_supersession_line =
+  "validated" | "on" | "off"` changes that. The edge lapses when either
+  concept is collected or an `against`/`depends_on` between the two is
+  written. It confers no score, dependents, blast radius, expansion,
+  decay, GC connectivity or conflict agent; #207 never follows it, and
+  #181 must treat a pair as never redundant
+  (`graph::suspected::is_suspected_pair`). Only new writes are flagged:
+  `lambo canon suspected --store <file> --session <s>` reports the pairs
+  an existing store holds and records them with `--apply` (under the
+  session's lease). Recall on real memory will be low: real dogfood
+  supersessions are mostly reworded, which the rule does not flag.
+- **Contract change: a new edge type and annotation (#198).** Edges gain
+  the type `SuspectedSupersedes` (the column and JSON string on every
+  backend; a build before it refuses to load a session that holds one).
+  The detailed recall (web portal `/api/recall`, `lambo recall` detail)
+  gains the annotation kind `possibly_superseded` and the hit field
+  `possibly_superseded_by`, serialized only when set; the `--ledger`
+  recall line gains `possibly_superseded_by` on a hit and a top-level
+  `possibly_superseded`, both only when set (`v` stays 1); `lambo session
+  verify` reports the kind. A derive receipt adds `; N possible
+  undeclared supersession(s) flagged` only when a write flagged one.
+  MCP `lambo_recall`'s `structuredContent.hits[]` gains
+  `possibly_superseded_by` on the older hit, only when set and whatever
+  the line gate says, so an agent under an unvalidated embedder still
+  sees the pair. The published tool list changes: the `lambo_recall`
+  description names the possibly-superseded line and field, and
+  `lambo_derive`'s `against` and `depends_on` say that naming the other
+  concept of a marked pair settles it.
 - Writes carrying `against` report up to 50 direct stale dependencies in
   their settled receipt, with a total count. `lambo_stale` pages through the
   current session or a shared layer for restartable re-checks (#208).

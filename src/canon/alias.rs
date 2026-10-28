@@ -581,6 +581,10 @@ pub fn apply(snap: &GraphSnapshot, plan: &AliasPlan) -> GraphSnapshot {
     let retire: HashSet<NodeId> = plan.retire.iter().copied().collect();
     let mut out = snap.clone();
     out.edges.retain(|e| !retire.contains(&e.id));
+    // #198: a redirected citation is a declared `depends_on` between the
+    // citer and the ruling, so it settles a suspected supersession between
+    // them, as a citation by id does (`crate::graph::cite::write_edges`).
+    crate::graph::suspected::settle_edges(&mut out.edges, &plan.add);
     out.edges.extend(plan.add.iter().cloned());
     out
 }

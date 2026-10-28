@@ -243,6 +243,20 @@ list-all returns every memo [Logic] (score 1.38, id 4bf3835a)
 * **Same scope as the contradiction line.** It stays inside its session, a layer hit's line starts with the layer's name in a merged recall, and a dependency question (graph traversal) carries none.
 * Its annotation kind is `rests_on_contradicted`, in the web portal's REST API (`/api/recall`'s `hits[].annotations`) and on the `--ledger` recall line. The line is in `warnings` and the context; `lambo session verify` reports it by that kind.
 
+**Possibly superseded, not declared.** A newer fact written without `against` used to leave the older one ranking with no warning. Since #198 a write that is a near vector match of an older concept of the same type (`logic`, `constraint` or `observation`), which the merge refused because their identifiers differ, and whose text differs from it in one value after the predicate, records that it may replace that concept. When both are in the same result, the older hit says so:
+
+```text
+the embedder listens on port 8080 [Logic] (score 0.91, id 5e6f7a8b)
+⚠ Possibly superseded by "the embedder listens on port 8081" (id 1a2b3c4d), not declared
+```
+
+* **A suspicion, not a declaration.** It is Lambo's reading of two texts, not a writer's `against`. A change before the predicate is a different thing, not a new value ("J1 round-1 verdict: …" and "J2 round-1 verdict: …" are never flagged), and so are two values changed at once. The later concept, by the date its fact is about (a backfilled write with an older `event_time` counts as older), is the possible replacement; two concepts dated alike are not flagged.
+* **Only when both are shown.** The line is on the older hit only when the newer concept is in the same result, at most one line per hit (the newest replacement). Nothing is added, kept past `top_k` or moved for it, and it changes no score, status, merge or garbage collection.
+* **Only where it was measured.** The line is shown under an embedding contract whose trigger precision was measured at 0.90 or better: BGE-M3 (0.96 on the held-out labelled pairs). Under EmbeddingGemma 2, not yet measured, the pair is only in the structured field below. `[embedder] suspected_supersession_line` (see [Configuration](/lambo/config/)) can show it for every contract (`on`) or none (`off`).
+* **It lapses.** Writing an explicit `against` or `depends_on` between the two removes it, and so does collecting either concept. Only new writes are flagged; `lambo canon suspected` reports the pairs an existing store already holds.
+* It never makes a memory stale: the stale-citation line above follows declared contradictions only.
+* Its annotation kind is `possibly_superseded`, in the web portal's REST API (`/api/recall`'s `hits[].annotations`) and on the `--ledger` recall line. The older hit also carries `possibly_superseded_by` (the newer concept's id) in `lambo_recall`'s `structuredContent.hits[]`, in the REST API and on the `--ledger` hit line whether or not the line is shown (absent when there is no pair, so other responses are unchanged), and the ledger line gains `possibly_superseded`. `lambo session verify` reports the kind either way. A derive receipt says `N possible undeclared supersession(s) flagged` when a write flagged one.
+
 **Superseded concepts.** When the operator turns on `canonization_supersede` (off by default, see [Configuration](/lambo/config/#supersession)), a contradiction can do more than warn: once the contradicting concept has earned its own newer support (dependents from at least three other interactions, newer than the Canonical concept's latest support, with enough spread), the canonization cycle demotes the Canonical concept to ordinary memory. A contradiction with no newer support never demotes anything, and the contradicting concept is not promoted by it. From then on, while it is not Canonical again, a recall that matches the demoted concept shows its history:
 
 ```text

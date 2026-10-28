@@ -293,15 +293,20 @@ impl EdgeWriters<'_> {
 /// `None` for a `Contradicts` edge, whose writer never joins the agent set
 /// (#19(c) owner decision 2, option B, applied with #19(b), the first
 /// product path that writes one): conflict lines stay about concurrent
-/// edits, and disagreement is #19's contradiction annotation. Also `None`
-/// for a source node missing from the graph (defensive; `assert_invariants`
-/// guarantees every edge endpoint exists).
+/// edits, and disagreement is #19's contradiction annotation. Likewise
+/// `None` for a `SuspectedSupersedes` edge (#198): Lambo's trigger writes it
+/// beside a new concept, so it is no agent touching the older one. Also
+/// `None` for a source node missing from the graph (defensive;
+/// `assert_invariants` guarantees every edge endpoint exists).
 fn edge_writers<'a>(
     graph: &'a Graph,
     edge: &Edge,
     timeline: &'a WriterTimeline,
 ) -> Option<EdgeWriters<'a>> {
-    if edge.edge_type == EdgeType::Contradicts {
+    if matches!(
+        edge.edge_type,
+        EdgeType::Contradicts | EdgeType::SuspectedSupersedes
+    ) {
         return None;
     }
     attribute(graph, edge, timeline)
@@ -748,6 +753,16 @@ mod tests {
             "a contradiction's writer is not a second agent"
         );
         assert!(detect(&g, CONFLICT_RECENCY_WINDOW, now).is_empty());
+        // #198: nor is the trigger's suspected-supersession edge.
+        g.upsert_edge(Edge {
+            edge_type: EdgeType::SuspectedSupersedes,
+            ..dep_edge(4, c3_id, c1_id, 3600 - 12)
+        })
+        .unwrap();
+        assert!(
+            conflict_at(&g, c1_id, CONFLICT_RECENCY_WINDOW, now).is_none(),
+            "a suspected supersession's writer is not a second agent"
+        );
 
         // Control: agent-b's own Dependency write on the node does conflict.
         g.upsert_edge(dep_edge(3, c3_id, c1_id, 3600 - 10)).unwrap();

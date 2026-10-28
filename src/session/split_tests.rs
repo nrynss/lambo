@@ -418,6 +418,46 @@ fn refusal(source: &GraphSnapshot) -> String {
     build_split(&plan, source).unwrap_err().to_string()
 }
 
+/// An informational edge (`Contradicts`, `SuspectedSupersedes` #198)
+/// between concepts placed in different sessions is dropped as
+/// informational, not structural: it declared no structure.
+#[test]
+fn a_cross_session_informational_edge_is_dropped_as_informational() {
+    let mut source = source();
+    let base = source.edges[0].clone();
+    for (n, from, to, ty) in [
+        (307, 12, 11, EdgeType::SuspectedSupersedes),
+        (308, 12, 11, EdgeType::Contradicts),
+    ] {
+        source.edges.push(Edge {
+            id: id(n),
+            source: id(from),
+            target: id(to),
+            edge_type: ty,
+            event_time: None,
+            ..base.clone()
+        });
+    }
+    let out = build_split(&plan_for(&source), &source).unwrap();
+    for n in [307, 308] {
+        let l = entry(&out, n);
+        assert_eq!(l.category, EdgeDisposition::Dropped, "{n}");
+        assert_eq!(
+            l.drop_reason,
+            Some(DropReason::CrossSessionInformational),
+            "{n}"
+        );
+    }
+    assert_eq!(
+        entry(&out, 304).drop_reason,
+        Some(DropReason::CrossSessionStructural)
+    );
+    assert_eq!(
+        out.accounting.edges.dropped_by_reason["cross_session_informational"],
+        2
+    );
+}
+
 #[test]
 fn every_source_edge_is_in_the_ledger_exactly_once_with_exact_accounting() {
     let source = source();
