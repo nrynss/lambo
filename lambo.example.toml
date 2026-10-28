@@ -194,7 +194,7 @@ url = "http://127.0.0.1:8080"
 #   validated (default) = the line only under an embedding contract whose
 #             trigger precision was measured at 0.90 or better: BGE-M3
 #             (candle BAAI/bge-m3 or bge_m3, 1024 dimensions; held-out 0.96
-#             on the #190 set). EmbeddingGemma 2 is unmeasured: field only.
+#             on the #211 pairs). EmbeddingGemma 2 is unmeasured: field only.
 #   on      = the line for every contract
 #   off     = never the line; field only
 # The record itself (a SuspectedSupersedes edge) is written either way.
