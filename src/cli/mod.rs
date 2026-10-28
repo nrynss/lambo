@@ -645,6 +645,77 @@ mod tests {
             .unwrap_or(true));
     }
 
+    /// #198 part c: `lambo derive` prints the replacement candidates a
+    /// hybrid write listed, after the summary, and prints exactly what it
+    /// printed before when it listed none.
+    #[tokio::test]
+    async fn cli_derive_prints_replacement_candidates() {
+        struct Constant;
+        #[async_trait]
+        impl crate::embed::Embedder for Constant {
+            fn dimensions(&self) -> usize {
+                1024
+            }
+            async fn embed(&self, _text: &str) -> Result<Vec<f32>, crate::embed::EmbedError> {
+                let mut v = vec![0.0; 1024];
+                v[0] = 1.0;
+                Ok(v)
+            }
+        }
+        let store = Arc::new(MemoryStore::new());
+        let backends = || ResolvedBackends {
+            store: Box::new(crate::test_util::GraphRanked(
+                crate::test_util::VectorSearchable(store.clone()),
+            )),
+            embedder: Box::new(Constant),
+            ..backends_on(store.clone())
+        };
+        let derive = |content: &str| crate::cli::derive::Args {
+            repo_scope: None,
+            session: "cli-replacement".into(),
+            agent: "agent-a".into(),
+            content: content.into(),
+            kind: ConceptKind::Logic,
+            parent_of: vec![],
+            concept: vec![],
+            depends_on: Vec::new(),
+            against: Vec::new(),
+        };
+        let first =
+            crate::cli::derive::run(backends(), derive("the embedder listens on port 8080"))
+                .await
+                .expect("derive the first");
+        assert_eq!(first, "derived 1 concept(s): 1 created, 0 matched existing");
+        let out = crate::cli::derive::run(
+            backends(),
+            derive("after the clash the embedder moved to port 9090 behind the proxy"),
+        )
+        .await
+        .expect("derive the second");
+        let snap = store
+            .load_session(&SessionId::new("cli-replacement"))
+            .await
+            .unwrap();
+        let id_of = |text: &str| {
+            snap.concepts
+                .iter()
+                .find(|c| c.content == text)
+                .map(|c| crate::recall::format::short_id(c.id))
+                .unwrap()
+        };
+        let old = id_of("the embedder listens on port 8080");
+        let new = id_of("after the clash the embedder moved to port 9090 behind the proxy");
+        assert_eq!(
+            out,
+            format!(
+                "derived 1 concept(s): 1 created, 0 matched existing; 1 replacement \
+                 candidate(s): existing concepts this write may replace (nothing recorded; cite \
+                 one in against on a later call only if it really is replaced)\n  - {old} \
+                 \"the embedder listens on port 8080\" (cosine 1.0000, for {new})"
+            )
+        );
+    }
+
     /// #19(b): `--against` on `lambo derive` and `lambo record-action`
     /// records the contradiction and says so; a reference that names
     /// nothing is a usage error and writes nothing; more than eight is

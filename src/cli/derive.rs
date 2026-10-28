@@ -168,6 +168,15 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
                     outcome.contradicted
                 ));
             }
+            // #198 part c: said only when the write listed candidates, so
+            // every other derive prints what it printed.
+            if let Some(report) =
+                crate::graph::suspected::replacement::ReplacementReport::for_receipt(
+                    &outcome.replacement_candidates,
+                )
+            {
+                summary.push_str(&report.describe());
+            }
             Ok(summary)
         }
         Err(e) => Err(CliError::from(e)),
