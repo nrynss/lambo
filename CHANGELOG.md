@@ -1,6 +1,50 @@
 # Changelog
 
-## Unreleased
+## 0.8.0 (2026-10-28)
+
+### Highlights
+
+- **Stale knowledge is named where it is recalled.** A contradiction of
+  ordinary memory now warns and shows the correction beside the stale fact
+  (#179). A memory that cites a contradicted concept through `depends_on`
+  is warned too (#207). A write carrying `against` reports the
+  dependencies it left stale, and `lambo_stale` pages through them (#208).
+- **Undeclared supersessions (#198).** A hybrid write flags a
+  same-type, high-cosine pair that differs in one value slot as a
+  suspected supersession, and recall names it on the older hit:
+  precision 0.97 dev and 0.96 held-out on the #211 pairs. Because real
+  replacements are mostly reworded, a derive's outcome also lists up to 3
+  replacement candidates per created concept, so the writer can cite one
+  in `against`. Both are informational and change no score or merge.
+  `lambo canon suspected` reports the pairs an existing store holds.
+- **Per-embedder calibration (#87).** Under EmbeddingGemma 2 (768 dims),
+  writers merge at 0.93, the recent leg scores 0.63, and an unset layer
+  floor is 0.72. BGE-M3 is unchanged.
+- **Safer merges (#193).** Hybrid derive no longer merges by similarity
+  across different identifiers, or into a concept the write's own
+  `against` names.
+- **Opt-in recall improvements.** `[fusion] kind = "rrf"` (#173) and
+  `[selection] skip_redundant` (#181) are off by default. The evaluation
+  set they were measured on is in `fixtures/eval/` (#190).
+- **`session_activity` is relative to the most-derived concept (#180)**,
+  so it no longer fades towards zero as a session ages.
+
+### Upgrading from 0.7.0
+
+You don't need to run `lambo provision`: there is no schema change.
+- **The new edge type is one-way.** Once a 0.8.0 writer records a
+  `SuspectedSupersedes` edge, a 0.7.0 or older binary refuses to load
+  that session. Keep a backup if you might roll back. That includes a
+  dogfood or MCP writer pinned to an older release.
+- **EmbeddingGemma 2 stores behave differently:**
+  - They merge less: a concept that would have merged at a cosine of
+    0.85–0.93 is now kept as its own concept.
+  - Layered recall drops its lowest-scoring true hits, about 7.5% of them.
+  - `[embedder] calibration = "off"` restores 0.7.0's values. The
+    individual switches are listed under Changed.
+- **Score ranges change.** `session_activity` now spans 0 to 1, so
+  composite scores and the daemon score table move. Rankings change only
+  where that term separated concepts.
 
 ### Changed
 
