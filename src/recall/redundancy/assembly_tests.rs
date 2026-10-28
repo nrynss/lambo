@@ -831,6 +831,59 @@ fn only_the_window_is_checked() {
     assert_eq!(ids(&on), vec![uid(1), uid(10)], "window(3) = 12");
 }
 
+/// The pair bound is per recall, not per pass: a recall with a fresh,
+/// unscored phase-1 hit runs `emitted` three times (the reservation pass,
+/// the cold-start check and the final pass), and each pair is judged once.
+/// Twenty distinct members at `top_k = 20` make 190 pairs a pass, 570 over
+/// three passes without the memo.
+#[test]
+fn the_pair_bound_holds_per_recall_across_passes() {
+    let texts: Vec<String> = (0..21).map(|i| format!("distinct fact number {i}")).collect();
+    let rows: Vec<(u64, &str, ConceptType, Option<[f32; 2]>)> = texts
+        .iter()
+        .enumerate()
+        .map(|(i, t)| (i as u64 + 1, t.as_str(), ConceptType::Logic, None))
+        .collect();
+    let f = Fixture::new(&rows);
+    // Member 21 is fresh: a phase-1 hit the daemon has not scored yet.
+    let scores = ScoreTable {
+        epoch: 0,
+        ranked: (1..=20)
+            .map(|n| Scored::new(uid(n), 1.0 - n as f64 / 100.0))
+            .collect(),
+    };
+    let phase1 = vec![Scored::new(uid(21), 1.0)];
+    let expanded = ExpandedSet {
+        required: (1..=21).map(|n| Scored::new(uid(n), 0.0)).collect(),
+        siblings: Vec::new(),
+    };
+    let before = SIGNAL_CALLS.with(std::cell::Cell::get);
+    let r = assemble_with_legs(
+        &f.g,
+        &expanded,
+        &phase1,
+        None,
+        &scores,
+        &HashMap::new(),
+        &RecallQuery {
+            query: "distinct fact".into(),
+            top_k: 20,
+            max_tokens: 100_000,
+            traversal_depth: 0,
+        },
+        RecallWeights::default(),
+        crate::Config::default().canonization_edge_min_age,
+        Some(DEFAULT),
+        ts(60),
+        default_token_count,
+    );
+    let calls = SIGNAL_CALLS.with(std::cell::Cell::get) - before;
+    assert!(r.cold_start, "premise: all three passes ran");
+    assert_eq!(r.hits.len(), 20);
+    assert!(calls <= PAIR_BUDGET, "{calls} verdicts");
+    assert!(calls <= 21 * 20 / 2, "each pair once: {calls} verdicts");
+}
+
 /// Canonical-first order is kept: a Canonical member still ranks first,
 /// and a duplicate below it is skipped in favour of the higher copy.
 #[test]

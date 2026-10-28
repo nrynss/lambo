@@ -313,6 +313,7 @@ where
     let mut selection = redundancy.as_ref().map(|r| Selection {
         redundancy: r,
         warns: &mut warns,
+        verdicts: HashMap::new(),
     });
     let any_fresh = w_query > 0.0
         && expanded
@@ -840,11 +841,45 @@ fn rank_members(graph: &Graph, members: &mut [Scored<NodeId>]) {
     });
 }
 
-/// #181's rule for one assembly: the redundancy test, and which members
-/// would carry a warning line of their own (never skipped).
+/// #181's rule for one assembly: the redundancy test, which members would
+/// carry a warning line of their own (never skipped), and the pair verdicts
+/// computed so far.
 struct Selection<'s> {
     redundancy: &'s Redundancy,
     warns: &'s mut dyn FnMut(NodeId) -> bool,
+    /// Each pair's verdict, by unordered pair, computed once per assembly:
+    /// [`emitted`] runs up to three times (the reservation, cold-start and
+    /// final passes) and reuses them. At most [`redundancy::PAIR_BUDGET`].
+    verdicts: HashMap<(NodeId, NodeId), Option<redundancy::RedundancySignal>>,
+}
+
+impl Selection<'_> {
+    /// The first signal that finds `b` redundant with `a`
+    /// ([`Redundancy::signal`], which is symmetric), memoized. Once
+    /// [`redundancy::PAIR_BUDGET`] verdicts are computed, a pair not yet
+    /// judged is not redundant, so a recall computes at most that many
+    /// whatever its passes see.
+    fn verdict(
+        &mut self,
+        graph: &Graph,
+        a: (&crate::types::Concept, &str),
+        b: (&crate::types::Concept, &str),
+    ) -> Option<redundancy::RedundancySignal> {
+        let key = if a.0.id.0 <= b.0.id.0 {
+            (a.0.id, b.0.id)
+        } else {
+            (b.0.id, a.0.id)
+        };
+        if let Some(v) = self.verdicts.get(&key) {
+            return *v;
+        }
+        if self.verdicts.len() >= redundancy::PAIR_BUDGET {
+            return None;
+        }
+        let v = self.redundancy.signal(graph, a, b);
+        self.verdicts.insert(key, v);
+        v
+    }
 }
 
 /// What [`emitted`] chose.
@@ -902,8 +937,7 @@ fn emitted(
                 if check {
                     checked += 1;
                     let found = taken.iter().find_map(|(t, t_norm)| {
-                        sel.redundancy
-                            .signal(graph, (t, t_norm), (c, &text))
+                        sel.verdict(graph, (t, t_norm), (c, &text))
                             .map(|signal| (t.id, signal))
                     });
                     if let Some((kept, signal)) = found

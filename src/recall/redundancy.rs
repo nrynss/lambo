@@ -72,9 +72,13 @@
 //!
 //! ## Cost
 //!
-//! Each checked member is compared with at most [`WINDOW_MAX`] taken hits,
-//! so a recall makes at most `20 × 20` pair checks, and computes a cosine
-//! only for a pair that has no cheaper signal and two vectors.
+//! Each checked member is compared with at most [`WINDOW_MAX`] taken hits.
+//! Assembly may walk its members up to three times (the reservation,
+//! cold-start and final passes), so each pair's verdict is memoized for the
+//! whole assembly, and a recall computes at most [`PAIR_BUDGET`]
+//! (`20 × 20`) verdicts across its passes; past that budget, a pair not yet
+//! judged is not redundant. A cosine is computed only for a pair that has
+//! no cheaper signal and two vectors.
 
 use serde::{Deserialize, Serialize};
 use unicode_normalization::UnicodeNormalization;
@@ -84,6 +88,10 @@ use crate::types::{Concept, EdgeType, NodeId};
 
 /// The most ordinary members the rule checks, whatever `top_k` is.
 pub const WINDOW_MAX: usize = 20;
+
+/// The most pair verdicts one recall computes (`WINDOW_MAX²`), across all
+/// of its assembly passes.
+pub const PAIR_BUDGET: usize = WINDOW_MAX * WINDOW_MAX;
 
 /// Ordinary members checked per `top_k` slot, below [`WINDOW_MAX`].
 pub const WINDOW_PER_SLOT: usize = 4;
@@ -413,6 +421,13 @@ pub fn never_redundant(graph: &Graph, a: NodeId, b: NodeId) -> bool {
     crate::daemon::contradiction::contradicts_either_way(graph, a, b)
 }
 
+#[cfg(test)]
+thread_local! {
+    /// How many times [`Redundancy::signal`] ran on this thread, for the
+    /// pair-budget test.
+    pub(crate) static SIGNAL_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// The redundancy test of one session's recalls: which signals count, and
 /// its effective merge threshold for the cosine signal.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -447,6 +462,8 @@ impl Redundancy {
         (a, a_norm): (&Concept, &str),
         (b, b_norm): (&Concept, &str),
     ) -> Option<RedundancySignal> {
+        #[cfg(test)]
+        SIGNAL_CALLS.with(|n| n.set(n.get() + 1));
         if a.id == b.id {
             return None;
         }
