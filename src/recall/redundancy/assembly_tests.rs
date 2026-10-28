@@ -114,6 +114,18 @@ impl Fixture {
     }
 
     fn edge(&mut self, n: u64, source: u64, target: u64, edge_type: EdgeType) -> &mut Self {
+        self.edge_at(n, source, target, edge_type, ts(1))
+    }
+
+    /// [`Fixture::edge`], written at `at`.
+    fn edge_at(
+        &mut self,
+        n: u64,
+        source: u64,
+        target: u64,
+        edge_type: EdgeType,
+        at: DateTime<Utc>,
+    ) -> &mut Self {
         self.g
             .upsert_edge(Edge {
                 event_time: None,
@@ -124,8 +136,8 @@ impl Fixture {
                 edge_type,
                 weight: 1.0,
                 reinforcements: 1,
-                created_at: ts(1),
-                last_reinforced: ts(1),
+                created_at: at,
+                last_reinforced: at,
             })
             .unwrap();
         self
@@ -457,6 +469,220 @@ fn a_skipped_copy_brought_back_as_a_companion_is_not_also_named() {
         "{}",
         on.context
     );
+}
+
+/// A forced member with no warning line of its own is never skipped: the
+/// #19 companion of a contradicted Venerable concept is forced but carries
+/// no hot-list payload, so only forcing keeps it when it repeats a hit
+/// already taken.
+#[test]
+fn a_forced_member_without_a_warning_is_never_skipped() {
+    let mut f = Fixture::new(&[
+        (1, EFFICACY, ConceptType::Entity, None),
+        (2, "the pillar fact", ConceptType::Logic, None),
+        (3, "a third fact", ConceptType::Logic, None),
+        (4, EFFICACY, ConceptType::Observation, None),
+    ]);
+    f.status(2, CanonizationStatus::Venerable);
+    let mut run = Run::new(&RANKED4, 1);
+    run.hot.insert(
+        uid(2),
+        vec![HotListPayload::Contradiction {
+            by: uid(4),
+            writer: AgentId::from("agent-b"),
+            at: ts(30),
+        }],
+    );
+    assert!(
+        !run.hot.contains_key(&uid(4)),
+        "premise: no payload of its own"
+    );
+    let on = run.go(&f.g);
+    assert_eq!(ids(&on), vec![uid(1), uid(2), uid(4)]);
+    assert!(on.detailed.iter().all(|d| d.skipped_redundant.is_empty()));
+}
+
+/// A duplicate whose only warning is a #207 stale citation (it cites a
+/// concept another contradicts; the kept copy does not) is not skipped.
+#[test]
+fn a_duplicate_with_only_a_stale_citation_is_not_skipped() {
+    let mut f = Fixture::new(&[
+        (1, EFFICACY, ConceptType::Entity, None),
+        (2, EFFICACY, ConceptType::Observation, None),
+        (3, "the cited fact", ConceptType::Logic, None),
+        (4, "the contradicting fact", ConceptType::Logic, None),
+        (5, "a fifth fact", ConceptType::Logic, None),
+    ]);
+    f.edge_at(1, 2, 3, EdgeType::Dependency, ts(0))
+        .edge_at(2, 4, 3, EdgeType::Contradicts, ts(10));
+    let ranked = [(1, 0.9), (2, 0.8), (5, 0.7)];
+    let on = Run::new(&ranked, 2).go(&f.g);
+    assert_eq!(ids(&on), vec![uid(1), uid(2)]);
+    let kinds: Vec<_> = on.detailed[1].annotations.iter().map(|a| a.kind).collect();
+    assert_eq!(
+        kinds,
+        vec![crate::recall::detail::AnnotationKind::RestsOnContradicted],
+        "premise: the copy's own warning"
+    );
+    assert!(on.detailed.iter().all(|d| d.skipped_redundant.is_empty()));
+}
+
+/// A duplicate whose only warning is a #20 supersession line (it was a
+/// Canonical concept another superseded; the kept copy was not) is not
+/// skipped.
+#[test]
+fn a_duplicate_with_only_a_supersession_line_is_not_skipped() {
+    use crate::types::{CanonizationEvent, DemotionReason};
+    let mut f = Fixture::new(&[
+        (1, EFFICACY, ConceptType::Entity, None),
+        (2, EFFICACY, ConceptType::Observation, None),
+        (3, "the newer fact", ConceptType::Logic, None),
+        (5, "a fifth fact", ConceptType::Logic, None),
+    ]);
+    for (n, (from, to, reason)) in [
+        (
+            CanonizationStatus::None,
+            CanonizationStatus::Venerable,
+            None,
+        ),
+        (
+            CanonizationStatus::Venerable,
+            CanonizationStatus::Canonical,
+            None,
+        ),
+        (
+            CanonizationStatus::Canonical,
+            CanonizationStatus::None,
+            Some(DemotionReason::Superseded { by: uid(3) }),
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let at = ts(2 + n as i64);
+        f.g.apply_canonization_transition(CanonizationEvent {
+            id: NodeId(Uuid::from_u64_pair(7, n as u64)),
+            session_id: sid(),
+            node_id: uid(2),
+            from_status: from,
+            to_status: to,
+            blast_radius: None,
+            last_demotion_time: (to == CanonizationStatus::None).then_some(at),
+            occurred_at: at,
+            reason,
+        })
+        .unwrap();
+    }
+    let ranked = [(1, 0.9), (2, 0.8), (5, 0.7)];
+    let on = Run::new(&ranked, 2).go(&f.g);
+    assert_eq!(ids(&on), vec![uid(1), uid(2)]);
+    let kinds: Vec<_> = on.detailed[1].annotations.iter().map(|a| a.kind).collect();
+    assert_eq!(
+        kinds,
+        vec![crate::recall::detail::AnnotationKind::Superseded],
+        "premise: the copy's own line"
+    );
+    assert!(on.detailed.iter().all(|d| d.skipped_redundant.is_empty()));
+}
+
+/// A recall over `daemon` scores and `phase1` relevance (a member with
+/// relevance and no daemon score is fresh, which runs the reservation and
+/// cold-start passes), at `top_k`, under the shipped default.
+fn go_with_phase1(
+    g: &Graph,
+    daemon: &[(u64, f64)],
+    phase1: &[(u64, f64)],
+    top_k: usize,
+) -> DetailedRecall {
+    let mut members: Vec<u64> = daemon.iter().chain(phase1).map(|&(n, _)| n).collect();
+    members.sort_unstable();
+    members.dedup();
+    let phase1: Vec<Scored<NodeId>> = phase1
+        .iter()
+        .map(|&(n, s)| Scored::new(uid(n), s))
+        .collect();
+    assemble_with_legs(
+        g,
+        &ExpandedSet {
+            required: members.iter().map(|&n| Scored::new(uid(n), 0.0)).collect(),
+            siblings: Vec::new(),
+        },
+        &phase1,
+        None,
+        &ScoreTable {
+            epoch: 0,
+            ranked: daemon
+                .iter()
+                .map(|&(n, s)| Scored::new(uid(n), s))
+                .collect(),
+        },
+        &HashMap::new(),
+        &RecallQuery {
+            query: "irrelevant".into(),
+            top_k,
+            max_tokens: 10_000,
+            traversal_depth: 0,
+        },
+        RecallWeights::default(),
+        crate::Config::default().canonization_edge_min_age,
+        Some(DEFAULT),
+        ts(60),
+        default_token_count,
+    )
+}
+
+/// The cold-start check applies the rule too: in query order the fresh
+/// hit comes third, behind two copies of one fact; skipping the second copy
+/// brings it within `top_k = 2`, so the recall runs cold, as the final
+/// pass (which skips the copy too) would show it.
+#[test]
+fn the_cold_start_check_applies_the_rule() {
+    let f = Fixture::new(&[
+        (1, EFFICACY, ConceptType::Entity, None),
+        (2, EFFICACY, ConceptType::Observation, None),
+        (3, "the fresh fact", ConceptType::Logic, None),
+    ]);
+    let r = go_with_phase1(
+        &f.g,
+        &[(1, 1.0), (2, 0.9)],
+        &[(1, 0.9), (2, 0.9), (3, 0.8)],
+        2,
+    );
+    assert!(r.cold_start, "{:?}", ids(&r));
+    assert_eq!(ids(&r), vec![uid(1), uid(3)]);
+    assert_eq!(
+        skipped_for(&r, 1),
+        vec![skip(2, RedundancySignal::SameContent)]
+    );
+}
+
+/// The reservation pass applies the rule too: in blend order a reserved
+/// hit comes third, behind two copies of one fact; skipping the second copy
+/// gives it a slot there, so cold mode keeps it (its reservation warning
+/// with it) although query order ranks it last.
+#[test]
+fn the_reservation_pass_applies_the_rule() {
+    let mut f = Fixture::new(&[
+        (1, EFFICACY, ConceptType::Entity, None),
+        (2, EFFICACY, ConceptType::Observation, None),
+        (3, "the reserved fact", ConceptType::Logic, None),
+        (4, "the fresh fact", ConceptType::Logic, None),
+        (5, "a fifth fact", ConceptType::Logic, None),
+    ]);
+    f.g.set_reservation(Reservation {
+        session_id: sid(),
+        node_id: uid(3),
+        agent_id: AgentId::from("agent-c"),
+        expires_at: ts(120),
+    });
+    let r = go_with_phase1(
+        &f.g,
+        &[(1, 1.0), (2, 0.99), (3, 0.98), (5, 0.0)],
+        &[(4, 1.0), (1, 0.5), (2, 0.5), (5, 0.3), (3, 0.1)],
+        2,
+    );
+    assert!(r.cold_start);
+    assert_eq!(ids(&r), vec![uid(4), uid(1), uid(3)], "the holder is kept");
 }
 
 /// (4) Under `similar_signals = true` at a -1 threshold: a member without
