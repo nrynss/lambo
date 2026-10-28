@@ -29,9 +29,17 @@
 //! * it has the same repository scope ([`super::repo_scope`]);
 //! * no `against` or `depends_on` already joins the two, either way
 //!   ([`super::settled`]);
-//! * it is not the concept this write merged into, nor a concept the same
-//!   call wrote or re-derived (the writer just restated it), nor an image
-//!   concept (a supplied vector is a picture, not a claim).
+//! * it is not a concept the same call wrote or re-derived (the writer just
+//!   restated it), nor an image concept (a supplied vector is a picture,
+//!   not a claim).
+//!
+//! The concept the write merged with **is** listed, marked
+//! [`merged`](ReplacementCandidate::merged): a similarity merge (a
+//! `Semantic` edge) declares no replacement, and a reworded reversal with
+//! no conflicting identifiers merges, so excluding it would hide exactly
+//! that replacement. Only `against` and `depends_on` settle a pair. When
+//! the merge tier is tied, every member is marked merged, not only the one
+//! the edge went to.
 //!
 //! Ranked by cosine (then id, so ties are deterministic) and capped at
 //! [`REPLACEMENT_CANDIDATE_LIMIT`] per created concept.
@@ -107,6 +115,10 @@ pub struct ReplacementCandidate {
     /// it may replace the new concept, not the other way round, so it is
     /// never one to cite in `against`. A tie is not newer (module docs).
     pub newer: bool,
+    /// The new concept merged with this one (a member of the tied merge
+    /// tier): a similarity merge declares no replacement, so it may still
+    /// be replaced (module docs).
+    pub merged: bool,
 }
 
 // The cosine is compared by its bits so the outcome structs that carry it
@@ -118,6 +130,7 @@ impl PartialEq for ReplacementCandidate {
             && self.excerpt == other.excerpt
             && self.cosine.to_bits() == other.cosine.to_bits()
             && self.newer == other.newer
+            && self.merged == other.merged
     }
 }
 
@@ -132,7 +145,10 @@ pub fn reported_cosine(cosine: f64) -> f64 {
 impl serde::Serialize for ReplacementCandidate {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
-        let mut st = s.serialize_struct("ReplacementCandidate", 5 + usize::from(self.newer))?;
+        let mut st = s.serialize_struct(
+            "ReplacementCandidate",
+            5 + usize::from(self.newer) + usize::from(self.merged),
+        )?;
         // The id recall shows, which `against` accepts, then the full one.
         st.serialize_field("id", &crate::recall::format::short_id(self.id))?;
         st.serialize_field("node_id", &self.id.0.to_string())?;
@@ -142,6 +158,9 @@ impl serde::Serialize for ReplacementCandidate {
         // Present only when true, so an unmarked row reads as before.
         if self.newer {
             st.serialize_field("newer", &true)?;
+        }
+        if self.merged {
+            st.serialize_field("merged", &true)?;
         }
         st.end()
     }
@@ -223,12 +242,24 @@ impl ReplacementReport {
             .any(|c| c.newer)
             .then(|| self.candidates.iter().map(|c| c.newer).collect())
     }
+
+    /// As [`Self::newer_flags`], for [merged](ReplacementCandidate::merged)
+    /// candidates.
+    pub fn merged_flags(&self) -> Option<Vec<bool>> {
+        self.candidates
+            .iter()
+            .any(|c| c.merged)
+            .then(|| self.candidates.iter().map(|c| c.merged).collect())
+    }
 }
 
 /// The marks a candidate's text line carries after its `for <id>`: empty
 /// for an unmarked candidate, so its line reads as before.
 fn marks(c: &ReplacementCandidate) -> String {
     let mut out = String::new();
+    if c.merged {
+        out.push_str("; merged with this write, may be replaced");
+    }
     if c.newer {
         out.push_str(
             "; newer: dated after this write, so it may replace this write, not the other \
@@ -253,16 +284,19 @@ pub fn eligible_pair(g: &Graph, new: &Concept, old: &Concept) -> bool {
 
 /// The candidates for the created concept `new` among `hits` (its vector
 /// hits as the store returned them, in any order), at or above `floor`,
-/// never naming a concept in `skip` (the write path passes the concept
-/// `new` merged into and every concept the call itself wrote or
-/// re-derived). Ranked by cosine, then id; at most
-/// [`REPLACEMENT_CANDIDATE_LIMIT`]. Empty when `new` is not a concept of `g`.
+/// never naming a concept in `skip` (the write path passes every concept
+/// the call itself wrote or re-derived). A candidate in `merged` (the write
+/// path passes the tied merge tier `new` merged with) is listed and marked
+/// [`merged`](ReplacementCandidate::merged). Ranked by cosine, then id; at
+/// most [`REPLACEMENT_CANDIDATE_LIMIT`]. Empty when `new` is not a concept
+/// of `g`.
 pub fn select(
     g: &Graph,
     new: NodeId,
     hits: &[Scored<NodeId>],
     floor: f64,
     skip: &[NodeId],
+    merged: &[NodeId],
 ) -> Vec<ReplacementCandidate> {
     let Some(Node::Concept(new_c)) = g.node(new) else {
         return Vec::new();
@@ -301,6 +335,7 @@ pub fn select(
             // Strictly later: the trigger's tie rule records no direction
             // on equal dates, so a tie is listed unmarked.
             newer: super::dated_at(g, old) > new_at,
+            merged: merged.contains(&old.id),
         })
         .collect()
 }

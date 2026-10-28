@@ -261,10 +261,11 @@ for each concept a hybrid derive created, `graph::suspected::replacement::select
 over its vector hits at or above the write's merge threshold, keeping the
 concepts `graph::suspected::replacement::eligible_pair` accepts (same
 session, type and repository scope, an eligible type, not an image, no
-`against`/`depends_on` either way), never the merged-into concept or one the
-call wrote, ranked by cosine then id and capped at
+`against`/`depends_on` either way), never one the call wrote; the merge
+tier the concept merged with is listed with `merged` set (every tied
+member); ranked by cosine then id and capped at
 `REPLACEMENT_CANDIDATE_LIMIT` (3). Each `ReplacementCandidate` has `new`,
-`id`, `excerpt`, `cosine` and `newer` (the existing concept is dated after
+`id`, `excerpt`, `cosine`, `merged` and `newer` (the existing concept is dated after
 the new one by `graph::suspected::dated_at`, strictly: a tie is not newer;
 it may replace the new concept, so it is not one to cite in `against`). It is informational: nothing is written for
 it. A sync derive leaves it empty. The write pipeline puts it on

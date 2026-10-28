@@ -6,11 +6,11 @@
 //! pair's first text into a graph, then judges the second as the write path
 //! does: one vector hit, the first text at the pair's BGE-M3 cosine (from
 //! `evidence/issue-198-trigger/cosines-bge-m3-self.json`). The hit is the
-//! concept the write merged into when the identifier guard passes and the
+//! concept the write merged with when the identifier guard passes and the
 //! cosine reaches the merge threshold (a single hit is the whole top tier),
-//! and is skipped then. Everything else is
-//! `lambo::graph::suspected::replacement::select`, the function the write
-//! path calls.
+//! and is then listed marked merged, as the write path lists it. Everything
+//! else is `lambo::graph::suspected::replacement::select`, the function the
+//! write path calls.
 //!
 //! A listed `supersedes` pair is a found predecessor; a listed
 //! `distinct_entity` pair is noise. A pair has one predecessor, so the
@@ -173,12 +173,28 @@ pub fn listed(row: &Row, floor: f64) -> bool {
     let (old_id, new_id) = (old.id, new.id);
     g.insert_concept(old, i.id).unwrap();
     g.insert_concept(new, i.id).unwrap();
-    let merged = same_identifiers(&row.a, &row.b) && row.cosine >= SEMANTIC_MATCH_THRESHOLD_DEFAULT;
-    let skip: Vec<NodeId> = if merged { vec![old_id] } else { Vec::new() };
     let hits = [Scored::new(old_id, row.cosine)];
-    select(&g, new_id, &hits, floor, &skip)
+    select(&g, new_id, &hits, floor, &[], &merged_with(row))
         .iter()
         .any(|c| c.id == old_id)
+}
+
+/// The merge tier the write of `row.b` merged with: the first text, when
+/// the identifier guard passes and the cosine reaches the merge threshold
+/// (a single hit is the whole top tier). Listed, marked merged.
+fn merged_with(row: &Row) -> Vec<NodeId> {
+    let merged = same_identifiers(&row.a, &row.b) && row.cosine >= SEMANTIC_MATCH_THRESHOLD_DEFAULT;
+    if merged {
+        vec![NodeId(uuid::Uuid::from_u64_pair(0x198c, 1))]
+    } else {
+        Vec::new()
+    }
+}
+
+/// Whether the write of `row.b` merged with `row.a` (so a listing of it is
+/// marked merged).
+pub fn merged(row: &Row) -> bool {
+    !merged_with(row).is_empty()
 }
 
 /// Per (split, relation), how many pairs are listed at `floor`.
@@ -233,4 +249,24 @@ fn main() {
         .map(|r| r.id.as_str())
         .collect();
     println!("supersedes not listed at the shipped floor: {missed:?}");
+    let t = SEMANTIC_MATCH_THRESHOLD_DEFAULT;
+    let merged_count = |split: &str, rel: &str| {
+        let of_split: Vec<&Row> = rows
+            .iter()
+            .filter(|r| r.split == split && r.relation == rel && listed(r, t))
+            .collect();
+        format!(
+            "{}/{}",
+            of_split.iter().filter(|r| merged(r)).count(),
+            of_split.len()
+        )
+    };
+    println!(
+        "listed at the shipped floor, of which merged: dev supersedes {}, dev distinct {}, \
+         held-out supersedes {}, held-out distinct {}",
+        merged_count("dev", "supersedes"),
+        merged_count("dev", "distinct_entity"),
+        merged_count("held_out", "supersedes"),
+        merged_count("held_out", "distinct_entity"),
+    );
 }

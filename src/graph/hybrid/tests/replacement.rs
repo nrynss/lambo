@@ -176,10 +176,12 @@ async fn a_suspected_pair_is_listed_too() {
     assert_eq!(listed(&out), vec![(old, 0.95)]);
 }
 
-/// The concept the write merged into is not listed; another close hit
-/// below the merge tier is.
+/// M2: the concept the write merged with is listed, marked merged (a
+/// similarity merge declares no replacement: a reworded reversal with no
+/// conflicting identifiers merges); another close hit below the merge tier
+/// is listed unmarked.
 #[tokio::test]
-async fn the_merged_into_concept_is_not_listed() {
+async fn the_merged_with_concept_is_listed_and_marked() {
     let (graph, [i0, i1, i2]) = graph_with_interactions();
     let a = derive_at(
         &graph,
@@ -202,13 +204,59 @@ async fn the_merged_into_concept_is_not_listed() {
     let out = derive_at(
         &graph,
         i2,
-        "the retry policy now uses capped backoff",
+        "the retry policy no longer uses exponential backoff",
         ConceptType::Logic,
         vec![hit(a, 0.95), hit(b, 0.9)],
     )
     .await;
     assert_eq!(out.semantic_merged, vec![a]);
-    assert_eq!(listed(&out), vec![(b, 0.9)]);
+    assert_eq!(listed(&out), vec![(a, 0.95), (b, 0.9)]);
+    let merged: Vec<bool> = out
+        .replacement_candidates
+        .iter()
+        .map(|c| c.merged)
+        .collect();
+    assert_eq!(merged, vec![true, false]);
+    graph.read().assert_invariants().unwrap();
+}
+
+/// m3: with a tied merge tier, every member is listed and marked merged,
+/// not only the one the stable tie-break sent the edge to.
+#[tokio::test]
+async fn every_tied_merge_target_is_marked_merged() {
+    let (graph, [i0, i1, i2]) = graph_with_interactions();
+    let mut olds = Vec::new();
+    for (i, content) in [
+        (i0, "the retry policy uses exponential backoff"),
+        (i0, "the retry policy uses linear backoff"),
+        (i1, "the retry policy gives up after the budget"),
+    ] {
+        olds.push(
+            derive_at(&graph, i, content, ConceptType::Logic, Vec::new())
+                .await
+                .created[0],
+        );
+    }
+    let out = derive_at(
+        &graph,
+        i2,
+        "the retry policy now uses capped backoff",
+        ConceptType::Logic,
+        vec![hit(olds[0], 0.95), hit(olds[1], 0.95), hit(olds[2], 0.9)],
+    )
+    .await;
+    assert_eq!(out.semantic_merged.len(), 1);
+    assert!(olds[..2].contains(&out.semantic_merged[0]));
+    let mut marks: Vec<(NodeId, bool)> = out
+        .replacement_candidates
+        .iter()
+        .map(|c| (c.id, c.merged))
+        .collect();
+    marks[..2].sort_by_key(|(id, _)| id.0);
+    let mut tier = vec![(olds[0], true), (olds[1], true)];
+    tier.sort_by_key(|(id, _)| id.0);
+    tier.push((olds[2], false));
+    assert_eq!(marks, tier);
 }
 
 /// Another type, or an ineligible one, is never listed.

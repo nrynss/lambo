@@ -745,6 +745,7 @@ fn ledger_facts_carry_replacement_candidates_only_when_listed() {
         excerpt: "concept text that must not reach the ledger".into(),
         cosine,
         newer: false,
+        merged: false,
     };
     let derive = AppliedSummary {
         stale_report: None,

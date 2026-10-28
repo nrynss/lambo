@@ -23,10 +23,11 @@ In regime: both texts the same `Logic`, `Constraint` or `Observation` type,
 not under review, labelled `supersedes` or `distinct_entity`, with a
 self-framed BGE-M3 cosine (`../issue-198-trigger/cosines-bge-m3-self.json`).
 Each pair is judged by `replacement::select`, the function the write path
-calls: the second text's write with the first as its one vector hit. The hit
-is skipped as the merge target when the identifier guard passes and the
-cosine reaches 0.85. A listed `supersedes` pair is a found predecessor; a
-listed `distinct_entity` pair is noise.
+calls: the second text's write with the first as its one vector hit. When
+the identifier guard passes and the cosine reaches 0.85 the write merges
+with the hit, which is then listed marked `merged`, as the write path lists
+it. A listed `supersedes` pair is a found predecessor; a listed
+`distinct_entity` pair is noise.
 
 | Floor | Dev supersedes | Dev distinct | Held-out supersedes | Held-out distinct |
 |---|---:|---:|---:|---:|
@@ -37,7 +38,11 @@ listed `distinct_entity` pair is noise.
 | 0.88 | 35/43 | 31/47 | 25/27 | 20/30 |
 
 The eight supersessions not listed at 0.85 are all reworded pairs below it
-(0.66 to 0.82); none is lost to a merge or a type refusal. These pairs are
+(0.66 to 0.82); none is lost to a type refusal. No in-regime pair merges
+at 0.85 (each pair at or above it names different identifiers), so these
+counts are the same whether the merged-with concept is listed or not; the
+measurement output's last line pins that (0 merged of every listed
+count). These pairs are
 authored, so their `distinct_entity` pairs are near-identical templates:
 they show the floor cannot separate a sibling from a predecessor by cosine,
 which is why the list is handed to the writer and nothing is recorded. A
@@ -56,6 +61,15 @@ Each concept's write was replayed against the concepts written before it,
 with the write path's rules: top-8 hits, merge target skipped, same type,
 eligible type, no `against`/`depends_on`. No concept text, id or per-pair
 row leaves the private copy; the numbers below are all that is recorded.
+
+**These aggregates predate two later changes and were not re-run against
+the private store.** The list now includes the concept a write merged with
+(marked `merged`) instead of skipping it, so a write that merged can list
+one more candidate than the replay counted, and the length and non-empty
+rates below are lower bounds for such writes. A candidate dated after the
+write is now marked `newer` rather than read as a predecessor (see the true
+predecessor paragraph). The labelled supersessions are guard-refused pairs,
+which never merge, so the four found at rank 1 are unaffected.
 
 **The true predecessor.** All 4 labelled supersessions are listed, at rank
 1, on the later of the two writes (cosines 0.857 to 0.899). In 2

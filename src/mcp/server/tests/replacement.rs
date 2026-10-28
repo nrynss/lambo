@@ -194,3 +194,33 @@ async fn a_backfilled_write_marks_a_later_candidate_newer() {
     );
     s.mem.close().await.unwrap();
 }
+
+/// M2 on the wire: a reworded reversal with no conflicting identifiers
+/// merges with what it reverses, and the receipt still lists that concept,
+/// with `"merged": true` and a text line saying it may be replaced.
+#[tokio::test]
+async fn a_merged_with_concept_is_listed_marked_merged() {
+    let s = hybrid_server("mcp-replacement-merged").await;
+    let first = settled(
+        &s,
+        &ack(&s, "the retry policy uses exponential backoff").await,
+    )
+    .await;
+    let old = first["created"][0].as_str().unwrap().to_string();
+    let r = settled(
+        &s,
+        &ack(&s, "the retry policy no longer uses exponential backoff").await,
+    )
+    .await;
+    assert_eq!(r["semantic_merged"], 1, "{r}");
+    let row = &r["replacement_candidates"]["candidates"][0];
+    assert_eq!(row["node_id"], old, "{r}");
+    assert_eq!(row["merged"], true, "{r}");
+    assert!(row.get("newer").is_none(), "{r}");
+    let detail = r["detail"].as_str().unwrap();
+    assert!(
+        detail.contains("; merged with this write, may be replaced)"),
+        "{detail}"
+    );
+    s.mem.close().await.unwrap();
+}

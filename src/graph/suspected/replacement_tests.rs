@@ -91,7 +91,7 @@ fn hit(n: u64, score: f64) -> Scored<NodeId> {
 }
 
 fn listed(g: &Graph, hits: &[Scored<NodeId>], skip: &[NodeId]) -> Vec<(NodeId, f64)> {
-    select(g, id(0), hits, 0.85, skip)
+    select(g, id(0), hits, 0.85, skip, &[])
         .into_iter()
         .map(|c| {
             assert_eq!(c.new, id(0));
@@ -107,7 +107,7 @@ const OLD: &str = "lane C prefetches across jobs with two limits";
 fn a_close_same_type_hit_is_listed_with_its_excerpt() {
     use ConceptType::Logic;
     let g = graph(concept(0, NEW, Logic), vec![concept(1, OLD, Logic)]);
-    let got = select(&g, id(0), &[hit(1, 0.9)], 0.85, &[]);
+    let got = select(&g, id(0), &[hit(1, 0.9)], 0.85, &[], &[]);
     assert_eq!(got.len(), 1);
     assert_eq!(got[0].id, id(1));
     assert_eq!(got[0].excerpt, crate::recall::format::excerpt(OLD));
@@ -223,10 +223,10 @@ fn an_already_cited_concept_is_not_listed() {
     assert_eq!(listed(&g, &[hit(1, 0.9)], &[]).len(), 1);
 }
 
-/// The merged-into concept (and anything else the caller skips) is never
-/// listed; the next hit takes its place.
+/// A skipped concept (the write path skips what the same call wrote) is
+/// never listed; the next hit takes its place.
 #[test]
-fn the_merged_into_hit_is_skipped() {
+fn a_skipped_hit_is_not_listed() {
     use ConceptType::Logic;
     let g = graph(
         concept(0, NEW, Logic),
@@ -235,6 +235,84 @@ fn the_merged_into_hit_is_skipped() {
     let hits = [hit(1, 0.95), hit(2, 0.9)];
     assert_eq!(listed(&g, &hits, &[id(1)]), vec![(id(2), 0.9)]);
     assert_eq!(listed(&g, &hits, &[]).len(), 2);
+}
+
+/// M2: the concepts the write merged with are listed, marked `merged`
+/// (every tied member, m3), ranked with the rest; the others are not
+/// marked. A merged concept the call also restated is still skipped.
+#[test]
+fn the_merged_with_concepts_are_listed_and_marked() {
+    use ConceptType::Logic;
+    let g = graph(
+        concept(0, NEW, Logic),
+        vec![
+            concept(1, OLD, Logic),
+            concept(2, "another rule", Logic),
+            concept(3, "a third rule", Logic),
+        ],
+    );
+    let hits = [hit(1, 0.95), hit(2, 0.95), hit(3, 0.9)];
+    let got = select(&g, id(0), &hits, 0.85, &[], &[id(1), id(2)]);
+    let marks: Vec<(NodeId, bool)> = got.iter().map(|c| (c.id, c.merged)).collect();
+    assert_eq!(marks, vec![(id(1), true), (id(2), true), (id(3), false)]);
+    let got = select(&g, id(0), &hits, 0.85, &[id(1)], &[id(1), id(2)]);
+    let marks: Vec<(NodeId, bool)> = got.iter().map(|c| (c.id, c.merged)).collect();
+    assert_eq!(marks, vec![(id(2), true), (id(3), false)]);
+}
+
+/// The `merged` mark on every surface: `"merged": true` on the wire only
+/// when set, a text line worded "merged with ..., may be replaced", and
+/// the ledger's aligned flags only when a row is marked.
+#[test]
+fn the_merged_mark_on_the_wire_text_and_ledger() {
+    let plain = ReplacementCandidate {
+        new: id(0),
+        id: NodeId(Uuid::from_u64_pair(0xabcd_ef01_0000_0000, 1)),
+        excerpt: "an older rule".into(),
+        cosine: 0.9,
+        newer: false,
+        merged: false,
+    };
+    let merged = ReplacementCandidate {
+        id: NodeId(Uuid::from_u64_pair(0x1234_5678_0000_0000, 1)),
+        excerpt: "a merged rule".into(),
+        cosine: 0.95,
+        merged: true,
+        ..plain.clone()
+    };
+    let quiet = ReplacementReport::for_receipt(std::slice::from_ref(&plain)).unwrap();
+    assert!(serde_json::to_value(&quiet).unwrap()["candidates"][0]
+        .get("merged")
+        .is_none());
+    assert_eq!(quiet.merged_flags(), None);
+
+    let report = ReplacementReport::for_receipt(&[merged.clone(), plain]).unwrap();
+    let wire = serde_json::to_value(&report).unwrap();
+    assert_eq!(wire["candidates"][0]["merged"], true, "{wire}");
+    assert!(wire["candidates"][1].get("merged").is_none(), "{wire}");
+    assert_eq!(report.merged_flags(), Some(vec![true, false]));
+    let new = crate::recall::format::short_id(id(0));
+    let text = report.describe();
+    assert!(
+        text.contains(&format!(
+            "\n  - 12345678 \"a merged rule\" (cosine 0.9500, for {new}; merged with this \
+             write, may be replaced)"
+        )),
+        "{text}"
+    );
+    // Both marks on one row, merged first.
+    let both = ReplacementReport::for_receipt(&[ReplacementCandidate {
+        newer: true,
+        ..merged
+    }])
+    .unwrap();
+    assert!(
+        both.describe().contains(&format!(
+            "for {new}; merged with this write, may be replaced; newer: dated after"
+        )),
+        "{}",
+        both.describe()
+    );
 }
 
 /// Itself, another session's concept, an image concept, and an id that is
@@ -252,7 +330,7 @@ fn never_itself_another_session_an_image_or_a_non_concept() {
     });
     let g = graph(concept(0, NEW, Logic), vec![image]);
     assert!(listed(&g, &[hit(0, 1.0), hit(2, 0.9), hit(9, 0.9)], &[]).is_empty());
-    assert!(select(&g, id(7), &[hit(0, 0.9)], 0.85, &[]).is_empty());
+    assert!(select(&g, id(7), &[hit(0, 0.9)], 0.85, &[], &[]).is_empty());
     // Another session's concept, judged by the predicate.
     let new = concept(0, NEW, Logic);
     let mut other = concept(1, OLD, Logic);
@@ -272,6 +350,7 @@ fn the_receipt_report() {
         excerpt: "an older rule".into(),
         cosine: 0.867_891,
         newer: false,
+        merged: false,
     };
     let report = ReplacementReport::for_receipt(std::slice::from_ref(&c)).unwrap();
     assert_eq!(report.total, 1);
@@ -368,7 +447,7 @@ fn dated_graph(new_at: (i64, Option<i64>), old_at: (i64, Option<i64>)) -> Graph 
 fn a_later_dated_candidate_is_marked_newer_both_ways_and_a_tie_is_not() {
     let newer = |new_at, old_at| {
         let g = dated_graph(new_at, old_at);
-        let got = select(&g, id(0), &[hit(1, 0.9)], 0.85, &[]);
+        let got = select(&g, id(0), &[hit(1, 0.9)], 0.85, &[], &[]);
         assert_eq!(got.len(), 1, "a newer candidate is still listed");
         got[0].newer
     };
@@ -397,6 +476,7 @@ fn the_newer_mark_on_the_wire_text_and_ledger() {
         excerpt: "an older rule".into(),
         cosine: 0.9,
         newer: false,
+        merged: false,
     };
     let later = ReplacementCandidate {
         id: NodeId(Uuid::from_u64_pair(0x1234_5678_0000_0000, 1)),

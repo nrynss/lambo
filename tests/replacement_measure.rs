@@ -38,8 +38,15 @@ fn the_shipped_floor_holds_its_measured_counts() {
     assert_eq!(count(&lower, "dev", "supersedes"), c(39, 43));
     assert_eq!(count(&lower, "held_out", "supersedes"), c(25, 27));
 
+    // No in-regime pair merges at the shipped floor (each pair at or above
+    // it names different identifiers), so listing the merged-with concept
+    // (marked merged) moves none of the counts above.
+    assert!(rows
+        .iter()
+        .all(|r| !(measure::merged(r) && measure::listed(r, 0.85))));
+
     // Every supersession missed at the shipped floor is a reworded one
-    // below it, never a merge or a type refusal.
+    // below it, never a type refusal.
     for r in rows.iter().filter(|r| r.relation == "supersedes") {
         if !measure::listed(r, 0.85) {
             assert!(r.cosine < 0.85, "{} at {}", r.id, r.cosine);

@@ -997,6 +997,11 @@ pub fn validate_embed_budget(
     check_embed_budget(&items, &parent_ends)
 }
 
+/// #198 part c: a created concept, its vector hits at or above the floor,
+/// and the merge tier it merged with (empty for a fresh concept), judged
+/// for replacement candidates at commit.
+type Replacing<'a> = (NodeId, &'a [crate::types::Scored<NodeId>], Vec<NodeId>);
+
 /// [`derive`](fn@derive)'s plan/embed/write loop, after [`validate_limits`].
 #[allow(clippy::too_many_arguments)]
 async fn derive_planned(
@@ -1543,7 +1548,9 @@ async fn derive_planned(
             let mut suspects: Vec<(NodeId, &[NodeId])> = Vec::new();
             // #198 part c: the concepts this call created, with their
             // vector hits at or above the floor, judged after step 8.
-            let mut replacing: Vec<(NodeId, &[crate::types::Scored<NodeId>])> = Vec::new();
+            // With them, the merge tier the concept merged with (empty for
+            // a fresh concept), listed and marked merged.
+            let mut replacing: Vec<Replacing<'_>> = Vec::new();
 
             for ((((content, concept_type, _key, _matched), res), refused), near) in items
                 .iter()
@@ -1643,7 +1650,7 @@ async fn derive_planned(
                             suspects.push((id, refused));
                         }
                         if !near.is_empty() {
-                            replacing.push((id, near));
+                            replacing.push((id, near, Vec::new()));
                         }
                     }
                     Resolution::HybridMerge {
@@ -1744,7 +1751,14 @@ async fn derive_planned(
                             suspects.push((id, refused));
                         }
                         if !near.is_empty() {
-                            replacing.push((id, near));
+                            // Every tied member, not only the edge's
+                            // target: the tie-break is not a judgement.
+                            let merged = if can_merge {
+                                targets.clone()
+                            } else {
+                                Vec::new()
+                            };
+                            replacing.push((id, near, merged));
                         }
                     }
                 }
@@ -1902,20 +1916,20 @@ async fn derive_planned(
             // Step 9 (#198 part c) — replacement candidates: for each
             // concept this call created, the hits at or above the floor
             // that may be what it replaces, judged on the graph as
-            // committed (so a relation this call declared, or the concept
-            // it merged into, is excluded). A concept this call wrote or
-            // re-derived is never one: the writer just restated it.
+            // committed (so a relation this call declared is excluded). A
+            // concept this call wrote or re-derived is never one: the
+            // writer just restated it. The merge tier is listed, marked
+            // merged: a similarity merge declares no replacement.
             // Informational only: it reads the graph and writes nothing.
-            for (new, near) in replacing {
-                let mut skip = call_nodes.clone();
-                skip.extend(cited.merged_into.get(&new).copied());
+            for (new, near, merged) in replacing {
                 outcome.replacement_candidates.extend(
                     crate::graph::suspected::replacement::select(
                         g,
                         new,
                         near,
                         semantic_match_threshold,
-                        &skip,
+                        &call_nodes,
+                        &merged,
                     ),
                 );
             }

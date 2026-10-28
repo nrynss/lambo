@@ -8,3 +8,4 @@ floor | dev supersedes | dev distinct | held-out supersedes | held-out distinct
 0.86 | 36/43 | 33/47 | 25/27 | 20/30
 0.88 | 35/43 | 31/47 | 25/27 | 20/30
 supersedes not listed at the shipped floor: ["p-emb-01-rbd1", "p-emb-03-rbd1", "p-cal-03-rbd1", "p-top-01-rbd1", "p-srv-04-rbd1", "p-rel-04-rbd1", "p-fnd-05-rbd1", "p-198-s16"]
+listed at the shipped floor, of which merged: dev supersedes 0/37, dev distinct 0/34, held-out supersedes 0/25, held-out distinct 0/23

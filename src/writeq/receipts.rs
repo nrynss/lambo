@@ -488,6 +488,10 @@ impl AppliedSummary {
             if let Some(newer) = report.newer_flags() {
                 facts.insert("replacement_newer".into(), serde_json::Value::from(newer));
             }
+            // Likewise for a candidate the write merged with.
+            if let Some(merged) = report.merged_flags() {
+                facts.insert("replacement_merged".into(), serde_json::Value::from(merged));
+            }
         }
         facts
     }
