@@ -14,7 +14,7 @@
 //!   ([`Receipts::expire`], [`Receipts::evict`]);
 //! * settle first, sweep second ([`settle_one`]), so a sweep can never take
 //!   an outcome with it;
-//! * receipts are scoped to the agent that created them (J1).
+//! * receipts are scoped to their agent and delivery session.
 
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
@@ -400,6 +400,8 @@ impl WriteKind {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AppliedSummary {
     pub kind: WriteKind,
+    /// Direct dependencies currently stale on targets of this write's contradictions.
+    pub stale_report: Option<crate::daemon::contradiction::StaleReport>,
     /// One-line human summary, the same sentence the synchronous path returns.
     pub summary: String,
     /// Node ids created, truncated to [`MAX_RECEIPT_IDS`].
@@ -532,9 +534,10 @@ pub enum ReceiptAnswer {
     /// close (or crash-with-flushed-tail) as a durable intent, and a later
     /// serve of the session applied it — or applied it before restarting and
     /// the consumed intent record carried the fact across. The payload is the
-    /// applied summary sentence; node ids are not retained across the restart
-    /// (recall finds the concepts).
-    AppliedAfterRestart(String),
+    /// applied summary sentence and, when this process performed the replay,
+    /// its bounded stale report. Consumed durable rows retain only the sentence;
+    /// a later restart cannot recover the original report.
+    AppliedAfterRestart(String, Option<crate::daemon::contradiction::StaleReport>),
     /// Not applied before this session closed, and **not lost**: the validated
     /// job is recorded as a durable intent, and the next serve of this session
     /// re-attempts it — idempotently, in submission order (J3 durable
@@ -598,7 +601,7 @@ impl ReceiptAnswer {
             ReceiptAnswer::PendingReplay => "pending_replay",
             ReceiptAnswer::Applied(_) => "applied",
             ReceiptAnswer::Failed(_) => "failed",
-            ReceiptAnswer::AppliedAfterRestart(_) => "applied_after_restart",
+            ReceiptAnswer::AppliedAfterRestart(..) => "applied_after_restart",
             ReceiptAnswer::IntentRecorded => "intent_durable",
             ReceiptAnswer::CloseUnflushed => "close_unflushed",
             ReceiptAnswer::Dropped(_) => "dropped",
@@ -624,7 +627,7 @@ impl ReceiptAnswer {
             ReceiptAnswer::PendingReplay => 1,
             ReceiptAnswer::Applied(_) => 2,
             ReceiptAnswer::Failed(_) => 3,
-            ReceiptAnswer::AppliedAfterRestart(_) => 4,
+            ReceiptAnswer::AppliedAfterRestart(..) => 4,
             ReceiptAnswer::IntentRecorded => 5,
             ReceiptAnswer::Dropped(_) => 6,
             ReceiptAnswer::Expired => 7,
@@ -646,12 +649,53 @@ impl ReceiptAnswer {
                                              later one; ask again, and recall rather than \
                                              re-deriving."
                 .into(),
-            ReceiptAnswer::Applied(s) => format!("applied — {}", s.summary),
+            ReceiptAnswer::Applied(s) => {
+                let mut detail = format!("applied — {}", s.summary);
+                if let Some(report) = &s.stale_report {
+                    detail.push_str(&format!("; {} stale direct dependenc(ies)", report.total));
+                    for entry in &report.dependents {
+                        detail.push_str(&format!(
+                            "\n  - {}: {} (cites {})",
+                            entry.id, entry.content, entry.cited_id
+                        ));
+                    }
+                    if report.total > report.dependents.len() {
+                        detail.push_str(&format!(
+                            "\n  ({} more)",
+                            report.total - report.dependents.len()
+                        ));
+                    }
+                }
+                detail
+            }
             ReceiptAnswer::Failed(why) => format!("FAILED, nothing was written — {why}"),
-            ReceiptAnswer::AppliedAfterRestart(summary) => format!(
-                "applied after a restart — {summary} (confirmed from the durable intent \
-                 record; recall to see the concepts)"
-            ),
+            ReceiptAnswer::AppliedAfterRestart(summary, report) => {
+                if let Some(report) = report {
+                    let mut detail = format!(
+                        "applied after a restart — {summary}; {} stale direct dependenc(ies)",
+                        report.total
+                    );
+                    for entry in &report.dependents {
+                        detail.push_str(&format!(
+                            "\n  - {}: {} (cites {})",
+                            entry.id, entry.content, entry.cited_id
+                        ));
+                    }
+                    if report.total > report.dependents.len() {
+                        detail.push_str(&format!(
+                            "\n  ({} more)",
+                            report.total - report.dependents.len()
+                        ));
+                    }
+                    detail
+                } else {
+                    format!(
+                        "applied after a restart — {summary} (confirmed from the durable intent \
+                 record; recall to see the concepts; stale report details are not retained \
+                 across restart — use lambo_stale for the current state)"
+                    )
+                }
+            }
             ReceiptAnswer::IntentRecorded => "not applied before this session closed — the \
                                               validated write is recorded as a DURABLE INTENT \
                                               and the next serve of this session will \
@@ -681,11 +725,38 @@ impl ReceiptAnswer {
             ReceiptAnswer::NeverIssued => {
                 "never issued — this session has never handed out that receipt id".into()
             }
-            ReceiptAnswer::Forbidden => {
-                "held by another agent — receipts are scoped to the agent that created them".into()
-            }
+            ReceiptAnswer::Forbidden => "receipt unavailable to this agent and session".into(),
         }
     }
+}
+
+// Stored in the existing durable outcome column. A tagged JSON envelope keeps
+// the summary and routing metadata together when the cited payload is scrubbed.
+const DESTINATION_PREFIX: &str = "lambo-receipt-destination-v1:";
+pub(super) fn durable_summary(summary: &str, destination: Option<&SessionId>) -> String {
+    match destination {
+        Some(destination) => format!(
+            "{}{}",
+            DESTINATION_PREFIX,
+            serde_json::json!({"summary": summary, "destination": destination})
+        ),
+        None => summary.to_owned(),
+    }
+}
+pub(super) fn unpack_durable_summary(summary: &str) -> (String, Option<SessionId>) {
+    if let Some(json) = summary.strip_prefix(DESTINATION_PREFIX)
+        && let Ok(value) = serde_json::from_str::<serde_json::Value>(json)
+        && let (Some(text), Some(destination)) = (
+            value.get("summary").and_then(|v| v.as_str()),
+            value
+                .get("destination")
+                .cloned()
+                .and_then(|v| serde_json::from_value(v).ok()),
+        )
+    {
+        return (text.to_owned(), Some(destination));
+    }
+    (summary.to_owned(), None)
 }
 
 pub(super) struct Entry {
@@ -868,34 +939,35 @@ impl WritePipeline {
     /// Look up a receipt for `agent`.
     ///
     /// Every non-answer is a *specific* non-answer: see [`ReceiptAnswer`].
+    /// Trusted in-process lookup without a caller session. MCP callers must
+    /// use `lookup_for`, which enforces the delivery destination.
     pub fn lookup(&self, agent: &AgentId, id: ReceiptId) -> ReceiptAnswer {
         let mut r = self.receipts.lock();
         r.expire((self.clock)());
         if let Some(entry) = r.entries.get(&id) {
-            if &entry.agent != agent {
-                return ReceiptAnswer::Forbidden;
-            }
-            return entry.answer.clone();
+            return if &entry.agent == agent {
+                entry.answer.clone()
+            } else {
+                ReceiptAnswer::Forbidden
+            };
         }
         drop(r);
-        // J3: a receipt from a previous process whose fate the durable intent
-        // record carries answers its truth — `pending_replay` while its replay
-        // is owed, `applied_after_restart`/`failed` once decided — instead of
-        // falling through to `restart_lost`.
-        if let Some((owner, answer)) = self.restart.lock().get(&id) {
-            if owner != agent {
-                return ReceiptAnswer::Forbidden;
-            }
-            return answer.clone();
+        if let Some((owner, _, answer)) = self.restart.lock().get(&id) {
+            return if owner == agent {
+                answer.clone()
+            } else {
+                ReceiptAnswer::Forbidden
+            };
         }
         if id.epoch != self.epoch {
             return ReceiptAnswer::RestartLost;
         }
         let r = self.receipts.lock();
         if id.seq > r.highest_seq {
-            return ReceiptAnswer::NeverIssued;
+            ReceiptAnswer::NeverIssued
+        } else {
+            ReceiptAnswer::Expired
         }
-        ReceiptAnswer::Expired
     }
 
     /// Wait for a receipt to settle — the opt-in synchrony surface.
@@ -908,6 +980,20 @@ impl WritePipeline {
     /// this process holds, or [`ReceiptAnswer::PendingReplay`] for a replay-owed
     /// id — either is honest, and neither is a failure.
     pub async fn wait(&self, agent: &AgentId, id: ReceiptId, budget: Duration) -> ReceiptAnswer {
+        self.wait_impl(agent, id, budget, None).await
+    }
+
+    async fn wait_impl(
+        &self,
+        agent: &AgentId,
+        id: ReceiptId,
+        budget: Duration,
+        destination: Option<Option<&SessionId>>,
+    ) -> ReceiptAnswer {
+        let lookup = || match destination {
+            Some(deliver_to) => self.lookup_for(agent, deliver_to, id),
+            None => self.lookup(agent, id),
+        };
         let budget = budget.min(RECEIPT_WAIT_MAX);
         // The agent's share first (#11 review P3-1), so an agent at its share
         // never takes a global slot another agent could have had.
@@ -918,7 +1004,7 @@ impl WritePipeline {
                 "write queue: this agent already holds {MAX_RECEIPT_WAITS_PER_AGENT} receipt \
                  waits; answering without waiting"
             );
-            return self.lookup(agent, id);
+            return lookup();
         };
         let _slot = match self.wait_slots.clone().try_acquire_owned() {
             Ok(slot) => slot,
@@ -930,7 +1016,7 @@ impl WritePipeline {
                     "write queue: {MAX_CONCURRENT_RECEIPT_WAITS} receipt waits already in \
                      flight; answering without waiting"
                 );
-                return self.lookup(agent, id);
+                return lookup();
             }
         };
         let deadline = tokio::time::Instant::now() + budget;
@@ -944,7 +1030,7 @@ impl WritePipeline {
             // whole `RECEIPT_WAIT_MAX` on a write that had already landed.
             let mut notified = Box::pin(self.settled.notified());
             notified.as_mut().enable();
-            let answer = self.lookup(agent, id);
+            let answer = lookup();
             if answer.is_settled() {
                 return answer;
             }
@@ -961,10 +1047,10 @@ impl WritePipeline {
             // settle that landed after the one above is not reported stale
             // (#11 review round 2, F1).
             if self.closed_to_settles() {
-                return self.lookup(agent, id);
+                return lookup();
             }
             if tokio::time::timeout_at(deadline, notified).await.is_err() {
-                return self.lookup(agent, id);
+                return lookup();
             }
         }
     }
@@ -987,17 +1073,7 @@ impl WritePipeline {
     /// message. Take-once is unaffected: the receipt is delivered exactly once
     /// either way, and this is the delivery.
     pub fn mark_delivered(&self, agent: &AgentId, id: ReceiptId) {
-        let mut r = self.receipts.lock();
-        let empty = match r.undelivered.get_mut(agent) {
-            Some(queue) => {
-                queue.retain(|held| held != &id);
-                queue.is_empty()
-            }
-            None => false,
-        };
-        if empty {
-            r.undelivered.remove(agent);
-        }
+        self.mark_delivered_for(agent, None, id);
     }
 
     /// Take up to [`MAX_PIGGYBACK_RECEIPTS`] settled-and-undelivered receipts
@@ -1068,14 +1144,36 @@ impl WritePipeline {
         deliver_to: Option<&SessionId>,
         id: ReceiptId,
     ) -> ReceiptAnswer {
-        if self.delivered_elsewhere(deliver_to, id) {
-            return ReceiptAnswer::Forbidden;
+        let mut receipts = self.receipts.lock();
+        receipts.expire((self.clock)());
+        if let Some(entry) = receipts.entries.get(&id) {
+            if &entry.agent != agent || entry.deliver_to.as_ref() != deliver_to {
+                return ReceiptAnswer::Forbidden;
+            }
+            return entry.answer.clone();
         }
-        self.lookup(agent, id)
+        drop(receipts);
+        if let Some((owner, destination, answer)) = self.restart.lock().get(&id) {
+            // Unknown legacy destinations fail closed: the agent id alone is
+            // shared across sessions and cannot authenticate a destination.
+            let caller = deliver_to.unwrap_or(&self.ctx.session);
+            if owner != agent || destination.as_ref() != Some(caller) {
+                return ReceiptAnswer::Forbidden;
+            }
+            return answer.clone();
+        }
+        if id.epoch != self.epoch {
+            return ReceiptAnswer::RestartLost;
+        }
+        let receipts = self.receipts.lock();
+        if id.seq > receipts.highest_seq {
+            ReceiptAnswer::NeverIssued
+        } else {
+            ReceiptAnswer::Expired
+        }
     }
 
-    /// [`WritePipeline::wait`] for a caller that delivers to `deliver_to`;
-    /// see [`WritePipeline::lookup_for`].
+    /// Wait with destination authorization on every lookup, including wakeups and timeout.
     pub async fn wait_for(
         &self,
         agent: &AgentId,
@@ -1083,19 +1181,34 @@ impl WritePipeline {
         id: ReceiptId,
         budget: Duration,
     ) -> ReceiptAnswer {
-        if self.delivered_elsewhere(deliver_to, id) {
-            return ReceiptAnswer::Forbidden;
-        }
-        self.wait(agent, id, budget).await
+        self.wait_impl(agent, id, budget, Some(deliver_to)).await
     }
 
-    /// Whether this pipeline holds `id` for a destination other than
-    /// `deliver_to`.
-    fn delivered_elsewhere(&self, deliver_to: Option<&SessionId>, id: ReceiptId) -> bool {
-        self.receipts
-            .lock()
+    #[cfg(all(test, feature = "store-memory", feature = "embed-fixture"))]
+    pub(crate) fn forget_live_receipt_for_test(&self, id: ReceiptId) {
+        self.receipts.lock().forget(&id);
+    }
+
+    /// Remove an explicitly delivered receipt only for its actual destination.
+    pub fn mark_delivered_for(
+        &self,
+        agent: &AgentId,
+        deliver_to: Option<&SessionId>,
+        id: ReceiptId,
+    ) {
+        let mut r = self.receipts.lock();
+        if !r
             .entries
             .get(&id)
-            .is_some_and(|e| e.deliver_to.as_ref() != deliver_to)
+            .is_some_and(|e| &e.agent == agent && e.deliver_to.as_ref() == deliver_to)
+        {
+            return;
+        }
+        if let Some(queue) = r.undelivered.get_mut(agent) {
+            queue.retain(|held| *held != id);
+            if queue.is_empty() {
+                r.undelivered.remove(agent);
+            }
+        }
     }
 }

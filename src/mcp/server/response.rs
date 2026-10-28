@@ -301,6 +301,26 @@ pub(super) fn attach_receipts(
         ));
     }
     out.content.push(ContentBlock::text(text));
+    let reports: Vec<_> = taken.iter().filter_map(|(id, answer)| {
+        let report = match answer {
+            ReceiptAnswer::Applied(s) => s.stale_report.as_ref(),
+            ReceiptAnswer::AppliedAfterRestart(_, report) => report.as_ref(),
+            _ => None,
+        }?;
+        Some(serde_json::json!({"id": id.to_string(), "state": answer.tag(), "stale_report": report}))
+    }).collect();
+    if !reports.is_empty() {
+        if out.structured_content.is_none() {
+            out.structured_content = Some(serde_json::json!({}));
+        }
+        if let Some(obj) = out
+            .structured_content
+            .as_mut()
+            .and_then(|v| v.as_object_mut())
+        {
+            obj.insert("write_receipts".into(), serde_json::json!(reports));
+        }
+    }
 }
 
 /// Run a tool body with panic containment (R1/T82-5).

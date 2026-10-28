@@ -698,6 +698,7 @@ fn mcp_stdio_publishes_the_spec_tools_and_the_image_tool_and_refuses_a_client_ti
         "tools/list must succeed, not error: {listed}"
     );
     let mut expected: Vec<&str> = SEVEN_TOOLS.to_vec();
+    expected.push("lambo_stale");
     expected.push("lambo_derive_image");
     expected.sort();
     assert_eq!(

@@ -77,6 +77,7 @@ async fn i1_every_tool_call_appends_exactly_one_parseable_ledger_line() {
     )
     .await;
     call(&s, "lambo_saints", json!({"agent_id": "agent-a"})).await;
+    call(&s, "lambo_stale", json!({"agent_id": "agent-a"})).await;
     call(&s, "lambo_stats", json!({"agent_id": "agent-a"})).await;
     call(
         &s,

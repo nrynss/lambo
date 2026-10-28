@@ -618,7 +618,7 @@ async fn every_session_of_one_serve_lists_the_same_tools() {
             "{label}: {:?}",
             in_a.keys()
         );
-        assert_eq!(in_a.len(), if image_listed { 8 } else { 7 }, "{label}");
+        assert_eq!(in_a.len(), if image_listed { 9 } else { 8 }, "{label}");
         // #22 PR 6: `lambo_recall` publishes `image` and `query_vector` in
         // every deployment (a deployment that cannot serve one refuses it
         // by name), so its schema is the same everywhere too.

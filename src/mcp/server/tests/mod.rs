@@ -271,6 +271,7 @@ async fn call_raw(s: &LamboServer, name: &str, args: serde_json::Value) -> CallT
         "lambo_reserve" => s.lambo_reserve(parse(args)).await,
         "lambo_inspect" => s.lambo_inspect(parse(args)).await,
         "lambo_saints" => s.lambo_saints(parse(args)).await,
+        "lambo_stale" => s.lambo_stale(parse(args)).await,
         "lambo_stats" => s.lambo_stats(parse(args)).await,
         "lambo_derive_image" => s.lambo_derive_image(parse(args)).await,
         other => panic!("unknown tool {other}"),

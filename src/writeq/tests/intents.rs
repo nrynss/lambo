@@ -256,6 +256,7 @@ fn repo_scoped_intents_round_trip_and_refuse_downgrade() {
 #[test]
 fn repo_scoped_replay_refuses_invalid_nested_or_image_payloads() {
     let bare = WriteIntentPayload::Derive {
+        receipt_destination: None,
         concepts: vec![],
         pairs: vec![],
     };
@@ -280,6 +281,7 @@ fn repo_scoped_replay_refuses_invalid_nested_or_image_payloads() {
         EmbeddingContract, EmbeddingSource, SourceModality, SuppliedVector, VectorOrigin,
     };
     let image = WriteIntentPayload::DeriveImage {
+        receipt_destination: None,
         concepts: vec![("red [image:a1]".into(), ConceptType::Resource)],
         pairs: vec![],
         supplied: SuppliedVector {

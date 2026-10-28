@@ -471,6 +471,7 @@ async fn a_consumed_intent_past_its_retention_window_is_not_answered_from() {
         lane_seq: seq,
         issued_ms: 1_755_000_000_000,
         payload: WriteIntentPayload::Derive {
+            receipt_destination: None,
             concepts: vec![("stale probe".to_string(), ConceptType::Entity)],
             pairs: Vec::new(),
         },
