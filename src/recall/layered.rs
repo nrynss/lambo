@@ -190,6 +190,11 @@ pub struct LayeredHit {
     /// (#19(c), #179), the ids of the hits of the same session it
     /// contradicts; empty otherwise. Such a hit holds no `top_k` slot.
     pub companion_of: Vec<NodeId>,
+    /// #198: the newer concept of the same session this hit is suspected to
+    /// be superseded by, when both are shown; `None` otherwise. Set whatever
+    /// the `suspected_supersession_line` gate says: it is the structured
+    /// form of the `Possibly superseded` line.
+    pub possibly_superseded_by: Option<NodeId>,
 }
 
 /// The answer of [`Memory::recall_layered`](crate::Memory::recall_layered):
@@ -241,6 +246,7 @@ impl LayeredRecall {
                 included_in_context: d.included_in_context,
                 truncated_in_context: d.truncated_in_context,
                 companion_of: d.companion_of.clone(),
+                possibly_superseded_by: d.possibly_superseded_by,
             })
             .collect();
         Self {
@@ -822,6 +828,7 @@ where
             included_in_context: d.included_in_context,
             truncated_in_context: d.truncated_in_context,
             companion_of: d.companion_of.clone(),
+            possibly_superseded_by: d.possibly_superseded_by,
         })
         .collect();
     LayeredRecall {
