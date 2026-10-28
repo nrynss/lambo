@@ -34,7 +34,7 @@ use super::imp::{
 };
 use super::{CommonArgs, Outcome, PolicyChoice};
 use crate::cli::caps::{check_size_cli, require_nonempty, CliError};
-use crate::graph::suspected::{scan, ScannedPair, Stamp};
+use crate::graph::suspected::{pair_stamp, scan, ScannedPair};
 use crate::graph::Graph;
 use crate::store::lease::{LeaseHolder, LeaseOutcome, LEASE_TTL};
 use crate::store::{GraphStore, SqliteStore};
@@ -237,6 +237,19 @@ async fn dry(args: SuspectedArgs) -> Result<Outcome, CliError> {
     output(&report, args.json)
 }
 
+/// A failed `load_session` as the command's error: a missing session is a
+/// usage error.
+fn load_error(args: &SuspectedArgs, e: StoreError) -> CliError {
+    match e {
+        StoreError::SessionNotFound(_) => CliError::Usage(format!(
+            "session {:?} is not in {}",
+            args.session,
+            args.store.display()
+        )),
+        e => CliError::Runtime(redact_store(&e)),
+    }
+}
+
 /// `--apply`: on the input, under the session's lease.
 async fn apply(args: SuspectedArgs) -> Result<Outcome, CliError> {
     let meta = std::fs::metadata(&args.store)
@@ -253,6 +266,14 @@ async fn apply(args: SuspectedArgs) -> Result<Outcome, CliError> {
         .await
         .map_err(|e| CliError::Runtime(redact_store(&e)))?;
     let session = SessionId::new(&args.session);
+    // The session must exist before its lease is taken: acquiring inserts a
+    // lease row, and releasing only expires it, so a mistyped --session
+    // would leave a row behind for a session that never existed. It is read
+    // again under the lease, which is the state the edges are written on.
+    match store.load_session(&session).await {
+        Ok(_) => {}
+        Err(e) => return Err(load_error(&args, e)),
+    }
     let holder = LeaseHolder::for_this_process(&AgentId::new(SUSPECTED_AGENT));
     let token = match store
         .acquire_lease(&session, &holder, LEASE_TTL)
@@ -269,37 +290,26 @@ async fn apply(args: SuspectedArgs) -> Result<Outcome, CliError> {
             )));
         }
     };
-    let result = async {
-        let snapshot = match store.load_session(&session).await {
-            Ok(s) => s,
-            Err(StoreError::SessionNotFound(_)) => {
-                return Err(CliError::Usage(format!(
-                    "session {:?} is not in {}",
-                    args.session,
-                    args.store.display()
-                )))
-            }
-            Err(e) => return Err(CliError::Runtime(redact_store(&e))),
-        };
+    let result: Result<SuspectedReport, CliError> = async {
+        let snapshot = store
+            .load_session(&session)
+            .await
+            .map_err(|e| load_error(&args, e))?;
         let (cosine, cosine_source) = floor(args.cosine, snapshot.embedding.as_ref())?;
         let mut g = Graph::from_snapshot(snapshot)
             .map_err(|e| CliError::Runtime(format!("load the session: {e}")))?;
         let _ = g.drain_log();
         let pairs = scan(&g, cosine);
-        let now = chrono::Utc::now();
         let session_id = g.session_id().clone();
         let mut applied = 0;
         for p in pairs.iter().filter(|p| !p.recorded) {
-            if crate::graph::suspected::record(
-                &mut g,
-                p.pair,
-                Stamp {
-                    created_at: now,
-                    event_time: None,
-                },
-                &session_id,
-            )
-            .map_err(|e| CliError::Runtime(e.to_string()))?
+            // Dated by the write that made the pair, as the trigger would
+            // have dated it, not by this run.
+            let stamp = pair_stamp(&g, p.pair).ok_or_else(|| {
+                CliError::Runtime("a scanned pair is not two concepts of the session".into())
+            })?;
+            if crate::graph::suspected::record(&mut g, p.pair, stamp, &session_id)
+                .map_err(|e| CliError::Runtime(e.to_string()))?
             {
                 applied += 1;
             }
@@ -406,6 +416,7 @@ mod tests {
             (7, "an unrelated observation", 2, 3),
         ];
         for (n, content, origin, axis) in concepts {
+            let written = t(origin as i64 * 10);
             let origin = NodeId(Uuid::from_u64_pair(0x198c, origin));
             g.insert_concept(
                 Concept {
@@ -416,7 +427,7 @@ mod tests {
                     concept_type: ConceptType::Logic,
                     origin_interaction: origin,
                     origin_agent: AgentId::new("agent-a"),
-                    created_at: t(0),
+                    created_at: written,
                     access_count: 0,
                     last_accessed: None,
                     gc_survived: 0,
@@ -550,6 +561,15 @@ mod tests {
         assert_eq!(report["applied"], 1);
         assert_eq!(edges_in(&path).await, vec![(cid(2), cid(1))]);
         let store = SqliteStore::new(SqliteConnectOptions::new().filename(&path).read_only(true));
+        // Dated by the newer concept's write, not by the run.
+        let snap = store.load_session(&SessionId::new(SESSION)).await.unwrap();
+        let edge = snap
+            .edges
+            .iter()
+            .find(|e| e.edge_type == EdgeType::SuspectedSupersedes)
+            .unwrap();
+        assert_eq!((edge.created_at, edge.last_reinforced), (t(10), t(10)));
+        assert_eq!(edge.event_time, None);
         assert!(store
             .read_lease(&SessionId::new(SESSION))
             .await
@@ -584,6 +604,30 @@ mod tests {
         let err = run(args(path.clone(), &scratch, true)).await.unwrap_err();
         assert!(err.to_string().contains("held by another writer"), "{err}");
         assert!(edges_in(&path).await.is_empty());
+    }
+
+    /// A mistyped `--session` is a usage error found before the lease is
+    /// taken: no lease row is left behind for a session that does not
+    /// exist.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn apply_to_a_missing_session_leaves_no_lease_row() {
+        let input = ScratchDir::new("lambo-suspected-input");
+        let scratch = ScratchDir::new("lambo-suspected-scratch");
+        let path = fixture_db(&input).await;
+        let err = run(SuspectedArgs {
+            session: "no-such-session".into(),
+            ..args(path.clone(), &scratch, true)
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(err.exit_code(), 2, "{err}");
+        assert!(err.to_string().contains("is not in"), "{err}");
+        let store = SqliteStore::new(SqliteConnectOptions::new().filename(&path).read_only(true));
+        assert!(store
+            .read_lease(&SessionId::new("no-such-session"))
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]

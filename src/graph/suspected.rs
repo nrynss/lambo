@@ -196,6 +196,33 @@ pub struct Stamp {
     pub event_time: Option<DateTime<Utc>>,
 }
 
+/// The stamp a pair's edge carries when it is recorded after the fact
+/// (`lambo canon suspected --apply`): the write that made the pair, which
+/// is the later of the two concepts' writes (the newer concept's, unless the
+/// older was backfilled after it), with that write's about-time, exactly as
+/// the hybrid trigger would have stamped it then. `None` if either end is
+/// not a concept of `g`.
+pub fn pair_stamp(g: &Graph, pair: SuspectedPair) -> Option<Stamp> {
+    let concept = |id| match g.node(id) {
+        Some(Node::Concept(c)) => Some(c),
+        _ => None,
+    };
+    let (newer, older) = (concept(pair.newer)?, concept(pair.older)?);
+    let later = if older.created_at > newer.created_at {
+        older
+    } else {
+        newer
+    };
+    let event_time = match g.node(later.origin_interaction) {
+        Some(Node::Interaction(i)) => i.event_time,
+        _ => None,
+    };
+    Some(Stamp {
+        created_at: later.created_at,
+        event_time,
+    })
+}
+
 /// Write `newer -SuspectedSupersedes-> older` unless it is already there.
 /// Returns whether an edge was added. Both ends must be concepts of `g`
 /// (the graph's endpoint matrix refuses anything else).
