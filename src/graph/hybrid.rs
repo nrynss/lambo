@@ -1750,15 +1750,13 @@ async fn derive_planned(
                         if !refused.is_empty() {
                             suspects.push((id, refused));
                         }
-                        if !near.is_empty() {
-                            // Every tied member, not only the edge's
-                            // target: the tie-break is not a judgement.
-                            let merged = if can_merge {
-                                targets.clone()
-                            } else {
-                                Vec::new()
-                            };
-                            replacing.push((id, near, merged));
+                        // A refused merge lists nothing: its hits come
+                        // from a vector view this call just found
+                        // untrustworthy (a non-concept candidate). Else
+                        // every tied member is marked merged, not only the
+                        // edge's target: the tie-break is not a judgement.
+                        if can_merge && !near.is_empty() {
+                            replacing.push((id, near, targets.clone()));
                         }
                     }
                 }

@@ -39,7 +39,8 @@
 //! no conflicting identifiers merges, so excluding it would hide exactly
 //! that replacement. Only `against` and `depends_on` settle a pair. When
 //! the merge tier is tied, every member is marked merged, not only the one
-//! the edge went to.
+//! the edge went to. A merge the write path refused (a candidate that was
+//! not a concept: an untrusted vector view) lists nothing at all.
 //!
 //! Ranked by cosine (then id, so ties are deterministic) and capped at
 //! [`REPLACEMENT_CANDIDATE_LIMIT`] per created concept.

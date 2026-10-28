@@ -265,7 +265,7 @@ concepts `graph::suspected::replacement::eligible_pair` accepts (same
 session, type and repository scope, an eligible type, not an image, no
 `against`/`depends_on` either way), never one the call wrote; the merge
 tier the concept merged with is listed with `merged` set (every tied
-member); ranked by cosine then id and capped at
+member), and a refused merge lists nothing; ranked by cosine then id and capped at
 `REPLACEMENT_CANDIDATE_LIMIT` (3). Each `ReplacementCandidate` has `new`,
 `id`, `excerpt`, `cosine`, `merged` and `newer` (the existing concept is dated after
 the new one by `graph::suspected::dated_at`, strictly: a tie is not newer;

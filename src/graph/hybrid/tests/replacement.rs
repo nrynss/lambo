@@ -433,3 +433,53 @@ async fn a_backfilled_write_marks_the_later_concept_newer() {
         assert_eq!(out.replacement_candidates[0].newer, want, "{about:?}");
     }
 }
+
+/// m4: a merge refused because the store handed back a candidate that is
+/// not a concept lists nothing, even for a real concept in the same tier:
+/// the hits come from a vector view the write found untrustworthy.
+#[tokio::test]
+async fn a_refused_merge_lists_nothing() {
+    let (graph, [i0, i1, _]) = graph_with_interactions();
+    let a = derive_at(
+        &graph,
+        i0,
+        "the retry policy uses exponential backoff",
+        ConceptType::Logic,
+        Vec::new(),
+    )
+    .await
+    .created[0];
+    let out = derive_at(
+        &graph,
+        i1,
+        "the retry policy no longer uses exponential backoff",
+        ConceptType::Logic,
+        vec![hit(a, 0.95), hit(i0, 0.95)],
+    )
+    .await;
+    assert!(out.semantic_merged.is_empty(), "the merge is refused");
+    assert_eq!(out.embedded, 0, "the refused merge persists no vector");
+    assert!(out.replacement_candidates.is_empty());
+
+    // The same write with a trustworthy tier merges and lists it.
+    let (graph, [i0, i1, _]) = graph_with_interactions();
+    let a = derive_at(
+        &graph,
+        i0,
+        "the retry policy uses exponential backoff",
+        ConceptType::Logic,
+        Vec::new(),
+    )
+    .await
+    .created[0];
+    let out = derive_at(
+        &graph,
+        i1,
+        "the retry policy no longer uses exponential backoff",
+        ConceptType::Logic,
+        vec![hit(a, 0.95)],
+    )
+    .await;
+    assert_eq!(out.semantic_merged, vec![a]);
+    assert_eq!(listed(&out), vec![(a, 0.95)]);
+}

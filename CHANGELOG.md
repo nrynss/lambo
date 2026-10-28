@@ -18,7 +18,8 @@
   merge tier; a text line saying it was merged with and may be replaced;
   `replacement_merged` flags on the ledger line): a similarity merge
   declares no replacement, and a reworded reversal with no conflicting
-  identifiers merges.
+  identifiers merges. A merge refused because the store returned a
+  non-concept candidate lists nothing.
   Lambo records nothing for them: no edge, score, merge, canonization or
   recall change. Wire additions, each present only when a write listed a
   candidate, so every other response is byte-identical: `lambo_stats`'s
