@@ -15,7 +15,12 @@
 #[allow(dead_code)]
 mod measure;
 
+use lambo::graph::hybrid::SEMANTIC_MATCH_THRESHOLD_DEFAULT;
 use measure::Count;
+
+/// The floor the counts below were measured at: BGE-M3's merge threshold,
+/// which has no #87 calibration row, so it is the default.
+const MEASURED_FLOOR: f64 = 0.85;
 
 fn count(t: &std::collections::BTreeMap<(String, String), Count>, split: &str, rel: &str) -> Count {
     t[&(split.to_string(), rel.to_string())]
@@ -24,10 +29,15 @@ fn count(t: &std::collections::BTreeMap<(String, String), Count>, split: &str, r
 #[test]
 fn the_shipped_floor_holds_its_measured_counts() {
     let (pairs, cosines) = measure::default_paths();
+    assert_eq!(
+        SEMANTIC_MATCH_THRESHOLD_DEFAULT, MEASURED_FLOOR,
+        "the shipped floor moved: re-measure and update the counts below \
+         and evidence/issue-198c-candidates/"
+    );
     let rows = measure::rows(&pairs, &cosines);
     assert_eq!(rows.len(), 147, "in-regime pairs");
 
-    let shipped = measure::tally(&rows, 0.85);
+    let shipped = measure::tally(&rows, MEASURED_FLOOR);
     let c = |listed, of| Count { listed, of };
     assert_eq!(count(&shipped, "dev", "supersedes"), c(37, 43));
     assert_eq!(count(&shipped, "dev", "distinct_entity"), c(34, 47));
@@ -43,13 +53,13 @@ fn the_shipped_floor_holds_its_measured_counts() {
     // (marked merged) moves none of the counts above.
     assert!(rows
         .iter()
-        .all(|r| !(measure::merged(r) && measure::listed(r, 0.85))));
+        .all(|r| !(measure::merged(r) && measure::listed(r, MEASURED_FLOOR))));
 
     // Every supersession missed at the shipped floor is a reworded one
     // below it, never a type refusal.
     for r in rows.iter().filter(|r| r.relation == "supersedes") {
-        if !measure::listed(r, 0.85) {
-            assert!(r.cosine < 0.85, "{} at {}", r.id, r.cosine);
+        if !measure::listed(r, MEASURED_FLOOR) {
+            assert!(r.cosine < MEASURED_FLOOR, "{} at {}", r.id, r.cosine);
         }
     }
 }
