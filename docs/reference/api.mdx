@@ -244,8 +244,9 @@ either concept is collected and by `graph::suspected::settle`, which
 `against` and `depends_on` writes call. #207 never follows it. #181's
 redundancy-aware selection treats a pair as never redundant
 (`recall::redundancy::never_redundant` checks
-`graph::suspected::is_suspected_pair(graph, a, b)`), and never skips a
-member another concept of its session is suspected of replacing. Recall sets
+`graph::suspected::is_suspected_pair(graph, a, b)`), and never skips
+either end of a suspected pair of its session, so the older hit's line keeps
+its replacement shown. Recall sets
 `DetailedHit::possibly_superseded_by` on the older hit when both are shown
 (one per hit, the newest replacement), and adds the
 `recall::format::possibly_superseded_warning` line with annotation kind

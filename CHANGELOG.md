@@ -293,9 +293,9 @@
   #19 forcing and companions, kept reservation holders) and hits
   carrying a warning line of their own (hot-list or contradiction, #207
   stale citation, #20 supersession, reservation) are never skipped, nor
-  is a hit a concept of its session is suspected of replacing (#198), so
-  its `possibly_superseded_by` field and line are not dropped; Canonical
-  concepts still come first.
+  is either end of a suspected pair of its session (#198), so the older
+  hit's `possibly_superseded_by` field and line are not dropped and its
+  replacement stays shown beside it; Canonical concepts still come first.
   Only the first `min(20, 4 × top_k)` hits are checked, each against at
   most 20 taken. The kept hit names what it replaced in its label, `(score
   …, id …, also 5e6f7a8b)`, at most three ids and then `+N more`, so the

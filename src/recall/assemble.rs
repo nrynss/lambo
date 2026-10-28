@@ -304,7 +304,7 @@ where
     let mut warns = |id: NodeId| {
         hot_payloads.get(&id).is_some_and(|p| !p.is_empty())
             || active_reservation(graph, id, now).is_some()
-            || suspected_replaced(graph, id)
+            || in_suspected_pair(graph, id)
             || (superseded.contains_key(&id)
                 && !matches!(
                     graph.node(id),
@@ -651,16 +651,20 @@ fn possibly_superseded_by<'g>(
         })
 }
 
-/// Whether some concept of `id`'s session is suspected of replacing it
-/// (#198), so it may carry a [`possibly_superseded_by`] annotation.
-fn suspected_replaced(graph: &Graph, id: NodeId) -> bool {
+/// Whether `id` is either end of a suspected pair of its own session
+/// (#198). The older end may carry a [`possibly_superseded_by`] annotation,
+/// which needs its replacement shown; so neither end is skipped as
+/// redundant (#181).
+fn in_suspected_pair(graph: &Graph, id: NodeId) -> bool {
     let Some(Node::Concept(of)) = graph.node(id) else {
         return false;
     };
+    let ty = crate::types::EdgeType::SuspectedSupersedes;
     graph
-        .in_neighbors_typed(id, crate::types::EdgeType::SuspectedSupersedes)
+        .in_neighbors_typed(id, ty)
         .into_iter()
-        .any(|by| same_session_concept(graph, of, by).is_some())
+        .chain(graph.out_neighbors_typed(id, ty))
+        .any(|other| same_session_concept(graph, of, other).is_some())
 }
 
 /// The stale-by-dependency lines of one hit (#207): one per contradicted

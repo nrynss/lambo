@@ -611,6 +611,32 @@ fn a_duplicate_that_may_be_superseded_is_not_skipped() {
     assert!(on.detailed.iter().all(|d| d.skipped_redundant.is_empty()));
 }
 
+/// A duplicate that is suspected of replacing an older hit (#198) is not
+/// skipped either: skipping it would leave the older hit shown without its
+/// `possibly_superseded_by` line, which needs the replacement shown.
+#[test]
+fn a_duplicate_suspected_of_replacing_a_hit_is_not_skipped() {
+    let rows = [
+        (1, EFFICACY, ConceptType::Entity, None),
+        (2, EFFICACY, ConceptType::Observation, None),
+        (4, "the older fact", ConceptType::Logic, None),
+        (5, "a fifth fact", ConceptType::Logic, None),
+    ];
+    let ranked = [(1, 0.9), (2, 0.8), (4, 0.7), (5, 0.6)];
+    let premise = Run::new(&ranked, 3).go(&Fixture::new(&rows).g);
+    assert_eq!(
+        ids(&premise),
+        vec![uid(1), uid(4), uid(5)],
+        "premise: a duplicate"
+    );
+    let mut f = Fixture::new(&rows);
+    f.edge(1, 2, 4, EdgeType::SuspectedSupersedes);
+    let on = Run::new(&ranked, 3).go(&f.g);
+    assert_eq!(ids(&on), vec![uid(1), uid(2), uid(4)]);
+    assert_eq!(on.detailed[2].possibly_superseded_by, Some(uid(2)));
+    assert!(on.detailed.iter().all(|d| d.skipped_redundant.is_empty()));
+}
+
 /// A recall over `daemon` scores and `phase1` relevance (a member with
 /// relevance and no daemon score is fresh, which runs the reservation and
 /// cold-start passes), at `top_k`, under the shipped default.
