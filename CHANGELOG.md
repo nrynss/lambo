@@ -4,6 +4,10 @@
 
 ### Changed
 
+- Writes carrying `against` report up to 50 direct stale dependencies in
+  their settled receipt, with a total count. `lambo_stale` pages through the
+  current session or a shared layer for restartable re-checks (#208).
+
 - **Behaviour change: a memory that cites a contradicted concept is
   warned (#207).** #179 warns on a concept that a newer concept
   contradicts, but not on a memory that only cites it through

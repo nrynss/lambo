@@ -272,6 +272,7 @@ pub(crate) fn source() -> GraphSnapshot {
             lane_seq: 1,
             issued_ms: 1000,
             payload: WriteIntentPayload::Action {
+                receipt_destination: None,
                 action: "planned".into(),
                 produces: vec![],
                 modifies: vec![],
@@ -289,6 +290,7 @@ pub(crate) fn source() -> GraphSnapshot {
             lane_seq: 2,
             issued_ms: 2000,
             payload: WriteIntentPayload::DeriveCited {
+                receipt_destination: None,
                 concepts: vec![("beta result is green".into(), ConceptType::Logic)],
                 pairs: vec![],
                 citations: PinnedCitations {

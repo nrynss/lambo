@@ -51,8 +51,11 @@ use crate::types::{
 /// tasks, and `Memory`'s `Drop` is load-bearing (it aborts tasks and lets the
 /// lease lapse). Every field here is already an `Arc` inside `Memory`, so this
 /// is clones of shared state, not a second copy of anything.
+#[derive(Clone)]
 pub(crate) struct WriteCtx {
     pub(crate) session: SessionId,
+    pub(crate) clock: crate::daemon::Clock,
+    pub(crate) contradiction_evidence_min_age: std::time::Duration,
     pub(crate) graph: Arc<RwLock<Graph>>,
     pub(crate) index: Arc<RwLock<InvertedIndex>>,
     pub(crate) store: Arc<dyn GraphStore>,
@@ -234,7 +237,53 @@ pub(super) fn action_sentence(
     }
 }
 
+#[cfg(test)]
+type ReportGate = (
+    crate::types::NodeId,
+    std::sync::mpsc::Sender<()>,
+    std::sync::mpsc::Receiver<()>,
+);
+#[cfg(test)]
+pub(crate) static REPORT_GATE: std::sync::Mutex<Option<ReportGate>> = std::sync::Mutex::new(None);
+
 impl WriteCtx {
+    fn stale_report(
+        &self,
+        graph: &Graph,
+        targets: &[crate::types::PinnedReference],
+    ) -> Option<crate::daemon::contradiction::StaleReport> {
+        if targets.is_empty() {
+            return None;
+        }
+        #[cfg(test)]
+        {
+            let gate = {
+                let mut gate = REPORT_GATE.lock().unwrap();
+                if gate
+                    .as_ref()
+                    .is_some_and(|(id, _, _)| targets.iter().any(|p| p.target == *id))
+                {
+                    gate.take()
+                } else {
+                    None
+                }
+            };
+            if let Some((_, entered, release)) = gate {
+                entered.send(()).unwrap();
+                release
+                    .recv_timeout(std::time::Duration::from_secs(10))
+                    .unwrap();
+            }
+        }
+        let mut report = crate::daemon::contradiction::stale_report(
+            graph,
+            targets.iter().map(|p| p.target),
+            self.contradiction_evidence_min_age,
+            (self.clock)(),
+        );
+        report.bound_for_receipt();
+        Some(report)
+    }
     /// The vector-candidate source a background job's hybrid derive and
     /// record-action embed gate are given (#27's caller-side seam): the twin
     /// of `Memory::vector_candidates`, built by the same constructor
@@ -313,26 +362,34 @@ impl WriteCtx {
                             .into(),
                     ));
                 }
+                let report_slot = std::sync::Arc::new(parking_lot::Mutex::new(None));
                 let outcome = match strategy {
                     MatchStrategy::Hybrid => {
-                        let on_commit: Option<hybrid::CommitHook> = consume.map(|stamp| {
-                            let receipt = job.receipt.to_string();
-                            Box::new(
-                                move |g: &mut Graph,
-                                      outcome: &crate::graph::derive::DeriveOutcome| {
+                        let receipt = job.receipt.to_string();
+                        let report_slot = report_slot.clone();
+                        let targets = pinned.against.clone();
+                        let ctx = self.clone();
+                        let destination = job.receipt_destination.clone();
+                        let on_commit: Option<hybrid::CommitHook> = Some(Box::new(
+                            move |g: &mut Graph, outcome: &crate::graph::derive::DeriveOutcome| {
+                                if let Some(stamp) = consume {
                                     g.consume_write_intent(
                                         receipt,
                                         WriteIntentOutcome {
                                             tag: stamp.tag.into(),
-                                            summary: derive_sentence_of(
-                                                strategy, submitted, outcome, image,
+                                            summary: super::receipts::durable_summary(
+                                                &derive_sentence_of(
+                                                    strategy, submitted, outcome, image,
+                                                ),
+                                                destination.as_ref(),
                                             ),
                                             consumed_at: stamp.at,
                                         },
                                     );
-                                },
-                            ) as hybrid::CommitHook
-                        });
+                                }
+                                *report_slot.lock() = ctx.stale_report(g, &targets);
+                            },
+                        ));
                         hybrid::derive_with(
                             self.graph.clone(),
                             self.derive_vector_candidates(),
@@ -367,11 +424,15 @@ impl WriteCtx {
                                 job.receipt.to_string(),
                                 WriteIntentOutcome {
                                     tag: stamp.tag.into(),
-                                    summary: derive_sentence(strategy, submitted, &outcome),
+                                    summary: super::receipts::durable_summary(
+                                        &derive_sentence(strategy, submitted, &outcome),
+                                        job.receipt_destination.as_ref(),
+                                    ),
                                     consumed_at: stamp.at,
                                 },
                             );
                         }
+                        *report_slot.lock() = self.stale_report(&g, &pinned.against);
                         outcome
                     }
                 };
@@ -400,6 +461,7 @@ impl WriteCtx {
                     reinforced: Some(outcome.reinforced),
                     edges: None,
                     embedded,
+                    stale_report: report_slot.lock().take(),
                 })
             }
             JobPayload::Action {
@@ -440,7 +502,7 @@ impl WriteCtx {
                     }
                     MatchStrategy::Hybrid | MatchStrategy::Canonical => ActionEmbeddings::new(),
                 };
-                let outcome = {
+                let (outcome, stale_report) = {
                     let mut g = self.graph.write();
                     // Stamp the space this call's vectors live in, or verify the
                     // stamp already there. Same rule as `hybrid::derive`'s
@@ -466,12 +528,16 @@ impl WriteCtx {
                             job.receipt.to_string(),
                             WriteIntentOutcome {
                                 tag: stamp.tag.into(),
-                                summary: action_sentence(self.match_strategy, &outcome),
+                                summary: super::receipts::durable_summary(
+                                    &action_sentence(self.match_strategy, &outcome),
+                                    job.receipt_destination.as_ref(),
+                                ),
                                 consumed_at: stamp.at,
                             },
                         );
                     }
-                    outcome
+                    let report = self.stale_report(&g, against);
+                    (outcome, report)
                 };
                 let mut touched = outcome.created.clone();
                 touched.push(outcome.action_node);
@@ -495,6 +561,7 @@ impl WriteCtx {
                         MatchStrategy::Hybrid => Some(outcome.embedded),
                         MatchStrategy::Canonical => None,
                     },
+                    stale_report,
                 })
             }
         }
@@ -628,7 +695,10 @@ impl WritePipeline {
                                     // copy is the completion line and the
                                     // WARN below, both written from `detail`.
                                     tag: "failed".into(),
-                                    summary: model_safe_failure(e),
+                                    summary: super::receipts::durable_summary(
+                                        &model_safe_failure(e),
+                                        job.receipt_destination.as_ref(),
+                                    ),
                                     consumed_at: (clock)(),
                                 },
                             );

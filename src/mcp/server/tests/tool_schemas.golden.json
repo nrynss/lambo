@@ -1,4 +1,40 @@
 {
+  "lambo_stale": {
+    "description": "List direct dependencies currently resting on contradicted concepts, in deterministic pages of 50. Use offset for the next page and scope for a shared layer.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "agent_id": {
+          "description": "Id of the agent making this call. Use one stable id for the agent's\nwhole life, never one per call, task or topic (good: your model or\nclient id, such as `claude-opus-5-5` or `gpt-5.6`, with a stable\ninstance suffix such as `-worker-2` if several run at once; bad:\n`b1-review`, `implement-m12`). Caller-asserted and unverified: work is\nrecorded under exactly the id you send, so a stable id keeps your\nattribution whole. Agents sharing an id share soft locks and can\nrelease each other's; concurrent agents that must keep out of each\nother's edits need distinct stable ids.",
+          "maxLength": 16384,
+          "type": "string"
+        },
+        "offset": {
+          "description": "Zero-based offset in the deterministic list; pages reflect current state.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ],
+          "maximum": 2147483647
+        },
+        "scope": {
+          "description": "Session or shared layer; omitted selects this session.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 16384
+        }
+      },
+      "required": [
+        "agent_id"
+      ],
+      "type": "object"
+    }
+  },
   "lambo_derive": {
     "description": "Derive concepts from the current interaction into session memory. A concept is one fact, stated atomically and short enough that a later restatement of the same fact matches it, such as a decision with its reason. Good: 'Lease TTL is 45s because it must exceed the 15s shutdown budget'. Bad: a paragraph narrating what you did and found. It is not a log: record activity with lambo_record_action. To group facts under a decision, send each as its own concept and add parent_of pairs with the decision as parent and each fact as child. When a concept rests on a ruling or decision already in memory, cite it by id (the 8 hex characters recall shows) in that concept's depends_on: it must already exist and match exactly one concept, or the whole call is refused. When a concept says an existing one is wrong, name that one the same way in the concept's against: it records the contradiction, dated by this write's event_time (else now), and adds no dependent, score or promotion. created_at is stamped server-side. event_time is optional RFC3339 historical about-time, such as a commit or document date; omit it for a live fact, which is about now. Returns as soon as the input is validated and ordered — the write is applied in the background and the ack carries a receipt id. The outcome is piggybacked on your next tool response; to wait for it, call lambo_stats with that receipt and a wait_ms. On a store with vector search each concept is embedded with the whole call's text, so a concept sent alone may be at most 8189 bytes; a longer call is refused before the ack, naming the part that is too long. scope (optional) writes to one of this session's shared layers instead; writes to different sessions have no ordering between them.",
     "inputSchema": {

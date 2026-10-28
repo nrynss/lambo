@@ -539,6 +539,7 @@ fn plant_image_intent(store: &MemoryStore, session: &str, declared: EmbeddingCon
                 lane_seq: 1,
                 issued_ms: 1_755_000_000_000,
                 payload: WriteIntentPayload::DeriveImage {
+                    receipt_destination: None,
                     concepts: vec![(content.clone(), ConceptType::Resource)],
                     pairs: Vec::new(),
                     supplied: crate::types::SuppliedVector {

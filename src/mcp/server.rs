@@ -1,5 +1,5 @@
-//! The seven MCP tools of `lambo serve` (spec §6.2), and `lambo_derive_image`
-//! (#22) where the deployment can serve it.
+//! The MCP tools of `lambo serve`, including `lambo_stale` (#208) and
+//! `lambo_derive_image` (#22) where the deployment can serve it.
 //!
 //! # `lambo_derive_image` is listed only where it can work (#22 design 6.1)
 //!
@@ -9,8 +9,7 @@
 //! `accept_client_vectors` is process config, so every session one serve
 //! holds lists the same tools, and nothing about a session or a caller
 //! changes the list. A text-only deployment (BGE-M3, candle, Gemini, with
-//! client vectors off) lists exactly the seven tools it always did, with
-//! byte-identical schemas, and a call to the unlisted name is rmcp's
+//! client vectors off) does not list the image tool, and a call to the unlisted name is rmcp's
 //! "tool not found".
 //!
 //! One process owns the session (spec §2.2); every tool call is a task inside
@@ -70,9 +69,9 @@ mod trace;
 
 pub use params::{
     DeriveImageParams, DeriveParams, InspectParams, RecallParams, RecordActionParams,
-    ReserveParams, SaintsParams, StatsParams, WireConcept, WireConceptType, WireEmbeddingContract,
-    WireImage, WireImageConceptType, WireParentOf, WireQueryVector, WireReference, WireResource,
-    WireVector,
+    ReserveParams, SaintsParams, StaleParams, StatsParams, WireConcept, WireConceptType,
+    WireEmbeddingContract, WireImage, WireImageConceptType, WireParentOf, WireQueryVector,
+    WireReference, WireResource, WireVector,
 };
 use response::attach_receipts;
 pub(crate) use trace::{CallCredential, CallGrant};
@@ -401,6 +400,16 @@ impl LamboServer {
     async fn lambo_saints(&self, Parameters(p): Parameters<SaintsParams>) -> CallToolResult {
         let agent_id = p.agent_id.clone();
         self.answered("lambo_saints", agent_id, self.saints_impl(p))
+            .await
+    }
+
+    #[tool(
+        name = "lambo_stale",
+        description = "List direct dependencies currently resting on contradicted concepts, in deterministic pages of 50. Use offset for the next page and scope for a shared layer."
+    )]
+    async fn lambo_stale(&self, Parameters(p): Parameters<StaleParams>) -> CallToolResult {
+        let agent_id = p.agent_id.clone();
+        self.answered("lambo_stale", agent_id, self.stale_impl(p))
             .await
     }
 

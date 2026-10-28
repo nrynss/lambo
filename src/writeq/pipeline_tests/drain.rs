@@ -241,14 +241,21 @@ async fn an_accepted_write_puts_a_durable_intent_and_applying_consumes_it() {
         put_at < consume_at,
         "the put ({put_at}) must precede its consume ({consume_at}) in the log"
     );
-    // And the consume carries the SAME sentence the receipt carries, so
-    // the durable record and the live answer can never tell two stories.
+    // The durable envelope preserves both the live sentence and the session
+    // authorized to recover it. The admission and consume must agree.
     let ReceiptAnswer::Applied(summary) = settled else {
         unreachable!()
     };
     match &log.mutations[consume_at] {
         crate::types::Mutation::ConsumeWriteIntent { outcome, .. } => {
-            assert_eq!(outcome.summary, summary.summary);
+            let (durable_sentence, destination) =
+                super::super::receipts::unpack_durable_summary(&outcome.summary);
+            assert_eq!(durable_sentence, summary.summary);
+            let crate::types::Mutation::PutWriteIntent { intent } = &log.mutations[put_at] else {
+                unreachable!()
+            };
+            assert_eq!(destination.as_ref(), intent.payload.receipt_destination());
+            assert_eq!(destination, Some(SessionId::new("wq-intent-lifecycle")));
         }
         _ => unreachable!(),
     }
@@ -501,6 +508,7 @@ async fn a_cancelled_stop_replay_leaves_the_replay_joinable() {
         lane_seq: 1,
         issued_ms: receipt.issued_ms(),
         payload: crate::types::WriteIntentPayload::Derive {
+            receipt_destination: None,
             concepts: vec![("gamma concept".into(), ConceptType::Entity)],
             pairs: Vec::new(),
         },

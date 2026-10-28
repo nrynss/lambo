@@ -721,6 +721,58 @@ fn a_concept_citing_a_contradicted_concept_is_stale() {
     assert!(stale(&s, 1, 1000).is_empty());
 }
 
+#[test]
+fn inverse_report_matches_recall_and_pages() {
+    let mut s = base(CanonizationStatus::None);
+    // A citing contradictor is excluded even if another contradictor wins.
+    s.edge(40, EdgeType::Dependency, 3, 1, 200, None);
+    for now in [150, 320, 1000] {
+        let report = stale_report(&s.g, [cid(1), cid(1)], MIN_AGE, t(now));
+        let expected: Vec<_> =
+            s.g.concepts()
+                .filter(|c| {
+                    stale_citations(&s.g, c.id, MIN_AGE, t(now))
+                        .iter()
+                        .any(|h| h.node == cid(1))
+                })
+                .map(|c| c.id.0.to_string())
+                .collect();
+        let actual: Vec<_> = report.dependents.iter().map(|d| d.id.clone()).collect();
+        assert_eq!(actual.len(), expected.len());
+        assert!(actual.iter().all(|id| expected.contains(id)));
+        assert_eq!(report.total, expected.len());
+        assert_eq!(
+            stale_report_page(&s.g, [cid(1)], MIN_AGE, t(now), report.total)
+                .dependents
+                .len(),
+            0
+        );
+    }
+    later_citation(&mut s, 300);
+    assert!(stale_report(&s.g, [cid(1)], MIN_AGE, t(1000))
+        .dependents
+        .is_empty());
+}
+
+#[test]
+fn inverse_report_is_bounded_and_pages_every_pair() {
+    let mut s = base(CanonizationStatus::None);
+    for n in 10..70 {
+        s.concept(n, 2, "agent-b", &format!("dependent {n}"), 100);
+        s.edge(100 + n, EdgeType::Dependency, n, 1, 100, None);
+    }
+    let first = stale_report(&s.g, [cid(1)], MIN_AGE, t(1000));
+    let second = stale_report_page(&s.g, [cid(1)], MIN_AGE, t(1000), STALE_REPORT_LIMIT);
+    assert_eq!(first.total, 61);
+    assert_eq!(first.dependents.len(), STALE_REPORT_LIMIT);
+    assert_eq!(second.total, 61);
+    assert_eq!(second.dependents.len(), 11);
+    assert!(first
+        .dependents
+        .iter()
+        .all(|a| second.dependents.iter().all(|b| a.id != b.id)));
+}
+
 /// Before the contradiction is written, nothing is stale; the citation
 /// alone flags nothing.
 #[test]
@@ -972,4 +1024,55 @@ fn contradiction_timing() {
         p50(cold_us),
         p50(warm_us)
     );
+}
+
+#[test]
+fn stale_page_builds_one_timeline_for_many_targets() {
+    let mut s = base(CanonizationStatus::None);
+    for n in 10..30 {
+        s.concept(n, 2, "agent-b", &format!("target {n}"), 100);
+        s.edge(100 + n, EdgeType::Contradicts, 2, n, 200, None);
+    }
+    crate::daemon::conflict::TIMELINE_BUILDS.with(|n| n.set(0));
+    let _ = stale_report(&s.g, (10..30).map(cid), MIN_AGE, t(1000));
+    crate::daemon::conflict::TIMELINE_BUILDS.with(|n| assert_eq!(n.get(), 1));
+}
+
+#[test]
+fn receipt_report_bounds_worst_case_utf8_and_keeps_total() {
+    let mut report = StaleReport {
+        dependents: (0..STALE_REPORT_LIMIT)
+            .map(|_| StaleDependent {
+                id: "a".repeat(36),
+                cited_id: "b".repeat(36),
+                content: "😀".repeat(160),
+            })
+            .collect(),
+        total: 500,
+    };
+    report.bound_for_receipt();
+    let bytes: usize = report
+        .dependents
+        .iter()
+        .map(|d| d.id.len() + d.cited_id.len() + d.content.len())
+        .sum();
+    assert!(bytes <= STALE_RECEIPT_BYTES);
+    assert_eq!(report.dependents.len(), 2);
+    assert_eq!(report.total, 500);
+    assert!(report.total > report.dependents.len());
+}
+
+#[test]
+fn stale_page_skips_evidence_evaluation_without_inbound_contradiction() {
+    let mut s = base(CanonizationStatus::None);
+    // Many targets have evidence, but only X has an inbound contradiction.
+    for n in 10..30 {
+        s.concept(n, 2, "agent-b", &format!("uncontradicted target {n}"), 100);
+        s.edge(100 + n, EdgeType::Dependency, 2, n, 100, None);
+    }
+    CONTRADICTION_EVALUATIONS.with(|count| count.set(0));
+    let report = stale_report(&s.g, (1..30).map(cid), MIN_AGE, t(1000));
+    CONTRADICTION_EVALUATIONS.with(|count| assert_eq!(count.get(), 1));
+    assert_eq!(report.total, 1);
+    assert_eq!(report.dependents[0].id, cid(2).0.to_string());
 }

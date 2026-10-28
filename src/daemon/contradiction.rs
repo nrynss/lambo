@@ -199,6 +199,11 @@ pub fn contradicts_either_way(graph: &Graph, a: NodeId, b: NodeId) -> bool {
             || graph.edge_between(b, a, EdgeType::Contradicts).is_some())
 }
 
+#[cfg(test)]
+thread_local! {
+    static CONTRADICTION_EVALUATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn contradiction_at_with(
     graph: &Graph,
     node: NodeId,
@@ -206,6 +211,8 @@ fn contradiction_at_with(
     now: DateTime<Utc>,
     timeline: &WriterTimeline,
 ) -> Option<ContradictionHit> {
+    #[cfg(test)]
+    CONTRADICTION_EVALUATIONS.with(|count| count.set(count.get() + 1));
     let target = concept(graph, node)?;
     // Evidence written at or before this instant is old enough to count.
     // `None` when `now - min_age` is out of chrono's range (review M5, as
@@ -369,6 +376,110 @@ pub fn supporting_citation(
         .edge_between(citer, cited, EdgeType::Contradicts)
         .is_some_and(|c| written_by(c, now));
     (!contradicts_it).then_some((citer, cited))
+}
+
+/// Direct concepts currently resting on a contradicted concept, in id order.
+pub fn stale_dependents(
+    graph: &Graph,
+    cited: NodeId,
+    min_age: Duration,
+    now: DateTime<Utc>,
+) -> Vec<NodeId> {
+    stale_dependents_with(graph, cited, min_age, now, &WriterTimeline::of(graph))
+}
+
+fn stale_dependents_with(
+    graph: &Graph,
+    cited: NodeId,
+    min_age: Duration,
+    now: DateTime<Utc>,
+    timeline: &WriterTimeline,
+) -> Vec<NodeId> {
+    if !has_inbound_contradiction(graph, cited)
+        || contradiction_at_with(graph, cited, min_age, now, timeline).is_none()
+    {
+        return Vec::new();
+    }
+    let mut dependents: Vec<_> = graph
+        .incident_edges(cited)
+        .into_iter()
+        .filter_map(|e| supporting_citation(graph, e, now))
+        .filter_map(|(citer, target)| (target == cited).then_some(citer))
+        .collect();
+    dependents.sort_by_key(|id| id.0);
+    dependents.dedup();
+    dependents
+}
+
+/// A direct dependent and the contradicted concept it cites.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct StaleDependent {
+    pub id: String,
+    pub content: String,
+    pub cited_id: String,
+}
+
+/// Bounded report of direct stale dependencies, ordered by cited and dependent id.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct StaleReport {
+    pub dependents: Vec<StaleDependent>,
+    pub total: usize,
+}
+
+pub const STALE_REPORT_LIMIT: usize = 50;
+
+/// Maximum retained UTF-8 bytes of entry strings per write receipt.
+pub const STALE_RECEIPT_BYTES: usize = 2048;
+
+impl StaleReport {
+    pub fn bound_for_receipt(&mut self) {
+        let mut bytes = 0;
+        self.dependents.retain(|entry| {
+            bytes += entry.id.len() + entry.cited_id.len() + entry.content.len();
+            bytes <= STALE_RECEIPT_BYTES
+        });
+        self.dependents.shrink_to_fit();
+    }
+}
+
+pub fn stale_report(
+    graph: &Graph,
+    targets: impl IntoIterator<Item = NodeId>,
+    min_age: Duration,
+    now: DateTime<Utc>,
+) -> StaleReport {
+    stale_report_page(graph, targets, min_age, now, 0)
+}
+
+pub fn stale_report_page(
+    graph: &Graph,
+    targets: impl IntoIterator<Item = NodeId>,
+    min_age: Duration,
+    now: DateTime<Utc>,
+    offset: usize,
+) -> StaleReport {
+    let mut targets: Vec<_> = targets.into_iter().collect();
+    targets.sort_by_key(|id| id.0);
+    targets.dedup();
+    let mut dependents = Vec::new();
+    let mut total = 0;
+    let timeline = WriterTimeline::of(graph);
+    for cited in targets {
+        for id in stale_dependents_with(graph, cited, min_age, now, &timeline) {
+            if total >= offset
+                && dependents.len() < STALE_REPORT_LIMIT
+                && let Some(c) = concept(graph, id)
+            {
+                dependents.push(StaleDependent {
+                    id: id.0.to_string(),
+                    content: c.content.chars().take(160).collect(),
+                    cited_id: cited.0.to_string(),
+                });
+            }
+            total += 1;
+        }
+    }
+    StaleReport { dependents, total }
 }
 
 /// **Stale by dependency** (#207): the concepts `node` directly cites

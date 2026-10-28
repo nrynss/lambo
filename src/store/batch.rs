@@ -658,6 +658,7 @@ mod tests {
             lane_seq,
             issued_ms: 1_752_000_000_000,
             payload: crate::types::WriteIntentPayload::Action {
+                receipt_destination: None,
                 action: "a".into(),
                 produces: vec![],
                 modifies: vec![],

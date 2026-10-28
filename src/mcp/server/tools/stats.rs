@@ -77,8 +77,8 @@ impl LamboServer {
                 // Delivered here, explicitly, so `answered`'s piggyback does
                 // not state the same outcome a second time in the same response
                 // (J3-R1-9). Take-once is unaffected — this *is* the take.
-                if answer.is_settled() {
-                    pipeline.mark_delivered(&acting, id);
+                if answer.is_settled() && !matches!(answer, ReceiptAnswer::Forbidden) {
+                    pipeline.mark_delivered_for(&acting, deliver_to.as_ref(), id);
                 }
                 Some((id, answer, None))
             }
@@ -168,8 +168,16 @@ impl LamboServer {
                 // `applied`, and absent — not empty — otherwise, for the same
                 // reason the ack omits them: an empty list would be a claim.
                 // An agent that needs a node id to reserve it gets it here.
+                if let ReceiptAnswer::AppliedAfterRestart(_, Some(report)) = answer {
+                    r.as_object_mut()
+                        .expect("json! built an object")
+                        .insert("stale_report".into(), json!(report));
+                }
                 if let ReceiptAnswer::Applied(s) = answer {
                     let obj = r.as_object_mut().expect("json! built an object");
+                    if let Some(report) = &s.stale_report {
+                        obj.insert("stale_report".into(), json!(report));
+                    }
                     obj.insert("kind".into(), json!(s.kind.tool()));
                     obj.insert("created".into(), json!(s.created));
                     obj.insert("matched".into(), json!(s.matched));
