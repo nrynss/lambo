@@ -224,3 +224,63 @@ async fn a_merged_with_concept_is_listed_marked_merged() {
     );
     s.mem.close().await.unwrap();
 }
+
+/// m1, a layered session: a `scope = "general"` write lists only concepts
+/// of `general`, never the project session's, and an unscoped write lists
+/// only the project's. Every text embeds alike here, so each session's
+/// concept is a hit at cosine 1.0 in its own store: only the session the
+/// write goes to is searched.
+#[tokio::test]
+async fn a_scoped_write_lists_only_its_own_sessions_concepts() {
+    const GENERAL_OLD: &str = "the embedder listens on port 7070";
+    let own = hybrid_server("mcp-replacement-proj").await;
+    let general = hybrid_server("general").await;
+    let project_old = settled(&own, &ack(&own, OLD).await).await["created"][0]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let general_old = settled(&general, &ack(&general, GENERAL_OLD).await).await["created"][0]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (s, _source) = super::layered::layered(&own, &general);
+
+    let out = call_raw(
+        &s,
+        "lambo_derive",
+        json!({
+            "agent_id": "agent-a",
+            "scope": "general",
+            "concepts": [{"content": REWORDED, "concept_type": "logic"}],
+        }),
+    )
+    .await;
+    assert_eq!(out.is_error, Some(false), "{out:?}");
+    let receipt = out.structured_content.unwrap()["receipt"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let r = settled(&s, &receipt).await;
+    let rows = r["replacement_candidates"]["candidates"]
+        .as_array()
+        .unwrap();
+    let ids: Vec<&str> = rows
+        .iter()
+        .map(|c| c["node_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, vec![general_old.as_str()], "{r}");
+    assert!(!r.to_string().contains(&project_old), "{r}");
+
+    let r = settled(&s, &ack(&s, REWORDED).await).await;
+    let rows = r["replacement_candidates"]["candidates"]
+        .as_array()
+        .unwrap();
+    let ids: Vec<&str> = rows
+        .iter()
+        .map(|c| c["node_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, vec![project_old.as_str()], "{r}");
+    assert!(!r.to_string().contains(&general_old), "{r}");
+    own.mem.close().await.unwrap();
+    general.mem.close().await.unwrap();
+}
