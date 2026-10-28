@@ -18,7 +18,8 @@
 //! that took a similarity merge; a canonical match wrote nothing new) is a
 //! candidate when every one of these holds ([`select`]):
 //!
-//! * its cosine is finite and at or above the floor, which is the write's
+//! * its cosine is finite and, clamped into [0, 1] (float error can put an
+//!   identical vector just above 1.0), at or above the floor, which is the write's
 //!   effective merge threshold (`semantic_match_threshold` as the write
 //!   path receives it: #87's calibrated value for the contract where it has
 //!   one, so 0.85 under BGE-M3 and 0.93 under EmbeddingGemma 2 at 768
@@ -209,8 +210,15 @@ pub fn select(
     };
     let mut kept: Vec<(&Concept, f64)> = Vec::new();
     for hit in hits {
-        let score = hit.score;
-        if !score.is_finite() || !(0.0..=1.0).contains(&score) || score < floor {
+        // A non-finite score is a store fault, never a similarity. A
+        // finite one is clamped into [0, 1] before the floor: float error
+        // can put a cosine of an identical vector just above 1.0, and that
+        // is the closest hit there is, not one to drop.
+        if !hit.score.is_finite() {
+            continue;
+        }
+        let score = hit.score.clamp(0.0, 1.0);
+        if score < floor {
             continue;
         }
         if skip.contains(&hit.item) || kept.iter().any(|(c, _)| c.id == hit.item) {

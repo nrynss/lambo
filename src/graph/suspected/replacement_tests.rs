@@ -153,16 +153,24 @@ fn repository_scope_must_match() {
     assert_eq!(listed(&g, &[hit(1, 0.9)], &[]).len(), 1);
 }
 
-/// At the floor is listed; below it, or a non-finite or out-of-range
-/// score, is not.
+/// At the floor is listed; below it, or a non-finite score, is not. A
+/// finite score is clamped into [0, 1] first: a cosine just above 1.0 from
+/// float error is listed at 1.0, and a negative one is below any floor.
 #[test]
 fn the_floor() {
     use ConceptType::Logic;
     let g = graph(concept(0, NEW, Logic), vec![concept(1, OLD, Logic)]);
     assert_eq!(listed(&g, &[hit(1, 0.85)], &[]).len(), 1, "at the floor");
     assert!(listed(&g, &[hit(1, 0.8499)], &[]).is_empty(), "below");
-    for bad in [f64::NAN, f64::INFINITY, 1.5, -0.9] {
+    for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -0.9] {
         assert!(listed(&g, &[hit(1, bad)], &[]).is_empty(), "{bad}");
+    }
+    for above in [1.0 + 1e-12, 1.000_000_1, 1.5] {
+        assert_eq!(
+            listed(&g, &[hit(1, above)], &[]),
+            vec![(id(1), 1.0)],
+            "{above}"
+        );
     }
 }
 
