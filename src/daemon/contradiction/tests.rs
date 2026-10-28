@@ -1061,3 +1061,18 @@ fn receipt_report_bounds_worst_case_utf8_and_keeps_total() {
     assert_eq!(report.total, 500);
     assert!(report.total > report.dependents.len());
 }
+
+#[test]
+fn stale_page_skips_evidence_evaluation_without_inbound_contradiction() {
+    let mut s = base(CanonizationStatus::None);
+    // Many targets have evidence, but only X has an inbound contradiction.
+    for n in 10..30 {
+        s.concept(n, 2, "agent-b", &format!("uncontradicted target {n}"), 100);
+        s.edge(100 + n, EdgeType::Dependency, 2, n, 100, None);
+    }
+    CONTRADICTION_EVALUATIONS.with(|count| count.set(0));
+    let report = stale_report(&s.g, (1..30).map(cid), MIN_AGE, t(1000));
+    CONTRADICTION_EVALUATIONS.with(|count| assert_eq!(count.get(), 1));
+    assert_eq!(report.total, 1);
+    assert_eq!(report.dependents[0].id, cid(2).0.to_string());
+}

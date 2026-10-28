@@ -199,6 +199,11 @@ pub fn contradicts_either_way(graph: &Graph, a: NodeId, b: NodeId) -> bool {
             || graph.edge_between(b, a, EdgeType::Contradicts).is_some())
 }
 
+#[cfg(test)]
+thread_local! {
+    static CONTRADICTION_EVALUATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn contradiction_at_with(
     graph: &Graph,
     node: NodeId,
@@ -206,6 +211,8 @@ fn contradiction_at_with(
     now: DateTime<Utc>,
     timeline: &WriterTimeline,
 ) -> Option<ContradictionHit> {
+    #[cfg(test)]
+    CONTRADICTION_EVALUATIONS.with(|count| count.set(count.get() + 1));
     let target = concept(graph, node)?;
     // Evidence written at or before this instant is old enough to count.
     // `None` when `now - min_age` is out of chrono's range (review M5, as
@@ -388,7 +395,9 @@ fn stale_dependents_with(
     now: DateTime<Utc>,
     timeline: &WriterTimeline,
 ) -> Vec<NodeId> {
-    if contradiction_at_with(graph, cited, min_age, now, timeline).is_none() {
+    if !has_inbound_contradiction(graph, cited)
+        || contradiction_at_with(graph, cited, min_age, now, timeline).is_none()
+    {
         return Vec::new();
     }
     let mut dependents: Vec<_> = graph

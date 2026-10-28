@@ -542,7 +542,7 @@ Lambo resolves `focus` exactly first, then as the short id a recall block render
 
 The report uses the same contradiction and supporting-citation rules, clock, and evidence age as recall. A concept that itself contradicts the cited concept is excluded; indirect dependencies do not count. New supporting evidence can make an earlier contradiction no longer current.
 
-For a derive or action carrying `against`, the settled receipt reports the affected targets' current stale dependents in `stale_report`, with the same bound and total. The immediate acknowledgement cannot report them. The report also appears in the piggybacked receipt text. After a restart, use `lambo_stale` to re-check the current graph; a recovered durable receipt may only retain its original summary.
+For a derive or action carrying `against`, the settled receipt's `stale_report` gives the full total of direct stale dependencies on the affected targets at the write's commit. It includes at most 50 rows, with at most 2048 UTF-8 bytes across the rows' IDs, cited IDs, and content snippets; `lambo_stale` pages have the 50-row limit without this byte cap. The immediate acknowledgement cannot report them. The report also appears in the piggybacked receipt text. After a restart, use `lambo_stale` to re-check the current graph; a recovered durable receipt may only retain its original summary.
 
 ### lambo_saints
 
