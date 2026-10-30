@@ -1,6 +1,8 @@
-# #175: current graph census and benchmark preparation
+# #175: graph census and experiment evidence
 
-First milestone of the [graph-relevance experiment](https://github.com/nrynss/lambo/issues/175#issuecomment-6199960984), measured **2026-10-30** on the local Apple M3 Pro rig. This is a topology census. No propagation arm, query-relevance grade, retrieval-quality result or latency comparison is reported yet.
+Current status: the [fixed-candidate three-arm pilot](pilot-2026-10-30.md) is complete, with [aggregate results](pilot-2026-10-30.json). Selected arms tie baseline on held-out known support (24/29); stronger development gains displace known answers. All labelled answers are direct phase-1 candidates, so useful graph-only evidence still needs independent labels. Production behavior is unchanged and #175 remains open.
+
+The sections below preserve the first milestone of the [graph-relevance experiment](https://github.com/nrynss/lambo/issues/175#issuecomment-6199960984), measured **2026-10-30** on the local Apple M3 Pro rig: the topology census and initial case preparation. They describe the state before the pilot; the linked report contains current decisions and remaining work.
 
 ## Frozen input and scope
 
@@ -55,7 +57,7 @@ These are **single-concept seeds**, not production phase-1 query seed sets. Real
 
 The giant component contains most file/entity records and only a small share of reasoning records. Ranking can improve choices among reachable evidence; it cannot surface disconnected facts through propagation. This is consistent with G3's old connectivity concern, but the snapshots differ in date and session scope, so these figures are not a controlled before/after comparison.
 
-## Decision and next milestones
+## Census decision and initial milestones (historical)
 
 **Proceed to query/label preparation, with targeted strata and representative controls.** The graph has concrete two-hop and varying-fanout opportunities, but they are a minority. These counts do not show that any reached concept is useful, nor that normalized propagation beats the zero-relevance arm.
 
@@ -69,9 +71,9 @@ The giant component contains most file/entity records and only a small share of 
 | No outgoing expansion | 1,600 | 20 |
 | Text contains an identifier/path/issue-like token | 2,103 | 20 |
 
-Selection is deterministic (seed 175), uses no propagation outcomes, and avoids repeated seeds across strata. Candidate texts are shuffled, with topology details and graph IDs retained only in a separate private key. The sheet has **no authored questions or relevance labels yet**: query, topic/split, grades, labeller/date and publication decisions are unset. It is not a set of 100 evaluated queries. Identifier-bearing text does not by itself make a good identifier question, and hub-reaching does not imply a relevant hub.
+Selection is deterministic (seed 175), uses no propagation outcomes, and avoids repeated seeds across strata. Candidate texts are shuffled, with topology details and graph IDs retained only in a separate private key. At this milestone the sheet had **no authored questions or relevance labels**: query, topic/split, grades, labeller/date and publication decisions were unset. It is not a set of 100 evaluated queries. Identifier-bearing text does not by itself make a good identifier question, and hub-reaching does not imply a relevant hub.
 
-The next steps are:
+The census identified these next steps (their implementation and outstanding limitations are recorded in the [pilot](pilot-2026-10-30.md)):
 
 1. Author genuine questions from the texts, covering the agreed multi-hop, low-degree detail, relevant-hub, exact-identifier and sparse families. Add separately authored unanswerable controls. Grade text usefulness without knowing an arm's selection. Group by topic/connected context before separating dev and held-out; do not treat overlapping seed neighbourhoods as independent topics.
 2. Pool the actual phase-1 and expanded candidates for those questions before finalizing labels. A topology neighbourhood alone is not the full relevance universe. Record query settings, seeds/scores, BFS membership, daemon scores, clock and embedding contract. Keep stratified diagnostics separate from an estimate over representative traffic.
@@ -97,4 +99,4 @@ python3 -m unittest discover -s scripts/eval -p 'test_graph_*.py'
 
 The case tool refuses outputs inside its repository, creates private files with mode 0600, and refuses overwrites. It never infers the largest session or labels a graph neighbour relevant.
 
-Validation: 10 stdlib tests cover direction/depth, cycles, isolates, duplicate typed edges, session isolation, invalid endpoints, immutable input bytes, exclusive outputs, sidecar refusal, deterministic sampling and unset labels. SCC sizes are checked against mutual reachability on every directed three-node graph. The traversal-type list is checked against production. An independent recursive SQL census on the frozen input matched all 2,421 seeds: 1,600 empty expansions, 113 seeds with hop-2 additions, 3,203 total depth-2 graph-only members and 2,921 depth-1 members.
+Validation at the census milestone: 10 stdlib tests cover direction/depth, cycles, isolates, duplicate typed edges, session isolation, invalid endpoints, immutable input bytes, exclusive outputs, sidecar refusal, deterministic sampling and unset labels. SCC sizes are checked against mutual reachability on every directed three-node graph. The traversal-type list is checked against production. An independent recursive SQL census on the frozen input matched all 2,421 seeds: 1,600 empty expansions, 113 seeds with hop-2 additions, 3,203 total depth-2 graph-only members and 2,921 depth-1 members.

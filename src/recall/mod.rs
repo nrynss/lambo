@@ -12,3 +12,7 @@ pub mod query_cache;
 pub mod query_vector;
 pub mod redundancy;
 pub mod suspected;
+
+// #175: offline research only; no runtime selector or default change.
+#[cfg(test)]
+mod experiment175;

@@ -12,6 +12,7 @@ from collections import Counter, defaultdict
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
 import sqlite3
 
@@ -93,7 +94,7 @@ def strong_component_sizes(nodes, outgoing, incoming):
     return sorted(sizes, reverse=True)
 
 
-def census(con, session):
+def census(con, session, private_key=None):
     meta = con.execute(
         "SELECT embedding_kind,embedding_model,embedding_dim,mutation_epoch "
         "FROM sessions WHERE session_id=?", (session,)).fetchone()
@@ -133,6 +134,9 @@ def census(con, session):
     incident = {u: len(outgoing[u] | incoming[u]) for u in nodes}
     cutoff = sorted(incident.values(), reverse=True)[math.ceil(len(nodes) * .01) - 1]
     hubs = {u for u in nodes if incident[u] >= max(1, cutoff)}
+    if private_key is not None:
+        private_key.update(session=session,hubs=sorted(hubs),incident_cutoff=cutoff,
+                           definition='top 1% by distinct incident neighbours, including cutoff ties')
     d1, d2, d3, second = {}, {}, {}, {}
     hub_reaching = fan_sensitive = alternate_paths = 0
     for u in nodes:
@@ -214,7 +218,12 @@ def main():
     ap.add_argument("--session", required=True, help="explicit session; never infer largest")
     ap.add_argument("--revision", required=True, help="engine revision whose semantics were checked")
     ap.add_argument("--out", required=True, type=Path)
+    ap.add_argument("--hub-key", type=Path, help="optional private hub-ID key outside Git")
     a = ap.parse_args()
+    if a.hub_key and a.hub_key.resolve().is_relative_to(Path(__file__).resolve().parents[2]):
+        ap.error("hub-ID key must stay outside the repository")
+    if a.hub_key and a.hub_key.exists():
+        ap.error("hub-ID key must be a new file")
     path = a.store.resolve(strict=True)
     # immutable ignores WAL: refuse a possibly incomplete copy, rather than hiding it.
     if Path(str(path) + "-wal").exists() or Path(str(path) + "-journal").exists():
@@ -224,7 +233,8 @@ def main():
     try:
         if con.execute("PRAGMA quick_check").fetchone()[0] != "ok":
             raise ValueError("snapshot quick_check failed")
-        report = census(con, a.session)
+        key = {}
+        report = census(con, a.session, key if a.hub_key else None)
     finally:
         con.close()
     if before != file_hash(path):
@@ -234,6 +244,11 @@ def main():
     with a.out.open("x") as f:
         json.dump(report, f, indent=2, sort_keys=True, allow_nan=False)
         f.write("\n")
+    if a.hub_key:
+        key['snapshot_sha256']=before
+        fd=os.open(a.hub_key,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+        with os.fdopen(fd,'w') as f:
+            json.dump(key,f,indent=2); f.write('\n')
     print(json.dumps({k: report[k] for k in ("concepts", "edges", "single_seed")}))
 
 
