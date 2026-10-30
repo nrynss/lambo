@@ -39,6 +39,8 @@ def validate(dataset):
         facets = {x["id"] for x in q["facets"]}
         if len(facets) != len(q["facets"]):
             raise ValueError("duplicate facet")
+        if not set(q.get("graph_only_facets", [])) <= facets:
+            raise ValueError("unknown graph-only facet")
         if q["kind"] == "answerable" and (not facets or not q["known_relevant"]):
             raise ValueError("answerable query lacks known answer evidence")
         if q["kind"] == "no_answer" and (facets or q["known_relevant"]):
@@ -59,6 +61,7 @@ def setting_key(setting):
 def measure(q, variant, hubs=None):
     known = {r["node"]: r for r in q["known_relevant"]}
     facets = {f["id"] for f in q["facets"]}
+    focus = set(q.get("graph_only_facets", []))
     rendered = [h for h in variant["hits"] if h["rendered"]]
     covered = set()
     for hit in rendered:
@@ -66,6 +69,11 @@ def measure(q, variant, hubs=None):
             covered.update(known[hit["id"]]["facets"])
     return dict(
         known_facet_coverage=len(covered) / len(facets) if facets else None,
+        known_graph_only_facet_coverage=len(covered & focus) / len(focus)
+        if focus
+        else None,
+        known_graph_only_facets_covered=len(covered & focus),
+        known_graph_only_facets=len(focus),
         known_answer_hit_at_10=float(
             any(h["id"] in known for h in variant["hits"][:10])
         ),
@@ -139,6 +147,15 @@ def aggregate(rows):
         controls=len(controls),
         topics=len({r["topic"] for r in answerable}),
         known_facet_coverage=mean(r["known_facet_coverage"] for r in answerable),
+        known_graph_only_facet_coverage=mean(
+            r.get("known_graph_only_facet_coverage") for r in answerable
+        ),
+        known_graph_only_facets_covered=sum(
+            r.get("known_graph_only_facets_covered", 0) for r in answerable
+        ),
+        known_graph_only_facets=sum(
+            r.get("known_graph_only_facets", 0) for r in answerable
+        ),
         known_answer_hit_at_10=mean(r["known_answer_hit_at_10"] for r in answerable),
         known_graph_only_rendered=sum(
             r["known_graph_only_rendered"] for r in answerable
@@ -165,31 +182,43 @@ def aggregate(rows):
     )
 
 
-def select(rows):
-    """Only already-scored development rows; low gain wins exact quality ties."""
+def select(rows, family=None, primary="known_facet_coverage"):
+    """Dev only. A predeclared family/metric can isolate screened missing facets.
+
+    Overall known support and hit@10 break quality ties before lower gain does.
+    """
     if any(r["split"] != "dev" for rs in rows.values() for r in rs):
         raise ValueError("selection requires development rows")
     chosen = {}
     for arm in ["damped", "degree"]:
-        options = [
-            (k, aggregate(rs)) for k, rs in rows.items() if json.loads(k)["arm"] == arm
-        ]
+        options = []
+        for key, values in rows.items():
+            if json.loads(key)["arm"] != arm:
+                continue
+            scoped = [r for r in values if family is None or r["family"] == family]
+            if not scoped:
+                raise ValueError("selection family has no rows")
+            quality = aggregate(scoped)[primary]
+            if quality is None or not math.isfinite(quality):
+                raise ValueError("selection metric has no labelled observations")
+            options.append((key, quality, aggregate(values)))
         if not options:
             raise ValueError("missing propagation arm")
 
         def rank(item):
-            k, a = item
-            s = json.loads(k)
+            key, quality, all_queries = item
+            setting = json.loads(key)
             return (
-                -a["known_facet_coverage"],
-                -a["known_answer_hit_at_10"],
-                s["gain"],
-                abs(s["damping"] - 0.5),
-                s["damping"],
+                -quality,
+                -all_queries["known_facet_coverage"],
+                -all_queries["known_answer_hit_at_10"],
+                setting["gain"],
+                abs(setting["damping"] - 0.5),
+                setting["damping"],
             )
 
-        k, a = min(options, key=rank)
-        chosen[arm] = json.loads(k)
+        key, _, _ = min(options, key=rank)
+        chosen[arm] = json.loads(key)
     return chosen
 
 
@@ -225,6 +254,14 @@ def main():
     ap.add_argument("--split", choices=["dev", "held_out"], required=True)
     ap.add_argument("--out", required=True, type=Path)
     ap.add_argument("--select", type=Path)
+    ap.add_argument(
+        "--selection-family", help="predeclared development selection family"
+    )
+    ap.add_argument(
+        "--selection-metric",
+        choices=["known_facet_coverage", "known_graph_only_facet_coverage"],
+        default="known_facet_coverage",
+    )
     ap.add_argument("--hubs", type=Path, help="private census hub key; same snapshot")
     a = ap.parse_args()
     if a.select and a.split != "dev":
@@ -271,9 +308,12 @@ def main():
     )
     if a.select:
         selection = dict(
-            selected=select(rows),
+            selected=select(rows, a.selection_family, a.selection_metric),
+            selection_family=a.selection_family,
+            selection_metric=a.selection_metric,
             selection_split="dev",
-            criterion="max known-facet coverage, then known-answer hit@10; ties: lower gain, damping nearest .5",
+            criterion="max primary metric on declared dev family; ties: overall known-facet coverage, "
+            "overall known-answer hit@10, lower gain, damping nearest .5",
             labels_sha256=digest(a.labels),
             run_sha256=digest(a.run),
         )

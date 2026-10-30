@@ -138,6 +138,53 @@ class Metrics(unittest.TestCase):
         self.assertEqual(a["mean"], 0.5)
         self.assertEqual(a["bootstrap_topic_clusters"], 2)
 
+    def test_focus_metric_credits_only_missing_facets_fully_rendered(self):
+        q = query()
+        q["facets"].append(dict(id="f2", text="graph-only detail"))
+        q["known_relevant"].append(dict(node="graph-answer", grade=2, facets=["f2"]))
+        q["graph_only_facets"] = ["f2"]
+        direct_only = g.measure(q, variant(hits=[hit("answer-q")]))
+        self.assertEqual(direct_only["known_facet_coverage"], 0.5)
+        self.assertEqual(direct_only["known_graph_only_facet_coverage"], 0)
+        both = g.measure(q, variant(hits=[hit("answer-q"), hit("graph-answer")]))
+        self.assertEqual(both["known_graph_only_facet_coverage"], 1)
+        self.assertEqual(both["known_graph_only_facets_covered"], 1)
+        truncated = g.measure(q, variant(hits=[hit("graph-answer", False, True)]))
+        self.assertEqual(truncated["known_graph_only_facet_coverage"], 0)
+
+    def test_development_focus_selection_breaks_ties_by_overall_support(self):
+        target = query()
+        target.update(family="graph_only_challenge", graph_only_facets=["f1"])
+        control = query("control", topic="two")
+        control["family"] = "direct_answer_control"
+        rows = {}
+        for arm in ["damped", "degree"]:
+            for gain, hits in [
+                (0.25, [[], [hit("answer-control")]]),
+                (8, [[hit("answer-q")], []]),
+                (16, [[hit("answer-q")], [hit("answer-control")]]),
+            ]:
+                key = g.setting_key(variant(arm, gain)["setting"])
+                rows[key] = [
+                    dict(
+                        id=q["id"],
+                        topic=q["topic"],
+                        family=q["family"],
+                        split="dev",
+                        kind="answerable",
+                        **g.measure(q, variant(hits=h)),
+                    )
+                    for q, h in zip([target, control], hits)
+                ]
+        chosen = g.select(
+            rows,
+            family="graph_only_challenge",
+            primary="known_graph_only_facet_coverage",
+        )
+        self.assertTrue(all(s["gain"] == 16 for s in chosen.values()))
+        with self.assertRaisesRegex(ValueError, "family has no rows"):
+            g.select(rows, family="absent")
+
     def test_cli_refuses_held_out_selection_before_reading_inputs(self):
         with tempfile.TemporaryDirectory() as tmp:
             p = Path(tmp)

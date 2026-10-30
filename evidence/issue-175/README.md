@@ -1,6 +1,8 @@
 # #175: graph census and experiment evidence
 
-Current status: the [fixed-candidate three-arm pilot](pilot-2026-10-30.md) is complete, with [aggregate results](pilot-2026-10-30.json). Selected arms tie baseline on held-out known support (24/29); stronger development gains displace known answers. All labelled answers are direct phase-1 candidates, so useful graph-only evidence still needs independent labels. Production behavior is unchanged and #175 remains open.
+Current status: the [fresh graph-only evidence check](graph-only-2026-10-30.md) is complete, with [aggregate results](graph-only-2026-10-30.json). After screening 84 fresh answerable questions, six have seven known graph-only facets. Development-selected arms recover **0/3 held-out missing facets** and reduce direct-control known-facet coverage from 56.7% to 26.7% (damped) / 53.3% (degree-normalized). Production behavior is unchanged; #175 remains open for review of the negative result. The sample is small and all seven missing-facet paths are one hop.
+
+The [initial pilot](pilot-2026-10-30.md) and [its aggregates](pilot-2026-10-30.json) are retained: all of its known answers were direct phase-1 candidates, so it did not measure graph-only recovery.
 
 The sections below preserve the first milestone of the [graph-relevance experiment](https://github.com/nrynss/lambo/issues/175#issuecomment-6199960984), measured **2026-10-30** on the local Apple M3 Pro rig: the topology census and initial case preparation. They describe the state before the pilot; the linked report contains current decisions and remaining work.
 
