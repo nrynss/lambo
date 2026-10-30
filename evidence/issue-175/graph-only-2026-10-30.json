@@ -1,0 +1,4201 @@
+{
+  "clock": "2026-10-30T09:14:26Z",
+  "dataset": {
+    "attrition": "All 84 authored answerable questions retained. Six have known graph-only facets; 78 have all known facets directly retrieved, after reviewing alternatives.",
+    "authored_answerable": 84,
+    "authoring": "Fresh relational questions authored before baseline pooling; second batch used multi-facet questions from new anchors after baseline-only screening. No query rewrites and no propagation outcomes before freeze.",
+    "authoring_batches": [
+      60,
+      24
+    ],
+    "direct_answer_controls": 78,
+    "focus_support_nodes_previously_labelled_in_pilot": 0,
+    "graph_only_topics": 4,
+    "graph_support_shortest_hops": {
+      "1": 7,
+      "2": 0
+    },
+    "known_facets": 108,
+    "labels": "Single-agent known-support labels, exact duplicates and reviewed equivalents. Unjudged candidates are not negatives; facet/source mapping audited before freeze.",
+    "no_answer_controls": 4,
+    "partition": "Semantic groups and known positive nodes never cross dev/held-out. Queue/accounting and citation/canonization challenges on dev; caller identity and proxy-recovery challenges held out.",
+    "provisional_exact_support_miss_questions": 9,
+    "publication": "Raw snapshots, texts, IDs, questions, qrels, vector cache, paths and per-query results remain private outside Git.",
+    "reviewed_graph_only_facets": 7,
+    "reviewed_graph_only_questions": 6,
+    "source_cases_rejected_before_authoring": 4,
+    "total_questions": 88
+  },
+  "date": "2026-10-30",
+  "decision": "No runtime/default change. Tested propagation recovered no held-out missing facets and displaced known direct support; negative small-sample mechanism check.",
+  "development": {
+    "families": {
+      "direct_answer_control": 48,
+      "graph_only_challenge": 4,
+      "no_answer_control": 2
+    },
+    "questions": 54,
+    "topic_groups": 14,
+    "variants": [
+      {
+        "by_family": {
+          "direct_answer_control": {
+            "answerable": 48,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": 0.012658227848101266,
+            "known_answer_hit_at_10": 0.7916666666666666,
+            "known_facet_coverage": 0.6458333333333334,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 13,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "graph_only_challenge": {
+            "answerable": 4,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": 0.0,
+            "known_answer_hit_at_10": 0.5,
+            "known_facet_coverage": 0.125,
+            "known_graph_only_facet_coverage": 0.0,
+            "known_graph_only_facets": 4,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 2,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "no_answer_control": {
+            "answerable": 0,
+            "controls": 2,
+            "controls_with_rendered_context": 2,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": null,
+            "known_answer_hit_at_10": null,
+            "known_facet_coverage": null,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0
+          }
+        },
+        "controls_with_rendered_context": 2,
+        "graph_only_rendered": 0,
+        "hub_share_rendered": 0.011673151750972763,
+        "known_answer_hit_at_10": 0.7692307692307693,
+        "known_coverage_delta_vs_zero": {
+          "bootstrap_topic_clusters": 13,
+          "draws": 2000,
+          "high": 0.0,
+          "low": 0.0,
+          "mean": 0.0
+        },
+        "known_facet_coverage": 0.6057692307692307,
+        "known_graph_only_facet_coverage": 0.0,
+        "known_graph_only_facets": 4,
+        "known_graph_only_facets_covered": 0,
+        "known_graph_only_rendered": 0,
+        "setting": {
+          "arm": "zero",
+          "damping": 0.5,
+          "gain": 0
+        }
+      },
+      {
+        "by_family": {
+          "direct_answer_control": {
+            "answerable": 48,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": 0.012658227848101266,
+            "known_answer_hit_at_10": 0.7916666666666666,
+            "known_facet_coverage": 0.6458333333333334,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 13,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "graph_only_challenge": {
+            "answerable": 4,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": 0.0,
+            "known_answer_hit_at_10": 0.5,
+            "known_facet_coverage": 0.125,
+            "known_graph_only_facet_coverage": 0.0,
+            "known_graph_only_facets": 4,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 2,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "no_answer_control": {
+            "answerable": 0,
+            "controls": 2,
+            "controls_with_rendered_context": 2,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": null,
+            "known_answer_hit_at_10": null,
+            "known_facet_coverage": null,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0
+          }
+        },
+        "controls_with_rendered_context": 2,
+        "graph_only_rendered": 0,
+        "hub_share_rendered": 0.011673151750972763,
+        "known_answer_hit_at_10": 0.7692307692307693,
+        "known_coverage_delta_vs_zero": {
+          "bootstrap_topic_clusters": 13,
+          "draws": 2000,
+          "high": 0.0,
+          "low": 0.0,
+          "mean": 0.0
+        },
+        "known_facet_coverage": 0.6057692307692307,
+        "known_graph_only_facet_coverage": 0.0,
+        "known_graph_only_facets": 4,
+        "known_graph_only_facets_covered": 0,
+        "known_graph_only_rendered": 0,
+        "setting": {
+          "arm": "damped",
+          "damping": 0.25,
+          "gain": 0.25
+        }
+      },
+      {
+        "by_family": {
+          "direct_answer_control": {
+            "answerable": 48,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": 0.012658227848101266,
+            "known_answer_hit_at_10": 0.7916666666666666,
+            "known_facet_coverage": 0.6458333333333334,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 13,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "graph_only_challenge": {
+            "answerable": 4,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": 0.0,
+            "known_answer_hit_at_10": 0.5,
+            "known_facet_coverage": 0.125,
+            "known_graph_only_facet_coverage": 0.0,
+            "known_graph_only_facets": 4,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 2,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "no_answer_control": {
+            "answerable": 0,
+            "controls": 2,
+            "controls_with_rendered_context": 2,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": null,
+            "known_answer_hit_at_10": null,
+            "known_facet_coverage": null,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0
+          }
+        },
+        "controls_with_rendered_context": 2,
+        "graph_only_rendered": 0,
+        "hub_share_rendered": 0.011673151750972763,
+        "known_answer_hit_at_10": 0.7692307692307693,
+        "known_coverage_delta_vs_zero": {
+          "bootstrap_topic_clusters": 13,
+          "draws": 2000,
+          "high": 0.0,
+          "low": 0.0,
+          "mean": 0.0
+        },
+        "known_facet_coverage": 0.6057692307692307,
+        "known_graph_only_facet_coverage": 0.0,
+        "known_graph_only_facets": 4,
+        "known_graph_only_facets_covered": 0,
+        "known_graph_only_rendered": 0,
+        "setting": {
+          "arm": "damped",
+          "damping": 0.25,
+          "gain": 0.5
+        }
+      },
+      {
+        "by_family": {
+          "direct_answer_control": {
+            "answerable": 48,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": 0.012658227848101266,
+            "known_answer_hit_at_10": 0.7916666666666666,
+            "known_facet_coverage": 0.6458333333333334,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 13,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "graph_only_challenge": {
+            "answerable": 4,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": 0.0,
+            "known_answer_hit_at_10": 0.5,
+            "known_facet_coverage": 0.125,
+            "known_graph_only_facet_coverage": 0.0,
+            "known_graph_only_facets": 4,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 2,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "no_answer_control": {
+            "answerable": 0,
+            "controls": 2,
+            "controls_with_rendered_context": 2,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": null,
+            "known_answer_hit_at_10": null,
+            "known_facet_coverage": null,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0
+          }
+        },
+        "controls_with_rendered_context": 2,
+        "graph_only_rendered": 0,
+        "hub_share_rendered": 0.011673151750972763,
+        "known_answer_hit_at_10": 0.7692307692307693,
+        "known_coverage_delta_vs_zero": {
+          "bootstrap_topic_clusters": 13,
+          "draws": 2000,
+          "high": 0.0,
+          "low": 0.0,
+          "mean": 0.0
+        },
+        "known_facet_coverage": 0.6057692307692307,
+        "known_graph_only_facet_coverage": 0.0,
+        "known_graph_only_facets": 4,
+        "known_graph_only_facets_covered": 0,
+        "known_graph_only_rendered": 0,
+        "setting": {
+          "arm": "damped",
+          "damping": 0.25,
+          "gain": 1
+        }
+      },
+      {
+        "by_family": {
+          "direct_answer_control": {
+            "answerable": 48,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": 0.012658227848101266,
+            "known_answer_hit_at_10": 0.7916666666666666,
+            "known_facet_coverage": 0.6458333333333334,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 13,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "graph_only_challenge": {
+            "answerable": 4,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": 0.0,
+            "known_answer_hit_at_10": 0.5,
+            "known_facet_coverage": 0.125,
+            "known_graph_only_facet_coverage": 0.0,
+            "known_graph_only_facets": 4,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 2,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "no_answer_control": {
+            "answerable": 0,
+            "controls": 2,
+            "controls_with_rendered_context": 2,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": null,
+            "known_answer_hit_at_10": null,
+            "known_facet_coverage": null,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0
+          }
+        },
+        "controls_with_rendered_context": 2,
+        "graph_only_rendered": 0,
+        "hub_share_rendered": 0.011673151750972763,
+        "known_answer_hit_at_10": 0.7692307692307693,
+        "known_coverage_delta_vs_zero": {
+          "bootstrap_topic_clusters": 13,
+          "draws": 2000,
+          "high": 0.0,
+          "low": 0.0,
+          "mean": 0.0
+        },
+        "known_facet_coverage": 0.6057692307692307,
+        "known_graph_only_facet_coverage": 0.0,
+        "known_graph_only_facets": 4,
+        "known_graph_only_facets_covered": 0,
+        "known_graph_only_rendered": 0,
+        "setting": {
+          "arm": "damped",
+          "damping": 0.25,
+          "gain": 2
+        }
+      },
+      {
+        "by_family": {
+          "direct_answer_control": {
+            "answerable": 48,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": 0.012658227848101266,
+            "known_answer_hit_at_10": 0.7916666666666666,
+            "known_facet_coverage": 0.6458333333333334,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 13,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "graph_only_challenge": {
+            "answerable": 4,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": 0.0,
+            "known_answer_hit_at_10": 0.5,
+            "known_facet_coverage": 0.125,
+            "known_graph_only_facet_coverage": 0.0,
+            "known_graph_only_facets": 4,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 2,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "no_answer_control": {
+            "answerable": 0,
+            "controls": 2,
+            "controls_with_rendered_context": 2,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": null,
+            "known_answer_hit_at_10": null,
+            "known_facet_coverage": null,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0
+          }
+        },
+        "controls_with_rendered_context": 2,
+        "graph_only_rendered": 0,
+        "hub_share_rendered": 0.011673151750972763,
+        "known_answer_hit_at_10": 0.7692307692307693,
+        "known_coverage_delta_vs_zero": {
+          "bootstrap_topic_clusters": 13,
+          "draws": 2000,
+          "high": 0.0,
+          "low": 0.0,
+          "mean": 0.0
+        },
+        "known_facet_coverage": 0.6057692307692307,
+        "known_graph_only_facet_coverage": 0.0,
+        "known_graph_only_facets": 4,
+        "known_graph_only_facets_covered": 0,
+        "known_graph_only_rendered": 0,
+        "setting": {
+          "arm": "damped",
+          "damping": 0.25,
+          "gain": 4
+        }
+      },
+      {
+        "by_family": {
+          "direct_answer_control": {
+            "answerable": 48,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": 0.012658227848101266,
+            "known_answer_hit_at_10": 0.7916666666666666,
+            "known_facet_coverage": 0.6458333333333334,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 13,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "graph_only_challenge": {
+            "answerable": 4,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": 0.0,
+            "known_answer_hit_at_10": 0.5,
+            "known_facet_coverage": 0.125,
+            "known_graph_only_facet_coverage": 0.0,
+            "known_graph_only_facets": 4,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 2,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "no_answer_control": {
+            "answerable": 0,
+            "controls": 2,
+            "controls_with_rendered_context": 2,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": null,
+            "known_answer_hit_at_10": null,
+            "known_facet_coverage": null,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0
+          }
+        },
+        "controls_with_rendered_context": 2,
+        "graph_only_rendered": 0,
+        "hub_share_rendered": 0.011673151750972763,
+        "known_answer_hit_at_10": 0.7692307692307693,
+        "known_coverage_delta_vs_zero": {
+          "bootstrap_topic_clusters": 13,
+          "draws": 2000,
+          "high": 0.0,
+          "low": 0.0,
+          "mean": 0.0
+        },
+        "known_facet_coverage": 0.6057692307692307,
+        "known_graph_only_facet_coverage": 0.0,
+        "known_graph_only_facets": 4,
+        "known_graph_only_facets_covered": 0,
+        "known_graph_only_rendered": 0,
+        "setting": {
+          "arm": "damped",
+          "damping": 0.25,
+          "gain": 8
+        }
+      },
+      {
+        "by_family": {
+          "direct_answer_control": {
+            "answerable": 48,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 92,
+            "hub_share_rendered": 0.02857142857142857,
+            "known_answer_hit_at_10": 0.7291666666666666,
+            "known_facet_coverage": 0.5833333333333334,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 13,
+              "draws": 2000,
+              "high": 0.0,
+              "low": -0.14285714285714285,
+              "mean": -0.0625
+            }
+          },
+          "graph_only_challenge": {
+            "answerable": 4,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 14,
+            "hub_share_rendered": 0.0,
+            "known_answer_hit_at_10": 0.25,
+            "known_facet_coverage": 0.125,
+            "known_graph_only_facet_coverage": 0.0,
+            "known_graph_only_facets": 4,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 2,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "no_answer_control": {
+            "answerable": 0,
+            "controls": 2,
+            "controls_with_rendered_context": 2,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": null,
+            "known_answer_hit_at_10": null,
+            "known_facet_coverage": null,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0
+          }
+        },
+        "controls_with_rendered_context": 2,
+        "graph_only_rendered": 106,
+        "hub_share_rendered": 0.026402640264026403,
+        "known_answer_hit_at_10": 0.6923076923076923,
+        "known_coverage_delta_vs_zero": {
+          "bootstrap_topic_clusters": 13,
+          "draws": 2000,
+          "high": 0.0,
+          "low": -0.1388888888888889,
+          "mean": -0.057692307692307696
+        },
+        "known_facet_coverage": 0.5480769230769231,
+        "known_graph_only_facet_coverage": 0.0,
+        "known_graph_only_facets": 4,
+        "known_graph_only_facets_covered": 0,
+        "known_graph_only_rendered": 0,
+        "setting": {
+          "arm": "damped",
+          "damping": 0.25,
+          "gain": 16
+        }
+      },
+      {
+        "by_family": {
+          "direct_answer_control": {
+            "answerable": 48,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 260,
+            "hub_share_rendered": 0.0375,
+            "known_answer_hit_at_10": 0.4375,
+            "known_facet_coverage": 0.3541666666666667,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 13,
+              "draws": 2000,
+              "high": -0.1956521739130435,
+              "low": -0.37777777777777777,
+              "mean": -0.2916666666666667
+            }
+          },
+          "graph_only_challenge": {
+            "answerable": 4,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 21,
+            "hub_share_rendered": 0.0,
+            "known_answer_hit_at_10": 1.0,
+            "known_facet_coverage": 0.375,
+            "known_graph_only_facet_coverage": 0.25,
+            "known_graph_only_facets": 4,
+            "known_graph_only_facets_covered": 1,
+            "known_graph_only_rendered": 1,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 2,
+              "draws": 2000,
+              "high": 0.3333333333333333,
+              "low": 0.0,
+              "mean": 0.25
+            }
+          },
+          "no_answer_control": {
+            "answerable": 0,
+            "controls": 2,
+            "controls_with_rendered_context": 2,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": null,
+            "known_answer_hit_at_10": null,
+            "known_facet_coverage": null,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0
+          }
+        },
+        "controls_with_rendered_context": 2,
+        "graph_only_rendered": 281,
+        "hub_share_rendered": 0.03488372093023256,
+        "known_answer_hit_at_10": 0.4807692307692308,
+        "known_coverage_delta_vs_zero": {
+          "bootstrap_topic_clusters": 13,
+          "draws": 2000,
+          "high": -0.12903225806451613,
+          "low": -0.36363636363636365,
+          "mean": -0.25
+        },
+        "known_facet_coverage": 0.3557692307692308,
+        "known_graph_only_facet_coverage": 0.25,
+        "known_graph_only_facets": 4,
+        "known_graph_only_facets_covered": 1,
+        "known_graph_only_rendered": 1,
+        "setting": {
+          "arm": "damped",
+          "damping": 0.25,
+          "gain": 32
+        }
+      },
+      {
+        "by_family": {
+          "direct_answer_control": {
+            "answerable": 48,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": 0.012658227848101266,
+            "known_answer_hit_at_10": 0.7916666666666666,
+            "known_facet_coverage": 0.6458333333333334,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 13,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "graph_only_challenge": {
+            "answerable": 4,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": 0.0,
+            "known_answer_hit_at_10": 0.5,
+            "known_facet_coverage": 0.125,
+            "known_graph_only_facet_coverage": 0.0,
+            "known_graph_only_facets": 4,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 2,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "no_answer_control": {
+            "answerable": 0,
+            "controls": 2,
+            "controls_with_rendered_context": 2,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": null,
+            "known_answer_hit_at_10": null,
+            "known_facet_coverage": null,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0
+          }
+        },
+        "controls_with_rendered_context": 2,
+        "graph_only_rendered": 0,
+        "hub_share_rendered": 0.011673151750972763,
+        "known_answer_hit_at_10": 0.7692307692307693,
+        "known_coverage_delta_vs_zero": {
+          "bootstrap_topic_clusters": 13,
+          "draws": 2000,
+          "high": 0.0,
+          "low": 0.0,
+          "mean": 0.0
+        },
+        "known_facet_coverage": 0.6057692307692307,
+        "known_graph_only_facet_coverage": 0.0,
+        "known_graph_only_facets": 4,
+        "known_graph_only_facets_covered": 0,
+        "known_graph_only_rendered": 0,
+        "setting": {
+          "arm": "damped",
+          "damping": 0.5,
+          "gain": 0.25
+        }
+      },
+      {
+        "by_family": {
+          "direct_answer_control": {
+            "answerable": 48,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": 0.012658227848101266,
+            "known_answer_hit_at_10": 0.7916666666666666,
+            "known_facet_coverage": 0.6458333333333334,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 13,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "graph_only_challenge": {
+            "answerable": 4,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": 0.0,
+            "known_answer_hit_at_10": 0.5,
+            "known_facet_coverage": 0.125,
+            "known_graph_only_facet_coverage": 0.0,
+            "known_graph_only_facets": 4,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 2,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "no_answer_control": {
+            "answerable": 0,
+            "controls": 2,
+            "controls_with_rendered_context": 2,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": null,
+            "known_answer_hit_at_10": null,
+            "known_facet_coverage": null,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0
+          }
+        },
+        "controls_with_rendered_context": 2,
+        "graph_only_rendered": 0,
+        "hub_share_rendered": 0.011673151750972763,
+        "known_answer_hit_at_10": 0.7692307692307693,
+        "known_coverage_delta_vs_zero": {
+          "bootstrap_topic_clusters": 13,
+          "draws": 2000,
+          "high": 0.0,
+          "low": 0.0,
+          "mean": 0.0
+        },
+        "known_facet_coverage": 0.6057692307692307,
+        "known_graph_only_facet_coverage": 0.0,
+        "known_graph_only_facets": 4,
+        "known_graph_only_facets_covered": 0,
+        "known_graph_only_rendered": 0,
+        "setting": {
+          "arm": "damped",
+          "damping": 0.5,
+          "gain": 0.5
+        }
+      },
+      {
+        "by_family": {
+          "direct_answer_control": {
+            "answerable": 48,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": 0.012658227848101266,
+            "known_answer_hit_at_10": 0.7916666666666666,
+            "known_facet_coverage": 0.6458333333333334,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 13,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "graph_only_challenge": {
+            "answerable": 4,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": 0.0,
+            "known_answer_hit_at_10": 0.5,
+            "known_facet_coverage": 0.125,
+            "known_graph_only_facet_coverage": 0.0,
+            "known_graph_only_facets": 4,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 2,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "no_answer_control": {
+            "answerable": 0,
+            "controls": 2,
+            "controls_with_rendered_context": 2,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": null,
+            "known_answer_hit_at_10": null,
+            "known_facet_coverage": null,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0
+          }
+        },
+        "controls_with_rendered_context": 2,
+        "graph_only_rendered": 0,
+        "hub_share_rendered": 0.011673151750972763,
+        "known_answer_hit_at_10": 0.7692307692307693,
+        "known_coverage_delta_vs_zero": {
+          "bootstrap_topic_clusters": 13,
+          "draws": 2000,
+          "high": 0.0,
+          "low": 0.0,
+          "mean": 0.0
+        },
+        "known_facet_coverage": 0.6057692307692307,
+        "known_graph_only_facet_coverage": 0.0,
+        "known_graph_only_facets": 4,
+        "known_graph_only_facets_covered": 0,
+        "known_graph_only_rendered": 0,
+        "setting": {
+          "arm": "damped",
+          "damping": 0.5,
+          "gain": 1
+        }
+      },
+      {
+        "by_family": {
+          "direct_answer_control": {
+            "answerable": 48,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": 0.012658227848101266,
+            "known_answer_hit_at_10": 0.7916666666666666,
+            "known_facet_coverage": 0.6458333333333334,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 13,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "graph_only_challenge": {
+            "answerable": 4,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": 0.0,
+            "known_answer_hit_at_10": 0.5,
+            "known_facet_coverage": 0.125,
+            "known_graph_only_facet_coverage": 0.0,
+            "known_graph_only_facets": 4,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 2,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "no_answer_control": {
+            "answerable": 0,
+            "controls": 2,
+            "controls_with_rendered_context": 2,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": null,
+            "known_answer_hit_at_10": null,
+            "known_facet_coverage": null,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0
+          }
+        },
+        "controls_with_rendered_context": 2,
+        "graph_only_rendered": 0,
+        "hub_share_rendered": 0.011673151750972763,
+        "known_answer_hit_at_10": 0.7692307692307693,
+        "known_coverage_delta_vs_zero": {
+          "bootstrap_topic_clusters": 13,
+          "draws": 2000,
+          "high": 0.0,
+          "low": 0.0,
+          "mean": 0.0
+        },
+        "known_facet_coverage": 0.6057692307692307,
+        "known_graph_only_facet_coverage": 0.0,
+        "known_graph_only_facets": 4,
+        "known_graph_only_facets_covered": 0,
+        "known_graph_only_rendered": 0,
+        "setting": {
+          "arm": "damped",
+          "damping": 0.5,
+          "gain": 2
+        }
+      },
+      {
+        "by_family": {
+          "direct_answer_control": {
+            "answerable": 48,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": 0.012658227848101266,
+            "known_answer_hit_at_10": 0.7916666666666666,
+            "known_facet_coverage": 0.6458333333333334,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 13,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "graph_only_challenge": {
+            "answerable": 4,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": 0.0,
+            "known_answer_hit_at_10": 0.5,
+            "known_facet_coverage": 0.125,
+            "known_graph_only_facet_coverage": 0.0,
+            "known_graph_only_facets": 4,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 2,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "no_answer_control": {
+            "answerable": 0,
+            "controls": 2,
+            "controls_with_rendered_context": 2,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": null,
+            "known_answer_hit_at_10": null,
+            "known_facet_coverage": null,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0
+          }
+        },
+        "controls_with_rendered_context": 2,
+        "graph_only_rendered": 0,
+        "hub_share_rendered": 0.011673151750972763,
+        "known_answer_hit_at_10": 0.7692307692307693,
+        "known_coverage_delta_vs_zero": {
+          "bootstrap_topic_clusters": 13,
+          "draws": 2000,
+          "high": 0.0,
+          "low": 0.0,
+          "mean": 0.0
+        },
+        "known_facet_coverage": 0.6057692307692307,
+        "known_graph_only_facet_coverage": 0.0,
+        "known_graph_only_facets": 4,
+        "known_graph_only_facets_covered": 0,
+        "known_graph_only_rendered": 0,
+        "setting": {
+          "arm": "damped",
+          "damping": 0.5,
+          "gain": 4
+        }
+      },
+      {
+        "by_family": {
+          "direct_answer_control": {
+            "answerable": 48,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": 0.012658227848101266,
+            "known_answer_hit_at_10": 0.7916666666666666,
+            "known_facet_coverage": 0.6458333333333334,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 13,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "graph_only_challenge": {
+            "answerable": 4,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": 0.0,
+            "known_answer_hit_at_10": 0.5,
+            "known_facet_coverage": 0.125,
+            "known_graph_only_facet_coverage": 0.0,
+            "known_graph_only_facets": 4,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 2,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "no_answer_control": {
+            "answerable": 0,
+            "controls": 2,
+            "controls_with_rendered_context": 2,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": null,
+            "known_answer_hit_at_10": null,
+            "known_facet_coverage": null,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0
+          }
+        },
+        "controls_with_rendered_context": 2,
+        "graph_only_rendered": 0,
+        "hub_share_rendered": 0.011673151750972763,
+        "known_answer_hit_at_10": 0.7692307692307693,
+        "known_coverage_delta_vs_zero": {
+          "bootstrap_topic_clusters": 13,
+          "draws": 2000,
+          "high": 0.0,
+          "low": 0.0,
+          "mean": 0.0
+        },
+        "known_facet_coverage": 0.6057692307692307,
+        "known_graph_only_facet_coverage": 0.0,
+        "known_graph_only_facets": 4,
+        "known_graph_only_facets_covered": 0,
+        "known_graph_only_rendered": 0,
+        "setting": {
+          "arm": "damped",
+          "damping": 0.5,
+          "gain": 8
+        }
+      },
+      {
+        "by_family": {
+          "direct_answer_control": {
+            "answerable": 48,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 74,
+            "hub_share_rendered": 0.011627906976744186,
+            "known_answer_hit_at_10": 0.75,
+            "known_facet_coverage": 0.5833333333333334,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 13,
+              "draws": 2000,
+              "high": 0.0,
+              "low": -0.14285714285714285,
+              "mean": -0.0625
+            }
+          },
+          "graph_only_challenge": {
+            "answerable": 4,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 12,
+            "hub_share_rendered": 0.0,
+            "known_answer_hit_at_10": 0.25,
+            "known_facet_coverage": 0.125,
+            "known_graph_only_facet_coverage": 0.0,
+            "known_graph_only_facets": 4,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 2,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "no_answer_control": {
+            "answerable": 0,
+            "controls": 2,
+            "controls_with_rendered_context": 2,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": null,
+            "known_answer_hit_at_10": null,
+            "known_facet_coverage": null,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0
+          }
+        },
+        "controls_with_rendered_context": 2,
+        "graph_only_rendered": 86,
+        "hub_share_rendered": 0.010714285714285714,
+        "known_answer_hit_at_10": 0.7115384615384616,
+        "known_coverage_delta_vs_zero": {
+          "bootstrap_topic_clusters": 13,
+          "draws": 2000,
+          "high": 0.0,
+          "low": -0.1388888888888889,
+          "mean": -0.057692307692307696
+        },
+        "known_facet_coverage": 0.5480769230769231,
+        "known_graph_only_facet_coverage": 0.0,
+        "known_graph_only_facets": 4,
+        "known_graph_only_facets_covered": 0,
+        "known_graph_only_rendered": 0,
+        "setting": {
+          "arm": "damped",
+          "damping": 0.5,
+          "gain": 16
+        }
+      },
+      {
+        "by_family": {
+          "direct_answer_control": {
+            "answerable": 48,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 254,
+            "hub_share_rendered": 0.0189873417721519,
+            "known_answer_hit_at_10": 0.4791666666666667,
+            "known_facet_coverage": 0.375,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 13,
+              "draws": 2000,
+              "high": -0.19047619047619047,
+              "low": -0.3492063492063492,
+              "mean": -0.2708333333333333
+            }
+          },
+          "graph_only_challenge": {
+            "answerable": 4,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 20,
+            "hub_share_rendered": 0.0,
+            "known_answer_hit_at_10": 0.5,
+            "known_facet_coverage": 0.375,
+            "known_graph_only_facet_coverage": 0.25,
+            "known_graph_only_facets": 4,
+            "known_graph_only_facets_covered": 1,
+            "known_graph_only_rendered": 1,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 2,
+              "draws": 2000,
+              "high": 0.3333333333333333,
+              "low": 0.0,
+              "mean": 0.25
+            }
+          },
+          "no_answer_control": {
+            "answerable": 0,
+            "controls": 2,
+            "controls_with_rendered_context": 2,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": null,
+            "known_answer_hit_at_10": null,
+            "known_facet_coverage": null,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0
+          }
+        },
+        "controls_with_rendered_context": 2,
+        "graph_only_rendered": 274,
+        "hub_share_rendered": 0.01764705882352941,
+        "known_answer_hit_at_10": 0.4807692307692308,
+        "known_coverage_delta_vs_zero": {
+          "bootstrap_topic_clusters": 13,
+          "draws": 2000,
+          "high": -0.12,
+          "low": -0.3333333333333333,
+          "mean": -0.23076923076923078
+        },
+        "known_facet_coverage": 0.375,
+        "known_graph_only_facet_coverage": 0.25,
+        "known_graph_only_facets": 4,
+        "known_graph_only_facets_covered": 1,
+        "known_graph_only_rendered": 1,
+        "setting": {
+          "arm": "damped",
+          "damping": 0.5,
+          "gain": 32
+        }
+      },
+      {
+        "by_family": {
+          "direct_answer_control": {
+            "answerable": 48,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": 0.012658227848101266,
+            "known_answer_hit_at_10": 0.7916666666666666,
+            "known_facet_coverage": 0.6458333333333334,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 13,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "graph_only_challenge": {
+            "answerable": 4,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": 0.0,
+            "known_answer_hit_at_10": 0.5,
+            "known_facet_coverage": 0.125,
+            "known_graph_only_facet_coverage": 0.0,
+            "known_graph_only_facets": 4,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 2,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "no_answer_control": {
+            "answerable": 0,
+            "controls": 2,
+            "controls_with_rendered_context": 2,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": null,
+            "known_answer_hit_at_10": null,
+            "known_facet_coverage": null,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0
+          }
+        },
+        "controls_with_rendered_context": 2,
+        "graph_only_rendered": 0,
+        "hub_share_rendered": 0.011673151750972763,
+        "known_answer_hit_at_10": 0.7692307692307693,
+        "known_coverage_delta_vs_zero": {
+          "bootstrap_topic_clusters": 13,
+          "draws": 2000,
+          "high": 0.0,
+          "low": 0.0,
+          "mean": 0.0
+        },
+        "known_facet_coverage": 0.6057692307692307,
+        "known_graph_only_facet_coverage": 0.0,
+        "known_graph_only_facets": 4,
+        "known_graph_only_facets_covered": 0,
+        "known_graph_only_rendered": 0,
+        "setting": {
+          "arm": "damped",
+          "damping": 0.75,
+          "gain": 0.25
+        }
+      },
+      {
+        "by_family": {
+          "direct_answer_control": {
+            "answerable": 48,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": 0.012658227848101266,
+            "known_answer_hit_at_10": 0.7916666666666666,
+            "known_facet_coverage": 0.6458333333333334,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 13,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "graph_only_challenge": {
+            "answerable": 4,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": 0.0,
+            "known_answer_hit_at_10": 0.5,
+            "known_facet_coverage": 0.125,
+            "known_graph_only_facet_coverage": 0.0,
+            "known_graph_only_facets": 4,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 2,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "no_answer_control": {
+            "answerable": 0,
+            "controls": 2,
+            "controls_with_rendered_context": 2,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": null,
+            "known_answer_hit_at_10": null,
+            "known_facet_coverage": null,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0
+          }
+        },
+        "controls_with_rendered_context": 2,
+        "graph_only_rendered": 0,
+        "hub_share_rendered": 0.011673151750972763,
+        "known_answer_hit_at_10": 0.7692307692307693,
+        "known_coverage_delta_vs_zero": {
+          "bootstrap_topic_clusters": 13,
+          "draws": 2000,
+          "high": 0.0,
+          "low": 0.0,
+          "mean": 0.0
+        },
+        "known_facet_coverage": 0.6057692307692307,
+        "known_graph_only_facet_coverage": 0.0,
+        "known_graph_only_facets": 4,
+        "known_graph_only_facets_covered": 0,
+        "known_graph_only_rendered": 0,
+        "setting": {
+          "arm": "damped",
+          "damping": 0.75,
+          "gain": 0.5
+        }
+      },
+      {
+        "by_family": {
+          "direct_answer_control": {
+            "answerable": 48,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": 0.012658227848101266,
+            "known_answer_hit_at_10": 0.7916666666666666,
+            "known_facet_coverage": 0.6458333333333334,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 13,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "graph_only_challenge": {
+            "answerable": 4,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": 0.0,
+            "known_answer_hit_at_10": 0.5,
+            "known_facet_coverage": 0.125,
+            "known_graph_only_facet_coverage": 0.0,
+            "known_graph_only_facets": 4,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 2,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "no_answer_control": {
+            "answerable": 0,
+            "controls": 2,
+            "controls_with_rendered_context": 2,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": null,
+            "known_answer_hit_at_10": null,
+            "known_facet_coverage": null,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0
+          }
+        },
+        "controls_with_rendered_context": 2,
+        "graph_only_rendered": 0,
+        "hub_share_rendered": 0.011673151750972763,
+        "known_answer_hit_at_10": 0.7692307692307693,
+        "known_coverage_delta_vs_zero": {
+          "bootstrap_topic_clusters": 13,
+          "draws": 2000,
+          "high": 0.0,
+          "low": 0.0,
+          "mean": 0.0
+        },
+        "known_facet_coverage": 0.6057692307692307,
+        "known_graph_only_facet_coverage": 0.0,
+        "known_graph_only_facets": 4,
+        "known_graph_only_facets_covered": 0,
+        "known_graph_only_rendered": 0,
+        "setting": {
+          "arm": "damped",
+          "damping": 0.75,
+          "gain": 1
+        }
+      },
+      {
+        "by_family": {
+          "direct_answer_control": {
+            "answerable": 48,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": 0.012658227848101266,
+            "known_answer_hit_at_10": 0.7916666666666666,
+            "known_facet_coverage": 0.6458333333333334,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 13,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "graph_only_challenge": {
+            "answerable": 4,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": 0.0,
+            "known_answer_hit_at_10": 0.5,
+            "known_facet_coverage": 0.125,
+            "known_graph_only_facet_coverage": 0.0,
+            "known_graph_only_facets": 4,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 2,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "no_answer_control": {
+            "answerable": 0,
+            "controls": 2,
+            "controls_with_rendered_context": 2,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": null,
+            "known_answer_hit_at_10": null,
+            "known_facet_coverage": null,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0
+          }
+        },
+        "controls_with_rendered_context": 2,
+        "graph_only_rendered": 0,
+        "hub_share_rendered": 0.011673151750972763,
+        "known_answer_hit_at_10": 0.7692307692307693,
+        "known_coverage_delta_vs_zero": {
+          "bootstrap_topic_clusters": 13,
+          "draws": 2000,
+          "high": 0.0,
+          "low": 0.0,
+          "mean": 0.0
+        },
+        "known_facet_coverage": 0.6057692307692307,
+        "known_graph_only_facet_coverage": 0.0,
+        "known_graph_only_facets": 4,
+        "known_graph_only_facets_covered": 0,
+        "known_graph_only_rendered": 0,
+        "setting": {
+          "arm": "damped",
+          "damping": 0.75,
+          "gain": 2
+        }
+      },
+      {
+        "by_family": {
+          "direct_answer_control": {
+            "answerable": 48,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": 0.012658227848101266,
+            "known_answer_hit_at_10": 0.7916666666666666,
+            "known_facet_coverage": 0.6458333333333334,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 13,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "graph_only_challenge": {
+            "answerable": 4,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": 0.0,
+            "known_answer_hit_at_10": 0.5,
+            "known_facet_coverage": 0.125,
+            "known_graph_only_facet_coverage": 0.0,
+            "known_graph_only_facets": 4,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 2,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "no_answer_control": {
+            "answerable": 0,
+            "controls": 2,
+            "controls_with_rendered_context": 2,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": null,
+            "known_answer_hit_at_10": null,
+            "known_facet_coverage": null,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0
+          }
+        },
+        "controls_with_rendered_context": 2,
+        "graph_only_rendered": 0,
+        "hub_share_rendered": 0.011673151750972763,
+        "known_answer_hit_at_10": 0.7692307692307693,
+        "known_coverage_delta_vs_zero": {
+          "bootstrap_topic_clusters": 13,
+          "draws": 2000,
+          "high": 0.0,
+          "low": 0.0,
+          "mean": 0.0
+        },
+        "known_facet_coverage": 0.6057692307692307,
+        "known_graph_only_facet_coverage": 0.0,
+        "known_graph_only_facets": 4,
+        "known_graph_only_facets_covered": 0,
+        "known_graph_only_rendered": 0,
+        "setting": {
+          "arm": "damped",
+          "damping": 0.75,
+          "gain": 4
+        }
+      },
+      {
+        "by_family": {
+          "direct_answer_control": {
+            "answerable": 48,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": 0.012658227848101266,
+            "known_answer_hit_at_10": 0.7916666666666666,
+            "known_facet_coverage": 0.6458333333333334,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 13,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "graph_only_challenge": {
+            "answerable": 4,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": 0.0,
+            "known_answer_hit_at_10": 0.5,
+            "known_facet_coverage": 0.125,
+            "known_graph_only_facet_coverage": 0.0,
+            "known_graph_only_facets": 4,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 2,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "no_answer_control": {
+            "answerable": 0,
+            "controls": 2,
+            "controls_with_rendered_context": 2,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": null,
+            "known_answer_hit_at_10": null,
+            "known_facet_coverage": null,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0
+          }
+        },
+        "controls_with_rendered_context": 2,
+        "graph_only_rendered": 0,
+        "hub_share_rendered": 0.011673151750972763,
+        "known_answer_hit_at_10": 0.7692307692307693,
+        "known_coverage_delta_vs_zero": {
+          "bootstrap_topic_clusters": 13,
+          "draws": 2000,
+          "high": 0.0,
+          "low": 0.0,
+          "mean": 0.0
+        },
+        "known_facet_coverage": 0.6057692307692307,
+        "known_graph_only_facet_coverage": 0.0,
+        "known_graph_only_facets": 4,
+        "known_graph_only_facets_covered": 0,
+        "known_graph_only_rendered": 0,
+        "setting": {
+          "arm": "damped",
+          "damping": 0.75,
+          "gain": 8
+        }
+      },
+      {
+        "by_family": {
+          "direct_answer_control": {
+            "answerable": 48,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 59,
+            "hub_share_rendered": 0.012096774193548387,
+            "known_answer_hit_at_10": 0.75,
+            "known_facet_coverage": 0.5833333333333334,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 13,
+              "draws": 2000,
+              "high": 0.0,
+              "low": -0.14285714285714285,
+              "mean": -0.0625
+            }
+          },
+          "graph_only_challenge": {
+            "answerable": 4,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 12,
+            "hub_share_rendered": 0.0,
+            "known_answer_hit_at_10": 0.25,
+            "known_facet_coverage": 0.125,
+            "known_graph_only_facet_coverage": 0.0,
+            "known_graph_only_facets": 4,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 2,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "no_answer_control": {
+            "answerable": 0,
+            "controls": 2,
+            "controls_with_rendered_context": 2,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": null,
+            "known_answer_hit_at_10": null,
+            "known_facet_coverage": null,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0
+          }
+        },
+        "controls_with_rendered_context": 2,
+        "graph_only_rendered": 71,
+        "hub_share_rendered": 0.011111111111111112,
+        "known_answer_hit_at_10": 0.7115384615384616,
+        "known_coverage_delta_vs_zero": {
+          "bootstrap_topic_clusters": 13,
+          "draws": 2000,
+          "high": 0.0,
+          "low": -0.1388888888888889,
+          "mean": -0.057692307692307696
+        },
+        "known_facet_coverage": 0.5480769230769231,
+        "known_graph_only_facet_coverage": 0.0,
+        "known_graph_only_facets": 4,
+        "known_graph_only_facets_covered": 0,
+        "known_graph_only_rendered": 0,
+        "setting": {
+          "arm": "damped",
+          "damping": 0.75,
+          "gain": 16
+        }
+      },
+      {
+        "by_family": {
+          "direct_answer_control": {
+            "answerable": 48,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 233,
+            "hub_share_rendered": 0.010033444816053512,
+            "known_answer_hit_at_10": 0.5625,
+            "known_facet_coverage": 0.3958333333333333,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 1,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 13,
+              "draws": 2000,
+              "high": -0.14130434782608695,
+              "low": -0.3474576271186441,
+              "mean": -0.25
+            }
+          },
+          "graph_only_challenge": {
+            "answerable": 4,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 19,
+            "hub_share_rendered": 0.0,
+            "known_answer_hit_at_10": 0.5,
+            "known_facet_coverage": 0.375,
+            "known_graph_only_facet_coverage": 0.25,
+            "known_graph_only_facets": 4,
+            "known_graph_only_facets_covered": 1,
+            "known_graph_only_rendered": 1,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 2,
+              "draws": 2000,
+              "high": 0.3333333333333333,
+              "low": 0.0,
+              "mean": 0.25
+            }
+          },
+          "no_answer_control": {
+            "answerable": 0,
+            "controls": 2,
+            "controls_with_rendered_context": 2,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": null,
+            "known_answer_hit_at_10": null,
+            "known_facet_coverage": null,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0
+          }
+        },
+        "controls_with_rendered_context": 2,
+        "graph_only_rendered": 252,
+        "hub_share_rendered": 0.009316770186335404,
+        "known_answer_hit_at_10": 0.5576923076923077,
+        "known_coverage_delta_vs_zero": {
+          "bootstrap_topic_clusters": 13,
+          "draws": 2000,
+          "high": -0.07258064516129033,
+          "low": -0.3333333333333333,
+          "mean": -0.21153846153846154
+        },
+        "known_facet_coverage": 0.3942307692307692,
+        "known_graph_only_facet_coverage": 0.25,
+        "known_graph_only_facets": 4,
+        "known_graph_only_facets_covered": 1,
+        "known_graph_only_rendered": 2,
+        "setting": {
+          "arm": "damped",
+          "damping": 0.75,
+          "gain": 32
+        }
+      },
+      {
+        "by_family": {
+          "direct_answer_control": {
+            "answerable": 48,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": 0.012658227848101266,
+            "known_answer_hit_at_10": 0.7916666666666666,
+            "known_facet_coverage": 0.6458333333333334,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 13,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "graph_only_challenge": {
+            "answerable": 4,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": 0.0,
+            "known_answer_hit_at_10": 0.5,
+            "known_facet_coverage": 0.125,
+            "known_graph_only_facet_coverage": 0.0,
+            "known_graph_only_facets": 4,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 2,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "no_answer_control": {
+            "answerable": 0,
+            "controls": 2,
+            "controls_with_rendered_context": 2,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": null,
+            "known_answer_hit_at_10": null,
+            "known_facet_coverage": null,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0
+          }
+        },
+        "controls_with_rendered_context": 2,
+        "graph_only_rendered": 0,
+        "hub_share_rendered": 0.011673151750972763,
+        "known_answer_hit_at_10": 0.7692307692307693,
+        "known_coverage_delta_vs_zero": {
+          "bootstrap_topic_clusters": 13,
+          "draws": 2000,
+          "high": 0.0,
+          "low": 0.0,
+          "mean": 0.0
+        },
+        "known_facet_coverage": 0.6057692307692307,
+        "known_graph_only_facet_coverage": 0.0,
+        "known_graph_only_facets": 4,
+        "known_graph_only_facets_covered": 0,
+        "known_graph_only_rendered": 0,
+        "setting": {
+          "arm": "degree",
+          "damping": 0.25,
+          "gain": 0.25
+        }
+      },
+      {
+        "by_family": {
+          "direct_answer_control": {
+            "answerable": 48,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": 0.012658227848101266,
+            "known_answer_hit_at_10": 0.7916666666666666,
+            "known_facet_coverage": 0.6458333333333334,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 13,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "graph_only_challenge": {
+            "answerable": 4,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": 0.0,
+            "known_answer_hit_at_10": 0.5,
+            "known_facet_coverage": 0.125,
+            "known_graph_only_facet_coverage": 0.0,
+            "known_graph_only_facets": 4,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 2,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "no_answer_control": {
+            "answerable": 0,
+            "controls": 2,
+            "controls_with_rendered_context": 2,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": null,
+            "known_answer_hit_at_10": null,
+            "known_facet_coverage": null,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0
+          }
+        },
+        "controls_with_rendered_context": 2,
+        "graph_only_rendered": 0,
+        "hub_share_rendered": 0.011673151750972763,
+        "known_answer_hit_at_10": 0.7692307692307693,
+        "known_coverage_delta_vs_zero": {
+          "bootstrap_topic_clusters": 13,
+          "draws": 2000,
+          "high": 0.0,
+          "low": 0.0,
+          "mean": 0.0
+        },
+        "known_facet_coverage": 0.6057692307692307,
+        "known_graph_only_facet_coverage": 0.0,
+        "known_graph_only_facets": 4,
+        "known_graph_only_facets_covered": 0,
+        "known_graph_only_rendered": 0,
+        "setting": {
+          "arm": "degree",
+          "damping": 0.25,
+          "gain": 0.5
+        }
+      },
+      {
+        "by_family": {
+          "direct_answer_control": {
+            "answerable": 48,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": 0.012658227848101266,
+            "known_answer_hit_at_10": 0.7916666666666666,
+            "known_facet_coverage": 0.6458333333333334,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 13,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "graph_only_challenge": {
+            "answerable": 4,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": 0.0,
+            "known_answer_hit_at_10": 0.5,
+            "known_facet_coverage": 0.125,
+            "known_graph_only_facet_coverage": 0.0,
+            "known_graph_only_facets": 4,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 2,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "no_answer_control": {
+            "answerable": 0,
+            "controls": 2,
+            "controls_with_rendered_context": 2,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": null,
+            "known_answer_hit_at_10": null,
+            "known_facet_coverage": null,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0
+          }
+        },
+        "controls_with_rendered_context": 2,
+        "graph_only_rendered": 0,
+        "hub_share_rendered": 0.011673151750972763,
+        "known_answer_hit_at_10": 0.7692307692307693,
+        "known_coverage_delta_vs_zero": {
+          "bootstrap_topic_clusters": 13,
+          "draws": 2000,
+          "high": 0.0,
+          "low": 0.0,
+          "mean": 0.0
+        },
+        "known_facet_coverage": 0.6057692307692307,
+        "known_graph_only_facet_coverage": 0.0,
+        "known_graph_only_facets": 4,
+        "known_graph_only_facets_covered": 0,
+        "known_graph_only_rendered": 0,
+        "setting": {
+          "arm": "degree",
+          "damping": 0.25,
+          "gain": 1
+        }
+      },
+      {
+        "by_family": {
+          "direct_answer_control": {
+            "answerable": 48,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": 0.012658227848101266,
+            "known_answer_hit_at_10": 0.7916666666666666,
+            "known_facet_coverage": 0.6458333333333334,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 13,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "graph_only_challenge": {
+            "answerable": 4,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": 0.0,
+            "known_answer_hit_at_10": 0.5,
+            "known_facet_coverage": 0.125,
+            "known_graph_only_facet_coverage": 0.0,
+            "known_graph_only_facets": 4,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 2,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "no_answer_control": {
+            "answerable": 0,
+            "controls": 2,
+            "controls_with_rendered_context": 2,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": null,
+            "known_answer_hit_at_10": null,
+            "known_facet_coverage": null,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0
+          }
+        },
+        "controls_with_rendered_context": 2,
+        "graph_only_rendered": 0,
+        "hub_share_rendered": 0.011673151750972763,
+        "known_answer_hit_at_10": 0.7692307692307693,
+        "known_coverage_delta_vs_zero": {
+          "bootstrap_topic_clusters": 13,
+          "draws": 2000,
+          "high": 0.0,
+          "low": 0.0,
+          "mean": 0.0
+        },
+        "known_facet_coverage": 0.6057692307692307,
+        "known_graph_only_facet_coverage": 0.0,
+        "known_graph_only_facets": 4,
+        "known_graph_only_facets_covered": 0,
+        "known_graph_only_rendered": 0,
+        "setting": {
+          "arm": "degree",
+          "damping": 0.25,
+          "gain": 2
+        }
+      },
+      {
+        "by_family": {
+          "direct_answer_control": {
+            "answerable": 48,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": 0.012658227848101266,
+            "known_answer_hit_at_10": 0.7916666666666666,
+            "known_facet_coverage": 0.6458333333333334,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 13,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "graph_only_challenge": {
+            "answerable": 4,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": 0.0,
+            "known_answer_hit_at_10": 0.5,
+            "known_facet_coverage": 0.125,
+            "known_graph_only_facet_coverage": 0.0,
+            "known_graph_only_facets": 4,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 2,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "no_answer_control": {
+            "answerable": 0,
+            "controls": 2,
+            "controls_with_rendered_context": 2,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": null,
+            "known_answer_hit_at_10": null,
+            "known_facet_coverage": null,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0
+          }
+        },
+        "controls_with_rendered_context": 2,
+        "graph_only_rendered": 0,
+        "hub_share_rendered": 0.011673151750972763,
+        "known_answer_hit_at_10": 0.7692307692307693,
+        "known_coverage_delta_vs_zero": {
+          "bootstrap_topic_clusters": 13,
+          "draws": 2000,
+          "high": 0.0,
+          "low": 0.0,
+          "mean": 0.0
+        },
+        "known_facet_coverage": 0.6057692307692307,
+        "known_graph_only_facet_coverage": 0.0,
+        "known_graph_only_facets": 4,
+        "known_graph_only_facets_covered": 0,
+        "known_graph_only_rendered": 0,
+        "setting": {
+          "arm": "degree",
+          "damping": 0.25,
+          "gain": 4
+        }
+      },
+      {
+        "by_family": {
+          "direct_answer_control": {
+            "answerable": 48,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": 0.012658227848101266,
+            "known_answer_hit_at_10": 0.7916666666666666,
+            "known_facet_coverage": 0.6458333333333334,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 13,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "graph_only_challenge": {
+            "answerable": 4,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": 0.0,
+            "known_answer_hit_at_10": 0.5,
+            "known_facet_coverage": 0.125,
+            "known_graph_only_facet_coverage": 0.0,
+            "known_graph_only_facets": 4,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 2,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "no_answer_control": {
+            "answerable": 0,
+            "controls": 2,
+            "controls_with_rendered_context": 2,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": null,
+            "known_answer_hit_at_10": null,
+            "known_facet_coverage": null,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0
+          }
+        },
+        "controls_with_rendered_context": 2,
+        "graph_only_rendered": 0,
+        "hub_share_rendered": 0.011673151750972763,
+        "known_answer_hit_at_10": 0.7692307692307693,
+        "known_coverage_delta_vs_zero": {
+          "bootstrap_topic_clusters": 13,
+          "draws": 2000,
+          "high": 0.0,
+          "low": 0.0,
+          "mean": 0.0
+        },
+        "known_facet_coverage": 0.6057692307692307,
+        "known_graph_only_facet_coverage": 0.0,
+        "known_graph_only_facets": 4,
+        "known_graph_only_facets_covered": 0,
+        "known_graph_only_rendered": 0,
+        "setting": {
+          "arm": "degree",
+          "damping": 0.25,
+          "gain": 8
+        }
+      },
+      {
+        "by_family": {
+          "direct_answer_control": {
+            "answerable": 48,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 66,
+            "hub_share_rendered": 0.00784313725490196,
+            "known_answer_hit_at_10": 0.75,
+            "known_facet_coverage": 0.5833333333333334,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 13,
+              "draws": 2000,
+              "high": 0.0,
+              "low": -0.14285714285714285,
+              "mean": -0.0625
+            }
+          },
+          "graph_only_challenge": {
+            "answerable": 4,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 12,
+            "hub_share_rendered": 0.0,
+            "known_answer_hit_at_10": 0.5,
+            "known_facet_coverage": 0.25,
+            "known_graph_only_facet_coverage": 0.25,
+            "known_graph_only_facets": 4,
+            "known_graph_only_facets_covered": 1,
+            "known_graph_only_rendered": 1,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 2,
+              "draws": 2000,
+              "high": 0.3333333333333333,
+              "low": 0.0,
+              "mean": 0.25
+            }
+          },
+          "no_answer_control": {
+            "answerable": 0,
+            "controls": 2,
+            "controls_with_rendered_context": 2,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": null,
+            "known_answer_hit_at_10": null,
+            "known_facet_coverage": null,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0
+          }
+        },
+        "controls_with_rendered_context": 2,
+        "graph_only_rendered": 78,
+        "hub_share_rendered": 0.007246376811594203,
+        "known_answer_hit_at_10": 0.7307692307692307,
+        "known_coverage_delta_vs_zero": {
+          "bootstrap_topic_clusters": 13,
+          "draws": 2000,
+          "high": 0.009615384615384616,
+          "low": -0.13636363636363635,
+          "mean": -0.04807692307692308
+        },
+        "known_facet_coverage": 0.5576923076923077,
+        "known_graph_only_facet_coverage": 0.25,
+        "known_graph_only_facets": 4,
+        "known_graph_only_facets_covered": 1,
+        "known_graph_only_rendered": 1,
+        "setting": {
+          "arm": "degree",
+          "damping": 0.25,
+          "gain": 16
+        }
+      },
+      {
+        "by_family": {
+          "direct_answer_control": {
+            "answerable": 48,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 227,
+            "hub_share_rendered": 0.007272727272727273,
+            "known_answer_hit_at_10": 0.5416666666666666,
+            "known_facet_coverage": 0.34375,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 13,
+              "draws": 2000,
+              "high": -0.225,
+              "low": -0.3618421052631579,
+              "mean": -0.3020833333333333
+            }
+          },
+          "graph_only_challenge": {
+            "answerable": 4,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 20,
+            "hub_share_rendered": 0.0,
+            "known_answer_hit_at_10": 0.5,
+            "known_facet_coverage": 0.25,
+            "known_graph_only_facet_coverage": 0.25,
+            "known_graph_only_facets": 4,
+            "known_graph_only_facets_covered": 1,
+            "known_graph_only_rendered": 1,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 2,
+              "draws": 2000,
+              "high": 0.3333333333333333,
+              "low": 0.0,
+              "mean": 0.25
+            }
+          },
+          "no_answer_control": {
+            "answerable": 0,
+            "controls": 2,
+            "controls_with_rendered_context": 2,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": null,
+            "known_answer_hit_at_10": null,
+            "known_facet_coverage": null,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0
+          }
+        },
+        "controls_with_rendered_context": 2,
+        "graph_only_rendered": 247,
+        "hub_share_rendered": 0.006734006734006734,
+        "known_answer_hit_at_10": 0.5384615384615384,
+        "known_coverage_delta_vs_zero": {
+          "bootstrap_topic_clusters": 13,
+          "draws": 2000,
+          "high": -0.17307692307692307,
+          "low": -0.35,
+          "mean": -0.2692307692307692
+        },
+        "known_facet_coverage": 0.33653846153846156,
+        "known_graph_only_facet_coverage": 0.25,
+        "known_graph_only_facets": 4,
+        "known_graph_only_facets_covered": 1,
+        "known_graph_only_rendered": 1,
+        "setting": {
+          "arm": "degree",
+          "damping": 0.25,
+          "gain": 32
+        }
+      },
+      {
+        "by_family": {
+          "direct_answer_control": {
+            "answerable": 48,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": 0.012658227848101266,
+            "known_answer_hit_at_10": 0.7916666666666666,
+            "known_facet_coverage": 0.6458333333333334,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 13,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "graph_only_challenge": {
+            "answerable": 4,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": 0.0,
+            "known_answer_hit_at_10": 0.5,
+            "known_facet_coverage": 0.125,
+            "known_graph_only_facet_coverage": 0.0,
+            "known_graph_only_facets": 4,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 2,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "no_answer_control": {
+            "answerable": 0,
+            "controls": 2,
+            "controls_with_rendered_context": 2,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": null,
+            "known_answer_hit_at_10": null,
+            "known_facet_coverage": null,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0
+          }
+        },
+        "controls_with_rendered_context": 2,
+        "graph_only_rendered": 0,
+        "hub_share_rendered": 0.011673151750972763,
+        "known_answer_hit_at_10": 0.7692307692307693,
+        "known_coverage_delta_vs_zero": {
+          "bootstrap_topic_clusters": 13,
+          "draws": 2000,
+          "high": 0.0,
+          "low": 0.0,
+          "mean": 0.0
+        },
+        "known_facet_coverage": 0.6057692307692307,
+        "known_graph_only_facet_coverage": 0.0,
+        "known_graph_only_facets": 4,
+        "known_graph_only_facets_covered": 0,
+        "known_graph_only_rendered": 0,
+        "setting": {
+          "arm": "degree",
+          "damping": 0.5,
+          "gain": 0.25
+        }
+      },
+      {
+        "by_family": {
+          "direct_answer_control": {
+            "answerable": 48,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": 0.012658227848101266,
+            "known_answer_hit_at_10": 0.7916666666666666,
+            "known_facet_coverage": 0.6458333333333334,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 13,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "graph_only_challenge": {
+            "answerable": 4,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": 0.0,
+            "known_answer_hit_at_10": 0.5,
+            "known_facet_coverage": 0.125,
+            "known_graph_only_facet_coverage": 0.0,
+            "known_graph_only_facets": 4,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 2,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "no_answer_control": {
+            "answerable": 0,
+            "controls": 2,
+            "controls_with_rendered_context": 2,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": null,
+            "known_answer_hit_at_10": null,
+            "known_facet_coverage": null,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0
+          }
+        },
+        "controls_with_rendered_context": 2,
+        "graph_only_rendered": 0,
+        "hub_share_rendered": 0.011673151750972763,
+        "known_answer_hit_at_10": 0.7692307692307693,
+        "known_coverage_delta_vs_zero": {
+          "bootstrap_topic_clusters": 13,
+          "draws": 2000,
+          "high": 0.0,
+          "low": 0.0,
+          "mean": 0.0
+        },
+        "known_facet_coverage": 0.6057692307692307,
+        "known_graph_only_facet_coverage": 0.0,
+        "known_graph_only_facets": 4,
+        "known_graph_only_facets_covered": 0,
+        "known_graph_only_rendered": 0,
+        "setting": {
+          "arm": "degree",
+          "damping": 0.5,
+          "gain": 0.5
+        }
+      },
+      {
+        "by_family": {
+          "direct_answer_control": {
+            "answerable": 48,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": 0.012658227848101266,
+            "known_answer_hit_at_10": 0.7916666666666666,
+            "known_facet_coverage": 0.6458333333333334,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 13,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "graph_only_challenge": {
+            "answerable": 4,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": 0.0,
+            "known_answer_hit_at_10": 0.5,
+            "known_facet_coverage": 0.125,
+            "known_graph_only_facet_coverage": 0.0,
+            "known_graph_only_facets": 4,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 2,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "no_answer_control": {
+            "answerable": 0,
+            "controls": 2,
+            "controls_with_rendered_context": 2,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": null,
+            "known_answer_hit_at_10": null,
+            "known_facet_coverage": null,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0
+          }
+        },
+        "controls_with_rendered_context": 2,
+        "graph_only_rendered": 0,
+        "hub_share_rendered": 0.011673151750972763,
+        "known_answer_hit_at_10": 0.7692307692307693,
+        "known_coverage_delta_vs_zero": {
+          "bootstrap_topic_clusters": 13,
+          "draws": 2000,
+          "high": 0.0,
+          "low": 0.0,
+          "mean": 0.0
+        },
+        "known_facet_coverage": 0.6057692307692307,
+        "known_graph_only_facet_coverage": 0.0,
+        "known_graph_only_facets": 4,
+        "known_graph_only_facets_covered": 0,
+        "known_graph_only_rendered": 0,
+        "setting": {
+          "arm": "degree",
+          "damping": 0.5,
+          "gain": 1
+        }
+      },
+      {
+        "by_family": {
+          "direct_answer_control": {
+            "answerable": 48,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": 0.012658227848101266,
+            "known_answer_hit_at_10": 0.7916666666666666,
+            "known_facet_coverage": 0.6458333333333334,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 13,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "graph_only_challenge": {
+            "answerable": 4,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": 0.0,
+            "known_answer_hit_at_10": 0.5,
+            "known_facet_coverage": 0.125,
+            "known_graph_only_facet_coverage": 0.0,
+            "known_graph_only_facets": 4,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 2,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "no_answer_control": {
+            "answerable": 0,
+            "controls": 2,
+            "controls_with_rendered_context": 2,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": null,
+            "known_answer_hit_at_10": null,
+            "known_facet_coverage": null,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0
+          }
+        },
+        "controls_with_rendered_context": 2,
+        "graph_only_rendered": 0,
+        "hub_share_rendered": 0.011673151750972763,
+        "known_answer_hit_at_10": 0.7692307692307693,
+        "known_coverage_delta_vs_zero": {
+          "bootstrap_topic_clusters": 13,
+          "draws": 2000,
+          "high": 0.0,
+          "low": 0.0,
+          "mean": 0.0
+        },
+        "known_facet_coverage": 0.6057692307692307,
+        "known_graph_only_facet_coverage": 0.0,
+        "known_graph_only_facets": 4,
+        "known_graph_only_facets_covered": 0,
+        "known_graph_only_rendered": 0,
+        "setting": {
+          "arm": "degree",
+          "damping": 0.5,
+          "gain": 2
+        }
+      },
+      {
+        "by_family": {
+          "direct_answer_control": {
+            "answerable": 48,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": 0.012658227848101266,
+            "known_answer_hit_at_10": 0.7916666666666666,
+            "known_facet_coverage": 0.6458333333333334,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 13,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "graph_only_challenge": {
+            "answerable": 4,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": 0.0,
+            "known_answer_hit_at_10": 0.5,
+            "known_facet_coverage": 0.125,
+            "known_graph_only_facet_coverage": 0.0,
+            "known_graph_only_facets": 4,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 2,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "no_answer_control": {
+            "answerable": 0,
+            "controls": 2,
+            "controls_with_rendered_context": 2,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": null,
+            "known_answer_hit_at_10": null,
+            "known_facet_coverage": null,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0
+          }
+        },
+        "controls_with_rendered_context": 2,
+        "graph_only_rendered": 0,
+        "hub_share_rendered": 0.011673151750972763,
+        "known_answer_hit_at_10": 0.7692307692307693,
+        "known_coverage_delta_vs_zero": {
+          "bootstrap_topic_clusters": 13,
+          "draws": 2000,
+          "high": 0.0,
+          "low": 0.0,
+          "mean": 0.0
+        },
+        "known_facet_coverage": 0.6057692307692307,
+        "known_graph_only_facet_coverage": 0.0,
+        "known_graph_only_facets": 4,
+        "known_graph_only_facets_covered": 0,
+        "known_graph_only_rendered": 0,
+        "setting": {
+          "arm": "degree",
+          "damping": 0.5,
+          "gain": 4
+        }
+      },
+      {
+        "by_family": {
+          "direct_answer_control": {
+            "answerable": 48,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": 0.012658227848101266,
+            "known_answer_hit_at_10": 0.7916666666666666,
+            "known_facet_coverage": 0.6458333333333334,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 13,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "graph_only_challenge": {
+            "answerable": 4,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": 0.0,
+            "known_answer_hit_at_10": 0.5,
+            "known_facet_coverage": 0.125,
+            "known_graph_only_facet_coverage": 0.0,
+            "known_graph_only_facets": 4,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 2,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "no_answer_control": {
+            "answerable": 0,
+            "controls": 2,
+            "controls_with_rendered_context": 2,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": null,
+            "known_answer_hit_at_10": null,
+            "known_facet_coverage": null,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0
+          }
+        },
+        "controls_with_rendered_context": 2,
+        "graph_only_rendered": 0,
+        "hub_share_rendered": 0.011673151750972763,
+        "known_answer_hit_at_10": 0.7692307692307693,
+        "known_coverage_delta_vs_zero": {
+          "bootstrap_topic_clusters": 13,
+          "draws": 2000,
+          "high": 0.0,
+          "low": 0.0,
+          "mean": 0.0
+        },
+        "known_facet_coverage": 0.6057692307692307,
+        "known_graph_only_facet_coverage": 0.0,
+        "known_graph_only_facets": 4,
+        "known_graph_only_facets_covered": 0,
+        "known_graph_only_rendered": 0,
+        "setting": {
+          "arm": "degree",
+          "damping": 0.5,
+          "gain": 8
+        }
+      },
+      {
+        "by_family": {
+          "direct_answer_control": {
+            "answerable": 48,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 64,
+            "hub_share_rendered": 0.007905138339920948,
+            "known_answer_hit_at_10": 0.75,
+            "known_facet_coverage": 0.5833333333333334,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 13,
+              "draws": 2000,
+              "high": 0.0,
+              "low": -0.14285714285714285,
+              "mean": -0.0625
+            }
+          },
+          "graph_only_challenge": {
+            "answerable": 4,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 13,
+            "hub_share_rendered": 0.0,
+            "known_answer_hit_at_10": 0.5,
+            "known_facet_coverage": 0.25,
+            "known_graph_only_facet_coverage": 0.25,
+            "known_graph_only_facets": 4,
+            "known_graph_only_facets_covered": 1,
+            "known_graph_only_rendered": 1,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 2,
+              "draws": 2000,
+              "high": 0.3333333333333333,
+              "low": 0.0,
+              "mean": 0.25
+            }
+          },
+          "no_answer_control": {
+            "answerable": 0,
+            "controls": 2,
+            "controls_with_rendered_context": 2,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": null,
+            "known_answer_hit_at_10": null,
+            "known_facet_coverage": null,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0
+          }
+        },
+        "controls_with_rendered_context": 2,
+        "graph_only_rendered": 77,
+        "hub_share_rendered": 0.007272727272727273,
+        "known_answer_hit_at_10": 0.7307692307692307,
+        "known_coverage_delta_vs_zero": {
+          "bootstrap_topic_clusters": 13,
+          "draws": 2000,
+          "high": 0.009615384615384616,
+          "low": -0.13636363636363635,
+          "mean": -0.04807692307692308
+        },
+        "known_facet_coverage": 0.5576923076923077,
+        "known_graph_only_facet_coverage": 0.25,
+        "known_graph_only_facets": 4,
+        "known_graph_only_facets_covered": 1,
+        "known_graph_only_rendered": 1,
+        "setting": {
+          "arm": "degree",
+          "damping": 0.5,
+          "gain": 16
+        }
+      },
+      {
+        "by_family": {
+          "direct_answer_control": {
+            "answerable": 48,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 221,
+            "hub_share_rendered": 0.007272727272727273,
+            "known_answer_hit_at_10": 0.5625,
+            "known_facet_coverage": 0.3541666666666667,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 13,
+              "draws": 2000,
+              "high": -0.20754716981132076,
+              "low": -0.35714285714285715,
+              "mean": -0.2916666666666667
+            }
+          },
+          "graph_only_challenge": {
+            "answerable": 4,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 19,
+            "hub_share_rendered": 0.0,
+            "known_answer_hit_at_10": 0.5,
+            "known_facet_coverage": 0.25,
+            "known_graph_only_facet_coverage": 0.25,
+            "known_graph_only_facets": 4,
+            "known_graph_only_facets_covered": 1,
+            "known_graph_only_rendered": 1,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 2,
+              "draws": 2000,
+              "high": 0.3333333333333333,
+              "low": 0.0,
+              "mean": 0.25
+            }
+          },
+          "no_answer_control": {
+            "answerable": 0,
+            "controls": 2,
+            "controls_with_rendered_context": 2,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": null,
+            "known_answer_hit_at_10": null,
+            "known_facet_coverage": null,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0
+          }
+        },
+        "controls_with_rendered_context": 2,
+        "graph_only_rendered": 240,
+        "hub_share_rendered": 0.006734006734006734,
+        "known_answer_hit_at_10": 0.5576923076923077,
+        "known_coverage_delta_vs_zero": {
+          "bootstrap_topic_clusters": 13,
+          "draws": 2000,
+          "high": -0.15789473684210525,
+          "low": -0.34615384615384615,
+          "mean": -0.25961538461538464
+        },
+        "known_facet_coverage": 0.34615384615384615,
+        "known_graph_only_facet_coverage": 0.25,
+        "known_graph_only_facets": 4,
+        "known_graph_only_facets_covered": 1,
+        "known_graph_only_rendered": 1,
+        "setting": {
+          "arm": "degree",
+          "damping": 0.5,
+          "gain": 32
+        }
+      },
+      {
+        "by_family": {
+          "direct_answer_control": {
+            "answerable": 48,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": 0.012658227848101266,
+            "known_answer_hit_at_10": 0.7916666666666666,
+            "known_facet_coverage": 0.6458333333333334,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 13,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "graph_only_challenge": {
+            "answerable": 4,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": 0.0,
+            "known_answer_hit_at_10": 0.5,
+            "known_facet_coverage": 0.125,
+            "known_graph_only_facet_coverage": 0.0,
+            "known_graph_only_facets": 4,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 2,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "no_answer_control": {
+            "answerable": 0,
+            "controls": 2,
+            "controls_with_rendered_context": 2,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": null,
+            "known_answer_hit_at_10": null,
+            "known_facet_coverage": null,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0
+          }
+        },
+        "controls_with_rendered_context": 2,
+        "graph_only_rendered": 0,
+        "hub_share_rendered": 0.011673151750972763,
+        "known_answer_hit_at_10": 0.7692307692307693,
+        "known_coverage_delta_vs_zero": {
+          "bootstrap_topic_clusters": 13,
+          "draws": 2000,
+          "high": 0.0,
+          "low": 0.0,
+          "mean": 0.0
+        },
+        "known_facet_coverage": 0.6057692307692307,
+        "known_graph_only_facet_coverage": 0.0,
+        "known_graph_only_facets": 4,
+        "known_graph_only_facets_covered": 0,
+        "known_graph_only_rendered": 0,
+        "setting": {
+          "arm": "degree",
+          "damping": 0.75,
+          "gain": 0.25
+        }
+      },
+      {
+        "by_family": {
+          "direct_answer_control": {
+            "answerable": 48,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": 0.012658227848101266,
+            "known_answer_hit_at_10": 0.7916666666666666,
+            "known_facet_coverage": 0.6458333333333334,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 13,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "graph_only_challenge": {
+            "answerable": 4,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": 0.0,
+            "known_answer_hit_at_10": 0.5,
+            "known_facet_coverage": 0.125,
+            "known_graph_only_facet_coverage": 0.0,
+            "known_graph_only_facets": 4,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 2,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "no_answer_control": {
+            "answerable": 0,
+            "controls": 2,
+            "controls_with_rendered_context": 2,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": null,
+            "known_answer_hit_at_10": null,
+            "known_facet_coverage": null,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0
+          }
+        },
+        "controls_with_rendered_context": 2,
+        "graph_only_rendered": 0,
+        "hub_share_rendered": 0.011673151750972763,
+        "known_answer_hit_at_10": 0.7692307692307693,
+        "known_coverage_delta_vs_zero": {
+          "bootstrap_topic_clusters": 13,
+          "draws": 2000,
+          "high": 0.0,
+          "low": 0.0,
+          "mean": 0.0
+        },
+        "known_facet_coverage": 0.6057692307692307,
+        "known_graph_only_facet_coverage": 0.0,
+        "known_graph_only_facets": 4,
+        "known_graph_only_facets_covered": 0,
+        "known_graph_only_rendered": 0,
+        "setting": {
+          "arm": "degree",
+          "damping": 0.75,
+          "gain": 0.5
+        }
+      },
+      {
+        "by_family": {
+          "direct_answer_control": {
+            "answerable": 48,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": 0.012658227848101266,
+            "known_answer_hit_at_10": 0.7916666666666666,
+            "known_facet_coverage": 0.6458333333333334,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 13,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "graph_only_challenge": {
+            "answerable": 4,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": 0.0,
+            "known_answer_hit_at_10": 0.5,
+            "known_facet_coverage": 0.125,
+            "known_graph_only_facet_coverage": 0.0,
+            "known_graph_only_facets": 4,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 2,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "no_answer_control": {
+            "answerable": 0,
+            "controls": 2,
+            "controls_with_rendered_context": 2,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": null,
+            "known_answer_hit_at_10": null,
+            "known_facet_coverage": null,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0
+          }
+        },
+        "controls_with_rendered_context": 2,
+        "graph_only_rendered": 0,
+        "hub_share_rendered": 0.011673151750972763,
+        "known_answer_hit_at_10": 0.7692307692307693,
+        "known_coverage_delta_vs_zero": {
+          "bootstrap_topic_clusters": 13,
+          "draws": 2000,
+          "high": 0.0,
+          "low": 0.0,
+          "mean": 0.0
+        },
+        "known_facet_coverage": 0.6057692307692307,
+        "known_graph_only_facet_coverage": 0.0,
+        "known_graph_only_facets": 4,
+        "known_graph_only_facets_covered": 0,
+        "known_graph_only_rendered": 0,
+        "setting": {
+          "arm": "degree",
+          "damping": 0.75,
+          "gain": 1
+        }
+      },
+      {
+        "by_family": {
+          "direct_answer_control": {
+            "answerable": 48,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": 0.012658227848101266,
+            "known_answer_hit_at_10": 0.7916666666666666,
+            "known_facet_coverage": 0.6458333333333334,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 13,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "graph_only_challenge": {
+            "answerable": 4,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": 0.0,
+            "known_answer_hit_at_10": 0.5,
+            "known_facet_coverage": 0.125,
+            "known_graph_only_facet_coverage": 0.0,
+            "known_graph_only_facets": 4,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 2,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "no_answer_control": {
+            "answerable": 0,
+            "controls": 2,
+            "controls_with_rendered_context": 2,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": null,
+            "known_answer_hit_at_10": null,
+            "known_facet_coverage": null,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0
+          }
+        },
+        "controls_with_rendered_context": 2,
+        "graph_only_rendered": 0,
+        "hub_share_rendered": 0.011673151750972763,
+        "known_answer_hit_at_10": 0.7692307692307693,
+        "known_coverage_delta_vs_zero": {
+          "bootstrap_topic_clusters": 13,
+          "draws": 2000,
+          "high": 0.0,
+          "low": 0.0,
+          "mean": 0.0
+        },
+        "known_facet_coverage": 0.6057692307692307,
+        "known_graph_only_facet_coverage": 0.0,
+        "known_graph_only_facets": 4,
+        "known_graph_only_facets_covered": 0,
+        "known_graph_only_rendered": 0,
+        "setting": {
+          "arm": "degree",
+          "damping": 0.75,
+          "gain": 2
+        }
+      },
+      {
+        "by_family": {
+          "direct_answer_control": {
+            "answerable": 48,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": 0.012658227848101266,
+            "known_answer_hit_at_10": 0.7916666666666666,
+            "known_facet_coverage": 0.6458333333333334,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 13,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "graph_only_challenge": {
+            "answerable": 4,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": 0.0,
+            "known_answer_hit_at_10": 0.5,
+            "known_facet_coverage": 0.125,
+            "known_graph_only_facet_coverage": 0.0,
+            "known_graph_only_facets": 4,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 2,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "no_answer_control": {
+            "answerable": 0,
+            "controls": 2,
+            "controls_with_rendered_context": 2,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": null,
+            "known_answer_hit_at_10": null,
+            "known_facet_coverage": null,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0
+          }
+        },
+        "controls_with_rendered_context": 2,
+        "graph_only_rendered": 0,
+        "hub_share_rendered": 0.011673151750972763,
+        "known_answer_hit_at_10": 0.7692307692307693,
+        "known_coverage_delta_vs_zero": {
+          "bootstrap_topic_clusters": 13,
+          "draws": 2000,
+          "high": 0.0,
+          "low": 0.0,
+          "mean": 0.0
+        },
+        "known_facet_coverage": 0.6057692307692307,
+        "known_graph_only_facet_coverage": 0.0,
+        "known_graph_only_facets": 4,
+        "known_graph_only_facets_covered": 0,
+        "known_graph_only_rendered": 0,
+        "setting": {
+          "arm": "degree",
+          "damping": 0.75,
+          "gain": 4
+        }
+      },
+      {
+        "by_family": {
+          "direct_answer_control": {
+            "answerable": 48,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": 0.012658227848101266,
+            "known_answer_hit_at_10": 0.7916666666666666,
+            "known_facet_coverage": 0.6458333333333334,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 13,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "graph_only_challenge": {
+            "answerable": 4,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": 0.0,
+            "known_answer_hit_at_10": 0.5,
+            "known_facet_coverage": 0.125,
+            "known_graph_only_facet_coverage": 0.0,
+            "known_graph_only_facets": 4,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 2,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "no_answer_control": {
+            "answerable": 0,
+            "controls": 2,
+            "controls_with_rendered_context": 2,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": null,
+            "known_answer_hit_at_10": null,
+            "known_facet_coverage": null,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0
+          }
+        },
+        "controls_with_rendered_context": 2,
+        "graph_only_rendered": 0,
+        "hub_share_rendered": 0.011673151750972763,
+        "known_answer_hit_at_10": 0.7692307692307693,
+        "known_coverage_delta_vs_zero": {
+          "bootstrap_topic_clusters": 13,
+          "draws": 2000,
+          "high": 0.0,
+          "low": 0.0,
+          "mean": 0.0
+        },
+        "known_facet_coverage": 0.6057692307692307,
+        "known_graph_only_facet_coverage": 0.0,
+        "known_graph_only_facets": 4,
+        "known_graph_only_facets_covered": 0,
+        "known_graph_only_rendered": 0,
+        "setting": {
+          "arm": "degree",
+          "damping": 0.75,
+          "gain": 8
+        }
+      },
+      {
+        "by_family": {
+          "direct_answer_control": {
+            "answerable": 48,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 64,
+            "hub_share_rendered": 0.007874015748031496,
+            "known_answer_hit_at_10": 0.75,
+            "known_facet_coverage": 0.5833333333333334,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 13,
+              "draws": 2000,
+              "high": 0.0,
+              "low": -0.14285714285714285,
+              "mean": -0.0625
+            }
+          },
+          "graph_only_challenge": {
+            "answerable": 4,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 15,
+            "hub_share_rendered": 0.0,
+            "known_answer_hit_at_10": 0.5,
+            "known_facet_coverage": 0.25,
+            "known_graph_only_facet_coverage": 0.25,
+            "known_graph_only_facets": 4,
+            "known_graph_only_facets_covered": 1,
+            "known_graph_only_rendered": 1,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 2,
+              "draws": 2000,
+              "high": 0.3333333333333333,
+              "low": 0.0,
+              "mean": 0.25
+            }
+          },
+          "no_answer_control": {
+            "answerable": 0,
+            "controls": 2,
+            "controls_with_rendered_context": 2,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": null,
+            "known_answer_hit_at_10": null,
+            "known_facet_coverage": null,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0
+          }
+        },
+        "controls_with_rendered_context": 2,
+        "graph_only_rendered": 79,
+        "hub_share_rendered": 0.007220216606498195,
+        "known_answer_hit_at_10": 0.7307692307692307,
+        "known_coverage_delta_vs_zero": {
+          "bootstrap_topic_clusters": 13,
+          "draws": 2000,
+          "high": 0.009615384615384616,
+          "low": -0.13636363636363635,
+          "mean": -0.04807692307692308
+        },
+        "known_facet_coverage": 0.5576923076923077,
+        "known_graph_only_facet_coverage": 0.25,
+        "known_graph_only_facets": 4,
+        "known_graph_only_facets_covered": 1,
+        "known_graph_only_rendered": 1,
+        "setting": {
+          "arm": "degree",
+          "damping": 0.75,
+          "gain": 16
+        }
+      },
+      {
+        "by_family": {
+          "direct_answer_control": {
+            "answerable": 48,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 219,
+            "hub_share_rendered": 0.007326007326007326,
+            "known_answer_hit_at_10": 0.5416666666666666,
+            "known_facet_coverage": 0.3229166666666667,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 13,
+              "draws": 2000,
+              "high": -0.23333333333333334,
+              "low": -0.39814814814814814,
+              "mean": -0.3229166666666667
+            }
+          },
+          "graph_only_challenge": {
+            "answerable": 4,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 18,
+            "hub_share_rendered": 0.0,
+            "known_answer_hit_at_10": 0.5,
+            "known_facet_coverage": 0.25,
+            "known_graph_only_facet_coverage": 0.25,
+            "known_graph_only_facets": 4,
+            "known_graph_only_facets_covered": 1,
+            "known_graph_only_rendered": 1,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 2,
+              "draws": 2000,
+              "high": 0.3333333333333333,
+              "low": 0.0,
+              "mean": 0.25
+            }
+          },
+          "no_answer_control": {
+            "answerable": 0,
+            "controls": 2,
+            "controls_with_rendered_context": 2,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": null,
+            "known_answer_hit_at_10": null,
+            "known_facet_coverage": null,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0
+          }
+        },
+        "controls_with_rendered_context": 2,
+        "graph_only_rendered": 237,
+        "hub_share_rendered": 0.006802721088435374,
+        "known_answer_hit_at_10": 0.5384615384615384,
+        "known_coverage_delta_vs_zero": {
+          "bootstrap_topic_clusters": 13,
+          "draws": 2000,
+          "high": -0.17708333333333334,
+          "low": -0.391304347826087,
+          "mean": -0.28846153846153844
+        },
+        "known_facet_coverage": 0.3173076923076923,
+        "known_graph_only_facet_coverage": 0.25,
+        "known_graph_only_facets": 4,
+        "known_graph_only_facets_covered": 1,
+        "known_graph_only_rendered": 1,
+        "setting": {
+          "arm": "degree",
+          "damping": 0.75,
+          "gain": 32
+        }
+      }
+    ]
+  },
+  "diagnostic": {
+    "held_out_missing_facets": 3,
+    "held_out_missing_facets_rendered": 0,
+    "held_out_missing_support_records_selected": 0,
+    "interpretation": "On held-out challenges the known missing supports failed selection before token fitting; token truncation was not the cause for these supports."
+  },
+  "engine_commit": "88216d2080cc3e629097a0948e29a173341686f0",
+  "experiment": "issue-175-graph-only-follow-up",
+  "held_out": {
+    "families": {
+      "direct_answer_control": 30,
+      "graph_only_challenge": 2,
+      "no_answer_control": 2
+    },
+    "questions": 34,
+    "topic_groups": 11,
+    "variants": [
+      {
+        "by_family": {
+          "direct_answer_control": {
+            "answerable": 30,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": 0.0,
+            "known_answer_hit_at_10": 0.7333333333333333,
+            "known_facet_coverage": 0.5666666666666667,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 10,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "graph_only_challenge": {
+            "answerable": 2,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": 0.0,
+            "known_answer_hit_at_10": 0.5,
+            "known_facet_coverage": 0.25,
+            "known_graph_only_facet_coverage": 0.0,
+            "known_graph_only_facets": 3,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 2,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "no_answer_control": {
+            "answerable": 0,
+            "controls": 2,
+            "controls_with_rendered_context": 2,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": null,
+            "known_answer_hit_at_10": null,
+            "known_facet_coverage": null,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0
+          }
+        },
+        "controls_with_rendered_context": 2,
+        "graph_only_rendered": 0,
+        "hub_share_rendered": 0.0,
+        "known_answer_hit_at_10": 0.71875,
+        "known_coverage_delta_vs_zero": {
+          "bootstrap_topic_clusters": 10,
+          "draws": 2000,
+          "high": 0.0,
+          "low": 0.0,
+          "mean": 0.0
+        },
+        "known_facet_coverage": 0.546875,
+        "known_graph_only_facet_coverage": 0.0,
+        "known_graph_only_facets": 3,
+        "known_graph_only_facets_covered": 0,
+        "known_graph_only_rendered": 0,
+        "setting": {
+          "arm": "zero",
+          "damping": 0.5,
+          "gain": 0
+        }
+      },
+      {
+        "by_family": {
+          "direct_answer_control": {
+            "answerable": 30,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 166,
+            "hub_share_rendered": 0.05825242718446602,
+            "known_answer_hit_at_10": 0.4666666666666667,
+            "known_facet_coverage": 0.26666666666666666,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 1,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 10,
+              "draws": 2000,
+              "high": -0.15384615384615385,
+              "low": -0.4782608695652174,
+              "mean": -0.3
+            }
+          },
+          "graph_only_challenge": {
+            "answerable": 2,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 9,
+            "hub_share_rendered": 0.1,
+            "known_answer_hit_at_10": 0.5,
+            "known_facet_coverage": 0.25,
+            "known_graph_only_facet_coverage": 0.0,
+            "known_graph_only_facets": 3,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 1,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 2,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "no_answer_control": {
+            "answerable": 0,
+            "controls": 2,
+            "controls_with_rendered_context": 2,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": null,
+            "known_answer_hit_at_10": null,
+            "known_facet_coverage": null,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0
+          }
+        },
+        "controls_with_rendered_context": 2,
+        "graph_only_rendered": 175,
+        "hub_share_rendered": 0.06018518518518518,
+        "known_answer_hit_at_10": 0.46875,
+        "known_coverage_delta_vs_zero": {
+          "bootstrap_topic_clusters": 10,
+          "draws": 2000,
+          "high": -0.14102564102564102,
+          "low": -0.4444444444444444,
+          "mean": -0.28125
+        },
+        "known_facet_coverage": 0.265625,
+        "known_graph_only_facet_coverage": 0.0,
+        "known_graph_only_facets": 3,
+        "known_graph_only_facets_covered": 0,
+        "known_graph_only_rendered": 2,
+        "setting": {
+          "arm": "damped",
+          "damping": 0.75,
+          "gain": 32
+        }
+      },
+      {
+        "by_family": {
+          "direct_answer_control": {
+            "answerable": 30,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 51,
+            "hub_share_rendered": 0.0,
+            "known_answer_hit_at_10": 0.7333333333333333,
+            "known_facet_coverage": 0.5333333333333333,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 1,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 10,
+              "draws": 2000,
+              "high": 0.03571428571428571,
+              "low": -0.16176470588235295,
+              "mean": -0.03333333333333333
+            }
+          },
+          "graph_only_challenge": {
+            "answerable": 2,
+            "controls": 0,
+            "controls_with_rendered_context": 0,
+            "graph_only_rendered": 3,
+            "hub_share_rendered": 0.0,
+            "known_answer_hit_at_10": 0.5,
+            "known_facet_coverage": 0.25,
+            "known_graph_only_facet_coverage": 0.0,
+            "known_graph_only_facets": 3,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 1,
+            "paired_coverage_delta_vs_zero": {
+              "bootstrap_topic_clusters": 2,
+              "draws": 2000,
+              "high": 0.0,
+              "low": 0.0,
+              "mean": 0.0
+            }
+          },
+          "no_answer_control": {
+            "answerable": 0,
+            "controls": 2,
+            "controls_with_rendered_context": 2,
+            "graph_only_rendered": 0,
+            "hub_share_rendered": null,
+            "known_answer_hit_at_10": null,
+            "known_facet_coverage": null,
+            "known_graph_only_facet_coverage": null,
+            "known_graph_only_facets": 0,
+            "known_graph_only_facets_covered": 0,
+            "known_graph_only_rendered": 0
+          }
+        },
+        "controls_with_rendered_context": 2,
+        "graph_only_rendered": 54,
+        "hub_share_rendered": 0.0,
+        "known_answer_hit_at_10": 0.71875,
+        "known_coverage_delta_vs_zero": {
+          "bootstrap_topic_clusters": 10,
+          "draws": 2000,
+          "high": 0.034482758620689655,
+          "low": -0.15,
+          "mean": -0.03125
+        },
+        "known_facet_coverage": 0.515625,
+        "known_graph_only_facet_coverage": 0.0,
+        "known_graph_only_facets": 3,
+        "known_graph_only_facets_covered": 0,
+        "known_graph_only_rendered": 2,
+        "setting": {
+          "arm": "degree",
+          "damping": 0.5,
+          "gain": 16
+        }
+      }
+    ]
+  },
+  "limitations": [
+    "Only six challenge questions in four semantic groups; held-out has two questions and three missing facets.",
+    "Single-agent labels; other candidates unjudged. Complete precision/recall and final answer accuracy are unmeasured.",
+    "All known missing-facet witnesses are one hop; this does not test a two-hop-only answer.",
+    "Two source-informed authoring batches plus baseline screening strongly enrich the set; 6/84 is not production prevalence.",
+    "Historical decision questions and synthetic absent-answer controls; not an estimate over representative live traffic.",
+    "No new graph edges, direct-retrieval settings, fusion, runtime selectors or default changes; shared layers/redundancy interactions not tested."
+  ],
+  "private_input_hashes": {
+    "dev-run.json": "a7ceb15c5d5f5c5e95866d636257e0f9681c4f5474de390cf32ab2606367a0d9",
+    "held-run.json": "75b87bee9efaeb3fffa865daab4ee393748d7ba307ba94df0b5c944a6a91abc2",
+    "path-witnesses.json": "4ca22f3266a6ef7098b43ea473e9cc606bbcd919cbd9f09dd80f58025d1b4358",
+    "pool-frozen.json": "718fed7846f7a383f3df16005da1d160fda094701a1fb3398a1da951d79ec8d2",
+    "pre-arm-audit.json": "f131042632ca44a28ecde2567f8255aae96dc9a687c53926bc4a98d64abedf67",
+    "queries-authored-b.json": "48711f96bd3783dac9a64e181454994f760159f112843a19a6270192b2600aac",
+    "queries-authored.json": "5c8634cdbaa7c4b6d7f2ec6b2f5d47a265aa8717952a529791c34f148b02e632",
+    "queries-confirm.json": "711c145550f55e50bddfc167155029d1854162d1e637e099c10239fe59045e41",
+    "queries-dev.json": "b0b091a57b0c09f493a6e84ccd6e0c7aaf285b25871fe1d3cde4e6f7452fcba9",
+    "queries-frozen.json": "aeef24b71b7cdd5a227486bc3c3687408bfae657cb7ca0a88d1f086336affd9c",
+    "query-vectors-complete.json": "13841bb47d322b5332bf04d3803e5e394eb513a456fbefe824af6e8b73208e37",
+    "selection.json": "10da8bef8a486b980401870420b532e332a6617372d3440b1b04c8d1fad77077"
+  },
+  "protocol": {
+    "confirmation": "Frozen labels, then baseline-only headroom verification, then dev sweep/immutable selection, then one held-out run of zero and selected arms.",
+    "damping_grid": [
+      0.25,
+      0.5,
+      0.75
+    ],
+    "depth": 2,
+    "direction": "current directed TRAVERSAL_ORDER",
+    "fusion": "max",
+    "gain_grid": [
+      0.25,
+      0.5,
+      1,
+      2,
+      4,
+      8,
+      16,
+      32
+    ],
+    "latency": "One debug assembly-plus-propagation timing per setting is not end-to-end release p50/p99; no adoption latency claim.",
+    "max_tokens": 1000,
+    "normalization": "Nonnegative sum-one seeds, two-hop accumulation; per-arm/query graph-only max normalization then gain.",
+    "selected": {
+      "damped": {
+        "arm": "damped",
+        "damping": 0.75,
+        "gain": 32
+      },
+      "degree": {
+        "arm": "degree",
+        "damping": 0.5,
+        "gain": 16
+      }
+    },
+    "selection": "max primary metric on declared dev family; ties: overall known-facet coverage, overall known-answer hit@10, lower gain, damping nearest .5",
+    "selection_family": "graph_only_challenge",
+    "selection_metric": "known_graph_only_facet_coverage",
+    "settings_per_development_query": 49,
+    "top_k": 10
+  },
+  "schema_version": 1,
+  "screening": {
+    "categories": {
+      "all_known_facets_direct": 78,
+      "graph_only_known_facets": 6,
+      "no_answer_control": 4
+    },
+    "direct_known_facets": 101,
+    "graph_only_known_facets": 7,
+    "graph_only_topics": 4,
+    "known_facets": 108,
+    "unreachable_known_facets": 0
+  },
+  "snapshot_sha256": "5499e0890c480304398a0ffcd80bbfba64f6aba758e11a2d5214d6a4f08db258",
+  "source_files_sha256": {
+    "scripts/eval/graph_compare.py": "10685843609c6279bb601f7e8ccc4d0ff4d22ad78c73d0916aa0cd0a9b3f93f3",
+    "scripts/eval/graph_screen.py": "f40e2f6d8a58940ca4a0aa7ee5a56da6d9dcd662066951387adc1e1879a190e3",
+    "src/recall/assemble.rs": "ec6cd35d72d80d3a1f716b84f5f5b9c30ef4f616b29a933069605af01383b008",
+    "src/recall/experiment175.rs": "db3fecc0bcff46fe4d1fb7a6f043ed0823e49268a3950390eb765920f0950800",
+    "src/recall/experiment175/run.rs": "c336b4c034183990317f26dfcf59a7ffdab186802b4f322e47d9df720cce6c31"
+  }
+}
