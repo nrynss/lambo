@@ -69,7 +69,9 @@ class Topology(unittest.TestCase):
     def test_type_filter_dedup_session_isolation_and_summary(self):
         con=fixture()
         self.addCleanup(con.close)
-        r=g.census(con,'public')
+        key={}
+        r=g.census(con,'public',key)
+        self.assertEqual(key['hubs'],['a','b'])
         self.assertEqual(r['concepts'],5)
         self.assertEqual(r['interactions'],1)
         self.assertEqual(r['edges']['all'],7)
