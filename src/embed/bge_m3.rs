@@ -23,11 +23,14 @@ use super::{EmbedError, Embedder};
 mod scrub;
 
 /// OpenAI-compatible embeddings request body (`model` is omitted when empty so it hits
-/// a llama.cpp server's default model).
+/// a llama.cpp server's default model; `dimensions` is omitted unless the operator
+/// configured a Matryoshka truncation width — see `with_request_dimensions`).
 #[derive(Debug, Serialize)]
 struct EmbedRequest {
     #[serde(skip_serializing_if = "String::is_empty")]
     model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dimensions: Option<usize>,
     input: String,
 }
 
@@ -162,6 +165,12 @@ pub struct BgeM3LlamaCppEmbedder {
     model: String,
     /// Expected embedding dimensionality (must match server output and store schema).
     dim: usize,
+    /// Matryoshka truncation width requested from the server as the OpenAI
+    /// `dimensions` field (#221: Qwen3 Embedding 4B serves 2560 by default and
+    /// 1024 only when asked). `None` sends no `dimensions` at all, which is
+    /// the llama.cpp default path: BGE-M3's native width needs no truncation
+    /// request, and older servers may not know the field.
+    request_dimensions: Option<usize>,
     /// `Authorization: Bearer <token>` for a hosted endpoint, marked sensitive.
     /// `None` sends no `Authorization` header at all (issue #21).
     authorization: Option<HeaderValue>,
@@ -173,6 +182,7 @@ impl std::fmt::Debug for BgeM3LlamaCppEmbedder {
             .field("url", &self.log_url)
             .field("model", &self.model)
             .field("dim", &self.dim)
+            .field("request_dimensions", &self.request_dimensions)
             .field(
                 "authorization",
                 &self
@@ -331,8 +341,36 @@ impl BgeM3LlamaCppEmbedder {
             base_url,
             model: model.into(),
             dim,
+            request_dimensions: None,
             authorization: None,
         })
+    }
+
+    /// Ask the server to truncate to `dimensions` output dims (the OpenAI
+    /// `dimensions` field), for a Matryoshka-capable model served over this
+    /// OpenAI-compatible endpoint (#221: `qwen3-embedding-4b` on Vultr, whose
+    /// full width is 2560 and whose 1024 truncation is what `dim = 1024`
+    /// needs). The truncated width is what the server returns, so `dim`
+    /// (set in [`Self::new`]) must equal it; anything else is refused here
+    /// rather than failing every embed with a dimension mismatch. Without
+    /// this call no `dimensions` field is sent at all, so the llama.cpp
+    /// BGE-M3 default path — which needs no truncation — is byte-identical
+    /// to before.
+    pub fn with_request_dimensions(mut self, dimensions: usize) -> Result<Self, EmbedError> {
+        if dimensions == 0 {
+            return Err(EmbedError::Unavailable(
+                "embedder dimensions must be > 0".into(),
+            ));
+        }
+        if dimensions != self.dim {
+            return Err(EmbedError::Unavailable(format!(
+                "embedder dimensions {dimensions} disagrees with the expected width {}: \
+                 the server truncates to `dimensions`, so set dim to the truncated width",
+                self.dim
+            )));
+        }
+        self.request_dimensions = Some(dimensions);
+        Ok(self)
     }
 
     /// Send `Authorization: Bearer <token>` on every embed request, for a hosted
@@ -480,6 +518,7 @@ impl BgeM3LlamaCppEmbedder {
     ) -> Result<EmbedResponse, EmbedError> {
         let body = EmbedRequest {
             model: model.to_string(),
+            dimensions: self.request_dimensions,
             input: text.to_string(),
         };
         self.post_json(&body, model, default_status_rule).await
@@ -697,6 +736,69 @@ mod tests {
             unit_magnitude(&v)
         );
         mock.assert();
+    }
+
+    /// #221: without `with_request_dimensions` the request body is exactly
+    /// what it was before (model + input only), so the llama.cpp BGE-M3
+    /// default path is byte-identical; with it, the body carries the
+    /// OpenAI `dimensions` field (Qwen3 Embedding 4B's 1024 truncation).
+    ///
+    /// Mutation: always serialize `dimensions` -> the first mock's
+    /// `request_dimensions_absent` assertion fails (the body gains the field).
+    #[tokio::test]
+    async fn request_dimensions_are_opt_in_per_request() {
+        // Absent by default: no `dimensions` key in the body.
+        let server = MockServer::start();
+        let no_dims = server.mock(|when, then| {
+            when.method(POST).path("/v1/embeddings").matches(|r| {
+                let body = r.body.as_deref().unwrap_or(&[]);
+                !String::from_utf8_lossy(body).contains("dimensions")
+            });
+            then.status(200).json_body(ok_response());
+        });
+        BgeM3LlamaCppEmbedder::new(server.base_url(), "", 1024)
+            .unwrap()
+            .embed("user schema")
+            .await
+            .unwrap();
+        no_dims.assert();
+
+        // Set: the body carries `"dimensions":1024`, and a 1024-wide answer
+        // still embeds (the truncated width is what `dim` expects).
+        let server = MockServer::start();
+        let with_dims = server.mock(|when, then| {
+            when.method(POST).path("/v1/embeddings").matches(|r| {
+                let body = String::from_utf8_lossy(r.body.as_deref().unwrap_or(&[]));
+                body.contains("\"dimensions\":1024")
+            });
+            then.status(200).json_body(ok_response());
+        });
+        BgeM3LlamaCppEmbedder::new(server.base_url(), "qwen3-embedding-4b", 1024)
+            .unwrap()
+            .with_request_dimensions(1024)
+            .unwrap()
+            .embed("user schema")
+            .await
+            .unwrap();
+        with_dims.assert();
+    }
+
+    /// #221: a truncation width that is not the expected width, or not a
+    /// width at all, is refused at construction — not as a dimension
+    /// mismatch on every embed.
+    #[test]
+    fn request_dimensions_must_equal_the_expected_width() {
+        let err = BgeM3LlamaCppEmbedder::new("http://127.0.0.1:9", "", 1024)
+            .unwrap()
+            .with_request_dimensions(2560)
+            .unwrap_err();
+        assert!(matches!(err, EmbedError::Unavailable(_)), "{err:?}");
+        assert!(err.to_string().contains("2560"), "{err}");
+        let err = BgeM3LlamaCppEmbedder::new("http://127.0.0.1:9", "", 1024)
+            .unwrap()
+            .with_request_dimensions(0)
+            .unwrap_err();
+        assert!(matches!(err, EmbedError::Unavailable(_)), "{err:?}");
     }
 
     #[tokio::test]

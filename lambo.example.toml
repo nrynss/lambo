@@ -99,6 +99,14 @@ url = "http://127.0.0.1:8080"
 # or `lambo re-embed`, never mix the two in one session.
 # api_key_env = "CLOUDFLARE_API_TOKEN"
 #
+# Matryoshka truncation width (#221), sent as the OpenAI `dimensions` field.
+# For a model served wider than `dim` above — e.g. Qwen3 Embedding 4B on Vultr
+# serves 2560 by default and 1024 only when asked — set dimensions = dim so the
+# server truncates to the width this deployment uses. Unset sends no
+# `dimensions` at all (the llama.cpp BGE-M3 path, which needs no truncation).
+# `bge_m3` (alias `openai`) only. LAMBO_EMBED_DIMENSIONS overrides it.
+# dimensions = 1024
+#
 # EmbeddingGemma 2, text AND images in one space (#22, kind = "embeddinggemma2",
 # feature embed-eg2), served by llama.cpp's llama-server, build b11452 or later
 # (older builds refuse the model: "unknown model architecture: 'gemma-embedding2'").

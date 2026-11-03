@@ -9,7 +9,8 @@ use sqlx::PgPool;
 use super::codec::{backend, parse_pgvector_format_type};
 use super::{Dialect, PgStore};
 use crate::store::{
-    columns_in_ddl, tables_in_ddl, unprovisioned_column_err, unprovisioned_store_err,
+    columns_in_ddl, tables_in_ddl, unprovisioned_column_err, unprovisioned_empty_store_err,
+    unprovisioned_store_err,
 };
 use crate::types::StoreError;
 
@@ -122,9 +123,15 @@ impl<D: Dialect> PgStore<D> {
         .map_err(backend)?;
         let required = tables_in_ddl(self.ddl.as_ref());
         let missing_tables: Vec<&str> = required
-            .into_iter()
+            .iter()
+            .copied()
             .filter(|t| !present.iter().any(|p| p == t))
             .collect();
+        if missing_tables.len() == required.len() {
+            // #222, as in the SQLite adapter: no required table at all is
+            // a fresh database, not one an older lambo provisioned.
+            return Err(unprovisioned_empty_store_err(D::NAME));
+        }
         if !missing_tables.is_empty() {
             return Err(unprovisioned_store_err(D::NAME, &missing_tables));
         }

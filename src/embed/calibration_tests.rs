@@ -179,6 +179,116 @@ fn rows_are_ordered_cosines() {
     }
 }
 
+/// #221: the BGE-M3 reference contracts run on calibrated constants (they
+/// ARE the scale), everything else needs a row. In particular the Vultr
+/// Qwen3 Embedding 4B contracts — `kind = "bge_m3"` (alias `"openai"`) with
+/// a Qwen model, at 2560 or at the 1024 truncation — are uncalibrated until
+/// measured (evidence/issue-221/).
+#[test]
+fn calibrated_means_a_row_or_the_bge_m3_reference() {
+    let reference = EmbeddingContract {
+        kind: "bge_m3".into(),
+        model: None,
+        dim: 1024,
+    };
+    assert!(is_reference(&reference));
+    assert!(is_calibrated(&reference));
+    // An explicit BGE-M3 model name is still the reference space.
+    for model in ["bge-m3", "bge_m3", "bge", "BAAI/bge-m3"] {
+        let named = EmbeddingContract {
+            kind: "bge_m3".into(),
+            model: Some(model.into()),
+            dim: 1024,
+        };
+        assert!(is_reference(&named), "{model}");
+        assert!(is_calibrated(&named), "{model}");
+    }
+    // The candle adapter's canonical BGE-M3 artifact is the #87 reference run.
+    let candle = EmbeddingContract {
+        kind: "candle".into(),
+        model: Some("BAAI/bge-m3@5617a9f61b028005a4858fdac845db406aefb181 model.safetensors sha256:68440cc1b73b".into()),
+        dim: 1024,
+    };
+    assert!(is_reference(&candle));
+    assert!(is_calibrated(&candle));
+    // The measured EG2 contract has a row.
+    assert!(is_calibrated(&eg2()));
+    // #221: Qwen3 Embedding 4B at either width is uncalibrated.
+    for dim in [2560, 1024] {
+        let qwen = EmbeddingContract {
+            kind: "bge_m3".into(),
+            model: Some("qwen3-embedding-4b".into()),
+            dim,
+        };
+        assert!(!is_reference(&qwen), "dim {dim}");
+        assert!(!is_calibrated(&qwen), "dim {dim}");
+        assert!(lookup(&qwen).is_none(), "dim {dim}");
+    }
+    // A custom candle repo and a non-BGE model at BGE dims are not reference.
+    let custom_repo = EmbeddingContract {
+        kind: "candle".into(),
+        model: Some("dir:<local> custom.safetensors sha256:abc".into()),
+        dim: 1024,
+    };
+    assert!(!is_calibrated(&custom_repo));
+    let other_dim = EmbeddingContract {
+        kind: "bge_m3".into(),
+        model: None,
+        dim: 512,
+    };
+    assert!(!is_calibrated(&other_dim));
+}
+
+/// #221 ask 1: the Qwen3 Embedding 4B row is pending a keyed measurement
+/// run (see evidence/issue-221/README.md for the exact commands). This test
+/// pins the pending state so the gap stays visible: adding the measured row
+/// flips `lookup` and this test must be updated with it — the row and the
+/// evidence file land together, as `rows_match_the_committed_evidence`
+/// requires.
+#[test]
+fn qwen3_embedding_4b_row_is_pending_measurement() {
+    for (dim, why) in [
+        (2560, "full width: lambo 0.8.0 sends no `dimensions`"),
+        (
+            1024,
+            "Matryoshka truncation via [embedder] dimensions = 1024",
+        ),
+    ] {
+        let contract = EmbeddingContract {
+            kind: "bge_m3".into(),
+            model: Some("qwen3-embedding-4b".into()),
+            dim,
+        };
+        assert!(
+            lookup(&contract).is_none(),
+            "qwen3-embedding-4b at dim {dim} ({why}): no measured row yet — \
+             measure it like #203 on the #87 set (evidence/issue-221/README.md) \
+             and ship the row with its evidence, instead of guessing constants"
+        );
+    }
+}
+
+/// #221 ask 2: the uncalibrated warning fires exactly when it should — a
+/// contract with no row that is not the reference, under `builtin` — and
+/// stays silent for a row, the reference, and `calibration = "off"`.
+#[test]
+fn warn_if_uncalibrated_fires_once_per_process_shape() {
+    let qwen = EmbeddingContract {
+        kind: "bge_m3".into(),
+        model: Some("qwen3-embedding-4b".into()),
+        dim: 2560,
+    };
+    assert!(warn_if_uncalibrated(CalibrationMode::Builtin, &qwen));
+    assert!(!warn_if_uncalibrated(CalibrationMode::Off, &qwen));
+    assert!(!warn_if_uncalibrated(CalibrationMode::Builtin, &eg2()));
+    let reference = EmbeddingContract {
+        kind: "bge_m3".into(),
+        model: None,
+        dim: 1024,
+    };
+    assert!(!warn_if_uncalibrated(CalibrationMode::Builtin, &reference));
+}
+
 /// #87 follow-up: the unset layer floor is the row's under `builtin` with
 /// the switch on, BGE-M3's 0.50 otherwise; a configured floor always wins.
 #[test]

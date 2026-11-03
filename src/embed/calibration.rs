@@ -142,6 +142,68 @@ pub fn lookup(contract: &EmbeddingContract) -> Option<&'static ContractCalibrati
     })
 }
 
+/// Whether `contract` runs on calibrated constants (#221): it has a
+/// [`BUILTIN`] row, or it IS the BGE-M3 reference the constants were set on
+/// (whose scale the constants map to by definition). Every other contract
+/// recalls on BGE-M3-shaped constants over a foreign scale — the Qwen3
+/// Embedding 4B shape in #221 — and its operator should hear about it once
+/// at startup (see [`warn_if_uncalibrated`]) and in `lambo stats`.
+pub fn is_calibrated(contract: &EmbeddingContract) -> bool {
+    lookup(contract).is_some() || is_reference(contract)
+}
+
+/// The BGE-M3 reference contract: BGE-M3 at its native 1024 dims, served
+/// either with the server's default model (`bge_m3` kind, no model) or with
+/// a model that names BGE-M3 explicitly, or in-process by the candle
+/// adapter from the canonical `BAAI/bge-m3` artifact. The #87 reference run
+/// itself was candle BGE-M3 at this contract
+/// (`evidence/issue-87-calibration/`).
+///
+/// Anything else at these coordinates — `kind = "bge_m3"` (alias `"openai"`)
+/// with a non-BGE model such as `qwen3-embedding-4b`, a custom candle repo —
+/// is a different space and needs its own measured row.
+pub fn is_reference(contract: &EmbeddingContract) -> bool {
+    if contract.dim != 1024 {
+        return false;
+    }
+    match contract.kind.as_str() {
+        "bge_m3" => match contract.model.as_deref() {
+            None => true,
+            Some(m) => {
+                let m = m.to_ascii_lowercase();
+                m.is_empty() || m == "bge" || m.contains("bge-m3") || m.contains("bge_m3")
+            }
+        },
+        "candle" => contract
+            .model
+            .as_deref()
+            .is_some_and(|m| m.starts_with("BAAI/bge-m3@")),
+        _ => false,
+    }
+}
+
+/// Warn once when `contract` recalls on uncalibrated constants (#221): no
+/// [`BUILTIN`] row and not the [`is_reference`] BGE-M3 contract, while
+/// `mode` is [`CalibrationMode::Builtin`]. A `false` return (row present,
+/// reference, or `calibration = "off"`) warns nothing. Call at resolve, so
+/// the operator hears it once per process startup rather than per recall.
+pub fn warn_if_uncalibrated(mode: CalibrationMode, contract: &EmbeddingContract) -> bool {
+    if mode != CalibrationMode::Builtin || is_calibrated(contract) {
+        return false;
+    }
+    tracing::warn!(
+        embedder = %contract.kind,
+        model = contract.model.as_deref().unwrap_or("(default)"),
+        dim = contract.dim,
+        "this embedding contract has no calibration row (evidence/issue-87-calibration/): \
+         recall runs on BGE-M3-shaped constants over a foreign similarity scale, so the recent \
+         leg, layer floors and merge threshold may misrank (issue #221). This is expected while \
+         the contract is unmeasured; set [embedder] calibration = \"off\" to silence this and \
+         keep the BGE-M3 constants deliberately"
+    );
+    true
+}
+
 /// The recent leg's score for a text recall whose vector leg runs under
 /// `contract`. `None` (no vector leg) keeps the BGE-M3 value: the recent leg
 /// then competes only with BM25, as it always has. The daemon calls this for

@@ -10,6 +10,68 @@ async fn init_schema_runs_twice_cleanly() {
     store.init_schema().await.unwrap();
 }
 
+/// #222: the preflight tells a fresh store from a stale one. A brand-new
+/// path (missing file), an empty file with no tables, and a database with
+/// zero required tables all refuse as "no schema yet" — never as
+/// "provisioned by an older lambo". A database with *some* tables keeps the
+/// older-lambo sentence (an upgrade without re-provisioning).
+#[tokio::test]
+async fn preflight_tells_a_fresh_store_from_a_stale_one() {
+    // A path that names nothing yet: `serve` on a brand-new store.
+    let (_dir, path) = scratch_db();
+    let missing = format!("{path}-missing.sqlite");
+    let err = SqliteStore::connect(&missing)
+        .unwrap()
+        .preflight_schema()
+        .await
+        .expect_err("a missing file must not pass the preflight")
+        .to_string();
+    assert!(err.contains("no schema yet"), "fresh: {err}");
+    assert!(!err.contains("older lambo"), "fresh, not stale: {err}");
+    assert!(err.contains("lambo provision"), "actionable: {err}");
+
+    // An empty file with no tables at all.
+    let (_dir, path) = scratch_db();
+    std::fs::write(&path, b"").unwrap();
+    let err = SqliteStore::connect(&path)
+        .unwrap()
+        .preflight_schema()
+        .await
+        .expect_err("an empty file must not pass the preflight")
+        .to_string();
+    assert!(err.contains("no schema yet"), "empty: {err}");
+    assert!(!err.contains("older lambo"), "empty, not stale: {err}");
+
+    // A database with unrelated tables only: still no schema.
+    let store = test_store();
+    sqlx::query("CREATE TABLE unrelated (id TEXT PRIMARY KEY)")
+        .execute(store.pool())
+        .await
+        .unwrap();
+    let err = store
+        .preflight_schema()
+        .await
+        .expect_err("unrelated tables are not a schema")
+        .to_string();
+    assert!(err.contains("no schema yet"), "unrelated: {err}");
+
+    // A provisioned store missing one table: stale, not fresh.
+    let store = test_store();
+    store.init_schema().await.unwrap();
+    sqlx::query("DROP TABLE sessions")
+        .execute(store.pool())
+        .await
+        .unwrap();
+    let err = store
+        .preflight_schema()
+        .await
+        .expect_err("a partially provisioned store must not pass")
+        .to_string();
+    assert!(err.contains("older lambo"), "stale: {err}");
+    assert!(!err.contains("no schema yet"), "stale, not fresh: {err}");
+    assert!(err.contains("lambo provision"), "actionable: {err}");
+}
+
 /// J3 F5, at the adapter. An un-provisioned target fails the preflight; a
 /// provisioned one passes it; and dropping the one table this branch added
 /// (a pre-J3 store, exactly) fails it by name.

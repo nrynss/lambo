@@ -25,11 +25,29 @@ pub async fn run(store: &dyn GraphStore, session: &str) -> Result<String, CliErr
     // from the durable snapshot — the counter that makes NULL-embedding rows
     // visible without opening a writer.
     let embedded = g.concepts().filter(|c| c.embedding.is_some()).count();
+    // #221: name the stored contract's calibration status. An uncalibrated
+    // contract (no built-in row, not the BGE-M3 reference) recalls on
+    // BGE-M3-shaped constants over a foreign scale; the operator should see
+    // that in the same snapshot that shows the vectors are there.
+    let calibration = match g.embedding() {
+        Some(contract) if crate::embed::calibration::is_calibrated(contract) => {
+            "calibration=calibrated".to_string()
+        }
+        Some(contract) => format!(
+            "calibration=uncalibrated (kind={} model={} dim={}: no built-in row; recall uses \
+             BGE-M3 constants)",
+            contract.kind,
+            contract.model.as_deref().unwrap_or("(default)"),
+            contract.dim
+        ),
+        None => "calibration=unknown (no stamped contract)".to_string(),
+    };
     let text = format!(
         "session '{}' (reader snapshot)\n\
          nodes={} edges={} concepts={} canonical={}\n\
          embedded={}/{}\n\
          epoch={}\n\
+         {}\n\
          flush_lag=n/a log_depth=n/a daemon_cycles=n/a canonization_cycles=n/a\n\
          note: flush_lag / log_depth / daemon_cycles / canonization_cycles are writer-only; \
          this is a reader process",
@@ -41,6 +59,7 @@ pub async fn run(store: &dyn GraphStore, session: &str) -> Result<String, CliErr
         embedded,
         concept_count,
         g.epoch(),
+        calibration,
     );
     Ok(text)
 }

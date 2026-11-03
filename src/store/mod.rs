@@ -269,6 +269,19 @@ pub fn unprovisioned_column_err(kind: &str, table: &str, missing: &[&str]) -> St
     ))
 }
 
+/// The refusal a never-provisioned store returns (#222): no required table
+/// exists at all, so this is a fresh or empty database, not one an older
+/// lambo provisioned. It must not say "provisioned by an older lambo" —
+/// that sentence sent operators of a brand-new store hunting for a version
+/// mismatch that never happened. Same actionable `lambo provision` sentence.
+/// [`unprovisioned_store_err`] stays the answer when *some* tables exist.
+pub fn unprovisioned_empty_store_err(kind: &str) -> StoreError {
+    StoreError::Capability(format!(
+        "{kind} store has no schema yet (a fresh or empty database: none of the required tables \
+         exists). Run `lambo provision` (idempotent) against this store, then retry"
+    ))
+}
+
 /// The refusal [`GraphStore::preflight_schema`] returns, shared by both SQL
 /// adapters so the operator reads one sentence whichever store they run.
 pub fn unprovisioned_store_err(kind: &str, missing: &[&str]) -> StoreError {
@@ -1507,6 +1520,20 @@ CREATE INDEX IF NOT EXISTS sessions_idx ON sessions (session_id);
         assert!(
             !meta.contains("Nothing would become durable"),
             "store_meta is not required for write durability: {meta}"
+        );
+    }
+
+    /// #222: a store with no schema at all is fresh, not stale — the refusal
+    /// must say so, and must not blame an older lambo.
+    #[test]
+    fn the_empty_store_refusal_names_freshness_not_age() {
+        let err = unprovisioned_empty_store_err("sqlite").to_string();
+        assert!(err.contains("no schema yet"), "{err}");
+        assert!(err.contains("fresh or empty"), "{err}");
+        assert!(err.contains("lambo provision"), "{err}");
+        assert!(
+            !err.contains("older lambo"),
+            "a fresh store was never provisioned by anyone: {err}"
         );
     }
 
