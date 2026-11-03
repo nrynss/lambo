@@ -194,7 +194,7 @@ fn calibrated_means_a_row_or_the_bge_m3_reference() {
     assert!(is_reference(&reference));
     assert!(is_calibrated(&reference));
     // An explicit BGE-M3 model name is still the reference space.
-    for model in ["bge-m3", "bge_m3", "bge", "BAAI/bge-m3"] {
+    for model in ["bge-m3", "bge_m3", "bge", "BAAI/bge-m3", "@cf/baai/bge-m3"] {
         let named = EmbeddingContract {
             kind: "bge_m3".into(),
             model: Some(model.into()),
@@ -237,6 +237,45 @@ fn calibrated_means_a_row_or_the_bge_m3_reference() {
         dim: 512,
     };
     assert!(!is_calibrated(&other_dim));
+}
+
+/// P1-2 (review round 1): `is_reference` is anchored, not a substring — a
+/// finetune-style name that merely mentions BGE-M3 is a different measured
+/// space until it is measured, so it warns instead of silently borrowing
+/// BGE-M3's constants. Quant/file variants of the artifact (`bge-m3-FP16`,
+/// `BGE_M3.Q8_0.gguf`) are likewise not the reference run (candle f32 on
+/// the Hugging Face weights).
+#[test]
+fn finetune_style_names_are_not_reference() {
+    for model in [
+        "my-bge-m3-ft",
+        "bge-m3-finetune",
+        "my-bge_m3-custom",
+        "xbge-m3",
+        "bge-m3x",
+        "not-bge-m3",
+        "bge-m3-FP16",
+        "BGE_M3.Q8_0.gguf",
+        "bge-m3-old.gguf",
+    ] {
+        let named = EmbeddingContract {
+            kind: "bge_m3".into(),
+            model: Some(model.into()),
+            dim: 1024,
+        };
+        assert!(!is_reference(&named), "{model}");
+        assert!(!is_calibrated(&named), "{model}");
+        assert!(lookup(&named).is_none(), "{model}");
+    }
+    // Case is still folded: the anchored ids match in any case.
+    for model in ["BGE-M3", "BAAI/BGE-M3", "@CF/BAAI/BGE-M3"] {
+        let named = EmbeddingContract {
+            kind: "bge_m3".into(),
+            model: Some(model.into()),
+            dim: 1024,
+        };
+        assert!(is_reference(&named), "{model}");
+    }
 }
 
 /// #221 ask 1: the Qwen3 Embedding 4B row is pending a keyed measurement

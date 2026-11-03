@@ -127,9 +127,15 @@ impl<D: Dialect> PgStore<D> {
             .copied()
             .filter(|t| !present.iter().any(|p| p == t))
             .collect();
-        if missing_tables.len() == required.len() {
+        if !required.is_empty() && missing_tables.len() == required.len() {
             // #222, as in the SQLite adapter: no required table at all is
-            // a fresh database, not one an older lambo provisioned.
+            // a fresh database, not one an older lambo provisioned. The
+            // `!required.is_empty()` guard keeps a degenerate empty parse
+            // (0 == 0) from refusing as fresh. Live cover for this branch is
+            // the postgres `empty_database_preflight_is_fresh_not_stale`
+            // case (same `verify_schema`, shared by both pg dialects); the
+            // Cockroach suite has none — its cluster is shared and
+            // provisioned, and its CI job is disabled.
             return Err(unprovisioned_empty_store_err(D::NAME));
         }
         if !missing_tables.is_empty() {

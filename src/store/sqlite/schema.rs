@@ -300,10 +300,11 @@ impl SqliteStore {
             .copied()
             .filter(|t| !present.iter().any(|p| p == t))
             .collect();
-        if missing_tables.len() == required.len() {
+        if !required.is_empty() && missing_tables.len() == required.len() {
             // #222: none of the required tables exists — a fresh or empty
             // database (`lambo serve` on a brand-new path), not a store an
-            // older lambo provisioned. The partial-schema sentence below
+            // older lambo provisioned. The `!required.is_empty()` guard keeps
+            // a degenerate empty parse (0 == 0) from refusing as fresh. The partial-schema sentence below
             // would blame a version mismatch that never happened.
             return Err(unprovisioned_empty_store_err("sqlite"));
         }

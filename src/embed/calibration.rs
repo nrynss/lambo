@@ -154,7 +154,7 @@ pub fn is_calibrated(contract: &EmbeddingContract) -> bool {
 
 /// The BGE-M3 reference contract: BGE-M3 at its native 1024 dims, served
 /// either with the server's default model (`bge_m3` kind, no model) or with
-/// a model that names BGE-M3 explicitly, or in-process by the candle
+/// a model that names BGE-M3 itself, or in-process by the candle
 /// adapter from the canonical `BAAI/bge-m3` artifact. The #87 reference run
 /// itself was candle BGE-M3 at this contract
 /// (`evidence/issue-87-calibration/`).
@@ -162,17 +162,21 @@ pub fn is_calibrated(contract: &EmbeddingContract) -> bool {
 /// Anything else at these coordinates — `kind = "bge_m3"` (alias `"openai"`)
 /// with a non-BGE model such as `qwen3-embedding-4b`, a custom candle repo —
 /// is a different space and needs its own measured row.
+///
+/// `model = None` ambiguity (P2-1): with no model name the server's default
+/// model is used and Lambo cannot see which it is, so it is taken as BGE-M3
+/// — the model the `bge_m3` kind is for. A foreign model served as the
+/// default at 1024 dims would look like the reference here and borrow
+/// BGE-M3's constants silently; an operator serving anything else that way
+/// should name the model (or set `[embedder] calibration = "off"`).
 pub fn is_reference(contract: &EmbeddingContract) -> bool {
     if contract.dim != 1024 {
         return false;
     }
     match contract.kind.as_str() {
         "bge_m3" => match contract.model.as_deref() {
-            None => true,
-            Some(m) => {
-                let m = m.to_ascii_lowercase();
-                m.is_empty() || m == "bge" || m.contains("bge-m3") || m.contains("bge_m3")
-            }
+            None | Some("") => true,
+            Some(m) => names_bge_m3(m),
         },
         "candle" => contract
             .model
@@ -180,6 +184,29 @@ pub fn is_reference(contract: &EmbeddingContract) -> bool {
             .is_some_and(|m| m.starts_with("BAAI/bge-m3@")),
         _ => false,
     }
+}
+
+/// Whether `model` names the BGE-M3 artifact itself — anchored (exact,
+/// case-insensitive) against the ids this repo documents, never a substring:
+/// the bare `bge` / `bge-m3` server defaults, the canonical `BAAI/bge-m3`
+/// repo, and Workers AI's `@cf/baai/bge-m3` (`lambo.example.toml`, resolve
+/// tests). A finetune-style name such as `my-bge-m3-ft` merely mentions
+/// BGE-M3 and is a different measured space until it is measured, so it is
+/// NOT reference. Deliberately excluded too are quant/file variants such as
+/// `bge-m3-FP16` or `BGE_M3.Q8_0.gguf`: a quant is not the reference run
+/// (candle f32 on the Hugging Face weights), so it warns — or silences via
+/// `calibration = "off"` — rather than silently borrowing the constants.
+fn names_bge_m3(model: &str) -> bool {
+    matches!(
+        model.to_ascii_lowercase().as_str(),
+        "bge"
+            | "bge-m3"
+            | "bge_m3"
+            | "baai/bge-m3"
+            | "baai/bge_m3"
+            | "@cf/baai/bge-m3"
+            | "@cf/baai/bge_m3"
+    )
 }
 
 /// Warn once when `contract` recalls on uncalibrated constants (#221): no
