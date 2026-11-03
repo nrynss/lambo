@@ -65,8 +65,9 @@
 //!   false`, or `calibration = "off"`, keeps 0.50.
 //!
 //! A contract with no row (any other model string, prompt profile, dimension
-//! or kind) keeps the BGE-M3 constants, as before. The evidence for each row is
-//! under `evidence/issue-87-calibration/`.
+//! or kind) keeps the BGE-M3 constants, as before. Each row's evidence sits
+//! beside it: the EG2 row under `evidence/issue-87-calibration/`, the Qwen3
+//! Embedding 4B rows under `evidence/issue-221/`.
 
 use serde::{Deserialize, Serialize};
 
@@ -130,8 +131,40 @@ const EG2_Q8_768: ContractCalibration = ContractCalibration {
     evidence: "evidence/issue-87-calibration/",
 };
 
-/// Every built-in row. BGE-M3 has none: it is the reference.
-pub const BUILTIN: &[ContractCalibration] = &[EG2_Q8_768];
+/// The Qwen3 Embedding 4B contracts measured for #221 (`kind = "bge_m3"`,
+/// alias `"openai"`, served by Vultr Serverless Inference). Full width and
+/// the 1024 Matryoshka truncation are different spaces: each has its own
+/// row. Method is the #87 quantile match on the #190 set
+/// (`evidence/issue-221/`), dev split only, self framing.
+const QWEN3_4B_2560: ContractCalibration = ContractCalibration {
+    kind: "bge_m3",
+    model: "qwen3-embedding-4b",
+    dim: 2560,
+    recent_score: 0.41,
+    layer_min_similarity: 0.59,
+    merge_threshold: 0.89,
+    default_threshold_merges: 0.70,
+    evidence: "evidence/issue-221/",
+};
+
+/// The Qwen3 Embedding 4B 1024 truncation measured for #221 (`[embedder]
+/// dimensions = 1024`, sent as the OpenAI `dimensions` field).
+const QWEN3_4B_1024: ContractCalibration = ContractCalibration {
+    kind: "bge_m3",
+    model: "qwen3-embedding-4b",
+    dim: 1024,
+    recent_score: 0.42,
+    layer_min_similarity: 0.60,
+    merge_threshold: 0.90,
+    default_threshold_merges: 0.71,
+    evidence: "evidence/issue-221/",
+};
+
+/// Every built-in row. BGE-M3 has none: it is the reference. The EG2 row
+/// was measured for #87; the Qwen3 Embedding 4B rows for #221 (full 2560
+/// width and the 1024 Matryoshka truncation are different spaces, so each
+/// has its own row).
+pub const BUILTIN: &[ContractCalibration] = &[EG2_Q8_768, QWEN3_4B_2560, QWEN3_4B_1024];
 
 /// The built-in row for exactly this contract, if any.
 pub fn lookup(contract: &EmbeddingContract) -> Option<&'static ContractCalibration> {
@@ -145,8 +178,8 @@ pub fn lookup(contract: &EmbeddingContract) -> Option<&'static ContractCalibrati
 /// Whether `contract` runs on calibrated constants (#221): it has a
 /// [`BUILTIN`] row, or it IS the BGE-M3 reference the constants were set on
 /// (whose scale the constants map to by definition). Every other contract
-/// recalls on BGE-M3-shaped constants over a foreign scale — the Qwen3
-/// Embedding 4B shape in #221 — and its operator should hear about it once
+/// recalls on BGE-M3-shaped constants over a foreign scale — the shape
+/// Qwen3 Embedding 4B had before its #221 row — and its operator should hear about it once
 /// at startup (see [`warn_if_uncalibrated`]) and in `lambo stats`.
 pub fn is_calibrated(contract: &EmbeddingContract) -> bool {
     lookup(contract).is_some() || is_reference(contract)

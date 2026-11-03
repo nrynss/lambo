@@ -15,13 +15,17 @@ leg wins. A measured row — the same quantile-matching method as #87/#203
 on the same #190 set (`fixtures/eval/`) — would re-seat the constants on
 Qwen's scale.
 
-**Status: no keyed run has been made. There is no Qwen row in
-`src/embed/calibration.rs`, and the anecdotal numbers below are NOT
-calibration data** — they come from one 10-concept session, not the 100
-concepts / 310 queries of the eval set. Do not ship constants derived from
-them. `qwen3_embedding_4b_row_is_pending_measurement`
-(`src/embed/calibration_tests.rs`) pins this state: it flips only when the
-measured row lands with its evidence file.
+**Status: measured 4 Nov 2026 (keyed Vultr run).** Rows for both
+contracts are in `src/embed/calibration.rs` (`BUILTIN`), with evidence in
+`calibration-qwen3-4b-2560.json` / `calibration-qwen3-4b-1024.json`
+(derived via `evidence/issue-87-calibration/derive.py`, dev split only;
+held-out measured, never tuned on). The anecdotal numbers below remain
+motivation only, not calibration data — they come from one 10-concept
+session, not the 100 concepts / 310 queries of the eval set.
+`qwen3_embedding_4b_rows_match_their_evidence`
+(`src/embed/calibration_tests.rs`) pins this state: it fails if either row
+leaves `lookup`, and `rows_match_the_committed_evidence` requires each row
+to agree with its committed evidence file.
 
 ## Contracts to measure
 

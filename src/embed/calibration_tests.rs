@@ -43,6 +43,45 @@ fn only_the_exact_measured_contract_has_a_row() {
     }
 }
 
+/// Only the exact measured Qwen3 Embedding 4B contracts have rows: a
+/// neighbouring width, an unnamed model, or the other width's row do not
+/// transfer.
+#[test]
+fn only_the_exact_measured_qwen_contracts_have_rows() {
+    for dim in [2560, 1024] {
+        let exact = EmbeddingContract {
+            kind: "bge_m3".into(),
+            model: Some("qwen3-embedding-4b".into()),
+            dim,
+        };
+        assert!(lookup(&exact).is_some(), "dim {dim}");
+    }
+    for c in [
+        EmbeddingContract {
+            kind: "bge_m3".into(),
+            model: Some("qwen3-embedding-4b".into()),
+            dim: 512,
+        },
+        EmbeddingContract {
+            kind: "bge_m3".into(),
+            model: None,
+            dim: 2560,
+        },
+        EmbeddingContract {
+            kind: "bge_m3".into(),
+            model: Some("qwen3-embedding-4b".into()),
+            dim: 2048,
+        },
+        EmbeddingContract {
+            kind: "openai".into(),
+            model: Some("qwen3-embedding-4b".into()),
+            dim: 2560,
+        },
+    ] {
+        assert!(lookup(&c).is_none(), "{c:?}");
+    }
+}
+
 #[test]
 fn recent_score_is_calibrated_only_when_on_and_known() {
     assert_eq!(recent_score(CalibrationMode::Builtin, Some(&eg2())), 0.63);
@@ -129,38 +168,53 @@ fn modes_parse_from_toml() {
 }
 
 /// Every shipped value is the evidence's derived value at two decimals, for
-/// the same contract, so the table and `evidence/issue-87-calibration/`
-/// cannot drift apart.
+/// the same contract, so the table and the evidence directories cannot drift
+/// apart. Each row names its own evidence file (`evidence = ...`), and each
+/// evidence file holds that row's contracts.
 #[test]
 fn rows_match_the_committed_evidence() {
-    let evidence: serde_json::Value = serde_json::from_str(include_str!(
-        "../../evidence/issue-87-calibration/calibration.json"
-    ))
-    .unwrap();
-    let contracts = evidence["contracts"].as_array().unwrap();
-    assert_eq!(contracts.len(), BUILTIN.len());
-    for row in BUILTIN {
-        let e = contracts
-            .iter()
-            .find(|e| e["kind"] == row.kind && e["model"] == row.model && e["dim"] == row.dim)
-            .unwrap_or_else(|| panic!("no evidence for {row:?}"));
-        for (name, value) in [
-            ("recent_score", row.recent_score),
-            ("layer_min_similarity", row.layer_min_similarity),
-            ("merge_threshold", row.merge_threshold),
-        ] {
-            let shipped = e[name]["shipped"].as_f64().unwrap();
-            let derived = e[name]["derived"].as_f64().unwrap();
-            assert_eq!(shipped, value, "{name}");
-            assert!(
-                (derived - value).abs() <= 0.005,
-                "{name}: {derived} vs {value}"
-            );
+    let files = [
+        (
+            include_str!("../../evidence/issue-87-calibration/calibration.json"),
+            "evidence/issue-87-calibration",
+        ),
+        (
+            include_str!("../../evidence/issue-221/calibration-qwen3-4b-2560.json"),
+            "evidence/issue-221",
+        ),
+        (
+            include_str!("../../evidence/issue-221/calibration-qwen3-4b-1024.json"),
+            "evidence/issue-221",
+        ),
+    ];
+    let mut checked = 0;
+    for (text, dir) in files {
+        let evidence: serde_json::Value = serde_json::from_str(text).unwrap();
+        for e in evidence["contracts"].as_array().unwrap() {
+            let row = BUILTIN
+                .iter()
+                .find(|row| row.kind == e["kind"] && row.model == e["model"] && row.dim == e["dim"])
+                .unwrap_or_else(|| panic!("no built-in row for evidence contract {e}"));
+            for (name, value) in [
+                ("recent_score", row.recent_score),
+                ("layer_min_similarity", row.layer_min_similarity),
+                ("merge_threshold", row.merge_threshold),
+            ] {
+                let shipped = e[name]["shipped"].as_f64().unwrap();
+                let derived = e[name]["derived"].as_f64().unwrap();
+                assert_eq!(shipped, value, "{name}");
+                assert!(
+                    (derived - value).abs() <= 0.005,
+                    "{name}: {derived} vs {value}"
+                );
+            }
+            let merges = e["default_threshold_merges"].as_f64().unwrap();
+            assert!((merges - row.default_threshold_merges).abs() <= 0.005);
+            assert!(row.evidence.starts_with(dir), "{row:?}");
+            checked += 1;
         }
-        let merges = e["default_threshold_merges"].as_f64().unwrap();
-        assert!((merges - row.default_threshold_merges).abs() <= 0.005);
-        assert!(row.evidence.starts_with("evidence/issue-87-calibration"));
     }
+    assert_eq!(checked, BUILTIN.len(), "every built-in row is evidenced");
 }
 
 #[test]
@@ -180,10 +234,10 @@ fn rows_are_ordered_cosines() {
 }
 
 /// #221: the BGE-M3 reference contracts run on calibrated constants (they
-/// ARE the scale), everything else needs a row. In particular the Vultr
-/// Qwen3 Embedding 4B contracts — `kind = "bge_m3"` (alias `"openai"`) with
-/// a Qwen model, at 2560 or at the 1024 truncation — are uncalibrated until
-/// measured (evidence/issue-221/).
+/// ARE the scale), everything else needs a row. The Vultr Qwen3 Embedding 4B
+/// contracts — `kind = "bge_m3"` (alias `"openai"`) with a Qwen model, at
+/// 2560 or at the 1024 truncation — have measured rows (evidence/issue-221/),
+/// so they are calibrated without being reference.
 #[test]
 fn calibrated_means_a_row_or_the_bge_m3_reference() {
     let reference = EmbeddingContract {
@@ -213,16 +267,20 @@ fn calibrated_means_a_row_or_the_bge_m3_reference() {
     assert!(is_calibrated(&candle));
     // The measured EG2 contract has a row.
     assert!(is_calibrated(&eg2()));
-    // #221: Qwen3 Embedding 4B at either width is uncalibrated.
-    for dim in [2560, 1024] {
+    // #221: the Qwen3 Embedding 4B contracts at either width have measured
+    // rows now (evidence/issue-221/).
+    for (dim, recent, floor, merge) in [(2560, 0.41, 0.59, 0.89), (1024, 0.42, 0.60, 0.90)] {
         let qwen = EmbeddingContract {
             kind: "bge_m3".into(),
             model: Some("qwen3-embedding-4b".into()),
             dim,
         };
         assert!(!is_reference(&qwen), "dim {dim}");
-        assert!(!is_calibrated(&qwen), "dim {dim}");
-        assert!(lookup(&qwen).is_none(), "dim {dim}");
+        assert!(is_calibrated(&qwen), "dim {dim}");
+        let row = lookup(&qwen).unwrap_or_else(|| panic!("dim {dim}"));
+        assert_eq!(row.recent_score, recent, "dim {dim}");
+        assert_eq!(row.layer_min_similarity, floor, "dim {dim}");
+        assert_eq!(row.merge_threshold, merge, "dim {dim}");
     }
     // A custom candle repo and a non-BGE model at BGE dims are not reference.
     let custom_repo = EmbeddingContract {
@@ -278,19 +336,29 @@ fn finetune_style_names_are_not_reference() {
     }
 }
 
-/// #221 ask 1: the Qwen3 Embedding 4B row is pending a keyed measurement
-/// run (see evidence/issue-221/README.md for the exact commands). This test
-/// pins the pending state so the gap stays visible: adding the measured row
-/// flips `lookup` and this test must be updated with it — the row and the
-/// evidence file land together, as `rows_match_the_committed_evidence`
+/// #221 ask 1: the Qwen3 Embedding 4B rows are measured (see
+/// evidence/issue-221/README.md for the exact commands). This test pins the
+/// measured state: it fails if either row leaves `lookup`, so the rows and
+/// their evidence files land together, as `rows_match_the_committed_evidence`
 /// requires.
 #[test]
-fn qwen3_embedding_4b_row_is_pending_measurement() {
-    for (dim, why) in [
-        (2560, "full width: lambo 0.8.0 sends no `dimensions`"),
+fn qwen3_embedding_4b_rows_match_their_evidence() {
+    for (dim, recent, floor, merge, merges, file) in [
+        (
+            2560,
+            0.41,
+            0.59,
+            0.89,
+            0.70,
+            include_str!("../../evidence/issue-221/calibration-qwen3-4b-2560.json"),
+        ),
         (
             1024,
-            "Matryoshka truncation via [embedder] dimensions = 1024",
+            0.42,
+            0.60,
+            0.90,
+            0.71,
+            include_str!("../../evidence/issue-221/calibration-qwen3-4b-1024.json"),
         ),
     ] {
         let contract = EmbeddingContract {
@@ -298,27 +366,53 @@ fn qwen3_embedding_4b_row_is_pending_measurement() {
             model: Some("qwen3-embedding-4b".into()),
             dim,
         };
-        assert!(
-            lookup(&contract).is_none(),
-            "qwen3-embedding-4b at dim {dim} ({why}): no measured row yet — \
-             measure it like #203 on the #87 set (evidence/issue-221/README.md) \
-             and ship the row with its evidence, instead of guessing constants"
-        );
+        let row = lookup(&contract).unwrap_or_else(|| {
+            panic!(
+                "qwen3-embedding-4b at dim {dim}: no measured row — measure it \
+                 like #203 on the #87 set (evidence/issue-221/README.md) and \
+                 ship the row with its evidence, instead of guessing constants"
+            )
+        });
+        assert_eq!(row.evidence, "evidence/issue-221/", "dim {dim}");
+        let evidence: serde_json::Value = serde_json::from_str(file).unwrap();
+        let e = &evidence["contracts"][0];
+        assert_eq!(e["kind"], "bge_m3", "dim {dim}");
+        assert_eq!(e["model"], "qwen3-embedding-4b", "dim {dim}");
+        assert_eq!(e["dim"], dim, "dim {dim}");
+        assert_eq!(e["recent_score"]["shipped"], recent, "dim {dim}");
+        assert_eq!(e["layer_min_similarity"]["shipped"], floor, "dim {dim}");
+        assert_eq!(e["merge_threshold"]["shipped"], merge, "dim {dim}");
+        assert_eq!(row.recent_score, recent, "dim {dim}");
+        assert_eq!(row.layer_min_similarity, floor, "dim {dim}");
+        assert_eq!(row.merge_threshold, merge, "dim {dim}");
+        assert_eq!(row.default_threshold_merges, merges, "dim {dim}");
     }
 }
 
 /// #221 ask 2: the uncalibrated warning fires exactly when it should — a
 /// contract with no row that is not the reference, under `builtin` — and
-/// stays silent for a row, the reference, and `calibration = "off"`.
+/// stays silent for a row, the reference, and `calibration = "off"`. The
+/// Qwen3 Embedding 4B contracts have rows now, so a foreign model stands in
+/// for the uncalibrated shape.
 #[test]
 fn warn_if_uncalibrated_fires_once_per_process_shape() {
-    let qwen = EmbeddingContract {
+    let foreign = EmbeddingContract {
         kind: "bge_m3".into(),
-        model: Some("qwen3-embedding-4b".into()),
-        dim: 2560,
+        model: Some("some-unmeasured-model".into()),
+        dim: 2048,
     };
-    assert!(warn_if_uncalibrated(CalibrationMode::Builtin, &qwen));
-    assert!(!warn_if_uncalibrated(CalibrationMode::Off, &qwen));
+    assert!(lookup(&foreign).is_none());
+    assert!(warn_if_uncalibrated(CalibrationMode::Builtin, &foreign));
+    assert!(!warn_if_uncalibrated(CalibrationMode::Off, &foreign));
+    // Qwen3 Embedding 4B at either measured width warns no more.
+    for dim in [2560, 1024] {
+        let qwen = EmbeddingContract {
+            kind: "bge_m3".into(),
+            model: Some("qwen3-embedding-4b".into()),
+            dim,
+        };
+        assert!(!warn_if_uncalibrated(CalibrationMode::Builtin, &qwen));
+    }
     assert!(!warn_if_uncalibrated(CalibrationMode::Builtin, &eg2()));
     let reference = EmbeddingContract {
         kind: "bge_m3".into(),

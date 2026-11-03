@@ -93,19 +93,26 @@ mod tests {
             "calibration=calibrated"
         );
         // Uncalibrated: names the contract so the operator sees which space
-        // recalls on BGE-M3-shaped constants.
-        let qwen = calibration_line(Some(&contract("bge_m3", Some("qwen3-embedding-4b"), 2560)));
+        // recalls on BGE-M3-shaped constants. (Qwen3 Embedding 4B has measured
+        // rows now, so a foreign model stands in.)
+        let qwen = calibration_line(Some(&contract(
+            "bge_m3",
+            Some("some-unmeasured-model"),
+            2560,
+        )));
         assert!(qwen.starts_with("calibration=uncalibrated"), "{qwen}");
         assert!(qwen.contains("kind=bge_m3"), "{qwen}");
-        assert!(qwen.contains("model=qwen3-embedding-4b"), "{qwen}");
+        assert!(qwen.contains("model=some-unmeasured-model"), "{qwen}");
         assert!(qwen.contains("dim=2560"), "{qwen}");
-        // A default-model uncalibrated contract prints `(default)`, not empty.
+        // A measured Qwen contract is calibrated.
+        let measured =
+            calibration_line(Some(&contract("bge_m3", Some("qwen3-embedding-4b"), 2560)));
+        assert_eq!(measured, "calibration=calibrated", "{measured}");
+        // The 1024 truncation has its own row: calibrated too.
         let truncated =
             calibration_line(Some(&contract("bge_m3", Some("qwen3-embedding-4b"), 1024)));
-        assert!(
-            truncated.starts_with("calibration=uncalibrated"),
-            "{truncated}"
-        );
+        assert_eq!(truncated, "calibration=calibrated", "{truncated}");
+        // A default-model uncalibrated contract prints `(default)`, not empty.
         let defaulted = calibration_line(Some(&contract("embeddinggemma2", None, 768)));
         assert!(defaulted.contains("model=(default)"), "{defaulted}");
         // Unknown: no stamped contract (nothing embedded yet).

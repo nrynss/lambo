@@ -1,0 +1,33 @@
+    Finished `release` profile [optimized] target(s) in 0.16s
+     Running `target/release/examples/eval_measure --out evidence/issue-221/runs/qwen3-4b-1024.json --detail evidence/issue-221/runs/qwen3-4b-1024-detail.json`
+  embedded 50
+  embedded 100
+  embedded 150
+  embedded 200
+  embedded 250
+  embedded 300
+  embedded 350
+  embedded 400
+  embedded 450
+  embedded 500
+  embedded 550
+  embedded 600
+  embedded 650
+  embedded 700
+  embedded 750
+  embedded 800
+  embedded 850
+  embedded 900
+  embedded 950
+  embedded 1000
+  embedded 1050
+  embedded 1100
+  embedded 1150
+  embedded 1200
+  embedded 1250
+  embedded 1300
+  embedded 1350
+  embedded 1400
+  embedded 1450
+wrote evidence/issue-221/runs/qwen3-4b-1024.json
+EXIT=0
