@@ -94,6 +94,90 @@ with `evidence = "evidence/issue-221/"`, evidence kept beside it, and
 `qwen3_embedding_4b_rows_match_their_evidence` (a
 `rows_match_the_committed_evidence`-style agreement test).
 
+## Results (self framing; dev tuned on, held-out measured)
+
+Shipped rows (raw-framing sensitivity in parentheses — the two framings
+agree within 0.02; #87 agreed within 0.008):
+
+| Contract | Recent | Layer floor | Merge | Default-threshold merges |
+|---|---|---|---|---|
+| Qwen 2560 | **0.41** (0.39) | **0.59** (0.57) | **0.89** (0.89) | 0.70 |
+| Qwen 1024 | **0.42** (0.40) | **0.60** (0.59) | **0.90** (0.90) | 0.71 |
+
+### Recent leg (applies by default)
+
+| Split | Run | Recent | All irrelevant above | Top-5 irrelevant above | True hits above |
+|---|---|---:|---:|---:|---:|
+| dev | BGE-M3 | 0.35 | 54.8% | 98.9% | 100% |
+| dev | Qwen 2560 before | 0.35 | 81.6% | 99.1% | 100% |
+| dev | Qwen 2560 after | 0.41 | 54.1% | 98.3% | 99.4% (1 of 169 below) |
+| held-out | BGE-M3 | 0.35 | 55.2% | 97.6% | 100% |
+| held-out | Qwen 2560 before | 0.35 | 84.5% | 98.2% | 100% |
+| held-out | Qwen 2560 after | 0.41 | 58.2% | 98.0% | 100% |
+| dev | Qwen 1024 before | 0.35 | 83.3% | 99.2% | 100% |
+| dev | Qwen 1024 after | 0.42 | 54.0% | 98.5% | 99.4% (1 of 169 below) |
+| held-out | Qwen 1024 before | 0.35 | 86.1% | 98.2% | 100% |
+| held-out | Qwen 1024 after | 0.42 | 58.2% | 98.2% | 100% |
+
+### Layer floor (the default for an unset floor)
+
+| Split | Run | Floor | All irrelevant above | True hits above |
+|---|---|---:|---:|---:|
+| held-out | BGE-M3 | 0.50 | 3.0% | 82.7% |
+| held-out | Qwen 2560 at default | 0.50 | 18.1% | 100% |
+| held-out | Qwen 2560 calibrated | 0.59 | 3.3% | 79.6% |
+
+Qwen 1024 calibrates to 0.60 with the same shape: held-out irrelevant
+above 3.3% (BGE-M3 3.0%), true hits above 79.6% (BGE-M3 82.7%).
+
+### Merge threshold (the default)
+
+By cosine (every pair):
+
+| Split | Run | Threshold | Related-distinct merged | Paraphrases merged |
+|---|---|---:|---:|---:|
+| dev | BGE-M3 | 0.85 | 61.5% | 86.6% |
+| dev | Qwen 2560 before | 0.85 | 70.3% | 93.9% |
+| dev | Qwen 2560 after | 0.89 | 62.1% | 78.1% |
+| held-out | BGE-M3 | 0.85 | 63.2% | 83.3% |
+| held-out | Qwen 2560 before | 0.85 | 71.1% | 86.1% |
+| held-out | Qwen 2560 after | 0.89 | 61.4% | 69.4% |
+| dev | Qwen 1024 after | 0.90 | 61.0% | 74.4% |
+| held-out | Qwen 1024 after | 0.90 | 60.5% | 69.4% |
+
+### Retrieval (unchanged: constants do not reorder vector hits)
+
+| Run | Framing | hit@1 | nDCG@10 |
+|---|---|---:|---:|
+| BGE-M3 | raw / self | 0.775 / 0.763 | 0.866 / 0.855 |
+| Qwen 2560 | raw / self | 0.721 / 0.702 | 0.856 / 0.840 |
+| Qwen 1024 | raw / self | 0.699 / 0.714 | 0.844 / 0.842 |
+
+## Live recall probe (proxy session, daemon path)
+
+The original 10-concept session's exact texts are not in the repo, so the
+anecdote above cannot be replayed verbatim. As a proxy, a fresh SQLite
+session under the Qwen 2560 contract (`kind = "openai"`,
+`model = "qwen3-embedding-4b"`, Solo) was written with 11 concepts in the
+anecdote's shape — a paging lesson, a related paging evidence, the
+unrelated "demo API v1 returns all items" observation, and fillers — and
+recalled through `lambo serve` (the daemon path, where the calibrated
+recent score and layer floor apply) with `calibration = "builtin"` vs
+`"off"`:
+
+- Lesson-seeking query ("how should the list endpoint return results when
+  there are too many for one response"): lesson 1st at 3.37, runner-up
+  1.84, unrelated observation 3rd at 1.40 (builtin). The anecdote's
+  failure mode — the unrelated observation ahead of the lesson — does not
+  occur.
+- The row is live in the daemon: off vs builtin fused scores differ
+  (e.g. 3.38 → 3.37, 1.41 → 1.40 on that query).
+
+(`lambo recall`, the lease-free reader, keeps the flat 0.35 recent score
+on purpose — the rows were measured on the daemon's text-recall blend —
+so a CLI before/after cannot discriminate; the probe above goes through
+the daemon.)
+
 ## Anecdote (motivation only — NOT calibration data)
 
 From the day-one Kalari session (10 concepts, reworded paging query; the
