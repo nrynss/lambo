@@ -1,4 +1,4 @@
-# #221: Qwen3 Embedding 4B calibration (PENDING a keyed measurement run)
+# #221: Qwen3 Embedding 4B calibration (measured 4 Nov 2026)
 
 Lambo 0.8.0, `kind = "openai"` embedder pointed at Vultr Serverless
 Inference, model `qwen3-embedding-4b`, dim 2560. SQLite store,
@@ -88,11 +88,11 @@ python3 evidence/issue-87-calibration/derive.py \
   --out evidence/issue-221/calibration-qwen3-4b-1024.json
 ```
 
-Then ship each row in `src/embed/calibration.rs` (`BUILTIN`) with
-`evidence = "evidence/issue-221/"`, extend `calibration.json`-style
-evidence beside it, and update
-`qwen3_embedding_4b_row_is_pending_measurement` into a
-`rows_match_the_committed_evidence`-style agreement test.
+Each row was then shipped in `src/embed/calibration.rs` (`BUILTIN`)
+with `evidence = "evidence/issue-221/"`, evidence kept beside it, and
+`qwen3_embedding_4b_row_is_pending_measurement` replaced by
+`qwen3_embedding_4b_rows_match_their_evidence` (a
+`rows_match_the_committed_evidence`-style agreement test).
 
 ## Anecdote (motivation only — NOT calibration data)
 
