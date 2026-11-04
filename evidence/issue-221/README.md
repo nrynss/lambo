@@ -268,8 +268,11 @@ first (0.7274), then the demo observation (0.5815), then r-001 (0.5680).
 ### Measured blend: RRF at #173's defaults, Qwen-scoped
 
 `examples/eval_fusion` on the #190 set (`fixtures/eval/`), Qwen3-Embedding-4B
-at 2560, eleven variants on `dev` (100 concepts derived once; the embedding
-cache is local-only, not committed):
+at 2560, ten variants on `dev` (100 concepts derived once; the embedding
+cache is local-only, not committed) — `max`, RRF at #173's defaults, a k
+sweep (2, 5), single-axis leg-weight moves (`keyword=0.5`, `vector=0.5`,
+`vector=2`, `recent=0`), and daemon-share moves (`wd=0`, `wd=0.3`); a
+sweep of single axes, not a grid:
 
 | variant | dev nDCG@10 | dev hit@1 | vocab-mismatch (30) | exact-id (18) |
 |---|---|---|---|---|
@@ -279,8 +282,10 @@ cache is local-only, not committed):
 | `rrf:k=5` | 0.8386 | 0.685 | 0.677 | 0.858 |
 | `rrf:keyword=0.5` | 0.8411 | 0.685 | 0.743 | 0.756 |
 | `rrf:vector=2` | 0.8600 | 0.727 | 0.784 | 0.780 |
+| `rrf:vector=0.5` | 0.8160 | 0.667 | 0.584 | 0.886 |
 | `rrf:recent=0` | 0.8634 | 0.733 | 0.710 | 0.863 |
 | `rrf:wd=0` | 0.8789 | 0.758 | 0.743 | 0.887 |
+| `rrf:wd=0.3` | 0.8726 | 0.751 | 0.718 | 0.879 |
 
 Held-out confirmation (`max` vs `rrf` only, decided on dev):
 
@@ -295,14 +300,22 @@ case is a vocabulary-mismatch query: RRF fixes it where no max-side constant
 can. `wd=0` scores higher on dev but does NOT fix the exact case (relevance
 alone still ranks the demo observation first: 0.913 vs 0.783), and `recent=0`
 is the set artefact #173 names (the recent leg always holds the corpus's last
-three concepts), so neither is shipped: the daemon share stays 0.5 and the
-weights stay #173's. No new numbers — the shipped default is RRF at the
-existing defaults (k = 3, 1.0/1.0/0.3), applied per-contract (see below).
+three concepts). `wd=0.3` does fix the exact case — lesson first at 0.845 vs
+demo 0.749 on the recorded 8-concept session — and beats the shipped default
+on dev (0.8726 vs 0.8521). It is still not shipped: it introduces a
+non-default daemon share, and the shipped default stays RRF at #173's
+existing constants (k = 3, 1.0/1.0/0.3, daemon 0.5). No new numbers — the
+shipped default is RRF at the existing defaults, applied per-contract (see
+below).
 
 Files: `fusion-qwen3-4b-2560-dev.json` (+ `.queries.jsonl`) is the dev
 sweep, `fusion-qwen3-4b-2560-heldout.json` (+ `.queries.jsonl`) the held-out
-confirmation, `repro-8concept-qwen3-4b-2560.json` the recorded live vectors
-for the offline regression test.
+confirmation, `repro-8concept-qwen3-4b-2560.json` and
+`repro-8concept-qwen3-4b-1024.json` the recorded live vectors (full width
+and Matryoshka truncation) for the offline regression tests. The held-out
+run's stderr log is not kept: the example prints only the dev split to
+stderr, so the file was a copy of the dev log's numbers, not held-out
+evidence (the held-out numbers live in the JSON).
 
 ### Shipped fix
 
@@ -316,7 +329,8 @@ one-line log). BGE-M3 and EmbeddingGemma 2 behavior is unchanged by
 construction: their contracts resolve to `RecallFusion::default()` exactly
 as before.
 
-Before/after on the exact session (top-4), both widths, daemon path:
+Before/after on the exact session (top-4), both widths, daemon path
+(both rows pinned offline in `issue221_fusion` on the recorded vectors):
 
 | Run | 1st | 2nd | 3rd | 4th |
 |---|---|---|---|---|
@@ -324,8 +338,8 @@ Before/after on the exact session (top-4), both widths, daemon path:
 | 2560, RRF default (after) | lesson 0.885 | demo API v1 … 0.668 | r-001 0.570 | pagination_changed 0.474 |
 | 1024, RRF default (after) | lesson 0.885 | demo API v1 … 0.668 | r-001 0.570 | pagination_changed 0.474 |
 
-Regression tests (offline, on the recorded vectors):
-`memory::tests::issue221_fusion` — the fixture keeps the live geometry, max
+Regression tests (offline, on the recorded vectors at both widths):
+`memory::tests::issue221_fusion` — each fixture keeps the live geometry, max
 reproduces the misrank, the RRF default ranks the lesson first;
 `calibration::default_fusion` matrix (Qwen both widths → RRF, EG2/BGE-M3/
 unmeasured → max, off → max); `resolve` scoping (unset → RRF on Qwen, stays
