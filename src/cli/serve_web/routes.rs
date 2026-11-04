@@ -441,18 +441,15 @@ pub(super) async fn api_inspect(
                     "gate measurements for /api/inspect failed; gate_progress and admission omitted"
                 );
             }
-            // Warnings ride with the focus, in the order the other
-            // inspect surfaces use: resolution first, then the state of
-            // what was resolved. A store fault degrades the gates to a
-            // labelled absence and names itself here, the way the MCP
-            // and CLI verbs name their explanation failure.
+            // Warnings ride with the focus: resolution first, then the
+            // state of what was resolved (a deliberate order, not MCP's —
+            // no test pins cross-surface order). A store fault degrades
+            // the gates to a labelled absence and names itself here, the
+            // way the MCP and CLI verbs name their explanation failure.
             let mut warnings: Vec<String> = fuzzy.into_iter().collect();
             warnings.extend(contradicted);
-            if measured.is_err() {
-                warnings.push(format!(
-                    "canonization explanation unavailable: {}",
-                    measured.as_ref().unwrap_err()
-                ));
+            if let Err(e) = &measured {
+                warnings.push(format!("canonization explanation unavailable: {e}"));
             }
             let (gate_progress, gate_progress_omitted) = if canonical {
                 (None, Some("already_canonical"))
