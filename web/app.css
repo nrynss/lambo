@@ -387,6 +387,13 @@ h2 { font-size: 17px; margin: 0 0 4px; letter-spacing: -0.01em; }
 
 .details-blast { margin: 14px 0 0; font-size: 16px; color: var(--text-muted); }
 .details-blast-num { font-size: 26px; font-weight: 700; color: var(--warn); letter-spacing: -0.02em; }
+/* #226: the contradiction warning /api/inspect carries beside the focus. */
+.details-warnings { margin: 12px 0 0; }
+.details-warning {
+  border: 1px solid var(--danger); border-left-width: 4px; border-radius: 9px;
+  padding: 10px 12px; margin-bottom: 8px; background: var(--bg-alt);
+  color: var(--text);
+}
 
 /* Gates answer "why is this not relied on yet", so they are shown only for
    concepts that have not reached Canonical. See H2. */

@@ -277,6 +277,11 @@ pub(super) struct InspectResponse {
     /// Stage 2/3 verdicts Solo has needed since PR 3.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) admission: Option<Admission>,
+    /// #226: the contradiction warning for a contradicted focus, by the
+    /// same ruling recall renders. Skipped when empty so a non-contradicted
+    /// focus keeps its exact previous payload.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(super) warnings: Vec<String>,
 }
 
 impl InspectResponse {
@@ -297,6 +302,7 @@ impl InspectResponse {
             gate_progress: None,
             gate_progress_omitted: None,
             admission: None,
+            warnings: Vec::new(),
         }
     }
 }

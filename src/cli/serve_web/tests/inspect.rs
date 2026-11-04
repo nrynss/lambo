@@ -853,3 +853,113 @@ async fn inspect_measures_once_for_the_gate_block_and_the_admission() {
     assert_eq!(span_calls.load(Ordering::SeqCst), 1, "one span");
     handle.abort();
 }
+
+/// #226: `/api/inspect` carries the contradiction warning for a
+/// contradicted focus — the same ruling recall renders — and stays silent
+/// for the contradictor. Staggered stamps (older 120 s back, newer 60 s)
+/// so the detector's strictly-newer declaration holds deterministically.
+#[tokio::test]
+async fn inspect_warns_on_a_contradicted_focus() {
+    use chrono::Duration as ChronoDuration;
+    let store = Arc::new(MemoryStore::new());
+    let sid = SessionId::new("t93-inspect-contradicted");
+    let now = Utc::now();
+    let older_at = now - ChronoDuration::seconds(120);
+    let newer_at = now - ChronoDuration::seconds(60);
+    let iid_old = NodeId::new();
+    let iid_new = NodeId::new();
+    let older_id = NodeId::new();
+    let newer_id = NodeId::new();
+    let mut batch = MutationBatch::new();
+    for (iid, prev, at) in [
+        (iid_old, None, older_at),
+        (iid_new, Some(iid_old), newer_at),
+    ] {
+        batch.push(Mutation::UpsertNode {
+            node: Node::Interaction(Interaction {
+                event_time: None,
+                id: iid,
+                session_id: sid.clone(),
+                agent_id: AgentId::from("agent-a"),
+                prompt_text: Some("contradiction fixture".to_string()),
+                previous_id: prev,
+                created_at: at,
+            }),
+        });
+    }
+    batch.push(Mutation::UpsertNode {
+        node: Node::Concept(concept(
+            sid.clone(),
+            older_id,
+            iid_old,
+            "older belief",
+            older_at,
+        )),
+    });
+    batch.push(Mutation::UpsertNode {
+        node: Node::Concept(concept(
+            sid.clone(),
+            newer_id,
+            iid_new,
+            "newer correction",
+            newer_at,
+        )),
+    });
+    batch.push(Mutation::UpsertEdge {
+        edge: edge(
+            NodeId::new(),
+            sid.clone(),
+            iid_old,
+            older_id,
+            EdgeType::Derives,
+            older_at,
+        ),
+    });
+    batch.push(Mutation::UpsertEdge {
+        edge: edge(
+            NodeId::new(),
+            sid.clone(),
+            iid_new,
+            newer_id,
+            EdgeType::Derives,
+            newer_at,
+        ),
+    });
+    batch.push(Mutation::UpsertEdge {
+        edge: edge(
+            NodeId::new(),
+            sid.clone(),
+            iid_new,
+            iid_old,
+            EdgeType::Temporal,
+            newer_at,
+        ),
+    });
+    batch.push(Mutation::UpsertEdge {
+        edge: edge(
+            NodeId::new(),
+            sid.clone(),
+            newer_id,
+            older_id,
+            EdgeType::Contradicts,
+            newer_at,
+        ),
+    });
+    store.flush(&batch, None).await.expect("seed contradiction");
+    let (addr, handle) = spawn(state_on(store, "t93-inspect-contradicted")).await;
+
+    let hit = get_json(addr, "/api/inspect?focus=older%20belief").await;
+    assert_eq!(hit["found"], true, "{hit}");
+    let warnings = hit["warnings"].as_array().unwrap();
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.as_str().unwrap_or("").starts_with("⚠ Contradicted at")),
+        "the contradicted focus must warn: {hit}"
+    );
+
+    let newer = get_json(addr, "/api/inspect?focus=newer%20correction").await;
+    assert_eq!(newer["found"], true, "{newer}");
+    assert!(newer.get("warnings").is_none(), "{newer}");
+    handle.abort();
+}
