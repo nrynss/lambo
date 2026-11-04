@@ -1508,10 +1508,11 @@ mod tests {
         env.remove("LAMBO_EMBED_KEEP_WARM_SECS");
     }
 
-    /// #221: `dimensions` is a real `[embedder]` key (absent = send nothing),
-    /// refused for every kind but `bge_m3`, and must equal `dim` when set.
+    /// #221: `dimensions` is a real `[embedder]` key (absent = send
+    /// nothing). The kind gate and the width check live in the test below,
+    /// which needs the adapters compiled in.
     #[test]
-    fn dimensions_toml_key_and_kind_gate() {
+    fn dimensions_toml_key() {
         let cfg: EmbedderConfig = toml::from_str("kind = \"bge_m3\"\n").unwrap();
         assert_eq!(cfg.dimensions, None, "absent sends nothing");
         let cfg: EmbedderConfig =
@@ -1519,6 +1520,15 @@ mod tests {
         assert_eq!(cfg.dimensions, Some(1024));
         // A typo of the key is refused (deny_unknown_fields).
         assert!(toml::from_str::<EmbedderConfig>("dimension = 1024\n").is_err());
+    }
+
+    /// #221: `dimensions` is refused for every kind but `bge_m3`, and must
+    /// equal `dim` when set. Needs both adapters compiled in: under a
+    /// minimal feature set `build_embedder` fails with "not compiled"
+    /// before it reaches the gate (the sqlite-minimal CI row).
+    #[cfg(all(feature = "embed-bge", feature = "embed-fixture"))]
+    #[test]
+    fn dimensions_kind_gate_and_width_check() {
         // Only the OpenAI-compatible adapter sends it.
         let Err(err) = build_embedder(EmbedderConfig {
             kind: EmbedderKind::Fixture,
