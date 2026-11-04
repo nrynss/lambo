@@ -546,3 +546,59 @@ async fn failed_inspects_record_their_failure_mode_and_focus_in_the_ledger() {
     assert_eq!(lines[0]["focus"], json!("ad concept 5"));
     s.mem.close().await.expect("close");
 }
+
+/// #226: a contradicted focus warns, by the same ruling recall renders —
+/// an incoming `Contradicts` edge must not read as `warnings: []`. The
+/// contradictor itself stays silent.
+#[tokio::test]
+async fn inspect_warns_on_a_contradicted_focus() {
+    let s = server("mcp-inspect-contradicted").await;
+    let ids = derive_created(
+        &s,
+        "agent-a",
+        json!([{"content": "brand y chargers are safe", "concept_type": "logic"}]),
+    )
+    .await;
+    derive_created(
+        &s,
+        "agent-b",
+        json!([{
+            "content": "brand y chargers overheat", "concept_type": "logic",
+            "against": [ids[0].clone()],
+        }]),
+    )
+    .await;
+
+    let hit = call(
+        &s,
+        "lambo_inspect",
+        serde_json::json!({"agent_id": "agent-a", "focus": "brand y chargers are safe"}),
+    )
+    .await;
+    assert_eq!(hit.is_error, Some(false), "{hit:?}");
+    assert!(
+        text_of(&hit).contains("Contradicted at"),
+        "the warning reaches the model, not only the payload"
+    );
+    let structured = hit.structured_content.unwrap();
+    let warnings = structured["warnings"].as_array().unwrap();
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.as_str().unwrap_or("").starts_with("⚠ Contradicted at")),
+        "the contradicted focus must warn: {warnings:?}"
+    );
+
+    let newer = call(
+        &s,
+        "lambo_inspect",
+        serde_json::json!({"agent_id": "agent-b", "focus": "brand y chargers overheat"}),
+    )
+    .await;
+    assert_eq!(newer.is_error, Some(false), "{newer:?}");
+    assert!(newer.structured_content.unwrap()["warnings"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    s.mem.close().await.expect("close");
+}

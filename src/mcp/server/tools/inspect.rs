@@ -17,7 +17,7 @@ use crate::surface::focus::{
     ambiguous_refusal, fuzzy_note, missing_refusal, oversized_refusal, resolve_focus, Focus,
 };
 use crate::surface::limits::MAX_INSPECT_DEPTH;
-use crate::surface::neighbourhood::render_neighbourhood_parts;
+use crate::surface::neighbourhood::{contradiction_line, render_neighbourhood_parts};
 use crate::surface::validate::{check_in_range, require_nonempty};
 
 impl LamboServer {
@@ -55,10 +55,17 @@ impl LamboServer {
         let scope = p.scope.clone();
 
         // One short read section, no `.await` inside (spec §6.4).
+        let now = chrono::Utc::now();
+        let min_age = mem.config().canonization_edge_min_age;
         let resolved = {
             let g = mem.graph().read();
             match resolve_focus(&g, p.focus.trim()) {
-                Focus::Exact(id) => Ok((id, None, render_neighbourhood_parts(&g, id, depth))),
+                Focus::Exact(id) => Ok((
+                    id,
+                    None,
+                    render_neighbourhood_parts(&g, id, depth),
+                    contradiction_line(&g, id, min_age, now),
+                )),
                 Focus::Fuzzy {
                     id,
                     content,
@@ -70,13 +77,18 @@ impl LamboServer {
                     // bounded one also names the bound (issue #9), so the
                     // caller knows what was not scanned.
                     let note = fuzzy_note(p.focus.trim(), &content, bounded.as_ref());
-                    Ok((id, Some(note), render_neighbourhood_parts(&g, id, depth)))
+                    Ok((
+                        id,
+                        Some(note),
+                        render_neighbourhood_parts(&g, id, depth),
+                        contradiction_line(&g, id, min_age, now),
+                    ))
                 }
                 other => Err(other),
             }
         };
 
-        let (focus_id, note, view) = match resolved {
+        let (focus_id, note, view, contradicted) = match resolved {
             Ok(v) => v,
             Err(Focus::Ambiguous {
                 candidates,
@@ -180,6 +192,13 @@ impl LamboServer {
             }
             None => text,
         };
+
+        // #226: a contradicted focus warns, by the same ruling recall
+        // renders — an incoming Contradicts edge must not read as
+        // `warnings: []`.
+        if let Some(line) = contradicted {
+            warnings.push(line);
+        }
 
         // I1: enough to place an inspect in a call sequence without carrying the
         // whole neighbourhood into the ledger. `fuzzy` is worth a field — a

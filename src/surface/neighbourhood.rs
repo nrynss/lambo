@@ -50,6 +50,31 @@ impl NeighbourhoodView {
     }
 }
 
+/// #226: the contradiction line for a contradicted focus, if the
+/// detector's ruling holds — the same ruling recall renders
+/// ([`crate::daemon::contradiction::contradiction_at`]), so inspect warns
+/// instead of showing `warnings: []` beside an incoming `Contradicts`
+/// edge. Caller holds the graph read lock; this function never awaits
+/// (spec §6.4).
+pub(crate) fn contradiction_line(
+    g: &Graph,
+    id: NodeId,
+    min_age: std::time::Duration,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<String> {
+    let hit = crate::daemon::contradiction::contradiction_at(g, id, min_age, now)?;
+    let by_content = match g.node(hit.by) {
+        Some(Node::Concept(c)) => Some(c.content.as_str()),
+        _ => None,
+    };
+    Some(format::contradiction_warning(
+        hit.by,
+        &hit.writer,
+        hit.at,
+        by_content,
+    ))
+}
+
 /// [`render_neighbourhood`] in parts (see [`NeighbourhoodView`]).
 pub(crate) fn render_neighbourhood_parts(
     g: &Graph,
@@ -464,5 +489,65 @@ mod tests {
         let (text, json) = render_neighbourhood(&g, case::concept_id("K"), 1);
         assert!(!text.contains("dependents ("), "{text}");
         assert!(json["dependents"].as_array().unwrap().is_empty());
+    }
+
+    /// #226: the contradiction line fires for a contradicted focus and for
+    /// nothing else — the ruling recall renders, direct on the graph.
+    #[test]
+    fn contradiction_line_fires_only_for_the_contradicted_focus() {
+        use crate::graph::cite::{validate, ConceptCitations};
+        use crate::graph::derive::{derive_cited, ParentOf};
+        use crate::test_util::citations::{concept, graph};
+        use crate::types::{AgentId, ConceptType, Interaction, NodeId, SessionId};
+        use chrono::{TimeZone, Utc};
+        use std::time::Duration;
+        let (mut g, i0) = graph("inspect-contradiction-line");
+        let older = concept(&mut g, i0, "brand x runs true to size", ConceptType::Logic);
+        // Edges inherit their interaction's `created_at`, and the detector
+        // needs a strictly newer declaration than the target's origin: a
+        // second, later interaction for the contradicting write.
+        let i1 = NodeId::new();
+        g.insert_interaction(Interaction {
+            event_time: None,
+            id: i1,
+            session_id: SessionId::from("inspect-contradiction-line"),
+            agent_id: AgentId::from("agent-b"),
+            prompt_text: None,
+            previous_id: Some(i0),
+            created_at: Utc.timestamp_opt(1_752_000_060, 0).unwrap(),
+        })
+        .unwrap();
+        let newer = "brand x runs a size small";
+        let call = [ConceptCitations {
+            content: newer.into(),
+            depends_on: vec![],
+            against: vec!["brand x runs true to size".to_string()],
+        }];
+        let concepts = [(newer, ConceptType::Logic)];
+        let pinned = validate(&g, &concepts, &call).unwrap();
+        derive_cited(
+            &mut g,
+            i1,
+            &AgentId::from("agent-b"),
+            &concepts,
+            &ParentOf::none(),
+            10,
+            &pinned,
+        )
+        .unwrap();
+        let now = Utc.timestamp_opt(1_752_000_120, 0).unwrap();
+        let line = super::contradiction_line(&g, older, Duration::from_secs(60), now)
+            .expect("the contradicted focus warns");
+        assert!(line.starts_with("⚠ Contradicted at"), "{line}");
+        assert!(
+            line.contains("size small"),
+            "names the contradictor: {line}"
+        );
+        let newer_id = g
+            .concepts()
+            .find(|c| c.content == newer)
+            .unwrap_or_else(|| panic!("no concept {newer:?}"))
+            .id;
+        assert!(super::contradiction_line(&g, newer_id, Duration::from_secs(60), now).is_none());
     }
 }
