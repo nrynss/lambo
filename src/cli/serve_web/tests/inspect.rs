@@ -613,6 +613,16 @@ async fn inspect_labels_a_failed_gate_read_as_unavailable_and_still_returns_200(
     assert_eq!(hit["gate_progress_omitted"], "unavailable", "{hit}");
     // ... and distinguishable from H2's, which is the whole point.
     assert_ne!(hit["gate_progress_omitted"], "already_canonical", "{hit}");
+    // The fault is also named in warnings, the way the MCP and CLI
+    // verbs name their explanation failure.
+    let warnings = hit["warnings"].as_array().unwrap();
+    assert!(
+        warnings.iter().any(|w| w
+            .as_str()
+            .unwrap_or("")
+            .starts_with("canonization explanation unavailable")),
+        "{hit}"
+    );
     handle.abort();
 }
 
@@ -961,5 +971,30 @@ async fn inspect_warns_on_a_contradicted_focus() {
     let newer = get_json(addr, "/api/inspect?focus=newer%20correction").await;
     assert_eq!(newer["found"], true, "{newer}");
     assert!(newer.get("warnings").is_none(), "{newer}");
+    handle.abort();
+}
+
+/// A fuzzy resolution is stated, never silent: the page asked for
+/// something the caller did not name, so `warnings` says what it
+/// resolved to — the same note the MCP and CLI verbs carry.
+#[tokio::test]
+async fn inspect_states_a_fuzzy_resolution_in_warnings() {
+    let store = seed("t93-inspect-fuzzy").await;
+    let (addr, handle) = spawn(state_on(store, "t93-inspect-fuzzy")).await;
+
+    let hit = get_json(addr, "/api/inspect?focus=middleware").await;
+    assert_eq!(hit["found"], true, "{hit}");
+    let warnings = hit["warnings"].as_array().unwrap();
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.as_str().unwrap_or("").contains("auth middleware")),
+        "the resolved concept must be named: {hit}"
+    );
+
+    // An exact focus stays silent.
+    let exact = get_json(addr, "/api/inspect?focus=auth%20middleware").await;
+    assert_eq!(exact["found"], true, "{exact}");
+    assert!(exact.get("warnings").is_none(), "{exact}");
     handle.abort();
 }

@@ -33,7 +33,7 @@ use crate::cli::caps::CliError;
 use crate::cli::recall::RecallRequest;
 use crate::recall::format::blast_radii;
 use crate::store::{Capabilities, StoreKind};
-use crate::surface::focus::{resolve_focus, Focus};
+use crate::surface::focus::{fuzzy_note, resolve_focus, Focus};
 use crate::types::{CanonizationStatus, Node};
 
 /// Upper bound on the concepts `/api/graph` returns. The tree view marks
@@ -315,7 +315,7 @@ pub(super) async fn api_inspect(
     let found = {
         let g = view.reader.graph.read();
         match resolve_focus(&g, params.focus.trim()) {
-            Focus::Exact(id) | Focus::Fuzzy { id, .. } => match g.node(id) {
+            Focus::Exact(id) => match g.node(id) {
                 Some(Node::Concept(c)) => {
                     let blast = blast_radii(&g).get(&id).copied().unwrap_or(0);
                     let (dependents, truncated) = structural_dependents(&g, id);
@@ -334,6 +334,37 @@ pub(super) async fn api_inspect(
                         dependents,
                         truncated,
                         inputs,
+                        None,
+                        contradicted,
+                    ))
+                }
+                _ => None,
+            },
+            Focus::Fuzzy {
+                id,
+                content,
+                bounded,
+            } => match g.node(id) {
+                Some(Node::Concept(c)) => {
+                    let blast = blast_radii(&g).get(&id).copied().unwrap_or(0);
+                    let (dependents, truncated) = structural_dependents(&g, id);
+                    let inputs = admission_inputs(&g, id, &eval_params, now);
+                    // A fuzzy resolution is stated, never silent — the page
+                    // asked for something the caller did not name.
+                    let note = fuzzy_note(params.focus.trim(), &content, bounded.as_ref());
+                    let contradicted = crate::surface::neighbourhood::contradiction_line(
+                        &g,
+                        id,
+                        state.backends.config.canonization_edge_min_age,
+                        now,
+                    );
+                    Some((
+                        c.clone(),
+                        blast,
+                        dependents,
+                        truncated,
+                        inputs,
+                        Some(note),
                         contradicted,
                     ))
                 }
@@ -345,7 +376,7 @@ pub(super) async fn api_inspect(
         }
     };
     let resp = match found {
-        Some((concept, blast, dependents, truncated, inputs, contradicted)) => {
+        Some((concept, blast, dependents, truncated, inputs, fuzzy, contradicted)) => {
             // T11 surfaces the concept's gate progress by re-running the
             // evaluation's own queries (`blast_radius` + `interaction_span`,
             // both with the eval's min_edge_age, plus the re-promotion
@@ -410,6 +441,19 @@ pub(super) async fn api_inspect(
                     "gate measurements for /api/inspect failed; gate_progress and admission omitted"
                 );
             }
+            // Warnings ride with the focus, in the order the other
+            // inspect surfaces use: resolution first, then the state of
+            // what was resolved. A store fault degrades the gates to a
+            // labelled absence and names itself here, the way the MCP
+            // and CLI verbs name their explanation failure.
+            let mut warnings: Vec<String> = fuzzy.into_iter().collect();
+            warnings.extend(contradicted);
+            if measured.is_err() {
+                warnings.push(format!(
+                    "canonization explanation unavailable: {}",
+                    measured.as_ref().unwrap_err()
+                ));
+            }
             let (gate_progress, gate_progress_omitted) = if canonical {
                 (None, Some("already_canonical"))
             } else {
@@ -442,7 +486,7 @@ pub(super) async fn api_inspect(
                 gate_progress,
                 gate_progress_omitted,
                 admission,
-                warnings: contradicted.into_iter().collect(),
+                warnings,
             }
         }
         None => InspectResponse::missing(params.focus, state.backends.config.promotion_policy),
