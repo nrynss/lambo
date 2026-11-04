@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Highlights
+
+- **Inspect warns where recall warns.** `lambo_inspect`, `lambo inspect`
+  and `/api/inspect` now carry the contradiction warning for a
+  contradicted focus (same ruling and text as recall), plus the
+  fuzzy-resolution note and the store-fault explanation line on the web
+  endpoint. The portal renders warnings in the details panel and on the
+  hero strip. Inspect ledger lines gain `warnings` and `contradicted`
+  facts.
+
 ## 0.9.1 (2026-11-04)
 
 ### Highlights
