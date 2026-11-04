@@ -251,6 +251,40 @@ fn template_contains_the_placeholder_exactly_once() {
     assert_eq!(INIT_SQL_TEMPLATE.matches(VECTOR_DIM_PLACEHOLDER).count(), 1);
 }
 
+/// #222 review: the fresh-vs-stale branch reads "every required table
+/// missing" as a fresh store. That reading is sound only because the shipped
+/// DDL names a non-empty required set — an empty parse (0 == 0) must never
+/// occur, and the `!required.is_empty()` guard in `verify_schema` is its
+/// backstop. The live behaviour is covered by
+/// `empty_database_preflight_is_fresh_not_stale` below; this pins the
+/// precondition on the shipped DDL at both widths the live suite provisions.
+#[test]
+fn shipped_ddl_names_a_nonempty_required_table_set() {
+    use crate::store::tables_in_ddl;
+    for dim in [768_usize, 1024] {
+        let ddl = PostgresDialect::init_sql(dim).expect("init_sql at a live width");
+        let required = tables_in_ddl(&ddl);
+        assert!(
+            !required.is_empty(),
+            "an empty parse must never read as fresh (dim {dim})"
+        );
+        for table in [
+            "sessions",
+            "concepts",
+            "interactions",
+            "edges",
+            "session_leases",
+            "store_meta",
+            "write_intents",
+        ] {
+            assert!(
+                required.contains(&table),
+                "{table} must be required at dim {dim}: {required:?}"
+            );
+        }
+    }
+}
+
 #[test]
 fn dim_above_hnsw_ceiling_is_refused_naming_halfvec() {
     for dim in [2001, 3072] {
@@ -704,6 +738,63 @@ async fn live_schema_width_refuses_a_config_that_disagrees() {
         err.to_ascii_lowercase().contains("live schema") || err.contains("vector(768)"),
         "must name the live schema, not only the pin: {err}"
     );
+}
+
+/// #222, live: the preflight tells a fresh store from a stale one, through
+/// the `information_schema` path. A database with none of the required
+/// tables refuses as fresh ("no schema yet"), never as a store an older
+/// lambo provisioned; a provisioned database missing one table keeps the
+/// older-lambo sentence (an upgrade without re-provisioning). The
+/// Postgres-dialect half of the sqlite
+/// `preflight_tells_a_fresh_store_from_a_stale_one` case — and the live
+/// cover for the `PgStore::verify_schema` fresh branch both pg dialects
+/// share (the Cockroach suite has no fresh-DB case: its cluster is shared
+/// and provisioned, and its CI job is disabled). Runs in CI's
+/// `postgres-live` job by exact name, like the other live tests in this file.
+#[tokio::test]
+#[ignore = "live: requires LAMBO_POSTGRES_DSN against pinned pgvector/pgvector:pg17"]
+async fn empty_database_preflight_is_fresh_not_stale() {
+    let Some(db) = unique_live_db("empty_database_preflight_is_fresh_not_stale").await else {
+        return;
+    };
+    let store = PostgresStore::new(StoreConfig {
+        kind: StoreKind::Postgres,
+        dsn: Some(db.dsn.clone()),
+        path: None,
+        vector_dim: Some(768),
+    })
+    .expect("construct on an empty database is I/O-free");
+    // Fresh: no required table at all.
+    let err = store
+        .preflight_schema()
+        .await
+        .expect_err("an empty database must not pass the preflight")
+        .to_string();
+    assert!(err.contains("no schema yet"), "fresh: {err}");
+    assert!(!err.contains("older lambo"), "fresh, not stale: {err}");
+    assert!(err.contains("lambo provision"), "actionable: {err}");
+    // Stale: provisioned, then one table gone. Nothing references
+    // `write_intents`, so a plain DROP removes exactly one required table.
+    store
+        .init_schema()
+        .await
+        .expect("init_schema on the scratch database");
+    store
+        .preflight_schema()
+        .await
+        .expect("a provisioned scratch database passes");
+    sqlx::query("DROP TABLE write_intents")
+        .execute(&store.pool().await.expect("pool"))
+        .await
+        .expect("drop one table (the older-build shape)");
+    let err = store
+        .preflight_schema()
+        .await
+        .expect_err("a partially provisioned store must not pass")
+        .to_string();
+    assert!(err.contains("older lambo"), "stale: {err}");
+    assert!(!err.contains("no schema yet"), "stale, not fresh: {err}");
+    assert!(err.contains("lambo provision"), "actionable: {err}");
 }
 
 /// Shared-SA live proof: with `LAMBO_POSTGRES_IAM=1`, `GCP_LAMBO_CREDENTIALS` and a

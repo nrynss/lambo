@@ -621,6 +621,11 @@ fn default_embed_dim() -> usize {
     1024
 }
 
+/// The environment variable that overrides `[embedder] dimensions`
+/// (#221: the Matryoshka truncation width sent as the OpenAI `dimensions`
+/// field).
+pub const EMBED_DIMENSIONS_ENV: &str = "LAMBO_EMBED_DIMENSIONS";
+
 /// Overrides `[embedder] canary` (#176).
 pub const CANARY_ENV: &str = "LAMBO_EMBED_CANARY";
 
@@ -632,6 +637,17 @@ pub struct EmbedderConfig {
     pub kind: EmbedderKind,
     #[serde(default = "default_embed_dim")]
     pub dim: usize,
+    /// Optional Matryoshka truncation width, sent as the OpenAI `dimensions`
+    /// field (#221: `qwen3-embedding-4b` serves 2560 by default and 1024 only
+    /// when asked). When set it must equal `dim` — the server truncates to
+    /// `dimensions`, so `dim` is the truncated width. Unset sends no
+    /// `dimensions` at all (the llama.cpp BGE-M3 default path, which must
+    /// stay byte-identical). `bge_m3` (alias `openai`) only; any other kind
+    /// refuses it. `LAMBO_EMBED_DIMENSIONS` overrides it. Not part of the
+    /// embedding contract (it selects the width, like `dim` does, rather
+    /// than the space).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dimensions: Option<usize>,
     /// llama.cpp server base URL, e.g. `http://127.0.0.1:8080`.
     #[serde(default, alias = "url")]
     pub llama_url: Option<String>,
@@ -755,6 +771,7 @@ impl Default for EmbedderConfig {
         Self {
             kind: EmbedderKind::BgeM3,
             dim: 1024,
+            dimensions: None,
             llama_url: None,
             llama_model: None,
             api_key_env: None,
@@ -807,6 +824,16 @@ impl EmbedderConfig {
             self.dim = v
                 .parse()
                 .map_err(|e| EmbedError::Unavailable(format!("invalid LAMBO_EMBED_DIM: {e}")))?;
+        }
+        if let Ok(v) = env::var(EMBED_DIMENSIONS_ENV)
+            && !v.is_empty()
+        {
+            self.dimensions = Some(v.parse().map_err(|e| {
+                EmbedError::Unavailable(format!(
+                    "invalid {EMBED_DIMENSIONS_ENV} {v:?}: {e} (expected the truncation width, \
+                     equal to the embedder dim)"
+                ))
+            })?);
         }
         if let Ok(v) = env::var("LAMBO_LLAMA_EMBED_URL")
             && !v.is_empty()
@@ -1103,6 +1130,14 @@ pub fn build_embedder(cfg: EmbedderConfig) -> Result<Box<dyn Embedder>, EmbedErr
             cfg.kind
         )));
     }
+    // Same rule for the Matryoshka width (#221): no other adapter sends it.
+    if cfg.dimensions.is_some() && cfg.kind != EmbedderKind::BgeM3 {
+        return Err(EmbedError::Unavailable(format!(
+            "embedder.dimensions applies only to kind `bge_m3` (alias `openai`), but kind is \
+             `{}`; remove dimensions or change the kind",
+            cfg.kind
+        )));
+    }
     // Pre-check for a clear rebuild hint (see comment above).
     if !cfg.kind.is_compiled() {
         return Err(missing_feature(cfg.kind));
@@ -1117,6 +1152,13 @@ pub fn build_embedder(cfg: EmbedderConfig) -> Result<Box<dyn Embedder>, EmbedErr
                     .unwrap_or_else(|| "http://127.0.0.1:8080".to_string());
                 let model = cfg.llama_model.unwrap_or_default();
                 let mut embedder = BgeM3LlamaCppEmbedder::new(url.clone(), model, cfg.dim)?;
+                // #221: a configured truncation width is sent as the OpenAI
+                // `dimensions` field (and must equal dim — the adapter
+                // refuses anything else). Unset sends nothing, so the
+                // llama.cpp default path is unchanged.
+                if let Some(dimensions) = cfg.dimensions {
+                    embedder = embedder.with_request_dimensions(dimensions)?;
+                }
                 // Issue #21: the token is read here, at resolve, so a configured
                 // but unset variable stops startup instead of sending no key.
                 // The transport is checked first, so a plaintext non-loopback
@@ -1464,6 +1506,66 @@ mod tests {
         let err = base.overlay_env().unwrap_err().to_string();
         assert!(err.contains("LAMBO_EMBED_KEEP_WARM_SECS"), "{err}");
         env.remove("LAMBO_EMBED_KEEP_WARM_SECS");
+    }
+
+    /// #221: `dimensions` is a real `[embedder]` key (absent = send nothing),
+    /// refused for every kind but `bge_m3`, and must equal `dim` when set.
+    #[test]
+    fn dimensions_toml_key_and_kind_gate() {
+        let cfg: EmbedderConfig = toml::from_str("kind = \"bge_m3\"\n").unwrap();
+        assert_eq!(cfg.dimensions, None, "absent sends nothing");
+        let cfg: EmbedderConfig =
+            toml::from_str("kind = \"bge_m3\"\ndim = 1024\ndimensions = 1024\n").unwrap();
+        assert_eq!(cfg.dimensions, Some(1024));
+        // A typo of the key is refused (deny_unknown_fields).
+        assert!(toml::from_str::<EmbedderConfig>("dimension = 1024\n").is_err());
+        // Only the OpenAI-compatible adapter sends it.
+        let Err(err) = build_embedder(EmbedderConfig {
+            kind: EmbedderKind::Fixture,
+            dimensions: Some(1024),
+            ..Default::default()
+        }) else {
+            panic!("dimensions for a fixture embedder must not build");
+        };
+        let err = err.to_string();
+        assert!(
+            err.contains("dimensions") && err.contains("fixture"),
+            "{err}"
+        );
+        // A truncation width that is not the expected width is refused at
+        // resolve, not as a dimension mismatch on every embed.
+        let Err(err) = build_embedder(EmbedderConfig {
+            kind: EmbedderKind::BgeM3,
+            dim: 2560,
+            dimensions: Some(1024),
+            ..Default::default()
+        }) else {
+            panic!("dimensions != dim must not build");
+        };
+        let err = err.to_string();
+        assert!(err.contains("1024"), "{err}");
+    }
+
+    /// #221: `LAMBO_EMBED_DIMENSIONS` overlays the file value with the usual
+    /// rules (non-empty env wins, empty leaves the base), and garbage is a
+    /// hard error naming the variable.
+    #[test]
+    fn dimensions_env_overlay() {
+        let env = crate::test_util::env_lock();
+        env.remove(EMBED_DIMENSIONS_ENV);
+        let base = EmbedderConfig {
+            dimensions: Some(2560),
+            ..Default::default()
+        };
+        assert_eq!(base.clone().overlay_env().unwrap().dimensions, Some(2560));
+        env.set(EMBED_DIMENSIONS_ENV, "1024");
+        assert_eq!(base.clone().overlay_env().unwrap().dimensions, Some(1024));
+        env.set(EMBED_DIMENSIONS_ENV, "");
+        assert_eq!(base.clone().overlay_env().unwrap().dimensions, Some(2560));
+        env.set(EMBED_DIMENSIONS_ENV, "wide");
+        let err = base.overlay_env().unwrap_err().to_string();
+        assert!(err.contains(EMBED_DIMENSIONS_ENV), "{err}");
+        env.remove(EMBED_DIMENSIONS_ENV);
     }
 
     /// Issue #21: `api_key_env` is a real `[embedder]` key holding a variable

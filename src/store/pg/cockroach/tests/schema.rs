@@ -51,6 +51,35 @@ fn served_migration_converges_event_time_and_human_confirmed() {
     );
 }
 
+/// #222 review: the fresh-vs-stale branch reads "every required table
+/// missing" as a fresh store. That reading is sound only because the shipped
+/// DDL names a non-empty required set — an empty parse (0 == 0) must never
+/// occur, and the `!required.is_empty()` guard in `verify_schema` is its
+/// backstop. The live behaviour is covered by the preflight tests (sqlite in
+/// process, postgres live); this pins the precondition on the shipped DDL.
+#[test]
+fn shipped_ddl_names_a_nonempty_required_table_set() {
+    let required = crate::store::tables_in_ddl(INIT_SQL);
+    assert!(
+        !required.is_empty(),
+        "an empty parse must never read as fresh"
+    );
+    for table in [
+        "sessions",
+        "concepts",
+        "interactions",
+        "edges",
+        "session_leases",
+        "store_meta",
+        "write_intents",
+    ] {
+        assert!(
+            required.contains(&table),
+            "{table} must be required: {required:?}"
+        );
+    }
+}
+
 #[test]
 fn embedding_dim_check() {
     assert!(check_embedding_dim(&[0.0; 1024], 1024).is_ok());

@@ -366,9 +366,11 @@ jobs:
             -- --ignored --nocapture --exact \
             store::pg::postgres::tests::init_schema_at_two_widths_creates_hnsw \
             store::pg::postgres::tests::live_schema_width_refuses_a_config_that_disagrees \
+            store::pg::postgres::tests::empty_database_preflight_is_fresh_not_stale \
             2>&1 | tee postgres-live.log
           grep -q 'test store::pg::postgres::tests::init_schema_at_two_widths_creates_hnsw ... ok' postgres-live.log
           grep -q 'test store::pg::postgres::tests::live_schema_width_refuses_a_config_that_disagrees ... ok' postgres-live.log
+          grep -q 'test store::pg::postgres::tests::empty_database_preflight_is_fresh_not_stale ... ok' postgres-live.log
       - name: Live Postgres B3 (EXPLAIN hnsw, fencing, NULL quarantine)
         run: |
           set -o pipefail

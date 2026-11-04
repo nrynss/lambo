@@ -113,6 +113,9 @@ pub const RESOLVE_ENV_VARS: &[&str] = &[
     crate::store::FALLBACK_DSN_ENV,
     "LAMBO_SQLITE_PATH",
     "LAMBO_EMBED_DIM",
+    // #221: the Matryoshka truncation width, read unconditionally by
+    // `overlay_env` like the dim above.
+    crate::embed::EMBED_DIMENSIONS_ENV,
     "LAMBO_LLAMA_EMBED_URL",
     "LAMBO_LLAMA_MODEL",
     // Issue #21: a variable *name* (`embedder.api_key_env`). The variable it
@@ -428,6 +431,10 @@ pub fn resolve_backends(file: LamboFile) -> Result<ResolvedBackends, LamboError>
     check_vector_compatibility(store.vector_dimensions(), embed_dim)?;
 
     let embedding = embedding_contract(&embedder_cfg, embedder.as_ref());
+    // #221: an unmeasured contract recalls on BGE-M3-shaped constants over a
+    // foreign scale. Warn once here, at resolve, so every full-resolve
+    // process (`serve` startup included) says so — not per recall.
+    crate::embed::calibration::warn_if_uncalibrated(embedder_cfg.calibration, &embedding);
 
     Ok(ResolvedBackends {
         store,
@@ -925,6 +932,13 @@ mod tests {
                 value: "768",
                 file: MEMORY,
                 resolved: Some(|p| format!("{:?}", load(p).embedder.dim)),
+            },
+            Override {
+                // #221: the Matryoshka truncation width, `None` unless set.
+                var: crate::embed::EMBED_DIMENSIONS_ENV,
+                value: "768",
+                file: MEMORY,
+                resolved: Some(|p| format!("{:?}", load(p).embedder.dimensions)),
             },
             Override {
                 var: "LAMBO_LLAMA_EMBED_URL",

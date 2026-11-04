@@ -10,7 +10,8 @@ use super::codec::db_err;
 use super::SqliteStore;
 use crate::store::vector::{decode_legacy_text_blob, SQLITE_VECTOR_CODEC};
 use crate::store::{
-    columns_in_ddl, tables_in_ddl, unprovisioned_column_err, unprovisioned_store_err,
+    columns_in_ddl, tables_in_ddl, unprovisioned_column_err, unprovisioned_empty_store_err,
+    unprovisioned_store_err,
 };
 use crate::types::StoreError;
 
@@ -295,9 +296,18 @@ impl SqliteStore {
                 .map_err(|e| db_err("preflight_schema: list tables", e))?;
         let required = tables_in_ddl(INIT_SQL);
         let missing_tables: Vec<&str> = required
-            .into_iter()
+            .iter()
+            .copied()
             .filter(|t| !present.iter().any(|p| p == t))
             .collect();
+        if !required.is_empty() && missing_tables.len() == required.len() {
+            // #222: none of the required tables exists — a fresh or empty
+            // database (`lambo serve` on a brand-new path), not a store an
+            // older lambo provisioned. The `!required.is_empty()` guard keeps
+            // a degenerate empty parse (0 == 0) from refusing as fresh. The partial-schema sentence below
+            // would blame a version mismatch that never happened.
+            return Err(unprovisioned_empty_store_err("sqlite"));
+        }
         if !missing_tables.is_empty() {
             return Err(unprovisioned_store_err("sqlite", &missing_tables));
         }
