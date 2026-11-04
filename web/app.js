@@ -785,6 +785,14 @@
       ? "concept depends on this right now"
       : "concepts depend on this right now";
 
+    // #226: contradiction warnings /api/inspect carries beside the focus.
+    var warns = $("details-warnings");
+    clear(warns);
+    (d.warnings || []).forEach(function (w) {
+      warns.appendChild(el("div", "details-warning", w));
+    });
+    show(warns, (d.warnings || []).length > 0);
+
     var deps = d.dependents || [];
     $("details-deps-label").textContent = "Directly connected (" + deps.length + ")";
     var wrap = $("details-deps");

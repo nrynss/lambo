@@ -320,7 +320,22 @@ pub(super) async fn api_inspect(
                     let blast = blast_radii(&g).get(&id).copied().unwrap_or(0);
                     let (dependents, truncated) = structural_dependents(&g, id);
                     let inputs = admission_inputs(&g, id, &eval_params, now);
-                    Some((c.clone(), blast, dependents, truncated, inputs))
+                    // #226: the contradiction warning for a contradicted
+                    // focus, by the same ruling recall renders.
+                    let contradicted = crate::surface::neighbourhood::contradiction_line(
+                        &g,
+                        id,
+                        state.backends.config.canonization_edge_min_age,
+                        now,
+                    );
+                    Some((
+                        c.clone(),
+                        blast,
+                        dependents,
+                        truncated,
+                        inputs,
+                        contradicted,
+                    ))
                 }
                 _ => None,
             },
@@ -330,7 +345,7 @@ pub(super) async fn api_inspect(
         }
     };
     let resp = match found {
-        Some((concept, blast, dependents, truncated, inputs)) => {
+        Some((concept, blast, dependents, truncated, inputs, contradicted)) => {
             // T11 surfaces the concept's gate progress by re-running the
             // evaluation's own queries (`blast_radius` + `interaction_span`,
             // both with the eval's min_edge_age, plus the re-promotion
@@ -427,6 +442,7 @@ pub(super) async fn api_inspect(
                 gate_progress,
                 gate_progress_omitted,
                 admission,
+                warnings: contradicted.into_iter().collect(),
             }
         }
         None => InspectResponse::missing(params.focus, state.backends.config.promotion_policy),
