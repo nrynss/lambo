@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.9.1 (2026-11-04)
+
+### Highlights
+
+- **Qwen recall fixed by fusion, not constants (#221, reopened).**
+  0.9.0's calibration rows changed nothing on the reported case:
+  phase 1 takes `max(keyword, recent, vector)`, so the keyword leg
+  decided every fused value and `builtin`/`off` were identical. Qwen
+  contracts now default to RRF at #173's existing defaults when
+  `[fusion]` is unset and calibration is `builtin` — no new constants,
+  BGE-M3/EG2 unchanged. Measured on the #190 set: dev nDCG
+  0.7905→0.8521 (vocab-mismatch 0.446→0.699), held-out 0.8403→0.8685
+  (0.672→0.802). The exact 8-concept session ranks the lesson 1st at
+  both widths (was 2nd at 1.77 behind 2.92).
+- **Inspect warns on a contradicted focus (#226).** `lambo_inspect`
+  fills `warnings` and `lambo inspect` appends the line, by the same
+  `contradiction_at` ruling and text recall renders. The web
+  `/api/inspect` page is unchanged (tracked follow-up).
+
+### Upgrading from 0.9.0
+
+You don't need to run `lambo provision`: there is no schema change.
+- **Qwen-backed recall reorders.** Only Qwen contracts change, and only
+  when `[fusion]` is unset: RRF replaces max. Set `[fusion]` explicitly
+  (or `calibration = "off"`, which keeps max with uncalibrated
+  constants) to hold the old order.
+- BGE-M3 and EmbeddingGemma 2 contracts recall exactly as before.
+
 ## 0.9.0 (2026-11-04)
 
 ### Highlights
