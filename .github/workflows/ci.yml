@@ -12,95 +12,49 @@ name: ci
 # (annotated tags need a second deref through /git/tags/<sha>; use
 #  .../git/ref/heads/<branch> for a branch-versioned action)
 
-# Path filter: the dev-diary is written on every task handoff and adversarial
-# review, and none of it can change a build result. CI runs only for inputs the
-# compiler or the test binaries actually read.
-#
-# NOT just `src/**/*.rs` — three non-Rust trees are real compile/test inputs and
-# MUST stay in this list:
-#   * migrations/**       `include_str!` into store/pg/{cockroach,postgres}.rs + store/sqlite.rs
-#   * fixtures/**         `include_str!` (mutations-batch.json) and golden files
-#                         read via CARGO_MANIFEST_DIR at test time
-#   * lambo.example.toml  `include_str!` in config.rs — it is a tested contract,
-#                         not documentation, despite the name
-#   * examples/**         compiled by every --all-targets row, and included by
-#                         tests via #[path] (tests/eval_set.rs,
-#                         tests/suspected_measure.rs, tests/replacement_measure.rs)
-#   * evidence/issue-198-trigger/cosines-bge-m3-self.json
-#                         read via CARGO_MANIFEST_DIR by tests/suspected_measure.rs
-#                         and tests/replacement_measure.rs
-#                         (the rest of evidence/** is not a test input)
-# Adding a new include_str!/CARGO_MANIFEST_DIR read outside these paths means
-# adding that path here, or CI goes blind to it.
-#
-# Deliberately excluded: dev-diary/**, README.md, AGENTS.md, LICENSE, spikes/**
-# (standalone crates, not workspace members — the root package has no
-# [workspace], so `cargo test --all` never builds them).
-#
-# NOT wholly excluded: docs/** and scripts/** are otherwise, but the J5
-# mirror-drift gate makes four of the doc files and one script real CI inputs:
-#   * the four mirror mdx files below (docs/reference/{cli,mcp}.mdx and
-#     site/src/content/docs/{cli,mcp}.mdx) — hand-maintained prose pairs that must
-#     stay in sync, checked by the docs-mirror job
-#   * scripts/docs/check-mirror-drift.sh — the script that job runs
-# Each is listed individually below so a mirror-only push still triggers CI.
-# Everything else under docs/ and scripts/ stays excluded (not executed by CI).
-#
-# The two lists below MUST be kept identical. GitHub Actions does not support
-# YAML anchors/aliases in workflow files, so this cannot be factored out.
+# Every event gets a lightweight classifier. A documentation-only success must
+# never qualify as full Rust validation for a release; see the full-ci job.
 on:
   push:
-    # `**` is required: GitHub branch globs do not let `*` cross `/`, and real
-    # phase branches are `phase/<slug>` (XP-1 — `'phase-*'` matched nothing).
-    # lambo-for-mooshik: branch work for the Mooshik integration (see
-    # dev-diary/lambo-for-mooshik/README.md). Jobs that need infrastructure this
-    # branch does not touch are gated off below by `if:` rather than deleted, so
-    # merging the branch restores full CI on main with no manual step.
     branches: [main, master, 'phase/**', 'lambo-for-mooshik']
-    paths:
-      - 'src/**'
-      - 'tests/**'
-      - 'migrations/**'
-      - 'fixtures/**'
-      - 'examples/**'
-      - 'evidence/issue-198-trigger/cosines-bge-m3-self.json'
-      - 'evidence/issue-221/repro-8concept-qwen3-4b-2560.json'
-      - 'lambo.example.toml'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'rust-toolchain.toml'
-      - 'docs/reference/cli.mdx'
-      - 'docs/reference/mcp.mdx'
-      - 'site/src/content/docs/cli.mdx'
-      - 'site/src/content/docs/mcp.mdx'
-      - 'scripts/docs/check-mirror-drift.sh'
-      - '.github/workflows/ci.yml'
   pull_request:
-    paths:
-      - 'src/**'
-      - 'tests/**'
-      - 'migrations/**'
-      - 'fixtures/**'
-      - 'examples/**'
-      - 'evidence/issue-198-trigger/cosines-bge-m3-self.json'
-      - 'evidence/issue-221/repro-8concept-qwen3-4b-2560.json'
-      - 'lambo.example.toml'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'rust-toolchain.toml'
-      - 'docs/reference/cli.mdx'
-      - 'docs/reference/mcp.mdx'
-      - 'site/src/content/docs/cli.mdx'
-      - 'site/src/content/docs/mcp.mdx'
-      - 'scripts/docs/check-mirror-drift.sh'
-      - '.github/workflows/ci.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Superseded PR commits may stop. Main and manual runs each get their own
+# group so every exact SHA can finish validation and become release-eligible.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      rust: ${{ steps.classify.outputs.rust }}
+      mirror: ${{ steps.classify.outputs.mirror }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # PRs diff their event base against the checked-out merge commit;
+          # pushes diff github.event.before against the checked-out commit.
+          fetch-depth: 0
+      - name: CI classifier and release gate tests
+        run: python3 -m unittest discover -s scripts/ci -p 'test_*.py'
+      - name: Classify changed inputs
+        id: classify
+        run: python3 scripts/ci/classify_changes.py
+
   check:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -117,24 +71,21 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets -- -D warnings
 
       - name: test
         # fixtures is deliberately NOT in `default` (v020-R1-P3-3 — test-only
         # profile); enable it explicitly so the fixtures-gated behavior tests
         # (canon goldens, recall goldens, GC, stage1-3, daemon loops,
         # tests/rebuild_session.rs) keep running on the default path.
-        run: cargo test --all --features fixtures
+        run: cargo test --locked --all --features fixtures
 
-  # docs-mirror (J5): the `--ledger`/transport prose is hand-maintained in four
-  # copies — docs/reference/{cli,mcp}.mdx and site/src/content/docs/{cli,mcp}.mdx —
-  # that must stay in sync. They are deliberately NOT byte-identical files (the
-  # site copies carry Astro imports, a `/lambo/` link prefix, and a site-only
-  # mcp.mdx section), so this compares each pair's canonical shared-prose form
-  # after normalising those deltas — see scripts/docs/check-mirror-drift.sh.
-  # The four mdx paths and that script are listed in the path filter above so a
-  # mirror-only push still triggers CI. Landed BEFORE the J5 prose edits, per §J5.
+  # All four mirrored page pairs are classified independently of Rust inputs.
+  # They differ intentionally in imports, link prefixes and site-only sections;
+  # the script checks their canonical shared prose.
   docs-mirror:
+    needs: changes
+    if: needs.changes.outputs.mirror == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -145,64 +96,34 @@ jobs:
   # never compiles sqlite/cockroach. Every non-default combo that must stay
   # green gets a row here; all inherit RUSTFLAGS="-D warnings".
   feature-matrix:
+    name: feature-matrix (${{ matrix.name }})
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         include:
-          # sqlite behavior tests (T3.6 matrix) on default features + sqlite
-          # + fixtures. fixtures is test-only, not in `default`; the sqlite
-          # fixtures tests (seed contract, mutations-batch round-trip,
-          # structural agreement matrix) need it.
+          # One full SQLite suite also proves the vector leg ran, without
+          # rebuilding/rerunning its subset on a separate runner. The named
+          # outcome and every vector result must be ok, never ignored.
           - name: sqlite
-            command: cargo test --features store-sqlite,fixtures
-          # sqlite WITHOUT store-memory: the ungated MemoryStore import in the
-          # test module (CON-4) must never regress.
-          - name: sqlite-minimal
-            command: cargo test --no-default-features --features store-sqlite
-          # F (issue #5) — semantic recall on the default local store. Its own row
-          # rather than trusting the `sqlite` row above, so a regression in the vector
-          # leg is a named red row instead of one line in an 800-test log: without it
-          # SQLite silently degrades to keyword-only and "memory recall" becomes a
-          # property of the cloud tier.
-          #
-          # The guards after the run are the anti-vacuity checks the acceptance
-          # criterion needs. A name filter that matches nothing exits 0, so a rename
-          # would otherwise leave this row green while testing nothing. The test they
-          # name proves the vector leg FIRED — a recording wrapper around the real
-          # adapter captures every answer SQLite returned — rather than inferring a
-          # vector hit from where a node landed in a rank.
-          #
-          # F-R1-6: the guards assert the RUN OUTCOME, not just the name. `--list`
-          # prints ignored tests indistinguishably from live ones, so a `--list | grep`
-          # alone is satisfied by an `#[ignore]`d test — green, and testing nothing.
-          # Grepping the run output for the pinned test's `... ok` line closes that:
-          # an ignored test prints `... ignored`, a renamed one prints nothing. The
-          # `0 failed; 0 ignored` guard extends that to every other vector test in the
-          # filter without pinning a count, so adding a vector test never needs a CI
-          # edit (a count would rot; this does not).
-          #
-          # `pipefail` is set explicitly: the default runner shell is `bash -e`, where
-          # a `cargo test` failure piped into `tee` would be masked by tee's exit 0.
-          #
-          # The clippy invocation is here because the `check` job lints default
-          # features only, so ~1250 lines of vector code shipped unlinted (F-R1-7).
-          - name: sqlite-vectors
             command: |
               set -o pipefail
-              cargo clippy --all-targets --features store-sqlite,fixtures -- -D warnings
-              cargo test --features store-sqlite,fixtures --lib store::sqlite::tests::vector \
-                2>&1 | tee vector-run.log
-              grep -q 'test store::sqlite::tests::vector_e2e::sqlite_vector_leg_fires_on_an_organically_derived_concept ... ok' vector-run.log
-              grep -qE 'test result: ok\. [0-9]+ passed; 0 failed; 0 ignored' vector-run.log
-              # Not `grep -q`: it exits at the first match, and the test binary,
-              # still writing the rest of the list, dies of a broken pipe that
-              # `pipefail` turns into a failure once enough tests sort after it.
-              cargo test --features store-sqlite,fixtures --lib -- --list \
-                | grep 'store::sqlite::tests::vector_e2e::sqlite_vector_leg_fires_on_an_organically_derived_concept' > /dev/null
+              cargo clippy --locked --all-targets --features store-sqlite,fixtures -- -D warnings
+              cargo test --locked --features store-sqlite,fixtures 2>&1 | tee sqlite-run.log
+              grep -qF 'test store::sqlite::tests::vector_e2e::sqlite_vector_leg_fires_on_an_organically_derived_concept ... ok' sqlite-run.log
+              if grep -E '^test store::sqlite::tests::vector[^ ]* \.\.\.' sqlite-run.log | grep -vE ' \.\.\. ok$'; then
+                echo 'A SQLite vector test did not run successfully' >&2
+                exit 1
+              fi
+          # Keep the independent configuration WITHOUT store-memory: broad
+          # feature builds cannot catch accidental imports of MemoryStore.
+          - name: sqlite-minimal
+            command: cargo test --locked --no-default-features --features store-sqlite
           # No adapters at all.
           - name: minimal
-            command: cargo check --no-default-features
+            command: cargo check --locked --no-default-features
           # cockroach without fixtures: compiles AND runs the test module
           # (dead-code-clean under -D warnings); live tests are #[ignore]d.
           # DISABLED 2026-10-06: the CockroachDB CI rows are off by decision.
@@ -225,9 +146,9 @@ jobs:
           - name: postgres
             command: |
               set -o pipefail
-              cargo clippy --all-targets --no-default-features --features store-postgres -- -D warnings
-              cargo clippy --all-targets --no-default-features --features store-postgres,store-sqlite,fixtures -- -D warnings
-              cargo test --no-default-features --features store-postgres
+              cargo clippy --locked --all-targets --no-default-features --features store-postgres -- -D warnings
+              cargo clippy --locked --all-targets --no-default-features --features store-postgres,store-sqlite,fixtures -- -D warnings
+              cargo test --locked --no-default-features --features store-postgres
           # K2 — the in-crate candle BGE-M3 embedder compiles and its
           # weightless unit tests pass on the default runner. The base feature
           # is CPU-capable candle only: no accelerator Cargo features, no
@@ -237,7 +158,7 @@ jobs:
           # into `check` because the default build must not pay candle's
           # compile cost; a named red row beats one line in an 800-test log.
           - name: candle
-            command: cargo test --features embed-candle
+            command: cargo test --locked --features embed-candle
           # A (embed-gemini) — the Vertex Gemini adapter compiles and its offline
           # unit tests (OAuth mint/exchange, embedContent, CON-7/CON-2, normalize,
           # dim guard) run on the default runner with no network and no
@@ -249,28 +170,28 @@ jobs:
           - name: gemini
             command: |
               set -o pipefail
-              cargo clippy --all-targets --features embed-gemini -- -D warnings
-              cargo test --features embed-gemini
+              cargo clippy --locked --all-targets --features embed-gemini -- -D warnings
+              cargo test --locked --features embed-gemini
           # #18: the Elasticsearch recall tier, against the in-process fake
           # index (no cluster). Lints it with and without the default store,
           # then runs the library with it compiled in.
           - name: recall-elastic
             command: |
               set -o pipefail
-              cargo clippy --all-targets --features recall-elastic,store-sqlite,fixtures -- -D warnings
-              cargo clippy --all-targets --no-default-features --features recall-elastic -- -D warnings
-              cargo test --features recall-elastic,store-sqlite,fixtures
+              cargo clippy --locked --all-targets --features recall-elastic,store-sqlite,fixtures -- -D warnings
+              cargo clippy --locked --all-targets --no-default-features --features recall-elastic -- -D warnings
+              cargo test --locked --features recall-elastic,store-sqlite,fixtures
           # #22 PR 5: the EmbeddingGemma 2 embedder over llama.cpp, against
           # httpmock only (no model, no server). The live test stays
           # `#[ignore]`d and operator-run (evidence/issue-22-eg2/).
           - name: embed-eg2
             command: |
               set -o pipefail
-              cargo clippy --all-targets --features embed-eg2 -- -D warnings
-              cargo test --features embed-eg2
+              cargo clippy --locked --all-targets --features embed-eg2 -- -D warnings
+              cargo test --locked --features embed-eg2
           # Ship profile (cockroach + memory + embedders + fixtures).
           - name: demo
-            command: cargo check --features demo
+            command: cargo check --locked --features demo
           # F-R2-2: the row that compiles COCKROACH TEST CODE together with
           # `fixtures`. No other row does: `demo` above is `cargo check` (no test
           # targets) and `cockroach` is `--no-default-features --features
@@ -282,9 +203,9 @@ jobs:
           # is what makes this row see them, and `ship,fixtures` is the widest
           # adapter set in the tree (cockroach + memory + sqlite + embedders), so
           # it also lints the two SQL adapters against each other. Same argument
-          # F-R1-7 made for `store-sqlite,fixtures` in the `sqlite-vectors` row.
+          # F-R1-7 made for `store-sqlite,fixtures` in the `sqlite` row.
           - name: ship-fixtures
-            command: cargo clippy --all-targets --features ship,fixtures -- -D warnings
+            command: cargo clippy --locked --all-targets --features ship,fixtures -- -D warnings
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
@@ -295,6 +216,8 @@ jobs:
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: ${{ matrix.name }}
 
       - name: ${{ matrix.name }}
         run: ${{ matrix.command }}
@@ -318,6 +241,8 @@ jobs:
   # named rather than hidden: a change made on a Mac can break the CUDA cfg
   # arms and CI will stay green until that rig next builds.
   candle-metal:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -325,7 +250,7 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: candle metal (compile only, no weights, no network)
-        run: cargo check --all-targets --features embed-candle-metal
+        run: cargo check --locked --all-targets --features embed-candle-metal
         env:
           RUSTFLAGS: -D warnings
 
@@ -334,6 +259,8 @@ jobs:
   # the same image local development runs. See B-postgres-store.md "Where B
   # is developed".
   postgres-live:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -364,7 +291,7 @@ jobs:
       - name: Live Postgres init (hnsw from init, two widths)
         run: |
           set -o pipefail
-          cargo test --no-default-features --features store-postgres --lib \
+          cargo test --locked --no-default-features --features store-postgres --lib \
             -- --ignored --nocapture --exact \
             store::pg::postgres::tests::init_schema_at_two_widths_creates_hnsw \
             store::pg::postgres::tests::live_schema_width_refuses_a_config_that_disagrees \
@@ -376,7 +303,7 @@ jobs:
       - name: Live Postgres B3 (EXPLAIN hnsw, fencing, NULL quarantine)
         run: |
           set -o pipefail
-          cargo test --no-default-features --features store-postgres --lib \
+          cargo test --locked --no-default-features --features store-postgres --lib \
             -- --ignored --nocapture --exact \
             store::pg::postgres::tests::explain_recall_uses_hnsw \
             store::pg::postgres::tests::fencing_refuses_stale_write_and_upserts_replay \
@@ -397,7 +324,7 @@ jobs:
       - name: Live Postgres coverage decode + Stage-2 hop
         run: |
           set -o pipefail
-          cargo test --no-default-features --features store-postgres --lib \
+          cargo test --locked --no-default-features --features store-postgres --lib \
             -- --ignored --nocapture --exact \
             store::pg::postgres::tests::interaction_span_coverage_decodes_on_both_arms \
             store::pg::postgres::tests::canonization_cycle_makes_the_stage2_hop_on_postgres \
@@ -411,7 +338,7 @@ jobs:
       - name: Live Postgres access counts (narrow update, reattach)
         run: |
           set -o pipefail
-          cargo test --no-default-features --features store-postgres --lib \
+          cargo test --locked --no-default-features --features store-postgres --lib \
             -- --ignored --nocapture --exact \
             store::pg::postgres::tests::access_counts_round_trip_through_the_narrow_update_and_survive_reattach \
             2>&1 | tee postgres-access.log
@@ -425,7 +352,7 @@ jobs:
       - name: Live Postgres session erasure and release fencing
         run: |
           set -o pipefail
-          cargo test --no-default-features --features store-postgres --lib \
+          cargo test --locked --no-default-features --features store-postgres --lib \
             -- --ignored --nocapture --exact \
             store::pg::erase::postgres_erases_a_session \
             store::pg::erase::postgres_erase_after_a_release_fences_every_token \
@@ -438,7 +365,7 @@ jobs:
       - name: Live Postgres H3 recall parity
         run: |
           set -o pipefail
-          cargo test --no-default-features --features store-postgres,store-sqlite,fixtures --lib \
+          cargo test --locked --no-default-features --features store-postgres,store-sqlite,fixtures --lib \
             store::sqlite::tests::h1_cross_store_parity::h3_postgres_recall_parity \
             -- --ignored --nocapture --exact \
             2>&1 | tee postgres-h3.log
@@ -452,7 +379,7 @@ jobs:
       - name: Live Postgres H3 hnsw envelope at scale
         run: |
           set -o pipefail
-          cargo test --no-default-features --features store-postgres,store-sqlite,fixtures --lib \
+          cargo test --locked --no-default-features --features store-postgres,store-sqlite,fixtures --lib \
             store::sqlite::tests::h1_cross_store_parity::h3_postgres_hnsw_envelope_at_scale \
             -- --ignored --nocapture --exact \
             2>&1 | tee postgres-h3-scale.log
@@ -462,7 +389,7 @@ jobs:
       - name: Live Postgres embedding source round trip
         run: |
           set -o pipefail
-          cargo test --no-default-features --features store-postgres --lib \
+          cargo test --locked --no-default-features --features store-postgres --lib \
             -- --ignored --nocapture --exact \
             store::pg::embedding_source_live::postgres_round_trips_the_embedding_source \
             2>&1 | tee postgres-embedding-source.log
@@ -472,7 +399,7 @@ jobs:
       - name: Live Postgres canonical-key re-key
         run: |
           set -o pipefail
-          cargo test --no-default-features --features store-postgres --lib \
+          cargo test --locked --no-default-features --features store-postgres --lib \
             -- --ignored --nocapture --exact \
             store::pg::rekey::postgres_rekeys_identifier_concepts \
             2>&1 | tee postgres-rekey.log
@@ -482,7 +409,7 @@ jobs:
       - name: Live Postgres merge freshness (unflushed paraphrase)
         run: |
           set -o pipefail
-          cargo test --no-default-features --features store-postgres --lib \
+          cargo test --locked --no-default-features --features store-postgres --lib \
             -- --ignored --nocapture --exact \
             store::pg::merge_freshness::postgres_holder_merges_an_unflushed_paraphrase \
             2>&1 | tee postgres-merge-freshness.log
@@ -518,4 +445,21 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Live CockroachDB tests (--ignored)
-        run: cargo test --features store-cockroach,store-memory,fixtures --lib -- --ignored
+        run: cargo test --locked --features store-cockroach,store-memory,fixtures --lib -- --ignored
+
+  # Release checks this exact job as well as the workflow conclusion. Skipped
+  # Rust jobs cannot earn a full-ci success; failed/cancelled dependencies fail
+  # the aggregate even though always() allows this job to report the result.
+  full-ci:
+    needs: [changes, check, feature-matrix, candle-metal, postgres-live]
+    if: ${{ always() && needs.changes.outputs.rust == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every full validation job to succeed
+        run: |
+          test '${{ needs.changes.result }}' = success
+          test '${{ needs.check.result }}' = success
+          test '${{ needs.feature-matrix.result }}' = success
+          test '${{ needs.candle-metal.result }}' = success
+          test '${{ needs.postgres-live.result }}' = success
