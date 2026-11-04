@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.9.0 (2026-11-04)
+
+### Highlights
+
+- **Qwen3 Embedding 4B calibration (#221).** Measured rows for both
+  Qwen widths (2560 full width and the 1024 Matryoshka truncation),
+  by the #87 quantile-match method on the #190 set
+  (`evidence/issue-221/`). Qwen contracts no longer recall on
+  BGE-M3-shaped fallback constants: in the live probe the paging lesson
+  ranks 1st (3.37 vs 1.84) with the unrelated observation 3rd.
+- **Uncalibrated contracts warn (#221).** `lambo serve` logs once at
+  startup when the embedding contract has no calibration row, and
+  `lambo stats` prints a `calibration=` line, so an uncalibrated ranking
+  is never silent.
+- **The OpenAI adapter sends `dimensions` (#221).** `[embedder]
+  dimensions` (`LAMBO_EMBED_DIMENSIONS`) is sent as the OpenAI
+  `dimensions` field when set (and must equal `dim`); unset sends
+  nothing, so the llama.cpp BGE-M3 path is byte-identical. This is what
+  makes the 1024 truncation measurable on Matryoshka models.
+- **Fresh stores are named as fresh (#222).** `serve` (and every other
+  attach) against a new or empty SQLite/Postgres store now refuses with
+  "no schema yet — run `lambo provision`", instead of blaming an older
+  lambo. The older-lambo wording is kept for stores that have some
+  tables but not all.
+
+### Upgrading from 0.8.0
+
+You don't need to run `lambo provision`: there is no schema change.
+- **Qwen-backed stores recall differently.** Contracts on
+  `qwen3-embedding-4b` previously fell back to the BGE-M3-shaped
+  defaults; they now use their measured constants (recent 0.41/0.42,
+  layer floor 0.59/0.60, merge 0.89/0.90). Rankings change where the
+  vector leg was under-weighted before — that is the fix.
+  `[embedder] calibration = "off"` restores the previous values.
+- BGE-M3 and EmbeddingGemma 2 contracts are unchanged.
+
 ## 0.8.0 (2026-10-28)
 
 ### Highlights
