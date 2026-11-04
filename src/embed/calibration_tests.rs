@@ -389,6 +389,77 @@ fn qwen3_embedding_4b_rows_match_their_evidence() {
     }
 }
 
+/// #221 follow-up (fusion): the unset-`[fusion]` default is RRF exactly for
+/// the Qwen3 Embedding 4B contracts under `builtin` calibration — the space
+/// whose narrow cosine band makes max-merge keyword-only — and `max`
+/// everywhere else. `calibration = "off"` keeps `max` even on Qwen (legacy
+/// behavior exactly); an explicit `[fusion]` table is applied by resolve and
+/// never reaches this default.
+#[test]
+fn unset_fusion_defaults_to_rrf_only_for_qwen_under_builtin() {
+    use crate::recall::fusion::{FusionKind, RecallFusion};
+    let max = RecallFusion::default();
+    assert_eq!(max.kind, FusionKind::Max);
+    for dim in [2560, 1024] {
+        let qwen = EmbeddingContract {
+            kind: "bge_m3".into(),
+            model: Some("qwen3-embedding-4b".into()),
+            dim,
+        };
+        let scoped = default_fusion(CalibrationMode::Builtin, &qwen);
+        assert_eq!(scoped.kind, FusionKind::Rrf, "dim {dim}");
+        // #173's defaults, not new numbers: k and the leg weights ship
+        // unchanged from the measured opt-in.
+        assert_eq!(scoped.k, crate::recall::fusion::DEFAULT_RRF_K, "dim {dim}");
+        assert_eq!(
+            scoped.keyword_weight,
+            crate::recall::fusion::DEFAULT_LEG_WEIGHT,
+            "dim {dim}"
+        );
+        assert_eq!(
+            scoped.vector_weight,
+            crate::recall::fusion::DEFAULT_LEG_WEIGHT,
+            "dim {dim}"
+        );
+        assert_eq!(
+            scoped.recent_weight,
+            crate::recall::fusion::DEFAULT_RECENT_WEIGHT,
+            "dim {dim}"
+        );
+        scoped.validate().expect("the scoped default validates");
+        assert_eq!(
+            default_fusion(CalibrationMode::Off, &qwen),
+            max,
+            "calibration off keeps max, dim {dim}"
+        );
+    }
+    // A neighbouring width is a different space: it keeps max.
+    let narrow = EmbeddingContract {
+        kind: "bge_m3".into(),
+        model: Some("qwen3-embedding-4b".into()),
+        dim: 512,
+    };
+    assert_eq!(
+        default_fusion(CalibrationMode::Builtin, &narrow),
+        max,
+        "unmeasured width keeps max"
+    );
+    // BGE-M3 (the reference) and EmbeddingGemma 2 (its own row) keep max.
+    for c in [
+        EmbeddingContract {
+            kind: "bge_m3".into(),
+            model: None,
+            dim: 1024,
+        },
+        eg2(),
+    ] {
+        assert_eq!(
+            default_fusion(CalibrationMode::Builtin, &c),
+            max,
+            "{c:?} keeps max"
+        );
+    }
+}
 /// #221 ask 2: the uncalibrated warning fires exactly when it should — a
 /// contract with no row that is not the reference, under `builtin` — and
 /// stays silent for a row, the reference, and `calibration = "off"`. The

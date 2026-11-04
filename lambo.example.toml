@@ -282,6 +282,27 @@ url = "http://127.0.0.1:8080"
 # skip_redundant = true
 # similar_signals = false
 
+# --- Phase-1 leg fusion (issue #173, #221) -----------------------------------
+# Optional; omit the whole section for the contract default. Recall combines
+# the keyword (BM25), recent-interaction and vector legs into one relevance:
+# max keeps the highest raw leg score, rrf is reciprocal rank fusion over the
+# legs' own ranks (k flattens rank gaps as it grows; the keyword/vector/recent
+# weights default to 1.0/1.0/0.3). An explicit table always wins.
+#
+# The default is max — except on a Qwen3-Embedding-4B contract under builtin
+# calibration, which defaults to rrf at the defaults below (#221: Qwen's
+# narrow cosine band lets BM25 decide every max-merge, so the vector leg
+# contributes nothing; evidence/issue-221/). BGE-M3 and EmbeddingGemma 2
+# keep max. calibration = "off" keeps max everywhere. Set kind = "max" on a
+# Qwen contract to keep max there too.
+#
+# [fusion]
+# kind = "rrf"
+# k = 3.0
+# keyword_weight = 1.0
+# vector_weight = 1.0
+# recent_weight = 0.3
+
 # --- Recall tier (issue #18, feature recall-elastic) -------------------------
 # Optional. An Elasticsearch index beside the durable [store] that serves the
 # vector leg of recall. The store above stays the source of truth: leases,

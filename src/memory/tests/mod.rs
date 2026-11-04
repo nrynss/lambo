@@ -36,6 +36,8 @@ mod citations;
 mod context_limit;
 mod contradiction;
 mod image;
+#[cfg(feature = "store-sqlite")]
+mod issue221_fusion;
 mod layered;
 mod leases;
 #[cfg(all(feature = "embed-eg2", feature = "store-sqlite"))]
