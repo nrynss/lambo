@@ -321,6 +321,42 @@ fn process_config(
     Ok(config)
 }
 
+/// #221: the contract-scoped fusion default.
+///
+/// When the file sets no `[fusion]` table (`fusion_unset`), the process
+/// recalls with [`crate::embed::calibration::default_fusion`] for its
+/// resolved contract — RRF for Qwen3-Embedding-4B, `max` for everything
+/// else — instead of the `max` [`process_config`] set. An explicit `[fusion]`
+/// table always wins (`fusion_unset` false). Logged when the default moves,
+/// once per process, like the uncalibrated-contract warning.
+fn apply_contract_fusion_default(
+    config: &mut crate::Config,
+    fusion_unset: bool,
+    mode: crate::embed::calibration::CalibrationMode,
+    contract: &crate::types::EmbeddingContract,
+) {
+    if !fusion_unset {
+        return;
+    }
+    let scoped = crate::embed::calibration::default_fusion(mode, contract);
+    if scoped.kind != config.recall_fusion.kind {
+        tracing::info!(
+            target: "lambo::config",
+            embedder = %contract.kind,
+            model = contract.model.as_deref().unwrap_or("(default)"),
+            dim = contract.dim,
+            "no [fusion] table: this embedding contract recalls with rrf \
+             (k = {}, keyword = {}, vector = {}, recent = {}) instead of the max \
+             default (evidence: evidence/issue-221/); set [fusion] kind = \"max\" to keep max",
+            scoped.k,
+            scoped.keyword_weight,
+            scoped.vector_weight,
+            scoped.recent_weight,
+        );
+    }
+    config.recall_fusion = scoped;
+}
+
 /// The embedding contract a resolved embedder stamps and is checked
 /// against. Shared by [`resolve_backends`] and [`resolve_verify_io`].
 fn embedding_contract(embedder_cfg: &EmbedderConfig, embedder: &dyn Embedder) -> EmbeddingContract {
@@ -356,6 +392,7 @@ pub fn resolve_backends(file: LamboFile) -> Result<ResolvedBackends, LamboError>
     // degenerate cadence here, uniformly and BEFORE any store/embedder build
     // (an embedder build may hash a weight file or dial a credential source,
     // so we reject the file first; since #31 none loads a model, see below).
+    let fusion_unset = file.fusion.is_none();
     let config = process_config(
         &daemon_cfg,
         promotion_policy,
@@ -435,6 +472,14 @@ pub fn resolve_backends(file: LamboFile) -> Result<ResolvedBackends, LamboError>
     // foreign scale. Warn once here, at resolve, so every full-resolve
     // process (`serve` startup included) says so — not per recall.
     crate::embed::calibration::warn_if_uncalibrated(embedder_cfg.calibration, &embedding);
+
+    let mut config = config;
+    apply_contract_fusion_default(
+        &mut config,
+        fusion_unset,
+        embedder_cfg.calibration,
+        &embedding,
+    );
 
     Ok(ResolvedBackends {
         store,
@@ -717,7 +762,8 @@ pub fn resolve_verify_io(
                 .into(),
         ));
     }
-    let process = process_config(
+    let fusion_unset = file.fusion.is_none();
+    let mut process = process_config(
         &file.daemon,
         file.promotion_policy,
         file.canonization_supersede,
@@ -738,6 +784,12 @@ pub fn resolve_verify_io(
         )));
     }
     let embedding = embedding_contract(&file.embedder, embedder.as_ref());
+    apply_contract_fusion_default(
+        &mut process,
+        fusion_unset,
+        file.embedder.calibration,
+        &embedding,
+    );
     Ok(VerifyIo {
         source,
         split,
@@ -1448,6 +1500,50 @@ mod tests {
         .to_string();
         assert!(err.contains("[fusion] k"), "{err}");
         assert!(LamboFile::from_toml_str(&format!("{base}[fusion]\nkid = 1.0\n")).is_err());
+    }
+
+    /// #221: with no `[fusion]` table a Qwen3-Embedding-4B contract resolves
+    /// to RRF (the measured fix for its narrow cosine band) while every
+    /// other contract keeps `max`; an explicit table and `calibration =
+    /// "off"` both keep their say.
+    #[test]
+    #[cfg(all(feature = "store-memory", feature = "embed-bge"))]
+    fn unset_fusion_is_scoped_to_qwen_contracts() {
+        use crate::recall::fusion::{FusionKind, RecallFusion};
+        let qwen = "[store]\nkind = \"memory\"\n[embedder]\nkind = \"bge_m3\"\ndim = 2560\nurl = \"http://127.0.0.1:1\"\nmodel = \"qwen3-embedding-4b\"\n";
+        let r = resolve_backends(LamboFile::from_toml_str(qwen).unwrap()).unwrap();
+        assert_eq!(r.embedding.model.as_deref(), Some("qwen3-embedding-4b"));
+        assert_eq!(
+            r.config.recall_fusion,
+            crate::embed::calibration::default_fusion(
+                crate::embed::calibration::CalibrationMode::Builtin,
+                &r.embedding,
+            ),
+            "resolve applies the contract default"
+        );
+        assert_eq!(r.config.recall_fusion.kind, FusionKind::Rrf);
+        // The 1024 Matryoshka truncation is its own space with the same default.
+        let narrow = qwen.replace("dim = 2560\n", "dim = 1024\ndimensions = 1024\n");
+        let r1024 = resolve_backends(LamboFile::from_toml_str(&narrow).unwrap()).unwrap();
+        assert_eq!(r1024.config.recall_fusion.kind, FusionKind::Rrf);
+        // An explicit table wins over the contract default.
+        let explicit = resolve_backends(
+            LamboFile::from_toml_str(&format!("{qwen}[fusion]\nkind = \"max\"\n")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(explicit.config.recall_fusion, RecallFusion::default());
+        assert_eq!(explicit.config.recall_fusion.kind, FusionKind::Max);
+        // `calibration = "off"` keeps max (legacy behavior exactly).
+        let off_toml = qwen.replace(
+            "model = \"qwen3-embedding-4b\"\n",
+            "model = \"qwen3-embedding-4b\"\ncalibration = \"off\"\n",
+        );
+        let off = resolve_backends(LamboFile::from_toml_str(&off_toml).unwrap()).unwrap();
+        assert_eq!(off.config.recall_fusion.kind, FusionKind::Max);
+        // A BGE-M3-shaped contract keeps max: reference behavior is unchanged.
+        let bge = "[store]\nkind = \"memory\"\n[embedder]\nkind = \"bge_m3\"\ndim = 1024\nurl = \"http://127.0.0.1:1\"\n";
+        let b = resolve_backends(LamboFile::from_toml_str(bge).unwrap()).unwrap();
+        assert_eq!(b.config.recall_fusion.kind, FusionKind::Max);
     }
 
     /// #181: `[selection]` reaches `Memory`'s `Config`; no table, or an

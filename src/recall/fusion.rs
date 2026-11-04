@@ -25,6 +25,16 @@
 //! carries each leg's rank, `max` and `rrf`), so the ledger can shadow-score
 //! one kind while the other ranks. The evidence for the defaults is in
 //! `evidence/issue-173-fusion/`.
+//!
+//! # The process default (#221)
+//!
+//! [`RecallFusion::default`] is `max`, so existing BGE-M3 and EmbeddingGemma 2
+//! deployments rank exactly as before. A process whose embedding contract is
+//! Qwen3-Embedding-4B at a measured width recalls with RRF at the defaults
+//! below unless its file sets `[fusion]` (see
+//! [`crate::embed::calibration::default_fusion`]): Qwen's narrow cosine band
+//! lets BM25 decide every max-merge, so the vector leg contributes nothing.
+//! The evidence is in `evidence/issue-221/`.
 
 use serde::{Deserialize, Serialize};
 

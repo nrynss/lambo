@@ -122,7 +122,10 @@ pub struct Config {
     pub recall_weights: RecallWeights,
     /// #173: `[fusion]`. How phase 1 combines its keyword, vector and recent
     /// legs ([`crate::recall::fusion`]): `max` (the default) keeps the
-    /// highest raw leg score, `rrf` is reciprocal rank fusion.
+    /// highest raw leg score, `rrf` is reciprocal rank fusion. A file with no
+    /// `[fusion]` table recalls with `max` — except on a Qwen3-Embedding-4B
+    /// contract under `builtin` calibration, which defaults to `rrf` (see
+    /// [`crate::embed::calibration::default_fusion`]).
     #[serde(default)]
     pub recall_fusion: crate::recall::fusion::RecallFusion,
     /// #181: `[selection]`. Whether assembly skips a member redundant with
@@ -572,9 +575,10 @@ pub struct LamboFile {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub canonization_supersede: Option<bool>,
     /// `[fusion]` (#173): how recall combines its legs. `None` (no section)
-    /// keeps the product default (`max`). Not serialized when unset, so a
-    /// file written from a [`LamboFile`] without it stays readable by a
-    /// binary that predates it.
+    /// keeps the product default (`max`, or `rrf` on a Qwen3-Embedding-4B
+    /// contract — see [`crate::embed::calibration::default_fusion`]). Not
+    /// serialized when unset, so a file written from a [`LamboFile`] without
+    /// it stays readable by a binary that predates it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fusion: Option<crate::recall::fusion::RecallFusion>,
     /// `[selection]` (#181): how assembly fills `top_k`. `None` (no

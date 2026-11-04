@@ -71,6 +71,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::recall::fusion::{FusionKind, RecallFusion};
 use crate::types::EmbeddingContract;
 
 /// `[embedder] calibration`: whether the built-in per-contract recall
@@ -272,6 +273,39 @@ pub fn recent_score(mode: CalibrationMode, contract: Option<&EmbeddingContract>)
     match (mode, contract.and_then(lookup)) {
         (CalibrationMode::Builtin, Some(row)) => row.recent_score,
         _ => crate::recall::candidates::RECENT_SCORE,
+    }
+}
+
+/// The process default fusion for `contract` when `[fusion]` is unset (#221):
+/// RRF at [`crate::recall::fusion`] defaults for Qwen3-Embedding-4B at
+/// either measured width under `builtin` calibration, `max` otherwise.
+///
+/// Why per-contract: Qwen's query-to-concept cosines live in a narrow band
+/// (observed 0.26–0.66 on the #221 session) while BM25 is unbounded, so
+/// under max-merge the keyword leg decides every rank and the vector leg
+/// contributes nothing — the calibration constants (all ≤ 0.90) cannot move
+/// a `max` against a BM25 above 1. RRF ranks on each leg's own order instead
+/// of their raw scales, so the vector leg counts again. Measured on the #190
+/// set (`fixtures/eval/`), dev tuned and held-out confirmed, in
+/// `evidence/issue-221/`; BGE-M3 and EmbeddingGemma 2 keep `max`, so their
+/// rankings are unchanged.
+///
+/// An explicit `[fusion]` table always wins, and `calibration = "off"` keeps
+/// `max` (legacy behavior exactly). Resolve applies this once per process
+/// and logs when the default moves.
+pub fn default_fusion(mode: CalibrationMode, contract: &EmbeddingContract) -> RecallFusion {
+    let qwen = [QWEN3_4B_2560, QWEN3_4B_1024].iter().any(|row| {
+        row.kind == contract.kind
+            && contract.model.as_deref() == Some(row.model)
+            && row.dim == contract.dim
+    });
+    if mode == CalibrationMode::Builtin && qwen {
+        RecallFusion {
+            kind: FusionKind::Rrf,
+            ..RecallFusion::default()
+        }
+    } else {
+        RecallFusion::default()
     }
 }
 

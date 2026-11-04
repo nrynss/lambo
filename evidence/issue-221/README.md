@@ -202,3 +202,145 @@ deterministic `lambo_inspect` path from the change kind is unaffected):
   sends nothing, so the llama.cpp BGE-M3 path is byte-identical. This is
   what makes the 1024 row measurable at all (Vultr serves Qwen at 2560
   unless asked).
+
+## Fusion follow-up (reopened #221, measured 4 Nov 2026)
+
+The 0.9.0 rows above did not move the reopened case: with
+`calibration = "builtin"` and `"off"` the fused scores are identical to two
+decimals (2.92 / 1.77 / 1.18 / 0.83), at 1024 too, and after Solo promotion.
+The exact 8-concept session is now recorded
+(`repro-8concept-qwen3-4b-2560.json`: the 8 framed doc texts, their live
+2560-dim vectors, the bare query and its live query vector), so the anecdote
+is replayable offline, and the two mysteries from the reopen comment are
+answered below with score-breakdown evidence.
+
+### M1: why builtin vs off is identical — the vector leg never wins the max
+
+Phase-1 relevance under the default fusion is
+`max(keyword BM25, recent flat score, vector cosine)`
+(`LegScores::merged`, `src/recall/candidates.rs`; the final is
+`0.5 × daemon + 0.5 × relevance`, `src/recall/assemble.rs`, default
+`RecallWeights` in `src/config.rs`). Live leg values on the exact session:
+
+| Concept | BM25 | vector cosine | max (= relevance) | final |
+|---|---|---:|---:|---:|
+| demo API v1 … | 5.3753 | 0.5815 | 5.3753 | 2.9207 |
+| lesson (paging) | 2.5265 | 0.7274 | 2.5265 | 1.7569 |
+| Chaaya … | 1.8883 | 0.3158 | 1.8883 | 1.1775 |
+| run r-001 … | 1.0634 | 0.5680 | 1.0634 | 0.8324 |
+
+Every shown hit's BM25 is above 1.06, while every calibrated constant is at
+most 0.90 (recent 0.41, layer floor 0.59, merge threshold 0.89 — and the
+latter two do not even enter phase 1). So `max` picks the BM25 leg in both
+runs and the calibration cannot move a rank or a shown score: builtin vs off
+finals are identical to 4 decimals (2.9207 / 1.7569 / 1.1775 / 0.8324),
+reproduced here through `Memory` on SQLite under both widths.
+
+The dropout hypotheses from the reopen comment resolve as follows: **floor
+exclusion, no** — recall's vector leg has no cosine floor
+(`rank_by_cosine`, `src/store/vector_source.rs`, is top-limit only; the
+layer floor is layered-recall-only and the merge threshold is write-path
+only); **candidate cap, no** — all 8 concepts are returned by the leg;
+**cache, no** — the query cache serves the same vector; **weight, in
+effect yes** — under max there is no weight, only raw scales, and BM25's
+scale (unbounded, 1.06–5.38 here) always beats cosine (≤ 1, 0.26–0.73 here).
+The vector leg is present in every shown hit's provenance and contributes
+to none of their fused values.
+
+### M2: the keyword/body split, at the token level
+
+Query stems (`normalize_tokens`): order api now return result one page time
+with cursor; how should import handl it? — plus `order`-family forms.
+
+| Concept | shared stems | BM25 | cosine (vector rank) | vector share of fused |
+|---|---|---:|---:|---:|
+| demo API v1 … | api, return, one | 5.3753 | 0.5815 (2nd) | 11% |
+| lesson (paging) | page (via `next_page_token`), import | 2.5265 | 0.7274 (1st) | 29% |
+| Chaaya … | with | 1.8883 | 0.3158 (6th) | 17% |
+| run r-001 … | import | 1.0634 | 0.5680 (3rd) | 53% |
+
+Splitting the finals (`final = 0.5 × daemon + 0.5 × relevance`) gives daemon
+scores demo 0.47 / lesson 0.99 / Chaaya 0.47 / r-001 0.60: the daemon ranks
+the lesson first (it has the dependent), but the query-relevance leg —
+keyword-decided under max — flips it. Qwen's raw cosine ranks the lesson
+first (0.7274), then the demo observation (0.5815), then r-001 (0.5680).
+
+### Measured blend: RRF at #173's defaults, Qwen-scoped
+
+`examples/eval_fusion` on the #190 set (`fixtures/eval/`), Qwen3-Embedding-4B
+at 2560, ten variants on `dev` (100 concepts derived once; the embedding
+cache is local-only, not committed) — `max`, RRF at #173's defaults, a k
+sweep (2, 5), single-axis leg-weight moves (`keyword=0.5`, `vector=0.5`,
+`vector=2`, `recent=0`), and daemon-share moves (`wd=0`, `wd=0.3`); a
+sweep of single axes, not a grid:
+
+| variant | dev nDCG@10 | dev hit@1 | vocab-mismatch (30) | exact-id (18) |
+|---|---|---|---|---|
+| `max` | 0.7905 | 0.679 | 0.446 | 0.923 |
+| `rrf` (k=3, 1/1/0.3) | 0.8521 | 0.715 | 0.699 | 0.859 |
+| `rrf:k=2` | 0.8546 | 0.715 | 0.706 | 0.867 |
+| `rrf:k=5` | 0.8386 | 0.685 | 0.677 | 0.858 |
+| `rrf:keyword=0.5` | 0.8411 | 0.685 | 0.743 | 0.756 |
+| `rrf:vector=2` | 0.8600 | 0.727 | 0.784 | 0.780 |
+| `rrf:vector=0.5` | 0.8160 | 0.667 | 0.584 | 0.886 |
+| `rrf:recent=0` | 0.8634 | 0.733 | 0.710 | 0.863 |
+| `rrf:wd=0` | 0.8789 | 0.758 | 0.743 | 0.887 |
+| `rrf:wd=0.3` | 0.8726 | 0.751 | 0.718 | 0.879 |
+
+Held-out confirmation (`max` vs `rrf` only, decided on dev):
+
+| split | max nDCG@10 | rrf nDCG@10 | vocab-mismatch | exact-id | contrast |
+|---|---|---|---|---|---|
+| dev | 0.7905 | 0.8521 (+0.062) | 0.446 → 0.699 | 0.923 → 0.859 | 0.911 → 0.896 |
+| held_out | 0.8403 | 0.8685 (+0.028) | 0.672 → 0.802 | 0.948 → 0.881 | 0.912 → 0.854 |
+
+The shape matches #173's BGE-M3/EG2 result (big vocabulary-mismatch gain,
+small exact-identifier/contrast losses on small classes), and the exact #221
+case is a vocabulary-mismatch query: RRF fixes it where no max-side constant
+can. `wd=0` scores higher on dev but does NOT fix the exact case (relevance
+alone still ranks the demo observation first: 0.913 vs 0.783), and `recent=0`
+is the set artefact #173 names (the recent leg always holds the corpus's last
+three concepts). `wd=0.3` does fix the exact case — lesson first at 0.845 vs
+demo 0.749 on the recorded 8-concept session — and beats the shipped default
+on dev (0.8726 vs 0.8521). It is still not shipped: it introduces a
+non-default daemon share, and the shipped default stays RRF at #173's
+existing constants (k = 3, 1.0/1.0/0.3, daemon 0.5). No new numbers — the
+shipped default is RRF at the existing defaults, applied per-contract (see
+below).
+
+Files: `fusion-qwen3-4b-2560-dev.json` (+ `.queries.jsonl`) is the dev
+sweep, `fusion-qwen3-4b-2560-heldout.json` (+ `.queries.jsonl`) the held-out
+confirmation, `repro-8concept-qwen3-4b-2560.json` and
+`repro-8concept-qwen3-4b-1024.json` the recorded live vectors (full width
+and Matryoshka truncation) for the offline regression tests. The held-out
+run's stderr log is not kept: the example prints only the dev split to
+stderr, so the file was a copy of the dev log's numbers, not held-out
+evidence (the held-out numbers live in the JSON).
+
+### Shipped fix
+
+A file with no `[fusion]` table on a Qwen3-Embedding-4B contract under
+`builtin` calibration now recalls with RRF at #173's defaults; every other
+contract keeps `max`, and an explicit `[fusion]` table or
+`calibration = "off"` keeps its say (`default_fusion` in
+`src/embed/calibration.rs`, applied by `apply_contract_fusion_default` in
+`src/resolve.rs` for both `resolve_backends` and `resolve_verify_io`, with a
+one-line log). BGE-M3 and EmbeddingGemma 2 behavior is unchanged by
+construction: their contracts resolve to `RecallFusion::default()` exactly
+as before.
+
+Before/after on the exact session (top-4), both widths, daemon path
+(both rows pinned offline in `issue221_fusion` on the recorded vectors):
+
+| Run | 1st | 2nd | 3rd | 4th |
+|---|---|---|---|---|
+| 2560 + 1024, max (before) | demo API v1 … 2.92 | lesson 1.76 | Chaaya 1.18 | r-001 0.83 |
+| 2560, RRF default (after) | lesson 0.885 | demo API v1 … 0.668 | r-001 0.570 | pagination_changed 0.474 |
+| 1024, RRF default (after) | lesson 0.885 | demo API v1 … 0.668 | r-001 0.570 | pagination_changed 0.474 |
+
+Regression tests (offline, on the recorded vectors at both widths):
+`memory::tests::issue221_fusion` — each fixture keeps the live geometry, max
+reproduces the misrank, the RRF default ranks the lesson first;
+`calibration::default_fusion` matrix (Qwen both widths → RRF, EG2/BGE-M3/
+unmeasured → max, off → max); `resolve` scoping (unset → RRF on Qwen, stays
+max on BGE-M3; explicit table and off win).

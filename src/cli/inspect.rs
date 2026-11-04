@@ -22,7 +22,7 @@ use crate::store::GraphStore;
 use crate::surface::focus::{
     ambiguous_refusal, fuzzy_note, missing_refusal, oversized_refusal, resolve_focus, Focus,
 };
-use crate::surface::neighbourhood::render_neighbourhood_parts;
+use crate::surface::neighbourhood::{contradiction_line, render_neighbourhood_parts};
 
 /// Inspect the neighbourhood around `focus` (lease-free reader), explaining
 /// its next canonization hop under the default policy (`Swarm`). The binary
@@ -71,10 +71,19 @@ pub async fn run_with_settings(
     let loaded = load_reader_graph(store, session).await?;
     // The read guard is scoped so it never spans the explanation's store
     // queries below.
-    let (id, note, view) = {
+    let now = chrono::Utc::now();
+    // The reader has no session config; the default evidence age floor is
+    // what a writer's recall uses unless configured otherwise (#226).
+    let min_age = crate::Config::default().canonization_edge_min_age;
+    let (id, note, view, contradicted) = {
         let g = loaded.graph.read();
         match resolve_focus(&g, focus.trim()) {
-            Focus::Exact(id) => (id, None, render_neighbourhood_parts(&g, id, depth)),
+            Focus::Exact(id) => (
+                id,
+                None,
+                render_neighbourhood_parts(&g, id, depth),
+                contradiction_line(&g, id, min_age, now),
+            ),
             Focus::Fuzzy {
                 id,
                 content: matched,
@@ -84,7 +93,12 @@ pub async fn run_with_settings(
                 // one names the bound, so the caller knows what was not
                 // scanned.
                 let note = fuzzy_note(focus.trim(), &matched, bounded.as_ref());
-                (id, Some(note), render_neighbourhood_parts(&g, id, depth))
+                (
+                    id,
+                    Some(note),
+                    render_neighbourhood_parts(&g, id, depth),
+                    contradiction_line(&g, id, min_age, now),
+                )
             }
             other => return Err(refusal(other, focus, session)),
         }
@@ -101,7 +115,11 @@ pub async fn run_with_settings(
         Err(e) => Some(format!("canonization: explanation unavailable: {e}\n")),
     };
     let section = crate::canon::with_last_demotion(section, &loaded.graph.read(), id);
-    let text = view.text(section.as_deref());
+    let mut text = view.text(section.as_deref());
+    // #226: a contradicted focus warns, by the same ruling recall renders.
+    if let Some(line) = contradicted {
+        text.push_str(&format!("{line}\n"));
+    }
     Ok(match note {
         Some(note) => format!("{note}\n{text}"),
         None => text,

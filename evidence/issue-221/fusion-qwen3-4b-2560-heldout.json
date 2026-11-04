@@ -1,0 +1,350 @@
+{
+  "cache": {
+    "hits": 803,
+    "misses": 129
+  },
+  "embedder_kind": "BgeM3",
+  "issue": 173,
+  "model": {
+    "device": null,
+    "dim": 2560,
+    "gemini_model": null,
+    "llama_model": "qwen3-embedding-4b",
+    "repo": null,
+    "revision": null,
+    "weights_file": null
+  },
+  "splits": [
+    "dev",
+    "held_out"
+  ],
+  "top_k": 10,
+  "variants": {
+    "max": {
+      "fusion": {
+        "k": 3.0,
+        "keyword_weight": 1.0,
+        "kind": "max",
+        "recent_weight": 0.3,
+        "vector_weight": 1.0
+      },
+      "metrics": {
+        "dev/family/contrast": {
+          "hit@1": 0.8636,
+          "hit@10": 0.9545,
+          "hit@5": 0.9545,
+          "mrr@10": 0.8955,
+          "n": 22,
+          "ndcg@10": 0.9112
+        },
+        "dev/family/exact-identifier": {
+          "hit@1": 0.8333,
+          "hit@10": 1.0,
+          "hit@5": 1.0,
+          "mrr@10": 0.8843,
+          "n": 18,
+          "ndcg@10": 0.9233
+        },
+        "dev/family/fact-lookup": {
+          "hit@1": 0.7,
+          "hit@10": 0.9375,
+          "hit@5": 0.9375,
+          "mrr@10": 0.7998,
+          "n": 80,
+          "ndcg@10": 0.8322
+        },
+        "dev/family/multi-hop": {
+          "hit@1": 0.5,
+          "hit@10": 1.0,
+          "hit@5": 1.0,
+          "mrr@10": 0.6,
+          "n": 2,
+          "ndcg@10": 0.7106
+        },
+        "dev/family/rationale": {
+          "hit@1": 1.0,
+          "hit@10": 1.0,
+          "hit@5": 1.0,
+          "mrr@10": 1.0,
+          "n": 9,
+          "ndcg@10": 0.9934
+        },
+        "dev/family/superseded": {
+          "hit@1": 0.75,
+          "hit@10": 1.0,
+          "hit@5": 1.0,
+          "mrr@10": 0.875,
+          "n": 4,
+          "ndcg@10": 0.8598
+        },
+        "dev/family/vocabulary-mismatch": {
+          "hit@1": 0.3,
+          "hit@10": 0.6,
+          "hit@5": 0.5,
+          "mrr@10": 0.3972,
+          "n": 30,
+          "ndcg@10": 0.4463
+        },
+        "held_out/family/contrast": {
+          "hit@1": 0.8571,
+          "hit@10": 1.0,
+          "hit@5": 1.0,
+          "mrr@10": 0.9071,
+          "n": 14,
+          "ndcg@10": 0.9116
+        },
+        "held_out/family/exact-identifier": {
+          "hit@1": 0.8182,
+          "hit@10": 1.0,
+          "hit@5": 1.0,
+          "mrr@10": 0.9091,
+          "n": 11,
+          "ndcg@10": 0.948
+        },
+        "held_out/family/fact-lookup": {
+          "hit@1": 0.7727,
+          "hit@10": 0.9318,
+          "hit@5": 0.9318,
+          "mrr@10": 0.8398,
+          "n": 44,
+          "ndcg@10": 0.8534
+        },
+        "held_out/family/rationale": {
+          "hit@1": 0.875,
+          "hit@10": 1.0,
+          "hit@5": 1.0,
+          "mrr@10": 0.9167,
+          "n": 8,
+          "ndcg@10": 0.9158
+        },
+        "held_out/family/superseded": {
+          "hit@1": 0.5,
+          "hit@10": 1.0,
+          "hit@5": 1.0,
+          "mrr@10": 0.6667,
+          "n": 2,
+          "ndcg@10": 0.679
+        },
+        "held_out/family/vocabulary-mismatch": {
+          "hit@1": 0.5,
+          "hit@10": 0.8333,
+          "hit@5": 0.7778,
+          "mrr@10": 0.6227,
+          "n": 18,
+          "ndcg@10": 0.6716
+        },
+        "split/dev": {
+          "hit@1": 0.6788,
+          "hit@10": 0.8909,
+          "hit@5": 0.8727,
+          "mrr@10": 0.7589,
+          "n": 165,
+          "ndcg@10": 0.7905
+        },
+        "split/held_out": {
+          "hit@1": 0.7423,
+          "hit@10": 0.9381,
+          "hit@5": 0.9278,
+          "mrr@10": 0.8198,
+          "n": 97,
+          "ndcg@10": 0.8403
+        }
+      },
+      "no_answer": {
+        "dev": {
+          "auc_top1": 0.7719,
+          "distinct_top1_values": {
+            "answerable": 163,
+            "no_answer": 73
+          },
+          "gate_alpha": 0.1,
+          "gate_pass_answerable": 0.9091,
+          "gate_pass_no_answer": 0.6216,
+          "gate_tau_from_dev": 3.8177,
+          "median_top1_answerable": 6.1632,
+          "median_top1_no_answer": 4.0654
+        },
+        "held_out": {
+          "auc_top1": 0.669,
+          "distinct_top1_values": {
+            "answerable": 97,
+            "no_answer": 31
+          },
+          "gate_alpha": 0.1,
+          "gate_pass_answerable": 0.8557,
+          "gate_pass_no_answer": 0.6563,
+          "gate_tau_from_dev": 3.8177,
+          "median_top1_answerable": 6.2836,
+          "median_top1_no_answer": 4.6377
+        }
+      },
+      "recall_weights": {
+        "w_daemon": 0.5,
+        "w_query": 0.5
+      }
+    },
+    "rrf": {
+      "fusion": {
+        "k": 3.0,
+        "keyword_weight": 1.0,
+        "kind": "rrf",
+        "recent_weight": 0.3,
+        "vector_weight": 1.0
+      },
+      "metrics": {
+        "dev/family/contrast": {
+          "hit@1": 0.7727,
+          "hit@10": 1.0,
+          "hit@5": 0.9545,
+          "mrr@10": 0.8636,
+          "n": 22,
+          "ndcg@10": 0.896
+        },
+        "dev/family/exact-identifier": {
+          "hit@1": 0.7778,
+          "hit@10": 1.0,
+          "hit@5": 0.8889,
+          "mrr@10": 0.8297,
+          "n": 18,
+          "ndcg@10": 0.8594
+        },
+        "dev/family/fact-lookup": {
+          "hit@1": 0.7625,
+          "hit@10": 0.975,
+          "hit@5": 0.9625,
+          "mrr@10": 0.852,
+          "n": 80,
+          "ndcg@10": 0.8861
+        },
+        "dev/family/multi-hop": {
+          "hit@1": 0.5,
+          "hit@10": 1.0,
+          "hit@5": 1.0,
+          "mrr@10": 0.625,
+          "n": 2,
+          "ndcg@10": 0.7778
+        },
+        "dev/family/rationale": {
+          "hit@1": 0.8889,
+          "hit@10": 1.0,
+          "hit@5": 1.0,
+          "mrr@10": 0.9444,
+          "n": 9,
+          "ndcg@10": 0.959
+        },
+        "dev/family/superseded": {
+          "hit@1": 0.75,
+          "hit@10": 1.0,
+          "hit@5": 1.0,
+          "mrr@10": 0.875,
+          "n": 4,
+          "ndcg@10": 0.8475
+        },
+        "dev/family/vocabulary-mismatch": {
+          "hit@1": 0.4667,
+          "hit@10": 0.9667,
+          "hit@5": 0.8,
+          "mrr@10": 0.6199,
+          "n": 30,
+          "ndcg@10": 0.6986
+        },
+        "held_out/family/contrast": {
+          "hit@1": 0.7143,
+          "hit@10": 1.0,
+          "hit@5": 0.9286,
+          "mrr@10": 0.8214,
+          "n": 14,
+          "ndcg@10": 0.854
+        },
+        "held_out/family/exact-identifier": {
+          "hit@1": 0.6364,
+          "hit@10": 1.0,
+          "hit@5": 1.0,
+          "mrr@10": 0.8182,
+          "n": 11,
+          "ndcg@10": 0.8809
+        },
+        "held_out/family/fact-lookup": {
+          "hit@1": 0.8182,
+          "hit@10": 0.9545,
+          "hit@5": 0.9545,
+          "mrr@10": 0.8758,
+          "n": 44,
+          "ndcg@10": 0.8892
+        },
+        "held_out/family/rationale": {
+          "hit@1": 0.875,
+          "hit@10": 1.0,
+          "hit@5": 1.0,
+          "mrr@10": 0.9375,
+          "n": 8,
+          "ndcg@10": 0.9444
+        },
+        "held_out/family/superseded": {
+          "hit@1": 0.5,
+          "hit@10": 1.0,
+          "hit@5": 1.0,
+          "mrr@10": 0.75,
+          "n": 2,
+          "ndcg@10": 0.7426
+        },
+        "held_out/family/vocabulary-mismatch": {
+          "hit@1": 0.6667,
+          "hit@10": 0.9444,
+          "hit@5": 0.8889,
+          "mrr@10": 0.7718,
+          "n": 18,
+          "ndcg@10": 0.8019
+        },
+        "split/dev": {
+          "hit@1": 0.7152,
+          "hit@10": 0.9818,
+          "hit@5": 0.9273,
+          "mrr@10": 0.8118,
+          "n": 165,
+          "ndcg@10": 0.8521
+        },
+        "split/held_out": {
+          "hit@1": 0.7526,
+          "hit@10": 0.9691,
+          "hit@5": 0.9485,
+          "mrr@10": 0.8446,
+          "n": 97,
+          "ndcg@10": 0.8685
+        }
+      },
+      "no_answer": {
+        "dev": {
+          "auc_top1": 0.6342,
+          "distinct_top1_values": {
+            "answerable": 46,
+            "no_answer": 43
+          },
+          "gate_alpha": 0.1,
+          "gate_pass_answerable": 0.9091,
+          "gate_pass_no_answer": 0.7838,
+          "gate_tau_from_dev": 0.7412,
+          "median_top1_answerable": 0.8372,
+          "median_top1_no_answer": 0.7872
+        },
+        "held_out": {
+          "auc_top1": 0.677,
+          "distinct_top1_values": {
+            "answerable": 34,
+            "no_answer": 23
+          },
+          "gate_alpha": 0.1,
+          "gate_pass_answerable": 0.9381,
+          "gate_pass_no_answer": 0.6563,
+          "gate_tau_from_dev": 0.7412,
+          "median_top1_answerable": 0.8373,
+          "median_top1_no_answer": 0.7847
+        }
+      },
+      "recall_weights": {
+        "w_daemon": 0.5,
+        "w_query": 0.5
+      }
+    }
+  }
+}
