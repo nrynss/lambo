@@ -10,21 +10,20 @@ name: release
 # so no extra third-party action is needed.
 #
 # Versioning: the version lives ONLY in Cargo.toml [package] version. A tag
-# must be v<version>; the release job asserts that so a stale tag can never
-# publish mismatched artifacts. To release: bump Cargo.toml, push, then
+# must be v<version>; preflight asserts that before building and requires full,
+# successful main CI for that exact commit. To release: bump Cargo.toml, push, then
 # `git tag v<version> && git push origin v<version>`.
 #
 # Dry run (workflow_dispatch): Actions -> release -> "Run workflow" on any
-# branch builds, parity-tests, checksums and uploads every matrix asset as a
-# workflow artifact, and publishes NOTHING. Two independent guards make that
-# hold:
+# branch builds, checksums and uploads every matrix asset as a workflow artifact,
+# and publishes NOTHING. Diagnostic dry runs bypass the green-CI gate. Guards:
 #   1. `release` and `publish-crate` run only when the event is a tag push
 #      (`github.event_name == 'push'` AND a refs/tags/v ref). Checking the ref
 #      alone is not enough: a dispatch can be started ON a tag, and then
 #      github.ref is refs/tags/v... too. `publish-crate` also needs `release`,
 #      so a skipped release skips it a second way.
 #   2. `dry_run` defaults to true, and a dispatch with dry_run=false is refused
-#      outright by the first build step rather than silently doing a dry run
+#      outright by preflight rather than silently doing a dry run
 #      anyway: a real release is only ever a tag push.
 
 on:
@@ -47,8 +46,27 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      version: ${{ steps.gate.outputs.version }}
+      sha: ${{ steps.gate.outputs.sha }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Validate release and require full CI on the exact commit
+        id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_DRY_RUN: ${{ inputs.dry_run }}
+        run: python3 scripts/ci/release_gate.py
+
   build:
     name: build-${{ matrix.name }}
+    needs: preflight
     runs-on: ${{ matrix.os }}
     # Builds third-party code (every dependency's build script runs here), so
     # its token must not be able to write to the repository.
@@ -63,6 +81,7 @@ jobs:
     # Only the Metal flavour sets `features`; the stock assets are unchanged.
     env:
       FEATURES: ${{ matrix.features || 'ship' }}
+      VERSION: ${{ needs.preflight.outputs.version }}
 
     # Every `run:` step here is bash. windows-latest defaults to PowerShell, which
     # parses `VERSION=$(...)` as a module name and fails the job before it builds.
@@ -133,18 +152,12 @@ jobs:
           # once #39 lands. The bash default shell and the Windows branches in
           # the steps below stay so the entry can come back unchanged.
     steps:
-      - name: Refuse a non-dry-run dispatch
-        if: github.event_name == 'workflow_dispatch' && !inputs.dry_run
-        run: |
-          echo "::error::A manual run is always a dry run. Publish by pushing a v<version> tag; re-run this dispatch with dry_run left true." >&2
-          exit 1
-
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ needs.preflight.outputs.sha }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@d124f86f28ff42855784ff3319f48ac182c248f8 # 1.99.1
-        with:
-          components: rustfmt, clippy
 
       - name: Add target
         run: rustup target add ${{ matrix.target }}
@@ -157,45 +170,16 @@ jobs:
           # feature sets. Key by asset name instead.
           key: ${{ matrix.name }}
 
-      - name: Derive version and git sha
+      - name: Stamp git sha
         run: |
-          VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
-          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
           # LAMBO_GIT_SHA is an option_env! read at compile time (src/ledger.rs):
           # without it the `serve --ledger` heartbeat reports git_sha
           # "unknown", and a rig that installs this asset cannot tell one
-          # release binary from another in its ledger. Set it for both the
-          # build and the parity test so the parity relink keeps the same value.
+          # release binary from another in its ledger.
           echo "LAMBO_GIT_SHA=$(git rev-parse --short=7 HEAD)" >> "$GITHUB_ENV"
 
       - name: Build release binary
-        run: cargo build --release --features "$FEATURES" --target ${{ matrix.target }}
-
-      - name: Binary + TOML parity test (release artifact)
-        run: |
-          set -euo pipefail
-          # Drive the exact shipped binary (the `--features $FEATURES --target <triple>`
-          # release artifact built above) with a real lambo.toml via
-          # tests/binary_parity.rs. unix targets only: KillOnDrop/SIGTERM is unix.
-          if [[ "${{ runner.os }}" == "Windows" ]]; then
-            echo "parity test is unix-only (SIGTERM/KillOnDrop); skipping on Windows"
-            exit 0
-          fi
-          # Run with the SAME default CARGO_TARGET_DIR and `--target <triple>` as
-          # the build step, so env!("CARGO_BIN_EXE_lambo") resolves to
-          # target/<triple>/release/lambo -- the exact artifact the Stage step
-          # below copies and publishes -- not a fresh NESTED rebuild.
-          # Every entry's $FEATURES contains ship, a superset of the parity
-          # test's cfg gate (store-sqlite + embed-fixture are both in ship), so
-          # this step compiles the entry's full feature set, never a
-          # store-sqlite,embed-fixture subset. Cargo still relinks `lambo` into
-          # that same path with the SAME features as the build step (same
-          # release profile), so the staged artifact stays feature-complete and
-          # is never clobbered by a subset binary. Because the parity run builds
-          # the whole feature set, a ship-only (or Metal-only) regression fails
-          # this build job.
-          cargo test --release --features "$FEATURES" \
-            --test binary_parity --target ${{ matrix.target }}
+        run: cargo build --locked --release --features "$FEATURES" --target ${{ matrix.target }}
 
       - name: Stage and checksum
         run: |
@@ -278,27 +262,19 @@ jobs:
 
   release:
     name: publish-release
-    needs: build
+    needs: [preflight, build]
     # Tag pushes only. A dry-run dispatch skips this job (and so publish-crate),
     # including a dispatch started on a tag ref; see the header.
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    env:
+      VERSION: ${{ needs.preflight.outputs.version }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-
-      - name: Derive version from Cargo.toml
-        id: version
-        run: |
-          VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
-          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
-      - name: Assert tag matches Cargo.toml version
-        run: |
-          if [ "$GITHUB_REF_NAME" != "v$VERSION" ]; then
-            echo "::error::Tag '$GITHUB_REF_NAME' does not match Cargo.toml version 'v$VERSION'. Bump Cargo.toml, commit, tag, then push the new tag." >&2
-            exit 1
-          fi
+        with:
+          ref: ${{ needs.preflight.outputs.sha }}
 
       - name: Download all binaries
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
@@ -336,7 +312,7 @@ jobs:
 
   publish-crate:
     name: publish-crate
-    needs: release
+    needs: [preflight, release]
     # Same guard as `release`, stated again so this job never depends on the
     # skip propagating through `needs` alone.
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
@@ -345,6 +321,8 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ needs.preflight.outputs.sha }}
 
       - name: Install Rust toolchain
         # No `toolchain:` input (v020-R1-P3-1): the committed rust-toolchain.toml
@@ -356,4 +334,4 @@ jobs:
       - name: Publish to crates.io
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish
+        run: cargo publish --locked

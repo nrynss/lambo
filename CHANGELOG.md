@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.9.2 (2026-11-04)
+
 ### Highlights
 
 - **Inspect warns where recall warns.** `lambo_inspect`, `lambo inspect`
@@ -11,6 +13,16 @@
   endpoint. The portal renders warnings in the details panel and on the
   hero strip. Inspect ledger lines gain `warnings` and `contradicted`
   facts.
+- **Release from a tested commit.** Releases require successful full CI for
+  the exact tagged commit. Release builds no longer compile or run the
+  binary parity tests again. CI shares the SQLite test/lint build, gives
+  feature rows separate caches, cancels superseded PR runs, and avoids
+  Rust builds for documentation-only changes.
+
+### Upgrading from 0.9.1
+
+You don't need to run `lambo provision`: there is no schema change.
+Recall behavior and configuration are unchanged.
 
 ## 0.9.1 (2026-11-04)
 

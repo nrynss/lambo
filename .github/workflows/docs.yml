@@ -3,6 +3,9 @@ name: docs
 on:
   push:
     branches: [main]
+    paths:
+      - 'site/**'
+      - '.github/workflows/docs.yml'
   workflow_dispatch:
 
 permissions:
