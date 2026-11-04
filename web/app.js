@@ -625,10 +625,17 @@
     get("api/inspect?focus=" + encodeURIComponent(pillar.content))
       .then(function (d) {
         if (seq !== state.heroSeq) return;
+        var hw = $("hero-warnings");
+        clear(hw);
+        (d.warnings || []).forEach(function (w) {
+          hw.appendChild(el("div", "details-warning", w));
+        });
+        show(hw, (d.warnings || []).length > 0);
         fillHeroDeps(pillar, d.dependents || [], d.dependents ? d.dependents.length : 0);
       })
       .catch(function () {
         if (seq !== state.heroSeq) return;
+        show($("hero-warnings"), false);
         fillHeroDeps(pillar, [], pillar.blast_radius);
       });
   }

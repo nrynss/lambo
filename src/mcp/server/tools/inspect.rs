@@ -196,6 +196,7 @@ impl LamboServer {
         // #226: a contradicted focus warns, by the same ruling recall
         // renders — an incoming Contradicts edge must not read as
         // `warnings: []`.
+        let contradicted_hit = contradicted.is_some();
         if let Some(line) = contradicted {
             warnings.push(line);
         }
@@ -203,9 +204,15 @@ impl LamboServer {
         // I1: enough to place an inspect in a call sequence without carrying the
         // whole neighbourhood into the ledger. `fuzzy` is worth a field — a
         // resolution the caller did not ask for is exactly the friction
-        // DOGFOOD metric 6 is looking for.
+        // DOGFOOD metric 6 is looking for. `warnings`/`contradicted` let the
+        // same telemetry count warned inspects without re-reading the graph.
         note_facts(|| {
-            let mut facts = json!({ "depth": depth, "fuzzy": note.is_some() });
+            let mut facts = json!({
+                "depth": depth,
+                "fuzzy": note.is_some(),
+                "warnings": warnings.len(),
+                "contradicted": contradicted_hit,
+            });
             // #33: additive, only when the caller sent a scope.
             if let Some(scope) = &scope
                 && let Some(map) = facts.as_object_mut()
