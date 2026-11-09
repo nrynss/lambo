@@ -23,7 +23,10 @@
   its durable intent, and the next serve re-attempts it (its receipt
   then reads `pending_replay`, then `applied_after_restart`), so agents
   should recall before re-deriving; only a refused text or a
-  configuration error fails a write for good. The two stay independent;
+  configuration error fails a write for good. A success response cut off
+  mid-body (a reset, or a stall past the request timeout) counts as an
+  outage too, and one larger than any embedding needs (64 bytes a
+  dimension, at least 4 MiB) is refused unread. The two stay independent;
   either works without the other.
 
 ### Fixed

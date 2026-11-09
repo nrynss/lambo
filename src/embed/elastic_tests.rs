@@ -432,9 +432,17 @@ async fn status_classes_drive_the_error_variant() {
             "{err}"
         );
     }
-    for code in [408u16, 429, 500, 503] {
+    // 418 is a status the J3 table does not name (Unclassified, so
+    // transient and logged); 425 is named transient.
+    for code in [408u16, 418, 425, 429, 500, 503] {
         let err = error_for(code, "busy").await;
         assert!(matches!(err, EmbedError::Unavailable(_)), "{code}: {err:?}");
+    }
+    // The rest of the content class: a statement about this input.
+    for code in [413u16, 415, 422] {
+        let err = error_for(code, "no").await;
+        assert!(matches!(err, EmbedError::Backend(_)), "{code}: {err:?}");
+        assert!(err.to_string().contains("refused this content"), "{err}");
     }
 }
 
@@ -484,6 +492,145 @@ async fn a_transport_failure_is_unavailable() {
             .contains("Elasticsearch unreachable at http://127.0.0.1:9/base/_inference"),
         "{err}"
     );
+}
+
+/// Serve one raw HTTP exchange on a loopback port: read the request (headers
+/// and its `Content-Length` body), write `head`, then each of `chunks`, then
+/// close. Write errors are ignored, since the client may stop reading first.
+/// Returns the base URL.
+async fn raw_server(head: String, chunks: Vec<Vec<u8>>) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut req = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            let n = sock.read(&mut buf).await.unwrap_or(0);
+            if n == 0 {
+                break;
+            }
+            req.extend_from_slice(&buf[..n]);
+            let text = String::from_utf8_lossy(&req).to_ascii_lowercase();
+            if let Some(end) = text.find("\r\n\r\n") {
+                let len = text[..end]
+                    .lines()
+                    .find_map(|l| l.strip_prefix("content-length:"))
+                    .and_then(|v| v.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+                if req.len() >= end + 4 + len {
+                    break;
+                }
+            }
+        }
+        if sock.write_all(head.as_bytes()).await.is_err() {
+            return;
+        }
+        for chunk in chunks {
+            if sock.write_all(&chunk).await.is_err() {
+                return;
+            }
+        }
+        let _ = sock.shutdown().await;
+    });
+    format!("http://{addr}")
+}
+
+/// A 2xx whose body the connection cuts off mid-read is a transport failure,
+/// so `Unavailable` and the write keeps its durable intent; the partial body
+/// is not quoted.
+///
+/// Mutation: map `SuccessBodyError::Cut` to `Backend` -> red.
+#[tokio::test]
+async fn a_success_body_cut_off_mid_read_is_unavailable() {
+    let partial = br#"{"text_embedding":[{"embedding":[0.123456,"#.to_vec();
+    let head =
+        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 100000\r\n\r\n"
+            .to_string();
+    let base = raw_server(head, vec![partial]).await;
+    let err = ElasticEmbedder::new(&base, ID, 4)
+        .unwrap()
+        .embed("anything")
+        .await
+        .unwrap_err();
+    assert!(matches!(err, EmbedError::Unavailable(_)), "{err:?}");
+    let msg = err.to_string();
+    assert!(msg.contains("was cut off"), "{msg}");
+    assert!(
+        !msg.contains("0.123456"),
+        "the partial body is not quoted: {msg}"
+    );
+}
+
+/// The cap grows with the width and never drops under the floor.
+#[test]
+fn the_success_body_cap_has_a_floor_and_grows_with_dim() {
+    use bge_m3::{success_body_cap, SUCCESS_BODY_FLOOR};
+    assert_eq!(success_body_cap(4), SUCCESS_BODY_FLOOR);
+    assert_eq!(success_body_cap(4096), SUCCESS_BODY_FLOOR);
+    assert_eq!(success_body_cap(1 << 20), 64 << 20);
+    assert_eq!(success_body_cap(usize::MAX), usize::MAX);
+}
+
+/// A 2xx body over the cap is refused as `Backend` without quoting it,
+/// whether `Content-Length` announces it or it streams chunked.
+///
+/// Mutation: read with `resp.bytes()` again -> red (the padded body parses
+/// and embeds).
+#[tokio::test]
+async fn an_oversized_success_body_is_refused_unquoted() {
+    let key = fake_key();
+    let cap = bge_m3::success_body_cap(4);
+    // Valid JSON padded past the cap, ending in the key: a parse would
+    // succeed and a quote would show it.
+    let big = format!(
+        "{{\"text_embedding\":[{{\"embedding\":[1,2,3,4]}}],\"pad\":\"{}{key}\"}}",
+        "x".repeat(cap)
+    );
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(POST).path(PATH);
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(big.clone());
+    });
+    let announced = ElasticEmbedder::new(&server.base_url(), ID, 4)
+        .unwrap()
+        .with_api_key(&key)
+        .unwrap()
+        .embed("anything")
+        .await
+        .unwrap_err();
+
+    let head =
+        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ntransfer-encoding: chunked\r\n\r\n"
+            .to_string();
+    let chunks = big
+        .as_bytes()
+        .chunks(64 * 1024)
+        .map(|c| {
+            let mut framed = format!("{:x}\r\n", c.len()).into_bytes();
+            framed.extend_from_slice(c);
+            framed.extend_from_slice(b"\r\n");
+            framed
+        })
+        .chain(std::iter::once(b"0\r\n\r\n".to_vec()))
+        .collect();
+    let base = raw_server(head, chunks).await;
+    let streamed = ElasticEmbedder::new(&base, ID, 4)
+        .unwrap()
+        .embed("anything")
+        .await
+        .unwrap_err();
+
+    for err in [announced, streamed] {
+        assert!(matches!(err, EmbedError::Backend(_)), "{err:?}");
+        let msg = err.to_string();
+        assert!(msg.contains(&format!("over {cap} bytes")), "{msg}");
+        assert!(msg.contains("body not shown"), "{msg}");
+        assert!(!msg.contains(&key) && !msg.contains("xxxx"), "{msg}");
+    }
 }
 
 /// An error body echoing the key (raw, JSON-quoted, masked) never carries

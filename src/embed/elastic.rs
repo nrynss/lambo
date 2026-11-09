@@ -23,17 +23,20 @@
 //! adapter sends `Authorization: ApiKey <key>` (as the recall tier does), only
 //! over https or http to a loopback host. A non-2xx body is read up to
 //! [`scrub::read_cap`] and quoted only after every detectable echo of the key
-//! is replaced ([`scrub::quotable_body`]).
+//! is replaced ([`scrub::quotable_body`]). A 2xx body is read in chunks up to
+//! [`bge_m3::success_body_cap`] (64 bytes a component, at least 4 MiB).
 //!
-//! **Errors.** A transport failure is [`EmbedError::Unavailable`]. A non-2xx
+//! **Errors.** A transport failure is [`EmbedError::Unavailable`], including
+//! one that cuts a 2xx body off mid-read (a reset, or a stall past the
+//! request timeout, which covers the body). A non-2xx
 //! status is classified by the J3 table ([`bge_m3::classify_status`]) with two
 //! Elastic-specific refinements for a `400`, read from the reasons of the
 //! Elastic error JSON only (never the rest of the body, which can echo the
 //! input): a reason saying `Incompatible task_type` (the endpoint is not a
 //! text_embedding endpoint) and a reason naming `input_type` (the service
-//! refuses the field) are permanent configuration errors with a hint. A bad
-//! body, the wrong width, a non-finite or zero-norm vector are
-//! [`EmbedError::Backend`].
+//! refuses the field) are permanent configuration errors with a hint. A 2xx
+//! body over the cap (never quoted), a bad body, the wrong width, a
+//! non-finite or zero-norm vector are [`EmbedError::Backend`].
 //!
 //! **CON-2:** there is no retry that changes the request. In particular a
 //! refused `input_type` is never retried without it, since that would embed
@@ -47,7 +50,7 @@ use reqwest::header::{HeaderValue, AUTHORIZATION};
 use serde::de::IgnoredAny;
 use serde::{Deserialize, Serialize};
 
-use super::bge_m3::{self, scrub, EmbedStatusClass, StatusVerdict};
+use super::bge_m3::{self, scrub, EmbedStatusClass, StatusVerdict, SuccessBodyError};
 use super::{api_key, EmbedError, Embedder, EmbedderConfig};
 
 /// `input_type` for the document role ([`Embedder::embed`]).
@@ -375,12 +378,23 @@ impl ElasticEmbedder {
         })?;
         let status = resp.status();
         if status.is_success() {
-            let bytes = resp.bytes().await.map_err(|e| {
-                EmbedError::Backend(format!(
-                    "Elasticsearch response body could not be read: {}",
-                    e.without_url()
-                ))
-            })?;
+            let cap = bge_m3::success_body_cap(self.dim);
+            let bytes = bge_m3::read_success_body(resp, cap)
+                .await
+                .map_err(|e| match e {
+                    // A transport failure mid-body says nothing about the
+                    // input: transient, so the write keeps its durable intent.
+                    SuccessBodyError::Cut(e) => EmbedError::Unavailable(format!(
+                        "Elasticsearch response body from {} was cut off: {}",
+                        self.log_url,
+                        e.without_url()
+                    )),
+                    SuccessBodyError::TooLarge => EmbedError::Backend(format!(
+                        "Elasticsearch response from {} is over {cap} bytes, more than an \
+                         embedding of {} components needs; refusing it (body not shown)",
+                        self.log_url, self.dim
+                    )),
+                })?;
             // The parse error's own text quotes body content, which an
             // echoing endpoint could fill with the key: name only its class
             // and position.

@@ -249,6 +249,63 @@ pub(crate) fn url_for_log(url: &str) -> String {
     }
 }
 
+/// The least [`success_body_cap`] allows, whatever the width: room for the
+/// JSON envelope (model name, usage counts) and for a server that answers
+/// wider than `dim` before a client-side Matryoshka cut.
+pub(crate) const SUCCESS_BODY_FLOOR: usize = 4 * 1024 * 1024;
+
+/// Bytes of a success body allowed per expected vector component. One JSON
+/// number with its separator is at most about 25 bytes even printed as an
+/// `f64` (`-1.2345678901234567e-308,`), so 64 is generous.
+const SUCCESS_BYTES_PER_COMPONENT: usize = 64;
+
+/// The most of a 2xx embeddings body worth downloading for a vector of `dim`
+/// components: `dim` x [`SUCCESS_BYTES_PER_COMPONENT`], at least
+/// [`SUCCESS_BODY_FLOOR`]. A body past it is no embedding the adapter can
+/// use, and a hostile or broken endpoint could otherwise stream without end
+/// into memory.
+pub(crate) fn success_body_cap(dim: usize) -> usize {
+    dim.saturating_mul(SUCCESS_BYTES_PER_COMPONENT)
+        .max(SUCCESS_BODY_FLOOR)
+}
+
+/// Why [`read_success_body`] returned no body.
+#[derive(Debug)]
+pub(crate) enum SuccessBodyError {
+    /// The transport failed mid-body: a reset, a stall past the request
+    /// timeout (which covers the body), a connection closed early. The server
+    /// said nothing about the input, so the caller answers
+    /// [`EmbedError::Unavailable`] and the write keeps its durable intent.
+    Cut(reqwest::Error),
+    /// The body is longer than the cap (by `Content-Length`, or once read
+    /// that far). The caller answers [`EmbedError::Backend`] without quoting
+    /// any of it.
+    TooLarge,
+}
+
+/// Read a 2xx body of at most `cap` bytes, in chunks. A `Content-Length` over
+/// the cap is refused before anything is read, and a body without one stops
+/// at the first chunk that would pass it; the rest is never downloaded.
+pub(crate) async fn read_success_body(
+    mut resp: reqwest::Response,
+    cap: usize,
+) -> Result<Vec<u8>, SuccessBodyError> {
+    if resp
+        .content_length()
+        .is_some_and(|len| len > u64::try_from(cap).unwrap_or(u64::MAX))
+    {
+        return Err(SuccessBodyError::TooLarge);
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = resp.chunk().await.map_err(SuccessBodyError::Cut)? {
+        if chunk.len() > cap - body.len() {
+            return Err(SuccessBodyError::TooLarge);
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
 /// The HTTP client for `base_url`.
 ///
 /// Redirects are never followed (`Policy::none`): an embeddings POST has no
