@@ -169,10 +169,12 @@ url = "http://127.0.0.1:8080"
 #   canary = "verify"
 # No fallback during an Elastic outage. Under hybrid a derive answers failed, but
 # an outage keeps its durable intent and the next serve re-attempts it (recall
-# before re-deriving); only a refused text or a configuration error fails a
-# write for good. Recall answers from its keyword and recent legs. With
-# the recall tier on Elastic as well, both of recall's vector dependencies sit on
-# one service; the embedder and the recall tier stay independent of each other.
+# before re-deriving); only a refused text, a configuration error, or a response
+# Lambo cannot use (unparseable, over the size cap, the wrong width, non-finite
+# or zero-norm) fails a write for good. Recall answers from its keyword and
+# recent legs. With the recall tier on Elastic as well, both of recall's vector
+# dependencies sit on one service; the embedder and the recall tier stay
+# independent of each other.
 #
 # In-crate candle BGE-M3 (kind = "candle", feature embed-candle): embeds locally, no
 # llama.cpp server. Weights fetch from hf-hub on first use and cache under the
