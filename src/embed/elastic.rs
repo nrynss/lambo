@@ -27,10 +27,12 @@
 //!
 //! **Errors.** A transport failure is [`EmbedError::Unavailable`]. A non-2xx
 //! status is classified by the J3 table ([`bge_m3::classify_status`]) with two
-//! Elastic-specific refinements for a `400`: a body naming `task_type` (the
-//! endpoint is not a text_embedding endpoint) and a body naming `input_type`
-//! (the service refuses the field) are permanent configuration errors with a
-//! hint. A bad body, the wrong width, a non-finite or zero-norm vector are
+//! Elastic-specific refinements for a `400`, read from the reasons of the
+//! Elastic error JSON only (never the rest of the body, which can echo the
+//! input): a reason saying `Incompatible task_type` (the endpoint is not a
+//! text_embedding endpoint) and a reason naming `input_type` (the service
+//! refuses the field) are permanent configuration errors with a hint. A bad
+//! body, the wrong width, a non-finite or zero-norm vector are
 //! [`EmbedError::Backend`].
 //!
 //! **CON-2:** there is no retry that changes the request. In particular a
@@ -55,14 +57,15 @@ pub(crate) const INPUT_TYPE_QUERY: &str = "SEARCH";
 /// Appended to the contract model when `send_input_type = false`.
 pub(crate) const INPUT_TYPE_OFF_SUFFIX: &str = ";input_type=off";
 
-/// Appended to the error for a `400` whose body names `input_type`.
+/// Appended to the error for a `400` whose error reason names `input_type`.
 const INPUT_TYPE_HINT: &str =
     " (this inference endpoint refused the input_type field Lambo sends: \
     INGEST for documents, SEARCH for queries; not every Elastic service accepts it. Set [embedder] \
     send_input_type = false to omit it. That changes the embedding contract's model (it gains \
     ;input_type=off), so a session embedded with input_type must be re-embedded)";
 
-/// Appended to the error for a `400` whose body names `task_type`.
+/// Appended to the error for a `400` whose error reason says `Incompatible
+/// task_type`.
 const TASK_TYPE_HINT: &str = " (this inference endpoint is not a text_embedding endpoint: ELSER \
     endpoints such as .elser-2-elastic are sparse_embedding, and multimodal endpoints such as \
     .jina-clip-v2 are task type embedding; neither can serve kind elastic. Point [embedder] model \
@@ -93,21 +96,63 @@ struct EmbeddingEntry {
     embedding: Vec<f32>,
 }
 
+/// The wording Elastic uses when a `text_embedding` request reaches an
+/// endpoint of another task type (seen live on Elastic Cloud Serverless,
+/// 2026-11-09, for `embedding` and `sparse_embedding` endpoints): `Incompatible
+/// task_type, the requested type [text_embedding] does not match the model
+/// type [...]`. Matched lowercased.
+const TASK_TYPE_REASON: &str = "incompatible task_type";
+
+/// The reason strings of an Elastic error body, lowercased: `error.reason`
+/// and every `error.root_cause[].reason`. A body that is not JSON, has no
+/// `error` object, or carries a reason that is not a string contributes
+/// nothing for that part. Only these strings are matched by
+/// [`elastic_status_rule`], never the rest of the body, which can echo the
+/// input text.
+fn error_reasons(body: &str) -> Vec<String> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else {
+        return Vec::new();
+    };
+    let Some(error) = value.get("error") else {
+        return Vec::new();
+    };
+    let root_causes = error
+        .get("root_cause")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten();
+    std::iter::once(error)
+        .chain(root_causes)
+        .filter_map(|e| e.get("reason").and_then(serde_json::Value::as_str))
+        .map(str::to_ascii_lowercase)
+        .collect()
+}
+
 /// The status rule for an Elastic inference response: the J3 table, except
-/// that a `400` naming `task_type` or (when the request carried it)
-/// `input_type` is a permanent configuration error with a hint. `task_type`
-/// is checked first: a wrong endpoint is wrong whatever the request said.
-/// Both words are matched case-insensitively, with `_` or a space.
+/// for two `400`s, which are permanent configuration errors with a hint. Only
+/// the reasons of the Elastic error JSON are read ([`error_reasons`]):
+///
+/// - a reason containing `Incompatible task_type` ([`TASK_TYPE_REASON`]):
+///   the endpoint is not a text_embedding endpoint. Checked first, since a
+///   wrong endpoint is wrong whatever the request said.
+/// - when the request carried `input_type`, a reason naming `input_type` or
+///   `input type` (case-insensitive): the service refuses the field.
+///
+/// Any other `400` keeps the J3 class with no hint.
 pub(crate) fn elastic_status_rule(code: u16, body: &str, sent_input_type: bool) -> StatusVerdict {
     if code == 400 {
-        let lower = body.to_ascii_lowercase();
-        if lower.contains("task_type") || lower.contains("task type") {
+        let reasons = error_reasons(body);
+        if reasons.iter().any(|r| r.contains(TASK_TYPE_REASON)) {
             return StatusVerdict {
                 class: EmbedStatusClass::PermanentConfig,
                 hint: Some(TASK_TYPE_HINT),
             };
         }
-        if sent_input_type && (lower.contains("input_type") || lower.contains("input type")) {
+        if sent_input_type
+            && reasons
+                .iter()
+                .any(|r| r.contains("input_type") || r.contains("input type"))
+        {
             return StatusVerdict {
                 class: EmbedStatusClass::PermanentConfig,
                 hint: Some(INPUT_TYPE_HINT),

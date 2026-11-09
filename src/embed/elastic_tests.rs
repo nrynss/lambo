@@ -297,9 +297,17 @@ fn the_status_rule_refines_two_400s() {
     assert_eq!(v.hint, Some(INPUT_TYPE_HINT));
     // Case and spelling: "Input Type" with a space still counts.
     assert_eq!(
-        rule(400, "Input Type [SEARCH] is not supported", true).hint,
+        rule(
+            400,
+            r#"{"error":{"reason":"Input Type [SEARCH] is not supported"}}"#,
+            true
+        )
+        .hint,
         Some(INPUT_TYPE_HINT)
     );
+    // A root_cause reason counts as well as the top-level one.
+    let root_only = r#"{"error":{"root_cause":[{"reason":"unrelated"},{"reason":"input_type is not allowed"}],"type":"x","reason":"failed"}}"#;
+    assert_eq!(rule(400, root_only, true).hint, Some(INPUT_TYPE_HINT));
     // Not sent: the input_type hint would point at a setting already applied.
     assert_eq!(rule(400, input, false).class, EmbedStatusClass::Content);
     assert_eq!(rule(400, input, false).hint, None);
@@ -315,6 +323,76 @@ fn the_status_rule_refines_two_400s() {
             "{code}"
         );
         assert_eq!(rule(code, input, true).hint, None, "{code}");
+    }
+}
+
+/// The 400 refinements read only the reasons of the Elastic error JSON, so
+/// text the body echoes elsewhere cannot pick a hint.
+///
+/// Mutation: match the whole body instead of `error_reasons` -> red.
+#[test]
+fn the_status_rule_reads_only_error_reasons() {
+    let rule = elastic_status_rule;
+
+    // A content 400 echoing input text that happens to say "input_type" (and
+    // "task_type") outside error.reason: no hint, the J3 content class.
+    let echo = r#"{"error":{"root_cause":[{"type":"illegal_argument_exception","reason":"input is too long"}],"type":"illegal_argument_exception","reason":"input is too long","input":["how is input_type set? Incompatible task_type"]},"status":400}"#;
+    let v = rule(400, echo, true);
+    assert_eq!(v.class, EmbedStatusClass::Content);
+    assert_eq!(v.hint, None);
+
+    // An input_type refusal that also mentions "task type" gets the
+    // input_type hint, not the task_type one.
+    let both_input = r#"{"error":{"reason":"input_type [SEARCH] is not supported for task type text_embedding on this service"},"status":400}"#;
+    let v = rule(400, both_input, true);
+    assert_eq!(v.class, EmbedStatusClass::PermanentConfig);
+    assert_eq!(v.hint, Some(INPUT_TYPE_HINT));
+    // An Incompatible task_type reason that also mentions input_type gets the
+    // task_type hint: the wrong endpoint is checked first.
+    let both_task = r#"{"error":{"reason":"Incompatible task_type, the requested type [text_embedding] does not match the model type [embedding]; input_type ignored"},"status":400}"#;
+    assert_eq!(rule(400, both_task, true).hint, Some(TASK_TYPE_HINT));
+
+    // The live Elastic Cloud Serverless body (2026-11-09), for an embedding
+    // and a sparse_embedding endpoint, whether or not input_type was sent.
+    for model_type in ["embedding", "sparse_embedding"] {
+        let reason = format!(
+            "Incompatible task_type, the requested type [text_embedding] does not match the \
+             model type [{model_type}]"
+        );
+        let live = serde_json::json!({
+            "error": {
+                "root_cause": [{ "type": "status_exception", "reason": reason }],
+                "type": "status_exception",
+                "reason": reason,
+            },
+            "status": 400,
+        })
+        .to_string();
+        for sent in [true, false] {
+            let v = rule(400, &live, sent);
+            assert_eq!(v.class, EmbedStatusClass::PermanentConfig, "{model_type}");
+            assert_eq!(v.hint, Some(TASK_TYPE_HINT), "{model_type}");
+        }
+    }
+
+    // A bare mention of task_type without "Incompatible" is not the task_type
+    // refusal.
+    assert_eq!(
+        rule(400, r#"{"error":{"reason":"task_type is fine"}}"#, false).hint,
+        None
+    );
+
+    // A non-JSON 400, or JSON without reasons, naming both words: no hint,
+    // classed as the J3 table classes a 400.
+    for body in [
+        "Incompatible task_type; input_type [SEARCH] is not supported",
+        r#"{"error":"Incompatible task_type; input_type refused"}"#,
+        r#"{"error":{"reason":7,"root_cause":"input_type"}}"#,
+        r#"{"message":"input_type refused"}"#,
+    ] {
+        let v = rule(400, body, true);
+        assert_eq!(v.class, bge_m3::classify_status(400), "{body}");
+        assert_eq!(v.hint, None, "{body}");
     }
 }
 

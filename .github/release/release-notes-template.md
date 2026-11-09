@@ -22,7 +22,8 @@ below never needs a different download.
 - Stores: `memory`, `sqlite`, `cockroach`, `postgres` (PostgreSQL + pgvector)
 - Embedders: `fixture`, `bge_m3` (also reached as `openai`), `gemini` (Vertex
   `gemini-embedding-001`), `embeddinggemma2` (EmbeddingGemma 2, text and
-  images, feature `embed-eg2`)
+  images, feature `embed-eg2`), `elastic` (the Elasticsearch Inference API,
+  feature `embed-elastic`)
 - Recall tier: `elastic` (feature `recall-elastic`), an optional Elasticsearch
   index selected by a top-level `[recall]` section that serves recall's vector
   leg beside the store
@@ -46,7 +47,10 @@ b11452 or later; images need it started with `--mmproj` and the image-budget
 flags in `lambo.example.toml` (without `--mmproj`, set `[embedder] images =
 false`). The Elasticsearch tier needs a reachable cluster; the store stays the
 source of truth, and recall's vector leg falls back to the store while the
-index is stale or failing.
+index is stale or failing. The `elastic` embedder needs a reachable
+Elasticsearch cluster with a `text_embedding` inference endpoint; used together
+with the `[recall]` Elasticsearch tier, it puts both of recall's vector
+dependencies on one service.
 
 `cargo install lambo` is a leaner channel: it builds the crate's default
 features (the `memory` store, `fixture` + `bge_m3` embedders) rather than the

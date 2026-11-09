@@ -163,8 +163,9 @@ url = "http://127.0.0.1:8080"
 # ";input_type=off" to the contract model (a different space: re-embed).
 #   send_input_type = true
 # Elastic can change the model behind an endpoint id without changing the id, so
-# recommend the canary in verify mode: a writer attach then refuses to write when
-# the endpoint's vectors drift from the ones this store pinned.
+# canary = "verify" is recommended: every writer attach then re-embeds the canary
+# phrases and refuses to attach (unless --allow-embedding-mismatch is passed)
+# when they drift from the vectors this store pinned.
 #   canary = "verify"
 # No fallback during an Elastic outage: derives fail (hybrid), unattempted writes
 # stay durable intents, and recall answers from its keyword and recent legs. With
