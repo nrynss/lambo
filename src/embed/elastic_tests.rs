@@ -498,7 +498,7 @@ async fn a_transport_failure_is_unavailable() {
 /// so `Unavailable` and the write keeps its durable intent; the partial body
 /// is not quoted.
 ///
-/// Mutation: map `SuccessBodyError::Cut` to `Backend` -> red.
+/// Mutation: map `BodyReadError::Cut` to `Backend` -> red.
 #[tokio::test]
 async fn a_success_body_cut_off_mid_read_is_unavailable() {
     let partial = br#"{"text_embedding":[{"embedding":[0.123456,"#.to_vec();

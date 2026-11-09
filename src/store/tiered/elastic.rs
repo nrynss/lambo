@@ -24,6 +24,11 @@
 //! with a key ignores the proxy environment. Redirects are never followed, so
 //! the key is never resent to another target; a 3xx is an error that does not
 //! quote the redirect target.
+//!
+//! Every response body is read through `crate::net::read_capped_body`, up to
+//! [`RESPONSE_BODY_CAP`] (a kNN search up to [`knn_body_cap`]); a longer one
+//! is an error that quotes none of it, and a body cut off mid-read is the
+//! same transport error as a request that got no answer.
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -37,7 +42,7 @@ use serde_json::{json, Value};
 
 use super::index::{DeleteReport, DocOp, KnnHit, RecallIndex, SyncMarker};
 use super::project::{contract_hash, validate_index_prefix};
-use crate::net::scrub;
+use crate::net::{scrub, BodyReadError};
 use crate::store::RecallConfig;
 use crate::types::{EmbeddingContract, NodeId, SessionId, StoreError};
 
@@ -50,6 +55,38 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_millis(5000);
 /// out would leave the session stale forever while the engine keeps
 /// deleting. The configured timeout still bounds connecting.
 const MAINTENANCE_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// The most of a response body the tier downloads: 32 MiB (a kNN search
+/// may take more, by [`knn_body_cap`]). Every body is read through
+/// [`crate::net::read_capped_body`], error bodies included, so a hostile or
+/// broken cluster (or a proxy in front of it) cannot stream without end into
+/// memory; before, only the request timeout bounded the read (300 seconds
+/// for maintenance calls). Fixed and generous: a marker, a count, a
+/// delete-by-query report, a bulk response (one short item per document) or
+/// an error with its stack stays far under it.
+const RESPONSE_BODY_CAP: usize = 32 * 1024 * 1024;
+
+/// Bytes of a kNN response allowed per stored vector component. An `f32`
+/// printed as JSON with its separator is at most about 16 bytes
+/// (`-1.2345678e-38,`), so 32 is generous.
+const KNN_BYTES_PER_COMPONENT: usize = 32;
+
+/// Bytes of a kNN response allowed per hit besides its vector: `_index`,
+/// `_id`, `_score` and the canonical key.
+const KNN_BYTES_PER_HIT: usize = 32 * 1024;
+
+/// The most of a kNN response worth downloading for `k` hits of `dim`
+/// components: what that many hits can legitimately take, at least
+/// [`RESPONSE_BODY_CAP`]. Every hit carries its stored vector, so a large
+/// `k` at a wide contract (2048 hits of 4096 components is about 80 MB as
+/// Elasticsearch prints it) needs more than the fixed cap, and the bound
+/// still follows what the request asked for.
+fn knn_body_cap(k: usize, dim: usize) -> usize {
+    dim.saturating_mul(KNN_BYTES_PER_COMPONENT)
+        .saturating_add(KNN_BYTES_PER_HIT)
+        .saturating_mul(k)
+        .max(RESPONSE_BODY_CAP)
+}
 
 /// `num_candidates` floor for a kNN query (the issue's `max(limit * 4, 100)`).
 const MIN_NUM_CANDIDATES: usize = 100;
@@ -215,7 +252,8 @@ impl ElasticRecall {
         url: Url,
         body: Option<Body>,
     ) -> Result<(StatusCode, Value), StoreError> {
-        self.send_within(what, method, url, body, None).await
+        self.send_within(what, method, url, body, None, RESPONSE_BODY_CAP)
+            .await
     }
 
     /// [`Self::send`] with the maintenance budget instead of the per-request
@@ -228,7 +266,7 @@ impl ElasticRecall {
         body: Option<Body>,
     ) -> Result<(StatusCode, Value), StoreError> {
         let budget = MAINTENANCE_TIMEOUT.max(self.timeout);
-        self.send_within(what, method, url, body, Some(budget))
+        self.send_within(what, method, url, body, Some(budget), RESPONSE_BODY_CAP)
             .await
     }
 
@@ -239,6 +277,7 @@ impl ElasticRecall {
         url: Url,
         body: Option<Body>,
         timeout: Option<Duration>,
+        cap: usize,
     ) -> Result<(StatusCode, Value), StoreError> {
         let mut req = self.client.request(method, url);
         if let Some(timeout) = timeout {
@@ -254,7 +293,21 @@ impl ElasticRecall {
         };
         let resp = req.send().await.map_err(|e| backend(what, e))?;
         let status = resp.status();
-        let bytes = resp.bytes().await.map_err(|e| backend(what, e))?;
+        let bytes = crate::net::read_capped_body(resp, cap)
+            .await
+            .map_err(|e| match e {
+                // A transport failure mid-body is a transport failure like
+                // one before the status line: the same error.
+                BodyReadError::Cut(e) => backend(what, e),
+                // Neither the body nor the key is quoted.
+                BodyReadError::TooLarge => backend(
+                    what,
+                    format!(
+                        "HTTP {status}: response body over {cap} bytes; refusing it (body not \
+                         shown)"
+                    ),
+                ),
+            })?;
         let value = if bytes.is_empty() {
             Value::Null
         } else {
@@ -616,8 +669,16 @@ impl RecallIndex for ElasticRecall {
             // The stored vector rides along so the tier re-ranks exactly.
             "_source": ["canonical_key", "embedding"]
         });
+        let cap = knn_body_cap(k, contract.dim);
         let (status, resp) = self
-            .send("knn search", Method::POST, url, Some(Body::Json(body)))
+            .send_within(
+                "knn search",
+                Method::POST,
+                url,
+                Some(Body::Json(body)),
+                None,
+                cap,
+            )
             .await?;
         if status == StatusCode::NOT_FOUND && Self::error_type(&resp) == "index_not_found_exception"
         {
@@ -1448,5 +1509,101 @@ mod tests {
         let index = ElasticRecall::new(&cfg("http://127.0.0.1:1")).unwrap();
         let err = index.read_marker(&SessionId::new("s")).await.unwrap_err();
         assert!(err.to_string().contains("recall index"), "{err}");
+    }
+
+    /// Pre-existing (found in #233 review): every response body, error
+    /// bodies included, was read whole with `resp.bytes()`, bounded only by
+    /// the request timeout. Past [`RESPONSE_BODY_CAP`] it is now refused,
+    /// whether `Content-Length` announces it or it streams chunked, and the
+    /// error quotes neither the body nor the key.
+    ///
+    /// Mutation: read with `resp.bytes()` again -> red (the padded body
+    /// parses, and the marker read answers `Ok(None)`).
+    #[tokio::test]
+    async fn an_oversized_response_body_is_refused_unquoted() {
+        const VAR: &str = "LAMBO_TEST_RECALL_BODY_CAP";
+        let fake = format!("fake-{}-{}", "recall", "cap-key-xyzzy");
+        // Valid JSON padded past the cap, ending in the key: a parse would
+        // succeed and a quote would show it.
+        let big = format!(
+            "{{\"found\":false,\"pad\":\"{}{fake}\"}}",
+            "x".repeat(RESPONSE_BODY_CAP)
+        );
+
+        let announced = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n",
+            big.len()
+        );
+        let announced =
+            crate::test_util::serve_raw_http_once(announced, vec![big.as_bytes().to_vec()]).await;
+
+        let chunked =
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ntransfer-encoding: chunked\r\n\r\n"
+                .to_string();
+        let frames = big
+            .as_bytes()
+            .chunks(1024 * 1024)
+            .map(|c| {
+                let mut framed = format!("{:x}\r\n", c.len()).into_bytes();
+                framed.extend_from_slice(c);
+                framed.extend_from_slice(b"\r\n");
+                framed
+            })
+            .chain(std::iter::once(b"0\r\n\r\n".to_vec()))
+            .collect();
+        let streamed = crate::test_util::serve_raw_http_once(chunked, frames).await;
+
+        for base in [announced, streamed] {
+            let index = {
+                let env = crate::test_util::env_lock();
+                env.set(VAR, &fake);
+                ElasticRecall::new(&keyed(&base, VAR)).unwrap()
+            };
+            let text = index
+                .read_marker(&SessionId::new("s"))
+                .await
+                .expect_err("an oversized body is an error")
+                .to_string();
+            assert!(
+                text.contains(&format!("over {RESPONSE_BODY_CAP} bytes")),
+                "{text}"
+            );
+            assert!(text.contains("body not shown"), "{text}");
+            assert!(!text.contains("xyzzy") && !text.contains("xxxx"), "{text}");
+        }
+    }
+
+    /// The kNN cap follows the request: never under the fixed cap, and wide
+    /// enough for a large `k` at a wide contract.
+    #[test]
+    fn the_knn_body_cap_grows_with_k_and_dim() {
+        assert_eq!(knn_body_cap(0, 1024), RESPONSE_BODY_CAP);
+        assert_eq!(knn_body_cap(50, 1024), RESPONSE_BODY_CAP);
+        assert_eq!(
+            knn_body_cap(2048, 4096),
+            2048 * (4096 * KNN_BYTES_PER_COMPONENT + KNN_BYTES_PER_HIT)
+        );
+        assert!(knn_body_cap(2048, 4096) > 100 * 1024 * 1024);
+        assert_eq!(knn_body_cap(usize::MAX, 4096), usize::MAX);
+    }
+
+    /// A body the connection cuts off mid-read is the same transport error
+    /// as a request that got no answer, and the partial body is not quoted.
+    #[tokio::test]
+    async fn a_response_body_cut_off_mid_read_is_a_transport_error() {
+        let head = "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                    content-length: 100000\r\n\r\n"
+            .to_string();
+        let partial = br#"{"found":true,"_source":{"partial-marker-xyzzy":"#.to_vec();
+        let base = crate::test_util::serve_raw_http_once(head, vec![partial]).await;
+        let index = ElasticRecall::new(&cfg(&base)).unwrap();
+        let err = index.read_marker(&SessionId::new("s")).await.unwrap_err();
+        assert!(matches!(err, StoreError::Backend(_)), "{err:?}");
+        let text = err.to_string();
+        assert!(text.contains("recall index: read marker"), "{text}");
+        assert!(
+            !text.contains("xyzzy"),
+            "the partial body is not quoted: {text}"
+        );
     }
 }

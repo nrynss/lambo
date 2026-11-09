@@ -50,8 +50,9 @@ use reqwest::header::{HeaderValue, AUTHORIZATION};
 use serde::de::IgnoredAny;
 use serde::{Deserialize, Serialize};
 
-use super::bge_m3::{self, scrub, EmbedStatusClass, StatusVerdict, SuccessBodyError};
+use super::bge_m3::{self, scrub, EmbedStatusClass, StatusVerdict};
 use super::{api_key, EmbedError, Embedder, EmbedderConfig};
+use crate::net::BodyReadError;
 
 /// `input_type` for the document role ([`Embedder::embed`]).
 pub(crate) const INPUT_TYPE_DOCUMENT: &str = "INGEST";
@@ -379,17 +380,17 @@ impl ElasticEmbedder {
         let status = resp.status();
         if status.is_success() {
             let cap = bge_m3::success_body_cap(self.dim);
-            let bytes = bge_m3::read_success_body(resp, cap)
+            let bytes = crate::net::read_capped_body(resp, cap)
                 .await
                 .map_err(|e| match e {
                     // A transport failure mid-body says nothing about the
                     // input: transient, so the write keeps its durable intent.
-                    SuccessBodyError::Cut(e) => EmbedError::Unavailable(format!(
+                    BodyReadError::Cut(e) => EmbedError::Unavailable(format!(
                         "Elasticsearch response body from {} was cut off: {}",
                         self.log_url,
                         e.without_url()
                     )),
-                    SuccessBodyError::TooLarge => EmbedError::Backend(format!(
+                    BodyReadError::TooLarge => EmbedError::Backend(format!(
                         "Elasticsearch response from {} is over {cap} bytes, more than an \
                          embedding of {} components needs; refusing it (body not shown)",
                         self.log_url, self.dim

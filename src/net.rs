@@ -11,7 +11,8 @@
 //! Its own module so that the recall tier (feature `recall-elastic`, which
 //! enables only `reqwest`) can use it without compiling the embedders. The
 //! same goes for [`scrub`], which keeps a credential out of an error body or
-//! reason before either is quoted.
+//! reason before either is quoted, and for [`read_capped_body`], which bounds
+//! how much of a response body is downloaded.
 
 use reqwest::Url;
 
@@ -49,6 +50,46 @@ pub(crate) fn is_loopback_http(url: &Url) -> bool {
 /// to a loopback host.
 pub(crate) fn may_carry_credential(url: &Url) -> bool {
     url.scheme() == "https" || is_loopback_http(url)
+}
+
+/// Why [`read_capped_body`] returned no body.
+#[derive(Debug)]
+pub(crate) enum BodyReadError {
+    /// The transport failed mid-body: a reset, a stall past the request
+    /// timeout (which covers the body), a connection closed early. The server
+    /// said nothing about the request, so each caller classifies it as it
+    /// classifies a request that got no answer at all (the embedders answer
+    /// `EmbedError::Unavailable`, so the write keeps its durable intent).
+    Cut(reqwest::Error),
+    /// The body is longer than the cap (by `Content-Length`, or once read
+    /// that far). The caller refuses the response without quoting any of it.
+    TooLarge,
+}
+
+/// Read a response body of at most `cap` bytes, in chunks. A
+/// `Content-Length` over the cap is refused before anything is read, and a
+/// body without one stops at the first chunk that would pass it; the rest is
+/// never downloaded, so a hostile or broken server cannot stream without end
+/// into memory. Shared by the hosted embedders (their 2xx bodies) and the
+/// `[recall]` tier (every body).
+pub(crate) async fn read_capped_body(
+    mut resp: reqwest::Response,
+    cap: usize,
+) -> Result<Vec<u8>, BodyReadError> {
+    if resp
+        .content_length()
+        .is_some_and(|len| len > u64::try_from(cap).unwrap_or(u64::MAX))
+    {
+        return Err(BodyReadError::TooLarge);
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = resp.chunk().await.map_err(BodyReadError::Cut)? {
+        if chunk.len() > cap - body.len() {
+            return Err(BodyReadError::TooLarge);
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
 }
 
 #[cfg(test)]

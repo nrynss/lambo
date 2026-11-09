@@ -57,6 +57,14 @@
   detectable echo (raw, JSON-escaped, percent-encoded, or a run of 8 or
   more of its bytes) is now replaced with `(token not shown)`, the rule
   the hosted embedders already follow.
+- **The `[recall]` tier no longer downloads a response of any size.**
+  Every response body, error bodies included, was read whole, bounded
+  only by the request timeout (300 seconds for maintenance calls), so a
+  broken or hostile cluster or proxy could stream without end into
+  memory. A body is now read up to 32 MiB, or for a kNN search what its
+  neighbours can take if that is more (32 bytes a dimension and 32 KiB a
+  neighbour); a longer one is an error that quotes neither the body nor
+  the key, handled like any other failure of the index.
 
 ## 0.9.2 (2026-11-04)
 

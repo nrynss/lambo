@@ -22,6 +22,7 @@ use super::{EmbedError, Embedder};
 
 // Moved to `crate::net` so the `[recall]` tier can scrub its error reasons too.
 pub(crate) use crate::net::scrub;
+use crate::net::{read_capped_body, BodyReadError};
 
 /// OpenAI-compatible embeddings request body (`model` is omitted when empty so it hits
 /// a llama.cpp server's default model; `dimensions` is omitted unless the operator
@@ -105,18 +106,18 @@ pub(crate) struct StatusVerdict {
     pub(crate) hint: Option<&'static str>,
 }
 
-/// A status rule: the status code and the (scrubbed, capped) error body in,
-/// the class out. The class is still decided at the site that read the
-/// response and carried out as an [`EmbedError`] variant (J1-R2-2); a rule
-/// only lets an adapter that knows its server's bodies refine the table for
-/// a request shape the table was not written for (the EmbeddingGemma 2
-/// image call, whose `500` can be a permanent deployment fault).
 /// How [`BgeM3LlamaCppEmbedder::post_json`] begins the message of a request that never
 /// got an HTTP answer (refused, reset, timed out). A caller that must tell a
 /// connection-level failure from a transient HTTP status (a 503 "busy")
 /// matches on it.
 pub(crate) const LLAMA_UNREACHABLE: &str = "llama.cpp unreachable at ";
 
+/// A status rule: the status code and the (scrubbed, capped) error body in,
+/// the class out. The class is still decided at the site that read the
+/// response and carried out as an [`EmbedError`] variant (J1-R2-2); a rule
+/// only lets an adapter that knows its server's bodies refine the table for
+/// a request shape the table was not written for (the EmbeddingGemma 2
+/// image call, whose `500` can be a permanent deployment fault).
 pub(crate) type StatusRule = fn(u16, &str) -> StatusVerdict;
 
 /// The body `llama-server` (checked on b11517) sends with `500` for a
@@ -268,43 +269,6 @@ const SUCCESS_BYTES_PER_COMPONENT: usize = 64;
 pub(crate) fn success_body_cap(dim: usize) -> usize {
     dim.saturating_mul(SUCCESS_BYTES_PER_COMPONENT)
         .max(SUCCESS_BODY_FLOOR)
-}
-
-/// Why [`read_success_body`] returned no body.
-#[derive(Debug)]
-pub(crate) enum SuccessBodyError {
-    /// The transport failed mid-body: a reset, a stall past the request
-    /// timeout (which covers the body), a connection closed early. The server
-    /// said nothing about the input, so the caller answers
-    /// [`EmbedError::Unavailable`] and the write keeps its durable intent.
-    Cut(reqwest::Error),
-    /// The body is longer than the cap (by `Content-Length`, or once read
-    /// that far). The caller answers [`EmbedError::Backend`] without quoting
-    /// any of it.
-    TooLarge,
-}
-
-/// Read a 2xx body of at most `cap` bytes, in chunks. A `Content-Length` over
-/// the cap is refused before anything is read, and a body without one stops
-/// at the first chunk that would pass it; the rest is never downloaded.
-pub(crate) async fn read_success_body(
-    mut resp: reqwest::Response,
-    cap: usize,
-) -> Result<Vec<u8>, SuccessBodyError> {
-    if resp
-        .content_length()
-        .is_some_and(|len| len > u64::try_from(cap).unwrap_or(u64::MAX))
-    {
-        return Err(SuccessBodyError::TooLarge);
-    }
-    let mut body = Vec::new();
-    while let Some(chunk) = resp.chunk().await.map_err(SuccessBodyError::Cut)? {
-        if chunk.len() > cap - body.len() {
-            return Err(SuccessBodyError::TooLarge);
-        }
-        body.extend_from_slice(&chunk);
-    }
-    Ok(body)
 }
 
 /// The HTTP client for `base_url`.
@@ -592,16 +556,16 @@ impl BgeM3LlamaCppEmbedder {
         let status = resp.status();
         if status.is_success() {
             let cap = success_body_cap(self.dim);
-            let bytes = read_success_body(resp, cap).await.map_err(|e| match e {
+            let bytes = read_capped_body(resp, cap).await.map_err(|e| match e {
                 // A transport failure mid-body (a reset, or a stall past the
                 // request timeout, which covers the body) says nothing about
                 // the input: transient, so the write keeps its durable intent.
-                SuccessBodyError::Cut(e) => EmbedError::Unavailable(format!(
+                BodyReadError::Cut(e) => EmbedError::Unavailable(format!(
                     "llama.cpp response body from {} was cut off: {}",
                     self.log_url,
                     e.without_url()
                 )),
-                SuccessBodyError::TooLarge => EmbedError::Backend(format!(
+                BodyReadError::TooLarge => EmbedError::Backend(format!(
                     "llama.cpp response from {} is over {cap} bytes, more than an embedding of \
                      {} components needs; refusing it (body not shown)",
                     self.log_url, self.dim
@@ -790,7 +754,7 @@ mod tests {
     /// quoted. The EmbeddingGemma 2 adapter posts through the same
     /// `post_json`, so this holds for it too.
     ///
-    /// Mutation: map `SuccessBodyError::Cut` to `Backend` -> red.
+    /// Mutation: map `BodyReadError::Cut` to `Backend` -> red.
     #[tokio::test]
     async fn a_success_body_cut_off_mid_read_is_unavailable() {
         let head = "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
