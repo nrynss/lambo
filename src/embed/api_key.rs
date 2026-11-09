@@ -1,5 +1,8 @@
-//! `[embedder] api_key_env`: the bearer token for a hosted OpenAI-compatible
-//! embeddings endpoint, by reference only (issue #21).
+//! `[embedder] api_key_env`: the API key an HTTP embedder sends, by reference
+//! only (issue #21). `bge_m3` and `embeddinggemma2` send it as
+//! `Authorization: Bearer <key>` to an OpenAI-compatible endpoint; `elastic`
+//! sends it as `Authorization: ApiKey <key>` to the Elasticsearch Inference API
+//! (#233).
 //!
 //! The file names an environment variable; the token itself never goes in
 //! `lambo.toml`. The name rule is `[serve] token_env`'s (#32), shared in
@@ -65,8 +68,10 @@ pub(crate) fn validate(
 /// never contains any and a trailing newline from `$(cat file)` is not part of
 /// it.
 ///
-/// Only the `bge_m3` adapter sends a token, so this exists only where it is
-/// compiled.
+/// Callers: the `bge_m3` and `embeddinggemma2` factories (bearer) and the
+/// `elastic` factory (`ApiKey`). All three adapters build on `embed-bge`
+/// (`embed-eg2` and `embed-elastic` enable it), so this is compiled exactly
+/// where one of them is.
 #[cfg(feature = "embed-bge")]
 pub(crate) fn resolve(api_key_env: &str) -> Result<String, EmbedError> {
     validate(Some(api_key_env), None)?;
