@@ -1,8 +1,10 @@
 # Lambo v__LAMBO_VERSION__
 
-> Maintainer: trim the checklists below to the actual release contents before
-> publishing. The version is substituted automatically by the release
-> workflow; do not hand-edit it here.
+<!-- Maintainer: "What's new" is generated from CHANGELOG.md's `## <version>`
+section by scripts/ci/render_release_notes.py — do not hand-fill it, and
+keep the placeholder lines it keys on. The version is substituted
+automatically by the release workflow; do not hand-edit it here. Trim the
+static checklists below to the actual release contents before publishing. -->
 
 Lambo is agentic graph memory. This single binary carries the MCP server
 (`lambo serve`) and the CLI verbs (`lambo recall`, `lambo derive`, `lambo

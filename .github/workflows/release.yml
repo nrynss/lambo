@@ -285,14 +285,15 @@ jobs:
       - name: Render release notes
         run: |
           set -euo pipefail
-          # The template carries a literal __LAMBO_VERSION__ placeholder;
-          # substitute the version derived from Cargo.toml above (already
-          # asserted to match the tag). GitHub scans run-block text - comments
-          # included - for expression markers, so no curly-brace expression
-          # sequence may appear in this script; the placeholder is
-          # deliberately brace-free.
-          sed "s/__LAMBO_VERSION__/$VERSION/g" \
-            .github/release/release-notes-template.md > "/tmp/notes-$VERSION.md"
+          # "What's new" comes from CHANGELOG.md's `## <version>` section
+          # (scripts/ci/render_release_notes.py fails closed when it or the
+          # template placeholders are missing). GitHub scans run-block text
+          # for expression markers, so no curly-brace expression sequence may
+          # appear in this script; the placeholder is deliberately brace-free.
+          python3 scripts/ci/render_release_notes.py --version "$VERSION" \
+            --template .github/release/release-notes-template.md \
+            --changelog CHANGELOG.md \
+            --out "/tmp/notes-$VERSION.md"
 
       - name: Publish release
         env:
