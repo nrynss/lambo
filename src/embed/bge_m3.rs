@@ -20,7 +20,8 @@ use std::time::Duration;
 
 use super::{EmbedError, Embedder};
 
-pub(crate) mod scrub;
+// Moved to `crate::net` so the `[recall]` tier can scrub its error reasons too.
+pub(crate) use crate::net::scrub;
 
 /// OpenAI-compatible embeddings request body (`model` is omitted when empty so it hits
 /// a llama.cpp server's default model; `dimensions` is omitted unless the operator

@@ -9,9 +9,13 @@
 //! it, off the machine.
 //!
 //! Its own module so that the recall tier (feature `recall-elastic`, which
-//! enables only `reqwest`) can use it without compiling the embedders.
+//! enables only `reqwest`) can use it without compiling the embedders. The
+//! same goes for [`scrub`], which keeps a credential out of an error body or
+//! reason before either is quoted.
 
 use reqwest::Url;
+
+pub(crate) mod scrub;
 
 /// Is `url`'s host loopback: `localhost`, `127.0.0.0/8`, `::1` or an
 /// IPv4-mapped `127.0.0.0/8`? `url` has already normalised the host: IPv4 to

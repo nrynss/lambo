@@ -14,7 +14,10 @@
 //!
 //! Secrets: the API key comes from the environment variable `[recall]
 //! api_key = { env = ... }` names, is sent only in the `Authorization`
-//! header (marked sensitive), and appears in no error or log line. A URL that
+//! header (marked sensitive), and appears in no error or log line: the
+//! server's `error.type` and `error.reason` (and a bulk item's) are quoted
+//! only after every detectable echo of the key is replaced
+//! (`crate::net::scrub`, the embedders' rule). A URL that
 //! carries credentials is refused at construction. With a key, the URL must be
 //! `https`, or plain `http` to a loopback host (the shared rule in
 //! `crate::net`), checked before the key is read; a loopback `http` client
@@ -34,6 +37,7 @@ use serde_json::{json, Value};
 
 use super::index::{DeleteReport, DocOp, KnnHit, RecallIndex, SyncMarker};
 use super::project::{contract_hash, validate_index_prefix};
+use crate::net::scrub;
 use crate::store::RecallConfig;
 use crate::types::{EmbeddingContract, NodeId, SessionId, StoreError};
 
@@ -66,6 +70,37 @@ pub(crate) struct ElasticRecall {
 
 fn backend(what: &str, e: impl std::fmt::Display) -> StoreError {
     StoreError::Backend(format!("recall index: {what}: {e}"))
+}
+
+/// Should the client for `base` ignore the `HTTP_PROXY` / `HTTPS_PROXY` /
+/// `ALL_PROXY` environment? Only when it carries a key over plain `http` to a
+/// loopback host: a proxy would carry the request, and the key on it, off the
+/// machine in clear text. `https` keeps the environment's proxies (they only
+/// tunnel), and a client without a key has nothing to leak.
+fn bypasses_env_proxy(keyed: bool, base: &Url) -> bool {
+    keyed && crate::net::is_loopback_http(base)
+}
+
+/// Finish `builder` into the tier's client for `base`. Takes the builder so a
+/// test can hand in one that already names a proxy: `no_proxy` drops those
+/// and the environment's alike.
+fn build_client(
+    builder: reqwest::ClientBuilder,
+    base: &Url,
+    keyed: bool,
+    timeout: Duration,
+) -> Result<reqwest::Client, StoreError> {
+    // No redirects: reqwest keeps `Authorization` on a same-host redirect,
+    // even one that downgrades https to http, and no endpoint this client
+    // calls has a legitimate redirect. A 3xx comes back to `fail`.
+    let mut builder = builder
+        .connect_timeout(timeout)
+        .timeout(timeout)
+        .redirect(reqwest::redirect::Policy::none());
+    if bypasses_env_proxy(keyed, base) {
+        builder = builder.no_proxy();
+    }
+    builder.build().map_err(|e| backend("build HTTP client", e))
 }
 
 impl ElasticRecall {
@@ -128,21 +163,7 @@ impl ElasticRecall {
             .timeout_ms
             .map(Duration::from_millis)
             .unwrap_or(DEFAULT_TIMEOUT);
-        // No redirects: reqwest keeps `Authorization` on a same-host redirect,
-        // even one that downgrades https to http, and no endpoint this client
-        // calls has a legitimate redirect. A 3xx comes back to `fail`.
-        let mut builder = reqwest::Client::builder()
-            .connect_timeout(timeout)
-            .timeout(timeout)
-            .redirect(reqwest::redirect::Policy::none());
-        // A proxy would carry a loopback request, and the key on it, off the
-        // machine; https keeps the environment's proxies (they only tunnel).
-        if auth.is_some() && crate::net::is_loopback_http(&base) {
-            builder = builder.no_proxy();
-        }
-        let client = builder
-            .build()
-            .map_err(|e| backend("build HTTP client", e))?;
+        let client = build_client(reqwest::Client::builder(), &base, auth.is_some(), timeout)?;
         Ok(Self {
             client,
             base,
@@ -246,7 +267,24 @@ impl ElasticRecall {
         body["error"]["type"].as_str().unwrap_or("")
     }
 
-    fn fail(what: &str, status: StatusCode, body: &Value) -> StoreError {
+    /// The API key this client sends, if any.
+    fn api_key(&self) -> Option<&str> {
+        self.auth
+            .as_ref()
+            .and_then(|auth| auth.as_bytes().strip_prefix(b"ApiKey "))
+            .and_then(|key| std::str::from_utf8(key).ok())
+    }
+
+    /// `text` from the server, cut and with every detectable echo of the API
+    /// key replaced ([`scrub::quotable_body`], whose doc lists what is
+    /// caught), before it is quoted into an error: a cluster or a proxy in
+    /// front of it may echo the key it refused, and these errors reach logs
+    /// and MCP receipts.
+    fn quotable(&self, text: &str) -> String {
+        scrub::quotable_body(text, self.api_key(), false)
+    }
+
+    fn fail(&self, what: &str, status: StatusCode, body: &Value) -> StoreError {
         if status.is_redirection() {
             // Neither the body nor `Location` is quoted: a redirect target can
             // carry a signed URL or a key in its query.
@@ -259,10 +297,8 @@ impl ElasticRecall {
             );
         }
         let reason = body["error"]["reason"].as_str().unwrap_or("");
-        backend(
-            what,
-            format!("HTTP {status} {} {reason}", Self::error_type(body)),
-        )
+        let detail = self.quotable(&format!("{} {reason}", Self::error_type(body)));
+        backend(what, format!("HTTP {status} {detail}"))
     }
 
     /// Create `index` with `body` unless it exists.
@@ -274,7 +310,7 @@ impl ElasticRecall {
         if status.is_success() || Self::error_type(&resp) == "resource_already_exists_exception" {
             Ok(())
         } else {
-            Err(Self::fail("create index", status, &resp))
+            Err(self.fail("create index", status, &resp))
         }
     }
 
@@ -334,7 +370,7 @@ impl ElasticRecall {
             return Ok(DeleteReport::default());
         }
         if !status.is_success() {
-            return Err(Self::fail(what, status, &resp));
+            return Err(self.fail(what, status, &resp));
         }
         if let Some(failures) = resp["failures"].as_array()
             && !failures.is_empty()
@@ -460,7 +496,7 @@ impl RecallIndex for ElasticRecall {
             .send("bulk write", Method::POST, url, Some(Body::NdJson(body)))
             .await?;
         if !status.is_success() {
-            return Err(Self::fail("bulk write", status, &resp));
+            return Err(self.fail("bulk write", status, &resp));
         }
         if resp["errors"].as_bool() != Some(true) {
             return Ok(());
@@ -479,11 +515,11 @@ impl RecallIndex for ElasticRecall {
             if !accepted {
                 return Err(backend(
                     "bulk write",
-                    format!(
+                    self.quotable(&format!(
                         "{action} {} failed: HTTP {code} {}",
                         result["_id"].as_str().unwrap_or("?"),
                         result["error"]["type"].as_str().unwrap_or("")
-                    ),
+                    )),
                 ));
             }
         }
@@ -502,7 +538,7 @@ impl RecallIndex for ElasticRecall {
         if status.is_success() || status == StatusCode::NOT_FOUND {
             Ok(())
         } else {
-            Err(Self::fail("refresh", status, &resp))
+            Err(self.fail("refresh", status, &resp))
         }
     }
 
@@ -551,7 +587,7 @@ impl RecallIndex for ElasticRecall {
             return Ok(0);
         }
         if !status.is_success() {
-            return Err(Self::fail("count session documents", status, &resp));
+            return Err(self.fail("count session documents", status, &resp));
         }
         resp["count"]
             .as_u64()
@@ -589,7 +625,7 @@ impl RecallIndex for ElasticRecall {
             return Ok(Vec::new());
         }
         if !status.is_success() {
-            return Err(Self::fail("knn search", status, &resp));
+            return Err(self.fail("knn search", status, &resp));
         }
         let hits = resp["hits"]["hits"].as_array().cloned().unwrap_or_default();
         hits.iter()
@@ -623,7 +659,7 @@ impl RecallIndex for ElasticRecall {
             return Ok(None);
         }
         if !status.is_success() {
-            return Err(Self::fail("read marker", status, &resp));
+            return Err(self.fail("read marker", status, &resp));
         }
         if resp["found"].as_bool() != Some(true) {
             return Ok(None);
@@ -655,7 +691,7 @@ impl RecallIndex for ElasticRecall {
         if status.is_success() || status == StatusCode::CONFLICT {
             Ok(())
         } else {
-            Err(Self::fail("write marker", status, &resp))
+            Err(self.fail("write marker", status, &resp))
         }
     }
 
@@ -667,7 +703,7 @@ impl RecallIndex for ElasticRecall {
         if status.is_success() || status == StatusCode::NOT_FOUND {
             Ok(())
         } else {
-            Err(Self::fail("delete marker", status, &resp))
+            Err(self.fail("delete marker", status, &resp))
         }
     }
 }
@@ -848,6 +884,120 @@ mod tests {
         assert!(!text.contains(&fake), "no key: {text}");
         redirect.assert_hits_async(1).await;
         target.assert_hits_async(0).await;
+    }
+
+    /// Mutation: make `bypasses_env_proxy` always false, or ignore `keyed`
+    /// -> red.
+    #[test]
+    fn only_a_keyed_loopback_http_client_ignores_env_proxies() {
+        for s in [
+            "http://127.0.0.1:9200",
+            "http://localhost:9200",
+            "http://[::1]:9200",
+        ] {
+            let base = Url::parse(s).unwrap();
+            assert!(bypasses_env_proxy(true, &base), "{s}");
+            assert!(!bypasses_env_proxy(false, &base), "no key: {s}");
+        }
+        for s in [
+            "https://127.0.0.1:9200",
+            "https://my-cluster.es.example.com",
+        ] {
+            assert!(!bypasses_env_proxy(true, &Url::parse(s).unwrap()), "{s}");
+        }
+    }
+
+    /// A keyed loopback client reaches the cluster even when a proxy is set,
+    /// and the same client without a key goes through that proxy (here a
+    /// closed port, so it fails). The proxy is set on the builder rather
+    /// than through `HTTP_PROXY`: `no_proxy` clears both alike (it empties
+    /// the builder's proxies and turns off the system ones), and a process
+    /// variable would leak into tests running in parallel.
+    ///
+    /// Mutation: drop `builder.no_proxy()` from `build_client` -> red.
+    #[tokio::test]
+    async fn a_keyed_loopback_client_skips_a_configured_proxy() {
+        let server = MockServer::start_async().await;
+        let mock = server
+            .mock_async(|when, then| {
+                when.method(GET).path("/");
+                then.status(200).json_body(json!({ "ok": true }));
+            })
+            .await;
+        let dead = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let proxy = format!("http://{}", dead.local_addr().unwrap());
+        drop(dead);
+        let base = Url::parse(&server.base_url()).unwrap();
+        let client = |keyed| {
+            let proxied = reqwest::Client::builder().proxy(reqwest::Proxy::all(&proxy).unwrap());
+            build_client(proxied, &base, keyed, Duration::from_secs(2)).unwrap()
+        };
+        let resp = client(true)
+            .get(base.clone())
+            .send()
+            .await
+            .expect("a keyed loopback client goes direct");
+        assert!(resp.status().is_success());
+        mock.assert_async().await;
+        client(false)
+            .get(base.clone())
+            .send()
+            .await
+            .expect_err("without a key the proxy (a closed port) is used");
+        mock.assert_hits_async(1).await;
+    }
+
+    /// Pre-existing (found in #233 review): the tier quoted `error.reason`
+    /// verbatim, so a cluster or proxy echoing the refused key put it in the
+    /// error. With a key set every detectable echo (raw, JSON-escaped,
+    /// percent-encoded, a run of 8 or more of its bytes) is replaced; the
+    /// rest of the reason is kept, and without a key it is unchanged.
+    ///
+    /// Mutation: quote `reason` without `quotable` -> red.
+    #[tokio::test]
+    async fn an_error_reason_echoing_the_key_never_carries_it() {
+        const VAR: &str = "LAMBO_TEST_RECALL_SCRUB";
+        let fake = format!("fake-{}-{}", "recall", "scrub-key-xyzzy");
+        let masked = format!("{}...", &fake[..12]);
+        let reason =
+            format!("unable to authenticate with provided credentials [{fake}] ({masked})");
+        let server = MockServer::start_async().await;
+        server
+            .mock_async(|when, then| {
+                when.method(GET).path(format!(
+                    "/lambo-meta/_doc/{}",
+                    marker_id(&SessionId::new("s"))
+                ));
+                then.status(401).json_body(json!({
+                    "error": { "type": "security_exception", "reason": reason.clone() }
+                }));
+            })
+            .await;
+        let keyed_index = {
+            let env = crate::test_util::env_lock();
+            env.set(VAR, &fake);
+            ElasticRecall::new(&keyed(&server.base_url(), VAR)).unwrap()
+        };
+        let text = keyed_index
+            .read_marker(&SessionId::new("s"))
+            .await
+            .expect_err("a 401 is an error")
+            .to_string();
+        assert!(!text.contains("xyzzy"), "no echo of the key: {text}");
+        assert!(!text.contains(&fake[..12]), "no masked echo: {text}");
+        assert!(text.contains(scrub::TOKEN_NOT_SHOWN), "{text}");
+        assert!(
+            text.contains("HTTP 401 Unauthorized security_exception unable to authenticate"),
+            "the rest of the reason is kept: {text}"
+        );
+
+        let open_index = ElasticRecall::new(&cfg(&server.base_url())).unwrap();
+        let text = open_index
+            .read_marker(&SessionId::new("s"))
+            .await
+            .expect_err("a 401 is an error")
+            .to_string();
+        assert!(text.contains(&reason), "no key, nothing to scrub: {text}");
     }
 
     #[tokio::test]

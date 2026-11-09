@@ -49,6 +49,13 @@
   loopback http client with a key ignores the proxy environment. An http
   URL without a key is unchanged. A deployment that sent a key over plain
   http to a remote cluster must switch `recall.url` to https.
+- **The `[recall]` tier no longer quotes an echoed API key in its errors.**
+  It quoted Elasticsearch's `error.type` and `error.reason` (and a bulk
+  item's error) verbatim, so a cluster or proxy that echoed the key it
+  refused put the key in logs and MCP receipts. With `api_key` set, every
+  detectable echo (raw, JSON-escaped, percent-encoded, or a run of 8 or
+  more of its bytes) is now replaced with `(token not shown)`, the rule
+  the hosted embedders already follow.
 
 ## 0.9.2 (2026-11-04)
 
