@@ -191,9 +191,9 @@ jobs:
               cargo test --locked --features embed-eg2
           # #233: the Elastic embedder over the Elasticsearch Inference API,
           # against httpmock only (no cluster, no key). Lints it with and
-          # without the default features, so the build without embed-bge's
-          # defaults is checked too. The live test stays `#[ignore]`d and
-          # operator-run.
+          # without the crate's default features (the second line has no
+          # embed-fixture), then runs the suite with it compiled in. The live
+          # test stays `#[ignore]`d and operator-run.
           - name: embed-elastic
             command: |
               set -o pipefail
