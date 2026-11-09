@@ -153,7 +153,7 @@ To run it for real, write a `lambo.toml` that picks a store and an embedder.
 kind = "memory"     # memory | sqlite | postgres | cockroach
 
 [embedder]
-kind = "fixture"    # fixture | bge_m3 | gemini
+kind = "fixture"    # fixture | bge_m3 | gemini | embeddinggemma2 | elastic (candle: Metal build)
 dim = 1024
 ```
 

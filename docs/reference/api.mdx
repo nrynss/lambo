@@ -464,7 +464,7 @@ Backends are chosen by Cargo feature and configuration, not loaded as plugins. S
 
 ### The GraphStore trait
 
-`GraphStore` handles durable graph storage. The implementations are the in-memory store, the SQLite store, and the CockroachDB store. Its methods cover schema setup, flushing a batch, loading a session, keyword and vector candidate lookup, blast radius, interaction spans, the two supersession evidence accessors, and canonization records, plus the lease methods below.
+`GraphStore` handles durable graph storage. The implementations are the in-memory store, the SQLite store, the CockroachDB store, and the PostgreSQL store. Its methods cover schema setup, flushing a batch, loading a session, keyword and vector candidate lookup, blast radius, interaction spans, the two supersession evidence accessors, and canonization records, plus the lease methods below.
 
 A store also declares what it can do. `capabilities` reports its features, and `vector_dimensions` reports the width of its vector column, or nothing when it has none. A store that reports a width must agree with the embedder's, and Lambo refuses to start when they differ.
 
