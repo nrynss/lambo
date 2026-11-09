@@ -167,8 +167,10 @@ url = "http://127.0.0.1:8080"
 # phrases and refuses to attach (unless --allow-embedding-mismatch is passed)
 # when they drift from the vectors this store pinned.
 #   canary = "verify"
-# No fallback during an Elastic outage: derives fail (hybrid), unattempted writes
-# stay durable intents, and recall answers from its keyword and recent legs. With
+# No fallback during an Elastic outage. Under hybrid a derive answers failed, but
+# an outage keeps its durable intent and the next serve re-attempts it (recall
+# before re-deriving); only a refused text or a configuration error fails a
+# write for good. Recall answers from its keyword and recent legs. With
 # the recall tier on Elastic as well, both of recall's vector dependencies sit on
 # one service; the embedder and the recall tier stay independent of each other.
 #

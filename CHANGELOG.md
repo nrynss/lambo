@@ -18,9 +18,13 @@
   model behind a stable id. There is no new fallback for an outage.
   Using Elastic for both `[recall]` and the embedder puts both of
   recall's vector dependencies on one service: during an Elastic outage
-  writes fail (under `hybrid`; unattempted writes stay durable intents)
-  and recall answers from keyword and recent legs only. The two stay
-  independent; either works without the other.
+  writes answer `failed` (under `hybrid`) and recall answers from
+  keyword and recent legs only. A write that fails for the outage keeps
+  its durable intent, and the next serve re-attempts it (its receipt
+  then reads `pending_replay`, then `applied_after_restart`), so agents
+  should recall before re-deriving; only a refused text or a
+  configuration error fails a write for good. The two stay independent;
+  either works without the other.
 
 ## 0.9.2 (2026-11-04)
 
