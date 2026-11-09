@@ -534,9 +534,11 @@ impl BgeM3LlamaCppEmbedder {
     /// POST an embed request and parse the response.
     ///
     /// Error classification (consumed by the degradation contract in T7.2):
-    /// * connect-level failures (server down/unreachable) -> `Unavailable`, so the caller
+    /// * connect-level failures (server down/unreachable), and a success body cut off
+    ///   mid-read -> `Unavailable`, so the caller
     ///   can fall back to canonical matching permanently and log once instead of hammering;
-    /// * server-side rejections / malformed / dimension-mismatched output -> `Backend`
+    /// * server-side rejections / malformed / dimension-mismatched output, and a success
+    ///   body over [`success_body_cap`] -> `Backend`
     ///   (server is up; the config or version is wrong, and the fix is permanent too).
     ///
     /// **CON-2 (fail hard):** there is deliberately NO retry that clears the configured
@@ -588,11 +590,21 @@ impl BgeM3LlamaCppEmbedder {
         })?;
         let status = resp.status();
         if status.is_success() {
-            let bytes = resp.bytes().await.map_err(|e| {
-                EmbedError::Backend(format!(
-                    "llama.cpp response body could not be read: {}",
+            let cap = success_body_cap(self.dim);
+            let bytes = read_success_body(resp, cap).await.map_err(|e| match e {
+                // A transport failure mid-body (a reset, or a stall past the
+                // request timeout, which covers the body) says nothing about
+                // the input: transient, so the write keeps its durable intent.
+                SuccessBodyError::Cut(e) => EmbedError::Unavailable(format!(
+                    "llama.cpp response body from {} was cut off: {}",
+                    self.log_url,
                     e.without_url()
-                ))
+                )),
+                SuccessBodyError::TooLarge => EmbedError::Backend(format!(
+                    "llama.cpp response from {} is over {cap} bytes, more than an embedding of \
+                     {} components needs; refusing it (body not shown)",
+                    self.log_url, self.dim
+                )),
             })?;
             // The parse error's own text quotes body content (`invalid type:
             // string "..."`), which an echoing endpoint could fill with the
@@ -769,6 +781,65 @@ mod tests {
             unit_magnitude(&v)
         );
         mock.assert();
+    }
+
+    /// Pre-existing (found in #233 review): a 2xx body the connection cut
+    /// off mid-read was `Backend`, so the write lost its durable intent. It
+    /// is a transport failure, so `Unavailable`; the partial body is not
+    /// quoted. The EmbeddingGemma 2 adapter posts through the same
+    /// `post_json`, so this holds for it too.
+    ///
+    /// Mutation: map `SuccessBodyError::Cut` to `Backend` -> red.
+    #[tokio::test]
+    async fn a_success_body_cut_off_mid_read_is_unavailable() {
+        let head = "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                    content-length: 100000\r\n\r\n"
+            .to_string();
+        let partial = br#"{"data":[{"embedding":[0.123456,"#.to_vec();
+        let base = crate::test_util::serve_raw_http_once(head, vec![partial]).await;
+        let err = BgeM3LlamaCppEmbedder::new(base, "", 4)
+            .unwrap()
+            .embed("anything")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, EmbedError::Unavailable(_)), "{err:?}");
+        let msg = err.to_string();
+        assert!(msg.contains("was cut off"), "{msg}");
+        assert!(
+            !msg.contains("0.123456"),
+            "the partial body is not quoted: {msg}"
+        );
+    }
+
+    /// Pre-existing (found in #233 review): the 2xx body was read whole,
+    /// however long. Past `success_body_cap` it is now refused as `Backend`
+    /// without quoting it.
+    ///
+    /// Mutation: read with `resp.bytes()` again -> red (the padded body
+    /// parses and embeds).
+    #[tokio::test]
+    async fn an_oversized_success_body_is_refused_unquoted() {
+        let cap = success_body_cap(4);
+        let big = format!(
+            "{{\"data\":[{{\"embedding\":[1,2,3,4]}}],\"pad\":\"{}\"}}",
+            "x".repeat(cap)
+        );
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(POST).path("/v1/embeddings");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(big.clone());
+        });
+        let err = BgeM3LlamaCppEmbedder::new(server.base_url(), "", 4)
+            .unwrap()
+            .embed("anything")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, EmbedError::Backend(_)), "{err:?}");
+        let msg = err.to_string();
+        assert!(msg.contains(&format!("over {cap} bytes")), "{msg}");
+        assert!(!msg.contains("xxxx"), "{msg}");
     }
 
     /// #221: without `with_request_dimensions` the request body is exactly

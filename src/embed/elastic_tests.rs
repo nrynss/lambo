@@ -494,49 +494,6 @@ async fn a_transport_failure_is_unavailable() {
     );
 }
 
-/// Serve one raw HTTP exchange on a loopback port: read the request (headers
-/// and its `Content-Length` body), write `head`, then each of `chunks`, then
-/// close. Write errors are ignored, since the client may stop reading first.
-/// Returns the base URL.
-async fn raw_server(head: String, chunks: Vec<Vec<u8>>) -> String {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        let (mut sock, _) = listener.accept().await.unwrap();
-        let mut req = Vec::new();
-        let mut buf = [0u8; 4096];
-        loop {
-            let n = sock.read(&mut buf).await.unwrap_or(0);
-            if n == 0 {
-                break;
-            }
-            req.extend_from_slice(&buf[..n]);
-            let text = String::from_utf8_lossy(&req).to_ascii_lowercase();
-            if let Some(end) = text.find("\r\n\r\n") {
-                let len = text[..end]
-                    .lines()
-                    .find_map(|l| l.strip_prefix("content-length:"))
-                    .and_then(|v| v.trim().parse::<usize>().ok())
-                    .unwrap_or(0);
-                if req.len() >= end + 4 + len {
-                    break;
-                }
-            }
-        }
-        if sock.write_all(head.as_bytes()).await.is_err() {
-            return;
-        }
-        for chunk in chunks {
-            if sock.write_all(&chunk).await.is_err() {
-                return;
-            }
-        }
-        let _ = sock.shutdown().await;
-    });
-    format!("http://{addr}")
-}
-
 /// A 2xx whose body the connection cuts off mid-read is a transport failure,
 /// so `Unavailable` and the write keeps its durable intent; the partial body
 /// is not quoted.
@@ -548,7 +505,7 @@ async fn a_success_body_cut_off_mid_read_is_unavailable() {
     let head =
         "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 100000\r\n\r\n"
             .to_string();
-    let base = raw_server(head, vec![partial]).await;
+    let base = crate::test_util::serve_raw_http_once(head, vec![partial]).await;
     let err = ElasticEmbedder::new(&base, ID, 4)
         .unwrap()
         .embed("anything")
@@ -617,7 +574,7 @@ async fn an_oversized_success_body_is_refused_unquoted() {
         })
         .chain(std::iter::once(b"0\r\n\r\n".to_vec()))
         .collect();
-    let base = raw_server(head, chunks).await;
+    let base = crate::test_util::serve_raw_http_once(head, chunks).await;
     let streamed = ElasticEmbedder::new(&base, ID, 4)
         .unwrap()
         .embed("anything")

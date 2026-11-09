@@ -31,6 +31,14 @@
 
 ### Fixed
 
+- **A `bge_m3` or `embeddinggemma2` write cut off mid-response now keeps
+  its durable intent, and an oversized response is refused.** A success
+  response whose body the connection cut off (a reset, or a stall past the
+  request timeout, which covers the body) failed the write for good; it
+  now counts as an outage, so under `hybrid` the next serve re-attempts
+  it. The success body was read whole however long it was; past 64 bytes
+  a dimension (at least 4 MiB) it is now refused without being read
+  further or quoted.
 - **The `[recall]` tier no longer sends its API key in clear text or to a
   redirect target.** With `api_key` set, `recall.url` must now be https,
   or plain http to a loopback host (`localhost`, `127.0.0.0/8`, `::1`),
