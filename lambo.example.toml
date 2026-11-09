@@ -107,6 +107,16 @@ url = "http://127.0.0.1:8080"
 # `bge_m3` (alias `openai`) only. LAMBO_EMBED_DIMENSIONS overrides it.
 # dimensions = 1024
 #
+# HTTP timeouts (#236), `bge_m3` (alias `openai`), `embeddinggemma2` and
+# `elastic` only. connect_timeout_ms waits 5 s to establish a connection by
+# default, so a broken DNS fails fast instead of hanging: fix the DNS, do not
+# raise it. timeout_ms budgets 60 s for the whole request. Either key refuses
+# 0. LAMBO_EMBED_CONNECT_TIMEOUT_MS / LAMBO_EMBED_TIMEOUT_MS override them.
+# A cold Elastic Cloud Serverless endpoint can need longer to accept a first
+# connection: raise connect_timeout_ms for it (20 s covers a cold start).
+# connect_timeout_ms = 20000
+# timeout_ms = 90000
+#
 # EmbeddingGemma 2, text AND images in one space (#22, kind = "embeddinggemma2",
 # feature embed-eg2), served by llama.cpp's llama-server, build b11452 or later
 # (older builds refuse the model: "unknown model architecture: 'gemma-embedding2'").
@@ -167,6 +177,10 @@ url = "http://127.0.0.1:8080"
 # phrases and refuses to attach (unless --allow-embedding-mismatch is passed)
 # when they drift from the vectors this store pinned.
 #   canary = "verify"
+# Exactly one Elastic contract is calibrated (#237): `.jina-embeddings-v3` at
+# 1024 dims with send_input_type on (recent-leg 0.13, layer floor 0.39, merge
+# threshold 0.86; evidence/issue-237/). Any other endpoint id, width, or
+# send_input_type = false recalls on BGE-M3 constants and warns at startup.
 # No fallback during an Elastic outage. Under hybrid a derive answers failed, but
 # an outage keeps its durable intent and the next serve re-attempts it (recall
 # before re-deriving); only a refused text, a configuration error, or a response

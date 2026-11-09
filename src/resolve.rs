@@ -116,6 +116,10 @@ pub const RESOLVE_ENV_VARS: &[&str] = &[
     // #221: the Matryoshka truncation width, read unconditionally by
     // `overlay_env` like the dim above.
     crate::embed::EMBED_DIMENSIONS_ENV,
+    // #236: the HTTP timeouts, read unconditionally by `overlay_env` like
+    // the dim above.
+    crate::embed::EMBED_CONNECT_TIMEOUT_MS_ENV,
+    crate::embed::EMBED_TIMEOUT_MS_ENV,
     "LAMBO_LLAMA_EMBED_URL",
     "LAMBO_LLAMA_MODEL",
     // Issue #21: a variable *name* (`embedder.api_key_env`). The variable it
@@ -994,6 +998,20 @@ mod tests {
                 value: "768",
                 file: MEMORY,
                 resolved: Some(|p| format!("{:?}", load(p).embedder.dimensions)),
+            },
+            Override {
+                // #236: the HTTP timeouts, `None` unless set.
+                var: crate::embed::EMBED_CONNECT_TIMEOUT_MS_ENV,
+                value: "20000",
+                file: MEMORY,
+                resolved: Some(|p| format!("{:?}", load(p).embedder.connect_timeout_ms)),
+            },
+            Override {
+                // #236: the whole-request budget, `None` unless set.
+                var: crate::embed::EMBED_TIMEOUT_MS_ENV,
+                value: "90000",
+                file: MEMORY,
+                resolved: Some(|p| format!("{:?}", load(p).embedder.timeout_ms)),
             },
             Override {
                 var: "LAMBO_LLAMA_EMBED_URL",

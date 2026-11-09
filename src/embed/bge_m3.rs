@@ -22,7 +22,7 @@ use super::{EmbedError, Embedder};
 
 // Moved to `crate::net` so the `[recall]` tier can scrub its error reasons too.
 pub(crate) use crate::net::scrub;
-use crate::net::{read_capped_body, BodyReadError};
+use crate::net::{read_capped_body, transport_error, BodyReadError};
 
 /// OpenAI-compatible embeddings request body (`model` is omitted when empty so it hits
 /// a llama.cpp server's default model; `dimensions` is omitted unless the operator
@@ -484,7 +484,7 @@ impl BgeM3LlamaCppEmbedder {
                 EmbedError::Unavailable(format!(
                     "llama.cpp health check failed at {}: {}",
                     url_for_log(&self.base_url),
-                    e.without_url()
+                    transport_error(&e)
                 ))
             })?;
         if !resp.status().is_success() {
@@ -550,7 +550,7 @@ impl BgeM3LlamaCppEmbedder {
             EmbedError::Unavailable(format!(
                 "{LLAMA_UNREACHABLE}{}: {}",
                 self.log_url,
-                e.without_url()
+                transport_error(&e)
             ))
         })?;
         let status = resp.status();
@@ -563,7 +563,7 @@ impl BgeM3LlamaCppEmbedder {
                 BodyReadError::Cut(e) => EmbedError::Unavailable(format!(
                     "llama.cpp response body from {} was cut off: {}",
                     self.log_url,
-                    e.without_url()
+                    transport_error(&e)
                 )),
                 BodyReadError::TooLarge => EmbedError::Backend(format!(
                     "llama.cpp response from {} is over {cap} bytes, more than an embedding of \
@@ -1118,6 +1118,36 @@ mod tests {
             .with_timeouts(Duration::from_secs(1), Duration::from_secs(2))
             .unwrap();
         assert_eq!(e.dimensions(), 1024);
+    }
+
+    /// #236: a small `timeout_ms` fails a slow embed as `Unavailable`
+    /// (the write keeps its durable intent), while a generous budget
+    /// against the same delayed server succeeds — so the failure is the
+    /// timeout, not the server. Local httpmock with a 400 ms delay: no
+    /// public blackhole IP, no flaky DNS.
+    ///
+    /// Mutation: drop `.timeout(request)` from `build_client` -> the
+    /// tiny-budget leg succeeds and the first assertion fails.
+    #[tokio::test]
+    async fn a_small_request_timeout_fails_a_slow_embed_as_unavailable() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(POST).path("/v1/embeddings");
+            then.status(200)
+                .delay(Duration::from_millis(400))
+                .json_body(ok_response());
+        });
+        let tiny = BgeM3LlamaCppEmbedder::new(server.base_url(), "", 1024)
+            .unwrap()
+            .with_timeouts(Duration::from_secs(5), Duration::from_millis(50))
+            .unwrap();
+        let err = tiny.embed("anything").await.unwrap_err();
+        assert!(matches!(err, EmbedError::Unavailable(_)), "{err:?}");
+        let roomy = BgeM3LlamaCppEmbedder::new(server.base_url(), "", 1024)
+            .unwrap()
+            .with_timeouts(Duration::from_secs(5), Duration::from_secs(10))
+            .unwrap();
+        roomy.embed("anything").await.unwrap();
     }
 
     /// A fake token: only ever sent to a local mock server.

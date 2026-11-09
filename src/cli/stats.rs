@@ -112,6 +112,13 @@ mod tests {
         let truncated =
             calibration_line(Some(&contract("bge_m3", Some("qwen3-embedding-4b"), 1024)));
         assert_eq!(truncated, "calibration=calibrated", "{truncated}");
+        // #237: the exact Elastic Jina contract has a measured row too.
+        let elastic = calibration_line(Some(&contract(
+            "elastic",
+            Some(".jina-embeddings-v3"),
+            1024,
+        )));
+        assert_eq!(elastic, "calibration=calibrated", "{elastic}");
         // A default-model uncalibrated contract prints `(default)`, not empty.
         let defaulted = calibration_line(Some(&contract("embeddinggemma2", None, 768)));
         assert!(defaulted.contains("model=(default)"), "{defaulted}");
