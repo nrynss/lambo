@@ -2,33 +2,39 @@
 
 ## Unreleased
 
+## 0.10.0 (2026-11-09)
+
 ### Highlights
 
 - **Elastic embedder (#233).** `[embedder] kind = "elastic"` (feature
   `embed-elastic`, in released binaries) creates embeddings through the
   Elasticsearch Inference API: `url` is the cluster, `model` the
-  inference endpoint id (both required; `GET /_inference/_all` lists the
-  ids a deployment exposes, such as `.jina-embeddings-v3`), and
-  `api_key_env` sends `Authorization: ApiKey` over https or loopback
-  http. Documents go with `input_type: INGEST`, queries with `SEARCH`;
-  an endpoint that refuses the field fails with a hint to set
-  `send_input_type = false`, never a silent retry. The contract is kind
-  `elastic` with the endpoint id as model. There is no calibration row,
-  and `canary = "verify"` is recommended because Elastic can change the
-  model behind a stable id. There is no new fallback for an outage.
-  Using Elastic for both `[recall]` and the embedder puts both of
-  recall's vector dependencies on one service: during an Elastic outage
-  writes answer `failed` (under `hybrid`) and recall answers from
-  keyword and recent legs only. A write that fails for the outage keeps
-  its durable intent, and the next serve re-attempts it (its receipt
-  then reads `pending_replay`, then `applied_after_restart`), so agents
-  should recall before re-deriving; only a refused text, a configuration
-  error, or a response Lambo cannot use (unparseable, over the size cap,
-  the wrong width, non-finite or zero-norm) fails a write for good. A
-  success response cut off mid-body (a reset, or a stall past the request
-  timeout) counts as an outage too, and one larger than any embedding
-  needs (64 bytes a dimension, at least 4 MiB) is refused unread. The two
-  stay independent; either works without the other.
+  inference endpoint id (both required; `GET /_inference/_all` lists
+  them, such as `.jina-embeddings-v3`), and `api_key_env` sends
+  `Authorization: ApiKey` over https or loopback http. Documents go with
+  `input_type: INGEST`, queries with `SEARCH`; an endpoint that refuses
+  the field fails with a hint to set `send_input_type = false`, never a
+  silent retry. The contract is kind `elastic` with the endpoint id as
+  model. There is no calibration row, and `canary = "verify"` is
+  recommended because Elastic can change the model behind a stable id.
+  There is no fallback for an outage: under `hybrid` the write answers
+  `failed` but keeps its durable intent, and the next serve re-attempts
+  it (`pending_replay`, then `applied_after_restart`), so agents should
+  recall before re-deriving. Using Elastic for both `[recall]` and the
+  embedder puts both of recall's vector dependencies on one service;
+  either works without the other.
+- **The `[recall]` tier keeps its API key off the wire in clear text.**
+  With `api_key` set, `recall.url` must be https or plain http to a
+  loopback host, redirects are no longer followed (a 3xx is an error that
+  does not name its target), and an echoed key is scrubbed from error
+  reasons as `(token not shown)`.
+- **A success response cut off mid-body is an outage, and an oversized
+  one is refused.** For the `elastic`, `bge_m3` and `embeddinggemma2`
+  embedders, a body cut by a reset or a stall past the request timeout
+  now keeps the write's durable intent instead of failing it for good,
+  and a body past 64 bytes a dimension (at least 4 MiB) is refused
+  unread. The `[recall]` tier reads at most 32 MiB of any response (more
+  only for a kNN search whose neighbours need it).
 
 ### Fixed
 
@@ -65,6 +71,17 @@
   neighbours can take if that is more (32 bytes a dimension and 32 KiB a
   neighbour); a longer one is an error that quotes neither the body nor
   the key, handled like any other failure of the index.
+
+### Upgrading from 0.9.2
+
+You don't need to run `lambo provision`: there is no schema change.
+- **A `[recall]` tier with `api_key` over plain http to a remote host is
+  refused at startup.** Switch `recall.url` to https. Loopback http and
+  http without a key are unchanged.
+- **A `[recall]` tier behind a redirect now errors.** Point `recall.url`
+  at the final address.
+- Recall ranking and every existing embedder's configuration are
+  unchanged; `elastic` is a new, opt-in `[embedder] kind`.
 
 ## 0.9.2 (2026-11-04)
 
