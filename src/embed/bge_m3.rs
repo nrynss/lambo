@@ -208,10 +208,7 @@ pub(crate) fn check_bearer_transport(base_url: &str) -> Result<(), EmbedError> {
                 .into(),
         )
     })?;
-    if url.scheme() == "https" {
-        return Ok(());
-    }
-    if url.scheme() == "http" && is_loopback_host(&url) {
+    if crate::net::may_carry_credential(&url) {
         return Ok(());
     }
     Err(EmbedError::Unavailable(format!(
@@ -221,27 +218,6 @@ pub(crate) fn check_bearer_transport(base_url: &str) -> Result<(), EmbedError> {
         url.host_str().unwrap_or("(no host)"),
         url.scheme()
     )))
-}
-
-/// Is `url`'s host loopback: `localhost`, `127.0.0.0/8`, `::1` or an
-/// IPv4-mapped `127.0.0.0/8`? `url` has already normalised the host: IPv4 to
-/// a dotted quad (`127.1`, `2130706433` and `0x7f.1` are `127.0.0.1`), IPv6
-/// in brackets, domains lower-cased. The name `localhost` is trusted without
-/// resolving it.
-pub(crate) fn is_loopback_host(url: &reqwest::Url) -> bool {
-    url.host_str().is_some_and(|host| {
-        match host
-            .trim_start_matches('[')
-            .trim_end_matches(']')
-            .parse::<std::net::IpAddr>()
-        {
-            Ok(std::net::IpAddr::V4(a)) => a.is_loopback(),
-            Ok(std::net::IpAddr::V6(a)) => {
-                a.is_loopback() || a.to_ipv4_mapped().is_some_and(|v4| v4.is_loopback())
-            }
-            Err(_) => host == "localhost" || host == "localhost.",
-        }
-    })
 }
 
 /// Should the client for `base_url` ignore the `HTTP_PROXY` / `HTTPS_PROXY` /
@@ -254,7 +230,7 @@ pub(crate) fn is_loopback_host(url: &reqwest::Url) -> bool {
 /// only through it. Plain `http` to any other host never carries a token
 /// (refused) and keeps its old behaviour.
 fn bypasses_env_proxy(base_url: &str) -> bool {
-    reqwest::Url::parse(base_url).is_ok_and(|url| url.scheme() == "http" && is_loopback_host(&url))
+    reqwest::Url::parse(base_url).is_ok_and(|url| crate::net::is_loopback_http(&url))
 }
 
 /// `url` for a log line, an error or `Debug`: scheme, host, port and path.

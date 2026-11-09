@@ -355,8 +355,10 @@ url = "http://127.0.0.1:8080"
 #
 # A top-level table, not [store.recall]. A binary built without the feature
 # refuses this section by name. The API key is by reference only: name the
-# environment variable that holds it, never the key itself. Omit api_key for
-# a cluster with security off.
+# environment variable that holds it, never the key itself. With api_key, url
+# must be https or http to a loopback host (plain http elsewhere is refused),
+# and redirects are never followed. Omit api_key for a cluster with security
+# off.
 #
 # [recall]
 # kind = "elastic"

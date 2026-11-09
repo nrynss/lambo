@@ -192,8 +192,8 @@ index_prefix = "lambo"
 | Key | Type | Default | Notes |
 |---|---|---|---|
 | `kind` | string | none | `elastic`. Required. |
-| `url` | string | none | The cluster's base URL, `http://` or `https://`. A URL that carries a user name, a password, a query string or a fragment is refused. |
-| `api_key` | table | none | `{ env = "NAME" }`: the environment variable that holds the API key. The key itself is never accepted in the file. Omit it for a cluster with security off. |
+| `url` | string | none | The cluster's base URL, `http://` or `https://`. A URL that carries a user name, a password, a query string or a fragment is refused. With `api_key` set, the URL must be `https://`, or `http://` to a loopback host (`localhost`, `127.0.0.0/8`, `::1`), so the key never crosses the network in clear text; plain `http://` to any other host is refused at startup, naming the host and scheme. Redirects are not followed: a `3xx` answer is an error that does not show the redirect target. |
+| `api_key` | table | none | `{ env = "NAME" }`: the environment variable that holds the API key, sent as `Authorization: ApiKey <key>` only over `https` or over plain `http` to a loopback host. A loopback `http` client with a key ignores the proxy environment. The key itself is never accepted in the file. Omit it for a cluster with security off. |
 | `index_prefix` | string | `lambo` | Lowercase letters, digits, `-`, `_` and `.`. Vectors go to `<prefix>-v-<hash>`, one index per embedding model, and a small `<prefix>-meta` index keeps one sync marker per session. Must not contain `-v-` or end in `-v`, so that `<prefix>-v-*` can never match another deployment's indices on a shared cluster. |
 | `refresh` | string | `"false"` | When a write becomes searchable: `"false"` leaves it to the index refresh interval (1 second by default), `"wait_for"` waits on every write and is for tests. |
 | `timeout_ms` | integer | `5000` | Per-request timeout for writes and searches. Must be greater than zero. Refreshes, deletes by query and counts, whose work grows with the session, get 300 seconds. |

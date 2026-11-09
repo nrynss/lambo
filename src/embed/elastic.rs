@@ -285,9 +285,7 @@ impl ElasticEmbedder {
     /// plain `http` to a loopback host, where it never leaves the machine.
     /// The refusal names the host and scheme, never the URL or the key.
     pub(crate) fn check_api_key_transport(&self) -> Result<(), EmbedError> {
-        if self.url.scheme() == "https"
-            || (self.url.scheme() == "http" && bge_m3::is_loopback_host(&self.url))
-        {
+        if crate::net::may_carry_credential(&self.url) {
             return Ok(());
         }
         Err(EmbedError::Unavailable(format!(

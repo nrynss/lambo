@@ -15,7 +15,12 @@
 //! Secrets: the API key comes from the environment variable `[recall]
 //! api_key = { env = ... }` names, is sent only in the `Authorization`
 //! header (marked sensitive), and appears in no error or log line. A URL that
-//! carries credentials is refused at construction.
+//! carries credentials is refused at construction. With a key, the URL must be
+//! `https`, or plain `http` to a loopback host (the shared rule in
+//! `crate::net`), checked before the key is read; a loopback `http` client
+//! with a key ignores the proxy environment. Redirects are never followed, so
+//! the key is never resent to another target; a 3xx is an error that does not
+//! quote the redirect target.
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -94,6 +99,17 @@ impl ElasticRecall {
                 "recall.timeout_ms must be greater than zero".into(),
             ));
         }
+        // Checked before the key is read: plain http to a remote host would
+        // put it on the wire in clear text. Names host and scheme only.
+        if cfg.api_key.is_some() && !crate::net::may_carry_credential(&base) {
+            return Err(StoreError::Backend(format!(
+                "refusing to send the recall API key to {} over {}: recall.api_key is sent only \
+                 over https, or over http to a loopback host (localhost, 127.0.0.0/8, ::1). Use \
+                 an https recall.url, or remove recall.api_key",
+                base.host_str().unwrap_or("(no host)"),
+                base.scheme()
+            )));
+        }
         let auth = match &cfg.api_key {
             Some(secret) => {
                 let mut value = HeaderValue::from_str(&format!("ApiKey {}", secret.resolve()?))
@@ -112,9 +128,19 @@ impl ElasticRecall {
             .timeout_ms
             .map(Duration::from_millis)
             .unwrap_or(DEFAULT_TIMEOUT);
-        let client = reqwest::Client::builder()
+        // No redirects: reqwest keeps `Authorization` on a same-host redirect,
+        // even one that downgrades https to http, and no endpoint this client
+        // calls has a legitimate redirect. A 3xx comes back to `fail`.
+        let mut builder = reqwest::Client::builder()
             .connect_timeout(timeout)
             .timeout(timeout)
+            .redirect(reqwest::redirect::Policy::none());
+        // A proxy would carry a loopback request, and the key on it, off the
+        // machine; https keeps the environment's proxies (they only tunnel).
+        if auth.is_some() && crate::net::is_loopback_http(&base) {
+            builder = builder.no_proxy();
+        }
+        let client = builder
             .build()
             .map_err(|e| backend("build HTTP client", e))?;
         Ok(Self {
@@ -221,6 +247,17 @@ impl ElasticRecall {
     }
 
     fn fail(what: &str, status: StatusCode, body: &Value) -> StoreError {
+        if status.is_redirection() {
+            // Neither the body nor `Location` is quoted: a redirect target can
+            // carry a signed URL or a key in its query.
+            return backend(
+                what,
+                format!(
+                    "HTTP {status}: redirect not followed (the redirect target is not shown); \
+                     point recall.url at the cluster itself"
+                ),
+            );
+        }
         let reason = body["error"]["reason"].as_str().unwrap_or("");
         backend(
             what,
@@ -717,6 +754,100 @@ mod tests {
         let err = ElasticRecall::new(&zero).err().unwrap();
         assert!(err.to_string().contains("timeout_ms"), "{err}");
         ElasticRecall::new(&cfg("http://127.0.0.1:9200/es/")).expect("a path is fine");
+    }
+
+    /// A config with an API key read from `var`.
+    fn keyed(url: &str, var: &str) -> RecallConfig {
+        let mut c = cfg(url);
+        c.api_key = Some(SecretRef { env: var.into() });
+        c
+    }
+
+    /// Pre-existing security defect (found in #233 review): the tier sent
+    /// `Authorization: ApiKey` over any URL, so plain http to a remote host
+    /// put the key on the wire in clear text. A key now needs https or http
+    /// to a loopback host, the embedders' rule; the refusal names host and
+    /// scheme, never the key. Without a key, plain http stays allowed.
+    ///
+    /// Mutation: drop the `may_carry_credential` check -> red.
+    #[test]
+    fn a_key_is_sent_only_over_https_or_loopback_http() {
+        const VAR: &str = "LAMBO_TEST_RECALL_TRANSPORT";
+        let fake = format!("fake-{}-{}", "recall", "transport-xyzzy");
+        let env = crate::test_util::env_lock();
+        env.set(VAR, &fake);
+        for url in [
+            "http://my-cluster.es.example.com:9200",
+            "http://10.0.0.5:9200",
+        ] {
+            let err = ElasticRecall::new(&keyed(url, VAR)).err().expect(url);
+            let text = err.to_string();
+            assert!(
+                text.contains("refusing to send the recall API key"),
+                "{text}"
+            );
+            assert!(text.contains("over http"), "names the scheme: {text}");
+            let host = Url::parse(url).unwrap().host_str().unwrap().to_string();
+            assert!(text.contains(&host), "names the host: {text}");
+            assert!(!text.contains(&fake), "never echo the key: {text}");
+        }
+        for url in [
+            "https://my-cluster.es.example.com",
+            "http://127.0.0.1:9200",
+            "http://localhost:9200",
+            "http://[::1]:9200",
+        ] {
+            ElasticRecall::new(&keyed(url, VAR)).unwrap_or_else(|e| panic!("{url}: {e}"));
+        }
+        drop(env);
+        ElasticRecall::new(&cfg("http://my-cluster.es.example.com:9200"))
+            .expect("no key, so plain http to a remote host carries nothing secret");
+    }
+
+    /// Pre-existing security defect (found in #233 review): the client used
+    /// reqwest's default redirect policy and followed a 3xx with the key
+    /// attached. A redirect is now an error, the target is never requested,
+    /// and the error quotes neither the target nor the key.
+    ///
+    /// Mutation: restore the default redirect policy -> red.
+    #[tokio::test]
+    async fn a_redirect_is_not_followed_and_does_not_resend_the_key() {
+        const VAR: &str = "LAMBO_TEST_RECALL_REDIRECT";
+        let fake = format!("fake-{}-{}", "recall", "redirect-xyzzy");
+        let server = MockServer::start_async().await;
+        let target = server
+            .mock_async(|when, then| {
+                when.path("/elsewhere");
+                then.status(404).json_body(json!({ "found": false }));
+            })
+            .await;
+        let redirect = server
+            .mock_async(|when, then| {
+                when.method(GET).path(format!(
+                    "/lambo-meta/_doc/{}",
+                    marker_id(&SessionId::new("s"))
+                ));
+                then.status(302)
+                    .header("location", server.url("/elsewhere?sig=signed-target-xyzzy"))
+                    .json_body(json!({ "error": { "reason": "moved, see signed-target-xyzzy" } }));
+            })
+            .await;
+        let index = {
+            let env = crate::test_util::env_lock();
+            env.set(VAR, &fake);
+            ElasticRecall::new(&keyed(&server.base_url(), VAR)).unwrap()
+        };
+        let err = index
+            .read_marker(&SessionId::new("s"))
+            .await
+            .expect_err("a 3xx is an error, not a followed redirect");
+        let text = err.to_string();
+        assert!(text.contains("redirect not followed"), "{text}");
+        assert!(!text.contains("signed-target-xyzzy"), "no target: {text}");
+        assert!(!text.contains("elsewhere"), "no target: {text}");
+        assert!(!text.contains(&fake), "no key: {text}");
+        redirect.assert_hits_async(1).await;
+        target.assert_hits_async(0).await;
     }
 
     #[tokio::test]

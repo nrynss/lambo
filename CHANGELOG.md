@@ -26,6 +26,19 @@
   configuration error fails a write for good. The two stay independent;
   either works without the other.
 
+### Fixed
+
+- **The `[recall]` tier no longer sends its API key in clear text or to a
+  redirect target.** With `api_key` set, `recall.url` must now be https,
+  or plain http to a loopback host (`localhost`, `127.0.0.0/8`, `::1`),
+  the rule the hosted embedders already follow; plain http to any other
+  host is refused at startup, naming the host and scheme, never the key.
+  The tier also no longer follows redirects: a 3xx is an error that does
+  not show the redirect target, so the key is never resent elsewhere. A
+  loopback http client with a key ignores the proxy environment. An http
+  URL without a key is unchanged. A deployment that sent a key over plain
+  http to a remote cluster must switch `recall.url` to https.
+
 ## 0.9.2 (2026-11-04)
 
 ### Highlights

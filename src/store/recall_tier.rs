@@ -16,7 +16,7 @@
 //! [recall]
 //! kind = "elastic"
 //! url = "https://my-cluster.es.example.com"
-//! api_key = { env = "LAMBO_ES_API_KEY" }   # by reference only, never inline
+//! api_key = { env = "LAMBO_ES_API_KEY" }   # by reference only; https or loopback http
 //! index_prefix = "lambo"
 //! refresh = "false"                        # "wait_for" in tests only
 //! ```
@@ -166,11 +166,14 @@ fn default_index_prefix() -> String {
 #[serde(deny_unknown_fields)]
 pub struct RecallConfig {
     pub kind: RecallKind,
-    /// Cluster base URL. Must not carry credentials (`user:pass@`): secrets
-    /// are by reference only, through [`Self::api_key`].
+    /// Cluster base URL. Must not carry credentials (`user:pass@`), a query
+    /// or a fragment: secrets are by reference only, through
+    /// [`Self::api_key`]. With a key it must be `https`, or plain `http` to a
+    /// loopback host; redirects are never followed.
     pub url: String,
-    /// API key, by reference (`{ env = "NAME" }`). Absent for a cluster with
-    /// security off (tests).
+    /// API key, by reference (`{ env = "NAME" }`), sent as
+    /// `Authorization: ApiKey <key>` only over `https` or loopback `http`.
+    /// Absent for a cluster with security off (tests).
     #[serde(default)]
     pub api_key: Option<SecretRef>,
     /// Index name prefix. Data indices are `{prefix}-v-{contract hash}`, the
