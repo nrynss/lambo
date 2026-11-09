@@ -2,6 +2,70 @@
 
 ## Unreleased
 
+### Highlights
+
+- **Elastic embedder (#233).** `[embedder] kind = "elastic"` (feature
+  `embed-elastic`, in released binaries) creates embeddings through the
+  Elasticsearch Inference API: `url` is the cluster, `model` the
+  inference endpoint id (both required; `GET /_inference/_all` lists the
+  ids a deployment exposes, such as `.jina-embeddings-v3`), and
+  `api_key_env` sends `Authorization: ApiKey` over https or loopback
+  http. Documents go with `input_type: INGEST`, queries with `SEARCH`;
+  an endpoint that refuses the field fails with a hint to set
+  `send_input_type = false`, never a silent retry. The contract is kind
+  `elastic` with the endpoint id as model. There is no calibration row,
+  and `canary = "verify"` is recommended because Elastic can change the
+  model behind a stable id. There is no new fallback for an outage.
+  Using Elastic for both `[recall]` and the embedder puts both of
+  recall's vector dependencies on one service: during an Elastic outage
+  writes answer `failed` (under `hybrid`) and recall answers from
+  keyword and recent legs only. A write that fails for the outage keeps
+  its durable intent, and the next serve re-attempts it (its receipt
+  then reads `pending_replay`, then `applied_after_restart`), so agents
+  should recall before re-deriving; only a refused text, a configuration
+  error, or a response Lambo cannot use (unparseable, over the size cap,
+  the wrong width, non-finite or zero-norm) fails a write for good. A
+  success response cut off mid-body (a reset, or a stall past the request
+  timeout) counts as an outage too, and one larger than any embedding
+  needs (64 bytes a dimension, at least 4 MiB) is refused unread. The two
+  stay independent; either works without the other.
+
+### Fixed
+
+- **A `bge_m3` or `embeddinggemma2` write cut off mid-response now keeps
+  its durable intent, and an oversized response is refused.** A success
+  response whose body the connection cut off (a reset, or a stall past the
+  request timeout, which covers the body) failed the write for good; it
+  now counts as an outage, so under `hybrid` the next serve re-attempts
+  it. The success body was read whole however long it was; past 64 bytes
+  a dimension (at least 4 MiB) it is now refused without being read
+  further or quoted.
+- **The `[recall]` tier no longer sends its API key in clear text or to a
+  redirect target.** With `api_key` set, `recall.url` must now be https,
+  or plain http to a loopback host (`localhost`, `127.0.0.0/8`, `::1`),
+  the rule the hosted embedders already follow; plain http to any other
+  host is refused at startup, naming the host and scheme, never the key.
+  The tier also no longer follows redirects: a 3xx is an error that does
+  not show the redirect target, so the key is never resent elsewhere. A
+  loopback http client with a key ignores the proxy environment. An http
+  URL without a key is unchanged. A deployment that sent a key over plain
+  http to a remote cluster must switch `recall.url` to https.
+- **The `[recall]` tier no longer quotes an echoed API key in its errors.**
+  It quoted Elasticsearch's `error.type` and `error.reason` (and a bulk
+  item's error) verbatim, so a cluster or proxy that echoed the key it
+  refused put the key in logs and MCP receipts. With `api_key` set, every
+  detectable echo (raw, JSON-escaped, percent-encoded, or a run of 8 or
+  more of its bytes) is now replaced with `(token not shown)`, the rule
+  the hosted embedders already follow.
+- **The `[recall]` tier no longer downloads a response of any size.**
+  Every response body, error bodies included, was read whole, bounded
+  only by the request timeout (300 seconds for maintenance calls), so a
+  broken or hostile cluster or proxy could stream without end into
+  memory. A body is now read up to 32 MiB, or for a kNN search what its
+  neighbours can take if that is more (32 bytes a dimension and 32 KiB a
+  neighbour); a longer one is an error that quotes neither the body nor
+  the key, handled like any other failure of the index.
+
 ## 0.9.2 (2026-11-04)
 
 ### Highlights

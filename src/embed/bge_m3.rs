@@ -20,7 +20,9 @@ use std::time::Duration;
 
 use super::{EmbedError, Embedder};
 
-mod scrub;
+// Moved to `crate::net` so the `[recall]` tier can scrub its error reasons too.
+pub(crate) use crate::net::scrub;
+use crate::net::{read_capped_body, BodyReadError};
 
 /// OpenAI-compatible embeddings request body (`model` is omitted when empty so it hits
 /// a llama.cpp server's default model; `dimensions` is omitted unless the operator
@@ -44,8 +46,8 @@ struct EmbedData {
     embedding: Vec<f32>,
 }
 
-const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+pub(crate) const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+pub(crate) const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// What a non-success HTTP status from llama.cpp says about retrying the same
@@ -104,18 +106,18 @@ pub(crate) struct StatusVerdict {
     pub(crate) hint: Option<&'static str>,
 }
 
-/// A status rule: the status code and the (scrubbed, capped) error body in,
-/// the class out. The class is still decided at the site that read the
-/// response and carried out as an [`EmbedError`] variant (J1-R2-2); a rule
-/// only lets an adapter that knows its server's bodies refine the table for
-/// a request shape the table was not written for (the EmbeddingGemma 2
-/// image call, whose `500` can be a permanent deployment fault).
 /// How [`BgeM3LlamaCppEmbedder::post_json`] begins the message of a request that never
 /// got an HTTP answer (refused, reset, timed out). A caller that must tell a
 /// connection-level failure from a transient HTTP status (a 503 "busy")
 /// matches on it.
 pub(crate) const LLAMA_UNREACHABLE: &str = "llama.cpp unreachable at ";
 
+/// A status rule: the status code and the (scrubbed, capped) error body in,
+/// the class out. The class is still decided at the site that read the
+/// response and carried out as an [`EmbedError`] variant (J1-R2-2); a rule
+/// only lets an adapter that knows its server's bodies refine the table for
+/// a request shape the table was not written for (the EmbeddingGemma 2
+/// image call, whose `500` can be a permanent deployment fault).
 pub(crate) type StatusRule = fn(u16, &str) -> StatusVerdict;
 
 /// The body `llama-server` (checked on b11517) sends with `500` for a
@@ -208,10 +210,7 @@ pub(crate) fn check_bearer_transport(base_url: &str) -> Result<(), EmbedError> {
                 .into(),
         )
     })?;
-    if url.scheme() == "https" {
-        return Ok(());
-    }
-    if url.scheme() == "http" && is_loopback_host(&url) {
+    if crate::net::may_carry_credential(&url) {
         return Ok(());
     }
     Err(EmbedError::Unavailable(format!(
@@ -221,27 +220,6 @@ pub(crate) fn check_bearer_transport(base_url: &str) -> Result<(), EmbedError> {
         url.host_str().unwrap_or("(no host)"),
         url.scheme()
     )))
-}
-
-/// Is `url`'s host loopback: `localhost`, `127.0.0.0/8`, `::1` or an
-/// IPv4-mapped `127.0.0.0/8`? `url` has already normalised the host: IPv4 to
-/// a dotted quad (`127.1`, `2130706433` and `0x7f.1` are `127.0.0.1`), IPv6
-/// in brackets, domains lower-cased. The name `localhost` is trusted without
-/// resolving it.
-fn is_loopback_host(url: &reqwest::Url) -> bool {
-    url.host_str().is_some_and(|host| {
-        match host
-            .trim_start_matches('[')
-            .trim_end_matches(']')
-            .parse::<std::net::IpAddr>()
-        {
-            Ok(std::net::IpAddr::V4(a)) => a.is_loopback(),
-            Ok(std::net::IpAddr::V6(a)) => {
-                a.is_loopback() || a.to_ipv4_mapped().is_some_and(|v4| v4.is_loopback())
-            }
-            Err(_) => host == "localhost" || host == "localhost.",
-        }
-    })
 }
 
 /// Should the client for `base_url` ignore the `HTTP_PROXY` / `HTTPS_PROXY` /
@@ -254,13 +232,13 @@ fn is_loopback_host(url: &reqwest::Url) -> bool {
 /// only through it. Plain `http` to any other host never carries a token
 /// (refused) and keeps its old behaviour.
 fn bypasses_env_proxy(base_url: &str) -> bool {
-    reqwest::Url::parse(base_url).is_ok_and(|url| url.scheme() == "http" && is_loopback_host(&url))
+    reqwest::Url::parse(base_url).is_ok_and(|url| crate::net::is_loopback_http(&url))
 }
 
 /// `url` for a log line, an error or `Debug`: scheme, host, port and path.
 /// Userinfo and the query are dropped, since either may carry a credential
 /// (issue #21); an unparseable URL is not shown at all.
-fn url_for_log(url: &str) -> String {
+pub(crate) fn url_for_log(url: &str) -> String {
     match reqwest::Url::parse(url) {
         Ok(u) => {
             let host = u.host_str().unwrap_or("");
@@ -273,6 +251,26 @@ fn url_for_log(url: &str) -> String {
     }
 }
 
+/// The least [`success_body_cap`] allows, whatever the width: room for the
+/// JSON envelope (model name, usage counts) and for a server that answers
+/// wider than `dim` before a client-side Matryoshka cut.
+pub(crate) const SUCCESS_BODY_FLOOR: usize = 4 * 1024 * 1024;
+
+/// Bytes of a success body allowed per expected vector component. One JSON
+/// number with its separator is at most about 25 bytes even printed as an
+/// `f64` (`-1.2345678901234567e-308,`), so 64 is generous.
+const SUCCESS_BYTES_PER_COMPONENT: usize = 64;
+
+/// The most of a 2xx embeddings body worth downloading for a vector of `dim`
+/// components: `dim` x [`SUCCESS_BYTES_PER_COMPONENT`], at least
+/// [`SUCCESS_BODY_FLOOR`]. A body past it is no embedding the adapter can
+/// use, and a hostile or broken endpoint could otherwise stream without end
+/// into memory.
+pub(crate) fn success_body_cap(dim: usize) -> usize {
+    dim.saturating_mul(SUCCESS_BYTES_PER_COMPONENT)
+        .max(SUCCESS_BODY_FLOOR)
+}
+
 /// The HTTP client for `base_url`.
 ///
 /// Redirects are never followed (`Policy::none`): an embeddings POST has no
@@ -280,7 +278,7 @@ fn url_for_log(url: &str) -> String {
 /// same-port redirect even when it downgrades `https` to `http`, so following
 /// one could resend the token in clear text (issue #21). A 3xx is answered
 /// as a permanent configuration error instead (see [`classify_status`]).
-fn build_client(
+pub(crate) fn build_client(
     base_url: &str,
     connect: Duration,
     request: Duration,
@@ -501,9 +499,11 @@ impl BgeM3LlamaCppEmbedder {
     /// POST an embed request and parse the response.
     ///
     /// Error classification (consumed by the degradation contract in T7.2):
-    /// * connect-level failures (server down/unreachable) -> `Unavailable`, so the caller
+    /// * connect-level failures (server down/unreachable), and a success body cut off
+    ///   mid-read -> `Unavailable`, so the caller
     ///   can fall back to canonical matching permanently and log once instead of hammering;
-    /// * server-side rejections / malformed / dimension-mismatched output -> `Backend`
+    /// * server-side rejections / malformed / dimension-mismatched output, and a success
+    ///   body over [`success_body_cap`] -> `Backend`
     ///   (server is up; the config or version is wrong, and the fix is permanent too).
     ///
     /// **CON-2 (fail hard):** there is deliberately NO retry that clears the configured
@@ -555,11 +555,21 @@ impl BgeM3LlamaCppEmbedder {
         })?;
         let status = resp.status();
         if status.is_success() {
-            let bytes = resp.bytes().await.map_err(|e| {
-                EmbedError::Backend(format!(
-                    "llama.cpp response body could not be read: {}",
+            let cap = success_body_cap(self.dim);
+            let bytes = read_capped_body(resp, cap).await.map_err(|e| match e {
+                // A transport failure mid-body (a reset, or a stall past the
+                // request timeout, which covers the body) says nothing about
+                // the input: transient, so the write keeps its durable intent.
+                BodyReadError::Cut(e) => EmbedError::Unavailable(format!(
+                    "llama.cpp response body from {} was cut off: {}",
+                    self.log_url,
                     e.without_url()
-                ))
+                )),
+                BodyReadError::TooLarge => EmbedError::Backend(format!(
+                    "llama.cpp response from {} is over {cap} bytes, more than an embedding of \
+                     {} components needs; refusing it (body not shown)",
+                    self.log_url, self.dim
+                )),
             })?;
             // The parse error's own text quotes body content (`invalid type:
             // string "..."`), which an echoing endpoint could fill with the
@@ -736,6 +746,65 @@ mod tests {
             unit_magnitude(&v)
         );
         mock.assert();
+    }
+
+    /// Pre-existing (found in #233 review): a 2xx body the connection cut
+    /// off mid-read was `Backend`, so the write lost its durable intent. It
+    /// is a transport failure, so `Unavailable`; the partial body is not
+    /// quoted. The EmbeddingGemma 2 adapter posts through the same
+    /// `post_json`, so this holds for it too.
+    ///
+    /// Mutation: map `BodyReadError::Cut` to `Backend` -> red.
+    #[tokio::test]
+    async fn a_success_body_cut_off_mid_read_is_unavailable() {
+        let head = "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                    content-length: 100000\r\n\r\n"
+            .to_string();
+        let partial = br#"{"data":[{"embedding":[0.123456,"#.to_vec();
+        let base = crate::test_util::serve_raw_http_once(head, vec![partial]).await;
+        let err = BgeM3LlamaCppEmbedder::new(base, "", 4)
+            .unwrap()
+            .embed("anything")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, EmbedError::Unavailable(_)), "{err:?}");
+        let msg = err.to_string();
+        assert!(msg.contains("was cut off"), "{msg}");
+        assert!(
+            !msg.contains("0.123456"),
+            "the partial body is not quoted: {msg}"
+        );
+    }
+
+    /// Pre-existing (found in #233 review): the 2xx body was read whole,
+    /// however long. Past `success_body_cap` it is now refused as `Backend`
+    /// without quoting it.
+    ///
+    /// Mutation: read with `resp.bytes()` again -> red (the padded body
+    /// parses and embeds).
+    #[tokio::test]
+    async fn an_oversized_success_body_is_refused_unquoted() {
+        let cap = success_body_cap(4);
+        let big = format!(
+            "{{\"data\":[{{\"embedding\":[1,2,3,4]}}],\"pad\":\"{}\"}}",
+            "x".repeat(cap)
+        );
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(POST).path("/v1/embeddings");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(big.clone());
+        });
+        let err = BgeM3LlamaCppEmbedder::new(server.base_url(), "", 4)
+            .unwrap()
+            .embed("anything")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, EmbedError::Backend(_)), "{err:?}");
+        let msg = err.to_string();
+        assert!(msg.contains(&format!("over {cap} bytes")), "{msg}");
+        assert!(!msg.contains("xxxx"), "{msg}");
     }
 
     /// #221: without `with_request_dimensions` the request body is exactly

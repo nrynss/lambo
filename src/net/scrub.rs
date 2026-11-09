@@ -1,8 +1,9 @@
-//! Keeping the bearer token out of an error body before it is quoted
-//! (issue #21).
+//! Keeping a credential out of an error body before it is quoted (issue #21;
+//! shared with the `[recall]` tier since #233).
 //!
-//! The adapter quotes a non-2xx response body into its error, and those
-//! errors reach logs and MCP receipts. A gateway may echo the key it refused,
+//! The hosted embedders quote a non-2xx response body into their errors, and
+//! the recall tier quotes Elasticsearch's `error.reason`; those errors reach
+//! logs and MCP receipts. A server may echo the key it refused,
 //! raw, JSON-escaped inside an error object, percent-encoded from a query
 //! string, or masked down to its first and last few characters. What is
 //! replaced, exactly:
@@ -27,30 +28,33 @@
 use std::fmt::Write as _;
 
 /// The shortest run of the token's bytes treated as an echo of it.
-pub(super) const MIN_ECHO_RUN: usize = 8;
+pub(crate) const MIN_ECHO_RUN: usize = 8;
 
 /// The most of a body that is quoted into an error.
-pub(super) const QUOTED_BODY_MAX: usize = 8 * 1024;
+pub(crate) const QUOTED_BODY_MAX: usize = 8 * 1024;
 
 /// The most of an error body worth downloading for a token of `token_len`
 /// bytes: the quoted part plus the scan's look-ahead past the cut (the
 /// longest token form is its percent-encoding, 3 bytes a byte) and a
 /// character's worth for the boundary. Anything past it is never quoted or
 /// scanned, so it is never read.
-pub(super) fn read_cap(token_len: usize) -> usize {
+// The recall tier quotes only fields of a parsed error body, never a raw
+// capped one, so a recall-only build has no caller.
+#[cfg_attr(not(feature = "embed-bge"), allow(dead_code))]
+pub(crate) fn read_cap(token_len: usize) -> usize {
     QUOTED_BODY_MAX
         .saturating_add(token_len.saturating_mul(3))
         .saturating_add(4)
 }
 
 /// What a scrubbed run is replaced with.
-pub(super) const TOKEN_NOT_SHOWN: &str = "(token not shown)";
+pub(crate) const TOKEN_NOT_SHOWN: &str = "(token not shown)";
 
 /// `body`, cut to [`QUOTED_BODY_MAX`] bytes, with every echo of `token` (see
 /// the module doc) replaced by [`TOKEN_NOT_SHOWN`]. `None` or an empty token
 /// only cuts. `truncated` says the body was read only in part, so its full
 /// length is unknown.
-pub(super) fn quotable_body(body: &str, token: Option<&str>, truncated: bool) -> String {
+pub(crate) fn quotable_body(body: &str, token: Option<&str>, truncated: bool) -> String {
     let limit = floor_char_boundary(body, QUOTED_BODY_MAX);
     let forms = token
         .filter(|t| !t.is_empty())

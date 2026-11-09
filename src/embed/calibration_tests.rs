@@ -611,3 +611,32 @@ fn a_floor_below_the_calibrated_one_is_warned_of() {
     assert_eq!(layer_floor_warning("general", Some(0.8), &off, &eg2), None);
     assert_eq!(layer_floor_warning("general", Some(0.5), &on, &bge), None);
 }
+
+/// #233: an `elastic` contract has no row and is never the BGE-M3
+/// reference, even when the inference endpoint id names BGE-M3 exactly: an
+/// endpoint id is an operator-chosen name, not a measured artifact. So it
+/// warns as uncalibrated until it is measured.
+#[test]
+fn elastic_contracts_are_never_the_reference() {
+    for model in [
+        Some(".jina-embeddings-v3"),
+        Some("bge-m3"),
+        Some("BAAI/bge-m3"),
+        Some("bge-m3;input_type=off"),
+        None,
+    ] {
+        let contract = EmbeddingContract {
+            kind: "elastic".into(),
+            model: model.map(str::to_string),
+            dim: 1024,
+        };
+        assert!(!is_reference(&contract), "{model:?}");
+        assert!(lookup(&contract).is_none(), "{model:?}");
+        assert!(!is_calibrated(&contract), "{model:?}");
+        assert!(
+            warn_if_uncalibrated(CalibrationMode::Builtin, &contract),
+            "{model:?}"
+        );
+        assert!(!warn_if_uncalibrated(CalibrationMode::Off, &contract));
+    }
+}

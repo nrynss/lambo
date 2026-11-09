@@ -97,6 +97,49 @@ impl TextRole {
     }
 }
 
+/// Serve one raw HTTP exchange on a loopback port: read the request (headers
+/// and its `Content-Length` body), write `head`, then each of `chunks`, then
+/// close. Write errors are ignored, since the client may stop reading first.
+/// Returns the base URL.
+pub async fn serve_raw_http_once(head: String, chunks: Vec<Vec<u8>>) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut req = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            let n = sock.read(&mut buf).await.unwrap_or(0);
+            if n == 0 {
+                break;
+            }
+            req.extend_from_slice(&buf[..n]);
+            let text = String::from_utf8_lossy(&req).to_ascii_lowercase();
+            if let Some(end) = text.find("\r\n\r\n") {
+                let len = text[..end]
+                    .lines()
+                    .find_map(|l| l.strip_prefix("content-length:"))
+                    .and_then(|v| v.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+                if req.len() >= end + 4 + len {
+                    break;
+                }
+            }
+        }
+        if sock.write_all(head.as_bytes()).await.is_err() {
+            return;
+        }
+        for chunk in chunks {
+            if sock.write_all(&chunk).await.is_err() {
+                return;
+            }
+        }
+        let _ = sock.shutdown().await;
+    });
+    format!("http://{addr}")
+}
+
 /// Take the process-environment lock: the only way a lib test may mutate the
 /// environment.
 ///

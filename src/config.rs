@@ -1094,6 +1094,41 @@ mod tests {
         assert_eq!(recall.timeout_ms, Some(5000));
     }
 
+    /// #233: the example's commented elastic `[embedder]` lines are a
+    /// working embedder section once uncommented, and the adapter accepts
+    /// the URL, endpoint id and width they name. Gated on `embed-elastic`
+    /// for that last step: the kind parses in any build.
+    #[cfg(feature = "embed-elastic")]
+    #[test]
+    fn lambo_file_example_elastic_embedder_block_parses_when_uncommented() {
+        let raw = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/lambo.example.toml"));
+        let start = raw
+            .find("# Elasticsearch Inference API (#233")
+            .expect("the example documents the elastic embedder");
+        let end = start
+            + raw[start..]
+                .find("# In-crate candle")
+                .expect("the candle example follows it");
+        // The example's settings are the `#   key = value` lines; the rest of
+        // the comment is prose.
+        let settings: Vec<&str> = raw[start..end]
+            .lines()
+            .filter_map(|l| l.strip_prefix("#   "))
+            .collect();
+        let block = format!("[embedder]\n{}", settings.join("\n"));
+        let f = LamboFile::from_toml_str(&block).unwrap_or_else(|e| panic!("{e}\n{block}"));
+        let e = &f.embedder;
+        assert_eq!(e.kind, EmbedderKind::Elastic, "{block}");
+        assert_eq!(e.send_input_type, Some(true));
+        assert_eq!(e.llama_model.as_deref(), Some(".jina-embeddings-v3"));
+        assert_eq!(e.dim, 1024);
+        assert_eq!(e.api_key_env.as_deref(), Some("LAMBO_ES_API_KEY"));
+        assert_eq!(e.canary, crate::embed::canary::CanaryMode::Verify);
+        let url = e.llama_url.as_deref().expect("the example names a url");
+        crate::embed::ElasticEmbedder::new(url, e.llama_model.as_deref().unwrap(), e.dim)
+            .expect("the adapter accepts the example's url, id and width");
+    }
+
     /// #181: the example's commented `[selection]` block turns the rule on
     /// once uncommented, with the similarity signals still off (the shipped
     /// default), and leaving it commented keeps it off.

@@ -372,6 +372,9 @@ fn embedding_contract(embedder_cfg: &EmbedderConfig, embedder: &dyn Embedder) ->
         // llama-server ignores the request's model name and EG2's text
         // vectors depend on the task prefixes.
         crate::embed::EmbedderKind::EmbeddingGemma2 => crate::embed::eg2_identity(embedder),
+        // #233: the inference endpoint id, plus `;input_type=off` when the
+        // query/document roles are not sent (a different space).
+        crate::embed::EmbedderKind::Elastic => crate::embed::elastic_identity(embedder),
         _ => embedder_cfg.llama_model.clone().filter(|s| !s.is_empty()),
     };
     EmbeddingContract {
@@ -1659,6 +1662,35 @@ mod tests {
             r.embedding.model.as_deref(),
             Some("gemini-embedding-001"),
             "the Gemini contract must carry the real model id, not NULL"
+        );
+    }
+
+    /// #233: an `elastic` config stamps kind `elastic` and the inference
+    /// endpoint id as the contract model, with `;input_type=off` when the
+    /// roles are not sent. Resolve connects nothing, so the URL need not
+    /// answer. The embedder needs no `[recall]` table (they are independent).
+    #[cfg(all(feature = "store-memory", feature = "embed-elastic"))]
+    #[test]
+    fn resolve_elastic_stamps_the_inference_endpoint_id() {
+        let base = "[store]\nkind = \"memory\"\n[embedder]\nkind = \"elastic\"\n\
+                    url = \"https://my-cluster.es.example.com\"\n\
+                    model = \".jina-embeddings-v3\"\ndim = 1024\n";
+        let r = resolve_backends(LamboFile::from_toml_str(base).unwrap()).unwrap();
+        assert_eq!(r.embedding.kind, "elastic");
+        assert_eq!(r.embedding.model.as_deref(), Some(".jina-embeddings-v3"));
+        assert_eq!(r.embedding.dim, 1024);
+        let off = format!("{base}send_input_type = false\n");
+        let r = resolve_backends(LamboFile::from_toml_str(&off).unwrap()).unwrap();
+        assert_eq!(
+            r.embedding.model.as_deref(),
+            Some(".jina-embeddings-v3;input_type=off")
+        );
+        // A different endpoint id is a different contract.
+        let other = base.replace(".jina-embeddings-v3", ".jina-embeddings-v5-text-small");
+        let r = resolve_backends(LamboFile::from_toml_str(&other).unwrap()).unwrap();
+        assert_eq!(
+            r.embedding.model.as_deref(),
+            Some(".jina-embeddings-v5-text-small")
         );
     }
 

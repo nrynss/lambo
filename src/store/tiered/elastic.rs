@@ -14,8 +14,21 @@
 //!
 //! Secrets: the API key comes from the environment variable `[recall]
 //! api_key = { env = ... }` names, is sent only in the `Authorization`
-//! header (marked sensitive), and appears in no error or log line. A URL that
-//! carries credentials is refused at construction.
+//! header (marked sensitive), and appears in no error or log line: the
+//! server's `error.type` and `error.reason` (and a bulk item's) are quoted
+//! only after every detectable echo of the key is replaced
+//! (`crate::net::scrub`, the embedders' rule). A URL that
+//! carries credentials is refused at construction. With a key, the URL must be
+//! `https`, or plain `http` to a loopback host (the shared rule in
+//! `crate::net`), checked before the key is read; a loopback `http` client
+//! with a key ignores the proxy environment. Redirects are never followed, so
+//! the key is never resent to another target; a 3xx is an error that does not
+//! quote the redirect target.
+//!
+//! Every response body is read through `crate::net::read_capped_body`, up to
+//! [`RESPONSE_BODY_CAP`] (a kNN search up to [`knn_body_cap`]); a longer one
+//! is an error that quotes none of it, and a body cut off mid-read is the
+//! same transport error as a request that got no answer.
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -29,6 +42,7 @@ use serde_json::{json, Value};
 
 use super::index::{DeleteReport, DocOp, KnnHit, RecallIndex, SyncMarker};
 use super::project::{contract_hash, validate_index_prefix};
+use crate::net::{scrub, BodyReadError};
 use crate::store::RecallConfig;
 use crate::types::{EmbeddingContract, NodeId, SessionId, StoreError};
 
@@ -41,6 +55,38 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_millis(5000);
 /// out would leave the session stale forever while the engine keeps
 /// deleting. The configured timeout still bounds connecting.
 const MAINTENANCE_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// The most of a response body the tier downloads: 32 MiB (a kNN search
+/// may take more, by [`knn_body_cap`]). Every body is read through
+/// [`crate::net::read_capped_body`], error bodies included, so a hostile or
+/// broken cluster (or a proxy in front of it) cannot stream without end into
+/// memory; before, only the request timeout bounded the read (300 seconds
+/// for maintenance calls). Fixed and generous: a marker, a count, a
+/// delete-by-query report, a bulk response (one short item per document) or
+/// an error with its stack stays far under it.
+const RESPONSE_BODY_CAP: usize = 32 * 1024 * 1024;
+
+/// Bytes of a kNN response allowed per stored vector component. An `f32`
+/// printed as JSON with its separator is at most about 16 bytes
+/// (`-1.2345678e-38,`), so 32 is generous.
+const KNN_BYTES_PER_COMPONENT: usize = 32;
+
+/// Bytes of a kNN response allowed per hit besides its vector: `_index`,
+/// `_id`, `_score` and the canonical key.
+const KNN_BYTES_PER_HIT: usize = 32 * 1024;
+
+/// The most of a kNN response worth downloading for `k` hits of `dim`
+/// components: what that many hits can legitimately take, at least
+/// [`RESPONSE_BODY_CAP`]. Every hit carries its stored vector, so a large
+/// `k` at a wide contract (2048 hits of 4096 components is about 80 MB as
+/// Elasticsearch prints it) needs more than the fixed cap, and the bound
+/// still follows what the request asked for.
+fn knn_body_cap(k: usize, dim: usize) -> usize {
+    dim.saturating_mul(KNN_BYTES_PER_COMPONENT)
+        .saturating_add(KNN_BYTES_PER_HIT)
+        .saturating_mul(k)
+        .max(RESPONSE_BODY_CAP)
+}
 
 /// `num_candidates` floor for a kNN query (the issue's `max(limit * 4, 100)`).
 const MIN_NUM_CANDIDATES: usize = 100;
@@ -61,6 +107,37 @@ pub(crate) struct ElasticRecall {
 
 fn backend(what: &str, e: impl std::fmt::Display) -> StoreError {
     StoreError::Backend(format!("recall index: {what}: {e}"))
+}
+
+/// Should the client for `base` ignore the `HTTP_PROXY` / `HTTPS_PROXY` /
+/// `ALL_PROXY` environment? Only when it carries a key over plain `http` to a
+/// loopback host: a proxy would carry the request, and the key on it, off the
+/// machine in clear text. `https` keeps the environment's proxies (they only
+/// tunnel), and a client without a key has nothing to leak.
+fn bypasses_env_proxy(keyed: bool, base: &Url) -> bool {
+    keyed && crate::net::is_loopback_http(base)
+}
+
+/// Finish `builder` into the tier's client for `base`. Takes the builder so a
+/// test can hand in one that already names a proxy: `no_proxy` drops those
+/// and the environment's alike.
+fn build_client(
+    builder: reqwest::ClientBuilder,
+    base: &Url,
+    keyed: bool,
+    timeout: Duration,
+) -> Result<reqwest::Client, StoreError> {
+    // No redirects: reqwest keeps `Authorization` on a same-host redirect,
+    // even one that downgrades https to http, and no endpoint this client
+    // calls has a legitimate redirect. A 3xx comes back to `fail`.
+    let mut builder = builder
+        .connect_timeout(timeout)
+        .timeout(timeout)
+        .redirect(reqwest::redirect::Policy::none());
+    if bypasses_env_proxy(keyed, base) {
+        builder = builder.no_proxy();
+    }
+    builder.build().map_err(|e| backend("build HTTP client", e))
 }
 
 impl ElasticRecall {
@@ -94,6 +171,17 @@ impl ElasticRecall {
                 "recall.timeout_ms must be greater than zero".into(),
             ));
         }
+        // Checked before the key is read: plain http to a remote host would
+        // put it on the wire in clear text. Names host and scheme only.
+        if cfg.api_key.is_some() && !crate::net::may_carry_credential(&base) {
+            return Err(StoreError::Backend(format!(
+                "refusing to send the recall API key to {} over {}: recall.api_key is sent only \
+                 over https, or over http to a loopback host (localhost, 127.0.0.0/8, ::1). Use \
+                 an https recall.url, or remove recall.api_key",
+                base.host_str().unwrap_or("(no host)"),
+                base.scheme()
+            )));
+        }
         let auth = match &cfg.api_key {
             Some(secret) => {
                 let mut value = HeaderValue::from_str(&format!("ApiKey {}", secret.resolve()?))
@@ -112,11 +200,7 @@ impl ElasticRecall {
             .timeout_ms
             .map(Duration::from_millis)
             .unwrap_or(DEFAULT_TIMEOUT);
-        let client = reqwest::Client::builder()
-            .connect_timeout(timeout)
-            .timeout(timeout)
-            .build()
-            .map_err(|e| backend("build HTTP client", e))?;
+        let client = build_client(reqwest::Client::builder(), &base, auth.is_some(), timeout)?;
         Ok(Self {
             client,
             base,
@@ -168,7 +252,8 @@ impl ElasticRecall {
         url: Url,
         body: Option<Body>,
     ) -> Result<(StatusCode, Value), StoreError> {
-        self.send_within(what, method, url, body, None).await
+        self.send_within(what, method, url, body, None, RESPONSE_BODY_CAP)
+            .await
     }
 
     /// [`Self::send`] with the maintenance budget instead of the per-request
@@ -181,7 +266,7 @@ impl ElasticRecall {
         body: Option<Body>,
     ) -> Result<(StatusCode, Value), StoreError> {
         let budget = MAINTENANCE_TIMEOUT.max(self.timeout);
-        self.send_within(what, method, url, body, Some(budget))
+        self.send_within(what, method, url, body, Some(budget), RESPONSE_BODY_CAP)
             .await
     }
 
@@ -192,6 +277,7 @@ impl ElasticRecall {
         url: Url,
         body: Option<Body>,
         timeout: Option<Duration>,
+        cap: usize,
     ) -> Result<(StatusCode, Value), StoreError> {
         let mut req = self.client.request(method, url);
         if let Some(timeout) = timeout {
@@ -207,7 +293,21 @@ impl ElasticRecall {
         };
         let resp = req.send().await.map_err(|e| backend(what, e))?;
         let status = resp.status();
-        let bytes = resp.bytes().await.map_err(|e| backend(what, e))?;
+        let bytes = crate::net::read_capped_body(resp, cap)
+            .await
+            .map_err(|e| match e {
+                // A transport failure mid-body is a transport failure like
+                // one before the status line: the same error.
+                BodyReadError::Cut(e) => backend(what, e),
+                // Neither the body nor the key is quoted.
+                BodyReadError::TooLarge => backend(
+                    what,
+                    format!(
+                        "HTTP {status}: response body over {cap} bytes; refusing it (body not \
+                         shown)"
+                    ),
+                ),
+            })?;
         let value = if bytes.is_empty() {
             Value::Null
         } else {
@@ -220,12 +320,38 @@ impl ElasticRecall {
         body["error"]["type"].as_str().unwrap_or("")
     }
 
-    fn fail(what: &str, status: StatusCode, body: &Value) -> StoreError {
+    /// The API key this client sends, if any.
+    fn api_key(&self) -> Option<&str> {
+        self.auth
+            .as_ref()
+            .and_then(|auth| auth.as_bytes().strip_prefix(b"ApiKey "))
+            .and_then(|key| std::str::from_utf8(key).ok())
+    }
+
+    /// `text` from the server, cut and with every detectable echo of the API
+    /// key replaced ([`scrub::quotable_body`], whose doc lists what is
+    /// caught), before it is quoted into an error: a cluster or a proxy in
+    /// front of it may echo the key it refused, and these errors reach logs
+    /// and MCP receipts.
+    fn quotable(&self, text: &str) -> String {
+        scrub::quotable_body(text, self.api_key(), false)
+    }
+
+    fn fail(&self, what: &str, status: StatusCode, body: &Value) -> StoreError {
+        if status.is_redirection() {
+            // Neither the body nor `Location` is quoted: a redirect target can
+            // carry a signed URL or a key in its query.
+            return backend(
+                what,
+                format!(
+                    "HTTP {status}: redirect not followed (the redirect target is not shown); \
+                     point recall.url at the cluster itself"
+                ),
+            );
+        }
         let reason = body["error"]["reason"].as_str().unwrap_or("");
-        backend(
-            what,
-            format!("HTTP {status} {} {reason}", Self::error_type(body)),
-        )
+        let detail = self.quotable(&format!("{} {reason}", Self::error_type(body)));
+        backend(what, format!("HTTP {status} {detail}"))
     }
 
     /// Create `index` with `body` unless it exists.
@@ -237,7 +363,7 @@ impl ElasticRecall {
         if status.is_success() || Self::error_type(&resp) == "resource_already_exists_exception" {
             Ok(())
         } else {
-            Err(Self::fail("create index", status, &resp))
+            Err(self.fail("create index", status, &resp))
         }
     }
 
@@ -297,7 +423,7 @@ impl ElasticRecall {
             return Ok(DeleteReport::default());
         }
         if !status.is_success() {
-            return Err(Self::fail(what, status, &resp));
+            return Err(self.fail(what, status, &resp));
         }
         if let Some(failures) = resp["failures"].as_array()
             && !failures.is_empty()
@@ -423,7 +549,7 @@ impl RecallIndex for ElasticRecall {
             .send("bulk write", Method::POST, url, Some(Body::NdJson(body)))
             .await?;
         if !status.is_success() {
-            return Err(Self::fail("bulk write", status, &resp));
+            return Err(self.fail("bulk write", status, &resp));
         }
         if resp["errors"].as_bool() != Some(true) {
             return Ok(());
@@ -442,11 +568,11 @@ impl RecallIndex for ElasticRecall {
             if !accepted {
                 return Err(backend(
                     "bulk write",
-                    format!(
+                    self.quotable(&format!(
                         "{action} {} failed: HTTP {code} {}",
                         result["_id"].as_str().unwrap_or("?"),
                         result["error"]["type"].as_str().unwrap_or("")
-                    ),
+                    )),
                 ));
             }
         }
@@ -465,7 +591,7 @@ impl RecallIndex for ElasticRecall {
         if status.is_success() || status == StatusCode::NOT_FOUND {
             Ok(())
         } else {
-            Err(Self::fail("refresh", status, &resp))
+            Err(self.fail("refresh", status, &resp))
         }
     }
 
@@ -514,7 +640,7 @@ impl RecallIndex for ElasticRecall {
             return Ok(0);
         }
         if !status.is_success() {
-            return Err(Self::fail("count session documents", status, &resp));
+            return Err(self.fail("count session documents", status, &resp));
         }
         resp["count"]
             .as_u64()
@@ -543,8 +669,16 @@ impl RecallIndex for ElasticRecall {
             // The stored vector rides along so the tier re-ranks exactly.
             "_source": ["canonical_key", "embedding"]
         });
+        let cap = knn_body_cap(k, contract.dim);
         let (status, resp) = self
-            .send("knn search", Method::POST, url, Some(Body::Json(body)))
+            .send_within(
+                "knn search",
+                Method::POST,
+                url,
+                Some(Body::Json(body)),
+                None,
+                cap,
+            )
             .await?;
         if status == StatusCode::NOT_FOUND && Self::error_type(&resp) == "index_not_found_exception"
         {
@@ -552,7 +686,7 @@ impl RecallIndex for ElasticRecall {
             return Ok(Vec::new());
         }
         if !status.is_success() {
-            return Err(Self::fail("knn search", status, &resp));
+            return Err(self.fail("knn search", status, &resp));
         }
         let hits = resp["hits"]["hits"].as_array().cloned().unwrap_or_default();
         hits.iter()
@@ -586,7 +720,7 @@ impl RecallIndex for ElasticRecall {
             return Ok(None);
         }
         if !status.is_success() {
-            return Err(Self::fail("read marker", status, &resp));
+            return Err(self.fail("read marker", status, &resp));
         }
         if resp["found"].as_bool() != Some(true) {
             return Ok(None);
@@ -618,7 +752,7 @@ impl RecallIndex for ElasticRecall {
         if status.is_success() || status == StatusCode::CONFLICT {
             Ok(())
         } else {
-            Err(Self::fail("write marker", status, &resp))
+            Err(self.fail("write marker", status, &resp))
         }
     }
 
@@ -630,7 +764,7 @@ impl RecallIndex for ElasticRecall {
         if status.is_success() || status == StatusCode::NOT_FOUND {
             Ok(())
         } else {
-            Err(Self::fail("delete marker", status, &resp))
+            Err(self.fail("delete marker", status, &resp))
         }
     }
 }
@@ -717,6 +851,214 @@ mod tests {
         let err = ElasticRecall::new(&zero).err().unwrap();
         assert!(err.to_string().contains("timeout_ms"), "{err}");
         ElasticRecall::new(&cfg("http://127.0.0.1:9200/es/")).expect("a path is fine");
+    }
+
+    /// A config with an API key read from `var`.
+    fn keyed(url: &str, var: &str) -> RecallConfig {
+        let mut c = cfg(url);
+        c.api_key = Some(SecretRef { env: var.into() });
+        c
+    }
+
+    /// Pre-existing security defect (found in #233 review): the tier sent
+    /// `Authorization: ApiKey` over any URL, so plain http to a remote host
+    /// put the key on the wire in clear text. A key now needs https or http
+    /// to a loopback host, the embedders' rule; the refusal names host and
+    /// scheme, never the key. Without a key, plain http stays allowed.
+    ///
+    /// Mutation: drop the `may_carry_credential` check -> red.
+    #[test]
+    fn a_key_is_sent_only_over_https_or_loopback_http() {
+        const VAR: &str = "LAMBO_TEST_RECALL_TRANSPORT";
+        let fake = format!("fake-{}-{}", "recall", "transport-xyzzy");
+        let env = crate::test_util::env_lock();
+        env.set(VAR, &fake);
+        for url in [
+            "http://my-cluster.es.example.com:9200",
+            "http://10.0.0.5:9200",
+        ] {
+            let err = ElasticRecall::new(&keyed(url, VAR)).err().expect(url);
+            let text = err.to_string();
+            assert!(
+                text.contains("refusing to send the recall API key"),
+                "{text}"
+            );
+            assert!(text.contains("over http"), "names the scheme: {text}");
+            let host = Url::parse(url).unwrap().host_str().unwrap().to_string();
+            assert!(text.contains(&host), "names the host: {text}");
+            assert!(!text.contains(&fake), "never echo the key: {text}");
+        }
+        for url in [
+            "https://my-cluster.es.example.com",
+            "http://127.0.0.1:9200",
+            "http://localhost:9200",
+            "http://[::1]:9200",
+        ] {
+            ElasticRecall::new(&keyed(url, VAR)).unwrap_or_else(|e| panic!("{url}: {e}"));
+        }
+        drop(env);
+        ElasticRecall::new(&cfg("http://my-cluster.es.example.com:9200"))
+            .expect("no key, so plain http to a remote host carries nothing secret");
+    }
+
+    /// Pre-existing security defect (found in #233 review): the client used
+    /// reqwest's default redirect policy and followed a 3xx with the key
+    /// attached. A redirect is now an error, the target is never requested,
+    /// and the error quotes neither the target nor the key.
+    ///
+    /// Mutation: restore the default redirect policy -> red.
+    #[tokio::test]
+    async fn a_redirect_is_not_followed_and_does_not_resend_the_key() {
+        const VAR: &str = "LAMBO_TEST_RECALL_REDIRECT";
+        let fake = format!("fake-{}-{}", "recall", "redirect-xyzzy");
+        let server = MockServer::start_async().await;
+        let target = server
+            .mock_async(|when, then| {
+                when.path("/elsewhere");
+                then.status(404).json_body(json!({ "found": false }));
+            })
+            .await;
+        let redirect = server
+            .mock_async(|when, then| {
+                when.method(GET).path(format!(
+                    "/lambo-meta/_doc/{}",
+                    marker_id(&SessionId::new("s"))
+                ));
+                then.status(302)
+                    .header("location", server.url("/elsewhere?sig=signed-target-xyzzy"))
+                    .json_body(json!({ "error": { "reason": "moved, see signed-target-xyzzy" } }));
+            })
+            .await;
+        let index = {
+            let env = crate::test_util::env_lock();
+            env.set(VAR, &fake);
+            ElasticRecall::new(&keyed(&server.base_url(), VAR)).unwrap()
+        };
+        let err = index
+            .read_marker(&SessionId::new("s"))
+            .await
+            .expect_err("a 3xx is an error, not a followed redirect");
+        let text = err.to_string();
+        assert!(text.contains("redirect not followed"), "{text}");
+        assert!(!text.contains("signed-target-xyzzy"), "no target: {text}");
+        assert!(!text.contains("elsewhere"), "no target: {text}");
+        assert!(!text.contains(&fake), "no key: {text}");
+        redirect.assert_hits_async(1).await;
+        target.assert_hits_async(0).await;
+    }
+
+    /// Mutation: make `bypasses_env_proxy` always false, or ignore `keyed`
+    /// -> red.
+    #[test]
+    fn only_a_keyed_loopback_http_client_ignores_env_proxies() {
+        for s in [
+            "http://127.0.0.1:9200",
+            "http://localhost:9200",
+            "http://[::1]:9200",
+        ] {
+            let base = Url::parse(s).unwrap();
+            assert!(bypasses_env_proxy(true, &base), "{s}");
+            assert!(!bypasses_env_proxy(false, &base), "no key: {s}");
+        }
+        for s in [
+            "https://127.0.0.1:9200",
+            "https://my-cluster.es.example.com",
+        ] {
+            assert!(!bypasses_env_proxy(true, &Url::parse(s).unwrap()), "{s}");
+        }
+    }
+
+    /// A keyed loopback client reaches the cluster even when a proxy is set,
+    /// and the same client without a key goes through that proxy (here a
+    /// closed port, so it fails). The proxy is set on the builder rather
+    /// than through `HTTP_PROXY`: `no_proxy` clears both alike (it empties
+    /// the builder's proxies and turns off the system ones), and a process
+    /// variable would leak into tests running in parallel.
+    ///
+    /// Mutation: drop `builder.no_proxy()` from `build_client` -> red.
+    #[tokio::test]
+    async fn a_keyed_loopback_client_skips_a_configured_proxy() {
+        let server = MockServer::start_async().await;
+        let mock = server
+            .mock_async(|when, then| {
+                when.method(GET).path("/");
+                then.status(200).json_body(json!({ "ok": true }));
+            })
+            .await;
+        let dead = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let proxy = format!("http://{}", dead.local_addr().unwrap());
+        drop(dead);
+        let base = Url::parse(&server.base_url()).unwrap();
+        let client = |keyed| {
+            let proxied = reqwest::Client::builder().proxy(reqwest::Proxy::all(&proxy).unwrap());
+            build_client(proxied, &base, keyed, Duration::from_secs(2)).unwrap()
+        };
+        let resp = client(true)
+            .get(base.clone())
+            .send()
+            .await
+            .expect("a keyed loopback client goes direct");
+        assert!(resp.status().is_success());
+        mock.assert_async().await;
+        client(false)
+            .get(base.clone())
+            .send()
+            .await
+            .expect_err("without a key the proxy (a closed port) is used");
+        mock.assert_hits_async(1).await;
+    }
+
+    /// Pre-existing (found in #233 review): the tier quoted `error.reason`
+    /// verbatim, so a cluster or proxy echoing the refused key put it in the
+    /// error. With a key set every detectable echo (raw, JSON-escaped,
+    /// percent-encoded, a run of 8 or more of its bytes) is replaced; the
+    /// rest of the reason is kept, and without a key it is unchanged.
+    ///
+    /// Mutation: quote `reason` without `quotable` -> red.
+    #[tokio::test]
+    async fn an_error_reason_echoing_the_key_never_carries_it() {
+        const VAR: &str = "LAMBO_TEST_RECALL_SCRUB";
+        let fake = format!("fake-{}-{}", "recall", "scrub-key-xyzzy");
+        let masked = format!("{}...", &fake[..12]);
+        let reason =
+            format!("unable to authenticate with provided credentials [{fake}] ({masked})");
+        let server = MockServer::start_async().await;
+        server
+            .mock_async(|when, then| {
+                when.method(GET).path(format!(
+                    "/lambo-meta/_doc/{}",
+                    marker_id(&SessionId::new("s"))
+                ));
+                then.status(401).json_body(json!({
+                    "error": { "type": "security_exception", "reason": reason.clone() }
+                }));
+            })
+            .await;
+        let keyed_index = {
+            let env = crate::test_util::env_lock();
+            env.set(VAR, &fake);
+            ElasticRecall::new(&keyed(&server.base_url(), VAR)).unwrap()
+        };
+        let text = keyed_index
+            .read_marker(&SessionId::new("s"))
+            .await
+            .expect_err("a 401 is an error")
+            .to_string();
+        assert!(!text.contains("xyzzy"), "no echo of the key: {text}");
+        assert!(!text.contains(&fake[..12]), "no masked echo: {text}");
+        assert!(text.contains(scrub::TOKEN_NOT_SHOWN), "{text}");
+        assert!(
+            text.contains("HTTP 401 Unauthorized security_exception unable to authenticate"),
+            "the rest of the reason is kept: {text}"
+        );
+
+        let open_index = ElasticRecall::new(&cfg(&server.base_url())).unwrap();
+        let text = open_index
+            .read_marker(&SessionId::new("s"))
+            .await
+            .expect_err("a 401 is an error")
+            .to_string();
+        assert!(text.contains(&reason), "no key, nothing to scrub: {text}");
     }
 
     #[tokio::test]
@@ -1167,5 +1509,101 @@ mod tests {
         let index = ElasticRecall::new(&cfg("http://127.0.0.1:1")).unwrap();
         let err = index.read_marker(&SessionId::new("s")).await.unwrap_err();
         assert!(err.to_string().contains("recall index"), "{err}");
+    }
+
+    /// Pre-existing (found in #233 review): every response body, error
+    /// bodies included, was read whole with `resp.bytes()`, bounded only by
+    /// the request timeout. Past [`RESPONSE_BODY_CAP`] it is now refused,
+    /// whether `Content-Length` announces it or it streams chunked, and the
+    /// error quotes neither the body nor the key.
+    ///
+    /// Mutation: read with `resp.bytes()` again -> red (the padded body
+    /// parses, and the marker read answers `Ok(None)`).
+    #[tokio::test]
+    async fn an_oversized_response_body_is_refused_unquoted() {
+        const VAR: &str = "LAMBO_TEST_RECALL_BODY_CAP";
+        let fake = format!("fake-{}-{}", "recall", "cap-key-xyzzy");
+        // Valid JSON padded past the cap, ending in the key: a parse would
+        // succeed and a quote would show it.
+        let big = format!(
+            "{{\"found\":false,\"pad\":\"{}{fake}\"}}",
+            "x".repeat(RESPONSE_BODY_CAP)
+        );
+
+        let announced = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n",
+            big.len()
+        );
+        let announced =
+            crate::test_util::serve_raw_http_once(announced, vec![big.as_bytes().to_vec()]).await;
+
+        let chunked =
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ntransfer-encoding: chunked\r\n\r\n"
+                .to_string();
+        let frames = big
+            .as_bytes()
+            .chunks(1024 * 1024)
+            .map(|c| {
+                let mut framed = format!("{:x}\r\n", c.len()).into_bytes();
+                framed.extend_from_slice(c);
+                framed.extend_from_slice(b"\r\n");
+                framed
+            })
+            .chain(std::iter::once(b"0\r\n\r\n".to_vec()))
+            .collect();
+        let streamed = crate::test_util::serve_raw_http_once(chunked, frames).await;
+
+        for base in [announced, streamed] {
+            let index = {
+                let env = crate::test_util::env_lock();
+                env.set(VAR, &fake);
+                ElasticRecall::new(&keyed(&base, VAR)).unwrap()
+            };
+            let text = index
+                .read_marker(&SessionId::new("s"))
+                .await
+                .expect_err("an oversized body is an error")
+                .to_string();
+            assert!(
+                text.contains(&format!("over {RESPONSE_BODY_CAP} bytes")),
+                "{text}"
+            );
+            assert!(text.contains("body not shown"), "{text}");
+            assert!(!text.contains("xyzzy") && !text.contains("xxxx"), "{text}");
+        }
+    }
+
+    /// The kNN cap follows the request: never under the fixed cap, and wide
+    /// enough for a large `k` at a wide contract.
+    #[test]
+    fn the_knn_body_cap_grows_with_k_and_dim() {
+        assert_eq!(knn_body_cap(0, 1024), RESPONSE_BODY_CAP);
+        assert_eq!(knn_body_cap(50, 1024), RESPONSE_BODY_CAP);
+        assert_eq!(
+            knn_body_cap(2048, 4096),
+            2048 * (4096 * KNN_BYTES_PER_COMPONENT + KNN_BYTES_PER_HIT)
+        );
+        assert!(knn_body_cap(2048, 4096) > 100 * 1024 * 1024);
+        assert_eq!(knn_body_cap(usize::MAX, 4096), usize::MAX);
+    }
+
+    /// A body the connection cuts off mid-read is the same transport error
+    /// as a request that got no answer, and the partial body is not quoted.
+    #[tokio::test]
+    async fn a_response_body_cut_off_mid_read_is_a_transport_error() {
+        let head = "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                    content-length: 100000\r\n\r\n"
+            .to_string();
+        let partial = br#"{"found":true,"_source":{"partial-marker-xyzzy":"#.to_vec();
+        let base = crate::test_util::serve_raw_http_once(head, vec![partial]).await;
+        let index = ElasticRecall::new(&cfg(&base)).unwrap();
+        let err = index.read_marker(&SessionId::new("s")).await.unwrap_err();
+        assert!(matches!(err, StoreError::Backend(_)), "{err:?}");
+        let text = err.to_string();
+        assert!(text.contains("recall index: read marker"), "{text}");
+        assert!(
+            !text.contains("xyzzy"),
+            "the partial body is not quoted: {text}"
+        );
     }
 }

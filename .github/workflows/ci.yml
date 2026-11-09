@@ -189,6 +189,17 @@ jobs:
               set -o pipefail
               cargo clippy --locked --all-targets --features embed-eg2 -- -D warnings
               cargo test --locked --features embed-eg2
+          # #233: the Elastic embedder over the Elasticsearch Inference API,
+          # against httpmock only (no cluster, no key). Lints it with and
+          # without the crate's default features (the second line has no
+          # embed-fixture), then runs the suite with it compiled in. The live
+          # test stays `#[ignore]`d and operator-run.
+          - name: embed-elastic
+            command: |
+              set -o pipefail
+              cargo clippy --locked --all-targets --features embed-elastic -- -D warnings
+              cargo clippy --locked --all-targets --no-default-features --features store-memory,embed-elastic -- -D warnings
+              cargo test --locked --features embed-elastic
           # Ship profile (cockroach + memory + embedders + fixtures).
           - name: demo
             command: cargo check --locked --features demo

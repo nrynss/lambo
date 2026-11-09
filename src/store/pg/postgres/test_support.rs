@@ -192,11 +192,15 @@ pub(crate) mod corpus {
     /// measurement: with `forced_exact_scan_sql()` returning `None`, the
     /// "exact" lane's plan names the index and the probe says so.
     /// Only the H3 parity harness calls this, and that harness lives behind
-    /// `store-sqlite` because it compares the two engines against SQLite and
-    /// the memory oracle. Under `store-postgres` alone it is genuinely
-    /// uncalled, so the allow is scoped to exactly that combination rather
-    /// than blanket-silencing dead code on every build.
-    #[cfg_attr(not(feature = "store-sqlite"), allow(dead_code))]
+    /// `store-sqlite` and `fixtures` because it compares the two engines
+    /// against SQLite and the memory oracle. Without both it is genuinely
+    /// uncalled (`--features ship` alone lints it so), so the allow is scoped
+    /// to exactly that combination rather than blanket-silencing dead code
+    /// on every build.
+    #[cfg_attr(
+        not(all(feature = "store-sqlite", feature = "fixtures")),
+        allow(dead_code)
+    )]
     pub(crate) async fn index_present(store: &PostgresStore, probe: &[f32], limit: i64) -> bool {
         plan(store, probe, limit)
             .await

@@ -94,6 +94,10 @@ pub mod graph;
 pub mod ledger;
 pub mod mcp;
 pub mod memory;
+// The credential transport rule (https, or http to loopback) shared by the
+// hosted embedders and the `[recall]` Elasticsearch tier.
+#[cfg(any(feature = "embed-bge", feature = "recall-elastic"))]
+pub(crate) mod net;
 pub mod recall;
 pub mod resolve;
 

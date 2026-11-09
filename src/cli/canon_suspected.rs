@@ -27,7 +27,8 @@ use std::path::PathBuf;
 use serde::Serialize;
 use sqlx::sqlite::SqliteConnectOptions;
 
-#[cfg(test)]
+// Only the fixtures-gated tests below use it.
+#[cfg(all(test, feature = "fixtures"))]
 use super::imp::fingerprint;
 use super::imp::{
     guarded, install_signals, load_copy, redact_store, removal_invariant, source_check, Scratch,
