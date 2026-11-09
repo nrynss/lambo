@@ -70,6 +70,7 @@ use super::bge_m3::{
     StatusVerdict, LLAMA_UNREACHABLE,
 };
 use super::{api_key, EmbedError, Embedder, EmbedderConfig, ImageInput, ImageMime, Modalities};
+use crate::net::transport_error;
 
 mod canonical;
 
@@ -916,7 +917,7 @@ impl EmbeddingGemma2Embedder {
             .authorized_get("/props", PROPS_TIMEOUT)
             .send()
             .await
-            .map_err(|e| format!("unreachable: {}", e.without_url()))?;
+            .map_err(|e| format!("unreachable: {}", transport_error(&e)))?;
         let status = resp.status();
         if status.is_server_error() {
             return Err(format!("it answered {status}"));
@@ -934,7 +935,7 @@ impl EmbeddingGemma2Embedder {
                     body.extend_from_slice(&chunk);
                 }
                 Ok(None) => break,
-                Err(e) => return Err(format!("the body was cut off: {}", e.without_url())),
+                Err(e) => return Err(format!("the body was cut off: {}", transport_error(&e))),
             }
         }
         let Ok(props) = serde_json::from_slice::<Props>(&body) else {
@@ -1124,6 +1125,11 @@ pub(crate) fn build(cfg: &EmbedderConfig) -> Result<EmbeddingGemma2Embedder, Emb
         .unwrap_or_else(|| EG2_DEFAULT_MODEL.to_string());
     let mut embedder = EmbeddingGemma2Embedder::new(url.clone(), model, cfg.dim)?
         .with_images(cfg.images.unwrap_or(true));
+    // #236: only when set, so the default path keeps its client.
+    if cfg.connect_timeout_ms.is_some() || cfg.timeout_ms.is_some() {
+        let (connect, request) = super::resolve_timeouts(cfg)?;
+        embedder = embedder.with_timeouts(connect, request)?;
+    }
     if let Some(name) = cfg.api_key_env.as_deref() {
         check_bearer_transport(&url)?;
         embedder = embedder.with_bearer_token(&api_key::resolve(name)?)?;

@@ -494,6 +494,34 @@ async fn a_transport_failure_is_unavailable() {
     );
 }
 
+/// A delayed answer past the request timeout is still `Unavailable` (the
+/// write keeps its durable intent), and the error names the timeout with its
+/// cause instead of a bare send failure.
+#[tokio::test]
+async fn a_delayed_response_names_the_timeout() {
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(POST).path(PATH);
+        then.status(200)
+            .delay(std::time::Duration::from_millis(400))
+            .json_body(ok_response(1024));
+    });
+    let err = ElasticEmbedder::new(&server.base_url(), ID, 1024)
+        .unwrap()
+        .with_timeouts(
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_millis(50),
+        )
+        .unwrap()
+        .embed("anything")
+        .await
+        .unwrap_err();
+    assert!(matches!(err, EmbedError::Unavailable(_)), "{err:?}");
+    let msg = err.to_string();
+    assert!(msg.contains("timed out"), "{msg}");
+    assert!(msg.contains("caused by"), "{msg}");
+}
+
 /// A 2xx whose body the connection cuts off mid-read is a transport failure,
 /// so `Unavailable` and the write keeps its durable intent; the partial body
 /// is not quoted.
@@ -779,8 +807,15 @@ async fn live_elastic_inference_endpoint() {
         llama_url: Some(url),
         llama_model: Some(id),
         api_key_env: var("LAMBO_ES_API_KEY").map(|_| "LAMBO_ES_API_KEY".to_string()),
+        // A live cluster (Elastic Cloud Serverless especially) can take
+        // longer to accept a first connection than the 5 s default allows;
+        // the live run budgets 20 s for connects. `overlay_env` keeps the
+        // `LAMBO_EMBED_*_TIMEOUT_MS` overrides working here as elsewhere.
+        connect_timeout_ms: Some(20_000),
         ..Default::default()
-    };
+    }
+    .overlay_env()
+    .unwrap_or_else(|e| panic!("overlay env: {e}"));
     let e = build(&cfg).unwrap_or_else(|e| panic!("build: {e}"));
     let doc = e
         .embed("the billing service owns the invoices table")
@@ -800,4 +835,31 @@ async fn live_elastic_inference_endpoint() {
         e.model_identity(),
         crate::embed::cosine(&doc, &query)
     );
+}
+
+/// #236: the timeout knobs reach the adapter through `build` (the single
+/// construction site): explicit values build, absent builds with the
+/// defaults, and a zero is refused naming the key.
+#[test]
+fn build_applies_timeouts_and_refuses_zero() {
+    fn cfg(connect: Option<u64>, request: Option<u64>) -> EmbedderConfig {
+        EmbedderConfig {
+            kind: crate::embed::EmbedderKind::Elastic,
+            dim: 1024,
+            llama_url: Some("https://my-cluster.es.example.com".into()),
+            llama_model: Some(ID.into()),
+            connect_timeout_ms: connect,
+            timeout_ms: request,
+            ..Default::default()
+        }
+    }
+    build(&cfg(Some(20_000), Some(90_000))).expect("explicit timeouts build");
+    build(&cfg(None, None)).expect("absent timeouts build");
+    for (connect, request) in [(Some(0), None), (None, Some(0)), (Some(0), Some(0))] {
+        let err = build(&cfg(connect, request)).unwrap_err().to_string();
+        assert!(
+            err.contains("connect_timeout_ms") || err.contains("timeout_ms"),
+            "{err}"
+        );
+    }
 }

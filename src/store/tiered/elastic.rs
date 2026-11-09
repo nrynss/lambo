@@ -42,7 +42,7 @@ use serde_json::{json, Value};
 
 use super::index::{DeleteReport, DocOp, KnnHit, RecallIndex, SyncMarker};
 use super::project::{contract_hash, validate_index_prefix};
-use crate::net::{scrub, BodyReadError};
+use crate::net::{scrub, transport_error, BodyReadError};
 use crate::store::RecallConfig;
 use crate::types::{EmbeddingContract, NodeId, SessionId, StoreError};
 
@@ -291,14 +291,17 @@ impl ElasticRecall {
             Some(Body::NdJson(text)) => req.header(CONTENT_TYPE, "application/x-ndjson").body(text),
             None => req,
         };
-        let resp = req.send().await.map_err(|e| backend(what, e))?;
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| backend(what, transport_error(&e)))?;
         let status = resp.status();
         let bytes = crate::net::read_capped_body(resp, cap)
             .await
             .map_err(|e| match e {
                 // A transport failure mid-body is a transport failure like
                 // one before the status line: the same error.
-                BodyReadError::Cut(e) => backend(what, e),
+                BodyReadError::Cut(e) => backend(what, transport_error(&e)),
                 // Neither the body nor the key is quoted.
                 BodyReadError::TooLarge => backend(
                     what,
@@ -1571,6 +1574,36 @@ mod tests {
             assert!(text.contains("body not shown"), "{text}");
             assert!(!text.contains("xyzzy") && !text.contains("xxxx"), "{text}");
         }
+    }
+
+    /// A delayed answer past the per-request timeout names the timeout with
+    /// its cause, like a refused connection does its own kind: an operator
+    /// tells a slow cluster from a dead one by the kind word.
+    #[tokio::test]
+    async fn a_delayed_response_names_the_timeout() {
+        let server = MockServer::start_async().await;
+        let mut c = cfg(&server.base_url());
+        c.timeout_ms = Some(50);
+        let index = ElasticRecall::new(&c).unwrap();
+        server
+            .mock_async(|when, then| {
+                when.method(GET).path(format!(
+                    "/lambo-meta/_doc/{}",
+                    marker_id(&SessionId::new("s"))
+                ));
+                then.status(404)
+                    .delay(Duration::from_millis(400))
+                    .json_body(json!({ "found": false }));
+            })
+            .await;
+        let text = index
+            .read_marker(&SessionId::new("s"))
+            .await
+            .expect_err("a 400 ms delay past a 50 ms timeout must fail")
+            .to_string();
+        assert!(text.contains("recall index"), "{text}");
+        assert!(text.contains("timed out"), "{text}");
+        assert!(text.contains("caused by"), "{text}");
     }
 
     /// The kNN cap follows the request: never under the fixed cap, and wide

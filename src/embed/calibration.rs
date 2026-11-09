@@ -67,7 +67,8 @@
 //! A contract with no row (any other model string, prompt profile, dimension
 //! or kind) keeps the BGE-M3 constants, as before. Each row's evidence sits
 //! beside it: the EG2 row under `evidence/issue-87-calibration/`, the Qwen3
-//! Embedding 4B rows under `evidence/issue-221/`.
+//! Embedding 4B rows under `evidence/issue-221/`, the Elastic Jina row under
+//! `evidence/issue-237/`.
 
 use serde::{Deserialize, Serialize};
 
@@ -161,11 +162,32 @@ const QWEN3_4B_1024: ContractCalibration = ContractCalibration {
     evidence: "evidence/issue-221/",
 };
 
+/// The Elastic Jina v3 contract measured for #237 (`kind = "elastic"`,
+/// served by the Elasticsearch Inference API). Exact contract only:
+/// `.jina-embeddings-v3` at 1024 dims with `input_type` on; `send_input_type
+/// = false` is a different space. Method is the #87 quantile match on the
+/// #190 set (`evidence/issue-237/`), dev split only, self framing.
+const ELASTIC_JINA_V3_1024: ContractCalibration = ContractCalibration {
+    kind: "elastic",
+    model: ".jina-embeddings-v3",
+    dim: 1024,
+    recent_score: 0.13,
+    layer_min_similarity: 0.39,
+    merge_threshold: 0.86,
+    default_threshold_merges: 0.64,
+    evidence: "evidence/issue-237/",
+};
+
 /// Every built-in row. BGE-M3 has none: it is the reference. The EG2 row
 /// was measured for #87; the Qwen3 Embedding 4B rows for #221 (full 2560
 /// width and the 1024 Matryoshka truncation are different spaces, so each
-/// has its own row).
-pub const BUILTIN: &[ContractCalibration] = &[EG2_Q8_768, QWEN3_4B_2560, QWEN3_4B_1024];
+/// has its own row); the Elastic Jina row for #237.
+pub const BUILTIN: &[ContractCalibration] = &[
+    EG2_Q8_768,
+    QWEN3_4B_2560,
+    QWEN3_4B_1024,
+    ELASTIC_JINA_V3_1024,
+];
 
 /// The built-in row for exactly this contract, if any.
 pub fn lookup(contract: &EmbeddingContract) -> Option<&'static ContractCalibration> {

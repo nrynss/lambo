@@ -80,6 +80,67 @@ fn public_identity(identity: &str) -> String {
     }
 }
 
+/// Whether `kind` (the `Debug` of `EmbedderKind`) selects the Elastic
+/// adapter. The Elastic contract carries the effective `send_input_type`
+/// switch, so the check is on the kind name rather than on a compiled
+/// identity helper.
+fn is_elastic_kind(kind: &str) -> bool {
+    kind.to_ascii_lowercase().contains("elastic")
+}
+
+/// Join the adapter identities into the reported one: candle, then EG2,
+/// then Elastic. At most one is `Some` on any build; the first wins.
+fn join_identities(
+    candle: Option<String>,
+    eg2: Option<String>,
+    elastic: Option<String>,
+) -> Option<String> {
+    candle.or(eg2).or(elastic)
+}
+
+/// Add the Elastic contract to a base contract value so a run file commits
+/// it: the contract model string (the inference id, or the id with
+/// `;input_type=off` when the switch is off) and the effective
+/// `send_input_type` (absent means `true`). Both are model names, never a
+/// URL, credential or local path. Non-elastic runs record both as `null`,
+/// so the schema is stable across kinds.
+fn with_elastic_contract(
+    mut contract: Value,
+    kind: &str,
+    cfg: &EmbedderConfig,
+    elastic: &Option<String>,
+) -> Value {
+    if let Some(obj) = contract.as_object_mut() {
+        obj.insert("elastic_model".to_string(), json!(elastic));
+        let send = if is_elastic_kind(kind) {
+            json!(cfg.send_input_type.unwrap_or(true))
+        } else {
+            Value::Null
+        };
+        obj.insert("send_input_type".to_string(), send);
+    }
+    contract
+}
+
+/// Everything that picks the vectors (endpoint, local weights, model,
+/// project, plus the Elastic contract model) keys the cache, so a different
+/// server, weights or `send_input_type` never reuses another's vectors;
+/// credentials are left out. Only a SHA-256 of it reaches the cache file,
+/// and none of it the report. The doc/query role stays part of the key in
+/// [`Cache::key`], not here.
+fn cache_contract(
+    kind: &str,
+    contract: &Value,
+    cfg: &EmbedderConfig,
+    candle: &Option<String>,
+    elastic: &Option<String>,
+) -> String {
+    format!(
+        "{kind}|{contract}|{:?}|{:?}|{:?}|{:?}|{candle:?}|{elastic:?}",
+        cfg.llama_url, cfg.weights_dir, cfg.gemini_project, cfg.gemini_location
+    )
+}
+
 fn quantile(sorted: &[f64], q: f64) -> f64 {
     let rank = ((q * sorted.len() as f64).ceil() as usize).clamp(1, sorted.len());
     sorted[rank - 1]
@@ -359,8 +420,10 @@ async fn run() -> Result<(), String> {
 
     let cfg = EmbedderConfig::from_env().map_err(|e| e.to_string())?;
     // Only fields that name the model: no URL, credential or local path, so
-    // a run file can be committed as it is.
-    let contract = json!({
+    // a run file can be committed as it is. The Elastic contract (model
+    // string plus effective switch) joins after the embedder build, from the
+    // adapter's own identity.
+    let mut contract = json!({
         "dim": cfg.dim,
         "llama_model": cfg.llama_model,
         "device": cfg.device,
@@ -386,24 +449,21 @@ async fn run() -> Result<(), String> {
     let prepare_secs = started.elapsed().as_secs_f64();
     let identity = lambo::embed::candle_identity(embedder.as_ref());
     // #87: the EG2 contract's `model` (weights artifact and prompt profile),
-    // which the calibration table keys on. Reported only: the cache key keeps
-    // `identity` above, so existing caches stay valid.
-    let reported_identity = identity
-        .clone()
-        .or_else(|| lambo::embed::eg2_identity(embedder.as_ref()));
+    // which the calibration table keys on; #233: the Elastic contract's
+    // `model` (inference id, with `;input_type=off` when the switch is off).
+    // Reported only, except Elastic also keys the cache below (a different
+    // space needs different vectors). The EG2 cache key keeps `identity`
+    // above, so existing caches stay valid.
+    let eg2 = lambo::embed::eg2_identity(embedder.as_ref());
+    let elastic = lambo::embed::elastic_identity(embedder.as_ref());
+    let reported_identity = join_identities(identity.clone(), eg2, elastic.clone());
+    contract = with_elastic_contract(contract, &kind, &cfg, &elastic);
     let mut cache = Cache {
         embedder: embedder.as_ref(),
         docs: HashMap::new(),
         queries: HashMap::new(),
         done: 0,
-        // Everything that picks the vectors (endpoint, local weights, model,
-        // project) keys the cache, so a different server or weights never
-        // reuses another's vectors; credentials are left out. Only a SHA-256
-        // of it reaches the cache file, and none of it the report.
-        contract: format!(
-            "{kind}|{contract}|{:?}|{:?}|{:?}|{:?}|{identity:?}",
-            cfg.llama_url, cfg.weights_dir, cfg.gemini_project, cfg.gemini_location
-        ),
+        contract: cache_contract(&kind, &contract, &cfg, &identity, &elastic),
         stored: HashMap::new(),
         file: None,
     };
@@ -748,4 +808,189 @@ fn emit(report: &BTreeMap<&str, Value>, out: Option<&std::path::Path>) -> Result
         eprintln!("wrote {}", out.display());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn elastic_cfg(send_input_type: Option<bool>) -> EmbedderConfig {
+        EmbedderConfig {
+            kind: lambo::embed::EmbedderKind::Elastic,
+            llama_url: Some("https://my-cluster.es.example.com".to_string()),
+            llama_model: Some(".jina-embeddings-v3".to_string()),
+            dim: 1024,
+            send_input_type,
+            ..Default::default()
+        }
+    }
+
+    /// #233: the Elastic effective identity is reported, on and off.
+    #[cfg(feature = "embed-elastic")]
+    #[test]
+    fn elastic_effective_identity_is_reported() {
+        use lambo::embed::{elastic_identity, ElasticEmbedder};
+        let on = ElasticEmbedder::new(
+            "https://my-cluster.es.example.com",
+            ".jina-embeddings-v3",
+            1024,
+        )
+        .unwrap();
+        assert_eq!(
+            elastic_identity(&on).as_deref(),
+            Some(".jina-embeddings-v3")
+        );
+        let off = ElasticEmbedder::new(
+            "https://my-cluster.es.example.com",
+            ".jina-embeddings-v3",
+            1024,
+        )
+        .unwrap()
+        .with_send_input_type(false);
+        assert_eq!(
+            elastic_identity(&off).as_deref(),
+            Some(".jina-embeddings-v3;input_type=off")
+        );
+        // The harness reports whatever the adapter stamps.
+        assert_eq!(
+            join_identities(None, None, elastic_identity(&on)).as_deref(),
+            Some(".jina-embeddings-v3")
+        );
+        assert_eq!(
+            join_identities(None, None, elastic_identity(&off)).as_deref(),
+            Some(".jina-embeddings-v3;input_type=off")
+        );
+        // Candle still wins when present; Elastic fills the gap, not more.
+        assert_eq!(
+            join_identities(Some("candle-id".to_string()), None, elastic_identity(&off)).as_deref(),
+            Some("candle-id")
+        );
+    }
+
+    /// The cache key separates `send_input_type` on from off, and keeps the
+    /// doc/query role separation the vectors depend on.
+    #[test]
+    fn cache_key_separates_input_type_and_roles() {
+        let base = json!({"dim": 1024});
+        let on_cfg = elastic_cfg(None);
+        let off_cfg = elastic_cfg(Some(false));
+        let on_contract = with_elastic_contract(
+            base.clone(),
+            "Elastic",
+            &on_cfg,
+            &Some(".jina-embeddings-v3".to_string()),
+        );
+        let off_contract = with_elastic_contract(
+            base.clone(),
+            "Elastic",
+            &off_cfg,
+            &Some(".jina-embeddings-v3;input_type=off".to_string()),
+        );
+        assert_eq!(on_contract["send_input_type"], json!(true));
+        assert_eq!(off_contract["send_input_type"], json!(false));
+        let on_key = cache_contract(
+            "Elastic",
+            &on_contract,
+            &on_cfg,
+            &None,
+            &Some(".jina-embeddings-v3".to_string()),
+        );
+        let off_key = cache_contract(
+            "Elastic",
+            &off_contract,
+            &off_cfg,
+            &None,
+            &Some(".jina-embeddings-v3;input_type=off".to_string()),
+        );
+        assert_ne!(on_key, off_key, "input_type on/off must not share a cache");
+
+        // Roles stay separated: the same text in doc and query roles keys
+        // differently under the same contract.
+        struct Dummy;
+        #[async_trait::async_trait]
+        impl lambo::Embedder for Dummy {
+            fn dimensions(&self) -> usize {
+                8
+            }
+            async fn embed(&self, _text: &str) -> Result<Vec<f32>, lambo::embed::EmbedError> {
+                Ok(vec![1.0; 8])
+            }
+        }
+        let dummy = Dummy;
+        let cache = Cache {
+            embedder: &dummy,
+            docs: HashMap::new(),
+            queries: HashMap::new(),
+            done: 0,
+            contract: on_key,
+            stored: HashMap::new(),
+            file: None,
+        };
+        assert_ne!(
+            cache.key("doc", "the schema"),
+            cache.key("query", "the schema"),
+            "doc and query roles must not share cache entries"
+        );
+    }
+
+    /// The committed run metadata names the model, never the endpoint, a
+    /// credential, or a local path.
+    #[test]
+    fn run_file_holds_no_url_credential_or_path() {
+        let mut cfg = elastic_cfg(Some(false));
+        cfg.weights_dir = Some("/tmp/local-weights".into());
+        cfg.api_key_env = Some("LAMBO_TEST_ES_KEY".into());
+        let base = json!({
+            "dim": cfg.dim,
+            "llama_model": cfg.llama_model,
+            "device": cfg.device,
+            "repo": cfg.repo,
+            "revision": cfg.revision,
+            "weights_file": cfg.weights_file,
+            "gemini_model": cfg.gemini_model,
+        });
+        let contract = with_elastic_contract(
+            base,
+            "Elastic",
+            &cfg,
+            &Some(".jina-embeddings-v3;input_type=off".to_string()),
+        );
+        let report = json!({
+            "embedder": {
+                "kind": "Elastic",
+                "config": contract,
+                "identity": ".jina-embeddings-v3;input_type=off",
+            }
+        });
+        let text = serde_json::to_string_pretty(&report).expect("json");
+        for secret in [
+            "my-cluster.es.example.com",
+            "LAMBO_TEST_ES_KEY",
+            "/tmp/local-weights",
+            "ApiKey",
+            "Bearer ",
+        ] {
+            assert!(
+                !text.contains(secret),
+                "run file must not contain {secret:?}:\n{text}"
+            );
+        }
+        assert!(
+            text.contains(".jina-embeddings-v3;input_type=off"),
+            "the effective Elastic contract must be committed:\n{text}"
+        );
+        // The cache key may see the endpoint (it is never committed), so a
+        // different cluster never reuses these vectors.
+        let key = cache_contract(
+            "Elastic",
+            &report["embedder"]["config"],
+            &cfg,
+            &None,
+            &Some(".jina-embeddings-v3;input_type=off".to_string()),
+        );
+        assert!(
+            key.contains("my-cluster.es.example.com"),
+            "the cache key must still separate endpoints: {key}"
+        );
+    }
 }

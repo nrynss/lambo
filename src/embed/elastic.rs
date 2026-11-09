@@ -52,7 +52,7 @@ use serde::{Deserialize, Serialize};
 
 use super::bge_m3::{self, scrub, EmbedStatusClass, StatusVerdict};
 use super::{api_key, EmbedError, Embedder, EmbedderConfig};
-use crate::net::BodyReadError;
+use crate::net::{transport_error, BodyReadError};
 
 /// `input_type` for the document role ([`Embedder::embed`]).
 pub(crate) const INPUT_TYPE_DOCUMENT: &str = "INGEST";
@@ -180,6 +180,9 @@ pub struct ElasticEmbedder {
     /// [`Self::url`] as logs, errors and `Debug` print it: scheme, host,
     /// port and path ([`bge_m3::url_for_log`]).
     log_url: String,
+    /// The cluster base URL `new` was given, for [`Self::with_timeouts`]:
+    /// the client rebuild needs the base for the loopback proxy rule.
+    base_url: String,
     /// The inference endpoint id (`[embedder] model`).
     inference_id: String,
     /// Expected width; a response of any other width is refused.
@@ -239,6 +242,11 @@ pub(crate) fn build(cfg: &EmbedderConfig) -> Result<ElasticEmbedder, EmbedError>
         })?;
     let mut embedder = ElasticEmbedder::new(url, id, cfg.dim)?
         .with_send_input_type(cfg.send_input_type.unwrap_or(true));
+    // #236: only when set, so the default path keeps its client.
+    if cfg.connect_timeout_ms.is_some() || cfg.timeout_ms.is_some() {
+        let (connect, request) = super::resolve_timeouts(cfg)?;
+        embedder = embedder.with_timeouts(connect, request)?;
+    }
     if let Some(name) = cfg.api_key_env.as_deref() {
         embedder.check_api_key_transport()?;
         embedder = embedder.with_api_key(&api_key::resolve(name)?)?;
@@ -271,12 +279,24 @@ impl ElasticEmbedder {
                 bge_m3::DEFAULT_REQUEST_TIMEOUT,
             )?,
             log_url: bge_m3::url_for_log(url.as_str()),
+            base_url: base.as_str().to_string(),
             url,
             inference_id: id.to_string(),
             dim,
             send_input_type: true,
             authorization: None,
         })
+    }
+
+    /// Override connect/request timeouts (#236). `request` is the
+    /// whole-request budget (connect + body read).
+    pub fn with_timeouts(
+        mut self,
+        connect: std::time::Duration,
+        request: std::time::Duration,
+    ) -> Result<Self, EmbedError> {
+        self.client = bge_m3::build_client(&self.base_url, connect, request)?;
+        Ok(self)
     }
 
     /// Send `input_type` (`true`, the default) or omit it for both roles.
@@ -374,7 +394,7 @@ impl ElasticEmbedder {
             EmbedError::Unavailable(format!(
                 "Elasticsearch unreachable at {}: {}",
                 self.log_url,
-                e.without_url()
+                transport_error(&e)
             ))
         })?;
         let status = resp.status();
@@ -388,7 +408,7 @@ impl ElasticEmbedder {
                     BodyReadError::Cut(e) => EmbedError::Unavailable(format!(
                         "Elasticsearch response body from {} was cut off: {}",
                         self.log_url,
-                        e.without_url()
+                        transport_error(&e)
                     )),
                     BodyReadError::TooLarge => EmbedError::Backend(format!(
                         "Elasticsearch response from {} is over {cap} bytes, more than an \

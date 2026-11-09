@@ -2,6 +2,42 @@
 
 ## Unreleased
 
+## 0.10.1 (2026-11-10)
+
+### Highlights
+
+- **Elastic `.jina-embeddings-v3` contract calibrated (#237).** The exact
+  contract — `kind = "elastic"`, `.jina-embeddings-v3` at 1024 dims with
+  `send_input_type` on — now ships its measured row
+  (`evidence/issue-237/`): recent-leg 0.13, layer floor 0.39, merge
+  threshold 0.86. Neighbouring contracts (`;input_type=off`, another
+  endpoint id or width) still warn as uncalibrated, and the
+  suspected-supersession line stays unvalidated for every elastic
+  contract.
+- **Embedder timeouts are configurable, and transport failures name their
+  cause (#236, #238).** `[embedder] connect_timeout_ms` (default 5000)
+  and `timeout_ms` (default 60000) bound the `bge_m3`, `embeddinggemma2`
+  and `elastic` HTTP calls, with `LAMBO_EMBED_CONNECT_TIMEOUT_MS` and
+  `LAMBO_EMBED_TIMEOUT_MS` overriding them; a zero is refused naming the
+  key. A failure before any answer, or one that cuts a body off mid-read,
+  now says whether it timed out, the connection failed, or something else
+  broke, with the underlying cause appended. Error variants are unchanged,
+  and so is every retry and fallback. The `[recall]` tier renders its
+  transport failures the same way.
+
+### Upgrading from 0.10.0
+
+You don't need to run `lambo provision`: there is no schema change. You
+don't need to re-embed: the new timeouts carry no space information and
+are not part of the embedding contract.
+- Only the exact elastic contract above changes scoring: its future
+  merges use 0.86, its unset layer floors resolve to 0.39, and its recent
+  leg scores 0.13. Concepts already merged stay merged. Every other
+  contract recalls exactly as before.
+- The new `[embedder]` keys are optional and default to 0.10.0's
+  behaviour. A 0.10.0 binary refuses a file that names them (unknown
+  keys), so keep it off new files if you might roll back.
+
 ## 0.10.0 (2026-11-09)
 
 ### Highlights

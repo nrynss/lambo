@@ -24,6 +24,7 @@ RUST_FILES = {
     "evidence/issue-221/calibration-qwen3-4b-1024.json",
     "evidence/issue-221/repro-8concept-qwen3-4b-2560.json",
     "evidence/issue-221/repro-8concept-qwen3-4b-1024.json",
+    "evidence/issue-237/calibration-elastic-jina-v3-1024.json",
 }
 MIRROR_FILES = {
     "docs/reference/cli.mdx", "docs/reference/mcp.mdx",

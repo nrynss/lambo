@@ -1384,6 +1384,35 @@ fn build_refusals() {
     );
 }
 
+/// #236: the timeout knobs reach the adapter through the EG2 build path:
+/// explicit values build (construction connects nothing), absent builds
+/// with the defaults, and a zero is refused naming the key.
+#[test]
+fn build_applies_timeouts_and_refuses_zero() {
+    fn cfg(connect: Option<u64>, request: Option<u64>) -> EmbedderConfig {
+        EmbedderConfig {
+            kind: EmbedderKind::EmbeddingGemma2,
+            dim: 768,
+            llama_url: Some("http://127.0.0.1:8191".into()),
+            connect_timeout_ms: connect,
+            timeout_ms: request,
+            ..Default::default()
+        }
+    }
+    build_embedder(cfg(Some(20_000), Some(90_000))).expect("explicit timeouts build");
+    build_embedder(cfg(None, None)).expect("absent timeouts build");
+    for (connect, request) in [(Some(0), None), (None, Some(0)), (Some(0), Some(0))] {
+        let err = build_embedder(cfg(connect, request))
+            .err()
+            .expect("a zero timeout must not build")
+            .to_string();
+        assert!(
+            err.contains("connect_timeout_ms") || err.contains("timeout_ms"),
+            "{err}"
+        );
+    }
+}
+
 /// Resolve stamps the EG2 contract: kind `embeddinggemma2`, the identity as
 /// `model`, the MRL width as `dim`.
 #[cfg(feature = "store-memory")]

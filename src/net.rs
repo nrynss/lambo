@@ -92,6 +92,64 @@ pub(crate) async fn read_capped_body(
     Ok(body)
 }
 
+/// One shared rendering of a reqwest transport failure, for every client that
+/// compiles in this module (`embed-bge` and `recall-elastic`; see `lib.rs`).
+/// It names what the failure says about retrying — a timeout
+/// ([`reqwest::Error::is_timeout`]), a connection failure
+/// ([`reqwest::Error::is_connect`]), or any other transport error — then the
+/// reqwest message with the URL stripped (the [`reqwest::Error::without_url`]
+/// semantics, from a borrow: the ` for url (...)` suffix is removed, and any
+/// other rendering of the same URL with it, so no userinfo, query or
+/// fragment is ever quoted; the caller's own host-bearing log line carries
+/// the where), then the deduplicated source chain (`std::error::Error`
+/// sources, first occurrence only), which is where the underlying cause (a
+/// refused syscall, an elapsed deadline) is named. A reqwest error carries
+/// no key and no response body, so neither can leak through here; callers
+/// keep quoting bodies only through [`scrub::quotable_body`].
+pub(crate) fn transport_error(e: &reqwest::Error) -> String {
+    let kind = if e.is_timeout() {
+        "timed out"
+    } else if e.is_connect() {
+        "connection failed"
+    } else {
+        "transport error"
+    };
+    let mut out = format!("{kind}: {}", stripped(e));
+    // The sources carry the syscall-level cause ("Connection refused",
+    // "operation timed out"). Deduped: reqwest repeats its own message as
+    // the first source.
+    let mut seen = vec![e.to_string(), stripped(e)];
+    let mut causes = Vec::new();
+    let mut next: Option<&dyn std::error::Error> = Some(e);
+    while let Some(err) = next {
+        next = err.source();
+        if let Some(source) = next {
+            let text = source.to_string();
+            if !seen.contains(&text) {
+                seen.push(text.clone());
+                causes.push(text);
+            }
+        }
+    }
+    if !causes.is_empty() {
+        out.push_str(&format!(" (caused by: {})", causes.join("; ")));
+    }
+    out
+}
+
+/// `e`'s message with its URL stripped, the [`reqwest::Error::without_url`]
+/// semantics without taking ownership: reqwest renders the URL as a
+/// ` for url (<url>)` suffix, which is removed, and any other rendering of
+/// the same URL along with it.
+fn stripped(e: &reqwest::Error) -> String {
+    let mut text = e.to_string();
+    if let Some(url) = e.url() {
+        text = text.replace(&format!(" for url ({url})"), "");
+        text = text.replace(url.as_str(), "(url not shown)");
+    }
+    text
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -152,5 +210,132 @@ mod tests {
         assert!(is_loopback_http(&url("http://127.0.0.1:9200")));
         assert!(!is_loopback_http(&url("https://127.0.0.1:9200")));
         assert!(!is_loopback_http(&url("http://my-cluster.es.example.com")));
+    }
+
+    /// A delayed answer past the request timeout names the timeout and keeps
+    /// the underlying cause: without the kind an operator cannot tell a slow
+    /// cluster from a refused port.
+    #[tokio::test]
+    async fn transport_error_names_a_timeout_and_its_cause() {
+        let server = httpmock::MockServer::start_async().await;
+        server
+            .mock_async(|when, then| {
+                when.path("/");
+                then.status(200)
+                    .delay(std::time::Duration::from_millis(400))
+                    .body("{}");
+            })
+            .await;
+        let err = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_millis(50))
+            .build()
+            .unwrap()
+            .get(server.base_url())
+            .send()
+            .await
+            .expect_err("a 400 ms delay past a 50 ms timeout must fail");
+        assert!(err.is_timeout(), "{err:?}");
+        let text = transport_error(&err);
+        assert!(text.contains("timed out"), "{text}");
+        assert!(text.contains("caused by"), "{text}");
+    }
+
+    /// A refused connection (a closed port, well inside any timeout) is a
+    /// connection failure, never a timeout: the two ask the operator for
+    /// different fixes.
+    #[tokio::test]
+    async fn transport_error_keeps_a_refused_connection_distinct_from_a_timeout() {
+        let err = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .unwrap()
+            .get("http://127.0.0.1:1")
+            .send()
+            .await
+            .expect_err("a closed port must fail");
+        assert!(!err.is_timeout(), "{err:?}");
+        let text = transport_error(&err);
+        assert!(text.contains("connection failed"), "{text}");
+        assert!(!text.contains("timed out"), "{text}");
+    }
+
+    /// A body the connection cuts off mid-read gets the same diagnostics as
+    /// a request that got no answer: the kind and the cause, never the
+    /// partial body.
+    #[tokio::test]
+    async fn transport_error_covers_a_body_cut_off_mid_read() {
+        let head = "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                    content-length: 100000\r\n\r\n"
+            .to_string();
+        let partial = br#"{"text_embedding":[{"embedding":[0.123456,"#.to_vec();
+        let base = crate::test_util::serve_raw_http_once(head, vec![partial]).await;
+        let mut resp = reqwest::Client::new()
+            .get(base)
+            .send()
+            .await
+            .expect("the head arrives");
+        let mut cut = None;
+        while let Ok(Some(_)) = resp.chunk().await.map_err(|e| {
+            cut = Some(e);
+        }) {}
+        let text = transport_error(cut.as_ref().expect("the body is cut off"));
+        assert!(
+            text.contains("connection failed")
+                || text.contains("transport error")
+                || text.contains("timed out"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("0.123456"),
+            "the partial body is not quoted: {text}"
+        );
+    }
+
+    /// Userinfo, query, fragment and any secret in them are never quoted: the
+    /// URL is stripped before anything is rendered.
+    #[tokio::test]
+    async fn transport_error_never_quotes_url_userinfo_or_query() {
+        let err = reqwest::Client::new()
+            .get("http://fake-user:fake-xyzzy-secret@127.0.0.1:1/?api_key=fake-xyzzy-secret")
+            .send()
+            .await
+            .expect_err("a closed port must fail");
+        let text = transport_error(&err);
+        assert!(!text.contains("fake-xyzzy"), "{text}");
+        assert!(!text.contains("fake-user"), "{text}");
+        assert!(!text.contains("api_key"), "{text}");
+    }
+
+    /// The source chain is deduplicated: reqwest repeats its own message as
+    /// the first source, which must not appear twice.
+    #[tokio::test]
+    async fn transport_error_dedupes_the_source_chain() {
+        let server = httpmock::MockServer::start_async().await;
+        server
+            .mock_async(|when, then| {
+                when.path("/");
+                then.status(200)
+                    .delay(std::time::Duration::from_millis(400))
+                    .body("{}");
+            })
+            .await;
+        let err = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_millis(50))
+            .build()
+            .unwrap()
+            .get(server.base_url())
+            .send()
+            .await
+            .expect_err("a 400 ms delay past a 50 ms timeout must fail");
+        let text = transport_error(&err);
+        let head = text.split(" (caused by: ").next().unwrap_or(&text);
+        if let Some(causes) = text.split(" (caused by: ").nth(1) {
+            let causes = causes.strip_suffix(')').unwrap_or(causes);
+            let mut seen = vec![head.to_string()];
+            for cause in causes.split("; ") {
+                assert!(!seen.contains(&cause.to_string()), "repeat: {text}");
+                seen.push(cause.to_string());
+            }
+        }
     }
 }

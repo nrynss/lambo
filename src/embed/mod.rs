@@ -638,6 +638,14 @@ fn default_embed_dim() -> usize {
 /// field).
 pub const EMBED_DIMENSIONS_ENV: &str = "LAMBO_EMBED_DIMENSIONS";
 
+/// The environment variable that overrides `[embedder] connect_timeout_ms`
+/// (#236: the connect timeout for the HTTP embedders).
+pub const EMBED_CONNECT_TIMEOUT_MS_ENV: &str = "LAMBO_EMBED_CONNECT_TIMEOUT_MS";
+
+/// The environment variable that overrides `[embedder] timeout_ms`
+/// (#236: the whole-request timeout for the HTTP embedders).
+pub const EMBED_TIMEOUT_MS_ENV: &str = "LAMBO_EMBED_TIMEOUT_MS";
+
 /// Overrides `[embedder] canary` (#176).
 pub const CANARY_ENV: &str = "LAMBO_EMBED_CANARY";
 
@@ -745,6 +753,20 @@ pub struct EmbedderConfig {
     /// must be re-embedded. `elastic` only; any other kind refuses it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub send_input_type: Option<bool>,
+    /// Connect timeout in milliseconds (#236): how long the HTTP embedders
+    /// (`bge_m3` alias `openai`, `embeddinggemma2`, `elastic`) wait to
+    /// establish a connection. Absent means the 5 s default; `0` is refused.
+    /// Any other kind refuses the key. Not part of the embedding contract.
+    /// `LAMBO_EMBED_CONNECT_TIMEOUT_MS` overrides it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connect_timeout_ms: Option<u64>,
+    /// Whole-request timeout in milliseconds (#236): the budget for one HTTP
+    /// embed request (connect + body read) on the same three kinds. Absent
+    /// means the 60 s default; `0` is refused. Any other kind refuses the
+    /// key. Not part of the embedding contract. `LAMBO_EMBED_TIMEOUT_MS`
+    /// overrides it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
     /// The embedder canary (#176, [`canary`]): `verify` refuses a writer
     /// attach whose embedder no longer reproduces the store's pinned canary
     /// vectors, `warn` (the default) logs it, `off` skips the check.
@@ -811,6 +833,8 @@ impl Default for EmbedderConfig {
             accept_client_vectors: false,
             images: None,
             send_input_type: None,
+            connect_timeout_ms: None,
+            timeout_ms: None,
             canary: canary::CanaryMode::Warn,
             related_pairs: None,
             calibration: calibration::CalibrationMode::Builtin,
@@ -856,6 +880,37 @@ impl EmbedderConfig {
                      equal to the embedder dim)"
                 ))
             })?);
+        }
+        if let Ok(v) = env::var(EMBED_CONNECT_TIMEOUT_MS_ENV)
+            && !v.is_empty()
+        {
+            let ms: u64 = v.parse().map_err(|e| {
+                EmbedError::Unavailable(format!(
+                    "invalid {EMBED_CONNECT_TIMEOUT_MS_ENV} {v:?}: {e} (expected whole \
+                     milliseconds)"
+                ))
+            })?;
+            if ms == 0 {
+                return Err(EmbedError::Unavailable(
+                    "embedder.connect_timeout_ms must be greater than zero".into(),
+                ));
+            }
+            self.connect_timeout_ms = Some(ms);
+        }
+        if let Ok(v) = env::var(EMBED_TIMEOUT_MS_ENV)
+            && !v.is_empty()
+        {
+            let ms: u64 = v.parse().map_err(|e| {
+                EmbedError::Unavailable(format!(
+                    "invalid {EMBED_TIMEOUT_MS_ENV} {v:?}: {e} (expected whole milliseconds)"
+                ))
+            })?;
+            if ms == 0 {
+                return Err(EmbedError::Unavailable(
+                    "embedder.timeout_ms must be greater than zero".into(),
+                ));
+            }
+            self.timeout_ms = Some(ms);
         }
         if let Ok(v) = env::var("LAMBO_LLAMA_EMBED_URL")
             && !v.is_empty()
@@ -1122,6 +1177,38 @@ fn build_gemini_embedder(cfg: &EmbedderConfig) -> Result<Box<dyn Embedder>, Embe
 // * The real gate is each `#[cfg(feature = "...")]` arm that constructs the type.
 // * Both are required: pre-check cannot name uncompiled types; cfg alone is a worse error.
 
+/// Resolve the connect and whole-request timeouts for the HTTP embedders
+/// (#236: `bge_m3` alias `openai`, `embeddinggemma2`, `elastic`).
+///
+/// Absent knobs mean the defaults ([`bge_m3::DEFAULT_CONNECT_TIMEOUT`],
+/// 5 s, and [`bge_m3::DEFAULT_REQUEST_TIMEOUT`], 60 s); a zero is refused
+/// naming the key. `timeout` is the whole-request budget (connect + body
+/// read). The values carry no space information, so they are not part of the
+/// embedding contract and need no re-embed.
+#[cfg(feature = "embed-bge")]
+pub(crate) fn resolve_timeouts(
+    cfg: &EmbedderConfig,
+) -> Result<(std::time::Duration, std::time::Duration), EmbedError> {
+    if cfg.connect_timeout_ms == Some(0) {
+        return Err(EmbedError::Unavailable(
+            "embedder.connect_timeout_ms must be greater than zero".into(),
+        ));
+    }
+    if cfg.timeout_ms == Some(0) {
+        return Err(EmbedError::Unavailable(
+            "embedder.timeout_ms must be greater than zero".into(),
+        ));
+    }
+    Ok((
+        cfg.connect_timeout_ms
+            .map(std::time::Duration::from_millis)
+            .unwrap_or(bge_m3::DEFAULT_CONNECT_TIMEOUT),
+        cfg.timeout_ms
+            .map(std::time::Duration::from_millis)
+            .unwrap_or(bge_m3::DEFAULT_REQUEST_TIMEOUT),
+    ))
+}
+
 /// Build an embedder from an explicit config (Level B registry).
 ///
 /// Fail-closed when the kind's Cargo feature is off or the adapter is not implemented.
@@ -1187,6 +1274,35 @@ pub fn build_embedder(cfg: EmbedderConfig) -> Result<Box<dyn Embedder>, EmbedErr
             cfg.kind
         )));
     }
+    // Same rule for the HTTP timeouts (#236): only the adapters that speak
+    // HTTP read them. A zero is refused naming the key, here and from the
+    // environment (which `overlay_env` already refused the same way).
+    if cfg.connect_timeout_ms.is_some()
+        && !matches!(
+            cfg.kind,
+            EmbedderKind::BgeM3 | EmbedderKind::EmbeddingGemma2 | EmbedderKind::Elastic
+        )
+    {
+        return Err(EmbedError::Unavailable(format!(
+            "embedder.connect_timeout_ms applies only to kinds `bge_m3` (alias `openai`), \
+             `embeddinggemma2` and `elastic`, but kind is `{}`; remove connect_timeout_ms or \
+             change the kind",
+            cfg.kind
+        )));
+    }
+    if cfg.timeout_ms.is_some()
+        && !matches!(
+            cfg.kind,
+            EmbedderKind::BgeM3 | EmbedderKind::EmbeddingGemma2 | EmbedderKind::Elastic
+        )
+    {
+        return Err(EmbedError::Unavailable(format!(
+            "embedder.timeout_ms applies only to kinds `bge_m3` (alias `openai`), \
+             `embeddinggemma2` and `elastic`, but kind is `{}`; remove timeout_ms or change the \
+             kind",
+            cfg.kind
+        )));
+    }
     // Pre-check for a clear rebuild hint (see comment above).
     if !cfg.kind.is_compiled() {
         return Err(missing_feature(cfg.kind));
@@ -1199,6 +1315,13 @@ pub fn build_embedder(cfg: EmbedderConfig) -> Result<Box<dyn Embedder>, EmbedErr
                     .llama_url
                     .clone()
                     .unwrap_or_else(|| "http://127.0.0.1:8080".to_string());
+                // #236: resolved before `llama_model` moves out of `cfg`;
+                // `None` keeps the default client below.
+                let timeouts = if cfg.connect_timeout_ms.is_some() || cfg.timeout_ms.is_some() {
+                    Some(resolve_timeouts(&cfg)?)
+                } else {
+                    None
+                };
                 let model = cfg.llama_model.unwrap_or_default();
                 let mut embedder = BgeM3LlamaCppEmbedder::new(url.clone(), model, cfg.dim)?;
                 // #221: a configured truncation width is sent as the OpenAI
@@ -1215,6 +1338,10 @@ pub fn build_embedder(cfg: EmbedderConfig) -> Result<Box<dyn Embedder>, EmbedErr
                 if let Some(name) = cfg.api_key_env.as_deref() {
                     bge_m3::check_bearer_transport(&url)?;
                     embedder = embedder.with_bearer_token(&api_key::resolve(name)?)?;
+                }
+                // #236: only when set, so the default path keeps its client.
+                if let Some((connect, request)) = timeouts {
+                    embedder = embedder.with_timeouts(connect, request)?;
                 }
                 Ok(Box::new(embedder))
             }
@@ -1635,6 +1762,196 @@ mod tests {
         let err = base.overlay_env().unwrap_err().to_string();
         assert!(err.contains(EMBED_DIMENSIONS_ENV), "{err}");
         env.remove(EMBED_DIMENSIONS_ENV);
+    }
+
+    /// #236: `connect_timeout_ms` and `timeout_ms` are real `[embedder]` keys,
+    /// absent by default, and a typo of either is refused.
+    #[test]
+    fn timeouts_toml_keys() {
+        let cfg: EmbedderConfig = toml::from_str("kind = \"bge_m3\"\n").unwrap();
+        assert_eq!(cfg.connect_timeout_ms, None, "absent means the default");
+        assert_eq!(cfg.timeout_ms, None, "absent means the default");
+        let cfg: EmbedderConfig =
+            toml::from_str("kind = \"bge_m3\"\nconnect_timeout_ms = 20000\ntimeout_ms = 90000\n")
+                .unwrap();
+        assert_eq!(cfg.connect_timeout_ms, Some(20_000));
+        assert_eq!(cfg.timeout_ms, Some(90_000));
+        // A zero parses: it is refused at build, naming the key.
+        let cfg: EmbedderConfig =
+            toml::from_str("kind = \"bge_m3\"\nconnect_timeout_ms = 0\n").unwrap();
+        assert_eq!(cfg.connect_timeout_ms, Some(0));
+        // Still deny_unknown_fields: a typo of either key is refused.
+        assert!(toml::from_str::<EmbedderConfig>("connect_timeout = 5\n").is_err());
+        assert!(toml::from_str::<EmbedderConfig>("timeout = 5\n").is_err());
+    }
+
+    /// #236: the timeout env vars overlay the file value with the usual rules
+    /// (non-empty env wins, empty leaves the base); garbage is a hard error
+    /// naming the variable, and a zero names the key.
+    #[test]
+    fn timeouts_env_overlay() {
+        let env = crate::test_util::env_lock();
+        env.remove(EMBED_CONNECT_TIMEOUT_MS_ENV);
+        env.remove(EMBED_TIMEOUT_MS_ENV);
+        let base = EmbedderConfig {
+            connect_timeout_ms: Some(5_000),
+            timeout_ms: Some(60_000),
+            ..Default::default()
+        };
+        assert_eq!(
+            base.clone().overlay_env().unwrap().connect_timeout_ms,
+            Some(5_000)
+        );
+        assert_eq!(base.clone().overlay_env().unwrap().timeout_ms, Some(60_000));
+
+        env.set(EMBED_CONNECT_TIMEOUT_MS_ENV, "20000");
+        env.set(EMBED_TIMEOUT_MS_ENV, "90000");
+        let overlaid = base.clone().overlay_env().unwrap();
+        assert_eq!(overlaid.connect_timeout_ms, Some(20_000));
+        assert_eq!(overlaid.timeout_ms, Some(90_000));
+
+        env.set(EMBED_CONNECT_TIMEOUT_MS_ENV, "");
+        env.set(EMBED_TIMEOUT_MS_ENV, "");
+        let overlaid = base.clone().overlay_env().unwrap();
+        assert_eq!(overlaid.connect_timeout_ms, Some(5_000));
+        assert_eq!(overlaid.timeout_ms, Some(60_000));
+
+        env.set(EMBED_CONNECT_TIMEOUT_MS_ENV, "soon");
+        let err = base.clone().overlay_env().unwrap_err().to_string();
+        assert!(err.contains(EMBED_CONNECT_TIMEOUT_MS_ENV), "{err}");
+        env.set(EMBED_CONNECT_TIMEOUT_MS_ENV, "20000");
+        env.set(EMBED_TIMEOUT_MS_ENV, "long");
+        let err = base.clone().overlay_env().unwrap_err().to_string();
+        assert!(err.contains(EMBED_TIMEOUT_MS_ENV), "{err}");
+
+        env.set(EMBED_CONNECT_TIMEOUT_MS_ENV, "0");
+        let err = base.clone().overlay_env().unwrap_err().to_string();
+        assert!(err.contains("connect_timeout_ms"), "{err}");
+        env.set(EMBED_CONNECT_TIMEOUT_MS_ENV, "20000");
+        env.set(EMBED_TIMEOUT_MS_ENV, "0");
+        let err = base.overlay_env().unwrap_err().to_string();
+        assert!(err.contains("timeout_ms"), "{err}");
+
+        env.remove(EMBED_CONNECT_TIMEOUT_MS_ENV);
+        env.remove(EMBED_TIMEOUT_MS_ENV);
+    }
+
+    /// #236: `resolve_timeouts` maps absent knobs to the 5 s connect /
+    /// 60 s request defaults and explicit values through; a zero is
+    /// refused naming the key.
+    #[cfg(feature = "embed-bge")]
+    #[test]
+    fn resolve_timeouts_defaults_and_explicit_values() {
+        let (connect, request) = resolve_timeouts(&EmbedderConfig::default()).unwrap();
+        assert_eq!(connect, std::time::Duration::from_secs(5));
+        assert_eq!(request, std::time::Duration::from_secs(60));
+        assert_eq!(connect, bge_m3::DEFAULT_CONNECT_TIMEOUT);
+        assert_eq!(request, bge_m3::DEFAULT_REQUEST_TIMEOUT);
+        let (connect, request) = resolve_timeouts(&EmbedderConfig {
+            connect_timeout_ms: Some(20_000),
+            timeout_ms: Some(90_000),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(connect, std::time::Duration::from_secs(20));
+        assert_eq!(request, std::time::Duration::from_secs(90));
+        // Partial: each knob defaults independently of the other.
+        let (connect, request) = resolve_timeouts(&EmbedderConfig {
+            connect_timeout_ms: Some(20_000),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(connect, std::time::Duration::from_secs(20));
+        assert_eq!(request, std::time::Duration::from_secs(60));
+        let (connect, request) = resolve_timeouts(&EmbedderConfig {
+            timeout_ms: Some(90_000),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(connect, std::time::Duration::from_secs(5));
+        assert_eq!(request, std::time::Duration::from_secs(90));
+        for cfg in [
+            EmbedderConfig {
+                connect_timeout_ms: Some(0),
+                ..Default::default()
+            },
+            EmbedderConfig {
+                timeout_ms: Some(0),
+                ..Default::default()
+            },
+        ] {
+            let err = resolve_timeouts(&cfg).unwrap_err().to_string();
+            assert!(
+                err.contains("connect_timeout_ms") || err.contains("timeout_ms"),
+                "{err}"
+            );
+        }
+    }
+
+    /// #236: the timeout knobs are refused for every kind but `bge_m3`,
+    /// `embeddinggemma2` and `elastic`, naming the key and the kind; a zero
+    /// is refused naming the key. Needs the adapters compiled in: under a
+    /// minimal feature set `build_embedder` fails with "not compiled" before
+    /// it reaches either gate (the sqlite-minimal CI row).
+    #[cfg(all(feature = "embed-bge", feature = "embed-fixture"))]
+    #[test]
+    fn timeouts_kind_gate_and_zero_refusal() {
+        // No other adapter reads them.
+        for kind in [EmbedderKind::Fixture, EmbedderKind::Gemini] {
+            for cfg in [
+                EmbedderConfig {
+                    kind,
+                    connect_timeout_ms: Some(20_000),
+                    ..Default::default()
+                },
+                EmbedderConfig {
+                    kind,
+                    timeout_ms: Some(90_000),
+                    ..Default::default()
+                },
+            ] {
+                let Err(err) = build_embedder(cfg) else {
+                    panic!("timeout knobs for a {kind} embedder must not build");
+                };
+                let err = err.to_string();
+                assert!(
+                    err.contains("connect_timeout_ms") || err.contains("timeout_ms"),
+                    "{err}"
+                );
+                assert!(err.contains(&kind.to_string()), "{err}");
+            }
+        }
+        // A zero is refused naming the key, not applied.
+        for cfg in [
+            EmbedderConfig {
+                kind: EmbedderKind::BgeM3,
+                connect_timeout_ms: Some(0),
+                ..Default::default()
+            },
+            EmbedderConfig {
+                kind: EmbedderKind::BgeM3,
+                timeout_ms: Some(0),
+                ..Default::default()
+            },
+        ] {
+            let Err(err) = build_embedder(cfg) else {
+                panic!("a zero timeout must not build");
+            };
+            let err = err.to_string();
+            assert!(
+                err.contains("connect_timeout_ms") || err.contains("timeout_ms"),
+                "{err}"
+            );
+        }
+        // Set on the OpenAI-compatible adapter: builds without touching the
+        // network (the constructor does no I/O).
+        build_embedder(EmbedderConfig {
+            kind: EmbedderKind::BgeM3,
+            connect_timeout_ms: Some(20_000),
+            timeout_ms: Some(90_000),
+            ..Default::default()
+        })
+        .expect("timeouts on bge_m3 build");
     }
 
     /// Issue #21: `api_key_env` is a real `[embedder]` key holding a variable

@@ -186,6 +186,10 @@ fn rows_match_the_committed_evidence() {
             include_str!("../../evidence/issue-221/calibration-qwen3-4b-1024.json"),
             "evidence/issue-221",
         ),
+        (
+            include_str!("../../evidence/issue-237/calibration-elastic-jina-v3-1024.json"),
+            "evidence/issue-237",
+        ),
     ];
     let mut checked = 0;
     for (text, dir) in files {
@@ -612,17 +616,54 @@ fn a_floor_below_the_calibrated_one_is_warned_of() {
     assert_eq!(layer_floor_warning("general", Some(0.5), &on, &bge), None);
 }
 
-/// #233: an `elastic` contract has no row and is never the BGE-M3
-/// reference, even when the inference endpoint id names BGE-M3 exactly: an
-/// endpoint id is an operator-chosen name, not a measured artifact. So it
-/// warns as uncalibrated until it is measured.
+/// #233: an `elastic` contract is never the BGE-M3 reference, even when
+/// the inference endpoint id names BGE-M3 exactly or carries the
+/// `;input_type=off` suffix: an endpoint id is an operator-chosen name, not
+/// a measured artifact. #237: the exact `.jina-embeddings-v3` contract at
+/// 1024 dims has a measured row (evidence/issue-237/), so it is calibrated
+/// without being reference; every neighbouring contract still warns.
 #[test]
-fn elastic_contracts_are_never_the_reference() {
+fn elastic_exact_jina_contract_is_calibrated_but_never_reference() {
+    let exact = EmbeddingContract {
+        kind: "elastic".into(),
+        model: Some(".jina-embeddings-v3".into()),
+        dim: 1024,
+    };
+    assert!(!is_reference(&exact));
+    let row = lookup(&exact).expect("exact elastic Jina contract has a row");
+    assert_eq!(row.recent_score, 0.13);
+    assert_eq!(row.layer_min_similarity, 0.39);
+    assert_eq!(row.merge_threshold, 0.86);
+    assert_eq!(row.default_threshold_merges, 0.64);
+    assert_eq!(row.evidence, "evidence/issue-237/");
+    assert!(is_calibrated(&exact));
+    assert!(!warn_if_uncalibrated(CalibrationMode::Builtin, &exact));
+    assert!(!warn_if_uncalibrated(CalibrationMode::Off, &exact));
+    // The row agrees with the committed evidence.
+    let evidence: serde_json::Value = serde_json::from_str(include_str!(
+        "../../evidence/issue-237/calibration-elastic-jina-v3-1024.json"
+    ))
+    .unwrap();
+    let e = &evidence["contracts"][0];
+    assert_eq!(e["kind"], "elastic");
+    assert_eq!(e["model"], ".jina-embeddings-v3");
+    assert_eq!(e["dim"], 1024);
+    assert_eq!(e["recent_score"]["shipped"], 0.13);
+    assert_eq!(e["layer_min_similarity"]["shipped"], 0.39);
+    assert_eq!(e["merge_threshold"]["shipped"], 0.86);
+}
+
+/// #233/#237: neighbouring elastic contracts — `input_type=off`, another
+/// width, another endpoint id, or no id — are different spaces with no row,
+/// so they stay uncalibrated and warn.
+#[test]
+fn elastic_neighbouring_contracts_stay_uncalibrated() {
     for model in [
-        Some(".jina-embeddings-v3"),
+        Some(".jina-embeddings-v3;input_type=off"),
         Some("bge-m3"),
         Some("BAAI/bge-m3"),
         Some("bge-m3;input_type=off"),
+        Some(".elser-2-elastic"),
         None,
     ] {
         let contract = EmbeddingContract {
@@ -639,4 +680,14 @@ fn elastic_contracts_are_never_the_reference() {
         );
         assert!(!warn_if_uncalibrated(CalibrationMode::Off, &contract));
     }
+    // Another width of the exact endpoint id is a different space too.
+    let narrow = EmbeddingContract {
+        kind: "elastic".into(),
+        model: Some(".jina-embeddings-v3".into()),
+        dim: 512,
+    };
+    assert!(!is_reference(&narrow));
+    assert!(lookup(&narrow).is_none());
+    assert!(!is_calibrated(&narrow));
+    assert!(warn_if_uncalibrated(CalibrationMode::Builtin, &narrow));
 }
