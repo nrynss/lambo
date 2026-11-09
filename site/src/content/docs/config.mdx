@@ -251,12 +251,13 @@ docker rm -f lambo-es-live
 
 | Key | Type | Default | Notes |
 |---|---|---|---|
-| `kind` | string | `bge_m3` | `bge_m3` (an OpenAI-compatible embeddings API: local `llama-server` or a hosted endpoint), `candle` (in-process BGE-M3), `gemini` (Vertex AI), `embeddinggemma2` (EmbeddingGemma 2 text and images through `llama-server`, see [EmbeddingGemma 2](#embeddinggemma-2)), or `fixture` (tests). `openai` is an alias of `bge_m3`. `bedrock` parses but is not implemented, so it fails at startup. |
+| `kind` | string | `bge_m3` | `bge_m3` (an OpenAI-compatible embeddings API: local `llama-server` or a hosted endpoint), `candle` (in-process BGE-M3), `gemini` (Vertex AI), `embeddinggemma2` (EmbeddingGemma 2 text and images through `llama-server`, see [EmbeddingGemma 2](#embeddinggemma-2)), `elastic` (the Elasticsearch Inference API, see [Elastic Inference API](#elastic-inference-api)), or `fixture` (tests). `openai` is an alias of `bge_m3`. `bedrock` parses but is not implemented, so it fails at startup. |
 | `dim` | integer | `1024` | The width you expect the embedder to emit. For `embeddinggemma2` it must be `768`, `512`, `256` or `128`, so set it: the default `1024` is refused. |
-| `url` | string | none | The `llama-server` base URL, used when `kind` is `bge_m3` or `embeddinggemma2`. Also accepted as `llama_url`. |
-| `model` | string | none | The model id sent to `llama-server`. Empty means the server's own default. For `embeddinggemma2` it names the weights artifact and defaults to `ggml-org/embeddinggemma-2-GGUF@bfcd2987/Q8_0`. Also accepted as `llama_model`. |
-| `api_key_env` | string | none | The name of the environment variable that holds a bearer token, for a hosted OpenAI-compatible endpoint. Used when `kind` is `bge_m3` or `embeddinggemma2`; any other kind refuses it. See [Hosted endpoints](#hosted-endpoints). |
+| `url` | string | none | The `llama-server` base URL, used when `kind` is `bge_m3` or `embeddinggemma2`. For `elastic` it is the Elasticsearch cluster's base URL and is required. Also accepted as `llama_url`. |
+| `model` | string | none | The model id sent to `llama-server`. Empty means the server's own default. For `embeddinggemma2` it names the weights artifact and defaults to `ggml-org/embeddinggemma-2-GGUF@bfcd2987/Q8_0`. For `elastic` it is the inference endpoint id, such as `.jina-embeddings-v3`, and is required. Also accepted as `llama_model`. |
+| `api_key_env` | string | none | The name of the environment variable that holds a bearer token, for a hosted OpenAI-compatible endpoint. Used when `kind` is `bge_m3` or `embeddinggemma2`, and for `elastic`, where it holds an Elasticsearch API key sent as `Authorization: ApiKey`; any other kind refuses it. See [Hosted endpoints](#hosted-endpoints). |
 | `images` | bool | `true` | Whether `embeddinggemma2` embeds images. `false` makes it text-only: it never sends an image, and `lambo_derive_image` takes only client vectors. Any other kind refuses the key. |
+| `send_input_type` | bool | `true` | Whether `elastic` sends `input_type` (`INGEST` for a stored concept, `SEARCH` for a recall query). `false` omits it for both, for an Elastic service that refuses the field, and changes the contract's model (it gains `;input_type=off`), so a session embedded with it on must be re-embedded. Any other kind refuses the key. |
 | `keep_warm_secs` | integer | auto | Seconds between `lambo serve` keep-warm touches. Omitted means auto: every 10 seconds for the in-process candle embedder on a Metal device, off for everything else. `0` turns it off; any other value applies to every kind. For `gemini`, each touch is a billed Vertex AI embedding request and keeps nothing local warm, so leave it off there. On a battery-powered laptop the default wakes the GPU every 10 seconds (about 0.2% GPU duty); set `keep_warm_secs = 0` to opt out. |
 | `accept_client_vectors` | bool | `false` | Accept a vector a client computed: an image's (`lambo_derive_image` with `vector`, `lambo derive-image --vector-json`) or a query's (`lambo_recall` with `query_vector`, `lambo recall --query-vector-json`). Off by default: such a call is refused and the refusal names this key. Lambo checks that the vector's declared contract (kind, model, dim) is exactly the session's and that the vector has the right width and a real direction, but it cannot check that the vector came from that model, so turning this on trusts the client's label. One setting for the whole process: every session a `lambo serve` holds gets the same value. |
 | `canary` | string | `"warn"` | The embedder canary (#176). A writer attach embeds 20 fixed phrases and compares each with the vector this store pinned for the same embedding contract (kind, model, dim), kept in `store_meta`. It catches a change behind the same name: a re-quantised model, another llama.cpp build, a provider's model revision. A phrase below cosine 0.99 is a drift. `"verify"` refuses the writer attach on a drift (fail closed; `--allow-embedding-mismatch` attaches anyway), `"warn"` logs it and attaches, `"off"` skips the check. A store with no pin gets one at the next writer attach, with an INFO line. Under `"warn"`, a check that passed less than 10 minutes ago is trusted without embedding again, so one-shot CLI writers cost one store read each; `"verify"` embeds at every writer attach. `lambo re-embed` pins again after its rewrite. The pin is per store and contract, so after re-embedding one session under an unchanged contract name, re-embed the store's other sessions under that name too: the canary no longer flags them. An embedder that cannot be reached leaves the check unverified, never refused. |
@@ -266,7 +267,7 @@ docker rm -f lambo-es-live
 | `calibrated_layer_floor` | bool | `true` | A layer whose `[[serve.layer]] min_similarity` is unset takes the measured contract's own floor instead of 0.50 (#87). Under the EG2 contract above, that floor is 0.72. 0.50 is BGE-M3's floor, and under EG2 it admits 99.9% of irrelevant concepts on the held-out split (BGE-M3 at 0.50: 3.2%). 0.72 admits 3.1% and keeps 92.5% of true hits: about 7.5% of true hits, the lowest-scoring ones, no longer merge from a layer. It is resolved at recall time from the calling session's embedding contract, which its layers must share. A `min_similarity` you set always applies, 0.50 included. Earlier versions of this page's example set `min_similarity = 0.50`, so remove that line to get the calibrated floor. `lambo serve` logs a warning when a layer's floor is below its contract's calibrated one. `false`, or `calibration = "off"`, keeps 0.50. No effect for a contract without a measured row (BGE-M3 included), or for a session without layers. |
 | `suspected_supersession_line` | string | `"validated"` | When recall shows the `⚠ Possibly superseded by "…" (id …), not declared` line for a suspected supersession (#198). `"validated"` shows it only under an embedding contract whose trigger precision was measured at 0.90 or better on the labelled pairs: today BGE-M3 (`candle` with `BAAI/bge-m3` weights, or `bge_m3` with a `model` that names BGE-M3, such as `bge-m3-FP16`, at 1024 dims; 0.96 held-out, `evidence/issue-198-trigger/`). A `bge_m3` with no `model` uses the server's default model, which Lambo cannot see, so it counts as BGE-M3: if that server serves another model, set this to `"off"`. `"on"` shows it for every contract, `"off"` for none. The record (a `SuspectedSupersedes` edge) is written either way, and the older hit's `possibly_superseded_by` field is set either way; under EmbeddingGemma 2, which is not yet measured, that field is all the default shows. Not part of the embedding contract. |
 
-`kind` also accepts `bge`, `bge-m3` and `openai` for `bge_m3`, `vertex` for `gemini`, `titan` for `bedrock`, and `fake` for `fixture`. An alias changes nothing but the spelling: the kind is still reported and stamped as `bge_m3`.
+`kind` also accepts `bge`, `bge-m3` and `openai` for `bge_m3`, `vertex` for `gemini`, `titan` for `bedrock`, `elasticsearch` for `elastic`, and `fake` for `fixture`. An alias changes nothing but the spelling: the kind is still reported and stamped as `bge_m3`.
 
 A store that persists vectors declares its own width, and Lambo refuses to start if `dim` disagrees with it.
 
@@ -348,6 +349,46 @@ Every image is resized to a 768 px longer side before it is embedded. That makes
 - Small images with sharp detail can drift by up to about 2% (a cosine of 0.98 for a checkerboard sent at 128 px), because enlarging cannot restore detail that was never sent.
 
 If bit-identical vectors matter, for example when you compare vectors directly or deduplicate on them, always send the same rendition of an image, such as the original file.
+
+### Elastic Inference API
+
+`kind = "elastic"` creates embeddings through the Elasticsearch Inference API, so a deployment that already runs on Elastic needs no second embedding service. It needs the `embed-elastic` feature, which released binaries include.
+
+```toml
+[embedder]
+kind = "elastic"
+url = "https://my-cluster.es.example.com"
+model = ".jina-embeddings-v3"     # the inference endpoint id
+dim = 1024
+api_key_env = "LAMBO_ES_API_KEY"
+canary = "verify"
+```
+
+- Lambo sends `POST <url>/_inference/text_embedding/<model>` with one text per request and reads the `text_embedding` answer. `url` and `model` are both required; neither has a default. `model` is the inference endpoint id, and which ids exist depends on the deployment: `GET /_inference/_all` lists them with their `task_type`. Only a `text_embedding` endpoint with float elements works. ELSER (`.elser-2-elastic`) is `sparse_embedding` and the multimodal endpoints (such as `.jina-clip-v2`) are task type `embedding`, so Elasticsearch refuses them for this kind, and the error says so. An endpoint that returns byte or bit embeddings is refused too.
+- `url` follows the same rules as `[recall]`: `http://` or `https://`, and no user name, password, query string or fragment. A path prefix (a proxy in front of the cluster) is kept.
+- `api_key_env` names the variable that holds an Elasticsearch API key (the encoded form). Lambo sends it as `Authorization: ApiKey <key>`, as the recall tier does, only over `https` or over plain `http` to a loopback host. The other rules under [Hosted endpoints](#hosted-endpoints) apply the same way: an unset variable stops startup, redirects are not followed, and an error body is quoted only with the key removed. Omit `api_key_env` for a cluster with security off.
+- `dim` must equal the endpoint's width (`.jina-embeddings-v3` is 1024). A response of any other width fails the write, naming both numbers.
+- A stored concept is sent with `input_type: INGEST` and a recall query with `input_type: SEARCH`, so an asymmetric model embeds each in its own role. Not every Elastic service accepts `input_type`. An endpoint that refuses it fails as a configuration error that names `send_input_type`. Set `send_input_type = false` to omit the field for both roles. Lambo never drops it on its own, because without the roles an asymmetric model embeds into a different space.
+- The session's contract is kind `elastic` with the endpoint id as its model, for example `.jina-embeddings-v3`, or `.jina-embeddings-v3;input_type=off` when `send_input_type = false`. Another endpoint id, or turning `send_input_type` off, is a different contract: start a fresh session or run `lambo re-embed`.
+- Elastic can change the model behind an endpoint id without changing the id, and the contract would not notice. The canary does: set `canary = "verify"` so a writer attach refuses to write when the endpoint's vectors drift from the ones this store pinned. The default `"warn"` only logs it.
+- No calibration row exists for an Elastic endpoint, even one whose id names BGE-M3, because an endpoint id is a name the operator chose. Lambo logs once at startup that the contract is uncalibrated.
+- `url` and `model` are the same keys `llama-server` uses, so `LAMBO_LLAMA_EMBED_URL` and `LAMBO_LLAMA_MODEL` override them here too.
+
+**When Elastic is unavailable.** The embedder has no fallback. A second embedder would put vectors from two models in one session, which the embedding contract forbids. With `match_strategy = "hybrid"` (the default), a derive whose embed fails gets a `failed` receipt and writes nothing. A write not yet attempted when the session closes is kept as a durable intent and replayed by the next serve. A recall whose query cannot be embedded skips the vector leg with a warning and answers from the keyword and recent legs. A connection failure or a status that says the server is busy (`408`, `429`, `5xx`) is transient. A `401`, `403` or `404` is a configuration error an operator must fix, and a `400` that refuses a text fails that write. To keep writing without an embedder, declare it with `match_strategy = "canonical"`.
+
+<Warning>
+The `elastic` embedder and the `[recall]` tier are independent: you can configure either without the other. Using Elastic for both puts both of recall's vector dependencies on one service. With the recall tier alone, an Elastic outage is survivable: recall ranks vectors in the store and the writer repairs the index afterwards. With Elastic also creating the embeddings, the same outage means writes fail (under `hybrid`) and recall answers from its keyword and recent legs only, until Elastic is back.
+</Warning>
+
+#### Running the live Elastic embedder test
+
+One ignored test embeds a document and a query against a real inference endpoint and checks the width and the unit norm of both. It is not part of CI. An explicitly requested run without the URL or the id fails rather than skipping. With the API key exported in `LAMBO_ES_API_KEY` (leave it unset for a local cluster with security off), run:
+
+```sh
+LAMBO_ELASTIC_EMBED_URL=https://my-cluster.es.example.com \
+  LAMBO_ELASTIC_INFERENCE_ID=.jina-embeddings-v3 LAMBO_ELASTIC_EMBED_DIM=1024 \
+  cargo test --features embed-elastic --lib embed::elastic::tests::live -- --ignored --nocapture
+```
 
 <Warning>
 Do not switch embedder models in the middle of a session without re-embedding, because vectors from different models are not comparable. The kind, the model, and the width together form the session's embedding contract.
@@ -660,6 +701,7 @@ Cargo features decide which stores and embedders exist in your binary, and `lamb
 | `embed-fixture` | The deterministic fixture embedder. |
 | `embed-bge` | BGE-M3 embeddings through `llama-server`. |
 | `embed-eg2` | EmbeddingGemma 2 text and image embeddings through `llama-server` (`kind = "embeddinggemma2"`). Builds on `embed-bge`. Released binaries include it. |
+| `embed-elastic` | Embeddings through the Elasticsearch Inference API (`kind = "elastic"`). Builds on `embed-bge`. Released binaries include it. |
 | `embed-bedrock` | Reserved for Amazon Titan embeddings through Bedrock. Not implemented yet. |
 | `fixtures` | Committed fixture graphs, which also enables `store-memory`. |
 | `demo` | A convenience profile covering the memory and CockroachDB stores, both local embedders, and the fixtures. |

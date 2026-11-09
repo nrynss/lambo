@@ -207,6 +207,7 @@ Cargo features select which adapters are compiled in. List fewer to get a smalle
 | `embed-bge` | BGE-M3 embeddings served by `llama-server`. |
 | `embed-gemini` | Vertex AI Gemini embeddings (`gemini-embedding-001`), authenticated with a service account. |
 | `embed-eg2` | EmbeddingGemma 2 text and image embeddings served by `llama-server` b11452 or later (`kind = "embeddinggemma2"`). Builds on `embed-bge`. |
+| `embed-elastic` | Embeddings through the Elasticsearch Inference API (`kind = "elastic"`): `POST /_inference/text_embedding/<id>` on a cluster you name, with an optional API key. Builds on `embed-bge`. Needs a reachable Elasticsearch cluster at runtime. |
 | `embed-candle` | In-process BGE-M3 through candle (`kind = "candle"`), CPU backend only. Builds anywhere. |
 | `embed-candle-metal` | `embed-candle` plus the Metal GPU backend. Apple silicon only. This is what the Metal release asset adds to `ship`. |
 | `embed-candle-accelerate` | `embed-candle` plus Apple's Accelerate framework for the CPU backend. macOS only. |

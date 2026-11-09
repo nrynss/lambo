@@ -60,7 +60,7 @@ kind = "memory"
 # vector_dim = 1024
 
 [embedder]
-# bge_m3 | gemini | candle | bedrock | fixture | embeddinggemma2
+# bge_m3 | gemini | candle | bedrock | fixture | embeddinggemma2 | elastic
 # (`openai` is an alias of bge_m3: the same OpenAI-compatible adapter, still
 # reported and stamped as bge_m3)
 kind = "bge_m3"
@@ -137,6 +137,39 @@ url = "http://127.0.0.1:8080"
 # says so), so keep writes stopped until then if the server's model is in doubt.
 #   model = "ggml-org/embeddinggemma-2-GGUF@bfcd2987/Q8_0"   # the default
 #   images = true    # false: text only, never send an image (server without --mmproj)
+#
+# Elasticsearch Inference API (#233, kind = "elastic", alias "elasticsearch",
+# feature embed-elastic). Lambo POSTs each text to
+# <url>/_inference/text_embedding/<model> and reads the `text_embedding` answer.
+# `url` and `model` are required (no defaults). `model` is the inference endpoint
+# id; which ids exist depends on the deployment, and GET /_inference/_all lists
+# them with their task_type. Only a text_embedding endpoint with float elements
+# works: ELSER (.elser-2-elastic) is sparse_embedding and the multimodal
+# endpoints (e.g. .jina-clip-v2) are task type `embedding`, so both are refused.
+# `url` follows [recall]'s rules: http or https, no credentials, query string or
+# fragment (a proxy path prefix is fine).
+#   kind = "elastic"
+#   url = "https://my-cluster.es.example.com"
+#   model = ".jina-embeddings-v3"     # the inference endpoint id
+#   dim = 1024                        # must equal the endpoint's width
+#   api_key_env = "LAMBO_ES_API_KEY"
+# api_key_env names the variable holding an Elasticsearch API key (the encoded
+# form), sent as `Authorization: ApiKey <key>` and only over https or http to a
+# loopback host; the api_key_env rules above (issue #21) apply. Omit it for a cluster
+# with security off.
+# Documents go with input_type INGEST and recall queries with SEARCH. Not every
+# Elastic service accepts input_type; one that refuses it fails as a
+# configuration error naming this key. false omits it for both roles and adds
+# ";input_type=off" to the contract model (a different space: re-embed).
+#   send_input_type = true
+# Elastic can change the model behind an endpoint id without changing the id, so
+# recommend the canary in verify mode: a writer attach then refuses to write when
+# the endpoint's vectors drift from the ones this store pinned.
+#   canary = "verify"
+# No fallback during an Elastic outage: derives fail (hybrid), unattempted writes
+# stay durable intents, and recall answers from its keyword and recent legs. With
+# the recall tier on Elastic as well, both of recall's vector dependencies sit on
+# one service; the embedder and the recall tier stay independent of each other.
 #
 # In-crate candle BGE-M3 (kind = "candle", feature embed-candle): embeds locally, no
 # llama.cpp server. Weights fetch from hf-hub on first use and cache under the

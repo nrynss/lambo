@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+### Highlights
+
+- **Elastic embedder (#233).** `[embedder] kind = "elastic"` (feature
+  `embed-elastic`, in released binaries) creates embeddings through the
+  Elasticsearch Inference API: `url` is the cluster, `model` the
+  inference endpoint id (both required; `GET /_inference/_all` lists the
+  ids a deployment exposes, such as `.jina-embeddings-v3`), and
+  `api_key_env` sends `Authorization: ApiKey` over https or loopback
+  http. Documents go with `input_type: INGEST`, queries with `SEARCH`;
+  an endpoint that refuses the field fails with a hint to set
+  `send_input_type = false`, never a silent retry. The contract is kind
+  `elastic` with the endpoint id as model. There is no calibration row,
+  and `canary = "verify"` is recommended because Elastic can change the
+  model behind a stable id. There is no new fallback for an outage.
+  Using Elastic for both `[recall]` and the embedder puts both of
+  recall's vector dependencies on one service: during an Elastic outage
+  writes fail (under `hybrid`; unattempted writes stay durable intents)
+  and recall answers from keyword and recent legs only. The two stay
+  independent; either works without the other.
+
 ## 0.9.2 (2026-11-04)
 
 ### Highlights
