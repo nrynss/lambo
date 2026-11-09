@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use super::{EmbedError, Embedder};
 
-mod scrub;
+pub(crate) mod scrub;
 
 /// OpenAI-compatible embeddings request body (`model` is omitted when empty so it hits
 /// a llama.cpp server's default model; `dimensions` is omitted unless the operator
@@ -44,8 +44,8 @@ struct EmbedData {
     embedding: Vec<f32>,
 }
 
-const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+pub(crate) const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+pub(crate) const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// What a non-success HTTP status from llama.cpp says about retrying the same
@@ -228,7 +228,7 @@ pub(crate) fn check_bearer_transport(base_url: &str) -> Result<(), EmbedError> {
 /// a dotted quad (`127.1`, `2130706433` and `0x7f.1` are `127.0.0.1`), IPv6
 /// in brackets, domains lower-cased. The name `localhost` is trusted without
 /// resolving it.
-fn is_loopback_host(url: &reqwest::Url) -> bool {
+pub(crate) fn is_loopback_host(url: &reqwest::Url) -> bool {
     url.host_str().is_some_and(|host| {
         match host
             .trim_start_matches('[')
@@ -260,7 +260,7 @@ fn bypasses_env_proxy(base_url: &str) -> bool {
 /// `url` for a log line, an error or `Debug`: scheme, host, port and path.
 /// Userinfo and the query are dropped, since either may carry a credential
 /// (issue #21); an unparseable URL is not shown at all.
-fn url_for_log(url: &str) -> String {
+pub(crate) fn url_for_log(url: &str) -> String {
     match reqwest::Url::parse(url) {
         Ok(u) => {
             let host = u.host_str().unwrap_or("");
@@ -280,7 +280,7 @@ fn url_for_log(url: &str) -> String {
 /// same-port redirect even when it downgrades `https` to `http`, so following
 /// one could resend the token in clear text (issue #21). A 3xx is answered
 /// as a permanent configuration error instead (see [`classify_status`]).
-fn build_client(
+pub(crate) fn build_client(
     base_url: &str,
     connect: Duration,
     request: Duration,

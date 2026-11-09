@@ -146,6 +146,12 @@ embed-gemini = ["dep:reqwest", "dep:jsonwebtoken"]
 # transport rule, error-body scrub), so it builds on `embed-bge`. `image`
 # (22g) resizes every image to a 768 px longer side before it is sent.
 embed-eg2 = ["embed-bge", "dep:image"]
+# #233: embeddings through the Elasticsearch Inference API
+# (`POST /_inference/text_embedding/{id}`). A thin adapter on the bge_m3 HTTP
+# transport (#21: no redirects, capped and key-scrubbed error bodies, the J3
+# status table, the loopback proxy rule), so it builds on `embed-bge`; it
+# sends `Authorization: ApiKey` instead of `Bearer`. No new crate.
+embed-elastic = ["embed-bge"]
 
 # Recall tiers (#18): an index beside the durable store that serves recall's
 # vector leg. Not a store kind; selected by `[recall]` in lambo.toml.
@@ -172,6 +178,7 @@ fixtures = ["store-memory"]
 # `store-postgres` is the same sqlx postgres driver `store-cockroach` already
 # pulls, and `embed-gemini` adds jsonwebtoken (pure Rust + ring, already in the
 # tree via rustls) on top of the reqwest `embed-bge` already carries.
+# `embed-elastic` joined with #233; it adds no crate on top of `embed-bge`.
 ship = [
     "store-memory",
     "store-cockroach",
@@ -181,6 +188,7 @@ ship = [
     "embed-fixture",
     "embed-gemini",
     "embed-eg2",
+    "embed-elastic",
     "recall-elastic",
 ]
 

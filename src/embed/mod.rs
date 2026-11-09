@@ -1,7 +1,7 @@
 //! Embedder trait, Level B factory, and optional adapter modules (P1 / P7).
 //!
 //! Packaging: Cargo features gate adapters (`embed-bge`, `embed-candle`, `embed-fixture`,
-//! `embed-bedrock`, `embed-gemini`, `embed-eg2`);
+//! `embed-bedrock`, `embed-gemini`, `embed-eg2`, `embed-elastic`);
 //! `lambo.toml` / env select among compiled kinds. See
 //! `dev-diary/notes/level-b-pluggability.md`.
 
@@ -17,6 +17,8 @@ mod bge_m3;
 mod candle;
 #[cfg(feature = "embed-eg2")]
 pub(crate) mod eg2;
+#[cfg(feature = "embed-elastic")]
+pub(crate) mod elastic;
 #[cfg(feature = "embed-fixture")]
 mod fixture;
 #[cfg(feature = "embed-gemini")]
@@ -38,6 +40,8 @@ pub use eg2::{
     EG2_DOCUMENT_PREFIX, EG2_IMAGE_TOKENS, EG2_MRL_DIMS, EG2_NATIVE_DIM, EG2_PROMPT_PROFILE,
     EG2_PROPS_RECHECK_INTERVAL, EG2_QUERY_PREFIX, EG2_REFERENCE_IMAGE_TOKENS,
 };
+#[cfg(feature = "embed-elastic")]
+pub use elastic::ElasticEmbedder;
 #[cfg(feature = "embed-fixture")]
 pub use fixture::{
     near_far_contract, png_with_label, FixtureEmbedder, FAR, IMAGE_LABEL_KEYWORD, NEAR_A, NEAR_B,
@@ -516,6 +520,9 @@ pub enum EmbedderKind {
     /// `llama-server` (#22 PR 5). Feature: `embed-eg2`.
     #[serde(rename = "embeddinggemma2")]
     EmbeddingGemma2,
+    /// The Elasticsearch Inference API (`POST /_inference/text_embedding/{id}`,
+    /// #233); `elasticsearch` is an alias. Feature: `embed-elastic`.
+    Elastic,
 }
 
 impl<'de> Deserialize<'de> for EmbedderKind {
@@ -536,6 +543,7 @@ impl EmbedderKind {
             Self::Bedrock => "embed-bedrock",
             Self::Fixture => "embed-fixture",
             Self::EmbeddingGemma2 => "embed-eg2",
+            Self::Elastic => "embed-elastic",
         }
     }
 
@@ -550,6 +558,7 @@ impl EmbedderKind {
             Self::Bedrock => cfg!(feature = "embed-bedrock"),
             Self::Fixture => cfg!(feature = "embed-fixture"),
             Self::EmbeddingGemma2 => cfg!(feature = "embed-eg2"),
+            Self::Elastic => cfg!(feature = "embed-elastic"),
         }
     }
 
@@ -561,6 +570,7 @@ impl EmbedderKind {
             Self::Fixture => cfg!(feature = "embed-fixture"),
             Self::Gemini => cfg!(feature = "embed-gemini"),
             Self::EmbeddingGemma2 => cfg!(feature = "embed-eg2"),
+            Self::Elastic => cfg!(feature = "embed-elastic"),
             // T7.1 not implemented yet.
             Self::Bedrock => false,
         }
@@ -575,7 +585,7 @@ impl FromStr for EmbedderKind {
         if t.is_empty() {
             return Err(EmbedError::Unavailable(
                 "empty embedder kind (expected bge_m3 | candle | gemini | bedrock | fixture | \
-                 embeddinggemma2)"
+                 embeddinggemma2 | elastic)"
                     .into(),
             ));
         }
@@ -589,11 +599,12 @@ impl FromStr for EmbedderKind {
             "bedrock" | "titan" => Ok(Self::Bedrock),
             "fixture" | "fake" => Ok(Self::Fixture),
             "embeddinggemma2" | "embeddinggemma-2" | "eg2" => Ok(Self::EmbeddingGemma2),
+            "elastic" | "elasticsearch" => Ok(Self::Elastic),
             // Never echo the value: a key or DSN pasted under `kind` would
             // reach the startup log.
             _ => Err(EmbedError::Unavailable(
                 "unknown embedder kind (value not shown; expected bge_m3 | candle | gemini | \
-                 bedrock | fixture | embeddinggemma2)"
+                 bedrock | fixture | embeddinggemma2 | elastic)"
                     .into(),
             )),
         }
@@ -609,6 +620,7 @@ impl std::fmt::Display for EmbedderKind {
             Self::Bedrock => write!(f, "bedrock"),
             Self::Fixture => write!(f, "fixture"),
             Self::EmbeddingGemma2 => write!(f, "embeddinggemma2"),
+            Self::Elastic => write!(f, "elastic"),
         }
     }
 }
@@ -724,6 +736,15 @@ pub struct EmbedderConfig {
     /// any other kind refuses it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub images: Option<bool>,
+    /// Whether the Elastic adapter sends `input_type` (`INGEST` for
+    /// documents, `SEARCH` for queries) with each request (#233). Absent
+    /// means `true`. `false` omits the field for both roles, for an Elastic
+    /// service that refuses it; the contract model then gains
+    /// `;input_type=off`, because an asymmetric model embeds into a
+    /// different space without its role, so a session embedded with it on
+    /// must be re-embedded. `elastic` only; any other kind refuses it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub send_input_type: Option<bool>,
     /// The embedder canary (#176, [`canary`]): `verify` refuses a writer
     /// attach whose embedder no longer reproduces the store's pinned canary
     /// vectors, `warn` (the default) logs it, `off` skips the check.
@@ -789,6 +810,7 @@ impl Default for EmbedderConfig {
             keep_warm_secs: None,
             accept_client_vectors: false,
             images: None,
+            send_input_type: None,
             canary: canary::CanaryMode::Warn,
             related_pairs: None,
             calibration: calibration::CalibrationMode::Builtin,
@@ -1002,6 +1024,23 @@ pub fn eg2_identity(_embedder: &dyn Embedder) -> Option<String> {
     None
 }
 
+/// The contract `model` the Elastic adapter stamps (#233): the inference
+/// endpoint id, with `;input_type=off` when `send_input_type = false`.
+/// `None` when the embedder is not that adapter.
+#[cfg(feature = "embed-elastic")]
+pub fn elastic_identity(embedder: &dyn Embedder) -> Option<String> {
+    embedder
+        .as_any()
+        .and_then(|a| a.downcast_ref::<elastic::ElasticEmbedder>())
+        .map(elastic::ElasticEmbedder::model_identity)
+}
+
+/// Same as [`elastic_identity`] on builds without the `embed-elastic` feature.
+#[cfg(not(feature = "embed-elastic"))]
+pub fn elastic_identity(_embedder: &dyn Embedder) -> Option<String> {
+    None
+}
+
 fn missing_feature(kind: EmbedderKind) -> EmbedError {
     EmbedError::Unavailable(format!(
         "embedder kind `{kind}` is not compiled into this binary; rebuild with \
@@ -1110,14 +1149,15 @@ pub fn build_embedder(cfg: EmbedderConfig) -> Result<Box<dyn Embedder>, EmbedErr
     if let Some(name) = cfg.api_key_env.as_deref()
         && !matches!(
             cfg.kind,
-            EmbedderKind::BgeM3 | EmbedderKind::EmbeddingGemma2
+            EmbedderKind::BgeM3 | EmbedderKind::EmbeddingGemma2 | EmbedderKind::Elastic
         )
     {
         // A credential key the selected adapter would ignore is refused rather
         // than silently dropped: an operator who configured one expects it used.
         return Err(EmbedError::Unavailable(format!(
-            "embedder.api_key_env ({}) applies only to kinds `bge_m3` (alias `openai`) and \
-             `embeddinggemma2`, but kind is `{}`; remove api_key_env or change the kind",
+            "embedder.api_key_env ({}) applies only to kinds `bge_m3` (alias `openai`), \
+             `embeddinggemma2` and `elastic`, but kind is `{}`; remove api_key_env or change the \
+             kind",
             crate::config::secret_env::shown(name),
             cfg.kind
         )));
@@ -1127,6 +1167,15 @@ pub fn build_embedder(cfg: EmbedderConfig) -> Result<Box<dyn Embedder>, EmbedErr
         return Err(EmbedError::Unavailable(format!(
             "embedder.images applies only to kind `embeddinggemma2`, but kind is `{}`; remove \
              images or change the kind",
+            cfg.kind
+        )));
+    }
+    // Same rule for the input_type switch (#233): only the Elastic adapter
+    // sends input_type.
+    if cfg.send_input_type.is_some() && cfg.kind != EmbedderKind::Elastic {
+        return Err(EmbedError::Unavailable(format!(
+            "embedder.send_input_type applies only to kind `elastic`, but kind is `{}`; remove \
+             send_input_type or change the kind",
             cfg.kind
         )));
     }
@@ -1225,6 +1274,16 @@ pub fn build_embedder(cfg: EmbedderConfig) -> Result<Box<dyn Embedder>, EmbedErr
             #[cfg(not(feature = "embed-eg2"))]
             {
                 Err(missing_feature(EmbedderKind::EmbeddingGemma2))
+            }
+        }
+        EmbedderKind::Elastic => {
+            #[cfg(feature = "embed-elastic")]
+            {
+                Ok(Box::new(elastic::build(&cfg)?))
+            }
+            #[cfg(not(feature = "embed-elastic"))]
+            {
+                Err(missing_feature(EmbedderKind::Elastic))
             }
         }
         EmbedderKind::Bedrock => {
@@ -2100,11 +2159,288 @@ mod tests {
         assert_eq!(EmbedderKind::Gemini.feature_name(), "embed-gemini");
         assert_eq!(EmbedderKind::Bedrock.feature_name(), "embed-bedrock");
         assert_eq!(EmbedderKind::EmbeddingGemma2.feature_name(), "embed-eg2");
+        assert_eq!(EmbedderKind::Elastic.feature_name(), "embed-elastic");
     }
 
     #[test]
     fn cosine_always_available() {
         // Must compile even when embed-fixture is off (math module is ungated).
         assert!((cosine(&[1.0, 0.0], &[1.0, 0.0]) - 1.0).abs() < 1e-6);
+    }
+
+    /// #233: `elastic` parses with its alias, in any case and with
+    /// surrounding whitespace, displays as `elastic`, and both `FromStr`
+    /// errors list it.
+    #[test]
+    fn elastic_kind_parses_and_is_listed() {
+        for s in ["elastic", " Elastic ", "ELASTICSEARCH", "\telasticsearch\n"] {
+            assert_eq!(
+                s.parse::<EmbedderKind>().unwrap(),
+                EmbedderKind::Elastic,
+                "{s:?}"
+            );
+        }
+        assert_eq!(EmbedderKind::Elastic.to_string(), "elastic");
+        assert_eq!(
+            EmbedderKind::Elastic.is_ready(),
+            cfg!(feature = "embed-elastic")
+        );
+        assert_eq!(
+            EmbedderKind::Elastic.is_compiled(),
+            cfg!(feature = "embed-elastic")
+        );
+        for bad in ["", "elastic-search"] {
+            let msg = bad.parse::<EmbedderKind>().unwrap_err().to_string();
+            assert!(msg.contains("| elastic)"), "{bad:?}: {msg}");
+        }
+        // Serde writes the canonical name back.
+        let cfg: EmbedderConfig = toml::from_str("kind = \"elasticsearch\"\n").unwrap();
+        assert!(toml::to_string(&cfg)
+            .unwrap()
+            .contains("kind = \"elastic\""));
+    }
+
+    /// #233: the issue's `[embedder]` snippet parses, and `send_input_type`
+    /// is a real key, absent by default and never serialized when absent.
+    #[test]
+    fn elastic_toml_snippet_parses() {
+        let cfg: EmbedderConfig = toml::from_str(
+            r#"
+            kind = "elastic"
+            url = "https://my-cluster.es.example.com"
+            model = ".jina-embeddings-v3"
+            dim = 1024
+            api_key_env = "LAMBO_ES_API_KEY"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(cfg.kind, EmbedderKind::Elastic);
+        assert_eq!(
+            cfg.llama_url.as_deref(),
+            Some("https://my-cluster.es.example.com")
+        );
+        assert_eq!(cfg.llama_model.as_deref(), Some(".jina-embeddings-v3"));
+        assert_eq!(cfg.dim, 1024);
+        assert_eq!(cfg.api_key_env.as_deref(), Some("LAMBO_ES_API_KEY"));
+        assert_eq!(cfg.send_input_type, None);
+        assert!(!toml::to_string(&cfg).unwrap().contains("send_input_type"));
+        let off: EmbedderConfig =
+            toml::from_str("kind = \"elastic\"\nsend_input_type = false\n").unwrap();
+        assert_eq!(off.send_input_type, Some(false));
+        let back: EmbedderConfig = toml::from_str(&toml::to_string(&off).unwrap()).unwrap();
+        assert_eq!(back, off);
+        assert!(toml::from_str::<EmbedderConfig>("send_input_types = false\n").is_err());
+    }
+
+    /// #233: `send_input_type` is refused for every kind but `elastic`,
+    /// whichever adapters are compiled (the gate runs before the
+    /// not-compiled check).
+    #[test]
+    fn send_input_type_is_refused_for_other_kinds() {
+        for kind in [
+            EmbedderKind::BgeM3,
+            EmbedderKind::Fixture,
+            EmbedderKind::EmbeddingGemma2,
+            EmbedderKind::Gemini,
+        ] {
+            let Err(err) = build_embedder(EmbedderConfig {
+                kind,
+                send_input_type: Some(true),
+                ..Default::default()
+            }) else {
+                panic!("{kind}: send_input_type must be refused");
+            };
+            let msg = err.to_string();
+            assert!(
+                msg.contains("send_input_type") && msg.contains("`elastic`"),
+                "{kind}: {msg}"
+            );
+        }
+    }
+
+    /// #233: on a build without the feature the kind is refused with the
+    /// rebuild hint, never a silent fallback.
+    #[cfg(not(feature = "embed-elastic"))]
+    #[test]
+    fn elastic_without_the_feature_names_it() {
+        let Err(err) = build_embedder(EmbedderConfig {
+            kind: EmbedderKind::Elastic,
+            llama_url: Some("https://my-cluster.es.example.com".into()),
+            llama_model: Some(".jina-embeddings-v3".into()),
+            ..Default::default()
+        }) else {
+            panic!("an uncompiled kind must not build");
+        };
+        assert!(err.to_string().contains("embed-elastic"), "{err}");
+        assert_eq!(elastic_identity(&NoopEmbedder), None);
+    }
+
+    #[cfg(not(feature = "embed-elastic"))]
+    struct NoopEmbedder;
+
+    #[cfg(not(feature = "embed-elastic"))]
+    #[async_trait]
+    impl Embedder for NoopEmbedder {
+        fn dimensions(&self) -> usize {
+            1
+        }
+        async fn embed(&self, _text: &str) -> Result<Vec<f32>, EmbedError> {
+            Ok(vec![1.0])
+        }
+    }
+
+    /// #233: resolve-time checks for kind `elastic`. No network: building
+    /// the adapter connects nothing.
+    #[cfg(feature = "embed-elastic")]
+    mod elastic_config {
+        use super::*;
+
+        const URL: &str = "https://my-cluster.es.example.com";
+        const ID: &str = ".jina-embeddings-v3";
+
+        fn cfg() -> EmbedderConfig {
+            EmbedderConfig {
+                kind: EmbedderKind::Elastic,
+                llama_url: Some(URL.into()),
+                llama_model: Some(ID.into()),
+                ..Default::default()
+            }
+        }
+
+        fn refusal(cfg: EmbedderConfig) -> String {
+            match build_embedder(cfg) {
+                Ok(_) => panic!("must be refused"),
+                Err(e) => e.to_string(),
+            }
+        }
+
+        #[test]
+        fn builds_and_stamps_the_inference_id() {
+            let e = build_embedder(cfg()).unwrap();
+            assert_eq!(e.dimensions(), 1024);
+            assert_eq!(elastic_identity(e.as_ref()).as_deref(), Some(ID));
+            let off = build_embedder(EmbedderConfig {
+                send_input_type: Some(false),
+                ..cfg()
+            })
+            .unwrap();
+            assert_eq!(
+                elastic_identity(off.as_ref()).as_deref(),
+                Some(".jina-embeddings-v3;input_type=off")
+            );
+            let on = build_embedder(EmbedderConfig {
+                send_input_type: Some(true),
+                ..cfg()
+            })
+            .unwrap();
+            assert_eq!(elastic_identity(on.as_ref()).as_deref(), Some(ID));
+            // The other identity helpers do not claim it.
+            assert_eq!(gemini_identity(e.as_ref()), None);
+            assert_eq!(candle_identity(e.as_ref()), None);
+            assert_eq!(eg2_identity(e.as_ref()), None);
+        }
+
+        #[test]
+        fn url_and_model_are_required() {
+            for url in [None, Some(String::new()), Some("  ".into())] {
+                let msg = refusal(EmbedderConfig {
+                    llama_url: url.clone(),
+                    ..cfg()
+                });
+                assert!(msg.contains("[embedder] url"), "{url:?}: {msg}");
+            }
+            for model in [None, Some(String::new())] {
+                let msg = refusal(EmbedderConfig {
+                    llama_model: model.clone(),
+                    ..cfg()
+                });
+                assert!(
+                    msg.contains("[embedder] model") && msg.contains("inference endpoint id"),
+                    "{model:?}: {msg}"
+                );
+            }
+        }
+
+        #[test]
+        fn url_rules_apply_at_resolve() {
+            for (url, want) in [
+                (
+                    "https://elastic:fake-xyzzy@my-cluster.es.example.com",
+                    "credentials",
+                ),
+                (
+                    "https://my-cluster.es.example.com?key=fake-xyzzy",
+                    "query string",
+                ),
+                ("https://my-cluster.es.example.com#fake-xyzzy", "fragment"),
+                ("ftp://my-cluster.es.example.com", "http:// or https://"),
+            ] {
+                let msg = refusal(EmbedderConfig {
+                    llama_url: Some(url.into()),
+                    ..cfg()
+                });
+                assert!(msg.contains(want), "{url}: {msg}");
+                assert!(!msg.contains("xyzzy"), "{url}: {msg}");
+            }
+        }
+
+        /// `api_key_env` is accepted for `elastic` and read at resolve.
+        /// Over plain http to a remote host it is refused before the
+        /// variable is read (the error is the transport one although the
+        /// variable is unset).
+        ///
+        /// Mutation: drop `check_api_key_transport` from `elastic::build` ->
+        /// red (the error becomes "not set").
+        #[test]
+        fn api_key_env_is_accepted_and_transport_checked() {
+            let env = crate::test_util::env_lock();
+            let var = "LAMBO_TEST_ISSUE233_ES_KEY";
+            env.remove(var);
+            let msg = refusal(EmbedderConfig {
+                llama_url: Some("http://my-cluster.es.example.com:9200".into()),
+                api_key_env: Some(var.into()),
+                ..cfg()
+            });
+            assert!(
+                msg.contains("my-cluster.es.example.com") && msg.contains("ApiKey"),
+                "{msg}"
+            );
+            assert!(!msg.contains("not set"), "transport first: {msg}");
+            // Unset over https: refused, naming the variable.
+            let msg = refusal(EmbedderConfig {
+                api_key_env: Some(var.into()),
+                ..cfg()
+            });
+            assert!(msg.contains(var) && msg.contains("not set"), "{msg}");
+            // Set: builds over https and over loopback http.
+            env.set(var, format!("fake-{}", "es-key-xyzzy"));
+            for url in [URL, "http://127.0.0.1:9200", "http://localhost:9200"] {
+                let e = build_embedder(EmbedderConfig {
+                    llama_url: Some(url.into()),
+                    api_key_env: Some(var.into()),
+                    ..cfg()
+                })
+                .unwrap_or_else(|e| panic!("{url}: {e}"));
+                assert_eq!(elastic_identity(e.as_ref()).as_deref(), Some(ID));
+            }
+            env.remove(var);
+        }
+
+        /// `api_key_env` is still refused for kinds that would ignore it,
+        /// and the refusal lists `elastic` among the kinds that take it.
+        #[test]
+        fn api_key_env_is_still_refused_for_other_kinds() {
+            for kind in [EmbedderKind::Gemini, EmbedderKind::Fixture] {
+                let msg = refusal(EmbedderConfig {
+                    kind,
+                    api_key_env: Some("LAMBO_ES_API_KEY".into()),
+                    ..cfg()
+                });
+                assert!(
+                    msg.contains("api_key_env") && msg.contains("`elastic`"),
+                    "{kind}: {msg}"
+                );
+            }
+        }
     }
 }

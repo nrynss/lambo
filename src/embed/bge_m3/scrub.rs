@@ -37,7 +37,7 @@ pub(super) const QUOTED_BODY_MAX: usize = 8 * 1024;
 /// longest token form is its percent-encoding, 3 bytes a byte) and a
 /// character's worth for the boundary. Anything past it is never quoted or
 /// scanned, so it is never read.
-pub(super) fn read_cap(token_len: usize) -> usize {
+pub(crate) fn read_cap(token_len: usize) -> usize {
     QUOTED_BODY_MAX
         .saturating_add(token_len.saturating_mul(3))
         .saturating_add(4)
@@ -50,7 +50,7 @@ pub(super) const TOKEN_NOT_SHOWN: &str = "(token not shown)";
 /// the module doc) replaced by [`TOKEN_NOT_SHOWN`]. `None` or an empty token
 /// only cuts. `truncated` says the body was read only in part, so its full
 /// length is unknown.
-pub(super) fn quotable_body(body: &str, token: Option<&str>, truncated: bool) -> String {
+pub(crate) fn quotable_body(body: &str, token: Option<&str>, truncated: bool) -> String {
     let limit = floor_char_boundary(body, QUOTED_BODY_MAX);
     let forms = token
         .filter(|t| !t.is_empty())
