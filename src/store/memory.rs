@@ -1178,6 +1178,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "fixtures")]
     #[tokio::test]
     async fn session_readability_accepts_lease_free_data_and_rejects_tombstones() {
         let store = MemoryStore::new();
