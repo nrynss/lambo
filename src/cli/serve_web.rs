@@ -11,7 +11,9 @@
 //!
 //! It serves an explicit allowlist: the ordered union of the repeatable
 //! `--session` and `[web] sessions` ([`plan_sessions`]). There is no store
-//! discovery. Each served session is read at `/s/{session}/` and
+//! discovery. An explicit credential `session_prefix` also reads existing
+//! sessions under that prefix, including sessions created after startup (#241).
+//! Exact scopes and `"*"` remain limited to the startup allowlist. Each session is read at `/s/{session}/` and
 //! `/s/{session}/api/...`; the unscoped `/` and `/api/...` are aliases for the
 //! first (the default), so a one-session portal is exactly what it was. With
 //! more than one session every name must pass the strict addressed-id charset
@@ -19,7 +21,8 @@
 //! looser rule and is reached through the aliases. A request for a session the
 //! portal does not serve, a malformed or percent-encoded id, and an unrouted
 //! path all answer the same bytes (`surface::session`'s uniform 404), before
-//! any store call.
+//! any store call. Dynamic prefix requests probe existence and erasure first;
+//! absent and erased sessions get that same 404, without creating a session.
 //!
 //! # Host check (#4 PR 2, DNS rebinding)
 //!
@@ -483,7 +486,7 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
     let reach = auth::credential_reach(&state.authority, &state.sessions);
     for (name, count) in &reach {
         println!(
-            "lambo serve-web: credential '{name}' reads {count} session{}",
+            "lambo serve-web: credential '{name}' reads {count} startup session{}",
             if *count == 1 { "" } else { "s" }
         );
     }
@@ -530,9 +533,20 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
     }
     let implicit = !state.authority.requires_bearer();
     let unserved = auth::unserved_names(&state.authority, &state.sessions);
+    // A prefix with no startup pins can still read existing dynamic sessions.
+    let grants = state.authority.grants();
+    let warning_reach: Vec<_> = reach
+        .iter()
+        .copied()
+        .filter(|(name, _)| {
+            grants
+                .iter()
+                .any(|grant| grant.name() == *name && grant.scope().prefix().is_none())
+        })
+        .collect();
     for warning in startup_warnings(
         legacy_beside_configured,
-        &reach,
+        &warning_reach,
         &unserved,
         implicit && state.list_sessions,
         inherit_note,

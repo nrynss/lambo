@@ -11,8 +11,8 @@
 //! |---|---|---|
 //! | nothing (loopback only) | the implicit `local`, no header read | every served session |
 //! | `LAMBO_AUTH_TOKEN` / `--auth-token` | `default` | every served session |
-//! | `[[web.credential]]` (#4 PR 3) | each its own, after `default` if a legacy token is set too | its `sessions` (`"*"` = the allowlist) and/or `session_prefix`, intersected with the allowlist |
-//! | `[web] inherit_serve_credentials` | each `[[serve.credential]]`, after the web ones, capabilities dropped | as configured for serve (`"*"` = serve's hosted set, never the allowlist), intersected with the allowlist |
+//! | `[[web.credential]]` (#4 PR 3) | each its own, after `default` if a legacy token is set too | its `sessions` (`"*"` = the allowlist); an explicit prefix also reaches existing sessions beyond the allowlist |
+//! | `[web] inherit_serve_credentials` | each `[[serve.credential]]`, after the web ones, capabilities dropped | exact and `"*"` scopes intersect the allowlist; its explicit prefix also reaches existing sessions |
 //!
 //! `local` exists only while no credential of any kind is configured; one
 //! configured credential (legacy, web or inherited) and every request needs
@@ -133,10 +133,9 @@ impl BearerSecret for AuthToken {
 /// token's `default` grant first (when set), then `configured` in order;
 /// the implicit `local` grant only when there is neither (module table).
 ///
-/// The hosted set is the allowlist's addressable names and no prefix, so a
-/// grant reaches nothing outside the allowlist (design 4.2): `"*"` is the
-/// allowlist, and a prefix covers only allowlisted ids under it, because
-/// the scoped path is also checked against [`SessionAuthority::is_pinned`].
+/// The hosted set is the allowlist's addressable names and no prefix, so
+/// `"*"` remains the allowlist. Scoped resolution separately admits existing
+/// sessions under the caller's explicit prefix (#241).
 /// A loose single session (one name outside the strict charset) is in no
 /// hosted set; the unscoped aliases reach it through
 /// [`SessionAuthority::authorize_default`], under a scope over every
@@ -338,23 +337,20 @@ pub(super) fn reach(
         .count()
 }
 
-/// Can `grant` switch sessions: does it read more than one served session
-/// (#4 PR 4)? `/api/session` says so, and the page shows its picker only
-/// then, so a single-session portal, or a credential that reads one
-/// session, gets the page exactly as before. A count of the caller's own
-/// reach, never a name and never a session outside its scope.
+/// An explicit prefix enables typed navigation without enumerating the store;
+/// otherwise switching follows the caller's startup-pinned reach (#4 PR 4).
 pub(super) fn switchable(
     authority: &PortalAuthority,
     grant: &SessionGrant,
     sessions: &[SessionId],
 ) -> bool {
-    reach(authority, grant, sessions) > 1
+    grant.scope().prefix().is_some() || reach(authority, grant, sessions) > 1
 }
 
 /// Each grant's exact session names that are not served, in scan order,
 /// for a startup warning (the one `lambo serve` gives for unpinned names,
-/// #32 PR 5 review I5): the portal never reads a session outside its
-/// allowlist, so those names are unreachable. Grants with none are left
+/// #32 PR 5 review I5): exact names outside both the startup allowlist and
+/// the grant's explicit prefix are unreachable. Grants with none are left
 /// out. Names a credential and sessions, never a token.
 pub(super) fn unserved_names<'a>(
     authority: &'a PortalAuthority,
@@ -367,6 +363,7 @@ pub(super) fn unserved_names<'a>(
             let missing: Vec<&str> = grant
                 .scope()
                 .names()
+                .filter(|n| !grant.scope().prefix().is_some_and(|p| p.covers(n)))
                 .map(|n| n.as_str())
                 .filter(|n| !sessions.iter().any(|s| s.as_str() == *n))
                 .collect();
@@ -379,8 +376,7 @@ pub(super) fn unserved_names<'a>(
 /// its exact names, or every one when its scope covers every served
 /// session (`local`, `default`, a web `"*"`). An inherited `"*"` lists the
 /// served sessions `[serve] sessions` pins (review M1). Never a prefix
-/// expansion: a prefix grant reads the allowlisted ids under it but lists
-/// none of them.
+/// expansion: a prefix grant can read dynamic ids but lists none of them.
 pub(super) fn listable<'a>(grant: &SessionGrant, sessions: &'a [SessionId]) -> Vec<&'a str> {
     let scope = grant.scope();
     sessions
@@ -542,6 +538,7 @@ pub(super) async fn gate(
         {
             req.extensions_mut().insert(super::scope::SessionCtx {
                 session: state.default_session.clone(),
+                _dynamic: None,
             });
         }
         req.extensions_mut().insert(Caller(grant));

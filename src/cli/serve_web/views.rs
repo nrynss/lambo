@@ -6,8 +6,10 @@
 //! shared by `Arc`, so every request and every open tab reads the same load
 //! until it is older than the TTL.
 //!
-//! [`ViewCache`] holds one slot per served session (one today; the allowlist
-//! in PR 2) and bounds the work:
+//! [`ViewCache`] holds fixed startup slots plus bounded dynamic prefix slots
+//! (#241). Dynamic slots are capped by `max_loaded_sessions`, removed after
+//! five idle minutes on admission, and never evicted during an active request.
+//! A full active cache refuses a new dynamic session with 503. It bounds work:
 //!
 //! * **TTL.** A request finding a view younger than `view_ttl_ms` uses it. An
 //!   older one is reloaded on the requesting task, and the request waits.
@@ -59,6 +61,9 @@ use crate::types::{CanonizationStatus, EmbeddingContract, SessionId};
 /// How long a recall waits for a [`ViewBounds::recall_concurrency`] permit
 /// before the portal answers 503 (design 5.3).
 pub(super) const RECALL_PERMIT_WAIT: Duration = Duration::from_secs(2);
+
+/// Dynamic session metadata expires after five idle minutes, pruned on admission.
+pub(super) const DYNAMIC_IDLE: Duration = Duration::from_secs(300);
 
 /// The cache's bounds, defaults applied and the SQLite rule enforced.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -203,19 +208,21 @@ struct SlotState {
     warned_mismatch: bool,
 }
 
-/// One served session's slot. Never removed: eviction clears `ready` only.
+/// One session's slot. Pinned slots retain metadata; dynamic slot eviction
+/// drops the whole slot once no request is using it.
 struct Slot {
     /// Single-flight: one loader at a time; joiners wait here.
     gate: AsyncMutex<()>,
     state: Mutex<SlotState>,
     /// LRU stamp from [`ViewCache::tick`].
     last_used: AtomicU64,
+    last_request: Mutex<Instant>,
     freshness: Mutex<Freshness>,
     /// #14's query-embedding LRU, ONE PER SESSION: a text-keyed cache shared
     /// across sessions is a cross-tenant timing oracle (#32 decision 13). An
     /// empty one allocates nothing, so a served session nobody recalls on
     /// costs nothing here.
-    queries: Mutex<QueryEmbeddingCache>,
+    queries: Arc<Mutex<QueryEmbeddingCache>>,
     /// Requests that found no fresh view and went on to queue for the gate
     /// (tests: a burst test releases its parked load once all are queued).
     #[cfg(test)]
@@ -231,11 +238,12 @@ impl Slot {
             gate: AsyncMutex::new(()),
             state: Mutex::new(SlotState::default()),
             last_used: AtomicU64::new(0),
+            last_request: Mutex::new(Instant::now()),
             freshness: Mutex::new(Freshness {
                 fingerprint: 0,
                 observed_at: std::time::Instant::now(),
             }),
-            queries: Mutex::new(QueryEmbeddingCache::new()),
+            queries: Arc::new(Mutex::new(QueryEmbeddingCache::new())),
             #[cfg(test)]
             queued: AtomicU64::new(0),
             #[cfg(test)]
@@ -247,10 +255,24 @@ impl Slot {
 /// The portal's bounded cache of per-session views. See the module docs.
 pub(super) struct ViewCache {
     bounds: ViewBounds,
-    slots: HashMap<SessionId, Slot>,
+    slots: HashMap<SessionId, Arc<Slot>>,
+    dynamic: Mutex<HashMap<SessionId, Arc<Slot>>>,
     loads: Semaphore,
     recalls: Semaphore,
     tick: AtomicU64,
+}
+
+/// Keeps an active request's slot from being replaced by another gate.
+#[derive(Clone)]
+pub(super) struct DynamicSlot {
+    _slot: Arc<Slot>,
+}
+
+impl Drop for DynamicSlot {
+    fn drop(&mut self) {
+        // Time spent serving a long request is active time, not idle time.
+        *self._slot.last_request.lock() = Instant::now();
+    }
 }
 
 impl ViewCache {
@@ -258,7 +280,11 @@ impl ViewCache {
     /// asks (design Q15).
     pub(super) fn new(sessions: impl IntoIterator<Item = SessionId>, bounds: ViewBounds) -> Self {
         Self {
-            slots: sessions.into_iter().map(|s| (s, Slot::new())).collect(),
+            slots: sessions
+                .into_iter()
+                .map(|s| (s, Arc::new(Slot::new())))
+                .collect(),
+            dynamic: Mutex::new(HashMap::new()),
             loads: Semaphore::new(bounds.load_concurrency),
             recalls: Semaphore::new(bounds.recall_concurrency),
             tick: AtomicU64::new(0),
@@ -270,11 +296,44 @@ impl ViewCache {
         &self.bounds
     }
 
-    fn slot(&self, session: &SessionId) -> Result<&Slot, CliError> {
+    fn slot(&self, session: &SessionId) -> Result<Arc<Slot>, CliError> {
         // Unreachable through the router: a request names a served session
         // or is refused before it gets here.
-        self.slots.get(session).ok_or_else(|| {
-            CliError::Runtime(format!("serve-web: session '{session}' is not served here"))
+        self.slots
+            .get(session)
+            .cloned()
+            .or_else(|| self.dynamic.lock().get(session).cloned())
+            .ok_or_else(|| {
+                CliError::Runtime(format!("serve-web: session '{session}' is not served here"))
+            })
+    }
+
+    /// Called only after prefix authorization and a successful existence probe.
+    /// Dynamic metadata and query caches share the existing loaded-view cap.
+    /// Pinned slots retain their historical metadata lifetime.
+    pub(super) fn admit_dynamic(&self, session: &SessionId) -> Option<DynamicSlot> {
+        let mut slots = self.dynamic.lock();
+        slots.retain(|_, slot| {
+            Arc::strong_count(slot) > 1 || slot.last_request.lock().elapsed() < DYNAMIC_IDLE
+        });
+        if !slots.contains_key(session) && slots.len() >= self.bounds.max_loaded_sessions {
+            let oldest = slots
+                .iter()
+                .filter(|(_, slot)| Arc::strong_count(slot) == 1)
+                .min_by_key(|(_, slot)| slot.last_used.load(Ordering::Relaxed))
+                .map(|(id, _)| id.clone())?;
+            slots.remove(&oldest);
+        }
+        let slot = slots
+            .entry(session.clone())
+            .or_insert_with(|| Arc::new(Slot::new()));
+        *slot.last_request.lock() = Instant::now();
+        slot.last_used.store(
+            self.tick.fetch_add(1, Ordering::Relaxed) + 1,
+            Ordering::Relaxed,
+        );
+        Some(DynamicSlot {
+            _slot: slot.clone(),
         })
     }
 
@@ -384,10 +443,11 @@ impl ViewCache {
     /// Drop least-recently-used views until at most `max_loaded_sessions`
     /// are held, never `keep` (the one just loaded).
     fn evict_beyond_cap(&self, keep: &SessionId) {
+        let dynamic = self.dynamic.lock();
         loop {
             let mut loaded = 0;
-            let mut oldest: Option<(&Slot, u64)> = None;
-            for (id, slot) in &self.slots {
+            let mut oldest: Option<(&Arc<Slot>, u64)> = None;
+            for (id, slot) in self.slots.iter().chain(dynamic.iter()) {
                 if slot.state.lock().ready.is_none() {
                     continue;
                 }
@@ -425,8 +485,8 @@ impl ViewCache {
     }
 
     /// `session`'s query-embedding cache (#14), one per session.
-    pub(super) fn queries(&self, session: &SessionId) -> Option<&Mutex<QueryEmbeddingCache>> {
-        self.slots.get(session).map(|slot| &slot.queries)
+    pub(super) fn queries(&self, session: &SessionId) -> Option<Arc<Mutex<QueryEmbeddingCache>>> {
+        self.slot(session).ok().map(|slot| slot.queries.clone())
     }
 
     /// A recall permit, or `None` when every one stayed taken for
@@ -445,8 +505,8 @@ impl ViewCache {
         allow(dead_code)
     )]
     pub(super) fn is_loaded(&self, session: &SessionId) -> bool {
-        self.slots
-            .get(session)
+        self.slot(session)
+            .ok()
             .is_some_and(|slot| slot.state.lock().ready.is_some())
     }
 
@@ -458,8 +518,8 @@ impl ViewCache {
         allow(dead_code)
     )]
     pub(super) fn queued(&self, session: &SessionId) -> u64 {
-        self.slots
-            .get(session)
+        self.slot(session)
+            .ok()
             .map_or(0, |slot| slot.queued.load(Ordering::SeqCst))
     }
 
@@ -470,8 +530,8 @@ impl ViewCache {
         allow(dead_code)
     )]
     pub(super) fn mismatch_warnings(&self, session: &SessionId) -> u64 {
-        self.slots
-            .get(session)
+        self.slot(session)
+            .ok()
             .map_or(0, |slot| slot.mismatch_warnings.load(Ordering::SeqCst))
     }
 }

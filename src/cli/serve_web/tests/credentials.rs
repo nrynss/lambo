@@ -18,7 +18,7 @@ use crate::LamboFile;
 const SERVED: &[&str] = &["t4-a", "t4-b", "t4c-p-1"];
 
 /// A session with data in the store, under the prefix grant's prefix, that
-/// is **not** on the allowlist: nothing may ever load or name it.
+/// is **not** on the allowlist: only its explicit prefix grant may read it.
 const UNSERVED: &str = "t4c-p-2";
 
 /// What each session holds, to catch a leak by content as well as by name.
@@ -172,7 +172,7 @@ async fn as_caller(
 fn scope_of(credential: &str) -> &'static [&'static str] {
     match credential {
         "viewers" => &["t4-a"],
-        "pre" => &["t4c-p-1"],
+        "pre" => &["t4c-p-1", UNSERVED],
         "star" | "default" | "local" => SERVED,
         "agents" => &["t4-b"],
         _ => unreachable!("{credential}"),
@@ -357,6 +357,7 @@ async fn an_inherited_star_is_serves_hosted_set_never_the_allowlist() {
     derive_text(&store, "lambo", "agent notes").await;
     derive_text(&store, "hr-private", HR).await;
     derive_text(&store, "dc-u-1", "user pantry").await;
+    derive_text(&store, "dc-u-2", "later user pantry").await;
     let recording = Recording::new(store);
     let state = Arc::new(AppState::new(
         ids[0].clone(),
@@ -375,6 +376,22 @@ async fn an_inherited_star_is_serves_hosted_set_never_the_allowlist() {
         let r = as_caller(addr, "GET", &format!("/s/{ok}/api/graph"), Some(&agents)).await;
         assert_eq!(r.status, 200, "agents reads {ok}, as on serve");
     }
+    for token in [&agents, &tok("star")] {
+        let before = recording.calls();
+        let r = as_caller(addr, "GET", "/s/dc-u-2/api/graph", Some(token)).await;
+        assert_eq!(
+            wire(&r),
+            unrouted,
+            "a star alone cannot read dynamic sessions"
+        );
+        assert_eq!(recording.calls(), before);
+    }
+    let r = as_caller(addr, "GET", "/s/dc-u-2/api/graph", Some(&tok("pre"))).await;
+    assert_eq!(
+        r.status, 200,
+        "inherited explicit prefix reads dynamic sessions"
+    );
+    assert!(r.body.contains("later user pantry"));
     let before = recording.calls();
     for route in DATA {
         let r = as_caller(addr, "GET", &format!("/s/hr-private{route}"), Some(&agents)).await;
@@ -520,7 +537,9 @@ async fn each_credential_reaches_only_its_sessions() {
             .filter(|s| !scope.contains(s))
             .map(|s| (*s).to_string())
             .collect();
-        refused.push(UNSERVED.into());
+        if cred != "pre" {
+            refused.push(UNSERVED.into());
+        }
         refused.extend(refused_ids());
         let before = recording.calls();
         for method in METHODS {
@@ -548,27 +567,156 @@ async fn each_credential_reaches_only_its_sessions() {
     handle.abort();
 }
 
-/// Acceptance (design 4.2, Q8): a prefix grant reaches only allowlisted ids
-/// under its prefix. `t4c-p-2` has data in the store and matches the
-/// prefix, but is not served: the uniform 404 and no load, ever.
+/// #241: an explicit prefix reads existing sessions beyond startup pins.
 #[tokio::test]
-async fn a_prefix_grant_reaches_only_allowlisted_ids_under_it() {
+async fn a_prefix_grant_reads_existing_unpinned_sessions() {
     let (addr, handle, recording) = credentialed(false).await;
     let token = tok("pre");
     let ok = as_caller(addr, "GET", "/s/t4c-p-1/api/graph", Some(&token)).await;
     assert_eq!(ok.status, 200);
     assert!(ok.body.contains(content_of("t4c-p-1")), "{}", ok.body);
     let unrouted = wire(&as_caller(addr, "GET", "/no/such/path", Some(&token)).await);
-    let loads = recording.loads();
     for route in DATA {
         let path = format!("/s/{UNSERVED}{route}");
         let r = as_caller(addr, "GET", &path, Some(&token)).await;
-        assert_eq!(wire(&r), unrouted, "GET {path}");
+        assert_eq!(r.status, 200, "GET {path}: {}", r.body);
     }
     // The bare prefix is in no prefix scope.
+    let loads = recording.loads();
     let bare = as_caller(addr, "GET", "/s/t4c-p-/api/graph", Some(&token)).await;
     assert_eq!(wire(&bare), unrouted);
-    assert_eq!(recording.loads(), loads, "no load for an unserved id");
+    assert_eq!(
+        recording.loads(),
+        loads,
+        "no load outside the explicit prefix"
+    );
+    handle.abort();
+}
+
+/// The writer can create a session while the reader is already running.
+/// Missing/erased names remain the same 404 even while a view is warm.
+#[tokio::test]
+async fn a_session_created_after_startup_is_readable_only_by_its_prefix() {
+    let (mut web, creds) = resolve(&config(true, true), &env()).expect("resolve");
+    web.max_loaded_sessions = Some(1);
+    let store = two_sessions().await;
+    let recording = Recording::new(store.clone());
+    let state = Arc::new(AppState::new(
+        SessionId::new("t4-a"),
+        [],
+        backends_with_store(Box::new(recording.clone())),
+        true,
+        None,
+        creds,
+        &[],
+        &web,
+    ));
+    let (addr, handle) = spawn(state.clone()).await;
+    let prefix = tok("pre");
+    let path = "/s/t4c-p-later/api/graph";
+    let missing = wire(&as_caller(addr, "GET", "/unrouted", Some(&prefix)).await);
+    assert_eq!(
+        wire(&as_caller(addr, "GET", path, Some(&prefix)).await),
+        missing
+    );
+    assert!(state
+        .views
+        .queries(&SessionId::new("t4c-p-later"))
+        .is_none());
+    derive_text(&store, "t4c-p-later", "new shopper memory").await;
+    for token in [&tok("viewers"), &tok("star"), &tok("agents")] {
+        let before = recording.calls();
+        assert_eq!(
+            wire(&as_caller(addr, "GET", path, Some(token)).await),
+            missing
+        );
+        assert_eq!(
+            recording.calls(),
+            before,
+            "out of scope makes no store call"
+        );
+    }
+    for path in [
+        "/s/t4c-p-later",
+        "/s/t4c-p-later/",
+        "/s/t4c-p-later/api/graph",
+    ] {
+        let r = as_caller(addr, "GET", path, Some(&prefix)).await;
+        assert!(matches!(r.status, 200 | 308), "{path}: {}", r.status);
+    }
+    let graph = as_caller(addr, "GET", path, Some(&prefix)).await;
+    assert!(graph.body.contains("new shopper memory"));
+    assert!(
+        listing(addr, Some(&prefix)).await.is_empty(),
+        "listing never expands a prefix"
+    );
+    derive_text(&store, "t4c-p-next", "second shopper memory").await;
+    let active = state
+        .views
+        .admit_dynamic(&SessionId::new("t4c-p-later"))
+        .unwrap();
+    let busy = as_caller(addr, "GET", "/s/t4c-p-next/api/graph", Some(&prefix)).await;
+    assert_eq!(busy.status, 503);
+    assert!(busy.headers.to_ascii_lowercase().contains("retry-after: 1"));
+    drop(active);
+    assert_eq!(
+        as_caller(addr, "GET", "/s/t4c-p-next/api/graph", Some(&prefix))
+            .await
+            .status,
+        200
+    );
+    assert_eq!(
+        as_caller(addr, "GET", path, Some(&prefix)).await.status,
+        200,
+        "warm the erased session's view again"
+    );
+    let before = recording.calls();
+    for path in [
+        "/s/t4c-p-later/api/sessions",
+        "/s/t4c-p-missing/api/sessions",
+        "/s/t4c-p-missing/app.js",
+    ] {
+        assert_eq!(
+            wire(&as_caller(addr, "GET", path, Some(&prefix)).await),
+            missing
+        );
+    }
+    assert_eq!(
+        recording.calls(),
+        before,
+        "refused paths precede existence probes"
+    );
+    crate::cli::erase_session::run(
+        store.as_ref(),
+        crate::cli::erase_session::Args {
+            session: "t4c-p-later".into(),
+            confirm: "t4c-p-later".into(),
+        },
+    )
+    .await
+    .expect("erase");
+    for method in METHODS {
+        let baseline = wire(&as_caller(addr, method, "/unrouted", Some(&prefix)).await);
+        for path in [
+            "/s/t4c-p-later",
+            "/s/t4c-p-later/",
+            "/s/t4c-p-later/api/graph",
+            "/s/t4c-p-missing/api/graph",
+        ] {
+            assert_eq!(
+                wire(&as_caller(addr, method, path, Some(&prefix)).await),
+                baseline,
+                "{method} {path}"
+            );
+        }
+    }
+    assert!(
+        matches!(
+            store.load_session(&SessionId::new("t4c-p-missing")).await,
+            Err(StoreError::SessionNotFound(_))
+        ),
+        "the reader never creates a missing session"
+    );
     handle.abort();
 }
 
@@ -707,7 +855,7 @@ async fn switchable_follows_the_callers_reach() {
     let (addr, handle, _) = portal(Some(legacy), creds, &web).await;
     for (cred, expected) in [
         ("viewers", false),
-        ("pre", false),
+        ("pre", true),
         ("agents", false),
         ("star", true),
         ("default", true),

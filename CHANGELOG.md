@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Added
+
+- `serve-web` credentials with an explicit `session_prefix` can read existing
+  sessions created after the reader started (#241), including inherited prefix
+  credentials. Missing, erased and unauthorized dynamic sessions return the same
+  empty 404; the reader never creates a session. Exact names and `"*"` keep their
+  startup allowlist scope, and opt-in session listing never expands a prefix.
+  Dynamic session metadata and query caches share `max_loaded_sessions`' cap,
+  expire after five idle minutes on subsequent dynamic requests, and return
+  `503` with `Retry-After: 1` when every cached slot has an active request.
+
 ## 0.10.1 (2026-11-10)
 
 ### Highlights

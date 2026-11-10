@@ -871,11 +871,11 @@ fn a_long_name_never_widens_a_narrow_page() {
 /// default it cannot read, is the uniform 404); `mixed` reads one by name
 /// and one by prefix, two in all.
 #[tokio::test]
-async fn a_prefix_grant_is_switchable_only_over_two_served_sessions() {
+async fn a_prefix_grant_is_switchable_beyond_startup_sessions() {
     let (addr, handle) = credentialed(false).await;
     for (cred, reads, switchable) in [
         ("pre-two", &["t4-a", "t4-b"][..], true),
-        ("pre-one", &["t4q-1"][..], false),
+        ("pre-one", &["t4q-1"][..], true),
         ("mixed", &["t4-a", "t4q-1"][..], true),
     ] {
         let token = cred_token(cred);
