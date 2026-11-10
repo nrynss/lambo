@@ -572,6 +572,16 @@ impl GraphStore for MemoryStore {
         Ok(self.leases.read().get(&session.0).map(row_info))
     }
 
+    async fn session_readable(&self, session: &SessionId) -> Result<bool, StoreError> {
+        // Match the writer/erase lock order; a tombstone always wins over data.
+        let map = self.inner.read();
+        let leases = self.leases.read();
+        if Self::is_tombstoned(&leases, session) {
+            return Ok(false);
+        }
+        Ok(leases.contains_key(&session.0) || map.contains_key(&session.0))
+    }
+
     async fn release_lease(
         &self,
         session: &SessionId,
@@ -1166,6 +1176,32 @@ mod tests {
             pid,
             host: "test-host".into(),
         }
+    }
+
+    #[tokio::test]
+    async fn session_readability_accepts_lease_free_data_and_rejects_tombstones() {
+        let store = MemoryStore::new();
+        let sid = SessionId::from("imported");
+        assert!(!store.session_readable(&sid).await.unwrap());
+        store
+            .seed(GraphSnapshot {
+                session_id: sid.clone(),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(store.read_lease(&sid).await.unwrap().is_none());
+        assert!(store.session_readable(&sid).await.unwrap());
+        store
+            .erase_session(&sid, &holder("eraser", 1))
+            .await
+            .unwrap();
+        assert!(!store.session_readable(&sid).await.unwrap());
+        let unflushed = SessionId::from("unflushed");
+        store
+            .acquire_lease(&unflushed, &holder("writer", 2), Duration::from_secs(60))
+            .await
+            .unwrap();
+        assert!(store.session_readable(&unflushed).await.unwrap());
     }
 
     /// T8.6: one holder acquires; a *different* holder is refused (fail closed)

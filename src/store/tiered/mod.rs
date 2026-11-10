@@ -1749,6 +1749,10 @@ impl GraphStore for TieredStore {
         self.primary.read_lease(session).await
     }
 
+    async fn session_readable(&self, session: &SessionId) -> Result<bool, StoreError> {
+        self.primary.session_readable(session).await
+    }
+
     async fn refresh_lease(
         &self,
         session: &SessionId,

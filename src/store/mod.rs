@@ -481,6 +481,23 @@ pub trait GraphStore: Send + Sync {
     async fn flush(&self, batch: &MutationBatch, token: Option<u64>) -> Result<(), StoreError>;
     async fn load_session(&self, session: &SessionId) -> Result<GraphSnapshot, StoreError>;
 
+    /// Does this session exist without an erasure tombstone (#241)?
+    ///
+    /// A read-only, bounded point probe: a durable session row (including a
+    /// lease-free import) or a non-erased lease counts as existing. A tombstone
+    /// takes precedence over both. This must neither create a session nor load
+    /// its graph. "Readable" describes existence/non-erasure only; callers must
+    /// separately authorize the session before probing it.
+    ///
+    /// Adapters must implement a consistent snapshot of session and tombstone
+    /// state. The default explicitly refuses this optional read capability;
+    /// absence of a lease alone cannot establish absence of a session.
+    async fn session_readable(&self, _session: &SessionId) -> Result<bool, StoreError> {
+        Err(StoreError::Capability(
+            "read-only session existence probes are not supported".into(),
+        ))
+    }
+
     async fn keyword_candidates(
         &self,
         session: &SessionId,

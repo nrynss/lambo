@@ -593,6 +593,103 @@ async fn a_prefix_grant_reads_existing_unpinned_sessions() {
     handle.abort();
 }
 
+/// A completed CLI split import is a real session even though it has never
+/// had a writer (and deliberately has no session_leases row).
+#[cfg(feature = "store-sqlite")]
+#[tokio::test]
+async fn a_prefix_reads_a_lease_free_split_import_and_refuses_it_after_erasure() {
+    use crate::session::split_tests::{plan_for, source};
+    use crate::store::{SplitReceipt, SqliteStore};
+
+    let path = std::env::temp_dir().join(format!("lambo-web-import-{}.db", uuid::Uuid::new_v4()));
+    std::fs::File::create(&path).unwrap();
+    let destination = crate::resolve::SplitDestination::open(&path);
+    destination.provision_split_destination().await.unwrap();
+    let source = source();
+    let split = crate::session::build_split(&plan_for(&source), &source).unwrap();
+    let target = split.targets.iter().find(|t| t.session == "alpha").unwrap();
+    let receipt = SplitReceipt::for_target(
+        &target.snapshot,
+        &split.split_sha256,
+        &target.sha256,
+        split.algorithm_version,
+        &split.source_sha256,
+        &split.plan_sha256,
+    );
+    destination
+        .import_split_target(
+            &receipt,
+            &target.snapshot,
+            &split.targets.iter().map(|t| t.session.clone()).collect(),
+        )
+        .await
+        .unwrap();
+    let id = SessionId::new("alpha");
+    assert!(destination.read_lease(&id).await.unwrap().is_none());
+    destination.finish_split_destination().await.unwrap();
+
+    let (web, credentials) = resolve(
+        &format!(
+            "[web]\nlist_sessions = true\n[[web.credential]]\nname = \"pre\"\n\
+             token_env = \"{PREFIX_ENV}\"\nsession_prefix = \"al\"\n"
+        ),
+        &env(),
+    )
+    .unwrap();
+    let reader = SqliteStore::connect(path.to_str().unwrap()).unwrap();
+    reader.preflight_schema().await.unwrap();
+    let mut backends = backends_with_store(Box::new(reader));
+    backends.store_cfg.kind = StoreKind::Sqlite;
+    backends.embedding = target.snapshot.embedding.clone().unwrap();
+    let state = Arc::new(AppState::new(
+        SessionId::new("t4-a"),
+        [],
+        backends,
+        true,
+        None,
+        credentials,
+        &[],
+        &web,
+    ));
+    let (addr, handle) = spawn(state.clone()).await;
+    let token = tok("pre");
+    let baseline = wire(&as_caller(addr, "GET", "/unrouted", Some(&token)).await);
+    let graph = as_caller(addr, "GET", "/s/alpha/api/graph", Some(&token)).await;
+    assert_eq!(graph.status, 200, "{}", graph.body);
+    assert!(graph.body.contains(&target.snapshot.concepts[0].content));
+    assert!(state.store().read_lease(&id).await.unwrap().is_none());
+    assert!(listing(addr, Some(&token)).await.is_empty());
+    assert_eq!(
+        wire(&as_caller(addr, "GET", "/s/al-missing/api/graph", Some(&token)).await),
+        baseline
+    );
+    assert!(state
+        .store()
+        .read_lease(&SessionId::new("al-missing"))
+        .await
+        .unwrap()
+        .is_none());
+    crate::cli::erase_session::run(
+        state.store(),
+        crate::cli::erase_session::Args {
+            session: "alpha".into(),
+            confirm: "alpha".into(),
+        },
+    )
+    .await
+    .unwrap();
+    for path in ["/s/alpha", "/s/alpha/", "/s/alpha/api/graph"] {
+        assert_eq!(
+            wire(&as_caller(addr, "GET", path, Some(&token)).await),
+            baseline
+        );
+    }
+    handle.abort();
+    let _ = handle.await;
+    drop(state);
+    std::fs::remove_file(path).unwrap();
+}
+
 /// The writer can create a session while the reader is already running.
 /// Missing/erased names remain the same 404 even while a view is warm.
 #[tokio::test]

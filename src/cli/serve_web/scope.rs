@@ -30,7 +30,7 @@
 //!
 //! Malformed and out-of-scope requests are refused entirely in memory. An
 //! explicit prefix can also authorize an existing session beyond the startup
-//! allowlist (#241); only then does resolution probe its lease/tombstone.
+//! allowlist (#241); only then does resolution probe existence and erasure.
 
 use std::sync::Arc;
 
@@ -122,14 +122,14 @@ pub(super) async fn resolve_session(
     // never turned into a cached empty 200. Unknown routes/listing were already
     // rejected in memory, before this first store call.
     let dynamic = if dynamic {
-        let lease = tokio::time::timeout(
+        let readable = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            state.store().read_lease(&session),
+            state.store().session_readable(&session),
         )
         .await;
-        match lease {
-            Ok(Ok(Some(row))) if !crate::store::erase::is_tombstone(&row) => {}
-            Ok(Ok(_)) => return not_found_response(),
+        match readable {
+            Ok(Ok(true)) => {}
+            Ok(Ok(false)) => return not_found_response(),
             Ok(Err(_)) | Err(_) => return dynamic_busy(),
         }
         let Some(slot) = state.views.admit_dynamic(&session) else {

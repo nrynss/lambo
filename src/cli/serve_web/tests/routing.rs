@@ -179,6 +179,10 @@ impl GraphStore for Recording {
         self.note("read_lease");
         self.inner.read_lease(session).await
     }
+    async fn session_readable(&self, session: &SessionId) -> Result<bool, StoreError> {
+        self.note("session_readable");
+        self.inner.session_readable(session).await
+    }
     async fn refresh_lease(
         &self,
         session: &SessionId,

@@ -403,6 +403,10 @@ impl<D: Dialect> GraphStore for PgStore<D> {
         self.read_lease_row(session).await
     }
 
+    async fn session_readable(&self, session: &SessionId) -> Result<bool, StoreError> {
+        self.read_session_presence(session).await
+    }
+
     async fn release_lease(
         &self,
         session: &SessionId,

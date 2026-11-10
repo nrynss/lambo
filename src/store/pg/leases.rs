@@ -129,6 +129,25 @@ impl<D: Dialect> PgStore<D> {
         .await
     }
 
+    /// One statement observes presence and erasure in the same read snapshot.
+    pub(super) async fn read_session_presence(
+        &self,
+        session: &SessionId,
+    ) -> Result<bool, StoreError> {
+        let pool = &self.pool().await?;
+        sqlx::query_scalar(
+            "SELECT NOT EXISTS (SELECT 1 FROM session_leases \
+                 WHERE session_id = $1 AND holder = $2) \
+             AND (EXISTS (SELECT 1 FROM sessions WHERE session_id = $1) \
+                 OR EXISTS (SELECT 1 FROM session_leases WHERE session_id = $1))",
+        )
+        .bind(&session.0)
+        .bind(crate::store::erase::ERASED_HOLDER)
+        .fetch_one(pool)
+        .await
+        .map_err(backend)
+    }
+
     pub(super) async fn read_lease_row(
         &self,
         session: &SessionId,

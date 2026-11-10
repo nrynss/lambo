@@ -334,6 +334,9 @@ impl GraphStore for Shared {
     ) -> Result<Option<crate::store::LeaseInfo>, StoreError> {
         self.0.read_lease(session).await
     }
+    async fn session_readable(&self, session: &SessionId) -> Result<bool, StoreError> {
+        self.0.session_readable(session).await
+    }
     async fn refresh_lease(
         &self,
         session: &SessionId,
