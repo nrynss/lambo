@@ -1,6 +1,6 @@
 # #175: graph census and experiment evidence
 
-Current status: the [fresh graph-only evidence check](graph-only-2026-10-30.md) is complete, with [aggregate results](graph-only-2026-10-30.json). After screening 84 fresh answerable questions, six have seven known graph-only facets. Development-selected arms recover **0/3 held-out missing facets** and reduce direct-control known-facet coverage from 56.7% to 26.7% (damped) / 53.3% (degree-normalized). Production behavior is unchanged; #175 remains open for review of the negative result. The sample is small and all seven missing-facet paths are one hop.
+Current status: the [main rebase and frozen replay](rebase-2026-11-11.md) reproduce the negative [graph-only evidence check](graph-only-2026-10-30.md). Both selected arms still recover **0/3 held-out missing facets**. A post hoc ranking bound shows that more gain alone cannot recover the held-out supports at the selected damping values; an additional label review records compound-facet limits. Production behavior is unchanged; #175 remains open. The sample is small and all seven missing-facet paths are one hop.
 
 The [initial pilot](pilot-2026-10-30.md) and [its aggregates](pilot-2026-10-30.json) are retained: all of its known answers were direct phase-1 candidates, so it did not measure graph-only recovery.
 

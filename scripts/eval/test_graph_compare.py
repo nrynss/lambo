@@ -114,7 +114,10 @@ class Metrics(unittest.TestCase):
             g.select(rows)
 
     def test_run_refuses_missing_queries_and_mixed_splits(self):
-        labels = dict(queries=[query(), query("b", topic="two")])
+        labels = dict(
+            queries=[query(), query("b", topic="two")],
+            settings=[variant()["setting"]],
+        )
         run = dict(
             queries=[dict(id="q", variants=[variant()], graph_only_candidates=0)]
         )
@@ -126,6 +129,67 @@ class Metrics(unittest.TestCase):
         self.assertEqual(len(g.score_rows(labels, run, "dev")), 1)
         with self.assertRaisesRegex(ValueError, "mixes splits"):
             g.score_rows(labels, run, "held_out")
+
+    def test_run_requires_exact_declared_settings_for_every_query(self):
+        settings = [variant()["setting"], variant("degree", 2)["setting"]]
+        labels = dict(queries=[query(), query("b", topic="two")], settings=settings)
+        run = dict(
+            queries=[
+                dict(
+                    id=q["id"],
+                    variants=[variant(), variant("degree", 2)],
+                    graph_only_candidates=0,
+                )
+                for q in labels["queries"]
+            ]
+        )
+        self.assertEqual(len(g.score_rows(labels, run, "dev")), 2)
+        missing = copy.deepcopy(run)
+        for row in missing["queries"]:
+            row["variants"].pop()
+        with self.assertRaisesRegex(ValueError, "missing declared settings"):
+            g.score_rows(labels, missing, "dev")
+        unexpected = copy.deepcopy(run)
+        unexpected["queries"][0]["variants"].append(variant("damped", 2))
+        with self.assertRaisesRegex(ValueError, "unexpected setting"):
+            g.score_rows(labels, unexpected, "dev")
+        duplicate = copy.deepcopy(run)
+        duplicate["queries"][0]["variants"].append(variant())
+        with self.assertRaisesRegex(ValueError, "duplicate run setting"):
+            g.score_rows(labels, duplicate, "dev")
+
+    def test_evaluation_requires_nonempty_unique_valid_declared_grid(self):
+        labels = dict(queries=[query()])
+        run = dict(
+            queries=[dict(id="q", variants=[variant()], graph_only_candidates=0)]
+        )
+        for settings in [None, []]:
+            labels["settings"] = settings
+            with self.assertRaisesRegex(ValueError, "nonempty declared settings"):
+                g.score_rows(labels, run, "dev")
+        labels["settings"] = [variant()["setting"], variant()["setting"]]
+        with self.assertRaisesRegex(ValueError, "duplicate declared setting"):
+            g.score_rows(labels, run, "dev")
+        for field, value in [
+            ("arm", "unknown"),
+            ("damping", float("nan")),
+            ("gain", float("inf")),
+            ("gain", -1),
+            ("damping", 1.1),
+            ("damping", -0.1),
+            ("gain", True),
+            ("gain", "2"),
+        ]:
+            with self.subTest(field=field, value=value):
+                invalid = dict(variant()["setting"], **{field: value})
+                labels["settings"] = [invalid]
+                with self.assertRaises(ValueError):
+                    g.score_rows(labels, run, "dev")
+                labels["settings"] = [variant()["setting"]]
+                run["queries"][0]["variants"][0]["setting"] = invalid
+                with self.assertRaises(ValueError):
+                    g.score_rows(labels, run, "dev")
+                run["queries"][0]["variants"][0] = variant()
 
     def test_topic_bootstrap_is_paired_and_seeded(self):
         base = [

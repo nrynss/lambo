@@ -60,6 +60,7 @@ async fn frozen_graph_experiment() {
     use sha2::{Digest, Sha256};
     let fingerprint = |path: &Path| format!("{:x}", Sha256::digest(std::fs::read(path).unwrap()));
     let snapshot_sha256 = fingerprint(&database);
+    let config_sha256 = fingerprint(&config);
     assert_eq!(
         dataset["snapshot_sha256"], snapshot_sha256,
         "wrong frozen snapshot"
@@ -87,6 +88,7 @@ async fn frozen_graph_experiment() {
     let scores = daemon.scores();
     let cache = crate::recall::cache::SharedRecallCache::with_capacity(128);
     let cache_path = PathBuf::from(env("LAMBO175_VECTORS"));
+    let vectors_sha256_before = cache_path.exists().then(|| fingerprint(&cache_path));
     let mut vectors = if cache_path.exists() {
         read(&cache_path)
     } else {
@@ -104,6 +106,10 @@ async fn frozen_graph_experiment() {
             assert_eq!(entry["text"], text, "query ID changed after embedding");
             serde_json::from_value(entry["vector"].clone()).unwrap()
         } else {
+            assert!(
+                vectors_sha256_before.is_none(),
+                "frozen vector cache is missing a query; create a new complete cache explicitly"
+            );
             let v = io.embedder.embed_query(text).await.unwrap();
             vectors["queries"][qid] = json!({"text":text,"vector":v});
             v
@@ -262,6 +268,18 @@ async fn frozen_graph_experiment() {
         fingerprint(&input),
         "labels changed during run"
     );
+    assert_eq!(
+        config_sha256,
+        fingerprint(&config),
+        "config changed during run"
+    );
+    if let Some(before) = &vectors_sha256_before {
+        assert_eq!(
+            *before,
+            fingerprint(&cache_path),
+            "vectors changed during run"
+        );
+    }
     if !cache_path.exists() {
         write_new(&cache_path, &vectors);
     }
@@ -269,6 +287,9 @@ async fn frozen_graph_experiment() {
         &output,
         &json!({"mode":mode,"embedding_contract":io.embedding,"clock":now,
         "snapshot_sha256":snapshot_sha256,"dataset_sha256":dataset_sha256,
+        "config_sha256":config_sha256,"vectors_sha256":fingerprint(&cache_path),
+        "resolved_config":io.config,
+        "query_settings":{"top_k":10,"max_tokens":1000,"traversal_depth":2},
         "method":"production phase1/expansion/daemon/hot-list/assembly; fixed frames; no GC or access updates",
         "queries":rows}),
     );

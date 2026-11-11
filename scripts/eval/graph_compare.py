@@ -58,6 +58,24 @@ def setting_key(setting):
     return json.dumps(setting, sort_keys=True, separators=(",", ":"))
 
 
+def validated_setting_key(setting):
+    if not isinstance(setting, dict) or set(setting) != {"arm", "damping", "gain"}:
+        raise ValueError("setting requires exactly arm, damping and gain")
+    if setting["arm"] not in ("zero", "damped", "degree"):
+        raise ValueError("unknown propagation arm")
+    for name in ("damping", "gain"):
+        value = setting[name]
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+        ):
+            raise ValueError("setting parameters must be finite numbers")
+    if not 0 <= setting["damping"] <= 1 or setting["gain"] < 0:
+        raise ValueError("setting damping must be in [0, 1] and gain nonnegative")
+    return setting_key(setting)
+
+
 def measure(q, variant, hubs=None):
     known = {r["node"]: r for r in q["known_relevant"]}
     facets = {f["id"] for f in q["facets"]}
@@ -105,6 +123,15 @@ def quantile(values, q):
 
 def score_rows(dataset, run, split, hubs=None):
     queries = validate(dataset)
+    settings = dataset.get("settings")
+    if not isinstance(settings, list) or not settings:
+        raise ValueError("evaluation requires a nonempty declared settings grid")
+    expected = set()
+    for setting in settings:
+        key = validated_setting_key(setting)
+        if key in expected:
+            raise ValueError("duplicate declared setting")
+        expected.add(key)
     result = defaultdict(list)
     seen = set()
     for row in run["queries"]:
@@ -116,9 +143,16 @@ def score_rows(dataset, run, split, hubs=None):
         seen.add(row["id"])
         if q["split"] != split:
             raise ValueError("run mixes splits or uses wrong split")
+        seen_settings = set()
         for v in row["variants"]:
+            key = validated_setting_key(v["setting"])
+            if key not in expected:
+                raise ValueError("run contains an unexpected setting")
+            if key in seen_settings:
+                raise ValueError("duplicate run setting for query")
+            seen_settings.add(key)
             m = measure(q, v, hubs)
-            result[setting_key(v["setting"])].append(
+            result[key].append(
                 dict(
                     id=q["id"],
                     topic=q["topic"],
@@ -129,6 +163,8 @@ def score_rows(dataset, run, split, hubs=None):
                     **m,
                 )
             )
+        if seen_settings != expected:
+            raise ValueError("run query is missing declared settings")
     if seen != {q["id"] for q in dataset["queries"] if q["split"] == split}:
         raise ValueError("run does not contain the full labelled split")
     counts = {len(rows) for rows in result.values()}
