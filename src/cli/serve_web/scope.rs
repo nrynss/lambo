@@ -28,8 +28,9 @@
 //! to its unscoped path and routed: a non-`GET` gets the route's own 405
 //! (design Q11), an unknown route axum's own 404.
 //!
-//! Nothing here can reach a store: the checks are `surface::session`'s, in
-//! memory, so a refused request makes zero store calls by construction.
+//! Malformed and out-of-scope requests are refused entirely in memory. An
+//! explicit prefix can also authorize an existing session beyond the startup
+//! allowlist (#241); only then does resolution probe existence and erasure.
 
 use std::sync::Arc;
 
@@ -42,6 +43,7 @@ use axum::response::{IntoResponse, Response};
 
 use super::auth::{authenticate, unauthorized, Authenticated, Caller};
 use super::state::AppState;
+use super::views::DynamicSlot;
 use crate::surface::session::{not_found_response, SessionGrant, SessionNeed};
 use crate::types::SessionId;
 
@@ -61,9 +63,11 @@ pub(super) struct ScopedRequest;
 
 /// The session a request was authorized to read. Inserted by
 /// [`resolve_session`] only; a handler extracts it.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(super) struct SessionCtx {
     pub(super) session: SessionId,
+    /// Lifetime guard: keeps the dynamic slot alive until the handler returns.
+    pub(super) _dynamic: Option<DynamicSlot>,
 }
 
 impl<S: Send + Sync> FromRequestParts<S> for SessionCtx {
@@ -108,9 +112,45 @@ pub(super) async fn resolve_session(
         session,
         target,
         slash,
+        dynamic,
     }) = scoped(&state, &grant, after)
     else {
         return not_found_response();
+    };
+    // A prefix may reach sessions created since startup, but never create one.
+    // Probe on EVERY request, including a warm view or HEAD, so a tombstone is
+    // never turned into a cached empty 200. Unknown routes/listing were already
+    // rejected in memory, before this first store call.
+    let dynamic = if dynamic {
+        let readable = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            state.store().session_readable(&session),
+        )
+        .await;
+        match readable {
+            Ok(Ok(true)) => {}
+            Ok(Ok(false)) => return not_found_response(),
+            Ok(Err(crate::types::StoreError::Capability(_))) => {
+                tracing::warn!(
+                    "serve-web: dynamic session existence probe is unsupported by the store"
+                );
+                return dynamic_busy();
+            }
+            Ok(Err(_)) => {
+                tracing::warn!("serve-web: dynamic session existence probe failed in the backend");
+                return dynamic_busy();
+            }
+            Err(_) => {
+                tracing::warn!("serve-web: dynamic session existence probe timed out");
+                return dynamic_busy();
+            }
+        }
+        let Some(slot) = state.views.admit_dynamic(&session) else {
+            return dynamic_busy();
+        };
+        Some(slot)
+    } else {
+        None
     };
     let page = target == "/";
     if page && !slash && (req.method() == Method::GET || req.method() == Method::HEAD) {
@@ -134,7 +174,10 @@ pub(super) async fn resolve_session(
         return not_found_response();
     };
     *req.uri_mut() = uri;
-    req.extensions_mut().insert(SessionCtx { session });
+    req.extensions_mut().insert(SessionCtx {
+        session,
+        _dynamic: dynamic,
+    });
     req.extensions_mut().insert(Caller(grant));
     req.extensions_mut().insert(Authenticated);
     req.extensions_mut().insert(ScopedRequest);
@@ -145,6 +188,15 @@ pub(super) async fn resolve_session(
         page_headers(&mut response);
     }
     response
+}
+
+/// Transient failure without exposing the probed id or a backend error.
+fn dynamic_busy() -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        [(header::RETRY_AFTER, "1")],
+    )
+        .into_response()
 }
 
 /// The page's URL names the session: never cache it, and never send the
@@ -185,6 +237,7 @@ struct Scoped {
     session: SessionId,
     target: String,
     slash: bool,
+    dynamic: bool,
 }
 
 /// Authorize the scoped path `after` (what follows `/s/`) for `grant`: the
@@ -209,7 +262,13 @@ fn scoped(state: &AppState, grant: &SessionGrant, after: &str) -> Option<Scoped>
             return None;
         }
     };
-    if !state.authority.is_pinned(&id) {
+    let dynamic = !state.authority.is_pinned(&id);
+    if dynamic
+        && !grant
+            .scope()
+            .prefix()
+            .is_some_and(|prefix| prefix.covers(&id))
+    {
         tracing::debug!("serve-web: scoped request refused: session not served here");
         return None;
     }
@@ -219,7 +278,16 @@ fn scoped(state: &AppState, grant: &SessionGrant, after: &str) -> Option<Scoped>
         // The listing is the caller's, not a session's (design 3.2): only
         // at `/api/sessions`, never under `/s/{session}/`.
         return None;
-    } else if rest.starts_with("api/") {
+    } else if matches!(
+        rest,
+        "api/session"
+            | "api/stats"
+            | "api/events"
+            | "api/pulse"
+            | "api/graph"
+            | "api/inspect"
+            | "api/recall"
+    ) {
         format!("/{rest}")
     } else {
         return None;
@@ -228,5 +296,6 @@ fn scoped(state: &AppState, grant: &SessionGrant, after: &str) -> Option<Scoped>
         session: id.to_session_id(),
         target,
         slash,
+        dynamic,
     })
 }

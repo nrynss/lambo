@@ -640,6 +640,83 @@ fn bounds(max_loaded_sessions: usize) -> crate::cli::serve_web::views::ViewBound
     }
 }
 
+/// Bound the whole dynamic slot, not just its graph. A request guard stops
+/// replacement of its single-flight gate until that request has finished.
+#[tokio::test]
+async fn dynamic_slots_are_bounded_without_evicting_active_requests() {
+    let counting = LoadCounting::new(two_sessions().await);
+    let a = SessionId::new("t4-a");
+    let b = SessionId::new("t4-b");
+    let cache = crate::cli::serve_web::views::ViewCache::new([], bounds(1));
+    let contract = backends_on(Arc::new(MemoryStore::new())).embedding;
+    let active = cache.admit_dynamic(&a).expect("admit a");
+    let original_queries = cache.queries(&a).unwrap();
+    cache.view(&counting, &contract, &a).await.expect("a");
+    assert!(
+        cache.admit_dynamic(&b).is_none(),
+        "active slot cannot be replaced"
+    );
+    let same = cache.admit_dynamic(&a).expect("join active a");
+    assert!(Arc::ptr_eq(&original_queries, &cache.queries(&a).unwrap()));
+    drop((active, same));
+    let _active_b = cache.admit_dynamic(&b).expect("evict idle a");
+    assert!(
+        cache.queries(&a).is_none(),
+        "eviction drops metadata/query cache too"
+    );
+    cache.view(&counting, &contract, &b).await.expect("b");
+    assert!(cache.is_loaded(&b));
+    assert!(!cache.is_loaded(&a));
+}
+
+#[tokio::test(start_paused = true)]
+async fn dynamic_slots_expire_after_five_idle_minutes() {
+    use crate::cli::serve_web::views::{ViewCache, DYNAMIC_IDLE};
+    let cache = ViewCache::new([], bounds(2));
+    let a = SessionId::new("idle-a");
+    let b = SessionId::new("idle-b");
+    let c = SessionId::new("idle-c");
+    drop(cache.admit_dynamic(&a).expect("a"));
+    tokio::time::advance(DYNAMIC_IDLE - Duration::from_millis(1)).await;
+    drop(cache.admit_dynamic(&b).expect("b"));
+    assert!(cache.queries(&a).is_some());
+    tokio::time::advance(Duration::from_millis(1)).await;
+    drop(cache.admit_dynamic(&c).expect("c"));
+    assert!(
+        cache.queries(&a).is_none(),
+        "idle expiry removes a whole slot"
+    );
+    assert!(cache.queries(&b).is_some());
+    assert!(cache.queries(&c).is_some());
+}
+
+#[tokio::test]
+async fn dynamic_zero_ttl_requests_share_one_gate_and_load() {
+    let counting = LoadCounting::new(two_sessions().await);
+    let a = SessionId::new("t4-a");
+    let mut limits = bounds(1);
+    limits.ttl = Duration::ZERO;
+    let cache = crate::cli::serve_web::views::ViewCache::new([], limits);
+    let contract = backends_on(Arc::new(MemoryStore::new())).embedding;
+    let guards = (
+        cache.admit_dynamic(&a).unwrap(),
+        cache.admit_dynamic(&a).unwrap(),
+    );
+    counting.park("t4-a");
+    let mut loader = pin!(cache.view(&counting, &contract, &a));
+    let mut joiner = pin!(cache.view(&counting, &contract, &a));
+    assert!(poll_once(loader.as_mut()).is_pending());
+    assert!(poll_once(joiner.as_mut()).is_pending());
+    assert_eq!(cache.queued(&a), 2);
+    assert!(cache.admit_dynamic(&SessionId::new("t4-b")).is_none());
+    counting.release("t4-a", 1);
+    let first = drive(loader.as_mut()).await.unwrap();
+    let second = drive(joiner.as_mut()).await.unwrap();
+    assert!(Arc::ptr_eq(&first, &second));
+    assert_eq!(counting.loads(), 1);
+    drop(guards);
+}
+
 /// Beyond `max_loaded_sessions` the least recently used view is dropped;
 /// a request for it reloads, and its freshness tracker survives eviction.
 #[tokio::test]
@@ -1009,7 +1086,7 @@ fn each_session_has_its_own_query_cache() {
     let (a, b) = (SessionId::new("t4-qa"), SessionId::new("t4-qb"));
     let cache = crate::cli::serve_web::views::ViewCache::new([a.clone(), b.clone()], bounds(4));
     let (qa, qb) = (cache.queries(&a).unwrap(), cache.queries(&b).unwrap());
-    assert!(!std::ptr::eq(qa, qb), "one query cache per session");
+    assert!(!Arc::ptr_eq(&qa, &qb), "one query cache per session");
     let contract = EmbeddingContract {
         kind: "fixture".into(),
         model: None,

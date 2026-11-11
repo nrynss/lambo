@@ -2,6 +2,55 @@
 
 ## Unreleased
 
+## 0.11.0 (2026-11-11)
+
+### Highlights
+
+- **Read newly created prefix sessions without restarting the web reader
+  (#241).** A web credential's explicit `session_prefix`, including an
+  inherited prefix, can now read existing sessions created after
+  `serve-web` starts. Exact names, `"*"` and opt-in session listing keep
+  their startup allowlist boundaries.
+- **Dynamic reads stay bounded and never create sessions.** Dynamic views
+  use the existing TTL and loaded-view cap; their metadata and query
+  caches are also capped and expire after five idle minutes on subsequent
+  dynamic requests. Missing, erased and unauthorized dynamic ids return
+  the same empty `404`, including after a cached read. Existing imported
+  sessions can be read without first attaching a writer.
+
+### Added
+
+- `serve-web` credentials with an explicit `session_prefix` can read existing
+  sessions created after the reader started (#241), including inherited prefix
+  credentials. Missing, erased and unauthorized dynamic sessions return the same
+  empty 404; the reader never creates a session. Exact names and `"*"` keep their
+  startup allowlist scope, and opt-in session listing never expands a prefix.
+  Dynamic session metadata and query caches share `max_loaded_sessions`' cap,
+  expire after five idle minutes on subsequent dynamic requests, and return
+  `503` with `Retry-After: 1` when every cached slot has an active request.
+
+### Upgrading from 0.10.1
+
+No `lambo provision` or re-embedding is needed: there is no schema or
+embedding contract change, and no new configuration key.
+
+- An existing explicit web `session_prefix` now also reaches existing
+  sessions beyond the startup allowlist. Check that each configured or
+  inherited prefix describes the sessions its credential should read.
+  Exact names and `"*"` still require startup-served sessions, and
+  `list_sessions` remains opt-in without expanding prefixes.
+- Rolling back to 0.10.1 accepts the same configuration, but sessions
+  outside its startup allowlist return `404` again. Add those names to
+  the allowlist and restart that reader if they must remain reachable.
+- Custom `GraphStore` adapters that support dynamic prefix reads must
+  implement the new `session_readable` method. It is a read-only point
+  probe: a durable session row or a non-erased lease establishes
+  existence, and an erasure tombstone takes precedence. It must not
+  create a session or load its graph. The default explicitly reports
+  unsupported capability, so dynamic reads on an adapter that has not
+  implemented it return `503`; reads of sessions served at startup are
+  unchanged. All bundled adapters implement the probe.
+
 ## 0.10.1 (2026-11-10)
 
 ### Highlights

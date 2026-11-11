@@ -54,10 +54,11 @@
 //! name = "lambo-viewers"
 //! token_env = "LAMBO_WEB_LAMBO_TOKEN"
 //! sessions = ["lambo"]              # exact names, "*" = the allowlist
-//! # session_prefix = "dc-u-"        # allowlisted ids under the prefix
+//! # session_prefix = "dc-u-"        # existing ids, including after startup
 //! ```
 //!
-//! A `[[web.credential]]` is a **read** grant over the allowlist: the
+//! A `[[web.credential]]` is a **read** grant: exact names and `"*"` use the
+//! allowlist; an explicit prefix also reads existing sessions outside it. The
 //! grammar of `[[serve.credential]]` ([`super::credential`], shared), minus
 //! the write capabilities. `create`, `erase` and `admin` are refused by name
 //! (an accepted-but-ignored `erase = true` would be a lie), and an inline
@@ -223,7 +224,8 @@ pub struct WebCredentialConfig {
     /// Exact session names, or `"*"` for every allowlisted session.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sessions: Vec<String>,
-    /// Every allowlisted session whose id starts with this and is longer.
+    /// Every existing session whose id starts with this and is longer, even
+    /// outside the startup allowlist. Never creates a missing session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_prefix: Option<String>,
     /// `create`: a `[[serve.credential]]` key, refused here by name.

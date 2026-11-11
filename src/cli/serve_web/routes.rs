@@ -263,11 +263,12 @@ pub(super) async fn api_recall(
     let Some(_permit) = state.views.recall_permit().await else {
         return recall_busy();
     };
+    let query_cache = state.views.queries(&ctx.session);
     let result = super::recall::run_detailed_on(
         &state.backends,
         &view.reader,
         &request,
-        state.views.queries(&ctx.session),
+        query_cache.as_deref(),
     )
     .await;
 

@@ -497,5 +497,8 @@ url = "http://127.0.0.1:8080"
 # name = "lambo-viewers"       # not "default" or "local"
 # token_env = "LAMBO_WEB_LAMBO_TOKEN"   # the variable holding the token, never the token
 # sessions = ["lambo"]         # exact names, "*" = every served session
-# # session_prefix = "dc-u-"   # served sessions under a prefix
+# # session_prefix = "dc-u-"   # existing sessions under a prefix, including after startup
+# # Prefix reads probe existence/erasure on every request; they never create.
+# # Dynamic slots also cap at max_loaded_sessions; inactive LRU slots are
+# # evicted at capacity and expire after five idle minutes on the next read.
 # --- [web] example ends ---
