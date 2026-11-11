@@ -130,7 +130,20 @@ pub(super) async fn resolve_session(
         match readable {
             Ok(Ok(true)) => {}
             Ok(Ok(false)) => return not_found_response(),
-            Ok(Err(_)) | Err(_) => return dynamic_busy(),
+            Ok(Err(crate::types::StoreError::Capability(_))) => {
+                tracing::warn!(
+                    "serve-web: dynamic session existence probe is unsupported by the store"
+                );
+                return dynamic_busy();
+            }
+            Ok(Err(_)) => {
+                tracing::warn!("serve-web: dynamic session existence probe failed in the backend");
+                return dynamic_busy();
+            }
+            Err(_) => {
+                tracing::warn!("serve-web: dynamic session existence probe timed out");
+                return dynamic_busy();
+            }
         }
         let Some(slot) = state.views.admit_dynamic(&session) else {
             return dynamic_busy();
