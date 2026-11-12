@@ -88,6 +88,8 @@ No new propagation algorithm, production configuration, default, graph edge or l
 
 ## Reproducing
 
+Current census output uses schema v2: `embedding_contract.model_sha256` replaces raw model text so a local model path cannot enter a new public report. The archived schema-v1 census retains its original public model identifier. On the same snapshot, all other fields reproduce unchanged. The final tool suite has 32 passing Python tests, including the pre-merge metadata, duplicate-label and empty-split regressions; dated reports retain their historical test counts.
+
 Take a consistent standalone backup first; never copy only the database file of a WAL-mode writer. Keep raw inputs outside the repository. The census requires an explicit session and rejects an input with a WAL/journal beside it.
 
 ```sh

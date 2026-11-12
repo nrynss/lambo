@@ -3,6 +3,7 @@
     python3 -m unittest discover -s scripts/eval -p test_graph_census.py
 """
 from collections import defaultdict
+import hashlib
 import json
 from pathlib import Path
 import sqlite3
@@ -43,6 +44,23 @@ def fixture():
 
 
 class Topology(unittest.TestCase):
+    def test_model_identity_is_fingerprinted_without_exposing_local_paths(self):
+        con=fixture()
+        self.addCleanup(con.close)
+        for model in ['/Users/private-owner/models/bge-m3.gguf', 'public-model', None]:
+            with self.subTest(model=model):
+                con.execute("UPDATE sessions SET embedding_model=? WHERE session_id='public'", (model,))
+                report=g.census(con,'public')
+                self.assertEqual(report['schema_version'],2)
+                self.assertEqual(report['embedding_contract'],dict(
+                    kind='candle', dim=1024,
+                    model_sha256=hashlib.sha256(model.encode('utf-8')).hexdigest()
+                    if model is not None else None))
+                self.assertNotIn('model',report['embedding_contract'])
+                if model is not None:
+                    self.assertNotIn(model,json.dumps(report))
+                self.assertEqual(report,g.census(con,'public'))
+
     def test_directed_depth_and_cycles(self):
         adj={'a':{'b'},'b':{'c'},'c':{'b'},'d':{'a'}}
         self.assertEqual(g.reachable('a',adj,0),{'a'})

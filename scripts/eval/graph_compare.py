@@ -45,7 +45,11 @@ def validate(dataset):
             raise ValueError("answerable query lacks known answer evidence")
         if q["kind"] == "no_answer" and (facets or q["known_relevant"]):
             raise ValueError("no-answer control has positive labels")
+        query_positives = set()
         for r in q["known_relevant"]:
+            if r["node"] in query_positives:
+                raise ValueError("duplicate known-relevant node in query")
+            query_positives.add(r["node"])
             if r["node"] in positives and positives[r["node"]] != q["split"]:
                 raise ValueError("known answer record crosses split")
             positives[r["node"]] = q["split"]
@@ -269,6 +273,14 @@ def paired_topic_interval(base, other, seed=175, draws=2000):
                 - baseline[row["id"]]["known_facet_coverage"]
             )
     topics = sorted(groups)
+    if not topics:
+        return dict(
+            mean=None,
+            bootstrap_topic_clusters=0,
+            draws=0,
+            low=None,
+            high=None,
+        )
     rng = random.Random(seed)
     samples = []
     for _ in range(draws):

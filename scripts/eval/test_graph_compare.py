@@ -9,6 +9,7 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import graph_compare as g
+import graph_screen
 
 
 def query(name="q", split="dev", topic="one"):
@@ -87,6 +88,33 @@ class Metrics(unittest.TestCase):
         q["kind"] = "misspelled"
         with self.assertRaisesRegex(ValueError, "unknown query kind"):
             g.validate(dict(queries=[q]))
+
+    def test_duplicate_positive_nodes_are_rejected_by_scoring_and_screening(self):
+        q = query()
+        q["facets"].append(dict(id="f2", text="second answer facet"))
+        q["known_relevant"].append(dict(node="answer-q", grade=2, facets=["f2"]))
+        labels = dict(queries=[q], settings=[variant()["setting"]])
+        run = dict(
+            queries=[
+                dict(
+                    id="q",
+                    variants=[variant(hits=[hit("answer-q")])],
+                    graph_only_candidates=0,
+                )
+            ]
+        )
+        pool = dict(
+            queries=[
+                dict(id="q", phase1=[dict(item="answer-q")], bfs_ids=["answer-q"])
+            ]
+        )
+        for check in (
+            lambda: g.validate(labels),
+            lambda: g.score_rows(labels, run, "dev"),
+            lambda: graph_screen.screen(labels, pool),
+        ):
+            with self.assertRaisesRegex(ValueError, "duplicate known-relevant node"):
+                check()
 
     def test_selection_uses_quality_then_lower_gain_and_nearest_half_damping(self):
         q = query()
@@ -201,6 +229,20 @@ class Metrics(unittest.TestCase):
         self.assertEqual(a, g.paired_topic_interval(base, other, draws=100))
         self.assertEqual(a["mean"], 0.5)
         self.assertEqual(a["bootstrap_topic_clusters"], 2)
+
+    def test_topic_bootstrap_has_no_interval_without_answerable_topics(self):
+        q = query()
+        q.update(kind="no_answer", facets=[], known_relevant=[])
+        labels = dict(queries=[q], settings=[variant()["setting"]])
+        run = dict(
+            queries=[dict(id="q", variants=[variant()], graph_only_candidates=0)]
+        )
+        rows = next(iter(g.score_rows(labels, run, "dev").values()))
+        expected = dict(
+            mean=None, bootstrap_topic_clusters=0, draws=0, low=None, high=None
+        )
+        self.assertEqual(g.paired_topic_interval(rows, rows), expected)
+        self.assertEqual(g.paired_topic_interval([], []), expected)
 
     def test_focus_metric_credits_only_missing_facets_fully_rendered(self):
         q = query()

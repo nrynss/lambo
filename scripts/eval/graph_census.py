@@ -161,13 +161,18 @@ def census(con, session, private_key=None):
             depth2_graph_only=distribution(d2[u] for u in subset),
             seeds_with_second_hop_additions=sum(second[u] > 0 for u in subset))
     return dict(
-        schema_version=1, session=session,
+        schema_version=2, session=session,
         scope="single-session concept graph; no layers; no phase-1 retrieval",
         semantics=dict(directed=True, traversal_order=list(TRAVERSAL_ORDER),
                        degree="distinct traversable outgoing concept neighbours",
                        reachability="graph-only members; seed and siblings excluded",
                        quantiles="nearest rank"),
-        embedding_contract=dict(zip(("kind", "model", "dim"), meta[:3])),
+        # Model contracts may contain local GGUF paths. Public topology output
+        # needs reproducible identity, not the raw operator-specific model text.
+        embedding_contract=dict(kind=meta[0],
+                                model_sha256=hashlib.sha256(meta[1].encode("utf-8")).hexdigest()
+                                if meta[1] is not None else None,
+                                dim=meta[2]),
         mutation_epoch=meta[3], concepts=len(nodes), interactions=len(interactions),
         concept_types=dict(sorted(Counter(kinds.values()).items())),
         created_at_range=[min(r[5] for r in rows), max(r[5] for r in rows)],

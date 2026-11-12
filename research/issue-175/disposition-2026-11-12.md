@@ -17,6 +17,8 @@ The census, both pilots, aggregates and replay diagnosis moved together from `ev
 
 The Python tools remain in `scripts/eval/`. Propagation and the frozen-snapshot operator remain test-only in `src/recall/experiment175*`; the crate-private assembly seam and warm/cold provenance regressions remain available for controlled future studies. Normal production callers supply no graph relevance. No propagation selector, config option or default change is introduced.
 
+Pre-merge review hardened three tool edge cases: duplicate positive-node labels are rejected before they can lose facets, a no-answer-only split returns an empty coverage interval with null bounds, and census schema v2 fingerprints model text instead of publishing a possible local model path. The original frozen labels pass the stricter validation. A fresh census of the frozen snapshot reproduces every archived field after only the declared schema/model-fingerprint conversion; historical JSON remains unchanged. These fixes do not change the measured conclusions.
+
 Private memory, source questions, labels, IDs and vectors remain outside Git. The retained [reports and aggregates](README.md) document their fingerprints and reproduction procedure.
 
 ## Ticket disposition and revisit condition
