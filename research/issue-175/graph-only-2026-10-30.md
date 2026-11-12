@@ -1,5 +1,7 @@
 # #175: fresh graph-only evidence check, 2026-10-30
 
+> Historical report. The [final disposition, 2026-11-12](disposition-2026-11-12.md), retires the tested proposal and supersedes the issue/PR pickup instructions below.
+
 **Result: neither tested propagation arm recovered a held-out missing answer facet, and both displaced known direct support. Keep production behavior unchanged.** This follow-up fixes the first pilot's absence of labelled graph-only answers: six fresh challenge questions have seven known supporting facets absent from direct retrieval but reachable through the existing directed graph.
 
 The held-out set has **two challenge questions with three missing facets**, plus 30 direct-answer questions and two synthetic no-answer controls. This is a small mechanism check, not a population effectiveness estimate.

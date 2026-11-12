@@ -1,10 +1,12 @@
-# #175: graph census and experiment evidence
+# #175: graph expansion relevance research
 
-Current status: the [main rebase and frozen replay](rebase-2026-11-11.md) reproduce the negative [graph-only evidence check](graph-only-2026-10-30.md). Both selected arms still recover **0/3 held-out missing facets**. A post hoc ranking bound shows that more gain alone cannot recover the held-out supports at the selected damping values; an additional label review records compound-facet limits. Production behavior is unchanged; #175 remains open. The sample is small and all seven missing-facet paths are one hop.
+**Final disposition, 2026-11-12: [evaluated, not adopted](disposition-2026-11-12.md).** The tested propagation proposal is retired; PR #220 preserves the research and #175 is closed as not planned. Production behavior is unchanged.
+
+The [main rebase and frozen replay](rebase-2026-11-11.md) reproduce the negative [graph-only evidence check](graph-only-2026-10-30.md). Both selected arms recover **0/3 held-out missing facets**. A post hoc ranking bound shows that more gain alone cannot recover the held-out supports at the selected damping values; an additional label review records compound-facet limits. The sample is small and all seven missing-facet paths are one hop. Earlier dated reports and JSON decisions to keep the issue open are historical and superseded by the final disposition.
 
 The [initial pilot](pilot-2026-10-30.md) and [its aggregates](pilot-2026-10-30.json) are retained: all of its known answers were direct phase-1 candidates, so it did not measure graph-only recovery.
 
-The sections below preserve the first milestone of the [graph-relevance experiment](https://github.com/nrynss/lambo/issues/175#issuecomment-6199960984), measured **2026-10-30** on the local Apple M3 Pro rig: the topology census and initial case preparation. They describe the state before the pilot; the linked report contains current decisions and remaining work.
+The sections below preserve the first milestone of the [graph-relevance experiment](https://github.com/nrynss/lambo/issues/175#issuecomment-6199960984), measured **2026-10-30** on the local Apple M3 Pro rig: the topology census and initial case preparation. They describe the state before the pilot; the dated reports record each milestone's decisions and limitations.
 
 ## Frozen input and scope
 

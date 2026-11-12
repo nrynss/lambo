@@ -38,6 +38,9 @@ Flash under OMP called derive, recall, and stats against a live CockroachDB sess
 Cursor's model ran derive, record_action, recall, and stats in sequence. Transcripts are in
 [`evidence/`](evidence/).
 
+Experiments and decisions about proposals considered for Lambo, including negative
+results, are indexed in [`research/`](research/).
+
 ## How importance is earned
 
 A concept is not important because an agent said it was. The daemon rescores every concept
