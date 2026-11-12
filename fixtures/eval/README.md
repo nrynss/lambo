@@ -2,8 +2,8 @@
 
 Labelled queries and labelled text pairs drawn from the dogfood memory. They
 are the shared yardstick for #87 / #176 (the `[embedder] related_pairs`
-threshold), #173 (RRF fusion), #174 (conformal abstention), #175 (PPR
-expansion), #181 (redundancy) and #198 (what a refused identifier merge is,
+threshold), #173 (RRF fusion), #174 (conformal abstention), the concluded #175
+graph-expansion study, #181 (redundancy) and #198 (what a refused identifier merge is,
 and the precision of its suspected-supersession trigger).
 
 **Status: v0, labelled by agents; every item that needed the owner's
@@ -93,11 +93,13 @@ Per consumer:
 - **#174**: 106 no-answer queries (32 in held-out); #174 wants at least 100
   per contract, so a held-out-only evaluation is short until the owner adds
   ledger misses.
-- **#175**: the corpus is text, not a graph: it has no edges, so the
-  multi-hop, low-degree-behind-hub and sparse/no-expansion families cannot
-  be evaluated against it as PPR needs. The two `multi-hop` queries mark
-  answers that need two concepts. A graph-structured slice needs the store
-  copy (owner step).
+- **#175 (concluded, not adopted)**: the separate frozen-store experiment is
+  archived under [`research/issue-175/`](../../research/issue-175/), with its
+  [final disposition](../../research/issue-175/disposition-2026-11-12.md).
+  This text-only corpus has no graph edges; its two `multi-hop` queries require
+  two concepts but do not establish graph-only retrieval quality. A future
+  graph-specific study would need new graph-structured inputs; that is no longer
+  a pending deliverable for the retired #175 proposal.
 - **#181**: the related-distinct families are #181's contrast families
   (polarity, repository, correction = old config vs correction, exception =
   rule plus exception, identifier); every answerable query carries `facets`.

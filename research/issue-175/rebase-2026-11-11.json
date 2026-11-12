@@ -1,0 +1,622 @@
+{
+  "schema_version": 1,
+  "date": "2026-11-11",
+  "experiment": "#175 historical frozen replay and post hoc failure diagnosis after main rebase",
+  "base_main": "7e6a4670b2ee607ac6828b8d40fb44bdd06a5218",
+  "previous_pr_head": "8c1e67ab52d43558169a55bc1a7e836013b84689",
+  "rebased_pilot_head": "24732ddf",
+  "snapshot_sha256": "5499e0890c480304398a0ffcd80bbfba64f6aba758e11a2d5214d6a4f08db258",
+  "clock": "2026-10-30T09:14:26Z",
+  "scope": "Historical replay, separate model label audit and fixed-damping ranking analysis. No fresh held-out confirmation, parameter retuning, production/default change or adoption claim.",
+  "replay": {
+    "pool_queries": 88,
+    "development_queries": 54,
+    "development_settings": 49,
+    "held_out_queries": 34,
+    "held_out_settings": 3,
+    "pool_frames_exactly_equal": true,
+    "all_nontiming_per_query_outcomes_exactly_equal": true,
+    "development_selection_reproduced": true,
+    "excluded_comparison_field": "assembly_plus_propagation_us",
+    "embedding_contract": {
+      "dim": 1024,
+      "kind": "candle",
+      "model": "BAAI/bge-m3@5617a9f61b028005a4858fdac845db406aefb181 model.safetensors sha256:68440cc1b73b"
+    },
+    "query_settings": {
+      "max_tokens": 1000,
+      "top_k": 10,
+      "traversal_depth": 2
+    },
+    "recall_weights": {
+      "w_daemon": 0.5,
+      "w_query": 0.5
+    },
+    "recall_fusion": {
+      "k": 3.0,
+      "keyword_weight": 1.0,
+      "kind": "max",
+      "recent_weight": 0.3,
+      "vector_weight": 1.0
+    },
+    "recall_selection": {
+      "similar_signals": false,
+      "skip_redundant": false
+    },
+    "resolved_config_sha256": "6160659e6cca692f4aada5e5be2943624395fcd8088f3adb8a27a923530c10ba",
+    "generated_embeddings": 0,
+    "snapshot_graph_labels_config_vectors_immutable": true
+  },
+  "screening": {
+    "categories": {
+      "all_known_facets_direct": 78,
+      "graph_only_known_facets": 6,
+      "no_answer_control": 4
+    },
+    "direct_known_facets": 101,
+    "graph_only_known_facets": 7,
+    "graph_only_topics": 4,
+    "known_facets": 108,
+    "labels_sha256": "aeef24b71b7cdd5a227486bc3c3687408bfae657cb7ca0a88d1f086336affd9c",
+    "pool_sha256": "567a01a23310c4f11c0d8afea58a5b915b4d2cc04a9f6243a8a734eccb9c141d",
+    "questions": 88,
+    "scope": "Known labels only; an edge is not a relevance label. Screening enriches graph-only cases and does not estimate traffic prevalence.",
+    "snapshot_sha256": "5499e0890c480304398a0ffcd80bbfba64f6aba758e11a2d5214d6a4f08db258",
+    "unreachable_known_facets": 0
+  },
+  "development": [
+    {
+      "setting": {
+        "arm": "zero",
+        "damping": 0.5,
+        "gain": 0
+      },
+      "answerable": 52,
+      "controls": 2,
+      "topics": 13,
+      "known_facet_coverage": 0.6057692307692307,
+      "known_graph_only_facet_coverage": 0.0,
+      "known_graph_only_facets_covered": 0,
+      "known_graph_only_facets": 4,
+      "known_answer_hit_at_10": 0.7692307692307693,
+      "known_graph_only_rendered": 0,
+      "known_positive_rendered": 37,
+      "unjudged_rendered": 220,
+      "graph_only_rendered": 0,
+      "hub_share_rendered": 0.011673151750972763,
+      "controls_with_rendered_context": 2,
+      "by_family": {
+        "direct_answer_control": {
+          "answerable": 48,
+          "controls": 0,
+          "topics": 13,
+          "known_facet_coverage": 0.6458333333333334,
+          "known_graph_only_facet_coverage": null,
+          "known_graph_only_facets_covered": 0,
+          "known_graph_only_facets": 0,
+          "known_answer_hit_at_10": 0.7916666666666666,
+          "known_graph_only_rendered": 0,
+          "known_positive_rendered": 36,
+          "unjudged_rendered": 201,
+          "graph_only_rendered": 0,
+          "hub_share_rendered": 0.012658227848101266,
+          "controls_with_rendered_context": 0
+        },
+        "graph_only_challenge": {
+          "answerable": 4,
+          "controls": 0,
+          "topics": 2,
+          "known_facet_coverage": 0.125,
+          "known_graph_only_facet_coverage": 0.0,
+          "known_graph_only_facets_covered": 0,
+          "known_graph_only_facets": 4,
+          "known_answer_hit_at_10": 0.5,
+          "known_graph_only_rendered": 0,
+          "known_positive_rendered": 1,
+          "unjudged_rendered": 19,
+          "graph_only_rendered": 0,
+          "hub_share_rendered": 0.0,
+          "controls_with_rendered_context": 0
+        },
+        "no_answer_control": {
+          "answerable": 0,
+          "controls": 2,
+          "topics": 0,
+          "known_facet_coverage": null,
+          "known_graph_only_facet_coverage": null,
+          "known_graph_only_facets_covered": 0,
+          "known_graph_only_facets": 0,
+          "known_answer_hit_at_10": null,
+          "known_graph_only_rendered": 0,
+          "known_positive_rendered": 0,
+          "unjudged_rendered": 0,
+          "graph_only_rendered": 0,
+          "hub_share_rendered": null,
+          "controls_with_rendered_context": 2
+        }
+      }
+    },
+    {
+      "setting": {
+        "arm": "damped",
+        "damping": 0.75,
+        "gain": 32
+      },
+      "answerable": 52,
+      "controls": 2,
+      "topics": 13,
+      "known_facet_coverage": 0.3942307692307692,
+      "known_graph_only_facet_coverage": 0.25,
+      "known_graph_only_facets_covered": 1,
+      "known_graph_only_facets": 4,
+      "known_answer_hit_at_10": 0.5576923076923077,
+      "known_graph_only_rendered": 2,
+      "known_positive_rendered": 23,
+      "unjudged_rendered": 299,
+      "graph_only_rendered": 252,
+      "hub_share_rendered": 0.009316770186335404,
+      "controls_with_rendered_context": 2,
+      "by_family": {
+        "direct_answer_control": {
+          "answerable": 48,
+          "controls": 0,
+          "topics": 13,
+          "known_facet_coverage": 0.3958333333333333,
+          "known_graph_only_facet_coverage": null,
+          "known_graph_only_facets_covered": 0,
+          "known_graph_only_facets": 0,
+          "known_answer_hit_at_10": 0.5625,
+          "known_graph_only_rendered": 1,
+          "known_positive_rendered": 21,
+          "unjudged_rendered": 278,
+          "graph_only_rendered": 233,
+          "hub_share_rendered": 0.010033444816053512,
+          "controls_with_rendered_context": 0
+        },
+        "graph_only_challenge": {
+          "answerable": 4,
+          "controls": 0,
+          "topics": 2,
+          "known_facet_coverage": 0.375,
+          "known_graph_only_facet_coverage": 0.25,
+          "known_graph_only_facets_covered": 1,
+          "known_graph_only_facets": 4,
+          "known_answer_hit_at_10": 0.5,
+          "known_graph_only_rendered": 1,
+          "known_positive_rendered": 2,
+          "unjudged_rendered": 21,
+          "graph_only_rendered": 19,
+          "hub_share_rendered": 0.0,
+          "controls_with_rendered_context": 0
+        },
+        "no_answer_control": {
+          "answerable": 0,
+          "controls": 2,
+          "topics": 0,
+          "known_facet_coverage": null,
+          "known_graph_only_facet_coverage": null,
+          "known_graph_only_facets_covered": 0,
+          "known_graph_only_facets": 0,
+          "known_answer_hit_at_10": null,
+          "known_graph_only_rendered": 0,
+          "known_positive_rendered": 0,
+          "unjudged_rendered": 0,
+          "graph_only_rendered": 0,
+          "hub_share_rendered": null,
+          "controls_with_rendered_context": 2
+        }
+      }
+    },
+    {
+      "setting": {
+        "arm": "degree",
+        "damping": 0.5,
+        "gain": 16
+      },
+      "answerable": 52,
+      "controls": 2,
+      "topics": 13,
+      "known_facet_coverage": 0.5576923076923077,
+      "known_graph_only_facet_coverage": 0.25,
+      "known_graph_only_facets_covered": 1,
+      "known_graph_only_facets": 4,
+      "known_answer_hit_at_10": 0.7307692307692307,
+      "known_graph_only_rendered": 1,
+      "known_positive_rendered": 35,
+      "unjudged_rendered": 240,
+      "graph_only_rendered": 77,
+      "hub_share_rendered": 0.007272727272727273,
+      "controls_with_rendered_context": 2,
+      "by_family": {
+        "direct_answer_control": {
+          "answerable": 48,
+          "controls": 0,
+          "topics": 13,
+          "known_facet_coverage": 0.5833333333333334,
+          "known_graph_only_facet_coverage": null,
+          "known_graph_only_facets_covered": 0,
+          "known_graph_only_facets": 0,
+          "known_answer_hit_at_10": 0.75,
+          "known_graph_only_rendered": 0,
+          "known_positive_rendered": 33,
+          "unjudged_rendered": 220,
+          "graph_only_rendered": 64,
+          "hub_share_rendered": 0.007905138339920948,
+          "controls_with_rendered_context": 0
+        },
+        "graph_only_challenge": {
+          "answerable": 4,
+          "controls": 0,
+          "topics": 2,
+          "known_facet_coverage": 0.25,
+          "known_graph_only_facet_coverage": 0.25,
+          "known_graph_only_facets_covered": 1,
+          "known_graph_only_facets": 4,
+          "known_answer_hit_at_10": 0.5,
+          "known_graph_only_rendered": 1,
+          "known_positive_rendered": 2,
+          "unjudged_rendered": 20,
+          "graph_only_rendered": 13,
+          "hub_share_rendered": 0.0,
+          "controls_with_rendered_context": 0
+        },
+        "no_answer_control": {
+          "answerable": 0,
+          "controls": 2,
+          "topics": 0,
+          "known_facet_coverage": null,
+          "known_graph_only_facet_coverage": null,
+          "known_graph_only_facets_covered": 0,
+          "known_graph_only_facets": 0,
+          "known_answer_hit_at_10": null,
+          "known_graph_only_rendered": 0,
+          "known_positive_rendered": 0,
+          "unjudged_rendered": 0,
+          "graph_only_rendered": 0,
+          "hub_share_rendered": null,
+          "controls_with_rendered_context": 2
+        }
+      }
+    }
+  ],
+  "held_out": [
+    {
+      "setting": {
+        "arm": "zero",
+        "damping": 0.5,
+        "gain": 0
+      },
+      "answerable": 32,
+      "controls": 2,
+      "topics": 10,
+      "known_facet_coverage": 0.546875,
+      "known_graph_only_facet_coverage": 0.0,
+      "known_graph_only_facets_covered": 0,
+      "known_graph_only_facets": 3,
+      "known_answer_hit_at_10": 0.71875,
+      "known_graph_only_rendered": 0,
+      "known_positive_rendered": 22,
+      "unjudged_rendered": 151,
+      "graph_only_rendered": 0,
+      "hub_share_rendered": 0.0,
+      "controls_with_rendered_context": 2,
+      "by_family": {
+        "direct_answer_control": {
+          "answerable": 30,
+          "controls": 0,
+          "topics": 10,
+          "known_facet_coverage": 0.5666666666666667,
+          "known_graph_only_facet_coverage": null,
+          "known_graph_only_facets_covered": 0,
+          "known_graph_only_facets": 0,
+          "known_answer_hit_at_10": 0.7333333333333333,
+          "known_graph_only_rendered": 0,
+          "known_positive_rendered": 21,
+          "unjudged_rendered": 142,
+          "graph_only_rendered": 0,
+          "hub_share_rendered": 0.0,
+          "controls_with_rendered_context": 0
+        },
+        "graph_only_challenge": {
+          "answerable": 2,
+          "controls": 0,
+          "topics": 2,
+          "known_facet_coverage": 0.25,
+          "known_graph_only_facet_coverage": 0.0,
+          "known_graph_only_facets_covered": 0,
+          "known_graph_only_facets": 3,
+          "known_answer_hit_at_10": 0.5,
+          "known_graph_only_rendered": 0,
+          "known_positive_rendered": 1,
+          "unjudged_rendered": 9,
+          "graph_only_rendered": 0,
+          "hub_share_rendered": 0.0,
+          "controls_with_rendered_context": 0
+        },
+        "no_answer_control": {
+          "answerable": 0,
+          "controls": 2,
+          "topics": 0,
+          "known_facet_coverage": null,
+          "known_graph_only_facet_coverage": null,
+          "known_graph_only_facets_covered": 0,
+          "known_graph_only_facets": 0,
+          "known_answer_hit_at_10": null,
+          "known_graph_only_rendered": 0,
+          "known_positive_rendered": 0,
+          "unjudged_rendered": 0,
+          "graph_only_rendered": 0,
+          "hub_share_rendered": null,
+          "controls_with_rendered_context": 2
+        }
+      }
+    },
+    {
+      "setting": {
+        "arm": "damped",
+        "damping": 0.75,
+        "gain": 32
+      },
+      "answerable": 32,
+      "controls": 2,
+      "topics": 10,
+      "known_facet_coverage": 0.265625,
+      "known_graph_only_facet_coverage": 0.0,
+      "known_graph_only_facets_covered": 0,
+      "known_graph_only_facets": 3,
+      "known_answer_hit_at_10": 0.46875,
+      "known_graph_only_rendered": 2,
+      "known_positive_rendered": 12,
+      "unjudged_rendered": 204,
+      "graph_only_rendered": 175,
+      "hub_share_rendered": 0.06018518518518518,
+      "controls_with_rendered_context": 2,
+      "by_family": {
+        "direct_answer_control": {
+          "answerable": 30,
+          "controls": 0,
+          "topics": 10,
+          "known_facet_coverage": 0.26666666666666666,
+          "known_graph_only_facet_coverage": null,
+          "known_graph_only_facets_covered": 0,
+          "known_graph_only_facets": 0,
+          "known_answer_hit_at_10": 0.4666666666666667,
+          "known_graph_only_rendered": 1,
+          "known_positive_rendered": 10,
+          "unjudged_rendered": 196,
+          "graph_only_rendered": 166,
+          "hub_share_rendered": 0.05825242718446602,
+          "controls_with_rendered_context": 0
+        },
+        "graph_only_challenge": {
+          "answerable": 2,
+          "controls": 0,
+          "topics": 2,
+          "known_facet_coverage": 0.25,
+          "known_graph_only_facet_coverage": 0.0,
+          "known_graph_only_facets_covered": 0,
+          "known_graph_only_facets": 3,
+          "known_answer_hit_at_10": 0.5,
+          "known_graph_only_rendered": 1,
+          "known_positive_rendered": 2,
+          "unjudged_rendered": 8,
+          "graph_only_rendered": 9,
+          "hub_share_rendered": 0.1,
+          "controls_with_rendered_context": 0
+        },
+        "no_answer_control": {
+          "answerable": 0,
+          "controls": 2,
+          "topics": 0,
+          "known_facet_coverage": null,
+          "known_graph_only_facet_coverage": null,
+          "known_graph_only_facets_covered": 0,
+          "known_graph_only_facets": 0,
+          "known_answer_hit_at_10": null,
+          "known_graph_only_rendered": 0,
+          "known_positive_rendered": 0,
+          "unjudged_rendered": 0,
+          "graph_only_rendered": 0,
+          "hub_share_rendered": null,
+          "controls_with_rendered_context": 2
+        }
+      }
+    },
+    {
+      "setting": {
+        "arm": "degree",
+        "damping": 0.5,
+        "gain": 16
+      },
+      "answerable": 32,
+      "controls": 2,
+      "topics": 10,
+      "known_facet_coverage": 0.515625,
+      "known_graph_only_facet_coverage": 0.0,
+      "known_graph_only_facets_covered": 0,
+      "known_graph_only_facets": 3,
+      "known_answer_hit_at_10": 0.71875,
+      "known_graph_only_rendered": 2,
+      "known_positive_rendered": 22,
+      "unjudged_rendered": 168,
+      "graph_only_rendered": 54,
+      "hub_share_rendered": 0.0,
+      "controls_with_rendered_context": 2,
+      "by_family": {
+        "direct_answer_control": {
+          "answerable": 30,
+          "controls": 0,
+          "topics": 10,
+          "known_facet_coverage": 0.5333333333333333,
+          "known_graph_only_facet_coverage": null,
+          "known_graph_only_facets_covered": 0,
+          "known_graph_only_facets": 0,
+          "known_answer_hit_at_10": 0.7333333333333333,
+          "known_graph_only_rendered": 1,
+          "known_positive_rendered": 20,
+          "unjudged_rendered": 159,
+          "graph_only_rendered": 51,
+          "hub_share_rendered": 0.0,
+          "controls_with_rendered_context": 0
+        },
+        "graph_only_challenge": {
+          "answerable": 2,
+          "controls": 0,
+          "topics": 2,
+          "known_facet_coverage": 0.25,
+          "known_graph_only_facet_coverage": 0.0,
+          "known_graph_only_facets_covered": 0,
+          "known_graph_only_facets": 3,
+          "known_answer_hit_at_10": 0.5,
+          "known_graph_only_rendered": 1,
+          "known_positive_rendered": 2,
+          "unjudged_rendered": 9,
+          "graph_only_rendered": 3,
+          "hub_share_rendered": 0.0,
+          "controls_with_rendered_context": 0
+        },
+        "no_answer_control": {
+          "answerable": 0,
+          "controls": 2,
+          "topics": 0,
+          "known_facet_coverage": null,
+          "known_graph_only_facet_coverage": null,
+          "known_graph_only_facets_covered": 0,
+          "known_graph_only_facets": 0,
+          "known_answer_hit_at_10": null,
+          "known_graph_only_rendered": 0,
+          "known_positive_rendered": 0,
+          "unjudged_rendered": 0,
+          "graph_only_rendered": 0,
+          "hub_share_rendered": null,
+          "controls_with_rendered_context": 2
+        }
+      }
+    }
+  ],
+  "ranking_diagnosis": {
+    "scope": "Exploratory post hoc diagnosis of already-inspected historical questions; no new labels, candidate changes, parameter selection, effectiveness or adoption claim. Fixed damping from original dev selection.",
+    "snapshot_sha256": "5499e0890c480304398a0ffcd80bbfba64f6aba758e11a2d5214d6a4f08db258",
+    "source_script_sha256": "5d22a6b43edb0fbba8b46c6ca0db193f5d6aeb5616ed013fc1c37acd2367d815",
+    "method": "Reproduce Rust two-hop deterministic unique directed-neighbor activation over all traversable outgoing neighbors; graph-only max-normalize. Reconstruct warm score d/2+direct_relevance/2 or d/2+gain*activation/2; rank with canonical status then score then canonical key then UUID. Validate against every saved selected-arm challenge hit. For the gain bound, each candidate has score intercept + gain*slope. A candidate no worse on both terms and strictly better on one outranks the support for every positive gain. No Canonical nodes or selected-case forced warnings exist in this snapshot.",
+    "validation": {
+      "selected_arm_challenge_lists": 12,
+      "top10_lists_equal": 12,
+      "max_score_absolute_error": 7.105427357601002e-15
+    },
+    "held_out": {
+      "missing_facets": 3,
+      "arm_support_pairs": 6,
+      "minimum_strict_positive_gain_dominators": 12,
+      "none_can_enter_ordinary_top10_by_gain_alone": true,
+      "damped": {
+        "selected_ranks": [
+          58,
+          151,
+          177
+        ],
+        "best_ordinary_ranks_over_nonnegative_gain": [
+          17,
+          107,
+          120
+        ]
+      },
+      "degree": {
+        "selected_ranks": [
+          57,
+          177,
+          178
+        ],
+        "best_ordinary_ranks_over_nonnegative_gain": [
+          16,
+          114,
+          119
+        ]
+      }
+    },
+    "limitations": [
+      "Ordinary pre-token-fitting score order only; no new renderer run at hypothetical gains.",
+      "Bounds concern exact historical graph, fixed selected damping and direct candidates; changes to damping/traversal/fusion lie outside this result.",
+      "Complete relevance labels, end-to-end latency and fresh independently authored challenge questions remain outside scope."
+    ]
+  },
+  "independent_label_review": {
+    "reviewers": 1,
+    "reviewer_type": "separate Codex subagent",
+    "challenge_questions": 6,
+    "nominated_missing_facets": 7,
+    "direct_candidate_incidences_screened": 307,
+    "full_plausible_direct_texts_read": 133,
+    "aggregate_historical_outcome_known": true,
+    "per_query_arm_outcomes_inspected": false,
+    "complete_compound_facets_supported": 7,
+    "complete_direct_equivalent_corrections": 0,
+    "questions_with_material_partial_direct_equivalents": 2,
+    "frozen_primary_label_changes": 0,
+    "scope": "Additional model review, not human annotation, exhaustive relevance labels or fresh held-out confirmation; compound facets can hide useful partial direct answers."
+  },
+  "harness_changes": [
+    "Require every declared setting once per question; reject empty/duplicate/unknown/nonfinite/negative/invalid settings.",
+    "Fingerprint config and vector cache, serialize resolved config/query limits, verify input immutability.",
+    "Reject missing questions in an existing vector cache; complete historical 88-entry cache reused after answerable-only 84-entry cache was rejected."
+  ],
+  "validation": {
+    "python_tests_passed": 29,
+    "rust_library_tests_passed": 2955,
+    "rust_library_tests_ignored": 14,
+    "rust_library_features": [
+      "fixtures",
+      "store-sqlite"
+    ],
+    "operator_features": [
+      "fixtures",
+      "store-sqlite",
+      "embed-candle-metal"
+    ],
+    "real_metal_operator_runs_passed": [
+      "development eval",
+      "held-out eval",
+      "complete pool"
+    ],
+    "clippy_warnings_denied": true,
+    "format_check": true,
+    "diff_check": true
+  },
+  "private_input_and_output_sha256": {
+    "original_labels": "aeef24b71b7cdd5a227486bc3c3687408bfae657cb7ca0a88d1f086336affd9c",
+    "development_labels": "b0b091a57b0c09f493a6e84ccd6e0c7aaf285b25871fe1d3cde4e6f7452fcba9",
+    "held_out_confirmation_labels": "711c145550f55e50bddfc167155029d1854162d1e637e099c10239fe59045e41",
+    "operator_config": "90d8b0a7298d58d5c33142dcb1927fff37dbbc6f892eaa3e2c6437b6ab44a526",
+    "complete_query_vectors": "13841bb47d322b5332bf04d3803e5e394eb513a456fbefe824af6e8b73208e37",
+    "frozen_selection": "10da8bef8a486b980401870420b532e332a6617372d3440b1b04c8d1fad77077",
+    "original_pool": "718fed7846f7a383f3df16005da1d160fda094701a1fb3398a1da951d79ec8d2",
+    "original_development_run": "a7ceb15c5d5f5c5e95866d636257e0f9681c4f5474de390cf32ab2606367a0d9",
+    "original_held_out_run": "75b87bee9efaeb3fffa865daab4ee393748d7ba307ba94df0b5c944a6a91abc2",
+    "replay_pool": "567a01a23310c4f11c0d8afea58a5b915b4d2cc04a9f6243a8a734eccb9c141d",
+    "replay_development_run": "0b1a527a33d743b62c5e9195956b272a5320218b1adf15d776a453d131f8036f",
+    "replay_held_out_run": "4f019b516c8da4e50105dc9ad6814a9de99edea48c2c5c2729ed67209f090a61",
+    "replay_development_summary": "36ed42862db2393b24c633d52dce57fb0f1ec5818daee9979e242cfae0a66a3f",
+    "replay_held_out_summary": "efe5ef9e29217dd2a3b1a2aaa1afd077a09553648df8e190aaca6860bf2a9668",
+    "replay_selection": "03a7984a7decd7ac302aeb11b9b824baeb7837e36b963c389de3c30e6c07d05e",
+    "replay_screen": "d782bc5903a366395febb6094013e4fab62b79bf3f231b076a44ba6ffd3c125f",
+    "independent_label_audit": "f37c81a234b4bd1eb2e548a24899db9c6252232fee36c24773036fca4daa3561",
+    "ranking_diagnostic_script": "5d22a6b43edb0fbba8b46c6ca0db193f5d6aeb5616ed013fc1c37acd2367d815",
+    "ranking_diagnostic_checked_results": "c462cfe34d30cdf24c6a2d12b8bc30fa0a5cfa5a227d7f225c48532dc06e8653",
+    "ranking_diagnostic_aggregate": "a151e947cdd3e2835a633a0985ae30ee2ac33350de9c024d1fc4586004eabb00"
+  },
+  "source_files_sha256": {
+    "src/recall/assemble.rs": "ec6cd35d72d80d3a1f716b84f5f5b9c30ef4f616b29a933069605af01383b008",
+    "src/recall/experiment175.rs": "db3fecc0bcff46fe4d1fb7a6f043ed0823e49268a3950390eb765920f0950800",
+    "src/recall/experiment175/run.rs": "e457173e9e237b5385056e084dfbf1a077e80683a8829e9d058c51a2669530ae",
+    "scripts/eval/graph_compare.py": "4bb2293d74fea8b49e5a8181a34cb6de108e855bc057dadb1fe7af54b9472171",
+    "scripts/eval/graph_screen.py": "f40e2f6d8a58940ca4a0aa7ee5a56da6d9dcd662066951387adc1e1879a190e3"
+  },
+  "limitations": [
+    "Inspected historical held-out topics cannot be reused as fresh confirmation.",
+    "Six challenge questions across four topics and seven one-hop missing facets; no two-hop-only answer case.",
+    "Compound facet sufficiency and partial direct equivalents require prospective atomic-facet review.",
+    "Ranking bound applies only to fixed selected damping and frozen frame, before token fitting.",
+    "No complete precision/recall, final-answer accuracy or release end-to-end latency measured."
+  ],
+  "decision": "Keep propagation test-only, production behavior unchanged, #175 and draft PR open. More gain at the selected damping cannot recover the held-out supports; any next effectiveness evaluation requires fresh independently reviewed atomic facets and complete quality/latency evidence."
+}

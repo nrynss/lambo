@@ -13,6 +13,10 @@ No DSN, API key, or cluster id appears anywhere in this directory. Where a captu
 have contained one, it is replaced by a named placeholder such as `<CLUSTER_ID>` or
 `<SCRATCH>`.
 
+Research experiments and their adoption decisions are indexed in
+[`research/`](../research/). The concluded #175 graph-relevance study is retained
+[there](../research/issue-175/), including its negative results and unchanged aggregates.
+
 ## MCP client interop
 
 | Path | What it shows |

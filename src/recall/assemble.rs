@@ -232,8 +232,64 @@ pub(crate) fn assemble_with_legs<F>(
 where
     F: Fn(&str) -> usize,
 {
+    assemble_with_graph_relevance(
+        graph,
+        expanded,
+        phase1,
+        legs,
+        None,
+        scores,
+        hot_payloads,
+        query,
+        weights,
+        contradiction_min_age,
+        suspected_line,
+        redundancy,
+        now,
+        token_fn,
+    )
+}
+
+/// Research seam for #175: direct candidates retain their own relevance and
+/// provenance; only BFS-required graph-only concepts may receive `graph_relevance`.
+/// Siblings and forced companions outside the BFS set do not acquire relevance.
+/// Normal recall calls this through `assemble_with_legs` with no graph evidence.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn assemble_with_graph_relevance<F>(
+    graph: &Graph,
+    expanded: &ExpandedSet,
+    phase1: &[Scored<NodeId>],
+    legs: Option<&HashMap<NodeId, LegScores>>,
+    graph_relevance: Option<&HashMap<NodeId, f64>>,
+    scores: &ScoreTable,
+    hot_payloads: &HashMap<NodeId, Vec<HotListPayload>>,
+    query: &RecallQuery,
+    weights: RecallWeights,
+    contradiction_min_age: std::time::Duration,
+    suspected_line: bool,
+    redundancy: Option<Redundancy>,
+    now: DateTime<Utc>,
+    token_fn: F,
+) -> DetailedRecall
+where
+    F: Fn(&str) -> usize,
+{
     let (w_daemon, w_query) = (sane_weight(weights.w_daemon), sane_weight(weights.w_query));
     let relevance: HashMap<NodeId, f64> = phase1.iter().map(|s| (s.item, s.score)).collect();
+    let graph_relevance: HashMap<NodeId, f64> = graph_relevance
+        .map(|values| {
+            expanded
+                .required
+                .iter()
+                .filter_map(|member| {
+                    (!relevance.contains_key(&member.item)
+                        && matches!(graph.node(member.item), Some(Node::Concept(_))))
+                    .then(|| values.get(&member.item).map(|v| (member.item, *v)))
+                    .flatten()
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     let daemon: HashMap<NodeId, f64> = scores.ranked.iter().map(|s| (s.item, s.score)).collect();
     // Only a real query-backed phase-1 concept can put recall in cold mode.
     // The recent-only leg is a flat floor, not evidence of a new match. BFS
@@ -254,7 +310,13 @@ where
         // store-provided relevance must not poison the total order, GPT5.6sol
         // P1-4 / deep-review F3).
         let d = sane_weight(daemon.get(&id).copied().unwrap_or(0.0));
-        let r = sane_weight(relevance.get(&id).copied().unwrap_or(0.0));
+        let r = sane_weight(
+            relevance
+                .get(&id)
+                .or_else(|| graph_relevance.get(&id))
+                .copied()
+                .unwrap_or(0.0),
+        );
         let daemon_part = if cold { 0.0 } else { d * w_daemon };
         (d, r, daemon_part, daemon_part + r * w_query)
     };
@@ -381,8 +443,10 @@ where
         // a trace subscriber is present (T9-R1-4) - never per-member with
         // tracing disabled.
         if tracing::enabled!(target: "lambo::recall", tracing::Level::TRACE) {
-            let arm = if r > 0.0 {
+            let arm = if r > 0.0 && relevance.contains_key(&s.item) {
                 "lexical/vector"
+            } else if r > 0.0 {
+                "graph"
             } else {
                 "structural"
             };
@@ -3380,6 +3444,9 @@ mod tests {
         );
         assert_eq!(result.warnings.len(), holders.len());
     }
+
+    // #175: graph relevance through the actual assembly path.
+    mod graph_relevance;
 
     // #198: the suspected-supersession surface.
     mod suspected;
