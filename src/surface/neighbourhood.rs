@@ -350,6 +350,7 @@ mod tests {
         for (depends_on, against) in [(true, false), (false, true)] {
             let refs = vec!["brand x runs true to size".to_string()];
             let call = [ConceptCitations {
+                name: None,
                 content: newer.into(),
                 depends_on: if depends_on { refs.clone() } else { vec![] },
                 against: if against { refs } else { vec![] },
@@ -519,6 +520,7 @@ mod tests {
         .unwrap();
         let newer = "brand x runs a size small";
         let call = [ConceptCitations {
+            name: None,
             content: newer.into(),
             depends_on: vec![],
             against: vec!["brand x runs true to size".to_string()],

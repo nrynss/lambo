@@ -355,6 +355,13 @@ pub(crate) fn candidates_with_legs_as(
     for s in index.search(query, keyword_cap) {
         legs.entry(s.item).or_default().keyword = Some(s.score);
     }
+    // An exact normalized name is direct identity evidence even when the
+    // target is old and its content has no words in common with the query.
+    if let Some(id) = graph.name_target(query)
+        && matches!(graph.node(id), Some(Node::Concept(_)))
+    {
+        legs.entry(id).or_default().keyword = Some(1.0);
+    }
     if recent == RecentLeg::Run {
         for (id, rank) in recent_concepts(graph) {
             let leg = legs.entry(id).or_default();

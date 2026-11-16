@@ -456,6 +456,8 @@ pub(super) async fn load_snapshot_in(
     let interactions = load_interactions(&mut *tx, session).await?;
     let concepts = load_concepts(&mut *tx, session).await?;
     let edges = load_edges(&mut *tx, session).await?;
+    let names = load_names(&mut *tx, session).await?;
+    let retired_aliases = load_retired_aliases(&mut *tx, session).await?;
     let synonyms = load_synonyms(&mut *tx, session).await?;
     let reservations = load_reservations(&mut *tx, session).await?;
     let canonization_events = load_canonization_events(&mut *tx, session).await?;
@@ -470,6 +472,8 @@ pub(super) async fn load_snapshot_in(
         concepts,
         edges,
         synonyms,
+        names,
+        retired_aliases,
         reservations,
         canonization_events,
         embedding,
@@ -477,4 +481,67 @@ pub(super) async fn load_snapshot_in(
         mutation_epoch: u64::try_from(mutation_epoch).unwrap_or(u64::MAX),
         gc_mark,
     }))
+}
+
+/// Durable citation identities, including bindings whose target has been deleted.
+pub(super) async fn load_names(
+    tx: &mut sqlx::SqliteConnection,
+    session: &SessionId,
+) -> Result<Vec<crate::types::ConceptName>, StoreError> {
+    let rows = sqlx::query(
+        "SELECT name, name_key, node_id FROM concept_names WHERE session_id = ? ORDER BY name_key",
+    )
+    .bind(session.as_str())
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|e| db_err("load concept names", e))?;
+    rows.iter()
+        .map(|row| {
+            let id: String = row
+                .try_get(2)
+                .map_err(|e| db_err("load concept names", e))?;
+            let name = crate::types::ConceptName {
+                session_id: session.clone(),
+                name: row
+                    .try_get(0)
+                    .map_err(|e| db_err("load concept names", e))?,
+                name_key: row
+                    .try_get(1)
+                    .map_err(|e| db_err("load concept names", e))?,
+                node_id: node_id_str(&id)?,
+            };
+            crate::store::names::validate_name(&name)?;
+            Ok(name)
+        })
+        .collect()
+}
+
+pub(super) async fn load_retired_aliases(
+    tx: &mut sqlx::SqliteConnection,
+    session: &SessionId,
+) -> Result<Vec<crate::types::RetiredAlias>, StoreError> {
+    let rows = sqlx::query(
+        "SELECT alias_id, payload FROM retired_aliases WHERE session_id = ? ORDER BY alias_id",
+    )
+    .bind(session.as_str())
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|e| db_err("load retired aliases", e))?;
+    rows.iter()
+        .map(|row| {
+            let id: String = row
+                .try_get(0)
+                .map_err(|e| db_err("load retired aliases", e))?;
+            let payload: String = row
+                .try_get(1)
+                .map_err(|e| db_err("load retired aliases", e))?;
+            let retired = crate::store::names::decode_retired_alias(&payload)?;
+            if retired.session_id != *session || retired.concept.id != node_id_str(&id)? {
+                return Err(StoreError::Invariant(
+                    "retired alias row disagrees with its payload".into(),
+                ));
+            }
+            Ok(retired)
+        })
+        .collect()
 }

@@ -302,6 +302,11 @@ enum Commands {
         #[command(subcommand)]
         action: CanonAction,
     },
+    /// Preview or apply durable-name migration, reviewed alias repair, or a name for an existing concept. Uses the configured store without an embedder.
+    Names {
+        #[command(subcommand)]
+        action: NamesAction,
+    },
     /// Maintain the recall tier's index ([recall] in lambo.toml).
     ///
     /// Operator-only. Does not construct the embedder.
@@ -323,6 +328,9 @@ enum Commands {
         /// The first concept's text.
         #[arg(long, help = "The first concept's text.")]
         content: String,
+        /// Optional durable name for the first concept.
+        #[arg(long)]
+        name: Option<String>,
         /// The first concept's type: entity, logic, constraint, resource, or observation.
         #[arg(
             long,
@@ -678,6 +686,44 @@ enum SessionAction {
     },
 }
 
+/// Durable-name operator tools (#146). Every operation previews by default.
+#[derive(Debug, Subcommand)]
+enum NamesAction {
+    /// Import surviving synonyms and repair the aliases in a reviewed full-ID map. Preview first; apply needs its source_epoch.
+    Migrate {
+        /// Session whose existing names and reviewed aliases will be upgraded.
+        #[arg(long)]
+        session: String,
+        /// Reviewed alias-id target-id pairs, one per line; # starts a comment.
+        #[arg(long, value_name = "PATH")]
+        map: Option<PathBuf>,
+        /// Apply the whole upgrade in one transaction under the writer lease.
+        #[arg(long, requires = "expect_epoch")]
+        apply: bool,
+        /// source_epoch from the reviewed preview; a changed session is refused.
+        #[arg(long, value_name = "EPOCH")]
+        expect_epoch: Option<u64>,
+    },
+    /// Attach a durable name to an existing concept's full UUID, without re-embedding it. Preview first; apply needs its source_epoch.
+    Assign {
+        /// Session containing the concept to name.
+        #[arg(long)]
+        session: String,
+        /// Durable name to bind to the existing concept.
+        #[arg(long)]
+        name: String,
+        /// Full UUID of the existing concept to name.
+        #[arg(long, value_name = "UUID")]
+        target: String,
+        /// Apply the assignment under the session writer lease.
+        #[arg(long, requires = "expect_epoch")]
+        apply: bool,
+        /// Source epoch from the reviewed preview.
+        #[arg(long, value_name = "EPOCH")]
+        expect_epoch: Option<u64>,
+    },
+}
+
 /// `lambo canon` actions (#36 PR 5).
 #[derive(Debug, Subcommand)]
 enum CanonAction {
@@ -932,6 +978,7 @@ impl Commands {
             Self::Provision { .. } => "provision",
             Self::EraseSession { .. } => "erase-session",
             Self::RecallIndex { .. } => "recall-index",
+            Self::Names { .. } => "names",
             Self::Canon { .. } => "canon",
             Self::Derive { .. } => "derive",
             Self::DeriveImage { .. } => "derive-image",
@@ -950,6 +997,7 @@ impl Commands {
                 | Self::Canon { .. }
                 | Self::EraseSession { .. }
                 | Self::RecallIndex { .. }
+                | Self::Names { .. }
                 | Self::Saints { .. }
                 | Self::Inspect { .. }
                 | Self::Stats { .. }
@@ -2090,6 +2138,46 @@ fn main() -> ExitCode {
                 lambo::cli::recall_index::Args { session },
             ),
         ),
+        (Commands::Names { action }, Resolved::StoreOnly { store, .. }) => {
+            run_async("names", async move {
+                use lambo::cli::names::{Action, Args};
+                let args = match action {
+                    NamesAction::Migrate {
+                        session,
+                        map,
+                        apply,
+                        expect_epoch,
+                    } => Args {
+                        session,
+                        action: Action::Migrate {
+                            pairs: map
+                                .as_deref()
+                                .map(lambo::cli::names::read_map)
+                                .transpose()?
+                                .unwrap_or_default(),
+                        },
+                        apply,
+                        expect_epoch,
+                    },
+                    NamesAction::Assign {
+                        session,
+                        name,
+                        target,
+                        apply,
+                        expect_epoch,
+                    } => Args {
+                        session,
+                        action: Action::Assign {
+                            name,
+                            target: lambo::cli::names::parse_id(&target)?,
+                        },
+                        apply,
+                        expect_epoch,
+                    },
+                };
+                lambo::cli::names::run(store.as_ref(), args).await
+            })
+        }
         (Commands::EraseSession { session, confirm }, Resolved::StoreOnly { store, .. }) => {
             run_async(
                 "erase-session",
@@ -2105,6 +2193,7 @@ fn main() -> ExitCode {
                 session,
                 agent,
                 content,
+                name,
                 kind,
                 parent_of,
                 concept,
@@ -2122,6 +2211,7 @@ fn main() -> ExitCode {
                     session,
                     agent,
                     content,
+                    name,
                     kind,
                     parent_of,
                     concept,

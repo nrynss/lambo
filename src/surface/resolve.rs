@@ -25,10 +25,8 @@
 //!    composed and decomposed spellings, case and word order reach the same
 //!    concept. Normalization is `crate::graph::canonical`'s (NFC,
 //!    invisible-character stripping, lowercasing, stemming); this module adds
-//!    none of its own. **No synonym is consulted**: a synonym is in-memory
-//!    session state (pinned contract S5), so a reference resolved through one
-//!    could mean something else after a restart. Nothing a write declares can
-//!    redirect a reference.
+//!    none of its own. Durable names use that same normalization and bind to
+//!    immutable node ids. Legacy RAM-local synonyms are never consulted.
 //!
 //! Legs 2 and 3 are both asked, and the distinct concepts they find decide:
 //! none is [`Resolved::Missing`], one is [`Resolved::Concept`], more is
@@ -63,6 +61,8 @@ pub(crate) enum Leg {
     ShortId,
     /// The canonical key.
     Key,
+    /// An explicitly declared durable name.
+    Name,
 }
 
 /// What a reference names in one graph.
@@ -76,6 +76,11 @@ pub(crate) enum Resolved {
     Ambiguous(Vec<NodeId>),
     /// A full node id naming an interaction.
     NotAConcept(NodeId),
+    /// An identity explicitly retired during a reviewed alias repair.
+    Retired {
+        node: NodeId,
+        target: Option<NodeId>,
+    },
 }
 
 /// `reference` as a full node id, when it parses as one.
@@ -164,6 +169,12 @@ pub(crate) fn resolve_reference_scoped(
         .then(|| parse_full_id(reference))
         .flatten()
     {
+        if let Some(alias) = g.retired_alias(id) {
+            return Resolved::Retired {
+                node: id,
+                target: Some(alias.target),
+            };
+        }
         return match g.node(id) {
             Some(Node::Concept(_)) => Resolved::Concept {
                 node: id,
@@ -173,6 +184,39 @@ pub(crate) fn resolve_reference_scoped(
             None => Resolved::Missing,
         };
     }
+    // A declared name reserves its normalized identity even if GC removed
+    // the target. Never fall through and bind that spelling to a new concept.
+    let named = g.name_target(reference);
+    if let Some(node) = named {
+        if let Some(alias) = g.retired_alias(node) {
+            return Resolved::Retired {
+                node,
+                target: Some(alias.target),
+            };
+        }
+        if !matches!(g.node(node), Some(Node::Concept(_))) {
+            return Resolved::Retired { node, target: None };
+        }
+    }
+    if is_short_id_shaped(reference) {
+        let mut retired = g.retired_aliases().filter(|a| {
+            a.concept
+                .id
+                .0
+                .simple()
+                .to_string()
+                .starts_with(&reference.to_ascii_lowercase())
+        });
+        if let Some(first) = retired.next() {
+            // A short id once printed for a retired identity must never
+            // silently start naming a new active prefix collision.
+            let target = retired.next().is_none().then_some(first.target);
+            return Resolved::Retired {
+                node: first.concept.id,
+                target,
+            };
+        }
+    }
     // (node, leg) per distinct concept, in leg order.
     let mut found: Vec<(NodeId, Leg)> = Vec::new();
     let mut push = |node: NodeId, leg: Leg| {
@@ -180,6 +224,9 @@ pub(crate) fn resolve_reference_scoped(
             found.push((node, leg));
         }
     };
+    if let Some(node) = named {
+        push(node, Leg::Name);
+    }
     if is_short_id_shaped(reference) {
         for node in short_id_matches(g, reference) {
             push(node, Leg::ShortId);
@@ -285,6 +332,7 @@ pub(crate) fn resolve_existing_scoped(
             candidates: candidates(g, &ids),
         },
         Resolved::NotAConcept(_) => ReferenceRefusalKind::NotAConcept,
+        Resolved::Retired { target, .. } => ReferenceRefusalKind::Retired { target },
     };
     Err(refusal(field, concept, reference, kind))
 }

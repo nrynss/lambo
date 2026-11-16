@@ -13,6 +13,7 @@ pub mod derive;
 pub mod derive_image;
 pub mod erase_session;
 pub mod inspect;
+pub mod names;
 pub mod provision;
 pub mod re_embed;
 pub mod recall;
@@ -425,6 +426,7 @@ mod tests {
         let derived = crate::cli::derive::run(
             backends_on(cli_store.clone()),
             crate::cli::derive::Args {
+                name: None,
                 repo_scope: None,
                 session: "cli-mcp-diff-cli".into(),
                 agent: "agent-a".into(),
@@ -446,12 +448,14 @@ mod tests {
                 agent_id: "agent-a".into(),
                 concepts: vec![
                     WireConcept {
+                        name: None,
                         content: "user schema".into(),
                         concept_type: WireConceptType::Entity,
                         depends_on: None,
                         against: None,
                     },
                     WireConcept {
+                        name: None,
                         content: "auth middleware".into(),
                         concept_type: WireConceptType::Entity,
                         depends_on: None,
@@ -555,6 +559,7 @@ mod tests {
         let err = crate::cli::derive::run(
             backends_on(store.clone()),
             crate::cli::derive::Args {
+                name: None,
                 repo_scope: None,
                 session: "cli-caps".into(),
                 agent: "agent-a".into(),
@@ -574,6 +579,7 @@ mod tests {
         let err = crate::cli::derive::run(
             backends_on(store),
             crate::cli::derive::Args {
+                name: None,
                 repo_scope: None,
                 session: "cli-caps".into(),
                 agent: "agent-a".into(),
@@ -606,6 +612,7 @@ mod tests {
             let err = crate::cli::derive::run(
                 backends_on(store.clone()),
                 crate::cli::derive::Args {
+                    name: None,
                     repo_scope: None,
                     session: "cli-image-suffix".into(),
                     agent: "agent-a".into(),
@@ -671,6 +678,7 @@ mod tests {
             ..backends_on(store.clone())
         };
         let derive = |content: &str| crate::cli::derive::Args {
+            name: None,
             repo_scope: None,
             session: "cli-replacement".into(),
             agent: "agent-a".into(),
@@ -724,6 +732,7 @@ mod tests {
     async fn cli_against_records_contradictions_and_refuses_bad_references() {
         let store = Arc::new(MemoryStore::new());
         let derive = |content: &str, against: Vec<String>| crate::cli::derive::Args {
+            name: None,
             repo_scope: None,
             session: "cli-against".into(),
             agent: "agent-a".into(),
@@ -866,6 +875,7 @@ mod tests {
         let cli = crate::cli::derive::run(
             backends_on(store.clone()),
             crate::cli::derive::Args {
+                name: None,
                 repo_scope: None,
                 session: "cli-mcp-caps-cli".into(),
                 agent: "agent-a".into(),
@@ -887,6 +897,7 @@ mod tests {
                 agent_id: "agent-a".into(),
                 concepts: (0..=MAX_CONCEPTS_PER_DERIVE)
                     .map(|i| WireConcept {
+                        name: None,
                         content: format!("c{i}"),
                         concept_type: WireConceptType::Entity,
                         depends_on: None,
@@ -955,6 +966,7 @@ mod tests {
         crate::cli::derive::run(
             backends_on(store.clone()),
             crate::cli::derive::Args {
+                name: None,
                 repo_scope: None,
                 session: "t83-parent-of".into(),
                 agent: "agent-a".into(),
@@ -1009,6 +1021,7 @@ mod tests {
         crate::cli::derive::run(
             backends_on(store.clone()),
             crate::cli::derive::Args {
+                name: None,
                 repo_scope: None,
                 session: "t83-no-gc".into(),
                 agent: "agent-a".into(),
@@ -1092,6 +1105,7 @@ mod tests {
         crate::cli::derive::run(
             backends_on(store.clone()),
             crate::cli::derive::Args {
+                name: None,
                 repo_scope: None,
                 session: "t83-vector-skip".into(),
                 agent: "agent-a".into(),
@@ -1386,6 +1400,7 @@ mod sqlite_tests {
         let derived = crate::cli::derive::run(
             resolve_clean(&cfg),
             crate::cli::derive::Args {
+                name: None,
                 repo_scope: None,
                 session: session.into(),
                 agent: "agent-a".into(),
@@ -1547,6 +1562,7 @@ mod sqlite_tests {
             .await
             .expect("provision");
         let derive = |repo_scope: Option<&str>| crate::cli::derive::Args {
+            name: None,
             against: Vec::new(),
             repo_scope: repo_scope.map(str::to_string),
             session: session.into(),
@@ -1618,6 +1634,7 @@ mod sqlite_tests {
         crate::cli::derive::run(
             first,
             crate::cli::derive::Args {
+                name: None,
                 repo_scope: None,
                 session: "h1-sqlite-model".into(),
                 agent: "operator".into(),
@@ -1638,6 +1655,7 @@ mod sqlite_tests {
         let err = crate::cli::derive::run(
             changed,
             crate::cli::derive::Args {
+                name: None,
                 repo_scope: None,
                 session: "h1-sqlite-model".into(),
                 agent: "operator".into(),
@@ -1663,6 +1681,7 @@ mod sqlite_tests {
         crate::cli::derive::run(
             override_backends,
             crate::cli::derive::Args {
+                name: None,
                 repo_scope: None,
                 session: "h1-sqlite-model".into(),
                 agent: "operator".into(),
@@ -1711,6 +1730,7 @@ mod sqlite_tests {
         crate::cli::derive::run(
             resolve_clean(&cfg),
             crate::cli::derive::Args {
+                name: None,
                 repo_scope: None,
                 session: "h1-sqlite-legacy".into(),
                 agent: "operator".into(),

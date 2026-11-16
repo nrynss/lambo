@@ -298,11 +298,13 @@ async fn an_already_cited_predecessor_is_not_listed() {
         };
         let pinned = if against {
             PinnedCitations {
+                names: Vec::new(),
                 references: Vec::new(),
                 against: vec![reference],
             }
         } else {
             PinnedCitations {
+                names: Vec::new(),
                 references: vec![reference],
                 against: Vec::new(),
             }

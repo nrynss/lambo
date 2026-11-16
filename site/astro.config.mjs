@@ -43,6 +43,7 @@ export default defineConfig({
           items: [
             { label: 'Installation', slug: 'installation' },
             { label: 'Configuration', slug: 'config' },
+            { label: 'Migration and memory repair', slug: 'migration' },
           ],
         },
         {
@@ -65,7 +66,6 @@ export default defineConfig({
           label: 'Evidence',
           items: [
             { label: 'Evidence & evaluation', slug: 'evidence' },
-            { label: 'Hackathon submission', slug: 'hackathon' },
           ],
         },
       ],

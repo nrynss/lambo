@@ -200,13 +200,16 @@ pub(super) enum JobPayload {
         supplied: SuppliedVector,
     },
     Action {
+        /// Old Action/ActionCited payloads pinned ids only; their text slots
+        /// must retain the legacy resolve-at-apply meaning during replay.
+        legacy_text_pins: bool,
         repo_scope: Option<String>,
         action: String,
         produces: Vec<String>,
         modifies: Vec<String>,
         depends_on: Vec<String>,
-        /// #36 PR 4: what each id-shaped `depends_on` entry named at the ack
-        /// (`graph::action::validate_pinned`); empty when none reads as an id.
+        /// What every `depends_on` entry named at the ack, including None for
+        /// missing text. Empty only for legacy intents or no dependencies.
         depends_on_pins: Vec<Option<NodeId>>,
         /// #19(b): the concepts the action contradicts, as resolved at the
         /// ack (`graph::action::validate_against`); empty for an action
@@ -233,6 +236,25 @@ impl JobPayload {
             Self::DeriveImage { .. } => None,
         };
         let payload = match self {
+            JobPayload::Derive {
+                concepts,
+                pairs,
+                citations,
+                ..
+            } if !citations.names.is_empty()
+                || citations
+                    .references
+                    .iter()
+                    .chain(&citations.against)
+                    .any(|p| !crate::surface::resolve::is_id_shaped(&p.reference)) =>
+            {
+                WriteIntentPayload::DeriveNamed {
+                    concepts: concepts.clone(),
+                    pairs: pairs.clone(),
+                    citations: citations.clone(),
+                    receipt_destination: None,
+                }
+            }
             JobPayload::Derive {
                 concepts,
                 pairs,
@@ -265,6 +287,35 @@ impl JobPayload {
                 receipt_destination: None,
             },
             JobPayload::Action {
+                legacy_text_pins,
+                action,
+                produces,
+                modifies,
+                depends_on,
+                depends_on_pins,
+                against,
+                ..
+            } if !legacy_text_pins
+                && ((!depends_on_pins.is_empty()
+                    && depends_on
+                        .iter()
+                        .any(|r| !crate::surface::resolve::is_id_shaped(r)))
+                    || against
+                        .iter()
+                        .any(|p| !crate::surface::resolve::is_id_shaped(&p.reference))) =>
+            {
+                WriteIntentPayload::ActionNamed {
+                    action: action.clone(),
+                    produces: produces.clone(),
+                    modifies: modifies.clone(),
+                    depends_on: depends_on.clone(),
+                    depends_on_pins: depends_on_pins.clone(),
+                    against: against.clone(),
+                    receipt_destination: None,
+                }
+            }
+            JobPayload::Action {
+                legacy_text_pins: _,
                 repo_scope: _,
                 action,
                 produces,
@@ -281,6 +332,7 @@ impl JobPayload {
                 receipt_destination: None,
             },
             JobPayload::Action {
+                legacy_text_pins: _,
                 repo_scope: _,
                 action,
                 produces,
@@ -323,8 +375,10 @@ impl JobPayload {
         crate::graph::resource::require_repo_scope(Some(&repo_scope))?;
         let mut job = match *payload {
             inner @ (WriteIntentPayload::Derive { .. }
+            | WriteIntentPayload::DeriveNamed { .. }
             | WriteIntentPayload::DeriveCited { .. }
             | WriteIntentPayload::Action { .. }
+            | WriteIntentPayload::ActionNamed { .. }
             | WriteIntentPayload::ActionCited { .. }) => Self::from_unscoped_intent(inner)?,
             WriteIntentPayload::DeriveImage { .. } | WriteIntentPayload::RepoScoped { .. } => {
                 return Err(LamboError::Config(
@@ -360,6 +414,12 @@ impl JobPayload {
                 pairs,
                 citations,
                 ..
+            }
+            | WriteIntentPayload::DeriveNamed {
+                concepts,
+                pairs,
+                citations,
+                ..
             } => JobPayload::Derive {
                 concepts,
                 pairs,
@@ -384,6 +444,7 @@ impl JobPayload {
                 depends_on_pins,
                 ..
             } => JobPayload::Action {
+                legacy_text_pins: true,
                 repo_scope: None,
                 action,
                 produces,
@@ -401,6 +462,25 @@ impl JobPayload {
                 against,
                 ..
             } => JobPayload::Action {
+                legacy_text_pins: true,
+                repo_scope: None,
+                action,
+                produces,
+                modifies,
+                depends_on,
+                depends_on_pins,
+                against,
+            },
+            WriteIntentPayload::ActionNamed {
+                action,
+                produces,
+                modifies,
+                depends_on,
+                depends_on_pins,
+                against,
+                ..
+            } => JobPayload::Action {
+                legacy_text_pins: false,
                 repo_scope: None,
                 action,
                 produces,
@@ -450,6 +530,7 @@ impl JobPayload {
                     + supplied.contract.model.as_ref().map_or(0, String::len)
             }
             JobPayload::Action {
+                legacy_text_pins: _,
                 repo_scope,
                 action,
                 produces,
@@ -650,6 +731,14 @@ impl WritePipeline {
                         ..
                     }
                     | WriteIntentPayload::DeriveCited {
+                        receipt_destination,
+                        ..
+                    }
+                    | WriteIntentPayload::DeriveNamed {
+                        receipt_destination,
+                        ..
+                    }
+                    | WriteIntentPayload::ActionNamed {
                         receipt_destination,
                         ..
                     }
@@ -860,6 +949,7 @@ impl WritePipeline {
             agent,
             interaction,
             JobPayload::Action {
+                legacy_text_pins: false,
                 repo_scope,
                 action,
                 produces,

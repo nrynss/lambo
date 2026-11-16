@@ -57,6 +57,7 @@
 // owns `src/graph/graph.rs` and phase docs reference that path.
 #[allow(clippy::module_inception)]
 pub mod graph;
+pub use graph::names;
 
 // Canonicalization pipeline (T2.2) — spec §7.1 steps 1–5.
 pub mod canonical;

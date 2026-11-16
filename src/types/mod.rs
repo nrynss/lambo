@@ -11,8 +11,8 @@ mod reference;
 pub(crate) use reference::pinned_bytes;
 pub(crate) use reference::shown;
 pub use reference::{
-    ConceptCitations, PinnedCitations, PinnedReference, ReferenceCandidate, ReferenceField,
-    ReferenceRefusal, ReferenceRefusalKind,
+    ConceptCitations, ConceptNaming, PinnedCitations, PinnedReference, ReferenceCandidate,
+    ReferenceField, ReferenceRefusal, ReferenceRefusalKind,
 };
 
 // ---------------------------------------------------------------------------
@@ -809,6 +809,10 @@ impl Edge {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Mutation {
+    /// Bind a normalized, session-local name to one immutable concept identity.
+    SetConceptName { name: ConceptName },
+    /// Preserve a reviewed alias's history outside the active graph.
+    RetireAlias { retired: RetiredAlias },
     /// Insert or update a node.
     ///
     /// **R2-1 — canonization columns are not this variant's to write.** On an
@@ -958,6 +962,25 @@ pub enum Mutation {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WriteIntentPayload {
+    /// A named derive must not be replayed by a build that ignores names.
+    DeriveNamed {
+        concepts: Vec<(String, ConceptType)>,
+        pairs: Vec<(String, String)>,
+        citations: PinnedCitations,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        receipt_destination: Option<SessionId>,
+    },
+    /// Action references, including ordinary text, pinned before acknowledgement.
+    ActionNamed {
+        action: String,
+        produces: Vec<String>,
+        modifies: Vec<String>,
+        depends_on: Vec<String>,
+        depends_on_pins: Vec<Option<NodeId>>,
+        against: Vec<PinnedReference>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        receipt_destination: Option<SessionId>,
+    },
     /// A `lambo_derive` job.
     Derive {
         /// `(content, concept_type)` pairs, in submission order.
@@ -1079,7 +1102,15 @@ impl WriteIntentPayload {
     /// Recorded delivery session, absent on payloads predating destination tracking.
     pub fn receipt_destination(&self) -> Option<&SessionId> {
         match self {
-            Self::Derive {
+            Self::DeriveNamed {
+                receipt_destination,
+                ..
+            }
+            | Self::ActionNamed {
+                receipt_destination,
+                ..
+            }
+            | Self::Derive {
                 receipt_destination,
                 ..
             }
@@ -1128,7 +1159,9 @@ impl WriteIntentPayload {
     /// [`Self::Derive`], for the same reason, whatever it wrapped.
     pub fn settled(&self) -> Option<WriteIntentPayload> {
         match self {
-            Self::DeriveImage { .. }
+            Self::DeriveNamed { .. }
+            | Self::ActionNamed { .. }
+            | Self::DeriveImage { .. }
             | Self::DeriveCited { .. }
             | Self::ActionCited { .. }
             | Self::RepoScoped { .. } => Some(Self::Derive {
@@ -1172,6 +1205,10 @@ pub const DERIVE_CITED_PAYLOAD_LIKE: &str = r#"{"kind":"derive_cited",%"#;
 /// A SQL `LIKE` pattern that matches a stored `ActionCited` payload
 /// (#19(b)) and no other, for the same overwrite at consume.
 pub const ACTION_CITED_PAYLOAD_LIKE: &str = r#"{"kind":"action_cited",%"#;
+
+/// Consume-time cleanup of named intents, whose unconsumed forms fail closed on old builds.
+pub const DERIVE_NAMED_PAYLOAD_LIKE: &str = r#"{"kind":"derive_named",%"#;
+pub const ACTION_NAMED_PAYLOAD_LIKE: &str = r#"{"kind":"action_named",%"#;
 
 /// A SQL `LIKE` pattern that matches a stored `RepoScoped` payload (#129)
 /// and no other, for the same overwrite at consume.
@@ -1542,6 +1579,12 @@ impl MutationBatch {
 /// Full session materialization for `load_session`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
 pub struct GraphSnapshot {
+    /// Normalized, immutable concept names. Empty on legacy snapshots.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub names: Vec<ConceptName>,
+    /// Reviewed aliases archived outside the active graph, keyed by their old id.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub retired_aliases: Vec<RetiredAlias>,
     /// The session this snapshot is of.
     pub session_id: SessionId,
     /// The session's root goal, when one is set.
@@ -1638,6 +1681,27 @@ pub struct Synonym {
     pub source_key: String,
     /// The key it redirects to.
     pub canonical_key: String,
+}
+
+/// A durable, session-local name bound to one concept identity forever.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConceptName {
+    pub session_id: SessionId,
+    pub name: String,
+    pub name_key: String,
+    pub node_id: NodeId,
+}
+
+/// Original history of a reviewed alias removed from the active graph.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RetiredAlias {
+    pub session_id: SessionId,
+    pub concept: Concept,
+    pub target: NodeId,
+    pub edges: Vec<Edge>,
+    pub retired_at: DateTime<Utc>,
 }
 
 // ---------------------------------------------------------------------------

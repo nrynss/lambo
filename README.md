@@ -238,6 +238,7 @@ flowchart LR
 | [Library API](https://nrynss.github.io/lambo/api/) | The Rust `Memory` API and the adapter traits |
 | [Canonization](https://nrynss.github.io/lambo/canonization/) | The composite score, the three promotion gates, and the constants they run on |
 | [End to end](https://nrynss.github.io/lambo/end-to-end/) | Serving, reading, and running a swarm against one session |
+| [Migration and memory repair](https://nrynss.github.io/lambo/migration/) | Upgrade existing memory, assign durable names and repair reviewed alias citations |
 | [Demo](https://nrynss.github.io/lambo/demo/) | Two agents building one REST API on shared memory. Operator notes in [`docs/demo.md`](docs/demo.md) |
 
 ## CockroachDB tools used

@@ -110,6 +110,13 @@ pub(crate) enum Focus {
 /// Every leg here collects and sorts by a total order, and the ambiguous
 /// case refuses instead of guessing.
 pub(crate) fn resolve_focus(g: &Graph, focus: &str) -> Focus {
+    if let Some(id) = g.name_target(focus) {
+        return if matches!(g.node(id), Some(crate::types::Node::Concept(_))) {
+            Focus::Exact(id)
+        } else {
+            Focus::Missing { near: Vec::new() }
+        };
+    }
     if let Some(id) = uuid::Uuid::parse_str(focus)
         .ok()
         .map(NodeId)

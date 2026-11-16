@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # Fail if any hand-maintained mirror pair of docs has drifted.
 #
-# Four pages exist in two copies each:
+# Six pages exist in two copies each:
 #   docs/reference/cli.mdx          <-> site/src/content/docs/cli.mdx
 #   docs/reference/mcp.mdx          <-> site/src/content/docs/mcp.mdx
 #   docs/reference/installation.mdx <-> site/src/content/docs/installation.mdx
 #   docs/reference/config.mdx       <-> site/src/content/docs/config.mdx
+#   docs/reference/api.mdx          <-> site/src/content/docs/api.mdx
+#   docs/reference/migration.mdx    <-> site/src/content/docs/migration.mdx
 # The two copies of each pair are meant to carry the SAME shared prose, but they
 # are deliberately NOT byte-identical files: the site copies add Astro component
 # imports and a `/lambo/...` link prefix, and mcp.mdx's site copy carries a whole
@@ -17,7 +19,7 @@
 # Astro imports, drops the site-only mcp.mdx section, and normalises the /lambo/
 # link prefix and trailing slashes. If the canonical forms differ, the shared
 # prose has drifted and the gate fails. The J5 rule: keep the pairs in sync, and
-# re-run `scripts/docs/check-mirror-drift.sh` after touching any of the six files.
+# re-run `scripts/docs/check-mirror-drift.sh` after touching any mirrored page.
 # installation.mdx joined the gate after its copies drifted unnoticed (the site
 # copy gained the Cursor client sentence, the reference did not); its one
 # site-only line, the link to mcp.mdx's site-only "Verified clients" section, sits
@@ -135,6 +137,8 @@ check_pair cli docs/reference/cli.mdx site/src/content/docs/cli.mdx
 check_pair mcp docs/reference/mcp.mdx site/src/content/docs/mcp.mdx
 check_pair installation docs/reference/installation.mdx site/src/content/docs/installation.mdx
 check_pair config docs/reference/config.mdx site/src/content/docs/config.mdx
+check_pair api docs/reference/api.mdx site/src/content/docs/api.mdx
+check_pair migration docs/reference/migration.mdx site/src/content/docs/migration.mdx
 
 printf '\n'
 if [ "$fail" -eq 0 ]; then

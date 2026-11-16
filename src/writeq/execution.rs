@@ -477,6 +477,7 @@ impl WriteCtx {
                 })
             }
             JobPayload::Action {
+                legacy_text_pins,
                 repo_scope,
                 action,
                 produces,
@@ -524,13 +525,21 @@ impl WriteCtx {
                     // ack must name the same one now. #19(b): so must each
                     // `against` target, re-resolved in the same transaction,
                     // before the contract is stamped (review L3).
+                    // Legacy intents' None text slots were deliberately
+                    // unpinned. Refresh only those under the commit lock;
+                    // their id-shaped slots retain the original ack pins.
+                    let replay_pins = if *legacy_text_pins {
+                        crate::graph::action::legacy_replay_pins(&g, &act, depends_on_pins)?
+                    } else {
+                        depends_on_pins.clone()
+                    };
                     let outcome = record_action_against(
                         &mut g,
                         job.interaction,
                         &job.agent,
                         &act,
                         &embeddings,
-                        depends_on_pins,
+                        &replay_pins,
                         against,
                         (!embeddings.is_empty()).then(|| self.embedding.clone()),
                     )?;

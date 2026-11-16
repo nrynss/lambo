@@ -597,6 +597,7 @@ async fn seed(session: &str) -> Arc<MemoryStore> {
     crate::cli::derive::run(
         backends_on(store.clone()),
         crate::cli::derive::Args {
+            name: None,
             repo_scope: None,
             session: session.into(),
             agent: "agent-a".into(),

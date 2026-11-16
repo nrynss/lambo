@@ -7,6 +7,8 @@ Lambo ships as a single `lambo` binary that carries both runtime surfaces: the M
 
 That is the whole deployment model. Every released binary carries the full `ship` adapter set. You move between the in-memory store, SQLite, CockroachDB, and PostgreSQL, or between the fixture, BGE-M3, Gemini, EmbeddingGemma 2, and Elastic (Elasticsearch Inference API) embedders, by editing config, not by downloading a different build. The one exception is the in-process candle embedder: it ships only in the Metal build for Apple silicon, described below.
 
+Already have stored memory? Read [Migration and memory repair](/migration) before changing binaries or repairing legacy names. It covers schema provisioning, reviewed repairs and rollback.
+
 ## Install the binary
 
 Each release carries one `lambo` binary per platform plus a SHA-256 checksum file. Releases are published for Linux x86_64, Linux arm64 and macOS arm64, with the full `ship` adapter set compiled in. Apple silicon also gets a Metal build, `lambo-<version>-macos-arm64-metal`, which adds the in-process candle embedder running on the GPU (`[embedder] kind = "candle"`, `device = "metal"`). The stock binaries do not carry candle.

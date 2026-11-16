@@ -235,6 +235,8 @@ pub struct EraseCounts {
     pub vectors: u64,
     pub edges: u64,
     pub synonyms: u64,
+    pub concept_names: u64,
+    pub retired_aliases: u64,
     pub canonization_events: u64,
     pub reservations: u64,
     /// Durable write intents, consumed or not (their payloads hold concept text).
@@ -255,6 +257,8 @@ impl EraseCounts {
             + self.concepts
             + self.edges
             + self.synonyms
+            + self.concept_names
+            + self.retired_aliases
             + self.canonization_events
             + self.reservations
             + self.write_intents
@@ -273,6 +277,8 @@ impl EraseCounts {
             "concepts" => &mut self.concepts,
             "edges" => &mut self.edges,
             "synonyms" => &mut self.synonyms,
+            "concept_names" => &mut self.concept_names,
+            "retired_aliases" => &mut self.retired_aliases,
             "canonization_events" => &mut self.canonization_events,
             "reservations" => &mut self.reservations,
             "write_intents" => &mut self.write_intents,
@@ -662,6 +668,13 @@ pub(crate) mod testkit {
             }),
         };
         let vector: Vec<f32> = (0..dim).map(|i| ((i % 7) as f32) + 1.0).collect();
+        let Mutation::UpsertNode {
+            node: Node::Concept(archived),
+        } = concept(sid, NodeId::new(), i1, "retired name artifact", None)
+        else {
+            unreachable!()
+        };
+        let display_name = format!("erase name {c1}");
         MutationBatch {
             mutation_epoch: 3,
             gc_mark: Default::default(),
@@ -680,6 +693,23 @@ pub(crate) mod testkit {
                 concept(sid, c2, i2, &format!("size m {c2}"), None),
                 derives(sid, i1, c1),
                 derives(sid, i2, c2),
+                Mutation::SetConceptName {
+                    name: crate::types::ConceptName {
+                        session_id: sid.clone(),
+                        name_key: crate::graph::canonical::canonical_key(&display_name, |_| None),
+                        name: display_name,
+                        node_id: c1,
+                    },
+                },
+                Mutation::RetireAlias {
+                    retired: crate::types::RetiredAlias {
+                        session_id: sid.clone(),
+                        concept: archived,
+                        target: c1,
+                        edges: Vec::new(),
+                        retired_at: ts,
+                    },
+                },
                 Mutation::CanonizationTransition {
                     event: CanonizationEvent {
                         id: NodeId::new(),
@@ -758,6 +788,8 @@ pub(crate) mod testkit {
             concepts: 2,
             vectors: 1,
             edges: 2,
+            concept_names: 1,
+            retired_aliases: 1,
             canonization_events: 1,
             write_intents: 2,
             ..Default::default()

@@ -523,6 +523,8 @@ pub fn batch_session_ids(mutations: &[Mutation]) -> Vec<&str> {
             | Mutation::ConsumeWriteIntent { session_id, .. } => session_id.as_str(),
             Mutation::PutWriteIntent { intent } => intent.session_id.as_str(),
             Mutation::RecordAccess { session_id, .. } => session_id.as_str(),
+            Mutation::SetConceptName { name } => name.session_id.as_str(),
+            Mutation::RetireAlias { retired } => retired.session_id.as_str(),
             Mutation::DeleteNode { .. } | Mutation::DeleteEdge { .. } => continue,
         };
         if !out.contains(&sid) {

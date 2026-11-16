@@ -37,6 +37,30 @@ pub(super) async fn bulk_upsert_interactions(
     if rows.is_empty() {
         return Ok(());
     }
+    let mut check = sqlx::QueryBuilder::<sqlx::Postgres>::new(
+        "SELECT 1 FROM retired_aliases WHERE alias_id IN (",
+    );
+    let mut ids = check.separated(", ");
+    for row in rows {
+        ids.push_bind(row.id.0);
+    }
+    ids.push_unseparated(") UNION ALL SELECT 1 FROM concept_names WHERE node_id IN (");
+    let mut named_ids = check.separated(", ");
+    for row in rows {
+        named_ids.push_bind(row.id.0);
+    }
+    named_ids.push_unseparated(") LIMIT 1");
+    if check
+        .build()
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(backend)?
+        .is_some()
+    {
+        return Err(StoreError::Invariant(
+            "a retired alias id cannot be reused".into(),
+        ));
+    }
     interaction_upsert_query(rows)
         .build()
         .execute(&mut *tx)
@@ -61,6 +85,7 @@ pub(super) async fn bulk_upsert_concepts(
         return Ok(());
     }
     let mut embeddings: Vec<Option<String>> = Vec::with_capacity(rows.len());
+    check_named_concept_keys(&mut *tx, rows).await?;
     for r in rows {
         if let Some(source) = &r.concept.embedding_source {
             source.check_writable(r.concept.id)?;
@@ -228,6 +253,8 @@ pub(super) async fn apply_single(
             node: Node::Concept(c),
         } => bulk_upsert_concepts(&mut *tx, &[ConceptRow::new(c)], sql).await?,
         Mutation::UpsertEdge { edge } => bulk_upsert_edges(&mut *tx, &[edge]).await?,
+        Mutation::SetConceptName { name } => set_concept_name(&mut *tx, name).await?,
+        Mutation::RetireAlias { retired } => retire_alias(&mut *tx, retired).await?,
         Mutation::DeleteNode { id } => {
             // Explicit incident-edge cleanup: edges carry no FK on source/target
             // (spec §4); delete the node row from both node tables (interaction
@@ -401,7 +428,9 @@ pub(super) async fn consume_write_intent(
              payload = CASE WHEN payload LIKE CAST($6 AS TEXT) \
                  OR payload LIKE CAST($8 AS TEXT) \
                  OR payload LIKE CAST($9 AS TEXT) \
-                 OR payload LIKE CAST($10 AS TEXT) THEN CAST($7 AS TEXT) \
+                 OR payload LIKE CAST($10 AS TEXT) \
+                 OR payload LIKE CAST($11 AS TEXT) \
+                 OR payload LIKE CAST($12 AS TEXT) THEN CAST($7 AS TEXT) \
                  ELSE payload END \
          WHERE session_id = $4 AND receipt = $5",
     )
@@ -415,6 +444,8 @@ pub(super) async fn consume_write_intent(
     .bind(crate::types::DERIVE_CITED_PAYLOAD_LIKE)
     .bind(crate::types::ACTION_CITED_PAYLOAD_LIKE)
     .bind(crate::types::REPO_SCOPED_PAYLOAD_LIKE)
+    .bind(crate::types::DERIVE_NAMED_PAYLOAD_LIKE)
+    .bind(crate::types::ACTION_NAMED_PAYLOAD_LIKE)
     .execute(&mut *tx)
     .await
     .map_err(|e| map_write_err(e, |m| format!("consume write intent: {m}")))?;
@@ -560,4 +591,133 @@ pub(super) async fn write_erase_tombstone(
             })
         })
         .transpose()
+}
+
+/// Register a fixed citation identity; retries may repeat but never retarget it.
+pub(super) async fn set_concept_name(
+    tx: &mut sqlx::PgConnection,
+    name: &crate::types::ConceptName,
+) -> Result<(), StoreError> {
+    write_concept_name(tx, name, false).await
+}
+
+/// Snapshot restore may carry a binding whose original target was collected.
+#[cfg(feature = "fixtures")]
+pub(super) async fn seed_concept_name(
+    tx: &mut sqlx::PgConnection,
+    name: &crate::types::ConceptName,
+) -> Result<(), StoreError> {
+    write_concept_name(tx, name, true).await
+}
+
+async fn write_concept_name(
+    tx: &mut sqlx::PgConnection,
+    name: &crate::types::ConceptName,
+    allow_missing: bool,
+) -> Result<(), StoreError> {
+    crate::store::names::validate_name(name)?;
+    if !allow_missing {
+        let target_ok: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM concepts WHERE session_id = $1 AND id = $2) OR EXISTS(SELECT 1 FROM concept_names WHERE session_id = $1 AND name_key = $3 AND node_id = $2)")
+            .bind(name.session_id.as_str()).bind(name.node_id.0).bind(&name.name_key)
+            .fetch_one(&mut *tx).await.map_err(backend)?;
+        if !target_ok {
+            return Err(StoreError::Invariant(
+                "new concept name must target an active concept in its own session".into(),
+            ));
+        }
+    }
+    let collision: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM concepts WHERE session_id = $1 AND canonical_key = $2 AND id <> $3)")
+        .bind(name.session_id.as_str()).bind(&name.name_key).bind(name.node_id.0)
+        .fetch_one(&mut *tx).await.map_err(backend)?;
+    if collision {
+        return Err(StoreError::Invariant(
+            "concept name collides with an existing concept key".into(),
+        ));
+    }
+    let result = sqlx::query(
+        "INSERT INTO concept_names (session_id, name, name_key, node_id) VALUES ($1, $2, $3, $4) \
+        ON CONFLICT (session_id, name_key) DO UPDATE SET name = concept_names.name \
+        WHERE concept_names.node_id = excluded.node_id",
+    )
+    .bind(name.session_id.as_str())
+    .bind(&name.name)
+    .bind(&name.name_key)
+    .bind(name.node_id.0)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| map_write_err(e, |m| format!("register concept name: {m}")))?;
+    if result.rows_affected() == 0 {
+        return Err(StoreError::Invariant(
+            "concept name target is immutable".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// One batched namespace check, including all rows before any are written.
+async fn check_named_concept_keys(
+    tx: &mut sqlx::PgConnection,
+    rows: &[ConceptRow<'_>],
+) -> Result<(), StoreError> {
+    let mut qb =
+        sqlx::QueryBuilder::<sqlx::Postgres>::new("WITH incoming(session_id, key, id) AS (");
+    qb.push_values(rows, |mut b, row| {
+        b.push_bind(row.concept.session_id.as_str())
+            .push_unseparated("::TEXT")
+            .push_bind(&row.concept.canonical_key)
+            .push_unseparated("::TEXT")
+            .push_bind(row.concept.id.0)
+            .push_unseparated("::UUID");
+    });
+    qb.push(") SELECT 1 FROM incoming i JOIN concept_names n ON n.session_id = i.session_id AND n.name_key = i.key WHERE n.node_id <> i.id UNION ALL SELECT 1 FROM incoming i JOIN retired_aliases r ON r.alias_id = i.id LIMIT 1");
+    if qb
+        .build()
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(backend)?
+        .is_some()
+    {
+        return Err(StoreError::Invariant(
+            "concept conflicts with a durable name or retired alias id".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Preserve the complete retired alias record, idempotently and without rewriting history.
+pub(super) async fn retire_alias(
+    tx: &mut sqlx::PgConnection,
+    retired: &crate::types::RetiredAlias,
+) -> Result<(), StoreError> {
+    crate::store::names::validate_retired_alias(retired)?;
+    let payload = serde_json::to_string(retired)
+        .map_err(|e| StoreError::Backend(format!("serialize retired alias: {e}")))?;
+    let result = sqlx::query(
+        "INSERT INTO retired_aliases (session_id, alias_id, payload) VALUES ($1, $2, $3) \
+        ON CONFLICT (session_id, alias_id) DO NOTHING",
+    )
+    .bind(retired.session_id.as_str())
+    .bind(retired.concept.id.0)
+    .bind(&payload)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| map_write_err(e, |m| format!("retire alias: {m}")))?;
+    if result.rows_affected() == 0 {
+        let old: String = sqlx::query_scalar(
+            "SELECT payload FROM retired_aliases WHERE session_id = $1 AND alias_id = $2",
+        )
+        .bind(retired.session_id.as_str())
+        .bind(retired.concept.id.0)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| StoreError::Backend(format!("read retired alias: {e}")))?;
+        if serde_json::from_str::<serde_json::Value>(&old).ok()
+            != serde_json::from_str::<serde_json::Value>(&payload).ok()
+        {
+            return Err(StoreError::Invariant(
+                "retired alias history is immutable".into(),
+            ));
+        }
+    }
+    Ok(())
 }

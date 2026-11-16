@@ -531,6 +531,7 @@ async fn a_scoped_write_draws_the_layers_rate() {
             repo_scope: None,
             agent_id: "agent-a".into(),
             concepts: vec![crate::mcp::server::WireConcept {
+                name: None,
                 content: GENERAL_RULING.into(),
                 concept_type: crate::mcp::server::WireConceptType::Logic,
                 depends_on: None,

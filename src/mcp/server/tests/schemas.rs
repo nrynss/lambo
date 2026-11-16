@@ -281,6 +281,8 @@ async fn f18_tool_schemas_match_the_golden_property_set() {
                 "concepts[].content",
                 // #36 PR 4: references to existing concepts, not a time.
                 "concepts[].depends_on",
+                // #146: a durable identity label, not client-supplied time.
+                "concepts[].name",
                 "event_time",
                 "parent_of",
                 "parent_of[].child",

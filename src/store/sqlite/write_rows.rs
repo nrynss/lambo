@@ -67,6 +67,8 @@ pub(super) async fn apply_single(
             node: Node::Concept(c),
         } => upsert_concepts(&mut *tx, &[ConceptRow::new(c)]).await?,
         Mutation::UpsertEdge { edge } => upsert_edges(&mut *tx, &[edge]).await?,
+        Mutation::SetConceptName { name } => set_concept_name(&mut *tx, name).await?,
+        Mutation::RetireAlias { retired } => retire_alias(&mut *tx, retired).await?,
         Mutation::DeleteNode { id } => {
             delete_node(&mut *tx, *id).await?;
         }
@@ -231,7 +233,7 @@ pub(super) async fn consume_write_intent(
     sqlx::query(
         "UPDATE write_intents SET consumed_at = ?, outcome_tag = ?, outcome_summary = ?, \
              payload = CASE WHEN payload LIKE ? OR payload LIKE ? OR payload LIKE ? \
-                 OR payload LIKE ? THEN ? ELSE payload END \
+                 OR payload LIKE ? OR payload LIKE ? OR payload LIKE ? THEN ? ELSE payload END \
          WHERE session_id = ? AND receipt = ?",
     )
     .bind(ts_to_text(outcome.consumed_at))
@@ -241,6 +243,8 @@ pub(super) async fn consume_write_intent(
     .bind(crate::types::DERIVE_CITED_PAYLOAD_LIKE)
     .bind(crate::types::ACTION_CITED_PAYLOAD_LIKE)
     .bind(crate::types::REPO_SCOPED_PAYLOAD_LIKE)
+    .bind(crate::types::DERIVE_NAMED_PAYLOAD_LIKE)
+    .bind(crate::types::ACTION_NAMED_PAYLOAD_LIKE)
     .bind(crate::types::SETTLED_IMAGE_INTENT_PAYLOAD)
     .bind(session_id.as_str())
     .bind(receipt)
@@ -266,6 +270,30 @@ pub(super) async fn upsert_interactions(
 ) -> Result<(), StoreError> {
     if rows.is_empty() {
         return Ok(());
+    }
+    let mut check = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
+        "SELECT 1 FROM retired_aliases WHERE alias_id IN (",
+    );
+    let mut ids = check.separated(", ");
+    for row in rows {
+        ids.push_bind(row.id.to_string());
+    }
+    ids.push_unseparated(") UNION ALL SELECT 1 FROM concept_names WHERE node_id IN (");
+    let mut named_ids = check.separated(", ");
+    for row in rows {
+        named_ids.push_bind(row.id.to_string());
+    }
+    named_ids.push_unseparated(") LIMIT 1");
+    if check
+        .build()
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| db_err("check retired interaction id", e))?
+        .is_some()
+    {
+        return Err(StoreError::Invariant(
+            "a retired alias id cannot be reused".into(),
+        ));
     }
     let mut qb = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
         "INSERT INTO interactions (id, session_id, agent_id, prompt_text, previous_id, created_at, event_time) ",
@@ -435,6 +463,7 @@ pub(super) async fn upsert_concepts(
     }
     // Before any encoding: a refusal must leave the transaction with nothing
     // written, and `?` here rolls the whole batch back (F-R1-1).
+    check_named_concept_keys(&mut *tx, rows).await?;
     enforce_concept_vector_widths(&mut *tx, rows).await?;
     let mut encoded: Vec<ConceptBinds> = Vec::with_capacity(rows.len());
     for r in rows {
@@ -875,6 +904,14 @@ pub(super) const ERASE_STATEMENTS: &[(&str, &str)] = &[
         "DELETE FROM reservations WHERE session_id = ?1",
     ),
     ("synonyms", "DELETE FROM synonyms WHERE session_id = ?1"),
+    (
+        "concept_names",
+        "DELETE FROM concept_names WHERE session_id = ?1",
+    ),
+    (
+        "retired_aliases",
+        "DELETE FROM retired_aliases WHERE session_id = ?1",
+    ),
     ("edges", "DELETE FROM edges WHERE session_id = ?1"),
     ("concepts", "DELETE FROM concepts WHERE session_id = ?1"),
     (
@@ -977,4 +1014,128 @@ pub(super) async fn write_erase_tombstone(
             })
         })
         .transpose()
+}
+
+/// Register a fixed citation identity; retries may repeat but never retarget it.
+pub(super) async fn set_concept_name(
+    tx: &mut sqlx::SqliteConnection,
+    name: &crate::types::ConceptName,
+) -> Result<(), StoreError> {
+    write_concept_name(tx, name, false).await
+}
+
+/// Snapshot restore may carry a binding whose original target was collected.
+pub(super) async fn seed_concept_name(
+    tx: &mut sqlx::SqliteConnection,
+    name: &crate::types::ConceptName,
+) -> Result<(), StoreError> {
+    write_concept_name(tx, name, true).await
+}
+
+async fn write_concept_name(
+    tx: &mut sqlx::SqliteConnection,
+    name: &crate::types::ConceptName,
+    allow_missing: bool,
+) -> Result<(), StoreError> {
+    crate::store::names::validate_name(name)?;
+    if !allow_missing {
+        let target_ok: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM concepts WHERE session_id = ?1 AND id = ?2) OR EXISTS(SELECT 1 FROM concept_names WHERE session_id = ?1 AND name_key = ?3 AND node_id = ?2)")
+            .bind(name.session_id.as_str()).bind(name.node_id.to_string()).bind(&name.name_key)
+            .fetch_one(&mut *tx).await.map_err(|e| db_err("check concept name target", e))?;
+        if !target_ok {
+            return Err(StoreError::Invariant(
+                "new concept name must target an active concept in its own session".into(),
+            ));
+        }
+    }
+    let collision: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM concepts WHERE session_id = ? AND canonical_key = ? AND id <> ?)")
+        .bind(name.session_id.as_str()).bind(&name.name_key).bind(name.node_id.to_string())
+        .fetch_one(&mut *tx).await.map_err(|e| db_err("check concept name", e))?;
+    if collision {
+        return Err(StoreError::Invariant(
+            "concept name collides with an existing concept key".into(),
+        ));
+    }
+    let result = sqlx::query(
+        "INSERT INTO concept_names (session_id, name, name_key, node_id) VALUES (?, ?, ?, ?) \
+        ON CONFLICT (session_id, name_key) DO UPDATE SET name = concept_names.name \
+        WHERE concept_names.node_id = excluded.node_id",
+    )
+    .bind(name.session_id.as_str())
+    .bind(&name.name)
+    .bind(&name.name_key)
+    .bind(name.node_id.0.to_string())
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| map_write_err(e, |m| format!("register concept name: {m}")))?;
+    if result.rows_affected() == 0 {
+        return Err(StoreError::Invariant(
+            "concept name target is immutable".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// One batched namespace check, so bulk flushes retain their bounded statement count.
+async fn check_named_concept_keys(
+    tx: &mut sqlx::SqliteConnection,
+    rows: &[ConceptRow<'_>],
+) -> Result<(), StoreError> {
+    let mut qb = sqlx::QueryBuilder::<sqlx::Sqlite>::new("WITH incoming(session_id, key, id) AS (");
+    qb.push_values(rows, |mut b, row| {
+        b.push_bind(row.concept.session_id.as_str())
+            .push_bind(&row.concept.canonical_key)
+            .push_bind(row.concept.id.to_string());
+    });
+    qb.push(") SELECT 1 FROM incoming i JOIN concept_names n ON n.session_id = i.session_id AND n.name_key = i.key WHERE n.node_id <> i.id UNION ALL SELECT 1 FROM incoming i JOIN retired_aliases r ON r.alias_id = i.id LIMIT 1");
+    if qb
+        .build()
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| db_err("check durable name namespace", e))?
+        .is_some()
+    {
+        return Err(StoreError::Invariant(
+            "concept conflicts with a durable name or retired alias id".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Preserve the complete retired alias record, idempotently and without rewriting history.
+pub(super) async fn retire_alias(
+    tx: &mut sqlx::SqliteConnection,
+    retired: &crate::types::RetiredAlias,
+) -> Result<(), StoreError> {
+    crate::store::names::validate_retired_alias(retired)?;
+    let payload = serde_json::to_string(retired)
+        .map_err(|e| StoreError::Backend(format!("serialize retired alias: {e}")))?;
+    let result = sqlx::query(
+        "INSERT INTO retired_aliases (session_id, alias_id, payload) VALUES (?, ?, ?) \
+        ON CONFLICT (session_id, alias_id) DO NOTHING",
+    )
+    .bind(retired.session_id.as_str())
+    .bind(retired.concept.id.0.to_string())
+    .bind(&payload)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| map_write_err(e, |m| format!("retire alias: {m}")))?;
+    if result.rows_affected() == 0 {
+        let old: String = sqlx::query_scalar(
+            "SELECT payload FROM retired_aliases WHERE session_id = ? AND alias_id = ?",
+        )
+        .bind(retired.session_id.as_str())
+        .bind(retired.concept.id.0.to_string())
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| StoreError::Backend(format!("read retired alias: {e}")))?;
+        if serde_json::from_str::<serde_json::Value>(&old).ok()
+            != serde_json::from_str::<serde_json::Value>(&payload).ok()
+        {
+            return Err(StoreError::Invariant(
+                "retired alias history is immutable".into(),
+            ));
+        }
+    }
+    Ok(())
 }

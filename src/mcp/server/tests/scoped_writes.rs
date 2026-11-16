@@ -370,6 +370,7 @@ async fn a_scoped_write_is_refused_for_a_grant_that_does_not_reach_the_layer() {
         repo_scope: None,
         agent_id: "agent-a".into(),
         concepts: vec![WireConcept {
+            name: None,
             content: "a narrow write".into(),
             concept_type: WireConceptType::Logic,
             depends_on: None,

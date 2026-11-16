@@ -5,6 +5,46 @@
 use super::admission::JobPayload;
 use crate::types::{ConceptType, NodeId, PinnedCitations, PinnedReference, WriteIntentPayload};
 
+#[test]
+fn named_declarations_and_text_reference_pins_fail_closed_on_old_decoders() {
+    let citations = PinnedCitations {
+        names: vec![crate::types::ConceptNaming {
+            content: "a decision".into(),
+            name: "release rule".into(),
+        }],
+        ..PinnedCitations::default()
+    };
+    let job = derive(citations.clone());
+    let intent = job.to_intent_payload();
+    assert!(matches!(intent, WriteIntentPayload::DeriveNamed { .. }));
+    let json = serde_json::to_string(&intent).unwrap();
+    assert!(serde_json::from_str::<v0_5_0::WriteIntentPayload>(&json).is_err());
+    let restored = JobPayload::from_intent_payload(serde_json::from_str(&json).unwrap()).unwrap();
+    assert_eq!(restored.to_intent_payload(), intent);
+    assert_eq!(restored.bytes(), job.bytes());
+    assert!(job.bytes() > derive(PinnedCitations::default()).bytes());
+    assert_eq!(
+        serde_json::to_string(&intent.settled().unwrap()).unwrap(),
+        crate::types::SETTLED_IMAGE_INTENT_PAYLOAD
+    );
+
+    // Even a previously missing spelling has an accepted resolution: None.
+    // A later declaration must be rechecked instead of creating an alias.
+    for target in [None, Some(NodeId::new())] {
+        let intent = action(vec![target]).to_intent_payload();
+        assert!(matches!(intent, WriteIntentPayload::ActionNamed { .. }));
+        let json = serde_json::to_string(&intent).unwrap();
+        assert!(serde_json::from_str::<v0_5_0::WriteIntentPayload>(&json).is_err());
+        let restored =
+            JobPayload::from_intent_payload(serde_json::from_str(&json).unwrap()).unwrap();
+        assert_eq!(restored.to_intent_payload(), intent);
+        assert_eq!(
+            serde_json::to_string(&intent.settled().unwrap()).unwrap(),
+            crate::types::SETTLED_IMAGE_INTENT_PAYLOAD
+        );
+    }
+}
+
 fn derive(citations: PinnedCitations) -> JobPayload {
     JobPayload::Derive {
         concepts: vec![("a decision".into(), ConceptType::Logic)],
@@ -20,6 +60,7 @@ fn action(pins: Vec<Option<NodeId>>) -> JobPayload {
 
 fn action_against(pins: Vec<Option<NodeId>>, against: Vec<PinnedReference>) -> JobPayload {
     JobPayload::Action {
+        legacy_text_pins: false,
         repo_scope: None,
         action: "ran it".into(),
         produces: vec![],
@@ -63,12 +104,32 @@ fn legacy_payloads_are_byte_identical() {
     }
 }
 
+#[test]
+fn old_action_variants_retain_their_legacy_text_pin_semantics() {
+    for kind in ["action", "action_cited", "action_named"] {
+        let mut json = serde_json::json!({"kind":kind,"action":"legacy work","produces":[],"modifies":[],
+            "depends_on":["00000000-0000-0000-0000-000000000007", "schema v1"],
+            "depends_on_pins":["00000000-0000-0000-0000-000000000007",null]});
+        if kind != "action" {
+            json["against"] = serde_json::json!([]);
+        }
+        let payload: WriteIntentPayload = serde_json::from_value(json).unwrap();
+        match JobPayload::from_intent_payload(payload).unwrap() {
+            JobPayload::Action {
+                legacy_text_pins, ..
+            } => assert_eq!(legacy_text_pins, kind != "action_named"),
+            other => panic!("unexpected replay job {other:?}"),
+        }
+    }
+}
+
 /// A cited derive is its own variant (Q18: an older build refuses to decode
 /// it rather than apply it without its citations), and its pins round-trip.
 #[test]
 fn a_cited_derive_is_its_own_variant_and_round_trips() {
     let target = NodeId(uuid::Uuid::from_u128(7));
     let citations = PinnedCitations {
+        names: Vec::new(),
         against: Vec::new(),
         references: vec![PinnedReference {
             content: "a decision".into(),
@@ -95,6 +156,7 @@ fn a_cited_derive_is_its_own_variant_and_round_trips() {
 fn a_cited_job_is_charged_its_citations() {
     let bare = derive(PinnedCitations::default()).bytes();
     let cited = derive(PinnedCitations {
+        names: Vec::new(),
         against: Vec::new(),
         references: vec![PinnedReference {
             content: "a decision".into(),
@@ -143,6 +205,7 @@ mod v0_5_0 {
 #[test]
 fn a_settled_cited_intent_decodes_under_the_0_5_0_payload() {
     let cited = derive(PinnedCitations {
+        names: Vec::new(),
         against: Vec::new(),
         references: vec![PinnedReference {
             content: "a decision".into(),
@@ -167,8 +230,12 @@ fn a_settled_cited_intent_decodes_under_the_0_5_0_payload() {
     // The settle pattern the SQL adapters match is this payload's prefix.
     assert!(unconsumed.starts_with(crate::types::DERIVE_CITED_PAYLOAD_LIKE.trim_end_matches('%')));
 
-    let pinned_action =
-        serde_json::to_string(&action(vec![Some(NodeId::new())]).to_intent_payload()).unwrap();
+    let target = NodeId::new();
+    let mut id_action = action(vec![Some(target)]);
+    if let JobPayload::Action { depends_on, .. } = &mut id_action {
+        *depends_on = vec![target.to_string()];
+    }
+    let pinned_action = serde_json::to_string(&id_action.to_intent_payload()).unwrap();
     assert!(matches!(
         serde_json::from_str::<v0_5_0::WriteIntentPayload>(&pinned_action).unwrap(),
         v0_5_0::WriteIntentPayload::Action { .. }
@@ -209,11 +276,13 @@ fn scoped(mut job: JobPayload, scope: &str) -> JobPayload {
 #[test]
 fn repo_scoped_intents_round_trip_and_refuse_downgrade() {
     let cited = PinnedCitations {
+        names: Vec::new(),
         references: vec![pinned("a decision", "README.md", 9)],
         against: vec![],
     };
     // #19(b): contradictions ride inside the wrapped payload too.
     let contradicting = PinnedCitations {
+        names: Vec::new(),
         references: vec![],
         against: vec![pinned("a decision", "docs/old.md", 10)],
     };
@@ -314,6 +383,7 @@ fn repo_scoped_replay_refuses_invalid_nested_or_image_payloads() {
 #[test]
 fn a_derive_s_contradictions_ride_in_the_cited_intent() {
     let cites = derive(PinnedCitations {
+        names: Vec::new(),
         references: vec![pinned("a decision", "00000000", 7)],
         against: vec![],
     })
@@ -323,17 +393,19 @@ fn a_derive_s_contradictions_ride_in_the_cited_intent() {
         r#"{"kind":"derive_cited","concepts":[["a decision","Logic"]],"pairs":[],"citations":{"references":[{"content":"a decision","reference":"00000000","target":"00000000-0000-0000-0000-000000000007"}]}}"#
     );
     let both = PinnedCitations {
+        names: Vec::new(),
         references: vec![pinned("a decision", "00000000", 7)],
         against: vec![pinned("a decision", "an older belief", 8)],
     };
     let only_against = PinnedCitations {
+        names: Vec::new(),
         references: vec![],
         against: vec![pinned("a decision", "an older belief", 8)],
     };
     for citations in [both, only_against] {
         let intent = derive(citations.clone()).to_intent_payload();
         let json = serde_json::to_string(&intent).unwrap();
-        assert!(json.starts_with(r#"{"kind":"derive_cited","#), "{json}");
+        assert!(json.starts_with(r#"{"kind":"derive_named","#), "{json}");
         assert!(
             json.contains(r#""against":[{"content":"a decision","reference":"an older belief""#),
             "{json}"
@@ -352,6 +424,7 @@ fn a_derive_s_contradictions_ride_in_the_cited_intent() {
     // Charged for, like a citation.
     let bare = derive(PinnedCitations::default()).bytes();
     let contradicting = derive(PinnedCitations {
+        names: Vec::new(),
         references: vec![],
         against: vec![pinned("a decision", "an older belief", 8)],
     })
@@ -372,7 +445,7 @@ fn an_action_with_against_is_its_own_variant_and_round_trips() {
     let json = serde_json::to_string(&intent).unwrap();
     assert_eq!(
         json,
-        r#"{"kind":"action_cited","action":"ran it","produces":[],"modifies":[],"depends_on":["schema v1"],"depends_on_pins":["00000000-0000-0000-0000-000000000003"],"against":[{"content":"ran it","reference":"chargers are fine","target":"00000000-0000-0000-0000-000000000009"}]}"#
+        r#"{"kind":"action_named","action":"ran it","produces":[],"modifies":[],"depends_on":["schema v1"],"depends_on_pins":["00000000-0000-0000-0000-000000000003"],"against":[{"content":"ran it","reference":"chargers are fine","target":"00000000-0000-0000-0000-000000000009"}]}"#
     );
     let back: WriteIntentPayload = serde_json::from_str(&json).unwrap();
     assert_eq!(back, intent);
@@ -400,6 +473,7 @@ fn an_action_with_against_is_its_own_variant_and_round_trips() {
 #[test]
 fn a_settled_contradicting_intent_decodes_under_the_0_5_0_payload() {
     let derive_against = derive(PinnedCitations {
+        names: Vec::new(),
         references: vec![],
         against: vec![pinned("a decision", "an older belief", 8)],
     })
@@ -409,13 +483,13 @@ fn a_settled_contradicting_intent_decodes_under_the_0_5_0_payload() {
     for (intent, kind, like) in [
         (
             &derive_against,
-            "derive_cited",
-            crate::types::DERIVE_CITED_PAYLOAD_LIKE,
+            "derive_named",
+            crate::types::DERIVE_NAMED_PAYLOAD_LIKE,
         ),
         (
             &action_cited,
-            "action_cited",
-            crate::types::ACTION_CITED_PAYLOAD_LIKE,
+            "action_named",
+            crate::types::ACTION_NAMED_PAYLOAD_LIKE,
         ),
     ] {
         let settled = serde_json::to_string(&intent.settled().expect("it settles")).unwrap();

@@ -503,6 +503,9 @@ pub(super) fn build_validated(
     plan: &ClassificationPlan,
     source: &GraphSnapshot,
 ) -> Result<SplitOutput, SplitError> {
+    if !source.names.is_empty() || !source.retired_aliases.is_empty() {
+        return refuse("session split cannot yet remap durable name identities or retired-alias history; the source is unchanged");
+    }
     let pending: Vec<&str> = source
         .write_intents
         .iter()
@@ -894,6 +897,8 @@ pub(super) fn build_validated(
             .collect();
 
         let snapshot = GraphSnapshot {
+            names: Vec::new(),
+            retired_aliases: Vec::new(),
             session_id: sid.clone(),
             root_goal: None,
             created_at: source.created_at,

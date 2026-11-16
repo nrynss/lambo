@@ -18,6 +18,7 @@ const OTHER_BELIEF: &str = "brand x runs true to size";
 
 fn against(content: &str, refs: &[&str]) -> ConceptCitations {
     ConceptCitations {
+        name: None,
         content: content.to_string(),
         depends_on: Vec::new(),
         against: refs.iter().map(|s| s.to_string()).collect(),

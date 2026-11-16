@@ -106,6 +106,9 @@ impl Annotation {
 /// One ranked hit in the presentation model.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct DetailedHit {
+    /// Up to three durable names, in normalized-key order, for discovery.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) names: Vec<String>,
     /// The hit's node id (issue #9, an additive field beside the pinned H3
     /// shape): the rendered context block now carries the short-form id, so
     /// the portal's byte-for-byte parity check, which deserializes this
@@ -181,6 +184,7 @@ impl DetailedHit {
     /// status the public [`RecallHit::is_canonical`] collapses to a bool.
     pub(crate) fn new(hit: &RecallHit, status: Option<CanonizationStatus>) -> Self {
         Self {
+            names: Vec::new(),
             node_id: hit.node_id,
             content: hit.content.clone(),
             concept_type: hit.concept_type,

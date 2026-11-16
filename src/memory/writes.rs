@@ -120,6 +120,16 @@ pub(super) fn resolve_concept(graph: &Graph, target: &str) -> Result<NodeId, Lam
 }
 
 impl Memory {
+    /// Bind a durable, normalized name to an existing concept identity.
+    /// Returns `false` for an identical repeated binding. Conflicting names
+    /// and concept keys are refused; a name is never retargeted.
+    pub fn declare_name(&self, name: &str, target: NodeId) -> Result<bool, LamboError> {
+        let _writing = self.begin_write_sync()?;
+        let changed = self.graph.write().declare_name(name, target)?;
+        self.daemon.wake();
+        Ok(changed)
+    }
+
     /// Declare the session's root goal (spec §9 drift anchor). Concepts the
     /// goal names are promoted to `Venerable` through the audited transition
     /// path, so the promotion is durable.
@@ -132,25 +142,21 @@ impl Memory {
         Ok(())
     }
 
-    /// Map `source` onto `canonical` for canonicalization (spec §7.1 step 4).
-    ///
-    /// # Not durable (pinned upstream contract S5)
-    ///
-    /// Synonyms are **RAM-local for this handle's lifetime**. There is no
-    /// `Mutation` kind for them by pinned S5 design, so no flush — not even
-    /// [`Memory::close`]'s final one — writes them, and `load_session` cannot
-    /// restore them: after a reattach the map is empty again.
-    ///
-    /// The consequence is not cosmetic. A synonym is what makes
-    /// `register_user` resolve onto the existing `create_user` concept; once
-    /// it is gone the same phrase **creates a duplicate concept** instead of
-    /// matching, and [`Memory::retract`]'s resolution loses the alias too. A
-    /// caller that needs the mapping across restarts must re-declare it on
-    /// every attach (do it right after `build()`, before the first
-    /// [`Memory::derive`]).
+    /// Declare a durable name for an existing concept. The target must already
+    /// exist; normalization and collisions follow the graph's name contract.
+    /// Prefer this operation to the legacy graph-only synonym importer.
     pub fn declare_synonym(&self, source: &str, canonical: &str) -> Result<(), LamboError> {
         let _writing = self.begin_write_sync()?;
-        self.graph.write().declare_synonym(source, canonical);
+        let mut graph = self.graph.write();
+        let (target, _) = crate::surface::resolve::resolve_existing_scoped(
+            &graph,
+            crate::types::ReferenceField::DependsOn,
+            None,
+            canonical,
+            None,
+        )?;
+        graph.declare_name(source, target)?;
+        self.daemon.wake();
         Ok(())
     }
 
@@ -265,8 +271,8 @@ impl Memory {
     /// [`ConceptCitations`] names one of `concepts` by its content and the
     /// existing concepts it depends on (`citing -Dependency-> cited`). Every
     /// reference must resolve to exactly one existing concept of this
-    /// session, by full node id, recall's short id or its canonical key (no
-    /// synonym is consulted); one that does not, or that would cite the
+    /// session, by full node id, recall's short id, a durable name or its
+    /// canonical key; one that does not, or that would cite the
     /// concept itself or close a `Dependency` cycle, refuses the whole call
     /// with [`LamboError::Reference`] and writes nothing. With no citations
     /// this is exactly [`Memory::derive_as`].
@@ -466,7 +472,7 @@ impl Memory {
         // Held across the embed await below, so a concurrent `close()` either
         // waits for this whole call or refuses it (T81-1), matching `derive`.
         let _writing = self.begin_write().await?;
-        // #36 PR 4: what each id-shaped `depends_on` entry names now; the
+        // What each `depends_on` entry names now, including missing text; the
         // apply below, after the embed await, refuses one that has changed.
         let pins = crate::graph::action::validate_pinned(&self.graph.read(), action)?;
         // #19(b): the contradictions, pinned the same way.

@@ -21,6 +21,7 @@ fn agent() -> AgentId {
 
 fn against(content: &str, refs: &[&str]) -> ConceptCitations {
     ConceptCitations {
+        name: None,
         content: content.to_string(),
         depends_on: Vec::new(),
         against: refs.iter().map(|s| s.to_string()).collect(),
@@ -208,6 +209,7 @@ fn against_has_its_own_budget() {
     let refs: Vec<String> = targets.iter().map(|t| format::short_id(*t)).collect();
     let refs: Vec<&str> = refs.iter().map(String::as_str).collect();
     let both = ConceptCitations {
+        name: None,
         content: NEWER.into(),
         depends_on: rulings.iter().map(|t| format::short_id(*t)).collect(),
         against: refs.iter().map(|s| s.to_string()).collect(),
@@ -293,6 +295,7 @@ fn a_changed_against_target_refuses_at_the_commit() {
         let ruling = concept(&mut g, i, "a ruling it rests on", ConceptType::Logic);
         let concepts = [(NEWER, ConceptType::Logic)];
         let call = ConceptCitations {
+            name: None,
             content: NEWER.into(),
             depends_on: vec![format::short_id(ruling)],
             against: vec!["c0ffee00".into()],
@@ -570,6 +573,7 @@ fn citing_and_contradicting_one_concept_in_one_call_is_refused() {
         (belief.0.to_string(), BELIEF.to_string()),
     ] {
         let call = ConceptCitations {
+            name: None,
             content: NEWER.into(),
             depends_on: vec![dep],
             against: vec![against_ref],
@@ -593,6 +597,7 @@ fn citing_and_contradicting_one_concept_in_one_call_is_refused() {
         &[
             against(NEWER, &[BELIEF]),
             ConceptCitations {
+                name: None,
                 content: other.into(),
                 depends_on: vec![BELIEF.into()],
                 against: vec![],
@@ -616,6 +621,7 @@ fn citing_and_contradicting_one_concept_in_one_call_is_refused() {
 
     // Forged pins handed straight to the commit are refused there.
     let forged = PinnedCitations {
+        names: Vec::new(),
         references: vec![PinnedReference {
             content: "a third claim".into(),
             reference: BELIEF.into(),

@@ -148,6 +148,7 @@ async fn queued_actions_and_derives_share_scoped_file_dependencies() {
         .edge_between(out.action_node, a, EdgeType::Dependency)
         .is_none());
     let citations = [ConceptCitations {
+        name: None,
         against: Vec::new(),
         content: "artifact has been checked".into(),
         depends_on: vec!["src/main.rs".into()],
@@ -198,6 +199,7 @@ async fn scoped_citations_refuse_legacy_fallback_but_allow_explicit_ids() {
     let context = ParentOf::none().with_repo_scope(Some("repo-a"));
     let concepts = [("documented the build", ConceptType::Logic)];
     let citations = [ConceptCitations {
+        name: None,
         against: Vec::new(),
         content: concepts[0].0.into(),
         depends_on: vec!["README.md".into()],
@@ -210,6 +212,7 @@ async fn scoped_citations_refuse_legacy_fallback_but_allow_explicit_ids() {
     assert!(matches!(err, LamboError::Reference(r) if r.kind == ReferenceRefusalKind::Missing));
     assert_eq!(mem.graph.read().snapshot(), before);
     let explicit = [ConceptCitations {
+        name: None,
         against: Vec::new(),
         content: concepts[0].0.into(),
         depends_on: vec![old.to_string()],
@@ -583,6 +586,7 @@ async fn scoped_against_contradicts_only_the_scoped_path() {
         let agent = AgentId::new("agent-a");
         let [legacy, a, b] = three_readmes(&mem, &agent);
         let against = |content: &str| ConceptCitations {
+            name: None,
             content: content.into(),
             depends_on: Vec::new(),
             against: vec!["README.md".into()],
@@ -695,6 +699,7 @@ async fn deferred_scoped_against_replays_under_its_scope() {
             &concepts,
             &ParentOf::none().with_repo_scope(Some("repo-b")),
             &[ConceptCitations {
+                name: None,
                 content: concepts[0].0.into(),
                 depends_on: Vec::new(),
                 against: vec!["README.md".into()],
@@ -732,8 +737,8 @@ async fn deferred_scoped_against_replays_under_its_scope() {
         .filter(|i| i.outcome.is_none())
         .map(|i| match &i.payload {
             WriteIntentPayload::RepoScoped { payload, .. } => match payload.as_ref() {
-                WriteIntentPayload::DeriveCited { .. } => "scoped derive_cited",
-                WriteIntentPayload::ActionCited { .. } => "scoped action_cited",
+                WriteIntentPayload::DeriveNamed { .. } => "scoped derive_named",
+                WriteIntentPayload::ActionNamed { .. } => "scoped action_named",
                 _ => "scoped other",
             },
             _ => "unscoped",
@@ -741,7 +746,7 @@ async fn deferred_scoped_against_replays_under_its_scope() {
         .collect();
     let mut kinds = kinds;
     kinds.sort();
-    assert_eq!(kinds, ["scoped action_cited", "scoped derive_cited"]);
+    assert_eq!(kinds, ["scoped action_named", "scoped derive_named"]);
 
     let mem2 = hybrid_on(
         &inner,
@@ -1002,6 +1007,7 @@ async fn scoped_inference_keeps_prose_and_non_resource_concepts_legacy() {
                 &concepts,
                 &ParentOf::none().with_repo_scope(Some("repo-a")),
                 &[ConceptCitations {
+                    name: None,
                     content: concepts[0].0.into(),
                     depends_on: vec!["config.toml".into(), "TCP/IP".into()],
                     against: Vec::new(),
@@ -1076,6 +1082,7 @@ async fn scoped_text_naming_both_identities_is_ambiguous() {
             &concepts,
             &ParentOf::none().with_repo_scope(Some("repo-a")),
             &[ConceptCitations {
+                name: None,
                 content: concepts[0].0.into(),
                 depends_on: vec!["config.toml".into()],
                 against: Vec::new(),
@@ -1423,6 +1430,7 @@ async fn dependency_questions_about_a_scoped_path_name_the_repository() {
             &[(dependent, ConceptType::Logic)],
             &ParentOf::none().with_repo_scope(Some(repo)),
             &[ConceptCitations {
+                name: None,
                 content: dependent.into(),
                 depends_on: vec!["README.md".into()],
                 against: Vec::new(),
@@ -1475,6 +1483,7 @@ async fn dependency_questions_about_a_scoped_path_name_the_repository() {
         &[("docs build guide", ConceptType::Logic)],
         &ParentOf::none(),
         &[ConceptCitations {
+            name: None,
             content: "docs build guide".into(),
             depends_on: vec!["README.md".into()],
             against: Vec::new(),

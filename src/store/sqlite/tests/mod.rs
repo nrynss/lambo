@@ -15,6 +15,7 @@ mod connection;
 mod demotion_reason;
 mod erase;
 mod leases;
+mod names;
 mod persistence;
 mod read_only;
 // #148: the provision re-key for unstemmed identifier tokens.

@@ -8,6 +8,110 @@ use crate::types::EdgeType;
 
 const RULING: &str = "the writer lease stays with its holder until the holder releases it";
 
+#[tokio::test]
+async fn durable_names_on_the_wire_resolve_and_conflicts_write_nothing() {
+    let s = server("mcp-durable-names").await;
+    let out = call(
+        &s,
+        "lambo_derive",
+        json!({"agent_id":"agent-a", "concepts":[{
+            "content":RULING,"concept_type":"logic","name":"Lease café"
+        }]}),
+    )
+    .await;
+    assert_eq!(out.is_error, Some(false), "{}", text_of(&out));
+    let target = s
+        .mem
+        .graph()
+        .read()
+        .name_target("LEASE cafe\u{301}")
+        .unwrap();
+    let out = call(
+        &s,
+        "lambo_record_action",
+        json!({"agent_id":"agent-a",
+        "action":"verified the named contract","depends_on":["LEASE cafe\u{301}"]}),
+    )
+    .await;
+    assert_eq!(out.is_error, Some(false), "{}", text_of(&out));
+    {
+        let graph = s.mem.graph().read();
+        let action = graph
+            .concepts()
+            .find(|c| c.content == "verified the named contract")
+            .unwrap()
+            .id;
+        assert!(graph
+            .edge_between(action, target, EdgeType::Dependency)
+            .is_some());
+        assert_eq!(graph.names().count(), 1);
+    }
+    let before = s.mem.graph().read().snapshot();
+    let out = call(
+        &s,
+        "lambo_derive",
+        json!({"agent_id":"agent-a", "concepts":[{
+            "content":"a different fact","concept_type":"logic","name":"lease CAFÉ"
+        }]}),
+    )
+    .await;
+    assert_eq!(out.is_error, Some(true), "{}", text_of(&out));
+    assert_eq!(s.mem.graph().read().snapshot(), before);
+    s.mem.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn repaired_alias_ids_remain_inspectable_and_refuse_new_citations() {
+    let s = server("mcp-retired-alias").await;
+    let target = ruling(&s).await;
+    let ids = derive_created(
+        &s,
+        "agent-a",
+        json!([{
+            "content":"writer lease","concept_type":"entity"
+        }]),
+    )
+    .await;
+    let alias = NodeId(ids[0].parse().unwrap());
+    let out = call(
+        &s,
+        "lambo_record_action",
+        json!({"agent_id":"agent-a",
+        "action":"followed the original alias","depends_on":[alias.to_string()]}),
+    )
+    .await;
+    assert_eq!(out.is_error, Some(false), "{}", text_of(&out));
+    crate::graph::names::upgrade(&mut s.mem.graph().write(), &[(alias, target)]).unwrap();
+    for focus in [alias.to_string(), format::short_id(alias)] {
+        let out = call(
+            &s,
+            "lambo_inspect",
+            json!({"agent_id":"agent-a","focus":focus}),
+        )
+        .await;
+        assert_eq!(out.is_error, Some(false), "{}", text_of(&out));
+        assert!(text_of(&out).contains("retired alias"));
+        let retired = &out.structured_content.as_ref().unwrap()["retired_alias"];
+        assert_eq!(retired["replacement"], json!(target));
+        assert_eq!(retired["content"], "writer lease");
+        assert!(retired.get("embedding").is_none());
+    }
+    for reference in [alias.to_string(), format::short_id(alias)] {
+        let before = s.mem.graph().read().snapshot();
+        let out = call(
+            &s,
+            "lambo_record_action",
+            json!({"agent_id":"agent-a",
+            "action":"must use replacement","depends_on":[reference]}),
+        )
+        .await;
+        assert_eq!(out.is_error, Some(true), "{}", text_of(&out));
+        assert!(text_of(&out).contains("retired"), "{}", text_of(&out));
+        assert_eq!(s.mem.graph().read().snapshot(), before);
+    }
+    s.mem.close().await.unwrap();
+}
+
 async fn ruling(s: &LamboServer) -> NodeId {
     let ids = derive_created(
         s,
@@ -145,11 +249,11 @@ async fn the_surface_limits_are_bad_params() {
         assert_eq!(out.is_error, Some(true));
         assert!(text_of(&out).contains(says), "{}", text_of(&out));
     }
-    // Review H1: `name` was removed before release; the wire refuses it.
-    let err = serde_json::from_value::<DeriveParams>(json!({"agent_id": "agent-a",
+    // #146 restores names with durable identity semantics.
+    let named = serde_json::from_value::<DeriveParams>(json!({"agent_id": "agent-a",
         "concepts": [{"content": "a", "concept_type": "logic", "name": "a name"}]}))
-    .unwrap_err();
-    assert!(err.to_string().contains("unknown field `name`"), "{err}");
+    .unwrap();
+    assert_eq!(named.concepts[0].name.as_deref(), Some("a name"));
     let five: Vec<serde_json::Value> = (0..5)
         .map(|n| {
             json!({"content": format!("c{n}"), "concept_type": "logic",

@@ -57,6 +57,7 @@ mod embeddings;
 mod invariants;
 mod keys;
 mod mutation_log;
+pub mod names;
 mod root_goal;
 mod snapshot;
 mod transitions;
@@ -94,6 +95,8 @@ pub struct Graph {
     temporal_chain: Vec<NodeId>,
     /// source_key -> canonical_key (direct lookup only, no transitivity).
     synonyms: BTreeMap<String, String>,
+    names: BTreeMap<String, crate::types::ConceptName>,
+    retired_aliases: BTreeMap<String, crate::types::RetiredAlias>,
     /// Advisory soft locks (spec §11). RAM-local: no `Mutation` kind exists, so
     /// these round-trip through [`GraphSnapshot`] but never enter the write-behind log.
     reservations: Vec<Reservation>,
@@ -162,6 +165,8 @@ impl Graph {
             incoming: HashMap::new(),
             temporal_chain: Vec::new(),
             synonyms: BTreeMap::new(),
+            names: BTreeMap::new(),
+            retired_aliases: BTreeMap::new(),
             reservations: Vec::new(),
             canonization_events: Vec::new(),
             root_goal: None,
@@ -195,6 +200,9 @@ impl Graph {
     /// entry) but must keep its chain position (`previous_id` unchanged). An id
     /// that already names a concept is refused.
     pub fn insert_interaction(&mut self, i: Interaction) -> Result<(), LamboError> {
+        if self.retired_alias(i.id).is_some() {
+            return Err(invariant("a retired alias id cannot be reused"));
+        }
         if i.session_id != self.session_id {
             return Err(invariant(format!(
                 "interaction {} session {} != graph {}",
@@ -306,6 +314,17 @@ impl Graph {
     /// `Derives` edge reinforces if already present (duplicate natural-key
     /// write).
     pub fn insert_concept(&mut self, c: Concept, derives_from: NodeId) -> Result<(), LamboError> {
+        if self.retired_alias(c.id).is_some() {
+            return Err(invariant("a retired alias id cannot be reused"));
+        }
+        if let Some(name) = self.names.get(&c.canonical_key)
+            && name.node_id != c.id
+        {
+            return Err(invariant(format!(
+                "concept key is reserved by durable name for {}",
+                name.node_id
+            )));
+        }
         if c.session_id != self.session_id {
             return Err(invariant(format!(
                 "concept {} session {} != graph {}",

@@ -18,6 +18,7 @@ fn agent() -> AgentId {
 
 fn cite(content: &str, depends_on: &[&str]) -> ConceptCitations {
     ConceptCitations {
+        name: None,
         content: content.to_string(),
         depends_on: depends_on.iter().map(|s| s.to_string()).collect(),
         against: Vec::new(),
@@ -379,6 +380,7 @@ fn the_commit_and_the_pre_pass_refuse_the_same_kinds() {
         let concepts = [(content, ConceptType::Logic)];
         let pre = validate(&g, &concepts, &[cite(content, &[reference])]).unwrap_err();
         let forged = PinnedCitations {
+            names: Vec::new(),
             against: Vec::new(),
             references: vec![PinnedReference {
                 content: content.to_string(),
@@ -687,9 +689,10 @@ fn record_action_pins_id_entries_and_refuses_a_changed_one() {
         RULING,
         ConceptType::Logic,
     );
-    assert!(validate_pinned(&g, &action(&[RULING, "schema v1"]))
-        .unwrap()
-        .is_empty());
+    assert_eq!(
+        validate_pinned(&g, &action(&[RULING, "schema v1"])).unwrap(),
+        vec![Some(ruling), None]
+    );
     let deps = ["feed0000", "schema v1", "abcabcab"];
     let pins = validate_pinned(&g, &action(&deps)).unwrap();
     assert_eq!(pins, vec![Some(ruling), None, None]);

@@ -32,6 +32,7 @@
             "group": "Guides",
             "pages": [
               "agent-skill",
+              "migration",
               "end-to-end"
             ]
           }

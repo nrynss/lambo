@@ -269,7 +269,21 @@ pub(crate) fn resolve_anchor_choice(graph: &Graph, query: &str) -> Option<Anchor
     let mut candidates = Vec::new();
     let mut spans = Vec::new();
     let mut marker_clauses = Vec::new();
-    for c in graph.concepts() {
+    let named_subjects: Vec<_> = graph
+        .names()
+        .filter_map(|n| {
+            let crate::types::Node::Concept(c) = graph.node(n.node_id)? else {
+                return None;
+            };
+            if anchor_text(&c.content) == anchor_text(&n.name) {
+                return None;
+            }
+            let mut subject = c.clone();
+            subject.content = n.name.clone();
+            Some(subject)
+        })
+        .collect();
+    for c in graph.concepts().chain(named_subjects.iter()) {
         // A needle longer than the haystack has no occurrence.
         let Some(lower_c) = concept_anchor_text(&c.content, lower_q.len()) else {
             continue;
@@ -708,6 +722,7 @@ pub(crate) fn try_structural_with(
             &hit,
             (c.canonization_status != CanonizationStatus::None).then_some(c.canonization_status),
         );
+        detailed_hit.names = graph.display_names(c.id);
         // T9-R1-5: canonical structural hits render the §13 load-bearing-pillar
         // warning exactly as the blended pipeline does (assemble), so the
         // structural and blend surfaces look identical.
@@ -719,7 +734,10 @@ pub(crate) fn try_structural_with(
                 .push(Annotation::new(AnnotationKind::LoadBearing, text.clone()));
             lines.push(text);
         }
-        blocks.push(format::ContextBlock::for_hit(&hit, &lines));
+        blocks.push(
+            format::ContextBlock::for_hit(&hit, &lines)
+                .with_meta(&format::names_meta(&detailed_hit.names)),
+        );
         hits.push(hit);
         detailed.push(detailed_hit);
     }

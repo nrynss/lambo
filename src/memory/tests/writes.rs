@@ -800,11 +800,11 @@ async fn declared_synonyms_merge_on_derive() {
     let store: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
     let mem = memory_on(store, "synonyms").await;
 
-    mem.declare_synonym("register_user", "create_user").unwrap();
     let first = mem
         .derive(&[("create_user", ConceptType::Logic)], &ParentOf::none())
         .await
         .unwrap();
+    mem.declare_synonym("register_user", "create_user").unwrap();
     let second = mem
         .derive(&[("register_user", ConceptType::Logic)], &ParentOf::none())
         .await

@@ -165,8 +165,43 @@ impl Graph {
                     s.session_id, sid
                 )));
             }
-            g.synonyms
-                .insert(s.source_key.clone(), s.canonical_key.clone());
+            if g.synonyms
+                .insert(s.source_key.clone(), s.canonical_key.clone())
+                .is_some()
+            {
+                return Err(invariant("duplicate legacy synonym source in snapshot"));
+            }
+        }
+        for retired in &snap.retired_aliases {
+            if retired.session_id != sid
+                || retired.concept.session_id != sid
+                || retired.target == retired.concept.id
+                || g.node(retired.concept.id).is_some()
+                || retired.edges.iter().any(|e| {
+                    e.session_id != sid
+                        || (e.source != retired.concept.id && e.target != retired.concept.id)
+                })
+                || g.retired_aliases
+                    .insert(retired.concept.id.to_string(), retired.clone())
+                    .is_some()
+            {
+                return Err(invariant("invalid or duplicate retired alias in snapshot"));
+            }
+        }
+        for name in &snap.names {
+            let key = super::names::name_key(&name.name)?;
+            if name.session_id != sid
+                || key != name.name_key
+                || matches!(g.node(name.node_id), Some(Node::Interaction(_)))
+                || g.retired_alias(name.node_id).is_some()
+                || g.concepts()
+                    .any(|c| c.canonical_key == key && c.id != name.node_id)
+                || g.names.insert(key, name.clone()).is_some()
+            {
+                return Err(invariant(
+                    "invalid, conflicting or duplicate name in snapshot",
+                ));
+            }
         }
         for r in &snap.reservations {
             if r.session_id != sid {
@@ -252,6 +287,8 @@ impl Graph {
         synonyms.sort_by(|a, b| a.source_key.cmp(&b.source_key));
 
         GraphSnapshot {
+            names: self.names.values().cloned().collect(),
+            retired_aliases: self.retired_aliases.values().cloned().collect(),
             session_id: self.session_id.clone(),
             root_goal: self.root_goal.clone(),
             created_at: self.created_at,

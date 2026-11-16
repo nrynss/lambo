@@ -122,12 +122,14 @@ fn refused(msg: impl Into<String>) -> StoreError {
 }
 
 /// Tables whose rows carry a `session_id`.
-const SESSION_TABLES: [&str; 11] = [
+const SESSION_TABLES: [&str; 13] = [
     "sessions",
     "interactions",
     "concepts",
     "edges",
     "synonyms",
+    "concept_names",
+    "retired_aliases",
     "canonization_events",
     "reservations",
     "session_leases",
@@ -334,6 +336,12 @@ async fn insert_target(
         upsert_edges(&mut *tx, chunk).await?;
     }
     step(hook, "edges")?;
+    for name in &s.names {
+        super::write_rows::seed_concept_name(&mut *tx, name).await?;
+    }
+    for retired in &s.retired_aliases {
+        super::write_rows::retire_alias(&mut *tx, retired).await?;
+    }
     for syn in &s.synonyms {
         sqlx::query(
             "INSERT INTO synonyms (session_id, source_key, canonical_key) VALUES (?, ?, ?)",

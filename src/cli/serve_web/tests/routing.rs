@@ -264,6 +264,7 @@ pub(super) async fn two_sessions() -> Arc<MemoryStore> {
     crate::cli::derive::run(
         backends_on(store.clone()),
         crate::cli::derive::Args {
+            name: None,
             repo_scope: None,
             session: "t4-b".into(),
             agent: "agent-b".into(),
@@ -797,6 +798,7 @@ async fn two_sessions_stay_apart_under_concurrent_clients() {
     crate::cli::derive::run(
         other_model,
         crate::cli::derive::Args {
+            name: None,
             repo_scope: None,
             session: "t4-b".into(),
             agent: "agent-b".into(),
@@ -919,6 +921,7 @@ async fn freshness_and_counts_are_per_session() {
     crate::cli::derive::run(
         backends_on(store.clone()),
         crate::cli::derive::Args {
+            name: None,
             repo_scope: None,
             session: "t4-b".into(),
             agent: "agent-b".into(),

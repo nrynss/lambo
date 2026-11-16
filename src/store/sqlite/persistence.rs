@@ -168,6 +168,7 @@ impl SqliteStore {
     /// survives `load_session` instead of being dropped.
     #[cfg(feature = "fixtures")]
     pub async fn seed(&self, snapshot: &GraphSnapshot) -> Result<(), StoreError> {
+        crate::store::names::validate_snapshot(snapshot)?;
         let embedding_dim = snapshot
             .embedding
             .as_ref()
@@ -250,6 +251,12 @@ impl SqliteStore {
         }
         for chunk in seed_edge_rows(&snapshot.edges).chunks(BULK_LIMITS.edges) {
             upsert_edges(&mut *tx, chunk).await?;
+        }
+        for name in &snapshot.names {
+            super::write_rows::seed_concept_name(&mut *tx, name).await?;
+        }
+        for retired in &snapshot.retired_aliases {
+            super::write_rows::retire_alias(&mut *tx, retired).await?;
         }
         for s in &snapshot.synonyms {
             sqlx::query(
@@ -419,6 +426,12 @@ impl SqliteStore {
                 Mutation::ConsumeWriteIntent { session_id, .. }
                 | Mutation::RecordAccess { session_id, .. } => {
                     sessions.insert(session_id.0.clone());
+                }
+                Mutation::SetConceptName { name } => {
+                    sessions.insert(name.session_id.0.clone());
+                }
+                Mutation::RetireAlias { retired } => {
+                    sessions.insert(retired.session_id.0.clone());
                 }
                 Mutation::DeleteNode { .. } | Mutation::DeleteEdge { .. } => {}
             }

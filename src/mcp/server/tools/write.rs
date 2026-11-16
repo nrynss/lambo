@@ -76,7 +76,11 @@ fn wire_citations(p: &DeriveParams) -> Result<Vec<ConceptCitations>, CallToolRes
     for c in &p.concepts {
         let depends_on: Vec<String> = c.depends_on.iter().flatten().map(|r| r.0.clone()).collect();
         let against: Vec<String> = c.against.iter().flatten().map(|r| r.0.clone()).collect();
-        if depends_on.is_empty() && against.is_empty() {
+        if let Some(name) = &c.name {
+            require_nonempty("concept.name", name).map_err(bad_param)?;
+            check_size("concept.name", name)?;
+        }
+        if depends_on.is_empty() && against.is_empty() && c.name.is_none() {
             continue;
         }
         let (on_cited, on_contradicted) = per_content.entry(c.content.as_str()).or_default();
@@ -100,6 +104,7 @@ fn wire_citations(p: &DeriveParams) -> Result<Vec<ConceptCitations>, CallToolRes
         )?;
         out.push(ConceptCitations {
             content: c.content.clone(),
+            name: c.name.clone(),
             depends_on,
             against,
         });

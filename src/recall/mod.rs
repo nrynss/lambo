@@ -8,6 +8,8 @@ pub mod expand;
 pub mod format;
 pub mod fusion;
 pub mod layered;
+#[cfg(test)]
+mod names_tests;
 pub mod query_cache;
 pub mod query_vector;
 pub mod redundancy;

@@ -95,6 +95,7 @@ async fn contradicted(mem: &Memory) -> (NodeId, NodeId) {
             &[(NEWER, ConceptType::Observation)],
             &ParentOf::none(),
             &[ConceptCitations {
+                name: None,
                 content: NEWER.to_string(),
                 depends_on: Vec::new(),
                 against: vec![format::short_id(belief)],
@@ -189,6 +190,7 @@ async fn the_stale_fact_is_never_returned_without_its_correction() {
                 &[(dependent.as_str(), ConceptType::Observation)],
                 &ParentOf::none(),
                 &[ConceptCitations {
+                    name: None,
                     content: dependent.clone(),
                     depends_on: vec![format::short_id(old)],
                     against: Vec::new(),
@@ -214,6 +216,7 @@ async fn the_stale_fact_is_never_returned_without_its_correction() {
             &[(NEW, ConceptType::Logic)],
             &ParentOf::none(),
             &[ConceptCitations {
+                name: None,
                 content: NEW.to_string(),
                 depends_on: Vec::new(),
                 against: vec![format::short_id(old)],
@@ -440,6 +443,7 @@ async fn gc_keeps_the_correction_while_the_contradicted_fact_is_here() {
             &[(NEWER, ConceptType::Observation)],
             &ParentOf::none(),
             &[ConceptCitations {
+                name: None,
                 content: NEWER.to_string(),
                 depends_on: Vec::new(),
                 against: vec![format::short_id(belief)],
