@@ -149,18 +149,21 @@ use shutdown::final_flush;
 ///     .build().await?;
 ///
 /// mem.set_root_goal(&["doom-style FPS", "3D renderer"])?;
-/// mem.declare_synonym("register_user", "create_user")?;
 ///
 /// // `derive` is async (hybrid matching is async; one shape for both strategies).
 /// mem.derive(&[
 ///     ("user schema", ConceptType::Entity),
+///     ("create_user", ConceptType::Entity),
 ///     ("must stay backward compatible", ConceptType::Constraint),
 /// ], &ParentOf::none()).await?;
+///
+/// // A durable name binds an existing concept, so derive its target first.
+/// mem.declare_synonym("register_user", "create_user")?;
 ///
 /// mem.record_action(&Action {
 ///     action: "created migrations/003.sql",
 ///     produces: &["migrations/003.sql"],
-///     depends_on: &["user schema"],
+///     depends_on: &["user schema", "register_user"],
 ///     modifies: &[],
 ///     event_time: None,
 ///     repo_scope: None,
@@ -191,6 +194,9 @@ use shutdown::final_flush;
 /// mem.close().await?;
 /// let snap = store.load_session(&lambo::SessionId::new("project-doom")).await.unwrap();
 /// assert!(snap.concepts.iter().any(|c| c.content == "user schema"));
+/// let target = snap.concepts.iter().find(|c| c.content == "create_user").unwrap();
+/// assert!(snap.names.iter().any(|n| n.name == "register_user" && n.node_id == target.id));
+/// assert!(!snap.concepts.iter().any(|c| c.content == "register_user"));
 /// # Ok(())
 /// # }
 /// # #[cfg(all(feature = "store-memory", feature = "embed-fixture"))]
