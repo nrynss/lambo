@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.12.0 (2026-11-16)
+
+### Durable concept names
+
 - Durable, normalized concept names bind to fixed IDs and work in citations,
   contradictions, inspection and recall. Named declarations and queued writes
   preserve identity across rollback, shutdown and restart replay.
@@ -14,6 +18,31 @@
 - Existing SQL stores must run `lambo provision` for the two additional tables.
   No re-embedding is needed. Downgrading after names or repair is unsupported;
   restore the pre-upgrade backup to return to an older binary.
+- Drain accepted writes, stop store writers and take a consistent backup before
+  provisioning or applying repairs. Review exact bindings and alias-ID pairs
+  before applying with the preview's `source_epoch`. See the
+  [migration guide](https://nrynss.github.io/lambo/migration/) for the complete
+  upgrade, verification and recovery procedure. Migration never guesses lost
+  names or approves repairs from similarity alone.
+- Rust callers using explicit struct literals must add `name: None` for
+  unnamed `ConceptCitations` and preserve the new `GraphSnapshot.names` and
+  `GraphSnapshot.retired_aliases` fields. Custom adapters and export/import
+  tools must retain both names and retired history. Session splitting refuses
+  snapshots containing them until identity remapping is supported.
+
+### Fixed and documented
+
+- The deterministic demo declares its complete fixed alias set while warming
+  up GC. Recall now displays durable names, so stopping at a scheduler-dependent
+  prefix could make otherwise identical runs produce different output.
+- Adapter-free builds compile without unused store validators or test helpers.
+  The `Memory` example creates a synonym target before naming it and verifies
+  the durable binding without creating an alias Entity. Full CI includes
+  doctests as well as the isolated feature configurations.
+- Expanded the API, CLI and MCP references with durable-name examples, receipt
+  handling and retired-ID inspection. Added the public migration guide and
+  removed the hackathon submission page. API and migration reference/site
+  copies now participate in the documentation mirror check.
 
 ## 0.11.0 (2026-11-11)
 

@@ -72,11 +72,11 @@
 //!
 //! So the demo does two things after the last write:
 //!
-//! * **Settle** (`settle_gc_survived`): declare one session synonym at a
-//!   time — a real spec §7.1 call, agent A teaching the session its aliases —
-//!   and wait for the resulting GC sweep, until **every** concept clears the
-//!   `gc_survived >= 3` floor. Stage 1's survival gate is then uniformly open
-//!   and admission is decided by score alone.
+//! * **Settle** (`settle_gc_survived`): declare the same complete list of
+//!   session aliases, one at a time — real calls by agent A — and wait for
+//!   each resulting GC sweep. Every concept clears the `gc_survived >= 3`
+//!   floor, and recall's displayed durable names are independent of how
+//!   many sweeps happened during the scripted writes.
 //! * **Quiesce** (`quiesce`): keep polling until the audit trail stops
 //!   growing across [`QUIESCE_STABLE_CYCLES`] consecutive completed
 //!   canonization cycles.
@@ -303,8 +303,9 @@ pub const DEMO_CONFLICT_RECENCY_WINDOW: Duration = Duration::from_secs(
 
 /// Session aliases agent A declares while settling `gc_survived`. Each is a
 /// real spec §7.1 synonym for `user schema`; each also advances the mutation
-/// epoch by one, which is what funds the next GC sweep. Sized with slack —
-/// three sweeps are needed, the extras are never reached on a healthy run.
+/// epoch by one, which is what funds the next GC sweep. The complete list is
+/// declared on every run, even if Stage 1's floor has already been reached:
+/// durable names are visible in recall and belong to the deterministic script.
 pub const SETTLE_ALIASES: &[&str] = &[
     "user_schema",
     "users table",
@@ -1262,34 +1263,31 @@ fn assert_shape(
 /// GC runs on session mutations, so an idle session's counters stop climbing
 /// (`src/daemon/mod.rs`, NEW-2). Each synonym advances the epoch by one, which
 /// funds exactly one sweep; the wait is on the observed counter, never on a
-/// duration. See the module docs for why this is what makes the fixed point
-/// unique.
+/// duration. Always declare the full fixed alias list: stopping when the floor
+/// is reached would expose a scheduler-dependent name set in recall.
 async fn settle_gc_survived(mem: &Memory, n: &mut Narrator) -> Result<(), CliError> {
-    let mut used = 0usize;
-    loop {
+    for alias in SETTLE_ALIASES {
         let floor = min_gc_survived(mem.graph());
-        if floor >= STAGE1_MIN_GC_SURVIVED {
-            n.say(format!(
-                "  gc_survived floor {floor} ≥ {STAGE1_MIN_GC_SURVIVED} — Stage 1's survival \
-                 gate is open for every concept"
-            ));
-            return Ok(());
-        }
-        let alias = SETTLE_ALIASES.get(used).copied().ok_or_else(|| {
-            CliError::Runtime(format!(
-                "demo: ran out of settle aliases with gc_survived floor {floor} \
-                 (< {STAGE1_MIN_GC_SURVIVED}); GC is not sweeping"
-            ))
-        })?;
         mem.declare_synonym(alias, USER_SCHEMA)
             .map_err(|e| CliError::Runtime(format!("declare_synonym: {e}")))?;
-        used += 1;
         let graph = mem.graph().clone();
         wait_until(&format!("gc sweep after synonym '{alias}'"), move || {
             min_gc_survived(&graph) > floor
         })
         .await?;
     }
+    let floor = min_gc_survived(mem.graph());
+    if floor < STAGE1_MIN_GC_SURVIVED {
+        return Err(CliError::Runtime(format!(
+            "demo: ran out of settle aliases with gc_survived floor {floor} \
+             (< {STAGE1_MIN_GC_SURVIVED}); GC is not sweeping"
+        )));
+    }
+    n.say(format!(
+        "  gc_survived floor {floor} ≥ {STAGE1_MIN_GC_SURVIVED} — Stage 1's survival \
+         gate is open for every concept"
+    ));
+    Ok(())
 }
 
 /// Wait for `user schema`'s three hops, narrating each as the audit trail
