@@ -15,6 +15,8 @@ pub struct Args {
     pub session: String,
     pub agent: String,
     pub content: String,
+    /// Optional durable name for the first concept.
+    pub name: Option<String>,
     pub kind: ConceptKind,
     pub parent_of: Vec<String>,
     pub concept: Vec<String>,
@@ -115,16 +117,21 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
         require_nonempty("against", r)?;
         check_size_cli("against", r)?;
     }
-    let citations: Vec<ConceptCitations> = if args.depends_on.is_empty() && args.against.is_empty()
-    {
-        Vec::new()
-    } else {
-        vec![ConceptCitations {
-            content: args.content.clone(),
-            depends_on: args.depends_on.clone(),
-            against: args.against.clone(),
-        }]
-    };
+    if let Some(name) = &args.name {
+        require_nonempty("name", name)?;
+        check_size_cli("name", name)?;
+    }
+    let citations: Vec<ConceptCitations> =
+        if args.depends_on.is_empty() && args.against.is_empty() && args.name.is_none() {
+            Vec::new()
+        } else {
+            vec![ConceptCitations {
+                content: args.content.clone(),
+                name: args.name.clone(),
+                depends_on: args.depends_on.clone(),
+                against: args.against.clone(),
+            }]
+        };
 
     let mem = open_writer(backends, &args.session, &args.agent).await?;
     let refs: Vec<(&str, ConceptType)> = concepts.iter().map(|(c, t)| (c.as_str(), *t)).collect();

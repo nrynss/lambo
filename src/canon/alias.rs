@@ -346,10 +346,14 @@ pub fn parse_map(g: &Graph, text: &str) -> (Vec<AliasPair>, Vec<AliasRefusal>) {
                 node,
                 leg: Leg::NodeId | Leg::ShortId,
             } => Ok(node),
-            Resolved::Concept { leg: Leg::Key, .. } => Err((RefusalKind::ByContent, Vec::new())),
+            Resolved::Concept {
+                leg: Leg::Key | Leg::Name,
+                ..
+            } => Err((RefusalKind::ByContent, Vec::new())),
             Resolved::Missing => Err((RefusalKind::Unresolved, Vec::new())),
             Resolved::Ambiguous(ids) => Err((RefusalKind::Ambiguous, ids)),
             Resolved::NotAConcept(_) => Err((RefusalKind::NotAConcept, Vec::new())),
+            Resolved::Retired { .. } => Err((RefusalKind::Unresolved, Vec::new())),
         };
         match (resolve(refs[0]), resolve(refs[1])) {
             (Ok(alias), Ok(ruling)) => pairs.push(AliasPair {

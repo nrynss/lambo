@@ -602,20 +602,34 @@ fn plan(graph: &Graph, action: &Action, expected: &[Option<NodeId>]) -> Result<P
     // named nothing at the ack (to be created) is refused at the apply if it
     // has come to name a concept since; dropped otherwise, so a request with
     // no id-shaped entry carries exactly what it carried before #36 PR 4.
-    if pins.iter().all(Option::is_none)
-        && !action
-            .depends_on
-            .iter()
-            .any(|d| crate::surface::resolve::is_id_shaped(d))
-    {
-        pins.clear();
-    }
     Ok(Plan {
         action_node,
         planned,
         planned_edges,
         pins,
     })
+}
+
+/// Pre-#146 pending actions pinned only id-shaped dependencies. Resolve their
+/// ordinary text anew at apply, preserving every original id pin. New named
+/// intents never call this compatibility path.
+pub(crate) fn legacy_replay_pins(
+    graph: &Graph,
+    action: &Action,
+    pins: &[Option<NodeId>],
+) -> Result<Vec<Option<NodeId>>, LamboError> {
+    let mut effective = pins.to_vec();
+    if !effective.is_empty() {
+        let current = validate_pinned(graph, action)?;
+        for (i, reference) in action.depends_on.iter().enumerate() {
+            if !crate::surface::resolve::is_id_shaped(reference)
+                && let (Some(pin), Some(now)) = (effective.get_mut(i), current.get(i))
+            {
+                *pin = *now;
+            }
+        }
+    }
+    Ok(effective)
 }
 
 /// [`record_action`]'s read-only pre-pass, for a caller that must validate
@@ -741,6 +755,30 @@ fn resolve_dependency(
     let refuse = |kind| {
         crate::surface::resolve::refusal(ReferenceField::ActionDependsOn, Some(action), entry, kind)
     };
+    if crate::surface::resolve::is_id_shaped(entry)
+        && let crate::surface::resolve::Resolved::Retired { target, .. } =
+            crate::surface::resolve::resolve_reference_scoped(graph, entry, repo_scope)
+    {
+        return Err(refuse(ReferenceRefusalKind::Retired { target }));
+    }
+    if graph.name_target(entry).is_some() {
+        let (node, _) = crate::surface::resolve::resolve_existing_scoped(
+            graph,
+            ReferenceField::ActionDependsOn,
+            Some(action),
+            entry,
+            repo_scope,
+        )?;
+        if let Some(accepted) = expected
+            && accepted != Some(node)
+        {
+            return Err(refuse(ReferenceRefusalKind::Changed {
+                accepted,
+                now: Some(node),
+            }));
+        }
+        return Ok((node, Some(node)));
+    }
     // #129 (review M1): under a repo scope, entry text is inferred. An
     // existing (or, earlier in this action, planned) scoped path is that
     // Resource, so producing a file and depending on it name one concept; an
@@ -760,7 +798,7 @@ fn resolve_dependency(
             }
         },
     };
-    let pin = if is_hyphenated_id(entry) {
+    let mut pin = if is_hyphenated_id(entry) {
         match parse_full_id(entry).map(|id| (id, graph.node(id))) {
             Some((id, Some(Node::Concept(_)))) => Some(id),
             Some((_, Some(Node::Interaction(_)))) => {
@@ -786,6 +824,12 @@ fn resolve_dependency(
     } else {
         None
     };
+    if pin.is_none()
+        && let CanonicalizeResult::Matched { node, .. } =
+            canonicalize_resource(entry, graph, text_kind, repo_scope)?
+    {
+        pin = Some(node);
+    }
     if let Some(accepted) = expected
         && accepted != pin
     {

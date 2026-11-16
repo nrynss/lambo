@@ -160,6 +160,25 @@ CREATE INDEX IF NOT EXISTS edges_session_source_type_idx
 ALTER TABLE interactions ADD COLUMN IF NOT EXISTS event_time TIMESTAMPTZ;
 ALTER TABLE edges ADD COLUMN IF NOT EXISTS event_time TIMESTAMPTZ;
 
+-- #146: durable citation names have immutable targets and outlive target deletion.
+-- No concept FK: deleting a target must leave its name permanently reserved.
+CREATE TABLE IF NOT EXISTS concept_names (
+    session_id TEXT NOT NULL REFERENCES sessions(session_id),
+    name TEXT NOT NULL,
+    name_key TEXT NOT NULL,
+    node_id UUID NOT NULL,
+    PRIMARY KEY (session_id, name_key)
+);
+
+-- Retired alias records preserve their original concept and incident edges.
+-- The payload is versioned by the Rust RetiredAlias type, kept outside active nodes.
+CREATE TABLE IF NOT EXISTS retired_aliases (
+    session_id TEXT NOT NULL REFERENCES sessions(session_id),
+    alias_id UUID NOT NULL,
+    payload TEXT NOT NULL,
+    PRIMARY KEY (session_id, alias_id)
+);
+
 CREATE TABLE IF NOT EXISTS synonyms (
     session_id      TEXT NOT NULL REFERENCES sessions(session_id),
     source_key      TEXT NOT NULL,

@@ -1,0 +1,135 @@
+---
+title: "Migration and memory repair"
+description: "Upgrade existing memory to durable concept names, review alias repairs, and verify the result"
+---
+
+Durable names let agents cite a concept by a short, stable name instead of repeating its full text. Each name belongs to one session and stays bound to one concept ID. Existing IDs and correct citations continue to work. This guide covers the durable-name upgrade introduced by #146; it does not require clearing memory or re-embedding existing concepts.
+
+The commands below require a binary that includes `lambo names` and the feature for your configured store. MemoryStore, SQLite, Postgres and Cockroach use the same migration path. MemoryStore is process-local: use a persistent adapter for memory that must survive a restart.
+
+## Choose the operation
+
+| Existing state | Operation | Result |
+|---|---|---|
+| A concept needs a human-readable citation name | `names assign` | Bind the reviewed name directly to its existing ID. |
+| A snapshot still contains legacy synonym rows | `names migrate` | Import unambiguous synonyms as durable names. |
+| An old text citation created an alias Entity instead of citing the intended concept | `names migrate --map reviewed-aliases.txt` | Move eligible dependency citations, archive the alias, and bind its name to the intended target. |
+| A RAM-only synonym was lost with no surviving record | Review the intended target, then `names assign` | Reconstruct only the binding you can establish from evidence. Migration cannot infer lost names. |
+
+Names are normalized like canonical keys, including case, Unicode composition, token order and stemming. Several names may identify one concept. An identical declaration is a no-op; a name cannot shadow another identity or be retargeted. UUID-shaped and eight-hex names are refused. Deleting a named target leaves the name reserved, and references fail explicitly rather than attaching to a different concept.
+
+## Prepare the store
+
+1. Let accepted writes finish, including replay of any pending intents with the existing writer. Check write receipts with [`lambo_stats`](/lambo/mcp/#lambo_stats). Migration refuses unconsumed intents.
+2. Stop every writer attached to this store, including any supervisor that would restart one. Provisioning can also re-key older canonical keys and refuses while a session is held. Name assignment and repair themselves take the addressed session's single-writer lease.
+3. Take a consistent backup and keep the previous binary and configuration. For SQLite, use SQLite's backup facility, or a completed checkpoint with all connections closed; copying only an active `.db` file can omit its WAL. For Postgres or Cockroach, use the backend's consistent backup procedure.
+4. With the new binary and the same store configuration, provision the additional schema. Provisioning is idempotent; it installs the name and retired-alias tables.
+
+```bash
+lambo --config lambo.toml provision
+```
+
+For Cockroach, run provisioning from a repository checkout: the command invokes the repository's provisioning script. See [Provision a store](/lambo/cli/#provision-a-store) for canonical-key re-keying and the `--rekey` option when older binaries have written to an already migrated store.
+
+Upgrade each existing session separately, including any shared layer. The name commands use the configured store without constructing an embedder. They do not change the session's embedding contract.
+
+## Name an existing concept
+
+Find the intended concept with recall and inspect it before choosing its full ID. The UUID and epoch below are examples: replace both with values from your session.
+
+```bash
+lambo --config lambo.toml names assign --session demo \
+  --name "writer lease rule" --target 01234567-89ab-4cde-8fab-0123456789ab
+```
+
+The command prints a JSON preview and writes nothing. Review `bindings`: each entry identifies the display name, normalized `name_key` and target `node_id`. Note `source_epoch`, which identifies the session state you reviewed. Apply that same assignment with the reported epoch:
+
+```bash
+lambo --config lambo.toml names assign --session demo \
+  --name "writer lease rule" --target 01234567-89ab-4cde-8fab-0123456789ab \
+  --apply --expect-epoch 42
+```
+
+This attaches metadata to the existing concept without deriving it again or changing its vector. A conflicting name or a separate alias Entity with that key is refused; use the reviewed repair path below for an alias artifact.
+
+## Import surviving synonyms
+
+```bash
+lambo --config lambo.toml names migrate --session demo
+# Review the JSON report, then use its source_epoch:
+lambo --config lambo.toml names migrate --session demo \
+  --apply --expect-epoch 42
+```
+
+Only surviving synonym rows can be imported. Each target must identify one existing concept. Equivalent spellings that normalize to the same name and target consolidate. Missing or ambiguous targets, chains and conflicting normalized bindings refuse the entire operation; nothing is partially imported.
+
+If a legacy row is wrong, first review and apply an explicit `names assign` to the intended existing ID, then preview migration again. An already established durable binding takes precedence over that legacy spelling. Bindings proposed within the same import cannot override each other's conflicts.
+
+## Repair reviewed alias Entities
+
+An old action's text reference may have created a separate Entity whose text is really a name for an existing ruling. Declaring a name alone does not repair those old dependency edges. Review the alias, its provenance and relationships, and the intended target before including a pair in a repair map.
+
+[`lambo canon alias-preview`](/lambo/cli/#lambo-canon-alias-preview) can suggest candidates on a consistent SQLite backup. Similarity and candidate detection are suggestions for review; the migration never infers or approves pairs automatically.
+
+Create `reviewed-aliases.txt` with one `alias-id target-id` pair per line. Both must be full hyphenated UUIDs; short IDs and text are refused. `#` starts a comment. The file limit is 4 MiB. These example IDs must be replaced with inspected IDs from your session:
+
+```text
+# alias Entity ID                         intended target concept ID
+11111111-1111-4111-8111-111111111111 22222222-2222-4222-8222-222222222222
+```
+
+Preview the complete migration, including any surviving synonyms:
+
+```bash
+lambo --config lambo.toml names migrate --session demo \
+  --map reviewed-aliases.txt > names-preview.json
+```
+
+Review the exact `bindings` and `retirements`, rather than counts alone. A retirement identifies the old alias ID, target ID, previous promotion status and number of archived incident edges. The report also includes `changes`, `mutations`, `source_epoch`, `resulting_epoch` and `applied`. A preview has `applied: false`; its resulting epoch describes the proposed state.
+
+For each eligible pair, the repair:
+
+- Moves incoming Dependency citations to the intended target, preserving their original times and reinforcement metadata and avoiding duplicate support.
+- Archives the full original alias concept and its original incident edges, with its previous status, retirement time and replacement ID.
+- Removes the alias from active memory and binds its name to the target in the same transaction. Its former promotion status remains history rather than active canonization evidence.
+
+Only alias-artifact Entities are eligible. Non-Entity aliases, self mappings, chains, cycles, conflicting names, aliases already holding immutable name bindings, and substantive relationships that cannot safely be retired refuse the entire operation. A citation move that would create a dependency cycle is also refused. Review and resolve the reported relationship explicitly before retrying; do not treat this as a general concept merge command.
+
+When the report and map are correct, apply using that preview's epoch:
+
+```bash
+lambo --config lambo.toml names migrate --session demo \
+  --map reviewed-aliases.txt --apply --expect-epoch 42
+```
+
+Apply acquires the writer lease, reloads the session, checks the epoch and commits the complete change in one fenced store transaction. A live writer, changed epoch or validation failure leaves the graph unchanged. Re-preview and review changed state before retrying; do not substitute a new epoch blindly.
+
+## Verify and restart
+
+1. Re-run the same preview. A successful repeat of the same migration or mapping proposes no new mutations.
+2. Restart the new writer with the same store and session configuration.
+3. Inspect the target by its durable name. Check that recall finds it and that a dependency question using the name reaches its dependents.
+4. Inspect a retired alias by its original full ID or unique eight-hex ID. Its archived text, type, previous status, replacement ID and retirement metadata remain available; archived vectors are omitted from the inspection response.
+5. Have a client cite the name in a new `depends_on`, wait for its receipt to report applied, then inspect the target's dependents. See the [MCP naming example](/lambo/mcp/#lambo_derive).
+
+The old alias ID remains historical evidence. New writes citing that retired ID are refused with the replacement identified; Lambo does not silently redirect an ID. Other concepts, their IDs, vectors, provenance, correct citations and canonization audit records stay in place. The repair does not reset promotion state across the session.
+
+## Application and client changes
+
+- **MCP:** add optional `name` to a concept in [`lambo_derive`](/lambo/mcp/#lambo_derive). After its receipt reports applied, use that name in `depends_on` or `against`, or as an inspect focus. Use the CLI to name existing memory without a fresh derive; there is no separate MCP naming tool.
+- **CLI:** `derive --name` names the first concept of the call. [`lambo names`](/lambo/cli/#upgrade-and-repair-concept-names) documents all assignment and migration flags.
+- **Rust:** [`Memory::declare_name`](/lambo/api/#durable-concept-names) names an existing ID. `ConceptCitations.name` names the concept a cited derive actually writes. `Memory::declare_synonym` now requires an existing target and creates a durable name: create the target first, or name it during derive. Raw `Graph::declare_synonym` remains a legacy import facility.
+
+Rust callers using explicit struct literals must add `name: None` for unnamed `ConceptCitations` and account for `GraphSnapshot.names` and `GraphSnapshot.retired_aliases`. Custom store adapters and export/import tools must preserve both fields and their mutation variants; see [The GraphStore trait](/lambo/api/#the-graphstore-trait).
+
+A name is resolved within the addressed session. For a shared layer, use that layer's `scope`; a name does not enable cross-session citations. Repository-scoped resources must still resolve unambiguously: a name such as `README.md` cannot silently choose between different resource identities.
+
+Derive citations remain strict: each must already exist. `record_action.depends_on` retains its create-on-miss behavior for ordinary unregistered text, so a misspelled name may create a text concept. Use a registered name or an inspected ID, and verify the result. A registered name with a missing target always fails explicitly.
+
+## Recovery and compatibility
+
+Keep the backup until verification is complete. Failed validation or a failed store commit does not partially apply a repair. If apply reports an uncertain result after a connection failure, inspect durable state and rerun the preview before retrying; successful repeated assignments and mappings are idempotent.
+
+Older binaries do not understand durable names and retired-alias history. Downgrading after this upgrade is unsupported. To roll back, stop the new writer and restore the complete pre-upgrade backup with its matching binary and configuration. Do not mix old and new writers. Drain accepted named intents before changing versions; their identity requirements must not be discarded by an older decoder.
+
+Session splitting currently refuses snapshots containing durable names or retired-alias history because their identity remapping is not implemented. If splitting is part of your rollout, split and verify first, then upgrade each resulting session.

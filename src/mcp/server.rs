@@ -297,7 +297,10 @@ impl LamboServer {
                        concept rests on a ruling or decision already in memory, cite it by id \
                        (the 8 hex characters recall shows) in that concept's depends_on: it \
                        must already exist and match exactly one concept, or the whole call is \
-                       refused. When a concept says an existing one is wrong, name that one \
+                       refused. A concept may declare an optional durable name; names shown \
+                       by recall can also be used in depends_on and against. Names are \
+                       session-local, normalized and bound to a fixed concept id. \
+                       When a concept says an existing one is wrong, name that one \
                        the same way in the concept's against: it records the contradiction, \
                        dated by this write's event_time (else now), and adds no dependent, \
                        score or promotion. A settled outcome may list replacement_candidates: \
@@ -334,7 +337,7 @@ impl LamboServer {
                        (e.g. 'merged PR #52'), not a narrative. A fact or decision that later \
                        work should recall is a concept for lambo_derive. When the action relied \
                        on a ruling or decision from memory, cite it by id (the 8 hex characters \
-                       recall shows) in depends_on. When the action showed a concept in \
+                       recall shows) or its declared durable name in depends_on. When the action showed a concept in \
                        memory to be wrong, name it the same way in against (dated by this \
                        write's event_time, else now; never the action itself). created_at is \
                        stamped server-side. event_time is optional \

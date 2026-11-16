@@ -384,6 +384,7 @@ async fn derive_store(
         for plan in plans(set, condition)? {
             let citations: Vec<ConceptCitations> = match &plan.against {
                 Some(anchor) => vec![ConceptCitations {
+                    name: None,
                     content: plan.text.clone(),
                     depends_on: Vec::new(),
                     against: vec![node_of[anchor].0.to_string()],

@@ -16,6 +16,7 @@ const OTHER_RULING: &str = "flush batches commit in one store transaction";
 
 fn cite(content: &str, depends_on: &[&str]) -> ConceptCitations {
     ConceptCitations {
+        name: None,
         content: content.to_string(),
         depends_on: depends_on.iter().map(|s| s.to_string()).collect(),
         against: Vec::new(),
@@ -696,6 +697,353 @@ async fn a_similarity_merge_into_the_cited_target_drops_that_citation() {
             .edge_between(merged, ruling, EdgeType::Dependency)
             .is_some());
         g.assert_invariants().unwrap();
+    }
+    mem.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn durable_names_survive_restart_and_address_existing_concepts() {
+    let store = Arc::new(MemoryStore::new());
+    let session = "names-memory-restart";
+    let agent = AgentId::new("agent-a");
+    let mem = memory_with(
+        store.clone(),
+        session,
+        MatchStrategy::Canonical,
+        Arc::new(FixtureEmbedder::new()),
+    )
+    .await;
+    let declaration = ConceptCitations {
+        content: RULING.into(),
+        name: Some("Lease café".into()),
+        depends_on: vec![],
+        against: vec![],
+    };
+    mem.derive_cited_as(
+        &agent,
+        &[(RULING, ConceptType::Logic)],
+        &ParentOf::none(),
+        &[declaration],
+    )
+    .await
+    .unwrap();
+    let target = node_of(&mem, RULING);
+    mem.close().await.unwrap();
+
+    let mem = memory_with(
+        store,
+        session,
+        MatchStrategy::Canonical,
+        Arc::new(FixtureEmbedder::new()),
+    )
+    .await;
+    let spelling = "LEASE cafe\u{301}";
+    assert_eq!(mem.graph.read().name_target(spelling), Some(target));
+    let action_write = mem
+        .record_action_async_as(
+            &agent,
+            &Action {
+                action: "verified the named ruling",
+                produces: &[],
+                modifies: &[],
+                depends_on: &[spelling],
+                event_time: None,
+                repo_scope: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        settle(&mem, action_write.receipt).await,
+        ReceiptAnswer::Applied(_)
+    ));
+    mem.derive_cited_as(
+        &agent,
+        &[("a correction", ConceptType::Logic)],
+        &ParentOf::none(),
+        &[ConceptCitations {
+            content: "a correction".into(),
+            name: None,
+            depends_on: vec![],
+            against: vec![spelling.into()],
+        }],
+    )
+    .await
+    .unwrap();
+    {
+        let graph = mem.graph.read();
+        let action = graph
+            .concepts()
+            .find(|c| c.content == "verified the named ruling")
+            .unwrap()
+            .id;
+        let correction = graph
+            .concepts()
+            .find(|c| c.content == "a correction")
+            .unwrap()
+            .id;
+        assert!(graph
+            .edge_between(action, target, EdgeType::Dependency)
+            .is_some());
+        assert!(graph
+            .edge_between(correction, target, EdgeType::Contradicts)
+            .is_some());
+        assert!(graph.concepts().all(|c| c.content != spelling));
+        assert_eq!(graph.names().count(), 1);
+    }
+    mem.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_conflicting_normalized_name_is_refused_before_any_write() {
+    for strategy in [MatchStrategy::Canonical, MatchStrategy::Hybrid] {
+        let store: Arc<dyn GraphStore> = Arc::new(VectorSearchable(Arc::new(MemoryStore::new())));
+        let mem = memory_with(
+            store,
+            &format!("names-collision-{strategy:?}"),
+            strategy,
+            Arc::new(FixtureEmbedder::new()),
+        )
+        .await;
+        let agent = AgentId::new("agent-a");
+        mem.derive_cited_as(
+            &agent,
+            &[(RULING, ConceptType::Logic)],
+            &ParentOf::none(),
+            &[ConceptCitations {
+                content: RULING.into(),
+                name: Some("writer lease".into()),
+                depends_on: vec![],
+                against: vec![],
+            }],
+        )
+        .await
+        .unwrap();
+        let before = mem.graph.read().snapshot();
+        for asynchronous in [false, true] {
+            let names = [ConceptCitations {
+                content: OTHER_RULING.into(),
+                name: Some("WRITER-LEASE".into()),
+                depends_on: vec![],
+                against: vec![],
+            }];
+            let refused = if asynchronous {
+                mem.derive_cited_async_as(
+                    &agent,
+                    &[(OTHER_RULING, ConceptType::Logic)],
+                    &ParentOf::none(),
+                    &names,
+                    None,
+                )
+                .await
+                .map(|_| ())
+            } else {
+                mem.derive_cited_as(
+                    &agent,
+                    &[(OTHER_RULING, ConceptType::Logic)],
+                    &ParentOf::none(),
+                    &names,
+                )
+                .await
+                .map(|_| ())
+            };
+            assert!(refused.is_err());
+            assert_eq!(mem.graph.read().snapshot(), before);
+        }
+        mem.close().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn an_unconsumed_named_derive_replays_its_binding_after_restart() {
+    use super::replay::HangingEmbedder;
+    let inner = Arc::new(MemoryStore::new());
+    let store: Arc<dyn GraphStore> = Arc::new(VectorSearchable(inner.clone()));
+    let session = "names-intent-replay";
+    let agent = AgentId::new("agent-a");
+    let mem = memory_with(
+        store.clone(),
+        session,
+        MatchStrategy::Hybrid,
+        Arc::new(HangingEmbedder::new()),
+    )
+    .await;
+    let submitted = mem
+        .derive_cited_async_as(
+            &agent,
+            &[(RULING, ConceptType::Logic)],
+            &ParentOf::none(),
+            &[ConceptCitations {
+                content: RULING.into(),
+                name: Some("lease invariant".into()),
+                depends_on: vec![],
+                against: vec![],
+            }],
+            None,
+        )
+        .await
+        .unwrap();
+    mem.close().await.unwrap();
+    let snapshot = inner.load_session(&SessionId::new(session)).await.unwrap();
+    assert!(matches!(
+        snapshot
+            .write_intents
+            .iter()
+            .find(|i| i.receipt == submitted.receipt.to_string())
+            .unwrap()
+            .payload,
+        crate::types::WriteIntentPayload::DeriveNamed { .. }
+    ));
+    let mem = memory_with(
+        store,
+        session,
+        MatchStrategy::Hybrid,
+        Arc::new(FixtureEmbedder::new()),
+    )
+    .await;
+    let answer = settle(&mem, submitted.receipt).await;
+    assert_eq!(answer.tag(), "applied_after_restart");
+    let target = node_of(&mem, RULING);
+    assert_eq!(
+        mem.graph.read().name_target("LEASE-INVARIANT"),
+        Some(target)
+    );
+    mem.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_named_intent_conflict_is_consumed_as_failed_without_blocking_replay() {
+    use super::replay::HangingEmbedder;
+    let inner = Arc::new(MemoryStore::new());
+    let store: Arc<dyn GraphStore> = Arc::new(VectorSearchable(inner.clone()));
+    let session = "names-replay-conflict";
+    let agent = AgentId::new("agent-a");
+    let mem = memory_with(
+        store.clone(),
+        session,
+        MatchStrategy::Canonical,
+        Arc::new(FixtureEmbedder::new()),
+    )
+    .await;
+    mem.derive_as(
+        &agent,
+        &[("an independent existing truth", ConceptType::Logic)],
+        &ParentOf::none(),
+    )
+    .await
+    .unwrap();
+    let existing = node_of(&mem, "an independent existing truth");
+    mem.close().await.unwrap();
+    let mem = memory_with(
+        store.clone(),
+        session,
+        MatchStrategy::Hybrid,
+        Arc::new(HangingEmbedder::new()),
+    )
+    .await;
+    let submitted = mem
+        .derive_cited_async_as(
+            &agent,
+            &[(RULING, ConceptType::Logic)],
+            &ParentOf::none(),
+            &[ConceptCitations {
+                content: RULING.into(),
+                name: Some("contested name".into()),
+                depends_on: vec![],
+                against: vec![],
+            }],
+            None,
+        )
+        .await
+        .unwrap();
+    mem.declare_name("contested name", existing).unwrap();
+    mem.close().await.unwrap();
+    let mem = memory_with(
+        store,
+        session,
+        MatchStrategy::Hybrid,
+        Arc::new(FixtureEmbedder::new()),
+    )
+    .await;
+    let answer = settle(&mem, submitted.receipt).await;
+    assert!(answer.tag().contains("failed"), "{}", answer.tag());
+    assert_eq!(
+        mem.graph.read().name_target("contested name"),
+        Some(existing)
+    );
+    assert!(!mem.graph.read().concepts().any(|c| c.content == RULING));
+    mem.close().await.unwrap();
+    let snapshot = inner.load_session(&SessionId::new(session)).await.unwrap();
+    assert!(snapshot
+        .write_intents
+        .iter()
+        .find(|i| i.receipt == submitted.receipt.to_string())
+        .unwrap()
+        .outcome
+        .is_some());
+}
+
+#[tokio::test]
+async fn a_name_citation_whose_target_disappears_after_ack_fails_without_alias_creation() {
+    let (hold, rx) = tokio::sync::watch::channel(false);
+    let entered = Arc::new(AtomicUsize::new(0));
+    let mem = memory_with(
+        Arc::new(VectorSearchable(Arc::new(MemoryStore::new()))),
+        "name-cite-race",
+        MatchStrategy::Hybrid,
+        Arc::new(GatedEmbedder {
+            inner: FixtureEmbedder::new(),
+            hold: rx,
+            entered: entered.clone(),
+        }),
+    )
+    .await;
+    let agent = AgentId::new("agent-a");
+    mem.derive_cited_as(
+        &agent,
+        &[(RULING, ConceptType::Logic)],
+        &ParentOf::none(),
+        &[ConceptCitations {
+            content: RULING.into(),
+            name: Some("lease invariant".into()),
+            depends_on: vec![],
+            against: vec![],
+        }],
+    )
+    .await
+    .unwrap();
+    let target = node_of(&mem, RULING);
+    hold.send(true).unwrap();
+    let decision = "a decision using the named invariant";
+    let submitted = mem
+        .derive_cited_async_as(
+            &agent,
+            &[(decision, ConceptType::Logic)],
+            &ParentOf::none(),
+            &[cite(decision, &["LEASE-INVARIANT"])],
+            None,
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while entered.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    })
+    .await
+    .unwrap();
+    mem.retract(RULING, DryRun::No).await.unwrap();
+    hold.send(false).unwrap();
+    let ReceiptAnswer::Failed(reason) = settle(&mem, submitted.receipt).await else {
+        panic!("citation applied after its target disappeared")
+    };
+    assert!(reason.contains("names nothing now"), "{reason}");
+    {
+        let graph = mem.graph.read();
+        assert_eq!(graph.name_target("lease invariant"), Some(target));
+        assert!(graph
+            .concepts()
+            .all(|c| c.content != decision && c.content != "LEASE-INVARIANT"));
     }
     mem.close().await.unwrap();
 }

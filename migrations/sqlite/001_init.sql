@@ -114,6 +114,25 @@ CREATE TABLE IF NOT EXISTS edges (
     UNIQUE (source, target, edge_type)
 );
 
+-- #146: durable citation names have immutable targets and outlive target deletion.
+-- No concept FK: deleting a target must leave its name permanently reserved.
+CREATE TABLE IF NOT EXISTS concept_names (
+    session_id TEXT NOT NULL REFERENCES sessions(session_id),
+    name TEXT NOT NULL,
+    name_key TEXT NOT NULL,
+    node_id TEXT NOT NULL,
+    PRIMARY KEY (session_id, name_key)
+);
+
+-- Retired alias records preserve their original concept and incident edges.
+-- The payload is versioned by the Rust RetiredAlias type, kept outside active nodes.
+CREATE TABLE IF NOT EXISTS retired_aliases (
+    session_id TEXT NOT NULL REFERENCES sessions(session_id),
+    alias_id TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    PRIMARY KEY (session_id, alias_id)
+);
+
 CREATE TABLE IF NOT EXISTS synonyms (
     session_id      TEXT NOT NULL REFERENCES sessions(session_id),
     source_key      TEXT NOT NULL,

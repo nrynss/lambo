@@ -64,6 +64,7 @@ fn semantic(graph: &Arc<RwLock<Graph>>, a: NodeId, b: NodeId) -> bool {
 
 fn against(content: &str, target: NodeId) -> PinnedCitations {
     PinnedCitations {
+        names: Vec::new(),
         references: Vec::new(),
         against: vec![PinnedReference {
             content: content.to_string(),

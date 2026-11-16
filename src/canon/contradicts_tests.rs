@@ -150,6 +150,7 @@ async fn contradictions_written_through_against_change_no_score_or_verdict() {
         let concepts = [(c.content.as_str(), c.concept_type)];
         let pinned = if contradict {
             let refs = [ConceptCitations {
+                name: None,
                 content: c.content.clone(),
                 depends_on: Vec::new(),
                 against: vec![case::concept_id(other).0.to_string()],

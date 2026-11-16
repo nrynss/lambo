@@ -529,6 +529,7 @@ where
             &hit,
             (c.canonization_status != CanonizationStatus::None).then_some(c.canonization_status),
         );
+        detailed_hit.names = graph.display_names(c.id);
         if let Some(s) = skipped.get(&c.id) {
             detailed_hit.skipped_redundant = s.clone();
         }
@@ -641,7 +642,8 @@ where
         // #181: the members skipped as redundant with this hit are named
         // in its label (`also <id>`), so the reader can inspect them.
         let block = format::ContextBlock::for_hit(&hit, &lines)
-            .with_meta(&redundancy::also_meta(&detailed_hit.skipped_redundant));
+            .with_meta(&redundancy::also_meta(&detailed_hit.skipped_redundant))
+            .with_meta(&format::names_meta(&detailed_hit.names));
         warnings.extend(lines);
         hit_blocks.push(block);
         hits.push(hit);

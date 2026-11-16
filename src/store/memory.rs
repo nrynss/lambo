@@ -120,12 +120,47 @@ impl MemoryStore {
     /// Off-lease, like the SQL adapters' seeds, but refused for an erased
     /// session (#23 review L5): a seed must not recreate it under the
     /// tombstone. Lock order: `inner` before `leases`, as in `flush`.
-    pub fn seed(&self, snapshot: GraphSnapshot) -> Result<(), StoreError> {
+    pub fn seed(&self, mut snapshot: GraphSnapshot) -> Result<(), StoreError> {
         let sid = snapshot.session_id.clone();
         let mut map = self.inner.write();
         if Self::is_tombstoned(&self.leases.read(), &sid) {
             return Err(crate::store::erase::erased_session_error(sid.as_str()));
         }
+        if let Some(old) = map.get(&sid.0) {
+            for name in &old.snapshot.names {
+                match snapshot
+                    .names
+                    .iter_mut()
+                    .find(|n| n.name_key == name.name_key)
+                {
+                    Some(new) if new.node_id != name.node_id => {
+                        return Err(StoreError::Invariant(
+                            "concept name target is immutable".into(),
+                        ))
+                    }
+                    Some(new) => *new = name.clone(),
+                    None => snapshot.names.push(name.clone()),
+                }
+            }
+            for retired in &old.snapshot.retired_aliases {
+                match snapshot
+                    .retired_aliases
+                    .iter()
+                    .find(|r| r.concept.id == retired.concept.id)
+                {
+                    Some(new) if new != retired => {
+                        return Err(StoreError::Invariant(
+                            "retired alias history is immutable".into(),
+                        ))
+                    }
+                    Some(_) => {}
+                    None => snapshot.retired_aliases.push(retired.clone()),
+                }
+            }
+        }
+        crate::store::names::validate_snapshot(&snapshot)?;
+        snapshot.names.sort_by(|a, b| a.name_key.cmp(&b.name_key));
+        snapshot.retired_aliases.sort_by_key(|r| r.concept.id.0);
         map.insert(sid.0.clone(), SessionData::new(snapshot));
         Ok(())
     }
@@ -174,9 +209,23 @@ impl MemoryStore {
         let snap = &mut data.snapshot;
         match m {
             Mutation::UpsertNode { node } => {
+                if snap
+                    .retired_aliases
+                    .iter()
+                    .any(|r| r.concept.id == node.id())
+                {
+                    return Err(StoreError::Invariant(
+                        "a retired alias id cannot be reused".into(),
+                    ));
+                }
                 // Session consistency: ignore mismatches by forcing snapshot session.
                 match node {
                     Node::Interaction(i) => {
+                        if snap.names.iter().any(|name| name.node_id == i.id) {
+                            return Err(StoreError::Invariant(
+                                "a named concept id cannot be reused as an interaction".into(),
+                            ));
+                        }
                         if i.session_id != snap.session_id {
                             return Err(StoreError::Invariant(format!(
                                 "interaction {} session {} != snapshot {}",
@@ -190,6 +239,15 @@ impl MemoryStore {
                         }
                     }
                     Node::Concept(c) => {
+                        if snap
+                            .names
+                            .iter()
+                            .any(|n| n.name_key == c.canonical_key && n.node_id != c.id)
+                        {
+                            return Err(StoreError::Invariant(
+                                "concept key is reserved by a durable name".into(),
+                            ));
+                        }
                         if c.session_id != snap.session_id {
                             return Err(StoreError::Invariant(format!(
                                 "concept {} session {} != snapshot {}",
@@ -234,6 +292,61 @@ impl MemoryStore {
                     snap.edges[pos] = edge.clone();
                 } else {
                     snap.edges.push(edge.clone());
+                }
+            }
+            Mutation::SetConceptName { name } => {
+                crate::store::names::validate_name(name)?;
+                if snap
+                    .concepts
+                    .iter()
+                    .any(|c| c.canonical_key == name.name_key && c.id != name.node_id)
+                {
+                    return Err(StoreError::Invariant(
+                        "concept name collides with an existing concept key".into(),
+                    ));
+                }
+                if name.session_id != snap.session_id {
+                    return Err(StoreError::Invariant(
+                        "concept name session mismatch".into(),
+                    ));
+                }
+                if let Some(old) = snap.names.iter().find(|n| n.name_key == name.name_key) {
+                    if old.node_id != name.node_id {
+                        return Err(StoreError::Invariant(
+                            "concept name target is immutable".into(),
+                        ));
+                    }
+                } else {
+                    if !snap.concepts.iter().any(|c| c.id == name.node_id) {
+                        return Err(StoreError::Invariant(
+                            "new concept name must target an active concept in its own session"
+                                .into(),
+                        ));
+                    }
+                    snap.names.push(name.clone());
+                    snap.names.sort_by(|a, b| a.name_key.cmp(&b.name_key));
+                }
+            }
+            Mutation::RetireAlias { retired } => {
+                crate::store::names::validate_retired_alias(retired)?;
+                if retired.session_id != snap.session_id {
+                    return Err(StoreError::Invariant(
+                        "retired alias session mismatch".into(),
+                    ));
+                }
+                if let Some(old) = snap
+                    .retired_aliases
+                    .iter()
+                    .find(|r| r.concept.id == retired.concept.id)
+                {
+                    if serde_json::to_value(old).ok() != serde_json::to_value(retired).ok() {
+                        return Err(StoreError::Invariant(
+                            "retired alias history is immutable".into(),
+                        ));
+                    }
+                } else {
+                    snap.retired_aliases.push(retired.clone());
+                    snap.retired_aliases.sort_by_key(|r| r.concept.id.0);
                 }
             }
             Mutation::DeleteNode { id } => {
@@ -705,6 +818,8 @@ impl GraphStore for MemoryStore {
                 Mutation::PutWriteIntent { intent } => vec![intent.session_id.clone()],
                 Mutation::ConsumeWriteIntent { session_id, .. } => vec![session_id.clone()],
                 Mutation::RecordAccess { session_id, .. } => vec![session_id.clone()],
+                Mutation::SetConceptName { name } => vec![name.session_id.clone()],
+                Mutation::RetireAlias { retired } => vec![retired.session_id.clone()],
                 Mutation::DeleteNode { id } => Self::sessions_for_node_delete(&map, *id),
                 Mutation::DeleteEdge { id } => Self::resolve_session_for_edge(&map, *id)
                     .into_iter()
@@ -762,6 +877,8 @@ impl GraphStore for MemoryStore {
                 Mutation::PutWriteIntent { intent } => vec![intent.session_id.clone()],
                 Mutation::ConsumeWriteIntent { session_id, .. } => vec![session_id.clone()],
                 Mutation::RecordAccess { session_id, .. } => vec![session_id.clone()],
+                Mutation::SetConceptName { name } => vec![name.session_id.clone()],
+                Mutation::RetireAlias { retired } => vec![retired.session_id.clone()],
                 // Every session holding the node or an edge incident to it,
                 // so a cross-session edge goes with its node as in SQL.
                 Mutation::DeleteNode { id } => Self::sessions_for_node_delete(&work, *id),
@@ -1057,6 +1174,8 @@ impl GraphStore for MemoryStore {
                 .count() as u64;
             removed.edges = snap.edges.len() as u64;
             removed.synonyms = snap.synonyms.len() as u64;
+            removed.concept_names = snap.names.len() as u64;
+            removed.retired_aliases = snap.retired_aliases.len() as u64;
             removed.canonization_events = snap.canonization_events.len() as u64;
             removed.reservations = snap.reservations.len() as u64;
             removed.write_intents = snap.write_intents.len() as u64;
@@ -1140,6 +1259,8 @@ impl MemoryStore {
             ("concepts", n(|s| s.concepts.len())),
             ("edges", n(|s| s.edges.len())),
             ("synonyms", n(|s| s.synonyms.len())),
+            ("concept_names", n(|s| s.names.len())),
+            ("retired_aliases", n(|s| s.retired_aliases.len())),
             ("canonization_events", n(|s| s.canonization_events.len())),
             ("reservations", n(|s| s.reservations.len())),
             ("write_intents", n(|s| s.write_intents.len())),

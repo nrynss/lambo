@@ -469,7 +469,20 @@ pub(crate) fn render_detailed_block(h: &crate::recall::detail::DetailedHit) -> S
     let lines: Vec<String> = h.annotations.iter().map(|a| a.text.clone()).collect();
     ContextBlock::for_hit(&hit, &lines)
         .with_meta(&crate::recall::redundancy::also_meta(&h.skipped_redundant))
+        .with_meta(&names_meta(&h.names))
         .text
+}
+
+/// Names are reference metadata, not warnings. JSON escaping keeps each
+/// spelling on one line and makes whitespace or punctuation unambiguous.
+pub(crate) fn names_meta(names: &[String]) -> Vec<String> {
+    if names.is_empty() {
+        return Vec::new();
+    }
+    vec![format!(
+        "names {}",
+        serde_json::to_string(names).expect("string lists serialize")
+    )]
 }
 
 /// The full context: rendered blocks in final-score order, separated by one

@@ -2079,7 +2079,9 @@ mod tests {
                 Mutation::RecordAccess { .. } => {
                     panic!("derive must not record a read access: {m:?}");
                 }
-                Mutation::CanonizationTransition { .. } => {}
+                Mutation::CanonizationTransition { .. }
+                | Mutation::SetConceptName { .. }
+                | Mutation::RetireAlias { .. } => {}
             }
         }
         // interaction + 3 concepts node-upserted; edges: 3 Derives + 1

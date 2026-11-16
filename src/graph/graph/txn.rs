@@ -134,6 +134,8 @@ pub(super) struct UndoLog {
     unflushed: HashMap<NodeId, Option<u64>>,
     access_dirty: HashMap<NodeId, bool>,
     reservations: Option<Vec<Reservation>>,
+    pub(super) names: HashMap<String, Option<crate::types::ConceptName>>,
+    pub(super) retired_aliases: HashMap<String, Option<crate::types::RetiredAlias>>,
 }
 
 impl Graph {
@@ -160,6 +162,8 @@ impl Graph {
             unflushed: HashMap::new(),
             access_dirty: HashMap::new(),
             reservations: None,
+            names: HashMap::new(),
+            retired_aliases: HashMap::new(),
         }));
         let result = catch_unwind(AssertUnwindSafe(|| f(self)));
         let undo = self
@@ -206,6 +210,10 @@ impl Graph {
             Mutation::UpsertEdge { edge } => undo.edges.contains_key(&edge.id),
             Mutation::DeleteEdge { id } => undo.edges.contains_key(id),
             Mutation::SetEmbedding { .. } => true,
+            Mutation::SetConceptName { name } => undo.names.contains_key(&name.name_key),
+            Mutation::RetireAlias { retired } => undo
+                .retired_aliases
+                .contains_key(&retired.concept.id.to_string()),
             _ => false,
         };
         debug_assert!(
@@ -255,6 +263,26 @@ impl Graph {
 
     /// Put back everything `undo` recorded.
     fn rollback(&mut self, undo: UndoLog) {
+        for (key, prior) in undo.names {
+            match prior {
+                Some(name) => {
+                    self.names.insert(key, name);
+                }
+                None => {
+                    self.names.remove(&key);
+                }
+            }
+        }
+        for (key, prior) in undo.retired_aliases {
+            match prior {
+                Some(retired) => {
+                    self.retired_aliases.insert(key, retired);
+                }
+                None => {
+                    self.retired_aliases.remove(&key);
+                }
+            }
+        }
         // Edges in two passes: take every touched edge out, then put the
         // prior ones back. One pass could drop a restored edge's natural key
         // when another touched edge id shared it (removed, then re-created

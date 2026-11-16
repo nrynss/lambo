@@ -659,6 +659,8 @@ fn deep_chain_cycle_check_does_not_overflow_stack() {
     let i = interaction(1, None, 0);
     let iid = i.id;
     let mut snap = GraphSnapshot {
+        names: Vec::new(),
+        retired_aliases: Vec::new(),
         session_id: sid(),
         root_goal: None,
         created_at: None,

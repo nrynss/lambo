@@ -12,6 +12,57 @@ fn short(id: NodeId) -> String {
     crate::recall::format::short_id(id)
 }
 
+#[test]
+fn a_durable_name_and_a_scoped_resource_must_agree_or_refuse() {
+    let (mut g, interaction) = graph("resolve-name-resource");
+    let rule = concept(&mut g, interaction, RULING, ConceptType::Logic);
+    g.declare_name("README.md", rule).unwrap();
+    let scope = "github.com/acme/widgets";
+    let path = concept(
+        &mut g,
+        interaction,
+        "source document",
+        ConceptType::Resource,
+    );
+    let Node::Concept(mut scoped) = g.node(path).unwrap().clone() else {
+        unreachable!()
+    };
+    scoped.content = "README.md".into();
+    scoped.canonical_key =
+        crate::graph::resource::scoped_resource_key("README.md", Some(scope)).unwrap();
+    g.insert_concept(scoped, interaction).unwrap();
+    let Resolved::Ambiguous(ids) = resolve_reference_scoped(&g, "README.md", Some(scope)) else {
+        panic!("a name cannot silently shadow a scoped path")
+    };
+    assert!(ids.contains(&rule) && ids.contains(&path));
+    assert_eq!(
+        resolve_reference(&g, "README.md"),
+        Resolved::Concept {
+            node: rule,
+            leg: Leg::Name
+        }
+    );
+}
+
+#[test]
+fn deleted_named_targets_remain_reserved_and_fail_closed() {
+    let (mut g, interaction) = graph("resolve-name-deleted");
+    let rule = concept(&mut g, interaction, RULING, ConceptType::Logic);
+    g.declare_name("lease rule", rule).unwrap();
+    g.remove_node(rule).unwrap();
+    assert_eq!(
+        resolve_reference(&g, "LEASE-RULE"),
+        Resolved::Retired {
+            node: rule,
+            target: None
+        }
+    );
+    assert!(matches!(
+        resolve_focus(&g, "LEASE-RULE"),
+        Focus::Missing { .. }
+    ));
+}
+
 /// The design's first PR 4 test: an id, a short id and the content
 /// (in another case, word order and Unicode composition) all reach the same
 /// node.

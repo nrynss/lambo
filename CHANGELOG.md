@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- Durable, normalized concept names bind to fixed IDs and work in citations,
+  contradictions, inspection and recall. Named declarations and queued writes
+  preserve identity across rollback, shutdown and restart replay.
+  `Memory::declare_synonym` now requires an existing target; derive it first
+  or declare its name on the initial derive.
+- `lambo names assign` attaches names to existing concepts. `lambo names migrate`
+  previews legacy-synonym upgrades and reviewed alias repairs; applying requires
+  the reviewed source epoch and the session writer lease. Repairs preserve
+  original citation times and archive old IDs and provenance for inspection.
+- Existing SQL stores must run `lambo provision` for the two additional tables.
+  No re-embedding is needed. Downgrading after names or repair is unsupported;
+  restore the pre-upgrade backup to return to an older binary.
+
 ## 0.11.0 (2026-11-11)
 
 ### Highlights

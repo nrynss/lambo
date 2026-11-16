@@ -228,9 +228,10 @@ Stores concepts from the current interaction. Lambo stamps the time itself, so t
 | `--agent <AGENT>` | Yes | Stamped on the interaction and the concepts. |
 | `--content <CONTENT>` | Yes | The first concept's text. May not contain an image suffix, `[image:<id>]` in any case or spelling, which only `derive-image` builds; text that only mentions it, such as `see [image: diagram]`, is fine. The same holds for `--concept` and for `record-action`'s `--action`. |
 | `--kind <KIND>` | Yes | One of `entity`, `logic`, `constraint`, `resource`, `observation`. |
+| `--name <NAME>` | No | A durable, session-local name for the first concept. Registered atomically with the derive; normalized like its canonical key and permanently bound to the concept actually written. Use `names assign` to name existing memory without deriving it again. |
 | `--concept <CONTENT:KIND>` | No | An extra concept. Repeat it to derive several in one call. |
 | `--parent-of <CHILD:PARENT>` | No | A hierarchy pair. Repeat it for several links. |
-| `--depends-on <REF>` | No | An existing concept the first concept rests on: its 8-hex id from recall or its full node id (its exact content also works). Repeat it, at most 8 times. Each must match exactly one concept of the session, or nothing is written (see [`lambo_derive`](/mcp#lambo_derive)). |
+| `--depends-on <REF>` | No | An existing concept the first concept rests on: its 8-hex id from recall, its full node id, its durable name or its exact content. Repeat it, at most 8 times. Each must match exactly one concept of the session, or nothing is written (see [`lambo_derive`](/mcp#lambo_derive)). |
 | `--against <REF>` | No | An existing concept the first concept contradicts, by the same forms. Repeat it, at most 8 times. Each must match exactly one concept of the session other than the first concept, or nothing is written, and naming it in `--depends-on` too is refused; it is recorded as a contradiction, not a dependency (see *Saying an existing concept is wrong* under [`lambo_derive`](/mcp#lambo_derive)). |
 | `--repo-scope <REPO>` | No | The repository this call's path-like `resource` concepts, `--parent-of` ends and `--depends-on` and `--against` path text belong to, such as `github.com/acme/widgets`, so the same path in two repositories is two concepts. Matched as exact text. At most 512 bytes, with no whitespace, control or invisible character inside (the ends are trimmed); anything else, or an empty value, is a usage error. See [Repository-scoped paths](/mcp#repository-scoped-paths). |
 
@@ -694,6 +695,48 @@ $ lambo --config lambo.toml recall-index backfill --session user-42
 ```
 
 It takes the session's writer lease while it runs, so it exits `1` and names the holder while a `lambo serve` or another writer holds the session. You rarely need it then: the writer repairs its own index when it opens the session and after a flush that follows an outage. Use the command after an index outage with no writer running, or to fill the index for a session written before the tier was configured. With no `[recall]` section it exits `2` and changes nothing. Running it again is safe.
+
+## Upgrade and repair concept names
+
+Follow [Migration and memory repair](/migration) for the full backup, provisioning, review, verification and recovery procedure.
+
+`lambo names` attaches durable names to existing concept IDs and upgrades surviving legacy synonyms. It uses the configured store, without constructing an embedder, on MemoryStore, SQLite, Postgres and Cockroach. Existing concept IDs, content and embeddings remain usable. A name is normalized like a canonical key and permanently bound to one concept ID in one session; it cannot be reassigned after that concept is deleted.
+
+Every command prints JSON and previews by default. `source_epoch` identifies the state read. The report lists the proposed `bindings` (display name, normalized key and target ID), proposed `retirements` (old ID, target, previous promotion status and archived edge count), and change counts. A preview holds no writer lease and writes nothing. Applying requires `--apply --expect-epoch <source_epoch>`: Lambo takes the session's writer lease, reloads it, refuses a changed epoch or unconsumed write intents, and writes the entire upgrade in one fenced transaction. A live writer blocks apply; a preview can still read its last durable state.
+
+### Attach a name to existing memory
+
+```bash
+lambo --config lambo.toml names assign --session demo \
+  --name "writer lease rule" --target 01234567-89ab-4cde-8fab-0123456789ab
+# Review the binding, then use source_epoch from that report:
+lambo --config lambo.toml names assign --session demo \
+  --name "writer lease rule" --target 01234567-89ab-4cde-8fab-0123456789ab \
+  --apply --expect-epoch 42
+```
+
+`--target` must be a full hyphenated concept UUID. Names must have a nonempty canonical key, fit the ordinary text limits, and must not be UUIDs or eight hexadecimal characters. A name already bound to the same target is an idempotent no-op. A name bound elsewhere, or a name whose normalized key belongs to another concept, is refused with nothing written. Use a reviewed repair for an existing alias Entity.
+
+### Migrate synonyms and repair reviewed aliases
+
+Back up the store, let accepted writes settle, and stop its writer before provisioning or applying the upgrade. Run `lambo provision` with the new binary to install the name tables. Keep the backup until restart verification is complete.
+
+```bash
+lambo --config lambo.toml provision
+lambo --config lambo.toml names migrate --session demo
+lambo --config lambo.toml names migrate --session demo --map reviewed-aliases.txt
+# After reviewing the report and map:
+lambo --config lambo.toml names migrate --session demo --map reviewed-aliases.txt \
+  --apply --expect-epoch 42
+```
+
+Without `--map`, migration imports surviving direct synonym rows. Targets must resolve unambiguously to existing concept identities. Equivalent normalized spellings for one target consolidate; conflicting names, missing targets and synonym chains refuse the whole operation. A name lost from RAM with no surviving record cannot be reconstructed automatically: assign it to the intended existing concept explicitly.
+
+The optional reviewed map contains one `alias-id target-id` pair per line, using full hyphenated UUIDs; `#` begins a comment. It is bounded to 4 MiB. Review candidate pairs with [`lambo canon alias-preview`](#lambo-canon-alias-preview); detection is a suggestion, never authority to repair memory. The migration does not infer pairs.
+
+For each accepted pair, Lambo moves historical Dependency citations to the target, preserving their original times and avoiding duplicate support, archives the alias's full original concept and incident edges, retires it from the active graph, and binds its name to the target in the same transaction. The retired record retains its old ID and provenance for inspection, but its former promotion status no longer participates in recall or canonization. Self mappings, chains, cycles, incompatible name claims, non-Entity aliases, or substantive relationships that cannot be retired safely refuse the whole upgrade. Resolve those relationships explicitly and preview again. Existing full-ID references are never silently redirected.
+
+Repeating the same reviewed mapping after a successful apply writes nothing new. After restarting the writer, inspect the target and archived alias, test a citation by the new name, and rerun the preview. No blanket re-embedding is required. Older binaries ignore the additional name tables, so downgrade after names or repair is unsupported; restore the pre-upgrade backup to return to the previous behavior. Drain named write intents before any version change.
 
 ## Preview canonization
 

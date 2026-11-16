@@ -36,6 +36,7 @@ async fn write(
             &[(content, ConceptType::Logic)],
             &ParentOf::none(),
             &[ConceptCitations {
+                name: None,
                 content: content.to_string(),
                 depends_on: depends_on.iter().map(|id| format::short_id(*id)).collect(),
                 against: against.iter().map(|id| format::short_id(*id)).collect(),

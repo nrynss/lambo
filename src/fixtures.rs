@@ -283,6 +283,8 @@ mod tests {
         use crate::types::Mutation;
         for m in &batch.mutations {
             let k = match m {
+                Mutation::SetConceptName { .. } => "set_concept_name",
+                Mutation::RetireAlias { .. } => "retire_alias",
                 Mutation::UpsertNode { .. } => "upsert_node",
                 Mutation::UpsertEdge { .. } => "upsert_edge",
                 Mutation::DeleteNode { .. } => "delete_node",

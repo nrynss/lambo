@@ -8,14 +8,14 @@ The site lives in `site/`. It is self-contained and does not touch the Rust buil
 
 - `src/content/docs/index.mdx` is the landing page. It carries the badges, the architecture diagram, and the project narrative.
 - `src/content/docs/quickstart.mdx` and `src/content/docs/demo.mdx` are the getting-started pages.
-- `src/content/docs/*.mdx` are the six reference pages, copied from `docs/reference/`. They are the source of truth.
+- Shared reference pages and the migration guide are maintained in `docs/reference/` and mirrored into `src/content/docs/`. The site copies add Astro component imports, `/lambo/` link prefixes and explicitly marked site-only sections.
 - `src/components/` holds small components. `Mermaid.astro` renders the architecture diagram client-side. The `Mdx*` components map the reference pages' block styles onto Starlight.
 - `src/content.config.ts` wires the Starlight content collection.
 - `src/public/favicon.svg` is the site icon.
 
 ## Run locally
 
-You need Node.js 20 or newer and npm.
+Use Node.js 24, matching the docs CI workflow, and npm.
 
 ```bash
 cd site
@@ -54,4 +54,6 @@ The first deploy runs on the next push to `main`. You can also trigger it manual
 
 ## Reference content
 
-Reference pages are copied from `docs/reference/`. When those change, re-copy them into `src/content/docs/` so the site stays current. Do not edit the reference exports in place.
+Update shared prose in both `docs/reference/` and `src/content/docs/`, preserving the site's component imports, `/lambo/` link prefixes and marked site-only sections. Run `scripts/docs/check-mirror-drift.sh` from the repository root; it checks the CLI, MCP, installation, configuration, API and migration pages. Then run `npm run build` from `site/` to validate MDX and generate the site.
+
+Add new pages to `astro.config.mjs`'s sidebar and, for shared reference pages, `docs/reference/docs.json`. The migration guide covers existing-memory upgrades and repair; keep it linked from installation and the interface references when their upgrade requirements change.

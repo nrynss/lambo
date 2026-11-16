@@ -69,6 +69,22 @@ pub async fn run_with_settings(
     check_in_range_cli("depth", depth, 0, MAX_INSPECT_DEPTH)?;
 
     let loaded = load_reader_graph(store, session).await?;
+    // A reviewed repair archives this exact identity instead of redirecting
+    // it. Reads retain its original text and replacement id; vectors stay
+    // private and the archived status is not evaluated as active evidence.
+    if let Ok(id) = uuid::Uuid::parse_str(focus.trim())
+        && let Some(retired) = loaded.graph.read().retired_alias(crate::types::NodeId(id))
+    {
+        return Ok(format!(
+            "retired alias {}: {}\nreplacement: {}\noriginal status: {:?}\nretired at: {}\narchived incident edges: {}\nThis identity is historical; use the replacement id for new writes.\n",
+            retired.concept.id,
+            retired.concept.content,
+            retired.target,
+            retired.concept.canonization_status,
+            retired.retired_at,
+            retired.edges.len(),
+        ));
+    }
     // The read guard is scoped so it never spans the explanation's store
     // queries below.
     let now = chrono::Utc::now();

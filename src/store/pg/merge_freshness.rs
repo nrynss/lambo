@@ -682,6 +682,7 @@ async fn the_merge_guards_hold_over_unflushed_concepts() {
                 &[(PARAPHRASE, ConceptType::Entity)],
                 &ParentOf::none(),
                 &[crate::types::ConceptCitations {
+                    name: None,
                     content: PARAPHRASE.to_string(),
                     depends_on: Vec::new(),
                     against: vec![original.0.to_string()],

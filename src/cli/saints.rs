@@ -109,6 +109,7 @@ mod live {
         crate::cli::derive::run(
             backends,
             crate::cli::derive::Args {
+                name: None,
                 repo_scope: None,
                 session: session.clone(),
                 agent: "t83-live".into(),

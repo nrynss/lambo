@@ -388,6 +388,20 @@ pub enum CanonicalizeResult {
 /// tie-break makes the match deterministic by construction even if duplicates
 /// ever slip through — never HashMap iteration order.
 pub fn canonicalize(content: &str, graph: &Graph) -> Result<CanonicalizeResult, LamboError> {
+    if let Some(id) = graph.name_target(content) {
+        return match graph.node(id) {
+            Some(crate::types::Node::Concept(c)) => Ok(CanonicalizeResult::Matched {
+                key: c.canonical_key.clone(),
+                node: id,
+            }),
+            _ => Err(crate::surface::resolve::refusal(
+                crate::types::ReferenceField::Name,
+                None,
+                content,
+                crate::types::ReferenceRefusalKind::Retired { target: None },
+            )),
+        };
+    }
     // Raw-lookup-before-normalization, identical to `canonical_key`'s pinned
     // ordering, but reading T2.1's storage directly (the public synonym callback
     // signature cannot borrow from the graph — see `canonical_key`).

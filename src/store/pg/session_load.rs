@@ -179,6 +179,9 @@ impl<D: Dialect> PgStore<D> {
                 .map(row_to_edge)
                 .collect::<Result<Vec<_>, _>>()?;
 
+            let names = load_names(&mut tx, sid).await?;
+            let retired_aliases = load_retired_aliases(&mut tx, sid).await?;
+
             let synonyms = sqlx::query(SELECT_SYNONYMS_SQL)
                 .bind(sid.0.as_str())
                 .fetch_all(&mut *tx)
@@ -218,6 +221,8 @@ impl<D: Dialect> PgStore<D> {
                 concepts,
                 edges,
                 synonyms,
+                names,
+                retired_aliases,
                 reservations,
                 canonization_events,
                 embedding,
@@ -228,4 +233,55 @@ impl<D: Dialect> PgStore<D> {
         })
         .await
     }
+}
+
+async fn load_names(
+    tx: &mut sqlx::PgConnection,
+    session: &SessionId,
+) -> Result<Vec<crate::types::ConceptName>, StoreError> {
+    let rows = sqlx::query(
+        "SELECT name, name_key, node_id FROM concept_names WHERE session_id = $1 ORDER BY name_key",
+    )
+    .bind(session.as_str())
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(backend)?;
+    rows.iter()
+        .map(|row| {
+            let name = crate::types::ConceptName {
+                session_id: session.clone(),
+                name: row.try_get(0).map_err(backend)?,
+                name_key: row.try_get(1).map_err(backend)?,
+                node_id: NodeId(row.try_get(2).map_err(backend)?),
+            };
+            crate::store::names::validate_name(&name)?;
+            Ok(name)
+        })
+        .collect()
+}
+
+async fn load_retired_aliases(
+    tx: &mut sqlx::PgConnection,
+    session: &SessionId,
+) -> Result<Vec<crate::types::RetiredAlias>, StoreError> {
+    let rows = sqlx::query(
+        "SELECT alias_id, payload FROM retired_aliases WHERE session_id = $1 ORDER BY alias_id",
+    )
+    .bind(session.as_str())
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(backend)?;
+    rows.iter()
+        .map(|row| {
+            let id: uuid::Uuid = row.try_get(0).map_err(backend)?;
+            let payload: String = row.try_get(1).map_err(backend)?;
+            let retired = crate::store::names::decode_retired_alias(&payload)?;
+            if retired.session_id != *session || retired.concept.id != NodeId(id) {
+                return Err(StoreError::Invariant(
+                    "retired alias row disagrees with its payload".into(),
+                ));
+            }
+            Ok(retired)
+        })
+        .collect()
 }

@@ -184,11 +184,13 @@ async fn recall_issue_session(fusion: RecallFusion, dim: usize) -> Vec<String> {
     for (n, (content, kind)) in CONCEPTS.iter().enumerate() {
         let cites = match n {
             1 => vec![ConceptCitations {
+                name: None,
                 content: content.to_string(),
                 depends_on: vec![CONCEPTS[0].0.to_string()],
                 against: vec![],
             }],
             2 => vec![ConceptCitations {
+                name: None,
                 content: content.to_string(),
                 depends_on: vec![CONCEPTS[1].0.to_string()],
                 against: vec![],
@@ -208,10 +210,13 @@ async fn recall_issue_session(fusion: RecallFusion, dim: usize) -> Vec<String> {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     let waited = std::time::Instant::now();
-    while mem.stats().daemon_cycles == 0 {
+    // A cycle may finish while the fixture is still being derived. Require
+    // scores for every concept so this blended-ranking assertion cannot
+    // accidentally exercise #79's deliberately different cold-start order.
+    while mem.stats().daemon_cycles == 0 || mem.daemon.scores().ranked.len() != CONCEPTS.len() {
         assert!(
             waited.elapsed() < Duration::from_secs(60),
-            "the daemon's warm-up cycle never ran"
+            "the daemon never scored the complete fixture"
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }

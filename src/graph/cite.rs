@@ -222,6 +222,40 @@ pub(crate) fn validate_scoped(
         .map(|c| (c.content.as_str(), c.against.as_slice()))
         .collect();
     let pinned = PinnedCitations {
+        names: {
+            let mut names = Vec::new();
+            let mut declared = HashMap::new();
+            for c in citations {
+                let Some(name) = &c.name else {
+                    continue;
+                };
+                let Some(&(_, kind)) = concepts.iter().find(|(content, _)| *content == c.content)
+                else {
+                    return Err(crate::graph::names::invalid_name(
+                        name,
+                        "a name must belong to a concept in this derive",
+                    ));
+                };
+                let (source_key, target) = match canon(&c.content, kind)? {
+                    CanonicalizeResult::Matched { key, node } => (key, Some(node)),
+                    CanonicalizeResult::Unmatched { key } => (key, None),
+                };
+                let name_key = g.validate_name(name, target)?;
+                if let Some(prior) = declared.insert(name_key, source_key.clone())
+                    && prior != source_key
+                {
+                    return Err(crate::graph::names::invalid_name(
+                        name,
+                        "one name cannot name two concepts in a derive",
+                    ));
+                }
+                names.push(crate::types::ConceptNaming {
+                    content: c.content.clone(),
+                    name: name.clone(),
+                });
+            }
+            names
+        },
         references: pin_scoped(g, concepts, &DEPENDS_ON, &depends_on, repo_scope, &canon)?,
         against: pin_scoped(g, concepts, &AGAINST, &against, repo_scope, &canon)?,
     };
@@ -285,6 +319,19 @@ pub(crate) fn write_all_edges(
         session_id,
     )?;
     let contradicted = write_edges(g, &AGAINST, &pinned.against, written, stamp, session_id)?;
+    for declaration in &pinned.names {
+        let target = written
+            .by_content
+            .get(&declaration.content)
+            .copied()
+            .ok_or_else(|| {
+                crate::graph::names::invalid_name(
+                    &declaration.name,
+                    "a name must belong to a concept written by this derive",
+                )
+            })?;
+        g.declare_name(&declaration.name, target)?;
+    }
     outcome.cited += cited.added;
     outcome.contradicted += contradicted.added;
     outcome.reinforced += cited.reinforced + contradicted.reinforced;
@@ -432,7 +479,10 @@ pub(crate) fn recheck(
         let now = match resolve::resolve_reference_scoped(g, &p.reference, repo_scope) {
             Resolved::Concept { node, .. } if node == p.target => continue,
             Resolved::Concept { node, .. } => Some(node),
-            Resolved::Missing | Resolved::Ambiguous(_) | Resolved::NotAConcept(_) => None,
+            Resolved::Missing
+            | Resolved::Ambiguous(_)
+            | Resolved::NotAConcept(_)
+            | Resolved::Retired { .. } => None,
         };
         return Err(refuse(
             spec,

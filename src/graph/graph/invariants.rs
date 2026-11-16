@@ -18,6 +18,28 @@ impl Graph {
     /// Causal/Dependency acyclicity. `Ok(())` when the graph is well-formed.
     pub fn assert_invariants(&self) -> Result<(), LamboError> {
         let mut v: Vec<String> = Vec::new();
+        for (key, name) in &self.names {
+            if name.session_id != self.session_id
+                || key != &name.name_key
+                || super::names::name_key(&name.name).as_ref().ok() != Some(key)
+                || matches!(self.node(name.node_id), Some(Node::Interaction(_)))
+                || self.retired_alias(name.node_id).is_some()
+                || self
+                    .concepts()
+                    .any(|c| c.canonical_key == *key && c.id != name.node_id)
+            {
+                v.push(format!("invalid durable name binding for {}", name.node_id));
+            }
+        }
+        for retired in self.retired_aliases.values() {
+            if retired.session_id != self.session_id
+                || retired.concept.session_id != self.session_id
+                || retired.concept.id == retired.target
+                || self.node(retired.concept.id).is_some()
+            {
+                v.push(format!("invalid retired alias {}", retired.concept.id));
+            }
+        }
 
         for n in self.nodes.values() {
             if n.session_id() != &self.session_id {

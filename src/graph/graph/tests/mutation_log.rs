@@ -184,7 +184,9 @@ fn drain_log_clears_and_orders_writes() {
             }
             // Neither carries graph topology, so neither participates in
             // the endpoint-ordering contract.
-            Mutation::CanonizationTransition { .. }
+            Mutation::SetConceptName { .. }
+            | Mutation::RetireAlias { .. }
+            | Mutation::CanonizationTransition { .. }
             | Mutation::SetRootGoal { .. }
             | Mutation::SetEmbedding { .. }
             | Mutation::PutWriteIntent { .. }
@@ -281,6 +283,8 @@ fn mutation_log_is_chronological_across_interleaved_writes() {
         .mutations
         .iter()
         .map(|m| match m {
+            Mutation::SetConceptName { .. } => "set_concept_name",
+            Mutation::RetireAlias { .. } => "retire_alias",
             Mutation::UpsertNode { .. } => "upsert_node",
             Mutation::UpsertEdge { .. } => "upsert_edge",
             Mutation::DeleteNode { .. } => "delete_node",

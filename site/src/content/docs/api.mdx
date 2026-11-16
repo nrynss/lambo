@@ -47,7 +47,48 @@ The accessors `session`, `agent`, `config`, `embedding_contract`, `graph`, `inde
 | `demote` | Demotes a chunk. |
 | `retract` | Retracts a concept. Pass a dry-run flag to get an impact report without mutating. Async. |
 | `reserve` and `release` | Take or release an advisory soft lock. |
-| `set_root_goal` and `declare_synonym` | Set up the session. |
+| `set_root_goal` | Set the session root goal. |
+| `declare_name` | Bind a durable name directly to an existing concept ID; identical registration is a no-op. |
+| `declare_synonym` | Resolve an existing canonical target and register a durable concept name. A missing or conflicting target is refused. |
+
+### Durable concept names
+
+`ConceptCitations.name: Option<String>` binds a durable name to the concept actually written by a cited derive. A declaration may have empty `depends_on` and `against` lists. Names and reference edges are committed atomically with the derived concepts; failed validation or commit rolls back the full call. Both canonical and hybrid writes use the same binding rules.
+
+A name is normalized like a canonical key and resolves to one fixed `NodeId` in its session. Use it in `depends_on` or `against`, or keep using existing IDs and content. Missing targets stay reserved and fail explicitly. Names cannot be retargeted. Named derives and text-reference actions use distinct durable-intent variants so a build that predates names refuses an unconsumed intent instead of ignoring its identity constraints.
+
+Exact-name recall reaches the target without content keyword overlap. Dependency questions can name the declared subject. Rendered and detailed recall hits expose up to three durable names in stable order.
+
+To attach a name without deriving or re-embedding a concept, use `Memory::declare_name(name, target)`, or the supported [`lambo names assign`](/lambo/cli/#attach-a-name-to-existing-memory) command. `Memory::declare_synonym(source, canonical)` now resolves an existing target and registers a durable name; the lower-level raw `Graph::declare_synonym` remains a legacy import facility. Existing synonym snapshots are upgraded by [`lambo names migrate`](/lambo/cli/#migrate-synonyms-and-repair-reviewed-aliases). Review repair mappings before applying them.
+
+For a new concept, supply its name through the cited derive API:
+
+```rust
+use lambo::{AgentId, ConceptCitations, ConceptType, LamboError, Memory};
+use lambo::graph::derive::ParentOf;
+
+async fn remember_rule(mem: &Memory) -> Result<(), LamboError> {
+    let content = "Lease TTL is 45s because it must exceed the 15s shutdown budget";
+    mem.derive_cited_as(
+        &AgentId("agent-a".into()),
+        &[(content, ConceptType::Logic)],
+        &ParentOf::none(),
+        &[ConceptCitations {
+            content: content.into(),
+            name: Some("writer lease rule".into()),
+            depends_on: vec![],
+            against: vec![],
+        }],
+    ).await?;
+    Ok(())
+}
+```
+
+For an existing inspected `target: NodeId`, call `let added = mem.declare_name("writer lease rule", target)?;`. This synchronous method returns `true` for a new binding and `false` for an identical existing binding. It changes no embedding. Names use the ordinary write-behind flush path; close the owning `Memory` cleanly with `close().await?` on shutdown. A process-local MemoryStore does not persist across restarts.
+
+Invalid or conflicting names produce typed `LamboError::Reference` errors with `ReferenceField::Name` and `InvalidName` or `NameTaken` refusals. Neither a name nor a citation silently chooses among distinct identities. UUID-shaped and eight-hex names are refused. A registered name stays reserved after its target disappears. In asynchronous writes, inspect the receipt as well as the admission result: an accepted write can still fail if its pinned identity is no longer valid at application time.
+
+When updating existing callers, create the target before `Memory::declare_synonym`; forward declarations are no longer accepted. A raw `Graph::declare_synonym` call is not a substitute for a durable write-reference name. See [Migration and memory repair](/lambo/migration/) for schema provisioning, lost synonyms, reviewed alias retirement, rollback and session-splitting limits.
 
 ### Read
 
@@ -469,6 +510,10 @@ Backends are chosen by Cargo feature and configuration, not loaded as plugins. S
 `GraphStore` handles durable graph storage. The implementations are the in-memory store, the SQLite store, the CockroachDB store, and the PostgreSQL store. Its methods cover schema setup, flushing a batch, loading a session, keyword and vector candidate lookup, blast radius, interaction spans, the two supersession evidence accessors, and canonization records, plus the lease methods below.
 
 A store also declares what it can do. `capabilities` reports its features, and `vector_dimensions` reports the width of its vector column, or nothing when it has none. A store that reports a width must agree with the embedder's, and Lambo refuses to start when they differ.
+
+Durable names add `GraphSnapshot.names: Vec<ConceptName>` and `GraphSnapshot.retired_aliases: Vec<RetiredAlias>`, both empty by default when deserializing older snapshots. `Mutation::SetConceptName` and `Mutation::RetireAlias` must participate in the same fenced transaction as the graph changes they accompany. Adapter implementations must preserve them through flush, reload, seeding and session erasure, refuse name retargeting, and retain a name when its target is deleted. The SQL adapters' `preflight_schema` checks the required tables and directs an older schema to `lambo provision`.
+
+When updating Rust callers, add `name: None` to unnamed `ConceptCitations` struct literals and account for the two snapshot fields in explicit `GraphSnapshot` literals. Custom adapters and snapshot export/import tools must preserve names and retired history; dropping either can change citation identity. See the [migration guide](/lambo/migration/) before upgrading stored sessions.
 
 ### The Embedder trait
 

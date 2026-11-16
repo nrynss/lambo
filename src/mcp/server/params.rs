@@ -147,6 +147,11 @@ pub struct WireConcept {
     /// not a paragraph or a log of what you did.
     #[schemars(length(max = 16_384))]
     pub content: String,
+    /// Optional durable name for this concept. Names use canonical-key
+    /// normalization and survive a writer restart. A conflicting name or
+    /// concept key refuses the whole call. Later writes may cite this name.
+    #[schemars(length(max = 16_384))]
+    pub name: Option<String>,
     /// One of `entity`, `logic`, `constraint`, `resource`, `observation`.
     pub concept_type: WireConceptType,
     /// Optional: up to 8 existing concepts this one rests on, such as the

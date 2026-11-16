@@ -1494,7 +1494,7 @@ CREATE INDEX IF NOT EXISTS sessions_idx ON sessions (session_id);
                 sqlite.contains(&"write_intents") && sqlite.contains(&"sessions"),
                 "{sqlite:?}"
             );
-            assert_eq!(sqlite.len(), 12, "sqlite DDL table count: {sqlite:?}");
+            assert_eq!(sqlite.len(), 14, "sqlite DDL table count: {sqlite:?}");
         }
         #[cfg(feature = "store-cockroach")]
         {
@@ -1504,7 +1504,7 @@ CREATE INDEX IF NOT EXISTS sessions_idx ON sessions (session_id);
                 "{crdb:?}"
             );
             // 12 with `store_meta` (#171).
-            assert_eq!(crdb.len(), 12, "cockroach DDL table count: {crdb:?}");
+            assert_eq!(crdb.len(), 14, "cockroach DDL table count: {crdb:?}");
         }
         #[cfg(feature = "store-postgres")]
         {
@@ -1514,7 +1514,7 @@ CREATE INDEX IF NOT EXISTS sessions_idx ON sessions (session_id);
                 "{pg:?}"
             );
             // 12 with `store_meta` (#171).
-            assert_eq!(pg.len(), 12, "postgres DDL table count: {pg:?}");
+            assert_eq!(pg.len(), 14, "postgres DDL table count: {pg:?}");
         }
     }
 
@@ -2201,3 +2201,6 @@ CREATE INDEX IF NOT EXISTS sessions_idx ON sessions (session_id);
         assert_eq!(store.read_flush_stats(&sid).await.unwrap(), Some(later));
     }
 }
+
+// #146: immutable citation names and retired alias snapshots.
+mod names;

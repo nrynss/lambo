@@ -263,6 +263,7 @@ async fn a_declared_contradiction_is_not_suspected() {
     let (graph, [i0, i1, _]) = graph_with_interactions();
     let old = derive_at(&graph, i0, OLD, Vec::new()).await.created[0];
     let pinned = PinnedCitations {
+        names: Vec::new(),
         references: Vec::new(),
         against: vec![PinnedReference {
             content: NEW.to_string(),
@@ -294,6 +295,7 @@ async fn a_declared_citation_is_not_suspected() {
     let (graph, [i0, i1, _]) = graph_with_interactions();
     let old = derive_at(&graph, i0, OLD, Vec::new()).await.created[0];
     let pinned = PinnedCitations {
+        names: Vec::new(),
         references: vec![PinnedReference {
             content: NEW.to_string(),
             reference: old.0.to_string(),
@@ -407,11 +409,13 @@ async fn a_later_declaration_settles_the_suspicion() {
         };
         let pinned = if against {
             PinnedCitations {
+                names: Vec::new(),
                 references: Vec::new(),
                 against: vec![reference],
             }
         } else {
             PinnedCitations {
+                names: Vec::new(),
                 references: vec![reference],
                 against: Vec::new(),
             }

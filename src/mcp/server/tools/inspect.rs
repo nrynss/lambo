@@ -54,6 +54,54 @@ impl LamboServer {
         let mem: &Memory = layer.as_ref().map_or(&self.mem, |l| &l.mem);
         let scope = p.scope.clone();
 
+        // Retired alias ids remain inspectable, but never silently redirect a
+        // caller's focus or expose archived embedding vectors.
+        let retired_id = uuid::Uuid::parse_str(p.focus.trim())
+            .ok()
+            .map(crate::types::NodeId)
+            .or_else(|| {
+                let focus = p.focus.trim();
+                if !crate::surface::resolve::is_short_id_shaped(focus) {
+                    return None;
+                }
+                let graph = mem.graph().read();
+                let mut matches = graph.retired_aliases().filter(|a| {
+                    a.concept
+                        .id
+                        .0
+                        .simple()
+                        .to_string()
+                        .starts_with(&focus.to_ascii_lowercase())
+                });
+                let first = matches.next()?.concept.id;
+                matches.next().is_none().then_some(first)
+            });
+        if let Some(id) = retired_id
+            && let Some(retired) = mem.graph().read().retired_alias(id)
+        {
+            let text = format!(
+                "retired alias {}: {}\nreplacement: {}\nretired at: {}\narchived incident edges: {}\nThis identity is historical; use the replacement id for new writes.",
+                retired.concept.id, retired.concept.content, retired.target,
+                retired.retired_at, retired.edges.len(),
+            );
+            let mut out = CallToolResult::success(vec![ContentBlock::text(text.clone())]);
+            out.structured_content = Some(json!({
+                "view": text,
+                "retired_alias": {
+                    "id": retired.concept.id,
+                    "content": retired.concept.content,
+                    "concept_type": retired.concept.concept_type,
+                    "original_status": retired.concept.canonization_status,
+                    "replacement": retired.target,
+                    "retired_at": retired.retired_at,
+                    "archived_edge_count": retired.edges.len(),
+                },
+                "scope": scope,
+                "warnings": [],
+            }));
+            return out;
+        }
+
         // One short read section, no `.await` inside (spec §6.4).
         let now = chrono::Utc::now();
         let min_age = mem.config().canonization_edge_min_age;

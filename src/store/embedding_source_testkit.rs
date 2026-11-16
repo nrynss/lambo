@@ -375,6 +375,7 @@ pub(crate) async fn check_a_settled_image_intent_keeps_no_vector(
         concepts: vec![("wears silk at pongal".into(), ConceptType::Logic)],
         pairs: vec![],
         citations: crate::types::PinnedCitations {
+            names: Vec::new(),
             // #19(b): and its contradictions.
             against: vec![crate::types::PinnedReference {
                 content: "wears silk at pongal".into(),

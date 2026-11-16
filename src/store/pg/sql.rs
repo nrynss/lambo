@@ -308,6 +308,14 @@ pub(super) const ERASE_STATEMENTS: &[(&str, &str)] = &[
         "DELETE FROM reservations WHERE session_id = $1",
     ),
     ("synonyms", "DELETE FROM synonyms WHERE session_id = $1"),
+    (
+        "concept_names",
+        "DELETE FROM concept_names WHERE session_id = $1",
+    ),
+    (
+        "retired_aliases",
+        "DELETE FROM retired_aliases WHERE session_id = $1",
+    ),
     ("edges", "DELETE FROM edges WHERE session_id = $1"),
     ("concepts", "DELETE FROM concepts WHERE session_id = $1"),
     (
@@ -889,6 +897,10 @@ pub(super) fn consume_write_intents_update<'a>(
         .push_bind(crate::types::ACTION_CITED_PAYLOAD_LIKE)
         .push(CONSUME_WRITE_INTENT_UPDATE_OR_SQL)
         .push_bind(crate::types::REPO_SCOPED_PAYLOAD_LIKE)
+        .push(CONSUME_WRITE_INTENT_UPDATE_OR_SQL)
+        .push_bind(crate::types::DERIVE_NAMED_PAYLOAD_LIKE)
+        .push(CONSUME_WRITE_INTENT_UPDATE_OR_SQL)
+        .push_bind(crate::types::ACTION_NAMED_PAYLOAD_LIKE)
         .push(CONSUME_WRITE_INTENT_UPDATE_PAYLOAD_SQL)
         .push_bind(crate::types::SETTLED_IMAGE_INTENT_PAYLOAD)
         .push(CONSUME_WRITE_INTENT_UPDATE_VALUES_SQL);

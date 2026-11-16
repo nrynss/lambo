@@ -24,6 +24,8 @@ use super::NodeId;
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReferenceField {
+    /// A durable concept-name declaration.
+    Name,
     /// A derive concept's `depends_on` entry.
     DependsOn,
     /// A `record_action` `depends_on` entry.
@@ -46,6 +48,7 @@ impl ReferenceField {
     /// The field as the wire spells it.
     pub fn wire_name(self) -> &'static str {
         match self {
+            ReferenceField::Name => "name",
             ReferenceField::DependsOn => "depends_on",
             ReferenceField::ActionDependsOn => "depends_on",
             ReferenceField::Against | ReferenceField::ActionAgainst => "against",
@@ -85,8 +88,17 @@ pub struct ReferenceCandidate {
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ReferenceRefusalKind {
+    /// A name failed its input or target validation.
+    InvalidName { reason: String },
+    /// Another identity already owns this normalized name or concept key.
+    NameTaken { target: NodeId },
     /// No concept in this session answers to it.
     Missing,
+    /// This identity was explicitly retired during an alias repair.
+    Retired {
+        /// The replacement concept, when known.
+        target: Option<NodeId>,
+    },
     /// It answers to several concepts.
     Ambiguous {
         /// The concepts it matched, in a stable order.
@@ -204,13 +216,15 @@ impl fmt::Display for ReferenceRefusal {
         let verb = if self.field.is_against()
             || matches!(
                 self.field,
-                ReferenceField::RetractTarget | ReferenceField::ParentOf
+                ReferenceField::Name | ReferenceField::RetractTarget | ReferenceField::ParentOf
             ) {
             "name"
         } else {
             "cite"
         };
         match &self.kind {
+            ReferenceRefusalKind::InvalidName { reason } => write!(f, "{field} {r}{on} is invalid: {reason}"),
+            ReferenceRefusalKind::NameTaken { target } => write!(f, "{field} {r}{on} already belongs to concept {target}; names cannot be retargeted or shadow existing concepts; use a reviewed repair for historical aliases"),
             ReferenceRefusalKind::Missing => write!(
                 f,
                 "{field} {r}{on} names no concept in this session; {verb} a concept that already \
@@ -246,6 +260,17 @@ impl fmt::Display for ReferenceRefusal {
             ),
             ReferenceRefusalKind::SelfReference if self.field.is_against() => {
                 write!(f, "{field} {r}{on} names the contradicting concept itself")
+            }
+            ReferenceRefusalKind::Retired { target } => {
+                if target.is_some() {
+                    write!(f, "{field} {r}{on} names a retired alias")?;
+                } else {
+                    write!(f, "{field} {r}{on} names a reserved name whose concept is no longer available")?;
+                }
+                if let Some(target) = target {
+                    write!(f, "; use replacement concept {}", target.0)?;
+                }
+                Ok(())
             }
             ReferenceRefusalKind::SelfReference => {
                 write!(f, "{field} {r}{on} names the citing concept itself")
@@ -294,6 +319,9 @@ impl std::error::Error for ReferenceRefusal {}
 pub struct ConceptCitations {
     /// The citing concept's content: one of the call's `concepts`.
     pub content: String,
+    /// Optional durable, normalized name to bind to the concept actually written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     /// Existing concepts it rests on, each by full node id, recall's short
     /// id or its content.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -302,6 +330,17 @@ pub struct ConceptCitations {
     /// written as `this -Contradicts-> that`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub against: Vec<String>,
+}
+
+/// A durable name declared by a derive. Its target is selected by the same
+/// canonical or hybrid write that produces the named concept.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConceptNaming {
+    /// One of this call's concept contents.
+    pub content: String,
+    /// The name as submitted; the graph owns normalization.
+    pub name: String,
 }
 
 /// A citation as accepted at the ack: the reference and what it resolved to.
@@ -325,6 +364,9 @@ pub struct PinnedReference {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PinnedCitations {
+    /// Durable names to bind in the graph write transaction.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub names: Vec<ConceptNaming>,
     /// One per distinct `(content, target)`: `depends_on`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub references: Vec<PinnedReference>,
@@ -337,12 +379,18 @@ pub struct PinnedCitations {
 impl PinnedCitations {
     /// Whether there is nothing to cite or contradict.
     pub fn is_empty(&self) -> bool {
-        self.references.is_empty() && self.against.is_empty()
+        self.names.is_empty() && self.references.is_empty() && self.against.is_empty()
     }
 
     /// Retained bytes, for the write queue's byte admission.
     pub(crate) fn bytes(&self) -> usize {
-        pinned_bytes(&self.references) + pinned_bytes(&self.against)
+        pinned_bytes(&self.references)
+            + pinned_bytes(&self.against)
+            + self
+                .names
+                .iter()
+                .map(|n| n.content.len() + n.name.len())
+                .sum::<usize>()
     }
 }
 

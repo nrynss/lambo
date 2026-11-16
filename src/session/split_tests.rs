@@ -294,6 +294,7 @@ pub(crate) fn source() -> GraphSnapshot {
                 concepts: vec![("beta result is green".into(), ConceptType::Logic)],
                 pairs: vec![],
                 citations: PinnedCitations {
+                    names: Vec::new(),
                     references: vec![PinnedReference {
                         content: "beta result is green".into(),
                         reference: "beta parser is strict".into(),
