@@ -115,6 +115,10 @@ fn assert_spec_13(outcome: &DemoOutcome) {
     // Step 3 — the context block, asserted on the exact strings.
     let ctx = &outcome.recall_context;
     assert!(
+        ctx.contains(r#"names ["user document","user entity","user model"]"#),
+        "every run must declare the same settle names, even if GC already passed its floor:\n{ctx}"
+    );
+    assert!(
         ctx.contains(EXPECT_CANONICAL_LABEL),
         "context block is missing the canonical marker:\n{ctx}"
     );
