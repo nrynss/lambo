@@ -2203,4 +2203,11 @@ CREATE INDEX IF NOT EXISTS sessions_idx ON sessions (session_id);
 }
 
 // #146: immutable citation names and retired alias snapshots.
+// Validators and their conformance harness are used only by compiled adapters.
+#[cfg(any(
+    feature = "store-memory",
+    feature = "store-sqlite",
+    feature = "store-postgres",
+    feature = "store-cockroach"
+))]
 mod names;
