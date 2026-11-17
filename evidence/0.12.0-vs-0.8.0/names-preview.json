@@ -1,0 +1,17 @@
+{
+  "session": "lambo-dev",
+  "operation": "migrate",
+  "source_epoch": 884194,
+  "resulting_epoch": 884194,
+  "applied": false,
+  "mutations": 0,
+  "changes": {
+    "aliases_retired": 0,
+    "already_applied": 0,
+    "citations_moved": 0,
+    "mutation_epoch": 884194,
+    "names_migrated": 0
+  },
+  "bindings": [],
+  "retirements": []
+}
