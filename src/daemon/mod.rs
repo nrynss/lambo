@@ -89,6 +89,9 @@ pub struct RecallPipeline {
     /// `phase1` while recomputing legs could report provenance for a ranking
     /// nobody produced.
     legs: candidates::LegProvenance,
+    /// #256: the best keyword and vector scores over `legs`, cached with it
+    /// for the same reason.
+    top: crate::types::TopLegs,
     expanded: expand::ExpandedSet,
 }
 
@@ -705,7 +708,11 @@ impl Daemon {
         // does the query resolve an anchor WITH structural dependents? Only then
         // can the (async, vector-I/O) gather be skipped (T9-R1-3); a structural
         // phrasing that does not dispatch falls through to the FULL blend below,
-        // never a degraded keyword-only answer.
+        // never a degraded keyword-only answer. The exceptions are a write
+        // landing between this check and the graph lock below, and a `top_k`
+        // of 0, either of which can make a predicted dispatch decline after
+        // the gather was skipped; that answer is keyword-only and says so
+        // (see after the dispatch).
         //
         // #171: the anchor is resolved here once, stamped with the epoch, and
         // reused by the dispatch and the subject text below unless a write
@@ -733,7 +740,8 @@ impl Daemon {
         // competes only with BM25 and keeps its BGE-M3 value. The table was
         // measured on text queries, so a recall by an image or a client
         // vector (its recent leg runs only beside text) keeps it too.
-        let recent_score = if vectors.available() && route == Route::Text {
+        let vector_capable = vectors.available();
+        let recent_score = if vector_capable && route == Route::Text {
             crate::embed::calibration::recent_score(self.calibration, embedding.map(|(_, c)| c))
         } else {
             candidates::RECENT_SCORE
@@ -814,6 +822,7 @@ impl Daemon {
         // mutation. The daemon HotList tracks conflict/condition entries, not recall
         // recency - neither the blend nor this path bumps recall recency - so there
         // is no recency to refresh here.
+        let planned_epoch = anchor.as_ref().map(dispatch::ResolvedAnchor::epoch);
         let anchor = anchor.map(|a| a.current(&graph, &query.query));
         if let Some(anchor) = &anchor
             && let Some(result) = dispatch::try_structural_with(
@@ -825,6 +834,30 @@ impl Daemon {
             )
         {
             return Ok(result);
+        }
+        // The lock-free pre-check above predicted this dispatch and skipped
+        // the vector gather, but the dispatch declined: the recall falls
+        // through to the blend with no vector input. Two causes: a write
+        // that landed before the graph lock (the anchor's dependents
+        // removed, the anchor renamed or retired), which moved the graph
+        // epoch; or a decline the pre-check does not predict, at an
+        // unchanged epoch (a `top_k` of 0 leaves the traversal nothing to
+        // return). Ranking stays as it is (fail closed, as for every other
+        // lost vector leg), but the caller hears the leg was skipped, the
+        // same way: a `vector_degraded` annotation and its warning line,
+        // naming a concurrent write only when the epoch says one happened.
+        // Only when the leg would have run (a query embedding and a store
+        // that searches vectors); otherwise nothing was lost.
+        if dispatch_ready && vector_capable && embedding.is_some() {
+            let text = if planned_epoch == Some(graph.epoch()) {
+                "recall: a planned dependency-question dispatch did not fire; vector leg \
+                 skipped, results are keyword-only"
+            } else {
+                "recall: a concurrent write changed the graph after a dependency-question \
+                 dispatch was planned, and the dispatch did not fire; vector leg skipped, \
+                 results are keyword-only"
+            };
+            vector_leg_refused.push(Annotation::new(AnnotationKind::VectorDegraded, text));
         }
 
         let scores = self.scores.read().clone();
@@ -843,8 +876,11 @@ impl Daemon {
             // P2-6: without an index, the independently gathered recent and
             // vector legs still yield candidates (only lexical lookup is lost).
             let recent = route.recent_leg(&query.query);
-            let (phase1, legs) = match index {
-                Some(index) => candidates::candidates_with_legs_as(
+            // #256: `keyword` is what the keyword leg itself found (its raw
+            // best BM25, before an exact-name match's 1.0, and whether one
+            // happened); with no index the leg did not run.
+            let (phase1, legs, keyword) = match index {
+                Some(index) => candidates::candidates_with_keyword_leg_as(
                     graph,
                     index,
                     input,
@@ -852,12 +888,18 @@ impl Daemon {
                     query.top_k,
                     recent,
                 ),
-                None => candidates::candidates_without_keyword_with_legs_as(graph, input, recent),
+                None => {
+                    let (phase1, legs) =
+                        candidates::candidates_without_keyword_with_legs_as(graph, input, recent);
+                    (phase1, legs, candidates::KeywordLeg::default())
+                }
             };
             let expanded = expand::expand(graph, phase1.clone(), query.traversal_depth);
+            let top = crate::recall::confidence::top_legs(graph, &legs, keyword);
             RecallPipeline {
                 phase1,
                 legs,
+                top,
                 expanded,
             }
         };
@@ -933,6 +975,26 @@ impl Daemon {
             .iter()
             .filter_map(|h| pipeline.legs.get(&h.node_id).map(|l| (h.node_id, *l)))
             .collect();
+        // #256: the best per-leg scores over EVERY phase-1 candidate (not
+        // only the returned hits above), and the provisional combined value.
+        // A report only: assembly has already ranked and cut. Only a text
+        // recall of the caller's own session gets a combined value (the null
+        // medians were measured on text queries, and a layer is another
+        // store), so a recall by image or vector, and a layer's side of a
+        // layered recall, report their legs alone. With both legs it is the
+        // two-leg basis at the contract's null median (absent without one);
+        // with the keyword leg alone (no vector search, a failed embed or
+        // vector read, no embedded concept) the keyword-only basis.
+        result.top_legs = pipeline.top;
+        result.confidence = match route {
+            Route::Text => crate::recall::confidence::provisional(
+                pipeline.top,
+                embedding.and_then(|(_, contract)| {
+                    crate::embed::calibration::null_median_cosine(self.calibration, contract)
+                }),
+            ),
+            _ => None,
+        };
         if self.index.is_none() {
             result.warnings.push(
                 "recall: no inverted index installed (Daemon::with_index) - keyword leg unavailable"

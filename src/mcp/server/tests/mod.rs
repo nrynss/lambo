@@ -45,6 +45,7 @@ mod scoped_writes;
 mod stats;
 mod suspected;
 mod tools;
+mod top_legs;
 
 async fn server(session: &str) -> LamboServer {
     server_with_config(session, Config::default()).await

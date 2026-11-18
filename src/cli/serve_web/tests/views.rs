@@ -958,6 +958,44 @@ async fn recall_on_a_view_matches_the_cli_recall_byte_for_byte() {
         page["response_annotations"],
         serde_json::to_value(&cli.response_annotations).unwrap()
     );
+    // #256: the page and `lambo recall` report the same top legs and
+    // confidence, under the same names. This store runs no vector leg, so
+    // there is a keyword score, a null cosine and the keyword-only basis.
+    let cli_top: serde_json::Value =
+        serde_json::from_str(&serde_json::to_string(&cli.top_legs).unwrap()).unwrap();
+    let cli_confidence: serde_json::Value =
+        serde_json::from_str(&serde_json::to_string(&cli.confidence).unwrap()).unwrap();
+    assert_eq!(page["top_legs"], cli_top, "{page}");
+    assert!(page["top_legs"]["bm25"].as_f64().is_some_and(|s| s > 0.0));
+    assert!(page["top_legs"]["vector_cosine"].is_null());
+    assert_eq!(page["top_legs"]["exact_name_match"], false);
+    assert_eq!(page["confidence"], cli_confidence, "{page}");
+    assert_eq!(page["confidence"]["basis"], "keyword-only-v0");
+    // `lambo recall` prints the context block to stdout, unchanged, and the
+    // score report as one line for stderr.
+    let printed = crate::cli::recall::run_reported(
+        &backends,
+        "t4-recall",
+        "user schema",
+        &crate::cli::recall::RecallBy::default(),
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect("cli recall");
+    assert_eq!(printed.context, cli.context);
+    assert_eq!(printed.scores, cli.scores_line());
+    let json = printed
+        .scores
+        .strip_prefix("recall scores: ")
+        .expect("the line's prefix");
+    assert!(!json.contains('\n'));
+    let scores: serde_json::Value = serde_json::from_str(json).expect("one JSON object");
+    assert_eq!(
+        scores,
+        serde_json::json!({ "top_legs": cli_top, "confidence": cli_confidence })
+    );
     handle.abort();
 }
 

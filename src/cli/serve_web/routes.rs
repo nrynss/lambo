@@ -282,6 +282,8 @@ pub(super) async fn api_recall(
                 elapsed_ms: started.elapsed().as_millis() as u64,
                 hits: cli.hits,
                 response_annotations: cli.response_annotations,
+                top_legs: cli.top_legs,
+                confidence: cli.confidence,
             },
         ),
         Err(e) => fail(e),

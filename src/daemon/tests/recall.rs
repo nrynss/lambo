@@ -27,7 +27,7 @@ async fn recall_entry_reproduces_context_golden() {
         Duration::from_secs(3600),
     )
     .with_clock(Arc::new(move || now))
-    .with_index(index);
+    .with_index(index.clone());
     daemon.scores.write().ranked = rescore(&graph.read(), &ScoringWeights::default());
     daemon.scores.write().epoch = graph.read().epoch();
 
@@ -91,6 +91,64 @@ async fn recall_entry_reproduces_context_golden() {
     );
     assert_eq!(cache.len(), 1, "first call populates the cache");
 
+    // #256: the same golden recall (its block above is the committed file,
+    // untouched, so ranking, hits and scores are what they were) now also
+    // reports its legs' best scores. The keyword leg's is the best BM25 the
+    // index gives the query, computed here apart from the pipeline; the
+    // fixture has no embeddings, so there is no cosine, and the confidence
+    // is the keyword-only basis, `S / (S + 5)`.
+    let keyword_best = index
+        .read()
+        .search(
+            &query.query,
+            query.top_k * crate::recall::candidates::KEYWORD_OVERFETCH,
+        )
+        .into_iter()
+        .map(|s| s.score)
+        .reduce(f64::max)
+        .expect("the golden query matches");
+    assert!(keyword_best > 0.0);
+    assert_eq!(result.top_legs.bm25, Some(keyword_best));
+    assert_eq!(result.top_legs.vector_cosine, None);
+    assert!(!result.top_legs.exact_name_match);
+    let confidence = result.confidence.clone().expect("the keyword leg ran");
+    assert_eq!(confidence.basis, "keyword-only-v0");
+    assert!(confidence.provisional);
+    assert_eq!(confidence.value, keyword_best / (keyword_best + 5.0));
+    // On the wire the result only gained `top_legs` and `confidence`:
+    // without them, it is the three fields it always had, with the values
+    // they always had.
+    let mut wire = serde_json::to_value(&result).unwrap();
+    assert_eq!(
+        wire.as_object_mut().unwrap().remove("top_legs"),
+        Some(serde_json::json!({
+            "bm25": keyword_best,
+            "vector_cosine": null,
+            "exact_name_match": false,
+        }))
+    );
+    assert_eq!(
+        wire.as_object_mut().unwrap().remove("confidence"),
+        Some(serde_json::json!({
+            "value": confidence.value,
+            "basis": "keyword-only-v0",
+            "provisional": true,
+        }))
+    );
+    assert_eq!(
+        wire,
+        serde_json::json!({
+            "hits": result.hits,
+            "context": golden,
+            "warnings": result.warnings,
+        })
+    );
+    // A payload written before #256 still reads, with the fields empty.
+    let old: crate::types::RecallResult = serde_json::from_value(wire).unwrap();
+    assert_eq!(old.hits, result.hits);
+    assert_eq!(old.top_legs, crate::types::TopLegs::default());
+    assert_eq!(old.confidence, None);
+
     // Cache hit: identical second call does not grow the cache.
     let again = daemon
         .recall(
@@ -104,6 +162,7 @@ async fn recall_entry_reproduces_context_golden() {
         .await;
     assert_eq!(again.context, golden);
     assert_eq!(cache.len(), 1, "cache hit: no new key inserted");
+    assert_eq!(again, result, "a cached pipeline reports the same top legs");
 
     // Epoch invalidation: any mutation bumps the epoch -> miss -> new key.
     // The new interaction must link to the fixture's chain tail
@@ -662,6 +721,18 @@ use async_trait::async_trait;
 /// else is unreachable on this path.
 struct StubVectorStore {
     race: bool,
+    /// Run on every capability probe: a test's stand-in for a write that
+    /// lands while recall holds no graph lock.
+    on_probe: Option<Box<dyn Fn() + Send + Sync>>,
+}
+
+impl StubVectorStore {
+    fn new(race: bool) -> Self {
+        Self {
+            race,
+            on_probe: None,
+        }
+    }
 }
 #[async_trait]
 impl crate::store::GraphStore for StubVectorStore {
@@ -669,6 +740,9 @@ impl crate::store::GraphStore for StubVectorStore {
         panic!("stub: init_schema")
     }
     fn capabilities(&self) -> Capabilities {
+        if let Some(probe) = &self.on_probe {
+            probe();
+        }
         Capabilities::VECTOR_SEARCH
     }
     fn vector_dimensions(&self) -> Option<usize> {
@@ -818,7 +892,7 @@ async fn gather_contract_race_annotates_vector_degraded() {
         .recall_detailed(
             &sid(),
             query,
-            &StubVectorStore { race: true },
+            &StubVectorStore::new(true),
             Some((&vec![0.0; 1024], &contract)),
             RecallWeights::default(),
             &cache,
@@ -851,6 +925,219 @@ async fn gather_contract_race_annotates_vector_degraded() {
         "the caller's warnings carry the same line: {:?}",
         result.warnings
     );
+}
+
+/// Found in the #256 review (pre-existing): the lock-free pre-check predicts
+/// a dependency-question dispatch and skips the vector gather; a write that
+/// lands before the graph lock removes the anchor's only dependent, so the
+/// dispatch declines and the recall falls through to the blend with no
+/// vector input. That answer says its vector leg was skipped, as every
+/// other lost vector leg does, instead of passing as a full blend. The
+/// "write" runs inside the store's capability probe, which recall calls
+/// after the pre-check and before it takes the graph lock, so the race is
+/// deterministic. Without the write the dispatch fires; without a query
+/// embedding no vector leg was lost, so nothing is said.
+#[tokio::test]
+async fn a_dispatch_declined_by_a_concurrent_write_says_the_vector_leg_was_skipped() {
+    use crate::config::RecallWeights;
+    use crate::recall::cache::SharedRecallCache;
+    use crate::recall::detail::AnnotationKind;
+
+    let build = || {
+        let mut g = Graph::new(sid());
+        let i = interaction(1);
+        let iid = i.id;
+        g.insert_interaction(i).unwrap();
+        let anchor = concept(1, iid, "billing ledger");
+        let dependent = concept(2, iid, "invoice export job");
+        let (a, d) = (anchor.id, dependent.id);
+        g.insert_concept(anchor, iid).unwrap();
+        g.insert_concept(dependent, iid).unwrap();
+        let edge = Edge {
+            event_time: None,
+            id: NodeId(Uuid::from_u64_pair(3, 1)),
+            session_id: sid(),
+            source: a,
+            target: d,
+            edge_type: EdgeType::Hierarchical,
+            weight: 4.5,
+            reinforcements: 1,
+            created_at: ts(0),
+            last_reinforced: ts(0),
+        };
+        let edge_id = edge.id;
+        g.upsert_edge(edge).unwrap();
+        let mut index = InvertedIndex::new();
+        for c in g.concepts() {
+            index.add(c);
+        }
+        let graph = Arc::new(RwLock::new(g));
+        let daemon = Daemon::new(
+            graph.clone(),
+            ScoringWeights::default(),
+            Duration::from_secs(3600),
+        )
+        .with_index(Arc::new(RwLock::new(index)));
+        (graph, daemon, edge_id)
+    };
+    let query = RecallQuery {
+        query: "what depends on billing ledger".into(),
+        top_k: 5,
+        max_tokens: 500,
+        traversal_depth: 2,
+    };
+    let contract = EmbeddingContract {
+        kind: "fixture".into(),
+        model: None,
+        dim: 1024,
+    };
+    let embedding = vec![0.0_f32; 1024];
+    let kinds = |r: &crate::recall::detail::DetailedRecall| -> Vec<AnnotationKind> {
+        r.response_annotations.iter().map(|a| a.kind).collect()
+    };
+
+    // No write: the predicted dispatch fires.
+    let (_graph, daemon, _) = build();
+    let r = daemon
+        .recall_detailed(
+            &sid(),
+            query.clone(),
+            &StubVectorStore::new(false),
+            Some((&embedding, &contract)),
+            RecallWeights::default(),
+            &SharedRecallCache::new(),
+        )
+        .await;
+    assert_eq!(
+        kinds(&r),
+        [AnnotationKind::Traversal],
+        "premise: dispatched"
+    );
+
+    // The write lands in the window: the dispatch declines, and with a
+    // query embedding the keyword-only answer says so, in its annotations
+    // and its warnings.
+    for with_embedding in [true, false] {
+        let (graph, daemon, edge_id) = build();
+        let store = StubVectorStore {
+            race: false,
+            on_probe: Some(Box::new(move || {
+                let mut g = graph.write();
+                if g.edges().any(|e| e.id == edge_id) {
+                    g.remove_edge(edge_id).unwrap();
+                }
+            })),
+        };
+        let r = daemon
+            .recall_detailed(
+                &sid(),
+                query.clone(),
+                &store,
+                with_embedding.then_some((embedding.as_slice(), &contract)),
+                RecallWeights::default(),
+                &SharedRecallCache::new(),
+            )
+            .await;
+        assert!(!r.hits.is_empty(), "the blend answered");
+        if !with_embedding {
+            assert!(
+                kinds(&r).is_empty(),
+                "no vector leg was lost: {:?}",
+                kinds(&r)
+            );
+            continue;
+        }
+        assert_eq!(kinds(&r), [AnnotationKind::VectorDegraded]);
+        let text = &r.response_annotations[0].text;
+        assert!(text.contains("keyword-only"), "{text}");
+        assert!(text.contains("concurrent write"), "{text}");
+        assert!(r.warnings.contains(text), "{:?}", r.warnings);
+        // The #256 report agrees: no cosine, the keyword-only basis.
+        assert_eq!(r.top_legs.vector_cosine, None);
+        assert_eq!(
+            r.confidence.as_ref().map(|c| c.basis.as_str()),
+            Some("keyword-only-v0")
+        );
+    }
+}
+
+/// Found in the #256 second review: at `top_k = 0` the pre-check predicts a
+/// dependency-question dispatch (the anchor has a dependent) and skips the
+/// vector gather, but the traversal has nothing to return and declines,
+/// deterministically, with no write anywhere. The answer still says its
+/// vector leg was skipped, and does not blame a concurrent write that never
+/// happened (the graph epoch did not move).
+#[tokio::test]
+async fn a_dispatch_declined_at_top_k_zero_does_not_blame_a_concurrent_write() {
+    use crate::config::RecallWeights;
+    use crate::recall::cache::SharedRecallCache;
+    use crate::recall::detail::AnnotationKind;
+
+    let mut g = Graph::new(sid());
+    let i = interaction(1);
+    let iid = i.id;
+    g.insert_interaction(i).unwrap();
+    let anchor = concept(1, iid, "billing ledger");
+    let dependent = concept(2, iid, "invoice export job");
+    let (a, d) = (anchor.id, dependent.id);
+    g.insert_concept(anchor, iid).unwrap();
+    g.insert_concept(dependent, iid).unwrap();
+    g.upsert_edge(Edge {
+        event_time: None,
+        id: NodeId(Uuid::from_u64_pair(3, 1)),
+        session_id: sid(),
+        source: a,
+        target: d,
+        edge_type: EdgeType::Hierarchical,
+        weight: 4.5,
+        reinforcements: 1,
+        created_at: ts(0),
+        last_reinforced: ts(0),
+    })
+    .unwrap();
+    let mut index = InvertedIndex::new();
+    for c in g.concepts() {
+        index.add(c);
+    }
+    let graph = Arc::new(RwLock::new(g));
+    let epoch = graph.read().epoch();
+    let daemon = Daemon::new(
+        graph.clone(),
+        ScoringWeights::default(),
+        Duration::from_secs(3600),
+    )
+    .with_index(Arc::new(RwLock::new(index)));
+    let contract = EmbeddingContract {
+        kind: "fixture".into(),
+        model: None,
+        dim: 1024,
+    };
+    let embedding = vec![0.0_f32; 1024];
+    let r = daemon
+        .recall_detailed(
+            &sid(),
+            RecallQuery {
+                query: "what depends on billing ledger".into(),
+                top_k: 0,
+                max_tokens: 500,
+                traversal_depth: 2,
+            },
+            &StubVectorStore::new(false),
+            Some((embedding.as_slice(), &contract)),
+            RecallWeights::default(),
+            &SharedRecallCache::new(),
+        )
+        .await;
+    assert_eq!(graph.read().epoch(), epoch, "premise: nothing was written");
+    let kinds: Vec<AnnotationKind> = r.response_annotations.iter().map(|a| a.kind).collect();
+    assert_eq!(kinds, [AnnotationKind::VectorDegraded]);
+    let text = &r.response_annotations[0].text;
+    assert_eq!(
+        text,
+        "recall: a planned dependency-question dispatch did not fire; vector leg skipped, \
+         results are keyword-only"
+    );
+    assert!(r.warnings.contains(text), "{:?}", r.warnings);
 }
 
 /// #87 through `Daemon::recall_detailed`: the recent leg scores at the
@@ -895,7 +1182,7 @@ async fn recent_leg_follows_the_vector_contracts_calibration() {
             .recall_detailed(
                 &sid(),
                 query,
-                &StubVectorStore { race },
+                &StubVectorStore::new(race),
                 contract.as_ref().map(|c| (vector.as_slice(), c)),
                 RecallWeights::default(),
                 &SharedRecallCache::new(),
@@ -936,9 +1223,7 @@ async fn recent_leg_follows_the_vector_contracts_calibration() {
                 max_tokens: 500,
                 traversal_depth: 0,
             },
-            crate::store::vector_source::VectorCandidates::from_store(&StubVectorStore {
-                race: false,
-            }),
+            crate::store::vector_source::VectorCandidates::from_store(&StubVectorStore::new(false)),
             (&vector, &eg2_contract),
             RecallWeights::default(),
             &SharedRecallCache::new(),
@@ -989,7 +1274,7 @@ async fn recall_fusion_reaches_phase_one() {
                     max_tokens: 500,
                     traversal_depth: 0,
                 },
-                &StubVectorStore { race: false },
+                &StubVectorStore::new(false),
                 contract.as_ref().map(|c| (vector.as_slice(), c)),
                 RecallWeights::default(),
                 &SharedRecallCache::new(),

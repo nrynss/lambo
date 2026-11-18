@@ -152,6 +152,8 @@ fn recall(tier: usize, hits: &[H], extra: &[&str]) -> TierRecall {
             warnings,
             legs,
             cold_start: false,
+            top_legs: Default::default(),
+            confidence: None,
             detailed,
             response_annotations: Vec::new(),
         },

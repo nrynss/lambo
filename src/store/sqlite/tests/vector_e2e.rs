@@ -360,6 +360,16 @@ async fn sqlite_vector_leg_fires_on_an_organically_derived_concept() {
         result.hits.iter().any(|h| h.node_id == organic),
         "the vector-leg candidate reaches the assembled result: {result:?}"
     );
+    // #256: the recall's top vector score is the best cosine of that one
+    // SQLite read (the call counts above show it cost no second one), and
+    // its keyword leg ran and matched nothing. The fixture contract has no
+    // measured null median, so there is no combined value.
+    assert_eq!(
+        result.top_legs.vector_cosine,
+        answers[1].iter().map(|s| s.score).reduce(f64::max)
+    );
+    assert_eq!(result.top_legs.bm25, Some(0.0), "{:?}", result.top_legs);
+    assert_eq!(result.confidence, None);
     assert!(
         !logs.contains("store lacks VECTOR_SEARCH"),
         "SQLite must no longer log the hybrid degradation warning: {}",

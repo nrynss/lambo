@@ -350,11 +350,29 @@ impl LamboServer {
         // a layer hit's `from <session>` meta (the merge is its one renderer).
         let mut out = CallToolResult::success(vec![ContentBlock::text(recalled.context.clone())]);
         attach_warnings(&mut out, &warnings);
-        out.structured_content = Some(json!({
+        let mut structured = json!({
             "context": recalled.context,
             "hits": hits,
             "warnings": warnings,
-        }));
+            // #256: additive. The best keyword and vector scores of the
+            // caller's own session (of the scoped session, with `scope`),
+            // over every candidate each leg scored; a leg that did not run
+            // is null. Never blended with a layer's.
+            "top_legs": recalled.top_legs,
+        });
+        if let Some(map) = structured.as_object_mut() {
+            // #256: additive, only when it can be computed. An object that
+            // says it is provisional and names its basis, never a number.
+            if let Some(confidence) = &recalled.confidence {
+                map.insert("confidence".into(), json!(confidence));
+            }
+            // #256: additive, on a layered session's merged recall only:
+            // each available layer's own best per-leg scores.
+            if !recalled.layer_top_legs.is_empty() {
+                map.insert("layer_top_legs".into(), json!(recalled.layer_top_legs));
+            }
+        }
+        out.structured_content = Some(structured);
         out
     }
 

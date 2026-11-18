@@ -135,6 +135,24 @@ pub struct ContractCalibration {
     /// (#254). Only reported (the `calibration=` stats line); nothing reads
     /// it to change a constant.
     pub measured_corpus_concepts: usize,
+    /// The **pairwise null median** (#256): the median cosine of a query to
+    /// one concept graded irrelevant to it under this contract, the row's
+    /// run file's `retrieval.self.query_to_irrelevant.dev.p50`, the same
+    /// null distribution, split and framing `recent_score` and
+    /// `layer_min_similarity` were matched on, at the run file's four
+    /// decimals. `None` would mean the row's evidence does not establish it.
+    ///
+    /// A statistic of single pairs, so it does not depend on store size.
+    /// The cosine it rescales is not a single pair: it is the best over a
+    /// store, which for an unrelated query sits well above this median and
+    /// grows with the store (see [`crate::recall::confidence`]).
+    ///
+    /// Read by nothing that ranks. It is the point the provisional recall
+    /// confidence rescales the vector leg's best cosine at
+    /// ([`crate::recall::confidence`]). The EmbeddingGemma 2 row's comes
+    /// from the older #87 evaluation set (`evidence/issue-87-calibration/`),
+    /// the others' from the #190 set.
+    pub null_median_cosine: Option<f64>,
     /// Where the numbers come from.
     pub evidence: &'static str,
 }
@@ -153,6 +171,7 @@ const EG2_Q8_768: ContractCalibration = ContractCalibration {
     merge_threshold: 0.93,
     default_threshold_merges: 0.78,
     measured_corpus_concepts: EVAL_SET_CORPUS_CONCEPTS,
+    null_median_cosine: Some(0.632),
     evidence: "evidence/issue-87-calibration/",
 };
 
@@ -170,6 +189,7 @@ const QWEN3_4B_2560: ContractCalibration = ContractCalibration {
     merge_threshold: 0.89,
     default_threshold_merges: 0.70,
     measured_corpus_concepts: EVAL_SET_CORPUS_CONCEPTS,
+    null_median_cosine: Some(0.4182),
     evidence: "evidence/issue-221/",
 };
 
@@ -184,6 +204,7 @@ const QWEN3_4B_1024: ContractCalibration = ContractCalibration {
     merge_threshold: 0.90,
     default_threshold_merges: 0.71,
     measured_corpus_concepts: EVAL_SET_CORPUS_CONCEPTS,
+    null_median_cosine: Some(0.4282),
     evidence: "evidence/issue-221/",
 };
 
@@ -201,6 +222,7 @@ const ELASTIC_JINA_V3_1024: ContractCalibration = ContractCalibration {
     merge_threshold: 0.86,
     default_threshold_merges: 0.64,
     measured_corpus_concepts: EVAL_SET_CORPUS_CONCEPTS,
+    null_median_cosine: Some(0.1443),
     evidence: "evidence/issue-237/",
 };
 
@@ -265,6 +287,35 @@ pub fn is_reference(contract: &EmbeddingContract) -> bool {
             .as_deref()
             .is_some_and(|m| m.starts_with("BAAI/bge-m3@")),
         _ => false,
+    }
+}
+
+/// The BGE-M3 reference contract's pairwise null median (#256): the median
+/// cosine of a query to one concept graded irrelevant, `retrieval.self.query_to_irrelevant
+/// .dev.p50` of the reference run on the current #190 set
+/// (`evidence/issue-221/runs/bge-m3-candle-cpu.json`, 23,707 dev pairs
+/// against 100 concepts; the Qwen and Jina rows were measured beside that
+/// run). The older #87 run of the same model on the set as it then was
+/// (`evidence/issue-87-calibration/runs/bge-m3-candle-cpu.json`, 19,751
+/// pairs) reads 0.3535. Read by nothing that ranks; see
+/// [`ContractCalibration::null_median_cosine`].
+pub const REFERENCE_NULL_MEDIAN_COSINE: f64 = 0.3586;
+
+/// The pairwise null median the provisional recall confidence rescales a
+/// cosine at under `contract` (#256): its [`BUILTIN`] row's
+/// [`ContractCalibration::null_median_cosine`] under `calibration =
+/// "builtin"`, or [`REFERENCE_NULL_MEDIAN_COSINE`] for the [`is_reference`]
+/// BGE-M3 contract under either mode. `"off"` means "the BGE-M3 reference
+/// values for every contract": for the reference contract those are its own
+/// values, so its median stays; every other contract's measured median is
+/// declined. `None` for a contract with no measured median, and for a
+/// non-reference contract under `"off"`: the two-leg confidence is then
+/// absent, never guessed.
+pub fn null_median_cosine(mode: CalibrationMode, contract: &EmbeddingContract) -> Option<f64> {
+    match (mode, lookup(contract)) {
+        (CalibrationMode::Builtin, Some(row)) => row.null_median_cosine,
+        _ if is_reference(contract) => Some(REFERENCE_NULL_MEDIAN_COSINE),
+        _ => None,
     }
 }
 

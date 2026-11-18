@@ -87,7 +87,7 @@ mod shutdown;
 mod types;
 mod writes;
 
-pub use crate::recall::layered::{LayerCopy, LayeredHit, LayeredRecall};
+pub use crate::recall::layered::{LayerCopy, LayerTopLegs, LayeredHit, LayeredRecall};
 pub(crate) use builder::AttachShutdown;
 pub use builder::{Attach, LeaseHeldElsewhere, MemoryBuilder};
 pub(crate) use image::embed_server_image;

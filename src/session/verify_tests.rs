@@ -477,6 +477,9 @@ fn a_merged_copys_redundancy_skips_are_deduped_not_lost() {
             unavailable_layers: Vec::new(),
             detail,
             hit_legs: Vec::new(),
+            top_legs: Default::default(),
+            confidence: None,
+            layer_top_legs: Vec::new(),
         }
     };
     let layered_hit = |session: &str, node_id: NodeId, also: Vec<LayerCopy>| LayeredHit {

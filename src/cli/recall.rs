@@ -29,7 +29,7 @@ use crate::recall::query_vector::{self, QueryBy};
 use crate::resolve::{assert_session_embedding_compatible, ResolvedBackends};
 use crate::store::vector_source::VectorCandidates;
 use crate::surface::image::{check_submitted_vector_as, sniff_mime, validate, MAX_IMAGE_BYTES};
-use crate::types::RecallQuery;
+use crate::types::{ProvisionalConfidence, RecallQuery, TopLegs};
 
 use super::derive_image::{read_capped, VectorFile, MAX_VECTOR_FILE_BYTES};
 use std::path::PathBuf;
@@ -47,6 +47,49 @@ pub(crate) struct CliRecall {
     /// (query embedding failure, CLI side) first, then the daemon's own
     /// (`traversal` for a dispatched structural query).
     pub(crate) response_annotations: Vec<Annotation>,
+    /// #256: the best phase-1 keyword and vector scores, over every
+    /// candidate each leg scored.
+    pub(crate) top_legs: TopLegs,
+    /// #256: their provisional combined value, when it can be computed.
+    pub(crate) confidence: Option<ProvisionalConfidence>,
+}
+
+impl CliRecall {
+    /// The one-line score report `lambo recall` prints to **stderr** (#256):
+    /// `recall scores: ` and one JSON object with `top_legs` and, when
+    /// present, `confidence`, named as every other surface names them.
+    /// Standard output stays the context block alone.
+    pub(crate) fn scores_line(&self) -> String {
+        format!(
+            "recall scores: {}",
+            scores_json(self.top_legs, self.confidence.as_ref())
+        )
+    }
+}
+
+/// `{"top_legs": {...}}` plus `"confidence": {...}` when present: the #256
+/// keys as the MCP result, the serve ledger and `/api/recall` carry them.
+pub(crate) fn scores_json(
+    top_legs: TopLegs,
+    confidence: Option<&ProvisionalConfidence>,
+) -> serde_json::Value {
+    let mut out = serde_json::json!({ "top_legs": top_legs });
+    if let (Some(c), Some(map)) = (confidence, out.as_object_mut()) {
+        map.insert("confidence".into(), serde_json::json!(c));
+    }
+    out
+}
+
+/// What `lambo recall` prints: the context block for standard output and
+/// the score report for standard error.
+#[derive(Debug)]
+pub struct RecallOutput {
+    /// The context block, exactly what [`run`] and [`run_by`] return.
+    pub context: String,
+    /// The #256 score line: `recall scores: {"top_legs": {"bm25": ...,
+    /// "vector_cosine": ...}, "confidence": {"value": ..., "basis": ...,
+    /// "provisional": true}}`, `confidence` only when present.
+    pub scores: String,
 }
 
 /// Recall relevant memory for a query.
@@ -99,6 +142,31 @@ pub async fn run_by(
     max_tokens: Option<usize>,
     traversal_depth: Option<usize>,
 ) -> Result<String, CliError> {
+    Ok(run_reported(
+        backends,
+        session,
+        query,
+        by,
+        top_k,
+        max_tokens,
+        traversal_depth,
+    )
+    .await?
+    .context)
+}
+
+/// [`run_by`] (a text recall when `by` names neither file), returning the
+/// score report beside the context block (#256). The binary prints
+/// `context` to standard output and `scores` to standard error.
+pub async fn run_reported(
+    backends: &ResolvedBackends,
+    session: &str,
+    query: &str,
+    by: &RecallBy,
+    top_k: Option<usize>,
+    max_tokens: Option<usize>,
+    traversal_depth: Option<usize>,
+) -> Result<RecallOutput, CliError> {
     if by.mime.is_some() && by.image.is_none() {
         return Err(CliError::Usage("--mime goes with --image".into()));
     }
@@ -165,7 +233,33 @@ pub async fn run_by(
             ));
         }
     };
-    let detail = match query_by {
+    let detail = run_by_detailed(
+        backends,
+        session,
+        query,
+        query_by,
+        top_k,
+        max_tokens,
+        traversal_depth,
+    )
+    .await?;
+    Ok(RecallOutput {
+        scores: detail.scores_line(),
+        context: detail.context,
+    })
+}
+
+/// A text recall (`by` is `None`) or a recall by image or vector.
+async fn run_by_detailed(
+    backends: &ResolvedBackends,
+    session: &str,
+    query: &str,
+    by: Option<QueryBy<'_>>,
+    top_k: Option<usize>,
+    max_tokens: Option<usize>,
+    traversal_depth: Option<usize>,
+) -> Result<CliRecall, CliError> {
+    Ok(match by {
         None => run_detailed(backends, session, query, top_k, max_tokens, traversal_depth).await?,
         Some(by) => {
             run_detailed_by(
@@ -179,8 +273,7 @@ pub async fn run_by(
             )
             .await?
         }
-    };
-    Ok(detail.context)
+    })
 }
 
 /// One recall execution producing the CLI string AND the H3 presentation
@@ -425,6 +518,8 @@ async fn run_on(
         context,
         hits: detail.detailed,
         response_annotations: detail.response_annotations,
+        top_legs: detail.top_legs,
+        confidence: detail.confidence,
     })
 }
 
@@ -719,6 +814,8 @@ mod tests {
             warnings: texts,
             legs: Default::default(),
             cold_start: false,
+            top_legs: Default::default(),
+            confidence: None,
             detailed,
             response_annotations: Vec::new(),
         }

@@ -264,6 +264,91 @@ fn rows_record_the_corpus_size_their_evidence_measured() {
     }
 }
 
+/// #256: every row's null median is its own run file's
+/// `retrieval.self.query_to_irrelevant.dev.p50`, and the reference's is the
+/// BGE-M3 reference run's. `null_median_cosine` answers it for a row and for
+/// the reference (under either mode), and nothing for an uncalibrated
+/// contract or for a measured row under `off`.
+#[test]
+fn null_medians_match_the_committed_runs() {
+    let p50 = |text: &str| {
+        let run: serde_json::Value = serde_json::from_str(text).unwrap();
+        run["retrieval"]["self"]["query_to_irrelevant"]["dev"]["p50"]
+            .as_f64()
+            .unwrap()
+    };
+    let runs = [
+        (
+            include_str!(
+                "../../evidence/issue-87-calibration/runs/eg2-q8-768-llamacpp-b11517-cpu.json"
+            ),
+            EG2_Q8_768,
+            0.632,
+        ),
+        (
+            include_str!("../../evidence/issue-221/runs/qwen3-4b-2560.json"),
+            QWEN3_4B_2560,
+            0.4182,
+        ),
+        (
+            include_str!("../../evidence/issue-221/runs/qwen3-4b-1024.json"),
+            QWEN3_4B_1024,
+            0.4282,
+        ),
+        (
+            include_str!("../../evidence/issue-237/runs/elastic-jina-v3-1024.json"),
+            ELASTIC_JINA_V3_1024,
+            0.1443,
+        ),
+    ];
+    assert_eq!(runs.len(), BUILTIN.len(), "every built-in row has a run");
+    for (text, row, expected) in runs {
+        assert_eq!(row.null_median_cosine, Some(expected), "{row:?}");
+        assert_eq!(p50(text), expected, "{row:?}");
+        let contract = EmbeddingContract {
+            kind: row.kind.into(),
+            model: Some(row.model.into()),
+            dim: row.dim,
+        };
+        assert_eq!(
+            null_median_cosine(CalibrationMode::Builtin, &contract),
+            Some(expected)
+        );
+        assert_eq!(null_median_cosine(CalibrationMode::Off, &contract), None);
+    }
+    assert_eq!(
+        p50(include_str!(
+            "../../evidence/issue-221/runs/bge-m3-candle-cpu.json"
+        )),
+        REFERENCE_NULL_MEDIAN_COSINE
+    );
+    let reference = EmbeddingContract {
+        kind: "bge_m3".into(),
+        model: None,
+        dim: 1024,
+    };
+    assert!(is_reference(&reference));
+    assert_eq!(
+        null_median_cosine(CalibrationMode::Builtin, &reference),
+        Some(REFERENCE_NULL_MEDIAN_COSINE)
+    );
+    // `off` means the BGE-M3 reference values, and for the reference
+    // contract its own median is one of them.
+    assert_eq!(
+        null_median_cosine(CalibrationMode::Off, &reference),
+        Some(REFERENCE_NULL_MEDIAN_COSINE)
+    );
+    let unmeasured = EmbeddingContract {
+        kind: "fixture".into(),
+        model: None,
+        dim: 1024,
+    };
+    assert_eq!(
+        null_median_cosine(CalibrationMode::Builtin, &unmeasured),
+        None
+    );
+}
+
 /// #254: `lookup` carries the recorded size, and the layer-floor accessor
 /// answers it for a row, 12 for the BGE-M3 reference (#157's layer) and
 /// nothing for an uncalibrated contract.

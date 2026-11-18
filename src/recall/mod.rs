@@ -2,6 +2,7 @@
 pub mod assemble;
 pub mod cache;
 pub mod candidates;
+pub mod confidence;
 pub mod detail;
 pub mod dispatch;
 pub mod expand;

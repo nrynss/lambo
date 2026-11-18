@@ -562,6 +562,11 @@ impl ResolvedAnchor {
         }
     }
 
+    /// The graph epoch this resolution was made at.
+    pub(crate) fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
     /// What the subject resolved to.
     pub(crate) fn choice(&self) -> Option<&AnchorChoice> {
         self.choice.as_ref()
@@ -781,6 +786,9 @@ pub(crate) fn try_structural_with(
         legs: Default::default(),
         // No blend ran, so there is no daemon share to withhold.
         cold_start: false,
+        // #256: no leg ran, so neither has a best score to report.
+        top_legs: Default::default(),
+        confidence: None,
         detailed,
         response_annotations: vec![Annotation::new(AnnotationKind::Traversal, traversal)],
     })

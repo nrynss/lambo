@@ -21,7 +21,9 @@
 //! pairs, `signal` one of `same_content`, `semantic_edge`, `cosine`),
 //! and `annotations` as zero or more `{kind, text}` pairs;
 //! `response_annotations` carries the response-global explanations.
-//! Producer order is preserved within both arrays.
+//! Producer order is preserved within both arrays. #256 adds two
+//! response-level keys beside them: `top_legs` (always) and `confidence`
+//! (only when present).
 //!
 //! Annotation kinds are derived from typed producers, never from text
 //! patterns: `load_bearing` from a Canonical blast warning, `conflict` from
@@ -277,6 +279,22 @@ pub(crate) struct DetailedRecall {
     /// 1). It is what makes the cold window observable in production.
     #[serde(skip)]
     pub(crate) cold_start: bool,
+    /// #256: the best phase-1 keyword and vector scores of this session for
+    /// this query, over every candidate the leg scored
+    /// ([`crate::recall::confidence`]). Unlike [`Self::legs`] it is not
+    /// filtered to the returned hits. Default (both `None`) for a dispatched
+    /// structural query and the warning-only refusals, which run no leg. A
+    /// layered merge carries the caller's own session's.
+    ///
+    /// Additive on the wire, and always serialized, so a client can rely on
+    /// the key.
+    #[serde(default)]
+    pub(crate) top_legs: crate::types::TopLegs,
+    /// #256: the provisional combined value of [`Self::top_legs`], when it
+    /// can be computed honestly. Additive on the wire: serialized only when
+    /// present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) confidence: Option<crate::types::ProvisionalConfidence>,
     /// The presentation hits, serialized on the wire as `hits`.
     #[serde(rename = "hits")]
     pub(crate) detailed: Vec<DetailedHit>,
@@ -297,6 +315,8 @@ impl DetailedRecall {
             warnings: vec![warning],
             legs: Default::default(),
             cold_start: false,
+            top_legs: Default::default(),
+            confidence: None,
             detailed: Vec::new(),
             response_annotations: Vec::new(),
         }
@@ -342,6 +362,8 @@ impl From<DetailedRecall> for RecallResult {
             hits: d.hits,
             context: d.context,
             warnings: d.warnings,
+            top_legs: d.top_legs,
+            confidence: d.confidence,
         }
     }
 }

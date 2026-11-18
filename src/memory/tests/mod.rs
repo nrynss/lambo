@@ -52,6 +52,7 @@ mod shutdown;
 mod stale_dependency;
 mod supersession;
 mod suspected;
+mod top_legs;
 mod writes;
 
 fn contract(kind: &str, dim: usize) -> EmbeddingContract {

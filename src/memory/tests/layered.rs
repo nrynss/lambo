@@ -79,7 +79,7 @@ async fn vector_session(session: &str, searches: bool) -> (Memory, Arc<AtomicUsi
 
 /// A session with a one-hour daemon tick, so a settled score table stays
 /// put between two recalls (reads never wake the daemon).
-async fn slow_session(store: Arc<dyn GraphStore>, session: &str, kind: &str) -> Memory {
+pub(super) async fn slow_session(store: Arc<dyn GraphStore>, session: &str, kind: &str) -> Memory {
     Memory::builder()
         .session(session)
         .agent("agent-a")
@@ -96,14 +96,14 @@ async fn slow_session(store: Arc<dyn GraphStore>, session: &str, kind: &str) -> 
         .expect("build")
 }
 
-async fn seeded(session: &str, concepts: &[(&str, ConceptType)]) -> Memory {
+pub(super) async fn seeded(session: &str, concepts: &[(&str, ConceptType)]) -> Memory {
     let mem = slow_session(Arc::new(MemoryStore::new()), session, "fixture").await;
     mem.derive(concepts, &ParentOf::none()).await.unwrap();
     mem.settle_daemon().await;
     mem
 }
 
-async fn seeded_vectors(session: &str, concepts: &[(&str, ConceptType)]) -> Memory {
+pub(super) async fn seeded_vectors(session: &str, concepts: &[(&str, ConceptType)]) -> Memory {
     let store = Arc::new(crate::test_util::GraphRanked(
         crate::test_util::VectorSearchable(Arc::new(MemoryStore::new())),
     ));
@@ -562,7 +562,7 @@ async fn a_layer_cannot_traverse_from_a_shorter_anchor_than_the_callers_subject(
 }
 
 /// #87: the EmbeddingGemma 2 contract the calibration table has a row for.
-fn eg2_contract() -> EmbeddingContract {
+pub(super) fn eg2_contract() -> EmbeddingContract {
     let row = &crate::embed::calibration::BUILTIN[0];
     EmbeddingContract {
         kind: row.kind.into(),
@@ -573,7 +573,7 @@ fn eg2_contract() -> EmbeddingContract {
 
 /// A session under [`eg2_contract`] with `config`'s calibration switches,
 /// seeded with `concepts`; `vectors` gives it a store that searches them.
-async fn eg2_seeded(
+pub(super) async fn eg2_seeded(
     session: &str,
     concepts: &[(&str, ConceptType)],
     vectors: bool,

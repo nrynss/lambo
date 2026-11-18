@@ -180,6 +180,13 @@ pub(super) struct RecallResponse {
     /// H3: response-global explanations (`traversal`, `vector_degraded`) in
     /// producer order.
     pub(super) response_annotations: Vec<crate::recall::detail::Annotation>,
+    /// #256: the best phase-1 keyword and vector scores of this session for
+    /// the query, over every candidate each leg scored. Always present.
+    pub(super) top_legs: crate::types::TopLegs,
+    /// #256: their provisional combined value. Absent when it cannot be
+    /// computed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) confidence: Option<crate::types::ProvisionalConfidence>,
 }
 
 #[derive(Debug, Deserialize)]

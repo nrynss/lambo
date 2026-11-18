@@ -1,5 +1,5 @@
 {
-  "note": "H3 structured recall payloads, pinned byte-for-byte by src/recall/assemble.rs h3_blended_payload_matches_golden (blended: Canonical load-bearing hit, Candidate, conflict, non-conflict hot condition, reservation, annotation-free hit) and src/recall/dispatch.rs h3_structural_payload_matches_golden (dispatched dependency question: canonical dependent + plain dependent + one traversal response annotation). Wire shape: hits[] with content/concept_type/status (absent only for None)/score/blast_radius (when present)/included_in_context/annotations[{kind,text}], plus response_annotations[{kind,text}]. 2026-10-06 (issue #9): each hit also carries node_id (additive; the rendered context now carries the short-form id and the portal parity check re-renders from this payload).",
+  "note": "H3 structured recall payloads, pinned byte-for-byte by src/recall/assemble.rs h3_blended_payload_matches_golden (blended: Canonical load-bearing hit, Candidate, conflict, non-conflict hot condition, reservation, annotation-free hit) and src/recall/dispatch.rs h3_structural_payload_matches_golden (dispatched dependency question: canonical dependent + plain dependent + one traversal response annotation). Wire shape: hits[] with content/concept_type/status (absent only for None)/score/blast_radius (when present)/included_in_context/annotations[{kind,text}], plus response_annotations[{kind,text}]. 2026-10-06 (issue #9): each hit also carries node_id (additive; the rendered context now carries the short-form id and the portal parity check re-renders from this payload). 2026-11-18 (issue #256): each payload also carries top_legs {bm25, exact_name_match, vector_cosine} (additive, always present; both scores null and exact_name_match false here because these two tests call assembly and the traversal dispatch directly, where no phase-1 leg is attached), and confidence {value, basis, provisional} only when it can be computed (never here).",
   "blended": {
     "hits": [
       {
@@ -74,7 +74,12 @@
         "score": 0.25
       }
     ],
-    "response_annotations": []
+    "response_annotations": [],
+    "top_legs": {
+      "bm25": null,
+      "exact_name_match": false,
+      "vector_cosine": null
+    }
   },
   "structural": {
     "hits": [
@@ -107,6 +112,11 @@
         "kind": "traversal",
         "text": "recall: dependency question answered by graph traversal (2 dependents)"
       }
-    ]
+    ],
+    "top_legs": {
+      "bm25": null,
+      "exact_name_match": false,
+      "vector_cosine": null
+    }
   }
 }

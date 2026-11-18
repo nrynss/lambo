@@ -2,6 +2,46 @@
 
 ## Unreleased
 
+- Every recall reports how strong its best match was (#256). `top_legs`
+  (`bm25`, `vector_cosine`, `exact_name_match`) is the best score each
+  first-phase search leg gave any concept of the session for the query,
+  returned or not, and `null` for a leg that did not run. `bm25` is the
+  index's own BM25, never the 1.0 a concept whose durable name is the query is
+  ranked with; `exact_name_match` reports that match. `confidence` is a
+  provisional combination, shipped as an object, `{"value", "basis",
+  "provisional": true}`: basis `"noisy-or-v0"` when both legs reported under
+  an embedding contract with a measured pairwise null median, basis
+  `"keyword-only-v0"` (`bm25 / (bm25 + 5)`) when the keyword leg ran and the
+  vector leg did not (no vector search, a failed embed or vector read, no
+  embedded concept), and
+  absent otherwise (both legs under an unmeasured contract, or under
+  `calibration = "off"` for any contract but BGE-M3; no keyword leg; a recall
+  by image or vector; a dependency question answered by traversal). Values of
+  different bases are different quantities. Both are in `RecallResult`,
+  `lambo_recall`'s `structuredContent`, `/api/recall`, the `--ledger` recall
+  line, and one `recall scores:` line that `lambo recall` prints to standard
+  error (standard output is unchanged). A layered recall reports the session's
+  own values and each layer's under `layer_top_legs`. No hit, ranking or
+  threshold changes. Neither number is a probability or comparable across
+  embedding contracts or store sizes, and `confidence` may change or be
+  removed without a deprecation cycle until #174 calibrates it. Each
+  calibration row records the pairwise null median the two-leg basis uses
+  (`ContractCalibration::null_median_cosine`). Rust callers building a
+  `RecallResult` or `ContractCalibration` literal must add the new fields;
+  the new `TopLegs`, `ProvisionalConfidence` and `LayerTopLegs` are
+  `#[non_exhaustive]` and built by recall only.
+- A dependency question whose traversal answer was predicted but declined
+  because a write changed the graph in between (its anchor lost its last
+  dependent, or was renamed or retired) used to fall through to a blended
+  recall with no vector leg and no sign of it. It now carries the
+  `vector_degraded` annotation and warning, `recall: a concurrent write
+  changed the graph after a dependency-question dispatch was planned, and the
+  dispatch did not fire; vector leg skipped, results are keyword-only`, when a
+  vector leg would have run. A predicted dispatch that declines with no write
+  in between (`top_k` 0 leaves the traversal nothing to return) carries the
+  same annotation worded `recall: a planned dependency-question dispatch did
+  not fire; vector leg skipped, results are keyword-only`. Ranking is
+  unchanged.
 - Each built-in calibration row records the corpus size its recall constants
   were measured on (`ContractCalibration::measured_corpus_concepts`: 100, the
   #190 set), and the BGE-M3 reference records the 12-concept layer its 0.50

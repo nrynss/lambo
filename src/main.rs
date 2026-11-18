@@ -2056,37 +2056,27 @@ fn main() -> ExitCode {
             Resolved::Full(backends),
         ) => {
             let query = query.unwrap_or_default();
-            if image.is_none() && query_vector_json.is_none() {
-                run_async(
-                    "recall",
-                    lambo::cli::recall::run(
-                        &backends,
-                        &session,
-                        &query,
-                        top_k,
-                        max_tokens,
-                        traversal_depth,
-                    ),
+            let by = lambo::cli::recall::RecallBy {
+                image,
+                mime,
+                query_vector_json,
+            };
+            // #256: the context block goes to standard output, unchanged;
+            // the score report goes to standard error.
+            run_async("recall", async {
+                let out = lambo::cli::recall::run_reported(
+                    &backends,
+                    &session,
+                    &query,
+                    &by,
+                    top_k,
+                    max_tokens,
+                    traversal_depth,
                 )
-            } else {
-                let by = lambo::cli::recall::RecallBy {
-                    image,
-                    mime,
-                    query_vector_json,
-                };
-                run_async(
-                    "recall",
-                    lambo::cli::recall::run_by(
-                        &backends,
-                        &session,
-                        &query,
-                        &by,
-                        top_k,
-                        max_tokens,
-                        traversal_depth,
-                    ),
-                )
-            }
+                .await?;
+                eprintln!("{}", out.scores);
+                Ok(out.context)
+            })
         }
         (Commands::Saints { session }, Resolved::StoreOnly { store, .. }) => {
             run_async("saints", lambo::cli::saints::run(store.as_ref(), &session))

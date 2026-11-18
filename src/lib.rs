@@ -125,7 +125,7 @@ pub use embed::{near_far_contract, FixtureEmbedder, FAR, NEAR_A, NEAR_B, NEAR_PA
 pub use graph::Graph;
 pub use memory::{
     CanonicalMemory, DryRun, GcStats, GcSweepSummary, ImpactReport, LayerCopy, LayerRef,
-    LayeredHit, LayeredRecall, Memory, MemoryBuilder, MemoryStats,
+    LayerTopLegs, LayeredHit, LayeredRecall, Memory, MemoryBuilder, MemoryStats,
 };
 pub use recall::layered::{DEFAULT_LAYER_MIN_SIMILARITY, DEFAULT_LAYER_WEIGHT};
 
@@ -147,7 +147,8 @@ pub use types::{
     ConceptNaming, ConceptType, DaemonEvent, DemotionReason, DependentEnd, Edge, EdgeType,
     EmbeddingContract, EmbeddingSource, GraphSnapshot, ImageMimeWire, Interaction, InteractionSpan,
     LamboError, MatchStrategy, Mutation, MutationBatch, Node, NodeId, PinnedCitations,
-    PinnedReference, RecallHit, RecallQuery, RecallResult, ReferenceCandidate, ReferenceField,
-    ReferenceRefusal, ReferenceRefusalKind, Reservation, RetiredAlias, ScoreTable, Scored,
-    SessionId, SourceModality, StoreError, Synonym, VectorOrigin,
+    PinnedReference, ProvisionalConfidence, RecallHit, RecallQuery, RecallResult,
+    ReferenceCandidate, ReferenceField, ReferenceRefusal, ReferenceRefusalKind, Reservation,
+    RetiredAlias, ScoreTable, Scored, SessionId, SourceModality, StoreError, Synonym, TopLegs,
+    VectorOrigin,
 };
