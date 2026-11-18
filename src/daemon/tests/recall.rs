@@ -1227,26 +1227,24 @@ async fn a_retried_recall_gathers_once_and_answers_from_the_current_graph() {
     );
     assert_eq!(store.searches(), 1);
 
-    // The second write changes the graph again but restores nothing: the
-    // second pass declines too and blends with the vector leg it gathered.
+    // The second write changes the graph again but restores nothing: it
+    // removes the forecast, which the stub's vector read still names first.
+    // The second pass declines too and blends from the graph as it is then,
+    // with the vector leg it gathered: the forecast is gone from the hits
+    // and from the leg's best (a blend on the graph before the second write
+    // would return it, at 0.81), and the ledger keeps its vector evidence.
     let fx = DispatchRace::new();
-    let iid = interaction(1).id;
+    let forecast = fx.forecast;
     let store = fx.store(
         false,
         Some(racing(
             &fx,
-            Box::new(move |g| {
-                g.insert_concept(concept(5, iid, "ledger archive policy"), iid)
-                    .unwrap();
-            }),
+            Box::new(move |g| g.remove_node(forecast).unwrap()),
         )),
     );
     let r = fx.recall(&store, 5, true).await;
     assert!(
-        fx.graph
-            .read()
-            .concepts()
-            .any(|c| c.content == "ledger archive policy"),
+        fx.graph.read().node(fx.forecast).is_none(),
         "premise: the second write landed"
     );
     assert_eq!(store.searches(), 1, "one re-gather, never two");
@@ -1257,11 +1255,17 @@ async fn a_retried_recall_gathers_once_and_answers_from_the_current_graph() {
         r.warnings
     );
     assert!(
-        r.hits.iter().any(|h| h.node_id == fx.forecast),
-        "{:?}",
+        !r.hits.iter().any(|h| h.node_id == fx.forecast),
+        "the blend reads the graph after the second write: {:?}",
         r.hits
     );
-    assert!(r.top_legs.vector_cosine.is_some(), "{:?}", r.top_legs);
+    assert_eq!(
+        r.legs.get(&fx.edge.source).and_then(|l| l.vector),
+        Some(0.64),
+        "the ledger keeps the re-gathered vector evidence: {:?}",
+        r.legs
+    );
+    assert_eq!(r.top_legs.vector_cosine, Some(0.64), "{:?}", r.top_legs);
     assert_eq!(confidence_basis(&r), Some("noisy-or-v0"));
 
     // The re-gather's vector read fails: the leg is lost and the answer

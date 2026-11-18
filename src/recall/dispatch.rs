@@ -592,8 +592,10 @@ pub fn fits_structural(graph: &Graph, query: &str) -> bool {
 /// answer on this graph: a single-anchor subject with no dependents, or one
 /// at a `top_k` of 0 (#263: the traversal takes no dependent and declines),
 /// is not dispatched, so the daemon does not skip the vector gather for it.
-/// A subject ambiguous between repositories is dispatched at any `top_k`,
-/// 0 included: its answer is the warning-only one (#129).
+/// An ambiguous subject (a tie between concepts of different repositories,
+/// or between a repository-scoped concept and an unscoped one) is
+/// dispatched at any `top_k`, 0 included: its answer is the warning-only
+/// one (#129).
 pub(crate) fn fits_structural_with(
     graph: &Graph,
     choice: Option<&AnchorChoice>,
