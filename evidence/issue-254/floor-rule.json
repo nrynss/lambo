@@ -1,0 +1,3568 @@
+{
+ "issue": 254,
+ "set": "fixtures/eval (the #190 set: 100 concepts, 368 queries)",
+ "derived_on": "dev",
+ "sizes": [
+  12,
+  32,
+  64,
+  100,
+  128,
+  256,
+  512,
+  1024,
+  2048
+ ],
+ "direct_sizes": [
+  12,
+  32,
+  64,
+  96
+ ],
+ "direct_draws_per_query": 200,
+ "seed": 254,
+ "contracts": [
+  {
+   "contract": "bge-m3 (reference)",
+   "run": "evidence/issue-221/runs/bge-m3-candle-cpu-detail.json",
+   "framing": "self",
+   "fixed_floor": 0.5,
+   "recorded_measured_concepts": 12,
+   "dev_null_pairs": 23707,
+   "dev_null_share_at_or_above_fixed_floor": 0.03054,
+   "dev_null_max": 0.711,
+   "anchors": {
+    "recorded": {
+     "n0": 12,
+     "sizes": [
+      {
+       "layer_concepts": 12,
+       "per_pair_share_target": 0.03054,
+       "floor": 0.5,
+       "dev_null_pairs_at_or_above": 724,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 25,
+        "grade2_lost_at_fixed": 25,
+        "grade1_pairs": 24,
+        "grade1_lost": 10,
+        "grade1_lost_at_fixed": 10,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 24,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 24,
+        "null_share_at_or_above": 0.03054
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 17,
+        "grade2_lost_at_fixed": 17,
+        "grade1_pairs": 16,
+        "grade1_lost": 10,
+        "grade1_lost_at_fixed": 10,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 17,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 17,
+        "null_share_at_or_above": 0.030267
+       }
+      },
+      {
+       "layer_concepts": 32,
+       "per_pair_share_target": 0.011563,
+       "floor": 0.5333,
+       "dev_null_pairs_at_or_above": 275,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 34,
+        "grade2_lost_at_fixed": 25,
+        "grade1_pairs": 24,
+        "grade1_lost": 17,
+        "grade1_lost_at_fixed": 10,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 30,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 24,
+        "null_share_at_or_above": 0.0116
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 32,
+        "grade2_lost_at_fixed": 17,
+        "grade1_pairs": 16,
+        "grade1_lost": 11,
+        "grade1_lost_at_fixed": 10,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 31,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 17,
+        "null_share_at_or_above": 0.011497
+       }
+      },
+      {
+       "layer_concepts": 64,
+       "per_pair_share_target": 0.005799,
+       "floor": 0.5584,
+       "dev_null_pairs_at_or_above": 139,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 52,
+        "grade2_lost_at_fixed": 25,
+        "grade1_pairs": 24,
+        "grade1_lost": 21,
+        "grade1_lost_at_fixed": 10,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 50,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 24,
+        "null_share_at_or_above": 0.005863
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 38,
+        "grade2_lost_at_fixed": 17,
+        "grade1_pairs": 16,
+        "grade1_lost": 11,
+        "grade1_lost_at_fixed": 10,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 37,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 17,
+        "null_share_at_or_above": 0.005397
+       }
+      },
+      {
+       "layer_concepts": 100,
+       "per_pair_share_target": 0.003715,
+       "floor": 0.5724,
+       "dev_null_pairs_at_or_above": 89,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 62,
+        "grade2_lost_at_fixed": 25,
+        "grade1_pairs": 24,
+        "grade1_lost": 21,
+        "grade1_lost_at_fixed": 10,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 60,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 24,
+        "null_share_at_or_above": 0.003754
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 44,
+        "grade2_lost_at_fixed": 17,
+        "grade1_pairs": 16,
+        "grade1_lost": 13,
+        "grade1_lost_at_fixed": 10,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 43,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 17,
+        "null_share_at_or_above": 0.003207
+       }
+      },
+      {
+       "layer_concepts": 128,
+       "per_pair_share_target": 0.002903,
+       "floor": 0.5813,
+       "dev_null_pairs_at_or_above": 69,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 67,
+        "grade2_lost_at_fixed": 25,
+        "grade1_pairs": 24,
+        "grade1_lost": 21,
+        "grade1_lost_at_fixed": 10,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 65,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 24,
+        "null_share_at_or_above": 0.002911
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 49,
+        "grade2_lost_at_fixed": 17,
+        "grade1_pairs": 16,
+        "grade1_lost": 14,
+        "grade1_lost_at_fixed": 10,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 48,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 17,
+        "null_share_at_or_above": 0.002581
+       }
+      },
+      {
+       "layer_concepts": 256,
+       "per_pair_share_target": 0.001453,
+       "floor": 0.601,
+       "dev_null_pairs_at_or_above": 35,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 79,
+        "grade2_lost_at_fixed": 25,
+        "grade1_pairs": 24,
+        "grade1_lost": 23,
+        "grade1_lost_at_fixed": 10,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 77,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 24,
+        "null_share_at_or_above": 0.001476
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 57,
+        "grade2_lost_at_fixed": 17,
+        "grade1_pairs": 16,
+        "grade1_lost": 14,
+        "grade1_lost_at_fixed": 10,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 56,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 17,
+        "null_share_at_or_above": 0.001251
+       }
+      },
+      {
+       "layer_concepts": 512,
+       "per_pair_share_target": 0.000727,
+       "floor": 0.6174,
+       "dev_null_pairs_at_or_above": 18,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 98,
+        "grade2_lost_at_fixed": 25,
+        "grade1_pairs": 24,
+        "grade1_lost": 24,
+        "grade1_lost_at_fixed": 10,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 96,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 24,
+        "null_share_at_or_above": 0.000759
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 63,
+        "grade2_lost_at_fixed": 17,
+        "grade1_pairs": 16,
+        "grade1_lost": 14,
+        "grade1_lost_at_fixed": 10,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 62,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 17,
+        "null_share_at_or_above": 0.000782
+       }
+      },
+      {
+       "layer_concepts": 1024,
+       "per_pair_share_target": 0.000363,
+       "floor": 0.6487,
+       "dev_null_pairs_at_or_above": 9,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 120,
+        "grade2_lost_at_fixed": 25,
+        "grade1_pairs": 24,
+        "grade1_lost": 24,
+        "grade1_lost_at_fixed": 10,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 117,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 24,
+        "null_share_at_or_above": 0.00038
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 74,
+        "grade2_lost_at_fixed": 17,
+        "grade1_pairs": 16,
+        "grade1_lost": 15,
+        "grade1_lost_at_fixed": 10,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 73,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 17,
+        "null_share_at_or_above": 0.000235
+       }
+      },
+      {
+       "layer_concepts": 2048,
+       "per_pair_share_target": 0.000182,
+       "floor": 0.6673,
+       "dev_null_pairs_at_or_above": 5,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 129,
+        "grade2_lost_at_fixed": 25,
+        "grade1_pairs": 24,
+        "grade1_lost": 24,
+        "grade1_lost_at_fixed": 10,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 126,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 24,
+        "null_share_at_or_above": 0.000211
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 81,
+        "grade2_lost_at_fixed": 17,
+        "grade1_pairs": 16,
+        "grade1_lost": 15,
+        "grade1_lost_at_fixed": 10,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 80,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 17,
+        "null_share_at_or_above": 7.8e-05
+       }
+      }
+     ]
+    },
+    "common12": {
+     "n0": 12,
+     "sizes": [
+      {
+       "layer_concepts": 12,
+       "per_pair_share_target": 0.03054,
+       "floor": 0.5,
+       "dev_null_pairs_at_or_above": 724,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 25,
+        "grade2_lost_at_fixed": 25,
+        "grade1_pairs": 24,
+        "grade1_lost": 10,
+        "grade1_lost_at_fixed": 10,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 24,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 24,
+        "null_share_at_or_above": 0.03054
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 17,
+        "grade2_lost_at_fixed": 17,
+        "grade1_pairs": 16,
+        "grade1_lost": 10,
+        "grade1_lost_at_fixed": 10,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 17,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 17,
+        "null_share_at_or_above": 0.030267
+       }
+      },
+      {
+       "layer_concepts": 32,
+       "per_pair_share_target": 0.011563,
+       "floor": 0.5333,
+       "dev_null_pairs_at_or_above": 275,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 34,
+        "grade2_lost_at_fixed": 25,
+        "grade1_pairs": 24,
+        "grade1_lost": 17,
+        "grade1_lost_at_fixed": 10,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 30,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 24,
+        "null_share_at_or_above": 0.0116
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 32,
+        "grade2_lost_at_fixed": 17,
+        "grade1_pairs": 16,
+        "grade1_lost": 11,
+        "grade1_lost_at_fixed": 10,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 31,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 17,
+        "null_share_at_or_above": 0.011497
+       }
+      },
+      {
+       "layer_concepts": 64,
+       "per_pair_share_target": 0.005799,
+       "floor": 0.5584,
+       "dev_null_pairs_at_or_above": 139,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 52,
+        "grade2_lost_at_fixed": 25,
+        "grade1_pairs": 24,
+        "grade1_lost": 21,
+        "grade1_lost_at_fixed": 10,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 50,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 24,
+        "null_share_at_or_above": 0.005863
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 38,
+        "grade2_lost_at_fixed": 17,
+        "grade1_pairs": 16,
+        "grade1_lost": 11,
+        "grade1_lost_at_fixed": 10,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 37,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 17,
+        "null_share_at_or_above": 0.005397
+       }
+      },
+      {
+       "layer_concepts": 100,
+       "per_pair_share_target": 0.003715,
+       "floor": 0.5724,
+       "dev_null_pairs_at_or_above": 89,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 62,
+        "grade2_lost_at_fixed": 25,
+        "grade1_pairs": 24,
+        "grade1_lost": 21,
+        "grade1_lost_at_fixed": 10,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 60,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 24,
+        "null_share_at_or_above": 0.003754
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 44,
+        "grade2_lost_at_fixed": 17,
+        "grade1_pairs": 16,
+        "grade1_lost": 13,
+        "grade1_lost_at_fixed": 10,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 43,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 17,
+        "null_share_at_or_above": 0.003207
+       }
+      },
+      {
+       "layer_concepts": 128,
+       "per_pair_share_target": 0.002903,
+       "floor": 0.5813,
+       "dev_null_pairs_at_or_above": 69,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 67,
+        "grade2_lost_at_fixed": 25,
+        "grade1_pairs": 24,
+        "grade1_lost": 21,
+        "grade1_lost_at_fixed": 10,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 65,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 24,
+        "null_share_at_or_above": 0.002911
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 49,
+        "grade2_lost_at_fixed": 17,
+        "grade1_pairs": 16,
+        "grade1_lost": 14,
+        "grade1_lost_at_fixed": 10,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 48,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 17,
+        "null_share_at_or_above": 0.002581
+       }
+      },
+      {
+       "layer_concepts": 256,
+       "per_pair_share_target": 0.001453,
+       "floor": 0.601,
+       "dev_null_pairs_at_or_above": 35,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 79,
+        "grade2_lost_at_fixed": 25,
+        "grade1_pairs": 24,
+        "grade1_lost": 23,
+        "grade1_lost_at_fixed": 10,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 77,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 24,
+        "null_share_at_or_above": 0.001476
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 57,
+        "grade2_lost_at_fixed": 17,
+        "grade1_pairs": 16,
+        "grade1_lost": 14,
+        "grade1_lost_at_fixed": 10,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 56,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 17,
+        "null_share_at_or_above": 0.001251
+       }
+      },
+      {
+       "layer_concepts": 512,
+       "per_pair_share_target": 0.000727,
+       "floor": 0.6174,
+       "dev_null_pairs_at_or_above": 18,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 98,
+        "grade2_lost_at_fixed": 25,
+        "grade1_pairs": 24,
+        "grade1_lost": 24,
+        "grade1_lost_at_fixed": 10,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 96,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 24,
+        "null_share_at_or_above": 0.000759
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 63,
+        "grade2_lost_at_fixed": 17,
+        "grade1_pairs": 16,
+        "grade1_lost": 14,
+        "grade1_lost_at_fixed": 10,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 62,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 17,
+        "null_share_at_or_above": 0.000782
+       }
+      },
+      {
+       "layer_concepts": 1024,
+       "per_pair_share_target": 0.000363,
+       "floor": 0.6487,
+       "dev_null_pairs_at_or_above": 9,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 120,
+        "grade2_lost_at_fixed": 25,
+        "grade1_pairs": 24,
+        "grade1_lost": 24,
+        "grade1_lost_at_fixed": 10,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 117,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 24,
+        "null_share_at_or_above": 0.00038
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 74,
+        "grade2_lost_at_fixed": 17,
+        "grade1_pairs": 16,
+        "grade1_lost": 15,
+        "grade1_lost_at_fixed": 10,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 73,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 17,
+        "null_share_at_or_above": 0.000235
+       }
+      },
+      {
+       "layer_concepts": 2048,
+       "per_pair_share_target": 0.000182,
+       "floor": 0.6673,
+       "dev_null_pairs_at_or_above": 5,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 129,
+        "grade2_lost_at_fixed": 25,
+        "grade1_pairs": 24,
+        "grade1_lost": 24,
+        "grade1_lost_at_fixed": 10,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 126,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 24,
+        "null_share_at_or_above": 0.000211
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 81,
+        "grade2_lost_at_fixed": 17,
+        "grade1_pairs": 16,
+        "grade1_lost": 15,
+        "grade1_lost_at_fixed": 10,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 80,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 17,
+        "null_share_at_or_above": 7.8e-05
+       }
+      }
+     ]
+    }
+   },
+   "direct_best_of_n": [
+    {
+     "split": "dev",
+     "queries": "no_answer",
+     "queries_n": 74,
+     "layer_concepts": 12,
+     "admit_fixed": 0.2564,
+     "admit_rule_recorded": 0.2564,
+     "admit_rule_common12": 0.2564
+    },
+    {
+     "split": "dev",
+     "queries": "no_answer",
+     "queries_n": 74,
+     "layer_concepts": 32,
+     "admit_fixed": 0.4557,
+     "admit_rule_recorded": 0.2614,
+     "admit_rule_common12": 0.2614
+    },
+    {
+     "split": "dev",
+     "queries": "no_answer",
+     "queries_n": 74,
+     "layer_concepts": 64,
+     "admit_fixed": 0.5998,
+     "admit_rule_recorded": 0.2102,
+     "admit_rule_common12": 0.2102
+    },
+    {
+     "split": "dev",
+     "queries": "no_answer",
+     "queries_n": 74,
+     "layer_concepts": 96,
+     "admit_fixed": 0.6809,
+     "admit_rule_recorded": 0.238,
+     "admit_rule_common12": 0.238
+    },
+    {
+     "split": "dev",
+     "queries": "all",
+     "queries_n": 239,
+     "layer_concepts": 12,
+     "admit_fixed": 0.2656,
+     "admit_rule_recorded": 0.2656,
+     "admit_rule_common12": 0.2656
+    },
+    {
+     "split": "dev",
+     "queries": "all",
+     "queries_n": 239,
+     "layer_concepts": 32,
+     "admit_fixed": 0.4699,
+     "admit_rule_recorded": 0.2532,
+     "admit_rule_common12": 0.2532
+    },
+    {
+     "split": "dev",
+     "queries": "all",
+     "queries_n": 239,
+     "layer_concepts": 64,
+     "admit_fixed": 0.6095,
+     "admit_rule_recorded": 0.2255,
+     "admit_rule_common12": 0.2255
+    },
+    {
+     "split": "dev",
+     "queries": "all",
+     "queries_n": 239,
+     "layer_concepts": 96,
+     "admit_fixed": 0.6888,
+     "admit_rule_recorded": 0.2138,
+     "admit_rule_common12": 0.2138
+    },
+    {
+     "split": "held_out",
+     "queries": "no_answer",
+     "queries_n": 32,
+     "layer_concepts": 12,
+     "admit_fixed": 0.2397,
+     "admit_rule_recorded": 0.2397,
+     "admit_rule_common12": 0.2397
+    },
+    {
+     "split": "held_out",
+     "queries": "no_answer",
+     "queries_n": 32,
+     "layer_concepts": 32,
+     "admit_fixed": 0.4452,
+     "admit_rule_recorded": 0.3078,
+     "admit_rule_common12": 0.3078
+    },
+    {
+     "split": "held_out",
+     "queries": "no_answer",
+     "queries_n": 32,
+     "layer_concepts": 64,
+     "admit_fixed": 0.5848,
+     "admit_rule_recorded": 0.3048,
+     "admit_rule_common12": 0.3048
+    },
+    {
+     "split": "held_out",
+     "queries": "no_answer",
+     "queries_n": 32,
+     "layer_concepts": 96,
+     "admit_fixed": 0.652,
+     "admit_rule_recorded": 0.3061,
+     "admit_rule_common12": 0.3061
+    },
+    {
+     "split": "held_out",
+     "queries": "all",
+     "queries_n": 129,
+     "layer_concepts": 12,
+     "admit_fixed": 0.2704,
+     "admit_rule_recorded": 0.2704,
+     "admit_rule_common12": 0.2704
+    },
+    {
+     "split": "held_out",
+     "queries": "all",
+     "queries_n": 129,
+     "layer_concepts": 32,
+     "admit_fixed": 0.4901,
+     "admit_rule_recorded": 0.25,
+     "admit_rule_common12": 0.25
+    },
+    {
+     "split": "held_out",
+     "queries": "all",
+     "queries_n": 129,
+     "layer_concepts": 64,
+     "admit_fixed": 0.6522,
+     "admit_rule_recorded": 0.23,
+     "admit_rule_common12": 0.23
+    },
+    {
+     "split": "held_out",
+     "queries": "all",
+     "queries_n": 129,
+     "layer_concepts": 96,
+     "admit_fixed": 0.7313,
+     "admit_rule_recorded": 0.1963,
+     "admit_rule_common12": 0.1963
+    }
+   ]
+  },
+  {
+   "contract": "qwen3-embedding-4b 2560",
+   "run": "evidence/issue-221/runs/qwen3-4b-2560-detail.json",
+   "framing": "self",
+   "fixed_floor": 0.59,
+   "recorded_measured_concepts": 100,
+   "dev_null_pairs": 23707,
+   "dev_null_share_at_or_above_fixed_floor": 0.03075,
+   "dev_null_max": 0.8268,
+   "anchors": {
+    "recorded": {
+     "n0": 100,
+     "sizes": [
+      {
+       "layer_concepts": 12,
+       "per_pair_share_target": 0.03075,
+       "floor": 0.59,
+       "dev_null_pairs_at_or_above": 729,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 35,
+        "grade2_lost_at_fixed": 35,
+        "grade1_pairs": 24,
+        "grade1_lost": 13,
+        "grade1_lost_at_fixed": 13,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 31,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 31,
+        "null_share_at_or_above": 0.03075
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 20,
+        "grade2_lost_at_fixed": 20,
+        "grade1_pairs": 16,
+        "grade1_lost": 13,
+        "grade1_lost_at_fixed": 13,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 20,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 20,
+        "null_share_at_or_above": 0.03277
+       }
+      },
+      {
+       "layer_concepts": 32,
+       "per_pair_share_target": 0.03075,
+       "floor": 0.59,
+       "dev_null_pairs_at_or_above": 729,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 35,
+        "grade2_lost_at_fixed": 35,
+        "grade1_pairs": 24,
+        "grade1_lost": 13,
+        "grade1_lost_at_fixed": 13,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 31,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 31,
+        "null_share_at_or_above": 0.03075
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 20,
+        "grade2_lost_at_fixed": 20,
+        "grade1_pairs": 16,
+        "grade1_lost": 13,
+        "grade1_lost_at_fixed": 13,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 20,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 20,
+        "null_share_at_or_above": 0.03277
+       }
+      },
+      {
+       "layer_concepts": 64,
+       "per_pair_share_target": 0.03075,
+       "floor": 0.59,
+       "dev_null_pairs_at_or_above": 729,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 35,
+        "grade2_lost_at_fixed": 35,
+        "grade1_pairs": 24,
+        "grade1_lost": 13,
+        "grade1_lost_at_fixed": 13,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 31,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 31,
+        "null_share_at_or_above": 0.03075
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 20,
+        "grade2_lost_at_fixed": 20,
+        "grade1_pairs": 16,
+        "grade1_lost": 13,
+        "grade1_lost_at_fixed": 13,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 20,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 20,
+        "null_share_at_or_above": 0.03277
+       }
+      },
+      {
+       "layer_concepts": 100,
+       "per_pair_share_target": 0.03075,
+       "floor": 0.59,
+       "dev_null_pairs_at_or_above": 729,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 35,
+        "grade2_lost_at_fixed": 35,
+        "grade1_pairs": 24,
+        "grade1_lost": 13,
+        "grade1_lost_at_fixed": 13,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 31,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 31,
+        "null_share_at_or_above": 0.03075
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 20,
+        "grade2_lost_at_fixed": 20,
+        "grade1_pairs": 16,
+        "grade1_lost": 13,
+        "grade1_lost_at_fixed": 13,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 20,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 20,
+        "null_share_at_or_above": 0.03277
+       }
+      },
+      {
+       "layer_concepts": 128,
+       "per_pair_share_target": 0.024106,
+       "floor": 0.6014,
+       "dev_null_pairs_at_or_above": 572,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 42,
+        "grade2_lost_at_fixed": 35,
+        "grade1_pairs": 24,
+        "grade1_lost": 13,
+        "grade1_lost_at_fixed": 13,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 37,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 31,
+        "null_share_at_or_above": 0.024128
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 24,
+        "grade2_lost_at_fixed": 20,
+        "grade1_pairs": 16,
+        "grade1_lost": 13,
+        "grade1_lost_at_fixed": 13,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 24,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 20,
+        "null_share_at_or_above": 0.02534
+       }
+      },
+      {
+       "layer_concepts": 256,
+       "per_pair_share_target": 0.012126,
+       "floor": 0.6338,
+       "dev_null_pairs_at_or_above": 288,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 54,
+        "grade2_lost_at_fixed": 35,
+        "grade1_pairs": 24,
+        "grade1_lost": 14,
+        "grade1_lost_at_fixed": 13,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 49,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 31,
+        "null_share_at_or_above": 0.012148
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 32,
+        "grade2_lost_at_fixed": 20,
+        "grade1_pairs": 16,
+        "grade1_lost": 15,
+        "grade1_lost_at_fixed": 13,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 32,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 20,
+        "null_share_at_or_above": 0.011966
+       }
+      },
+      {
+       "layer_concepts": 512,
+       "per_pair_share_target": 0.006082,
+       "floor": 0.6616,
+       "dev_null_pairs_at_or_above": 145,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 72,
+        "grade2_lost_at_fixed": 35,
+        "grade1_pairs": 24,
+        "grade1_lost": 19,
+        "grade1_lost_at_fixed": 13,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 68,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 31,
+        "null_share_at_or_above": 0.006116
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 46,
+        "grade2_lost_at_fixed": 20,
+        "grade1_pairs": 16,
+        "grade1_lost": 15,
+        "grade1_lost_at_fixed": 13,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 46,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 20,
+        "null_share_at_or_above": 0.007039
+       }
+      },
+      {
+       "layer_concepts": 1024,
+       "per_pair_share_target": 0.003045,
+       "floor": 0.6877,
+       "dev_null_pairs_at_or_above": 73,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 87,
+        "grade2_lost_at_fixed": 35,
+        "grade1_pairs": 24,
+        "grade1_lost": 22,
+        "grade1_lost_at_fixed": 13,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 83,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 31,
+        "null_share_at_or_above": 0.003079
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 59,
+        "grade2_lost_at_fixed": 20,
+        "grade1_pairs": 16,
+        "grade1_lost": 15,
+        "grade1_lost_at_fixed": 13,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 59,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 20,
+        "null_share_at_or_above": 0.003598
+       }
+      },
+      {
+       "layer_concepts": 2048,
+       "per_pair_share_target": 0.001524,
+       "floor": 0.7119,
+       "dev_null_pairs_at_or_above": 37,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 99,
+        "grade2_lost_at_fixed": 35,
+        "grade1_pairs": 24,
+        "grade1_lost": 23,
+        "grade1_lost_at_fixed": 13,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 94,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 31,
+        "null_share_at_or_above": 0.001561
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 64,
+        "grade2_lost_at_fixed": 20,
+        "grade1_pairs": 16,
+        "grade1_lost": 15,
+        "grade1_lost_at_fixed": 13,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 64,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 20,
+        "null_share_at_or_above": 0.001955
+       }
+      }
+     ]
+    },
+    "common12": {
+     "n0": 12,
+     "sizes": [
+      {
+       "layer_concepts": 12,
+       "per_pair_share_target": 0.03075,
+       "floor": 0.59,
+       "dev_null_pairs_at_or_above": 729,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 35,
+        "grade2_lost_at_fixed": 35,
+        "grade1_pairs": 24,
+        "grade1_lost": 13,
+        "grade1_lost_at_fixed": 13,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 31,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 31,
+        "null_share_at_or_above": 0.03075
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 20,
+        "grade2_lost_at_fixed": 20,
+        "grade1_pairs": 16,
+        "grade1_lost": 13,
+        "grade1_lost_at_fixed": 13,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 20,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 20,
+        "null_share_at_or_above": 0.03277
+       }
+      },
+      {
+       "layer_concepts": 32,
+       "per_pair_share_target": 0.011644,
+       "floor": 0.6352,
+       "dev_null_pairs_at_or_above": 277,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 54,
+        "grade2_lost_at_fixed": 35,
+        "grade1_pairs": 24,
+        "grade1_lost": 14,
+        "grade1_lost_at_fixed": 13,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 49,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 31,
+        "null_share_at_or_above": 0.011684
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 32,
+        "grade2_lost_at_fixed": 20,
+        "grade1_pairs": 16,
+        "grade1_lost": 15,
+        "grade1_lost_at_fixed": 13,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 32,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 20,
+        "null_share_at_or_above": 0.011497
+       }
+      },
+      {
+       "layer_concepts": 64,
+       "per_pair_share_target": 0.005839,
+       "floor": 0.6628,
+       "dev_null_pairs_at_or_above": 140,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 74,
+        "grade2_lost_at_fixed": 35,
+        "grade1_pairs": 24,
+        "grade1_lost": 19,
+        "grade1_lost_at_fixed": 13,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 70,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 31,
+        "null_share_at_or_above": 0.005905
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 46,
+        "grade2_lost_at_fixed": 20,
+        "grade1_pairs": 16,
+        "grade1_lost": 15,
+        "grade1_lost_at_fixed": 13,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 46,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 20,
+        "null_share_at_or_above": 0.006648
+       }
+      },
+      {
+       "layer_concepts": 100,
+       "per_pair_share_target": 0.003741,
+       "floor": 0.6813,
+       "dev_null_pairs_at_or_above": 89,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 84,
+        "grade2_lost_at_fixed": 35,
+        "grade1_pairs": 24,
+        "grade1_lost": 22,
+        "grade1_lost_at_fixed": 13,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 80,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 31,
+        "null_share_at_or_above": 0.003754
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 56,
+        "grade2_lost_at_fixed": 20,
+        "grade1_pairs": 16,
+        "grade1_lost": 15,
+        "grade1_lost_at_fixed": 13,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 56,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 20,
+        "null_share_at_or_above": 0.00438
+       }
+      },
+      {
+       "layer_concepts": 128,
+       "per_pair_share_target": 0.002924,
+       "floor": 0.6882,
+       "dev_null_pairs_at_or_above": 70,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 87,
+        "grade2_lost_at_fixed": 35,
+        "grade1_pairs": 24,
+        "grade1_lost": 22,
+        "grade1_lost_at_fixed": 13,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 83,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 31,
+        "null_share_at_or_above": 0.002953
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 59,
+        "grade2_lost_at_fixed": 20,
+        "grade1_pairs": 16,
+        "grade1_lost": 15,
+        "grade1_lost_at_fixed": 13,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 59,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 20,
+        "null_share_at_or_above": 0.003519
+       }
+      },
+      {
+       "layer_concepts": 256,
+       "per_pair_share_target": 0.001463,
+       "floor": 0.7146,
+       "dev_null_pairs_at_or_above": 35,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 99,
+        "grade2_lost_at_fixed": 35,
+        "grade1_pairs": 24,
+        "grade1_lost": 24,
+        "grade1_lost_at_fixed": 13,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 95,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 31,
+        "null_share_at_or_above": 0.001476
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 65,
+        "grade2_lost_at_fixed": 20,
+        "grade1_pairs": 16,
+        "grade1_lost": 15,
+        "grade1_lost_at_fixed": 13,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 65,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 20,
+        "null_share_at_or_above": 0.001955
+       }
+      },
+      {
+       "layer_concepts": 512,
+       "per_pair_share_target": 0.000732,
+       "floor": 0.7392,
+       "dev_null_pairs_at_or_above": 18,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 118,
+        "grade2_lost_at_fixed": 35,
+        "grade1_pairs": 24,
+        "grade1_lost": 24,
+        "grade1_lost_at_fixed": 13,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 114,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 31,
+        "null_share_at_or_above": 0.000759
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 72,
+        "grade2_lost_at_fixed": 20,
+        "grade1_pairs": 16,
+        "grade1_lost": 15,
+        "grade1_lost_at_fixed": 13,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 71,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 20,
+        "null_share_at_or_above": 0.00133
+       }
+      },
+      {
+       "layer_concepts": 1024,
+       "per_pair_share_target": 0.000366,
+       "floor": 0.764,
+       "dev_null_pairs_at_or_above": 9,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 135,
+        "grade2_lost_at_fixed": 35,
+        "grade1_pairs": 24,
+        "grade1_lost": 24,
+        "grade1_lost_at_fixed": 13,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 131,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 31,
+        "null_share_at_or_above": 0.00038
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 82,
+        "grade2_lost_at_fixed": 20,
+        "grade1_pairs": 16,
+        "grade1_lost": 15,
+        "grade1_lost_at_fixed": 13,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 81,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 20,
+        "null_share_at_or_above": 0.000626
+       }
+      },
+      {
+       "layer_concepts": 2048,
+       "per_pair_share_target": 0.000183,
+       "floor": 0.7793,
+       "dev_null_pairs_at_or_above": 5,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 144,
+        "grade2_lost_at_fixed": 35,
+        "grade1_pairs": 24,
+        "grade1_lost": 24,
+        "grade1_lost_at_fixed": 13,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 140,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 31,
+        "null_share_at_or_above": 0.000211
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 84,
+        "grade2_lost_at_fixed": 20,
+        "grade1_pairs": 16,
+        "grade1_lost": 16,
+        "grade1_lost_at_fixed": 13,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 83,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 20,
+        "null_share_at_or_above": 0.000313
+       }
+      }
+     ]
+    }
+   },
+   "direct_best_of_n": [
+    {
+     "split": "dev",
+     "queries": "no_answer",
+     "queries_n": 74,
+     "layer_concepts": 12,
+     "admit_fixed": 0.2981,
+     "admit_rule_recorded": 0.2981,
+     "admit_rule_common12": 0.2981
+    },
+    {
+     "split": "dev",
+     "queries": "no_answer",
+     "queries_n": 74,
+     "layer_concepts": 32,
+     "admit_fixed": 0.5017,
+     "admit_rule_recorded": 0.5017,
+     "admit_rule_common12": 0.2768
+    },
+    {
+     "split": "dev",
+     "queries": "no_answer",
+     "queries_n": 74,
+     "layer_concepts": 64,
+     "admit_fixed": 0.6385,
+     "admit_rule_recorded": 0.6385,
+     "admit_rule_common12": 0.3005
+    },
+    {
+     "split": "dev",
+     "queries": "no_answer",
+     "queries_n": 74,
+     "layer_concepts": 96,
+     "admit_fixed": 0.722,
+     "admit_rule_recorded": 0.722,
+     "admit_rule_common12": 0.3153
+    },
+    {
+     "split": "dev",
+     "queries": "all",
+     "queries_n": 239,
+     "layer_concepts": 12,
+     "admit_fixed": 0.2518,
+     "admit_rule_recorded": 0.2518,
+     "admit_rule_common12": 0.2518
+    },
+    {
+     "split": "dev",
+     "queries": "all",
+     "queries_n": 239,
+     "layer_concepts": 32,
+     "admit_fixed": 0.44,
+     "admit_rule_recorded": 0.44,
+     "admit_rule_common12": 0.2494
+    },
+    {
+     "split": "dev",
+     "queries": "all",
+     "queries_n": 239,
+     "layer_concepts": 64,
+     "admit_fixed": 0.5813,
+     "admit_rule_recorded": 0.5813,
+     "admit_rule_common12": 0.2542
+    },
+    {
+     "split": "dev",
+     "queries": "all",
+     "queries_n": 239,
+     "layer_concepts": 96,
+     "admit_fixed": 0.6592,
+     "admit_rule_recorded": 0.6592,
+     "admit_rule_common12": 0.2573
+    },
+    {
+     "split": "held_out",
+     "queries": "no_answer",
+     "queries_n": 32,
+     "layer_concepts": 12,
+     "admit_fixed": 0.288,
+     "admit_rule_recorded": 0.288,
+     "admit_rule_common12": 0.288
+    },
+    {
+     "split": "held_out",
+     "queries": "no_answer",
+     "queries_n": 32,
+     "layer_concepts": 32,
+     "admit_fixed": 0.5228,
+     "admit_rule_recorded": 0.5228,
+     "admit_rule_common12": 0.2528
+    },
+    {
+     "split": "held_out",
+     "queries": "no_answer",
+     "queries_n": 32,
+     "layer_concepts": 64,
+     "admit_fixed": 0.7055,
+     "admit_rule_recorded": 0.7055,
+     "admit_rule_common12": 0.3295
+    },
+    {
+     "split": "held_out",
+     "queries": "no_answer",
+     "queries_n": 32,
+     "layer_concepts": 96,
+     "admit_fixed": 0.8031,
+     "admit_rule_recorded": 0.8031,
+     "admit_rule_common12": 0.3362
+    },
+    {
+     "split": "held_out",
+     "queries": "all",
+     "queries_n": 129,
+     "layer_concepts": 12,
+     "admit_fixed": 0.2772,
+     "admit_rule_recorded": 0.2772,
+     "admit_rule_common12": 0.2772
+    },
+    {
+     "split": "held_out",
+     "queries": "all",
+     "queries_n": 129,
+     "layer_concepts": 32,
+     "admit_fixed": 0.4841,
+     "admit_rule_recorded": 0.4841,
+     "admit_rule_common12": 0.2581
+    },
+    {
+     "split": "held_out",
+     "queries": "all",
+     "queries_n": 129,
+     "layer_concepts": 64,
+     "admit_fixed": 0.6372,
+     "admit_rule_recorded": 0.6372,
+     "admit_rule_common12": 0.2791
+    },
+    {
+     "split": "held_out",
+     "queries": "all",
+     "queries_n": 129,
+     "layer_concepts": 96,
+     "admit_fixed": 0.7157,
+     "admit_rule_recorded": 0.7157,
+     "admit_rule_common12": 0.296
+    }
+   ]
+  },
+  {
+   "contract": "qwen3-embedding-4b 1024",
+   "run": "evidence/issue-221/runs/qwen3-4b-1024-detail.json",
+   "framing": "self",
+   "fixed_floor": 0.6,
+   "recorded_measured_concepts": 100,
+   "dev_null_pairs": 23707,
+   "dev_null_share_at_or_above_fixed_floor": 0.03075,
+   "dev_null_max": 0.8331,
+   "anchors": {
+    "recorded": {
+     "n0": 100,
+     "sizes": [
+      {
+       "layer_concepts": 12,
+       "per_pair_share_target": 0.03075,
+       "floor": 0.6,
+       "dev_null_pairs_at_or_above": 729,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 37,
+        "grade2_lost_at_fixed": 37,
+        "grade1_pairs": 24,
+        "grade1_lost": 13,
+        "grade1_lost_at_fixed": 13,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 32,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 32,
+        "null_share_at_or_above": 0.03075
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 20,
+        "grade2_lost_at_fixed": 20,
+        "grade1_pairs": 16,
+        "grade1_lost": 12,
+        "grade1_lost_at_fixed": 12,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 20,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 20,
+        "null_share_at_or_above": 0.032457
+       }
+      },
+      {
+       "layer_concepts": 32,
+       "per_pair_share_target": 0.03075,
+       "floor": 0.6,
+       "dev_null_pairs_at_or_above": 729,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 37,
+        "grade2_lost_at_fixed": 37,
+        "grade1_pairs": 24,
+        "grade1_lost": 13,
+        "grade1_lost_at_fixed": 13,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 32,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 32,
+        "null_share_at_or_above": 0.03075
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 20,
+        "grade2_lost_at_fixed": 20,
+        "grade1_pairs": 16,
+        "grade1_lost": 12,
+        "grade1_lost_at_fixed": 12,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 20,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 20,
+        "null_share_at_or_above": 0.032457
+       }
+      },
+      {
+       "layer_concepts": 64,
+       "per_pair_share_target": 0.03075,
+       "floor": 0.6,
+       "dev_null_pairs_at_or_above": 729,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 37,
+        "grade2_lost_at_fixed": 37,
+        "grade1_pairs": 24,
+        "grade1_lost": 13,
+        "grade1_lost_at_fixed": 13,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 32,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 32,
+        "null_share_at_or_above": 0.03075
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 20,
+        "grade2_lost_at_fixed": 20,
+        "grade1_pairs": 16,
+        "grade1_lost": 12,
+        "grade1_lost_at_fixed": 12,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 20,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 20,
+        "null_share_at_or_above": 0.032457
+       }
+      },
+      {
+       "layer_concepts": 100,
+       "per_pair_share_target": 0.03075,
+       "floor": 0.6,
+       "dev_null_pairs_at_or_above": 729,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 37,
+        "grade2_lost_at_fixed": 37,
+        "grade1_pairs": 24,
+        "grade1_lost": 13,
+        "grade1_lost_at_fixed": 13,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 32,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 32,
+        "null_share_at_or_above": 0.03075
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 20,
+        "grade2_lost_at_fixed": 20,
+        "grade1_pairs": 16,
+        "grade1_lost": 12,
+        "grade1_lost_at_fixed": 12,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 20,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 20,
+        "null_share_at_or_above": 0.032457
+       }
+      },
+      {
+       "layer_concepts": 128,
+       "per_pair_share_target": 0.024106,
+       "floor": 0.6109,
+       "dev_null_pairs_at_or_above": 573,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 41,
+        "grade2_lost_at_fixed": 37,
+        "grade1_pairs": 24,
+        "grade1_lost": 13,
+        "grade1_lost_at_fixed": 13,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 36,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 32,
+        "null_share_at_or_above": 0.02417
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 24,
+        "grade2_lost_at_fixed": 20,
+        "grade1_pairs": 16,
+        "grade1_lost": 12,
+        "grade1_lost_at_fixed": 12,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 24,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 20,
+        "null_share_at_or_above": 0.026513
+       }
+      },
+      {
+       "layer_concepts": 256,
+       "per_pair_share_target": 0.012126,
+       "floor": 0.6439,
+       "dev_null_pairs_at_or_above": 288,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 54,
+        "grade2_lost_at_fixed": 37,
+        "grade1_pairs": 24,
+        "grade1_lost": 17,
+        "grade1_lost_at_fixed": 13,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 49,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 32,
+        "null_share_at_or_above": 0.012148
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 32,
+        "grade2_lost_at_fixed": 20,
+        "grade1_pairs": 16,
+        "grade1_lost": 15,
+        "grade1_lost_at_fixed": 12,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 32,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 20,
+        "null_share_at_or_above": 0.012123
+       }
+      },
+      {
+       "layer_concepts": 512,
+       "per_pair_share_target": 0.006082,
+       "floor": 0.672,
+       "dev_null_pairs_at_or_above": 145,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 70,
+        "grade2_lost_at_fixed": 37,
+        "grade1_pairs": 24,
+        "grade1_lost": 19,
+        "grade1_lost_at_fixed": 13,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 65,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 32,
+        "null_share_at_or_above": 0.006116
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 44,
+        "grade2_lost_at_fixed": 20,
+        "grade1_pairs": 16,
+        "grade1_lost": 15,
+        "grade1_lost_at_fixed": 12,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 44,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 20,
+        "null_share_at_or_above": 0.006491
+       }
+      },
+      {
+       "layer_concepts": 1024,
+       "per_pair_share_target": 0.003045,
+       "floor": 0.6987,
+       "dev_null_pairs_at_or_above": 73,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 85,
+        "grade2_lost_at_fixed": 37,
+        "grade1_pairs": 24,
+        "grade1_lost": 23,
+        "grade1_lost_at_fixed": 13,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 81,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 32,
+        "null_share_at_or_above": 0.003079
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 56,
+        "grade2_lost_at_fixed": 20,
+        "grade1_pairs": 16,
+        "grade1_lost": 15,
+        "grade1_lost_at_fixed": 12,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 56,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 20,
+        "null_share_at_or_above": 0.003754
+       }
+      },
+      {
+       "layer_concepts": 2048,
+       "per_pair_share_target": 0.001524,
+       "floor": 0.7232,
+       "dev_null_pairs_at_or_above": 38,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 101,
+        "grade2_lost_at_fixed": 37,
+        "grade1_pairs": 24,
+        "grade1_lost": 24,
+        "grade1_lost_at_fixed": 13,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 97,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 32,
+        "null_share_at_or_above": 0.001603
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 64,
+        "grade2_lost_at_fixed": 20,
+        "grade1_pairs": 16,
+        "grade1_lost": 15,
+        "grade1_lost_at_fixed": 12,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 63,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 20,
+        "null_share_at_or_above": 0.002268
+       }
+      }
+     ]
+    },
+    "common12": {
+     "n0": 12,
+     "sizes": [
+      {
+       "layer_concepts": 12,
+       "per_pair_share_target": 0.03075,
+       "floor": 0.6,
+       "dev_null_pairs_at_or_above": 729,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 37,
+        "grade2_lost_at_fixed": 37,
+        "grade1_pairs": 24,
+        "grade1_lost": 13,
+        "grade1_lost_at_fixed": 13,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 32,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 32,
+        "null_share_at_or_above": 0.03075
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 20,
+        "grade2_lost_at_fixed": 20,
+        "grade1_pairs": 16,
+        "grade1_lost": 12,
+        "grade1_lost_at_fixed": 12,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 20,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 20,
+        "null_share_at_or_above": 0.032457
+       }
+      },
+      {
+       "layer_concepts": 32,
+       "per_pair_share_target": 0.011644,
+       "floor": 0.6449,
+       "dev_null_pairs_at_or_above": 277,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 54,
+        "grade2_lost_at_fixed": 37,
+        "grade1_pairs": 24,
+        "grade1_lost": 17,
+        "grade1_lost_at_fixed": 13,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 49,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 32,
+        "null_share_at_or_above": 0.011684
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 32,
+        "grade2_lost_at_fixed": 20,
+        "grade1_pairs": 16,
+        "grade1_lost": 15,
+        "grade1_lost_at_fixed": 12,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 32,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 20,
+        "null_share_at_or_above": 0.011732
+       }
+      },
+      {
+       "layer_concepts": 64,
+       "per_pair_share_target": 0.005839,
+       "floor": 0.6737,
+       "dev_null_pairs_at_or_above": 139,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 72,
+        "grade2_lost_at_fixed": 37,
+        "grade1_pairs": 24,
+        "grade1_lost": 19,
+        "grade1_lost_at_fixed": 13,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 67,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 32,
+        "null_share_at_or_above": 0.005863
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 44,
+        "grade2_lost_at_fixed": 20,
+        "grade1_pairs": 16,
+        "grade1_lost": 15,
+        "grade1_lost_at_fixed": 12,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 44,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 20,
+        "null_share_at_or_above": 0.006335
+       }
+      },
+      {
+       "layer_concepts": 100,
+       "per_pair_share_target": 0.003741,
+       "floor": 0.692,
+       "dev_null_pairs_at_or_above": 89,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 81,
+        "grade2_lost_at_fixed": 37,
+        "grade1_pairs": 24,
+        "grade1_lost": 23,
+        "grade1_lost_at_fixed": 13,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 77,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 32,
+        "null_share_at_or_above": 0.003754
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 54,
+        "grade2_lost_at_fixed": 20,
+        "grade1_pairs": 16,
+        "grade1_lost": 15,
+        "grade1_lost_at_fixed": 12,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 54,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 20,
+        "null_share_at_or_above": 0.004302
+       }
+      },
+      {
+       "layer_concepts": 128,
+       "per_pair_share_target": 0.002924,
+       "floor": 0.701,
+       "dev_null_pairs_at_or_above": 71,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 87,
+        "grade2_lost_at_fixed": 37,
+        "grade1_pairs": 24,
+        "grade1_lost": 24,
+        "grade1_lost_at_fixed": 13,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 83,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 32,
+        "null_share_at_or_above": 0.002995
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 57,
+        "grade2_lost_at_fixed": 20,
+        "grade1_pairs": 16,
+        "grade1_lost": 15,
+        "grade1_lost_at_fixed": 12,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 57,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 20,
+        "null_share_at_or_above": 0.003598
+       }
+      },
+      {
+       "layer_concepts": 256,
+       "per_pair_share_target": 0.001463,
+       "floor": 0.7238,
+       "dev_null_pairs_at_or_above": 35,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 101,
+        "grade2_lost_at_fixed": 37,
+        "grade1_pairs": 24,
+        "grade1_lost": 24,
+        "grade1_lost_at_fixed": 13,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 97,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 32,
+        "null_share_at_or_above": 0.001476
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 64,
+        "grade2_lost_at_fixed": 20,
+        "grade1_pairs": 16,
+        "grade1_lost": 15,
+        "grade1_lost_at_fixed": 12,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 63,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 20,
+        "null_share_at_or_above": 0.00219
+       }
+      },
+      {
+       "layer_concepts": 512,
+       "per_pair_share_target": 0.000732,
+       "floor": 0.7531,
+       "dev_null_pairs_at_or_above": 18,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 123,
+        "grade2_lost_at_fixed": 37,
+        "grade1_pairs": 24,
+        "grade1_lost": 24,
+        "grade1_lost_at_fixed": 13,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 119,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 32,
+        "null_share_at_or_above": 0.000759
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 74,
+        "grade2_lost_at_fixed": 20,
+        "grade1_pairs": 16,
+        "grade1_lost": 15,
+        "grade1_lost_at_fixed": 12,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 73,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 20,
+        "null_share_at_or_above": 0.001095
+       }
+      },
+      {
+       "layer_concepts": 1024,
+       "per_pair_share_target": 0.000366,
+       "floor": 0.7757,
+       "dev_null_pairs_at_or_above": 9,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 134,
+        "grade2_lost_at_fixed": 37,
+        "grade1_pairs": 24,
+        "grade1_lost": 24,
+        "grade1_lost_at_fixed": 13,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 130,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 32,
+        "null_share_at_or_above": 0.00038
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 82,
+        "grade2_lost_at_fixed": 20,
+        "grade1_pairs": 16,
+        "grade1_lost": 16,
+        "grade1_lost_at_fixed": 12,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 81,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 20,
+        "null_share_at_or_above": 0.000547
+       }
+      },
+      {
+       "layer_concepts": 2048,
+       "per_pair_share_target": 0.000183,
+       "floor": 0.7922,
+       "dev_null_pairs_at_or_above": 5,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 146,
+        "grade2_lost_at_fixed": 37,
+        "grade1_pairs": 24,
+        "grade1_lost": 24,
+        "grade1_lost_at_fixed": 13,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 142,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 32,
+        "null_share_at_or_above": 0.000211
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 86,
+        "grade2_lost_at_fixed": 20,
+        "grade1_pairs": 16,
+        "grade1_lost": 16,
+        "grade1_lost_at_fixed": 12,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 85,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 20,
+        "null_share_at_or_above": 0.000235
+       }
+      }
+     ]
+    }
+   },
+   "direct_best_of_n": [
+    {
+     "split": "dev",
+     "queries": "no_answer",
+     "queries_n": 74,
+     "layer_concepts": 12,
+     "admit_fixed": 0.2803,
+     "admit_rule_recorded": 0.2803,
+     "admit_rule_common12": 0.2803
+    },
+    {
+     "split": "dev",
+     "queries": "no_answer",
+     "queries_n": 74,
+     "layer_concepts": 32,
+     "admit_fixed": 0.4789,
+     "admit_rule_recorded": 0.4789,
+     "admit_rule_common12": 0.2841
+    },
+    {
+     "split": "dev",
+     "queries": "no_answer",
+     "queries_n": 74,
+     "layer_concepts": 64,
+     "admit_fixed": 0.6222,
+     "admit_rule_recorded": 0.6222,
+     "admit_rule_common12": 0.2757
+    },
+    {
+     "split": "dev",
+     "queries": "no_answer",
+     "queries_n": 74,
+     "layer_concepts": 96,
+     "admit_fixed": 0.7071,
+     "admit_rule_recorded": 0.7071,
+     "admit_rule_common12": 0.3153
+    },
+    {
+     "split": "dev",
+     "queries": "all",
+     "queries_n": 239,
+     "layer_concepts": 12,
+     "admit_fixed": 0.2551,
+     "admit_rule_recorded": 0.2551,
+     "admit_rule_common12": 0.2551
+    },
+    {
+     "split": "dev",
+     "queries": "all",
+     "queries_n": 239,
+     "layer_concepts": 32,
+     "admit_fixed": 0.444,
+     "admit_rule_recorded": 0.444,
+     "admit_rule_common12": 0.2509
+    },
+    {
+     "split": "dev",
+     "queries": "all",
+     "queries_n": 239,
+     "layer_concepts": 64,
+     "admit_fixed": 0.5846,
+     "admit_rule_recorded": 0.5846,
+     "admit_rule_common12": 0.2402
+    },
+    {
+     "split": "dev",
+     "queries": "all",
+     "queries_n": 239,
+     "layer_concepts": 96,
+     "admit_fixed": 0.6628,
+     "admit_rule_recorded": 0.6628,
+     "admit_rule_common12": 0.2574
+    },
+    {
+     "split": "held_out",
+     "queries": "no_answer",
+     "queries_n": 32,
+     "layer_concepts": 12,
+     "admit_fixed": 0.2792,
+     "admit_rule_recorded": 0.2792,
+     "admit_rule_common12": 0.2792
+    },
+    {
+     "split": "held_out",
+     "queries": "no_answer",
+     "queries_n": 32,
+     "layer_concepts": 32,
+     "admit_fixed": 0.5169,
+     "admit_rule_recorded": 0.5169,
+     "admit_rule_common12": 0.3075
+    },
+    {
+     "split": "held_out",
+     "queries": "no_answer",
+     "queries_n": 32,
+     "layer_concepts": 64,
+     "admit_fixed": 0.6809,
+     "admit_rule_recorded": 0.6809,
+     "admit_rule_common12": 0.3103
+    },
+    {
+     "split": "held_out",
+     "queries": "no_answer",
+     "queries_n": 32,
+     "layer_concepts": 96,
+     "admit_fixed": 0.7716,
+     "admit_rule_recorded": 0.7716,
+     "admit_rule_common12": 0.3664
+    },
+    {
+     "split": "held_out",
+     "queries": "all",
+     "queries_n": 129,
+     "layer_concepts": 12,
+     "admit_fixed": 0.2792,
+     "admit_rule_recorded": 0.2792,
+     "admit_rule_common12": 0.2792
+    },
+    {
+     "split": "held_out",
+     "queries": "all",
+     "queries_n": 129,
+     "layer_concepts": 32,
+     "admit_fixed": 0.4878,
+     "admit_rule_recorded": 0.4878,
+     "admit_rule_common12": 0.2561
+    },
+    {
+     "split": "held_out",
+     "queries": "all",
+     "queries_n": 129,
+     "layer_concepts": 64,
+     "admit_fixed": 0.6338,
+     "admit_rule_recorded": 0.6338,
+     "admit_rule_common12": 0.274
+    },
+    {
+     "split": "held_out",
+     "queries": "all",
+     "queries_n": 129,
+     "layer_concepts": 96,
+     "admit_fixed": 0.7005,
+     "admit_rule_recorded": 0.7005,
+     "admit_rule_common12": 0.2967
+    }
+   ]
+  },
+  {
+   "contract": "elastic jina-v3 1024",
+   "run": "evidence/issue-237/runs/elastic-jina-v3-1024-detail.json",
+   "framing": "self",
+   "fixed_floor": 0.39,
+   "recorded_measured_concepts": 100,
+   "dev_null_pairs": 23707,
+   "dev_null_share_at_or_above_fixed_floor": 0.02868,
+   "dev_null_max": 0.6741,
+   "anchors": {
+    "recorded": {
+     "n0": 100,
+     "sizes": [
+      {
+       "layer_concepts": 12,
+       "per_pair_share_target": 0.028684,
+       "floor": 0.39,
+       "dev_null_pairs_at_or_above": 680,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 34,
+        "grade2_lost_at_fixed": 34,
+        "grade1_pairs": 24,
+        "grade1_lost": 14,
+        "grade1_lost_at_fixed": 14,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 32,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 32,
+        "null_share_at_or_above": 0.028684
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 18,
+        "grade2_lost_at_fixed": 18,
+        "grade1_pairs": 16,
+        "grade1_lost": 8,
+        "grade1_lost_at_fixed": 8,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 17,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 17,
+        "null_share_at_or_above": 0.026513
+       }
+      },
+      {
+       "layer_concepts": 32,
+       "per_pair_share_target": 0.028684,
+       "floor": 0.39,
+       "dev_null_pairs_at_or_above": 680,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 34,
+        "grade2_lost_at_fixed": 34,
+        "grade1_pairs": 24,
+        "grade1_lost": 14,
+        "grade1_lost_at_fixed": 14,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 32,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 32,
+        "null_share_at_or_above": 0.028684
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 18,
+        "grade2_lost_at_fixed": 18,
+        "grade1_pairs": 16,
+        "grade1_lost": 8,
+        "grade1_lost_at_fixed": 8,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 17,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 17,
+        "null_share_at_or_above": 0.026513
+       }
+      },
+      {
+       "layer_concepts": 64,
+       "per_pair_share_target": 0.028684,
+       "floor": 0.39,
+       "dev_null_pairs_at_or_above": 680,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 34,
+        "grade2_lost_at_fixed": 34,
+        "grade1_pairs": 24,
+        "grade1_lost": 14,
+        "grade1_lost_at_fixed": 14,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 32,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 32,
+        "null_share_at_or_above": 0.028684
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 18,
+        "grade2_lost_at_fixed": 18,
+        "grade1_pairs": 16,
+        "grade1_lost": 8,
+        "grade1_lost_at_fixed": 8,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 17,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 17,
+        "null_share_at_or_above": 0.026513
+       }
+      },
+      {
+       "layer_concepts": 100,
+       "per_pair_share_target": 0.028684,
+       "floor": 0.39,
+       "dev_null_pairs_at_or_above": 680,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 34,
+        "grade2_lost_at_fixed": 34,
+        "grade1_pairs": 24,
+        "grade1_lost": 14,
+        "grade1_lost_at_fixed": 14,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 32,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 32,
+        "null_share_at_or_above": 0.028684
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 18,
+        "grade2_lost_at_fixed": 18,
+        "grade1_pairs": 16,
+        "grade1_lost": 8,
+        "grade1_lost_at_fixed": 8,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 17,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 17,
+        "null_share_at_or_above": 0.026513
+       }
+      },
+      {
+       "layer_concepts": 128,
+       "per_pair_share_target": 0.02248,
+       "floor": 0.4074,
+       "dev_null_pairs_at_or_above": 533,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 35,
+        "grade2_lost_at_fixed": 34,
+        "grade1_pairs": 24,
+        "grade1_lost": 14,
+        "grade1_lost_at_fixed": 14,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 33,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 32,
+        "null_share_at_or_above": 0.022483
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 22,
+        "grade2_lost_at_fixed": 18,
+        "grade1_pairs": 16,
+        "grade1_lost": 10,
+        "grade1_lost_at_fixed": 8,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 22,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 17,
+        "null_share_at_or_above": 0.019787
+       }
+      },
+      {
+       "layer_concepts": 256,
+       "per_pair_share_target": 0.011304,
+       "floor": 0.449,
+       "dev_null_pairs_at_or_above": 269,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 53,
+        "grade2_lost_at_fixed": 34,
+        "grade1_pairs": 24,
+        "grade1_lost": 16,
+        "grade1_lost_at_fixed": 14,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 49,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 32,
+        "null_share_at_or_above": 0.011347
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 35,
+        "grade2_lost_at_fixed": 18,
+        "grade1_pairs": 16,
+        "grade1_lost": 12,
+        "grade1_lost_at_fixed": 8,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 34,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 17,
+        "null_share_at_or_above": 0.009542
+       }
+      },
+      {
+       "layer_concepts": 512,
+       "per_pair_share_target": 0.005668,
+       "floor": 0.4854,
+       "dev_null_pairs_at_or_above": 135,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 66,
+        "grade2_lost_at_fixed": 34,
+        "grade1_pairs": 24,
+        "grade1_lost": 19,
+        "grade1_lost_at_fixed": 14,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 62,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 32,
+        "null_share_at_or_above": 0.005695
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 45,
+        "grade2_lost_at_fixed": 18,
+        "grade1_pairs": 16,
+        "grade1_lost": 12,
+        "grade1_lost_at_fixed": 8,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 43,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 17,
+        "null_share_at_or_above": 0.005397
+       }
+      },
+      {
+       "layer_concepts": 1024,
+       "per_pair_share_target": 0.002838,
+       "floor": 0.5227,
+       "dev_null_pairs_at_or_above": 68,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 79,
+        "grade2_lost_at_fixed": 34,
+        "grade1_pairs": 24,
+        "grade1_lost": 21,
+        "grade1_lost_at_fixed": 14,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 75,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 32,
+        "null_share_at_or_above": 0.002868
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 63,
+        "grade2_lost_at_fixed": 18,
+        "grade1_pairs": 16,
+        "grade1_lost": 14,
+        "grade1_lost_at_fixed": 8,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 61,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 17,
+        "null_share_at_or_above": 0.002581
+       }
+      },
+      {
+       "layer_concepts": 2048,
+       "per_pair_share_target": 0.00142,
+       "floor": 0.5668,
+       "dev_null_pairs_at_or_above": 34,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 98,
+        "grade2_lost_at_fixed": 34,
+        "grade1_pairs": 24,
+        "grade1_lost": 22,
+        "grade1_lost_at_fixed": 14,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 94,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 32,
+        "null_share_at_or_above": 0.001434
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 72,
+        "grade2_lost_at_fixed": 18,
+        "grade1_pairs": 16,
+        "grade1_lost": 15,
+        "grade1_lost_at_fixed": 8,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 71,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 17,
+        "null_share_at_or_above": 0.000939
+       }
+      }
+     ]
+    },
+    "common12": {
+     "n0": 12,
+     "sizes": [
+      {
+       "layer_concepts": 12,
+       "per_pair_share_target": 0.028684,
+       "floor": 0.39,
+       "dev_null_pairs_at_or_above": 680,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 34,
+        "grade2_lost_at_fixed": 34,
+        "grade1_pairs": 24,
+        "grade1_lost": 14,
+        "grade1_lost_at_fixed": 14,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 32,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 32,
+        "null_share_at_or_above": 0.028684
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 18,
+        "grade2_lost_at_fixed": 18,
+        "grade1_pairs": 16,
+        "grade1_lost": 8,
+        "grade1_lost_at_fixed": 8,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 17,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 17,
+        "null_share_at_or_above": 0.026513
+       }
+      },
+      {
+       "layer_concepts": 32,
+       "per_pair_share_target": 0.010854,
+       "floor": 0.4522,
+       "dev_null_pairs_at_or_above": 258,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 54,
+        "grade2_lost_at_fixed": 34,
+        "grade1_pairs": 24,
+        "grade1_lost": 16,
+        "grade1_lost_at_fixed": 14,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 50,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 32,
+        "null_share_at_or_above": 0.010883
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 37,
+        "grade2_lost_at_fixed": 18,
+        "grade1_pairs": 16,
+        "grade1_lost": 12,
+        "grade1_lost_at_fixed": 8,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 36,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 17,
+        "null_share_at_or_above": 0.008916
+       }
+      },
+      {
+       "layer_concepts": 64,
+       "per_pair_share_target": 0.005442,
+       "floor": 0.4866,
+       "dev_null_pairs_at_or_above": 130,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 66,
+        "grade2_lost_at_fixed": 34,
+        "grade1_pairs": 24,
+        "grade1_lost": 19,
+        "grade1_lost_at_fixed": 14,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 62,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 32,
+        "null_share_at_or_above": 0.005484
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 46,
+        "grade2_lost_at_fixed": 18,
+        "grade1_pairs": 16,
+        "grade1_lost": 12,
+        "grade1_lost_at_fixed": 8,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 44,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 17,
+        "null_share_at_or_above": 0.005318
+       }
+      },
+      {
+       "layer_concepts": 100,
+       "per_pair_share_target": 0.003486,
+       "floor": 0.5049,
+       "dev_null_pairs_at_or_above": 83,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 75,
+        "grade2_lost_at_fixed": 34,
+        "grade1_pairs": 24,
+        "grade1_lost": 20,
+        "grade1_lost_at_fixed": 14,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 71,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 32,
+        "null_share_at_or_above": 0.003501
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 52,
+        "grade2_lost_at_fixed": 18,
+        "grade1_pairs": 16,
+        "grade1_lost": 13,
+        "grade1_lost_at_fixed": 8,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 51,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 17,
+        "null_share_at_or_above": 0.003676
+       }
+      },
+      {
+       "layer_concepts": 128,
+       "per_pair_share_target": 0.002725,
+       "floor": 0.5256,
+       "dev_null_pairs_at_or_above": 65,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 79,
+        "grade2_lost_at_fixed": 34,
+        "grade1_pairs": 24,
+        "grade1_lost": 21,
+        "grade1_lost_at_fixed": 14,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 75,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 32,
+        "null_share_at_or_above": 0.002742
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 64,
+        "grade2_lost_at_fixed": 18,
+        "grade1_pairs": 16,
+        "grade1_lost": 14,
+        "grade1_lost_at_fixed": 8,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 62,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 17,
+        "null_share_at_or_above": 0.002346
+       }
+      },
+      {
+       "layer_concepts": 256,
+       "per_pair_share_target": 0.001363,
+       "floor": 0.5683,
+       "dev_null_pairs_at_or_above": 33,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 99,
+        "grade2_lost_at_fixed": 34,
+        "grade1_pairs": 24,
+        "grade1_lost": 22,
+        "grade1_lost_at_fixed": 14,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 95,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 32,
+        "null_share_at_or_above": 0.001392
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 72,
+        "grade2_lost_at_fixed": 18,
+        "grade1_pairs": 16,
+        "grade1_lost": 15,
+        "grade1_lost_at_fixed": 8,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 71,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 17,
+        "null_share_at_or_above": 0.000939
+       }
+      },
+      {
+       "layer_concepts": 512,
+       "per_pair_share_target": 0.000682,
+       "floor": 0.5964,
+       "dev_null_pairs_at_or_above": 17,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 108,
+        "grade2_lost_at_fixed": 34,
+        "grade1_pairs": 24,
+        "grade1_lost": 23,
+        "grade1_lost_at_fixed": 14,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 104,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 32,
+        "null_share_at_or_above": 0.000717
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 78,
+        "grade2_lost_at_fixed": 18,
+        "grade1_pairs": 16,
+        "grade1_lost": 15,
+        "grade1_lost_at_fixed": 8,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 76,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 17,
+        "null_share_at_or_above": 0.000469
+       }
+      },
+      {
+       "layer_concepts": 1024,
+       "per_pair_share_target": 0.000341,
+       "floor": 0.6276,
+       "dev_null_pairs_at_or_above": 9,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 121,
+        "grade2_lost_at_fixed": 34,
+        "grade1_pairs": 24,
+        "grade1_lost": 23,
+        "grade1_lost_at_fixed": 14,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 117,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 32,
+        "null_share_at_or_above": 0.00038
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 78,
+        "grade2_lost_at_fixed": 18,
+        "grade1_pairs": 16,
+        "grade1_lost": 15,
+        "grade1_lost_at_fixed": 8,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 76,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 17,
+        "null_share_at_or_above": 0.000156
+       }
+      },
+      {
+       "layer_concepts": 2048,
+       "per_pair_share_target": 0.000171,
+       "floor": 0.6449,
+       "dev_null_pairs_at_or_above": 5,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 127,
+        "grade2_lost_at_fixed": 34,
+        "grade1_pairs": 24,
+        "grade1_lost": 23,
+        "grade1_lost_at_fixed": 14,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 123,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 32,
+        "null_share_at_or_above": 0.000211
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 79,
+        "grade2_lost_at_fixed": 18,
+        "grade1_pairs": 16,
+        "grade1_lost": 15,
+        "grade1_lost_at_fixed": 8,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 77,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 17,
+        "null_share_at_or_above": 0.000156
+       }
+      }
+     ]
+    }
+   },
+   "direct_best_of_n": [
+    {
+     "split": "dev",
+     "queries": "no_answer",
+     "queries_n": 74,
+     "layer_concepts": 12,
+     "admit_fixed": 0.3168,
+     "admit_rule_recorded": 0.3168,
+     "admit_rule_common12": 0.3168
+    },
+    {
+     "split": "dev",
+     "queries": "no_answer",
+     "queries_n": 74,
+     "layer_concepts": 32,
+     "admit_fixed": 0.5616,
+     "admit_rule_recorded": 0.5616,
+     "admit_rule_common12": 0.2968
+    },
+    {
+     "split": "dev",
+     "queries": "no_answer",
+     "queries_n": 74,
+     "layer_concepts": 64,
+     "admit_fixed": 0.7136,
+     "admit_rule_recorded": 0.7136,
+     "admit_rule_common12": 0.2669
+    },
+    {
+     "split": "dev",
+     "queries": "no_answer",
+     "queries_n": 74,
+     "layer_concepts": 96,
+     "admit_fixed": 0.7669,
+     "admit_rule_recorded": 0.7669,
+     "admit_rule_common12": 0.2745
+    },
+    {
+     "split": "dev",
+     "queries": "all",
+     "queries_n": 239,
+     "layer_concepts": 12,
+     "admit_fixed": 0.2548,
+     "admit_rule_recorded": 0.2548,
+     "admit_rule_common12": 0.2548
+    },
+    {
+     "split": "dev",
+     "queries": "all",
+     "queries_n": 239,
+     "layer_concepts": 32,
+     "admit_fixed": 0.4639,
+     "admit_rule_recorded": 0.4639,
+     "admit_rule_common12": 0.2519
+    },
+    {
+     "split": "dev",
+     "queries": "all",
+     "queries_n": 239,
+     "layer_concepts": 64,
+     "admit_fixed": 0.6078,
+     "admit_rule_recorded": 0.6078,
+     "admit_rule_common12": 0.2463
+    },
+    {
+     "split": "dev",
+     "queries": "all",
+     "queries_n": 239,
+     "layer_concepts": 96,
+     "admit_fixed": 0.6807,
+     "admit_rule_recorded": 0.6807,
+     "admit_rule_common12": 0.2328
+    },
+    {
+     "split": "held_out",
+     "queries": "no_answer",
+     "queries_n": 32,
+     "layer_concepts": 12,
+     "admit_fixed": 0.2845,
+     "admit_rule_recorded": 0.2845,
+     "admit_rule_common12": 0.2845
+    },
+    {
+     "split": "held_out",
+     "queries": "no_answer",
+     "queries_n": 32,
+     "layer_concepts": 32,
+     "admit_fixed": 0.5248,
+     "admit_rule_recorded": 0.5248,
+     "admit_rule_common12": 0.3036
+    },
+    {
+     "split": "held_out",
+     "queries": "no_answer",
+     "queries_n": 32,
+     "layer_concepts": 64,
+     "admit_fixed": 0.6789,
+     "admit_rule_recorded": 0.6789,
+     "admit_rule_common12": 0.3698
+    },
+    {
+     "split": "held_out",
+     "queries": "no_answer",
+     "queries_n": 32,
+     "layer_concepts": 96,
+     "admit_fixed": 0.7444,
+     "admit_rule_recorded": 0.7444,
+     "admit_rule_common12": 0.3973
+    },
+    {
+     "split": "held_out",
+     "queries": "all",
+     "queries_n": 129,
+     "layer_concepts": 12,
+     "admit_fixed": 0.2463,
+     "admit_rule_recorded": 0.2463,
+     "admit_rule_common12": 0.2463
+    },
+    {
+     "split": "held_out",
+     "queries": "all",
+     "queries_n": 129,
+     "layer_concepts": 32,
+     "admit_fixed": 0.4594,
+     "admit_rule_recorded": 0.4594,
+     "admit_rule_common12": 0.2108
+    },
+    {
+     "split": "held_out",
+     "queries": "all",
+     "queries_n": 129,
+     "layer_concepts": 64,
+     "admit_fixed": 0.6228,
+     "admit_rule_recorded": 0.6228,
+     "admit_rule_common12": 0.2313
+    },
+    {
+     "split": "held_out",
+     "queries": "all",
+     "queries_n": 129,
+     "layer_concepts": 96,
+     "admit_fixed": 0.7075,
+     "admit_rule_recorded": 0.7075,
+     "admit_rule_common12": 0.2507
+    }
+   ]
+  }
+ ],
+ "sensitivity_raw_framing": [
+  {
+   "contract": "bge-m3 (reference)",
+   "run": "evidence/issue-221/runs/bge-m3-candle-cpu-detail.json",
+   "framing": "raw",
+   "fixed_floor": 0.5,
+   "recorded_measured_concepts": 12,
+   "dev_null_pairs": 23707,
+   "dev_null_share_at_or_above_fixed_floor": 0.03501,
+   "dev_null_max": 0.734,
+   "anchors": {
+    "recorded": {
+     "n0": 12,
+     "sizes": [
+      {
+       "layer_concepts": 12,
+       "per_pair_share_target": 0.035011,
+       "floor": 0.5,
+       "dev_null_pairs_at_or_above": 830,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 22,
+        "grade2_lost_at_fixed": 22,
+        "grade1_pairs": 24,
+        "grade1_lost": 10,
+        "grade1_lost_at_fixed": 10,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 20,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 20,
+        "null_share_at_or_above": 0.035011
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 12,
+        "grade2_lost_at_fixed": 12,
+        "grade1_pairs": 16,
+        "grade1_lost": 10,
+        "grade1_lost_at_fixed": 10,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 12,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 12,
+        "null_share_at_or_above": 0.034334
+       }
+      },
+      {
+       "layer_concepts": 32,
+       "per_pair_share_target": 0.013275,
+       "floor": 0.5367,
+       "dev_null_pairs_at_or_above": 315,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 36,
+        "grade2_lost_at_fixed": 22,
+        "grade1_pairs": 24,
+        "grade1_lost": 14,
+        "grade1_lost_at_fixed": 10,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 34,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 20,
+        "null_share_at_or_above": 0.013287
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 30,
+        "grade2_lost_at_fixed": 12,
+        "grade1_pairs": 16,
+        "grade1_lost": 11,
+        "grade1_lost_at_fixed": 10,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 29,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 12,
+        "null_share_at_or_above": 0.011653
+       }
+      },
+      {
+       "layer_concepts": 64,
+       "per_pair_share_target": 0.00666,
+       "floor": 0.5614,
+       "dev_null_pairs_at_or_above": 158,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 45,
+        "grade2_lost_at_fixed": 22,
+        "grade1_pairs": 24,
+        "grade1_lost": 21,
+        "grade1_lost_at_fixed": 10,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 43,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 20,
+        "null_share_at_or_above": 0.006665
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 35,
+        "grade2_lost_at_fixed": 12,
+        "grade1_pairs": 16,
+        "grade1_lost": 12,
+        "grade1_lost_at_fixed": 10,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 34,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 12,
+        "null_share_at_or_above": 0.0061
+       }
+      },
+      {
+       "layer_concepts": 100,
+       "per_pair_share_target": 0.004267,
+       "floor": 0.5745,
+       "dev_null_pairs_at_or_above": 102,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 52,
+        "grade2_lost_at_fixed": 22,
+        "grade1_pairs": 24,
+        "grade1_lost": 21,
+        "grade1_lost_at_fixed": 10,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 50,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 20,
+        "null_share_at_or_above": 0.004303
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 38,
+        "grade2_lost_at_fixed": 12,
+        "grade1_pairs": 16,
+        "grade1_lost": 13,
+        "grade1_lost_at_fixed": 10,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 37,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 12,
+        "null_share_at_or_above": 0.003989
+       }
+      },
+      {
+       "layer_concepts": 128,
+       "per_pair_share_target": 0.003336,
+       "floor": 0.5835,
+       "dev_null_pairs_at_or_above": 80,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 59,
+        "grade2_lost_at_fixed": 22,
+        "grade1_pairs": 24,
+        "grade1_lost": 21,
+        "grade1_lost_at_fixed": 10,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 56,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 20,
+        "null_share_at_or_above": 0.003375
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 42,
+        "grade2_lost_at_fixed": 12,
+        "grade1_pairs": 16,
+        "grade1_lost": 14,
+        "grade1_lost_at_fixed": 10,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 41,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 12,
+        "null_share_at_or_above": 0.002894
+       }
+      },
+      {
+       "layer_concepts": 256,
+       "per_pair_share_target": 0.001669,
+       "floor": 0.6073,
+       "dev_null_pairs_at_or_above": 40,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 78,
+        "grade2_lost_at_fixed": 22,
+        "grade1_pairs": 24,
+        "grade1_lost": 22,
+        "grade1_lost_at_fixed": 10,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 74,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 20,
+        "null_share_at_or_above": 0.001687
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 53,
+        "grade2_lost_at_fixed": 12,
+        "grade1_pairs": 16,
+        "grade1_lost": 14,
+        "grade1_lost_at_fixed": 10,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 52,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 12,
+        "null_share_at_or_above": 0.00133
+       }
+      },
+      {
+       "layer_concepts": 512,
+       "per_pair_share_target": 0.000835,
+       "floor": 0.6264,
+       "dev_null_pairs_at_or_above": 20,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 93,
+        "grade2_lost_at_fixed": 22,
+        "grade1_pairs": 24,
+        "grade1_lost": 23,
+        "grade1_lost_at_fixed": 10,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 90,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 20,
+        "null_share_at_or_above": 0.000844
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 65,
+        "grade2_lost_at_fixed": 12,
+        "grade1_pairs": 16,
+        "grade1_lost": 15,
+        "grade1_lost_at_fixed": 10,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 64,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 12,
+        "null_share_at_or_above": 0.000704
+       }
+      },
+      {
+       "layer_concepts": 1024,
+       "per_pair_share_target": 0.000418,
+       "floor": 0.6544,
+       "dev_null_pairs_at_or_above": 10,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 115,
+        "grade2_lost_at_fixed": 22,
+        "grade1_pairs": 24,
+        "grade1_lost": 24,
+        "grade1_lost_at_fixed": 10,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 112,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 20,
+        "null_share_at_or_above": 0.000422
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 76,
+        "grade2_lost_at_fixed": 12,
+        "grade1_pairs": 16,
+        "grade1_lost": 15,
+        "grade1_lost_at_fixed": 10,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 74,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 12,
+        "null_share_at_or_above": 0.000235
+       }
+      },
+      {
+       "layer_concepts": 2048,
+       "per_pair_share_target": 0.000209,
+       "floor": 0.6824,
+       "dev_null_pairs_at_or_above": 5,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 132,
+        "grade2_lost_at_fixed": 22,
+        "grade1_pairs": 24,
+        "grade1_lost": 24,
+        "grade1_lost_at_fixed": 10,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 128,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 20,
+        "null_share_at_or_above": 0.000211
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 85,
+        "grade2_lost_at_fixed": 12,
+        "grade1_pairs": 16,
+        "grade1_lost": 15,
+        "grade1_lost_at_fixed": 10,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 83,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 12,
+        "null_share_at_or_above": 7.8e-05
+       }
+      }
+     ]
+    },
+    "common12": {
+     "n0": 12,
+     "sizes": [
+      {
+       "layer_concepts": 12,
+       "per_pair_share_target": 0.035011,
+       "floor": 0.5,
+       "dev_null_pairs_at_or_above": 830,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 22,
+        "grade2_lost_at_fixed": 22,
+        "grade1_pairs": 24,
+        "grade1_lost": 10,
+        "grade1_lost_at_fixed": 10,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 20,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 20,
+        "null_share_at_or_above": 0.035011
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 12,
+        "grade2_lost_at_fixed": 12,
+        "grade1_pairs": 16,
+        "grade1_lost": 10,
+        "grade1_lost_at_fixed": 10,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 12,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 12,
+        "null_share_at_or_above": 0.034334
+       }
+      },
+      {
+       "layer_concepts": 32,
+       "per_pair_share_target": 0.013275,
+       "floor": 0.5367,
+       "dev_null_pairs_at_or_above": 315,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 36,
+        "grade2_lost_at_fixed": 22,
+        "grade1_pairs": 24,
+        "grade1_lost": 14,
+        "grade1_lost_at_fixed": 10,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 34,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 20,
+        "null_share_at_or_above": 0.013287
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 30,
+        "grade2_lost_at_fixed": 12,
+        "grade1_pairs": 16,
+        "grade1_lost": 11,
+        "grade1_lost_at_fixed": 10,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 29,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 12,
+        "null_share_at_or_above": 0.011653
+       }
+      },
+      {
+       "layer_concepts": 64,
+       "per_pair_share_target": 0.00666,
+       "floor": 0.5614,
+       "dev_null_pairs_at_or_above": 158,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 45,
+        "grade2_lost_at_fixed": 22,
+        "grade1_pairs": 24,
+        "grade1_lost": 21,
+        "grade1_lost_at_fixed": 10,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 43,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 20,
+        "null_share_at_or_above": 0.006665
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 35,
+        "grade2_lost_at_fixed": 12,
+        "grade1_pairs": 16,
+        "grade1_lost": 12,
+        "grade1_lost_at_fixed": 10,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 34,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 12,
+        "null_share_at_or_above": 0.0061
+       }
+      },
+      {
+       "layer_concepts": 100,
+       "per_pair_share_target": 0.004267,
+       "floor": 0.5745,
+       "dev_null_pairs_at_or_above": 102,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 52,
+        "grade2_lost_at_fixed": 22,
+        "grade1_pairs": 24,
+        "grade1_lost": 21,
+        "grade1_lost_at_fixed": 10,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 50,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 20,
+        "null_share_at_or_above": 0.004303
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 38,
+        "grade2_lost_at_fixed": 12,
+        "grade1_pairs": 16,
+        "grade1_lost": 13,
+        "grade1_lost_at_fixed": 10,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 37,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 12,
+        "null_share_at_or_above": 0.003989
+       }
+      },
+      {
+       "layer_concepts": 128,
+       "per_pair_share_target": 0.003336,
+       "floor": 0.5835,
+       "dev_null_pairs_at_or_above": 80,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 59,
+        "grade2_lost_at_fixed": 22,
+        "grade1_pairs": 24,
+        "grade1_lost": 21,
+        "grade1_lost_at_fixed": 10,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 56,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 20,
+        "null_share_at_or_above": 0.003375
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 42,
+        "grade2_lost_at_fixed": 12,
+        "grade1_pairs": 16,
+        "grade1_lost": 14,
+        "grade1_lost_at_fixed": 10,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 41,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 12,
+        "null_share_at_or_above": 0.002894
+       }
+      },
+      {
+       "layer_concepts": 256,
+       "per_pair_share_target": 0.001669,
+       "floor": 0.6073,
+       "dev_null_pairs_at_or_above": 40,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 78,
+        "grade2_lost_at_fixed": 22,
+        "grade1_pairs": 24,
+        "grade1_lost": 22,
+        "grade1_lost_at_fixed": 10,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 74,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 20,
+        "null_share_at_or_above": 0.001687
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 53,
+        "grade2_lost_at_fixed": 12,
+        "grade1_pairs": 16,
+        "grade1_lost": 14,
+        "grade1_lost_at_fixed": 10,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 52,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 12,
+        "null_share_at_or_above": 0.00133
+       }
+      },
+      {
+       "layer_concepts": 512,
+       "per_pair_share_target": 0.000835,
+       "floor": 0.6264,
+       "dev_null_pairs_at_or_above": 20,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 93,
+        "grade2_lost_at_fixed": 22,
+        "grade1_pairs": 24,
+        "grade1_lost": 23,
+        "grade1_lost_at_fixed": 10,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 90,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 20,
+        "null_share_at_or_above": 0.000844
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 65,
+        "grade2_lost_at_fixed": 12,
+        "grade1_pairs": 16,
+        "grade1_lost": 15,
+        "grade1_lost_at_fixed": 10,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 64,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 12,
+        "null_share_at_or_above": 0.000704
+       }
+      },
+      {
+       "layer_concepts": 1024,
+       "per_pair_share_target": 0.000418,
+       "floor": 0.6544,
+       "dev_null_pairs_at_or_above": 10,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 115,
+        "grade2_lost_at_fixed": 22,
+        "grade1_pairs": 24,
+        "grade1_lost": 24,
+        "grade1_lost_at_fixed": 10,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 112,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 20,
+        "null_share_at_or_above": 0.000422
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 76,
+        "grade2_lost_at_fixed": 12,
+        "grade1_pairs": 16,
+        "grade1_lost": 15,
+        "grade1_lost_at_fixed": 10,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 74,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 12,
+        "null_share_at_or_above": 0.000235
+       }
+      },
+      {
+       "layer_concepts": 2048,
+       "per_pair_share_target": 0.000209,
+       "floor": 0.6824,
+       "dev_null_pairs_at_or_above": 5,
+       "dev": {
+        "grade2_pairs": 169,
+        "grade2_lost": 132,
+        "grade2_lost_at_fixed": 22,
+        "grade1_pairs": 24,
+        "grade1_lost": 24,
+        "grade1_lost_at_fixed": 10,
+        "answerable_queries": 165,
+        "queries_with_no_relevant_hit_admitted": 128,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 20,
+        "null_share_at_or_above": 0.000211
+       },
+       "held_out": {
+        "grade2_pairs": 98,
+        "grade2_lost": 85,
+        "grade2_lost_at_fixed": 12,
+        "grade1_pairs": 16,
+        "grade1_lost": 15,
+        "grade1_lost_at_fixed": 10,
+        "answerable_queries": 97,
+        "queries_with_no_relevant_hit_admitted": 83,
+        "queries_with_no_relevant_hit_admitted_at_fixed": 12,
+        "null_share_at_or_above": 7.8e-05
+       }
+      }
+     ]
+    }
+   },
+   "direct_best_of_n": [
+    {
+     "split": "dev",
+     "queries": "no_answer",
+     "queries_n": 74,
+     "layer_concepts": 12,
+     "admit_fixed": 0.2874,
+     "admit_rule_recorded": 0.2874,
+     "admit_rule_common12": 0.2874
+    },
+    {
+     "split": "dev",
+     "queries": "no_answer",
+     "queries_n": 74,
+     "layer_concepts": 32,
+     "admit_fixed": 0.499,
+     "admit_rule_recorded": 0.2675,
+     "admit_rule_common12": 0.2675
+    },
+    {
+     "split": "dev",
+     "queries": "no_answer",
+     "queries_n": 74,
+     "layer_concepts": 64,
+     "admit_fixed": 0.6469,
+     "admit_rule_recorded": 0.2536,
+     "admit_rule_common12": 0.2536
+    },
+    {
+     "split": "dev",
+     "queries": "no_answer",
+     "queries_n": 74,
+     "layer_concepts": 96,
+     "admit_fixed": 0.7216,
+     "admit_rule_recorded": 0.2396,
+     "admit_rule_common12": 0.2396
+    },
+    {
+     "split": "dev",
+     "queries": "all",
+     "queries_n": 239,
+     "layer_concepts": 12,
+     "admit_fixed": 0.2938,
+     "admit_rule_recorded": 0.2938,
+     "admit_rule_common12": 0.2938
+    },
+    {
+     "split": "dev",
+     "queries": "all",
+     "queries_n": 239,
+     "layer_concepts": 32,
+     "admit_fixed": 0.4988,
+     "admit_rule_recorded": 0.2756,
+     "admit_rule_common12": 0.2756
+    },
+    {
+     "split": "dev",
+     "queries": "all",
+     "queries_n": 239,
+     "layer_concepts": 64,
+     "admit_fixed": 0.6384,
+     "admit_rule_recorded": 0.2482,
+     "admit_rule_common12": 0.2482
+    },
+    {
+     "split": "dev",
+     "queries": "all",
+     "queries_n": 239,
+     "layer_concepts": 96,
+     "admit_fixed": 0.7066,
+     "admit_rule_recorded": 0.2426,
+     "admit_rule_common12": 0.2426
+    },
+    {
+     "split": "held_out",
+     "queries": "no_answer",
+     "queries_n": 32,
+     "layer_concepts": 12,
+     "admit_fixed": 0.2741,
+     "admit_rule_recorded": 0.2741,
+     "admit_rule_common12": 0.2741
+    },
+    {
+     "split": "held_out",
+     "queries": "no_answer",
+     "queries_n": 32,
+     "layer_concepts": 32,
+     "admit_fixed": 0.4836,
+     "admit_rule_recorded": 0.3141,
+     "admit_rule_common12": 0.3141
+    },
+    {
+     "split": "held_out",
+     "queries": "no_answer",
+     "queries_n": 32,
+     "layer_concepts": 64,
+     "admit_fixed": 0.612,
+     "admit_rule_recorded": 0.3234,
+     "admit_rule_common12": 0.3234
+    },
+    {
+     "split": "held_out",
+     "queries": "no_answer",
+     "queries_n": 32,
+     "layer_concepts": 96,
+     "admit_fixed": 0.6817,
+     "admit_rule_recorded": 0.3373,
+     "admit_rule_common12": 0.3373
+    },
+    {
+     "split": "held_out",
+     "queries": "all",
+     "queries_n": 129,
+     "layer_concepts": 12,
+     "admit_fixed": 0.2989,
+     "admit_rule_recorded": 0.2989,
+     "admit_rule_common12": 0.2989
+    },
+    {
+     "split": "held_out",
+     "queries": "all",
+     "queries_n": 129,
+     "layer_concepts": 32,
+     "admit_fixed": 0.5257,
+     "admit_rule_recorded": 0.2498,
+     "admit_rule_common12": 0.2498
+    },
+    {
+     "split": "held_out",
+     "queries": "all",
+     "queries_n": 129,
+     "layer_concepts": 64,
+     "admit_fixed": 0.6904,
+     "admit_rule_recorded": 0.2537,
+     "admit_rule_common12": 0.2537
+    },
+    {
+     "split": "held_out",
+     "queries": "all",
+     "queries_n": 129,
+     "layer_concepts": 96,
+     "admit_fixed": 0.7694,
+     "admit_rule_recorded": 0.2495,
+     "admit_rule_common12": 0.2495
+    }
+   ]
+  }
+ ]
+}
