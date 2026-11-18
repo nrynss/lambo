@@ -29,6 +29,14 @@
   `RecallResult` or `ContractCalibration` literal must add the new fields;
   the new `TopLegs`, `ProvisionalConfidence` and `LayerTopLegs` are
   `#[non_exhaustive]` and built by recall only.
+- A dependency question whose traversal answer was predicted but declined
+  because a write changed the graph in between (its anchor lost its last
+  dependent, or was renamed or retired) used to fall through to a blended
+  recall with no vector leg and no sign of it. It now carries the
+  `vector_degraded` annotation and warning, `recall: a concurrent write
+  changed the graph after a dependency-question dispatch was planned, and the
+  dispatch did not fire; vector leg skipped, results are keyword-only`, when a
+  vector leg would have run. Ranking is unchanged.
 - Each built-in calibration row records the corpus size its recall constants
   were measured on (`ContractCalibration::measured_corpus_concepts`: 100, the
   #190 set), and the BGE-M3 reference records the 12-concept layer its 0.50

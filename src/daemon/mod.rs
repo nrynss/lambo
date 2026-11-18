@@ -708,7 +708,10 @@ impl Daemon {
         // does the query resolve an anchor WITH structural dependents? Only then
         // can the (async, vector-I/O) gather be skipped (T9-R1-3); a structural
         // phrasing that does not dispatch falls through to the FULL blend below,
-        // never a degraded keyword-only answer.
+        // never a degraded keyword-only answer. The one exception is a write
+        // landing between this check and the graph lock below, which can make
+        // a predicted dispatch decline after the gather was skipped; that
+        // answer is keyword-only and says so (see after the dispatch).
         //
         // #171: the anchor is resolved here once, stamped with the epoch, and
         // reused by the dispatch and the subject text below unless a write
@@ -736,7 +739,8 @@ impl Daemon {
         // competes only with BM25 and keeps its BGE-M3 value. The table was
         // measured on text queries, so a recall by an image or a client
         // vector (its recent leg runs only beside text) keeps it too.
-        let recent_score = if vectors.available() && route == Route::Text {
+        let vector_capable = vectors.available();
+        let recent_score = if vector_capable && route == Route::Text {
             crate::embed::calibration::recent_score(self.calibration, embedding.map(|(_, c)| c))
         } else {
             candidates::RECENT_SCORE
@@ -828,6 +832,23 @@ impl Daemon {
             )
         {
             return Ok(result);
+        }
+        // The lock-free pre-check above predicted this dispatch and skipped
+        // the vector gather, but a write that landed before the graph lock
+        // (the anchor's dependents removed, the anchor renamed or retired)
+        // made it decline: the recall falls through to the blend with no
+        // vector input. Ranking stays as it is (fail closed, as for every
+        // other lost vector leg), but the caller hears the leg was skipped,
+        // the same way: a `vector_degraded` annotation and its warning line.
+        // Only when the leg would have run (a query embedding and a store
+        // that searches vectors); otherwise nothing was lost.
+        if dispatch_ready && vector_capable && embedding.is_some() {
+            vector_leg_refused.push(Annotation::new(
+                AnnotationKind::VectorDegraded,
+                "recall: a concurrent write changed the graph after a dependency-question \
+                 dispatch was planned, and the dispatch did not fire; vector leg skipped, \
+                 results are keyword-only",
+            ));
         }
 
         let scores = self.scores.read().clone();
