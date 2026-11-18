@@ -29,22 +29,22 @@ These files hold aggregates only, with no memory content and no local paths.
 |---|---:|---:|---|
 | Replay of 330 real writes | 330 applied | 330 applied | PASS, 0 unexpected, matching final store counts |
 | Top-8 recall on the 20 A/B queries | | | identical on all 20 (Jaccard 1.0) |
-| Sequential recall p50 / p99 | 1.99 / 22.88 ms | 2.00 / 22.62 ms | same |
-| Sequential `lambo_stats` p50 | 0.44 ms | 0.39 ms | same |
-| Sequential derive ack p50 / p90 | 0.50 / 0.58 ms | 0.50 / 0.58 ms | same |
-| Sequential derive applied p50 / p90 | 25.49 / 26.05 ms | 25.42 / 26.05 ms | same |
-| 8 agents: writes failed | 0 / 546 | 0 / 544 | same |
+| Sequential recall p50 / p99 | 1.99 / 22.88 ms | 2.00 / 22.62 ms | within 0.3 ms, one run |
+| Sequential `lambo_stats` p50 | 0.44 ms | 0.39 ms | within 0.05 ms, one run |
+| Sequential derive ack p50 / p90 | 0.50 / 0.58 ms | 0.50 / 0.58 ms | equal, one run |
+| Sequential derive applied p50 / p90 | 25.49 / 26.05 ms | 25.42 / 26.05 ms | within 0.1 ms, one run |
+| 8 agents: writes failed | 0 / 546 | 0 / 544 | none failed on either |
 | 8 agents: recall p50 / p99 | 9.38 / 38.63 ms | 10.20 / 39.38 ms | close, one run each |
 | 8 agents: derive ack p50 | 2.04 ms | 2.38 ms | close, one run each |
 | 8 agents: apply p50 / p90 (server) | 49 / 62 ms | 52 / 66 ms | close, one run each |
-| 16 agents: writes acked / failed | 2,129 / 0 | 2,128 / 0 | same |
-| 16 agents: recall p50 / p99 | 5.74 / 30.73 ms | 5.65 / 24.51 ms | same |
-| 16 agents: derive ack p50 | 0.77 ms | 0.79 ms | same |
-| 16 agents: apply p50 / p90 (server) | 61 / 119 ms | 56 / 118 ms | same |
+| 16 agents: writes acked / failed | 2,129 / 0 | 2,128 / 0 | none failed on either |
+| 16 agents: recall p50 / p99 | 5.74 / 30.73 ms | 5.65 / 24.51 ms | close at p50, 0.12.0 lower at p99, one run each |
+| 16 agents: derive ack p50 | 0.77 ms | 0.79 ms | close, one run each |
+| 16 agents: apply p50 / p90 (server) | 61 / 119 ms | 56 / 118 ms | close, one run each |
 | `names migrate` preview, 8 sessions | | 0 changes in each | provision-only upgrade |
 
-**No regression was found, and no speed-up either.** The sequential A/B
-figures are equal on both builds. The concurrency figures are close, with
+**These runs show no regression and no speed-up.** The sequential A/B
+figures of the two builds are within 0.3 ms of each other. The concurrency figures are close, with
 0.12.0 a few percent slower at 8 agents (derive ack p50 2.04 against
 2.38 ms) and level or slightly faster at 16. Every cell is one run, so
 these runs do not establish whether a difference of that size is noise.
@@ -145,7 +145,8 @@ Findings:
   7 to 9 ms with no pause).
 - **The window grew with session size**, on two sizes. Two points do not
   give a scaling law.
-- **The window is the same on 0.8.0 and 0.12.0.** The write-queue lock paths
+- **The window measured about the same on 0.8.0 and 0.12.0** (13.68 and
+  14.27 ms with no pause, one run each). The write-queue lock paths
   are also unchanged between the tags: the `src/writeq` diff adds the names
   payload variants and a legacy-pin refresh, and nothing that changes when
   the graph lock is held.
@@ -177,7 +178,7 @@ What supports it:
   39.2 ms on 0.12.0 at p50, against 73.67 and 44.74 for applied itself.
   0.8.0 was listed first.
 - The lock path did not change between the tags, and on this rig the two
-  builds are indistinguishable with and without the window.
+  builds measured alike with and without the window, in one run each.
 - 0.8.0's own ack p50 has moved between CUDA gates with its partner and
   position: 15.5 ms (second, against 0.6.0), 20.1 ms (second, against
   0.7.0), 28.57 ms (first, against 0.12.0).
