@@ -132,13 +132,22 @@ fn provision_on_a_fresh_sqlite_file_makes_recall_work() {
     assert_eq!(lines.len(), 1, "one score line on stderr: {stderr}");
     let scores: serde_json::Value = serde_json::from_str(lines[0]).expect("a JSON object");
     let top = scores["top_legs"].as_object().expect("top_legs");
-    assert!(top.contains_key("bm25") && top.contains_key("vector_cosine"));
+    let mut keys: Vec<&str> = top.keys().map(String::as_str).collect();
+    keys.sort();
+    assert_eq!(keys, ["bm25", "exact_name_match", "vector_cosine"]);
     assert!(
         top["bm25"].as_f64().is_some_and(|s| s > 0.0),
         "the keyword leg matched: {scores}"
     );
-    if let Some(confidence) = scores.get("confidence") {
-        assert_eq!(confidence["provisional"], serde_json::json!(true));
-        assert!(confidence["basis"].is_string());
-    }
+    assert_eq!(top["exact_name_match"], serde_json::json!(false));
+    // SQLite searches vectors and the derive embedded the concept, so the
+    // vector leg ran too. The fixture contract has no measured null median,
+    // so the two-leg value is absent rather than guessed, and the
+    // keyword-only one does not stand in for it.
+    assert!(
+        top["vector_cosine"].as_f64().is_some(),
+        "the vector leg ran: {scores}"
+    );
+    assert!(scores.get("confidence").is_none(), "{scores}");
+    assert_eq!(scores.as_object().map(|m| m.len()), Some(1), "{scores}");
 }

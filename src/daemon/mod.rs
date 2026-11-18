@@ -846,8 +846,11 @@ impl Daemon {
             // P2-6: without an index, the independently gathered recent and
             // vector legs still yield candidates (only lexical lookup is lost).
             let recent = route.recent_leg(&query.query);
-            let (phase1, legs) = match index {
-                Some(index) => candidates::candidates_with_legs_as(
+            // #256: `keyword` is what the keyword leg itself found (its raw
+            // best BM25, before an exact-name match's 1.0, and whether one
+            // happened); with no index the leg did not run.
+            let (phase1, legs, keyword) = match index {
+                Some(index) => candidates::candidates_with_keyword_leg_as(
                     graph,
                     index,
                     input,
@@ -855,13 +858,14 @@ impl Daemon {
                     query.top_k,
                     recent,
                 ),
-                None => candidates::candidates_without_keyword_with_legs_as(graph, input, recent),
+                None => {
+                    let (phase1, legs) =
+                        candidates::candidates_without_keyword_with_legs_as(graph, input, recent);
+                    (phase1, legs, candidates::KeywordLeg::default())
+                }
             };
             let expanded = expand::expand(graph, phase1.clone(), query.traversal_depth);
-            // #256: the keyword leg ran when a text query searched an index;
-            // it then reports 0.0 for "matched nothing".
-            let keyword_ran = index.is_some() && !query.query.trim().is_empty();
-            let top = crate::recall::confidence::top_legs(&legs, keyword_ran);
+            let top = crate::recall::confidence::top_legs(graph, &legs, keyword);
             RecallPipeline {
                 phase1,
                 legs,
@@ -943,16 +947,21 @@ impl Daemon {
             .collect();
         // #256: the best per-leg scores over EVERY phase-1 candidate (not
         // only the returned hits above), and the provisional combined value.
-        // A report only: assembly has already ranked and cut. The combined
-        // value needs a text query's own embedding under a contract with a
-        // measured null median (the medians were measured on text queries),
-        // so a recall by image or vector, and a layer's side of a layered
-        // recall, report their legs alone.
+        // A report only: assembly has already ranked and cut. Only a text
+        // recall of the caller's own session gets a combined value (the null
+        // medians were measured on text queries, and a layer is another
+        // store), so a recall by image or vector, and a layer's side of a
+        // layered recall, report their legs alone. With both legs it is the
+        // two-leg basis at the contract's null median (absent without one);
+        // with the keyword leg alone (no vector search, a failed embed or
+        // vector read, no embedded concept) the keyword-only basis.
         result.top_legs = pipeline.top;
-        result.confidence = match (route, embedding) {
-            (Route::Text, Some((_, contract))) => crate::recall::confidence::provisional(
+        result.confidence = match route {
+            Route::Text => crate::recall::confidence::provisional(
                 pipeline.top,
-                crate::embed::calibration::null_median_cosine(self.calibration, contract),
+                embedding.and_then(|(_, contract)| {
+                    crate::embed::calibration::null_median_cosine(self.calibration, contract)
+                }),
             ),
             _ => None,
         };

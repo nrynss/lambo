@@ -139,14 +139,13 @@ async fn a_layered_recall_merges_both_sessions_and_names_every_hits_session() {
     general.mem.close().await.expect("close");
 }
 
-/// An unlayered session's answer has 0.5.0's shape: no `session` on any
-/// hit, the same three structured keys and six hit keys (plus #256's
-/// additive `top_legs`), and `get_info` unchanged; a layered session's
-/// `get_info` only appends.
-/// `payload` without the keys #256 added to `lambo_recall`'s structured
-/// content, after checking the one that is always there. What is left is
-/// what the answer was before #256.
-fn without_256(payload: &serde_json::Value) -> serde_json::Value {
+/// `payload` (an UNLAYERED session's `lambo_recall` structured content)
+/// without the keys #256 added, after pinning them: `top_legs` is always
+/// there with its three keys; `confidence` is there with exactly the
+/// `basis` given, or absent when `basis` is `None`; `layer_top_legs` is
+/// never there (no layer answered). What is left is what the answer was
+/// before #256.
+fn without_256(payload: &serde_json::Value, basis: Option<&str>) -> serde_json::Value {
     let mut map = payload.as_object().expect("object").clone();
     let top = map.remove("top_legs").expect("top_legs is always present");
     let mut legs: Vec<&str> = top
@@ -156,12 +155,27 @@ fn without_256(payload: &serde_json::Value) -> serde_json::Value {
         .map(String::as_str)
         .collect();
     legs.sort();
-    assert_eq!(legs, ["bm25", "vector_cosine"]);
-    map.remove("confidence");
-    map.remove("layer_top_legs");
+    assert_eq!(legs, ["bm25", "exact_name_match", "vector_cosine"]);
+    match (map.remove("confidence"), basis) {
+        (None, None) => {}
+        (Some(c), Some(basis)) => {
+            assert_eq!(c["basis"], json!(basis), "{c}");
+            assert_eq!(c["provisional"], json!(true), "{c}");
+        }
+        (got, want) => panic!("confidence {got:?}, expected basis {want:?}"),
+    }
+    assert!(
+        map.remove("layer_top_legs").is_none(),
+        "an unlayered answer has no layer_top_legs"
+    );
     serde_json::Value::Object(map)
 }
 
+/// An unlayered session's answer has 0.5.0's shape: no `session` on any
+/// hit, the same three structured keys and six hit keys (plus #256's
+/// additive `top_legs` and, since this store runs no vector leg, the
+/// keyword-only `confidence`), and `get_info` unchanged; a layered
+/// session's `get_info` only appends.
 #[tokio::test]
 async fn an_unlayered_session_keeps_the_0_5_0_shape() {
     let plain = server("plain-proj").await;
@@ -175,9 +189,19 @@ async fn an_unlayered_session_keeps_the_0_5_0_shape() {
         .map(String::as_str)
         .collect();
     keys.sort();
-    // #256: `top_legs` is the one additive key (`confidence` is absent
-    // here: this server's store runs no vector leg).
-    assert_eq!(keys, ["context", "hits", "top_legs", "warnings"]);
+    // #256: `top_legs` and `confidence` are the additive keys (the
+    // keyword-only basis: this server's store runs no vector leg), and an
+    // unlayered answer has no `layer_top_legs`.
+    assert_eq!(
+        keys,
+        ["confidence", "context", "hits", "top_legs", "warnings"]
+    );
+    assert_eq!(
+        without_256(payload, Some("keyword-only-v0"))
+            .as_object()
+            .map(|m| m.len()),
+        Some(3)
+    );
     let hits = payload["hits"].as_array().expect("hits");
     assert!(!hits.is_empty());
     for hit in hits {
@@ -541,9 +565,9 @@ async fn an_unlayered_recall_is_byte_identical_to_the_0_5_0_body() {
             })
             .await;
         // #256: the 0.5.0 keys are byte-identical; the answer only gained
-        // `top_legs`.
+        // `top_legs` and the keyword-only `confidence` (no vector leg here).
         assert_eq!(
-            serde_json::to_string(&without_256(structured(&out))).unwrap(),
+            serde_json::to_string(&without_256(structured(&out), Some("keyword-only-v0"))).unwrap(),
             serde_json::to_string(&expected).unwrap(),
             "max_tokens {max_tokens}"
         );
@@ -790,9 +814,13 @@ async fn an_unlayered_recall_matches_the_frozen_v0_5_0_projection() {
     );
     assert_eq!(out.content.len(), 2, "content[1] carries the warnings");
     // #256: everything v0.5.0 returned is byte-identical; the structured
-    // content only gained `top_legs`.
+    // content only gained `top_legs` and the keyword-only `confidence` (no
+    // vector leg here).
     let mut out = out;
-    out.structured_content = out.structured_content.as_ref().map(without_256);
+    out.structured_content = out
+        .structured_content
+        .as_ref()
+        .map(|p| without_256(p, Some("keyword-only-v0")));
     assert_eq!(
         serde_json::to_string(&out).unwrap(),
         serde_json::to_string(&frozen).unwrap()

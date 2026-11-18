@@ -267,7 +267,8 @@ fn rows_record_the_corpus_size_their_evidence_measured() {
 /// #256: every row's null median is its own run file's
 /// `retrieval.self.query_to_irrelevant.dev.p50`, and the reference's is the
 /// BGE-M3 reference run's. `null_median_cosine` answers it for a row and for
-/// the reference, and nothing for an uncalibrated contract or under `off`.
+/// the reference (under either mode), and nothing for an uncalibrated
+/// contract or for a measured row under `off`.
 #[test]
 fn null_medians_match_the_committed_runs() {
     let p50 = |text: &str| {
@@ -331,7 +332,12 @@ fn null_medians_match_the_committed_runs() {
         null_median_cosine(CalibrationMode::Builtin, &reference),
         Some(REFERENCE_NULL_MEDIAN_COSINE)
     );
-    assert_eq!(null_median_cosine(CalibrationMode::Off, &reference), None);
+    // `off` means the BGE-M3 reference values, and for the reference
+    // contract its own median is one of them.
+    assert_eq!(
+        null_median_cosine(CalibrationMode::Off, &reference),
+        Some(REFERENCE_NULL_MEDIAN_COSINE)
+    );
     let unmeasured = EmbeddingContract {
         kind: "fixture".into(),
         model: None,

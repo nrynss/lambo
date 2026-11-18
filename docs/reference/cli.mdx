@@ -112,10 +112,12 @@ If the top hit alone is longer than `--max-tokens`, the output shows its text cu
 **Scores on standard error.** Standard output is the context block and nothing else. `lambo recall` also prints one line to standard error, `recall scores: ` followed by a JSON object:
 
 ```text
-recall scores: {"top_legs":{"bm25":1.3097505006899584,"vector_cosine":0.7000000476837158},"confidence":{"value":0.35400198340656197,"basis":"noisy-or-v0","provisional":true}}
+recall scores: {"confidence":{"basis":"noisy-or-v0","provisional":true,"value":0.35400198340656197},"top_legs":{"bm25":1.3097505006899584,"exact_name_match":false,"vector_cosine":0.7000000476837158}}
 ```
 
-`top_legs` is the best score each search leg gave any concept of the session, returned or not; a leg that did not run is `null`. `confidence` is a provisional combination of the two, present only when both legs reported a score under a measured embedding contract, and it may change or be removed in any release. Neither is a probability, neither is comparable across embedding contracts or store sizes, and neither should be used as a fixed threshold. See [`lambo_recall`](/mcp#lambo_recall) for the full description.
+`top_legs` is the best score each search leg gave any concept of the session, returned or not; a leg that did not run is `null`, and `exact_name_match` says the query was a concept's durable name. `confidence` is a provisional combination of the two: `"noisy-or-v0"` when both legs reported a score under a measured embedding contract, `"keyword-only-v0"` when only the keyword leg ran, absent otherwise. It may change or be removed in any release. Neither is a probability, neither is comparable across embedding contracts or store sizes, and neither should be used as a fixed threshold.
+
+What stays stable about the line: it is printed for every successful recall (by text, image or vector), always to standard error and never to standard output, as exactly one line that starts with `recall scores: ` and continues with one JSON object. `top_legs` is always in it, with the keys above; `confidence` follows the provisional rule above; new keys may be added. Standard output is byte-identical to a recall before the line existed. A script that merges the two streams (`2>&1`) sees the line too, so read standard output alone when you want the context block. See [`lambo_recall`](/mcp#lambo_recall) for the full description.
 
 **One session.** `lambo recall` reads the one session `--session` names and never applies `[serve] layers`: it is a reader with no lease, and layers belong to an HTTP serve. To read a layer, name it: `lambo recall --session general`. A layered `lambo_recall` through `lambo serve` is described in [Layered recall](#layered-recall).
 

@@ -1824,13 +1824,24 @@ pub struct RecallResult {
 /// contracts or store sizes, and neither is a fixed bar: the best score an
 /// unrelated query finds rises as a store grows, at a different rate per leg
 /// (#174, #254, `evidence/layer-floor-size/`).
+///
+/// Both maxima are over concepts of the graph the recall answers from. On
+/// a reader (`lambo recall`, the web portal) whose vector read can see a
+/// concept a writer flushed after the reader loaded its snapshot, that
+/// concept is left out here as assembly leaves it out of the hits.
+///
+/// `#[non_exhaustive]`: read its fields; it is built by recall.
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct TopLegs {
-    /// The keyword leg's best score: BM25 (a concept whose durable name is
-    /// exactly the query scores `1.0` in place of its BM25, as its per-hit
-    /// leg score does). `Some(0.0)` when the leg ran and matched nothing;
-    /// `None` when it did not run (no query text, no index, or a dependency
-    /// question answered by traversal).
+    /// The keyword leg's best BM25 score, as the index returned it. A
+    /// concept whose durable name is exactly the query is ranked with a
+    /// keyword score of `1.0` in place of its BM25 (its per-hit leg score
+    /// says so); this field is never that substitute, and
+    /// [`Self::exact_name_match`] says the match happened. `Some(0.0)` when
+    /// the leg ran and matched nothing; `None` when it did not run (no query
+    /// text, no index, or a dependency question answered by traversal), or
+    /// when every score it returned was non-finite.
     #[serde(default)]
     pub bm25: Option<f64>,
     /// The vector leg's best cosine, as the store returned it. `None` when
@@ -1839,6 +1850,12 @@ pub struct TopLegs {
     /// or returned no candidate.
     #[serde(default)]
     pub vector_cosine: Option<f64>,
+    /// The query is exactly the durable name of a concept of this session,
+    /// so the keyword leg scored that concept as an identity match. Direct
+    /// evidence the store holds what was asked for, which no BM25 value
+    /// expresses. `false` when the keyword leg did not run.
+    #[serde(default)]
+    pub exact_name_match: bool,
 }
 
 /// One number combining a recall's [`TopLegs`] (#256). **Provisional**: its
@@ -1847,14 +1864,19 @@ pub struct TopLegs {
 /// that says so, never a bare number.
 ///
 /// `value` is not a probability and is not comparable across embedding
-/// contracts or store sizes. Do not threshold it. Rely on [`TopLegs`].
+/// contracts or store sizes, or across bases. Do not threshold it. Rely on
+/// [`TopLegs`].
+///
+/// `#[non_exhaustive]`: read its fields; it is built by recall.
+#[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ProvisionalConfidence {
     /// The combined value, in `[0, 1]`.
     pub value: f64,
-    /// The named, versioned formula `value` came from
-    /// ([`crate::recall::confidence::BASIS`]). A different basis is a
-    /// different quantity.
+    /// The named, versioned formula `value` came from: `"noisy-or-v0"` when
+    /// both legs reported, `"keyword-only-v0"` when only the keyword leg did
+    /// (see `recall::confidence`). A different basis is a different
+    /// quantity: never compare values across bases.
     pub basis: String,
     /// Always `true` while the value is uncalibrated.
     pub provisional: bool,

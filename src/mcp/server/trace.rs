@@ -148,11 +148,13 @@ pub(super) fn call_auth() -> Option<CallAuth> {
 /// `top_legs` (#256, additive; `v` stays 1) is always present on a recall
 /// line: `bm25` and `vector_cosine`, the best score each phase-1 leg gave any
 /// candidate of the caller's own session, returned or not, each `null` when
-/// that leg did not run. `confidence` (#256, additive) is beside it only
-/// when the provisional combined value could be computed: `{value, basis,
-/// provisional}`. A layered line also carries `layer_top_legs`, one
-/// `{session, bm25, vector_cosine}` per available layer. None of these is a
-/// probability or comparable across embedding contracts or store sizes.
+/// that leg did not run, and `exact_name_match`. `confidence` (#256,
+/// additive) is beside it only when a provisional combined value could be
+/// computed: `{value, basis, provisional}`, `basis` `"noisy-or-v0"` (both
+/// legs) or `"keyword-only-v0"` (the keyword leg alone). A layered line also
+/// carries `layer_top_legs`, one `{session, bm25, vector_cosine,
+/// exact_name_match}` per available layer. None of these is a probability or
+/// comparable across embedding contracts or store sizes.
 ///
 /// # What the five set-level flags mean, and why they are not all computed alike
 ///

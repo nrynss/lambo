@@ -301,22 +301,31 @@ lambo_recall        query (≤2000 chars, then "…[truncated]"), top_k, hit_cou
                     conflict_line, hot_warning, reservation_warning,
                     response_annotations[], warning_count, cold_start,
                     top_legs{}, confidence{} (when computed)
-  top_legs{}        (#256) bm25 / vector_cosine → float or null. The best
-                    score each phase-1 leg gave ANY candidate of the caller's
-                    own session, returned in hits[] or not; null when that leg
-                    did not run (bm25 is 0 when it ran and matched nothing).
-                    Recent leg and expansion not counted. Always present on a
-                    line written since #256. Additive (v stays 1).
-  confidence{}      (#256) value / basis ("noisy-or-v0") / provisional (true).
-                    PROVISIONAL: present only when both legs reported on a
-                    text query under a contract with a measured null median;
-                    may change or disappear without a deprecation cycle.
-                    Neither it nor top_legs is a probability, comparable
-                    across embedding contracts or store sizes, or a fixed
-                    threshold (#174, #254).
+  top_legs{}        (#256) bm25 / vector_cosine → float or null,
+                    exact_name_match → bool. The best score each phase-1
+                    leg gave ANY candidate of the caller's own session,
+                    returned in hits[] or not; null when that leg did not
+                    run (bm25 is 0 when it ran and matched nothing). bm25 is
+                    the index's own BM25, never the 1.0 an exact-name match
+                    ranks with; exact_name_match says the query was a
+                    concept's durable name. Recent leg and expansion not
+                    counted. Always present on a line written since #256.
+                    Additive (v stays 1).
+  confidence{}      (#256) value / basis / provisional (true). PROVISIONAL.
+                    basis "noisy-or-v0": both legs reported on a text query
+                    under a contract with a measured pairwise null median.
+                    basis "keyword-only-v0": the keyword leg ran and the
+                    vector leg did not (no vector search, failed embed or
+                    vector read); value = bm25 / (bm25 + 5). Never compare
+                    values of different bases. Absent otherwise. May change
+                    or disappear without a deprecation cycle. Neither it nor
+                    top_legs is a probability, comparable across embedding
+                    contracts or store sizes, or a fixed threshold (#174,
+                    #254).
   layer_top_legs[]  (#256) layered session only: session, bm25,
-                    vector_cosine per layer that answered. Never blended
-                    into top_legs.
+                    vector_cosine, exact_name_match per layer that answered
+                    (both scores null for a layer that answered by
+                    traversal). Never blended into top_legs.
   cold_start        (#79) true when assembly ranked the recall in cold mode:
                     a fresh concept the daemon had not scored yet would be
                     shown, so every hit's score is w_query × q with no daemon

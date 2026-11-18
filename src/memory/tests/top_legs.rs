@@ -3,11 +3,11 @@
 //! or not), the combined value is absent rather than guessed, and a layered
 //! recall reports the caller's own session's values, never a layer's.
 
-use super::layered::{eg2_contract, eg2_seeded, seeded, seeded_vectors};
+use super::layered::{eg2_contract, eg2_seeded, seeded, seeded_vectors, slow_session};
 use super::*;
 use crate::embed::calibration::CalibrationMode::{Builtin, Off};
 use crate::memory::LayerRef;
-use crate::recall::confidence::{noisy_or, BASIS};
+use crate::recall::confidence::{noisy_or, BASIS, KEYWORD_ONLY_BASIS};
 use crate::recall::detail::DetailedRecall;
 use crate::recall::layered::LayerTopLegs;
 use crate::recall::query_vector::QueryBy;
@@ -39,6 +39,7 @@ fn best_returned(r: &DetailedRecall) -> TopLegs {
     TopLegs {
         bm25: best(|l| l.keyword),
         vector_cosine: best(|l| l.vector),
+        exact_name_match: false,
     }
 }
 
@@ -95,6 +96,7 @@ async fn top_legs_are_the_maxima_over_candidates_the_recall_did_not_return() {
     let expected = TopLegs {
         bm25: Some(bm25),
         vector_cosine: Some(cosine),
+        exact_name_match: false,
     };
     assert_eq!(wide.top_legs, expected);
     assert_eq!(best_returned(&wide), expected, "premise: nothing was cut");
@@ -133,9 +135,10 @@ async fn top_legs_are_the_maxima_over_candidates_the_recall_did_not_return() {
 
 /// The recent leg is not a top leg: a query that matches nothing still
 /// returns the session's recent concepts, and reports a keyword leg that ran
-/// and matched nothing, no cosine and no confidence.
+/// and matched nothing and no cosine. With no vector leg the confidence is
+/// the keyword-only basis (#256's acceptance), `S / (S + 5)`.
 #[tokio::test]
-async fn a_keyword_only_recall_reports_the_keyword_leg_and_no_confidence() {
+async fn a_keyword_only_recall_reports_the_keyword_leg_and_a_keyword_only_confidence() {
     let mem = seeded(
         "top-legs-keyword",
         &[
@@ -145,10 +148,12 @@ async fn a_keyword_only_recall_reports_the_keyword_leg_and_no_confidence() {
     )
     .await;
     let r = mem.recall_detailed(query(QUERY)).await.unwrap();
-    assert!(r.top_legs.bm25.is_some_and(|s| s > 0.0), "{:?}", r.top_legs);
+    let bm25 = r.top_legs.bm25.expect("the keyword leg ran");
+    assert!(bm25 > 0.0, "{:?}", r.top_legs);
     assert_eq!(r.top_legs.bm25, best_returned(&r).bm25);
     assert_eq!(r.top_legs.vector_cosine, None, "no vector search");
-    assert_eq!(r.confidence, None, "one leg is not the two-leg basis");
+    assert!(!r.top_legs.exact_name_match);
+    assert_keyword_only(&r, bm25);
 
     let none = mem.recall_detailed(query("qqqq wwww")).await.unwrap();
     assert!(
@@ -161,14 +166,25 @@ async fn a_keyword_only_recall_reports_the_keyword_leg_and_no_confidence() {
         TopLegs {
             bm25: Some(0.0),
             vector_cosine: None,
+            exact_name_match: false,
         }
     );
-    assert_eq!(none.confidence, None);
+    assert_keyword_only(&none, 0.0);
     mem.close().await.unwrap();
 }
 
+/// `r`'s confidence is the keyword-only basis at keyword score `bm25`.
+fn assert_keyword_only(r: &DetailedRecall, bm25: f64) {
+    let c = r.confidence.clone().expect("the keyword leg ran");
+    assert_eq!(c.basis, KEYWORD_ONLY_BASIS);
+    assert_eq!(c.basis, "keyword-only-v0");
+    assert!(c.provisional);
+    assert_eq!(c.value, bm25 / (bm25 + 5.0), "{c:?}");
+}
+
 /// Both legs run, but no null median applies: the per-leg scores are
-/// reported and the combined value is absent, never guessed.
+/// reported and the two-leg value is absent, never guessed (nor replaced by
+/// the keyword-only one, which is for a recall with no vector leg).
 #[tokio::test]
 async fn the_confidence_is_absent_without_a_measured_null_median() {
     // A contract with no calibration row.
@@ -187,7 +203,7 @@ async fn the_confidence_is_absent_without_a_measured_null_median() {
     assert_eq!(r.confidence, None);
     unmeasured.close().await.unwrap();
 
-    // A measured contract with the built-in rows switched off.
+    // A measured (non-reference) contract with the built-in rows off.
     let off = two_leg_session("top-legs-off", Off).await;
     let r = off.recall_detailed(query(QUERY)).await.unwrap();
     assert!(r.top_legs.bm25.is_some() && r.top_legs.vector_cosine.is_some());
@@ -197,25 +213,347 @@ async fn the_confidence_is_absent_without_a_measured_null_median() {
     // A recall by a client vector: the medians were measured on text
     // queries, so the legs are reported alone.
     let on = two_leg_session("top-legs-by-vector", Builtin).await;
-    let values = FixtureEmbedder::with_dimensions(eg2_contract().dim)
-        .unwrap()
-        .embed_sync(QUERY);
-    let r = on
-        .recall_by_detailed(
-            query(QUERY),
+    let by_vector = |text: &str| {
+        let values = FixtureEmbedder::with_dimensions(eg2_contract().dim)
+            .unwrap()
+            .embed_sync(QUERY);
+        (
+            query(text),
             QueryBy::Vector {
                 values,
                 declared: eg2_contract(),
             },
         )
-        .await
-        .unwrap();
+    };
+    let (q, by) = by_vector(QUERY);
+    let r = on.recall_by_detailed(q, by).await.unwrap();
+    assert!(r
+        .top_legs
+        .vector_cosine
+        .is_some_and(|c| (c - 0.70).abs() < 1e-4));
+    assert!(r.top_legs.bm25.is_some_and(|s| s > 0.0));
+    assert_eq!(r.confidence, None);
+    // With no text, the keyword leg does not run: `bm25` is null.
+    let (q, by) = by_vector("");
+    let r = on.recall_by_detailed(q, by).await.unwrap();
+    assert_eq!(r.top_legs.bm25, None, "{:?}", r.top_legs);
+    assert!(!r.top_legs.exact_name_match);
     assert!(r
         .top_legs
         .vector_cosine
         .is_some_and(|c| (c - 0.70).abs() < 1e-4));
     assert_eq!(r.confidence, None);
     on.close().await.unwrap();
+}
+
+/// A session under the BGE-M3 reference contract (`bge_m3`, server default
+/// model, 1024 dims) whose store searches vectors, under `calibration`.
+async fn bge_session(
+    session: &str,
+    calibration: crate::embed::calibration::CalibrationMode,
+) -> Memory {
+    let contract = EmbeddingContract {
+        kind: "bge_m3".into(),
+        model: None,
+        dim: 1024,
+    };
+    assert!(crate::embed::calibration::is_reference(&contract));
+    let mem = Memory::builder()
+        .session(session)
+        .agent("agent-a")
+        .config(crate::config::Config {
+            daemon_tick_interval: Duration::from_secs(3_600),
+            calibration,
+            ..crate::config::Config::default()
+        })
+        .flush_interval(Duration::from_secs(3_600))
+        .store(std::sync::Arc::new(crate::test_util::GraphRanked(
+            crate::test_util::VectorSearchable(std::sync::Arc::new(MemoryStore::new())),
+        )) as std::sync::Arc<dyn GraphStore>)
+        .embedder(
+            std::sync::Arc::new(FixtureEmbedder::with_dimensions(contract.dim).unwrap())
+                as std::sync::Arc<dyn crate::embed::Embedder>,
+        )
+        .embedding_contract(contract)
+        .build()
+        .await
+        .expect("build");
+    mem.derive(
+        &[
+            (KEYWORD_HIT, ConceptType::Logic),
+            (VECTOR_HIT, ConceptType::Observation),
+        ],
+        &ParentOf::none(),
+    )
+    .await
+    .unwrap();
+    mem.settle_daemon().await;
+    crate::test_util::seed_layer_match(&mem, VECTOR_HIT, QUERY).await;
+    mem
+}
+
+/// The BGE-M3 reference contract has a measured null median, end to end,
+/// and keeps it under `calibration = "off"`, which means "the BGE-M3
+/// reference values": for the reference contract, its own.
+#[tokio::test]
+async fn the_reference_contract_reports_the_two_leg_value_in_either_mode() {
+    for (session, mode) in [("top-legs-bge", Builtin), ("top-legs-bge-off", Off)] {
+        let mem = bge_session(session, mode).await;
+        let r = mem.recall_detailed(query(QUERY)).await.unwrap();
+        let bm25 = r.top_legs.bm25.expect("keyword leg");
+        let cosine = r.top_legs.vector_cosine.expect("vector leg");
+        assert!((cosine - 0.70).abs() < 1e-4, "{cosine}");
+        let c = r.confidence.clone().expect("a measured median");
+        assert_eq!(c.basis, BASIS, "{mode:?}");
+        assert_eq!(
+            Some(c.value),
+            noisy_or(
+                bm25,
+                cosine,
+                crate::embed::calibration::REFERENCE_NULL_MEDIAN_COSINE
+            ),
+            "{mode:?}"
+        );
+        mem.close().await.unwrap();
+    }
+}
+
+/// A query that is exactly a concept's durable name ranks that concept with
+/// a keyword score of 1.0 (unchanged, per hit). `top_legs.bm25` is the
+/// index's own best BM25, never that sentinel, whether the real score is
+/// above every other match or (in a store where the word is everywhere)
+/// below 1.0; `exact_name_match` reports the name.
+#[tokio::test]
+async fn an_exact_name_query_reports_the_raw_bm25_and_the_match() {
+    let raw_best = |mem: &Memory, q: &str| {
+        let cap = query(q).top_k * crate::recall::candidates::KEYWORD_OVERFETCH;
+        mem.index
+            .read()
+            .search(q, cap)
+            .into_iter()
+            .map(|s| s.score)
+            .reduce(f64::max)
+            .expect("the query matches")
+    };
+
+    // The named concept's real BM25 is the best match: the old fold took
+    // the runner-up, since the named one's slot held 1.0.
+    let mem = seeded(
+        "top-legs-name",
+        &[
+            (KEYWORD_HIT, ConceptType::Logic),
+            ("auth middleware", ConceptType::Entity),
+            ("tokens expire", ConceptType::Entity),
+        ],
+    )
+    .await;
+    let target = mem
+        .recall_detailed(query(KEYWORD_HIT))
+        .await
+        .unwrap()
+        .hits
+        .iter()
+        .find(|h| h.content == KEYWORD_HIT)
+        .expect("seeded")
+        .node_id;
+    mem.declare_name("auth tokens rotate", target).unwrap();
+    mem.settle_daemon().await;
+    let named = mem
+        .recall_detailed(query("auth tokens rotate"))
+        .await
+        .unwrap();
+    assert_eq!(
+        named.legs.get(&target).and_then(|l| l.keyword),
+        Some(1.0),
+        "premise: the per-hit keyword leg is the exact-name sentinel, unchanged"
+    );
+    let best = raw_best(&mem, "auth tokens rotate");
+    let runner_up = named
+        .legs
+        .iter()
+        .filter(|(id, _)| **id != target)
+        .filter_map(|(_, l)| l.keyword)
+        .reduce(f64::max)
+        .expect("another concept matched");
+    assert!(best > runner_up, "premise: {best} > {runner_up}");
+    assert_eq!(named.top_legs.bm25, Some(best));
+    assert!(named.top_legs.exact_name_match);
+    // A word no concept holds adds nothing to BM25, and names nothing.
+    let reordered = mem
+        .recall_detailed(query("auth tokens rotate qqqq"))
+        .await
+        .unwrap();
+    assert_eq!(reordered.top_legs.bm25, Some(best));
+    assert!(!reordered.top_legs.exact_name_match);
+    // The combined value takes the raw score as well.
+    assert_keyword_only(&named, best);
+    mem.close().await.unwrap();
+
+    // Every concept holds the word, so its BM25 is small: the sentinel
+    // would have been reported as a keyword score no concept had.
+    let mem = seeded(
+        "top-legs-name-small",
+        &[
+            ("alpha one", ConceptType::Entity),
+            ("alpha two", ConceptType::Entity),
+            ("alpha three", ConceptType::Entity),
+            ("alpha four", ConceptType::Entity),
+        ],
+    )
+    .await;
+    let target = mem
+        .recall_detailed(query("alpha one"))
+        .await
+        .unwrap()
+        .hits
+        .iter()
+        .find(|h| h.content == "alpha one")
+        .expect("seeded")
+        .node_id;
+    mem.declare_name("alpha", target).unwrap();
+    mem.settle_daemon().await;
+    let named = mem.recall_detailed(query("alpha")).await.unwrap();
+    let best = raw_best(&mem, "alpha");
+    assert!(
+        best < 1.0,
+        "premise: every BM25 is under the sentinel: {best}"
+    );
+    assert_eq!(named.top_legs.bm25, Some(best));
+    assert!(named.top_legs.exact_name_match);
+    assert_keyword_only(&named, best);
+    mem.close().await.unwrap();
+}
+
+/// A dependency question answered by graph traversal runs no leg: both
+/// legs are null, no name matched, and there is no confidence.
+#[tokio::test]
+async fn a_dispatched_dependency_question_reports_no_leg() {
+    let mem = slow_session(
+        std::sync::Arc::new(MemoryStore::new()),
+        "top-legs-dispatch",
+        "fixture",
+    )
+    .await;
+    mem.derive(
+        &[
+            ("weekly token rotation ruling", ConceptType::Constraint),
+            ("rotated the prod tokens", ConceptType::Resource),
+        ],
+        &ParentOf::from_pairs(&[("weekly token rotation ruling", "rotated the prod tokens")]),
+    )
+    .await
+    .unwrap();
+    mem.settle_daemon().await;
+    let r = mem
+        .recall_detailed(RecallQuery {
+            traversal_depth: 1,
+            ..query("what depends on weekly token rotation ruling")
+        })
+        .await
+        .unwrap();
+    assert!(
+        r.response_annotations
+            .iter()
+            .any(|a| a.kind == crate::recall::detail::AnnotationKind::Traversal),
+        "premise: dispatched: {:?}",
+        r.response_annotations
+    );
+    assert_eq!(r.top_legs, TopLegs::default());
+    assert_eq!(r.confidence, None);
+    mem.close().await.unwrap();
+}
+
+/// Embeds documents, and refuses every query embed.
+#[derive(Debug)]
+struct QueryEmbedFails(FixtureEmbedder);
+
+#[async_trait]
+impl crate::embed::Embedder for QueryEmbedFails {
+    fn dimensions(&self) -> usize {
+        self.0.dimensions()
+    }
+    async fn embed(&self, text: &str) -> Result<Vec<f32>, crate::embed::EmbedError> {
+        self.0.embed(text).await
+    }
+    async fn embed_query(&self, _text: &str) -> Result<Vec<f32>, crate::embed::EmbedError> {
+        Err(crate::embed::EmbedError::Unavailable(
+            "simulated embedder outage".into(),
+        ))
+    }
+}
+
+/// A degraded recall (the query embed failed, or the store's vector read
+/// failed) has a null cosine, says why in a warning, and reports the
+/// keyword-only confidence.
+#[tokio::test]
+async fn a_degraded_vector_leg_reports_a_null_cosine_and_a_keyword_only_confidence() {
+    // The query embed fails.
+    let mem = Memory::builder()
+        .session("top-legs-embed-fails")
+        .agent("agent-a")
+        .store(std::sync::Arc::new(crate::test_util::GraphRanked(
+            crate::test_util::VectorSearchable(std::sync::Arc::new(MemoryStore::new())),
+        )) as std::sync::Arc<dyn GraphStore>)
+        .embedder(std::sync::Arc::new(QueryEmbedFails(FixtureEmbedder::new()))
+            as std::sync::Arc<dyn crate::embed::Embedder>)
+        .embedding_contract(contract("fixture", 1024))
+        .build()
+        .await
+        .expect("build");
+    mem.derive(&[(KEYWORD_HIT, ConceptType::Logic)], &ParentOf::none())
+        .await
+        .unwrap();
+    mem.settle_daemon().await;
+    let r = mem.recall_detailed(query(QUERY)).await.unwrap();
+    assert!(
+        r.warnings
+            .iter()
+            .any(|w| w.contains("query embedding failed")),
+        "{:?}",
+        r.warnings
+    );
+    assert_eq!(r.top_legs.vector_cosine, None);
+    let bm25 = r.top_legs.bm25.expect("the keyword leg ran");
+    assert!(bm25 > 0.0);
+    assert_keyword_only(&r, bm25);
+    mem.close().await.unwrap();
+
+    // The store's vector read fails.
+    let store = std::sync::Arc::new(super::writes::VectorSearchStore::new(std::sync::Arc::new(
+        MemoryStore::new(),
+    )));
+    let mem = Memory::builder()
+        .session("top-legs-read-fails")
+        .agent("agent-a")
+        .store(store.clone() as std::sync::Arc<dyn GraphStore>)
+        .embedder(std::sync::Arc::new(FixtureEmbedder::new())
+            as std::sync::Arc<dyn crate::embed::Embedder>)
+        .embedding_contract(contract("fixture", 1024))
+        .build()
+        .await
+        .expect("build");
+    mem.derive(&[(KEYWORD_HIT, ConceptType::Logic)], &ParentOf::none())
+        .await
+        .unwrap();
+    mem.settle_daemon().await;
+    store.fail_vector_reads();
+    let r = mem.recall_detailed(query(QUERY)).await.unwrap();
+    assert!(
+        r.warnings
+            .iter()
+            .any(|w| w.contains("vector read failed (detail logged)")),
+        "{:?}",
+        r.warnings
+    );
+    assert!(r
+        .response_annotations
+        .iter()
+        .any(|a| a.kind == crate::recall::detail::AnnotationKind::VectorDegraded));
+    assert_eq!(r.top_legs.vector_cosine, None);
+    let bm25 = r.top_legs.bm25.expect("the keyword leg ran");
+    assert!(bm25 > 0.0);
+    assert_keyword_only(&r, bm25);
+    mem.close().await.unwrap();
 }
 
 /// A layered recall's primary values are the caller's own session's. The
@@ -292,6 +630,75 @@ async fn a_layered_recall_reports_the_callers_own_top_legs() {
     assert_eq!(plain.top_legs, own.top_legs);
     assert!(plain.layer_top_legs.is_empty());
 
+    project.close().await.unwrap();
+    general.close().await.unwrap();
+}
+
+/// A layer that is unavailable has no `layer_top_legs` entry; one that
+/// answered a dependency question by traversal has one, with both legs
+/// null (it ran none). The primary values stay the caller's own.
+#[tokio::test]
+async fn layer_top_legs_skip_an_unavailable_layer_and_report_a_traversal() {
+    let project = seeded(
+        "top-legs-lp",
+        &[("auth middleware checks tokens", ConceptType::Entity)],
+    )
+    .await;
+
+    let closed = seeded("top-legs-closed", &[("auth closed", ConceptType::Entity)]).await;
+    closed.close().await.unwrap();
+    let own = project.recall_detailed(query(QUERY)).await.unwrap();
+    let r = project
+        .recall_layered(&[LayerRef::new(&closed)], query(QUERY))
+        .await
+        .unwrap();
+    assert_eq!(r.unavailable_layers, [closed.session().clone()]);
+    assert!(r.layer_top_legs.is_empty(), "{:?}", r.layer_top_legs);
+    assert_eq!(r.top_legs, own.top_legs);
+    assert_eq!(r.confidence, own.confidence);
+
+    let general = slow_session(
+        std::sync::Arc::new(MemoryStore::new()),
+        "top-legs-lg",
+        "fixture",
+    )
+    .await;
+    general
+        .derive(
+            &[
+                ("weekly token rotation ruling", ConceptType::Constraint),
+                ("rotated the prod tokens", ConceptType::Resource),
+            ],
+            &ParentOf::from_pairs(&[("weekly token rotation ruling", "rotated the prod tokens")]),
+        )
+        .await
+        .unwrap();
+    general.settle_daemon().await;
+    let q = RecallQuery {
+        traversal_depth: 1,
+        ..query("what depends on weekly token rotation ruling")
+    };
+    let own = project.recall_detailed(q.clone()).await.unwrap();
+    let r = project
+        .recall_layered(&[LayerRef::new(&general)], q)
+        .await
+        .unwrap();
+    assert!(
+        r.hits
+            .iter()
+            .any(|h| h.session == *general.session() && h.hit.content == "rotated the prod tokens"),
+        "premise: the layer answered by traversal: {:?}",
+        r.hits
+    );
+    assert_eq!(
+        r.layer_top_legs,
+        [LayerTopLegs {
+            session: general.session().clone(),
+            top_legs: TopLegs::default(),
+        }]
+    );
+    assert_eq!(r.top_legs, own.top_legs);
+    assert_eq!(r.confidence, own.confidence);
     project.close().await.unwrap();
     general.close().await.unwrap();
 }

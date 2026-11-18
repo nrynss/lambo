@@ -95,7 +95,8 @@ async fn recall_entry_reproduces_context_golden() {
     // untouched, so ranking, hits and scores are what they were) now also
     // reports its legs' best scores. The keyword leg's is the best BM25 the
     // index gives the query, computed here apart from the pipeline; the
-    // fixture has no embeddings, so there is no cosine and no confidence.
+    // fixture has no embeddings, so there is no cosine, and the confidence
+    // is the keyword-only basis, `S / (S + 5)`.
     let keyword_best = index
         .read()
         .search(
@@ -107,20 +108,32 @@ async fn recall_entry_reproduces_context_golden() {
         .reduce(f64::max)
         .expect("the golden query matches");
     assert!(keyword_best > 0.0);
-    assert_eq!(
-        result.top_legs,
-        crate::types::TopLegs {
-            bm25: Some(keyword_best),
-            vector_cosine: None,
-        }
-    );
-    assert_eq!(result.confidence, None);
-    // On the wire the result only gained `top_legs`: without it, it is the
-    // three fields it always had, with the values they always had.
+    assert_eq!(result.top_legs.bm25, Some(keyword_best));
+    assert_eq!(result.top_legs.vector_cosine, None);
+    assert!(!result.top_legs.exact_name_match);
+    let confidence = result.confidence.clone().expect("the keyword leg ran");
+    assert_eq!(confidence.basis, "keyword-only-v0");
+    assert!(confidence.provisional);
+    assert_eq!(confidence.value, keyword_best / (keyword_best + 5.0));
+    // On the wire the result only gained `top_legs` and `confidence`:
+    // without them, it is the three fields it always had, with the values
+    // they always had.
     let mut wire = serde_json::to_value(&result).unwrap();
     assert_eq!(
         wire.as_object_mut().unwrap().remove("top_legs"),
-        Some(serde_json::json!({"bm25": keyword_best, "vector_cosine": null}))
+        Some(serde_json::json!({
+            "bm25": keyword_best,
+            "vector_cosine": null,
+            "exact_name_match": false,
+        }))
+    );
+    assert_eq!(
+        wire.as_object_mut().unwrap().remove("confidence"),
+        Some(serde_json::json!({
+            "value": confidence.value,
+            "basis": "keyword-only-v0",
+            "provisional": true,
+        }))
     );
     assert_eq!(
         wire,

@@ -336,6 +336,23 @@ pub(crate) enum RecentLeg {
     Skip,
 }
 
+/// What the keyword leg itself found for a query (#256), read while phase 1
+/// runs it and kept apart from [`LegProvenance`], whose keyword slot an
+/// exact-name match overwrites with `1.0` (that per-hit value is unchanged).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct KeywordLeg {
+    /// The leg searched: a text query against an installed index.
+    pub(crate) ran: bool,
+    /// The best BM25 the index gave a concept of this graph, before any
+    /// exact-name substitution. `Some(0.0)` when the leg ran and matched no
+    /// concept; `None` when it did not run, or when every score it returned
+    /// was non-finite (phase 1's own leg ranking ignores those too).
+    pub(crate) best_bm25: Option<f64>,
+    /// The query is exactly a concept's durable name, so phase 1 scored that
+    /// concept's keyword leg `1.0` in place of its BM25.
+    pub(crate) exact_name: bool,
+}
+
 /// [`candidates_with_legs`], with the recent leg on or off.
 pub(crate) fn candidates_with_legs_as(
     graph: &Graph,
@@ -345,23 +362,60 @@ pub(crate) fn candidates_with_legs_as(
     limit: usize,
     recent: RecentLeg,
 ) -> (Vec<Scored<NodeId>>, LegProvenance) {
+    let (out, legs, _) = candidates_with_keyword_leg_as(graph, index, input, query, limit, recent);
+    (out, legs)
+}
+
+/// [`candidates_with_legs_as`], plus what the keyword leg found before the
+/// exact-name substitution (#256). The same single index search: the raw
+/// best BM25 is read off the results phase 1 already iterates.
+pub(crate) fn candidates_with_keyword_leg_as(
+    graph: &Graph,
+    index: &InvertedIndex,
+    input: Phase1Input,
+    query: &str,
+    limit: usize,
+    recent: RecentLeg,
+) -> (Vec<Scored<NodeId>>, LegProvenance, KeywordLeg) {
     // Phase 1 is a candidate OVER-approximation: the final `top_k` truncation
     // is applied downstream in phase-3 assembly (by final score). Prematurely
     // truncating here let the flat-scored recent/vector legs evict strong
     // keyword matches (GPT5.6sol P1-3), so keyword is over-fetched (bounded)
     // and the union is returned unreduced.
     let keyword_cap = limit.saturating_mul(KEYWORD_OVERFETCH);
+    let keyword_ran = !query.trim().is_empty();
     let mut legs: LegProvenance = HashMap::new();
+    // #256: the leg's own best, over the concepts of this graph (the only
+    // ones assembly can return), before the exact-name overwrite below.
+    let mut matched = false;
+    let mut best_bm25: Option<f64> = None;
     for s in index.search(query, keyword_cap) {
         legs.entry(s.item).or_default().keyword = Some(s.score);
+        if matches!(graph.node(s.item), Some(Node::Concept(_))) {
+            matched = true;
+            if s.score.is_finite() {
+                best_bm25 = Some(best_bm25.map_or(s.score, |b| b.max(s.score)));
+            }
+        }
     }
     // An exact normalized name is direct identity evidence even when the
     // target is old and its content has no words in common with the query.
+    let mut exact_name = false;
     if let Some(id) = graph.name_target(query)
         && matches!(graph.node(id), Some(Node::Concept(_)))
     {
         legs.entry(id).or_default().keyword = Some(1.0);
+        exact_name = true;
     }
+    let keyword = KeywordLeg {
+        ran: keyword_ran,
+        best_bm25: match (keyword_ran, matched) {
+            (false, _) => None,
+            (true, false) => Some(0.0),
+            (true, true) => best_bm25,
+        },
+        exact_name,
+    };
     if recent == RecentLeg::Run {
         for (id, rank) in recent_concepts(graph) {
             let leg = legs.entry(id).or_default();
@@ -372,7 +426,7 @@ pub(crate) fn candidates_with_legs_as(
     for s in input.vector {
         merge_max(&mut legs.entry(s.item).or_default().vector, s.score);
     }
-    let out = rank(&mut legs, graph, &input.fusion, !query.trim().is_empty());
+    let out = rank(&mut legs, graph, &input.fusion, keyword_ran);
     // T9 instrumentation: which phase-1 leg(s) produced each candidate, so a
     // trace-enabled run can say whether the lexical (keyword), recent, or
     // vector arm produced an identifier-shaped hit. Unchanged output; it now
@@ -394,7 +448,7 @@ pub(crate) fn candidates_with_legs_as(
             );
         }
     }
-    (out, legs)
+    (out, legs, keyword)
 }
 
 /// Leg names in the order T9's trace printed them (sorted, deduplicated).

@@ -79,7 +79,7 @@ async fn vector_session(session: &str, searches: bool) -> (Memory, Arc<AtomicUsi
 
 /// A session with a one-hour daemon tick, so a settled score table stays
 /// put between two recalls (reads never wake the daemon).
-async fn slow_session(store: Arc<dyn GraphStore>, session: &str, kind: &str) -> Memory {
+pub(super) async fn slow_session(store: Arc<dyn GraphStore>, session: &str, kind: &str) -> Memory {
     Memory::builder()
         .session(session)
         .agent("agent-a")
