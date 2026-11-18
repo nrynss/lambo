@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- `scripts/loadtest/mcp_ab.py ab` retries a call the serve's rate limit refuses
+  (HTTP 429), after `Retry-After` or with bounded backoff, instead of aborting
+  the run. Only the successful attempt is timed, and the output's new
+  `rate_limited_retries` field counts the retries per side.
+
 ## 0.12.0 (2026-11-16)
 
 ### Durable concept names

@@ -13,15 +13,21 @@ writes synthetic `lambo_derive` concepts, so point it at scratch copies, never a
 live writer: port 7700 is refused unless --allow-production-port is passed.
 Top-k overlap between the sides is reported as a recall-quality check.
 
+A call the serve's rate limit refuses (HTTP 429) is retried after the server's
+`Retry-After`, else with bounded exponential backoff, and only the attempt that
+succeeded is timed; `rate_limited_retries` counts the retries per side. If the
+retries run out, the run stops and says so: rerun against scratch serves started
+with `--rate-limit-rps 0`.
+
 `ledger` splits a `serve --ledger` file at the re-pin time and summarizes
 per-tool server-side latency on each side. It only reads the file.
 
 Stdlib only. Output is JSON of aggregates, no memory content, so it is safe to
 paste into a public issue. First used for nrynss/lambo#108 (0.4.0 vs bef53e6).
 """
-import argparse, json, os, re, statistics, sys, time, urllib.error, urllib.parse, urllib.request
+import argparse, email.utils, json, os, re, statistics, sys, time, urllib.error, urllib.parse, urllib.request
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 AGENT = "perf-ab"
 PRODUCTION_PORT = 7700  # a live writer's port; see mcp_load.py
@@ -47,6 +53,58 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 _OPENER = urllib.request.build_opener(_NoRedirect)
 
+# The serve rate-limits each credential (DEFAULT_RATE_LIMIT_RPS, 50/s with a 2x
+# burst) and answers 429 with `Retry-After: 1`. Same backoff as
+# mcp_concurrent.py's receipt queries: 6 attempts, 0.25 s doubling, 4 s cap.
+RATE_LIMIT_ATTEMPTS = 6
+RATE_LIMIT_BASE_S = 0.25
+RATE_LIMIT_CAP_S = 4.0
+RETRY_AFTER_CAP_S = 30.0  # a Retry-After larger than this is clamped to it
+
+
+def parse_retry_after(value, now=None):
+    """Seconds a `Retry-After` header asks for, or None when absent or unparseable.
+
+    Accepts delta-seconds or an HTTP-date; negative or past values become 0.
+    """
+    if value is None:
+        return None
+    value = str(value).strip()
+    if not value:
+        return None
+    if value.isdigit():
+        return float(value)
+    try:
+        when = email.utils.parsedate_to_datetime(value)
+    except (TypeError, ValueError, IndexError):
+        return None
+    if when is None:
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    now = now or datetime.now(timezone.utc)
+    return max(0.0, (when - now).total_seconds())
+
+
+def rate_limit_delay(attempt, retry_after=None, attempts=RATE_LIMIT_ATTEMPTS,
+                     base=RATE_LIMIT_BASE_S, cap=RATE_LIMIT_CAP_S,
+                     retry_after_cap=RETRY_AFTER_CAP_S):
+    """Seconds to wait before retrying after the 0-based `attempt` was refused
+    with HTTP 429, or None when that was the last of `attempts`.
+
+    A `Retry-After` (in seconds, see parse_retry_after) wins, clamped to
+    [0, retry_after_cap]; otherwise min(base * 2**attempt, cap).
+    """
+    if attempt >= attempts - 1:
+        return None
+    if retry_after is not None:
+        return min(max(0.0, retry_after), retry_after_cap)
+    return min(base * 2 ** attempt, cap)
+
+
+class RateLimitExhausted(RuntimeError):
+    pass
+
 
 class Mcp:
     def __init__(self, url, token=None):
@@ -56,6 +114,8 @@ class Mcp:
         if token and u.scheme == "http" and u.hostname not in ("127.0.0.1", "localhost", "::1"):
             print(f"warning: sending a bearer token over plaintext HTTP to {u.hostname}", file=sys.stderr)
         self.url, self.token, self.sid, self.n = url, token, None, 0
+        self.rate_limited_retries = 0
+        self._t0 = time.perf_counter()  # start of the attempt being timed
         self._rpc("initialize", {"protocolVersion": "2025-06-18", "capabilities": {},
                                  "clientInfo": {"name": AGENT, "version": "1"}})
         self._post({"jsonrpc": "2.0", "method": "notifications/initialized"})
@@ -66,10 +126,30 @@ class Mcp:
             h["mcp-session-id"] = self.sid
         if self.token:
             h["authorization"] = f"Bearer {self.token}"
-        req = urllib.request.Request(self.url, json.dumps(body).encode(), h)
-        with _OPENER.open(req, timeout=120) as r:
-            self.sid = r.headers.get("mcp-session-id") or self.sid
-            return r.read().decode()
+        data = json.dumps(body).encode()
+        attempt = 0
+        while True:
+            req = urllib.request.Request(self.url, data, h)
+            try:
+                with _OPENER.open(req, timeout=120) as r:
+                    self.sid = r.headers.get("mcp-session-id") or self.sid
+                    return r.read().decode()
+            except urllib.error.HTTPError as e:
+                if e.code != 429:
+                    raise
+                retry_after = parse_retry_after(e.headers.get("retry-after") if e.headers else None)
+                e.close()
+                delay = rate_limit_delay(attempt, retry_after)
+                if delay is None:
+                    raise RateLimitExhausted(
+                        f"{self.url}: the serve's rate limit refused the call (HTTP 429) "
+                        f"{attempt + 1} times; rerun against a scratch serve started with "
+                        "--rate-limit-rps 0") from e
+                self.rate_limited_retries += 1
+                time.sleep(delay)
+                attempt += 1
+                # Time only the attempt that succeeds, not the refusals and waits.
+                self._t0 = time.perf_counter()
 
     def _rpc(self, method, params):
         self.n += 1
@@ -85,9 +165,10 @@ class Mcp:
 
     def tool(self, name, **args):
         args["agent_id"] = AGENT
-        t = time.perf_counter()
+        self._t0 = time.perf_counter()
         res = self._rpc("tools/call", {"name": name, "arguments": args})
-        ms = (time.perf_counter() - t) * 1000
+        # _post moves _t0 to the start of a retried attempt after a 429.
+        ms = (time.perf_counter() - self._t0) * 1000
         if res.get("isError"):
             return ms, {}, True
         body = res.get("structuredContent")
@@ -134,9 +215,8 @@ def run_ab(a, b, rounds, derives, token):
             if err or not body.get("receipt"):
                 errors[name] += 1
                 continue
-            t = time.perf_counter()
-            _, st, st_err = c.tool("lambo_stats", receipt=body["receipt"], wait_ms=4000)
-            lat[name]["derive_applied"].append(ms + (time.perf_counter() - t) * 1000)
+            st_ms, st, st_err = c.tool("lambo_stats", receipt=body["receipt"], wait_ms=4000)
+            lat[name]["derive_applied"].append(ms + st_ms)
             receipt = st.get("receipt")
             state = receipt.get("state") if isinstance(receipt, dict) else None
             if st_err or state != "applied":
@@ -150,7 +230,8 @@ def run_ab(a, b, rounds, derives, token):
     return {"sides": names, "rounds": rounds, "derives": derives,
             "latency_ms": {n: {k: summ(v) for k, v in lat[n].items()} for n in names},
             "errors": errors,
-            "recall_topk_jaccard": summ(overlap)}
+            "recall_topk_jaccard": summ(overlap),
+            "rate_limited_retries": {n: sides[n].rate_limited_retries for n in names}}
 
 
 def parse_ts(ts):

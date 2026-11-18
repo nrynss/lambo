@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Unit tests for the pure parts of mcp_concurrent.py and replay_parity.py.
+"""Unit tests for the pure parts of mcp_concurrent.py, replay_parity.py and
+mcp_ab.py's rate-limit retry.
 
 Stdlib only. No server, no GPU, no network, no live store: every test works on
 literals, a fake in-process MCP client, or a temp dir.
@@ -25,6 +26,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from unittest import mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import mcp_ab as ab  # noqa: E402
 import mcp_concurrent as mc  # noqa: E402
 import replay_parity as rp  # noqa: E402
 
@@ -838,6 +840,133 @@ class RuntimeParent(unittest.TestCase):
         f.write_text("x")
         with self.assertRaises(SystemExit):
             rp.make_runtime_parent(f)
+
+
+# ---------------------------------------------------------------------------
+# mcp_ab: HTTP 429 retry
+# ---------------------------------------------------------------------------
+
+class RetryAfter(unittest.TestCase):
+    def test_delta_seconds_and_absent_or_bad_values(self):
+        self.assertEqual(ab.parse_retry_after("1"), 1.0)
+        self.assertEqual(ab.parse_retry_after(" 5 "), 5.0)
+        for v in (None, "", "soon", "-3", "1.5"):
+            with self.subTest(v=v):
+                self.assertIsNone(ab.parse_retry_after(v))
+
+    def test_http_date_is_seconds_from_now_and_never_negative(self):
+        now = ab.datetime(2026, 11, 18, 12, 0, 0, tzinfo=ab.timezone.utc)
+        self.assertEqual(ab.parse_retry_after("Wed, 18 Nov 2026 12:00:07 GMT", now), 7.0)
+        self.assertEqual(ab.parse_retry_after("Wed, 18 Nov 2026 11:59:00 GMT", now), 0.0)
+
+
+class RateLimitDelay(unittest.TestCase):
+    def test_backoff_doubles_from_the_base_and_is_capped(self):
+        self.assertEqual([ab.rate_limit_delay(i, attempts=8) for i in range(7)],
+                         [0.25, 0.5, 1.0, 2.0, 4.0, 4.0, 4.0])
+
+    def test_last_attempt_gives_up(self):
+        self.assertIsNone(ab.rate_limit_delay(ab.RATE_LIMIT_ATTEMPTS - 1))
+        self.assertIsNone(ab.rate_limit_delay(ab.RATE_LIMIT_ATTEMPTS))
+        self.assertIsNone(ab.rate_limit_delay(0, attempts=1))
+        self.assertIsNone(ab.rate_limit_delay(0, retry_after=1.0, attempts=1))
+
+    def test_retry_after_wins_and_is_clamped(self):
+        self.assertEqual(ab.rate_limit_delay(3, retry_after=1.0), 1.0)
+        self.assertEqual(ab.rate_limit_delay(0, retry_after=0.0), 0.0)
+        self.assertEqual(ab.rate_limit_delay(0, retry_after=3600.0), ab.RETRY_AFTER_CAP_S)
+        self.assertEqual(ab.rate_limit_delay(0, retry_after=-2.0), 0.0)
+
+    def test_matches_mcp_concurrent_receipt_backoff(self):
+        # mcp_concurrent.py's receipt loop: 6 attempts, min(0.25 * 2**i, 4.0).
+        self.assertEqual(ab.RATE_LIMIT_ATTEMPTS, 6)
+        self.assertEqual([ab.rate_limit_delay(i) for i in range(5)],
+                         [min(0.25 * 2 ** i, 4.0) for i in range(5)])
+
+
+class _Resp:
+    def __init__(self, text):
+        self.text, self.headers = text, {}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def read(self):
+        return self.text.encode()
+
+
+def _http_429(retry_after=None):
+    from email.message import Message
+    h = Message()
+    if retry_after is not None:
+        h["Retry-After"] = retry_after
+    return ab.urllib.error.HTTPError("http://x/mcp", 429, "Too Many Requests", h, io.BytesIO())
+
+
+class AbRetry(unittest.TestCase):
+    """Mcp._post against a fake opener: no network, sleeps recorded not taken."""
+
+    def client(self):
+        c = object.__new__(ab.Mcp)
+        c.url, c.token, c.sid, c.n = "http://x/mcp", None, None, 0
+        c.rate_limited_retries = 0
+        c._t0 = 0.0
+        return c
+
+    def run_tool(self, replies):
+        """A fake clock: each request takes 0.01 s, and a sleep advances it."""
+        c = self.client()
+        sleeps, now = [], [100.0]
+        ok = json.dumps({"result": {"structuredContent": {"hits": []}}})
+
+        def opener(req, timeout):
+            now[0] += 0.01
+            r = replies.pop(0)
+            if isinstance(r, Exception):
+                raise r
+            return _Resp(ok)
+
+        def sleep(s):
+            sleeps.append(s)
+            now[0] += s
+        with mock.patch.object(ab._OPENER, "open", side_effect=opener), \
+                mock.patch.object(ab.time, "sleep", side_effect=sleep), \
+                mock.patch.object(ab.time, "perf_counter", side_effect=lambda: now[0]):
+            return c, sleeps, c.tool("lambo_recall", query="q")
+
+    def test_429_is_retried_with_retry_after_then_backoff_and_counted(self):
+        c, sleeps, (ms, body, err) = self.run_tool([_http_429("1"), _http_429(), "ok"])
+        self.assertEqual(sleeps, [1.0, 0.5])
+        self.assertEqual(c.rate_limited_retries, 2)
+        self.assertFalse(err)
+        self.assertEqual(body, {"hits": []})
+
+    def test_waiting_on_429_is_not_counted_in_latency(self):
+        _, sleeps, (ms, _, _) = self.run_tool([_http_429(), _http_429(), "ok"])
+        self.assertEqual(sleeps, [0.25, 0.5])
+        # Only the successful attempt (0.01 s), not the two refusals and 0.75 s of waits.
+        self.assertAlmostEqual(ms, 10.0, places=6)
+
+    def test_no_429_latency_is_the_single_attempt(self):
+        c, sleeps, (ms, _, _) = self.run_tool(["ok"])
+        self.assertEqual((sleeps, c.rate_limited_retries), ([], 0))
+        self.assertAlmostEqual(ms, 10.0, places=6)
+
+    def test_exhausted_retries_raise_with_the_remedy(self):
+        replies = [_http_429() for _ in range(ab.RATE_LIMIT_ATTEMPTS)]
+        with self.assertRaises(ab.RateLimitExhausted) as cm:
+            self.run_tool(replies)
+        self.assertIn("rate limit", str(cm.exception))
+        self.assertIn("--rate-limit-rps 0", str(cm.exception))
+
+    def test_other_http_errors_are_not_retried(self):
+        err = ab.urllib.error.HTTPError("http://x/mcp", 500, "boom", {}, io.BytesIO())
+        self.addCleanup(err.close)
+        with self.assertRaises(ab.urllib.error.HTTPError):
+            self.run_tool([err, "ok"])
 
 
 if __name__ == "__main__":
