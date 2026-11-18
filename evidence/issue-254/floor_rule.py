@@ -42,6 +42,11 @@ SIZES = [12, 32, 64, 100, 128, 256, 512, 1024, 2048]
 DIRECT_SIZES = [12, 32, 64, 96]  # the labelled set has 100 concepts
 DRAWS = 200
 SEED = 254
+# By-query bootstrap (resample whole queries with replacement): pairs that
+# share a query are not independent, so the query is the unit. Its own seed,
+# so the draws above are unchanged by it.
+BOOTSTRAP_RESAMPLES = 1000
+BOOTSTRAP_SEED = 2540
 
 # name, detail run, fixed floor (src/embed/calibration.rs), recorded size.
 CONTRACTS = [
@@ -85,6 +90,13 @@ class Run:
     def cosines(self, split, grade):
         return [r["cosine"] for r in self.rows if r["split"] == split and r["grade"] == grade]
 
+    def cosines_by_query(self, split, grade):
+        by = {}
+        for r in self.rows:
+            if r["split"] == split and r["grade"] == grade:
+                by.setdefault(r["query"], []).append(r["cosine"])
+        return by
+
     def best_relevant(self, split):
         """Each answerable query's best cosine to a concept graded 1 or 2."""
         best = {}
@@ -116,6 +128,69 @@ def direct_admission(by_query, n, floors, rng):
             for i, f in enumerate(floors):
                 hits[i] += best >= f
     return [h / total for h in hits], total // DRAWS
+
+
+def interval95(values):
+    """The 2.5th and 97.5th percentiles (nearest rank) of bootstrap values."""
+    v = sorted(values)
+    return [quantile(v, 0.025), quantile(v, 0.975)]
+
+
+def bootstrap(run, f0, n0, floors, rng):
+    """By-query bootstrap, 95% percentile intervals, for anchor `n0`.
+
+    Two questions, answered separately. `floor`: how far the rule's floor at
+    each size moves when the dev queries behind the null are resampled (the
+    fixed floor is not resampled, so it has no interval). `grade2_lost`: how
+    far the share of grade-2 pairs below the point-estimate floor moves when
+    that split's queries are resampled, with the floor held where the full
+    dev null puts it. Neither covers the other's uncertainty, and neither
+    covers the labels, the embedder run or the set's size.
+    """
+    null = list(run.cosines_by_query("dev", 0).values())
+    floor_draws = {n: [] for n in SIZES}
+    for _ in range(BOOTSTRAP_RESAMPLES):
+        resampled = sorted(x for cosines in rng.choices(null, k=len(null)) for x in cosines)
+        for n in SIZES:
+            floor_draws[n].append(rule_floor(resampled, f0, n0, n)[0])
+    lost_draws = {split: {n: [] for n in SIZES} for split in ("dev", "held_out")}
+    fixed_draws = {split: [] for split in ("dev", "held_out")}
+    for split in ("dev", "held_out"):
+        g2 = list(run.cosines_by_query(split, 2).values())
+        for _ in range(BOOTSTRAP_RESAMPLES):
+            resampled = [x for cosines in rng.choices(g2, k=len(g2)) for x in cosines]
+            fixed_draws[split].append(sum(x < f0 for x in resampled) / len(resampled))
+            for n in SIZES:
+                lost_draws[split][n].append(
+                    sum(x < floors[n] for x in resampled) / len(resampled)
+                )
+    return {
+        "unit": "query",
+        "anchor_n0": n0,
+        "resamples": BOOTSTRAP_RESAMPLES,
+        "seed": BOOTSTRAP_SEED,
+        "interval": "95% percentile",
+        "dev_null_queries": len(null),
+        "grade2_queries": {
+            split: len(run.cosines_by_query(split, 2)) for split in ("dev", "held_out")
+        },
+        "grade2_lost_share_at_fixed": {
+            split: [round(x, 4) for x in interval95(fixed_draws[split])]
+            for split in ("dev", "held_out")
+        },
+        "sizes": [
+            {
+                "layer_concepts": n,
+                "floor_point": round(floors[n], 4),
+                "floor": [round(x, 4) for x in interval95(floor_draws[n])],
+                "grade2_lost_share": {
+                    split: [round(x, 4) for x in interval95(lost_draws[split][n])]
+                    for split in ("dev", "held_out")
+                },
+            }
+            for n in SIZES
+        ],
+    }
 
 
 def measure(name, path, f0, recorded, framing):
@@ -186,11 +261,21 @@ def measure(name, path, f0, recorded, framing):
                         "admit_rule_common12": round(shares[2], 4),
                     }
                 )
+    # Sampling uncertainty, for the anchor every floor shares (12; module
+    # docstring). Its own generator, after everything else.
+    floors12 = {n: rule_floor(null_dev, f0, 12, n)[0] for n in SIZES}
+    out["bootstrap_common12"] = bootstrap(
+        run, f0, 12, floors12, random.Random(BOOTSTRAP_SEED)
+    )
     return out
 
 
 def pct(a, b):
     return f"{100 * a / b:.0f}%" if b else "n/a"
+
+
+def span(pair):
+    return f"{100 * pair[0]:.0f} to {100 * pair[1]:.0f}%"
 
 
 def print_tables(result):
@@ -221,6 +306,25 @@ def print_tables(result):
                     f"{h['queries_with_no_relevant_hit_admitted']}/{h['answerable_queries']} "
                     f"({pct(h['queries_with_no_relevant_hit_admitted'], h['answerable_queries'])}) |"
                 )
+        b = c["bootstrap_common12"]
+        fixed = b["grade2_lost_share_at_fixed"]
+        print(
+            f"\nby-query bootstrap, N0 = {b['anchor_n0']}, {b['resamples']} resamples, "
+            f"95% percentile intervals\n"
+        )
+        print(
+            f"grade-2 lost at the fixed floor: dev {span(fixed['dev'])}, "
+            f"held-out {span(fixed['held_out'])}\n"
+        )
+        print("| Layer size | Floor | Floor, 95% | Grade-2 lost, dev, 95% | Grade-2 lost, held-out, 95% |")
+        print("|---:|---:|---:|---:|---:|")
+        for r in b["sizes"]:
+            lost = r["grade2_lost_share"]
+            print(
+                f"| {r['layer_concepts']:,} | {r['floor_point']:.4f} | "
+                f"{r['floor'][0]:.3f} to {r['floor'][1]:.3f} | {span(lost['dev'])} | "
+                f"{span(lost['held_out'])} |"
+            )
         print("\ndirect best-of-N, held-out queries, layers of irrelevant concepts\n")
         print("| Queries | Layer size | Fixed | Rule, recorded | Rule, common12 |")
         print("|---|---:|---:|---:|---:|")
@@ -243,6 +347,8 @@ def main():
         "direct_sizes": DIRECT_SIZES,
         "direct_draws_per_query": DRAWS,
         "seed": SEED,
+        "bootstrap_resamples": BOOTSTRAP_RESAMPLES,
+        "bootstrap_seed": BOOTSTRAP_SEED,
         "contracts": [measure(n, p, f, r, FRAMING) for n, p, f, r in CONTRACTS],
         "sensitivity_raw_framing": [measure(n, p, f, r, "raw") for n, p, f, r in CONTRACTS[:1]],
     }

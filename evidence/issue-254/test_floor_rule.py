@@ -74,6 +74,44 @@ class Committed(unittest.TestCase):
             floors = [r["floor"] for r in anchor["sizes"]]
             self.assertEqual(floors, sorted(floors))
 
+    def test_bootstrap_intervals_contain_their_point_estimates(self):
+        result = json.loads((HERE / "floor-rule.json").read_text())
+        for c in result["contracts"]:
+            b = c["bootstrap_common12"]
+            self.assertEqual((b["unit"], b["anchor_n0"]), ("query", 12))
+            by_size = {r["layer_concepts"]: r for r in c["anchors"]["common12"]["sizes"]}
+            for r in b["sizes"]:
+                lo, hi = r["floor"]
+                self.assertLessEqual(lo, r["floor_point"])
+                self.assertLessEqual(r["floor_point"], hi)
+                for split in ("dev", "held_out"):
+                    point = by_size[r["layer_concepts"]][split]
+                    share = point["grade2_lost"] / point["grade2_pairs"]
+                    lo, hi = r["grade2_lost_share"][split]
+                    self.assertLessEqual(lo, share + 1e-4)
+                    self.assertLessEqual(share - 1e-4, hi)
+
+    def test_readme_figures_at_32_and_100_concepts(self):
+        # The README rests its conclusion on 100 concepts and quotes dev
+        # beside held-out at 32, where the two splits disagree.
+        result = json.loads((HERE / "floor-rule.json").read_text())
+        sizes = {r["layer_concepts"]: r for r in result["contracts"][0]["anchors"]["recorded"]["sizes"]}
+        lost = lambda n, split: (sizes[n][split]["grade2_lost"], sizes[n][split]["grade2_pairs"])
+        self.assertEqual((lost(12, "dev"), lost(12, "held_out")), ((25, 169), (17, 98)))
+        self.assertEqual((lost(32, "dev"), lost(32, "held_out")), ((34, 169), (32, 98)))
+        self.assertEqual((lost(100, "dev"), lost(100, "held_out")), ((62, 169), (44, 98)))
+
+    def test_cross_project_tail_falls_faster_than_the_labelled_null(self):
+        # Above the fixed floor, each project keeps a smaller part of its
+        # share at 0.50 than the labelled dev null does, under both estimates.
+        tail = json.loads((HERE / "real-queries.json").read_text())["null_tail"]["floors"]
+        self.assertEqual(tail[0]["floor"], 0.5)
+        for e in tail[1:]:
+            labelled = e["labelled_dev"]["relative_to_fixed"]
+            for p in ("A", "B"):
+                for name in ("uncorrected", "corrected"):
+                    self.assertLess(e[p][f"relative_to_fixed_{name}"], labelled, (e["floor"], p))
+
     def test_real_query_aggregates_hold_no_names(self):
         text = (HERE / "real-queries.json").read_text()
         self.assertEqual(sorted(json.loads(text)["projects"]), ["A", "B"])

@@ -5,19 +5,22 @@ fixed cosine floor admits a hit for more unrelated queries as the layer
 grows ([`evidence/layer-floor-size/`](../layer-floor-size/README.md)). Its
 option 2 is a default floor that rises with the layer's size, so that the
 admission rate for unrelated queries stays where it was at the size the
-floor was measured on. This measures whether such a floor meets the issue's
+floor was chosen on. This measures whether such a floor meets the issue's
 acceptance criteria.
 
 **Result: it does not, and no size-aware floor ships.** A floor derived
 from each contract's measured null distribution does hold admission roughly
 level on the labelled set, as far as that set can test (96 concepts). It
-does so by rejecting hits that are labelled relevant: under BGE-M3 the fixed
-0.50 floor already rejects 17% of the held-out grade-2 pairs, and the rule
-rejects 33% at 32 concepts, 45% at 100, 76% at 1,024 and 83% at 2,048. On
-real queries against an unrelated stand-in layer the same floor does not
+does so by rejecting hits that are labelled relevant. Under BGE-M3 the fixed
+0.50 floor already rejects 15% of the dev grade-2 pairs and 17% of the
+held-out ones. The rule rejects 37% (dev) and 45% (held-out) at 100
+concepts, 71% and 76% at 1,024, and 76% and 83% at 2,048. At 32 concepts the
+two splits disagree about the first step (20% dev, 33% held-out, with
+overlapping intervals), so the conclusion rests on 100 concepts and above.
+On real queries against an unrelated stand-in layer the same floor does not
 hold admission level either: it pushes it towards zero. What ships instead
-is a warning when a layer on its default floor holds more concepts than the
-floor was measured on (option 1).
+is a warning when a layer on its default floor holds more concepts with
+vectors than the 12-concept layer that floor was chosen on (option 1).
 
 - **When:** 2026-11-18.
 - **Labelled data:** the #190 set (`fixtures/eval/`: 100 concepts, 368
@@ -51,12 +54,16 @@ No functional form is fitted. The floor at each size is an empirical
 quantile, and the table says how many null pairs sit at or above it, which
 is how far into the tail the data resolves.
 
-`N0` is the size each floor records (`layer_floor_measured_concepts`): 12
-for the BGE-M3 reference, 100 for the built-in rows. Those two are not
-consistent with each other: the rows' floors are quantile-matched to
-BGE-M3's 0.50, which was chosen on a 12-concept layer. So
-[`floor-rule.json`](floor-rule.json) also carries every row at `N0 = 12`
-(`common12`). Under BGE-M3 the two anchors are the same.
+Two anchors `N0` are measured. `recorded` is the size each floor's record
+names (`layer_floor_measured_concepts`): 12 for the BGE-M3 reference, 100
+for the built-in rows. Those are not the same kind of number. The 12 is the
+layer BGE-M3's 0.50 was chosen on. The 100 is the corpus on which a row's
+floor was quantile-matched to that 0.50: it says where the match was made,
+not that the floor was checked on a layer of 100. So every floor's bar
+traces to the 12-concept layer, and [`floor-rule.json`](floor-rule.json)
+also carries every row at `N0 = 12` (`common12`), which is the anchor the
+shipped warning uses for every contract. Under BGE-M3 the two anchors are
+the same.
 
 ## 1. Admission for queries with nothing relevant in the layer
 
@@ -118,13 +125,50 @@ Each cell is "uncorrected / corrected": two sensitivity estimates of the
 share of queries admitting a hit, not an interval (see
 [Limits](#limits)).
 
-The rule does not hold the rate level here. It falls from 15 to 37% (A) and
-4 to 18% (B) at 8 concepts to 0 to 3% at 1,024 and above. The cause is that
-the rule's null is the labelled set's, where a query and an irrelevant
-concept are still about the same project: 3.05% of those pairs reach 0.50,
-against 2.3% (A) and 0.77% (B) of cross-project pairs
-(`evidence/layer-floor-size/null-pairs.json`). A floor scaled from the
-in-project null rises faster than an unrelated layer needs.
+The rule does not hold the rate level here. Under the rule, each estimate
+separately:
+
+| | 8 concepts | 1,024 concepts | 2,048 concepts |
+|---|---:|---:|---:|
+| A, uncorrected | 15.2% | 0.0% | 1.5% |
+| A, corrected | 37.4% | 1.5% | 1.3% |
+| B, uncorrected | 3.8% | 1.9% | 0.0% |
+| B, corrected | 17.6% | 3.1% | 0.0% |
+
+**Why it over-corrects: the two nulls fall off at different rates above
+0.50.** The rule's floors are quantiles of the labelled set's null. The
+share of single pairs at or above 0.50 does not explain the result: it is
+3.05% on the labelled dev null, and on the cross-project pairs 2.30% (A) and
+0.77% (B) uncorrected but 5.65% (A) and 2.09% (B) corrected
+(`evidence/layer-floor-size/null-pairs.json`). Project A's corrected null is
+heavier at 0.50 than the labelled one, and the rule still drives A's
+corrected admission to 1.5% at 1,024 concepts. What differs is the tail
+above 0.50, measured here at each of the rule's floors (`null_tail` in
+[`real-queries.json`](real-queries.json)):
+
+| Rule floor for | Floor | Labelled dev null | A, uncorrected | A, corrected | B, uncorrected | B, corrected |
+|---:|---:|---:|---:|---:|---:|---:|
+| 12 | 0.5000 | 3.054% | 2.301% | 5.652% | 0.768% | 2.087% |
+| 32 | 0.5333 | 1.160% | 0.413% | 1.079% | 0.140% | 0.357% |
+| 64 | 0.5584 | 0.586% | 0.104% | 0.264% | 0.031% | 0.089% |
+| 128 | 0.5813 | 0.291% | 0.033% | 0.070% | 0.010% | 0.020% |
+| 256 | 0.6010 | 0.148% | 0.010% | 0.023% | 0.004% | 0.008% |
+| 1,024 | 0.6487 | 0.038% | 0.001% | 0.002% | 0.000% | 0.001% |
+
+Share of single (query, concept) pairs at or above the floor: 23,707
+labelled dev pairs, 499,620 cross-project pairs for A and 249,524 for B. At
+0.5333 the labelled null keeps 38% of the share it has at 0.50; the
+cross-project pairs keep 17 to 19%, in both projects and under both
+estimates. At 0.5813 it is 10% against 1.0 to 1.4%. So a floor that follows
+the labelled null's quantiles climbs past the cross-project tail, and the
+gap widens with size. The last rows rest on few pairs (at 0.6487: 9 labelled
+pairs, 3 and 9 for A, 1 and 3 for B).
+
+This says how the over-correction arises, not why the tails differ. The
+labelled null is in-project (a query and an irrelevant concept are about the
+same project), but the two populations also differ in who wrote the text, in
+how the queries were embedded and in size, and nothing here separates those.
+The correction was fitted on logged top hits, not on pairs in this tail.
 
 ## 2. Hits labelled relevant
 
@@ -151,15 +195,40 @@ The last column counts answerable queries whose best relevant concept
 (grade 1 or 2) is below the floor, so the layer would return nothing
 relevant for them.
 
-This is not acceptable at any size above the measured one. The first step,
-to 32 concepts, already doubles the held-out loss (17% to 33%), and at the
-sizes where the fixed floor has stopped discriminating (a few hundred
-concepts) the rule rejects about half of the relevant pairs or more. The
-reason is in the two distributions: the largest irrelevant cosine on dev is
-0.711 (0.749 held-out), and the median grade-2 cosine is 0.61 (0.58
-held-out). They overlap, so no
-absolute floor separates them, and a floor high enough to keep a large
-layer quiet is above most true hits.
+Sampling uncertainty, from a by-query bootstrap (1,000 resamples of whole
+queries, seeded; `bootstrap_common12` in the JSON). The interval on a loss
+resamples that split's queries with the floor held at its point estimate;
+the interval on a floor resamples the dev queries behind the null. Neither
+covers the labels or the embedder run:
+
+| Layer size | Floor, 95% | Grade-2 lost, dev, 95% | Grade-2 lost, held-out, 95% |
+|---:|---:|---:|---:|
+| 12 (fixed floor) | 0.500 (not resampled) | 10 to 21% | 11 to 26% |
+| 32 | 0.530 to 0.538 | 14 to 27% | 24 to 42% |
+| 100 | 0.565 to 0.581 | 29 to 44% | 36 to 55% |
+| 256 | 0.595 to 0.609 | 39 to 54% | 48 to 67% |
+| 1,024 | 0.619 to 0.667 | 64 to 78% | 67 to 84% |
+| 2,048 | 0.646 to 0.693 | 69 to 83% | 75 to 91% |
+
+The first step, to 32 concepts, is not settled by this set. Held-out loses
+33% against 17% at the fixed floor, but 15 of the 98 held-out pairs happen
+to lie between 0.50 and 0.5333; on dev it is 9 of 169, a loss of 20% against
+15%, and each split's interval at 32 overlaps its own interval at the fixed
+floor. From 100 concepts the loss is clear on both splits: 37% (dev) and
+45% (held-out) at 100, against 15% and 17%, and it rises with every step.
+The rule rejects half or more of the grade-2 pairs from 128 concepts on
+held-out and from 512 on dev. That is where the fixed floor has stopped
+discriminating (a few hundred concepts), so the rule fails where it is
+needed.
+
+The reason is in the two distributions: the largest irrelevant cosine on
+dev is 0.711 (0.749 held-out), and the median grade-2 cosine is 0.61 (0.58
+held-out). They overlap, so on this set no absolute floor separates
+relevant from irrelevant pairs, and a floor high enough to keep a large
+layer quiet is above most of the hits labelled relevant. The population
+matters: these grade-2 pairs are a query against a concept of its own
+project, not a project's query against a shared layer's rule, which was not
+measured ([Limits](#limits)).
 
 The other contracts, held-out grade-2 pairs lost (of 98):
 
@@ -184,8 +253,13 @@ the held-out grade-2 share that floor loses:
 | 512 | 0.575 / 0.562 | 46% / 41% | 0.647 / 0.574 | 76% / 46% |
 | 2,048 | 0.594 / 0.573 | 55% / 45% | 0.647 / 0.611 | 76% / 62% |
 
-Cells are "uncorrected / corrected" again. B's uncorrected floor rests on 2
-of 53 queries (its 3.8% at 8 concepts) and is not stable. Even the lowest
+Cells are "uncorrected / corrected" again. This table is not anchored like
+the rule's: it holds admission at its 8-concept level, the smallest layer
+the real-query data has, where the rule holds it at the 12-concept level.
+Admission at 8 is lower than at 12, so these floors are somewhat higher, and
+their losses somewhat larger, than a 12-anchored fit would give; the data
+has no 12-concept column to say by how much. B's uncorrected floor rests on
+2 of 53 queries (its 3.8% at 8 concepts) and is not stable. Even the lowest
 figure at 2,048 concepts loses 45% of the relevant pairs. Such a floor also
 could not ship: it is fitted to one operator's private queries, not derived
 from committed data.
@@ -194,24 +268,40 @@ from committed data.
 
 None moved. No floor, threshold, score or ranking weight changes in this
 branch, so every recall golden and test is byte-identical. The only code
-change is the warning (below) and the `lambo stats` line, which gains text
-only for a calibrated session holding more concepts than the measured size.
+change is the warning (below) and the wording of the `lambo stats`
+`calibration=` line for a calibrated contract.
 
 ## What ships
 
-`lambo serve` logs one line when it attaches a layer's session, if the
-layer is on its default floor and holds more concepts than that floor was
-measured on (`layer_floor_size_warning` in `src/embed/calibration.rs`), and
-`lambo stats` states the same comparison for a session. A floor set with
-`[[serve.layer]] min_similarity` is the operator's own and is not warned
-of. The floor itself is unchanged.
+`lambo serve` logs one line when it has attached a layer's session, if the
+layer is on its default floor and holds more concepts with vectors than the
+12-concept layer that floor was chosen on (`layer_floor_size_warning` in
+`src/embed/calibration.rs`). The line gives both sizes and their ratio. It
+does not offer a floor to set, because this evidence finds none: it says
+that raising the floor rejects hits labelled relevant and that the layer's
+weight still limits what an admitted hit displaces. The size is read once,
+at attach. A floor set with `[[serve.layer]] min_similarity` is the
+operator's own choice of that trade and is not warned of. The floor itself
+is unchanged.
 
-Per-query standardisation
-([#256](https://github.com/nrynss/lambo/issues/256), with abstention in
-[#174](https://github.com/nrynss/lambo/issues/174)) compares a hit with
-that query's own score distribution over the layer instead of an absolute
-bar. This evidence does not test it. It does show why an absolute bar, at
-any height, cannot do the job.
+`lambo stats` (the CLI) states two facts on its `calibration=` line: the
+size the contract's layer floor was chosen on, and how many concepts with
+vectors the session holds. It does not warn, because a reader cannot know
+whether the session is served as a layer or with which floor. The MCP
+`lambo_stats` tool is unchanged.
+
+Per-query standardisation is option 3 of
+[#254](https://github.com/nrynss/lambo/issues/254) and part of the direction
+of [#174](https://github.com/nrynss/lambo/issues/174) (abstention): compare
+a hit with that query's own score distribution over the layer instead of an
+absolute bar. [#256](https://github.com/nrynss/lambo/issues/256) is
+narrower: it reports a confidence and the top per-leg scores on every
+recall, with no threshold. This evidence tests neither. What it shows is
+that on the #190 set no absolute bar separates grade-2 pairs from irrelevant
+ones at a height that also keeps a large layer quiet. Those grade-2 pairs
+are a query against its own project's concepts; whether a shared layer's
+hits score like them was not measured, so for real layer hits this is an
+expectation, not a result.
 
 ## Limits
 
@@ -220,16 +310,21 @@ any height, cannot do the job.
   real-query check.
 - **Tail resolution.** The dev null has 23,707 pairs from 239 queries and
   100 concepts. The floor at 2,048 concepts rests on 5 of them and the one
-  at 1,024 on 9, so those two floors are uncertain by a few hundredths; at
-  256 it rests on 35. No tail is fitted and nothing is extrapolated past
-  2,048. The conclusion does not depend on the last rows: the loss is
-  already 33% at 32 concepts, where the floor rests on 275 pairs.
+  at 1,024 on 9; at 256 it rests on 35. The by-query bootstrap puts the
+  1,024 floor at 0.619 to 0.667 (point 0.649) and the 2,048 floor at 0.646
+  to 0.693 (point 0.667), against 0.565 to 0.581 at 100. No tail is fitted
+  and nothing is extrapolated past 2,048. The conclusion does not depend on
+  the last rows: at 100 concepts, where the floor rests on 89 pairs, the
+  loss is 37% (dev) and 45% (held-out).
 - **Null pairs are not independent.** They share queries and concepts, so
   the effective sample is smaller than 23,707, and Proposition 1's
   independence does not hold exactly.
 - **The labelled null is in-project.** Every concept and most queries are
-  about one project, so it is heavier-tailed than a cross-project null.
-  The set has no cross-project text (its README, "Known biases").
+  about one project, and the set has no cross-project text (its README,
+  "Known biases"). Above 0.50 its tail falls off more slowly than the
+  cross-project pairs of projects A and B do (section 1). That is two
+  projects of one operator, with approximate query vectors; it is not shown
+  that being in-project is the reason.
 - **Relevance labels have one rater.** The set is v0: labelled by agents,
   with the owner's adjudication on flagged items, and no double-labelled
   overlap. Relevance was pooled once against BGE-M3, which favours it
@@ -266,9 +361,10 @@ python3 -m unittest discover -s evidence/issue-254 -p 'test_*.py'
 ```
 
 `floor_rule.py` needs only the committed run files and the standard
-library; its random draws are seeded. `real_queries.py` needs the private
-database (table `e2`, built as `evidence/layer-floor-size/method.sql` step 3
-describes) and the `duckdb` CLI, and reads it read-only:
+library; its random draws and its bootstrap are seeded, and it takes about
+40 seconds. `real_queries.py` needs the private database (tables `e2`, `q`
+and `pool`, built as `evidence/layer-floor-size/method.sql` describes) and
+the `duckdb` CLI, and reads it read-only:
 
 ```sh
 python3 evidence/issue-254/real_queries.py --db <analysis.duckdb> \
