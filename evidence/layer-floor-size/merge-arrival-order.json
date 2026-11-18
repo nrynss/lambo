@@ -1,0 +1,110 @@
+[
+ {
+  "session": "A",
+  "written_when_session_held": "0001-0500",
+  "facts": 209,
+  "best_earlier_p50": 0.728,
+  "best_earlier_p95": 0.825,
+  "pct_ge_080": 12.4,
+  "pct_ge_085": 1.9
+ },
+ {
+  "session": "A",
+  "written_when_session_held": "0501-1000",
+  "facts": 211,
+  "best_earlier_p50": 0.731,
+  "best_earlier_p95": 0.83,
+  "pct_ge_080": 19.4,
+  "pct_ge_085": 1.4
+ },
+ {
+  "session": "A",
+  "written_when_session_held": "1001-2000",
+  "facts": 481,
+  "best_earlier_p50": 0.768,
+  "best_earlier_p95": 0.845,
+  "pct_ge_080": 27.9,
+  "pct_ge_085": 4.6
+ },
+ {
+  "session": "A",
+  "written_when_session_held": "2001-4000",
+  "facts": 363,
+  "best_earlier_p50": 0.732,
+  "best_earlier_p95": 0.834,
+  "pct_ge_080": 18.5,
+  "pct_ge_085": 3.9
+ },
+ {
+  "session": "A-archived",
+  "written_when_session_held": "0001-0500",
+  "facts": 209,
+  "best_earlier_p50": 0.728,
+  "best_earlier_p95": 0.825,
+  "pct_ge_080": 12.4,
+  "pct_ge_085": 1.9
+ },
+ {
+  "session": "A-archived",
+  "written_when_session_held": "0501-1000",
+  "facts": 189,
+  "best_earlier_p50": 0.706,
+  "best_earlier_p95": 0.813,
+  "pct_ge_080": 8.5,
+  "pct_ge_085": 0.5
+ },
+ {
+  "session": "A-archived",
+  "written_when_session_held": "1001-2000",
+  "facts": 368,
+  "best_earlier_p50": 0.761,
+  "best_earlier_p95": 0.847,
+  "pct_ge_080": 24.5,
+  "pct_ge_085": 4.1
+ },
+ {
+  "session": "A-archived",
+  "written_when_session_held": "2001-4000",
+  "facts": 840,
+  "best_earlier_p50": 0.741,
+  "best_earlier_p95": 0.829,
+  "pct_ge_080": 16.5,
+  "pct_ge_085": 1.9
+ },
+ {
+  "session": "A-archived",
+  "written_when_session_held": "4001+",
+  "facts": 767,
+  "best_earlier_p50": 0.764,
+  "best_earlier_p95": 0.842,
+  "pct_ge_080": 26.1,
+  "pct_ge_085": 4.2
+ },
+ {
+  "session": "B",
+  "written_when_session_held": "0001-0500",
+  "facts": 205,
+  "best_earlier_p50": 0.748,
+  "best_earlier_p95": 0.848,
+  "pct_ge_080": 23.4,
+  "pct_ge_085": 4.4
+ },
+ {
+  "session": "B",
+  "written_when_session_held": "0501-1000",
+  "facts": 200,
+  "best_earlier_p50": 0.737,
+  "best_earlier_p95": 0.82,
+  "pct_ge_080": 17.5,
+  "pct_ge_085": 2.5
+ },
+ {
+  "session": "B",
+  "written_when_session_held": "1001-2000",
+  "facts": 392,
+  "best_earlier_p50": 0.718,
+  "best_earlier_p95": 0.831,
+  "pct_ge_080": 9.7,
+  "pct_ge_085": 3.1
+ }
+]
