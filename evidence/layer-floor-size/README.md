@@ -2,10 +2,12 @@
 
 Two of Lambo's fixed cosine thresholds are tested against every concept of
 a store that grows: the layer admission floor (0.50 for BGE-M3) and the
-semantic merge threshold (0.85). Each concept is checked on its own cosine,
-so one above the threshold does not let another below it pass. What grows
-with the store is the number of chances for some unrelated concept to clear
-the threshold. arXiv:2610.34507, raised on
+semantic merge threshold (0.85). On the ordinary vector path each concept is
+checked on its own cosine, so one above the threshold does not let another
+below it pass. (A layer hit reached by an anchored traversal is admitted
+without that check; it is not what this measures.) What grows with the
+store is the number of chances for some unrelated concept to clear the
+threshold. arXiv:2610.34507, raised on
 [#174](https://github.com/nrynss/lambo/issues/174), shows that a fixed
 threshold therefore fires on at least one of N concepts more often as N
 grows. This measures whether that happens here.
