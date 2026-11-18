@@ -97,6 +97,31 @@
 //! embedding contract (#87, [`crate::embed::calibration`]): a measured
 //! contract (EmbeddingGemma 2 at 768 dims: 0.72) replaces 0.50 at recall
 //! time. Both knobs remain configurable per layer, and a set floor wins.
+//!
+//! ## The floor and the layer's size (#254)
+//!
+//! The floor is a bar for one query and one concept, and rule 1 asks whether
+//! *any* hit of the layer clears it: a best-of-N test. The chance that some
+//! concept unrelated to the query clears a fixed bar rises with the number
+//! of concepts in the layer, so a floor says less the further a layer grows
+//! past the size it was measured on (12 concepts for BGE-M3's 0.50, 100 for
+//! a calibrated contract's floor;
+//! [`layer_floor_measured_concepts`](crate::embed::calibration::layer_floor_measured_concepts)).
+//! On real queries against an unrelated stand-in layer, 0.50 admitted a hit
+//! for roughly 4 to 37% of queries at 8 concepts and 79 to 99% at 1,024
+//! (`evidence/layer-floor-size/`, two sensitivity estimates).
+//!
+//! The floor is **not** scaled with the layer's size. A floor that rises
+//! along the contract's measured null distribution was tried and rejected
+//! (`evidence/issue-254/`): on the #190 set it rejects 33% of the held-out
+//! hits labelled relevant at 32 concepts and 76% at 1,024 (the fixed floor:
+//! 17%), because relevant and irrelevant cosines overlap. So rule 2's "a
+//! layer whose top hits fail its floor has shown weak relevance" holds for a
+//! small layer only. A serve warns once at attach when a layer on its
+//! default floor holds more concepts than the floor was measured on
+//! ([`layer_floor_size_warning`](crate::embed::calibration::layer_floor_size_warning));
+//! what limits a large layer's effect on the answer is its weight, since an
+//! admitted hit still has to outrank the caller's own.
 
 use std::collections::{HashMap, HashSet};
 

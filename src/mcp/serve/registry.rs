@@ -1291,6 +1291,22 @@ impl SessionRegistry {
             // #33 PR 4 review L2: a layer's own writes refuse relative
             // paths, as a write scoped to it does.
             server = server.serving_a_layer(attacher.layers.is_layer(mem.session().as_str()));
+            // #254: a default floor is a per-pair bar applied to the
+            // layer's best match, so it admits more unrelated hits the
+            // further the layer has grown past the size it was measured on.
+            // Said once per attach of the layer, from the count its graph
+            // already holds; a floor the user set is not warned of.
+            if let Some(spec) = attacher.layers.layer_spec(mem.session().as_str())
+                && let Some(warning) = crate::embed::calibration::layer_floor_size_warning(
+                    &spec.session,
+                    mem.stats().concept_count,
+                    spec.configured_min_similarity(),
+                    mem.config(),
+                    mem.embedding_contract(),
+                )
+            {
+                tracing::warn!(session = %mem.session(), "lambo serve: {warning}");
+            }
             let stack = attacher.layers.stack(mem.session().as_str());
             if !stack.is_empty() {
                 // #87: a floor below the contract's calibrated one is the

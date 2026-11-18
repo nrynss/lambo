@@ -64,6 +64,16 @@
 //!   floor the user set always wins. `[embedder] calibrated_layer_floor =
 //!   false`, or `calibration = "off"`, keeps 0.50.
 //!
+//!   The floor does not depend on the layer's size (#254). Each floor
+//!   records the size it was measured on
+//!   ([`layer_floor_measured_concepts`]), and a layer on its default floor
+//!   that holds more concepts is warned of once at attach
+//!   ([`layer_floor_size_warning`]) and in `lambo stats`: the floor is
+//!   applied to the layer's best match, so a larger layer admits a hit for
+//!   more unrelated queries. A floor scaled with the size, along the null
+//!   distribution the rows were derived from, was measured and not adopted:
+//!   it rejects most hits labelled relevant (`evidence/issue-254/`).
+//!
 //! A contract with no row (any other model string, prompt profile, dimension
 //! or kind) keeps the BGE-M3 constants, as before. Each row's evidence sits
 //! beside it: the EG2 row under `evidence/issue-87-calibration/`, the Qwen3
@@ -128,8 +138,9 @@ pub struct ContractCalibration {
     ///
     /// Recorded because a fixed floor is a per-pair bar that layered recall
     /// applies best-of-N, so it admits more unrelated hits the larger a layer
-    /// grows past the size it was measured at (#254). Only reported (the
-    /// `calibration=` stats line); nothing reads it to change a constant.
+    /// grows past the size it was measured at (#254). Read to report (the
+    /// `calibration=` stats line) and to warn ([`layer_floor_size_warning`]);
+    /// nothing reads it to change a constant.
     pub measured_corpus_concepts: usize,
     /// Where the numbers come from.
     pub evidence: &'static str,
@@ -456,6 +467,68 @@ pub fn layer_floor_warning(
          irrelevant concepts than 0.50 does under BGE-M3. {fix} to use the calibrated floor \
          (evidence: {})",
         row.layer_min_similarity, row.evidence,
+    ))
+}
+
+/// How many concepts the floor a layer gets when nobody set one was measured
+/// against, under `config`'s switches and `contract` (#254): the contract's
+/// row's size when the row's floor applies, [`REFERENCE_LAYER_FLOOR_CONCEPTS`]
+/// for the BGE-M3 reference. `None` when the floor in effect was never
+/// measured for this contract: an uncalibrated contract, or a row contract
+/// with the calibration switched off, which both run BGE-M3's 0.50 over
+/// another scale ([`warn_if_uncalibrated`] and [`layer_floor_warning`] cover
+/// those).
+pub fn default_layer_floor_measured_concepts(
+    config: &crate::Config,
+    contract: &EmbeddingContract,
+) -> Option<usize> {
+    let row_applies = config.calibration == CalibrationMode::Builtin
+        && config.calibrated_layer_floor
+        && lookup(contract).is_some();
+    if row_applies || is_reference(contract) {
+        layer_floor_measured_concepts(contract)
+    } else {
+        None
+    }
+}
+
+/// One line for a layer that holds more concepts than its floor was measured
+/// against (#254), or `None`.
+///
+/// A layer's floor is a bar for one query and one concept, and admission
+/// asks whether any concept of the layer clears it. The more concepts the
+/// layer holds, the more often some concept unrelated to the query does, so
+/// past the measured size the floor admits a hit for more unrelated queries
+/// than it was chosen to (`evidence/layer-floor-size/`).
+///
+/// Fires when the floor is the default one (`configured` is `None`),
+/// [`default_layer_floor_measured_concepts`] knows its measured size, and
+/// `concepts` is strictly greater. A floor the user set is theirs and is
+/// never warned of here. No floor is changed: a floor that rises with the
+/// layer's size was measured and not adopted, because it loses most hits
+/// labelled relevant (`evidence/issue-254/`). A serve logs this once when it
+/// attaches a layer's session, and `lambo stats` shows the same comparison.
+pub fn layer_floor_size_warning(
+    layer: &str,
+    concepts: usize,
+    configured: Option<f64>,
+    config: &crate::Config,
+    contract: &EmbeddingContract,
+) -> Option<String> {
+    if configured.is_some() {
+        return None;
+    }
+    let measured = default_layer_floor_measured_concepts(config, contract)?;
+    if concepts <= measured {
+        return None;
+    }
+    let floor = resolve_layer_floor(None, config, contract);
+    Some(format!(
+        "layer {layer:?} holds {concepts} concepts, but its floor {floor} was measured on \
+         {measured}: the floor is applied to the layer's best match, so a layer this size admits \
+         a hit for more unrelated queries than the floor was chosen to (#254, \
+         evidence/layer-floor-size/). The floor is unchanged; set [[serve.layer]] min_similarity \
+         to choose one for this size"
     ))
 }
 

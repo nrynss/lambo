@@ -715,6 +715,101 @@ fn a_floor_below_the_calibrated_one_is_warned_of() {
     assert_eq!(layer_floor_warning("general", Some(0.5), &on, &bge), None);
 }
 
+/// #254: a layer on its default floor that holds more concepts than the
+/// floor was measured on is warned of, once, in one line naming both sizes
+/// and the floor. A floor the user set, a layer at or below the measured
+/// size, and a floor never measured for the contract are not.
+#[test]
+fn a_layer_larger_than_its_floor_was_measured_on_is_warned_of() {
+    let row = &BUILTIN[0];
+    let eg2 = EmbeddingContract {
+        kind: row.kind.into(),
+        model: Some(row.model.into()),
+        dim: row.dim,
+    };
+    let bge = EmbeddingContract {
+        kind: "bge_m3".into(),
+        model: None,
+        dim: 1024,
+    };
+    let foreign = EmbeddingContract {
+        kind: "bge_m3".into(),
+        model: Some("some-unmeasured-model".into()),
+        dim: 2048,
+    };
+    let on = crate::Config::default();
+
+    // The BGE-M3 reference: 0.50, chosen on a 12-concept layer.
+    assert_eq!(default_layer_floor_measured_concepts(&on, &bge), Some(12));
+    assert_eq!(
+        layer_floor_size_warning("general", 12, None, &on, &bge),
+        None
+    );
+    assert_eq!(
+        layer_floor_size_warning("general", 35, None, &on, &bge).as_deref(),
+        Some(
+            "layer \"general\" holds 35 concepts, but its floor 0.5 was measured on 12: the \
+             floor is applied to the layer's best match, so a layer this size admits a hit for \
+             more unrelated queries than the floor was chosen to (#254, \
+             evidence/layer-floor-size/). The floor is unchanged; set [[serve.layer]] \
+             min_similarity to choose one for this size"
+        )
+    );
+
+    // A row contract: its own floor, measured on the #190 corpus.
+    assert_eq!(default_layer_floor_measured_concepts(&on, &eg2), Some(100));
+    assert_eq!(
+        layer_floor_size_warning("general", 100, None, &on, &eg2),
+        None
+    );
+    let grown = layer_floor_size_warning("general", 101, None, &on, &eg2).expect("101 > 100");
+    assert!(
+        grown.contains("holds 101 concepts") && grown.contains("floor 0.72 was measured on 100"),
+        "{grown}"
+    );
+    assert!(!grown.contains('\n'), "one line: {grown}");
+
+    // A floor the user set is theirs, at any size and any value.
+    for set in [0.5, 0.72, 0.9] {
+        assert_eq!(
+            layer_floor_size_warning("general", 5000, Some(set), &on, &eg2),
+            None
+        );
+        assert_eq!(
+            layer_floor_size_warning("general", 5000, Some(set), &on, &bge),
+            None
+        );
+    }
+
+    // A floor never measured for the contract has no size to compare with:
+    // an uncalibrated contract, and a row contract switched back to 0.50
+    // (the uncalibrated and below-calibrated warnings cover those).
+    assert_eq!(default_layer_floor_measured_concepts(&on, &foreign), None);
+    assert_eq!(
+        layer_floor_size_warning("general", 5000, None, &on, &foreign),
+        None
+    );
+    for off in [
+        crate::Config {
+            calibrated_layer_floor: false,
+            ..crate::Config::default()
+        },
+        crate::Config {
+            calibration: CalibrationMode::Off,
+            ..crate::Config::default()
+        },
+    ] {
+        assert_eq!(default_layer_floor_measured_concepts(&off, &eg2), None);
+        assert_eq!(
+            layer_floor_size_warning("general", 5000, None, &off, &eg2),
+            None
+        );
+        // The reference keeps its own 0.50 under either switch.
+        assert_eq!(default_layer_floor_measured_concepts(&off, &bge), Some(12));
+        assert!(layer_floor_size_warning("general", 5000, None, &off, &bge).is_some());
+    }
+}
+
 /// #233: an `elastic` contract is never the BGE-M3 reference, even when
 /// the inference endpoint id names BGE-M3 exactly or carries the
 /// `;input_type=off` suffix: an endpoint id is an operator-chosen name, not

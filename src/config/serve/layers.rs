@@ -120,6 +120,16 @@ impl ServeLayers {
             .any(|stack| stack.iter().any(|l| l.session == session))
     }
 
+    /// `session`'s knobs as a layer, when some layered session lists it.
+    /// `[[serve.layer]]` is keyed by the layer's session, so every stack
+    /// that lists a layer resolves it to the same knobs.
+    pub fn layer_spec(&self, session: &str) -> Option<&LayerSpec> {
+        self.stacks
+            .values()
+            .flat_map(|stack| stack.iter())
+            .find(|l| l.session == session)
+    }
+
     /// Every layered session and its stack, by session name.
     pub fn iter(&self) -> impl Iterator<Item = (&str, &[LayerSpec])> {
         self.stacks.iter().map(|(s, l)| (s.as_str(), l.as_slice()))

@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- `lambo serve` warns once, when it attaches a layer's session, if the layer
+  is on its default floor and holds more concepts than that floor was measured
+  on (12 for BGE-M3's 0.50, 100 for a calibrated contract's floor): the floor
+  is tested against the layer's best match, so a larger layer admits a hit for
+  more unrelated queries (#254). `lambo stats` says the same on its
+  `calibration=` line for a session larger than the measured size. A floor set
+  with `[[serve.layer]] min_similarity` is not warned of. No floor, threshold
+  or ranking changes: a default floor that rises with the layer's size was
+  measured and not adopted, because on the #190 set it rejects 33% of the
+  held-out hits labelled relevant at 32 concepts and 76% at 1,024, against 17%
+  for the fixed floor (`evidence/issue-254/`). New library functions:
+  `embed::calibration::layer_floor_size_warning` and
+  `default_layer_floor_measured_concepts`, and `ServeLayers::layer_spec`.
 - Each built-in calibration row records the corpus size its recall constants
   were measured on (`ContractCalibration::measured_corpus_concepts`: 100, the
   #190 set), and the BGE-M3 reference records the 12-concept layer its 0.50
