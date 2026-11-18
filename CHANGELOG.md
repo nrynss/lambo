@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.13.0 (2026-11-19)
+
+### Recall strength scores
+
 - Every recall reports how strong its best match was (#256). `top_legs`
   (`bm25`, `vector_cosine`, `exact_name_match`) is the best score each
   first-phase search leg gave any concept of the session for the query,
