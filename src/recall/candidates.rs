@@ -344,7 +344,8 @@ pub(crate) struct KeywordLeg {
     /// The leg searched: a text query against an installed index.
     pub(crate) ran: bool,
     /// The best BM25 the index gave a concept of this graph, before any
-    /// exact-name substitution. `Some(0.0)` when the leg ran and matched no
+    /// exact-name substitution and before phase 1's over-fetch cap (so a
+    /// `limit` of 0 reports it too). `Some(0.0)` when the leg ran and matched no
     /// concept; `None` when it did not run, or when every score it returned
     /// was non-finite (phase 1's own leg ranking ignores those too).
     pub(crate) best_bm25: Option<f64>,
@@ -369,7 +370,8 @@ pub(crate) fn candidates_with_legs_as(
 
 /// [`candidates_with_legs_as`], plus what the keyword leg found before the
 /// exact-name substitution (#256). The same single index search: the raw
-/// best BM25 is read off the results phase 1 already iterates.
+/// best BM25 is read off its ranked results before phase 1 cuts them to its
+/// over-fetch cap, so it is the same at every `limit`.
 pub(crate) fn candidates_with_keyword_leg_as(
     graph: &Graph,
     index: &InvertedIndex,
@@ -386,16 +388,26 @@ pub(crate) fn candidates_with_keyword_leg_as(
     let keyword_cap = limit.saturating_mul(KEYWORD_OVERFETCH);
     let keyword_ran = !query.trim().is_empty();
     let mut legs: LegProvenance = HashMap::new();
-    // #256: the leg's own best, over the concepts of this graph (the only
-    // ones assembly can return), before the exact-name overwrite below.
+    // One index search: its first `keyword_cap` results are the leg's
+    // candidates, exactly as `index.search(query, keyword_cap)` returns them.
+    let ranked = index.search_ranked(query);
+    for s in ranked.iter().take(keyword_cap) {
+        legs.entry(s.item).or_default().keyword = Some(s.score);
+    }
+    // #256: the leg's own best, read off the same search before the cut to
+    // `keyword_cap`, so it does not move with `limit` (a library caller's
+    // `top_k` of 0 included). Counted over the concepts of this graph (the
+    // only ones assembly can return), before the exact-name overwrite below.
+    // The search is best-first, so the first such concept with a finite
+    // score is the best: the walk stops there, normally at the first result.
     let mut matched = false;
     let mut best_bm25: Option<f64> = None;
-    for s in index.search(query, keyword_cap) {
-        legs.entry(s.item).or_default().keyword = Some(s.score);
+    for s in &ranked {
         if matches!(graph.node(s.item), Some(Node::Concept(_))) {
             matched = true;
             if s.score.is_finite() {
-                best_bm25 = Some(best_bm25.map_or(s.score, |b| b.max(s.score)));
+                best_bm25 = Some(s.score);
+                break;
             }
         }
     }
@@ -1113,6 +1125,59 @@ mod tests {
             NodeId(Uuid::from_u64_pair(2, 4)),
         ];
         assert_eq!(out, expected);
+    }
+
+    /// #256: the keyword leg's best is read off the whole index search, not
+    /// the over-fetch cap, so a `limit` of 0 reports the same best as any
+    /// other; it still counts only concepts of the graph (an indexed concept
+    /// the graph does not hold scores higher here and is skipped), and the
+    /// candidates and ranking are those of the capped search.
+    #[test]
+    fn the_keyword_best_ignores_the_cap_and_keeps_to_the_graph() {
+        let (g, mut index) = planted_graph();
+        let i1 = interaction(1, None, 0);
+        // Not in the graph; "alpha" twice in two tokens outscores "alpha".
+        index.add(&concept(9, i1.id, "alpha alpha"));
+        let raw = index.search("alpha", 10);
+        assert_eq!(raw.len(), 2, "premise: {raw:?}");
+        assert_eq!(raw[0].item, NodeId(Uuid::from_u64_pair(2, 9)), "premise");
+        let member = raw[1].score;
+        assert!(raw[0].score > member, "premise: {raw:?}");
+        for limit in [0, 1, 5] {
+            let (out, legs, keyword) = candidates_with_keyword_leg_as(
+                &g,
+                &index,
+                Phase1Input::default(),
+                "alpha",
+                limit,
+                RecentLeg::Skip,
+            );
+            assert_eq!(keyword.best_bm25, Some(member), "limit {limit}");
+            assert!(keyword.ran && !keyword.exact_name);
+            let cap = limit * KEYWORD_OVERFETCH;
+            let want: std::collections::HashSet<NodeId> =
+                index.search("alpha", cap).iter().map(|s| s.item).collect();
+            let got: std::collections::HashSet<NodeId> = legs.keys().copied().collect();
+            assert_eq!(got, want, "limit {limit}: the capped search's candidates");
+            for s in index.search("alpha", cap) {
+                assert_eq!(legs[&s.item].keyword, Some(s.score), "limit {limit}");
+            }
+            assert_eq!(out.is_empty(), limit == 0, "limit {limit}");
+        }
+        // Matched only by a concept the graph does not hold, or by nothing:
+        // the leg ran and found no concept of the graph, best 0.
+        index.add(&concept(10, i1.id, "omega"));
+        for q in ["omega", "zzz"] {
+            let (_, _, keyword) = candidates_with_keyword_leg_as(
+                &g,
+                &index,
+                Phase1Input::default(),
+                q,
+                0,
+                RecentLeg::Skip,
+            );
+            assert_eq!(keyword.best_bm25, Some(0.0), "{q}");
+        }
     }
 
     #[test]

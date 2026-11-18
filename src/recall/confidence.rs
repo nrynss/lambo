@@ -17,13 +17,17 @@
 //! every concept a leg scored, before phase-2 expansion and before
 //! phase-3's `top_k` cut. So the maximum is over what the leg scored,
 //! returned or not. The keyword leg contributes the top `top_k x 4` BM25
-//! matches of the session's inverted index; the vector leg contributes the
-//! `top_k` nearest stored vectors. Both are best-first reads, so the leg's
-//! maximum is always among them and reading it costs no store call and no
-//! embed: the keyword best is read off the one index search phase 1 makes
-//! (`KeywordLeg`), the vector best is a fold over a map the pipeline
-//! already built (and caches with the pipeline). The recent leg's flat score
-//! and expansion members are not counted (#174).
+//! matches of the session's inverted index, but its best is read off the
+//! one index search phase 1 makes before that cut (`KeywordLeg`), so `bm25`
+//! is the same at every `top_k`, 0 included. The vector leg contributes the
+//! `top_k` nearest stored vectors, a best-first read, so its maximum is
+//! among them; the vector best is a fold over a map the pipeline already
+//! built (and caches with the pipeline). Neither costs a store call or an
+//! embed. A `top_k` of 0, which only a library caller can send (the CLI
+//! and MCP take 1 to 100), asks the vector leg for no neighbours, so
+//! `vector_cosine` is `None` there and a text recall reports
+//! `"keyword-only-v0"` where `top_k = 1` would report `"noisy-or-v0"`.
+//! The recent leg's flat score and expansion members are not counted (#174).
 //!
 //! An exact-name match ranks its concept with a keyword score of `1.0` in
 //! place of its BM25 (the per-hit `legs.keyword` says so, unchanged). That

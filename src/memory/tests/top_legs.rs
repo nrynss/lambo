@@ -173,6 +173,52 @@ async fn a_keyword_only_recall_reports_the_keyword_leg_and_a_keyword_only_confid
     mem.close().await.unwrap();
 }
 
+/// The keyword leg's best is read before phase 1 cuts the index search to
+/// its over-fetch cap (`top_k x 4`), so a library caller's `top_k` of 0, a
+/// cap of 0, reports the same `bm25` and keyword-only confidence as
+/// `top_k = 1`, not a leg that matched nothing.
+#[tokio::test]
+async fn a_zero_top_k_reports_the_same_bm25_as_top_k_one() {
+    let mem = seeded(
+        "top-legs-zero-k",
+        &[
+            (KEYWORD_HIT, ConceptType::Logic),
+            ("auth middleware", ConceptType::Entity),
+            (VECTOR_HIT, ConceptType::Observation),
+        ],
+    )
+    .await;
+    let one = mem.recall_detailed(top_k(1)).await.unwrap();
+    let zero = mem.recall_detailed(top_k(0)).await.unwrap();
+    assert!(
+        zero.hits.is_empty() && zero.legs.values().all(|l| l.keyword.is_none()),
+        "premise: a cap of 0 keeps no keyword candidate: {:?}",
+        zero.legs
+    );
+    let bm25 = one.top_legs.bm25.expect("the keyword leg ran");
+    assert!(bm25 > 0.0, "{:?}", one.top_legs);
+    assert_eq!(zero.top_legs.bm25, one.top_legs.bm25);
+    assert_eq!(zero.top_legs, one.top_legs);
+    assert_keyword_only(&zero, bm25);
+    assert_eq!(zero.confidence, one.confidence);
+    mem.close().await.unwrap();
+
+    // With both legs, a `top_k` of 0 asks the vector leg for no neighbours:
+    // `bm25` holds, `vector_cosine` is null, and the basis is keyword-only.
+    let mem = two_leg_session("top-legs-zero-k-two", Builtin).await;
+    let one = mem.recall_detailed(top_k(1)).await.unwrap();
+    let zero = mem.recall_detailed(top_k(0)).await.unwrap();
+    assert!(one.top_legs.vector_cosine.is_some(), "{:?}", one.top_legs);
+    assert_eq!(
+        one.confidence.as_ref().map(|c| c.basis.as_str()),
+        Some(BASIS)
+    );
+    assert_eq!(zero.top_legs.bm25, one.top_legs.bm25);
+    assert_eq!(zero.top_legs.vector_cosine, None, "{:?}", zero.top_legs);
+    assert_keyword_only(&zero, one.top_legs.bm25.expect("keyword leg"));
+    mem.close().await.unwrap();
+}
+
 /// `r`'s confidence is the keyword-only basis at keyword score `bm25`.
 fn assert_keyword_only(r: &DetailedRecall, bm25: f64) {
     let c = r.confidence.clone().expect("the keyword leg ran");

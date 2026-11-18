@@ -122,6 +122,17 @@ impl InvertedIndex {
     /// grok G1) — `search("user user")` scores identically to `search("user")`;
     /// document-side duplicates still matter via tf.
     pub fn search(&self, query: &str, limit: usize) -> Vec<Scored<NodeId>> {
+        let mut results = self.search_ranked(query);
+        results.truncate(limit);
+        results
+    }
+
+    /// [`search`](Self::search) before its truncation to a limit: every
+    /// concept with a strictly positive score, in the same order. Recall's
+    /// phase 1 makes its one keyword search through here, keeps the first
+    /// `limit` as `search` would, and reads the leg's best score off the
+    /// whole result (#256), so that best does not move with the limit.
+    pub(crate) fn search_ranked(&self, query: &str) -> Vec<Scored<NodeId>> {
         if self.total_docs == 0 {
             return Vec::new();
         }
@@ -176,7 +187,6 @@ impl InvertedIndex {
                 )
             })
         });
-        results.truncate(limit);
         results
     }
 }
