@@ -33,15 +33,19 @@
 - A dependency question whose traversal answer was predicted but declined
   because a write changed the graph in between (its anchor lost its last
   dependent, or was renamed or retired) used to fall through to a blended
-  recall with no vector leg and no sign of it. It now carries the
-  `vector_degraded` annotation and warning, `recall: a concurrent write
-  changed the graph after a dependency-question dispatch was planned, and the
-  dispatch did not fire; vector leg skipped, results are keyword-only`, when a
-  vector leg would have run. A predicted dispatch that declines with no write
-  in between (`top_k` 0 leaves the traversal nothing to return) carries the
-  same annotation worded `recall: a planned dependency-question dispatch did
-  not fire; vector leg skipped, results are keyword-only`. Ranking is
-  unchanged.
+  recall with no vector leg and no sign of it (#263). It now runs the vector
+  search it skipped, once, with no graph lock held, and answers from the graph
+  as it is then: by traversal if another write gave the anchor dependents
+  back, else by the blend with both legs, the same hits, ranking, `top_legs`
+  and `confidence` as the same recall made after the write. No query is
+  embedded twice, and a recall whose dispatch fires, or that plans none, makes
+  no extra search. If that search fails, the answer says so as any failed
+  vector read does (`vector_degraded`, keyword-only). The interim
+  `vector_degraded` warnings that named a dispatch that "did not fire" are
+  gone. A library recall with `top_k` 0, at which the traversal has nothing to
+  return, no longer plans a dependency-question dispatch: it is an ordinary
+  recall at that `top_k` (no hit, `vector_cosine` `null`, `keyword-only-v0`),
+  with no warning.
 - Each built-in calibration row records the corpus size its recall constants
   were measured on (`ContractCalibration::measured_corpus_concepts`: 100, the
   #190 set), and the BGE-M3 reference records the 12-concept layer its 0.50

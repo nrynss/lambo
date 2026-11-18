@@ -148,6 +148,90 @@ impl Route {
     }
 }
 
+/// One recall's phase-1 store gather, with everything it needs, so
+/// `Daemon::recall_routed` can run it before its graph lock and, when a
+/// predicted dispatch declines, once more after releasing that lock (#263).
+/// Never run while the graph lock is held: the vector leg is async store I/O.
+#[derive(Clone, Copy)]
+struct Phase1Gather<'a> {
+    vectors: crate::store::vector_source::VectorCandidates<'a>,
+    session: &'a SessionId,
+    embedding: Option<(&'a [f32], &'a crate::types::EmbeddingContract)>,
+    top_k: usize,
+    recent_score: f64,
+    fusion: crate::recall::fusion::RecallFusion,
+    route: Route,
+}
+
+impl Phase1Gather<'_> {
+    /// Gather phase 1's vector leg. `Err` only on a route whose vector leg is
+    /// required; any other failed read degrades to no vector input and adds
+    /// its `vector_degraded` annotation to `refused`.
+    async fn run(
+        self,
+        refused: &mut Vec<Annotation>,
+    ) -> Result<candidates::Phase1Input, StoreError> {
+        let Self {
+            vectors,
+            session,
+            embedding,
+            top_k,
+            recent_score,
+            fusion,
+            route,
+        } = self;
+        match candidates::gather_from(vectors, session, embedding, top_k).await {
+            Ok(input) => Ok(candidates::Phase1Input {
+                recent_score,
+                fusion,
+                ..input
+            }),
+            // #22 PR 6: a recall by image or vector has nothing to
+            // degrade to; its vector leg is the question.
+            Err(err) if route.vector_required() => {
+                tracing::warn!(
+                    target: "lambo::recall",
+                    "recall by vector failed: the vector read failed: {err}"
+                );
+                Err(err)
+            }
+            Err(err) => {
+                tracing::warn!(target: "lambo::recall", "phase-1 gather degraded: {err}");
+                // E2E-6: a mid-flight refusal of the checked vector read
+                // (H1's `Invariant` when the durable embedding contract
+                // changed between the reader's load and its vector query)
+                // is a client-visible degradation, not just a log line:
+                // attach the `vector_degraded` annotation so both the CLI
+                // header and the portal's card/verbatim views say the
+                // results are keyword-only. Ranking stays fail-closed —
+                // only the explanation is new. Distinct from the
+                // CLI-side embed-failure annotation (that path has no
+                // query embedding, so `gather` returns early and never
+                // reaches the store), so the two never duplicate.
+                //
+                // Any other failure of the vector read (a backend error,
+                // a timeout, a tier whose durable fallback failed too)
+                // drops the same leg, so it says so the same way; its
+                // text names no detail (that can carry a store URL or a
+                // driver string), the log above has it.
+                let text = if matches!(&err, StoreError::Invariant(msg) if msg.contains("embedding contract changed"))
+                {
+                    "recall: vector leg refused because the embedding contract changed \
+                     mid-query; results are keyword-only"
+                } else {
+                    "recall: the store's vector read failed (detail logged); vector leg \
+                     skipped, results are keyword-only"
+                };
+                refused.push(Annotation::new(AnnotationKind::VectorDegraded, text));
+                Ok(candidates::Phase1Input {
+                    fusion,
+                    ..candidates::Phase1Input::default()
+                })
+            }
+        }
+    }
+}
+
 /// The daemon cycle's `now` source (T4.6 finding-1 regression seam).
 ///
 /// Production uses [`Utc::now`]; tests swap in a controllable clock
@@ -705,13 +789,14 @@ impl Daemon {
             route.routes_structural() && dispatch::classify(&query.query) == RecallKind::Structural;
 
         // Cheap in-memory dispatch check (no store I/O) under a brief graph read:
-        // does the query resolve an anchor WITH structural dependents? Only then
-        // can the (async, vector-I/O) gather be skipped (T9-R1-3); a structural
-        // phrasing that does not dispatch falls through to the FULL blend below,
-        // never a degraded keyword-only answer. The exceptions are a write
-        // landing between this check and the graph lock below, and a `top_k`
-        // of 0, either of which can make a predicted dispatch decline after
-        // the gather was skipped; that answer is keyword-only and says so
+        // does the query resolve an anchor WITH structural dependents, at a
+        // `top_k` the traversal can answer (#263: not 0)? Only then can the
+        // (async, vector-I/O) gather be skipped (T9-R1-3); a structural
+        // phrasing that does not dispatch falls through to the FULL blend
+        // below, never a degraded keyword-only answer. A write landing between
+        // this check and the graph lock below can still make the predicted
+        // dispatch decline after the gather was skipped; the recall then runs
+        // the skipped gather once and answers from the graph as it is then
         // (see after the dispatch).
         //
         // #171: the anchor is resolved here once, stamped with the epoch, and
@@ -720,7 +805,7 @@ impl Daemon {
         let (anchor, dispatch_ready) = if structural {
             let g = self.graph.read();
             let anchor = dispatch::ResolvedAnchor::resolve(&g, &query.query);
-            let ready = dispatch::fits_structural_with(&g, anchor.choice());
+            let ready = dispatch::fits_structural_with(&g, anchor.choice(), query.top_k);
             (Some(anchor), ready)
         } else {
             (None, false)
@@ -747,67 +832,23 @@ impl Daemon {
             candidates::RECENT_SCORE
         };
         let fusion = self.fusion;
-        let input = if dispatch_ready {
+        let gather = Phase1Gather {
+            vectors,
+            session: &graph_session,
+            embedding,
+            top_k: query.top_k,
+            recent_score,
+            fusion,
+            route,
+        };
+        let mut input = if dispatch_ready {
             candidates::Phase1Input {
                 fusion,
                 ..candidates::Phase1Input::default()
             }
         } else {
-            match candidates::gather_from(vectors, &graph_session, embedding, query.top_k).await {
-                Ok(input) => candidates::Phase1Input {
-                    recent_score,
-                    fusion,
-                    ..input
-                },
-                // #22 PR 6: a recall by image or vector has nothing to
-                // degrade to; its vector leg is the question.
-                Err(err) if route.vector_required() => {
-                    tracing::warn!(
-                        target: "lambo::recall",
-                        "recall by vector failed: the vector read failed: {err}"
-                    );
-                    return Err(err);
-                }
-                Err(err) => {
-                    tracing::warn!(target: "lambo::recall", "phase-1 gather degraded: {err}");
-                    // E2E-6: a mid-flight refusal of the checked vector read
-                    // (H1's `Invariant` when the durable embedding contract
-                    // changed between the reader's load and its vector query)
-                    // is a client-visible degradation, not just a log line:
-                    // attach the `vector_degraded` annotation so both the CLI
-                    // header and the portal's card/verbatim views say the
-                    // results are keyword-only. Ranking stays fail-closed —
-                    // only the explanation is new. Distinct from the
-                    // CLI-side embed-failure annotation (that path has no
-                    // query embedding, so `gather` returns early and never
-                    // reaches the store), so the two never duplicate.
-                    //
-                    // Any other failure of the vector read (a backend error,
-                    // a timeout, a tier whose durable fallback failed too)
-                    // drops the same leg, so it says so the same way; its
-                    // text names no detail (that can carry a store URL or a
-                    // driver string), the log above has it.
-                    let text = if matches!(&err, StoreError::Invariant(msg) if msg.contains("embedding contract changed"))
-                    {
-                        "recall: vector leg refused because the embedding contract changed \
-                         mid-query; results are keyword-only"
-                    } else {
-                        "recall: the store's vector read failed (detail logged); vector leg \
-                         skipped, results are keyword-only"
-                    };
-                    vector_leg_refused.push(Annotation::new(AnnotationKind::VectorDegraded, text));
-                    candidates::Phase1Input {
-                        fusion,
-                        ..candidates::Phase1Input::default()
-                    }
-                }
-            }
+            gather.run(&mut vector_leg_refused).await?
         };
-
-        // ONE graph guard spans pipeline acquisition AND assembly, so the epoch
-        // in the cache key identifies the exact graph snapshot the context is
-        // built from (P1-1). Lock order: graph read -> index read -> hot write.
-        let graph = self.graph.read();
 
         // T9 dispatch: answer a structural question by traversal when the graph has
         // an anchor with dependents; otherwise fall through to the blended pipeline
@@ -822,42 +863,56 @@ impl Daemon {
         // mutation. The daemon HotList tracks conflict/condition entries, not recall
         // recency - neither the blend nor this path bumps recall recency - so there
         // is no recency to refresh here.
-        let planned_epoch = anchor.as_ref().map(dispatch::ResolvedAnchor::epoch);
-        let anchor = anchor.map(|a| a.current(&graph, &query.query));
-        if let Some(anchor) = &anchor
-            && let Some(result) = dispatch::try_structural_with(
-                &graph,
-                &query.query,
-                anchor.choice(),
-                query.top_k,
-                query.max_tokens,
-            )
-        {
-            return Ok(result);
-        }
-        // The lock-free pre-check above predicted this dispatch and skipped
-        // the vector gather, but the dispatch declined: the recall falls
-        // through to the blend with no vector input. Two causes: a write
-        // that landed before the graph lock (the anchor's dependents
-        // removed, the anchor renamed or retired), which moved the graph
-        // epoch; or a decline the pre-check does not predict, at an
-        // unchanged epoch (a `top_k` of 0 leaves the traversal nothing to
-        // return). Ranking stays as it is (fail closed, as for every other
-        // lost vector leg), but the caller hears the leg was skipped, the
-        // same way: a `vector_degraded` annotation and its warning line,
-        // naming a concurrent write only when the epoch says one happened.
-        // Only when the leg would have run (a query embedding and a store
-        // that searches vectors); otherwise nothing was lost.
+        let try_dispatch = |graph: &Graph, anchor: Option<&dispatch::ResolvedAnchor>| {
+            anchor.and_then(|anchor| {
+                dispatch::try_structural_with(
+                    graph,
+                    &query.query,
+                    anchor.choice(),
+                    query.top_k,
+                    query.max_tokens,
+                )
+            })
+        };
+        let mut anchor = anchor;
+
+        // #263: when the pre-check skipped a vector leg that would have run
+        // (a query embedding and a store that searches vectors), the dispatch
+        // is tried under a graph guard of its own first. If it declines, a
+        // write landed before that lock (the anchor's dependents removed, the
+        // anchor renamed or retired): the guard is released, the skipped
+        // gather runs, and the recall answers from the graph as it is once
+        // the lock is taken again below, by traversal if a later write gave
+        // the anchor dependents back, else by the blend, now with its vector
+        // leg. That is the answer the same recall gets with no pre-check.
+        // Bounded: the gather runs at most once per recall (the second pass
+        // has the vector input, so it skips nothing), and no graph guard is
+        // held across it (the guard's scope ends before the await). A failed
+        // read degrades and says so as on the ordinary path. The query
+        // embedding is the caller's, reused: nothing is embedded again. With
+        // no vector leg to run the skipped gather would have returned nothing,
+        // so the one guard below already gives the full answer. The recall
+        // cache never sees a re-gathered or degraded pipeline: this runs only
+        // with a query embedding, and a vector-dependent pipeline is never
+        // cached or served from the cache (P1-2, below).
         if dispatch_ready && vector_capable && embedding.is_some() {
-            let text = if planned_epoch == Some(graph.epoch()) {
-                "recall: a planned dependency-question dispatch did not fire; vector leg \
-                 skipped, results are keyword-only"
-            } else {
-                "recall: a concurrent write changed the graph after a dependency-question \
-                 dispatch was planned, and the dispatch did not fire; vector leg skipped, \
-                 results are keyword-only"
-            };
-            vector_leg_refused.push(Annotation::new(AnnotationKind::VectorDegraded, text));
+            {
+                let graph = self.graph.read();
+                anchor = anchor.map(|a| a.current(&graph, &query.query));
+                if let Some(result) = try_dispatch(&graph, anchor.as_ref()) {
+                    return Ok(result);
+                }
+            }
+            input = gather.run(&mut vector_leg_refused).await?;
+        }
+
+        // ONE graph guard spans pipeline acquisition AND assembly, so the epoch
+        // in the cache key identifies the exact graph snapshot the context is
+        // built from (P1-1). Lock order: graph read -> index read -> hot write.
+        let graph = self.graph.read();
+        let anchor = anchor.map(|a| a.current(&graph, &query.query));
+        if let Some(result) = try_dispatch(&graph, anchor.as_ref()) {
+            return Ok(result);
         }
 
         let scores = self.scores.read().clone();
