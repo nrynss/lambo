@@ -1,0 +1,20 @@
+[
+ {
+  "project": "A",
+  "pairs": 499620,
+  "cosine_p50": 0.405,
+  "cosine_p95": 0.483,
+  "cosine_p99": 0.516,
+  "pct_pairs_ge_050_uncorrected": 2.3,
+  "pct_pairs_ge_050_corrected": 5.65
+ },
+ {
+  "project": "B",
+  "pairs": 249524,
+  "cosine_p50": 0.375,
+  "cosine_p95": 0.46,
+  "cosine_p99": 0.495,
+  "pct_pairs_ge_050_uncorrected": 0.77,
+  "pct_pairs_ge_050_corrected": 2.09
+ }
+]

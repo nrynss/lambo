@@ -117,9 +117,27 @@ pub struct ContractCalibration {
     /// *default* 0.85 under this contract, by cosine (before #193's
     /// identifier guard), for the attach warning.
     pub default_threshold_merges: f64,
+    /// How many corpus concepts each query was scored against in the null
+    /// distribution behind `recent_score` and `layer_min_similarity` (the
+    /// #190 set's `fixtures/eval/corpus.json`). The dev split divides queries
+    /// and pairs, not concepts, so every dev query was scored against the
+    /// whole corpus. `merge_threshold` comes from labelled pairs and does not
+    /// depend on it. The quantile match makes the row's floor admit the same
+    /// share of single irrelevant pairs as BGE-M3's 0.50, which was itself
+    /// chosen on a smaller layer ([`REFERENCE_LAYER_FLOOR_CONCEPTS`]).
+    ///
+    /// Recorded because a fixed floor is a per-pair bar that layered recall
+    /// applies best-of-N, so it admits more unrelated hits the larger a layer
+    /// grows past the size it was measured at (#254). Only reported (the
+    /// `calibration=` stats line); nothing reads it to change a constant.
+    pub measured_corpus_concepts: usize,
     /// Where the numbers come from.
     pub evidence: &'static str,
 }
+
+/// The #190 set's corpus size, which every built-in row was measured on:
+/// each run's `set.corpus` (`evidence/*/runs/*.json`) is 100.
+const EVAL_SET_CORPUS_CONCEPTS: usize = 100;
 
 /// The EG2 contract measured for #87.
 const EG2_Q8_768: ContractCalibration = ContractCalibration {
@@ -130,6 +148,7 @@ const EG2_Q8_768: ContractCalibration = ContractCalibration {
     layer_min_similarity: 0.72,
     merge_threshold: 0.93,
     default_threshold_merges: 0.78,
+    measured_corpus_concepts: EVAL_SET_CORPUS_CONCEPTS,
     evidence: "evidence/issue-87-calibration/",
 };
 
@@ -146,6 +165,7 @@ const QWEN3_4B_2560: ContractCalibration = ContractCalibration {
     layer_min_similarity: 0.59,
     merge_threshold: 0.89,
     default_threshold_merges: 0.70,
+    measured_corpus_concepts: EVAL_SET_CORPUS_CONCEPTS,
     evidence: "evidence/issue-221/",
 };
 
@@ -159,6 +179,7 @@ const QWEN3_4B_1024: ContractCalibration = ContractCalibration {
     layer_min_similarity: 0.60,
     merge_threshold: 0.90,
     default_threshold_merges: 0.71,
+    measured_corpus_concepts: EVAL_SET_CORPUS_CONCEPTS,
     evidence: "evidence/issue-221/",
 };
 
@@ -175,6 +196,7 @@ const ELASTIC_JINA_V3_1024: ContractCalibration = ContractCalibration {
     layer_min_similarity: 0.39,
     merge_threshold: 0.86,
     default_threshold_merges: 0.64,
+    measured_corpus_concepts: EVAL_SET_CORPUS_CONCEPTS,
     evidence: "evidence/issue-237/",
 };
 
@@ -239,6 +261,30 @@ pub fn is_reference(contract: &EmbeddingContract) -> bool {
             .as_deref()
             .is_some_and(|m| m.starts_with("BAAI/bge-m3@")),
         _ => false,
+    }
+}
+
+/// The size of the layer the BGE-M3 reference's layer floor
+/// ([`DEFAULT_LAYER_MIN_SIMILARITY`](crate::recall::layered::DEFAULT_LAYER_MIN_SIMILARITY),
+/// 0.50) was chosen on: #157's sweep ran against a `general` layer of 12
+/// concepts (`dev-diary/notes/feat-157-layer-tuning.md`, "The general layer
+/// contains 12 concepts", aggregates in `evidence/157-layer-tuning/`).
+/// Recorded for the same reason as
+/// [`ContractCalibration::measured_corpus_concepts`] (#254). It describes
+/// the floor only: the reference's recent score and merge threshold were set
+/// on labelled pairs (`evidence/mooshik-g-recall-calibration/`), not against
+/// a corpus.
+pub const REFERENCE_LAYER_FLOOR_CONCEPTS: usize = 12;
+
+/// How many concepts `contract`'s layer floor was measured against (#254):
+/// its [`BUILTIN`] row's [`ContractCalibration::measured_corpus_concepts`],
+/// or [`REFERENCE_LAYER_FLOOR_CONCEPTS`] for the [`is_reference`] BGE-M3
+/// contract. `None` for an uncalibrated contract.
+pub fn layer_floor_measured_concepts(contract: &EmbeddingContract) -> Option<usize> {
+    match lookup(contract) {
+        Some(row) => Some(row.measured_corpus_concepts),
+        None if is_reference(contract) => Some(REFERENCE_LAYER_FLOOR_CONCEPTS),
+        None => None,
     }
 }
 

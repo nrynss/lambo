@@ -1,0 +1,11 @@
+[
+ {
+  "pairs": 627,
+  "mean_signed_diff": -0.0134,
+  "mean_abs_diff": 0.0181,
+  "correlation": 0.9601,
+  "intercept": 0.0438,
+  "slope": 0.9504,
+  "rmse": 0.0195
+ }
+]
