@@ -119,4 +119,26 @@ fn provision_on_a_fresh_sqlite_file_makes_recall_work() {
     );
     let ctx = String::from_utf8_lossy(&recall2.stdout);
     assert!(ctx.contains("user schema"), "{ctx}");
+
+    // #256: the score report is one line on stderr, a JSON object under the
+    // names every other surface uses; stdout stays the context block alone.
+    assert!(!ctx.contains("recall scores"), "{ctx}");
+    assert!(!ctx.contains("top_legs"), "{ctx}");
+    let stderr = String::from_utf8_lossy(&recall2.stderr);
+    let lines: Vec<&str> = stderr
+        .lines()
+        .filter_map(|l| l.strip_prefix("recall scores: "))
+        .collect();
+    assert_eq!(lines.len(), 1, "one score line on stderr: {stderr}");
+    let scores: serde_json::Value = serde_json::from_str(lines[0]).expect("a JSON object");
+    let top = scores["top_legs"].as_object().expect("top_legs");
+    assert!(top.contains_key("bm25") && top.contains_key("vector_cosine"));
+    assert!(
+        top["bm25"].as_f64().is_some_and(|s| s > 0.0),
+        "the keyword leg matched: {scores}"
+    );
+    if let Some(confidence) = scores.get("confidence") {
+        assert_eq!(confidence["provisional"], serde_json::json!(true));
+        assert!(confidence["basis"].is_string());
+    }
 }

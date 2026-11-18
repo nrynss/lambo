@@ -103,7 +103,9 @@ use std::collections::{HashMap, HashSet};
 use crate::recall::candidates::LegScores;
 use crate::recall::detail::{Annotation, AnnotationKind, DetailedHit, DetailedRecall};
 use crate::recall::format::{self, ContextBlock};
-use crate::types::{CanonizationStatus, NodeId, RecallHit, SessionId};
+use crate::types::{
+    CanonizationStatus, NodeId, ProvisionalConfidence, RecallHit, SessionId, TopLegs,
+};
 
 /// The default merge weight of a layer: its hit at position `r` ranks as
 /// `0.5 / r`, against `1 / r` for the caller's own session.
@@ -240,6 +242,32 @@ pub struct LayeredRecall {
     /// for a hit with no leg score (expansion or traversal).
     #[allow(dead_code)] // read by the call ledger in #33 PR 3
     pub(crate) hit_legs: Vec<Option<LegScores>>,
+    /// #256: the caller's own session's best per-leg scores. Never blended
+    /// with a layer's: a layer is another store, of another size.
+    pub top_legs: TopLegs,
+    /// #256: the provisional combined value of [`Self::top_legs`], when it
+    /// can be computed (see [`ProvisionalConfidence`]). The caller's own
+    /// session's only.
+    pub confidence: Option<ProvisionalConfidence>,
+    /// #256: each available layer's own best per-leg scores, in tier order
+    /// (an unavailable layer has no entry). Each layer's recall scored them
+    /// against its own concepts with the caller's query, so they cost
+    /// nothing extra; they are over every candidate the layer's legs
+    /// scored, admitted past its floor or not (#254). Empty for an
+    /// unlayered recall.
+    pub layer_top_legs: Vec<LayerTopLegs>,
+}
+
+/// One layer's best per-leg scores in a layered recall (#256).
+#[non_exhaustive]
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct LayerTopLegs {
+    /// The layer.
+    pub session: SessionId,
+    /// Its legs' best scores, as [`TopLegs`] defines them. A layer runs no
+    /// recent leg.
+    #[serde(flatten)]
+    pub top_legs: TopLegs,
 }
 
 impl LayeredRecall {
@@ -271,6 +299,9 @@ impl LayeredRecall {
             context: detail.context.clone(),
             warnings: detail.warnings.clone(),
             unavailable_layers: Vec::new(),
+            top_legs: detail.top_legs,
+            confidence: detail.confidence.clone(),
+            layer_top_legs: Vec::new(),
             detail,
             hit_legs,
         }
@@ -841,6 +872,9 @@ where
             .first()
             .and_then(|l| l.recall.as_ref())
             .is_some_and(|t| t.recall.cold_start),
+        // #256: the caller's own session's, never a blend with a layer's.
+        top_legs: recall_of(0).map(|t| t.recall.top_legs).unwrap_or_default(),
+        confidence: recall_of(0).and_then(|t| t.recall.confidence.clone()),
         detailed,
         response_annotations,
     };
@@ -866,6 +900,18 @@ where
         context: detail.context.clone(),
         warnings: detail.warnings.clone(),
         unavailable_layers: unavailable,
+        top_legs: detail.top_legs,
+        confidence: detail.confidence.clone(),
+        layer_top_legs: lists
+            .iter()
+            .skip(1)
+            .filter_map(|l| {
+                Some(LayerTopLegs {
+                    session: l.session.clone(),
+                    top_legs: l.recall.as_ref()?.recall.top_legs,
+                })
+            })
+            .collect(),
         detail,
         hit_legs,
     }

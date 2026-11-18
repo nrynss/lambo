@@ -27,7 +27,7 @@ async fn recall_entry_reproduces_context_golden() {
         Duration::from_secs(3600),
     )
     .with_clock(Arc::new(move || now))
-    .with_index(index);
+    .with_index(index.clone());
     daemon.scores.write().ranked = rescore(&graph.read(), &ScoringWeights::default());
     daemon.scores.write().epoch = graph.read().epoch();
 
@@ -91,6 +91,51 @@ async fn recall_entry_reproduces_context_golden() {
     );
     assert_eq!(cache.len(), 1, "first call populates the cache");
 
+    // #256: the same golden recall (its block above is the committed file,
+    // untouched, so ranking, hits and scores are what they were) now also
+    // reports its legs' best scores. The keyword leg's is the best BM25 the
+    // index gives the query, computed here apart from the pipeline; the
+    // fixture has no embeddings, so there is no cosine and no confidence.
+    let keyword_best = index
+        .read()
+        .search(
+            &query.query,
+            query.top_k * crate::recall::candidates::KEYWORD_OVERFETCH,
+        )
+        .into_iter()
+        .map(|s| s.score)
+        .reduce(f64::max)
+        .expect("the golden query matches");
+    assert!(keyword_best > 0.0);
+    assert_eq!(
+        result.top_legs,
+        crate::types::TopLegs {
+            bm25: Some(keyword_best),
+            vector_cosine: None,
+        }
+    );
+    assert_eq!(result.confidence, None);
+    // On the wire the result only gained `top_legs`: without it, it is the
+    // three fields it always had, with the values they always had.
+    let mut wire = serde_json::to_value(&result).unwrap();
+    assert_eq!(
+        wire.as_object_mut().unwrap().remove("top_legs"),
+        Some(serde_json::json!({"bm25": keyword_best, "vector_cosine": null}))
+    );
+    assert_eq!(
+        wire,
+        serde_json::json!({
+            "hits": result.hits,
+            "context": golden,
+            "warnings": result.warnings,
+        })
+    );
+    // A payload written before #256 still reads, with the fields empty.
+    let old: crate::types::RecallResult = serde_json::from_value(wire).unwrap();
+    assert_eq!(old.hits, result.hits);
+    assert_eq!(old.top_legs, crate::types::TopLegs::default());
+    assert_eq!(old.confidence, None);
+
     // Cache hit: identical second call does not grow the cache.
     let again = daemon
         .recall(
@@ -104,6 +149,7 @@ async fn recall_entry_reproduces_context_golden() {
         .await;
     assert_eq!(again.context, golden);
     assert_eq!(cache.len(), 1, "cache hit: no new key inserted");
+    assert_eq!(again, result, "a cached pipeline reports the same top legs");
 
     // Epoch invalidation: any mutation bumps the epoch -> miss -> new key.
     // The new interaction must link to the fixture's chain tail

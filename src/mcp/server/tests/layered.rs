@@ -57,7 +57,7 @@ pub(super) fn layered(own: &LamboServer, layer: &LamboServer) -> (LamboServer, A
     (server, source)
 }
 
-async fn vector_general() -> LamboServer {
+pub(super) async fn vector_general() -> LamboServer {
     server_with_parts(
         "general",
         Arc::new(crate::test_util::GraphRanked(
@@ -93,7 +93,7 @@ pub(super) async fn derive(s: &LamboServer, content: &str) {
     }
 }
 
-async fn recall(s: &LamboServer, args: serde_json::Value) -> CallToolResult {
+pub(super) async fn recall(s: &LamboServer, args: serde_json::Value) -> CallToolResult {
     let mut args = args;
     args["agent_id"] = json!("agent-a");
     call(s, "lambo_recall", args).await
@@ -139,9 +139,29 @@ async fn a_layered_recall_merges_both_sessions_and_names_every_hits_session() {
     general.mem.close().await.expect("close");
 }
 
-/// An unlayered session's answer has 0.5.0's shape exactly: no `session`
-/// on any hit, the same three structured keys and six hit keys, and
-/// `get_info` unchanged; a layered session's `get_info` only appends.
+/// An unlayered session's answer has 0.5.0's shape: no `session` on any
+/// hit, the same three structured keys and six hit keys (plus #256's
+/// additive `top_legs`), and `get_info` unchanged; a layered session's
+/// `get_info` only appends.
+/// `payload` without the keys #256 added to `lambo_recall`'s structured
+/// content, after checking the one that is always there. What is left is
+/// what the answer was before #256.
+fn without_256(payload: &serde_json::Value) -> serde_json::Value {
+    let mut map = payload.as_object().expect("object").clone();
+    let top = map.remove("top_legs").expect("top_legs is always present");
+    let mut legs: Vec<&str> = top
+        .as_object()
+        .expect("top_legs object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    legs.sort();
+    assert_eq!(legs, ["bm25", "vector_cosine"]);
+    map.remove("confidence");
+    map.remove("layer_top_legs");
+    serde_json::Value::Object(map)
+}
+
 #[tokio::test]
 async fn an_unlayered_session_keeps_the_0_5_0_shape() {
     let plain = server("plain-proj").await;
@@ -155,7 +175,9 @@ async fn an_unlayered_session_keeps_the_0_5_0_shape() {
         .map(String::as_str)
         .collect();
     keys.sort();
-    assert_eq!(keys, ["context", "hits", "warnings"]);
+    // #256: `top_legs` is the one additive key (`confidence` is absent
+    // here: this server's store runs no vector leg).
+    assert_eq!(keys, ["context", "hits", "top_legs", "warnings"]);
     let hits = payload["hits"].as_array().expect("hits");
     assert!(!hits.is_empty());
     for hit in hits {
@@ -518,8 +540,10 @@ async fn an_unlayered_recall_is_byte_identical_to_the_0_5_0_body() {
                 ..Default::default()
             })
             .await;
+        // #256: the 0.5.0 keys are byte-identical; the answer only gained
+        // `top_legs`.
         assert_eq!(
-            serde_json::to_string(structured(&out)).unwrap(),
+            serde_json::to_string(&without_256(structured(&out))).unwrap(),
             serde_json::to_string(&expected).unwrap(),
             "max_tokens {max_tokens}"
         );
@@ -765,6 +789,10 @@ async fn an_unlayered_recall_matches_the_frozen_v0_5_0_projection() {
         "a warning is part of what is compared"
     );
     assert_eq!(out.content.len(), 2, "content[1] carries the warnings");
+    // #256: everything v0.5.0 returned is byte-identical; the structured
+    // content only gained `top_legs`.
+    let mut out = out;
+    out.structured_content = out.structured_content.as_ref().map(without_256);
     assert_eq!(
         serde_json::to_string(&out).unwrap(),
         serde_json::to_string(&frozen).unwrap()

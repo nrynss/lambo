@@ -89,6 +89,9 @@ pub struct RecallPipeline {
     /// `phase1` while recomputing legs could report provenance for a ranking
     /// nobody produced.
     legs: candidates::LegProvenance,
+    /// #256: the best keyword and vector scores over `legs`, cached with it
+    /// for the same reason.
+    top: crate::types::TopLegs,
     expanded: expand::ExpandedSet,
 }
 
@@ -855,9 +858,14 @@ impl Daemon {
                 None => candidates::candidates_without_keyword_with_legs_as(graph, input, recent),
             };
             let expanded = expand::expand(graph, phase1.clone(), query.traversal_depth);
+            // #256: the keyword leg ran when a text query searched an index;
+            // it then reports 0.0 for "matched nothing".
+            let keyword_ran = index.is_some() && !query.query.trim().is_empty();
+            let top = crate::recall::confidence::top_legs(&legs, keyword_ran);
             RecallPipeline {
                 phase1,
                 legs,
+                top,
                 expanded,
             }
         };
@@ -933,6 +941,21 @@ impl Daemon {
             .iter()
             .filter_map(|h| pipeline.legs.get(&h.node_id).map(|l| (h.node_id, *l)))
             .collect();
+        // #256: the best per-leg scores over EVERY phase-1 candidate (not
+        // only the returned hits above), and the provisional combined value.
+        // A report only: assembly has already ranked and cut. The combined
+        // value needs a text query's own embedding under a contract with a
+        // measured null median (the medians were measured on text queries),
+        // so a recall by image or vector, and a layer's side of a layered
+        // recall, report their legs alone.
+        result.top_legs = pipeline.top;
+        result.confidence = match (route, embedding) {
+            (Route::Text, Some((_, contract))) => crate::recall::confidence::provisional(
+                pipeline.top,
+                crate::embed::calibration::null_median_cosine(self.calibration, contract),
+            ),
+            _ => None,
+        };
         if self.index.is_none() {
             result.warnings.push(
                 "recall: no inverted index installed (Daemon::with_index) - keyword leg unavailable"

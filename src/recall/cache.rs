@@ -259,6 +259,8 @@ mod tests {
 
     fn result(context: &str) -> RecallResult {
         RecallResult {
+            top_legs: Default::default(),
+            confidence: None,
             hits: Vec::new(),
             context: context.to_string(),
             warnings: Vec::new(),

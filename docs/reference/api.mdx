@@ -112,6 +112,43 @@ When updating existing callers, create the target before `Memory::declare_synony
 - A layer that is closed, has a different embedding contract, or whose recall panics is left out, with the warning `recall: layer <name> is unavailable; results are from <sessions>`. It never fails the call. A layer whose vector search fails keeps its warning, but contributes no ordinary hits without vector evidence; anchored dependency answers can still pass. Warnings from a layer start with `[<name>] `.
 - Graph edges are never followed from one session into another.
 
+### Top leg scores and the provisional confidence
+
+Every recall also reports how strong its best match was, as two fields beside `hits`, `context` and `warnings`. They are a report only: no hit is added, dropped or reordered because of them, and there is no threshold anywhere. Tracked in [#256](https://github.com/nrynss/lambo/issues/256).
+
+**`top_legs` is the one to rely on.** `RecallResult::top_legs` is a `TopLegs { bm25, vector_cosine }`: the best score each first-phase search leg gave any concept of the session for this query. The maximum is over everything the leg scored, whether or not that concept is among the returned hits, so it does not change with `top_k`.
+
+| Field | What it is | When it is `None` |
+|---|---|---|
+| `bm25` | The keyword leg's best BM25 score. A concept whose durable name is exactly the query scores 1.0 in place of its BM25. `Some(0.0)` means the leg ran and no concept shares a word with the query. | The keyword leg did not run: a recall by image or vector with no text, or a dependency question answered by graph traversal. |
+| `vector_cosine` | The vector leg's best cosine similarity between the query and a stored concept vector. | The vector leg did not run or found nothing: a store without vector search, a failed query embed or vector read, no embedded concept, or a dependency question answered by graph traversal. |
+
+The recent-interactions leg and concepts reached by graph expansion are not counted. Where the store searches vectors through an approximate index (CockroachDB, PostgreSQL with pgvector, an Elasticsearch recall tier), `vector_cosine` is the best of what the index returned, which can be slightly under the true maximum.
+
+**`confidence` is provisional.** `RecallResult::confidence` is an `Option<ProvisionalConfidence>`: `{ value, basis, provisional }`. It is an object, not a number, so that code cannot compare it to a constant by accident. `provisional` is `true`, and `basis` names the formula, currently `"noisy-or-v0"`:
+
+```text
+a     = bm25 / (bm25 + 5)
+b     = (vector_cosine - m) / (1 - m), clamped to 0..1
+value = 1 - (1 - a) * (1 - b)
+```
+
+`m` is the median cosine between a query and an unrelated concept under the session's embedding contract, measured on the 100-concept evaluation set: 0.3586 for BGE-M3, 0.632 for EmbeddingGemma 2 (768 dims, Q8_0, `lambo-eg2-v2`), 0.4182 and 0.4282 for Qwen3 Embedding 4B at 2560 and 1024 dims, 0.1443 for Elastic `.jina-embeddings-v3` (`ContractCalibration::null_median_cosine`).
+
+`confidence` is `None`, never a guess, unless both legs reported a score on a text query under one of those contracts with `calibration = "builtin"`. So it is absent for a keyword-only or degraded recall (`top_legs.bm25` still reports the keyword leg), for an embedding contract with no measured median, under `calibration = "off"`, for a recall by image or vector, and for a dependency question answered by traversal.
+
+**What these numbers are not.**
+
+- Neither is a probability. `value` 0.6 does not mean the answer is 60% likely to be in the store.
+- Neither is comparable across embedding contracts: 0.63 is an unrelated pair under EmbeddingGemma 2 and a strong match under BGE-M3.
+- Neither is comparable across store sizes. The best score an unrelated query finds rises as a store grows, and the keyword leg's rises faster than the vector leg's, so a bar that separates answers from non-answers at one size stops doing so at another. The measurements are in [`evidence/layer-floor-size/`](https://github.com/nrynss/lambo/tree/main/evidence/layer-floor-size) and [`evidence/issue-254/`](https://github.com/nrynss/lambo/tree/main/evidence/issue-254).
+- So do not use either as a fixed threshold. A calibrated decision (whether to abstain) is [#174](https://github.com/nrynss/lambo/issues/174); the same effect in the layer floor is [#254](https://github.com/nrynss/lambo/issues/254).
+- `confidence` may change its formula (and then its `basis`), or be removed, in any release, without a deprecation cycle, until #174 calibrates it. The formula was measured on synthetic data only.
+
+**Layered recall.** `LayeredRecall::top_legs` and `confidence` are this session's own, exactly what its plain `recall` reports. Each available layer's best scores are in `LayeredRecall::layer_top_legs`, one `LayerTopLegs { session, top_legs }` per layer in tier order, over every concept the layer's legs scored, whether or not it passed the layer's floor. A layer's scores are never mixed into this session's.
+
+Rust callers building a `RecallResult` literal must add `top_legs` and `confidence`; a serialized `RecallResult` without them still deserializes.
+
 ## Contradiction edges
 
 `EdgeType::Contradicts` is a directed concept-to-concept relation:

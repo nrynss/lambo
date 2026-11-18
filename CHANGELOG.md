@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- Every recall reports how strong its best match was (#256). `top_legs`
+  (`bm25`, `vector_cosine`) is the best score each first-phase search leg gave
+  any concept of the session for the query, returned or not, and `null` for a
+  leg that did not run. `confidence` is a provisional combination of the two,
+  shipped as an object, `{"value", "basis": "noisy-or-v0", "provisional":
+  true}`, and absent whenever it cannot be computed (no vector leg, an
+  unmeasured embedding contract, `calibration = "off"`, a recall by image or
+  vector). Both are in `RecallResult`, `lambo_recall`'s `structuredContent`,
+  `/api/recall`, the `--ledger` recall line, and one `recall scores:` line that
+  `lambo recall` prints to standard error. A layered recall reports the
+  session's own values and each layer's under `layer_top_legs`. No hit,
+  ranking or threshold changes. Neither number is a probability or comparable
+  across embedding contracts or store sizes, and `confidence` may change or be
+  removed without a deprecation cycle until #174 calibrates it. Each
+  calibration row records the null median the combination uses
+  (`ContractCalibration::null_median_cosine`). Rust callers building a
+  `RecallResult` or `ContractCalibration` literal must add the new fields.
 - Each built-in calibration row records the corpus size its recall constants
   were measured on (`ContractCalibration::measured_corpus_concepts`: 100, the
   #190 set), and the BGE-M3 reference records the 12-concept layer its 0.50

@@ -677,6 +677,9 @@ where
         // list, so inventing legs here would mean guessing.
         legs: Default::default(),
         cold_start: cold,
+        // #256: attached by the caller too, from the same phase-1 result.
+        top_legs: Default::default(),
+        confidence: None,
         detailed,
         response_annotations: Vec::new(),
     }

@@ -299,7 +299,24 @@ per ledger file when quoting them.
 lambo_recall        query (≤2000 chars, then "…[truncated]"), top_k, hit_count,
                     hits[], canonical_marker, blast_radius_warning,
                     conflict_line, hot_warning, reservation_warning,
-                    response_annotations[], warning_count, cold_start
+                    response_annotations[], warning_count, cold_start,
+                    top_legs{}, confidence{} (when computed)
+  top_legs{}        (#256) bm25 / vector_cosine → float or null. The best
+                    score each phase-1 leg gave ANY candidate of the caller's
+                    own session, returned in hits[] or not; null when that leg
+                    did not run (bm25 is 0 when it ran and matched nothing).
+                    Recent leg and expansion not counted. Always present on a
+                    line written since #256. Additive (v stays 1).
+  confidence{}      (#256) value / basis ("noisy-or-v0") / provisional (true).
+                    PROVISIONAL: present only when both legs reported on a
+                    text query under a contract with a measured null median;
+                    may change or disappear without a deprecation cycle.
+                    Neither it nor top_legs is a probability, comparable
+                    across embedding contracts or store sizes, or a fixed
+                    threshold (#174, #254).
+  layer_top_legs[]  (#256) layered session only: session, bm25,
+                    vector_cosine per layer that answered. Never blended
+                    into top_legs.
   cold_start        (#79) true when assembly ranked the recall in cold mode:
                     a fresh concept the daemon had not scored yet would be
                     shown, so every hit's score is w_query × q with no daemon

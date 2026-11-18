@@ -145,6 +145,15 @@ pub(super) fn call_auth() -> Option<CallAuth> {
 /// (an additive key; `v` stays 1), so a ledger written by a binary with it
 /// tells `false` apart from "not recorded", which a line without the key is.
 ///
+/// `top_legs` (#256, additive; `v` stays 1) is always present on a recall
+/// line: `bm25` and `vector_cosine`, the best score each phase-1 leg gave any
+/// candidate of the caller's own session, returned or not, each `null` when
+/// that leg did not run. `confidence` (#256, additive) is beside it only
+/// when the provisional combined value could be computed: `{value, basis,
+/// provisional}`. A layered line also carries `layer_top_legs`, one
+/// `{session, bm25, vector_cosine}` per available layer. None of these is a
+/// probability or comparable across embedding contracts or store sizes.
+///
 /// # What the five set-level flags mean, and why they are not all computed alike
 ///
 /// The spec's word is **rendered**, and the honest answer differs by kind
@@ -205,6 +214,13 @@ pub(super) fn layered_recall_facts(
         |i, _| recalled.hit_legs.get(i).copied().flatten(),
         Some(&sessions),
     );
+    // #256: additive, each available layer's own best per-leg scores (the
+    // line's `top_legs` is the caller's own session's).
+    if !recalled.layer_top_legs.is_empty()
+        && let Some(map) = facts.as_object_mut()
+    {
+        map.insert("layer_top_legs".into(), json!(recalled.layer_top_legs));
+    }
     // #181: additive, on a line whose hit's merged copies had members
     // skipped as redundant with them (session-qualified).
     if let Some(lines) = facts.get_mut("hits").and_then(|h| h.as_array_mut()) {
@@ -408,7 +424,13 @@ fn recall_facts_with(
         "response_annotations": response_kinds,
         "warning_count": detailed.warnings.len(),
         "cold_start": detailed.cold_start,
+        "top_legs": detailed.top_legs,
     });
+    // #256: additive, only when the provisional combined value could be
+    // computed, so a line without it reads as "absent", never as a number.
+    if let (Some(confidence), Some(map)) = (&detailed.confidence, facts.as_object_mut()) {
+        map.insert("confidence".into(), json!(confidence));
+    }
     // #198: additive, only when some hit carries a suspected pair, so a
     // line without one reads as before (`v` stays 1).
     if possibly_superseded && let Some(map) = facts.as_object_mut() {

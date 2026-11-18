@@ -111,6 +111,14 @@ migrations/003.sql [Resource] (score 0.25, id 9d44f8b1)
 
 If the top hit alone is longer than `--max-tokens`, the output shows its text cut short and marked `…`, its label (type, canonical marker, score, id), and a `[truncated: N tokens left out; lambo_inspect <id> for the full concept]` line instead of nothing. Any warning line that did not fit is printed above it. `lambo inspect --session <session> --focus <id>` shows the whole concept. See [`lambo_recall`](/lambo/mcp/#lambo_recall) for the rule.
 
+**Scores on standard error.** Standard output is the context block and nothing else. `lambo recall` also prints one line to standard error, `recall scores: ` followed by a JSON object:
+
+```text
+recall scores: {"top_legs":{"bm25":1.3097505006899584,"vector_cosine":0.7000000476837158},"confidence":{"value":0.35400198340656197,"basis":"noisy-or-v0","provisional":true}}
+```
+
+`top_legs` is the best score each search leg gave any concept of the session, returned or not; a leg that did not run is `null`. `confidence` is a provisional combination of the two, present only when both legs reported a score under a measured embedding contract, and it may change or be removed in any release. Neither is a probability, neither is comparable across embedding contracts or store sizes, and neither should be used as a fixed threshold. See [`lambo_recall`](/lambo/mcp/#lambo_recall) for the full description.
+
 **One session.** `lambo recall` reads the one session `--session` names and never applies `[serve] layers`: it is a reader with no lease, and layers belong to an HTTP serve. To read a layer, name it: `lambo recall --session general`. A layered `lambo_recall` through `lambo serve` is described in [Layered recall](#layered-recall).
 
 **Recall by image or by vector.** With `--image` or `--query-vector-json`, the vector leg searches by that image's or vector's embedding instead of the query text's, with the same rules as `lambo_recall`'s `image` and `query_vector`. `--query` is then optional and still matches words through the keyword leg; without it, recent interactions are left out, as for `lambo_recall`. The files are read under the same size caps as `derive-image`'s and are never printed, stored or cached. A store without vector search, or a vector search that fails, is an error rather than a keyword-only answer, since the vector leg is the point.

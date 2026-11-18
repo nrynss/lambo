@@ -1802,6 +1802,62 @@ pub struct RecallResult {
     pub context: String,
     /// Anything the caller should know, such as a leg of the search that was skipped.
     pub warnings: Vec<String>,
+    /// The best score each phase-1 leg gave any concept of this session for
+    /// this query (#256). The primary strength report of a recall. Default
+    /// (both `None`) when no leg ran, and for a payload written before the
+    /// field existed.
+    #[serde(default)]
+    pub top_legs: TopLegs,
+    /// A provisional single number combining [`Self::top_legs`] (#256).
+    /// `None` whenever it cannot be computed honestly; see
+    /// [`ProvisionalConfidence`]. Not serialized when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<ProvisionalConfidence>,
+}
+
+/// The best score each phase-1 leg gave any candidate of the caller's own
+/// session for one query (#256): the maximum over **everything the leg
+/// scored**, whether or not that candidate is among the returned hits. The
+/// recent leg and graph-expansion members are not counted (#174).
+///
+/// Neither number is a probability, neither is comparable across embedding
+/// contracts or store sizes, and neither is a fixed bar: the best score an
+/// unrelated query finds rises as a store grows, at a different rate per leg
+/// (#174, #254, `evidence/layer-floor-size/`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct TopLegs {
+    /// The keyword leg's best score: BM25 (a concept whose durable name is
+    /// exactly the query scores `1.0` in place of its BM25, as its per-hit
+    /// leg score does). `Some(0.0)` when the leg ran and matched nothing;
+    /// `None` when it did not run (no query text, no index, or a dependency
+    /// question answered by traversal).
+    #[serde(default)]
+    pub bm25: Option<f64>,
+    /// The vector leg's best cosine, as the store returned it. `None` when
+    /// the leg did not run (no vector search, no query embedding, a failed
+    /// embed or vector read, or a dependency question answered by traversal)
+    /// or returned no candidate.
+    #[serde(default)]
+    pub vector_cosine: Option<f64>,
+}
+
+/// One number combining a recall's [`TopLegs`] (#256). **Provisional**: its
+/// formula, its scale and its presence may change or go away without a
+/// deprecation cycle until #174 calibrates it, which is why it is an object
+/// that says so, never a bare number.
+///
+/// `value` is not a probability and is not comparable across embedding
+/// contracts or store sizes. Do not threshold it. Rely on [`TopLegs`].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ProvisionalConfidence {
+    /// The combined value, in `[0, 1]`.
+    pub value: f64,
+    /// The named, versioned formula `value` came from
+    /// ([`crate::recall::confidence::BASIS`]). A different basis is a
+    /// different quantity.
+    pub basis: String,
+    /// Always `true` while the value is uncalibrated.
+    pub provisional: bool,
 }
 
 /// A value paired with a score, used wherever candidates are ranked.
