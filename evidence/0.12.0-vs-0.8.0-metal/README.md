@@ -27,24 +27,27 @@ These files hold aggregates only, with no memory content and no local paths.
 
 | Test | 0.8.0 | 0.12.0 | Verdict |
 |---|---:|---:|---|
-| Replay of 330 real writes | 330 applied | 330 applied | PASS, 0 unexpected, identical final stores |
+| Replay of 330 real writes | 330 applied | 330 applied | PASS, 0 unexpected, matching final store counts |
 | Top-8 recall on the 20 A/B queries | | | identical on all 20 (Jaccard 1.0) |
 | Sequential recall p50 / p99 | 1.99 / 22.88 ms | 2.00 / 22.62 ms | same |
 | Sequential `lambo_stats` p50 | 0.44 ms | 0.39 ms | same |
 | Sequential derive ack p50 / p90 | 0.50 / 0.58 ms | 0.50 / 0.58 ms | same |
 | Sequential derive applied p50 / p90 | 25.49 / 26.05 ms | 25.42 / 26.05 ms | same |
 | 8 agents: writes failed | 0 / 546 | 0 / 544 | same |
-| 8 agents: recall p50 / p99 | 9.38 / 38.63 ms | 10.20 / 39.38 ms | same within noise |
-| 8 agents: derive ack p50 | 2.04 ms | 2.38 ms | same within noise |
-| 8 agents: apply p50 / p90 (server) | 49 / 62 ms | 52 / 66 ms | same within noise |
+| 8 agents: recall p50 / p99 | 9.38 / 38.63 ms | 10.20 / 39.38 ms | close, one run each |
+| 8 agents: derive ack p50 | 2.04 ms | 2.38 ms | close, one run each |
+| 8 agents: apply p50 / p90 (server) | 49 / 62 ms | 52 / 66 ms | close, one run each |
 | 16 agents: writes acked / failed | 2,129 / 0 | 2,128 / 0 | same |
 | 16 agents: recall p50 / p99 | 5.74 / 30.73 ms | 5.65 / 24.51 ms | same |
 | 16 agents: derive ack p50 | 0.77 ms | 0.79 ms | same |
 | 16 agents: apply p50 / p90 (server) | 61 / 119 ms | 56 / 118 ms | same |
 | `names migrate` preview, 8 sessions | | 0 changes in each | provision-only upgrade |
 
-**No regression, and no speed-up either.** On this rig 0.12.0 is
-latency-neutral against 0.8.0 on every path. Every cell is one run.
+**No regression was found, and no speed-up either.** The sequential A/B
+figures are equal on both builds. The concurrency figures are close, with
+0.12.0 a few percent slower at 8 agents (derive ack p50 2.04 against
+2.38 ms) and level or slightly faster at 16. Every cell is one run, so
+these runs do not establish whether a difference of that size is noise.
 
 The rig was re-pinned to 0.12.0 the same day (DOGFOOD-SETUP §2a, writer down
 for about 5 seconds, all 8 sessions re-attached, every concept embedded).
@@ -59,8 +62,10 @@ reason catalogue needed no new entries.
 File: [`replay-080-0120.json`](replay-080-0120.json).
 
 Both sides applied 330 of 330, created 610 concepts, semantically merged 30,
-and ended on the same store: 5,870 concepts, all embedded, 14,525 edges with
-the same count per edge type. 34 calls differ, all
+and ended on stores with matching counts: 5,870 concepts, all embedded,
+14,525 edges with the same count per edge type. The stores are not
+identical: 14 semantic edges exist only on the 0.8.0 side and 14 only on the
+0.12.0 side, which is the merge-target difference below. 34 calls differ, all
 `merge_into_replayed_concept` (merge-target noise, as in earlier gates);
 0 are unexpected.
 
@@ -102,8 +107,10 @@ retired, 0 bindings, 0 retirements.
 ## 5. Why writes look different from the CUDA gate
 
 The CUDA gate reports a derive ack of 28.57 ms on 0.8.0 against 5.58 ms on
-0.12.0, and ack-to-applied of 73.67 against 44.74 ms. Here both builds ack
-in 0.50 ms and apply in about 25 ms. This section is a probe into that
+0.12.0, and derive applied of 73.67 against 44.74 ms. That write-up labels
+the second pair "ack to applied", but `mcp_ab.py`'s `derive_applied` timer
+starts when the derive is sent, so it is submit to applied and includes the
+ack. Here both builds ack in 0.50 ms and reach applied in about 25 ms. This section is a probe into that
 difference. **Its conclusion about the CUDA figures is a hypothesis and
 needs a run on the CUDA rig.**
 
