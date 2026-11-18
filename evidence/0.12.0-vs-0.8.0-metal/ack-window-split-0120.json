@@ -1,0 +1,44 @@
+{
+ "0": {
+  "ack_p50": 0.52,
+  "ack_p90": 8.62,
+  "ack_max": 16.8,
+  "wait_applied_p50": 24.8
+ },
+ "5": {
+  "ack_p50": 0.71,
+  "ack_p90": 0.86,
+  "ack_max": 0.96,
+  "wait_applied_p50": 29.36
+ },
+ "10": {
+  "ack_p50": 0.92,
+  "ack_p90": 1.21,
+  "ack_max": 8.69,
+  "wait_applied_p50": 25.57
+ },
+ "20": {
+  "ack_p50": 0.99,
+  "ack_p90": 1.09,
+  "ack_max": 2.37,
+  "wait_applied_p50": 26.45
+ },
+ "40": {
+  "ack_p50": 1.12,
+  "ack_p90": 1.51,
+  "ack_max": 7.65,
+  "wait_applied_p50": 34.63
+ },
+ "80": {
+  "ack_p50": 2.24,
+  "ack_p90": 2.71,
+  "ack_max": 2.84,
+  "wait_applied_p50": 36.51
+ },
+ "160": {
+  "ack_p50": 2.43,
+  "ack_p90": 3.19,
+  "ack_max": 3.28,
+  "wait_applied_p50": 36.41
+ }
+}
