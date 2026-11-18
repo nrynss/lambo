@@ -12,11 +12,13 @@
     "rule_floor": 0.5,
     "admit_fixed_uncorrected": 0.1515,
     "admit_rule_uncorrected": 0.1515,
-    "level_floor_uncorrected": 0.5015,
+    "level_floor_uncorrected": 0.5,
+    "admit_level_floor_uncorrected": 0.1515,
     "held_out_grade2_lost_at_level_floor_uncorrected": 0.1735,
     "admit_fixed_corrected": 0.3737,
     "admit_rule_corrected": 0.3737,
-    "level_floor_corrected": 0.5003,
+    "level_floor_corrected": 0.5,
+    "admit_level_floor_corrected": 0.3737,
     "held_out_grade2_lost_at_level_floor_corrected": 0.1735
    },
    {
@@ -25,12 +27,14 @@
     "rule_floor": 0.5333,
     "admit_fixed_uncorrected": 0.3409,
     "admit_rule_uncorrected": 0.1515,
-    "level_floor_uncorrected": 0.5377,
-    "held_out_grade2_lost_at_level_floor_uncorrected": 0.3367,
+    "level_floor_uncorrected": 0.5323,
+    "admit_level_floor_uncorrected": 0.1515,
+    "held_out_grade2_lost_at_level_floor_uncorrected": 0.3265,
     "admit_fixed_corrected": 0.6389,
     "admit_rule_corrected": 0.2399,
-    "level_floor_corrected": 0.5193,
-    "held_out_grade2_lost_at_level_floor_corrected": 0.2449
+    "level_floor_corrected": 0.5186,
+    "admit_level_floor_corrected": 0.3737,
+    "held_out_grade2_lost_at_level_floor_corrected": 0.2347
    },
    {
     "layer_concepts": 64,
@@ -38,11 +42,13 @@
     "rule_floor": 0.5584,
     "admit_fixed_uncorrected": 0.4697,
     "admit_rule_uncorrected": 0.1061,
-    "level_floor_uncorrected": 0.5481,
+    "level_floor_uncorrected": 0.5477,
+    "admit_level_floor_uncorrected": 0.1515,
     "held_out_grade2_lost_at_level_floor_uncorrected": 0.3673,
     "admit_fixed_corrected": 0.803,
     "admit_rule_corrected": 0.1616,
-    "level_floor_corrected": 0.5349,
+    "level_floor_corrected": 0.5348,
+    "admit_level_floor_corrected": 0.3737,
     "held_out_grade2_lost_at_level_floor_corrected": 0.3367
    },
    {
@@ -51,11 +57,13 @@
     "rule_floor": 0.5813,
     "admit_fixed_uncorrected": 0.5985,
     "admit_rule_uncorrected": 0.053,
-    "level_floor_uncorrected": 0.5517,
-    "held_out_grade2_lost_at_level_floor_uncorrected": 0.3776,
+    "level_floor_uncorrected": 0.5508,
+    "admit_level_floor_uncorrected": 0.1515,
+    "held_out_grade2_lost_at_level_floor_uncorrected": 0.3673,
     "admit_fixed_corrected": 0.8813,
     "admit_rule_corrected": 0.0707,
-    "level_floor_corrected": 0.5424,
+    "level_floor_corrected": 0.5423,
+    "admit_level_floor_corrected": 0.3737,
     "held_out_grade2_lost_at_level_floor_corrected": 0.3469
    },
    {
@@ -64,11 +72,13 @@
     "rule_floor": 0.601,
     "admit_fixed_uncorrected": 0.8106,
     "admit_rule_uncorrected": 0.0303,
-    "level_floor_uncorrected": 0.5649,
+    "level_floor_uncorrected": 0.5643,
+    "admit_level_floor_uncorrected": 0.1515,
     "held_out_grade2_lost_at_level_floor_uncorrected": 0.4184,
     "admit_fixed_corrected": 0.947,
     "admit_rule_corrected": 0.053,
-    "level_floor_corrected": 0.5537,
+    "level_floor_corrected": 0.5535,
+    "admit_level_floor_corrected": 0.3737,
     "held_out_grade2_lost_at_level_floor_corrected": 0.3776
    },
    {
@@ -77,11 +87,13 @@
     "rule_floor": 0.6174,
     "admit_fixed_uncorrected": 0.8864,
     "admit_rule_uncorrected": 0.0152,
-    "level_floor_uncorrected": 0.5748,
+    "level_floor_uncorrected": 0.5747,
+    "admit_level_floor_uncorrected": 0.1515,
     "held_out_grade2_lost_at_level_floor_uncorrected": 0.4592,
     "admit_fixed_corrected": 0.9722,
     "admit_rule_corrected": 0.0455,
     "level_floor_corrected": 0.5616,
+    "admit_level_floor_corrected": 0.3737,
     "held_out_grade2_lost_at_level_floor_corrected": 0.4082
    },
    {
@@ -90,11 +102,13 @@
     "rule_floor": 0.6487,
     "admit_fixed_uncorrected": 0.9167,
     "admit_rule_uncorrected": 0.0,
-    "level_floor_uncorrected": 0.5772,
+    "level_floor_uncorrected": 0.5759,
+    "admit_level_floor_uncorrected": 0.1515,
     "held_out_grade2_lost_at_level_floor_uncorrected": 0.4592,
     "admit_fixed_corrected": 0.9874,
     "admit_rule_corrected": 0.0152,
-    "level_floor_corrected": 0.5691,
+    "level_floor_corrected": 0.5689,
+    "admit_level_floor_corrected": 0.3737,
     "held_out_grade2_lost_at_level_floor_corrected": 0.4388
    },
    {
@@ -103,11 +117,13 @@
     "rule_floor": 0.6673,
     "admit_fixed_uncorrected": 0.9621,
     "admit_rule_uncorrected": 0.0152,
-    "level_floor_uncorrected": 0.5938,
+    "level_floor_uncorrected": 0.5935,
+    "admit_level_floor_uncorrected": 0.1515,
     "held_out_grade2_lost_at_level_floor_uncorrected": 0.551,
     "admit_fixed_corrected": 0.9924,
     "admit_rule_corrected": 0.0126,
-    "level_floor_corrected": 0.5732,
+    "level_floor_corrected": 0.5731,
+    "admit_level_floor_corrected": 0.3737,
     "held_out_grade2_lost_at_level_floor_corrected": 0.449
    }
   ],
@@ -118,11 +134,13 @@
     "rule_floor": 0.5,
     "admit_fixed_uncorrected": 0.0377,
     "admit_rule_uncorrected": 0.0377,
-    "level_floor_uncorrected": 0.5194,
-    "held_out_grade2_lost_at_level_floor_uncorrected": 0.2449,
+    "level_floor_uncorrected": 0.5,
+    "admit_level_floor_uncorrected": 0.0377,
+    "held_out_grade2_lost_at_level_floor_uncorrected": 0.1735,
     "admit_fixed_corrected": 0.1761,
     "admit_rule_corrected": 0.1761,
-    "level_floor_corrected": 0.5003,
+    "level_floor_corrected": 0.5,
+    "admit_level_floor_corrected": 0.1761,
     "held_out_grade2_lost_at_level_floor_corrected": 0.1735
    },
    {
@@ -131,12 +149,14 @@
     "rule_floor": 0.5333,
     "admit_fixed_uncorrected": 0.1509,
     "admit_rule_uncorrected": 0.0377,
-    "level_floor_uncorrected": 0.5546,
-    "held_out_grade2_lost_at_level_floor_uncorrected": 0.3776,
+    "level_floor_uncorrected": 0.5291,
+    "admit_level_floor_uncorrected": 0.0377,
+    "held_out_grade2_lost_at_level_floor_uncorrected": 0.2959,
     "admit_fixed_corrected": 0.3333,
     "admit_rule_corrected": 0.0943,
-    "level_floor_corrected": 0.5152,
-    "held_out_grade2_lost_at_level_floor_corrected": 0.2245
+    "level_floor_corrected": 0.5145,
+    "admit_level_floor_corrected": 0.1761,
+    "held_out_grade2_lost_at_level_floor_corrected": 0.2143
    },
    {
     "layer_concepts": 64,
@@ -144,11 +164,13 @@
     "rule_floor": 0.5584,
     "admit_fixed_uncorrected": 0.2264,
     "admit_rule_uncorrected": 0.0,
-    "level_floor_uncorrected": 0.5546,
-    "held_out_grade2_lost_at_level_floor_uncorrected": 0.3776,
+    "level_floor_uncorrected": 0.5291,
+    "admit_level_floor_uncorrected": 0.0377,
+    "held_out_grade2_lost_at_level_floor_uncorrected": 0.2959,
     "admit_fixed_corrected": 0.4465,
     "admit_rule_corrected": 0.0252,
-    "level_floor_corrected": 0.5226,
+    "level_floor_corrected": 0.5221,
+    "admit_level_floor_corrected": 0.1761,
     "held_out_grade2_lost_at_level_floor_corrected": 0.2551
    },
    {
@@ -157,11 +179,13 @@
     "rule_floor": 0.5813,
     "admit_fixed_uncorrected": 0.4151,
     "admit_rule_uncorrected": 0.0,
-    "level_floor_uncorrected": 0.5546,
-    "held_out_grade2_lost_at_level_floor_uncorrected": 0.3776,
+    "level_floor_uncorrected": 0.5419,
+    "admit_level_floor_uncorrected": 0.0377,
+    "held_out_grade2_lost_at_level_floor_uncorrected": 0.3469,
     "admit_fixed_corrected": 0.5535,
     "admit_rule_corrected": 0.0,
-    "level_floor_corrected": 0.5376,
+    "level_floor_corrected": 0.5374,
+    "admit_level_floor_corrected": 0.1761,
     "held_out_grade2_lost_at_level_floor_corrected": 0.3367
    },
    {
@@ -170,12 +194,14 @@
     "rule_floor": 0.601,
     "admit_fixed_uncorrected": 0.6604,
     "admit_rule_uncorrected": 0.0943,
-    "level_floor_uncorrected": 0.6474,
-    "held_out_grade2_lost_at_level_floor_uncorrected": 0.7551,
+    "level_floor_uncorrected": 0.6248,
+    "admit_level_floor_uncorrected": 0.0377,
+    "held_out_grade2_lost_at_level_floor_uncorrected": 0.6633,
     "admit_fixed_corrected": 0.761,
     "admit_rule_corrected": 0.044,
-    "level_floor_corrected": 0.5578,
-    "held_out_grade2_lost_at_level_floor_corrected": 0.3878
+    "level_floor_corrected": 0.5572,
+    "admit_level_floor_corrected": 0.1761,
+    "held_out_grade2_lost_at_level_floor_corrected": 0.3776
    },
    {
     "layer_concepts": 512,
@@ -183,11 +209,13 @@
     "rule_floor": 0.6174,
     "admit_fixed_uncorrected": 0.7358,
     "admit_rule_uncorrected": 0.0566,
-    "level_floor_uncorrected": 0.6474,
-    "held_out_grade2_lost_at_level_floor_uncorrected": 0.7551,
+    "level_floor_uncorrected": 0.6248,
+    "admit_level_floor_uncorrected": 0.0377,
+    "held_out_grade2_lost_at_level_floor_uncorrected": 0.6633,
     "admit_fixed_corrected": 0.8553,
     "admit_rule_corrected": 0.0755,
-    "level_floor_corrected": 0.5738,
+    "level_floor_corrected": 0.5734,
+    "admit_level_floor_corrected": 0.1761,
     "held_out_grade2_lost_at_level_floor_corrected": 0.4592
    },
    {
@@ -196,11 +224,13 @@
     "rule_floor": 0.6487,
     "admit_fixed_uncorrected": 0.7925,
     "admit_rule_uncorrected": 0.0189,
-    "level_floor_uncorrected": 0.6474,
-    "held_out_grade2_lost_at_level_floor_uncorrected": 0.7551,
+    "level_floor_uncorrected": 0.6248,
+    "admit_level_floor_uncorrected": 0.0377,
+    "held_out_grade2_lost_at_level_floor_uncorrected": 0.6633,
     "admit_fixed_corrected": 0.8805,
     "admit_rule_corrected": 0.0314,
     "level_floor_corrected": 0.5797,
+    "admit_level_floor_corrected": 0.1698,
     "held_out_grade2_lost_at_level_floor_corrected": 0.4694
    },
    {
@@ -209,17 +239,19 @@
     "rule_floor": 0.6673,
     "admit_fixed_uncorrected": 0.8302,
     "admit_rule_uncorrected": 0.0,
-    "level_floor_uncorrected": 0.6474,
-    "held_out_grade2_lost_at_level_floor_uncorrected": 0.7551,
+    "level_floor_uncorrected": 0.6248,
+    "admit_level_floor_uncorrected": 0.0377,
+    "held_out_grade2_lost_at_level_floor_uncorrected": 0.6633,
     "admit_fixed_corrected": 0.9686,
     "admit_rule_corrected": 0.0,
     "level_floor_corrected": 0.611,
+    "admit_level_floor_corrected": 0.1635,
     "held_out_grade2_lost_at_level_floor_corrected": 0.6224
    }
   ]
  },
  "null_tail": {
-  "note": "Share of single (query, unrelated concept) pairs at or above each floor the rule gives (anchor 12). labelled_dev is the null the rule was derived from. relative_to_fixed is that share divided by the same population's share at the fixed floor: how much of the mass at 0.50 is still there. Pairs that share a query are not independent, and the correction was fitted on logged top hits, not on pairs in this tail.",
+  "note": "Share of single (query, unrelated concept) pairs at or above each floor the rule gives (anchor 12). labelled_dev is the null the rule was derived from. relative_to_fixed is that share divided by the same population's share at the fixed floor: how much of the mass at 0.50 is still there (null when that population has no pair at or above the fixed floor). Pairs that share a query are not independent, and the correction was fitted on logged top hits, not on pairs in this tail.",
   "correction": {
    "intercept": 0.0438,
    "slope": 0.9504

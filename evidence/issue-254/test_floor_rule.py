@@ -55,10 +55,114 @@ class RuleFloor(unittest.TestCase):
 
 
 class LevelFloor(unittest.TestCase):
-    def test_admits_the_requested_share(self):
-        best = [i / 100 for i in range(100)]
-        floor = real_queries.level_floor(best, 0.25)
-        self.assertAlmostEqual(floor_rule.share_at_or_above(best, floor), 0.25)
+    FIXED = real_queries.FIXED
+
+    def admitted(self, best, floor):
+        return sum(x >= floor for x in best)
+
+    def test_is_the_lowest_floor_that_keeps_to_the_cap(self):
+        best = [0.40, 0.52, 0.55, 0.61, 0.70]
+        floor = real_queries.level_floor(best, 2)
+        self.assertEqual(self.admitted(best, floor), 2)
+        # Just above the third-highest score, not at the second-highest:
+        # nothing lower keeps to the cap.
+        self.assertGreater(floor, 0.55)
+        self.assertLess(floor, 0.5500001)
+        self.assertEqual(self.admitted(best, 0.55), 3)
+
+    def test_is_the_fixed_floor_when_that_already_keeps_to_the_cap(self):
+        best = [0.40, 0.45, 0.52, 0.61]
+        self.assertEqual(real_queries.level_floor(best, 2), self.FIXED)
+        self.assertEqual(real_queries.level_floor(best, 4), self.FIXED)
+        # Nothing at or above the fixed floor: it holds for a zero cap too.
+        self.assertEqual(real_queries.level_floor([0.1, 0.2], 0), self.FIXED)
+        self.assertEqual(real_queries.level_floor([], 0), self.FIXED)
+
+    def test_zero_cap_admits_nothing(self):
+        best = [0.40, 0.52, 0.70, 0.70]
+        floor = real_queries.level_floor(best, 0)
+        self.assertEqual(self.admitted(best, floor), 0)
+        self.assertGreater(floor, 0.70)
+        self.assertLess(floor, 0.7000001)
+
+    def test_tie_at_the_cutoff_admits_fewer_never_more(self):
+        # Three scores tie across a cap of 2: no floor admits exactly two, and
+        # the kth-highest score (0.60) would admit three.
+        best = [0.52, 0.60, 0.60, 0.60, 0.40]
+        self.assertEqual(self.admitted(best, 0.60), 3)
+        floor = real_queries.level_floor(best, 2)
+        self.assertEqual(self.admitted(best, floor), 0)
+        self.assertGreater(floor, 0.60)
+        # A tie below the cutoff is not affected.
+        best = [0.52, 0.52, 0.60, 0.70]
+        floor = real_queries.level_floor(best, 2)
+        self.assertEqual(self.admitted(best, floor), 2)
+        self.assertLess(floor, 0.5200001)
+
+    def test_never_falls_below_the_fixed_floor(self):
+        best = [0.30, 0.35, 0.40, 0.45]
+        self.assertEqual(real_queries.level_floor(best, 1), self.FIXED)
+
+    def test_summarise_reports_what_the_level_floor_admits(self):
+        null = sorted(i / 1000 for i in range(1000))
+        grade2 = [0.45, 0.55, 0.65, 0.75]
+        rows = {
+            n: {"raw": [0.3, 0.3, 0.3, 0.6], "corrected": [0.3] * 12}
+            for n in real_queries.SIZES
+        }
+        # At 32 concepts three of four queries clear the fixed floor.
+        rows[32] = {"raw": [0.3, 0.58, 0.62, 0.7], "corrected": [0.3] * 11 + [0.9]}
+        out = {e["layer_concepts"]: e for e in real_queries.summarise(rows, null, grade2)}
+        # 8 concepts sets the cap (one of four) and sits on the fixed floor.
+        self.assertEqual(out[8]["level_floor_uncorrected"], self.FIXED)
+        self.assertEqual(out[8]["admit_level_floor_uncorrected"], 0.25)
+        # 32: the floor is just above 0.62, admits one of four, loses 0.45
+        # and 0.55 of the four grade-2 pairs.
+        self.assertEqual(out[32]["level_floor_uncorrected"], 0.62)
+        self.assertEqual(out[32]["admit_level_floor_uncorrected"], 0.25)
+        self.assertEqual(out[32]["held_out_grade2_lost_at_level_floor_uncorrected"], 0.5)
+        # Corrected: no query admits at 8, so the cap is zero and the floor
+        # at 32 goes above the one score that would.
+        self.assertEqual(out[8]["admit_fixed_corrected"], 0.0)
+        self.assertEqual(out[32]["admit_level_floor_corrected"], 0.0)
+        self.assertEqual(out[32]["level_floor_corrected"], 0.9)
+
+
+class NullTailShares(unittest.TestCase):
+    @staticmethod
+    def entry(labelled, a, b):
+        cell = lambda raw, corrected: {
+            "pairs": 100,
+            "at_or_above_uncorrected": raw,
+            "at_or_above_corrected": corrected,
+        }
+        return {
+            "labelled_dev": {"pairs": 200, "at_or_above": labelled},
+            "A": cell(*a),
+            "B": cell(*b),
+        }
+
+    def test_relative_share_is_null_when_nothing_clears_the_fixed_floor(self):
+        # Project B has pairs but none at or above the fixed floor
+        # (uncorrected): its counts and shares are kept, its ratio is null,
+        # and every other population keeps its ratio.
+        base = {}
+        fixed = self.entry(20, (10, 30), (0, 4))
+        higher = self.entry(5, (2, 3), (0, 1))
+        real_queries.add_shares(fixed, base)
+        real_queries.add_shares(higher, base)
+        for e in (fixed, higher):
+            self.assertEqual(e["B"]["at_or_above_uncorrected"], 0)
+            self.assertEqual(e["B"]["share_uncorrected"], 0.0)
+            self.assertIsNone(e["B"]["relative_to_fixed_uncorrected"])
+        self.assertEqual(fixed["B"]["relative_to_fixed_corrected"], 1.0)
+        self.assertEqual(higher["B"]["relative_to_fixed_corrected"], 0.25)
+        self.assertEqual(higher["B"]["share_corrected"], 0.01)
+        self.assertEqual(higher["A"]["relative_to_fixed_uncorrected"], 0.2)
+        self.assertEqual(higher["A"]["relative_to_fixed_corrected"], 0.1)
+        self.assertEqual(higher["labelled_dev"]["relative_to_fixed"], 0.25)
+        self.assertEqual(higher["labelled_dev"]["share"], 0.025)
+        json.dumps([fixed, higher])  # null, not an error
 
 
 class Committed(unittest.TestCase):
