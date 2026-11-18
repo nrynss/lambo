@@ -1,0 +1,63 @@
+{
+  "operation": "migrate",
+  "sessions_previewed": 8,
+  "applied": false,
+  "per_session": [
+    {
+      "mutations": 0,
+      "names_migrated": 0,
+      "aliases_retired": 0,
+      "bindings": 0,
+      "retirements": 0
+    },
+    {
+      "mutations": 0,
+      "names_migrated": 0,
+      "aliases_retired": 0,
+      "bindings": 0,
+      "retirements": 0
+    },
+    {
+      "mutations": 0,
+      "names_migrated": 0,
+      "aliases_retired": 0,
+      "bindings": 0,
+      "retirements": 0
+    },
+    {
+      "mutations": 0,
+      "names_migrated": 0,
+      "aliases_retired": 0,
+      "bindings": 0,
+      "retirements": 0
+    },
+    {
+      "mutations": 0,
+      "names_migrated": 0,
+      "aliases_retired": 0,
+      "bindings": 0,
+      "retirements": 0
+    },
+    {
+      "mutations": 0,
+      "names_migrated": 0,
+      "aliases_retired": 0,
+      "bindings": 0,
+      "retirements": 0
+    },
+    {
+      "mutations": 0,
+      "names_migrated": 0,
+      "aliases_retired": 0,
+      "bindings": 0,
+      "retirements": 0
+    },
+    {
+      "mutations": 0,
+      "names_migrated": 0,
+      "aliases_retired": 0,
+      "bindings": 0,
+      "retirements": 0
+    }
+  ]
+}
