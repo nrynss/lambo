@@ -1165,8 +1165,6 @@ async fn a_pinned_session_that_can_no_longer_attach_is_not_retried() {
 /// The real multi-session serve, in-process (#32 review M1/M2).
 mod authority;
 mod erase;
-/// #254: the layer-size warning at a layer's attach.
-mod layer_floor_size;
 /// #33 PR 3: layered recall over two pinned sessions.
 mod layered;
 /// #32 PR 6: sessions attached on demand.

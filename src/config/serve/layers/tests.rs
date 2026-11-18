@@ -48,10 +48,6 @@ min_similarity = 0.55
         layers.iter().map(|(s, _)| s).collect::<Vec<_>>(),
         vec!["lambo", "rustydocs"]
     );
-    // #254: a layer's own knobs, by its session; none for a consumer.
-    assert_eq!(layers.layer_spec("general"), Some(&stack[0]));
-    assert_eq!(layers.layer_spec("lambo"), None);
-    assert_eq!(layers.layer_spec("paper"), None);
 }
 
 #[test]

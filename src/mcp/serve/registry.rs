@@ -1220,32 +1220,7 @@ impl SessionRegistry {
     ) -> Arc<AttachedSession> {
         let session = self.build_session(mem, endpoint);
         self.insert_live(Arc::clone(&session));
-        self.warn_if_layer_outgrew_its_floor(&session);
         session
-    }
-
-    /// #254: log [`layer_size_warning`] for a session this registry has just
-    /// admitted, when it is a layer that warrants it. Called after the slot
-    /// is filled, so an attach that is not admitted (`admit_if`'s reject
-    /// path) logs nothing about a layer that is then not served.
-    ///
-    /// The count is read here, once per attach. A layer that grows past the
-    /// size while it stays attached is not warned of until it is attached
-    /// again (a restart, or a re-attach after a detach).
-    fn warn_if_layer_outgrew_its_floor(&self, session: &AttachedSession) {
-        let Some(attacher) = &self.attacher else {
-            return;
-        };
-        let mem = &session.mem;
-        if let Some(warning) = layer_size_warning(
-            &attacher.layers,
-            mem.session().as_str(),
-            &mem.stats(),
-            mem.config(),
-            mem.embedding_contract(),
-        ) {
-            tracing::warn!(session = %mem.session(), "lambo serve: {warning}");
-        }
     }
 
     /// [`SessionRegistry::admit`] for a background attach (the pinned retry,
@@ -1262,7 +1237,6 @@ impl SessionRegistry {
     ) -> Option<Arc<AttachedSession>> {
         let session = self.build_session(mem, endpoint);
         if self.insert_live_if(Arc::clone(&session), expected) {
-            self.warn_if_layer_outgrew_its_floor(&session);
             return Some(session);
         }
         tracing::warn!(
@@ -1921,33 +1895,6 @@ impl SessionRegistry {
             session.tasks.stop();
         }
     }
-}
-
-/// The #254 line for `session`, when a serve should log it at the session's
-/// attach: `session` is a layer of some pinned session (`layers` lists it),
-/// its floor is the default one, and `stats` counts more concepts with
-/// vectors than the layer that floor was chosen on
-/// ([`layer_floor_size_warning`](crate::embed::calibration::layer_floor_size_warning)).
-///
-/// `None` for a session that is not a layer: a consumer's own recall is not
-/// floored, however large it is. The count is `embedded_concepts`, not
-/// `concept_count`: admission is on vector cosine, so a concept with no
-/// vector is not one of the draws the floor is tested against.
-pub(super) fn layer_size_warning(
-    layers: &crate::config::ServeLayers,
-    session: &str,
-    stats: &crate::MemoryStats,
-    config: &crate::Config,
-    contract: &crate::types::EmbeddingContract,
-) -> Option<String> {
-    let spec = layers.layer_spec(session)?;
-    crate::embed::calibration::layer_floor_size_warning(
-        &spec.session,
-        stats.embedded_concepts,
-        spec.configured_min_similarity(),
-        config,
-        contract,
-    )
 }
 
 /// Whether a background attach error may clear without an operator: the

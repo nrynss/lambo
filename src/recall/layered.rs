@@ -97,46 +97,6 @@
 //! embedding contract (#87, [`crate::embed::calibration`]): a measured
 //! contract (EmbeddingGemma 2 at 768 dims: 0.72) replaces 0.50 at recall
 //! time. Both knobs remain configurable per layer, and a set floor wins.
-//!
-//! ## The floor and the layer's size (#254)
-//!
-//! The floor is a bar for one query and one concept, and rule 1 asks whether
-//! *any* hit of the layer clears it: a best-of-N test, where N is the number
-//! of the layer's concepts that carry a vector. The chance that some concept
-//! unrelated to the query clears a fixed bar rises with N, so a floor says
-//! less the larger the layer. Every calibrated floor traces to one small
-//! layer: BGE-M3's 0.50 was chosen on 12 concepts (#157), and each other
-//! contract's floor is quantile-matched to that 0.50 on the #190 set's
-//! 100-concept corpus
-//! ([`layer_floor_chosen_concepts`](crate::embed::calibration::layer_floor_chosen_concepts)).
-//!
-//! On real queries against an unrelated stand-in layer
-//! (`evidence/layer-floor-size/`), the share admitting a hit at 0.50 has two
-//! sensitivity estimates per project, which are not an interval: for
-//! project A, 15% (uncorrected) and 37% (corrected) at 8 concepts, and 92%
-//! and 99% at 1,024; for project B, 4% and 18% at 8, and 79% and 88% at
-//! 1,024.
-//!
-//! The floor is **not** scaled with the layer's size. A floor that rises
-//! along the contract's measured null distribution was tried and rejected
-//! (`evidence/issue-254/`). Under BGE-M3 on the #190 set, the fixed floor
-//! rejects 15% (dev) and 17% (held-out) of the hits labelled relevant; the
-//! rising floor rejects 37% and 45% at 100 concepts and 71% and 76% at
-//! 1,024, because relevant and irrelevant cosines overlap. (At 32 concepts
-//! the splits disagree, 20% and 33%, and the set does not settle that
-//! step.) Those hits are a query against its own project's concepts;
-//! whether a shared layer's hits score like them was not measured. So rule
-//! 2's "a layer whose top hits fail its floor has shown weak relevance"
-//! holds for a small layer only.
-//!
-//! A serve warns once per attach of a layer on its default floor that holds
-//! more concepts with vectors than 12
-//! ([`layer_floor_size_warning`](crate::embed::calibration::layer_floor_size_warning)),
-//! giving both sizes and their ratio. The count is read at attach: a layer
-//! that grows while attached is not warned of until its next attach. A
-//! floor set per layer is the operator's choice of the trade and is not
-//! warned of. What limits a large layer's effect on the answer is its
-//! weight, since an admitted hit still has to outrank the caller's own.
 
 use std::collections::{HashMap, HashSet};
 
