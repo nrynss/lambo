@@ -2,27 +2,45 @@
 
 ## Unreleased
 
-- `lambo serve` warns once, when it attaches a layer's session, if the layer
-  is on its default floor and holds more concepts than that floor was measured
-  on (12 for BGE-M3's 0.50, 100 for a calibrated contract's floor): the floor
-  is tested against the layer's best match, so a larger layer admits a hit for
-  more unrelated queries (#254). `lambo stats` says the same on its
-  `calibration=` line for a session larger than the measured size. A floor set
-  with `[[serve.layer]] min_similarity` is not warned of. No floor, threshold
-  or ranking changes: a default floor that rises with the layer's size was
-  measured and not adopted, because on the #190 set it rejects 33% of the
-  held-out hits labelled relevant at 32 concepts and 76% at 1,024, against 17%
-  for the fixed floor (`evidence/issue-254/`). New library functions:
-  `embed::calibration::layer_floor_size_warning` and
-  `default_layer_floor_measured_concepts`, and `ServeLayers::layer_spec`.
-- Each built-in calibration row records the corpus size its recall constants
-  were measured on (`ContractCalibration::measured_corpus_concepts`: 100, the
-  #190 set), and the BGE-M3 reference records the 12-concept layer its 0.50
-  floor was chosen on (#157). `lambo stats` now prints
-  `calibration=calibrated (layer floor measured on N concepts)` for a
-  calibrated contract, so a layer much larger than N can be spotted (#254).
-  No constant, threshold or ranking changes. Rust callers building a
-  `ContractCalibration` literal must add the new field.
+- `lambo serve` warns, each time it has attached a layer's session, if the
+  layer is on its default floor and holds more concepts with vectors than the
+  12-concept layer that floor was chosen on (#254). The floor is tested
+  against the layer's best match, so the more vectors a layer holds, the more
+  unrelated queries it admits a hit for. The line is in the serve log only. It
+  gives both sizes and their ratio, and names no floor to set, because none is
+  known; the layer's weight still limits what an admitted hit displaces. The
+  size is read once per attach: a layer that grows while attached is not
+  warned of until its next attach. A layer whose floor is set with
+  `[[serve.layer]] min_similarity` is never warned of; setting one is how an
+  operator acknowledges the trade. The size compared is 12 for every
+  calibrated contract, because each built-in row's floor is matched to
+  BGE-M3's 0.50, which was chosen on a 12-concept layer.
+- `lambo stats` (the command) now prints, for a calibrated contract,
+  `calibration=calibrated (default layer floor 0.5 chosen on a 12-concept
+  layer; this session holds N concepts with vectors)`, or for a contract with
+  a built-in row `(calibrated layer floor F matched, on a 100-concept corpus,
+  to a bar chosen on a 12-concept layer; ...)`. It states the two sizes and
+  does not warn: a reader cannot know whether the session is served as a
+  layer or with which floor. The `lambo_stats` MCP tool is unchanged; adding
+  the size there is left for later (#254).
+- No floor, threshold or ranking changes. A default floor that rises with the
+  layer's size was measured and not adopted (`evidence/issue-254/`). Under
+  BGE-M3 on the #190 set, the fixed floor rejects 15% (dev) and 17%
+  (held-out) of the hits labelled relevant; the rising floor rejects 37% and
+  45% at 100 concepts and 71% and 76% at 1,024. At 32 concepts the two splits
+  disagree (20% dev, 33% held-out) and the set does not settle that step.
+  Those hits are a query against its own project's concepts; a shared layer's
+  hits were not measured.
+- Each built-in calibration row records the corpus its recall constants were
+  measured on (`ContractCalibration::measured_corpus_concepts`: 100, the #190
+  set), and the BGE-M3 reference records the 12-concept layer its 0.50 floor
+  was chosen on (`REFERENCE_LAYER_FLOOR_CONCEPTS`, #157). A row's 100 is where
+  its floor was matched to BGE-M3's, not a layer size the floor was checked
+  at. New library functions in `embed::calibration`:
+  `layer_floor_measured_concepts`, `layer_floor_chosen_concepts`,
+  `layer_floor_provenance`, `default_layer_floor_chosen_concepts` and
+  `layer_floor_size_warning`; and `ServeLayers::layer_spec`. Rust callers
+  building a `ContractCalibration` literal must add the new field.
 - `scripts/loadtest/mcp_ab.py ab` retries a call the serve's rate limit refuses
   (HTTP 429), after `Retry-After` or with bounded backoff, instead of aborting
   the run. Only the successful attempt is timed, and the output's new
