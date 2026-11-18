@@ -2,25 +2,34 @@
 
 [#254](https://github.com/nrynss/lambo/issues/254) showed that a layer's
 fixed cosine floor admits a hit for more unrelated queries as the layer
-grows ([`evidence/layer-floor-size/`](../layer-floor-size/README.md)). Its
+grows ([`evidence/layer-floor-size/`](../layer-floor-size/README.md)). Every
+ordinary layer hit is checked against the floor on its own cosine: a hit
+above it does not let one below it pass. The size effect is that a larger
+layer gives concepts unrelated to the query more chances to clear the floor.
+So a hit that passes is less informative as the layer grows; that says
+nothing about a hit that fails, which is rejected at any size. The issue's
 option 2 is a default floor that rises with the layer's size, so that the
 admission rate for unrelated queries stays where it was at the size the
 floor was chosen on. This measures whether such a floor meets the issue's
 acceptance criteria.
 
-**Result: it does not, and no size-aware floor ships.** A floor derived
+**Result: it does not. Nothing in the product changes.** A floor derived
 from each contract's measured null distribution does hold admission roughly
 level on the labelled set, as far as that set can test (96 concepts). It
-does so by rejecting hits that are labelled relevant. Under BGE-M3 the fixed
-0.50 floor already rejects 15% of the dev grade-2 pairs and 17% of the
-held-out ones. The rule rejects 37% (dev) and 45% (held-out) at 100
-concepts, 71% and 76% at 1,024, and 76% and 83% at 2,048. At 32 concepts the
+does so by rejecting grade-2 pairs: a query and a concept labelled as
+answering it. Under BGE-M3 the fixed 0.50 floor already rejects 15% of the
+dev grade-2 pairs and 17% of the held-out ones. The rule rejects 37% (dev)
+and 45% (held-out) at 100 concepts, 71% and 76% at 1,024, and 76% and 83% at 2,048. At 32 concepts the
 two splits disagree about the first step (20% dev, 33% held-out, with
 overlapping intervals), so the conclusion rests on 100 concepts and above.
 On real queries against an unrelated stand-in layer the same floor does not
-hold admission level either: it pushes it towards zero. What ships instead
-is a warning when a layer on its default floor holds more concepts with
-vectors than the 12-concept layer that floor was chosen on (option 1).
+hold admission level either: it pushes it towards zero. These rates count
+grade-2 pairs of a query with a concept of its own project: not the other
+relevance grades, and not a query against a shared layer. What they show is
+that the tested size-scaled floors rejected more relevant pairs than the
+fixed floor does, not that no higher floor could help. A size warning
+(option 1) was written and reviewed, then left out
+([What changes](#what-changes-nothing)).
 
 - **When:** 2026-11-18.
 - **Labelled data:** the #190 set (`fixtures/eval/`: 100 concepts, 368
@@ -61,9 +70,8 @@ layer BGE-M3's 0.50 was chosen on. The 100 is the corpus on which a row's
 floor was quantile-matched to that 0.50: it says where the match was made,
 not that the floor was checked on a layer of 100. So every floor's bar
 traces to the 12-concept layer, and [`floor-rule.json`](floor-rule.json)
-also carries every row at `N0 = 12` (`common12`), which is the anchor the
-shipped warning uses for every contract. Under BGE-M3 the two anchors are
-the same.
+also carries every row at `N0 = 12` (`common12`), the anchor that treats
+every contract alike. Under BGE-M3 the two anchors are the same.
 
 ## 1. Admission for queries with nothing relevant in the layer
 
@@ -170,7 +178,7 @@ same project), but the two populations also differ in who wrote the text, in
 how the queries were embedded and in size, and nothing here separates those.
 The correction was fitted on logged top hits, not on pairs in this tail.
 
-## 2. Hits labelled relevant
+## 2. Grade-2 pairs below the floor
 
 A layer hit is admitted on its own cosine, so whether a relevant hit
 survives depends only on the floor, not on the layer's size. For each floor
@@ -225,7 +233,7 @@ The reason is in the two distributions: the largest irrelevant cosine on
 dev is 0.711 (0.749 held-out), and the median grade-2 cosine is 0.61 (0.58
 held-out). They overlap, so on this set no absolute floor separates
 relevant from irrelevant pairs, and a floor high enough to keep a large
-layer quiet is above most of the hits labelled relevant. The population
+layer quiet is above most of the grade-2 pairs. The population
 matters: these grade-2 pairs are a query against a concept of its own
 project, not a project's query against a shared layer's rule, which was not
 measured ([Limits](#limits)).
@@ -241,55 +249,57 @@ The other contracts, held-out grade-2 pairs lost (of 98):
 The gentler anchor (100) only delays the loss.
 
 **A milder floor fitted to the real queries does not rescue it.** For each
-size, [`real-queries.json`](real-queries.json) gives the floor that would
-hold admission at its 8-concept level on those same queries (an in-sample
-quantile, so the best case for any floor that depends on size alone), and
-the held-out grade-2 share that floor loses:
+size, [`real-queries.json`](real-queries.json) gives the level floor: the
+lowest floor, at or above 0.50, at which those same queries admit no more
+often than they do at 8 concepts under the fixed floor (in-sample, so the
+best case for any floor that depends on size alone), and the held-out
+grade-2 share that floor loses:
 
 | Layer size | A: floor | A: grade-2 lost | B: floor | B: grade-2 lost |
 |---:|---:|---:|---:|---:|
-| 32 | 0.538 / 0.519 | 34% / 24% | 0.555 / 0.515 | 38% / 22% |
-| 128 | 0.552 / 0.542 | 38% / 35% | 0.555 / 0.538 | 38% / 34% |
-| 512 | 0.575 / 0.562 | 46% / 41% | 0.647 / 0.574 | 76% / 46% |
-| 2,048 | 0.594 / 0.573 | 55% / 45% | 0.647 / 0.611 | 76% / 62% |
+| 32 | 0.532 / 0.519 | 33% / 23% | 0.529 / 0.514 | 30% / 21% |
+| 128 | 0.551 / 0.542 | 37% / 35% | 0.542 / 0.537 | 35% / 34% |
+| 512 | 0.575 / 0.562 | 46% / 41% | 0.625 / 0.573 | 66% / 46% |
+| 2,048 | 0.594 / 0.573 | 55% / 45% | 0.625 / 0.611 | 66% / 62% |
 
-Cells are "uncorrected / corrected" again. This table is not anchored like
+Cells are "uncorrected / corrected" again. With a cap of k admitted scores,
+the level floor is the next float above the (k + 1)-th highest best cosine:
+any lower floor admits that score too, so the figure shown is that score.
+At 8 concepts it is 0.50 itself. The JSON also carries what each floor
+admits (`admit_level_floor_*`): the 8-concept share at every size (15.2% and
+37.4% for A, 3.8% and 17.6% for B), except B corrected at 1,024 and 2,048
+concepts, where scores tied at the cutoff are excluded together and it
+admits 17.0% and 16.4%. This table is not anchored like
 the rule's: it holds admission at its 8-concept level, the smallest layer
 the real-query data has, where the rule holds it at the 12-concept level.
 Admission at 8 is lower than at 12, so these floors are somewhat higher, and
 their losses somewhat larger, than a 12-anchored fit would give; the data
 has no 12-concept column to say by how much. B's uncorrected floor rests on
-2 of 53 queries (its 3.8% at 8 concepts) and is not stable. Even the lowest
-figure at 2,048 concepts loses 45% of the relevant pairs. Such a floor also
+2 of 53 queries (its 3.8% at 8 concepts: the floor sits just above the
+third-highest of 53 scores) and is not stable. Even the lowest
+figure at 2,048 concepts loses 45% of the held-out grade-2 pairs. Such a floor also
 could not ship: it is fitted to one operator's private queries, not derived
 from committed data.
 
 ## 3. Goldens
 
-None moved. No floor, threshold, score or ranking weight changes in this
-branch, so every recall golden and test is byte-identical. The only code
-change is the warning (below) and the wording of the `lambo stats`
-`calibration=` line for a calibrated contract.
+None moved. This branch changes no file outside `evidence/issue-254/`, so
+every recall golden and test is byte-identical.
 
-## What ships
+## What changes: nothing
 
-`lambo serve` logs one line when it has attached a layer's session, if the
-layer is on its default floor and holds more concepts with vectors than the
-12-concept layer that floor was chosen on (`layer_floor_size_warning` in
-`src/embed/calibration.rs`). The line gives both sizes and their ratio. It
-does not offer a floor to set, because this evidence finds none: it says
-that raising the floor rejects hits labelled relevant and that the layer's
-weight still limits what an admitted hit displaces. The size is read once,
-at attach. A floor set with `[[serve.layer]] min_similarity` is the
-operator's own choice of that trade and is not warned of. The floor itself
-is unchanged.
+No floor, threshold, score, ranking weight, log line or documented behaviour
+changes. The floor stays fixed, and what limits a large layer's effect on an
+answer is still its weight: an admitted hit has to outrank the caller's own.
 
-`lambo stats` (the CLI) states two facts on its `calibration=` line: the
-size the contract's layer floor was chosen on, and how many concepts with
-vectors the session holds. It does not warn, because a reader cannot know
-whether the session is served as a layer or with which floor. The MCP
-`lambo_stats` tool is unchanged.
+A size warning (option 1 of #254) was written and reviewed, and then left
+out. It compared a layer's count of concepts with vectors with the
+12-concept layer its default floor was chosen on. Every calibrated floor
+traces to that one small layer, so the warning would fire for nearly every
+layer in use, and it could name no action for an operator to take: this
+evidence finds no floor to recommend.
 
+The open direction is per-query scoring of layer hits.
 Per-query standardisation is option 3 of
 [#254](https://github.com/nrynss/lambo/issues/254) and part of the direction
 of [#174](https://github.com/nrynss/lambo/issues/174) (abstention): compare
@@ -362,11 +372,65 @@ python3 -m unittest discover -s evidence/issue-254 -p 'test_*.py'
 
 `floor_rule.py` needs only the committed run files and the standard
 library; its random draws and its bootstrap are seeded, and it takes about
-40 seconds. `real_queries.py` needs the private database (tables `e2`, `q`
-and `pool`, built as `evidence/layer-floor-size/method.sql` describes) and
-the `duckdb` CLI, and reads it read-only:
+40 seconds. `real_queries.py` needs the `duckdb` CLI (1.4 or 2.0) and the
+private database, which it opens read-only:
 
 ```sh
 python3 evidence/issue-254/real_queries.py --db <analysis.duckdb> \
     --project-a <session> --project-b <session>
 ```
+
+It reads three tables. `q` (the logged recall queries and their vectors) and
+`c` (the store's concepts) are built by
+[`evidence/layer-floor-size/method.sql`](../layer-floor-size/method.sql).
+That file shows `pool` and the per-size scores for one project, one size and
+one order; the script needs both projects in one `pool` and every size and
+order in `e2`. Session names are placeholders, as in `method.sql`:
+`:project_a` and `:project_b` are the two query sessions, and each
+`:unrelated_to_*` list names the sessions of the store that are about other
+projects than that one (never the project's own session or a copy of it;
+the other project's session may be in it).
+
+```sql
+-- pool: each project's stand-in layer. grp is the session whose queries the
+-- layer is for, so it equals q.session and the name given to --project-a or
+-- --project-b. r1, r2, r3 are three random orders within the group.
+create table pool as
+  select grp, id, v,
+         row_number() over (partition by grp order by hash(id || 'p1')) r1,
+         row_number() over (partition by grp order by hash(id || 'p2')) r2,
+         row_number() over (partition by grp order by hash(id || 'p3')) r3
+  from (select :project_a grp, id, v from c where session in (:unrelated_to_a)
+        union all
+        select :project_b grp, id, v from c where session in (:unrelated_to_b));
+
+-- e2: one row per query of a project. The four score arrays are aligned
+-- with ns: element i is the query's best cosine over the first ns[i]
+-- concepts of its project's layer. araw is order r1 as recomputed; a, b and
+-- c3 are orders r1, r2 and r3 with the linear correction of method.sql
+-- step 1 (:intercept and :slope; the values used are in
+-- ../layer-floor-size/query-vector-check.json).
+create table e2 as
+  with sizes as (select unnest([8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096]) n),
+       best as (
+         select q.qid, q.session, s.n,
+                max(array_cosine_similarity(q.v, p.v)) filter (p.r1 <= s.n) m1,
+                max(array_cosine_similarity(q.v, p.v)) filter (p.r2 <= s.n) m2,
+                max(array_cosine_similarity(q.v, p.v)) filter (p.r3 <= s.n) m3
+         from q join pool p on p.grp = q.session, sizes s
+         group by all)
+  select qid, session,
+         list(n order by n) ns,
+         list((:intercept + :slope * m1)::float order by n) a,
+         list((:intercept + :slope * m2)::float order by n) b,
+         list((:intercept + :slope * m3)::float order by n) c3,
+         list(m1::float order by n) araw
+  from best group by all;
+```
+
+A size larger than a project's pool takes the whole pool. The script reads
+the sizes it reports (8 to 2,048) out of `ns` by value and ignores 16 and
+4,096. Checked on DuckDB 2.0.0 against the database behind the committed
+figures: these two statements rebuild its `pool` (8,493 rows, every rank
+equal) and its `e2` (185 queries, all 1,850 values of each of the four
+arrays equal).
