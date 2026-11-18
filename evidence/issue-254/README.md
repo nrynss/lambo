@@ -6,8 +6,11 @@ grows ([`evidence/layer-floor-size/`](../layer-floor-size/README.md)). Every
 ordinary layer hit is checked against the floor on its own cosine: a hit
 above it does not let one below it pass. The size effect is that a larger
 layer gives concepts unrelated to the query more chances to clear the floor.
-So a hit that passes is less informative as the layer grows; that says
-nothing about a hit that fails, which is rejected at any size. The issue's
+So the chance that a query admits at least one unrelated hit rises with the
+layer's size; that is the quantity measured, and it says nothing about a
+hit that fails, which is rejected at any size. (A layer hit reached by an
+anchored traversal is admitted without the cosine check and is not part of
+this.) The issue's
 option 2 is a default floor that rises with the layer's size, so that the
 admission rate for unrelated queries stays where it was at the size the
 floor was chosen on. This measures whether such a floor meets the issue's
