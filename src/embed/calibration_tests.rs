@@ -221,6 +221,105 @@ fn rows_match_the_committed_evidence() {
     assert_eq!(checked, BUILTIN.len(), "every built-in row is evidenced");
 }
 
+/// #254: every row records the corpus size its query-to-concept nulls were
+/// measured on, and it is the one its own run file reports (`set.corpus`),
+/// which is the #190 corpus as committed.
+#[test]
+fn rows_record_the_corpus_size_their_evidence_measured() {
+    let runs = [
+        (
+            include_str!(
+                "../../evidence/issue-87-calibration/runs/eg2-q8-768-llamacpp-b11517-cpu.json"
+            ),
+            EG2_Q8_768,
+        ),
+        (
+            include_str!("../../evidence/issue-221/runs/qwen3-4b-2560.json"),
+            QWEN3_4B_2560,
+        ),
+        (
+            include_str!("../../evidence/issue-221/runs/qwen3-4b-1024.json"),
+            QWEN3_4B_1024,
+        ),
+        (
+            include_str!("../../evidence/issue-237/runs/elastic-jina-v3-1024.json"),
+            ELASTIC_JINA_V3_1024,
+        ),
+    ];
+    assert_eq!(runs.len(), BUILTIN.len(), "every built-in row has a run");
+    for (text, row) in runs {
+        let run: serde_json::Value = serde_json::from_str(text).unwrap();
+        assert_eq!(run["embedder"]["dimensions"], row.dim, "{row:?}");
+        assert_eq!(
+            run["set"]["corpus"].as_u64(),
+            Some(row.measured_corpus_concepts as u64),
+            "{row:?}"
+        );
+    }
+    let corpus: serde_json::Value =
+        serde_json::from_str(include_str!("../../fixtures/eval/corpus.json")).unwrap();
+    assert_eq!(corpus.as_array().unwrap().len(), EVAL_SET_CORPUS_CONCEPTS);
+    for row in BUILTIN {
+        assert_eq!(row.measured_corpus_concepts, 100, "{row:?}");
+    }
+}
+
+/// #254: `lookup` carries the recorded size, and the layer-floor accessor
+/// answers it for a row, 12 for the BGE-M3 reference (#157's layer) and
+/// nothing for an uncalibrated contract.
+#[test]
+fn layer_floor_measured_concepts_per_contract() {
+    assert_eq!(
+        lookup(&eg2()).map(|r| r.measured_corpus_concepts),
+        Some(100)
+    );
+    assert_eq!(layer_floor_measured_concepts(&eg2()), Some(100));
+    for (kind, model, dim) in [
+        ("bge_m3", "qwen3-embedding-4b", 2560),
+        ("bge_m3", "qwen3-embedding-4b", 1024),
+        ("elastic", ".jina-embeddings-v3", 1024),
+    ] {
+        let c = EmbeddingContract {
+            kind: kind.into(),
+            model: Some(model.into()),
+            dim,
+        };
+        assert_eq!(lookup(&c).map(|r| r.measured_corpus_concepts), Some(100));
+        assert_eq!(layer_floor_measured_concepts(&c), Some(100), "{c:?}");
+    }
+    for reference in [
+        EmbeddingContract {
+            kind: "bge_m3".into(),
+            model: None,
+            dim: 1024,
+        },
+        EmbeddingContract {
+            kind: "candle".into(),
+            model: Some("BAAI/bge-m3@5617a9f61b028005a4858fdac845db406aefb181".into()),
+            dim: 1024,
+        },
+    ] {
+        assert!(lookup(&reference).is_none());
+        assert_eq!(
+            layer_floor_measured_concepts(&reference),
+            Some(REFERENCE_LAYER_FLOOR_CONCEPTS),
+            "{reference:?}"
+        );
+    }
+    assert_eq!(REFERENCE_LAYER_FLOOR_CONCEPTS, 12);
+    assert!(
+        include_str!("../../dev-diary/notes/feat-157-layer-tuning.md")
+            .contains("The general layer contains 12 concepts."),
+        "the reference size must match #157's write-up"
+    );
+    let uncalibrated = EmbeddingContract {
+        kind: "bge_m3".into(),
+        model: Some("some-unmeasured-model".into()),
+        dim: 2560,
+    };
+    assert_eq!(layer_floor_measured_concepts(&uncalibrated), None);
+}
+
 #[test]
 fn rows_are_ordered_cosines() {
     for row in BUILTIN {

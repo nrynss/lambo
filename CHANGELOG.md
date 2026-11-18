@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Each built-in calibration row records the corpus size its recall constants
+  were measured on (`ContractCalibration::measured_corpus_concepts`: 100, the
+  #190 set), and the BGE-M3 reference records the 12-concept layer its 0.50
+  floor was chosen on (#157). `lambo stats` now prints
+  `calibration=calibrated (layer floor measured on N concepts)` for a
+  calibrated contract, so a layer much larger than N can be spotted (#254).
+  No constant, threshold or ranking changes. Rust callers building a
+  `ContractCalibration` literal must add the new field.
 - `scripts/loadtest/mcp_ab.py ab` retries a call the serve's rate limit refuses
   (HTTP 429), after `Retry-After` or with bounded backoff, instead of aborting
   the run. Only the successful attempt is timed, and the output's new

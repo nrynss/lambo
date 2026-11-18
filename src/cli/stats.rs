@@ -56,11 +56,17 @@ pub async fn run(store: &dyn GraphStore, session: &str) -> Result<String, CliErr
 /// its three arms are unit-testable without a store: the BGE-M3 reference
 /// (or a measured row) reports calibrated, any other stamped contract names
 /// itself as uncalibrated, and a session with no stamped contract reports
-/// unknown.
+/// unknown. A calibrated line also names how many concepts the contract's
+/// layer floor was measured against (#254), so an operator can compare it
+/// with the size of a layer.
 fn calibration_line(contract: Option<&EmbeddingContract>) -> String {
+    use crate::embed::calibration::{is_calibrated, layer_floor_measured_concepts};
     match contract {
-        Some(contract) if crate::embed::calibration::is_calibrated(contract) => {
-            "calibration=calibrated".to_string()
+        Some(contract) if is_calibrated(contract) => {
+            match layer_floor_measured_concepts(contract) {
+                Some(n) => format!("calibration=calibrated (layer floor measured on {n} concepts)"),
+                None => "calibration=calibrated".to_string(),
+            }
         }
         Some(contract) => format!(
             "calibration=uncalibrated (kind={} model={} dim={}: no built-in row; recall uses \
@@ -87,10 +93,11 @@ mod tests {
 
     #[test]
     fn calibration_line_names_all_three_arms() {
-        // Calibrated: the BGE-M3 reference contract (server default at 1024).
+        // Calibrated: the BGE-M3 reference contract (server default at 1024),
+        // whose 0.50 layer floor was chosen on a 12-concept layer (#157, #254).
         assert_eq!(
             calibration_line(Some(&contract("bge_m3", None, 1024))),
-            "calibration=calibrated"
+            "calibration=calibrated (layer floor measured on 12 concepts)"
         );
         // Uncalibrated: names the contract so the operator sees which space
         // recalls on BGE-M3-shaped constants. (Qwen3 Embedding 4B has measured
@@ -104,21 +111,36 @@ mod tests {
         assert!(qwen.contains("kind=bge_m3"), "{qwen}");
         assert!(qwen.contains("model=some-unmeasured-model"), "{qwen}");
         assert!(qwen.contains("dim=2560"), "{qwen}");
-        // A measured Qwen contract is calibrated.
+        // The uncalibrated arm's text is unchanged: no measured size.
+        assert_eq!(
+            qwen,
+            "calibration=uncalibrated (kind=bge_m3 model=some-unmeasured-model dim=2560: no \
+             built-in row; recall uses BGE-M3 constants)"
+        );
+        // A measured Qwen contract is calibrated, on the #190 set's 100
+        // concepts.
+        let on_eval_set = "calibration=calibrated (layer floor measured on 100 concepts)";
         let measured =
             calibration_line(Some(&contract("bge_m3", Some("qwen3-embedding-4b"), 2560)));
-        assert_eq!(measured, "calibration=calibrated", "{measured}");
+        assert_eq!(measured, on_eval_set, "{measured}");
         // The 1024 truncation has its own row: calibrated too.
         let truncated =
             calibration_line(Some(&contract("bge_m3", Some("qwen3-embedding-4b"), 1024)));
-        assert_eq!(truncated, "calibration=calibrated", "{truncated}");
+        assert_eq!(truncated, on_eval_set, "{truncated}");
         // #237: the exact Elastic Jina contract has a measured row too.
         let elastic = calibration_line(Some(&contract(
             "elastic",
             Some(".jina-embeddings-v3"),
             1024,
         )));
-        assert_eq!(elastic, "calibration=calibrated", "{elastic}");
+        assert_eq!(elastic, on_eval_set, "{elastic}");
+        // The EG2 row (#87) was measured on the same set.
+        let eg2 = calibration_line(Some(&contract(
+            "embeddinggemma2",
+            Some("ggml-org/embeddinggemma-2-GGUF@bfcd2987/Q8_0;prompts=lambo-eg2-v2"),
+            768,
+        )));
+        assert_eq!(eg2, on_eval_set, "{eg2}");
         // A default-model uncalibrated contract prints `(default)`, not empty.
         let defaulted = calibration_line(Some(&contract("embeddinggemma2", None, 768)));
         assert!(defaulted.contains("model=(default)"), "{defaulted}");
