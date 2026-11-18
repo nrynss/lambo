@@ -179,27 +179,29 @@ By default a hit's query relevance is the highest of its raw keyword, vector and
 
 ```json
 {"content": [{"type": "text", "text": "stdio wire check [Entity] (score 0.86, id ddbc8bc8)"}],
- "structuredContent": {"context": "stdio wire check [Entity] (score 0.86, id ddbc8bc8)",
-   "hits": [{"node_id": "ddbc8bc8-52ed-465b-9a2a-b0066bda51ad", "content": "stdio wire check",
-             "concept_type": "Entity", "score": 0.8565231086776713,
-             "is_canonical": false, "blast_radius": null}],
-   "warnings": [],
-   "top_legs": {"bm25": 0.8630462173553426, "vector_cosine": null, "exact_name_match": false},
-   "confidence": {"value": 0.14720099166208497, "basis": "keyword-only-v0", "provisional": true}},
+ "structuredContent": {
+   "confidence": {"basis": "keyword-only-v0", "provisional": true, "value": 0.14720099166208497},
+   "context": "stdio wire check [Entity] (score 0.86, id ddbc8bc8)",
+   "hits": [{"blast_radius": null, "concept_type": "Entity", "content": "stdio wire check",
+             "is_canonical": false, "node_id": "ddbc8bc8-52ed-465b-9a2a-b0066bda51ad",
+             "score": 0.8565231086776713}],
+   "top_legs": {"bm25": 0.8630462173553426, "exact_name_match": false, "vector_cosine": null},
+   "warnings": []},
  "isError": false}
 ```
 
 **How strong the best match was.** `structuredContent` carries two more keys. Neither changes which hits are returned or their order, and nothing in `context` or `warnings` mentions them.
 
-* `top_legs` is always present: `{"bm25": ..., "vector_cosine": ..., "exact_name_match": ...}`, the best score each first-phase search leg gave any concept of the session for this query, whether or not that concept is among `hits`. `bm25` is the keyword leg's best BM25 score as the index returned it (`0` when no concept shares a word with the query). `vector_cosine` is the vector leg's best cosine similarity. A leg that did not run is `null`: the example above is from a store without vector search. `exact_name_match` is `true` when the query is exactly the durable name of a concept: that concept is ranked with a keyword score of 1.0 in place of its BM25, and `bm25` still reports the index's own best. The recent-interactions leg and graph expansion are not counted. Rely on these numbers.
+* `top_legs` is always present: `{"bm25": ..., "exact_name_match": ..., "vector_cosine": ...}`, the best score each first-phase search leg gave any concept of the session for this query, whether or not that concept is among `hits`. `bm25` is the keyword leg's best BM25 score as the index returned it (`0` when no concept shares a word with the query). `vector_cosine` is the vector leg's best cosine similarity. A leg that did not run is `null`: the example above is from a store without vector search. `exact_name_match` is `true` when the query, normalized as names are (so case and spacing variants match), is the durable name of a concept: that concept is ranked with a keyword score of 1.0 in place of its BM25, and `bm25` still reports the index's own best. The recent-interactions leg and graph expansion are not counted. Rely on these numbers.
 * `confidence` is an object, never a bare number. Its `basis` says which formula produced `value`, and two values are only comparable when their `basis` is the same. With both legs, on a text query whose session's embedding contract has a measured baseline, it is `"noisy-or-v0"`:
 
 ```json
-"top_legs": {"bm25": 1.3097505006899584, "vector_cosine": 0.7000000476837158, "exact_name_match": false},
-"confidence": {"value": 0.35400198340656197, "basis": "noisy-or-v0", "provisional": true}
+"confidence": {"basis": "noisy-or-v0", "provisional": true, "value": 0.35400198340656197},
+"top_legs": {"bm25": 1.3097505006899584, "exact_name_match": false, "vector_cosine": 0.7000000476837158}
 ```
 
-* With the keyword leg alone (a store without vector search, a failed query embed or vector read, no embedded concept), it is `"keyword-only-v0"`, `bm25 / (bm25 + 5)`, as in the first example: a lower quantity than the two-leg value, kept apart by its name.
+* With the keyword leg alone (a store without vector search, a failed query embed or vector read, no embedded concept), it is `"keyword-only-v0"`, `bm25 / (bm25 + 5)`, as in the first example: a lower quantity than the two-leg value, kept apart by its name. A vector leg that ran but returned no concept it could count (every cosine not a finite number, or every concept one the reader's loaded graph does not hold) counts as one that did not run.
+* `value` does not take `exact_name_match` into account: a query that is a concept's name but shares no word with any concept's content reports `bm25` `0`, and with the keyword leg alone a `value` of `0`, beside `"exact_name_match": true`. Read the flag beside the value.
 * `confidence` is provisional. The formula may change (with a new `basis`), or the key may be removed, in any release without a deprecation cycle. It is absent, not guessed, when both legs ran but the embedding contract has no measured baseline (including every contract but BGE-M3 under `calibration = "off"`), when the keyword leg did not run, for a recall by `image` or `query_vector`, and for a dependency question answered by traversal.
 * None of these numbers is a probability, and none is comparable across embedding contracts or across store sizes: the best score an unrelated query finds rises as the store grows. Do not treat any of them as a fixed threshold. The web portal's REST API (`/api/recall`) and the `--ledger` recall line carry the same two keys. The formula, the baselines and the reasons are in the [API reference](/api#top-leg-scores-and-the-provisional-confidence); calibration is tracked in [#174](https://github.com/nrynss/lambo/issues/174) and [#254](https://github.com/nrynss/lambo/issues/254).
 
@@ -305,7 +307,7 @@ worktree branches are always rebased onto origin main first [Logic] (score 0.42,
 * A layer that is not serving right now leaves a merged recall to the session's own hits with one warning, `recall: layer general is unavailable; results are from lambo only`. A `scope` naming it is refused: retryably while another writer holds its lease, it is being detached or it is over its rate; as permanent, telling you to ask the operator, when its attach failed for good or it was erased.
 * A layer's warnings start with its name, such as `[general] `. A truncated layer block's marker reads `lambo_inspect <id> (scope general)`.
 * A recall by `image` or `query_vector` reads one session: on a layered session without `scope` it reads the session itself and says its layers were not searched.
-* `top_legs` and `confidence` are the addressed session's own (with `scope`, the session `scope` names, and no `layer_top_legs`). A merged recall also carries `layer_top_legs`: one `{"session": "general", "bm25": ..., "vector_cosine": ..., "exact_name_match": ...}` per layer that answered, the best scores of that layer's own concepts for the query, whether or not they passed its floor. A layer that is not serving has no entry; one that answered a dependency question by traversal has one with both scores `null`. A layer's scores are never mixed into `top_legs`, and a layer gets no `confidence`.
+* `top_legs` and `confidence` are the addressed session's own (with `scope`, the session `scope` names, and no `layer_top_legs`). A merged recall also carries `layer_top_legs`: one `{"bm25": ..., "exact_name_match": ..., "session": "general", "vector_cosine": ...}` per layer that answered, the best scores of that layer's own concepts for the query, whether or not they passed its floor. A layer that is not serving has no entry; one that answered a dependency question by traversal has one with both scores `null`. A layer's scores are never mixed into `top_legs`, and a layer gets no `confidence`.
 * With `--ledger`, a layered session's recall line names each hit's `session` and counts hits per session in `session_hits`; a line carries `scope` when the call sent one. Every recall line carries `top_legs`, `confidence` when the answer had one, and `layer_top_legs` for a merged recall, with the same names and values as the answer.
 
 **Recall by image or by vector.** With `image` or `query_vector`, the vector leg searches by that image's or vector's embedding instead of the text's, so "this outfit is close to the one you dismissed for Onam" is a recall by the photo of this outfit. The server embeds an image with no prompt, the way it embeds an image it stores, and normalizes a client vector to unit length after checking that its contract is exactly the session's `embedding_contract`, as `lambo_derive_image` does. Text sent beside it still matches words through the keyword leg. With no text the keyword leg finds nothing and recent interactions are left out: they say nothing about the image, and their fixed score would rank whatever was stored last above a real match whose similarity is lower. With text, recent interactions are included as for any recall. A structural question such as "what depends on X" is answered by the blended recall here, not by graph traversal, since traversal would ignore the image.

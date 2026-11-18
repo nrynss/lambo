@@ -348,8 +348,9 @@ pub(crate) struct KeywordLeg {
     /// concept; `None` when it did not run, or when every score it returned
     /// was non-finite (phase 1's own leg ranking ignores those too).
     pub(crate) best_bm25: Option<f64>,
-    /// The query is exactly a concept's durable name, so phase 1 scored that
-    /// concept's keyword leg `1.0` in place of its BM25.
+    /// The query, normalized as names are ([`Graph::name_target`]), is a
+    /// concept's durable name, so phase 1 scored that concept's keyword leg
+    /// `1.0` in place of its BM25.
     pub(crate) exact_name: bool,
 }
 

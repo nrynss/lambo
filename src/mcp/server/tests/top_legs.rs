@@ -107,7 +107,7 @@ async fn the_structured_content_and_the_ledger_carry_both_under_one_shape() {
     assert_eq!(confidence["provisional"], json!(true));
     let expected = noisy_or(bm25, cosine, 0.632).expect("finite");
     let value = confidence["value"].as_f64().expect("value");
-    assert!((value - expected).abs() < 1e-12, "{value} vs {expected}");
+    assert_eq!(value, expected, "in-process f64 on both sides");
     assert!((0.0..=1.0).contains(&value));
 
     // The context block and its text content say nothing about either.
@@ -261,7 +261,10 @@ async fn the_bge_m3_reference_contract_reports_the_two_leg_value() {
         crate::embed::calibration::REFERENCE_NULL_MEDIAN_COSINE,
     )
     .expect("finite");
-    assert!((value - expected).abs() < 1e-12, "{value} vs {expected}");
+    // Both sides are in-process f64 (the structured content is a
+    // `serde_json::Value` built from the result, never re-parsed), so they
+    // agree exactly.
+    assert_eq!(value, expected);
     s.mem.close().await.expect("close");
 }
 

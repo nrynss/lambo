@@ -12,7 +12,8 @@
   "provisional": true}`: basis `"noisy-or-v0"` when both legs reported under
   an embedding contract with a measured pairwise null median, basis
   `"keyword-only-v0"` (`bm25 / (bm25 + 5)`) when the keyword leg ran and the
-  vector leg did not (no vector search, a failed embed or vector read), and
+  vector leg did not (no vector search, a failed embed or vector read, no
+  embedded concept), and
   absent otherwise (both legs under an unmeasured contract, or under
   `calibration = "off"` for any contract but BGE-M3; no keyword leg; a recall
   by image or vector; a dependency question answered by traversal). Values of
@@ -36,7 +37,11 @@
   `vector_degraded` annotation and warning, `recall: a concurrent write
   changed the graph after a dependency-question dispatch was planned, and the
   dispatch did not fire; vector leg skipped, results are keyword-only`, when a
-  vector leg would have run. Ranking is unchanged.
+  vector leg would have run. A predicted dispatch that declines with no write
+  in between (`top_k` 0 leaves the traversal nothing to return) carries the
+  same annotation worded `recall: a planned dependency-question dispatch did
+  not fire; vector leg skipped, results are keyword-only`. Ranking is
+  unchanged.
 - Each built-in calibration row records the corpus size its recall constants
   were measured on (`ContractCalibration::measured_corpus_concepts`: 100, the
   #190 set), and the BGE-M3 reference records the 12-concept layer its 0.50

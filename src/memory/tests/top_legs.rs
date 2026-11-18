@@ -424,6 +424,127 @@ async fn an_exact_name_query_reports_the_raw_bm25_and_the_match() {
     mem.close().await.unwrap();
 }
 
+/// A query that is a concept's durable name but shares no word with any
+/// concept's content: the named concept is absent from the BM25 results, so
+/// `bm25` is 0 beside `exact_name_match: true`, and the keyword-only value,
+/// which does not take the flag into account, is 0. The name is compared
+/// normalized, so a case and spacing variant matches too.
+#[tokio::test]
+async fn an_exact_name_with_no_word_overlap_reports_zero_bm25_beside_the_match() {
+    let mem = seeded(
+        "top-legs-name-zero",
+        &[
+            (KEYWORD_HIT, ConceptType::Logic),
+            ("auth middleware", ConceptType::Entity),
+        ],
+    )
+    .await;
+    let target = mem
+        .recall_detailed(query(KEYWORD_HIT))
+        .await
+        .unwrap()
+        .hits
+        .iter()
+        .find(|h| h.content == KEYWORD_HIT)
+        .expect("seeded")
+        .node_id;
+    mem.declare_name("quokka", target).unwrap();
+    mem.settle_daemon().await;
+    for q in ["quokka", "  Quokka "] {
+        let cap = query(q).top_k * crate::recall::candidates::KEYWORD_OVERFETCH;
+        assert!(
+            mem.index.read().search(q, cap).is_empty(),
+            "premise: no concept's content holds the name"
+        );
+        let r = mem.recall_detailed(query(q)).await.unwrap();
+        assert_eq!(
+            r.legs.get(&target).and_then(|l| l.keyword),
+            Some(1.0),
+            "premise: ranked as an exact-name match ({q:?})"
+        );
+        assert_eq!(
+            r.top_legs,
+            TopLegs {
+                bm25: Some(0.0),
+                vector_cosine: None,
+                exact_name_match: true,
+            },
+            "{q:?}"
+        );
+        assert_keyword_only(&r, 0.0);
+    }
+    mem.close().await.unwrap();
+}
+
+/// A layer's own exact-name match is reported in its `layer_top_legs`
+/// entry, and does not set the caller's own flag.
+#[tokio::test]
+async fn a_layers_exact_name_match_is_reported_under_layer_top_legs() {
+    let project = seeded(
+        "top-legs-name-lp",
+        &[("auth middleware checks tokens", ConceptType::Entity)],
+    )
+    .await;
+    let general = seeded("top-legs-name-lg", &[(KEYWORD_HIT, ConceptType::Logic)]).await;
+    let target = general
+        .recall_detailed(query(KEYWORD_HIT))
+        .await
+        .unwrap()
+        .hits
+        .iter()
+        .find(|h| h.content == KEYWORD_HIT)
+        .expect("seeded")
+        .node_id;
+    general.declare_name("rotation policy", target).unwrap();
+    general.settle_daemon().await;
+
+    let q = query("rotation policy");
+    let own = project.recall_detailed(q.clone()).await.unwrap();
+    assert!(!own.top_legs.exact_name_match, "premise: no project name");
+    let r = project
+        .recall_layered(&[LayerRef::new(&general)], q)
+        .await
+        .unwrap();
+    assert_eq!(r.layer_top_legs.len(), 1, "{:?}", r.layer_top_legs);
+    let LayerTopLegs { session, top_legs } = &r.layer_top_legs[0];
+    assert_eq!(session, general.session());
+    assert!(top_legs.exact_name_match, "{top_legs:?}");
+    assert!(top_legs.bm25.is_some(), "the layer's keyword leg ran");
+    assert_eq!(r.top_legs, own.top_legs);
+    assert_eq!(r.confidence, own.confidence);
+    project.close().await.unwrap();
+    general.close().await.unwrap();
+}
+
+/// A recall refused with a warning (here a `top_k` over the vector
+/// candidate limit, on a session whose two legs would otherwise both run)
+/// runs no leg: through `Memory`, both legs are null, no name matched, and
+/// there is no confidence, in the detailed answer, the public one and its
+/// serialized form.
+#[tokio::test]
+async fn a_refused_recall_reports_no_leg_and_no_confidence() {
+    let mem = two_leg_session("top-legs-refused", Builtin).await;
+    let q = top_k(crate::store::MAX_VECTOR_CANDIDATE_LIMIT + 1);
+    let r = mem.recall_detailed(q.clone()).await.unwrap();
+    assert!(
+        r.hits.is_empty() && r.warnings.iter().any(|w| w.contains("exceeds maximum")),
+        "premise: refused with a warning: {:?}",
+        r.warnings
+    );
+    assert_eq!(r.top_legs, TopLegs::default());
+    assert_eq!(r.confidence, None);
+    let public = mem.recall(q).await.unwrap();
+    assert_eq!(public.top_legs, TopLegs::default());
+    assert_eq!(public.confidence, None);
+    let wire = serde_json::to_value(&public).unwrap();
+    assert_eq!(
+        wire["top_legs"],
+        serde_json::json!({"bm25": null, "exact_name_match": false, "vector_cosine": null})
+    );
+    assert!(wire.get("confidence").is_none(), "{wire}");
+    mem.close().await.unwrap();
+}
+
 /// A dependency question answered by graph traversal runs no leg: both
 /// legs are null, no name matched, and there is no confidence.
 #[tokio::test]

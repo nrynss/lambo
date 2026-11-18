@@ -316,7 +316,8 @@ lambo_recall        query (≤2000 chars, then "…[truncated]"), top_k, hit_cou
                     under a contract with a measured pairwise null median.
                     basis "keyword-only-v0": the keyword leg ran and the
                     vector leg did not (no vector search, failed embed or
-                    vector read); value = bm25 / (bm25 + 5). Never compare
+                    vector read, no embedded concept); value = bm25 /
+                    (bm25 + 5). Never compare
                     values of different bases. Absent otherwise. May change
                     or disappear without a deprecation cycle. Neither it nor
                     top_legs is a probability, comparable across embedding

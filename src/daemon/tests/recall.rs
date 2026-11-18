@@ -1050,6 +1050,7 @@ async fn a_dispatch_declined_by_a_concurrent_write_says_the_vector_leg_was_skipp
         assert_eq!(kinds(&r), [AnnotationKind::VectorDegraded]);
         let text = &r.response_annotations[0].text;
         assert!(text.contains("keyword-only"), "{text}");
+        assert!(text.contains("concurrent write"), "{text}");
         assert!(r.warnings.contains(text), "{:?}", r.warnings);
         // The #256 report agrees: no cosine, the keyword-only basis.
         assert_eq!(r.top_legs.vector_cosine, None);
@@ -1058,6 +1059,85 @@ async fn a_dispatch_declined_by_a_concurrent_write_says_the_vector_leg_was_skipp
             Some("keyword-only-v0")
         );
     }
+}
+
+/// Found in the #256 second review: at `top_k = 0` the pre-check predicts a
+/// dependency-question dispatch (the anchor has a dependent) and skips the
+/// vector gather, but the traversal has nothing to return and declines,
+/// deterministically, with no write anywhere. The answer still says its
+/// vector leg was skipped, and does not blame a concurrent write that never
+/// happened (the graph epoch did not move).
+#[tokio::test]
+async fn a_dispatch_declined_at_top_k_zero_does_not_blame_a_concurrent_write() {
+    use crate::config::RecallWeights;
+    use crate::recall::cache::SharedRecallCache;
+    use crate::recall::detail::AnnotationKind;
+
+    let mut g = Graph::new(sid());
+    let i = interaction(1);
+    let iid = i.id;
+    g.insert_interaction(i).unwrap();
+    let anchor = concept(1, iid, "billing ledger");
+    let dependent = concept(2, iid, "invoice export job");
+    let (a, d) = (anchor.id, dependent.id);
+    g.insert_concept(anchor, iid).unwrap();
+    g.insert_concept(dependent, iid).unwrap();
+    g.upsert_edge(Edge {
+        event_time: None,
+        id: NodeId(Uuid::from_u64_pair(3, 1)),
+        session_id: sid(),
+        source: a,
+        target: d,
+        edge_type: EdgeType::Hierarchical,
+        weight: 4.5,
+        reinforcements: 1,
+        created_at: ts(0),
+        last_reinforced: ts(0),
+    })
+    .unwrap();
+    let mut index = InvertedIndex::new();
+    for c in g.concepts() {
+        index.add(c);
+    }
+    let graph = Arc::new(RwLock::new(g));
+    let epoch = graph.read().epoch();
+    let daemon = Daemon::new(
+        graph.clone(),
+        ScoringWeights::default(),
+        Duration::from_secs(3600),
+    )
+    .with_index(Arc::new(RwLock::new(index)));
+    let contract = EmbeddingContract {
+        kind: "fixture".into(),
+        model: None,
+        dim: 1024,
+    };
+    let embedding = vec![0.0_f32; 1024];
+    let r = daemon
+        .recall_detailed(
+            &sid(),
+            RecallQuery {
+                query: "what depends on billing ledger".into(),
+                top_k: 0,
+                max_tokens: 500,
+                traversal_depth: 2,
+            },
+            &StubVectorStore::new(false),
+            Some((embedding.as_slice(), &contract)),
+            RecallWeights::default(),
+            &SharedRecallCache::new(),
+        )
+        .await;
+    assert_eq!(graph.read().epoch(), epoch, "premise: nothing was written");
+    let kinds: Vec<AnnotationKind> = r.response_annotations.iter().map(|a| a.kind).collect();
+    assert_eq!(kinds, [AnnotationKind::VectorDegraded]);
+    let text = &r.response_annotations[0].text;
+    assert_eq!(
+        text,
+        "recall: a planned dependency-question dispatch did not fire; vector leg skipped, \
+         results are keyword-only"
+    );
+    assert!(r.warnings.contains(text), "{:?}", r.warnings);
 }
 
 /// #87 through `Daemon::recall_detailed`: the recent leg scores at the

@@ -708,10 +708,11 @@ impl Daemon {
         // does the query resolve an anchor WITH structural dependents? Only then
         // can the (async, vector-I/O) gather be skipped (T9-R1-3); a structural
         // phrasing that does not dispatch falls through to the FULL blend below,
-        // never a degraded keyword-only answer. The one exception is a write
-        // landing between this check and the graph lock below, which can make
-        // a predicted dispatch decline after the gather was skipped; that
-        // answer is keyword-only and says so (see after the dispatch).
+        // never a degraded keyword-only answer. The exceptions are a write
+        // landing between this check and the graph lock below, and a `top_k`
+        // of 0, either of which can make a predicted dispatch decline after
+        // the gather was skipped; that answer is keyword-only and says so
+        // (see after the dispatch).
         //
         // #171: the anchor is resolved here once, stamped with the epoch, and
         // reused by the dispatch and the subject text below unless a write
@@ -821,6 +822,7 @@ impl Daemon {
         // mutation. The daemon HotList tracks conflict/condition entries, not recall
         // recency - neither the blend nor this path bumps recall recency - so there
         // is no recency to refresh here.
+        let planned_epoch = anchor.as_ref().map(dispatch::ResolvedAnchor::epoch);
         let anchor = anchor.map(|a| a.current(&graph, &query.query));
         if let Some(anchor) = &anchor
             && let Some(result) = dispatch::try_structural_with(
@@ -834,21 +836,28 @@ impl Daemon {
             return Ok(result);
         }
         // The lock-free pre-check above predicted this dispatch and skipped
-        // the vector gather, but a write that landed before the graph lock
-        // (the anchor's dependents removed, the anchor renamed or retired)
-        // made it decline: the recall falls through to the blend with no
-        // vector input. Ranking stays as it is (fail closed, as for every
-        // other lost vector leg), but the caller hears the leg was skipped,
-        // the same way: a `vector_degraded` annotation and its warning line.
+        // the vector gather, but the dispatch declined: the recall falls
+        // through to the blend with no vector input. Two causes: a write
+        // that landed before the graph lock (the anchor's dependents
+        // removed, the anchor renamed or retired), which moved the graph
+        // epoch; or a decline the pre-check does not predict, at an
+        // unchanged epoch (a `top_k` of 0 leaves the traversal nothing to
+        // return). Ranking stays as it is (fail closed, as for every other
+        // lost vector leg), but the caller hears the leg was skipped, the
+        // same way: a `vector_degraded` annotation and its warning line,
+        // naming a concurrent write only when the epoch says one happened.
         // Only when the leg would have run (a query embedding and a store
         // that searches vectors); otherwise nothing was lost.
         if dispatch_ready && vector_capable && embedding.is_some() {
-            vector_leg_refused.push(Annotation::new(
-                AnnotationKind::VectorDegraded,
+            let text = if planned_epoch == Some(graph.epoch()) {
+                "recall: a planned dependency-question dispatch did not fire; vector leg \
+                 skipped, results are keyword-only"
+            } else {
                 "recall: a concurrent write changed the graph after a dependency-question \
                  dispatch was planned, and the dispatch did not fire; vector leg skipped, \
-                 results are keyword-only",
-            ));
+                 results are keyword-only"
+            };
+            vector_leg_refused.push(Annotation::new(AnnotationKind::VectorDegraded, text));
         }
 
         let scores = self.scores.read().clone();

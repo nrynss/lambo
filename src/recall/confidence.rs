@@ -9,7 +9,7 @@
 //!
 //! * `bm25`: the keyword leg's best BM25, as the index returned it.
 //! * `vector_cosine`: the vector leg's best cosine.
-//! * `exact_name_match`: the query is a concept's durable name.
+//! * `exact_name_match`: the query, normalized, is a concept's durable name.
 //!
 //! **"Phase-1 candidates"** are the members of the phase-1
 //! [`LegProvenance`] map
@@ -69,6 +69,17 @@
 //! (#256's acceptance: a recall with no vector leg still reports a
 //! confidence).
 //!
+//! A vector leg that ran but left nothing to count counts as one that did
+//! not run: when every cosine it returned is non-finite, or every concept it
+//! returned is outside the graph the recall answers from (a reader's
+//! snapshot, above), `vector_cosine` is `None`, and the recall reports
+//! `"keyword-only-v0"`, on a calibrated contract too.
+//!
+//! Neither basis takes `exact_name_match` into account: a query that is a
+//! concept's name but shares no word with any concept's content reports
+//! `bm25` 0, and with the keyword leg alone a value of 0, beside
+//! `exact_name_match: true`. Read the flag beside the value.
+//!
 //! `m` is the **pairwise null median**: the median cosine of a query to one
 //! concept graded irrelevant to it under the session's embedding contract
 //! ([`crate::embed::calibration::null_median_cosine`], each run file's
@@ -91,13 +102,12 @@
 //! probability, and not comparable across contracts or store sizes.
 //!
 //! The two-leg value is **absent**, never guessed, on a text recall whose
-//! vector leg reported when:
-//!
-//! * the contract has no measured null median (a contract with no
-//!   calibration row; under `[embedder] calibration = "off"` every contract
-//!   but the BGE-M3 reference, whose median is the reference value "off"
-//!   keeps);
-//! * an input is non-finite.
+//! vector leg reported when the contract has no measured null median (a
+//! contract with no calibration row; under `[embedder] calibration = "off"`
+//! every contract but the BGE-M3 reference, whose median is the reference
+//! value "off" keeps). Both leg maxima it reads are finite by construction
+//! (a non-finite score is never a leg's best), so the non-finite guards in
+//! `noisy_or` and the keyword term are defensive.
 //!
 //! And no confidence of either basis is reported when:
 //!

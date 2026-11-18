@@ -562,6 +562,11 @@ impl ResolvedAnchor {
         }
     }
 
+    /// The graph epoch this resolution was made at.
+    pub(crate) fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
     /// What the subject resolved to.
     pub(crate) fn choice(&self) -> Option<&AnchorChoice> {
         self.choice.as_ref()

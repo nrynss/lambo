@@ -1850,8 +1850,10 @@ pub struct TopLegs {
     /// or returned no candidate.
     #[serde(default)]
     pub vector_cosine: Option<f64>,
-    /// The query is exactly the durable name of a concept of this session,
-    /// so the keyword leg scored that concept as an identity match. Direct
+    /// The query is the durable name of a concept of this session, compared
+    /// after the same normalization as names themselves (so a case or
+    /// whitespace variant of the name matches), and the keyword leg scored
+    /// that concept as an identity match. Direct
     /// evidence the store holds what was asked for, which no BM25 value
     /// expresses. `false` when the keyword leg did not run.
     #[serde(default)]
@@ -1866,6 +1868,11 @@ pub struct TopLegs {
 /// `value` is not a probability and is not comparable across embedding
 /// contracts or store sizes, or across bases. Do not threshold it. Rely on
 /// [`TopLegs`].
+///
+/// `value` does not take [`TopLegs::exact_name_match`] into account (a query
+/// that is a concept's name but shares no word with any concept's content
+/// reports a `bm25` of 0 and, with the keyword leg alone, a value of 0); read
+/// the flag beside it.
 ///
 /// `#[non_exhaustive]`: read its fields; it is built by recall.
 #[non_exhaustive]
