@@ -127,8 +127,10 @@ pub struct ContractCalibration {
     /// chosen on a smaller layer ([`REFERENCE_LAYER_FLOOR_CONCEPTS`]).
     ///
     /// Recorded because a fixed floor is a per-pair bar that layered recall
-    /// applies best-of-N, so it admits more unrelated hits the larger a layer
-    /// grows past the size it was measured at (#254). Only reported (the
+    /// checks against every hit of the layer on its own cosine. A larger
+    /// layer gives unrelated concepts more chances to clear it, so a hit
+    /// that passes is less informative the further a layer grows past the
+    /// size the floor was measured at (#254). Only reported (the
     /// `calibration=` stats line); nothing reads it to change a constant.
     pub measured_corpus_concepts: usize,
     /// Where the numbers come from.
