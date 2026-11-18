@@ -48,13 +48,18 @@ File: [`layer-admission.json`](layer-admission.json).
 | 2,048 | 96.2% | 99.2% | 83.0% | 96.9% |
 
 Share of queries admitting at least one hit at the 0.50 floor. "Corrected"
-and "uncorrected" are explained under [Query vectors](#query-vectors); the
-uncorrected column is one random order, the corrected one is the mean of
+and "uncorrected" are two estimates, explained under
+[Query vectors](#query-vectors), and neither is a bound on the true share.
+The uncorrected column is one random order; the corrected one is the mean of
 three.
 
 At a floor of 0.55 the corrected shares are 22.0% (A) and 3.1% (B) at 64
 concepts and 60.6% and 45.9% at 1,024. A higher fixed floor delays the
 effect and does not remove it.
+
+The 0.50 floor itself was chosen against a small layer: #157's sweep ran on
+a `general` layer of 12 concepts
+(`dev-diary/notes/feat-157-layer-tuning.md`).
 
 **Why:** for one unrelated query and concept, the cosine has a median of
 0.405 (A) and 0.375 (B), and 0.50 is near its 98th to 99th percentile: 2.3%
@@ -96,7 +101,9 @@ most of them at small sizes. The growth is the subset filling back in.
 File: [`merge-arrival-order.json`](merge-arrival-order.json).
 
 Each fact's best cosine to concepts of earlier calls only, grouped by how
-many concepts its session held when it was written.
+many concepts its session held when it was written. A fact with no earlier
+concept from another call has no match and counts as below the threshold
+(18 of the 4,434 facts across the three sessions).
 
 | Written when the session held | A | A-archived | B |
 |---|---:|---:|---:|
@@ -139,15 +146,21 @@ File: [`query-vector-check.json`](query-vector-check.json). On the 627
 (query, concept) pairs for which the ledger logged the server's own cosine,
 the recomputed cosine is lower by 0.013 on average, with correlation 0.96.
 
-- **Uncorrected** figures use the recomputed cosine as it is. They
-  understate admission.
+- **Uncorrected** figures use the recomputed cosine as it is.
 - **Corrected** figures apply the linear fit from those pairs
-  (0.0438 + 0.9504 × cosine, RMSE 0.0195). The logged pairs are top hits,
-  selected for a high server cosine, so the fit probably overstates.
+  (0.0438 + 0.9504 × cosine, RMSE 0.0195).
 
-The true figure should lie between the two. The merge side needs no
-correction: it compares stored vectors with stored vectors, as the writer
-does.
+These are two sensitivity estimates, not an interval. The check and the fit
+come from logged top hits, selected for a high server cosine. They say
+nothing direct about how the framing moves the cosine of an unrelated pair
+near the floor, which is what decides admission. The true share could lie
+below both figures or above both. What both estimates share is the shape:
+admission rises steeply with layer size. Bare query vectors, which
+[#258](https://github.com/nrynss/lambo/issues/258) would provide, are needed
+to settle the level.
+
+The merge side needs no correction: it compares stored vectors with stored
+vectors, as the writer does.
 
 ### Same-call siblings
 

@@ -37,6 +37,12 @@ create table cr as
   select c.*, o.origin,
          row_number() over (partition by session order by created_at, id) arrival
   from c join read_json('origin.jsonl') o using (id);
-select a.id, max(array_cosine_similarity(a.v, b.v)) best_earlier
-from cr a join cr b on a.session = b.session and b.arrival < a.arrival and a.origin <> b.origin
+--    LEFT join: a fact with no earlier concept from another call keeps a row with a NULL
+--    best_earlier. It counts as a miss in the share (coalesce to 0). The published
+--    percentiles also take it as 0; that is 18 of the 4,434 facts.
+create table best as
+select a.id, a.session, a.arrival, max(array_cosine_similarity(a.v, b.v)) best_earlier
+from cr a left join cr b on a.session = b.session and b.arrival < a.arrival and a.origin <> b.origin
 where a.ctype in ('Logic', 'Observation', 'Constraint') group by all;
+select session, count(*) facts, avg((coalesce(best_earlier, 0) >= 0.85)::int) share_ge_085
+from best group by all;
