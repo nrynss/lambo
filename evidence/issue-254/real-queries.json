@@ -1,0 +1,514 @@
+{
+ "issue": 254,
+ "contract": "bge-m3 (reference)",
+ "fixed_floor": 0.5,
+ "rule_anchor_concepts": 12,
+ "note": "Query vectors are approximate (see evidence/layer-floor-size/README.md): uncorrected and corrected are two sensitivity estimates, not an interval. uncorrected is one random order of the stand-in layer; corrected pools three.",
+ "projects": {
+  "A": [
+   {
+    "layer_concepts": 8,
+    "queries": 132,
+    "rule_floor": 0.5,
+    "admit_fixed_uncorrected": 0.1515,
+    "admit_rule_uncorrected": 0.1515,
+    "level_floor_uncorrected": 0.5,
+    "admit_level_floor_uncorrected": 0.1515,
+    "held_out_grade2_lost_at_level_floor_uncorrected": 0.1735,
+    "admit_fixed_corrected": 0.3737,
+    "admit_rule_corrected": 0.3737,
+    "level_floor_corrected": 0.5,
+    "admit_level_floor_corrected": 0.3737,
+    "held_out_grade2_lost_at_level_floor_corrected": 0.1735
+   },
+   {
+    "layer_concepts": 32,
+    "queries": 132,
+    "rule_floor": 0.5333,
+    "admit_fixed_uncorrected": 0.3409,
+    "admit_rule_uncorrected": 0.1515,
+    "level_floor_uncorrected": 0.5323,
+    "admit_level_floor_uncorrected": 0.1515,
+    "held_out_grade2_lost_at_level_floor_uncorrected": 0.3265,
+    "admit_fixed_corrected": 0.6389,
+    "admit_rule_corrected": 0.2399,
+    "level_floor_corrected": 0.5186,
+    "admit_level_floor_corrected": 0.3737,
+    "held_out_grade2_lost_at_level_floor_corrected": 0.2347
+   },
+   {
+    "layer_concepts": 64,
+    "queries": 132,
+    "rule_floor": 0.5584,
+    "admit_fixed_uncorrected": 0.4697,
+    "admit_rule_uncorrected": 0.1061,
+    "level_floor_uncorrected": 0.5477,
+    "admit_level_floor_uncorrected": 0.1515,
+    "held_out_grade2_lost_at_level_floor_uncorrected": 0.3673,
+    "admit_fixed_corrected": 0.803,
+    "admit_rule_corrected": 0.1616,
+    "level_floor_corrected": 0.5348,
+    "admit_level_floor_corrected": 0.3737,
+    "held_out_grade2_lost_at_level_floor_corrected": 0.3367
+   },
+   {
+    "layer_concepts": 128,
+    "queries": 132,
+    "rule_floor": 0.5813,
+    "admit_fixed_uncorrected": 0.5985,
+    "admit_rule_uncorrected": 0.053,
+    "level_floor_uncorrected": 0.5508,
+    "admit_level_floor_uncorrected": 0.1515,
+    "held_out_grade2_lost_at_level_floor_uncorrected": 0.3673,
+    "admit_fixed_corrected": 0.8813,
+    "admit_rule_corrected": 0.0707,
+    "level_floor_corrected": 0.5423,
+    "admit_level_floor_corrected": 0.3737,
+    "held_out_grade2_lost_at_level_floor_corrected": 0.3469
+   },
+   {
+    "layer_concepts": 256,
+    "queries": 132,
+    "rule_floor": 0.601,
+    "admit_fixed_uncorrected": 0.8106,
+    "admit_rule_uncorrected": 0.0303,
+    "level_floor_uncorrected": 0.5643,
+    "admit_level_floor_uncorrected": 0.1515,
+    "held_out_grade2_lost_at_level_floor_uncorrected": 0.4184,
+    "admit_fixed_corrected": 0.947,
+    "admit_rule_corrected": 0.053,
+    "level_floor_corrected": 0.5535,
+    "admit_level_floor_corrected": 0.3737,
+    "held_out_grade2_lost_at_level_floor_corrected": 0.3776
+   },
+   {
+    "layer_concepts": 512,
+    "queries": 132,
+    "rule_floor": 0.6174,
+    "admit_fixed_uncorrected": 0.8864,
+    "admit_rule_uncorrected": 0.0152,
+    "level_floor_uncorrected": 0.5747,
+    "admit_level_floor_uncorrected": 0.1515,
+    "held_out_grade2_lost_at_level_floor_uncorrected": 0.4592,
+    "admit_fixed_corrected": 0.9722,
+    "admit_rule_corrected": 0.0455,
+    "level_floor_corrected": 0.5616,
+    "admit_level_floor_corrected": 0.3737,
+    "held_out_grade2_lost_at_level_floor_corrected": 0.4082
+   },
+   {
+    "layer_concepts": 1024,
+    "queries": 132,
+    "rule_floor": 0.6487,
+    "admit_fixed_uncorrected": 0.9167,
+    "admit_rule_uncorrected": 0.0,
+    "level_floor_uncorrected": 0.5759,
+    "admit_level_floor_uncorrected": 0.1515,
+    "held_out_grade2_lost_at_level_floor_uncorrected": 0.4592,
+    "admit_fixed_corrected": 0.9874,
+    "admit_rule_corrected": 0.0152,
+    "level_floor_corrected": 0.5689,
+    "admit_level_floor_corrected": 0.3737,
+    "held_out_grade2_lost_at_level_floor_corrected": 0.4388
+   },
+   {
+    "layer_concepts": 2048,
+    "queries": 132,
+    "rule_floor": 0.6673,
+    "admit_fixed_uncorrected": 0.9621,
+    "admit_rule_uncorrected": 0.0152,
+    "level_floor_uncorrected": 0.5935,
+    "admit_level_floor_uncorrected": 0.1515,
+    "held_out_grade2_lost_at_level_floor_uncorrected": 0.551,
+    "admit_fixed_corrected": 0.9924,
+    "admit_rule_corrected": 0.0126,
+    "level_floor_corrected": 0.5731,
+    "admit_level_floor_corrected": 0.3737,
+    "held_out_grade2_lost_at_level_floor_corrected": 0.449
+   }
+  ],
+  "B": [
+   {
+    "layer_concepts": 8,
+    "queries": 53,
+    "rule_floor": 0.5,
+    "admit_fixed_uncorrected": 0.0377,
+    "admit_rule_uncorrected": 0.0377,
+    "level_floor_uncorrected": 0.5,
+    "admit_level_floor_uncorrected": 0.0377,
+    "held_out_grade2_lost_at_level_floor_uncorrected": 0.1735,
+    "admit_fixed_corrected": 0.1761,
+    "admit_rule_corrected": 0.1761,
+    "level_floor_corrected": 0.5,
+    "admit_level_floor_corrected": 0.1761,
+    "held_out_grade2_lost_at_level_floor_corrected": 0.1735
+   },
+   {
+    "layer_concepts": 32,
+    "queries": 53,
+    "rule_floor": 0.5333,
+    "admit_fixed_uncorrected": 0.1509,
+    "admit_rule_uncorrected": 0.0377,
+    "level_floor_uncorrected": 0.5291,
+    "admit_level_floor_uncorrected": 0.0377,
+    "held_out_grade2_lost_at_level_floor_uncorrected": 0.2959,
+    "admit_fixed_corrected": 0.3333,
+    "admit_rule_corrected": 0.0943,
+    "level_floor_corrected": 0.5145,
+    "admit_level_floor_corrected": 0.1761,
+    "held_out_grade2_lost_at_level_floor_corrected": 0.2143
+   },
+   {
+    "layer_concepts": 64,
+    "queries": 53,
+    "rule_floor": 0.5584,
+    "admit_fixed_uncorrected": 0.2264,
+    "admit_rule_uncorrected": 0.0,
+    "level_floor_uncorrected": 0.5291,
+    "admit_level_floor_uncorrected": 0.0377,
+    "held_out_grade2_lost_at_level_floor_uncorrected": 0.2959,
+    "admit_fixed_corrected": 0.4465,
+    "admit_rule_corrected": 0.0252,
+    "level_floor_corrected": 0.5221,
+    "admit_level_floor_corrected": 0.1761,
+    "held_out_grade2_lost_at_level_floor_corrected": 0.2551
+   },
+   {
+    "layer_concepts": 128,
+    "queries": 53,
+    "rule_floor": 0.5813,
+    "admit_fixed_uncorrected": 0.4151,
+    "admit_rule_uncorrected": 0.0,
+    "level_floor_uncorrected": 0.5419,
+    "admit_level_floor_uncorrected": 0.0377,
+    "held_out_grade2_lost_at_level_floor_uncorrected": 0.3469,
+    "admit_fixed_corrected": 0.5535,
+    "admit_rule_corrected": 0.0,
+    "level_floor_corrected": 0.5374,
+    "admit_level_floor_corrected": 0.1761,
+    "held_out_grade2_lost_at_level_floor_corrected": 0.3367
+   },
+   {
+    "layer_concepts": 256,
+    "queries": 53,
+    "rule_floor": 0.601,
+    "admit_fixed_uncorrected": 0.6604,
+    "admit_rule_uncorrected": 0.0943,
+    "level_floor_uncorrected": 0.6248,
+    "admit_level_floor_uncorrected": 0.0377,
+    "held_out_grade2_lost_at_level_floor_uncorrected": 0.6633,
+    "admit_fixed_corrected": 0.761,
+    "admit_rule_corrected": 0.044,
+    "level_floor_corrected": 0.5572,
+    "admit_level_floor_corrected": 0.1761,
+    "held_out_grade2_lost_at_level_floor_corrected": 0.3776
+   },
+   {
+    "layer_concepts": 512,
+    "queries": 53,
+    "rule_floor": 0.6174,
+    "admit_fixed_uncorrected": 0.7358,
+    "admit_rule_uncorrected": 0.0566,
+    "level_floor_uncorrected": 0.6248,
+    "admit_level_floor_uncorrected": 0.0377,
+    "held_out_grade2_lost_at_level_floor_uncorrected": 0.6633,
+    "admit_fixed_corrected": 0.8553,
+    "admit_rule_corrected": 0.0755,
+    "level_floor_corrected": 0.5734,
+    "admit_level_floor_corrected": 0.1761,
+    "held_out_grade2_lost_at_level_floor_corrected": 0.4592
+   },
+   {
+    "layer_concepts": 1024,
+    "queries": 53,
+    "rule_floor": 0.6487,
+    "admit_fixed_uncorrected": 0.7925,
+    "admit_rule_uncorrected": 0.0189,
+    "level_floor_uncorrected": 0.6248,
+    "admit_level_floor_uncorrected": 0.0377,
+    "held_out_grade2_lost_at_level_floor_uncorrected": 0.6633,
+    "admit_fixed_corrected": 0.8805,
+    "admit_rule_corrected": 0.0314,
+    "level_floor_corrected": 0.5797,
+    "admit_level_floor_corrected": 0.1698,
+    "held_out_grade2_lost_at_level_floor_corrected": 0.4694
+   },
+   {
+    "layer_concepts": 2048,
+    "queries": 53,
+    "rule_floor": 0.6673,
+    "admit_fixed_uncorrected": 0.8302,
+    "admit_rule_uncorrected": 0.0,
+    "level_floor_uncorrected": 0.6248,
+    "admit_level_floor_uncorrected": 0.0377,
+    "held_out_grade2_lost_at_level_floor_uncorrected": 0.6633,
+    "admit_fixed_corrected": 0.9686,
+    "admit_rule_corrected": 0.0,
+    "level_floor_corrected": 0.611,
+    "admit_level_floor_corrected": 0.1635,
+    "held_out_grade2_lost_at_level_floor_corrected": 0.6224
+   }
+  ]
+ },
+ "null_tail": {
+  "note": "Share of single (query, unrelated concept) pairs at or above each floor the rule gives (anchor 12). labelled_dev is the null the rule was derived from. relative_to_fixed is that share divided by the same population's share at the fixed floor: how much of the mass at 0.50 is still there (null when that population has no pair at or above the fixed floor). Pairs that share a query are not independent, and the correction was fitted on logged top hits, not on pairs in this tail.",
+  "correction": {
+   "intercept": 0.0438,
+   "slope": 0.9504
+  },
+  "floors": [
+   {
+    "rule_floor_for_layer_concepts": 12,
+    "floor": 0.5,
+    "labelled_dev": {
+     "pairs": 23707,
+     "at_or_above": 724,
+     "share": 0.03054,
+     "relative_to_fixed": 1.0
+    },
+    "A": {
+     "pairs": 499620,
+     "at_or_above_uncorrected": 11498,
+     "at_or_above_corrected": 28239,
+     "share_uncorrected": 0.023013,
+     "relative_to_fixed_uncorrected": 1.0,
+     "share_corrected": 0.056521,
+     "relative_to_fixed_corrected": 1.0
+    },
+    "B": {
+     "pairs": 249524,
+     "at_or_above_uncorrected": 1917,
+     "at_or_above_corrected": 5207,
+     "share_uncorrected": 0.007683,
+     "relative_to_fixed_uncorrected": 1.0,
+     "share_corrected": 0.020868,
+     "relative_to_fixed_corrected": 1.0
+    }
+   },
+   {
+    "rule_floor_for_layer_concepts": 32,
+    "floor": 0.5333,
+    "labelled_dev": {
+     "pairs": 23707,
+     "at_or_above": 275,
+     "share": 0.0116,
+     "relative_to_fixed": 0.3798
+    },
+    "A": {
+     "pairs": 499620,
+     "at_or_above_uncorrected": 2064,
+     "at_or_above_corrected": 5390,
+     "share_uncorrected": 0.004131,
+     "relative_to_fixed_uncorrected": 0.1795,
+     "share_corrected": 0.010788,
+     "relative_to_fixed_corrected": 0.1909
+    },
+    "B": {
+     "pairs": 249524,
+     "at_or_above_uncorrected": 349,
+     "at_or_above_corrected": 891,
+     "share_uncorrected": 0.001399,
+     "relative_to_fixed_uncorrected": 0.1821,
+     "share_corrected": 0.003571,
+     "relative_to_fixed_corrected": 0.1711
+    }
+   },
+   {
+    "rule_floor_for_layer_concepts": 64,
+    "floor": 0.5584,
+    "labelled_dev": {
+     "pairs": 23707,
+     "at_or_above": 139,
+     "share": 0.005863,
+     "relative_to_fixed": 0.192
+    },
+    "A": {
+     "pairs": 499620,
+     "at_or_above_uncorrected": 520,
+     "at_or_above_corrected": 1321,
+     "share_uncorrected": 0.001041,
+     "relative_to_fixed_uncorrected": 0.0452,
+     "share_corrected": 0.002644,
+     "relative_to_fixed_corrected": 0.0468
+    },
+    "B": {
+     "pairs": 249524,
+     "at_or_above_uncorrected": 78,
+     "at_or_above_corrected": 222,
+     "share_uncorrected": 0.000313,
+     "relative_to_fixed_uncorrected": 0.0407,
+     "share_corrected": 0.00089,
+     "relative_to_fixed_corrected": 0.0426
+    }
+   },
+   {
+    "rule_floor_for_layer_concepts": 100,
+    "floor": 0.5724,
+    "labelled_dev": {
+     "pairs": 23707,
+     "at_or_above": 89,
+     "share": 0.003754,
+     "relative_to_fixed": 0.1229
+    },
+    "A": {
+     "pairs": 499620,
+     "at_or_above_uncorrected": 256,
+     "at_or_above_corrected": 587,
+     "share_uncorrected": 0.000512,
+     "relative_to_fixed_uncorrected": 0.0223,
+     "share_corrected": 0.001175,
+     "relative_to_fixed_corrected": 0.0208
+    },
+    "B": {
+     "pairs": 249524,
+     "at_or_above_uncorrected": 33,
+     "at_or_above_corrected": 88,
+     "share_uncorrected": 0.000132,
+     "relative_to_fixed_uncorrected": 0.0172,
+     "share_corrected": 0.000353,
+     "relative_to_fixed_corrected": 0.0169
+    }
+   },
+   {
+    "rule_floor_for_layer_concepts": 128,
+    "floor": 0.5813,
+    "labelled_dev": {
+     "pairs": 23707,
+     "at_or_above": 69,
+     "share": 0.002911,
+     "relative_to_fixed": 0.0953
+    },
+    "A": {
+     "pairs": 499620,
+     "at_or_above_uncorrected": 166,
+     "at_or_above_corrected": 350,
+     "share_uncorrected": 0.000332,
+     "relative_to_fixed_uncorrected": 0.0144,
+     "share_corrected": 0.000701,
+     "relative_to_fixed_corrected": 0.0124
+    },
+    "B": {
+     "pairs": 249524,
+     "at_or_above_uncorrected": 25,
+     "at_or_above_corrected": 50,
+     "share_uncorrected": 0.0001,
+     "relative_to_fixed_uncorrected": 0.013,
+     "share_corrected": 0.0002,
+     "relative_to_fixed_corrected": 0.0096
+    }
+   },
+   {
+    "rule_floor_for_layer_concepts": 256,
+    "floor": 0.601,
+    "labelled_dev": {
+     "pairs": 23707,
+     "at_or_above": 35,
+     "share": 0.001476,
+     "relative_to_fixed": 0.0483
+    },
+    "A": {
+     "pairs": 499620,
+     "at_or_above_uncorrected": 50,
+     "at_or_above_corrected": 113,
+     "share_uncorrected": 0.0001,
+     "relative_to_fixed_uncorrected": 0.0043,
+     "share_corrected": 0.000226,
+     "relative_to_fixed_corrected": 0.004
+    },
+    "B": {
+     "pairs": 249524,
+     "at_or_above_uncorrected": 10,
+     "at_or_above_corrected": 19,
+     "share_uncorrected": 4e-05,
+     "relative_to_fixed_uncorrected": 0.0052,
+     "share_corrected": 7.6e-05,
+     "relative_to_fixed_corrected": 0.0036
+    }
+   },
+   {
+    "rule_floor_for_layer_concepts": 512,
+    "floor": 0.6174,
+    "labelled_dev": {
+     "pairs": 23707,
+     "at_or_above": 18,
+     "share": 0.000759,
+     "relative_to_fixed": 0.0249
+    },
+    "A": {
+     "pairs": 499620,
+     "at_or_above_uncorrected": 19,
+     "at_or_above_corrected": 43,
+     "share_uncorrected": 3.8e-05,
+     "relative_to_fixed_uncorrected": 0.0017,
+     "share_corrected": 8.6e-05,
+     "relative_to_fixed_corrected": 0.0015
+    },
+    "B": {
+     "pairs": 249524,
+     "at_or_above_uncorrected": 6,
+     "at_or_above_corrected": 10,
+     "share_uncorrected": 2.4e-05,
+     "relative_to_fixed_uncorrected": 0.0031,
+     "share_corrected": 4e-05,
+     "relative_to_fixed_corrected": 0.0019
+    }
+   },
+   {
+    "rule_floor_for_layer_concepts": 1024,
+    "floor": 0.6487,
+    "labelled_dev": {
+     "pairs": 23707,
+     "at_or_above": 9,
+     "share": 0.00038,
+     "relative_to_fixed": 0.0124
+    },
+    "A": {
+     "pairs": 499620,
+     "at_or_above_uncorrected": 3,
+     "at_or_above_corrected": 9,
+     "share_uncorrected": 6e-06,
+     "relative_to_fixed_uncorrected": 0.0003,
+     "share_corrected": 1.8e-05,
+     "relative_to_fixed_corrected": 0.0003
+    },
+    "B": {
+     "pairs": 249524,
+     "at_or_above_uncorrected": 1,
+     "at_or_above_corrected": 3,
+     "share_uncorrected": 4e-06,
+     "relative_to_fixed_uncorrected": 0.0005,
+     "share_corrected": 1.2e-05,
+     "relative_to_fixed_corrected": 0.0006
+    }
+   },
+   {
+    "rule_floor_for_layer_concepts": 2048,
+    "floor": 0.6673,
+    "labelled_dev": {
+     "pairs": 23707,
+     "at_or_above": 5,
+     "share": 0.000211,
+     "relative_to_fixed": 0.0069
+    },
+    "A": {
+     "pairs": 499620,
+     "at_or_above_uncorrected": 2,
+     "at_or_above_corrected": 3,
+     "share_uncorrected": 4e-06,
+     "relative_to_fixed_uncorrected": 0.0002,
+     "share_corrected": 6e-06,
+     "relative_to_fixed_corrected": 0.0001
+    },
+    "B": {
+     "pairs": 249524,
+     "at_or_above_uncorrected": 0,
+     "at_or_above_corrected": 0,
+     "share_uncorrected": 0.0,
+     "relative_to_fixed_uncorrected": 0.0,
+     "share_corrected": 0.0,
+     "relative_to_fixed_corrected": 0.0
+    }
+   }
+  ]
+ }
+}
