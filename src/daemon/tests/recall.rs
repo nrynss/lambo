@@ -717,13 +717,21 @@ use async_trait::async_trait;
 
 /// A `VECTOR_SEARCH` store with only the items `recall_detailed` touches:
 /// the capability probe and the checked read, which refuses with E2E-6's
-/// contract race when `race` is set and finds nothing otherwise. Everything
-/// else is unreachable on this path.
+/// contract race when `race` is set and otherwise returns the first `limit`
+/// of `vector_hits` (none by default). Everything else is unreachable on
+/// this path.
 struct StubVectorStore {
     race: bool,
     /// Run on every capability probe: a test's stand-in for a write that
-    /// lands while recall holds no graph lock.
+    /// lands while recall holds no graph lock. The probes take the graph's
+    /// write lock with `try_write`, so a recall that called one while holding
+    /// the graph's read lock fails the test at once (the probe panics with
+    /// "recall held the graph lock across the gather") rather than hanging.
     on_probe: Option<Box<dyn Fn() + Send + Sync>>,
+    /// What the checked read finds, best first.
+    vector_hits: Vec<Scored<NodeId>>,
+    /// Checked vector reads made, refused ones included.
+    searches: std::sync::atomic::AtomicUsize,
 }
 
 impl StubVectorStore {
@@ -731,7 +739,13 @@ impl StubVectorStore {
         Self {
             race,
             on_probe: None,
+            vector_hits: Vec::new(),
+            searches: std::sync::atomic::AtomicUsize::new(0),
         }
+    }
+
+    fn searches(&self) -> usize {
+        self.searches.load(std::sync::atomic::Ordering::SeqCst)
     }
 }
 #[async_trait]
@@ -778,10 +792,12 @@ impl crate::store::GraphStore for StubVectorStore {
         _session: &SessionId,
         _embedding: &[f32],
         _expected_contract: &EmbeddingContract,
-        _limit: usize,
+        limit: usize,
     ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+        self.searches
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         if !self.race {
-            return Ok(Vec::new());
+            return Ok(self.vector_hits.iter().take(limit).cloned().collect());
         }
         Err(StoreError::Invariant(
             "vector candidate lookup refused after embedding contract changed: \
@@ -927,32 +943,32 @@ async fn gather_contract_race_annotates_vector_degraded() {
     );
 }
 
-/// Found in the #256 review (pre-existing): the lock-free pre-check predicts
-/// a dependency-question dispatch and skips the vector gather; a write that
-/// lands before the graph lock removes the anchor's only dependent, so the
-/// dispatch declines and the recall falls through to the blend with no
-/// vector input. That answer says its vector leg was skipped, as every
-/// other lost vector leg does, instead of passing as a full blend. The
-/// "write" runs inside the store's capability probe, which recall calls
-/// after the pre-check and before it takes the graph lock, so the race is
-/// deterministic. Without the write the dispatch fires; without a query
-/// embedding no vector leg was lost, so nothing is said.
-#[tokio::test]
-async fn a_dispatch_declined_by_a_concurrent_write_says_the_vector_leg_was_skipped() {
-    use crate::config::RecallWeights;
-    use crate::recall::cache::SharedRecallCache;
-    use crate::recall::detail::AnnotationKind;
+/// The #256 / #263 dispatch-race fixture: "billing ledger" with one
+/// dependent, "invoice export job" (a `Hierarchical` edge), and "quarterly
+/// revenue forecast", which only the vector leg finds for a question about
+/// the ledger. The daemon runs on the default config (built-in calibration)
+/// with a pinned clock, so two recalls of one question compare whole.
+struct DispatchRace {
+    graph: Arc<RwLock<Graph>>,
+    daemon: Daemon,
+    edge: Edge,
+    dependent: NodeId,
+    forecast: NodeId,
+}
 
-    let build = || {
+impl DispatchRace {
+    fn new() -> Self {
         let mut g = Graph::new(sid());
         let i = interaction(1);
         let iid = i.id;
         g.insert_interaction(i).unwrap();
         let anchor = concept(1, iid, "billing ledger");
         let dependent = concept(2, iid, "invoice export job");
-        let (a, d) = (anchor.id, dependent.id);
+        let forecast = concept(4, iid, "quarterly revenue forecast");
+        let (a, d, f) = (anchor.id, dependent.id, forecast.id);
         g.insert_concept(anchor, iid).unwrap();
         g.insert_concept(dependent, iid).unwrap();
+        g.insert_concept(forecast, iid).unwrap();
         let edge = Edge {
             event_time: None,
             id: NodeId(Uuid::from_u64_pair(3, 1)),
@@ -965,179 +981,411 @@ async fn a_dispatch_declined_by_a_concurrent_write_says_the_vector_leg_was_skipp
             created_at: ts(0),
             last_reinforced: ts(0),
         };
-        let edge_id = edge.id;
-        g.upsert_edge(edge).unwrap();
+        g.upsert_edge(edge.clone()).unwrap();
         let mut index = InvertedIndex::new();
         for c in g.concepts() {
             index.add(c);
         }
         let graph = Arc::new(RwLock::new(g));
-        let daemon = Daemon::new(
-            graph.clone(),
-            ScoringWeights::default(),
-            Duration::from_secs(3600),
-        )
-        .with_index(Arc::new(RwLock::new(index)));
-        (graph, daemon, edge_id)
-    };
-    let query = RecallQuery {
-        query: "what depends on billing ledger".into(),
-        top_k: 5,
-        max_tokens: 500,
-        traversal_depth: 2,
-    };
-    let contract = EmbeddingContract {
-        kind: "fixture".into(),
-        model: None,
-        dim: 1024,
-    };
-    let embedding = vec![0.0_f32; 1024];
-    let kinds = |r: &crate::recall::detail::DetailedRecall| -> Vec<AnnotationKind> {
-        r.response_annotations.iter().map(|a| a.kind).collect()
-    };
+        let daemon = Daemon::from_config(graph.clone(), &crate::Config::default())
+            .with_index(Arc::new(RwLock::new(index)))
+            .with_clock(Arc::new(|| ts(100)));
+        Self {
+            graph,
+            daemon,
+            edge,
+            dependent: d,
+            forecast: f,
+        }
+    }
 
-    // No write: the predicted dispatch fires.
-    let (_graph, daemon, _) = build();
-    let r = daemon
-        .recall_detailed(
-            &sid(),
-            query.clone(),
-            &StubVectorStore::new(false),
-            Some((&embedding, &contract)),
-            RecallWeights::default(),
-            &SharedRecallCache::new(),
-        )
-        .await;
-    assert_eq!(
-        kinds(&r),
-        [AnnotationKind::Traversal],
-        "premise: dispatched"
-    );
+    /// A store whose vector read finds the forecast first, then the ledger.
+    fn store(&self, race: bool, on_probe: Option<Box<dyn Fn() + Send + Sync>>) -> StubVectorStore {
+        StubVectorStore {
+            on_probe,
+            vector_hits: vec![
+                Scored::new(self.forecast, 0.81),
+                Scored::new(self.edge.source, 0.64),
+            ],
+            ..StubVectorStore::new(race)
+        }
+    }
 
-    // The write lands in the window: the dispatch declines, and with a
-    // query embedding the keyword-only answer says so, in its annotations
-    // and its warnings.
-    for with_embedding in [true, false] {
-        let (graph, daemon, edge_id) = build();
-        let store = StubVectorStore {
-            race: false,
-            on_probe: Some(Box::new(move || {
-                let mut g = graph.write();
-                if g.edges().any(|e| e.id == edge_id) {
-                    g.remove_edge(edge_id).unwrap();
-                }
-            })),
-        };
-        let r = daemon
+    /// A probe that removes the ledger's only dependent edge the first time
+    /// it runs: a write landing after the pre-check, before the graph lock.
+    fn edge_removal(&self) -> Box<dyn Fn() + Send + Sync> {
+        let graph = self.graph.clone();
+        let edge_id = self.edge.id;
+        Box::new(move || {
+            let mut g = graph.try_write().expect(HELD_ACROSS_GATHER);
+            if g.edges().any(|e| e.id == edge_id) {
+                g.remove_edge(edge_id).unwrap();
+            }
+        })
+    }
+
+    async fn recall(
+        &self,
+        store: &StubVectorStore,
+        top_k: usize,
+        with_embedding: bool,
+    ) -> crate::recall::detail::DetailedRecall {
+        let contract = race_contract();
+        let embedding = vec![0.0_f32; contract.dim];
+        self.daemon
             .recall_detailed(
                 &sid(),
-                query.clone(),
-                &store,
+                RecallQuery {
+                    query: "what depends on billing ledger".into(),
+                    top_k,
+                    max_tokens: 500,
+                    traversal_depth: 2,
+                },
+                store,
                 with_embedding.then_some((embedding.as_slice(), &contract)),
-                RecallWeights::default(),
-                &SharedRecallCache::new(),
+                crate::config::RecallWeights::default(),
+                &crate::recall::cache::SharedRecallCache::new(),
             )
-            .await;
-        assert!(!r.hits.is_empty(), "the blend answered");
-        if !with_embedding {
-            assert!(
-                kinds(&r).is_empty(),
-                "no vector leg was lost: {:?}",
-                kinds(&r)
-            );
-            continue;
-        }
-        assert_eq!(kinds(&r), [AnnotationKind::VectorDegraded]);
-        let text = &r.response_annotations[0].text;
-        assert!(text.contains("keyword-only"), "{text}");
-        assert!(text.contains("concurrent write"), "{text}");
-        assert!(r.warnings.contains(text), "{:?}", r.warnings);
-        // The #256 report agrees: no cosine, the keyword-only basis.
-        assert_eq!(r.top_legs.vector_cosine, None);
-        assert_eq!(
-            r.confidence.as_ref().map(|c| c.basis.as_str()),
-            Some("keyword-only-v0")
-        );
+            .await
+    }
+
+    /// The same question on a layer's side of a layered recall
+    /// (`Route::Layer`), at `top_k` 5 with the query embedding.
+    async fn recall_layer(&self, store: &StubVectorStore) -> crate::recall::detail::DetailedRecall {
+        let contract = race_contract();
+        let embedding = vec![0.0_f32; contract.dim];
+        self.daemon
+            .recall_layer_with(
+                &sid(),
+                RecallQuery {
+                    query: "what depends on billing ledger".into(),
+                    top_k: 5,
+                    max_tokens: 500,
+                    traversal_depth: 2,
+                },
+                crate::store::vector_source::VectorCandidates::from_store(store),
+                Some((embedding.as_slice(), &contract)),
+                crate::config::RecallWeights::default(),
+            )
+            .await
     }
 }
 
-/// Found in the #256 second review: at `top_k = 0` the pre-check predicts a
-/// dependency-question dispatch (the anchor has a dependent) and skips the
-/// vector gather, but the traversal has nothing to return and declines,
-/// deterministically, with no write anywhere. The answer still says its
-/// vector leg was skipped, and does not blame a concurrent write that never
-/// happened (the graph epoch did not move).
+/// A dispatch-race probe's failure message. The probes run where recall
+/// must hold no graph guard (before its first graph lock, and inside the
+/// gather) and take the graph's write lock with `try_write`, which fails at
+/// once if a guard is still held there. (A guard held across the gather's
+/// `.await` does not compile: the recall future must be `Send`, and a
+/// `parking_lot` guard is not.)
+const HELD_ACROSS_GATHER: &str = "recall held the graph lock across the gather";
+
+/// A contract with a built-in calibration row and a measured null median,
+/// so a two-leg recall reports the two-leg confidence basis.
+fn race_contract() -> EmbeddingContract {
+    let row = crate::embed::calibration::BUILTIN[0];
+    EmbeddingContract {
+        kind: row.kind.into(),
+        model: Some(row.model.into()),
+        dim: row.dim,
+    }
+}
+
+fn annotation_kinds(
+    r: &crate::recall::detail::DetailedRecall,
+) -> Vec<crate::recall::detail::AnnotationKind> {
+    r.response_annotations.iter().map(|a| a.kind).collect()
+}
+
+fn confidence_basis(r: &crate::recall::detail::DetailedRecall) -> Option<&str> {
+    r.confidence.as_ref().map(|c| c.basis.as_str())
+}
+
+/// #263 (found in the #256 review): the lock-free pre-check predicts a
+/// dependency-question dispatch and skips the vector gather; a write that
+/// lands before the graph lock removes the anchor's only dependent, so the
+/// dispatch declines. The recall then runs the skipped gather once, with the
+/// graph lock released, and answers exactly as the same recall made with no
+/// pre-check does: the same hits, ranking, legs, context and confidence,
+/// with its vector leg and no `vector_degraded` annotation. The "write" runs
+/// inside the store's capability probe, which recall calls after the
+/// pre-check and before it takes the graph lock, so the race is
+/// deterministic. Without the write the dispatch fires with no vector
+/// search; without a query embedding no vector leg was lost, so nothing is
+/// gathered again.
 #[tokio::test]
-async fn a_dispatch_declined_at_top_k_zero_does_not_blame_a_concurrent_write() {
-    use crate::config::RecallWeights;
-    use crate::recall::cache::SharedRecallCache;
+async fn a_dispatch_declined_by_a_concurrent_write_runs_the_skipped_vector_leg() {
     use crate::recall::detail::AnnotationKind;
 
-    let mut g = Graph::new(sid());
-    let i = interaction(1);
-    let iid = i.id;
-    g.insert_interaction(i).unwrap();
-    let anchor = concept(1, iid, "billing ledger");
-    let dependent = concept(2, iid, "invoice export job");
-    let (a, d) = (anchor.id, dependent.id);
-    g.insert_concept(anchor, iid).unwrap();
-    g.insert_concept(dependent, iid).unwrap();
-    g.upsert_edge(Edge {
-        event_time: None,
-        id: NodeId(Uuid::from_u64_pair(3, 1)),
-        session_id: sid(),
-        source: a,
-        target: d,
-        edge_type: EdgeType::Hierarchical,
-        weight: 4.5,
-        reinforcements: 1,
-        created_at: ts(0),
-        last_reinforced: ts(0),
-    })
-    .unwrap();
-    let mut index = InvertedIndex::new();
-    for c in g.concepts() {
-        index.add(c);
-    }
-    let graph = Arc::new(RwLock::new(g));
-    let epoch = graph.read().epoch();
-    let daemon = Daemon::new(
-        graph.clone(),
-        ScoringWeights::default(),
-        Duration::from_secs(3600),
-    )
-    .with_index(Arc::new(RwLock::new(index)));
-    let contract = EmbeddingContract {
-        kind: "fixture".into(),
-        model: None,
-        dim: 1024,
+    // No write: the predicted dispatch fires, and no vector search runs.
+    let fx = DispatchRace::new();
+    let store = fx.store(false, None);
+    let r = fx.recall(&store, 5, true).await;
+    assert_eq!(
+        annotation_kinds(&r),
+        [AnnotationKind::Traversal],
+        "premise: dispatched"
+    );
+    assert_eq!(store.searches(), 0, "the dispatch path searches no vectors");
+
+    // The same recall with no pre-check: the edge is gone before the recall
+    // starts, so nothing is planned, the gather runs once, and the blend
+    // answers with both legs.
+    let fx = DispatchRace::new();
+    fx.graph.write().remove_edge(fx.edge.id).unwrap();
+    let store = fx.store(false, None);
+    let baseline = fx.recall(&store, 5, true).await;
+    assert_eq!(store.searches(), 1);
+    assert!(
+        baseline.response_annotations.is_empty() && baseline.warnings.is_empty(),
+        "{:?} {:?}",
+        baseline.response_annotations,
+        baseline.warnings
+    );
+    assert!(
+        baseline.hits.iter().any(|h| h.node_id == fx.forecast),
+        "premise: the vector leg finds the forecast: {:?}",
+        baseline.hits
+    );
+    assert!(baseline.top_legs.vector_cosine.is_some());
+    assert!(baseline.top_legs.bm25.is_some());
+    assert_eq!(confidence_basis(&baseline), Some("noisy-or-v0"));
+
+    // The write lands in the window: the dispatch declines, the skipped
+    // gather runs once, and the answer is the baseline's, whole.
+    let fx = DispatchRace::new();
+    let store = fx.store(false, Some(fx.edge_removal()));
+    let r = fx.recall(&store, 5, true).await;
+    assert!(
+        !fx.graph.read().edges().any(|e| e.id == fx.edge.id),
+        "premise: the write landed"
+    );
+    assert_eq!(store.searches(), 1, "the skipped gather ran exactly once");
+    assert_eq!(r, baseline);
+
+    // Without a query embedding no vector leg was lost: no gather, no
+    // annotation, and the keyword blend answers.
+    let fx = DispatchRace::new();
+    let store = fx.store(false, Some(fx.edge_removal()));
+    let r = fx.recall(&store, 5, false).await;
+    assert!(!r.hits.is_empty(), "the blend answered");
+    assert!(
+        annotation_kinds(&r).is_empty(),
+        "no vector leg was lost: {:?}",
+        annotation_kinds(&r)
+    );
+    assert_eq!(store.searches(), 0);
+}
+
+/// #263: the re-gather is bounded and answers from the graph as it is once
+/// the lock is taken again. A second write that lands during the re-gather
+/// (the store's second capability probe, inside the gather, with no graph
+/// lock held: the probe takes the write lock) is seen by the second pass:
+/// one that gives the anchor its dependent back is answered by traversal,
+/// and one that does not leaves the blend, with the vector leg it now has.
+/// Either way the vector leg is searched once, never twice, and no
+/// `vector_degraded` annotation appears. A re-gather whose vector read fails
+/// degrades and says so exactly as the ordinary path does.
+#[tokio::test]
+async fn a_retried_recall_gathers_once_and_answers_from_the_current_graph() {
+    use crate::recall::detail::AnnotationKind;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    // Probe 1 (before the first lock) removes the edge; probe 2 (inside the
+    // re-gather) runs `second`.
+    let racing = |fx: &DispatchRace, second: Box<dyn Fn(&mut Graph) + Send + Sync>| {
+        let graph = fx.graph.clone();
+        let edge = fx.edge.clone();
+        let probes = AtomicUsize::new(0);
+        let probe: Box<dyn Fn() + Send + Sync> =
+            Box::new(move || match probes.fetch_add(1, Ordering::SeqCst) {
+                0 => graph
+                    .try_write()
+                    .expect(HELD_ACROSS_GATHER)
+                    .remove_edge(edge.id)
+                    .unwrap(),
+                1 => second(&mut graph.try_write().expect(HELD_ACROSS_GATHER)),
+                _ => {}
+            });
+        probe
     };
-    let embedding = vec![0.0_f32; 1024];
-    let r = daemon
-        .recall_detailed(
-            &sid(),
-            RecallQuery {
-                query: "what depends on billing ledger".into(),
-                top_k: 0,
-                max_tokens: 500,
-                traversal_depth: 2,
-            },
-            &StubVectorStore::new(false),
-            Some((embedding.as_slice(), &contract)),
-            RecallWeights::default(),
-            &SharedRecallCache::new(),
-        )
-        .await;
-    assert_eq!(graph.read().epoch(), epoch, "premise: nothing was written");
-    let kinds: Vec<AnnotationKind> = r.response_annotations.iter().map(|a| a.kind).collect();
-    assert_eq!(kinds, [AnnotationKind::VectorDegraded]);
+
+    // The second write restores the dependent: the second pass dispatches.
+    let fx = DispatchRace::new();
+    let edge = fx.edge.clone();
+    let store = fx.store(
+        false,
+        Some(racing(
+            &fx,
+            Box::new(move |g| g.upsert_edge(edge.clone()).unwrap()),
+        )),
+    );
+    let r = fx.recall(&store, 5, true).await;
+    assert_eq!(annotation_kinds(&r), [AnnotationKind::Traversal]);
+    assert_eq!(
+        r.hits.iter().map(|h| h.node_id).collect::<Vec<_>>(),
+        [fx.dependent]
+    );
+    assert_eq!(store.searches(), 1);
+
+    // The second write changes the graph again but restores nothing: it
+    // removes the forecast, which the stub's vector read still names first.
+    // The second pass declines too and blends from the graph as it is then,
+    // with the vector leg it gathered: the forecast is gone from the hits
+    // and from the leg's best (a blend on the graph before the second write
+    // would return it, at 0.81), and the ledger keeps its vector evidence.
+    let fx = DispatchRace::new();
+    let forecast = fx.forecast;
+    let store = fx.store(
+        false,
+        Some(racing(
+            &fx,
+            Box::new(move |g| g.remove_node(forecast).unwrap()),
+        )),
+    );
+    let r = fx.recall(&store, 5, true).await;
+    assert!(
+        fx.graph.read().node(fx.forecast).is_none(),
+        "premise: the second write landed"
+    );
+    assert_eq!(store.searches(), 1, "one re-gather, never two");
+    assert!(
+        r.response_annotations.is_empty() && r.warnings.is_empty(),
+        "{:?} {:?}",
+        r.response_annotations,
+        r.warnings
+    );
+    assert!(
+        !r.hits.iter().any(|h| h.node_id == fx.forecast),
+        "the blend reads the graph after the second write: {:?}",
+        r.hits
+    );
+    assert_eq!(
+        r.legs.get(&fx.edge.source).and_then(|l| l.vector),
+        Some(0.64),
+        "the ledger keeps the re-gathered vector evidence: {:?}",
+        r.legs
+    );
+    assert_eq!(r.top_legs.vector_cosine, Some(0.64), "{:?}", r.top_legs);
+    assert_eq!(confidence_basis(&r), Some("noisy-or-v0"));
+
+    // The re-gather's vector read fails: the leg is lost and the answer
+    // says so in the ordinary path's words, keyword-only.
+    let fx = DispatchRace::new();
+    let store = fx.store(true, Some(fx.edge_removal()));
+    let r = fx.recall(&store, 5, true).await;
+    assert_eq!(store.searches(), 1);
+    assert_eq!(annotation_kinds(&r), [AnnotationKind::VectorDegraded]);
     let text = &r.response_annotations[0].text;
     assert_eq!(
         text,
-        "recall: a planned dependency-question dispatch did not fire; vector leg skipped, \
+        "recall: vector leg refused because the embedding contract changed mid-query; \
          results are keyword-only"
     );
     assert!(r.warnings.contains(text), "{:?}", r.warnings);
+    assert_eq!(r.top_legs.vector_cosine, None);
+    assert_eq!(confidence_basis(&r), Some("keyword-only-v0"));
+}
+
+/// #263 on a layer's side of a layered recall (`Route::Layer`), which plans
+/// dependency-question dispatches as a text recall does and so reaches the
+/// same re-gather: a write in the window between the pre-check and the graph
+/// lock makes the dispatch decline, and the layer's answer is the one the
+/// same layer recall gives with no pre-check, vector leg included. A failed
+/// re-gather read degrades and says so as on the text route.
+#[tokio::test]
+async fn a_layer_recall_whose_dispatch_declines_runs_the_skipped_vector_leg() {
+    use crate::recall::detail::AnnotationKind;
+
+    // No write: the layer answers by traversal with no vector search.
+    let fx = DispatchRace::new();
+    let store = fx.store(false, None);
+    let r = fx.recall_layer(&store).await;
+    assert_eq!(
+        annotation_kinds(&r),
+        [AnnotationKind::Traversal],
+        "premise: dispatched"
+    );
+    assert_eq!(store.searches(), 0, "the dispatch path searches no vectors");
+
+    // The same layer recall with no pre-check: nothing to dispatch to.
+    let fx = DispatchRace::new();
+    fx.graph.write().remove_edge(fx.edge.id).unwrap();
+    let store = fx.store(false, None);
+    let baseline = fx.recall_layer(&store).await;
+    assert_eq!(store.searches(), 1);
+    assert!(
+        baseline.response_annotations.is_empty() && baseline.warnings.is_empty(),
+        "{:?} {:?}",
+        baseline.response_annotations,
+        baseline.warnings
+    );
+    assert!(
+        baseline.hits.iter().any(|h| h.node_id == fx.forecast),
+        "premise: the vector leg finds the forecast: {:?}",
+        baseline.hits
+    );
+    assert!(baseline.top_legs.vector_cosine.is_some());
+
+    // The write lands in the window: one re-gather, and the baseline whole.
+    let fx = DispatchRace::new();
+    let store = fx.store(false, Some(fx.edge_removal()));
+    let r = fx.recall_layer(&store).await;
+    assert!(
+        !fx.graph.read().edges().any(|e| e.id == fx.edge.id),
+        "premise: the write landed"
+    );
+    assert_eq!(store.searches(), 1, "the skipped gather ran exactly once");
+    assert_eq!(r, baseline);
+
+    // The re-gather's vector read fails: keyword-only, and it says so.
+    let fx = DispatchRace::new();
+    let store = fx.store(true, Some(fx.edge_removal()));
+    let r = fx.recall_layer(&store).await;
+    assert_eq!(store.searches(), 1);
+    assert_eq!(annotation_kinds(&r), [AnnotationKind::VectorDegraded]);
+    assert!(
+        r.warnings.contains(&r.response_annotations[0].text),
+        "{:?}",
+        r.warnings
+    );
+    assert_eq!(r.top_legs.vector_cosine, None);
+}
+
+/// #263: at `top_k = 0` the traversal takes no dependent and cannot answer,
+/// so the pre-check no longer plans a dispatch for it (#256 reported one
+/// that "did not fire"). A dependency question at `top_k = 0` is an ordinary
+/// blend, as every recall at `top_k = 0` is: the gather runs and asks the
+/// vector leg for no neighbours, no hit is returned, `vector_cosine` is
+/// null, the confidence is keyword-only, and nothing is annotated or warned.
+/// It equals the same recall made with no dependent to plan a dispatch for.
+#[tokio::test]
+async fn a_top_k_zero_dependency_question_is_an_ordinary_blend() {
+    let fx = DispatchRace::new();
+    let epoch = fx.graph.read().epoch();
+    let store = fx.store(false, None);
+    let r = fx.recall(&store, 0, true).await;
+    assert_eq!(
+        fx.graph.read().epoch(),
+        epoch,
+        "premise: nothing was written"
+    );
+    assert!(
+        r.response_annotations.is_empty() && r.warnings.is_empty(),
+        "{:?} {:?}",
+        r.response_annotations,
+        r.warnings
+    );
+    assert!(r.hits.is_empty(), "{:?}", r.hits);
+    assert_eq!(store.searches(), 1, "the ordinary gather ran");
+    assert!(r.top_legs.bm25.is_some(), "{:?}", r.top_legs);
+    assert_eq!(r.top_legs.vector_cosine, None);
+    assert_eq!(confidence_basis(&r), Some("keyword-only-v0"));
+
+    // The same recall with nothing to dispatch to.
+    let fx = DispatchRace::new();
+    fx.graph.write().remove_edge(fx.edge.id).unwrap();
+    let store = fx.store(false, None);
+    assert_eq!(fx.recall(&store, 0, true).await, r);
 }
 
 /// #87 through `Daemon::recall_detailed`: the recent leg scores at the

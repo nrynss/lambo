@@ -562,11 +562,6 @@ impl ResolvedAnchor {
         }
     }
 
-    /// The graph epoch this resolution was made at.
-    pub(crate) fn epoch(&self) -> u64 {
-        self.epoch
-    }
-
     /// What the subject resolved to.
     pub(crate) fn choice(&self) -> Option<&AnchorChoice> {
         self.choice.as_ref()
@@ -581,20 +576,44 @@ impl ResolvedAnchor {
 /// phrasing that cannot dispatch falls through to the FULL blend (never a
 /// degraded keyword-only answer). The dispatch itself re-validates under the
 /// final graph lock inside `try_structural`, so this is a gather-skip
-/// decision, not a short-circuit of correctness.
+/// decision, not a short-circuit of correctness. It answers for a positive
+/// `top_k`; the daemon asks [`fits_structural_with`], which also takes the
+/// recall's `top_k`.
 pub fn fits_structural(graph: &Graph, query: &str) -> bool {
     if !matches!(classify(query), RecallKind::Structural) {
         return false;
     }
-    fits_structural_with(graph, resolve_anchor_choice(graph, query).as_ref())
+    anchor_dispatches(graph, resolve_anchor_choice(graph, query).as_ref())
 }
 
-/// [`fits_structural`]'s anchor half, from a resolution already made on
-/// `graph` for a query that classifies `Structural` (#171).
-pub(crate) fn fits_structural_with(graph: &Graph, choice: Option<&AnchorChoice>) -> bool {
+/// [`fits_structural`]'s anchor half for a recall of `top_k` hits, from a
+/// resolution already made on `graph` for a query that classifies
+/// `Structural` (#171). True exactly when [`try_structural_with`] would
+/// answer on this graph: a single-anchor subject with no dependents, or one
+/// at a `top_k` of 0 (#263: the traversal takes no dependent and declines),
+/// is not dispatched, so the daemon does not skip the vector gather for it.
+/// An ambiguous subject (a tie between concepts of different repositories,
+/// or between a repository-scoped concept and an unscoped one) is
+/// dispatched at any `top_k`, 0 included: its answer is the warning-only
+/// one (#129).
+pub(crate) fn fits_structural_with(
+    graph: &Graph,
+    choice: Option<&AnchorChoice>,
+    top_k: usize,
+) -> bool {
+    match choice {
+        Some(AnchorChoice::One(_)) if top_k == 0 => false,
+        _ => anchor_dispatches(graph, choice),
+    }
+}
+
+/// Whether a resolved subject has a traversal answer at any positive
+/// `top_k`: a single anchor with at least one dependent, or an ambiguous one.
+fn anchor_dispatches(graph: &Graph, choice: Option<&AnchorChoice>) -> bool {
     match choice {
         Some(AnchorChoice::One(anchor)) => !dependents(graph, *anchor).is_empty(),
-        // #129: the dispatch answers an ambiguous subject itself.
+        // #129: the dispatch answers an ambiguous subject itself, at any
+        // `top_k`.
         Some(AnchorChoice::Ambiguous(_)) => true,
         None => false,
     }
@@ -1019,6 +1038,36 @@ mod tests {
         assert_eq!(contents[0], "RDS-Lambo-Demo-DB");
         // The anchor itself is answered by traversal, not echoed back.
         assert!(!contents.contains(&"SG-Base-VPC"));
+    }
+
+    /// #263: the daemon's gather-skip predicate agrees with the dispatch at
+    /// every `top_k`. A single anchor with dependents dispatches at 1 and not
+    /// at 0 (the traversal takes no dependent and declines), so the vector
+    /// gather is never skipped for a dispatch that cannot fire; an ambiguous
+    /// subject is answered at any `top_k`, 0 included.
+    #[test]
+    fn the_gather_skip_predicate_matches_the_dispatch_at_every_top_k() {
+        let g = exhibit();
+        let q = "what depends on SG-Base-VPC";
+        let anchor = ResolvedAnchor::resolve(&g, q);
+        assert!(matches!(anchor.choice(), Some(AnchorChoice::One(_))));
+        for top_k in [0, 1, 5] {
+            assert_eq!(
+                fits_structural_with(&g, anchor.choice(), top_k),
+                try_structural_with(&g, q, anchor.choice(), top_k, 500).is_some(),
+                "top_k {top_k}"
+            );
+        }
+        assert!(!fits_structural_with(&g, anchor.choice(), 0));
+        assert!(fits_structural_with(&g, anchor.choice(), 1));
+        // The public predicate, which takes no `top_k`, answers for a
+        // positive one.
+        assert!(fits_structural(&g, q));
+
+        let ids: Vec<NodeId> = g.concepts().take(2).map(|c| c.id).collect();
+        let ambiguous = AnchorChoice::Ambiguous(ids);
+        assert!(fits_structural_with(&g, Some(&ambiguous), 0));
+        assert!(try_structural_with(&g, q, Some(&ambiguous), 0, 500).is_some());
     }
 
     #[test]

@@ -33,15 +33,31 @@
 - A dependency question whose traversal answer was predicted but declined
   because a write changed the graph in between (its anchor lost its last
   dependent, or was renamed or retired) used to fall through to a blended
-  recall with no vector leg and no sign of it. It now carries the
-  `vector_degraded` annotation and warning, `recall: a concurrent write
-  changed the graph after a dependency-question dispatch was planned, and the
-  dispatch did not fire; vector leg skipped, results are keyword-only`, when a
-  vector leg would have run. A predicted dispatch that declines with no write
-  in between (`top_k` 0 leaves the traversal nothing to return) carries the
-  same annotation worded `recall: a planned dependency-question dispatch did
-  not fire; vector leg skipped, results are keyword-only`. Ranking is
-  unchanged.
+  recall with no vector leg and no sign of it (#263). When the recall has a
+  vector leg to run (the caller supplied a query embedding and the store
+  searches vectors), it now runs the vector search it skipped, once, with no
+  graph lock held, and answers from the graph as it is then: by traversal if
+  another write gave the anchor dependents back, else by the blend with both
+  legs, the same hits, ranking, `top_legs` and `confidence` as the same recall
+  made after the write. Without a query embedding or vector search there is no
+  vector leg to recover: the declined dispatch blends without one and runs
+  no search, as any recall without a vector leg does. No query is
+  embedded twice, and a recall whose dispatch fires, or that plans none, makes
+  no extra search. If that search fails and the answer is the blend, it says
+  so as any failed vector read does (`vector_degraded`, keyword-only); if a
+  later write gave the anchor dependents back, the traversal answer reads no
+  vector leg and carries no such note. The interim `vector_degraded` warnings
+  that named a dispatch that "did not fire" are gone. A library recall with
+  `top_k` 0 whose subject is one concept, at which the traversal has nothing
+  to return, no longer plans a dependency-question dispatch: it is an ordinary
+  recall at that `top_k` (`vector_cosine` `null`, `keyword-only-v0`, no hit
+  but one kept past `top_k` for its conflict, hot or reservation warning),
+  with no warning of its own (a failed vector read still says so, as at any
+  `top_k`). An ambiguous subject (its best match ties between concepts in
+  different repositories, or between a repository-scoped concept and an
+  unscoped one, and the question does not name exactly one of their
+  repositories) is still dispatched at `top_k` 0, as at any other: no hit,
+  and the one warning that lists them and asks for the repository.
 - Each built-in calibration row records the corpus size its recall constants
   were measured on (`ContractCalibration::measured_corpus_concepts`: 100, the
   #190 set), and the BGE-M3 reference records the 12-concept layer its 0.50
