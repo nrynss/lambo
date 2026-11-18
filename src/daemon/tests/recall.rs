@@ -723,9 +723,10 @@ use async_trait::async_trait;
 struct StubVectorStore {
     race: bool,
     /// Run on every capability probe: a test's stand-in for a write that
-    /// lands while recall holds no graph lock. The probe takes the graph's
-    /// write lock, so a recall that called it while holding the graph's
-    /// read lock would deadlock rather than pass.
+    /// lands while recall holds no graph lock. The probes take the graph's
+    /// write lock with `try_write`, so a recall that called one while holding
+    /// the graph's read lock fails the test at once (the probe panics with
+    /// "recall held the graph lock across the gather") rather than hanging.
     on_probe: Option<Box<dyn Fn() + Send + Sync>>,
     /// What the checked read finds, best first.
     vector_hits: Vec<Scored<NodeId>>,
@@ -1016,7 +1017,7 @@ impl DispatchRace {
         let graph = self.graph.clone();
         let edge_id = self.edge.id;
         Box::new(move || {
-            let mut g = graph.write();
+            let mut g = graph.try_write().expect(HELD_ACROSS_GATHER);
             if g.edges().any(|e| e.id == edge_id) {
                 g.remove_edge(edge_id).unwrap();
             }
@@ -1047,7 +1048,36 @@ impl DispatchRace {
             )
             .await
     }
+
+    /// The same question on a layer's side of a layered recall
+    /// (`Route::Layer`), at `top_k` 5 with the query embedding.
+    async fn recall_layer(&self, store: &StubVectorStore) -> crate::recall::detail::DetailedRecall {
+        let contract = race_contract();
+        let embedding = vec![0.0_f32; contract.dim];
+        self.daemon
+            .recall_layer_with(
+                &sid(),
+                RecallQuery {
+                    query: "what depends on billing ledger".into(),
+                    top_k: 5,
+                    max_tokens: 500,
+                    traversal_depth: 2,
+                },
+                crate::store::vector_source::VectorCandidates::from_store(store),
+                Some((embedding.as_slice(), &contract)),
+                crate::config::RecallWeights::default(),
+            )
+            .await
+    }
 }
+
+/// A dispatch-race probe's failure message. The probes run where recall
+/// must hold no graph guard (before its first graph lock, and inside the
+/// gather) and take the graph's write lock with `try_write`, which fails at
+/// once if a guard is still held there. (A guard held across the gather's
+/// `.await` does not compile: the recall future must be `Send`, and a
+/// `parking_lot` guard is not.)
+const HELD_ACROSS_GATHER: &str = "recall held the graph lock across the gather";
 
 /// A contract with a built-in calibration row and a measured null median,
 /// so a two-leg recall reports the two-leg confidence basis.
@@ -1168,8 +1198,12 @@ async fn a_retried_recall_gathers_once_and_answers_from_the_current_graph() {
         let probes = AtomicUsize::new(0);
         let probe: Box<dyn Fn() + Send + Sync> =
             Box::new(move || match probes.fetch_add(1, Ordering::SeqCst) {
-                0 => graph.write().remove_edge(edge.id).unwrap(),
-                1 => second(&mut graph.write()),
+                0 => graph
+                    .try_write()
+                    .expect(HELD_ACROSS_GATHER)
+                    .remove_edge(edge.id)
+                    .unwrap(),
+                1 => second(&mut graph.try_write().expect(HELD_ACROSS_GATHER)),
                 _ => {}
             });
         probe
@@ -1246,6 +1280,71 @@ async fn a_retried_recall_gathers_once_and_answers_from_the_current_graph() {
     assert!(r.warnings.contains(text), "{:?}", r.warnings);
     assert_eq!(r.top_legs.vector_cosine, None);
     assert_eq!(confidence_basis(&r), Some("keyword-only-v0"));
+}
+
+/// #263 on a layer's side of a layered recall (`Route::Layer`), which plans
+/// dependency-question dispatches as a text recall does and so reaches the
+/// same re-gather: a write in the window between the pre-check and the graph
+/// lock makes the dispatch decline, and the layer's answer is the one the
+/// same layer recall gives with no pre-check, vector leg included. A failed
+/// re-gather read degrades and says so as on the text route.
+#[tokio::test]
+async fn a_layer_recall_whose_dispatch_declines_runs_the_skipped_vector_leg() {
+    use crate::recall::detail::AnnotationKind;
+
+    // No write: the layer answers by traversal with no vector search.
+    let fx = DispatchRace::new();
+    let store = fx.store(false, None);
+    let r = fx.recall_layer(&store).await;
+    assert_eq!(
+        annotation_kinds(&r),
+        [AnnotationKind::Traversal],
+        "premise: dispatched"
+    );
+    assert_eq!(store.searches(), 0, "the dispatch path searches no vectors");
+
+    // The same layer recall with no pre-check: nothing to dispatch to.
+    let fx = DispatchRace::new();
+    fx.graph.write().remove_edge(fx.edge.id).unwrap();
+    let store = fx.store(false, None);
+    let baseline = fx.recall_layer(&store).await;
+    assert_eq!(store.searches(), 1);
+    assert!(
+        baseline.response_annotations.is_empty() && baseline.warnings.is_empty(),
+        "{:?} {:?}",
+        baseline.response_annotations,
+        baseline.warnings
+    );
+    assert!(
+        baseline.hits.iter().any(|h| h.node_id == fx.forecast),
+        "premise: the vector leg finds the forecast: {:?}",
+        baseline.hits
+    );
+    assert!(baseline.top_legs.vector_cosine.is_some());
+
+    // The write lands in the window: one re-gather, and the baseline whole.
+    let fx = DispatchRace::new();
+    let store = fx.store(false, Some(fx.edge_removal()));
+    let r = fx.recall_layer(&store).await;
+    assert!(
+        !fx.graph.read().edges().any(|e| e.id == fx.edge.id),
+        "premise: the write landed"
+    );
+    assert_eq!(store.searches(), 1, "the skipped gather ran exactly once");
+    assert_eq!(r, baseline);
+
+    // The re-gather's vector read fails: keyword-only, and it says so.
+    let fx = DispatchRace::new();
+    let store = fx.store(true, Some(fx.edge_removal()));
+    let r = fx.recall_layer(&store).await;
+    assert_eq!(store.searches(), 1);
+    assert_eq!(annotation_kinds(&r), [AnnotationKind::VectorDegraded]);
+    assert!(
+        r.warnings.contains(&r.response_annotations[0].text),
+        "{:?}",
+        r.warnings
+    );
+    assert_eq!(r.top_legs.vector_cosine, None);
 }
 
 /// #263: at `top_k = 0` the traversal takes no dependent and cannot answer,

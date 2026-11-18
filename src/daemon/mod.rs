@@ -1058,9 +1058,14 @@ impl Daemon {
         }
         // E2E-6: the refused-leg note lands in producer order after the
         // pipeline's own response annotations (assembled above). The only
-        // other response annotation on this path is `traversal`, which is
-        // produced by a dispatched structural query that skips `gather`
-        // entirely — the two never coexist.
+        // other response annotation a recall makes is `traversal`, and the two
+        // never coexist in a result: a dispatched structural answer returns
+        // early, before this point, and every return of a traversal drops
+        // `vector_leg_refused`. That holds even when a note was pushed: a
+        // #263 re-gather can fail (pushing its `vector_degraded` note) and
+        // the dispatch under the main guard then fire because a later write
+        // gave the anchor dependents back; the traversal is returned and the
+        // note dropped, correctly, since that answer reads no vector leg.
         //
         // The same line also goes to `warnings`, which is what `Memory::recall`
         // and `lambo_recall` hand a caller (as the query-embed failure's line

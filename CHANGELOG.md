@@ -42,10 +42,12 @@
   no extra search. If that search fails, the answer says so as any failed
   vector read does (`vector_degraded`, keyword-only). The interim
   `vector_degraded` warnings that named a dispatch that "did not fire" are
-  gone. A library recall with `top_k` 0, at which the traversal has nothing to
-  return, no longer plans a dependency-question dispatch: it is an ordinary
-  recall at that `top_k` (no hit, `vector_cosine` `null`, `keyword-only-v0`),
-  with no warning.
+  gone. A library recall with `top_k` 0 whose subject is one concept, at which
+  the traversal has nothing to return, no longer plans a dependency-question
+  dispatch: it is an ordinary recall at that `top_k` (no hit, `vector_cosine`
+  `null`, `keyword-only-v0`), with no warning. A subject that names concepts
+  in different repositories is still dispatched at `top_k` 0, as at any other:
+  no hit, and the one warning that lists them and asks for the repository.
 - Each built-in calibration row records the corpus size its recall constants
   were measured on (`ContractCalibration::measured_corpus_concepts`: 100, the
   #190 set), and the BGE-M3 reference records the 12-concept layer its 0.50
