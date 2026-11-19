@@ -116,6 +116,9 @@ async fn the_structured_content_and_the_ledger_carry_both_under_one_shape() {
     assert_eq!(out.content.len(), 1, "no warning line was added: {out:?}");
 
     let lines = read_ledger(&ledger, 1);
+    assert_eq!(lines[0]["concept_count"], json!(2));
+    assert_eq!(lines[0]["layer_concept_counts"], json!({}));
+    assert!(payload.get("concept_count").is_none());
     assert_eq!(lines[0]["tool"], json!("lambo_recall"));
     assert_eq!(&lines[0]["top_legs"], top);
     same_confidence(&lines[0]["confidence"], confidence);
@@ -169,11 +172,19 @@ async fn a_keyword_only_recall_has_a_null_cosine_and_a_keyword_only_confidence()
         json!({"value": 0.0, "basis": "keyword-only-v0", "provisional": true})
     );
 
-    let lines = read_ledger(&ledger, 3);
+    let refused = recall(&s, json!({"query": "worktree", "top_k": 0})).await;
+    assert_eq!(refused.is_error, Some(true), "{refused:?}");
+    let lines = read_ledger(&ledger, 4);
     assert_eq!(lines[1]["top_legs"], payload["top_legs"]);
     same_confidence(&lines[1]["confidence"], &payload["confidence"]);
     assert_eq!(lines[2]["top_legs"], structured(&none)["top_legs"]);
     same_confidence(&lines[2]["confidence"], &structured(&none)["confidence"]);
+    assert_eq!(lines[1]["concept_count"], json!(1));
+    assert_eq!(lines[2]["concept_count"], json!(1));
+    assert_eq!(lines[3]["outcome"], json!("error"));
+    assert_eq!(lines[3].get("concept_count"), Some(&json!(null)));
+    assert_eq!(lines[3]["layer_concept_counts"], json!({}));
+    assert_eq!(lines[3]["top_legs"]["vector_cosine"], json!(null));
     s.mem.close().await.expect("close");
 }
 
@@ -279,8 +290,9 @@ async fn a_layered_recall_keeps_the_layers_top_legs_apart() {
     let ledger = Arc::clone(own.ledger().expect("ledger"));
     let general = vector_general().await;
     derive(&own, PROJECT_FACT).await;
+    derive(&own, "The release train has a separate checklist").await;
     derive(&general, GENERAL_RULING).await;
-    let (s, _source) = layered(&own, &general);
+    let (s, source) = layered(&own, &general);
 
     let alone = recall(&own, json!({"query": "worktree branches"})).await;
     let merged = recall(&s, json!({"query": "worktree branches"})).await;
@@ -312,7 +324,17 @@ async fn a_layered_recall_keeps_the_layers_top_legs_apart() {
     assert!((cosine - 0.70).abs() < 1e-4, "{cosine}");
     assert!(structured(&alone).get("layer_top_legs").is_none());
 
-    let lines = read_ledger(&ledger, 3);
+    let scoped = recall(
+        &s,
+        json!({"query": "worktree branches", "scope": "general"}),
+    )
+    .await;
+    assert_eq!(scoped.is_error, Some(false), "{scoped:?}");
+    drop(source);
+    let unavailable = recall(&s, json!({"query": "worktree branches"})).await;
+    assert_eq!(unavailable.is_error, Some(false), "{unavailable:?}");
+
+    let lines = read_ledger(&ledger, 6);
     let line = lines
         .iter()
         .find(|l| l.get("session_hits").is_some())
@@ -320,6 +342,14 @@ async fn a_layered_recall_keeps_the_layers_top_legs_apart() {
     assert_eq!(line["top_legs"], payload["top_legs"]);
     same_confidence(&line["confidence"], &payload["confidence"]);
     assert_eq!(line["layer_top_legs"], payload["layer_top_legs"]);
+    assert_eq!(line["concept_count"], json!(2));
+    assert_eq!(line["layer_concept_counts"], json!({"general": 1}));
+    assert!(payload.get("layer_concept_counts").is_none());
+    let scoped_line = lines.iter().find(|l| l["scope"] == "general").unwrap();
+    assert_eq!(scoped_line["concept_count"], json!(1));
+    assert_eq!(scoped_line["layer_concept_counts"], json!({}));
+    assert_eq!(lines[5]["concept_count"], json!(2));
+    assert_eq!(lines[5]["layer_concept_counts"], json!({"general": null}));
     s.mem.close().await.expect("close");
     general.mem.close().await.expect("close");
 }

@@ -18,6 +18,10 @@
   with its origin or export one query vector per line as JSON Lines.
   `lambo recall --query-vector-as-text` replays text recall from an exported
   query vector and the original query text.
+- Recall ledger lines include `concept_count` and `layer_concept_counts` (#257),
+  so the existing best per-leg scores can be compared against the size of the
+  session and layer graphs at recall time. The new fields are additive in
+  ledger version 1.
 
 ## 0.13.0 (2026-11-19)
 

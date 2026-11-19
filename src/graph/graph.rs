@@ -558,6 +558,12 @@ impl Graph {
         self.nodes.len()
     }
 
+    /// Live concepts. Every node is a concept or an interaction, and the
+    /// temporal chain contains each interaction exactly once.
+    pub(crate) fn concept_count(&self) -> usize {
+        self.nodes.len() - self.temporal_chain.len()
+    }
+
     pub fn edge_count(&self) -> usize {
         self.edges.len()
     }

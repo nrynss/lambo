@@ -98,7 +98,7 @@
 //! contract (EmbeddingGemma 2 at 768 dims: 0.72) replaces 0.50 at recall
 //! time. Both knobs remain configurable per layer, and a set floor wins.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::recall::candidates::LegScores;
 use crate::recall::detail::{Annotation, AnnotationKind, DetailedHit, DetailedRecall};
@@ -256,6 +256,9 @@ pub struct LayeredRecall {
     /// scored, admitted past its floor or not (#254). Empty for an
     /// unlayered recall.
     pub layer_top_legs: Vec<LayerTopLegs>,
+    /// #257: the graph count for each layer considered for the merge.
+    /// Ledger only. Unavailable layers have no count.
+    pub(crate) layer_concept_counts: BTreeMap<String, Option<usize>>,
 }
 
 /// One layer's best per-leg scores in a layered recall (#256).
@@ -302,6 +305,7 @@ impl LayeredRecall {
             top_legs: detail.top_legs,
             confidence: detail.confidence.clone(),
             layer_top_legs: Vec::new(),
+            layer_concept_counts: BTreeMap::new(),
             detail,
             hit_legs,
         }
@@ -862,6 +866,7 @@ where
     }
 
     let detail = DetailedRecall {
+        concept_count: recall_of(0).and_then(|t| t.recall.concept_count),
         anchor: recall_of(0).and_then(|t| t.recall.anchor.clone()),
         hits,
         context: fitted.context,
@@ -910,6 +915,16 @@ where
                     session: l.session.clone(),
                     top_legs: l.recall.as_ref()?.recall.top_legs,
                 })
+            })
+            .collect(),
+        layer_concept_counts: lists
+            .iter()
+            .skip(1)
+            .map(|layer| {
+                (
+                    layer.session.as_str().to_owned(),
+                    layer.recall.as_ref().and_then(|t| t.recall.concept_count),
+                )
             })
             .collect(),
         detail,

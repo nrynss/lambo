@@ -27,7 +27,25 @@ because metric 2 and metric 3 **join** to it, and leaves `startup`/`lease` in
                 blast_radius_warning, conflict_line, hot_warning,
                 reservation_warning, response_annotations[], warning_count,
                 cold_start (#79; absent on lines written before it),
-                contradiction_warning (#19(c); absent on older lines)
+                contradiction_warning (#19(c); absent on older lines),
+                top_legs{}, confidence{} (when computed), layer_top_legs[]
+                (merged recalls), concept_count, layer_concept_counts{}
+      top_legs{}  (#256) bm25 and vector_cosine are the best phase-1 scores
+                for the addressed session, or null when a leg did not run;
+                exact_name_match is a bool. Present on successful lines since
+                #256 and failed lines since #257; a refusal without a graph
+                result has both scores null.
+      confidence{}  (#256) provisional value, basis and provisional flag when
+                computed. Values with different bases are not comparable.
+      layer_top_legs[]  (#256) best scores per answering layer on merged recalls;
+                unavailable layers have no entry, traversal scores are null.
+      concept_count  (#257) live concepts in the addressed graph used for the
+                answer: 0 means empty, null means no graph result (e.g. refusal).
+      layer_concept_counts{}  (#257) layer session -> live concept count for
+                each layer considered for a merge; null means unavailable and
+                0 means empty. {} for single-session or scoped recalls and
+                refused calls. Both count fields are additive (v stays 1);
+                older v1 lines may omit them.
       hits[i]   node_id, content (truncated), score, legs{}, is_canonical,
                 blast_radius, included_in_context, annotations[]
       legs{}    any of bm25 / recent / vector_cosine -> float. A key is present

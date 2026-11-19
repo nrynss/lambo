@@ -306,7 +306,7 @@ impl Memory {
         // so reading both here sees the drain whole or not at all, and
         // `log_depth + flush_depth` never under-reports what is not durable.
         let flush = self.flush.stats();
-        let concept_count = g.concepts().count();
+        let concept_count = g.concept_count();
         let canonical_count = g
             .concepts()
             .filter(|c| c.canonization_status == CanonizationStatus::Canonical)
