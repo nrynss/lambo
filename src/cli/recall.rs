@@ -287,7 +287,12 @@ pub async fn run_reported_with_text_vector(
         .map(|x| f64::from(*x).powi(2))
         .sum::<f64>()
         .sqrt();
-    if (norm - 1.0).abs() > SUPPLIED_UNIT_NORM_TOLERANCE {
+    // Adapters may accumulate squared components in f32 before sqrt and
+    // division. Allow rounding error to grow with width, while retaining the
+    // existing floor for small vectors. Vector files are capped at 4096.
+    let tolerance = SUPPLIED_UNIT_NORM_TOLERANCE
+        .max((vector.len() as f64 + 4.0) * f64::from(f32::EPSILON) / 2.0);
+    if (norm - 1.0).abs() > tolerance {
         return Err(CliError::Usage(
             "--query-vector-as-text requires a near-unit query vector; export one with lambo embed --query".into(),
         ));

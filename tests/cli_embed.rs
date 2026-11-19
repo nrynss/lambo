@@ -261,6 +261,37 @@ fn text_replay_preserves_near_unit_bits_and_rejects_scaled_vectors() {
     };
     assert_eq!(scores(&ordinary), scores(&replay));
 
+    // Match the BGE adapter's f32 accumulation and normalization. The small
+    // squares round away from the sum, but remain visible in an f64 norm.
+    let mut wide = vec![2_f32.powi(-13); 4096];
+    wide[0] = 1.0;
+    let f32_norm = wide.iter().map(|x| x * x).sum::<f32>().sqrt();
+    for value in &mut wide {
+        *value /= f32_norm;
+    }
+    let wide_norm = wide
+        .iter()
+        .map(|x| f64::from(*x).powi(2))
+        .sum::<f64>()
+        .sqrt();
+    assert!(wide_norm - 1.0 > 1e-5, "{wide_norm}");
+    let mut wide_vector = vector.clone();
+    wide_vector["values"] = json!(wide);
+    fs::write(&path, serde_json::to_vec(&wide_vector).unwrap()).unwrap();
+    success(invoke(
+        &config,
+        &[
+            "recall",
+            "--session",
+            "demo",
+            "--query",
+            query,
+            "--query-vector-json",
+            path_arg,
+            "--query-vector-as-text",
+        ],
+    ));
+
     for value in vector["values"].as_array_mut().unwrap() {
         *value = json!(value.as_f64().unwrap() * 2.0);
     }
