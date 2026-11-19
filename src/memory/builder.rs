@@ -818,6 +818,7 @@ impl MemoryBuilder {
             && let Some(gap) = concept_stats(&graph, clock(), true).2
         {
             tracing::warn!(
+                target: "lambo::memory::missing_vectors",
                 session = %session,
                 missing_vectors = gap.count,
                 oldest_age_secs = gap.oldest_age_secs,

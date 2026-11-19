@@ -1763,6 +1763,31 @@ fn main() -> ExitCode {
         other => other,
     };
 
+    // One-shot writers otherwise have no subscriber. Restrict diagnostics to
+    // the attach coverage event; serve configures its own tracing below.
+    if matches!(
+        cmd,
+        Commands::Derive { .. }
+            | Commands::DeriveImage { .. }
+            | Commands::RecordAction { .. }
+            | Commands::Reserve { .. }
+            | Commands::Release { .. }
+    ) {
+        use tracing_subscriber::prelude::*;
+        let filter = tracing_subscriber::filter::filter_fn(|metadata| {
+            metadata.target() == "lambo::memory::missing_vectors"
+                && *metadata.level() == tracing::Level::WARN
+        });
+        let _ = tracing_subscriber::registry()
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_writer(std::io::stderr)
+                    .with_ansi(false)
+                    .with_filter(filter),
+            )
+            .try_init();
+    }
+
     let allow_embedding_mismatch = cmd.allow_embedding_mismatch();
 
     // `lambo serve`'s usage checks, before any backend is built (#32 PR 4).

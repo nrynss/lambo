@@ -358,3 +358,74 @@ fn a_sigkilled_holder_is_named_gone_without_a_hedge() {
         "the refusal must say plainly that the holder is gone; stderr=\n{stderr}"
     );
 }
+
+#[tokio::test]
+async fn one_shot_writer_reports_restored_missing_vectors_on_stderr() {
+    let (_dir, cfg, db) = scratch();
+    let provision = lambo()
+        .args(["--config", cfg.to_str().unwrap(), "provision"])
+        .output()
+        .unwrap();
+    assert!(
+        provision.status.success(),
+        "{}",
+        String::from_utf8_lossy(&provision.stderr)
+    );
+    let first = derive_cmd(&cfg, "agent-a").output().unwrap();
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let pool = sqlx::SqlitePool::connect(&format!("sqlite:{db}"))
+        .await
+        .unwrap();
+    sqlx::query("UPDATE concepts SET embedding = NULL, created_at = '2020-01-01T00:00:00Z' WHERE session_id = ?")
+        .bind(SESSION).execute(&pool).await.unwrap();
+    pool.close().await;
+
+    let reader = lambo()
+        .args([
+            "--config",
+            cfg.to_str().unwrap(),
+            "stats",
+            "--session",
+            SESSION,
+        ])
+        .output()
+        .unwrap();
+    assert!(reader.status.success());
+    assert!(!String::from_utf8_lossy(&reader.stderr).contains("lambo re-embed --missing-only"));
+    let writer = derive_cmd(&cfg, "agent-a").output().unwrap();
+    assert!(
+        writer.status.success(),
+        "{}",
+        String::from_utf8_lossy(&writer.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&writer.stderr);
+    assert_eq!(
+        stderr.matches("lambo re-embed --missing-only").count(),
+        1,
+        "{stderr}"
+    );
+    assert!(!String::from_utf8_lossy(&writer.stdout).contains("lambo re-embed --missing-only"));
+    let repair = lambo()
+        .args([
+            "--config",
+            cfg.to_str().unwrap(),
+            "re-embed",
+            "--session",
+            SESSION,
+            "--agent",
+            "agent-a",
+            "--missing-only",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        repair.status.success(),
+        "{}",
+        String::from_utf8_lossy(&repair.stderr)
+    );
+    assert!(!String::from_utf8_lossy(&repair.stderr).contains("lambo re-embed --missing-only"));
+}
