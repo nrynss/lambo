@@ -11,6 +11,15 @@ use crate::types::{CanonizationStatus, EmbeddingContract};
 
 /// Session health from the durable snapshot.
 pub async fn run(store: &dyn GraphStore, session: &str) -> Result<String, CliError> {
+    run_with_missing_vectors(store, session, false).await
+}
+
+/// Optionally list every missing vector in the durable snapshot.
+pub async fn run_with_missing_vectors(
+    store: &dyn GraphStore,
+    session: &str,
+    missing_vectors: bool,
+) -> Result<String, CliError> {
     require_nonempty("session", session)?;
     check_size_cli("session", session)?;
 
@@ -30,7 +39,7 @@ pub async fn run(store: &dyn GraphStore, session: &str) -> Result<String, CliErr
     // BGE-M3-shaped constants over a foreign scale; the operator should see
     // that in the same snapshot that shows the vectors are there.
     let calibration = calibration_line(g.embedding());
-    let text = format!(
+    let mut text = format!(
         "session '{}' (reader snapshot)\n\
          nodes={} edges={} concepts={} canonical={}\n\
          embedded={}/{}\n\
@@ -49,6 +58,27 @@ pub async fn run(store: &dyn GraphStore, session: &str) -> Result<String, CliErr
         g.epoch(),
         calibration,
     );
+    if missing_vectors {
+        let mut missing: Vec<_> = g.concepts().filter(|c| c.embedding.is_none()).collect();
+        missing.sort_by_key(|c| (c.created_at, c.id.0));
+        text.push_str(&format!(
+            "\nmissing vectors (durable snapshot): {}",
+            missing.len()
+        ));
+        for c in missing {
+            let kind = if c.embedding_source.is_some() {
+                "image"
+            } else {
+                "text"
+            };
+            text.push_str(&format!(
+                "\n  {} kind={} created_at={}",
+                c.id,
+                kind,
+                c.created_at.to_rfc3339()
+            ));
+        }
+    }
     Ok(text)
 }
 
@@ -89,6 +119,114 @@ mod tests {
             model: model.map(Into::into),
             dim,
         }
+    }
+
+    #[cfg(feature = "fixtures")]
+    #[tokio::test]
+    async fn missing_inventory_reads_all_snapshot_kinds_in_order() {
+        use crate::types::{
+            AgentId, Concept, ConceptType, Edge, EdgeType, EmbeddingSource, GraphSnapshot,
+            Interaction, NodeId, SessionId, SourceModality, VectorOrigin,
+        };
+        use crate::MemoryStore;
+        use chrono::{TimeZone, Utc};
+        let session = SessionId::from("inventory");
+        let origin = NodeId::new();
+        let make = |id: NodeId, second, image, embedded| Concept {
+            id,
+            session_id: session.clone(),
+            content: "private payload".into(),
+            canonical_key: id.to_string(),
+            concept_type: ConceptType::Entity,
+            origin_interaction: origin,
+            origin_agent: AgentId::from("a"),
+            created_at: Utc.timestamp_opt(second, 0).unwrap(),
+            access_count: 0,
+            last_accessed: None,
+            gc_survived: 0,
+            human_confirmed: 0,
+            canonization_status: CanonizationStatus::None,
+            blast_radius: None,
+            last_demotion_time: None,
+            embedding: if embedded { Some(vec![1.0]) } else { None },
+            embedding_source: if image {
+                Some(EmbeddingSource {
+                    modality: SourceModality::Image,
+                    origin: VectorOrigin::Client,
+                    sha256: None,
+                    mime: None,
+                })
+            } else {
+                None
+            },
+            chunk_group_id: None,
+        };
+        let text_id = NodeId::new();
+        let image_id = NodeId::new();
+        let embedded_id = NodeId::new();
+        let store = MemoryStore::new();
+        store
+            .seed(GraphSnapshot {
+                session_id: session.clone(),
+                embedding: Some(contract("fixture", None, 1)),
+                interactions: vec![Interaction {
+                    id: origin,
+                    session_id: session.clone(),
+                    agent_id: AgentId::from("a"),
+                    prompt_text: None,
+                    previous_id: None,
+                    created_at: Utc.timestamp_opt(0, 0).unwrap(),
+                    event_time: None,
+                }],
+                edges: [text_id, image_id, embedded_id]
+                    .into_iter()
+                    .map(|target| Edge {
+                        id: NodeId::new(),
+                        session_id: session.clone(),
+                        source: origin,
+                        target,
+                        edge_type: EdgeType::Derives,
+                        weight: 1.0,
+                        reinforcements: 0,
+                        created_at: Utc.timestamp_opt(0, 0).unwrap(),
+                        last_reinforced: Utc.timestamp_opt(0, 0).unwrap(),
+                        event_time: None,
+                    })
+                    .collect(),
+                concepts: vec![
+                    make(text_id, 20, false, false),
+                    make(image_id, 10, true, false),
+                    make(embedded_id, 5, false, true),
+                ],
+                ..Default::default()
+            })
+            .unwrap();
+        let normal = run(&store, "inventory").await.unwrap();
+        assert!(!normal.contains("missing vectors"));
+        let listed = run_with_missing_vectors(&store, "inventory", true)
+            .await
+            .unwrap();
+        assert!(listed.starts_with(&normal));
+        assert!(
+            listed.contains("missing vectors (durable snapshot): 2"),
+            "{listed}"
+        );
+        assert!(listed.contains(&format!("{text_id} kind=text created_at=")));
+        assert!(listed.contains(&format!("{image_id} kind=image created_at=")));
+        assert!(listed.find(&image_id.to_string()) < listed.find(&text_id.to_string()));
+        assert!(!listed.contains(&embedded_id.to_string()));
+        assert!(!listed.contains("private payload"));
+        let empty = MemoryStore::new();
+        empty
+            .seed(GraphSnapshot {
+                session_id: SessionId::from("empty"),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(run_with_missing_vectors(&empty, "empty", true)
+            .await
+            .unwrap()
+            .contains("missing vectors (durable snapshot): 0"));
     }
 
     #[test]

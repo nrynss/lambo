@@ -812,16 +812,18 @@ impl MemoryBuilder {
             }
         };
 
-        if existing && !self.reembed_mode && expects_text_vectors(&config, store.as_ref()) {
-            if let Some(gap) = concept_stats(&graph, clock(), true).2 {
-                tracing::warn!(
-                    session = %session,
-                    missing_vectors = gap.count,
-                    oldest_age_secs = gap.oldest_age_secs,
-                    "{}",
-                    gap.warning()
-                );
-            }
+        if existing
+            && !self.reembed_mode
+            && expects_text_vectors(&config, store.as_ref())
+            && let Some(gap) = concept_stats(&graph, clock(), true).2
+        {
+            tracing::warn!(
+                session = %session,
+                missing_vectors = gap.count,
+                oldest_age_secs = gap.oldest_age_secs,
+                "{}",
+                gap.warning()
+            );
         }
 
         let graph = Arc::new(RwLock::new(graph));
