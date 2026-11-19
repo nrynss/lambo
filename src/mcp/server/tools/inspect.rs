@@ -15,6 +15,7 @@ use super::scope::Scoped;
 const TOOL: &str = "lambo_inspect";
 use crate::surface::focus::{
     ambiguous_refusal, fuzzy_note, missing_refusal, oversized_refusal, resolve_focus, Focus,
+    FocusKind,
 };
 use crate::surface::limits::MAX_INSPECT_DEPTH;
 use crate::surface::neighbourhood::{contradiction_line, render_neighbourhood_parts};
@@ -105,15 +106,11 @@ impl LamboServer {
         // One short read section, no `.await` inside (spec §6.4).
         let now = chrono::Utc::now();
         let min_age = mem.config().canonization_edge_min_age;
+        let focus = p.focus.trim();
         let resolved = {
             let g = mem.graph().read();
-            match resolve_focus(&g, p.focus.trim()) {
-                Focus::Exact(id) => Ok((
-                    id,
-                    None,
-                    render_neighbourhood_parts(&g, id, depth),
-                    contradiction_line(&g, id, min_age, now),
-                )),
+            let matched = match resolve_focus(&g, focus) {
+                Focus::Exact { id, kind } => Ok((id, kind, None)),
                 Focus::Fuzzy {
                     id,
                     content,
@@ -124,19 +121,23 @@ impl LamboServer {
                     // is exactly the line a model reads straight past. A
                     // bounded one also names the bound (issue #9), so the
                     // caller knows what was not scanned.
-                    let note = fuzzy_note(p.focus.trim(), &content, bounded.as_ref());
-                    Ok((
-                        id,
-                        Some(note),
-                        render_neighbourhood_parts(&g, id, depth),
-                        contradiction_line(&g, id, min_age, now),
-                    ))
+                    let note = fuzzy_note(focus, &content, bounded.as_ref());
+                    Ok((id, FocusKind::Fuzzy, Some(note)))
                 }
                 other => Err(other),
-            }
+            };
+            matched.map(|(id, kind, note)| {
+                (
+                    id,
+                    kind,
+                    note,
+                    render_neighbourhood_parts(&g, id, depth),
+                    contradiction_line(&g, id, min_age, now),
+                )
+            })
         };
 
-        let (focus_id, note, view, contradicted) = match resolved {
+        let (focus_id, kind, note, view, contradicted) = match resolved {
             Ok(v) => v,
             Err(Focus::Ambiguous {
                 candidates,
@@ -196,7 +197,7 @@ impl LamboServer {
             }
             // Unreachable: Exact and Fuzzy are resolved in the read section
             // above, and `Focus` has no further variants.
-            Err(Focus::Exact(_) | Focus::Fuzzy { .. }) => {
+            Err(Focus::Exact { .. } | Focus::Fuzzy { .. }) => {
                 unreachable!("Exact and Fuzzy resolve in the read section")
             }
         };
@@ -228,7 +229,8 @@ impl LamboServer {
             focus_id,
         );
         let text = view.text(section.as_deref());
-        let structured = view.json;
+        let mut structured = view.json;
+        structured["resolution"] = json!({ "kind": kind, "value": focus });
 
         // A fuzzy resolution is stated in the *text*, not only in a warning:
         // "focus: <something the caller did not ask for>" is exactly the line a
@@ -283,7 +285,7 @@ impl LamboServer {
             "view": text,
             "focus": structured,
             "admission": admission,
-            "resolution": note,
+            "resolution": note, // Legacy human-readable fuzzy note.
             "warnings": warnings,
         }));
         out

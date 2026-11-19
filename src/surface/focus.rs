@@ -1,10 +1,10 @@
 //! `inspect` focus resolution, shared by `lambo inspect`, `lambo_inspect` and
 //! the web portal's `/api/inspect`.
 //!
-//! Resolution (UUID → exact case-insensitive content → short-form node id →
-//! substring; ambiguous refuses with named candidates; deterministic sort) is
-//! one implementation for every surface, so a focus that resolves on one
-//! resolves the same way on the others. Caps: [`MAX_INSPECT_CANDIDATES`],
+//! Resolution (durable name → UUID → exact case-insensitive content →
+//! short-form node id → substring) is deterministic and refuses ambiguous
+//! matches with named candidates. Every surface uses the same lookup.
+//! Caps: [`MAX_INSPECT_CANDIDATES`],
 //! [`MAX_INSPECT_SCAN_CONCEPTS`], [`MAX_INSPECT_BOUNDED_SCAN`].
 
 use super::limits::MAX_INSPECT_CANDIDATES;
@@ -64,12 +64,22 @@ pub(crate) struct FocusCandidate {
     pub content: String,
 }
 
+/// The lookup that resolved an inspect focus.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum FocusKind {
+    Name,
+    Uuid,
+    Text,
+    ShortId,
+    Fuzzy,
+}
+
 /// How `inspect` resolved (or refused to resolve) its `focus`.
 #[derive(Debug)]
 pub(crate) enum Focus {
-    /// A node UUID, a short-form id, or an exact (case-insensitive) content
-    /// match.
-    Exact(NodeId),
+    /// A durable name, a node UUID, exact content, or a unique id prefix.
+    Exact { id: NodeId, kind: FocusKind },
     /// Exactly one substring match, usable but the caller is told. `bounded`
     /// is set when the match was found inside the bounded subset a past-cap
     /// graph scans.
@@ -112,7 +122,10 @@ pub(crate) enum Focus {
 pub(crate) fn resolve_focus(g: &Graph, focus: &str) -> Focus {
     if let Some(id) = g.name_target(focus) {
         return if matches!(g.node(id), Some(crate::types::Node::Concept(_))) {
-            Focus::Exact(id)
+            Focus::Exact {
+                id,
+                kind: FocusKind::Name,
+            }
         } else {
             Focus::Missing { near: Vec::new() }
         };
@@ -122,7 +135,10 @@ pub(crate) fn resolve_focus(g: &Graph, focus: &str) -> Focus {
         .map(NodeId)
         .filter(|id| g.node(*id).is_some())
     {
-        return Focus::Exact(id);
+        return Focus::Exact {
+            id,
+            kind: FocusKind::Uuid,
+        };
     }
 
     let mut exact: Vec<FocusCandidate> = g
@@ -153,7 +169,10 @@ pub(crate) fn resolve_focus(g: &Graph, focus: &str) -> Focus {
                 bounded: None,
             };
         }
-        return Focus::Exact(exact[0].id);
+        return Focus::Exact {
+            id: exact[0].id,
+            kind: FocusKind::Text,
+        };
     }
 
     // Short-form id leg (issue #9): recall's rendered blocks carry
@@ -338,7 +357,10 @@ fn resolve_short_id(g: &Graph, focus: &str) -> Option<Focus> {
         .collect();
     match matches.len() {
         0 => None,
-        1 => Some(Focus::Exact(matches.remove(0).id)),
+        1 => Some(Focus::Exact {
+            id: matches.remove(0).id,
+            kind: FocusKind::ShortId,
+        }),
         _ => Some(Focus::Ambiguous {
             candidates: matches,
             bounded: None,
@@ -610,11 +632,14 @@ mod tests {
 
         // Exact content match still resolves — the guard only gates the
         // substring leg's lowercase pass.
-        assert!(matches!(resolve_focus(&g, "concept-7"), Focus::Exact(_)));
+        assert!(matches!(
+            resolve_focus(&g, "concept-7"),
+            Focus::Exact { .. }
+        ));
         // Node-id focus still resolves.
         assert!(matches!(
             resolve_focus(&g, &cid.0.to_string()),
-            Focus::Exact(_)
+            Focus::Exact { .. }
         ));
         // A non-matching substring focus is refused before the O(total-content)
         // pass, not silently scanned.
@@ -630,7 +655,7 @@ mod tests {
     fn a_graph_within_the_scan_cap_still_resolves_the_fuzzy_leg() {
         let (g, _iid, _cid) = graph_with_concepts(3);
         match resolve_focus(&g, "concept-2") {
-            Focus::Fuzzy { .. } | Focus::Exact(_) => {}
+            Focus::Fuzzy { .. } | Focus::Exact { .. } => {}
             other => panic!("a small graph must resolve a substring focus, got {other:?}"),
         }
     }
@@ -740,7 +765,10 @@ mod tests {
             .unwrap();
 
         match resolve_focus(&g, "f0000000") {
-            Focus::Exact(id) => assert_eq!(id, id_a),
+            Focus::Exact {
+                id,
+                kind: FocusKind::ShortId,
+            } => assert_eq!(id, id_a),
             other => panic!("the rendered short form must resolve, got {other:?}"),
         }
         // Below the rendered length there is no id leg, so an unmatched
@@ -750,7 +778,13 @@ mod tests {
             other => panic!("a sub-short-form hex focus must not resolve via ids, got {other:?}"),
         }
         // Exact content still wins over the id leg.
-        assert!(matches!(resolve_focus(&g, "alpha pad"), Focus::Exact(id) if id == id_a));
+        let id_c = NodeId("f0000002-0000-4000-8000-000000001003".parse().unwrap());
+        g.insert_concept(concept_shaped(id_c, iid, "f0000000", ts()), iid)
+            .unwrap();
+        assert!(matches!(
+            resolve_focus(&g, "f0000000"),
+            Focus::Exact { id, kind: FocusKind::Text } if id == id_c
+        ));
 
         // Two concepts sharing their first 8 hex chars refuse ambiguously.
         let (g2, _iid, _cid) = graph_with_concepts(2);

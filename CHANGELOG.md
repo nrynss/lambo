@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Live `lambo_inspect` results now include `structuredContent.focus.concept_type`
+  and `focus.resolution` (#251). Clients can read the concept type and tell
+  whether a durable name, UUID, short ID, exact text, or fuzzy match resolved
+  the focus.
+- The MCP reference explains which lowercase `concept_type` values to use
+  when a client rejects an enum argument before sending it to the server
+  (#250).
+
 ## 0.13.0 (2026-11-19)
 
 ### Recall strength scores
