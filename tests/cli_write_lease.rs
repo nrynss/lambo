@@ -404,7 +404,9 @@ async fn one_shot_writer_reports_restored_missing_vectors_on_stderr() {
     );
     let stderr = String::from_utf8_lossy(&writer.stderr);
     assert_eq!(
-        stderr.matches("lambo re-embed --missing-only").count(),
+        stderr
+            .matches("lambo re-embed --missing-only --session <id> --agent <id>")
+            .count(),
         1,
         "{stderr}"
     );

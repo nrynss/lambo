@@ -488,7 +488,7 @@ async fn hybrid_stats_and_heartbeat_report_missing_vectors_until_backfilled() {
     assert_eq!(payload["degraded"], false);
     let warning = gap["warning"].as_str().expect("repair warning");
     assert!(
-        warning.contains("lambo re-embed --missing-only"),
+        warning.contains("lambo re-embed --missing-only --session <id> --agent <id>"),
         "{warning}"
     );
     assert_eq!(payload["warnings"], json!([warning]));

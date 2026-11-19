@@ -165,7 +165,7 @@ impl MissingVectors {
     pub(crate) fn warning(&self) -> String {
         format!(
             "{} text concept(s) without vectors (oldest {}s); stop the writer and run \
-             lambo re-embed --missing-only for this session",
+             lambo re-embed --missing-only --session <id> --agent <id>",
             self.count, self.oldest_age_secs
         )
     }
