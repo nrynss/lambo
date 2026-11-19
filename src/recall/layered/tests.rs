@@ -145,6 +145,7 @@ fn recall(tier: usize, hits: &[H], extra: &[&str]) -> TierRecall {
     }
     TierRecall {
         recall: DetailedRecall {
+            concept_count: None,
             anchor: None,
             hits: out_hits,
             context: "ignored per-session context".into(),

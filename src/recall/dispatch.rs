@@ -492,12 +492,14 @@ fn ambiguous_anchor_answer(graph: &Graph, ids: &[NodeId]) -> DetailedRecall {
             listed.push(format!("{} {} ({repo})", format::short_id(*id), c.content));
         }
     }
-    DetailedRecall::warn_only(format!(
+    let mut result = DetailedRecall::warn_only(format!(
         "recall: {text:?} names {} concepts in different repositories: {}; name the \
          repository in the question to ask about one",
         listed.len(),
         listed.join("; ")
-    ))
+    ));
+    result.concept_count = Some(graph.concept_count());
+    result
 }
 
 /// Normalized resolved subject, even when it has no dependents. The caller
@@ -791,6 +793,7 @@ pub(crate) fn try_structural_with(
     // response-global — one annotation, never attached to a hit.
     let truncation = DetailedRecall::mark_context(&mut detailed, &fitted);
     Some(DetailedRecall {
+        concept_count: Some(graph.concept_count()),
         anchor: match graph.node(anchor) {
             Some(Node::Concept(c)) => Some(anchor_label(c)),
             _ => None,

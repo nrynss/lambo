@@ -155,6 +155,9 @@ pub(super) fn call_auth() -> Option<CallAuth> {
 /// carries `layer_top_legs`, one `{session, bm25, vector_cosine,
 /// exact_name_match}` per available layer. None of these is a probability or
 /// comparable across embedding contracts or store sizes.
+/// `concept_count` and `layer_concept_counts` (#257) record the live concept
+/// counts from the graphs used for recall. A null count distinguishes an
+/// unavailable graph from an empty graph, which has a count of zero.
 ///
 /// # What the five set-level flags mean, and why they are not all computed alike
 ///
@@ -218,10 +221,14 @@ pub(super) fn layered_recall_facts(
     );
     // #256: additive, each available layer's own best per-leg scores (the
     // line's `top_legs` is the caller's own session's).
-    if !recalled.layer_top_legs.is_empty()
-        && let Some(map) = facts.as_object_mut()
-    {
-        map.insert("layer_top_legs".into(), json!(recalled.layer_top_legs));
+    if let Some(map) = facts.as_object_mut() {
+        if !recalled.layer_top_legs.is_empty() {
+            map.insert("layer_top_legs".into(), json!(recalled.layer_top_legs));
+        }
+        map.insert(
+            "layer_concept_counts".into(),
+            json!(recalled.layer_concept_counts),
+        );
     }
     // #181: additive, on a line whose hit's merged copies had members
     // skipped as redundant with them (session-qualified).
@@ -427,6 +434,8 @@ fn recall_facts_with(
         "warning_count": detailed.warnings.len(),
         "cold_start": detailed.cold_start,
         "top_legs": detailed.top_legs,
+        "concept_count": detailed.concept_count,
+        "layer_concept_counts": {},
     });
     // #256: additive, only when the provisional combined value could be
     // computed, so a line without it reads as "absent", never as a number.
@@ -576,6 +585,15 @@ impl LamboServer {
                 let (error_kind, facts) = TRACE.with(|t| {
                     let mut t = t.borrow_mut();
                     (t.error_kind.take(), t.facts.take())
+                });
+                let facts = facts.or_else(|| {
+                    (tool == "lambo_recall").then(|| {
+                        json!({
+                            "top_legs": crate::types::TopLegs::default(),
+                            "concept_count": null,
+                            "layer_concept_counts": {},
+                        })
+                    })
                 });
                 let failed = out.is_error.unwrap_or(false);
                 let outcome = match (failed, error_kind) {

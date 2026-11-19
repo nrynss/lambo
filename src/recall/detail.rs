@@ -209,6 +209,10 @@ impl DetailedHit {
 /// presentation model, produced by ONE execution.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct DetailedRecall {
+    /// #257: live concepts in the graph used for assembly or traversal.
+    /// Ledger only. `None` means the recall did not produce a graph result.
+    #[serde(skip)]
+    pub(crate) concept_count: Option<usize>,
     /// Resolved normalized subject captured under the pipeline graph guard.
     /// Also present for a structural blend whose anchor has no dependents.
     #[serde(skip)]
@@ -308,6 +312,7 @@ impl DetailedRecall {
     /// refusal paths (limit validation, session mismatch).
     pub(crate) fn warn_only(warning: String) -> Self {
         Self {
+            concept_count: None,
             anchor: None,
             hits: Vec::new(),
             context: String::new(),

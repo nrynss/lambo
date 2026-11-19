@@ -667,6 +667,7 @@ where
     let truncation = DetailedRecall::mark_context(&mut detailed, &fitted);
 
     DetailedRecall {
+        concept_count: Some(graph.concept_count()),
         anchor: None,
         hits,
         context: fitted.context,
