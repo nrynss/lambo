@@ -61,6 +61,15 @@ passes --reasons FILE (see load_catalogue for the format and validation).
 direction (default: A applied, B refused). A reason id not in the catalogue,
 marked unexpected, or produced by no detector is UNEXPECTED.
 
+Merges are compared per new concept, never by per-side node id or timestamp
+(see semantic_targets and merge_diff): a replayed target is its text, a pre-T
+target its shared id. A differing merge is merge_into_replayed_concept when
+one side merges into a replayed concept and the other side does not merge
+that concept or merges it into a pre-T one; merge_differs_pre_t when only
+pre-T targets are involved; merge_target_differs (UNEXPECTED) when both sides
+merge it into different replayed concepts. Differing rows carry merge_diff,
+counts per category with no text.
+
 Verdict and exit status: 0 pass; 1 fail, when any differing call is
 UNEXPECTED, more than --max-not-applied of the calls applied on neither side,
 any result never settled (pending, transport error, not run), or a serve
@@ -513,7 +522,9 @@ def replay_facts(db_path, T):
     created = collections.Counter(
         (c, t) for c, t in db.execute(
             "SELECT content, concept_type FROM concepts WHERE created_at >= ?", (T,)))
-    sem = collections.Counter(db.execute(
+    # A Semantic edge's direction is NodeId order (random v4 UUIDs per side),
+    # not meaning, so an edge is keyed by its two texts in sorted order.
+    sem = collections.Counter(tuple(sorted(p)) for p in db.execute(
         "SELECT s.content, t.content FROM edges e JOIN concepts s ON s.id=e.source "
         "JOIN concepts t ON t.id=e.target WHERE e.edge_type='Semantic' AND e.created_at >= ?",
         (T,)).fetchall())
@@ -542,17 +553,47 @@ def id_contents(db_path, ids):
     return out
 
 
-def semantic_targets(db_path, src_ids):
-    if not src_ids:
+def semantic_targets(db_path, created_ids, T=None):
+    """The semantic merges one call made, read back from one side's store.
+
+    created_ids are the call's created concept ids in receipt order. A merge
+    writes one Semantic edge between the new concept and its target, but the
+    server orders the edge's endpoints by NodeId (random v4 UUIDs), not by
+    role, so the new concept is the edge's source on one side and its target
+    on the other. Both directions are read, and the merge is kept only when
+    this call made it: the other end existed at or before the new concept
+    (a later call's merge into this call's concept is that call's merge), or,
+    for two concepts of this call, the new concept is the later one created.
+
+    Each merge is {"from": new concept text, "to": target text,
+    "to_created_at", "to_replayed": target created at/after T, "to_id":
+    target id when it predates T}. A pre-T target has the same id on both
+    sides (both copies start from one base); a replayed target is minted per
+    side and is identified by its text. Text stays in --work and the
+    content-gated detail only.
+    """
+    if not created_ids:
         return []
+    order = {i: n for n, i in enumerate(created_ids)}
     db = ro_connect(db_path)
     res = []
-    for i in src_ids:
-        for s, t, tc in db.execute(
-                "SELECT s.content, t.content, t.created_at FROM edges e JOIN concepts s "
-                "ON s.id=e.source JOIN concepts t ON t.id=e.target "
-                "WHERE e.edge_type='Semantic' AND e.source=?", (i,)):
-            res.append({"from": s, "to": t, "to_created_at": tc})
+    for i in created_ids:
+        me = db.execute("SELECT content, created_at FROM concepts WHERE id=?", (i,)).fetchone()
+        if me is None:
+            continue
+        for oid, oc, otc in db.execute(
+                "SELECT o.id, o.content, o.created_at FROM edges e JOIN concepts o "
+                "ON o.id = CASE WHEN e.source=? THEN e.target ELSE e.source END "
+                "WHERE e.edge_type='Semantic' AND (e.source=? OR e.target=?) AND o.id<>? "
+                "ORDER BY e.rowid", (i, i, i, i)):
+            if oid in order:
+                if order[oid] > order[i]:
+                    continue  # i is this call's earlier concept: oid merged into it
+            elif (otc or "") > (me[1] or ""):
+                continue  # a later call merged into this call's concept
+            replayed = T is not None and (otc or "") >= T
+            res.append({"from": me[0], "to": oc, "to_created_at": otc,
+                        "to_replayed": replayed, "to_id": None if replayed else oid})
     db.close()
     return res
 
@@ -802,7 +843,7 @@ def run_side(label, binary, base_db, template, workdir, calls, T, a):
     for r in results:
         r["created"] = sorted((contents.get(i) or ("<missing>",))[0] for i in r.get("created_ids", []))
         r["matched"] = sorted((contents.get(i) or ("<missing>",))[0] for i in r.get("matched_ids", []))
-        r["semantic_merges"] = semantic_targets(db, r.get("created_ids", []))
+        r["semantic_merges"] = semantic_targets(db, r.get("created_ids", []), T)
     st = (final or {}).get("structured") or {}
     final_stats = {k: st.get(k) for k in (
         "concept_count", "edge_count", "embedded_concepts", "canonical_count",
@@ -900,6 +941,9 @@ UNEXPECTED_IDS = {
     "action_edges_differ": "record_action edge count differs",
     "created_differs": "created concepts differ with no merge or canonical change to explain it",
     "reinforced_differs": "reinforced differs with no earlier differing call",
+    "merge_target_differs": "both sides merge the same new concept into different concepts "
+                            "written during the replay (not the unflushed-concept ranking: "
+                            "that decides whether a replayed concept is a target, not which)",
     "unclassified": "differs, no detector fired",
 }
 # Which compared fields each detector id accounts for. A field that differs
@@ -913,6 +957,8 @@ EXPLAINS = {
                                     "embedded"},
     "merge_differs_pre_t": {"semantic_merged", "merges", "created_count", "created",
                             "embedded"},
+    "merge_target_differs": {"semantic_merged", "merges", "created_count", "created",
+                             "embedded"},
     "canonical_key_invisible": {"matched_count", "matched", "created_count", "created",
                                 "embedded"},
     "canonical_match_differs": {"matched_count", "matched"},
@@ -1001,15 +1047,66 @@ def state_reason(catalogue, detail, sa_state, sb_state):
 INVISIBLE_RE = re.compile("[​-‏⁠-⁤﻿­͏]")
 
 
-def differing_fields(sa, sb, ra, rb):
+def _merge_map(r, T):
+    """new-concept text -> [(target replayed?, side-independent target id)]
+    for one side's merges. A pre-T target is its node id (both copies share
+    the base); a replayed target, minted per side, is its text. Neither the
+    per-side id nor to_created_at (the replay's wall clock) is compared. A
+    record without "to_replayed" (an older side file) is placed by
+    to_created_at against T."""
+    out = collections.defaultdict(list)
+    for m in r.get("semantic_merges") or []:
+        if "to_replayed" in m:
+            replayed = bool(m["to_replayed"])
+        else:
+            replayed = T is not None and (m.get("to_created_at") or "") >= T
+        ident = m.get("to") if replayed else (m.get("to_id") or m.get("to"))
+        out[m.get("from")].append((replayed, ident))
+    return out
+
+
+# merge_diff category -> reason id. one_sided_*: one side merges a new
+# concept the other side does not merge; *_vs_*: both merge it, into
+# different targets (named by where each target comes from).
+MERGE_CATEGORY_REASON = {
+    "one_sided_replay": "merge_into_replayed_concept",
+    "replay_vs_pre_t": "merge_into_replayed_concept",
+    "one_sided_pre_t": "merge_differs_pre_t",
+    "pre_t_vs_pre_t": "merge_differs_pre_t",
+    "replay_vs_replay": "merge_target_differs",
+}
+
+
+def merge_diff(ra, rb, T=None):
+    """{category: count} of the merges that differ between two sides' results
+    for one call (empty when they made the same merges). Counts only: no
+    text, so it may be written to the evidence."""
+    ma, mb = _merge_map(ra, T), _merge_map(rb, T)
+    out = collections.Counter()
+    for src in set(ma) | set(mb):
+        ca, cb = collections.Counter(ma.get(src, [])), collections.Counter(mb.get(src, []))
+        only_a, only_b = sorted((ca - cb).elements()), sorted((cb - ca).elements())
+        for x, y in zip(only_a, only_b):
+            if x[0] and y[0]:
+                out["replay_vs_replay"] += 1
+            elif x[0] or y[0]:
+                out["replay_vs_pre_t"] += 1
+            else:
+                out["pre_t_vs_pre_t"] += 1
+        n = min(len(only_a), len(only_b))
+        for x in only_a[n:] + only_b[n:]:
+            out["one_sided_replay" if x[0] else "one_sided_pre_t"] += 1
+    return dict(sorted(out.items()))
+
+
+def differing_fields(sa, sb, ra, rb, T=None):
     """Every compared field whose value differs between the sides."""
     out = {f for f in FIELDS if sa.get(f) != sb.get(f)}
     if sorted(ra.get("created") or []) != sorted(rb.get("created") or []):
         out.add("created")
     if sorted(ra.get("matched") or []) != sorted(rb.get("matched") or []):
         out.add("matched")
-    if (sorted(map(json.dumps, ra.get("semantic_merges") or []))
-            != sorted(map(json.dumps, rb.get("semantic_merges") or []))):
+    if merge_diff(ra, rb, T):
         out.add("merges")
     return out
 
@@ -1022,7 +1119,7 @@ def classify(call, sa, sb, ra, rb, T, catalogue, prior_diff=False):
     expected reason can never mask an unexpected difference. prior_diff says
     whether an earlier call already differed (reinforced cascade).
     """
-    diff = differing_fields(sa, sb, ra, rb)
+    diff = differing_fields(sa, sb, ra, rb, T)
     if "state" in diff:
         if sb["state"] not in APPLIED_STATES:
             detail = rb.get("detail") or (rb.get("receipt") or {}).get("detail") or ""
@@ -1040,10 +1137,14 @@ def classify(call, sa, sb, ra, rb, T, catalogue, prior_diff=False):
             ids.append("parent_of_ends_embedded")
         elif call.get("arguments", {}).get("parent_of"):
             ids.append("parent_of_embedded_differs")
-    if diff & {"semantic_merged", "merges"}:
-        fresh = [m for m in (ra.get("semantic_merges") or []) + (rb.get("semantic_merges") or [])
-                 if (m.get("to_created_at") or "") >= T]
-        ids.append("merge_into_replayed_concept" if fresh else "merge_differs_pre_t")
+    if "merges" in diff:
+        # Per new concept, by where each side's target comes from (see
+        # MERGE_CATEGORY_REASON). A semantic_merged count difference with the
+        # same merges in both stores fires nothing here and is unexplained.
+        for cat in merge_diff(ra, rb, T):
+            rid = MERGE_CATEGORY_REASON[cat]
+            if rid not in ids:
+                ids.append(rid)
     if diff & {"matched_count", "matched"}:
         if INVISIBLE_RE.search(json.dumps(call.get("arguments", {}), ensure_ascii=False)):
             ids.append("canonical_key_invisible")
@@ -1113,7 +1214,7 @@ def compare(calls, A, B, T, base_counts, catalogue):
                     totals[side][k] += s[k]
         if sa["state"] not in APPLIED_STATES and sb["state"] not in APPLIED_STATES:
             not_applied_both += 1
-        same = not differing_fields(sa, sb, ra, rb)
+        same = not differing_fields(sa, sb, ra, rb, T)
         row = {"idx": i, "kind": c["kind"], "agent_id": c["agent_id"],
                "interaction_id": c.get("interaction_id"), "variant": bool(c.get("variant")),
                "orig_created": c.get("orig_created"), "orig_matched": c.get("orig_matched"),
@@ -1124,6 +1225,9 @@ def compare(calls, A, B, T, base_counts, catalogue):
             row["reasons"] = [resolve_reason(r, catalogue) for r in
                               classify(c, sa, sb, ra, rb, T, catalogue, bool(differing))]
             row["unexpected"] = any(not r["expected"] for r in row["reasons"])
+            md = merge_diff(ra, rb, T)
+            if md:  # counts by category only, so it survives strip_content
+                row["merge_diff"] = md
             row["detail"] = {  # store content: stripped unless --include-content
                 "created_only_a": sorted(set(ra.get("created", [])) - set(rb.get("created", []))),
                 "created_only_b": sorted(set(rb.get("created", [])) - set(ra.get("created", []))),
@@ -1285,6 +1389,8 @@ def render_text(meta, cmp_):
     L.append("")
     for d in cmp_["differing"]:
         diffs = {k: (d["a"][k], d["b"][k]) for k in FIELDS if d["a"][k] != d["b"][k]}
+        if d.get("merge_diff"):
+            diffs["merges"] = d["merge_diff"]
         L.append(f"  #{d['idx']:<4}{d['kind']:<14}{str(d['agent_id'])[:22]:<23}{diffs}")
         for r in d["reasons"]:
             L.append(f"        -> {'' if r['expected'] else 'UNEXPECTED '}{r['id']}")
