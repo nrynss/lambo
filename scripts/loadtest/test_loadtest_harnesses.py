@@ -539,6 +539,41 @@ class MergeReadback(unittest.TestCase):
         self.assertEqual(rp.merge_diff({"semantic_merges": ma}, {"semantic_merges": mb},
                                        self.T), {})
 
+    def tied_store(self, name, flip):
+        """Two calls whose concepts share one millisecond: call 1 creates c1,
+        call 2 creates c2 and merges it into c1."""
+        p = tmpdir(self) / name
+        db = sqlite3.connect(p)
+        db.executescript(
+            "CREATE TABLE concepts(id TEXT PRIMARY KEY, content TEXT, concept_type TEXT, "
+            "created_at TEXT, embedding BLOB);"
+            "CREATE TABLE edges(source TEXT, target TEXT, edge_type TEXT, created_at TEXT);")
+        c1, c2 = name + "c1", name + "c2"
+        db.executemany("INSERT INTO concepts VALUES (?, ?, 'Logic', ?, x'00')",
+                       [(c1, "first call", self.CALL), (c2, "second call", self.CALL)])
+        db.execute("INSERT INTO edges VALUES (?, ?, 'Semantic', ?)",
+                   ((c1, c2) if flip else (c2, c1)) + (self.CALL,))
+        db.commit()
+        db.close()
+        results = [{"idx": 0, "created_ids": [c1]}, {"idx": 1, "created_ids": [c2]}]
+        return p, results
+
+    def test_a_millisecond_tie_is_settled_by_replay_order(self):
+        sides = []
+        for name, flip in (("a", False), ("b", True)):
+            p, results = self.tied_store(name, flip)
+            order_of = rp.replay_order(results)
+            self.assertEqual(order_of, {name + "c1": (0, 0), name + "c2": (1, 0)})
+            per_call = [rp.semantic_targets(p, r["created_ids"], self.T, order_of)
+                        for r in results]
+            self.assertEqual(per_call[0], [], name)  # the earlier call made no merge
+            self.assertEqual([(m["from"], m["to"], m["to_replayed"]) for m in per_call[1]],
+                             [("second call", "first call", True)], name)
+            sides.append(per_call)
+        for ra, rb in zip(*sides):
+            self.assertEqual(rp.merge_diff({"semantic_merges": ra}, {"semantic_merges": rb},
+                                           self.T), {})
+
     def test_semantic_edge_facts_ignore_direction(self):
         pa, _ = self.store("a", flip=False)
         pb, _ = self.store("b", flip=True)

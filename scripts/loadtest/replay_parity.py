@@ -553,17 +553,35 @@ def id_contents(db_path, ids):
     return out
 
 
-def semantic_targets(db_path, created_ids, T=None):
+def replay_order(results):
+    """created concept id -> (call index, position in the call's created_ids)
+    over a whole replay: the order the writes were applied in."""
+    out = {}
+    for r in results:
+        for n, cid in enumerate(r.get("created_ids") or []):
+            out[cid] = (r["idx"], n)
+    return out
+
+
+def semantic_targets(db_path, created_ids, T=None, order_of=None):
     """The semantic merges one call made, read back from one side's store.
 
-    created_ids are the call's created concept ids in receipt order. A merge
-    writes one Semantic edge between the new concept and its target, but the
-    server orders the edge's endpoints by NodeId (random v4 UUIDs), not by
-    role, so the new concept is the edge's source on one side and its target
-    on the other. Both directions are read, and the merge is kept only when
-    this call made it: the other end existed at or before the new concept
-    (a later call's merge into this call's concept is that call's merge), or,
-    for two concepts of this call, the new concept is the later one created.
+    created_ids are the call's created concept ids in receipt order;
+    order_of (from replay_order) places every concept the replay created.
+    A merge writes one Semantic edge between the new concept and its target,
+    but the server orders the edge's endpoints by NodeId (random v4 UUIDs),
+    not by role, so the new concept is the edge's source on one side and its
+    target on the other. Both directions are read, and the edge is kept only
+    when this call made the merge, decided by:
+      - a neighbour in order_of (or, without order_of, in this call's
+        created_ids): replay order. The merge belongs to the later of the
+        two concepts; created_at is never used, since calls can share a
+        millisecond.
+      - a pre-T neighbour (created_at before T): always this call's merge.
+      - any other neighbour, i.e. a replayed concept beyond the receipt's
+        MAX_RECEIPT_IDS cap and so in no created_ids: fallback on created_at,
+        kept when the neighbour is not newer than this concept. A tie in
+        that fallback can keep the edge at both ends.
 
     Each merge is {"from": new concept text, "to": target text,
     "to_created_at", "to_replayed": target created at/after T, "to_id":
@@ -574,7 +592,9 @@ def semantic_targets(db_path, created_ids, T=None):
     """
     if not created_ids:
         return []
-    order = {i: n for n, i in enumerate(created_ids)}
+    order = dict(order_of or {})
+    for n, i in enumerate(created_ids):
+        order.setdefault(i, (0, n))
     db = ro_connect(db_path)
     res = []
     for i in created_ids:
@@ -586,12 +606,13 @@ def semantic_targets(db_path, created_ids, T=None):
                 "ON o.id = CASE WHEN e.source=? THEN e.target ELSE e.source END "
                 "WHERE e.edge_type='Semantic' AND (e.source=? OR e.target=?) AND o.id<>? "
                 "ORDER BY e.rowid", (i, i, i, i)):
+            pre_t = T is not None and (otc or "") < T
             if oid in order:
                 if order[oid] > order[i]:
-                    continue  # i is this call's earlier concept: oid merged into it
-            elif (otc or "") > (me[1] or ""):
-                continue  # a later call merged into this call's concept
-            replayed = T is not None and (otc or "") >= T
+                    continue  # oid is later in the replay: it merged into i
+            elif not pre_t and (otc or "") > (me[1] or ""):
+                continue  # beyond the id cap: created_at fallback, a later merge into i
+            replayed = T is not None and not pre_t
             res.append({"from": me[0], "to": oc, "to_created_at": otc,
                         "to_replayed": replayed, "to_id": None if replayed else oid})
     db.close()
@@ -840,10 +861,11 @@ def run_side(label, binary, base_db, template, workdir, calls, T, a):
     # Resolve receipt ids to content now that the store is flushed and closed.
     all_ids = [i for r in results for i in r.get("created_ids", []) + r.get("matched_ids", [])]
     contents = id_contents(db, all_ids)
+    order_of = replay_order(results)
     for r in results:
         r["created"] = sorted((contents.get(i) or ("<missing>",))[0] for i in r.get("created_ids", []))
         r["matched"] = sorted((contents.get(i) or ("<missing>",))[0] for i in r.get("matched_ids", []))
-        r["semantic_merges"] = semantic_targets(db, r.get("created_ids", []), T)
+        r["semantic_merges"] = semantic_targets(db, r.get("created_ids", []), T, order_of)
     st = (final or {}).get("structured") or {}
     final_stats = {k: st.get(k) for k in (
         "concept_count", "edge_count", "embedded_concepts", "canonical_count",
