@@ -106,8 +106,8 @@ snapshot, builds and arguments, run later the same day.
 
 **0 of 330 calls differ, and no semantic edge exists on one side only.**
 Totals and final store counts are the same as in the first run. This run
-reports 30 reconstruction warnings where the first reported 33; the
-reconstruction reads the serving ledger, which had grown in between.
+reports 30 reconstruction warnings where the first reported 33; the cause
+of that difference was not looked into.
 
 ## 2. Sequential latency A/B
 
