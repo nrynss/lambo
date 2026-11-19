@@ -1,0 +1,191 @@
+#![cfg(feature = "embed-fixture")]
+
+use std::fs;
+use std::path::Path;
+use std::process::Output;
+
+use serde_json::{json, Value};
+
+mod common;
+use common::{lambo_command, ScratchDir};
+
+fn invoke(config: &Path, arguments: &[&str]) -> Output {
+    lambo_command()
+        .arg("--config")
+        .arg(config)
+        .args(arguments)
+        .output()
+        .unwrap()
+}
+
+fn success(output: Output) -> Output {
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    output
+}
+
+fn vector(output: &Output) -> Value {
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+
+#[test]
+fn embed_exports_query_document_and_batch_vectors_without_a_store() {
+    let scratch = ScratchDir::new("lambo-cli-embed");
+    let config = scratch.join("lambo.toml");
+    // A normal backend resolution cannot build this SQLite store without a
+    // path (or in a build without SQLite). Embed needs only the fixture.
+    fs::write(
+        &config,
+        "[store]\nkind = \"sqlite\"\n[embedder]\nkind = \"fixture\"\ndim = 8\n",
+    )
+    .unwrap();
+
+    let first = success(invoke(&config, &["embed", "--query", "café policy"]));
+    let second = success(invoke(&config, &["embed", "--query", "renewal"]));
+    let first_vector = vector(&first);
+    assert_eq!(
+        first_vector["contract"],
+        json!({"kind": "fixture", "dim": 8})
+    );
+    assert_eq!(first_vector["values"].as_array().unwrap().len(), 8);
+    assert_ne!(first_vector["values"], vector(&second)["values"]);
+
+    // The fixture is symmetric; compare the document vector to its literal
+    // framed input and also to the bare document.
+    let bare = success(invoke(&config, &["embed", "--document", "café policy"]));
+    assert_eq!(vector(&bare), first_vector);
+    let framed = success(invoke(
+        &config,
+        &[
+            "embed",
+            "--document",
+            "café policy",
+            "--origin",
+            " renewal ",
+        ],
+    ));
+    let literal = success(invoke(
+        &config,
+        &["embed", "--document", "café policy — renewal"],
+    ));
+    assert_eq!(vector(&framed), vector(&literal));
+    assert_ne!(vector(&framed), vector(&bare));
+
+    let path = scratch.join("queries.txt");
+    fs::write(&path, "café policy\r\nrenewal").unwrap();
+    let args = ["embed", "--queries-file", path.to_str().unwrap()];
+    let batch = success(invoke(&config, &args));
+    assert_eq!(batch.stdout, [first.stdout.clone(), second.stdout].concat());
+
+    fs::write(&path, "café policy\n\n").unwrap();
+    let blank = invoke(&config, &args);
+    assert_eq!(blank.status.code(), Some(2));
+    assert_eq!(blank.stdout, first.stdout);
+    assert!(String::from_utf8_lossy(&blank.stderr).contains("--queries-file line 2"));
+}
+
+#[cfg(feature = "store-sqlite")]
+#[test]
+fn exported_query_vectors_replay_text_and_dependency_recall() {
+    let scratch = ScratchDir::new("lambo-cli-embed-replay");
+    let config = scratch.join("lambo.toml");
+    let database = scratch.join("store.sqlite");
+    fs::write(
+        &config,
+        format!(
+            "[store]\nkind = \"sqlite\"\npath = {:?}\n\
+             [embedder]\nkind = \"fixture\"\ndim = 8\naccept_client_vectors = true\n",
+            database.to_str().unwrap()
+        ),
+    )
+    .unwrap();
+    success(invoke(&config, &["provision"]));
+    success(invoke(
+        &config,
+        &[
+            "derive",
+            "--session",
+            "demo",
+            "--agent",
+            "test",
+            "--content",
+            "reader policy",
+            "--kind",
+            "entity",
+        ],
+    ));
+    success(invoke(
+        &config,
+        &[
+            "derive",
+            "--session",
+            "demo",
+            "--agent",
+            "test",
+            "--content",
+            "lease renewal rule",
+            "--kind",
+            "logic",
+            "--depends-on",
+            "reader policy",
+        ],
+    ));
+
+    let query_scores = |stderr: &[u8]| -> String {
+        std::str::from_utf8(stderr)
+            .unwrap()
+            .lines()
+            .find(|line| line.starts_with("recall scores: "))
+            .unwrap()
+            .to_owned()
+    };
+    for query in ["reader policy", "what depends on reader policy"] {
+        let ordinary = success(invoke(
+            &config,
+            &["recall", "--session", "demo", "--query", query],
+        ));
+        let exported = success(invoke(&config, &["embed", "--query", query]));
+        let path = scratch.join("query.json");
+        let path_arg = path.to_str().unwrap();
+        fs::write(&path, &exported.stdout).unwrap();
+        let replay = success(invoke(
+            &config,
+            &[
+                "recall",
+                "--session",
+                "demo",
+                "--query",
+                query,
+                "--query-vector-json",
+                path_arg,
+                "--query-vector-as-text",
+            ],
+        ));
+        assert_eq!(ordinary.stdout, replay.stdout, "{query}");
+        assert_eq!(
+            query_scores(&ordinary.stderr),
+            query_scores(&replay.stderr),
+            "{query}"
+        );
+
+        if query.starts_with("what depends") {
+            assert!(String::from_utf8_lossy(&ordinary.stdout).contains("lease renewal rule"));
+            let vector_search = success(invoke(
+                &config,
+                &[
+                    "recall",
+                    "--session",
+                    "demo",
+                    "--query",
+                    query,
+                    "--query-vector-json",
+                    path_arg,
+                ],
+            ));
+            assert_ne!(ordinary.stdout, vector_search.stdout);
+        }
+    }
+}

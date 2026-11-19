@@ -77,7 +77,7 @@ derived 1 concept(s): 0 created, 1 matched existing
 
 ## Read commands
 
-Read commands query the store directly and never take the writer lease, so they are safe to run against a session another process owns.
+Read commands never take the writer lease. Most read the store directly. `lambo embed` uses just the configured embedder.
 
 ### lambo recall
 
@@ -99,6 +99,7 @@ The in-crate candle embedder (`kind = "candle"`) runs BGE-M3 locally with no lla
 | `--image <PATH>` | No; at most one of `--image`, `--query-vector-json` | Recall what is close to this PNG, JPEG or WebP file (at most 2 MiB and 4096 pixels a side), embedded by the configured embedder. Needs an embedder that embeds images. |
 | `--mime <MIME>` | No | With `--image`, as for `derive-image`. |
 | `--query-vector-json <PATH>` | No; at most one of `--image`, `--query-vector-json` | Recall what is close to a vector: a JSON file in the shape `derive-image --vector-json` takes. Needs `[embedder] accept_client_vectors = true`, and the contract must equal the session's exactly. |
+| `--query-vector-as-text` | No | Replay normal text recall with a saved query-role vector. Requires `--query` with the original text and `--query-vector-json`. |
 
 ```bash
 $ lambo recall --session demo --query "update user schema" --top-k 5
@@ -117,16 +118,41 @@ If the top hit alone is longer than `--max-tokens`, the output shows its text cu
 recall scores: {"confidence":{"basis":"noisy-or-v0","provisional":true,"value":0.35400198340656197},"top_legs":{"bm25":1.3097505006899584,"exact_name_match":false,"vector_cosine":0.7000000476837158}}
 ```
 
-`top_legs` is the best score each search leg gave any concept of the session, returned or not; a leg that did not run is `null`, and `exact_name_match` says the query was a concept's durable name. `confidence` is a provisional combination of the two, computed only for a recall by query text. On such a recall it is `"noisy-or-v0"` when both legs reported a score and the embedding contract has a measured baseline, and `"keyword-only-v0"` when the keyword leg reported a score and `vector_cosine` is `null`: the vector leg did not run (a store without vector search, a failed query embed or vector read, no embedded concept), or it ran and returned no score it could count (every cosine not a finite number, or every concept it returned outside the session as loaded). It is absent when both legs reported but the contract has no measured baseline, when the keyword leg did not run, and for a dependency question answered by traversal. A recall with `--image` or `--query-vector-json` never has one, even beside `--query` with both scores reported and a measured baseline: the baselines were measured on text queries. It may change or be removed in any release. Neither is a probability, neither is comparable across embedding contracts or store sizes, and neither should be used as a fixed threshold.
+`top_legs` is the best score each search leg gave any concept of the session, returned or not; a leg that did not run is `null`, and `exact_name_match` says the query was a concept's durable name. `confidence` is a provisional combination of the two, computed only for a recall by query text. On such a recall it is `"noisy-or-v0"` when both legs reported a score and the embedding contract has a measured baseline, and `"keyword-only-v0"` when the keyword leg reported a score and `vector_cosine` is `null`: the vector leg did not run (a store without vector search, a failed query embed or vector read, no embedded concept), or it ran and returned no score it could count (every cosine not a finite number, or every concept it returned outside the session as loaded). It is absent when both legs reported but the contract has no measured baseline, when the keyword leg did not run, and for a dependency question answered by traversal. A search by image or vector omits confidence even when it has query text. Use `--query-vector-as-text` with a saved query-role vector and its original text to apply the text recall confidence rules. Confidence may change or be removed in any release. Neither is a probability, neither is comparable across embedding contracts or store sizes, and neither should be used as a fixed threshold.
 
 What stays stable about the line: it is printed for every successful recall (by text, image or vector), always to standard error and never to standard output, as exactly one line that starts with `recall scores: ` and continues with one JSON object. `top_legs` is always in it, with the keys above; `confidence` follows the provisional rule above; new keys may be added. Standard output is byte-identical to a recall before the line existed. A script that merges the two streams (`2>&1`) sees the line too, so read standard output alone when you want the context block. See [`lambo_recall`](/lambo/mcp/#lambo_recall) for the full description.
 
 **One session.** `lambo recall` reads the one session `--session` names and never applies `[serve] layers`: it is a reader with no lease, and layers belong to an HTTP serve. To read a layer, name it: `lambo recall --session general`. A layered `lambo_recall` through `lambo serve` is described in [Layered recall](#layered-recall).
 
-**Recall by image or by vector.** With `--image` or `--query-vector-json`, the vector leg searches by that image's or vector's embedding instead of the query text's, with the same rules as `lambo_recall`'s `image` and `query_vector`. `--query` is then optional and still matches words through the keyword leg; without it, recent interactions are left out, as for `lambo_recall`. The files are read under the same size caps as `derive-image`'s and are never printed, stored or cached. A store without vector search, or a vector search that fails, is an error rather than a keyword-only answer, since the vector leg is the point.
+**Recall by image or by vector.** In image or vector search mode, the vector leg searches by that image's or vector's embedding instead of the query text's, with the same rules as `lambo_recall`'s `image` and `query_vector`. `--query` is then optional and still matches words through the keyword leg; without it, recent interactions are left out, as for `lambo_recall`. The files are read under the same size caps as `derive-image`'s and are never printed, stored or cached. A store without vector search, or a vector search that fails, is an error rather than a keyword-only answer, since the vector leg is the point.
 
 ```bash
 $ lambo recall --session dresscode --image ./photos/today.png --top-k 3
+```
+
+### lambo embed
+
+Print vectors in the configured embedding contract's space without opening a store, naming a session, or taking a lease. Adapter model downloads and caches work as usual.
+
+Pass exactly one of these inputs.
+
+| Flag | Input |
+|---|---|
+| `--query <TEXT>` | Embed bare text using the same query role as text recall. |
+| `--document <TEXT>` | Embed bare text using the document role. |
+| `--queries-file <PATH>` | Embed one query per UTF-8 line. Output is JSON Lines in input order. A blank, oversized, or unreadable line stops the command with its line number. Any earlier output is still valid. |
+
+With `--document`, pass `--origin <TEXT>` to apply hybrid derive's framing to the original interaction text. Leave it off to embed the document verbatim.
+
+Each vector is one JSON object with `values` and `contract`. The contract has `kind`, `dim`, and `model` when the adapter names a model. The same object can be used with `lambo recall --query-vector-json` when the session's contract matches exactly and the vector has at most 4,096 components.
+
+To replay text recall with the same hits and scores on the same stored data, supply the original query text and use `--query-vector-as-text`. It reuses the vector and keeps text recall's keyword and recent scoring, dependency dispatch, and confidence rules. The store must support vector search, and `[embedder] accept_client_vectors = true` is required.
+
+```bash
+query='user schema'
+lambo --config lambo.toml embed --query "$query" > query.json
+lambo --config lambo.toml recall --session demo --query "$query" \
+    --query-vector-json query.json --query-vector-as-text
 ```
 
 ### lambo saints

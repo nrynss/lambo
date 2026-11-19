@@ -32,7 +32,7 @@ use crate::surface::image::{check_submitted_vector_as, sniff_mime, validate, MAX
 use crate::types::{ProvisionalConfidence, RecallQuery, TopLegs};
 
 use super::derive_image::{read_capped, VectorFile, MAX_VECTOR_FILE_BYTES};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// The result of one detailed recall: the full `lambo recall` string plus the
 /// H3 presentation model, all from the same execution.
@@ -64,6 +64,13 @@ impl CliRecall {
             "recall scores: {}",
             scores_json(self.top_legs, self.confidence.as_ref())
         )
+    }
+
+    fn into_output(self) -> RecallOutput {
+        RecallOutput {
+            scores: self.scores_line(),
+            context: self.context,
+        }
     }
 }
 
@@ -174,13 +181,7 @@ pub async fn run_reported(
     // loaded (review L4): the vector leg is the point of a recall by image
     // or vector, and only an image embedder embeds the image.
     if by.image.is_some() || by.query_vector_json.is_some() {
-        if !VectorCandidates::from_store(backends.store.as_ref()).available() {
-            return Err(CliError::Runtime(
-                "a recall by image or by vector needs a store with vector search \
-                 (VECTOR_SEARCH), and this store does not search vectors"
-                    .into(),
-            ));
-        }
+        require_vector_search(backends)?;
         if by.image.is_some()
             && !backends
                 .embedder
@@ -213,20 +214,7 @@ pub async fn run_reported(
                 validate(&bytes, &mime).map_err(CliError::Usage)?,
             ))
         }
-        (None, Some(path)) => {
-            if !backends.config.accept_client_vectors {
-                return Err(CliError::Runtime(
-                    "this process does not accept client-computed vectors; enable them with \
-                     [embedder] accept_client_vectors = true (or LAMBO_ACCEPT_CLIENT_VECTORS=true)"
-                        .into(),
-                ));
-            }
-            let raw = read_capped("--query-vector-json", path, MAX_VECTOR_FILE_BYTES)?;
-            let (values, declared) = VectorFile::parse("--query-vector-json", &raw)?;
-            check_submitted_vector_as("query_vector", &values, &declared, &backends.embedding)
-                .map_err(CliError::Usage)?;
-            Some(QueryBy::Vector { values, declared })
-        }
+        (None, Some(path)) => Some(read_query_vector(backends, path)?),
         (Some(_), Some(_)) => {
             return Err(CliError::Usage(
                 "pass at most one of --image or --query-vector-json".into(),
@@ -243,10 +231,58 @@ pub async fn run_reported(
         traversal_depth,
     )
     .await?;
-    Ok(RecallOutput {
-        scores: detail.scores_line(),
-        context: detail.context,
-    })
+    Ok(detail.into_output())
+}
+
+fn require_vector_search(backends: &ResolvedBackends) -> Result<(), CliError> {
+    if !VectorCandidates::from_store(backends.store.as_ref()).available() {
+        return Err(CliError::Runtime(
+            "a recall by image or by vector needs a store with vector search \
+             (VECTOR_SEARCH), and this store does not search vectors"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
+fn read_query_vector(
+    backends: &ResolvedBackends,
+    path: &Path,
+) -> Result<QueryBy<'static>, CliError> {
+    if !backends.config.accept_client_vectors {
+        return Err(CliError::Runtime(
+            "this process does not accept client-computed vectors; enable them with \
+             [embedder] accept_client_vectors = true (or LAMBO_ACCEPT_CLIENT_VECTORS=true)"
+                .into(),
+        ));
+    }
+    let raw = read_capped("--query-vector-json", path, MAX_VECTOR_FILE_BYTES)?;
+    let (values, declared) = VectorFile::parse("--query-vector-json", &raw)?;
+    check_submitted_vector_as("query_vector", &values, &declared, &backends.embedding)
+        .map_err(CliError::Usage)?;
+    Ok(QueryBy::Vector { values, declared })
+}
+
+/// Replay a text recall using the saved query-role vector instead of embedding
+/// the original query again. Keep text dispatch, calibration and reporting.
+pub async fn run_reported_with_text_vector(
+    backends: &ResolvedBackends,
+    session: &str,
+    query: &str,
+    path: &Path,
+    top_k: Option<usize>,
+    max_tokens: Option<usize>,
+    traversal_depth: Option<usize>,
+) -> Result<RecallOutput, CliError> {
+    let request = RecallRequest::validate(session, query, top_k, max_tokens, traversal_depth)?;
+    require_vector_search(backends)?;
+    let by = read_query_vector(backends, path)?;
+    let vector = query_vector::resolve(by, backends.embedder.as_ref(), &backends.embedding).await?;
+    let loaded = load_reader_graph(backends.store.as_ref(), session).await?;
+    let input = VectorInput::Text(Some(Arc::from(vector)));
+    Ok(run_on(backends, &loaded, &request, input, None)
+        .await?
+        .into_output())
 }
 
 /// A text recall (`by` is `None`) or a recall by image or vector.
@@ -308,7 +344,7 @@ async fn run_detailed_by(
     let request =
         RecallRequest::validate_as(session, query, true, top_k, max_tokens, traversal_depth)?;
     let loaded = load_reader_graph(backends.store.as_ref(), session).await?;
-    run_on(backends, &loaded, &request, Some(by), None).await
+    run_on(backends, &loaded, &request, VectorInput::ByVector(by), None).await
 }
 
 /// A recall's arguments, validated and with the defaults applied: every
@@ -404,17 +440,23 @@ pub(crate) async fn run_detailed_on(
     request: &RecallRequest,
     queries: Option<&Mutex<QueryEmbeddingCache>>,
 ) -> Result<CliRecall, CliError> {
-    run_on(backends, loaded, request, None, queries).await
+    run_on(backends, loaded, request, VectorInput::Text(None), queries).await
 }
 
-/// [`run_detailed_on`], optionally searching the vector leg by `by`
-/// (#22 PR 6) instead of the query text's embedding. A recall by image or
-/// vector never touches `queries`: the #14 cache holds text queries only.
+enum VectorInput<'a> {
+    /// Text recall. An exported vector can replace just the embed step.
+    Text(Option<Arc<[f32]>>),
+    /// An image or client vector is the search input rather than the text.
+    ByVector(QueryBy<'a>),
+}
+
+/// [`run_detailed_on`], with either text recall or vector search.
+/// Only a text recall that needs embedding consults the query cache.
 async fn run_on(
     backends: &ResolvedBackends,
     loaded: &LoadedReader,
     request: &RecallRequest,
-    by: Option<QueryBy<'_>>,
+    input: VectorInput<'_>,
     queries: Option<&Mutex<QueryEmbeddingCache>>,
 ) -> Result<CliRecall, CliError> {
     // Scoped so the read guard never reaches an await.
@@ -451,10 +493,11 @@ async fn run_on(
         max_tokens: request.max_tokens,
         traversal_depth: request.traversal_depth,
     };
-    let mut detail = match by {
-        None => {
-            let embedded = match queries {
-                Some(cache) => {
+    let mut detail = match input {
+        VectorInput::Text(saved) => {
+            let embedded = match (saved, queries) {
+                (Some(vector), _) => Ok(Some(vector)),
+                (None, Some(cache)) => {
                     embed_query_cached(
                         cache,
                         vectors,
@@ -464,7 +507,7 @@ async fn run_on(
                     )
                     .await
                 }
-                None => candidates::embed_query(vectors, backends.embedder.as_ref(), query)
+                (None, None) => candidates::embed_query(vectors, backends.embedder.as_ref(), query)
                     .await
                     .map(|vector| vector.map(Arc::from)),
             };
@@ -491,7 +534,7 @@ async fn run_on(
         // #22 PR 6: the vector leg is the point, so no vector search, or a
         // failed vector read, is an error, not a degradation; and nothing
         // is cached (this process's cache is discarded anyway).
-        Some(by) => {
+        VectorInput::ByVector(by) => {
             let vector =
                 query_vector::resolve(by, backends.embedder.as_ref(), &backends.embedding).await?;
             daemon

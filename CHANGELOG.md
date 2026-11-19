@@ -13,6 +13,11 @@
   floor stricter than its calibrated value (#260). For Elastic Jina v3, the
   fallback of 0.50 exceeds the calibrated floor of 0.39 and can exclude hits
   the calibrated floor would admit.
+- `lambo embed` prints query or document vectors and their configured
+  embedding contract without opening a store (#258). It can frame a document
+  with its origin or export one query vector per line as JSON Lines.
+  `lambo recall --query-vector-as-text` replays text recall from an exported
+  query vector and the original query text.
 
 ## 0.13.0 (2026-11-19)
 
