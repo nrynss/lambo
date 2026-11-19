@@ -300,7 +300,17 @@ lambo_recall        query (≤2000 chars, then "…[truncated]"), top_k, hit_cou
                     hits[], canonical_marker, blast_radius_warning,
                     conflict_line, hot_warning, reservation_warning,
                     response_annotations[], warning_count, cold_start,
-                    top_legs{}, confidence{} (when computed)
+                    top_legs{}, confidence{} (when computed),
+                    concept_count, layer_concept_counts{}
+  concept_count     (#257) live concepts in the addressed session's graph
+                    used for the answer; 0 means an empty graph, null means
+                    no graph result (for example, a refused call).
+  layer_concept_counts{}  (#257) session → live concept count for each layer
+                    considered for a merge; null means the layer was
+                    unavailable, while 0 means its graph was empty. {} for
+                    single-session or scoped recalls and refused calls. Both
+                    count fields are additive (v stays 1); older v1 lines may
+                    omit them.
   top_legs{}        (#256) bm25 / vector_cosine → float or null,
                     exact_name_match → bool. The best score each phase-1
                     leg gave ANY candidate of the caller's own session,
@@ -309,8 +319,9 @@ lambo_recall        query (≤2000 chars, then "…[truncated]"), top_k, hit_cou
                     the index's own BM25, never the 1.0 an exact-name match
                     ranks with; exact_name_match says the query was a
                     concept's durable name. Recent leg and expansion not
-                    counted. Always present on a line written since #256.
-                    Additive (v stays 1).
+                    counted. Present on successful lines since #256 and failed
+                    lines since #257; a refusal without a graph result has
+                    both scores null. Additive (v stays 1).
   confidence{}      (#256) value / basis / provisional (true). PROVISIONAL.
                     basis "noisy-or-v0": both legs reported on a text query
                     under a contract with a measured pairwise null median.
