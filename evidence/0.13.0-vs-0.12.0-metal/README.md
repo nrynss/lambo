@@ -28,8 +28,9 @@ reduced to their file names; nothing else in any file is edited.
 
 Both changes are on the recall side.
 
-- Every recall reports `top_legs`, a provisional `confidence` and
-  `layer_top_legs` (#256). The fields are additive.
+- Every recall reports `top_legs` (#256). A recall also reports a provisional
+  `confidence` when one can be computed, and `layer_top_legs` when it merges
+  hits from a layer. The fields are additive.
 - When a dependency question's structural dispatch declines under the graph
   lock, the daemon runs the vector search it had skipped and retries, where
   0.12.0 answered from the keyword leg with a warning (#263).
@@ -41,7 +42,7 @@ The write path is not changed, which the replay below is the check on.
 | Test | 0.12.0 | 0.13.0 | Verdict |
 |---|---:|---:|---|
 | Replay of 330 real writes | 330 applied | 330 applied | PASS, 0 unexpected, matching final store counts |
-| Top-8 recall on the 20 A/B queries | | | identical on 19; the other is a startup-timing artefact (section 2) |
+| Top-8 recall on the 20 A/B queries | | | identical on 19 of 20; the other is not explained from a captured file (section 2) |
 | Sequential recall p50 / p99 | 2.02 / 21.69 ms | 2.02 / 21.66 ms | within 0.1 ms, one run |
 | Sequential `lambo_stats` p50 | 0.43 ms | 0.39 ms | within 0.05 ms, one run |
 | Sequential derive ack p50 / p90 | 0.52 / 0.58 ms | 0.52 / 0.56 ms | within 0.05 ms, one run |
@@ -81,6 +82,13 @@ identical: 13 semantic edges exist only on the 0.12.0 side and 13 only on
 the 0.13.0 side, which is the merge-target difference of earlier gates.
 32 calls differ, all `merge_into_replayed_concept`; 0 are unexpected.
 
+**Limit of that classification.** The harness marks a merge difference as
+expected whenever either side merged into a concept written during the
+replay; it does not compare which target each side chose. Some of the 32
+(call 1, for one) have equal counters on both sides and differ only in merge
+targets, which this file does not carry. So "0 unexpected" rests on that
+rule, and on the matching final counts, not on a per-target check.
+
 ## 2. Sequential latency A/B
 
 **Method:** `scripts/loadtest/mcp_ab.py ab`, two HTTP serves side by side,
@@ -92,13 +100,22 @@ default rate limit; the harness retried one rate-limited request on the
 File: [`sequential-ab-0120-0130.json`](sequential-ab-0120-0130.json).
 
 **One of the 20 queries returned a different top-8 set on the two builds**
-(`recall_topk_jaccard` mean 0.98, where the previous gate read 1.0). It is
-not a build difference. For a few seconds after a serve starts, recall
-carries a "Session inactive" notice that forces one extra hit, and the
-0.13.0 serve started two seconds after the 0.12.0 one, so one early query
-fell inside that window on one side only. Re-run by hand with the 0.13.0
-serve started first and the repeats spaced 2 s apart, the two builds
-returned the same hits on all ten repeats. That re-run has no file here.
+(`recall_topk_jaccard` mean 0.98, where the previous gate read 1.0). The
+file carries the aggregate only, so it does not show which query differed or
+how.
+
+**The cause is not confirmed.** What was observed by hand afterwards:
+
+- On the differing query one side returned a ninth hit carrying a "Session
+  inactive" warning and the other returned eight.
+- The 0.13.0 serve had started two seconds after the 0.12.0 one.
+- With the 0.13.0 serve started first and the repeats spaced 2 s apart, the
+  two builds returned the same hits on all ten repeats.
+
+That is consistent with the warning's presence depending on when each serve
+started and not on the build, but none of it is in a file here, and the
+warning's lifetime was not traced in the source. Treat the 19 of 20 as the
+result and the explanation as a hypothesis.
 
 ## 3. Concurrent agents
 
