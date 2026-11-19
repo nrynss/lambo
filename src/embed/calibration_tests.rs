@@ -744,7 +744,8 @@ fn calibrated_layer_floor_parses_with_default_on() {
 }
 
 /// A floor below the calibrated one, set or switched off, is warned of;
-/// the calibrated floor, a higher one and a contract without a row are not.
+/// the calibrated floor, an explicitly set higher floor and a contract
+/// without a row are not.
 #[test]
 fn a_floor_below_the_calibrated_one_is_warned_of() {
     let row = &BUILTIN[0];
@@ -798,6 +799,50 @@ fn a_floor_below_the_calibrated_one_is_warned_of() {
     assert_eq!(layer_floor_warning("general", Some(0.72), &on, &eg2), None);
     assert_eq!(layer_floor_warning("general", Some(0.8), &off, &eg2), None);
     assert_eq!(layer_floor_warning("general", Some(0.5), &on, &bge), None);
+}
+
+#[test]
+fn a_stricter_fallback_floor_is_warned_of_when_calibration_is_off() {
+    let jina = EmbeddingContract {
+        kind: "elastic".into(),
+        model: Some(".jina-embeddings-v3".into()),
+        dim: 1024,
+    };
+    let on = crate::Config::default();
+    let floor_off = crate::Config {
+        calibrated_layer_floor: false,
+        ..crate::Config::default()
+    };
+    let mode_off = crate::Config {
+        calibration: CalibrationMode::Off,
+        ..crate::Config::default()
+    };
+
+    for (config, setting) in [
+        (&floor_off, "calibrated_layer_floor = false"),
+        (&mode_off, "calibration = \"off\""),
+    ] {
+        let warning = layer_floor_warning("general", None, config, &jina)
+            .expect("0.50 fallback is above Jina's 0.39 floor");
+        assert!(
+            warning.contains(&format!("[embedder] {setting}")),
+            "{warning}"
+        );
+        assert!(warning.contains("floor 0.50"), "{warning}");
+        assert!(warning.contains("above the 0.39"), "{warning}");
+        assert!(warning.contains("rejects layer hits"), "{warning}");
+        assert!(
+            warning.contains("[[serve.layer]] min_similarity"),
+            "{warning}"
+        );
+        assert_eq!(
+            layer_floor_warning("general", Some(0.5), config, &jina),
+            None
+        );
+    }
+
+    assert_eq!(layer_floor_warning("general", None, &on, &jina), None);
+    assert_eq!(layer_floor_warning("general", Some(0.5), &on, &jina), None);
 }
 
 /// #233: an `elastic` contract is never the BGE-M3 reference, even when

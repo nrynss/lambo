@@ -1293,8 +1293,8 @@ impl SessionRegistry {
             server = server.serving_a_layer(attacher.layers.is_layer(mem.session().as_str()));
             let stack = attacher.layers.stack(mem.session().as_str());
             if !stack.is_empty() {
-                // #87: a floor below the contract's calibrated one is the
-                // user's choice, but likely a stale one; say so.
+                // Warn when the layer floor is too permissive or when the
+                // uncalibrated fallback makes it stricter (#87, #260).
                 for l in stack {
                     if let Some(warning) = crate::embed::calibration::layer_floor_warning(
                         &l.session,

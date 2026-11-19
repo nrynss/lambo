@@ -466,11 +466,10 @@ pub(crate) fn resolve_layer_floor(
     })
 }
 
-/// Why a layer's effective floor sits below its contract's calibrated one,
-/// if it does: a floor the user set lower (the old documentation's example
-/// set 0.50), or the calibration switched off. `None` when the floor is the
-/// calibrated one or higher, or the contract has no row. A serve logs this
-/// when it builds a layered session's server.
+/// Warn when a layer's effective floor is below its calibrated floor, or when
+/// disabling calibration raises an unset floor above the calibrated value.
+/// An explicit higher floor is intentional. A serve logs this warning when
+/// it builds a layered session's server.
 pub fn layer_floor_warning(
     layer: &str,
     configured: Option<f64>,
@@ -479,19 +478,26 @@ pub fn layer_floor_warning(
 ) -> Option<String> {
     let row = lookup(contract)?;
     let floor = resolve_layer_floor(configured, config, contract);
+    let disabled_setting = match config.calibration {
+        CalibrationMode::Off => "calibration = \"off\"",
+        CalibrationMode::Builtin => "calibrated_layer_floor = false",
+    };
     if floor >= row.layer_min_similarity {
-        return None;
+        return (configured.is_none() && floor > row.layer_min_similarity).then(|| {
+            format!(
+                "layer {layer:?} keeps BGE-M3's floor {floor:.2}: [embedder] {disabled_setting}, \
+                 above the {} calibrated for this embedding contract, so it rejects layer hits \
+                 the calibrated floor would admit. Turn the calibration back on or set \
+                 `[[serve.layer]] min_similarity` to choose a floor explicitly (evidence: {})",
+                row.layer_min_similarity, row.evidence,
+            )
+        });
     }
     let why = match configured {
         Some(set) => format!("[[serve.layer]] {layer:?} sets min_similarity = {set}"),
-        None => format!(
-            "layer {layer:?} keeps BGE-M3's floor {floor}: [embedder] {}",
-            if config.calibration == CalibrationMode::Off {
-                "calibration = \"off\""
-            } else {
-                "calibrated_layer_floor = false"
-            }
-        ),
+        None => {
+            format!("layer {layer:?} keeps BGE-M3's floor {floor}: [embedder] {disabled_setting}")
+        }
     };
     let switched_off =
         !(config.calibration == CalibrationMode::Builtin && config.calibrated_layer_floor);
