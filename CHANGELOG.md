@@ -9,6 +9,10 @@
 - The MCP reference explains which lowercase `concept_type` values to use
   when a client rejects an enum argument before sending it to the server
   (#250).
+- `lambo serve` warns when disabling layer floor calibration makes an unset
+  floor stricter than its calibrated value (#260). For Elastic Jina v3, the
+  fallback of 0.50 exceeds the calibrated floor of 0.39 and can exclude hits
+  the calibrated floor would admit.
 
 ## 0.13.0 (2026-11-19)
 
