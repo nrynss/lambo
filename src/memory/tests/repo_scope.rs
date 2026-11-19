@@ -861,7 +861,9 @@ async fn retract_and_inspect_refuse_ambiguous_scoped_text() {
     )
     .unwrap();
     let only = path_id(&mem, "repo-a", "NOTES.md");
-    assert!(matches!(resolve_focus(&mem.graph.read(), "NOTES.md"), Focus::Exact(n) if n == only));
+    assert!(
+        matches!(resolve_focus(&mem.graph.read(), "NOTES.md"), Focus::Exact { id, .. } if id == only)
+    );
     mem.retract("NOTES.md", DryRun::No).await.unwrap();
     assert!(mem.graph.read().node(only).is_none());
     mem.close().await.unwrap();

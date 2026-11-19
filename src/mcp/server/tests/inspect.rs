@@ -67,6 +67,56 @@ async fn inspect_finds_a_concept_and_reports_a_miss() {
     s.mem.close().await.expect("close");
 }
 
+#[tokio::test]
+async fn inspect_returns_the_concept_type_and_lookup_that_resolved_its_focus() {
+    let s = server("mcp-inspect-resolution").await;
+    let id = derive_created(
+        &s,
+        "agent-a",
+        json!([{
+            "content": "A writer keeps its lease until it stops",
+            "concept_type": "constraint",
+            "name": "writer lease rule"
+        }]),
+    )
+    .await
+    .remove(0);
+
+    let compact_id = id.replace('-', "");
+    for (input, kind) in [
+        ("  WRITER LEASE RULE  ", "name"),
+        (id.as_str(), "uuid"),
+        (&id[..8], "short_id"),
+        (&compact_id[..12], "short_id"),
+        ("a writer keeps its lease until it stops", "text"),
+        ("keeps its lease", "fuzzy"),
+    ] {
+        let hit = call(
+            &s,
+            "lambo_inspect",
+            json!({"agent_id": "agent-a", "focus": input}),
+        )
+        .await;
+        assert_eq!(hit.is_error, Some(false), "{hit:?}");
+        let result = hit.structured_content.unwrap();
+        assert_eq!(result["focus"]["node_id"], id);
+        assert_eq!(result["focus"]["concept_type"], "Constraint");
+        assert_eq!(
+            result["focus"]["resolution"],
+            json!({"kind": kind, "value": input.trim()})
+        );
+        if kind == "fuzzy" {
+            let legacy_note = result["resolution"].as_str().unwrap();
+            assert!(legacy_note.contains("resolved 'keeps its lease'"));
+            assert_eq!(result["warnings"][0], legacy_note);
+            assert!(result["view"].as_str().unwrap().starts_with(legacy_note));
+        } else {
+            assert!(result["resolution"].is_null());
+        }
+    }
+    s.mem.close().await.expect("close");
+}
+
 /// **R1/T82-7 pinned.** An ambiguous focus is refused with the candidates
 /// named, rather than resolved to an arbitrary one of them whose `node_id`
 /// then flows into `lambo_reserve` and into edits.

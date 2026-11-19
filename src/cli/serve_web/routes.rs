@@ -318,7 +318,7 @@ pub(super) async fn api_inspect(
     let found = {
         let g = view.reader.graph.read();
         match resolve_focus(&g, params.focus.trim()) {
-            Focus::Exact(id) => match g.node(id) {
+            Focus::Exact { id, .. } => match g.node(id) {
                 Some(Node::Concept(c)) => {
                     let blast = blast_radii(&g).get(&id).copied().unwrap_or(0);
                     let (dependents, truncated) = structural_dependents(&g, id);

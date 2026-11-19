@@ -94,7 +94,7 @@ pub async fn run_with_settings(
     let (id, note, view, contradicted) = {
         let g = loaded.graph.read();
         match resolve_focus(&g, focus.trim()) {
-            Focus::Exact(id) => (
+            Focus::Exact { id, .. } => (
                 id,
                 None,
                 render_neighbourhood_parts(&g, id, depth),
@@ -145,7 +145,7 @@ pub async fn run_with_settings(
 /// The refusal for a focus that resolved to no single concept.
 fn refusal(resolved: Focus, focus: &str, session: &str) -> CliError {
     match resolved {
-        Focus::Exact(_) | Focus::Fuzzy { .. } => {
+        Focus::Exact { .. } | Focus::Fuzzy { .. } => {
             unreachable!("exact and fuzzy foci resolve before a refusal is built")
         }
         Focus::Ambiguous {

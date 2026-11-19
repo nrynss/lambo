@@ -236,8 +236,13 @@ pub(crate) fn render_neighbourhood_parts(
             })
         })
         .collect();
+    let concept_type = match g.node(target) {
+        Some(Node::Concept(c)) => Some(c.concept_type),
+        _ => None,
+    };
     let structured = json!({
         "node_id": target.0.to_string(),
+        "concept_type": concept_type,
         "label": label(target),
         "blast_radius": radii.get(&target).copied().unwrap_or(0),
         "dependents": dependents_json,

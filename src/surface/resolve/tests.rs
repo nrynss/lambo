@@ -285,7 +285,7 @@ fn inspect_and_writes_share_the_short_id_leg() {
         ConceptType::Entity,
     );
     match resolve_focus(&g, "abcdef01") {
-        Focus::Exact(id) => assert_eq!(id, a),
+        Focus::Exact { id, .. } => assert_eq!(id, a),
         other => panic!("{other:?}"),
     }
     assert!(matches!(

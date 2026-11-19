@@ -108,7 +108,7 @@ Apply acquires the writer lease, reloads the session, checks the epoch and commi
 
 1. Re-run the same preview. A successful repeat of the same migration or mapping proposes no new mutations.
 2. Restart the new writer with the same store and session configuration.
-3. Inspect the target by its durable name. Check that recall finds it and that a dependency question using the name reaches its dependents.
+3. Inspect the target by its durable name. In the MCP result, check that `structuredContent.focus.resolution.kind` is `"name"` and that `focus.node_id` is the intended target. Check that recall finds it and that a dependency question using the name reaches its dependents.
 4. Inspect a retired alias by its original full ID or unique eight-hex ID. Its archived text, type, previous status, replacement ID and retirement metadata remain available; archived vectors are omitted from the inspection response.
 5. Have a client cite the name in a new `depends_on`, wait for its receipt to report applied, then inspect the target's dependents. See the [MCP naming example](/mcp#lambo_derive).
 
