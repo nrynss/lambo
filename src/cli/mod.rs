@@ -11,6 +11,7 @@ pub mod caps;
 pub mod demo;
 pub mod derive;
 pub mod derive_image;
+pub mod embed;
 pub mod erase_session;
 pub mod inspect;
 pub mod names;

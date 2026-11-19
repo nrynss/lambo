@@ -4,6 +4,7 @@ use std::process::ExitCode;
 use clap::{ArgAction, CommandFactory, Parser, Subcommand};
 use lambo::cli::{CliError, ConceptKind};
 use lambo::mcp::{PinnedSessions, ServeOptions, Transport};
+use lambo::resolve::{resolve_embedder_only, ResolvedEmbedder};
 use lambo::store::{GraphStore, StoreKind};
 use lambo::{
     resolve_backends, resolve_from_config_path, resolve_store_only, LamboFile, ResolvedBackends,
@@ -214,13 +215,32 @@ enum Commands {
             help = "The --image file's MIME type (image/png, image/jpeg, image/webp). Default: read from the file; a mismatch is refused."
         )]
         mime: Option<String>,
-        /// Recall what is close to a vector: a JSON file {"values": [...], "contract": {"kind", "model", "dim"}} in this session's space. Needs [embedder] accept_client_vectors = true.
+        /// Recall what is close to a vector in this session's space. For exact text replay, also pass --query-vector-as-text and the original --query.
         #[arg(
             long = "query-vector-json",
             value_name = "PATH",
-            help = "Recall what is close to a vector: a JSON file {\"values\": [...], \"contract\": {\"kind\", \"model\", \"dim\"}} in this session's space. Needs [embedder] accept_client_vectors = true."
+            help = "Recall what is close to a vector: a JSON file {\"values\": [...], \"contract\": {\"kind\", \"model\", \"dim\"}} in this session's space. Needs [embedder] accept_client_vectors = true. For exact text replay, also pass --query-vector-as-text and the original --query."
         )]
         query_vector_json: Option<PathBuf>,
+        /// Replay a text recall with the saved query-role vector. Requires the original --query.
+        #[arg(long, requires_all = ["query", "query_vector_json"])]
+        query_vector_as_text: bool,
+    },
+    /// Print text embeddings as JSON using the configured embedder, without opening a store.
+    #[command(group(clap::ArgGroup::new("embed_input").required(true).args(["query", "document", "queries_file"])))]
+    Embed {
+        /// Embed text in the recall query role.
+        #[arg(long, value_name = "TEXT")]
+        query: Option<String>,
+        /// Embed text in the document role.
+        #[arg(long, value_name = "TEXT")]
+        document: Option<String>,
+        /// Frame --document with its original interaction text, as hybrid derive does.
+        #[arg(long, requires = "document", value_name = "TEXT")]
+        origin: Option<String>,
+        /// Embed one query per UTF-8 line and print one JSON object per line.
+        #[arg(long, value_name = "PATH")]
+        queries_file: Option<PathBuf>,
     },
     /// List the session's canonical memories — concepts that earned Canonical status through the audited transition path.
     Saints {
@@ -972,6 +992,7 @@ impl Commands {
             Self::ServeWeb { .. } => "serve-web",
             Self::Demo { .. } => "demo",
             Self::Recall { .. } => "recall",
+            Self::Embed { .. } => "embed",
             Self::Saints { .. } => "saints",
             Self::Inspect { .. } => "inspect",
             Self::Stats { .. } => "stats",
@@ -1049,6 +1070,7 @@ enum Resolved {
     Split(Box<lambo::resolve::SplitIo>),
     Verify(Box<lambo::resolve::VerifyIo>),
     Full(Box<ResolvedBackends>),
+    EmbedderOnly(ResolvedEmbedder),
     StoreOnly {
         store: Box<dyn GraphStore>,
         kind: StoreKind,
@@ -1072,6 +1094,11 @@ fn resolve_for_command(
     config: Option<&std::path::Path>,
     loaded: Option<LamboFile>,
 ) -> Result<Resolved, String> {
+    if matches!(cmd, Commands::Embed { .. }) {
+        return resolve_embedder_only(config)
+            .map(Resolved::EmbedderOnly)
+            .map_err(|e| e.to_string());
+    }
     if let Commands::Session {
         action:
             SessionAction::Split {
@@ -1561,6 +1588,14 @@ fn run_async(
     name: &str,
     fut: impl std::future::Future<Output = Result<String, CliError>>,
 ) -> ExitCode {
+    run_async_result(name, fut, |out| emit_stdout(&out))
+}
+
+fn run_async_result<T>(
+    name: &str,
+    fut: impl std::future::Future<Output = Result<T, CliError>>,
+    on_success: impl FnOnce(T),
+) -> ExitCode {
     let runtime = match tokio::runtime::Runtime::new() {
         Ok(r) => r,
         Err(e) => {
@@ -1573,7 +1608,7 @@ fn run_async(
     runtime.shutdown_background();
     match result {
         Ok(out) => {
-            emit_stdout(&out);
+            on_success(out);
             ExitCode::SUCCESS
         }
         Err(e) => {
@@ -1796,6 +1831,8 @@ fn main() -> ExitCode {
                 }
             ) {
                 "failed to resolve verify inputs"
+            } else if matches!(cmd, Commands::Embed { .. }) {
+                "failed to resolve embedder"
             } else if cmd.needs_embedder() {
                 "failed to build backends"
             } else {
@@ -1809,6 +1846,7 @@ fn main() -> ExitCode {
         match &mut resolved {
             Resolved::Full(backends) => backends.allow_embedding_mismatch = true,
             Resolved::StoreOnly { .. }
+            | Resolved::EmbedderOnly(_)
             | Resolved::Classification(_)
             | Resolved::Split(_)
             | Resolved::Verify(_) => {
@@ -2052,6 +2090,7 @@ fn main() -> ExitCode {
                 image,
                 mime,
                 query_vector_json,
+                query_vector_as_text,
             },
             Resolved::Full(backends),
         ) => {
@@ -2064,19 +2103,63 @@ fn main() -> ExitCode {
             // #256: the context block goes to standard output, unchanged;
             // the score report goes to standard error.
             run_async("recall", async {
-                let out = lambo::cli::recall::run_reported(
-                    &backends,
-                    &session,
-                    &query,
-                    &by,
-                    top_k,
-                    max_tokens,
-                    traversal_depth,
-                )
-                .await?;
+                let out = if query_vector_as_text {
+                    lambo::cli::recall::run_reported_with_text_vector(
+                        &backends,
+                        &session,
+                        &query,
+                        by.query_vector_json
+                            .as_deref()
+                            .expect("clap requires a vector file"),
+                        top_k,
+                        max_tokens,
+                        traversal_depth,
+                    )
+                    .await?
+                } else {
+                    lambo::cli::recall::run_reported(
+                        &backends,
+                        &session,
+                        &query,
+                        &by,
+                        top_k,
+                        max_tokens,
+                        traversal_depth,
+                    )
+                    .await?
+                };
                 eprintln!("{}", out.scores);
                 Ok(out.context)
             })
+        }
+        (
+            Commands::Embed {
+                query,
+                document,
+                origin,
+                queries_file,
+            },
+            Resolved::EmbedderOnly(resolved),
+        ) => {
+            use lambo::cli::embed::{self, Input};
+            let input = match (
+                query.as_deref(),
+                document.as_deref(),
+                queries_file.as_deref(),
+            ) {
+                (Some(text), None, None) => Input::Query(text),
+                (None, Some(text), None) => Input::Document {
+                    text,
+                    origin: origin.as_deref(),
+                },
+                (None, None, Some(path)) => Input::QueriesFile(path),
+                _ => unreachable!("clap requires one embedding input"),
+            };
+            run_async_result(
+                "embed",
+                async { embed::run(&resolved, input, &mut std::io::stdout().lock()).await },
+                |()| {},
+            )
         }
         (Commands::Saints { session }, Resolved::StoreOnly { store, .. }) => {
             run_async("saints", lambo::cli::saints::run(store.as_ref(), &session))

@@ -361,9 +361,18 @@ fn apply_contract_fusion_default(
     config.recall_fusion = scoped;
 }
 
-/// The embedding contract a resolved embedder stamps and is checked
-/// against. Shared by [`resolve_backends`] and [`resolve_verify_io`].
-fn embedding_contract(embedder_cfg: &EmbedderConfig, embedder: &dyn Embedder) -> EmbeddingContract {
+/// The embedding contract a resolved embedder stamps and is checked against.
+fn embedding_contract(
+    embedder_cfg: &EmbedderConfig,
+    embedder: &dyn Embedder,
+) -> Result<EmbeddingContract, LamboError> {
+    let dim = embedder.dimensions();
+    if dim != embedder_cfg.dim {
+        return Err(LamboError::Config(format!(
+            "embedder reported dim {dim} but config requested {}",
+            embedder_cfg.dim
+        )));
+    }
     // K2 task 3: the candle adapter stamps its served-artifact identity
     // (source revision + weight sha256 prefix) rather than a raw model string,
     // so a kind/dim match cannot hide a swap between two quantizations. bge_m3
@@ -381,11 +390,35 @@ fn embedding_contract(embedder_cfg: &EmbedderConfig, embedder: &dyn Embedder) ->
         crate::embed::EmbedderKind::Elastic => crate::embed::elastic_identity(embedder),
         _ => embedder_cfg.llama_model.clone().filter(|s| !s.is_empty()),
     };
-    EmbeddingContract {
+    Ok(EmbeddingContract {
         kind: embedder_cfg.kind.to_string(),
         model,
-        dim: embedder.dimensions(),
-    }
+        dim,
+    })
+}
+
+/// An embedder and its contract, resolved without constructing a store.
+#[non_exhaustive]
+pub struct ResolvedEmbedder {
+    pub embedder: Box<dyn Embedder>,
+    pub embedding: EmbeddingContract,
+}
+
+fn resolve_embedder(config: &EmbedderConfig) -> Result<ResolvedEmbedder, LamboError> {
+    let embedder = build_embedder(config.clone()).map_err(|e| LamboError::Config(e.to_string()))?;
+    let embedding = embedding_contract(config, embedder.as_ref())?;
+    Ok(ResolvedEmbedder {
+        embedder,
+        embedding,
+    })
+}
+
+/// Load the usual config and environment overrides, then resolve only the embedder.
+pub fn resolve_embedder_only(
+    explicit: Option<&std::path::Path>,
+) -> Result<ResolvedEmbedder, LamboError> {
+    let file = LamboFile::load_resolved(explicit)?;
+    resolve_embedder(&file.embedder)
 }
 
 /// Build store + embedder from a resolved process file and enforce store×embedder dim match.
@@ -435,17 +468,13 @@ pub fn resolve_backends(file: LamboFile) -> Result<ResolvedBackends, LamboError>
     // `MemoryBuilder::build_attach` once the lease is won). Every check below
     // reads `dimensions()` and the identity, neither of which needs the
     // loaded model, so compatibility is still decided here, at resolve.
-    let embedder =
-        build_embedder(embedder_cfg.clone()).map_err(|e| LamboError::Config(e.to_string()))?;
+    let ResolvedEmbedder {
+        embedder,
+        embedding,
+    } = resolve_embedder(&embedder_cfg)?;
     check_vector_search_contract(store.as_ref(), store_cfg.kind)?;
 
-    let embed_dim = embedder.dimensions();
-    if embed_dim != embedder_cfg.dim {
-        return Err(LamboError::Config(format!(
-            "embedder reported dim {embed_dim} but config requested {}",
-            embedder_cfg.dim
-        )));
-    }
+    let embed_dim = embedding.dim;
     // F-R1-2: the pin is the one width authority a width-agnostic store can carry that
     // the embedder did not supply, so a disagreement between them is a real, reachable
     // resolution failure — unlike `check_vector_compatibility` below, which compares
@@ -474,7 +503,6 @@ pub fn resolve_backends(file: LamboFile) -> Result<ResolvedBackends, LamboError>
     }
     check_vector_compatibility(store.vector_dimensions(), embed_dim)?;
 
-    let embedding = embedding_contract(&embedder_cfg, embedder.as_ref());
     // #221: an unmeasured contract recalls on BGE-M3-shaped constants over a
     // foreign scale. Warn once here, at resolve, so every full-resolve
     // process (`serve` startup included) says so — not per recall.
@@ -781,16 +809,10 @@ pub fn resolve_verify_io(
     file.serve.validate()?;
     let source = resolve_classification_source(database, snapshot)?;
     let split = VerifySplitOutput::open(split_database)?;
-    let embedder =
-        build_embedder(file.embedder.clone()).map_err(|e| LamboError::Config(e.to_string()))?;
-    if embedder.dimensions() != file.embedder.dim {
-        return Err(LamboError::Config(format!(
-            "embedder reported dim {} but config requested {}",
-            embedder.dimensions(),
-            file.embedder.dim
-        )));
-    }
-    let embedding = embedding_contract(&file.embedder, embedder.as_ref());
+    let ResolvedEmbedder {
+        embedder,
+        embedding,
+    } = resolve_embedder(&file.embedder)?;
     apply_contract_fusion_default(
         &mut process,
         fusion_unset,
