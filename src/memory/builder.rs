@@ -31,6 +31,7 @@ use chrono::Utc;
 use parking_lot::{Mutex as PlMutex, RwLock};
 use tokio::sync::RwLock as AsyncRwLock;
 
+use super::reads::{concept_stats, expects_text_vectors};
 use super::{final_flush, register_session, spawn_lease_heartbeat, LeaseLostSignal, Memory};
 use crate::canon::CanonizationTask;
 use crate::config::{Config, ScoringWeights};
@@ -810,6 +811,18 @@ impl MemoryBuilder {
                 return Err(startup_error);
             }
         };
+
+        if existing && !self.reembed_mode && expects_text_vectors(&config, store.as_ref()) {
+            if let Some(gap) = concept_stats(&graph, clock(), true).2 {
+                tracing::warn!(
+                    session = %session,
+                    missing_vectors = gap.count,
+                    oldest_age_secs = gap.oldest_age_secs,
+                    "{}",
+                    gap.warning()
+                );
+            }
+        }
 
         let graph = Arc::new(RwLock::new(graph));
         let index = Arc::new(RwLock::new(index));

@@ -113,7 +113,7 @@ async fn stats_json_renders_the_gc_reading_it_is_given() {
         last_gc_epoch: 987_654_321,
         last_sweep: None,
     };
-    let payload = s.stats_json_with_gc(&fabricated);
+    let payload = s.stats_json_from(&s.mem.stats(), &fabricated);
     assert_eq!(payload["gc"], gc_stats_json(&fabricated));
     s.mem.close().await.expect("close");
 }
@@ -424,6 +424,103 @@ async fn k2_stats_payload_reports_embedding_coverage() {
         "canonical derives do not embed; the counter must SAY so, not hide it: {payload}"
     );
     s.mem.close().await.expect("close");
+}
+
+#[cfg(feature = "store-sqlite")]
+#[tokio::test]
+async fn hybrid_stats_and_heartbeat_report_missing_vectors_until_backfilled() {
+    use crate::store::SqliteStore;
+    use crate::types::MatchStrategy;
+    use std::sync::atomic::{AtomicI64, Ordering};
+
+    let store: Arc<dyn GraphStore> =
+        Arc::new(SqliteStore::connect("sqlite::memory:").expect("connect"));
+    store.init_schema().await.expect("provision");
+    let embedder: Arc<dyn Embedder> = Arc::new(FixtureEmbedder::new());
+
+    let seconds = Arc::new(AtomicI64::new(1_760_000_000));
+    let clock = {
+        let seconds = seconds.clone();
+        Arc::new(move || DateTime::from_timestamp(seconds.load(Ordering::Relaxed), 0).unwrap())
+    };
+    let open = |strategy| {
+        Memory::builder()
+            .session("missing-vectors")
+            .agent("agent-a")
+            .match_strategy(strategy)
+            .clock(clock.clone())
+            .store(store.clone())
+            .embedder(embedder.clone())
+            .embedding_contract(fixture_contract())
+            .build()
+    };
+    let canonical = LamboServer::new(Arc::new(open(MatchStrategy::Canonical).await.unwrap()));
+    let derive = |content| {
+        call(
+            &canonical,
+            "lambo_derive",
+            json!({
+                "agent_id": "agent-a",
+                "event_time": "2024-01-01T00:00:00Z",
+                "concepts": [{"content": content, "concept_type": "entity"}],
+            }),
+        )
+    };
+    assert_eq!(derive("database schema").await.is_error, Some(false));
+    seconds.fetch_add(150, Ordering::Relaxed);
+    assert_eq!(derive("public API contract").await.is_error, Some(false));
+    seconds.fetch_add(59, Ordering::Relaxed);
+    assert_eq!(canonical.mem.stats().missing_vectors, None);
+    canonical.mem.close().await.expect("close canonical");
+
+    let hybrid = LamboServer::new(Arc::new(open(MatchStrategy::Hybrid).await.unwrap()));
+    let read_stats = || call(&hybrid, "lambo_stats", json!({"agent_id": "agent-a"}));
+    let reply = read_stats().await;
+    let payload = reply.structured_content.unwrap();
+    let gap = &payload["missing_vectors"];
+    assert_eq!(
+        gap["count"], 1,
+        "a recent concept is inside the grace period"
+    );
+    assert_eq!(gap["oldest_age_secs"], 209);
+    assert_eq!(payload["embedded_concepts"], 0);
+    assert_eq!(payload["concept_count"], 2);
+    assert_eq!(payload["degraded"], false);
+    let warning = gap["warning"].as_str().expect("repair warning");
+    assert!(
+        warning.contains("lambo re-embed --missing-only"),
+        "{warning}"
+    );
+    assert_eq!(payload["warnings"], json!([warning]));
+    assert!(payload["summary"].as_str().unwrap().contains(warning));
+    assert_eq!(&hybrid.heartbeat_line()["stats"]["missing_vectors"], gap);
+
+    seconds.fetch_add(1, Ordering::Relaxed);
+    assert_eq!(
+        hybrid.heartbeat_line()["stats"]["missing_vectors"]["count"],
+        2,
+        "the second concept is counted at 60 seconds"
+    );
+    {
+        let mut graph = hybrid.mem.graph().write();
+        let embedder = FixtureEmbedder::new();
+        let updates = graph
+            .concepts()
+            .map(|concept| (concept.id, embedder.embed_sync(&concept.content)))
+            .collect();
+        assert_eq!(
+            graph.embed_missing(updates, &fixture_contract()).unwrap(),
+            2
+        );
+    }
+    let payload = read_stats().await.structured_content.unwrap();
+    assert_eq!(payload["embedded_concepts"], 2);
+    assert!(payload.get("missing_vectors").is_none(), "{payload}");
+    assert_eq!(payload["warnings"], json!([]));
+    assert!(hybrid.heartbeat_line()["stats"]
+        .get("missing_vectors")
+        .is_none());
+    hybrid.mem.close().await.expect("close hybrid");
 }
 
 /// #32 PR 3: a session whose probe comes from a process-wide

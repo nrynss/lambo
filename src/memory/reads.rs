@@ -20,20 +20,59 @@
 ))]
 use std::time::Duration;
 
-use chrono::Utc;
+use chrono::{DateTime, TimeDelta, Utc};
 use tokio::sync::broadcast;
 
-use super::{CanonicalMemory, GcStats, GcSweepSummary, Memory, MemoryStats};
+use super::{CanonicalMemory, GcStats, GcSweepSummary, Memory, MemoryStats, MissingVectors};
+use crate::config::Config;
 use crate::daemon::RecallPipeline;
+use crate::graph::Graph;
 use crate::recall::cache::SharedRecallCache;
 use crate::recall::format;
 use crate::recall::query_cache;
 use crate::recall::query_vector::{self, QueryBy};
 use crate::store::vector_source::VectorCandidates;
+use crate::store::{Capabilities, GraphStore};
 use crate::types::{
-    tie_break_by_key, CanonizationStatus, DaemonEvent, LamboError, NodeId, RecallQuery,
-    RecallResult,
+    tie_break_by_key, CanonizationStatus, DaemonEvent, LamboError, MatchStrategy, NodeId,
+    RecallQuery, RecallResult,
 };
+
+// Allow twice the hybrid I/O budget for fresh writes before advising repair.
+const MISSING_VECTOR_GRACE: TimeDelta = TimeDelta::seconds(60);
+
+pub(super) fn expects_text_vectors(config: &Config, store: &dyn GraphStore) -> bool {
+    config.match_strategy == MatchStrategy::Hybrid
+        && store.capabilities().contains(Capabilities::VECTOR_SEARCH)
+}
+
+pub(super) fn concept_stats(
+    graph: &Graph,
+    now: DateTime<Utc>,
+    expect_vectors: bool,
+) -> (usize, usize, Option<MissingVectors>) {
+    let mut canonical = 0;
+    let mut embedded = 0;
+    let mut missing = 0;
+    let mut oldest_age_secs = 0;
+    for concept in graph.concepts() {
+        canonical += usize::from(concept.canonization_status == CanonizationStatus::Canonical);
+        if concept.embedding.is_some() {
+            embedded += 1;
+        } else if expect_vectors && concept.embedding_source.is_none() {
+            let age = now - concept.created_at;
+            if age >= MISSING_VECTOR_GRACE {
+                missing += 1;
+                oldest_age_secs = oldest_age_secs.max(age.num_seconds() as u64);
+            }
+        }
+    }
+    let gap = (missing > 0).then_some(MissingVectors {
+        count: missing,
+        oldest_age_secs,
+    });
+    (canonical, embedded, gap)
+}
 
 impl Memory {
     /// Three-phase recall (spec §8), rendered as the T5.3 context block.
@@ -307,11 +346,11 @@ impl Memory {
         // `log_depth + flush_depth` never under-reports what is not durable.
         let flush = self.flush.stats();
         let concept_count = g.concept_count();
-        let canonical_count = g
-            .concepts()
-            .filter(|c| c.canonization_status == CanonizationStatus::Canonical)
-            .count();
-        let embedded_concepts = g.concepts().filter(|c| c.embedding.is_some()).count();
+        let (canonical_count, embedded_concepts, missing_vectors) = concept_stats(
+            &g,
+            self.now(),
+            expects_text_vectors(&self.config, self.store.as_ref()),
+        );
         let stats = MemoryStats {
             session: self.session.clone(),
             agent: self.agent.clone(),
@@ -325,6 +364,7 @@ impl Memory {
             concept_count,
             canonical_count,
             embedded_concepts,
+            missing_vectors,
             epoch: g.epoch(),
             daemon_cycles: self.daemon.cycles(),
             canonization_cycles: self.canon.cycles(),

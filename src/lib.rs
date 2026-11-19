@@ -125,7 +125,7 @@ pub use embed::{near_far_contract, FixtureEmbedder, FAR, NEAR_A, NEAR_B, NEAR_PA
 pub use graph::Graph;
 pub use memory::{
     CanonicalMemory, DryRun, GcStats, GcSweepSummary, ImpactReport, LayerCopy, LayerRef,
-    LayerTopLegs, LayeredHit, LayeredRecall, Memory, MemoryBuilder, MemoryStats,
+    LayerTopLegs, LayeredHit, LayeredRecall, Memory, MemoryBuilder, MemoryStats, MissingVectors,
 };
 pub use recall::layered::{DEFAULT_LAYER_MIN_SIMILARITY, DEFAULT_LAYER_WEIGHT};
 

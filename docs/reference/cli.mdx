@@ -224,6 +224,14 @@ note: flush_lag / log_depth / daemon_cycles / canonization_cycles are writer-onl
 
 For flush lag and write-log depth, ask the writer through the `lambo_stats` MCP tool instead.
 
+Hybrid writers on vector-search stores warn at attach when text concepts have been missing vectors for at least 60 seconds. Check the live `lambo_stats` MCP result or configure `--ledger-heartbeat` to catch gaps that develop during a serve. Stop the writer for the affected session, then run the repair with the same store and embedder configuration.
+
+```bash
+lambo re-embed --missing-only --session <id> --agent <id>
+```
+
+Restart the writer and check `lambo_stats` again. The repair fills missing text vectors in the existing embedding space. To restore a missing image vector, re-derive the image.
+
 ## Write commands
 
 Write commands acquire the session's writer lease. If a `lambo serve` process already owns the session, the write is refused and names the holder, so a command line write never becomes a silent second writer.

@@ -375,6 +375,9 @@ lambo_stats         (no extra facts — the numbers are in the heartbeat)
  ledger_dropped_channel_full, ledger_dropped_write_failed,
  ledger_queued_lines }}
 
+// stats.missing_vectors is present for a persistent text vector gap:
+// { "count": 35, "oldest_age_secs": 1209600, "warning": "… re-embed --missing-only …" }
+
 // kind: "completion" (J4) — one background write's durable lifecycle.
 // `receipt` joins it back to the derive/record_action `call` line that acked
 // it. The two applied states carry the metric-2 fact set; the other three

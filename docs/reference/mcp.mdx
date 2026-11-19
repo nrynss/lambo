@@ -651,6 +651,8 @@ List the session's canonical memories, which are the concepts Lambo has promoted
 
 Report session health: flush lag, write-behind log depth, background write queue depth, node, edge, and concept counts, canonization progress, and whether the session is degraded. It is also where you ask what happened to a write.
 
+**`missing_vectors`** appears when a hybrid writer on a vector-search store has text concepts that have been without a vector for at least 60 seconds since Lambo recorded them. It contains `count`, `oldest_age_secs`, and a repair `warning`. The same warning appears in the tool's text and `warnings` array. Writer attach logs the warning for restored gaps, and each ledger heartbeat includes the same object while a gap remains. `embedded_concepts` still counts all concepts carrying a vector. The warning excludes image concepts, which need to be re-derived from their original image, and leaves the durability indicator `degraded` independent.
+
 | Argument | Type | Required | Notes |
 |---|---|---|---|
 | `agent_id` | string | Yes | |
