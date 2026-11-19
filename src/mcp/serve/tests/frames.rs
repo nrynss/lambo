@@ -753,6 +753,46 @@ mod tool_path {
     type Writer = Box<dyn tokio::io::AsyncWrite + Unpin + Send>;
     type Reader = Box<dyn tokio::io::AsyncRead + Unpin + Send>;
 
+    #[tokio::test]
+    async fn invalid_concept_type_lists_the_published_values_on_the_wire() {
+        let mut client = Client::connect().await;
+        client
+            .send(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#)
+            .await;
+        let listed: serde_json::Value = serde_json::from_str(&client.response(2).await).unwrap();
+        let derive = listed["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == "lambo_derive")
+            .unwrap();
+        let schema = &derive["inputSchema"];
+        let item_ref = schema["properties"]["concepts"]["items"]["$ref"]
+            .as_str()
+            .unwrap();
+        let item = schema.pointer(item_ref.strip_prefix('#').unwrap()).unwrap();
+        let type_ref = item["properties"]["concept_type"]["$ref"].as_str().unwrap();
+        let concept_type = schema.pointer(type_ref.strip_prefix('#').unwrap()).unwrap();
+        let values = concept_type["enum"].as_array().unwrap();
+        assert_eq!(
+            values.as_slice(),
+            ["entity", "logic", "constraint", "resource", "observation"]
+                .map(serde_json::Value::from)
+        );
+
+        client
+            .send(r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"lambo_derive","arguments":{"agent_id":"agent-a","concepts":[{"content":"Example concept","concept_type":"Observation"}]}}}"#)
+            .await;
+        let reply: serde_json::Value = serde_json::from_str(&client.response(3).await).unwrap();
+        assert_eq!(reply["result"]["isError"], true, "{reply}");
+        let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("unknown variant `Observation`"), "{text}");
+        for value in values {
+            let value = value.as_str().unwrap();
+            assert!(text.contains(&format!("`{value}`")), "{text}");
+        }
+    }
+
     struct Client {
         to_server: Writer,
         from_server: tokio::io::Lines<BufReader<Reader>>,
