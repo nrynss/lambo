@@ -41,7 +41,7 @@ The write path is not changed, which the replay below is the check on.
 
 | Test | 0.12.0 | 0.13.0 | Verdict |
 |---|---:|---:|---|
-| Replay of 330 real writes | 330 applied | 330 applied | PASS, 0 unexpected, matching final store counts |
+| Replay of 330 real writes | 330 applied | 330 applied | PASS; 0 of 330 calls differ on the corrected re-run (section 1) |
 | Top-8 recall on the 20 A/B queries | | | identical on 19 of 20; the other is not explained from a captured file (section 2) |
 | Sequential recall p50 / p99 | 2.02 / 21.69 ms | 2.02 / 21.66 ms | within 0.1 ms, one run |
 | Sequential `lambo_stats` p50 | 0.43 ms | 0.39 ms | within 0.05 ms, one run |
@@ -82,12 +82,32 @@ identical: 13 semantic edges exist only on the 0.12.0 side and 13 only on
 the 0.13.0 side, which is the merge-target difference of earlier gates.
 32 calls differ, all `merge_into_replayed_concept`; 0 are unexpected.
 
-**Limit of that classification.** The harness marks a merge difference as
-expected whenever either side merged into a concept written during the
-replay; it does not compare which target each side chose. Some of the 32
-(call 1, for one) have equal counters on both sides and differ only in merge
-targets, which this file does not carry. So "0 unexpected" rests on that
-rule, and on the matching final counts, not on a per-target check.
+**Limit of that classification.** The harness that produced this file
+marked a merge difference as expected whenever either side merged into a
+concept written during the replay; it did not compare which target each side
+chose. All 32 differing calls have equal counters on both sides and differ
+only in merges, which this file does not carry. So its "0 unexpected" rests
+on that rule, and on the matching final counts, not on a per-target check.
+
+### Re-run with the corrected comparison
+
+The 32 differences were a harness artefact. The server orders a merge edge's
+two ends by node id, and ids are random per side, so the harness credited
+the same merge to different calls on the two sides; it also compared the
+target's creation time, which is the replay's own clock. The harness now
+reads a merge in both directions, credits it to the call that made it, and
+identifies a target by its text when written during the replay and by its
+shared id otherwise. Two sides merging one concept into different
+replay-written targets is a new reason, `merge_target_differs`, marked
+unexpected.
+
+File: [`replay-0120-0130-v2.json`](replay-0120-0130-v2.json), the same
+snapshot, builds and arguments, run later the same day.
+
+**0 of 330 calls differ, and no semantic edge exists on one side only.**
+Totals and final store counts are the same as in the first run. This run
+reports 30 reconstruction warnings where the first reported 33; the
+reconstruction reads the serving ledger, which had grown in between.
 
 ## 2. Sequential latency A/B
 
