@@ -383,6 +383,67 @@ class Classify(unittest.TestCase):
         self.assertEqual(self.cls(call, sa, sb, fresh, {}), ["merge_into_replayed_concept"])
         self.assertEqual(self.cls(call, sa, sb, old, {}), ["merge_differs_pre_t"])
 
+    @staticmethod
+    def merge(frm, to, replayed, at="2026-10-08T15:05:00Z", to_id=None):
+        return {"from": frm, "to": to, "to_created_at": at, "to_replayed": replayed,
+                "to_id": None if replayed else (to_id or "id-" + to)}
+
+    def test_equal_counters_with_different_replayed_targets_are_unexpected(self):
+        call = {"kind": "derive", "arguments": {}}
+        sa = sb = row(semantic_merged=1, created_count=1)
+        ra = {"semantic_merges": [self.merge("n", "x", True)]}
+        rb = {"semantic_merges": [self.merge("n", "y", True)]}
+        ids = self.cls(call, sa, sb, ra, rb)
+        self.assertEqual(ids, ["merge_target_differs"])
+        self.assertEqual(self.unexpected(ids), ["merge_target_differs"])
+        self.assertEqual(rp.merge_diff(ra, rb, self.T), {"replay_vs_replay": 1})
+
+    def test_the_same_merge_with_per_side_ids_and_times_is_no_difference(self):
+        sa = sb = row(semantic_merged=2, created_count=2)
+        ra = {"semantic_merges": [self.merge("n", "x", True, "2026-10-08T15:05:00Z"),
+                                  self.merge("m", "p", False, "2026-10-01T00:00:00Z")]}
+        rb = {"semantic_merges": [self.merge("m", "p", False, "2026-10-01T00:00:00Z"),
+                                  self.merge("n", "x", True, "2026-10-08T16:40:12Z")]}
+        self.assertEqual(rp.differing_fields(sa, sb, ra, rb, self.T), set())
+        # Records from before to_replayed existed: placed by to_created_at.
+        old_a = {"semantic_merges": [{"from": "n", "to": "x",
+                                      "to_created_at": "2026-10-08T15:05:00Z"}]}
+        old_b = {"semantic_merges": [{"from": "n", "to": "x",
+                                      "to_created_at": "2026-10-08T16:40:12Z"}]}
+        self.assertEqual(rp.merge_diff(old_a, old_b, self.T), {})
+
+    def test_two_pre_t_targets_with_one_text_are_told_apart_by_id(self):
+        call = {"kind": "derive", "arguments": {}}
+        sa = sb = row(semantic_merged=1)
+        ra = {"semantic_merges": [self.merge("n", "p", False, to_id="id-1")]}
+        rb = {"semantic_merges": [self.merge("n", "p", False, to_id="id-2")]}
+        self.assertEqual(self.cls(call, sa, sb, ra, rb), ["merge_differs_pre_t"])
+
+    def test_replayed_target_against_pre_t_or_none_fits_the_mechanism(self):
+        call = {"kind": "derive", "arguments": {}}
+        sa = sb = row(semantic_merged=1)
+        ra = {"semantic_merges": [self.merge("n", "x", True)]}
+        rb = {"semantic_merges": [self.merge("n", "p", False)]}
+        self.assertEqual(self.cls(call, sa, sb, ra, rb), ["merge_into_replayed_concept"])
+        self.assertEqual(rp.merge_diff(ra, rb, self.T), {"replay_vs_pre_t": 1})
+        self.assertEqual(self.cls(call, row(semantic_merged=0), sb, {}, ra),
+                         ["merge_into_replayed_concept"])
+
+    def test_one_call_can_fire_several_merge_reasons(self):
+        call = {"kind": "derive", "arguments": {}}
+        sa = sb = row(semantic_merged=2, created_count=2)
+        ra = {"semantic_merges": [self.merge("n", "x", True), self.merge("m", "y", True)]}
+        rb = {"semantic_merges": [self.merge("n", "p", False), self.merge("m", "z", True)]}
+        ids = self.cls(call, sa, sb, ra, rb)
+        self.assertEqual(sorted(ids), ["merge_into_replayed_concept", "merge_target_differs"])
+        self.assertEqual(self.unexpected(ids), ["merge_target_differs"])
+
+    def test_a_merge_count_the_stores_do_not_show_is_unexplained(self):
+        call = {"kind": "derive", "arguments": {}}
+        same = {"semantic_merges": [self.merge("n", "x", True)]}
+        ids = self.cls(call, row(semantic_merged=1), row(semantic_merged=2), same, same)
+        self.assertEqual(ids, ["unexplained:semantic_merged"])
+
     def test_invisible_codepoints_are_detected_in_raw_text(self):
         # json.dumps escapes U+200B by default; the detector must see the raw
         # character (the evidence copy dumped with ensure_ascii=True and so
@@ -438,8 +499,120 @@ class Classify(unittest.TestCase):
                          ["reinforced_differs"])
 
 
+class MergeReadback(unittest.TestCase):
+    """semantic_targets / replay_facts on a minimal store whose Semantic edge
+    directions are flipped between two copies, as random v4 NodeIds do."""
+    T = "2026-10-08T15:04:00Z"
+    PRE, CALL, LATER = "2026-10-01T00:00:00Z", "2026-10-08T15:05:00Z", "2026-10-08T15:06:00Z"
+
+    def store(self, name, flip, call_at=None):
+        call_at = call_at or self.CALL
+        p = tmpdir(self) / name
+        db = sqlite3.connect(p)
+        db.executescript(
+            "CREATE TABLE concepts(id TEXT PRIMARY KEY, content TEXT, concept_type TEXT, "
+            "created_at TEXT, embedding BLOB);"
+            "CREATE TABLE edges(source TEXT, target TEXT, edge_type TEXT, created_at TEXT);"
+            "CREATE TABLE canonization_events(node_id TEXT, from_status TEXT, "
+            "to_status TEXT, occurred_at TEXT);")
+        # Per-side ids for replayed concepts; the pre-T one is shared.
+        s = name
+        rows = [("p", "pre-T target", self.PRE), (s + "n1", "new one", call_at),
+                (s + "n2", "new two", call_at), (s + "L", "later concept", self.LATER)]
+        db.executemany("INSERT INTO concepts VALUES (?, ?, 'Logic', ?, x'00')", rows)
+        pairs = [("p", s + "n1", call_at),       # n1 merged into pre-T p
+                 (s + "n1", s + "n2", call_at),  # n2 merged into n1, same call
+                 (s + "n1", s + "L", self.LATER)]  # a later call merged L into n1
+        db.executemany("INSERT INTO edges VALUES (?, ?, 'Semantic', ?)",
+                       [((b, a) if flip else (a, b)) + (t,) for a, b, t in pairs])
+        db.commit()
+        db.close()
+        return p, [s + "n1", s + "n2"]
+
+    def test_a_call_owns_its_merges_whatever_the_edge_direction(self):
+        pa, ida = self.store("a", flip=False)
+        pb, idb = self.store("b", flip=True, call_at="2026-10-08T15:05:30Z")
+        ma, mb = rp.semantic_targets(pa, ida, self.T), rp.semantic_targets(pb, idb, self.T)
+        self.assertEqual(sorted((m["from"], m["to"], m["to_replayed"], m["to_id"]) for m in ma),
+                         [("new one", "pre-T target", False, "p"),
+                          ("new two", "new one", True, None)])
+        self.assertEqual(rp.merge_diff({"semantic_merges": ma}, {"semantic_merges": mb},
+                                       self.T), {})
+
+    def tied_store(self, name, flip):
+        """Two calls whose concepts share one millisecond: call 1 creates c1,
+        call 2 creates c2 and merges it into c1."""
+        p = tmpdir(self) / name
+        db = sqlite3.connect(p)
+        db.executescript(
+            "CREATE TABLE concepts(id TEXT PRIMARY KEY, content TEXT, concept_type TEXT, "
+            "created_at TEXT, embedding BLOB);"
+            "CREATE TABLE edges(source TEXT, target TEXT, edge_type TEXT, created_at TEXT);")
+        c1, c2 = name + "c1", name + "c2"
+        db.executemany("INSERT INTO concepts VALUES (?, ?, 'Logic', ?, x'00')",
+                       [(c1, "first call", self.CALL), (c2, "second call", self.CALL)])
+        db.execute("INSERT INTO edges VALUES (?, ?, 'Semantic', ?)",
+                   ((c1, c2) if flip else (c2, c1)) + (self.CALL,))
+        db.commit()
+        db.close()
+        results = [{"idx": 0, "created_ids": [c1]}, {"idx": 1, "created_ids": [c2]}]
+        return p, results
+
+    def test_a_millisecond_tie_is_settled_by_replay_order(self):
+        sides = []
+        for name, flip in (("a", False), ("b", True)):
+            p, results = self.tied_store(name, flip)
+            order_of = rp.replay_order(results)
+            self.assertEqual(order_of, {name + "c1": (0, 0), name + "c2": (1, 0)})
+            per_call = [rp.semantic_targets(p, r["created_ids"], self.T, order_of)
+                        for r in results]
+            self.assertEqual(per_call[0], [], name)  # the earlier call made no merge
+            self.assertEqual([(m["from"], m["to"], m["to_replayed"]) for m in per_call[1]],
+                             [("second call", "first call", True)], name)
+            sides.append(per_call)
+        for ra, rb in zip(*sides):
+            self.assertEqual(rp.merge_diff({"semantic_merges": ra}, {"semantic_merges": rb},
+                                           self.T), {})
+
+    def test_semantic_edge_facts_ignore_direction(self):
+        pa, _ = self.store("a", flip=False)
+        pb, _ = self.store("b", flip=True)
+        fa, fb = rp.replay_facts(pa, self.T), rp.replay_facts(pb, self.T)
+        self.assertEqual(fa["semantic"], fb["semantic"])
+        self.assertEqual(sum(fa["semantic"].values()), 3)
+
+    def test_compare_writes_merge_counts_and_no_text_once_stripped(self):
+        pa, ida = self.store("a", flip=False)
+        calls = [{"kind": "derive", "agent_id": "x", "arguments": {}}]
+        facts = rp.replay_facts(pa, self.T)
+
+        def side(merges):
+            return {"results": [{"state": "applied", "receipt": {
+                        "state": "applied", "created_count": 2, "semantic_merged": 2},
+                        "created": ["new one", "new two"], "matched": [],
+                        "semantic_merges": merges}],
+                    "store": {"canonization_status": {}}, "final_stats_tool": {},
+                    "facts": facts}
+        ma = rp.semantic_targets(pa, ida, self.T)
+        mb = [dict(m, to="another replayed concept") if m["to_replayed"] else m for m in ma]
+        c = rp.compare(calls, side(ma), side(mb), self.T, {"canonization_status": {}},
+                       rp.REASONS_0_4_0)
+        d = c["differing"][0]
+        self.assertEqual(d["merge_diff"], {"replay_vs_replay": 1})
+        self.assertEqual([r["id"] for r in d["reasons"]], ["merge_target_differs"])
+        self.assertEqual(c["unexpected_calls"], 1)
+        s = json.dumps(rp.strip_content(c))
+        self.assertIn("replay_vs_replay", s)
+        for text in ("new one", "new two", "pre-T target", "another replayed"):
+            self.assertNotIn(text, s)
+        same = rp.compare(calls, side(ma), side([dict(m) for m in ma]), self.T,
+                          {"canonization_status": {}}, rp.REASONS_0_4_0)
+        self.assertEqual(same["differing"], [])
+
+
 class Catalogue(unittest.TestCase):
     def write(self, d):
+
         p = tmpdir(self) / "r.json"
         p.write_text(json.dumps(d))
         return str(p)
