@@ -144,7 +144,7 @@ With `--document`, pass `--origin <TEXT>` to apply hybrid derive's framing to th
 
 Each vector is one JSON object with `values` and `contract`. The contract has `kind`, `dim`, and `model` when the adapter names a model. The same object can be used with `lambo recall --query-vector-json` when the session's contract matches exactly and the vector has at most 4,096 components.
 
-To replay text recall with the same hits and scores on the same stored data, supply the original query text and use `--query-vector-as-text`. It reuses the vector and keeps text recall's keyword and recent scoring, dependency dispatch, and confidence rules. The store must support vector search, and `[embedder] accept_client_vectors = true` is required.
+To replay text recall with the same hits and scores on the same stored data, supply the original query text and use `--query-vector-as-text`. It requires a near-unit query vector, preserves its values, and keeps text recall's keyword and recent scoring, dependency dispatch, and confidence rules. The store must support vector search, and `[embedder] accept_client_vectors = true` is required.
 
 ```bash
 query='user schema'

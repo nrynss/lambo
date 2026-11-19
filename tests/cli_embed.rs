@@ -189,3 +189,107 @@ fn exported_query_vectors_replay_text_and_dependency_recall() {
         }
     }
 }
+
+#[cfg(feature = "store-sqlite")]
+#[test]
+fn text_replay_preserves_near_unit_bits_and_rejects_scaled_vectors() {
+    let scratch = ScratchDir::new("lambo-cli-embed-replay-drift");
+    let config = scratch.join("lambo.toml");
+    let database = scratch.join("store.sqlite");
+    fs::write(&config, format!(
+        "[store]\nkind = \"sqlite\"\npath = {:?}\n[embedder]\nkind = \"fixture\"\ndim = 4096\naccept_client_vectors = true\n",
+        database.to_str().unwrap()
+    )).unwrap();
+    success(invoke(&config, &["provision"]));
+    for content in ["probe concept", "probe other concept"] {
+        success(invoke(
+            &config,
+            &[
+                "derive",
+                "--session",
+                "demo",
+                "--agent",
+                "test",
+                "--content",
+                content,
+                "--kind",
+                "entity",
+            ],
+        ));
+    }
+    let query = "policy 487";
+    let exported = success(invoke(&config, &["embed", "--query", query]));
+    let mut vector = vector(&exported);
+    let norm = vector["values"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap().powi(2))
+        .sum::<f64>()
+        .sqrt();
+    assert!(
+        (norm - 1.0).abs() > 1e-6 && (norm - 1.0).abs() < 1e-5,
+        "{norm}"
+    );
+    let path = scratch.join("query.json");
+    fs::write(&path, &exported.stdout).unwrap();
+    let path_arg = path.to_str().unwrap();
+    let ordinary = success(invoke(
+        &config,
+        &["recall", "--session", "demo", "--query", query],
+    ));
+    let replay = success(invoke(
+        &config,
+        &[
+            "recall",
+            "--session",
+            "demo",
+            "--query",
+            query,
+            "--query-vector-json",
+            path_arg,
+            "--query-vector-as-text",
+        ],
+    ));
+    assert_eq!(ordinary.stdout, replay.stdout);
+    let scores = |o: &Output| {
+        String::from_utf8_lossy(&o.stderr)
+            .lines()
+            .find(|l| l.starts_with("recall scores: "))
+            .unwrap()
+            .to_owned()
+    };
+    assert_eq!(scores(&ordinary), scores(&replay));
+
+    for value in vector["values"].as_array_mut().unwrap() {
+        *value = json!(value.as_f64().unwrap() * 2.0);
+    }
+    fs::write(&path, serde_json::to_vec(&vector).unwrap()).unwrap();
+    let rejected = invoke(
+        &config,
+        &[
+            "recall",
+            "--session",
+            "demo",
+            "--query",
+            query,
+            "--query-vector-json",
+            path_arg,
+            "--query-vector-as-text",
+        ],
+    );
+    assert_eq!(rejected.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("requires a near-unit query vector"));
+    success(invoke(
+        &config,
+        &[
+            "recall",
+            "--session",
+            "demo",
+            "--query",
+            query,
+            "--query-vector-json",
+            path_arg,
+        ],
+    ));
+}

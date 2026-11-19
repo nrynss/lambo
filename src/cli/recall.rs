@@ -29,7 +29,9 @@ use crate::recall::query_vector::{self, QueryBy};
 use crate::resolve::{assert_session_embedding_compatible, ResolvedBackends};
 use crate::store::vector_source::VectorCandidates;
 use crate::surface::image::{check_submitted_vector_as, sniff_mime, validate, MAX_IMAGE_BYTES};
-use crate::types::{ProvisionalConfidence, RecallQuery, TopLegs};
+use crate::types::{
+    EmbeddingContract, ProvisionalConfidence, RecallQuery, TopLegs, SUPPLIED_UNIT_NORM_TOLERANCE,
+};
 
 use super::derive_image::{read_capped, VectorFile, MAX_VECTOR_FILE_BYTES};
 use std::path::{Path, PathBuf};
@@ -214,7 +216,10 @@ pub async fn run_reported(
                 validate(&bytes, &mime).map_err(CliError::Usage)?,
             ))
         }
-        (None, Some(path)) => Some(read_query_vector(backends, path)?),
+        (None, Some(path)) => {
+            let (values, declared) = read_query_vector(backends, path)?;
+            Some(QueryBy::Vector { values, declared })
+        }
         (Some(_), Some(_)) => {
             return Err(CliError::Usage(
                 "pass at most one of --image or --query-vector-json".into(),
@@ -248,7 +253,7 @@ fn require_vector_search(backends: &ResolvedBackends) -> Result<(), CliError> {
 fn read_query_vector(
     backends: &ResolvedBackends,
     path: &Path,
-) -> Result<QueryBy<'static>, CliError> {
+) -> Result<(Vec<f32>, EmbeddingContract), CliError> {
     if !backends.config.accept_client_vectors {
         return Err(CliError::Runtime(
             "this process does not accept client-computed vectors; enable them with \
@@ -260,7 +265,7 @@ fn read_query_vector(
     let (values, declared) = VectorFile::parse("--query-vector-json", &raw)?;
     check_submitted_vector_as("query_vector", &values, &declared, &backends.embedding)
         .map_err(CliError::Usage)?;
-    Ok(QueryBy::Vector { values, declared })
+    Ok((values, declared))
 }
 
 /// Replay a text recall using the saved query-role vector instead of embedding
@@ -276,8 +281,17 @@ pub async fn run_reported_with_text_vector(
 ) -> Result<RecallOutput, CliError> {
     let request = RecallRequest::validate(session, query, top_k, max_tokens, traversal_depth)?;
     require_vector_search(backends)?;
-    let by = read_query_vector(backends, path)?;
-    let vector = query_vector::resolve(by, backends.embedder.as_ref(), &backends.embedding).await?;
+    let (vector, _) = read_query_vector(backends, path)?;
+    let norm = vector
+        .iter()
+        .map(|x| f64::from(*x).powi(2))
+        .sum::<f64>()
+        .sqrt();
+    if (norm - 1.0).abs() > SUPPLIED_UNIT_NORM_TOLERANCE {
+        return Err(CliError::Usage(
+            "--query-vector-as-text requires a near-unit query vector; export one with lambo embed --query".into(),
+        ));
+    }
     let loaded = load_reader_graph(backends.store.as_ref(), session).await?;
     let input = VectorInput::Text(Some(Arc::from(vector)));
     Ok(run_on(backends, &loaded, &request, input, None)
