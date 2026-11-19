@@ -215,11 +215,11 @@ enum Commands {
             help = "The --image file's MIME type (image/png, image/jpeg, image/webp). Default: read from the file; a mismatch is refused."
         )]
         mime: Option<String>,
-        /// Recall what is close to a vector: a JSON file {"values": [...], "contract": {"kind", "model", "dim"}} in this session's space. Needs [embedder] accept_client_vectors = true.
+        /// Recall what is close to a vector in this session's space. For exact text replay, also pass --query-vector-as-text and the original --query.
         #[arg(
             long = "query-vector-json",
             value_name = "PATH",
-            help = "Recall what is close to a vector: a JSON file {\"values\": [...], \"contract\": {\"kind\", \"model\", \"dim\"}} in this session's space. Needs [embedder] accept_client_vectors = true."
+            help = "Recall what is close to a vector: a JSON file {\"values\": [...], \"contract\": {\"kind\", \"model\", \"dim\"}} in this session's space. Needs [embedder] accept_client_vectors = true. For exact text replay, also pass --query-vector-as-text and the original --query."
         )]
         query_vector_json: Option<PathBuf>,
         /// Replay a text recall with the saved query-role vector. Requires the original --query.

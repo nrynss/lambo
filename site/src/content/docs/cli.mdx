@@ -98,7 +98,7 @@ The in-crate candle embedder (`kind = "candle"`) runs BGE-M3 locally with no lla
 | `--traversal-depth <TRAVERSAL_DEPTH>` | No | The session's `default_traversal_depth`, which is `2`. |
 | `--image <PATH>` | No; at most one of `--image`, `--query-vector-json` | Recall what is close to this PNG, JPEG or WebP file (at most 2 MiB and 4096 pixels a side), embedded by the configured embedder. Needs an embedder that embeds images. |
 | `--mime <MIME>` | No | With `--image`, as for `derive-image`. |
-| `--query-vector-json <PATH>` | No; at most one of `--image`, `--query-vector-json` | Recall what is close to a vector: a JSON file in the shape `derive-image --vector-json` takes. Needs `[embedder] accept_client_vectors = true`, and the contract must equal the session's exactly. |
+| `--query-vector-json <PATH>` | No; at most one of `--image`, `--query-vector-json` | Recall what is close to a vector: a JSON file in the shape `derive-image --vector-json` takes. Needs `[embedder] accept_client_vectors = true`, and the contract must equal the session's exactly. For exact text replay, also pass `--query-vector-as-text` and the original `--query`. |
 | `--query-vector-as-text` | No | Replay normal text recall with a saved query-role vector. Requires `--query` with the original text and `--query-vector-json`. |
 
 ```bash
