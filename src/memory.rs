@@ -95,7 +95,9 @@ pub use layered::LayerRef;
 pub(crate) use layered::LayerSlot;
 pub(crate) use lease_refusal::{holder_looks_gone, lease_held_message, lease_remaining};
 pub(crate) use leases::LeaseLostSignal;
-pub use types::{CanonicalMemory, DryRun, GcStats, GcSweepSummary, ImpactReport, MemoryStats};
+pub use types::{
+    CanonicalMemory, DryRun, GcStats, GcSweepSummary, ImpactReport, MemoryStats, MissingVectors,
+};
 
 // Crate-internal names the sibling modules reach through `super::`.
 use leases::{register_session, spawn_lease_heartbeat};

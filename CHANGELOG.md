@@ -22,6 +22,11 @@
   so the existing best per-leg scores can be compared against the size of the
   session and layer graphs at recall time. The new fields are additive in
   ledger version 1.
+- Hybrid writers warn at attach and in `lambo_stats` and ledger heartbeats
+  when text concepts have been missing vectors for at least 60 seconds (#249).
+  The warning gives the count, the oldest concept's age, and the
+  `lambo re-embed --missing-only` repair command. `lambo stats --missing-vectors`
+  lists missing text and image vectors in the durable session snapshot.
 
 ## 0.13.0 (2026-11-19)
 

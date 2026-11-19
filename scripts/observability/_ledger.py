@@ -68,7 +68,8 @@ because metric 2 and metric 3 **join** to it, and leaves `startup`/`lease` in
     + saints    canonical_count
     stats       uptime_secs, version, git_sha, stats{...the lambo_stats payload,
                 including ledger_written_lines / ledger_dropped_lines /
-                ledger_queued_lines}
+                ledger_queued_lines and optional missing_vectors{
+                count, oldest_age_secs, warning} for a persistent text vector gap}
     completion  agent_id, receipt, state ("applied" | "applied_after_restart" |
                 "failed" | "deferred" | "close_unflushed", the last since #117:
                 the close's final flush did not complete, so the write may not

@@ -4,6 +4,7 @@
 use serde_json::json;
 
 use super::LamboServer;
+use crate::memory::{GcStats, MemoryStats};
 
 /// The text half of the `gc` object, one line on the `lambo_stats` summary.
 pub(super) fn gc_summary_line(g: &crate::memory::GcStats) -> String {
@@ -95,15 +96,11 @@ impl LamboServer {
     /// the tool would make the whole time axis in `scripts/observability`
     /// unreadable.
     pub(super) fn stats_json(&self) -> serde_json::Value {
-        self.stats_json_with_gc(&self.mem.gc_stats())
+        self.stats_json_from(&self.mem.stats(), &self.mem.gc_stats())
     }
 
-    /// [`Self::stats_json`] over a `gc` reading the caller already took, so
-    /// `lambo_stats` can render its structured `gc` object and its text `gc:`
-    /// line from one value (two reads straddling the daemon's first anchor or a
-    /// sweep could otherwise disagree within one answer).
-    pub(super) fn stats_json_with_gc(&self, gc: &crate::memory::GcStats) -> serde_json::Value {
-        let s = self.mem.stats();
+    /// Use the same readings that `lambo_stats` uses for its text summary.
+    pub(super) fn stats_json_from(&self, s: &MemoryStats, gc: &GcStats) -> serde_json::Value {
         let mut payload = json!({
             "session": s.session.0,
             "agent": s.agent.0,
@@ -141,6 +138,13 @@ impl LamboServer {
             "embedding_contract": self.embedding_contract_json(),
             "embedding_modalities": self.embedding_modalities(),
         });
+        if let Some(gap) = &s.missing_vectors {
+            payload["missing_vectors"] = json!({
+                "count": gap.count,
+                "oldest_age_secs": gap.oldest_age_secs,
+                "warning": gap.warning(),
+            });
+        }
         // I1: dropped lines are reported next to written ones so a gap in the
         // ledger is never mistaken for a gap in the traffic. Emitted ONLY when
         // a ledger exists — with `--ledger` off the payload is byte-identical

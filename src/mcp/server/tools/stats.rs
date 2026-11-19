@@ -15,8 +15,6 @@ impl LamboServer {
         if let Err(e) = self.check_agent_id(&p.agent_id) {
             return e;
         }
-        // J1-R1-3: no warning is reachable here — see `derive_impl`.
-        //
         // **The receipt is resolved FIRST, and the ordering is load-bearing**
         // (found by measuring the shipped binary, not by a test): a `wait_ms`
         // blocks for up to `RECEIPT_WAIT_MAX`, so a snapshot taken before it
@@ -94,7 +92,6 @@ impl LamboServer {
         receipt: Option<(crate::writeq::ReceiptId, ReceiptAnswer, Option<String>)>,
     ) -> CallToolResult {
         let s = self.mem.stats();
-        // One GC reading for both halves of the answer (see `stats_json_with_gc`).
         let gc = self.mem.gc_stats();
         // #22 PR 4: the space a client vector must be computed in.
         let contract = self.embedding_contract_json();
@@ -134,14 +131,14 @@ impl LamboServer {
             contract["dim"],
             self.embedding_modalities().join(","),
         );
-        // One payload builder shared with the I2 heartbeat, so a heartbeat can
-        // never report different numbers than the tool. With `--ledger` off
-        // this is exactly the payload it always was; with it on, the six
-        // `ledger_*` keys are appended (I1: the dropped-line counter has to be
-        // reachable from `lambo_stats`, or silence is invisible).
-        let mut payload = self.stats_json_with_gc(&gc);
+        let mut payload = self.stats_json_from(&s, &gc);
 
-        let mut lines = vec![text.clone()];
+        let mut lines = vec![text];
+        let mut warnings = Vec::new();
+        if let Some(warning) = payload["missing_vectors"]["warning"].as_str() {
+            lines.push(format!("warning: {warning}"));
+            warnings.push(warning.to_owned());
+        }
         if let Some((id, answer, detail)) = &receipt {
             // Redacted like every other model-facing string (N3): a `failed`
             // answer carries a `LamboError`, and a store error can name a DSN.
@@ -155,7 +152,7 @@ impl LamboServer {
         {
             let obj = payload.as_object_mut().expect("stats_json built an object");
             obj.insert("summary".into(), json!(text));
-            obj.insert("warnings".into(), json!([]));
+            obj.insert("warnings".into(), json!(warnings));
             if let Some((id, answer, detail)) = &receipt {
                 let mut r = json!({
                     "id": id.to_string(),

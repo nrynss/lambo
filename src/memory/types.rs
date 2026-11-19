@@ -139,6 +139,9 @@ pub struct MemoryStats {
     /// keyword-only and nobody could see it). `embedded_concepts ==
     /// concept_count` is the healthy state; anything less is NULL rows.
     pub embedded_concepts: usize,
+    /// Repairable text concepts missing a vector past the hybrid write grace
+    /// period, when this writer is expected to produce text vectors.
+    pub missing_vectors: Option<MissingVectors>,
     /// `MutationEpoch` — recall-cache key (spec §8).
     pub epoch: u64,
     /// Background daemon cycles completed since the session opened.
@@ -147,6 +150,25 @@ pub struct MemoryStats {
     pub canonization_cycles: u64,
     /// Canonization cycles that failed. A non-zero count is worth investigating.
     pub canonization_failures: u64,
+}
+
+/// A persistent gap in a hybrid session's text vector coverage.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MissingVectors {
+    /// Number of text concepts without a vector past the grace period.
+    pub count: usize,
+    /// Age of the oldest such concept, measured from when it was written.
+    pub oldest_age_secs: u64,
+}
+
+impl MissingVectors {
+    pub(crate) fn warning(&self) -> String {
+        format!(
+            "{} text concept(s) without vectors (oldest {}s); stop the writer and run \
+             lambo re-embed --missing-only --session <id> --agent <id>",
+            self.count, self.oldest_age_secs
+        )
+    }
 }
 
 /// GC's sweep accounting for `lambo_stats` (issue #29): read-side only.

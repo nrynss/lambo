@@ -281,6 +281,9 @@ enum Commands {
             help = "Session to report (reader process; does not take the writer lease)."
         )]
         session: String,
+        /// List all concepts without vectors in the durable snapshot.
+        #[arg(long)]
+        missing_vectors: bool,
     },
     /// Provision / migrate the durable store schema (SQLite and Postgres via init_schema, Cockroach via scripts/provision.sh).
     ///
@@ -1760,6 +1763,31 @@ fn main() -> ExitCode {
         other => other,
     };
 
+    // One-shot writers otherwise have no subscriber. Restrict diagnostics to
+    // the attach coverage event; serve configures its own tracing below.
+    if matches!(
+        cmd,
+        Commands::Derive { .. }
+            | Commands::DeriveImage { .. }
+            | Commands::RecordAction { .. }
+            | Commands::Reserve { .. }
+            | Commands::Release { .. }
+    ) {
+        use tracing_subscriber::prelude::*;
+        let filter = tracing_subscriber::filter::filter_fn(|metadata| {
+            metadata.target() == "lambo::memory::missing_vectors"
+                && *metadata.level() == tracing::Level::WARN
+        });
+        let _ = tracing_subscriber::registry()
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_writer(std::io::stderr)
+                    .with_ansi(false)
+                    .with_filter(filter),
+            )
+            .try_init();
+    }
+
     let allow_embedding_mismatch = cmd.allow_embedding_mismatch();
 
     // `lambo serve`'s usage checks, before any backend is built (#32 PR 4).
@@ -2187,9 +2215,16 @@ fn main() -> ExitCode {
                 supersede,
             ),
         ),
-        (Commands::Stats { session }, Resolved::StoreOnly { store, .. }) => {
-            run_async("stats", lambo::cli::stats::run(store.as_ref(), &session))
-        }
+        (
+            Commands::Stats {
+                session,
+                missing_vectors,
+            },
+            Resolved::StoreOnly { store, .. },
+        ) => run_async(
+            "stats",
+            lambo::cli::stats::run_with_missing_vectors(store.as_ref(), &session, missing_vectors),
+        ),
         (
             Commands::Provision { rekey },
             Resolved::StoreOnly {
