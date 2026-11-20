@@ -119,7 +119,9 @@ dependencies, the protection is blind.
    `depends-on` edges are what give a resource its blast radius — record them
    faithfully. When citing a concept already returned by recall, pass its 8-hex
    id or durable name in `depends_on` (or in `against` when new evidence shows
-   an older concept is wrong). For shared pillars meant to be cited repeatedly,
+   an older concept is wrong); in layered sessions, cite only hits whose
+   `hits[].session` matches the write's target session and keep foreign-session
+   hits as read-only context. For shared pillars meant to be cited repeatedly,
    you may bind a lowercase kebab-case durable `name` (`<domain>-<subject>`,
    e.g. `prod-vpc-base-sg`) via `concepts[].name` on MCP `lambo_derive` (over
    CLI, pass `--name` on `lambo derive` or bind names on existing concepts with
@@ -128,8 +130,15 @@ dependencies, the protection is blind.
 3. Writes are lease-held and exclusive; sequence them. Over CLI, a write waits
    for flush before returning. Over MCP, `lambo_derive` and `lambo_record_action`
    apply in the background and return a receipt id in the ack (`lambo_reserve` is
-   synchronous) — pass that receipt to `lambo_stats` with `wait_ms` if the very
-   next read or citation must see the write immediately.
+   synchronous). If the very next read or citation must see the write
+   immediately, pass that receipt to `lambo_stats` with `wait_ms` and verify
+   `receipt.state` is `applied` or `applied_after_restart` before proceeding —
+   a completed `wait_ms` call alone does not prove visibility. If it returns
+   `pending` or `pending_replay` (for example after a wait timeout or saturated
+   wait slots), retry waiting and check again; handle unsuccessful or
+   non-applied outcomes (`failed`, `dropped`, `intent_durable`,
+   `close_unflushed`, `expired`, `restart_lost`, `never_issued`, `forbidden`)
+   separately without assuming the write is visible.
 
 ---
 

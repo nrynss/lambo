@@ -60,7 +60,11 @@ own `AGENTS.md` does), add four habits on top of the pre-flight rule:
 - **Cite by 8-hex ID or durable name:** Pass the 8-hex ID or durable name from
   recall in `depends_on` (so rulings earn real structural dependents instead of
   plain-text alias nodes) and in `against` (so contradictions bind unambiguously
-  to the refuted concept).
+  to the refuted concept). References resolve only in the write's target
+  session: when layered, cite only hits whose `hits[].session` matches the
+  target session, and treat foreign-session hits (such as `general`-layer
+  rulings when writing to a repository session) as read-only context rather than
+  citing them across sessions or moving repository decisions into `general`.
 - **Name standing rulings selectively:** Bind a short lowercase kebab-case
   `concepts[].name` (`<domain>-<subject>`, no slashes) only to settled `logic`
   or `constraint` rulings meant to be cited across PRs — never to

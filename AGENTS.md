@@ -52,8 +52,11 @@
 ## Consulting memory (Lambo MCP)
 
 If a Lambo MCP server (`lambo-dogfood` or an infrastructure session) is attached,
-use it as shared multi-agent memory alongside the repo. No server attached = no
-obligation: never block on an outage; fall back to `dev-diary/` and note it.
+use it as shared multi-agent memory alongside the repo. For repository
+development work (no server attached = no obligation), never block on an outage:
+fall back to `dev-diary/` and note it. For destructive infrastructure actions,
+stay fail-closed and stop until recall succeeds (see
+`skills/lambo-cloudops/SKILL.md`).
 
 ### Before acting
 - **Recall early, then refine:** Call `lambo_recall` on the task topic (or target
