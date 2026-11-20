@@ -652,6 +652,19 @@ def _self_test_dependents_section() -> None:
     )
     if parse_dependents(truncated) != expected or parse_dependents_total(truncated) != 250:
         raise SystemExit("self-test FAILED: a truncated dependents list must parse")
+    named = golden.replace(
+        "focus: concept X [Logic]\n",
+        'focus: concept X [Logic]\nnames: ["prod-sg-base"]\n',
+        1,
+    )
+    if named == golden:
+        raise SystemExit("self-test FAILED: golden did not contain expected focus header")
+    if (
+        parse_dependents(named) != expected
+        or parse_dependents_total(named) != len(expected)
+        or parse_blast_radius(named) != len(expected)
+    ):
+        raise SystemExit("self-test FAILED: a named focus must parse dependents and blast radius")
     if parse_dependents("focus: lonely [Entity]\nblast radius: 0\n") != []:
         raise SystemExit("self-test FAILED: no dependents section must read as no dependents")
 

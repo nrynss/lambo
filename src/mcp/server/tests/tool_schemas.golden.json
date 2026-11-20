@@ -6,7 +6,7 @@
       "additionalProperties": false,
       "properties": {
         "agent_id": {
-          "description": "Id of the agent making this call. Use one stable id for the agent's\nwhole life, never one per call, task or topic (good: your model or\nclient id, such as `claude-opus-5-5` or `gpt-5.6`, with a stable\ninstance suffix such as `-worker-2` if several run at once; bad:\n`b1-review`, `implement-m12`). Caller-asserted and unverified: work is\nrecorded under exactly the id you send, so a stable id keeps your\nattribution whole. Agents sharing an id share soft locks and can\nrelease each other's; concurrent agents that must keep out of each\nother's edits need distinct stable ids.",
+          "description": "Stable caller id: use one stable id for the agent's whole life, never\none per call, task or topic (good: `claude-opus-5-5`, `gpt-5.6`, with a\nstable instance suffix if concurrent; bad: `b1-review`). Caller-asserted\nand unverified; callers sharing an id share soft locks and can release\neach other's.",
           "maxLength": 16384,
           "type": "string"
         },
@@ -43,7 +43,7 @@
           "additionalProperties": false,
           "properties": {
             "against": {
-              "description": "Optional: up to 8 existing concepts this one contradicts, such as an\nolder belief a newer observation shows is wrong. Name each as for\n`depends_on`: its id (the 8 hex characters recall shows) or full\nnode id (its exact content also works). Each must already exist in\nthe session the write goes to and match exactly one concept other\nthan this one, or the whole call is refused before the ack and\nnothing is written, as is a concept this one also lists in\n`depends_on`. Recorded as this concept contradicting each, dated by\nthis write's `event_time` (else when it is written) whatever the two\nconcepts' ages; sending it again does not re-date it. It adds no\ndependent and changes no score or promotion, and raises no conflict;\nit does count as a fresh write to the contradicted concept. Recall\nthen warns on the contradicted concept and shows this one beside it.\nNaming the other concept of a pair recall marks possibly superseded\nsettles it: the mark is removed. At most 32 across the call.",
+              "description": "Optional: up to 8 existing concepts this one contradicts, such as an\nolder belief a newer observation shows is wrong. Name each as for\n`depends_on`: its id (the 8 hex characters recall shows), full node id,\ndurable name, or exact content. Each must already exist in\nthe session the write goes to and match exactly one concept other\nthan this one, or the whole call is refused before the ack and\nnothing is written, as is a concept this one also lists in\n`depends_on`. Recorded as this concept contradicting each, dated by\nthis write's `event_time` (else when it is written) whatever the two\nconcepts' ages; sending it again does not re-date it. It adds no\ndependent and changes no score or promotion, and raises no conflict;\nit does count as a fresh write to the contradicted concept. Recall\nthen warns on the contradicted concept and shows this one beside it.\nNaming the other concept of a pair recall marks possibly superseded\nsettles it: the mark is removed. At most 32 across the call.",
               "items": {
                 "$ref": "#/$defs/WireReference"
               },
@@ -70,7 +70,7 @@
               "type": "string"
             },
             "depends_on": {
-              "description": "Optional: up to 8 existing concepts this one rests on, such as the\nruling a decision applies. Cite each by its id: the 8 hex characters\nrecall shows, or its full node id (its exact content also works).\nEach must already exist in this session and match exactly one\nconcept; one that does not, or that names this concept itself,\nrefuses the whole call before the ack and writes nothing. Recorded as\nthis concept depending on each, which makes the cited concept\nload-bearing. Citing the other concept of a pair recall marks\npossibly superseded settles it: the mark is removed. At most 32\nacross the call.",
+              "description": "Optional: up to 8 existing concepts this one rests on, such as the\nruling a decision applies. Cite each by its id (the 8 hex characters\nrecall shows), its full node id, its durable name, or its exact content.\nEach must already exist in this session and match exactly one\nconcept; one that does not, or that names this concept itself,\nrefuses the whole call before the ack and writes nothing. Recorded as\nthis concept depending on each, which makes the cited concept\nload-bearing. Citing the other concept of a pair recall marks\npossibly superseded settles it: the mark is removed. At most 32\nacross the call.",
               "items": {
                 "$ref": "#/$defs/WireReference"
               },
@@ -81,7 +81,7 @@
               ]
             },
             "name": {
-              "description": "Optional durable name for this concept. Names use canonical-key\nnormalization and survive a writer restart. A conflicting name or\nconcept key refuses the whole call. Later writes may cite this name.",
+              "description": "Optional durable name for a standing ruling or pillar (e.g.\n`writer-lease-ttl`, lowercase kebab-case, 2-4 words). Omit for\nobservations or one-off facts — names stay permanently reserved even\nafter GC. Normalized like canonical keys; conflicting names or concept\nkeys refuse the call. Later writes and inspect may cite this name.",
               "maxLength": 16384,
               "type": [
                 "string",
@@ -114,7 +114,7 @@
           "type": "object"
         },
         "WireReference": {
-          "description": "One `depends_on` or `against` entry: an existing concept, by the id\nrecall shows, its full node id or its exact content.",
+          "description": "One `depends_on` or `against` entry: an existing concept, by the id\nrecall shows, its full node id, its durable name, or its exact content.",
           "maxLength": 16384,
           "type": "string"
         }
@@ -123,7 +123,7 @@
       "additionalProperties": false,
       "properties": {
         "agent_id": {
-          "description": "Id of the agent making this call. Use one stable id for the agent's\nwhole life, never one per call, task or topic (good: your model or\nclient id, such as `claude-opus-5-5` or `gpt-5.6`, with a stable\ninstance suffix such as `-worker-2` if several run at once; bad:\n`b1-review`, `implement-m12`). Caller-asserted and unverified: work is\nrecorded under exactly the id you send, so a stable id keeps your\nattribution whole. Agents sharing an id share soft locks and can\nrelease each other's; concurrent agents that must keep out of each\nother's edits need distinct stable ids.",
+          "description": "Stable caller id: use one stable id for the agent's whole life, never\none per call, task or topic (good: `claude-opus-5-5`, `gpt-5.6`, with a\nstable instance suffix if concurrent; bad: `b1-review`). Caller-asserted\nand unverified; callers sharing an id share soft locks and can release\neach other's.",
           "maxLength": 16384,
           "type": "string"
         },
@@ -284,7 +284,7 @@
       "additionalProperties": false,
       "properties": {
         "agent_id": {
-          "description": "Id of the agent making this call. Use one stable id for the agent's\nwhole life, never one per call, task or topic (good: your model or\nclient id, such as `claude-opus-5-5` or `gpt-5.6`, with a stable\ninstance suffix such as `-worker-2` if several run at once; bad:\n`b1-review`, `implement-m12`). Caller-asserted and unverified: work is\nrecorded under exactly the id you send, so a stable id keeps your\nattribution whole. Agents sharing an id share soft locks and can\nrelease each other's; concurrent agents that must keep out of each\nother's edits need distinct stable ids.",
+          "description": "Stable caller id: use one stable id for the agent's whole life, never\none per call, task or topic (good: `claude-opus-5-5`, `gpt-5.6`, with a\nstable instance suffix if concurrent; bad: `b1-review`). Caller-asserted\nand unverified; callers sharing an id share soft locks and can release\neach other's.",
           "maxLength": 16384,
           "type": "string"
         },
@@ -377,7 +377,7 @@
       "additionalProperties": false,
       "properties": {
         "agent_id": {
-          "description": "Id of the agent making this call. Use one stable id for the agent's\nwhole life, never one per call, task or topic (good: your model or\nclient id, such as `claude-opus-5-5` or `gpt-5.6`, with a stable\ninstance suffix such as `-worker-2` if several run at once; bad:\n`b1-review`, `implement-m12`). Caller-asserted and unverified: work is\nrecorded under exactly the id you send, so a stable id keeps your\nattribution whole. Agents sharing an id share soft locks and can\nrelease each other's; concurrent agents that must keep out of each\nother's edits need distinct stable ids.",
+          "description": "Stable caller id: use one stable id for the agent's whole life, never\none per call, task or topic (good: `claude-opus-5-5`, `gpt-5.6`, with a\nstable instance suffix if concurrent; bad: `b1-review`). Caller-asserted\nand unverified; callers sharing an id share soft locks and can release\neach other's.",
           "maxLength": 16384,
           "type": "string"
         },
@@ -392,7 +392,7 @@
           ]
         },
         "focus": {
-          "description": "Concept content, a node UUID, or the short-form id rendered in recall\nblocks, to centre the neighbourhood on.",
+          "description": "Concept content, a durable name, a node UUID, or the short-form id\nrendered in recall blocks, to centre the neighbourhood on.",
           "maxLength": 16384,
           "type": "string"
         },
@@ -501,7 +501,7 @@
       "additionalProperties": false,
       "properties": {
         "agent_id": {
-          "description": "Id of the agent making this call. Use one stable id for the agent's\nwhole life, never one per call, task or topic (good: your model or\nclient id, such as `claude-opus-5-5` or `gpt-5.6`, with a stable\ninstance suffix such as `-worker-2` if several run at once; bad:\n`b1-review`, `implement-m12`). Caller-asserted and unverified: work is\nrecorded under exactly the id you send, so a stable id keeps your\nattribution whole. Agents sharing an id share soft locks and can\nrelease each other's; concurrent agents that must keep out of each\nother's edits need distinct stable ids.",
+          "description": "Stable caller id: use one stable id for the agent's whole life, never\none per call, task or topic (good: `claude-opus-5-5`, `gpt-5.6`, with a\nstable instance suffix if concurrent; bad: `b1-review`). Caller-asserted\nand unverified; callers sharing an id share soft locks and can release\neach other's.",
           "maxLength": 16384,
           "type": "string"
         },
@@ -583,7 +583,7 @@
     "inputSchema": {
       "$defs": {
         "WireReference": {
-          "description": "One `depends_on` or `against` entry: an existing concept, by the id\nrecall shows, its full node id or its exact content.",
+          "description": "One `depends_on` or `against` entry: an existing concept, by the id\nrecall shows, its full node id, its durable name, or its exact content.",
           "maxLength": 16384,
           "type": "string"
         },
@@ -602,7 +602,7 @@
           "type": "string"
         },
         "against": {
-          "description": "Optional: up to 8 existing concepts this action contradicts, such as a\nbelief the action showed to be wrong. Name each by its id (the 8 hex\ncharacters recall shows) or full node id (its exact content also\nworks). Unlike `depends_on`, nothing is ever created: each must\nalready exist in the session the write goes to and match exactly one\nconcept other than the action itself, and not one the action's\n`depends_on` names, or the whole call is refused before the ack and\nnothing is written. Recorded as the action contradicting each, dated\nby this write's `event_time` (else when it is written); it adds no\ndependent and changes no score or promotion.",
+          "description": "Optional: up to 8 existing concepts this action contradicts, such as a\nbelief the action showed to be wrong. Name each by its id (the 8 hex\ncharacters recall shows), full node id, durable name, or exact content.\nUnlike `depends_on`, nothing is ever created: each must\nalready exist in the session the write goes to and match exactly one\nconcept other than the action itself, and not one the action's\n`depends_on` names, or the whole call is refused before the ack and\nnothing is written. Recorded as the action contradicting each, dated\nby this write's `event_time` (else when it is written); it adds no\ndependent and changes no score or promotion.",
           "items": {
             "$ref": "#/$defs/WireReference"
           },
@@ -613,12 +613,12 @@
           ]
         },
         "agent_id": {
-          "description": "Id of the agent making this call. Use one stable id for the agent's\nwhole life, never one per call, task or topic (good: your model or\nclient id, such as `claude-opus-5-5` or `gpt-5.6`, with a stable\ninstance suffix such as `-worker-2` if several run at once; bad:\n`b1-review`, `implement-m12`). Caller-asserted and unverified: work is\nrecorded under exactly the id you send, so a stable id keeps your\nattribution whole. Agents sharing an id share soft locks and can\nrelease each other's; concurrent agents that must keep out of each\nother's edits need distinct stable ids.",
+          "description": "Stable caller id: use one stable id for the agent's whole life, never\none per call, task or topic (good: `claude-opus-5-5`, `gpt-5.6`, with a\nstable instance suffix if concurrent; bad: `b1-review`). Caller-asserted\nand unverified; callers sharing an id share soft locks and can release\neach other's.",
           "maxLength": 16384,
           "type": "string"
         },
         "depends_on": {
-          "description": "Things this action depends on (`Dependency` edges). To cite a ruling\nor decision you relied on, give its id: the 8 hex characters recall\nshows, or its full node id. An id names that existing concept; a\nshort id several concepts share is refused. Any other entry, and an\nid that names no concept, names a concept by its text, created if\nnew.",
+          "description": "Things this action depends on (`Dependency` edges). To cite a ruling\nor decision you relied on, give its id (the 8 hex characters recall\nshows or its full node id) or a declared durable name. An id or declared\ndurable name cites that existing concept; a short id several concepts\nshare is refused. Any other entry — including an unregistered name or an\nid that names no concept — names a concept by its text, created if new.",
           "items": {
             "$ref": "#/$defs/WireResource"
           },
@@ -687,7 +687,7 @@
       "additionalProperties": false,
       "properties": {
         "agent_id": {
-          "description": "Id of the agent making this call — the identity the lock is held under.\nUse one stable id for the agent's whole life, never one per call, task\nor topic (good: `claude-opus-5-5`, `gpt-5.6`, with a stable instance\nsuffix such as `-worker-2` if several run at once; bad: `b1-review`).\nCaller-asserted and unverified: locks are cooperative. Distinct ids\ncontend: reserving a node another id holds is refused, naming the\nholder. Two callers sending the SAME id share one lock and can release\neach other's.",
+          "description": "Stable caller id the lock is held under: use one stable id for the\nagent's whole life, never one per call, task or topic (good:\n`claude-opus-5-5`, `gpt-5.6`, with a stable instance suffix if\nconcurrent; bad: `b1-review`). Caller-asserted and unverified: distinct\nids contend, while callers sharing an id share one lock and can release\neach other's.",
           "maxLength": 16384,
           "type": "string"
         },
@@ -736,7 +736,7 @@
       "additionalProperties": false,
       "properties": {
         "agent_id": {
-          "description": "Id of the agent making this call. Use one stable id for the agent's\nwhole life, never one per call, task or topic (good: your model or\nclient id, such as `claude-opus-5-5` or `gpt-5.6`, with a stable\ninstance suffix such as `-worker-2` if several run at once; bad:\n`b1-review`, `implement-m12`). Caller-asserted and unverified: work is\nrecorded under exactly the id you send, so a stable id keeps your\nattribution whole. Agents sharing an id share soft locks and can\nrelease each other's; concurrent agents that must keep out of each\nother's edits need distinct stable ids.",
+          "description": "Stable caller id: use one stable id for the agent's whole life, never\none per call, task or topic (good: `claude-opus-5-5`, `gpt-5.6`, with a\nstable instance suffix if concurrent; bad: `b1-review`). Caller-asserted\nand unverified; callers sharing an id share soft locks and can release\neach other's.",
           "maxLength": 16384,
           "type": "string"
         },
@@ -762,7 +762,7 @@
       "additionalProperties": false,
       "properties": {
         "agent_id": {
-          "description": "Id of the agent making this call. Use one stable id for the agent's\nwhole life, never one per call, task or topic (good: your model or\nclient id, such as `claude-opus-5-5` or `gpt-5.6`, with a stable\ninstance suffix such as `-worker-2` if several run at once; bad:\n`b1-review`, `implement-m12`). Caller-asserted and unverified: work is\nrecorded under exactly the id you send, so a stable id keeps your\nattribution whole. Agents sharing an id share soft locks and can\nrelease each other's; concurrent agents that must keep out of each\nother's edits need distinct stable ids.",
+          "description": "Stable caller id: use one stable id for the agent's whole life, never\none per call, task or topic (good: `claude-opus-5-5`, `gpt-5.6`, with a\nstable instance suffix if concurrent; bad: `b1-review`). Caller-asserted\nand unverified; callers sharing an id share soft locks and can release\neach other's.",
           "maxLength": 16384,
           "type": "string"
         },

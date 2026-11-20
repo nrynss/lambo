@@ -213,6 +213,9 @@ pub struct LayeredHit {
     /// it (`[selection] skip_redundant`), in skip order; empty otherwise.
     /// Its block names them (`also <id>`).
     pub skipped_redundant: Vec<crate::recall::redundancy::RedundantSkip>,
+    /// #146: up to three durable display names bound to this hit's concept
+    /// in its session, in normalized-key order; empty when unnamed.
+    pub names: Vec<String>,
 }
 
 /// The answer of [`Memory::recall_layered`](crate::Memory::recall_layered):
@@ -295,6 +298,7 @@ impl LayeredRecall {
                 companion_of: d.companion_of.clone(),
                 possibly_superseded_by: d.possibly_superseded_by,
                 skipped_redundant: d.skipped_redundant.clone(),
+                names: d.names.clone(),
             })
             .collect();
         Self {
@@ -750,6 +754,8 @@ where
         // #181: what the hit's own session skipped as redundant with it;
         // those ids belong to the hit's session, like its own.
         meta.extend(crate::recall::redundancy::also_meta(&d.skipped_redundant));
+        // #146: durable names belong to the hit's session, like its id.
+        meta.extend(format::names_meta(&d.names));
         for a in &also {
             meta.push(format!(
                 "also {} in {}",
@@ -898,6 +904,7 @@ where
             companion_of: d.companion_of.clone(),
             possibly_superseded_by: d.possibly_superseded_by,
             skipped_redundant: d.skipped_redundant.clone(),
+            names: d.names.clone(),
         })
         .collect();
     LayeredRecall {

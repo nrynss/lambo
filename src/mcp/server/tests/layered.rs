@@ -950,3 +950,192 @@ async fn a_contradiction_of_a_layer_concept_is_refused_as_cross_session() {
     s.mem.close().await.expect("close");
     general.mem.close().await.expect("close general");
 }
+
+/// #146: a merged layered recall renders durable names in the context block
+/// (`names [...]`) and exposes an additive `hits[].names` array in
+/// `structuredContent` for named hits from both the primary session and its
+/// shared layers, while unnamed hits omit `names`.
+#[tokio::test]
+async fn layered_recall_surfaces_durable_names_in_context_and_structured_hits() {
+    let (s, general, _source) = project_and_general("layered-names").await;
+    let d1 = call(
+        &s,
+        "lambo_derive",
+        json!({
+            "agent_id": "agent-a",
+            "concepts": [{
+                "content": "worktree branches keep durable names visible in merged recall",
+                "concept_type": "logic",
+                "name": "worktree-merge-rule"
+            }]
+        }),
+    )
+    .await;
+    assert_eq!(d1.is_error, Some(false), "{d1:?}");
+    let d2 = call(
+        &s,
+        "lambo_derive",
+        json!({
+            "agent_id": "agent-a",
+            "scope": "general",
+            "concepts": [{
+                "content": "worktree branches are always named in general",
+                "concept_type": "constraint",
+                "name": "global-worktree-rule"
+            }]
+        }),
+    )
+    .await;
+    assert_eq!(d2.is_error, Some(false), "{d2:?}");
+    crate::test_util::seed_layer_match(
+        general.memory(),
+        "worktree branches are always named in general",
+        "worktree branches",
+    )
+    .await;
+
+    let out = recall(&s, json!({"query": "worktree branches"})).await;
+    assert_eq!(out.is_error, Some(false), "{out:?}");
+    let payload = structured(&out);
+    let context = payload["context"].as_str().expect("context");
+    assert!(
+        context.contains("names [\"worktree-merge-rule\"]"),
+        "primary durable name missing from layered context: {context}"
+    );
+    assert!(
+        context.contains("from general, names [\"global-worktree-rule\"]"),
+        "layer durable name missing from layered context: {context}"
+    );
+
+    let hits = payload["hits"].as_array().expect("hits");
+    let primary_named = hits
+        .iter()
+        .find(|h| {
+            h["content"] == json!("worktree branches keep durable names visible in merged recall")
+        })
+        .expect("primary named hit");
+    assert_eq!(primary_named["names"], json!(["worktree-merge-rule"]));
+    let layer_named = hits
+        .iter()
+        .find(|h| h["content"] == json!("worktree branches are always named in general"))
+        .expect("layer named hit");
+    assert_eq!(layer_named["session"], json!("general"));
+    assert_eq!(layer_named["names"], json!(["global-worktree-rule"]));
+    let unnamed = hits
+        .iter()
+        .find(|h| h["content"] == json!(PROJECT_FACT))
+        .expect("unnamed project hit");
+    assert!(
+        unnamed.get("names").is_none(),
+        "unnamed hit must omit `names`: {unnamed}"
+    );
+    let unnamed_layer = hits
+        .iter()
+        .find(|h| h["content"] == json!(GENERAL_RULING))
+        .expect("unnamed layer hit");
+    assert!(
+        unnamed_layer.get("names").is_none(),
+        "unnamed layer hit must omit `names`: {unnamed_layer}"
+    );
+
+    // Single-scope recall through `LayeredRecall::single` preserves
+    // `hits[].names` on the named hit and omits `names` on unnamed hits.
+    let scoped = recall(
+        &s,
+        json!({"query": "worktree branches", "scope": "general"}),
+    )
+    .await;
+    assert_eq!(scoped.is_error, Some(false), "{scoped:?}");
+    let scoped_payload = structured(&scoped);
+    let scoped_context = scoped_payload["context"].as_str().expect("context");
+    assert!(
+        scoped_context.contains("names [\"global-worktree-rule\"]"),
+        "scoped durable name missing from context: {scoped_context}"
+    );
+    assert!(
+        !scoped_context.contains("from general"),
+        "single-scope recall should not carry `from general`: {scoped_context}"
+    );
+    let scoped_hits = scoped_payload["hits"].as_array().expect("hits");
+    let scoped_named = scoped_hits
+        .iter()
+        .find(|h| h["content"] == json!("worktree branches are always named in general"))
+        .expect("scoped named hit");
+    assert_eq!(scoped_named["session"], json!("general"));
+    assert_eq!(scoped_named["names"], json!(["global-worktree-rule"]));
+    let scoped_unnamed = scoped_hits
+        .iter()
+        .find(|h| h["content"] == json!(GENERAL_RULING))
+        .expect("scoped unnamed hit");
+    assert!(
+        scoped_unnamed.get("names").is_none(),
+        "scoped unnamed hit must omit `names`: {scoped_unnamed}"
+    );
+
+    s.mem.close().await.expect("close");
+    general.mem.close().await.expect("close general");
+}
+
+/// #146: an unlayered server going through `LayeredRecall::single` exposes
+/// `hits[].names` on named hits and omits `names` on unnamed hits.
+#[tokio::test]
+async fn unlayered_recall_surfaces_durable_names_in_context_and_structured_hits() {
+    let plain = server("unlayered-names").await;
+    let d = call(
+        &plain,
+        "lambo_derive",
+        json!({
+            "agent_id": "agent-a",
+            "concepts": [
+                {
+                    "content": "worktree branches keep durable names visible in unlayered recall",
+                    "concept_type": "logic",
+                    "name": "unlayered-worktree-rule"
+                },
+                {
+                    "content": PROJECT_FACT,
+                    "concept_type": "logic"
+                }
+            ]
+        }),
+    )
+    .await;
+    assert_eq!(d.is_error, Some(false), "{d:?}");
+
+    let out = recall(&plain, json!({"query": "worktree"})).await;
+    assert_eq!(out.is_error, Some(false), "{out:?}");
+    let payload = structured(&out);
+    let context = payload["context"].as_str().expect("context");
+    assert!(
+        context.contains("names [\"unlayered-worktree-rule\"]"),
+        "durable name missing from unlayered context: {context}"
+    );
+
+    let hits = payload["hits"].as_array().expect("hits");
+    let named = hits
+        .iter()
+        .find(|h| {
+            h["content"]
+                == json!("worktree branches keep durable names visible in unlayered recall")
+        })
+        .expect("named unlayered hit");
+    assert_eq!(named["names"], json!(["unlayered-worktree-rule"]));
+    assert!(
+        named.get("session").is_none(),
+        "unlayered hit must omit `session`: {named}"
+    );
+    let unnamed = hits
+        .iter()
+        .find(|h| h["content"] == json!(PROJECT_FACT))
+        .expect("unnamed unlayered hit");
+    assert!(
+        unnamed.get("names").is_none(),
+        "unnamed unlayered hit must omit `names`: {unnamed}"
+    );
+    assert!(
+        unnamed.get("session").is_none(),
+        "unlayered hit must omit `session`: {unnamed}"
+    );
+
+    plain.mem.close().await.expect("close");
+}

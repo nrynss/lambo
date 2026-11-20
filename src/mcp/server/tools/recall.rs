@@ -340,6 +340,11 @@ impl LamboServer {
                     if let Some(skips) = crate::recall::redundancy::copy_skips_json(&lh.also) {
                         map.insert("also_skipped_redundant".into(), skips);
                     }
+                    // #146: additive, on hits carrying durable names only, so
+                    // unnamed hits keep the 0.5.0 key set byte-identical.
+                    if !lh.names.is_empty() {
+                        map.insert("names".into(), json!(lh.names));
+                    }
                 }
                 hit
             })
