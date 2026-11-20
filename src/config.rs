@@ -1069,6 +1069,118 @@ mod tests {
         );
     }
 
+    /// #277: the macOS onboarding kit's starter config, which people copy
+    /// verbatim, parses with every key it sets, and its `[serve]` layout
+    /// resolves the way the guide (`docs/reference/macos.mdx`) says: Solo,
+    /// SQLite, candle on Metal with keep-warm left at auto, `general` layered
+    /// under every other pinned session, `general-usage` as the `/mcp`
+    /// default, and a `[web]` that serves only pinned sessions.
+    #[test]
+    fn macos_solo_starter_config_parses() {
+        let raw = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/examples/macos-solo/lambo.toml"
+        ));
+        let f = LamboFile::from_toml_str(raw).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(f.promotion_policy, Some(PromotionPolicy::Solo));
+        assert_eq!(f.canonization_supersede, None);
+
+        assert_eq!(f.store.kind, StoreKind::Sqlite);
+        assert_eq!(
+            f.store.path.as_deref(),
+            Some("/Users/USERNAME/.local/share/lambo/lambo.db")
+        );
+        assert_eq!(f.store.vector_dim, None);
+
+        assert_eq!(f.embedder.kind, EmbedderKind::Candle);
+        assert_eq!(f.embedder.device.as_deref(), Some("metal"));
+        assert_eq!(f.embedder.dim, 1024);
+        // The battery note leaves keep_warm_secs commented out: auto.
+        assert_eq!(f.embedder.keep_warm_secs, None);
+        assert_eq!(f.embedder.llama_url, None);
+        assert_eq!(f.embedder.repo, None);
+
+        let pinned = ["general", "general-usage", "myapp"].map(String::from);
+        assert_eq!(f.serve.sessions, pinned);
+        assert_eq!(f.serve.default_session.as_deref(), Some("general-usage"));
+        assert!(f.serve.credentials.is_empty(), "loopback, no credential");
+        let layers = f.serve.resolve_layers(&pinned).expect("layers resolve");
+        assert!(layers.is_layer("general"));
+        for session in ["general-usage", "myapp"] {
+            let stack: Vec<_> = layers
+                .stack(session)
+                .iter()
+                .map(|l| l.session.as_str())
+                .collect();
+            assert_eq!(stack, ["general"], "{session}");
+        }
+        assert!(layers.stack("general").is_empty());
+
+        let projects: Vec<_> = f
+            .serve
+            .projects
+            .iter()
+            .map(|p| (p.path.as_str(), p.session.as_str()))
+            .collect();
+        assert_eq!(
+            projects,
+            [("~/work/myapp", "myapp"), ("~/work/myapp-*", "myapp")]
+        );
+        for p in &f.serve.projects {
+            assert!(f.serve.sessions.contains(&p.session), "{p:?} is pinned");
+        }
+
+        assert_eq!(f.web.sessions, ["general-usage", "myapp", "general"]);
+        for s in &f.web.sessions {
+            assert!(f.serve.sessions.contains(s), "[web] serves pinned {s}");
+        }
+        assert!(f.web.list_sessions);
+        assert!(f.web.credentials.is_empty());
+    }
+
+    /// #277: the starter config's `[[serve.projects]]` pair sends the
+    /// repository, its subdirectories and its `myapp-*` sibling worktrees to
+    /// `myapp`, and anything else to `general-usage`, with `~` expanded
+    /// against an injected home (never the real `$HOME`).
+    #[test]
+    fn macos_solo_starter_config_maps_worktrees_to_their_project() {
+        use crate::config::SessionSource;
+        let raw = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/examples/macos-solo/lambo.toml"
+        ));
+        let f = LamboFile::from_toml_str(raw).unwrap();
+        let home = crate::test_util::ScratchDir::new("lambo-277-home");
+        for dir in ["work/myapp/src", "work/myapp-wt-1/src", "work/other"] {
+            std::fs::create_dir_all(home.join(dir)).unwrap();
+        }
+        let select = |rel: &str| {
+            let cwd = home.join(rel);
+            f.serve
+                .select_stdio_session_with(None, move || Ok(cwd), Some(&*home))
+                .unwrap_or_else(|e| panic!("{rel}: {e:?}"))
+        };
+        let repo = select("work/myapp/src");
+        assert_eq!(repo.session, "myapp");
+        assert_eq!(
+            repo.source,
+            SessionSource::Project {
+                path: "~/work/myapp".into()
+            }
+        );
+        let worktree = select("work/myapp-wt-1/src");
+        assert_eq!(worktree.session, "myapp");
+        assert_eq!(
+            worktree.source,
+            SessionSource::Project {
+                path: "~/work/myapp-*".into()
+            }
+        );
+        let other = select("work/other");
+        assert_eq!(other.session, "general-usage");
+        assert_eq!(other.source, SessionSource::DefaultSession);
+    }
+
     /// #18: the example's commented `[recall]` block is a working section
     /// once uncommented, and leaving it commented keeps the tier off.
     #[test]
