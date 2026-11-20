@@ -22,13 +22,13 @@
   `uptime_secs` per session (ignoring non-integer and boolean values), and
   `Ledger.restart_times()` returns their chronologically sorted union.
   `scripts/observability/recall_first.py` groups each agent's calls by
-  `(agent_id, session)` and splits work sessions only on that session's
-  restarts so interleaved heartbeats, restarts in another session, or legacy
-  session-less heartbeats do not distort recall-first metrics. Its `--json`
-  output keeps `restarts` and adds `session` on each work-session row,
-  `restarts_by_session` for named sessions, and `restarts_unspecified_session`
-  for legacy session-less restarts (preventing collision with a literal
-  `"<unspecified>"` session name).
+  `(agent_id, session)` and splits work sessions on that session's restarts and
+  idle gaps exceeding `--gap-minutes`, so interleaved heartbeats, restarts in
+  another session, or legacy session-less heartbeats do not distort
+  recall-first metrics. Its `--json` output keeps `restarts` and adds `session`
+  on each work-session row, `restarts_by_session` for named sessions, and
+  `restarts_unspecified_session` for legacy session-less restarts (preventing
+  collision with a literal `"<unspecified>"` session name).
 
 ## 0.14.0 (2026-11-20)
 
