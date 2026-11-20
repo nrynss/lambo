@@ -41,6 +41,12 @@ Research experiments and their adoption decisions are indexed in
 | [`0.5.0-vs-0.4.0/`](0.5.0-vs-0.4.0/) | The full 0.4.0 vs 0.5.0 suite on the release assets. Sequential latency is unchanged with identical top-8 results, and startup is 4× faster. Concurrent writes: 0.4.0 failed 253 of 519 at 8 agents and 1,441 of 2,009 at 16; 0.5.0 failed 0 of both. Replay of 330 real writes is indistinguishable from 0.4.0 against itself. Crash behaviour is the same. A proxy's footprint drops from 90 MB to 6.5 MB. |
 | [`0.6.0-vs-0.5.0/`](0.6.0-vs-0.5.0/) | The re-pin gate for 0.6.0 on the Linux CUDA rig. Replay of 330 real writes is indistinguishable from 0.5.0 against itself, recall results are identical, and neither build fails a write at 8 or 16 agents. One regression: queries with a structural marker (`blast radius`, `depends on`) take about 280 ms instead of 21 ms (#165). |
 
+## Production dogfood helpfulness audit
+
+| Path | What it shows |
+|---|---|
+| [`dogfood-helpfulness-2026-11/`](dogfood-helpfulness-2026-11/) | Sanitized 92.5-day read-only audit (`2026-08-19` to `2026-11-20`, versions `0.2.2`–`0.13.0`) across `5,248` ledger calls, `7,594` concepts across `8` sessions (`63.9%` non-`lambo`, anonymized as `project-a`–`project-e`), `1,883` `Dependency` edges (`624` cross-agent, `181` cross-agent & >24h), `260` local sessions across Claude Code, Codex, and Cursor (`657` recalls; `50.8%` `0.6.0+` ID follow-through), and a stratified `n = 74` causal helpfulness audit (`45.9%` Horvitz-Thompson population-weighted / `50.0%` unweighted clearly helpful). Includes the `#177` `ledger_drift.py` replay (`11` alarms) and four documented friction modes driving `#279`, `#280`, `#174`, `#254`, and `#277`. Private project names, non-`lambo` concept IDs, and local paths withheld. |
+
 ## CockroachDB
 
 | Path | What it shows |
