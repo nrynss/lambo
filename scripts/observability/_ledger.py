@@ -95,9 +95,10 @@ confidently wrong number.
 Two quiet dependencies on the SHAPE of `ts`, written down here because both are
 invisible at their use site and both break silently:
 
-  1. **String sort is timestamp sort** (`Ledger.sorted_calls`, `restart_times`,
-     `queued_lines` — and only those three; `binaries` groups by
-     `(version, git_sha)` and sorts by heartbeat count, so it never reads `ts`).
+  1. **String sort is timestamp sort** (`Ledger.sorted_calls`,
+     `restart_times_by_session` / `restart_times`, `queued_lines` — and only
+     those three; `binaries` groups by `(version, git_sha)` and sorts by
+     heartbeat count, so it never reads `ts`).
      True only while every stamp is the same fixed-offset RFC3339 form chrono's
      `to_rfc3339()` emits — same field widths, same `+00:00` suffix. A producer
      that switched to `Z`, to local offsets, or to a variable number of
@@ -166,7 +167,8 @@ MERGE_THRESHOLD = 0.85
 #: The ledger has no session-boundary marker — `serve` owns one lambo session
 #: for its whole life, while an *agent's* working stretches come and go — so an
 #: idle gap is the honest proxy. A process restart is the other boundary, and
-#: that one IS observable (see `Ledger.restart_times`).
+#: that one IS observable per session (see `Ledger.restart_times_by_session` and
+#: `Ledger.restart_times`).
 DEFAULT_SESSION_GAP_MINUTES = 30
 
 
@@ -176,6 +178,17 @@ class LedgerError(Exception):
 
 #: Fractional-second digits `datetime.fromisoformat` accepts before Python 3.11.
 _FRACTION_DIGITS = 6
+
+
+def session_key(record: dict[str, Any]) -> str | None:
+    """Top-level `session` of a ledger line, or `None` when absent/invalid.
+
+    Since #32 (0.3.x), `Ledger::for_session` stamps `session` on every `call`,
+    `completion`, and `stats` line so multiple sessions can share one ledger
+    file. Pre-#32 lines lacking `session` share the single legacy `None` bucket.
+    """
+    session = record.get("session")
+    return session if isinstance(session, str) and session else None
 
 
 def parse_ts(raw: str) -> dt.datetime:
@@ -274,24 +287,51 @@ class Ledger:
     def agents(self) -> list[str]:
         return sorted({c.get("agent_id", "?") for c in self.calls})
 
-    def restart_times(self) -> list[dt.datetime]:
-        """When the serve process restarted, from the heartbeat's uptime.
+    def restart_times_by_session(self) -> dict[str | None, list[dt.datetime]]:
+        """Per-session serve restarts, from each session's heartbeat uptime.
 
-        A heartbeat whose `uptime_secs` is not greater than its predecessor's
-        can only mean a new process. That is the one work-session boundary the
-        ledger states rather than infers — and, with `git_sha`, the one that
-        says *which binary* the next stretch came from.
+        In a shared multi-session ledger, each session's `serve` daemon emits
+        its own monotonic `uptime_secs`, so heartbeats from concurrent sessions
+        interleave in the file. Tracking `uptime_secs` monotonicity
+        (`uptime <= previous`) per `session` — with pre-#32 heartbeats lacking
+        `session` grouped in the `None` bucket — avoids false restarts on
+        cross-session alternation while catching every true per-session reset.
+
+        Returns a mapping from session key (`str` or `None`) to sorted restart
+        timestamps, including only sessions that observed at least one restart.
+        Non-integer and boolean `uptime_secs` values are ignored.
         """
-        out: list[dt.datetime] = []
-        previous: int | None = None
+        out: dict[str | None, list[dt.datetime]] = {}
+        previous: dict[str | None, int] = {}
         for hb in sorted(self.heartbeats, key=lambda r: r["ts"]):
             uptime = hb.get("uptime_secs")
-            if not isinstance(uptime, int):
+            if not (isinstance(uptime, int) and not isinstance(uptime, bool)):
                 continue
-            if previous is not None and uptime <= previous:
-                out.append(parse_ts(hb["ts"]))
-            previous = uptime
-        return out
+            session = session_key(hb)
+            prev = previous.get(session)
+            if prev is not None and uptime <= prev:
+                out.setdefault(session, []).append(parse_ts(hb["ts"]))
+            previous[session] = uptime
+        return {
+            session: sorted(out[session])
+            for session in sorted(out, key=lambda s: (s is None, s or ""))
+        }
+
+    def restart_times(self) -> list[dt.datetime]:
+        """When any serve process restarted, flattened across all sessions.
+
+        Returns the chronologically sorted union of the per-session restarts
+        from `restart_times_by_session()`. A heartbeat whose `uptime_secs` is
+        not greater than its own session's predecessor can only mean a new
+        process. That is the one work-session boundary the ledger states rather
+        than infers — and, with `git_sha`, the one that says *which binary* the
+        next stretch came from.
+        """
+        return sorted(
+            ts
+            for times in self.restart_times_by_session().values()
+            for ts in times
+        )
 
     def binaries(self) -> list[tuple[str, str, int]]:
         """`(version, git_sha, heartbeat_count)`, most heartbeats first.

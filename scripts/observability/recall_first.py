@@ -21,11 +21,16 @@ can quote:
     than the illustration above ("recalls once then derives six concepts complied
     once") admits, and it is named in the README's list of definitions that are
     choices. Shorten `--gap-minutes` to make the claim weaker.
-  * A **work session** is a stretch of one agent's calls with no gap longer than
-    --gap-minutes and no serve restart inside it. The ledger records no
-    agent-session boundary — `serve` holds one lambo session for its whole life
-    — so the gap is an explicit proxy; the restart is a fact, read off the
-    heartbeat's uptime resetting.
+  * A **work session** is a stretch of one agent's calls in one lambo session
+    with no gap longer than --gap-minutes and no serve restart for that session
+    inside it. The ledger records no agent-session boundary — `serve` holds one
+    lambo session for its whole life — so the gap is an explicit proxy; the
+    restart is a fact, read off each session's heartbeat uptime resetting
+    (`_ledger.Ledger.restart_times_by_session`). Grouping calls by
+    `(agent_id, session)` ensures a restart in session `beta` never splits a
+    work session in session `alpha` on a shared multi-session ledger; legacy
+    pre-#32 lines lacking `session` share the `None` bucket and behave
+    identically to a single-session ledger.
 
 Also reported, because it is the number C5 measured and the one directly
 comparable to `evidence/swarm/`: **`derives_without_prior_recall`** — derives with
@@ -49,55 +54,65 @@ from _ledger import RECALL_TOOL, WRITE_TOOLS
 
 
 def analyse(ledger: _ledger.Ledger, gap_minutes: float) -> dict[str, Any]:
+    restarts_by_session = ledger.restart_times_by_session()
     restarts = ledger.restart_times()
     calls = ledger.sorted_calls()
 
     per_agent: dict[str, dict[str, Any]] = {}
     for agent in ledger.agents():
         mine = [c for c in calls if c.get("agent_id") == agent]
-        sessions = list(_ledger.work_sessions(mine, gap_minutes, restarts))
+        by_session: dict[str | None, list[dict[str, Any]]] = {}
+        for call in mine:
+            by_session.setdefault(_ledger.session_key(call), []).append(call)
+
         rows = []
-        for session in sessions:
-            recalled = False
-            sequences = 0
-            compliant = 0
-            derives_without_recall = 0
-            in_sequence = False
-            for call in session:
-                tool = call.get("tool")
-                ok = _ledger.succeeded(call)
-                if tool == RECALL_TOOL and ok:
-                    recalled = True
-                    in_sequence = False
-                    continue
-                if tool in WRITE_TOOLS and ok:
-                    if not in_sequence:
-                        sequences += 1
-                        in_sequence = True
-                        if recalled:
-                            compliant += 1
-                    if tool == "lambo_derive" and not recalled:
-                        derives_without_recall += 1
-                    continue
-                # Any other call (a read, or a failed write) ends the run
-                # without starting one.
+        for lambo_session, session_calls in by_session.items():
+            boundaries = restarts_by_session.get(lambo_session, [])
+            for work_session in _ledger.work_sessions(
+                session_calls, gap_minutes, boundaries
+            ):
+                recalled = False
+                sequences = 0
+                compliant = 0
+                derives_without_recall = 0
                 in_sequence = False
-            rows.append(
-                {
-                    "started": session[0]["ts"],
-                    "ended": session[-1]["ts"],
-                    "calls": len(session),
-                    "write_sequences": sequences,
-                    "recall_first_sequences": compliant,
-                    "derives_without_prior_recall": derives_without_recall,
-                    # `succeeded()` like every other predicate here: a session
-                    # that opened with a recall that ERRORED did not open with a
-                    # recall, and counting it as one is the same overstatement
-                    # every other check in this kit avoids.
-                    "opened_with_recall": session[0].get("tool") == RECALL_TOOL
-                    and _ledger.succeeded(session[0]),
-                }
-            )
+                for call in work_session:
+                    tool = call.get("tool")
+                    ok = _ledger.succeeded(call)
+                    if tool == RECALL_TOOL and ok:
+                        recalled = True
+                        in_sequence = False
+                        continue
+                    if tool in WRITE_TOOLS and ok:
+                        if not in_sequence:
+                            sequences += 1
+                            in_sequence = True
+                            if recalled:
+                                compliant += 1
+                        if tool == "lambo_derive" and not recalled:
+                            derives_without_recall += 1
+                        continue
+                    # Any other call (a read, or a failed write) ends the run
+                    # without starting one.
+                    in_sequence = False
+                rows.append(
+                    {
+                        "session": lambo_session,
+                        "started": work_session[0]["ts"],
+                        "ended": work_session[-1]["ts"],
+                        "calls": len(work_session),
+                        "write_sequences": sequences,
+                        "recall_first_sequences": compliant,
+                        "derives_without_prior_recall": derives_without_recall,
+                        # `succeeded()` like every other predicate here: a session
+                        # that opened with a recall that ERRORED did not open with a
+                        # recall, and counting it as one is the same overstatement
+                        # every other check in this kit avoids.
+                        "opened_with_recall": work_session[0].get("tool") == RECALL_TOOL
+                        and _ledger.succeeded(work_session[0]),
+                    }
+                )
+        rows.sort(key=lambda r: (r["started"], r["ended"], r["session"] or ""))
         seqs = sum(r["write_sequences"] for r in rows)
         good = sum(r["recall_first_sequences"] for r in rows)
         per_agent[agent] = {
@@ -115,9 +130,21 @@ def analyse(ledger: _ledger.Ledger, gap_minutes: float) -> dict[str, Any]:
 
     total_seq = sum(a["write_sequences"] for a in per_agent.values())
     total_good = sum(a["recall_first_sequences"] for a in per_agent.values())
+    restarts_by_session_json = {
+        sess: [t.isoformat() for t in times]
+        for sess, times in sorted(
+            (item for item in restarts_by_session.items() if item[0] is not None),
+            key=lambda item: item[0],
+        )
+    }
+    restarts_unspecified = [
+        t.isoformat() for t in restarts_by_session.get(None, [])
+    ]
     return {
         "gap_minutes": gap_minutes,
         "restarts": [r.isoformat() for r in restarts],
+        "restarts_by_session": restarts_by_session_json,
+        "restarts_unspecified_session": restarts_unspecified,
         "agents": per_agent,
         "total_write_sequences": total_seq,
         "total_recall_first_sequences": total_good,
