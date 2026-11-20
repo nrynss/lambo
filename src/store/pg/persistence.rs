@@ -26,7 +26,7 @@ use super::pool::tx_retry;
 use super::sql::{
     DELETED_ROW_SESSIONS_SQL, ERASE_CROSS_SESSION_EDGES_SQL, ERASE_LEASE_FOR_UPDATE_SQL,
     ERASE_SESSION_ROW_FOR_UPDATE_SQL, ERASE_STATEMENTS, LEASE_TOKEN_FOR_SHARE_SQL,
-    UPSERT_SESSION_ROW_SQL,
+    STORE_HEALTH_SQL, UPSERT_SESSION_ROW_SQL,
 };
 #[cfg(feature = "fixtures")]
 use super::sql::{UPSERT_RESERVATION_SQL, UPSERT_SYNONYM_SQL};
@@ -304,6 +304,150 @@ impl<D: Dialect> PgStore<D> {
             flush_lag_ms: u64::try_from(flush_lag_ms).unwrap_or(u64::MAX),
             log_depth: u64::try_from(log_depth).unwrap_or(u64::MAX),
         }))
+    }
+
+    pub(super) async fn read_store_health(
+        &self,
+    ) -> Result<Vec<crate::store::SessionHealth>, StoreError> {
+        use chrono::{DateTime, Utc};
+        let pool = &self.pool().await?;
+        let rows = sqlx::query(STORE_HEALTH_SQL)
+            .bind(ERASED_HOLDER)
+            .bind(crate::store::lease::RELEASED_HOLDER)
+            .fetch_all(pool)
+            .await
+            .map_err(backend)?;
+
+        let non_neg = |val: i64, field: &str, sid: &str| -> Result<u64, StoreError> {
+            u64::try_from(val).map_err(|_| {
+                StoreError::Backend(format!(
+                    "store health: negative {field} ({val}) for session {sid:?}"
+                ))
+            })
+        };
+
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            let session_id: String = row
+                .try_get("session_id")
+                .map_err(|e| backend(format!("read store health: session_id: {e}")))?;
+            let canon_unknown: i64 = row
+                .try_get("canon_unknown")
+                .map_err(|e| backend(format!("read store health: canon_unknown: {e}")))?;
+            if canon_unknown != 0 {
+                return Err(StoreError::Backend(format!(
+                    "store health: session {session_id:?} has {canon_unknown} concept(s) with an \
+                     unknown canonization_status"
+                )));
+            }
+
+            let concept_count = non_neg(
+                row.try_get("concept_count")
+                    .map_err(|e| backend(format!("read store health: concept_count: {e}")))?,
+                "concept_count",
+                &session_id,
+            )?;
+            let edge_count = non_neg(
+                row.try_get("edge_count")
+                    .map_err(|e| backend(format!("read store health: edge_count: {e}")))?,
+                "edge_count",
+                &session_id,
+            )?;
+            let embedded_count = non_neg(
+                row.try_get("embedded_count")
+                    .map_err(|e| backend(format!("read store health: embedded_count: {e}")))?,
+                "embedded_count",
+                &session_id,
+            )?;
+            let canonization = crate::store::CanonizationCounts {
+                none: non_neg(
+                    row.try_get("canon_none")
+                        .map_err(|e| backend(format!("read store health: canon_none: {e}")))?,
+                    "canon_none",
+                    &session_id,
+                )?,
+                candidate: non_neg(
+                    row.try_get("canon_candidate")
+                        .map_err(|e| backend(format!("read store health: canon_candidate: {e}")))?,
+                    "canon_candidate",
+                    &session_id,
+                )?,
+                venerable: non_neg(
+                    row.try_get("canon_venerable")
+                        .map_err(|e| backend(format!("read store health: canon_venerable: {e}")))?,
+                    "canon_venerable",
+                    &session_id,
+                )?,
+                canonical: non_neg(
+                    row.try_get("canon_canonical")
+                        .map_err(|e| backend(format!("read store health: canon_canonical: {e}")))?,
+                    "canon_canonical",
+                    &session_id,
+                )?,
+            };
+
+            let lease_holder: Option<String> = row
+                .try_get("lease_holder")
+                .map_err(|e| backend(format!("read store health: lease_holder: {e}")))?;
+            let lease_acquired: Option<DateTime<Utc>> = row
+                .try_get("lease_acquired_at")
+                .map_err(|e| backend(format!("read store health: lease_acquired_at: {e}")))?;
+            let lease_expires: Option<DateTime<Utc>> = row
+                .try_get("lease_expires_at")
+                .map_err(|e| backend(format!("read store health: lease_expires_at: {e}")))?;
+            let lease = match (lease_holder, lease_acquired, lease_expires) {
+                (Some(holder), Some(acquired_at), Some(expires_at)) => {
+                    Some(crate::store::ActiveSessionLease {
+                        holder,
+                        acquired_at,
+                        expires_at,
+                    })
+                }
+                (None, None, None) => None,
+                _ => {
+                    return Err(StoreError::Backend(format!(
+                        "store health: inconsistent active lease columns for session {session_id:?}"
+                    )));
+                }
+            };
+
+            let ts_cols = [
+                "max_interaction_at",
+                "max_concept_at",
+                "max_edge_created_at",
+                "max_edge_reinforced_at",
+                "max_event_at",
+            ];
+            let mut last_write_at: Option<DateTime<Utc>> = None;
+            for col in ts_cols {
+                let ts: Option<DateTime<Utc>> = row
+                    .try_get(col)
+                    .map_err(|e| backend(format!("read store health: {col}: {e}")))?;
+                if let Some(parsed) = ts {
+                    last_write_at = Some(match last_write_at {
+                        Some(prev) => prev.max(parsed),
+                        None => parsed,
+                    });
+                }
+            }
+
+            out.push(crate::store::SessionHealth {
+                session_id: SessionId(session_id),
+                concept_count,
+                edge_count,
+                embedded_count,
+                canonization,
+                lease,
+                last_write_at,
+            });
+        }
+
+        // Normalize order in Rust by UTF-8 byte order for parity with
+        // MemoryStore, SqliteStore, and CockroachStore regardless of the
+        // PostgreSQL database's default locale collation (e.g. en_US.utf8).
+        out.sort_by(|a, b| a.session_id.0.cmp(&b.session_id.0));
+
+        Ok(out)
     }
 
     pub(super) async fn flush_batch(

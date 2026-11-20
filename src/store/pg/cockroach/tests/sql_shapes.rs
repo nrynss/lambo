@@ -699,3 +699,23 @@ fn keyword_sql_placeholder_counts_and_order() {
     assert!(sql.contains("strpos(lower(content), $2) > 0"));
     assert!(!sql.contains("ILIKE") && !sql.contains("LIKE"), "{sql}");
 }
+
+#[test]
+fn store_health_sql_uses_store_clock_and_integer_counts() {
+    let sql = crate::store::pg::sql::STORE_HEALTH_SQL;
+    assert_eq!(
+        placeholder_max(sql),
+        2,
+        "binds ERASED_HOLDER and RELEASED_HOLDER"
+    );
+    assert!(sql.contains("SELECT now() AS now_ts"), "{sql}");
+    assert!(
+        sql.contains("COUNT(CASE WHEN embedding IS NOT NULL THEN 1 END)"),
+        "{sql}"
+    );
+    assert!(
+        !sql.contains("SUM("),
+        "SUM(INT) returns DECIMAL on CockroachDB; use COUNT(CASE WHEN ...) instead: {sql}"
+    );
+    assert!(sql.contains("ORDER BY a.session_id ASC"), "{sql}");
+}

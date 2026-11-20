@@ -284,6 +284,7 @@
 #![allow(clippy::explicit_auto_deref)]
 
 mod codec;
+mod health;
 mod leases;
 mod meta;
 mod persistence;
@@ -396,6 +397,51 @@ impl SqliteStore {
             options
                 .journal_mode(SqliteJournalMode::Wal)
                 .busy_timeout(Duration::from_secs(8))
+        };
+        Ok(Self::new(options))
+    }
+
+    /// Open an existing SQLite database strictly read-only without creating a
+    /// missing file, rewriting the journal header, or setting `immutable` (so
+    /// a live WAL-mode database with an active writer remains readable).
+    ///
+    /// Used by read-only inspection commands such as `lambo stats --store`
+    /// (#248): a nonexistent path fails without creating a file on disk, a
+    /// pre-existing unprovisioned file is refused by `preflight_schema`
+    /// without being mutated to WAL mode, and a read-only (`0444`) file can be
+    /// inspected without write permission.
+    pub fn connect_existing_read_only(path: &str) -> Result<Self, StoreError> {
+        let options = SqliteConnectOptions::from_str(path)
+            .map_err(|e| StoreError::Backend(format!("sqlite connect options {path:?}: {e}")))?
+            .create_if_missing(false)
+            .read_only(true);
+        let options = if Self::is_in_memory_uri(path) {
+            options
+        } else {
+            let file = options.get_filename();
+            match file.try_exists() {
+                Ok(true) => {}
+                Ok(false) => {
+                    return Err(StoreError::Backend(format!(
+                        "sqlite database file does not exist: {} (run `lambo provision` to \
+                         create and initialize a new store)",
+                        file.display()
+                    )));
+                }
+                Err(e) => {
+                    return Err(StoreError::Backend(format!(
+                        "sqlite database file cannot be accessed: {}: {e}",
+                        file.display()
+                    )));
+                }
+            }
+            if file.is_dir() {
+                return Err(StoreError::Backend(format!(
+                    "sqlite database path is a directory, not a file: {}",
+                    file.display()
+                )));
+            }
+            options.busy_timeout(Duration::from_secs(8))
         };
         Ok(Self::new(options))
     }
@@ -616,6 +662,10 @@ impl GraphStore for SqliteStore {
         session: &SessionId,
     ) -> Result<Option<SessionFlushStats>, StoreError> {
         self.select_flush_stats(session).await
+    }
+
+    async fn store_health(&self) -> Result<Vec<crate::store::SessionHealth>, StoreError> {
+        self.read_store_health().await
     }
 
     async fn flush(&self, batch: &MutationBatch, token: Option<u64>) -> Result<(), StoreError> {

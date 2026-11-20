@@ -6,8 +6,88 @@
 
 use super::caps::{check_size_cli, require_nonempty, CliError};
 use super::load_reader_graph;
-use crate::store::GraphStore;
+use crate::store::{GraphStore, SessionHealth};
 use crate::types::{CanonizationStatus, EmbeddingContract};
+use chrono::SecondsFormat;
+
+/// Store-wide read-only health overview across every non-erased session (#248).
+///
+/// Preflights the store schema (read-only), takes no lease, constructs no
+/// embedder, and reports per-session counts, raw vector coverage (all concepts,
+/// including images and recent writes), canonization status breakdown, live
+/// writer lease holder and expiry (or `"no writer"`), and last-write time.
+pub async fn run_store(store: &dyn GraphStore, json: bool) -> Result<String, CliError> {
+    store
+        .preflight_schema()
+        .await
+        .map_err(|e| CliError::Runtime(e.to_string()))?;
+    let sessions = store
+        .store_health()
+        .await
+        .map_err(|e| CliError::Runtime(e.to_string()))?;
+    if json {
+        #[derive(serde::Serialize)]
+        struct StoreHealthReport<'a> {
+            session_count: usize,
+            sessions: &'a [SessionHealth],
+        }
+        serde_json::to_string_pretty(&StoreHealthReport {
+            session_count: sessions.len(),
+            sessions: &sessions,
+        })
+        .map_err(|e| CliError::Runtime(format!("serialize store health: {e}")))
+    } else {
+        Ok(format_store_health(&sessions))
+    }
+}
+
+fn format_store_health(sessions: &[SessionHealth]) -> String {
+    let plural = if sessions.len() == 1 {
+        "session"
+    } else {
+        "sessions"
+    };
+    let mut out = format!("store health ({} {plural}, read-only)", sessions.len());
+    if sessions.is_empty() {
+        out.push_str("\nno sessions in store");
+        return out;
+    }
+    for s in sessions {
+        let lease_str = match &s.lease {
+            Some(lease) => format!(
+                "{} (expires {})",
+                lease.holder,
+                lease
+                    .expires_at
+                    .to_rfc3339_opts(SecondsFormat::AutoSi, true)
+            ),
+            None => "no writer".to_string(),
+        };
+        let last_write_str = match s.last_write_at {
+            Some(ts) => ts.to_rfc3339_opts(SecondsFormat::AutoSi, true),
+            None => "none".to_string(),
+        };
+        out.push_str(&format!(
+            "\nsession '{}'\n\
+             \x20 concepts={} edges={} embedded={}/{}\n\
+             \x20 canonization: none={} candidate={} venerable={} canonical={}\n\
+             \x20 lease: {}\n\
+             \x20 last_write: {}",
+            s.session_id.0,
+            s.concept_count,
+            s.edge_count,
+            s.embedded_count,
+            s.concept_count,
+            s.canonization.none,
+            s.canonization.candidate,
+            s.canonization.venerable,
+            s.canonization.canonical,
+            lease_str,
+            last_write_str,
+        ));
+    }
+    out
+}
 
 /// Session health from the durable snapshot.
 pub async fn run(store: &dyn GraphStore, session: &str) -> Result<String, CliError> {
@@ -287,5 +367,172 @@ mod tests {
             calibration_line(None),
             "calibration=unknown (no stamped contract)"
         );
+    }
+
+    #[cfg(all(feature = "store-memory", feature = "fixtures"))]
+    #[tokio::test]
+    async fn run_store_formats_text_and_json_with_leases_coverage_and_erased_omission() {
+        use crate::store::lease::LeaseHolder;
+        use crate::types::{
+            AgentId, Concept, ConceptType, Edge, EdgeType, EmbeddingSource, GraphSnapshot,
+            Interaction, NodeId, SessionId, SourceModality, VectorOrigin,
+        };
+        use crate::MemoryStore;
+        use chrono::{TimeZone, Utc};
+        use std::time::Duration;
+
+        let store = MemoryStore::new();
+        let empty_text = run_store(&store, false).await.unwrap();
+        assert_eq!(
+            empty_text,
+            "store health (0 sessions, read-only)\nno sessions in store"
+        );
+        let empty_json: serde_json::Value =
+            serde_json::from_str(&run_store(&store, true).await.unwrap()).unwrap();
+        assert_eq!(empty_json["session_count"], 0);
+        assert_eq!(empty_json["sessions"], serde_json::json!([]));
+
+        let sid_a = SessionId::from("alpha");
+        let sid_b = SessionId::from("beta");
+        let sid_erased = SessionId::from("gone");
+        let i_a = NodeId::new();
+        let c1 = NodeId::new();
+        let c2 = NodeId::new();
+        let c3 = NodeId::new();
+        let t1 = Utc.timestamp_opt(1_700_000_010, 0).unwrap();
+        let t2 = Utc.timestamp_opt(1_700_000_020, 0).unwrap();
+        let t3 = Utc.timestamp_opt(1_700_000_099, 0).unwrap();
+
+        let mk_concept = |id, status, embedded, image, ts| Concept {
+            id,
+            session_id: sid_a.clone(),
+            content: format!("c-{id}"),
+            canonical_key: format!("c-{id}"),
+            concept_type: ConceptType::Entity,
+            origin_interaction: i_a,
+            origin_agent: AgentId::from("a"),
+            created_at: ts,
+            access_count: 0,
+            last_accessed: None,
+            gc_survived: 0,
+            human_confirmed: 0,
+            canonization_status: status,
+            blast_radius: None,
+            last_demotion_time: None,
+            embedding: if embedded { Some(vec![1.0]) } else { None },
+            embedding_source: if image {
+                Some(EmbeddingSource {
+                    modality: SourceModality::Image,
+                    origin: VectorOrigin::Client,
+                    sha256: None,
+                    mime: None,
+                })
+            } else {
+                None
+            },
+            chunk_group_id: None,
+        };
+
+        store
+            .seed(GraphSnapshot {
+                session_id: sid_a.clone(),
+                interactions: vec![Interaction {
+                    id: i_a,
+                    session_id: sid_a.clone(),
+                    agent_id: AgentId::from("a"),
+                    prompt_text: None,
+                    previous_id: None,
+                    created_at: t1,
+                    event_time: None,
+                }],
+                concepts: vec![
+                    mk_concept(c1, CanonizationStatus::Canonical, true, false, t1),
+                    mk_concept(c2, CanonizationStatus::Venerable, false, false, t2),
+                    mk_concept(c3, CanonizationStatus::Candidate, true, true, t2),
+                ],
+                edges: vec![Edge {
+                    id: NodeId::new(),
+                    session_id: sid_a.clone(),
+                    source: i_a,
+                    target: c1,
+                    edge_type: EdgeType::Derives,
+                    weight: 1.0,
+                    reinforcements: 1,
+                    created_at: t1,
+                    last_reinforced: t3,
+                    event_time: None,
+                }],
+                ..Default::default()
+            })
+            .unwrap();
+        store
+            .seed(GraphSnapshot {
+                session_id: sid_b.clone(),
+                ..Default::default()
+            })
+            .unwrap();
+        store
+            .seed(GraphSnapshot {
+                session_id: sid_erased.clone(),
+                ..Default::default()
+            })
+            .unwrap();
+
+        let holder_a = LeaseHolder {
+            agent: AgentId::from("writer-a"),
+            pid: 123,
+            host: "host-a".into(),
+            endpoint: None,
+        };
+        store
+            .acquire_lease(&sid_a, &holder_a, Duration::from_secs(60))
+            .await
+            .unwrap();
+        let eraser = LeaseHolder {
+            agent: AgentId::from("eraser"),
+            pid: 124,
+            host: "host-a".into(),
+            endpoint: None,
+        };
+        store.erase_session(&sid_erased, &eraser).await.unwrap();
+
+        let text = run_store(&store, false).await.unwrap();
+        assert!(
+            text.contains("store health (2 sessions, read-only)"),
+            "{text}"
+        );
+        assert!(text.contains("session 'alpha'"), "{text}");
+        assert!(text.contains("concepts=3 edges=1 embedded=2/3"), "{text}");
+        assert!(
+            text.contains("canonization: none=0 candidate=1 venerable=1 canonical=1"),
+            "{text}"
+        );
+        assert!(text.contains(&holder_a.token()), "{text}");
+        assert!(text.contains("expires "), "{text}");
+        assert!(
+            text.contains(&format!(
+                "last_write: {}",
+                t3.to_rfc3339_opts(SecondsFormat::AutoSi, true)
+            )),
+            "{text}"
+        );
+        assert!(text.contains("session 'beta'"), "{text}");
+        assert!(text.contains("lease: no writer"), "{text}");
+        assert!(text.contains("last_write: none"), "{text}");
+        assert!(
+            !text.contains("gone"),
+            "erased session must be omitted: {text}"
+        );
+
+        let json: serde_json::Value =
+            serde_json::from_str(&run_store(&store, true).await.unwrap()).unwrap();
+        assert_eq!(json["session_count"], 2);
+        assert_eq!(json["sessions"][0]["session_id"], "alpha");
+        assert_eq!(json["sessions"][0]["embedded_count"], 2);
+        assert_eq!(json["sessions"][0]["concept_count"], 3);
+        assert_eq!(json["sessions"][0]["lease"]["holder"], holder_a.token());
+        assert_eq!(json["sessions"][1]["session_id"], "beta");
+        assert!(json["sessions"][1]["lease"].is_null());
+        assert!(json["sessions"][1]["last_write_at"].is_null());
     }
 }

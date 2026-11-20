@@ -6,7 +6,8 @@
 use crate::embed::{build_embedder, Embedder, EmbedderConfig, EmbedderKind};
 use crate::store::recall_tier::wrap_with_recall_tier;
 use crate::store::{
-    build_store, build_store_with_vector_dim, Capabilities, GraphStore, StoreConfig,
+    build_store_with_options, build_store_with_vector_dim, Capabilities, GraphStore,
+    StoreAccessMode, StoreConfig,
 };
 use crate::types::{EmbeddingContract, LamboError};
 use crate::LamboFile;
@@ -542,8 +543,25 @@ pub fn resolve_from_config_path(
 pub fn resolve_store_only(
     explicit: Option<&std::path::Path>,
 ) -> Result<Box<dyn GraphStore>, LamboError> {
+    resolve_store_only_with_access(explicit, StoreAccessMode::ReadWrite)
+}
+
+/// Store-only read-only resolution for inspection commands that must never
+/// create a missing SQLite file or rewrite its journal header (such as
+/// `lambo stats --store`, #248).
+pub fn resolve_store_only_read_only(
+    explicit: Option<&std::path::Path>,
+) -> Result<Box<dyn GraphStore>, LamboError> {
+    resolve_store_only_with_access(explicit, StoreAccessMode::ReadOnlyExisting)
+}
+
+fn resolve_store_only_with_access(
+    explicit: Option<&std::path::Path>,
+    access: StoreAccessMode,
+) -> Result<Box<dyn GraphStore>, LamboError> {
     let file = LamboFile::load_resolved(explicit)?;
-    let store = build_store(file.store).map_err(|e| LamboError::Config(e.to_string()))?;
+    let store = build_store_with_options(file.store, None, access)
+        .map_err(|e| LamboError::Config(e.to_string()))?;
     // #18: store-only verbs (provision, erase-session, recall-index backfill,
     // the readers) see the same tiered store a writer does, so an erase reaches
     // the recall index and a backfill has one to rebuild.

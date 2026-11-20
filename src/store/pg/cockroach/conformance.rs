@@ -1823,6 +1823,8 @@ async fn conformance_suite() {
     crate::store::pg::supersession_live::check_unreadable_reason(&store).await;
     // #198: the suspected-supersession edge.
     crate::store::pg::suspected_live::check_suspected_case(&store).await;
+    // #248: store-wide health overview.
+    crate::store::pg::health_live::check_store_health_case(&store).await;
     check_record_canonization_appends_and_is_idempotent(&store).await;
     check_corrupt_contract_row_load_errors(&store).await;
     check_unstamped_vector_candidates_are_empty_until_contract_commit(&store).await;
