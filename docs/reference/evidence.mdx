@@ -1,125 +1,165 @@
 ---
 title: "Evidence and evaluation"
-description: "Live cluster verification, vector recall benchmarks, and determinism proofs."
+description: "Release re-pin gates, recall calibration, cross-store parity, durability proofs, and negative research results."
 ---
 
-You do not have to trust claims on paper. You can verify every invariant against live CockroachDB clusters and raw logs in the `evidence/` directory.
+Every claim in Lambo's documentation maps to a raw capture, benchmark JSON, or test harness committed in [`evidence/`](https://github.com/nrynss/lambo/tree/main/evidence) or [`research/`](https://github.com/nrynss/lambo/tree/main/research). Captures are kept verbatim as recorded rather than retouched after the fact; negative findings and regressions caught by the gates stay on the record beside the wins.
 
-## Vector recall vs search beam size
+## Release re-pin gates and performance
 
-CockroachDB uses C-SPANN approximate nearest neighbour search for vector indexes. You must balance retrieval speed against recall quality.
+Before re-pinning the daily dogfood writers (Apple Silicon M3 Pro Metal and Linux RTX 4070 SUPER CUDA), each release runs an interleaved latency A/B (`scripts/loadtest/mcp_ab.py`), a 330-call real-write replay parity check (`scripts/loadtest/replay_parity.py`), and 8- and 16-agent concurrent load tests (`scripts/loadtest/mcp_concurrent.py`) on copies of real multi-session stores.
 
-We measured recall across 3,000 vectors on a live CockroachDB cluster. We evaluated two distinct distributions. Dataset A contains uniform-random vectors. Dataset B contains clustered unit-norm vectors with 60 centers.
+| Release / gate | Hardware & store | Headline measurements | Raw capture |
+|---|---|---|---|
+| **0.4.0 vs 0.3.0** | Metal M3 Pro (4,949 concepts) & CUDA Linux (8,496 concepts) | Sequential recall p50 `310.0 → 5.7 ms` (~55× repeated; unseen stdio `315 → 26 ms`, ~12×) on Metal and `804.8 → 15.4 ms` on CUDA; 8-agent recall p50 `16,431 → 7 ms`, 16-agent `47,041 → 6 ms`; top-8 Jaccard `1.0` on all 20 queries. Surfaced `#116` concurrent write replan failures. | [`issue-108-perf/`](https://github.com/nrynss/lambo/tree/main/evidence/issue-108-perf), [`0.4.0-vs-0.3.0-load/`](https://github.com/nrynss/lambo/tree/main/evidence/0.4.0-vs-0.3.0-load) |
+| **0.5.0 vs 0.4.0** | Metal M3 Pro (5,005 concepts) | `#116` fixed: 8-agent write failures `253/519 → 0/521`; 16-agent `740 failed + 701 dropped of 2,009 → 0/2,003`. `#102` commit write-lock hold at 100k concepts `168 ms → 21 µs`. `#31` proxy footprint `90 MB` (1.4 GB during election) → `6.5 MB`; stdio startup `3.4 → 0.8 s`. | [`0.5.0-acceptance/`](https://github.com/nrynss/lambo/tree/main/evidence/0.5.0-acceptance), [`0.5.0-vs-0.4.0/`](https://github.com/nrynss/lambo/tree/main/evidence/0.5.0-vs-0.4.0) |
+| **0.6.0 cut-over** | Metal M3 Pro (5,599 concepts → 8 sessions + `general` layer) | `lambo session verify` recall@5 vs pre-split `0.852–1.000` per project, cross-project leakage `0 hits`. Recall p50 `5.64 → 2.69 ms`, p99 `144.05 → 74.93 ms`; 8-agent (`543/543`) and 4×2 multi-session (`527/527`) writes `0 failed`; single ~1.08 GB Metal model shared across all 8 sessions. | [`0.6.0-cutover/`](https://github.com/nrynss/lambo/tree/main/evidence/0.6.0-cutover) |
+| **#171 & 0.8.0 vs 0.6.0** | x86-64 synthetic (9,508 concepts) & CUDA RTX 4070 SUPER (9,746 concepts) | SIMD lane cosine + partial top-k cut 9,000-candidate scan `8.93 → 1.85 ms`; lock decoupling raised 16-concurrent recall `249.8 ms (63 rps) → 13.06 ms (1,103.9 rps)`; single-walk rescore at 9,100 concepts `201.2 → 31.3 ms`; `provision` `143.35 → 5.58 ms`. On CUDA, 16-agent recall p50/p99 dropped `191.3 / 945.5 ms → 49.9 / 135.0 ms`; top-8 Jaccard `1.0`; 0 unexpected replay diffs. | [`issue-171-perf/`](https://github.com/nrynss/lambo/tree/main/evidence/issue-171-perf), [`0.8.0-vs-0.6.0/`](https://github.com/nrynss/lambo/tree/main/evidence/0.8.0-vs-0.6.0) |
+| **0.12.0 vs 0.8.0** | CUDA (11,218 concepts) & Metal (2,663 concepts + `general` layer) | Durable concept names (`#146`) upgrade verified provision-only (`0` bindings/retirements proposed across all 8 sessions). Top-8 Jaccard `1.0` on all 20 queries on both rigs; Metal recall p50 `2.00 ms`, derive ack `0.50 ms`, 8/16-agent writes `0/544` and `0/2,128` failed. Includes `ack_window.py` probing the post-apply lock window across store sizes. | [`0.12.0-vs-0.8.0/`](https://github.com/nrynss/lambo/tree/main/evidence/0.12.0-vs-0.8.0), [`0.12.0-vs-0.8.0-metal/`](https://github.com/nrynss/lambo/tree/main/evidence/0.12.0-vs-0.8.0-metal) |
+| **0.13.0 vs 0.12.0** | Metal M3 Pro (2,665 concepts + `general` layer) | Additive `top_legs` / provisional `confidence` (`#256`) and `#263` retry: sequential recall p50/p99 `2.02 / 21.66 ms` (within 0.1 ms), 8/16-agent writes `0/543` and `0/2,128` failed. Corrected replay parity (`replay-0120-0130-v2.json`): **0 of 330 calls differ** and **0 semantic-edge divergence** across 5,872 concepts and 14,529 edges. | [`0.13.0-vs-0.12.0-metal/`](https://github.com/nrynss/lambo/tree/main/evidence/0.13.0-vs-0.12.0-metal) |
+
+<Note>
+On `0.6.0 vs 0.5.0` ([`evidence/0.6.0-vs-0.5.0/`](https://github.com/nrynss/lambo/tree/main/evidence/0.6.0-vs-0.5.0)), the gate caught a real regression: structural-marker queries (`blast radius`, `depends on`) rose to ~280 ms p99 because anchor resolution normalized every concept on every query (`#165`). That finding stayed published and drove the `#165`/`#171` fixes verified in `0.8.0`.
+</Note>
+
+## Recall calibration, fusion, selection, and multimodal
+
+### Evaluation set (`#190`) and per-contract calibration (`#87`)
+
+Lambo's recall constants were originally chosen on BGE-M3's cosine distribution (`RECENT_SCORE = 0.35`, unset layer floor `0.50`, merge threshold `0.85`). Other embedding models sit on narrower or shifted cosine scales, so Lambo calibrates measured contracts on the `#190` evaluation set (`fixtures/eval/`: 100 concepts, 310 → 368 queries, 403 labelled pairs plus 144 `#198` pairs; [`evidence/eval-set/`](https://github.com/nrynss/lambo/tree/main/evidence/eval-set)) using dev-only quantile matching against BGE-M3, then confirms on the untouched held-out split. Under self-framed candle BGE-M3, baseline vector retrieval scores `hit@1 = 0.779`, `hit@5 = 0.941`, `hit@10 = 0.966`, and `nDCG@10 = 0.876` across 204 answerable queries.
+
+| Contract (`kind` / `model` / `dim`) | Recent leg | Layer floor | Merge threshold | Null median | Default fusion | Key held-out effect | Capture |
+|---|---:|---:|---:|---:|---|---|---|
+| **BGE-M3** *(reference)* · `candle` (`BAAI/bge-m3@*`) or `bge_m3` / `openai` · `1024` | `0.35` | `0.50` | `0.85` | `0.3586` | `max` | Baseline: `3.0–3.2%` irrelevant admitted at layer floor; `82.7–85.0%` true hits above floor; validated for `#198` suspected-supersession warnings (`0.96` held-out precision). | [`eval-set/`](https://github.com/nrynss/lambo/tree/main/evidence/eval-set), [`issue-198-trigger/`](https://github.com/nrynss/lambo/tree/main/evidence/issue-198-trigger) |
+| **EmbeddingGemma 2** · `embeddinggemma2` · `ggml-org/embeddinggemma-2-GGUF@bfcd2987/Q8_0;prompts=lambo-eg2-v2` · `768` | `0.63` | `0.72` | `0.93` | `0.632` | `max` | Uncalibrated `0.50` layer floor admitted `99.9%` of irrelevant concepts; `0.72` drops that to **`3.1%`** while keeping **`92.5%`** of true hits. Merge `0.93` cuts cosine related-distinct merges `76.3% → 45.8%` while keeping `87.9%` of paraphrases. | [`issue-87-calibration/`](https://github.com/nrynss/lambo/tree/main/evidence/issue-87-calibration) |
+| **Qwen3 Embedding 4B** *(full)* · `bge_m3` / `openai` · `qwen3-embedding-4b` · `2560` | `0.41` | `0.59` | `0.89` | `0.4182` | `rrf` | Layer irrelevant admitted drops `18.1% → 3.3%` at `0.59`. Contract-scoped RRF default (`#221`) fixes keyword-dominated misranking, lifting held-out vocabulary-mismatch nDCG@10 from `0.672` to **`0.802`**. | [`issue-221/`](https://github.com/nrynss/lambo/tree/main/evidence/issue-221) |
+| **Qwen3 Embedding 4B** *(Matryoshka)* · `bge_m3` / `openai` · `qwen3-embedding-4b` · `1024` (`dimensions = 1024`) | `0.42` | `0.60` | `0.90` | `0.4282` | `rrf` | Layer floor `0.60` holds held-out irrelevant admitted to `3.3%` (`79.6%` true hits kept); shares the `#221` contract-scoped RRF default when `[fusion]` is unset. | [`issue-221/`](https://github.com/nrynss/lambo/tree/main/evidence/issue-221) |
+| **Elastic Jina v3** · `elastic` · `.jina-embeddings-v3` · `1024` (`send_input_type = true`) | `0.13` | `0.39` | `0.86` | `0.1443` | `max` | Uncalibrated `0.50` layer floor rejected half of true hits (`49.0%` kept); `0.39` restores **`81.6%`** true hits kept at `2.7%` irrelevant admitted. | [`issue-237/`](https://github.com/nrynss/lambo/tree/main/evidence/issue-237) |
+
+Built-in calibration matches **exact** `(kind, model, dim)` contracts (`src/embed/calibration.rs`). Any other quantization, dimension, prompt profile, or `send_input_type = false` (`;input_type=off`) is uncalibrated and falls back to the BGE-M3 defaults unless calibrated via `[embedder] related_pairs`.
+
+### Recall fusion (`#173`), redundancy selection (`#181`), and suspected supersession (`#198`)
+
+- **Reciprocal rank fusion ([`evidence/issue-173-fusion/`](https://github.com/nrynss/lambo/tree/main/evidence/issue-173-fusion)):** Evaluated on the expanded 368-query set (`runs-v2`), `[fusion] kind = "rrf"` at `k = 3` (weights `1.0 / 1.0 / 0.3`) lifts overall nDCG@10 over `max` on `dev` (`0.790 → 0.854` BGE-M3; `0.849` EG2) and `held_out` (`0.840 → 0.872` / `0.863`), with large vocabulary-mismatch gains (`0.446 → 0.657` dev). Because held-out exact-identifier (`0.948 → 0.899`) and contrast (`0.912 → 0.879`) queries dip, `max` stays the global default and RRF is opt-in (except Qwen3 Embedding 4B, where `#221` showed BM25 drowned Qwen's narrower vector band). Literature `k = 60` collapses inside Lambo's 50/50 daemon blend (`0.698` dev nDCG@10).
+- **Redundancy-aware selection ([`evidence/issue-181/`](https://github.com/nrynss/lambo/tree/main/evidence/issue-181)):** On duplicated corpora (`dup`, 500-token budget, `top_k = 3`), `[selection] skip_redundant = true` (same-content default) raises distinct memories rendered from `1.44 → 2.05` (dev) and `1.45 → 2.03` (held-out) and facet coverage from `0.830 → 0.849` / `0.840 → 0.881`, with **`0` false suppressions** across all contrast families and `+4 to +5 µs` p50 overhead on clean recalls. `similar_signals` stays off by default because in the decision run it gained 3 duplicate facets at a cost of 42 contrast facets before the stricter claim guard was introduced.
+- **Suspected undeclared supersession ([`evidence/issue-198-trigger/`](https://github.com/nrynss/lambo/tree/main/evidence/issue-198-trigger)):** The "one span and value slot" trigger on identifier-guard-refused near matches achieves **`0.97` precision** (95% Wilson lower bound `0.86`, `35/37` recall) on dev and **`0.96` precision** (lower bound `0.81`, **`25/25` recall**) on held-out under BGE-M3, with the Rust implementation matching the Python reference row for row. Unmeasured contracts emit only the structured `possibly_superseded_by` field by default.
+
+### Layer floor vs store size (`#254`)
+
+Two studies ([`evidence/layer-floor-size/`](https://github.com/nrynss/lambo/tree/main/evidence/layer-floor-size) and [`evidence/issue-254/`](https://github.com/nrynss/lambo/tree/main/evidence/issue-254)) measured how fixed cosine cutoffs behave as a session or shared layer grows:
+
+- On real logged recall queries scored against unrelated stand-in layers under BGE-M3 (`0.50` floor), the share of queries admitting at least one unrelated hit rose from `15.2%` / `37.4%` (uncorrected / corrected) at 8 concepts to `91.7%` / `98.7%` at 1,024 concepts on project A. (Arrival-order testing on merge thresholds up to 5,599 concepts showed no consistent growth.)
+- Testing an empirically size-scaled floor (`#254` option 2) failed acceptance: holding unrelated admission level pushed the floor high enough to reject **`37%` (dev) / `45%` (held-out)** of grade-2 relevant pairs at 100 concepts and **`71%` / `76%`** at 1,024 concepts. No size-scaled floor was shipped; instead `lambo stats` prints `calibration=calibrated (layer floor measured on N concepts)` so large layers stay visible to operators.
+
+### Multimodal EmbeddingGemma 2 (`#22`)
+
+Measured live on `llama.cpp` b11517 serving `embeddinggemma-2-Q8_0.gguf` + `--mmproj` ([`evidence/issue-22-eg2/`](https://github.com/nrynss/lambo/tree/main/evidence/issue-22-eg2)):
+
+- Text and image embeddings produce unit-norm 768-d vectors (with MRL truncation verified at 256-d). Each generated image ranked its own caption first (`0.750–0.794` cosine vs `0.566–0.678` for other captions).
+- Canonical `lambo-eg2-v2` framing resizes every PNG/JPEG/WebP to a 768 px longer side before sending lossless PNG: renders at 768 px and above agree to `≥ 0.9991` cosine (flat images `1.000000`).
+- Discovered that default `llama-server` ubatch (`512`) silently caps `--image-max-tokens 280` to `256` tokens, shifting vectors (`0.9989` cosine). Lambo now verifies `/props` and embeds a 1×1 reference PNG (`293 ± 8` prompt tokens at the 280 budget) to fail closed on misconfigured servers.
+
+## Cross-store parity, vector indexing, and local Metal Candle
+
+### Cross-store vector parity (`H1`–`H3`)
+
+The same 4-probe × 5-limit grid (`stored-itself`, `negated`, `midpoint`, `off-axis`) runs across all vector-capable store adapters on the committed fixture graphs:
+
+| Parity leg | Adapters compared | Pairs | Candidate Jaccard | Rank displacement | Max score diff | Capture |
+|---|---|---:|---:|---:|---:|---|
+| **H1 (cluster-free)** | `sqlite` vs `memory-oracle` (synthetic + real BGE-M3 corpus) | 60 | `1.0` (all 60) | `0` | `0.0` (bit-identical) | [`mooshik-h1-cross-store-parity/`](https://github.com/nrynss/lambo/tree/main/evidence/mooshik-h1-cross-store-parity) |
+| **H2 (CockroachDB live)** | `cockroach` (CCL v26.2.5, beam 64, `EXPLAIN`-verified index) vs `sqlite` & `memory-oracle` | 120 (80 ANN, 40 exact) | `1.0` (all 120) | `0` | `5.36e-6` (ANN); `0.0` (exact) | [`mooshik-h2-cockroach-parity/`](https://github.com/nrynss/lambo/tree/main/evidence/mooshik-h2-cockroach-parity) |
+| **H3 (PostgreSQL `pgvector`)** | `postgres-hnsw` & `postgres-exact` vs `sqlite` & `memory-oracle` | 240 | `1.0` (all 240) | `0` | `1.21e-7` (`0.0` HNSW vs exact) | [`mooshik-h3-postgres-parity/`](https://github.com/nrynss/lambo/tree/main/evidence/mooshik-h3-postgres-parity) |
+
+H2 also verified cross-space quarantine end to end: writing 9 vectors under contract A (dim 1024) and restamping contract B (dim 4) returned **`0` cross-space candidates** on both SQLite (NULL quarantine) and CockroachDB (fail-closed refusal). On SQLite under live BGE-M3 ([`evidence/mooshik-f-sqlite-bge/`](https://github.com/nrynss/lambo/tree/main/evidence/mooshik-f-sqlite-bge)), queries sharing zero vocabulary with derived concepts retrieved the right concept by cosine alone (`0.5706` and `0.5823`, margins `+0.16`), while a third query ranking first at `0.3991` stayed below the recent-leg floor and was recorded honestly as a miss.
+
+### Local-native Candle BGE-M3 on Apple Silicon (`K1`)
+
+Measured on Apple M3 Pro (18 GB) against `llama.cpp` q8_0 as an independent reference ([`evidence/mooshik-k1-metal/`](https://github.com/nrynss/lambo/tree/main/evidence/mooshik-k1-metal)):
+
+| Metric | Measured result | Gate / takeaway |
+|---|---|---|
+| **Cosine parity** (82 texts, 10 languages, 32 B → 8 KiB) | Median **`0.999720`**, min **`0.997920`**, `0` of 82 below `0.99` (Metal f16) | PASS outright; CLS pooling and pad-id handling verified. |
+| **Throughput at 35 B** (3-repeat median) | Metal f16: `66.9` serial, `69.6` 4-wide, **`190.5` batch-4** vs `llama.cpp` `146.2` items/s (CPU+Accelerate `30.2`) | Batching beats `llama.cpp`; drove coalesced batching in K2. CPU is fallback-only. |
+| **Cold start to first vector** (5 fresh launches) | Metal f16: **`1.52 s` median** (`1.73 s` max) | ~15–20× headroom under the ~30 s client abandon window. |
+
+### CockroachDB C-SPANN beam sweep
+
+CockroachDB uses C-SPANN approximate nearest neighbour search for vector indexes. We measured recall across 3,000 vectors on a live cluster across uniform-random vectors (Dataset A) and 60-center clustered unit-norm vectors (Dataset B) ([`evidence/20260813-145209-ann-recall-vs-beam.txt`](https://github.com/nrynss/lambo/blob/main/evidence/20260813-145209-ann-recall-vs-beam.txt)):
 
 | Beam size | Dataset A recall@10 | Dataset A recall@50 | Dataset B recall@10 | Dataset B recall@50 |
-|---|---|---|---|---|
+|---:|---:|---:|---:|---:|
 | 1 | 0.233 | 0.096 | 0.193 | 0.073 |
 | 2 | 0.295 | 0.155 | 0.229 | 0.128 |
 | 4 | 0.375 | 0.238 | 0.324 | 0.216 |
 | 8 | 0.513 | 0.400 | 0.473 | 0.403 |
 | 16 | 0.716 | 0.638 | 0.695 | 0.638 |
-| **32 (Default)** | 0.916 | 0.929 | 0.931 | 0.938 |
+| **32 (Engine default)** | 0.916 | 0.929 | 0.931 | 0.938 |
 | **64 (Lambo default)** | **0.931** | **0.970** | **0.960** | **0.990** |
 | 128 | 0.927 | 0.972 | 0.960 | 0.987 |
 | 256 | 0.836 | 0.954 | 0.862 | 0.968 |
 
-### What this measurement teaches you
+Setting `DEFAULT_VECTOR_BEAM_SIZE = 64` lifts Dataset B recall@50 from `0.938` to `0.990` while avoiding the recall degradation observed at beam `256`. Reproduce with `./scripts/seed-vector-index.sh --count 3000`.
 
-1. At the engine default beam of 32, you lose roughly 6% to 7% of true nearest neighbours. In Lambo, a missed neighbour drops out of that recall's vector results rather than causing an error. Deduplication uses the index for concepts already flushed: the writer compares a new concept against its own in-memory copy of the concepts it has not flushed yet and asks the database for the rest, so a flushed neighbour the index misses can become a near-duplicate concept.
-2. Higher beam sizes do not always improve recall. Beam 256 degraded recall compared to beam 64 in both datasets.
-3. Setting `DEFAULT_VECTOR_BEAM_SIZE = 64` raises recall@50 to 0.990 with negligible query overhead.
+## Durability, concurrency, multi-client, and determinism
 
-You can reproduce this test with `./scripts/seed-vector-index.sh --count 3000`.
+### Concurrency, SIGTERM durability, and SIGKILL crash boundary
 
-## Deterministic convergence
+- **K=12 concurrent MCP clients + mid-burst SIGTERM ([`evidence/concurrency/`](https://github.com/nrynss/lambo/tree/main/evidence/concurrency)):** 3,423 calls recorded, rate-limit `429` overdrive (`1,682` refused) and `32/32` session-cap `503` verified live. SIGTERM mid-burst exited cleanly in `1,419 ms` (`exit 0`) with the exact line `lambo serve: session closed, tail durable` (`0` `tail lost on exit`). Store readback held `862` interactions vs `841` ledger-acked writes (store AHEAD by 21 in-flight writes) and `1,359` concepts vs `1,466` created — the 107 shortfall matched `concepts_collected=107` from one daemon GC sweep exactly. Wire-hygiene scan across all 3,423 responses and stderr found **`0` leaked DSNs, keys, or driver messages**.
+- **SIGKILL crash boundary ([`evidence/0.5.0-vs-0.4.0/`](https://github.com/nrynss/lambo/tree/main/evidence/0.5.0-vs-0.4.0)):** Clean SIGTERM loses zero acked writes. Hard SIGKILL can lose writes acknowledged inside the final flush interval (`12` of `1,136` acked writes on 0.5.0), while every intent flushed prior to the kill replays in order on restart (`152` replayed).
+- **Durable write intents across embedder outages ([`evidence/mooshik-j3-durable-intents/`](https://github.com/nrynss/lambo/tree/main/evidence/mooshik-j3-durable-intents)):** 16 agents × 4 derives (`64` acked) closed immediately held the exact invariant `acked == applied-with-embedding + durable-intent` (`64 == 1 + 63`, `0` NULL embeddings). Re-attaching while the embedder endpoint was unreachable left all `62` pending intents unconsumed (`write_queue_replay_owed=62`, receipts `pending_replay`, `0` failed); the next healthy attach replayed all `62` (`applied_after_restart`, `64/64` embedded).
+- **Multi-client stdio-to-HTTP forwarding ([`evidence/j4-live-multiclient/`](https://github.com/nrynss/lambo/tree/main/evidence/j4-live-multiclient)):** Starting a second `lambo serve` against a held session automatically forwards over the private Unix socket rather than exiting on lease refusal, preserving per-call `agent_id` attribution and logging `refused`, `proxying`, `refused_takeover`, and `proxying_stopped` in the shared ledger.
 
-Multi-agent graphs must reach a stable state regardless of write arrival order. The demo's rendered OUTCOME block is asserted to be **byte-identical** across two runs of the same scenario, by a test that compares the blocks directly. There is no tolerance, no ordering leniency, and no rounding.
+### Deterministic convergence (`lambo demo`)
 
-Measured on 2026-08-16 at commit `0006824`:
+The demo's rendered OUTCOME block is asserted **byte-identical** across two runs of the same scenario — no tolerance, ordering leniency, or rounding. Measured on 2026-08-16 at commit `0006824` ([`evidence/demo-determinism/`](https://github.com/nrynss/lambo/tree/main/evidence/demo-determinism)):
 
 | What was measured | Result |
 |---|---|
 | Consecutive parity runs, frozen build | **100 of 100 passed, 0 failed** |
 | Independent run-pairs, every diff line classified | **20 pairs, 0 unexpected differences** |
 | Distinct places two runs can differ at all | **3**, all intentional, all outside the asserted block |
-| Rendered scores across all 20 pairs | identical |
+| Rendered scores across all 20 pairs | Identical |
 
-The three permitted differences are the freshly-minted session id, a random node id quoted in the high-risk warning, and a narration line's canonization cycle index. The third is a genuine timer interleaving and fires in about 18 of 20 pairs, which is why two runs may differ in two places or three and both are healthy.
+The three permitted difference sites are the freshly-minted session id, a random node id quoted in the high-risk warning, and a narration line's canonization cycle index. Earlier live-cluster captures (`evidence/demo-live-1.txt` and `demo-live-2.txt`) predate the script-clock fix, when wall-clock recency jitter made identical output hold roughly nine runs in ten; those captures are preserved unedited alongside the determinism proof.
 
-The classification matters more than the pass count. Twenty pairs were compared with **every** changed line sorted into a known bucket, and anything unsorted counted as unexpected. That turns "we saw nothing else vary" into "we looked for a fourth source of variation and there is none". Full logs and the scripts that produced them are in [`evidence/demo-determinism/`](https://github.com/nrynss/lambo/tree/main/evidence/demo-determinism).
+### Immutable canonization audit trail
 
-### The same scenario against a live cluster
-
-Run twice against a live CockroachDB Cloud cluster:
-
-```
-$ diff -u evidence/demo-live-1.txt evidence/demo-live-2.txt
-IDENTICAL - T8.4 x2 met
-```
-
-- Exactly 12 interactions and 27 concepts created.
-- Exactly 114 graph edges established.
-- Exactly 5 canonization events recorded in CockroachDB.
-- `user schema` promoted to Canonical with an exact blast radius of 9.
-
-### When this became a guarantee
-
-That live-cluster capture predates the fix, and is worth reading with its date in mind. When it was taken, identical output was not yet guaranteed. A time-derived term in the daemon score varied between runs, so roughly one run in ten rendered two near-tied concepts in the opposite order. The term is `recency`, measured against the session's wall-clock temporal extent. The capture is genuine, but it passed at about nine attempts in ten rather than by construction.
-
-The cause was that the demo replays in around 110ms of logical span while stamping interactions from the wall clock, so ordinary scheduler jitter moved the denominator that every recency value is measured against. The demo now stamps from a script clock, making a session's temporal extent a property of the script rather than of the machine it runs on. The script step is 60 seconds. The twelve interactions are script-clock calls 0 to 8, 10, 11 and 13, because each close between acts also reads the clock, so the session spans 13 minutes, above the 10-minute recency floor. Because recency is a position inside the span, and the call pattern is the one the old 10ms step had, the values are unchanged.
-
-The assertion was never weakened to accommodate the bug. It is the test that caught it, and it failed openly for as long as the bug existed. The earlier capture is kept exactly as recorded rather than re-taken, because a capture edited after the fact stops being evidence.
-
-## Live conflict and blast radius interception
-
-When Agent B attempts to modify a load-bearing pillar, Lambo halts the regression. The engine returns structural blast radius warnings and conflict age.
-
-```text
-── ACT IV — agent-b: recall("update user schema") ──────────────────────
-  daemon event: Conflict on 'user schema' - contesting agents: agent-a, agent-b
-
-  user schema [Entity, canonical] (score 2.27, blast radius 9)
-  ⚑ Load-bearing pillar - 9 nodes depend on this. Modify with caution.
-  Agent A wrote to it 15 seconds ago
-  High-risk modification: high-value node a30fef36-9c49-412c-8f25-2eabf8dc27b4 (Canonical, blast radius 9) modified within 30s
-  
-  agent-b does not make the breaking change.
-```
-
-## Immutable audit trail in CockroachDB
-
-Lambo writes all promotions into `canonization_events`. You can inspect this audit trail directly through CockroachDB SQL or the Managed MCP Server.
+Every promotion writes an audit row into `canonization_events`, verifiable from any SQL client or managed MCP server:
 
 ```sql
-SELECT session_id, concept_content, previous_status, new_status, reason, blast_radius 
-FROM canonization_events 
-WHERE session_id = 'demo-session' 
-ORDER BY event_order ASC;
+SELECT node_id, from_status, to_status, blast_radius, occurred_at
+FROM canonization_events
+WHERE session_id = '<your session id>'
+ORDER BY occurred_at;
 ```
 
-You can view raw logs and execution plans in the `evidence/` folder of the repository.
+Three independent MCP clients — OMP ([`managed-mcp-canonization-events.md`](https://github.com/nrynss/lambo/blob/main/evidence/managed-mcp-canonization-events.md)), Claude Code, and Cursor Agent CLI ([`mcp-client-interop/`](https://github.com/nrynss/lambo/tree/main/evidence/mcp-client-interop)) — queried this table model-first and agreed on every field.
 
-## Recorded demonstrations
+## Agent protocol adherence and MCP interop
 
-Every claim on this page has a log or a test behind it. Some of them also have
-footage, captured 2026-08-17 against the live `cloudops-exhibit` session in
-CockroachDB and the deployed portal.
+### Small-model agentic swarm
 
-| Demonstration | What it shows |
+To test whether Lambo's MCP surface is compact enough for very small local models, three concurrent **Qwen3-0.6B** agents (served locally by `llama.cpp`) ran against one session for 151 seconds with the [agent skill](/agent-skill) as system prompt and a minimal 4-tool subset (`lambo_derive`, `lambo_recall`, `lambo_record_action`, `lambo_inspect`) ([`evidence/swarm/`](https://github.com/nrynss/lambo/tree/main/evidence/swarm)):
+
+| Measurement | Result |
 |---|---|
-| `lambo demo` | The full scenario with no config and no database, ending on a recall block that carries `[canonical]`, a blast radius, and the load-bearing warning |
-| Recall against the exhibit | `what depends on SG-Base-VPC` answered by graph traversal, with `RDS-Lambo-Demo-DB` returned as the top hit at score 9.50 |
-| Inspect | `SG-Base-VPC` at blast radius 5, its typed dependency edges, and which agent provisioned each dependent |
-| The crossover guard | `03_crossover_protect.py` refusing a security-group deletion, naming the four concepts that would have been stranded, and issuing no AWS call on any path |
-| The portal | The structure tree, a focused concept with its canonization gates, and a recall rendered as cards with score bars |
-| An agent consulting memory | A model asked about deleting a security group, calling `lambo_recall` and `lambo_inspect` unprompted, and refusing. See [Agent skill](/agent-skill) |
+| Tool calls | 173 (`165` ok, `95.4%`): 86 `recall`, 45 `derive`, 40 `record_action`, 2 `inspect` |
+| Recall before write | **43 of 43** acting tasks started with `lambo_recall`; **0 of 45** derives lacked a prior recall in the same task |
+| Canonization dedup | **0.857** (`36` of `42` successful derives landed on existing concepts) |
+| Durability after SIGTERM | **Exact match**: `82` interactions and `12` concepts matching the driver's ledger (`0` lease rows) |
 
-The agent demonstration is the one worth reproducing yourself, because it is the
-only one where nothing is scripted: the prompt does not mention memory, and the
-tool calls are the model's own choice. The [Agent skill](/agent-skill) page has
-the exact prompt, the observed calls, and the conditions that change the outcome.
+<Note>
+Not every sub-billion model can drive tool calling. Under the same `llama.cpp` build, **LFM2-350M** and **functiongemma-270m** returned prose instead of OpenAI `tool_calls` (probed both under OMP and raw API; transcripts in [`evidence/swarm/probes/`](https://github.com/nrynss/lambo/tree/main/evidence/swarm/probes)). And in the Qwen3-0.6B run above, tasks named the sequence to follow — measuring reliable execution of the protocol against a live surface rather than unprompted memory lookup.
+</Note>
 
-One honest boundary, stated because the footage makes it easy to blur: the
-CloudOps scripts in `evidence/cloudops-run/` are deterministic Python playing
-agent roles. They provisioned real infrastructure and wrote real derives, but
-they are not model-driven. The agent demonstration above is.
+### Client interop and historical CloudOps walkthrough
+
+- **MCP clients ([`evidence/mcp-client-stdio/`](https://github.com/nrynss/lambo/tree/main/evidence/mcp-client-stdio), [`evidence/mcp-client-interop/`](https://github.com/nrynss/lambo/tree/main/evidence/mcp-client-interop)):** Claude Code, Cursor Agent CLI, OMP, and Pi verified for MCP handshake and tool discovery, with model-driven tool calls captured under Cursor and OMP (and unprompted recall-before-delete verified in [Agent skill](/agent-skill)).
+- **Historical August 2026 walkthrough:** [Lambo: Durable canonical memory for agents](https://www.youtube.com/watch?v=dfbMvf_YwFo) (YouTube) captures the early `cloudops-exhibit` session (`lambo demo`, graph traversal on `what depends on SG-Base-VPC`, `lambo_inspect`, the deterministic crossover guard `03_crossover_protect.py`, the `lambo serve-web` portal, and an unprompted agent consultation).
+
+## Research and negative results
+
+Proposals evaluated on Lambo's frozen snapshots and **not adopted** are archived in [`research/`](https://github.com/nrynss/lambo/tree/main/research) rather than forgotten:
+
+- **[#175: Graph-relevance propagation](https://github.com/nrynss/lambo/blob/main/research/issue-175/disposition-2026-11-12.md) (retired 2026-11-12):** Evaluated damped and sender-degree-normalized graph propagation across 49 dev settings and 3 held-out settings. Neither selected arm recovered any of the **3 held-out missing facets** across two challenge questions, while direct-control known-facet coverage fell from **`56.7%`** to **`26.7%`** (damped) and **`53.3%`** (sender-degree normalized). Rebased and reproduced across all 88 production candidate pools; closed as not planned with zero changes to production recall.

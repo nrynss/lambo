@@ -17,9 +17,41 @@ export default defineConfig({
   integrations: [
     starlight({
       title: 'Lambo',
-      description: 'Agentic graph memory for multi-agent AI operations.',
+      description:
+        'Shared, self-consolidating graph memory for coding agents and multi-agent AI operations.',
       favicon: '/favicon.svg',
-      customCss: ['katex/dist/katex.min.css'],
+      logo: {
+        src: './src/assets/lambo-mark.svg',
+        alt: 'Lambo',
+      },
+      head: [
+        {
+          tag: 'link',
+          attrs: {
+            rel: 'preconnect',
+            href: 'https://fonts.googleapis.com',
+          },
+        },
+        {
+          tag: 'link',
+          attrs: {
+            rel: 'preconnect',
+            href: 'https://fonts.gstatic.com',
+            crossorigin: '',
+          },
+        },
+        {
+          tag: 'link',
+          attrs: {
+            rel: 'stylesheet',
+            href: 'https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap',
+          },
+        },
+      ],
+      customCss: [
+        'katex/dist/katex.min.css',
+        './src/styles/custom.css',
+      ],
       social: [
         { icon: 'github', label: 'GitHub', href: 'https://github.com/nrynss/lambo' },
       ],

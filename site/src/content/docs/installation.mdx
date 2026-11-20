@@ -43,7 +43,7 @@ To install the Metal build on Apple silicon, set `LAMBO_FLAVOR=metal` on `sh`, t
 curl -fsSL https://github.com/nrynss/lambo/releases/latest/download/install.sh | LAMBO_FLAVOR=metal sh
 ```
 
-`LAMBO_FLAVOR` needs the v0.3.0 install script or later, which the `latest` URL above serves. To pin the Metal build to a version, download that release's script and run it pinned:
+To pin the Metal build to a specific version, download that release's script and run it pinned:
 
 ```bash
 curl -fsSLo install.sh https://github.com/nrynss/lambo/releases/download/v0.14.0/install.sh
@@ -52,7 +52,7 @@ LAMBO_VERSION=0.14.0 LAMBO_FLAVOR=metal sh install.sh
 
 Set `LAMBO_DRY_RUN=1` the same way to print the asset and URLs the script would fetch without downloading anything.
 
-There is no Windows binary from v0.3.0: the shared session endpoint does not compile on Windows yet ([#39](https://github.com/nrynss/lambo/issues/39)). v0.2.2's `lambo-0.2.2-windows-x86_64.exe` is on the [releases page](https://github.com/nrynss/lambo/releases).
+Prebuilt binaries are published for Linux and macOS; Windows support is blocked by the Unix-socket session endpoint ([#39](https://github.com/nrynss/lambo/issues/39)). An older `lambo-0.2.2-windows-x86_64.exe` asset remains on the [releases page](https://github.com/nrynss/lambo/releases).
 
 ## Write a lambo.toml
 
@@ -130,7 +130,7 @@ Most MCP clients, such as Claude Code and Cursor, read an `mcpServers` configura
 
 The `--config` flag comes before `serve`, because it is a global flag. The `serve` flags come after. The client launches this process and talks to it over stdio, so you do not start `lambo serve` yourself when you use a client this way.
 
-Real clients drive this, not only unit tests. Claude Code and the Cursor Agent CLI each complete the handshake and list all seven tools over stdio. OMP, the Oh My Pi harness, is an MCP client out of the box. Two models have driven the tools autonomously: DeepSeek Flash under OMP called derive, recall, and stats against a live CockroachDB session, and Cursor's model ran derive, record_action, recall, and stats in sequence. Pi needs its MCP adapter installed first, after which it drives all seven tools.
+Real clients drive this, not only unit tests. Claude Code and the Cursor Agent CLI each completed the handshake and tool discovery over stdio (listing all seven tools on the initial capture, before `lambo_stale` and `lambo_derive_image` were added). OMP, the Oh My Pi harness, is an MCP client out of the box. Two models drove the tools autonomously in those captures: DeepSeek Flash under OMP called derive, recall, and stats against a live CockroachDB session, and Cursor's model ran derive, record_action, recall, and stats in sequence. Pi needs its MCP adapter installed first, after which it drives the full MCP surface.
 
 {/* lambo-site-only:start */}
 
@@ -145,7 +145,16 @@ The HTTP endpoint is a session writer, so treat it accordingly. On loopback it i
 
 ## Set up real embeddings
 
-To use BGE-M3 embeddings, run a local `llama-server` with an embedding model and point Lambo at it.
+On Apple silicon with the Metal build (`LAMBO_FLAVOR=metal`), run BGE-M3 in-process on the GPU with no external server:
+
+```toml
+[embedder]
+kind = "candle"
+device = "metal"
+dim = 1024
+```
+
+Alternatively (or on Linux), run a local `llama-server` with an embedding model and point Lambo at it.
 
 ```bash
 llama-server -m path/to/bge-m3.gguf --embedding --port 8080
@@ -166,7 +175,7 @@ Do not switch embedder models in the middle of a session without re-embedding, b
 
 ## Set up durable storage
 
-For a durable store, apply the schema before you serve. The repository's `scripts/provision.sh` does this for CockroachDB. Then select the store in `lambo.toml` and keep the connection string in the environment, so the secret stays out of the file.
+For a local file, set `kind = "sqlite"` and `path = "./lambo.db"`, then run `lambo --config lambo.toml provision`. For PostgreSQL with `pgvector`, set `kind = "postgres"` and export `LAMBO_POSTGRES_DSN`, then run `lambo --config lambo.toml provision`. For CockroachDB, apply the schema with `scripts/provision.sh` (or `lambo --config lambo.toml provision` from a checkout), select `kind = "cockroach"`, and keep the connection string in the environment so the secret stays out of the file:
 
 ```toml
 [store]
@@ -177,7 +186,7 @@ kind = "cockroach"
 export LAMBO_COCKROACH_DSN="postgresql://USER@HOST:26257/lambo?sslmode=verify-full"
 ```
 
-For a local file instead, set `kind = "sqlite"` and `path = "./lambo.db"`. See [Configuration](/lambo/config/) for the store keys and the provisioning details.
+See [Configuration](/lambo/config/) for all store keys, PostgreSQL/pgvector setup, and provisioning details.
 
 ## Build from source
 

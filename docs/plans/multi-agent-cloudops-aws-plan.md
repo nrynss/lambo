@@ -4,7 +4,7 @@
 status: PROPOSED / READY FOR EXECUTION POST-BINARY-VALIDATION
 revision: 2 (hardened 2026-08-16 — see §0)
 owner: nryn
-target_hackathon: CockroachDB AI Hackathon on Devpost
+target_hackathon: CockroachDB AI Hackathon (archived historical plan)
 target_services: AWS (EC2, Lambda, RDS, Secrets Manager, VPC) + CockroachDB Cloud
 execution_mode: >
   Agents and `lambo serve` run on the operator's own machine and act on AWS
@@ -408,7 +408,7 @@ Every line is a service actually exercised by this scenario; none is aspirationa
 
 | Service | How this project uses it |
 |---|---|
-| **Amazon EC2** | Hosts the public judge portal: `lambo serve-web` behind Caddy, serving the read-only view of a live session at [lambo.nryn.dev](https://lambo.nryn.dev). Read-only is test-enforced, not merely intended. **As built:** an `m7i-flex.large` on x86_64 running Ubuntu 26.04, not the `t4g.micro` this plan first assumed, because BGE-M3 does not fit in 1 GiB. The arm64 branch of the launcher is not exercised. |
+| **Amazon EC2** | Hosts the public judge portal: `lambo serve-web` behind Caddy, serving the read-only view of a live session on the retired exhibit hostname. Read-only is test-enforced, not merely intended. **As built:** an `m7i-flex.large` on x86_64 running Ubuntu 26.04, not the `t4g.micro` this plan first assumed, because BGE-M3 does not fit in 1 GiB. The arm64 branch of the launcher is not exercised. |
 | **Amazon VPC** (subnets, route tables, internet gateway, security groups) | The network the two agents provision and that Lambo tracks as graph nodes. The shared security group and private subnet are the load-bearing pillars whose blast radius the demo protects. |
 | **AWS Secrets Manager** | Stores the CockroachDB DSN. The exhibit instance resolves it at boot through an instance profile, so no connection string is baked into user data, an AMI, or the repo. |
 | **AWS Lambda** (Function URL) | A public read-only stats endpoint over the live CockroachDB session, [live and answering 200](https://uwvhgfb2rothsct6pnl44edk3q0kazsl.lambda-url.us-east-1.on.aws/). Runs outside the VPC, since it reads an internet-facing database. It 403d until T10 found that a public Function URL has required both `lambda:InvokeFunctionUrl` and `lambda:InvokeFunction` in its resource policy since October 2025. |

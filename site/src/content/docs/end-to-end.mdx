@@ -93,7 +93,7 @@ To watch the wire yourself, pipe JSON-RPC frames into the server, one per line. 
 } | lambo --config lambo.toml serve --session wire-demo --agent agent-a
 ```
 
-The `initialize` reply names the session and carries the server's instructions, `tools/list` returns the seven tools with their schemas, and the call returns the derive summary.
+The `initialize` reply names the session and carries the server's instructions, `tools/list` returns the server's MCP tools with their schemas (eight core tools on text-only deployments, plus `lambo_derive_image` when image embedding or client vectors are enabled), and the call returns a background write acknowledgement carrying a receipt id.
 
 ```json
 {"content":[{"type":"text","text":"derived 1 concept(s): 1 created, 0 matched existing"}],"isError":false}
@@ -119,15 +119,16 @@ Recall has three legs: keyword matching, vector similarity, and expansion throug
 
 | Store | Keyword | Vector | Graph expansion |
 |---|---|---|---|
-| CockroachDB | Yes | Yes | Yes |
 | SQLite | Yes | Yes | Yes |
+| PostgreSQL (`pgvector`) | Yes | Yes | Yes |
+| CockroachDB | Yes | Yes | Yes |
 | In-memory | Yes | No | Yes |
 
 Concepts your agents write through `derive` and `record-action` store their embedding along with their text. On a store with vector search, that means recall finds memory the swarm wrote itself by meaning, not just memory you loaded in bulk ahead of time. This matters most for the swarm pattern below, where many agents write the same idea in different words.
 
 The walkthrough above uses SQLite, so it exercises all three. On SQLite the vector leg is an exact scan rather than an index lookup, which is the right trade while a session's concept count stays small and returns exact nearest neighbours rather than approximate ones. The process serving a session (`lambo serve`, or an embedded `Memory`) runs that scan over the vectors it already holds in memory, so recall and `derive` never read vectors back from the database and see a concept as soon as it is written, before it is flushed. A separate reader such as `lambo recall` or `lambo serve-web` scans the database, with the same ranking. The in-memory store has no vector leg at all: recall there cannot match on meaning under any embedder.
 
-**The walkthrough exercises the vector leg mechanically, not semantically.** Its config is `[embedder] kind = "fixture"`, and the fixture embedder is *deterministic, not semantic*: it hashes the normalized phrase to a pseudo-random unit vector, so two phrasings of the same idea are near-orthogonal unless they happen to fall in its one hardcoded family. Running the walkthrough proves vectors are written, queried, and ranked; it does not show a semantic hit, and the scores you see for non-keyword matches will be flat. For recall by meaning, point `[embedder]` at a real embedder — `kind = "bge_m3"` against a local llama.cpp server. A captured run of exactly that, where a query sharing no vocabulary with a derived concept recalls it, is in [`evidence/mooshik-f-sqlite-bge/`](https://github.com/nrynss/lambo/tree/main/evidence/mooshik-f-sqlite-bge) (that link resolves once the `lambo-for-mooshik` branch merges; the directory is committed there today).
+**The walkthrough exercises the vector leg mechanically, not semantically.** Its config is `[embedder] kind = "fixture"`, and the fixture embedder is *deterministic, not semantic*: it hashes the normalized phrase to a pseudo-random unit vector, so two phrasings of the same idea are near-orthogonal unless they happen to fall in its one hardcoded family. Running the walkthrough proves vectors are written, queried, and ranked; it does not show a semantic hit, and the scores you see for non-keyword matches will be flat. For recall by meaning, point `[embedder]` at a real embedder — `kind = "candle"` on Apple silicon Metal builds or `kind = "bge_m3"` against a local llama.cpp server. A captured run of exactly that, where a query sharing no vocabulary with a derived concept recalls it, is in [`evidence/mooshik-f-sqlite-bge/`](https://github.com/nrynss/lambo/tree/main/evidence/mooshik-f-sqlite-bge).
 
 One asymmetry to know when you write your own queries: `derive` embeds the concept *with its context* — the string `"{content} — {origin}"` — while `recall` embeds your query text bare. So a query is compared against the framed string, not against the concept's content alone. With a real embedder this costs a little similarity and the ranking survives it; with the fixture embedder, which has no notion of similarity, it is the difference between a hit and a miss.
 
