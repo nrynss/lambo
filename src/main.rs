@@ -273,17 +273,29 @@ enum Commands {
         )]
         depth: usize,
     },
-    /// Session health: node/edge/concept counts and canonization progress. Writer-only flush lag is not visible to a reader process.
+    /// Session health: node/edge/concept counts and canonization progress, or a store-wide per-session health view (`--store`). Writer-only flush lag is not visible to a reader process.
     Stats {
         /// Session to report (reader process; does not take the writer lease).
         #[arg(
             long,
+            conflicts_with = "store",
+            required_unless_present = "store",
             help = "Session to report (reader process; does not take the writer lease)."
         )]
-        session: String,
-        /// List all concepts without vectors in the durable snapshot.
-        #[arg(long)]
+        session: Option<String>,
+        /// Report per-session counts, raw vector coverage, canonization status, live writer lease, and last-write time across the whole store (read-only, no lease, no embedder).
+        #[arg(
+            long,
+            conflicts_with_all = ["session", "missing_vectors"],
+            help = "Report per-session counts, raw vector coverage, canonization status, live writer lease, and last-write time across the whole store (read-only, no lease)."
+        )]
+        store: bool,
+        /// List all concepts without vectors in the durable snapshot (requires --session).
+        #[arg(long, conflicts_with = "store", requires = "session")]
         missing_vectors: bool,
+        /// Emit machine-readable JSON (requires --store).
+        #[arg(long, conflicts_with = "session", requires = "store")]
+        json: bool,
     },
     /// Provision / migrate the durable store schema (SQLite and Postgres via init_schema, Cockroach via scripts/provision.sh).
     ///
@@ -1191,7 +1203,12 @@ fn resolve_for_command(
         let dsn = file.store.dsn.clone();
         let promotion_policy = file.promotion_policy.unwrap_or_default();
         let supersede = file.canonization_supersede.unwrap_or_default();
-        let store = resolve_store_only(config).map_err(|e| e.to_string())?;
+        let store = if matches!(cmd, Commands::Stats { store: true, .. }) {
+            lambo::resolve::resolve_store_only_read_only(config)
+        } else {
+            resolve_store_only(config)
+        }
+        .map_err(|e| e.to_string())?;
         Ok(Resolved::StoreOnly {
             store,
             kind,
@@ -2218,13 +2235,26 @@ fn main() -> ExitCode {
         (
             Commands::Stats {
                 session,
+                store: store_view,
                 missing_vectors,
+                json,
             },
             Resolved::StoreOnly { store, .. },
-        ) => run_async(
-            "stats",
-            lambo::cli::stats::run_with_missing_vectors(store.as_ref(), &session, missing_vectors),
-        ),
+        ) => {
+            if store_view {
+                run_async("stats", lambo::cli::stats::run_store(store.as_ref(), json))
+            } else {
+                let session = session.expect("clap requires --session unless --store is set");
+                run_async(
+                    "stats",
+                    lambo::cli::stats::run_with_missing_vectors(
+                        store.as_ref(),
+                        &session,
+                        missing_vectors,
+                    ),
+                )
+            }
+        }
         (
             Commands::Provision { rekey },
             Resolved::StoreOnly {
@@ -2800,6 +2830,18 @@ mod tests {
             !stats.command.unwrap().needs_embedder(),
             "stats must not construct an embedder"
         );
+        let stats_store = Cli::try_parse_from(["lambo", "stats", "--store"]).unwrap();
+        assert!(
+            !stats_store.command.unwrap().needs_embedder(),
+            "stats --store must not construct an embedder"
+        );
+        assert!(Cli::try_parse_from(["lambo", "stats", "--store", "--json"]).is_ok());
+        assert!(Cli::try_parse_from(["lambo", "stats"]).is_err());
+        assert!(Cli::try_parse_from(["lambo", "stats", "--store", "--session", "s"]).is_err());
+        assert!(Cli::try_parse_from(["lambo", "stats", "--store", "--missing-vectors"]).is_err());
+        assert!(Cli::try_parse_from(["lambo", "stats", "--session", "s", "--json"]).is_err());
+        assert!(Cli::try_parse_from(["lambo", "stats", "--json"]).is_err());
+        assert!(Cli::try_parse_from(["lambo", "stats", "--missing-vectors"]).is_err());
         let inspect = Cli::try_parse_from([
             "lambo",
             "inspect",

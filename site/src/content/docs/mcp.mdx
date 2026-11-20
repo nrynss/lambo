@@ -434,7 +434,7 @@ Writes you send one after another are applied in that order, whatever other agen
 | `repo_scope` | string | No | The repository this call's path-like `resource` concepts and `parent_of` ends belong to, such as `github.com/acme/widgets`. See *Repository-scoped paths* below. |
 
 <Warning>
-`concept_type` is lower case on the wire. Sending `Entity` is refused with "unknown variant `Entity`, expected one of `entity`, `logic`, `constraint`, `resource`, `observation`". An MCP client may reject a value before sending the call. If its error only names `WireConceptType`, use the lowercase values published in `tools/list`.
+`concept_type` is lower case on the wire, and `tools/list` publishes its `enum` values inline on the property. Sending `Entity` or a non-string JSON value is refused with an error that lists the accepted values (`entity`, `logic`, `constraint`, `resource`, `observation`; `lambo_derive_image` omits `observation`).
 </Warning>
 
 ```json

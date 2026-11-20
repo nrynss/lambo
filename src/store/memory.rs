@@ -785,6 +785,101 @@ impl GraphStore for MemoryStore {
         Ok(self.flush_stats.read().get(&session.0).copied())
     }
 
+    async fn store_health(&self) -> Result<Vec<crate::store::SessionHealth>, StoreError> {
+        // Lock order: `inner` before `leases`, matching `flush` / `erase_session` / `session_readable`.
+        let map = self.inner.read();
+        let leases = self.leases.read();
+        let now = Utc::now();
+
+        let mut session_ids: Vec<&String> = map
+            .keys()
+            .chain(leases.keys())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .filter(|sid| {
+                !leases
+                    .get(*sid)
+                    .is_some_and(|r| is_erased_holder(&r.holder))
+            })
+            .collect();
+        session_ids.sort();
+
+        let mut out = Vec::with_capacity(session_ids.len());
+        for sid in session_ids {
+            let (concept_count, edge_count, embedded_count, canonization, last_write_at) =
+                match map.get(sid) {
+                    Some(data) => {
+                        let snap = &data.snapshot;
+                        let mut canon = crate::store::CanonizationCounts::default();
+                        let mut embedded = 0u64;
+                        let mut last_write: Option<DateTime<Utc>> = None;
+                        let mut bump = |ts: DateTime<Utc>| {
+                            last_write = Some(match last_write {
+                                Some(prev) => prev.max(ts),
+                                None => ts,
+                            });
+                        };
+                        for i in &snap.interactions {
+                            bump(i.created_at);
+                        }
+                        for c in &snap.concepts {
+                            if c.embedding.is_some() {
+                                embedded += 1;
+                            }
+                            match c.canonization_status {
+                                crate::types::CanonizationStatus::None => canon.none += 1,
+                                crate::types::CanonizationStatus::Candidate => canon.candidate += 1,
+                                crate::types::CanonizationStatus::Venerable => canon.venerable += 1,
+                                crate::types::CanonizationStatus::Canonical => canon.canonical += 1,
+                            }
+                            bump(c.created_at);
+                        }
+                        for e in &snap.edges {
+                            bump(e.created_at);
+                            bump(e.last_reinforced);
+                        }
+                        for ev in &snap.canonization_events {
+                            bump(ev.occurred_at);
+                        }
+                        (
+                            snap.concepts.len() as u64,
+                            snap.edges.len() as u64,
+                            embedded,
+                            canon,
+                            last_write,
+                        )
+                    }
+                    None => (0, 0, 0, crate::store::CanonizationCounts::default(), None),
+                };
+
+            let lease = leases.get(sid).and_then(|row| {
+                if !is_erased_holder(&row.holder)
+                    && row.holder != crate::store::lease::RELEASED_HOLDER
+                    && row.expires_at > now
+                {
+                    Some(crate::store::ActiveSessionLease {
+                        holder: row.holder.clone(),
+                        acquired_at: row.acquired_at,
+                        expires_at: row.expires_at,
+                    })
+                } else {
+                    None
+                }
+            });
+
+            out.push(crate::store::SessionHealth {
+                session_id: SessionId(sid.clone()),
+                concept_count,
+                edge_count,
+                embedded_count,
+                canonization,
+                lease,
+                last_write_at,
+            });
+        }
+        Ok(out)
+    }
+
     async fn flush(&self, batch: &MutationBatch, token: Option<u64>) -> Result<(), StoreError> {
         if batch.mutations.is_empty() {
             return Ok(());
@@ -3104,5 +3199,153 @@ mod tests {
             }
             assert_eq!(census(&store, &sid), before);
         }
+    }
+
+    #[tokio::test]
+    async fn store_health_reports_counts_coverage_leases_and_omits_erased() {
+        let store = MemoryStore::new();
+        assert_eq!(store.store_health().await.unwrap(), vec![]);
+
+        let sid_a = SessionId::from("alpha");
+        let sid_b = SessionId::from("beta");
+        let sid_gone = SessionId::from("gone");
+        let writer_a = LeaseHolder {
+            agent: crate::types::AgentId::from("writer-a"),
+            pid: 10,
+            host: "host".into(),
+            endpoint: None,
+        };
+        let writer_b = LeaseHolder {
+            agent: crate::types::AgentId::from("writer-b"),
+            pid: 11,
+            host: "host".into(),
+            endpoint: None,
+        };
+        let eraser = LeaseHolder {
+            agent: crate::types::AgentId::from("eraser"),
+            pid: 12,
+            host: "host".into(),
+            endpoint: None,
+        };
+
+        let t1 = Utc::now() - chrono::Duration::seconds(120);
+        let t2 = Utc::now() - chrono::Duration::seconds(30);
+        let ia = NodeId::new();
+        let c1 = NodeId::new();
+        let c2 = NodeId::new();
+        let e1 = NodeId::new();
+
+        store
+            .flush(
+                &MutationBatch {
+                    mutations: vec![
+                        Mutation::UpsertNode {
+                            node: Node::Interaction(crate::types::Interaction {
+                                id: ia,
+                                session_id: sid_a.clone(),
+                                agent_id: crate::types::AgentId::from("a"),
+                                prompt_text: None,
+                                previous_id: None,
+                                created_at: t1,
+                                event_time: None,
+                            }),
+                        },
+                        Mutation::UpsertNode {
+                            node: Node::Concept(crate::types::Concept {
+                                id: c1,
+                                session_id: sid_a.clone(),
+                                content: "c1".into(),
+                                canonical_key: "c1".into(),
+                                concept_type: crate::types::ConceptType::Entity,
+                                origin_interaction: ia,
+                                origin_agent: crate::types::AgentId::from("a"),
+                                created_at: t1,
+                                access_count: 0,
+                                last_accessed: None,
+                                gc_survived: 0,
+                                canonization_status: crate::types::CanonizationStatus::Canonical,
+                                blast_radius: None,
+                                last_demotion_time: None,
+                                embedding: Some(vec![1.0, 0.0]),
+                                human_confirmed: 0,
+                                embedding_source: None,
+                                chunk_group_id: None,
+                            }),
+                        },
+                        Mutation::UpsertNode {
+                            node: Node::Concept(crate::types::Concept {
+                                id: c2,
+                                session_id: sid_a.clone(),
+                                content: "c2".into(),
+                                canonical_key: "c2".into(),
+                                concept_type: crate::types::ConceptType::Logic,
+                                origin_interaction: ia,
+                                origin_agent: crate::types::AgentId::from("a"),
+                                created_at: t1,
+                                access_count: 0,
+                                last_accessed: None,
+                                gc_survived: 0,
+                                canonization_status: crate::types::CanonizationStatus::Venerable,
+                                blast_radius: None,
+                                last_demotion_time: None,
+                                embedding: None,
+                                human_confirmed: 0,
+                                embedding_source: None,
+                                chunk_group_id: None,
+                            }),
+                        },
+                        Mutation::UpsertEdge {
+                            edge: Edge {
+                                id: e1,
+                                session_id: sid_a.clone(),
+                                source: ia,
+                                target: c1,
+                                edge_type: crate::types::EdgeType::Derives,
+                                weight: 1.0,
+                                reinforcements: 1,
+                                created_at: t1,
+                                last_reinforced: t2,
+                                event_time: None,
+                            },
+                        },
+                    ],
+                    mutation_epoch: 1,
+                    gc_mark: Default::default(),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        let LeaseOutcome::Acquired(la) = store
+            .acquire_lease(&sid_a, &writer_a, Duration::from_secs(60))
+            .await
+            .unwrap()
+        else {
+            panic!("acquire a");
+        };
+        store
+            .acquire_lease(&sid_b, &writer_b, Duration::from_secs(60))
+            .await
+            .unwrap();
+        store.release_lease(&sid_b, &writer_b).await.unwrap();
+        store.erase_session(&sid_gone, &eraser).await.unwrap();
+
+        let health = store.store_health().await.unwrap();
+        assert_eq!(health.len(), 2);
+        assert_eq!(health[0].session_id, sid_a);
+        assert_eq!(health[0].concept_count, 2);
+        assert_eq!(health[0].edge_count, 1);
+        assert_eq!(health[0].embedded_count, 1);
+        assert_eq!(health[0].canonization.canonical, 1);
+        assert_eq!(health[0].canonization.venerable, 1);
+        assert_eq!(health[0].lease.as_ref().unwrap().holder, writer_a.token());
+        assert_eq!(health[0].lease.as_ref().unwrap().expires_at, la.expires_at);
+        assert_eq!(health[0].last_write_at, Some(t2));
+
+        assert_eq!(health[1].session_id, sid_b);
+        assert_eq!(health[1].concept_count, 0);
+        assert!(health[1].lease.is_none());
+        assert!(health[1].last_write_at.is_none());
     }
 }

@@ -131,14 +131,15 @@ pub use recall::layered::{DEFAULT_LAYER_MIN_SIMILARITY, DEFAULT_LAYER_WEIGHT};
 
 pub use resolve::{
     assert_session_embedding_compatible, check_vector_compatibility, resolve_backends,
-    resolve_from_config_path, resolve_store_only, ResolvedBackends, RESOLVE_ENV_VARS,
+    resolve_from_config_path, resolve_store_only, resolve_store_only_read_only, ResolvedBackends,
+    RESOLVE_ENV_VARS,
 };
 
 #[cfg(feature = "store-memory")]
 pub use store::MemoryStore;
 pub use store::{
-    build_store, store_dsn_identity, store_from_env, Capabilities, GraphStore, StoreConfig,
-    StoreKind,
+    build_store, store_dsn_identity, store_from_env, ActiveSessionLease, CanonizationCounts,
+    Capabilities, GraphStore, SessionHealth, StoreConfig, StoreKind,
 };
 
 // Explicit re-exports (no `types::*` glob — keeps the public surface auditable).

@@ -140,6 +140,86 @@ pub struct SessionFlushStats {
     /// Mutations not yet durable (in-graph log + pending batch) at publish time.
     pub log_depth: u64,
 }
+
+/// Counts of durable concepts by [`crate::types::CanonizationStatus`] for one
+/// session (#248).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct CanonizationCounts {
+    pub none: u64,
+    pub candidate: u64,
+    pub venerable: u64,
+    pub canonical: u64,
+}
+
+/// An active (non-expired, non-released, non-erased) single-writer lease
+/// observed at the store's clock (#248).
+///
+/// `#[non_exhaustive]`; build with [`ActiveSessionLease::new`].
+#[non_exhaustive]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ActiveSessionLease {
+    pub holder: String,
+    pub acquired_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
+impl ActiveSessionLease {
+    /// Construct an active single-writer lease summary.
+    pub fn new(holder: String, acquired_at: DateTime<Utc>, expires_at: DateTime<Utc>) -> Self {
+        Self {
+            holder,
+            acquired_at,
+            expires_at,
+        }
+    }
+}
+
+/// Store-level per-session durable health summary returned by
+/// [`GraphStore::store_health`] (#248).
+///
+/// `#[non_exhaustive]`; build with [`SessionHealth::new`].
+#[non_exhaustive]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct SessionHealth {
+    pub session_id: SessionId,
+    pub concept_count: u64,
+    pub edge_count: u64,
+    /// Raw count of concepts in the session carrying a vector (includes text
+    /// and image concepts and recent writes, with no grace period).
+    pub embedded_count: u64,
+    pub canonization: CanonizationCounts,
+    /// Active single-writer lease according to the store's own clock, or `None`
+    /// when no writer currently holds the session.
+    pub lease: Option<ActiveSessionLease>,
+    /// Latest durable graph write timestamp across interactions, concepts,
+    /// edges (creation and reinforcement), and canonization events, or `None`
+    /// when the session has no durable writes yet.
+    pub last_write_at: Option<DateTime<Utc>>,
+}
+
+impl SessionHealth {
+    /// Construct a per-session durable health summary.
+    pub fn new(
+        session_id: SessionId,
+        concept_count: u64,
+        edge_count: u64,
+        embedded_count: u64,
+        canonization: CanonizationCounts,
+        lease: Option<ActiveSessionLease>,
+        last_write_at: Option<DateTime<Utc>>,
+    ) -> Self {
+        Self {
+            session_id,
+            concept_count,
+            edge_count,
+            embedded_count,
+            canonization,
+            lease,
+            last_write_at,
+        }
+    }
+}
+
 pub fn validate_vector_candidate_limit(limit: usize) -> Result<(), StoreError> {
     if limit > MAX_VECTOR_CANDIDATE_LIMIT {
         return Err(StoreError::Invariant(format!(
@@ -941,6 +1021,26 @@ pub trait GraphStore: Send + Sync {
     ) -> Result<Option<SessionFlushStats>, StoreError> {
         Ok(None)
     }
+
+    // -----------------------------------------------------------------------
+    // Store-level health view (#248)
+    // -----------------------------------------------------------------------
+
+    /// Read-only per-session durable health overview across the entire store
+    /// (#248).
+    ///
+    /// Returns one [`SessionHealth`] per non-erased session, ordered by
+    /// `session_id` ascending. Erased session tombstones (`lambo:erased`) are
+    /// omitted. Live lease checks use the store's own clock (F18), never a
+    /// caller instant. Read-only: takes no lease and mutates nothing.
+    ///
+    /// Default fails closed with [`StoreError::Capability`] so an adapter that
+    /// does not implement store-wide inspection never looks like an empty store.
+    async fn store_health(&self) -> Result<Vec<SessionHealth>, StoreError> {
+        Err(StoreError::Capability(
+            "store_health is not implemented by this GraphStore adapter".into(),
+        ))
+    }
 }
 
 /// Operator-facing list of kinds, kept in one place so the empty-kind and
@@ -1338,6 +1438,14 @@ pub fn build_store(cfg: StoreConfig) -> Result<Box<dyn GraphStore>, StoreError> 
     build_store_with_vector_dim(cfg, None)
 }
 
+/// Whether store construction may create/mutate a SQLite file on connect, or
+/// must open an existing database strictly read-only (#248).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StoreAccessMode {
+    ReadWrite,
+    ReadOnlyExisting,
+}
+
 /// [`build_store`], plus the process's configured dense-vector width.
 ///
 /// SQLite consumes it: `concepts.embedding` is a `BLOB` with no width of its
@@ -1373,16 +1481,25 @@ pub fn build_store_with_vector_dim(
     cfg: StoreConfig,
     vector_dim: Option<usize>,
 ) -> Result<Box<dyn GraphStore>, StoreError> {
+    build_store_with_options(cfg, vector_dim, StoreAccessMode::ReadWrite)
+}
+
+pub(crate) fn build_store_with_options(
+    cfg: StoreConfig,
+    vector_dim: Option<usize>,
+    access: StoreAccessMode,
+) -> Result<Box<dyn GraphStore>, StoreError> {
     // Pre-check for a clear rebuild hint (see module comment above is_compiled).
     if !cfg.kind.is_compiled() {
         return Err(missing_feature(cfg.kind));
     }
     // Precedence: the operator's pin outranks the resolved embedder width (see the
     // doc comment). SQLite and Postgres consume it (Postgres copies into the pin
-    // slot below when the pin is absent). Cockroach ignores it. The binding stays
+    // slot below when the pin is absent). Cockroach ignores it. The bindings stay
     // used under feature rows that compile none of them.
     let vector_dim = cfg.vector_dim.or(vector_dim);
     let _ = vector_dim;
+    let _ = access;
     match cfg.kind {
         StoreKind::Memory => {
             // Real gate: type only exists under this feature.
@@ -1443,7 +1560,12 @@ pub fn build_store_with_vector_dim(
                         "SqliteStore requires a path (store.path or LAMBO_SQLITE_PATH)".into(),
                     )
                 })?;
-                let store = SqliteStore::connect(&path)?;
+                let store = match access {
+                    StoreAccessMode::ReadWrite => SqliteStore::connect(&path)?,
+                    StoreAccessMode::ReadOnlyExisting => {
+                        SqliteStore::connect_existing_read_only(&path)?
+                    }
+                };
                 let store = match vector_dim {
                     Some(dim) => store.with_vector_dim(dim)?,
                     None => store,

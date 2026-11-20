@@ -168,6 +168,16 @@ pub(crate) mod supersession_live;
     )
 ))]
 pub(crate) mod suspected_live;
+// #248: store-wide health overview on the live Postgres family (Postgres test
+// here, Cockroach leg in its conformance suite).
+#[cfg(all(
+    test,
+    any(
+        feature = "store-postgres",
+        all(feature = "store-cockroach", feature = "fixtures")
+    )
+))]
+pub(crate) mod health_live;
 
 // Postgres-only: the flush fence's lease row stays locked until commit.
 #[cfg(all(test, feature = "store-postgres"))]
@@ -444,6 +454,10 @@ impl<D: Dialect> GraphStore for PgStore<D> {
         session: &SessionId,
     ) -> Result<Option<SessionFlushStats>, StoreError> {
         self.select_flush_stats(session).await
+    }
+
+    async fn store_health(&self) -> Result<Vec<crate::store::SessionHealth>, StoreError> {
+        self.read_store_health().await
     }
 
     async fn flush(&self, batch: &MutationBatch, token: Option<u64>) -> Result<(), StoreError> {

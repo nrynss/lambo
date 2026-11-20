@@ -3137,3 +3137,111 @@ async fn tier_forwards_capped_extents_to_primary() {
     );
     crate::test_util::dependents::check_extents_case(&store).await;
 }
+
+/// #248: the tier delegates `store_health` directly to its primary and returns
+/// the primary's `SessionHealth` rows unchanged.
+#[tokio::test]
+async fn tier_delegates_store_health_to_primary() {
+    use crate::store::CanonizationCounts;
+    use chrono::TimeZone;
+
+    let primary = MemoryStore::new();
+    let sid_a = SessionId::from("tier-health-a");
+    let sid_erased = SessionId::from("tier-health-erased");
+    let t1 = Utc.timestamp_opt(1_700_000_010, 0).unwrap();
+    let t2 = Utc.timestamp_opt(1_700_000_060, 0).unwrap();
+    let ia = NodeId::new();
+    let ca = NodeId::new();
+    primary
+        .flush(
+            &MutationBatch {
+                mutation_epoch: 1,
+                gc_mark: Default::default(),
+                mutations: vec![
+                    Mutation::SetEmbedding {
+                        session_id: sid_a.clone(),
+                        embedding: Some(EmbeddingContract {
+                            kind: "fixture".into(),
+                            model: None,
+                            dim: 4,
+                        }),
+                    },
+                    Mutation::UpsertNode {
+                        node: Node::Interaction(Interaction {
+                            id: ia,
+                            session_id: sid_a.clone(),
+                            agent_id: AgentId::from("a"),
+                            prompt_text: None,
+                            previous_id: None,
+                            created_at: t1,
+                            event_time: None,
+                        }),
+                    },
+                    Mutation::UpsertNode {
+                        node: Node::Concept(Concept {
+                            id: ca,
+                            session_id: sid_a.clone(),
+                            content: "tiered fact".into(),
+                            canonical_key: "tiered fact".into(),
+                            concept_type: ConceptType::Logic,
+                            origin_interaction: ia,
+                            origin_agent: AgentId::from("a"),
+                            created_at: t2,
+                            access_count: 0,
+                            last_accessed: None,
+                            gc_survived: 0,
+                            canonization_status: CanonizationStatus::Canonical,
+                            blast_radius: None,
+                            last_demotion_time: None,
+                            embedding: Some(vec![1.0, 0.0, 0.0, 0.0]),
+                            human_confirmed: 0,
+                            embedding_source: None,
+                            chunk_group_id: None,
+                        }),
+                    },
+                ],
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    let holder = LeaseHolder {
+        agent: AgentId::from("writer"),
+        pid: 42,
+        host: "test".into(),
+        endpoint: None,
+    };
+    primary
+        .acquire_lease(&sid_a, &holder, Duration::from_secs(60))
+        .await
+        .unwrap();
+    let eraser = LeaseHolder {
+        agent: AgentId::from("eraser"),
+        pid: 43,
+        host: "test".into(),
+        endpoint: None,
+    };
+    primary.erase_session(&sid_erased, &eraser).await.unwrap();
+
+    let expected = primary.store_health().await.unwrap();
+    let index = Arc::new(FakeIndex::new());
+    let store = TieredStore::new(Box::new(primary), Box::new(index), Some(4));
+    let actual = store.store_health().await.unwrap();
+    assert_eq!(actual, expected);
+    assert_eq!(actual.len(), 1);
+    assert_eq!(actual[0].session_id, sid_a);
+    assert_eq!(actual[0].concept_count, 1);
+    assert_eq!(actual[0].embedded_count, 1);
+    assert_eq!(
+        actual[0].canonization,
+        CanonizationCounts {
+            none: 0,
+            candidate: 0,
+            venerable: 0,
+            canonical: 1,
+        }
+    );
+    let lease_holder = actual[0].lease.as_ref().map(|l| l.holder.as_str());
+    assert_eq!(lease_holder, Some(holder.token().as_str()));
+    assert_eq!(actual[0].last_write_at, Some(t2));
+}

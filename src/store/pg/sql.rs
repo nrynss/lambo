@@ -333,6 +333,116 @@ pub(super) const ERASE_STATEMENTS: &[(&str, &str)] = &[
     ("sessions", "DELETE FROM sessions WHERE session_id = $1"),
 ];
 
+/// Read-only store-wide per-session health overview (#248).
+///
+/// Uses `clock AS (SELECT now() AS now_ts)` so the active-lease check is
+/// evaluated at one cluster-clock instant (F18) across all returned columns,
+/// and `COUNT(CASE WHEN ... THEN 1 END)` so every count decodes as `INT8` /
+/// `BIGINT` (`i64`) on both PostgreSQL and CockroachDB (unlike `SUM(INT)` on
+/// CockroachDB, which returns `DECIMAL`).
+///
+/// `$1` = `ERASED_HOLDER`, `$2` = `RELEASED_HOLDER`.
+pub(super) const STORE_HEALTH_SQL: &str = "\
+WITH clock AS ( \
+    SELECT now() AS now_ts \
+), \
+active_sessions AS ( \
+    SELECT s.session_id \
+    FROM sessions s \
+    WHERE NOT EXISTS ( \
+        SELECT 1 FROM session_leases sl \
+        WHERE sl.session_id = s.session_id AND sl.holder = $1 \
+    ) \
+    UNION \
+    SELECT sl.session_id \
+    FROM session_leases sl \
+    WHERE sl.holder <> $1 \
+), \
+concept_agg AS ( \
+    SELECT \
+        session_id, \
+        COUNT(*) AS concept_count, \
+        COUNT(CASE WHEN embedding IS NOT NULL THEN 1 END) AS embedded_count, \
+        COUNT(CASE WHEN canonization_status = 'None' THEN 1 END) AS canon_none, \
+        COUNT(CASE WHEN canonization_status = 'Candidate' THEN 1 END) AS canon_candidate, \
+        COUNT(CASE WHEN canonization_status = 'Venerable' THEN 1 END) AS canon_venerable, \
+        COUNT(CASE WHEN canonization_status = 'Canonical' THEN 1 END) AS canon_canonical, \
+        COUNT(CASE WHEN canonization_status NOT IN ('None', 'Candidate', 'Venerable', 'Canonical') THEN 1 END) AS canon_unknown, \
+        MAX(created_at) AS max_concept_at \
+    FROM concepts \
+    GROUP BY session_id \
+), \
+edge_agg AS ( \
+    SELECT \
+        session_id, \
+        COUNT(*) AS edge_count, \
+        MAX(created_at) AS max_edge_created_at, \
+        MAX(last_reinforced) AS max_edge_reinforced_at \
+    FROM edges \
+    GROUP BY session_id \
+), \
+interaction_agg AS ( \
+    SELECT \
+        session_id, \
+        MAX(created_at) AS max_interaction_at \
+    FROM interactions \
+    GROUP BY session_id \
+), \
+event_agg AS ( \
+    SELECT \
+        session_id, \
+        MAX(occurred_at) AS max_event_at \
+    FROM canonization_events \
+    GROUP BY session_id \
+) \
+SELECT \
+    a.session_id, \
+    COALESCE(c.concept_count, 0) AS concept_count, \
+    COALESCE(e.edge_count, 0) AS edge_count, \
+    COALESCE(c.embedded_count, 0) AS embedded_count, \
+    COALESCE(c.canon_none, 0) AS canon_none, \
+    COALESCE(c.canon_candidate, 0) AS canon_candidate, \
+    COALESCE(c.canon_venerable, 0) AS canon_venerable, \
+    COALESCE(c.canon_canonical, 0) AS canon_canonical, \
+    COALESCE(c.canon_unknown, 0) AS canon_unknown, \
+    CASE \
+        WHEN sl.session_id IS NOT NULL \
+         AND sl.holder <> $1 \
+         AND sl.holder <> $2 \
+         AND sl.expires_at > clock.now_ts \
+        THEN sl.holder \
+        ELSE NULL \
+    END AS lease_holder, \
+    CASE \
+        WHEN sl.session_id IS NOT NULL \
+         AND sl.holder <> $1 \
+         AND sl.holder <> $2 \
+         AND sl.expires_at > clock.now_ts \
+        THEN sl.acquired_at \
+        ELSE NULL \
+    END AS lease_acquired_at, \
+    CASE \
+        WHEN sl.session_id IS NOT NULL \
+         AND sl.holder <> $1 \
+         AND sl.holder <> $2 \
+         AND sl.expires_at > clock.now_ts \
+        THEN sl.expires_at \
+        ELSE NULL \
+    END AS lease_expires_at, \
+    i.max_interaction_at, \
+    c.max_concept_at, \
+    e.max_edge_created_at, \
+    e.max_edge_reinforced_at, \
+    ev.max_event_at \
+FROM active_sessions a \
+CROSS JOIN clock \
+LEFT JOIN concept_agg c ON c.session_id = a.session_id \
+LEFT JOIN edge_agg e ON e.session_id = a.session_id \
+LEFT JOIN interaction_agg i ON i.session_id = a.session_id \
+LEFT JOIN event_agg ev ON ev.session_id = a.session_id \
+LEFT JOIN session_leases sl ON sl.session_id = a.session_id \
+ORDER BY a.session_id ASC";
+
 /// Canonization transition: update the concept (parity with MemoryStore's
 /// `CanonizationTransition` application) and append the audit row. The event insert is
 /// `ON CONFLICT (id) DO NOTHING` so a retried flush (same batch, already-committed

@@ -932,6 +932,89 @@ async fn the_image_tool_schema_publishes_the_runtime_caps() {
     s.mem.close().await.expect("close");
 }
 
+/// #250: every enum field in every published tool schema is inlined directly
+/// on the property (never behind a `$ref` into `$defs`), so client-side schema
+/// validators report the accepted values instead of an opaque Rust type name
+/// like `Expected WireConceptType`. Server-side deserialization also lists the
+/// accepted values for both unknown strings and non-string JSON types.
+#[tokio::test]
+async fn published_enum_fields_are_inlined_and_errors_list_accepted_values() {
+    let s = server("mcp-enum-inline").await;
+    for t in tools(&s) {
+        let schema = serde_json::to_value(&*t.input_schema).unwrap();
+        if let Some(defs) = schema.get("$defs").and_then(|v| v.as_object()) {
+            for (name, def) in defs {
+                assert!(
+                    def.get("enum").is_none(),
+                    "tool {} puts enum {name:?} in $defs instead of inlining it on the property: {def}",
+                    t.name
+                );
+            }
+        }
+    }
+    s.mem.close().await.expect("close");
+
+    // Non-string JSON types and wrong-case variants both list accepted values.
+    for bad_value in [json!("Observation"), json!(42), json!(null), json!(true)] {
+        let err = serde_json::from_value::<DeriveParams>(json!({
+            "agent_id": "agent-a",
+            "concepts": [{"content": "fact", "concept_type": bad_value}]
+        }))
+        .unwrap_err()
+        .to_string();
+        for expected in ["entity", "logic", "constraint", "resource", "observation"] {
+            assert!(
+                err.contains(&format!("`{expected}`")),
+                "DeriveParams error for {bad_value} must list `{expected}`: {err}"
+            );
+        }
+    }
+
+    for bad_value in [
+        json!("observation"),
+        json!("Entity"),
+        json!(42),
+        json!(null),
+    ] {
+        let err = serde_json::from_value::<DeriveImageParams>(json!({
+            "agent_id": "agent-a",
+            "caption": "diagram",
+            "concept_type": bad_value
+        }))
+        .unwrap_err()
+        .to_string();
+        for expected in ["entity", "logic", "constraint", "resource"] {
+            assert!(
+                err.contains(&format!("`{expected}`")),
+                "DeriveImageParams error for {bad_value} must list `{expected}`: {err}"
+            );
+        }
+        let expected_list = err
+            .split_once("expected one of")
+            .map(|(_, tail)| tail)
+            .unwrap_or(&err);
+        assert!(
+            !expected_list.contains("`observation`"),
+            "DeriveImageParams must not advertise `observation` as accepted: {err}"
+        );
+    }
+
+    for bad_mime in [json!(42), json!(null), json!(true)] {
+        let err = serde_json::from_value::<RecallParams>(json!({
+            "agent_id": "agent-a",
+            "image": {"mime": bad_mime, "data": "AAAA"}
+        }))
+        .unwrap_err()
+        .to_string();
+        for expected in ["image/png", "image/jpeg", "image/webp"] {
+            assert!(
+                err.contains(&format!("`{expected}`")),
+                "WireImage.mime error for {bad_mime} must list `{expected}`: {err}"
+            );
+        }
+    }
+}
+
 /// #22 PR 6: `lambo_recall`'s image and query vector publish the same caps
 /// as `lambo_derive_image`'s, pinned to the same constants, and its text is
 /// required only when neither is sent (so the schema no longer lists it as

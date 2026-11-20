@@ -771,8 +771,11 @@ mod tool_path {
             .as_str()
             .unwrap();
         let item = schema.pointer(item_ref.strip_prefix('#').unwrap()).unwrap();
-        let type_ref = item["properties"]["concept_type"]["$ref"].as_str().unwrap();
-        let concept_type = schema.pointer(type_ref.strip_prefix('#').unwrap()).unwrap();
+        let concept_type = &item["properties"]["concept_type"];
+        assert!(
+            concept_type.get("$ref").is_none(),
+            "concept_type enum must be inlined on the property (#250): {concept_type}"
+        );
         let values = concept_type["enum"].as_array().unwrap();
         assert_eq!(
             values.as_slice(),
@@ -780,6 +783,7 @@ mod tool_path {
                 .map(serde_json::Value::from)
         );
 
+        // Wrong-case string variant lists all 5 accepted values.
         client
             .send(r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"lambo_derive","arguments":{"agent_id":"agent-a","concepts":[{"content":"Example concept","concept_type":"Observation"}]}}}"#)
             .await;
@@ -790,6 +794,68 @@ mod tool_path {
         for value in values {
             let value = value.as_str().unwrap();
             assert!(text.contains(&format!("`{value}`")), "{text}");
+        }
+
+        // Wrong JSON type in enum slot also lists all 5 accepted values (#250).
+        client
+            .send(r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"lambo_derive","arguments":{"agent_id":"agent-a","concepts":[{"content":"Example concept","concept_type":42}]}}}"#)
+            .await;
+        let reply: serde_json::Value = serde_json::from_str(&client.response(4).await).unwrap();
+        assert_eq!(reply["result"]["isError"], true, "{reply}");
+        let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+        for value in values {
+            let value = value.as_str().unwrap();
+            assert!(text.contains(&format!("`{value}`")), "{text}");
+        }
+
+        // lambo_derive_image: inlined 4-value enum (no `observation`), listed on wire errors.
+        let derive_image = listed["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == "lambo_derive_image")
+            .unwrap();
+        let image_type = &derive_image["inputSchema"]["properties"]["concept_type"];
+        assert!(
+            image_type.get("$ref").is_none(),
+            "lambo_derive_image concept_type enum must be inlined (#250): {image_type}"
+        );
+        let image_values = image_type["enum"].as_array().unwrap();
+        assert_eq!(
+            image_values.as_slice(),
+            ["entity", "logic", "constraint", "resource"].map(serde_json::Value::from)
+        );
+        client
+            .send(r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"lambo_derive_image","arguments":{"agent_id":"agent-a","caption":"diagram","concept_type":"observation"}}}"#)
+            .await;
+        let reply: serde_json::Value = serde_json::from_str(&client.response(5).await).unwrap();
+        assert_eq!(reply["result"]["isError"], true, "{reply}");
+        let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("unknown variant `observation`"), "{text}");
+        for value in image_values {
+            let value = value.as_str().unwrap();
+            assert!(text.contains(&format!("`{value}`")), "{text}");
+        }
+        client
+            .send(r#"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"lambo_derive_image","arguments":{"agent_id":"agent-a","caption":"diagram","concept_type":99}}}"#)
+            .await;
+        let reply: serde_json::Value = serde_json::from_str(&client.response(6).await).unwrap();
+        assert_eq!(reply["result"]["isError"], true, "{reply}");
+        let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+        for value in image_values {
+            let value = value.as_str().unwrap();
+            assert!(text.contains(&format!("`{value}`")), "{text}");
+        }
+
+        // image.mime: non-string JSON type lists all 3 accepted MIME types.
+        client
+            .send(r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"lambo_derive_image","arguments":{"agent_id":"agent-a","caption":"diagram","concept_type":"resource","image":{"mime":42,"data":"AAAA"}}}}"#)
+            .await;
+        let reply: serde_json::Value = serde_json::from_str(&client.response(7).await).unwrap();
+        assert_eq!(reply["result"]["isError"], true, "{reply}");
+        let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+        for mime in ["image/png", "image/jpeg", "image/webp"] {
+            assert!(text.contains(&format!("`{mime}`")), "{text}");
         }
     }
 

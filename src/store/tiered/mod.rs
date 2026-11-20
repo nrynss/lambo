@@ -1826,6 +1826,10 @@ impl GraphStore for TieredStore {
     ) -> Result<Option<SessionFlushStats>, StoreError> {
         self.primary.read_flush_stats(session).await
     }
+
+    async fn store_health(&self) -> Result<Vec<crate::store::SessionHealth>, StoreError> {
+        self.primary.store_health().await
+    }
 }
 
 impl Tier {

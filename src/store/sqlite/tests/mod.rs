@@ -14,6 +14,7 @@ mod access;
 mod connection;
 mod demotion_reason;
 mod erase;
+mod health;
 mod leases;
 mod names;
 mod persistence;
