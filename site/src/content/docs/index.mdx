@@ -2,23 +2,19 @@
 # The tab title. `hero.title` below is what the page displays, so this only
 # has to stop the browser tab reading "Lambo | Lambo".
 title: "Agentic graph memory"
-description: "Agentic graph memory for multi-agent AI operations."
+description: "Shared, self-consolidating graph memory for coding agents and multi-agent AI operations."
 template: doc
 hero:
   title: "Lambo"
-  tagline: "Shared, self-consolidating memory for your agents. Importance is earned from structural evidence, not declared."
-  # Only the two the sidebar cannot offer. Quickstart and Evidence are one
-  # click away in the sidebar and again in the cards below, so buttons for
-  # them would be a third copy of the same link.
+  tagline: "Shared, self-consolidating graph memory for coding agents across harnesses and models. Importance is earned from structural evidence, never declared."
   actions:
-    - text: "Try it live"
-      link: "https://lambo.nryn.dev"
+    - text: "Get started"
+      link: "/lambo/quickstart/"
+      icon: right-arrow
       variant: primary
-      attrs:
-        target: _blank
-
-    - text: "Watch the walkthrough"
-      link: "https://www.youtube.com/watch?v=dfbMvf_YwFo"
+    - text: "View on GitHub"
+      link: "https://github.com/nrynss/lambo"
+      icon: external
       variant: secondary
       attrs:
         target: _blank
@@ -27,30 +23,44 @@ hero:
 import Mermaid from '../../components/Mermaid.astro';
 import { CardGrid, LinkCard } from '@astrojs/starlight/components';
 
-<div class="badges" style="text-align: center; margin-top: 1.5rem;">
-  <img src="https://img.shields.io/github/actions/workflow/status/nrynss/lambo/ci.yml?branch=main&label=ci&logo=github" alt="CI status" height="20" />
-  <img src="https://img.shields.io/github/license/nrynss/lambo?color=%2316A34A&label=license" alt="License" height="20" />
+<div class="lambo-meta-bar">
+  <span class="lambo-version">v0.14.0</span>
+  <span>9 MCP tools · SQLite, PostgreSQL (pgvector), CockroachDB, Memory · Optional Elasticsearch recall tier</span>
+  <span class="lambo-badges">
+    <img src="https://img.shields.io/github/actions/workflow/status/nrynss/lambo/ci.yml?branch=main&label=ci&logo=github" alt="CI status" height="20" />
+    <img src="https://img.shields.io/github/license/nrynss/lambo?color=%2315803d&label=license" alt="License" height="20" />
+  </span>
 </div>
 
-Lambo is agentic graph memory for multi-agent AI operations. It stores what your agents learn, recalls relevant memory on request, and coordinates edits across many small agents that never talk to each other directly.
+Lambo stores what your agents learn across **Cursor, Claude Code, Codex, OMP, Pi**, and custom MCP clients, recalls it by meaning and dependency structure, and protects load-bearing decisions before another agent breaks them.
 
-A single `lambo serve` process owns each session. Agents connect to that process and share its in-memory graph. A background daemon consolidates what they write.
+One `lambo serve` process owns each session (or a multi-session stack with shared layers such as `general`) as its single writer. Agents share its in-memory graph while mutations flush asynchronously to your durable store, and a background daemon consolidates and canonizes concepts from structure alone.
+
+```bash
+# Try the deterministic two-agent REST API scenario with zero config
+curl -fsSL https://github.com/nrynss/lambo/releases/latest/download/install.sh | sh
+lambo demo
+```
+
+On Apple Silicon, pass `LAMBO_FLAVOR=metal` to include the in-process Candle BGE-M3 embedder on the Metal GPU — local SQLite plus real semantic search with no `llama-server` sidecar. See [Installation](/lambo/installation/).
 
 <Mermaid
+  caption="Architecture — multi-session single-writer graph, pluggable durable stores, and optional Elasticsearch recall tier"
   code={`flowchart LR
-    subgraph Surfaces["Agent surfaces"]
-        MCP["MCP clients<br/>(agents)"]
-        CLI["Command line verbs"]
+    subgraph Surfaces["Agent and operator surfaces"]
+        MCP["MCP clients<br/>(Cursor, Claude Code, Codex, OMP, Pi)<br/>stdio / HTTP /mcp/s/session"]
+        CLI["CLI verbs<br/>(derive, recall, inspect, names, stats)"]
         WEB["lambo serve-web<br/>(browser, read-only)"]
     end
-    subgraph Writer["lambo serve (single writer)"]
-        GRAPH["In-memory graph<br/>concepts and edges"]
-        DAEMON["Background daemon"]
-        CANON["Canonization"]
-        EMB["Embedder"]
+    subgraph Writer["lambo serve (single writer per session)"]
+        GRAPH["Multi-session in-memory graph<br/>and shared layers (e.g. general)"]
+        DAEMON["Background daemon<br/>GC, rescore, contradictions"]
+        CANON["Canonization<br/>Swarm / Solo / supersession"]
+        EMB["Embedder<br/>candle / bge_m3 / eg2 / gemini / elastic"]
     end
-    subgraph Durable["Durable store"]
-        DB[("memory / sqlite /<br/>cockroach")]
+    subgraph Storage["Durable store and recall tier"]
+        DB[("Store (source of truth)<br/>memory / sqlite /<br/>postgres (pgvector) / cockroach")]
+        ES[("Optional recall tier<br/>Elasticsearch HNSW<br/>(fallback to store)")]
     end
     MCP --> GRAPH
     CLI --> GRAPH
@@ -58,32 +68,72 @@ A single `lambo serve` process owns each session. Agents connect to that process
     GRAPH --> EMB
     GRAPH --> DAEMON
     DAEMON --> CANON
-    GRAPH -. "write-behind flush" .-> DB`}
+    GRAPH -. "write-behind flush" .-> DB
+    DB -. "async vector copy" .-> ES
+    GRAPH -. "vector leg (optional)" .-> ES`}
 />
 
-## The project narrative
+## Why structural memory
 
-Multi-agent coding produces a flood of observations. Each small agent sees one slice of the work, writes it down in its own words, and moves on. That memory lives in tool call history and dies when the context window closes.
+Multi-agent coding produces a flood of observations. Each agent sees one slice of the repository, writes notes in its own phrasing, and exits when the context window closes. Flat text files and plain vector RAG accumulate duplicates and cannot distinguish a passing remark from a load-bearing ruling.
 
-That is the problem Lambo was built for, and [Origin](/lambo/origin/) is the author's account of how the idea arrived: what working with coding agents made obvious, and where a promotion model borrowed from veneration and canonization came from.
+Lambo models each session as a typed bipartite graph of interactions and concepts (`Entity`, `Logic`, `Constraint`, `Resource`, `Observation`) joined by structural edges. [Origin](/lambo/origin/) tells how working with coding agents led to a promotion model borrowed from veneration and canonization.
 
-Lambo gives those agents a shared memory that outlives the context. It treats each session as a graph of concepts. A concept is something your agents learn, such as `user schema`, `auth middleware`, or `retry budget is 3`. Typed edges connect concepts that depend on, produce, or relate to each other.
+<div class="lambo-pillars">
+  <div class="lambo-pillar">
+    <h3>Consolidates duplicates</h3>
+    <p>Near-identical restatements merge by canonical key and cosine similarity — guarded against conflicting versions, paths, and identifiers — so recall returns one sharp fact instead of fifty noisy notes.</p>
+  </div>
+  <div class="lambo-pillar">
+    <h3>Promotes by evidence</h3>
+    <p>No agent can declare a memory canonical. The daemon evaluates survival, independent dependent interactions, temporal spread, and blast radius across three audited gates under <code>Swarm</code> or <code>Solo</code> policy. <a href="/lambo/canonization/">Read the arithmetic</a>.</p>
+  </div>
+  <div class="lambo-pillar">
+    <h3>Flags blast radius &amp; drift</h3>
+    <p>Every recall returns live blast-radius warnings, concurrent-edit conflicts, declared contradictions (<code>against</code>), stale-citation alerts, and suspected undeclared supersessions before work lands.</p>
+  </div>
+</div>
 
-Three properties make this memory useful at scale.
+## Capabilities in v0.14.0
 
-- **It consolidates.** Many agents write the same idea in different words. Lambo matches the duplicates, deduplicates them, and lets recall return one canonical fact instead of fifty near-identical notes.
-- **It promotes by evidence.** Importance is earned, not declared. The background daemon promotes concepts on structural evidence: how many other interactions declared that they depend on a concept, over how long, and how many concepts rest on it. A concept that accumulates evidence earns canonical status. [Canonization](/lambo/canonization/) has the arithmetic, and [Evidence and evaluation](/lambo/evidence/) has the transcripts that verify it from a plain SQL client.
-- **It retracts safely.** Each concept carries a blast radius, so an agent knows how many things depend on what it is about to change. Coordination tools such as `lambo_reserve` and `lambo_inspect` turn that knowledge into action.
-
-Durability is write-behind and eventual. Mutations batch into a few round trips to a durable store, so a burst of writes drains quickly and the session survives restarts.
+<div class="lambo-capabilities">
+  <div class="lambo-cap">
+    <div class="lambo-cap-title">
+      <span>Multi-session HTTP &amp; shared layers</span>
+      <span class="lambo-cap-tag">[serve]</span>
+    </div>
+    <p>Serve multiple project sessions at <code>/mcp/s/&lt;session&gt;</code>, layer shared rules such as <code>general</code> into every recall, scope bearer tokens per credential, and route stdio clients by directory via <code>[[serve.projects]]</code>.</p>
+  </div>
+  <div class="lambo-cap">
+    <div class="lambo-cap-title">
+      <span>Durable names, contradictions &amp; staleness</span>
+      <span class="lambo-cap-tag">lambo_stale</span>
+    </div>
+    <p>Bind normalized durable names to concept IDs, refute outdated beliefs with <code>against</code>, audit downstream dependents via <code>lambo_stale</code>, and isolate identical file paths across repos with <code>repo_scope</code>.</p>
+  </div>
+  <div class="lambo-cap">
+    <div class="lambo-cap-title">
+      <span>Multimodal &amp; calibrated retrieval</span>
+      <span class="lambo-cap-tag">lambo_derive_image</span>
+    </div>
+    <p>Derive and recall images alongside text with EmbeddingGemma 2 or client vectors, backed by per-contract calibration rows, a startup embedder canary, <code>top_legs</code> scores, and optional RRF or redundancy filtering.</p>
+  </div>
+  <div class="lambo-cap">
+    <div class="lambo-cap-title">
+      <span>Pluggable backends &amp; operational telemetry</span>
+      <span class="lambo-cap-tag">stats --store</span>
+    </div>
+    <p>Switch between SQLite, PostgreSQL (<code>pgvector</code>), CockroachDB, Memory, and an optional Elasticsearch <code>[recall]</code> tier in <code>lambo.toml</code>. Inspect every session lease-free with <code>lambo stats --store</code> and audit recall quality offline via <code>--ledger</code>.</p>
+  </div>
+</div>
 
 ## Explore
 
-Four ways in. The sidebar has everything else.
-
 <CardGrid cols={2}>
-  <LinkCard title="Quickstart" href="/lambo/quickstart/" description="Install the binary and run your first session in about 30 seconds." />
-  <LinkCard title="Demo" href="/lambo/demo/" description="Watch two agents build one REST API and share load-bearing memory." />
-  <LinkCard title="Canonization" href="/lambo/canonization/" description="How a concept earns canonical status: the score, the three gates, the constants." />
-  <LinkCard title="Evidence & evaluation" href="/lambo/evidence/" description="Live-cluster measurements, determinism proofs, and the raw transcripts behind every claim." />
+  <LinkCard title="Quickstart" href="/lambo/quickstart/" description="Install the binary, provision local SQLite, and run your first recall in 30 seconds." />
+  <LinkCard title="Demo" href="/lambo/demo/" description="Run two agents building one REST API and watch load-bearing memory form deterministically." />
+  <LinkCard title="MCP tools" href="/lambo/mcp/" description="All nine MCP tools (eight always-on plus lambo_derive_image), schemas, receipts, and limits." />
+  <LinkCard title="Canonization" href="/lambo/canonization/" description="The composite score formula, Stage 1–3 evidence gates, Solo policy, and supersession." />
+  <LinkCard title="Configuration" href="/lambo/config/" description="Every lambo.toml table: stores, embedders, layers, credentials, calibration, and fusion." />
+  <LinkCard title="Evidence & evaluation" href="/lambo/evidence/" description="Release re-pin gates, calibration benchmarks, cross-store parity, durability proofs, and negative results." />
 </CardGrid>

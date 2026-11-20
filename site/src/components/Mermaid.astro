@@ -1,67 +1,184 @@
 ---
-// Renders a Mermaid diagram client-side at runtime.
-// Pass the diagram source as the `code` prop.
+// Renders a Mermaid diagram client-side at runtime, harmonized with Starlight's
+// light and dark themes and re-rendered automatically when the theme toggles.
 interface Props {
   code: string;
+  caption?: string;
 }
 
-const { code } = Astro.props;
+const { code, caption } = Astro.props;
 const id = `mermaid-${Math.random().toString(36).slice(2, 8)}`;
 ---
 
-<div class="mermaid-shell" data-mermaid-shell={id}>
-  <pre class="mermaid" id={id}>{code}</pre>
-</div>
+<figure class="mermaid-shell" data-mermaid-shell={id} data-source={code}>
+  {caption && <figcaption class="mermaid-caption">{caption}</figcaption>}
+  <div class="mermaid-stage">
+    <pre class="mermaid-fallback" id={id}>{code}</pre>
+  </div>
+</figure>
 
 <style>
   .mermaid-shell {
-    max-width: 100%;
-    overflow-x: auto;
-    padding: 1rem;
-    border-radius: 0.5rem;
+    margin: 1.6rem 0;
+    border: 1px solid var(--lambo-border);
+    border-radius: 0.6rem;
+    background: var(--lambo-surface);
+    overflow: hidden;
+    box-shadow: var(--lambo-shadow-sm);
   }
+
+  .mermaid-caption {
+    padding: 0.55rem 0.95rem;
+    font-family: var(--sl-font-mono);
+    font-size: 0.74rem;
+    color: var(--sl-color-gray-3);
+    background: var(--lambo-table-head);
+    border-bottom: 1px solid var(--lambo-border);
+    letter-spacing: 0.02em;
+  }
+
+  .mermaid-stage {
+    padding: 1.25rem 1rem;
+    overflow-x: auto;
+    display: flex;
+    justify-content: center;
+  }
+
+  .mermaid-fallback {
+    margin: 0;
+    font-size: 0.8rem;
+    color: var(--sl-color-gray-3);
+    background: transparent;
+    border: none;
+    white-space: pre-wrap;
+  }
+
+  .mermaid-shell :global(.mermaid-rendered) {
+    width: 100%;
+    display: flex;
+    justify-content: center;
+  }
+
   .mermaid-shell :global(svg) {
     max-width: 100%;
     height: auto;
+    font-family: var(--sl-font) !important;
   }
 </style>
 
 <script>
   import mermaid from 'mermaid';
 
+  let renderSeq = 0;
   let busy = false;
+  let pending = false;
 
-  async function render() {
-    if (busy) return;
+  function themeVars(isLight: boolean) {
+    if (isLight) {
+      return {
+        fontFamily: "'IBM Plex Sans', -apple-system, BlinkMacSystemFont, sans-serif",
+        fontSize: '13px',
+        background: '#ffffff',
+        primaryColor: '#edf7f0',
+        primaryTextColor: '#141a16',
+        primaryBorderColor: '#15803d',
+        secondaryColor: '#f2f5f0',
+        secondaryTextColor: '#141a16',
+        secondaryBorderColor: '#8d9a92',
+        tertiaryColor: '#f7f9f5',
+        tertiaryTextColor: '#232d27',
+        tertiaryBorderColor: '#c5cfc3',
+        clusterBkg: '#f5f7f3',
+        clusterBorder: '#c5cfc3',
+        lineColor: '#414e46',
+        edgeLabelBackground: '#ffffff',
+        textColor: '#141a16',
+        nodeTextColor: '#141a16',
+      };
+    }
+    return {
+      fontFamily: "'IBM Plex Sans', -apple-system, BlinkMacSystemFont, sans-serif",
+      fontSize: '13px',
+      background: '#121815',
+      primaryColor: '#13281d',
+      primaryTextColor: '#edf2ee',
+      primaryBorderColor: '#22c55e',
+      secondaryColor: '#17201c',
+      secondaryTextColor: '#edf2ee',
+      secondaryBorderColor: '#3d5246',
+      tertiaryColor: '#141c18',
+      tertiaryTextColor: '#d4ddd7',
+      tertiaryBorderColor: '#2e3f36',
+      clusterBkg: '#0f1512',
+      clusterBorder: '#2a3931',
+      lineColor: '#86efac',
+      edgeLabelBackground: '#121815',
+      textColor: '#edf2ee',
+      nodeTextColor: '#edf2ee',
+    };
+  }
+
+  async function renderAll() {
+    if (busy) {
+      pending = true;
+      return;
+    }
     busy = true;
+    pending = false;
 
+    const isLight = document.documentElement.dataset.theme === 'light';
     mermaid.initialize({
       startOnLoad: false,
       theme: 'base',
       securityLevel: 'strict',
-      flowchart: { useMaxWidth: true },
+      themeVariables: themeVars(isLight),
+      flowchart: {
+        useMaxWidth: true,
+        htmlLabels: true,
+        curve: 'basis',
+        padding: 14,
+        nodeSpacing: 34,
+        rankSpacing: 46,
+      },
     });
 
-    const els = Array.from(document.querySelectorAll('pre.mermaid:not([data-done])'));
-    for (const el of els) {
-      el.dataset.done = 'true';
-      const source = el.textContent ?? '';
-      const target = el.parentElement;
-      if (!target) continue;
+    const shells = Array.from(document.querySelectorAll<HTMLElement>('[data-mermaid-shell]'));
+    for (const shell of shells) {
+      const source = shell.dataset.source ?? '';
+      const stage = shell.querySelector<HTMLElement>('.mermaid-stage');
+      if (!stage || !source) continue;
+      const svgId = `${shell.dataset.mermaidShell ?? 'mermaid'}-svg-${++renderSeq}`;
       try {
-        // Mount the svg element, then ask mermaid to upgrade the raw tags.
-        target.innerHTML = '<div class="mermaid-rendered"></div>';
-        const { svg } = await mermaid.render(undefined, source);
-        const box = target.querySelector('.mermaid-rendered');
-        if (box) box.innerHTML = svg;
+        const { svg } = await mermaid.render(svgId, source);
+        stage.innerHTML = `<div class="mermaid-rendered">${svg}</div>`;
       } catch (err) {
-        el.style.display = 'block';
-        el.textContent = `Diagram failed to render: ${err instanceof Error ? err.message : String(err)}`;
+        const msg = err instanceof Error ? err.message : String(err);
+        stage.innerHTML = `<pre class="mermaid-fallback">Diagram failed to render: ${msg}</pre>`;
       }
     }
 
     busy = false;
+    if (pending) {
+      void renderAll();
+    }
   }
 
-  document.addEventListener('astro:page-load', render);
+  // Initial render + Starlight client navigation
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', () => void renderAll(), { once: true });
+  } else {
+    void renderAll();
+  }
+  document.addEventListener('astro:page-load', () => void renderAll());
+
+  // Re-render when Starlight's light/dark theme attribute toggles
+  const observer = new MutationObserver((mutations) => {
+    for (const m of mutations) {
+      if (m.attributeName === 'data-theme') {
+        void renderAll();
+        break;
+      }
+    }
+  });
+  observer.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
 </script>

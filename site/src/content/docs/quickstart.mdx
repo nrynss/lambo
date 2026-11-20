@@ -13,7 +13,15 @@ Run the install script on macOS or Linux.
 curl -fsSL https://github.com/nrynss/lambo/releases/latest/download/install.sh | sh
 ```
 
-The script picks the binary for your platform, verifies its SHA-256 checksum, and installs it to `~/.local/bin`. Confirm it with `lambo --version`. The Apple silicon Metal build (`LAMBO_FLAVOR=metal`) and a build-from-source path are in [Installation](/lambo/installation/).
+The script picks the binary for your platform, verifies its SHA-256 checksum, and installs it to `~/.local/bin`. Confirm it with `lambo --version`.
+
+On Apple silicon, you can instead install the Metal build (`LAMBO_FLAVOR=metal`) to run real BGE-M3 embeddings in-process with zero sidecar:
+
+```bash
+curl -fsSL https://github.com/nrynss/lambo/releases/latest/download/install.sh | LAMBO_FLAVOR=metal sh
+```
+
+See [Installation](/lambo/installation/) for version pinning and building from source.
 
 ## Configure a quick session
 
@@ -84,4 +92,4 @@ Pick whichever direction matches what you want to build.
 - Point the same binary at a durable store by editing `lambo.toml`. See [Configuration](/lambo/config/).
 - Run a full walkthrough in [End to end](/lambo/end-to-end/).
 - Run the scripted two-agent demo described in [Demo](/lambo/demo/).
-- Explore the seven [MCP tools](/lambo/mcp/).
+- Explore the nine [MCP tools](/lambo/mcp/).

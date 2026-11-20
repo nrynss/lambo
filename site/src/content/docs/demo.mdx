@@ -19,7 +19,7 @@ With no config file present it runs against the in-memory store and finishes in 
 
 | Flag | Default | What it does |
 |---|---|---|
-| `--scenario` | `rest-api` | Picks the scenario. `rest-api` is the only one in v0.2. |
+| `--scenario` | `rest-api` | Picks the scenario (`rest-api` is the built-in scenario). |
 | `--session` | fresh id per run | Writes into a session id you choose. |
 
 <Warning>
@@ -110,7 +110,7 @@ The age reads 0 seconds because the whole session replays in under a second. On 
 
 ## Run it against a durable store
 
-Point the demo at SQLite or CockroachDB to exercise the full write-behind path and leave a graph behind you can inspect.
+Point the demo at SQLite, PostgreSQL (`pgvector`), or CockroachDB to exercise the full write-behind path and leave a graph behind you can inspect.
 
 ```bash
 lambo --config lambo.toml provision
@@ -147,7 +147,7 @@ It also covers one scenario. It does not exercise reservations, drift detection,
 Follow whichever thread the demo made interesting.
 
 - Read [End to end](/lambo/end-to-end/) for the topology this scenario exercises.
-- Read [MCP tools](/lambo/mcp/) for the seven tools your agents call.
+- Read [MCP tools](/lambo/mcp/) for the nine MCP tools your agents call.
 - Read [Command line](/lambo/cli/) for the verbs a swarm uses.
 - Read [Configuration](/lambo/config/) to point Lambo at a durable store.
 - Read [`docs/demo.md`](https://github.com/nrynss/lambo/blob/main/docs/demo.md) in the repository for the operator's view of this same scenario: every knob and its committed value, what determinism does and does not cover, why each run gets a fresh session, and the tests that hold the behaviour in place.
