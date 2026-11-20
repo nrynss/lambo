@@ -2,6 +2,34 @@
 
 ## Unreleased
 
+- Durable display names now surface through layered recall, `lambo_inspect`,
+  and MCP tool schemas (#285). Layered recall preserves `LayeredHit::names`
+  across merged and single-session recalls, emits `names [...]` in rendered
+  context headers scoped to the shown hit's session so deduplicated
+  farther-tier copies never leak names across sessions, and exposes additive
+  `structuredContent.hits[].names` (omitted when unnamed to preserve v0.5.0
+  byte identity). `lambo_inspect` renders up to three durable display names in
+  normalized-key order as `names: [...]` in text and additive
+  `structuredContent.focus.names`, preserving unnamed output byte-identically
+  and keeping CloudOps parsers compatible. MCP `get_info` instructions, tool
+  schemas (`WireConcept.name`, durable-name `depends_on` / `against` /
+  `InspectParams.focus` guidance, and tightened `agent_id` descriptions), and
+  `docs/reference/mcp.mdx` (with its site mirror) are updated to match.
+- `scripts/observability/_ledger.py` now tracks heartbeat restarts per session
+  instead of globally across a shared multi-session ledger (#281, fixing #279).
+  `session_key` extracts the top-level `session` string (or `None` for legacy
+  session-less lines), `Ledger.restart_times_by_session()` tracks monotonic
+  `uptime_secs` per session (ignoring non-integer and boolean values), and
+  `Ledger.restart_times()` returns their chronologically sorted union.
+  `scripts/observability/recall_first.py` groups each agent's calls by
+  `(agent_id, session)` and splits work sessions on that session's restarts and
+  idle gaps exceeding `--gap-minutes`, so interleaved heartbeats, restarts in
+  another session, or legacy session-less heartbeats do not distort
+  recall-first metrics. Its `--json` output keeps `restarts` and adds `session`
+  on each work-session row, `restarts_by_session` for named sessions, and
+  `restarts_unspecified_session` for legacy session-less restarts (preventing
+  collision with a literal `"<unspecified>"` session name).
+
 ## 0.14.0 (2026-11-20)
 
 - Live `lambo_inspect` results now include `structuredContent.focus.concept_type`
