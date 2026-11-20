@@ -17,7 +17,29 @@
 //! max_loaded_sessions = 4     # views held in memory at once
 //! load_concurrency = 2        # simultaneous session loads (always 1 on SQLite)
 //! recall_concurrency = 4      # simultaneous recalls; a request waiting 2 s gets 503
+//! embedder = true             # false: never load the embedder (as --no-embedder)
 //! ```
+//!
+//! # The embedder (#247)
+//!
+//! The portal's only heavy resource is the embedder, which recall needs for
+//! its vector leg alone. An in-process model costs real memory per process
+//! (candle BGE-M3: about 1.3 GB of RAM or unified memory once loaded), and a
+//! `lambo serve` beside the portal holds its own copy. So the portal loads it
+//! **lazily**: startup, the page, counts, feeds, inspect, the graph and
+//! `/api/session` never load it, and the first `/api/recall` that embeds a
+//! query loads it once (concurrent recalls share that one load) and keeps it.
+//! A failed load degrades that recall to the keyword and recent legs, as a
+//! failed embed does, and is not remembered: the next recall tries again.
+//! An HTTP embedder (`bge_m3`, Bedrock, Gemini, Elastic, EmbeddingGemma 2)
+//! has nothing to load and costs no more either way.
+//!
+//! `embedder = false` (or `lambo serve-web --no-embedder`) turns the vector
+//! leg off: the model is never loaded, and every recall runs on the keyword
+//! and recent legs with a line saying the vector leg is off by
+//! configuration. The configured embedder is still resolved (its identity
+//! and width, no weights), so the page's embedding-contract status stays
+//! exact.
 //!
 //! `allowed_hosts` matters only while no credential of any kind is
 //! configured (no legacy token, no `[[web.credential]]`, none inherited): then
@@ -187,6 +209,12 @@ pub struct WebConfig {
     /// [`DEFAULT_RECALL_CONCURRENCY`]; 1 to [`MAX_CONCURRENCY`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recall_concurrency: Option<usize>,
+    /// Use the configured embedder for recall's vector leg (#247). Default
+    /// `true`: loaded on the first recall that embeds a query, never at
+    /// startup. `false`: never loaded, and recall runs on its keyword and
+    /// recent legs (`--no-embedder` does the same).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedder: Option<bool>,
     /// Answer `GET /api/sessions` with the names the presenting credential
     /// may read (#4 PR 3, design 6.2). Off by default: the route is then not
     /// registered at all, so it is the uniform 404.
@@ -390,6 +418,11 @@ impl WebConfig {
         self.recall_concurrency
             .unwrap_or(DEFAULT_RECALL_CONCURRENCY)
     }
+
+    /// Whether recall may use the embedder, default applied (#247).
+    pub fn embedder_enabled(&self) -> bool {
+        self.embedder.unwrap_or(true)
+    }
 }
 
 #[cfg(test)]
@@ -405,6 +438,27 @@ mod tests {
         assert_eq!(file.web.max_loaded_sessions(), 4);
         assert_eq!(file.web.load_concurrency(), 2);
         assert_eq!(file.web.recall_concurrency(), 4);
+        assert!(file.web.embedder_enabled());
+    }
+
+    /// #247: `embedder` is a bool, on by default; `false` turns it off, and
+    /// a non-bool is refused without quoting the value.
+    #[test]
+    fn the_embedder_switch_parses() {
+        let off = LamboFile::from_toml_str("[web]\nembedder = false\n").expect("off");
+        assert_eq!(off.web.embedder, Some(false));
+        assert!(!off.web.embedder_enabled());
+        assert!(!off.web.is_empty());
+        let on = LamboFile::from_toml_str("[web]\nembedder = true\n").expect("on");
+        assert!(on.web.embedder_enabled());
+        let err = LamboFile::from_toml_str("[web]\nembedder = \"a-pasted-value\"\n")
+            .expect_err("a string where a bool goes")
+            .to_string();
+        assert!(!err.contains("a-pasted-value"), "{err}");
+        let err = LamboFile::from_toml_str("[web]\nembeder = false\n")
+            .expect_err("a typo is an unknown key")
+            .to_string();
+        assert!(err.contains("unknown field `embeder`"), "{err}");
     }
 
     #[test]
@@ -768,6 +822,7 @@ mod tests {
         assert_eq!(web.max_loaded_sessions, Some(DEFAULT_MAX_LOADED_SESSIONS));
         assert_eq!(web.load_concurrency, Some(DEFAULT_LOAD_CONCURRENCY));
         assert_eq!(web.recall_concurrency, Some(DEFAULT_RECALL_CONCURRENCY));
+        assert_eq!(web.embedder, Some(true));
         assert!(!web.list_sessions && !web.inherit_serve_credentials);
         assert_eq!(web.credentials.len(), 1);
         assert_eq!(web.credentials[0].name, "lambo-viewers");

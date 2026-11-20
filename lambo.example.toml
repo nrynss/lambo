@@ -481,6 +481,16 @@ url = "http://127.0.0.1:8080"
 # allowed_hosts and the [[web.credential]] block are examples (none by
 # default).
 #
+# Memory (#247): the embedder is the window's only heavy part, and only
+# recall's vector leg uses it. An in-process model (candle BGE-M3) costs
+# about 1.3 GB per process once loaded, on top of the lambo serve beside it;
+# an HTTP embedder (bge_m3 over llama.cpp, Bedrock, Gemini, Elastic) costs
+# nothing extra. The window never loads it at startup or for browsing: the
+# first recall that embeds a query loads it once and keeps it. A failed load
+# degrades that recall to keyword + recent results and is retried by the next
+# recall. embedder = false (or --no-embedder) never loads it: every recall
+# then runs on keyword + recent results and says the vector leg is off.
+#
 # --- [web] example begins ---
 # [web]
 # sessions = ["lambo", "rustydocs"]        # default none; beside --session, the first overall is the default
@@ -489,6 +499,7 @@ url = "http://127.0.0.1:8080"
 # max_loaded_sessions = 4      # views kept in memory, least recently used dropped; >= 1
 # load_concurrency = 2         # session loads at once, 1 to 1024 (always 1 on SQLite)
 # recall_concurrency = 4       # recalls at once, 1 to 1024
+# embedder = true              # false: never load the embedder; recall is keyword + recent only
 # list_sessions = false        # true: GET /api/sessions names the caller's sessions (off: no such route)
 # inherit_serve_credentials = false  # true: [[serve.credential]] tokens read too (no write);
 #                                    # their "*" is serve's sessions + prefixes, not this list
