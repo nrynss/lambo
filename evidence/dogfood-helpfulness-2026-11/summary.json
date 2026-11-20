@@ -1,0 +1,423 @@
+{
+  "schema_version": 1,
+  "sanitization": {
+    "policy": "public_aggregates_and_anonymized_non_lambo_sessions",
+    "anonymized_sessions": [
+      "project-a",
+      "project-b",
+      "project-c",
+      "project-d",
+      "project-e"
+    ],
+    "withheld": [
+      "non-lambo repository and product names",
+      "internal ticket and PR identifiers",
+      "non-lambo concept IDs and concept text",
+      "local filesystem and transcript paths"
+    ]
+  },
+  "window": {
+    "start_date": "2026-08-19",
+    "end_date": "2026-11-20",
+    "span_days": 92.5,
+    "generated_at": "2026-11-20",
+    "versions_seen": [
+      "0.2.2",
+      "0.3.0",
+      "0.4.0",
+      "0.5.0",
+      "0.6.0",
+      "0.8.0",
+      "0.12.0",
+      "0.13.0"
+    ]
+  },
+  "level1_ledger": {
+    "total_calls": 5248,
+    "total_recalls": 1990,
+    "total_derives": 1923,
+    "total_record_actions": 1144,
+    "unique_agent_ids": 324,
+    "daemon_heartbeats": 53857,
+    "dropped_lines": 0,
+    "by_tool": [
+      { "tool": "lambo_recall", "count": 1990 },
+      { "tool": "lambo_derive", "count": 1923 },
+      { "tool": "lambo_record_action", "count": 1144 },
+      { "tool": "lambo_stats", "count": 130 },
+      { "tool": "lambo_reserve", "count": 41 },
+      { "tool": "lambo_inspect", "count": 17 },
+      { "tool": "lambo_saints", "count": 2 },
+      { "tool": "lambo_stale", "count": 1 }
+    ],
+    "by_session": [
+      { "session": "pre-split", "total": 2994, "recalls": 1149, "derives": 1097, "actions": 647, "warning_recalls": 123, "unique_agents": 178 },
+      { "session": "general-usage", "total": 623, "recalls": 231, "derives": 212, "actions": 165, "warning_recalls": 79, "unique_agents": 77 },
+      { "session": "lambo-dev", "total": 563, "recalls": 202, "derives": 220, "actions": 92, "warning_recalls": 8, "unique_agents": 36 },
+      { "session": "lambo", "total": 563, "recalls": 304, "derives": 165, "actions": 68, "warning_recalls": 113, "unique_agents": 50 },
+      { "session": "project-a", "total": 480, "recalls": 95, "derives": 218, "actions": 167, "warning_recalls": 31, "unique_agents": 5 },
+      { "session": "project-d", "total": 25, "recalls": 9, "derives": 11, "actions": 5, "warning_recalls": 2, "unique_agents": 2 }
+    ],
+    "weekly_series": [
+      { "iso_week": "2026-W34", "total": 161, "recalls": 34, "derives": 70, "actions": 54, "warnings": 7, "claude": 58, "gpt_codex": 0, "gemini": 0, "other": 103 },
+      { "iso_week": "2026-W35", "total": 34, "recalls": 17, "derives": 6, "actions": 4, "warnings": 8, "claude": 0, "gpt_codex": 2, "gemini": 0, "other": 32 },
+      { "iso_week": "2026-W36", "total": 252, "recalls": 103, "derives": 86, "actions": 53, "warnings": 22, "claude": 155, "gpt_codex": 49, "gemini": 0, "other": 48 },
+      { "iso_week": "2026-W37", "total": 725, "recalls": 279, "derives": 210, "actions": 199, "warnings": 40, "claude": 156, "gpt_codex": 364, "gemini": 8, "other": 197 },
+      { "iso_week": "2026-W38", "total": 95, "recalls": 30, "derives": 38, "actions": 27, "warnings": 16, "claude": 75, "gpt_codex": 5, "gemini": 0, "other": 15 },
+      { "iso_week": "2026-W39", "total": 40, "recalls": 7, "derives": 26, "actions": 7, "warnings": 5, "claude": 38, "gpt_codex": 0, "gemini": 0, "other": 2 },
+      { "iso_week": "2026-W40", "total": 301, "recalls": 99, "derives": 127, "actions": 67, "warnings": 5, "claude": 131, "gpt_codex": 132, "gemini": 0, "other": 38 },
+      { "iso_week": "2026-W41", "total": 1432, "recalls": 594, "derives": 556, "actions": 243, "warnings": 22, "claude": 773, "gpt_codex": 615, "gemini": 0, "other": 44 },
+      { "iso_week": "2026-W42", "total": 663, "recalls": 253, "derives": 250, "actions": 109, "warnings": 16, "claude": 259, "gpt_codex": 384, "gemini": 0, "other": 20 },
+      { "iso_week": "2026-W44", "total": 347, "recalls": 114, "derives": 139, "actions": 87, "warnings": 21, "claude": 233, "gpt_codex": 104, "gemini": 0, "other": 10 },
+      { "iso_week": "2026-W45", "total": 268, "recalls": 79, "derives": 115, "actions": 71, "warnings": 19, "claude": 167, "gpt_codex": 101, "gemini": 0, "other": 0 },
+      { "iso_week": "2026-W46", "total": 502, "recalls": 206, "derives": 162, "actions": 120, "warnings": 81, "claude": 232, "gpt_codex": 200, "gemini": 66, "other": 4 },
+      { "iso_week": "2026-W47", "total": 428, "recalls": 175, "derives": 138, "actions": 103, "warnings": 94, "claude": 224, "gpt_codex": 179, "gemini": 25, "other": 0 }
+    ],
+    "warnings": {
+      "any_warning_recalls": 356,
+      "recall_categories": {
+        "hot_warning": 205,
+        "canonical_marker": 64,
+        "blast_radius_warning": 64,
+        "contradiction_warning": 52,
+        "conflict_line": 44,
+        "reservation_warning": 13
+      },
+      "hit_annotations": {
+        "hot": 212,
+        "load_bearing": 140,
+        "conflict": 93,
+        "contradiction": 62,
+        "contradicts": 62,
+        "rests_on_contradicted": 23,
+        "reservation": 13
+      }
+    },
+    "observability": {
+      "recall_first": {
+        "issue": "#279",
+        "raw_pct": 52.2,
+        "raw_compliant": 922,
+        "raw_sequences": 1765,
+        "raw_restarts": 38389,
+        "session_scoped_pct": 74.0,
+        "session_scoped_compliant": 1083,
+        "session_scoped_sequences": 1464,
+        "session_scoped_restarts": 97,
+        "by_family": [
+          { "family": "Claude", "calls": 2501, "unique_ids": 71, "raw_pct": 31.7, "raw_compliant": 312, "raw_sequences": 983, "adjusted_pct": 56.1, "adjusted_compliant": 410, "adjusted_sequences": 731, "adjusted_no_recall_derives": 383 },
+          { "family": "GPT / Codex", "calls": 2135, "unique_ids": 99, "raw_pct": 81.6, "raw_compliant": 493, "raw_sequences": 604, "adjusted_pct": 96.8, "adjusted_compliant": 539, "adjusted_sequences": 557, "adjusted_no_recall_derives": 25 },
+          { "family": "Gemini", "calls": 99, "unique_ids": 33, "raw_pct": 9.7, "raw_compliant": 3, "raw_sequences": 31, "adjusted_pct": 58.6, "adjusted_compliant": 17, "adjusted_sequences": 29, "adjusted_no_recall_derives": 5 },
+          { "family": "Other", "calls": 513, "unique_ids": 121, "raw_pct": 77.6, "raw_compliant": 114, "raw_sequences": 147, "adjusted_pct": 79.6, "adjusted_compliant": 117, "adjusted_sequences": 147, "adjusted_no_recall_derives": 23 }
+        ]
+      },
+      "dedup_rate": {
+        "ok_derives": 1920,
+        "failed_derives": 3,
+        "factless_derives": 1,
+        "exact_match_count": 81,
+        "exact_match_pct": 2.24,
+        "effective_convergence_pct": 2.72,
+        "semantic_merges": 18,
+        "reinforcements": 6,
+        "pre_0_4_0_derives_without_merge_fields": 1026,
+        "derived_concepts_created": 3542,
+        "record_action_concepts_created": 3986
+      },
+      "score_bands": {
+        "recalls_analyzed": 1989,
+        "recalls_using_vectors": 1690,
+        "zero_hit_recalls": 0,
+        "expansion_hits": 229,
+        "phase1_hits": 12323,
+        "recency_leg_hits": 2282,
+        "recency_leg_pct": 18.5,
+        "recency_floor_only_hits": 162,
+        "recency_floor_only_pct": 1.3,
+        "vector_hits_masked_below_0_35": 0,
+        "g1_drift_mean_delta": 0.0503,
+        "distributions": [
+          { "signal": "bm25_keyword", "n": 12065, "p10": 6.60, "median": 15.00, "p90": 27.16, "min": 0.43, "max": 92.87 },
+          { "signal": "vector_cosine", "n": 4540, "p10": 0.549, "median": 0.635, "p90": 0.711, "min": 0.305, "max": 1.000 },
+          { "signal": "fused_score", "n": 12552, "p10": null, "median": 7.50, "p90": 13.62, "min": 0.06, "max": 46.54 }
+        ]
+      },
+      "ledger_drift_177": {
+        "script": "scripts/loadtest/ledger_drift.py",
+        "streams_evaluated": 46,
+        "streams_total": 61,
+        "alarms_count": 11,
+        "dropped_lines": 0,
+        "alarms": [
+          { "date": "2026-09-07", "session": "default", "contract": "unknown (pre-0.6.0)", "query_class": "hybrid", "stream": "hit_count", "direction": "low", "n": 967, "before_median": 25.0, "after_median": 5.0, "peak_log10_m": 24.64, "nearby_events": "None" },
+          { "date": "2026-10-05", "session": "default", "contract": "unknown (pre-0.6.0)", "query_class": "hybrid", "stream": "top_bm25_legacy", "direction": "high", "n": 967, "before_median": 15.73, "after_median": 25.75, "peak_log10_m": 8.13, "nearby_events": "None" },
+          { "date": "2026-10-05", "session": "default", "contract": "unknown (pre-0.6.0)", "query_class": "hybrid", "stream": "top_fused", "direction": "high", "n": 967, "before_median": 8.04, "after_median": 13.03, "peak_log10_m": 7.84, "nearby_events": "None" },
+          { "date": "2026-10-05", "session": "default", "contract": "unknown (pre-0.6.0)", "query_class": "keyword_only", "stream": "hit_count", "direction": "low", "n": 181, "before_median": 5.0, "after_median": 5.0, "peak_log10_m": 4.39, "nearby_events": "None" },
+          { "date": "2026-09-05", "session": "default", "contract": "unknown (pre-0.6.0)", "query_class": "hybrid", "stream": "top_vector_cosine", "direction": "high", "n": 967, "before_median": 0.599, "after_median": 0.672, "peak_log10_m": 4.05, "nearby_events": "None" },
+          { "date": "2026-09-11", "session": "default", "contract": "unknown (pre-0.6.0)", "query_class": "keyword_only", "stream": "top_bm25_legacy", "direction": "high", "n": 181, "before_median": 10.69, "after_median": 16.68, "peak_log10_m": 3.67, "nearby_events": "None" },
+          { "date": "2026-10-12", "session": "lambo-dev", "contract": "candle/bge-m3/1024", "query_class": "hybrid", "stream": "top_fused", "direction": "high", "n": 182, "before_median": 9.90, "after_median": 13.43, "peak_log10_m": 3.28, "nearby_events": "None" },
+          { "date": "2026-10-05", "session": "default", "contract": "unknown (pre-0.6.0)", "query_class": "keyword_only", "stream": "top_fused", "direction": "high", "n": 181, "before_median": 6.70, "after_median": 9.22, "peak_log10_m": 3.09, "nearby_events": "None" },
+          { "date": "2026-10-13", "session": "lambo-dev", "contract": "candle/bge-m3/1024", "query_class": "hybrid", "stream": "top_bm25_legacy", "direction": "high", "n": 182, "before_median": 19.51, "after_median": 26.55, "peak_log10_m": 3.03, "nearby_events": "2 uptime_gap restarts" },
+          { "date": "2026-11-03", "session": "general-usage", "contract": "candle/bge-m3/1024", "query_class": "hybrid", "stream": "top_bm25_legacy", "direction": "high", "n": 159, "before_median": 10.22, "after_median": 16.42, "peak_log10_m": 2.52, "nearby_events": "None" },
+          { "date": "2026-11-03", "session": "general-usage", "contract": "candle/bge-m3/1024", "query_class": "hybrid", "stream": "top_fused", "direction": "high", "n": 191, "before_median": 5.51, "after_median": 7.68, "peak_log10_m": 2.37, "nearby_events": "None" }
+        ]
+      }
+    }
+  },
+  "level2_graph": {
+    "snapshot_date": "2026-11-20",
+    "sessions_count": 8,
+    "concepts_total": 7594,
+    "lambo_concepts": 2743,
+    "lambo_concepts_pct": 36.1,
+    "non_lambo_concepts": 4851,
+    "non_lambo_concepts_pct": 63.9,
+    "promotions": {
+      "canonical": 5,
+      "venerable": 26,
+      "candidate": 720,
+      "none": 6843
+    },
+    "edges_total": 18919,
+    "edges_by_type": {
+      "Derives": 7622,
+      "Causal": 3618,
+      "Temporal": 3103,
+      "CoOccurrence": 2537,
+      "Dependency": 1883,
+      "Semantic": 69,
+      "Hierarchical": 49,
+      "Contradicts": 38
+    },
+    "dependency_survival_funnel": {
+      "all_dependencies": 1883,
+      "cross_agent": 624,
+      "cross_agent_pct": 33.1,
+      "over_24h": 250,
+      "over_24h_pct": 13.3,
+      "cross_agent_and_over_24h": 181,
+      "cross_agent_and_over_24h_pct": 9.6,
+      "over_7d": 165,
+      "over_7d_pct": 8.8
+    },
+    "contradicts_edges": {
+      "total": 38,
+      "cross_agent": 13,
+      "cross_agent_pct": 34.2
+    },
+    "sessions": [
+      { "session": "lambo", "concepts": 2743, "canonical": 5, "venerable": 15, "candidate": 444, "none": 2279, "edges": 7299, "dependencies": 779, "cross_agent_deps": 271, "deps_over_24h": 184, "cross_agent_and_over_24h": 138, "deps_over_7d": 129, "contradicts": 6, "cross_agent_contradicts": 2 },
+      { "session": "project-a", "concepts": 1861, "canonical": 0, "venerable": 5, "candidate": 88, "none": 1768, "edges": 4352, "dependencies": 296, "cross_agent_deps": 39, "deps_over_24h": 44, "cross_agent_and_over_24h": 23, "deps_over_7d": 32, "contradicts": 11, "cross_agent_contradicts": 1 },
+      { "session": "project-b", "concepts": 1012, "canonical": 0, "venerable": 0, "candidate": 59, "none": 953, "edges": 2516, "dependencies": 391, "cross_agent_deps": 133, "deps_over_24h": 13, "cross_agent_and_over_24h": 13, "deps_over_7d": 0, "contradicts": 0, "cross_agent_contradicts": 0 },
+      { "session": "general-usage", "concepts": 910, "canonical": 0, "venerable": 0, "candidate": 35, "none": 875, "edges": 2390, "dependencies": 238, "cross_agent_deps": 180, "deps_over_24h": 8, "cross_agent_and_over_24h": 6, "deps_over_7d": 3, "contradicts": 19, "cross_agent_contradicts": 10 },
+      { "session": "project-c", "concepts": 553, "canonical": 0, "venerable": 2, "candidate": 62, "none": 489, "edges": 1229, "dependencies": 90, "cross_agent_deps": 0, "deps_over_24h": 0, "cross_agent_and_over_24h": 0, "deps_over_7d": 0, "contradicts": 0, "cross_agent_contradicts": 0 },
+      { "session": "project-d", "concepts": 411, "canonical": 0, "venerable": 3, "candidate": 30, "none": 378, "edges": 909, "dependencies": 76, "cross_agent_deps": 1, "deps_over_24h": 1, "cross_agent_and_over_24h": 1, "deps_over_7d": 1, "contradicts": 2, "cross_agent_contradicts": 0 },
+      { "session": "project-e", "concepts": 69, "canonical": 0, "venerable": 1, "candidate": 2, "none": 66, "edges": 151, "dependencies": 9, "cross_agent_deps": 0, "deps_over_24h": 0, "cross_agent_and_over_24h": 0, "deps_over_7d": 0, "contradicts": 0, "cross_agent_contradicts": 0 },
+      { "session": "general", "concepts": 35, "canonical": 0, "venerable": 0, "candidate": 0, "none": 35, "edges": 73, "dependencies": 4, "cross_agent_deps": 0, "deps_over_24h": 0, "cross_agent_and_over_24h": 0, "deps_over_7d": 0, "contradicts": 0, "cross_agent_contradicts": 0 }
+    ],
+    "model_family_handoff_matrices": {
+      "all": {
+        "total": 1883,
+        "cross_family": 207,
+        "cross_family_pct": 11.0,
+        "matrix": {
+          "Claude": { "Claude": 762, "GPT / Codex": 64, "Gemini": 31, "Other": 24 },
+          "GPT / Codex": { "Claude": 29, "GPT / Codex": 692, "Gemini": 0, "Other": 41 },
+          "Gemini": { "Claude": 4, "GPT / Codex": 0, "Gemini": 17, "Other": 1 },
+          "Other": { "Claude": 7, "GPT / Codex": 6, "Gemini": 0, "Other": 205 }
+        }
+      },
+      "lambo": {
+        "total": 779,
+        "cross_family": 79,
+        "cross_family_pct": 10.1,
+        "matrix": {
+          "Claude": { "Claude": 329, "GPT / Codex": 60, "Gemini": 0, "Other": 10 },
+          "GPT / Codex": { "Claude": 4, "GPT / Codex": 346, "Gemini": 0, "Other": 0 },
+          "Gemini": { "Claude": 0, "GPT / Codex": 0, "Gemini": 0, "Other": 0 },
+          "Other": { "Claude": 3, "GPT / Codex": 2, "Gemini": 0, "Other": 25 }
+        }
+      },
+      "non_lambo": {
+        "total": 1104,
+        "cross_family": 128,
+        "cross_family_pct": 11.6,
+        "matrix": {
+          "Claude": { "Claude": 433, "GPT / Codex": 4, "Gemini": 31, "Other": 14 },
+          "GPT / Codex": { "Claude": 25, "GPT / Codex": 346, "Gemini": 0, "Other": 41 },
+          "Gemini": { "Claude": 4, "GPT / Codex": 0, "Gemini": 17, "Other": 1 },
+          "Other": { "Claude": 4, "GPT / Codex": 4, "Gemini": 0, "Other": 180 }
+        }
+      }
+    },
+    "public_lambo_pillars": [
+      { "id_short": "ca2cb7d7", "session": "lambo", "status": "Canonical", "blast_radius": 10, "origin_family": "GPT / Codex", "created_at": "2026-11-04" },
+      { "id_short": "341fdd9c", "session": "lambo", "status": "Canonical", "blast_radius": 9, "origin_family": "GPT / Codex", "created_at": "2026-10-15" },
+      { "id_short": "f586c6c0", "session": "lambo", "status": "Canonical", "blast_radius": 7, "origin_family": "GPT / Codex", "created_at": "2026-10-30" },
+      { "id_short": "db60cb86", "session": "lambo", "status": "Canonical", "blast_radius": 6, "origin_family": "GPT / Codex", "created_at": "2026-10-30" },
+      { "id_short": "b853d1aa", "session": "lambo", "status": "Canonical", "blast_radius": 6, "origin_family": "GPT / Codex", "created_at": "2026-11-10" },
+      { "id_short": "6c1285b7", "session": "lambo", "status": "Venerable", "blast_radius": 5, "origin_family": "GPT / Codex", "created_at": "2026-10-30" },
+      { "id_short": "6c9579da", "session": "lambo", "status": "Venerable", "blast_radius": 5, "origin_family": "Claude", "created_at": "2026-10-10" }
+    ]
+  },
+  "level3_transcripts_and_causal_audit": {
+    "sessions_total": 260,
+    "mcp_calls_total": 2543,
+    "recalls_total": 657,
+    "derives_total": 1050,
+    "actions_total": 762,
+    "id_citation_0_6_0_plus": {
+      "eligible_recalls": 443,
+      "any_cited_count": 225,
+      "any_cited_pct": 50.8,
+      "structured_cited_pct": 50.3
+    },
+    "by_harness": [
+      {
+        "harness": "Claude Code",
+        "window": "2026-08-19 to 2026-11-20",
+        "sessions": 168,
+        "mcp_calls": 1923,
+        "recalls": 361,
+        "recall_before_write_pct": 93.5,
+        "recall_before_write_num": 116,
+        "recall_before_write_den": 124,
+        "recall_before_file_edit_pct": 91.1,
+        "recall_before_file_edit_den": 90,
+        "id_cited_later_pct": 33.8,
+        "id_cited_later_num": 79,
+        "id_cited_later_den": 234,
+        "structured_cited_pct": 33.8,
+        "warning_recalls": 131,
+        "sample_n": 29,
+        "sample_clearly_helpful_count": 14,
+        "sample_clearly_helpful_pct": 48.3
+      },
+      {
+        "harness": "Codex",
+        "window": "2026-11-03 to 2026-11-19",
+        "sessions": 28,
+        "mcp_calls": 293,
+        "recalls": 162,
+        "recall_before_write_pct": 100.0,
+        "recall_before_write_num": 27,
+        "recall_before_write_den": 27,
+        "recall_before_file_edit_pct": 100.0,
+        "recall_before_file_edit_den": 11,
+        "id_cited_later_pct": 75.3,
+        "id_cited_later_num": 122,
+        "id_cited_later_den": 162,
+        "structured_cited_pct": 75.3,
+        "warning_recalls": 87,
+        "sample_n": 20,
+        "sample_clearly_helpful_count": 13,
+        "sample_clearly_helpful_pct": 65.0
+      },
+      {
+        "harness": "Cursor",
+        "window": "2026-08-24 to 2026-11-20",
+        "sessions": 64,
+        "mcp_calls": 327,
+        "recalls": 134,
+        "recall_before_write_pct": 77.0,
+        "recall_before_write_num": 47,
+        "recall_before_write_den": 61,
+        "recall_before_file_edit_pct": 68.2,
+        "recall_before_file_edit_den": 44,
+        "id_cited_later_pct": 51.1,
+        "id_cited_later_num": 24,
+        "id_cited_later_den": 47,
+        "structured_cited_pct": 46.8,
+        "warning_recalls": 24,
+        "sample_n": 25,
+        "sample_clearly_helpful_count": 10,
+        "sample_clearly_helpful_pct": 40.0
+      }
+    ],
+    "by_project_group": [
+      { "project": "project-a", "sessions": 166, "calls": 1488, "recalls": 302, "derives": 686, "actions": 493 },
+      { "project": "lambo", "sessions": 48, "calls": 813, "recalls": 265, "derives": 300, "actions": 191 },
+      { "project": "project-b", "sessions": 25, "calls": 139, "recalls": 52, "derives": 29, "actions": 54 },
+      { "project": "other", "sessions": 12, "calls": 41, "recalls": 23, "derives": 14, "actions": 4 },
+      { "project": "project-d", "sessions": 5, "calls": 31, "recalls": 10, "derives": 9, "actions": 10 },
+      { "project": "project-e", "sessions": 2, "calls": 18, "recalls": 3, "derives": 7, "actions": 6 },
+      { "project": "project-c", "sessions": 2, "calls": 13, "recalls": 2, "derives": 5, "actions": 4 }
+    ],
+    "stratified_causal_audit": {
+      "sample_n": 74,
+      "population_N": 657,
+      "seed": 42,
+      "strata": [
+        { "stratum": "warning_bearing", "sampled": 26, "population": 242 },
+        { "stratum": "cited_non_warning", "sampled": 20, "population": 118 },
+        { "stratum": "baseline_uncited_non_warning", "sampled": 28, "population": 297 }
+      ],
+      "clearly_helpful_unweighted_pct": 50.0,
+      "clearly_helpful_unweighted_count": 37,
+      "clearly_helpful_ht_weighted_pct": 45.9,
+      "tiers": [
+        { "tier": "changed_plan", "unweighted_count": 14, "unweighted_pct": 18.9, "ht_weighted_pct": 17.4 },
+        { "tier": "saved_discovery", "unweighted_count": 23, "unweighted_pct": 31.1, "ht_weighted_pct": 28.5 },
+        { "tier": "confirmed_neutral", "unweighted_count": 23, "unweighted_pct": 31.1, "ht_weighted_pct": 32.5 },
+        { "tier": "noise_ignored", "unweighted_count": 14, "unweighted_pct": 18.9, "ht_weighted_pct": 21.6 }
+      ],
+      "by_project_split": [
+        { "group": "lambo", "n": 34, "changed_plan_pct": 29.4, "saved_discovery_pct": 23.5, "clearly_helpful_pct": 52.9, "confirmed_neutral_pct": 26.5, "noise_ignored_pct": 20.6 },
+        { "group": "non_lambo", "n": 40, "changed_plan_pct": 10.0, "saved_discovery_pct": 37.5, "clearly_helpful_pct": 47.5, "confirmed_neutral_pct": 35.0, "noise_ignored_pct": 17.5 }
+      ],
+      "by_harness": [
+        { "harness": "Claude Code", "n": 29, "changed_plan_pct": 17.2, "saved_discovery_pct": 31.0, "clearly_helpful_pct": 48.3, "confirmed_neutral_pct": 20.7, "noise_ignored_pct": 31.0 },
+        { "harness": "Codex", "n": 20, "changed_plan_pct": 25.0, "saved_discovery_pct": 40.0, "clearly_helpful_pct": 65.0, "confirmed_neutral_pct": 35.0, "noise_ignored_pct": 0.0 },
+        { "harness": "Cursor", "n": 25, "changed_plan_pct": 16.0, "saved_discovery_pct": 24.0, "clearly_helpful_pct": 40.0, "confirmed_neutral_pct": 40.0, "noise_ignored_pct": 20.0 }
+      ],
+      "warning_audit": {
+        "n": 26,
+        "acted_on": 7,
+        "acted_on_pct": 26.9,
+        "noted_only": 5,
+        "noted_only_pct": 19.2,
+        "ignored_or_false_positive": 14,
+        "ignored_or_false_positive_pct": 53.8
+      }
+    }
+  },
+  "friction_modes": [
+    {
+      "id": "FM-1",
+      "title": "Canonical-first warning carryover causes warning fatigue",
+      "severity": "high",
+      "headline_metric": "53.8% (14/26) audited warnings ignored or false positive",
+      "issues": ["#280"],
+      "code_paths": ["src/recall/assemble.rs"]
+    },
+    {
+      "id": "FM-2",
+      "title": "general-usage bleed and 0.35 recency-floor backfill noise",
+      "severity": "high",
+      "headline_metric": "18.5% (2,282/12,323) phase-1 hits carry 0.35 leg; 1.3% (162) recency-floor-only",
+      "issues": ["#174", "#254", "#277"]
+    },
+    {
+      "id": "FM-3",
+      "title": "Write-gate performative recall and headless permission denials",
+      "severity": "medium",
+      "headline_metric": "33 errored headless Claude Code recalls; late gate-clearing recall in reviews",
+      "issues": ["#277"]
+    },
+    {
+      "id": "FM-4",
+      "title": "Shared-ledger multi-session heartbeat bug in recall_first.py",
+      "severity": "medium",
+      "headline_metric": "38,389 false restart splits (52.2% raw vs. 74.0% session-scoped compliance)",
+      "issues": ["#279", "#177"],
+      "code_paths": ["scripts/observability/_ledger.py", "scripts/loadtest/ledger_drift.py"]
+    }
+  ],
+  "methodology_caveats": [
+    "Asymmetric transcript retention windows: Codex covers 2026-11-03 to 2026-11-19 (post-0.6.0 only), whereas Claude Code and Cursor span the full 92.5 days including pre-split and pre-0.6.0 sessions.",
+    "Three recall-first measurement layers: 52.2% raw recall_first.py (38,389 false splits), 74.0% session-scoped adjusted (97 true restarts), and 77.0% to 100.0% in local interactive transcripts with hooks.",
+    "Stratification oversampling: n = 74 oversampled warning-bearing (26/242) and cited non-warning (20/118) recalls alongside 28/297 baseline uncited recalls; Horvitz-Thompson population estimate (45.9%) and unweighted sample (50.0%) are reported together.",
+    "Cursor tool-result reconstruction: Cursor local transcripts omit raw MCP tool_result payloads, so returned 0.6.0+ IDs and warnings were joined via exact (agent_id, query, +/-3d) server ledger matches (132/134 matched); silent saves without ID citation remain a conservative undercount.",
+    "Caller-asserted agent_id fragmentation: 324 unique IDs across 5,248 calls include task-scoped IDs, placing 513 calls (121 IDs) in Other and inflating cross-agent Dependency counts when one model family rotates task-scoped IDs."
+  ]
+}

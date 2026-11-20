@@ -1,6 +1,6 @@
 ---
 title: "Evidence and evaluation"
-description: "Release re-pin gates, recall calibration, cross-store parity, durability proofs, and negative research results."
+description: "Multi-agent dogfood helpfulness audit, release re-pin gates, recall calibration, cross-store parity, durability proofs, and negative research results."
 ---
 import Note from '../../components/MdxNote.astro';
 import Warning from '../../components/MdxWarning.astro';
@@ -23,6 +23,38 @@ Before re-pinning the daily dogfood writers (Apple Silicon M3 Pro Metal and Linu
 
 <Note>
 On `0.6.0 vs 0.5.0` ([`evidence/0.6.0-vs-0.5.0/`](https://github.com/nrynss/lambo/tree/main/evidence/0.6.0-vs-0.5.0)), the gate caught a real regression: structural-marker queries (`blast radius`, `depends on`) rose to ~280 ms p99 because anchor resolution normalized every concept on every query (`#165`). That finding stayed published and drove the `#165`/`#171` fixes verified in `0.8.0`.
+</Note>
+
+## Three-month multi-agent dogfood audit (2026-08-19 to 2026-11-20)
+
+Beyond synthetic re-pin gates and offline eval sets, a read-only 92.5-day audit ([`evidence/dogfood-helpfulness-2026-11/`](https://github.com/nrynss/lambo/tree/main/evidence/dogfood-helpfulness-2026-11)) measured real daily multi-agent usage across eight serving sessions (`lambo`, `general-usage`, `general`, and five anonymized external project sessions `project-a`–`project-e`), eight shipped versions (`0.2.2`–`0.13.0`), and three coding-agent harnesses (`Claude Code`, `Codex`, and `Cursor`). Non-`lambo` project names, private concept IDs, internal ticket/PR identifiers, and local transcript paths are anonymized or withheld in the public report and machine-readable [`summary.json`](https://github.com/nrynss/lambo/blob/main/evidence/dogfood-helpfulness-2026-11/summary.json).
+
+| Evidence layer | Scope | Headline measurements |
+|---|---|---|
+| **Server ledger** | `92.5` days (`0.2.2`–`0.13.0`, `0` dropped lines) | `5,248` MCP calls (`1,990` recalls, `1,923` derives, `1,144` actions); `324` caller-asserted `agent_id`s; `356` warning-bearing recalls; `74.0%` session-scoped `recall-first` compliance (`52.2%` raw before `#279`). |
+| **Live SQLite graph** | Snapshot `2026-11-20` across `8` sessions | `7,594` concepts (`2,743` / `36.1%` `lambo`; `4,851` / `63.9%` non-`lambo`); `18,919` edges; `5` Canonical, `26` Venerable, `720` Candidate; `1,883` `Dependency` edges (`624` cross-agent, `250` >24h, `181` cross-agent & >24h, `165` >7d, `207` / `11.0%` cross-model-family); `38` `Contradicts` edges (`13` cross-agent). |
+| **Local transcripts & causal audit** | `260` sessions (`168` Claude Code, `64` Cursor, `28` Codex); `2,543` calls; `657` recalls; stratified `n = 74` sample | **`45.9%`** Horvitz-Thompson population-weighted clearly helpful (**`50.0%`** unweighted `37/74`); `32.5%` (`31.1%`) confirmed/neutral; `21.6%` (`18.9%`) noise/ignored. **`50.8%`** (`225/443`) `0.6.0+` returned-ID follow-through citation (`50.3%` structured via `depends_on` / `against` / `lambo_inspect`). |
+
+### Causal helpfulness, cross-project split, and warnings
+
+| Slice | Sample | Changed plan | Saved discovery | Clearly helpful | Confirmed / neutral | Noise / ignored |
+|---|---:|---:|---:|---:|---:|---:|
+| **All recalls (pop.-weighted, HT)** | `N = 657` | `17.4%` | `28.5%` | **`45.9%`** | `32.5%` | `21.6%` |
+| **All recalls (unweighted sample)** | `n = 74` | `18.9%` | `31.1%` | **`50.0%`** | `31.1%` | `18.9%` |
+| **`lambo` sessions** | `n = 34` | **`29.4%`** | `23.5%` | `52.9%` | `26.5%` | `20.6%` |
+| **Non-`lambo` sessions** | `n = 40` | `10.0%` | **`37.5%`** | `47.5%` | `35.0%` | `17.5%` |
+
+- **Different value profiles across repos:** `lambo` saw more plan changes from Canonical/Venerable design rulings and contradiction edges (`29.4%` `changed_plan`, e.g. `#175` closeout rulings `341fdd9c`/`db60cb86`/`f586c6c0` and `#198` supersession `f00d7711`), whereas non-`lambo` repos drew their biggest gains from durable operational memory (`37.5%` `saved_discovery`, including two-month-old rollback runbooks, local Playwright baselines, and cross-session PR review checklists).
+- **Observability and `#177` drift replay:** Replaying the 92.5-day ledger through `scripts/loadtest/ledger_drift.py` evaluated `46` of `61` streams and raised `11` alarms — led by the `2026-09-07` `hit_count` tightening (`25.0 → 5.0` median, `peak log10(M) = 24.64`). `dedup_rate.py` measured `2.24%` exact match (`2.72%` effective convergence), and `score_bands.py` measured BM25 median `15.00` (p90 `27.16`), cosine median `0.635` (p90 `0.711`), fused median `7.50` (p90 `13.62`), `18.5%` phase-1 hits on the `0.35` recency leg (`1.3%` recency-floor-only), and `0` vector hits masked below `0.35`.
+
+<Note>
+The audit also quantified four concrete failure and friction modes that drove follow-up issues:
+1. **Canonical-first warning fatigue (`#280`):** `53.8%` (`14/26`) of audited warnings were ignored or false positives (`26.9%` acted on, `19.2%` noted only) because `src/recall/assemble.rs` attaches high-blast-radius Canonical banners (such as `ca2cb7d7`) even to unrelated queries.
+2. **`general-usage` bleed + `0.35` recency backfill (`#174`, `#254`, `#277`):** Routing repo queries into a shared session lets the `0.35` recency leg backfill sparse queries with unrelated project notes (`18.5%` of phase-1 hits carry the `0.35` leg; `1.3%` recency-floor-only).
+3. **Mid-write gate performative recall & headless denials (`#277`):** Strict pre-write hooks triggered late gate-clearing recalls after reviews were already drafted, while `33` non-interactive Claude Code recalls hit MCP permission denials.
+4. **`recall_first.py` multi-daemon restart bug (`#279`):** `scripts/observability/_ledger.py` compared `uptime_secs` globally across interleaved per-session heartbeats, manufacturing `38,389` false restarts (`52.2%` raw vs. `74.0%` session-scoped compliance across `97` true restarts).
+
+Caveat: local Codex transcripts cover only `2026-11-03` to `2026-11-19` (post-`0.6.0` with per-project isolation and 8-character IDs), whereas Claude Code and Cursor span the full three months including pre-split sessions. Full caveats and anonymized tables live in [`evidence/dogfood-helpfulness-2026-11/README.md`](https://github.com/nrynss/lambo/blob/main/evidence/dogfood-helpfulness-2026-11/README.md).
 </Note>
 
 ## Recall calibration, fusion, selection, and multimodal
