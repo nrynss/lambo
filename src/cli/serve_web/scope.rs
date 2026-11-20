@@ -30,7 +30,9 @@
 //!
 //! Malformed and out-of-scope requests are refused entirely in memory. An
 //! explicit prefix can also authorize an existing session beyond the startup
-//! allowlist (#241); only then does resolution probe existence and erasure.
+//! allowlist (#241), and so can opt-in store discovery for a grant whose
+//! scope covers every served session (#276, [`super::discovery`]); only then
+//! does resolution probe existence and erasure.
 
 use std::sync::Arc;
 
@@ -44,7 +46,9 @@ use axum::response::{IntoResponse, Response};
 use super::auth::{authenticate, unauthorized, Authenticated, Caller};
 use super::state::AppState;
 use super::views::DynamicSlot;
-use crate::surface::session::{not_found_response, SessionGrant, SessionNeed};
+use crate::surface::session::{
+    not_found_response, parse_addressed, RefusalReason, SessionGrant, SessionNeed,
+};
 use crate::types::SessionId;
 
 /// The scoped paths' prefix: `/s/{session}/...`.
@@ -254,8 +258,14 @@ fn scoped(state: &AppState, grant: &SessionGrant, after: &str) -> Option<Scoped>
         Some((raw, rest)) => (raw, rest, true),
         None => (after, "", false),
     };
+    // Discovery (#276) widens only a grant that already covers every served
+    // session, and only past a scope refusal: a malformed id stays refused.
+    let discovers = state.discovery.reaches(grant);
     let id = match state.authority.authorize(grant, raw, SessionNeed::Use) {
         Ok(id) => id,
+        Err(refusal) if discovers && refusal.reason() == RefusalReason::OutOfScope => {
+            parse_addressed(raw).ok()?
+        }
         Err(refusal) => {
             // The reason class only, never the probed id.
             tracing::debug!(reason = %refusal, "serve-web: scoped request refused");
@@ -264,6 +274,7 @@ fn scoped(state: &AppState, grant: &SessionGrant, after: &str) -> Option<Scoped>
     };
     let dynamic = !state.authority.is_pinned(&id);
     if dynamic
+        && !discovers
         && !grant
             .scope()
             .prefix()

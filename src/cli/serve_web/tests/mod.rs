@@ -41,6 +41,13 @@ const PRODUCTION_SOURCES: &[(&str, &str)] = &[
         )),
     ),
     (
+        "serve_web/discovery.rs",
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/cli/serve_web/discovery.rs"
+        )),
+    ),
+    (
         "serve_web/dto.rs",
         include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -202,6 +209,7 @@ fn router_source() -> &'static str {
 
 mod auth;
 mod credentials;
+mod discovery;
 mod feeds;
 mod graph;
 mod host;
@@ -336,6 +344,9 @@ impl GraphStore for Shared {
     }
     async fn session_readable(&self, session: &SessionId) -> Result<bool, StoreError> {
         self.0.session_readable(session).await
+    }
+    async fn store_health(&self) -> Result<Vec<crate::store::SessionHealth>, StoreError> {
+        self.0.store_health().await
     }
     async fn refresh_lease(
         &self,

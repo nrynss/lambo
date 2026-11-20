@@ -153,6 +153,16 @@ enum Commands {
             help = "A Host (name or address, optionally :port) the portal also answers while no credential is configured, beside localhost, 127.0.0.1 and [::1]. Needed behind a proxy that forwards its public name. Repeatable."
         )]
         allowed_host: Vec<String>,
+        /// Also serve every live, non-erased session in the store, including
+        /// ones created after startup, to callers whose scope covers every
+        /// served session (no credential on loopback, LAMBO_AUTH_TOKEN, a
+        /// [[web.credential]] "*"). Same as lambo.toml [web]
+        /// discover_sessions = true. Off by default.
+        #[arg(
+            long = "discover-sessions",
+            help = "Also serve every live, non-erased session in the store, including ones created after startup, to callers whose scope covers every served session (no credential on loopback, LAMBO_AUTH_TOKEN, a [[web.credential]] \"*\"). Same as [web] discover_sessions = true. Off by default."
+        )]
+        discover_sessions: bool,
     },
     /// Scripted two-agent demo scenario (spec §13): two agents build one REST API, `user schema` earns Canonical, and the second agent's recall carries the blast-radius and conflict warnings.
     Demo {
@@ -2009,10 +2019,14 @@ fn main() -> ExitCode {
             session,
             allowed_host,
             auth_token,
+            discover_sessions,
             ..
         } => match LamboFile::load_resolved(config) {
             Ok(file) => {
                 web = file.web.clone();
+                // #276: the flag turns discovery on; it never turns a
+                // configured `discover_sessions = true` off.
+                web.discover_sessions |= *discover_sessions;
                 // #4 PR 3: the credentials too, so an unset variable or a
                 // shared token costs no model load.
                 let planned = lambo::cli::serve_web::plan_sessions(session, &web).and_then(|s| {
@@ -2264,6 +2278,7 @@ fn main() -> ExitCode {
                 bind,
                 auth_token,
                 allowed_host: _,
+                discover_sessions: _,
             },
             Resolved::Full(backends),
         ) => run_async(
