@@ -6,9 +6,6 @@
   and `focus.resolution` (#251). Clients can read the concept type and tell
   whether a durable name, UUID, short ID, exact text, or fuzzy match resolved
   the focus.
-- The MCP reference explains which lowercase `concept_type` values to use
-  when a client rejects an enum argument before sending it to the server
-  (#250).
 - `lambo serve` warns when disabling layer floor calibration makes an unset
   floor stricter than its calibrated value (#260). For Elastic Jina v3, the
   fallback of 0.50 exceeds the calibrated floor of 0.39 and can exclude hits
@@ -27,6 +24,29 @@
   The warning gives the count, the oldest concept's age, and the
   `lambo re-embed --missing-only` repair command. `lambo stats --missing-vectors`
   lists missing text and image vectors in the durable session snapshot.
+- `lambo stats --store` (with optional `--json`) reports a read-only,
+  lease-free overview of every non-erased session in the store without
+  constructing an embedder (#248): concept and edge counts, raw vector coverage
+  across all concepts, canonization status counts, active writer lease holder
+  and expiry (or `no writer`), and last-write time. Backed by
+  `GraphStore::store_health` (`SessionHealth`, `CanonizationCounts`,
+  `ActiveSessionLease`).
+- MCP tool schemas now inline the `concept_type` enums on `lambo_derive` and
+  `lambo_derive_image` instead of referencing `$defs`, `concept_type`
+  deserialization errors list every accepted value for both invalid strings and
+  non-string JSON types, `image.mime` deserialization errors list the accepted
+  MIME types for non-string JSON types (while invalid strings continue to be
+  refused by `surface::image::validate` with the accepted MIME types and
+  without echoing caller input), and `docs/reference/mcp.mdx` documents the
+  inlined lowercase enum values and refusal error messages (#250).
+- Added `scripts/loadtest/ledger_drift.py` for offline recall-quality change
+  detection over `lambo serve --ledger` files using an online Sleepy Jumper
+  conformal exchangeability martingale with O(log n) randomized rank p-values,
+  per-(session, contract, query class) conditioning using score-independent
+  execution modes (`traversal`, `image`, `vector`, `exact_name`, `hybrid`,
+  `keyword_only`, `vector_only`, `other`), separate `top_bm25` /
+  `top_bm25_legacy` streams across the 0.13.0 scale change, operational-event
+  correlation, and synthetic shift injection (#177).
 
 ## 0.13.0 (2026-11-19)
 
