@@ -1,0 +1,2470 @@
+{
+  "slow_ms": 100.0,
+  "cold_s": 5.0,
+  "runs": {
+    "conc-0130-w8": {
+      "first_call_utc": "2026-11-20T06:09:34Z",
+      "last_load_call_utc": "2026-11-20T06:11:34Z",
+      "calls_by_tool": {
+        "lambo_recall": 360,
+        "lambo_stats": 587,
+        "lambo_record_action": 175,
+        "lambo_derive": 370
+      },
+      "completions": 545,
+      "recall_ms": {
+        "n": 345,
+        "p50": 6.69,
+        "p90": 14.16,
+        "p99": 33.83,
+        "max": 84.33
+      },
+      "ack_ms": {
+        "n": 545,
+        "p50": 0.13,
+        "p90": 1.39,
+        "p99": 20.4,
+        "max": 36.03
+      },
+      "apply_lag_ms": {
+        "n": 545,
+        "p50": 46.51,
+        "p90": 71.09,
+        "p99": 106.07,
+        "max": 153.9
+      },
+      "slow_calls": 0,
+      "slow_call_max_ms": 0.0,
+      "slow_seconds": 0,
+      "slow_seconds_utc": [],
+      "buckets_10s": [
+        {
+          "t_s": 0,
+          "load_calls": 77,
+          "recall_p50_ms": 23.12,
+          "recall_max_ms": 96.42,
+          "ack_max_ms": 6.29,
+          "completions": 48,
+          "apply_lag_p50_ms": 48.19,
+          "apply_lag_max_ms": 91.27
+        },
+        {
+          "t_s": 10,
+          "load_calls": 90,
+          "recall_p50_ms": 6.3,
+          "recall_max_ms": 28.44,
+          "ack_max_ms": 14.14,
+          "completions": 52,
+          "apply_lag_p50_ms": 48.27,
+          "apply_lag_max_ms": 106.07
+        },
+        {
+          "t_s": 20,
+          "load_calls": 77,
+          "recall_p50_ms": 5.22,
+          "recall_max_ms": 19.39,
+          "ack_max_ms": 12.82,
+          "completions": 45,
+          "apply_lag_p50_ms": 45.52,
+          "apply_lag_max_ms": 83.62
+        },
+        {
+          "t_s": 30,
+          "load_calls": 75,
+          "recall_p50_ms": 6.01,
+          "recall_max_ms": 43.13,
+          "ack_max_ms": 22.67,
+          "completions": 47,
+          "apply_lag_p50_ms": 44.09,
+          "apply_lag_max_ms": 153.9
+        },
+        {
+          "t_s": 40,
+          "load_calls": 91,
+          "recall_p50_ms": 4.82,
+          "recall_max_ms": 32.28,
+          "ack_max_ms": 25.29,
+          "completions": 57,
+          "apply_lag_p50_ms": 42.25,
+          "apply_lag_max_ms": 74.55
+        },
+        {
+          "t_s": 50,
+          "load_calls": 61,
+          "recall_p50_ms": 8.63,
+          "recall_max_ms": 20.85,
+          "ack_max_ms": 6.07,
+          "completions": 36,
+          "apply_lag_p50_ms": 50.83,
+          "apply_lag_max_ms": 73.65
+        },
+        {
+          "t_s": 60,
+          "load_calls": 73,
+          "recall_p50_ms": 9.03,
+          "recall_max_ms": 29.31,
+          "ack_max_ms": 14.76,
+          "completions": 45,
+          "apply_lag_p50_ms": 47.0,
+          "apply_lag_max_ms": 90.09
+        },
+        {
+          "t_s": 70,
+          "load_calls": 64,
+          "recall_p50_ms": 8.14,
+          "recall_max_ms": 26.02,
+          "ack_max_ms": 4.13,
+          "completions": 38,
+          "apply_lag_p50_ms": 48.69,
+          "apply_lag_max_ms": 91.58
+        },
+        {
+          "t_s": 80,
+          "load_calls": 75,
+          "recall_p50_ms": 6.6,
+          "recall_max_ms": 20.09,
+          "ack_max_ms": 16.29,
+          "completions": 53,
+          "apply_lag_p50_ms": 41.8,
+          "apply_lag_max_ms": 73.82
+        },
+        {
+          "t_s": 90,
+          "load_calls": 69,
+          "recall_p50_ms": 5.54,
+          "recall_max_ms": 25.43,
+          "ack_max_ms": 8.68,
+          "completions": 39,
+          "apply_lag_p50_ms": 46.05,
+          "apply_lag_max_ms": 108.8
+        },
+        {
+          "t_s": 100,
+          "load_calls": 73,
+          "recall_p50_ms": 4.75,
+          "recall_max_ms": 84.33,
+          "ack_max_ms": 36.03,
+          "completions": 43,
+          "apply_lag_p50_ms": 46.29,
+          "apply_lag_max_ms": 84.24
+        },
+        {
+          "t_s": 110,
+          "load_calls": 80,
+          "recall_p50_ms": 7.49,
+          "recall_max_ms": 49.64,
+          "ack_max_ms": 13.77,
+          "completions": 42,
+          "apply_lag_p50_ms": 54.47,
+          "apply_lag_max_ms": 121.65
+        }
+      ]
+    },
+    "conc-0140-w8": {
+      "first_call_utc": "2026-11-20T06:11:58Z",
+      "last_load_call_utc": "2026-11-20T06:13:57Z",
+      "calls_by_tool": {
+        "lambo_recall": 360,
+        "lambo_stats": 588,
+        "lambo_record_action": 176,
+        "lambo_derive": 370
+      },
+      "completions": 546,
+      "recall_ms": {
+        "n": 345,
+        "p50": 6.41,
+        "p90": 13.89,
+        "p99": 35.66,
+        "max": 83.63
+      },
+      "ack_ms": {
+        "n": 546,
+        "p50": 0.12,
+        "p90": 0.41,
+        "p99": 15.79,
+        "max": 29.87
+      },
+      "apply_lag_ms": {
+        "n": 546,
+        "p50": 45.29,
+        "p90": 64.23,
+        "p99": 159.7,
+        "max": 297.53
+      },
+      "slow_calls": 0,
+      "slow_call_max_ms": 0.0,
+      "slow_seconds": 0,
+      "slow_seconds_utc": [],
+      "buckets_10s": [
+        {
+          "t_s": 0,
+          "load_calls": 77,
+          "recall_p50_ms": 19.52,
+          "recall_max_ms": 236.38,
+          "ack_max_ms": 10.42,
+          "completions": 48,
+          "apply_lag_p50_ms": 47.23,
+          "apply_lag_max_ms": 78.47
+        },
+        {
+          "t_s": 10,
+          "load_calls": 90,
+          "recall_p50_ms": 6.91,
+          "recall_max_ms": 83.63,
+          "ack_max_ms": 9.52,
+          "completions": 52,
+          "apply_lag_p50_ms": 41.44,
+          "apply_lag_max_ms": 202.98
+        },
+        {
+          "t_s": 20,
+          "load_calls": 77,
+          "recall_p50_ms": 3.07,
+          "recall_max_ms": 19.71,
+          "ack_max_ms": 7.45,
+          "completions": 45,
+          "apply_lag_p50_ms": 43.37,
+          "apply_lag_max_ms": 77.82
+        },
+        {
+          "t_s": 30,
+          "load_calls": 77,
+          "recall_p50_ms": 8.13,
+          "recall_max_ms": 18.86,
+          "ack_max_ms": 7.81,
+          "completions": 48,
+          "apply_lag_p50_ms": 44.74,
+          "apply_lag_max_ms": 65.7
+        },
+        {
+          "t_s": 40,
+          "load_calls": 90,
+          "recall_p50_ms": 5.77,
+          "recall_max_ms": 19.93,
+          "ack_max_ms": 14.05,
+          "completions": 57,
+          "apply_lag_p50_ms": 45.96,
+          "apply_lag_max_ms": 115.95
+        },
+        {
+          "t_s": 50,
+          "load_calls": 61,
+          "recall_p50_ms": 7.66,
+          "recall_max_ms": 19.44,
+          "ack_max_ms": 0.24,
+          "completions": 35,
+          "apply_lag_p50_ms": 45.72,
+          "apply_lag_max_ms": 64.83
+        },
+        {
+          "t_s": 60,
+          "load_calls": 72,
+          "recall_p50_ms": 7.3,
+          "recall_max_ms": 29.1,
+          "ack_max_ms": 16.29,
+          "completions": 45,
+          "apply_lag_p50_ms": 44.74,
+          "apply_lag_max_ms": 105.22
+        },
+        {
+          "t_s": 70,
+          "load_calls": 65,
+          "recall_p50_ms": 7.56,
+          "recall_max_ms": 19.46,
+          "ack_max_ms": 15.72,
+          "completions": 38,
+          "apply_lag_p50_ms": 44.98,
+          "apply_lag_max_ms": 67.21
+        },
+        {
+          "t_s": 80,
+          "load_calls": 74,
+          "recall_p50_ms": 6.2,
+          "recall_max_ms": 25.3,
+          "ack_max_ms": 28.42,
+          "completions": 53,
+          "apply_lag_p50_ms": 43.4,
+          "apply_lag_max_ms": 68.6
+        },
+        {
+          "t_s": 90,
+          "load_calls": 69,
+          "recall_p50_ms": 8.07,
+          "recall_max_ms": 24.08,
+          "ack_max_ms": 13.72,
+          "completions": 39,
+          "apply_lag_p50_ms": 50.23,
+          "apply_lag_max_ms": 89.23
+        },
+        {
+          "t_s": 100,
+          "load_calls": 73,
+          "recall_p50_ms": 7.18,
+          "recall_max_ms": 27.05,
+          "ack_max_ms": 29.87,
+          "completions": 43,
+          "apply_lag_p50_ms": 45.4,
+          "apply_lag_max_ms": 297.53
+        },
+        {
+          "t_s": 110,
+          "load_calls": 81,
+          "recall_p50_ms": 5.55,
+          "recall_max_ms": 48.73,
+          "ack_max_ms": 26.23,
+          "completions": 43,
+          "apply_lag_p50_ms": 46.28,
+          "apply_lag_max_ms": 164.67
+        }
+      ]
+    },
+    "conc-0130-w16": {
+      "first_call_utc": "2026-11-20T06:14:22Z",
+      "last_load_call_utc": "2026-11-20T06:16:22Z",
+      "calls_by_tool": {
+        "lambo_recall": 1457,
+        "lambo_derive": 1446,
+        "lambo_stats": 2153,
+        "lambo_record_action": 694
+      },
+      "completions": 2140,
+      "recall_ms": {
+        "n": 1392,
+        "p50": 4.77,
+        "p90": 11.52,
+        "p99": 20.78,
+        "max": 46.08
+      },
+      "ack_ms": {
+        "n": 2140,
+        "p50": 0.06,
+        "p90": 7.48,
+        "p99": 18.82,
+        "max": 41.88
+      },
+      "apply_lag_ms": {
+        "n": 2140,
+        "p50": 50.01,
+        "p90": 106.54,
+        "p99": 204.14,
+        "max": 311.42
+      },
+      "slow_calls": 0,
+      "slow_call_max_ms": 0.0,
+      "slow_seconds": 0,
+      "slow_seconds_utc": [],
+      "buckets_10s": [
+        {
+          "t_s": 0,
+          "load_calls": 307,
+          "recall_p50_ms": 2.97,
+          "recall_max_ms": 550.77,
+          "ack_max_ms": 32.83,
+          "completions": 177,
+          "apply_lag_p50_ms": 45.14,
+          "apply_lag_max_ms": 311.42
+        },
+        {
+          "t_s": 10,
+          "load_calls": 318,
+          "recall_p50_ms": 3.13,
+          "recall_max_ms": 18.49,
+          "ack_max_ms": 14.09,
+          "completions": 178,
+          "apply_lag_p50_ms": 48.84,
+          "apply_lag_max_ms": 272.29
+        },
+        {
+          "t_s": 20,
+          "load_calls": 298,
+          "recall_p50_ms": 3.44,
+          "recall_max_ms": 20.78,
+          "ack_max_ms": 16.27,
+          "completions": 188,
+          "apply_lag_p50_ms": 57.82,
+          "apply_lag_max_ms": 266.87
+        },
+        {
+          "t_s": 30,
+          "load_calls": 289,
+          "recall_p50_ms": 3.75,
+          "recall_max_ms": 15.49,
+          "ack_max_ms": 12.55,
+          "completions": 168,
+          "apply_lag_p50_ms": 49.01,
+          "apply_lag_max_ms": 223.53
+        },
+        {
+          "t_s": 40,
+          "load_calls": 291,
+          "recall_p50_ms": 4.04,
+          "recall_max_ms": 22.32,
+          "ack_max_ms": 14.43,
+          "completions": 174,
+          "apply_lag_p50_ms": 47.45,
+          "apply_lag_max_ms": 219.5
+        },
+        {
+          "t_s": 50,
+          "load_calls": 310,
+          "recall_p50_ms": 4.2,
+          "recall_max_ms": 46.08,
+          "ack_max_ms": 39.39,
+          "completions": 173,
+          "apply_lag_p50_ms": 50.15,
+          "apply_lag_max_ms": 169.14
+        },
+        {
+          "t_s": 60,
+          "load_calls": 315,
+          "recall_p50_ms": 4.81,
+          "recall_max_ms": 26.47,
+          "ack_max_ms": 41.88,
+          "completions": 202,
+          "apply_lag_p50_ms": 50.06,
+          "apply_lag_max_ms": 250.71
+        },
+        {
+          "t_s": 70,
+          "load_calls": 300,
+          "recall_p50_ms": 5.06,
+          "recall_max_ms": 16.92,
+          "ack_max_ms": 21.25,
+          "completions": 178,
+          "apply_lag_p50_ms": 46.12,
+          "apply_lag_max_ms": 161.0
+        },
+        {
+          "t_s": 80,
+          "load_calls": 258,
+          "recall_p50_ms": 5.13,
+          "recall_max_ms": 18.06,
+          "ack_max_ms": 17.26,
+          "completions": 164,
+          "apply_lag_p50_ms": 48.52,
+          "apply_lag_max_ms": 262.67
+        },
+        {
+          "t_s": 90,
+          "load_calls": 304,
+          "recall_p50_ms": 5.46,
+          "recall_max_ms": 22.27,
+          "ack_max_ms": 29.61,
+          "completions": 178,
+          "apply_lag_p50_ms": 52.78,
+          "apply_lag_max_ms": 233.36
+        },
+        {
+          "t_s": 100,
+          "load_calls": 288,
+          "recall_p50_ms": 5.82,
+          "recall_max_ms": 23.05,
+          "ack_max_ms": 21.34,
+          "completions": 167,
+          "apply_lag_p50_ms": 52.88,
+          "apply_lag_max_ms": 204.14
+        },
+        {
+          "t_s": 110,
+          "load_calls": 318,
+          "recall_p50_ms": 5.63,
+          "recall_max_ms": 23.5,
+          "ack_max_ms": 24.4,
+          "completions": 192,
+          "apply_lag_p50_ms": 53.32,
+          "apply_lag_max_ms": 165.92
+        },
+        {
+          "t_s": 120,
+          "load_calls": 1,
+          "recall_p50_ms": null,
+          "recall_max_ms": null,
+          "ack_max_ms": 0.05,
+          "completions": 1,
+          "apply_lag_p50_ms": 24.5,
+          "apply_lag_max_ms": 24.5
+        }
+      ]
+    },
+    "conc-0140-w16": {
+      "first_call_utc": "2026-11-20T06:17:40Z",
+      "last_load_call_utc": "2026-11-20T06:19:40Z",
+      "calls_by_tool": {
+        "lambo_recall": 1437,
+        "lambo_derive": 1422,
+        "lambo_stats": 2151,
+        "lambo_record_action": 676
+      },
+      "completions": 2098,
+      "recall_ms": {
+        "n": 1372,
+        "p50": 4.9,
+        "p90": 12.41,
+        "p99": 111.35,
+        "max": 939.17
+      },
+      "ack_ms": {
+        "n": 2098,
+        "p50": 0.07,
+        "p90": 9.35,
+        "p99": 114.72,
+        "max": 999.16
+      },
+      "apply_lag_ms": {
+        "n": 2098,
+        "p50": 52.15,
+        "p90": 112.7,
+        "p99": 404.59,
+        "max": 564.79
+      },
+      "slow_calls": 40,
+      "slow_call_max_ms": 999.16,
+      "slow_seconds": 4,
+      "slow_seconds_utc": [
+        "2026-11-20T06:19:26Z",
+        "2026-11-20T06:19:27Z",
+        "2026-11-20T06:19:28Z",
+        "2026-11-20T06:19:29Z"
+      ],
+      "buckets_10s": [
+        {
+          "t_s": 0,
+          "load_calls": 304,
+          "recall_p50_ms": 3.92,
+          "recall_max_ms": 396.43,
+          "ack_max_ms": 15.22,
+          "completions": 175,
+          "apply_lag_p50_ms": 45.97,
+          "apply_lag_max_ms": 277.68
+        },
+        {
+          "t_s": 10,
+          "load_calls": 316,
+          "recall_p50_ms": 3.59,
+          "recall_max_ms": 18.82,
+          "ack_max_ms": 12.77,
+          "completions": 179,
+          "apply_lag_p50_ms": 50.4,
+          "apply_lag_max_ms": 131.26
+        },
+        {
+          "t_s": 20,
+          "load_calls": 295,
+          "recall_p50_ms": 3.83,
+          "recall_max_ms": 16.43,
+          "ack_max_ms": 12.78,
+          "completions": 184,
+          "apply_lag_p50_ms": 53.25,
+          "apply_lag_max_ms": 148.18
+        },
+        {
+          "t_s": 30,
+          "load_calls": 290,
+          "recall_p50_ms": 4.13,
+          "recall_max_ms": 15.79,
+          "ack_max_ms": 15.11,
+          "completions": 170,
+          "apply_lag_p50_ms": 49.36,
+          "apply_lag_max_ms": 144.36
+        },
+        {
+          "t_s": 40,
+          "load_calls": 282,
+          "recall_p50_ms": 4.34,
+          "recall_max_ms": 21.4,
+          "ack_max_ms": 13.9,
+          "completions": 169,
+          "apply_lag_p50_ms": 50.86,
+          "apply_lag_max_ms": 168.87
+        },
+        {
+          "t_s": 50,
+          "load_calls": 312,
+          "recall_p50_ms": 4.6,
+          "recall_max_ms": 16.34,
+          "ack_max_ms": 42.53,
+          "completions": 172,
+          "apply_lag_p50_ms": 50.41,
+          "apply_lag_max_ms": 174.66
+        },
+        {
+          "t_s": 60,
+          "load_calls": 313,
+          "recall_p50_ms": 4.25,
+          "recall_max_ms": 18.88,
+          "ack_max_ms": 14.98,
+          "completions": 198,
+          "apply_lag_p50_ms": 51.39,
+          "apply_lag_max_ms": 282.65
+        },
+        {
+          "t_s": 70,
+          "load_calls": 296,
+          "recall_p50_ms": 4.98,
+          "recall_max_ms": 23.38,
+          "ack_max_ms": 16.29,
+          "completions": 177,
+          "apply_lag_p50_ms": 53.28,
+          "apply_lag_max_ms": 179.42
+        },
+        {
+          "t_s": 80,
+          "load_calls": 265,
+          "recall_p50_ms": 4.97,
+          "recall_max_ms": 32.93,
+          "ack_max_ms": 19.34,
+          "completions": 170,
+          "apply_lag_p50_ms": 49.17,
+          "apply_lag_max_ms": 131.7
+        },
+        {
+          "t_s": 90,
+          "load_calls": 303,
+          "recall_p50_ms": 6.03,
+          "recall_max_ms": 21.08,
+          "ack_max_ms": 19.82,
+          "completions": 177,
+          "apply_lag_p50_ms": 51.36,
+          "apply_lag_max_ms": 188.48
+        },
+        {
+          "t_s": 100,
+          "load_calls": 231,
+          "recall_p50_ms": 8.03,
+          "recall_max_ms": 939.17,
+          "ack_max_ms": 999.16,
+          "completions": 136,
+          "apply_lag_p50_ms": 106.5,
+          "apply_lag_max_ms": 564.79
+        },
+        {
+          "t_s": 110,
+          "load_calls": 325,
+          "recall_p50_ms": 6.09,
+          "recall_max_ms": 42.78,
+          "ack_max_ms": 37.57,
+          "completions": 187,
+          "apply_lag_p50_ms": 78.72,
+          "apply_lag_max_ms": 345.01
+        },
+        {
+          "t_s": 120,
+          "load_calls": 3,
+          "recall_p50_ms": 23.72,
+          "recall_max_ms": 23.72,
+          "ack_max_ms": 0.05,
+          "completions": 4,
+          "apply_lag_p50_ms": 73.02,
+          "apply_lag_max_ms": 79.33
+        }
+      ]
+    },
+    "conc2-0130-w16": {
+      "first_call_utc": "2026-11-20T06:28:24Z",
+      "last_load_call_utc": "2026-11-20T06:30:24Z",
+      "calls_by_tool": {
+        "lambo_recall": 1455,
+        "lambo_derive": 1448,
+        "lambo_stats": 2152,
+        "lambo_record_action": 694
+      },
+      "completions": 2142,
+      "recall_ms": {
+        "n": 1390,
+        "p50": 4.9,
+        "p90": 12.32,
+        "p99": 25.07,
+        "max": 55.65
+      },
+      "ack_ms": {
+        "n": 2142,
+        "p50": 0.07,
+        "p90": 10.21,
+        "p99": 24.48,
+        "max": 40.47
+      },
+      "apply_lag_ms": {
+        "n": 2142,
+        "p50": 53.39,
+        "p90": 121.9,
+        "p99": 233.6,
+        "max": 362.71
+      },
+      "slow_calls": 0,
+      "slow_call_max_ms": 0.0,
+      "slow_seconds": 0,
+      "slow_seconds_utc": [],
+      "buckets_10s": [
+        {
+          "t_s": 0,
+          "load_calls": 306,
+          "recall_p50_ms": 2.96,
+          "recall_max_ms": 282.3,
+          "ack_max_ms": 29.17,
+          "completions": 176,
+          "apply_lag_p50_ms": 51.86,
+          "apply_lag_max_ms": 362.71
+        },
+        {
+          "t_s": 10,
+          "load_calls": 319,
+          "recall_p50_ms": 3.27,
+          "recall_max_ms": 17.37,
+          "ack_max_ms": 22.31,
+          "completions": 179,
+          "apply_lag_p50_ms": 53.5,
+          "apply_lag_max_ms": 206.12
+        },
+        {
+          "t_s": 20,
+          "load_calls": 298,
+          "recall_p50_ms": 3.89,
+          "recall_max_ms": 41.68,
+          "ack_max_ms": 40.47,
+          "completions": 187,
+          "apply_lag_p50_ms": 60.34,
+          "apply_lag_max_ms": 282.12
+        },
+        {
+          "t_s": 30,
+          "load_calls": 288,
+          "recall_p50_ms": 3.92,
+          "recall_max_ms": 28.01,
+          "ack_max_ms": 13.14,
+          "completions": 168,
+          "apply_lag_p50_ms": 47.77,
+          "apply_lag_max_ms": 180.98
+        },
+        {
+          "t_s": 40,
+          "load_calls": 290,
+          "recall_p50_ms": 4.01,
+          "recall_max_ms": 18.19,
+          "ack_max_ms": 18.04,
+          "completions": 173,
+          "apply_lag_p50_ms": 49.89,
+          "apply_lag_max_ms": 220.18
+        },
+        {
+          "t_s": 50,
+          "load_calls": 310,
+          "recall_p50_ms": 4.48,
+          "recall_max_ms": 20.69,
+          "ack_max_ms": 19.05,
+          "completions": 173,
+          "apply_lag_p50_ms": 47.93,
+          "apply_lag_max_ms": 172.48
+        },
+        {
+          "t_s": 60,
+          "load_calls": 318,
+          "recall_p50_ms": 4.54,
+          "recall_max_ms": 29.3,
+          "ack_max_ms": 37.18,
+          "completions": 201,
+          "apply_lag_p50_ms": 64.78,
+          "apply_lag_max_ms": 288.92
+        },
+        {
+          "t_s": 70,
+          "load_calls": 297,
+          "recall_p50_ms": 5.05,
+          "recall_max_ms": 20.32,
+          "ack_max_ms": 27.28,
+          "completions": 177,
+          "apply_lag_p50_ms": 51.78,
+          "apply_lag_max_ms": 180.13
+        },
+        {
+          "t_s": 80,
+          "load_calls": 260,
+          "recall_p50_ms": 5.18,
+          "recall_max_ms": 27.7,
+          "ack_max_ms": 27.53,
+          "completions": 168,
+          "apply_lag_p50_ms": 53.23,
+          "apply_lag_max_ms": 181.0
+        },
+        {
+          "t_s": 90,
+          "load_calls": 303,
+          "recall_p50_ms": 5.77,
+          "recall_max_ms": 55.65,
+          "ack_max_ms": 33.3,
+          "completions": 178,
+          "apply_lag_p50_ms": 52.2,
+          "apply_lag_max_ms": 273.3
+        },
+        {
+          "t_s": 100,
+          "load_calls": 287,
+          "recall_p50_ms": 5.86,
+          "recall_max_ms": 26.8,
+          "ack_max_ms": 30.02,
+          "completions": 167,
+          "apply_lag_p50_ms": 57.0,
+          "apply_lag_max_ms": 282.21
+        },
+        {
+          "t_s": 110,
+          "load_calls": 321,
+          "recall_p50_ms": 6.23,
+          "recall_max_ms": 28.77,
+          "ack_max_ms": 31.53,
+          "completions": 194,
+          "apply_lag_p50_ms": 59.46,
+          "apply_lag_max_ms": 251.86
+        }
+      ]
+    },
+    "conc2-0140-w16": {
+      "first_call_utc": "2026-11-20T06:33:25Z",
+      "last_load_call_utc": "2026-11-20T06:35:25Z",
+      "calls_by_tool": {
+        "lambo_recall": 1432,
+        "lambo_derive": 1418,
+        "lambo_stats": 2147,
+        "lambo_record_action": 671
+      },
+      "completions": 2089,
+      "recall_ms": {
+        "n": 1368,
+        "p50": 5.69,
+        "p90": 33.21,
+        "p99": 199.33,
+        "max": 471.28
+      },
+      "ack_ms": {
+        "n": 2089,
+        "p50": 0.11,
+        "p90": 27.68,
+        "p99": 175.4,
+        "max": 394.78
+      },
+      "apply_lag_ms": {
+        "n": 2089,
+        "p50": 61.1,
+        "p90": 163.33,
+        "p99": 397.33,
+        "max": 691.66
+      },
+      "slow_calls": 91,
+      "slow_call_max_ms": 471.28,
+      "slow_seconds": 25,
+      "slow_seconds_utc": [
+        "2026-11-20T06:33:51Z",
+        "2026-11-20T06:34:12Z",
+        "2026-11-20T06:34:20Z",
+        "2026-11-20T06:34:23Z",
+        "2026-11-20T06:34:27Z",
+        "2026-11-20T06:34:34Z",
+        "2026-11-20T06:34:35Z",
+        "2026-11-20T06:34:38Z",
+        "2026-11-20T06:34:40Z",
+        "2026-11-20T06:34:41Z",
+        "2026-11-20T06:34:42Z",
+        "2026-11-20T06:34:43Z",
+        "2026-11-20T06:34:46Z",
+        "2026-11-20T06:34:50Z",
+        "2026-11-20T06:34:51Z",
+        "2026-11-20T06:34:53Z",
+        "2026-11-20T06:34:54Z",
+        "2026-11-20T06:34:57Z",
+        "2026-11-20T06:34:59Z",
+        "2026-11-20T06:35:00Z",
+        "2026-11-20T06:35:03Z",
+        "2026-11-20T06:35:04Z",
+        "2026-11-20T06:35:09Z",
+        "2026-11-20T06:35:11Z",
+        "2026-11-20T06:35:17Z"
+      ],
+      "buckets_10s": [
+        {
+          "t_s": 0,
+          "load_calls": 307,
+          "recall_p50_ms": 3.1,
+          "recall_max_ms": 201.81,
+          "ack_max_ms": 74.98,
+          "completions": 175,
+          "apply_lag_p50_ms": 46.87,
+          "apply_lag_max_ms": 229.29
+        },
+        {
+          "t_s": 10,
+          "load_calls": 317,
+          "recall_p50_ms": 3.11,
+          "recall_max_ms": 27.38,
+          "ack_max_ms": 67.88,
+          "completions": 180,
+          "apply_lag_p50_ms": 46.31,
+          "apply_lag_max_ms": 227.15
+        },
+        {
+          "t_s": 20,
+          "load_calls": 297,
+          "recall_p50_ms": 3.5,
+          "recall_max_ms": 179.26,
+          "ack_max_ms": 142.03,
+          "completions": 181,
+          "apply_lag_p50_ms": 62.28,
+          "apply_lag_max_ms": 226.98
+        },
+        {
+          "t_s": 30,
+          "load_calls": 285,
+          "recall_p50_ms": 3.84,
+          "recall_max_ms": 69.97,
+          "ack_max_ms": 66.93,
+          "completions": 174,
+          "apply_lag_p50_ms": 47.94,
+          "apply_lag_max_ms": 397.33
+        },
+        {
+          "t_s": 40,
+          "load_calls": 287,
+          "recall_p50_ms": 4.02,
+          "recall_max_ms": 109.35,
+          "ack_max_ms": 62.21,
+          "completions": 172,
+          "apply_lag_p50_ms": 47.32,
+          "apply_lag_max_ms": 213.2
+        },
+        {
+          "t_s": 50,
+          "load_calls": 310,
+          "recall_p50_ms": 4.63,
+          "recall_max_ms": 176.64,
+          "ack_max_ms": 163.69,
+          "completions": 170,
+          "apply_lag_p50_ms": 52.0,
+          "apply_lag_max_ms": 261.0
+        },
+        {
+          "t_s": 60,
+          "load_calls": 305,
+          "recall_p50_ms": 6.32,
+          "recall_max_ms": 171.79,
+          "ack_max_ms": 132.79,
+          "completions": 189,
+          "apply_lag_p50_ms": 73.58,
+          "apply_lag_max_ms": 636.62
+        },
+        {
+          "t_s": 70,
+          "load_calls": 276,
+          "recall_p50_ms": 18.14,
+          "recall_max_ms": 131.15,
+          "ack_max_ms": 263.12,
+          "completions": 171,
+          "apply_lag_p50_ms": 79.1,
+          "apply_lag_max_ms": 452.36
+        },
+        {
+          "t_s": 80,
+          "load_calls": 263,
+          "recall_p50_ms": 8.63,
+          "recall_max_ms": 471.28,
+          "ack_max_ms": 316.12,
+          "completions": 164,
+          "apply_lag_p50_ms": 86.56,
+          "apply_lag_max_ms": 553.01
+        },
+        {
+          "t_s": 90,
+          "load_calls": 272,
+          "recall_p50_ms": 9.33,
+          "recall_max_ms": 420.65,
+          "ack_max_ms": 394.78,
+          "completions": 172,
+          "apply_lag_p50_ms": 84.51,
+          "apply_lag_max_ms": 691.66
+        },
+        {
+          "t_s": 100,
+          "load_calls": 286,
+          "recall_p50_ms": 7.37,
+          "recall_max_ms": 313.05,
+          "ack_max_ms": 240.39,
+          "completions": 157,
+          "apply_lag_p50_ms": 61.86,
+          "apply_lag_max_ms": 462.13
+        },
+        {
+          "t_s": 110,
+          "load_calls": 316,
+          "recall_p50_ms": 6.59,
+          "recall_max_ms": 101.26,
+          "ack_max_ms": 51.7,
+          "completions": 180,
+          "apply_lag_p50_ms": 60.63,
+          "apply_lag_max_ms": 182.68
+        }
+      ]
+    },
+    "conc3-r1-0140-w16": {
+      "first_call_utc": "2026-11-20T06:48:52Z",
+      "last_load_call_utc": "2026-11-20T06:50:52Z",
+      "calls_by_tool": {
+        "lambo_recall": 1459,
+        "lambo_derive": 1448,
+        "lambo_stats": 2152,
+        "lambo_record_action": 695
+      },
+      "completions": 2143,
+      "recall_ms": {
+        "n": 1395,
+        "p50": 4.62,
+        "p90": 10.1,
+        "p99": 22.33,
+        "max": 58.45
+      },
+      "ack_ms": {
+        "n": 2143,
+        "p50": 0.06,
+        "p90": 7.24,
+        "p99": 21.62,
+        "max": 84.81
+      },
+      "apply_lag_ms": {
+        "n": 2143,
+        "p50": 49.11,
+        "p90": 97.63,
+        "p99": 169.79,
+        "max": 275.67
+      },
+      "slow_calls": 0,
+      "slow_call_max_ms": 0.0,
+      "slow_seconds": 0,
+      "slow_seconds_utc": [],
+      "buckets_10s": [
+        {
+          "t_s": 0,
+          "load_calls": 304,
+          "recall_p50_ms": 3.42,
+          "recall_max_ms": 239.49,
+          "ack_max_ms": 84.81,
+          "completions": 175,
+          "apply_lag_p50_ms": 44.24,
+          "apply_lag_max_ms": 253.39
+        },
+        {
+          "t_s": 10,
+          "load_calls": 319,
+          "recall_p50_ms": 3.15,
+          "recall_max_ms": 14.57,
+          "ack_max_ms": 13.78,
+          "completions": 179,
+          "apply_lag_p50_ms": 46.53,
+          "apply_lag_max_ms": 141.87
+        },
+        {
+          "t_s": 20,
+          "load_calls": 300,
+          "recall_p50_ms": 3.53,
+          "recall_max_ms": 15.24,
+          "ack_max_ms": 12.29,
+          "completions": 188,
+          "apply_lag_p50_ms": 49.48,
+          "apply_lag_max_ms": 172.95
+        },
+        {
+          "t_s": 30,
+          "load_calls": 287,
+          "recall_p50_ms": 3.76,
+          "recall_max_ms": 12.14,
+          "ack_max_ms": 21.62,
+          "completions": 168,
+          "apply_lag_p50_ms": 46.88,
+          "apply_lag_max_ms": 207.79
+        },
+        {
+          "t_s": 40,
+          "load_calls": 290,
+          "recall_p50_ms": 4.19,
+          "recall_max_ms": 36.17,
+          "ack_max_ms": 17.09,
+          "completions": 174,
+          "apply_lag_p50_ms": 53.24,
+          "apply_lag_max_ms": 192.17
+        },
+        {
+          "t_s": 50,
+          "load_calls": 312,
+          "recall_p50_ms": 4.15,
+          "recall_max_ms": 17.08,
+          "ack_max_ms": 16.28,
+          "completions": 173,
+          "apply_lag_p50_ms": 45.72,
+          "apply_lag_max_ms": 184.34
+        },
+        {
+          "t_s": 60,
+          "load_calls": 317,
+          "recall_p50_ms": 4.39,
+          "recall_max_ms": 19.58,
+          "ack_max_ms": 26.53,
+          "completions": 202,
+          "apply_lag_p50_ms": 49.72,
+          "apply_lag_max_ms": 170.88
+        },
+        {
+          "t_s": 70,
+          "load_calls": 297,
+          "recall_p50_ms": 4.78,
+          "recall_max_ms": 19.27,
+          "ack_max_ms": 19.74,
+          "completions": 178,
+          "apply_lag_p50_ms": 47.22,
+          "apply_lag_max_ms": 150.79
+        },
+        {
+          "t_s": 80,
+          "load_calls": 259,
+          "recall_p50_ms": 4.75,
+          "recall_max_ms": 58.45,
+          "ack_max_ms": 24.26,
+          "completions": 166,
+          "apply_lag_p50_ms": 48.59,
+          "apply_lag_max_ms": 174.35
+        },
+        {
+          "t_s": 90,
+          "load_calls": 306,
+          "recall_p50_ms": 5.45,
+          "recall_max_ms": 32.7,
+          "ack_max_ms": 37.22,
+          "completions": 178,
+          "apply_lag_p50_ms": 52.71,
+          "apply_lag_max_ms": 275.67
+        },
+        {
+          "t_s": 100,
+          "load_calls": 289,
+          "recall_p50_ms": 5.38,
+          "recall_max_ms": 28.4,
+          "ack_max_ms": 20.16,
+          "completions": 168,
+          "apply_lag_p50_ms": 53.74,
+          "apply_lag_max_ms": 183.11
+        },
+        {
+          "t_s": 110,
+          "load_calls": 321,
+          "recall_p50_ms": 5.49,
+          "recall_max_ms": 42.05,
+          "ack_max_ms": 32.25,
+          "completions": 193,
+          "apply_lag_p50_ms": 53.24,
+          "apply_lag_max_ms": 134.4
+        },
+        {
+          "t_s": 120,
+          "load_calls": 1,
+          "recall_p50_ms": null,
+          "recall_max_ms": null,
+          "ack_max_ms": 0.06,
+          "completions": 1,
+          "apply_lag_p50_ms": 22.6,
+          "apply_lag_max_ms": 22.6
+        }
+      ]
+    },
+    "conc3-r2-0130-w16": {
+      "first_call_utc": "2026-11-20T06:52:00Z",
+      "last_load_call_utc": "2026-11-20T06:54:00Z",
+      "calls_by_tool": {
+        "lambo_recall": 1456,
+        "lambo_derive": 1448,
+        "lambo_stats": 2152,
+        "lambo_record_action": 694
+      },
+      "completions": 2142,
+      "recall_ms": {
+        "n": 1391,
+        "p50": 4.71,
+        "p90": 13.17,
+        "p99": 32.85,
+        "max": 192.06
+      },
+      "ack_ms": {
+        "n": 2142,
+        "p50": 0.07,
+        "p90": 10.86,
+        "p99": 29.56,
+        "max": 184.29
+      },
+      "apply_lag_ms": {
+        "n": 2142,
+        "p50": 49.72,
+        "p90": 104.86,
+        "p99": 200.01,
+        "max": 350.07
+      },
+      "slow_calls": 5,
+      "slow_call_max_ms": 192.06,
+      "slow_seconds": 1,
+      "slow_seconds_utc": [
+        "2026-11-20T06:53:21Z"
+      ],
+      "buckets_10s": [
+        {
+          "t_s": 0,
+          "load_calls": 307,
+          "recall_p50_ms": 3.31,
+          "recall_max_ms": 277.93,
+          "ack_max_ms": 17.75,
+          "completions": 176,
+          "apply_lag_p50_ms": 43.31,
+          "apply_lag_max_ms": 252.76
+        },
+        {
+          "t_s": 10,
+          "load_calls": 317,
+          "recall_p50_ms": 3.26,
+          "recall_max_ms": 23.5,
+          "ack_max_ms": 21.82,
+          "completions": 179,
+          "apply_lag_p50_ms": 44.14,
+          "apply_lag_max_ms": 139.96
+        },
+        {
+          "t_s": 20,
+          "load_calls": 298,
+          "recall_p50_ms": 3.65,
+          "recall_max_ms": 47.23,
+          "ack_max_ms": 46.69,
+          "completions": 187,
+          "apply_lag_p50_ms": 51.1,
+          "apply_lag_max_ms": 248.52
+        },
+        {
+          "t_s": 30,
+          "load_calls": 288,
+          "recall_p50_ms": 3.57,
+          "recall_max_ms": 55.03,
+          "ack_max_ms": 16.1,
+          "completions": 169,
+          "apply_lag_p50_ms": 42.98,
+          "apply_lag_max_ms": 156.02
+        },
+        {
+          "t_s": 40,
+          "load_calls": 290,
+          "recall_p50_ms": 3.78,
+          "recall_max_ms": 27.4,
+          "ack_max_ms": 16.74,
+          "completions": 174,
+          "apply_lag_p50_ms": 47.06,
+          "apply_lag_max_ms": 213.98
+        },
+        {
+          "t_s": 50,
+          "load_calls": 313,
+          "recall_p50_ms": 4.13,
+          "recall_max_ms": 33.08,
+          "ack_max_ms": 26.55,
+          "completions": 172,
+          "apply_lag_p50_ms": 43.48,
+          "apply_lag_max_ms": 106.06
+        },
+        {
+          "t_s": 60,
+          "load_calls": 316,
+          "recall_p50_ms": 4.34,
+          "recall_max_ms": 20.9,
+          "ack_max_ms": 33.16,
+          "completions": 204,
+          "apply_lag_p50_ms": 50.14,
+          "apply_lag_max_ms": 240.84
+        },
+        {
+          "t_s": 70,
+          "load_calls": 296,
+          "recall_p50_ms": 5.14,
+          "recall_max_ms": 29.21,
+          "ack_max_ms": 24.51,
+          "completions": 177,
+          "apply_lag_p50_ms": 53.0,
+          "apply_lag_max_ms": 174.75
+        },
+        {
+          "t_s": 80,
+          "load_calls": 259,
+          "recall_p50_ms": 5.46,
+          "recall_max_ms": 192.06,
+          "ack_max_ms": 184.29,
+          "completions": 164,
+          "apply_lag_p50_ms": 49.26,
+          "apply_lag_max_ms": 206.9
+        },
+        {
+          "t_s": 90,
+          "load_calls": 307,
+          "recall_p50_ms": 5.47,
+          "recall_max_ms": 25.83,
+          "ack_max_ms": 33.32,
+          "completions": 179,
+          "apply_lag_p50_ms": 49.91,
+          "apply_lag_max_ms": 177.09
+        },
+        {
+          "t_s": 100,
+          "load_calls": 285,
+          "recall_p50_ms": 5.46,
+          "recall_max_ms": 56.66,
+          "ack_max_ms": 58.5,
+          "completions": 165,
+          "apply_lag_p50_ms": 57.06,
+          "apply_lag_max_ms": 249.13
+        },
+        {
+          "t_s": 110,
+          "load_calls": 319,
+          "recall_p50_ms": 7.8,
+          "recall_max_ms": 72.1,
+          "ack_max_ms": 70.06,
+          "completions": 192,
+          "apply_lag_p50_ms": 69.1,
+          "apply_lag_max_ms": 350.07
+        },
+        {
+          "t_s": 120,
+          "load_calls": 3,
+          "recall_p50_ms": 12.76,
+          "recall_max_ms": 12.76,
+          "ack_max_ms": 7.11,
+          "completions": 4,
+          "apply_lag_p50_ms": 126.9,
+          "apply_lag_max_ms": 147.36
+        }
+      ]
+    },
+    "conc3-r3-0140-w16": {
+      "first_call_utc": "2026-11-20T06:55:08Z",
+      "last_load_call_utc": "2026-11-20T06:57:09Z",
+      "calls_by_tool": {
+        "lambo_recall": 1453,
+        "lambo_derive": 1443,
+        "lambo_stats": 2153,
+        "lambo_record_action": 692
+      },
+      "completions": 2135,
+      "recall_ms": {
+        "n": 1396,
+        "p50": 4.94,
+        "p90": 16.73,
+        "p99": 40.95,
+        "max": 126.75
+      },
+      "ack_ms": {
+        "n": 2135,
+        "p50": 0.07,
+        "p90": 14.12,
+        "p99": 32.88,
+        "max": 125.51
+      },
+      "apply_lag_ms": {
+        "n": 2135,
+        "p50": 51.57,
+        "p90": 105.08,
+        "p99": 181.15,
+        "max": 346.3
+      },
+      "slow_calls": 6,
+      "slow_call_max_ms": 126.75,
+      "slow_seconds": 1,
+      "slow_seconds_utc": [
+        "2026-11-20T06:56:55Z"
+      ],
+      "buckets_10s": [
+        {
+          "t_s": 0,
+          "load_calls": 282,
+          "recall_p50_ms": 3.27,
+          "recall_max_ms": 743.96,
+          "ack_max_ms": 12.56,
+          "completions": 163,
+          "apply_lag_p50_ms": 43.61,
+          "apply_lag_max_ms": 242.1
+        },
+        {
+          "t_s": 10,
+          "load_calls": 321,
+          "recall_p50_ms": 2.81,
+          "recall_max_ms": 22.67,
+          "ack_max_ms": 11.97,
+          "completions": 183,
+          "apply_lag_p50_ms": 42.88,
+          "apply_lag_max_ms": 142.62
+        },
+        {
+          "t_s": 20,
+          "load_calls": 299,
+          "recall_p50_ms": 3.17,
+          "recall_max_ms": 15.1,
+          "ack_max_ms": 15.56,
+          "completions": 179,
+          "apply_lag_p50_ms": 50.44,
+          "apply_lag_max_ms": 237.73
+        },
+        {
+          "t_s": 30,
+          "load_calls": 293,
+          "recall_p50_ms": 3.59,
+          "recall_max_ms": 21.01,
+          "ack_max_ms": 19.58,
+          "completions": 178,
+          "apply_lag_p50_ms": 50.38,
+          "apply_lag_max_ms": 222.98
+        },
+        {
+          "t_s": 40,
+          "load_calls": 286,
+          "recall_p50_ms": 3.9,
+          "recall_max_ms": 16.38,
+          "ack_max_ms": 22.21,
+          "completions": 171,
+          "apply_lag_p50_ms": 46.43,
+          "apply_lag_max_ms": 169.74
+        },
+        {
+          "t_s": 50,
+          "load_calls": 309,
+          "recall_p50_ms": 4.46,
+          "recall_max_ms": 26.94,
+          "ack_max_ms": 28.72,
+          "completions": 169,
+          "apply_lag_p50_ms": 48.5,
+          "apply_lag_max_ms": 147.79
+        },
+        {
+          "t_s": 60,
+          "load_calls": 312,
+          "recall_p50_ms": 5.05,
+          "recall_max_ms": 26.66,
+          "ack_max_ms": 40.34,
+          "completions": 195,
+          "apply_lag_p50_ms": 55.16,
+          "apply_lag_max_ms": 346.3
+        },
+        {
+          "t_s": 70,
+          "load_calls": 293,
+          "recall_p50_ms": 4.92,
+          "recall_max_ms": 29.07,
+          "ack_max_ms": 37.97,
+          "completions": 179,
+          "apply_lag_p50_ms": 50.81,
+          "apply_lag_max_ms": 265.14
+        },
+        {
+          "t_s": 80,
+          "load_calls": 273,
+          "recall_p50_ms": 5.22,
+          "recall_max_ms": 40.95,
+          "ack_max_ms": 44.5,
+          "completions": 175,
+          "apply_lag_p50_ms": 51.55,
+          "apply_lag_max_ms": 155.62
+        },
+        {
+          "t_s": 90,
+          "load_calls": 303,
+          "recall_p50_ms": 5.61,
+          "recall_max_ms": 47.72,
+          "ack_max_ms": 45.41,
+          "completions": 179,
+          "apply_lag_p50_ms": 61.07,
+          "apply_lag_max_ms": 236.47
+        },
+        {
+          "t_s": 100,
+          "load_calls": 281,
+          "recall_p50_ms": 5.78,
+          "recall_max_ms": 126.75,
+          "ack_max_ms": 125.51,
+          "completions": 162,
+          "apply_lag_p50_ms": 59.04,
+          "apply_lag_max_ms": 316.83
+        },
+        {
+          "t_s": 110,
+          "load_calls": 313,
+          "recall_p50_ms": 7.06,
+          "recall_max_ms": 63.78,
+          "ack_max_ms": 62.27,
+          "completions": 184,
+          "apply_lag_p50_ms": 63.12,
+          "apply_lag_max_ms": 186.22
+        },
+        {
+          "t_s": 120,
+          "load_calls": 23,
+          "recall_p50_ms": 24.14,
+          "recall_max_ms": 48.64,
+          "ack_max_ms": 48.13,
+          "completions": 18,
+          "apply_lag_p50_ms": 69.94,
+          "apply_lag_max_ms": 120.5
+        }
+      ]
+    },
+    "conc3-r4-0130-w16": {
+      "first_call_utc": "2026-11-20T06:58:17Z",
+      "last_load_call_utc": "2026-11-20T07:00:17Z",
+      "calls_by_tool": {
+        "lambo_recall": 1447,
+        "lambo_derive": 1434,
+        "lambo_stats": 2152,
+        "lambo_record_action": 685
+      },
+      "completions": 2119,
+      "recall_ms": {
+        "n": 1382,
+        "p50": 5.33,
+        "p90": 20.77,
+        "p99": 102.89,
+        "max": 186.24
+      },
+      "ack_ms": {
+        "n": 2119,
+        "p50": 0.1,
+        "p90": 17.92,
+        "p99": 57.69,
+        "max": 177.4
+      },
+      "apply_lag_ms": {
+        "n": 2119,
+        "p50": 55.9,
+        "p90": 123.46,
+        "p99": 257.79,
+        "max": 375.52
+      },
+      "slow_calls": 23,
+      "slow_call_max_ms": 186.24,
+      "slow_seconds": 5,
+      "slow_seconds_utc": [
+        "2026-11-20T06:58:44Z",
+        "2026-11-20T06:58:45Z",
+        "2026-11-20T06:59:00Z",
+        "2026-11-20T06:59:02Z",
+        "2026-11-20T06:59:24Z"
+      ],
+      "buckets_10s": [
+        {
+          "t_s": 0,
+          "load_calls": 307,
+          "recall_p50_ms": 3.16,
+          "recall_max_ms": 89.61,
+          "ack_max_ms": 24.72,
+          "completions": 176,
+          "apply_lag_p50_ms": 43.47,
+          "apply_lag_max_ms": 281.7
+        },
+        {
+          "t_s": 10,
+          "load_calls": 315,
+          "recall_p50_ms": 3.53,
+          "recall_max_ms": 52.95,
+          "ack_max_ms": 39.35,
+          "completions": 179,
+          "apply_lag_p50_ms": 44.77,
+          "apply_lag_max_ms": 157.24
+        },
+        {
+          "t_s": 20,
+          "load_calls": 291,
+          "recall_p50_ms": 4.34,
+          "recall_max_ms": 149.39,
+          "ack_max_ms": 143.67,
+          "completions": 180,
+          "apply_lag_p50_ms": 69.56,
+          "apply_lag_max_ms": 375.52
+        },
+        {
+          "t_s": 30,
+          "load_calls": 292,
+          "recall_p50_ms": 4.27,
+          "recall_max_ms": 64.06,
+          "ack_max_ms": 21.67,
+          "completions": 174,
+          "apply_lag_p50_ms": 47.04,
+          "apply_lag_max_ms": 185.45
+        },
+        {
+          "t_s": 40,
+          "load_calls": 273,
+          "recall_p50_ms": 6.73,
+          "recall_max_ms": 186.24,
+          "ack_max_ms": 177.4,
+          "completions": 163,
+          "apply_lag_p50_ms": 65.88,
+          "apply_lag_max_ms": 291.79
+        },
+        {
+          "t_s": 50,
+          "load_calls": 312,
+          "recall_p50_ms": 4.8,
+          "recall_max_ms": 35.41,
+          "ack_max_ms": 41.09,
+          "completions": 172,
+          "apply_lag_p50_ms": 51.45,
+          "apply_lag_max_ms": 163.11
+        },
+        {
+          "t_s": 60,
+          "load_calls": 312,
+          "recall_p50_ms": 4.89,
+          "recall_max_ms": 102.89,
+          "ack_max_ms": 47.57,
+          "completions": 192,
+          "apply_lag_p50_ms": 65.72,
+          "apply_lag_max_ms": 264.64
+        },
+        {
+          "t_s": 70,
+          "load_calls": 290,
+          "recall_p50_ms": 5.89,
+          "recall_max_ms": 45.11,
+          "ack_max_ms": 52.91,
+          "completions": 180,
+          "apply_lag_p50_ms": 62.07,
+          "apply_lag_max_ms": 349.86
+        },
+        {
+          "t_s": 80,
+          "load_calls": 269,
+          "recall_p50_ms": 5.33,
+          "recall_max_ms": 22.59,
+          "ack_max_ms": 42.31,
+          "completions": 173,
+          "apply_lag_p50_ms": 58.04,
+          "apply_lag_max_ms": 195.18
+        },
+        {
+          "t_s": 90,
+          "load_calls": 305,
+          "recall_p50_ms": 5.41,
+          "recall_max_ms": 93.39,
+          "ack_max_ms": 61.02,
+          "completions": 178,
+          "apply_lag_p50_ms": 54.77,
+          "apply_lag_max_ms": 243.24
+        },
+        {
+          "t_s": 100,
+          "load_calls": 289,
+          "recall_p50_ms": 5.71,
+          "recall_max_ms": 58.07,
+          "ack_max_ms": 56.47,
+          "completions": 166,
+          "apply_lag_p50_ms": 52.63,
+          "apply_lag_max_ms": 145.47
+        },
+        {
+          "t_s": 110,
+          "load_calls": 310,
+          "recall_p50_ms": 7.66,
+          "recall_max_ms": 50.66,
+          "ack_max_ms": 73.33,
+          "completions": 185,
+          "apply_lag_p50_ms": 71.14,
+          "apply_lag_max_ms": 270.19
+        },
+        {
+          "t_s": 120,
+          "load_calls": 1,
+          "recall_p50_ms": null,
+          "recall_max_ms": null,
+          "ack_max_ms": 0.07,
+          "completions": 1,
+          "apply_lag_p50_ms": 24.69,
+          "apply_lag_max_ms": 24.69
+        }
+      ]
+    },
+    "pair1-0130-w16": {
+      "first_call_utc": "2026-11-20T06:41:12Z",
+      "last_load_call_utc": "2026-11-20T06:43:12Z",
+      "calls_by_tool": {
+        "lambo_recall": 1437,
+        "lambo_derive": 1420,
+        "lambo_stats": 2150,
+        "lambo_record_action": 671
+      },
+      "completions": 2091,
+      "recall_ms": {
+        "n": 1374,
+        "p50": 7.17,
+        "p90": 35.02,
+        "p99": 78.8,
+        "max": 271.67
+      },
+      "ack_ms": {
+        "n": 2091,
+        "p50": 0.17,
+        "p90": 26.24,
+        "p99": 85.54,
+        "max": 530.89
+      },
+      "apply_lag_ms": {
+        "n": 2091,
+        "p50": 104.82,
+        "p90": 282.96,
+        "p99": 616.49,
+        "max": 936.06
+      },
+      "slow_calls": 25,
+      "slow_call_max_ms": 530.89,
+      "slow_seconds": 6,
+      "slow_seconds_utc": [
+        "2026-11-20T06:41:33Z",
+        "2026-11-20T06:41:34Z",
+        "2026-11-20T06:41:54Z",
+        "2026-11-20T06:41:57Z",
+        "2026-11-20T06:41:58Z",
+        "2026-11-20T06:42:34Z"
+      ],
+      "buckets_10s": [
+        {
+          "t_s": 0,
+          "load_calls": 302,
+          "recall_p50_ms": 6.26,
+          "recall_max_ms": 419.83,
+          "ack_max_ms": 44.45,
+          "completions": 172,
+          "apply_lag_p50_ms": 93.42,
+          "apply_lag_max_ms": 620.94
+        },
+        {
+          "t_s": 10,
+          "load_calls": 313,
+          "recall_p50_ms": 5.06,
+          "recall_max_ms": 35.03,
+          "ack_max_ms": 39.13,
+          "completions": 180,
+          "apply_lag_p50_ms": 96.24,
+          "apply_lag_max_ms": 516.31
+        },
+        {
+          "t_s": 20,
+          "load_calls": 287,
+          "recall_p50_ms": 5.2,
+          "recall_max_ms": 214.16,
+          "ack_max_ms": 530.89,
+          "completions": 172,
+          "apply_lag_p50_ms": 167.25,
+          "apply_lag_max_ms": 714.23
+        },
+        {
+          "t_s": 30,
+          "load_calls": 287,
+          "recall_p50_ms": 7.34,
+          "recall_max_ms": 60.86,
+          "ack_max_ms": 43.08,
+          "completions": 174,
+          "apply_lag_p50_ms": 154.51,
+          "apply_lag_max_ms": 865.45
+        },
+        {
+          "t_s": 40,
+          "load_calls": 268,
+          "recall_p50_ms": 16.13,
+          "recall_max_ms": 271.67,
+          "ack_max_ms": 259.55,
+          "completions": 159,
+          "apply_lag_p50_ms": 125.01,
+          "apply_lag_max_ms": 635.79
+        },
+        {
+          "t_s": 50,
+          "load_calls": 312,
+          "recall_p50_ms": 11.31,
+          "recall_max_ms": 94.09,
+          "ack_max_ms": 94.66,
+          "completions": 177,
+          "apply_lag_p50_ms": 108.23,
+          "apply_lag_max_ms": 479.34
+        },
+        {
+          "t_s": 60,
+          "load_calls": 285,
+          "recall_p50_ms": 10.88,
+          "recall_max_ms": 51.87,
+          "ack_max_ms": 85.54,
+          "completions": 173,
+          "apply_lag_p50_ms": 114.36,
+          "apply_lag_max_ms": 389.72
+        },
+        {
+          "t_s": 70,
+          "load_calls": 303,
+          "recall_p50_ms": 12.98,
+          "recall_max_ms": 78.8,
+          "ack_max_ms": 68.4,
+          "completions": 188,
+          "apply_lag_p50_ms": 141.59,
+          "apply_lag_max_ms": 936.06
+        },
+        {
+          "t_s": 80,
+          "load_calls": 267,
+          "recall_p50_ms": 6.42,
+          "recall_max_ms": 152.99,
+          "ack_max_ms": 135.36,
+          "completions": 169,
+          "apply_lag_p50_ms": 93.34,
+          "apply_lag_max_ms": 555.87
+        },
+        {
+          "t_s": 90,
+          "load_calls": 288,
+          "recall_p50_ms": 5.49,
+          "recall_max_ms": 51.5,
+          "ack_max_ms": 33.11,
+          "completions": 182,
+          "apply_lag_p50_ms": 79.95,
+          "apply_lag_max_ms": 404.39
+        },
+        {
+          "t_s": 100,
+          "load_calls": 293,
+          "recall_p50_ms": 5.51,
+          "recall_max_ms": 42.89,
+          "ack_max_ms": 25.05,
+          "completions": 157,
+          "apply_lag_p50_ms": 63.09,
+          "apply_lag_max_ms": 259.96
+        },
+        {
+          "t_s": 110,
+          "load_calls": 319,
+          "recall_p50_ms": 6.13,
+          "recall_max_ms": 52.7,
+          "ack_max_ms": 66.08,
+          "completions": 185,
+          "apply_lag_p50_ms": 104.37,
+          "apply_lag_max_ms": 467.32
+        },
+        {
+          "t_s": 120,
+          "load_calls": 4,
+          "recall_p50_ms": 11.07,
+          "recall_max_ms": 11.09,
+          "ack_max_ms": 0.07,
+          "completions": 3,
+          "apply_lag_p50_ms": 60.77,
+          "apply_lag_max_ms": 92.64
+        }
+      ]
+    },
+    "pair1-0140-w16": {
+      "first_call_utc": "2026-11-20T06:41:12Z",
+      "last_load_call_utc": "2026-11-20T06:43:12Z",
+      "calls_by_tool": {
+        "lambo_recall": 1433,
+        "lambo_derive": 1422,
+        "lambo_stats": 2149,
+        "lambo_record_action": 670
+      },
+      "completions": 2092,
+      "recall_ms": {
+        "n": 1369,
+        "p50": 7.24,
+        "p90": 33.4,
+        "p99": 94.41,
+        "max": 813.37
+      },
+      "ack_ms": {
+        "n": 2092,
+        "p50": 0.18,
+        "p90": 25.11,
+        "p99": 69.76,
+        "max": 897.35
+      },
+      "apply_lag_ms": {
+        "n": 2092,
+        "p50": 110.37,
+        "p90": 374.34,
+        "p99": 2537.36,
+        "max": 3313.34
+      },
+      "slow_calls": 27,
+      "slow_call_max_ms": 897.35,
+      "slow_seconds": 7,
+      "slow_seconds_utc": [
+        "2026-11-20T06:41:34Z",
+        "2026-11-20T06:41:54Z",
+        "2026-11-20T06:41:55Z",
+        "2026-11-20T06:41:58Z",
+        "2026-11-20T06:42:12Z",
+        "2026-11-20T06:42:29Z",
+        "2026-11-20T06:42:34Z"
+      ],
+      "buckets_10s": [
+        {
+          "t_s": 0,
+          "load_calls": 299,
+          "recall_p50_ms": 5.82,
+          "recall_max_ms": 729.11,
+          "ack_max_ms": 49.93,
+          "completions": 171,
+          "apply_lag_p50_ms": 111.93,
+          "apply_lag_max_ms": 1080.27
+        },
+        {
+          "t_s": 10,
+          "load_calls": 320,
+          "recall_p50_ms": 5.0,
+          "recall_max_ms": 61.41,
+          "ack_max_ms": 58.94,
+          "completions": 182,
+          "apply_lag_p50_ms": 92.2,
+          "apply_lag_max_ms": 548.64
+        },
+        {
+          "t_s": 20,
+          "load_calls": 282,
+          "recall_p50_ms": 5.67,
+          "recall_max_ms": 813.37,
+          "ack_max_ms": 897.35,
+          "completions": 158,
+          "apply_lag_p50_ms": 369.66,
+          "apply_lag_max_ms": 3313.34
+        },
+        {
+          "t_s": 30,
+          "load_calls": 281,
+          "recall_p50_ms": 10.48,
+          "recall_max_ms": 94.23,
+          "ack_max_ms": 75.38,
+          "completions": 184,
+          "apply_lag_p50_ms": 163.36,
+          "apply_lag_max_ms": 3131.98
+        },
+        {
+          "t_s": 40,
+          "load_calls": 266,
+          "recall_p50_ms": 15.3,
+          "recall_max_ms": 345.01,
+          "ack_max_ms": 264.98,
+          "completions": 157,
+          "apply_lag_p50_ms": 122.41,
+          "apply_lag_max_ms": 756.35
+        },
+        {
+          "t_s": 50,
+          "load_calls": 310,
+          "recall_p50_ms": 11.73,
+          "recall_max_ms": 101.05,
+          "ack_max_ms": 124.91,
+          "completions": 179,
+          "apply_lag_p50_ms": 112.83,
+          "apply_lag_max_ms": 498.91
+        },
+        {
+          "t_s": 60,
+          "load_calls": 292,
+          "recall_p50_ms": 9.78,
+          "recall_max_ms": 69.59,
+          "ack_max_ms": 62.54,
+          "completions": 172,
+          "apply_lag_p50_ms": 106.28,
+          "apply_lag_max_ms": 451.12
+        },
+        {
+          "t_s": 70,
+          "load_calls": 305,
+          "recall_p50_ms": 13.96,
+          "recall_max_ms": 180.55,
+          "ack_max_ms": 162.05,
+          "completions": 193,
+          "apply_lag_p50_ms": 148.13,
+          "apply_lag_max_ms": 788.48
+        },
+        {
+          "t_s": 80,
+          "load_calls": 260,
+          "recall_p50_ms": 6.5,
+          "recall_max_ms": 100.67,
+          "ack_max_ms": 82.11,
+          "completions": 163,
+          "apply_lag_p50_ms": 91.45,
+          "apply_lag_max_ms": 461.02
+        },
+        {
+          "t_s": 90,
+          "load_calls": 298,
+          "recall_p50_ms": 5.5,
+          "recall_max_ms": 64.64,
+          "ack_max_ms": 60.96,
+          "completions": 184,
+          "apply_lag_p50_ms": 86.64,
+          "apply_lag_max_ms": 628.43
+        },
+        {
+          "t_s": 100,
+          "load_calls": 290,
+          "recall_p50_ms": 5.53,
+          "recall_max_ms": 51.27,
+          "ack_max_ms": 50.83,
+          "completions": 160,
+          "apply_lag_p50_ms": 65.01,
+          "apply_lag_max_ms": 307.16
+        },
+        {
+          "t_s": 110,
+          "load_calls": 322,
+          "recall_p50_ms": 6.11,
+          "recall_max_ms": 46.9,
+          "ack_max_ms": 97.8,
+          "completions": 186,
+          "apply_lag_p50_ms": 99.08,
+          "apply_lag_max_ms": 427.07
+        }
+      ]
+    },
+    "pair2-0140-w16": {
+      "first_call_utc": "2026-11-20T06:44:38Z",
+      "last_load_call_utc": "2026-11-20T06:46:38Z",
+      "calls_by_tool": {
+        "lambo_recall": 1441,
+        "lambo_derive": 1428,
+        "lambo_stats": 2150,
+        "lambo_record_action": 677
+      },
+      "completions": 2105,
+      "recall_ms": {
+        "n": 1376,
+        "p50": 5.08,
+        "p90": 24.13,
+        "p99": 122.87,
+        "max": 448.53
+      },
+      "ack_ms": {
+        "n": 2105,
+        "p50": 0.07,
+        "p90": 16.72,
+        "p99": 123.79,
+        "max": 746.15
+      },
+      "apply_lag_ms": {
+        "n": 2105,
+        "p50": 100.82,
+        "p90": 331.04,
+        "p99": 680.72,
+        "max": 1158.14
+      },
+      "slow_calls": 58,
+      "slow_call_max_ms": 746.15,
+      "slow_seconds": 15,
+      "slow_seconds_utc": [
+        "2026-11-20T06:45:07Z",
+        "2026-11-20T06:45:14Z",
+        "2026-11-20T06:45:30Z",
+        "2026-11-20T06:45:32Z",
+        "2026-11-20T06:45:58Z",
+        "2026-11-20T06:46:03Z",
+        "2026-11-20T06:46:04Z",
+        "2026-11-20T06:46:06Z",
+        "2026-11-20T06:46:20Z",
+        "2026-11-20T06:46:21Z",
+        "2026-11-20T06:46:22Z",
+        "2026-11-20T06:46:23Z",
+        "2026-11-20T06:46:24Z",
+        "2026-11-20T06:46:25Z",
+        "2026-11-20T06:46:31Z"
+      ],
+      "buckets_10s": [
+        {
+          "t_s": 0,
+          "load_calls": 306,
+          "recall_p50_ms": 2.72,
+          "recall_max_ms": 197.44,
+          "ack_max_ms": 13.36,
+          "completions": 176,
+          "apply_lag_p50_ms": 78.05,
+          "apply_lag_max_ms": 514.4
+        },
+        {
+          "t_s": 10,
+          "load_calls": 319,
+          "recall_p50_ms": 3.02,
+          "recall_max_ms": 12.96,
+          "ack_max_ms": 10.11,
+          "completions": 179,
+          "apply_lag_p50_ms": 99.16,
+          "apply_lag_max_ms": 401.03
+        },
+        {
+          "t_s": 20,
+          "load_calls": 295,
+          "recall_p50_ms": 3.4,
+          "recall_max_ms": 54.9,
+          "ack_max_ms": 143.85,
+          "completions": 184,
+          "apply_lag_p50_ms": 139.17,
+          "apply_lag_max_ms": 1021.94
+        },
+        {
+          "t_s": 30,
+          "load_calls": 288,
+          "recall_p50_ms": 3.58,
+          "recall_max_ms": 186.59,
+          "ack_max_ms": 29.3,
+          "completions": 171,
+          "apply_lag_p50_ms": 95.98,
+          "apply_lag_max_ms": 660.52
+        },
+        {
+          "t_s": 40,
+          "load_calls": 285,
+          "recall_p50_ms": 4.44,
+          "recall_max_ms": 75.48,
+          "ack_max_ms": 44.11,
+          "completions": 171,
+          "apply_lag_p50_ms": 84.58,
+          "apply_lag_max_ms": 802.11
+        },
+        {
+          "t_s": 50,
+          "load_calls": 312,
+          "recall_p50_ms": 4.04,
+          "recall_max_ms": 177.82,
+          "ack_max_ms": 75.27,
+          "completions": 170,
+          "apply_lag_p50_ms": 84.63,
+          "apply_lag_max_ms": 847.36
+        },
+        {
+          "t_s": 60,
+          "load_calls": 313,
+          "recall_p50_ms": 4.17,
+          "recall_max_ms": 17.56,
+          "ack_max_ms": 18.8,
+          "completions": 196,
+          "apply_lag_p50_ms": 99.52,
+          "apply_lag_max_ms": 588.37
+        },
+        {
+          "t_s": 70,
+          "load_calls": 297,
+          "recall_p50_ms": 4.84,
+          "recall_max_ms": 153.21,
+          "ack_max_ms": 120.35,
+          "completions": 179,
+          "apply_lag_p50_ms": 91.32,
+          "apply_lag_max_ms": 705.44
+        },
+        {
+          "t_s": 80,
+          "load_calls": 262,
+          "recall_p50_ms": 6.31,
+          "recall_max_ms": 200.4,
+          "ack_max_ms": 174.65,
+          "completions": 172,
+          "apply_lag_p50_ms": 161.15,
+          "apply_lag_max_ms": 917.69
+        },
+        {
+          "t_s": 90,
+          "load_calls": 296,
+          "recall_p50_ms": 9.6,
+          "recall_max_ms": 64.75,
+          "ack_max_ms": 47.8,
+          "completions": 175,
+          "apply_lag_p50_ms": 83.25,
+          "apply_lag_max_ms": 632.17
+        },
+        {
+          "t_s": 100,
+          "load_calls": 253,
+          "recall_p50_ms": 17.32,
+          "recall_max_ms": 448.53,
+          "ack_max_ms": 746.15,
+          "completions": 142,
+          "apply_lag_p50_ms": 141.39,
+          "apply_lag_max_ms": 1158.14
+        },
+        {
+          "t_s": 110,
+          "load_calls": 320,
+          "recall_p50_ms": 6.39,
+          "recall_max_ms": 107.33,
+          "ack_max_ms": 117.41,
+          "completions": 189,
+          "apply_lag_p50_ms": 119.3,
+          "apply_lag_max_ms": 656.69
+        }
+      ]
+    },
+    "pair2-0130-w16": {
+      "first_call_utc": "2026-11-20T06:44:38Z",
+      "last_load_call_utc": "2026-11-20T06:46:38Z",
+      "calls_by_tool": {
+        "lambo_recall": 1437,
+        "lambo_derive": 1425,
+        "lambo_stats": 2151,
+        "lambo_record_action": 678
+      },
+      "completions": 2103,
+      "recall_ms": {
+        "n": 1372,
+        "p50": 4.96,
+        "p90": 23.48,
+        "p99": 96.49,
+        "max": 734.35
+      },
+      "ack_ms": {
+        "n": 2103,
+        "p50": 0.07,
+        "p90": 21.35,
+        "p99": 116.53,
+        "max": 1029.13
+      },
+      "apply_lag_ms": {
+        "n": 2103,
+        "p50": 103.65,
+        "p90": 333.44,
+        "p99": 753.47,
+        "max": 1256.91
+      },
+      "slow_calls": 41,
+      "slow_call_max_ms": 1029.13,
+      "slow_seconds": 13,
+      "slow_seconds_utc": [
+        "2026-11-20T06:45:06Z",
+        "2026-11-20T06:45:07Z",
+        "2026-11-20T06:45:30Z",
+        "2026-11-20T06:46:03Z",
+        "2026-11-20T06:46:04Z",
+        "2026-11-20T06:46:06Z",
+        "2026-11-20T06:46:21Z",
+        "2026-11-20T06:46:22Z",
+        "2026-11-20T06:46:23Z",
+        "2026-11-20T06:46:24Z",
+        "2026-11-20T06:46:25Z",
+        "2026-11-20T06:46:27Z",
+        "2026-11-20T06:46:31Z"
+      ],
+      "buckets_10s": [
+        {
+          "t_s": 0,
+          "load_calls": 306,
+          "recall_p50_ms": 2.81,
+          "recall_max_ms": 197.94,
+          "ack_max_ms": 13.92,
+          "completions": 176,
+          "apply_lag_p50_ms": 78.6,
+          "apply_lag_max_ms": 612.15
+        },
+        {
+          "t_s": 10,
+          "load_calls": 318,
+          "recall_p50_ms": 2.95,
+          "recall_max_ms": 11.99,
+          "ack_max_ms": 11.52,
+          "completions": 180,
+          "apply_lag_p50_ms": 89.61,
+          "apply_lag_max_ms": 389.82
+        },
+        {
+          "t_s": 20,
+          "load_calls": 295,
+          "recall_p50_ms": 3.42,
+          "recall_max_ms": 152.9,
+          "ack_max_ms": 134.22,
+          "completions": 181,
+          "apply_lag_p50_ms": 136.06,
+          "apply_lag_max_ms": 974.34
+        },
+        {
+          "t_s": 30,
+          "load_calls": 287,
+          "recall_p50_ms": 3.53,
+          "recall_max_ms": 55.41,
+          "ack_max_ms": 93.94,
+          "completions": 173,
+          "apply_lag_p50_ms": 100.17,
+          "apply_lag_max_ms": 663.77
+        },
+        {
+          "t_s": 40,
+          "load_calls": 285,
+          "recall_p50_ms": 4.36,
+          "recall_max_ms": 55.68,
+          "ack_max_ms": 88.59,
+          "completions": 171,
+          "apply_lag_p50_ms": 90.58,
+          "apply_lag_max_ms": 616.39
+        },
+        {
+          "t_s": 50,
+          "load_calls": 313,
+          "recall_p50_ms": 4.05,
+          "recall_max_ms": 81.79,
+          "ack_max_ms": 111.37,
+          "completions": 170,
+          "apply_lag_p50_ms": 108.36,
+          "apply_lag_max_ms": 620.67
+        },
+        {
+          "t_s": 60,
+          "load_calls": 314,
+          "recall_p50_ms": 4.12,
+          "recall_max_ms": 17.14,
+          "ack_max_ms": 23.11,
+          "completions": 192,
+          "apply_lag_p50_ms": 102.64,
+          "apply_lag_max_ms": 577.77
+        },
+        {
+          "t_s": 70,
+          "load_calls": 298,
+          "recall_p50_ms": 4.84,
+          "recall_max_ms": 74.57,
+          "ack_max_ms": 54.42,
+          "completions": 183,
+          "apply_lag_p50_ms": 102.44,
+          "apply_lag_max_ms": 852.48
+        },
+        {
+          "t_s": 80,
+          "load_calls": 259,
+          "recall_p50_ms": 6.33,
+          "recall_max_ms": 262.06,
+          "ack_max_ms": 267.38,
+          "completions": 171,
+          "apply_lag_p50_ms": 173.87,
+          "apply_lag_max_ms": 923.15
+        },
+        {
+          "t_s": 90,
+          "load_calls": 298,
+          "recall_p50_ms": 7.57,
+          "recall_max_ms": 87.32,
+          "ack_max_ms": 93.34,
+          "completions": 174,
+          "apply_lag_p50_ms": 103.35,
+          "apply_lag_max_ms": 622.54
+        },
+        {
+          "t_s": 100,
+          "load_calls": 245,
+          "recall_p50_ms": 15.46,
+          "recall_max_ms": 734.35,
+          "ack_max_ms": 1029.13,
+          "completions": 137,
+          "apply_lag_p50_ms": 154.97,
+          "apply_lag_max_ms": 1256.91
+        },
+        {
+          "t_s": 110,
+          "load_calls": 317,
+          "recall_p50_ms": 6.12,
+          "recall_max_ms": 106.88,
+          "ack_max_ms": 96.9,
+          "completions": 191,
+          "apply_lag_p50_ms": 109.98,
+          "apply_lag_max_ms": 826.11
+        },
+        {
+          "t_s": 120,
+          "load_calls": 5,
+          "recall_p50_ms": 6.06,
+          "recall_max_ms": 6.19,
+          "ack_max_ms": 27.52,
+          "completions": 4,
+          "apply_lag_p50_ms": 52.0,
+          "apply_lag_max_ms": 63.88
+        }
+      ]
+    }
+  },
+  "pairs": [
+    {
+      "a": "pair1-0130-w16",
+      "b": "pair1-0140-w16",
+      "seconds_compared": 115,
+      "seconds_with_slowest_call_at_least_ms": {
+        "50": {
+          "pair1-0130-w16": 36,
+          "pair1-0140-w16": 35,
+          "both": 23
+        },
+        "100": {
+          "pair1-0130-w16": 6,
+          "pair1-0140-w16": 7,
+          "both": 4
+        },
+        "250": {
+          "pair1-0130-w16": 2,
+          "pair1-0140-w16": 2,
+          "both": 1
+        },
+        "500": {
+          "pair1-0130-w16": 1,
+          "pair1-0140-w16": 1,
+          "both": 0
+        }
+      },
+      "per_second_slowest_b_minus_a_median_ms": -0.44,
+      "seconds_b_slower_by_over_5ms": 35,
+      "seconds_a_slower_by_over_5ms": 45,
+      "slow_seconds": {
+        "pair1-0130-w16": 6,
+        "pair1-0140-w16": 7
+      },
+      "slow_seconds_shared_within_1s": {
+        "pair1-0130-w16": 6,
+        "pair1-0140-w16": 5
+      },
+      "slow_seconds_only": {
+        "pair1-0130-w16": 0,
+        "pair1-0140-w16": 2
+      }
+    },
+    {
+      "a": "pair2-0130-w16",
+      "b": "pair2-0140-w16",
+      "seconds_compared": 115,
+      "seconds_with_slowest_call_at_least_ms": {
+        "50": {
+          "pair2-0130-w16": 26,
+          "pair2-0140-w16": 26,
+          "both": 22
+        },
+        "100": {
+          "pair2-0130-w16": 13,
+          "pair2-0140-w16": 15,
+          "both": 11
+        },
+        "250": {
+          "pair2-0130-w16": 3,
+          "pair2-0140-w16": 2,
+          "both": 2
+        },
+        "500": {
+          "pair2-0130-w16": 2,
+          "pair2-0140-w16": 2,
+          "both": 2
+        }
+      },
+      "per_second_slowest_b_minus_a_median_ms": -0.81,
+      "seconds_b_slower_by_over_5ms": 24,
+      "seconds_a_slower_by_over_5ms": 37,
+      "slow_seconds": {
+        "pair2-0130-w16": 13,
+        "pair2-0140-w16": 15
+      },
+      "slow_seconds_shared_within_1s": {
+        "pair2-0130-w16": 12,
+        "pair2-0140-w16": 12
+      },
+      "slow_seconds_only": {
+        "pair2-0130-w16": 1,
+        "pair2-0140-w16": 3
+      }
+    }
+  ]
+}
