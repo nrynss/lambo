@@ -70,34 +70,37 @@ obligation: never block on an outage; fall back to `dev-diary/` and note it.
   - *Scope-check `⚑ Load-bearing pillar`:* Canonical-first ordering can surface
     incidental Canonical hits from unrelated subsystems. Treat `⚑` as **blocking only
     when your change modifies, removes, or breaks that concept's surface or resource** —
-    then call `lambo_inspect` on its ID or durable name and name the dependents before
-    editing.
+    then call `lambo_inspect` on its ID or durable name (with matching `scope` for
+    layer hits) and name the dependents before editing.
 
 ### Writing back
 - **Derive decisions, not logs:** Call `lambo_derive` at decision time with one atomic
   fact + its *why* (`logic` or `constraint`). Activity (merges, review rounds, binary
   re-pins, infra changes) goes to `lambo_record_action`.
 - **Cite what you relied on:** Pass the 8-hex ID or durable name from recall in
-  `depends_on` (on `lambo_derive` concepts or `lambo_record_action`). Only cite IDs
-  from the same session (`hits[].session` matches target).
+  `depends_on` (on `lambo_derive` concepts or `lambo_record_action`). Both 8-hex IDs
+  and durable names in `depends_on` and `against` must belong to the same target
+  session (`hits[].session` matches target).
 - **Contradict stale facts explicitly:** When new evidence invalidates a recalled
-  concept, pass its 8-hex ID or durable name in `against` (never both `depends_on`
-  and `against` in one call, and never `against` a `replacement_candidates` entry
-  marked `newer`).
+  concept, pass its 8-hex ID or durable name in `against` (same-session rule applies;
+  never both `depends_on` and `against` in one call, and never `against` a
+  `replacement_candidates` entry marked `newer`).
 - **Name standing rulings durably (`concepts[].name`):** Give a 2–4 word lowercase
   kebab-case `<domain>-<subject>` name (no slashes; e.g. `single-writer-lease`,
   `vector-dim-authority`) **only** to settled `logic`/`constraint` rulings or shared
   infra pillars meant to be cited across workstreams. Never name `observation`s,
   one-off findings, or file paths (names stay permanently reserved even after GC).
   Wait via `lambo_stats(receipt, wait_ms)` before citing a brand-new name in the same
-  turn. In `lambo_record_action.depends_on`, only pass durable names already confirmed
-  in recall or an `applied` receipt (unregistered text creates a new concept).
+  turn. Reference resolution differs by tool: `lambo_derive` refuses unknown
+  references, whereas in `lambo_record_action.depends_on` unregistered text creates a
+  new `Resource` concept (deleted targets and retired alias IDs are still refused) —
+  only pass durable names already confirmed in recall or an `applied` receipt.
 - **Scope & paths (dogfood):** Write Lambo repo decisions without `scope` (session
-  `lambo`), using `repo_scope: "github.com/nrynss/lambo"` on path-like resources and
-  actions. Write cross-project preferences with `scope: "general"` (no bare relative
-  paths). Shared Lambo design surfaces that warrant recall + citation: the dialect
-  trait, width/pin semantics, quarantine/canonization rules, recall constants, and CI
-  matrix rows.
+  `lambo`), using `repo_scope: "github.com/nrynss/lambo"` on new path-like `resource`
+  concepts and actions (older unscoped concepts must still be cited by ID). Write
+  cross-project preferences with `scope: "general"` (no bare relative paths). Shared
+  Lambo design surfaces that warrant recall + citation: the dialect trait, width/pin
+  semantics, quarantine/canonization rules, recall constants, and CI matrix rows.
 - **`agent_id`:** Use the exact model ID for this session (e.g. `claude-opus-5-5`,
   `gpt-6.2-sol`, `gemini-4-neon`; harness name only as fallback). Keep it identical
   across every call — never invent per-task or per-role IDs.

@@ -119,8 +119,10 @@ dependencies, the protection is blind.
    faithfully. When citing a concept already returned by recall, pass its 8-hex
    id or durable name in `depends_on` (or in `against` when new evidence shows
    an older concept is wrong). For shared pillars meant to be cited repeatedly,
-   you may bind a lowercase kebab-case `name` (`<domain>-<subject>`, e.g.
-   `prod-vpc-base-sg`) on `lambo_derive`.
+   you may bind a lowercase kebab-case durable `name` (`<domain>-<subject>`,
+   e.g. `prod-vpc-base-sg`) via `concepts[].name` on MCP `lambo_derive` (over
+   CLI, pass `--name` on `lambo derive` or bind names on existing concepts with
+   `lambo names assign`).
 
 3. Writes are lease-held and exclusive; sequence them. Over CLI, a write waits
    for flush before returning. Over MCP, writes apply in the background and
