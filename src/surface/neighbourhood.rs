@@ -110,6 +110,15 @@ pub(crate) fn render_neighbourhood_parts(
 
     let mut text = String::new();
     text.push_str(&format!("focus: {}\n", label(target)));
+    // #146: surface durable display names bound to the focus when present;
+    // unnamed concepts stay byte-identical (pinned by the cloudops golden).
+    let names = g.display_names(target);
+    if !names.is_empty() {
+        text.push_str(&format!(
+            "names: {}\n",
+            serde_json::to_string(&names).expect("string lists serialize")
+        ));
+    }
     if let Some(r) = radii.get(&target) {
         text.push_str(&format!("blast radius: {r}\n"));
         if *r > 0 {
@@ -240,7 +249,7 @@ pub(crate) fn render_neighbourhood_parts(
         Some(Node::Concept(c)) => Some(c.concept_type),
         _ => None,
     };
-    let structured = json!({
+    let mut structured = json!({
         "node_id": target.0.to_string(),
         "concept_type": concept_type,
         "label": label(target),
@@ -249,6 +258,11 @@ pub(crate) fn render_neighbourhood_parts(
         "dependents_truncated": dependents_truncated,
         "levels": levels,
     });
+    if !names.is_empty()
+        && let Some(map) = structured.as_object_mut()
+    {
+        map.insert("names".into(), json!(names));
+    }
     NeighbourhoodView {
         head,
         hops: text,

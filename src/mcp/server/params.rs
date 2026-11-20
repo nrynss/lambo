@@ -113,15 +113,11 @@ impl From<WireConceptType> for ConceptType {
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RecallParams {
-    /// Id of the agent making this call. Use one stable id for the agent's
-    /// whole life, never one per call, task or topic (good: your model or
-    /// client id, such as `claude-opus-5-5` or `gpt-5.6`, with a stable
-    /// instance suffix such as `-worker-2` if several run at once; bad:
-    /// `b1-review`, `implement-m12`). Caller-asserted and unverified: work is
-    /// recorded under exactly the id you send, so a stable id keeps your
-    /// attribution whole. Agents sharing an id share soft locks and can
-    /// release each other's; concurrent agents that must keep out of each
-    /// other's edits need distinct stable ids.
+    /// Stable caller id: use one stable id for the agent's whole life, never
+    /// one per call, task or topic (good: `claude-opus-5-5`, `gpt-5.6`, with a
+    /// stable instance suffix if concurrent; bad: `b1-review`). Caller-asserted
+    /// and unverified; callers sharing an id share soft locks and can release
+    /// each other's.
     #[schemars(length(max = 16_384))]
     pub agent_id: String,
     /// Natural-language query. Required, unless you send `image` or
@@ -178,17 +174,19 @@ pub struct WireConcept {
     /// not a paragraph or a log of what you did.
     #[schemars(length(max = 16_384))]
     pub content: String,
-    /// Optional durable name for this concept. Names use canonical-key
-    /// normalization and survive a writer restart. A conflicting name or
-    /// concept key refuses the whole call. Later writes may cite this name.
+    /// Optional durable name for a standing ruling or pillar (e.g.
+    /// `writer-lease-ttl`, lowercase kebab-case, 2-4 words). Omit for
+    /// observations or one-off facts — names stay permanently reserved even
+    /// after GC. Normalized like canonical keys; conflicting names or concept
+    /// keys refuse the call. Later writes and inspect may cite this name.
     #[schemars(length(max = 16_384))]
     pub name: Option<String>,
     // Field doc omitted so `#[schemars(inline)]` publishes `WireConceptType`'s
     // per-variant guidance directly on the property instead of overwriting it.
     pub concept_type: WireConceptType,
     /// Optional: up to 8 existing concepts this one rests on, such as the
-    /// ruling a decision applies. Cite each by its id: the 8 hex characters
-    /// recall shows, or its full node id (its exact content also works).
+    /// ruling a decision applies. Cite each by its id (the 8 hex characters
+    /// recall shows), its full node id, its durable name, or its exact content.
     /// Each must already exist in this session and match exactly one
     /// concept; one that does not, or that names this concept itself,
     /// refuses the whole call before the ack and writes nothing. Recorded as
@@ -200,8 +198,8 @@ pub struct WireConcept {
     pub depends_on: Option<Vec<WireReference>>,
     /// Optional: up to 8 existing concepts this one contradicts, such as an
     /// older belief a newer observation shows is wrong. Name each as for
-    /// `depends_on`: its id (the 8 hex characters recall shows) or full
-    /// node id (its exact content also works). Each must already exist in
+    /// `depends_on`: its id (the 8 hex characters recall shows), full node id,
+    /// durable name, or exact content. Each must already exist in
     /// the session the write goes to and match exactly one concept other
     /// than this one, or the whole call is refused before the ack and
     /// nothing is written, as is a concept this one also lists in
@@ -218,7 +216,7 @@ pub struct WireConcept {
 }
 
 /// One `depends_on` or `against` entry: an existing concept, by the id
-/// recall shows, its full node id or its exact content.
+/// recall shows, its full node id, its durable name, or its exact content.
 #[derive(Clone, Debug, Deserialize, schemars::JsonSchema)]
 pub struct WireReference(#[schemars(length(max = 16_384))] pub String);
 
@@ -234,15 +232,11 @@ pub struct WireParentOf {
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DeriveParams {
-    /// Id of the agent making this call. Use one stable id for the agent's
-    /// whole life, never one per call, task or topic (good: your model or
-    /// client id, such as `claude-opus-5-5` or `gpt-5.6`, with a stable
-    /// instance suffix such as `-worker-2` if several run at once; bad:
-    /// `b1-review`, `implement-m12`). Caller-asserted and unverified: work is
-    /// recorded under exactly the id you send, so a stable id keeps your
-    /// attribution whole. Agents sharing an id share soft locks and can
-    /// release each other's; concurrent agents that must keep out of each
-    /// other's edits need distinct stable ids.
+    /// Stable caller id: use one stable id for the agent's whole life, never
+    /// one per call, task or topic (good: `claude-opus-5-5`, `gpt-5.6`, with a
+    /// stable instance suffix if concurrent; bad: `b1-review`). Caller-asserted
+    /// and unverified; callers sharing an id share soft locks and can release
+    /// each other's.
     #[schemars(length(max = 16_384))]
     pub agent_id: String,
     /// Concepts to derive from this interaction.
@@ -290,15 +284,11 @@ pub struct WireResource(#[schemars(length(max = 16_384))] pub String);
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RecordActionParams {
-    /// Id of the agent making this call. Use one stable id for the agent's
-    /// whole life, never one per call, task or topic (good: your model or
-    /// client id, such as `claude-opus-5-5` or `gpt-5.6`, with a stable
-    /// instance suffix such as `-worker-2` if several run at once; bad:
-    /// `b1-review`, `implement-m12`). Caller-asserted and unverified: work is
-    /// recorded under exactly the id you send, so a stable id keeps your
-    /// attribution whole. Agents sharing an id share soft locks and can
-    /// release each other's; concurrent agents that must keep out of each
-    /// other's edits need distinct stable ids.
+    /// Stable caller id: use one stable id for the agent's whole life, never
+    /// one per call, task or topic (good: `claude-opus-5-5`, `gpt-5.6`, with a
+    /// stable instance suffix if concurrent; bad: `b1-review`). Caller-asserted
+    /// and unverified; callers sharing an id share soft locks and can release
+    /// each other's.
     #[schemars(length(max = 16_384))]
     pub agent_id: String,
     /// The action taken — becomes a `Resource` concept.
@@ -314,16 +304,16 @@ pub struct RecordActionParams {
     /// Resources this action mutates (`Causal` edges).
     pub modifies: Option<Vec<WireResource>>,
     /// Things this action depends on (`Dependency` edges). To cite a ruling
-    /// or decision you relied on, give its id: the 8 hex characters recall
-    /// shows, or its full node id. An id names that existing concept; a
-    /// short id several concepts share is refused. Any other entry, and an
-    /// id that names no concept, names a concept by its text, created if
-    /// new.
+    /// or decision you relied on, give its id (the 8 hex characters recall
+    /// shows or its full node id) or a declared durable name. An id or declared
+    /// durable name cites that existing concept; a short id several concepts
+    /// share is refused. Any other entry — including an unregistered name or an
+    /// id that names no concept — names a concept by its text, created if new.
     pub depends_on: Option<Vec<WireResource>>,
     /// Optional: up to 8 existing concepts this action contradicts, such as a
     /// belief the action showed to be wrong. Name each by its id (the 8 hex
-    /// characters recall shows) or full node id (its exact content also
-    /// works). Unlike `depends_on`, nothing is ever created: each must
+    /// characters recall shows), full node id, durable name, or exact content.
+    /// Unlike `depends_on`, nothing is ever created: each must
     /// already exist in the session the write goes to and match exactly one
     /// concept other than the action itself, and not one the action's
     /// `depends_on` names, or the whole call is refused before the ack and
@@ -362,13 +352,11 @@ pub struct RecordActionParams {
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ReserveParams {
-    /// Id of the agent making this call — the identity the lock is held under.
-    /// Use one stable id for the agent's whole life, never one per call, task
-    /// or topic (good: `claude-opus-5-5`, `gpt-5.6`, with a stable instance
-    /// suffix such as `-worker-2` if several run at once; bad: `b1-review`).
-    /// Caller-asserted and unverified: locks are cooperative. Distinct ids
-    /// contend: reserving a node another id holds is refused, naming the
-    /// holder. Two callers sending the SAME id share one lock and can release
+    /// Stable caller id the lock is held under: use one stable id for the
+    /// agent's whole life, never one per call, task or topic (good:
+    /// `claude-opus-5-5`, `gpt-5.6`, with a stable instance suffix if
+    /// concurrent; bad: `b1-review`). Caller-asserted and unverified: distinct
+    /// ids contend, while callers sharing an id share one lock and can release
     /// each other's.
     #[schemars(length(max = 16_384))]
     pub agent_id: String,
@@ -392,19 +380,15 @@ pub struct ReserveParams {
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct InspectParams {
-    /// Id of the agent making this call. Use one stable id for the agent's
-    /// whole life, never one per call, task or topic (good: your model or
-    /// client id, such as `claude-opus-5-5` or `gpt-5.6`, with a stable
-    /// instance suffix such as `-worker-2` if several run at once; bad:
-    /// `b1-review`, `implement-m12`). Caller-asserted and unverified: work is
-    /// recorded under exactly the id you send, so a stable id keeps your
-    /// attribution whole. Agents sharing an id share soft locks and can
-    /// release each other's; concurrent agents that must keep out of each
-    /// other's edits need distinct stable ids.
+    /// Stable caller id: use one stable id for the agent's whole life, never
+    /// one per call, task or topic (good: `claude-opus-5-5`, `gpt-5.6`, with a
+    /// stable instance suffix if concurrent; bad: `b1-review`). Caller-asserted
+    /// and unverified; callers sharing an id share soft locks and can release
+    /// each other's.
     #[schemars(length(max = 16_384))]
     pub agent_id: String,
-    /// Concept content, a node UUID, or the short-form id rendered in recall
-    /// blocks, to centre the neighbourhood on.
+    /// Concept content, a durable name, a node UUID, or the short-form id
+    /// rendered in recall blocks, to centre the neighbourhood on.
     #[schemars(length(max = 16_384))]
     pub focus: String,
     /// Hops out from the focus (default 2, max 5).
@@ -420,15 +404,11 @@ pub struct InspectParams {
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SaintsParams {
-    /// Id of the agent making this call. Use one stable id for the agent's
-    /// whole life, never one per call, task or topic (good: your model or
-    /// client id, such as `claude-opus-5-5` or `gpt-5.6`, with a stable
-    /// instance suffix such as `-worker-2` if several run at once; bad:
-    /// `b1-review`, `implement-m12`). Caller-asserted and unverified: work is
-    /// recorded under exactly the id you send, so a stable id keeps your
-    /// attribution whole. Agents sharing an id share soft locks and can
-    /// release each other's; concurrent agents that must keep out of each
-    /// other's edits need distinct stable ids.
+    /// Stable caller id: use one stable id for the agent's whole life, never
+    /// one per call, task or topic (good: `claude-opus-5-5`, `gpt-5.6`, with a
+    /// stable instance suffix if concurrent; bad: `b1-review`). Caller-asserted
+    /// and unverified; callers sharing an id share soft locks and can release
+    /// each other's.
     #[schemars(length(max = 16_384))]
     pub agent_id: String,
     /// Optional: the session to list. Omit it for this session; name one of
@@ -441,15 +421,11 @@ pub struct SaintsParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct StaleParams {
-    /// Id of the agent making this call. Use one stable id for the agent's
-    /// whole life, never one per call, task or topic (good: your model or
-    /// client id, such as `claude-opus-5-5` or `gpt-5.6`, with a stable
-    /// instance suffix such as `-worker-2` if several run at once; bad:
-    /// `b1-review`, `implement-m12`). Caller-asserted and unverified: work is
-    /// recorded under exactly the id you send, so a stable id keeps your
-    /// attribution whole. Agents sharing an id share soft locks and can
-    /// release each other's; concurrent agents that must keep out of each
-    /// other's edits need distinct stable ids.
+    /// Stable caller id: use one stable id for the agent's whole life, never
+    /// one per call, task or topic (good: `claude-opus-5-5`, `gpt-5.6`, with a
+    /// stable instance suffix if concurrent; bad: `b1-review`). Caller-asserted
+    /// and unverified; callers sharing an id share soft locks and can release
+    /// each other's.
     #[schemars(length(max = 16_384))]
     pub agent_id: String,
     /// Session or shared layer; omitted selects this session.
@@ -463,15 +439,11 @@ pub struct StaleParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct StatsParams {
-    /// Id of the agent making this call. Use one stable id for the agent's
-    /// whole life, never one per call, task or topic (good: your model or
-    /// client id, such as `claude-opus-5-5` or `gpt-5.6`, with a stable
-    /// instance suffix such as `-worker-2` if several run at once; bad:
-    /// `b1-review`, `implement-m12`). Caller-asserted and unverified: work is
-    /// recorded under exactly the id you send, so a stable id keeps your
-    /// attribution whole. Agents sharing an id share soft locks and can
-    /// release each other's; concurrent agents that must keep out of each
-    /// other's edits need distinct stable ids.
+    /// Stable caller id: use one stable id for the agent's whole life, never
+    /// one per call, task or topic (good: `claude-opus-5-5`, `gpt-5.6`, with a
+    /// stable instance suffix if concurrent; bad: `b1-review`). Caller-asserted
+    /// and unverified; callers sharing an id share soft locks and can release
+    /// each other's.
     #[schemars(length(max = 16_384))]
     pub agent_id: String,
     /// A write receipt id from a `lambo_derive` or `lambo_record_action` ack.
@@ -658,15 +630,11 @@ pub struct WireVector {
 #[derive(Default, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DeriveImageParams {
-    /// Id of the agent making this call. Use one stable id for the agent's
-    /// whole life, never one per call, task or topic (good: your model or
-    /// client id, such as `claude-opus-5-5` or `gpt-5.6`, with a stable
-    /// instance suffix such as `-worker-2` if several run at once; bad:
-    /// `b1-review`, `implement-m12`). Caller-asserted and unverified: work is
-    /// recorded under exactly the id you send, so a stable id keeps your
-    /// attribution whole. Agents sharing an id share soft locks and can
-    /// release each other's; concurrent agents that must keep out of each
-    /// other's edits need distinct stable ids.
+    /// Stable caller id: use one stable id for the agent's whole life, never
+    /// one per call, task or topic (good: `claude-opus-5-5`, `gpt-5.6`, with a
+    /// stable instance suffix if concurrent; bad: `b1-review`). Caller-asserted
+    /// and unverified; callers sharing an id share soft locks and can release
+    /// each other's.
     #[schemars(length(max = 16_384))]
     pub agent_id: String,
     /// What the image is, in words. It is the concept's text: keyword recall

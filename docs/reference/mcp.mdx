@@ -492,7 +492,7 @@ Continue when the receipt reports `applied` (or `applied_after_restart` after re
   "depends_on": ["writer lease rule"]}}
 ```
 
-Wait for this action's receipt too before inspecting its dependency. `lambo_inspect` accepts `"focus": "writer lease rule"`, and an exact-name recall or a question such as `what depends on writer lease rule` reaches the named identity. Recall hits expose up to three durable display names in normalized-key order.
+Wait for this action's receipt too before inspecting its dependency. `lambo_inspect` accepts `"focus": "writer lease rule"`, and an exact-name recall or a question such as `what depends on writer lease rule` reaches the named identity. Recall hits (including merged layered recalls) expose up to three durable display names in normalized-key order, both in the rendered context block (`names [...]`) and as an additive `hits[].names` array in `structuredContent`. `lambo_inspect` renders the same display names (up to three, in normalized-key order) as `names: [...]` in text and `focus.names` in `structuredContent` when the focus carries durable names.
 
 The same name works in a later derive's `concepts[].depends_on` or `concepts[].against`. Names are scoped to the addressed session; use `scope` for an authorized shared layer, with no cross-session edges. Repository-scoped paths must still resolve unambiguously.
 
@@ -714,9 +714,11 @@ learned and did, lambo_reserve before editing a shared concept, and lambo_inspec
 lambo_saints / lambo_stats to look around. A concept is one fact, stated atomically and
 short, such as a decision with its reason; it is not a log line or a paragraph, and
 activity goes to lambo_record_action. When a write rests on a ruling or decision recall
-showed you, cite it by its id (the 8 hex characters recall shows) in depends_on:
-lambo_record_action's, or the concept's on lambo_derive. When a write shows an existing
-concept to be wrong, name it the same way in against. Every tool takes your agent_id:
+showed you, cite it by its id (the 8 hex characters recall shows) or durable name in
+depends_on: lambo_record_action's, or the concept's on lambo_derive. Name standing rulings
+with a short kebab-case concepts[].name (e.g. writer-lease-ttl); omit it for observations
+or one-off facts. When a write shows an existing concept to be wrong, name it the same way
+in against. Every tool takes your agent_id:
 use one stable id for as long as you run, never one per call, task or topic: your model or client id
 (<your-model-id>), with a stable instance suffix if several of you run at once. It is
 caller-asserted and unverified. Work is recorded under it, so a stable id keeps

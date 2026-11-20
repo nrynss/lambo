@@ -1299,3 +1299,155 @@ fn possibly_superseded_is_snake_case_on_the_wire() {
         "\"possibly_superseded\""
     );
 }
+
+/// #146: durable display names survive layered merge in both `LayeredHit::names`
+/// and the rendered context block (`names [...]`), for primary and layer hits
+/// alike; unnamed hits render byte-identically to before.
+#[test]
+fn durable_names_survive_layered_merge() {
+    let mut lists = vec![
+        primary(&[kw("p1"), kw("p2")]),
+        layer(1, "general", 0.5, &[kw("g1")]),
+    ];
+    lists[0].recall.as_mut().unwrap().recall.detailed[0].names = vec!["primary-ruling".to_string()];
+    lists[1].recall.as_mut().unwrap().recall.detailed[0].names = vec!["global-ruling".to_string()];
+
+    let r = run(&lists, params(10));
+    assert_eq!(order(&r), ["lambo/p1", "lambo/p2", "general/g1"]);
+
+    let block = |i: usize| r.context.split("\n\n").nth(i).unwrap().to_string();
+    assert!(
+        block(0).ends_with(&format!(
+            "id {}, names [\"primary-ruling\"])",
+            short_id(nid(0, 0))
+        )),
+        "{}",
+        block(0)
+    );
+    assert_eq!(
+        block(1),
+        block_with_meta(&r.detail.hits[1], &[], &[], None).text
+    );
+    assert!(
+        block(2).ends_with(&format!(
+            "id {}, from general, names [\"global-ruling\"])",
+            short_id(nid(1, 0))
+        )),
+        "{}",
+        block(2)
+    );
+    assert_eq!(r.hits[0].names, vec!["primary-ruling"]);
+    assert!(r.hits[1].names.is_empty());
+    assert_eq!(r.hits[2].names, vec!["global-ruling"]);
+}
+
+/// #146: dedupe keeps durable names strictly scoped to the shown hit's session
+/// — a merged layer copy's names never leak onto an unnamed or named primary
+/// hit — and meta ordering stays `id <short>, also <skip>, names [...], also
+/// <copy> in <session>`.
+#[test]
+fn dedupe_keeps_durable_names_scoped_to_shown_session_in_meta_order() {
+    use crate::recall::redundancy::{RedundancySignal, RedundantSkip};
+    let skipped = RedundantSkip {
+        node_id: NodeId(Uuid::from_u64_pair(0x5c1b << 48, 2)),
+        signal: RedundancySignal::SameContent,
+    };
+    let mut lists = vec![
+        primary(&[kw("p1"), kw("p2")]),
+        layer(1, "general", 0.5, &[kw("p1"), kw("p2")]),
+    ];
+    // Primary p1 is unnamed; general's copy of p1 carries a layer-only name.
+    lists[1].recall.as_mut().unwrap().recall.detailed[0].names =
+        vec!["layer-only-name".to_string()];
+    // Primary p2 has a name and a redundancy skip; general's copy of p2 carries
+    // a distinct name that must never leak onto the primary hit.
+    lists[0].recall.as_mut().unwrap().recall.detailed[1].names = vec!["primary-name".to_string()];
+    lists[0].recall.as_mut().unwrap().recall.detailed[1].skipped_redundant = vec![skipped];
+    lists[1].recall.as_mut().unwrap().recall.detailed[1].names =
+        vec!["other-layer-name".to_string()];
+
+    let r = run(&lists, params(10));
+    assert_eq!(order(&r), ["lambo/p1", "lambo/p2"]);
+
+    let block = |i: usize| r.context.split("\n\n").nth(i).unwrap().to_string();
+    assert!(
+        r.hits[0].names.is_empty(),
+        "unnamed primary hit must not inherit layer copy names: {:?}",
+        r.hits[0].names
+    );
+    assert!(
+        !block(0).contains("layer-only-name"),
+        "layer copy name leaked into unnamed primary block: {}",
+        block(0)
+    );
+    assert!(
+        !block(0).contains("names ["),
+        "unnamed primary block should not render names meta: {}",
+        block(0)
+    );
+    assert!(
+        block(0).ends_with(&format!(
+            "id {}, also {} in general)",
+            short_id(nid(0, 0)),
+            short_id(nid(1, 0))
+        )),
+        "{}",
+        block(0)
+    );
+
+    assert_eq!(r.hits[1].names, vec!["primary-name"]);
+    assert!(
+        !block(1).contains("other-layer-name"),
+        "layer copy name leaked into named primary block: {}",
+        block(1)
+    );
+    assert!(
+        block(1).ends_with(&format!(
+            "id {}, also {}, names [\"primary-name\"], also {} in general)",
+            short_id(nid(0, 1)),
+            short_id(skipped.node_id),
+            short_id(nid(1, 1))
+        )),
+        "{}",
+        block(1)
+    );
+}
+
+/// #130 + #146: truncating a named layer first block preserves `names [...]`
+/// beside `from general` in the label and keeps `(scope general)` on the
+/// truncation marker within `max_tokens`.
+#[test]
+fn a_truncated_named_layer_first_block_keeps_names_and_scope() {
+    let long = "general ruling ".repeat(200);
+    let mut lists = [
+        primary(&[kw("p1")]),
+        layer(1, "general", 2.0, &[kw(long.trim())]),
+    ];
+    lists[1].recall.as_mut().unwrap().recall.detailed[0].names = vec!["global-ruling".to_string()];
+
+    let r = run(
+        &lists,
+        MergeParams {
+            max_tokens: 120,
+            ..params(10)
+        },
+    );
+    assert_eq!(r.hits[0].session, SessionId::new("general"));
+    assert_eq!(r.hits[0].names, vec!["global-ruling"]);
+    assert!(r.hits[0].truncated_in_context);
+    assert!(!r.hits[0].included_in_context);
+    assert!(!r.hits[1].included_in_context);
+    assert!(
+        r.context
+            .contains(", from general, names [\"global-ruling\"])"),
+        "{}",
+        r.context
+    );
+    let marker = format!(
+        "lambo_inspect {} (scope general) for the full concept]",
+        short_id(nid(1, 0))
+    );
+    assert!(r.context.ends_with(&marker), "{}", r.context);
+    assert!(r.detail.truncated_hit().is_some());
+    assert!(default_token_count(&r.context) <= 120);
+}

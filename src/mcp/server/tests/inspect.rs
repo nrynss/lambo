@@ -36,6 +36,14 @@ async fn inspect_finds_a_concept_and_reports_a_miss() {
         view.contains("  - survived 0 GC sweeps, needs at least 3\n"),
         "{view}"
     );
+    assert!(
+        structured["focus"].get("names").is_none(),
+        "unnamed inspect focus must omit names: {structured}"
+    );
+    assert!(
+        !view.contains("names:"),
+        "unnamed inspect view must omit names line: {view}"
+    );
     let admission = &structured["admission"];
     assert_eq!(admission["policy"], "Swarm", "{structured}");
     assert_eq!(admission["status"], "None", "{structured}");
@@ -101,6 +109,15 @@ async fn inspect_returns_the_concept_type_and_lookup_that_resolved_its_focus() {
         let result = hit.structured_content.unwrap();
         assert_eq!(result["focus"]["node_id"], id);
         assert_eq!(result["focus"]["concept_type"], "Constraint");
+        assert_eq!(result["focus"]["names"], json!(["writer lease rule"]));
+        assert!(
+            result["view"]
+                .as_str()
+                .unwrap()
+                .contains("names: [\"writer lease rule\"]\n"),
+            "inspect text should show durable names: {}",
+            result["view"]
+        );
         assert_eq!(
             result["focus"]["resolution"],
             json!({"kind": kind, "value": input.trim()})

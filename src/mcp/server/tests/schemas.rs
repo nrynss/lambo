@@ -838,6 +838,11 @@ async fn get_info_advertises_tools_and_names_the_session() {
         "instructions must say what a concept is: {instructions}"
     );
     assert!(
+        instructions.contains("or durable name in depends_on")
+            && instructions.contains("concepts[].name"),
+        "instructions must advertise durable names for standing rulings: {instructions}"
+    );
+    assert!(
         instructions.contains("use one stable id for as long as you run")
             && instructions.contains("never one per call, task or topic")
             && instructions.contains("<your-model-id>")

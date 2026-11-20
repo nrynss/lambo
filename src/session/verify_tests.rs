@@ -492,6 +492,7 @@ fn a_merged_copys_redundancy_skips_are_deduped_not_lost() {
         companion_of: Vec::new(),
         possibly_superseded_by: None,
         skipped_redundant: Vec::new(),
+        names: Vec::new(),
     };
     let before_recall = recall(vec![
         layered_hit("mixed", id(20), Vec::new()),

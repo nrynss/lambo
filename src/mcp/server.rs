@@ -518,9 +518,11 @@ impl ServerHandler for LamboServer {
                  and short, such as a decision with its reason; it is not a log line or a \
                  paragraph, and activity goes to lambo_record_action. When a write rests \
                  on a ruling or decision recall showed you, cite it by its id (the 8 hex \
-                 characters recall shows) in depends_on: lambo_record_action's, or the \
-                 concept's on lambo_derive. When a write shows an existing concept to be \
-                 wrong, name it the same way in against. Every tool takes \
+                 characters recall shows) or durable name in depends_on: \
+                 lambo_record_action's, or the concept's on lambo_derive. Name standing \
+                 rulings with a short kebab-case concepts[].name (e.g. writer-lease-ttl); \
+                 omit it for observations or one-off facts. When a write shows an existing \
+                 concept to be wrong, name it the same way in against. Every tool takes \
                  your agent_id: use one stable id for as long as you run, never one per \
                  call, task or topic: your model or client id (<your-model-id>), with a \
                  stable instance suffix if several of you run at once. It is \
