@@ -64,9 +64,9 @@ obligation: never block on an outage; fall back to `dev-diary/` and note it.
   something another agent built?"* while live provider state answers what exists now.
   On conflict, name it explicitly and update memory with `against`.
 - **Triage warnings (don't false-halt, never ignore real conflicts):**
-  - *Act immediately:* `⚠ Contradicted`, `⚠ Rests on contradicted`, `⚠ Possibly superseded`,
-    `Reserved by`, or recent-write conflict lines. Read the contradicting concept and
-    resolve stale dependents (`lambo_stale` when cleaning up).
+  - *Act immediately:* `⚠ Contradicted`, `⚠ Rests on a contradicted concept`,
+    `⚠ Possibly superseded`, `Reserved by`, or recent-write conflict lines. Read the
+    contradicting concept and list stale dependents with `lambo_stale` when cleaning up.
   - *Scope-check `⚑ Load-bearing pillar`:* Canonical-first ordering can surface
     incidental Canonical hits from unrelated subsystems. Treat `⚑` as **blocking only
     when your change modifies, removes, or breaks that concept's surface or resource** —
@@ -80,11 +80,11 @@ obligation: never block on an outage; fall back to `dev-diary/` and note it.
 - **Cite what you relied on:** Pass the 8-hex ID or durable name from recall in
   `depends_on` (on `lambo_derive` concepts or `lambo_record_action`). Both 8-hex IDs
   and durable names in `depends_on` and `against` must belong to the same target
-  session (`hits[].session` matches target).
+  session (when layered, `hits[].session` matches target).
 - **Contradict stale facts explicitly:** When new evidence invalidates a recalled
   concept, pass its 8-hex ID or durable name in `against` (same-session rule applies;
-  never both `depends_on` and `against` in one call, and never `against` a
-  `replacement_candidates` entry marked `newer`).
+  never both `depends_on` and `against` for the same concept in one call, and never
+  `against` a `replacement_candidates` entry marked `newer`).
 - **Name standing rulings durably (`concepts[].name`):** Give a 2–4 word lowercase
   kebab-case `<domain>-<subject>` name (no slashes; e.g. `single-writer-lease`,
   `vector-dim-authority`) **only** to settled `logic`/`constraint` rulings or shared
@@ -93,8 +93,10 @@ obligation: never block on an outage; fall back to `dev-diary/` and note it.
   Wait via `lambo_stats(receipt, wait_ms)` before citing a brand-new name in the same
   turn. Reference resolution differs by tool: `lambo_derive` refuses unknown
   references, whereas in `lambo_record_action.depends_on` unregistered text creates a
-  new `Resource` concept (deleted targets and retired alias IDs are still refused) —
-  only pass durable names already confirmed in recall or an `applied` receipt.
+  new `Entity` concept (or a `Resource` for path-like entries under `repo_scope`;
+  registered names whose target was deleted, and retired alias IDs, are still refused) —
+  only pass durable names already confirmed in recall or an `applied` (or
+  `applied_after_restart`) receipt.
 - **Scope & paths (dogfood):** Write Lambo repo decisions without `scope` (session
   `lambo`), using `repo_scope: "github.com/nrynss/lambo"` on new path-like `resource`
   concepts and actions (older unscoped concepts must still be cited by ID). Write
@@ -103,4 +105,5 @@ obligation: never block on an outage; fall back to `dev-diary/` and note it.
   semantics, quarantine/canonization rules, recall constants, and CI matrix rows.
 - **`agent_id`:** Use the exact model ID for this session (e.g. `claude-opus-5-5`,
   `gpt-6.2-sol`, `gemini-4-neon`; harness name only as fallback). Keep it identical
-  across every call — never invent per-task or per-role IDs.
+  across every call — never invent per-task or per-role IDs (add a stable instance
+  suffix if concurrent sessions must not share soft locks).

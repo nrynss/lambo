@@ -25,7 +25,8 @@ would break a load-bearing resource is caught before it happens.
     `lambo reserve`, `lambo inspect`, `lambo stats`.
   - **MCP** (preferred for tool-using agents): `lambo_recall`,
     `lambo_derive`, `lambo_record_action`, `lambo_reserve`, `lambo_inspect`,
-    `lambo_saints`, `lambo_stats`. Every MCP tool takes your `agent_id`.
+    `lambo_saints`, `lambo_stale` (read-only list of direct stale dependents),
+    `lambo_stats`. Every MCP tool takes your `agent_id`.
 - Writers (`derive`, `record-action`, `reserve`) hold the session's
   single-writer lease. Sequence your writes; do not run two CLI writers
   against one session. Readers are read-only and may run freely.
@@ -74,8 +75,8 @@ that modifies a shared resource), you MUST check what you are about to break:
    (a live collision notice: another agent is working in that resource),
    `High-risk modification` lines (a high-value node modified within the
    conflict window), active `Reserved by` soft locks, and `⚠ Contradicted` /
-   `⚠ Rests on contradicted` warnings (verify the newer contradicting concept
-   before relying on the older fact).
+   `⚠ Rests on a contradicted concept` warnings (verify the newer contradicting
+   concept before relying on the older fact).
 
 4. **Fail closed.** If recall refuses or errors — embedding-contract mismatch,
    store unreachable, vector leg refused — you MUST halt. An answer you cannot
@@ -125,9 +126,10 @@ dependencies, the protection is blind.
    `lambo names assign`).
 
 3. Writes are lease-held and exclusive; sequence them. Over CLI, a write waits
-   for flush before returning. Over MCP, writes apply in the background and
-   return a receipt id in the ack — pass that receipt to `lambo_stats` with
-   `wait_ms` if the very next read or citation must see the write immediately.
+   for flush before returning. Over MCP, `lambo_derive` and `lambo_record_action`
+   apply in the background and return a receipt id in the ack (`lambo_reserve` is
+   synchronous) — pass that receipt to `lambo_stats` with `wait_ms` if the very
+   next read or citation must see the write immediately.
 
 ---
 

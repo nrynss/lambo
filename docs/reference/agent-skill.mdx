@@ -58,16 +58,17 @@ own `AGENTS.md` does), add four habits on top of the pre-flight rule:
   memory as prior context (`spec → source → memory`); on conflict, record
   `against`.
 - **Cite by 8-hex ID or durable name:** Pass the 8-hex ID or durable name from
-  recall in `depends_on` or `against` so rulings earn real structural
-  dependents instead of plain-text alias nodes.
+  recall in `depends_on` (so rulings earn real structural dependents instead of
+  plain-text alias nodes) and in `against` (so contradictions bind unambiguously
+  to the refuted concept).
 - **Name standing rulings selectively:** Bind a short lowercase kebab-case
   `concepts[].name` (`<domain>-<subject>`, no slashes) only to settled `logic`
   or `constraint` rulings meant to be cited across PRs — never to
   `observation`s or file paths (names stay reserved permanently even after GC).
-- **Triage warnings by scope:** Always act on `⚠ Contradicted`, `⚠ Rests on
-  contradicted`, `⚠ Possibly superseded`, and active `Reserved by` / conflict
-  lines. For `⚑ Load-bearing pillar`, check whether the hit's surface is in
-  your edit scope before halting, then run `lambo_inspect` and name its
+- **Triage warnings by scope:** Always act on `⚠ Contradicted`, `⚠ Rests on a
+  contradicted concept`, `⚠ Possibly superseded`, and active `Reserved by` /
+  conflict lines. For `⚑ Load-bearing pillar`, check whether the hit's surface
+  is in your edit scope before halting, then run `lambo_inspect` and name its
   dependents.
 
 ## Why the rule is load-bearing
