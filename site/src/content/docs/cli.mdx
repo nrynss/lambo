@@ -648,11 +648,14 @@ Under a supervisor (launchd, systemd, Kubernetes), give the server more than 20 
 | `--bind <BIND>` | No | `127.0.0.1`. A non-loopback bind needs a credential: `--auth-token`, `LAMBO_AUTH_TOKEN`, a `[[web.credential]]` or an inherited `[[serve.credential]]`. |
 | `--auth-token <TOKEN>` | No | Bearer token that reads every served session. Loopback is unauthenticated by default. A non-loopback bind requires it, a `[[web.credential]]` or an inherited `[[serve.credential]]`, and fails closed without one. `LAMBO_AUTH_TOKEN` overrides it. The token must be printable ASCII with no leading or trailing whitespace, and at most 4096 bytes, as for `lambo serve`; otherwise the start exits `2`, never quoting the token. A token that starts with `-` must be given as `--auth-token=-abc`: after `--auth-token ` (with a space) anything that looks like a flag is refused with exit `2`, never taken as the token. From `--auth-token` on, an argument the command does not accept (the rest of an unquoted token with a space, say) and an invalid value of a flag it accepts exit `2` without being shown. A request carrying two `Authorization` headers gets `401`. |
 | `--allowed-host <HOST>` | No | Repeatable. A `Host` the unauthenticated window also answers, beside `localhost`, `127.0.0.1` and `[::1]`. A name, or `name:port` to accept only that port. Ignored once any credential is configured. |
+| `--discover-sessions` | No | Off. Also serve every live, non-erased session in the store, including sessions created after startup, to callers that may already read every served session (no credential on loopback, `LAMBO_AUTH_TOKEN`, a `[[web.credential]]` with `"*"`). Same as `[web] discover_sessions = true`; see [Session discovery](/lambo/config/#session-discovery). |
 
 ```bash
 lambo serve-web --config lambo.toml --session demo
 lambo serve-web --config lambo.toml --session lambo --session rustydocs
 ```
+
+**New sessions without a restart.** With `--discover-sessions` (or `[web] discover_sessions = true`), a window on a store that holds several sessions also serves every live session in it at `/s/<session>/`, including one an agent creates after the window started, and on loopback lists them in the session picker. A caller with an exact-name or `session_prefix` credential, or an inherited `[[serve.credential]]`, reads only what it reads without the flag. Erased sessions and names outside `[A-Za-z0-9._:-]` are never served or listed. You still name one `--session` (or `[web] sessions`) as the default served at `/`. See [Session discovery](/lambo/config/#session-discovery).
 
 The window reads each session on its own and never merges a session with its `[serve] layers`; a layered answer is `lambo serve`'s (see [Layered recall](#layered-recall)).
 

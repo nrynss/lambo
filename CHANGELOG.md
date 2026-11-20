@@ -576,6 +576,20 @@
   step and proves that, under max fusion, the named concept's phase-1 fused
   score and its phase-1 rank can no longer fall, and that other nodes' leg
   scores are untouched (RRF fusion is not modelled).
+- `lambo serve-web` gains opt-in store-wide session discovery (#276):
+  `[web] discover_sessions = true` or `--discover-sessions` (default off, so
+  existing configs serve exactly their allowlist). On, callers whose scope
+  already covers every served session (the unauthenticated loopback window,
+  `LAMBO_AUTH_TOKEN` / `--auth-token`, a `[[web.credential]]` `"*"`) also read
+  every live session in the store at `/s/<session>/`, including sessions
+  created after startup, without editing `lambo.toml` or restarting.
+  Exact-name, `session_prefix` and inherited `[[serve.credential]]` scopes are
+  unchanged. Each request probes existence and erasure before a lazy,
+  `max_loaded_sessions`-bounded load, so erased (`lambo:erased`) and unknown
+  sessions keep the uniform `404`; names outside the addressed-id charset are
+  skipped. On a loopback bind discovery also registers `GET /api/sessions`,
+  which lists the store's sessions (from `GraphStore::store_health`) after the
+  served ones; beyond loopback the listing still needs `list_sessions`.
 - Durable display names now surface through layered recall, `lambo_inspect`,
   and MCP tool schemas (#285). Layered recall preserves `LayeredHit::names`
   across merged and single-session recalls, emits `names [...]` in rendered
