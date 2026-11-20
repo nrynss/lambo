@@ -90,7 +90,10 @@ def _is_int(val: Any) -> bool:
 def _finite_number(val: Any) -> float | None:
     """Convert a finite int/float (excluding bool) to float, else None."""
     if isinstance(val, (int, float)) and not isinstance(val, bool):
-        f = float(val)
+        try:
+            f = float(val)
+        except OverflowError:
+            return None
         if math.isfinite(f):
             return f
     return None
@@ -538,23 +541,29 @@ class ParsedLedger:
     unknown_version: list[tuple[int, Any]] = field(default_factory=list)
 
     def provenance(self) -> dict[str, Any]:
-        prev_uptime_by_session: dict[str, float] = {}
+        # sess_key -> (ts_dt, uptime_secs) from the most recent heartbeat with uptime.
+        prev_uptime_by_session: dict[str, tuple[dt.datetime | None, float]] = {}
+        prev_binary_by_session: dict[str, tuple[str, str]] = {}
         # sess_key -> [banked_dropped, run_max_dropped]
         dropped_by_session: dict[str, list[int]] = {}
         latest_queued_by_session: dict[str, int] = {}
         for hb in sorted(self.heartbeats, key=_ts_key):
             sess_key = _heartbeat_session_key(hb)
+            ts_dt = _parse_record_ts(hb)
             uptime = _heartbeat_uptime(hb)
-            prev_uptime = prev_uptime_by_session.get(sess_key)
-            # Strict `<` (not `<=`) so two heartbeats emitted within the same
-            # second with equal `uptime_secs` do not trigger a false restart.
-            restarted = (
-                prev_uptime is not None
-                and uptime is not None
-                and uptime < prev_uptime
+            binary = _heartbeat_binary(hb)
+            prev_pair = prev_uptime_by_session.get(sess_key)
+            prev_ts = prev_pair[0] if prev_pair is not None else None
+            prev_uptime = prev_pair[1] if prev_pair is not None else None
+            prev_binary = prev_binary_by_session.get(sess_key)
+
+            restarted, _ = _is_restart_boundary(
+                prev_ts, prev_uptime, prev_binary, ts_dt, uptime, binary
             )
             if uptime is not None:
-                prev_uptime_by_session[sess_key] = uptime
+                prev_uptime_by_session[sess_key] = (ts_dt, uptime)
+            if binary is not None:
+                prev_binary_by_session[sess_key] = binary
 
             if restarted and sess_key in dropped_by_session:
                 state = dropped_by_session[sess_key]
@@ -615,18 +624,20 @@ def load_ledger(paths: Iterable[str]) -> ParsedLedger:
     for path in paths:
         out.paths.append(path)
         try:
-            fh = open(path, encoding="utf-8")
+            fh = open(path, "rb")
         except OSError as exc:
             raise LedgerDriftError(f"cannot open ledger {path!r}: {exc}") from exc
         with fh:
-            for lineno, raw in enumerate(fh, start=1):
-                raw = raw.strip()
-                if not raw:
+            for lineno, raw_bytes in enumerate(fh, start=1):
+                raw_bytes = raw_bytes.strip()
+                if not raw_bytes:
                     continue
                 try:
+                    raw = raw_bytes.decode("utf-8")
                     rec = json.loads(raw)
-                except json.JSONDecodeError:
-                    out.unparseable.append((lineno, raw[:80]))
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    preview = raw_bytes[:80].decode("utf-8", errors="replace")
+                    out.unparseable.append((lineno, preview))
                     continue
                 if not isinstance(rec, dict):
                     out.unparseable.append((lineno, raw[:80]))
@@ -636,8 +647,10 @@ def load_ledger(paths: Iterable[str]) -> ParsedLedger:
                     out.versions.add(version)
                     if version not in KNOWN_VERSIONS:
                         out.unknown_version.append((lineno, version))
+                        continue
                 else:
                     out.unknown_version.append((lineno, version))
+                    continue
                 kind = rec.get("kind")
                 if kind == "call":
                     out.calls.append(rec)
@@ -659,7 +672,7 @@ def load_ledger(paths: Iterable[str]) -> ParsedLedger:
         + len(out.leases)
         + len(out.unknown)
     )
-    if total == 0 and not out.unparseable:
+    if total == 0 and not out.unparseable and not out.unknown_version:
         raise LedgerDriftError(f"no ledger lines in {out.paths}")
     return out
 
@@ -698,54 +711,122 @@ def _heartbeat_uptime(hb: dict[str, Any]) -> float | None:
     return None
 
 
+_RESTART_ELAPSED_TOLERANCE_SECS = 2.0
+
+
+def _parse_record_ts(record: dict[str, Any]) -> dt.datetime | None:
+    ts_raw = record.get("ts")
+    if not isinstance(ts_raw, str):
+        return None
+    try:
+        return parse_ts(ts_raw)
+    except ValueError:
+        return None
+
+
+def _heartbeat_binary(hb: dict[str, Any]) -> tuple[str, str] | None:
+    version = hb.get("version")
+    git_sha = hb.get("git_sha")
+    if isinstance(version, str) and version and isinstance(git_sha, str) and git_sha:
+        return (version, git_sha)
+    return None
+
+
+def _is_restart_boundary(
+    prev_ts: dt.datetime | None,
+    prev_uptime: float | None,
+    prev_binary: tuple[str, str] | None,
+    ts_dt: dt.datetime | None,
+    uptime: float | None,
+    binary: tuple[str, str] | None,
+) -> tuple[bool, str | None]:
+    """Shared process-restart boundary detector for heartbeat streams.
+
+    Detects restarts via strict uptime reset, binary identity change, or
+    wall-clock elapsed time exceeding uptime growth by more than
+    ``_RESTART_ELAPSED_TOLERANCE_SECS`` (allowing for integer ``uptime_secs``
+    truncation and minor scheduling skew, while catching restarts across long
+    outages where the new process's first observed uptime exceeds the old one).
+    """
+    if prev_uptime is not None and uptime is not None and uptime < prev_uptime:
+        return True, "uptime_reset"
+    if prev_binary is not None and binary is not None and binary != prev_binary:
+        return True, "binary_change"
+    if (
+        prev_ts is not None
+        and ts_dt is not None
+        and prev_uptime is not None
+        and uptime is not None
+    ):
+        elapsed = (ts_dt - prev_ts).total_seconds()
+        uptime_growth = uptime - prev_uptime
+        if elapsed - uptime_growth > _RESTART_ELAPSED_TOLERANCE_SECS:
+            return True, "uptime_gap"
+    return False, None
+
+
 def _session_of_heartbeat(hb: dict[str, Any]) -> str:
     key = _heartbeat_session_key(hb)
     return "default" if key == "\x00unknown" else key
+
+
+def _contract_display(contract: str, contract_epoch: int) -> str:
+    return f"{contract}#{contract_epoch}" if contract_epoch > 0 else contract
 
 
 @dataclass(frozen=True)
 class _SessionContracts:
     times: list[dt.datetime]
     contracts: list[str]
+    epochs: list[int]
 
 
 def _build_contract_timeline(
     heartbeats: list[dict[str, Any]],
     startups: Iterable[dict[str, Any]] = (),
+    leases: Iterable[dict[str, Any]] = (),
 ) -> tuple[dict[str, _SessionContracts], str | None]:
-    """Per-session O(log H) contract lookup timeline from heartbeats and startups.
+    """Per-session O(log K) contract timeline with contract epochs and unattributed gaps.
 
-    Consecutive identical contracts are collapsed. When a heartbeat reports a
-    new contract after a prior heartbeat for the same session, the transition
-    is anchored at the restarted process's start time (matching session
-    ``startup`` marker or ``hb_ts - uptime_secs``, never earlier than the
-    previous heartbeat) so calls arriving after a restart+swap and before the
-    new process's first heartbeat map to the new contract.
+    - Consecutive identical contracts share the same ``contract_epoch``.
+    - Each contract change advances ``contract_epoch`` so returning to an
+      earlier contract (e.g. ``A -> B -> A``) starts a fresh detector.
+    - Startup lines carry no process identity, so proximity to a ``startup``
+      marker is never used to prove which process served a call. Instead:
+      - When ``uptime_secs`` proves the new process booted strictly after the
+        prior contract heartbeat and no lease contention occurred in the
+        transition window, the 1-second integer-truncation ambiguity band
+        ``[uptime_start - 1s, uptime_start)`` is marked ``"unknown"``
+        (unattributed) and the new contract begins at ``uptime_start``.
+      - When a lease conflict occurred during that window, or when
+        ``uptime_secs`` is missing/overflowed or does not prove a restart
+        after the prior heartbeat, the entire ambiguous transition interval
+        up to the new heartbeat is marked ``"unknown"`` (unattributed).
     """
-    startups_by_session: dict[str, list[dt.datetime]] = {}
-    for st in sorted(startups, key=_ts_key):
-        ts_raw = st.get("ts")
-        sess = st.get("session")
-        if not isinstance(ts_raw, str) or not isinstance(sess, str) or not sess:
+    del startups  # startup lines carry no process identity; kept in signature for compatibility.
+
+    leases_by_session: dict[str, list[dt.datetime]] = {}
+    unscoped_leases: list[dt.datetime] = []
+    for le in sorted(leases, key=_ts_key):
+        le_dt = _parse_record_ts(le)
+        if le_dt is None:
             continue
-        try:
-            st_dt = parse_ts(ts_raw)
-        except ValueError:
-            continue
-        startups_by_session.setdefault(sess, []).append(st_dt)
+        sess = le.get("session")
+        if isinstance(sess, str) and sess:
+            leases_by_session.setdefault(sess, []).append(le_dt)
+        else:
+            unscoped_leases.append(le_dt)
 
     times_by_session: dict[str, list[dt.datetime]] = {}
     contracts_by_session: dict[str, list[str]] = {}
+    epochs_by_session: dict[str, list[int]] = {}
+    current_epoch_by_session: dict[str, int] = {}
     last_contract_hb_ts: dict[str, dt.datetime] = {}
     session_names: set[str] = set()
 
     for hb in sorted(heartbeats, key=_ts_key):
-        ts_raw = hb.get("ts")
-        if not isinstance(ts_raw, str):
-            continue
-        try:
-            ts_dt = parse_ts(ts_raw)
-        except ValueError:
+        ts_dt = _parse_record_ts(hb)
+        if ts_dt is None:
             continue
         sess = _session_of_heartbeat(hb)
         session_names.add(sess)
@@ -758,14 +839,24 @@ def _build_contract_timeline(
         prev_hb_ts = last_contract_hb_ts.get(sess)
         times = times_by_session.setdefault(sess, [])
         contracts = contracts_by_session.setdefault(sess, [])
+        epochs = epochs_by_session.setdefault(sess, [])
         if contracts and contracts[-1] == contract:
             last_contract_hb_ts[sess] = ts_dt
             continue
 
-        effective_ts = ts_dt
-        if prev_hb_ts is not None and contracts:
-            sess_startups = startups_by_session.get(sess, [])
-            startups_in_gap = [t for t in sess_startups if prev_hb_ts < t <= ts_dt]
+        if not contracts:
+            current_epoch_by_session[sess] = 0
+            times.append(ts_dt)
+            contracts.append(contract)
+            epochs.append(0)
+            last_contract_hb_ts[sess] = ts_dt
+            continue
+
+        next_epoch = current_epoch_by_session[sess] + 1
+        current_epoch_by_session[sess] = next_epoch
+
+        if prev_hb_ts is not None and prev_hb_ts < ts_dt:
+            after_prev = prev_hb_ts + dt.timedelta(microseconds=1)
             uptime = _heartbeat_uptime(hb)
             uptime_start: dt.datetime | None = None
             if uptime is not None and uptime <= 1e9:
@@ -773,27 +864,46 @@ def _build_contract_timeline(
                     uptime_start = ts_dt - dt.timedelta(seconds=uptime)
                 except OverflowError:
                     uptime_start = None
-            if uptime_start is not None and uptime_start > prev_hb_ts:
-                matched_startup = None
-                best_err = dt.timedelta(seconds=5)
-                for st_dt in startups_in_gap:
-                    err = abs(st_dt - uptime_start)
-                    if err <= best_err:
-                        best_err = err
-                        matched_startup = st_dt
-                effective_ts = matched_startup if matched_startup is not None else uptime_start
-            elif uptime is None and startups_in_gap:
-                effective_ts = startups_in_gap[-1]
-            effective_ts = min(ts_dt, max(prev_hb_ts, effective_ts))
-            if times and effective_ts < times[-1]:
-                effective_ts = times[-1]
 
-        times.append(effective_ts)
-        contracts.append(contract)
+            if uptime_start is not None and uptime_start > prev_hb_ts:
+                low_bound = uptime_start - dt.timedelta(seconds=1)
+                ambig_start = max(after_prev, low_bound, times[-1])
+                # Only lease contention after the new process could have booted
+                # (lt >= low_bound) makes [uptime_start, ts_dt) ambiguous; an
+                # earlier lease refusal under the old contract does not.
+                sess_leases = leases_by_session.get(sess, [])
+                has_lease_conflict = any(
+                    prev_hb_ts < lt <= ts_dt and lt >= low_bound for lt in sess_leases
+                ) or any(
+                    prev_hb_ts < lt <= ts_dt and lt >= low_bound for lt in unscoped_leases
+                )
+                confirmed_start = ts_dt if has_lease_conflict else min(ts_dt, uptime_start)
+            else:
+                ambig_start = max(after_prev, times[-1])
+                confirmed_start = ts_dt
+
+            confirmed_start = max(confirmed_start, times[-1])
+            if ambig_start < confirmed_start:
+                times.append(ambig_start)
+                contracts.append("unknown")
+                epochs.append(next_epoch)
+            times.append(confirmed_start)
+            contracts.append(contract)
+            epochs.append(next_epoch)
+        else:
+            effective_ts = max(ts_dt, times[-1])
+            times.append(effective_ts)
+            contracts.append(contract)
+            epochs.append(next_epoch)
+
         last_contract_hb_ts[sess] = ts_dt
 
     timeline = {
-        sess: _SessionContracts(times=times_by_session[sess], contracts=contracts_by_session[sess])
+        sess: _SessionContracts(
+            times=times_by_session[sess],
+            contracts=contracts_by_session[sess],
+            epochs=epochs_by_session[sess],
+        )
         for sess in times_by_session
     }
     single_hb_session = next(iter(session_names)) if len(session_names) == 1 else None
@@ -804,22 +914,23 @@ def _lookup_contract(
     timeline: dict[str, _SessionContracts],
     session: str,
     ts_dt: dt.datetime,
-) -> str:
+) -> tuple[str, int]:
     entry = timeline.get(session)
     if entry is None or not entry.times:
-        return "unknown"
+        return "unknown", 0
     # Most recent contract transition at or before ts_dt; if call precedes first
     # heartbeat, fall back to the earliest contract recorded for that session.
     idx = bisect.bisect_right(entry.times, ts_dt) - 1
     if idx < 0:
-        return entry.contracts[0]
-    return entry.contracts[idx]
+        return entry.contracts[0], entry.epochs[0]
+    return entry.contracts[idx], entry.epochs[idx]
 
 
 def extract_operational_events(ledger: ParsedLedger) -> list[OperationalEvent]:
     """Extract restarts, binary upgrades, contract swaps, and lease/startup markers."""
     events: list[OperationalEvent] = []
-    prev_uptime: dict[str, float] = {}
+    # sess -> (ts_dt, uptime_secs) from the most recent heartbeat with uptime.
+    prev_uptime: dict[str, tuple[dt.datetime, float]] = {}
     prev_binary: dict[str, tuple[str, str]] = {}
     prev_contract: dict[str, str] = {}
 
@@ -833,37 +944,49 @@ def extract_operational_events(ledger: ParsedLedger) -> list[OperationalEvent]:
             continue
         sess = _session_of_heartbeat(hb)
         uptime = _heartbeat_uptime(hb)
-        if uptime is not None:
-            # Strict `<` (not `<=`) matches ParsedLedger.provenance() so
-            # same-second heartbeats with equal `uptime_secs` do not emit
-            # a false restart event.
-            if sess in prev_uptime and uptime < prev_uptime[sess]:
-                events.append(
-                    OperationalEvent(
-                        ts=ts_raw,
-                        ts_dt=ts_dt,
-                        session=sess,
-                        kind="restart",
-                        detail={"prev_uptime_secs": prev_uptime[sess], "uptime_secs": uptime},
-                    )
-                )
-            prev_uptime[sess] = uptime
+        binary = _heartbeat_binary(hb)
+        prev_pair = prev_uptime.get(sess)
+        prev_ts = prev_pair[0] if prev_pair is not None else None
+        prev_up = prev_pair[1] if prev_pair is not None else None
+        prev_bin = prev_binary.get(sess)
 
-        binary = (str(hb.get("version", "?")), str(hb.get("git_sha", "?")))
-        if sess in prev_binary and binary != prev_binary[sess]:
+        restarted, restart_reason = _is_restart_boundary(
+            prev_ts, prev_up, prev_bin, ts_dt, uptime, binary
+        )
+        if restarted:
+            detail: dict[str, Any] = {"reason": restart_reason}
+            if prev_up is not None and uptime is not None:
+                detail["prev_uptime_secs"] = prev_up
+                detail["uptime_secs"] = uptime
+            if prev_ts is not None and restart_reason == "uptime_gap":
+                detail["elapsed_secs"] = round((ts_dt - prev_ts).total_seconds(), 3)
             events.append(
                 OperationalEvent(
                     ts=ts_raw,
                     ts_dt=ts_dt,
                     session=sess,
-                    kind="binary_change",
-                    detail={
-                        "from": f"{prev_binary[sess][0]}@{prev_binary[sess][1]}",
-                        "to": f"{binary[0]}@{binary[1]}",
-                    },
+                    kind="restart",
+                    detail=detail,
                 )
             )
-        prev_binary[sess] = binary
+        if uptime is not None:
+            prev_uptime[sess] = (ts_dt, uptime)
+
+        if binary is not None:
+            if prev_bin is not None and binary != prev_bin:
+                events.append(
+                    OperationalEvent(
+                        ts=ts_raw,
+                        ts_dt=ts_dt,
+                        session=sess,
+                        kind="binary_change",
+                        detail={
+                            "from": f"{prev_bin[0]}@{prev_bin[1]}",
+                            "to": f"{binary[0]}@{binary[1]}",
+                        },
+                    )
+                )
+            prev_binary[sess] = binary
 
         stats = hb.get("stats") if isinstance(hb.get("stats"), dict) else {}
         contract = _format_contract(stats.get("embedding_contract"))
@@ -1080,17 +1203,20 @@ class StreamKey:
     contract: str
     query_class: str
     stream: str
+    contract_epoch: int = 0
 
-    def to_dict(self) -> dict[str, str]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "session": self.session,
             "contract": self.contract,
+            "contract_epoch": self.contract_epoch,
             "query_class": self.query_class,
             "stream": self.stream,
         }
 
     def label(self) -> str:
-        return f"{self.session} | {self.contract} | {self.query_class} | {self.stream}"
+        c = _contract_display(self.contract, self.contract_epoch)
+        return f"{self.session} | {c} | {self.query_class} | {self.stream}"
 
 
 def extract_streams(
@@ -1098,9 +1224,9 @@ def extract_streams(
     *,
     by_query_class: bool = True,
 ) -> dict[StreamKey, list[Observation]]:
-    """Extract time-ordered scalar streams per ``(session, contract, query_class, stream)``."""
+    """Extract time-ordered scalar streams per ``(session, contract, epoch, query_class, stream)``."""
     contract_timeline, single_hb_session = _build_contract_timeline(
-        ledger.heartbeats, ledger.startups
+        ledger.heartbeats, ledger.startups, ledger.leases
     )
     completions = _completions_by_receipt(ledger.completions)
     streams: dict[StreamKey, list[Observation]] = {}
@@ -1108,6 +1234,7 @@ def extract_streams(
     def push(
         session: str,
         contract: str,
+        contract_epoch: int,
         query_class: str,
         stream: str,
         ts: str,
@@ -1116,7 +1243,7 @@ def extract_streams(
     ) -> None:
         if math.isnan(value) or math.isinf(value):
             return
-        key = StreamKey(session, contract, query_class, stream)
+        key = StreamKey(session, contract, query_class, stream, contract_epoch)
         streams.setdefault(key, []).append(Observation(ts=ts, ts_dt=ts_dt, value=value))
 
     for call in sorted(ledger.calls, key=_ts_key):
@@ -1131,7 +1258,7 @@ def extract_streams(
             continue
 
         sess = _target_session(call, single_hb_session)
-        contract = _lookup_contract(contract_timeline, sess, ts_dt)
+        contract, contract_epoch = _lookup_contract(contract_timeline, sess, ts_dt)
         tool = call.get("tool")
 
         if tool == "lambo_recall":
@@ -1152,25 +1279,53 @@ def extract_streams(
                     if s is not None
                 ]
                 if scores:
-                    push(sess, contract, qclass, "top_fused", ts_raw, ts_dt, max(scores))
+                    push(
+                        sess,
+                        contract,
+                        contract_epoch,
+                        qclass,
+                        "top_fused",
+                        ts_raw,
+                        ts_dt,
+                        max(scores),
+                    )
 
             if top_bm25 is not None:
                 bm25_stream = "top_bm25" if has_top_legs else "top_bm25_legacy"
-                push(sess, contract, qclass, bm25_stream, ts_raw, ts_dt, top_bm25)
+                push(sess, contract, contract_epoch, qclass, bm25_stream, ts_raw, ts_dt, top_bm25)
             if top_vec is not None:
-                push(sess, contract, qclass, "top_vector_cosine", ts_raw, ts_dt, top_vec)
+                push(
+                    sess,
+                    contract,
+                    contract_epoch,
+                    qclass,
+                    "top_vector_cosine",
+                    ts_raw,
+                    ts_dt,
+                    top_vec,
+                )
 
             conf = call.get("confidence")
             if isinstance(conf, dict):
                 cval = _finite_number(conf.get("value"))
                 basis = conf.get("basis")
                 if cval is not None and isinstance(basis, str) and basis:
-                    push(sess, contract, qclass, f"confidence:{basis}", ts_raw, ts_dt, cval)
+                    push(
+                        sess,
+                        contract,
+                        contract_epoch,
+                        qclass,
+                        f"confidence:{basis}",
+                        ts_raw,
+                        ts_dt,
+                        cval,
+                    )
 
             if isinstance(call.get("abstained"), bool):
                 push(
                     sess,
                     contract,
+                    contract_epoch,
                     qclass,
                     "abstained",
                     ts_raw,
@@ -1180,12 +1335,23 @@ def extract_streams(
 
             hit_count = call.get("hit_count")
             if _is_int(hit_count) and hit_count >= 0:
-                push(sess, contract, qclass, "hit_count", ts_raw, ts_dt, float(hit_count))
+                hc = _finite_number(hit_count)
+                if hc is not None:
+                    push(sess, contract, contract_epoch, qclass, "hit_count", ts_raw, ts_dt, hc)
 
         elif tool == "lambo_derive":
             rate = _derive_semantic_merged_rate(call, sess, completions)
             if rate is not None:
-                push(sess, contract, "derive", "semantic_merged_rate", ts_raw, ts_dt, rate)
+                push(
+                    sess,
+                    contract,
+                    contract_epoch,
+                    "derive",
+                    "semantic_merged_rate",
+                    ts_raw,
+                    ts_dt,
+                    rate,
+                )
 
     return streams
 
@@ -1367,7 +1533,10 @@ def analyze_ledger(
     stream_reports: list[dict[str, Any]] = []
     alarms: list[dict[str, Any]] = []
 
-    for key in sorted(streams.keys(), key=lambda k: (k.session, k.contract, k.query_class, k.stream)):
+    for key in sorted(
+        streams.keys(),
+        key=lambda k: (k.session, k.contract_epoch, k.contract, k.query_class, k.stream),
+    ):
         raw_obs = streams[key]
         obs, inject_start = _apply_injection(key.stream, raw_obs, normalized_injection)
         values = [o.value for o in obs]
@@ -1472,7 +1641,7 @@ def analyze_ledger(
         "config": {
             "method": "online_sleepy_jumper_conformal_martingale",
             "threshold": threshold,
-            "ville_false_alarm_bound": round(1.0 / threshold, 6),
+            "ville_false_alarm_bound": 1.0 / threshold,
             "direction": direction,
             "by_query_class": by_query_class,
             "min_points": min_points,
@@ -1540,9 +1709,11 @@ def format_text(report: dict[str, Any]) -> str:
         lines.append(f"   dropped:   0 (but {queued} line(s) still queued at last heartbeat)")
     else:
         lines.append("   dropped:   0")
+    bound = cfg["ville_false_alarm_bound"]
+    bound_str = f"{bound:.2e}" if 0 < bound < 1e-4 else f"{bound:.4g}"
     lines.append(
         f"   detector:  threshold M >= {cfg['threshold']:g} "
-        f"(Ville bound <= {cfg['ville_false_alarm_bound']:.4g} per stream), "
+        f"(Ville bound <= {bound_str} per stream), "
         f"direction={cfg['direction']}, query_class={cfg['by_query_class']}, "
         f"seed={cfg['seed']}"
     )
@@ -1560,8 +1731,9 @@ def format_text(report: dict[str, Any]) -> str:
     else:
         lines.append(f"Alarms ({len(alarms)}):")
         for a in alarms:
+            ac = _contract_display(a["contract"], a.get("contract_epoch", 0))
             lines.append(
-                f"  - [{a['direction']}] {a['session']} | {a['contract']} | "
+                f"  - [{a['direction']}] {a['session']} | {ac} | "
                 f"{a['query_class']} | {a['stream']}"
             )
             lines.append(
@@ -1605,16 +1777,17 @@ def format_text(report: dict[str, Any]) -> str:
     lines.append("")
     lines.append(f"Streams ({len(report['streams'])}):")
     for s in report["streams"]:
+        sc = _contract_display(s["contract"], s.get("contract_epoch", 0))
         if not s["evaluated"]:
             lines.append(
-                f"  {s['session']} | {s['contract']} | {s['query_class']} | {s['stream']}: "
+                f"  {s['session']} | {sc} | {s['query_class']} | {s['stream']}: "
                 f"n={s['n']} (skipped: {s['reason']})"
             )
         else:
             flag = " ALARM" if s["alarm"] else ""
             sm = s["summary"]
             lines.append(
-                f"  {s['session']} | {s['contract']} | {s['query_class']} | {s['stream']}: "
+                f"  {s['session']} | {sc} | {s['query_class']} | {s['stream']}: "
                 f"n={s['n']} median={sm['median']} mean={sm['mean']} "
                 f"peak_log10_m={s['peak_log10_m']:.2f}{flag}"
             )

@@ -1810,7 +1810,7 @@ class LedgerDriftEndToEndTests(unittest.TestCase):
             },
             {
                 "v": 1, "ts": "2026-11-19T10:02:00Z", "kind": "stats",
-                "session": "sess-a", "uptime_secs": 20, "version": "0.13.0", "git_sha": "aaa",
+                "session": "sess-a", "uptime_secs": 70, "version": "0.13.0", "git_sha": "aaa",
                 "stats": {"session": "sess-a", "ledger_dropped_lines": 3, "ledger_queued_lines": 1},
             },
             # sess-b max dropped=2, latest queued=4.
@@ -1819,9 +1819,19 @@ class LedgerDriftEndToEndTests(unittest.TestCase):
                 "session": "sess-b", "uptime_secs": 10, "version": "0.13.0", "git_sha": "aaa",
                 "stats": {"session": "sess-b", "ledger_dropped_lines": 2, "ledger_queued_lines": 4},
             },
-            # Booleans must be rejected for v, dropped/queued, dim, hit_count, etc.
+            # Booleans must be rejected for v (not dispatched to v1) and inside v1 payloads.
             {
                 "v": True, "ts": "2026-11-19T10:04:00Z", "kind": "stats",
+                "session": "sess-bool-v", "uptime_secs": True, "version": "0.13.0", "git_sha": "aaa",
+                "stats": {
+                    "session": "sess-bool-v",
+                    "embedding_contract": {"kind": "bge_m3", "model": None, "dim": True},
+                    "ledger_dropped_lines": 99,
+                    "ledger_queued_lines": 99,
+                },
+            },
+            {
+                "v": 1, "ts": "2026-11-19T10:04:30Z", "kind": "stats",
                 "session": "sess-bool", "uptime_secs": True, "version": "0.13.0", "git_sha": "aaa",
                 "stats": {
                     "session": "sess-bool",
@@ -1940,9 +1950,11 @@ class LedgerDriftEndToEndTests(unittest.TestCase):
         ]
         ledger = ld.load_ledger([str(self._write_ledger(records))])
         streams = ld.extract_streams(ledger)
-        old_obs = streams[ld.StreamKey("proj-a", "bge_m3/old/1024", "hybrid", "top_vector_cosine")]
+        old_obs = streams[
+            ld.StreamKey("proj-a", "bge_m3/old/1024", "hybrid", "top_vector_cosine", 0)
+        ]
         new_obs = streams[
-            ld.StreamKey("proj-a", "embeddinggemma2/new/768", "hybrid", "top_vector_cosine")
+            ld.StreamKey("proj-a", "embeddinggemma2/new/768", "hybrid", "top_vector_cosine", 1)
         ]
         self.assertEqual([o.value for o in old_obs], [0.6])
         self.assertEqual([o.value for o in new_obs], [0.9])
@@ -1955,7 +1967,7 @@ class LedgerDriftEndToEndTests(unittest.TestCase):
             [
                 o.value
                 for o in streams_b[
-                    ld.StreamKey("proj-a", "bge_m3/old/1024", "hybrid", "top_vector_cosine")
+                    ld.StreamKey("proj-a", "bge_m3/old/1024", "hybrid", "top_vector_cosine", 0)
                 ]
             ],
             [0.6],
@@ -1964,7 +1976,7 @@ class LedgerDriftEndToEndTests(unittest.TestCase):
             [
                 o.value
                 for o in streams_b[
-                    ld.StreamKey("proj-a", "embeddinggemma2/new/768", "hybrid", "top_vector_cosine")
+                    ld.StreamKey("proj-a", "embeddinggemma2/new/768", "hybrid", "top_vector_cosine", 1)
                 ]
             ],
             [0.9],
@@ -2109,7 +2121,7 @@ class LedgerDriftEndToEndTests(unittest.TestCase):
             [
                 o.value
                 for o in streams_null[
-                    ld.StreamKey("proj-a", "bge_m3/old/1024", "hybrid", "top_vector_cosine")
+                    ld.StreamKey("proj-a", "bge_m3/old/1024", "hybrid", "top_vector_cosine", 0)
                 ]
             ],
             [0.55],
@@ -2118,14 +2130,16 @@ class LedgerDriftEndToEndTests(unittest.TestCase):
             [
                 o.value
                 for o in streams_null[
-                    ld.StreamKey("proj-a", "embeddinggemma2/new/768", "hybrid", "top_vector_cosine")
+                    ld.StreamKey("proj-a", "embeddinggemma2/new/768", "hybrid", "top_vector_cosine", 1)
                 ]
             ],
             [0.91],
         )
 
-        # 2. Unrelated lease-loser startup in (prev_hb_ts, ts_dt] when uptime_secs
-        #    proves the serving process did NOT restart must NOT hijack effective_ts.
+        # 2. When uptime_secs proves the serving process did NOT restart across a
+        #    contract change (e.g. in-place cutover), an unrelated lease-loser startup
+        #    must NOT hijack the anchor, and calls in the ambiguous (prev_hb, new_hb)
+        #    interval are left unattributed ("unknown") rather than guessed.
         records_loser = [
             {
                 "v": 1, "ts": ts(0), "kind": "stats", "session": "proj-b",
@@ -2135,12 +2149,19 @@ class LedgerDriftEndToEndTests(unittest.TestCase):
                     "embedding_contract": {"kind": "bge_m3", "model": "old", "dim": 1024},
                 },
             },
+            # Call at t=0 (at/before HB A) stays on contract A.
+            {
+                "v": 1, "ts": ts(0), "kind": "call", "tool": "lambo_recall",
+                "session": "proj-b", "outcome": "ok",
+                "top_legs": {"bm25": 1.0, "vector_cosine": 0.51, "exact_name_match": False},
+                "response_annotations": [],
+            },
             # Unrelated lease-loser starts at t=200 and fails to take over.
             {
                 "v": 1, "ts": ts(200), "kind": "startup", "session": "proj-b",
                 "transport": "http", "state": "acquiring",
             },
-            # Call at t=330 happens while the original non-restarted server is still running.
+            # Call at t=330 falls in the ambiguous (0, 600) in-place cutover interval.
             {
                 "v": 1, "ts": ts(330), "kind": "call", "tool": "lambo_recall",
                 "session": "proj-b", "outcome": "ok",
@@ -2169,7 +2190,16 @@ class LedgerDriftEndToEndTests(unittest.TestCase):
             [
                 o.value
                 for o in streams_loser[
-                    ld.StreamKey("proj-b", "bge_m3/old/1024", "hybrid", "top_vector_cosine")
+                    ld.StreamKey("proj-b", "bge_m3/old/1024", "hybrid", "top_vector_cosine", 0)
+                ]
+            ],
+            [0.51],
+        )
+        self.assertEqual(
+            [
+                o.value
+                for o in streams_loser[
+                    ld.StreamKey("proj-b", "unknown", "hybrid", "top_vector_cosine", 1)
                 ]
             ],
             [0.62],
@@ -2178,14 +2208,14 @@ class LedgerDriftEndToEndTests(unittest.TestCase):
             [
                 o.value
                 for o in streams_loser[
-                    ld.StreamKey("proj-b", "embeddinggemma2/new/768", "hybrid", "top_vector_cosine")
+                    ld.StreamKey("proj-b", "embeddinggemma2/new/768", "hybrid", "top_vector_cosine", 1)
                 ]
             ],
             [0.88],
         )
 
-        # 3. Overflow on (ts_dt - timedelta(seconds=uptime)) near year 0001 does not crash
-        #    and must NOT let an in-gap lease-loser startup hijack effective_ts.
+        # 3. Overflow on (ts_dt - timedelta(seconds=uptime)) near year 0001 does not crash,
+        #    marks (prev_hb, ts_dt) unattributed, and confirms B at ts_dt (not startup).
         timeline, _ = ld._build_contract_timeline(
             heartbeats=[
                 {
@@ -2216,13 +2246,16 @@ class LedgerDriftEndToEndTests(unittest.TestCase):
                 },
             ],
         )
-        self.assertEqual(timeline["proj-min"].contracts, ["bge_m3/a/1024", "bge_m3/b/1024"])
         self.assertEqual(
-            timeline["proj-min"].times[1], ld.parse_ts("0001-01-01T00:00:10Z")
+            timeline["proj-min"].contracts, ["bge_m3/a/1024", "unknown", "bge_m3/b/1024"]
+        )
+        self.assertEqual(timeline["proj-min"].epochs, [0, 1, 1])
+        self.assertEqual(
+            timeline["proj-min"].times[-1], ld.parse_ts("0001-01-01T00:00:10Z")
         )
 
-        # 4. Huge uptime_secs (> 1e9) must likewise NOT be misclassified as missing uptime
-        #    and must keep effective_ts at ts_dt rather than an in-gap startup.
+        # 4. Huge uptime_secs (> 1e9) likewise marks (prev_hb, ts_dt) unattributed
+        #    and confirms B at ts_dt rather than letting an in-gap startup hijack it.
         timeline_huge, _ = ld._build_contract_timeline(
             heartbeats=[
                 {
@@ -2253,8 +2286,11 @@ class LedgerDriftEndToEndTests(unittest.TestCase):
                 },
             ],
         )
-        self.assertEqual(timeline_huge["proj-huge"].contracts, ["bge_m3/a/1024", "bge_m3/b/1024"])
-        self.assertEqual(timeline_huge["proj-huge"].times[1], ld.parse_ts(ts(600)))
+        self.assertEqual(
+            timeline_huge["proj-huge"].contracts, ["bge_m3/a/1024", "unknown", "bge_m3/b/1024"]
+        )
+        self.assertEqual(timeline_huge["proj-huge"].epochs, [0, 1, 1])
+        self.assertEqual(timeline_huge["proj-huge"].times[-1], ld.parse_ts(ts(600)))
 
     def test_completion_receipt_fallback_never_cross_joins_different_session(self):
         comps = ld._completions_by_receipt([
@@ -2542,6 +2578,369 @@ class LedgerDriftEndToEndTests(unittest.TestCase):
         self.assertNotIn("None observation", text)
         self.assertIn("n/a (alarm preceded injection", text)
         self.assertIn("at index=40, delta=-0.1)", text)
+
+    def test_overflowing_numeric_scores_and_hit_count_are_skipped_preserving_valid_hits(self):
+        huge = 10**400
+        self.assertIsNone(ld._finite_number(huge))
+        records = [
+            {
+                "v": 1, "ts": "2026-11-19T10:00:00Z", "kind": "call", "tool": "lambo_recall",
+                "session": "s1", "outcome": "ok",
+                "hit_count": huge,
+                "hits": [{"score": huge}, {"score": 0.75}],
+                "top_legs": {"bm25": huge, "vector_cosine": 0.75, "exact_name_match": False},
+                "response_annotations": [],
+            },
+        ]
+        ledger = ld.load_ledger([str(self._write_ledger(records))])
+        streams = ld.extract_streams(ledger)
+        fused = [o.value for k, obs in streams.items() if k.stream == "top_fused" for o in obs]
+        vec = [
+            o.value for k, obs in streams.items() if k.stream == "top_vector_cosine" for o in obs
+        ]
+        self.assertEqual(fused, [0.75])
+        self.assertEqual(vec, [0.75])
+        self.assertFalse(any(k.stream == "hit_count" for k in streams))
+        self.assertFalse(any(k.stream == "top_bm25" for k in streams))
+
+    def test_torn_utf8_final_line_counted_unparseable_and_prefix_preserved(self):
+        path = tmpdir(self) / "torn_utf8.jsonl"
+        good_line = json.dumps({
+            "v": 1, "ts": "2026-11-19T10:00:00Z", "kind": "call", "tool": "lambo_recall",
+            "session": "s1", "outcome": "ok", "hit_count": 1,
+            "hits": [{"score": 0.8}],
+            "top_legs": {"bm25": 2.0, "vector_cosine": 0.8, "exact_name_match": False},
+            "response_annotations": [],
+        }).encode("utf-8")
+        # Torn multibyte UTF-8 sequence at EOF (incomplete 3-byte em-dash \xe2\x80\x94).
+        torn_tail = b'{"v":1,"ts":"2026-11-19T10:01:00Z","kind":"call","query":"\xe2\x80'
+        path.write_bytes(good_line + b"\n" + torn_tail)
+
+        ledger = ld.load_ledger([str(path)])
+        prov = ledger.provenance()
+        self.assertEqual(prov["call_lines"], 1)
+        self.assertEqual(prov["unparseable_lines"], 1)
+        streams = ld.extract_streams(ledger)
+        self.assertEqual(
+            [o.value for o in streams[ld.StreamKey("s1", "unknown", "hybrid", "top_fused", 0)]],
+            [0.8],
+        )
+
+    def test_unsupported_schema_versions_counted_but_not_dispatched_to_v1(self):
+        records = [
+            {
+                "v": 1, "ts": "2026-11-19T10:00:00Z", "kind": "call", "tool": "lambo_recall",
+                "session": "s1", "outcome": "ok",
+                "hits": [{"score": 0.7}],
+                "top_legs": {"bm25": 2.0, "vector_cosine": 0.7, "exact_name_match": False},
+                "response_annotations": [],
+            },
+            # Future v2 record with incompatible scale must not enter v1 streams or heartbeats.
+            {
+                "v": 2, "ts": "2026-11-19T10:01:00Z", "kind": "call", "tool": "lambo_recall",
+                "session": "s1", "outcome": "ok",
+                "hits": [{"score": 999.0}],
+                "top_legs": {"bm25": 999.0, "vector_cosine": 999.0, "exact_name_match": False},
+                "response_annotations": [],
+            },
+            {
+                "v": 2, "ts": "2026-11-19T10:02:00Z", "kind": "stats", "session": "s1",
+                "uptime_secs": 10, "version": "0.99.0", "git_sha": "future",
+                "stats": {"session": "s1", "ledger_dropped_lines": 500},
+            },
+        ]
+        ledger = ld.load_ledger([str(self._write_ledger(records))])
+        prov = ledger.provenance()
+        self.assertEqual(prov["versions"], [1, 2])
+        self.assertEqual(prov["unknown_version_lines"], 2)
+        self.assertEqual(prov["call_lines"], 1)
+        self.assertEqual(prov["heartbeat_lines"], 0)
+        self.assertIsNone(prov["dropped_lines"])
+        streams = ld.extract_streams(ledger)
+        self.assertEqual(
+            [o.value for o in streams[ld.StreamKey("s1", "unknown", "hybrid", "top_fused", 0)]],
+            [0.7],
+        )
+
+        # An all-v2 ledger produces a provenance warning report with 0 streams instead of crashing.
+        only_v2 = ld.load_ledger([str(self._write_ledger([records[1]]))])
+        rep = ld.analyze_ledger(only_v2)
+        self.assertEqual(rep["ledger_schema"]["unknown_version_lines"], 1)
+        self.assertEqual(rep["streams"], [])
+        self.assertEqual(rep["alarms"], [])
+
+    def test_restart_detected_when_next_observed_uptime_is_higher_across_outage(self):
+        # Old run: t=0, uptime=120, drops=10.
+        # New run observed 300s later: t=300, uptime=180, drops=12 -> elapsed - growth = 240s.
+        base = ld.parse_ts("2026-11-19T10:00:00Z")
+
+        def ts(sec):
+            return (base + ld.dt.timedelta(seconds=sec)).isoformat()
+
+        records_gap = [
+            {
+                "v": 1, "ts": ts(0), "kind": "stats", "session": "s1",
+                "uptime_secs": 120, "version": "0.13.0", "git_sha": "aaa",
+                "stats": {"session": "s1", "ledger_dropped_lines": 10},
+            },
+            {
+                "v": 1, "ts": ts(300), "kind": "stats", "session": "s1",
+                "uptime_secs": 180, "version": "0.13.0", "git_sha": "aaa",
+                "stats": {"session": "s1", "ledger_dropped_lines": 12},
+            },
+        ]
+        ledger_gap = ld.load_ledger([str(self._write_ledger(records_gap))])
+        self.assertEqual(ledger_gap.provenance()["dropped_lines"], 22)
+        restarts = [ev for ev in ld.extract_operational_events(ledger_gap) if ev.kind == "restart"]
+        self.assertEqual(len(restarts), 1)
+        self.assertEqual(restarts[0].detail["reason"], "uptime_gap")
+
+        # Whole-second truncation (elapsed=60.9s, uptime_growth=60s) must NOT trigger a restart.
+        records_normal = [
+            {
+                "v": 1, "ts": "2026-11-19T10:00:00.050Z", "kind": "stats", "session": "s1",
+                "uptime_secs": 60, "version": "0.13.0", "git_sha": "aaa",
+                "stats": {"session": "s1", "ledger_dropped_lines": 10},
+            },
+            {
+                "v": 1, "ts": "2026-11-19T10:01:00.950Z", "kind": "stats", "session": "s1",
+                "uptime_secs": 120, "version": "0.13.0", "git_sha": "aaa",
+                "stats": {"session": "s1", "ledger_dropped_lines": 12},
+            },
+        ]
+        ledger_normal = ld.load_ledger([str(self._write_ledger(records_normal))])
+        self.assertEqual(ledger_normal.provenance()["dropped_lines"], 12)
+        self.assertEqual(
+            [ev for ev in ld.extract_operational_events(ledger_normal) if ev.kind == "restart"],
+            [],
+        )
+
+    def test_ambiguous_startup_truncation_band_and_lease_conflict_leave_calls_unattributed(self):
+        base = ld.parse_ts("2026-11-19T10:00:00Z")
+
+        def ts(sec):
+            return (base + ld.dt.timedelta(seconds=sec)).isoformat()
+
+        # Winner boots at 300.0, lease-loser startup at 301.0; first HB at 600.9 with
+        # integer uptime_secs=300 (inferred uptime_start=300.9, closer to 301.0 than 300.0).
+        # The recall at 300.5 lies in [299.9, 300.9) and must stay unattributed ("unknown")
+        # rather than being assigned to old contract A.
+        records = [
+            {
+                "v": 1, "ts": ts(0), "kind": "stats", "session": "proj-a",
+                "uptime_secs": 600, "version": "0.13.0", "git_sha": "aaa",
+                "stats": {
+                    "session": "proj-a",
+                    "embedding_contract": {"kind": "bge_m3", "model": "old", "dim": 1024},
+                },
+            },
+            {
+                "v": 1, "ts": ts(299.0), "kind": "call", "tool": "lambo_recall",
+                "session": "proj-a", "outcome": "ok",
+                "top_legs": {"bm25": 1.0, "vector_cosine": 0.51, "exact_name_match": False},
+                "response_annotations": [],
+            },
+            {
+                "v": 1, "ts": ts(300.0), "kind": "startup", "session": "proj-a",
+                "transport": "http", "state": "acquiring",
+            },
+            {
+                "v": 1, "ts": ts(300.5), "kind": "call", "tool": "lambo_recall",
+                "session": "proj-a", "outcome": "ok",
+                "top_legs": {"bm25": 1.0, "vector_cosine": 0.77, "exact_name_match": False},
+                "response_annotations": [],
+            },
+            {
+                "v": 1, "ts": ts(301.0), "kind": "startup", "session": "proj-a",
+                "transport": "http", "state": "acquiring",
+            },
+            {
+                "v": 1, "ts": ts(310.0), "kind": "call", "tool": "lambo_recall",
+                "session": "proj-a", "outcome": "ok",
+                "top_legs": {"bm25": 1.0, "vector_cosine": 0.92, "exact_name_match": False},
+                "response_annotations": [],
+            },
+            {
+                "v": 1, "ts": ts(600.9), "kind": "stats", "session": "proj-a",
+                "uptime_secs": 300, "version": "0.13.0", "git_sha": "aaa",
+                "stats": {
+                    "session": "proj-a",
+                    "embedding_contract": {"kind": "embeddinggemma2", "model": "new", "dim": 768},
+                },
+            },
+        ]
+        ledger = ld.load_ledger([str(self._write_ledger(records))])
+        streams = ld.extract_streams(ledger)
+        self.assertEqual(
+            [
+                o.value
+                for o in streams[
+                    ld.StreamKey("proj-a", "bge_m3/old/1024", "hybrid", "top_vector_cosine", 0)
+                ]
+            ],
+            [0.51],
+        )
+        self.assertEqual(
+            [
+                o.value
+                for o in streams[
+                    ld.StreamKey("proj-a", "unknown", "hybrid", "top_vector_cosine", 1)
+                ]
+            ],
+            [0.77],
+        )
+        self.assertEqual(
+            [
+                o.value
+                for o in streams[
+                    ld.StreamKey(
+                        "proj-a", "embeddinggemma2/new/768", "hybrid", "top_vector_cosine", 1
+                    )
+                ]
+            ],
+            [0.92],
+        )
+
+        # If a lease refusal also occurs in [299.9, 600.9], the call at 310.0 is also left
+        # unattributed until contract B is confirmed at 600.9.
+        with_lease = list(records) + [
+            {
+                "v": 1, "ts": ts(305.0), "kind": "lease", "session": "proj-a",
+                "event": "refused", "side": "loser",
+            },
+            {
+                "v": 1, "ts": ts(610.0), "kind": "call", "tool": "lambo_recall",
+                "session": "proj-a", "outcome": "ok",
+                "top_legs": {"bm25": 1.0, "vector_cosine": 0.95, "exact_name_match": False},
+                "response_annotations": [],
+            },
+        ]
+        streams_lease = ld.extract_streams(ld.load_ledger([str(self._write_ledger(with_lease))]))
+        self.assertEqual(
+            [
+                o.value
+                for o in streams_lease[
+                    ld.StreamKey("proj-a", "unknown", "hybrid", "top_vector_cosine", 1)
+                ]
+            ],
+            [0.77, 0.92],
+        )
+        self.assertEqual(
+            [
+                o.value
+                for o in streams_lease[
+                    ld.StreamKey(
+                        "proj-a", "embeddinggemma2/new/768", "hybrid", "top_vector_cosine", 1
+                    )
+                ]
+            ],
+            [0.95],
+        )
+
+    def test_contract_rollback_a_b_a_resets_detector_with_fresh_epoch(self):
+        rng = random.Random(2026)
+        base = ld.parse_ts("2026-11-19T10:00:00Z")
+
+        def ts(sec):
+            return (base + ld.dt.timedelta(seconds=sec)).isoformat()
+
+        c_a = {"kind": "bge_m3", "model": "a", "dim": 1024}
+        c_b = {"kind": "embeddinggemma2", "model": "b", "dim": 768}
+
+        records = [
+            # Visit 1 of A (two consecutive identical heartbeats must share epoch 0).
+            {
+                "v": 1, "ts": ts(0), "kind": "stats", "session": "s1",
+                "uptime_secs": 60, "version": "0.13.0", "git_sha": "aaa",
+                "stats": {"session": "s1", "embedding_contract": c_a},
+            },
+            {
+                "v": 1, "ts": ts(60), "kind": "stats", "session": "s1",
+                "uptime_secs": 120, "version": "0.13.0", "git_sha": "aaa",
+                "stats": {"session": "s1", "embedding_contract": c_a},
+            },
+        ]
+        # 60 calls in Visit 1 of A around 0.80.
+        for i in range(60):
+            val = round(0.80 + rng.uniform(-0.02, 0.02), 5)
+            records.append({
+                "v": 1, "ts": ts(100 + i), "kind": "call", "tool": "lambo_recall",
+                "session": "s1", "outcome": "ok",
+                "top_legs": {"bm25": 2.0, "vector_cosine": val, "exact_name_match": False},
+                "response_annotations": [],
+            })
+        # Switch to B (epoch 1) with two consecutive heartbeats.
+        records.extend([
+            {
+                "v": 1, "ts": ts(300), "kind": "stats", "session": "s1",
+                "uptime_secs": 5, "version": "0.13.0", "git_sha": "aaa",
+                "stats": {"session": "s1", "embedding_contract": c_b},
+            },
+            {
+                "v": 1, "ts": ts(360), "kind": "stats", "session": "s1",
+                "uptime_secs": 65, "version": "0.13.0", "git_sha": "aaa",
+                "stats": {"session": "s1", "embedding_contract": c_b},
+            },
+        ])
+        for i in range(20):
+            val = round(0.90 + rng.uniform(-0.02, 0.02), 5)
+            records.append({
+                "v": 1, "ts": ts(370 + i), "kind": "call", "tool": "lambo_recall",
+                "session": "s1", "outcome": "ok",
+                "top_legs": {"bm25": 2.0, "vector_cosine": val, "exact_name_match": False},
+                "response_annotations": [],
+            })
+        # Roll back to A (epoch 2): steady around 0.55. If epoch 2 wrongly resumed
+        # epoch 0's 0.80 ranks, 60 draws at 0.55 would immediately trigger an alarm.
+        records.append({
+            "v": 1, "ts": ts(500), "kind": "stats", "session": "s1",
+            "uptime_secs": 5, "version": "0.13.0", "git_sha": "aaa",
+            "stats": {"session": "s1", "embedding_contract": c_a},
+        })
+        for i in range(60):
+            val = round(0.55 + rng.uniform(-0.02, 0.02), 5)
+            records.append({
+                "v": 1, "ts": ts(510 + i), "kind": "call", "tool": "lambo_recall",
+                "session": "s1", "outcome": "ok",
+                "top_legs": {"bm25": 2.0, "vector_cosine": val, "exact_name_match": False},
+                "response_annotations": [],
+            })
+
+        ledger = ld.load_ledger([str(self._write_ledger(records))])
+        report = ld.analyze_ledger(ledger, seed=0)
+        vec_streams = [
+            s for s in report["streams"] if s["stream"] == "top_vector_cosine"
+        ]
+        epochs = [(s["contract"], s["contract_epoch"], s["n"]) for s in vec_streams]
+        self.assertEqual(
+            epochs,
+            [
+                ("bge_m3/a/1024", 0, 60),
+                ("embeddinggemma2/b/768", 1, 20),
+                ("bge_m3/a/1024", 2, 60),
+            ],
+        )
+        self.assertEqual(report["alarms"], [])
+        rendered = ld.format_text(report)
+        self.assertIn("bge_m3/a/1024#2", rendered)
+
+    def test_ville_bound_preserves_reciprocal_in_json_and_scientific_notation_in_text(self):
+        records = [
+            {
+                "v": 1, "ts": "2026-11-19T10:00:00Z", "kind": "call", "tool": "lambo_recall",
+                "session": "s1", "outcome": "ok",
+                "hits": [{"score": 0.8}],
+                "top_legs": {"bm25": 2.0, "vector_cosine": 0.8, "exact_name_match": False},
+                "response_annotations": [],
+            },
+        ]
+        ledger = ld.load_ledger([str(self._write_ledger(records))])
+        report = ld.analyze_ledger(ledger, threshold=10_000_000)
+        self.assertAlmostEqual(report["config"]["ville_false_alarm_bound"], 1e-7, places=15)
+        self.assertGreater(report["config"]["ville_false_alarm_bound"], 0.0)
+        text = ld.format_text(report)
+        self.assertIn("1.00e-07", text)
+        self.assertNotIn("Ville bound <= 0 ", text)
 
 
 if __name__ == "__main__":

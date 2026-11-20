@@ -42,11 +42,11 @@
 - Added `scripts/loadtest/ledger_drift.py` for offline recall-quality change
   detection over `lambo serve --ledger` files using an online Sleepy Jumper
   conformal exchangeability martingale with O(log n) randomized rank p-values,
-  per-(session, contract, query class) conditioning using score-independent
-  execution modes (`traversal`, `image`, `vector`, `exact_name`, `hybrid`,
-  `keyword_only`, `vector_only`, `other`), separate `top_bm25` /
-  `top_bm25_legacy` streams across the 0.13.0 scale change, operational-event
-  correlation, and synthetic shift injection (#177).
+  per-(session, contract, contract epoch, query class) conditioning using
+  score-independent execution modes (`traversal`, `image`, `vector`,
+  `exact_name`, `hybrid`, `keyword_only`, `vector_only`, `other`), separate
+  `top_bm25` / `top_bm25_legacy` streams across the 0.13.0 scale change,
+  operational-event correlation, and synthetic shift injection (#177).
 
 ## 0.13.0 (2026-11-19)
 
