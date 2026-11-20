@@ -104,7 +104,13 @@ overrule:
   no agent-session boundary — `serve` holds one lambo session for its whole life
   while an agent's working stretches come and go — so an idle gap is an explicit
   *proxy*. A serve restart is the other boundary and that one is a fact, read off
-  the heartbeat's `uptime_secs` resetting.
+  each session's heartbeat `uptime_secs` resetting. In a shared multi-session
+  ledger (`session` stamped on each line since `#32`), restarts are tracked per
+  `session` (`_ledger.Ledger.restart_times_by_session`) and `recall_first.py`
+  groups an agent's calls by `(agent_id, session)` so interleaved heartbeats
+  from concurrent daemons never manufacture false restarts and a restart in one
+  session never splits another session's work sessions (pre-`#32` lines lacking
+  `session` share a single legacy `None` bucket).
 * **Write sequence.** A maximal run of consecutive successful writes. Compliance
   is scored per sequence, not per write: an agent that recalls once and then
   derives six concepts complied once, and scoring it six times would flatter it

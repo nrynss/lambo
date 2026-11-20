@@ -503,6 +503,115 @@ else
   fail=1
 fi
 
+step "#279: interleaved multi-session heartbeats do not manufacture false restarts"
+# Two concurrent per-session daemons (`alpha` at uptime 100, 160, 220; `beta` at
+# 10, 70, 130) writing to one shared ledger with zero real restarts. Comparing
+# `uptime_secs` globally treats `100 -> 10`, `160 -> 70`, and `220 -> 130` as
+# serve restarts and splits both agents' work sessions.
+#
+# Opposing plants inside the fixture:
+#   - `alpha`'s `09:02:00` (220) heartbeat is written BEFORE `09:01:00` (160) so
+#     file order opposes timestamp order (`220 -> 160` if the `ts` sort were dropped).
+#   - A malformed heartbeat with boolean `uptime_secs: true` sits between 160 and
+#     220 on `alpha` (`isinstance(True, int)` is True and `1 <= 160` in Python, so
+#     forgetting `not isinstance(uptime, bool)` invents a restart).
+cat >"$work/multi-session-no-restart.jsonl" <<'MULTINO'
+{"v":1,"ts":"2026-08-26T08:59:50+00:00","kind":"call","session":"alpha","tool":"lambo_recall","agent_id":"agent-alpha","outcome":"ok","duration_us":10,"query":"alpha ctx","top_k":8,"hit_count":0,"hits":[]}
+{"v":1,"ts":"2026-08-26T09:00:00+00:00","kind":"stats","session":"alpha","uptime_secs":100,"version":"0.13.0","git_sha":"aaaa111","stats":{"session":"alpha","ledger_dropped_lines":0,"ledger_queued_lines":0}}
+{"v":1,"ts":"2026-08-26T09:00:10+00:00","kind":"call","session":"beta","tool":"lambo_recall","agent_id":"agent-beta","outcome":"ok","duration_us":10,"query":"beta ctx","top_k":8,"hit_count":0,"hits":[]}
+{"v":1,"ts":"2026-08-26T09:00:30+00:00","kind":"stats","session":"beta","uptime_secs":10,"version":"0.13.0","git_sha":"aaaa111","stats":{"session":"beta","ledger_dropped_lines":0,"ledger_queued_lines":0}}
+{"v":1,"ts":"2026-08-26T09:02:00+00:00","kind":"stats","session":"alpha","uptime_secs":220,"version":"0.13.0","git_sha":"aaaa111","stats":{"session":"alpha","ledger_dropped_lines":0,"ledger_queued_lines":0}}
+{"v":1,"ts":"2026-08-26T09:01:00+00:00","kind":"stats","session":"alpha","uptime_secs":160,"version":"0.13.0","git_sha":"aaaa111","stats":{"session":"alpha","ledger_dropped_lines":0,"ledger_queued_lines":0}}
+{"v":1,"ts":"2026-08-26T09:01:15+00:00","kind":"stats","session":"alpha","uptime_secs":true,"version":"0.13.0","git_sha":"aaaa111","stats":{"session":"alpha","ledger_dropped_lines":0,"ledger_queued_lines":0}}
+{"v":1,"ts":"2026-08-26T09:01:30+00:00","kind":"stats","session":"beta","uptime_secs":70,"version":"0.13.0","git_sha":"aaaa111","stats":{"session":"beta","ledger_dropped_lines":0,"ledger_queued_lines":0}}
+{"v":1,"ts":"2026-08-26T09:02:10+00:00","kind":"call","session":"alpha","tool":"lambo_derive","agent_id":"agent-alpha","outcome":"ok","duration_us":10,"created":1,"matched":0}
+{"v":1,"ts":"2026-08-26T09:02:30+00:00","kind":"stats","session":"beta","uptime_secs":130,"version":"0.13.0","git_sha":"aaaa111","stats":{"session":"beta","ledger_dropped_lines":0,"ledger_queued_lines":0}}
+{"v":1,"ts":"2026-08-26T09:02:40+00:00","kind":"call","session":"beta","tool":"lambo_derive","agent_id":"agent-beta","outcome":"ok","duration_us":10,"created":1,"matched":0}
+MULTINO
+out="$("$py" "$here/recall_first.py" "$work/multi-session-no-restart.jsonl")"
+echo "$out"
+check "interleaved heartbeats report 0 serve restart(s)" "$out" "0 serve restart(s)"
+check "interleaved sessions keep 100.0% compliance" "$out" "100.0%"
+if "$py" "$here/recall_first.py" --json "$work/multi-session-no-restart.jsonl" \
+   | "$py" -c 'import json,sys
+d = json.load(sys.stdin)
+assert d["restarts"] == [], d["restarts"]
+assert d["restarts_by_session"] == {}, d["restarts_by_session"]
+assert d["overall_compliance"] == 1.0, d["overall_compliance"]
+assert d["total_write_sequences"] == 2, d["total_write_sequences"]
+assert d["total_recall_first_sequences"] == 2, d["total_recall_first_sequences"]
+assert d["total_derives_without_prior_recall"] == 0, d["total_derives_without_prior_recall"]
+for agent in ("agent-alpha", "agent-beta"):
+    a = d["agents"][agent]
+    assert a["work_sessions"] == 1 and a["compliance"] == 1.0, (agent, a)'; then
+  printf '    ok   --json reports zero restarts and 100%% compliance across interleaved sessions\n'
+else
+  printf '    FAIL --json reported false restarts or split interleaved sessions\n'
+  fail=1
+fi
+
+step "#279: a real restart in session beta splits beta without splitting alpha"
+# `alpha` runs continuously (`100 -> 160 -> 220`) while `beta` genuinely restarts
+# (`10 -> 70 -> 130 -> 5`) at 09:03:30 between recall and derive calls.
+#   - `agent-alpha` (only on `alpha`) stays 1 work session, 100.0% compliant.
+#   - `agent-beta` (only on `beta`) is split into 2 work sessions, 0.0% compliant.
+#   - `agent-shared` calls BOTH `alpha` and `beta` across the same restart: its
+#     `alpha` stretch stays intact (1/1 compliant) while its `beta` stretch splits
+#     (0/1 compliant) -> 3 work sessions, 50.0% compliant.
+cat >"$work/multi-session-one-restart.jsonl" <<'MULTIONE'
+{"v":1,"ts":"2026-08-26T09:00:00+00:00","kind":"stats","session":"alpha","uptime_secs":100,"version":"0.13.0","git_sha":"aaaa111","stats":{"session":"alpha","ledger_dropped_lines":0,"ledger_queued_lines":0}}
+{"v":1,"ts":"2026-08-26T09:00:10+00:00","kind":"call","session":"alpha","tool":"lambo_recall","agent_id":"agent-alpha","outcome":"ok","duration_us":10,"query":"alpha ctx","top_k":8,"hit_count":0,"hits":[]}
+{"v":1,"ts":"2026-08-26T09:00:30+00:00","kind":"stats","session":"beta","uptime_secs":10,"version":"0.13.0","git_sha":"aaaa111","stats":{"session":"beta","ledger_dropped_lines":0,"ledger_queued_lines":0}}
+{"v":1,"ts":"2026-08-26T09:00:40+00:00","kind":"call","session":"beta","tool":"lambo_recall","agent_id":"agent-beta","outcome":"ok","duration_us":10,"query":"beta ctx","top_k":8,"hit_count":0,"hits":[]}
+{"v":1,"ts":"2026-08-26T09:00:50+00:00","kind":"call","session":"alpha","tool":"lambo_recall","agent_id":"agent-shared","outcome":"ok","duration_us":10,"query":"shared alpha","top_k":8,"hit_count":0,"hits":[]}
+{"v":1,"ts":"2026-08-26T09:00:55+00:00","kind":"call","session":"beta","tool":"lambo_recall","agent_id":"agent-shared","outcome":"ok","duration_us":10,"query":"shared beta","top_k":8,"hit_count":0,"hits":[]}
+{"v":1,"ts":"2026-08-26T09:01:00+00:00","kind":"stats","session":"alpha","uptime_secs":160,"version":"0.13.0","git_sha":"aaaa111","stats":{"session":"alpha","ledger_dropped_lines":0,"ledger_queued_lines":0}}
+{"v":1,"ts":"2026-08-26T09:01:30+00:00","kind":"stats","session":"beta","uptime_secs":70,"version":"0.13.0","git_sha":"aaaa111","stats":{"session":"beta","ledger_dropped_lines":0,"ledger_queued_lines":0}}
+{"v":1,"ts":"2026-08-26T09:02:00+00:00","kind":"stats","session":"alpha","uptime_secs":220,"version":"0.13.0","git_sha":"aaaa111","stats":{"session":"alpha","ledger_dropped_lines":0,"ledger_queued_lines":0}}
+{"v":1,"ts":"2026-08-26T09:02:30+00:00","kind":"stats","session":"beta","uptime_secs":130,"version":"0.13.0","git_sha":"aaaa111","stats":{"session":"beta","ledger_dropped_lines":0,"ledger_queued_lines":0}}
+{"v":1,"ts":"2026-08-26T09:03:30+00:00","kind":"stats","session":"beta","uptime_secs":5,"version":"0.13.0","git_sha":"aaaa111","stats":{"session":"beta","ledger_dropped_lines":0,"ledger_queued_lines":0}}
+{"v":1,"ts":"2026-08-26T09:04:00+00:00","kind":"call","session":"alpha","tool":"lambo_derive","agent_id":"agent-alpha","outcome":"ok","duration_us":10,"created":1,"matched":0}
+{"v":1,"ts":"2026-08-26T09:04:10+00:00","kind":"call","session":"beta","tool":"lambo_derive","agent_id":"agent-beta","outcome":"ok","duration_us":10,"created":1,"matched":0}
+{"v":1,"ts":"2026-08-26T09:04:20+00:00","kind":"call","session":"alpha","tool":"lambo_derive","agent_id":"agent-shared","outcome":"ok","duration_us":10,"created":1,"matched":0}
+{"v":1,"ts":"2026-08-26T09:04:30+00:00","kind":"call","session":"beta","tool":"lambo_derive","agent_id":"agent-shared","outcome":"ok","duration_us":10,"created":1,"matched":0}
+MULTIONE
+out="$("$py" "$here/recall_first.py" "$work/multi-session-one-restart.jsonl")"
+echo "$out"
+check "sees exactly 1 serve restart(s)" "$out" "1 serve restart(s)"
+check "keeps agent-alpha at 100.0% across beta's restart" "$out" "agent-alpha                   2     1     1        1      100.0%                 0"
+check "splits agent-beta across beta's restart (0.0%)" "$out" "agent-beta                    2     2     1        0        0.0%                 1"
+check "splits only agent-shared's beta session (50.0%)" "$out" "agent-shared                  4     3     2        1       50.0%                 1"
+if "$py" "$here/recall_first.py" --json "$work/multi-session-one-restart.jsonl" \
+   | "$py" -c 'import json,sys
+d = json.load(sys.stdin)
+assert d["restarts"] == ["2026-08-26T09:03:30+00:00"], d["restarts"]
+assert d["restarts_by_session"] == {"beta": ["2026-08-26T09:03:30+00:00"]}, d["restarts_by_session"]
+assert d["total_write_sequences"] == 4, d["total_write_sequences"]
+assert d["total_recall_first_sequences"] == 2, d["total_recall_first_sequences"]
+assert d["overall_compliance"] == 0.5, d["overall_compliance"]
+assert d["total_derives_without_prior_recall"] == 2, d["total_derives_without_prior_recall"]
+aa = d["agents"]["agent-alpha"]
+assert aa["work_sessions"] == 1 and aa["compliance"] == 1.0 and aa["derives_without_prior_recall"] == 0, aa
+ab = d["agents"]["agent-beta"]
+assert ab["work_sessions"] == 2 and ab["compliance"] == 0.0 and ab["derives_without_prior_recall"] == 1, ab
+ash = d["agents"]["agent-shared"]
+assert ash["work_sessions"] == 3 and ash["compliance"] == 0.5 and ash["derives_without_prior_recall"] == 1, ash'; then
+  printf '    ok   --json isolates beta restart from alpha for both dedicated and shared agents\n'
+else
+  printf '    FAIL --json did not isolate beta restart from alpha\n'
+  fail=1
+fi
+if "$py" "$here/recall_first.py" --json "$ledger" \
+   | "$py" -c 'import json,sys
+d = json.load(sys.stdin)
+assert d["restarts"] == ["2026-08-18T11:00:00+00:00"], d["restarts"]
+assert d["restarts_by_session"] == {"<unspecified>": ["2026-08-18T11:00:00+00:00"]}, d["restarts_by_session"]'; then
+  printf '    ok   legacy pre-#32 sample groups restarts under <unspecified>\n'
+else
+  printf '    FAIL legacy pre-#32 sample did not map restarts_by_session to <unspecified>\n'
+  fail=1
+fi
+
 step "every report also emits JSON"
 for script in recall_first dedup_rate score_bands blast_radius; do
   if "$py" "$here/$script.py" --json "$ledger" | "$py" -c 'import json,sys; json.load(sys.stdin)'; then
