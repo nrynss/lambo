@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.14.0 (2026-11-20)
+
 - Live `lambo_inspect` results now include `structuredContent.focus.concept_type`
   and `focus.resolution` (#251). Clients can read the concept type and tell
   whether a durable name, UUID, short ID, exact text, or fuzzy match resolved
