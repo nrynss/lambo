@@ -613,6 +613,7 @@ Under a supervisor (launchd, systemd, Kubernetes), give the server more than 20 
 | `--bind <BIND>` | No | `127.0.0.1`. A non-loopback bind needs a credential: `--auth-token`, `LAMBO_AUTH_TOKEN`, a `[[web.credential]]` or an inherited `[[serve.credential]]`. |
 | `--auth-token <TOKEN>` | No | Bearer token that reads every served session. Loopback is unauthenticated by default. A non-loopback bind requires it, a `[[web.credential]]` or an inherited `[[serve.credential]]`, and fails closed without one. `LAMBO_AUTH_TOKEN` overrides it. The token must be printable ASCII with no leading or trailing whitespace, and at most 4096 bytes, as for `lambo serve`; otherwise the start exits `2`, never quoting the token. A request carrying two `Authorization` headers gets `401`. |
 | `--allowed-host <HOST>` | No | Repeatable. A `Host` the unauthenticated window also answers, beside `localhost`, `127.0.0.1` and `[::1]`. A name, or `name:port` to accept only that port. Ignored once any credential is configured. |
+| `--no-embedder` | No | Never load the embedder, as `[web] embedder = false`: recall answers from its keyword and recent parts and says its vector leg is off. Without it the embedder loads on the first recall that needs a query vector, never at startup. See [Memory and the embedder](/config#memory-and-the-embedder). |
 
 ```bash
 lambo serve-web --config lambo.toml --session demo

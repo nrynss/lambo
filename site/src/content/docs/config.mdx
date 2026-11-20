@@ -644,6 +644,7 @@ view_ttl_ms = 1500
 max_loaded_sessions = 4
 load_concurrency = 2
 recall_concurrency = 4
+embedder = true
 list_sessions = false
 inherit_serve_credentials = false
 ```
@@ -656,10 +657,27 @@ inherit_serve_credentials = false
 | `max_loaded_sessions` | `4` | Views kept in memory at once. The least recently used is dropped beyond it. Also caps entire dynamic prefix slots, including metadata and query caches; inactive slots expire after five idle minutes, pruned on the next dynamic request. Active requests cannot be evicted; if all slots are active, a new dynamic session gets `503` with `Retry-After: 1`. At least 1. |
 | `load_concurrency` | `2` | Session loads that may run at once. 1 to 1024. Always `1` on SQLite. |
 | `recall_concurrency` | `4` | Recalls that may run at once. A recall that waits 2 seconds for a slot gets `503` with `Retry-After: 1`. 1 to 1024. |
+| `embedder` | `true` | Use the configured embedder for recall's vector leg. It is loaded on the first recall that needs a query vector, never at startup. `false` never loads it: recall runs on its keyword and recent parts and says the vector leg is off. `--no-embedder` does the same. See [Memory and the embedder](#memory-and-the-embedder). |
 | `list_sessions` | `false` | Answer `GET /api/sessions` with the served sessions the presenting credential may list. Off, the route does not exist. With no credential configured it names every served session to anyone who reaches the port, and startup warns about it. The page's session picker offers these names, plus "Other session…" for a name typed in; without the listing it asks for a name instead. |
 | `inherit_serve_credentials` | `false` | Also accept every `[[serve.credential]]` as a read credential with the same scope as on `lambo serve`, so its `"*"` is serve's, not every served session (see below). Its `create`, `erase` and `admin` are dropped: the window only reads. With no `[[serve.credential]]` nothing is imported, and startup says so; with no other credential either, the window stays unauthenticated on loopback. |
 
 An unknown key, an out-of-range value, an empty or repeated session name and a malformed host are refused when the file is read, so they stop every command, like any other invalid key. A numeric refusal names the key and its bound, never the value. At startup `lambo serve-web` prints the sessions and bounds it runs with. It checks the store's schema at startup and loads each session on the first request that needs it. See [Watch a session in a browser](/lambo/cli/#watch-a-session-in-a-browser).
+
+### Memory and the embedder
+
+The embedder is the window's only large cost, and only recall's vector leg uses it. How much it costs depends on where the model runs:
+
+| `[embedder] kind` | Memory in the window process |
+|---|---|
+| `candle` (in-process BGE-M3) | About 1.3 to 1.4 GB of RAM (unified memory on Apple silicon) once loaded, on top of the copy the `lambo serve` beside it holds. Without it, the window holds little beyond its session views (at most `max_loaded_sessions` of them). |
+| `bge_m3`, `embeddinggemma2`, `bedrock`, `gemini`, `elastic` | Nothing extra: the model runs in another process or service, and the window only sends it requests. |
+| `fixture` | Nothing extra. |
+
+So the window does not load the embedder at startup. Browsing (the page, counts, the canonization feed, inspect, the graph and `/api/session`) never loads it. The first recall that needs a query vector loads it once, and the window keeps it until it exits; recalls that arrive while it loads wait for that one load. A recall needs a query vector only when the store can search by vector, the session's stored embedding matches the configured one, and the same query has not been embedded for that session already. The model loaded is the configured one, so recall ranks exactly as it would have with the model loaded at startup; only the first such recall is slower. Startup prints which embedder recall uses and that it loads on first use.
+
+If the load fails, that recall still answers from its keyword and recent parts, with the line `recall: query embedding failed (...); vector leg skipped`, as when an embed fails. The failure is not kept: recalls that were waiting on that load get the same answer, and the next recall tries to load again.
+
+To never load the embedder, set `[web] embedder = false` or start the window with `--no-embedder`. Every recall then answers from its keyword and recent parts and carries the line `recall: vector leg off by configuration ([web] embedder = false or --no-embedder); keyword and recent legs only`, and `/api/session` and `/api/pulse` report `vector_search: false`. The window still reads the configured embedder's identity and width (no weights), so the page's embedding-contract status stays exact. The flag can only turn the embedder off; it never turns a file's `embedder = false` back on.
 
 ### Portal credentials
 

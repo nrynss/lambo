@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- `lambo serve-web` no longer loads the embedder at startup (#247). Browsing
+  (the page, counts, the canonization feed, inspect, the graph and
+  `/api/session`) never loads it; the first `/api/recall` that needs a query
+  vector loads it once, concurrent recalls share that load, and the model is
+  kept for the life of the process. With an in-process candle BGE-M3 this
+  keeps a portal nobody recalls on about 1.3 GB lighter. A failed load
+  degrades that recall to the keyword and recent legs with the usual
+  `query embedding failed ...; vector leg skipped` line and is retried by the
+  next recall. The new `[web] embedder = false` key and the `--no-embedder`
+  flag never load it: recall runs on its keyword and recent legs and carries
+  a `vector_degraded` line saying the vector leg is off by configuration, and
+  `/api/session` and `/api/pulse` report `vector_search: false`. Startup
+  prints which of the two applies. The configured embedder is still resolved
+  (identity and width, no weights), so the embedding-contract status is
+  unchanged.
 - Durable display names now surface through layered recall, `lambo_inspect`,
   and MCP tool schemas (#285). Layered recall preserves `LayeredHit::names`
   across merged and single-session recalls, emits `names [...]` in rendered
