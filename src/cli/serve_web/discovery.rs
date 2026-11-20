@@ -176,8 +176,8 @@ pub(super) fn startup_notes(reached: &[&str], exposed: bool, listing: bool) -> V
         );
     } else {
         out.push(format!(
-            "[web] discover_sessions is on: {} also read every live, non-erased session in the \
-             store whose name is 1 to 128 bytes of [A-Za-z0-9._:-], including sessions created \
+            "[web] discover_sessions is on: callers as {} also read every live, non-erased session \
+             in the store whose name is 1 to 128 bytes of [A-Za-z0-9._:-], including sessions created \
              after startup; other credentials read only their own scope",
             reached
                 .iter()
