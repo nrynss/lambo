@@ -11,9 +11,13 @@
 //!
 //! It serves an explicit allowlist: the ordered union of the repeatable
 //! `--session` and `[web] sessions` ([`plan_sessions`]). There is no store
-//! discovery. An explicit credential `session_prefix` also reads existing
+//! discovery unless the operator opts in (#276: `[web] discover_sessions` or
+//! `--discover-sessions`, see `discovery`). An explicit credential
+//! `session_prefix` also reads existing
 //! sessions under that prefix, including sessions created after startup (#241).
-//! Exact scopes and `"*"` remain limited to the startup allowlist. Each session is read at `/s/{session}/` and
+//! Exact scopes and `"*"` remain limited to the startup allowlist, except that
+//! with discovery on, `"*"` (and the implicit and legacy grants) also reads
+//! the store's live sessions. Each session is read at `/s/{session}/` and
 //! `/s/{session}/api/...`; the unscoped `/` and `/api/...` are aliases for the
 //! first (the default), so a one-session portal is exactly what it was. With
 //! more than one session every name must pass the strict addressed-id charset
@@ -127,6 +131,7 @@
 //! | `headers` | `nosniff` on every response the router answers, and the page CSP on `text/html`, as the outermost layer (#92) |
 //! | `auth` | [`AuthToken`], env-over-flag resolution, the non-loopback refusal, the credential set and the bearer gate |
 //! | `scope` | which session a request reads: the per-request resolution, before routing (#4) |
+//! | `discovery` | opt-in store-wide session discovery: who it reaches, the single-flight store read (#276) |
 //! | `state` | `AppState`: served sessions, backends, credential set, view cache |
 //! | `views` | the per-session reader views: one load per TTL, single-flight, bounded (#4) |
 //! | `dto` | every response and query type |
@@ -158,6 +163,7 @@ use crate::store::StoreKind;
 use crate::types::SessionId;
 
 mod auth;
+mod discovery;
 mod dto;
 mod headers;
 mod projections;
@@ -531,6 +537,19 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
              the token."
         );
     }
+    // #276: who discovery reaches, by credential name, and where it lists.
+    if state.discovery.enabled() {
+        let reached: Vec<&str> = state
+            .authority
+            .grants()
+            .into_iter()
+            .filter(|grant| state.discovery.reaches(grant))
+            .map(|grant| grant.name())
+            .collect();
+        for note in discovery::startup_notes(&reached, exposed, state.list_sessions) {
+            eprintln!("⚑ lambo serve-web: {note}");
+        }
+    }
     let implicit = !state.authority.requires_bearer();
     let unserved = auth::unserved_names(&state.authority, &state.sessions);
     // A prefix with no startup pins can still read existing dynamic sessions.
@@ -548,7 +567,9 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
         legacy_beside_configured,
         &warning_reach,
         &unserved,
-        implicit && state.list_sessions,
+        // `[web] list_sessions` itself: discovery's own listing on loopback
+        // is announced by its startup notes above (#276).
+        implicit && args.web.list_sessions,
         inherit_note,
     ) {
         eprintln!("⚑ lambo serve-web: {warning}");
