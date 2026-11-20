@@ -74,6 +74,7 @@ export default defineConfig({
           label: 'Install and configure',
           items: [
             { label: 'Installation', slug: 'installation' },
+            { label: 'macOS multi-session setup', slug: 'macos' },
             { label: 'Configuration', slug: 'config' },
             { label: 'Migration and memory repair', slug: 'migration' },
           ],

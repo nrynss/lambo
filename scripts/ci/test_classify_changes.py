@@ -38,7 +38,8 @@ class PathClassification(unittest.TestCase):
 
     def test_mirror_only_does_not_start_rust(self):
         paths = [f"{prefix}/{page}.mdx" for prefix in ["docs/reference", "site/src/content/docs"]
-                 for page in ["cli", "mcp", "installation", "config"]]
+                 for page in ["cli", "mcp", "installation", "config", "api", "migration",
+                              "macos"]]
         paths.append("scripts/docs/check-mirror-drift.sh")
         for path in paths:
             with self.subTest(path=path):

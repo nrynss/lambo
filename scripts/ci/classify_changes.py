@@ -26,13 +26,13 @@ RUST_FILES = {
     "evidence/issue-221/repro-8concept-qwen3-4b-1024.json",
     "evidence/issue-237/calibration-elastic-jina-v3-1024.json",
 }
+# Every pair scripts/docs/check-mirror-drift.sh checks, both copies.
+MIRROR_PAGES = ("cli", "mcp", "installation", "config", "api", "migration", "macos")
 MIRROR_FILES = {
-    "docs/reference/cli.mdx", "docs/reference/mcp.mdx",
-    "docs/reference/installation.mdx", "docs/reference/config.mdx",
-    "site/src/content/docs/cli.mdx", "site/src/content/docs/mcp.mdx",
-    "site/src/content/docs/installation.mdx", "site/src/content/docs/config.mdx",
-    "scripts/docs/check-mirror-drift.sh",
-}
+    f"{prefix}/{page}.mdx"
+    for prefix in ("docs/reference", "site/src/content/docs")
+    for page in MIRROR_PAGES
+} | {"scripts/docs/check-mirror-drift.sh"}
 
 
 def classify_paths(paths):

@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # Fail if any hand-maintained mirror pair of docs has drifted.
 #
-# Six pages exist in two copies each:
+# Seven pages exist in two copies each:
 #   docs/reference/cli.mdx          <-> site/src/content/docs/cli.mdx
 #   docs/reference/mcp.mdx          <-> site/src/content/docs/mcp.mdx
 #   docs/reference/installation.mdx <-> site/src/content/docs/installation.mdx
 #   docs/reference/config.mdx       <-> site/src/content/docs/config.mdx
 #   docs/reference/api.mdx          <-> site/src/content/docs/api.mdx
 #   docs/reference/migration.mdx    <-> site/src/content/docs/migration.mdx
+#   docs/reference/macos.mdx        <-> site/src/content/docs/macos.mdx
 # The two copies of each pair are meant to carry the SAME shared prose, but they
 # are deliberately NOT byte-identical files: the site copies add Astro component
 # imports and a `/lambo/...` link prefix, and mcp.mdx's site copy carries a whole
@@ -26,6 +27,8 @@
 # in the same lambo-site-only markers.
 # config.mdx joined it with #32 PR 9: it carries most of the multi-session
 # reference, both copies already agreed, and nothing kept them that way.
+# macos.mdx (the macOS onboarding guide, #277) joined it when it was written,
+# so its two copies were never allowed to differ.
 #
 # ## The normalisation's one asymmetric input (JE2E-10)
 #
@@ -139,6 +142,7 @@ check_pair installation docs/reference/installation.mdx site/src/content/docs/in
 check_pair config docs/reference/config.mdx site/src/content/docs/config.mdx
 check_pair api docs/reference/api.mdx site/src/content/docs/api.mdx
 check_pair migration docs/reference/migration.mdx site/src/content/docs/migration.mdx
+check_pair macos docs/reference/macos.mdx site/src/content/docs/macos.mdx
 
 printf '\n'
 if [ "$fail" -eq 0 ]; then
