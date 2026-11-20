@@ -54,8 +54,15 @@
               ]
             },
             "concept_type": {
-              "$ref": "#/$defs/WireConceptType",
-              "description": "One of `entity`, `logic`, `constraint`, `resource`, `observation`."
+              "description": "What kind of thing a concept is. Pick the one that fits the content best:\n\n- `entity` — a named thing: a person, service, file, table, or component.\n- `logic` — a rule, decision, or piece of reasoning about how things work.\n- `constraint` — a requirement or limit that must keep holding.\n- `resource` — something produced, consumed, or acted on by the work.\n- `observation` — something noticed in passing; the weakest kind, and\n  the only one that can later be demoted.",
+              "enum": [
+                "entity",
+                "logic",
+                "constraint",
+                "resource",
+                "observation"
+              ],
+              "type": "string"
             },
             "content": {
               "description": "The concept text: one fact, stated atomically and short — a sentence,\nnot a paragraph or a log of what you did.",
@@ -87,17 +94,6 @@
             "concept_type"
           ],
           "type": "object"
-        },
-        "WireConceptType": {
-          "description": "What kind of thing a concept is. Pick the one that fits the content best:\n\n- `entity` — a named thing: a person, service, file, table, or component.\n- `logic` — a rule, decision, or piece of reasoning about how things work.\n- `constraint` — a requirement or limit that must keep holding.\n- `resource` — something produced, consumed, or acted on by the work.\n- `observation` — something noticed in passing; the weakest kind, and\n  the only one that can later be demoted.",
-          "enum": [
-            "entity",
-            "logic",
-            "constraint",
-            "resource",
-            "observation"
-          ],
-          "type": "string"
         },
         "WireParentOf": {
           "additionalProperties": false,
@@ -241,16 +237,6 @@
           ],
           "type": "object"
         },
-        "WireImageConceptType": {
-          "description": "What kind of thing the image is. One of `entity`, `logic`, `constraint`,\n`resource` (an image cannot be an `observation`).",
-          "enum": [
-            "entity",
-            "logic",
-            "constraint",
-            "resource"
-          ],
-          "type": "string"
-        },
         "WireParentOf": {
           "additionalProperties": false,
           "properties": {
@@ -308,8 +294,14 @@
           "type": "string"
         },
         "concept_type": {
-          "$ref": "#/$defs/WireImageConceptType",
-          "description": "One of `entity`, `logic`, `constraint`, `resource`."
+          "description": "What kind of thing the image is. One of `entity`, `logic`, `constraint`,\n`resource` (an image cannot be an `observation`).",
+          "enum": [
+            "entity",
+            "logic",
+            "constraint",
+            "resource"
+          ],
+          "type": "string"
         },
         "event_time": {
           "description": "Optional RFC3339 historical about-time for this evidence, such as a\ncommit or document date. Omit it for a live fact, which is about now.\nNo additional date-range bounds are applied.",

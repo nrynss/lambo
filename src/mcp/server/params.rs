@@ -31,17 +31,17 @@ use crate::types::{AgentId, ConceptType};
 // type: the MCP schema is owned here, so a core rename cannot silently change
 // a published tool schema.
 //
-// Byte-echo note (R4 nit): an invalid value here yields serde's `unknown
-// variant \`…\`` error, which repeats the caller's decoded string — potentially
-// a decoded control char such as `U+0001` — back to the model, unlike
-// `validate_size`, which names control codepoints instead of echoing them. This
-// is **not** interceptable at our layer: every tool takes its params through
-// rmcp's `Parameters<T>` extractor, so the variant error is built and returned
-// (as a `-32602`) inside the rmcp framework, before any `LamboServer` code runs.
-// Sanitising it would mean abandoning `Parameters<T>` for a hand-rolled
-// deserialize in all seven tools — a large, error-prone change for a field whose
-// only reachable "byte" is an escaped control char in an enum slot. Left as-is;
-// revisit if rmcp grows an extraction-error hook.
+// Deserialization / byte-echo note (#250): `WireConceptType` and
+// `WireImageConceptType` implement `Deserialize` by hand so both wrong strings
+// (`E::unknown_variant`) and wrong JSON types (`Visitor::expecting`) list every
+// accepted value. On rmcp 3.1.2, `Parameters<T>` returns deserialization errors
+// as a `CallToolResult` (`isError: true`) before any `LamboServer` handler
+// runs. For those two enum slots, `E::unknown_variant` still repeats the
+// caller's decoded string (potentially an escaped control character) back to
+// the model, whereas `WireImage.mime` intentionally accepts any string during
+// deserialization (listing accepted MIME types only via `Visitor::expecting`
+// for non-string JSON types) and defers string allowlist validation to
+// `surface::image::validate`, which redacts caller strings.
 // ===========================================================================
 
 /// What kind of thing a concept is. Pick the one that fits the content best:
@@ -52,7 +52,8 @@ use crate::types::{AgentId, ConceptType};
 /// - `resource` — something produced, consumed, or acted on by the work.
 /// - `observation` — something noticed in passing; the weakest kind, and
 ///   the only one that can later be demoted.
-#[derive(Clone, Copy, Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Clone, Copy, Debug, schemars::JsonSchema)]
+#[schemars(inline)]
 #[serde(rename_all = "snake_case")]
 pub enum WireConceptType {
     Entity,
@@ -60,6 +61,36 @@ pub enum WireConceptType {
     Constraint,
     Resource,
     Observation,
+}
+
+const WIRE_CONCEPT_TYPE_VALUES: &[&str] =
+    &["entity", "logic", "constraint", "resource", "observation"];
+
+impl<'de> Deserialize<'de> for WireConceptType {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor;
+
+        impl serde::de::Visitor<'_> for Visitor {
+            type Value = WireConceptType;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("one of `entity`, `logic`, `constraint`, `resource`, `observation`")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
+                match v {
+                    "entity" => Ok(WireConceptType::Entity),
+                    "logic" => Ok(WireConceptType::Logic),
+                    "constraint" => Ok(WireConceptType::Constraint),
+                    "resource" => Ok(WireConceptType::Resource),
+                    "observation" => Ok(WireConceptType::Observation),
+                    _ => Err(E::unknown_variant(v, WIRE_CONCEPT_TYPE_VALUES)),
+                }
+            }
+        }
+
+        deserializer.deserialize_str(Visitor)
+    }
 }
 
 impl From<WireConceptType> for ConceptType {
@@ -152,7 +183,8 @@ pub struct WireConcept {
     /// concept key refuses the whole call. Later writes may cite this name.
     #[schemars(length(max = 16_384))]
     pub name: Option<String>,
-    /// One of `entity`, `logic`, `constraint`, `resource`, `observation`.
+    // Field doc omitted so `#[schemars(inline)]` publishes `WireConceptType`'s
+    // per-variant guidance directly on the property instead of overwriting it.
     pub concept_type: WireConceptType,
     /// Optional: up to 8 existing concepts this one rests on, such as the
     /// ruling a decision applies. Cite each by its id: the 8 hex characters
@@ -499,7 +531,8 @@ pub struct StatsParams {
 
 /// What kind of thing the image is. One of `entity`, `logic`, `constraint`,
 /// `resource` (an image cannot be an `observation`).
-#[derive(Clone, Copy, Debug, Default, Deserialize, schemars::JsonSchema)]
+#[derive(Clone, Copy, Debug, Default, schemars::JsonSchema)]
+#[schemars(inline)]
 #[serde(rename_all = "snake_case")]
 pub enum WireImageConceptType {
     // The `Default` a struct literal's `..Default::default()` fills; not a
@@ -510,6 +543,60 @@ pub enum WireImageConceptType {
     Logic,
     Constraint,
     Resource,
+}
+
+const WIRE_IMAGE_CONCEPT_TYPE_VALUES: &[&str] = &["entity", "logic", "constraint", "resource"];
+
+impl<'de> Deserialize<'de> for WireImageConceptType {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor;
+
+        impl serde::de::Visitor<'_> for Visitor {
+            type Value = WireImageConceptType;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("one of `entity`, `logic`, `constraint`, `resource`")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
+                match v {
+                    "entity" => Ok(WireImageConceptType::Entity),
+                    "logic" => Ok(WireImageConceptType::Logic),
+                    "constraint" => Ok(WireImageConceptType::Constraint),
+                    "resource" => Ok(WireImageConceptType::Resource),
+                    _ => Err(E::unknown_variant(v, WIRE_IMAGE_CONCEPT_TYPE_VALUES)),
+                }
+            }
+        }
+
+        deserializer.deserialize_str(Visitor)
+    }
+}
+
+/// Accept any string so `surface::image::validate` enforces the allowlist without
+/// echoing caller input, while non-string JSON values still list the accepted MIME types.
+fn deserialize_image_mime<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<String, D::Error> {
+    struct Visitor;
+
+    impl serde::de::Visitor<'_> for Visitor {
+        type Value = String;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("one of `image/png`, `image/jpeg`, `image/webp`")
+        }
+
+        fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
+            Ok(v.to_owned())
+        }
+
+        fn visit_string<E: serde::de::Error>(self, v: String) -> Result<Self::Value, E> {
+            Ok(v)
+        }
+    }
+
+    deserializer.deserialize_string(Visitor)
 }
 
 impl From<WireImageConceptType> for ConceptType {
@@ -530,6 +617,7 @@ pub struct WireImage {
     /// The image's media type, which must match its bytes: `image/png`,
     /// `image/jpeg` or `image/webp`.
     #[schemars(extend("enum" = ["image/png", "image/jpeg", "image/webp"]))]
+    #[serde(deserialize_with = "deserialize_image_mime")]
     pub mime: String,
     /// The image bytes in base64 (standard alphabet, padded), on one line,
     /// with no `data:` prefix. At most 2 MiB decoded, and at most 4096 pixels
@@ -588,7 +676,8 @@ pub struct DeriveImageParams {
     /// the image id's length (16359 with the default 16-character id).
     #[schemars(length(max = 16_374))]
     pub caption: String,
-    /// One of `entity`, `logic`, `constraint`, `resource`.
+    // Field doc omitted so `#[schemars(inline)]` publishes `WireImageConceptType`'s
+    // full description directly on the property instead of overwriting it.
     pub concept_type: WireImageConceptType,
     /// Your id for this image: 1 to 64 lowercase letters and digits. The
     /// concept's content is the caption plus `[image:<image_id>]`; the same
