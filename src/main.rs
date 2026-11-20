@@ -153,6 +153,15 @@ enum Commands {
             help = "A Host (name or address, optionally :port) the portal also answers while no credential is configured, beside localhost, 127.0.0.1 and [::1]. Needed behind a proxy that forwards its public name. Repeatable."
         )]
         allowed_host: Vec<String>,
+        /// Never load the embedder (as lambo.toml [web] embedder = false):
+        /// recall runs on its keyword and recent legs and says the vector
+        /// leg is off. Without it the embedder loads on the first recall
+        /// that needs a query vector, never at startup.
+        #[arg(
+            long = "no-embedder",
+            help = "Never load the embedder (as lambo.toml [web] embedder = false): recall runs on its keyword and recent legs and says the vector leg is off. Without it the embedder loads on the first recall that needs one, never at startup."
+        )]
+        no_embedder: bool,
     },
     /// Scripted two-agent demo scenario (spec §13): two agents build one REST API, `user schema` earns Canonical, and the second agent's recall carries the blast-radius and conflict warnings.
     Demo {
@@ -1831,10 +1840,16 @@ fn main() -> ExitCode {
             session,
             allowed_host,
             auth_token,
+            no_embedder,
             ..
         } => match LamboFile::load_resolved(config) {
             Ok(file) => {
                 web = file.web.clone();
+                // #247: the flag turns the embedder off; it never turns a
+                // file's `embedder = false` back on.
+                if *no_embedder {
+                    web.embedder = Some(false);
+                }
                 // #4 PR 3: the credentials too, so an unset variable or a
                 // shared token costs no model load.
                 let planned = lambo::cli::serve_web::plan_sessions(session, &web).and_then(|s| {
@@ -2086,6 +2101,7 @@ fn main() -> ExitCode {
                 bind,
                 auth_token,
                 allowed_host: _,
+                no_embedder: _,
             },
             Resolved::Full(backends),
         ) => run_async(

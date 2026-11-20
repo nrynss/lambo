@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::auth::{portal_authority, AuthToken, HostCheck, PortalAuthority, WebCredential};
+use super::embedder::EmbedderGate;
 use super::views::{SessionView, ViewBounds, ViewCache};
 use crate::cli::caps::CliError;
 use crate::config::{AllowedHost, WebConfig};
@@ -36,6 +37,9 @@ pub(super) struct AppState {
     /// Every data route reads through this: one load per session per TTL,
     /// shared by every request (#4 PR 1).
     pub(super) views: ViewCache,
+    /// The embedder, loaded on the first recall that embeds a query, or
+    /// off by configuration (#247).
+    pub(super) embedder: EmbedderGate,
 }
 
 impl AppState {
@@ -65,6 +69,7 @@ impl AppState {
         let authority = portal_authority(auth, credentials, &sessions);
         Self {
             views: ViewCache::new(sessions.iter().cloned(), bounds),
+            embedder: EmbedderGate::new(web.embedder_enabled()),
             host_check: HostCheck::for_authority(&authority, allowed_hosts),
             authority,
             sessions,

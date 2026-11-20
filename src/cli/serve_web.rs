@@ -98,6 +98,15 @@
 //! feed, and `durable_change_age_ms` (how long since this reader last observed
 //! the durable snapshot change) — all of which move during a demo scenario.
 //!
+//! # The embedder: on first recall, or never (#247)
+//!
+//! Only recall's vector leg needs the embedder, and an in-process model
+//! (candle BGE-M3) costs about 1.3 GB per process once loaded. So startup
+//! and browsing never load it: the first recall that embeds a query does,
+//! once, and keeps it. `[web] embedder = false` or `--no-embedder` never
+//! loads it, and recall runs on its keyword and recent legs, saying the
+//! vector leg is off by configuration. See `embedder`.
+//!
 //! # Deployment (P9 target: AWS)
 //!
 //! * **Self-contained binary.** `web/index.html`, `web/app.css` and `web/app.js`
@@ -129,6 +138,7 @@
 //! | `scope` | which session a request reads: the per-request resolution, before routing (#4) |
 //! | `state` | `AppState`: served sessions, backends, credential set, view cache |
 //! | `views` | the per-session reader views: one load per TTL, single-flight, bounded (#4) |
+//! | `embedder` | the embedder gate: loaded on the first recall that embeds a query, or off (#247) |
 //! | `dto` | every response and query type |
 //! | `projections` | the reads: hop-1 structural dependents, the ordered event feed, the stats |
 //! | `routes` | the handlers and `router`, `GET` only |
@@ -147,18 +157,16 @@ use std::time::Duration;
 use axum::Router;
 
 use super::caps::{check_size_cli, require_nonempty, CliError};
-use crate::surface::session::{parse_addressed, MAX_ADDRESSED_LEN};
-// `routes::api_recall` names it as `super::recall`, unchanged from when it
-// lived here.
-use super::recall;
 use crate::config::{AllowedHost, WebConfig};
 use crate::mcp::AUTH_TOKEN_ENV;
 use crate::resolve::ResolvedBackends;
 use crate::store::StoreKind;
+use crate::surface::session::{parse_addressed, MAX_ADDRESSED_LEN};
 use crate::types::SessionId;
 
 mod auth;
 mod dto;
+mod embedder;
 mod headers;
 mod projections;
 mod routes;
@@ -234,7 +242,9 @@ pub struct Args {
     /// (or, without one, the implicit loopback grant).
     pub credentials: Vec<WebCredential>,
     /// `[web]` from `lambo.toml`: the view TTL and the load and recall
-    /// bounds (#4). [`WebConfig::default`] when the file has no table.
+    /// bounds (#4), and whether recall uses the embedder (#247; the CLI sets
+    /// `embedder = Some(false)` for `--no-embedder`). [`WebConfig::default`]
+    /// when the file has no table.
     pub web: WebConfig,
 }
 
@@ -437,14 +447,10 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
         .preflight_schema()
         .await
         .map_err(|e| CliError::Runtime(e.to_string()))?;
-    // Issue #31: the resolve no longer puts a candle model on the device;
-    // load it now, before the listener binds, so the first recall costs what
-    // it did when the resolve loaded it. A no-op for every other kind.
-    backends
-        .embedder
-        .prepare()
-        .await
-        .map_err(|e| CliError::Runtime(format!("the embedder could not be loaded: {e}")))?;
+    // #247: the embedder is NOT loaded here. The resolve built it without
+    // its weights (#31); the first recall that embeds a query loads it
+    // (`embedder::EmbedderGate`), and `[web] embedder = false` never does,
+    // so a portal nobody recalls on costs no model memory.
 
     let exposed = !args.bind.is_loopback();
     let state = Arc::new(AppState::new(
@@ -499,6 +505,20 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
         bounds.load_concurrency,
         bounds.recall_concurrency,
     );
+    // #247: say which embedder recall uses and when it loads. Kind only,
+    // never a URL or path.
+    if state.embedder.enabled() {
+        println!(
+            "lambo serve-web: embedder '{}' — loaded on the first recall that needs a query \
+             vector, not at startup",
+            state.backends.embedder_cfg.kind
+        );
+    } else {
+        println!(
+            "lambo serve-web: embedder off ([web] embedder = false or --no-embedder) — recall \
+             runs on its keyword and recent legs, no vector leg"
+        );
+    }
     // A non-loopback bind always carries a credential (`authorize_bind_web`),
     // so the two branches below are exhaustive: credential configured, or
     // loopback.
