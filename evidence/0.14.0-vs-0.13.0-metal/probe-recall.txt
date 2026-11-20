@@ -1,0 +1,87 @@
+sides: baseline=0130a control=0130b candidate=0140; rounds=3
+  q n_base n_ctrl n_cand  J base/cand  J base/ctrl  stable b/c/n
+  0      9      9      9         1.00         1.00         N/N/N
+  1      9      9      9         1.00         1.00         N/N/N
+  2      9      8      9         1.00         0.89         N/y/N
+  3      9      8      8         0.89         0.89         N/y/y
+  4      8      8      8         1.00         1.00         y/y/y
+  5      8      8      8         1.00         1.00         y/y/y
+  6      8      8      8         1.00         1.00         y/y/y
+  7      8      8      8         1.00         1.00         y/y/y
+  8      8      8      8         1.00         1.00         y/y/y
+  9      8      8      8         1.00         1.00         y/y/y
+ 10      8      8      8         1.00         1.00         y/y/y
+ 11      8      8      8         1.00         1.00         y/y/y
+ 12      8      8      8         1.00         1.00         y/y/y
+ 13      8      8      8         1.00         1.00         y/y/y
+ 14      8      8      8         1.00         1.00         y/y/y
+ 15      8      8      8         1.00         1.00         y/y/y
+ 16      8      8      8         1.00         1.00         y/y/y
+ 17      8      8      8         1.00         1.00         y/y/y
+ 18      8      8      8         1.00         1.00         y/y/y
+ 19      8      8      8         1.00         1.00         y/y/y
+mean Jaccard baseline/candidate: 0.994   baseline/control (same build): 0.989
+
+--- query 2: first-round hits per side (id prefix, score, type, session, warnings)
+  [0130a] err=False hits=9 warnings=1 top_legs={'bm25': 15.993133656115795, 'exact_name_match': False, 'vector_cosine': 0.6780803799629211}
+      warning: Session inactive 50619 seconds
+      0 b0df5186 score=8.0968 Observation session=lambo in-others=== companion=False
+      1 92c0e668 score=6.9322 Logic session=lambo in-others=== companion=False
+      2 1ca7c444 score=6.8225 Observation session=lambo in-others=== companion=False
+      3 accefd50 score=6.5032 Observation session=lambo in-others=== companion=False
+      4 932e282b score=6.3806 Logic session=lambo in-others=== companion=False
+      5 302c926a score=6.3774 Resource session=lambo in-others=== companion=False
+      6 a70e4e20 score=6.0138 Entity session=lambo in-others=== companion=False
+      7 fac7f84f score=5.8441 Entity session=lambo in-others=== companion=False
+      8 64c27e3d score=0.3617 Resource session=lambo in-others=!= companion=False
+  [0130b] err=False hits=8 warnings=0 top_legs={'bm25': 15.993133656115795, 'exact_name_match': False, 'vector_cosine': 0.6780803799629211}
+      0 b0df5186 score=8.0968 Observation session=lambo in-others=== companion=False
+      1 92c0e668 score=6.9322 Logic session=lambo in-others=== companion=False
+      2 1ca7c444 score=6.8225 Observation session=lambo in-others=== companion=False
+      3 accefd50 score=6.5032 Observation session=lambo in-others=== companion=False
+      4 932e282b score=6.3806 Logic session=lambo in-others=== companion=False
+      5 302c926a score=6.3774 Resource session=lambo in-others=== companion=False
+      6 a70e4e20 score=6.0138 Entity session=lambo in-others=== companion=False
+      7 fac7f84f score=5.8441 Entity session=lambo in-others=== companion=False
+  [0140] err=False hits=9 warnings=1 top_legs={'bm25': 15.993133656115795, 'exact_name_match': False, 'vector_cosine': 0.6780803799629211}
+      warning: Session inactive 50619 seconds
+      0 b0df5186 score=8.0968 Observation session=lambo in-others=== companion=False
+      1 92c0e668 score=6.9322 Logic session=lambo in-others=== companion=False
+      2 1ca7c444 score=6.8225 Observation session=lambo in-others=== companion=False
+      3 accefd50 score=6.5032 Observation session=lambo in-others=== companion=False
+      4 932e282b score=6.3806 Logic session=lambo in-others=== companion=False
+      5 302c926a score=6.3774 Resource session=lambo in-others=== companion=False
+      6 a70e4e20 score=6.0138 Entity session=lambo in-others=== companion=False
+      7 fac7f84f score=5.8441 Entity session=lambo in-others=== companion=False
+      8 64c27e3d score=0.3617 Resource session=lambo in-others==! companion=False
+
+--- query 3: first-round hits per side (id prefix, score, type, session, warnings)
+  [0130a] err=False hits=9 warnings=1 top_legs={'bm25': 10.95244428909088, 'exact_name_match': False, 'vector_cosine': 0.7386522889137268}
+      warning: Session inactive 50619 seconds
+      0 487c8954 score=5.6161 Resource session=lambo in-others=== companion=False
+      1 f6246270 score=4.8037 Logic session=lambo in-others=== companion=False
+      2 0aaf5cfd score=4.8024 Logic session=lambo in-others=== companion=False
+      3 ac8894d2 score=4.5100 Resource session=lambo in-others=== companion=False
+      4 c26bf16a score=4.1987 Constraint session=lambo in-others=== companion=False
+      5 7d8b3ed3 score=4.1682 Constraint session=lambo in-others=== companion=False
+      6 d14af03f score=3.9745 Logic session=lambo in-others=== companion=False
+      7 0b1bf486 score=3.9648 Constraint session=lambo in-others=== companion=False
+      8 64c27e3d score=0.3617 Resource session=lambo in-others=!! companion=False
+  [0130b] err=False hits=8 warnings=0 top_legs={'bm25': 10.95244428909088, 'exact_name_match': False, 'vector_cosine': 0.7386522889137268}
+      0 487c8954 score=5.6161 Resource session=lambo in-others=== companion=False
+      1 f6246270 score=4.8037 Logic session=lambo in-others=== companion=False
+      2 0aaf5cfd score=4.8024 Logic session=lambo in-others=== companion=False
+      3 ac8894d2 score=4.5100 Resource session=lambo in-others=== companion=False
+      4 c26bf16a score=4.1987 Constraint session=lambo in-others=== companion=False
+      5 7d8b3ed3 score=4.1682 Constraint session=lambo in-others=== companion=False
+      6 d14af03f score=3.9745 Logic session=lambo in-others=== companion=False
+      7 0b1bf486 score=3.9648 Constraint session=lambo in-others=== companion=False
+  [0140] err=False hits=8 warnings=0 top_legs={'bm25': 10.95244428909088, 'exact_name_match': False, 'vector_cosine': 0.7386522889137268}
+      0 487c8954 score=5.6161 Resource session=lambo in-others=== companion=False
+      1 f6246270 score=4.8037 Logic session=lambo in-others=== companion=False
+      2 0aaf5cfd score=4.8024 Logic session=lambo in-others=== companion=False
+      3 ac8894d2 score=4.5100 Resource session=lambo in-others=== companion=False
+      4 c26bf16a score=4.1987 Constraint session=lambo in-others=== companion=False
+      5 7d8b3ed3 score=4.1682 Constraint session=lambo in-others=== companion=False
+      6 d14af03f score=3.9745 Logic session=lambo in-others=== companion=False
+      7 0b1bf486 score=3.9648 Constraint session=lambo in-others=== companion=False
