@@ -49,60 +49,64 @@
     without re-embed — use `EmbeddingContract` on `GraphSnapshot`.
   - Never commit `models/` weights.
 
-## Consulting memory before infrastructure work
+## Consulting memory (Lambo MCP)
 
-If a Lambo MCP server is attached, treat it as the record of what other agents
-have already built, and consult it **before** advising on or performing any
-change to shared infrastructure.
+If a Lambo MCP server (`lambo-dogfood` or an infrastructure session) is attached,
+use it as shared multi-agent memory alongside the repo. For repository
+development work (no server attached = no obligation), never block on an outage:
+fall back to `dev-diary/` and note it. For destructive infrastructure actions,
+stay fail-closed and stop until recall succeeds (see
+`skills/lambo-cloudops/SKILL.md`).
 
-- Before deleting, detaching, renaming or reconfiguring a resource, call
-  `lambo_recall` with the resource name, and `lambo_inspect` on it when the
-  answer is not obvious. Do this first, before reading code or searching the
-  filesystem: the graph records what other agents actually provisioned, which
-  source files do not.
-- A load-bearing warning or a non-zero blast radius means other work depends on
-  the resource. Say so plainly and name the dependents rather than proceeding.
-- Recorded dependents are authoritative for the question "would this break
-  something another agent built". They are not a substitute for verifying live
-  provider state, so say which of the two you checked.
-- After doing the work, write it back with `lambo_derive` and
-  `lambo_record_action` so the next agent inherits it.
+### Before acting
+- **Recall early, then refine:** Call `lambo_recall` on the task topic (or target
+  AWS/infra resource) *before* reading code or editing; run a second targeted recall
+  once you learn exact symbol or resource names.
+- **Authority order:** Memory is prior context, not unquestioned authority. For code,
+  `spec → phase doc / source → memory`; for infra, memory answers *"would this break
+  something another agent built?"* while live provider state answers what exists now.
+  On conflict, name it explicitly and update memory with `against`.
+- **Triage warnings (don't false-halt, never ignore real conflicts):**
+  - *Act immediately:* `⚠ Contradicted`, `⚠ Rests on a contradicted concept`,
+    `⚠ Possibly superseded`, `Reserved by`, or recent-write conflict lines. Read the
+    contradicting concept and list stale dependents with `lambo_stale` when cleaning up.
+  - *Scope-check `⚑ Load-bearing pillar`:* Canonical-first ordering can surface
+    incidental Canonical hits from unrelated subsystems. Treat `⚑` as **blocking only
+    when your change modifies, removes, or breaks that concept's surface or resource** —
+    then call `lambo_inspect` on its ID or durable name (with matching `scope` for
+    layer hits) and name the dependents before editing.
 
-## Consulting memory during development work (dogfood)
-
-If a `lambo-dogfood` MCP server is attached, this project's own development memory
-is live (see `dev-diary/lambo-for-mooshik/DOGFOOD.md`). The rules mirror the
-infrastructure section above, applied to design surface instead of resources:
-
-- **Recall before starting a workstream** or touching shared design surface (the
-  dialect trait, width/pin semantics, quarantine rules, recall constants, CI rows):
-  call `lambo_recall` with the topic. Decisions recorded there are settled — do not
-  re-litigate them; if one must change, say so explicitly and update the graph.
-- A load-bearing warning or non-zero blast radius on a concept means another
-  workstream rests on it. Treat it as blocking: name the dependents before editing.
-- **Derive decisions, not activity.** After a design decision, review verdict, or
-  constant change, call `lambo_derive` with the decision *and its why*. Git records
-  what was done; the graph records what the next agent must not re-derive.
-- **`record_action` on merges** — workstream landed, review round closed, dogfood
-  binary re-pinned.
-- **Cite the rulings you rely on by id** (once the dogfood writer runs 0.6.0; a 0.5.0
-  writer stores an id as text). When a decision or action rests on a ruling recall
-  showed you, put its id (the 8 hex characters recall shows) in `depends_on`: on
-  `lambo_record_action`, or on the concept in `lambo_derive`. The ruling then gains a
-  dependent, instead of a short alias Entity collecting the citation.
-- **Name what a write shows to be wrong in `against`** (also 0.6.0 only; a 0.5.0 writer
-  refuses the field). When a decision, finding or action contradicts a concept already in
-  memory, put that concept's id in `against`, on the concept in `lambo_derive` or on
-  `lambo_record_action`. It records the contradiction, dated by your write's about-time
-  (its `event_time` if you give one, else now); it adds no dependent, changes no score or
-  promotion, raises no conflict, and never replaces the older concept. When the older
-  concept is Canonical or Venerable, later recalls warn that it is contradicted and show
-  your concept beside it, but only from the daemon's next cycle after your write, only
-  while your contradiction is newer than other agents' eligible evidence for that concept
-  (your own citations do not count against it), and not on dependency-question answers
-  ("what depends on X"), which carry no warnings. Do not cite and contradict one concept in the same call (refused).
-- Use one stable `agent_id` for an agent's whole life (model or client id: `claude-opus-5-5`,
-  `codex-agent`, …), never per call, task or topic. Agents sharing an id share soft locks, so
-  concurrent agents that must not collide need distinct stable ids (model + stable suffix).
-- No server attached = no obligation. Never block on the memory being up; fall back
-  to the dev-diary and note the outage.
+### Writing back
+- **Derive decisions, not logs:** Call `lambo_derive` at decision time with one atomic
+  fact + its *why* (`logic` or `constraint`). Activity (merges, review rounds, binary
+  re-pins, infra changes) goes to `lambo_record_action`.
+- **Cite what you relied on:** Pass the 8-hex ID or durable name from recall in
+  `depends_on` (on `lambo_derive` concepts or `lambo_record_action`). Both 8-hex IDs
+  and durable names in `depends_on` and `against` must belong to the same target
+  session (when layered, `hits[].session` matches target).
+- **Contradict stale facts explicitly:** When new evidence invalidates a recalled
+  concept, pass its 8-hex ID or durable name in `against` (same-session rule applies;
+  never both `depends_on` and `against` for the same concept in one call, and never
+  `against` a `replacement_candidates` entry marked `newer`).
+- **Name standing rulings durably (`concepts[].name`):** Give a 2–4 word lowercase
+  kebab-case `<domain>-<subject>` name (no slashes; e.g. `single-writer-lease`,
+  `vector-dim-authority`) **only** to settled `logic`/`constraint` rulings or shared
+  infra pillars meant to be cited across workstreams. Never name `observation`s,
+  one-off findings, or file paths (names stay permanently reserved even after GC).
+  Wait via `lambo_stats(receipt, wait_ms)` before citing a brand-new name in the same
+  turn. Reference resolution differs by tool: `lambo_derive` refuses unknown
+  references, whereas in `lambo_record_action.depends_on` unregistered text creates a
+  new `Entity` concept (or a `Resource` for path-like entries under `repo_scope`;
+  registered names whose target was deleted, and retired alias IDs, are still refused) —
+  only pass durable names already confirmed in recall or an `applied` (or
+  `applied_after_restart`) receipt.
+- **Scope & paths (dogfood):** Write Lambo repo decisions without `scope` (session
+  `lambo`), using `repo_scope: "github.com/nrynss/lambo"` on new path-like `resource`
+  concepts and actions (older unscoped concepts must still be cited by ID). Write
+  cross-project preferences with `scope: "general"` (no bare relative paths). Shared
+  Lambo design surfaces that warrant recall + citation: the dialect trait, width/pin
+  semantics, quarantine/canonization rules, recall constants, and CI matrix rows.
+- **`agent_id`:** Use the exact model ID for this session (e.g. `claude-opus-5-5`,
+  `gpt-6.2-sol`, `gemini-4-neon`; harness name only as fallback). Keep it identical
+  across every call — never invent per-task or per-role IDs (add a stable instance
+  suffix if concurrent sessions must not share soft locks).

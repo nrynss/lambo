@@ -90,7 +90,7 @@ Every tool takes an `agent_id`, and every tool rejects any argument it does not 
 Do not send `created_at` or another client flush timestamp. Lambo stamps flush time itself. Only `lambo_derive` and `lambo_record_action` accept optional `event_time`: an RFC3339 historical about-time, such as a commit or document date. Omit `event_time` for a live fact, which is about now. Other timestamp arguments are refused by name.
 </Note>
 
-You manage ordering. A read sees a write only after that write's tool call has returned. If you want a recall to see something you just derived, call `lambo_derive` first, wait for it to return, and then call `lambo_recall`.
+You manage ordering, and writes apply in the background. `lambo_derive`, `lambo_derive_image`, and `lambo_record_action` return once your input is validated and ordered, carrying a receipt id in the ack; sequential writes from one agent to the same session apply in submission order. If the very next read (`lambo_recall`, `lambo_inspect`, `lambo_stale`) or follow-up citation must see what you just wrote, pass that receipt to [`lambo_stats`](#lambo_stats) with `wait_ms` and confirm `receipt.state` is `applied` or `applied_after_restart` before reading or citing: retry waiting if it returns `pending` or `pending_replay` (for example if the wait timed out or wait slots were saturated), and do not assume the write is visible on unsuccessful or non-applied outcomes (`failed`, `dropped`, `intent_durable`, `close_unflushed`, `expired`, `restart_lost`, `never_issued`, `forbidden` — see [`lambo_stats`](#lambo_stats) for each state).
 
 ### What Lambo accepts in text
 
@@ -358,9 +358,7 @@ on its blocks. Through a layered endpoint, every structured hit still carries
 connection to unlayered `/mcp/s/general`, omits that field. A direct layer
 read through the project's endpoint also supplies a warning naming the layer;
 the warning does not replace its hits' `session` fields.
-MCP `scope` is not a CLI flag and is not accepted by
-the write tools yet. To write to another session today, deliberately connect
-to its own endpoint; a read of `general` does not redirect later project writes.
+MCP `scope` is not a CLI flag. Write tools also accept `scope` (see *Writing to a layer* under `lambo_derive`); a scoped read of `general` does not redirect later unscoped writes.
 
 ### lambo_derive
 
@@ -563,7 +561,7 @@ The same caption and `image_id` derived again is the same concept, and two image
 
 Record something the agent did, along with what it produces, modifies, and depends on. This is where activity goes: name the act in a short line, such as `merged PR #52`, rather than a narrative. A fact or decision that later work should recall is a concept for [`lambo_derive`](#lambo_derive). The action becomes a `Resource` concept, `produces` and `modifies` become causal edges, and `depends_on` becomes dependency edges. A `depends_on` entry makes the action a dependent of that concept, so it counts toward the concept's blast radius and its canonization evidence. `produces` and `modifies` record provenance and count toward neither.
 
-**Like `lambo_derive`, this returns before the write is applied**, and its ack carries a receipt resolved the same way. It has no embedding step of its own, so what asynchrony buys here is ordering: both write tools feed one queue per agent, so an action you record and then derive from is applied in that order.
+**Like `lambo_derive`, this returns before the write is applied**, and its ack carries a receipt resolved the same way. It embeds newly created texts in the background (when vector search is enabled) and shares one write queue per agent with `lambo_derive`, so an action you record and then derive from applies in that order.
 
 | Argument | Type | Required | Notes |
 |---|---|---|---|

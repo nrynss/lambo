@@ -25,7 +25,8 @@ would break a load-bearing resource is caught before it happens.
     `lambo reserve`, `lambo inspect`, `lambo stats`.
   - **MCP** (preferred for tool-using agents): `lambo_recall`,
     `lambo_derive`, `lambo_record_action`, `lambo_reserve`, `lambo_inspect`,
-    `lambo_saints`, `lambo_stats`. Every MCP tool takes your `agent_id`.
+    `lambo_saints`, `lambo_stale` (read-only list of direct stale dependents),
+    `lambo_stats`. Every MCP tool takes your `agent_id`.
 - Writers (`derive`, `record-action`, `reserve`) hold the session's
   single-writer lease. Sequence your writes; do not run two CLI writers
   against one session. Readers are read-only and may run freely.
@@ -71,9 +72,11 @@ that modifies a shared resource), you MUST check what you are about to break:
    Agent <other> wrote to it <n> seconds ago
    ```
 
-   (a live collision notice: another agent is working in that resource) and
+   (a live collision notice: another agent is working in that resource),
    `High-risk modification` lines (a high-value node modified within the
-   conflict window).
+   conflict window), active `Reserved by` soft locks, and `⚠ Contradicted` /
+   `⚠ Rests on a contradicted concept` warnings (verify the newer contradicting
+   concept before relying on the older fact).
 
 4. **Fail closed.** If recall refuses or errors — embedding-contract mismatch,
    store unreachable, vector leg refused — you MUST halt. An answer you cannot
@@ -114,11 +117,28 @@ dependencies, the protection is blind.
    or `lambo_record_action` (MCP). Example: an RDS instance `depends-on` its
    security group and subnets; a Lambda `depends-on` the RDS it queries.
    `depends-on` edges are what give a resource its blast radius — record them
-   faithfully.
+   faithfully. When citing a concept already returned by recall, pass its 8-hex
+   id or durable name in `depends_on` (or in `against` when new evidence shows
+   an older concept is wrong); in layered sessions, cite only hits whose
+   `hits[].session` matches the write's target session and keep foreign-session
+   hits as read-only context. For shared pillars meant to be cited repeatedly,
+   you may bind a lowercase kebab-case durable `name` (`<domain>-<subject>`,
+   e.g. `prod-vpc-base-sg`) via `concepts[].name` on MCP `lambo_derive` (over
+   CLI, pass `--name` on `lambo derive` or bind names on existing concepts with
+   `lambo names assign`).
 
-3. Writes are lease-held and exclusive; sequence them. A read only sees a
-   write after that write's own call has returned — derive/record before the
-   recall that is meant to see it.
+3. Writes are lease-held and exclusive; sequence them. Over CLI, a write waits
+   for flush before returning. Over MCP, `lambo_derive` and `lambo_record_action`
+   apply in the background and return a receipt id in the ack (`lambo_reserve` is
+   synchronous). If the very next read or citation must see the write
+   immediately, pass that receipt to `lambo_stats` with `wait_ms` and verify
+   `receipt.state` is `applied` or `applied_after_restart` before proceeding —
+   a completed `wait_ms` call alone does not prove visibility. If it returns
+   `pending` or `pending_replay` (for example after a wait timeout or saturated
+   wait slots), retry waiting and check again; handle unsuccessful or
+   non-applied outcomes (`failed`, `dropped`, `intent_durable`,
+   `close_unflushed`, `expired`, `restart_lost`, `never_issued`, `forbidden`)
+   separately without assuming the write is visible.
 
 ---
 

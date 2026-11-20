@@ -37,14 +37,43 @@ GC survival and coverage.
 The skill is a Markdown file. How you attach it depends on your client.
 
 - **Claude Code**: copy the directory into `~/.claude/skills/lambo-cloudops/`,
-  or into `.claude/skills/` inside the project you are working in.
+  or into `.claude/skills/` inside the project you are working in. If your
+  repository keeps its rules in `AGENTS.md`, add a one-line `CLAUDE.md`
+  containing `@AGENTS.md` so Claude Code loads it automatically.
 - **Cursor**: place the rules in an `AGENTS.md` at the root of the working
-  directory, or use its own skills mechanism.
-- **Anything else**: most agent harnesses read a rules or system file. The
-  content matters; the filename does not.
+  directory, or add an always-apply `.mdc` rule in `~/.cursor/rules/`.
+- **Codex / anything else**: most agent harnesses read an `AGENTS.md`, rules,
+  or system file. The content matters; the filename does not.
 
 Attaching the Lambo MCP server is the other half. See
 [MCP tools](/mcp) for the server definition and the MCP tools it exposes.
+
+## Using Lambo in a code repository
+
+When coding agents share a Lambo session alongside a repository (as this repo's
+own `AGENTS.md` does), add four habits on top of the pre-flight rule:
+
+- **Recall twice:** Recall on the task topic before reading code, then run a
+  second targeted recall once you know the concrete symbol or file names. Treat
+  memory as prior context (`spec → source → memory`); on conflict, record
+  `against`.
+- **Cite by 8-hex ID or durable name:** Pass the 8-hex ID or durable name from
+  recall in `depends_on` (so rulings earn real structural dependents instead of
+  plain-text alias nodes) and in `against` (so contradictions bind unambiguously
+  to the refuted concept). References resolve only in the write's target
+  session: when layered, cite only hits whose `hits[].session` matches the
+  target session, and treat foreign-session hits (such as `general`-layer
+  rulings when writing to a repository session) as read-only context rather than
+  citing them across sessions or moving repository decisions into `general`.
+- **Name standing rulings selectively:** Bind a short lowercase kebab-case
+  `concepts[].name` (`<domain>-<subject>`, no slashes) only to settled `logic`
+  or `constraint` rulings meant to be cited across PRs — never to
+  `observation`s or file paths (names stay reserved permanently even after GC).
+- **Triage warnings by scope:** Always act on `⚠ Contradicted`, `⚠ Rests on a
+  contradicted concept`, `⚠ Possibly superseded`, and active `Reserved by` /
+  conflict lines. For `⚑ Load-bearing pillar`, check whether the hit's surface
+  is in your edit scope before halting, then run `lambo_inspect` and name its
+  dependents.
 
 ## Why the rule is load-bearing
 
