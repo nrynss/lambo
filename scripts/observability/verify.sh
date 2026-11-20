@@ -537,6 +537,7 @@ if "$py" "$here/recall_first.py" --json "$work/multi-session-no-restart.jsonl" \
 d = json.load(sys.stdin)
 assert d["restarts"] == [], d["restarts"]
 assert d["restarts_by_session"] == {}, d["restarts_by_session"]
+assert d["restarts_unspecified_session"] == [], d["restarts_unspecified_session"]
 assert d["overall_compliance"] == 1.0, d["overall_compliance"]
 assert d["total_write_sequences"] == 2, d["total_write_sequences"]
 assert d["total_recall_first_sequences"] == 2, d["total_recall_first_sequences"]
@@ -586,6 +587,7 @@ if "$py" "$here/recall_first.py" --json "$work/multi-session-one-restart.jsonl" 
 d = json.load(sys.stdin)
 assert d["restarts"] == ["2026-08-26T09:03:30+00:00"], d["restarts"]
 assert d["restarts_by_session"] == {"beta": ["2026-08-26T09:03:30+00:00"]}, d["restarts_by_session"]
+assert d["restarts_unspecified_session"] == [], d["restarts_unspecified_session"]
 assert d["total_write_sequences"] == 4, d["total_write_sequences"]
 assert d["total_recall_first_sequences"] == 2, d["total_recall_first_sequences"]
 assert d["overall_compliance"] == 0.5, d["overall_compliance"]
@@ -605,10 +607,32 @@ if "$py" "$here/recall_first.py" --json "$ledger" \
    | "$py" -c 'import json,sys
 d = json.load(sys.stdin)
 assert d["restarts"] == ["2026-08-18T11:00:00+00:00"], d["restarts"]
-assert d["restarts_by_session"] == {"<unspecified>": ["2026-08-18T11:00:00+00:00"]}, d["restarts_by_session"]'; then
-  printf '    ok   legacy pre-#32 sample groups restarts under <unspecified>\n'
+assert d["restarts_by_session"] == {}, d["restarts_by_session"]
+assert d["restarts_unspecified_session"] == ["2026-08-18T11:00:00+00:00"], d["restarts_unspecified_session"]'; then
+  printf '    ok   legacy pre-#32 sample reports restarts under restarts_unspecified_session\n'
 else
-  printf '    FAIL legacy pre-#32 sample did not map restarts_by_session to <unspecified>\n'
+  printf '    FAIL legacy pre-#32 sample did not separate restarts_unspecified_session\n'
+  fail=1
+fi
+
+# Verify a literal "<unspecified>" session name cannot collide with legacy
+# session-less heartbeats in the JSON output.
+cat >"$work/legacy-vs-literal-unspecified.jsonl" <<'COLLISION'
+{"v":1,"ts":"2026-08-27T09:00:00+00:00","kind":"stats","uptime_secs":100,"version":"0.2.2","git_sha":"aaaa111","stats":{"ledger_dropped_lines":0,"ledger_queued_lines":0}}
+{"v":1,"ts":"2026-08-27T09:01:00+00:00","kind":"stats","uptime_secs":5,"version":"0.2.2","git_sha":"aaaa111","stats":{"ledger_dropped_lines":0,"ledger_queued_lines":0}}
+{"v":1,"ts":"2026-08-27T09:00:30+00:00","kind":"stats","session":"<unspecified>","uptime_secs":200,"version":"0.13.0","git_sha":"bbbb222","stats":{"session":"<unspecified>","ledger_dropped_lines":0,"ledger_queued_lines":0}}
+{"v":1,"ts":"2026-08-27T09:02:00+00:00","kind":"stats","session":"<unspecified>","uptime_secs":10,"version":"0.13.0","git_sha":"bbbb222","stats":{"session":"<unspecified>","ledger_dropped_lines":0,"ledger_queued_lines":0}}
+{"v":1,"ts":"2026-08-27T09:00:10+00:00","kind":"call","tool":"lambo_recall","agent_id":"a","outcome":"ok","duration_us":10,"query":"q","top_k":8,"hit_count":0,"hits":[]}
+COLLISION
+if "$py" "$here/recall_first.py" --json "$work/legacy-vs-literal-unspecified.jsonl" \
+   | "$py" -c 'import json,sys
+d = json.load(sys.stdin)
+assert d["restarts"] == ["2026-08-27T09:01:00+00:00", "2026-08-27T09:02:00+00:00"], d["restarts"]
+assert d["restarts_by_session"] == {"<unspecified>": ["2026-08-27T09:02:00+00:00"]}, d["restarts_by_session"]
+assert d["restarts_unspecified_session"] == ["2026-08-27T09:01:00+00:00"], d["restarts_unspecified_session"]'; then
+  printf '    ok   legacy restarts stay separate from a literal "<unspecified>" session\n'
+else
+  printf '    FAIL legacy restarts collided with a literal "<unspecified>" session\n'
   fail=1
 fi
 

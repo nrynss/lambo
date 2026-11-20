@@ -46,15 +46,11 @@ Usage:
 
 from __future__ import annotations
 
-import datetime as dt
 import sys
 from typing import Any
 
 import _ledger
 from _ledger import RECALL_TOOL, WRITE_TOOLS
-
-
-UNSPECIFIED_SESSION = "<unspecified>"
 
 
 def analyse(ledger: _ledger.Ledger, gap_minutes: float) -> dict[str, Any]:
@@ -134,18 +130,21 @@ def analyse(ledger: _ledger.Ledger, gap_minutes: float) -> dict[str, Any]:
 
     total_seq = sum(a["write_sequences"] for a in per_agent.values())
     total_good = sum(a["recall_first_sequences"] for a in per_agent.values())
-    restarts_by_session_dt: dict[str, list[dt.datetime]] = {}
-    for sess, times in restarts_by_session.items():
-        key = UNSPECIFIED_SESSION if sess is None else sess
-        restarts_by_session_dt.setdefault(key, []).extend(times)
     restarts_by_session_json = {
-        key: [t.isoformat() for t in sorted(times)]
-        for key, times in restarts_by_session_dt.items()
+        sess: [t.isoformat() for t in times]
+        for sess, times in sorted(
+            (item for item in restarts_by_session.items() if item[0] is not None),
+            key=lambda item: item[0],
+        )
     }
+    restarts_unspecified = [
+        t.isoformat() for t in restarts_by_session.get(None, [])
+    ]
     return {
         "gap_minutes": gap_minutes,
         "restarts": [r.isoformat() for r in restarts],
         "restarts_by_session": restarts_by_session_json,
+        "restarts_unspecified_session": restarts_unspecified,
         "agents": per_agent,
         "total_write_sequences": total_seq,
         "total_recall_first_sequences": total_good,
