@@ -10,7 +10,7 @@ constants `BACKOFF_BASE` (100 ms), `BACKOFF_CAP` (10 s) and `RETAINED_BACKOFF`
 (= the cap), `FlushParams` (`retries`, `max_batch`, `log_max`) and
 `FlushStats::dead_lettered`; `StoreError::is_retryable` in `src/types/mod.rs`;
 and two clauses of the `GraphStore::flush` contract in `src/store/mod.rs`, the
-fencing token (#1) and "Idempotency contract (flush replay)".
+fencing token and "Idempotency contract (flush replay)".
 
 ## Model
 
@@ -51,7 +51,8 @@ Retry ladder:
   `upsert_idempotent`), a batch whose ladder succeeds is applied once in
   effect, lost acknowledgements included, and a retained batch re-sent with
   newer mutations behind it lands as if sent once. Without the assumption the
-  first fails (an append-only `decide` example).
+  first fails (an append-only `decide` example). Both assume nothing else
+  writes the store between the attempts (see `Idempotent`).
 
 The loop, over every run from `St.init` (`good_reachable`):
 * `Good.conserve`: ledger, then `pending`, then the graph log, is exactly the
@@ -79,8 +80,8 @@ The loop, over every run from `St.init` (`good_reachable`):
   (flag set), or is back at the front of the graph log for `Memory::close`.
   `abort_loses`: the one way out of this is the documented hard `abort`.
 * `fencing_refuses_after_takeover`, `flush_after_takeover` (with
-  `Lease.stale_token_refused`): once another identity holds the lease, every
-  attempt with the loop's token is refused as `StaleWrite` and commits
+  `Lease.stale_token_refused`, #1): once another identity holds the lease,
+  every attempt with the loop's token is refused as `StaleWrite` and commits
   nothing.
 
 ## What the model shows about the Rust
@@ -88,17 +89,34 @@ The loop, over every run from `St.init` (`good_reachable`):
 * `stale_write_retained`: `is_retryable` says the loop "treats it like a
   constraint"; it does not. Only the `Constraint` arm dead-letters, so a
   `StaleWrite` (not erased) is retained with the post-retry hold and
-  `retained_resent` sends it again every `RETAINED_BACKOFF` until the heartbeat
-  latches the fence (logged as `BackendFlushFailed ... never dropped`).
+  `retained_resent` sends it again every `RETAINED_BACKOFF` (logged as
+  `BackendFlushFailed ... never dropped`) for as long as the fence stays
+  unlatched. Normally the heartbeat (every `LEASE_HEARTBEAT_INTERVAL`, 15 s)
+  sees `Held` and latches it after one or two resends. It never latches if
+  the holder's own refresh re-takes the lease: a refresh is an acquire
+  (`GraphStore::refresh_lease`), an expired row held by another identity is
+  taken over with a new token (`MemoryStore::acquire_lease`, the SQL upsert),
+  and the heartbeat ignores the token an `Acquired` returns. After the
+  documented `OPERATOR_OVERRIDE` (holder `lambo:released`, row expired), or a
+  takeover and release by another writer within one heartbeat interval, the
+  wedged holder's next refresh wins at `token + 1`
+  (`override_refresh_retakes`). Its flush loop keeps the old token, so every
+  flush is refused, retained and resent every 10 s, the fence never latches,
+  the handle keeps accepting writes until the session degrades, and other
+  writers get `Held` (the `exRetaken` examples).
 * `flush_after_fence_latched`: the fence check runs before the loop waits, so
-  a fence latched during the wait is seen only after the next branch has run,
-  and a due tick still sends the batch. The comment "once the heartbeat
-  latches a lost lease no further flush is issued" does not hold; the store's
-  token check is what refuses that flush.
+  a fence latched during the wait is seen only after the branch that ends the
+  wait has run. Since the wait is at most one `POLL_QUANTUM` (100 ms), that is
+  a further flush only when the fence latches within 100 ms before a due
+  tick, or while `pending` holds at least `max_batch` mutations. Then the
+  comment "once the heartbeat latches a lost lease no further flush is
+  issued" does not hold; the store's token check is what refuses that
+  flush.
 * `stop_requeues`: a stop that ends the wait after the fence latched hands the
   tail back to the graph log instead of dropping it, unlike the comment's
   "writing them (here OR handing them back for `close`'s final flush)".
-  `Memory::close` checks `lease_lost` itself before its final flush.
+  `Memory::close` checks `lease_lost` itself before it stops the loop, so in
+  practice this only changes which error a racing close reports.
 * `constraint_dead_lettered`: the dead letter is the whole merged `pending`,
   so mutations retained from an earlier outage are dropped with a later
   write's constraint violation, and `dead_lettered` counts one (see the
@@ -111,7 +129,13 @@ carry (#17, #29); the graph's unflushed set (`mark_durable_through`,
 `pin_unflushed`, #60); `lag`, `depth` and `publish_stats`; writes that land
 during a cycle (they land between iterations here); the `select!` priority
 (the event list picks the branch); `refused_as_erased`'s store read (an input,
-`erased`); `Memory::close`'s own final flush.
+`erased`); `Memory::close`'s own final flush. The model also drops an
+ordering the Rust enforces: `select!` re-arms `sleep(POLL_QUANTUM)` on every
+iteration, so the real loop wakes, and runs the fence check, at least every
+100 ms. Here a run may space its wake-ups arbitrarily, so some event lists
+(a fence latched long before the next wake-up) are not realizable; the
+examples below include the polls that make them so. The theorems hold of
+every run, realizable or not.
 -/
 
 namespace Lambo.Flush
@@ -528,9 +552,14 @@ exactly when its transaction committed (`ok`, or a lost acknowledgement). -/
 def effect (ap : σ → α → σ) (s : σ) (calls : List (List α × Outcome)) : σ :=
   calls.foldl (fun s c => if c.2.committed then applyBatch ap s c.1 else s) s
 
-/-- **The assumption the code makes** (`GraphStore::flush`, "Idempotency
-contract (flush replay)"): applying a batch a second time right after it was
-applied changes nothing. -/
+/-- **The assumption the code makes**: applying a batch a second time right
+after it was applied changes nothing. It is implied by the `GraphStore::flush`
+"Idempotency contract (flush replay)". The contract also covers replaying a
+batch that partially succeeded; the model excludes partial success by the
+one-transaction-per-batch reading of `Outcome`. `ladder_ok_effect` and
+`replay_absorbs` also assume nothing else writes the store between the
+attempts, which the Rust does not guarantee: the canonization task and
+`write_flush_stats` write the same store concurrently. -/
 def Idempotent (ap : σ → α → σ) : Prop :=
   ∀ s b, applyBatch ap (applyBatch ap s b) b = applyBatch ap s b
 
@@ -1517,12 +1546,15 @@ theorem fenced_stops {s : St α} (hf : s.fenced = true) (w : Wake) (now : Nat) (
   · simp at hr; simp [hr]
 
 /-- **The fence is seen one pass late.** The check sits at the top of the
-loop, before the `select!` wait, so a fence latched during the wait (where the
-loop spends its time) is not seen by the branch that ends the wait: a due tick
-still sends the batch to the store, and only the check after it drops the
-tail. The flush.rs comment says "once the heartbeat latches a lost lease no
-further flush is issued"; this is one further flush (at most one ladder),
-which the store-side token refuses (`flush_after_takeover`). -/
+loop, before the `select!` wait, so a fence latched during the wait is not
+seen by the branch that ends the wait: a due tick still sends the batch to the
+store, and only the check after it drops the tail. The wait is at most one
+`POLL_QUANTUM` (100 ms), so in the Rust this is a further flush only when the
+fence latches within 100 ms before a due tick, or while `pending` holds at
+least `max_batch` mutations. The flush.rs comment says "once the heartbeat
+latches a lost lease no further flush is issued"; this is one further flush
+(at most one ladder), which the store-side token refuses
+(`flush_after_takeover`). -/
 theorem flush_after_fence_latched {s : St α} {now : Nat} {er : Bool} (hrun : s.running = true)
     (hf : s.fenced = true) (h : Due P true now s) :
     (∃ rest, (iter P st .tick now er s).calls =
@@ -1534,8 +1566,9 @@ theorem flush_after_fence_latched {s : St α} {now : Nat} {er : Bool} (hrun : s.
 stop branch exits without the fence check, so a fence latched during the wait
 does not drop `pending`: it goes back to the graph log like any other stop
 (the flush.rs comment says a fenced tail is dropped, never handed back for
-`close`'s final flush; `Memory::close` checks `lease_lost` itself before that
-flush). -/
+`close`'s final flush; `Memory::close` checks `lease_lost` itself before it
+stops the loop). The equation is definitional (`iter`'s stop branch); the
+fenced case is the `decide` example after `exStale`. -/
 theorem stop_requeues {s : St α} (hr : s.running = true) (now : Nat) (er : Bool) :
     step P st s (.wake .stop now er) = requeue s ∧
     (requeue s).log = s.pending ++ s.log ∧ (requeue s).pending = [] ∧
@@ -1697,6 +1730,42 @@ theorem flush_after_takeover {released A : H} {a : Lease.Row H} (hA : a.holder =
       ⟨[(b, .fail .staleWrite)], [], some .staleWrite⟩ :=
   stale_write_one_call (fencing_refuses_after_takeover hA row inner n0 hsteps hother b n hn) retries
 
+/-- **A refresh can re-take the lease, and the flush loop does not follow.**
+The heartbeat's refresh is an acquire (`GraphStore::refresh_lease`). After the
+documented `OPERATOR_OVERRIDE` (here `Lease.release`: holder
+`lambo:released`, row expired, token kept), the wedged holder `A`'s own next
+refresh takes the row over: `A` holds it again, so the heartbeat gets
+`Acquired` and never latches the fence, but at `token + 1`, which the
+heartbeat ignores (`Ok(LeaseOutcome::Acquired(_)) => {}`). The flush loop still
+presents the token it was built with, so every attempt is refused as
+`StaleWrite`, for as long as this row stands. With `stale_write_retained`
+the batch is retained and resent every `RETAINED_BACKOFF`, indefinitely. -/
+theorem override_refresh_retakes {released A : H} (a : Lease.Row H) (hA : a.holder = A)
+    (hAr : A ≠ released) (now now' ttl : Int) (hle : now ≤ now') (inner : Store α) :
+    (Lease.acquire A now' ttl (Lease.release released A now a)).holder = A ∧
+    (Lease.acquire A now' ttl (Lease.release released A now a)).token = a.token + 1 ∧
+    ∀ b n, fencing (fun _ => Lease.acquire A now' ttl (Lease.release released A now a))
+      (some a.token) inner b n = .fail .staleWrite := by
+  have htok := Lease.acquire_after_release_bumps released A A now now' ttl a hA hAr hle
+  have hhold : (Lease.acquire A now' ttl (Lease.release released A now a)).holder = A := by
+    rw [Lease.release_mine hA]
+    have h2 : ({ holder := released, token := a.token, expires := now } : Lease.Row H).holder
+        ≠ A := fun e => hAr e.symm
+    have h1 : ¬ (now' < ({ holder := released, token := a.token, expires := now } :
+        Lease.Row H).expires ∧ ({ holder := released, token := a.token, expires := now } :
+        Lease.Row H).holder ≠ A) := by
+      intro hc
+      have : now' < now := hc.1
+      omega
+    rw [Lease.acquire_takeover h1 h2]
+  refine ⟨hhold, htok, ?_⟩
+  intro b n
+  have hp : permits (Lease.acquire A now' ttl (Lease.release released A now a)).token
+      (some a.token) = false := by
+    rw [htok]
+    simp [permits]
+  simp [fencing, hp]
+
 end Fencing
 
 /-! ## Examples -/
@@ -1776,23 +1845,27 @@ example :
 /-- The holder lost the lease: every write is refused as stale. -/
 def exStale : Store Nat := fun _ _ => .fail .staleWrite
 
+/-- A realizable run with a 5 s interval: ticks at 0, 5, 10, 15 and 20 s.
+The polls every 100 ms in between are left out except the last one before the
+fence: each drains nothing new, makes no call (below `max_batch`) and finds
+the fence unlatched, so it changes nothing. The fence latches at about
+19.95 s, within 100 ms before the 20 s tick. -/
+def exStaleRun : List (Ev Nat) :=
+  [.write 1, .wake .tick 0 false, .write 2, .wake .tick 5000 false,
+   .wake .tick 10000 false, .wake .tick 15000 false, .wake .poll 19900 false, .fence,
+   .wake .tick 20000 false]
+
 /-- `stale_write_one_call`, `stale_write_retained`, `retained_resent`,
-`flush_after_fence_latched`: each attempt is a single call, but the batch is
-retained and sent again after the hold; the fence latched at 15 s (while the
-loop waits) is seen only after the 20 s tick has sent the batch a third time.
-The tail is then dropped, not dead-lettered. -/
+`cycle_held`, `flush_after_fence_latched`: each attempt is a single call, but
+the batch is retained and sent again once the hold has passed (not at 5 s or
+15 s); the fence latched just before the 20 s tick is seen only after that
+tick has sent the batch a third time. The tail is then dropped, not
+dead-lettered. -/
 example :
-    (run exP exStale St.init
-      [.write 1, .wake .tick 0 false, .write 2, .wake .tick 5000 false,
-       .wake .tick 10000 false, .fence, .wake .tick 20000 false]).calls =
+    (run exP exStale St.init exStaleRun).calls =
       [([1], .fail .staleWrite), ([1, 2], .fail .staleWrite), ([1, 2], .fail .staleWrite)] ∧
-    (run exP exStale St.init
-      [.write 1, .wake .tick 0 false, .write 2, .wake .tick 5000 false,
-       .wake .tick 10000 false, .fence, .wake .tick 20000 false]).ledger =
-      [(.droppedFenced, [1, 2])] ∧
-    (run exP exStale St.init
-      [.write 1, .wake .tick 0 false, .write 2, .wake .tick 5000 false,
-       .wake .tick 10000 false, .fence, .wake .tick 20000 false]).deadLettered = 0 := by
+    (run exP exStale St.init exStaleRun).ledger = [(.droppedFenced, [1, 2])] ∧
+    (run exP exStale St.init exStaleRun).deadLettered = 0 := by
   decide
 
 /-- `stop_requeues`: a stop that ends the wait after the fence latched hands
@@ -1865,15 +1938,74 @@ example :
     s.consumed ++ s.pending ++ s.log = [] ∧ s.hist = [1] := by
   decide
 
-/-- `fencing_refuses_after_takeover`: holder `0` captured token `1`; from
-attempt `2` holder `1` has the lease at token `2`, and the stale token is
-refused. -/
+/-- The lease of `fencing_refuses_after_takeover`'s example, built with the
+`Lease` operations: holder `0` acquires at time 0 (token 1, TTL 10); holder
+`1` takes the expired row over at time 20 (token 2), before attempt `2`. The
+released marker is `99`. -/
+def exA : Lease.Row Nat := Lease.first 0 0 10
+
+def exRowT (n : Nat) : Lease.Row Nat := if n < 2 then exA else Lease.acquire 1 20 10 exA
+
+/-- `fencing_refuses_after_takeover` applied: its `Lease.Steps` and `hother`
+hypotheses hold for `exRowT`, so from attempt `2` every attempt with token `1`
+is refused. -/
+example : ∀ b n, 2 ≤ n → fencing exRowT (some exA.token) exFlaky b n = .fail .staleWrite :=
+  fencing_refuses_after_takeover (released := 99) (A := 0) rfl exRowT exFlaky 2
+    (fun n hn => by
+      have e : exRowT n = Lease.acquire 1 20 10 exA := by
+        simp [exRowT, Nat.not_lt.mpr hn]
+      rw [e]
+      exact Lease.Steps.tail (Lease.Steps.refl _) (Lease.Step.acq 1 20 10 exA (by decide)))
+    (fun n hn => by
+      have e : exRowT n = Lease.acquire 1 20 10 exA := by
+        simp [exRowT, Nat.not_lt.mpr hn]
+      rw [e]
+      decide)
+
+/-- The same rows, concretely: the takeover mints token 2 for holder 1, and a
+ladder before the takeover runs normally while one after it is one refused
+call. -/
 example :
-    let row : Nat → Lease.Row Nat := fun n =>
-      if n < 2 then { holder := 0, token := 1, expires := 100 }
-      else { holder := 1, token := 2, expires := 200 }
-    (flushWithRetry (fencing row (some 1) exFlaky) [7] 0 2).calls = [([7], .fail .backend), ([7], .ok)] ∧
-    (flushWithRetry (fencing row (some 1) exFlaky) [7] 2 2).calls = [([7], .fail .staleWrite)] := by
+    exA.token = 1 ∧ (exRowT 2).holder = 1 ∧ (exRowT 2).token = 2 ∧
+    (flushWithRetry (fencing exRowT (some 1) exFlaky) [7] 0 2).calls =
+      [([7], .fail .backend), ([7], .ok)] ∧
+    (flushWithRetry (fencing exRowT (some 1) exFlaky) [7] 2 2).calls =
+      [([7], .fail .staleWrite)] := by
+  decide
+
+/-- `override_refresh_retakes`: holder `0` holds token 1 (TTL 45 s); the
+operator override at 50 s releases the row; holder `0`'s own refresh at 60 s
+re-takes it at token 2. -/
+def exRetakenRow : Lease.Row Nat :=
+  Lease.acquire 0 60000 45000 (Lease.release 99 0 50000 (Lease.first 0 0 45000))
+
+/-- The store as the wedged holder's flush loop sees it from then on. -/
+def exRetaken : Store Nat := fencing (fun _ => exRetakenRow) (some 1) exFlaky
+
+/-- The refresh comes back `Acquired` (holder `0` again), so the heartbeat
+does not latch; every flush is refused, retained and resent every 10 s, and
+the handle keeps accepting writes. -/
+example :
+    exRetakenRow.holder = 0 ∧ exRetakenRow.token = 2 ∧
+    (run exP exRetaken St.init
+      [.write 1, .wake .tick 0 false, .write 2, .wake .tick 10000 false,
+       .wake .tick 20000 false, .write 3, .wake .tick 30000 false]).calls.length = 4 ∧
+    (run exP exRetaken St.init
+      [.write 1, .wake .tick 0 false, .write 2, .wake .tick 10000 false,
+       .wake .tick 20000 false, .write 3, .wake .tick 30000 false]).pending = [1, 2, 3] ∧
+    (run exP exRetaken St.init
+      [.write 1, .wake .tick 0 false, .write 2, .wake .tick 10000 false,
+       .wake .tick 20000 false, .write 3, .wake .tick 30000 false]).fenced = false := by
+  decide
+
+/-- ...until the backlog passes `log_max` and the session degrades. -/
+example :
+    (run { exP with logMax := 2 } exRetaken St.init
+      [.write 1, .wake .tick 0 false, .write 2, .wake .tick 10000 false,
+       .write 3, .wake .tick 20000 false]).degraded = true ∧
+    (run { exP with logMax := 2 } exRetaken St.init
+      [.write 1, .wake .tick 0 false, .write 2, .wake .tick 10000 false,
+       .write 3, .wake .tick 20000 false]).calls.length = 2 := by
   decide
 
 end Examples
