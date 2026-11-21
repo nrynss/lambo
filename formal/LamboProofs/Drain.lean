@@ -17,7 +17,8 @@ Rust items modelled (paths as at `16e9aafa`):
   `abort_all_sync`.
 * `src/writeq/replay.rs`: `spawn_replay` (seeding the restart map, the
   unconsumed filter, the liveness gate, the loop's match arm by arm, both
-  streaks, `EMBEDDER_SICK_THRESHOLD`, `REPLAY_LOOKUP_TIMEOUT_LIMIT`).
+  streaks, `EMBEDDER_SICK_THRESHOLD`, `REPLAY_LOOKUP_TIMEOUT_LIMIT`; since
+  #295 the deferred agents and `replay_order`).
 * `Graph::record_write_intent` / `consume_write_intent`
   (`src/graph/graph/mutation_log.rs`), the adapters' consume (an `UPDATE` by
   receipt) and their load order `ORDER BY issued_ms, lane_seq`
@@ -99,19 +100,34 @@ process's sequence starts at 1.
   it still stops on every other non-transient error; `stepInput_agrees`:
   nothing else changes; `fixed_agrees_with_worker`: replay and the in-session
   worker now both consume an input refusal `failed`.
+* The fix for #295 (`stepFixed` on top of `stepInput`, run through `loopD`,
+  which defers an agent for the rest of the serve at a transient answer, and
+  loaded by `fixedLoad`, which orders each process's rows by sequence number
+  within the positions the old load gave that process):
+  `loopD_no_overtake`: within a serve no write is applied while an earlier
+  write of its agent is left unsettled, for any step and any run results;
+  `fixed_agent_order`, `fixed_agent_order_load`: across two serves, whatever
+  the embedder answers, each agent's writes of one process apply in
+  admission order; `fixedLoad_sorted`, `fixed_epoch_seq_order`: per-process
+  sequence order with no clock assumption; `fixedLoad_epochs`: the
+  cross-process order is the old one; `fixedLoad_agrees`: while the clock
+  behaves the load is unchanged; `fixed_badId_settled`: an unparseable
+  receipt id is settled `failed`; `fixedD_input_goes_on`: #294 still holds.
 * `outage_failed_but_owed`: an in-session `EmbedUnavailable` answers
   `failed` and leaves the write owed (test
   `a_write_reached_during_an_in_session_embedder_outage_is_not_consumed`).
 
 What the model shows about the Rust (theorems in the last section):
 `transient_skip_reorders` and `outage_then_replay_reorders` (a transient
-embed answer breaks the per-agent order across serves),
-`clock_step_reorders` (the load order trusts the wall clock),
+embed answer breaks the per-agent order across serves; the replay half is
+fixed by #295, the in-session half is not: the worker still answers `failed`,
+leaves the intent owed and goes on to the agent's next write),
+`clock_step_reorders` (the load order trusts the wall clock; fixed by #295),
 `outage_failed_then_applied` (a doc fix: `ReceiptAnswer::Failed` says the
 write did not happen, and after an outage it later does),
 `store_error_blocks_backlog` (a graph-dependent refusal raised as a plain
 `Invariant` stops the replay on every serve; fixed by #294, see above),
-`bad_id_never_settled`.
+`bad_id_never_settled` (fixed by #295).
 
 Not modelled: concurrency and the cancellation-safety custody of handles
 (`WorkerCustody`, `ReplayCustody`); `stop_replay` running before the quiesce;
@@ -1621,6 +1637,738 @@ theorem fixed_agrees_with_worker (img : Bool) (j : Job) (s : Streaks) :
       workerStep false j (.err .inputRefusal) = (.failed, [.consume j.key .failed]) :=
   ⟨rfl, rfl⟩
 
+/-! ## The fix for #295: per-agent order, a clock-free load order, bad ids
+
+Three changes on top of #294's step.
+
+* An intent whose receipt id does not parse is settled `failed` (`stepFixed`),
+  like a payload this build cannot decode (#129): it can never be applied or
+  looked up by its id, and before it was skipped on every serve and counted
+  owed forever (`bad_id_never_settled`).
+* A transient embedder answer below the threshold still leaves its intent
+  unconsumed, and now **defers that agent** for the rest of the serve
+  (`loopD`): none of its later intents is run, so none can apply before the
+  one left behind. Other agents' intents go on, and the threshold still counts
+  transients across all of them. The alternative, stopping the replay at the
+  first transient, also keeps the order, but makes one blip hold every
+  agent's backlog and leaves `EMBEDDER_SICK_THRESHOLD` with nothing to count.
+* Each process's intents are loaded in sequence order within its epoch
+  (`fixedLoad`): the (`issued_ms`, `lane_seq`) load decides which epoch each
+  position belongs to, as before, and the epoch's own intents fill its
+  positions in `lane_seq` order (`regroup`). No clock assumption is needed.
+
+In the Rust a deferred agent's intent is passed over after the loop's lease
+and seal check; here it is passed over before `rout` is consulted, which can
+only move where a halting replay stops, never what it settles. -/
+
+/-- The replay's match after #295: an unparseable receipt id settles
+`failed`; everything else is `stepInput` (#294). -/
+def stepFixed (image : Bool) (rr : RR) (s : Streaks) : Step × Streaks :=
+  match rr with
+  | .badId => (.failed, s)
+  | rr => stepInput image rr s
+
+/-- The replay loop after #295. `d` holds the agents deferred for the rest of
+the serve: an intent of one is passed over, unconsumed; a `skip` (a transient
+answer below the threshold) defers the intent's agent. Otherwise as
+`loopWith`. -/
+def loopD (step : Bool → RR → Streaks → Step × Streaks) (rout : Job → RR) :
+    Streaks → List Nat → List Intent → ROut
+  | _, _, [] => ROut.empty
+  | s, d, i :: rest =>
+    if i.job.agent ∈ d then loopD step rout s d rest
+    else
+      match step i.job.image (rout i.job) s with
+      | (.applied, s') =>
+        let o := loopD step rout s' d rest
+        { o with
+          answers := (i.job.key, .appliedAfterRestart) :: o.answers
+          log := [.write i.job.key, .consume i.job.key .appliedAfterRestart] :: o.log
+          applied := i.job :: o.applied }
+      | (.failed, s') =>
+        let o := loopD step rout s' d rest
+        { o with
+          answers := (i.job.key, .failed) :: o.answers
+          log := [.consume i.job.key .failed] :: o.log
+          failed := i.job :: o.failed }
+      | (.skip, s') => loopD step rout s' (i.job.agent :: d) rest
+      | (.stop b, _) => { ROut.empty with block := some b }
+
+/-- `spawn_replay` after #295: the same gate, the loop with no agent deferred
+yet. -/
+def replayD (step : Bool → RR → Streaks → Step × Streaks) (live : Bool) (rout : Job → RR)
+    (intents : List Intent) : ROut :=
+  match pendingOf intents with
+  | [] => ROut.empty
+  | p => if live then loopD step rout ⟨0, 0⟩ [] p else { ROut.empty with block := some .embedder }
+
+/-! ### The steps -/
+
+/-- On everything but an unparseable id the step is #294's. -/
+theorem stepFixed_agrees (img : Bool) (rr : RR) (s : Streaks) (h : rr ≠ .badId) :
+    stepFixed img rr s = stepInput img rr s := by
+  unfold stepFixed
+  split
+  · exact absurd rfl h
+  · rfl
+
+/-- An unparseable id settles `failed`, both streaks unchanged. -/
+theorem stepFixed_badId (img : Bool) (s : Streaks) : stepFixed img .badId s = (.failed, s) := rfl
+
+/-- #294 still holds: every input refusal settles `failed`. -/
+theorem stepFixed_refusesInput (img : Bool) (e : Err) (s : Streaks) (h : e.refusesInput = true) :
+    (stepFixed img (.run (.err e)) s).1 = .failed := by
+  rw [stepFixed_agrees img _ s (by simp)]
+  exact stepInput_refusesInput img e s h
+
+/-- The only result the fixed step leaves unsettled without stopping is a
+transient embedder answer: so only it defers an agent. -/
+theorem stepFixed_skip {img : Bool} {rr : RR} {s : Streaks} (h : (stepFixed img rr s).1 = .skip) :
+    rr = .run (.err .unavailable) := by
+  cases rr with
+  | halt => simp [stepFixed, stepInput, replayStep] at h
+  | badId => simp [stepFixed] at h
+  | decodeRefused => simp [stepFixed, stepInput, replayStep] at h
+  | run r =>
+    cases r with
+    | ok => simp [stepFixed, stepInput, replayStep] at h
+    | err e =>
+      cases e <;> simp [stepFixed, stepInput, replayStep] at h ⊢
+      all_goals (split at h <;> simp at h)
+
+/-! ### The loop -/
+
+theorem loopD_deferred {step : Bool → RR → Streaks → Step × Streaks} {rout : Job → RR}
+    {s : Streaks} {d : List Nat} {i : Intent} {rest : List Intent} (h : i.job.agent ∈ d) :
+    loopD step rout s d (i :: rest) = loopD step rout s d rest := by
+  simp [loopD, h]
+
+theorem loopD_applied {step : Bool → RR → Streaks → Step × Streaks} {rout : Job → RR}
+    {s s' : Streaks} {d : List Nat} {i : Intent} {rest : List Intent} (hd : i.job.agent ∉ d)
+    (h : step i.job.image (rout i.job) s = (.applied, s')) :
+    loopD step rout s d (i :: rest) =
+      { loopD step rout s' d rest with
+        answers := (i.job.key, .appliedAfterRestart) :: (loopD step rout s' d rest).answers
+        log := [.write i.job.key, .consume i.job.key .appliedAfterRestart] ::
+          (loopD step rout s' d rest).log
+        applied := i.job :: (loopD step rout s' d rest).applied } := by
+  simp only [loopD, hd, h, ite_false]
+
+theorem loopD_failed {step : Bool → RR → Streaks → Step × Streaks} {rout : Job → RR}
+    {s s' : Streaks} {d : List Nat} {i : Intent} {rest : List Intent} (hd : i.job.agent ∉ d)
+    (h : step i.job.image (rout i.job) s = (.failed, s')) :
+    loopD step rout s d (i :: rest) =
+      { loopD step rout s' d rest with
+        answers := (i.job.key, .failed) :: (loopD step rout s' d rest).answers
+        log := [.consume i.job.key .failed] :: (loopD step rout s' d rest).log
+        failed := i.job :: (loopD step rout s' d rest).failed } := by
+  simp only [loopD, hd, h, ite_false]
+
+theorem loopD_skip {step : Bool → RR → Streaks → Step × Streaks} {rout : Job → RR}
+    {s s' : Streaks} {d : List Nat} {i : Intent} {rest : List Intent} (hd : i.job.agent ∉ d)
+    (h : step i.job.image (rout i.job) s = (.skip, s')) :
+    loopD step rout s d (i :: rest) = loopD step rout s' (i.job.agent :: d) rest := by
+  simp only [loopD, hd, h, ite_false]
+
+theorem loopD_stop {step : Bool → RR → Streaks → Step × Streaks} {rout : Job → RR}
+    {s s' : Streaks} {d : List Nat} {i : Intent} {rest : List Intent} {b : Block}
+    (hd : i.job.agent ∉ d) (h : step i.job.image (rout i.job) s = (.stop b, s')) :
+    loopD step rout s d (i :: rest) = { ROut.empty with block := some b } := by
+  simp only [loopD, hd, h, ite_false]
+
+/-- `loop_facts` for the fixed loop, plus: no job of a deferred agent is
+applied. -/
+theorem loopD_facts (step : Bool → RR → Streaks → Step × Streaks) (rout : Job → RR) :
+    ∀ (l : List Intent) (s : Streaks) (d : List Nat),
+    (loopD step rout s d l).applied.Sublist (l.map (·.job)) ∧
+    (loopD step rout s d l).failed.Sublist (l.map (·.job)) ∧
+    NoPut (loopD step rout s d l).log.flatten ∧
+    (∀ x, x ∈ (loopD step rout s d l).applied ∨ x ∈ (loopD step rout s d l).failed →
+      ∃ t, Mut.consume x.key t ∈ (loopD step rout s d l).log.flatten) ∧
+    (∀ x ∈ (loopD step rout s d l).applied, x.agent ∉ d) := by
+  intro l
+  induction l with
+  | nil =>
+    intro s d
+    refine ⟨List.Sublist.slnil, List.Sublist.slnil, ?_, ?_, ?_⟩
+    · intro m hm; simp [loopD, ROut.empty] at hm
+    · intro x hx; simp [loopD, ROut.empty] at hx
+    · intro x hx; simp [loopD, ROut.empty] at hx
+  | cons i rest ih =>
+    intro s d
+    by_cases hd : i.job.agent ∈ d
+    · rw [loopD_deferred hd]
+      obtain ⟨h1, h2, h3, h4, h5⟩ := ih s d
+      exact ⟨List.Sublist.cons _ h1, List.Sublist.cons _ h2, h3, h4, h5⟩
+    · cases h : step i.job.image (rout i.job) s with
+      | mk st s' =>
+        cases st with
+        | applied =>
+          rw [loopD_applied hd h]
+          obtain ⟨h1, h2, h3, h4, h5⟩ := ih s' d
+          refine ⟨List.Sublist.cons_cons _ h1, List.Sublist.cons _ h2, ?_, ?_, ?_⟩
+          · intro m hm j
+            simp only [List.flatten_cons, List.mem_append, List.mem_cons] at hm
+            rcases hm with ((hm | hm | hm) | hm)
+            · rw [hm]; exact Mut.noConfusion
+            · rw [hm]; exact Mut.noConfusion
+            · simp at hm
+            · exact h3 m hm j
+          · intro x hx
+            simp only [List.mem_cons] at hx
+            rcases hx with (hx | hx) | hx
+            · exact ⟨.appliedAfterRestart, by rw [hx]; simp⟩
+            · obtain ⟨t, ht⟩ := h4 x (Or.inl hx)
+              exact ⟨t, by simp only [List.flatten_cons]; exact List.mem_append_right _ ht⟩
+            · obtain ⟨t, ht⟩ := h4 x (Or.inr hx)
+              exact ⟨t, by simp only [List.flatten_cons]; exact List.mem_append_right _ ht⟩
+          · intro x hx
+            cases List.mem_cons.mp hx with
+            | inl e => rw [e]; exact hd
+            | inr hx' => exact h5 x hx'
+        | failed =>
+          rw [loopD_failed hd h]
+          obtain ⟨h1, h2, h3, h4, h5⟩ := ih s' d
+          refine ⟨List.Sublist.cons _ h1, List.Sublist.cons_cons _ h2, ?_, ?_, h5⟩
+          · intro m hm j
+            simp only [List.flatten_cons, List.mem_append, List.mem_cons] at hm
+            rcases hm with ((hm | hm) | hm)
+            · rw [hm]; exact Mut.noConfusion
+            · simp at hm
+            · exact h3 m hm j
+          · intro x hx
+            simp only [List.mem_cons] at hx
+            rcases hx with hx | hx | hx
+            · obtain ⟨t, ht⟩ := h4 x (Or.inl hx)
+              exact ⟨t, by simp only [List.flatten_cons]; exact List.mem_append_right _ ht⟩
+            · exact ⟨.failed, by rw [hx]; simp⟩
+            · obtain ⟨t, ht⟩ := h4 x (Or.inr hx)
+              exact ⟨t, by simp only [List.flatten_cons]; exact List.mem_append_right _ ht⟩
+        | skip =>
+          rw [loopD_skip hd h]
+          obtain ⟨h1, h2, h3, h4, h5⟩ := ih s' (i.job.agent :: d)
+          refine ⟨List.Sublist.cons _ h1, List.Sublist.cons _ h2, h3, h4, ?_⟩
+          intro x hx hxd
+          exact h5 x hx (List.mem_cons_of_mem _ hxd)
+        | stop b =>
+          rw [loopD_stop hd h]
+          refine ⟨List.nil_sublist _, List.nil_sublist _, ?_, ?_, ?_⟩
+          · intro m hm; simp [ROut.empty] at hm
+          · intro x hx; simp [ROut.empty] at hx
+          · intro x hx; simp [ROut.empty] at hx
+
+/-- **No write overtakes an earlier one of its agent within a serve.** If the
+fixed loop applies an intent, every earlier intent of the same agent in the
+backlog was settled in that serve (applied or failed), never left behind for
+a later serve. Holds for any step and any run results, transient answers
+included: a `skip` defers the agent, so nothing of it runs after. -/
+theorem loopD_no_overtake (step : Bool → RR → Streaks → Step × Streaks) (rout : Job → RR) :
+    ∀ (pre : List Intent) (ix : Intent) (post : List Intent) (s : Streaks) (d : List Nat),
+    ((pre ++ ix :: post).map (·.job)).Nodup →
+    ix.job ∈ (loopD step rout s d (pre ++ ix :: post)).applied →
+    ∀ i ∈ pre, i.job.agent = ix.job.agent →
+      i.job ∈ (loopD step rout s d (pre ++ ix :: post)).applied ∨
+        i.job ∈ (loopD step rout s d (pre ++ ix :: post)).failed := by
+  intro pre
+  induction pre with
+  | nil => intro ix post s d _ _ i hi; simp at hi
+  | cons i0 pre' ih =>
+    intro ix post s d hnd hx i hi hag
+    simp only [List.cons_append] at hnd hx ⊢
+    rw [List.map_cons, List.nodup_cons] at hnd
+    have hne : i0.job ≠ ix.job := by
+      intro e
+      apply hnd.1
+      rw [e]
+      exact List.mem_map_of_mem (List.mem_append_right _ List.mem_cons_self)
+    by_cases hd : i0.job.agent ∈ d
+    · rw [loopD_deferred hd] at hx ⊢
+      cases List.mem_cons.mp hi with
+      | inl e =>
+        subst e
+        exact absurd (hag ▸ hd) ((loopD_facts step rout _ s d).2.2.2.2 _ hx)
+      | inr hi' => exact ih ix post s d hnd.2 hx i hi' hag
+    · cases h : step i0.job.image (rout i0.job) s with
+      | mk st s' =>
+        cases st with
+        | applied =>
+          rw [loopD_applied hd h] at hx ⊢
+          have hx' := (List.mem_cons.mp hx).resolve_left (Ne.symm hne)
+          cases List.mem_cons.mp hi with
+          | inl e => subst e; exact Or.inl List.mem_cons_self
+          | inr hi' =>
+            rcases ih ix post s' d hnd.2 hx' i hi' hag with h' | h'
+            · exact Or.inl (List.mem_cons_of_mem _ h')
+            · exact Or.inr h'
+        | failed =>
+          rw [loopD_failed hd h] at hx ⊢
+          cases List.mem_cons.mp hi with
+          | inl e => subst e; exact Or.inr List.mem_cons_self
+          | inr hi' =>
+            rcases ih ix post s' d hnd.2 hx i hi' hag with h' | h'
+            · exact Or.inl h'
+            · exact Or.inr (List.mem_cons_of_mem _ h')
+        | skip =>
+          rw [loopD_skip hd h] at hx ⊢
+          cases List.mem_cons.mp hi with
+          | inl e =>
+            subst e
+            exact absurd (hag ▸ List.mem_cons_self)
+              ((loopD_facts step rout _ s' _).2.2.2.2 _ hx)
+          | inr hi' => exact ih ix post s' _ hnd.2 hx i hi' hag
+        | stop b =>
+          rw [loopD_stop hd h] at hx
+          simp [ROut.empty] at hx
+
+theorem replayD_cases (step : Bool → RR → Streaks → Step × Streaks) (live : Bool)
+    (rout : Job → RR) (intents : List Intent) :
+    replayD step live rout intents = ROut.empty ∨
+      replayD step live rout intents = { ROut.empty with block := some .embedder } ∨
+      replayD step live rout intents = loopD step rout ⟨0, 0⟩ [] (pendingOf intents) := by
+  unfold replayD
+  cases hp : pendingOf intents with
+  | nil => exact Or.inl rfl
+  | cons p ps =>
+    cases live with
+    | true => exact Or.inr (Or.inr rfl)
+    | false => exact Or.inr (Or.inl rfl)
+
+/-- The loop facts lifted to `replayD`, over the pending rows. -/
+theorem replayD_facts (step : Bool → RR → Streaks → Step × Streaks) (live : Bool)
+    (rout : Job → RR) (intents : List Intent) :
+    (replayD step live rout intents).applied.Sublist ((pendingOf intents).map (·.job)) ∧
+    (replayD step live rout intents).failed.Sublist ((pendingOf intents).map (·.job)) ∧
+    NoPut (replayD step live rout intents).log.flatten ∧
+    (∀ x, x ∈ (replayD step live rout intents).applied ∨
+        x ∈ (replayD step live rout intents).failed →
+      ∃ t, Mut.consume x.key t ∈ (replayD step live rout intents).log.flatten) := by
+  rcases replayD_cases step live rout intents with h | h | h <;> rw [h]
+  · refine ⟨List.nil_sublist _, List.nil_sublist _, ?_, ?_⟩
+    · intro m hm; simp [ROut.empty] at hm
+    · intro x hx; simp [ROut.empty] at hx
+  · refine ⟨List.nil_sublist _, List.nil_sublist _, ?_, ?_⟩
+    · intro m hm; simp [ROut.empty] at hm
+    · intro x hx; simp [ROut.empty] at hx
+  · obtain ⟨h1, h2, h3, h4, _⟩ := loopD_facts step rout _ ⟨0, 0⟩ []
+    exact ⟨h1, h2, h3, h4⟩
+
+/-- The fixed replay, too, applies only unconsumed rows. -/
+theorem replayD_applied_pending {step : Bool → RR → Streaks → Step × Streaks} {live : Bool}
+    {rout : Job → RR} {intents : List Intent} {x : Job}
+    (hx : x ∈ (replayD step live rout intents).applied) :
+    ∃ i ∈ intents, i.job = x ∧ i.outcome = none := by
+  have hs := (replayD_facts step live rout intents).1.subset hx
+  obtain ⟨i, hi, rfl⟩ := List.mem_map.mp hs
+  obtain ⟨hi1, hi2⟩ := List.mem_filter.mp hi
+  exact ⟨i, hi1, rfl, Option.isNone_iff_eq_none.mp hi2⟩
+
+/-- Rows with distinct receipt ids: a row is determined by its id. -/
+theorem mem_eq_of_key {L : List Intent} (hnd : (L.map (·.job.key)).Nodup) {a b : Intent}
+    (ha : a ∈ L) (hb : b ∈ L) (h : a.job.key = b.job.key) : a = b := by
+  induction L with
+  | nil => simp at ha
+  | cons k L ih =>
+    rw [List.map_cons, List.nodup_cons] at hnd
+    cases List.mem_cons.mp ha with
+    | inl ha' =>
+      cases List.mem_cons.mp hb with
+      | inl hb' => rw [ha', hb']
+      | inr hb' =>
+        subst ha'
+        exact absurd (h ▸ List.mem_map_of_mem (f := (·.job.key)) hb') hnd.1
+    | inr ha' =>
+      cases List.mem_cons.mp hb with
+      | inl hb' =>
+        subst hb'
+        exact absurd (h.symm ▸ List.mem_map_of_mem (f := (·.job.key)) ha') hnd.1
+      | inr hb' => exact ih hnd.2 ha' hb'
+
+/-- Per-epoch sequence order of a list of rows. -/
+abbrev EpochSorted (l : List Intent) : Prop :=
+  l.Pairwise (fun a b => a.job.epoch = b.job.epoch → a.job.rid ≤ b.job.rid)
+
+/-- **Per-agent order across serves, whatever the embedder answers.** Two
+serves of the fixed replay: the first over a backlog `L1` loaded in per-epoch
+sequence order, the second over any per-epoch-sorted load `L2` of the rows
+the first left. Whatever each run returned (transient embedder answers
+included), the writes the two serves applied, in the order they applied
+them, keep each agent's writes of one process in sequence (admission) order:
+the per-agent promise (`WriteIntent::agent`, `docs/reference/mcp.mdx`) that
+`transient_skip_reorders` shows the code before #295 breaking. Holds for any
+step; rows are keyed by receipt id (`hnd`). -/
+theorem fixed_agent_order (step : Bool → RR → Streaks → Step × Streaks) (live live' : Bool)
+    (rout rout' : Job → RR) (L1 L2 : List Intent) (hnd : (L1.map (·.job.key)).Nodup)
+    (hs1 : EpochSorted L1) (hs2 : EpochSorted L2)
+    (hL2 : ∀ i ∈ L2, i ∈ applyLog L1 (replayD step live rout L1).log) :
+    ((replayD step live rout L1).applied ++ (replayD step live' rout' L2).applied).Pairwise
+      (fun a b => a.agent = b.agent → a.epoch = b.epoch → a.rid ≤ b.rid) := by
+  obtain ⟨f1, _, fnp, fcons⟩ := replayD_facts step live rout L1
+  have hp1 : EpochSorted (pendingOf L1) := hs1.sublist List.filter_sublist
+  have hsorted : ∀ (L : List Intent) (x : List Job), EpochSorted L →
+      x.Sublist ((pendingOf L).map (·.job)) →
+      x.Pairwise (fun a b => a.agent = b.agent → a.epoch = b.epoch → a.rid ≤ b.rid) := by
+    intro L x hL hx
+    have hpl : ((pendingOf L).map (·.job)).Pairwise
+        (fun a b => a.epoch = b.epoch → a.rid ≤ b.rid) :=
+      List.pairwise_map.mpr (hL.sublist List.filter_sublist)
+    exact (hpl.sublist hx).imp
+      (fun {a b} (h : a.epoch = b.epoch → a.rid ≤ b.rid) (_ : a.agent = b.agent) => h)
+  refine List.pairwise_append.mpr ⟨hsorted L1 _ hs1 f1,
+    hsorted L2 _ hs2 (replayD_facts step live' rout' L2).1, ?_⟩
+  intro x hx y hy hag hep
+  -- `y` is a row the first serve left unconsumed.
+  obtain ⟨iy, hiy, hiyj, hiyo⟩ := replayD_applied_pending hy
+  have hiy' := hL2 iy hiy
+  -- A key the first serve consumed has no unconsumed row after it.
+  have hgone : ∀ z : Job, (∃ t, Mut.consume z.key t ∈ (replayD step live rout L1).log.flatten) →
+      z.key ≠ y.key := by
+    intro z hz hzy
+    exact foldl_consumed _ L1 fnp (Or.inl hz) iy hiy' (by rw [hiyj, hzy]) hiyo
+  obtain ⟨i, hi, hij⟩ := foldl_rows _ L1 fnp hiy'
+  have hio : i.outcome = none := by
+    cases ho : i.outcome with
+    | none => rfl
+    | some t =>
+      exfalso
+      refine foldl_consumed _ L1 fnp (Or.inr ?_) iy hiy' rfl hiyo
+      intro k hk hkk
+      have hki : k = i := mem_eq_of_key hnd hk hi (by rw [hkk, hij])
+      rw [hki, ho]
+      exact Option.some_ne_none t
+  have hip : i ∈ pendingOf L1 := List.mem_filter.mpr ⟨hi, by simp [hio]⟩
+  -- `x` was applied by the loop over the pending rows.
+  have hr : replayD step live rout L1 = loopD step rout ⟨0, 0⟩ [] (pendingOf L1) := by
+    rcases replayD_cases step live rout L1 with h | h | h
+    · rw [h] at hx; simp [ROut.empty] at hx
+    · rw [h] at hx; simp [ROut.empty] at hx
+    · exact h
+  have hxl : x ∈ (loopD step rout ⟨0, 0⟩ [] (pendingOf L1)).applied := hr ▸ hx
+  obtain ⟨ix, hixp, hixj⟩ := List.mem_map.mp (f1.subset hx)
+  obtain ⟨pre, post, hsplit⟩ := List.append_of_mem hixp
+  have hndp : ((pendingOf L1).map (·.job)).Nodup := by
+    have hk : ((pendingOf L1).map (·.job.key)).Nodup := hnd.sublist (List.filter_sublist.map _)
+    unfold List.Nodup at hk ⊢
+    rw [List.pairwise_map] at hk ⊢
+    exact hk.imp (fun h e => h (by rw [e]))
+  rw [hsplit] at hip hp1 hxl hndp
+  rw [← hixj] at hxl
+  have hy' : i.job = y := by rw [← hij, hiyj]
+  rcases List.mem_append.mp hip with hpre | hpost
+  · -- An earlier row of the same agent: the no-overtake theorem settled it.
+    exfalso
+    have hsettled := loopD_no_overtake step rout pre ix post ⟨0, 0⟩ [] hndp hxl i hpre
+      (by rw [hy', hixj]; exact hag.symm)
+    apply hgone y _ rfl
+    apply fcons
+    rw [hr, hsplit, ← hy']
+    exact hsettled
+  · cases List.mem_cons.mp hpost with
+    | inl e =>
+      exfalso
+      apply hgone x (fcons x (Or.inl hx))
+      rw [← hy', e, hixj]
+    | inr hpost' =>
+      have hrel := List.rel_of_pairwise_cons (List.pairwise_append.mp hp1).2.1 hpost'
+      rw [hixj, hy'] at hrel
+      exact hrel hep
+
+/-- **An unparseable receipt id is settled, not skipped forever**: the fixed
+loop consumes its row `failed` and goes on (`bad_id_never_settled` is the code
+before #295). -/
+theorem fixed_badId_settled (rout : Job → RR) (s : Streaks) (d : List Nat) (i : Intent)
+    (rest : List Intent) (he : rout i.job = .badId) (hd : i.job.agent ∉ d) :
+    loopD stepFixed rout s d (i :: rest) =
+      { loopD stepFixed rout s d rest with
+        answers := (i.job.key, .failed) :: (loopD stepFixed rout s d rest).answers
+        log := [.consume i.job.key .failed] :: (loopD stepFixed rout s d rest).log
+        failed := i.job :: (loopD stepFixed rout s d rest).failed } :=
+  loopD_failed hd (by rw [he]; rfl)
+
+/-- **#294 still holds in the fixed loop**: an input refusal is consumed
+`failed` and the loop goes on. -/
+theorem fixedD_input_goes_on (rout : Job → RR) (s : Streaks) (d : List Nat) (i : Intent)
+    (rest : List Intent) (e : Err) (he : rout i.job = .run (.err e)) (hf : e.refusesInput = true)
+    (hd : i.job.agent ∉ d) :
+    ∃ s', loopD stepFixed rout s d (i :: rest) =
+      { loopD stepFixed rout s' d rest with
+        answers := (i.job.key, .failed) :: (loopD stepFixed rout s' d rest).answers
+        log := [.consume i.job.key .failed] :: (loopD stepFixed rout s' d rest).log
+        failed := i.job :: (loopD stepFixed rout s' d rest).failed } := by
+  have h := stepFixed_refusesInput i.job.image e s hf
+  refine ⟨(stepFixed i.job.image (rout i.job) s).2, loopD_failed hd ?_⟩
+  rw [he]
+  exact Prod.ext h rfl
+
+/-! ### The load order -/
+
+/-- The intent with the smallest sequence number among `x` and those of `l`
+in `x`'s epoch (`x` itself, or the first such, on a tie). -/
+def minE (x : Intent) : List Intent → Intent
+  | [] => x
+  | y :: ys =>
+    minE (if y.job.epoch = x.job.epoch ∧ y.job.rid < x.job.rid then y else x) ys
+
+/-- `l` with its first `m` replaced by `x`. -/
+def swapIn (m x : Intent) : List Intent → List Intent
+  | [] => []
+  | y :: ys => if y = m then x :: ys else y :: swapIn m x ys
+
+/-- Selection within epochs: each position keeps its epoch, and an epoch's
+positions take its intents in sequence order. `n` is fuel (`regroup` passes
+the length). -/
+def regroupN : Nat → List Intent → List Intent
+  | 0, l => l
+  | _, [] => []
+  | n + 1, x :: xs =>
+    if minE x xs = x then x :: regroupN n xs
+    else minE x xs :: regroupN n (swapIn (minE x xs) x xs)
+
+def regroup (l : List Intent) : List Intent := regroupN l.length l
+
+/-- **The load order after #295** (`replay_order` in `replay.rs`): the
+adapters' (`issued_ms`, `lane_seq`) order picks which process each position
+belongs to, and each process's intents fill its positions in `lane_seq`
+order. -/
+def fixedLoad (l : List Intent) : List Intent := regroup (loadOrder l)
+
+theorem minE_spec : ∀ (l : List Intent) (x : Intent),
+    (minE x l).job.epoch = x.job.epoch ∧ minE x l ∈ x :: l ∧
+      ∀ y ∈ x :: l, y.job.epoch = x.job.epoch → (minE x l).job.rid ≤ y.job.rid := by
+  intro l
+  induction l with
+  | nil =>
+    intro x
+    refine ⟨rfl, List.mem_cons_self, ?_⟩
+    intro y hy _
+    rw [List.mem_singleton.mp hy]
+    exact Nat.le_refl _
+  | cons y ys ih =>
+    intro x
+    simp only [minE]
+    by_cases hc : y.job.epoch = x.job.epoch ∧ y.job.rid < x.job.rid
+    · rw [ite_eq_left hc]
+      obtain ⟨h1, h2, h3⟩ := ih y
+      refine ⟨h1.trans hc.1, ?_, ?_⟩
+      · exact List.mem_cons_of_mem _ h2
+      · intro z hz hze
+        cases List.mem_cons.mp hz with
+        | inl e => rw [e]; exact Nat.le_of_lt (Nat.lt_of_le_of_lt (h3 y List.mem_cons_self rfl) hc.2)
+        | inr hz' => exact h3 z hz' (hze.trans hc.1.symm)
+    · rw [ite_eq_right hc]
+      obtain ⟨h1, h2, h3⟩ := ih x
+      refine ⟨h1, ?_, ?_⟩
+      · cases List.mem_cons.mp h2 with
+        | inl e => rw [e]; exact List.mem_cons_self
+        | inr h' => exact List.mem_cons_of_mem _ (List.mem_cons_of_mem _ h')
+      · intro z hz hze
+        cases List.mem_cons.mp hz with
+        | inl e => rw [e]; exact h3 x List.mem_cons_self rfl
+        | inr hz' =>
+          cases List.mem_cons.mp hz' with
+          | inl e =>
+            rw [e] at hze ⊢
+            have hxy : x.job.rid ≤ y.job.rid := by
+              rcases Nat.lt_or_ge y.job.rid x.job.rid with hl | hl
+              · exact absurd ⟨hze, hl⟩ hc
+              · exact hl
+            exact Nat.le_trans (h3 x List.mem_cons_self rfl) hxy
+          | inr hz'' => exact h3 z (List.mem_cons_of_mem _ hz'') hze
+
+/-- With nothing earlier in sequence in its epoch, `x` is its own minimum. -/
+theorem minE_self : ∀ (l : List Intent) (x : Intent),
+    (∀ y ∈ l, y.job.epoch = x.job.epoch → x.job.rid ≤ y.job.rid) → minE x l = x := by
+  intro l
+  induction l with
+  | nil => intro x _; rfl
+  | cons y ys ih =>
+    intro x h
+    simp only [minE]
+    have hc : ¬ (y.job.epoch = x.job.epoch ∧ y.job.rid < x.job.rid) := by
+      intro hc
+      exact absurd (h y List.mem_cons_self hc.1) (Nat.not_le_of_lt hc.2)
+    rw [ite_eq_right hc]
+    exact ih x (fun z hz => h z (List.mem_cons_of_mem _ hz))
+
+theorem swapIn_perm (m x : Intent) : ∀ (xs : List Intent), m ∈ xs →
+    (x :: xs).Perm (m :: swapIn m x xs) := by
+  intro xs
+  induction xs with
+  | nil => intro h; simp at h
+  | cons y ys ih =>
+    intro h
+    simp only [swapIn]
+    by_cases hy : y = m
+    · rw [ite_eq_left hy, hy]
+      exact List.Perm.swap m x ys
+    · rw [ite_eq_right hy]
+      have hm : m ∈ ys := (List.mem_cons.mp h).resolve_left (Ne.symm hy)
+      exact ((List.Perm.swap y x ys).trans ((ih hm).cons y)).trans (List.Perm.swap m y _)
+
+theorem swapIn_length (m x : Intent) : ∀ (xs : List Intent), (swapIn m x xs).length = xs.length := by
+  intro xs
+  induction xs with
+  | nil => rfl
+  | cons y ys ih =>
+    simp only [swapIn]
+    split <;> simp [ih]
+
+theorem swapIn_epochs (m x : Intent) (h : m.job.epoch = x.job.epoch) : ∀ (xs : List Intent),
+    (swapIn m x xs).map (·.job.epoch) = xs.map (·.job.epoch) := by
+  intro xs
+  induction xs with
+  | nil => rfl
+  | cons y ys ih =>
+    simp only [swapIn]
+    by_cases hy : y = m
+    · rw [ite_eq_left hy, hy]; simp [h]
+    · rw [ite_eq_right hy]; simp [ih]
+
+theorem regroupN_perm : ∀ (n : Nat) (l : List Intent), (regroupN n l).Perm l := by
+  intro n
+  induction n with
+  | zero => intro l; exact List.Perm.refl _
+  | succ n ih =>
+    intro l
+    cases l with
+    | nil => exact List.Perm.refl _
+    | cons x xs =>
+      simp only [regroupN]
+      by_cases hm : minE x xs = x
+      · rw [ite_eq_left hm]; exact (ih xs).cons x
+      · rw [ite_eq_right hm]
+        have hmem : minE x xs ∈ xs :=
+          (List.mem_cons.mp (minE_spec xs x).2.1).resolve_left hm
+        exact ((ih _).cons _).trans (swapIn_perm _ x xs hmem).symm
+
+theorem regroupN_epochs : ∀ (n : Nat) (l : List Intent),
+    (regroupN n l).map (·.job.epoch) = l.map (·.job.epoch) := by
+  intro n
+  induction n with
+  | zero => intro l; rfl
+  | succ n ih =>
+    intro l
+    cases l with
+    | nil => rfl
+    | cons x xs =>
+      simp only [regroupN]
+      by_cases hm : minE x xs = x
+      · rw [ite_eq_left hm]; simp [ih]
+      · rw [ite_eq_right hm]
+        have he := (minE_spec xs x).1
+        simp only [List.map_cons, ih, swapIn_epochs _ x he, he]
+
+theorem regroupN_sorted : ∀ (n : Nat) (l : List Intent), l.length ≤ n →
+    EpochSorted (regroupN n l) := by
+  intro n
+  induction n with
+  | zero =>
+    intro l hl
+    rw [List.length_eq_zero_iff.mp (Nat.le_zero.mp hl)]
+    exact List.Pairwise.nil
+  | succ n ih =>
+    intro l hl
+    cases l with
+    | nil => exact List.Pairwise.nil
+    | cons x xs =>
+      have hxs : xs.length ≤ n := Nat.le_of_succ_le_succ hl
+      obtain ⟨he, hmem, hmin⟩ := minE_spec xs x
+      simp only [regroupN]
+      by_cases hm : minE x xs = x
+      · rw [ite_eq_left hm]
+        refine List.pairwise_cons.mpr ⟨?_, ih xs hxs⟩
+        intro z hz hze
+        have hz' := (regroupN_perm n xs).mem_iff.mp hz
+        rw [← hm]
+        exact hmin z (List.mem_cons_of_mem _ hz') (hm ▸ hze.symm)
+      · rw [ite_eq_right hm]
+        have hin : minE x xs ∈ xs := (List.mem_cons.mp hmem).resolve_left hm
+        refine List.pairwise_cons.mpr ⟨?_, ih _ (by rw [swapIn_length]; exact hxs)⟩
+        intro z hz hze
+        have hz' := (regroupN_perm n _).mem_iff.mp hz
+        have hz'' : z ∈ x :: xs :=
+          (swapIn_perm _ x xs hin).mem_iff.mpr (List.mem_cons_of_mem _ hz')
+        exact hmin z hz'' (hze.symm.trans he)
+
+theorem regroupN_of_sorted : ∀ (n : Nat) (l : List Intent), EpochSorted l → regroupN n l = l := by
+  intro n
+  induction n with
+  | zero => intro l _; rfl
+  | succ n ih =>
+    intro l hl
+    cases l with
+    | nil => rfl
+    | cons x xs =>
+      have hl' := List.pairwise_cons.mp hl
+      have hm : minE x xs = x :=
+        minE_self xs x (fun y hy hye => hl'.1 y hy hye.symm)
+      simp only [regroupN, hm, ite_true]
+      rw [ih xs hl'.2]
+
+theorem insertK_perm (x : Intent) : ∀ (l : List Intent), (insertK x l).Perm (x :: l) := by
+  intro l
+  induction l with
+  | nil => exact List.Perm.refl _
+  | cons y ys ih =>
+    unfold insertK
+    split
+    · exact List.Perm.refl _
+    · exact (ih.cons y).trans (List.Perm.swap x y ys)
+
+theorem loadOrder_perm : ∀ (l : List Intent), (loadOrder l).Perm l := by
+  intro l
+  induction l with
+  | nil => exact List.Perm.refl _
+  | cons x xs ih => exact (insertK_perm x _).trans (ih.cons x)
+
+/-- The fixed load holds the same rows. -/
+theorem fixedLoad_perm (l : List Intent) : (fixedLoad l).Perm l :=
+  (regroupN_perm _ _).trans (loadOrder_perm l)
+
+/-- **Each process's intents load in sequence order, with no clock
+assumption** (`load_epoch_seq_order` needs one; `clock_step_reorders` is
+what happens without it). -/
+theorem fixedLoad_sorted (l : List Intent) : EpochSorted (fixedLoad l) :=
+  regroupN_sorted _ _ (Nat.le_refl _)
+
+/-- **Cross-process order as before**: each position of the load belongs to
+the same process as in the (`issued_ms`, `lane_seq`) order. -/
+theorem fixedLoad_epochs (l : List Intent) :
+    (fixedLoad l).map (·.job.epoch) = (loadOrder l).map (·.job.epoch) :=
+  regroupN_epochs _ _
+
+/-- **Nothing changes while the clock behaves**: under `load_epoch_seq_order`'s
+hypothesis the fixed load is the old one. -/
+theorem fixedLoad_agrees (l : List Intent)
+    (hmono : ∀ a ∈ l, ∀ b ∈ l, a.job.epoch = b.job.epoch → a.job.rid < b.job.rid →
+      a.job.ms ≤ b.job.ms) :
+    fixedLoad l = loadOrder l :=
+  regroupN_of_sorted _ _ (load_epoch_seq_order l hmono)
+
+/-- One serve of the fixed replay over the fixed load applies each process's
+writes in sequence order: `replay_epoch_seq_order` without its clock
+hypothesis. -/
+theorem fixed_epoch_seq_order (live : Bool) (rout : Job → RR) (l : List Intent) :
+    (replayD stepFixed live rout (fixedLoad l)).applied.Pairwise
+      (fun a b => a.epoch = b.epoch → a.rid ≤ b.rid) := by
+  have hs := (replayD_facts stepFixed live rout (fixedLoad l)).1
+  apply List.Pairwise.sublist hs
+  exact List.pairwise_map.mpr ((fixedLoad_sorted l).sublist List.filter_sublist)
+
+/-- **The two fixes together, across two serves**: rows keyed by receipt id,
+loaded by the fixed load at each serve; whatever the embedder answers, the
+writes the two serves apply keep each agent's writes of one process in
+admission order. -/
+theorem fixed_agent_order_load (live live' : Bool) (rout rout' : Job → RR) (rows : List Intent)
+    (hnd : (rows.map (·.job.key)).Nodup) :
+    let L1 := fixedLoad rows
+    let r1 := replayD stepFixed live rout L1
+    ((r1.applied ++ (replayD stepFixed live' rout' (fixedLoad (applyLog L1 r1.log))).applied)).Pairwise
+      (fun a b => a.agent = b.agent → a.epoch = b.epoch → a.rid ≤ b.rid) := by
+  intro L1 r1
+  have hnd1 : (L1.map (·.job.key)).Nodup := ((fixedLoad_perm rows).map _).nodup_iff.mpr hnd
+  exact fixed_agent_order stepFixed live live' rout rout' L1 _ hnd1 (fixedLoad_sorted rows)
+    (fixedLoad_sorted _) (fun i hi => (fixedLoad_perm _).mem_iff.mp hi)
+
 /-! ## Crash: a durable write is never replayed -/
 
 theorem mem_admit_flatten {all : List Job} {n : Nat} {m : Mut}
@@ -2028,6 +2776,74 @@ theorem bad_id_never_settled :
     let rout : Job → RR := fun j => if j.rid = 1 then .badId else .run .ok
     let r := replay true rout ints
     r.applied = [j2] ∧ ⟨j1, none⟩ ∈ pendingOf (applyLog ints r.log) := by
+  decide
+
+/-! ### The fixes for #295 on the issue's scenarios -/
+
+private def k1 : Job := ⟨3, 1, 1002, false, 0⟩
+
+/-- `transient_skip_reorders` fixed: `j1` meets one transient answer, so
+agent 0 is deferred and its `j2` waits; agent 1's `k1` applies. The next
+serve applies `j1`, then `j2`. The old replay applied `j2` first. -/
+example :
+    let ints : List Intent := [⟨j1, none⟩, ⟨j2, none⟩, ⟨k1, none⟩]
+    let rout : Job → RR := fun j => if j.rid = 1 then .run (.err .unavailable) else .run .ok
+    let r1 := replayD stepFixed true rout ints
+    let r2 := replayD stepFixed true okAll (applyLog ints r1.log)
+    (replay true rout ints).applied = [j2, k1] ∧
+      r1.applied = [k1] ∧ r1.block = none ∧ r2.applied = [j1, j2] ∧
+      r1.applied ++ r2.applied = [k1, j1, j2] := by
+  decide
+
+/-- The threshold still counts transients across agents: three agents each
+meeting one, with nothing answered between, stop the replay as `embedder`,
+consuming nothing. -/
+example :
+    let a : Job := ⟨1, 0, 1000, false, 0⟩
+    let b : Job := ⟨2, 1, 1001, false, 0⟩
+    let c : Job := ⟨3, 2, 1002, false, 0⟩
+    let r := replayD stepFixed true (fun _ => .run (.err .unavailable))
+      [⟨a, none⟩, ⟨b, none⟩, ⟨c, none⟩]
+    r.log = [] ∧ r.block = some .embedder := by
+  decide
+
+/-- `clock_step_reorders` fixed: the clock stepped back between `a` and `b`
+of one process; the fixed load puts `a` (sequence 1) first anyway, and the
+replay applies `a`, then `b`. -/
+example :
+    let a : Job := ⟨1, 0, 1000, false, 0⟩
+    let b : Job := ⟨2, 0, 999, false, 0⟩
+    fixedLoad [⟨a, none⟩, ⟨b, none⟩] = [⟨a, none⟩, ⟨b, none⟩] ∧
+      (replayD stepFixed true okAll (fixedLoad [⟨a, none⟩, ⟨b, none⟩])).applied = [a, b] := by
+  decide
+
+/-- Across processes the order is the old one: two crashed processes whose
+clocks interleave keep their positions, and within process 7 the clock step
+is undone. -/
+example :
+    let a1 : Job := ⟨1, 0, 1000, false, 7⟩
+    let a2 : Job := ⟨2, 0, 990, false, 7⟩
+    let b1 : Job := ⟨1, 1, 995, false, 9⟩
+    let rows : List Intent := [⟨a1, none⟩, ⟨a2, none⟩, ⟨b1, none⟩]
+    (loadOrder rows).map (·.job) = [a2, b1, a1] ∧
+      (fixedLoad rows).map (·.job) = [a1, b1, a2] := by
+  decide
+
+/-- `bad_id_never_settled` fixed: the row with the unparseable id is settled
+`failed`, and nothing is left owed. -/
+example :
+    let ints : List Intent := [⟨j1, none⟩, ⟨j2, none⟩]
+    let rout : Job → RR := fun j => if j.rid = 1 then .badId else .run .ok
+    let r := replayD stepFixed true rout ints
+    r.applied = [j2] ∧ r.failed = [j1] ∧ pendingOf (applyLog ints r.log) = [] := by
+  decide
+
+/-- #294's scenario through the fully fixed replay. -/
+example :
+    let ints : List Intent := [⟨j1, none⟩, ⟨j2, none⟩, ⟨j3, none⟩]
+    let rout : Job → RR := fun j => if j.rid = 2 then .run (.err .inputRefusal) else .run .ok
+    let r := replayD stepFixed true rout ints
+    r.applied = [j1, j3] ∧ r.failed = [j2] ∧ r.block = none := by
   decide
 
 end Examples
