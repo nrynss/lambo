@@ -547,7 +547,10 @@ pub fn validate(
         reject_empty_key(parent, &parent_key)?;
         reject_empty_key(child, &child_key)?;
         if parent_key == child_key {
-            return Err(LamboError::Store(StoreError::Invariant(format!(
+            // An input refusal (#294): the two ends can resolve to one key
+            // only through the graph (a synonym declared since the ack), so
+            // a replay settles it `failed` rather than stopping.
+            return Err(LamboError::Store(StoreError::input_refusal(format!(
                 "derive: parent_of pair ({parent}, {child}) resolves to the same canonical \
                  key ({parent_key:?}) — a Hierarchical self-loop is a cycle (spec §5.7)"
             ))));
@@ -711,7 +714,7 @@ fn derive_after_validation(
             child_key,
         )?;
         if parent_node == child_node {
-            return Err(LamboError::Store(StoreError::Invariant(format!(
+            return Err(LamboError::Store(StoreError::input_refusal(format!(
                 "derive: parent_of pair ({parent}, {child}) resolves to the same concept \
                  {parent_node} — a Hierarchical self-loop is a cycle (spec §5.7)"
             ))));
@@ -915,6 +918,10 @@ fn reject_empty_key(content: &str, key: &str) -> Result<(), LamboError> {
 /// a same-key Observation (per-sentence overflow records can repeat a key), so
 /// duplicate-key Observations remain legal at the store/model level — this
 /// guard is derive-only (caller-declared identity).
+///
+/// The refusal is an [input refusal](StoreError::is_input_refusal) (#294):
+/// two derives of one Observation can both pass the ack, so the second is
+/// refused only when it applies, and a replay settles it `failed`.
 fn reject_repeated_observation(
     content: &str,
     concept_type: ConceptType,
@@ -928,7 +935,7 @@ fn reject_repeated_observation(
         .concepts()
         .any(|c| c.concept_type == ConceptType::Observation && c.canonical_key == key);
     if exists {
-        return Err(LamboError::Store(StoreError::Invariant(format!(
+        return Err(LamboError::Store(StoreError::input_refusal(format!(
             "derive: content {content:?} is declared as an Observation, but an Observation with \
              the same canonical key ({key:?}) already exists. Observation opts out of identity \
              (never matched), so re-deriving it would silently split one concept in two. Refusing; \
@@ -955,6 +962,9 @@ fn reject_repeated_observation(
 /// designed multi-source case (`record-action` fans
 /// `produces`/`modifies`/`depends_on`). Refusing those would be wrong, not a
 /// gap.
+///
+/// The refusal is an [input refusal](StoreError::is_input_refusal) (#294),
+/// for the same reason as [`reject_repeated_observation`]'s.
 fn reject_second_hierarchical_parent(
     child: &str,
     child_key: &str,
@@ -963,7 +973,7 @@ fn reject_second_hierarchical_parent(
     pending: &mut HashMap<String, String>,
 ) -> Result<(), LamboError> {
     let second_parent = |prev_key: &str| {
-        LamboError::Store(StoreError::Invariant(format!(
+        LamboError::Store(StoreError::input_refusal(format!(
             "derive: child {child:?} already has Hierarchical parent '{prev_key}'; declaring \
              parent '{parent_key}' would give it a second Hierarchical parent. A concept has at \
              most one Hierarchical parent: the hierarchy is a tree. Keep the existing parent \
@@ -1366,6 +1376,11 @@ mod tests {
             msg.contains("second Hierarchical parent"),
             "refusal must say the child would get a second parent: {msg}"
         );
+        // #294: an input refusal, which a replay settles `failed`.
+        assert!(
+            matches!(&err, LamboError::Store(e) if e.is_input_refusal()),
+            "{err:?}"
+        );
 
         // The child still has exactly ONE Hierarchical parent: nothing was
         // written.
@@ -1398,6 +1413,10 @@ mod tests {
         assert!(
             err2.to_string().contains("second Hierarchical parent"),
             "in-batch second parent must refuse: {err2}"
+        );
+        assert!(
+            matches!(&err2, LamboError::Store(e) if e.is_input_refusal()),
+            "{err2:?}"
         );
         g.assert_invariants().unwrap();
     }
@@ -1796,6 +1815,11 @@ mod tests {
         assert!(
             err.to_string().contains("opts out of identity"),
             "refusal must explain the Observation identity opt-out: {err}"
+        );
+        // #294: an input refusal, which a replay settles `failed`.
+        assert!(
+            matches!(&err, LamboError::Store(e) if e.is_input_refusal()),
+            "{err:?}"
         );
 
         // The graph still holds exactly ONE Observation — no silent split.

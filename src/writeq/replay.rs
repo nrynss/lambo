@@ -10,9 +10,9 @@
 //! * strictly one intent at a time, in (`issued_ms`, `lane_seq`) order, never
 //!   through admission;
 //! * nothing is consumed before one liveness embed succeeds;
-//! * a content refusal consumes the intent as `failed`; an outage, a store
-//!   error or a lost lease leaves it unconsumed and, past
-//!   [`EMBEDDER_SICK_THRESHOLD`] consecutive transients or on any
+//! * a content refusal or an input refusal consumes the intent as `failed`;
+//!   an outage, any other store error or a lost lease leaves it unconsumed
+//!   and, past [`EMBEDDER_SICK_THRESHOLD`] consecutive transients or on any
 //!   non-embedder error, ends the loop;
 //! * replay moves only `replayed` / `replay_owed` / `replay_blocked`, never this
 //!   session's own `accepted`/`applied`/`failed`.
@@ -106,16 +106,23 @@ impl WritePipeline {
     ///   **without consuming a single intent** — the backlog stays durable and
     ///   the next serve tries again. A dead or hanging embedder at attach
     ///   therefore costs one embed, not one `HYBRID_IO_TIMEOUT` per intent.
-    /// * **Failure**: a replay that fails **for its own content**
-    ///   ([`LamboError::Embed`] under the J3-R3-1 contract, a vanished
-    ///   interaction, a validation refusal) consumes the intent with a `failed`
-    ///   outcome — mirroring what the in-session worker does — rather than
-    ///   retrying on every restart forever. A replay that fails for a reason
+    /// * **Failure**: a replay that fails **for its own content** consumes the
+    ///   intent with a `failed` outcome, mirroring what the in-session worker
+    ///   does, rather than retrying on every restart forever. That is
+    ///   [`LamboError::Embed`] under the J3-R3-1 contract,
+    ///   [`LamboError::ImageIdTaken`], a refused reference
+    ///   ([`LamboError::Reference`]), an
+    ///   [input refusal](crate::types::StoreError::is_input_refusal) (a cycle,
+    ///   a repeated Observation, a second Hierarchical parent, a pair whose
+    ///   ends resolve to one key or concept: #116, #294), a stored payload
+    ///   this build cannot decode (#129), and a lookup timeout below
+    ///   [`REPLAY_LOOKUP_TIMEOUT_LIMIT`]. A replay that fails for a reason
     ///   that says nothing about the intent (the embedder unreachable or timed
-    ///   out, the store failing, the lease lost) leaves it **unconsumed** and
-    ///   ends the loop: those are conditions a later process can be in a
-    ///   position to fix, and settling an acked write `failed` because a
-    ///   dependency blinked is the defect N1 named.
+    ///   out, any other store error, the lease lost, a configuration that
+    ///   cannot apply it) leaves it **unconsumed** and ends the loop: those
+    ///   are conditions a later process can be in a position to fix, and
+    ///   settling an acked write `failed` because a dependency blinked is the
+    ///   defect N1 named.
     /// * **Shutdown**: `close()` aborts this task before the quiesce; whatever
     ///   is still unconsumed stays durable for the next serve.
     pub(crate) fn spawn_replay(self: &Arc<Self>, intents: Vec<WriteIntent>) {
@@ -432,9 +439,13 @@ impl WritePipeline {
                     // this write against this graph closes a cycle, every time.
                     // Before, it fell to the session-wide arm below, which left
                     // the intent durable and stopped the replay, so every later
-                    // intent stayed `pending_replay` for good. Narrow on purpose:
-                    // any other `Invariant` can mean an inconsistent graph or
-                    // store, and still stops the replay.
+                    // intent stayed `pending_replay` for good. #294: so is every
+                    // other input refusal (an Observation derived again, a
+                    // second Hierarchical parent, a pair whose ends resolve to
+                    // one key or concept), which two writes acked back to back
+                    // can meet only at apply. Narrow on purpose: any other
+                    // `Invariant` can mean an inconsistent graph or store, and
+                    // still stops the replay.
                     // #36 PR 4: a refused reference is a fact about this
                     // input against this graph too (re-resolution at apply
                     // reached a different answer, or none): settle `failed`.
@@ -446,11 +457,12 @@ impl WritePipeline {
                                     | LamboError::ImageIdTaken(_)
                                     | LamboError::Reference(_)
                             )
-                            || matches!(&err, LamboError::Store(e) if e.is_cycle_refusal()) =>
+                            || matches!(&err, LamboError::Store(e) if e.is_input_refusal()) =>
                     {
-                        // A cycle refusal is decided before any embed, so it
-                        // proves nothing about the embedder's health; nor
-                        // does a decode refusal.
+                        // An input refusal is decided before any embed (or,
+                        // at the commit, without one), so it proves nothing
+                        // about the embedder's health; nor does a decode
+                        // refusal.
                         if !decode_refused
                             && !matches!(&err, LamboError::Store(_) | LamboError::Reference(_))
                         {

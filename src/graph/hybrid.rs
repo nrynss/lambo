@@ -887,7 +887,8 @@ fn validate_pairs(
         reject_empty_key(parent, &pk)?;
         reject_empty_key(child, &ck)?;
         if pk == ck {
-            return Err(LamboError::Store(StoreError::Invariant(format!(
+            // An input refusal (#294): see `derive::validate`'s twin.
+            return Err(LamboError::Store(StoreError::input_refusal(format!(
                 "hybrid derive: parent_of pair ({parent}, {child}) resolves to the same \
                  canonical key ({pk:?}) — a Hierarchical self-loop is a cycle (spec §5.7)"
             ))));
@@ -1843,7 +1844,9 @@ async fn derive_planned(
                     child_key,
                 )?;
                 if parent_node == child_node {
-                    return Err(LamboError::Store(StoreError::Invariant(format!(
+                    // An input refusal (#294): two ends that merge onto one
+                    // concept are a fact about this input against this graph.
+                    return Err(LamboError::Store(StoreError::input_refusal(format!(
                 "hybrid derive: parent_of pair ({parent}, {child}) resolves to the same concept \
                  {parent_node} — a Hierarchical self-loop is a cycle (spec §5.7)"
             ))));

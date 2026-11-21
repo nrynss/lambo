@@ -2305,16 +2305,47 @@ impl StoreError {
     /// Whether this is a write refused because it would close a cycle in an
     /// acyclic edge type. That is a fact about the write's input against the
     /// graph it met, not about the session: the same write against the same
-    /// graph is refused again, and nothing else is wrong. So a replayed
-    /// durable intent that meets it settles `failed` and the replay goes on
-    /// (as for [`LamboError::Embed`]), where any other `Invariant`, which can
-    /// mean the graph or the store is inconsistent, still stops the replay.
+    /// graph is refused again, and nothing else is wrong. It is one kind of
+    /// [input refusal](Self::is_input_refusal).
     ///
     /// Identified by prefix, like [`Self::is_embedding_contract_refusal`]:
     /// both producers build it through `Self::cycle_refusal`, so the
     /// variant stays `Invariant` and no public enum gains a member.
     pub fn is_cycle_refusal(&self) -> bool {
         self.cycle_refusal_kind().is_some()
+    }
+
+    /// The prefix every other [input refusal](Self::is_input_refusal)'s
+    /// message starts with.
+    const INPUT_REFUSAL: &'static str = "refused: the write's input does not fit the graph: ";
+
+    /// An [input refusal](Self::is_input_refusal) that is not a cycle: an
+    /// [`StoreError::Invariant`] whose message is [`Self::INPUT_REFUSAL`]
+    /// then `detail`, which goes to the operator's log and never reaches a
+    /// model (a caller is told `store error`, as before).
+    pub(crate) fn input_refusal(detail: impl std::fmt::Display) -> StoreError {
+        StoreError::Invariant(format!("{}{detail}", Self::INPUT_REFUSAL))
+    }
+
+    /// Whether this is a write refused for its own input against the graph
+    /// it met (#294): a [cycle refusal](Self::is_cycle_refusal), an
+    /// `Observation` derived again under a canonical key an `Observation`
+    /// already holds, a child given a second `Hierarchical` parent, or a
+    /// `parent_of` pair whose two ends resolve to one canonical key or one
+    /// concept. Each can pass at the ack and be refused at apply, because the
+    /// graph changed between the two (two such writes acked back to back), and
+    /// the same write against the same graph is refused again. So a replayed
+    /// durable intent that meets one settles `failed` and the replay goes on
+    /// (as for [`LamboError::Embed`], and as the in-session worker does),
+    /// where any other `Invariant`, which can mean the graph or the store is
+    /// inconsistent, still stops the replay.
+    ///
+    /// Identified by prefix, like [`Self::is_cycle_refusal`]: the producers
+    /// build it through `Self::input_refusal`, so the variant stays
+    /// `Invariant` and no public enum gains a member.
+    pub fn is_input_refusal(&self) -> bool {
+        self.is_cycle_refusal()
+            || matches!(self, StoreError::Invariant(m) if m.starts_with(Self::INPUT_REFUSAL))
     }
 
     /// Whether this is a checked vector read refusing its probe because the
@@ -2580,6 +2611,23 @@ mod tests {
             !StoreError::Backend("refused: the write would close a cycle: x".into())
                 .is_cycle_refusal()
         );
+    }
+
+    /// #294: an input refusal is a cycle refusal or one built through
+    /// `input_refusal`; a plain `Invariant` (which can mean an inconsistent
+    /// graph) and a `Backend` error with the same words are not, and an input
+    /// refusal that is not a cycle is not a cycle refusal.
+    #[test]
+    fn only_input_refusals_are_marked_as_input_refusals() {
+        let refusal = StoreError::input_refusal("derive: a second Observation");
+        assert!(refusal.is_input_refusal());
+        assert!(!refusal.is_cycle_refusal());
+        assert!(StoreError::cycle_refusal(CycleKind::Hierarchical, "pair").is_input_refusal());
+        assert!(!StoreError::Invariant("temporal chain covers 1 of 2".into()).is_input_refusal());
+        assert!(!StoreError::Backend(
+            "refused: the write's input does not fit the graph: x".into()
+        )
+        .is_input_refusal());
     }
 
     /// #22 review: `{:?}` of a supplied vector, or of an intent carrying

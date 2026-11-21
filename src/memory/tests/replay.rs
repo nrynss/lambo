@@ -1446,3 +1446,197 @@ async fn a_lookup_timeout_at_replay_settles_failed_and_a_run_of_them_stops_it() 
     }
     mem3.close().await.expect("clean close 3");
 }
+
+/// One unconsumed derive intent a previous process left, for
+/// `MemoryStore::seed`: receipt `lwr1.{epoch}.{issued_ms}.{seq}`, as
+/// `ReceiptId`'s `Display` writes it.
+#[cfg(feature = "fixtures")]
+#[allow(clippy::too_many_arguments)]
+fn owed_derive(
+    sid: &SessionId,
+    agent: &AgentId,
+    interaction: NodeId,
+    epoch: u64,
+    issued_ms: i64,
+    seq: u64,
+    concepts: &[(&str, ConceptType)],
+    pairs: &[(&str, &str)],
+) -> crate::types::WriteIntent {
+    crate::types::WriteIntent {
+        session_id: sid.clone(),
+        receipt: format!("lwr1.{epoch:016x}.{issued_ms:x}.{seq:x}"),
+        agent: agent.clone(),
+        interaction,
+        lane_seq: seq,
+        issued_ms,
+        payload: crate::types::WriteIntentPayload::Derive {
+            receipt_destination: None,
+            concepts: concepts.iter().map(|(c, t)| (c.to_string(), *t)).collect(),
+            pairs: pairs
+                .iter()
+                .map(|(p, c)| (p.to_string(), c.to_string()))
+                .collect(),
+        },
+        created_at: Utc::now(),
+        outcome: None,
+    }
+}
+
+/// Seed `inner` with a session whose only content is one interaction and the
+/// given intents, as `load_session` returns them (`intents` is the load
+/// order), then attach `strategy` over it and wait until the replay has
+/// either paid its debt or stopped.
+#[cfg(feature = "fixtures")]
+async fn replay_planted(
+    inner: &Arc<MemoryStore>,
+    session: &str,
+    strategy: MatchStrategy,
+    intents: impl FnOnce(&SessionId, NodeId) -> Vec<crate::types::WriteIntent>,
+) -> Memory {
+    let sid = SessionId::new(session);
+    let interaction = NodeId::new();
+    let now = Utc::now();
+    inner
+        .seed(GraphSnapshot {
+            session_id: sid.clone(),
+            embedding: Some(contract("fixture", 1024)),
+            interactions: vec![Interaction {
+                event_time: None,
+                id: interaction,
+                session_id: sid.clone(),
+                agent_id: AgentId::new("agent-a"),
+                prompt_text: None,
+                previous_id: None,
+                created_at: now,
+            }],
+            write_intents: intents(&sid, interaction),
+            ..GraphSnapshot::default()
+        })
+        .expect("seed");
+    let mem = Memory::builder()
+        .session(session)
+        .agent("agent-a")
+        .flush_interval(Duration::from_secs(3_600))
+        .store(Arc::new(VectorSearchable(inner.clone())) as Arc<dyn GraphStore>)
+        .embedder(Arc::new(FixtureEmbedder::new()) as Arc<dyn Embedder>)
+        .embedding_contract(contract("fixture", 1024))
+        .match_strategy(strategy)
+        .build()
+        .await
+        .expect("build");
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while mem.pipeline().counters().replay_owed() != 0
+        && mem.pipeline().counters().replay_blocked() == crate::writeq::ReplayBlockReason::None
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the replay neither finished nor stopped"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    // The last settle is published before the counters move on; give the
+    // replay task a moment to publish it.
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    mem
+}
+
+/// **#294**: a replayed intent refused because its input no longer fits the
+/// graph it meets (an Observation derived twice, a child given a second
+/// Hierarchical parent) settles `failed`, and the replay goes on, as it
+/// does for a cycle refusal and as the in-session worker does for the same
+/// error.
+///
+/// The issue's scenario: a `Canonical` session acked each pair of writes
+/// against a graph that held neither, and both flushed before the process
+/// died. Before the fix the second of the first pair took the stop arm
+/// (block reason `Other`): it and everything behind it stayed
+/// `pending_replay`, on every serve.
+///
+/// Mirrors the Lean theorems `Drain.fixed_input_goes_on` (the replay settles
+/// an input refusal `failed` and goes on) and `Drain.fixed_sessionWide_stops`
+/// (any other non-transient error still stops it); the code before the fix
+/// is `Drain.store_error_blocks_backlog` and
+/// `Drain.replayStep_inputRefusal_stops`.
+#[cfg(feature = "fixtures")]
+#[tokio::test]
+async fn a_graph_dependent_input_refusal_at_replay_settles_failed_and_the_replay_goes_on() {
+    let inner = Arc::new(MemoryStore::new());
+    let agent = AgentId::new("agent-a");
+    let epoch = 0x00ab_cdef_0123_4567;
+    let mem = replay_planted(
+        &inner,
+        "intent-input-refusal",
+        MatchStrategy::Canonical,
+        |sid, ix| {
+            vec![
+                owed_derive(
+                    sid,
+                    &agent,
+                    ix,
+                    epoch,
+                    1_000,
+                    1,
+                    &[("tide gauge reading", ConceptType::Observation)],
+                    &[],
+                ),
+                owed_derive(
+                    sid,
+                    &agent,
+                    ix,
+                    epoch,
+                    1_001,
+                    2,
+                    &[("tide gauge reading", ConceptType::Observation)],
+                    &[],
+                ),
+                owed_derive(sid, &agent, ix, epoch, 1_002, 3, &[], &[("harbor", "pier")]),
+                owed_derive(sid, &agent, ix, epoch, 1_003, 4, &[], &[("marina", "pier")]),
+                owed_derive(
+                    sid,
+                    &agent,
+                    ix,
+                    epoch,
+                    1_004,
+                    5,
+                    &[("a later fact", ConceptType::Entity)],
+                    &[],
+                ),
+            ]
+        },
+    )
+    .await;
+    let tags: Vec<&str> = (1..=5)
+        .map(|seq| {
+            let r: crate::writeq::ReceiptId = format!("lwr1.{epoch:016x}.{:x}.{seq:x}", 999 + seq)
+                .parse()
+                .unwrap();
+            mem.pipeline().lookup(&agent, r).tag()
+        })
+        .collect();
+    assert_eq!(
+        tags,
+        [
+            "applied_after_restart",
+            "failed",
+            "applied_after_restart",
+            "failed",
+            "applied_after_restart"
+        ],
+        "the input refusals settle failed and the replay applies what is behind them"
+    );
+    assert_eq!(mem.pipeline().counters().replay_owed(), 0);
+    assert_eq!(
+        mem.pipeline().counters().replay_blocked(),
+        crate::writeq::ReplayBlockReason::None
+    );
+    mem.graph.read().assert_invariants().unwrap();
+    mem.close().await.expect("clean close");
+    let snap = inner
+        .load_session(&SessionId::new("intent-input-refusal"))
+        .await
+        .expect("reload");
+    assert!(
+        snap.write_intents.iter().all(|i| i.outcome.is_some()),
+        "every intent is consumed: nothing is owed to the next serve"
+    );
+}

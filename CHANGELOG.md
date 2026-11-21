@@ -230,6 +230,20 @@
   latches, that a stale write is never re-sent, that the loop itself loses
   nothing silently, and that `close` returns `Ok` only when every batch that
   left the loop was committed or dead-lettered.
+- Write-queue replay: a durable intent refused at replay because its input no
+  longer fits the graph now settles `failed` and the replay goes on, as a
+  cycle refusal already did and as the in-session worker does (#294). The
+  refusals are a second derive of one `Observation`, a second `Hierarchical`
+  parent for a child, and a `parent_of` pair whose ends resolve to one
+  canonical key or one concept. Two such writes acked back to back both pass
+  the ack; before, the second took the replay's stop arm (block reason
+  `other`), so it and every intent behind it stayed `pending_replay` on every
+  serve. They are marked by `StoreError::is_input_refusal` (a message prefix
+  on `StoreError::Invariant`, like `is_cycle_refusal`, which it includes); any
+  other `Invariant` still stops the replay. What a caller is told is unchanged
+  (`store error`). `formal/LamboProofs/Drain.lean` models the fixed step and
+  proves the replay settles every input refusal and still stops on every other
+  non-transient error.
 - Recall: an exact durable-name match now raises the named concept's
   phase-1 keyword score to at least 1.0 instead of overwriting it with 1.0
   (#288). BM25 is unnormalized and routinely above 1.0, so the overwrite could

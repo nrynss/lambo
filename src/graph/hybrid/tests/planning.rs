@@ -1281,3 +1281,25 @@ async fn check_embed_context_agrees_with_the_apply_time_check() {
         );
     }
 }
+
+/// #294: a `parent_of` pair whose two ends resolve to one canonical key is
+/// refused as an input refusal, which a replay settles `failed` rather than
+/// stopping on; a raw-reflexive pair (refused at the ack, so never met at
+/// replay) stays a plain `Invariant`.
+#[test]
+fn a_pair_resolving_to_one_key_is_an_input_refusal() {
+    let (graph, _) = graph_with_interaction("pair-one-key", 1, 0, "p");
+    let g = graph.read();
+    let err = validate_graph_inputs(&g, &ParentOf::from_pairs(&[("user schema", "schema user")]))
+        .unwrap_err();
+    assert!(
+        matches!(&err, LamboError::Store(e) if e.is_input_refusal()),
+        "{err:?}"
+    );
+    let err = validate_graph_inputs(&g, &ParentOf::from_pairs(&[("user schema", "user schema")]))
+        .unwrap_err();
+    assert!(
+        matches!(&err, LamboError::Store(e) if !e.is_input_refusal()),
+        "{err:?}"
+    );
+}
