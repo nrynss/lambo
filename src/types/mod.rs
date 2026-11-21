@@ -1,4 +1,4 @@
-//! Core Lambo types (P1 contracts — frozen after T1.1).
+//! Core Lambo types.
 //!
 //! Spec: lambo-hackathon-spec-v0.1.md §§3–6, graph model §5.
 
@@ -399,8 +399,8 @@ pub enum CanonizationStatus {
 /// this setting has, and the two others are on the write path.**
 ///
 /// The first two consequences were the ones documented for a long time (the
-/// third was found by J3-R2R-7, which is also the finding that made this
-/// authority name all three):
+/// third was found by the review finding that also made this authority name
+/// all three):
 ///
 /// 1. **Recall scope** — which concepts a recall may match: canonical facts
 ///    only (`Canonical`) or canonical and ordinary memory together (`Hybrid`).
@@ -415,7 +415,7 @@ pub enum CanonizationStatus {
 ///    while `Hybrid` uses the laxer hybrid rule set
 ///    (`crate::memory::Memory::derive`, `crate::graph::derive::validate`). So
 ///    the opt-out a user is sent to — flip to `Canonical` — also starts
-///    rejecting inputs `Hybrid` accepted (J3-R2R-7).
+///    rejecting inputs `Hybrid` accepted.
 ///
 /// **Note the two defaults are not the same**, deliberately and confusingly: the
 /// `Default` impl here is `Canonical` (the conservative choice for a
@@ -440,11 +440,11 @@ pub enum MatchStrategy {
 
 /// One turn of agent work: the unit that facts are derived from.
 ///
-/// ## Flush time and event time (workstream D)
+/// ## Flush time and event time
 ///
 /// [`Self::created_at`] is **flush time**: when Lambo recorded the turn. It is
 /// stamped by the process clock and never accepted from a caller — the
-/// server-authoritative ordering that F18 protects on the CLI surface too.
+/// server-authoritative ordering, protected on the CLI surface too.
 ///
 /// [`Self::event_time`] is **event time**: the instant this turn is *about* —
 /// a commit date, a transcript timestamp — supplied per fact by an ingester
@@ -516,7 +516,7 @@ pub struct Concept {
     pub last_accessed: Option<DateTime<Utc>>,
     /// How many garbage-collection sweeps this concept has survived.
     pub gc_survived: i32,
-    /// How many times a human has explicitly confirmed this concept (C2, spec
+    /// How many times a human has explicitly confirmed this concept (spec
     /// §3.2's "Human Confirmed" term).
     ///
     /// The one solo-score input no existing structure carries (the other three
@@ -540,10 +540,10 @@ pub struct Concept {
     pub last_demotion_time: Option<DateTime<Utc>>,
     /// Dense embedding when present (width = session [`EmbeddingContract::dim`]).
     pub embedding: Option<Vec<f32>>,
-    /// Demoted-chunk group id (T2.5): Observations from one context-overflow
-    /// chunk share this id for sibling co-retrieval (spec §7, §8; read by T5.2).
-    /// Added post-T1.1 per the P5 doc ("T2.5's field") — serde-defaulted so
-    /// existing fixture JSON loads unchanged.
+    /// Demoted-chunk group id: Observations from one context-overflow chunk
+    /// share this id for sibling co-retrieval (spec §7, §8). Added after the
+    /// original field set — serde-defaulted so existing fixture JSON loads
+    /// unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chunk_group_id: Option<String>,
     /// Where [`Self::embedding`] came from when it is **not** a function of
@@ -672,7 +672,7 @@ impl EmbeddingSource {
     /// not parse is an error, never `None`: reading it as `None` would let a
     /// re-embed overwrite the supplied vector with a vector of the caption.
     /// `concept` names the row in the error, which also names the way out
-    /// (upgrade, or `lambo erase-session`; #22 review L4).
+    /// (upgrade, or `lambo erase-session`; #22 review).
     pub fn from_column(raw: &str, concept: impl fmt::Display) -> Result<Self, StoreError> {
         let source: Self = serde_json::from_str(raw).map_err(|e| {
             StoreError::Invariant(format!(
@@ -682,7 +682,7 @@ impl EmbeddingSource {
                  `lambo erase-session`, which does not need to load it"
             ))
         })?;
-        // Review I1: the digest is held to its documented form on the way in,
+        // The digest is held to its documented form on the way in,
         // so nothing downstream sees a sha256 that is not one.
         if let Some(digest) = &source.sha256
             && !is_lowercase_sha256_hex(digest)
@@ -744,7 +744,7 @@ impl Node {
 /// that interaction's clock), so the edge inherits the writing interaction's
 /// event time at creation — an edge manufactured during a historical ingest is
 /// as old as what it is about, while a live edge falls back to its own flush
-/// time and keeps F17's fresh-evidence guard intact.
+/// time and keeps the fresh-evidence guard intact.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Edge {
     /// This edge's own id.
@@ -815,7 +815,7 @@ pub enum Mutation {
     RetireAlias { retired: RetiredAlias },
     /// Insert or update a node.
     ///
-    /// **R2-1 — canonization columns are not this variant's to write.** On an
+    /// **Canonization columns are not this variant's to write.** On an
     /// **existing** concept row every adapter leaves `canonization_status`,
     /// `blast_radius` and `last_demotion_time` exactly as they are; only
     /// [`Mutation::CanonizationTransition`] and
@@ -826,7 +826,7 @@ pub enum Mutation {
     /// Single-writer, because the alternative is a lost update with no
     /// repair: this variant carries a **snapshot of the concept taken when
     /// the mutation was appended**, and appenders that care nothing about
-    /// canonization append it — `bump_gc_survived` (T4.5 GC) is the common
+    /// canonization append it — `bump_gc_survived` (GC) is the common
     /// one. A GC bump at `T`, a hop at `T+1`, and the flush at `T+2` puts
     /// `[UpsertNode(stale), CanonizationTransition(hop)]` in one batch; the
     /// transition is already recorded (the evaluator writes it immediately
@@ -834,7 +834,7 @@ pub enum Mutation {
     /// the stale upsert's write of the three columns would stand as the
     /// durable state. Status regresses; worse, a demoted node reloads
     /// `Canonical` with `last_demotion_time` erased — the re-promotion
-    /// cooldown gone (COH-3, "cooldown survives restart").
+    /// cooldown gone ("cooldown survives restart").
     ///
     /// Excluding the columns here rather than making the transition's UPDATE
     /// monotonic is what makes the replay no-op's premise ("the effect is
@@ -867,7 +867,7 @@ pub enum Mutation {
         /// The transition to record.
         event: CanonizationEvent,
     },
-    /// The session's `root_goal` changed (XP-8). `None` clears it.
+    /// The session's `root_goal` changed. `None` clears it.
     ///
     /// Session-level metadata otherwise reaches a store only through the
     /// full-snapshot `seed` path, so before this variant a reload replayed an
@@ -895,7 +895,7 @@ pub enum Mutation {
         embedding: Option<EmbeddingContract>,
     },
     /// A validated, acked background write that has not yet been applied
-    /// (J3 durable intents — `dev-diary/lambo-for-mooshik/J3-durability-redesign.md`).
+    /// (durable intents — `dev-diary/lambo-for-mooshik/J3-durability-redesign.md`).
     ///
     /// Appended at **ack** time by the write pipeline, through this same
     /// write-behind log, so the C-series "session closed, tail durable"
@@ -1135,7 +1135,7 @@ impl WriteIntentPayload {
     }
 
     /// The payload a **settled** (consumed: applied or failed) intent keeps
-    /// in the store (#22 review L1).
+    /// in the store (#22 review).
     ///
     /// Nothing reads a settled intent's payload: the replay seeds its receipt
     /// answer from the outcome alone and replays only unconsumed rows. So a
@@ -1148,7 +1148,7 @@ impl WriteIntentPayload {
     /// *unconsumed* image intent stops an older build). Text payloads are kept
     /// as they are.
     ///
-    /// A settled [`Self::DeriveCited`] (#36 PR 4 review H2) becomes the same
+    /// A settled [`Self::DeriveCited`] (#36 PR 4 review) becomes the same
     /// empty [`Self::Derive`], for the second reason: a 0.5.0 build cannot
     /// decode the variant, and a settled row is decoded at every load, so a
     /// cited derive that had already applied would otherwise stop a
@@ -1266,7 +1266,7 @@ impl SuppliedVector {
     /// builds is unit. The apply runs this, so a durable intent replayed
     /// under a changed live contract, or one whose stored vector was damaged
     /// or planted un-normalized, is refused rather than written as is
-    /// (#22 review L5). The message names both contracts and never quotes
+    /// (#22 review). The message names both contracts and never quotes
     /// the vector.
     pub fn check(&self, live: &EmbeddingContract) -> Result<(), String> {
         check_supplied_values(&self.vector, &self.contract, live)?;
@@ -1337,7 +1337,7 @@ pub(crate) fn check_supplied_values(
     Ok(())
 }
 
-/// A durable post-validation write intent (J3). See
+/// A durable post-validation write intent. See
 /// [`Mutation::PutWriteIntent`].
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct WriteIntent {
@@ -1379,7 +1379,7 @@ pub struct WriteIntent {
 /// long as an in-RAM receipt would ([`crate::writeq::RECEIPT_RETENTION`] is
 /// const-asserted equal to this).
 ///
-/// **Two mechanisms, stated precisely (J3 round-1 F2 corrected the second).**
+/// **Two mechanisms, stated precisely (a review corrected the second).**
 ///
 /// * *Purging the row* is **lazy**: it happens inside the adapters' consume
 ///   step, clocked by that mutation's own `consumed_at`, so no adapter needs a
@@ -1412,7 +1412,7 @@ pub struct WriteIntentOutcome {
     pub summary: String,
     /// When the intent was consumed (process clock of the consumer).
     ///
-    /// Doubles as the **purge** clock, but the purging is *lazy* (J3-R2R-5):
+    /// Doubles as the **purge** clock, but the purging is *lazy*:
     /// adapters delete consumed rows older than the receipt-retention window
     /// only as a side-effect of the next consume, scoped to one
     /// `session_id`, so a session that goes quiet after a burst keeps its
@@ -1465,8 +1465,8 @@ pub struct MutationBatch {
 pub struct GcMark {
     /// The epoch the next `gc_interval` (and the idle floor) is measured from:
     /// the epoch after the last sweep, advanced by every deferred survivor-bump
-    /// drain so GC's own writes are never credited as session mutations
-    /// (NEW-2). `0` for a session that has never swept.
+    /// drain so GC's own writes are never credited as session mutations. `0`
+    /// for a session that has never swept.
     #[serde(default)]
     pub last_gc_epoch: u64,
     /// When the last sweep ran — or, for a session that has never swept, when a
@@ -1609,7 +1609,7 @@ pub struct GraphSnapshot {
     /// Set on first embed; refuse swaps without re-embed (see `EmbeddingContract`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub embedding: Option<EmbeddingContract>,
-    /// Durable write intents (J3): unconsumed ones are owed a replay by the
+    /// Durable write intents: unconsumed ones are owed a replay by the
     /// loading process; consumed-and-retained ones answer
     /// `applied_after_restart` lookups. Expired consumed rows are not loaded.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1727,7 +1727,7 @@ pub enum DaemonEvent {
         node_id: NodeId,
         /// Shortest-path hop count to the nearest root goal — **or the no-path
         /// sentinel** `4294967295`
-        /// ([`crate::daemon::drift::DRIFT_HOPS_NO_PATH_EVENT`], ALGO-5/NEW-5).
+        /// ([`crate::daemon::drift::DRIFT_HOPS_NO_PATH_EVENT`]).
         /// `u32` is frozen by spec §6.1 and has no unreachable encoding, so a
         /// concept with no traversable route to any goal — the maximally drifted
         /// case — reports the sentinel. This enum derives `Serialize`: a JSON
@@ -1941,8 +1941,8 @@ pub fn tie_break_by_key(
 /// The daemon's score table — epoch of the graph state it was computed from,
 /// plus the score-descending ranked list of concept scores.
 ///
-/// Daemon-owned: the rescore loop replaces it wholesale each cycle. T4.2+
-/// reads it; never mutated from outside. Defined here rather than in
+/// Daemon-owned: the rescore loop replaces it wholesale each cycle; readers
+/// never mutate it. Defined here rather than in
 /// [`crate::daemon`] because recall and canonization read it too (#25);
 /// `daemon::ScoreTable` re-exports it.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -1953,7 +1953,7 @@ pub struct ScoreTable {
     pub ranked: Vec<Scored<NodeId>>,
 }
 
-/// Per-condition payload — what recall (T5.3) renders and what a re-validation
+/// Per-condition payload — what recall renders and what a re-validation
 /// predicate reads. The conflict payload carries everything the demo sentence
 /// needs: the agent(s) involved and how long ago the write happened
 /// ("Agent A wrote to it eleven seconds ago").
@@ -1965,13 +1965,13 @@ pub enum HotListPayload {
         agents: Vec<AgentId>,
         /// The agent that made the **most recent qualifying write** — the
         /// subject of the §13 sentence "Agent A wrote to it eleven seconds
-        /// ago" (ALGO-2). Without it the renderer can only guess from
+        /// ago". Without it the renderer can only guess from
         /// `agents`, and on the shipped fixture the naive guess (first
         /// alphabetically) is wrong: the newest write is agent-b's.
         writer: AgentId,
         /// Age of `writer`'s write, in seconds, **as of the last
         /// re-validation** — refreshed by [`crate::daemon::hotlist::HotList::revalidate`], so a
-        /// rendered value is the age at read time (XP-3).
+        /// rendered value is the age at read time.
         seconds_ago: u64,
     },
     /// A high-risk modification touched the node.
@@ -2036,8 +2036,8 @@ pub struct CanonizationEvent {
     pub blast_radius: Option<i32>,
     /// The concept's new `last_demotion_time` when this event is a demotion
     /// (`Canonical -> None`); `None` for every non-demotion transition, which
-    /// must leave the concept's value untouched (adve-review COH-3). Spec §10:
-    /// "Demotion sets `last_demotion_time`" — T6.3 cooldown / T6.4 read it.
+    /// must leave the concept's value untouched. Spec §10: "Demotion sets
+    /// `last_demotion_time`" — the re-promotion cooldown reads it.
     /// Serde-defaulted and skipped when absent so existing fixture JSON loads
     /// unchanged (verified: no committed fixture carries a demotion event).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2069,7 +2069,7 @@ pub enum DemotionReason {
         /// The contradicting concept whose newer evidence demoted this one.
         by: NodeId,
     },
-    /// A stored reason this build cannot read (#20 review M3): unknown text,
+    /// A stored reason this build cannot read (#20 review): unknown text,
     /// a malformed `(reason, superseded_by)` pair, or a reason on a
     /// promotion. Produced only when loading, with a warning, so one bad row
     /// never stops a session's load; it is never read as `Budget`, and every
@@ -2122,7 +2122,7 @@ impl DemotionReason {
         }
     }
 
-    /// The load-time reading of a stored pair (#20 review M3): what
+    /// The load-time reading of a stored pair (#20 review): what
     /// [`Self::from_columns`] accepts, and [`Self::Unknown`] (never
     /// `Budget`) for anything else, so the session still loads. The caller
     /// logs the warning through [`CanonizationEvent::loaded`].
@@ -2179,7 +2179,7 @@ impl CanonizationEvent {
         }
     }
 
-    /// The load-time form of [`Self::check_reason`] (#20 review M3, L7): an
+    /// The load-time form of [`Self::check_reason`] (#20 review): an
     /// event read from a store or a snapshot whose reason does not pass the
     /// write gate keeps loading, with its reason turned into
     /// [`DemotionReason::Unknown`] (the raw pair kept) and one warning. It is
@@ -2248,8 +2248,8 @@ pub enum StoreError {
     Backend(String),
     /// Deterministic constraint violation (Postgres SQLSTATE 23xxx /
     /// SQLite `SQLITE_CONSTRAINT`), carrying the SQLSTATE / extended code.
-    /// Terminal: replaying the batch can never succeed (STORE-4 / D5), so the
-    /// flush loop dead-letters it instead of retrying.
+    /// Terminal: replaying the batch can never succeed, so the flush loop
+    /// dead-letters it instead of retrying.
     #[error("constraint violated ({0})")]
     Constraint(String),
     /// A write whose fencing token is stale (GitHub issue #1). The lease moved
@@ -2264,10 +2264,10 @@ pub enum StoreError {
 }
 
 impl StoreError {
-    /// STORE-4: retryability for the flush loop. A constraint violation is
+    /// Retryability for the flush loop. A constraint violation is
     /// deterministic — retrying it can never succeed and only blocks the
     /// queue (head-of-line) — so it is non-retryable and dead-lettered
-    /// (D5: drop-after-log, visible in `FlushStats::dead_lettered`). A
+    /// (drop-after-log, visible in `FlushStats::dead_lettered`). A
     /// `StaleWrite` is also non-retryable: the holder's token will never catch
     /// up (it lost the lease), so retrying cannot succeed — on detection the
     /// flush loop treats it like a constraint (bail out of the retry ladder).
@@ -2278,15 +2278,15 @@ impl StoreError {
 
     /// Whether this is a checked vector read refusing its probe because the
     /// session's embedding space is not the caller's: the durable contract
-    /// changed under the read (the E2E-6 race), or the probe's width is not
-    /// the session's.
+    /// changed under the read (a race), or the probe's width is not the
+    /// session's.
     ///
     /// Every store and the holder's graph source word these two refusals
     /// alike (the parity tests compare them), so the prefixes identify them.
     /// Used only to word a model-facing message: neither refusal carries a
-    /// detail N4 hides, and both are fixed by re-reading the contract and
-    /// retrying, which a bare "store error" does not say (#22 PR 6 review
-    /// Low 1). The class stays `store error`.
+    /// detail the model-facing error flattening hides, and both are fixed by
+    /// re-reading the contract and retrying, which a bare "store error" does
+    /// not say (#22 PR 6 review). The class stays `store error`.
     /// The prefix every write-time cycle refusal's message starts with,
     /// followed by its [`CycleKind`]'s tag.
     const CYCLE_REFUSAL: &'static str = "refused: the write would close a cycle: ";
@@ -2339,7 +2339,7 @@ impl LamboError {
 
     /// A hybrid derive's vector-candidate lookup that did not answer inside
     /// its own budget, `graph::hybrid::VECTOR_LOOKUP_TIMEOUT` from when it
-    /// started (#125 review H1). A call whose overall budget ran out first
+    /// started (#125 review). A call whose overall budget ran out first
     /// (slow embeds before the lookup) is the ordinary embed-budget
     /// [`LamboError::EmbedUnavailable`], not this. It is
     /// [`LamboError::EmbedUnavailable`]: transient, so the in-session write
@@ -2398,10 +2398,10 @@ pub enum LamboError {
     /// Producing an embedding failed because the embedder **could not be
     /// reached or did not answer in time** — a transport failure or a timeout.
     ///
-    /// Split out of [`LamboError::Embed`] by J3 round-1 N1 for the same reason
-    /// [`LamboError::SoftLock`] was split out of [`LamboError::Conflict`] by
-    /// J1-R2-2: a class a decision turns on must be a **type**, not a substring
-    /// of a message. The decision here is the durable-intent replay's, and it is
+    /// Split out of [`LamboError::Embed`] for the same reason
+    /// [`LamboError::SoftLock`] was split out of [`LamboError::Conflict`]: a
+    /// class a decision turns on must be a **type**, not a substring of a
+    /// message. The decision here is the durable-intent replay's, and it is
     /// irreversible in both directions — settle an acked write `failed`, or
     /// leave it durable for the next process. Before the split, the replay arm
     /// could only see `LamboError::Embed(String)` and so treated a dead
@@ -2410,8 +2410,8 @@ pub enum LamboError {
     ///
     /// Produced only where the cause is known: `graph::hybrid::derive`'s embed
     /// timeout arm, its embed-error arm when
-    /// [`crate::embed::EmbedError::is_transient`] says so, and (#125 review
-    /// H1) its vector-candidate lookup when the store did not answer within
+    /// [`crate::embed::EmbedError::is_transient`] says so, and (#125 review)
+    /// its vector-candidate lookup when the store did not answer within
     /// the lookup's own budget (`Self::lookup_timeout`), or when the call's
     /// embed-and-lookup budget ran out before or during the lookup (the
     /// ordinary budget message). Neither says anything about the input, so
@@ -2433,20 +2433,19 @@ pub enum LamboError {
     /// The configuration is unusable.
     #[error("config: {0}")]
     Config(String),
-    /// Another writer holds this session — the T8.6 single-writer lease, at
+    /// Another writer holds this session — the single-writer lease, at
     /// build time or lost mid-flight ([`crate::Memory`]'s lease-lost fence).
     ///
     /// Its message carries session-private state and an operator-only override,
-    /// so it is **not** model-facing: `mcp::server`'s N4 policy flattens it to a
-    /// class. The §11 soft-lock refusal that *is* safe to render is
-    /// [`LamboError::SoftLock`], a separate variant for exactly that reason
-    /// (J1-R2-2).
+    /// so it is **not** model-facing: `mcp::server`'s error policy flattens it
+    /// to a class. The §11 soft-lock refusal that *is* safe to render is
+    /// [`LamboError::SoftLock`], a separate variant for exactly that reason.
     #[error("conflict: {0}")]
     Conflict(String),
     /// Another agent holds this node's §11 soft lock, or this agent does not
     /// hold the lock it tried to release.
     ///
-    /// Split out of [`LamboError::Conflict`] by J1-R2-2 so that "a soft-lock
+    /// Split out of [`LamboError::Conflict`] so that "a soft-lock
     /// refusal" is a *type*, not a string or a guess about which of a variant's
     /// producers ran. Produced by `graph::reserve::{reserve, release}` and
     /// nowhere else: those two messages are built from a node id the caller
@@ -2469,7 +2468,7 @@ pub enum LamboError {
     /// (`crate::surface::error`) while every other `Embed` refusal is
     /// flattened to a class: the fix is the caller's (choose another image
     /// id), and a bare "embedding error" told it nothing. Produced only by
-    /// `graph::hybrid`'s commit-lock check, the same J1-R2-2 rule as
+    /// `graph::hybrid`'s commit-lock check, the same rule as
     /// [`LamboError::SoftLock`]: the exception is a type, so it opens for
     /// this producer and no other.
     ///
@@ -2487,7 +2486,7 @@ pub enum LamboError {
     /// Its message is built only from the caller's own reference (shortened
     /// and escaped) and session-local ids and content the caller can already
     /// read, which is what lets every surface render it intact
-    /// (`crate::surface::error`), the J1-R2-2 rule by type. It is a fact
+    /// (`crate::surface::error`), the same exception-by-type rule. It is a fact
     /// about this input against this graph, like [`LamboError::Embed`]: a
     /// replayed intent that meets it settles `failed`.
     #[error("reference refused: {0}")]
@@ -2560,7 +2559,7 @@ mod tests {
         .is_err());
     }
 
-    /// #116 review M1: only the two cycle producers' refusals are marked;
+    /// #116 review: only the two cycle producers' refusals are marked;
     /// any other `Invariant` (which can mean an inconsistent graph) is not.
     #[test]
     fn only_cycle_refusals_are_marked_as_cycle_refusals() {
@@ -2580,7 +2579,7 @@ mod tests {
         );
     }
 
-    /// #22 review L5: `{:?}` of a supplied vector, or of an intent carrying
+    /// #22 review: `{:?}` of a supplied vector, or of an intent carrying
     /// one, shows its length and never a component.
     #[test]
     fn a_supplied_vector_debug_never_prints_the_vector() {
@@ -2614,7 +2613,7 @@ mod tests {
         }
     }
 
-    /// #22 review L1: the SQL adapters' consume matches a stored image
+    /// #22 review: the SQL adapters' consume matches a stored image
     /// payload with [`DERIVE_IMAGE_PAYLOAD_LIKE`] and writes
     /// [`SETTLED_IMAGE_INTENT_PAYLOAD`] over it, both as constants. Pin them
     /// to what serde actually writes and reads.
@@ -3205,14 +3204,14 @@ mod tests {
             assert!(matches!(err, StoreError::Invariant(_)), "{raw}: {err:?}");
             assert!(err.to_string().contains("embedding_source"), "{err}");
             assert!(err.to_string().contains("concept c3"), "{err}");
-            // Review L4: the refusal says how to get the session back.
+            // The refusal says how to get the session back.
             assert!(err.to_string().contains("upgrade"), "{err}");
             assert!(err.to_string().contains("lambo erase-session"), "{err}");
         }
     }
 
-    /// Review I1: the stored digest is decoded as strictly as the rest of the
-    /// value. Anything but 64 lowercase hex characters is refused like an
+    /// The stored digest is decoded as strictly as the rest of the value.
+    /// Anything but 64 lowercase hex characters is refused like an
     /// unreadable value; a well-formed one loads.
     #[test]
     fn embedding_source_refuses_a_malformed_sha256() {

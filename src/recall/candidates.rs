@@ -1,4 +1,4 @@
-//! Phase-1 candidate retrieval (T5.1, spec §8) — the UNION of three legs.
+//! Phase-1 candidate retrieval (spec §8) — the UNION of three legs.
 //!
 //! Legs:
 //! 1. **Keyword** — [`InvertedIndex::search`] (`query`, `limit`): BM25 hits,
@@ -7,9 +7,8 @@
 //!    the N = [`RECENT_INTERACTIONS`] most recent interactions by `created_at`
 //!    (ties broken by node id ascending; interactions carry no canonical key,
 //!    so the id is the only stable separator at that step). The temporal chain
-//!    order is NOT consulted: the contract is "3 most recent by `created_at`"
-//!    (handoff T5.1), and a chain ordered by insertion may carry arbitrary
-//!    timestamps.
+//!    order is NOT consulted: the contract is "3 most recent by `created_at`",
+//!    and a chain ordered by insertion may carry arbitrary timestamps.
 //! 3. **Vector** — the checked candidate read of the source recall is handed
 //!    (`VectorCandidates`), only when the store advertises
 //!    [`Capabilities::VECTOR_SEARCH`](crate::store::Capabilities::VECTOR_SEARCH).
@@ -47,7 +46,7 @@
 //! next (issue #2).
 //!
 //! The caller supplies the [`InvertedIndex`]: the graph itself owns no index
-//! (P3 contract — the session owner mirrors every concept write into a separate
+//! (the session owner mirrors every concept write into a separate
 //! [`InvertedIndex`]; see `src/graph/mod.rs`), so building one here would
 //! silently re-derive a possibly stale copy.
 //!
@@ -93,13 +92,13 @@ pub const RECENT_SCORE: f64 = 0.35;
 /// Phase-1 keyword over-fetch multiplier: the keyword leg keeps the first
 /// `limit * KEYWORD_OVERFETCH` index results. Phase 1 used to truncate its
 /// merged list to `limit`, which let the flat-scored recent/vector legs evict
-/// strong query matches (GPT5.6sol P1-3); it no longer truncates, and this cap
-/// bounds how many keyword candidates reach the phase-3 `top_k` cut.
+/// strong query matches; it no longer truncates, and this cap bounds how many
+/// keyword candidates reach the phase-3 `top_k` cut.
 pub(crate) const KEYWORD_OVERFETCH: usize = 4;
 
 /// The score each phase-1 leg contributed for one node, **before** max-merge.
 ///
-/// The merged score alone cannot answer G's question — "was this a real semantic
+/// The merged score alone cannot answer the question "was this a real semantic
 /// hit, a lexical hit, or just the recency floor?" — because max-merge is
 /// lossy: a `0.35` could be the [`RECENT_SCORE`] floor or a genuine (weak)
 /// cosine, and the two mean opposite things. `None` means the leg did not
@@ -107,7 +106,7 @@ pub(crate) const KEYWORD_OVERFETCH: usize = 4;
 /// `recent` set was retrieved by nothing but recency).
 ///
 /// Collected on every call rather than only under a trace subscriber: the leg
-/// names already had a trace-gated map (below), but the I1 ledger needs the
+/// names already had a trace-gated map (below), but the ledger needs the
 /// *numbers*, and only from a run nobody thought to enable tracing on.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct LegScores {
@@ -310,7 +309,7 @@ pub fn candidates(
 }
 
 /// [`candidates`], plus the per-leg scores the max-merge would otherwise
-/// discard (I1).
+/// discard.
 ///
 /// One implementation, two views: the merge rule lives here and `candidates`
 /// projects it, so the ranked list and the leg provenance can never describe
@@ -388,8 +387,8 @@ pub(crate) fn candidates_with_keyword_leg_as(
     // Phase 1 is a candidate OVER-approximation: the final `top_k` truncation
     // is applied downstream in phase-3 assembly (by final score). Prematurely
     // truncating here let the flat-scored recent/vector legs evict strong
-    // keyword matches (GPT5.6sol P1-3), so keyword is over-fetched (bounded)
-    // and the union is returned unreduced.
+    // keyword matches, so keyword is over-fetched (bounded) and the union is
+    // returned unreduced.
     let keyword_cap = limit.saturating_mul(KEYWORD_OVERFETCH);
     let keyword_ran = !query.trim().is_empty();
     let mut legs: LegProvenance = HashMap::new();
@@ -445,7 +444,7 @@ pub(crate) fn candidates_with_keyword_leg_as(
         merge_max(&mut legs.entry(s.item).or_default().vector, s.score);
     }
     let out = rank(&mut legs, graph, &input.fusion, keyword_ran);
-    // T9 instrumentation: which phase-1 leg(s) produced each candidate, so a
+    // Instrumentation: which phase-1 leg(s) produced each candidate, so a
     // trace-enabled run can say whether the lexical (keyword), recent, or
     // vector arm produced an identifier-shaped hit. Unchanged output; it now
     // reads the always-collected map instead of building a second one.
@@ -469,7 +468,7 @@ pub(crate) fn candidates_with_keyword_leg_as(
     (out, legs, keyword)
 }
 
-/// Leg names in the order T9's trace printed them (sorted, deduplicated).
+/// Leg names in the order the trace prints them (sorted, deduplicated).
 fn arm_names(legs: LegScores) -> Vec<&'static str> {
     // Sorted by construction: "keyword" < "recent" < "vector".
     [
@@ -575,7 +574,7 @@ fn rank(
     out
 }
 
-/// Phase-1 candidates for the RECENT + VECTOR legs only (GPT5.6sol P2-6).
+/// Phase-1 candidates for the RECENT + VECTOR legs only.
 ///
 /// Used when no inverted index is installed: the keyword leg is unavailable,
 /// but the independently gathered recent and vector candidates must not be
@@ -584,7 +583,7 @@ pub fn candidates_without_keyword(graph: &Graph, input: Phase1Input) -> Vec<Scor
     candidates_without_keyword_with_legs(graph, input).0
 }
 
-/// [`candidates_without_keyword`], plus per-leg scores (I1). The `keyword` leg
+/// [`candidates_without_keyword`], plus per-leg scores. The `keyword` leg
 /// is `None` throughout — there is no index to ask.
 pub fn candidates_without_keyword_with_legs(
     graph: &Graph,
@@ -620,12 +619,12 @@ pub(crate) fn candidates_without_keyword_with_legs_as(
 /// Only the vector leg needs this, and it needs it for a reason that is easy to
 /// lose: `vector_candidates` is a trait method whose contract does not forbid an
 /// adapter returning the same `NodeId` twice, and a plain assignment makes the
-/// *last* duplicate win. That silently reversed the pre-I1 arithmetic — a
-/// `[(dup, 0.90), (dup, 0.10)]` input ranked at 0.1 where it used to rank at 0.9.
-/// The keyword leg assigns rather than max-merges because that is what it did
-/// before I1 too (the inverted index yields each id once), and the recency leg is
-/// idempotent by construction; changing either would be the same kind of silent
-/// arithmetic change in the other direction.
+/// *last* duplicate win. That silently reversed the arithmetic from before per-leg
+/// provenance — a `[(dup, 0.90), (dup, 0.10)]` input ranked at 0.1 where it used
+/// to rank at 0.9. The keyword leg assigns rather than max-merges because that is
+/// what it did before per-leg provenance too (the inverted index yields each id
+/// once), and the recency leg is idempotent by construction; changing either
+/// would be the same kind of silent arithmetic change in the other direction.
 fn merge_max(slot: &mut Option<f64>, score: f64) {
     *slot = Some(match *slot {
         Some(previous) => previous.max(score),
@@ -1040,7 +1039,7 @@ mod tests {
         );
     }
 
-    /// G2: the F BGE-M3 evidence found the right durable vector at 0.3991,
+    /// The BGE-M3 calibration evidence found the right durable vector at 0.3991,
     /// below the former 0.50 recent floor. A recent leg must remain secondary:
     /// that real semantic ranking has to survive the phase-1 max merge rather
     /// than tie by node id with every young concept.
@@ -1416,10 +1415,10 @@ mod tests {
         }
     }
 
-    // P1-3 (GPT5.6sol): a bounded recent-interactions leg must not evict every
-    // strong lexical match at phase-1 truncation. With keyword over-fetch and
-    // NO union truncation in `candidates`, all keyword matches survive even
-    // when an unrelated recent leg is present.
+    // A bounded recent-interactions leg must not evict every strong lexical
+    // match at phase-1 truncation. With keyword over-fetch and NO union
+    // truncation in `candidates`, all keyword matches survive even when an
+    // unrelated recent leg is present.
     #[test]
     fn recent_leg_does_not_evict_keyword_matches() {
         let mut g = Graph::new(sid());
@@ -1457,16 +1456,16 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // I1 — per-leg provenance
+    // Per-leg provenance
     // -----------------------------------------------------------------------
 
-    /// **I1.** The per-leg scores survive the max-merge, and the merged score
-    /// the ranking uses is exactly the maximum over the legs that fired.
+    /// The per-leg scores survive the max-merge, and the merged score the
+    /// ranking uses is exactly the maximum over the legs that fired.
     ///
     /// This is the distinction the whole of DOGFOOD metric 4 rests on: a `0.35`
     /// from the recency floor and a genuine `0.35` cosine rank identically and
-    /// mean opposite things, and before I1 the ledger could not have told them
-    /// apart because `candidates` returned one `f64`.
+    /// mean opposite things, and before per-leg provenance the ledger could not
+    /// have told them apart because `candidates` returned one `f64`.
     #[test]
     fn i1_per_leg_scores_survive_the_max_merge() {
         let (g, index) = planted_graph();
@@ -1541,7 +1540,7 @@ mod tests {
         // last-writes. The `vector_candidates` trait contract does not forbid
         // duplicates and no shipped adapter emits them, so this is the arithmetic
         // no test held down: a plain assignment made `[(dup, 0.90), (dup, 0.10)]`
-        // rank at 0.1, reversing what the pre-I1 merge did with the same input.
+        // rank at 0.1, reversing what the earlier merge did with the same input.
         let dup = NodeId(Uuid::from_u64_pair(11, 42));
         let (ranked, legs) = candidates_with_legs(
             &g,
@@ -1575,7 +1574,7 @@ mod tests {
         );
     }
 
-    /// **I1.** The recency floor is distinguishable from a real score of the
+    /// The recency floor is distinguishable from a real score of the
     /// same magnitude. A node retrieved by nothing but recency reports
     /// `recent: 0.35` and no other leg.
     #[test]
@@ -1598,7 +1597,7 @@ mod tests {
         }
     }
 
-    /// **I1.** The keyword-less path (no inverted index installed) still
+    /// The keyword-less path (no inverted index installed) still
     /// reports its two legs.
     #[test]
     fn i1_the_keywordless_path_reports_its_legs_too() {
