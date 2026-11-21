@@ -443,7 +443,7 @@ impl Evaluator {
             // log carries these hops to it on the next flush (deduped on
             // event id) exactly as it does for a failed `record`.
             Err(err) => {
-                // Focused review 2: Stage 3 evaluated nothing, so its ring
+                // Stage 3 evaluated nothing, so its ring
                 // does not advance.
                 self.stage3_cursor = plan.stage3_cursor_before;
                 let stage1_only = CyclePlan {
@@ -482,11 +482,11 @@ impl Evaluator {
 
         // #20: a speculative Stage 3 window whose reads were
         // skipped was not evaluated, so its ring does not advance.
-        // Focused review 1: a window the hold probes could not cover (the
+        // A window the hold probes could not cover (the
         // probe cap) defers its unprobed Venerables and is evaluated again,
-        // at most MAX_HOLD_DEFERRALS cycles in a row (re-verify (a)). Only
+        // at most MAX_HOLD_DEFERRALS cycles in a row. Only
         // when the hold actually ran: a store without the accessors defers
-        // nothing (re-verify (b)).
+        // nothing.
         let deferred = !verdicts.deferred.is_empty();
         if verdicts.stage3_skipped
             || supersession::restore_for_deferral(deferred, &mut self.hold_deferrals)
@@ -546,9 +546,9 @@ impl Evaluator {
         // Supersession (#20) — bounded probes off its own target ring. Read
         // first: whether any exist decides whether Stage 3 is gathered at a
         // full budget below.
-        // The probe cap, once for supersession and once for the hold
-        // (re-verify (a)): Canonicals with live contradictions using the
-        // cap every cycle must not leave the hold with nothing.
+        // The probe cap, once for supersession and once for the hold:
+        // Canonicals with live contradictions using the cap every cycle
+        // must not leave the hold with nothing.
         let cap = self
             .probe_cap
             .unwrap_or(supersession::MAX_SUPERSESSION_PROBES);
@@ -1277,7 +1277,7 @@ impl EventIds {
     }
 }
 
-/// CON-6: never `as i32`. An unrepresentable store count is an invariant.
+/// Never `as i32`. An unrepresentable store count is an invariant.
 fn narrow_blast_radius(blast: u64) -> Result<i32, StoreError> {
     i32::try_from(blast).map_err(|_| {
         StoreError::Invariant(format!("blast_radius {blast} exceeds i32::MAX (CON-6)"))

@@ -112,7 +112,7 @@ impl Graph {
     }
 
     /// Atomic full re-embed: rewrite **every** concept vector into a new space
-    /// and swap the session contract in one staged graph transaction (K2).
+    /// and swap the session contract in one staged graph transaction.
     ///
     /// This is the operation `lambo re-embed` runs when a session migrates to a
     /// different embedder (e.g. bge_m3 → candle): the `EmbeddingContract`

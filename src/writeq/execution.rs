@@ -69,7 +69,7 @@ pub(crate) struct WriteCtx {
     pub(crate) daemon_wake: Arc<Notify>,
     /// The single-writer fence, shared with the heartbeat and the flush task.
     pub(crate) lease_lost: Arc<AtomicBool>,
-    /// J4. An optional call ledger this pipeline appends durable-intent
+    /// An optional call ledger this pipeline appends durable-intent
     /// **completion** lines to (`applied` / `applied_after_restart` / `failed`
     /// / `deferred`), on the same [`crate::ledger::Ledger::append`] path every
     /// other line rides. `None` for every process run without `--ledger`, and
@@ -115,7 +115,7 @@ pub(super) fn truncate_ids(ids: &[NodeId]) -> Vec<String> {
         .collect()
 }
 
-/// When — and as what — a job's durable intent is consumed at commit (J3).
+/// When — and as what — a job's durable intent is consumed at commit.
 ///
 /// `tag` is `"applied"` when the acking process itself applies the job, and
 /// `"applied_after_restart"` when a later serve replays it. `at` is the
@@ -310,7 +310,7 @@ impl WriteCtx {
     /// Run one job through the ordinary write path.
     ///
     /// `consume`, when present, consumes the job's durable intent **inside the
-    /// same write-lock critical section as the commit** (J3): for the hybrid
+    /// same write-lock critical section as the commit**: for the hybrid
     /// path via [`hybrid::CommitHook`], for the canonical and action paths
     /// inline under the guard the graph write already holds. The flush drain
     /// takes that same lock, so the applied mutations and the

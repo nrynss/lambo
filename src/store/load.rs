@@ -10,16 +10,11 @@
 //! ## Daemon warm-up rescore seam (spec §2.5)
 //!
 //! The daemon's warm-up rescore over a freshly loaded session is **not** this
-//! module's job and is deliberately not implemented or stubbed here. The seam:
-//! the session owner (the `Memory` type, which owns `Arc<RwLock<Graph>>` plus
-//! the [`InvertedIndex`]) calls [`load_session`] at startup and, when the store
-//! returned an **existing** session (never for a fresh empty one), emits the
-//! rescore signal. That signal is the warm-up rescore the daemon task skeleton
-//! is *intended* to wake on (planned, not yet present), transported via the
-//! daemon event channel — today the channel exists only as
-//! [`crate::types::DaemonEvent`]; neither the transport nor the skeleton is in
-//! the tree yet. Once they land, they wire it up — this module only provides
-//! the materialization.
+//! module's job. The session owner (the `Memory` type, which owns
+//! `Arc<RwLock<Graph>>` plus the [`InvertedIndex`]) calls [`load_session`] at
+//! startup and then spawns the daemon, whose first cycle is the warm-up
+//! rescore (spec §2.5; `MemoryBuilder::build`). This module only provides the
+//! materialization.
 //!
 //! ## Lock discipline (spec §6.4)
 //!
@@ -47,7 +42,7 @@ use crate::types::{LamboError, SessionId, StoreError};
 use super::GraphStore;
 
 /// A session materialized into RAM: the graph plus its rebuilt inverted index,
-/// and any durable write intents the store holds for it (J3 — unconsumed ones
+/// and any durable write intents the store holds for it (unconsumed ones
 /// are owed a replay by the loading process; consumed-and-retained ones answer
 /// `applied_after_restart` receipt lookups).
 #[derive(Debug)]

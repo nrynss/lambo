@@ -49,7 +49,7 @@ use crate::types::AgentId;
 /// How long a clean `close()` drains the queue before **deferring** the
 /// remainder (`WritePipeline::quiesce`).
 ///
-/// Under J3's durable intents this stops being a durability deadline: whatever
+/// Under durable intents this stops being a durability deadline: whatever
 /// does not drain inside the budget survives as a durable intent and the next
 /// serve applies it, so this constant prices *latency at shutdown against
 /// promptness of the write*, nothing more. (Its earlier career — sizing
@@ -71,7 +71,7 @@ pub const WRITE_QUEUE_DRAIN_BUDGET: Duration = Duration::from_secs(2);
 /// every close — safe under durable intents, but a silent behaviour cliff an
 /// edit should have to acknowledge. (The old reason here — a divide-by-zero in
 /// `PROBE_CLAMP_RPS`, which used to divide by this — went away when the clamp
-/// stopped being budget-derived, J3 redesign.)
+/// stopped being budget-derived in the durable-intent redesign.)
 const _: () = assert!(
     WRITE_QUEUE_DRAIN_BUDGET.as_secs() > 0,
     "WRITE_QUEUE_DRAIN_BUDGET must be at least one whole second — a zero budget silently turns \
@@ -90,8 +90,8 @@ impl WritePipeline {
     ///
     /// Bounded by [`WRITE_QUEUE_DRAIN_BUDGET`]. (This said "which is the same
     /// number admission promised"; admission stopped promising a drain time at
-    /// the J3 redesign.) Anything still outstanding when it runs out is
-    /// **deferred, not lost** (J3 durable intents): workers are aborted and
+    /// the durable-intent redesign.) Anything still outstanding when it runs out is
+    /// **deferred, not lost** (durable intents): workers are aborted and
     /// joined (aborting alone proves nothing), and every
     /// still-pending receipt is set aside for
     /// [`WritePipeline::settle_deferred`]. The jobs themselves were recorded
@@ -291,9 +291,9 @@ impl WritePipeline {
                     continue;
                 }
                 let agent = entry.agent.clone();
-                // J4 proof obligation 5: a close-deferred intent is a
-                // lifecycle fact (admitted → deferred), measurable; so is
-                // a close that could not vouch for it.
+                // A close-deferred intent is a lifecycle fact (admitted →
+                // deferred), measurable; so is a close that could not vouch
+                // for it.
                 if let Some(ledger) = &self.ctx.ledger {
                     ledger.append(&crate::ledger::completion_line(
                         &agent.to_string(),

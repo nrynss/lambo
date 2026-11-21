@@ -375,7 +375,7 @@ async fn retained_batch_session(session: &str, store: Arc<dyn GraphStore>) -> (M
     (mem, retained)
 }
 
-/// The retained-batch case the COH-6 design exists for: the flush task
+/// The retained-batch case the graceful-stop design exists for: the flush task
 /// drained the log and failed to persist it, so those mutations live only
 /// in the task's `pending` buffer. `close()` must get them back (via the
 /// stop signal's push-front) and make them durable — a hard abort would
@@ -829,10 +829,10 @@ async fn concurrent_closes_both_wait_for_the_one_final_flush() {
     assert!(snap.concepts.iter().any(|c| c.content == "user schema"));
 }
 
-/// Partial coverage for COH-6 clause 2 — `biased;` + stop-first in the
+/// Partial coverage for the stop-first rule — `biased;` + stop-first in the
 /// flush loop's `select!`.
 ///
-/// The regression that clause guards is a **lost stop permit**: an unbiased
+/// The regression that rule guards is a **lost stop permit**: an unbiased
 /// `select!` polls in a random start order, so a concurrently ready
 /// `interval.tick()` can be polled first, consume-and-drop the stored
 /// permit, and `close()`'s join then hangs forever. The tick is

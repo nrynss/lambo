@@ -122,7 +122,7 @@ fn h1_operator_override_is_limited_to_same_width_same_kind_vector_aliases() {
 }
 
 // -----------------------------------------------------------------------
-// K2: Graph::reembed_all
+// Graph::reembed_all
 // -----------------------------------------------------------------------
 
 fn embed_contract(kind: &str, model: &str, dim: usize) -> crate::types::EmbeddingContract {
@@ -417,7 +417,7 @@ fn k2_reembed_all_on_an_empty_graph_stamps_the_contract_alone() {
     ));
 }
 
-/// #22 design Q19 at the graph: an image concept's vector is never replaced
+/// #22 at the graph: an image concept's vector is never replaced
 /// by a text vector. `reembed_all` refuses while one remains, the dropping
 /// variant nulls it (keeping the source) in the same ordered batch, and a
 /// backfill refuses to give a vectorless image concept a caption vector.

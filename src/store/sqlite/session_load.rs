@@ -19,7 +19,7 @@ use crate::types::{
     Interaction, SessionId, StoreError,
 };
 
-/// Load a session's write intents (J3), sorted by (`issued_ms`, `lane_seq`):
+/// Load a session's write intents, sorted by (`issued_ms`, `lane_seq`):
 /// wall-clock order, which interleaves different processes' intents. The
 /// replay then puts each process's own intents in `lane_seq` (admission)
 /// order (`writeq::replay::replay_order`, #295), since a clock that stepped
@@ -168,7 +168,7 @@ pub(super) async fn load_concepts(
         let blast_radius: Option<i32> = row.try_get(12).map_err(|e| db_err("load concepts", e))?;
         let last_demotion: Option<String> =
             row.try_get(13).map_err(|e| db_err("load concepts", e))?;
-        // CON-8: decode the packed-f32 BLOB (#55). A corrupt blob (not whole
+        // Decode the packed-f32 BLOB (#55). A corrupt blob (not whole
         // f32s) is a backend error, not a panic.
         let embedding: Option<Vec<u8>> = row.try_get(14).map_err(|e| db_err("load concepts", e))?;
         let embedding = embedding
@@ -415,7 +415,7 @@ pub(super) async fn load_snapshot_in(
 ) -> Result<Option<GraphSnapshot>, StoreError> {
     // The existence probe doubles as the embedding-contract read. Both
     // snapshot seed and `SetEmbedding` flush write these columns; root_goal
-    // likewise has its ordered mutation path (XP-8). `mutation_epoch` is
+    // likewise has its ordered mutation path. `mutation_epoch` is
     // the durable mutation counter (issue #17): flush stamps it, and this
     // read is what a writer restart resumes it from.
     let row = sqlx::query(
@@ -434,7 +434,7 @@ pub(super) async fn load_snapshot_in(
     let embedding_model: Option<String> =
         row.try_get(1).map_err(|e| db_err("lookup session", e))?;
     let embedding_dim: Option<i64> = row.try_get(2).map_err(|e| db_err("lookup session", e))?;
-    // XP-8: `root_goal` survives a reload — `Mutation::SetRootGoal` writes
+    // `root_goal` survives a reload — `Mutation::SetRootGoal` writes
     // it, so replaying the log no longer silently clears the drift anchor.
     let root_goal: Option<String> = row.try_get(3).map_err(|e| db_err("lookup session", e))?;
     let root_goal = root_goal

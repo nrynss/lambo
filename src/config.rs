@@ -148,7 +148,7 @@ pub struct Config {
     pub recall_selection: crate::recall::redundancy::RecallSelection,
 
     /// Daemon poll interval — how often the loop rescores and re-runs the
-    /// detectors (XP-7). This is the one daemon parameter nothing else can
+    /// detectors. This is the one daemon parameter nothing else can
     /// derive: it governs stale-detection latency, GC latency, and how long a
     /// hot-list entry can lag the graph. Default
     /// [`crate::daemon::DAEMON_TICK_INTERVAL`].
@@ -165,7 +165,7 @@ pub struct Config {
     pub conflict_recency_window: Duration,
     /// `drift_threshold` in hops (spec §9). `usize` — the metric is a hop
     /// count, which every consumer (`drift::detect`, `CycleParams`) indexes
-    /// with; the previous `u32` forced a cast at every use site (XP-7).
+    /// with; the previous `u32` forced a cast at every use site.
     pub drift_threshold: usize,
 
     pub gc_interval: u64,
@@ -848,7 +848,7 @@ mod tests {
         assert_eq!(c.scoring.session_activity, 0.20);
         assert_eq!(c.scoring.density, 0.35);
 
-        // XP-7: the daemon tick has a named default, and the spec §9 knobs the
+        // The daemon tick has a named default, and the spec §9 knobs the
         // daemon also declares as consts must agree with them here — a drift
         // between the two is exactly what CycleParams' literal duplication hid.
         assert_eq!(c.daemon_tick_interval, Duration::from_secs(1));

@@ -123,7 +123,7 @@ fn old_action_variants_retain_their_legacy_text_pin_semantics() {
     }
 }
 
-/// A cited derive is its own variant (Q18: an older build refuses to decode
+/// A cited derive is its own variant (an older build refuses to decode
 /// it rather than apply it without its citations), and its pins round-trip.
 #[test]
 fn a_cited_derive_is_its_own_variant_and_round_trips() {
@@ -200,7 +200,7 @@ mod v0_5_0 {
 /// #36 PR 4: a settled cited derive is stored as the empty derive,
 /// which the 0.5.0 decoder reads, so a downgrade still loads a session
 /// whose cited writes all applied; an unconsumed one is refused by name
-/// (Q18), never applied without its citations; an action's pins are
+/// and never applied without its citations; an action's pins are
 /// ignored by 0.5.0, which re-resolves its own way.
 #[test]
 fn a_settled_cited_intent_decodes_under_the_0_5_0_payload() {
@@ -432,7 +432,7 @@ fn a_derive_s_contradictions_ride_in_the_cited_intent() {
     assert!(contradicting > bare);
 }
 
-/// #19(b): an action with `against` is its own kind (Q18), round-trips with
+/// #19(b): an action with `against` is its own kind, round-trips with
 /// its pins, and an action without it is the plain kind, byte for byte.
 #[test]
 fn an_action_with_against_is_its_own_variant_and_round_trips() {

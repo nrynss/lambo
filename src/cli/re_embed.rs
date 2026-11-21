@@ -1,4 +1,4 @@
-//! `lambo re-embed` — the K2 migration verb: rewrite a session's EVERY concept
+//! `lambo re-embed` — the migration verb: rewrite a session's EVERY concept
 //! vector into the configured live embedding space and swap the session's
 //! [`EmbeddingContract`] in the same atomic flush.
 //!
@@ -22,7 +22,7 @@
 //! This is the migration path; it deliberately REFUSES
 //! `--allow-embedding-mismatch`, which relabels vectors without rewriting them.
 //!
-//! # Image concepts (#22, design Q19)
+//! # Image concepts (#22)
 //!
 //! An image concept's vector (`embedding_source` set) is not a function of
 //! its text, so re-embed never embeds its caption:
@@ -105,7 +105,7 @@ pub struct Args {
     pub repin_canary: bool,
 }
 
-/// Run the K2 re-embed migration for one session.
+/// Run the re-embed migration for one session.
 pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliError> {
     require_nonempty("session", &args.session)?;
     check_size_cli("session", &args.session)?;
@@ -661,8 +661,8 @@ mod seed {
         Mutation, MutationBatch, NodeId, SessionId,
     };
 
-    /// Plant the pre-K2 damage shape directly in the durable store under
-    /// `contract`: one interaction, two concepts, "user schema" WITH a
+    /// Plant the damage shape `re-embed` repairs directly in the durable store
+    /// under `contract`: one interaction, two concepts, "user schema" WITH a
     /// `dim`-wide vector and "auth middleware" with a NULL embedding (the
     /// row an interrupted or degraded writer leaves behind). With no
     /// contract it is a pre-contract (legacy) session (#322): the vectored
@@ -967,10 +967,10 @@ mod tests {
         }
     }
 
-    /// Plant the pre-K2 damage shape directly in the durable store: one
-    /// interaction, two concepts under a LEGACY contract — one WITH a legacy
-    /// vector, one with a NULL embedding (the row an interrupted or degraded
-    /// writer leaves behind).
+    /// Plant the damage shape `re-embed` repairs directly in the durable store:
+    /// one interaction, two concepts under a LEGACY contract — one WITH a
+    /// legacy vector, one with a NULL embedding (the row an interrupted or
+    /// degraded writer leaves behind).
     async fn seed_damaged_session(store: &Arc<MemoryStore>) {
         seed_session_with_source(store, None).await;
     }
@@ -1228,7 +1228,7 @@ mod tests {
         super::seed::lease_is_free(store, SESSION).await
     }
 
-    /// #22 design Q19: a full migration must not leave an image vector in
+    /// #22: a full migration must not leave an image vector in
     /// the old space, and cannot recompute one from a caption, so it refuses
     /// before any embed or write, releases the lease, and names the flag.
     #[tokio::test]
@@ -1469,7 +1469,7 @@ mod tests {
         .verdict
     }
 
-    /// #296, finding 1: the drift repair can be followed. A canary drift is
+    /// #296: the drift repair can be followed. A canary drift is
     /// only ever seen on a session under the live contract; the plain verb
     /// still refuses that session, now naming the flag, and
     /// `--rewrite-same-contract` rewrites every vector in place, keeps the
@@ -1606,7 +1606,7 @@ mod tests {
         assert!(err.to_string().contains("--missing-only"), "{err}");
     }
 
-    /// #296, finding 3: `--missing-only` runs the canary. Under `verify` a
+    /// #296: `--missing-only` runs the canary. Under `verify` a
     /// drift refuses the backfill like any writer attach, before it writes;
     /// under `warn` the backfill runs as before.
     ///
@@ -1650,7 +1650,7 @@ mod tests {
         assert!(out.contains("coverage: embedded 1/2 -> 2/2"), "{out}");
     }
 
-    /// #296, finding 2: no silent re-pin. A migration into a contract whose
+    /// #296: no silent re-pin. A migration into a contract whose
     /// store pin the live embedder does not reproduce (another session's
     /// vectors rest on it) is refused before it writes unless
     /// `--repin-canary` is given, and then says the other sessions are no

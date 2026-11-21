@@ -88,7 +88,7 @@ impl Rig {
         Self::new_with_ledger(session, embedder, None)
     }
 
-    /// [`Rig::new`], with a call ledger attached so J4's durable-intent
+    /// [`Rig::new`], with a call ledger attached so the durable-intent
     /// completion lines land on a real file a test can read back.
     fn new_with_ledger(
         session: &str,

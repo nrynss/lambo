@@ -938,7 +938,7 @@ theorem a_bulk_ingest_recurs_only_under_event_time :
 
 /-- The test's comment says the about-times are days 0/2/4/6; the code
 computes days 0/3/4/5. Both are four sessions, so the test holds on either
-reading (finding 3). -/
+reading (see "Findings"). -/
 theorem spread_days_doc_and_code :
     sessionCount sessionSeparation [day 0, day 2, day 4, day 6] = 4 ∧
       supportingTimes (spreadGraph true) 10 = [day 0, day 3, day 4, day 5] := by
@@ -965,7 +965,7 @@ def greedyLeMutant (gap : Nat) : Option Int → List Int → Nat
 
 /-- Days 3, 4 and 5 are exactly one separation apart, so the bulk-ingest
 corpus sits on the inclusive boundary: the `<=` mutant counts 3, not 4
-(finding 3). -/
+(see "Findings"). -/
 theorem spread_days_on_the_boundary :
     day 4 - day 3 = sessionSeparation ∧ day 5 - day 4 = sessionSeparation ∧
       greedyLeMutant sessionSeparation none (supportingTimes (spreadGraph true) 10) = 3 := by
@@ -1044,12 +1044,13 @@ theorem hierarchical_child_is_dependent_not_recurrence :
       dependentOrigins (childGraph false) 10 = [5] ∧ recurrenceSessions (childGraph false) 10 = 5 := by
   decide
 
-/-- Finding 2. Turn 1 (day 0) derives `X` (60), `Y` (61) and the action
-"deploy api" (62), which depends on `X`. On day 5 a turn repeats the action,
-`record_action` reuses node 62, and it now also depends on `Y`. With
-`reused = true` the new edge `62 → 61` is credited to turn 1: `Y` gets one
-session and no dependent. With `reused = false` the day-5 turn creates a
-fresh action node (63), and `Y` gets two sessions and one dependent. -/
+/-- The reused-action dating (see "Findings"). Turn 1 (day 0) derives `X`
+(60), `Y` (61) and the action "deploy api" (62), which depends on `X`. On
+day 5 a turn repeats the action, `record_action` reuses node 62, and it now
+also depends on `Y`. With `reused = true` the new edge `62 → 61` is credited
+to turn 1: `Y` gets one session and no dependent. With `reused = false` the
+day-5 turn creates a fresh action node (63), and `Y` gets two sessions and
+one dependent. -/
 def reusedActionGraph (reused : Bool) : Graph where
   interactions := [⟨1, base, some (day 0)⟩, ⟨5, base + 60, some (day 5)⟩]
   concepts := [⟨60, 1⟩, ⟨61, 1⟩, ⟨62, 1⟩] ++ (if reused then [] else [⟨63, 5⟩])

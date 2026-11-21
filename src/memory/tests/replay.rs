@@ -1,8 +1,8 @@
-//! J3 durable intents: defer at close, replay at the next attach.
+//! Durable intents: defer at close, replay at the next attach.
 
 use super::*;
 
-// -- J3 durable intents: defer at close, replay at the next attach ------
+// -- Durable intents: defer at close, replay at the next attach ---------
 
 /// Moved to `crate::test_util` (#22 PR 4) so the MCP tests can serve an
 /// image derive over it too.
@@ -10,7 +10,7 @@ pub(super) use crate::test_util::VectorSearchable;
 
 /// Answers the calibration probe's own texts instantly and hangs forever
 /// on real content — the shape that leaves an ADMITTED write undrainable
-/// at close, which is the case J3's durable intents exist for.
+/// at close, which is the case durable intents exist for.
 pub(super) struct HangingEmbedder {
     inner: FixtureEmbedder,
     /// Real-content calls that have entered the hang, so a test can wait for
@@ -69,7 +69,7 @@ impl HangingEmbedder {
     }
 }
 
-/// **J3's founding invariant, end to end at `Memory` level**: acked ⇒
+/// **Durable intents' founding invariant, end to end at `Memory` level**: acked ⇒
 /// (applied ∨ durable intent) at a clean close — and the durable half is a
 /// real write, not a tombstone: the next attach replays it, the concept
 /// lands **with its embedding** (durability is judged at the store's
@@ -373,7 +373,7 @@ async fn a_dead_embedder_at_attach_leaves_the_backlog_durable_and_a_later_serve_
     );
 }
 
-/// **J3-R2R-2 (in-session symmetry).** A write the worker reaches DURING an
+/// **In-session symmetry.** A write the worker reaches DURING an
 /// embedder outage is not destroyed as `failed`: its durable intent is left
 /// unconsumed so the next serve can re-attempt it. Since #295 the live
 /// caller's receipt says `pending_replay` (the write is held, and may still
@@ -734,7 +734,7 @@ async fn a_cycle_refused_at_replay_settles_failed_and_the_replay_goes_on() {
 }
 
 /// Issue #16 §2 made `parent_of` ends embed, so a call can now ask for more
-/// embeds than fit one `HYBRID_IO_TIMEOUT`. Under hybrid the J3 ack refuses
+/// embeds than fit one `HYBRID_IO_TIMEOUT`. Under hybrid the ack refuses
 /// a call over `MAX_HYBRID_EMBEDS` at call time with a `Config` error, rather
 /// than acking it and letting it time out at apply (and, as a kept intent,
 /// time out again at replay). Exactly the budget is admitted.
@@ -1221,7 +1221,7 @@ async fn a_stale_flush_during_close_answers_close_unflushed() {
 }
 
 /// [`VectorSearchable`] whose checked vector lookup is slower than a write's
-/// whole I/O budget, every time (#125 Sonnet review).
+/// whole I/O budget, every time (#125).
 struct SlowLookup(VectorSearchable);
 
 #[async_trait::async_trait]
@@ -1340,7 +1340,7 @@ impl GraphStore for SlowLookup {
     }
 }
 
-/// **#125 (Sonnet review)**: a lookup timeout at replay is settled `failed`
+/// **#125**: a lookup timeout at replay is settled `failed`
 /// instead of being left durable as an embedder outage, so a write whose
 /// lookup is slow every time cannot hold the backlog on every restart; and a
 /// run of [`REPLAY_LOOKUP_TIMEOUT_LIMIT`] of them stops the replay with the
@@ -2524,7 +2524,7 @@ async fn an_unparseable_id_outside_the_format_family_is_settled_failed() {
     );
 }
 
-/// **#295**: in session, three lookup timeouts in a
+/// **The third review of #295**: in session, three lookup timeouts in a
 /// row with nothing applied between hold the third write (the store is slow
 /// for everyone), and its retry, which the run does not count again, settles
 /// it `failed` if the lookup times out once more. One input slow every time

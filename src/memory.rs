@@ -108,8 +108,8 @@ use shutdown::final_flush;
 // ---------------------------------------------------------------------------
 
 /// An attached session: graph + index + store + embedder, the daemon, flush
-/// and canonization tasks, the lease heartbeat, and (since J3) the asynchronous
-/// write pipeline.
+/// and canonization tasks, the lease heartbeat, and the asynchronous write
+/// pipeline.
 ///
 /// One process owns one session (spec §2.2). Every method takes `&self`, so a
 /// `Memory` behind an `Arc` serves concurrent MCP tool calls; each call carries
@@ -250,10 +250,10 @@ pub struct Memory {
     /// final drain's write section. A leaf lock: never held while another lock
     /// is taken. See [`crate::daemon::access`] for what counts and why.
     accesses: Arc<AccessLedger>,
-    /// **Writers gate** (COH-6 clause 14). Mutating methods hold the
-    /// READ side for their whole body — `.await`s included — and re-check
-    /// `closed` once they have it; [`Memory::close`] takes the WRITE side
-    /// before stopping the tasks, so it cannot drain past an in-flight write.
+    /// **Writers gate.** Mutating methods hold the READ side for their whole
+    /// body — `.await`s included — and re-check `closed` once they have it;
+    /// [`Memory::close`] takes the WRITE side before stopping the tasks, so it
+    /// cannot drain past an in-flight write.
     ///
     /// A `tokio` RwLock, deliberately not `parking_lot`: `derive` and `retract`
     /// hold this across `.await` (that is the entire point), which a
@@ -307,7 +307,7 @@ pub struct Memory {
     /// id. See [`LeaseLostSignal`], and [`Memory::lease_lost_latched`] for what
     /// waits on it.
     lease_lost_signal: Arc<LeaseLostSignal>,
-    /// **J3's background write pipeline** — bounded per-agent FIFO lanes and
+    /// **The background write pipeline** — bounded per-agent FIFO lanes and
     /// the receipt store their outcomes land in. Always present: there is no
     /// "async writes off" mode, because the two tools that use it
     /// (`lambo_derive`, `lambo_record_action`) are the two whose result does
@@ -318,7 +318,8 @@ pub struct Memory {
     /// than transitional: an owner that derives and then asserts — every
     /// embedded user, `lambo demo`, and most of this file's own tests — depends
     /// on read-your-writes, and silently removing it from the existing surface
-    /// would be a far larger change than J3 is. The async path is additive.
+    /// would be a far larger change than adding the async path. The async path
+    /// is additive.
     ///
     /// `Arc` because the workers, the receipt waiters and the MCP server all
     /// hold it, and because [`Memory::close`] must reach it before it takes the
@@ -351,8 +352,8 @@ impl Memory {
     /// [`Memory::demote`]), and the id this handle registered in
     /// `ACTIVE_SESSIONS` and holds the single-writer lease under.
     ///
-    /// It is **not** "the only agent this handle can write as". Since J1 every
-    /// write method has an `_as` twin taking the acting agent per call
+    /// It is **not** "the only agent this handle can write as". Every write
+    /// method has an `_as` twin taking the acting agent per call
     /// ([`Memory::derive_as`] and friends), so one handle serves many agents —
     /// which is what lets one `lambo serve` process host several MCP clients
     /// without falsifying any of their identities. Callers wanting "who wrote

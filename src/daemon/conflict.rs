@@ -45,7 +45,7 @@
 //! its latest write, of at least one edge incident to N (N as source or as
 //! target).
 //!
-//! ### Same-instant collisions (NEW-4)
+//! ### Same-instant collisions
 //!
 //! When several interactions share one instant, "the agent acting then" is not a
 //! single answer, so **every** candidate joins the contested node's agent set and
@@ -57,8 +57,8 @@
 //! Erring toward detection is deliberate; see `ConflictHit::writer` for the
 //! residual ambiguity.
 //!
-//! **J1 made this path non-degenerate, and it is the one place in this module
-//! whose *accuracy* changed**. Before per-call `agent_id`, every
+//! **Per-call `agent_id` made this path non-degenerate, and it is the one place
+//! in this module whose *accuracy* changed**. Before per-call `agent_id`, every
 //! interaction in a `serve` carried the process's own `--agent`, so a same-instant
 //! tie collapsed to one agent whichever rule was applied and the residual
 //! ambiguity could not be observed. Two clients writing through one `serve` in the
@@ -68,8 +68,8 @@
 //! formality. The behaviour is unchanged and still correct for its purpose
 //! (detection over precision, since the §13 sentence's job is to make the reader
 //! look): what changed is that the sentence can now name the wrong one of two real
-//! agents. J2 and J3 interleave far harder than J1 does, so J3's Done-when carries
-//! this as something to measure rather than assume.
+//! agents. Proxied calls and the background write pipeline interleave far harder
+//! still, so this is something to measure rather than assume.
 //!
 //! ## "Active agent"
 //!
@@ -119,7 +119,7 @@
 //! predicate re-runs [`conflict_at`] against the **caller's** `now` and returns
 //! the payload it computed, so a recall five minutes later either drops the
 //! entry (the write left the window) or renders the true age — never the frozen
-//! detection-time value (XP-3). [`HotList`] dedups by `(node, condition)`, so
+//! detection-time value. [`HotList`] dedups by `(node, condition)`, so
 //! re-running the detector refreshes an existing conflict entry instead of
 //! duplicating it. The hits are returned: the daemon loop publishes them
 //! on transition and syncs the hot list against them with
@@ -155,7 +155,7 @@ pub struct ConflictHit {
     /// The agent that made the most recent qualifying write — the
     /// subject of spec §13's "Agent A wrote to it eleven seconds ago".
     ///
-    /// **Residual ambiguity (NEW-4).** When two or more interactions from
+    /// **Residual ambiguity.** When two or more interactions from
     /// different agents share the newest qualifying write's instant, the edge
     /// carries no evidence of which one wrote it (edges have no agent id — the
     /// §5 shape is frozen). This field is then *one of* the candidates, picked
@@ -176,12 +176,12 @@ pub struct ConflictHit {
 ///
 /// One `O(interactions)` build per pass, `O(1)` per edge: a whole-graph
 /// [`detect`] builds it once and shares it across every node, and a per-node
-/// [`conflict_at`] (recall's path, CONC-5) builds it once for that node.
+/// [`conflict_at`] (recall's path) builds it once for that node.
 pub(crate) struct WriterTimeline {
     /// `created_at -> every (interaction id, agent) written at that instant`,
     /// id-ascending.
     ///
-    /// **All** candidates, not the smallest id (NEW-4). Collapsing an instant to
+    /// **All** candidates, not the smallest id. Collapsing an instant to
     /// one interaction discards the only evidence that the attribution is
     /// ambiguous, and under same-instant cross-agent interactions that produced
     /// both failure modes: a false negative on the genuinely contested node (its
@@ -288,7 +288,7 @@ impl SharedTimeline {
 }
 
 /// Who wrote an edge — one agent, or every same-instant candidate when the
-/// timeline cannot separate them (NEW-4).
+/// timeline cannot separate them.
 pub(crate) enum EdgeWriters<'a> {
     /// Exactly attributed: an interaction-sourced edge, or the structural
     /// fallback to the source concept's `origin_agent`.
@@ -302,7 +302,7 @@ pub(crate) enum EdgeWriters<'a> {
 impl EdgeWriters<'_> {
     /// Every candidate writer. All of them join the contested node's agent set:
     /// "agent X has an edge to node N" is true of each, and dropping the ones a
-    /// tie-break did not pick is what made a real conflict invisible (NEW-4).
+    /// tie-break did not pick is what made a real conflict invisible.
     pub(crate) fn all(&self) -> impl Iterator<Item = &AgentId> {
         let (certain, acting): (&[AgentId], &[(NodeId, AgentId)]) = match self {
             Self::Certain(agent) => (std::slice::from_ref(agent), &[]),
@@ -394,7 +394,7 @@ pub(crate) fn attribute_at<'a>(
     }
 }
 
-/// Pure conflict check for one node — the per-node primitive (CONC-5): shared
+/// Pure conflict check for one node — the per-node primitive: shared
 /// by [`detect`] and the hot-list re-validation predicates so both use
 /// identical logic, and cheap enough for recall to call under the graph lock
 /// (one neighborhood walk, not a whole-graph pass).
@@ -433,7 +433,7 @@ fn conflict_at_with(
         ) else {
             continue;
         };
-        // Every candidate joins the set (NEW-4) — see `EdgeWriters::all`.
+        // Every candidate joins the set — see `EdgeWriters::all`.
         for agent in first.all().chain(writers.all()) {
             if !agents.contains(agent) {
                 agents.push(agent.clone());
@@ -468,7 +468,7 @@ fn conflict_at_with(
 
 /// `window` as a `chrono` duration. `Duration::MAX` seconds exceeds chrono's
 /// range, so an unrepresentable window saturates rather than panicking
-/// (config-reachable — see CONC-4's `from_std` sweep).
+/// (config-reachable).
 fn chrono_window(window: Duration) -> ChronoDuration {
     ChronoDuration::from_std(window).unwrap_or(ChronoDuration::MAX)
 }
@@ -510,7 +510,7 @@ pub fn detect(graph: &Graph, window: Duration, now: DateTime<Utc>) -> Vec<Confli
 /// fresh `now` refreshes the payload (`seconds_ago`) and the re-validation
 /// predicate instead of duplicating. Each entry's predicate
 /// re-checks the same conflict logic against the `now` **its caller** passes to
-/// [`HotList::revalidate`] — never this cycle's frozen instant (XP-3).
+/// [`HotList::revalidate`] — never this cycle's frozen instant.
 ///
 /// Returns the hits — the daemon loop emits them on condition transition and
 /// uses them as the fresh set it syncs the hot list against
@@ -527,7 +527,7 @@ pub fn insert_conflicts(
         let node = hit.node;
         // The predicate re-runs the same per-node check against the *caller's*
         // `now` and hands back the payload it computed, so recall renders a
-        // read-time `seconds_ago` and writer (XP-3). It captures
+        // read-time `seconds_ago` and writer. It captures
         // `node`, `window` and the pass's shared timeline (#19(c):
         // one timeline build per recall, not one per conflicted member); no
         // graph or hot-list lock is re-entered (spec §6.4).
@@ -968,10 +968,10 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // XP-3 — re-validation consults live time
+    // Re-validation consults live time
     // ------------------------------------------------------------------
 
-    /// XP-3: advancing the clock past the recency window must age the entry
+    /// Advancing the clock past the recency window must age the entry
     /// out, with **no graph mutation at all**.
     ///
     /// Pre-fix the predicate captured `now` by move and re-derived its window
@@ -1100,7 +1100,7 @@ mod tests {
         assert_eq!(hit.seconds_ago, 5);
     }
 
-    /// NEW-4: two agents' interactions at the **same instant**, and a cross-agent
+    /// Two agents' interactions at the **same instant**, and a cross-agent
     /// write stamped with it. The timeline used to keep only the smallest
     /// interaction id per instant, which re-created the very failure
     /// write-time attribution fixed — the contested node's agent set

@@ -297,14 +297,14 @@ async fn stale_fires_for_idle_session_after_window_elapses() {
 
 #[tokio::test(start_paused = true)]
 async fn loop_emits_high_risk_for_fresh_write_to_canonical_node() {
-    // Final-review finding 1a: the entered-gated HighRisk emit path (the
+    // The entered-gated HighRisk emit path (the
     // `high_risk_hits` loop in `run_loop`) + `events::high_risk_event`
     // mapper had no loop-level test. A Canonical node with a fresh
     // in-window write is a high-risk modification (spec §9 "high-risk
     // modification" hot-list condition; events.rs v0.1 rule): exactly one
     // `DaemonEvent::HighRisk` on transition, a HighRiskModification
     // hot-list entry with a renderable reason, and NO re-emit while the
-    // condition persists (emit-on-transition, finding 3).
+    // condition persists (emit-on-transition).
     use crate::daemon::hotlist::{Condition, HotListPayload};
 
     let t0 = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
@@ -393,7 +393,7 @@ async fn loop_emits_high_risk_for_fresh_write_to_canonical_node() {
 /// Parse the seconds out of a `stale_event` detail
 /// ("... untouched for <N>s").
 ///
-/// Gated with its only caller (NEW-1): CI's feature matrix runs
+/// Gated with its only caller: CI's feature matrix runs
 /// `--no-default-features --features store-sqlite|store-cockroach` under
 /// `RUSTFLAGS="-D warnings"`, where an ungated helper whose sole use sits
 /// behind `fixtures` is a hard dead-code error, not a warning.
@@ -411,12 +411,12 @@ fn stale_seconds(detail: &str) -> u64 {
 #[cfg(feature = "fixtures")]
 #[tokio::test(start_paused = true)]
 async fn loop_emits_one_session_stale_from_rest_api_fixture_after_writes_age_out() {
-    // Final-review finding 1a: staleness had only a synthetic-clock loop
+    // Staleness had only a synthetic-clock loop
     // test. This one is fixture-driven: rebase session-rest-api so its
     // newest write lands 2h before `anchor` — past the 1h STALE_WINDOW
     // and far outside the 30s conflict/high-risk windows. The session as a
     // whole is stale, so the warm-up cycle must emit exactly ONE Stale
-    // (CONC-2: per session, not per concept — this asserted 22 before) and
+    // (per session, not per concept — this asserted 22 before) and
     // nothing else: no Conflict (all writes are 2h old, outside
     // conflict_recency_window), no Drift (the session has no root goal —
     // drift.rs: no goal nodes → no hits), no HighRisk (no fresh in-window
@@ -485,12 +485,12 @@ async fn loop_emits_one_session_stale_from_rest_api_fixture_after_writes_age_out
 }
 
 // ------------------------------------------------------------------
-// XP-4 / CONC-2 / CONC-3 — the event seam
+// The event seam
 // ------------------------------------------------------------------
 
 #[tokio::test(start_paused = true)]
 async fn non_daemon_caller_can_emit_canonized_on_the_daemon_channel() {
-    // XP-4: the canonizer's documented seam (`events::emit_canonized`) needs the
+    // The canonizer's documented seam (`events::emit_canonized`) needs the
     // broadcast Sender. Before `Daemon::event_sender()` no public path to it
     // existed anywhere in the crate, so the canonizer could not reach the channel
     // without owning the daemon's private field. This test is the seam: a
@@ -530,7 +530,7 @@ async fn non_daemon_caller_can_emit_canonized_on_the_daemon_channel() {
         DaemonEvent::Canonized { event: e } => assert_eq!(e, event),
         other => panic!("expected Canonized, got {other:?}"),
     }
-    // NEW-3: the seam is an `events::EventSender`, not a raw broadcast
+    // The seam is an `events::EventSender`, not a raw broadcast
     // Sender — the evaluator's send advanced the channel's SHARED publication counter,
     // which is what the loop's re-arm measures ring eviction against. A
     // clone taken later reads the same count.
@@ -543,10 +543,10 @@ async fn non_daemon_caller_can_emit_canonized_on_the_daemon_channel() {
 
 #[tokio::test(start_paused = true)]
 async fn external_publisher_flood_cannot_permanently_evict_a_held_conflict() {
-    // NEW-3: `event_sender()` used to hand out a raw `broadcast::Sender`
+    // `event_sender()` used to hand out a raw `broadcast::Sender`
     // clone. Its sends advanced the ring but not the loop's emission count,
-    // so re-arm (CONC-2) could not see that the held Conflict's event had
-    // been pushed out — leaving CONC-2 only partially closed. Probe on the
+    // so re-arm could not see that the held Conflict's event had
+    // been pushed out — leaving that event loss only partially fixed. Probe on the
     // pre-fix code: 300 external `Canonized` sends + a continuously-held
     // Conflict + 601 daemon cycles delivered **0** Conflict events.
     //
@@ -625,7 +625,7 @@ async fn external_publisher_flood_cannot_permanently_evict_a_held_conflict() {
 
 #[tokio::test(start_paused = true)]
 async fn late_subscriber_misses_the_warm_up_condition_set() {
-    // CONC-3: pins the documented caller ordering obligation. The warm-up cycle
+    // Pins the documented caller ordering obligation. The warm-up cycle
     // publishes the whole restored condition set — including the demo's
     // planted Conflict — and `broadcast` delivers only what is sent after a
     // receiver exists. Emission is on transition, so nothing re-publishes
@@ -656,7 +656,7 @@ async fn late_subscriber_misses_the_warm_up_condition_set() {
 
 #[tokio::test(start_paused = true)]
 async fn held_condition_is_re_emitted_once_the_ring_wraps_past_it() {
-    // CONC-2: emit-on-transition alone loses an event permanently — the
+    // Emit-on-transition alone loses an event permanently — the
     // transition is recorded whether or not any consumer got it, so an
     // event evicted from the ring while its condition still holds is never
     // re-published. The demo's Conflict is exactly such an event.
@@ -729,7 +729,7 @@ async fn held_condition_is_re_emitted_once_the_ring_wraps_past_it() {
 
 #[tokio::test(start_paused = true)]
 async fn entering_conditions_publish_highest_severity_first() {
-    // CONC-2: a burst must put the most actionable event first for a
+    // A burst must put the most actionable event first for a
     // consumer draining in order — Conflict, HighRisk, Drift, Stale
     // (`Condition::severity`). Pre-fix the order was Conflict, Drift,
     // Stale, HighRisk: the hazard came last.

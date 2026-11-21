@@ -75,7 +75,7 @@ async fn load_missing_session_errors() {
     assert!(matches!(err, StoreError::SessionNotFound(_)));
 }
 
-/// XP-8: `root_goal` survives flush → load through the **mutation path**.
+/// `root_goal` survives flush → load through the **mutation path**.
 ///
 /// Before `Mutation::SetRootGoal` the goal reached a store only via the
 /// full-snapshot `seed` path, so a session reloaded from the write-behind log
@@ -224,7 +224,7 @@ async fn embedding_contract_roundtrips_flush_and_load() {
     }
 }
 
-/// Acceptance (CON-8): `Concept.embedding` survives flush → load on SQLite
+/// Acceptance: `Concept.embedding` survives flush → load on SQLite
 /// (the column is now written and read), and the loaded snapshot deep-equals
 /// the MemoryStore oracle on the same batch.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -408,7 +408,7 @@ async fn seed_load_preserves_embedding_contract() {
     let ts = Utc.timestamp_opt(1_752_000_000, 0).unwrap();
     // `dim` matches the seeded concept's vector width below. It used to read
     // 1024 against a 3-wide vector — incidental to what this test asserts
-    // (contract persistence + CON-8 embedding round-trip), but a snapshot no
+    // (contract persistence + embedding round-trip), but a snapshot no
     // writer should be able to produce: the width gate now refuses it on the
     // seed path too, which is the point of the gate.
     let contract = EmbeddingContract {
@@ -1006,7 +1006,7 @@ async fn canonization_events_append_and_update_concept() {
     assert_eq!(snap.canonization_events.len(), 2);
 }
 
-/// COH-3 acceptance: a demotion event (Canonical -> None) carries
+/// Acceptance: a demotion event (Canonical -> None) carries
 /// `last_demotion_time`; it lands on the concept and round-trips through the
 /// event table; a later non-demotion transition leaves it untouched.
 #[tokio::test]
@@ -1425,7 +1425,7 @@ async fn a_batch_larger_than_the_chunk_limit_round_trips_whole() {
 /// The stale-snapshot case, demotion variant — the worse half. The stale snapshot carries
 /// `last_demotion_time: None` and the pre-demotion blast, so the demoted
 /// node used to reload `Canonical` with the re-promotion cooldown erased
-/// (COH-3, "cooldown survives restart").
+/// ("cooldown survives restart").
 #[tokio::test]
 async fn stale_upsert_before_a_recorded_demotion_does_not_erase_the_cooldown() {
     let store = test_store();

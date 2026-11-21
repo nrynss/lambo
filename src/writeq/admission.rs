@@ -33,7 +33,7 @@ use crate::types::{
     SuppliedVector, WriteIntent, WriteIntentPayload,
 };
 
-/// **Deleted roles, recorded where they lived** (J3 redesign): this block used
+/// **Deleted roles, recorded where they lived** (durability redesign): this block used
 /// to define `DRAIN_PROJECTION_SHARE` (the share of the drain budget an
 /// admission bound could project a *rate* against), `WRITE_QUEUE_LANE_MIN` (the
 /// floor under a rate-derived lane bound), `WRITE_QUEUE_MIN` (the unmeasured
@@ -149,8 +149,8 @@ impl DropReason {
     /// The receipt's stated reason. **It must name the bound that actually
     /// refused, as what it actually is** — a review caught the previous text
     /// attributing every refusal to "a bound measured … on this deployment's
-    /// embedder" in an era where a fixed ceiling was deciding; under the J3
-    /// redesign the bounds are static shares and the text says so.
+    /// embedder" in an era where a fixed ceiling was deciding; under the
+    /// durability redesign the bounds are static shares and the text says so.
     pub(super) fn describe(self, bound: usize) -> String {
         match self {
             DropReason::LaneFull => format!(
@@ -242,7 +242,7 @@ impl JobPayload {
         }
     }
 
-    /// The durable form of this job, exactly as validated (J3 intents).
+    /// The durable form of this job, exactly as validated.
     pub(super) fn to_intent_payload(&self) -> WriteIntentPayload {
         let repo_scope = match self {
             Self::Derive { repo_scope, .. } | Self::Action { repo_scope, .. } => {
@@ -753,7 +753,7 @@ impl WritePipeline {
 
     /// Admit a job and hand back its receipt, or refuse it.
     ///
-    /// Admission is instant since the J3 redesign — the bounds are the static
+    /// Admission is instant since the durability redesign — the bounds are the static
     /// fairness/memory caps, so there is no calibration to await. (The old
     /// `await_calibration` blocked the first burst on the probe for up to
     /// [`PROBE_BUDGET`](super::PROBE_BUDGET) because "a provisional constant is the constant the
@@ -806,7 +806,7 @@ impl WritePipeline {
             } else if lanes.bytes.saturating_add(bytes) > WRITE_QUEUE_MAX_BYTES {
                 Some((DropReason::QueueBytes, WRITE_QUEUE_MAX))
             } else {
-                // J3 durable intents: the ack's other half. Recorded at
+                // Durable intents: the ack's other half. Recorded at
                 // admission, through the ordinary write-behind log, so the
                 // close-time final flush ("session closed, tail durable")
                 // carries it — acked ⇒ (applied ∨ durable intent) at a clean

@@ -19,14 +19,14 @@ impl Graph {
     /// mutations (the history is already durable) and verifies every §5.7
     /// invariant before returning.
     ///
-    /// A zero-interaction snapshot is a valid **empty** graph (adve-review
-    /// GRAPH-6 — "expected exactly one chain head, found 0" was rejecting
-    /// fresh sessions), and duplicate natural-key edges are rejected rather than
-    /// silently merged via reinforcement (GRAPH-7 — the loaded graph must equal
-    /// the stored snapshot; reinforcement is a write-path semantic, not a load
-    /// one). For the same reason a node id that appears twice (two
-    /// interactions, two concepts, or a concept reusing an interaction's id) is
-    /// rejected rather than loaded last-wins.
+    /// A zero-interaction snapshot is a valid **empty** graph ("expected
+    /// exactly one chain head, found 0" was rejecting fresh sessions), and
+    /// duplicate natural-key edges are rejected rather than silently merged via
+    /// reinforcement (the loaded graph must equal the stored snapshot;
+    /// reinforcement is a write-path semantic, not a load one). For the same
+    /// reason a node id that appears twice (two interactions, two concepts, or
+    /// a concept reusing an interaction's id) is rejected rather than loaded
+    /// last-wins.
     ///
     /// The mutation epoch **resumes** from [`GraphSnapshot::mutation_epoch`]
     /// (issue #17): the counter is durable accounting, not process state.
@@ -50,7 +50,7 @@ impl Graph {
                     i.id, i.session_id, sid
                 )));
             }
-            // GRAPH-7: the loaded graph must equal the snapshot, so a node id
+            // The loaded graph must equal the snapshot, so a node id
             // that appears twice is refused, not loaded last-wins.
             if g.nodes.insert(i.id, Node::Interaction(i.clone())).is_some() {
                 return Err(invariant(format!(
@@ -106,7 +106,7 @@ impl Graph {
             }
         }
         if snap.interactions.is_empty() {
-            // GRAPH-6: a zero-interaction snapshot is a valid empty graph, not a
+            // A zero-interaction snapshot is a valid empty graph, not a
             // malformed chain. A non-empty snapshot with a forked/absent chain
             // still fails below; concepts without Derives edges still fail
             // assert_invariants.
@@ -141,7 +141,7 @@ impl Graph {
             g.temporal_chain = chain;
         }
 
-        // GRAPH-7: duplicate (source, target, edge_type) in one snapshot must be
+        // Duplicate (source, target, edge_type) in one snapshot must be
         // rejected up front — record_edge would silently reinforce, leaving a
         // loaded graph that disagrees with the stored snapshot.
         let mut seen_edge_keys: HashSet<EdgeKey> = HashSet::with_capacity(snap.edges.len());

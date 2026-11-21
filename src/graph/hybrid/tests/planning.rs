@@ -138,7 +138,7 @@ async fn concurrent_first_writers_cannot_mix_embedding_contracts() {
 /// declared `Observation` (embedded, typed, carrying CoOccurrence /
 /// Derives / Semantic) and a bare `Entity` (unembedded, carrying only
 /// Derives / Hierarchical) — because `canonicalize` never matches an
-/// `Observation` (GRAPH-1). On Mooshik's bootstrap graph that was 170
+/// `Observation`. On Mooshik's bootstrap graph that was 170
 /// contents existing as such pairs, holding embedding coverage near 50%
 /// and splitting each fact's supporting interactions across two nodes.
 ///
@@ -222,7 +222,7 @@ async fn parent_of_child_resolves_to_a_concept_declared_in_the_same_call() {
 /// `PARENT_OF_CONCEPT_TYPE` (`Entity`). Without this, a fix that made
 /// `canonicalize` match Observations generally would pass the test above
 /// while quietly reattaching agent content to demoted context-overflow
-/// records (GRAPH-1).
+/// records.
 #[tokio::test]
 async fn a_brand_new_parent_of_end_is_still_created_as_entity() {
     let (graph, interaction) = graph_with_interaction("hybrid-fresh-end", 1, 0, "ingest context");

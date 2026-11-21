@@ -294,12 +294,12 @@ override is the operator asserting that they do.
   and a later read returns both.
 * `reembed_refuses_same`, `reembedCmd_refuses_same_contract`: `re-embed`
   cannot rewrite a session already under the live contract, which is the
-  state a canary drift is detected in (finding 1 below).
+  state a canary drift is detected in (see the findings below).
 * `reembedCmd_full_never_warns`, `reembed_repins_without_warning`: every
   full re-embed that succeeds re-pins the canary and never prints the
-  "other sessions under the same contract" warning (finding 2).
+  "other sessions under the same contract" warning.
 * `missingOnly_skips_canary`, `example_drifted_backfill`: the backfill runs
-  whatever the canary says (finding 3).
+  whatever the canary says.
 
 ## Findings about the Rust at `703f703f`
 
@@ -1347,7 +1347,7 @@ def reembedCmdGated (s : Session K M) (live : Contract K M) (allow missingOnly d
     (_mode : CanaryMode) (_drifted : Bool) : Option (Session K M × List (Mut K M)) :=
   reembedCmd s live allow missingOnly drop
 
-/-- **`--missing-only` bypasses the canary** (finding 3): the re-embed verb,
+/-- **`--missing-only` bypasses the canary**: the re-embed verb,
 backfill included, does the same whatever the canary mode and verdict. -/
 theorem missingOnly_skips_canary (s : Session K M) (live : Contract K M)
     (allow missingOnly drop : Bool) (mode : CanaryMode) (drifted : Bool) :
@@ -1386,7 +1386,7 @@ theorem reembedCmd_full_never_warns (s : Session K M) (live : Contract K M) (dro
     rw [reembedCmd_refuses_same_contract s live drop hc hne] at h
     cases h
 
-/-- **Silent re-pin** (finding 2): whenever a run re-pins, it does not warn. -/
+/-- **Silent re-pin**: whenever a run re-pins, it does not warn. -/
 theorem reembed_repins_without_warning (s : Session K M) (live : Contract K M)
     (missingOnly drop : Bool) (mode : CanaryMode)
     (h : repins s live missingOnly drop mode = true) : repinWarns s live = false := by
@@ -1480,7 +1480,7 @@ theorem example_drift_not_reembeddable_in_place :
 `llama_model`). -/
 def cA' : Contract Nat Nat := ⟨0, some 2, 4⟩
 
-/-- **The undocumented repair** (finding 1): re-embed to an alias of the same
+/-- **The undocumented repair**: re-embed to an alias of the same
 width succeeds, and re-embed back to the original name succeeds too. -/
 theorem example_rename_hop :
     reembedCmd sA cA' false false false =
@@ -1489,7 +1489,7 @@ theorem example_rename_hop :
       some (⟨some cA, [⟨1, false, some cA⟩]⟩, [.upsert 1 (some cA), .setEmbedding (some cA)]) := by
   decide
 
-/-- **Silent re-pin, two routes** (finding 2). The round trip's second hop
+/-- **Silent re-pin, two routes.** The round trip's second hop
 (prior `cA'`, live `cA`) and the re-embed of an unrecorded session with a
 text concept (prior none) both re-pin `cA` without the warning. -/
 theorem example_silent_repin :
@@ -1498,7 +1498,7 @@ theorem example_silent_repin :
     repins (⟨none, [⟨1, false, none⟩]⟩ : Session Nat Nat) cA false false .warn = true ∧
     repinWarns (⟨none, [⟨1, false, none⟩]⟩ : Session Nat Nat) cA = false := by decide
 
-/-- **The drifted backfill** (finding 3): under `verify` with a drift, an
+/-- **The drifted backfill**: under `verify` with a drift, an
 ordinary writer attach to `sEmpty` is refused, while `re-embed
 --missing-only` writes a vector from the drifted embedder into it. -/
 theorem example_drifted_backfill :
@@ -1506,7 +1506,7 @@ theorem example_drifted_backfill :
     reembedCmdGated sEmpty cA false true false .verify true =
       some (⟨some cA, [⟨1, false, some cA⟩]⟩, [.upsert 1 (some cA)]) := by decide
 
-/-- The weak same-kind guard (finding 5): vectors from model `0` are
+/-- The weak same-kind guard: vectors from model `0` are
 relabelled as model `1` of the same kind and width. -/
 theorem example_same_kind_relabel :
     (attach sA cB true).isSome = true ∧ (attach sA cC true).isSome = false := by decide
@@ -1757,7 +1757,7 @@ theorem reembedCmdFixed_full_spec (s s' : Session K M) (live : Contract K M)
             exact ⟨hs', hc'⟩
           · exact ⟨reembed_one_space s s' live _ drop m h, reembed_contract s s' live _ drop m h⟩
 
-/-- **The drift is repairable in place** (finding 1 fixed). On a non-empty
+/-- **The drift is repairable in place** (fixed). On a non-empty
 session under the live contract that holds a vector, with no image vector
 left behind and distinct node ids, `re-embed --rewrite-same-contract
 --repin-canary` succeeds whatever the canary mode and pin say (under
@@ -1812,7 +1812,7 @@ theorem reembedCmdFixed_migration_agrees (s : Session K M) (live : Contract K M)
   simp only [hc, decide_false, bne_self_eq_false, hsafe, husage, Bool.not_true,
     Bool.false_eq_true, ite_false, Bool.false_and, Bool.not_false, Bool.true_and]
 
-/-- **`--missing-only` runs the canary** (finding 3 fixed): under `verify`
+/-- **`--missing-only` runs the canary** (fixed): under `verify`
 with a drift, the backfill of a session under the live contract is refused,
 like every ordinary writer attach (`writerAttach_verify_drift`). -/
 theorem missingOnly_fixed_refuses_drift (s : Session K M) (live : Contract K M)
@@ -1862,7 +1862,7 @@ def repinWarnsFixed (s : Session K M) (live : Contract K M) (missingOnly drop sa
     (mode : CanaryMode) (pin : PinState) : Bool :=
   repinsFixed s live missingOnly drop same repin mode pin && !pin.safeToReplace
 
-/-- **No silent re-pin** (finding 2 fixed): a run that re-pins over a pin it
+/-- **No silent re-pin** (fixed): a run that re-pins over a pin it
 could not confirm (drifted, or unchecked) was given `--repin-canary`, and
 prints the warning. -/
 theorem fixed_repin_unsafe_needs_optin (s : Session K M) (live : Contract K M)

@@ -62,14 +62,14 @@
 //! per-node graph logic they used to detect; the hot list only evaluates it.
 //!
 //! The predicate takes `now` as a **parameter** and returns the recomputed
-//! payload (XP-3). A predicate that captured `now` by move re-derived its
+//! payload. A predicate that captured `now` by move re-derived its
 //! recency window from a frozen instant, so a `Conflict`/`HighRisk` entry
 //! re-validated `true` forever against an unchanged graph and served a frozen
 //! `seconds_ago` — the exact API recall is told to call, rendering "wrote to it
 //! eleven seconds ago" five minutes later. Handing `now` in and taking the
 //! payload out makes both halves impossible to get wrong.
 //!
-//! Predicates are **per-node** (CONC-5): each re-check costs one node's
+//! Predicates are **per-node**: each re-check costs one node's
 //! neighborhood, not a whole-graph detection pass. Recall force-including ten
 //! hot nodes therefore costs ten neighborhood walks under the graph lock, not
 //! ten full scans.
@@ -157,7 +157,7 @@ pub use crate::types::HotListPayload;
 /// from read-time state; `None` — it has lapsed and the entry is dropped.
 ///
 /// Taking `now` as a parameter rather than capturing it at detection is the
-/// whole point (XP-3): a closure that froze `now` re-derived its recency window
+/// whole point: a closure that froze `now` re-derived its recency window
 /// from a fixed instant, so a `Conflict` or `HighRisk` entry re-validated `true`
 /// forever against an unchanged graph and rendered a frozen `seconds_ago` — the
 /// demo's "wrote to it eleven seconds ago" would still say eleven seconds five
@@ -465,7 +465,7 @@ impl HotList {
     /// survived). Recall uses this to decide force-inclusion and then
     /// renders [`HotListEntry::payload`], which this call has just rebuilt
     /// against `now` — so a rendered `seconds_ago` is the age at *read* time,
-    /// not at detection time (XP-3).
+    /// not at detection time.
     ///
     /// `now` is the caller's clock: recall passes its own, so an entry whose
     /// recency window elapsed between detection and this read is dropped here
@@ -490,8 +490,7 @@ impl HotList {
     }
 
     /// Re-validate the hot entries of every node in `members` **at `now`** and
-    /// return the surviving payloads per node, freshly rebuilt (force-inclusion,
-    /// XP-3).
+    /// return the surviving payloads per node, freshly rebuilt (force-inclusion).
     ///
     /// This is recall's read-time maintenance of the hot list, run by
     /// `Daemon::recall_detailed` over the recall's expanded
@@ -702,7 +701,7 @@ mod tests {
     }
 
     /// An entry whose predicate re-derives `seconds_ago` from the `now` it is
-    /// handed — the shape every real detector uses (XP-3).
+    /// handed — the shape every real detector uses.
     fn clock_reading_entry(node: NodeId, written_at: DateTime<Utc>, window: i64) -> HotListEntry {
         HotListEntry::new(
             node,
@@ -911,7 +910,7 @@ mod tests {
         assert!(list.contains(nid(2)));
     }
 
-    /// XP-3: `revalidate` consults the `now` it is handed, and the surviving
+    /// `revalidate` consults the `now` it is handed, and the surviving
     /// entry's payload is rebuilt from it.
     ///
     /// Pre-fix the predicate was `Fn(&Graph) -> bool` over a captured `now`, so

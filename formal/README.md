@@ -10,7 +10,9 @@ tests. It has no dependencies beyond Lean itself (no Mathlib).
 `sorry`: 2,352 theorems across 27 model files. The axiom audit in
 `LamboProofs/Audit.lean` reports only Lean's standard axioms (`propext`,
 `Quot.sound`, and `Classical.choice` for 285 theorems); 24 of the 642 audited
-theorems use no axioms at all.
+theorems use no axioms at all. The count is of `theorem` declarations in
+the model files (`LamboProofs/*.lean` other than `Audit.lean`), private ones and
+ones tagged `@[simp]` included; `example`s are not counted.
 
 To check them yourself:
 

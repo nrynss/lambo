@@ -142,7 +142,7 @@ pub struct WriteQueueCounters {
     pub(super) dropped_closed: AtomicU64,
     /// Acked writes a clean `close()` did **not** apply and did not lose:
     /// their durable intents survive the close and the next serve of the
-    /// session applies them (J3 durable intents). A fourth settle class beside
+    /// session applies them (durable intents). A fourth settle class beside
     /// `applied`/`failed` — never a subset of either — because "your write
     /// will happen, later, in another process" is neither a success nor a
     /// failure and must not be counted as one.
@@ -165,7 +165,7 @@ pub struct WriteQueueCounters {
     /// therefore not a term in `outstanding` (those intents were never accepted
     /// by this process).
     pub(super) replay_owed: AtomicU64,
-    /// The reason the last replay stopped without draining (J3-R2R-8), or
+    /// The reason the last replay stopped without draining, or
     /// [`ReplayBlockReason::None`] when it drained / was never owed. Renders as
     /// the `write_queue_replay_blocked` stat: `null` = draining or idle,
     /// `"embedder"` = sick/wedged, `"other"` = store/lease/config,

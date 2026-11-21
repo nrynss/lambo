@@ -63,7 +63,7 @@ fn image_content_appends_one_suffix_after_the_trimmed_caption() {
     assert!(check_caption("render [image:x] 17").is_err());
 }
 
-/// PR 4: a caption allowed because it holds no suffix token
+/// #22: a caption allowed because it holds no suffix token
 /// still yields exactly one, the appended one, so its id alone decides the
 /// key.
 #[test]
@@ -99,7 +99,7 @@ fn a_caption_suffix_in_any_case_or_with_invisible_characters_is_refused() {
     ] {
         assert!(check_caption(caption).is_err(), "{caption:?}");
     }
-    // PR 4: only a token that canonicalizes to `[image:<id>]`
+    // #22: only a token that canonicalizes to `[image:<id>]`
     // with a valid id can collide; a caption that only mentions the suffix
     // is allowed.
     for caption in [

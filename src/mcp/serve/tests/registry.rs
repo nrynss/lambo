@@ -1258,7 +1258,7 @@ async fn a_transient_model_load_failure_is_retried_and_a_permanent_one_is_not() 
     );
 }
 
-/// Sonnet review L-C: which background-attach errors keep a pinned session
+/// Which background-attach errors keep a pinned session
 /// retrying (the store or the embedder could not be reached) and which mark
 /// it `Failed` (the same answer on every retry). A permanent store error
 /// (#301) keeps retrying as the backend error it used to be: the operator

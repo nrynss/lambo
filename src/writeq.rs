@@ -1,4 +1,4 @@
-//! Asynchronous write pipeline and write receipts (J3).
+//! Asynchronous write pipeline and write receipts.
 //!
 //! # The rule
 //!
@@ -55,8 +55,8 @@
 //! | `drain` | `quiesce` / `abort_workers` / `settle_deferred` for `close()`, `abort_all_sync` for `Drop` |
 //! | `replay` | the durable-intent replay spawned at attach |
 //!
-//! The review chronology behind these rules (J3 rounds 1-3, the estimator
-//! redesign) is in `dev-diary/notes/refactor-27-writeq-memory.md` and
+//! The review chronology behind these rules (three review rounds, the
+//! estimator redesign) is in `dev-diary/notes/refactor-27-writeq-memory.md` and
 //! `dev-diary/lambo-for-mooshik/J3-durability-redesign.md`.
 
 use std::collections::HashMap;
@@ -126,7 +126,7 @@ use receipts::{hold_one, model_safe_failure, settle_one, Entry, Receipts};
 // The pipeline
 // ---------------------------------------------------------------------------
 
-/// The J3 background write pipeline: bounded per-agent FIFO lanes feeding the
+/// The background write pipeline: bounded per-agent FIFO lanes feeding the
 /// ordinary write path, plus the receipt store their outcomes land in.
 ///
 /// Lives at **`Memory` level** rather than in the MCP server, so any owner —
@@ -158,7 +158,7 @@ pub struct WritePipeline {
     observed: Arc<PlMutex<ObservedRate>>,
     /// Admission-to-settle latency of recent applied writes (#11).
     apply_latency: Arc<PlMutex<ApplyLatency>>,
-    /// Cross-restart receipt answers (J3 durable intents): receipts issued by
+    /// Cross-restart receipt answers (durable intents): receipts issued by
     /// **previous** processes whose fate this process knows — from the loaded
     /// intent records at attach (unconsumed → `Pending`; consumed → the stored
     /// outcome) and from this process's own replay as it settles them. Checked
@@ -166,7 +166,7 @@ pub struct WritePipeline {
     /// answer their truth instead of `restart_lost`. Agent-scoped like the
     /// live store.
     restart: PlMutex<RestartReceipts>,
-    /// The replay task (J3), when this session attached over a durable intent
+    /// The replay task, when this session attached over a durable intent
     /// backlog. Aborted at close — unconsumed intents stay durable for the
     /// next serve.
     replay: PlMutex<Option<JoinHandle<()>>>,
@@ -200,7 +200,7 @@ impl WritePipeline {
     ///
     /// Spawned rather than awaited: the probe measures the deployment's
     /// embedder, and making session build wait for it would put embedder
-    /// latency on a startup path J2 has already made latency-sensitive. It
+    /// latency on a startup path that is already latency-sensitive. It
     /// sources **nothing** — the bounds are the static
     /// [`WRITE_QUEUE_LANE_MAX`] / [`WRITE_QUEUE_MAX`] whatever it reads, and
     /// `admit` never consults it (this docstring used to say the

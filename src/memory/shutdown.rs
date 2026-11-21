@@ -137,14 +137,14 @@ impl Drop for Memory {
 /// The slot was left `None`, so the retried `close()` skipped the join, drained
 /// an empty log, took the empty-log shortcut and returned `Ok(())` over a tail
 /// that was neither durable nor anywhere [`Drop`]'s warning could see it
-/// (the log was empty because the zombie held the batch). COH-6 clause 13 — "a
-/// retained batch is never silently lost" — by the same route.
+/// (the log was empty because the zombie held the batch). The guarantee that "a
+/// retained batch is never silently lost" broke by the same route.
 ///
 /// So a handle is never a bare local either. This guard owns it from the take
 /// until [`HandleCustody::join`] sees the task actually finish, and its `Drop`
 /// returns an un-reaped handle to its slot. A `JoinHandle` whose poll was
 /// cancelled is re-awaitable, so the retry re-joins *that* task, waits out its
-/// in-flight attempt and collects its `requeue_pending` (COH-6): the tail is
+/// in-flight attempt and collects its `requeue_pending`: the tail is
 /// back on the log before step 3 drains, and the empty-log shortcut is never
 /// reached with a live flush task behind it.
 ///
@@ -582,7 +582,7 @@ impl Memory {
     /// no success is ever latched over an un-joined flush task — is asserted in
     /// `Memory::latch_success`.
     ///
-    /// ## The drain (COH-6)
+    /// ## The drain
     ///
     /// `FlushTask` owns its `pending` buffer, so a hard
     /// [`JoinHandle::abort`](tokio::task::JoinHandle::abort) on it would drop

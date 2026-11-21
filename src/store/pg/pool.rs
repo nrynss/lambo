@@ -101,7 +101,7 @@ pub(super) const STATEMENT_TIMEOUT: Duration = Duration::from_secs(20);
 /// server enforces **1..=2048** (verified live 2026-08-13; out-of-range is a
 /// server-side error, not a clamp).
 ///
-/// **Default 64, chosen from measurement** (adve-review MAJOR-1, 2026-08-13).
+/// **Default 64, chosen from measurement** (2026-08-13).
 /// Recall was measured against exact top-k on the live cluster, where exact
 /// ground truth is forced with the `concepts@concepts_pkey` hint (a FULL SCAN).
 /// Two 3,000-row datasets: uniform-random vectors, and clustered unit-norm

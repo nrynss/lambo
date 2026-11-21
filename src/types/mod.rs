@@ -993,8 +993,8 @@ pub enum WriteIntentPayload {
     /// An image derive (#22): one concept whose vector was supplied rather
     /// than embedded from its text.
     ///
-    /// Its own variant, not a defaulted field on [`Self::Derive`] (design
-    /// Q18): a build that predates it fails to decode an unconsumed intent and
+    /// Its own variant, not a defaulted field on [`Self::Derive`]: a
+    /// build that predates it fails to decode an unconsumed intent and
     /// says so (a settled one is stored as [`WriteIntentPayload::settled`]),
     /// where a defaulted field would let it drop the vector silently and
     /// embed the caption in its place. The intent carries the **vector**,
@@ -1037,7 +1037,7 @@ pub enum WriteIntentPayload {
     /// resolved to at the ack.
     ///
     /// Its own variant, not a defaulted field on [`Self::Derive`], for the
-    /// reason [`Self::DeriveImage`] is (design Q18): a build that predates
+    /// reason [`Self::DeriveImage`] is: a build that predates
     /// citations fails to decode an unconsumed cited intent and says so,
     /// where a defaulted field would let it apply the derive with its
     /// citations silently dropped. A derive without citations stays
@@ -1058,7 +1058,7 @@ pub enum WriteIntentPayload {
     /// A `lambo_record_action` job with `against` (#19(b)): the action
     /// above plus the concepts it contradicts, as resolved at the ack.
     ///
-    /// Its own variant, for [`Self::DeriveCited`]'s reason (design Q18): a
+    /// Its own variant, for [`Self::DeriveCited`]'s reason: a
     /// defaulted field on [`Self::Action`] would let a build that predates
     /// it replay the action with its contradictions silently dropped, where
     /// a new variant is refused by name. An action without `against` stays
@@ -2411,7 +2411,7 @@ impl LamboError {
     }
 
     /// Whether this is a [lookup timeout](Self::lookup_timeout). The replay
-    /// tells it apart from an embedder outage (#125 Sonnet review): the
+    /// tells it apart from an embedder outage (#125): the
     /// embedder answered before the lookup, so it is no evidence that the
     /// embedder is sick, and a lookup that is slow every time for one input
     /// must not hold the backlog behind it on every restart. Identified by

@@ -50,8 +50,8 @@ item, as the engine applies it, and a read sees the index at any point
 between (a periodic refresh can expose any prefix). Chunks are one document
 (the tests' `with_repair_chunk(1)`; with chunk `k` the one in-flight request
 below is `k` documents). The read path's load and marker check are one step;
-`load_session`'s are two (`loadBegin`, `loadEnd`), which is what #18 review M4
-races.
+`load_session`'s are two (`loadBegin`, `loadEnd`), which is what the #18 ahead-marker
+check races.
 
 ## Results
 
@@ -70,12 +70,13 @@ races.
   `nextVersion_gt` gives it only when the store's recorded token is at most
   the pass's, and a stale pass breaks that (`stale_pass_rewinds_version`).
   `putAll_eq` (first write at a version wins),
-  `reconcile_matches`. `finish_overtaken`, `finish_inSync`: #18 review F4.
-* Breaker (#18 review M2). `breaker_trips`, `breaker_counts`,
+  `reconcile_matches`. `finish_overtaken`, `finish_inSync`: an overtaken repair is not
+  trusted (#18).
+* Breaker (#18). `breaker_trips`, `breaker_counts`,
   `breaker_open_falls_back`, `breaker_one_probe`, `breaker_probe_outcome`; in the machine,
   `read_breaker_open` and `read_not_inSync_falls_back`: while open, or while
   not in sync, a read is the durable store's.
-* Fencing (#18 review F2, #293). `repair_silent_after_loss`: once the lease moved
+* Fencing (#18, #293). `repair_silent_after_loss`: once the lease moved
   past a token and the repair task is off its in-flight request, no repair write under
   that token ever lands, in any run; `erase_silences_repair` applies it to an
   erase or takeover. `mirror_starts_held`: a mirror starts only from an
@@ -85,7 +86,7 @@ races.
   `settle_trusted`: after a load the session is trusted exactly when the
   final (re-checked) marker is in sync, unless a holder finds it behind and
   asks for a repair.
-* Search (#18 review M3 and F7). `rerank_ignores_engine`: with every stored
+* Search (#18). `rerank_ignores_engine`: with every stored
   vector returned, the engine's scores and order do not matter, and the answer
   is `rank_by_cosine` over the candidates (`rerank_exact`, close to the
   definition: the durable store's exact scan run on the same candidates);
@@ -108,8 +109,8 @@ races.
   for both versions (they are stated for any `Params`).
 
 Tests mirrored by `decide` runs: the mirror and served leg, the contract
-refusal, the mirror failure and repair, #18 review F4, F2 and F6, the #293
-re-take, the #18 review M4 ahead marker, #18 review L4, the breaker, the
+refusal, the mirror failure and repair, the #18 cases (overtaken repair, lost lease,
+erase, ahead marker, unleased flush), the #293 re-take, the breaker, the
 overfetch, the exact re-rank and its boundary, the projection table, and the
 #319 migration and relabel.
 
@@ -172,8 +173,8 @@ overfetch, the exact re-rank and its boundary, the projection table, and the
 * `repair_from_pre_recheck_snapshot`: when `repair_once` finds the marker
   ahead and `recheck_ahead`'s fresh load finds it behind (another flush in
   between), it reconciles from the **first**, older snapshot, contrary to
-  #18 review M4's "never repair from the older snapshot": it re-indexes a
-  node deleted since and rewinds the marker. The #18 review F4 guard sends it
+  #18's "never repair from the older snapshot": it re-indexes a
+  node deleted since and rewinds the marker. The overtaken-repair guard (#18) sends it
   round again and the rerun repairs it; meanwhile the holder falls back, but an in-sync reader elsewhere
   serves the deleted node.
 * `edge_only_batch_leaves_marker_behind`: a batch of only `DeleteEdge`s names
@@ -241,14 +242,14 @@ Exact arithmetic: versions and epochs are naturals (`u64` overflow is the
 `f32`/`f64` rounding in `rank_by_cosine` and the engine is outside the model.
 Not modelled: the refresh interval as such (the realtime view stands for
 every view a refresh can expose; delete-by-query is atomic with its refresh,
-so the #18 review H1 refresh-first rule and version-conflict retries in
+so the #18 refresh-first rule and version-conflict retries in
 `sweep` and `erase_session` are assumed, not proved), `ensure_index`, index naming and
 `validate_index_prefix`, widths (`index_doc`'s width check), interactions and
 graph structure, multiple sessions (`mirror` over several sessions is reduced
-to the one-session attribution rule), the eviction bound (#18 review L5) and
-`repair_run` (#18 review L1), log messages and `last_error`, timeouts as
+to the one-session attribution rule), the eviction bound (#18) and
+`repair_run` (#18), log messages and `last_error`, timeouts as
 durations (a deadline is an event), the primary's own errors, `backfill_recall_index`,
-the unchecked `vector_candidates` surface, and holder derive (#18 review M6).
+the unchecked `vector_candidates` surface, and holder derive (#18).
 -/
 
 namespace Lambo.Tiered
@@ -363,7 +364,7 @@ def overfetch : Nat := 16
 /-- `knn_fetch(limit)`: `limit + 16`, capped at `max(2048, limit)`. -/
 def knnFetch (limit : Nat) : Nat := min (limit + overfetch) (max maxLimit limit)
 
-/-- **The over-fetch bound (#18 review F7).** For every limit the store accepts
+/-- **The over-fetch bound (#18).** For every limit the store accepts
 (`validate_vector_candidate_limit`: at most 2048), the fetch is at least the
 limit and never above the store-wide candidate limit; below the cap it is
 exactly `limit + 16`. -/
@@ -598,7 +599,7 @@ def breakerRun (P : Params) : List (Nat × Bool) → Breaker → List Bool × Br
       let (rs', b'') := breakerRun P rs b'
       (r :: rs', b'')
 
-/-- **The breaker trips** (#18 review M2): `threshold` consecutive failures from a closed
+/-- **The breaker trips** (#18): `threshold` consecutive failures from a closed
 breaker open it for a full cool-down after the last one. -/
 theorem breaker_trips (P : Params) (b : Breaker) (now : Nat) (h : P.threshold ≤ b.fails + 1)
     (hc : b.openUntil = none) :
@@ -1864,7 +1865,7 @@ theorem step_frame (s : St) (e : Ev) (he : e ≠ .repStep) : Frame s (step P s e
   case tick => exact frame_same rfl rfl rfl
 
 /-- **Once the lease moved past `t`, no repair write under `t` ever lands
-again** (#18 review F2, `ensure_fenced`). From a state where the repair task is not
+again** (#18, `ensure_fenced`). From a state where the repair task is not
 mid-request under `t` and no aborted request under `t` is on the wire, every
 event keeps it so. -/
 theorem step_quiet (s : St) (t : Nat) (e : Ev) (hq : Quiet t s) : Quiet t (step P s e) := by
@@ -1922,7 +1923,7 @@ theorem step_log (s : St) (t : Nat) (e : Ev) (hq : Quiet t s) :
     exact hq.noOrphan (src, it) (by rw [ho]; exact List.mem_cons_self) hs.symm
 
 /-- **Once the lease moved past `t`, no repair write under `t` ever lands
-again** (#18 review F2, `ensure_fenced`), over every run.
+again** (#18, `ensure_fenced`), over every run.
 `a_repair_that_lost_its_lease_stops_writing`
 is the one write already on the wire; from then on the stalled holder writes
 nothing however the events interleave: takeovers, re-takes, erases, its own
@@ -2157,7 +2158,7 @@ theorem reader_stays_inSync (s : St) (h : s.tier.sync = .inSync) (evs : List Ev)
     show (run P (step P s e) es).tier = s.tier
     rw [ih (step P s e) (hstep ▸ h) (fun e' he' => he e' (List.mem_cons_of_mem _ he')), hstep]
 
-/-- **#18 review F4: a repair overtaken by a flush is not trusted.** At the end of a
+/-- **A repair overtaken by a flush is not trusted (#18).** At the end of a
 pass whose snapshot is older than a flush this store committed, the session
 is not marked in sync and the run goes round again. -/
 theorem finish_overtaken (s : St) (snap : Snap) (hr : s.rep = .finish snap)
@@ -2611,7 +2612,7 @@ def rerank (cos : Nat → Nat) (hits : List Hit) (limit : Nat) : List Nat :=
 def exactScan (cos : Nat → Nat) (vs : List (Nat × Nat × Nat)) (limit : Nat) : List Nat :=
   rankExact (vs.map fun v => (v.1, cos v.2.1, v.2.2)) limit
 
-/-- The re-rank is the durable store's ranking on the candidate set (#18 review M3). Close
+/-- The re-rank is the durable store's ranking on the candidate set (#18). Close
 to the definition of `rerank`; the content is `rerank_ignores_engine`:
 when every hit carries its stored vector, the engine's scores and its order
 are ignored and the answer is `rank_by_cosine` over exactly those vectors,
@@ -2623,7 +2624,7 @@ theorem rerank_exact (cos : Nat → Nat) (hits : List Hit) (limit : Nat)
   have ha : hits.all (·.vec.isSome) = true := List.all_eq_true.mpr h
   simp [rerank, ha, exactScan, Function.comp_def]
 
-/-- **The engine's scores never matter** (#18 review M3): when every hit carries
+/-- **The engine's scores never matter** (#18): when every hit carries
 its stored vector, two answers that differ only in the engine's (approximate,
 quantized) scores re-rank the same. -/
 theorem rerank_ignores_engine (cos : Nat → Nat) (hits : List Hit) (f : Hit → Nat) (limit : Nat)
@@ -2913,7 +2914,7 @@ example : Matches (run Pt atLoad (steps .repStep (2 * 3 + 9))) :=
     (by intro w e h; simp [show atLoad.mark = none by decide] at h)
     (by decide) (by decide)).1
 
-/-- `repairs_run_one_at_a_time_per_session` and #18 review F4
+/-- `repairs_run_one_at_a_time_per_session` and the #18 test
 (`a_repair_overtaken_by_a_flush_is_not_trusted_until_the_rerun`): a flush that
 commits while a repair runs is not in its snapshot; the pass writes its own
 epoch but does not mark the session in sync, a read falls back, and the rerun
@@ -2929,7 +2930,7 @@ example : (run Pt overtaken (steps .repStep 30)).tier.sync = .inSync ∧
     markerEpoch (run Pt overtaken (steps .repStep 30)) = some 3 ∧
     docAt (run Pt overtaken (steps .repStep 30)) 1 5 = some (0, 50) := by decide
 
-/-- `a_repair_that_lost_its_lease_stops_writing` (#18 review F2): the holder's repair
+/-- `a_repair_that_lost_its_lease_stops_writing` (#18): the holder's repair
 lands its first chunk, the lease lapses and another process erases the
 session; the repair's next fence check stops it. One write landed, no marker,
 stale, and the lost lease is not counted as an index failure. -/
@@ -2941,7 +2942,7 @@ example : lostLease.log.filter (· = .repair 1) = [.repair 1] ∧ lostLease.mark
     lostLease.tier.sync = .stale ∧ lostLease.tier.failures = 1 ∧ lostLease.tier.held = none ∧
     lostLease.rep = .idle := by decide
 
-/-- `erase_stops_this_stores_repair_before_it_sweeps` (#18 review F6): an erase through
+/-- `erase_stops_this_stores_repair_before_it_sweeps` (#18): an erase through
 this store fences the repair, waits for it, then sweeps: nothing of the
 session is left and the state is gone. -/
 def erasedHere : St :=
@@ -2961,7 +2962,7 @@ def retaken : St := run Pt seeded [.override, .refresh]
 example : retaken.d.lease = 2 ∧ retaken.tier.held = none ∧ retaken.wtok = some 1 ∧
     (run Pt retaken [.write [.upsert 4 (some (0, 40))]]).d = retaken.d := by decide
 
-/-- `a_marker_ahead_of_the_loaded_snapshot_is_rechecked_not_repaired` (#18 review M4): a
+/-- `a_marker_ahead_of_the_loaded_snapshot_is_rechecked_not_repaired` (#18): a
 load that read e1 while the holder's own flush committed and mirrored e2 sees
 the marker ahead, re-checks against a fresh load, and is in sync without a
 repair. -/
@@ -2970,7 +2971,7 @@ example :
       [.loadEnd])
     s.tier.sync = .inSync ∧ s.rep = .idle ∧ s.tier.repairing = false := by decide
 
-/-- `an_unleased_flush_is_not_mirrored_and_the_next_holder_repairs` (#18 review L4). -/
+/-- `an_unleased_flush_is_not_mirrored_and_the_next_holder_repairs` (#18). -/
 example :
     let s := run Pt {} [.writeUnleased seed]
     s.tier.sync = .stale ∧ s.log = [] ∧
@@ -3205,7 +3206,7 @@ theorem mirror_lands_after_erase :
     s.d.erased = true ∧ docAt s 1 4 = some (0, 40) ∧ markerEpoch s = some 2 ∧
       s.log.take 2 = [.mirror 1, .mirror 1] := by decide
 
-/-- The repair in the same position writes nothing (#18 review F2): its fence reads the
+/-- The repair in the same position writes nothing (#18): its fence reads the
 durable row. -/
 example :
     let s := run Pt outage ([.write [.upsert 4 (some (0, 40))]] ++ steps .repStep 4 ++
@@ -3213,7 +3214,7 @@ example :
     s.log.filter (· matches .repair _) = [] ∧ s.mark = none := by decide
 
 /-- **A repair can reconcile from the snapshot it loaded before re-checking an
-ahead marker** (`repair_once`). #18 review M4 says a marker ahead of a load is re-checked
+ahead marker** (`repair_once`). #18 says a marker ahead of a load is re-checked
 against a fresh load and never repaired from; but when the fresh re-check
 finds the marker *behind* (another flush committed in between), `repair_once`
 reconciles from the first, older snapshot. The holder loads while its own e2
@@ -3221,7 +3222,7 @@ mirror is in flight (marker behind: a repair is queued while the session is
 still in sync), e2's mirror lands, the repair loads e2, e3 (deleting node 2)
 commits and mirrors, e4 commits; the repair's check finds the marker (e3)
 ahead of e2, the re-check finds it behind e4, and the pass re-indexes node 2
-and rewinds the marker to e2. The #18 review F4 guard sends it round again, which
+and rewinds the marker to e2. The overtaken-repair guard (#18) sends it round again, which
 repairs it: for the holder, reads fall back meanwhile; another process's
 reader in sync (`reader_never_rechecks`) serves the deleted node. -/
 def rewound : St :=

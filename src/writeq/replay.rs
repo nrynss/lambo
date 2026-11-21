@@ -508,7 +508,7 @@ impl WritePipeline {
                             summary.replacement,
                         )
                     }
-                    // #125 (Sonnet review): a vector-candidate lookup that
+                    // #125: a vector-candidate lookup that
                     // did not answer within its own budget. The embedder answered before it, so
                     // it is no evidence of a sick embedder and never counts
                     // toward that streak. Left durable, a lookup that is slow

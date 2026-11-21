@@ -80,7 +80,7 @@ enum Commands {
         /// DANGEROUS: attach despite a same-width stored/configured model-id mismatch.
         #[arg(long)]
         allow_embedding_mismatch: bool,
-        /// I1 — append one JSON line per MCP tool call to this path
+        /// Append one JSON line per MCP tool call to this path
         /// (append-only JSONL, created if absent). Off by default.
         ///
         /// Never affects a tool call: the write is buffered onto a dedicated
@@ -93,7 +93,7 @@ enum Commands {
         /// repo (`~/lambo-dogfood/`), export only through the curated path.
         #[arg(long, value_name = "PATH")]
         ledger: Option<std::path::PathBuf>,
-        /// I2 — also append a `stats` heartbeat line to the ledger every N
+        /// Also append a `stats` heartbeat line to the ledger every N
         /// seconds: the `lambo_stats` payload plus process uptime and the
         /// binary's version and git sha. Requires --ledger. Off by default.
         #[arg(long, value_name = "SECS")]
@@ -565,7 +565,7 @@ enum Commands {
         #[arg(long)]
         allow_embedding_mismatch: bool,
     },
-    /// Migrate a session to the configured embedder: re-embed EVERY concept into the live space and swap the session's contract atomically (K2).
+    /// Migrate a session to the configured embedder: re-embed EVERY concept into the live space and swap the session's contract atomically.
     ///
     /// Run with the NEW embedder configured (e.g. LAMBO_EMBEDDER=candle) after
     /// stopping the serve process that holds the session. Every concept is
@@ -1098,7 +1098,7 @@ enum Resolved {
         /// The resolved `store.dsn` (file overlaid with the kind's DSN
         /// environment variable). `provision`'s Cockroach arm hands it to
         /// `scripts/provision.sh` so the config file, not the ambient
-        /// environment, names the cluster that receives the DDL (E2E-1).
+        /// environment, names the cluster that receives the DDL.
         dsn: Option<String>,
         /// The promotion policy `lambo.toml` and `LAMBO_PROMOTION_POLICY`
         /// select, which `inspect` explains the focus's next canonization

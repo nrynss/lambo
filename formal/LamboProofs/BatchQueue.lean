@@ -90,7 +90,7 @@ the call failing if any row fails, every row one width (`Uniform`).
   `takePrioritized_perm`: nothing beyond the cap is lost.
   `lengthChunks_perm`: every text in exactly one chunk; `chunksOf_eq_lit`:
   the restated loop is the Rust's `last_mut` loop.
-* Isolation (#125, review M3). `forwardIsolated_rowwise`: each caller gets
+* Isolation (#125). `forwardIsolated_rowwise`: each caller gets
   what its text gets alone, whatever it was batched with;
   `forwardIsolated_device_down`: a failing device fails every caller
   `Unavailable` in two forwards; `forwardIsolated_width_mismatch`: one

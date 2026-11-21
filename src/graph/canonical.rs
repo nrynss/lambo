@@ -1,7 +1,7 @@
 //! Canonicalization pipeline — spec §7.1 steps 1–5.
 //!
 //! Steps, in order:
-//! 1. Normalize — Unicode **NFC** (adve-review GRAPH-9: composed and decomposed
+//! 1. Normalize — Unicode **NFC** (composed and decomposed
 //!    spellings of the same word must not become two concepts), split camelCase
 //!    boundaries, lowercase, split `[-_ ]` + whitespace, strip stopwords
 //!    (`STOPWORDS`, pinned to the fixture convention
@@ -204,16 +204,16 @@ fn split_camel_case(s: &str) -> String {
 
 /// Spec §7.1 steps 1–2 — normalize + stem.
 ///
-/// **Invisible codepoints stripped and Unicode NFC first** (adve-review
-/// GRAPH-9), then split camelCase boundaries on the original case, split on
-/// `-`, `_` and whitespace, lowercase, drop stopwords, stem with Snowball
+/// **Invisible codepoints stripped and Unicode NFC first**, then split
+/// camelCase boundaries on the original case, split on `-`, `_` and
+/// whitespace, lowercase, drop stopwords, stem with Snowball
 /// English (Porter2) except identifier tokens, and drop empty stems. The
 /// camelCase split comes before lowercasing, which would erase the boundary
 /// (module docs, ordering note). NO sort, NO synonym
 /// lookup, NO join (those are [`canonical_key`]'s job). Pure — no `Graph`
 /// dependency, so recall's keyword index can tokenize without a graph.
 ///
-/// ## Why NFC (GRAPH-9)
+/// ## Why NFC
 ///
 /// `"café"` composed (NFC, `é` = U+00E9) and decomposed (NFD, `e` + U+0301) are
 /// different byte strings and were therefore different canonical keys — so the
@@ -414,7 +414,7 @@ pub enum CanonicalizeResult {
 /// `Graph`). `Result` is part of the pinned contract; this step itself cannot
 /// fail — the hybrid step 6 is deliberately left to the caller.
 ///
-/// **Observations are never matched** (adve-review GRAPH-1): demoted
+/// **Observations are never matched**: demoted
 /// context-overflow records skip the match step per spec §7 demote semantics,
 /// so `derive`/`record_action` must not attach agent-declared content to an
 /// Observation — even when one carries the same canonical key (legal for
@@ -565,7 +565,8 @@ mod tests {
     }
 
     /// Like [`graph_with_concept`], but with an arbitrary JSON concept type —
-    /// GRAPH-1's regression needs an Observation-carrying graph.
+    /// the never-match-Observations regression needs an Observation-carrying
+    /// graph.
     fn graph_with_concept_typed(canonical_key: &str, concept_type: &str) -> Graph {
         let snap: GraphSnapshot = serde_json::from_value(serde_json::json!({
             "session_id": "test-session",
@@ -709,10 +710,10 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // GRAPH-9 — Unicode NFC
+    // Unicode NFC
     // ------------------------------------------------------------------
 
-    /// GRAPH-9: composed (NFC) and decomposed (NFD) spellings of the same word
+    /// Composed (NFC) and decomposed (NFD) spellings of the same word
     /// must produce the same canonical key — and therefore resolve to the same
     /// concept — instead of two concepts canonicalization can never merge.
     #[test]
@@ -934,7 +935,7 @@ mod tests {
         }
     }
 
-    /// GRAPH-9: pure ASCII is a fixed point of NFC, so no pinned key moves.
+    /// Pure ASCII is a fixed point of NFC, so no pinned key moves.
     #[test]
     fn ascii_canonical_keys_are_unchanged_by_nfc() {
         for input in [
@@ -957,7 +958,7 @@ mod tests {
     #[cfg(feature = "fixtures")]
     #[test]
     fn nfc_leaves_every_pinned_canonicalization_case_unchanged() {
-        // The frozen cases table is the contract (module docs); GRAPH-9 must be
+        // The frozen cases table is the contract (module docs); NFC must be
         // invisible to it. `canonicalization_cases` is ASCII throughout.
         let cases = crate::fixtures::load_canonicalization_cases().unwrap();
         let cases = cases.as_array().expect("cases table is a JSON array");
@@ -1027,7 +1028,7 @@ mod tests {
 
     #[test]
     fn canonicalize_never_matches_observations() {
-        // GRAPH-1: demote creates Observations that may legally carry the same
+        // Demote creates Observations that may legally carry the same
         // canonical key as agent-declared content (partial-UNIQUE errata).
         // The step-5 matcher must skip them — new agent content must never
         // attach to a context-overflow record (spec §7 demote semantics).

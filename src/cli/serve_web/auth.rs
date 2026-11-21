@@ -170,7 +170,7 @@ pub(super) fn portal_authority(
 /// Resolve the portal's configured read credentials from the process
 /// environment: every `[[web.credential]]`, then, with `[web]
 /// inherit_serve_credentials`, every `[[serve.credential]]` as a read grant
-/// with the same scope and no capability (design 4.1, Q5).
+/// with the same scope and no capability (design 4.1).
 ///
 /// "The same scope" is serve's: an inherited `"*"` covers what `"*"` covers
 /// on serve, the `[serve] sessions` of this `lambo.toml` plus every name
@@ -291,9 +291,9 @@ pub(super) fn resolve_auth_token_from(
 
 /// Fail closed when a non-loopback bind has no token.
 ///
-/// Mirrors `mcp::serve::authorize_bind` — the rule, not its J2 section: a
-/// reader takes no lease and binds no session endpoint, so the pre-lease
-/// ordering argument that section restates has no counterpart here.
+/// Mirrors `mcp::serve::authorize_bind` — the rule, not its lease-ordering
+/// notes: a reader takes no lease and binds no session endpoint, so the
+/// pre-lease ordering argument those notes restate has no counterpart here.
 /// serve-web is a *reader* — it never
 /// takes the writer lease, so exposure is read-only — but the whole session
 /// is still readable, so a token-less bind to the world is not a configuration
@@ -524,8 +524,7 @@ pub(super) fn authenticate(
 /// not already authenticate: every unscoped path, routed or not. It
 /// authenticates (the 401 a client of the unscoped routes has always seen,
 /// byte for byte, `Allow` on a non-`GET` route included) and then attaches
-/// the default session when the grant may read it (the aliases, design
-/// Q10).
+/// the default session when the grant may read it (the aliases).
 pub(super) async fn gate(
     axum::extract::State(state): axum::extract::State<Arc<AppState>>,
     mut req: axum::extract::Request,

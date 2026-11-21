@@ -232,7 +232,7 @@ async fn a_second_writer_sharing_a_store_is_refused_by_the_lease() {
     second.close().await.unwrap();
 }
 
-/// J2: `MemoryBuilder::endpoint` reaches the lease row, and its absence is
+/// `MemoryBuilder::endpoint` reaches the lease row, and its absence is
 /// the default. This is the holder half of the proxy path — the loser's read
 /// is only useful if the winner actually published where it listens.
 #[tokio::test]

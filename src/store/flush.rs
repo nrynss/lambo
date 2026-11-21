@@ -100,7 +100,7 @@
 //! [`Graph`]), so `POLL_QUANTUM` is the granularity of the early-flush
 //! trigger and of the depth observation.
 //!
-//! ## Shutdown (COH-6)
+//! ## Shutdown
 //!
 //! [`FlushTask::stop`] signals a graceful stop: the loop finishes its current
 //! cycle, returns its task-owned `pending` buffer to the front of the graph's
@@ -139,8 +139,8 @@ const POLL_QUANTUM: Duration = Duration::from_millis(100);
 /// degrades as designed. Mirrors `LOAD_SESSION_TIMEOUT` (load.rs) —
 /// same 30s value, same naming convention.
 ///
-/// `pub(crate)`: `Memory::close`'s hand-rolled final flush (COH-6 step 4) is
-/// one more attempt against the same store and bounds itself with the same
+/// `pub(crate)`: `Memory::close`'s hand-rolled final flush is one more
+/// attempt against the same store and bounds itself with the same
 /// constant — one value, one behaviour to reason about.
 pub(crate) const FLUSH_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Backoff base for flush retries; doubles per retry.
@@ -243,7 +243,7 @@ struct Shared {
     /// Dead-lettered-batch counter (deterministic constraint
     /// violations dropped after logging). Monotonic for the task's lifetime.
     dead_lettered: AtomicU64,
-    /// Graceful-stop channel (COH-6). [`FlushTask::stop`] latches a
+    /// Graceful-stop channel. [`FlushTask::stop`] latches a
     /// permit here; the loop's `biased;` `select!` polls it FIRST and, when it
     /// fires, re-appends `pending` to the front of the graph log and exits.
     stop: Arc<tokio::sync::Notify>,
@@ -415,8 +415,8 @@ impl FlushTask {
         self.shared.degraded.load(Ordering::Acquire)
     }
 
-    /// Ask the flush loop to stop gracefully (COH-6 — `Memory::close`'s
-    /// shutdown drain). Returns immediately; the task stops later.
+    /// Ask the flush loop to stop gracefully (`Memory::close`'s shutdown
+    /// drain). Returns immediately; the task stops later.
     ///
     /// This is a **signal, not a drain API**: the loop finishes its current
     /// `FlushLoop::cycle` (any in-flight flush and its retry/backoff run to
@@ -485,7 +485,7 @@ impl<F: Future> Future for CatchUnwindPoll<F> {
 /// itself (not its payload) as the trait object, breaking every downcast.
 /// `Box::as_ref` is the explicit deref that reaches the payload.
 ///
-/// `pub(crate)`: the daemon loop's panic containment (CONC-4) reports payloads
+/// `pub(crate)`: the daemon loop's panic containment reports payloads
 /// the same way, and one formatter means one behaviour to reason about.
 pub(crate) fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
     let payload: &(dyn std::any::Any + Send) = payload.as_ref();
@@ -599,8 +599,8 @@ impl FlushLoop {
                 self.stop_fenced();
                 break;
             }
-            // `biased;` is REQUIRED, and the stop branch must be FIRST
-            // (COH-6). An unbiased `select!` polls branches in a random start
+            // `biased;` is REQUIRED, and the stop branch must be FIRST.
+            // An unbiased `select!` polls branches in a random start
             // order, so a concurrently-ready `interval.tick()` could be polled
             // first, consume-and-drop the stored stop permit, and lose the stop
             // forever — `close()`'s `join_handle.await` would then hang. The
@@ -641,8 +641,8 @@ impl FlushLoop {
         );
     }
 
-    /// Hand the task-owned `pending` buffer back to the graph log on stop
-    /// (COH-6): everything in it was drained from the log but is not durable,
+    /// Hand the task-owned `pending` buffer back to the graph log on stop:
+    /// everything in it was drained from the log but is not durable,
     /// so it goes back to the FRONT (chronological order preserved) where
     /// `Memory::close`'s final `drain_log` can see and flush it.
     ///
@@ -3811,7 +3811,7 @@ mod tests {
         );
     }
 
-    /// #60 review T-2, the degrade site: a degraded session drops what it
+    /// #60, the degrade site: a degraded session drops what it
     /// drains, so those concepts never reach the store and must stay in the
     /// unflushed set even past a later successful stamp (the stand-in here
     /// for any later commit, such as a builder relabel's).
@@ -3858,7 +3858,7 @@ mod tests {
         }
     }
 
-    /// #60 review T-2, the fence site: a holder that lost its lease drops its
+    /// #60, the fence site: a holder that lost its lease drops its
     /// pending batch, so those concepts must stay in the unflushed set even
     /// past a later successful stamp.
     #[tokio::test(start_paused = true)]

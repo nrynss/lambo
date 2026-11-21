@@ -71,7 +71,7 @@ const _: () = assert!(
 pub const MEASURED_WORST_FLUSH_LAG_SECS: u64 = 227;
 
 /// Build-time invariant: a receipt must outlive the applied-but-not-durable
-/// window, or the crash window J3 widened is unauditable from the surface that
+/// window, or that crash window is unauditable from the surface that
 /// describes it.
 ///
 /// **This replaces a false guard**. The old one asserted
@@ -147,11 +147,10 @@ pub const MAX_RETAINED_RECEIPTS: usize = 4096;
 /// own I/O, every embed and vector lookup of its derive or `record_action`,
 /// runs under one [`HYBRID_IO_TIMEOUT`] deadline, and nothing after it awaits,
 /// so a job a worker has picked up settles, applied or failed, within that
-/// bound. On top of it sit the two drain budgets of the J3 reasoning
-/// (J3-R2R-5): a close's quiesce drains for one whole budget, and the second
-/// is slack for the worker to pick the job up. So a wait that runs out
-/// answers `pending` only when other writes were queued ahead in the same
-/// lane, and that answer is then the honest one.
+/// bound. On top of it sit two drain budgets: a close's quiesce drains for
+/// one whole budget, and the second is slack for the worker to pick the job
+/// up. So a wait that runs out answers `pending` only when other writes were
+/// queued ahead in the same lane, and that answer is then the honest one.
 ///
 /// It was 4 s, the two budgets alone. On the Metal rig a 3 to 4 concept
 /// derive's apply reached 4.6 s (p90 2 s) because each concept is embedded
@@ -201,8 +200,8 @@ const _: () = assert!(
 /// rather than in the proxy because this is the surface that creates the
 /// population.** A waiting `lambo_stats(receipt=…, wait_ms=…)` call is a
 /// long-lived in-flight request — there is no `lambo_receipt` tool, which is
-/// what this docstring named twice; the eighth tool is the deviation
-/// §J3 argues, and `lambo_stats` is the surface that shipped instead — so
+/// what this docstring named twice; the eighth tool was a proposed
+/// deviation, and `lambo_stats` is the surface that shipped instead — so
 /// through a proxy it occupies an entry in the pump's `inflight`
 /// list for the whole wait — and `answer_lost` writes one un-raced frame per
 /// in-flight id to a client that may not be reading. So the waiting surface,
@@ -282,14 +281,14 @@ pub const MAX_PIGGYBACK_RECEIPTS: usize = 8;
 /// It carries the issuing process's epoch, the issue time and a sequence
 /// number, and those three fields are what let a lookup answer *expired*,
 /// *restart-lost* and *never-issued* distinctly instead of collapsing all three
-/// into "unknown" (§J3: "expired must not read as unknown, and restart-lost
-/// must not either"). Nothing has to be remembered about an id after its
+/// into "unknown" (expired must not read as unknown, and restart-lost
+/// must not either). Nothing has to be remembered about an id after its
 /// outcome is discarded, because the id itself says when it was issued and by
 /// which process.
 ///
 /// It is **not a capability**: possession of an id does not authorise reading
 /// its outcome. The receipt store scopes every held receipt to the agent that
-/// created it (J1), and a lookup by a different agent is refused.
+/// created it, and a lookup by a different agent is refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ReceiptId {
     /// Random per-process value. A foreign epoch is what makes `restart_lost`
@@ -430,16 +429,16 @@ pub struct AppliedSummary {
     /// The **true** number created, which may exceed `created.len()` because
     /// the list is truncated at [`MAX_RECEIPT_IDS`]. Carried separately so a
     /// truncated list can never read as a short one, and because this is the
-    /// number I1's metric 2 counts.
+    /// number DOGFOOD metric 2 counts.
     pub created_count: usize,
     /// The true number matched, for the same reason.
     pub matched_count: usize,
     /// Hybrid semantic merges — `derive` only.
     ///
-    /// **This and the two fields below are I1's DOGFOOD metric 2 fact set,
-    /// relocated rather than dropped.** Before J3 they rode the ledger call
-    /// line, which J3's ack can no longer carry: at ack time the write has not
-    /// happened. Keeping them on the receipt means the metric-2 distinction
+    /// **This and the two fields below are the DOGFOOD metric 2 fact set,
+    /// relocated rather than dropped.** Before durable intents they rode the
+    /// ledger call line, which the ack can no longer carry: at ack time the
+    /// write has not happened. Keeping them on the receipt means the metric-2 distinction
     /// (`semantic_merged`, a similarity merge that adds no `Derives` edge,
     /// against `matched`, a re-derive that does) is still recoverable — from
     /// the receipt instead of from the line.
@@ -536,7 +535,7 @@ impl AppliedSummary {
 pub enum ReceiptAnswer {
     /// Admitted, not yet decided. Also what a timed-out wait answers *for a
     /// receipt this process holds* — a replay-owed id answers
-    /// [`ReceiptAnswer::PendingReplay`] instead (J3-R2R-5).
+    /// [`ReceiptAnswer::PendingReplay`] instead.
     Pending,
     /// Recorded as a durable intent and still owed: admitted by a
     /// **previous** process and not yet replayed, or admitted by this one and
@@ -596,7 +595,7 @@ pub enum ReceiptAnswer {
     ),
     /// Not applied before this session closed, and **not lost**: the validated
     /// job is recorded as a durable intent, and the next serve of this session
-    /// re-attempts it — idempotently, in submission order (J3 durable
+    /// re-attempts it — idempotently, in submission order (durable
     /// intents). Terminal *for this process*; the next process's answer for
     /// this id is `applied_after_restart` (or `failed`, if the replay is
     /// refused for the content, or `pending_replay` while it is still owed).
@@ -630,15 +629,15 @@ pub enum ReceiptAnswer {
     /// Well-formed, from this process's epoch, but past the highest sequence
     /// number this process has ever issued. Nobody issued it.
     NeverIssued,
-    /// Held, but by another agent. Receipts are per-agent scoped (J1).
+    /// Held, but by another agent. Receipts are per-agent scoped.
     Forbidden,
 }
 
 /// The model-facing form of a background write's failure.
 ///
-/// The synchronous path's rule, applied to the async path: the model gets a class and a pointer to
-/// the log, never the raw error, which can carry a store URL, a store file path
-/// or a driver message. This is the same sentence `mcp::server::tool_err`
+/// The synchronous path's rule, applied to the async path: the model gets a
+/// class and a pointer to the log, never the raw error, which can carry a
+/// store URL, a store file path or a driver message. This is the same sentence `mcp::server::tool_err`
 /// produces for the synchronous path, built from the same
 /// [`crate::surface::error::err_class`] so the two cannot drift.
 ///
@@ -675,7 +674,7 @@ impl ReceiptAnswer {
 
     /// A unique index per variant, with **no `_` arm** — the mechanical
     /// exhaustiveness that makes the "Twelve variants" docstring true by
-    /// construction (J3-R2R-4): a thirteenth variant is a compile error here
+    /// construction: a thirteenth variant is a compile error here
     /// before it can drift out of the taxonomy tests.
     pub fn ordinal(&self) -> usize {
         match self {

@@ -7,7 +7,7 @@
 //!    so a refusal has nothing to release;
 //! 2. acquire the single-writer lease (a held lease is returned as
 //!    [`Attach::Held`], data rather than an error); arm the serve's early
-//!    shutdown in the `Acquired` arm and nowhere else (J6);
+//!    shutdown in the `Acquired` arm and nowhere else;
 //! 3. the startup load and the Level B embedding-contract check, raced against
 //!    that early shutdown; any error from here releases the fresh lease;
 //! 4. spawn the daemon (its first events receiver subscribed before `spawn`),
@@ -51,9 +51,9 @@ use crate::store::GraphStore;
 use crate::types::{AgentId, EmbeddingContract, LamboError, MatchStrategy, SessionId, StoreError};
 use crate::writeq::{EmbedderCalibration, WriteCtx, WritePipeline};
 
-/// The shutdown pre-arm a serving process hands [`MemoryBuilder::build_attach`]
-/// (J6), as the builder needs it: armed at lease acquisition, and raced
-/// against the startup load.
+/// The shutdown pre-arm a serving process hands [`MemoryBuilder::build_attach`],
+/// as the builder needs it: armed at lease acquisition, and raced against
+/// the startup load.
 ///
 /// A trait so `memory` does not depend on the serving layer: `serve`
 /// implements it (`crate::mcp::serve::EarlyShutdown`), and a process hosting
@@ -69,9 +69,9 @@ pub(crate) trait AttachShutdown: Send + Sync {
     fn fired(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
 }
 
-/// What a session lease refusal tells the loser (J2).
+/// What a session lease refusal tells the loser.
 ///
-/// The refusal has always carried this information; before J2 it was formatted
+/// The refusal has always carried this information; it was once formatted
 /// into a string and the structure was thrown away, which is why a losing
 /// `serve` could only exit. `mcp::serve` needs the holder's *endpoint* to proxy
 /// to it, and the host inside `holder` to know whether that endpoint means
@@ -120,7 +120,7 @@ pub enum Attach {
 /// Everything else the session needs already has a `Config` knob, so pass a
 /// whole [`Config`] rather than looking for more setters. **No new knobs are
 /// introduced by this type.**
-/// `Clone` is deliberate and load-bearing (J2): `mcp::serve` retries the attach
+/// `Clone` is deliberate and load-bearing: `mcp::serve` retries the attach
 /// when the session's lease is held by a holder that turns out to be
 /// unreachable, and it must retry the *same* configuration — one store, one
 /// embedder, one contract, all behind `Arc`s, so a clone is cheap and does not
@@ -133,7 +133,7 @@ pub struct MemoryBuilder {
     pub(super) embedder: Option<Arc<dyn Embedder>>,
     pub(super) embedding: Option<EmbeddingContract>,
     pub(super) allow_embedding_mismatch: bool,
-    /// K2. Crate-internal attach mode for the re-embed migration: load the
+    /// Crate-internal attach mode for the re-embed migration: load the
     /// session WITHOUT the Level B contract check, because this caller is about
     /// to rewrite every vector into the live space atomically (see
     /// [`crate::graph::Graph::reembed_all`]). Set only by `lambo re-embed`;
@@ -152,15 +152,15 @@ pub struct MemoryBuilder {
     // Crate-private, and not a knob: see `MemoryBuilder::clock`.
     pub(super) clock: Option<Clock>,
     pub(super) endpoint: Option<String>,
-    /// J4. An optional call ledger this process appends its own conflict and
+    /// An optional call ledger this process appends its own conflict and
     /// write-intent **completion** lines to (pre-lease startup, lease refusals,
     /// proxying/degraded, and durable-intent completion — see
-    /// `dev-diary/lambo-for-mooshik/J-multi-client.md` §J4). `None` for every
+    /// `dev-diary/lambo-for-mooshik/J-multi-client.md`). `None` for every
     /// writer that is not a `serve` and for a `serve` run without `--ledger`.
     /// Set only by [`crate::mcp::serve()`]; every ordinary writer keeps the
     /// default.
     pub(super) ledger: Option<Arc<crate::ledger::Ledger>>,
-    /// J6. The shutdown pre-arm a `serve` process wants installed the instant
+    /// The shutdown pre-arm a `serve` process wants installed the instant
     /// this builder takes the single-writer lease, closing the window between
     /// the acquire and the arming at `holder_shutdown` in which a SIGTERM had
     /// the default disposition and killed the process with `close()` un-run.
@@ -229,7 +229,7 @@ impl MemoryBuilder {
         self
     }
 
-    /// Attach WITHOUT the Level B contract check (`pub(crate)`, K2).
+    /// Attach WITHOUT the Level B contract check (`pub(crate)`).
     ///
     /// A normal attach refuses a stored/live contract mismatch because two
     /// model spaces in one session is exactly the corruption Level B exists to
@@ -334,7 +334,7 @@ impl MemoryBuilder {
     }
 
     /// Where this writer can be reached, published into the lease row's
-    /// `endpoint` column when the lease is acquired (J2).
+    /// `endpoint` column when the lease is acquired.
     ///
     /// Set by [`crate::mcp::serve`](mod@crate::mcp::serve) and by nothing else. A `serve` process is
     /// the only writer another process can forward MCP tool calls to, so it is
@@ -347,14 +347,14 @@ impl MemoryBuilder {
         self
     }
 
-    /// Attach a call ledger (J4) for this serve's own conflict / completion
+    /// Attach a call ledger for this serve's own conflict / completion
     /// lines. `None` (the default) writes nothing.
     pub fn ledger(mut self, ledger: Option<Arc<crate::ledger::Ledger>>) -> Self {
         self.ledger = ledger;
         self
     }
 
-    /// Arm this handle the instant the single-writer lease is acquired (J6).
+    /// Arm this handle the instant the single-writer lease is acquired.
     ///
     /// Crate-private, and set by `crate::mcp::serve` alone. The handle
     /// arrives unarmed and is armed from exactly one place — the
@@ -432,20 +432,20 @@ impl MemoryBuilder {
     ///
     /// The daemon's first cycle *is* the spec §2.5 warm-up rescore, so
     /// [`Memory::events`]'s first receiver is subscribed **before** `spawn`
-    /// (CONC-3: `broadcast` delivers only what is sent after subscription, and
-    /// a resumed session publishes its whole restored condition set on that
+    /// (`broadcast` delivers only what is sent after subscription, and a
+    /// resumed session publishes its whole restored condition set on that
     /// first cycle).
     pub async fn build(self) -> Result<Memory, LamboError> {
         match self.build_attach().await? {
             Attach::Attached(mem) => Ok(*mem),
-            // The exact error this function returned before J2 — see `Attach`.
+            // The exact error this function has always returned — see `Attach`.
             Attach::Held(held) => Err(LamboError::Conflict(held.message)),
         }
     }
 
     /// [`MemoryBuilder::build`], reporting a lease refusal as data rather than
-    /// as an error (J2). See [`Attach`] for why this is a second method rather
-    /// than a change to `build`'s error type.
+    /// as an error. See [`Attach`] for why this is a second method rather than
+    /// a change to `build`'s error type.
     pub async fn build_attach(self) -> Result<Attach, LamboError> {
         let session = self.session.ok_or_else(|| {
             LamboError::Config("Memory::builder: .session(..) is required".into())
@@ -525,7 +525,7 @@ impl MemoryBuilder {
         // recovered by TTL, but a clean refusal must never look like a crash to
         // the next invocation.
         let lease_holder = match &self.endpoint {
-            // J2: reachability is published by the same acquire that takes the
+            // Reachability is published by the same acquire that takes the
             // lease, so a live row always names the current holder's address —
             // there is no window in which a refused racer can read a leased row
             // with no endpoint in it.
@@ -545,7 +545,7 @@ impl MemoryBuilder {
             // other token means the lease was lost and re-taken, and fences
             // the handle (#293).
             LeaseOutcome::Acquired(info) => {
-                // J6 — the pre-arm, HERE, the first statement after the lease
+                // The pre-arm, HERE, the first statement after the lease
                 // is ours. Everything from this point on holds something a
                 // signal must not be allowed to destroy: the lease itself, and
                 // shortly the write-behind tail. Before this, the whole span
@@ -579,7 +579,7 @@ impl MemoryBuilder {
             }
             LeaseOutcome::Held { current, age } => {
                 // Fail closed, naming the current holder and the lease row's
-                // facts. Reported as data (J2) so `mcp::serve` can proxy to
+                // facts. Reported as data so `mcp::serve` can proxy to
                 // the holder; `build` returns the same message as
                 // `LamboError::Conflict`. The row cannot say whether the
                 // holder is alive, so the message does not claim it is (#118).
@@ -639,7 +639,7 @@ impl MemoryBuilder {
             // `None` on a fresh session is not a mismatch — it is an unstamped
             // space, so stamp it.
             //
-            // K2: reembed_mode (the `lambo re-embed` migration) skips this
+            // reembed_mode (the `lambo re-embed` migration) skips this
             // entire check and loads the session AS-IS — old contract, old
             // vectors. That is safe precisely because that caller immediately
             // rewrites every concept vector into the live space and swaps the
@@ -671,7 +671,7 @@ impl MemoryBuilder {
                             "operator allowed an embedding contract mismatch; relabeled the session's \
                              existing vectors with the configured live contract"
                         );
-                        // E2E-1: the override relabel must be durable BEFORE the
+                        // The override relabel must be durable BEFORE the
                         // first write — the checked candidate read compares the
                         // *durable* contract against the expected one, so a
                         // write-behind relabel (flush at interval / close) would
@@ -683,7 +683,7 @@ impl MemoryBuilder {
                         // the close-time final flush; it stays an ordered durable
                         // mutation (later writes append after it in the log). A
                         // failed relabel flush refuses the attach: the writer
-                        // would otherwise hit the same E2E-1 refusal on its first
+                        // would otherwise hit the same refusal on its first
                         // write, and the startup-error path below releases the
                         // freshly acquired lease.
                         let relabel = graph.drain_log();
@@ -708,7 +708,7 @@ impl MemoryBuilder {
             // checked (step 2), so this is the first point at which the
             // weights are both needed and allowed: a lease loser returned
             // `Attach::Held` above, and a contract refusal returned before
-            // loading anything. Inside this future, so the J6 race below
+            // loading anything. Inside this future, so the shutdown race below
             // covers it and a signal mid-load releases the lease; ahead of
             // the write pipeline, so the calibration probe and the intent
             // replay never wait on it, and ahead of the return, so no serve
@@ -797,11 +797,11 @@ impl MemoryBuilder {
                 merge_threshold,
             ))
         };
-        // J6 — the one unbounded `await` under the pre-arm, and therefore the
-        // one place the pre-arm could have become the immunity a
-        // past ruling rejected. The startup load reads the whole durable session back; on a
-        // large session or a wedged store that is not quick, and a recorded
-        // signal that nobody acts on until it finishes is deafness with no
+        // The one unbounded `await` under the pre-arm, and therefore the
+        // one place the pre-arm could have become the immunity a past
+        // ruling rejected. The startup load reads the whole durable session
+        // back; on a large session or a wedged store that is not quick, and a
+        // recorded signal that nobody acts on until it finishes is deafness with no
         // bound at all — worse than the 20 seconds that ruling refused.
         //
         // So the load is RACED against the record. A signal here abandons it
@@ -882,7 +882,7 @@ impl MemoryBuilder {
         let daemon = Daemon::from_config(graph.clone(), &config)
             .with_index(index.clone())
             .with_access_ledger(accesses.clone());
-        // CONC-3: subscribe BEFORE spawn or the warm-up condition set is lost.
+        // Subscribe BEFORE spawn or the warm-up condition set is lost.
         let startup_events = daemon.events();
 
         let flush = FlushTask::new(
@@ -942,7 +942,7 @@ impl MemoryBuilder {
             dim = embedding.dim,
             "Memory session attached (daemon + flush + canonization running)"
         );
-        // J3's background write pipeline. Built here, with `Arc` clones of the
+        // The background write pipeline. Built here, with `Arc` clones of the
         // shared state its workers need and deliberately NOT a handle on the
         // `Memory` being constructed — see `WriteCtx`. `spawn` also starts the
         // calibration probe that measures this deployment's embedder, unless a
@@ -970,7 +970,7 @@ impl MemoryBuilder {
             self.calibration.as_ref(),
         ));
 
-        // J3 durable intents: replay whatever a previous process acked and
+        // Durable intents: replay whatever a previous process acked and
         // could not apply — one at a time, in admission order, concurrent with
         // (never ahead of) this session's own calls. Also seeds the
         // cross-restart receipt answers, so those ids answer

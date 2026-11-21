@@ -5,7 +5,7 @@
 //!
 //! Every serve runs through a registry. A one-session serve (stdio, or HTTP
 //! with one pinned session and nothing on demand) attaches its session
-//! through the startup election (`roles::resolve_role`, J2's proxy included)
+//! through the startup election (`roles::resolve_role`, the proxy included)
 //! and holds it in a registry of one under [`LeaseLossPolicy::ExitProcess`]:
 //! a lost lease ends the process exactly as it always has. A serve with more
 //! than one pinned session, or any credential that reaches past the pinned
@@ -421,7 +421,7 @@ pub(super) struct SessionRegistry {
     /// line sees them (the process tasks are spawned before the session
     /// parts, to keep the startup's log order).
     started: tokio::sync::watch::Sender<bool>,
-    /// The process's J6 pre-arm, which each close reads for its second-signal
+    /// The process's early-shutdown pre-arm, which each close reads for its second-signal
     /// escape and each attach's load races.
     early: EarlyShutdown,
     /// The pinned retry loop.
@@ -438,7 +438,7 @@ pub(super) struct SessionRegistry {
     /// session that is not attached runs against.
     store: Option<Arc<dyn crate::store::GraphStore>>,
     /// Set by a test to make the next on-demand attach panic right after
-    /// it is admitted (#32 PR 6 Sonnet review L-a).
+    /// it is admitted (#32 PR 6).
     #[cfg(test)]
     panic_after_admit: std::sync::atomic::AtomicBool,
 }
@@ -584,7 +584,7 @@ impl SessionRegistry {
     ///    and otherwise starts an attach, unless the serve does not attach on
     ///    demand (the uniform 404), is closing (503), or
     ///    already has `2 × max_attached` attaches waiting for their probe
-    ///    (503 `Retry-After`, Sonnet review L-b). The
+    ///    (503 `Retry-After`). The
     ///    attach (`attach_on_demand`) probes for the session before it
     ///    reserves a place or evicts anything (#32 PR 6); see
     ///    `on_demand` for the order.
@@ -680,8 +680,8 @@ impl SessionRegistry {
             }));
         }
         // An attach that has not probed takes no place, so the
-        // ones waiting for their probe are bounded on their own (Sonnet
-        // review L-b): a flood of distinct ids starts no task past the cap.
+        // ones waiting for their probe are bounded on their own: a flood of
+        // distinct ids starts no task past the cap.
         let unplaced = slots
             .values()
             .filter(|slot| matches!(slot, Slot::Attaching { placed: false, .. }))
@@ -1102,7 +1102,7 @@ impl SessionRegistry {
         self.slots.lock().insert(id.to_string(), slot);
     }
 
-    /// The process's J6 pre-arm, so a test can record shutdown signals on
+    /// The process's early-shutdown pre-arm, so a test can record shutdown signals on
     /// it (`EarlyShutdown::simulate_signal`). Gated like its reader, the
     /// registry tests.
     #[cfg(all(test, unix, feature = "store-memory", feature = "embed-fixture"))]
@@ -1121,8 +1121,8 @@ impl SessionRegistry {
     }
 
     /// Make the next on-demand attach panic right after its admission, as a
-    /// bug between `admit` and the flight's end would (#32 PR 6 Sonnet
-    /// review L-a). Gated like its reader, the registry tests.
+    /// bug between `admit` and the flight's end would (#32 PR 6). Gated like
+    /// its reader, the registry tests.
     #[cfg(all(test, unix, feature = "store-memory", feature = "embed-fixture"))]
     pub(super) fn panic_after_next_admit(&self) {
         self.panic_after_admit
@@ -1180,7 +1180,7 @@ impl SessionRegistry {
     }
 
     /// Take the lease for pinned session `id` through the template builder:
-    /// configuration validation, preflight, the acquire (which arms the J6
+    /// configuration validation, preflight, the acquire (which arms the early-shutdown
     /// pre-arm on the first one), the load raced against it, the contract
     /// check and the background tasks — `build_attach`, unchanged.
     pub(super) async fn acquire(&self, id: &str) -> Result<Acquired, LamboError> {
@@ -1332,7 +1332,7 @@ impl SessionRegistry {
     }
 
     /// A pinned session whose lease another writer holds: serve the others
-    /// and try it again in [`PINNED_RETRY`]. Logged, and (J4) recorded from
+    /// and try it again in [`PINNED_RETRY`]. Logged, and recorded from
     /// the loser's side, once.
     pub(super) async fn mark_held(&self, id: &str, held: &LeaseHeldElsewhere) {
         if let Some(attacher) = &self.attacher {
@@ -1457,7 +1457,7 @@ impl SessionRegistry {
         );
         // The whole attach observes the shutdown (#32): the
         // preflight, the acquire and the store round trips are not raced
-        // against J6's pre-arm, and a serve whose sessions were all held at
+        // against the early-shutdown pre-arm, and a serve whose sessions were all held at
         // startup has not armed it at all. Abandoned, it may hold the lease
         // it took, so that is released before the shutdown's close set is
         // taken; the attach permit is held until then.
@@ -1528,9 +1528,8 @@ impl SessionRegistry {
             // A shutdown signal that lands during the attach's load makes it
             // fail with a configuration error ("shutdown signal arrived"),
             // which is not the session's fault: the process is exiting, so
-            // leave the slot as it was and say nothing alarming (#32 PR 4
-            // Sonnet review L-A). `build_attach`'s error path has already
-            // released any lease it took.
+            // leave the slot as it was and say nothing alarming (#32 PR 4).
+            // `build_attach`'s error path has already released any lease it took.
             Err(e) if self.is_closing() || self.shutdown_signalled().await => {
                 tracing::debug!(
                     session = %id,

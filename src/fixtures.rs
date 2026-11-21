@@ -294,7 +294,7 @@ mod tests {
                 Mutation::DeleteNode { .. } => "delete_node",
                 Mutation::DeleteEdge { .. } => "delete_edge",
                 Mutation::CanonizationTransition { .. } => "canonization_transition",
-                // XP-8: the committed fixture predates this kind and is not
+                // The committed fixture predates this kind and is not
                 // regenerated (the batch's five-kind coverage is its contract);
                 // a future fixture carrying one would count here.
                 Mutation::SetRootGoal { .. } => "set_root_goal",
