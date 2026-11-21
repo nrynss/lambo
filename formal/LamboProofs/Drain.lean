@@ -40,6 +40,11 @@ write and its settle" rule make them; an aborted worker is a job that was not
 run. A flush carries whole batches (one lock hold each), so a crash leaves a
 prefix of the batch log durable.
 
+Rows and consumes are keyed by the receipt id, modelled as its (epoch,
+sequence) pair (`Job.key`), as the adapters key them by the full receipt
+string: a backlog may hold several crashed processes' intents, and every
+process's sequence starts at 1.
+
 ## Results
 
 * `drain_fifo`, `drain_extends_taken`: a lane drained to completion has taken
@@ -51,19 +56,26 @@ prefix of the batch log durable.
 * `workerStep_atomic`, `crash_never_reapplies`: a write in the durable log has
   its consume beside it, so no replay after a crash applies it again
   (`Graph::consume_write_intent`: "the double-apply this design excludes").
+  Proved for logs shaped "all puts, then worker batches": the Rust relies on
+  the admission lock order (graph write, then lanes) to put each job's put
+  before its consume, and the model takes that shape as given. A crash in the
+  middle of a replay is not proved (the replay's own batches have the same
+  write-with-consume shape, `loop_facts`).
 * `close_settles_all`, `close_answer`, `shutdown_no_silent_loss`: after
   `close()` every receipt is settled, and each admitted write is drained,
   `intent_durable` and owed by the next replay, or `close_unflushed`
   ("deferred, not lost", `quiesce`). `retry_upgrades`: the one
   settled-to-settled change. `drop_settles_nothing`: the `Drop` path, the
-  documented exception.
+  documented exception; it is definitional (`abortAllSync` is the identity on
+  receipts) and is there to name the gap, not to prove anything about it.
 * `replay_applied_pending`, `replay_drained`, `replay_idempotent`,
   `replay_complete_idem`: replay applies only unconsumed rows; replaying a
   fully drained queue changes nothing; a replayed write is never applied by a
   later replay.
-* `replay_order`, `load_seq_order`, `replay_seq_order`: one serve applies in
-  load order, which is sequence (admission) order while the clock does not
-  step back.
+* `replay_order`, `load_seq_order`, `replay_seq_order`,
+  `load_epoch_seq_order`, `replay_epoch_seq_order`: one serve applies in load
+  order, which within one process is sequence (admission) order as long as no
+  later admission carries an earlier issue time.
 * `inputFact_goes_on`, `replayStep_cycle`, `replayStep_decode`: a refusal
   that is a fact about the intent's input (`Embed`, `ImageIdTaken`,
   `Reference`, a cycle refusal, an undecodable payload) settles `failed` and
@@ -77,18 +89,22 @@ prefix of the batch log durable.
   `a_write_reached_during_an_in_session_embedder_outage_is_not_consumed`).
 
 What the model shows about the Rust (theorems in the last section):
-`transient_skip_reorders` (a transient skip breaks the per-agent replay
-order), `clock_step_reorders` (the load order trusts the wall clock),
-`outage_failed_then_applied` (a `failed` receipt later answers
-`applied_after_restart`), `store_error_blocks_backlog` (a non-cycle store
-error, such as the "vanished interaction" the doc says is consumed, stops the
-replay on every serve), `bad_id_never_settled`.
+`transient_skip_reorders` and `outage_then_replay_reorders` (a transient
+embed answer breaks the per-agent order across serves),
+`clock_step_reorders` (the load order trusts the wall clock),
+`outage_failed_then_applied` (a doc fix: `ReceiptAnswer::Failed` says the
+write did not happen, and after an outage it later does),
+`store_error_blocks_backlog` (a graph-dependent refusal raised as a plain
+`Invariant` stops the replay on every serve), `bad_id_never_settled`.
 
 Not modelled: concurrency and the cancellation-safety custody of handles
 (`WorkerCustody`, `ReplayCustody`); `stop_replay` running before the quiesce;
 admission and its caps (`Receipts.lean`); receipt retention, eviction, the
 undelivered queue, delivery destinations and the live entry a replay inserts;
-the stale consumed-row skip at seeding; counters, the ledger and logging; the
+the stale consumed-row skip at seeding; the adapters' lazy purge of consumed
+rows older than the retention window (sqlite `write_rows.rs`, inside the
+consume; it deletes only consumed rows, so it never touches a pending one);
+counters, the ledger and logging; the
 lease fence at the flush (a fenced flush is refused at the store, so a
 consume appended after a lost lease never lands); `calibration.rs` (drain
 does not depend on it).
@@ -106,13 +122,24 @@ open Lambo.Receipts (Answer Entry settle Lane)
 read: the receipt's per-process sequence number (`ReceiptId::seq`, stored as
 `WriteIntent::lane_seq`), the agent whose lane it is on, the receipt's issue
 time in Unix milliseconds (`issued_ms`, from the pipeline's wall clock), and
-whether it is an image derive (`JobPayload::DeriveImage`). -/
+whether it is an image derive (`JobPayload::DeriveImage`), and the random
+epoch of the process that issued it (`ReceiptId::epoch`). -/
 structure Job where
   rid : Nat
   agent : Nat
   ms : Int
   image : Bool
+  epoch : Nat
   deriving DecidableEq, Repr
+
+/-- What identifies a write across processes: the receipt id, here its
+(epoch, sequence) pair. The adapters key intent rows by the receipt string
+`lwr1.{epoch}.{ms}.{seq}` (`WHERE session_id = ? AND receipt = ?`), and every
+process's sequence starts at 1, so the sequence alone is not a key once a
+backlog holds two crashed processes' intents. -/
+abbrev Key := Nat × Nat
+
+def Job.key (j : Job) : Key := (j.epoch, j.rid)
 
 /-- The classes of `LamboError` that `WriteCtx::run` can fail with, as the
 worker and the replay tell them apart. `cycle` is a `StoreError::Invariant`
@@ -169,8 +196,8 @@ applied write (one `write` stands for all of them), and
 `ConsumeWriteIntent`. -/
 inductive Mut where
   | put (j : Job)
-  | write (rid : Nat)
-  | consume (rid : Nat) (t : Tag)
+  | write (k : Key)
+  | consume (k : Key) (t : Tag)
   deriving DecidableEq, Repr
 
 /-- What is appended under one hold of the graph write lock. The flush drain
@@ -193,30 +220,30 @@ def workerStep (fenced : Bool) (j : Job) (r : RunResult) : Answer × Batch :=
   if fenced then (.failed, [])
   else
     match r with
-    | .ok => (.applied, [.write j.rid, .consume j.rid .applied])
-    | .err e => if e.transient then (.failed, []) else (.failed, [.consume j.rid .failed])
+    | .ok => (.applied, [.write j.key, .consume j.key .applied])
+    | .err e => if e.transient then (.failed, []) else (.failed, [.consume j.key .failed])
 
-/-- The receipt store's entries, keyed by sequence number. -/
-abbrev RStore := List (Nat × Entry)
+/-- The receipt store's entries, keyed by receipt id (`Job.key`). -/
+abbrev RStore := List (Key × Entry)
 
 /-- The first entry for `r`. -/
-def lookup : RStore → Nat → Option Entry
+def lookup : RStore → Key → Option Entry
   | [], _ => none
   | p :: s, r => if p.1 = r then some p.2 else lookup s r
 
 /-- Apply `f` to the entries for `r`. -/
-def update (s : RStore) (r : Nat) (f : Entry → Entry) : RStore :=
+def update (s : RStore) (r : Key) (f : Entry → Entry) : RStore :=
   s.map (fun p => if p.1 = r then (p.1, f p.2) else p)
 
 /-- `settle_one` (`receipts.rs`): `Entry::settle` on the job's entry; a
 missing entry is skipped. The undelivered queue and the retention sweep are
 not modelled. -/
-def settleOne (s : RStore) (r : Nat) (a : Answer) (now : Int) : RStore :=
+def settleOne (s : RStore) (r : Key) (a : Answer) (now : Int) : RStore :=
   update s r (fun e => (settle e a now).1)
 
 /-- What admission leaves behind for the jobs it accepted: a `Pending` entry
 each, and a `PutWriteIntent` each, on its own hold. -/
-def admitStore (js : List Job) : RStore := js.map (fun j => (j.rid, ⟨.pending, none⟩))
+def admitStore (js : List Job) : RStore := js.map (fun j => (j.key, ⟨.pending, none⟩))
 
 def admitLog (js : List Job) : List Batch := js.map (fun j => [.put j])
 
@@ -228,7 +255,7 @@ def work (fence : Job → Bool) (out : Job → RunResult) (now : Int) :
   | s, [] => (s, [])
   | s, j :: js =>
     let r := workerStep (fence j) j (out j)
-    let rest := work fence out now (settleOne s j.rid r.1 now) js
+    let rest := work fence out now (settleOne s j.key r.1 now) js
     (rest.1, r.2 :: rest.2)
 
 /-- Drain a lane to completion: pop until the queue is empty. -/
@@ -259,11 +286,11 @@ def deferEntry (flush : CloseFlush) (now : Int) (e : Entry) : Entry :=
 
 /-- The ids `abort_workers` sets aside: every receipt still unsettled once
 the workers are aborted and joined. -/
-def pendingIds (s : RStore) : List Nat :=
+def pendingIds (s : RStore) : List Key :=
   (s.filter (fun p => !p.2.answer.isSettled)).map (·.1)
 
 /-- `settle_deferred` over the set-aside ids. -/
-def settleDeferred (flush : CloseFlush) (now : Int) (ids : List Nat) (s : RStore) : RStore :=
+def settleDeferred (flush : CloseFlush) (now : Int) (ids : List Key) (s : RStore) : RStore :=
   ids.foldl (fun s r => update s r (deferEntry flush now)) s
 
 /-- `quiesce` then the final flush then `settle_deferred`. `done` is what the
@@ -296,7 +323,7 @@ graph writes do not touch the table. -/
 def applyMut (acc : List Intent) : Mut → List Intent
   | .put j => acc ++ [⟨j, none⟩]
   | .write _ => acc
-  | .consume r t => acc.map (fun i => if i.job.rid = r then { i with outcome := some t } else i)
+  | .consume r t => acc.map (fun i => if i.job.key = r then { i with outcome := some t } else i)
 
 /-- The rows a flushed mutation sequence leaves. -/
 def intentsOf (ms : List Mut) : List Intent := ms.foldl applyMut []
@@ -380,7 +407,7 @@ def replayStep (image : Bool) (rr : RR) (s : Streaks) : Step × Streaks :=
     | .imageIdTaken => (.failed, { s with transient := 0 })
     | .reference => (.failed, s)
     | .cycle => (.failed, s)
-    -- #22 review L4: an image derive this configuration cannot apply.
+    -- #22: an image derive this configuration cannot apply.
     | .config => (.stop (if image then .imageConfig else .other), s)
     -- "Anything else (store/lease/config)".
     | .store => (.stop .other, s)
@@ -392,7 +419,7 @@ def replayStep (image : Bool) (rr : RR) (s : Streaks) : Step × Streaks :=
 the jobs it applied and settled failed, and the block reason if it stopped
 before the end of the backlog. -/
 structure ROut where
-  answers : List (Nat × Answer)
+  answers : List (Key × Answer)
   log : List Batch
   applied : List Job
   failed : List Job
@@ -413,14 +440,14 @@ def loop (rout : Job → RR) : Streaks → List Intent → ROut
     | (.applied, s') =>
       let o := loop rout s' rest
       { o with
-        answers := (i.job.rid, .appliedAfterRestart) :: o.answers
-        log := [.write i.job.rid, .consume i.job.rid .appliedAfterRestart] :: o.log
+        answers := (i.job.key, .appliedAfterRestart) :: o.answers
+        log := [.write i.job.key, .consume i.job.key .appliedAfterRestart] :: o.log
         applied := i.job :: o.applied }
     | (.failed, s') =>
       let o := loop rout s' rest
       { o with
-        answers := (i.job.rid, .failed) :: o.answers
-        log := [.consume i.job.rid .failed] :: o.log
+        answers := (i.job.key, .failed) :: o.answers
+        log := [.consume i.job.key .failed] :: o.log
         failed := i.job :: o.failed }
     | (.skip, s') => loop rout s' rest
     | (.stop b, _) => { ROut.empty with block := some b }
@@ -443,11 +470,11 @@ def seedAnswer (i : Intent) : Answer :=
   | some .failed => .failed
   | some _ => .appliedAfterRestart
 
-def seed (intents : List Intent) : List (Nat × Answer) :=
-  intents.map (fun i => (i.job.rid, seedAnswer i))
+def seed (intents : List Intent) : List (Key × Answer) :=
+  intents.map (fun i => (i.job.key, seedAnswer i))
 
 /-- The restart map after a list of `insert`s: the last insert wins. -/
-def lookupLast (m : List (Nat × Answer)) (r : Nat) : Option Answer :=
+def lookupLast (m : List (Key × Answer)) (r : Key) : Option Answer :=
   (m.reverse.find? (fun p => p.1 = r)).map (·.2)
 
 /-- The rows after the replay's own consumes have landed. -/
@@ -456,11 +483,11 @@ def applyLog (intents : List Intent) (log : List Batch) : List Intent :=
 
 /-! ## The receipt store -/
 
-theorem update_cons (k : Nat) (e : Entry) (s : RStore) (r : Nat) (f : Entry → Entry) :
+theorem update_cons (k : Key) (e : Entry) (s : RStore) (r : Key) (f : Entry → Entry) :
     update ((k, e) :: s) r f = (if k = r then (k, f e) else (k, e)) :: update s r f := by
   simp only [update, List.map_cons]
 
-theorem lookup_update (s : RStore) (r q : Nat) (f : Entry → Entry) :
+theorem lookup_update (s : RStore) (r q : Key) (f : Entry → Entry) :
     lookup (update s r f) q = if q = r then (lookup s q).map f else lookup s q := by
   induction s with
   | nil => simp [lookup, update]
@@ -477,11 +504,11 @@ theorem lookup_update (s : RStore) (r q : Nat) (f : Entry → Entry) :
       · subst hkq; simp [lookup, hkr]
       · simp [lookup, hkr, hkq, ih]
 
-theorem lookup_update_ne (s : RStore) {r q : Nat} (f : Entry → Entry) (h : q ≠ r) :
+theorem lookup_update_ne (s : RStore) {r q : Key} (f : Entry → Entry) (h : q ≠ r) :
     lookup (update s r f) q = lookup s q := by
   rw [lookup_update, ite_eq_right h]
 
-theorem mem_update {s : RStore} {r : Nat} {f : Entry → Entry} {p : Nat × Entry}
+theorem mem_update {s : RStore} {r : Key} {f : Entry → Entry} {p : Key × Entry}
     (hp : p ∈ update s r f) :
     ∃ q ∈ s, p = (if q.1 = r then (q.1, f q.2) else q) := by
   unfold update at hp
@@ -490,12 +517,12 @@ theorem mem_update {s : RStore} {r : Nat} {f : Entry → Entry} {p : Nat × Entr
 
 /-- Admission's entries are all `Pending`. -/
 theorem lookup_admit {js : List Job} {j : Job} (hj : j ∈ js) :
-    ∃ e, lookup (admitStore js) j.rid = some e ∧ e.answer = .pending := by
+    ∃ e, lookup (admitStore js) j.key = some e ∧ e.answer = .pending := by
   induction js with
   | nil => simp at hj
   | cons k js ih =>
-    show ∃ e, lookup ((k.rid, ⟨.pending, none⟩) :: admitStore js) j.rid = some e ∧ _
-    by_cases hk : k.rid = j.rid
+    show ∃ e, lookup ((k.key, ⟨.pending, none⟩) :: admitStore js) j.key = some e ∧ _
+    by_cases hk : k.key = j.key
     · exact ⟨⟨.pending, none⟩, by simp [lookup, hk], rfl⟩
     · have hj' : j ∈ js := by
         cases List.mem_cons.mp hj with
@@ -529,8 +556,8 @@ theorem workerStep_answer (f : Bool) (j : Job) (r : RunResult) :
     | err e => cases e <;> exact Or.inr rfl
 
 /-- A worker batch mentions only its own job. -/
-theorem workerStep_rids {f : Bool} {j : Job} {r : RunResult} {m : Mut}
-    (hm : m ∈ (workerStep f j r).2) : m = .write j.rid ∨ ∃ t, m = .consume j.rid t := by
+theorem workerStep_keys {f : Bool} {j : Job} {r : RunResult} {m : Mut}
+    (hm : m ∈ (workerStep f j r).2) : m = .write j.key ∨ ∃ t, m = .consume j.key t := by
   unfold workerStep at hm
   cases f with
   | true => simp at hm
@@ -545,7 +572,7 @@ theorem workerStep_rids {f : Bool} {j : Job} {r : RunResult} {m : Mut}
 
 /-- **The commit carries its consume.** A worker batch that writes also
 consumes the intent as `applied`, in the same batch, so the same flush. -/
-theorem workerStep_atomic {f : Bool} {j : Job} {r : RunResult} {q : Nat}
+theorem workerStep_atomic {f : Bool} {j : Job} {r : RunResult} {q : Key}
     (hm : Mut.write q ∈ (workerStep f j r).2) : Mut.consume q .applied ∈ (workerStep f j r).2 := by
   unfold workerStep at hm ⊢
   cases f with
@@ -573,24 +600,24 @@ theorem work_log (fence : Job → Bool) (out : Job → RunResult) (now : Int) :
 
 /-- The worker leaves the entries of other jobs alone. -/
 theorem work_lookup_other (fence : Job → Bool) (out : Job → RunResult) (now : Int) :
-    ∀ (js : List Job) (s : RStore) (q : Nat), q ∉ js.map (·.rid) →
+    ∀ (js : List Job) (s : RStore) (q : Key), q ∉ js.map (·.key) →
       lookup (work fence out now s js).1 q = lookup s q := by
   intro js
   induction js with
   | nil => intro s q _; rfl
   | cons j js ih =>
     intro s q hq
-    have hne : q ≠ j.rid := fun h => hq (by simp [h])
-    have hq' : q ∉ js.map (·.rid) := fun h => hq (List.mem_cons_of_mem _ h)
-    show lookup (work fence out now (settleOne s j.rid _ now) js).1 q = _
+    have hne : q ≠ j.key := fun h => hq (by simp [h])
+    have hq' : q ∉ js.map (·.key) := fun h => hq (List.mem_cons_of_mem _ h)
+    show lookup (work fence out now (settleOne s j.key _ now) js).1 q = _
     rw [ih _ q hq']
     exact lookup_update_ne s _ hne
 
 /-- Each job's receipt ends with the worker's answer for it, settled once. -/
 theorem work_lookup (fence : Job → Bool) (out : Job → RunResult) (now : Int) :
-    ∀ (js : List Job) (s : RStore) (j : Job), (js.map (·.rid)).Nodup → j ∈ js →
-      (∃ e, lookup s j.rid = some e ∧ e.answer.isSettled = false) →
-      (lookup (work fence out now s js).1 j.rid).map (·.answer) =
+    ∀ (js : List Job) (s : RStore) (j : Job), (js.map (·.key)).Nodup → j ∈ js →
+      (∃ e, lookup s j.key = some e ∧ e.answer.isSettled = false) →
+      (lookup (work fence out now s js).1 j.key).map (·.answer) =
         some (workerStep (fence j) j (out j)).1 := by
   intro js
   induction js with
@@ -598,18 +625,18 @@ theorem work_lookup (fence : Job → Bool) (out : Job → RunResult) (now : Int)
   | cons k js ih =>
     intro s j hnd hj he
     rw [List.map_cons, List.nodup_cons] at hnd
-    show (lookup (work fence out now (settleOne s k.rid _ now) js).1 j.rid).map (·.answer) = _
+    show (lookup (work fence out now (settleOne s k.key _ now) js).1 j.key).map (·.answer) = _
     cases List.mem_cons.mp hj with
     | inl h =>
       subst h
-      rw [work_lookup_other fence out now js _ j.rid hnd.1]
+      rw [work_lookup_other fence out now js _ j.key hnd.1]
       obtain ⟨e, hl, hu⟩ := he
       unfold settleOne
       rw [lookup_update, ite_eq_left rfl, hl]
       have hs : ¬ e.answer.isSettled = true := by rw [hu]; decide
       simp [Lambo.Receipts.settle_unsettled e _ now hs]
     | inr h =>
-      have hne : j.rid ≠ k.rid := fun hr => hnd.1 (hr ▸ List.mem_map_of_mem h)
+      have hne : j.key ≠ k.key := fun hr => hnd.1 (hr ▸ List.mem_map_of_mem h)
       apply ih _ j hnd.2 h
       unfold settleOne
       rw [lookup_update_ne s _ hne]
@@ -668,10 +695,10 @@ submitted with `workerStep`'s answer (`applied` or `failed`), and appends one
 batch per job. -/
 theorem drain_settles_each (ops : List (Lambo.Receipts.Op Job)) (fence : Job → Bool)
     (out : Job → RunResult) (now : Int)
-    (hnd : ((Lambo.Receipts.submitted ops).map (·.rid)).Nodup)
+    (hnd : ((Lambo.Receipts.submitted ops).map (·.key)).Nodup)
     (j : Job) (hj : j ∈ Lambo.Receipts.submitted ops) :
     let js := (drain (Lambo.Receipts.run ⟨[], []⟩ ops)).taken
-    (lookup (work fence out now (admitStore js) js).1 j.rid).map (·.answer) =
+    (lookup (work fence out now (admitStore js) js).1 j.key).map (·.answer) =
         some (workerStep (fence j) j (out j)).1 ∧
       (work fence out now (admitStore js) js).2 =
         js.map (fun j => (workerStep (fence j) j (out j)).2) := by
@@ -699,7 +726,7 @@ theorem deferEntry_durable (now : Int) (e : Entry) :
 theorem deferEntry_incomplete (now : Int) (e : Entry) :
     deferEntry .incomplete now e = (settle e .closeUnflushed now).1 := rfl
 
-theorem lookup_mem : ∀ (s : RStore) (q : Nat) (x : Entry), lookup s q = some x → (q, x) ∈ s := by
+theorem lookup_mem : ∀ (s : RStore) (q : Key) (x : Entry), lookup s q = some x → (q, x) ∈ s := by
   intro s
   induction s with
   | nil => intro q x h; simp [lookup] at h
@@ -758,7 +785,7 @@ theorem deferEntry_idem (flush : CloseFlush) (now : Int) (e : Entry) :
     rw [Lambo.Receipts.settle_settled _ _ now (deferEntry_settled .incomplete now e)]
 
 theorem lookup_settleDeferred (flush : CloseFlush) (now : Int) :
-    ∀ (ids : List Nat) (s : RStore) (q : Nat),
+    ∀ (ids : List Key) (s : RStore) (q : Key),
       lookup (settleDeferred flush now ids s) q =
         if q ∈ ids then (lookup s q).map (deferEntry flush now) else lookup s q := by
   intro ids
@@ -780,7 +807,7 @@ theorem lookup_settleDeferred (flush : CloseFlush) (now : Int) :
       · simp [hq, hr]
 
 theorem settleDeferred_all_settled (flush : CloseFlush) (now : Int) :
-    ∀ (ids : List Nat) (s : RStore), (∀ p ∈ s, p.1 ∉ ids → p.2.answer.isSettled = true) →
+    ∀ (ids : List Key) (s : RStore), (∀ p ∈ s, p.1 ∉ ids → p.2.answer.isSettled = true) →
       ∀ p ∈ settleDeferred flush now ids s, p.2.answer.isSettled = true := by
   intro ids
   induction ids with
@@ -801,7 +828,7 @@ theorem settleDeferred_all_settled (flush : CloseFlush) (now : Int) :
       | inl h' => exact hqr h'
       | inr h' => exact hpi h'
 
-theorem mem_pendingIds {s : RStore} {p : Nat × Entry} (hp : p ∈ s)
+theorem mem_pendingIds {s : RStore} {p : Key × Entry} (hp : p ∈ s)
     (hu : p.2.answer.isSettled = false) : p.1 ∈ pendingIds s := by
   unfold pendingIds
   exact List.mem_map_of_mem (List.mem_filter.mpr ⟨hp, by simp [hu]⟩)
@@ -822,15 +849,15 @@ theorem close_settles_all (done : List Job) (fence : Job → Bool) (out : Job �
 /-- And settled for good: no later settle attempt changes any receipt after a
 close (`Receipts.settleAll_fixed`). -/
 theorem close_final (done : List Job) (fence : Job → Bool) (out : Job → RunResult) (now : Int)
-    (flush : CloseFlush) (s : RStore) (p : Nat × Entry)
+    (flush : CloseFlush) (s : RStore) (p : Key × Entry)
     (hp : p ∈ (close done fence out now flush s).1) (later : List (Answer × Int)) :
     Lambo.Receipts.settleAll p.2 later = p.2 :=
   Lambo.Receipts.settleAll_fixed later p.2 (close_settles_all done fence out now flush s p hp)
 
-/-- Two jobs with the same sequence number in a list whose numbers are
+/-- Two jobs with the same receipt id in a list whose ids are
 distinct are the same job. -/
-theorem eq_of_rid {js : List Job} (hnd : (js.map (·.rid)).Nodup) {a b : Job} (ha : a ∈ js)
-    (hb : b ∈ js) (h : a.rid = b.rid) : a = b := by
+theorem eq_of_key {js : List Job} (hnd : (js.map (·.key)).Nodup) {a b : Job} (ha : a ∈ js)
+    (hb : b ∈ js) (h : a.key = b.key) : a = b := by
   induction js with
   | nil => simp at ha
   | cons k js ih =>
@@ -850,14 +877,14 @@ theorem eq_of_rid {js : List Job} (hnd : (js.map (·.rid)).Nodup) {a b : Job} (h
       | inr hb' => exact ih hnd.2 ha' hb'
 
 /-- **What every admitted write is after a close.** For admitted jobs `all`
-(distinct sequence numbers) of which the drain finished `done`: a finished job
+(distinct receipt ids) of which the drain finished `done`: a finished job
 carries the worker's answer (`applied` or `failed`); every other one is
 `intent_durable` when the final flush landed and `close_unflushed` when it did
 not. No job is in neither state. -/
 theorem close_answer (all done : List Job) (fence : Job → Bool) (out : Job → RunResult)
-    (now : Int) (flush : CloseFlush) (hnd : (all.map (·.rid)).Nodup)
-    (hdone : ∀ d ∈ done, d ∈ all) (hdnd : (done.map (·.rid)).Nodup) (j : Job) (hj : j ∈ all) :
-    (lookup (close done fence out now flush (admitStore all)).1 j.rid).map (·.answer) =
+    (now : Int) (flush : CloseFlush) (hnd : (all.map (·.key)).Nodup)
+    (hdone : ∀ d ∈ done, d ∈ all) (hdnd : (done.map (·.key)).Nodup) (j : Job) (hj : j ∈ all) :
+    (lookup (close done fence out now flush (admitStore all)).1 j.key).map (·.answer) =
       if j ∈ done then some (workerStep (fence j) j (out j)).1
       else some (match flush with
         | .durable => Answer.intentRecorded
@@ -865,12 +892,12 @@ theorem close_answer (all done : List Job) (fence : Job → Bool) (out : Job →
   obtain ⟨e, he, hpend⟩ := lookup_admit hj
   have hu : e.answer.isSettled = false := by rw [hpend]; rfl
   show (lookup (settleDeferred flush now _ (work fence out now (admitStore all) done).1)
-    j.rid).map (·.answer) = _
+    j.key).map (·.answer) = _
   rw [lookup_settleDeferred]
   by_cases hd : j ∈ done
   · rw [ite_eq_left hd]
     have hw := work_lookup fence out now done (admitStore all) j hdnd hd ⟨e, he, hu⟩
-    cases hl : lookup (work fence out now (admitStore all) done).1 j.rid with
+    cases hl : lookup (work fence out now (admitStore all) done).1 j.key with
     | none => rw [hl] at hw; simp at hw
     | some e' =>
       rw [hl] at hw
@@ -879,17 +906,17 @@ theorem close_answer (all done : List Job) (fence : Job → Bool) (out : Job →
       have hc : e'.answer ≠ .closeUnflushed := by
         rw [ha]
         rcases workerStep_answer (fence j) j (out j) with h | h <;> rw [h] <;> decide
-      by_cases hm : j.rid ∈ pendingIds (work fence out now (admitStore all) done).1
+      by_cases hm : j.key ∈ pendingIds (work fence out now (admitStore all) done).1
       · simp [hm, deferEntry_of_settled flush now e' hs hc, ha]
       · simp [hm, ha]
   · rw [ite_eq_right hd]
-    have hnot : j.rid ∉ done.map (·.rid) := by
+    have hnot : j.key ∉ done.map (·.key) := by
       intro hm
       obtain ⟨d, hdm, hdr⟩ := List.mem_map.mp hm
-      exact hd (eq_of_rid hnd (hdone d hdm) hj hdr ▸ hdm)
-    have hw := work_lookup_other fence out now done (admitStore all) j.rid hnot
+      exact hd (eq_of_key hnd (hdone d hdm) hj hdr ▸ hdm)
+    have hw := work_lookup_other fence out now done (admitStore all) j.key hnot
     rw [hw, he]
-    have hm : j.rid ∈ pendingIds (work fence out now (admitStore all) done).1 := by
+    have hm : j.key ∈ pendingIds (work fence out now (admitStore all) done).1 := by
       exact mem_pendingIds (lookup_mem _ _ _ (hw.trans he)) hu
     have hu' : ¬ e.answer.isSettled = true := by rw [hu]; decide
     cases flush with
@@ -903,7 +930,7 @@ theorem close_answer (all done : List Job) (fence : Job → Bool) (out : Job →
 
 /-- A retried close upgrades `close_unflushed` to `intent_durable` once its
 flush lands: the one settled-to-settled change, made by `settle_deferred`
-outside `Entry::settle` (#117 review M1). -/
+outside `Entry::settle` (#117). -/
 theorem retry_upgrades (now now' : Int) (e : Entry) (h : e.answer.isSettled = false) :
     (deferEntry .durable now' (deferEntry .incomplete now e)).answer = .intentRecorded := by
   have h' : ¬ e.answer.isSettled = true := by rw [h]; decide
@@ -914,7 +941,7 @@ theorem retry_upgrades (now now' : Int) (e : Entry) (h : e.answer.isSettled = fa
 a `Memory` is dropped without `close()` stays pending in a process that is
 going away. This is the documented exception to "no write is lost silently";
 the write survives only if an earlier flush took its intent. -/
-theorem drop_settles_nothing (s : RStore) (q : Nat) : lookup (abortAllSync s) q = lookup s q := rfl
+theorem drop_settles_nothing (s : RStore) (q : Key) : lookup (abortAllSync s) q = lookup s q := rfl
 
 /-! ## The intent table -/
 
@@ -949,16 +976,16 @@ theorem intentsOf_admit (js : List Job) :
   rfl
 
 theorem applyMut_keeps_owed {acc : List Intent} {j : Job} {m : Mut} (h : ⟨j, none⟩ ∈ acc)
-    (hm : ∀ t, m ≠ .consume j.rid t) : ⟨j, none⟩ ∈ applyMut acc m := by
+    (hm : ∀ t, m ≠ .consume j.key t) : ⟨j, none⟩ ∈ applyMut acc m := by
   cases m with
   | put k => exact List.mem_append_left _ h
   | write _ => exact h
   | consume r t =>
-    have hr : j.rid ≠ r := fun e => hm t (e ▸ rfl)
+    have hr : j.key ≠ r := fun e => hm t (e ▸ rfl)
     exact List.mem_map.mpr ⟨⟨j, none⟩, h, by simp [hr]⟩
 
 theorem foldl_keeps_owed {j : Job} : ∀ (ms : List Mut) (acc : List Intent),
-    ⟨j, none⟩ ∈ acc → (∀ t, Mut.consume j.rid t ∉ ms) → ⟨j, none⟩ ∈ ms.foldl applyMut acc := by
+    ⟨j, none⟩ ∈ acc → (∀ t, Mut.consume j.key t ∉ ms) → ⟨j, none⟩ ∈ ms.foldl applyMut acc := by
   intro ms
   induction ms with
   | nil => intro acc h _; exact h
@@ -968,34 +995,34 @@ theorem foldl_keeps_owed {j : Job} : ∀ (ms : List Mut) (acc : List Intent),
     · exact applyMut_keeps_owed h (fun t e => hc t (e ▸ List.mem_cons_self))
     · exact fun t ht => hc t (List.mem_cons_of_mem _ ht)
 
-theorem applyMut_consumed {acc : List Intent} {r : Nat} {m : Mut} (hm : ∀ j, m ≠ .put j)
-    (h : ∀ i ∈ acc, i.job.rid = r → i.outcome ≠ none) :
-    ∀ i ∈ applyMut acc m, i.job.rid = r → i.outcome ≠ none := by
+theorem applyMut_consumed {acc : List Intent} {r : Key} {m : Mut} (hm : ∀ j, m ≠ .put j)
+    (h : ∀ i ∈ acc, i.job.key = r → i.outcome ≠ none) :
+    ∀ i ∈ applyMut acc m, i.job.key = r → i.outcome ≠ none := by
   cases m with
   | put k => exact absurd rfl (hm k)
   | write _ => exact h
   | consume q t =>
     intro i hi hr
     obtain ⟨i0, h0, rfl⟩ := List.mem_map.mp hi
-    by_cases hq : i0.job.rid = q
+    by_cases hq : i0.job.key = q
     · simp [hq]
     · simp only [hq, ite_false] at hr ⊢
       exact h i0 h0 hr
 
-theorem applyMut_consume_self (acc : List Intent) (r : Nat) (t : Tag) :
-    ∀ i ∈ applyMut acc (.consume r t), i.job.rid = r → i.outcome ≠ none := by
+theorem applyMut_consume_self (acc : List Intent) (r : Key) (t : Tag) :
+    ∀ i ∈ applyMut acc (.consume r t), i.job.key = r → i.outcome ≠ none := by
   intro i hi hr
   obtain ⟨i0, _, rfl⟩ := List.mem_map.mp hi
-  by_cases hq : i0.job.rid = r
+  by_cases hq : i0.job.key = r
   · simp [hq]
   · simp only [hq, ite_false] at hr
 
 /-- **A consume is never undone.** Once a mutation sequence with no puts
 carries a consume of `r`, or every row of `r` is already consumed, every row
 of `r` is consumed afterwards. -/
-theorem foldl_consumed {r : Nat} : ∀ (ms : List Mut) (acc : List Intent), NoPut ms →
-    ((∃ t, Mut.consume r t ∈ ms) ∨ ∀ i ∈ acc, i.job.rid = r → i.outcome ≠ none) →
-    ∀ i ∈ ms.foldl applyMut acc, i.job.rid = r → i.outcome ≠ none := by
+theorem foldl_consumed {r : Key} : ∀ (ms : List Mut) (acc : List Intent), NoPut ms →
+    ((∃ t, Mut.consume r t ∈ ms) ∨ ∀ i ∈ acc, i.job.key = r → i.outcome ≠ none) →
+    ∀ i ∈ ms.foldl applyMut acc, i.job.key = r → i.outcome ≠ none := by
   intro ms
   induction ms with
   | nil =>
@@ -1031,7 +1058,7 @@ theorem foldl_rows {i' : Intent} : ∀ (ms : List Mut) (acc : List Intent), NoPu
       obtain ⟨i0, h0, rfl⟩ := List.mem_map.mp h1
       refine ⟨i0, h0, ?_⟩
       rw [he]
-      by_cases hq : i0.job.rid = q <;> simp [hq]
+      by_cases hq : i0.job.key = q <;> simp [hq]
 
 /-! ## Load order -/
 
@@ -1114,11 +1141,14 @@ theorem loadOrder_sorted : ∀ (l : List Intent),
   | nil => exact List.Pairwise.nil
   | cons x xs ih => exact pairwise_insertK x _ ih
 
-/-- **With a clock that never steps back, the load is sequence order.** If,
-among the rows, a higher sequence number never has an earlier issue time (one
-process whose wall clock is monotone), the (`issued_ms`, `lane_seq`) order is
-`lane_seq` order, the admission order the `WriteIntent::lane_seq` doc
-promises. `clock_step_reorders` is the other side. -/
+/-- **With issue times in sequence order, the load is sequence order.** If,
+among the rows, a higher sequence number never has an earlier issue time, the
+(`issued_ms`, `lane_seq`) order is `lane_seq` order, the admission order the
+`WriteIntent::lane_seq` doc promises. A monotone clock alone does not give the
+hypothesis: `next_receipt` takes the sequence number before it reads the clock
+and before admission takes its lock, so two concurrent admissions can read
+the clock in the other order. It holds for sequential admissions under a
+clock that does not step back. `clock_step_reorders` is the other side. -/
 theorem load_seq_order (l : List Intent)
     (hmono : ∀ a ∈ l, ∀ b ∈ l, a.job.rid < b.job.rid → a.job.ms ≤ b.job.ms) :
     (loadOrder l).Pairwise (fun a b => a.job.rid ≤ b.job.rid) := by
@@ -1136,8 +1166,8 @@ theorem loop_applied {rout : Job → RR} {s s' : Streaks} {i : Intent} {rest : L
     (h : replayStep i.job.image (rout i.job) s = (.applied, s')) :
     loop rout s (i :: rest) =
       { loop rout s' rest with
-        answers := (i.job.rid, .appliedAfterRestart) :: (loop rout s' rest).answers
-        log := [.write i.job.rid, .consume i.job.rid .appliedAfterRestart] :: (loop rout s' rest).log
+        answers := (i.job.key, .appliedAfterRestart) :: (loop rout s' rest).answers
+        log := [.write i.job.key, .consume i.job.key .appliedAfterRestart] :: (loop rout s' rest).log
         applied := i.job :: (loop rout s' rest).applied } := by
   simp only [loop, h]
 
@@ -1145,8 +1175,8 @@ theorem loop_failed {rout : Job → RR} {s s' : Streaks} {i : Intent} {rest : Li
     (h : replayStep i.job.image (rout i.job) s = (.failed, s')) :
     loop rout s (i :: rest) =
       { loop rout s' rest with
-        answers := (i.job.rid, .failed) :: (loop rout s' rest).answers
-        log := [.consume i.job.rid .failed] :: (loop rout s' rest).log
+        answers := (i.job.key, .failed) :: (loop rout s' rest).answers
+        log := [.consume i.job.key .failed] :: (loop rout s' rest).log
         failed := i.job :: (loop rout s' rest).failed } := by
   simp only [loop, h]
 
@@ -1170,7 +1200,7 @@ theorem loop_facts (rout : Job → RR) : ∀ (l : List Intent) (s : Streaks),
     (loop rout s l).failed.Sublist (l.map (·.job)) ∧
     NoPut (loop rout s l).log.flatten ∧
     (∀ x, x ∈ (loop rout s l).applied ∨ x ∈ (loop rout s l).failed →
-      ∃ t, Mut.consume x.rid t ∈ (loop rout s l).log.flatten) := by
+      ∃ t, Mut.consume x.key t ∈ (loop rout s l).log.flatten) := by
   intro l
   induction l with
   | nil =>
@@ -1246,7 +1276,7 @@ theorem replay_facts (live : Bool) (rout : Job → RR) (intents : List Intent) :
     (replay live rout intents).failed.Sublist ((pendingOf intents).map (·.job)) ∧
     NoPut (replay live rout intents).log.flatten ∧
     (∀ x, x ∈ (replay live rout intents).applied ∨ x ∈ (replay live rout intents).failed →
-      ∃ t, Mut.consume x.rid t ∈ (replay live rout intents).log.flatten) := by
+      ∃ t, Mut.consume x.key t ∈ (replay live rout intents).log.flatten) := by
   rcases replay_cases live rout intents with h | h | h <;> rw [h]
   · refine ⟨List.nil_sublist _, List.nil_sublist _, ?_, ?_⟩
     · intro m hm; simp [ROut.empty] at hm
@@ -1283,7 +1313,7 @@ applied again by any later replay over the rows its log left. -/
 theorem replay_idempotent (live live' : Bool) (rout rout' : Job → RR) (intents : List Intent)
     (x : Job) (hx : x ∈ (replay live rout intents).applied) (y : Job)
     (hy : y ∈ (replay live' rout' (applyLog intents (replay live rout intents).log)).applied) :
-    y.rid ≠ x.rid := by
+    y.key ≠ x.key := by
   obtain ⟨_, _, hnp, hcons⟩ := replay_facts live rout intents
   obtain ⟨i, hi, hij, hio⟩ := replay_applied_pending hy
   intro hr
@@ -1301,7 +1331,7 @@ theorem replay_complete_idem (live live' : Bool) (rout rout' : Job → RR) (inte
   intro i' hi'
   obtain ⟨i, hi, hji⟩ := foldl_rows _ intents hnp hi'
   apply foldl_consumed _ intents hnp _ i' hi' rfl
-  by_cases hp : ∃ k ∈ intents, k.job.rid = i'.job.rid ∧ k.outcome = none
+  by_cases hp : ∃ k ∈ intents, k.job.key = i'.job.key ∧ k.outcome = none
   · obtain ⟨k, hk, hkr, hko⟩ := hp
     have hkp : k ∈ pendingOf intents := List.mem_filter.mpr ⟨hk, by simp [hko]⟩
     obtain ⟨t, ht⟩ := hcons k.job (hall k hkp)
@@ -1316,14 +1346,40 @@ theorem replay_order (live : Bool) (rout : Job → RR) (intents : List Intent) :
     (replay live rout intents).applied.Sublist (intents.map (·.job)) :=
   (replay_facts live rout intents).1.trans (List.filter_sublist.map _)
 
-/-- With a monotone clock, one serve's replay applies in sequence-number
-order, which is admission order (`load_seq_order`). -/
+/-- With issue times in sequence order (sequential admissions, a clock that
+does not step back), one serve's replay applies in sequence-number order,
+which is admission order (`load_seq_order`). -/
 theorem replay_seq_order (live : Bool) (rout : Job → RR) (l : List Intent)
     (hmono : ∀ a ∈ l, ∀ b ∈ l, a.job.rid < b.job.rid → a.job.ms ≤ b.job.ms) :
     (replay live rout (loadOrder l)).applied.Pairwise (fun a b => a.rid ≤ b.rid) := by
   have hs := replay_order live rout (loadOrder l)
   apply List.Pairwise.sublist hs
   exact List.pairwise_map.mpr (load_seq_order l hmono)
+
+/-- `load_seq_order` for a backlog of several processes: the hypothesis and
+the conclusion compare only rows of the same epoch. Across epochs the load
+order is issue-time order; sequence numbers of different processes are not
+comparable. -/
+theorem load_epoch_seq_order (l : List Intent)
+    (hmono : ∀ a ∈ l, ∀ b ∈ l, a.job.epoch = b.job.epoch → a.job.rid < b.job.rid →
+      a.job.ms ≤ b.job.ms) :
+    (loadOrder l).Pairwise (fun a b => a.job.epoch = b.job.epoch → a.job.rid ≤ b.job.rid) := by
+  apply List.Pairwise.imp_of_mem _ (loadOrder_sorted l)
+  intro a b ha hb hab he
+  rw [keyLe_iff] at hab
+  have hm := hmono b (mem_loadOrder.mp hb) a (mem_loadOrder.mp ha) he.symm
+  omega
+
+/-- One serve's replay over several processes' rows applies each process's
+writes in sequence order (`load_epoch_seq_order`). -/
+theorem replay_epoch_seq_order (live : Bool) (rout : Job → RR) (l : List Intent)
+    (hmono : ∀ a ∈ l, ∀ b ∈ l, a.job.epoch = b.job.epoch → a.job.rid < b.job.rid →
+      a.job.ms ≤ b.job.ms) :
+    (replay live rout (loadOrder l)).applied.Pairwise
+      (fun a b => a.epoch = b.epoch → a.rid ≤ b.rid) := by
+  have hs := replay_order live rout (loadOrder l)
+  apply List.Pairwise.sublist hs
+  exact List.pairwise_map.mpr (load_epoch_seq_order l hmono)
 
 /-! ## How the replay settles a refusal -/
 
@@ -1338,7 +1394,7 @@ theorem replayStep_decode (img : Bool) (s : Streaks) :
 
 /-- A cycle refusal settles `failed` and leaves both streaks alone: it is
 decided before any embed, so it says nothing about the embedder
-(`StoreError::is_cycle_refusal`, #116 review M1). -/
+(`StoreError::is_cycle_refusal`, #116). -/
 theorem replayStep_cycle (img : Bool) (s : Streaks) :
     replayStep img (.run (.err .cycle)) s = (.failed, s) := rfl
 
@@ -1359,8 +1415,8 @@ theorem inputFact_goes_on (rout : Job → RR) (s : Streaks) (i : Intent) (rest :
     (e : Err) (he : rout i.job = .run (.err e)) (hf : e.inputFact = true) :
     ∃ s', loop rout s (i :: rest) =
       { loop rout s' rest with
-        answers := (i.job.rid, .failed) :: (loop rout s' rest).answers
-        log := [.consume i.job.rid .failed] :: (loop rout s' rest).log
+        answers := (i.job.key, .failed) :: (loop rout s' rest).answers
+        log := [.consume i.job.key .failed] :: (loop rout s' rest).log
         failed := i.job :: (loop rout s' rest).failed } := by
   have h := replayStep_inputFact i.job.image e s hf
   refine ⟨(replayStep i.job.image (rout i.job) s).2, loop_failed ?_⟩
@@ -1415,7 +1471,7 @@ theorem work_noPut (fence : Job → Bool) (out : Job → RunResult) (now : Int) 
     (done : List Job) (k : Nat) : NoPut ((work fence out now s done).2.take k).flatten := by
   intro m hm j he
   obtain ⟨d, _, hmd⟩ := mem_work_flatten hm
-  rcases workerStep_rids hmd with h | ⟨t, h⟩ <;> rw [h] at he <;> cases he
+  rcases workerStep_keys hmd with h | ⟨t, h⟩ <;> rw [h] at he <;> cases he
 
 /-- **No write is applied twice across a crash.** Admission's puts are
 logged first, then the workers' batches; a flush (background or final) makes
@@ -1424,11 +1480,11 @@ write is in the durable prefix, its intent is consumed there too (the commit
 carries its consume), so the next serve's replay never applies it again
 (`Graph::consume_write_intent`'s doc, `WriteCtx::run`'s doc). -/
 theorem crash_never_reapplies (all done : List Job) (fence : Job → Bool)
-    (out : Job → RunResult) (now : Int) (s : RStore) (n r : Nat) (live : Bool)
+    (out : Job → RunResult) (now : Int) (s : RStore) (n : Nat) (r : Key) (live : Bool)
     (rout : Job → RR)
     (hw : Mut.write r ∈ ((admitLog all ++ (work fence out now s done).2).take n).flatten) :
     ∀ x ∈ (replay live rout (loadOrder (intentsOf
-      ((admitLog all ++ (work fence out now s done).2).take n).flatten))).applied, x.rid ≠ r := by
+      ((admitLog all ++ (work fence out now s done).2).take n).flatten))).applied, x.key ≠ r := by
   intro x hx hxr
   obtain ⟨i, hi, hix, hio⟩ := replay_applied_pending hx
   rw [mem_loadOrder] at hi
@@ -1458,7 +1514,7 @@ theorem crash_never_reapplies (all done : List Job) (fence : Job → Bool)
 finished job shares, is still owed in the log: its row is unconsumed. -/
 theorem owed_in_log (all done : List Job) (fence : Job → Bool) (out : Job → RunResult)
     (now : Int) (s : RStore) (j : Job) (hj : j ∈ all)
-    (hno : ∀ d ∈ done, ∀ t, Mut.consume j.rid t ∉ (workerStep (fence d) d (out d)).2) :
+    (hno : ∀ d ∈ done, ∀ t, Mut.consume j.key t ∉ (workerStep (fence d) d (out d)).2) :
     ⟨j, none⟩ ∈ pendingOf (loadOrder (intentsOf
       (admitLog all ++ (work fence out now s done).2).flatten)) := by
   apply List.mem_filter.mpr
@@ -1468,7 +1524,7 @@ theorem owed_in_log (all done : List Job) (fence : Job → Bool) (out : Job → 
   apply foldl_keeps_owed
   · exact List.mem_map.mpr ⟨j, hj, rfl⟩
   · intro t ht
-    have ht' : Mut.consume j.rid t ∈
+    have ht' : Mut.consume j.key t ∈
         ((work fence out now s done).2.take (work fence out now s done).2.length).flatten := by
       rw [List.take_length]; exact ht
     obtain ⟨d, hd, hmd⟩ := mem_work_flatten ht'
@@ -1482,18 +1538,18 @@ or deferred with the flush incomplete, answered `close_unflushed`, which says
 the write may not have been saved. None is pending and none is unaccounted
 for ("Acked ⇒ (applied ∨ durable intent) at a clean close", `quiesce`). -/
 theorem shutdown_no_silent_loss (all done : List Job) (fence : Job → Bool)
-    (out : Job → RunResult) (now : Int) (flush : CloseFlush) (hnd : (all.map (·.rid)).Nodup)
-    (hdone : ∀ d ∈ done, d ∈ all) (hdnd : (done.map (·.rid)).Nodup) (j : Job) (hj : j ∈ all) :
+    (out : Job → RunResult) (now : Int) (flush : CloseFlush) (hnd : (all.map (·.key)).Nodup)
+    (hdone : ∀ d ∈ done, d ∈ all) (hdnd : (done.map (·.key)).Nodup) (j : Job) (hj : j ∈ all) :
     (j ∈ done ∧
-      (lookup (close done fence out now flush (admitStore all)).1 j.rid).map (·.answer) =
+      (lookup (close done fence out now flush (admitStore all)).1 j.key).map (·.answer) =
         some (workerStep (fence j) j (out j)).1) ∨
     (j ∉ done ∧ flush = .durable ∧
-      (lookup (close done fence out now flush (admitStore all)).1 j.rid).map (·.answer) =
+      (lookup (close done fence out now flush (admitStore all)).1 j.key).map (·.answer) =
         some .intentRecorded ∧
       ⟨j, none⟩ ∈ pendingOf (loadOrder (intentsOf
         (admitLog all ++ (close done fence out now flush (admitStore all)).2).flatten))) ∨
     (j ∉ done ∧ flush = .incomplete ∧
-      (lookup (close done fence out now flush (admitStore all)).1 j.rid).map (·.answer) =
+      (lookup (close done fence out now flush (admitStore all)).1 j.key).map (·.answer) =
         some .closeUnflushed) := by
   have ha := close_answer all done fence out now flush hnd hdone hdnd j hj
   by_cases hd : j ∈ done
@@ -1505,10 +1561,10 @@ theorem shutdown_no_silent_loss (all done : List Job) (fence : Job → Bool)
       refine Or.inr (Or.inl ⟨hd, rfl, ha, ?_⟩)
       apply owed_in_log all done fence out now _ j hj
       intro d hdm t hm
-      rcases workerStep_rids hm with h | ⟨t', h⟩
+      rcases workerStep_keys hm with h | ⟨t', h⟩
       · cases h
-      · have hr : j.rid = d.rid := (Mut.consume.inj h).1
-        exact hd (eq_of_rid hnd (hdone d hdm) hj hr.symm ▸ hdm)
+      · have hr : j.key = d.key := (Mut.consume.inj h).1
+        exact hd (eq_of_key hnd (hdone d hdm) hj hr.symm ▸ hdm)
     | incomplete => exact Or.inr (Or.inr ⟨hd, rfl, ha⟩)
 
 /-- **An in-session outage answers `failed` and leaves the write owed.** A
@@ -1517,10 +1573,10 @@ answered `failed`, but its intent is left unconsumed (by design, so that an
 outage does not destroy it), so the next serve's replay owes it and, if the embedder answers then, applies it.
 See `outage_failed_then_applied` for the receipt this produces. -/
 theorem outage_failed_but_owed (all done : List Job) (fence : Job → Bool)
-    (out : Job → RunResult) (now : Int) (flush : CloseFlush) (hnd : (all.map (·.rid)).Nodup)
-    (hdone : ∀ d ∈ done, d ∈ all) (hdnd : (done.map (·.rid)).Nodup) (j : Job) (hjd : j ∈ done)
+    (out : Job → RunResult) (now : Int) (flush : CloseFlush) (hnd : (all.map (·.key)).Nodup)
+    (hdone : ∀ d ∈ done, d ∈ all) (hdnd : (done.map (·.key)).Nodup) (j : Job) (hjd : j ∈ done)
     (hf : fence j = false) (e : Err) (he : out j = .err e) (ht : e.transient = true) :
-    (lookup (close done fence out now flush (admitStore all)).1 j.rid).map (·.answer) =
+    (lookup (close done fence out now flush (admitStore all)).1 j.key).map (·.answer) =
         some .failed ∧
       ⟨j, none⟩ ∈ pendingOf (loadOrder (intentsOf
         (admitLog all ++ (close done fence out now flush (admitStore all)).2).flatten)) := by
@@ -1532,10 +1588,10 @@ theorem outage_failed_but_owed (all done : List Job) (fence : Job → Bool)
   refine ⟨by rw [ha, hws], ?_⟩
   apply owed_in_log all done fence out now _ j hj
   intro d hdm t hm
-  rcases workerStep_rids hm with h | ⟨t', h⟩
+  rcases workerStep_keys hm with h | ⟨t', h⟩
   · cases h
-  · have hr : j.rid = d.rid := (Mut.consume.inj h).1
-    have hdj : d = j := eq_of_rid hnd (hdone d hdm) hj hr.symm
+  · have hr : j.key = d.key := (Mut.consume.inj h).1
+    have hdj : d = j := eq_of_key hnd (hdone d hdm) hj hr.symm
     subst hdj
     rw [hws] at hm
     simp at hm
@@ -1544,9 +1600,9 @@ theorem outage_failed_but_owed (all done : List Job) (fence : Job → Bool)
 
 section Examples
 
-private def j1 : Job := ⟨1, 0, 1000, false⟩
-private def j2 : Job := ⟨2, 0, 1001, false⟩
-private def j3 : Job := ⟨3, 0, 1002, false⟩
+private def j1 : Job := ⟨1, 0, 1000, false, 0⟩
+private def j2 : Job := ⟨2, 0, 1001, false, 0⟩
+private def j3 : Job := ⟨3, 0, 1002, false, 0⟩
 
 private def okAll : Job → RR := fun _ => .run .ok
 
@@ -1561,15 +1617,15 @@ example :
     let w := work (fun _ => false)
       (fun j => if j.rid = 1 then .ok else if j.rid = 2 then .err .embed else .err .unavailable)
       0 (admitStore [j1, j2, j3]) [j1, j2, j3]
-    ([1, 2, 3].map (fun r => (lookup w.1 r).map (·.answer)) =
+    ([j1.key, j2.key, j3.key].map (fun r => (lookup w.1 r).map (·.answer)) =
       [some .applied, some .failed, some .failed]) ∧
-    w.2 = [[.write 1, .consume 1 .applied], [.consume 2 .failed], []] := by decide
+    w.2 = [[.write j1.key, .consume j1.key .applied], [.consume j2.key .failed], []] := by decide
 
 /-- `shutdown_no_silent_loss`: the drain finished `j1`; `j2` and `j3` are
 deferred and owed by the next replay. -/
 example :
     let c := close [j1] (fun _ => false) (fun _ => .ok) 0 .durable (admitStore [j1, j2, j3])
-    [1, 2, 3].map (fun r => (lookup c.1 r).map (·.answer)) =
+    [j1.key, j2.key, j3.key].map (fun r => (lookup c.1 r).map (·.answer)) =
         [some .applied, some .intentRecorded, some .intentRecorded] ∧
       (pendingOf (loadOrder (intentsOf (admitLog [j1, j2, j3] ++ c.2).flatten))).map (·.job) =
         [j2, j3] := by decide
@@ -1579,12 +1635,12 @@ example :
 (`retry_upgrades`). -/
 example :
     let c := close [] (fun _ => false) (fun _ => .ok) 0 .incomplete (admitStore [j1])
-    (lookup c.1 1).map (·.answer) = some .closeUnflushed ∧
-      (lookup (settleDeferred .durable 1 [1] c.1) 1).map (·.answer) = some .intentRecorded := by
+    (lookup c.1 j1.key).map (·.answer) = some .closeUnflushed ∧
+      (lookup (settleDeferred .durable 1 [j1.key] c.1) j1.key).map (·.answer) = some .intentRecorded := by
   decide
 
 /-- `drop_settles_nothing`: the `Drop` path leaves a pending receipt pending. -/
-example : (lookup (abortAllSync (admitStore [j1])) 1).map (·.answer) = some .pending := by decide
+example : (lookup (abortAllSync (admitStore [j1])) j1.key).map (·.answer) = some .pending := by decide
 
 /-- `crash_never_reapplies`: the process dies after flushing `j1`'s commit;
 the next replay applies only `j2`. -/
@@ -1599,6 +1655,16 @@ example :
     let ints : List Intent := [⟨j1, none⟩, ⟨j2, some .applied⟩, ⟨j3, none⟩]
     let r1 := replay true okAll ints
     r1.applied = [j1, j3] ∧ replay true okAll (applyLog ints r1.log) = ROut.empty := by decide
+
+/-- Two crashed processes' backlogs with colliding sequence numbers: the
+rows are distinct receipts (different epochs), so the replay applies both,
+in issue-time order, and consuming one does not consume the other. -/
+example :
+    let a : Job := ⟨1, 0, 1000, false, 7⟩
+    let b : Job := ⟨1, 0, 2000, false, 9⟩
+    let ints := loadOrder [⟨b, none⟩, ⟨a, none⟩]
+    let r := replay true okAll ints
+    r.applied = [a, b] ∧ replay true okAll (applyLog ints r.log) = ROut.empty := by decide
 
 /-- `inputFact_goes_on`: a cycle refusal settles `failed` and the replay
 applies the next intent. -/
@@ -1632,8 +1698,15 @@ On an `EmbedUnavailable` below the threshold the loop `continue`s
 intent unconsumed and applying the next one, which can be the same agent's
 later write. The skipped intent is applied by a later serve, after it. The
 `WriteIntent::agent` doc says "Replay preserves order **within** an agent's
-intents (the lane promise)", and the image-`Config` arm stops rather than
-skip because "skipping it would break the lane order". -/
+intents (the lane promise)"; `docs/reference/mcp.mdx` (the `intent_durable`
+row) says the next server re-attempts the write "in the order you sent it";
+and the image-`Config` arm stops rather than skip because "skipping it would
+break the lane order".
+
+The same reordering happens across a restart through the in-session outage
+path: `j1` meets `EmbedUnavailable` in session (answered `failed`, intent
+left unconsumed), `j2` applies in session, and `j1` applies at the next serve
+(`outage_then_replay_reorders`). -/
 
 /-- Two writes of agent 0; at the first serve `j1` meets one transient embed
 answer and `j2` applies; the next serve applies `j1`. Applied order across
@@ -1643,6 +1716,17 @@ theorem transient_skip_reorders :
     let r1 := replay true (fun j => if j.rid = 1 then .run (.err .unavailable) else .run .ok) ints
     let r2 := replay true okAll (applyLog ints r1.log)
     j1.agent = j2.agent ∧ j1.rid < j2.rid ∧ r1.applied ++ r2.applied = [j2, j1] := by
+  decide
+
+/-- In session the worker meets an outage at `j1` and applies `j2`; the close
+lands; the next serve applies `j1`. Writes in the order they reached the
+graph: `j2`, then `j1`. -/
+theorem outage_then_replay_reorders :
+    let c := close [j1, j2] (fun _ => false)
+      (fun j => if j.rid = 1 then .err .unavailable else .ok) 0 .durable (admitStore [j1, j2])
+    let rows := loadOrder (intentsOf (admitLog [j1, j2] ++ c.2).flatten)
+    c.2 = [[], [.write j2.key, .consume j2.key .applied]] ∧
+      (replay true okAll rows).applied = [j1] := by
   decide
 
 /-! ### Finding 2: the load order trusts the wall clock
@@ -1657,56 +1741,75 @@ while the clock does not step back between admissions (`load_seq_order`). -/
 the clock steps back one millisecond and `j2` (sequence 2) is stamped 999 ms.
 The load puts `j2` first, and the replay applies it first. -/
 theorem clock_step_reorders :
-    let a : Job := ⟨1, 0, 1000, false⟩
-    let b : Job := ⟨2, 0, 999, false⟩
+    let a : Job := ⟨1, 0, 1000, false, 0⟩
+    let b : Job := ⟨2, 0, 999, false, 0⟩
     (replay true okAll (loadOrder [⟨a, none⟩, ⟨b, none⟩])).applied = [b, a] := by
   decide
 
-/-! ### Finding 3: an in-session `failed` can later be applied
+/-! ### Finding 3 (doc fix): a `failed` receipt after an outage is not final
 
-`ReceiptAnswer::Failed` says "Attempted and rejected. The write did not
-happen." For an in-session `EmbedUnavailable` the worker answers `failed`
-but leaves the intent unconsumed (`outage_failed_but_owed`), so the next serve
-applies it and the same receipt id then answers `applied_after_restart`. A
-caller that resubmitted on `failed` gets the write twice. -/
+For an in-session `EmbedUnavailable` the worker answers `failed` but leaves
+the intent unconsumed (`outage_failed_but_owed`), so the next serve applies
+it and the same receipt id then answers `applied_after_restart`. This is the
+designed behaviour, and the user docs describe it: `docs/reference/mcp.mdx`
+and `docs/reference/config.mdx` tell callers to recall, or read the receipt
+after the restart, before deriving the same concept again, "or it may be
+written twice", and the `failed` row of mcp.mdx's receipt table says the
+intent is kept and replayed. What is stale is the rustdoc on
+`ReceiptAnswer::Failed` (`src/writeq/receipts.rs`), "Attempted and rejected.
+The write did not happen.", with no qualifier, and the first sentence of
+mcp.mdx's `failed` row, "Nothing was written", which needs "by this server"
+or "yet". -/
 
 /-- The restart map's answer for a receipt after a replay: seeded from the
 rows, then overwritten by the replay's own inserts. -/
-def restartAnswer (live : Bool) (rout : Job → RR) (intents : List Intent) (r : Nat) :
+def restartAnswer (live : Bool) (rout : Job → RR) (intents : List Intent) (r : Key) :
     Option Answer :=
   lookupLast (seed intents ++ (replay live rout intents).answers) r
 
 theorem outage_failed_then_applied :
     let c := close [j1] (fun _ => false) (fun _ => .err .unavailable) 0 .durable (admitStore [j1])
     let rows := loadOrder (intentsOf (admitLog [j1] ++ c.2).flatten)
-    (lookup c.1 1).map (·.answer) = some .failed ∧
-      restartAnswer true okAll rows 1 = some .appliedAfterRestart ∧
+    (lookup c.1 j1.key).map (·.answer) = some .failed ∧
+      restartAnswer true okAll rows j1.key = some .appliedAfterRestart ∧
       (replay true okAll rows).applied = [j1] := by
   decide
 
 /-! ### Finding 4: a store error other than a cycle blocks the backlog
 
-`spawn_replay`'s doc lists "a vanished interaction" among the failures that
-consume the intent `failed`. A vanished interaction is
-`Store(StoreError::NotFound(..))` (`graph/derive.rs`, `graph/hybrid.rs`,
-`graph/action.rs`), which reaches the stop arm: the intent stays durable and
-the replay ends, on every serve, so every later intent stays `pending_replay`
-(the shape #116 review M1 fixed for cycles). The in-session worker, meeting
-the same error, consumes it `failed`. -/
+Only a cycle refusal among `StoreError::Invariant`s settles `failed` at
+replay; every other one reaches the stop arm, which leaves the intent durable
+and ends the replay, on every serve, so every later intent stays
+`pending_replay` (the shape #116 fixed for cycles). Some of those are facts
+about the write's input against the graph, raised as plain `Invariant`s:
+`reject_repeated_observation` and `reject_second_hierarchical_parent`
+(`src/graph/derive.rs`) and the same-canonical-key check in hybrid
+`validate_pairs` (`src/graph/hybrid.rs`). Scenario: a `Canonical` session
+acks two derives of the same Observation, both puts flush, the process dies;
+the next serve applies the first, the second is refused with a non-cycle
+`Invariant`, and the replay stops (block reason `Other`) there on every later
+serve, leaving the whole backlog behind it `pending_replay`. The in-session
+worker, meeting the same error, consumes it `failed`. (`spawn_replay`'s doc
+also lists "a vanished interaction" among the failures consumed `failed`; that
+is a `Store(NotFound)` and stops the replay too, but it is effectively
+unreachable: the interaction is logged before the put and never collected.) -/
 
 theorem store_error_blocks_backlog :
     let ints : List Intent := [⟨j1, none⟩, ⟨j2, none⟩]
     let rout : Job → RR := fun j => if j.rid = 1 then .run (.err .store) else .run .ok
     let r := replay true rout ints
     r.applied = [] ∧ r.block = some .other ∧ applyLog ints r.log = ints ∧
-      workerStep false j1 (.err .store) = (.failed, [.consume 1 .failed]) := by
+      workerStep false j1 (.err .store) = (.failed, [.consume j1.key .failed]) := by
   decide
 
 /-! ### Finding 5: an intent with an unparseable receipt id is never settled
 
 The loop `continue`s past it (`let Ok(receipt) = ... else { continue; }`),
-and seeding warns and skips it, so it is never applied and never consumed,
-and every serve skips it again. -/
+so it is never applied and never consumed, and every serve skips it again.
+Seeding's warning says "it will replay but cannot be looked up", which is
+false: it never replays. And the row stays counted in `replay_owed` (set from
+the backlog's length, decremented only when a row is applied or failed)
+forever. -/
 
 theorem bad_id_never_settled :
     let ints : List Intent := [⟨j1, none⟩, ⟨j2, none⟩]
