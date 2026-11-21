@@ -4,40 +4,31 @@ This directory holds a Lean 4 development that models parts of the Lambo engine
 and proves properties the source states in its doc comments and pins in its
 tests. It has no dependencies beyond Lean itself (no Mathlib).
 
-## Status: not yet machine-checked
+## Status: machine-checked
 
-**These files have not been compiled.** They were written in a cloud session
-where running a Lean toolchain was not permitted, and the session's GitHub
-credential could not add a workflow file, so neither a local `lake build` nor
-CI has ever run on them. Each proof was written by hand and then read line by
-line by an independent reviewer against the Lean `v4.36.0` core source text.
-That review found one real error class (nine uses of `Option.noConfusion`,
-whose shape changed in 4.36) and one deprecated name, both fixed. A read-through
-is not the same thing as Lean accepting the files.
+`lake build` passes on Lean `v4.36.0` with no errors, no warnings and no
+`sorry`: 252 theorems across 13 files. The axiom audit in
+`LamboProofs/Audit.lean` reports only Lean's standard axioms (`propext`,
+`Quot.sound`, and `Classical.choice` for two theorems); 7 of the 35 audited
+theorems use no axioms at all.
 
-Until `lake build` passes, treat every theorem here as a *claim with a proposed
-proof*. Expect some proofs to need small repairs (a renamed library lemma, a
-tactic that closes a goal one step earlier than assumed). The statements and
-the models are the part that took the care; they were written against the Rust
-source at commit `c3be141`.
-
-To check them:
+To check them yourself:
 
 ```bash
 curl https://elan.lean-lang.org/elan-init.sh -sSf | sh
 ```
 
 ```bash
-cd formal && lake build
+cd formal && lake build --wfail
 ```
 
-`lean-toolchain` pins Lean `v4.36.0`. A clean build prints the axiom audit from
-`LamboProofs/Audit.lean`; no line of it may mention `sorryAx`.
+`lean-toolchain` pins the Lean version, and elan fetches it on first use.
 
-To have CI check them on every change, move `ci/lean.yml` to
+CI does not check these yet. To enable it, move `ci/lean.yml` to
 `.github/workflows/lean.yml`. It downloads the pinned Lean release, verifies its
-SHA-256, builds, and fails on any `sorry`. It uses no third-party action beyond
-the checkout pin `ci.yml` already uses.
+SHA-256, builds with warnings as errors, and fails on any `sorry`. It uses no
+third-party action beyond the checkout pin `ci.yml` already uses. (The session
+that wrote this could not add a workflow file.)
 
 ## What is modelled, and what each file proves
 

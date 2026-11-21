@@ -73,13 +73,13 @@ def settle (e : Entry) (a : Answer) (now : Int) : Entry × Bool :=
 theorem settle_settled (e : Entry) (a : Answer) (now : Int) (h : e.answer.isSettled = true) :
     settle e a now = (e, false) := by
   unfold settle
-  exact if_pos h
+  exact ite_eq_left h
 
 theorem settle_unsettled (e : Entry) (a : Answer) (now : Int)
     (h : ¬ e.answer.isSettled = true) :
     settle e a now = ({ answer := a, settledAt := some now }, true) := by
   unfold settle
-  exact if_neg h
+  exact ite_eq_right h
 
 /-- Settling with a settled answer leaves a settled entry. Workers and the
 close path only ever settle with a settled answer (`Applied`, `Failed`,
@@ -269,14 +269,14 @@ def lookupMissing (sameEpoch : Bool) (seq highestSeq : Nat) : Answer :=
 theorem lookupMissing_restartLost (seq highestSeq : Nat) :
     lookupMissing false seq highestSeq = .restartLost := by
   unfold lookupMissing
-  exact if_pos rfl
+  exact ite_eq_left rfl
 
 /-- An id of this epoch above the highest issued sequence is `never_issued`. -/
 theorem lookupMissing_neverIssued (seq highestSeq : Nat) (h : highestSeq < seq) :
     lookupMissing true seq highestSeq = .neverIssued := by
   have hne : ¬ (true = false) := by decide
   unfold lookupMissing
-  rw [if_neg hne, if_pos h]
+  rw [ite_eq_right hne, ite_eq_left h]
 
 /-- An id of this epoch that was issued is `expired`: it existed and its
 retention ended. -/
@@ -285,7 +285,7 @@ theorem lookupMissing_expired (seq highestSeq : Nat) (h : seq ≤ highestSeq) :
   have hn : ¬ highestSeq < seq := by omega
   have hne : ¬ (true = false) := by decide
   unfold lookupMissing
-  rw [if_neg hne, if_neg hn]
+  rw [ite_eq_right hne, ite_eq_right hn]
 
 /-- The answer for a missing id is always settled: a caller waiting on it is
 never told to keep waiting. -/
@@ -425,13 +425,13 @@ theorem admit_lane_bound (lane total : Nat) (h : lane ≤ writeQueueLaneMax) :
     (tryAdmit lane total).1 ≤ writeQueueLaneMax := by
   unfold tryAdmit
   by_cases h1 : writeQueueLaneMax ≤ lane
-  · rw [if_pos h1]
+  · rw [ite_eq_left h1]
     exact h
-  · rw [if_neg h1]
+  · rw [ite_eq_right h1]
     by_cases h2 : writeQueueMax ≤ total
-    · rw [if_pos h2]
+    · rw [ite_eq_left h2]
       exact h
-    · rw [if_neg h2]
+    · rw [ite_eq_right h2]
       show lane + 1 ≤ writeQueueLaneMax
       omega
 
@@ -440,13 +440,13 @@ theorem admit_queue_bound (lane total : Nat) (h : total ≤ writeQueueMax) :
     (tryAdmit lane total).2.1 ≤ writeQueueMax := by
   unfold tryAdmit
   by_cases h1 : writeQueueLaneMax ≤ lane
-  · rw [if_pos h1]
+  · rw [ite_eq_left h1]
     exact h
-  · rw [if_neg h1]
+  · rw [ite_eq_right h1]
     by_cases h2 : writeQueueMax ≤ total
-    · rw [if_pos h2]
+    · rw [ite_eq_left h2]
       exact h
-    · rw [if_neg h2]
+    · rw [ite_eq_right h2]
       show total + 1 ≤ writeQueueMax
       omega
 
@@ -455,13 +455,13 @@ theorem admit_refused_unchanged (lane total : Nat) (h : (tryAdmit lane total).2.
     (tryAdmit lane total).1 = lane ∧ (tryAdmit lane total).2.1 = total := by
   unfold tryAdmit at h ⊢
   by_cases h1 : writeQueueLaneMax ≤ lane
-  · rw [if_pos h1]
+  · rw [ite_eq_left h1]
     exact ⟨rfl, rfl⟩
-  · rw [if_neg h1] at h ⊢
+  · rw [ite_eq_right h1] at h ⊢
     by_cases h2 : writeQueueMax ≤ total
-    · rw [if_pos h2]
+    · rw [ite_eq_left h2]
       exact ⟨rfl, rfl⟩
-    · rw [if_neg h2] at h
+    · rw [ite_eq_right h2] at h
       have h' : true = false := h
       exact absurd h' (by decide)
 

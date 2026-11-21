@@ -85,7 +85,7 @@ variable {me : H} {now ttl : Int} {r : Row H}
 /-- `Held`: a live lease held by someone else is left exactly as it was. -/
 theorem acquire_held (h : now < r.expires ∧ r.holder ≠ me) : acquire me now ttl r = r := by
   unfold acquire
-  exact if_pos h
+  exact ite_eq_left h
 
 /-- Refresh: the holder's own row keeps its token and gets a new expiry. This
 arm applies even to the holder's own *expired* row. -/
@@ -93,23 +93,23 @@ theorem acquire_refresh (h : r.holder = me) :
     acquire me now ttl r = { holder := r.holder, token := r.token, expires := now + ttl } := by
   have hn : ¬ (now < r.expires ∧ r.holder ≠ me) := fun hc => hc.2 h
   unfold acquire
-  rw [if_neg hn, if_pos h]
+  rw [ite_eq_right hn, ite_eq_left h]
 
 /-- Takeover: an expired (or released) row held by another identity passes to
 the caller with the token incremented. -/
 theorem acquire_takeover (h1 : ¬ (now < r.expires ∧ r.holder ≠ me)) (h2 : r.holder ≠ me) :
     acquire me now ttl r = { holder := me, token := r.token + 1, expires := now + ttl } := by
   unfold acquire
-  rw [if_neg h1, if_neg h2]
+  rw [ite_eq_right h1, ite_eq_right h2]
 
 theorem release_mine {released : H} (h : r.holder = me) :
     release released me now r = { holder := released, token := r.token, expires := now } := by
   unfold release
-  exact if_pos h
+  exact ite_eq_left h
 
 theorem release_other {released : H} (h : r.holder ≠ me) : release released me now r = r := by
   unfold release
-  exact if_neg h
+  exact ite_eq_right h
 
 end Arms
 
@@ -193,7 +193,7 @@ theorem step_token_mono {released : H} {a b : Row H} (h : Step released a b) :
 theorem token_mono {released : H} {a b : Row H} (h : Steps released a b) :
     a.token ≤ b.token := by
   induction h with
-  | refl r => exact Nat.le_refl r.token
+  | refl => exact Nat.le_refl _
   | tail _ hstep ih => exact Nat.le_trans ih (step_token_mono hstep)
 
 /-! ## The fence -/
@@ -205,7 +205,7 @@ def Safe (released A : H) (t : Nat) (r : Row H) : Prop :=
   (r.token = t ∧ (r.holder = A ∨ r.holder = released)) ∨ t < r.token
 
 theorem safe_acquire {released A : H} {t : Nat} {r : Row H} (me : H) (now ttl : Int)
-    (hme : me ≠ released) (h : Safe released A t r) :
+    (h : Safe released A t r) :
     Safe released A t (acquire me now ttl r) := by
   unfold Safe at h ⊢
   by_cases hheld : now < r.expires ∧ r.holder ≠ me
@@ -235,15 +235,16 @@ theorem safe_release {released A : H} {t : Nat} {r : Row H} (me : H) (now : Int)
 theorem safe_step {released A : H} {t : Nat} {a b : Row H} (hstep : Step released a b)
     (h : Safe released A t a) : Safe released A t b := by
   cases hstep with
-  | acq me now ttl r hme => exact safe_acquire me now ttl hme h
+  | acq me now ttl r _ => exact safe_acquire me now ttl h
   | rel me now r => exact safe_release me now h
 
 theorem safe_steps {released A : H} {t : Nat} {a b : Row H} (hsteps : Steps released a b)
     (h : Safe released A t a) : Safe released A t b := by
   induction hsteps with
-  | refl r => exact h
-  | tail _ hstep ih => exact safe_step hstep (ih h)
+  | refl => exact h
+  | tail _ hstep ih => exact safe_step hstep ih
 
+omit [DecidableEq H] in
 /-- A writer that has just become holder is `Safe` at the token it captured. -/
 theorem safe_of_holder (released : H) (r : Row H) : Safe released r.holder r.token r := by
   unfold Safe
@@ -280,6 +281,7 @@ theorem stale_token_refused {released A : H} {a b : Row H}
       have hle : b.token ≤ p := hp'.2
       omega
 
+omit [DecidableEq H] in
 /-- The other half: the identity that holds the row passes the fence with the
 token it was given, for as long as the row is still its own generation. -/
 theorem holder_token_permitted (r : Row H) : Permits r.token (some r.token) := by

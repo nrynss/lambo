@@ -229,7 +229,7 @@ theorem bump_never_resets (g : Nat) : ∀ (n : Nat), g ≤ Nat.repeat bump n g :
 /-- Below saturation a bump adds exactly one survival. -/
 theorem bump_adds_one (g : Nat) (h : g < i32Max) : bump g = g + 1 := by
   unfold bump
-  exact if_pos h
+  exact ite_eq_left h
 
 /-- Three sweeps survived are enough for Stage 1's `gc_survived >= 3`, and two
 are not. -/
@@ -262,7 +262,7 @@ theorem idle_never_sweeps (since gcInterval idleFloor : Nat) (longEnough : Bool)
     sweepDue since gcInterval idleFloor longEnough = none := by
   have h1 : ¬ gcInterval ≤ since := by omega
   unfold sweepDue
-  rw [if_neg h1, if_pos hidle]
+  rw [ite_eq_right h1, ite_eq_left hidle]
 
 /-- The mutation trigger is ungated: enough mutations always sweep (Rust test
 `sweep_due_mutation_trigger_is_unchanged_and_ungated`). -/
@@ -270,7 +270,7 @@ theorem mutations_always_sweep (since gcInterval idleFloor : Nat) (longEnough : 
     (h : gcInterval ≤ since) :
     sweepDue since gcInterval idleFloor longEnough = some .mutations := by
   unfold sweepDue
-  rw [if_pos h]
+  rw [ite_eq_left h]
 
 /-- The time trigger needs both the interval and the floor. -/
 theorem time_trigger_needs_both (since gcInterval idleFloor : Nat) (longEnough : Bool)
@@ -278,17 +278,17 @@ theorem time_trigger_needs_both (since gcInterval idleFloor : Nat) (longEnough :
     idleFloor ≤ since ∧ longEnough = true := by
   unfold sweepDue at h
   by_cases h1 : gcInterval ≤ since
-  · rw [if_pos h1] at h
+  · rw [ite_eq_left h1] at h
     have h' : Trigger.mutations = Trigger.elapsed := Option.some.inj h
     exact absurd h' (by decide)
-  · rw [if_neg h1] at h
+  · rw [ite_eq_right h1] at h
     by_cases h2 : since < idleFloor
-    · rw [if_pos h2] at h
+    · rw [ite_eq_left h2] at h
       cases h
-    · rw [if_neg h2] at h
+    · rw [ite_eq_right h2] at h
       by_cases h3 : longEnough = true
       · exact ⟨by omega, h3⟩
-      · rw [if_neg h3] at h
+      · rw [ite_eq_right h3] at h
         cases h
 
 end Lambo.Gc

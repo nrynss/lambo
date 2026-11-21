@@ -104,11 +104,11 @@ theorem gate_some (current from_ to_ result : Status)
     current = from_ ∧ result = to_ ∧ legal current result = true := by
   unfold gate at h
   by_cases hc : current = from_ ∧ legal from_ to_ = true
-  · rw [if_pos hc] at h
+  · rw [ite_eq_left hc] at h
     have e : to_ = result := Option.some.inj h
     rw [← e, hc.1]
     exact ⟨rfl, rfl, hc.2⟩
-  · rw [if_neg hc] at h
+  · rw [ite_eq_right hc] at h
     cases h
 
 /-- A fabricated transition, one whose `from` is not the current status, is
@@ -116,7 +116,7 @@ rejected whatever it claims. -/
 theorem gate_rejects_mismatch (current from_ to_ : Status) (h : current ≠ from_) :
     gate current from_ to_ = none := by
   unfold gate
-  exact if_neg (fun (hc : current = from_ ∧ legal from_ to_ = true) => h hc.1)
+  exact ite_eq_right (fun (hc : current = from_ ∧ legal from_ to_ = true) => h hc.1)
 
 /-! ## One canonization cycle
 

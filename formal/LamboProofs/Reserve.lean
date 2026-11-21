@@ -56,7 +56,7 @@ theorem reserve_denied (agent : A) (now ttl : Int) (r : Reservation A)
   show (if r.agent = agent then (some { agent := agent, expires := now + ttl }, true)
     else if now < r.expires then (some r, false)
     else (some { agent := agent, expires := now + ttl }, true)) = (some r, false)
-  rw [if_neg hother, if_pos hlive]
+  rw [ite_eq_right hother, ite_eq_left hlive]
 
 /-- **Takeover needs expiry.** If a reserve succeeds against another agent's
 reservation, that reservation had expired. The boundary `now == expires_at`
@@ -83,7 +83,7 @@ theorem reserve_holder (agent : A) (now ttl : Int) (s : Option (Reservation A))
         show (if r.agent = agent then (some { agent := agent, expires := now + ttl }, true)
           else if now < r.expires then (some r, false)
           else (some { agent := agent, expires := now + ttl }, true)) = _
-        rw [if_pos hsame]
+        rw [ite_eq_left hsame]
       rw [e] <;> rfl
     · by_cases hlive : now < r.expires
       · rw [reserve_denied agent now ttl r hsame hlive] at hok
@@ -94,7 +94,7 @@ theorem reserve_holder (agent : A) (now ttl : Int) (s : Option (Reservation A))
           show (if r.agent = agent then (some { agent := agent, expires := now + ttl }, true)
             else if now < r.expires then (some r, false)
             else (some { agent := agent, expires := now + ttl }, true)) = _
-          rw [if_neg hsame, if_neg hlive]
+          rw [ite_eq_right hsame, ite_eq_right hlive]
         rw [e] <;> rfl
 
 /-- The same agent always succeeds: it extends (or shortens) its own lock, even
@@ -105,8 +105,9 @@ theorem reserve_same_agent (agent : A) (now ttl : Int) (r : Reservation A)
   show (if r.agent = agent then (some { agent := agent, expires := now + ttl }, true)
     else if now < r.expires then (some r, false)
     else (some { agent := agent, expires := now + ttl }, true)) = _
-  rw [if_pos hsame]
+  rw [ite_eq_left hsame]
 
+omit [DecidableEq A] in
 /-- "Active iff `now < expires_at`". -/
 theorem active_iff (now : Int) (r : Reservation A) :
     active now (some r) = some r ↔ now < r.expires := by
@@ -116,12 +117,12 @@ theorem active_iff (now : Int) (r : Reservation A) :
     · exact hlive
     · have e : active now (some r) = none := by
         show (if now < r.expires then some r else none) = none
-        rw [if_neg hlive]
+        rw [ite_eq_right hlive]
       rw [e] at h
       cases h
   · intro hlive
     show (if now < r.expires then some r else none) = some r
-    rw [if_pos hlive]
+    rw [ite_eq_left hlive]
 
 /-- **One live holder.** While a reservation is active, no other agent can
 obtain the node: its reserve fails and the active reservation is unchanged. -/
@@ -139,9 +140,9 @@ theorem release_owner_only (agent : A) (r : Reservation A) :
   constructor
   · intro h
     show (if r.agent = agent then (none, true) else (some r, false)) = (none, true)
-    rw [if_pos h]
+    rw [ite_eq_left h]
   · intro h
     show (if r.agent = agent then (none, true) else (some r, false)) = (some r, false)
-    rw [if_neg h]
+    rw [ite_eq_right h]
 
 end Lambo.Reserve

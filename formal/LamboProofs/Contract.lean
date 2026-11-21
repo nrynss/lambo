@@ -81,8 +81,8 @@ exactly the contract it had. -/
 theorem stamp_keeps (c offered : Contract K M) : (stamp (some c) offered).1 = some c := by
   show (if c = offered then (some c, true) else (some c, false)).1 = some c
   by_cases h : c = offered
-  · rw [if_pos h] <;> rfl
-  · rw [if_neg h] <;> rfl
+  · rw [ite_eq_left h] <;> rfl
+  · rw [ite_eq_right h] <;> rfl
 
 /-- A stamp on a stamped session succeeds only for the stored contract. -/
 theorem stamp_ok_eq (c offered : Contract K M) (h : (stamp (some c) offered).2 = true) :
@@ -91,7 +91,7 @@ theorem stamp_ok_eq (c offered : Contract K M) (h : (stamp (some c) offered).2 =
   · exact he.symm
   · have e : stamp (some c) offered = (some c, false) := by
       show (if c = offered then (some c, true) else (some c, false)) = (some c, false)
-      rw [if_neg he]
+      rw [ite_eq_right he]
     rw [e] at h
     have h' : false = true := h
     exact absurd h' (by decide)
@@ -148,9 +148,9 @@ theorem classify_unrecorded_iff (stored : Option (Contract K M)) (live : Contrac
     · intro h
       have h' : (if s = live then Compat.compatible else Compat.mismatch) = .unrecorded := h
       by_cases hs : s = live
-      · rw [if_pos hs] at h'
+      · rw [ite_eq_left hs] at h'
         exact Compat.noConfusion h'
-      · rw [if_neg hs] at h'
+      · rw [ite_eq_right hs] at h'
         exact Compat.noConfusion h'
     · intro h
       cases h
@@ -163,11 +163,11 @@ theorem classify_compatible_iff (s live : Contract K M) :
     have h' : (if s = live then Compat.compatible else Compat.mismatch) = .compatible := h
     by_cases hs : s = live
     · exact hs
-    · rw [if_neg hs] at h'
+    · rw [ite_eq_right hs] at h'
       exact Compat.noConfusion h'
   · intro hs
     show (if s = live then Compat.compatible else Compat.mismatch) = .compatible
-    rw [if_pos hs]
+    rw [ite_eq_left hs]
 
 /-! ## Store-authoritative vector width -/
 

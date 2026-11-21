@@ -394,14 +394,14 @@ theorem emit_eq_filter (isConcept forced : ι → Bool) (topK : Nat) :
       have e : ordinary isConcept forced (s :: rest) = ordinary isConcept forced rest := by
         simp [ordinary, hc]
       rw [e] at hle
-      rw [emit_missing hc, ih slots hle] <;> simp [List.filter_cons, hc]
+      rw [emit_missing hc, ih slots hle] <;> simp [hc]
     | true =>
       cases hf : forced s with
       | true =>
         have e : ordinary isConcept forced (s :: rest) = ordinary isConcept forced rest := by
           simp [ordinary, hc, hf]
         rw [e] at hle
-        rw [emit_forced hc hf, ih slots hle] <;> simp [List.filter_cons, hc]
+        rw [emit_forced hc hf, ih slots hle] <;> simp [hc]
       | false =>
         have e : ordinary isConcept forced (s :: rest)
             = s :: ordinary isConcept forced rest := by
@@ -412,6 +412,6 @@ theorem emit_eq_filter (isConcept forced : ι → Bool) (topK : Nat) :
           simp
         rw [hlen] at hle
         have hs : slots < topK := by omega
-        rw [emit_take hc hf hs, ih (slots + 1) (by omega)] <;> simp [List.filter_cons, hc]
+        rw [emit_take hc hf hs, ih (slots + 1) (by omega)] <;> simp [hc]
 
 end Lambo.TopK

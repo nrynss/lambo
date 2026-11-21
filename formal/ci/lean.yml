@@ -53,7 +53,7 @@ jobs:
         run: |
           set -euo pipefail
           lean --version
-          lake build 2>&1 | tee "$RUNNER_TEMP/build.log"
+          lake build --wfail 2>&1 | tee "$RUNNER_TEMP/build.log"
 
       - name: Reject sorry and unexpected axioms
         working-directory: formal

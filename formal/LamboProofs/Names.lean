@@ -46,7 +46,7 @@ structure Registry (κ ι : Type) where
   live : ι → Bool
   keyOf : ι → κ
 
-variable {κ ι : Type} [DecidableEq κ] [DecidableEq ι]
+variable {κ ι : Type} [DecidableEq κ]
 
 /-- Bind `k` to `t`. -/
 def bind (s : Registry κ ι) (k : κ) (t : ι) : Registry κ ι :=
@@ -69,18 +69,18 @@ inductive Steps : Registry κ ι → Registry κ ι → Prop
 
 theorem bind_same (s : Registry κ ι) (k : κ) (t : ι) : (bind s k t).names k = some t := by
   show (if k = k then some t else s.names k) = some t
-  exact if_pos rfl
+  exact ite_eq_left rfl
 
 theorem bind_other (s : Registry κ ι) (k k' : κ) (t : ι) (h : k' ≠ k) :
     (bind s k t).names k' = s.names k' := by
   show (if k' = k then some t else s.names k') = s.names k'
-  exact if_neg h
+  exact ite_eq_right h
 
 /-- One step never changes an existing binding. -/
 theorem step_keeps_binding {a b : Registry κ ι} (h : Step a b) (k : κ) (i : ι)
     (hk : a.names k = some i) : b.names k = some i := by
   cases h with
-  | declare s k' t _ hfree _ =>
+  | declare k' t _ hfree _ =>
     by_cases hkk : k = k'
     · rw [hkk] at hk ⊢
       rw [bind_same]
@@ -93,7 +93,7 @@ theorem step_keeps_binding {a b : Registry κ ι} (h : Step a b) (k : κ) (i : �
         exact hk
     · rw [bind_other _ k' k t hkk]
       exact hk
-  | setLive s live' => exact hk
+  | setLive live' => exact hk
 
 /-- **Permanence.** A binding, once made, holds in every later state: garbage
 collecting the target, declaring other names and re-declaring this one all
@@ -101,8 +101,8 @@ leave it in place. -/
 theorem names_permanent {a b : Registry κ ι} (h : Steps a b) (k : κ) (i : ι)
     (hk : a.names k = some i) : b.names k = some i := by
   induction h with
-  | refl s => exact hk
-  | tail _ hstep ih => exact step_keeps_binding hstep k i (ih hk)
+  | refl => exact hk
+  | tail _ hstep ih => exact step_keeps_binding hstep k i ih
 
 /-- How a reference that is a registered name resolves. -/
 inductive Resolution (ι : Type) where
@@ -118,19 +118,21 @@ def resolve (s : Registry κ ι) (k : κ) : Resolution ι :=
   | none => .unbound
   | some i => if s.live i = true then .concept i else .retired
 
+omit [DecidableEq κ] in
 /-- While its target is live, the name resolves to it. -/
 theorem resolve_live (s : Registry κ ι) (k : κ) (i : ι) (hk : s.names k = some i)
     (hlive : s.live i = true) : resolve s k = .concept i := by
   first
-    | (unfold resolve; rw [hk]; exact if_pos hlive)
+    | (unfold resolve; rw [hk]; exact ite_eq_left hlive)
     | simp [resolve, hk, hlive]
 
+omit [DecidableEq κ] in
 /-- A name whose target was collected fails closed (Rust test
 `deleted_named_targets_remain_reserved_and_fail_closed`). -/
 theorem resolve_collected (s : Registry κ ι) (k : κ) (i : ι) (hk : s.names k = some i)
     (hdead : ¬ s.live i = true) : resolve s k = .retired := by
   first
-    | (unfold resolve; rw [hk]; exact if_neg hdead)
+    | (unfold resolve; rw [hk]; exact ite_eq_right hdead)
     | simp [resolve, hk, hdead]
 
 /-- **A name never re-binds.** After a key has been bound to `i`, in every
