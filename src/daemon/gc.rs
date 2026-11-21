@@ -143,9 +143,11 @@ use crate::types::{CanonizationStatus, Concept, ConceptType, EdgeType, NodeId};
 
 /// Below this weight, an edge past its TTL is removed (step 1).
 ///
-/// v0.6.0's value is not in-repo — v0.1 decision. Kept below the structural
-/// write weights (`Derives` 0.9, `Temporal`/`Dependency`/`Causal` 1.0) so
-/// provenance and load-bearing edges survive a default run.
+/// v0.6.0's value is not in-repo — v0.1 decision. Structural edges survive
+/// step 1 by type, not by weight: it examines only the decaying types
+/// (`CoOccurrence`, `Semantic`; see `dead_edge_ids`). `Derives` (0.9) and
+/// `Temporal` (1.0) are written above this bar; `Causal` and `Dependency` are
+/// written exactly on it, by `record_action` and by `depends_on` citations.
 ///
 /// ### The CoOccurrence margin is zero, deliberately (issue #29)
 ///
@@ -1069,12 +1071,12 @@ fn is_root_goal_concept(c: &Concept, goal_texts: &[String]) -> bool {
 /// and `Semantic` as decaying and every other type as not, so a weight-and-TTL
 /// cut is only meaningful for those two — a structural edge's weight is a fixed
 /// property of its kind, not a decayed signal, and collecting one on a protected
-/// concept would break §5.7's structural guarantees. The margin today is
-/// **zero**: `record_action` writes `Causal`/`Dependency` at exactly
-/// [`MIN_EDGE_WEIGHT`] and the predicate is a strict `<`, so any weight tweak or
-/// a lower configured `min_edge_weight` would start deleting the demo's
-/// dependency graph out from under it. [`EdgeType::decays`] is the single source
-/// of truth for the table.
+/// concept would break §5.7's structural guarantees. The type filter is what
+/// protects them: their weight margin is **zero**. `record_action` and
+/// `depends_on` citations write `Causal`/`Dependency` at exactly
+/// [`MIN_EDGE_WEIGHT`], so if this cut examined them, a lower write weight or a
+/// higher configured `min_edge_weight` would delete the dependency graph.
+/// [`EdgeType::decays`] is the single source of truth for the table.
 fn dead_edge_ids(graph: &Graph, params: GcParams) -> Vec<NodeId> {
     const DECAYING_TYPES: [EdgeType; 2] = [EdgeType::CoOccurrence, EdgeType::Semantic];
     debug_assert!(

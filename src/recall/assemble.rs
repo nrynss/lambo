@@ -428,7 +428,9 @@ where
     // hold their slots, and a forced member would free one for another hit.
     let forced = |id: NodeId| if cold { cold_forced(id) } else { hot(id) };
 
-    // Score every member independently; sort by final score desc, id asc.
+    // Score every member independently; `scored` ranks them with
+    // `rank_members`: Canonical first, then final score desc, then canonical
+    // key asc, then node id asc.
     let members = scored(cold);
     for s in &members {
         let (d, r, daemon_part, _) = score_of(s.item, cold);

@@ -36,7 +36,10 @@
 //! secondary signal below a genuine BM25 or similarity hit); vector members
 //! keep the store-provided similarity score. The merged list is sorted
 //! score-descending, ties broken by canonical key ascending then node id
-//! ascending ([`crate::types::tie_break_by_key`]), then truncated to `limit`.
+//! ascending ([`crate::types::tie_break_by_key`]), and returned unreduced:
+//! phase 1 is a candidate over-approximation, and the `top_k` cut happens in
+//! phase-3 assembly by final score. `limit` only sizes the keyword leg's
+//! over-fetch (`KEYWORD_OVERFETCH`).
 //! Sorting is a total order (f64 `total_cmp`, then canonical key, then UUID),
 //! so the output is deterministic regardless of leg iteration or store result
 //! order, and stable across runs: node ids are minted per run, so the old
@@ -87,9 +90,11 @@ pub const RECENT_INTERACTIONS: usize = 3;
 /// [`crate::embed::calibration`]).
 pub const RECENT_SCORE: f64 = 0.35;
 
-/// Phase-1 keyword over-fetch multiplier: the keyword leg is over-fetched so
-/// strong query matches cannot be evicted by the flat-scored recent/vector
-/// legs at phase-1 truncation (GPT5.6sol P1-3).
+/// Phase-1 keyword over-fetch multiplier: the keyword leg keeps the first
+/// `limit * KEYWORD_OVERFETCH` index results. Phase 1 used to truncate its
+/// merged list to `limit`, which let the flat-scored recent/vector legs evict
+/// strong query matches (GPT5.6sol P1-3); it no longer truncates, and this cap
+/// bounds how many keyword candidates reach the phase-3 `top_k` cut.
 pub(crate) const KEYWORD_OVERFETCH: usize = 4;
 
 /// The score each phase-1 leg contributed for one node, **before** max-merge.
