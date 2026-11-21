@@ -989,3 +989,69 @@ async fn a_full_hot_list_keeps_the_conflict_over_contradictions() {
     drop(hot);
     handle.abort();
 }
+
+/// #298: a cycle cuts the hot list to what it detects before it enforces the
+/// bound, so an entry the cycle no longer detects never pushes a fresh hit off
+/// a full list. The issue's bound-2 scenario, with the session's stale hit as
+/// the fresh lower-tier hit (the issue's drift on n3): the list holds an old
+/// conflict on a node this cycle no longer detects, and the cycle detects the
+/// conflict on `c1` and the stale session. Mirrors the Lean theorems
+/// `Hotlist.cycleFixed_keeps_fresh_hit` and `Hotlist.cycleFixed_keys_eq_hits`
+/// (before the fix, `Hotlist.cycle_evicts_fresh_hit`).
+#[test]
+fn a_lapsed_entry_never_evicts_a_fresh_hit() {
+    use crate::daemon::hotlist::{HotListEntry, HotListPayload};
+
+    let (graph, c1_id, _, _) = conflicted_graph();
+    let g = graph.read();
+    // The last write landed 5s ago: stale under a 1s window, while the
+    // conflict on `c1` is still inside its 30s window.
+    let params = CycleParams {
+        hot_list_max: 2,
+        stale_window: Duration::from_secs(1),
+        ..Default::default()
+    };
+    let mut h = HotList::with_max(params.hot_list_max);
+    // The previous cycle's conflict on a node this cycle no longer detects.
+    let gone = NodeId(Uuid::from_u64_pair(9, 9));
+    let payload = HotListPayload::Conflict {
+        agents: vec![AgentId::from("agent-a"), AgentId::from("agent-b")],
+        writer: AgentId::from("agent-b"),
+        seconds_ago: 20,
+    };
+    let _ = h.insert(HotListEntry::new(
+        gone,
+        Condition::Conflict,
+        payload,
+        |_, _| None,
+    ));
+
+    let (conflicts, drift, stale, high_risk, fresh) =
+        detect_into_hot_list(&mut h, &g, &params, Utc::now());
+
+    assert_eq!(
+        conflicts.iter().map(|c| c.node).collect::<Vec<_>>(),
+        vec![c1_id]
+    );
+    assert!(drift.is_empty() && high_risk.is_empty());
+    assert_eq!(stale.len(), 1, "the session is stale");
+    let anchor = stale[0].node;
+    // Events are driven by the detected set, which the fix leaves alone.
+    let expected: HashSet<(Condition, NodeId)> = [
+        (Condition::Conflict, c1_id),
+        (Condition::StaleSession, anchor),
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(fresh, expected);
+    // The list is the cycle's fresh hits, both of which fit the bound.
+    let held: Vec<(Condition, NodeId)> = h.iter().map(|e| (e.condition(), e.node())).collect();
+    assert_eq!(
+        held,
+        vec![
+            (Condition::Conflict, c1_id),
+            (Condition::StaleSession, anchor)
+        ],
+        "the lapsed conflict must not evict the fresh stale hit"
+    );
+}

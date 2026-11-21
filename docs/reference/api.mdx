@@ -232,7 +232,10 @@ entries (default half of `hot_list_max`) are contradictions (#196): over that
 budget the oldest-declared contradictions are dropped first, so contradictions
 never evict the high-risk, drift and stale warnings from the rest of the list.
 A contradiction dropped by the budget or the bound carries no recall warning
-until it fits again. The entry is the newest qualifying
+until it fits again. Each cycle the list is first cut to what that cycle
+detects, and only then are the budget and the bound enforced (#298), so an
+entry the cycle no longer detects never evicts a fresh one: while the
+cycle's hits fit, the list holds every one of them. The entry is the newest qualifying
 contradiction, ties going to the smaller canonical key and then the smaller
 id of `by`. `writer` is the agent acting when the edge was first written,
 falling back to `by`'s origin agent. No `DaemonEvent` is published for it.

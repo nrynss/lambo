@@ -29,6 +29,24 @@
   phrases. `formal/LamboProofs/Dispatch.lean` models the fixed classifier and
   proves that a phrase glued to a longer word never counts, that every phrase
   as whole words still does, and that the dispatch theorems hold for it.
+- Daemon: a cycle no longer lets an entry it has stopped detecting evict a
+  fresh hot-list warning (#298). `detect_into_hot_list` used to enforce the
+  bound and the contradiction budget on every insert and drop undetected
+  entries only afterwards, so on a full list an old entry of a higher tier
+  (say a lapsed conflict) could push off a fresh high-risk, drift or stale
+  hit and then be dropped itself, leaving the list below its bound and the
+  hit without its warning line or force-inclusion until a later cycle. The
+  detectors now insert inside the new `HotList::sync_cycle`, which lifts both
+  limits while they run, cuts the list to the cycle's condition set, then
+  enforces them once (restoring them even if a detector panics). While the
+  cycle's hits fit, the list now holds every one of them; when they do not,
+  the lowest of them go, as before. Events are unchanged.
+  `prime_offline` shares the path. `formal/LamboProofs/Hotlist.lean` models
+  the fixed cycle (`cycleFixed`) and proves it keeps the invariant, keeps
+  every fresh hit that fits (`cycleFixed_keeps_hits`,
+  `cycleFixed_keys_eq_hits`) and agrees with the old cycle whenever that one
+  evicted nothing while inserting.
+
 - Recall: an exact durable-name match now raises the named concept's
   phase-1 keyword score to at least 1.0 instead of overwriting it with 1.0
   (#288). BM25 is unnormalized and routinely above 1.0, so the overwrite could

@@ -4,7 +4,10 @@
 //! `recall()` (force-inclusion, spec §8). Entry conditions retained:
 //! **conflict detected**, **high-risk modification**, **drift detected**,
 //! **stale session**, plus #19(c)'s **contradiction**. The daemon loop (T4.6) keeps the list equal to the
-//! current cycle's fresh detector hits ([`HotList::retain_conditions`]); the
+//! current cycle's fresh detector hits, up to the bound and the contradiction
+//! budget ([`HotList::sync_cycle`]: the cycle's inserts evict nothing, entries
+//! it no longer detects are dropped, then the limits are enforced once, so a
+//! lapsed entry never evicts a fresh hit, #298); the
 //! per-entry predicate ([`ConditionCheck`]) remains available for
 //! recall-time re-validation (T5.3).
 //!
@@ -73,8 +76,9 @@
 //!
 //! Since T4.6 the daemon loop *does not* evaluate these predicates each cycle —
 //! it diffs the list against the fresh detection pass
-//! ([`HotList::retain_conditions`]), which replaces the old
-//! O(hot_len × graph) per-cycle re-validation scan (T4.6 finding 2).
+//! ([`HotList::retain_conditions`], inside [`HotList::sync_cycle`]), which
+//! replaces the old O(hot_len × graph) per-cycle re-validation scan (T4.6
+//! finding 2).
 //! [`HotList::revalidate`] is recall's (T5.3) read-time path, run through
 //! [`HotList::revalidate_members`] by the daemon's recall entry before
 //! assembly.
@@ -470,13 +474,40 @@ impl HotList {
 
     /// Drop every entry whose `(node, condition)` is not in `fresh` (T4.6
     /// finding 2). The daemon loop calls this once per cycle with the
-    /// current detection pass's hits, so the hot list always equals the
+    /// current detection pass's hits, through [`HotList::sync_cycle`] and
+    /// before the bound applies, so the hot list always equals the
     /// *current* condition set: a HighRisk entry whose 30s window elapsed —
     /// or any condition that stopped being detected — is evicted here,
     /// deterministically, without evaluating captured-`now` predicates.
     pub fn retain_conditions(&mut self, fresh: &HashSet<(Condition, NodeId)>) {
         self.entries
             .retain(|e| fresh.contains(&(e.condition, e.node)));
+    }
+
+    /// One detection cycle's refresh (#298): run `detect`, which inserts the
+    /// cycle's hits and returns the cycle's condition set with its own result;
+    /// keep only the entries whose `(condition, node)` is in that set
+    /// ([`HotList::retain_conditions`]); then enforce the contradiction budget
+    /// and the bound, once.
+    ///
+    /// While `detect` runs, both limits are lifted, so its inserts refresh or
+    /// add entries (each with the next recency) and evict nothing. An entry
+    /// the cycle no longer detects is therefore gone before the limits apply,
+    /// and can never push one of the cycle's fresh hits off a full list: the
+    /// list ends as the cycle's hits, cut to the budget and the bound by the
+    /// usual priority. Had each insert enforced the limits, as the daemon
+    /// cycle did before #298, such an entry could evict a fresh hit of a lower
+    /// tier and then be dropped itself, leaving the list below its bound.
+    ///
+    /// The limits are restored and enforced even if `detect` panics.
+    pub fn sync_cycle<T>(
+        &mut self,
+        detect: impl FnOnce(&mut HotList) -> (HashSet<(Condition, NodeId)>, T),
+    ) -> T {
+        let lifted = Lifted::new(self);
+        let (held, out) = detect(&mut *lifted.list);
+        lifted.list.retain_conditions(&held);
+        out
     }
 
     /// Is `node` on the hot list (without re-validating)?
@@ -515,6 +546,35 @@ impl HotList {
 impl Default for HotList {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// A hot list with its bound and contradiction budget lifted for the length
+/// of one [`HotList::sync_cycle`]; dropping it restores both and enforces
+/// them, so the list is back within its limits however the cycle ends.
+struct Lifted<'a> {
+    list: &'a mut HotList,
+    max: usize,
+    contradiction_max: usize,
+}
+
+impl<'a> Lifted<'a> {
+    fn new(list: &'a mut HotList) -> Self {
+        let max = std::mem::replace(&mut list.max, usize::MAX);
+        let contradiction_max = std::mem::replace(&mut list.contradiction_max, usize::MAX);
+        Self {
+            list,
+            max,
+            contradiction_max,
+        }
+    }
+}
+
+impl Drop for Lifted<'_> {
+    fn drop(&mut self) {
+        self.list.max = self.max;
+        self.list.contradiction_max = self.contradiction_max;
+        let _ = self.list.enforce();
     }
 }
 
@@ -988,6 +1048,128 @@ mod tests {
             other => panic!("unexpected payload {other:?}"),
         }
         assert_eq!(e.node, nid(9));
+    }
+
+    // ------------------------------------------------------------------
+    // One detection cycle (#298)
+    // ------------------------------------------------------------------
+
+    fn pairs(list: &HotList) -> Vec<(Condition, NodeId)> {
+        list.iter().map(|e| (e.condition, e.node)).collect()
+    }
+
+    /// One cycle through [`HotList::sync_cycle`]: insert `hits` and hold
+    /// exactly their pairs, as the daemon's condition set does.
+    fn cycle(list: &mut HotList, hits: &[(u64, Condition)]) {
+        list.sync_cycle(|h| {
+            for &(n, c) in hits {
+                let _ = h.insert(entry(nid(n), c));
+            }
+            (hits.iter().map(|&(n, c)| (c, nid(n))).collect(), ())
+        });
+    }
+
+    /// The issue's bound-2 scenario: cycle 1 holds conflicts on n1 and n2;
+    /// cycle 2 detects conflict n2 and drift n3. The lapsed conflict on n1 is
+    /// cut before the bound applies, so both fresh hits stay. Mirrors the
+    /// Lean theorem `Hotlist.cycleFixed_keeps_fresh_hit`.
+    #[test]
+    fn sync_cycle_cuts_before_it_enforces() {
+        let mut list = HotList::with_max(2);
+        cycle(
+            &mut list,
+            &[(1, Condition::Conflict), (2, Condition::Conflict)],
+        );
+        assert_eq!(
+            pairs(&list),
+            vec![(Condition::Conflict, nid(2)), (Condition::Conflict, nid(1))]
+        );
+        cycle(
+            &mut list,
+            &[(2, Condition::Conflict), (3, Condition::Drift)],
+        );
+        assert_eq!(
+            pairs(&list),
+            vec![(Condition::Conflict, nid(2)), (Condition::Drift, nid(3))],
+            "the lapsed conflict on n1 must not evict the fresh drift on n3"
+        );
+        assert_eq!(list.max(), 2);
+        assert_eq!(list.contradiction_max(), 1);
+    }
+
+    /// When the fresh hits themselves overflow, the bound and the budget cut
+    /// them by the usual priority, and never for a lapsed entry. The two
+    /// overflow examples beside `Hotlist.cycleFixed_keeps_fresh_hit`.
+    #[test]
+    fn sync_cycle_enforces_the_limits_on_the_fresh_hits() {
+        // Bound 2: an old high-risk entry lapses; of three fresh hits the
+        // stale one goes.
+        let mut list = HotList::with_max(2);
+        cycle(&mut list, &[(9, Condition::HighRiskModification)]);
+        cycle(
+            &mut list,
+            &[
+                (1, Condition::Conflict),
+                (2, Condition::Drift),
+                (3, Condition::StaleSession),
+            ],
+        );
+        assert_eq!(
+            pairs(&list),
+            vec![(Condition::Conflict, nid(1)), (Condition::Drift, nid(2))]
+        );
+
+        // Bound 3, budget 1: an old conflict lapses; of two fresh
+        // contradictions the later inserted stays, beside the drift.
+        let mut list = HotList::with_budget(3, 1);
+        cycle(&mut list, &[(9, Condition::Conflict)]);
+        cycle(
+            &mut list,
+            &[
+                (1, Condition::Contradiction),
+                (2, Condition::Contradiction),
+                (3, Condition::Drift),
+            ],
+        );
+        assert_eq!(
+            pairs(&list),
+            vec![
+                (Condition::Contradiction, nid(2)),
+                (Condition::Drift, nid(3))
+            ]
+        );
+    }
+
+    /// Inside the cycle nothing is evicted; the limits are restored and
+    /// enforced afterwards, even when the cycle panics.
+    #[test]
+    fn sync_cycle_restores_the_limits_even_on_a_panic() {
+        let mut list = HotList::with_budget(2, 1);
+        let inside = list.sync_cycle(|h| {
+            let evicted: Vec<_> = (1..=4)
+                .filter_map(|n| h.insert(entry(nid(n), Condition::Contradiction)))
+                .collect();
+            assert!(evicted.is_empty(), "no insert evicts inside the cycle");
+            let held = (1..=4)
+                .map(|n| (Condition::Contradiction, nid(n)))
+                .collect();
+            (held, h.len())
+        });
+        assert_eq!(inside, 4);
+        assert_eq!(pairs(&list), vec![(Condition::Contradiction, nid(4))]);
+
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            list.sync_cycle(|h| -> (HashSet<(Condition, NodeId)>, ()) {
+                for n in 10..15 {
+                    let _ = h.insert(entry(nid(n), Condition::Drift));
+                }
+                panic!("a detector panicked");
+            })
+        }));
+        assert!(caught.is_err());
+        assert_eq!(list.max(), 2);
+        assert_eq!(list.contradiction_max(), 1);
+        assert_eq!(list.len(), 2, "the bound holds again");
     }
 
     /// `insert_many` leaves exactly the list one-by-one `insert` would:
