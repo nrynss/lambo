@@ -4,8 +4,9 @@
 //! `assemble` turns the phase-2 [`ExpandedSet`] into a `RecallResult`:
 //! every member (required AND `chunk_group_id` siblings, "scored
 //! independently") gets a final score, hot-listed members are force-included
-//! after condition re-validation, and the rendered context is truncated to
-//! the query's token budget.
+//! after condition re-validation (except an ordinary concept whose only hot
+//! payload is a contradiction, #179), and the rendered context is truncated
+//! to the query's token budget.
 //!
 //! ## Scoring rule
 //!
@@ -111,10 +112,16 @@
 //! entry's payload has just been rebuilt against `now`. Assemble takes the
 //! resulting payload map and renders it directly, never a cached copy; it
 //! does not touch the hot list itself, so recall does not depend on the
-//! daemon. Members in the map are **force-included**: they stay in the hit
-//! list even beyond `top_k`, so a live conflict warning is never truncated
-//! away by rank. The per-entry re-validation is a single neighborhood walk,
-//! so a handful of hot nodes under the graph lock is cheap.
+//! daemon. A member in the map is **force-included** when one of its
+//! payloads forces (`forces`): every hot-list condition does, except a
+//! contradiction of an ordinary concept (#179), which annotates the hit but
+//! leaves its rank to decide whether it is shown. A forced member stays in
+//! the hit list even beyond `top_k`, so a live conflict warning is never
+//! truncated away by rank. A contradicted Canonical or Venerable member
+//! also pulls in its contradicting concept, force-included too, even when
+//! that concept is outside the expanded set (#19(c)). The per-entry
+//! re-validation is a single neighborhood walk, so a handful of hot nodes
+//! under the graph lock is cheap.
 //!
 //! ## Assembly to `max_tokens`
 //!

@@ -7,8 +7,12 @@
 //!    (`STOPWORDS`, pinned to the fixture convention
 //!    `scripts/gen-fixtures.py`). See [`normalize_tokens`] for why NFC and not
 //!    NFKC.
-//! 2. Stem — Porter via `rust-stemmers` (`Algorithm::English`; snowball and
-//!    custom stemmers are cut per spec §7.1).
+//! 2. Stem — Snowball English (Porter2, not the original Porter algorithm)
+//!    via `rust-stemmers` (`Algorithm::English`), the only stemmer. Spec
+//!    §7.1's "Porter only" cut the configurable `snowball` option and custom
+//!    `stem_fn`s, not this algorithm.
+//!    Identifier tokens are not stemmed (#148), and empty stems are dropped
+//!    (#301).
 //! 3. Token-sort → canonical key (sorted stems joined with single spaces).
 //! 4. Synonym resolution — **direct lookup only**: no transitivity, no chains,
 //!    no merge token. Pinned ordering (fixtures.rs + `gen-fixtures.py`): the RAW
@@ -43,7 +47,8 @@ const STOPWORDS: [&str; 13] = [
     "the", "a", "an", "for", "of", "at", "in", "to", "on", "and", "or", "is", "are",
 ];
 
-/// Shared Porter (English) stemmer — created once, reused for every call.
+/// Shared Snowball English (Porter2) stemmer — created once, reused for every
+/// call.
 static STEMMER: LazyLock<Stemmer> = LazyLock::new(|| Stemmer::create(Algorithm::English));
 
 /// Codepoints that render as nothing, or as an empty cell — the single authority
@@ -198,8 +203,12 @@ fn split_camel_case(s: &str) -> String {
 
 /// Spec §7.1 steps 1–2 — normalize + stem.
 ///
-/// **Unicode NFC first** (adve-review GRAPH-9), then lowercase, split `[-_ ]`
-/// and camelCase boundaries, drop stopwords, Porter stem. NO sort, NO synonym
+/// **Invisible codepoints stripped and Unicode NFC first** (adve-review
+/// GRAPH-9), then split camelCase boundaries on the original case, split on
+/// `-`, `_` and whitespace, lowercase, drop stopwords, stem with Snowball
+/// English (Porter2) except identifier tokens, and drop empty stems. The
+/// camelCase split comes before lowercasing, which would erase the boundary
+/// (module docs, ordering note). NO sort, NO synonym
 /// lookup, NO join (those are [`canonical_key`]'s job). Pure — no `Graph`
 /// dependency, so recall's keyword index (T2.6) can tokenize without a graph.
 ///
@@ -251,7 +260,7 @@ fn split_camel_case(s: &str) -> String {
 /// A token containing an ASCII digit, `/` or `.` is an identifier (a hash, a
 /// short id, a version, a path, a file name), not an English word, and is
 /// kept as it is after lowercasing. Stemming it merged distinct identifiers:
-/// the Porter stemmer drops a trailing `e`, so `2122de39e47e` and
+/// the stemmer drops a trailing `e`, so `2122de39e47e` and
 /// `2122de39e47` were one key and one concept. This is a deliberate, approved
 /// change to spec section 7.1 step 2; `lambo provision` re-keys stored
 /// concepts written under the old rule (see [`legacy_canonical_key`]).
@@ -437,7 +446,7 @@ mod tests {
     use crate::types::GraphSnapshot;
 
     /// Fixture STEM table (`scripts/gen-fixtures.py`, probe-verified against this
-    /// module's stemmer — Porter English). `(word, expected stem)`.
+    /// module's stemmer — Snowball English, Porter2). `(word, expected stem)`.
     const STEM: &[(&str, &str)] = &[
         ("registering", "regist"),
         ("register", "regist"),

@@ -631,6 +631,11 @@ independently.
 **Phase 3 — scoring and assembly.**
 `final_score = daemon_score × w_daemon + query_relevance × w_query`.
 Hot-listed nodes within the expanded set are force-included after condition re-validation.
+*(Correction 2026-11-21, #302: this sentence is inaccurate in two ways. Since #179 an
+ordinary concept whose only hot payload is a contradiction is not force-included; its rank
+decides whether it is shown. And the contradicting concept of a contradicted Canonical or
+Venerable hit is force-included even when it is outside the expanded set (#19(c);
+`extra` in `src/recall/assemble.rs`).)*
 Output assembled to `max_tokens` using the built-in `ceil(bytes / 3.5)` estimator or a
 caller-supplied `token_fn`.
 

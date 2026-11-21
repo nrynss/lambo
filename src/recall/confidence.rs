@@ -72,7 +72,10 @@
 //! the two-leg value with `b = 0`, a lower quantity than the two-leg value
 //! would have been for the same store, which is why it has its own name
 //! (#256's acceptance: a recall with no vector leg still reports a
-//! confidence).
+//! confidence). "Lower" is exact in real arithmetic (Lean
+//! `Confidence.keywordOnly_le_noisyOr`); in `f64` it holds only up to an
+//! ulp: `noisy_or(1.0, 0.10, 0.36)` rounds to an ulp below
+//! `keyword_term(1.0)`.
 //!
 //! A vector leg that ran but left nothing to count counts as one that did
 //! not run: when every cosine it returned is non-finite, or every concept it

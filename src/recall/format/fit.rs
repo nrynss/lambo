@@ -23,7 +23,8 @@
 //!    [truncated: 1342 tokens left out; lambo_inspect 1a2b3c4d for the full concept]
 //!    ```
 //!    So the label (type, canonical marker, score, id, blast radius) survives
-//!    the cut. The first form that fits wins ([`Truncation`]): the whole rest
+//!    the cut. The first form that fits wins ([`Truncation`]; for a steady
+//!    estimator, see Arithmetic below): the whole rest
 //!    of the block ([`Truncation::WithWarnings`]), then the label line
 //!    without the warning lines ([`Truncation::LabelOnly`]; the warnings
 //!    still reach the caller in `warnings`), then the content head alone
@@ -50,11 +51,22 @@
 //! is found by binary search over the content's char boundaries that do not
 //! follow whitespace (so the head never ends in whitespace and needs no
 //! trimming). Every candidate is measured as the exact string returned, so
-//! the result is within budget for any estimator. For an estimator that is
-//! monotone in bytes (the default `ceil(bytes / 3.5)` is) the head is also
-//! the longest such head that fits: each step adds at least one byte of head
-//! and removes it from the left-out text, and a count that loses a digit
-//! does so only after losing at least one byte, so the total never shrinks.
+//! the result is within budget for any estimator.
+//!
+//! Two further claims need a **steady** estimator: its count is a monotone
+//! function of the byte size that rises by at most one per byte, and the
+//! marker grows by at most one byte per unit of count. For such an estimator
+//! the head is the longest head (at such a boundary) that fits in its form,
+//! and no earlier
+//! form fits at any cut, so "the first form that fits wins" (rule 2): each
+//! step adds at least one byte of head and removes it from the left-out
+//! text, the count of the left-out text drops by at most one per byte, and
+//! the marker shrinks by at most one byte per unit, so the total never
+//! shrinks. Monotone in bytes alone is not enough: an estimator whose count
+//! jumps by a huge amount past some size can make the search skip a form
+//! that fits (Lean `Fit.rust_jump_skips_a_fitting_form`, on a real block).
+//! The default estimator `ceil(bytes / 3.5)`, the only one any production
+//! caller passes, is steady with the real marker (`Fit.rust_default_steady`).
 //!
 //! Cuts are on char boundaries, not grapheme boundaries: a head may end
 //! inside a combined emoji or a base letter's combining marks. That is
