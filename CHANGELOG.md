@@ -16,6 +16,19 @@
   first and latest write, so a writer between them (re-sent over by a third
   write) is still not attributable. `formal/LamboProofs/Conflict.lean` models
   the fix (`conflictAtFixed`).
+- Recall: a dependency-question phrase ("depends on", "dependents of",
+  "what uses", "safe to delete", ...) now routes a query to graph traversal
+  only where it stands as whole words (#299). The classifier was a substring
+  test, so "the answer depends only on the score" (via "depends on"), "who
+  are the independents of the senate" and "the team somewhat uses the old
+  schema" were answered by traversal when the words after the phrase named a
+  concept with dependents. The phrase now follows the word rule subject names
+  already follow (letters, digits, `_` and combining marks are word
+  characters; a hyphen between word characters joins them), and anchor
+  resolution measures a subject's distance only from those whole-word
+  phrases. `formal/LamboProofs/Dispatch.lean` models the fixed classifier and
+  proves that a phrase glued to a longer word never counts, that every phrase
+  as whole words still does, and that the dispatch theorems hold for it.
 - Recall: an exact durable-name match now raises the named concept's
   phase-1 keyword score to at least 1.0 instead of overwriting it with 1.0
   (#288). BM25 is unnormalized and routinely above 1.0, so the overwrite could

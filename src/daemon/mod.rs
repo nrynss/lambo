@@ -783,14 +783,16 @@ impl Daemon {
         }
         // T9: route by query kind. A structural/dependency question is answered
         // by traversal below; the gather and the blended pipeline are skipped
-        // only for a DISPATCHED structural query (N2) - one that actually resolves
-        // an anchor with structural dependents.
+        // only for a DISPATCHED structural query (N2) - one whose subject
+        // actually resolves to an anchor with structural dependents, or to an
+        // ambiguous subject (#129), which is answered with a warning alone.
         let structural =
             route.routes_structural() && dispatch::classify(&query.query) == RecallKind::Structural;
 
         // Cheap in-memory dispatch check (no store I/O) under a brief graph read:
         // does the query resolve an anchor WITH structural dependents, at a
-        // `top_k` the traversal can answer (#263: not 0)? Only then can the
+        // `top_k` the traversal can answer (#263: not 0), or an ambiguous
+        // subject (#129, at any `top_k`)? Only then can the
         // (async, vector-I/O) gather be skipped (T9-R1-3); a structural
         // phrasing that does not dispatch falls through to the FULL blend
         // below, never a degraded keyword-only answer. A write landing between
