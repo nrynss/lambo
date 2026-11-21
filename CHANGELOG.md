@@ -75,8 +75,9 @@
   (#302). `select` documented its hits as taken "in any order" and its
   candidates as "ranked by cosine", but the first occurrence decided the
   cosine and so the rank. Latent: no current vector source returns a
-  duplicate id. `formal/LamboProofs/Supersession.lean` still models the
-  first-occurrence rule.
+  duplicate id. `formal/LamboProofs/Supersession.lean` models the fix
+  (`selectF`) and proves the list does not depend on the order or repetition
+  of the hits (`selectF_order_independent`).
 - Canonical keys: an empty stem no longer reaches a key (#301, item 1). The
   Snowball English stemmer stems `''s` to the empty string, and the
   tokenizer kept it, so `''s-lease` keyed as `" leas"` (a leading space, and

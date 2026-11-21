@@ -199,7 +199,10 @@ fn ordering_cap_and_dedup() {
 
 /// #302: a duplicate id keeps its highest-scoring occurrence wherever it
 /// stands in the store's order ("in any order", "ranked by cosine"), not
-/// its first one.
+/// its first one. Mirrors the Lean theorems `Supersession.keepF_best` (one
+/// entry per id, at its highest score) and
+/// `Supersession.selectF_order_independent` (the list does not depend on
+/// hit order or repetition), and the `selectF` examples on these inputs.
 #[test]
 fn a_duplicate_id_keeps_its_highest_cosine() {
     use ConceptType::Logic;
