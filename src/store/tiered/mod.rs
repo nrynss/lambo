@@ -241,6 +241,9 @@ struct SessionTier {
     /// The token of a lease this store acquired for the session, if held.
     held: Option<u64>,
     mirror_failures: u64,
+    /// Why the session last left `InSync` (a failed mirror or repair, an
+    /// unleased write, a contract change). Historical: a repair that brings
+    /// the session back in sync does not clear it.
     last_error: Option<String>,
     next_repair: Option<Instant>,
     /// When a read may next re-check an `Unknown` session (a check reads the
@@ -360,6 +363,8 @@ pub(crate) struct TierStatus {
     pub token: u64,
     pub flush_counter: u32,
     pub mirror_failures: u64,
+    /// Historical: why the session last left `InSync`, kept after it is
+    /// back in sync.
     pub last_error: Option<String>,
 }
 

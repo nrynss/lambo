@@ -13,10 +13,12 @@
   the same way. Now a batch that moves an existing contract, or stamps one
   after an upsert that carries a vector, writes nothing to the index: the
   session goes stale (not counted as a mirror failure), its reads fall back
-  to the store, and the writer repairs it at once from the durable snapshot,
+  to the store, and the writer asks for a repair from the durable snapshot,
   which indexes every vector under the new contract and sweeps the old
-  contract's documents. If the command releases the lease before the repair
-  finishes, the next writer's load finishes it. Batches without a contract
+  contract's documents. The repair starts right away unless a recent failed
+  repair is still backing off, in which case it runs once the backoff ends.
+  If the command releases the lease before the repair finishes, the next
+  writer's load finishes it. Batches without a contract
   change, and first stamps that come before the concepts (every derive), are
   mirrored as before. Modelled first in `formal/LamboProofs/Tiered.lean`
   (`mirror_switch_writes_nothing`, `write_agrees`,

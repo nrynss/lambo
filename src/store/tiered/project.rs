@@ -383,6 +383,17 @@ mod tests {
         assert!(switched(&[set(Some(k2.clone())), v(a)], Some(k1.clone())));
         // A cleared contract.
         assert!(switched(&[set(None)], Some(k1.clone())));
+        // Several SetEmbeddings: a move that a later one undoes still
+        // switched (the batch is not trusted), and a first stamp followed
+        // by a move switches at the move.
+        assert!(switched(
+            &[set(Some(k2.clone())), set(Some(k1.clone()))],
+            Some(k1.clone())
+        ));
+        assert!(switched(
+            &[set(Some(k1.clone())), set(Some(k2.clone()))],
+            None
+        ));
         // Not switches: a first stamp first, a vectorless upsert before a
         // first stamp, the same contract again, no SetEmbedding at all.
         assert!(!switched(&[set(Some(k1.clone())), v(a)], None));

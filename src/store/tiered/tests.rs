@@ -821,6 +821,78 @@ async fn a_reembed_migration_is_indexed_under_the_new_contract() {
     assert!(matches!(err, StoreError::Invariant(_)), "{err:?}");
 }
 
+/// #319, the relabel half: `--allow-embedding-mismatch` flushes a lone
+/// `SetEmbedding` (a same-kind model rename that keeps every vector). The
+/// previous mirror wrote nothing, advanced the marker and stayed in sync, so
+/// the vectors the store now holds under the new contract were in no
+/// document of its index (`relabel_leaves_new_index_empty` in
+/// `formal/LamboProofs/Tiered.lean`). Now the batch is repaired from the
+/// durable store (`mirror_switch_writes_nothing`), and the new contract's
+/// index serves the kept vectors.
+#[tokio::test]
+async fn a_relabel_is_indexed_under_the_new_contract() {
+    let (primary, fake) = (memory_primary(), Arc::new(FakeIndex::new()));
+    let store = tier(&primary, &fake);
+    let sid = SessionId::new("relabel");
+    let token = attach(&store, &sid, &holder("w")).await;
+    let (s, b) = seed_batch(&sid, 1);
+    store.flush(&b, Some(token)).await.unwrap();
+    assert_eq!(store.tier_status(&sid).sync, TierSync::InSync);
+
+    let renamed = EmbeddingContract {
+        model: Some("renamed".into()),
+        ..contract()
+    };
+    store
+        .flush(
+            &batch(2, vec![set_contract(&sid, Some(renamed.clone()))]),
+            Some(token),
+        )
+        .await
+        .unwrap();
+    let status = store.tier_status(&sid);
+    assert_ne!(status.sync, TierSync::InSync, "the relabel is not trusted");
+    assert_eq!(status.mirror_failures, 0, "a relabel is not a failure");
+    assert!(
+        status
+            .last_error
+            .as_deref()
+            .is_some_and(|e| e.contains("contract changed")),
+        "{status:?}"
+    );
+
+    settle(&store).await;
+    assert_eq!(store.tier_status(&sid).sync, TierSync::InSync);
+    assert_eq!(fake.marker(&sid), Some(2));
+    let new_index = fake.index_name(&renamed);
+    let live = fake.live(&sid);
+    assert_eq!(live.len(), 2, "{live:?}");
+    for (id, vector) in [(s.c1, [1.0, 0.0, 0.0, 0.0]), (s.c2, [0.0, 1.0, 0.0, 0.0])] {
+        let (index, doc) = &live[&id.0.to_string()];
+        assert_eq!(
+            index, &new_index,
+            "{id:?} is indexed under the new contract"
+        );
+        assert_eq!(doc.embedding, vector.to_vec(), "{id:?} keeps its vector");
+    }
+    let knn_before = fake.knn_calls.load(std::sync::atomic::Ordering::SeqCst);
+    let got = store
+        .vector_candidates_checked(&sid, &PROBE, &renamed, 10)
+        .await
+        .unwrap();
+    assert_eq!(
+        fake.knn_calls.load(std::sync::atomic::Ordering::SeqCst),
+        knn_before + 1,
+        "served from the index"
+    );
+    assert_eq!(ids(&got), vec![s.c1, s.c2]);
+    let err = store
+        .vector_candidates_checked(&sid, &PROBE, &contract(), 10)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, StoreError::Invariant(_)), "{err:?}");
+}
+
 #[tokio::test]
 async fn a_session_without_a_contract_or_data_answers_empty() {
     let (primary, fake) = (memory_primary(), Arc::new(FakeIndex::new()));
