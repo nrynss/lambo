@@ -14,14 +14,36 @@
 //! the edge's write timestamp**, falling back to the source concept's
 //! `origin_agent` when no interaction was written at that instant.
 //!
+//! ### Re-sends (#297)
+//!
+//! A concept→concept edge is resolved at **two** write instants, and the
+//! writers at both join the agent set: its first write (`created_at`) and its
+//! latest write (`max(created_at, last_reinforced)`). Re-sending an edge (the
+//! same source, target and type, through `record_action` or a derive's
+//! `depends_on`) does not insert a new one: `Graph::upsert_edge` reinforces the
+//! existing edge, keeps its `created_at` and moves `last_reinforced` to the
+//! re-send. Resolving at the latest write alone, the rule before #297, made a
+//! re-send by another agent replace the original writer, so a real conflict
+//! could vanish from every node. Resolving at `created_at` alone, as
+//! contradiction dating does (`attribute_at`), would drop the re-sender
+//! instead. Both join: the original writer stays however often the edge is
+//! re-sent, and the latest re-sender is in the set too.
+//!
+//! The edge records nothing between those two instants (the §5 shape is
+//! frozen: no agent id, and reinforcement keeps only the latest time), so a
+//! writer re-sent over by a later write is not attributable: agent-a writes,
+//! agent-b re-sends, agent-a re-sends again, and agent-b drops out.
+//! `formal/LamboProofs/Conflict.lean` models this (`conflictAtFixed`).
+//!
 //! Resolving by write time rather than by the source concept's origin is
 //! ALGO-3's fix: `record_action` reuses an already-canonical concept as the
 //! source of a new edge, so origin-based attribution credits the concept's
 //! original author instead of the acting agent — collapsing the demo's
 //! two-agent set to one and silently suppressing the conflict.
 //!
-//! "Agent X has an edge to node N" == X is the resolved writer of at least one
-//! edge incident to N (N as source or as target).
+//! "Agent X has an edge to node N" == X is a resolved writer, at its first or
+//! its latest write, of at least one edge incident to N (N as source or as
+//! target).
 //!
 //! ### Same-instant collisions (NEW-4)
 //!
@@ -65,7 +87,8 @@
 //! An edge's latest write is `max(created_at, last_reinforced)` (creation or a
 //! duplicate natural-key reinforcement). Write activity falls **inside** the
 //! window iff that time is in `[now - window, now]` — inclusive: a write
-//! exactly `window` ago or exactly at `now` counts.
+//! exactly `window` ago or exactly at `now` counts. A re-send is write
+//! activity: it moves the edge's latest write.
 //!
 //! ## Future-dated edges (mocked `now`)
 //!
@@ -80,7 +103,9 @@
 //!
 //! The age, in whole seconds (truncated), of the most recent qualifying write
 //! — the latest `Causal`/`Dependency` write inside the window — together with
-//! the agent that made *that* write ([`ConflictHit::writer`], ALGO-2). T5.3
+//! the agent that made *that* write ([`ConflictHit::writer`], ALGO-2), resolved
+//! at that latest write: after a re-send it names the re-sender, who is in
+//! `agents` because the latest write's writers always join it (#297). T5.3
 //! renders "Agent A wrote to it eleven seconds ago" from `writer` +
 //! `seconds_ago`; `agents` is the full contesting set. Deriving the subject
 //! from `agents` alone is not possible and guessing is wrong on the shipped
@@ -123,7 +148,8 @@ pub const CONFLICT_RECENCY_WINDOW: Duration = Duration::from_secs(30);
 pub struct ConflictHit {
     /// The contested node.
     pub node: NodeId,
-    /// Agents with edges to the node, sorted by id (deterministic).
+    /// Agents with edges to the node, sorted by id (deterministic): each
+    /// edge's writers at its first write and at its latest (#297).
     pub agents: Vec<AgentId>,
     /// The agent that made the most recent qualifying write (ALGO-2) — the
     /// subject of spec §13's "Agent A wrote to it eleven seconds ago".
@@ -290,6 +316,9 @@ impl EdgeWriters<'_> {
 /// attributed to agent A. Both edges then read as agent A's, the agent set
 /// collapses to one, and the conflict silently does not fire.
 ///
+/// Resolved at the write instant `at`: [`conflict_at_with`] asks at the edge's
+/// `created_at` and at its latest write (#297).
+///
 /// `None` for a `Contradicts` edge, whose writer never joins the agent set
 /// (#19(c) owner decision 2, option B, applied with #19(b), the first
 /// product path that writes one): conflict lines stay about concurrent
@@ -301,6 +330,7 @@ impl EdgeWriters<'_> {
 fn edge_writers<'a>(
     graph: &'a Graph,
     edge: &Edge,
+    at: DateTime<Utc>,
     timeline: &'a WriterTimeline,
 ) -> Option<EdgeWriters<'a>> {
     if matches!(
@@ -309,30 +339,16 @@ fn edge_writers<'a>(
     ) {
         return None;
     }
-    attribute(graph, edge, timeline)
+    attribute_at(graph, edge, at, timeline)
 }
 
-/// The agents that may have written `edge`, by the resolution order of
-/// [`edge_writers`], for every edge type (`Contradicts` included). `None`
-/// only for a source node missing from the graph.
-fn attribute<'a>(
-    graph: &'a Graph,
-    edge: &Edge,
-    timeline: &'a WriterTimeline,
-) -> Option<EdgeWriters<'a>> {
-    attribute_at(
-        graph,
-        edge,
-        edge.last_reinforced.max(edge.created_at),
-        timeline,
-    )
-}
-
-/// [`attribute`], resolving a concept-sourced edge's writer at the write
-/// instant `at` instead of the edge's latest write. #19(c) passes the
-/// edge's `created_at`: a contradiction (or a piece of evidence) is dated by
-/// its first declaration, so it is attributed to that declaration's writer
-/// too, not to whoever re-sent it.
+/// The agents that may have written `edge` at the write instant `at`, by the
+/// resolution order of [`edge_writers`], for every edge type (`Contradicts`
+/// included). `None` only for a source node missing from the graph. #19(c)
+/// passes the edge's `created_at`: a contradiction (or a piece of evidence)
+/// is dated by its first declaration, so it is attributed to that
+/// declaration's writer too, not to whoever re-sent it. Conflict detection
+/// asks at `created_at` and at the latest write (#297).
 pub(crate) fn attribute_at<'a>(
     graph: &'a Graph,
     edge: &Edge,
@@ -381,19 +397,27 @@ fn conflict_at_with(
     let mut newest: Option<(DateTime<Utc>, AgentId)> = None;
 
     for edge in graph.incident_edges(node) {
-        let Some(writers) = edge_writers(graph, edge, timeline) else {
+        let last_write = edge.last_reinforced.max(edge.created_at);
+        // The edge's writers at its first write and at its latest (#297): a
+        // re-send by another agent keeps the original writer in the set, and
+        // the re-sender joins it. Both are `None` together (edge type or a
+        // missing source).
+        let (Some(first), Some(writers)) = (
+            edge_writers(graph, edge, edge.created_at, timeline),
+            edge_writers(graph, edge, last_write, timeline),
+        ) else {
             continue;
         };
         // Every candidate joins the set (NEW-4) — see `EdgeWriters::all`.
-        for agent in writers.all() {
+        for agent in first.all().chain(writers.all()) {
             if !agents.contains(agent) {
                 agents.push(agent.clone());
             }
         }
 
         // Write activity inside [now - window, now]; future-dated edges (the
-        // edge's last write is after `now`) are outside the window.
-        let last_write = edge.last_reinforced.max(edge.created_at);
+        // edge's last write is after `now`) are outside the window. A re-send
+        // is write activity, and `writers.named()` is who made it.
         let qualifying = matches!(edge.edge_type, EdgeType::Causal | EdgeType::Dependency)
             && last_write <= now
             && last_write >= window_start;
@@ -1095,6 +1119,107 @@ mod tests {
         // smallest interaction id at the instant (documented ambiguity).
         assert_eq!(hit.writer, AgentId::from("agent-a"));
         assert_eq!(hit.seconds_ago, 10);
+    }
+
+    /// #297's graph: agent-a's interaction creates "session store" and "user
+    /// schema"; `agent_1` (one interaction, at `first`) writes "session store"
+    /// depends on "user schema"; every later `(agent, at)` re-sends that
+    /// dependency, which reinforces the one edge (a duplicate natural key).
+    ///
+    /// Returns `(graph, session store, user schema)`.
+    fn resent_dependency_graph(
+        first: (&str, i64),
+        resends: &[(&str, i64)],
+    ) -> (Graph, NodeId, NodeId) {
+        let mut g = Graph::new(sid());
+        let i1 = interaction(1, None, "agent-a", 3600 - 100);
+        g.insert_interaction(i1.clone()).unwrap();
+        let store = concept(1, i1.id, "agent-a", "session store", 3600 - 100);
+        let store_id = store.id;
+        g.insert_concept(store, i1.id).unwrap();
+        let schema = concept(2, i1.id, "agent-a", "user schema", 3600 - 100);
+        let schema_id = schema.id;
+        g.insert_concept(schema, i1.id).unwrap();
+
+        let writes = std::iter::once(&first).chain(resends);
+        for (n, (agent, at)) in (2u64..).zip(writes) {
+            g.insert_interaction(interaction(n, Some(n - 1), agent, *at))
+                .unwrap();
+            // What `record_action` sends: a fresh edge stamped with the acting
+            // interaction's time; `upsert_edge` folds it into the existing one.
+            g.upsert_edge(dep_edge(n, store_id, schema_id, *at))
+                .unwrap();
+        }
+        assert!(g.assert_invariants().is_ok());
+        (g, store_id, schema_id)
+    }
+
+    /// #297: a re-send by another agent must not drop the edge's original
+    /// writer. agent-b writes the dependency 30 s ago, agent-a re-sends it
+    /// 10 s ago. Before the fix the edge was attributed at its latest write
+    /// only, so it read as agent-a's, agent-b vanished from every node and no
+    /// conflict fired. Mirrors the Lean theorems `Conflict.issue_297_fixed`
+    /// (this scenario) and `Conflict.resend_keeps_creator` (the first writer
+    /// stays after any re-send); `seconds_ago` and `writer` still describe the
+    /// latest write (`Conflict.writer_mem_agents_fixed`).
+    #[test]
+    fn a_resend_by_another_agent_keeps_the_original_writer() {
+        let now = t(3600);
+        let (g, store, schema) =
+            resent_dependency_graph(("agent-b", 3600 - 30), &[("agent-a", 3600 - 10)]);
+        let hits = detect(&g, CONFLICT_RECENCY_WINDOW, now);
+        for node in [schema, store] {
+            let hit = hits
+                .iter()
+                .find(|h| h.node == node)
+                .unwrap_or_else(|| panic!("both agents wrote the dependency: {hits:?}"));
+            assert_eq!(
+                hit.agents,
+                vec![AgentId::from("agent-a"), AgentId::from("agent-b")]
+            );
+            assert_eq!(
+                hit.writer,
+                AgentId::from("agent-a"),
+                "the re-send is newest"
+            );
+            assert_eq!(hit.seconds_ago, 10);
+        }
+    }
+
+    /// The mirror of #297: agent-a writes the dependency, agent-b re-sends it.
+    /// The re-sender joins the agent set (it fired before the fix too); a fix
+    /// that attributed at `created_at` alone would lose agent-b here. Mirrors
+    /// `Conflict.resend_by_other_joins` and `Conflict.resend_adds_resender`.
+    #[test]
+    fn a_resend_by_another_agent_joins_the_agent_set() {
+        let now = t(3600);
+        let (g, _, schema) =
+            resent_dependency_graph(("agent-a", 3600 - 30), &[("agent-b", 3600 - 10)]);
+        let hit = conflict_at(&g, schema, CONFLICT_RECENCY_WINDOW, now).expect("fires");
+        assert_eq!(
+            hit.agents,
+            vec![AgentId::from("agent-a"), AgentId::from("agent-b")]
+        );
+        assert_eq!(hit.writer, AgentId::from("agent-b"));
+        assert_eq!(hit.seconds_ago, 10);
+    }
+
+    /// The documented residual of #297's fix: an edge records only its first
+    /// and its latest write, so when agent-a writes, agent-b re-sends and
+    /// agent-a re-sends again, agent-b is no longer attributable. Mirrors
+    /// `Conflict.second_resend_drops_first_resender`.
+    #[test]
+    fn a_second_resend_drops_the_first_resender() {
+        let now = t(3600);
+        let (g, _, schema) =
+            resent_dependency_graph(("agent-a", 3600 - 30), &[("agent-b", 3600 - 20)]);
+        let hit = conflict_at(&g, schema, CONFLICT_RECENCY_WINDOW, now).expect("fires");
+        assert_eq!(hit.writer, AgentId::from("agent-b"));
+        let (g, _, schema) = resent_dependency_graph(
+            ("agent-a", 3600 - 30),
+            &[("agent-b", 3600 - 20), ("agent-a", 3600 - 10)],
+        );
+        assert!(conflict_at(&g, schema, CONFLICT_RECENCY_WINDOW, now).is_none());
     }
 
     /// A window past chrono's range covers all of time instead of panicking

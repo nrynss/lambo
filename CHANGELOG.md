@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- Conflict detection: a re-send by another agent no longer drops an edge's
+  original writer from the conflict agent set (#297). Re-sending an edge (the
+  same source, target and type, through `record_action` or `lambo_derive`'s
+  `depends_on`) reinforces the one edge and moves its `last_reinforced`, and
+  `daemon::conflict` resolved the edge's writer only at that latest write,
+  so the edge read as the re-sender's alone and a real conflict could vanish.
+  An edge now contributes its writers at its first write (`created_at`, the
+  instant contradiction dating already attributes at) and at its latest
+  write. The window test, the named `writer` and `seconds_ago` still describe
+  the latest write. Where no edge was re-sent nothing changes, and every
+  conflict the old rule found still fires. The graph keeps only an edge's
+  first and latest write, so a writer between them (re-sent over by a third
+  write) is still not attributable. `formal/LamboProofs/Conflict.lean` models
+  the fix (`conflictAtFixed`).
 - Recall: an exact durable-name match now raises the named concept's
   phase-1 keyword score to at least 1.0 instead of overwriting it with 1.0
   (#288). BM25 is unnormalized and routinely above 1.0, so the overwrite could
