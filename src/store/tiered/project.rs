@@ -89,9 +89,10 @@ pub(crate) struct Projection {
     /// contract in force when a contract was already in force (the session's
     /// other vectors are now the new contract's: the
     /// `--allow-embedding-mismatch` relabel, or a migration), or when an
-    /// upsert carrying a vector came earlier in the batch
-    /// (`Graph::reembed_all` drains its rewritten vectors before the
-    /// `SetEmbedding`, and a first stamp quarantines them durably). The
+    /// upsert carrying a vector came earlier in the batch (vectors written
+    /// before a first stamp are quarantined durably by that stamp; since
+    /// #322 `Graph::reembed_all` stamps a contract-less session first, so
+    /// this guards raw writers). The
     /// mirror does not trust `ops` then and repairs from the durable store.
     /// A first stamp before any vector, or a `SetEmbedding` that keeps the
     /// contract, is not a switch. Lean: `switches` in
@@ -374,7 +375,8 @@ mod tests {
         let switched = |muts: &[Mutation], before: Option<EmbeddingContract>| {
             project(&sid, muts, before, None).switched
         };
-        // `reembed_all`'s order, from a contract and from none.
+        // Vectors then a `SetEmbedding`: `reembed_all`'s order from a
+        // contract; from none, the order before #322 (now a raw writer's).
         let reembed = [v(a), v(b), set(Some(k2.clone()))];
         assert!(switched(&reembed, Some(k1.clone())));
         assert!(switched(&reembed, None));

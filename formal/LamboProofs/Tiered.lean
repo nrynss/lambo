@@ -136,10 +136,13 @@ overfetch, the exact re-rank and its boundary, the projection table, and the
   quarantined (`projectFinal_ahead_of_durable`); reordering `reembed_all`
   changes what the durable store keeps (`reorder_changes_durable`). The fix
   takes the third: a switching batch is repaired, not mirrored.
-* `reorder_changes_durable` also shows a durable-side hazard outside the tier:
-  re-embedding a session that has no contract yet (`reembed_all` from none)
-  writes its vectors and then stamps, and every store's first-stamp
-  quarantine nulls them in the same transaction.
+* `reorder_changes_durable` also showed a durable-side hazard outside the
+  tier: re-embedding a session that had no contract yet (`reembed_all` from
+  none) wrote its vectors and then stamped, and every store's first-stamp
+  quarantine nulled them in the same transaction. #322 fixed it on the
+  durable side (`Contract.reembedOrdered_contractless_durable`): such a
+  re-embed now stamps first, which `switches` reads as a first stamp, not a
+  switch.
 * `inplace_reembed_mixes_builds` (the #296 review's case): an in-place
   re-embed (`--rewrite-same-contract`) is one durable transaction, but the
   index takes the bulk item by item into the same contract's index while the
@@ -439,9 +442,10 @@ projection cannot say what the new contract's index must hold. A
 `SetEmbedding` that changes the contract in force counts when a contract was
 already in force (the session's other vectors are now the new contract's:
 `--allow-embedding-mismatch`'s relabel, or a migration) or when a concept
-upsert carrying a vector came earlier in the batch (`Graph::reembed_all`'s
-order: its vector is the new contract's, and a first stamp quarantines it
-durably). A first stamp with nothing before it, or a `SetEmbedding` that
+upsert carrying a vector came earlier in the batch (its vector is the new
+contract's, and a first stamp quarantines it durably; `Graph::reembed_all`
+wrote that order from no contract before #322, and a raw writer still can).
+A first stamp with nothing before it, or a `SetEmbedding` that
 keeps the contract, does not count. -/
 def switchesGo : List Mut → Option Nat → Bool → Bool
   | [], _, _ => false
