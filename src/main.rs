@@ -140,7 +140,7 @@ enum Commands {
         /// inherit_serve_credentials. It reads
         /// every served session; [[web.credential]] entries read only their
         /// own.
-        #[arg(long, value_name = "TOKEN")]
+        #[arg(long, value_name = "TOKEN", value_parser = WebAuthTokenParser)]
         auth_token: Option<lambo::cli::serve_web::AuthToken>,
         /// A Host (name or address, optionally :port) the portal also
         /// answers while no credential is configured, beside localhost,
@@ -1678,41 +1678,83 @@ impl clap::builder::TypedValueParser for AuthTokenArgParser {
     }
 }
 
-/// `--auth-token` for an HTTP serve: [`lambo::mcp::SecretToken::new`], with
-/// clap's usage error (exit 2) that never quotes the value (#32 PR 5 review
-/// L3).
+/// `serve-web --auth-token`'s parser (#315): checks the token when clap
+/// parses it, as `AuthToken: FromStr` did (`serve-web` is HTTP only, so no
+/// transport waits to decide), but refuses through [`auth_token_refusal`],
+/// so clap never adds the value to its error. The kind
+/// (`ValueValidation`), hence the exit code (2), and the rule named are the
+/// ones the `FromStr` parser gave.
+#[derive(Clone)]
+struct WebAuthTokenParser;
+
+impl clap::builder::TypedValueParser for WebAuthTokenParser {
+    type Value = lambo::cli::serve_web::AuthToken;
+
+    fn parse_ref(
+        &self,
+        cmd: &clap::Command,
+        arg: Option<&clap::Arg>,
+        value: &std::ffi::OsStr,
+    ) -> Result<Self::Value, clap::Error> {
+        check_auth_token(value).map_err(|why| {
+            auth_token_refusal(cmd, arg, clap::error::ErrorKind::ValueValidation, &why)
+        })
+    }
+}
+
+/// An `--auth-token` value as a token of type `T`: UTF-8, then `T`'s own
+/// rule (its `FromStr`, whose error names the rule and never the value).
+/// Shared by `lambo serve` ([`http_auth_token_flag`]) and `lambo serve-web`
+/// ([`WebAuthTokenParser`]) so the two cannot drift.
+fn check_auth_token<T: std::str::FromStr<Err = String>>(
+    raw: &std::ffi::OsStr,
+) -> Result<T, String> {
+    raw.to_str()
+        .ok_or_else(|| "auth token is not valid UTF-8".to_string())?
+        .parse()
+}
+
+/// The usage error for a refused `--auth-token` (#32 PR 5 review L3, #315):
+/// a clap error of `kind` on `cmd` that names the flag and the rule `why`,
+/// never the value.
 ///
 /// clap's own error for a rejected value repeats the value ("invalid value
 /// '<it>' for ..."), and for a token with a stray trailing space that is the
-/// secret on stderr. This reports the reason alone.
+/// secret on stderr. Both `--auth-token` refusals are built here instead;
+/// `Resolve.lean` models the text as `render`'s `flagRefusal` and
+/// `webFlagRefusal` (`web_flag_refusal_eq_serve`).
+fn auth_token_refusal(
+    cmd: &clap::Command,
+    arg: Option<&clap::Arg>,
+    kind: clap::error::ErrorKind,
+    why: &str,
+) -> clap::Error {
+    let flag = arg.map_or_else(|| "--auth-token".to_string(), ToString::to_string);
+    cmd.clone().error(
+        kind,
+        format!("invalid value for '{flag}': {why} (the value is not shown)"),
+    )
+}
+
+/// `--auth-token` for an HTTP serve: [`lambo::mcp::SecretToken::new`], with
+/// clap's usage error (exit 2) from [`auth_token_refusal`], which never
+/// quotes the value.
 fn http_auth_token_flag(
     flag: Option<AuthTokenArg>,
 ) -> Result<Option<lambo::mcp::SecretToken>, ExitCode> {
     let Some(AuthTokenArg(raw)) = flag else {
         return Ok(None);
     };
-    let checked = match raw.to_str() {
-        Some(raw) => lambo::mcp::SecretToken::new(raw),
-        None => Err("auth token is not valid UTF-8".to_string()),
-    };
-    checked.map(Some).map_err(|why| {
+    check_auth_token(&raw).map(Some).map_err(|why| {
         let mut command = Cli::command();
         command.build();
-        let err = match command.find_subcommand_mut("serve") {
+        let kind = clap::error::ErrorKind::InvalidValue;
+        let err = match command.find_subcommand("serve") {
             Some(serve) => {
-                let flag = serve
-                    .get_arguments()
-                    .find(|a| a.get_id() == "auth_token")
-                    .map_or_else(|| "--auth-token".to_string(), ToString::to_string);
-                serve.error(
-                    clap::error::ErrorKind::InvalidValue,
-                    format!("invalid value for '{flag}': {why} (the value is not shown)"),
-                )
+                let flag = serve.get_arguments().find(|a| a.get_id() == "auth_token");
+                auth_token_refusal(serve, flag, kind, &why)
             }
-            None => command.error(
-                clap::error::ErrorKind::InvalidValue,
-                format!("invalid value for '--auth-token': {why} (the value is not shown)"),
-            ),
+            None => auth_token_refusal(&command, None, kind, &why),
         };
         let _ = err.print();
         ExitCode::from(2)
@@ -2943,5 +2985,115 @@ dim = 1024
         assert_eq!(full.embedding.dim, 1024);
         assert!(full.store.vector_dimensions().is_none());
         let _ = resolve_store_only(Some(&path)).expect("store only");
+    }
+
+    /// `lambo serve-web --auth-token` never echoes a malformed token (#315).
+    ///
+    /// Before the fix the flag was parsed through `AuthToken: FromStr`, and
+    /// clap's `InvalidValue` error quoted the refused value, so a stray
+    /// trailing space put the secret on stderr. Mirrors `Resolve.lean`:
+    /// `render_noninterference` at `PrintPath.webFlagRefusal` (the refusal
+    /// depends on the token only through its verdict),
+    /// `serve_web_flag_refusal_fixed` (the issue's `'x '` and
+    /// `'NOTASECRET-probe '` print the same line, naming the rule), and
+    /// `web_flag_refusal_keeps_reason` (the rule is still named); the
+    /// previous version is `serve_web_flag_refusal_leaks`. The refusal is
+    /// still clap's `ValueValidation` usage error (exit 2) at parse time.
+    ///
+    /// Mutation: parse the flag through `AuthToken: FromStr` again -> red.
+    #[test]
+    fn serve_web_auth_token_refusal_never_quotes_the_value() {
+        let too_long = format!("NOTASECRET{}", "Z".repeat(4096));
+        let cases: [(&str, &str); 4] = [
+            ("x ", "leading or trailing whitespace"),
+            ("NOTASECRET-probe ", "leading or trailing whitespace"),
+            ("NOTASECRET\u{1}probe", "outside printable ASCII"),
+            (&too_long, "longer than 4096 bytes"),
+        ];
+        for (token, reason) in cases {
+            let err = Cli::try_parse_from(["lambo", "serve-web", "--auth-token", token])
+                .expect_err("a malformed --auth-token must be refused at parse time");
+            let text = err.render().to_string();
+            assert!(
+                !text.contains(&format!("'{token}'")) && !text.contains("NOTASECRET"),
+                "the refused value must not be shown: {text:?}"
+            );
+            // What the fix keeps: clap's kind and exit code from the
+            // `FromStr` parser, the flag and the rule.
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::ValueValidation,
+                "{text}"
+            );
+            assert_eq!(err.exit_code(), 2, "{text}");
+            assert!(
+                text.contains("--auth-token <TOKEN>"),
+                "names the flag: {text}"
+            );
+            assert!(text.contains(reason), "names the rule ({reason}): {text}");
+        }
+        // Two tokens refused for the same reason print the same error.
+        let line = |token: &str| {
+            Cli::try_parse_from(["lambo", "serve-web", "--auth-token", token])
+                .expect_err("refused")
+                .render()
+                .to_string()
+        };
+        assert_eq!(line("x "), line("NOTASECRET-probe "));
+    }
+
+    /// `serve-web`'s `--auth-token` refusal says what `serve`'s says, word
+    /// for word (one builder, #315). Mirrors `Resolve.lean`'s
+    /// `web_flag_refusal_eq_serve`.
+    #[test]
+    fn serve_web_auth_token_refusal_line_is_serves() {
+        let web = Cli::try_parse_from(["lambo", "serve-web", "--auth-token", "x "])
+            .expect_err("refused")
+            .render()
+            .to_string();
+        let why = check_auth_token::<lambo::mcp::SecretToken>(std::ffi::OsStr::new("x "))
+            .expect_err("serve refuses it too");
+        let mut command = Cli::command();
+        command.build();
+        let serve_cmd = command.find_subcommand("serve").expect("serve");
+        let flag = serve_cmd
+            .get_arguments()
+            .find(|a| a.get_id() == "auth_token");
+        let serve = auth_token_refusal(serve_cmd, flag, clap::error::ErrorKind::InvalidValue, &why)
+            .render()
+            .to_string();
+        let first = |s: &str| s.lines().next().unwrap_or_default().to_string();
+        assert_eq!(first(&web), first(&serve));
+        assert!(first(&web).ends_with("(the value is not shown)"), "{web}");
+    }
+
+    /// A non-UTF-8 `serve-web --auth-token` is refused without the value
+    /// (#315), like `lambo serve`'s.
+    #[cfg(unix)]
+    #[test]
+    fn serve_web_auth_token_non_utf8_never_quotes_the_value() {
+        use std::os::unix::ffi::OsStrExt;
+        let raw = std::ffi::OsStr::from_bytes(b"NOTASECRET\xff");
+        let err = Cli::try_parse_from([
+            std::ffi::OsStr::new("lambo"),
+            std::ffi::OsStr::new("serve-web"),
+            std::ffi::OsStr::new("--auth-token"),
+            raw,
+        ])
+        .expect_err("a non-UTF-8 --auth-token must be refused");
+        let text = err.render().to_string();
+        assert_eq!(err.exit_code(), 2, "{text}");
+        assert!(!text.contains("NOTASECRET"), "{text:?}");
+    }
+
+    /// A valid `serve-web --auth-token` parses, and `Commands`' `Debug`
+    /// (derived) does not print it.
+    #[test]
+    fn serve_web_valid_auth_token_parses_and_debug_redacts() {
+        let cli = Cli::try_parse_from(["lambo", "serve-web", "--auth-token", "NOTASECRET-ok"])
+            .expect("a valid token parses");
+        let shown = format!("{:?}", cli.command);
+        assert!(shown.contains("<redacted>"), "{shown}");
+        assert!(!shown.contains("NOTASECRET"), "{shown}");
     }
 }

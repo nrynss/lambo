@@ -34,6 +34,18 @@
   session is not erased), so the batch is retained as after any failed flush;
   a stats write that panics or times out is logged and ignored, as a failed
   one was.
+- Security: `lambo serve-web --auth-token` no longer prints a malformed
+  token (#315). The flag was parsed through `AuthToken`'s `FromStr`, so
+  clap's error quoted the refused value (`invalid value 'NOTASECRET-probe '
+  for '--auth-token <TOKEN>': ...`), and a token with a stray trailing space
+  reached stderr and any log capturing it. The refusal is now built the way
+  `lambo serve`'s is: it names the flag and the rule the token broke, says
+  the value is not shown, and still exits `2` at parse time, before
+  `lambo.toml` is read. `docs/reference/cli.mdx` already promised this.
+  `formal/LamboProofs/Resolve.lean` models the fix
+  (`serveWebFlagRefusalFixed`, and `render_noninterference` now covers this
+  path).
+
 - Embedding canary drift repair (#296). On a drift the refusal told the
   operator to run `lambo re-embed`, which refuses a session already under the
   live contract, the only state a drift is detected in. `lambo re-embed

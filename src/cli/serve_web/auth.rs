@@ -115,6 +115,10 @@ impl std::fmt::Debug for AuthToken {
     }
 }
 
+/// The rule, for `lambo`'s own `--auth-token` parsers, which build their
+/// refusal from this error (it never quotes the value). Never a clap
+/// `value_parser` on its own: clap's error for a refused value quotes the
+/// value, which here is the secret (#315).
 impl std::str::FromStr for AuthToken {
     type Err = String;
 
