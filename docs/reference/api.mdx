@@ -680,7 +680,10 @@ never probed. `canon::solo_breakdown` returns the Solo score's terms.
 `PromotionScorer::candidates_with` and `admits_hop_with` (unreleased, #300)
 take a `canon::Writers`, the graph's writer attribution that Solo's
 dependents term reads; the evaluator lends its own, cached by graph epoch,
-so a cycle resolves it once. Their defaults call `candidates` and
+so a cycle resolves it once, and only for a scorer whose `reads_writers()`
+is true (default `false`; Solo overrides it). Any other scorer gets
+`Writers::unresolved()`, and a scorer that reads writers but is handed
+unresolved ones resolves its own. Their defaults call `candidates` and
 `admits_hop`; `Writers::of(&graph)` resolves one for other callers, and
 `canon::solo_dependent_interactions` resolves its own.
 `EvalParams::min_peer_count` and `Config::canonization_min_peer_count` are

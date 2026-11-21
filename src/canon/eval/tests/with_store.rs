@@ -334,6 +334,32 @@ async fn a_solo_cycle_resolves_writers_once() {
     assert_eq!(builds() - before, 0, "unchanged graph: the cached timeline");
 }
 
+/// #300 re-review: Swarm reads no writers, so a Swarm cycle with
+/// supersession off (the default) resolves no writer timeline, as before
+/// #300, however many Candidates and Venerables it asks about.
+#[tokio::test]
+async fn a_swarm_cycle_resolves_no_writers() {
+    use crate::daemon::conflict::TIMELINE_BUILDS;
+    let builds = || TIMELINE_BUILDS.with(|n| n.get());
+    let (mut g, hub_id) = solo_band_only_graph(CanonizationStatus::Candidate, 1);
+    attach_blast(&mut g, 10, 3, 300);
+    let store = store_from_graph(&g).await;
+    let g = RwLock::new(g);
+    let (tx, _rx) = channel();
+    let p = params();
+    assert_eq!(p.promotion_policy, PromotionPolicy::Swarm);
+    assert!(!p.supersede, "the default");
+    let mut ev = Evaluator::new();
+    let before = builds();
+    for _ in 0..2 {
+        eval_cycle(&mut ev, &g, &store, &table(&[]), &tx, &p, ts())
+            .await
+            .unwrap();
+    }
+    assert_eq!(status_of(&g.read(), hub_id), CanonizationStatus::Venerable);
+    assert_eq!(builds() - before, 0);
+}
+
 /// Design test: Solo cannot bypass Stage 3. A Venerable in the Canonical
 /// band ((1 + 8) × 1.2 = 10.8) with no dependents stays Venerable.
 #[tokio::test]

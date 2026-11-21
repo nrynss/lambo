@@ -495,12 +495,15 @@ impl Evaluator {
             self.stage3_cursor = plan.stage3_cursor_before;
         }
 
-        // #300: bring the writer cache up to the graph's current epoch under
-        // a read guard, so apply (which reads it once, before committing)
-        // does not rebuild it under the write guard. A write landing between
-        // the two guards moves the epoch, and apply then rebuilds once, which
-        // is still correct.
-        {
+        // #300: when apply will read the writer timeline (a policy that
+        // reads writers, with a Stage 2 or 3 window to admit, or a
+        // supersession to re-check), bring the cache up to the graph's
+        // current epoch under a read guard, so apply does not rebuild it
+        // under the write guard. A write landing between the two guards
+        // moves the epoch, and apply then rebuilds once, which is still
+        // correct. Otherwise (Swarm with supersession off, the default)
+        // nothing is resolved.
+        if apply_reads_writers(&plan, &verdicts, params) {
             let g = graph.read();
             self.timeline.get(&g);
         }
@@ -586,13 +589,17 @@ impl Evaluator {
         // both policies read (#36 PR 3).
         //
         // #300: Solo's dependents term reads which interaction wrote each
-        // edge. The writers are resolved once per graph epoch (the cache
-        // supersession already uses) and lent to every policy call below,
-        // not rebuilt per call.
-        let writers = Writers::shared(self.timeline.get(graph));
-        let stage1: Vec<NodeId> = params
-            .promotion_policy
-            .scorer()
+        // edge. For a policy that reads writers they are resolved once per
+        // graph epoch (the cache supersession already uses) and lent to
+        // every policy call below, not rebuilt per call; for one that does
+        // not (Swarm), nothing is resolved.
+        let scorer = params.promotion_policy.scorer();
+        let writers = if scorer.reads_writers() {
+            Writers::shared(self.timeline.get(graph), graph)
+        } else {
+            Writers::unresolved()
+        };
+        let stage1: Vec<NodeId> = scorer
             .candidates_with(graph, scores, params, now, &writers)
             .into_iter()
             .filter(|&id| concept_status(graph, id) == Some(CanonizationStatus::None))
@@ -607,7 +614,6 @@ impl Evaluator {
         // admits every member, so its ring is unchanged; Solo drops the
         // Candidates whose band cannot reach Venerable, which would cost a
         // store probe every pass and could never promote.
-        let scorer = params.promotion_policy.scorer();
         let mut candidates = ids_with_status(graph, CanonizationStatus::Candidate);
         candidates.retain(|&id| {
             scorer.admits_hop_with(
@@ -929,6 +935,14 @@ async fn stage2_verdict(
 /// unlocked while the verdicts were computed, so another writer may have
 /// moved it. `outcome` is filled in as hops commit, so a mid-phase failure
 /// still hands the caller everything that did.
+/// Whether [`apply`] will read the writer timeline: a policy that reads
+/// writers with a Stage 2 or Stage 3 window to admit, or a supersession
+/// verdict to re-check (#300).
+fn apply_reads_writers(plan: &CyclePlan, verdicts: &Verdicts, params: &EvalParams) -> bool {
+    let windows = !plan.stage2.is_empty() || (!plan.stage3.is_empty() && !verdicts.stage3_skipped);
+    (params.promotion_policy.scorer().reads_writers() && windows) || !verdicts.supersede.is_empty()
+}
+
 #[allow(clippy::too_many_arguments)] // one cycle's apply input
 fn apply(
     graph: &mut Graph,
@@ -957,11 +971,16 @@ fn apply(
     // its score band.
     let scorer = params.promotion_policy.scorer();
     // #300: the writers Solo's admission reads, taken once before anything
-    // commits. Canonization transitions add no interaction, so they stay
-    // valid for the whole apply; `eval_cycle` refreshed the cache under the
-    // read guard, so this is normally a cache hit, not a build under the
-    // write guard.
-    let writers = Writers::shared(timeline.get(graph));
+    // commits, and only when a policy that reads them has a Stage 2 or 3
+    // window to admit (the Stage-1-only error path has none). Canonization
+    // transitions add no interaction, so they stay valid for the whole
+    // apply; `eval_cycle` refreshed the cache under the read guard, so this
+    // is normally a cache hit, not a build under the write guard.
+    let writers = if scorer.reads_writers() && (!plan.stage2.is_empty() || !stage3.is_empty()) {
+        Writers::shared(timeline.get(graph), graph)
+    } else {
+        Writers::unresolved()
+    };
 
     // --- Supersession (#20): Canonical → None, committed first ---
     // Each verdict is re-checked against the graph as it is now (the store

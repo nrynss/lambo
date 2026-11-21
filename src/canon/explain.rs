@@ -33,12 +33,12 @@ use crate::canon::policy::{
     solo_breakdown, SoloBreakdown, CANDIDATE_BAR, CANONICAL_BAR, VENERABLE_BAR,
 };
 use crate::canon::stage1::{
-    dependent_interactions, solo_dependent_interactions, MIN_DEPENDENT_INTERACTIONS,
-    MIN_GC_SURVIVED,
+    dependent_interactions, solo_dependent_interactions, solo_dependent_interactions_with,
+    MIN_DEPENDENT_INTERACTIONS, MIN_GC_SURVIVED,
 };
 use crate::canon::stage2::{MIN_COVERAGE, MIN_DISTINCT};
 use crate::canon::stage3::{in_repromotion_cooldown, MIN_BLAST_RADIUS};
-use crate::canon::{EvalParams, PromotionPolicy};
+use crate::canon::{EvalParams, PromotionPolicy, Writers};
 use crate::graph::Graph;
 use crate::store::GraphStore;
 use crate::types::InteractionSpan;
@@ -199,6 +199,20 @@ pub fn admission_inputs(
     params: &EvalParams,
     now: DateTime<Utc>,
 ) -> Option<AdmissionInputs> {
+    admission_inputs_with(graph, node, params, now, &Writers::unresolved())
+}
+
+/// [`admission_inputs`] with writers already resolved for `graph`, for a
+/// caller explaining many nodes of one graph (the dry run's survey), so the
+/// writer timeline is resolved once rather than once per node (#300).
+/// Unresolved writers are resolved per node, as [`admission_inputs`] does.
+pub(crate) fn admission_inputs_with(
+    graph: &Graph,
+    node: NodeId,
+    params: &EvalParams,
+    now: DateTime<Utc>,
+    writers: &Writers,
+) -> Option<AdmissionInputs> {
     let Some(Node::Concept(c)) = graph.node(node) else {
         return None;
     };
@@ -206,11 +220,15 @@ pub fn admission_inputs(
     let solo = match params.promotion_policy {
         // Solo's dependents term credits each dependence to the turn that
         // wrote it (#300), so it can differ from Stage 1's count.
-        PromotionPolicy::Solo => Some(solo_breakdown(
-            graph,
-            c,
-            solo_dependent_interactions(graph, node, params.min_age, now),
-        )),
+        PromotionPolicy::Solo => {
+            let solo_deps = match writers.for_graph(graph) {
+                Some(timeline) => {
+                    solo_dependent_interactions_with(graph, node, params.min_age, now, timeline)
+                }
+                None => solo_dependent_interactions(graph, node, params.min_age, now),
+            };
+            Some(solo_breakdown(graph, c, solo_deps))
+        }
         PromotionPolicy::Swarm => None,
     };
     let budget = (c.canonization_status == CanonizationStatus::Venerable).then(|| {
@@ -225,7 +243,7 @@ pub fn admission_inputs(
         dependent_interactions: deps,
         solo,
         budget,
-        hold: crate::canon::supersession::gather_hold_for(graph, node, params, now),
+        hold: crate::canon::supersession::gather_hold_for(graph, node, params, now, writers),
     })
 }
 

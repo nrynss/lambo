@@ -36,10 +36,11 @@ use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
+use crate::canon::explain::admission_inputs_with;
 use crate::canon::stage3::in_repromotion_cooldown;
 use crate::canon::{
-    admission_inputs, explain_admission, stage2_evidence_passes, Admission, EvalParams, Evaluator,
-    PromotionPolicy,
+    explain_admission, stage2_evidence_passes, Admission, EvalParams, Evaluator, PromotionPolicy,
+    Writers,
 };
 use crate::config::ScoringWeights;
 use crate::daemon::score::rescore;
@@ -465,10 +466,19 @@ async fn survey(
             .map(|c| (c.id, c.concept_type, c.canonization_status))
             .collect();
         ids.sort_by_key(|(id, ..)| id.0);
+        // #300: one writer timeline for the whole survey, when anything
+        // reads one (Solo's dependents term, supersession's hold probes),
+        // not one per concept.
+        let writers =
+            if params.eval.promotion_policy.scorer().reads_writers() || params.eval.supersede {
+                Writers::of(&g)
+            } else {
+                Writers::unresolved()
+            };
         let inputs: Vec<_> = ids
             .into_iter()
             .filter_map(|(id, t, s)| {
-                admission_inputs(&g, id, &params.eval, now).map(|i| (id, t, s, i))
+                admission_inputs_with(&g, id, &params.eval, now, &writers).map(|i| (id, t, s, i))
             })
             .collect();
         (g.session_id().clone(), inputs)

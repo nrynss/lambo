@@ -996,3 +996,39 @@ async fn the_alias_preview_similar_vector_source_sees_embeddings() {
         sim.pairs
     );
 }
+
+/// #300 review: under Solo a survey explains every concept, and each one's
+/// dependents term reads writer attribution. The survey resolves it once,
+/// not once per concept with a dependence edge (and the supersession hold
+/// probes reuse it). Under Swarm with supersession off nothing reads it.
+#[tokio::test]
+async fn a_survey_resolves_writers_once() {
+    use crate::daemon::conflict::TIMELINE_BUILDS;
+    let builds = || TIMELINE_BUILDS.with(|n| n.get());
+    let mut snap = fair::snapshot(true);
+    prepare(&mut snap, false);
+    let (graph, store) = overlay(&snap).await.unwrap();
+    let with_dependence = graph
+        .read()
+        .concepts()
+        .filter(|c| {
+            graph
+                .read()
+                .incident_edges(c.id)
+                .into_iter()
+                .any(|e| e.dependence().is_some_and(|(pillar, _)| pillar == c.id))
+        })
+        .count();
+    assert!(with_dependence > 1, "fixture premise: {with_dependence}");
+    for (policy, supersede, want) in [
+        (PromotionPolicy::Solo, false, 1),
+        (PromotionPolicy::Solo, true, 1),
+        (PromotionPolicy::Swarm, false, 0),
+    ] {
+        let mut p = params(policy);
+        p.eval.supersede = supersede;
+        let before = builds();
+        survey(&graph, &store, &p, p.now).await.unwrap();
+        assert_eq!(builds() - before, want, "{policy:?}, supersede {supersede}");
+    }
+}

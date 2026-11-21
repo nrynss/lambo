@@ -64,7 +64,10 @@
   evidence that Stage 2 does not count toward Venerable. The evaluator
   resolves writers once per graph epoch and lends them to the policy
   (`PromotionScorer::candidates_with` / `admits_hop_with`, `canon::Writers`),
-  so a cycle does not rebuild them per concept.
+  so a cycle does not rebuild them per concept, and only for a policy whose
+  `PromotionScorer::reads_writers` is true (Solo): a Swarm cycle with
+  supersession off resolves none, as before. The dry run resolves them once
+  per survey.
   `formal/LamboProofs/Policy.lean` models the fix
   (`reused_action_dependency_is_dated_by_its_writer`).
 - Conflict detection: a re-send by another agent no longer drops an edge's

@@ -555,15 +555,25 @@ pub(crate) fn gather_hold_for(
     node: NodeId,
     params: &EvalParams,
     now: DateTime<Utc>,
+    writers: &crate::canon::Writers,
 ) -> Probes {
     let venerable = concept(graph, node)
         .is_some_and(|c| c.canonization_status == CanonizationStatus::Venerable);
     if !params.supersede || !venerable {
         return Probes::default();
     }
-    let timeline = WriterTimeline::of(graph);
+    // The caller's resolved writers when it has them (#300: the dry run
+    // explains every node of one graph), else this node's own.
+    let built;
+    let timeline = match writers.for_graph(graph) {
+        Some(timeline) => timeline,
+        None => {
+            built = WriterTimeline::of(graph);
+            &built
+        }
+    };
     let mut budget = MAX_SUPERSESSION_PROBES;
-    probes_for(graph, &[node], params, now, &timeline, &mut budget)
+    probes_for(graph, &[node], params, now, timeline, &mut budget)
 }
 
 /// One passing probe.

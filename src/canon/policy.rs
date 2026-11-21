@@ -78,8 +78,8 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::canon::event_time::separated_session_count;
 use crate::canon::stage1::{
-    solo_dependent_interaction_counts_with, solo_dependent_interactions,
-    solo_dependent_interactions_with,
+    solo_dependent_interaction_counts, solo_dependent_interaction_counts_with,
+    solo_dependent_interactions, solo_dependent_interactions_with,
 };
 use crate::canon::stage1_candidates;
 use crate::canon::EvalParams;
@@ -341,9 +341,19 @@ pub trait PromotionScorer: Send + Sync + std::fmt::Debug {
         now: DateTime<Utc>,
     ) -> bool;
 
-    /// [`Self::candidates`] with the writer attribution the caller already
-    /// holds for `graph` ([`Writers`]). The evaluator passes its own, cached
-    /// across cycles by graph epoch, so a cycle resolves writers at most once
+    /// Whether [`Self::candidates_with`] and [`Self::admits_hop_with`] read
+    /// the [`Writers`] they are given. The evaluator resolves writers only
+    /// for a policy that does, and passes [`Writers::unresolved`] otherwise,
+    /// so a policy that reads none (Swarm) pays nothing for them. Defaults
+    /// to `false`; a policy that reads writers must say so, or it is handed
+    /// unresolved ones and has to resolve its own.
+    fn reads_writers(&self) -> bool {
+        false
+    }
+
+    /// [`Self::candidates`] with the writer attribution the caller holds for
+    /// `graph` ([`Writers`]). The evaluator passes its own, cached across
+    /// cycles by graph epoch, so a cycle resolves writers at most once
     /// instead of once per call. A policy that reads no writer ignores it:
     /// the default is [`Self::candidates`].
     fn candidates_with(
@@ -381,24 +391,54 @@ pub trait PromotionScorer: Send + Sync + std::fmt::Debug {
 ///
 /// [`Writers::of`] resolves it; the evaluator lends its own, cached across
 /// cycles by graph epoch, through [`PromotionScorer::candidates_with`] and
-/// [`PromotionScorer::admits_hop_with`]. It must have been resolved from the
-/// same graph's interactions.
+/// [`PromotionScorer::admits_hop_with`], and passes [`Writers::unresolved`]
+/// to a policy that does not [read them](PromotionScorer::reads_writers). A
+/// policy handed unresolved writers resolves its own from the graph, so
+/// they are never wrong, only slower.
+///
+/// Resolved writers must come from the same graph's interactions. They carry
+/// the interaction count they were resolved at, and a debug build asserts it
+/// wherever they are read (not the epoch: canonization transitions move it
+/// while the writers stay valid).
 #[derive(Clone)]
-pub struct Writers(Arc<WriterTimeline>);
+pub struct Writers(Option<ResolvedWriters>);
+
+#[derive(Clone)]
+struct ResolvedWriters {
+    timeline: Arc<WriterTimeline>,
+    interactions: usize,
+}
 
 impl Writers {
     /// Resolve `graph`'s writers: `O(interactions)`.
     pub fn of(graph: &Graph) -> Self {
-        Self(Arc::new(WriterTimeline::of(graph)))
+        Self::shared(Arc::new(WriterTimeline::of(graph)), graph)
     }
 
-    /// An already-resolved timeline (the evaluator's cached one).
-    pub(crate) fn shared(timeline: Arc<WriterTimeline>) -> Self {
-        Self(timeline)
+    /// No writers resolved, for a policy that reads none. A policy that does
+    /// read them resolves its own from the graph.
+    pub fn unresolved() -> Self {
+        Self(None)
     }
 
-    pub(crate) fn timeline(&self) -> &WriterTimeline {
-        &self.0
+    /// `graph`'s already-resolved timeline (the evaluator's cached one).
+    pub(crate) fn shared(timeline: Arc<WriterTimeline>, graph: &Graph) -> Self {
+        Self(Some(ResolvedWriters {
+            timeline,
+            interactions: graph.temporal_chain().len(),
+        }))
+    }
+
+    /// The resolved timeline, to read against `graph`; `None` when
+    /// unresolved.
+    pub(crate) fn for_graph(&self, graph: &Graph) -> Option<&WriterTimeline> {
+        let resolved = self.0.as_ref()?;
+        debug_assert_eq!(
+            resolved.interactions,
+            graph.temporal_chain().len(),
+            "writers resolved from a different graph's interactions"
+        );
+        Some(&resolved.timeline)
     }
 }
 
@@ -663,6 +703,10 @@ pub fn classify(resistant: f64) -> CanonizationStatus {
 pub struct SoloScorer;
 
 impl PromotionScorer for SoloScorer {
+    fn reads_writers(&self) -> bool {
+        true
+    }
+
     fn candidates(
         &self,
         graph: &Graph,
@@ -693,8 +737,12 @@ impl PromotionScorer for SoloScorer {
         now: DateTime<Utc>,
         writers: &Writers,
     ) -> Vec<NodeId> {
-        let counts =
-            solo_dependent_interaction_counts_with(graph, params.min_age, now, writers.timeline());
+        let counts = match writers.for_graph(graph) {
+            Some(timeline) => {
+                solo_dependent_interaction_counts_with(graph, params.min_age, now, timeline)
+            }
+            None => solo_dependent_interaction_counts(graph, params.min_age, now),
+        };
         let mut admitted: Vec<(f64, &Concept)> = graph
             .concepts()
             .map(|c| {
@@ -720,8 +768,12 @@ impl PromotionScorer for SoloScorer {
         now: DateTime<Utc>,
         writers: &Writers,
     ) -> bool {
-        let deps =
-            solo_dependent_interactions_with(graph, node, params.min_age, now, writers.timeline());
+        let deps = match writers.for_graph(graph) {
+            Some(timeline) => {
+                solo_dependent_interactions_with(graph, node, params.min_age, now, timeline)
+            }
+            None => solo_dependent_interactions(graph, node, params.min_age, now),
+        };
         band_admits(graph, node, to, deps)
     }
 }
@@ -1505,6 +1557,25 @@ mod tests {
             dependent_interactions(&g, user_schema, params().min_age, now),
             1,
             "Swarm's Stage 1 count keeps the dependent-origin dating"
+        );
+    }
+
+    /// #300: writers resolved for one graph are refused, in a debug build,
+    /// on a graph with a different number of interactions.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "different graph")]
+    fn writers_from_another_graph_are_caught() {
+        let (four_turns, _) = spread_support_graph(ConceptType::Entity);
+        let (three_turns, _) = evidence_graph(3);
+        let writers = Writers::of(&four_turns);
+        PromotionPolicy::Solo.scorer().admits_hop_with(
+            &three_turns,
+            nid(1),
+            CanonizationStatus::Candidate,
+            &params(),
+            ts(),
+            &writers,
         );
     }
 
