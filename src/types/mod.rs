@@ -2319,7 +2319,7 @@ impl StoreError {
     /// mean the graph or the store is inconsistent, still stops the replay.
     ///
     /// Identified by prefix, like [`Self::is_embedding_contract_refusal`]:
-    /// both producers build it through [`Self::cycle_refusal`], so the
+    /// both producers build it through `Self::cycle_refusal`, so the
     /// variant stays `Invariant` and no public enum gains a member.
     pub fn is_cycle_refusal(&self) -> bool {
         self.cycle_refusal_kind().is_some()
@@ -2412,7 +2412,7 @@ pub enum LamboError {
     /// timeout arm, its embed-error arm when
     /// [`crate::embed::EmbedError::is_transient`] says so, and (#125 review
     /// H1) its vector-candidate lookup when the store did not answer within
-    /// the lookup's own budget ([`Self::lookup_timeout`]), or when the call's
+    /// the lookup's own budget (`Self::lookup_timeout`), or when the call's
     /// embed-and-lookup budget ran out before or during the lookup (the
     /// ordinary budget message). Neither says anything about the input, so
     /// the in-session write queue leaves the durable intent unconsumed. Before 0.6.0 a lookup
@@ -2421,7 +2421,7 @@ pub enum LamboError {
     /// "embedding error" kind. Nothing retries a transient write within the
     /// session: the next serve of the session replays its durable intent,
     /// and the replay settles a lookup timeout `failed` rather than retry it
-    /// again ([`Self::is_lookup_timeout`]).
+    /// again (`Self::is_lookup_timeout`).
     ///
     /// `Display` is deliberately identical to [`LamboError::Embed`]'s: to an
     /// operator and to the ledger this is the same *class* of failure

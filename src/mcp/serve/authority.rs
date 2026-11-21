@@ -54,7 +54,7 @@ fn credential_err(msg: impl std::fmt::Display) -> LamboError {
 }
 
 /// The checks a credential set must pass before a serve starts, shared by
-/// the CLI's preflight (before any backend is built) and [`serve_authority`]
+/// the CLI's preflight (before any backend is built) and `serve_authority`
 /// (so a library caller meets them too). Names credentials, never a token.
 ///
 /// Refuses: a configured credential named `default` or `local` (the

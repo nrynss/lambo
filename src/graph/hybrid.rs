@@ -187,7 +187,7 @@
 //! ## Merge guards (#193)
 //!
 //! Two more hard refusals, applied to the vector hits before the tier is
-//! taken ([`merge_guard`]), and again to the rivals the commit's re-plan
+//! taken (`merge_guard`), and again to the rivals the commit's re-plan
 //! check rescores (`plan_still_holds`), so a retried write is guarded alike:
 //!
 //! * **Identifiers.** The new content and the hit must name the same
@@ -429,9 +429,9 @@ pub const MAX_SINGLE_CONCEPT_CONTEXT_BYTES: usize = (MAX_HYBRID_CONTEXT_BYTES - 
 /// context would exceed [`MAX_HYBRID_CONTEXT_BYTES`] at apply (#74).
 ///
 /// The same arithmetic as the apply-time checks in `derive_planned`, which
-/// stay as defence in depth: the call's text is [`derive_prompt`] over
+/// stay as defence in depth: the call's text is `derive_prompt` over
 /// `concepts` (the interaction prompt every `Memory` derive path opens), and
-/// each embedded item's text is [`context_len`] of it framed with that text.
+/// each embedded item's text is `context_len` of it framed with that text.
 ///
 /// Matching is not known at acceptance, so this is conservative: it checks
 /// every concept and every `parent_of` end, where apply embeds only the
@@ -842,7 +842,8 @@ pub fn validate_limits(
 /// on the first attempt: a concurrent re-derive of one content started failing
 /// with a `store error` at ack time.
 ///
-/// Read-only: [`canonicalize`] writes nothing.
+/// Read-only: [`canonicalize`](crate::graph::canonical::canonicalize) writes
+/// nothing.
 pub fn validate_graph_inputs(graph: &Graph, parent_of: &ParentOf<'_>) -> Result<(), LamboError> {
     validate_graph_inputs_scoped(graph, parent_of, &[])
 }
@@ -2440,7 +2441,7 @@ async fn checked_candidates(
 
 /// How long one vector-candidate lookup may take, from when it starts, inside
 /// the call's [`HYBRID_IO_TIMEOUT`] (#125). Its own budget, so a lookup
-/// timeout ([`LamboError::is_lookup_timeout`]) means the store did not answer
+/// timeout (`LamboError::is_lookup_timeout`) means the store did not answer
 /// in this long, not that slow embeds before it used up the call's budget.
 /// Half the call's budget: a lookup normally takes milliseconds (the holder's
 /// graph, or one indexed query), and the SQLite exact scan the store

@@ -25,7 +25,7 @@
 //! that skipped nothing renders without them.
 //!
 //! Blocks are joined with a blank line ([`render_context`]). The token budget
-//! is applied once, by [`fit_blocks`] (submodule `fit`): the longest ranked
+//! is applied once, by `fit_blocks` (submodule `fit`): the longest ranked
 //! prefix of whole blocks, except that a first block too long for the budget
 //! has its content cut at a UTF-8 boundary, keeps its label, and is followed
 //! by a marker naming its id (#130).

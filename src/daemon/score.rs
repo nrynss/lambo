@@ -58,7 +58,7 @@
 //!
 //! [`score_concept`] returns the max-normalized value. Recall, [`rescore`]
 //! and swarm Stage 1's queue all read [`score`] of that. GC's step-2 cut
-//! does not. [`SessionContext::per_interaction_activity`] is still
+//! does not. `SessionContext::per_interaction_activity` is still
 //! `derived_by / |interactions|`, and `eviction_score` substitutes it before
 //! the comparison with [`crate::daemon::gc::MIN_CONCEPT_SCORE`].
 //! Max-normalization would score a concept derived once at `1/max`. At a

@@ -92,6 +92,13 @@ jobs:
       - name: clippy
         run: cargo clippy --locked --all-targets -- -D warnings
 
+      - name: doc
+        # Public docs must not link to private or missing items. Plain
+        # `cargo doc` only warns, so without this they accumulate unnoticed.
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+        run: cargo doc --locked --no-deps --features fixtures
+
       - name: test
         # fixtures is deliberately NOT in `default` (v020-R1-P3-3 — test-only
         # profile); enable it explicitly so the fixtures-gated behavior tests

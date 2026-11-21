@@ -67,7 +67,7 @@ impl SecretToken {
     /// `Authorization: Bearer `.
     ///
     /// Also reject a token longer than
-    /// [`MAX_BEARER_CREDENTIAL_BYTES`](crate::surface::bearer::MAX_BEARER_CREDENTIAL_BYTES)
+    /// `MAX_BEARER_CREDENTIAL_BYTES`
     /// (#32 PR 5 review L2): every presented credential over that length is
     /// refused unread, so such a token could never authenticate anything.
     pub fn new(raw: impl Into<String>) -> Result<Self, String> {

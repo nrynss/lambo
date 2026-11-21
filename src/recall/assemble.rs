@@ -127,7 +127,7 @@
 //! its content is cut and marked `…`, its label is kept, and a
 //! `[truncated: …; lambo_inspect <id> …]` line follows instead of an empty
 //! context; nothing follows it. The cut is
-//! the shared [`format::fit_blocks`], which `dispatch` uses too. A dropped
+//! the shared `format::fit_blocks`, which `dispatch` uses too. A dropped
 //! block still appears in `RecallResult::hits` and contributes its warnings
 //! (a warning is actionable regardless of the token budget; the caller
 //! renders `context` and `warnings` separately).

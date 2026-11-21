@@ -83,7 +83,7 @@
 //! ## Cost
 //!
 //! Keys are matched through a hash map. Holder-vector comparisons are
-//! bounded by [`MAX_VECTOR_DEDUPE_PAIRS`] per merge (a `top_k` near the
+//! bounded by `MAX_VECTOR_DEDUPE_PAIRS` per merge (a `top_k` near the
 //! 2048 limit would otherwise mean millions of 1024-wide dot products);
 //! past it, only canonical keys dedupe.
 //!

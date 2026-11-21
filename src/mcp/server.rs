@@ -4,7 +4,7 @@
 //! # `lambo_derive_image` is listed only where it can work (#22 design 6.1)
 //!
 //! The router keeps the tool only when the session's embedder embeds images
-//! or the operator accepts client vectors ([`image_tool_listed`]). Both are
+//! or the operator accepts client vectors (`image_tool_listed`). Both are
 //! process facts: the embedder is resolved once per process and
 //! `accept_client_vectors` is process config, so every session one serve
 //! holds lists the same tools, and nothing about a session or a caller

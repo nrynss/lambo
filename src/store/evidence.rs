@@ -7,7 +7,7 @@
 //! [`DependentEvidence::latest_structural_evidence_at`] /
 //! [`DependentEvidence::interaction_span_since`] apply the rules, so
 //! MemoryStore, SQLite and the Postgres family cannot drift apart on them.
-//! [`rows_from_graph`] builds the same rows from the in-RAM graph.
+//! `rows_from_graph` builds the same rows from the in-RAM graph.
 //!
 //! ## The rules (#19(c)'s clock, Stage 2's predicate)
 //!
@@ -20,11 +20,11 @@
 //!   skip the floor). A cutoff outside chrono's range makes nothing eligible.
 //! * **Own origin**: a dependent written by the node's own origin
 //!   interaction never supports it.
-//! * **Dated** by [`declared_at`]: the about-time clamped to the write time,
+//! * **Dated** by `declared_at`: the about-time clamped to the write time,
 //!   exactly as `daemon::contradiction` dates evidence and contradictions.
-//! * [`latest_at`] is the newest such date (the supersession watermark),
+//! * `latest_at` is the newest such date (the supersession watermark),
 //!   minus the edges the caller excludes (self-suppression).
-//! * [`span_since`] is Stage 2's span over the evidence strictly after
+//! * `span_since` is Stage 2's span over the evidence strictly after
 //!   `since`: the edge **and** its dependent's origin interaction (a session
 //!   interaction, itself written by the cutoff) must both be dated strictly
 //!   after it. The filter runs before origins are counted and the spread is

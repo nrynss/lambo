@@ -579,7 +579,7 @@ impl ResolvedAnchor {
 /// degraded keyword-only answer). The dispatch itself re-validates under the
 /// final graph lock inside `try_structural`, so this is a gather-skip
 /// decision, not a short-circuit of correctness. It answers for a positive
-/// `top_k`; the daemon asks [`fits_structural_with`], which also takes the
+/// `top_k`; the daemon asks `fits_structural_with`, which also takes the
 /// recall's `top_k`.
 pub fn fits_structural(graph: &Graph, query: &str) -> bool {
     if !matches!(classify(query), RecallKind::Structural) {

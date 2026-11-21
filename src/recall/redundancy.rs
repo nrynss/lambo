@@ -275,7 +275,7 @@ fn is_negation(word: &str) -> bool {
     word.ends_with("n't") || NEGATIONS.contains(&word)
 }
 
-/// How many negation words `content` holds: [`NEGATIONS`] and every word
+/// How many negation words `content` holds: `NEGATIONS` and every word
 /// ending in `n't` (any apostrophe, U+02BC included), case-insensitive.
 /// Invisible codepoints are ignored.
 pub fn negation_count(content: &str) -> usize {
@@ -393,7 +393,7 @@ fn opposite_words(a: &[String], b: &[String]) -> bool {
 ///   script;
 /// * a different [`negation_count`];
 /// * a word in one where the other has its opposite (`enable` / `disable`,
-///   `safe` / `unsafe`: [`ANTONYMS`], [`ANTONYM_PREFIXES`]);
+///   `safe` / `unsafe`: `ANTONYMS`, `ANTONYM_PREFIXES`);
 /// * the content words both share, negation included, in a different
 ///   order (swapped roles, or a negation that moved).
 ///

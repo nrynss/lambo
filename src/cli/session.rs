@@ -212,7 +212,7 @@ async fn load_source(
 }
 
 /// Produces a private plan, printing only aggregate counts and its path.
-/// The output is published create-new (see [`write_new_private`]), so an
+/// The output is published create-new (see `write_new_private`), so an
 /// output spelling cannot truncate an input.
 pub async fn classify_session(
     source: ClassificationSource,

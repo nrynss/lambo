@@ -17,7 +17,7 @@
 //!   module can reach a store: the types take no store handle, so "an
 //!   unauthorized request makes zero store calls" (#32 §6.2) holds by
 //!   construction for the part of the check that lives here.
-//! * [`SessionAuthority`]: a surface's whole credential set (#32 PR 5): which
+//! * `SessionAuthority`: a surface's whole credential set (#32 PR 5): which
 //!   grant a presented bearer token resolves to, scanned in constant time
 //!   across every credential, or the implicit loopback grant when none is
 //!   configured. Generic over the surface's own secret type, so the token

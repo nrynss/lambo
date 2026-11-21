@@ -120,7 +120,7 @@ fn rejected(s: &str) -> bool {
 
 /// A local path in an **explicit Resource** context (a `resource` concept,
 /// an action's `produces` and `modifies`): an anchored path (see
-/// [`is_anchored_path`]); else, with no whitespace, a separated name whose
+/// `is_anchored_path`); else, with no whitespace, a separated name whose
 /// first segment is not domain-like (`src/main.rs`, `docs/reference`), or a
 /// lone file name the shared-layer refusal recognizes (`README.md`,
 /// `Makefile`, `.env`). URI, scp and domain-led remote names are not paths.

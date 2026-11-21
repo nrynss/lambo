@@ -691,7 +691,7 @@ pub trait GraphStore: Send + Sync {
     /// ([`crate::types::Edge::about_time`]) is at or before
     /// `now - min_edge_age`. This is a read-time reinterpretation of the
     /// stored edges (no migration); every adapter must agree with
-    /// [`MemoryStore`](crate::store::MemoryStore).
+    /// [`MemoryStore`].
     ///
     /// **Type split (CON-6):** this surface returns `u64`, but the frozen
     /// [`crate::types::Concept::blast_radius`] /

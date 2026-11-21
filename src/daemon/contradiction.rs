@@ -5,7 +5,7 @@
 //!
 //! 1. it has an inbound `Contradicts` edge from another concept of the
 //!    session (`by -Contradicts-> node`, written by `against`, #19(b));
-//! 2. that edge's **declaration date** ([`declared_at`]: the declaring
+//! 2. that edge's **declaration date** (`declared_at`: the declaring
 //!    write's `event_time` when one was given, else its write time, and
 //!    never later than its write time) is **strictly later** than the
 //!    node's latest **eligible dependent evidence**, or, with none, than the
@@ -49,7 +49,7 @@
 //! * **age**: the edge was **written** at or before `now - min_age` (the
 //!   session's `canonization_edge_min_age`); a backdated `event_time` does
 //!   not skip the floor (review M3). Its date for the comparison is its
-//!   [`declared_at`]. Re-sending an existing dependence reinforces the same
+//!   `declared_at`. Re-sending an existing dependence reinforces the same
 //!   edge and keeps its first dates, so it is not new evidence: only a new
 //!   dependence edge (a concept that did not depend on the node before, or
 //!   a new `parent_of` child) outweighs a contradiction.

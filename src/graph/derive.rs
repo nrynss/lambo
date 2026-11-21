@@ -415,7 +415,7 @@ pub fn derive(
 }
 
 /// [`derive`](fn@derive) with citations (#36 PR 4) and contradictions
-/// (#19(b)), as accepted by [`crate::graph::cite::validate`]. With none it
+/// (#19(b)), as accepted by [`crate::graph::cite::validate_scoped`]. With none it
 /// is exactly `derive`.
 ///
 /// Inside the one transaction: the pinned references are re-resolved
@@ -497,7 +497,7 @@ pub(crate) fn derive_cited(
 /// a second set of rules, and the whole point of validate-then-mutate is that
 /// there is one.
 ///
-/// Read-only: [`canonicalize`] writes nothing, so a failure here leaves the
+/// Read-only: [`canonicalize`](crate::graph::canonical::canonicalize) writes nothing, so a failure here leaves the
 /// graph exactly as it was.
 pub fn validate(
     graph: &Graph,

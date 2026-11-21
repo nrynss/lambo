@@ -180,11 +180,11 @@ pub struct WebConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_loaded_sessions: Option<usize>,
     /// Simultaneous session loads. Default [`DEFAULT_LOAD_CONCURRENCY`];
-    /// 1 to [`MAX_CONCURRENCY`]. SQLite always uses 1.
+    /// 1 to `MAX_CONCURRENCY`. SQLite always uses 1.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub load_concurrency: Option<usize>,
     /// Simultaneous recalls, process-wide. Default
-    /// [`DEFAULT_RECALL_CONCURRENCY`]; 1 to [`MAX_CONCURRENCY`].
+    /// [`DEFAULT_RECALL_CONCURRENCY`]; 1 to `MAX_CONCURRENCY`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recall_concurrency: Option<usize>,
     /// Answer `GET /api/sessions` with the names the presenting credential

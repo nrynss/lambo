@@ -253,7 +253,7 @@ pub struct ServedSessions {
 /// sessions`: their ordered union, each once, the first the default.
 ///
 /// Refuses (a usage error, exit 2) an empty union, and every name
-/// [`check_served`] refuses. The CLI runs it before any backend is built,
+/// `check_served` refuses. The CLI runs it before any backend is built,
 /// so a bad name costs no model load.
 pub fn plan_sessions(cli: &[String], web: &WebConfig) -> Result<ServedSessions, CliError> {
     let mut sessions: Vec<String> = Vec::new();

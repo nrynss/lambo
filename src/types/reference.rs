@@ -360,7 +360,7 @@ pub struct PinnedReference {
 }
 
 /// A derive's citations and contradictions as accepted at the ack
-/// (`crate::graph::cite::validate`).
+/// (`crate::graph::cite::validate_scoped`).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PinnedCitations {
