@@ -25,7 +25,8 @@
 //!   big); SQLite `SQLITE_TOOBIG` (18) and `SQLITE_MISMATCH` (20). Both
 //!   adapters map them to [`StoreError::Constraint`] too, with their code, so
 //!   the flush loop drops that batch, counts it in `dead_lettered`, and the
-//!   session goes on.
+//!   session goes on. The variant carries only the code, so [`map_write_err`]
+//!   logs the statement and the driver's message at warn when it maps one.
 //! * **A permanent error about the store degrades (#301).** An error no
 //!   replay can fix that is about the store, not the batch, so every later
 //!   batch would fail the same way: SQLSTATE classes `42` (syntax error or
@@ -50,8 +51,9 @@
 //!   degrades the session, while a transient misread as permanent would
 //!   degrade a session that would have recovered. That is why `0A000`
 //!   (feature not supported) stays retryable: Postgres also returns it for
-//!   "cached plan must not change result type", which clears once the
-//!   connection re-prepares the statement.
+//!   "cached plan must not change result type", which should clear once the
+//!   pool recycles the connection that cached the plan (whether sqlx
+//!   re-prepares the statement on this error by itself is not verified).
 //!
 //! Only statements mapped with [`map_write_err`] are classified. Reads the
 //! adapters make inside the flush transaction (the fence's lease-token read,
@@ -142,7 +144,9 @@ fn unidentified(code: &str) -> ErrorClass {
 /// permanent errors about the store become [`StoreError::Permanent`] and the
 /// rest [`StoreError::Backend`], each with the caller's `ctx`, which names
 /// the statement for the log. A permanent error's message also carries its
-/// code, which the driver's message may not.
+/// code, which the driver's message may not. A rejected value's statement and
+/// driver message (a row too big for an index, a NUL in a text value) are
+/// logged at warn here, since the variant keeps only the code.
 ///
 /// **Write paths only.** Constraints can only arise from write statements
 /// (INSERT / UPDATE / DELETE / DDL), so this mapping is used exclusively on
@@ -150,8 +154,15 @@ fn unidentified(code: &str) -> ErrorClass {
 /// bodies); read / load paths keep their existing plain `Backend` mapping.
 pub fn map_write_err(e: sqlx::Error, ctx: impl FnOnce(&str) -> String) -> StoreError {
     match classify(&e) {
-        ErrorClass::Constraint | ErrorClass::ValueRejected => {
-            StoreError::Constraint(error_code(&e))
+        ErrorClass::Constraint => StoreError::Constraint(error_code(&e)),
+        ErrorClass::ValueRejected => {
+            let code = error_code(&e);
+            tracing::warn!(
+                code = %code,
+                "StoreValueRejected: {}; the batch will be dead-lettered",
+                ctx(&e.to_string()),
+            );
+            StoreError::Constraint(code)
         }
         ErrorClass::StorePermanent => {
             StoreError::Permanent(ctx(&format!("{e} (code {})", error_code(&e))))
@@ -451,6 +462,66 @@ mod tests {
         ] {
             let err = map_write_err(e, |m| format!("upsert concept: {m}"));
             assert!(err.is_retryable(), "must stay retryable: {err:?}");
+        }
+    }
+
+    /// #301 review: a rejected value keeps only its code in the error, so
+    /// `map_write_err` logs the statement and the driver's message.
+    #[test]
+    fn a_rejected_value_logs_its_statement_and_message() {
+        let (logs, _guard) = crate::test_util::capture_logs(tracing::Level::WARN);
+        let err = map_write_err(db_err("22001"), |m| format!("upsert concept: {m}"));
+        assert!(
+            matches!(err, StoreError::Constraint(ref c) if c == "22001"),
+            "{err:?}"
+        );
+        let out = logs.contents();
+        assert!(out.contains("StoreValueRejected"), "{out}");
+        assert!(out.contains("upsert concept"), "statement missing: {out}");
+        assert!(
+            out.contains("db error (code 22001)"),
+            "message missing: {out}"
+        );
+    }
+
+    /// #301 review, live: a NUL written into a TEXT column is SQLSTATE 22021,
+    /// classified through the real `PgDatabaseError` downcast (not the tests'
+    /// shape reading, which would take 22021 for `SQLITE_BUSY`) as a value
+    /// the store rejects, so it is dead-lettered, not retried or degraded.
+    /// Lean: `Flush.value_rejected_dead_letters`.
+    ///
+    /// ```text
+    /// LAMBO_POSTGRES_DSN=<dsn> cargo test --no-default-features --features store-postgres --lib store::error -- --ignored
+    /// ```
+    #[cfg(any(feature = "store-cockroach", feature = "store-postgres"))]
+    #[tokio::test]
+    #[ignore = "needs a live Postgres: set LAMBO_POSTGRES_DSN"]
+    async fn a_nul_in_text_is_a_value_rejection_on_live_postgres() {
+        use sqlx::Connection;
+        let dsn = std::env::var("LAMBO_POSTGRES_DSN").expect("set LAMBO_POSTGRES_DSN");
+        let mut conn = sqlx::PgConnection::connect(&dsn).await.unwrap();
+        sqlx::query("CREATE TEMPORARY TABLE lambo_301_nul (v TEXT)")
+            .execute(&mut conn)
+            .await
+            .unwrap();
+        let e = sqlx::query("INSERT INTO lambo_301_nul (v) VALUES ($1)")
+            .bind("a\0b")
+            .execute(&mut conn)
+            .await
+            .unwrap_err();
+        let sqlx::Error::Database(db) = &e else {
+            panic!("expected a database error, got {e:?}");
+        };
+        assert!(
+            db.try_downcast_ref::<sqlx::postgres::PgDatabaseError>()
+                .is_some(),
+            "not a PgDatabaseError: {db:?}"
+        );
+        assert_eq!(db.code().as_deref(), Some("22021"), "{e}");
+        assert_eq!(classify(&e), ErrorClass::ValueRejected);
+        match map_write_err(e, |m| format!("insert: {m}")) {
+            StoreError::Constraint(code) => assert_eq!(code, "22021"),
+            other => panic!("expected a dead-letter Constraint, got {other:?}"),
         }
     }
 

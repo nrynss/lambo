@@ -1262,7 +1262,9 @@ async fn a_transient_model_load_failure_is_retried_and_a_permanent_one_is_not() 
 /// retrying (the store or the embedder could not be reached) and which mark
 /// it `Failed` (the same answer on every retry). A permanent store error
 /// (#301) keeps retrying as the backend error it used to be: the operator
-/// fixes it in the store (a migration, a `GRANT`) while the server runs.
+/// fixes it in the store (a migration, a `GRANT`) while the server runs. A
+/// value the store rejects (#301) is a `Constraint` now, so an attach that
+/// hits one marks the session `Failed`, where it used to retry.
 #[test]
 fn only_unreachable_store_or_embedder_errors_are_retried() {
     use crate::types::StoreError;
@@ -1270,7 +1272,7 @@ fn only_unreachable_store_or_embedder_errors_are_retried() {
         LamboError::Store(StoreError::Backend("connection refused".into())),
         LamboError::Store(StoreError::Other(anyhow::anyhow!("pool timed out"))),
         LamboError::Store(StoreError::Permanent(
-            "load: permission denied for table concepts (code 42501)".into(),
+            "upsert session row: permission denied for table sessions (code 42501)".into(),
         )),
         LamboError::EmbedUnavailable("llama-server is down".into()),
     ] {
@@ -1279,6 +1281,7 @@ fn only_unreachable_store_or_embedder_errors_are_retried() {
     for permanent in [
         LamboError::Store(StoreError::Invariant("erased".into())),
         LamboError::Store(StoreError::SessionNotFound("s".into())),
+        LamboError::Store(StoreError::Constraint("22021".into())),
         LamboError::Config("contract mismatch".into()),
     ] {
         assert!(!is_transient(&permanent), "{permanent:?}");

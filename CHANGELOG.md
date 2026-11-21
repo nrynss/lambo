@@ -50,6 +50,10 @@
   server's background attach still retries a permanent store error, as it
   did the backend error it used to be, so a pinned session recovers once
   the operator fixes the store (a migration, a `GRANT`) without a restart.
+  An attach that hits a value rejection, now a constraint error, marks the
+  pinned session failed instead of retrying it. A rejected value's statement
+  and the driver's message are logged at warn (`StoreValueRejected`) when it
+  is mapped, since the dead letter keeps only its code.
   The adapters now tell SQLite and Postgres codes apart by the driver's
   error type, so a numeric SQLSTATE whose low byte matches a SQLite code
   (`42501` and `22021` read as `SQLITE_BUSY`) is no longer misread.
@@ -58,7 +62,10 @@
   `docs/reference/mcp.mdx` what `dead_lettered` now counts.
   **Breaking (library API):** `StoreError` has a new variant, `Permanent`,
   so an exhaustive `match` on `StoreError` outside this crate no longer
-  compiles until it handles it.
+  compiles until it handles it. `StoreError::Constraint` is wider: a caller
+  that treats it as a key collision now also gets the codes of SQLSTATE
+  classes `21`, `22` and `44` and `54000`, and `SQLITE_TOOBIG` and
+  `SQLITE_MISMATCH`.
 - Flush loop: the lease read behind the erased check that follows a failed
   flush, and the flush-stats row write, now run under the same 30 s timeout
   and panic containment as a flush attempt (#301). A store adapter that

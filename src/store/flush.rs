@@ -32,7 +32,7 @@
 //!   retained batch that exhausted its retries waits out
 //!   `RETAINED_BACKOFF` before the next attempt (F3): a permanently failing
 //!   store re-enters the retry sequence at most once per hold, not once per
-//!   interval tick. The one exception (STORE-4/D5): a batch rejected with a
+//!   interval tick. The one exception: a batch rejected with a
 //!   deterministic constraint violation, or since #301 a value the store
 //!   cannot hold, is logged and dropped — never retried, never retained — so
 //!   it cannot poison the queue head.
@@ -219,7 +219,7 @@ pub struct FlushStats {
     /// Mutations not yet durable: in-graph log + pending batch (in flight,
     /// backed off, or retained after exhausted retries).
     pub depth: usize,
-    /// Batches dropped as dead letters (STORE-4 / D5): a deterministic
+    /// Batches dropped as dead letters: a deterministic
     /// constraint violation, or since #301 a value the store cannot hold, is
     /// logged and dropped — never retried, never
     /// retained — so it cannot poison the queue head. Visible in stats by
@@ -830,11 +830,13 @@ impl FlushLoop {
                 self.refresh_depth();
             }
             Err(StoreError::Constraint(code)) => {
-                // STORE-4 / D5: a deterministic constraint violation can
-                // never succeed on replay — retrying it would only poison the
-                // queue head (head-of-line blocking). Since #301 a value the
-                // store cannot hold arrives here too (`map_write_err`): the
-                // batch's fault, not the store's. Dead-letter the WHOLE
+                // A deterministic constraint violation can never succeed on
+                // replay — retrying it would only poison the queue head
+                // (head-of-line blocking). Since #301 a value the store cannot
+                // hold arrives here too: the batch's fault, not the store's
+                // (`map_write_err` has already logged its statement and the
+                // driver's message, which the variant does not carry).
+                // Dead-letter the WHOLE
                 // batch: warn (constraint + batch summary), drop, count in
                 // stats, session continues, never degrade for a dead-lettered
                 // batch. "Whole" includes anything retained from an earlier
@@ -1007,7 +1009,7 @@ impl FlushLoop {
     /// attempt is bounded by `FLUSH_ATTEMPT_TIMEOUT` (STORE-2): a hung
     /// store must not wedge the loop forever — the timeout maps into this
     /// retry path exactly like any other `Err` (retry → retain → degrade).
-    /// A [`StoreError::Constraint`] (STORE-4) is deterministic and surfaces
+    /// A [`StoreError::Constraint`] is deterministic and surfaces
     /// immediately with NO backoff: the caller dead-letters the batch. So do
     /// a [`StoreError::StaleWrite`] (#293: the caller fences) and a
     /// [`StoreError::Permanent`] (#301: the caller degrades).
@@ -1054,7 +1056,7 @@ impl FlushLoop {
                 Ok(()) => return Ok(()),
                 Err(err) => {
                     if !err.is_retryable() {
-                        // STORE-4: deterministic constraint violation — no
+                        // A deterministic constraint violation — no
                         // backoff, no retry; the caller dead-letters it. A
                         // stale write likewise: the caller fences (#293). A
                         // permanent error likewise: the caller degrades
