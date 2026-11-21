@@ -788,8 +788,7 @@ impl Memory {
 
         // 2 — join. After this the flush task cannot touch the graph. This is
         // the long await (most of `close`'s worst case, see "How long it can
-        // take") and
-        // so the one an external timeout fires in: dropping the handle here
+        // take") and so the one an external timeout fires in: dropping the handle here
         // used to leave a zombie flush task holding the tail in its own
         // `pending`, invisible to the retry, to `Drop`'s warning and to the log
         // (R3-1). Custody keeps it re-joinable instead.

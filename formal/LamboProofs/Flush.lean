@@ -209,6 +209,21 @@ changes nothing. `cycleFixed_erased_irrelevant`: a cycle that does not read
 the lease does not depend on the `erased` input, so the `false` passed there
 is arbitrary.
 
+What the model does not show: it takes the erased answer `er` as an input,
+so it proves only that "not erased" after a failed read loses nothing and
+blocks nothing, not that the answer is right. That a wrong "not erased" never
+writes into an erased session rests on the adapters' commit-time fence,
+`erase::check_fence`, which refuses an erasure tombstone whatever token is
+presented, inside the flush transaction: `MemoryStore` (`store/memory.rs`),
+SQLite (`store/sqlite/persistence.rs`) and Postgres / CockroachDB
+(`store/pg/persistence.rs`). That refusal is a `StaleWrite`, so after a
+"not erased" answer the loop takes the stale-write arm and fences itself all
+the same; only the erased latch's early wake-up waits for the heartbeat.
+`stop_exits_guarded` assumes what the
+Rust timeout provides: a guarded call that never returns is cut off at
+`FLUSH_ATTEMPT_TIMEOUT` (the model's calls take no time), so the cycle ends
+and the stop is served.
+
 ## Left out
 
 Read-access drains and their budget (#30); the `mutation_epoch` and GC-mark
@@ -2914,7 +2929,9 @@ theorem stepFixed_stop_stops (s : St α) (now : Nat) (er : Bool) :
 
 /-- **After #301 a stop always ends the loop.** Whatever the lease read and
 the stats write did before it, a stop wake-up leaves the guarded loop exited
-(contrast `lease_hang_blocks_stop`). -/
+(contrast `lease_hang_blocks_stop`). This assumes the timeout bounds every
+guarded call: a hung call reaches the loop as a read that failed only once
+`FLUSH_ATTEMPT_TIMEOUT` has cut it off. -/
 theorem stop_exits_guarded (s : St α) (evs : List (PEv α)) (now : Nat) (lease : Probe Bool)
     (stats : Option (Probe Unit)) :
     (runGuarded P st s (evs ++ [.wake .stop now lease stats])).running = false := by

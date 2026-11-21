@@ -116,14 +116,18 @@ pub struct Config {
     /// How often pending writes flush to the store.
     pub backend_flush_interval: Duration,
     /// Early-flush trigger, not a cap: once this many mutations wait, they
-    /// flush before the next interval tick. A flush sends everything waiting.
+    /// flush before the next interval tick (not during the hold after
+    /// exhausted retries). A flush sends everything waiting.
     pub backend_flush_max_batch: usize,
-    /// Retries after a failed flush attempt (`retries + 1` attempts). When
-    /// they are used up the batch is retained and retried after a hold, never
-    /// dropped; only a constraint violation dead-letters it, whole.
+    /// Retries after a flush attempt that failed with a retryable error
+    /// (`retries + 1` attempts). When they are used up the batch is retained
+    /// and retried after a hold, never dropped. A constraint violation
+    /// dead-letters it, whole, and a stale write fences the handle and drops
+    /// it; neither is retried.
     pub backend_flush_retries: u32,
     /// Degrade threshold, not a cap: when the mutations not yet durable
-    /// exceed it, the session degrades to `durability = "none"`.
+    /// exceed it, the session degrades to `durability = "none"` and the flush
+    /// loop drops its backlog and what it drains after.
     pub backend_log_max: usize,
 
     pub scoring: ScoringWeights,
