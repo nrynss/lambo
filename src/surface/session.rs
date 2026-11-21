@@ -306,7 +306,7 @@ impl SessionScope {
 
     /// This scope with its `"*"` pinned to `hosted`, the sessions the
     /// configuration that wrote it hosts, instead of whatever set the
-    /// authority judging it hosts (#4 PR 3 review M1). The portal imports
+    /// authority judging it hosts (#4 PR 3). The portal imports
     /// a `[[serve.credential]]` this way: on serve, `"*"` means serve's
     /// pinned sessions plus every credential prefix, and the token must not
     /// read a session on the portal it could not use on serve, however
@@ -591,7 +591,7 @@ impl<T: BearerSecret> SessionAuthority<T> {
     }
 
     /// How many credentials a request can arrive as: the configured ones,
-    /// or 1 for an implicit grant (#32 PR 5 review M2: each one's share of
+    /// or 1 for an implicit grant (#32 PR 5: each one's share of
     /// the serve's bounds). Never 0.
     pub(crate) fn credential_count(&self) -> usize {
         self.credentials.len().max(1)
@@ -628,7 +628,7 @@ impl<T: BearerSecret> SessionAuthority<T> {
         // empty one, which matches nothing), so "no header" and "wrong
         // token" cost the same.
         let presented = crate::surface::bearer::bearer_credential(header).unwrap_or_default();
-        // Over the fixed cap: refused before the scan (#32 PR 5 review L2).
+        // Over the fixed cap: refused before the scan (#32 PR 5).
         if presented.len() > crate::surface::bearer::MAX_BEARER_CREDENTIAL_BYTES {
             return None;
         }

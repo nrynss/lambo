@@ -16,7 +16,7 @@
 //!   `Hierarchical` child), whose dependent is a concept of the session other
 //!   than the node.
 //! * **Eligible** by write time: the edge was written at or before
-//!   `now - min_age` (#19(c) review M3: a backdated `event_time` does not
+//!   `now - min_age` (#19(c): a backdated `event_time` does not
 //!   skip the floor). A cutoff outside chrono's range makes nothing eligible.
 //! * **Own origin**: a dependent written by the node's own origin
 //!   interaction never supports it.
@@ -137,7 +137,7 @@ fn counted<'a>(
 }
 
 /// The newest declaration date among the evidence [`span_since`] counts
-/// after `since` (#20 review L2: sources rank by what was counted).
+/// after `since` (#20: sources rank by what was counted).
 pub(crate) fn newest_counted(
     rows: &DependentEvidence,
     min_age: Duration,
