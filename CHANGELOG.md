@@ -54,6 +54,28 @@
   whenever no entry lapses, even with overflowing hits, is checked on
   examples only.
 
+- Single-writer lease: a holder that lost its lease is now fenced even when
+  its own heartbeat takes the lease back (#293). A refresh is an acquire, so
+  after the documented operator takeover (or a takeover and release by another
+  writer between two heartbeats) the wedged holder's next refresh could re-take
+  the row at a new fencing token. The heartbeat ignored that token, so it never
+  latched the fence, while every flush still presented the old token and was
+  refused as stale, retained and re-sent every 10 seconds; the session kept
+  accepting writes until it degraded, and other writers were refused the whole
+  time. The heartbeat now latches the fence when a refresh comes back at a
+  token other than the one the session holds, and stops refreshing, so the
+  re-taken lease lapses at its TTL. In the flush loop a `StaleWrite` is now
+  terminal, as `StoreError::is_retryable` documents: it latches the fence and
+  the pending batch is dropped as a fenced handle's is, never retained or
+  re-sent. The loop also checks the fence after each drain and before each
+  retry, so no flush is issued once the fence is latched (it was seen one pass
+  late), and a stop that arrives after the fence drops the tail instead of
+  handing it back for `close`'s final flush. A fenced loop no longer publishes
+  its flush-stats row. `formal/LamboProofs/Flush.lean` and `Lease.lean` model
+  the fixed heartbeat and loop and prove that after any takeover the fence
+  latches at the next heartbeat, that no flush is issued after it latches,
+  that a stale write is never re-sent, and that the loop still loses nothing
+  silently.
 - Recall: an exact durable-name match now raises the named concept's
   phase-1 keyword score to at least 1.0 instead of overwriting it with 1.0
   (#288). BM25 is unnormalized and routinely above 1.0, so the overwrite could

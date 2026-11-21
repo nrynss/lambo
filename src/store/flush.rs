@@ -27,6 +27,11 @@
 //!   interval tick. The one exception (STORE-4/D5): a batch rejected with a
 //!   deterministic constraint violation is logged and dropped — never
 //!   retried, never retained — so it cannot poison the queue head.
+//! * **A stale write is terminal (#293).** A flush the store refuses with
+//!   [`StoreError::StaleWrite`] presented a fencing token the lease has moved
+//!   past, so it can never succeed: the loop latches the lease-lost fence and
+//!   drops `pending` as on any fenced iteration, rather than retain and re-send
+//!   it.
 //! * **Degradation.** If the pending depth exceeds `log_max` the session
 //!   degrades to `durability="none"`: the task logs at ERROR, sets
 //!   [`FlushTask::degraded`], and stops all store I/O. The mode is terminal
@@ -283,6 +288,8 @@ impl FlushTask {
     /// loop stops flushing and drops its pending buffer. `Memory::build` passes
     /// the same `Arc<AtomicBool>` here and to the lease heartbeat, so a lost
     /// lease fences the write-behind path without a channel between the two.
+    /// The loop also latches it itself when the store refuses a flush as stale
+    /// (#293), so the write gate refuses from then on.
     pub fn with_fence(mut self, fence: Arc<AtomicBool>) -> Self {
         self.fence = Some(fence);
         self
@@ -346,6 +353,7 @@ impl FlushTask {
                 fence,
                 token,
                 erased_latch,
+                stale: false,
                 pending: MutationBatch::default(),
                 retry_after: None,
                 holds_accesses: false,
@@ -461,6 +469,9 @@ struct FlushLoop {
     token: Option<u64>,
     /// See [`FlushTask::with_erased_latch`].
     erased_latch: Option<crate::store::erase::ErasedLatch>,
+    /// Latched by a [`StoreError::StaleWrite`] (#293), beside the shared
+    /// `fence` when one is armed, so a task with no fence armed stops too.
+    stale: bool,
     /// Mutations not yet durable. Retained batches stay at the front; newly
     /// drained mutations are appended in chronological order — never re-sorted
     /// (mod.rs contract). The batch's `mutation_epoch` is a carried watermark:
@@ -501,10 +512,14 @@ impl FlushLoop {
 
         loop {
             // Single-writer-lease fence (T86-2). Checked at the top of every
-            // iteration — after each `select!` branch resolves and before the
-            // next `cycle` — so once the heartbeat latches a lost lease no
-            // further flush is issued. The task-owned `pending` is **dropped**,
-            // not requeued: those mutations belong to a session this process no
+            // iteration, in the stop branch, after each cycle's drain and before
+            // each retry of a flush (#293), so once the heartbeat (or a stale
+            // write, #293) latches a lost lease no further flush is issued: a
+            // fence latched while the loop waits is honoured by the branch that
+            // ends the wait, not one pass later. Only an attempt already inside
+            // `store.flush` can still run to its end, and the store's token
+            // check refuses it. The task-owned `pending` is **dropped**, not
+            // requeued: those mutations belong to a session this process no
             // longer owns, and writing them (here OR handing them back for
             // `close`'s final flush) would overwrite the new holder's rows —
             // the exact split-brain the lease exists to prevent.
@@ -522,14 +537,7 @@ impl FlushLoop {
             // not by any cooperative timer. (`POLL_QUANTUM`, 100ms, never
             // bounded the in-flight cycle.)
             if self.fenced() {
-                let dropped = self.pending.mutations.len();
-                self.drop_pending();
-                self.refresh_depth();
-                tracing::error!(
-                    dropped,
-                    "FlushTask fenced: single-writer lease lost; flushing stopped and {dropped} \
-                     not-yet-durable mutations were dropped rather than overwrite the new holder"
-                );
+                self.stop_fenced();
                 break;
             }
             // `biased;` is REQUIRED, and the stop branch must be FIRST
@@ -544,7 +552,14 @@ impl FlushLoop {
             tokio::select! {
                 biased;
                 _ = stop.notified() => {
-                    self.requeue_pending();
+                    // #293: a fence latched while the loop waited drops the
+                    // tail here too; handing it back would make it `close`'s
+                    // final flush to a session this process no longer owns.
+                    if self.fenced() {
+                        self.stop_fenced();
+                    } else {
+                        self.requeue_pending();
+                    }
                     break;
                 }
                 _ = interval.tick() => self.cycle(true).await,
@@ -552,6 +567,19 @@ impl FlushLoop {
                 _ = tokio::time::sleep(POLL_QUANTUM) => self.cycle(false).await,
             }
         }
+    }
+
+    /// The fenced exit (T86-2): drop `pending` rather than write it or hand it
+    /// back, and say so.
+    fn stop_fenced(&mut self) {
+        let dropped = self.pending.mutations.len();
+        self.drop_pending();
+        self.refresh_depth();
+        tracing::error!(
+            dropped,
+            "FlushTask fenced: single-writer lease lost; flushing stopped and {dropped} \
+             not-yet-durable mutations were dropped rather than overwrite the new holder"
+        );
     }
 
     /// Hand the task-owned `pending` buffer back to the graph log on stop
@@ -583,6 +611,11 @@ impl FlushLoop {
     async fn cycle(&mut self, tick: bool) {
         let session = self.graph.read().session_id().clone();
         let attempted = self.drain_and_flush(&session, tick).await;
+        // A fenced handle writes nothing more to the session, its flush-stats
+        // row included: the row is the new holder's now (#293).
+        if self.fenced() {
+            return;
+        }
         self.publish_stats(&session, attempted).await;
     }
 
@@ -667,6 +700,14 @@ impl FlushLoop {
 
         // Writes may have landed since the guard dropped; they only add.
         self.refresh_depth();
+        // #293: re-check the fence after the drain. It may have latched while
+        // the loop waited for this wake-up; the check at the top of the loop
+        // ran before that wait, so without this one a due tick (or a full
+        // batch on a poll) would still flush. The top of the next iteration
+        // drops what was just drained. Nothing below awaits before the flush.
+        if self.fenced() {
+            return false;
+        }
         if self.pending.is_empty() {
             // Nothing drained and nothing held: the store holds every
             // mutation, so the durability lag is zero now (#16 §3). Not for a
@@ -748,6 +789,9 @@ impl FlushLoop {
                      mutations dropped (dead-letter D5, drop-after-log), session continues",
                 );
             }
+            // The fence latched during the ladder, which stopped retrying
+            // (#293): the top of the next iteration drops `pending`.
+            Err(_) if self.fenced() => {}
             Err(err) if self.erased(session, &err).await => {
                 // #23 review L2: the session was erased. The latch fences
                 // this handle, and the top of the next iteration drops
@@ -758,6 +802,22 @@ impl FlushLoop {
                     error = %err,
                     "FlushTask: the session was erased; fencing this handle now rather than at \
                      its next heartbeat"
+                );
+            }
+            Err(StoreError::StaleWrite(why)) => {
+                // #293: terminal. The lease moved to a newer token than this
+                // writer's, which it can never catch up with, so a resend can
+                // never land. Latch the lease-lost fence, as the heartbeat
+                // will on its next beat: the handle refuses further writes
+                // now, and the top of the next iteration drops `pending` and
+                // stops. Not dead-lettered: the batch is not at fault.
+                self.latch_stale();
+                tracing::error!(
+                    session = %session,
+                    error = %why,
+                    "FlushTask: the store refused a flush as stale (this writer's fencing token \
+                     is behind the lease's); fencing this handle now rather than retaining and \
+                     re-sending the batch"
                 );
             }
             Err(err) => {
@@ -887,7 +947,8 @@ impl FlushLoop {
                 Err(err) => {
                     if !err.is_retryable() {
                         // STORE-4: deterministic constraint violation — no
-                        // backoff, no retry; the caller dead-letters it.
+                        // backoff, no retry; the caller dead-letters it. A
+                        // stale write likewise: the caller fences (#293).
                         return Err(err);
                     }
                     if retries_used >= self.params.retries {
@@ -904,6 +965,10 @@ impl FlushLoop {
                     tokio::time::sleep(backoff).await;
                     // Writes that landed during the backoff are now part of depth.
                     self.refresh_depth();
+                    // #293: no further attempt once the fence has latched.
+                    if self.fenced() {
+                        return Err(err);
+                    }
                     backoff = (backoff * 2).min(BACKOFF_CAP);
                 }
             }
@@ -924,12 +989,23 @@ impl FlushLoop {
         true
     }
 
-    /// `true` once the single-writer lease has been lost (T86-2). `false` for a
-    /// task with no fence armed.
+    /// `true` once the single-writer lease has been lost (T86-2): the shared
+    /// fence latched, or this loop saw a stale write (#293).
     fn fenced(&self) -> bool {
-        self.fence
-            .as_ref()
-            .is_some_and(|f| f.load(Ordering::Acquire))
+        self.stale
+            || self
+                .fence
+                .as_ref()
+                .is_some_and(|f| f.load(Ordering::Acquire))
+    }
+
+    /// A flush was refused as stale (#293): latch this loop's own flag and,
+    /// when armed, the shared lease-lost fence the write gate reads.
+    fn latch_stale(&mut self) {
+        self.stale = true;
+        if let Some(fence) = &self.fence {
+            fence.store(true, Ordering::Release);
+        }
     }
 
     /// Empty `pending` (flushed, dead-lettered, dropped while degraded or
@@ -1878,6 +1954,13 @@ mod tests {
     /// T86-2: once the single-writer-lease fence is latched, the loop stops
     /// flushing and DROPS its not-yet-durable `pending` rather than write it —
     /// so a handle that lost its lease cannot overwrite the new holder's rows.
+    ///
+    /// #293: `max_batch` equals the three mutations, so the poll that wakes
+    /// the loop after the fence latched would flush them early if the fence
+    /// were checked only at the top of the loop, before the wait. It is
+    /// re-checked after the drain, so nothing reaches the store. Mirrors
+    /// `Flush.fence_before_due_tick_fixed` (before the fix,
+    /// `Flush.flush_after_fence_latched` and its `max_batch = 3` example).
     #[tokio::test(start_paused = true)]
     async fn a_fenced_loop_stops_flushing_and_drops_pending() {
         let store: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
@@ -1886,22 +1969,23 @@ mod tests {
         let task = FlushTask::new(
             graph.clone(),
             store.clone(),
-            params(Duration::from_secs(1), 100, 3, 1_000),
+            params(Duration::from_secs(1), 3, 3, 1_000),
         )
         .with_fence(fence.clone());
         let handle = task.spawn();
         let_task_arm().await;
 
-        // Three not-yet-durable mutations sit in the graph log.
+        // Three not-yet-durable mutations sit in the graph log: a full batch.
         let iid = add_interaction(&graph, 1, None);
         add_concept(&graph, 1, iid); // 3 mutations total
         assert_eq!(graph.read().log_len(), 3);
 
-        // Lose the lease BEFORE any interval tick could flush.
+        // Lose the lease while the loop waits, BEFORE any flush.
         fence.store(true, Ordering::Release);
 
-        // One POLL_QUANTUM later the loop wakes, drains into `pending`, then the
-        // top-of-loop fence check drops it and breaks. Drive to completion.
+        // One POLL_QUANTUM later the loop wakes and drains into `pending`; the
+        // fence re-check after the drain stops the cycle before its early
+        // flush, and the loop drops `pending` and breaks. Drive to completion.
         tokio::time::advance(Duration::from_millis(100)).await;
         handle.await.expect("fenced loop exits");
 
@@ -1911,6 +1995,178 @@ mod tests {
             "a fenced loop must NEVER flush — the new holder owns the session now"
         );
         assert!(!task.degraded(), "fenced is not the same as degraded");
+    }
+
+    /// #293: a `StaleWrite` is terminal for the flush loop. The store refused
+    /// the flush because the lease moved on to a newer token, which this
+    /// writer's token can never catch up with, so the loop latches the
+    /// lease-lost fence and drops `pending` exactly as the fence does. It is
+    /// not retained and re-sent every `RETAINED_BACKOFF` until the heartbeat
+    /// notices (which, before the heartbeat fix, it never did after a re-take).
+    ///
+    /// Mirrors `Flush.stale_write_never_resent` and
+    /// `Flush.stale_write_dropped_fixed` (before the fix,
+    /// `Flush.stale_write_retained`).
+    #[tokio::test(start_paused = true)]
+    async fn a_stale_write_fences_the_loop_and_is_never_resent() {
+        let inner = Arc::new(MemoryStore::new());
+        let ttl = Duration::from_secs(45);
+        let a = crate::store::lease::LeaseHolder::for_this_process(&AgentId::from("agent-a"));
+        let b = crate::store::lease::LeaseHolder::for_this_process(&AgentId::from("agent-b"));
+        let crate::store::lease::LeaseOutcome::Acquired(mine) =
+            inner.acquire_lease(&sid(), &a, ttl).await.unwrap()
+        else {
+            panic!("agent-a takes the lease first");
+        };
+        // The lease moves on: released (or overridden), then taken by b at a
+        // newer token.
+        inner.release_lease(&sid(), &a).await.unwrap();
+        assert!(inner
+            .acquire_lease(&sid(), &b, ttl)
+            .await
+            .unwrap()
+            .is_acquired());
+
+        let flaky = Arc::new(FlakyStore::new(inner.clone()));
+        let store: Arc<dyn GraphStore> = flaky.clone();
+        let graph = new_graph();
+        let fence = Arc::new(AtomicBool::new(false));
+        let task = FlushTask::new(
+            graph.clone(),
+            store.clone(),
+            params(Duration::from_secs(1), 100, 3, 1_000),
+        )
+        .with_fence(fence.clone())
+        .with_token(mine.token);
+        let handle = task.spawn();
+        let_task_arm().await;
+
+        let iid = add_interaction(&graph, 1, None);
+        add_concept(&graph, 1, iid);
+
+        // The first tick flushes with agent-a's token, and the store refuses it.
+        tokio::time::advance(Duration::from_secs(1)).await;
+        wait_until(|| flaky.flush_calls() == 1).await;
+
+        // Long past `RETAINED_BACKOFF`: nothing is ever sent again.
+        for _ in 0..30 {
+            tokio::time::advance(Duration::from_secs(1)).await;
+            for _ in 0..20 {
+                tokio::task::yield_now().await;
+            }
+        }
+        assert_eq!(
+            flaky.flush_calls(),
+            1,
+            "a stale write must never be re-sent: the token cannot catch up"
+        );
+        assert!(
+            fence.load(Ordering::Acquire),
+            "a stale write latches the lease-lost fence, so the handle refuses writes too"
+        );
+        assert!(
+            handle.is_finished(),
+            "the loop stops, as on any fenced iteration"
+        );
+        assert_eq!(task.stats().depth, 0, "pending dropped, not retained");
+        assert_eq!(
+            task.stats().dead_lettered,
+            0,
+            "a fenced drop, not a dead letter"
+        );
+        assert!(!task.degraded(), "fenced is not the same as degraded");
+        assert!(
+            inner.load_session(&sid()).await.is_err(),
+            "nothing of agent-a's reached the store"
+        );
+    }
+
+    /// #293: a stop that ends the wait after the fence latched drops the
+    /// tail rather than hand it back to the graph log for `close`'s final
+    /// flush, which would be the write to a session this process no longer
+    /// owns. Mirrors `Flush.stop_drops_fenced` (before the fix,
+    /// `Flush.stop_requeues`).
+    #[tokio::test(start_paused = true)]
+    async fn a_stop_after_the_fence_drops_the_tail() {
+        let flaky = Arc::new(FlakyStore::new(Arc::new(MemoryStore::new())));
+        flaky.fail_forever();
+        let store: Arc<dyn GraphStore> = flaky.clone();
+        let graph = new_graph();
+        let fence = Arc::new(AtomicBool::new(false));
+        let task = FlushTask::new(
+            graph.clone(),
+            store.clone(),
+            params(Duration::from_secs(1), 100, 0, 1_000),
+        )
+        .with_fence(fence.clone());
+        let handle = task.spawn();
+        let_task_arm().await;
+
+        // A batch fails and is retained in `pending`.
+        let iid = add_interaction(&graph, 1, None);
+        add_concept(&graph, 1, iid);
+        tokio::time::advance(Duration::from_secs(1)).await;
+        wait_until(|| flaky.flush_calls() == 1).await;
+        for _ in 0..50 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(task.stats().depth, 3, "the batch is retained");
+
+        // The fence latches while the loop waits, and a stop arrives with it.
+        fence.store(true, Ordering::Release);
+        task.stop();
+        handle.await.expect("the loop exits");
+
+        assert_eq!(
+            graph.read().log_len(),
+            0,
+            "a fenced tail is dropped, not handed back for close's final flush"
+        );
+        assert_eq!(task.stats().depth, 0);
+        assert_eq!(flaky.flush_calls(), 1, "nothing flushed after the fence");
+    }
+
+    /// #293: a fence latched during a retry's backoff sleep ends the ladder:
+    /// no further attempt is issued once the fence is latched. The Lean model
+    /// latches the fence only between wake-ups, so this is the Rust side of
+    /// `Flush.no_flush_after_fence_fixed` inside one ladder.
+    #[tokio::test(start_paused = true)]
+    async fn a_fence_latched_during_a_backoff_ends_the_ladder() {
+        let flaky = Arc::new(FlakyStore::new(Arc::new(MemoryStore::new())));
+        flaky.fail_forever();
+        let store: Arc<dyn GraphStore> = flaky.clone();
+        let graph = new_graph();
+        let fence = Arc::new(AtomicBool::new(false));
+        let task = FlushTask::new(
+            graph.clone(),
+            store.clone(),
+            params(Duration::from_secs(1), 100, 5, 1_000),
+        )
+        .with_fence(fence.clone());
+        let handle = task.spawn();
+        let_task_arm().await;
+
+        let iid = add_interaction(&graph, 1, None);
+        add_concept(&graph, 1, iid);
+        // The first attempt fails; the ladder sleeps `BACKOFF_BASE`.
+        tokio::time::advance(Duration::from_secs(1)).await;
+        wait_until(|| flaky.flush_calls() == 1).await;
+
+        // The fence latches during the backoff.
+        fence.store(true, Ordering::Release);
+        for _ in 0..20 {
+            tokio::time::advance(Duration::from_secs(1)).await;
+            for _ in 0..20 {
+                tokio::task::yield_now().await;
+            }
+        }
+        assert_eq!(
+            flaky.flush_calls(),
+            1,
+            "no attempt is issued once the fence is latched"
+        );
+        assert!(handle.is_finished(), "the fenced loop stops");
+        assert_eq!(task.stats().depth, 0, "and drops its tail");
     }
 
     #[tokio::test(start_paused = true)]

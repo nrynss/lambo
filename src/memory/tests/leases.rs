@@ -738,3 +738,91 @@ async fn the_erase_fence_wakes_its_waiters_only_when_announced() {
     assert!(crate::store::erase::is_erased_holder(&winner), "{winner}");
     let _ = mem.close().await;
 }
+
+/// **#293: a heartbeat refresh that re-takes the lease latches the fence.**
+///
+/// A refresh is an acquire, and an acquire takes over a released or expired
+/// row held by another identity at a NEW fencing token. After the documented
+/// `OPERATOR_OVERRIDE` (here a release, which writes the same row: holder
+/// `lambo:released`, expired, token kept) the wedged holder's own next
+/// heartbeat wins that takeover. The heartbeat used to ignore the token an
+/// `Acquired` carried, so it never latched the fence while the flush loop and
+/// the canonization task kept presenting the old token, refused forever.
+///
+/// Mirrors `Lease.override_beat_latches` and `Lease.beat_latches_iff`
+/// (`formal/LamboProofs/Lease.lean`): the old beat (`beatLatchesOld`) does
+/// not latch on the re-take, the fixed beat (`beatLatches`) does, at the first
+/// beat after it. The fixed heartbeat also stops beating, so the lease it
+/// re-took lapses at its TTL instead of being refreshed by a fenced handle.
+#[tokio::test(start_paused = true)]
+async fn a_heartbeat_that_retakes_its_lost_lease_latches_the_fence() {
+    let store = Arc::new(MemoryStore::new());
+    let session = SessionId::new("retaken");
+    let holder = LeaseHolder::for_this_process(&AgentId::new("agent-a"));
+    let LeaseOutcome::Acquired(mine) = store
+        .acquire_lease(&session, &holder, LEASE_TTL)
+        .await
+        .unwrap()
+    else {
+        panic!("the first acquire takes the lease");
+    };
+    let fence = Arc::new(AtomicBool::new(false));
+    let signal = Arc::new(super::super::leases::LeaseLostSignal::default());
+    let beat = super::super::leases::spawn_lease_heartbeat(
+        store.clone() as Arc<dyn GraphStore>,
+        session.clone(),
+        holder.clone(),
+        mine.token,
+        fence.clone(),
+        signal.clone(),
+    );
+    // Let the heartbeat consume its immediate first tick.
+    tokio::task::yield_now().await;
+
+    // The operator override expires the row and hands it to `lambo:released`.
+    store.release_lease(&session, &holder).await.unwrap();
+
+    // The next beat refreshes, which re-takes the row at a new token.
+    tokio::time::advance(crate::store::lease::LEASE_HEARTBEAT_INTERVAL).await;
+    let mut row = None;
+    for _ in 0..1_000 {
+        let now = store.read_lease(&session).await.unwrap();
+        if now.as_ref().is_some_and(|l| l.holder == holder.token()) {
+            row = now;
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    let row = row.expect("the heartbeat's refresh re-took the released row");
+    assert_eq!(
+        row.token,
+        mine.token + 1,
+        "the re-take minted a new fencing token the session's tasks do not hold"
+    );
+    for _ in 0..100 {
+        tokio::task::yield_now().await;
+    }
+
+    assert!(
+        fence.load(Ordering::Acquire),
+        "a refresh that came back at a token other than the session's must latch the \
+         lease-lost fence, or every flush is refused as stale while the handle keeps \
+         accepting writes"
+    );
+    assert!(
+        signal
+            .winner()
+            .is_some_and(|w| !crate::store::erase::is_erased_holder(&w)),
+        "the wake-up is latched too, and it is not mistaken for an erasure"
+    );
+    for _ in 0..1_000 {
+        if beat.is_finished() {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        beat.is_finished(),
+        "a fenced heartbeat stops refreshing the lease it re-took, so it lapses at TTL"
+    );
+}

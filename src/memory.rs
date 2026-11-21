@@ -281,7 +281,8 @@ pub struct Memory {
     /// Monotonic fencing token (GitHub issue #1) this handle presents on every
     /// durable write (via the FlushTask and the canon task). Minted by the
     /// store at takeover; a refresh PRESERVES it, so it is stable for the
-    /// handle's life. The store rejects a stale/missing one after a takeover —
+    /// handle's life (a refresh that comes back at another token latches the
+    /// fence instead, #293). The store rejects a stale/missing one after a takeover —
     /// the hard store-side fence, independent of the cooperative `lease_lost`.
     lease_token: u64,
     /// `true` once this handle has released its lease. A **successful** `close()`

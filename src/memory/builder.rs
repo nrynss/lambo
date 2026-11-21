@@ -533,6 +533,9 @@ impl MemoryBuilder {
             // minted for this holder. A refresh PRESERVES it, so the value is
             // stable for the handle's life; every durable write (flush + canon)
             // presents it and the store rejects a stale one after a takeover.
+            // The heartbeat is handed it too: a refresh that comes back at any
+            // other token means the lease was lost and re-taken, and fences
+            // the handle (#293).
             LeaseOutcome::Acquired(info) => {
                 // J6 — the pre-arm, HERE, the first statement after the lease
                 // is ours. Everything from this point on holds something a
@@ -608,6 +611,7 @@ impl MemoryBuilder {
             store.clone(),
             session.clone(),
             lease_holder.clone(),
+            lease_token,
             lease_lost.clone(),
             lease_lost_signal.clone(),
         )));

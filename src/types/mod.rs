@@ -2270,8 +2270,10 @@ impl StoreError {
     /// queue (head-of-line) — so it is non-retryable and dead-lettered
     /// (drop-after-log, visible in `FlushStats::dead_lettered`). A
     /// `StaleWrite` is also non-retryable: the holder's token will never catch
-    /// up (it lost the lease), so retrying cannot succeed — on detection the
-    /// flush loop treats it like a constraint (bail out of the retry ladder).
+    /// up (it lost the lease), so retrying cannot succeed. It is terminal for
+    /// the flush loop, which bails out of the retry ladder, latches the
+    /// lease-lost fence and drops its pending batch as a fenced handle does
+    /// (#293): never retained or re-sent, and not dead-lettered either.
     /// Every other error keeps the existing retry / retain semantics.
     pub fn is_retryable(&self) -> bool {
         !matches!(self, StoreError::Constraint(_) | StoreError::StaleWrite(_))

@@ -931,7 +931,11 @@ pub trait GraphStore: Send + Sync {
     /// upsert shape as [`Self::acquire_lease`] — a refresh is just a re-acquire
     /// by the same holder, so a holder whose lease was stolen after expiry
     /// learns it lost the session ([`LeaseOutcome::Held`]) instead of silently
-    /// squatting a row it no longer owns. Default is advisory (always grants).
+    /// squatting a row it no longer owns. A row that was released or expired
+    /// under another holder is taken over at a NEW token, so a caller must
+    /// compare the returned token with the one it holds: the heartbeat treats
+    /// any other token as a lost lease (#293). Default is advisory (always
+    /// grants).
     async fn refresh_lease(
         &self,
         session: &SessionId,

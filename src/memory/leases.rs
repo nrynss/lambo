@@ -6,7 +6,9 @@
 //!   *successful* `close()` (or [`Memory::release_lease_after_abandoned_close`]),
 //!   and left to lapse at TTL on every crash-shaped path, `Drop` included.
 //! * **The fence** (T86-2) is the `lease_lost` flag the heartbeat latches when a
-//!   refresh finds another holder. Every write gate and the flush loop obey it;
+//!   refresh finds another holder, or comes back at a token other than the
+//!   handle's (#293), and the flush loop latches when the store refuses a flush
+//!   as stale (#293). Every write gate and the flush loop obey it;
 //!   [`LeaseLostSignal`] is the wake-up and winner id `serve` acts on (JE2E-4).
 //! * **The registry** ([`ACTIVE_SESSIONS`]) reports, never refuses, a second
 //!   `Memory` on one session in one process (T81-8). Keyed by session, so many
@@ -152,6 +154,13 @@ impl LeaseLostSignal {
     }
 }
 
+/// The winner a heartbeat records when its refresh **re-took** the lease at a
+/// new fencing token (#293). The writer that took the session in between (and
+/// released it, or had it expired by the operator override) is not on the row
+/// any more, so the heartbeat cannot name it. Never the erasure tombstone.
+const RETAKEN_WINNER: &str =
+    "an unknown writer (the lease was taken over and released between two heartbeats)";
+
 /// Spawn the single-writer lease heartbeat (T8.6).
 ///
 /// Refreshes the lease every [`LEASE_HEARTBEAT_INTERVAL`] (a third of the TTL),
@@ -168,6 +177,18 @@ impl LeaseLostSignal {
 /// session. The loss is still logged loudly, and the fence is idempotent, so the
 /// heartbeat may keep beating after it without changing anything.
 ///
+/// **A refresh that comes back [`LeaseOutcome::Acquired`] at a token other
+/// than `token` (the one this handle acquired with) is a loss too** (#293). A
+/// refresh is an acquire, so when the row was released or expired under another
+/// holder (the documented `OPERATOR_OVERRIDE`, or a takeover and release between
+/// two beats) this refresh takes it over at a new token. The flush loop and the
+/// canonization task still present the old one, which the store refuses, so
+/// adopting the new token silently would leave every flush refused while the
+/// handle keeps accepting writes. The heartbeat latches the fence instead, as
+/// on `Held`, and then **stops beating**: the lease it re-took lapses at its TTL
+/// rather than being kept alive by a fenced handle, which would wedge the
+/// session for as long as this process lives.
+///
 /// **What the process does about it is `serve`'s decision, and since JE2E-4 it
 /// winds down** (operator ruling, 2026-08-22). The fence is a *safety*
 /// mechanism and stays exactly what it was; `signal` is how a serve learns of
@@ -179,6 +200,7 @@ pub(super) fn spawn_lease_heartbeat(
     store: Arc<dyn GraphStore>,
     session: SessionId,
     holder: LeaseHolder,
+    token: u64,
     fence: Arc<AtomicBool>,
     signal: Arc<LeaseLostSignal>,
 ) -> JoinHandle<()> {
@@ -189,7 +211,27 @@ pub(super) fn spawn_lease_heartbeat(
         loop {
             interval.tick().await;
             match store.refresh_lease(&session, &holder, LEASE_TTL).await {
-                Ok(LeaseOutcome::Acquired(_)) => {}
+                Ok(LeaseOutcome::Acquired(info)) if info.token == token => {}
+                Ok(LeaseOutcome::Acquired(info)) => {
+                    // #293: the refresh re-took a lease this handle had lost,
+                    // at a token its writes do not carry. Fence first, then
+                    // wake, as on `Held`.
+                    fence.store(true, Ordering::Release);
+                    signal.latch(RETAKEN_WINNER);
+                    tracing::error!(
+                        session = %session,
+                        holder = %holder,
+                        token,
+                        new_token = info.token,
+                        "single-writer lease LOST: this handle's lease was taken over and \
+                         released (an operator override, or another writer that came and went) \
+                         and this heartbeat took it back at token {} instead of {token}. This \
+                         handle is now FENCED — further writes are refused and its tail will NOT \
+                         be flushed; the heartbeat stops, so the lease lapses at its TTL.",
+                        info.token
+                    );
+                    return;
+                }
                 Ok(LeaseOutcome::Held { current, .. }) => {
                     // T86-2: fence the writer. From here every write is refused
                     // and the flush loop stops overwriting the new holder's rows.

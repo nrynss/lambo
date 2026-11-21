@@ -97,8 +97,11 @@ pub fn tombstone_expires_at() -> DateTime<Utc> {
 /// The stable refusal for any durable write to an erased session.
 ///
 /// A [`StoreError::StaleWrite`]: the erase minted a newer fencing token than
-/// any writer holds, so the write is exactly a stale one, and every caller
-/// already treats that class as terminal (not retried, the writer is fenced).
+/// any writer holds, so the write is exactly a stale one. The flush loop
+/// treats that class as terminal (never retried or re-sent; it latches the
+/// writer's fence, #293), a canonization cycle it refuses fails and is logged,
+/// and the writer is fenced at once by the erased latch or at its next
+/// heartbeat.
 /// The message says why, so an operator reading a refused flush is not sent
 /// looking for a second writer that does not exist.
 pub fn erased_session_error(session: &str) -> StoreError {
