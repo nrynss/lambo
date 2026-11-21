@@ -22,6 +22,13 @@ the legacy-vector quarantine at load, the checked vector read and the
 embedder canary gate. Its own header lists the Rust items and what it leaves
 out.
 
+The third part (from "The fix for #296") keeps all of that as the previous
+version and adds the fixed `lambo re-embed`: an in-place rewrite for a
+session already under the live contract (the canary-drift repair), the
+canary gate on `--missing-only`, a guard against silently replacing a canary
+pin other sessions rely on, and the override WARN logged only after the
+relabel. Its header lists what each theorem proves.
+
 ## Results
 
 * `compatible_iff_eq`: compatibility is equality of all three fields; a
@@ -1498,5 +1505,576 @@ theorem example_backfill :
 cannot move it back. -/
 theorem example_write_after_override :
     (runAll sA [.attach cB true, .write cA 2 false true]).contract = some cB := by decide
+
+/-! # The fix for #296
+
+Rust items modelled (at the fix commit):
+
+* `Graph::reembed_in_place` / `reembed_in_place_dropping_image_vectors`
+  (`src/graph/graph/embeddings.rs`): `reembedSame`. The same rewrite as
+  `reembed` (every text concept covered once, image vectors refused unless
+  dropped), but for a session that already carries the live contract and
+  holds at least one vector. The contract does not move, so the batch has no
+  `SetEmbedding`.
+* `re_embed::run` with `--rewrite-same-contract` and `--repin-canary`
+  (`src/cli/re_embed.rs`): `reembedCmdFixed`. Before it writes, a full
+  rewrite reads what the store's canary pin for the live contract says about
+  the live embedder (`PinState`, `canary::compare_pin`) and refuses to
+  replace a pin it cannot confirm (one that drifted or could not be checked)
+  unless `--repin-canary` is given.
+* `--missing-only` attaches in `reembed_mode` with the configured canary, and
+  the builder runs `canary_gate` in `reembed_mode` when the session already
+  carries the live contract (`builder.rs`, step 2c): `gatedBackfill`. The
+  full rewrites attach with the canary off, as before: they replace the space
+  rather than write into it.
+* `repinWarnsFixed` is the output line after such a re-pin; it is printed
+  whenever the replaced pin was not confirmed, which replaces the old
+  `prior == live` test that a successful rewrite never met.
+* The override WARN is logged after the relabel succeeds:
+  `attachWarnsFixed`.
+
+## Results
+
+* `reembedCmdFixed_repairs_drift`: a canary drift is now repairable in
+  place: on a session under the live contract that holds a vector,
+  `--rewrite-same-contract --repin-canary` succeeds whatever the canary says,
+  and `reembedCmdFixed_full_spec` says every successful full run leaves every
+  stored vector in the live space under the live contract.
+* `reembedCmdFixed_plain_refuses_same_contract`: without the new flag the
+  verb still refuses a session under the live contract, as before.
+  `reembedCmdFixed_migration_agrees`: on a migration whose re-pin is safe the
+  fixed verb is the old one.
+* `missingOnly_fixed_refuses_drift`, `missingOnly_fixed_verify_drift_writes_nothing`:
+  under `verify` with a drift the backfill refuses, and writes nothing in any
+  case; `missingOnly_fixed_agrees`: otherwise it is the old backfill.
+* `fixed_repin_unsafe_needs_optin`: a run that re-pins over a pin it could
+  not confirm was given `--repin-canary`, and then warns.
+* `reembedSame_keeps_contract`, `runAll2_keeps`, `runAll2_ordinary_keeps`,
+  `contract_change_explicit2`, `runAll2_oneSpace`: the gated backfill and the
+  in-place rewrite never move a stamped contract, add no new way to move it,
+  and keep the session in one space.
+* `attachWarnsFixed_relabelled`: the fixed WARN fires only on a relabel that
+  happened.
+
+Modelling the fix forced one choice: `drifted` in the first half is one
+Boolean, but the gate and the re-pin guard read the pin differently. The
+attach gate admits a pin it could not check (`Unverified` is never a
+refusal), while the re-pin guard must not replace a pin it could not check,
+so the fix needs the four states of `PinState`.
+-/
+
+/-- What the store's canary pin for the live contract says about the live
+embedder, read before a re-embed writes. -/
+inductive PinState where
+  /-- No usable pin: a re-pin replaces nothing. -/
+  | absent
+  /-- The live embedder reproduces the pin (`Verified`). -/
+  | agrees
+  /-- It does not (`Drifted`). -/
+  | drifted
+  /-- The canaries could not be embedded (`Unverified`). -/
+  | unchecked
+  deriving DecidableEq, Repr
+
+/-- The verdict the attach gate reads: only a measured drift. -/
+def PinState.isDrifted : PinState → Bool
+  | .drifted => true
+  | _ => false
+
+/-- Replacing the pin takes nothing from the store's other sessions: there is
+none, or the live embedder reproduces it. -/
+def PinState.safeToReplace : PinState → Bool
+  | .absent => true
+  | .agrees => true
+  | _ => false
+
+/-- The in-place rewrite's checks: the session already carries the live
+contract and holds a vector, then `reembed`'s image, duplicate, coverage and
+membership checks. -/
+def reembedSameOk (s : Session K M) (live : Contract K M) (ids : List Nat) (drop : Bool) :
+    Bool :=
+  decide (s.contract = some live) && hasVectors s && ((imageVectorIds s).isEmpty || drop) &&
+    distinct ids && decide (ids.length = (textIds s).length) &&
+      ids.all (fun i => decide (i ∈ textIds s))
+
+/-- The in-place rewrite's batch: the upserts only. The contract does not
+change, so no `SetEmbedding` (the guard `relabel` shares). -/
+def reembedSameBatch (s : Session K M) (live : Contract K M) (ids : List Nat) (drop : Bool) :
+    List (Mut K M) :=
+  ids.map (fun i => .upsert i (some live)) ++
+    (if drop then (imageVectorIds s).map (fun i => .upsert i none) else [])
+
+/-- `Graph::reembed_in_place` (`drop`: `..._dropping_image_vectors`). -/
+def reembedSame (s : Session K M) (live : Contract K M) (ids : List Nat) (drop : Bool) :
+    Option (Session K M × List (Mut K M)) :=
+  if reembedSameOk s live ids drop then
+    some (⟨some live, rewrite s.concepts ids live drop⟩, reembedSameBatch s live ids drop)
+  else none
+
+/-- `rewrite` covering every text concept, with no image vector left behind,
+puts every stored vector in the rewritten space. -/
+theorem rewrite_one_space (s : Session K M) (live : Contract K M) (ids : List Nat) (drop : Bool)
+    (himg : ((imageVectorIds s).isEmpty || drop) = true) (hdist : distinct ids = true)
+    (hlen : ids.length = (textIds s).length) (hsub : ∀ i ∈ ids, i ∈ textIds s) :
+    oneSpace (⟨some live, rewrite s.concepts ids live drop⟩ : Session K M) = true := by
+  rw [oneSpace_iff]
+  intro c' hc'
+  simp only [rewrite, List.mem_map] at hc'
+  obtain ⟨c, hc, rfl⟩ := hc'
+  cases himgc : c.image with
+  | false =>
+    have hct : c.id ∈ textIds s := by
+      simp only [textIds, List.mem_map, List.mem_filter]
+      exact ⟨c, ⟨hc, by simp [himgc]⟩, rfl⟩
+    have hcov := cover_of_distinct ids (textIds s) hdist hsub hlen c.id hct
+    simp [hcov]
+  | true =>
+    cases drop with
+    | true => simp
+    | false =>
+      simp only [Bool.or_false] at himg
+      have hnone : c.vec = none := by
+        cases hv : c.vec with
+        | none => rfl
+        | some v =>
+          have hmem : c.id ∈ imageVectorIds s := by
+            simp only [imageVectorIds, List.mem_map, List.mem_filter]
+            exact ⟨c, ⟨hc, by simp [himgc, hv]⟩, rfl⟩
+          rw [List.isEmpty_iff] at himg
+          rw [himg] at hmem; cases hmem
+      simp [hnone]
+
+/-- Everything a successful in-place rewrite guarantees: the session was
+already under the live contract and stays under it, every stored vector is in
+the live space, and the batch is upserts only. -/
+theorem reembedSame_spec {s s' : Session K M} {live : Contract K M} {ids : List Nat}
+    {drop : Bool} {m : List (Mut K M)} (h : reembedSame s live ids drop = some (s', m)) :
+    s.contract = some live ∧ hasVectors s = true ∧ s'.contract = some live ∧
+      oneSpace s' = true ∧ ∀ x ∈ m, x.isUpsert = true := by
+  unfold reembedSame at h
+  split at h
+  · rename_i hg
+    unfold reembedSameOk at hg
+    simp only [Bool.and_eq_true, decide_eq_true_eq, List.all_eq_true] at hg
+    obtain ⟨⟨⟨⟨⟨hc, hv⟩, himg⟩, hdist⟩, hlen⟩, hsub⟩ := hg
+    simp only [Option.some.injEq, Prod.mk.injEq] at h
+    obtain ⟨rfl, rfl⟩ := h
+    refine ⟨hc, hv, rfl, rewrite_one_space s live ids drop himg hdist hlen hsub, ?_⟩
+    intro x hx
+    simp only [reembedSameBatch, List.mem_append, List.mem_map] at hx
+    rcases hx with ⟨i, _, rfl⟩ | hx
+    · rfl
+    · cases drop with
+      | true =>
+        simp only [ite_true, List.mem_map] at hx
+        obtain ⟨i, _, rfl⟩ := hx
+        rfl
+      | false => simp at hx
+  · cases h
+
+/-- The in-place rewrite never moves the contract. -/
+theorem reembedSame_keeps_contract (s s' : Session K M) (live : Contract K M) (ids : List Nat)
+    (drop : Bool) (m : List (Mut K M)) (h : reembedSame s live ids drop = some (s', m)) :
+    s'.contract = s.contract := by
+  obtain ⟨hc, _, hc', _⟩ := reembedSame_spec h
+  rw [hc, hc']
+
+/-- The fixed `lambo re-embed`. `same` is `--rewrite-same-contract`, `repin`
+is `--repin-canary`; `mode` is `[embedder] canary` and `pin` what the store's
+pin for the live contract says about the live embedder. In the Rust's order:
+the usage checks, the attach (whose canary gate runs only for the backfill of
+a session under the live contract), the image and empty checks, the
+backfill, then the full rewrite's contract precondition and re-pin guard. -/
+def reembedCmdFixed (s : Session K M) (live : Contract K M)
+    (allow missingOnly drop same repin : Bool) (mode : CanaryMode) (pin : PinState) :
+    Option (Session K M × List (Mut K M)) :=
+  if allow then none
+  else if missingOnly && (drop || same || repin) then none
+  else if missingOnly && decide (s.contract = some live) &&
+      !canaryAdmits mode pin.isDrifted false then none
+  else if !missingOnly && !(imageVectorIds s).isEmpty && !drop then none
+  else if s.concepts.isEmpty then some (s, [])
+  else if missingOnly then
+    let ids := (s.concepts.filter (fun c => !c.image && c.vec.isNone)).map (·.id)
+    if ids.isEmpty then some (s, []) else backfill s live ids
+  else if same != decide (s.contract = some live) then none
+  else if !(decide (mode = .off) || repin || pin.safeToReplace) then none
+  else if same then reembedSame s live (textIds s) drop
+  else reembed s live (textIds s) drop
+
+/-- **Every successful full run ends in one space.** A full run of the fixed
+verb that succeeds on a non-empty session, in-place or a migration, leaves
+every stored vector in the live space under the live contract. -/
+theorem reembedCmdFixed_full_spec (s s' : Session K M) (live : Contract K M)
+    (drop same repin : Bool) (mode : CanaryMode) (pin : PinState) (m : List (Mut K M))
+    (hne : s.concepts ≠ [])
+    (h : reembedCmdFixed s live false false drop same repin mode pin = some (s', m)) :
+    oneSpace s' = true ∧ s'.contract = some live := by
+  have hne' : s.concepts.isEmpty = false := by
+    cases hcs : s.concepts with
+    | nil => exact absurd hcs hne
+    | cons _ _ => rfl
+  unfold reembedCmdFixed at h
+  simp only [Bool.false_eq_true, ite_false, Bool.false_and, hne', Bool.not_false,
+    Bool.true_and] at h
+  split at h
+  · cases h
+  · split at h
+    · cases h
+    · split at h
+      · cases h
+      · split at h
+        · obtain ⟨_, _, hc', hs', _⟩ := reembedSame_spec h
+          exact ⟨hs', hc'⟩
+        · exact ⟨reembed_one_space s s' live _ drop m h, reembed_contract s s' live _ drop m h⟩
+
+/-- **The drift is repairable in place** (finding 1 fixed). On a non-empty
+session under the live contract that holds a vector, with no image vector
+left behind and distinct node ids, `re-embed --rewrite-same-contract
+--repin-canary` succeeds whatever the canary mode and pin say, and (by
+`reembedCmdFixed_full_spec`) leaves every vector in the live space. -/
+theorem reembedCmdFixed_repairs_drift (s : Session K M) (live : Contract K M) (drop : Bool)
+    (mode : CanaryMode) (pin : PinState) (hc : s.contract = some live)
+    (hv : hasVectors s = true) (himg : ((imageVectorIds s).isEmpty || drop) = true)
+    (hdist : distinct (textIds s) = true) (hne : s.concepts ≠ []) :
+    ∃ r, reembedCmdFixed s live false false drop true true mode pin = some r ∧
+      oneSpace r.1 = true ∧ r.1.contract = some live := by
+  have hne' : s.concepts.isEmpty = false := by
+    cases hcs : s.concepts with
+    | nil => exact absurd hcs hne
+    | cons _ _ => rfl
+  have hok : reembedSameOk s live (textIds s) drop = true := by
+    simp [reembedSameOk, hc, hv, himg, hdist]
+  have himg' : (!(imageVectorIds s).isEmpty && !drop) = false := by
+    cases drop <;> simp_all
+  refine ⟨(⟨some live, rewrite s.concepts (textIds s) live drop⟩,
+    reembedSameBatch s live (textIds s) drop), ?_, ?_, rfl⟩
+  · simp [reembedCmdFixed, hne', hc, himg', reembedSame, hok]
+  · exact rewrite_one_space s live (textIds s) drop himg hdist rfl (fun _ h => h)
+
+/-- **Agreement: the plain verb still refuses a same-contract session.**
+Without `--rewrite-same-contract`, a full run on a non-empty session under
+the live contract is refused, as `reembedCmd_refuses_same_contract` says of
+the old verb. -/
+theorem reembedCmdFixed_plain_refuses_same_contract (s : Session K M) (live : Contract K M)
+    (drop repin : Bool) (mode : CanaryMode) (pin : PinState) (hc : s.contract = some live)
+    (hne : s.concepts ≠ []) :
+    reembedCmdFixed s live false false drop false repin mode pin = none := by
+  have hne' : s.concepts.isEmpty = false := by
+    cases hcs : s.concepts with
+    | nil => exact absurd hcs hne
+    | cons _ _ => rfl
+  cases drop <;> simp [reembedCmdFixed, hne', hc]
+
+/-- **Agreement: a safe migration is unchanged.** On a session not under the
+live contract, when the re-pin replaces nothing other sessions rely on (or
+the canary is off, or `--repin-canary` is given), the fixed full verb is the
+old one. -/
+theorem reembedCmdFixed_migration_agrees (s : Session K M) (live : Contract K M)
+    (allow drop repin : Bool) (mode : CanaryMode) (pin : PinState)
+    (hc : s.contract ≠ some live)
+    (hsafe : (decide (mode = .off) || repin || pin.safeToReplace) = true) :
+    reembedCmdFixed s live allow false drop false repin mode pin = reembedCmd s live allow false drop := by
+  unfold reembedCmdFixed reembedCmd
+  simp only [hc, decide_false, bne_self_eq_false, hsafe, Bool.not_true, Bool.false_eq_true,
+    ite_false, Bool.false_and, Bool.not_false, Bool.true_and]
+
+/-- **`--missing-only` runs the canary** (finding 3 fixed): under `verify`
+with a drift, the backfill of a session under the live contract is refused,
+like every ordinary writer attach (`writerAttach_verify_drift`). -/
+theorem missingOnly_fixed_refuses_drift (s : Session K M) (live : Contract K M)
+    (drop same repin : Bool) (hc : s.contract = some live) :
+    reembedCmdFixed s live false true drop same repin .verify .drifted = none := by
+  cases drop <;> cases same <;> cases repin <;>
+    simp [reembedCmdFixed, hc, canaryAdmits, PinState.isDrifted]
+
+/-- Under `verify` with a drift the backfill writes nothing, whatever the
+session's contract: it is refused, or it is a no-op. -/
+theorem missingOnly_fixed_verify_drift_writes_nothing (s : Session K M) (live : Contract K M)
+    (r : Session K M × List (Mut K M))
+    (h : reembedCmdFixed s live false true false false false .verify .drifted = some r) :
+    r = (s, []) := by
+  by_cases hc : s.contract = some live
+  · rw [missingOnly_fixed_refuses_drift s live false false false hc] at h; cases h
+  · have hbf := backfill_needs_same_contract s live
+      ((s.concepts.filter (fun c => !c.image && c.vec.isNone)).map (·.id)) hc
+    unfold reembedCmdFixed at h
+    by_cases he : s.concepts.isEmpty = true
+    · simp [hc, he] at h; exact h.symm
+    · by_cases hi : ((s.concepts.filter (fun c => !c.image && c.vec.isNone)).map (·.id)).isEmpty = true
+      · simp [hc, he, hi] at h; exact h.symm
+      · simp [hc, he, hi, hbf] at h
+
+/-- **Agreement: an admitted backfill is unchanged.** When the canary admits
+(any mode but `verify`, or no drift), `--missing-only` is the old backfill. -/
+theorem missingOnly_fixed_agrees (s : Session K M) (live : Contract K M) (allow : Bool)
+    (mode : CanaryMode) (pin : PinState) (hadm : canaryAdmits mode pin.isDrifted false = true) :
+    reembedCmdFixed s live allow true false false false mode pin =
+      reembedCmd s live allow true false := by
+  unfold reembedCmdFixed reembedCmd
+  simp [hadm]
+
+/-- Whether a fixed run pins the canary afterwards: a full run that
+succeeded on a non-empty session, with the canary not `off`. -/
+def repinsFixed (s : Session K M) (live : Contract K M) (missingOnly drop same repin : Bool)
+    (mode : CanaryMode) (pin : PinState) : Bool :=
+  (reembedCmdFixed s live false missingOnly drop same repin mode pin).isSome && !missingOnly &&
+    !s.concepts.isEmpty && !decide (mode = .off)
+
+/-- Whether the fixed run prints the line that other sessions under the
+contract are no longer flagged: whenever it re-pinned over a pin it could
+not confirm (which, by `fixed_repin_unsafe_needs_optin`, took
+`--repin-canary`). -/
+def repinWarnsFixed (s : Session K M) (live : Contract K M) (missingOnly drop same repin : Bool)
+    (mode : CanaryMode) (pin : PinState) : Bool :=
+  repinsFixed s live missingOnly drop same repin mode pin && !pin.safeToReplace
+
+/-- **No silent re-pin** (finding 2 fixed): a run that re-pins over a pin it
+could not confirm (drifted, or unchecked) was given `--repin-canary`, and
+prints the warning. -/
+theorem fixed_repin_unsafe_needs_optin (s : Session K M) (live : Contract K M)
+    (missingOnly drop same repin : Bool) (mode : CanaryMode) (pin : PinState)
+    (h : repinsFixed s live missingOnly drop same repin mode pin = true)
+    (hunsafe : pin.safeToReplace = false) :
+    repin = true ∧ repinWarnsFixed s live missingOnly drop same repin mode pin = true := by
+  have hr : repin = true := by
+    unfold repinsFixed at h
+    simp only [Bool.and_eq_true, Bool.not_eq_true', decide_eq_false_iff_not,
+      Option.isSome_iff_exists] at h
+    obtain ⟨⟨⟨⟨r, hr⟩, hmo⟩, hne⟩, hoff⟩ := h
+    subst hmo
+    cases repin with
+    | true => rfl
+    | false =>
+      exfalso
+      have hoff' : decide (mode = .off) = false := by simpa using hoff
+      unfold reembedCmdFixed at hr
+      cases same <;> cases drop <;>
+        simp [hne, hunsafe, hoff'] at hr <;> split at hr <;> simp_all
+  subst hr
+  exact ⟨rfl, by simp [repinWarnsFixed, h, hunsafe]⟩
+
+/-! ### The fixed operations keep the contract and one space -/
+
+/-- The backfill behind the builder's canary gate. -/
+def gatedBackfill (s : Session K M) (live : Contract K M) (ids : List Nat) (mode : CanaryMode)
+    (pin : PinState) : Option (Session K M × List (Mut K M)) :=
+  if decide (s.contract = some live) && !canaryAdmits mode pin.isDrifted false then none
+  else backfill s live ids
+
+/-- The session-level operations after the fix. -/
+inductive Op2 (K M : Type) where
+  | base (op : Op K M)
+  | backfillGated (live : Contract K M) (ids : List Nat) (mode : CanaryMode) (pin : PinState)
+  | reembedSame (live : Contract K M) (ids : List Nat) (drop : Bool)
+
+/-- Ordinary operations: the old ordinary ones without the override, and the
+gated backfill. -/
+def Op2.ordinary : Op2 K M → Bool
+  | .base op => op.ordinary && !op.overrides
+  | .backfillGated .. => true
+  | .reembedSame .. => false
+
+/-- The operations that never move a stamped contract: the ordinary ones and
+the in-place rewrite. -/
+def Op2.keepsContract : Op2 K M → Bool
+  | .reembedSame .. => true
+  | op => op.ordinary
+
+/-- Whether an operation carries the operator override. -/
+def Op2.overrides : Op2 K M → Bool
+  | .base op => op.overrides
+  | _ => false
+
+/-- One operation after the fix. -/
+def step2 (s : Session K M) : Op2 K M → Option (Session K M × List (Mut K M))
+  | .base op => step s op
+  | .backfillGated live ids mode pin => gatedBackfill s live ids mode pin
+  | .reembedSame live ids drop => reembedSame s live ids drop
+
+/-- A sequence of operations after the fix; a refused one leaves the session
+as it was. -/
+def runAll2 (s : Session K M) : List (Op2 K M) → Session K M
+  | [] => s
+  | op :: rest =>
+    match step2 s op with
+    | some (s', _) => runAll2 s' rest
+    | none => runAll2 s rest
+
+/-- A gated backfill that succeeds is the plain backfill. -/
+theorem gatedBackfill_eq {s : Session K M} {live : Contract K M} {ids : List Nat}
+    {mode : CanaryMode} {pin : PinState} {r : Session K M × List (Mut K M)}
+    (h : gatedBackfill s live ids mode pin = some r) : backfill s live ids = some r := by
+  unfold gatedBackfill at h
+  split at h
+  · cases h
+  · exact h
+
+/-- One contract-keeping operation keeps a stamped contract. -/
+theorem step2_keeps (s s' : Session K M) (c : Contract K M) (op : Op2 K M) (m : List (Mut K M))
+    (hc : s.contract = some c) (hop : op.keepsContract = true) (h : step2 s op = some (s', m)) :
+    s'.contract = some c := by
+  cases op with
+  | base op =>
+    have hord : op.ordinary = true ∧ op.overrides = false := by
+      simp only [Op2.keepsContract, Op2.ordinary, Bool.and_eq_true, Bool.not_eq_true'] at hop
+      exact hop
+    have := runAll_ordinary_keeps c [op] s hc (fun o ho => by simp at ho; subst ho; exact hord)
+    simp only [runAll, step2] at this h
+    rw [h] at this
+    exact this
+  | backfillGated live ids mode pin =>
+    rw [backfill_keeps_contract s s' live ids m (gatedBackfill_eq h), hc]
+  | reembedSame live ids drop =>
+    rw [reembedSame_keeps_contract s s' live ids drop m h, hc]
+
+/-- **Ordinary operations keep a stamped contract, after the fix**
+(`runAll_ordinary_keeps` for the fixed operations): no sequence of ordinary
+operations without the override, gated backfills and in-place rewrites
+changes it. -/
+theorem runAll2_keeps (c : Contract K M) :
+    ∀ (ops : List (Op2 K M)) (s : Session K M), s.contract = some c →
+      (∀ op ∈ ops, op.keepsContract = true) → (runAll2 s ops).contract = some c := by
+  intro ops
+  induction ops with
+  | nil => intro s hc _; exact hc
+  | cons op rest ih =>
+    intro s hc hops
+    have hrest : ∀ op ∈ rest, op.keepsContract = true := fun o ho => hops o (by simp [ho])
+    unfold runAll2
+    split
+    · rename_i s' m hstep
+      exact ih s' (step2_keeps s s' c op m hc (hops op (by simp)) hstep) hrest
+    · exact ih s hc hrest
+
+/-- The ordinary operations alone. -/
+theorem runAll2_ordinary_keeps (c : Contract K M) (ops : List (Op2 K M)) (s : Session K M)
+    (hc : s.contract = some c) (hops : ∀ op ∈ ops, op.ordinary = true) :
+    (runAll2 s ops).contract = some c :=
+  runAll2_keeps c ops s hc (fun op ho => by
+    have := hops op ho
+    cases op <;> simp_all [Op2.keepsContract])
+
+/-- **The fix adds no way to move the contract.** If one fixed operation
+changes a stamped contract, it is an old operation, so
+`contract_change_explicit` applies to it. -/
+theorem contract_change_explicit2 (s s' : Session K M) (c : Contract K M) (op : Op2 K M)
+    (m : List (Mut K M)) (hc : s.contract = some c) (h : step2 s op = some (s', m))
+    (hch : s'.contract ≠ some c) : ∃ op', op = .base op' ∧ step s op' = some (s', m) := by
+  cases op with
+  | base op' => exact ⟨op', rfl, h⟩
+  | backfillGated live ids mode pin =>
+    exact absurd (step2_keeps s s' c _ m hc rfl h) hch
+  | reembedSame live ids drop =>
+    exact absurd (step2_keeps s s' c _ m hc rfl h) hch
+
+/-- Each fixed operation without the override keeps the session in one
+space. -/
+theorem step2_oneSpace (s s' : Session K M) (op : Op2 K M) (m : List (Mut K M))
+    (hop : op.overrides = false) (hs : oneSpace s = true) (h : step2 s op = some (s', m)) :
+    oneSpace s' = true := by
+  cases op with
+  | base op => exact step_oneSpace s s' op m hop hs h
+  | backfillGated live ids mode pin =>
+    exact step_oneSpace s s' (.backfill live ids) m rfl hs (gatedBackfill_eq h)
+  | reembedSame live ids drop => exact (reembedSame_spec h).2.2.2.1
+
+/-- **No mixing without the override, after the fix.** -/
+theorem runAll2_oneSpace :
+    ∀ (ops : List (Op2 K M)) (s : Session K M), oneSpace s = true →
+      (∀ op ∈ ops, op.overrides = false) → oneSpace (runAll2 s ops) = true := by
+  intro ops
+  induction ops with
+  | nil => intro s hs _; exact hs
+  | cons op rest ih =>
+    intro s hs hops
+    have hrest : ∀ op ∈ rest, op.overrides = false := fun o ho => hops o (by simp [ho])
+    unfold runAll2
+    split
+    · rename_i s' m hstep
+      exact ih s' (step2_oneSpace s s' op m (hops op (by simp)) hs hstep) hrest
+    · exact ih s hs hrest
+
+/-! ### The override WARN after the fix -/
+
+/-- The fixed WARN: logged only once the relabel succeeded. -/
+def attachWarnsFixed (s : Session K M) (live : Contract K M) (allow : Bool) : Bool :=
+  attachWarns s live allow && (attach s live allow).isSome
+
+/-- The fixed WARN fires only on a relabel that happened, which emitted the
+one `SetEmbedding`. -/
+theorem attachWarnsFixed_relabelled (s : Session K M) (live : Contract K M) (allow : Bool)
+    (h : attachWarnsFixed s live allow = true) :
+    ∃ e s' m, s.contract = some e ∧ e ≠ live ∧ attach s live allow = some (s', m) ∧
+      m = [.setEmbedding (some live)] := by
+  unfold attachWarnsFixed at h
+  simp only [Bool.and_eq_true, Option.isSome_iff_exists] at h
+  obtain ⟨hw, ⟨⟨s', m⟩, ha⟩⟩ := h
+  obtain ⟨_, _, e, hc, _⟩ := (attachWarns_iff s live allow).mp hw
+  have hne : e ≠ live := by
+    intro he
+    unfold attachWarns at hw
+    rw [hc] at hw
+    simp [he] at hw
+  exact ⟨e, s', m, hc, hne, ha, ((attach_spec ha).2.2 e hc hne).2.2.2⟩
+
+/-! ### Concrete cases after the fix -/
+
+/-- **The drift repaired in place.** On `sA` under `cA` with a drifted pin:
+the plain verb still refuses; `--rewrite-same-contract` without
+`--repin-canary` is refused by the re-pin guard; with both it rewrites the
+vector under `cA` with no `SetEmbedding`; and with a pin that agrees the
+opt-in is not needed. -/
+theorem example_drift_repaired_in_place :
+    reembedCmdFixed sA cA false false false false true .verify .drifted = none ∧
+    reembedCmdFixed sA cA false false false true false .verify .drifted = none ∧
+    reembedCmdFixed sA cA false false false true true .verify .drifted =
+      some (⟨some cA, [⟨1, false, some cA⟩]⟩, [.upsert 1 (some cA)]) ∧
+    (reembedCmdFixed sA cA false false false true false .warn .agrees).isSome = true := by
+  decide
+
+/-- `--rewrite-same-contract` is refused on a session not under the live
+contract (that is a migration), and on one with no vector (that is a
+backfill). -/
+theorem example_same_contract_preconditions :
+    reembedCmdFixed sA cC false false false true true .off .absent = none ∧
+    reembedCmdFixed sEmpty cA false false false true true .off .absent = none := by
+  decide
+
+/-- **The drifted backfill, fixed.** Under `verify` with a drift,
+`--missing-only` on `sEmpty` is refused like the ordinary writer attach;
+under `warn` it backfills as before. -/
+theorem example_drifted_backfill_fixed :
+    writerAttach sEmpty cA false .verify true = none ∧
+    reembedCmdFixed sEmpty cA false true false false false .verify .drifted = none ∧
+    reembedCmdFixed sEmpty cA false true false false false .warn .drifted =
+      some (⟨some cA, [⟨1, false, some cA⟩]⟩, [.upsert 1 (some cA)]) := by decide
+
+/-- **The re-pin guard on the round trip's second hop** (prior `cA'`, live
+`cA`). Over a drifted or unchecked pin it is refused without
+`--repin-canary`; with it, it re-pins and warns; over a pin that agrees, or
+none, it re-pins without the opt-in (and without the warning, opt-in or
+not), replacing nothing other sessions rely on. -/
+theorem example_repin_guard :
+    reembedCmdFixed ⟨some cA', [⟨1, false, some cA'⟩]⟩ cA false false false false false
+      .verify .drifted = none ∧
+    reembedCmdFixed ⟨some cA', [⟨1, false, some cA'⟩]⟩ cA false false false false false
+      .warn .unchecked = none ∧
+    repinWarnsFixed ⟨some cA', [⟨1, false, some cA'⟩]⟩ cA false false false true .verify
+      .drifted = true ∧
+    repinsFixed ⟨some cA', [⟨1, false, some cA'⟩]⟩ cA false false false false .warn
+      .agrees = true ∧
+    repinWarnsFixed ⟨some cA', [⟨1, false, some cA'⟩]⟩ cA false false false true .warn
+      .agrees = false ∧
+    repinsFixed (⟨none, [⟨1, false, none⟩]⟩ : Session Nat Nat) cA false false false false .warn
+      .absent = true ∧
+    (reembedCmdFixed ⟨some cA', [⟨1, false, some cA'⟩]⟩ cA false false false false false
+      .off .drifted).isSome = true := by decide
+
+/-- The override WARN no longer fires on the cross-kind attempt the relabel
+refuses; it still fires on the rename that happens. -/
+theorem example_warn_only_after_relabel :
+    attachWarnsFixed sA cC true = false ∧ attachWarnsFixed sA cB true = true := by decide
+
 
 end Lambo.Contract
