@@ -7,8 +7,9 @@ Model of the hot list in `src/daemon/hotlist.rs` (`Condition`,
 `Condition::severity`, `higher_priority`, `HotList::{with_budget, enforce,
 insert, insert_many, revalidate, revalidate_members, retain_conditions}`,
 `default_contradiction_max`, `HOT_LIST_MAX`), of the cycle that maintains it
-(`detect_into_hot_list` in `src/daemon/mod.rs`: contradictions, conflicts,
-drift, stale, high-risk inserted in that order, then `retain_conditions`), and
+(`detect_into_hot_list` in `src/daemon/mod.rs`, which `prime_offline` shares:
+contradictions, conflicts, drift, stale, high-risk inserted in that order, then
+`retain_conditions`), and
 of how recall consumes it in `src/recall/assemble.rs`: `forces`,
 `contradiction_companions`, the `hot` / `cold_forced` / `forced` predicates
 handed to `emitted`, and the kinds of the hot-list warning lines (`format::
@@ -33,6 +34,16 @@ is an input: a cycle is given its hits and its condition set.
   (`budgetKept_of_countC_le`).
 * Times are `Int` seconds; nodes are an abstract type with decidable equality.
   There is no floating point.
+* `insertMany` models `insert_many` (one sort for the batch). Its agreement
+  with one-by-one `insert`s, which the Rust doc claims, is checked by `decide`
+  only (the examples on `plan`, which refresh a seeded entry and repeat keys
+  within the batch), not proved. `insertMany_inv` shows the batch keeps the
+  invariant. `cycle` sends every hit through `insertAll`, one insert at a time,
+  though Rust inserts a cycle's contradictions with one `insert_many`
+  (`insert_contradictions`, `src/daemon/contradiction.rs`): `cycle_inv` is
+  about that substitute cycle. `cycle_sound` and `cycle_drops_collected` hold
+  for any insertion step (they only use the final `retain`), and
+  `cycle_evicts_fresh_hit` inserts no contradiction.
 * Not modelled: the detectors, the `ConditionCheck` closures' bodies (except
   `windowCheck`, the shape of `clock_reading_entry`), lock order, events and
   re-arm, the companion step after the cut (`with_ordinary_companions`), and
@@ -108,8 +119,19 @@ What the model shows about the cycle:
   no longer detected can evict a fresh hit from a full list and is then
   dropped itself; after that cycle the list holds fewer entries than the
   bound although every fresh hit fits. The module doc says the loop "keeps the
-  list equal to the current cycle's fresh detector hits". The next cycle
-  repairs it.
+  list equal to the current cycle's fresh detector hits".
+  Only a fresh high-risk, drift or stale hit can be lost this way, and only to
+  an entry no longer detected of a strictly higher tier: a fresh hit outranks
+  an old entry of its own tier by `seq`, fresh contradictions and conflicts are
+  top-tier, and the budget never drops a fresh contradiction for an old one
+  (the cycle re-inserts every held contradiction after the old ones). Events
+  are unaffected (they are driven by the detected set); what is missing until
+  a later cycle is the hit's warning lines and its force-inclusion. The next
+  cycle restores it only if no further higher-tier entry lapses in that cycle,
+  so under steady churn the loss can recur. At the defaults (bound 1000,
+  budget 500) it needs at least 1000 old and fresh entries in one cycle, for
+  example a full contradiction budget and about 500 conflict, high-risk or
+  drift entries; with a small `hot_list_max` it is easy to reach.
 -/
 
 namespace Lambo.Hotlist
@@ -1080,7 +1102,9 @@ theorem retain_inv {l : HotList ν} (hl : Inv l) (held : List (Cond × ν)) :
 
 /-- One daemon cycle's hot-list step (`detect_into_hot_list`): every
 detector's hits are inserted, in the daemon's order, and only then is the
-list cut down to the cycle's condition set. -/
+list cut down to the cycle's condition set. Every hit goes through a single
+`insert` here; Rust inserts the contradictions with one `insert_many`, which
+agrees with single inserts on the `decide` examples only (see the header). -/
 def cycle (l : HotList ν) (hits : List (ν × Cond × Payload ν)) (held : List (Cond × ν)) :
     HotList ν :=
   retain held (insertAll l hits)
@@ -1231,9 +1255,11 @@ theorem revalidate_inv {l : HotList ν} (hl : Inv l) (check : Check ν) (members
 
 end Lapse
 
-/-- A predicate shaped like every clock-reading detector's
-(`clock_reading_entry`): it holds while `0 ≤ now - writtenAt ≤ window` and
-rebuilds `seconds_ago` from `now`. -/
+/-- A clock-reading predicate: it holds while `0 ≤ now - writtenAt ≤ window`
+and rebuilds `seconds_ago` from `now`. This is the test fixture
+`clock_reading_entry` (`src/daemon/hotlist.rs`), not a detector; the real
+recency predicates have the same shape, a write time in `[now - window, now]`
+(for example `high_risk_at` in `src/daemon/events.rs`). -/
 def windowCheck (writtenAt window now : Int) : Option (Payload ν) :=
   if 0 ≤ now - writtenAt ∧ now - writtenAt ≤ window then some (.conflict (now - writtenAt).toNat)
   else none
@@ -1485,6 +1511,46 @@ theorem cycle_inv {l : HotList ν} (hl : Inv l) (hits : List (ν × Cond × Payl
     (held : List (Cond × ν)) : Inv (cycle l hits held) :=
   retain_inv (insertAll_inv hl hits) held
 
+/-- What `upsertAll` keeps: one entry per pair, unique and issued `seq`s. -/
+theorem upsertAll_keys : ∀ (l : HotList ν) (es : List (ν × Cond × Payload ν)),
+    (l.entries.map key).Nodup → (l.entries.map Entry.seq).Nodup →
+      (∀ e ∈ l.entries, e.seq < l.nextSeq) →
+      ((upsertAll l es).entries.map key).Nodup ∧ ((upsertAll l es).entries.map Entry.seq).Nodup ∧
+        (upsertAll l es).max = l.max ∧ (upsertAll l es).cmax = l.cmax
+  | l, [], hk, hs, _ => ⟨hk, hs, rfl, rfl⟩
+  | l, (n, c, p) :: rest, hk, hs, hlt => by
+    simp only [upsertAll]
+    refine upsertAll_keys _ rest (upsert_keys_nodup _ _ hk)
+      (upsert_seq_nodup _ _ hs (fun x hx => hlt x hx)) ?_
+    intro e he
+    show e.seq < l.nextSeq + 1
+    cases mem_upsert he with
+    | inl h => subst h; simp [stamp]
+    | inr h => have := hlt e h; omega
+
+theorem upsertAll_seq_lt : ∀ (l : HotList ν) (es : List (ν × Cond × Payload ν)),
+    (∀ e ∈ l.entries, e.seq < l.nextSeq) →
+      ∀ e ∈ (upsertAll l es).entries, e.seq < (upsertAll l es).nextSeq
+  | l, [], hlt => hlt
+  | l, (n, c, p) :: rest, hlt => by
+    simp only [upsertAll]
+    apply upsertAll_seq_lt
+    intro e he
+    show e.seq < l.nextSeq + 1
+    cases mem_upsert he with
+    | inl h => subst h; simp [stamp]
+    | inr h => have := hlt e h; omega
+
+/-- The batch insert keeps the invariant. -/
+theorem insertMany_inv {l : HotList ν} (hl : Inv l) (es : List (ν × Cond × Payload ν)) :
+    Inv (insertMany l es).1 := by
+  have hu := upsertAll_keys l es hl.keys_nodup hl.seq_nodup hl.seq_lt
+  have hlt := upsertAll_seq_lt l es hl.seq_lt
+  refine ⟨enforce_map_nodup key _ _ _ hu.1, enforce_map_nodup Entry.seq _ _ _ hu.2.1, ?_,
+    enforce_length_le _ _ _, enforce_countC_le _ _ _⟩
+  intro e he
+  exact hlt e (mem_enforce _ _ _ he)
+
 end Reachable
 
 /-! ## Concrete examples (nodes are `Nat`) -/
@@ -1579,16 +1645,30 @@ example :
     keys (insertAll (withBudget 1 1) [req 1 .contradiction, req 2 .conflict]) = [(2, .conflict)] := by
   decide
 
-/-- The plan of `insert_many_matches_inserting_one_by_one` (shortened): the batch
-leaves the list one-by-one inserts leave, for several bounds and budgets. -/
+/-- The plan of `insert_many_matches_inserting_one_by_one` (shortened), with
+repeated `(node, condition)` keys inside the batch and a refresh of the seeded
+`(99, drift)` entry, so the refresh-in-place path is exercised: the batch
+leaves exactly the list one-by-one inserts leave (entries, payloads, `seq`s),
+for several bounds and budgets. -/
 def plan : List (Nat × Cond × Payload Nat) :=
-  (List.range 16).map fun i =>
-    req ((i * 7) % 13) ([Cond.contradiction, .stale, .conflict, .drift, .highRisk].getD ((i * 3) % 5) .drift)
+  (List.range 16).map (fun i =>
+    req ((i * 7) % 13) ([Cond.contradiction, .stale, .conflict, .drift, .highRisk].getD ((i * 3) % 5) .drift))
+  ++ [(0, .contradiction, .contradiction 5 3), (7, .drift, .drift 9), (99, .drift, .drift 7),
+      (1, .stale, .stale 90), (0, .contradiction, .contradiction 6 4), (12, .conflict, .conflict 2)]
 
 example :
-    [(0, 0), (3, 0), (3, 1), (3, 3), (8, 2), (8, 4), (8, 8), (100, 50)].all fun (m, b) =>
-      let l := insertAll (withBudget m b) [req 99 .drift]
-      keys (insertMany l plan).1 = keys (insertAll l plan) := by
+    [(0, 0), (3, 0), (3, 1), (3, 3), (8, 2), (8, 4), (8, 8), (20, 3), (20, 10), (100, 50)].all
+      fun (m, b) =>
+        let l := insertAll (withBudget m b) [req 99 .drift]
+        (insertMany l plan).1 = insertAll l plan := by
+  decide +kernel
+
+/-- The plan repeats keys, and with room to spare the seeded entry is refreshed
+in place with its new payload. -/
+example :
+    let l := insertAll (withBudget 100 50) [req 99 .drift]
+    (plan.map reqKey).length = 22 ∧ (keys (insertMany l plan).1).length = 18 ∧
+      ((insertMany l plan).1.entries.find? (·.node = 99)).map (·.payload) = some (.drift 7) := by
   decide
 
 /-- **Order matters once the list is full**: two drift entries into a list of
@@ -1601,7 +1681,9 @@ theorem order_matters_when_full :
 /-- **The cycle inserts before it retains** (`detect_into_hot_list`), so an
 entry that is no longer detected can push a fresh hit off a full list, and is
 then dropped itself: after cycle 2 the list (bound 2) holds one entry, though
-both fresh hits fit. The next cycle restores the drift entry. -/
+both fresh hits fit. The drift entry is lost to the old conflict, a higher tier;
+an old entry of its own tier could not evict it, since the fresh one has the
+newer `seq`. The next cycle restores it (no further entry lapses there). -/
 theorem cycle_evicts_fresh_hit :
     let l1 := cycle (withMax 2) [req 1 .conflict, req 2 .conflict] [(.conflict, 1), (.conflict, 2)]
     let l2 := cycle l1 [req 2 .conflict, req 3 .drift] [(.conflict, 2), (.drift, 3)]
