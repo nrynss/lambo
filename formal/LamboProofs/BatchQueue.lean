@@ -59,10 +59,15 @@ the call failing if any row fails, every row one width (`Uniform`).
   caller observes twice (a send, a dropped sender, or its own timeout).
   `core_at_rest`, `served_when_left_alone`: once the worker has caught up,
   every request ever queued has been observed exactly once; a running
-  worker left alone catches up within `measure` steps (`work_progress`,
-  `workN_idle`). `eventually_all_answered`: from any reachable state,
-  shutdown, the worker's drain, the supervisor's exit and the drop of
-  `Shared` leave every request observed exactly once. The invariant
+  worker (`pc ≠ down`) left alone catches up within `measure` steps
+  (`work_progress`, `workN_idle`). `served_when_left_alone` is the liveness
+  theorem. `eventually_all_answered` is an accounting theorem only: from
+  any reachable state, shutdown, the worker's drain, the supervisor's exit
+  and the drop of `Shared` leave every request observed exactly once, but
+  in a wedged or dead state those observations are `.dropped` from
+  `dropShared` (a permanent `Backend` error), and the recipe requests
+  shutdown while callers may still be waiting, which the Rust cannot do
+  (an awaiting `embed()` keeps a handle alive). The invariant
   (`Good`, `good_reachable`) keeps every request in exactly one place,
   across deaths and restarts (`restart_serves_queue`).
 * No cross-wiring. `wired`: the answers being sent are, position by
@@ -71,7 +76,13 @@ the call failing if any row fails, every row one width (`Uniform`).
   `removeDesc_eq` shows the highest-first `remove` loop takes exactly the
   chunk's requests. `answers_are_own`: with a row-wise forward and a
   canary that embeds, every answer a caller receives in any run is what its
-  own text gets alone.
+  own text gets alone. That equality is exact in the model only: the real
+  forward's rows depend on their batch up to rounding (padding, batched
+  kernels), and the live test
+  `embed_batch_matches_single_embeds_and_fails_empty_text_in_its_slot`
+  asserts only cosine > 0.999 between a batched and a single vector. So
+  on the Rust, `answers_are_own` and `forwardIsolated_rowwise` hold for the
+  error class and the vector up to that tolerance, not bit for bit.
 * Caps. `forwards_capped`: every forward holds at most `FORWARD_WIDTH`
   texts, each within twice any other's length plus `CHUNK_SLACK_BYTES`
   (`chunksOf_slack`, from the sorted order). `takePrioritized_length_le`,
@@ -90,7 +101,10 @@ the call failing if any row fails, every row one width (`Uniform`).
   at most `MAX_SINGLE_STREAK` single forwards in a row while a take has
   bulk texts; `take_ends`: a take ends within `phi + 1` iterations whatever
   arrives (`|single| + 132·|bulk| + 1` with the Rust's constants,
-  `phi_rust`).
+  `phi_rust`). `take_ends` is proved about `drive`, a restatement of the
+  take loop with the arrivals as input; it shares `pick` with `work`, and
+  `pullOf_drive` shows `work`'s pulls obey `drive`'s discipline, but no
+  theorem states the bound about runs of `step` directly.
 * Shutdown (K2-R1-7). `shutdown_drains`: after shutdown a running worker
   exits only once nothing is queued or held, having answered everything;
   `pullOf_nil`: no singles are pulled once shutdown is requested.
@@ -117,9 +131,17 @@ The Rust tests modelled by `decide`: `lengthChunks_long_text_alone`,
 * `queued_bulk_starves`, `takePrioritized_no_bulk`: the no-starvation
   guarantee is per take; with `MAX_BATCH` singles queued at every take a
   queued bulk text is never taken.
-* `test_stream_of_singles`: a recall can wait for the forward in flight and
-  then a bulk forward (the `MAX_SINGLE_STREAK` doc's bound), more than
-  `serve_take`'s "at most the one forward in flight".
+* A recall can wait for the whole rest of its take, which breaks both
+  `serve_take`'s "waits for at most the one forward in flight" and
+  `MAX_SINGLE_STREAK`'s "a recall waits at most one bulk forward more".
+  `test_stream_of_singles` shows the mild case (the forward in flight, then
+  a bulk forward). `long_recall_waits_out_the_take` shows the strong one:
+  singles are length-chunked shortest first, and new singles are pulled
+  before every forward while bulk texts remain, so shorter singles that
+  arrive later keep overtaking a long recall. With a take of 24 bulk texts
+  of 11 bytes, a 200-byte recall arriving during the first forward, and a
+  5-byte single arriving every two worker steps, the recall runs at forward
+  10, after all three bulk forwards. The take still ends (`take_ends`).
 * `death_after_shutdown_abandons_queue`: no restart after shutdown, so the
   queue is answered only by the drop of `Shared` (harmless: no caller can
   be waiting then). `wedged_stays`, `test_spawn_failure_wedges`: after a
@@ -1265,8 +1287,11 @@ theorem forwardIsolated_width_mismatch (f : Fwd) (dim k : Nat) (ts : List Txt) (
 
 /-- A forward that computes each text's row on its own and fails the whole
 call if any row fails: the shape of the real `BgeM3Core::forward` (one
-`encode_batch`, one model call, rows independent up to padding), and of the
-tests' `fake_forward`. -/
+`encode_batch`, one model call), and of the tests' `fake_forward`. Exact
+only in the model: on the real forward a row depends on its batch up to
+rounding (padding, batched kernels; the live test asserts cosine > 0.999
+between batched and single), so the theorems built on `rowFwd` hold for the
+Rust up to that tolerance. -/
 def rowFwd (row : Txt → Option Vec) : Fwd := fun _ ts =>
   if ts.all (fun t => (row t).isSome) then .ok (ts.filterMap row) else .err
 
@@ -2547,11 +2572,16 @@ theorem shutdown_drains {c : Cfg} {f : Fwd} {dim : Nat} (hm : 0 < c.maxBatch) {s
   | sending _ _ => rw [hpc] at hnb; exact absurd trivial hnb
 
 
-/-- No request is lost, whatever state the embedder is in: request shutdown
-(the last handle drops), let the worker run, let the supervisor exit and
-`Shared` drop, and every request ever queued has been observed exactly
-once. A request still queued when `Shared` drops is observed as a dropped
-sender. -/
+/-- An accounting theorem, not liveness: whatever state the embedder is in,
+request shutdown (the last handle drops), let the worker run, let the
+supervisor exit and `Shared` drop, and every request ever queued has been
+observed exactly once, so no request is ever left without an outcome. In a
+wedged or dead state (worker `down`, supervisor gone) those outcomes are
+`.dropped` from `dropShared`, which callers see as a permanent `Backend`
+error, not an answer. And the recipe requests shutdown while callers may
+still be waiting, which the Rust cannot reach: an awaiting `embed()` keeps a
+handle alive. The liveness theorem is `served_when_left_alone`, for a
+running worker (`pc ≠ down`). -/
 theorem eventually_all_answered {c : Cfg} {f : Fwd} {dim : Nat} (hm : 0 < c.maxBatch)
     (hw : 1 ≤ c.width) {s : St} (hg : Good c f dim s) :
     let evs := [Ev.shutdown] ++ List.replicate (measure (step c f dim s .shutdown)) .work ++
@@ -2858,10 +2888,11 @@ def streamEvs : List Ev :=
 /-- The bulk chunks run at forwards 0 and `1 + MAX_SINGLE_STREAK`, and the
 take ends after six forwards. Shown about the docs: the recall that
 arrives during the third single forward (`sReq 103`) waits for that forward
-and then for a bulk forward before its own, the bound `MAX_SINGLE_STREAK`'s
-doc states ("a recall waits at most one bulk forward more"); `serve_take`'s
-doc sentence "waits for at most the one forward in flight" holds only while
-the streak is below the cap. -/
+and then for a bulk forward before its own, more than `serve_take`'s "waits
+for at most the one forward in flight". This is the mild case; a long recall
+overtaken by shorter later singles waits out the whole take, beyond
+`MAX_SINGLE_STREAK`'s "at most one bulk forward more" too
+(`long_recall_waits_out_the_take`). -/
 theorem test_stream_of_singles :
     let s := run Cfg.rust okFwd 4 { St.init with pc := .serving (split bulk16), issued := bulk16 } streamEvs
     s.fwds.map List.length = [8, 1, 1, 1, 8, 1] ∧
@@ -2993,12 +3024,41 @@ theorem pullOf_drive (c : Cfg) (sd : Bool) (q : List Req) (t : Take) :
     (pullOf c sd q t).1.length ≤ c.maxBatch ∧ (t.bulk = [] → (pullOf c sd q t).1 = []) :=
   ⟨pullOf_length c sd q t, fun h => by rw [pullOf_nil c sd q t (Or.inl h)]⟩
 
-/-- No cross-wiring for any forward: in every run, the answers being sent
-are `forward_isolated`'s results, position by position, on the texts of the
-requests they are paired with. -/
+/-- No cross-wiring for any forward: in every run, the answers still to be
+sent (`out`) are a suffix of a list whose answers are `forward_isolated`'s
+results, position by position, on that list's own texts. `pre` is
+existential: the invariant does not record that it is the part of the same
+forward already sent, nor which requests it held, so the theorem pins each
+pending answer to its own request's position in one `forward_isolated`
+call, and says nothing about requests already answered (those are covered,
+for a row-wise forward, by `answers_are_own`). -/
 theorem answers_wired {c : Cfg} (f : Fwd) (dim : Nat) (hw : 1 ≤ c.width) (evs : List Ev)
     (t : Take) (out : List (Req × Res)) (h : (run c f dim St.init evs).pc = .sending t out) :
     ∃ pre k, (pre ++ out).map Prod.snd = (forwardIsolated f dim k ((pre ++ out).map (·.1.txt))).1 :=
   (good_reachable f dim hw evs).wired t out h
+
+
+/-- The reviewer's scenario: a take of 24 bulk texts of 11 bytes; a 200-byte
+recall (`longR`) arrives during the first bulk forward; then a 5-byte single
+arrives every two worker steps. -/
+def longR : Req := sReq 100 200
+
+def overtakeEvs : List Ev :=
+  [.work, .enqueue longR] ++
+    ((List.range 40).map (fun i => List.replicate 2 Ev.work ++ [.enqueue (sReq (200 + i) 5)])).flatten ++
+    List.replicate 60 .work
+
+set_option maxRecDepth 20000 in
+/-- Shown about the Rust: a long recall waits out the take. Shorter singles
+that arrive later keep overtaking it (length chunks, shortest first, pulled
+before every forward while bulk remains), so it runs at forward 10, after
+all three bulk forwards, not after "the one forward in flight" nor "at most
+one bulk forward more". -/
+theorem long_recall_waits_out_the_take :
+    let s := run Cfg.rust okFwd 4 { St.init with pc := .serving (split bulk24), issued := bulk24 }
+      overtakeEvs
+    s.fwds.findIdx? (fun b => b.any (·.tag == 100)) = some 10 ∧
+      ((s.fwds.take 10).filter (fun b => b.any (·.len == 11))).length = 3 := by
+  decide
 
 end Lambo.BatchQueue
