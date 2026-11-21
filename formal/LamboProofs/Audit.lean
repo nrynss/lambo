@@ -81,3 +81,10 @@ open Lambo
 #print axioms Fusion.raise_no_demotion
 #print axioms Fusion.raise_ahead_le
 #print axioms Fusion.raise_eq_assign
+#print axioms Fusion.full_keyword_ge_bm25
+#print axioms Fusion.full_keyword_eq
+#print axioms Fusion.full_local
+#print axioms Fusion.full_ahead_le
+#print axioms Fusion.full_ahead_le_raise
+#print axioms Fusion.full_eq_raise
+#print axioms Fusion.full_keeps_beyond_cap_bm25

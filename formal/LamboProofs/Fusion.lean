@@ -25,14 +25,30 @@ if let Some(id) = graph.name_target(query)
 }
 ```
 
-and #288 makes it **raise** the leg to at least `1.0`:
+and #288's first fix made it **raise** the leg to at least `1.0`:
 
 ```rust
     merge_max(&mut legs.entry(id).or_default().keyword, 1.0);
 ```
 
-Both are modelled (`assignName`, `raiseName`), beside `noName`, the table as it
-stands before the step, so the theorems can compare all three.
+That reads only the slot the capped keyword loop left, so a named concept
+whose hit lies beyond the over-fetch cap got the bare `1.0`
+(`beyond_cap_floor_only`). The step after the #288 review also folds in the
+named concept's own BM25 from the whole ranked list, already computed, before
+the floor:
+
+```rust
+    let slot = &mut legs.entry(id).or_default().keyword;
+    if let Some(hit) = ranked.iter().find(|s| s.item == id) {
+        merge_max(slot, hit.score);
+    }
+    merge_max(slot, 1.0);
+```
+
+All three are modelled (`assignName`, `raiseName`, `raiseFullName`), beside
+`noName`, the table as it stands before the step, so the theorems can compare
+them. `raiseFullName` is the step the Rust runs now; the `raise_*` theorems
+are about the intermediate one and stay as they were.
 
 ## Number model
 
@@ -76,12 +92,13 @@ present in more than one leg keeps its HIGHEST score (max-merge)" (`merged`),
 and the comment above the name step, "An exact normalized name is direct
 identity evidence even when the target is old and its content has no words in
 common with the query", which reads as evidence added for the named concept,
-never taken away (`raise_*`). The Rust test
+never taken away (`raise_*`, `full_*`). The Rust test
 `an_exact_name_raises_the_keyword_leg_without_lowering_its_bm25`
 (`candidates.rs`) pins the fixed step on #288's shape: the named concept's
 keyword leg is its BM25, the neighbour's is untouched, and the named concept
 ranks first (`raise_keyword_eq`, `raise_keyword_ge_bm25`, `raise_local`,
-`raise_keeps_wins`); on the unfixed code it failed with the leg at `1.0`
+`raise_keeps_wins`, and `full_eq_raise` for the current step, the hit being
+within the cap); on the unfixed code it failed with the leg at `1.0`
 (`assign_lowers_named_concept`).
 
 * `merged_mono`, `merged_mono_keyword`: max fusion is monotone in each leg.
@@ -105,6 +122,31 @@ ranks first (`raise_keyword_eq`, `raise_keyword_ge_bm25`, `raise_local`,
 * `beyond_cap_floor_only`: a named concept whose BM25 hit lies beyond the
   over-fetch cap is not in the keyword leg, so even the raising step scores it
   `1.0`, below its BM25. "At least its BM25" holds for hits within the cap.
+
+The step after review, `raiseFullName`:
+
+* `full_keyword_ge_one`, `full_keyword_ge_leg`, `full_keyword_ge_bm25`: the
+  named concept's keyword leg is at least `1.0`, at least the leg it had, and
+  at least its BM25 for **any** hit in the ranked list, with no over-fetch-cap
+  hypothesis. `full_keyword_eq` gives the exact value, `max(BM25, 1.0)` from
+  the whole list, or `1.0` without a hit (`full_keyword_of_mem`,
+  `full_keyword_of_not_mem`).
+* `full_local`: every other node's legs are unchanged, so an unnamed node
+  beyond the cap stays out of the keyword leg.
+* `full_no_demotion`, `full_keeps_wins`, `full_never_overtaken`,
+  `full_ahead_le`: as for `raiseName`, against the table before the step.
+* `full_keyword_ge_raise`, `full_ahead_le_raise`: against `raiseName`, the
+  keyword leg is never lower and nothing more sorts ahead of the named
+  concept.
+* `full_eq_raise`: the two steps give the same table whenever the named
+  concept's hit is within the cap or it has none; they differ only beyond the
+  cap. `full_keeps_beyond_cap_bm25`: on `beyondCapInput` and a three-node
+  variant, the full-list step keeps the BM25 `3.2` where `raiseName` gave
+  `1.0`, and an unnamed beyond-cap node stays out of the leg.
+
+The name step writes only leg slots. In Rust, `rank` then recomputes every
+node's `keyword_rank` and `rrf`, so other nodes' RRF fields can move; RRF is
+not modelled, and "locality" here means the leg slots under max fusion.
 -/
 
 namespace Lambo.Fusion
@@ -286,6 +328,18 @@ def lastScore : List (ι × Int) → ι → Option Int
 def keywordLeg (ranked : List (ι × Int)) (cap : Nat) : ι → Option Int :=
   lastScore (ranked.take cap)
 
+/-- A node's score on the whole ranked list, cap or no cap: the first entry
+for it (`ranked.iter().find(|s| s.item == id)`), `none` when it has none. -/
+def findScore : List (ι × Int) → ι → Option Int
+  | [], _ => none
+  | (i, s) :: rest, n => if i = n then some s else findScore rest n
+
+/-- Fold an optional hit into a slot with `merge_max`; no hit leaves the slot
+as it is (`if let Some(hit) = … { merge_max(slot, hit.score) }`). -/
+def mergeHit (slot : Option Int) : Option Int → Option Int
+  | none => slot
+  | some s => mergeMax slot s
+
 /-- What phase 1 reads. -/
 structure Input (ι : Type) where
   /-- `index.search_ranked(query)`: (node, BM25), best first, ids distinct. -/
@@ -316,11 +370,32 @@ def assignName : NameStep ι
   | legs, none => legs
   | legs, some t => fun n => if n = t then { legs n with keyword := some one } else legs n
 
-/-- The step after #288: `merge_max(keyword, 1.0)`. -/
+/-- The first #288 step: `merge_max(keyword, 1.0)` on the slot the capped
+keyword loop left, so a hit beyond the over-fetch cap is not seen. -/
 def raiseName : NameStep ι
   | legs, none => legs
   | legs, some t => fun n =>
     if n = t then { legs n with keyword := mergeMax (legs n).keyword one } else legs n
+
+/-- The step after the #288 review: fold in the named concept's BM25 from the
+whole ranked list, then the `1.0` floor, so a hit beyond the over-fetch cap
+counts too:
+
+```rust
+let slot = &mut legs.entry(id).or_default().keyword;
+if let Some(hit) = ranked.iter().find(|s| s.item == id) {
+    merge_max(slot, hit.score);
+}
+merge_max(slot, 1.0);
+```
+
+It reads `ranked` itself, so it takes the list as a parameter. -/
+def raiseFullName (ranked : List (ι × Int)) : NameStep ι
+  | legs, none => legs
+  | legs, some t => fun n =>
+    if n = t then
+      { legs n with keyword := mergeMax (mergeHit (legs n).keyword (findScore ranked t)) one }
+    else legs n
 
 /-- The recent leg: `leg.recent = Some(input.recent_score)` for its members. -/
 def recentStep (inp : Input ι) (legs : ι → Legs) : ι → Legs :=
@@ -372,6 +447,13 @@ theorem raiseName_keywordOnly : KeywordOnly (ι := ι) raiseName := by
   cases t with
   | none => exact ⟨rfl, rfl⟩
   | some t => simp only [raiseName]; split <;> exact ⟨rfl, rfl⟩
+
+theorem raiseFullName_keywordOnly (ranked : List (ι × Int)) :
+    KeywordOnly (raiseFullName ranked) := by
+  intro legs t n
+  cases t with
+  | none => exact ⟨rfl, rfl⟩
+  | some t => simp only [raiseFullName]; split <;> exact ⟨rfl, rfl⟩
 
 /-- The recent and vector steps act slot by slot: on two tables that agree
 on recent and vector slots everywhere, they produce tables that differ only in
@@ -456,6 +538,72 @@ theorem lastScore_of_mem {l : List (ι × Int)} {n : ι} {s : Int}
     rcases hm with ⟨rfl, rfl⟩ | hm
     · simp [lastScore, lastScore_of_not_mem hnd.1]
     · simp [lastScore, ih hnd.2 hm]
+
+/-- Whatever the keyword loop wrote for a node is an entry of the list. -/
+theorem mem_of_lastScore {l : List (ι × Int)} {n : ι} {s : Int} (h : lastScore l n = some s) :
+    (n, s) ∈ l := by
+  induction l with
+  | nil => simp [lastScore] at h
+  | cons p rest ih =>
+    obtain ⟨i, s'⟩ := p
+    simp only [lastScore] at h
+    cases hr : lastScore rest n with
+    | some u =>
+      rw [hr] at h
+      cases h
+      exact List.mem_cons_of_mem _ (ih hr)
+    | none =>
+      rw [hr] at h
+      by_cases hi : i = n
+      · subst hi; simp at h; subst h; exact List.mem_cons_self
+      · simp [hi] at h
+
+theorem findScore_of_not_mem {l : List (ι × Int)} {n : ι} (h : n ∉ l.map Prod.fst) :
+    findScore l n = none := by
+  induction l with
+  | nil => rfl
+  | cons p rest ih =>
+    obtain ⟨i, s⟩ := p
+    simp only [List.map_cons, List.mem_cons, not_or] at h
+    simp only [findScore, ih h.2]
+    rw [ite_eq_right (Ne.symm h.1)]
+
+theorem findScore_of_mem {l : List (ι × Int)} {n : ι} {s : Int}
+    (hnd : (l.map Prod.fst).Nodup) (hm : (n, s) ∈ l) : findScore l n = some s := by
+  induction l with
+  | nil => simp at hm
+  | cons p rest ih =>
+    obtain ⟨i, s'⟩ := p
+    simp only [List.map_cons, List.nodup_cons] at hnd
+    simp only [List.mem_cons, Prod.mk.injEq] at hm
+    rcases hm with ⟨rfl, rfl⟩ | hm
+    · simp [findScore]
+    · have hi : i ≠ n := by
+        intro hi; subst hi
+        exact hnd.1 (List.mem_map_of_mem (f := Prod.fst) hm)
+      simp [findScore, hi, ih hnd.2 hm]
+
+/-- The capped keyword leg, where it has a score for a node, has the same one
+the whole list gives (the ids being distinct). -/
+theorem keywordLeg_eq_findScore {ranked : List (ι × Int)} {cap : Nat} {n : ι} {s : Int}
+    (hnd : (ranked.map Prod.fst).Nodup) (h : keywordLeg ranked cap n = some s) :
+    findScore ranked n = some s :=
+  findScore_of_mem hnd (List.mem_of_mem_take (mem_of_lastScore h))
+
+theorem le_mergeHit (slot h : Option Int) : OLe slot (mergeHit slot h) := by
+  cases h with
+  | none => exact oLe_refl _
+  | some s => exact le_mergeMax _ _
+
+theorem mergeMax_mono {a b : Option Int} (h : OLe a b) (x : Int) :
+    OLe (mergeMax a x) (mergeMax b x) := by
+  rw [mergeMax_eq, mergeMax_eq]; exact omax_mono h (oLe_refl _)
+
+/-- Folding a slot's own score back in changes nothing. -/
+theorem mergeHit_self (slot : Option Int) : mergeHit slot slot = slot := by
+  cases slot with
+  | none => rfl
+  | some s => simp [mergeHit, mergeMax, imax]
 
 /-! ## The bug: the assigning step can demote the named concept -/
 
@@ -623,6 +771,198 @@ def beyondCapInput : Input Nat where
 theorem beyond_cap_floor_only :
     (phase1 noName beyondCapInput 0).keyword = none ∧
     (phase1 raiseName beyondCapInput 0).keyword = some 1000 := by
+  decide
+
+/-! ## The fix after review: the name step reads the whole ranked list
+
+`raiseFullName` closes the gap `beyond_cap_floor_only` records: the named
+concept's keyword leg is `max(BM25, 1.0)` for its hit anywhere in the ranked
+list, inside the over-fetch cap or beyond it. Every other node keeps the leg
+the capped loop gave it, so a node beyond the cap that is not named stays out
+of the keyword leg. -/
+
+section FullList
+
+variable (inp : Input ι) {t : ι} (ht : inp.nameTarget = some t)
+include ht
+
+/-- The named concept's keyword leg after the full-list step, from its leg
+before it. -/
+theorem full_keyword (n : ι) :
+    (phase1 (raiseFullName inp.ranked) inp n).keyword =
+      if n = t then mergeMax (mergeHit (phase1 noName inp n).keyword (findScore inp.ranked t)) one
+      else (phase1 noName inp n).keyword := by
+  rw [phase1_eq (raiseFullName_keywordOnly _), ht]
+  by_cases hn : n = t <;> simp [raiseFullName, hn, phase1_noName_keyword, keywordTable]
+
+/-- **Floor.** The named concept's keyword leg is at least `1.0`. -/
+theorem full_keyword_ge_one :
+    OLe (some one) (phase1 (raiseFullName inp.ranked) inp t).keyword := by
+  rw [full_keyword inp ht, ite_eq_left rfl]
+  exact score_le_mergeMax _ _
+
+/-- **No loss.** It is at least the keyword leg it had before the step. -/
+theorem full_keyword_ge_leg :
+    OLe (phase1 noName inp t).keyword (phase1 (raiseFullName inp.ranked) inp t).keyword := by
+  rw [full_keyword inp ht, ite_eq_left rfl]
+  exact oLe_trans (le_mergeHit _ _) (le_mergeMax _ _)
+
+/-- **At least its BM25, for any hit.** No over-fetch-cap hypothesis: the hit
+may lie anywhere in the ranked list. -/
+theorem full_keyword_ge_bm25 {s : Int} (hnd : (inp.ranked.map Prod.fst).Nodup)
+    (hm : (t, s) ∈ inp.ranked) :
+    OLe (some s) (phase1 (raiseFullName inp.ranked) inp t).keyword := by
+  rw [full_keyword inp ht, ite_eq_left rfl, findScore_of_mem hnd hm]
+  exact oLe_trans (score_le_mergeMax _ _) (le_mergeMax _ _)
+
+/-- The exact value: `max(BM25, 1.0)` for its BM25 on the whole list, or `1.0`
+when the list has no hit for it. -/
+theorem full_keyword_eq (hnd : (inp.ranked.map Prod.fst).Nodup) :
+    (phase1 (raiseFullName inp.ranked) inp t).keyword =
+      match findScore inp.ranked t with
+      | some s => some (imax s one)
+      | none => some one := by
+  rw [full_keyword inp ht, ite_eq_left rfl, phase1_noName_keyword]
+  cases hk : keywordLeg inp.ranked inp.cap t with
+  | none =>
+    cases findScore inp.ranked t <;> rfl
+  | some k =>
+    rw [keywordLeg_eq_findScore hnd hk]
+    simp [mergeHit, mergeMax, imax]
+
+/-- `full_keyword_eq` for a hit: exactly `max(BM25, 1.0)`, wherever the hit
+lies. -/
+theorem full_keyword_of_mem {s : Int} (hnd : (inp.ranked.map Prod.fst).Nodup)
+    (hm : (t, s) ∈ inp.ranked) :
+    (phase1 (raiseFullName inp.ranked) inp t).keyword = some (imax s one) := by
+  rw [full_keyword_eq inp ht hnd, findScore_of_mem hnd hm]
+
+/-- `full_keyword_eq` without a hit: exactly `1.0`. -/
+theorem full_keyword_of_not_mem (hn : t ∉ inp.ranked.map Prod.fst) :
+    (phase1 (raiseFullName inp.ranked) inp t).keyword = some one := by
+  rw [full_keyword inp ht, ite_eq_left rfl, findScore_of_not_mem hn, phase1_noName_keyword]
+  have : keywordLeg inp.ranked inp.cap t = none := by
+    apply lastScore_of_not_mem
+    intro hmem
+    rw [List.map_take] at hmem
+    exact hn (List.mem_of_mem_take hmem)
+  rw [this]; rfl
+
+/-- **Locality.** Every other node's legs are unchanged by the step, a node
+beyond the over-fetch cap included: it stays out of the keyword leg. -/
+theorem full_local {n : ι} (hn : n ≠ t) :
+    phase1 (raiseFullName inp.ranked) inp n = phase1 noName inp n := by
+  rw [phase1_eq (raiseFullName_keywordOnly _), ht]
+  ext <;> simp [raiseFullName, hn, phase1_noName_keyword, keywordTable]
+
+/-- **No demotion.** The named concept's fused score does not fall. -/
+theorem full_no_demotion :
+    OLe (score noName inp t) (score (raiseFullName inp.ranked) inp t) := by
+  unfold score
+  rw [phase1_eq (raiseFullName_keywordOnly _) inp t]
+  exact merged_mono_keyword _ (by
+    have := full_keyword_ge_leg inp ht
+    rwa [phase1_eq (raiseFullName_keywordOnly _) inp t] at this)
+
+theorem full_score_local {n : ι} (hn : n ≠ t) :
+    score (raiseFullName inp.ranked) inp n = score noName inp n := by
+  unfold score; rw [full_local inp ht hn]
+
+/-- **Keeps its wins.** -/
+theorem full_keeps_wins (tb : ι → ι → Bool) {j : ι} (hj : j ≠ t)
+    (h : Beats (score noName inp) tb t j) : Beats (score (raiseFullName inp.ranked) inp) tb t j :=
+  beats_of_raise (fun _ hn => full_score_local inp ht hn) (full_no_demotion inp ht) hj h
+
+/-- **Never overtaken.** -/
+theorem full_never_overtaken (tb : ι → ι → Bool) {j : ι}
+    (h : Beats (score (raiseFullName inp.ranked) inp) tb j t) : Beats (score noName inp) tb j t :=
+  beats_of_raise_rev (fun _ hn => full_score_local inp ht hn) (full_no_demotion inp ht) h
+
+/-- **Rank cannot get worse.** No more nodes sort ahead of the named concept
+after the step than before it. -/
+theorem full_ahead_le (tb : ι → ι → Bool) (ids : List ι) :
+    ahead (score (raiseFullName inp.ranked) inp) tb ids t ≤ ahead (score noName inp) tb ids t := by
+  unfold ahead
+  apply length_filter_mono
+  intro j hj
+  simp only [decide_eq_true_eq] at hj ⊢
+  exact full_never_overtaken inp ht tb hj
+
+/-- Against the first #288 step: the full-list step's keyword leg for the
+named concept is never below `raiseName`'s. -/
+theorem full_keyword_ge_raise :
+    OLe (phase1 raiseName inp t).keyword (phase1 (raiseFullName inp.ranked) inp t).keyword := by
+  rw [full_keyword inp ht, ite_eq_left rfl, raise_keyword inp ht, ite_eq_left rfl]
+  exact mergeMax_mono (le_mergeHit _ _) _
+
+/-- And so nothing sorts ahead of the named concept under the full-list step
+that did not under `raiseName`. -/
+theorem full_ahead_le_raise (tb : ι → ι → Bool) (ids : List ι) :
+    ahead (score (raiseFullName inp.ranked) inp) tb ids t ≤ ahead (score raiseName inp) tb ids t := by
+  have hloc : ∀ n, n ≠ t → score (raiseFullName inp.ranked) inp n = score raiseName inp n :=
+    fun n hn => by rw [full_score_local inp ht hn, raise_score_local inp ht hn]
+  have hup : OLe (score raiseName inp t) (score (raiseFullName inp.ranked) inp t) := by
+    unfold score
+    rw [phase1_eq raiseName_keywordOnly inp t, phase1_eq (raiseFullName_keywordOnly _) inp t]
+    refine merged_mono ?_ (oLe_refl _) (oLe_refl _)
+    have := full_keyword_ge_raise inp ht
+    rwa [phase1_eq raiseName_keywordOnly inp t,
+      phase1_eq (raiseFullName_keywordOnly _) inp t] at this
+  unfold ahead
+  apply length_filter_mono
+  intro j hj
+  simp only [decide_eq_true_eq] at hj ⊢
+  exact beats_of_raise_rev hloc hup hj
+
+/-- **Agreement.** When the named concept's hit is within the over-fetch cap,
+or it has no hit at all, the full-list step and `raiseName` give the same
+table: the review fix changes only the beyond-cap case. -/
+theorem full_eq_raise (hnd : (inp.ranked.map Prod.fst).Nodup)
+    (hcap : t ∉ inp.ranked.map Prod.fst ∨ ∃ s, (t, s) ∈ inp.ranked.take inp.cap) :
+    phase1 (raiseFullName inp.ranked) inp = phase1 raiseName inp := by
+  have hfind : findScore inp.ranked t = keywordLeg inp.ranked inp.cap t := by
+    rcases hcap with hn | ⟨s, hm⟩
+    · rw [findScore_of_not_mem hn]
+      symm
+      apply lastScore_of_not_mem
+      intro hmem
+      rw [List.map_take] at hmem
+      exact hn (List.mem_of_mem_take hmem)
+    · have hnd' : ((inp.ranked.take inp.cap).map Prod.fst).Nodup := by
+        rw [List.map_take]; exact hnd.sublist (List.take_sublist _ _)
+      rw [findScore_of_mem hnd (List.mem_of_mem_take hm)]
+      exact (lastScore_of_mem hnd' hm).symm
+  funext n
+  rw [phase1_eq (raiseFullName_keywordOnly _), phase1_eq raiseName_keywordOnly, ht]
+  by_cases hn : n = t
+  · subst hn
+    simp [raiseFullName, raiseName, keywordTable, hfind, mergeHit_self]
+  · simp [raiseFullName, raiseName, hn]
+
+end FullList
+
+/-- The beyond-cap shape with a third node: `X` (node 0) is named with BM25
+`3.2`; a cap of 1 keeps only `Z` (node 1, `5.0`); `W` (node 2, `4.0`) is also
+beyond the cap but not named. -/
+def beyondCapInput3 : Input Nat where
+  ranked := [(1, 5000), (2, 4000), (0, 3200)]
+  cap := 1
+  nameTarget := some 0
+  recent := fun _ => false
+  recentScore := 350
+  vector := []
+
+/-- **The gap closed.** Where `raiseName` gave the beyond-cap named concept
+only the `1.0` floor, the full-list step keeps its BM25 `3.2`; the in-cap
+node keeps its `5.0`, and the unnamed node beyond the cap stays out of the
+keyword leg. On `beyondCapInput`, the input of `beyond_cap_floor_only`, too. -/
+theorem full_keeps_beyond_cap_bm25 :
+    (phase1 raiseName beyondCapInput 0).keyword = some 1000 ∧
+    (phase1 (raiseFullName beyondCapInput.ranked) beyondCapInput 0).keyword = some 3200 ∧
+    (phase1 raiseName beyondCapInput3 0).keyword = some 1000 ∧
+    (phase1 (raiseFullName beyondCapInput3.ranked) beyondCapInput3 0).keyword = some 3200 ∧
+    (phase1 (raiseFullName beyondCapInput3.ranked) beyondCapInput3 1).keyword = some 5000 ∧
+    (phase1 (raiseFullName beyondCapInput3.ranked) beyondCapInput3 2).keyword = none := by
   decide
 
 end Lambo.Fusion
