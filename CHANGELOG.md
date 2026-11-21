@@ -48,12 +48,16 @@
   On `lambo serve` and `lambo serve-web`, clap's "unexpected argument"
   error could also print a token: one starting with `-` was taken for a
   flag (`--auth-token --abc` printed `'--abc'`, `-abc` printed `'-a'`), and
-  the rest of an unquoted token with a space was printed whole. A value
-  starting with `-` is now the token, and an argument from `--auth-token` on
-  that the command does not accept is shown as `<redacted>` with a tip to
-  quote the token; the exit code is still `2`. An unexpected argument
-  before the flag is shown as before. `Resolve.lean` models this path
-  (`unexpectedArgRefusalFixed`).
+  the rest of an unquoted token with a space was printed whole. From
+  `--auth-token` on, an argument the command does not accept, an invalid
+  value of a flag it accepts (`--port <it>`) and an unrecognized subcommand
+  are now shown as `<redacted>`, with a tip to check the arguments and quote
+  the token and the command's plain usage line; the exit code is still `2`.
+  An unexpected argument before the flag, a missing value ("a value is
+  required") and a misplaced `--auth-token` itself are shown as before. A
+  flag right after `--auth-token ` is still refused, never taken as the
+  token; a token that starts with `-` is given as `--auth-token=-abc`.
+  `Resolve.lean` models this path (`quotedRender`, `authFlagValue`).
 
 - Embedding canary drift repair (#296). On a drift the refusal told the
   operator to run `lambo re-embed`, which refuses a session already under the

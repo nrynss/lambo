@@ -65,12 +65,7 @@ enum Commands {
         /// request must present one. Optional on loopback; a non-loopback
         /// bind needs this or a [[serve.credential]]. Ignored by
         /// --transport stdio.
-        #[arg(
-            long,
-            value_name = "TOKEN",
-            value_parser = AuthTokenArgParser,
-            allow_hyphen_values = true
-        )]
+        #[arg(long, value_name = "TOKEN", value_parser = AuthTokenArgParser)]
         auth_token: Option<AuthTokenArg>,
         /// Maximum concurrently live MCP sessions on the HTTP transport;
         /// further `initialize` requests are refused with 503. With several
@@ -145,12 +140,7 @@ enum Commands {
         /// inherit_serve_credentials. It reads
         /// every served session; [[web.credential]] entries read only their
         /// own.
-        #[arg(
-            long,
-            value_name = "TOKEN",
-            value_parser = WebAuthTokenParser,
-            allow_hyphen_values = true
-        )]
+        #[arg(long, value_name = "TOKEN", value_parser = WebAuthTokenParser)]
         auth_token: Option<lambo::cli::serve_web::AuthToken>,
         /// A Host (name or address, optionally :port) the portal also
         /// answers while no credential is configured, beside localhost,
@@ -1783,20 +1773,39 @@ fn http_auth_token_check(
 /// What a parse error shows in place of an argv element it would quote.
 const ARGV_REDACTED: &str = "<redacted>";
 
+/// The tip that replaces clap's suggestions on a redaction.
+const ARGV_REDACTED_TIP: &str =
+    "an argument after --auth-token is not shown (it may be part of the \
+     token); check the arguments after it, and quote a token that contains a space";
+
 /// clap's parse error with every argv element it quotes that may be part
 /// of an `--auth-token` value replaced by [`ARGV_REDACTED`] (#315).
 ///
-/// `allow_hyphen_values` makes the element after `--auth-token` its value
-/// even when it starts with `-`, but an unquoted token split by a space
-/// leaves its tail in argv, and clap's "unexpected argument '<it>' found"
-/// would print it. The rule is narrow: an element clap quotes (an unknown
-/// argument, an invalid value or subcommand) is shown only when it occurs in
-/// an argv element before the first `--auth-token` (or `--auth-token=`) and
-/// in none from that flag on; anything else is redacted, so an element it
-/// cannot place is redacted (fail closed). With a redaction clap's
-/// suggestions, which can repeat the element or hint at it, are replaced by
-/// one fixed tip. The kind, hence the exit code (2), and the usage line are
+/// An unquoted token split by a space leaves its tail in argv, and a token
+/// that starts with `-` is read as a flag (`--auth-token` takes no hyphen
+/// values, so a flag after it is never silently the token); clap's
+/// "unexpected argument '<it>' found", "invalid value '<it>' for ..." and
+/// "unrecognized subcommand '<it>'" would print them.
+///
+/// The rule is narrow: an element clap quotes is shown only when it occurs
+/// in an argv element before the first `--auth-token` (or `--auth-token=`)
+/// and in none from that flag on; anything else is redacted, so an element
+/// it cannot place is redacted (fail closed). Two quoted values are never
+/// redacted: an empty one, which is clap's missing value ("a value is
+/// required for ..."), and `--auth-token` itself (`lambo --auth-token x
+/// serve-web`), which is the flag, not a value.
+///
+/// With a redaction, clap's suggestions, which can repeat the element or
+/// hint at it, are replaced by one fixed tip ([`ARGV_REDACTED_TIP`]), and
+/// its usage line, which can name its did-you-mean flag for the element, by
+/// the subcommand's plain usage. The kind, hence the exit code (2), is
 /// clap's. Without `--auth-token` in argv the error is unchanged.
+///
+/// Not redacted: a value parser's own message after an invalid value
+/// (": invalid digit found in string"). That is safe today because the
+/// parsers of every flag `serve` and `serve-web` accept (`u16`, `u32`,
+/// `usize`, `IpAddr`, strings, paths) never echo their input there; a new
+/// flag whose parser does would need this revisited.
 fn redact_auth_token_echo(mut err: clap::Error, argv: &[std::ffi::OsString]) -> clap::Error {
     use clap::error::{ContextKind, ContextValue, ErrorKind};
     let args: Vec<String> = argv
@@ -1812,7 +1821,10 @@ fn redact_auth_token_echo(mut err: clap::Error, argv: &[std::ffi::OsString]) -> 
     };
     let (before, from_flag) = args.split_at(flag);
     let shown = |quoted: &str| {
-        before.iter().any(|a| a.contains(quoted)) && !from_flag.iter().any(|a| a.contains(quoted))
+        quoted.is_empty()
+            || quoted == "--auth-token"
+            || (before.iter().any(|a| a.contains(quoted))
+                && !from_flag.iter().any(|a| a.contains(quoted)))
     };
     let mut quoting = vec![ContextKind::InvalidValue, ContextKind::InvalidSubcommand];
     if err.kind() == ErrorKind::UnknownArgument {
@@ -1839,13 +1851,32 @@ fn redact_auth_token_echo(mut err: clap::Error, argv: &[std::ffi::OsString]) -> 
             err.remove(kind);
         }
         let mut tip = clap::builder::StyledStr::new();
-        tip.push_str(
-            "an argument after --auth-token may be part of the token, so it is not shown; \
-             quote a token that contains a space",
-        );
+        tip.push_str(ARGV_REDACTED_TIP);
         err.insert(ContextKind::Suggested, ContextValue::StyledStrs(vec![tip]));
+        if err.get(ContextKind::Usage).is_some() {
+            err.insert(
+                ContextKind::Usage,
+                ContextValue::StyledStr(plain_usage(before)),
+            );
+        }
     }
     err
+}
+
+/// The plain usage of the subcommand named before `--auth-token` (the
+/// first argv element naming one), else of `lambo` itself: the same for
+/// every argv after the flag.
+fn plain_usage(before_flag: &[String]) -> clap::builder::StyledStr {
+    let mut command = Cli::command();
+    command.build();
+    let name = before_flag
+        .iter()
+        .find(|a| command.find_subcommand(a.as_str()).is_some())
+        .cloned();
+    match name.and_then(|n| command.find_subcommand_mut(n)) {
+        Some(sub) => sub.render_usage(),
+        None => command.render_usage(),
+    }
 }
 
 /// The missing-session refusal, rendered the way clap rendered a missing
@@ -3202,76 +3233,226 @@ dim = 1024
         (err, text)
     }
 
-    /// A token that starts with `-` is `--auth-token`'s value, on `serve`
-    /// and `serve-web` (#315): before `allow_hyphen_values`, clap took
-    /// `--NOTASECRET...` for an unknown flag and printed "unexpected
-    /// argument '--NOTASECRET...' found", and `-NOTASECRET...` as `-N`.
-    /// Mirrors `Resolve.lean`'s `flagTakes_fixed` (previous version:
-    /// `hyphen_token_leaked`).
+    /// The `serve` or `serve-web` behind a parsed `--auth-token` value, as
+    /// the raw string it was given (`serve-web`'s `AuthToken` is compared
+    /// through a fresh check, its `Debug` being redacted).
+    fn parsed_token_is(cli: Cli, token: &str) -> bool {
+        match cli.command {
+            Some(Commands::Serve {
+                auth_token: Some(AuthTokenArg(raw)),
+                ..
+            }) => raw == std::ffi::OsStr::new(token),
+            Some(Commands::ServeWeb {
+                auth_token: Some(t),
+                ..
+            }) => {
+                let again: lambo::cli::serve_web::AuthToken =
+                    check_auth_token(std::ffi::OsStr::new(token)).expect("valid");
+                t == again
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// A spaced `--auth-token` followed by something that looks like a flag
+    /// is refused at parse time (exit 2, so nothing starts), never taken as
+    /// the token, and never shown, on `serve` and `serve-web` (#315 re-review
+    /// B1). With `allow_hyphen_values` (a26ffd30) each of these was the
+    /// token and the server started. Mirrors `Resolve.lean`'s
+    /// `authFlagValue_spaced_none_iff` and `re_review_fixed` (previous
+    /// version: `b1_fail_open`).
     #[test]
-    fn auth_token_starting_with_a_hyphen_is_the_value() {
+    fn auth_token_followed_by_a_flag_is_refused() {
+        let tails: [&[&str]; 7] = [
+            &["-h"],
+            &["--session"],
+            &["--port=7718"],
+            &["--allow-embedding-mismatch"],
+            &["-NOTASECRET-TERCESATON"],
+            &["--NOTASECRET-TERCESATON"],
+            &["-h", "--session", "s"],
+        ];
         for sub in ["serve", "serve-web"] {
-            for token in ["--NOTASECRET-TERCESATON", "-NOTASECRET-TERCESATON"] {
-                let argv = argv_with_token(sub, &[], &[token]);
+            for tail in tails {
+                let argv = argv_with_token(sub, &[], tail);
+                let (err, text) = parse_error_text(&argv);
+                assert_eq!(err.exit_code(), 2, "{sub} {tail:?}: {text}");
+                assert!(
+                    !matches!(
+                        err.kind(),
+                        clap::error::ErrorKind::DisplayHelp
+                            | clap::error::ErrorKind::DisplayVersion
+                    ),
+                    "{sub} {tail:?}: {text}"
+                );
+                for piece in ["NOTASECRET", "TERCESATON"] {
+                    assert!(!text.contains(piece), "{sub} {tail:?}: {text}");
+                }
+            }
+            // A known flag right after it: clap's missing value, unredacted.
+            let (_, text) = parse_error_text(&argv_with_token(sub, &[], &["-h"]));
+            assert!(
+                text.contains("a value is required for '--auth-token <TOKEN>'"),
+                "{text}"
+            );
+        }
+    }
+
+    /// `--auth-token=<v>` takes a value starting with `-`, as the base did
+    /// (#315 re-review). Mirrors `Resolve.lean`'s `authFlagValue_eq_form`.
+    #[test]
+    fn auth_token_eq_form_takes_a_hyphen_value() {
+        for sub in ["serve", "serve-web"] {
+            for token in ["-abc", "--abc"] {
+                let mut argv = vec!["lambo", sub];
+                if sub == "serve" {
+                    argv.extend(["--transport", "http"]);
+                }
+                let flag = format!("--auth-token={token}");
+                argv.push(&flag);
                 let cli = Cli::try_parse_from(&argv)
-                    .unwrap_or_else(|e| panic!("{sub} {token}: {}", e.render()));
-                let taken = match cli.command {
-                    Some(Commands::Serve {
-                        auth_token: Some(AuthTokenArg(raw)),
-                        ..
-                    }) => raw == std::ffi::OsStr::new(token),
-                    Some(Commands::ServeWeb {
-                        auth_token: Some(t),
-                        ..
-                    }) => {
-                        // A valid token; its `Debug` is redacted, so compare
-                        // through a fresh parse of the same value.
-                        let again: lambo::cli::serve_web::AuthToken =
-                            check_auth_token(std::ffi::OsStr::new(token)).expect("valid");
-                        t == again
-                    }
-                    other => panic!("{sub}: {other:?}"),
-                };
-                assert!(taken, "{sub}: {token} is the token");
+                    .unwrap_or_else(|e| panic!("{sub} {flag}: {}", e.render()));
+                assert!(parsed_token_is(cli, token), "{sub}: {token}");
             }
         }
     }
 
+    /// A missing value keeps clap's "a value is required" message, with no
+    /// redaction and no tip (#315 re-review S2). Mirrors `Resolve.lean`'s
+    /// `missing_value_kept`.
+    #[test]
+    fn missing_value_keeps_clap_message() {
+        for sub in ["serve", "serve-web"] {
+            for (argv, flag) in [
+                (argv_with_token(sub, &[], &[]), "--auth-token <TOKEN>"),
+                (argv_with_token(sub, &[], &["-h"]), "--auth-token <TOKEN>"),
+                (
+                    argv_with_token(sub, &[], &["tok", "--session"]),
+                    "--session <SESSION>",
+                ),
+            ] {
+                let (err, text) = parse_error_text(&argv);
+                assert_eq!(err.exit_code(), 2, "{text}");
+                assert!(
+                    text.contains(&format!(
+                        "a value is required for '{flag}' but none was supplied"
+                    )),
+                    "{text}"
+                );
+                assert!(!text.contains(ARGV_REDACTED), "{text}");
+                assert!(!text.contains("tip:"), "{text}");
+            }
+        }
+    }
+
+    /// An invalid value of an accepted flag after `--auth-token` is
+    /// redacted: it may be a piece of the token (#315 re-review S3, the
+    /// `InvalidValue` branch). Mirrors `Resolve.lean`'s
+    /// `quotedRender_noninterference` and `re_review_fixed`.
+    #[test]
+    fn invalid_value_after_auth_token_is_redacted() {
+        for sub in ["serve", "serve-web"] {
+            let argv = argv_with_token(sub, &[], &["a", "--port", "NOTASECRET-TERCESATON"]);
+            let raw = Cli::try_parse_from(&argv)
+                .expect_err("not a port")
+                .render()
+                .to_string();
+            assert!(raw.contains("NOTASECRET"), "previous version leaked: {raw}");
+            let (err, text) = parse_error_text(&argv);
+            assert_eq!(err.exit_code(), 2, "{text}");
+            assert!(
+                text.contains("invalid value '<redacted>' for '--port <PORT>'"),
+                "{text}"
+            );
+            for piece in ["NOTASECRET", "TERCESATON"] {
+                assert!(!text.contains(piece), "{sub}: {text}");
+            }
+        }
+    }
+
+    /// An unrecognized subcommand quoted after `--auth-token` is redacted
+    /// (#315 re-review S3, the `InvalidSubcommand` branch). clap cannot
+    /// produce one after a real `--auth-token` flag (the flag itself is an
+    /// unexpected argument first anywhere but `serve` and `serve-web`), so
+    /// the error is built here to exercise the branch.
+    #[test]
+    fn unrecognized_subcommand_after_auth_token_is_redacted() {
+        use clap::error::{ContextKind, ContextValue, ErrorKind};
+        let mut command = Cli::command();
+        command.build();
+        let mut err = clap::Error::new(ErrorKind::InvalidSubcommand).with_cmd(&command);
+        err.insert(
+            ContextKind::InvalidSubcommand,
+            ContextValue::String("NOTASECRET-sub".to_owned()),
+        );
+        let argv: Vec<std::ffi::OsString> = ["lambo", "--auth-token", "NOTASECRET-sub"]
+            .into_iter()
+            .map(Into::into)
+            .collect();
+        let raw = err.render().to_string();
+        assert!(raw.contains("NOTASECRET"), "{raw}");
+        let text = redact_auth_token_echo(err, &argv).render().to_string();
+        assert!(
+            text.contains("unrecognized subcommand '<redacted>'"),
+            "{text}"
+        );
+        assert!(!text.contains("NOTASECRET"), "{text}");
+    }
+
+    /// `lambo --auth-token x serve-web` names the misplaced flag: its own
+    /// spelling is never redacted (#315 re-review N1).
+    #[test]
+    fn a_misplaced_auth_token_flag_is_named() {
+        let argv: Vec<std::ffi::OsString> = ["lambo", "--auth-token", "NOTASECRET", "serve-web"]
+            .into_iter()
+            .map(Into::into)
+            .collect();
+        let (err, text) = parse_error_text(&argv);
+        assert_eq!(err.exit_code(), 2, "{text}");
+        assert!(
+            text.contains("unexpected argument '--auth-token' found"),
+            "{text}"
+        );
+        assert!(!text.contains("NOTASECRET"), "{text}");
+    }
+
     /// An unquoted token split by a space leaves its tail in argv; clap's
-    /// "unexpected argument" error must not print it, on `serve` or
-    /// `serve-web` (#315). The raw clap error did (pinned here as the
-    /// previous version, `Resolve.lean`'s `unexpected_arg_leaked`); `main`
-    /// prints it through [`redact_auth_token_echo`], whose output is the
-    /// same for every tail (`render_noninterference` at
-    /// `PrintPath.unexpectedArg`). Covers `--auth-token=` and the three
-    /// review probes.
+    /// "unexpected argument" error must not print it, or hint at it, on
+    /// `serve` or `serve-web` (#315). The raw clap error did (pinned here as
+    /// the previous version, `Resolve.lean`'s `unexpected_arg_leaked`);
+    /// `main` prints it through [`redact_auth_token_echo`], whose output,
+    /// usage line included, is the same for every tail
+    /// (`quotedRender_noninterference`, `quotedRender_unexpected_is_render`).
+    /// Covers `--auth-token=`, the review probes, and a mistyped flag in the
+    /// tail, whose did-you-mean clap put in its usage line (S1).
     #[test]
     fn unexpected_argument_after_auth_token_is_not_shown() {
-        let probes: [&[&str]; 5] = [
+        let probes: [&[&str]; 6] = [
             &["NOTASECRET-a", "NOTASECRET-extra-TERCESATON"],
             &["NOTASECRET-a", "--NOTASECRET-TERCESATON"],
             &["NOTASECRET-a", "-NOTASECRET-TERCESATON"],
             &["--NOTASECRET-a", "NOTASECRET-extra-TERCESATON"],
             &["NOTASECRET-a", "b", "NOTASECRET-extra-TERCESATON"],
+            &["NOTASECRET-a", "--porr", "5"],
         ];
         for sub in ["serve", "serve-web"] {
-            let mut lines = Vec::new();
+            let mut texts = Vec::new();
             for tail in probes {
                 let argv = argv_with_token(sub, &[], tail);
                 let raw = Cli::try_parse_from(&argv)
                     .expect_err("an extra argument is refused")
                     .render()
                     .to_string();
-                // The first unplaced piece is quoted; `-NOTASECRET...` as
-                // its first short flag, `-N`.
+                // A piece of the tail is quoted; `-NOTASECRET...` as its
+                // first short flag, `-N`.
                 assert!(
-                    raw.contains(&format!("'{}'", tail[1])) || raw.contains("'-N'"),
+                    tail.iter().any(|p| raw.contains(&format!("'{p}'"))) || raw.contains("'-N'"),
                     "previous version leaked: {raw}"
                 );
                 let (err, text) = parse_error_text(&argv);
                 assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
                 assert_eq!(err.exit_code(), 2, "{text}");
-                for piece in ["NOTASECRET", "TERCESATON", "extra"] {
+                for piece in ["NOTASECRET", "TERCESATON", "extra", "porr", "--port"] {
                     assert!(
                         !text.contains(piece),
                         "{sub} {tail:?} shows {piece}: {text}"
@@ -3281,20 +3462,10 @@ dim = 1024
                     text.contains("unexpected argument '<redacted>' found"),
                     "{text}"
                 );
-                assert!(
-                    text.contains("quote a token that contains a space"),
-                    "{text}"
-                );
-                // clap's usage line names the flags given (never a value),
-                // so compare what comes before it.
-                lines.push(
-                    text.split("\n\nUsage:")
-                        .next()
-                        .unwrap_or_default()
-                        .to_owned(),
-                );
+                assert!(text.contains(ARGV_REDACTED_TIP), "{text}");
+                texts.push(text);
             }
-            assert!(lines.windows(2).all(|w| w[0] == w[1]), "{sub}: {lines:#?}");
+            assert!(texts.windows(2).all(|w| w[0] == w[1]), "{sub}: {texts:#?}");
         }
         // The `=` form: the split tail is redacted too.
         let argv: Vec<std::ffi::OsString> = [
