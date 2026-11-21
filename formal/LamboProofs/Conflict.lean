@@ -1533,7 +1533,8 @@ and it fires. Agent-a re-sends again (3590): the edge keeps only its first
 write and its latest, both agent-a's, so agent-b drops out. The graph records
 no writer between the first and the latest write (`Edge` has no agent field
 and `record_edge` keeps only the latest `last_reinforced`), so no rule over
-the current graph can keep agent-b. -/
+the edge's recorded fields can keep agent-b: agent-b's interaction is still in
+the timeline, but nothing links it to the edge. -/
 theorem second_resend_drops_first_resender :
     conflictAtFixed lo₀ recencyWindow 3600
         [⟨1, 1, 3500⟩, ⟨2, 1, 3570⟩, ⟨3, 2, 3580⟩, ⟨4, 1, 3590⟩]

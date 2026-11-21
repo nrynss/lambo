@@ -1122,7 +1122,7 @@ mod tests {
     }
 
     /// #297's graph: agent-a's interaction creates "session store" and "user
-    /// schema"; `agent_1` (one interaction, at `first`) writes "session store"
+    /// schema"; the agent in `first` (one interaction, at its time) writes "session store"
     /// depends on "user schema"; every later `(agent, at)` re-sends that
     /// dependency, which reinforces the one edge (a duplicate natural key).
     ///
