@@ -36,6 +36,28 @@
   never ahead of a cross-kind relabel that refuses.
   `formal/LamboProofs/Contract.lean` models the fix (`reembedCmdFixed`).
 
+- Solo canonization: a dependence is now dated by the turn that wrote it, in
+  both of the Solo score's time terms (#300). The recurrence term
+  (`supporting_interaction_times`) dated a `Dependency` edge by its source
+  concept's origin interaction, and the dependents term credited every
+  dependence edge to its dependent's origin, so a dependence written later
+  by an older concept was invisible: `record_action` reuses an existing
+  action node, and a day-5 repeat of an action first recorded on day 0,
+  adding `depends_on` Y, added no session to Y and, when Y came from the
+  day-0 turn too, no dependent either. The recurrence term now reads the
+  edge's own about-time (`Edge::about_time`, stamped from the writing turn),
+  and the dependents term (`canon::solo_dependent_interactions` and
+  `solo_dependent_interaction_counts`, read by `SoloScorer` and Solo's
+  inspect breakdown) credits the interaction flushed at the edge's
+  `created_at`, falling back to the dependent's origin when no single
+  interaction was. The own-origin exclusion now asks whether the pillar's
+  own turn wrote the dependence. Where every dependence was written in its
+  dependent's origin turn (a fresh action or concept, the usual case)
+  nothing changes. Re-sending an identical dependence reinforces the edge
+  and keeps its date, so it still adds nothing. Swarm's Stage 1 count and
+  Stage 2's span keep crediting the dependent's origin, unchanged.
+  `formal/LamboProofs/Policy.lean` models the fix
+  (`reused_action_dependency_is_dated_by_its_writer`).
 - Conflict detection: a re-send by another agent no longer drops an edge's
   original writer from the conflict agent set (#297). Re-sending an edge (the
   same source, target and type, through `record_action` or `lambo_derive`'s

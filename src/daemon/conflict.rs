@@ -228,6 +228,18 @@ impl WriterTimeline {
     fn acting(&self, at: DateTime<Utc>) -> &[(NodeId, AgentId)] {
         self.by_time.get(&at).map_or(&[], Vec::as_slice)
     }
+
+    /// The one interaction written at exactly `at`, or `None` when none was
+    /// or several were (#300: Solo's dependents term credits a dependence
+    /// edge to the turn that wrote it). Same exact-match evidence as
+    /// [`Self::acting`]; with no single candidate there is no attribution,
+    /// and the caller falls back to structure.
+    pub(crate) fn sole_writer(&self, at: DateTime<Utc>) -> Option<NodeId> {
+        match self.acting(at) {
+            [(id, _)] => Some(*id),
+            _ => None,
+        }
+    }
 }
 
 /// One [`WriterTimeline`] shared by every hot-list predicate a detector pass

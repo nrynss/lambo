@@ -8,7 +8,9 @@
 //! * Stage 1 reads the concept's `gc_survived` and
 //!   [`dependent_interactions`](crate::canon::dependent_interactions), the
 //!   single-node form of the batched count the cycle uses, with the cycle's
-//!   age floor; Solo reads its [`SoloBreakdown`].
+//!   age floor; Solo reads its [`SoloBreakdown`], whose dependents term
+//!   is [`solo_dependent_interactions`](crate::canon::solo_dependent_interactions)
+//!   (each dependence credited to the turn that wrote it, #300).
 //! * Stage 2 is [`GraphStore::interaction_span_with_window`] with the cycle's
 //!   age floor and coverage cap, compared by [`stage2_evidence_passes`]'s bars.
 //! * Stage 3 is Stage 2 again plus [`GraphStore::blast_radius`] with the
@@ -30,7 +32,10 @@ use serde::Serialize;
 use crate::canon::policy::{
     solo_breakdown, SoloBreakdown, CANDIDATE_BAR, CANONICAL_BAR, VENERABLE_BAR,
 };
-use crate::canon::stage1::{dependent_interactions, MIN_DEPENDENT_INTERACTIONS, MIN_GC_SURVIVED};
+use crate::canon::stage1::{
+    dependent_interactions, solo_dependent_interactions, MIN_DEPENDENT_INTERACTIONS,
+    MIN_GC_SURVIVED,
+};
 use crate::canon::stage2::{MIN_COVERAGE, MIN_DISTINCT};
 use crate::canon::stage3::{in_repromotion_cooldown, MIN_BLAST_RADIUS};
 use crate::canon::{EvalParams, PromotionPolicy};
@@ -199,7 +204,13 @@ pub fn admission_inputs(
     };
     let deps = dependent_interactions(graph, node, params.min_age, now);
     let solo = match params.promotion_policy {
-        PromotionPolicy::Solo => Some(solo_breakdown(graph, c, deps)),
+        // Solo's dependents term credits each dependence to the turn that
+        // wrote it (#300), so it can differ from Stage 1's count.
+        PromotionPolicy::Solo => Some(solo_breakdown(
+            graph,
+            c,
+            solo_dependent_interactions(graph, node, params.min_age, now),
+        )),
         PromotionPolicy::Swarm => None,
     };
     let budget = (c.canonization_status == CanonizationStatus::Venerable).then(|| {

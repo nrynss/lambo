@@ -59,7 +59,10 @@ pub use policy::{
 // narrowest one that works, and keeps serde plumbing off the library's semver
 // surface (there is nothing an external caller could do with it).
 pub(crate) use policy::deserialize_config_value as deserialize_promotion_policy;
-pub use stage1::{dependent_interaction_counts, dependent_interactions, stage1_candidates};
+pub use stage1::{
+    dependent_interaction_counts, dependent_interactions, solo_dependent_interaction_counts,
+    solo_dependent_interactions, stage1_candidates,
+};
 pub use stage2::{stage2_evidence_passes, stage2_passes, stage2_passes_with_window};
 pub use stage3::{last_demotion_time, stage3_passes};
 pub use task::CanonizationTask;
