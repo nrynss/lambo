@@ -110,7 +110,9 @@ pub(crate) const KEYWORD_OVERFETCH: usize = 4;
 /// *numbers*, and only from a run nobody thought to enable tracing on.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct LegScores {
-    /// BM25 score from [`InvertedIndex::search`].
+    /// BM25 score from [`InvertedIndex::search`]. For an exact-name match it
+    /// is `max(BM25, 1.0)`, with the BM25 read from the whole ranked list
+    /// (#288), so it can be the `1.0` floor rather than a BM25.
     pub keyword: Option<f64>,
     /// The flat recent-leg score ([`RECENT_SCORE`], or the contract's
     /// calibrated value, #87), when this node belongs to one of the
@@ -639,11 +641,11 @@ pub(crate) fn candidates_without_keyword_with_legs_as(
 /// adapter returning the same `NodeId` twice, and a plain assignment makes
 /// the *last* duplicate win. That silently reversed the arithmetic from
 /// before per-leg provenance — a `[(dup, 0.90), (dup, 0.10)]` input ranked at
-/// 0.1 where it used to rank at 0.9. The keyword leg's BM25 loop assigns rather than max-merges because
-/// that is what it did before per-leg provenance too (the inverted index
-/// yields each id once), and the recency leg is idempotent by construction;
-/// changing either would be the same kind of silent arithmetic change in the
-/// other direction.
+/// 0.1 where it used to rank at 0.9. The keyword leg's BM25 loop assigns
+/// rather than max-merges because that is what it did before per-leg
+/// provenance too (the inverted index yields each id once), and the recency
+/// leg is idempotent by construction; changing either would be the same kind
+/// of silent arithmetic change in the other direction.
 fn merge_max(slot: &mut Option<f64>, score: f64) {
     *slot = Some(match *slot {
         Some(previous) => previous.max(score),

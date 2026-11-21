@@ -477,7 +477,8 @@ async fn an_exact_name_query_reports_the_raw_bm25_and_the_match() {
         "premise: the named concept matched, under the floor: {own:?}"
     );
     // Per hit, the named concept takes the floor: max(BM25, 1.0) is 1.0
-    // here, the one case where the raise and the old overwrite agree.
+    // here: below 1.0, like exactly 1.0 or no hit, the raise and the old
+    // overwrite agree.
     assert_eq!(
         named.legs.get(&target).and_then(|l| l.keyword),
         Some(1.0),

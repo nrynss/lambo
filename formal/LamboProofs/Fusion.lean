@@ -10,7 +10,7 @@ Model of how phase 1 builds each candidate's leg scores and fuses them, in
 * the recent leg: its members get the flat recent score;
 * the vector leg: each candidate folded in with `merge_max`;
 * `LegScores::merged`, the value phase 1 ranks on under `FusionKind::Max`, the
-  default (`LegScores::fused`, `src/recall/fusion.rs`);
+  default (`LegScores::fused`, `src/recall/candidates.rs`);
 * the order `rank` sorts by: the fused value descending, then a tie-break
   (`tie_break_by_key`).
 
@@ -137,8 +137,10 @@ The step after review, `raiseFullName`:
   hypothesis. `full_keyword_eq` gives the exact value, `max(BM25, 1.0)` from
   the whole list, or `1.0` without a hit (`full_keyword_of_mem`,
   `full_keyword_of_not_mem`).
-* `full_local`: every other node's legs are unchanged, so an unnamed node
-  beyond the cap stays out of the keyword leg.
+* `full_local`: every other node's legs are unchanged; with
+  `lastScore_of_not_mem` (under `Nodup`), an unnamed node beyond the cap stays
+  out of the keyword leg, and `full_keeps_beyond_cap_bm25` shows it on a
+  concrete input.
 * `full_no_demotion`, `full_keeps_wins`, `full_never_overtaken`,
   `full_ahead_le`: as for `raiseName`, against the table before the step.
 * `full_keyword_ge_raise`, `full_ahead_le_raise`: against `raiseName`, the

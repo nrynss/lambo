@@ -17,7 +17,8 @@
 //! every concept a leg scored, before phase-2 expansion and before
 //! phase-3's `top_k` cut. So the maximum is over what the leg scored,
 //! returned or not. The keyword leg contributes the top `top_k x 4` BM25
-//! matches of the session's inverted index, but its best is read off the
+//! matches of the session's inverted index (plus an exact-name match,
+//! wherever it ranks), but its best is read off the
 //! one index search phase 1 makes before that cut (`KeywordLeg`), so `bm25`
 //! is the same at every `top_k`, 0 included. The vector leg contributes the
 //! `top_k` nearest stored vectors, a best-first read, so its maximum is
