@@ -1189,6 +1189,12 @@ async fn a_stale_flush_during_close_answers_close_unflushed() {
             );
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
+        // If the heartbeat had latched first, close would take its first
+        // fence check and this test would no longer cover the re-check.
+        assert!(
+            !logs.contains("single-writer lease LOST"),
+            "the heartbeat latched before close's first check; rerun"
+        );
         gate.release.notify_one();
     };
     let (closed, ()) = tokio::join!(mem.close(), release);
