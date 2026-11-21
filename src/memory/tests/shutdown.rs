@@ -407,6 +407,35 @@ async fn close_flushes_a_batch_retained_after_a_failed_flush() {
     );
 }
 
+/// #301, end to end: the stats write that follows the failed flush panics.
+/// Before the fix that killed the flush task holding the retained batch;
+/// `close` only logged the join error, found an empty log, and returned
+/// `Ok` although the batch never reached the store. Now the panic is
+/// contained, the stop hands the batch back, and `close`'s final flush makes
+/// it durable.
+///
+/// Mirrors `Flush.close_ok_accounted_guarded` (before the fix,
+/// `Flush.close_ok_over_panic`).
+#[tokio::test(start_paused = true)]
+async fn close_flushes_a_retained_batch_after_a_panicking_stats_write() {
+    let inner: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
+    // One failing flush (the background one), then the stats write panics.
+    let store: Arc<dyn GraphStore> =
+        Arc::new(FlakyStore::new(inner.clone(), 1).with_panicking_stats());
+    let (mem, _retained) = retained_batch_session("stats-panic", store).await;
+
+    mem.close().await.unwrap();
+
+    let snap = inner
+        .load_session(&SessionId::new("stats-panic"))
+        .await
+        .expect("close must not report Ok over a batch that never reached the store");
+    assert!(
+        snap.concepts.iter().any(|c| c.content == "user schema"),
+        "the retained batch must be flushed by close(), not lost with the task"
+    );
+}
+
 /// Pins the push-**front** mechanism itself: returned custody lands at the
 /// FRONT of the graph log, so `close()`'s final batch carries the retained
 /// mutations *and* everything written after them, as one chronological
@@ -644,8 +673,8 @@ async fn a_cancelled_close_returns_the_tail_to_the_log_for_the_retry() {
 /// flush task.
 ///
 /// R2-1 covered the drain-to-flush window; this is the window before it,
-/// and the likelier one — the join is the long await (`close`'s own "worst
-/// case ≈ 2 minutes" is mostly this), so an external `timeout` fires here.
+/// and the likelier one — the join is the long await (`close`'s own worst
+/// case is mostly this), so an external `timeout` fires here.
 /// The handle was lifted out of its slot *before* that await, so dropping
 /// the future dropped the local: the flush task was detached, not stopped —
 /// still running, still holding the whole tail in its `pending` (it had

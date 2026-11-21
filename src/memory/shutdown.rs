@@ -128,7 +128,7 @@ impl Drop for Memory {
 ///
 /// `close()` used to lift each handle out of its slot (`slot.lock().take()`)
 /// and then `await` it as a bare local. That await is the long one — the flush
-/// join is what `close`'s "worst case ≈ 2 minutes" measures, and an external
+/// join is most of what `close`'s worst case measures, and an external
 /// [`timeout`](tokio::time::timeout) around `close()` is the posture its own
 /// docs invite. Dropping the future there dropped the local `JoinHandle`, which
 /// **detaches** the task rather than stopping it: the flush loop kept running,
@@ -648,7 +648,9 @@ impl Memory {
     /// ## How long it can take
     ///
     /// Bounded by the flush loop's current cycle (worst case
-    /// `FLUSH_ATTEMPT_TIMEOUT × (retries + 1)`), plus the slowest write in
+    /// `FLUSH_ATTEMPT_TIMEOUT × (retries + 3)` plus the backoff sleeps: every
+    /// flush attempt, then the lease read and the stats write, each bounded
+    /// by that timeout since #301), plus the slowest write in
     /// flight at step 0 — the gate waits for it rather than losing it — plus
     /// one [`crate::writeq::WRITE_QUEUE_DRAIN_BUDGET`] for the write-queue
     /// quiesce inside step 0, plus one `FLUSH_ATTEMPT_TIMEOUT` for step 4. That
@@ -785,7 +787,8 @@ impl Memory {
         self.flush.stop();
 
         // 2 — join. After this the flush task cannot touch the graph. This is
-        // the long await (the whole of `close`'s "worst case ≈ 2 minutes") and
+        // the long await (most of `close`'s worst case, see "How long it can
+        // take") and
         // so the one an external timeout fires in: dropping the handle here
         // used to leave a zombie flush task holding the tail in its own
         // `pending`, invisible to the retry, to `Drop`'s warning and to the log

@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Flush loop: the lease read behind the erased check that follows a failed
+  flush, and the flush-stats row write, now run under the same 30 s timeout
+  and panic containment as a flush attempt (#301). A store adapter that
+  panicked in either killed the flush task with the batch it held:
+  `degraded` stayed false, nothing was counted, and `close` logged the join
+  error and returned `Ok` over the lost batch. One that never returned kept
+  the flush loop from serving `close`'s stop, so `close` never returned. A
+  lease read that panics or times out now counts as a read that failed (the
+  session is not erased), so the batch is retained as after any failed flush;
+  a stats write that panics or times out is logged and ignored, as a failed
+  one was.
 - Embedding canary drift repair (#296). On a drift the refusal told the
   operator to run `lambo re-embed`, which refuses a session already under the
   live contract, the only state a drift is detected in. `lambo re-embed

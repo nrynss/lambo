@@ -87,6 +87,8 @@ struct FlakyStore {
     /// Every batch it was handed, whole: the T81-3 assertions need the
     /// mutation **sequence**, not just the lengths.
     batches: PlMutex<Vec<MutationBatch>>,
+    /// `write_flush_stats` panics instead of returning (#301).
+    stats_panics: bool,
 }
 
 impl FlakyStore {
@@ -95,7 +97,14 @@ impl FlakyStore {
             inner,
             fail_remaining: AtomicUsize::new(fail_next),
             batches: PlMutex::new(Vec::new()),
+            stats_panics: false,
         }
+    }
+
+    /// Make every `write_flush_stats` call panic (#301).
+    fn with_panicking_stats(mut self) -> Self {
+        self.stats_panics = true;
+        self
     }
 
     fn batches(&self) -> Vec<MutationBatch> {
@@ -201,6 +210,17 @@ impl GraphStore for FlakyStore {
         token: Option<u64>,
     ) -> Result<(), StoreError> {
         self.inner.record_canonization(event, token).await
+    }
+
+    async fn write_flush_stats(
+        &self,
+        _session: &SessionId,
+        _stats: &crate::store::SessionFlushStats,
+    ) -> Result<(), StoreError> {
+        if self.stats_panics {
+            panic!("simulated write_flush_stats panic (FlakyStore)");
+        }
+        Ok(())
     }
 }
 

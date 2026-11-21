@@ -15,6 +15,14 @@
 //! * **Bounded attempts.** Every `store.flush` attempt is bounded by
 //!   `FLUSH_ATTEMPT_TIMEOUT` (STORE-2): a hung store must not wedge the
 //!   loop forever — the timeout maps into the retry path like any `Err`.
+//!   The loop's two other store calls get the same guard (#301): the lease
+//!   read behind the erased check after a failed flush, and the stats row
+//!   write. Each is bounded by `FLUSH_ATTEMPT_TIMEOUT` and polled inside
+//!   `CatchUnwindPoll`, so a hung or panicking adapter can neither block
+//!   [`FlushTask::stop`] nor kill the task with `pending` in it. A lease read
+//!   that panics or times out counts as a read that failed (not erased), so
+//!   the batch is handled as after any failed flush; a stats write that
+//!   panics or times out is ignored like one that failed.
 //! * **Never dropped (except dead letters).** After `retries` retries the
 //!   batch is retained in the task's pending buffer and flushes before newly
 //!   drained mutations on the next cycle (drained mutations are appended
@@ -383,7 +391,9 @@ impl FlushTask {
     ///
     /// This is a **signal, not a drain API**: the loop finishes its current
     /// `FlushLoop::cycle` (any in-flight flush and its retry/backoff run to
-    /// completion — a post-retry `RETAINED_BACKOFF` hold is not waited out),
+    /// completion, and so do the lease read and the stats write after it,
+    /// each bounded by `FLUSH_ATTEMPT_TIMEOUT` since #301 — a post-retry
+    /// `RETAINED_BACKOFF` hold is not waited out),
     /// re-appends whatever is still in its task-owned `pending` buffer to the
     /// FRONT of the graph's mutation log ([`Graph::push_front_log`]), and
     /// exits. The caller then `.await`s the [`tokio::task::JoinHandle`] and
@@ -413,6 +423,10 @@ impl FlushTask {
 /// `degraded()==false` — silent durability loss). Dropping the future after a
 /// caught panic is safe: the backend only ever holds a `&MutationBatch`, so the
 /// loop's `pending` buffer cannot have been corrupted.
+///
+/// The flush loop polls every store call through it: each `store.flush`
+/// attempt, and since #301 the lease read behind the erased check and the
+/// stats row write ([`guarded`]).
 ///
 /// `pub(crate)`: P6's canonization loop makes the same argument for the same
 /// reason (a panicking store must not stop the loop for the process's
@@ -455,6 +469,20 @@ pub(crate) fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
             "non-string panic payload ({})",
             std::any::type_name_of_val(payload)
         )
+    }
+}
+
+/// Run one of the flush loop's store calls other than `store.flush` under the
+/// guard a flush attempt has (#301): bounded by `FLUSH_ATTEMPT_TIMEOUT`, and
+/// polled inside [`CatchUnwindPoll`]. `Err` says why the call did not return
+/// (a panic, with its payload, or the timeout). Without it a panicking adapter
+/// killed the task with `pending` in it and `degraded()` false, and a hung one
+/// kept the cycle from ending, so [`FlushTask::stop`] was never served.
+async fn guarded<T>(what: &str, call: impl Future<Output = T>) -> Result<T, String> {
+    match tokio::time::timeout(FLUSH_ATTEMPT_TIMEOUT, CatchUnwindPoll(call)).await {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(payload)) => Err(format!("{what} panicked: {}", panic_message(&payload))),
+        Err(_elapsed) => Err(format!("{what} timed out after {FLUSH_ATTEMPT_TIMEOUT:?}")),
     }
 }
 
@@ -867,6 +895,9 @@ impl FlushLoop {
     /// no further store I/O, and its lag grows for good, so the drift test
     /// would pass every time and upsert, inline in this loop, against the
     /// store whose failures degraded it.
+    ///
+    /// The write is [`guarded`] (#301): a panic or a timeout is logged and
+    /// otherwise ignored, like a failed write.
     async fn publish_stats(&mut self, session: &SessionId, attempted: bool) {
         let fs = self.shared.stats();
         let session_stats = SessionFlushStats {
@@ -889,12 +920,20 @@ impl FlushLoop {
             }
         }
         self.last_published = Some((now, session_stats));
-        if let Err(err) = self.store.write_flush_stats(session, &session_stats).await {
-            tracing::trace!(
+        let write = self.store.write_flush_stats(session, &session_stats);
+        match guarded("write_flush_stats", write).await {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => tracing::trace!(
                 error = %err,
                 session = %session,
                 "failed to publish flush stats (best-effort)"
-            );
+            ),
+            Err(why) => tracing::warn!(
+                error = %why,
+                session = %session,
+                "FlushStatsWriteFailed: {why}; flush stats not published (best-effort), the \
+                 flush loop carries on"
+            ),
         }
     }
 
@@ -980,12 +1019,28 @@ impl FlushLoop {
     /// `true` (after calling the latch) when `err` refused the flush because
     /// the session was erased (#23 review L2). `false`, without reading the
     /// store, for a task with no latch armed.
+    ///
+    /// The lease read is [`guarded`] (#301). A read that panics or times out
+    /// is a read that failed, so the answer is `false` (not erased), as for
+    /// a read that returned an error: the batch then takes the stale-write or
+    /// retain arm, never lost with the task and never blocking a stop.
     async fn erased(&self, session: &SessionId, err: &StoreError) -> bool {
         let Some(latch) = &self.erased_latch else {
             return false;
         };
-        if !crate::store::erase::refused_as_erased(self.store.as_ref(), session, err).await {
-            return false;
+        let read = crate::store::erase::refused_as_erased(self.store.as_ref(), session, err);
+        match guarded("read_lease", read).await {
+            Ok(true) => {}
+            Ok(false) => return false,
+            Err(why) => {
+                tracing::warn!(
+                    error = %why,
+                    session = %session,
+                    "FlushLeaseReadFailed: {why}; treating the session as not erased, so the \
+                     batch is handled as after any failed flush"
+                );
+                return false;
+            }
         }
         latch();
         true
@@ -1182,9 +1237,22 @@ mod tests {
         }
     }
 
+    /// What [`FlakyStore`]'s `read_lease` or `write_flush_stats` does (#301):
+    /// the two store calls the flush loop makes outside `store.flush`.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Aux {
+        /// Delegate to the inner store.
+        Answer,
+        /// Unwind inside the call.
+        Panic,
+        /// Never return.
+        Hang,
+    }
+
     /// `GraphStore` mock: fails the first `fail_next(n)` flush calls (or
     /// `fail_forever`), then delegates to an inner store. Records flush-call
-    /// count and per-call batch sizes for assertions.
+    /// count and per-call batch sizes for assertions. `read_lease` and
+    /// `write_flush_stats` delegate, or panic or hang (`set_aux`).
     struct FlakyStore {
         inner: Arc<dyn GraphStore>,
         flush_calls: AtomicUsize,
@@ -1193,6 +1261,10 @@ mod tests {
         batch_sizes: Mutex<Vec<usize>>,
         /// `write_flush_stats` calls, whatever their outcome.
         stats_writes: AtomicUsize,
+        /// `read_lease` calls, whatever their outcome.
+        lease_reads: AtomicUsize,
+        lease_aux: Mutex<Aux>,
+        stats_aux: Mutex<Aux>,
     }
 
     impl FlakyStore {
@@ -1204,11 +1276,24 @@ mod tests {
                 fail_always: AtomicBool::new(false),
                 batch_sizes: Mutex::new(Vec::new()),
                 stats_writes: AtomicUsize::new(0),
+                lease_reads: AtomicUsize::new(0),
+                lease_aux: Mutex::new(Aux::Answer),
+                stats_aux: Mutex::new(Aux::Answer),
             }
         }
 
         fn stats_writes(&self) -> usize {
             self.stats_writes.load(Ordering::SeqCst)
+        }
+
+        fn lease_reads(&self) -> usize {
+            self.lease_reads.load(Ordering::SeqCst)
+        }
+
+        /// How later `read_lease` and `write_flush_stats` calls behave.
+        fn set_aux(&self, lease: Aux, stats: Aux) {
+            *self.lease_aux.lock() = lease;
+            *self.stats_aux.lock() = stats;
         }
 
         fn fail_next(&self, n: usize) {
@@ -1355,7 +1440,25 @@ mod tests {
             stats: &SessionFlushStats,
         ) -> Result<(), StoreError> {
             self.stats_writes.fetch_add(1, Ordering::SeqCst);
-            self.inner.write_flush_stats(session, stats).await
+            let aux = *self.stats_aux.lock();
+            match aux {
+                Aux::Answer => self.inner.write_flush_stats(session, stats).await,
+                Aux::Panic => panic!("simulated write_flush_stats panic (FlakyStore)"),
+                Aux::Hang => std::future::pending().await,
+            }
+        }
+
+        async fn read_lease(
+            &self,
+            session: &SessionId,
+        ) -> Result<Option<crate::store::lease::LeaseInfo>, StoreError> {
+            self.lease_reads.fetch_add(1, Ordering::SeqCst);
+            let aux = *self.lease_aux.lock();
+            match aux {
+                Aux::Answer => self.inner.read_lease(session).await,
+                Aux::Panic => panic!("simulated read_lease panic (FlakyStore)"),
+                Aux::Hang => std::future::pending().await,
+            }
         }
 
         async fn read_flush_stats(
@@ -3127,6 +3230,186 @@ mod tests {
         assert_eq!(snap.edges.len(), 2); // Derives + Temporal
         assert!(!handle.is_finished());
         assert!(!task.degraded());
+    }
+
+    /// A flush task for the #301 tests over `flaky`, whose flushes all fail:
+    /// one retry, the erased latch armed as `Memory::build` arms it (it sets
+    /// `erased`), and three mutations written. Returns the task, its handle
+    /// and the flag the latch sets.
+    async fn failing_task_with_three_writes(
+        flaky: &Arc<FlakyStore>,
+        graph: &Arc<RwLock<Graph>>,
+    ) -> (FlushTask, tokio::task::JoinHandle<()>, Arc<AtomicBool>) {
+        flaky.fail_forever();
+        let erased = Arc::new(AtomicBool::new(false));
+        let latch: crate::store::erase::ErasedLatch = {
+            let erased = erased.clone();
+            Arc::new(move || erased.store(true, Ordering::SeqCst))
+        };
+        let store: Arc<dyn GraphStore> = flaky.clone();
+        let task = FlushTask::new(
+            graph.clone(),
+            store,
+            params(Duration::from_secs(1), 100, 1, 1_000),
+        )
+        .with_erased_latch(latch);
+        let handle = task.spawn();
+        let_task_arm().await;
+        let iid = add_interaction(graph, 1, None);
+        add_concept(graph, 1, iid); // 3 mutations
+        (task, handle, erased)
+    }
+
+    /// Drive the first tick's ladder: attempt 1 fails at 1s, the retry fails
+    /// at 1.1s, and the loop goes on to `erased()` and `publish_stats`.
+    async fn run_the_failing_ladder(flaky: &FlakyStore) {
+        tokio::time::advance(Duration::from_secs(1)).await;
+        wait_until(|| flaky.flush_calls() >= 1).await;
+        tokio::time::advance(Duration::from_millis(100)).await;
+        wait_until(|| flaky.flush_calls() >= 2).await;
+    }
+
+    /// #301: the lease read behind `erased()` panics after a failed flush.
+    /// Before the fix the panic unwound out of the flush task, which died
+    /// holding the batch: `degraded()` stayed false, nothing was counted, and
+    /// `close` only logged the join error and found an empty log. The read
+    /// now runs under `CatchUnwindPoll` and a panic counts as a failed read
+    /// (not erased), so the batch is retained as after any failed flush and
+    /// lands once the store recovers.
+    ///
+    /// Mirrors `Flush.no_silent_loss_guarded` (before the fix,
+    /// `Flush.lease_panic_loses`).
+    #[tokio::test(start_paused = true)]
+    async fn a_panicking_lease_read_retains_the_batch() {
+        let _callsites = quiet_logs();
+        let inner: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
+        let flaky = Arc::new(FlakyStore::new(inner.clone()));
+        flaky.set_aux(Aux::Panic, Aux::Answer);
+        let graph = new_graph();
+        let (task, handle, erased) = failing_task_with_three_writes(&flaky, &graph).await;
+
+        run_the_failing_ladder(&flaky).await;
+        wait_until(|| flaky.lease_reads() >= 1).await;
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            !handle.is_finished(),
+            "a panicking lease read must not kill the flush task"
+        );
+        assert!(
+            !erased.load(Ordering::SeqCst),
+            "a read that failed is not an erasure"
+        );
+        assert_eq!(task.stats().depth, 3, "the batch is retained");
+        assert!(!task.degraded());
+
+        // The store recovers: once the post-retry hold has passed, the
+        // retained batch lands whole.
+        flaky.recover();
+        flaky.set_aux(Aux::Answer, Aux::Answer);
+        tokio::time::advance(Duration::from_secs(11)).await;
+        wait_until(|| task.stats().depth == 0).await;
+        let snap = inner.load_session(&sid()).await.unwrap();
+        assert_eq!(snap.interactions.len(), 1);
+        assert_eq!(snap.concepts.len(), 1);
+        assert!(!handle.is_finished());
+    }
+
+    /// #301: `write_flush_stats` panics after a failed flush. Before the fix
+    /// the task died holding the retained batch, so the stop that `close`
+    /// sends could not hand it back and it was lost. The write now runs
+    /// under `CatchUnwindPoll`, a panic is ignored like a failed write, and
+    /// the stop returns the batch to the graph log for `close`'s final flush.
+    ///
+    /// Mirrors `Flush.stopped_accounted_guarded` (before the fix,
+    /// `Flush.stats_panic_loses`).
+    #[tokio::test(start_paused = true)]
+    async fn a_panicking_stats_write_keeps_the_retained_batch() {
+        let _callsites = quiet_logs();
+        let flaky = Arc::new(FlakyStore::new(Arc::new(MemoryStore::new())));
+        flaky.set_aux(Aux::Answer, Aux::Panic);
+        let graph = new_graph();
+        let (task, handle, _erased) = failing_task_with_three_writes(&flaky, &graph).await;
+
+        run_the_failing_ladder(&flaky).await;
+        wait_until(|| flaky.stats_writes() >= 1).await;
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            !handle.is_finished(),
+            "a panicking stats write must not kill the flush task"
+        );
+        assert_eq!(task.stats().depth, 3, "the batch is retained");
+
+        task.stop();
+        handle.await.expect("the loop stops cleanly");
+        assert_eq!(
+            graph.read().log_len(),
+            3,
+            "the stop hands the retained batch back for close's final flush"
+        );
+    }
+
+    /// #301: the lease read behind `erased()` never returns. Before the fix
+    /// the cycle never ended, so the stop was never served and `close`'s join
+    /// waited for good. The read is now bounded by `FLUSH_ATTEMPT_TIMEOUT`;
+    /// a timeout counts as a failed read, the batch is retained, and the stop
+    /// hands it back.
+    ///
+    /// Mirrors `Flush.stop_exits_guarded` (before the fix,
+    /// `Flush.lease_hang_blocks_stop`).
+    #[tokio::test(start_paused = true)]
+    async fn a_hanging_lease_read_does_not_block_stop() {
+        let _callsites = quiet_logs();
+        let flaky = Arc::new(FlakyStore::new(Arc::new(MemoryStore::new())));
+        flaky.set_aux(Aux::Hang, Aux::Answer);
+        let graph = new_graph();
+        let (task, handle, erased) = failing_task_with_three_writes(&flaky, &graph).await;
+
+        run_the_failing_ladder(&flaky).await;
+        wait_until(|| flaky.lease_reads() >= 1).await;
+
+        task.stop();
+        let joined = tokio::time::timeout(2 * FLUSH_ATTEMPT_TIMEOUT, handle).await;
+        assert!(joined.is_ok(), "a hanging lease read must not block stop()");
+        joined.unwrap().expect("the loop stops cleanly");
+        assert!(
+            !erased.load(Ordering::SeqCst),
+            "a timeout is not an erasure"
+        );
+        assert_eq!(
+            graph.read().log_len(),
+            3,
+            "the stop hands the retained batch back for close's final flush"
+        );
+    }
+
+    /// #301: `write_flush_stats` never returns after a failed flush. Before
+    /// the fix this blocked `stop()` the same way; now it is bounded by
+    /// `FLUSH_ATTEMPT_TIMEOUT` and the stop hands the retained batch back.
+    ///
+    /// Mirrors `Flush.stop_exits_guarded`.
+    #[tokio::test(start_paused = true)]
+    async fn a_hanging_stats_write_does_not_block_stop() {
+        let _callsites = quiet_logs();
+        let flaky = Arc::new(FlakyStore::new(Arc::new(MemoryStore::new())));
+        flaky.set_aux(Aux::Answer, Aux::Hang);
+        let graph = new_graph();
+        let (task, handle, _erased) = failing_task_with_three_writes(&flaky, &graph).await;
+
+        run_the_failing_ladder(&flaky).await;
+        wait_until(|| flaky.stats_writes() >= 1).await;
+
+        task.stop();
+        let joined = tokio::time::timeout(2 * FLUSH_ATTEMPT_TIMEOUT, handle).await;
+        assert!(
+            joined.is_ok(),
+            "a hanging stats write must not block stop()"
+        );
+        joined.unwrap().expect("the loop stops cleanly");
+        assert_eq!(graph.read().log_len(), 3);
     }
 
     #[tokio::test(start_paused = true)]
