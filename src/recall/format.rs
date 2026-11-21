@@ -81,9 +81,8 @@
 //! which on the shipped fixture would pick the wrong agent (the newest write
 //! is agent-b's). [`agent_display`] maps the fixture's id convention
 //! (`agent-a` → `A`). The age renders as a numeral, matching the events
-//! channel's `"{}s ago"` convention and the "11-seconds-ago conflict line";
-//! spec §13's "eleven seconds ago" is demo narration, not quoted screen text
-//! (unlike the ⚑ line above).
+//! channel's `"{}s ago"` convention; spec §13's "eleven seconds ago" is demo
+//! narration, not quoted screen text (unlike the ⚑ line above).
 
 use std::collections::{HashMap, HashSet};
 

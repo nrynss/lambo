@@ -357,7 +357,8 @@ enum Resolution {
 }
 
 /// "log the fallback once per session" — module-level, keyed by session id,
-/// because there is no session owner yet and the fallback is cross-call.
+/// because the fallback is cross-call and the session owner (`Memory`) does
+/// not carry this flag.
 fn note_fallback_logged(session: &SessionId) -> bool {
     static LOGGED: LazyLock<Mutex<HashSet<SessionId>>> =
         LazyLock::new(|| Mutex::new(HashSet::new()));

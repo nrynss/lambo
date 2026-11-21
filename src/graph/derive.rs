@@ -77,16 +77,13 @@
 //! partial batch in the graph or the mutation log. The loop's
 //! reflexive checks remain as unreachable defense-in-depth.
 //!
-//! ## Daemon notify seam (do NOT build the channel here)
+//! ## No daemon notify from here
 //!
-//! [`derive`](fn@derive) is the write path the daemon will subscribe to: the daemon
-//! consumes the session's mutation stream and reacts to derive-created
-//! conflicts / drift / staleness. The notify hook (a channel send, spec §6.1
-//! `DaemonEvent`) is **deferred** — there is nothing to send to yet, so
-//! this module deliberately contains no stub functions and no channel types.
-//! When the daemon lands, the send belongs *after* the successful graph writes
-//! here (or, more likely, inside the flush path that drains `MutationBatch`),
-//! and the receiver-side contract is `DaemonEvent` (already in `crate::types`).
+//! [`derive`](fn@derive) does not signal the daemon. The daemon polls
+//! `Graph::epoch` on its tick and reacts to what derive wrote (conflicts,
+//! drift, staleness); see `crate::daemon`. `DaemonEvent` (spec §6.1) is the
+//! daemon's outbound event, not an inbound notify, so this module contains no
+//! channel.
 
 use std::collections::{HashMap, HashSet};
 
@@ -393,7 +390,7 @@ impl MergeGuarded {
 ///
 /// Returns the [`DeriveOutcome`] (created / matched / reinforced counts). All
 /// mutations flow through `Graph`'s write APIs into its ordered log; [`derive`](fn@derive)
-/// is synchronous and pure of I/O (the daemon notify hook is deferred, see
+/// is synchronous and pure of I/O, and does not notify the daemon (see the
 /// module docs).
 pub fn derive(
     graph: &mut Graph,

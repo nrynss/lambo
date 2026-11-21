@@ -871,8 +871,8 @@ pub trait GraphStore: Send + Sync {
     /// always grants, persisting nothing — it exists so test doubles and any
     /// store that has not implemented enforcement keep their prior behaviour
     /// (single-writer was advisory before leases were store-enforced). The
-    /// three real backends
-    /// (`MemoryStore`, `SqliteStore`, `CockroachStore`) override it with true
+    /// real backends (`MemoryStore`, `SqliteStore`, and `PgStore`, which is
+    /// both `CockroachStore` and `PostgresStore`) override it with true
     /// enforcement. A store that grants here provides no cross-process
     /// guarantee — the in-process `ACTIVE_SESSIONS` log is the only catch.
     async fn acquire_lease(
@@ -1003,8 +1003,9 @@ pub trait GraphStore: Send + Sync {
     /// the flush path.
     ///
     /// **Default is a no-op** so non-target backends, test doubles, and the
-    /// advisory-default stores keep their prior behaviour; the three real
-    /// stores (`MemoryStore`, `SqliteStore`, `CockroachStore`) override it.
+    /// advisory-default stores keep their prior behaviour; the real stores
+    /// (`MemoryStore`, `SqliteStore`, and `PgStore`, which is both
+    /// `CockroachStore` and `PostgresStore`) override it.
     async fn write_flush_stats(
         &self,
         _session: &SessionId,
@@ -1097,9 +1098,8 @@ pub const POSTGRES_IAM_ENV: &str = "LAMBO_POSTGRES_IAM";
 /// wire protocol through the same sqlx driver, and there was no PostgreSQL
 /// dialect yet. It is also a lie the Cockroach adapter's `VECTOR(n)`,
 /// `CREATE VECTOR INDEX`, and `::STRING` never meant on PostgreSQL. The split
-/// means no string maps across the boundary; a leftover `kind = "postgres"`
-/// pointed at Cockroach fails loud at construction (the PostgreSQL adapter has
-/// not landed DDL) rather than silently ranking with Cockroach SQL.
+/// means no string maps across the boundary: `kind = "postgres"` builds the
+/// PostgreSQL adapter and never ranks with Cockroach SQL.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StoreKind {
@@ -1110,8 +1110,7 @@ pub enum StoreKind {
     /// Config strings: `"cockroach"`, `"crdb"`. Not `"postgres"` / `"pg"`.
     Cockroach,
     /// PostgreSQL + pgvector. Feature: `store-postgres`.
-    /// Config strings: `"postgres"`, `"pg"`. Fail-closed until the PostgreSQL
-    /// adapter lands DDL.
+    /// Config strings: `"postgres"`, `"pg"`.
     Postgres,
     /// SQLite offline / test tier. Feature: `store-sqlite`.
     Sqlite,

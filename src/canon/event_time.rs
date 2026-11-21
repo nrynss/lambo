@@ -102,10 +102,11 @@ use chrono::{DateTime, Utc};
 /// contribute one session each; stragglers further than `gap` out extend the
 /// chain.
 ///
-/// This is the solo policy's seam (`dev-diary/lambo-for-mooshik/C-solopolicy.md`).
-/// Its production caller is the solo policy's recurrence term,
-/// `recurrence_sessions` in `policy.rs`, which resolves
-/// session starts through [`crate::types::Interaction::about_time`].
+/// This is the solo policy's seam
+/// (`dev-diary/lambo-for-mooshik/C-solopolicy.md`). Its production caller is
+/// the solo policy's recurrence term, `recurrence_sessions` in `policy.rs`,
+/// which resolves session starts through
+/// [`crate::types::Interaction::about_time`].
 /// `a_bulk_ingest_recurs_only_under_event_time` in `policy.rs` kills the mutant
 /// that resolves them through flush stamps instead.
 pub fn separated_session_count(starts: &[DateTime<Utc>], gap: Duration) -> usize {

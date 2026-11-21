@@ -41,6 +41,8 @@
 //!   the window. A holder the blend would not show is not promoted, and the
 //!   blend itself forces no holder.
 //!
+//! The scoring rule's terms:
+//!
 //! * **query_relevance** — the member's phase-1 candidate score: under the
 //!   default [`FusionKind::Max`](crate::recall::fusion::FusionKind::Max) its
 //!   highest raw leg score (BM25 for keyword hits), under `Rrf` its
