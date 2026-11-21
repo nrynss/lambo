@@ -7,8 +7,12 @@ Model of the canonical-key pipeline in `src/graph/canonical.rs` (at `a15d1e72`):
   predecessor is an ASCII lowercase letter, on the original case;
 * `tokens(content, true)` (= `normalize_tokens`): split on `-`, `_` and
   `char::is_whitespace`, drop empty pieces, lowercase, drop `STOPWORDS`, then
-  Porter-stem every token except an identifier token (one containing an ASCII
-  digit, `/` or `.`, `is_identifier_token`, #148), which is kept as lowercased;
+  stem every token with Snowball English (Porter2, `rust-stemmers`
+  `Algorithm::English`; the Rust docs call it "Porter") except an identifier
+  token (one containing an ASCII digit, `/` or `.`, `is_identifier_token`,
+  #148), which is kept as lowercased. The camelCase split runs first, so an
+  identifier piece with a lower-to-upper boundary inside is still split;
+  empty stems are not filtered out;
 * `tokens_to_key`: sort the tokens (`Vec<String>::sort`) and join them with
   single spaces;
 * `canonical_key(content, synonyms)`: trim, look the trimmed raw text up in the
@@ -27,8 +31,11 @@ UUID, or exactly 8 ASCII hex digits).
   structural theorem holds for any such pair; the ones that need more of the
   stemmer say so in a hypothesis (`Sane`, `Stable`). The concrete `stop0` is the
   real 13-word `STOPWORDS`; the concrete `stem0` is a small lookup table that
-  agrees with Porter (English) on the words the examples use (identity
-  elsewhere).
+  agrees with Snowball English (Porter2) on the words the examples use
+  (identity elsewhere). The real stemmer is neither `Stable` nor `Sane`, and
+  neither is `stem0`, which keeps two of its failures (`leas` and `''s`); the
+  theorems with those hypotheses reach the concrete tables only through the
+  `decide` examples.
 * `isWs` is Rust's `char::is_whitespace` (Unicode `White_Space`), exactly.
 * `tokLe` orders tokens by code point, lexicographically. Rust sorts `String`s
   by UTF-8 bytes, which is the same order.
@@ -38,7 +45,7 @@ UUID, or exactly 8 ASCII hex digits).
 Not modelled: the invisible-character strip and Unicode NFC that open
 `tokens` (the model reads their output), Unicode case mapping beyond ASCII
 (`str::to_lowercase` maps non-ASCII letters too; `lowerA` is ASCII-only), the
-Porter algorithm itself (a parameter), `legacy_canonical_key`, and step 5
+Snowball English algorithm itself (a parameter), `legacy_canonical_key`, and step 5
 (`canonicalize` matching a key against the graph). How a key is bound and kept
 is `Names.lean`.
 
@@ -64,11 +71,24 @@ Structure (any stopword list and stemmer):
 * `key_eq_iff_perm` (`Sane` stemmer: nonempty, separator-free stems): two inputs
   have the same key exactly when their stems form the same multiset. The key is
   a multiset, not a set: `lease lease` is not `lease` (`dup_not_collapsed`).
+  The real stemmer is not `Sane`: it stems `''s` to the empty string (the
+  prelude drops the leading apostrophe, Step 1a removes `'s`), and `tokens`
+  keeps empty stems, so `''s-lease` has the key ` leas` with a leading space
+  and `''s ''s` the key ` ` (`empty_stem_key`). Since tokens never contain a
+  separator, joining with spaces still tells token lists apart except "no
+  tokens" from "one empty token", both of which give the empty key. `name_key`
+  refuses the empty key, so for accepted names the conclusion of
+  `nameKey_eq_iff_perm` still holds; only the proof here assumes `Sane`.
 * `key_idem` (`Stable` stemmer: its outputs are fixed points, contain no
   separator or uppercase, and are not stopwords): normalizing a key gives the
-  same key. `stable_id` shows the hypothesis is satisfiable. The real Porter
-  stemmer is not `Stable`: it stems `ons` to the stopword `on`, so the key of
-  `ons` is `on` and the key of `on` is empty (`ons_not_idempotent`).
+  same key. `stable_id` shows the hypothesis is satisfiable. The real stemmer
+  is not `Stable`, because stemming is not idempotent on ordinary words: `lease`
+  stems to `leas` but `leas` stems to `lea`, so the key of `lease` is `leas`
+  and the key of `leas` is `lea` (`leas_not_idempotent`). The canonical key is
+  therefore not idempotent whatever the stopword order (`names.rs` `upgrade`
+  says the same). A second, rarer case: `ons` stems to the stopword `on`, which
+  is not removed because stopwords are dropped before stemming, so the key of
+  `ons` is `on` while the key of `on` is empty (`ons_not_idempotent`).
 * `canonicalKey_syn`: a synonym is followed once, on the trimmed raw text, and
   its target is then normalized like any input (no chains).
 
@@ -883,9 +903,9 @@ theorem nameKey_all_stop {s : Text}
 /-! ## Concrete examples
 
 `stop0` is `STOPWORDS` from `src/graph/canonical.rs`. `stem0` agrees with the
-Porter (English) stemmer on the words below. The pairs `user`, `users`,
-`schema`, `register`, `create` and `account` are in the Rust test table `STEM`;
-the rest follow the Porter rules by hand, and every collision and
+Snowball English (Porter2) stemmer on the words below. The pairs `user`,
+`users`, `schema`, `register`, `create` and `account` are in the Rust test
+table `STEM`; the rest follow the Porter2 rules by hand, and every collision and
 non-collision stated below was checked against a local debug build of
 `lambo derive` (a match against the earlier concept, or a new one). -/
 
@@ -901,7 +921,7 @@ def stemTable : List (String × String) :=
    ("onning", "on"), ("user", "user"), ("users", "user"), ("schema", "schema"),
    ("register", "regist"), ("create", "creat"), ("account", "account"),
    ("xmlparser", "xmlparser"), ("xml", "xml"), ("parser", "parser"),
-   ("singlewriterlease", "singlewriterleas")]
+   ("singlewriterlease", "singlewriterleas"), ("leas", "lea"), ("''s", "")]
 
 def stem0 (t : Token) : Token :=
   match stemTable.find? (fun p => p.1.toList == t) with
@@ -959,12 +979,20 @@ example : key0 "leases-v2" = key0 "v2 lease" := by decide
 
 example : key0 "XmlParser" = key0 "xml-parser" := by decide
 
-/-- `.` and `/` are not separators: a piece containing them is one identifier
-token (#148), lowercased and not stemmed, so dotted or slashed names neither
-reorder nor drop stopwords, but do ignore case. -/
+/-- `.` and `/` are not separators: once split at separators and camelCase
+boundaries, a piece containing them (or a digit) is one identifier token
+(#148), lowercased and not stemmed. Without a camelCase boundary a dotted or
+slashed piece is therefore neither reordered inside nor stripped of
+stopwords, but its case is ignored. -/
 example : key0 "single.writer.lease" ≠ key0 "single-writer-lease" := by decide
 example : key0 "leases/v2" ≠ key0 "v2/leases" := by decide
 example : key0 "Leases.V2" = key0 "leases.v2" := by decide
+
+/-- The camelCase split runs before the identifier rule, so a lower-to-upper
+boundary inside a dotted or slashed piece still splits and reorders it. -/
+example : key0 "src/MyFile.rs" = key0 "File.rs src/My" := by decide
+example : key0 "src/MyFile.rs" = "file.rs src/my".toList := by decide
+example : key0 "leaseV2" = key0 "v2-lease" := by decide
 
 /-- The key is a multiset: a repeated word is not collapsed. -/
 theorem dup_not_collapsed : key0 "lease lease" ≠ key0 "lease" := by decide
@@ -974,12 +1002,31 @@ example : nameKey0 "the" = none := by decide
 example : nameKey0 "the-of" = none := by decide
 example : nameKey0 "DeadBeef" = none := by decide
 
-/-- The real stemmer is not `Stable`: `ons` stems to the stopword `on`, so the
-key of `ons` is `on`, whose own key is empty. Normalizing that key again is
-not the identity, and the name `ons` is accepted while `on` is refused. -/
+/-- **The real key is not idempotent.** Snowball English stems `lease` to
+`leas` and `leas` to `lea` (`Stable.fix` fails on an ordinary word), so the
+key of `lease` is `leas` and normalizing it again gives `lea`. A displayed key
+typed back as a name is a different name. -/
+theorem leas_not_idempotent :
+    key0 "lease" = "leas".toList ∧ key0 "leas" = "lea".toList ∧
+    key stop0 stem0 (key0 "lease") ≠ key0 "lease" ∧
+    nameKey0 "leas singl writer" = some "lea singl writer".toList ∧
+    nameKey0 "leas singl writer" ≠ nameKey0 "single-writer-lease" := by decide
+
+/-- A second, rarer failure of `Stable`: `ons` stems to the stopword `on`, so
+the key of `ons` is `on`, whose own key is empty. Normalizing that key again
+is not the identity, and the name `ons` is accepted while `on` is refused. -/
 theorem ons_not_idempotent :
     key0 "ons" = "on".toList ∧ key stop0 stem0 (key0 "ons") = [] ∧
     nameKey0 "ons" = some "on".toList ∧ nameKey0 "on" = none := by decide
+
+/-- The real stemmer is not `Sane`: `''s` stems to the empty string, and
+`tokens` does not drop empty stems. `''s` alone has the empty key (refused as
+a name), but `''s-lease` keys as ` leas` with a leading space, and `''s ''s`
+as a single space, which `name_key` accepts. -/
+theorem empty_stem_key :
+    key0 "''s" = [] ∧ nameKey0 "''s" = none ∧
+    key0 "''s-lease" = " leas".toList ∧ nameKey0 "''s-lease" = some " leas".toList ∧
+    nameKey0 "''s ''s" = some " ".toList := by decide
 
 /-- The identity stemmer is `Stable`, so `key_idem` applies to it, here on a
 non-trivial input. -/
