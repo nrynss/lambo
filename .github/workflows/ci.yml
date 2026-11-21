@@ -12,6 +12,15 @@ name: ci
 # (annotated tags need a second deref through /git/tags/<sha>; use
 #  .../git/ref/heads/<branch> for a branch-versioned action)
 
+# Cargo cache. rust-cache hashes every installed toolchain into its key, and the
+# ubuntu runner images differ in their preinstalled stable (1.99.1 on some,
+# 1.100.0 on others during a rollout), so one job alternated between two keys
+# and about a third of the jobs in each run started cold. Every job therefore
+# uninstalls all toolchains except the one rust-toolchain.toml selects before
+# rust-cache computes its key. Only main saves: PR and other branch caches are
+# scoped to their own ref, and they pushed the repo over the 10 GiB cache limit,
+# evicting main's entries. PRs restore main's caches.
+
 # Every event gets a lightweight classifier. A documentation-only success must
 # never qualify as full Rust validation for a release; see the full-ci job.
 on:
@@ -64,8 +73,18 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      - name: Keep only the pinned toolchain
+        run: |
+          keep="$(rustup show active-toolchain | cut -d' ' -f1)"
+          for t in $(rustup toolchain list --quiet); do
+            if [ "$t" != "$keep" ]; then rustup toolchain uninstall "$t"; fi
+          done
+          rustup toolchain list
+
       - name: Cache cargo
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: fmt
         run: cargo fmt --all -- --check
@@ -225,9 +244,18 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      - name: Keep only the pinned toolchain
+        run: |
+          keep="$(rustup show active-toolchain | cut -d' ' -f1)"
+          for t in $(rustup toolchain list --quiet); do
+            if [ "$t" != "$keep" ]; then rustup toolchain uninstall "$t"; fi
+          done
+          rustup toolchain list
+
       - name: Cache cargo
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           key: ${{ matrix.name }}
 
       - name: ${{ matrix.name }}
@@ -258,8 +286,17 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: dtolnay/rust-toolchain@d124f86f28ff42855784ff3319f48ac182c248f8 # 1.99.1
+      - name: Keep only the pinned toolchain
+        run: |
+          keep="$(rustup show active-toolchain | cut -d' ' -f1)"
+          for t in $(rustup toolchain list --quiet); do
+            if [ "$t" != "$keep" ]; then rustup toolchain uninstall "$t"; fi
+          done
+          rustup toolchain list
       - name: Cache cargo
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: candle metal (compile only, no weights, no network)
         run: cargo check --locked --all-targets --features embed-candle-metal
         env:
@@ -297,8 +334,18 @@ jobs:
         uses: dtolnay/rust-toolchain@d124f86f28ff42855784ff3319f48ac182c248f8 # 1.99.1
         with:
           components: rustfmt, clippy
+      - name: Keep only the pinned toolchain
+        run: |
+          keep="$(rustup show active-toolchain | cut -d' ' -f1)"
+          for t in $(rustup toolchain list --quiet); do
+            if [ "$t" != "$keep" ]; then rustup toolchain uninstall "$t"; fi
+          done
+          rustup toolchain list
+
       - name: Cache cargo
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Live Postgres init (hnsw from init, two widths)
         run: |
           set -o pipefail
@@ -453,8 +500,18 @@ jobs:
         uses: dtolnay/rust-toolchain@d124f86f28ff42855784ff3319f48ac182c248f8 # 1.99.1
         with:
           components: rustfmt, clippy
+      - name: Keep only the pinned toolchain
+        run: |
+          keep="$(rustup show active-toolchain | cut -d' ' -f1)"
+          for t in $(rustup toolchain list --quiet); do
+            if [ "$t" != "$keep" ]; then rustup toolchain uninstall "$t"; fi
+          done
+          rustup toolchain list
+
       - name: Cache cargo
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Live CockroachDB tests (--ignored)
         run: cargo test --locked --features store-cockroach,store-memory,fixtures --lib -- --ignored
 

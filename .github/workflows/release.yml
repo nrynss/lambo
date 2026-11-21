@@ -159,12 +159,27 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@d124f86f28ff42855784ff3319f48ac182c248f8 # 1.99.1
 
+      # rust-cache hashes every installed toolchain into its key, and runner
+      # images differ in their preinstalled stable; keep only the one
+      # rust-toolchain.toml selects so the key is stable (see ci.yml).
+      - name: Keep only the pinned toolchain
+        run: |
+          keep="$(rustup show active-toolchain | cut -d' ' -f1)"
+          for t in $(rustup toolchain list --quiet); do
+            if [ "$t" != "$keep" ]; then rustup toolchain uninstall "$t"; fi
+          done
+          rustup toolchain list
+
       - name: Add target
         run: rustup target add ${{ matrix.target }}
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
+          # A tag's cache is scoped to that tag, so no later release can reuse
+          # it; it only takes quota. Tags restore main's caches instead, which a
+          # workflow_dispatch dry run from main seeds.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           # macos-arm64 and macos-arm64-metal share an OS and a target triple, so
           # the default key would make them fight over one cache with different
           # feature sets. Key by asset name instead.
