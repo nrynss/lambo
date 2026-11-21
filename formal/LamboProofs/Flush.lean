@@ -254,9 +254,18 @@ store as the loop sees it when the adapters map a class through `m`.
   (`Cls.errDeadLetter`, a permanent error dead-lettered like a constraint
   violation) against a store whose table is gone. It drops every batch and
   `close` returns `Ok` with nothing committed. Degrading keeps the writes in
-  the graph and makes `close` an error. `exBadValue` is the cost: a
-  permanent error that belongs to one batch ends durability for the session,
+  the graph and makes `close` an error. `exBadValue` was the cost: a
+  permanent error that belongs to one batch ended durability for the session,
   where dead-lettering would drop that batch alone.
+* So the permanent class is split by scope (`Cause`, after review): a value
+  the store rejects (SQLSTATE `21`, `22`, `44`, `54000`; `SQLITE_TOOBIG`,
+  `SQLITE_MISMATCH`) reaches the loop as `StoreError::Constraint`
+  (`Cause.errSplit`) and is dead-lettered with one call while the session
+  goes on (`value_rejected_dead_letters`, the `exBadValue` example); an error
+  about the store itself degrades as before (`store_permanent_degrades_split`,
+  `exGoneK`). The loop is unchanged; `via_split_agrees`,
+  `no_silent_loss_split` and `close_ok_accounted_split` carry the results
+  over.
 
 ## Left out
 
@@ -3092,7 +3101,9 @@ written. It is also where the code before the fix ends up for a permanent
 error, after a retry storm and a `log_max` of backlog; the fix gets there on
 the first refusal. The cost is the batch-specific permanent error (a value the
 store rejects, `exBadValue`): dead-lettering would drop that batch and keep
-the session durable, degrading ends durability for the rest of the session. -/
+the session durable, degrading ends durability for the rest of the session.
+The split by scope below (`Cause`) removes that cost: a value-scoped error is
+dead-lettered, and only a store-scoped one degrades. -/
 
 section Classes
 
@@ -3771,6 +3782,194 @@ theorem close_ok_accounted_classed {s : St α} (hg : Good s) (evs : List (PEv α
 
 end ClassedInvariants
 
+/-! ### Value-scoped and store-scoped permanent errors (#301 review)
+
+The fix above treats every permanent error alike and degrades. `exBadValue`
+shows what that costs when the error belongs to the batch: degrading drops
+that batch too, as a dead letter would, and also ends durability for the
+rest of the session. So the remediated fix splits the class by scope
+(`Cause`): an error about a value the store rejects (SQLSTATE classes `21`,
+`22`, `44`, `54000`; `SQLITE_TOOBIG`, `SQLITE_MISMATCH`) is dead-lettered as
+a constraint violation is, and only an error about the store itself (class
+`42`, `3F`, `54001` and up; `SQLITE_ERROR`, `CORRUPT`, `NOTADB`, `RANGE`)
+degrades. The adapters map a value-scoped error to `StoreError::Constraint`
+(`Cause.errSplit`), so the loop is `runClassed` unchanged: only the
+classification moves. `Cause.cls` forgets the scope, which gives back the
+classes above, so every theorem about `Cls` still holds of the projection.
+
+* `value_rejected_dead_letters`: one call, the batch dead-lettered and
+  counted once, and the session goes on (not degraded, not fenced, running,
+  no hold).
+* `store_permanent_degrades_split`: a store-scoped error degrades as before.
+* `via_split_agrees`: on a store with no value-scoped error, the split is the
+  fix above.
+* `no_silent_loss_split`, `close_ok_accounted_split`: the invariants and the
+  close theorem hold of the split classification (they hold of `runClassed`
+  over any store). -/
+
+/-- The class of a failed flush with the scope of a permanent error. -/
+inductive Cause where
+  | retryable
+  | constraint
+  | stale
+  /-- A value the store cannot hold: the batch's fault. -/
+  | valueRejected
+  /-- The store itself: a missing table, a corrupt file. -/
+  | storePermanent
+  deriving DecidableEq, Repr
+
+/-- Forget the scope. -/
+def Cause.cls : Cause → Cls
+  | .retryable => .retryable
+  | .constraint => .constraint
+  | .stale => .stale
+  | .valueRejected => .permanent
+  | .storePermanent => .permanent
+
+/-- The remediated mapping: a value-scoped error reaches the loop as
+`StoreError::Constraint`, a store-scoped one as `StoreError::Permanent`. -/
+def Cause.errSplit : Cause → Err
+  | .valueRejected => .constraint
+  | c => c.cls.errFixed
+
+inductive KRes where
+  | ok
+  | fail (c : Cause)
+  | lostAck
+  deriving DecidableEq, Repr
+
+def KRes.outcome (m : Cause → Err) : KRes → Outcome
+  | .ok => .ok
+  | .fail c => .fail (m c)
+  | .lostAck => .lostAck
+
+def KRes.res : KRes → Res
+  | .ok => .ok
+  | .fail c => .fail c.cls
+  | .lostAck => .lostAck
+
+/-- A store described by class and scope. -/
+abbrev KStore (α : Type) := List α → Nat → KRes
+
+def KStore.via (m : Cause → Err) (ks : KStore α) : Store α := fun b n => (ks b n).outcome m
+
+/-- The same store with the scope forgotten. -/
+def KStore.cls (ks : KStore α) : CStore α := fun b n => (ks b n).res
+
+/-- Any mapping that ignores the scope sees the projected store. -/
+theorem via_cls (m : Cls → Err) (ks : KStore α) :
+    CStore.via m ks.cls = KStore.via (fun c => m c.cls) ks := by
+  funext b n
+  simp only [CStore.via, KStore.via, KStore.cls]
+  cases ks b n <;> rfl
+
+/-- A value-scoped error is not retried. -/
+theorem value_rejected_not_retryable : (Cause.errSplit .valueRejected).retryable = false := rfl
+
+/-- Nor is a store-scoped one, and a transient stays retryable. -/
+theorem store_permanent_not_retryable : (Cause.errSplit .storePermanent).retryable = false := rfl
+
+theorem transient_retryable_split : (Cause.errSplit .retryable).retryable = true := rfl
+
+/-- **Agreement.** On a store that never rejects a value, the split is the
+fix before it. -/
+theorem via_split_agrees {ks : KStore α} (h : ∀ b n, ks b n ≠ .fail .valueRejected) :
+    KStore.via Cause.errSplit ks = CStore.via Cls.errFixed ks.cls := by
+  rw [via_cls]
+  funext b n
+  have hb := h b n
+  simp only [KStore.via]
+  cases hc : ks b n with
+  | ok => rfl
+  | lostAck => rfl
+  | fail c =>
+    rw [hc] at hb
+    cases c <;> simp_all [KRes.outcome, Cause.errSplit]
+
+section Split
+
+variable {P : Params}
+
+/-- **A rejected value is a dead letter, and the session goes on.** One
+call, no retry; the whole batch goes to the ledger as a dead letter and
+`dead_lettered` rises by one; nothing is held, degraded or fenced, so the
+next batch is sent on the next due tick (contrast `exBadValue` under the
+fix before, which degrades). -/
+theorem value_rejected_dead_letters {ks : KStore α} {s : St α} {now : Nat} {er : Bool}
+    (hrun : s.running = true) (hf : s.fenced = false) (h : Due P true now s)
+    (hv : ks (s.pending ++ s.log) s.attempts = .fail .valueRejected) :
+    (iterClassed P (KStore.via Cause.errSplit ks) .tick now er s).calls =
+      s.calls ++ [(s.pending ++ s.log, .fail .constraint)] ∧
+    (iterClassed P (KStore.via Cause.errSplit ks) .tick now er s).ledger =
+      s.ledger ++ [(.deadLettered, s.pending ++ s.log)] ∧
+    (iterClassed P (KStore.via Cause.errSplit ks) .tick now er s).deadLettered =
+      s.deadLettered + 1 ∧
+    (iterClassed P (KStore.via Cause.errSplit ks) .tick now er s).pending = [] ∧
+    (iterClassed P (KStore.via Cause.errSplit ks) .tick now er s).retryAfter = none ∧
+    (iterClassed P (KStore.via Cause.errSplit ks) .tick now er s).degraded = false ∧
+    (iterClassed P (KStore.via Cause.errSplit ks) .tick now er s).fenced = false ∧
+    (iterClassed P (KStore.via Cause.errSplit ks) .tick now er s).running = true := by
+  have hs : KStore.via Cause.errSplit ks (s.pending ++ s.log) s.attempts = .fail .constraint := by
+    simp [KStore.via, hv, KRes.outcome, Cause.errSplit]
+  have hrep : (KStore.via Cause.errSplit ks (s.pending ++ s.log) s.attempts).reported =
+      some .constraint := by rw [hs]; rfl
+  have hres : flushWithRetry (KStore.via Cause.errSplit ks) (s.pending ++ s.log) s.attempts
+      P.retries = ⟨[(s.pending ++ s.log, .fail .constraint)], [], some .constraint⟩ := by
+    unfold flushWithRetry
+    rw [ladder_nonretryable hrep rfl, hs]
+  have hr' : (!s.running) = false := by simp [hrun]
+  simp only [iterClassed, hr', Bool.false_eq_true, ↓reduceIte]
+  rw [cycleClassed_with, cycleWith_due _ hf h]
+  simp [settleClassed, settleFixed, preSettle, checkFence, hf, hrun, hres, h.notDegraded]
+
+/-- **A store-scoped error degrades**, as under the fix before. -/
+theorem store_permanent_degrades_split {ks : KStore α} {s : St α} {now : Nat}
+    (hrun : s.running = true) (hf : s.fenced = false) (h : Due P true now s)
+    (hp : ks (s.pending ++ s.log) s.attempts = .fail .storePermanent) :
+    (iterClassed P (KStore.via Cause.errSplit ks) .tick now false s).calls =
+      s.calls ++ [(s.pending ++ s.log, .fail .permanent)] ∧
+    (iterClassed P (KStore.via Cause.errSplit ks) .tick now false s).pending =
+      s.pending ++ s.log ∧
+    (iterClassed P (KStore.via Cause.errSplit ks) .tick now false s).ledger = s.ledger ∧
+    (iterClassed P (KStore.via Cause.errSplit ks) .tick now false s).deadLettered =
+      s.deadLettered ∧
+    (iterClassed P (KStore.via Cause.errSplit ks) .tick now false s).degraded = true ∧
+    (iterClassed P (KStore.via Cause.errSplit ks) .tick now false s).running = true := by
+  have hs : KStore.via Cause.errSplit ks (s.pending ++ s.log) s.attempts = .fail .permanent := by
+    simp [KStore.via, hp, KRes.outcome, Cause.errSplit, Cause.cls, Cls.errFixed]
+  have hres := permanent_one_call (st := KStore.via Cause.errSplit ks) hs P.retries
+  have hr' : (!s.running) = false := by simp [hrun]
+  simp only [iterClassed, hr', Bool.false_eq_true, ↓reduceIte]
+  rw [cycleClassed_with, cycleWith_due _ hf h]
+  simp [settleClassed, preSettle, checkFence, hf, hrun, hres]
+
+/-- `no_silent_loss_classed` under the split classification. -/
+theorem no_silent_loss_split (ks : KStore α) (evs : List (PEv α)) :
+    ∀ e ∈ (runClassedGuarded P (KStore.via Cause.errSplit ks) St.init evs).ledger,
+      e.1 = .committed ∨
+      (e.1 = .deadLettered ∧
+        0 < (runClassedGuarded P (KStore.via Cause.errSplit ks) St.init evs).deadLettered) ∨
+      (e.1 = .droppedDegraded ∧
+        (runClassedGuarded P (KStore.via Cause.errSplit ks) St.init evs).degraded = true) ∨
+      (e.1 = .droppedFenced ∧
+        (runClassedGuarded P (KStore.via Cause.errSplit ks) St.init evs).fenced = true) :=
+  no_silent_loss_classed evs
+
+/-- `close_ok_accounted_classed` under the split classification: a dead
+letter is still the one drop an `Ok` close can sit over, and it is counted. -/
+theorem close_ok_accounted_split {ks : KStore α} {s : St α} (hg : Good s)
+    (evs : List (PEv α)) (final : Store α)
+    (hok : closeOkClassedGuarded P (KStore.via Cause.errSplit ks) true s evs final = true)
+    (hstop : (runClassedGuarded P (KStore.via Cause.errSplit ks) s evs).running = false) :
+    (∀ e ∈ (runClassedGuarded P (KStore.via Cause.errSplit ks) s evs).ledger,
+      e.1 = .committed ∨ e.1 = .deadLettered) ∧
+    (runClassedGuarded P (KStore.via Cause.errSplit ks) s evs).consumed ++
+        (runClassedGuarded P (KStore.via Cause.errSplit ks) s evs).log =
+      (runClassedGuarded P (KStore.via Cause.errSplit ks) s evs).hist :=
+  close_ok_accounted_classed hg evs final hok hstop
+
+end Split
+
 end Classes
 
 /-! ## Examples -/
@@ -4232,25 +4431,44 @@ example :
   decide
 
 /-- A permanent error that is a property of the batch: the store rejects any
-batch holding the value `3` (a value it cannot store, e.g. SQLSTATE `22021`). -/
-def exBadValue : CStore Nat := fun b _ => if b.contains 3 then .fail .permanent else .ok
+batch holding the value `3` (a value it cannot store, e.g. SQLSTATE `22021`).
+A value-scoped error (`Cause.valueRejected`); `exBadValue.cls` is the same
+store with the scope forgotten, as the fix before the split saw it. -/
+def exBadValue : KStore Nat := fun b _ => if b.contains 3 then .fail .valueRejected else .ok
 
 def exBadEvs : List (Ev Nat) :=
   [.write 1, .wake .tick 0 false, .write 3, .wake .tick 1000 false, .write 4,
    .wake .tick 2000 false]
 
-/-- **The cost of degrading.** After the fix `[1]` commits, `[3]` degrades the
-session and `[4]` is dropped with it; the dead-letter candidate would drop
-`[3]` alone and commit `[4]`. The code before the fix resends `[3]` until the
-backlog passes `log_max`, then degrades all the same; here it still holds
-`[3, 4]`. -/
+/-- **A rejected value is a dead letter** (`value_rejected_dead_letters`).
+Under the split classification `[1]` commits, `[3]` is dead-lettered and
+counted, and `[4]` commits: the session stays durable. The fix before the
+split degraded on `[3]` and dropped `[4]` with it, which was the cost of
+degrading; the code before #301 resends `[3]` until the backlog passes
+`log_max`, then degrades all the same; here it still holds `[3, 4]`. -/
 example :
-    (runClassed exP (CStore.via Cls.errFixed exBadValue) St.init exBadEvs).ledger =
-      [(.committed, [1]), (.droppedDegraded, [3, 4])] ∧
-    (runFixed exP (CStore.via Cls.errDeadLetter exBadValue) St.init exBadEvs).ledger =
+    (runClassed exP (KStore.via Cause.errSplit exBadValue) St.init exBadEvs).ledger =
       [(.committed, [1]), (.deadLettered, [3]), (.committed, [4])] ∧
-    (runFixed exP (CStore.via Cls.errOld exBadValue) St.init exBadEvs).pending = [3, 4] ∧
-    (runFixed exP (CStore.via Cls.errOld exBadValue) St.init exBadEvs).degraded = false := by
+    (runClassed exP (KStore.via Cause.errSplit exBadValue) St.init exBadEvs).deadLettered = 1 ∧
+    (runClassed exP (KStore.via Cause.errSplit exBadValue) St.init exBadEvs).degraded = false ∧
+    (runClassed exP (CStore.via Cls.errFixed exBadValue.cls) St.init exBadEvs).ledger =
+      [(.committed, [1]), (.droppedDegraded, [3, 4])] ∧
+    (runFixed exP (CStore.via Cls.errDeadLetter exBadValue.cls) St.init exBadEvs).ledger =
+      [(.committed, [1]), (.deadLettered, [3]), (.committed, [4])] ∧
+    (runFixed exP (CStore.via Cls.errOld exBadValue.cls) St.init exBadEvs).pending = [3, 4] ∧
+    (runFixed exP (CStore.via Cls.errOld exBadValue.cls) St.init exBadEvs).degraded =
+      false := by
+  decide
+
+/-- `exGone` as a store-scoped error: the split still degrades on it
+(`store_permanent_degrades_split`, `via_split_agrees`), and `close` errors. -/
+def exGoneK : KStore Nat := fun _ _ => .fail .storePermanent
+
+example :
+    runClassed exP (KStore.via Cause.errSplit exGoneK) St.init exGoneEvs =
+      runClassed exP (CStore.via Cls.errFixed exGone) St.init exGoneEvs ∧
+    closeOkClassed exP (KStore.via Cause.errSplit exGoneK) true St.init exGoneEvs
+      (KStore.via Cause.errSplit exGoneK) = false := by
   decide
 
 /-- `via_fixed_agrees`, `runClassed_old`: a transient outage is retried and
