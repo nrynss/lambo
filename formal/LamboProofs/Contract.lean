@@ -275,7 +275,60 @@ override is the operator asserting that they do.
   and a later read returns both.
 * `reembed_refuses_same`, `reembedCmd_refuses_same_contract`: `re-embed`
   cannot rewrite a session already under the live contract, which is the
-  state a canary drift is detected in (see the report on #176).
+  state a canary drift is detected in (finding 1 below).
+* `reembedCmd_full_never_warns`, `reembed_repins_without_warning`: every
+  full re-embed that succeeds re-pins the canary and never prints the
+  "other sessions under the same contract" warning (finding 2).
+* `missingOnly_skips_canary`, `example_drifted_backfill`: the backfill runs
+  whatever the canary says (finding 3).
+
+## Findings about the Rust at `703f703f`
+
+1. **Drift cannot be re-embedded in place.** The drift refusal says
+   "Re-embed the store's sessions with `lambo re-embed`"
+   (`src/memory/builder.rs:1028-1037`), and `docs/reference/config.mdx:263`
+   speaks of "re-embedding one session under an unchanged contract name". A
+   drift is only seen on a session whose stored contract equals the live one
+   (the canary is keyed by the contract and runs after the contract check),
+   and `Graph::reembed` refuses exactly that state (`embeddings.rs:184-188`);
+   `re_embed::run` calls it with no special case (`re_embed.rs:347-350`).
+   So the advice as written cannot be followed
+   (`reembedCmd_refuses_same_contract`,
+   `example_drift_not_reembeddable_in_place`). The only repair is
+   undocumented: change the contract identity at the same width, then
+   re-embed (`example_rename_hop`). Where the contract `model` is the
+   free-form `[embedder] model` / `llama_model` (the `_ =>` arm of
+   `resolve_embedder`, `src/resolve.rs:381-393`, e.g. `bge_m3`; `None` and
+   `Some` differ), an alias of the same model makes stored and live differ
+   and the re-embed succeeds, and a second re-embed back to the original
+   name succeeds too. A same-width kind hop (`bge_m3` to `candle`, both
+   BGE-M3 at 1024) also works (`example_reembed`). `candle` (source revision
+   plus weights sha) and `gemini` (provider model id) stamp a derived
+   identity and have no rename route.
+2. **Silent re-pin.** After a successful full rewrite, `re_embed::run`
+   (`re_embed.rs:211-230`) pins the canary for the live contract, replacing
+   the store's pin for that name, and warns that other sessions under the
+   name are no longer flagged only when `prior == live`. That never holds
+   after a successful full rewrite (`reembedCmd_full_never_warns`). So any
+   re-embed into a name other sessions already use re-pins it silently,
+   unflagging their drift: the round trip's second hop (prior `A'`, live
+   `A`) and the re-embed of an unrecorded session (prior `None`) are two
+   routes (`example_silent_repin`). The store-wide pin table and the other
+   sessions are not modelled; `repins` is the per-run decision only.
+3. **`re-embed --missing-only` bypasses the canary.** It attaches in
+   `reembed_mode` (`re_embed.rs:112-122`), which skips `canary_gate`
+   (`builder.rs:717-720`), so under `canary = "verify"` it writes vectors
+   from a drifted embedder into the session with no check, where every other
+   writer attach is refused (`missingOnly_skips_canary`,
+   `example_drifted_backfill`).
+4. **The override's WARN precedes a relabel that may refuse**
+   (`builder.rs:648-658`; `example_warn_without_relabel`).
+5. **The override's same-kind guard is weak for generic kinds.** The guard
+   compares the kind string only. For a kind whose `model` is free-form
+   (`bge_m3`, which the `openai` alias also selects), vectors from one model
+   can be relabelled as a different model of the same kind and width (BGE-M3
+   at 1024 as qwen3-embedding-4b at 1024), and `attach_override_ok_iff`
+   admits it (`example_same_kind_relabel`).
 
 Not modelled: vector values, widths of individual vectors and finiteness
 (each written vector is assumed to have its contract's width, which the
@@ -1255,6 +1308,72 @@ theorem canary_refuses_iff (mode : CanaryMode) (drifted allow : Bool) :
       mode = .verify ∧ drifted = true ∧ allow = false := by
   cases mode <;> cases drifted <;> cases allow <;> simp [canaryAdmits]
 
+/-- An ordinary writer attach with its canary gate (`build_attach` steps 2
+and 2c): the contract check, then the canary. -/
+def writerAttach (s : Session K M) (live : Contract K M) (allow : Bool) (mode : CanaryMode)
+    (drifted : Bool) : Option (Session K M × List (Mut K M)) :=
+  match attach s live allow with
+  | some r => if canaryAdmits mode drifted allow then some r else none
+  | none => none
+
+/-- `lambo re-embed` with the canary inputs it is given. It attaches in
+`reembed_mode`, which skips `canary_gate`, so `mode` and `drifted` are
+accepted and unused: this is the current code, not a modelling shortcut. -/
+def reembedCmdGated (s : Session K M) (live : Contract K M) (allow missingOnly drop : Bool)
+    (_mode : CanaryMode) (_drifted : Bool) : Option (Session K M × List (Mut K M)) :=
+  reembedCmd s live allow missingOnly drop
+
+/-- **`--missing-only` bypasses the canary** (finding 3): the re-embed verb,
+backfill included, does the same whatever the canary mode and verdict. -/
+theorem missingOnly_skips_canary (s : Session K M) (live : Contract K M)
+    (allow missingOnly drop : Bool) (mode : CanaryMode) (drifted : Bool) :
+    reembedCmdGated s live allow missingOnly drop mode drifted =
+      reembedCmdGated s live allow missingOnly drop .off false := rfl
+
+/-- Under `verify` with a drift, every ordinary writer attach is refused. -/
+theorem writerAttach_verify_drift (s : Session K M) (live : Contract K M) :
+    writerAttach s live false .verify true = none := by
+  unfold writerAttach
+  cases attach s live false <;> rfl
+
+/-- Whether a `re-embed` run pins the canary afterwards
+(`re_embed.rs:209-215`): a full rewrite that succeeded on a non-empty
+session, with the canary not `off`. -/
+def repins (s : Session K M) (live : Contract K M) (missingOnly drop : Bool)
+    (mode : CanaryMode) : Bool :=
+  (reembedCmd s live false missingOnly drop).isSome && !missingOnly && !s.concepts.isEmpty &&
+    !decide (mode = .off)
+
+/-- Whether the run prints the "other sessions under the same contract"
+warning: `prior_contract == Some(live)`. -/
+def repinWarns (s : Session K M) (live : Contract K M) : Bool :=
+  decide (s.contract = some live)
+
+/-- After a successful full re-embed of a non-empty session the warning is
+never printed: the session was not under the live contract. -/
+theorem reembedCmd_full_never_warns (s : Session K M) (live : Contract K M) (drop : Bool)
+    (r : Session K M × List (Mut K M)) (hne : s.concepts ≠ [])
+    (h : reembedCmd s live false false drop = some r) : repinWarns s live = false := by
+  unfold repinWarns
+  cases hc : decide (s.contract = some live) with
+  | false => rfl
+  | true =>
+    rw [decide_eq_true_eq] at hc
+    rw [reembedCmd_refuses_same_contract s live drop hc hne] at h
+    cases h
+
+/-- **Silent re-pin** (finding 2): whenever a run re-pins, it does not warn. -/
+theorem reembed_repins_without_warning (s : Session K M) (live : Contract K M)
+    (missingOnly drop : Bool) (mode : CanaryMode)
+    (h : repins s live missingOnly drop mode = true) : repinWarns s live = false := by
+  unfold repins at h
+  simp only [Bool.and_eq_true, Bool.not_eq_true', Option.isSome_iff_exists] at h
+  obtain ⟨⟨⟨⟨r, hr⟩, hmo⟩, hne⟩, _⟩ := h
+  subst hmo
+  have hne' : s.concepts ≠ [] := by
+    intro h0; rw [h0] at hne; cases hne
+  exact reembedCmd_full_never_warns s live drop r hne' hr
+
 /-! ### Concrete cases
 
 Kinds and models are numbers: kind `0` and `1`, models `some 0` and
@@ -1327,10 +1446,46 @@ theorem example_reembed_images :
   decide
 
 /-- The canary drift case: the session is under the live contract, and
-`re-embed` refuses it; the override flag is refused too. -/
-theorem example_drift_unrepairable :
+`re-embed` refuses to rewrite it in place; the override flag is refused too.
+The repair is a rename hop (`example_rename_hop`). -/
+theorem example_drift_not_reembeddable_in_place :
     reembedCmd sA cA false false false = none ∧ reembedCmd sA cA true false false = none ∧
     canaryAdmits .verify true false = false := by decide
+
+/-- An alias of `cA`'s model at the same kind and width (a renamed
+`llama_model`). -/
+def cA' : Contract Nat Nat := ⟨0, some 2, 4⟩
+
+/-- **The undocumented repair** (finding 1): re-embed to an alias of the same
+width succeeds, and re-embed back to the original name succeeds too. -/
+theorem example_rename_hop :
+    reembedCmd sA cA' false false false =
+      some (⟨some cA', [⟨1, false, some cA'⟩]⟩, [.upsert 1 (some cA'), .setEmbedding (some cA')]) ∧
+    reembedCmd ⟨some cA', [⟨1, false, some cA'⟩]⟩ cA false false false =
+      some (⟨some cA, [⟨1, false, some cA⟩]⟩, [.upsert 1 (some cA), .setEmbedding (some cA)]) := by
+  decide
+
+/-- **Silent re-pin, two routes** (finding 2). The round trip's second hop
+(prior `cA'`, live `cA`) and the re-embed of an unrecorded session with a
+text concept (prior none) both re-pin `cA` without the warning. -/
+theorem example_silent_repin :
+    repins (⟨some cA', [⟨1, false, some cA'⟩]⟩ : Session Nat Nat) cA false false .verify = true ∧
+    repinWarns (⟨some cA', [⟨1, false, some cA'⟩]⟩ : Session Nat Nat) cA = false ∧
+    repins (⟨none, [⟨1, false, none⟩]⟩ : Session Nat Nat) cA false false .warn = true ∧
+    repinWarns (⟨none, [⟨1, false, none⟩]⟩ : Session Nat Nat) cA = false := by decide
+
+/-- **The drifted backfill** (finding 3): under `verify` with a drift, an
+ordinary writer attach to `sEmpty` is refused, while `re-embed
+--missing-only` writes a vector from the drifted embedder into it. -/
+theorem example_drifted_backfill :
+    writerAttach sEmpty cA false .verify true = none ∧
+    reembedCmdGated sEmpty cA false true false .verify true =
+      some (⟨some cA, [⟨1, false, some cA⟩]⟩, [.upsert 1 (some cA)]) := by decide
+
+/-- The weak same-kind guard (finding 5): vectors from model `0` are
+relabelled as model `1` of the same kind and width. -/
+theorem example_same_kind_relabel :
+    (attach sA cB true).isSome = true ∧ (attach sA cC true).isSome = false := by decide
 
 /-- A backfill fills a missing vector in the session's own space and keeps
 the contract; from another space it is refused. -/
