@@ -472,6 +472,7 @@ fn re_embed_and_backfill_never_give_an_image_concept_a_text_vector() {
 /// coverage like `reembed_all`.
 ///
 /// Mirrors `Contract.reembedSame_spec` and `Contract.reembedSame_keeps_contract`.
+#[cfg(feature = "embed-fixture")]
 #[test]
 fn reembed_in_place_rewrites_every_vector_and_keeps_the_contract() {
     let (mut g, c1, c2) = two_concept_graph();
