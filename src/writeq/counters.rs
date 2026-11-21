@@ -98,9 +98,11 @@ pub enum ReplayBlockReason {
     /// was deferred, and its intents wait, in order, for the next serve).
     Embedder,
     /// A non-embedder, session-wide fault (a store error, a lost lease, a
-    /// config error) ended the loop. Also the reason when the replay ended
-    /// with intents owed only behind an intent whose receipt id is in another
-    /// format, which this build leaves owed (quarantined, #295).
+    /// config error) ended the loop, or it halted because the lease was lost
+    /// or the session began to close with intents still owed (#295). Also
+    /// the reason when the replay ended with intents owed only behind an
+    /// intent whose receipt id is in another version of the receipt format,
+    /// which this build leaves owed (quarantined, #295).
     Other,
     /// An image derive intent (#22) reached the head of the backlog in a
     /// process that cannot apply one: its match strategy is not `hybrid`, or

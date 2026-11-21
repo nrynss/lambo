@@ -238,13 +238,14 @@ impl WritePipeline {
                     // true: a consumed row is not replayed at all.
                     let fate = if intent.outcome.is_some() {
                         "its recorded outcome cannot be looked up by that id"
-                    } else if ReceiptId::is_this_format(&intent.receipt) {
-                        "it is malformed in this build's own format, so the replay settles it \
-                         failed"
+                    } else if ReceiptId::is_other_version(&intent.receipt) {
+                        "it is in another version of the receipt format (a newer build's?), so \
+                         the replay leaves it owed (quarantined) and holds its agent's later \
+                         intents behind it. Run the build that wrote it to replay it, or delete \
+                         the row (`DELETE FROM write_intents WHERE session_id = ... AND receipt = \
+                         ...`) to let the agent's later intents through"
                     } else {
-                        "it is in another receipt format (a newer build's?), so the replay leaves \
-                         it owed (quarantined) and holds its agent's later intents behind it; a \
-                         build that reads the format can replay it"
+                        "it is malformed, so the replay settles it failed"
                     };
                     tracing::warn!(
                         session = %self.ctx.session,
@@ -383,6 +384,7 @@ impl WritePipeline {
                     continue;
                 };
                 if this.ctx.lease_lost.load(Ordering::Acquire) || this.lanes.lock().sealed {
+                    // This intent and every one not yet reached stay owed.
                     halted = true;
                     break;
                 }
@@ -391,24 +393,17 @@ impl WritePipeline {
                     continue;
                 }
                 if ReceiptId::from_str(&intent.receipt).is_err()
-                    && !ReceiptId::is_this_format(&intent.receipt)
+                    && ReceiptId::is_other_version(&intent.receipt)
                 {
-                    // #295 review: an id in another receipt format, as a
-                    // newer build writes. Settling it `failed` could not be
-                    // undone, so it is quarantined: left owed (counted in
-                    // `replay_owed`, warned about at seeding and here), and
-                    // its agent deferred so the agent's later intents do not
-                    // overtake it.
+                    // #295 review: an id in another version of the receipt
+                    // format (`lwr<digits>.`, not `lwr1.`), as a newer build
+                    // writes. Settling it `failed` could not be undone, so it
+                    // is quarantined: left owed (counted in `replay_owed`, and
+                    // named once per serve by the seeding warning, which says
+                    // how to clear it), and its agent deferred so the agent's
+                    // later intents do not overtake it.
                     quarantined += 1;
                     deferred.insert(intent.agent.clone());
-                    tracing::warn!(
-                        session = %this.ctx.session,
-                        receipt = %intent.receipt,
-                        agent = %intent.agent,
-                        "write queue: a durable intent's receipt id is in another format; it is \
-                         left owed (quarantined) for a build that reads it, and its agent's \
-                         later intents wait behind it"
-                    );
                     left.push(intent);
                     continue;
                 }
@@ -620,9 +615,10 @@ impl WritePipeline {
                             streak = transient_streak,
                             "write queue: a durable intent's replay got a transient embedder \
                              answer; it and the rest of this agent's intents stay DURABLE and \
-                             unconsumed for the next serve, so they keep their order, while the \
-                             sequential decision rule keeps sampling the embedder's health on \
-                             other agents' intents"
+                             unconsumed, so they keep their order: the replay retries them once \
+                             after this pass, and what is still owed then waits for the next \
+                             serve. The sequential decision rule keeps sampling the embedder's \
+                             health on other agents' intents"
                         );
                         left.push(intent);
                         continue;
@@ -823,6 +819,12 @@ impl WritePipeline {
             // stands: `Embedder` when its last pass deferred an agent at a
             // transient answer, `Other` when only quarantined intents hold
             // writes back.
+            // A halt (the lease lost, or the session closing) leaves the
+            // intent it stopped at, and every one after it, owed: `Other`, the
+            // reason a lost lease already has, rather than `null`.
+            if halted && this.counters.replay_blocked() == ReplayBlockReason::None {
+                this.counters.set_replay_blocked(ReplayBlockReason::Other);
+            }
             if !halted
                 && !left.is_empty()
                 && this.counters.replay_blocked() == ReplayBlockReason::None
@@ -840,8 +842,8 @@ impl WritePipeline {
                     reason = ?reason,
                     "write queue: the replay ended with durable intents still owed: agents whose \
                      intent the embedder did not answer at two attempts, or that wait behind an \
-                     intent in another receipt format; they stay durable, in order, for the \
-                     next serve"
+                     intent in another version of the receipt format (named at startup); they \
+                     stay durable, in order, for the next serve"
                 );
             }
             tracing::info!(

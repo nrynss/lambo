@@ -590,8 +590,38 @@ impl WriteCtx {
     }
 }
 
+/// #295: how long an agent's worker waits, after its oldest held write met
+/// an outage `attempts` times in a row, before it retries that write with
+/// no new write to prompt it: one second, doubling per failed attempt, at
+/// most [`HYBRID_IO_TIMEOUT`](crate::graph::hybrid::HYBRID_IO_TIMEOUT) (30 s),
+/// the longest a single attempt can take. So a write that never embeds
+/// costs its agent at most one attempt per 30 s, and a write that blinked
+/// is retried within a second, receipts waiting on it or not.
+pub(crate) fn held_retry_backoff(attempts: u32) -> std::time::Duration {
+    let first = std::time::Duration::from_secs(1);
+    let max = crate::graph::hybrid::HYBRID_IO_TIMEOUT;
+    first
+        .checked_mul(1u32 << attempts.saturating_sub(1).min(16))
+        .map_or(max, |d| d.min(max))
+}
+
+/// What the worker does next (one write at a time).
+enum Next {
+    /// Run this write (boxed: a `Job` dwarfs the other variants).
+    Run(Box<Job>),
+    /// A write taken off the queue while its agent has held writes and is
+    /// parked: it joined them, behind, without running.
+    Held(ReceiptId),
+    /// Nothing to run until the agent's retry is due (or a write or a
+    /// refused admission wakes it).
+    Wait(std::time::Duration),
+    Exit,
+}
+
 impl WritePipeline {
-    pub(super) fn spawn_worker(&self, agent: AgentId) -> JoinHandle<()> {
+    /// Spawn `agent`'s lane worker. Called under the lanes lock, so it takes
+    /// its wake-up (`Lanes::wake_for`) from the caller rather than the lock.
+    pub(super) fn spawn_worker(&self, agent: AgentId, wake: Arc<Notify>) -> JoinHandle<()> {
         let ctx = self.ctx.clone();
         let lanes = self.lanes.clone();
         let receipts = self.receipts.clone();
@@ -601,258 +631,287 @@ impl WritePipeline {
         let observed = self.observed.clone();
         let apply_latency = self.apply_latency.clone();
         tokio::spawn(async move {
+            // #295: set after this worker met an outage at the agent's oldest
+            // owed write; cleared when its retry is due (the backoff timer, a
+            // new write of the agent, or a refused admission wakes it). While
+            // set, writes taken off the queue join the held ones unrun.
+            let mut parked = false;
             loop {
-                let job = {
+                // One write per turn, under the lock admission takes, so a
+                // held write is counted (held, then running) until it settles.
+                let next = {
                     let mut l = lanes.lock();
-                    match l.queues.get_mut(&agent).and_then(VecDeque::pop_front) {
-                        Some(job) => {
-                            l.queued -= 1;
-                            l.bytes = l.bytes.saturating_sub(job.bytes);
+                    let fenced = ctx.lease_lost.load(Ordering::Acquire);
+                    let has_held = l.lane_held(&agent) > 0;
+                    if has_held && (fenced || (!parked && !l.sealed)) {
+                        // The oldest held write first: retried, or refused
+                        // below if the lease is gone.
+                        let job = l.held.get_mut(&agent).and_then(VecDeque::pop_front);
+                        if l.lane_held(&agent) == 0 {
+                            l.held.remove(&agent);
+                        }
+                        match job {
+                            Some(job) => {
+                                l.running += 1;
+                                *l.running_per_lane.entry(agent.clone()).or_insert(0) += 1;
+                                Next::Run(Box::new(job))
+                            }
+                            None => continue,
+                        }
+                    } else if let Some(job) = l.queues.get_mut(&agent).and_then(VecDeque::pop_front)
+                    {
+                        l.queued -= 1;
+                        if has_held {
+                            // Parked (or closing): it keeps its place behind
+                            // the held writes, counted, unrun.
+                            let id = job.receipt;
+                            l.held.entry(agent.clone()).or_default().push_back(job);
+                            Next::Held(id)
+                        } else {
                             l.running += 1;
                             *l.running_per_lane.entry(agent.clone()).or_insert(0) += 1;
-                            job
+                            Next::Run(Box::new(job))
                         }
-                        None => {
-                            // Exit decision and liveness bookkeeping happen
-                            // under the same lock an enqueue takes, so no job
-                            // can be queued against a worker that has already
-                            // decided to stop. Dropping our own JoinHandle
-                            // here detaches a task that is about to return.
-                            l.queues.remove(&agent);
-                            l.workers.remove(&agent);
-                            l.running_per_lane.remove(&agent);
-                            return;
-                        }
-                    }
-                };
-
-                // The fence, checked per job rather than once: the lease can be
-                // lost while a lane drains, and every job after that must be
-                // refused rather than written into a session another writer
-                // owns.
-                //
-                // #295: the agent's held writes first. A write this worker met
-                // an embedder outage at is held (see `Lanes::held`) together
-                // with every later write of its agent, and re-attempted, in
-                // order, before the agent's next write: so no write of the
-                // agent applies ahead of an earlier one still owed. A fenced
-                // worker runs none of them.
-                let fenced = ctx.lease_lost.load(Ordering::Acquire);
-                let mut owed: VecDeque<Job> = if fenced {
-                    VecDeque::new()
-                } else {
-                    lanes.lock().held.remove(&agent).unwrap_or_default()
-                };
-                owed.push_back(job);
-                while let Some(job) = owed.pop_front() {
-                    let (outcome, outage) = if fenced {
-                        counters.abandoned.fetch_add(1, Ordering::Relaxed);
-                        // The durable intent is deliberately NOT consumed here: it
-                        // is not ours to consume any more. If it flushed before
-                        // the fence, the session's current holder replays it
-                        // (fenced flushes are refused at the store, so this
-                        // process can neither apply nor consume it now); if it
-                        // never flushed, it dies with this process's tail.
-                        //
-                        // JE2E-12: this arm hand-writes its own message and always
-                        // did, which is why the finding did not reach it — it is
-                        // lambo's own text about lambo's own lease, with nothing of
-                        // the environment in it. It carries the same string twice
-                        // because the model and the operator want the same words
-                        // here; the split exists for the arms where they do not.
-                        let fenced = format!(
-                            "this handle lost its single-writer lease before the write was applied; \
-                             this process wrote nothing for session {} — if the write's durable \
-                             intent reached the store first, the session's current holder will \
-                             apply it",
-                            ctx.session
-                        );
-                        (Err((fenced.clone(), fenced)), false)
+                    } else if has_held && !l.sealed {
+                        let attempts = l.held_attempts.get(&agent).map_or(1, |(_, n)| *n);
+                        Next::Wait(held_retry_backoff(attempts))
                     } else {
-                        // Timed, because this lane is single-consumer: the wall
-                        // clock around one `run` *is* this deployment's serial
-                        // service time, embedder warmth and all (J3-R1-2) — the
-                        // figure `write_queue_serial_items_per_sec` publishes. It
-                        // feeds no admission decision (J3 round-1 N3: this said "the
-                        // serial service time the admission bound needs"); what it
-                        // is *for* is that an operator watching a slowing embedder
-                        // sees the deployment's own writes, not a startup estimate.
-                        // A fenced refusal above is deliberately not sampled — it
-                        // never entered `run`, and calling it a fast write would
-                        // bias the rate upward, which is the dangerous direction.
-                        //
-                        // **And neither is a failure** (J3-R2-2): the same argument
-                        // reaches one step further than it was taken. A write that
-                        // fails — embedder error, HYBRID_IO_TIMEOUT, a store error —
-                        // fails FAST, and sampling it says "this deployment retires
-                        // work quickly" on the evidence of work it did not retire.
-                        // Measured on this rig: llama returns HTTP 500 in ~2 ms for
-                        // an input it refuses, which is 30x faster than a write it
-                        // accepts. The hazard is the recovery, not the outage: an
-                        // embedder that fast-fails a burst inflates the bound, then
-                        // comes back and services the inflated queue at its real
-                        // rate. Only work that went all the way through the pipeline
-                        // is evidence about the pipeline.
-                        let started = tokio::time::Instant::now();
-                        let stamp = ConsumeStamp {
-                            tag: "applied",
-                            at: (clock)(),
-                        };
-                        let raw_outcome = ctx.run(&job, Some(stamp)).await;
-                        if raw_outcome.is_ok() {
-                            observed.lock().sample(started.elapsed().as_secs_f64());
-                        } else {
-                            // J3-R2R-2 (in-session symmetry). A failed job's intent
-                            // must be settled — `run` consumes only at a commit, and
-                            // a failure has no commit to ride — but WHICH failures
-                            // consume it is the question this arm answers to match
-                            // the replay arm. A content refusal
-                            // (`LamboError::Embed`) is settled `failed` and consumed,
-                            // exactly as the replay arm does. An embedder **outage**
-                            // (`LamboError::EmbedUnavailable`) is NOT: it says
-                            // nothing was learned about this *input*, so destroying
-                            // the durable intent over it would recreate N1's loss on
-                            // the path that handles almost every write. Instead the
-                            // intent is left unconsumed and the write is held (#295,
-                            // below): re-attempted before the agent's next write in
-                            // this serve, or replayed by the next serve.
-                            if let Err(e) = &raw_outcome
-                                && !matches!(e, LamboError::EmbedUnavailable(_))
-                            {
-                                ctx.graph.write().consume_write_intent(
-                                    job.receipt.to_string(),
-                                    WriteIntentOutcome {
-                                        // JE2E-12: the intent row IS the durable
-                                        // half of the receipt store — a restart
-                                        // answers `failed` straight out of this
-                                        // `summary` — so what it holds must be
-                                        // what a receipt may say. The operator's
-                                        // copy is the completion line and the
-                                        // WARN below, both written from `detail`.
-                                        tag: "failed".into(),
-                                        summary: super::receipts::durable_summary(
-                                            &model_safe_failure(e),
-                                            job.receipt_destination.as_ref(),
-                                        ),
-                                        consumed_at: (clock)(),
-                                    },
-                                );
-                            }
-                        }
-                        let outage = matches!(&raw_outcome, Err(LamboError::EmbedUnavailable(_)));
-                        // Two strings from here on: the class for the model, the
-                        // error for the operator (JE2E-12).
-                        (
-                            raw_outcome.map_err(|e| (model_safe_failure(&e), e.to_string())),
-                            outage,
-                        )
-                    };
-                    if let (true, Err((_, detail))) = (outage, &outcome) {
-                        // #295: hold this write and every later one of the agent
-                        // this worker has taken. Their intents stay unconsumed;
-                        // their receipts answer `pending_replay`, which a later
-                        // outcome in this serve, or a close's `intent_durable`,
-                        // settles. No `.await` from here to the `break`.
-                        owed.push_front(job);
-                        let head = owed.front().map(|j| j.receipt);
-                        let held_ids: Vec<ReceiptId> = owed.iter().map(|j| j.receipt).collect();
-                        let attempts = {
-                            let mut l = lanes.lock();
-                            l.running -= 1;
-                            if let Some(n) = l.running_per_lane.get_mut(&agent) {
-                                *n = n.saturating_sub(1);
-                            }
-                            let attempts = match (l.held_attempts.get(&agent), head) {
-                                (Some((id, n)), Some(h)) if *id == h => n + 1,
-                                _ => 1,
-                            };
-                            if let Some(h) = head {
-                                l.held_attempts.insert(agent.clone(), (h, attempts));
-                            }
-                            l.held.insert(agent.clone(), std::mem::take(&mut owed));
-                            attempts
-                        };
-                        for id in &held_ids {
-                            hold_one(&receipts, id);
-                        }
-                        tracing::warn!(
-                            session = %ctx.session,
-                            agent = %agent,
-                            receipt = ?head,
-                            attempts,
-                            held = held_ids.len(),
-                            error = %detail,
-                            "write queue: the embedder did not answer this agent's oldest owed write \
-                             ({attempts} attempt(s) in this server); it and the agent's later writes \
-                             are held, answered pending_replay, and re-attempted in order before the \
-                             agent's next write, so none applies ahead of it. At close they stay \
-                             durable intents for the next serve. A write that never embeds (too large \
-                             for the embed budget, say) holds this agent's writes until a restart"
-                        );
-                        settled.notify_waiters();
-                        break;
+                        // Exit decision and liveness bookkeeping happen under
+                        // the same lock an enqueue takes, so no job can be
+                        // queued against a worker that has already decided to
+                        // stop. Dropping our own JoinHandle here detaches a
+                        // task that is about to return. A sealed lane's held
+                        // writes are the close's to set aside.
+                        l.queues.remove(&agent);
+                        l.workers.remove(&agent);
+                        l.running_per_lane.remove(&agent);
+                        l.wakes.remove(&agent);
+                        Next::Exit
                     }
-                    let last = owed.is_empty();
-                    if last {
-                        lanes.lock().held_attempts.remove(&agent);
+                };
+                let job = match next {
+                    Next::Exit => return,
+                    Next::Held(id) => {
+                        hold_one(&receipts, &id);
+                        continue;
                     }
+                    Next::Wait(delay) => {
+                        tokio::select! {
+                            _ = tokio::time::sleep(delay) => {}
+                            _ = wake.notified() => {}
+                        }
+                        parked = false;
+                        continue;
+                    }
+                    Next::Run(job) => *job,
+                };
 
-                    // No `.await` from here to the end of the iteration: an
-                    // `abort()` cannot land between a completed graph write and the
-                    // settle that reports it, so "aborted" always means "not
-                    // written".
-                    if last {
+                // The fence, checked per write, right before it would run: the
+                // lease can be lost while a lane drains or a retry runs, and
+                // every write taken after that is refused rather than written
+                // into a session another writer owns. A write already running
+                // when it is lost can still commit here; the store refuses
+                // that flush.
+                let (outcome, hold_cause) = if ctx.lease_lost.load(Ordering::Acquire) {
+                    counters.abandoned.fetch_add(1, Ordering::Relaxed);
+                    // The durable intent is deliberately NOT consumed here: it
+                    // is not ours to consume any more. If it flushed before
+                    // the fence, the session's current holder replays it
+                    // (fenced flushes are refused at the store, so this
+                    // process can neither apply nor consume it now); if it
+                    // never flushed, it dies with this process's tail. The
+                    // message is lambo's own text about its own lease, the
+                    // same for the model and the operator.
+                    let fenced = format!(
+                        "this handle lost its single-writer lease before the write was applied; \
+                         this process wrote nothing for session {} — if the write's durable \
+                         intent reached the store first, the session's current holder will \
+                         apply it",
+                        ctx.session
+                    );
+                    (Err((fenced.clone(), fenced)), None)
+                } else {
+                    // Timed, because this lane is single-consumer: the wall
+                    // clock around one `run` is this deployment's serial
+                    // service time, the figure
+                    // `write_queue_serial_items_per_sec` publishes. Neither a
+                    // fenced refusal nor a failure is sampled: both are fast
+                    // and say nothing about work the pipeline retired, and
+                    // sampling them would bias the rate upward.
+                    let started = tokio::time::Instant::now();
+                    let stamp = ConsumeStamp {
+                        tag: "applied",
+                        at: (clock)(),
+                    };
+                    let raw_outcome = ctx.run(&job, Some(stamp)).await;
+                    // Which failures hold the write rather than consume it.
+                    // An embedder outage says nothing about the input, so the
+                    // write is held (#295). A lookup timeout is the replay's
+                    // rule (#125): one is a fact about this write, settled
+                    // `failed`; a run of `REPLAY_LOOKUP_TIMEOUT_LIMIT` in a
+                    // row with nothing applied between says the store is slow
+                    // for everyone, and holds it.
+                    let hold_cause = match &raw_outcome {
+                        Ok(_) => {
+                            observed.lock().sample(started.elapsed().as_secs_f64());
+                            lanes.lock().lookup_streak = 0;
+                            None
+                        }
+                        Err(e) if e.is_lookup_timeout() => {
+                            let mut l = lanes.lock();
+                            l.lookup_streak += 1;
+                            (l.lookup_streak >= super::REPLAY_LOOKUP_TIMEOUT_LIMIT)
+                                .then_some("the store's vector lookup is slow for every write")
+                        }
+                        Err(LamboError::EmbedUnavailable(_)) => Some("the embedder did not answer"),
+                        Err(_) => None,
+                    };
+                    if let Err(e) = &raw_outcome
+                        && hold_cause.is_none()
+                    {
+                        // A failure has no commit to ride, so it is consumed
+                        // here. The row holds the model-safe form: a restart
+                        // answers `failed` straight out of its summary, and the
+                        // operator's copy is the completion line and the WARN
+                        // below.
+                        let why = if e.is_lookup_timeout() {
+                            format!(
+                                "the vector candidate lookup did not answer within {:?}, so the \
+                                 write is not retried; nothing was written",
+                                crate::graph::hybrid::VECTOR_LOOKUP_TIMEOUT
+                            )
+                        } else {
+                            model_safe_failure(e)
+                        };
+                        ctx.graph.write().consume_write_intent(
+                            job.receipt.to_string(),
+                            WriteIntentOutcome {
+                                tag: "failed".into(),
+                                summary: super::receipts::durable_summary(
+                                    &why,
+                                    job.receipt_destination.as_ref(),
+                                ),
+                                consumed_at: (clock)(),
+                            },
+                        );
+                    }
+                    // Two strings from here on: the class for the model, the
+                    // error for the operator.
+                    (
+                        raw_outcome.map_err(|e| {
+                            let why = if e.is_lookup_timeout() && hold_cause.is_none() {
+                                format!(
+                                    "the vector candidate lookup did not answer within {:?}, so \
+                                     the write is not retried; nothing was written",
+                                    crate::graph::hybrid::VECTOR_LOOKUP_TIMEOUT
+                                )
+                            } else {
+                                model_safe_failure(&e)
+                            };
+                            (why, e.to_string())
+                        }),
+                        hold_cause,
+                    )
+                };
+                if let (Some(cause), Err((_, detail))) = (hold_cause, &outcome) {
+                    // #295: hold this write as the agent's oldest owed one. Its
+                    // intent stays unconsumed and its bytes counted; its
+                    // receipt answers `pending_replay`. No `.await` from here
+                    // to the `continue`.
+                    let receipt = job.receipt;
+                    let (attempts, held) = {
                         let mut l = lanes.lock();
                         l.running -= 1;
                         if let Some(n) = l.running_per_lane.get_mut(&agent) {
                             *n = n.saturating_sub(1);
                         }
-                    }
-                    let answer = match outcome {
-                        Ok(summary) => {
-                            counters.applied.fetch_add(1, Ordering::Relaxed);
-                            apply_latency.lock().record(job.admitted.elapsed());
-                            // J4 proof obligation 5: a closed acked write's applied
-                            // lifecycle is measurable — carry the metric-2 fact set,
-                            // which is exactly what a durable-intent replay hid.
-                            if let Some(ledger) = &ctx.ledger {
-                                ledger.append(&crate::ledger::completion_line(
-                                    &job.agent.to_string(),
-                                    &job.receipt.to_string(),
-                                    "applied",
-                                    Some(serde_json::Value::Object(summary.ledger_facts())),
-                                ));
-                            }
-                            ReceiptAnswer::Applied(summary)
-                        }
-                        Err((why, detail)) => {
-                            counters.failed.fetch_add(1, Ordering::Relaxed);
-                            // JE2E-12: the ledger line is operator-facing JSONL and
-                            // gets the raw error; the receipt is model-facing and
-                            // gets the class. Same fact, two audiences, one site —
-                            // which is what keeps the detail from being lost rather
-                            // than merely hidden.
-                            if let Some(ledger) = &ctx.ledger {
-                                ledger.append(&crate::ledger::completion_line(
-                                    &job.agent.to_string(),
-                                    &job.receipt.to_string(),
-                                    "failed",
-                                    Some(json!({ "error": &detail })),
-                                ));
-                            }
-                            tracing::warn!(
-                                session = %ctx.session,
-                                agent = %job.agent,
-                                receipt = %job.receipt,
-                                error = %detail,
-                                "write queue: a background write failed; the outcome is on its receipt"
-                            );
-                            ReceiptAnswer::Failed(why)
-                        }
+                        let attempts = match l.held_attempts.get(&agent) {
+                            Some((id, n)) if *id == receipt => n + 1,
+                            _ => 1,
+                        };
+                        l.held_attempts.insert(agent.clone(), (receipt, attempts));
+                        l.held.entry(agent.clone()).or_default().push_front(job);
+                        (attempts, l.lane_held(&agent))
                     };
-                    settle_one(&receipts, &job.receipt, answer, (clock)());
+                    parked = true;
+                    hold_one(&receipts, &receipt);
+                    tracing::warn!(
+                        session = %ctx.session,
+                        agent = %agent,
+                        receipt = %receipt,
+                        attempts,
+                        held,
+                        retry_in = ?held_retry_backoff(attempts),
+                        error = %detail,
+                        "write queue: {cause} for this agent's oldest owed write ({attempts} \
+                         attempt(s) in this server); it and the agent's {held} held write(s) answer \
+                         pending_replay and are retried in the background, oldest first, so none \
+                         applies ahead of it. At close they stay durable intents for the next \
+                         serve. A write that never succeeds (too large for the embed budget, say) \
+                         holds this agent's writes until a restart"
+                    );
                     settled.notify_waiters();
+                    continue;
                 }
+
+                // No `.await` from here to the end of the iteration: an
+                // `abort()` cannot land between a completed graph write and the
+                // settle that reports it, so "aborted" always means "not
+                // written".
+                {
+                    let mut l = lanes.lock();
+                    l.running -= 1;
+                    l.bytes = l.bytes.saturating_sub(job.bytes);
+                    if let Some(n) = l.running_per_lane.get_mut(&agent) {
+                        *n = n.saturating_sub(1);
+                    }
+                    if l.held_attempts
+                        .get(&agent)
+                        .is_some_and(|(id, _)| *id == job.receipt)
+                    {
+                        l.held_attempts.remove(&agent);
+                    }
+                }
+                let answer = match outcome {
+                    Ok(summary) => {
+                        counters.applied.fetch_add(1, Ordering::Relaxed);
+                        apply_latency.lock().record(job.admitted.elapsed());
+                        // A closed acked write's applied lifecycle is
+                        // measurable: carry the metric-2 fact set.
+                        if let Some(ledger) = &ctx.ledger {
+                            ledger.append(&crate::ledger::completion_line(
+                                &job.agent.to_string(),
+                                &job.receipt.to_string(),
+                                "applied",
+                                Some(serde_json::Value::Object(summary.ledger_facts())),
+                            ));
+                        }
+                        ReceiptAnswer::Applied(summary)
+                    }
+                    Err((why, detail)) => {
+                        counters.failed.fetch_add(1, Ordering::Relaxed);
+                        // The ledger line is operator-facing and gets the raw
+                        // error; the receipt is model-facing and gets the class.
+                        if let Some(ledger) = &ctx.ledger {
+                            ledger.append(&crate::ledger::completion_line(
+                                &job.agent.to_string(),
+                                &job.receipt.to_string(),
+                                "failed",
+                                Some(json!({ "error": &detail })),
+                            ));
+                        }
+                        tracing::warn!(
+                            session = %ctx.session,
+                            agent = %job.agent,
+                            receipt = %job.receipt,
+                            error = %detail,
+                            "write queue: a background write failed; the outcome is on its receipt"
+                        );
+                        ReceiptAnswer::Failed(why)
+                    }
+                };
+                settle_one(&receipts, &job.receipt, answer, (clock)());
+                settled.notify_waiters();
             }
         })
     }

@@ -2098,28 +2098,53 @@ async fn derive_and_wait(mem: &Memory, agent: &AgentId, content: &str) -> crate:
     submitted.receipt
 }
 
+/// Derive one `parent_of` pair as `agent` and wait until the worker has
+/// taken the write. Two pairs in opposite directions close a cycle, so of the
+/// two writes whichever applies second is refused: the answers show the
+/// order they applied in.
+async fn pair_and_wait(
+    mem: &Memory,
+    agent: &AgentId,
+    pair: &'static [(&'static str, &'static str)],
+) -> crate::writeq::ReceiptId {
+    let submitted = mem
+        .derive_async_as(agent, &[], &ParentOf::from_pairs(pair), None)
+        .await
+        .expect("ack");
+    assert!(!submitted.dropped());
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while mem.pipeline().lookup(agent, submitted.receipt).tag() == "pending" {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the worker never took the write"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    submitted.receipt
+}
+
 /// **#295 (in session)**: after an embedder outage leaves one of an agent's
 /// writes owed, the agent's later write in the same server must not apply
 /// ahead of it.
 ///
-/// Before the fix the first write answered `failed` with its intent kept,
-/// the second applied, and the next serve applied the first after it. Now
-/// the second is held behind the first: both answer `pending_replay`, a
-/// clean close keeps both as durable intents, and the next serve applies
-/// them in order. Another agent's write is not held.
+/// A's two writes are opposite `parent_of` pairs, so whichever applies
+/// second is refused as a cycle. Before the fix the first answered `failed`
+/// with its intent kept and the second applied; the next serve then refused
+/// the first. Now the second is held behind the first: both answer
+/// `pending_replay`, a clean close keeps both as durable intents, and the
+/// next serve applies the first and refuses the second.
 ///
-/// Mirrors the Lean theorems `Drain.workH_split` and
-/// `Drain.hold_then_serve_order`; the code before the fix is
+/// Mirrors the Lean theorems `Drain.stepW_ord` and
+/// `Drain.sessionW_then_serve_order`; the code before the fix is
 /// `Drain.outage_then_replay_reorders`.
 #[tokio::test]
 async fn an_outage_in_session_holds_the_agents_later_writes_behind_the_owed_one() {
     let inner = Arc::new(MemoryStore::new());
     let a = AgentId::new("agent-a");
-    let b = AgentId::new("agent-b");
     let down = Arc::new(std::sync::atomic::AtomicBool::new(true));
     let mem = switchable_session(&inner, "in-session-hold", &down).await;
-    let a1 = derive_and_wait(&mem, &a, "first fact of a").await;
-    let a2 = derive_and_wait(&mem, &a, "second fact of a").await;
+    let a1 = pair_and_wait(&mem, &a, &[("hold alpha", "hold beta")]).await;
+    let a2 = pair_and_wait(&mem, &a, &[("hold beta", "hold alpha")]).await;
     assert_eq!(
         [
             mem.pipeline().lookup(&a, a1).tag(),
@@ -2128,6 +2153,42 @@ async fn an_outage_in_session_holds_the_agents_later_writes_behind_the_owed_one(
         ["pending_replay", "pending_replay"],
         "a's second write must wait behind its first, not apply ahead of it"
     );
+    mem.close().await.expect("clean close");
+    assert_eq!(mem.pipeline().lookup(&a, a1).tag(), "intent_durable");
+    assert_eq!(mem.pipeline().lookup(&a, a2).tag(), "intent_durable");
+
+    down.store(false, Ordering::SeqCst);
+    let mem2 = switchable_session(&inner, "in-session-hold", &down).await;
+    wait_for_owed(&mem2).await;
+    assert_eq!(
+        [
+            mem2.pipeline().lookup(&a, a1).tag(),
+            mem2.pipeline().lookup(&a, a2).tag()
+        ],
+        ["applied_after_restart", "failed"],
+        "the first applied first; the second, closing the cycle, was refused"
+    );
+    mem2.close().await.expect("clean close 2");
+}
+
+/// **#295 (in session)**: once the embedder is back, the agent's next write
+/// first applies the held one, then itself, in this server; another agent's
+/// write is not held.
+///
+/// As above, the two writes are opposite pairs: the held first applies and
+/// the second is refused. Before the fix the first answered `failed` and the
+/// second applied ahead of it.
+///
+/// Mirrors `Drain.retry_settles_head` and `Drain.stepW_ord`.
+#[tokio::test]
+async fn a_held_write_applies_before_the_agents_next_write_once_the_embedder_is_back() {
+    let inner = Arc::new(MemoryStore::new());
+    let a = AgentId::new("agent-a");
+    let b = AgentId::new("agent-b");
+    let down = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let mem = switchable_session(&inner, "in-session-recover", &down).await;
+    let a1 = pair_and_wait(&mem, &a, &[("recover alpha", "recover beta")]).await;
+    assert_eq!(mem.pipeline().lookup(&a, a1).tag(), "pending_replay");
     down.store(false, Ordering::SeqCst);
     let b1 = derive_and_wait(&mem, &b, "only fact of b").await;
     assert_eq!(
@@ -2135,45 +2196,68 @@ async fn an_outage_in_session_holds_the_agents_later_writes_behind_the_owed_one(
         "applied",
         "b is not held"
     );
-    mem.close().await.expect("clean close");
-    assert_eq!(mem.pipeline().lookup(&a, a1).tag(), "intent_durable");
-    assert_eq!(mem.pipeline().lookup(&a, a2).tag(), "intent_durable");
-
-    let mem2 = switchable_session(&inner, "in-session-hold", &down).await;
-    wait_for_owed(&mem2).await;
+    let a2 = pair_and_wait(&mem, &a, &[("recover beta", "recover alpha")]).await;
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while mem.pipeline().lookup(&a, a2).tag() == "pending_replay" {
+        assert!(std::time::Instant::now() < deadline, "a2 never settled");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
     assert_eq!(
-        mem2.pipeline().lookup(&a, a1).tag(),
-        "applied_after_restart"
+        [
+            mem.pipeline().lookup(&a, a1).tag(),
+            mem.pipeline().lookup(&a, a2).tag()
+        ],
+        ["applied", "failed"],
+        "the held write applied first; the later one, closing the cycle, was refused"
     );
-    assert_eq!(
-        mem2.pipeline().lookup(&a, a2).tag(),
-        "applied_after_restart"
-    );
-    mem2.close().await.expect("clean close 2");
-}
-
-/// **#295 (in session)**: once the embedder is back, the agent's next write
-/// first applies the held one, then itself, in this server.
-///
-/// Mirrors `Drain.arriveH_clears` and `Drain.workH_split`.
-#[tokio::test]
-async fn a_held_write_applies_before_the_agents_next_write_once_the_embedder_is_back() {
-    let inner = Arc::new(MemoryStore::new());
-    let a = AgentId::new("agent-a");
-    let down = Arc::new(std::sync::atomic::AtomicBool::new(true));
-    let mem = switchable_session(&inner, "in-session-recover", &down).await;
-    let a1 = derive_and_wait(&mem, &a, "first fact of a").await;
-    assert_eq!(mem.pipeline().lookup(&a, a1).tag(), "pending_replay");
-    down.store(false, Ordering::SeqCst);
-    let a2 = derive_and_wait(&mem, &a, "second fact of a").await;
-    assert_eq!(mem.pipeline().lookup(&a, a1).tag(), "applied");
-    assert_eq!(mem.pipeline().lookup(&a, a2).tag(), "applied");
     mem.close().await.expect("clean close");
     let snap = inner
         .load_session(&SessionId::new("in-session-recover"))
         .await
         .expect("reload");
     assert!(snap.write_intents.iter().all(|i| i.outcome.is_some()));
+}
+
+/// **#295 review (S4)**: a lookup timeout in session follows the replay's
+/// rule: one is a fact about that write and settles `failed`; it does not
+/// hold the agent's lane as an embedder outage does.
+#[tokio::test(start_paused = true)]
+async fn a_lookup_timeout_in_session_settles_failed_and_holds_nothing() {
+    let inner = Arc::new(MemoryStore::new());
+    let a = AgentId::new("agent-a");
+    let mem = Memory::builder()
+        .session("in-session-slow-lookup")
+        .agent("agent-a")
+        .flush_interval(Duration::from_secs(3_600))
+        .store(Arc::new(SlowLookup(VectorSearchable(inner.clone()))) as Arc<dyn GraphStore>)
+        .embedder(Arc::new(FixtureEmbedder::new()) as Arc<dyn Embedder>)
+        .embedding_contract(contract("fixture", 1024))
+        .match_strategy(MatchStrategy::Hybrid)
+        .build()
+        .await
+        .expect("build");
+    let submitted = mem
+        .derive_async_as(
+            &a,
+            &[("slow lookup fact", ConceptType::Entity)],
+            &ParentOf::none(),
+            None,
+        )
+        .await
+        .expect("ack");
+    for _ in 0..10_000 {
+        if mem.pipeline().lookup(&a, submitted.receipt).tag() != "pending" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    match mem.pipeline().lookup(&a, submitted.receipt) {
+        crate::writeq::ReceiptAnswer::Failed(why) => {
+            assert!(why.contains("candidate lookup"), "{why}")
+        }
+        other => panic!("a lookup timeout settles failed, not held: {other:?}"),
+    }
+    mem.close().await.expect("clean close");
 }
 
 /// Wait (bounded) until a replay has nothing owed.
@@ -2327,4 +2411,116 @@ async fn an_intent_in_another_receipt_format_is_quarantined_not_settled() {
         .find(|i| i.receipt.starts_with("lwr2."))
         .expect("kept");
     assert!(quarantined.outcome.is_none(), "left owed, not settled");
+}
+
+/// Answers the probe's texts; real content waits for a permit on `gate`.
+#[cfg(feature = "fixtures")]
+struct Gated {
+    inner: FixtureEmbedder,
+    gate: Arc<tokio::sync::Semaphore>,
+    entered: Arc<AtomicUsize>,
+}
+
+#[cfg(feature = "fixtures")]
+#[async_trait]
+impl Embedder for Gated {
+    fn dimensions(&self) -> usize {
+        self.inner.dimensions()
+    }
+    async fn embed(&self, text: &str) -> Result<Vec<f32>, crate::embed::EmbedError> {
+        if !text.contains(crate::writeq::PROBE_TEXT) {
+            self.entered.fetch_add(1, Ordering::SeqCst);
+            self.gate.acquire().await.expect("gate").forget();
+        }
+        self.inner.embed(text).await
+    }
+}
+
+/// **#295 review (S5)**: a replay that halts because the lease is lost
+/// leaves the intent it stopped at, and every later one, owed; the block
+/// reason says `Other` (the reason a lost lease has), not `null`.
+///
+/// Mirrors `Drain.serveR_reported`; the code before the fix is the hidden
+/// halt in `Drain.serveQ_block`.
+#[cfg(feature = "fixtures")]
+#[tokio::test]
+async fn a_replay_halted_by_a_lost_lease_names_a_block_reason() {
+    let inner = Arc::new(MemoryStore::new());
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let entered = Arc::new(AtomicUsize::new(0));
+    let epoch = 0x0044_5566_7788_99aa;
+    let mem = attach_planted(
+        &inner,
+        "intent-halt",
+        MatchStrategy::Hybrid,
+        Arc::new(Gated {
+            inner: FixtureEmbedder::new(),
+            gate: gate.clone(),
+            entered: entered.clone(),
+        }),
+        |sid, ix| two_of_a_one_of_b(sid, ix, epoch, ("halt fact", ConceptType::Entity)),
+    )
+    .await;
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while entered.load(Ordering::SeqCst) == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the replay never embedded"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    mem.simulate_lease_loss();
+    gate.add_permits(64);
+    wait_for(&mem, |mem| {
+        mem.pipeline().counters().replay_blocked() != crate::writeq::ReplayBlockReason::None
+    })
+    .await;
+    assert_eq!(
+        mem.pipeline().counters().replay_blocked(),
+        crate::writeq::ReplayBlockReason::Other
+    );
+    assert!(mem.pipeline().counters().replay_owed() > 0);
+}
+
+/// **#295 review (S6)**: only an id in another version of the receipt
+/// format (`lwr<digits>.`) is quarantined; any other unparseable id is
+/// malformed and settled `failed`, so it holds nothing back.
+#[cfg(feature = "fixtures")]
+#[tokio::test]
+async fn an_unparseable_id_outside_the_format_family_is_settled_failed() {
+    let inner = Arc::new(MemoryStore::new());
+    let a = AgentId::new("agent-a");
+    let epoch = 0x0055_6677_8899_aabb;
+    let mem = replay_planted(
+        &inner,
+        "intent-garbled",
+        MatchStrategy::Canonical,
+        |sid, ix| {
+            let mut rows = two_of_a_one_of_b(sid, ix, epoch, ("garbled fact", ConceptType::Entity));
+            rows[0].receipt = "lwrx.not-a-version".into();
+            rows
+        },
+    )
+    .await;
+    assert_eq!(mem.pipeline().counters().replay_owed(), 0);
+    assert_eq!(
+        mem.pipeline()
+            .lookup(&a, owed_receipt(epoch, 1_001, 2))
+            .tag(),
+        "applied_after_restart"
+    );
+    mem.close().await.expect("clean close");
+    let snap = inner
+        .load_session(&SessionId::new("intent-garbled"))
+        .await
+        .expect("reload");
+    let garbled = snap
+        .write_intents
+        .iter()
+        .find(|i| i.receipt == "lwrx.not-a-version")
+        .expect("kept");
+    assert_eq!(
+        garbled.outcome.as_ref().map(|o| o.tag.as_str()),
+        Some("failed")
+    );
 }

@@ -226,6 +226,12 @@ impl WritePipeline {
         lanes.running_per_lane.clear();
         lanes.queued = 0;
         lanes.bytes = 0;
+        // #295: the held writes' receipts are unsettled, so they are among
+        // the set-aside ones above; nothing in this process will run them.
+        lanes.held.clear();
+        lanes.held_attempts.clear();
+        lanes.wakes.clear();
+        lanes.lookup_streak = 0;
         for id in pending {
             if !lanes.close_deferred.contains(&id) {
                 lanes.close_deferred.push(id);

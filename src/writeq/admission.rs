@@ -138,6 +138,11 @@ pub enum DropReason {
     QueueBytes,
     /// The session is closing or has lost its lease.
     Closed,
+    /// This agent's lane is full and some of it is writes held behind one
+    /// the embedder did not answer (#295): they are retried in the
+    /// background, so the agent is told to resubmit later rather than to
+    /// wait on their receipts.
+    HeldLane,
 }
 
 impl DropReason {
@@ -155,13 +160,21 @@ impl DropReason {
             ),
             DropReason::QueueFull => format!(
                 "the background write queue is full ({bound} outstanding — the whole-queue \
-                 memory cap; wait for receipts to settle and resubmit)"
+                 memory cap; wait for receipts to settle and resubmit. Writes held behind an \
+                 embedder outage count too, and are retried in the background)"
             ),
             DropReason::QueueBytes => format!(
-                "the background write queue is at its {} MiB payload cap",
+                "the background write queue is at its {} MiB payload cap (writes held behind an \
+                 embedder outage count too, and are retried in the background)",
                 WRITE_QUEUE_MAX_BYTES / (1024 * 1024)
             ),
             DropReason::Closed => "the session is closing".into(),
+            DropReason::HeldLane => format!(
+                "this agent's background write lane is full ({bound} outstanding, including \
+                 writes held behind one the embedder did not answer); held writes are retried \
+                 in the background and apply in order once it answers, so resubmit this one \
+                 later rather than waiting on their receipts"
+            ),
         }
     }
 }
@@ -603,21 +616,40 @@ pub(super) struct Lanes {
     pub(super) close_deferred: Vec<ReceiptId>,
     /// #295: per agent, the write its lane worker met an embedder outage at
     /// and every later write of that agent the worker has taken since, oldest
-    /// first. Not run until the worker takes that agent's next write, which
-    /// re-attempts them in order first, so no write of the agent applies
-    /// ahead of an earlier one still owed. Their intents stay unconsumed and
-    /// their receipts answer `pending_replay`; a close sets them aside like
-    /// any unsettled receipt (`intent_durable`), and the next serve replays
-    /// them in order. Counted against the lane and queue bounds at admission,
-    /// not by the quiesce (nothing in this serve drains them by itself).
+    /// first. The agent's worker stays alive while it has any and retries the
+    /// oldest on a backoff timer (`execution::held_retry_backoff`), sooner
+    /// when a new write of the agent arrives or one is refused; no new write
+    /// is needed. Nothing of the agent runs ahead of them. Their intents stay
+    /// unconsumed and their receipts answer `pending_replay`; a close sets
+    /// them aside like any unsettled receipt (`intent_durable`), and the next
+    /// serve replays them in order. Counted at admission against the lane and
+    /// queue bounds, and their bytes stay in [`Lanes::bytes`], until each one
+    /// settles; not counted by the quiesce.
     pub(super) held: HashMap<AgentId, VecDeque<Job>>,
     /// For each agent with held writes: the oldest one and how many times in
-    /// a row the worker has met an outage at it, for the warning that makes a
-    /// write which never embeds visible.
+    /// a row the worker has met an outage at it, for its backoff and for the
+    /// warning that makes a write which never embeds visible.
     pub(super) held_attempts: HashMap<AgentId, (ReceiptId, u32)>,
+    /// Each live worker's wake-up: admission notifies it when a write of its
+    /// agent is admitted or refused, so an agent with held writes retries
+    /// the oldest at once rather than at its next backoff.
+    pub(super) wakes: HashMap<AgentId, std::sync::Arc<tokio::sync::Notify>>,
+    /// Lookup timeouts in a row, across lanes, with nothing applied between
+    /// (#295, the replay's rule): below `REPLAY_LOOKUP_TIMEOUT_LIMIT` one
+    /// settles its write `failed`; at it the store is slow for everyone and
+    /// the write is held like an embedder outage.
+    pub(super) lookup_streak: usize,
 }
 
 impl Lanes {
+    /// The wake-up a new worker for `agent` waits on (see [`Lanes::wakes`]).
+    pub(super) fn wake_for(&mut self, agent: &AgentId) -> std::sync::Arc<tokio::sync::Notify> {
+        self.wakes
+            .entry(agent.clone())
+            .or_insert_with(|| std::sync::Arc::new(tokio::sync::Notify::new()))
+            .clone()
+    }
+
     /// Held writes (see [`Lanes::held`]) across every agent.
     pub(super) fn held_count(&self) -> usize {
         self.held.values().map(VecDeque::len).sum()
@@ -722,14 +754,20 @@ impl WritePipeline {
         let refusal = {
             let mut graph = self.ctx.graph.write();
             let mut lanes = self.lanes.lock();
-            if lanes.sealed {
+            let refusal = if lanes.sealed {
                 Some((DropReason::Closed, WRITE_QUEUE_LANE_MAX))
             } else if lanes.lane_outstanding(&agent) + lanes.lane_held(&agent)
                 >= WRITE_QUEUE_LANE_MAX
             {
                 // #295: an agent's held writes count against its lane, so an
                 // outage that holds them cannot grow memory without bound.
-                Some((DropReason::LaneFull, WRITE_QUEUE_LANE_MAX))
+                // They are retried in the background, so the refusal says so
+                // rather than to wait on their receipts.
+                if lanes.lane_held(&agent) > 0 {
+                    Some((DropReason::HeldLane, WRITE_QUEUE_LANE_MAX))
+                } else {
+                    Some((DropReason::LaneFull, WRITE_QUEUE_LANE_MAX))
+                }
             } else if lanes.outstanding() + lanes.held_count() >= WRITE_QUEUE_MAX {
                 Some((DropReason::QueueFull, WRITE_QUEUE_MAX))
             } else if lanes.bytes.saturating_add(bytes) > WRITE_QUEUE_MAX_BYTES {
@@ -810,11 +848,32 @@ impl WritePipeline {
                         admitted: tokio::time::Instant::now(),
                     });
                 if !lanes.workers.contains_key(&agent) {
-                    let handle = self.spawn_worker(agent.clone());
+                    let wake = lanes.wake_for(&agent);
+                    let handle = self.spawn_worker(agent.clone(), wake);
                     lanes.workers.insert(agent.clone(), handle);
+                } else if lanes.lane_held(&agent) > 0
+                    && let Some(wake) = lanes.wakes.get(&agent)
+                {
+                    // A new write of an agent with held writes: retry the
+                    // oldest now rather than at its next backoff.
+                    wake.notify_one();
                 }
                 None
+            };
+            // #295: a refused write of an agent with held writes wakes its
+            // retry, so a full lane can never keep them from being retried.
+            // Its worker is alive while it has any; spawn one if not.
+            if refusal.is_some() && !lanes.sealed && lanes.lane_held(&agent) > 0 {
+                if let Some(wake) = lanes.wakes.get(&agent) {
+                    wake.notify_one();
+                }
+                if !lanes.workers.contains_key(&agent) {
+                    let wake = lanes.wake_for(&agent);
+                    let handle = self.spawn_worker(agent.clone(), wake);
+                    lanes.workers.insert(agent.clone(), handle);
+                }
             }
+            refusal
         };
 
         let mut receipts = self.receipts.lock();
@@ -837,7 +896,7 @@ impl WritePipeline {
                     DropReason::Closed => {
                         self.counters.dropped_closed.fetch_add(1, Ordering::Relaxed);
                     }
-                    DropReason::LaneFull | DropReason::QueueFull => {
+                    DropReason::LaneFull | DropReason::QueueFull | DropReason::HeldLane => {
                         self.counters
                             .dropped_queue_full
                             .fetch_add(1, Ordering::Relaxed);

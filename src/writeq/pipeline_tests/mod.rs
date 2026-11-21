@@ -19,6 +19,7 @@ use std::time::Duration;
 mod admission;
 mod calibration;
 mod drain;
+mod hold;
 mod receipts;
 
 /// An embedder that parks until it is released, so a burst can be held in

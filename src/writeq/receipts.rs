@@ -306,12 +306,19 @@ impl ReceiptId {
     /// than silently mis-parsed as this one.
     pub(super) const PREFIX: &'static str = "lwr1";
 
-    /// Whether `s` claims this build's receipt format (`lwr1.`), parseable or
-    /// not. An id in another format (a newer build's, say) is not this build's
-    /// to settle: the replay quarantines it (#295).
-    pub(super) fn is_this_format(s: &str) -> bool {
-        s.strip_prefix(Self::PREFIX)
-            .is_some_and(|rest| rest.starts_with('.'))
+    /// Whether `s` is a receipt id of another version of this format,
+    /// `lwr<digits>.` with a version other than 1, as a newer build would
+    /// write. Such an id is not this build's to settle: the replay
+    /// quarantines it (#295). Any other id that does not parse is malformed
+    /// and settled `failed`.
+    pub(super) fn is_other_version(s: &str) -> bool {
+        let Some(rest) = s.strip_prefix("lwr") else {
+            return false;
+        };
+        let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        !digits.is_empty()
+            && rest[digits.len()..].starts_with('.')
+            && digits.parse::<u64>() != Ok(1)
     }
 
     pub(super) fn new(epoch: u64, issued: DateTime<Utc>, seq: u64) -> Self {
@@ -691,12 +698,14 @@ impl ReceiptAnswer {
     pub fn describe(&self) -> String {
         match self {
             ReceiptAnswer::Pending => "pending — admitted, not yet applied; ask again".into(),
-            ReceiptAnswer::PendingReplay => "pending — admitted by an EARLIER serve of this \
-                                             session and recorded as a durable intent; still \
-                                             owed a replay, behind a backlog replayed one write \
-                                             at a time. It may settle in this process or in a \
-                                             later one; ask again, and recall rather than \
-                                             re-deriving."
+            ReceiptAnswer::PendingReplay => "pending — recorded as a durable intent and still \
+                                             owed: either admitted by an EARLIER serve of this \
+                                             session and waiting in this serve's replay, one \
+                                             write at a time, or held in this serve behind a \
+                                             write of the same agent the embedder did not \
+                                             answer, and retried in the background. It may \
+                                             settle in this process or in a later one; ask \
+                                             again, and recall rather than re-deriving."
                 .into(),
             ReceiptAnswer::Applied(s) => {
                 let mut detail = format!("applied — {}", s.summary);
