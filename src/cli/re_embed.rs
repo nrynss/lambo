@@ -250,8 +250,8 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
         // already has, and never stamps one (`Graph::embed_missing`). Refuse
         // before embedding anything, and name the full re-embed.
         Err(CliError::Runtime(format!(
-            "session '{}' has no embedding contract (it was written before embedding \
-             contracts, and its stored vectors are ignored at load). --missing-only fills \
+            "session '{}' has no recorded contract (for example, one written before \
+             embedding contracts), and its stored vectors are ignored at load. --missing-only fills \
              vectors into the contract a session already has. Refused; nothing was written. \
              Run `lambo re-embed` without --missing-only to embed every text concept and \
              record the live contract.",
@@ -645,6 +645,164 @@ async fn rewrite_all(
     ))
 }
 
+/// Test seeding shared by the store tests below: no store or embedder
+/// feature, so the Postgres live test (`--no-default-features --features
+/// store-postgres`) uses it too.
+#[cfg(test)]
+mod seed {
+    use std::time::Duration;
+
+    use crate::store::{
+        lease::{LeaseHolder, LeaseOutcome},
+        GraphStore,
+    };
+    use crate::types::{
+        AgentId, CanonizationStatus, Concept, ConceptType, EmbeddingContract, Interaction,
+        Mutation, MutationBatch, NodeId, SessionId,
+    };
+
+    /// Plant the pre-K2 damage shape directly in the durable store under
+    /// `contract`: one interaction, two concepts, "user schema" WITH a
+    /// `dim`-wide vector and "auth middleware" with a NULL embedding (the
+    /// row an interrupted or degraded writer leaves behind). With no
+    /// contract it is a pre-contract (legacy) session (#322): the vectored
+    /// concept's row keeps a vector no contract describes. `source` and
+    /// `unvectored` are the two concepts' `embedding_source` (#22).
+    pub(super) async fn seed_session<S: GraphStore + ?Sized>(
+        store: &S,
+        session: &str,
+        dim: usize,
+        contract: Option<EmbeddingContract>,
+        source: Option<crate::types::EmbeddingSource>,
+        unvectored: Option<crate::types::EmbeddingSource>,
+    ) {
+        let sid = SessionId::from(session);
+        let seeder = LeaseHolder::for_this_process(&AgentId::from("seeder"));
+        let LeaseOutcome::Acquired(info) = store
+            .acquire_lease(&sid, &seeder, Duration::from_secs(30))
+            .await
+            .unwrap()
+        else {
+            panic!("test setup must acquire the seed lease");
+        };
+        let ts = chrono::Utc::now();
+        let i1 = NodeId::new();
+        let concept =
+            |id: NodeId,
+             content: &str,
+             emb: Option<Vec<f32>>,
+             embedding_source: Option<crate::types::EmbeddingSource>| {
+                Mutation::UpsertNode {
+                    node: crate::types::Node::Concept(Concept {
+                        id,
+                        session_id: sid.clone(),
+                        content: content.into(),
+                        canonical_key: content.to_lowercase(),
+                        concept_type: ConceptType::Entity,
+                        origin_interaction: i1,
+                        origin_agent: AgentId::from("seeder"),
+                        created_at: ts,
+                        access_count: 0,
+                        last_accessed: None,
+                        gc_survived: 0,
+                        canonization_status: CanonizationStatus::None,
+                        blast_radius: None,
+                        last_demotion_time: None,
+                        embedding: emb,
+                        human_confirmed: 0,
+                        embedding_source,
+                        chunk_group_id: None,
+                    }),
+                }
+            };
+        let c1 = NodeId::new();
+        let c2 = NodeId::new();
+        let derives_edge = |target: NodeId| Mutation::UpsertEdge {
+            edge: crate::types::Edge {
+                event_time: None,
+                id: NodeId::new(),
+                session_id: sid.clone(),
+                source: i1,
+                target,
+                edge_type: crate::types::EdgeType::Derives,
+                weight: 1.0,
+                reinforcements: 1,
+                created_at: ts,
+                last_reinforced: ts,
+            },
+        };
+        // Contract FIRST: the store treats a contract stamped over already
+        // stored vectors as a legacy upgrade and strips them (untrusted
+        // provenance) — which would manufacture damage instead of modeling it.
+        let set_contract = contract.map(|embedding| Mutation::SetEmbedding {
+            session_id: sid.clone(),
+            embedding: Some(embedding),
+        });
+        let interaction = Mutation::UpsertNode {
+            node: crate::types::Node::Interaction(Interaction {
+                event_time: None,
+                id: i1,
+                session_id: sid.clone(),
+                agent_id: AgentId::from("seeder"),
+                prompt_text: Some("seed".into()),
+                previous_id: None,
+                created_at: ts,
+            }),
+        };
+        let batch = MutationBatch {
+            mutation_epoch: 0,
+            gc_mark: Default::default(),
+            mutations: [interaction]
+                .into_iter()
+                .chain(set_contract)
+                .chain([
+                    concept(c1, "user schema", Some(vec![0.25_f32; dim]), source),
+                    derives_edge(c1),
+                    concept(c2, "auth middleware", None, unvectored),
+                    derives_edge(c2),
+                ])
+                .collect(),
+        };
+        store.flush(&batch, Some(info.token)).await.unwrap();
+        store.release_lease(&sid, &seeder).await.unwrap();
+    }
+
+    /// The raw durable session, read straight from the store (no load
+    /// quarantine): its contract, and each concept's content and vector,
+    /// sorted by content.
+    pub(super) async fn raw_session<S: GraphStore + ?Sized>(
+        store: &S,
+        session: &str,
+    ) -> (Option<EmbeddingContract>, Vec<(String, Option<Vec<f32>>)>) {
+        let snap = store.load_session(&SessionId::from(session)).await.unwrap();
+        let mut concepts: Vec<_> = snap
+            .concepts
+            .iter()
+            .map(|c| (c.content.clone(), c.embedding.clone()))
+            .collect();
+        concepts.sort_by(|a, b| a.0.cmp(&b.0));
+        (snap.embedding, concepts)
+    }
+
+    /// Whether a new writer can take `session`'s lease now. The probe
+    /// releases what it took, so a test can go on writing.
+    pub(super) async fn lease_is_free<S: GraphStore + ?Sized>(store: &S, session: &str) -> bool {
+        let probe = LeaseHolder::for_this_process(&AgentId::from("probe"));
+        let sid = SessionId::from(session);
+        let free = matches!(
+            store
+                .acquire_lease(&sid, &probe, Duration::from_secs(5))
+                .await
+                .unwrap(),
+            LeaseOutcome::Acquired(_)
+        );
+        if free {
+            store.release_lease(&sid, &probe).await.unwrap();
+        }
+        free
+    }
+}
+
 #[cfg(all(test, feature = "store-memory", feature = "embed-fixture"))]
 mod tests {
     use super::*;
@@ -652,10 +810,7 @@ mod tests {
         lease::{LeaseHolder, LeaseOutcome},
         GraphStore,
     };
-    use crate::types::{
-        AgentId, CanonizationStatus, Concept, ConceptType, GraphSnapshot, Interaction, Mutation,
-        MutationBatch, NodeId, SessionId, StoreError,
-    };
+    use crate::types::{AgentId, GraphSnapshot, MutationBatch, NodeId, SessionId, StoreError};
     use crate::{embed::FixtureEmbedder, MemoryStore};
     use crate::{
         embed::{EmbedderConfig, EmbedderKind},
@@ -859,95 +1014,7 @@ mod tests {
         source: Option<crate::types::EmbeddingSource>,
         unvectored: Option<crate::types::EmbeddingSource>,
     ) {
-        let sid = SessionId::from(SESSION);
-        let seeder = LeaseHolder::for_this_process(&AgentId::from("seeder"));
-        let LeaseOutcome::Acquired(info) = store
-            .acquire_lease(&sid, &seeder, Duration::from_secs(30))
-            .await
-            .unwrap()
-        else {
-            panic!("test setup must acquire the seed lease");
-        };
-        let ts = chrono::Utc::now();
-        let i1 = NodeId::new();
-        let concept =
-            |id: NodeId,
-             content: &str,
-             emb: Option<Vec<f32>>,
-             embedding_source: Option<crate::types::EmbeddingSource>| {
-                Mutation::UpsertNode {
-                    node: crate::types::Node::Concept(Concept {
-                        id,
-                        session_id: sid.clone(),
-                        content: content.into(),
-                        canonical_key: content.to_lowercase(),
-                        concept_type: ConceptType::Entity,
-                        origin_interaction: i1,
-                        origin_agent: AgentId::from("seeder"),
-                        created_at: ts,
-                        access_count: 0,
-                        last_accessed: None,
-                        gc_survived: 0,
-                        canonization_status: CanonizationStatus::None,
-                        blast_radius: None,
-                        last_demotion_time: None,
-                        embedding: emb,
-                        human_confirmed: 0,
-                        embedding_source,
-                        chunk_group_id: None,
-                    }),
-                }
-            };
-        let c1 = NodeId::new();
-        let c2 = NodeId::new();
-        let derives_edge = |target: NodeId| Mutation::UpsertEdge {
-            edge: crate::types::Edge {
-                event_time: None,
-                id: NodeId::new(),
-                session_id: sid.clone(),
-                source: i1,
-                target,
-                edge_type: crate::types::EdgeType::Derives,
-                weight: 1.0,
-                reinforcements: 1,
-                created_at: ts,
-                last_reinforced: ts,
-            },
-        };
-        // Contract FIRST: the store treats a contract stamped over already
-        // stored vectors as a legacy upgrade and strips them (untrusted
-        // provenance) — which would manufacture damage instead of modeling it.
-        let set_contract = contract.map(|embedding| Mutation::SetEmbedding {
-            session_id: sid.clone(),
-            embedding: Some(embedding),
-        });
-        let interaction = Mutation::UpsertNode {
-            node: crate::types::Node::Interaction(Interaction {
-                event_time: None,
-                id: i1,
-                session_id: sid.clone(),
-                agent_id: AgentId::from("seeder"),
-                prompt_text: Some("seed".into()),
-                previous_id: None,
-                created_at: ts,
-            }),
-        };
-        let batch = MutationBatch {
-            mutation_epoch: 0,
-            gc_mark: Default::default(),
-            mutations: [interaction]
-                .into_iter()
-                .chain(set_contract)
-                .chain([
-                    concept(c1, "user schema", Some(vec![0.25_f32; 1024]), source),
-                    derives_edge(c1),
-                    concept(c2, "auth middleware", None, unvectored),
-                    derives_edge(c2),
-                ])
-                .collect(),
-        };
-        store.flush(&batch, Some(info.token)).await.unwrap();
-        store.release_lease(&sid, &seeder).await.unwrap();
+        super::seed::seed_session(store, SESSION, 1024, contract, source, unvectored).await;
     }
 
     /// Durable reader-side assertions: stamped contract kind plus per-concept
@@ -996,19 +1063,11 @@ mod tests {
         assert_eq!(widths, vec![Some(1024), Some(1024)]);
     }
 
-    /// The raw durable session, read straight from the store (no load
-    /// quarantine): its contract, and each concept's content and vector.
+    /// [`super::seed::raw_session`] of this module's session.
     async fn raw_session<S: GraphStore>(
         store: &S,
     ) -> (Option<EmbeddingContract>, Vec<(String, Option<Vec<f32>>)>) {
-        let snap = store.load_session(&SessionId::from(SESSION)).await.unwrap();
-        let mut concepts: Vec<_> = snap
-            .concepts
-            .iter()
-            .map(|c| (c.content.clone(), c.embedding.clone()))
-            .collect();
-        concepts.sort_by(|a, b| a.0.cmp(&b.0));
-        (snap.embedding, concepts)
+        super::seed::raw_session(store, SESSION).await
     }
 
     /// #322: `lambo re-embed` on a pre-contract session (no durable
@@ -1109,7 +1168,7 @@ mod tests {
         .expect_err("a backfill never stamps a contract");
         assert!(matches!(err, CliError::Runtime(_)), "{err}");
         let msg = err.to_string();
-        assert!(msg.contains("no embedding contract"), "{msg}");
+        assert!(msg.contains("no recorded contract"), "{msg}");
         assert!(msg.contains("without --missing-only"), "{msg}");
         assert!(msg.contains("nothing was written"), "{msg}");
         assert_eq!(raw_session(store.as_ref()).await, before, "no writes");
@@ -1166,19 +1225,7 @@ mod tests {
 
     /// [`lease_is_free`] on any store.
     async fn lease_is_free_on<S: GraphStore>(store: &S) -> bool {
-        let probe = LeaseHolder::for_this_process(&AgentId::from("probe"));
-        let sid = SessionId::from(SESSION);
-        let free = matches!(
-            store
-                .acquire_lease(&sid, &probe, Duration::from_secs(5))
-                .await
-                .unwrap(),
-            LeaseOutcome::Acquired(_)
-        );
-        if free {
-            store.release_lease(&sid, &probe).await.unwrap();
-        }
-        free
+        super::seed::lease_is_free(store, SESSION).await
     }
 
     /// #22 design Q19: a full migration must not leave an image vector in
@@ -1898,5 +1945,136 @@ mod tests {
             LeaseOutcome::Acquired(_) => {}
             other => panic!("lease must be released after a failed migration, got {other:?}"),
         }
+    }
+}
+
+/// #322 on the live Postgres family: the store's first-stamp quarantine there
+/// is `QUARANTINE_LEGACY_EMBEDDINGS_SQL`, run before the `SetEmbedding`'s
+/// session write. Live only, `#[ignore]`d like every live-database test:
+///
+/// ```text
+/// LAMBO_POSTGRES_DSN=<dsn> cargo test --no-default-features --features store-postgres \
+///   --lib cli::re_embed::postgres_live -- --ignored
+/// ```
+///
+/// No embedder feature in that build, so the test carries its own
+/// deterministic embedder.
+#[cfg(all(test, feature = "store-postgres"))]
+mod postgres_live {
+    use super::{run, seed, Args};
+    use crate::embed::{EmbedError, Embedder, EmbedderConfig};
+    use crate::resolve::ResolvedBackends;
+    use crate::store::pg::postgres::{postgres_dsn_or_skip, PostgresStore};
+    use crate::store::{GraphStore, StoreConfig, StoreKind};
+    use crate::types::EmbeddingContract;
+
+    /// A deterministic embedder of the store's width: the vector of a text
+    /// is a function of its bytes, so the test can recompute it.
+    struct ByteEmbedder(usize);
+
+    #[async_trait::async_trait]
+    impl Embedder for ByteEmbedder {
+        fn dimensions(&self) -> usize {
+            self.0
+        }
+        async fn embed(&self, text: &str) -> Result<Vec<f32>, EmbedError> {
+            let bytes = text.as_bytes();
+            Ok((0..self.0)
+                .map(|i| f32::from(bytes[i % bytes.len()]) / 255.0 + 0.01)
+                .collect())
+        }
+    }
+
+    fn store_config(dsn: &str) -> StoreConfig {
+        StoreConfig {
+            kind: StoreKind::Postgres,
+            dsn: Some(dsn.to_string()),
+            path: None,
+            vector_dim: None,
+        }
+    }
+
+    /// Mirrors `reembedCmd322_contractless_durable` and
+    /// `reembedOrdered_contractless_matches_graph` in
+    /// `formal/LamboProofs/Contract.lean` on Postgres: after `lambo re-embed`
+    /// of a pre-contract session, the raw rows hold the live contract and
+    /// every new vector. Before the fix the trailing `SetEmbedding`'s
+    /// quarantine nulled them (`reembed_contractless_durable_loses_vectors`).
+    #[tokio::test]
+    #[ignore = "live: requires LAMBO_POSTGRES_DSN against pinned pgvector/pgvector:pg17"]
+    async fn postgres_re_embed_of_a_contractless_session_keeps_its_new_vectors() {
+        let Some(dsn) = postgres_dsn_or_skip(
+            "postgres_re_embed_of_a_contractless_session_keeps_its_new_vectors",
+        ) else {
+            return;
+        };
+        let store = PostgresStore::new(store_config(&dsn)).expect("construct");
+        store.init_schema().await.expect("init_schema");
+        let dim = store.vector_dimensions().expect("pg stores carry vectors");
+        let session = format!("reembed-contractless-{}", uuid::Uuid::new_v4());
+        seed::seed_session(&store, &session, dim, None, None, None).await;
+        let (contract, rows) = seed::raw_session(&store, &session).await;
+        assert_eq!(contract, None, "the seed is a pre-contract session");
+        assert_eq!(
+            rows.iter()
+                .map(|(c, v)| (c.as_str(), v.as_ref().map(Vec::len)))
+                .collect::<Vec<_>>(),
+            vec![("auth middleware", None), ("user schema", Some(dim))],
+            "the legacy row keeps its vector until a contract is stamped"
+        );
+
+        let live = EmbeddingContract {
+            kind: "byte-test".into(),
+            model: Some("v1".into()),
+            dim,
+        };
+        let backends = ResolvedBackends {
+            store: Box::new(PostgresStore::new(store_config(&dsn)).expect("construct")),
+            embedder: Box::new(ByteEmbedder(dim)),
+            store_cfg: store_config(&dsn),
+            embedder_cfg: EmbedderConfig {
+                dim,
+                // No store-wide canary pin in a shared live database.
+                canary: crate::embed::canary::CanaryMode::Off,
+                ..Default::default()
+            },
+            embedding: live.clone(),
+            allow_embedding_mismatch: false,
+            config: crate::Config::default(),
+        };
+        let out = run(
+            backends,
+            Args {
+                session: session.clone(),
+                agent: "operator".into(),
+                allow_embedding_mismatch: false,
+                missing_only: false,
+                drop_image_vectors: false,
+                rewrite_same_contract: false,
+                repin_canary: false,
+            },
+        )
+        .await
+        .expect("re-embed");
+        assert!(out.contains("coverage: embedded 0/2 -> 2/2"), "{out}");
+
+        let (contract, rows) = seed::raw_session(&store, &session).await;
+        assert_eq!(contract, Some(live), "the live contract is stamped");
+        let widths: Vec<_> = rows
+            .iter()
+            .map(|(c, v)| (c.as_str(), v.as_ref().map(Vec::len)))
+            .collect();
+        let embedder = ByteEmbedder(dim);
+        for (content, vector) in &rows {
+            assert!(
+                vector.as_ref() == Some(&embedder.embed(content).await.unwrap()),
+                "the store holds the new vector of {content:?}; stored widths: {widths:?}"
+            );
+        }
+        assert_eq!(rows.len(), 2);
+        assert!(
+            seed::lease_is_free(&store, &session).await,
+            "the lease was released"
+        );
     }
 }

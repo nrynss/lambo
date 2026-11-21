@@ -251,13 +251,19 @@ lambo re-embed --missing-only --session <id> --agent <id>
 
 Restart the writer and check `lambo_stats` again. The repair fills missing text vectors in the existing embedding space. To restore a missing image vector, re-derive the image. Under `[embedder] canary = "verify"` the repair runs the embedder canary like any writer attach, and a drift refuses it before it writes.
 
-A session written before embedding contracts existed has no recorded contract. Lambo does not trust its stored vectors, so it ignores them when it loads the session and logs that explicit re-embedding is required. Stop the writer for the session, then run a full re-embed. It embeds every text concept with the live embedder and records the live contract in the same write, and the coverage it reports is what the store now holds.
+A session can have no recorded contract, for example one written before embedding contracts existed. Lambo does not trust its stored vectors, so it ignores them when it loads the session and logs that explicit re-embedding is required. What to run depends on whether a writer has attached since:
 
-```bash
-lambo re-embed --session <id> --agent <id>
-```
+- If no writer has attached since then, the session still has no contract. Run a full re-embed. It embeds every text concept with the live embedder and records the live contract in the same write, and the coverage it reports is what the store now holds. `--missing-only` is refused on such a session, before it embeds anything, because it fills vectors into a contract the session already has.
 
-`--missing-only` is refused on such a session, before it embeds anything: it fills vectors into the contract a session already has, and this one has none.
+  ```bash
+  lambo re-embed --session <id> --agent <id>
+  ```
+
+- Once a writer has attached (a `lambo serve` or any write command), it recorded the live contract, and its first flush cleared the old vectors. A full re-embed is then refused, since the session already carries the live contract. Stop the writer and fill the vectors instead:
+
+  ```bash
+  lambo re-embed --missing-only --session <id> --agent <id>
+  ```
 
 ### Repairing a canary drift
 

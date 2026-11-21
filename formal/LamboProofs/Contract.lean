@@ -283,7 +283,10 @@ override is the operator asserting that they do.
   full re-embed, or the no-vectors re-stamp.
 * `reembed_one_space`: a successful re-embed leaves every stored vector in the
   new space whatever it started from; `reembed_contract_last`: its batch is
-  upserts with one trailing `SetEmbedding`.
+  upserts with one trailing `SetEmbedding`. That is the pre-#322 order, and a
+  durability argument only for a session that already has a contract: on a
+  contract-less one the store's first-stamp quarantine then erases the new
+  vectors. The fixed order is `reembedOrdered_contract_first`.
 * `runAll_oneSpace`, `read_one_space`, `no_mixing_without_override`: without
   the override, a vector read returns vectors of the expected contract only.
   `attach_override_relabel_mixes`, `override_mixes_reads`: with it, a
@@ -959,7 +962,12 @@ theorem reembed_one_space (s s' : Session K M) (live : Contract K M) (ids : List
   · cases h
 
 /-- Re-embed's batch is node upserts with one trailing `SetEmbedding`
-("vectors first, contract last"). -/
+("vectors first, contract last"). This pins the pre-#322 order. It is a
+durability argument only for a session that already has a contract: on a
+contract-less session the store's first-stamp quarantine runs at that
+trailing `SetEmbedding` and erases the vectors the batch just wrote
+(`reembed_contractless_durable_loses_vectors`). The fixed order, contract
+first on a contract-less session, is `reembedOrdered_contract_first`. -/
 theorem reembed_contract_last (s s' : Session K M) (live : Contract K M) (ids : List Nat)
     (drop : Bool) (m : List (Mut K M)) (h : reembed s live ids drop = some (s', m)) :
     ∃ pre, m = pre ++ [.setEmbedding (some live)] ∧ ∀ x ∈ pre, x.isUpsert = true := by
@@ -2252,8 +2260,9 @@ graph: N/N); the store holds the live contract and no vector at all
   batch order moved (`reembedBatchOrdered_perm`), with the `SetEmbedding`
   first on a contract-less session (`reembedOrdered_contract_first`).
 * `missingOnly_contractless_writes_nothing`: `--missing-only` has no such
-  hazard. On a contract-less session the backfill is refused (it never
-  stamps a contract), so it writes nothing.
+  hazard. On a non-empty contract-less session it is refused up front,
+  before anything is embedded or written (the backfill never stamps a
+  contract).
 
 Modelling the store forced one observation: the old theorems are all true of
 the graph, and `reembed_contract_last` ("vectors first, contract last") was
@@ -2296,7 +2305,9 @@ def reembedOrdered (s : Session K M) (live : Contract K M) (ids : List Nat) (dro
   else none
 
 /-- `lambo re-embed` after the fix for #322: `reembedCmdFixed` with
-`reembedOrdered`. -/
+`reembedOrdered`, and `--missing-only` refused up front on a non-empty
+session with no contract (the backfill would refuse it anyway, after
+embedding). -/
 def reembedCmd322 (s : Session K M) (live : Contract K M)
     (allow missingOnly drop same repin : Bool) (mode : CanaryMode) (pin : PinState) :
     Option (Session K M × List (Mut K M)) :=
@@ -2307,6 +2318,7 @@ def reembedCmd322 (s : Session K M) (live : Contract K M)
       !canaryAdmits mode pin.isDrifted false then none
   else if !missingOnly && !(imageVectorIds s).isEmpty && !drop then none
   else if s.concepts.isEmpty then some (s, [])
+  else if missingOnly && decide (s.contract = none) then none
   else if missingOnly then
     let ids := (s.concepts.filter (fun c => !c.image && c.vec.isNone)).map (·.id)
     if ids.isEmpty then some (s, []) else backfill s live ids
@@ -2613,8 +2625,10 @@ theorem reembedCmd322_stamped_agrees (s : Session K M) (live : Contract K M)
     (hc : s.contract ≠ none) :
     reembedCmd322 s live allow missingOnly drop same repin mode pin =
       reembedCmdFixed s live allow missingOnly drop same repin mode pin := by
+  have hn : decide (s.contract = none) = false := by simp [hc]
   unfold reembedCmd322 reembedCmdFixed
-  rw [reembedOrdered_stamped_eq s live _ drop hc]
+  rw [reembedOrdered_stamped_eq s live _ drop hc, hn, Bool.and_false]
+  simp only [Bool.false_eq_true, ↓reduceIte]
 
 /-- **The fixed verb on a contract-less session.** A successful full run on a
 non-empty contract-less session leaves the store under the live contract, in
@@ -2643,19 +2657,18 @@ theorem reembedCmd322_contractless_durable (d s' : Session K M) (live : Contract
         · exact reembedOrdered_contractless_durable d s' live _ drop m hd h
   · simp at h
 
-/-- **`--missing-only` has no such hazard**: on a contract-less session the
-backfill is refused or finds nothing to do, and writes nothing. -/
+/-- **`--missing-only` has no such hazard**, and is refused up front: on a
+non-empty contract-less session the fixed verb refuses it before anything is
+embedded or written. (The #296 verb refused it too, through the backfill,
+but only after embedding; this pins the up-front refusal.) -/
 theorem missingOnly_contractless_writes_nothing (s : Session K M) (live : Contract K M)
-    (mode : CanaryMode) (pin : PinState) (r : Session K M × List (Mut K M))
-    (hc : s.contract = none)
-    (h : reembedCmd322 s live false true false false false mode pin = some r) : r.2 = [] := by
-  have hbf := fun ids => backfill_needs_same_contract s live ids (by rw [hc]; simp)
-  unfold reembedCmd322 at h
-  by_cases he : s.concepts.isEmpty = true
-  · simp [he] at h; rw [← h.2]
-  · by_cases hi : ((s.concepts.filter (fun c => !c.image && c.vec.isNone)).map (·.id)).isEmpty = true
-    · simp [he, hi] at h; rw [← h.2]
-    · simp [he, hi, hc, hbf] at h
+    (mode : CanaryMode) (pin : PinState) (hc : s.contract = none) (hne : s.concepts ≠ []) :
+    reembedCmd322 s live false true false false false mode pin = none := by
+  have hne' : s.concepts.isEmpty = false := by
+    cases hcs : s.concepts with
+    | nil => exact absurd hcs hne
+    | cons _ _ => rfl
+  simp [reembedCmd322, hc, hne']
 
 /-- **The #322 scenario.** A contract-less store with a legacy vector on
 concept 1 and none on concept 2; its graph is loaded through the quarantine.
