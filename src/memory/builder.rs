@@ -137,7 +137,10 @@ pub struct MemoryBuilder {
     /// session WITHOUT the Level B contract check, because this caller is about
     /// to rewrite every vector into the live space atomically (see
     /// [`crate::graph::Graph::reembed_all`]). Set only by `lambo re-embed`;
-    /// never relabels anything.
+    /// never relabels anything. The canary gate runs in this mode only on a
+    /// session already under the live contract, with the options the caller
+    /// set (#296: the backfill passes the configured canary, a full rewrite
+    /// none).
     pub(super) reembed_mode: bool,
     pub(super) config: Config,
     // Held as overrides rather than written straight into `config`, so
@@ -236,6 +239,11 @@ impl MemoryBuilder {
     /// atomically ([`crate::graph::Graph::reembed_all`]) and swap the contract
     /// in the same flushed batch. Skipping the check here loads the session
     /// as-is — old contract, old vectors — and nothing is relabelled.
+    ///
+    /// The embedder canary still applies to whatever this attach writes into
+    /// the session's own space: on a session already under the live
+    /// contract, the gate runs with the options set by
+    /// [`MemoryBuilder::canary`] (#296; off unless the caller sets them).
     ///
     /// Only `lambo re-embed` sets this; it is deliberately unreachable from
     /// outside the crate, so no ordinary caller can bypass the mismatch refusal.
@@ -649,6 +657,10 @@ impl MemoryBuilder {
                         if !self.allow_embedding_mismatch || stored.dim != live.dim {
                             return Err(embedding_mismatch_error(&stored, &live));
                         }
+                        graph.replace_embedding_with_operator_override(live.clone())?;
+                        // #296: logged once the relabel happened, never ahead
+                        // of a relabel that refuses (a kind change over
+                        // stored vectors).
                         tracing::warn!(
                             session = %session,
                             stored_kind = %stored.kind,
@@ -656,10 +668,9 @@ impl MemoryBuilder {
                             live_kind = %live.kind,
                             live_model = ?live.model,
                             dim = live.dim,
-                            "operator allowed an embedding contract mismatch; relabeling the session's \
+                            "operator allowed an embedding contract mismatch; relabeled the session's \
                              existing vectors with the configured live contract"
                         );
-                        graph.replace_embedding_with_operator_override(live)?;
                         // E2E-1: the override relabel must be durable BEFORE the
                         // first write — the checked candidate read compares the
                         // *durable* contract against the expected one, so a
@@ -719,9 +730,30 @@ impl MemoryBuilder {
                 }
             })?;
             // (2c) #176 — the embedder canary, now the weights are loaded.
-            // Skipped for the re-embed migration, which re-pins it after its
-            // rewrite is durable.
+            //
+            // In reembed_mode (#296) the caller chooses the canary: the
+            // backfill (`re-embed --missing-only`) writes vectors from the
+            // live embedder into the session's own space, so it passes the
+            // configured canary and is gated like any writer attach; a full
+            // rewrite passes none (the builder default, off), because it
+            // replaces the space and re-pins after its rewrite is durable.
+            // The gate runs only on a session already under the live
+            // contract: on any other the backfill refuses on its own, and the
+            // gate must not pin a contract the session does not carry. The
+            // re-embed merges nothing, so no merge threshold either way.
             let merge_threshold = if self.reembed_mode {
+                if graph.embedding() == Some(&embedding) {
+                    canary_gate(
+                        store.as_ref(),
+                        embedder.as_ref(),
+                        &embedding,
+                        &self.canary,
+                        config.semantic_match_threshold,
+                        self.allow_embedding_mismatch,
+                        &session,
+                    )
+                    .await?;
+                }
                 None
             } else {
                 let derived = canary_gate(
@@ -1034,10 +1066,12 @@ async fn canary_gate(
                  {min_cosine:.5} against the vector this store pinned for kind={} model={} \
                  dim={}, below {}. The embedder behind this contract no longer produces the \
                  vectors already stored (a re-quantised model, another server build, a provider \
-                 revision), and new vectors would land in a different space. Re-embed the \
-                 store's sessions with `lambo re-embed` (which re-pins the canary), restore the \
-                 previous embedder, or, knowing the spaces still agree, attach with \
-                 --allow-embedding-mismatch or set [embedder] canary = \"warn\".",
+                 revision), and new vectors would land in a different space. Re-embed each of \
+                 the store's sessions under this contract in place with `lambo re-embed \
+                 --rewrite-same-contract` (the first one also with --repin-canary, which \
+                 replaces this pin), restore the previous embedder, or, knowing the spaces \
+                 still agree, attach with --allow-embedding-mismatch or set [embedder] canary \
+                 = \"warn\".",
                 canary::CANARY_PHRASES[*worst],
                 contract.kind,
                 contract.model.as_deref().unwrap_or("(default)"),

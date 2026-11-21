@@ -514,6 +514,37 @@ pub async fn pin(
     .await
 }
 
+/// What the store's pin for `contract` says about `embedder`, read without
+/// writing anything (#296). `None` when there is no usable pin: no row, or a
+/// row of another canary version or with malformed vectors, which [`check`]
+/// would pin again. Otherwise [`CanaryVerdict::Verified`],
+/// [`CanaryVerdict::Drifted`], or [`CanaryVerdict::Unverified`] when the
+/// canaries could not be embedded. A full `lambo re-embed` reads it before it
+/// writes, because the [`pin`] that follows its rewrite replaces this one.
+pub async fn compare_pin(
+    store: &dyn GraphStore,
+    embedder: &dyn Embedder,
+    contract: &EmbeddingContract,
+) -> Result<Option<CanaryVerdict>, LamboError> {
+    let raw = store
+        .read_store_meta(&fingerprint_key(contract))
+        .await
+        .map_err(LamboError::Store)?;
+    let Some(pinned) = raw
+        .and_then(|raw| serde_json::from_str::<Fingerprint>(&raw).ok())
+        .filter(|f| f.version == CANARY_VERSION)
+        .and_then(|f| f.decoded())
+    else {
+        return Ok(None);
+    };
+    Ok(Some(
+        match embed_all(embedder, &CANARY_PHRASES, contract.dim).await {
+            Ok(live) => verdict_against(&pinned, &live),
+            Err(e) => CanaryVerdict::Unverified(e),
+        },
+    ))
+}
+
 /// Read and parse the labelled pairs file.
 fn read_related_pairs(path: &Path) -> Result<(Vec<RelatedPair>, String), LamboError> {
     let bytes = std::fs::read(path).map_err(|e| {

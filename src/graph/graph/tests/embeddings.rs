@@ -464,3 +464,64 @@ fn re_embed_and_backfill_never_give_an_image_concept_a_text_vector() {
     assert!(err.to_string().contains("image concept"), "{err}");
     assert!(g.drain_log().is_empty());
 }
+
+/// #296: the in-place rewrite. On a session already under the contract it
+/// rewrites every text vector, keeps the contract and emits the upserts
+/// alone (no `SetEmbedding`); it refuses a session under another contract
+/// (a migration) and one that holds no vector (a backfill), and checks
+/// coverage like `reembed_all`.
+///
+/// Mirrors `Contract.reembedSame_spec` and `Contract.reembedSame_keeps_contract`.
+#[test]
+fn reembed_in_place_rewrites_every_vector_and_keeps_the_contract() {
+    let (mut g, c1, c2) = two_concept_graph();
+    let live = embed_contract("bge_m3", "old.gguf", 1024);
+    g.seed_test_vectors(vec![(c1, vec![0.1_f32; 1024]), (c2, vec![0.1_f32; 1024])]);
+    g.drain_log();
+
+    let err = g
+        .reembed_in_place(vec![(c1, vec![0.5_f32; 1024])], &live)
+        .unwrap_err();
+    assert!(err.to_string().contains("requires every concept"), "{err}");
+    let err = g
+        .reembed_in_place(
+            vec![(c1, vec![0.5_f32; 1024]), (c2, vec![0.5_f32; 1024])],
+            &embed_contract("candle", "BAAI/bge-m3@main sha256:abcd1234", 1024),
+        )
+        .unwrap_err();
+    assert!(err.to_string().contains("which is a migration"), "{err}");
+    assert!(g.drain_log().is_empty(), "a refusal appends nothing");
+
+    g.reembed_in_place(
+        vec![(c1, vec![0.25_f32; 1024]), (c2, vec![0.5_f32; 1024])],
+        &live,
+    )
+    .unwrap();
+    assert_eq!(g.embedding(), Some(&live));
+    let embedded = |g: &Graph, id: NodeId| match g.node(id) {
+        Some(crate::types::Node::Concept(c)) => c.embedding.clone().unwrap(),
+        other => panic!("expected concept {id}, got {other:?}"),
+    };
+    assert_eq!(embedded(&g, c1), vec![0.25_f32; 1024]);
+    assert_eq!(embedded(&g, c2), vec![0.5_f32; 1024]);
+    assert!(matches!(
+        g.drain_log().mutations.as_slice(),
+        [Mutation::UpsertNode { .. }, Mutation::UpsertNode { .. }]
+    ));
+
+    // A session under the contract with no vector: that is a backfill.
+    let mut g = Graph::new(sid());
+    let i = interaction(1, None, 0);
+    let iid = i.id;
+    g.insert_interaction(i).unwrap();
+    let mut c = concept(1, iid, "user schema");
+    c.embedding = None;
+    let id = c.id;
+    g.insert_concept(c, iid).unwrap();
+    g.stamp_embedding(live.clone()).unwrap();
+    g.drain_log();
+    let err = g
+        .reembed_in_place(vec![(id, vec![0.5_f32; 1024])], &live)
+        .unwrap_err();
+    assert!(err.to_string().contains("embed_missing"), "{err}");
+}

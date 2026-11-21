@@ -32,6 +32,31 @@
 //!   and reports the count. Re-deriving the same image under the new
 //!   embedder restores the vector.
 //! * `--missing-only` skips image concepts and reports how many it skipped.
+//!
+//! # A session already under the live contract (#296)
+//!
+//! A plain re-embed refuses a session that already carries the live
+//! contract: there is nothing to migrate. Two modes act on that state:
+//!
+//! * `--missing-only` fills the vectors that are missing. It writes vectors
+//!   from the live embedder into the session's own space, so it runs the
+//!   embedder canary like any writer attach: under `canary = "verify"` a
+//!   drift refuses it before it writes.
+//! * `--rewrite-same-contract` rewrites every text concept vector in place
+//!   ([`crate::graph::Graph::reembed_in_place`]) and keeps the contract. It
+//!   is the repair for a canary drift (the same contract name, different
+//!   vectors), which is only ever detected on a session in this state.
+//!
+//! # The canary pin
+//!
+//! A full rewrite pins the store's canary for the live contract again once
+//! the rewrite is durable. The pin is per store and contract, and the
+//! store's other sessions under that contract rest on it, so before writing
+//! the rewrite reads what the pin says about the live embedder
+//! ([`crate::embed::canary::compare_pin`]). A pin it cannot confirm (the
+//! live embedder drifted from it, or could not be checked) is replaced only
+//! with `--repin-canary`, and the run then says that the other sessions are
+//! no longer flagged.
 
 use std::sync::Arc;
 
@@ -64,6 +89,18 @@ pub struct Args {
     /// its caption; the image concept stays, findable by its caption, until
     /// the image is derived again under the new embedder.
     pub drop_image_vectors: bool,
+    /// Full rewrite of a session that already carries the live contract
+    /// (#296): re-embed every text concept in place and keep the contract.
+    /// The repair for an embedder canary drift. Refused unless the session
+    /// carries the live contract and holds a vector; without it, such a
+    /// session is refused as before.
+    pub rewrite_same_contract: bool,
+    /// Full rewrite only (#296): replace the store's canary pin for the live
+    /// contract even when the live embedder does not reproduce it (it
+    /// drifted, or could not be checked). Without it such a rewrite is
+    /// refused before it writes, because the store's other sessions under
+    /// that contract rest on the pin.
+    pub repin_canary: bool,
 }
 
 /// Run the K2 re-embed migration for one session.
@@ -87,6 +124,13 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
                 .to_string(),
         ));
     }
+    if args.missing_only && (args.rewrite_same_contract || args.repin_canary) {
+        return Err(CliError::Usage(
+            "--missing-only fills missing vectors in the session's own space and never pins \
+             the canary; --rewrite-same-contract and --repin-canary belong to a full rewrite."
+                .to_string(),
+        ));
+    }
     if args.allow_embedding_mismatch {
         return Err(CliError::Usage(
             "--allow-embedding-mismatch is refused by re-embed: re-embed IS the embedding \
@@ -105,6 +149,13 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
     // own mechanism, never by flipping the override.
     let config = backends.config.clone();
     let canary_mode = backends.embedder_cfg.canary;
+    // #296: the backfill runs the configured canary like any writer attach;
+    // a full rewrite attaches with it off and checks the pin itself below.
+    let canary = if args.missing_only {
+        backends.canary_options()
+    } else {
+        crate::embed::canary::CanaryOptions::off()
+    };
     let store: std::sync::Arc<dyn crate::store::GraphStore> = Arc::from(backends.store);
     let embedder: std::sync::Arc<dyn Embedder> = Arc::from(backends.embedder);
     let live_contract: EmbeddingContract = backends.embedding.clone();
@@ -116,6 +167,7 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
         .store(store.clone())
         .embedder(embedder.clone())
         .embedding_contract(live_contract.clone())
+        .canary(canary)
         .reembed_mode(true)
         .build()
         .await
@@ -130,9 +182,10 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
     // still carries a vector blocks a full migration unless
     // --drop-image-vectors, and one whose vector is missing is skipped by
     // both modes (re-deriving the image restores it).
-    let (concepts, images, total, prior_contract) = {
+    let (concepts, images, total, prior_contract, has_vectors) = {
         let g = mem.graph().read();
         let prior_contract = g.embedding().cloned();
+        let has_vectors = g.concepts().any(|c| c.embedding.is_some());
         let mut images = ImageCounts::default();
         let mut snapshot: Vec<(NodeId, String)> = Vec::new();
         for c in g.concepts() {
@@ -147,12 +200,22 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
             }
         }
         snapshot.sort_by_key(|(id, _)| id.0);
-        (snapshot, images, g.concepts().count(), prior_contract)
+        (
+            snapshot,
+            images,
+            g.concepts().count(),
+            prior_contract,
+            has_vectors,
+        )
     };
 
     // Every path below — success or any mid-run abort — funnels into
     // close_writer at the end of this function (K2-R1-6): a failed migration
     // must release the writer lease immediately, not hold it to TTL.
+    //
+    // #296: whether the re-pin after a full rewrite replaces a pin the live
+    // embedder does not reproduce (allowed by --repin-canary).
+    let mut replaces_unconfirmed_pin = false;
     let out = if !args.missing_only && images.with_vector > 0 && !args.drop_image_vectors {
         let n = images.with_vector;
         Err(CliError::Runtime(format!(
@@ -190,22 +253,43 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
         )
         .await
         .map(|out| out + &images.skipped_note())
+    } else if let Some(refusal) =
+        contract_refusal(&args, prior_contract.as_ref(), &live_contract, has_vectors)
+    {
+        Err(refusal)
     } else {
-        rewrite_all(
-            &mem,
-            &args.session,
-            &args.agent,
-            &embedder,
+        match repin_guard(
+            store.as_ref(),
+            embedder.as_ref(),
             &live_contract,
-            &concepts,
-            args.drop_image_vectors,
+            canary_mode,
+            args.repin_canary,
+            &args.session,
         )
         .await
-        .map(|out| out + &images.skipped_note())
+        {
+            Err(refusal) => Err(refusal),
+            Ok(unconfirmed) => {
+                replaces_unconfirmed_pin = unconfirmed;
+                rewrite_all(
+                    &mem,
+                    &args.session,
+                    &args.agent,
+                    &embedder,
+                    &live_contract,
+                    &concepts,
+                    args.drop_image_vectors,
+                    args.rewrite_same_contract,
+                )
+                .await
+                .map(|out| out + &images.skipped_note())
+            }
+        }
     };
-    // #176: a full rewrite moved this session into the live space, so the
-    // store's canary is pinned again from the live embedder — after the
-    // rewrite is durable, never before. A backfill changes no space.
+    // #176: a full rewrite moved this session into the live space (or
+    // rewrote it in place), so the store's canary is pinned again from the
+    // live embedder — after the rewrite is durable, never before. A backfill
+    // changes no space.
     let full_rewrite = out.is_ok() && !args.missing_only && total > 0;
     let out = close_writer(mem, out).await?;
     if !full_rewrite || canary_mode == crate::embed::canary::CanaryMode::Off {
@@ -213,15 +297,18 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
     }
     Ok(
         match crate::embed::canary::pin(store.as_ref(), embedder.as_ref(), &live_contract).await {
-            // The canary is store-wide per contract. A rewrite under the
-            // same contract name (the drift the canary exists for) leaves the
-            // store's other sessions under that name in the old space, and
-            // after this pin nothing flags them any more: say so.
-            Ok(()) if prior_contract.as_ref() == Some(&live_contract) => format!(
-                "{out}\nembedder canary pinned again for the live contract. This session kept \
-                 its contract name, so any other session in this store under the same contract \
-                 still holds vectors from the previous embedder and the canary no longer flags \
-                 it: re-embed each of them too"
+            // The canary is store-wide per contract. A re-pin over a pin the
+            // live embedder did not reproduce (--repin-canary; the drift the
+            // canary exists for) leaves the store's other sessions under that
+            // contract in the pinned embedder's space, and after this pin
+            // nothing flags them any more: say so. #296: this used to key on
+            // `prior == live`, which a successful rewrite never met.
+            Ok(()) if replaces_unconfirmed_pin => format!(
+                "{out}\nembedder canary pinned again for the live contract, replacing a pin the \
+                 live embedder did not reproduce (--repin-canary). Any other session in this \
+                 store under the same contract still holds vectors from the embedder that pin \
+                 recorded, and the canary no longer flags it: re-embed each of them with \
+                 --rewrite-same-contract"
             ),
             Ok(()) => format!("{out}\nembedder canary pinned again for the live contract"),
             Err(e) => format!(
@@ -230,6 +317,113 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
             ),
         },
     )
+}
+
+/// #296: the full rewrite's contract precondition, checked before anything
+/// is embedded or written. `--rewrite-same-contract` needs a session already
+/// under the live contract that holds a vector; without it, a session
+/// already under the live contract is refused, as `Graph::reembed_all`
+/// refuses it, but here, naming the two modes that act on that state.
+fn contract_refusal(
+    args: &Args,
+    prior: Option<&EmbeddingContract>,
+    live: &EmbeddingContract,
+    has_vectors: bool,
+) -> Option<CliError> {
+    let describe = |c: &EmbeddingContract| {
+        format!(
+            "kind={} model={} dim={}",
+            c.kind,
+            c.model.as_deref().unwrap_or("<unset>"),
+            c.dim
+        )
+    };
+    let session = &args.session;
+    let under_live = prior == Some(live);
+    let message = if args.rewrite_same_contract && !under_live {
+        format!(
+            "session '{session}': --rewrite-same-contract rewrites a session that already \
+             carries the live contract ({}), and this one carries {}: re-embedding it into the \
+             live contract is a migration. Refused; nothing was written. Drop the flag.",
+            describe(live),
+            prior.map_or_else(|| "no recorded contract".to_string(), describe),
+        )
+    } else if args.rewrite_same_contract && !has_vectors {
+        format!(
+            "session '{session}' carries the live contract but holds no vector, so there is \
+             nothing to rewrite in place. Refused; nothing was written. Fill its missing \
+             vectors with --missing-only."
+        )
+    } else if !args.rewrite_same_contract && under_live {
+        format!(
+            "session '{session}' already carries the live contract ({}), so there is nothing to \
+             migrate. Refused; nothing was written. To fill missing vectors, run with \
+             --missing-only; to rewrite every vector in place (the repair for an embedder \
+             canary drift), run with --rewrite-same-contract.",
+            describe(live),
+        )
+    } else {
+        return None;
+    };
+    Some(CliError::Runtime(message))
+}
+
+/// #296: before a full rewrite writes anything, read what the store's canary
+/// pin for the live contract says about the live embedder. The rewrite pins
+/// the canary again afterwards, and the store's other sessions under that
+/// contract rest on the pin, so a pin the live embedder does not reproduce
+/// (it drifted, or could not be checked) is replaced only with
+/// `--repin-canary`. Returns whether the re-pin will replace such a pin.
+async fn repin_guard(
+    store: &dyn crate::store::GraphStore,
+    embedder: &dyn Embedder,
+    live: &EmbeddingContract,
+    mode: crate::embed::canary::CanaryMode,
+    repin: bool,
+    session: &str,
+) -> Result<bool, CliError> {
+    use crate::embed::canary::{self, CanaryMode, CanaryVerdict};
+    if mode == CanaryMode::Off {
+        return Ok(false);
+    }
+    let why = match canary::compare_pin(store, embedder, live)
+        .await
+        .map_err(CliError::from)?
+    {
+        Some(CanaryVerdict::Drifted { min_cosine, worst }) => format!(
+            "the live embedder no longer reproduces that pin (canary {worst} has cosine \
+             {min_cosine:.5}, below {})",
+            canary::CANARY_MIN_COSINE
+        ),
+        Some(CanaryVerdict::Unverified(reason)) => {
+            format!("the live embedder could not be checked against that pin ({reason})")
+        }
+        // No usable pin, or one the live embedder reproduces: the re-pin
+        // takes nothing from any other session. `compare_pin` returns no
+        // other verdict.
+        None
+        | Some(
+            CanaryVerdict::Verified { .. }
+            | CanaryVerdict::Off
+            | CanaryVerdict::Pinned
+            | CanaryVerdict::RecentlyVerified,
+        ) => return Ok(false),
+    };
+    if repin {
+        return Ok(true);
+    }
+    Err(CliError::Runtime(format!(
+        "session '{session}': this re-embed would pin the embedder canary again for kind={} \
+         model={} dim={}, replacing the store's pin for that contract, and {why}. Any other \
+         session in this store under that contract holds vectors from the pinned embedder, and \
+         after the re-pin the canary would no longer flag it. Refused; nothing was written. \
+         Rerun with --repin-canary to replace the pin anyway (then re-embed each of those \
+         sessions with --rewrite-same-contract), or restore the embedder the pin was taken \
+         from.",
+        live.kind,
+        live.model.as_deref().unwrap_or("<unset>"),
+        live.dim,
+    )))
 }
 
 /// The image concepts (#22) a re-embed found, which it never embeds.
@@ -309,7 +503,10 @@ async fn backfill_missing(
 /// The all-or-nothing rewrite body: embed EVERY concept BEFORE mutating the
 /// graph. Any embed failure aborts here — no mutation appended, no partial
 /// rewrite, no mixed-space state — and the caller's `close_writer` still
-/// releases the lease on this error path (K2-R1-6).
+/// releases the lease on this error path (K2-R1-6). `in_place`
+/// (`--rewrite-same-contract`, #296) keeps the contract
+/// ([`crate::graph::Graph::reembed_in_place`]).
+#[allow(clippy::too_many_arguments)]
 async fn rewrite_all(
     mem: &Memory,
     session: &str,
@@ -318,6 +515,7 @@ async fn rewrite_all(
     live_contract: &EmbeddingContract,
     concepts: &[(NodeId, String)],
     drop_image_vectors: bool,
+    in_place: bool,
 ) -> Result<String, CliError> {
     let mut updates: Vec<(NodeId, Vec<f32>)> = Vec::with_capacity(concepts.len());
     for (id, content) in concepts {
@@ -343,13 +541,23 @@ async fn rewrite_all(
         let mut g = mem.graph().write();
         let total = g.concepts().count();
         let before = g.concepts().filter(|c| c.embedding.is_some()).count();
-        let dropped = if drop_image_vectors {
-            g.reembed_all_dropping_image_vectors(updates, live_contract.clone())
-                .map_err(CliError::from)?
-        } else {
-            g.reembed_all(updates, live_contract.clone())
-                .map_err(CliError::from)?;
-            0
+        let dropped = match (in_place, drop_image_vectors) {
+            (false, true) => g
+                .reembed_all_dropping_image_vectors(updates, live_contract.clone())
+                .map_err(CliError::from)?,
+            (false, false) => {
+                g.reembed_all(updates, live_contract.clone())
+                    .map_err(CliError::from)?;
+                0
+            }
+            (true, true) => g
+                .reembed_in_place_dropping_image_vectors(updates, live_contract)
+                .map_err(CliError::from)?,
+            (true, false) => {
+                g.reembed_in_place(updates, live_contract)
+                    .map_err(CliError::from)?;
+                0
+            }
         };
         let after = g.concepts().filter(|c| c.embedding.is_some()).count();
         (before, after, total, dropped)
@@ -363,13 +571,24 @@ async fn rewrite_all(
         String::new()
     };
 
+    let (contract_line, flush_line) = if in_place {
+        (
+            "contract unchanged (rewritten in place)",
+            "the vector rewrite flushes as ONE transaction with this writer's lease release",
+        )
+    } else {
+        (
+            "contract now",
+            "the vector rewrite and contract swap flush as ONE transaction with this \
+             writer's lease release",
+        )
+    };
     Ok(format!(
         "re-embedded session '{session}' as agent '{agent}': {rewritten} concept(s) rewritten \
          into the live space\n\
          coverage: embedded {before}/{total} -> {after}/{total}\n\
-         contract now: kind={} model={} dim={}\n\
-         the vector rewrite and contract swap flush as ONE transaction with this \
-         writer's lease release{dropped_line}",
+         {contract_line}: kind={} model={} dim={}\n\
+         {flush_line}{dropped_line}",
         live_contract.kind,
         live_contract.model.as_deref().unwrap_or("<unset>"),
         live_contract.dim,
@@ -494,6 +713,21 @@ mod tests {
             token: Option<u64>,
         ) -> Result<(), StoreError> {
             self.0.record_canonization(event, token).await
+        }
+        // #176/#296: the canary pin lives in `store_meta`; without these the
+        // double would read every pin as absent.
+        async fn read_store_meta(&self, key: &str) -> Result<Option<String>, StoreError> {
+            self.0.read_store_meta(key).await
+        }
+        async fn write_store_meta(&self, key: &str, value: &str) -> Result<(), StoreError> {
+            self.0.write_store_meta(key, value).await
+        }
+        async fn write_store_meta_if_absent(
+            &self,
+            key: &str,
+            value: &str,
+        ) -> Result<bool, StoreError> {
+            self.0.write_store_meta_if_absent(key, value).await
         }
     }
 
@@ -674,6 +908,8 @@ mod tests {
                 allow_embedding_mismatch: false,
                 missing_only: false,
                 drop_image_vectors: false,
+                rewrite_same_contract: false,
+                repin_canary: false,
             },
         )
         .await
@@ -720,18 +956,27 @@ mod tests {
             allow_embedding_mismatch: false,
             missing_only,
             drop_image_vectors,
+            rewrite_same_contract: false,
+            repin_canary: false,
         }
     }
 
+    /// Whether a new writer can take the session's lease now. The probe
+    /// releases what it took, so a test can go on writing.
     async fn lease_is_free(store: &Arc<MemoryStore>) -> bool {
         let probe = LeaseHolder::for_this_process(&AgentId::from("probe"));
-        matches!(
+        let sid = SessionId::from(SESSION);
+        let free = matches!(
             store
-                .acquire_lease(&SessionId::from(SESSION), &probe, Duration::from_secs(5))
+                .acquire_lease(&sid, &probe, Duration::from_secs(5))
                 .await
                 .unwrap(),
             LeaseOutcome::Acquired(_)
-        )
+        );
+        if free {
+            store.release_lease(&sid, &probe).await.unwrap();
+        }
+        free
     }
 
     /// #22 design Q19: a full migration must not leave an image vector in
@@ -845,6 +1090,8 @@ mod tests {
                 allow_embedding_mismatch: true,
                 missing_only: false,
                 drop_image_vectors: false,
+                rewrite_same_contract: false,
+                repin_canary: false,
             },
         )
         .await
@@ -867,6 +1114,8 @@ mod tests {
                 allow_embedding_mismatch: false,
                 missing_only: false,
                 drop_image_vectors: false,
+                rewrite_same_contract: false,
+                repin_canary: false,
             },
         )
         .await
@@ -898,11 +1147,328 @@ mod tests {
                 allow_embedding_mismatch: false,
                 missing_only: false,
                 drop_image_vectors: false,
+                rewrite_same_contract: false,
+                repin_canary: false,
             },
         )
         .await
         .unwrap_err();
         assert!(err.to_string().contains("already held"), "{err}");
+    }
+
+    /// The embedder a drifted pin was taken from: the fixture's vectors of
+    /// other texts, so no canary phrase is near the live fixture's.
+    struct OldBuild(FixtureEmbedder);
+
+    #[async_trait::async_trait]
+    impl Embedder for OldBuild {
+        fn dimensions(&self) -> usize {
+            1024
+        }
+        async fn embed(&self, text: &str) -> Result<Vec<f32>, crate::embed::EmbedError> {
+            Ok(self
+                .0
+                .embed_sync(&format!("an older build of the model: {text}")))
+        }
+    }
+
+    /// The contract [`seed_damaged_session`] stamps.
+    fn legacy() -> EmbeddingContract {
+        EmbeddingContract {
+            kind: "legacy".into(),
+            model: Some("v1".into()),
+            dim: 1024,
+        }
+    }
+
+    fn with_canary(
+        mut backends: ResolvedBackends,
+        mode: crate::embed::canary::CanaryMode,
+    ) -> ResolvedBackends {
+        backends.embedder_cfg.canary = mode;
+        backends
+    }
+
+    /// Pin `contract`'s canary in `store` from `embedder`.
+    async fn pin_from(
+        store: &Arc<MemoryStore>,
+        embedder: &dyn Embedder,
+        contract: &EmbeddingContract,
+    ) {
+        crate::embed::canary::pin(store.as_ref(), embedder, contract)
+            .await
+            .unwrap();
+    }
+
+    /// What the live fixture embedder measures against `contract`'s pin.
+    async fn verdict(
+        store: &Arc<MemoryStore>,
+        contract: &EmbeddingContract,
+    ) -> crate::embed::canary::CanaryVerdict {
+        crate::embed::canary::check(
+            store.as_ref(),
+            &FixtureEmbedder::new(),
+            contract,
+            &crate::embed::canary::CanaryOptions {
+                mode: crate::embed::canary::CanaryMode::Verify,
+                related_pairs: None,
+            },
+            0.85,
+        )
+        .await
+        .unwrap()
+        .verdict
+    }
+
+    /// #296, finding 1: the drift repair can be followed. A canary drift is
+    /// only ever seen on a session under the live contract; the plain verb
+    /// still refuses that session, now naming the flag, and
+    /// `--rewrite-same-contract` rewrites every vector in place, keeps the
+    /// contract and re-pins the canary. Over a drifted pin the re-pin also
+    /// needs `--repin-canary`, and the run then says the store's other
+    /// sessions under the contract are no longer flagged.
+    ///
+    /// Mirrors `Contract.reembedCmdFixed_repairs_drift`,
+    /// `Contract.reembedCmdFixed_full_spec`,
+    /// `Contract.reembedCmdFixed_plain_refuses_same_contract` and
+    /// `Contract.example_drift_repaired_in_place`.
+    #[tokio::test]
+    async fn re_embed_rewrite_same_contract_repairs_a_canary_drift() {
+        use crate::embed::canary::{CanaryMode, CanaryVerdict};
+        let store = Arc::new(MemoryStore::new());
+        seed_damaged_session(&store).await;
+        pin_from(&store, &OldBuild(FixtureEmbedder::new()), &legacy()).await;
+        assert!(
+            matches!(
+                verdict(&store, &legacy()).await,
+                CanaryVerdict::Drifted { .. }
+            ),
+            "test setup: the live embedder drifted from the pin"
+        );
+        let live = || {
+            with_canary(
+                backends_on(store.clone(), "legacy", "v1"),
+                CanaryMode::Verify,
+            )
+        };
+        let before = durable_concepts(&store).await;
+
+        let err = run(live(), args(false, false))
+            .await
+            .expect_err("the plain verb still refuses a same-contract session");
+        assert!(err.to_string().contains("--rewrite-same-contract"), "{err}");
+        assert_eq!(durable_concepts(&store).await, before, "no writes");
+
+        let err = run(
+            live(),
+            Args {
+                rewrite_same_contract: true,
+                ..args(false, false)
+            },
+        )
+        .await
+        .expect_err("a drifted pin is not replaced without --repin-canary");
+        let msg = err.to_string();
+        assert!(msg.contains("--repin-canary"), "{msg}");
+        assert!(msg.contains("nothing was written"), "{msg}");
+        assert_eq!(durable_concepts(&store).await, before, "no writes");
+        assert!(
+            lease_is_free(&store).await,
+            "the refusal released the lease"
+        );
+
+        let out = run(
+            live(),
+            Args {
+                rewrite_same_contract: true,
+                repin_canary: true,
+                ..args(false, false)
+            },
+        )
+        .await
+        .expect("the in-place repair");
+        assert!(out.contains("coverage: embedded 1/2 -> 2/2"), "{out}");
+        assert!(out.contains("no longer flags"), "{out}");
+
+        let snap = store.load_session(&SessionId::from(SESSION)).await.unwrap();
+        assert_eq!(snap.embedding, Some(legacy()), "the contract did not move");
+        let fixture = FixtureEmbedder::new();
+        for c in &snap.concepts {
+            assert_eq!(
+                c.embedding.as_deref(),
+                Some(fixture.embed_sync(&c.content).as_slice()),
+                "{}: every vector is the live embedder's",
+                c.content
+            );
+        }
+        assert!(
+            matches!(
+                verdict(&store, &legacy()).await,
+                CanaryVerdict::Verified { .. }
+            ),
+            "the canary is pinned again from the live embedder"
+        );
+        assert!(lease_is_free(&store).await);
+    }
+
+    /// `--rewrite-same-contract` is refused on a session not under the live
+    /// contract (a migration) and on a session that holds no vector (a
+    /// backfill), before anything is written.
+    ///
+    /// Mirrors `Contract.example_same_contract_preconditions`.
+    #[tokio::test]
+    async fn re_embed_rewrite_same_contract_refuses_a_migration_or_an_empty_space() {
+        let store = Arc::new(MemoryStore::new());
+        seed_damaged_session(&store).await;
+        let before = durable_concepts(&store).await;
+        let err = run(
+            backends_on(store.clone(), "fixture", "fixture-model"),
+            Args {
+                rewrite_same_contract: true,
+                repin_canary: true,
+                ..args(false, false)
+            },
+        )
+        .await
+        .expect_err("a migration is not an in-place rewrite");
+        assert!(err.to_string().contains("--rewrite-same-contract"), "{err}");
+        assert_eq!(durable_concepts(&store).await, before, "no writes");
+
+        // Two image concepts and no text concept: once a migration with
+        // --drop-image-vectors nulls the one image vector, the session
+        // holds none.
+        let store = Arc::new(MemoryStore::new());
+        seed_session_with_sources(&store, Some(image_source()), Some(image_source())).await;
+        run(
+            backends_on(store.clone(), "legacy", "v2"),
+            args(false, true),
+        )
+        .await
+        .expect("migration dropping the image vector");
+        let err = run(
+            backends_on(store.clone(), "legacy", "v2"),
+            Args {
+                rewrite_same_contract: true,
+                ..args(false, false)
+            },
+        )
+        .await
+        .expect_err("a session with no vector has nothing to rewrite in place");
+        assert!(err.to_string().contains("--missing-only"), "{err}");
+    }
+
+    /// #296, finding 3: `--missing-only` runs the canary. Under `verify` a
+    /// drift refuses the backfill like any writer attach, before it writes;
+    /// under `warn` the backfill runs as before.
+    ///
+    /// Mirrors `Contract.missingOnly_fixed_refuses_drift`,
+    /// `Contract.missingOnly_fixed_agrees` and
+    /// `Contract.example_drifted_backfill_fixed`.
+    #[tokio::test]
+    async fn re_embed_missing_only_runs_the_canary() {
+        use crate::embed::canary::CanaryMode;
+        let store = Arc::new(MemoryStore::new());
+        seed_damaged_session(&store).await;
+        pin_from(&store, &OldBuild(FixtureEmbedder::new()), &legacy()).await;
+        let before = durable_concepts(&store).await;
+
+        let err = run(
+            with_canary(
+                backends_on(store.clone(), "legacy", "v1"),
+                CanaryMode::Verify,
+            ),
+            args(true, false),
+        )
+        .await
+        .expect_err("a drifted backfill under verify is refused");
+        assert!(err.to_string().contains("canary drifted"), "{err}");
+        assert_eq!(durable_concepts(&store).await, before, "no writes");
+        assert!(
+            lease_is_free(&store).await,
+            "the refusal released the lease"
+        );
+
+        let out = run(
+            with_canary(backends_on(store.clone(), "legacy", "v1"), CanaryMode::Warn),
+            args(true, false),
+        )
+        .await
+        .expect("warn logs the drift and backfills");
+        assert!(out.contains("coverage: embedded 1/2 -> 2/2"), "{out}");
+    }
+
+    /// #296, finding 2: no silent re-pin. A migration into a contract whose
+    /// store pin the live embedder does not reproduce (another session's
+    /// vectors rest on it) is refused before it writes unless
+    /// `--repin-canary` is given, and then says the other sessions are no
+    /// longer flagged. Over a pin the live embedder reproduces, the
+    /// migration re-pins as before, without the opt-in or the warning.
+    ///
+    /// Mirrors `Contract.fixed_repin_unsafe_needs_optin`,
+    /// `Contract.reembedCmdFixed_migration_agrees` and
+    /// `Contract.example_repin_guard`.
+    #[tokio::test]
+    async fn re_embed_never_silently_replaces_a_pin_it_cannot_confirm() {
+        use crate::embed::canary::CanaryMode;
+        let target = EmbeddingContract {
+            kind: "fixture".into(),
+            model: Some("fixture-model".into()),
+            dim: 1024,
+        };
+        let store = Arc::new(MemoryStore::new());
+        seed_damaged_session(&store).await;
+        pin_from(&store, &OldBuild(FixtureEmbedder::new()), &target).await;
+        let before = durable_state(&store).await;
+
+        let err = run(
+            with_canary(
+                backends_on(store.clone(), "fixture", "fixture-model"),
+                CanaryMode::Warn,
+            ),
+            args(false, false),
+        )
+        .await
+        .expect_err("a drifted pin is not replaced silently");
+        let msg = err.to_string();
+        assert!(msg.contains("--repin-canary"), "{msg}");
+        assert!(msg.contains("nothing was written"), "{msg}");
+        assert_eq!(durable_state(&store).await, before, "no writes");
+        assert!(
+            lease_is_free(&store).await,
+            "the refusal released the lease"
+        );
+
+        let out = run(
+            with_canary(
+                backends_on(store.clone(), "fixture", "fixture-model"),
+                CanaryMode::Warn,
+            ),
+            Args {
+                repin_canary: true,
+                ..args(false, false)
+            },
+        )
+        .await
+        .expect("the opt-in replaces the pin");
+        assert!(out.contains("no longer flags"), "{out}");
+        assert_eq!(durable_state(&store).await.0.as_deref(), Some("fixture"));
+
+        // A pin the live embedder reproduces: re-pinned with no opt-in and
+        // no warning.
+        let store = Arc::new(MemoryStore::new());
+        seed_damaged_session(&store).await;
+        pin_from(&store, &FixtureEmbedder::new(), &target).await;
+        let out = run(
+            with_canary(
+                backends_on(store.clone(), "fixture", "fixture-model"),
+                CanaryMode::Warn,
+            ),
+            args(false, false),
+        )
+        .await
+        .expect("an agreeing pin needs no opt-in");
+        assert!(out.contains("embedder canary pinned again"), "{out}");
+        assert!(!out.contains("no longer flags"), "{out}");
     }
 
     /// An embedder whose every embed fails — drives the mid-run abort path.
@@ -936,6 +1502,8 @@ mod tests {
                 allow_embedding_mismatch: false,
                 missing_only: false,
                 drop_image_vectors: false,
+                rewrite_same_contract: false,
+                repin_canary: false,
             },
         )
         .await

@@ -251,7 +251,20 @@ Hybrid writers on vector-search stores warn at attach when text concepts have be
 lambo re-embed --missing-only --session <id> --agent <id>
 ```
 
-Restart the writer and check `lambo_stats` again. The repair fills missing text vectors in the existing embedding space. To restore a missing image vector, re-derive the image.
+Restart the writer and check `lambo_stats` again. The repair fills missing text vectors in the existing embedding space. To restore a missing image vector, re-derive the image. Under `[embedder] canary = "verify"` the repair runs the embedder canary like any writer attach, and a drift refuses it before it writes.
+
+### Repairing a canary drift
+
+An embedder canary drift (see `canary` in the [configuration reference](/lambo/config/#embedder)) means the embedder behind an unchanged embedding contract now produces different vectors: a re-quantised model, another server build, a provider revision. A plain `lambo re-embed` refuses a session that already carries the live contract, since there is nothing to migrate. Stop the writers of the sessions under that contract, then rewrite each one in place:
+
+```bash
+lambo re-embed --rewrite-same-contract --repin-canary --session <first> --agent <id>
+lambo re-embed --rewrite-same-contract --session <next> --agent <id>
+```
+
+`--rewrite-same-contract` embeds every text concept again with the live embedder and keeps the contract. It is refused on a session under another contract (re-embedding that is a migration, without the flag) and on a session with no vector (use `--missing-only`). Image vectors block it as they block a migration, unless you pass `--drop-image-vectors`.
+
+A full re-embed pins the store's canary for the contract again once its rewrite is durable. Before it writes, it checks the existing pin against the live embedder, and refuses to replace one the embedder does not reproduce unless you pass `--repin-canary`, because the store's other sessions under that contract rest on the pin. After that re-pin the canary no longer flags the sessions not yet re-embedded, and the command says so: re-embed each of them. The same check guards a migration into a contract whose pin the live embedder does not reproduce.
 
 ## Write commands
 

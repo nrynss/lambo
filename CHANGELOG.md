@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+- Embedding canary drift repair (#296). On a drift the refusal told the
+  operator to run `lambo re-embed`, which refuses a session already under the
+  live contract, the only state a drift is detected in. `lambo re-embed
+  --rewrite-same-contract` now rewrites every text vector of such a session
+  in place and keeps the contract; it is refused on a session under another
+  contract or with no vector, and checks the lease, widths and image vectors
+  as a migration does. A plain `lambo re-embed` on a same-contract session is
+  still refused, now before embedding anything and naming the two modes. The
+  drift refusal and `docs/reference/config.mdx` name the new flag, and
+  `docs/reference/cli.mdx` gains *Repairing a canary drift*.
+  `lambo re-embed --missing-only` now runs the embedder canary like any
+  writer attach: under `canary = "verify"` a drift refuses it before it
+  writes (it used to backfill vectors from the drifted embedder). A full
+  re-embed now reads the store's canary pin for the live contract before it
+  writes and refuses to replace a pin the live embedder does not reproduce
+  (a drift, or a check that could not run) unless `--repin-canary` is given,
+  because the store's other sessions under that contract rest on it; the
+  re-pin used to be silent, and its warning keyed on a condition no
+  successful rewrite met. With the opt-in the output says those sessions are
+  no longer flagged. The `--allow-embedding-mismatch` WARN ("relabeled the
+  session's existing vectors") is now logged after the relabel succeeds,
+  never ahead of a cross-kind relabel that refuses.
+  `formal/LamboProofs/Contract.lean` models the fix (`reembedCmdFixed`).
+
 - Conflict detection: a re-send by another agent no longer drops an edge's
   original writer from the conflict agent set (#297). Re-sending an edge (the
   same source, target and type, through `record_action` or `lambo_derive`'s

@@ -593,6 +593,12 @@ enum Commands {
         /// Full migration only: null the vector of every image concept instead of refusing on it. An image vector cannot be recomputed from its caption; each image concept keeps its caption and source, and deriving the same image again under the new embedder restores its vector.
         #[arg(long)]
         drop_image_vectors: bool,
+        /// Full rewrite of a session that already carries the live embedding contract: re-embed every text concept in place, keep the contract, and pin the canary again. This is the repair for an embedder canary drift (the same contract name, different vectors). Refused unless the session carries the live contract and holds a vector; a plain re-embed refuses such a session.
+        #[arg(long)]
+        rewrite_same_contract: bool,
+        /// Full rewrite only: allow replacing the store's canary pin for the live contract when the live embedder does not reproduce it (it drifted, or could not be checked). Other sessions in the store under that contract keep vectors from the pinned embedder, and after the re-pin the canary no longer flags them.
+        #[arg(long)]
+        repin_canary: bool,
     },
 }
 
@@ -2465,6 +2471,8 @@ fn main() -> ExitCode {
                 allow_embedding_mismatch: _,
                 missing_only,
                 drop_image_vectors,
+                rewrite_same_contract,
+                repin_canary,
             },
             Resolved::Full(backends),
         ) => run_async(
@@ -2480,6 +2488,8 @@ fn main() -> ExitCode {
                     allow_embedding_mismatch,
                     missing_only,
                     drop_image_vectors,
+                    rewrite_same_contract,
+                    repin_canary,
                 },
             ),
         ),
