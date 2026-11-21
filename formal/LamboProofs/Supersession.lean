@@ -45,11 +45,15 @@ and `superseded_by` (`src/recall/assemble.rs`), and the line gate of
 * `select_mem`, `select_length`: a replacement candidate is an eligible
   concept of the session, at or above the floor, not skipped, not the new
   concept, at most `REPLACEMENT_CANDIDATE_LIMIT` of them; its `newer` mark is
-  exactly "dated strictly after the new concept".
-  `select_newer_matches_trigger`, `select_newer_not_replaced`,
-  `select_tie_not_newer`: `newer` agrees with the trigger's direction, so a
-  candidate marked `newer` is never one the new concept replaces ("never cite
-  it in `against`", `docs/reference/mcp.mdx`), and a tie is not newer (test
+  exactly "dated strictly after the new concept" (its last conjunct).
+  `select_newer_never_replaced_by_new`: a candidate marked `newer` is dated
+  after the new concept, and on any graph, so on any later call, a suspected
+  pair of the two runs from the candidate to the new concept, never the other
+  way: the rule "never cite a `newer` candidate in `against`" (AGENTS.md,
+  `docs/reference/mcp.mdx`) rests on this and on `select_mem`.
+  `select_newer_matches_trigger`, `select_newer_not_replaced`: `newer` agrees
+  with the trigger's direction on the write's own graph.
+  `select_tie_not_newer`: a tie is not newer (test
   `a_later_dated_candidate_is_marked_newer_both_ways_and_a_tie_is_not`).
 * `stage2Since_newest`, `evaluate_some`, `verdict_sound`: a #20 verdict
   comes from a forward probe whose source's newest counted evidence is
@@ -73,7 +77,13 @@ and `superseded_by` (`src/recall/assemble.rs`), and the line gate of
   the supersede flag set from the verdicts that still hold.
 * `gather_off`, `gatherHolds_off`, `off_no_demotion`, `off_agrees`,
   `held_off`: with `canonization_supersede` off nothing is probed, decided,
-  demoted or held, and the cycle is `Canon.cycle` with no supersession.
+  demoted or held, and the cycle is `Canon.cycle` with no supersession. They
+  are definitional (`rfl`), as the Rust's early returns in `gather` and
+  `gather_holds` are (`if !params.supersede { return Probes::default(); }`).
+  The option defaults to off (`canonization_supersede: false`,
+  `src/config.rs:304`; test
+  `canonization_supersede_defaults_off_and_parses_from_the_file`,
+  `src/config.rs:1499`).
 * `contradictions_ignore_suspected`, `probesFor_ignore_suspected`: a
   `SuspectedSupersedes` edge is never read as a contradiction, so #198 never
   demotes anything ("informational ... never read as one").
@@ -113,6 +123,11 @@ duplicate), which `record` relies on.
   targets are probed in a cycle, and every theorem about `probesFor` holds for
   any target list. `still_holds` is the given predicate `holds` plus the
   explicit target-status check.
+* `gather_hold_for`, inspect's explanation of a hold: it returns no probes
+  unless the option is on and the node is Venerable
+  (`if !params.supersede || !venerable`), then probes that one node with a
+  fresh writer timeline and the full probe budget. It is not modelled; it
+  reuses `probes_for`, which is.
 * Stage 3's use of the hold beyond `held` (`Canon.lean` models Stage 3), the
   store-capability fallback and the audit write.
 -/
@@ -772,8 +787,11 @@ theorem select_newer_matches_trigger (slot : Nat → Nat → Bool) (E : List Edg
     rw [hn, h1]
     exact ⟨by simp, by simp [Ne.symm hid]⟩
 
-/-- **Never cite a newer candidate in `against`.** A candidate marked `newer`
-is never one the trigger would record as replaced by the new concept. -/
+/-- A candidate marked `newer` is never one the trigger, judged against the
+edges `E` of the same write, would record as replaced by the new concept. This
+holds trivially whenever `candidate` is `none` for another reason (slot rule,
+equal identifiers as for a `merged` candidate, a settled pair); the rule
+agents rely on is `select_newer_never_replaced_by_new`. -/
 theorem select_newer_not_replaced (slot : Nat → Nat → Bool) (E : List Edge)
     (look : Nat → Option Concept) (new : Concept) (hits : List Hit) (floor : Int)
     (skip merged : List Nat) (hl : LookById look) (c : Cand)
@@ -783,6 +801,28 @@ theorem select_newer_not_replaced (slot : Nat → Nat → Bool) (E : List Edge)
   have := (select_newer_matches_trigger slot E look new hits floor skip merged hl c hc old hold _ hp).2
   rw [hn] at this
   simp at this
+
+/-- **Never cite a newer candidate in `against`** (AGENTS.md, and
+`docs/reference/mcp.mdx`: "never cite it in `against`"). A candidate marked
+`newer` is dated strictly after the new concept, and on **any** graph (any
+edges `E'`, so on any later call too, whatever the slot rule) a suspected pair
+of the two can only run from the candidate to the new concept: the candidate
+is the possible replacement, never the replaced. -/
+theorem select_newer_never_replaced_by_new (E : List Edge) (look : Nat → Option Concept)
+    (new : Concept) (hits : List Hit) (floor : Int) (skip merged : List Nat)
+    (hl : LookById look) (c : Cand) (hc : c ∈ select E look new hits floor skip merged)
+    (old : Concept) (hold : look c.id = some old) (hn : c.newer = true) :
+    new.dated < old.dated ∧
+      ∀ (slot : Nat → Nat → Bool) (E' : List Edge) (p : Pair),
+        candidate slot E' new old = some p → p.newer = old.id ∧ p.older = new.id := by
+  obtain ⟨o, ho, _, _, _, _, _, _, _, hnewer⟩ := select_mem E look new hits floor skip merged hl c hc
+  rw [hold] at ho; injection ho with ho; subst ho
+  have hlt := hnewer.mp hn
+  refine ⟨hlt, ?_⟩
+  intro slot E' p hp
+  rcases candidate_dir slot E' new old p hp with ⟨_, _, h3⟩ | ⟨h1, h2, _⟩
+  · omega
+  · exact ⟨h1, h2⟩
 
 /-- A tie is not newer ("a tie is not marked newer"). -/
 theorem select_tie_not_newer (E : List Edge) (look : Nat → Option Concept) (new : Concept)
@@ -807,8 +847,13 @@ Dates are integer milliseconds. A row is one dependence edge into a node, as
   origin is a session interaction written by the cutoff, `none` otherwise
   (`counted` drops such a row).
 
-Every row of one origin carries that origin's date, so the per-origin map of
-`span_since` has the same minimum and maximum as the rows. -/
+`coveragePasses` takes the minimum and maximum over the rows' origin dates,
+where `span_since` takes them over a per-origin map (one entry per origin).
+The two agree when every row of one origin carries that origin's date. The
+`Row` type does not enforce it; the Rust gives it by construction (a row's
+`origin_dates` are its origin interaction's, and one interaction has one
+date). No theorem in this file depends on it: they use only the count of
+distinct origins and the edge dates. -/
 
 structure Row where
   edge : Nat
@@ -1931,6 +1976,9 @@ example : (select [] (lookOld 0) (mk 0 (-30)) [⟨1, 9000, true⟩] 8500 [] []).
   decide
 example : (select [] (lookOld 0) (mk 0 0) [⟨1, 9000, true⟩] 8500 [] []).map (·.newer) = [false] := by
   decide
+/-- The `newer` candidate above is the replacement, not the replaced: the
+trigger points the edge from it to the new concept. -/
+example : candidate anySlot [] (mk 0 (-30)) (mk 1 0) = some ⟨1, 0⟩ := by decide
 /-- The floor, the clamp and non-finite scores (test `the_floor`). -/
 example : (select [] (lookOld 0) (mk 0 10) [⟨1, 8499, true⟩] 8500 [] []).length = 0 := by decide
 example : (select [] (lookOld 0) (mk 0 10) [⟨1, 15000, true⟩] 8500 [] []).map (·.cosine) = [10000] := by
