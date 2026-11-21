@@ -1,5 +1,5 @@
 //! Phase-3 scoring, hot-list force-inclusion, and assembly to `max_tokens`
-//! (T5.3, spec §8) — the final read-path stage.
+//! (spec §8) — the final read-path stage.
 //!
 //! `assemble` turns the phase-2 [`ExpandedSet`] into a `RecallResult`:
 //! every member (required AND `chunk_group_id` siblings, "scored
@@ -35,7 +35,7 @@
 //!   Phase 1 normally fills `top_k`, so a `traversal_depth > 0` recall made
 //!   in the window usually returns no structural expansions; in the blend
 //!   they compete at `w_daemon × d`.
-//! * **Reservation holders the blend would show stay** (#79 review L4). A
+//! * **Reservation holders the blend would show stay** (#79 review). A
 //!   member with an active reservation that the blended order would emit is
 //!   force-included in cold mode, so its Reservation warning is not lost to
 //!   the window. A holder the blend would not show is not promoted, and the
@@ -55,9 +55,9 @@
 //!   candidate that query-only order would emit lacks an entry, the temporary
 //!   query-only rule above applies to every expanded member until the next
 //!   daemon score table arrives.
-//! * **weights** — [`RecallWeights`], sanitized like `ScoringWeights`
-//!   (ALGO-10): a non-finite or negative weight becomes `0.0`, so the final
-//!   score is finite for every input.
+//! * **weights** — [`RecallWeights`], sanitized like `ScoringWeights`: a
+//!   non-finite or negative weight becomes `0.0`, so the final score is
+//!   finite for every input.
 //!
 //! Hits are sorted by `final_score` descending, ties broken by canonical key
 //! ascending then node id ascending (the same total order phase 1 uses),
@@ -68,10 +68,10 @@
 //! Spec §10: "**Canonical nodes are:** eviction-immune; **always promoted
 //! first** with `is_canonical=True`; marked `[canonical]` in recall output
 //! with a blast-radius warning". The marker, the flag and the ⚑ warning
-//! landed in P5; "always promoted first" had no owner in any phase plan, so a
-//! Canonical concept that fell below the `top_k` cut was silently absent from
-//! the read the whole tier exists to produce. Canonization decides what is
-//! load-bearing; recall is where that decision is supposed to show up.
+//! landed earlier; "always promoted first" had no owner in any phase plan, so
+//! a Canonical concept that fell below the `top_k` cut was silently absent
+//! from the read the whole tier exists to produce. Canonization decides what
+//! is load-bearing; recall is where that decision is supposed to show up.
 //!
 //! So the sort key is `(is_canonical desc, final_score desc, canonical key
 //! asc, node id asc)`: every Canonical member of the expanded set is ranked
@@ -105,15 +105,14 @@
 //! for everything else in the call: reservations, rendering), through
 //! `HotList::revalidate_members` in `Daemon::recall_detailed`. The predicate
 //! re-derives its recency window from that instant, so an entry whose window
-//! elapsed between detection and this read is dropped there (XP-3), and a
-//! surviving entry's payload has just been rebuilt against `now`. Assemble
-//! takes the resulting payload map and renders it directly, never a cached
-//! copy; it does not touch the hot list itself, so recall does not depend on
-//! the daemon. Members in the map are **force-included**: they stay in the
-//! hit list even beyond `top_k`, so a live conflict warning is never
-//! truncated away by rank. The per-entry re-validation is a single
-//! neighborhood walk (CONC-5), so a handful of hot nodes under the graph lock
-//! is cheap.
+//! elapsed between detection and this read is dropped there, and a surviving
+//! entry's payload has just been rebuilt against `now`. Assemble takes the
+//! resulting payload map and renders it directly, never a cached copy; it
+//! does not touch the hot list itself, so recall does not depend on the
+//! daemon. Members in the map are **force-included**: they stay in the hit
+//! list even beyond `top_k`, so a live conflict warning is never truncated
+//! away by rank. The per-entry re-validation is a single neighborhood walk,
+//! so a handful of hot nodes under the graph lock is cheap.
 //!
 //! ## Assembly to `max_tokens`
 //!
@@ -307,8 +306,7 @@ where
     let score_of = |id: NodeId, cold: bool| {
         // d and r are multiplied unguarded, so sanitize them like the weights
         // (module doc: final score is finite for every input - a non-finite
-        // store-provided relevance must not poison the total order, GPT5.6sol
-        // P1-4 / deep-review F3).
+        // store-provided relevance must not poison the total order).
         let d = sane_weight(daemon.get(&id).copied().unwrap_or(0.0));
         let r = sane_weight(
             relevance
@@ -393,7 +391,7 @@ where
             .iter()
             .chain(expanded.siblings.iter())
             .any(|s| fresh_unscored(s.item));
-    // L4: a member with an active reservation (soft lock) that the blend
+    // A member with an active reservation (soft lock) that the blend
     // would show keeps its slot, and so its Reservation warning, in cold
     // mode: the warning is about the concept, not its rank, and cold order
     // must not drop it for the length of the window. A holder the blend
@@ -409,7 +407,7 @@ where
         HashSet::new()
     };
     let cold_forced = |id: NodeId| hot(id) || reserved_keep.contains(&id);
-    // M1: cold mode is worth its cost only when an unscored fresh concept
+    // Cold mode is worth its cost only when an unscored fresh concept
     // could be SHOWN. Under the blend its d is 0, so it ranks no higher than
     // under query-only order; if query-only order would not emit it within
     // top_k, neither mode can, and every returned hit keeps its daemon share.
@@ -434,7 +432,7 @@ where
     let members = scored(cold);
     for s in &members {
         let (d, r, daemon_part, _) = score_of(s.item, cold);
-        // T9 instrumentation (default-invisible trace): attribute the final
+        // Instrumentation (default-invisible trace): attribute the final
         // score to its arms. A member with `r == 0` was never a phase-1
         // candidate — it reached the assembled block purely by structural
         // expansion (BFS over structural edges / chunk-group siblings), so it
@@ -442,8 +440,8 @@ where
         // query arm. A member with `r > 0` carries a query-relevance arm
         // (lexical keyword BM25 / vector similarity / recent flat score).
         // The arm/content formatting and the `graph.node` lookup run only when
-        // a trace subscriber is present (T9-R1-4) - never per-member with
-        // tracing disabled.
+        // a trace subscriber is present - never per-member with tracing
+        // disabled.
         if tracing::enabled!(target: "lambo::recall", tracing::Level::TRACE) {
             let arm = if r > 0.0 && relevance.contains_key(&s.item) {
                 "lexical/vector"
@@ -476,9 +474,9 @@ where
         }
     }
     // top_k normal members (counted by VALID emitted hits — a graph-missing
-    // member such as a stale durable-vector id must not consume a top_k slot,
-    // GPT5.6sol P2-5), plus every force-included hot member, in score order.
-    // Blast radii for every canonical hit, computed ONCE (P2-7).
+    // member such as a stale durable-vector id must not consume a top_k
+    // slot), plus every force-included hot member, in score order.
+    // Blast radii for every canonical hit, computed ONCE.
     let radii = format::blast_radii(graph);
     let mut hits: Vec<RecallHit> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
@@ -522,7 +520,7 @@ where
             },
             repo_scope: crate::graph::resource::repo_scope_of_key(&c.canonical_key),
         };
-        // H3: the full status comes from the SAME graph snapshot the hit was
+        // The full status comes from the SAME graph snapshot the hit was
         // assembled from (never reconstructed from `is_canonical` or a later
         // store read), and each typed warning is attached here, where its
         // producer is still known, BEFORE the flat `warnings` extend below.
@@ -655,12 +653,12 @@ where
     // Context: the shared budget cut (`format::fit_blocks`): the longest
     // ranked prefix of whole blocks, measured on the ACTUAL joined text
     // (separators included) so the rendered output is within budget; a
-    // lower-ranked block never follows a skipped one (GPT5.6sol P1-4); a
-    // first block too long on its own is truncated with a marker naming its
-    // id instead of leaving the context empty (#130).
+    // lower-ranked block never follows a skipped one; a first block too long
+    // on its own is truncated with a marker naming its id instead of leaving
+    // the context empty (#130).
     let fitted = format::fit_blocks(&hit_blocks, query.max_tokens, &token_fn);
 
-    // H3: `included_in_context` is recorded AT the token-budget cut — true
+    // `included_in_context` is recorded AT the token-budget cut — true
     // exactly for the longest ranked prefix of hits whose complete rendered
     // blocks appear in the context. Every hit stays in `hits`; later ones
     // report `false` (their annotations remain, token exclusion never
@@ -675,7 +673,7 @@ where
         context: fitted.context,
         truncation,
         warnings,
-        // I1: attached by the caller, which owns the phase-1 result this
+        // Attached by the caller, which owns the phase-1 result this
         // assembly ran over. Assembly itself sees only the expanded member
         // list, so inventing legs here would mean guessing.
         legs: Default::default(),
@@ -1032,7 +1030,7 @@ struct Emission {
 /// of `ranked`, plus every `forced` member wherever it sorts.
 ///
 /// A graph-missing member such as a stale durable-vector id must not consume
-/// a top_k slot (GPT5.6sol P2-5), and a forced member never consumes one.
+/// a top_k slot, and a forced member never consumes one.
 /// The cold-mode trigger runs this over the query-only order to ask whether
 /// a fresh concept could be shown at all, so both callers share one rule.
 ///
@@ -1102,7 +1100,8 @@ fn emitted(
     Emission { hits: out, skipped }
 }
 
-/// Finite, non-negative weight, else `0.0` (mirrors ALGO-10 sanitization).
+/// Finite, non-negative weight, else `0.0` (mirrors the `ScoringWeights`
+/// sanitization).
 fn sane_weight(w: f64) -> f64 {
     if w.is_finite() && w >= 0.0 {
         w
@@ -1606,7 +1605,7 @@ mod tests {
             ranked: vec![Scored::new(uid(1), 1.0)],
         };
         let hot = HashMap::new();
-        // NaN and negative weights must not poison the final score (ALGO-10).
+        // NaN and negative weights must not poison the final score.
         let result = assemble(
             &g,
             &expanded,
@@ -1627,8 +1626,8 @@ mod tests {
 
     #[test]
     fn non_finite_daemon_or_relevance_inputs_sanitize_to_zero() {
-        // Deep-review F3: the "final score finite for every input" contract is
-        // honored for the INPUTS too, not just the weights. A non-finite
+        // The "final score finite for every input" contract is honored for
+        // the INPUTS too, not just the weights. A non-finite
         // store-provided relevance (or daemon score) must sanitize to 0.0 and
         // never rank first via total_cmp.
         let g = graph_with(2);
@@ -1672,9 +1671,9 @@ mod tests {
     // Hot-list force-include
     // -----------------------------------------------------------------------
 
-    /// Conflict predicate shaped like T4.3's: the recency window is derived
-    /// from the caller's `now`, so a lapsed window evicts the entry and a
-    /// live one rebuilds `seconds_ago` at read time (XP-3).
+    /// Conflict predicate shaped like the daemon conflict detector's: the
+    /// recency window is derived from the caller's `now`, so a lapsed window
+    /// evicts the entry and a live one rebuilds `seconds_ago` at read time.
     fn conflict_entry(
         node: NodeId,
         writer: AgentId,
@@ -2445,11 +2444,12 @@ mod tests {
     // * daemon scores: the MERGED daemon scorer (`daemon::score::rescore`)
     //   over the fixture — session-relative, wall-clock-free, so the table is
     //   stable;
-    // * hot list: built directly with a T4.3-shaped Conflict predicate on
-    //   `user schema` whose recency window derives from the caller's `now`;
+    // * hot list: built directly with a Conflict predicate shaped like the
+    //   daemon conflict detector's, on `user schema` whose recency window
+    //   derives from the caller's `now`;
     // * `now`: a fixed instant (base + 60 min), so the conflict's rebuilt
     //   `seconds_ago` is exactly 11 at read time.
-    // The golden file is the byte-for-byte expected context block. G2's 0.35
+    // The golden file is the byte-for-byte expected context block. The 0.35
     // recent floor is reflected there: it no longer masks a stronger
     // non-recent candidate during phase-1 ordering.
     #[cfg(feature = "fixtures")]
@@ -2550,8 +2550,8 @@ mod tests {
         );
     }
 
-    // P1-4 (GPT5.6sol): the token budget charges the separator AND stops at the
-    // first non-fitting block (ranked-prefix) — a lower-ranked short block must
+    // The token budget charges the separator AND stops at the first
+    // non-fitting block (ranked-prefix) — a lower-ranked short block must
     // not follow a skipped higher-ranked one. Provable with a tiny token_fn
     // that returns the byte length, and blocks whose sizes straddle a budget.
     #[test]
@@ -2578,7 +2578,7 @@ mod tests {
         // test self-adjusts when the render changes: block1+block2 fits with
         // one byte to spare only while the join separator is free, and stops
         // fitting once the "\n\n" join is charged. Under a separator-free
-        // accumulator the pre-P1-4 bug rendered two blocks here; the fixed
+        // accumulator the old code rendered two blocks here; the fixed
         // code must stop at block1 (ranked-prefix: block2, though it might
         // fit alone, must NOT appear after block1).
         let hit1 = RecallHit {
@@ -2635,7 +2635,7 @@ mod tests {
         assert_eq!(all.context.split("\n\n").count(), 3);
     }
 
-    // Deep-review F1 / GPT5.6sol P1-4: the context is a STRICT ranked prefix.
+    // The context is a STRICT ranked prefix.
     // A lower-ranked block that would fit alone must NOT appear after a
     // higher-ranked block that does not fit. Sizes are computed at runtime so
     // the test is robust to render changes.
@@ -2717,8 +2717,8 @@ mod tests {
         assert!(truncated.context.len() < full_long.len());
     }
 
-    // P2-5 (GPT5.6sol): a graph-missing member within top_k (e.g. a stale durable
-    // vector id) must NOT consume a top_k slot — the next valid member fills it.
+    // A graph-missing member within top_k (e.g. a stale durable vector id)
+    // must NOT consume a top_k slot — the next valid member fills it.
     #[test]
     fn stale_graph_missing_member_does_not_consume_top_k_slot() {
         // expanded.required includes uid(9) which is NOT in the graph (stale
@@ -2754,7 +2754,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // H3 — structured recall payload golden (blended pipeline)
+    // Structured recall payload golden (blended pipeline)
     // -----------------------------------------------------------------------
 
     /// Walk `id` through the audited transition path and stop at `to` (the
@@ -2800,7 +2800,7 @@ mod tests {
         }
     }
 
-    /// The H3 blended golden — one result carrying the full annotation family:
+    /// The blended payload golden — one result carrying the full annotation family:
     /// a Canonical load-bearing hit, a Candidate, a conflict, a non-conflict
     /// hot condition, a reservation, and an annotation-free hit. The payload
     /// is pinned byte-for-byte in `fixtures/recall-h3-goldens.json`.
@@ -3213,7 +3213,7 @@ mod tests {
         }
     }
 
-    /// M1 (#79 review): a fresh unscored keyword hit that query-only order
+    /// From the #79 review: a fresh unscored keyword hit that query-only order
     /// would place below the `top_k` cut cannot be shown in either mode, so
     /// it must not withhold the daemon share from the hits that are shown.
     /// Moved inside the cut, the same hit does switch the recall to cold.
@@ -3281,7 +3281,7 @@ mod tests {
         assert!(inside.cold_start, "the result reports cold mode (M2)");
     }
 
-    /// M1, the force-included edge: a hot-listed fresh hit is emitted past
+    /// The force-included edge of the same rule: a hot-listed fresh hit is emitted past
     /// `top_k`, so it can be shown and still switches the recall to cold.
     #[test]
     fn unscored_hot_hit_below_the_top_k_cut_still_starts_cold_mode() {
@@ -3322,7 +3322,7 @@ mod tests {
         assert!(approx(result.hits[1].score, 0.10));
     }
 
-    /// L4 (#79 review): a reservation holder the blend would show keeps its
+    /// From the #79 review: a reservation holder the blend would show keeps its
     /// slot and its Reservation warning in cold mode, even when query-only
     /// order ranks it below the cut. A holder the blend would not show is
     /// not promoted, and the blend itself forces no holder.
@@ -3385,7 +3385,7 @@ mod tests {
         assert_eq!(ids_of(&blend), vec![uid(1)]);
     }
 
-    /// F3 (#79 review): kept reservation holders take no `top_k` slot in cold
+    /// From the #79 review: kept reservation holders take no `top_k` slot in cold
     /// mode, so a cold result holds `top_k` query-ranked hits plus the holders
     /// it keeps, and never more: a holder the blend would not show is not
     /// added.

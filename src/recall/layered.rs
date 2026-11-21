@@ -69,7 +69,7 @@
 //!    context flag from that one cut. Each session's own `context` is
 //!    ignored. A session that answered by traversal gets its headline
 //!    recomputed from the dependents of its own that the merged context
-//!    renders (T9-R1-N4).
+//!    renders.
 //! 5. **Degradation.** A list whose recall is unavailable contributes no
 //!    hits; the answer gets one `layer_unavailable` response annotation and
 //!    one warning per such list, naming it and the sessions the results
@@ -489,7 +489,7 @@ where
     let mut vector_budget = params.vector_pairs;
     let mut slots = 0usize;
     let mut pending: Vec<(usize, (usize, usize))> = Vec::new();
-    // #129 (review M2): a repository-scoped path is its exact key. Two
+    // #129 review: a repository-scoped path is its exact key. Two
     // repositories' `README.md` embed alike, so a scoped copy joins a
     // group only by an equal key, never by vector, and no copy joins a
     // scoped one by vector.

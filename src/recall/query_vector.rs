@@ -23,12 +23,12 @@
 //!
 //! **Never cached, never logged.** Neither cache sees these vectors: the #14
 //! query-embedding cache is keyed by query text and holds only query-role
-//! text vectors (design 7.2: an image key would be a digest of a user's
-//! image held across requests), and the pipeline recall cache never serves
-//! or stores a vector-dependent result (P1-2). No message here quotes the
-//! bytes, a component or the declared contract's strings beyond what
-//! `check_supplied_values` shows to a library caller; the surfaces check
-//! with the model-safe `surface::image::check_submitted_vector` first.
+//! text vectors (design 7.2: an image key would be a digest of a user's image
+//! held across requests), and the pipeline recall cache never serves or
+//! stores a vector-dependent result. No message here quotes the bytes, a
+//! component or the declared contract's strings beyond what
+//! `check_supplied_values` shows to a library caller; the surfaces check with
+//! the model-safe `surface::image::check_submitted_vector` first.
 
 use crate::embed::{EmbedError, Embedder, ImageInput, Modalities};
 use crate::graph::hybrid::HYBRID_IO_TIMEOUT;

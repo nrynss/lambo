@@ -1,5 +1,4 @@
-//! Dependency-question dispatch (T9) — route by query kind, not by blending
-//! arms.
+//! Dependency-question dispatch — route by query kind, not by blending arms.
 //!
 //! The recall pipeline (`candidates` → `expand` → `assemble`) answers every
 //! query by *ranking*: a structural dependent that is reachable by traversal
@@ -18,18 +17,18 @@
 //! `None` and the caller falls through to the normal word/blend path — the
 //! refusal is as important as the dispatch.
 //!
-//! The traversal is **one hop by design** (T9-R1-6): it returns the anchor's
-//! DIRECT structural dependents, which is exactly the §4.1 blast-radius
-//! predicate. `RecallQuery::traversal_depth` is intentionally not honored —
-//! multi-hop expansion would turn a "depends on" answer into a transitive
-//! reachability question, which belongs to the blended pipeline's `expand`,
-//! not to blast-radius traversal. Ordering, however, matches the blend: spec
-//! §10 canonical-first promotion is applied ([`dependents`]).
+//! The traversal is **one hop by design**: it returns the anchor's DIRECT
+//! structural dependents, which is exactly the §4.1 blast-radius predicate.
+//! `RecallQuery::traversal_depth` is intentionally not honored — multi-hop
+//! expansion would turn a "depends on" answer into a transitive reachability
+//! question, which belongs to the blended pipeline's `expand`, not to
+//! blast-radius traversal. Ordering, however, matches the blend: spec §10
+//! canonical-first promotion is applied ([`dependents`]).
 //!
 //! Every step logs at `tracing::trace!` (`target: "lambo::recall"`): which
 //! arm a question is classified into, the resolved anchor, and each dependent
 //! collected. This is default-invisible (no subscriber enables trace on the
-//! CLI/daemon path) and is the T9 instrumentation for the structural arm.
+//! CLI/daemon path) and is the instrumentation for the structural arm.
 
 use unicode_normalization::{char::is_combining_mark, UnicodeNormalization};
 
@@ -38,7 +37,7 @@ use crate::recall::detail::{Annotation, AnnotationKind, DetailedHit, DetailedRec
 use crate::recall::format;
 use crate::types::{tie_break_by_key, CanonizationStatus, Node, NodeId, RecallHit, Scored};
 
-/// What kind of question a recall query is, for routing (T9).
+/// What kind of question a recall query is, for routing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RecallKind {
     /// A general / word-match question — the blended pipeline answers it.
@@ -64,13 +63,13 @@ const STRUCTURAL_MARKERS: [&str; 7] = [
 ];
 
 /// Phrasings that mark a question as structural / dependency rather than
-/// plain word recall. Kept deliberately small and EXPLICIT (T9-R1-1): every
-/// marker is a dependency/structural phrasing, never an ordinary substring.
-/// In particular bare `"depend"` is NOT a marker — it would match inside
-/// `"independent"` — and bare `"references"` / `"is it safe"` are ordinary
-/// prose, so they are dropped. A marker-bearing but non-dependency question
-/// ("is the system independent of a single region", "the report references
-/// the changelog") stays `General`.
+/// plain word recall. Kept deliberately small and EXPLICIT: every marker is a
+/// dependency/structural phrasing, never an ordinary substring. In particular
+/// bare `"depend"` is NOT a marker — it would match inside `"independent"` —
+/// and bare `"references"` / `"is it safe"` are ordinary prose, so they are
+/// dropped. A marker-bearing but non-dependency question ("is the system
+/// independent of a single region", "the report references the changelog")
+/// stays `General`.
 ///
 /// Classify a query into a recall arm (lexical/vector vs structural).
 pub fn classify(query: &str) -> RecallKind {
@@ -572,15 +571,14 @@ impl ResolvedAnchor {
 
 /// Cheap in-memory predicate: would a structural dispatch fire for `query` on
 /// `graph`? True iff the query classifies `Structural` AND an anchor resolves
-/// WITH at least one structural dependent. The daemon routing (T9-R1-3) uses
-/// this to decide whether the async store-gather can be skipped — it skips the
-/// gather only when the dispatch is actually about to fire, so a structural
-/// phrasing that cannot dispatch falls through to the FULL blend (never a
-/// degraded keyword-only answer). The dispatch itself re-validates under the
-/// final graph lock inside `try_structural`, so this is a gather-skip
-/// decision, not a short-circuit of correctness. It answers for a positive
-/// `top_k`; the daemon asks `fits_structural_with`, which also takes the
-/// recall's `top_k`.
+/// WITH at least one structural dependent. The daemon routing uses this to
+/// decide whether the async store-gather can be skipped — it skips the gather
+/// only when the dispatch is actually about to fire, so a structural phrasing
+/// that cannot dispatch falls through to the FULL blend (never a degraded
+/// keyword-only answer). The dispatch itself re-validates under the final
+/// graph lock inside `try_structural`, so this is a gather-skip decision, not
+/// a short-circuit of correctness. It answers for a positive `top_k`; the
+/// daemon asks `fits_structural_with`, which also takes the recall's `top_k`.
 pub fn fits_structural(graph: &Graph, query: &str) -> bool {
     if !matches!(classify(query), RecallKind::Structural) {
         return false;
@@ -741,17 +739,17 @@ pub(crate) fn try_structural_with(
             },
             repo_scope: crate::graph::resource::repo_scope_of_key(&c.canonical_key),
         };
-        // H3: status from the same graph snapshot, typed annotation attached
-        // where its producer is known (mirrors assemble). Status `None` is
-        // carried as absent (the wire contract).
+        // Status from the same graph snapshot, typed annotation attached where
+        // its producer is known (mirrors assemble). Status `None` is carried
+        // as absent (the wire contract).
         let mut detailed_hit = DetailedHit::new(
             &hit,
             (c.canonization_status != CanonizationStatus::None).then_some(c.canonization_status),
         );
         detailed_hit.names = graph.display_names(c.id);
-        // T9-R1-5: canonical structural hits render the §13 load-bearing-pillar
-        // warning exactly as the blended pipeline does (assemble), so the
-        // structural and blend surfaces look identical.
+        // Canonical structural hits render the §13 load-bearing-pillar warning
+        // exactly as the blended pipeline does (assemble), so the structural
+        // and blend surfaces look identical.
         let mut lines: Vec<String> = Vec::new();
         if canonical {
             let text = format::blast_radius_warning(hit.blast_radius.unwrap_or_default());
@@ -782,15 +780,15 @@ pub(crate) fn try_structural_with(
         hits = hits.len(),
         "recall dispatched dependency question to structural traversal"
     );
-    // T9-R1-N4: headline names only the dependents the context actually
-    // renders (kept whole blocks, plus a truncated first block, which the
-    // context does show), not the pre-truncation hit set.
+    // The headline names only the dependents the context actually renders
+    // (kept whole blocks, plus a truncated first block, which the context
+    // does show), not the pre-truncation hit set.
     let count = fitted.rendered();
     let mut warnings = Vec::new();
     let traversal = traversal_headline(count);
     warnings.push(traversal.clone());
-    // H3: included_in_context at the cut; the traversal explanation is
-    // response-global — one annotation, never attached to a hit.
+    // `included_in_context` is recorded at the cut; the traversal explanation
+    // is response-global — one annotation, never attached to a hit.
     let truncation = DetailedRecall::mark_context(&mut detailed, &fitted);
     Some(DetailedRecall {
         concept_count: Some(graph.concept_count()),
@@ -803,8 +801,8 @@ pub(crate) fn try_structural_with(
         truncation,
         warnings,
         // A dispatched structural query answers by traversal and skips the
-        // phase-1 blend entirely (T9-R1-3), so there are no leg scores to
-        // report. Empty here means "no leg ran", not "the legs were dropped".
+        // phase-1 blend entirely, so there are no leg scores to report. Empty
+        // here means "no leg ran", not "the legs were dropped".
         legs: Default::default(),
         // No blend ran, so there is no daemon share to withhold.
         cold_start: false,
@@ -816,9 +814,9 @@ pub(crate) fn try_structural_with(
     })
 }
 
-/// The structural-dispatch headline (the `traversal` response annotation
-/// and its warning line) for `count` rendered dependents (T9-R1-N4). The
-/// layered merge recomputes it after its own budget cut (#33 PR 2).
+/// The structural-dispatch headline (the `traversal` response annotation and
+/// its warning line) for `count` rendered dependents. The layered merge
+/// recomputes it after its own budget cut (#33 PR 2).
 pub(crate) fn traversal_headline(count: usize) -> String {
     format!("recall: dependency question answered by graph traversal ({count} dependents)")
 }
@@ -1006,8 +1004,8 @@ mod tests {
 
     #[test]
     fn marker_bearing_non_dependency_questions_stay_general() {
-        // T9-R1-1: a marker-bearing but genuinely lexical/vector question must
-        // NOT route to the traversal. "independent" embeds the bare "depend"
+        // A marker-bearing but genuinely lexical/vector question must NOT
+        // route to the traversal. "independent" embeds the bare "depend"
         // substring and "references" is ordinary prose — both must stay
         // General, and must not dispatch.
         assert_eq!(
@@ -1583,8 +1581,8 @@ mod tests {
         let (logs, _guard) = capture_logs(tracing::Level::TRACE);
 
         // Drive the REAL general pipeline over the same graph to expose the
-        // per-hit d/r/final contributions (the T9 instrumentation in
-        // `assemble`), plus the dispatch classification trace.
+        // per-hit d/r/final contributions (the instrumentation in `assemble`),
+        // plus the dispatch classification trace.
         let mut index = crate::graph::index::InvertedIndex::new();
         for c in g.concepts() {
             index.add(c);
@@ -1813,7 +1811,7 @@ mod tests {
         g
     }
 
-    /// The H3 structural golden — a dispatched dependency question carries
+    /// The structural payload golden — a dispatched dependency question carries
     /// one hit with a `load_bearing` annotation (its Canonical status from
     /// the same graph snapshot), one annotation-free hit, and the traversal
     /// explanation as a single response-global annotation.
@@ -1940,8 +1938,8 @@ mod tests {
             "{}",
             result.context
         );
-        // The label survives the cut (M1): content head, `…`, then the
-        // block's own label line.
+        // The label survives the cut: content head, `…`, then the block's own
+        // label line.
         assert!(
             result.context.contains("… [Entity] (score "),
             "{}",
