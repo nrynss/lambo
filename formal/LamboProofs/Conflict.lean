@@ -58,6 +58,22 @@ Model of two daemon detectors that share write-time attribution:
   arithmetic in the order the Rust applies them. Canonical keys are `Nat`
   under their order (the Rust compares `String`s).
 
+## The fix for #297 (what changed)
+
+`conflictAt` and its theorems model the rule before #297, which resolved an
+edge's writers only at its latest write `max(created_at, last_reinforced)`:
+a re-send by another agent (a duplicate natural key, which `record_edge`
+turns into a reinforcement that moves `last_reinforced`) replaced the
+original writer, and could drop it from every node
+(`resend_drops_original_writer`). They are kept as statements about that
+version. The fixed `conflict_at_with` is `conflictAtFixed`: every
+non-excluded edge adds its writers at `created_at` (`creatorsOf`, as
+contradiction dating attributes) **and** at its latest write (`writersOf`, as
+before) to the agent set (`candidatesOf`). Write activity, the newest write,
+the named writer and `seconds_ago` still read the latest write. Resolving at
+`created_at` alone was rejected: it drops the re-sender instead
+(`resend_by_other_joins`) and can leave the named writer outside the set.
+
 ## What is left out
 
 `detect` (the walk over every node and the sort by node id), `insert_conflicts`
@@ -102,11 +118,30 @@ Conflict:
   (an edge written after `now` still adds its agent, as documented; a
   design-consistency question against `written_by` in `contradiction.rs`,
   reachable only with a mocked clock or fixture); `resend_drops_original_writer`
-  (an edge is attributed at its latest write, so a re-send by another agent
-  removes the original writer from the edge's target node); and
+  (before #297 an edge was attributed at its latest write, so a re-send by
+  another agent removed the original writer from the edge's target node); and
   `writer_order_dependent` (with no interaction at the newest instant, ties
   between edges go to the smallest edge id, a rule the docs do not state;
   fixture-only, see its doc).
+
+The fix for #297 (`conflictAtFixed`):
+* `resend_keeps_creator`: an edge's first writer stays in the agent set after
+  any re-send, by anyone; `resend_adds_resender`: the re-sender joins too.
+* `resend_still_fires`: a conflict that fired before an edge's first re-send
+  (at an instant between its write and `now`) still fires after it.
+* `conflictAtFixed_of_unreinforced`: where no edge was re-sent the fix is the
+  old rule exactly; `conflictAtFixed_of_conflictAt`: it never loses a
+  conflict the old rule found.
+* `conflictAtFixed_isSome_iff`, `single_agent_never_conflicts_fixed`,
+  `writer_mem_agents_fixed`, `secondsAgo_le_window_fixed`,
+  `excluded_edge_irrelevant_fixed`, and order independence
+  (`conflictAtFixed_perm_isSome`, `conflictAtFixed_perm_agents`,
+  `conflictAtFixed_perm_secondsAgo`, `writer_perm_of_unique_fixed`).
+* `issue_297_fixed` (the issue's scenario: no conflict before, one after),
+  `resend_keeps_original_writer`, `resend_by_other_joins`.
+* Residual, pinned: `second_resend_drops_first_resender`. The graph keeps
+  only an edge's first and latest write instants, so a writer between them
+  (a re-sender re-sent over) is not recoverable.
 
 Contradiction:
 * `declaredAt_le_createdAt`, `declaredAt_of_le`, `declaredAt_of_ge`,
@@ -1037,6 +1072,484 @@ example : conflictAt lo₀ recencyWindow 3610 (twoAgentTl 3560) (twoAgent 3560 3
     some ⟨[1, 2], 2, 21⟩ := by decide
 example : conflictAt lo₀ recencyWindow 3620 (twoAgentTl 3560) (twoAgent 3560 3589) = none := by
   decide
+
+/-! ## The fix for #297: an edge's first writer stays in the agent set
+
+`conflictAt` above is the rule before #297: an edge's writers are resolved at
+its latest write only (`writersOf`), so a re-send by another agent replaces
+the original writer (`resend_drops_original_writer`). The fixed
+`conflict_at_with` resolves every non-excluded edge twice and adds both lists
+to the agent set, creation first: at its `created_at` (`creatorsOf`, the
+instant contradiction dating already attributes at, which no re-send moves)
+and at its latest write (`writersOf`, as before). Everything else reads the
+latest write, unchanged: a re-send inside the window is write activity
+(`qualifies`), and the newest write, its named writer and `seconds_ago` come
+from `newestOf` as before. -/
+
+omit [Ord A] in
+/-- The edge's writers at its first write: `attribute_at(edge.created_at)`. -/
+def creatorsOf (tl : List (Interaction A)) (e : Edge A) : List A :=
+  (attributeAt tl e.source e.createdAt).1
+
+omit [Ord A] in
+/-- Every agent the fixed rule credits with an edge: its first writers, then
+its latest writers. -/
+def candidatesOf (tl : List (Interaction A)) (e : Edge A) : List A :=
+  creatorsOf tl e ++ (writersOf tl e).1
+
+omit [Ord A] in
+def agentsStepFixed (tl : List (Interaction A)) (as : List A) (e : Edge A) : List A :=
+  if e.ty.excluded then as else (candidatesOf tl e).foldl pushNew as
+
+omit [Ord A] in
+/-- The fixed agent set, before its sort. -/
+def agentsOfFixed (tl : List (Interaction A)) (es : List (Edge A)) : List A :=
+  es.foldl (agentsStepFixed tl) []
+
+/-- The fixed `conflict_at_with`: only the agent set changes. -/
+def conflictAtFixed (lo : Int) (w : Option Nat) (now : Int) (tl : List (Interaction A))
+    (es : List (Edge A)) : Option (Hit A) :=
+  let agents := agentsOfFixed tl es
+  if agents.length < 2 then none
+  else
+    match newestOf lo w now tl es with
+    | none => none
+    | some (t, wr) => some ⟨sortAgents agents, wr, (now - t).toNat⟩
+
+omit [Ord A] in
+/-- A re-send of `e` at `r`: on a duplicate natural key `Graph::record_edge`
+sets `last_reinforced` to the new write's time and keeps the id, type,
+source, `created_at` and `event_time`. -/
+def resend (e : Edge A) (r : Int) : Edge A := { e with lastReinforced := r }
+
+/-! ### The fixed agent set -/
+
+omit [DecidableEq A] [Ord A] in
+theorem mem_candidatesOf (tl : List (Interaction A)) (e : Edge A) (x : A) :
+    x ∈ candidatesOf tl e ↔ x ∈ creatorsOf tl e ∨ x ∈ (writersOf tl e).1 := by
+  simp [candidatesOf]
+
+omit [Ord A] in
+theorem mem_foldl_agentsStepFixed (tl : List (Interaction A)) (es : List (Edge A))
+    (as : List A) (x : A) :
+    x ∈ es.foldl (agentsStepFixed tl) as ↔
+      x ∈ as ∨ ∃ e ∈ es, e.ty.excluded = false ∧ x ∈ candidatesOf tl e := by
+  induction es generalizing as with
+  | nil => simp
+  | cons e es ih =>
+    simp only [List.foldl_cons, ih, List.mem_cons]
+    unfold agentsStepFixed
+    split
+    · rename_i hex
+      constructor
+      · rintro (h | ⟨e', he', h1, h2⟩)
+        · exact Or.inl h
+        · exact Or.inr ⟨e', Or.inr he', h1, h2⟩
+      · rintro (h | ⟨e', (rfl | he'), h1, h2⟩)
+        · exact Or.inl h
+        · simp [hex] at h1
+        · exact Or.inr ⟨e', he', h1, h2⟩
+    · rename_i hex
+      rw [mem_foldl_pushNew]
+      constructor
+      · rintro ((h | h) | ⟨e', he', h1, h2⟩)
+        · exact Or.inl h
+        · exact Or.inr ⟨e, Or.inl rfl, by simpa using hex, h⟩
+        · exact Or.inr ⟨e', Or.inr he', h1, h2⟩
+      · rintro (h | ⟨e', (rfl | he'), h1, h2⟩)
+        · exact Or.inl (Or.inl h)
+        · exact Or.inl (Or.inr h2)
+        · exact Or.inr ⟨e', he', h1, h2⟩
+
+omit [Ord A] in
+/-- "Agent X has an edge to node N" under the fix: X is a writer of a
+non-excluded edge incident to N, at its first write or at its latest. -/
+theorem mem_agentsOfFixed (tl : List (Interaction A)) (es : List (Edge A)) (x : A) :
+    x ∈ agentsOfFixed tl es ↔ ∃ e ∈ es, e.ty.excluded = false ∧ x ∈ candidatesOf tl e := by
+  unfold agentsOfFixed
+  rw [mem_foldl_agentsStepFixed]
+  simp
+
+omit [Ord A] in
+theorem agentsOfFixed_nodup (tl : List (Interaction A)) (es : List (Edge A)) :
+    (agentsOfFixed tl es).Nodup := by
+  unfold agentsOfFixed
+  suffices ∀ as : List A, as.Nodup → (es.foldl (agentsStepFixed tl) as).Nodup from
+    this [] (by simp)
+  induction es with
+  | nil => intro as h; exact h
+  | cons e es ih =>
+    intro as h
+    simp only [List.foldl_cons]
+    apply ih
+    unfold agentsStepFixed
+    split
+    · exact h
+    · exact nodup_foldl_pushNew _ h
+
+omit [Ord A] in
+/-- The fix only adds agents: every agent of the old set is in the new one. -/
+theorem agentsOf_sub_fixed (tl : List (Interaction A)) (es : List (Edge A)) {x : A}
+    (h : x ∈ agentsOf tl es) : x ∈ agentsOfFixed tl es := by
+  rw [mem_agentsOf] at h
+  obtain ⟨e, he, hx, hw⟩ := h
+  exact (mem_agentsOfFixed tl es x).2 ⟨e, he, hx, (mem_candidatesOf tl e x).2 (Or.inr hw)⟩
+
+omit [Ord A] in
+theorem foldl_pushNew_of_mem (l as : List A) (h : ∀ x ∈ l, x ∈ as) : l.foldl pushNew as = as := by
+  induction l with
+  | nil => rfl
+  | cons a l ih =>
+    simp only [List.foldl_cons]
+    have ha : a ∈ as := h a (by simp)
+    rw [show pushNew as a = as by simp [pushNew, ha]]
+    exact ih (fun x hx => h x (by simp [hx]))
+
+omit [Ord A] in
+/-- On an edge never re-sent (`last_reinforced ≤ created_at`, as at insert)
+the fixed step is the old one: the first write is the latest. -/
+theorem agentsStepFixed_of_unreinforced (tl : List (Interaction A)) (as : List A) (e : Edge A)
+    (h : e.lastReinforced ≤ e.createdAt) : agentsStepFixed tl as e = agentsStep tl as e := by
+  have hlw : lastWrite e = e.createdAt := Int.max_eq_right h
+  have hc : creatorsOf tl e = (writersOf tl e).1 := by
+    simp only [creatorsOf, writersOf, hlw]
+  unfold agentsStepFixed agentsStep candidatesOf
+  split
+  · rfl
+  · rw [hc, List.foldl_append]
+    apply foldl_pushNew_of_mem
+    intro x hx
+    rw [mem_foldl_pushNew]
+    exact Or.inr hx
+
+omit [Ord A] in
+theorem agentsOfFixed_of_unreinforced (tl : List (Interaction A)) (es : List (Edge A))
+    (h : ∀ e ∈ es, e.lastReinforced ≤ e.createdAt) : agentsOfFixed tl es = agentsOf tl es := by
+  unfold agentsOfFixed agentsOf
+  generalize ([] : List A) = as
+  induction es generalizing as with
+  | nil => rfl
+  | cons e es ih =>
+    simp only [List.foldl_cons]
+    rw [agentsStepFixed_of_unreinforced tl as e (h e (by simp))]
+    exact ih (fun f hf => h f (by simp [hf])) _
+
+/-! ### The fixed verdict -/
+
+/-- **Agreement.** Where no incident edge was ever re-sent, the fix changes
+nothing: verdict, agents, writer and age are the old rule's. -/
+theorem conflictAtFixed_of_unreinforced (lo : Int) (w : Option Nat) (now : Int)
+    (tl : List (Interaction A)) (es : List (Edge A))
+    (h : ∀ e ∈ es, e.lastReinforced ≤ e.createdAt) :
+    conflictAtFixed lo w now tl es = conflictAt lo w now tl es := by
+  unfold conflictAtFixed conflictAt
+  rw [agentsOfFixed_of_unreinforced tl es h]
+
+theorem conflictAtFixed_eq_some {lo : Int} {w : Option Nat} {now : Int}
+    {tl : List (Interaction A)} {es : List (Edge A)} {h : Hit A}
+    (hc : conflictAtFixed lo w now tl es = some h) :
+    2 ≤ (agentsOfFixed tl es).length ∧ h.agents = sortAgents (agentsOfFixed tl es) ∧
+      ∃ t, newestOf lo w now tl es = some (t, h.writer) ∧ h.secondsAgo = (now - t).toNat := by
+  unfold conflictAtFixed at hc
+  simp only at hc
+  split at hc
+  · simp at hc
+  · rename_i hlen
+    split at hc
+    · simp at hc
+    · rename_i t wr hn
+      simp only [Option.some.injEq] at hc
+      subst hc
+      exact ⟨by omega, rfl, t, hn, rfl⟩
+
+/-- **The fixed conflict rule.** A conflict fires iff two distinct agents
+each wrote a non-excluded edge incident to the node (at its first write or its
+latest, any age), and at least one `Causal`/`Dependency` write is inside the
+window. -/
+theorem conflictAtFixed_isSome_iff (lo : Int) (w : Option Nat) (now : Int)
+    (tl : List (Interaction A)) (es : List (Edge A)) :
+    (conflictAtFixed lo w now tl es).isSome ↔
+      (∃ a b, a ≠ b ∧ (∃ e ∈ es, e.ty.excluded = false ∧ a ∈ candidatesOf tl e) ∧
+        (∃ e ∈ es, e.ty.excluded = false ∧ b ∈ candidatesOf tl e)) ∧
+      ∃ e ∈ es, qualifies lo w now e = true := by
+  have hlen := two_le_length_iff (agentsOfFixed_nodup tl es)
+  unfold conflictAtFixed
+  simp only
+  split
+  · rename_i hl
+    simp only [Option.isSome_none, Bool.false_eq_true, false_iff, not_and]
+    intro ⟨a, b, hab, ha, hb⟩
+    exact absurd (hlen.2 ⟨a, (mem_agentsOfFixed _ _ _).2 ha, b,
+      (mem_agentsOfFixed _ _ _).2 hb, hab⟩) (by omega)
+  · rename_i hl
+    have ⟨a, ha, b, hb, hab⟩ := hlen.1 (by omega)
+    have two : ∃ a b, a ≠ b ∧ (∃ e ∈ es, e.ty.excluded = false ∧ a ∈ candidatesOf tl e) ∧
+        (∃ e ∈ es, e.ty.excluded = false ∧ b ∈ candidatesOf tl e) :=
+      ⟨a, b, hab, (mem_agentsOfFixed _ _ _).1 ha, (mem_agentsOfFixed _ _ _).1 hb⟩
+    split
+    · rename_i hn
+      rw [newestOf_none_iff] at hn
+      simp only [Option.isSome_none, Bool.false_eq_true, false_iff, not_and]
+      intro _ ⟨e, he, hq⟩
+      rw [hn e he] at hq
+      exact absurd hq (by decide)
+    · rename_i t wr hn
+      have := (newestOf_some lo w now tl es t wr hn).1
+      obtain ⟨e, he, hq, _⟩ := this
+      simp only [Option.isSome_some, true_iff]
+      exact ⟨two, e, he, hq⟩
+
+/-- The fix never loses a conflict the old rule found. -/
+theorem conflictAtFixed_of_conflictAt {lo : Int} {w : Option Nat} {now : Int}
+    {tl : List (Interaction A)} {es : List (Edge A)}
+    (h : (conflictAt lo w now tl es).isSome) : (conflictAtFixed lo w now tl es).isSome := by
+  rw [conflictAt_isSome_iff] at h
+  rw [conflictAtFixed_isSome_iff]
+  obtain ⟨⟨a, b, hab, ⟨e, he, hx, ha⟩, ⟨f, hf, hy, hb⟩⟩, hq⟩ := h
+  exact ⟨⟨a, b, hab, ⟨e, he, hx, (mem_candidatesOf _ _ _).2 (Or.inr ha)⟩,
+    ⟨f, hf, hy, (mem_candidatesOf _ _ _).2 (Or.inr hb)⟩⟩, hq⟩
+
+/-- One agent never conflicts under the fix either. -/
+theorem single_agent_never_conflicts_fixed (lo : Int) (w : Option Nat) (now : Int)
+    (tl : List (Interaction A)) (es : List (Edge A)) (a : A)
+    (h : ∀ e ∈ es, e.ty.excluded = false → ∀ x ∈ candidatesOf tl e, x = a) :
+    conflictAtFixed lo w now tl es = none := by
+  cases hc : conflictAtFixed lo w now tl es with
+  | none => rfl
+  | some hit =>
+    have := (conflictAtFixed_isSome_iff lo w now tl es).1 (by simp [hc])
+    obtain ⟨⟨x, y, hxy, ⟨e, he, hx, hxw⟩, ⟨f, hf, hy, hyw⟩⟩, _⟩ := this
+    exact absurd ((h e he hx x hxw).trans (h f hf hy y hyw).symm) hxy
+
+/-- The named writer is still one of the contesting agents: it is resolved at
+the latest write, whose writers the fixed set keeps. -/
+theorem writer_mem_agents_fixed {lo : Int} {w : Option Nat} {now : Int}
+    {tl : List (Interaction A)} {es : List (Edge A)} {h : Hit A}
+    (hc : conflictAtFixed lo w now tl es = some h) : h.writer ∈ h.agents := by
+  obtain ⟨_, ha, t, hn, _⟩ := conflictAtFixed_eq_some hc
+  obtain ⟨⟨e, he, hq, _, hw⟩, _⟩ := newestOf_some lo w now tl es t h.writer hn
+  rw [ha, (sortAgents_perm _).mem_iff, mem_agentsOfFixed]
+  refine ⟨e, he, ?_, ?_⟩
+  · cases hx : e.ty.excluded
+    · rfl
+    · rw [qualifies_false_of_excluded hx] at hq; exact absurd hq (by decide)
+  · rw [mem_candidatesOf]
+    right
+    rw [← hw]; exact attributeAt_named_mem _ _ _
+
+/-- The fix keeps the window: a hit's age is at most the window. -/
+theorem secondsAgo_le_window_fixed {lo : Int} {w : Nat} {now : Int}
+    {tl : List (Interaction A)} {es : List (Edge A)} {h : Hit A}
+    (hc : conflictAtFixed lo (some w) now tl es = some h) : h.secondsAgo ≤ w := by
+  obtain ⟨_, _, t, hn, hs⟩ := conflictAtFixed_eq_some hc
+  obtain ⟨⟨e, _, hq, ht, _⟩, _⟩ := newestOf_some lo (some w) now tl es t h.writer hn
+  rw [qualifies_iff] at hq
+  rw [hs]
+  omega
+
+/-! ### Order independence, under the fix -/
+
+/-- The verdict does not depend on the order of the incident edges. -/
+theorem conflictAtFixed_perm_isSome (lo : Int) (w : Option Nat) (now : Int)
+    (tl : List (Interaction A)) {es es' : List (Edge A)} (hp : es.Perm es') :
+    (conflictAtFixed lo w now tl es).isSome = (conflictAtFixed lo w now tl es').isSome := by
+  apply Bool.eq_iff_iff.2
+  rw [conflictAtFixed_isSome_iff, conflictAtFixed_isSome_iff]
+  simp only [hp.mem_iff]
+
+/-- Nor does the agent set. -/
+theorem conflictAtFixed_perm_agents {lo : Int} {w : Option Nat} {now : Int}
+    {tl : List (Interaction A)} {es es' : List (Edge A)} (hp : es.Perm es') {h h' : Hit A}
+    (hc : conflictAtFixed lo w now tl es = some h)
+    (hc' : conflictAtFixed lo w now tl es' = some h') (x : A) :
+    x ∈ h.agents ↔ x ∈ h'.agents := by
+  rw [(conflictAtFixed_eq_some hc).2.1, (conflictAtFixed_eq_some hc').2.1,
+    (sortAgents_perm _).mem_iff, (sortAgents_perm _).mem_iff, mem_agentsOfFixed,
+    mem_agentsOfFixed]
+  simp only [hp.mem_iff]
+
+/-- Nor does `seconds_ago`. -/
+theorem conflictAtFixed_perm_secondsAgo {lo : Int} {w : Option Nat} {now : Int}
+    {tl : List (Interaction A)} {es es' : List (Edge A)} (hp : es.Perm es') {h h' : Hit A}
+    (hc : conflictAtFixed lo w now tl es = some h)
+    (hc' : conflictAtFixed lo w now tl es' = some h') :
+    h.secondsAgo = h'.secondsAgo := by
+  obtain ⟨_, _, t, hn, hs⟩ := conflictAtFixed_eq_some hc
+  obtain ⟨_, _, t', hn', hs'⟩ := conflictAtFixed_eq_some hc'
+  rw [hs, hs', newestOf_perm_time hp hn hn']
+
+/-- Nor does the named writer, under the same uniqueness condition as
+`writer_perm_of_unique`. -/
+theorem writer_perm_of_unique_fixed {lo : Int} {w : Option Nat} {now : Int}
+    {tl : List (Interaction A)} {es es' : List (Edge A)} (hp : es.Perm es') {h h' : Hit A}
+    (hu : ∀ e₁ ∈ es, ∀ e₂ ∈ es, qualifies lo w now e₁ = true → qualifies lo w now e₂ = true →
+      lastWrite e₁ = lastWrite e₂ → (writersOf tl e₁).2 = (writersOf tl e₂).2)
+    (hc : conflictAtFixed lo w now tl es = some h)
+    (hc' : conflictAtFixed lo w now tl es' = some h') :
+    h.writer = h'.writer := by
+  obtain ⟨_, _, t, hn, _⟩ := conflictAtFixed_eq_some hc
+  obtain ⟨_, _, t', hn', _⟩ := conflictAtFixed_eq_some hc'
+  have htt := newestOf_perm_time hp hn hn'
+  obtain ⟨⟨e, he, hq, ht, hw⟩, _⟩ := newestOf_some lo w now tl es t h.writer hn
+  obtain ⟨⟨e', he', hq', ht', hw'⟩, _⟩ := newestOf_some lo w now tl es' t' h'.writer hn'
+  rw [← hw, ← hw']
+  exact hu e he e' (hp.mem_iff.2 he') hq hq' (by omega)
+
+omit [Ord A] in
+theorem agentsStepFixed_excluded (tl : List (Interaction A)) (as : List A) {e : Edge A}
+    (h : e.ty.excluded = true) : agentsStepFixed tl as e = as := by
+  simp [agentsStepFixed, h]
+
+/-- A `Contradicts` or `SuspectedSupersedes` edge still changes nothing. -/
+theorem excluded_edge_irrelevant_fixed (lo : Int) (w : Option Nat) (now : Int)
+    (tl : List (Interaction A)) (pre suf : List (Edge A)) {e : Edge A}
+    (h : e.ty.excluded = true) :
+    conflictAtFixed lo w now tl (pre ++ e :: suf) = conflictAtFixed lo w now tl (pre ++ suf) := by
+  unfold conflictAtFixed agentsOfFixed newestOf
+  simp only [List.foldl_append, List.foldl_cons, agentsStepFixed_excluded tl _ h,
+    newestStep_excluded h]
+
+/-! ### Re-sends under the fix -/
+
+omit [Ord A] in
+/-- **The original writer stays.** Whoever the timeline resolves at an
+edge's first write is in the agent set of every node the edge touches after a
+re-send of it, by any agent at any time. A re-send keeps `created_at`, so this
+applies again to each later re-send. -/
+theorem resend_keeps_creator (tl : List (Interaction A)) (pre suf : List (Edge A))
+    (e : Edge A) (r : Int) (hx : e.ty.excluded = false) {x : A} (h : x ∈ creatorsOf tl e) :
+    x ∈ agentsOfFixed tl (pre ++ resend e r :: suf) :=
+  (mem_agentsOfFixed tl _ x).2
+    ⟨resend e r, by simp, hx, (mem_candidatesOf tl (resend e r) x).2 (Or.inl h)⟩
+
+omit [Ord A] in
+/-- The re-sender joins too: whoever the timeline resolves at the re-send's
+instant (or at `created_at`, if the re-send is stamped earlier). -/
+theorem resend_adds_resender (tl : List (Interaction A)) (pre suf : List (Edge A))
+    (e : Edge A) (r : Int) (hx : e.ty.excluded = false) {x : A}
+    (h : x ∈ (attributeAt tl e.source (max r e.createdAt)).1) :
+    x ∈ agentsOfFixed tl (pre ++ resend e r :: suf) :=
+  (mem_agentsOfFixed tl _ x).2
+    ⟨resend e r, by simp, hx, (mem_candidatesOf tl (resend e r) x).2 (Or.inr h)⟩
+
+omit [DecidableEq A] [Ord A] in
+theorem qualifies_resend {lo : Int} {w : Option Nat} {now : Int} {e : Edge A} {r : Int}
+    (hr : lastWrite e ≤ r) (hnow : r ≤ now) (h : qualifies lo w now e = true) :
+    qualifies lo w now (resend e r) = true := by
+  have hc : e.createdAt ≤ lastWrite e := Int.le_max_right _ _
+  have hlw : lastWrite (resend e r) = r := by
+    show max r e.createdAt = r
+    exact Int.max_eq_left (by omega)
+  unfold qualifies at h ⊢
+  rw [hlw]
+  simp only [Bool.and_eq_true, decide_eq_true_eq] at h ⊢
+  exact ⟨⟨h.1.1, hnow⟩, Int.le_trans h.2 hr⟩
+
+/-- **A conflict survives the first re-send.** If the node is in conflict
+and an edge never re-sent before is re-sent, by any agent, at an instant no
+earlier than its write and no later than `now`, the node is still in
+conflict. (The old rule fails this: `resend_drops_original_writer`.) A
+*second* re-send can drop the first re-sender, see
+`second_resend_drops_first_resender`. -/
+theorem resend_still_fires (lo : Int) (w : Option Nat) (now : Int) (tl : List (Interaction A))
+    (pre suf : List (Edge A)) (e : Edge A) (r : Int)
+    (hfresh : e.lastReinforced ≤ e.createdAt) (hr : lastWrite e ≤ r) (hnow : r ≤ now)
+    (h : (conflictAtFixed lo w now tl (pre ++ e :: suf)).isSome) :
+    (conflictAtFixed lo w now tl (pre ++ resend e r :: suf)).isSome := by
+  have hlw : lastWrite e = e.createdAt := Int.max_eq_right hfresh
+  -- Every edge of the old list has a counterpart in the new one with the same
+  -- type, at least its candidates, and its qualification.
+  have hmove : ∀ f ∈ pre ++ e :: suf, ∃ g ∈ pre ++ resend e r :: suf, g.ty = f.ty ∧
+      (∀ x, x ∈ candidatesOf tl f → x ∈ candidatesOf tl g) ∧
+      (qualifies lo w now f = true → qualifies lo w now g = true) := by
+    intro f hf
+    simp only [List.mem_append, List.mem_cons] at hf
+    rcases hf with hf | hf | hf
+    · exact ⟨f, by simp [hf], rfl, fun _ h => h, id⟩
+    · rw [hf]
+      refine ⟨resend e r, by simp, rfl, ?_, qualifies_resend hr hnow⟩
+      intro x hx
+      rw [mem_candidatesOf] at hx ⊢
+      left
+      show x ∈ creatorsOf tl e
+      rcases hx with hx | hx
+      · exact hx
+      · simpa only [creatorsOf, writersOf, hlw] using hx
+    · exact ⟨f, by simp [hf], rfl, fun _ h => h, id⟩
+  rw [conflictAtFixed_isSome_iff] at h ⊢
+  obtain ⟨⟨a, b, hab, ⟨ea, hea, hxa, ha⟩, ⟨eb, heb, hxb, hb⟩⟩, ⟨eq, heq, hq⟩⟩ := h
+  obtain ⟨ga, hga, tya, ca, _⟩ := hmove ea hea
+  obtain ⟨gb, hgb, tyb, cb, _⟩ := hmove eb heb
+  obtain ⟨gq, hgq, _, _, qq⟩ := hmove eq heq
+  exact ⟨⟨a, b, hab, ⟨ga, hga, by rw [tya]; exact hxa, ca a ha⟩,
+    ⟨gb, hgb, by rw [tyb]; exact hxb, cb b hb⟩⟩, ⟨gq, hgq, qq hq⟩⟩
+
+/-! ### Concrete cases of the fix -/
+
+/-- **The issue's scenario.** Node "user schema" (u): agent-a's interaction
+(i1, 3500) derives it; agent-b's `record_action` (i2, 3570) writes "session
+store" (agent-a's concept) depends on u; agent-a records the same action (i3,
+3590), which reinforces that edge. The old rule attributes the edge to
+agent-a alone and fires nothing; the fix keeps agent-b, the edge's first
+writer, and names agent-a, who wrote 10 s ago. The "session store" side is
+the same edge with that concept's own `Derives`. -/
+theorem issue_297_fixed :
+    conflictAt lo₀ recencyWindow 3600 [⟨1, 1, 3500⟩, ⟨2, 2, 3570⟩, ⟨3, 1, 3590⟩]
+        [derives 1 1 3500, ⟨3, .dependency, .concept 1, 3570, 3590, none⟩] = none ∧
+      conflictAtFixed lo₀ recencyWindow 3600 [⟨1, 1, 3500⟩, ⟨2, 2, 3570⟩, ⟨3, 1, 3590⟩]
+        [derives 1 1 3500, ⟨3, .dependency, .concept 1, 3570, 3590, none⟩] =
+        some ⟨[1, 2], 1, 10⟩ := by decide
+
+/-- `resend_drops_original_writer`'s graph under the fix: it fires after the
+re-send as it did before, and before the re-send the two rules agree. -/
+theorem resend_keeps_original_writer :
+    conflictAtFixed lo₀ recencyWindow 3600 [⟨1, 1, 3500⟩, ⟨3, 1, 3590⟩]
+        [derives 1 1 3500, ⟨2, .dependency, .concept 2, 3570, 3590, none⟩] =
+        some ⟨[1, 2], 1, 10⟩ ∧
+      conflictAtFixed lo₀ recencyWindow 3600 [⟨1, 1, 3500⟩]
+        [derives 1 1 3500, ⟨2, .dependency, .concept 2, 3570, 3570, none⟩] =
+        some ⟨[1, 2], 2, 30⟩ := by decide
+
+/-- **Why not attribute at `created_at` alone.** The mirror of the issue:
+agent-a writes the dependency (i2, 3570) and agent-b re-sends it (i3, 3590).
+The old rule fires, naming agent-b; so does the fix. Resolving the edge at
+`created_at` alone gives `[1]`: agent-b's only write to the node would drop
+out and no conflict would fire, the same bug in the other order, and the
+named writer (agent-b, resolved at the latest write) would not be in the
+agent set. -/
+theorem resend_by_other_joins :
+    conflictAt lo₀ recencyWindow 3600 [⟨1, 1, 3500⟩, ⟨2, 1, 3570⟩, ⟨3, 2, 3590⟩]
+        [derives 1 1 3500, ⟨3, .dependency, .concept 1, 3570, 3590, none⟩] =
+        some ⟨[1, 2], 2, 10⟩ ∧
+      conflictAtFixed lo₀ recencyWindow 3600 [⟨1, 1, 3500⟩, ⟨2, 1, 3570⟩, ⟨3, 2, 3590⟩]
+        [derives 1 1 3500, ⟨3, .dependency, .concept 1, 3570, 3590, none⟩] =
+        some ⟨[1, 2], 2, 10⟩ ∧
+      creatorsOf [⟨1, 1, 3500⟩, ⟨2, 1, 3570⟩, ⟨3, 2, 3590⟩]
+        (⟨3, .dependency, .concept 1, 3570, 3590, none⟩ : Edge Nat) = [1] := by decide
+
+/-- **Residual: a second re-send can drop the first re-sender.** Agent-a
+writes the dependency (3570), agent-b re-sends it (3580): both are in the set
+and it fires. Agent-a re-sends again (3590): the edge keeps only its first
+write and its latest, both agent-a's, so agent-b drops out. The graph records
+no writer between the first and the latest write (`Edge` has no agent field
+and `record_edge` keeps only the latest `last_reinforced`), so no rule over
+the current graph can keep agent-b. -/
+theorem second_resend_drops_first_resender :
+    conflictAtFixed lo₀ recencyWindow 3600
+        [⟨1, 1, 3500⟩, ⟨2, 1, 3570⟩, ⟨3, 2, 3580⟩, ⟨4, 1, 3590⟩]
+        [derives 1 1 3500, ⟨3, .dependency, .concept 1, 3570, 3580, none⟩] =
+        some ⟨[1, 2], 2, 20⟩ ∧
+      conflictAtFixed lo₀ recencyWindow 3600
+        [⟨1, 1, 3500⟩, ⟨2, 1, 3570⟩, ⟨3, 2, 3580⟩, ⟨4, 1, 3590⟩]
+        [derives 1 1 3500, ⟨3, .dependency, .concept 1, 3570, 3590, none⟩] = none := by
+  decide
+
+/-- The tests the old rule's examples mirror are unchanged under the fix
+(every edge there is written once). -/
+example : conflictAtFixed lo₀ recencyWindow 3600 (twoAgentTl 3560) (twoAgent 3560 3589) =
+    some ⟨[1, 2], 2, 11⟩ := by decide
+example : conflictAtFixed lo₀ recencyWindow 3600 [⟨1, 1, -31536000⟩, ⟨2, 2, 3590⟩]
+    [derives 1 1 (-31536000), dep 2 2 3590] = some ⟨[1, 2], 2, 10⟩ := by decide
 
 end Sorted
 
