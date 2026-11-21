@@ -11,9 +11,8 @@
 //! names, and answers it **by traversal** over the edge types that declare a
 //! dependence (`Dependency` / `Hierarchical`; see [`dependents`]), returning
 //! the anchor's dependents ranked by how strongly the graph binds each one to
-//! it. It is a
-//! *dispatch*: when it fires it produces the whole `RecallResult` and the
-//! blended pipeline never runs. When it cannot (a general query, or a
+//! it. It is a *dispatch*: when it fires it produces the whole `RecallResult`
+//! and the blended pipeline never runs. When it cannot (a general query, or a
 //! structural phrasing with no resolvable anchor / no dependents) it returns
 //! `None` and the caller falls through to the normal word/blend path — the
 //! refusal is as important as the dispatch.
@@ -50,8 +49,9 @@ pub enum RecallKind {
 /// Phrasings that mark a question as structural / dependency rather than
 /// plain word recall. Kept deliberately small and EXPLICIT: every marker is a
 /// dependency/structural phrasing. In particular bare `"depend"` is NOT a
-/// marker (it is the stem of `"independent"`), and bare `"references"` /
-/// `"is it safe"` are ordinary prose, so they are dropped. A marker counts
+/// marker: on its own it is too generic ("it may depend on the load"), and
+/// bare `"references"` / `"is it safe"` are ordinary prose, so they are
+/// dropped. A marker counts
 /// only where it stands on word boundaries ([`classify`]).
 const STRUCTURAL_MARKERS: [&str; 7] = [
     "depends on",
@@ -587,10 +587,10 @@ impl ResolvedAnchor {
 /// it skips the gather only when the dispatch is actually about to fire, so a
 /// structural phrasing that cannot dispatch falls through to the FULL blend
 /// (never a degraded keyword-only answer). The dispatch itself re-validates
-/// under the final
-/// graph lock inside `try_structural`, so this is a gather-skip decision, not
-/// a short-circuit of correctness. It answers for a positive `top_k`; the
-/// daemon asks `fits_structural_with`, which also takes the recall's `top_k`.
+/// under the final graph lock inside `try_structural`, so this is a
+/// gather-skip decision, not a short-circuit of correctness. It answers for a
+/// positive `top_k`; the daemon asks `fits_structural_with`, which also takes
+/// the recall's `top_k`.
 pub fn fits_structural(graph: &Graph, query: &str) -> bool {
     if !matches!(classify(query), RecallKind::Structural) {
         return false;

@@ -792,10 +792,10 @@ impl Daemon {
         // Cheap in-memory dispatch check (no store I/O) under a brief graph read:
         // does the query resolve an anchor WITH structural dependents, at a
         // `top_k` the traversal can answer (#263: not 0), or an ambiguous
-        // subject (#129, at any `top_k`)? Only then can the
-        // (async, vector-I/O) gather be skipped (T9-R1-3); a structural
-        // phrasing that does not dispatch falls through to the FULL blend
-        // below, never a degraded keyword-only answer. A write landing between
+        // subject (#129, at any `top_k`)? Only then can the (async,
+        // vector-I/O) gather be skipped (T9-R1-3); a structural phrasing that
+        // does not dispatch falls through to the FULL blend below, never a
+        // degraded keyword-only answer. A write landing between
         // this check and the graph lock below can still make the predicted
         // dispatch decline after the gather was skipped; the recall then runs
         // the skipped gather once and answers from the graph as it is then

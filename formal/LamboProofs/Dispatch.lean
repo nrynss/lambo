@@ -36,8 +36,14 @@ daemon's routing around it in `Daemon::recall_routed` (`src/daemon/mod.rs`):
   characters whose Unicode lowercase contains an ASCII letter are U+212A
   KELVIN SIGN (to `k`, not a marker letter) and U+0130 (to `i` followed by
   U+0307, so the `i` of `radius` would be followed by a combining mark, not
-  `u`). So on every query the two classifications agree; the model does not
-  prove this, it is the reading above.
+  `u`). So on every query the two agree on where a marker occurs. The
+  word-bounded classifier (`classifyWB`) also reads the characters next to an
+  occurrence, which may be non-ASCII and which `lower` leaves alone; that
+  reading still holds, because lowercasing keeps a character a word or a
+  non-word character (a letter lowercases to letters, U+0130 to `i` and
+  U+0307, both word characters; a non-letter, the hyphen included, is
+  unchanged), and the boundary test asks only that. The model does not prove
+  any of this; it is the reading above.
 * **Matching** before #299 was `str::contains`: a plain substring test
   (`containsSub`, proved equal to `List.IsInfix`), with no word boundaries
   (`classify`). The fix (#299) matches each marker with the word-bounded rule
@@ -116,8 +122,9 @@ Fixed classifier (#299):
 * `classifyWB_iff`: exactly the queries whose lowercase text has a marker
   occurrence on word boundaries classify `Structural`; `wb_inside_word`,
   `wb_into_word`: an occurrence with a word character just before or just
-  after it never counts. `issue_queries_general`: the issue's four queries
-  classify `General`.
+  after it never counts, nor does one hyphenated onto a word
+  (`wb_hyphen_before`, `wb_hyphen_after`). `issue_queries_general`: the
+  issue's four queries classify `General`.
 * `classifyWB_marker`: every marker as whole words (the text around it ends
   in a non-word, non-hyphen character, or nothing), in any ASCII case,
   classifies `Structural` for every `isWord`; `classifyWB_each_marker`: each
@@ -485,6 +492,33 @@ with a word character just after it is not bounded. -/
 theorem wb_into_word {isWord : Char → Bool} (hL : ∀ c : Char, c.isLower = true → isWord c = true)
     {m : List Char} (hm : m ∈ markers) {c : Char} (hc : isWord c = true) (cs : List Char) :
     rightOk isWord m (c :: cs) = false := by
+  obtain ⟨hne, _, hl⟩ := markers_ends m hm
+  cases hg : m.getLast? with
+  | none => exact absurd (List.getLast?_eq_none_iff.mp hg) hne
+  | some l =>
+    rw [hg] at hl
+    have hlw : isWord l = true := hL l (by simpa using hl)
+    simp [rightOk, hg, wordAt, hlw, hc]
+
+/-- **A hyphen between word characters joins them**, so a marker hyphenated
+onto a word ("co-dependents of") does not count: the hyphen before it belongs
+to the word. -/
+theorem wb_hyphen_before {isWord : Char → Bool}
+    (hL : ∀ c : Char, c.isLower = true → isWord c = true) {m : List Char} (hm : m ∈ markers)
+    {c : Char} (hc : isWord c = true) (rb : List Char) :
+    leftOk isWord m ('-' :: c :: rb) = false := by
+  obtain ⟨hne, hh, _⟩ := markers_ends m hm
+  match m, hne, hh with
+  | [], hne, _ => exact absurd rfl hne
+  | f :: _, _, hh =>
+    have hf : isWord f = true := hL f (by simpa using hh)
+    simp [leftOk, wordAt, hf, hc]
+
+/-- The mirror: a marker hyphenated onto the next word does not count. -/
+theorem wb_hyphen_after {isWord : Char → Bool}
+    (hL : ∀ c : Char, c.isLower = true → isWord c = true) {m : List Char} (hm : m ∈ markers)
+    {c : Char} (hc : isWord c = true) (cs : List Char) :
+    rightOk isWord m ('-' :: c :: cs) = false := by
   obtain ⟨hne, _, hl⟩ := markers_ends m hm
   cases hg : m.getLast? with
   | none => exact absurd (List.getLast?_eq_none_iff.mp hg) hne
