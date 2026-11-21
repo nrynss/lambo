@@ -31,9 +31,9 @@
 //! stems, such as `''s ''s`, which an old build stored as `" "`) also keeps
 //! its old key and is reported ([`RekeyPlan::kept_empty`]): an empty key is
 //! one no write accepts, and in the key index every stopword-only text would
-//! resolve to that concept. Such a row does not stop the marker from being
-//! recorded; nothing derives its old key any more, and `lambo provision
-//! --rekey` reports it again.
+//! resolve to that concept. Like a collision, such a row keeps the marker
+//! from being recorded (fail closed), so every provision reports it until the
+//! concept is retracted or rewritten.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -77,9 +77,10 @@ pub struct RekeyPlan {
 /// `lambo provision` skips the full concept scan.
 ///
 /// Written in the re-key's own transaction, and only when it left no
-/// collision behind: a store with a reported collision is checked again on
-/// every provision, since the operator may resolve it. Removed again by a
-/// forced re-key (`lambo provision --rekey`) that finds one.
+/// collision and no row kept from an empty key behind
+/// ([`RekeyPlan::is_clean`]): such a store is checked again on every
+/// provision, since the operator may resolve it. Removed again by a forced
+/// re-key (`lambo provision --rekey`) that finds one.
 ///
 /// The marker records what this build did, not what every writer since has
 /// done: a pre-#148 binary still writing to a Postgres or Cockroach store
@@ -87,6 +88,16 @@ pub struct RekeyPlan {
 /// stemmed keys the skip will not see. `lambo provision --rekey` runs the
 /// full pass whatever the marker says.
 pub const REKEY_MARKER_KEY: &str = "canonical_key_rule";
+
+impl RekeyPlan {
+    /// Whether the pass left nothing behind, so the store may record
+    /// [`REKEY_MARKER_KEY`]: no collision and no row kept from an empty key.
+    /// Either one withdraws the marker, so every provision reports it again
+    /// until the operator resolves it.
+    pub fn is_clean(&self) -> bool {
+        self.collisions.is_empty() && self.kept_empty.is_empty()
+    }
+}
 
 /// The value [`REKEY_MARKER_KEY`] holds once every key follows the current
 /// rule. It changed when #301 changed the rule, so a store whose marker a

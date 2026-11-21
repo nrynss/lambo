@@ -32,6 +32,8 @@ SID = "session-rest-api"
 
 # --- canonical keys ----------------------------------------------------------
 # Porter (English) stems for the closed fixture vocabulary (probe-verified).
+# "Porter" here and in the fixture notes means rust-stemmers' Algorithm::English,
+# Snowball English (Porter2); the wording stays so the generated fixtures do not change.
 STEM = {
     "registering":"regist","register":"regist","registered":"regist",
     "users":"user","user":"user","systems":"system","system":"system",

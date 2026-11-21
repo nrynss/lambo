@@ -94,21 +94,25 @@
   Stored data written before this change:
 
   * **Concepts.** `lambo provision` re-keys a stored concept whose key held
-    an empty stem (the re-key marker changed, so every store is scanned once
-    more; `--rekey` forces it as before). It now also recognises keys
-    written between #148 and this change (identifier unstemmed, empty stem
-    kept). A concept whose current key would be empty (text of only
-    stopwords and `''s` tokens, stored as `" "`) keeps its old key and is
-    listed in the provision line ("kept their old key because the current
-    rule gives them an empty key"): the re-key never writes an empty key.
+    an empty stem, and now also recognises keys written between #148 and
+    this change (identifier unstemmed, empty stem kept). The re-key marker
+    in `store_meta` changed, so the next plain `lambo provision` scans each
+    store once (`--rekey` forces it as before). A concept whose current key
+    would be empty (text of only stopwords and `''s` tokens, stored as
+    `" "`) keeps its old key and is listed in the provision line ("kept
+    their old key because the current rule gives them an empty key"): the
+    re-key never writes an empty key. Like a collision, such a row keeps
+    the marker from being recorded, so every provision scans and reports it
+    again until the concept is retracted or rewritten.
   * **Durable names.** A stored name whose key held an empty stem makes the
     whole session fail to open (every command that loads it, `lambo names`
     included), by design: the name no longer passes the load-time name
-    check. On SQLite and Postgres the error reads
-    `invariant violated: concept name has an invalid normalized key` (a name
-    such as `''s-lease`) or `invariant violated: reference refused: name
-    "''s ''s" is invalid: a concept name must have a nonempty normalized key
-    and cannot be an id; ...` (a name whose stems are all empty). Find and
+    check. The error names the row, for example
+    `invariant violated: concept name "''s-lease" of session dogfood (bound
+    to <node id>) has key " leas", but the current rule derives "leas"`, or,
+    for a name whose stems are all empty, `... concept name "''s ''s" of
+    session dogfood (bound to <node id>) has key " ", but the current rule
+    refuses the name: ...`. Find and
     remove the row with the session stopped (the same SQL on SQLite and
     Postgres; double each `'` inside a literal), then declare the name again
     if it is still wanted:

@@ -60,7 +60,7 @@ pub(crate) mod vector;
 // SQLite scan and the pg-family queries implement, plus the shared exact scorer.
 // Ungated: #8's graph-backed source implements it in Memory-only builds too.
 pub(crate) mod vector_source;
-// #148: the provision re-key plan for unstemmed identifier tokens.
+// #148, #301: the provision re-key plan for keys an older rule wrote.
 pub mod rekey;
 
 // DSN spelling -> DSN identity. Store-agnostic and always compiled: both the
@@ -462,8 +462,8 @@ pub trait GraphStore: Send + Sync {
         Ok(())
     }
 
-    /// #148: re-key every stored concept whose key the pre-#148 rule
-    /// (stemming identifier tokens) wrote, run by `lambo provision` after the
+    /// #148, #301: re-key every stored concept whose key an older rule
+    /// (stemming identifiers, or keeping empty stems) wrote, run by `lambo provision` after the
     /// schema. Refuses while a session lease is live; idempotent. Default: an
     /// adapter with no durable keys (`MemoryStore`, test doubles) has nothing
     /// to re-key.

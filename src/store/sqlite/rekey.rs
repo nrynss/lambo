@@ -59,9 +59,9 @@ async fn rekey_in(conn: &mut SqliteConnection, force: bool) -> Result<RekeyPlan,
 }
 
 /// Record the clean re-key, or withdraw a stale record when this pass left a
-/// collision (#171, [`REKEY_MARKER_KEY`]).
+/// collision or a row kept from an empty key (#171, #301, [`REKEY_MARKER_KEY`]).
 async fn record_marker(conn: &mut SqliteConnection, plan: &RekeyPlan) -> Result<(), StoreError> {
-    let query = if plan.collisions.is_empty() {
+    let query = if plan.is_clean() {
         sqlx::query(
             "INSERT INTO store_meta (key, value) VALUES (?, ?) \
              ON CONFLICT (key) DO UPDATE SET value = excluded.value",

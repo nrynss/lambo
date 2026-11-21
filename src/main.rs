@@ -303,11 +303,11 @@ enum Commands {
     /// store selection so a misconfigured `kind` fails closed early.
     Provision {
         /// Re-check every concept's canonical key even if the store records that
-        /// a previous provision already re-keyed it (#148, #171). Use it after a
+        /// a previous provision already re-keyed it (#148, #171, #301). Use it after a
         /// pre-0.7.0 binary has written to a Postgres or Cockroach store.
         #[arg(
             long,
-            help = "Re-check every concept's canonical key even if the store records that a previous provision already re-keyed it (#148, #171). Use it after a pre-0.7.0 binary has written to a Postgres or Cockroach store."
+            help = "Re-check every concept's canonical key even if the store records that a previous provision already re-keyed it (#148, #171, #301). Use it after a pre-0.7.0 binary has written to a Postgres or Cockroach store."
         )]
         rekey: bool,
     },

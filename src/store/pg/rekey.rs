@@ -106,13 +106,13 @@ impl<D: Dialect> PgStore<D> {
 }
 
 /// Record the clean re-key, or withdraw a stale record when this pass left a
-/// collision (#171, [`REKEY_MARKER_KEY`]). Plain `INSERT .. ON CONFLICT`
+/// collision or a row kept from an empty key (#171, #301, [`REKEY_MARKER_KEY`]). Plain `INSERT .. ON CONFLICT`
 /// works on both Postgres and Cockroach.
 async fn record_marker(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     plan: &RekeyPlan,
 ) -> Result<(), StoreError> {
-    let query = if plan.collisions.is_empty() {
+    let query = if plan.is_clean() {
         sqlx::query(
             "INSERT INTO store_meta (key, value) VALUES ($1, $2) \
              ON CONFLICT (key) DO UPDATE SET value = excluded.value",

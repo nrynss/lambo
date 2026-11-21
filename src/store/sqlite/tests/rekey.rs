@@ -167,6 +167,35 @@ async fn a_taken_key_is_reported_and_left_alone() {
     assert_eq!(again.collisions.len(), 1);
 }
 
+/// #301: a row whose current key would be empty keeps its old key and, like
+/// a collision, withdraws the marker, so every provision reports it again.
+#[tokio::test]
+async fn a_row_kept_from_an_empty_key_blocks_the_marker() {
+    let (store, _) = legacy_store(&["''s ''s", "release 2122de39e47e"]).await;
+    sqlx::query("INSERT INTO store_meta (key, value) VALUES (?, ?)")
+        .bind(crate::store::rekey::REKEY_MARKER_KEY)
+        .bind("148-identifiers-unstemmed")
+        .execute(store.pool())
+        .await
+        .unwrap();
+    let plan = store.rekey_canonical_keys(false).await.unwrap();
+    assert!(
+        !plan.skipped,
+        "a pre-#301 marker is scanned again: {plan:?}"
+    );
+    assert_eq!(plan.kept_empty.len(), 1, "{plan:?}");
+    assert_eq!(plan.changes.len(), 1, "{plan:?}");
+    assert!(plan.collisions.is_empty());
+    assert_eq!(
+        keys(&store).await[0],
+        ("''s ''s".to_string(), " ".to_string())
+    );
+    assert_eq!(marker(&store).await, None);
+    let again = store.rekey_canonical_keys(false).await.unwrap();
+    assert!(!again.skipped);
+    assert_eq!(again.kept_empty.len(), 1);
+}
+
 /// The adapter-agnostic testkit the live Postgres test also runs.
 #[tokio::test]
 async fn the_shared_rekey_testkit_passes_on_sqlite() {
