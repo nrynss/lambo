@@ -84,7 +84,12 @@ The loop, over every run from `St.init` (`good_reachable`):
   every attempt with the loop's token is refused as `StaleWrite` and commits
   nothing.
 
-## What the model shows about the Rust
+## What the model shows about the Rust before #293
+
+The definitions `settle`, `cycle`, `iter`, `step`, `run` and the theorems
+above are the loop as it was before #293. The first three results below pin
+the behaviour that issue fixes (see "The fix (#293)" next); the fourth is
+unchanged by it.
 
 * `stale_write_retained`: `is_retryable` says the loop "treats it like a
   constraint"; it does not. Only the `Constraint` arm dead-letters, so a
@@ -121,6 +126,45 @@ The loop, over every run from `St.init` (`good_reachable`):
   so mutations retained from an earlier outage are dropped with a later
   write's constraint violation, and `dead_lettered` counts one (see the
   `exPoison` example).
+
+## The fix (#293)
+
+Beside the definitions above, `settleFixed`, `cycleFixed`, `iterFixed`,
+`stepFixed` and `runFixed` model the loop after #293, and `Lease.beatLatches`
+the fixed heartbeat (`Lease.beatLatchesOld` is the one before). Three changes:
+a `StaleWrite` latches the fence (as the erased arm already did); the fence is
+re-checked right after the drain, before anything can reach the store; and the
+stop branch drops a fenced tail. `cycleFixed_eq` shows the fixed cycle is the
+old one with exactly those substitutions.
+
+* `takeover_fences_fixed`, `override_fences_fixed` (with
+  `Lease.beat_latches_iff`, `Lease.override_beat_latches`): after any takeover,
+  the operator-override re-take included, the fixed heartbeat latches at its
+  next beat, within one `LEASE_HEARTBEAT_INTERVAL`, where the old one misses
+  the re-take; and from the latch on the fixed loop never calls the store
+  (`no_flush_after_fence_fixed`, `runFixed_fenced_silent`).
+* `fence_before_due_tick_fixed`: the scenario of `flush_after_fence_latched`
+  makes no call; the drained tail is a fenced drop.
+* `stale_write_fences_fixed`, `stale_write_never_resent`,
+  `stale_write_dropped_fixed`: any event whose calls include a `StaleWrite`
+  leaves the loop fenced and stopped, and no later event calls the store, so
+  a stale write is never retained or re-sent (contrast
+  `stale_write_retained`).
+* `stop_drops_fenced`: a stop after the fence drops the tail instead of
+  handing it back (contrast `stop_requeues`).
+* `good_reachable_fixed`, `no_silent_loss_fixed`, `stopped_accounted_fixed`:
+  the invariants still hold; a stale-write drop is a fenced drop, made only
+  once the fence is latched.
+* `stepFixed_agrees`, `Lease.beat_own_generation`: away from a latched fence
+  and a stale write, and for a heartbeat on the holder's own generation, the
+  fix changes nothing.
+
+The fixed Rust also checks the fence before each retry in `flush_with_retry`,
+so a fence latched during a backoff sleep stops the ladder. The model latches
+the fence only between wake-ups, so that check is not modelled. The fixed
+heartbeat also stops beating once it latches on a re-take, so the lease it
+re-took lapses at its TTL; the model does not follow the lease row past the
+latch.
 
 ## Left out
 
@@ -1768,6 +1812,478 @@ theorem override_refresh_retakes {released A : H} (a : Lease.Row H) (hA : a.hold
 
 end Fencing
 
+/-! ## The fix for #293
+
+The definitions above stay the model of the loop before #293. The fixed loop
+differs in three places, each a `Fixed` definition beside its original:
+
+* `settleFixed`: a `StaleWrite` is terminal. Like the erased arm it latches the
+  fence, so the fence check that follows drops `pending` and stops the loop;
+  it is never retained or sent again.
+* `cycleFixed`: the fence is re-checked right after the drain, before anything
+  can reach the store, so a fence latched while the loop waited is honoured by
+  the branch that ends the wait.
+* `iterFixed`: the stop branch checks the fence too, and drops a fenced tail
+  instead of handing it back to the graph log. -/
+
+section Fixed
+
+variable {α : Type}
+
+/-- `drain_and_flush`'s `match` after #293. A `StaleWrite` (erased or not)
+latches the fence; everything else is `settle`. -/
+def settleFixed (now : Nat) (erased : Bool) (p : List α) (r : Run α) (s : St α) : St α :=
+  match r.result with
+  | none => { s with pending := [], ledger := s.ledger ++ [(.committed, p)] }
+  | some .constraint =>
+    { s with pending := [], ledger := s.ledger ++ [(.deadLettered, p)],
+             deadLettered := s.deadLettered + 1 }
+  | some .staleWrite => { s with fenced := true }
+  | some _ =>
+    if erased then { s with fenced := true }
+    else { s with retryAfter := some (now + r.sleeps.sum + retainedBackoff) }
+
+/-- `drain_and_flush` after #293: the fence is re-checked after the drain,
+before the early returns and the ladder, and the ladder's result is settled by
+`settleFixed`. -/
+def cycleFixed (P : Params) (st : Store α) (tick : Bool) (now : Nat) (erased : Bool) (s0 : St α) :
+    St α :=
+  let p := s0.pending ++ s0.log
+  let s := { s0 with pending := p, log := [] }
+  if s.fenced then s
+  else if p.isEmpty then s
+  else if s.degraded then { s with pending := [], ledger := s.ledger ++ [(.droppedDegraded, p)] }
+  else if P.logMax < p.length then { s with degraded := true }
+  else if held s.retryAfter now then s
+  else
+    let s := { s with retryAfter := none }
+    if !tick && decide (p.length < P.maxBatch) then s
+    else
+      let r := flushWithRetry st p s.attempts P.retries
+      settleFixed now erased p r
+        { s with calls := s.calls ++ r.calls, attempts := s.attempts + r.calls.length }
+
+/-- One pass of the fixed loop. The stop branch drops a fenced tail; the
+cycle branches are followed by the top-of-loop fence check as before. -/
+def iterFixed (P : Params) (st : Store α) (w : Wake) (now : Nat) (erased : Bool) (s : St α) :
+    St α :=
+  if !s.running then s
+  else match w with
+    | .stop => if s.fenced then dropFenced s else requeue s
+    | .tick => checkFence (cycleFixed P st true now erased s)
+    | .poll => checkFence (cycleFixed P st false now erased s)
+
+def stepFixed (P : Params) (st : Store α) (s : St α) : Ev α → St α
+  | .write m => { s with hist := s.hist ++ [m], log := s.log ++ [m] }
+  | .fence => { s with fenced := true }
+  | .wake w now erased => iterFixed P st w now erased s
+
+def runFixed (P : Params) (st : Store α) (s : St α) (evs : List (Ev α)) : St α :=
+  evs.foldl (stepFixed P st) s
+
+theorem runFixed_cons {P : Params} {st : Store α} (s : St α) (e : Ev α) (evs : List (Ev α)) :
+    runFixed P st s (e :: evs) = runFixed P st (stepFixed P st s e) evs := rfl
+
+/-! ### The fixed loop is the old loop with two substitutions -/
+
+/-- The drain alone. -/
+def drained (s : St α) : St α := { s with pending := s.pending ++ s.log, log := [] }
+
+/-- The erased flag the old `settle` would need to behave like `settleFixed`
+on this state's ladder: set when the ladder ends in `StaleWrite`. -/
+def erasedFixed (P : Params) (st : Store α) (er : Bool) (s : St α) : Bool :=
+  er || decide ((flushWithRetry st (s.pending ++ s.log) s.attempts P.retries).result =
+    some .staleWrite)
+
+theorem settleFixed_eq (now : Nat) (er : Bool) (p : List α) (r : Run α) (s : St α) :
+    settleFixed now er p r s = settle now (er || decide (r.result = some .staleWrite)) p r s := by
+  unfold settleFixed settle
+  cases h : r.result with
+  | none => simp
+  | some e => cases e <;> simp
+
+/-- A fenced cycle only drains; an unfenced one is the old cycle, with a
+`StaleWrite` treated as the old code treats an erased session's. -/
+theorem cycleFixed_eq (P : Params) (st : Store α) (tick : Bool) (now : Nat) (er : Bool)
+    (s : St α) :
+    cycleFixed P st tick now er s =
+      if s.fenced then drained s else cycle P st tick now (erasedFixed P st er s) s := by
+  by_cases hf : s.fenced = true
+  · simp [cycleFixed, drained, hf]
+  · have hf' : s.fenced = false := by simpa using hf
+    simp only [hf', Bool.false_eq_true, ↓reduceIte]
+    unfold cycleFixed cycle erasedFixed
+    simp only [hf', Bool.false_eq_true, ↓reduceIte, settleFixed_eq]
+
+theorem cycleFixed_fenced {P : Params} {st : Store α} {tick : Bool} {now : Nat} {er : Bool}
+    {s : St α} (hf : s.fenced = true) : cycleFixed P st tick now er s = drained s := by
+  rw [cycleFixed_eq]; simp [hf]
+
+theorem cycleFixed_unfenced {P : Params} {st : Store α} {tick : Bool} {now : Nat} {er : Bool}
+    {s : St α} (hf : s.fenced = false) :
+    cycleFixed P st tick now er s = cycle P st tick now (erasedFixed P st er s) s := by
+  rw [cycleFixed_eq]; simp [hf]
+
+/-- **Agreement.** Where the fix should change nothing, it changes nothing: in
+a state whose fence is not latched and whose next ladder would not end in
+`StaleWrite`, every event does exactly what it did before. -/
+theorem stepFixed_agrees {P : Params} {st : Store α} {s : St α} (hf : s.fenced = false)
+    (hs : (flushWithRetry st (s.pending ++ s.log) s.attempts P.retries).result ≠
+      some .staleWrite) (e : Ev α) :
+    stepFixed P st s e = step P st s e := by
+  have her : ∀ er, erasedFixed P st er s = er := by
+    intro er
+    simp [erasedFixed, hs]
+  cases e with
+  | write m => rfl
+  | fence => rfl
+  | wake w now er =>
+    simp only [stepFixed, step, iterFixed, iter]
+    cases w with
+    | stop => simp [hf]
+    | tick => simp only [cycleFixed_unfenced hf, her]
+    | poll => simp only [cycleFixed_unfenced hf, her]
+
+/-! ### The invariants still hold -/
+
+section FixedInvariants
+
+variable {P : Params} {st : Store α}
+
+theorem good_drained {s : St α} (hg : Good s) (hrun : s.running = true) : Good (drained s) where
+  conserve := by
+    have hc := hg.conserve
+    simp only [drained, St.consumed] at hc ⊢
+    simpa [List.append_assoc] using hc
+  dead := hg.dead
+  degr := hg.degr
+  fence := hg.fence
+  stopped := by intro h; simp [drained, hrun] at h
+
+theorem good_cycleFixed {tick : Bool} {now : Nat} {er : Bool} {s : St α} (hg : Good s)
+    (hrun : s.running = true) : Good (cycleFixed P st tick now er s) := by
+  rw [cycleFixed_eq]
+  split
+  · exact good_drained hg hrun
+  · exact good_cycle hg hrun
+
+theorem good_stepFixed {s : St α} (hg : Good s) (e : Ev α) : Good (stepFixed P st s e) := by
+  cases e with
+  | write m => exact good_step (P := P) (st := st) hg (.write m)
+  | fence => exact good_step (P := P) (st := st) hg .fence
+  | wake w now er =>
+    simp only [stepFixed, iterFixed]
+    by_cases hr : s.running = true
+    · have hr' : (!s.running) = false := by simp [hr]
+      rw [hr']
+      simp only [Bool.false_eq_true, ↓reduceIte]
+      cases w with
+      | stop =>
+        by_cases hf : s.fenced = true
+        · simp only [hf, ↓reduceIte]; exact good_dropFenced hg hf
+        · simp only [hf, Bool.false_eq_true, ↓reduceIte]; exact good_requeue hg
+      | tick => exact good_checkFence (good_cycleFixed hg hr)
+      | poll => exact good_checkFence (good_cycleFixed hg hr)
+    · have hr' : (!s.running) = true := by simp at hr; simp [hr]
+      rw [hr']
+      exact hg
+
+theorem good_runFixed {s : St α} (hg : Good s) (evs : List (Ev α)) :
+    Good (runFixed P st s evs) := by
+  induction evs generalizing s with
+  | nil => exact hg
+  | cons e evs ih => exact ih (good_stepFixed hg e)
+
+/-- **`good_reachable` for the fixed loop.** Conservation, the dead-letter
+count, and "dropped only once degraded or fenced" hold of every state the
+fixed loop reaches. -/
+theorem good_reachable_fixed (evs : List (Ev α)) : Good (runFixed P st St.init evs) :=
+  good_runFixed good_init evs
+
+/-- **`no_silent_loss` for the fixed loop.** A batch dropped for a stale write
+is a fenced drop: it leaves `pending` only once the fence is latched, the
+flag `Memory` refuses writes on and `close` reports. -/
+theorem no_silent_loss_fixed (evs : List (Ev α)) :
+    ∀ e ∈ (runFixed P st St.init evs).ledger, e.1 = .committed ∨
+      (e.1 = .deadLettered ∧ 0 < (runFixed P st St.init evs).deadLettered) ∨
+      (e.1 = .droppedDegraded ∧ (runFixed P st St.init evs).degraded = true) ∨
+      (e.1 = .droppedFenced ∧ (runFixed P st St.init evs).fenced = true) :=
+  no_silent_loss (good_reachable_fixed evs)
+
+/-- `stopped_accounted` for the fixed loop. -/
+theorem stopped_accounted_fixed (evs : List (Ev α))
+    (hr : (runFixed P st St.init evs).running = false) :
+    (runFixed P st St.init evs).consumed ++ (runFixed P st St.init evs).log =
+      (runFixed P st St.init evs).hist :=
+  stopped_accounted (good_reachable_fixed evs) hr
+
+end FixedInvariants
+
+/-! ### No flush after the fence, no resend after a stale write -/
+
+section FixedFence
+
+variable {P : Params} {st : Store α}
+
+/-- Once the fence is latched, no event makes a store call, and the fence
+stays latched. -/
+theorem stepFixed_fenced {s : St α} (hf : s.fenced = true) (e : Ev α) :
+    (stepFixed P st s e).calls = s.calls ∧ (stepFixed P st s e).fenced = true := by
+  cases e with
+  | write m => exact ⟨rfl, hf⟩
+  | fence => exact ⟨rfl, rfl⟩
+  | wake w now er =>
+    simp only [stepFixed, iterFixed]
+    by_cases hr : s.running = true
+    · have hr' : (!s.running) = false := by simp [hr]
+      rw [hr']
+      simp only [Bool.false_eq_true, ↓reduceIte]
+      cases w with
+      | stop => simp [hf, dropFenced]
+      | tick => simp [cycleFixed_fenced hf, hf, drained, checkFence, dropFenced]
+      | poll => simp [cycleFixed_fenced hf, hf, drained, checkFence, dropFenced]
+    · have hr' : (!s.running) = true := by simp at hr; simp [hr]
+      rw [hr']
+      exact ⟨rfl, hf⟩
+
+/-- **No flush is issued after the fence latches.** From a fenced state, no
+run of the fixed loop ever calls the store again. -/
+theorem runFixed_fenced_silent {s : St α} (hf : s.fenced = true) (evs : List (Ev α)) :
+    (runFixed P st s evs).calls = s.calls := by
+  induction evs generalizing s with
+  | nil => rfl
+  | cons e evs ih =>
+    rw [runFixed_cons, ih (stepFixed_fenced hf e).2, (stepFixed_fenced hf e).1]
+
+/-- In particular, whatever the loop is doing when the heartbeat latches the
+fence, nothing reaches the store afterwards. -/
+theorem no_flush_after_fence_fixed (s : St α) (evs : List (Ev α)) :
+    (runFixed P st s (.fence :: evs)).calls = s.calls := by
+  rw [runFixed_cons]
+  exact runFixed_fenced_silent (s := stepFixed P st s .fence) rfl evs
+
+/-- **The fence is seen by the branch that ends the wait.** The scenario of
+`flush_after_fence_latched` (the fence latched while the loop waited, then a
+due tick): the fixed loop makes no store call, drops the drained tail as a
+fenced drop and stops. -/
+theorem fence_before_due_tick_fixed {s : St α} {now : Nat} {er : Bool}
+    (hrun : s.running = true) (hf : s.fenced = true) (h : Due P true now s) :
+    (iterFixed P st .tick now er s).calls = s.calls ∧
+    (iterFixed P st .tick now er s).ledger = s.ledger ++ [(.droppedFenced, s.pending ++ s.log)] ∧
+    (iterFixed P st .tick now er s).log = [] ∧
+    (iterFixed P st .tick now er s).running = false := by
+  have hne : (s.pending ++ s.log).isEmpty = false := h.nonempty
+  have hr' : (!s.running) = false := by simp [hrun]
+  simp only [iterFixed, hr', Bool.false_eq_true, ↓reduceIte]
+  rw [cycleFixed_eq]
+  simp only [hf, ↓reduceIte]
+  have hne' : (s.pending ++ s.log).isEmpty = false := hne
+  simp [drained, checkFence, dropFenced, hf, hne']
+
+/-- **A stop after the fence drops the tail.** The fixed stop branch checks
+the fence: a fenced `pending` goes to the ledger as a fenced drop and is not
+handed back to the graph log for `close`'s final flush (contrast
+`stop_requeues`). -/
+theorem stop_drops_fenced {s : St α} (hr : s.running = true) (hf : s.fenced = true)
+    (now : Nat) (er : Bool) :
+    stepFixed P st s (.wake .stop now er) = dropFenced s ∧
+    (dropFenced s).log = s.log ∧ (dropFenced s).calls = s.calls ∧
+    (dropFenced s).running = false := by
+  refine ⟨?_, rfl, rfl, rfl⟩
+  simp [stepFixed, iterFixed, hr, hf]
+
+/-- A call to the store that reports a non-retryable error is the ladder's last,
+and the ladder's result. -/
+theorem ladder_terminal_result {b : List α} (n bo k : Nat) :
+    ∀ c ∈ (ladder st b n bo k).calls, ∀ e, c.2.reported = some e → e.retryable = false →
+      (ladder st b n bo k).result = some e := by
+  induction k generalizing n bo with
+  | zero =>
+    intro c hc e he _
+    simp only [ladder, List.mem_singleton] at hc ⊢
+    rw [← he, hc]
+  | succ k ih =>
+    intro c hc e he hr
+    cases h : (st b n).reported with
+    | none =>
+      rw [ladder_ok h] at hc ⊢
+      simp only [List.mem_singleton] at hc
+      rw [hc] at he
+      rw [h] at he
+      cases he
+    | some e0 =>
+      cases hr0 : e0.retryable with
+      | false =>
+        rw [ladder_nonretryable h hr0] at hc ⊢
+        simp only [List.mem_singleton] at hc
+        rw [hc, h] at he
+        exact congrArg some (Option.some.inj he)
+      | true =>
+        rw [ladder_retry h hr0] at hc ⊢
+        cases hc with
+        | head =>
+          rw [h] at he
+          cases Option.some.inj he
+          rw [hr0] at hr
+          cases hr
+        | tail _ hc => exact ih _ _ c hc e he hr
+
+/-- What a cycle does, as far as the store is concerned: it makes no call, or
+it is due. -/
+theorem cycle_calls_or_due {tick : Bool} {now : Nat} {er : Bool} (s : St α) :
+    (cycle P st tick now er s).calls = s.calls ∨ Due P tick now s := by
+  unfold cycle
+  dsimp only
+  by_cases h1 : (s.pending ++ s.log).isEmpty = true
+  · rw [ite_eq_left h1]; exact Or.inl rfl
+  · rw [ite_eq_right h1]
+    by_cases h2 : s.degraded = true
+    · rw [ite_eq_left h2]; exact Or.inl rfl
+    · rw [ite_eq_right h2]
+      by_cases h3 : P.logMax < (s.pending ++ s.log).length
+      · rw [ite_eq_left h3]; exact Or.inl rfl
+      · rw [ite_eq_right h3]
+        by_cases h4 : held s.retryAfter now = true
+        · rw [ite_eq_left h4]; exact Or.inl rfl
+        · rw [ite_eq_right h4]
+          by_cases h5 : (!tick && decide ((s.pending ++ s.log).length < P.maxBatch)) = true
+          · rw [ite_eq_left h5]; exact Or.inl rfl
+          · right
+            refine ⟨by simpa using h1, by simpa using h2, by omega, by simpa using h4, ?_⟩
+            cases tick
+            · right
+              simp only [Bool.not_false, Bool.true_and, decide_eq_true_eq] at h5
+              omega
+            · left; rfl
+
+/-- **A stale write fences the loop at once.** In the fixed loop, any event
+whose store calls include a `StaleWrite` leaves the loop fenced and stopped. -/
+theorem stale_write_fences_fixed {s : St α} (e : Ev α)
+    (hst : ∃ c ∈ (stepFixed P st s e).calls.drop s.calls.length, c.2 = .fail .staleWrite) :
+    (stepFixed P st s e).fenced = true ∧ (stepFixed P st s e).running = false := by
+  obtain ⟨c, hc, hcs⟩ := hst
+  have nocall : (stepFixed P st s e).calls = s.calls → False := by
+    intro h
+    rw [h, List.drop_length] at hc
+    cases hc
+  cases e with
+  | write m => exact (nocall rfl).elim
+  | fence => exact (nocall rfl).elim
+  | wake w now er =>
+    by_cases hr : s.running = true
+    · have hr' : (!s.running) = false := by simp [hr]
+      have htick : stepFixed P st s (.wake .tick now er) =
+          checkFence (cycleFixed P st true now er s) := by
+        simp [stepFixed, iterFixed, hr']
+      have hpoll : stepFixed P st s (.wake .poll now er) =
+          checkFence (cycleFixed P st false now er s) := by
+        simp [stepFixed, iterFixed, hr']
+      have main : ∀ tick,
+          (∃ c ∈ (checkFence (cycleFixed P st tick now er s)).calls.drop s.calls.length,
+            c.2 = .fail .staleWrite) →
+          (checkFence (cycleFixed P st tick now er s)).fenced = true ∧
+          (checkFence (cycleFixed P st tick now er s)).running = false := by
+        intro tick ⟨c, hc, hcs⟩
+        rw [(checkFence_shape _).2.2] at hc
+        rw [cycleFixed_eq] at hc ⊢
+        by_cases hf : s.fenced = true
+        · simp only [hf, ↓reduceIte, drained, List.drop_length] at hc
+          cases hc
+        · simp only [hf, Bool.false_eq_true, ↓reduceIte] at hc ⊢
+          rcases cycle_calls_or_due (P := P) (st := st) (tick := tick) (now := now)
+            (er := erasedFixed P st er s) s with hcalls | hdue
+          · rw [hcalls, List.drop_length] at hc
+            cases hc
+          · rw [cycle_due hdue] at hc ⊢
+            rw [(settle_shape _ _ _ _ _).2.2.2.1] at hc
+            simp only [List.drop_left'] at hc
+            have hc' : c ∈ (flushWithRetry st (s.pending ++ s.log) s.attempts P.retries).calls := by
+              simpa using hc
+            have hres : (flushWithRetry st (s.pending ++ s.log) s.attempts P.retries).result =
+                some .staleWrite :=
+              ladder_terminal_result _ _ _ c hc' .staleWrite (by rw [hcs]; rfl) rfl
+            have her : erasedFixed P st er s = true := by simp [erasedFixed, hres]
+            rw [her]
+            simp [settle, hres, checkFence, dropFenced]
+      cases w with
+      | stop =>
+        refine (nocall ?_).elim
+        by_cases hf : s.fenced = true
+        · simp [stepFixed, iterFixed, hr', hf, dropFenced]
+        · simp [stepFixed, iterFixed, hr', hf, requeue]
+      | tick => rw [htick] at hc ⊢; exact main true ⟨c, hc, hcs⟩
+      | poll => rw [hpoll] at hc ⊢; exact main false ⟨c, hc, hcs⟩
+    · refine (nocall ?_).elim
+      have hr' : (!s.running) = true := by simp at hr; simp [hr]
+      simp [stepFixed, iterFixed, hr']
+
+/-- **A stale write never leads to a resend.** After any event whose store
+calls include a `StaleWrite`, no run of the fixed loop calls the store again:
+the batch is not retained, held and re-sent (contrast `stale_write_retained`). -/
+theorem stale_write_never_resent {s : St α} (e : Ev α)
+    (hst : ∃ c ∈ (stepFixed P st s e).calls.drop s.calls.length, c.2 = .fail .staleWrite)
+    (evs : List (Ev α)) :
+    (runFixed P st (stepFixed P st s e) evs).calls = (stepFixed P st s e).calls :=
+  runFixed_fenced_silent (stale_write_fences_fixed e hst).1 evs
+
+/-- The scenario of `stale_write_retained`, fixed: one call, the drained batch
+dropped as a fenced drop, the loop fenced and stopped, nothing held for a
+resend. -/
+theorem stale_write_dropped_fixed {s : St α} {now : Nat} {er : Bool}
+    (hrun : s.running = true) (hf : s.fenced = false) (h : Due P true now s)
+    (hs : st (s.pending ++ s.log) s.attempts = .fail .staleWrite) :
+    (iterFixed P st .tick now er s).calls = s.calls ++ [(s.pending ++ s.log, .fail .staleWrite)] ∧
+    (iterFixed P st .tick now er s).ledger = s.ledger ++ [(.droppedFenced, s.pending ++ s.log)] ∧
+    (iterFixed P st .tick now er s).deadLettered = s.deadLettered ∧
+    (iterFixed P st .tick now er s).fenced = true ∧
+    (iterFixed P st .tick now er s).running = false := by
+  have hr' : (!s.running) = false := by simp [hrun]
+  have hres := stale_write_one_call (st := st) hs P.retries
+  have her : erasedFixed P st er s = true := by simp [erasedFixed, hres]
+  have hne : (s.pending ++ s.log).isEmpty = false := h.nonempty
+  simp only [iterFixed, hr', Bool.false_eq_true, ↓reduceIte]
+  rw [cycleFixed_eq]
+  simp only [hf, Bool.false_eq_true, ↓reduceIte]
+  rw [cycle_due h, her, hres]
+  simp [settle, checkFence, dropFenced, hne]
+
+end FixedFence
+
+/-! ### The heartbeat and the loop together -/
+
+section FixedLease
+
+variable {H : Type} [DecidableEq H] {P : Params} {st : Store α}
+
+/-- **After a takeover the fence latches within one heartbeat, and then no
+flush is issued.** Writer `A` captured token `a.token` at row `a`; after any
+history the row `b` is no longer `A`'s generation (another writer holds it, it
+was released by the operator override, or `A`'s own refresh re-took it at a
+later token). The fixed heartbeat's next beat latches (`Lease.beat_latches_iff`),
+and from the `.fence` event on the fixed loop never calls the store again. -/
+theorem takeover_fences_fixed {released A : H} {a b : Lease.Row H}
+    (hsteps : Lease.Steps released a b) (hnot : ¬ (b.holder = A ∧ b.token = a.token))
+    (now ttl : Int) (s : St α) (evs : List (Ev α)) :
+    Lease.beatLatches A a.token now ttl b = true ∧
+    (runFixed P st s (.fence :: evs)).calls = s.calls :=
+  ⟨(Lease.beat_latches_iff hsteps now ttl).mpr hnot, no_flush_after_fence_fixed s evs⟩
+
+/-- The operator-override case of `override_refresh_retakes`, fixed: the old
+beat misses the re-take, the fixed beat latches, and nothing is flushed
+afterwards. -/
+theorem override_fences_fixed {released A : H} (a : Lease.Row H) (hA : a.holder = A)
+    (hAr : A ≠ released) {now now' : Int} (hle : now ≤ now') (ttl : Int) (s : St α)
+    (evs : List (Ev α)) :
+    Lease.beatLatchesOld A now' ttl (Lease.release released A now a) = false ∧
+    Lease.beatLatches A a.token now' ttl (Lease.release released A now a) = true ∧
+    (runFixed P st s (.fence :: evs)).calls = s.calls :=
+  ⟨(Lease.override_beat_latches a hA hAr hle ttl).1,
+   (Lease.override_beat_latches a hA hAr hle ttl).2, no_flush_after_fence_fixed s evs⟩
+
+end FixedLease
+
+end Fixed
+
 /-! ## Examples -/
 
 section Examples
@@ -2006,6 +2522,74 @@ example :
     (run { exP with logMax := 2 } exRetaken St.init
       [.write 1, .wake .tick 0 false, .write 2, .wake .tick 10000 false,
        .write 3, .wake .tick 20000 false]).calls.length = 2 := by
+  decide
+
+/-! ### The same scenarios in the fixed loop (#293) -/
+
+/-- The issue's scenario, fixed (`stale_write_never_resent`): the wedged
+holder's first flush after the re-take is refused once, the stale write
+latches the fence, the batch is dropped as a fenced drop and the loop stops.
+No resend, and nothing waits for `log_max` to degrade the session. (The fixed
+heartbeat latches too, `Lease.override_beat_latches`; this run does not need
+it.) -/
+example :
+    (runFixed exP exRetaken St.init
+      [.write 1, .wake .tick 0 false, .write 2, .wake .tick 10000 false,
+       .wake .tick 20000 false, .write 3, .wake .tick 30000 false]).calls =
+      [([1], .fail .staleWrite)] ∧
+    (runFixed exP exRetaken St.init
+      [.write 1, .wake .tick 0 false, .write 2, .wake .tick 10000 false,
+       .wake .tick 20000 false, .write 3, .wake .tick 30000 false]).ledger =
+      [(.droppedFenced, [1])] ∧
+    (runFixed exP exRetaken St.init
+      [.write 1, .wake .tick 0 false, .write 2, .wake .tick 10000 false,
+       .wake .tick 20000 false, .write 3, .wake .tick 30000 false]).fenced = true ∧
+    (runFixed exP exRetaken St.init
+      [.write 1, .wake .tick 0 false, .write 2, .wake .tick 10000 false,
+       .wake .tick 20000 false, .write 3, .wake .tick 30000 false]).running = false := by
+  decide
+
+/-- `exStaleRun`, fixed: the first refused flush fences the loop; the batch is
+never sent again. -/
+example :
+    (runFixed exP exStale St.init exStaleRun).calls = [([1], .fail .staleWrite)] ∧
+    (runFixed exP exStale St.init exStaleRun).ledger = [(.droppedFenced, [1])] ∧
+    (runFixed exP exStale St.init exStaleRun).deadLettered = 0 := by
+  decide
+
+/-- `fence_before_due_tick_fixed`: the `max_batch = 3` run that flushed after
+the fence latched now makes no call and drops the tail. -/
+example :
+    (runFixed { exP with maxBatch := 3 } exFlaky St.init
+      [.write 1, .write 2, .write 3, .fence, .wake .poll 100 false]).calls = [] ∧
+    (runFixed { exP with maxBatch := 3 } exFlaky St.init
+      [.write 1, .write 2, .write 3, .fence, .wake .poll 100 false]).ledger =
+      [(.droppedFenced, [1, 2, 3])] ∧
+    (runFixed { exP with maxBatch := 3 } exFlaky St.init
+      [.write 1, .write 2, .write 3, .fence, .wake .poll 100 false]).running = false := by
+  decide
+
+/-- `stop_drops_fenced`: a retained batch, then the fence, then a stop. The
+old loop hands `[1]` back to the graph log; the fixed loop drops it. -/
+example :
+    (run exP exDown St.init [.write 1, .wake .tick 0 false, .fence, .wake .stop 1 false]).log
+      = [1] ∧
+    (runFixed exP exDown St.init [.write 1, .wake .tick 0 false, .fence, .wake .stop 1 false]).log
+      = [] ∧
+    (runFixed exP exDown St.init
+      [.write 1, .wake .tick 0 false, .fence, .wake .stop 1 false]).ledger =
+      [(.droppedFenced, [1])] := by
+  decide
+
+/-- `stepFixed_agrees`: away from the fence and stale writes the fixed loop
+runs exactly as before (the retry, the retained batch, the stop). -/
+example :
+    runFixed exP exFlaky St.init [.write 1, .write 2, .wake .tick 0 false] =
+      run exP exFlaky St.init [.write 1, .write 2, .wake .tick 0 false] ∧
+    runFixed exP exDown St.init
+      [.write 1, .write 2, .wake .tick 0 false, .write 3, .wake .stop 0 false] =
+      run exP exDown St.init
+        [.write 1, .write 2, .wake .tick 0 false, .write 3, .wake .stop 0 false] := by
   decide
 
 end Examples

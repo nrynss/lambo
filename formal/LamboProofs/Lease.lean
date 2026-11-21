@@ -45,6 +45,27 @@ with no row (it mints token `1`; `first` below is that row).
 
 The last two are the single-writer guarantee at the store: of all the tokens
 ever handed out for a session, only the newest generation can write.
+
+## The heartbeat (#293)
+
+The heartbeat in `src/memory/leases.rs` (`spawn_lease_heartbeat`) refreshes
+the lease with an `acquire` by the holder and decides from the answer whether
+to latch the lease-lost fence. `beatLatchesOld` is the behaviour before #293:
+it latches only on `Held`, i.e. when another identity holds the row after the
+refresh, and ignores the token an `Acquired` returns. `beatLatches` is the
+fix: it also latches when the refresh comes back `Acquired` at a token other
+than the one the handle captured at its own acquire.
+
+* `beat_latches_iff`: over any history, the fixed beat latches exactly when
+  the row is no longer the holder's own generation (held by it at its
+  captured token). So the first beat after any takeover latches, whoever holds
+  the row by then, the holder itself included (a re-take).
+* `beat_own_generation`: on the holder's own generation neither beat latches;
+  the fix changes nothing there. `beatLatchesOld_le`: every old latch is still
+  a latch.
+* `override_beat_latches`: after the documented operator override (a release
+  by hand), the old beat re-takes the row and does not latch; the fixed beat
+  latches.
 -/
 
 namespace Lambo.Lease
@@ -336,5 +357,107 @@ theorem acquire_after_release_bumps (released me who : H) (now now' ttl : Int) (
     have hlt : now' < now := hc.1
     omega
   rw [acquire_takeover h1 h2] <;> rfl
+
+/-! ## The heartbeat's latch decision (#293) -/
+
+/-- The heartbeat before #293: refresh (an `acquire` by the holder `me`) and
+latch the fence only when the answer is `Held`, i.e. another identity holds
+the row after the refresh (`Ok(LeaseOutcome::Acquired(_)) => {}`). -/
+def beatLatchesOld (me : H) (now ttl : Int) (r : Row H) : Bool :=
+  decide ((acquire me now ttl r).holder ≠ me)
+
+/-- The fixed heartbeat: latch on `Held`, and also when the refresh comes back
+`Acquired` at a token other than `t`, the one the handle captured at its own
+acquire (and presents on every flush). -/
+def beatLatches (me : H) (t : Nat) (now ttl : Int) (r : Row H) : Bool :=
+  decide ((acquire me now ttl r).holder ≠ me) || decide ((acquire me now ttl r).token ≠ t)
+
+/-- The fix only adds latches. -/
+theorem beatLatchesOld_le (me : H) (t : Nat) (now ttl : Int) (r : Row H)
+    (h : beatLatchesOld me now ttl r = true) : beatLatches me t now ttl r = true := by
+  unfold beatLatchesOld at h
+  unfold beatLatches
+  rw [h]
+  rfl
+
+/-- **On the holder's own generation neither beat latches.** While the row is
+`me`'s at the token `me` captured, the refresh keeps both, so the fix changes
+nothing for a healthy holder. -/
+theorem beat_own_generation {me : H} {t : Nat} (now ttl : Int) {r : Row H}
+    (hh : r.holder = me) (ht : r.token = t) :
+    beatLatches me t now ttl r = false ∧ beatLatchesOld me now ttl r = false := by
+  have e := acquire_refresh (now := now) (ttl := ttl) hh
+  unfold beatLatches beatLatchesOld
+  rw [e]
+  simp [hh, ht]
+
+/-- **The fixed beat latches exactly when the row has left the holder's
+generation.** Writer `A` captured token `a.token` at row `a`. After any history
+of acquires and releases (`Steps`), `A`'s next beat latches if and only if the
+row is not `A`'s at that token: another identity holds it (`Held`), the row was
+released (by `A`, or by the operator override), or `A` itself holds it at a
+later token (a re-take). Since this holds at every row after a takeover, the
+fence latches at the first beat after it, within one
+`LEASE_HEARTBEAT_INTERVAL`. -/
+theorem beat_latches_iff {released A : H} {a b : Row H} (hsteps : Steps released a b)
+    (now ttl : Int) :
+    beatLatches A a.token now ttl b = true ↔ ¬ (b.holder = A ∧ b.token = a.token) := by
+  constructor
+  · intro hl hown
+    rw [(beat_own_generation now ttl hown.1 hown.2).1] at hl
+    cases hl
+  · intro hnot
+    have hmono : a.token ≤ b.token := token_mono hsteps
+    unfold beatLatches
+    by_cases hA : (acquire A now ttl b).holder = A
+    · rcases acquire_token_cases A now ttl b hA with ⟨hb, htok⟩ | ⟨_, htok⟩
+      · have hne : b.token ≠ a.token := fun e => hnot ⟨hb, e⟩
+        simp [htok, hne]
+      · have hne : b.token + 1 ≠ a.token := by omega
+        simp [htok, hne]
+    · simp [hA]
+
+/-- In particular the first beat after any takeover latches: once the token
+has moved past the one `A` captured, `A`'s beat latches whoever holds the row. -/
+theorem beat_latches_after_takeover {released A : H} {a b : Row H}
+    (hsteps : Steps released a b) (hlt : a.token < b.token) (now ttl : Int) :
+    beatLatches A a.token now ttl b = true :=
+  (beat_latches_iff hsteps now ttl).mpr (fun h => by omega)
+
+/-- **The operator-override re-take.** The override releases the wedged
+holder `A`'s row by hand (holder `lambo:released`, expired, token kept). `A`'s
+next refresh takes it over at `token + 1`, holder `A` again: the old beat sees
+`Acquired` and does not latch; the fixed beat sees the token move and does. -/
+theorem override_beat_latches {released A : H} (a : Row H) (hA : a.holder = A)
+    (hAr : A ≠ released) {now now' : Int} (hle : now ≤ now') (ttl : Int) :
+    beatLatchesOld A now' ttl (release released A now a) = false ∧
+    beatLatches A a.token now' ttl (release released A now a) = true := by
+  have htok := acquire_after_release_bumps released A A now now' ttl a hA hAr hle
+  have hhold : (acquire A now' ttl (release released A now a)).holder = A := by
+    rw [release_mine hA]
+    have h2 : ({ holder := released, token := a.token, expires := now } : Row H).holder ≠ A :=
+      fun e => hAr e.symm
+    have h1 : ¬ (now' < ({ holder := released, token := a.token, expires := now } : Row H).expires
+        ∧ ({ holder := released, token := a.token, expires := now } : Row H).holder ≠ A) := by
+      intro hc
+      have : now' < now := hc.1
+      omega
+    rw [acquire_takeover h1 h2]
+  unfold beatLatchesOld beatLatches
+  simp [hhold, htok]
+
+/-- The override scenario concretely (the `exRetakenRow` of `Flush.lean`):
+holder `0` holds token 1, the override at 50 s releases it, the refresh at
+60 s re-takes it at token 2. The old beat does not latch; the fixed one does. -/
+example :
+    beatLatchesOld 0 60000 45000 (release 99 0 50000 (first 0 0 45000)) = false ∧
+    beatLatches 0 1 60000 45000 (release 99 0 50000 (first 0 0 45000)) = true := by
+  decide
+
+/-- A healthy holder's beat latches under neither version. -/
+example :
+    beatLatchesOld 0 15000 45000 (first 0 0 45000) = false ∧
+    beatLatches 0 1 15000 45000 (first 0 0 45000) = false := by
+  decide
 
 end Lambo.Lease
