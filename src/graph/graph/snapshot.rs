@@ -207,16 +207,19 @@ impl Graph {
                 )));
             }
             if name.session_id != sid
-                || key != name.name_key
                 || matches!(g.node(name.node_id), Some(Node::Interaction(_)))
                 || g.retired_alias(name.node_id).is_some()
                 || g.concepts()
                     .any(|c| c.canonical_key == key && c.id != name.node_id)
                 || g.names.insert(key, name.clone()).is_some()
             {
-                return Err(invariant(
-                    "invalid, conflicting or duplicate name in snapshot",
-                ));
+                return Err(invariant(format!(
+                    "stored name {:?} of session {} (bound to {}, key {:?}) is invalid, \
+                     conflicting or a duplicate in this snapshot: another session's, bound \
+                     to an interaction or a retired alias, its key held by another concept, \
+                     or a second name with the same key",
+                    name.name, name.session_id, name.node_id, name.name_key
+                )));
             }
         }
         for r in &snap.reservations {

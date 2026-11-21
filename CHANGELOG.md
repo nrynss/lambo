@@ -103,7 +103,12 @@
     their old key because the current rule gives them an empty key"): the
     re-key never writes an empty key. Like a collision, such a row keeps
     the marker from being recorded, so every provision scans and reports it
-    again until the concept is retracted or rewritten.
+    again until the concept is removed with the API's `retract`, given its
+    full id (the provision line lists the ids; a write of the same text
+    derives the empty key and is refused, so it cannot be rewritten). A concept is
+    also never re-keyed onto the key of a durable name bound to another
+    concept, which would stop the session loading: it keeps its old key and
+    is reported as a collision.
   * **Durable names.** A stored name whose key held an empty stem makes the
     whole session fail to open (every command that loads it, `lambo names`
     included), by design: the name no longer passes the load-time name
@@ -113,16 +118,17 @@
     for a name whose stems are all empty, `... concept name "''s ''s" of
     session dogfood (bound to <node id>) has key " ", but the current rule
     refuses the name: ...`. Find and
-    remove the row with the session stopped (the same SQL on SQLite and
-    Postgres; double each `'` inside a literal), then declare the name again
-    if it is still wanted:
+    remove the row with the session stopped (the same SQL on SQLite,
+    Postgres and Cockroach; double each `'` inside a literal), then declare
+    the name again if it is still wanted:
 
     ```sql
     -- Find: names whose stored key has a leading, trailing or doubled space.
     SELECT session_id, name, name_key, node_id FROM concept_names
      WHERE name_key LIKE ' %' OR name_key LIKE '% ' OR name_key LIKE '%  %';
-    -- Remove one.
-    DELETE FROM concept_names WHERE session_id = '<session>' AND name = '<name>';
+    -- Remove one, by its primary key.
+    DELETE FROM concept_names
+     WHERE session_id = '<session>' AND name_key = '<stored key>' AND name = '<name>';
     ```
 
     Updating `name_key` to the current key instead keeps the binding only

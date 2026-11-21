@@ -25,7 +25,9 @@
 //! break `UNIQUE (session_id, canonical_key)`; that row keeps its old key and
 //! is reported, never merged. So does a row whose staging placeholder
 //! ([`placeholder_key`]) another concept already holds: keys are
-//! caller-supplied, so the planner checks rather than assumes.
+//! caller-supplied, so the planner checks rather than assumes. So does a row
+//! whose new key is the key of a durable name bound to another concept
+//! ([`NameRow`]): the session would no longer load.
 //!
 //! A row whose new key would be empty (its text has only stopwords and empty
 //! stems, such as `''s ''s`, which an old build stored as `" "`) also keeps
@@ -33,7 +35,8 @@
 //! one no write accepts, and in the key index every stopword-only text would
 //! resolve to that concept. Like a collision, such a row keeps the marker
 //! from being recorded (fail closed), so every provision reports it until the
-//! concept is retracted or rewritten.
+//! concept is retracted by its full id. It cannot be rewritten: a write of the
+//! same text derives the empty key and is refused.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -47,6 +50,16 @@ pub struct KeyRow {
     pub content: String,
     pub canonical_key: String,
     pub observation: bool,
+}
+
+/// One stored durable name, as the re-key reads it: a name's key must not be
+/// a concept key of another concept in the session, or the session no
+/// longer loads. `node_id` is the adapter's id text, as [`KeyRow::id`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NameRow {
+    pub session_id: String,
+    pub name_key: String,
+    pub node_id: String,
 }
 
 /// One planned key change.
@@ -105,8 +118,14 @@ impl RekeyPlan {
 pub const REKEY_MARKER_VALUE: &str = "301-empty-stems-dropped";
 
 /// Plan the re-key. `synonyms` maps `(session_id, source_key)` to the
-/// synonym's target text, as the `synonyms` table stores it.
-pub fn plan_rekey(rows: &[KeyRow], synonyms: &HashMap<(String, String), String>) -> RekeyPlan {
+/// synonym's target text, as the `synonyms` table stores it; `names` are the
+/// session's durable names, whose keys a concept may take only if the name
+/// is bound to it.
+pub fn plan_rekey(
+    rows: &[KeyRow],
+    synonyms: &HashMap<(String, String), String>,
+    names: &[NameRow],
+) -> RekeyPlan {
     let mut candidates: BTreeMap<String, (usize, String)> = BTreeMap::new();
     let mut kept_empty: Vec<String> = Vec::new();
     for (i, r) in rows.iter().enumerate() {
@@ -152,6 +171,20 @@ pub fn plan_rekey(rows: &[KeyRow], synonyms: &HashMap<(String, String), String>)
         })
         .map(|(id, _)| id.clone())
         .collect();
+    // A durable name's key is held by the concept it is bound to: a load
+    // refuses a name whose key another concept carries (Observations
+    // included), so a row whose new key is such a name's key is refused as
+    // a collision. Names are not re-keyed, so this is fixed before the
+    // fixpoint.
+    for (id, (i, new_key)) in &candidates {
+        let r = &rows[*i];
+        if names
+            .iter()
+            .any(|n| n.session_id == r.session_id && n.name_key == *new_key && n.node_id != *id)
+        {
+            refused.insert(id.clone());
+        }
+    }
     // Fixpoint: a candidate whose new key is held by a row that keeps its key
     // is refused, and then its own old key stays held too.
     loop {
@@ -245,7 +278,7 @@ pub fn report(plan: &RekeyPlan) -> String {
         out.push_str(&format!(
             "; {} kept their old key because the current rule gives them an empty key \
              (text of only stopwords and empty stems, which no write accepts now; retract \
-             or rewrite them): {}",
+             them by these ids): {}",
             plan.kept_empty.len(),
             plan.kept_empty.join(", ")
         ));
@@ -386,7 +419,7 @@ mod tests {
                 &legacy_canonical_key("deploy v2 schemas", |_| None),
             ),
         ];
-        let plan = plan_rekey(&rows, &none());
+        let plan = plan_rekey(&rows, &none(), &[]);
         assert_eq!(
             plan.changes,
             vec![KeyChange {
@@ -411,7 +444,7 @@ mod tests {
                 "RepoResource:v1:[\"r\",\"src/release.rs\"]",
             ),
         ];
-        assert_eq!(plan_rekey(&rows, &none()), RekeyPlan::default());
+        assert_eq!(plan_rekey(&rows, &none(), &[]), RekeyPlan::default());
     }
 
     #[test]
@@ -425,7 +458,7 @@ mod tests {
             (r == "release").then_some("release 2122de39e47e")
         });
         let rows = [row("a", "release", &old)];
-        let plan = plan_rekey(&rows, &syn);
+        let plan = plan_rekey(&rows, &syn, &[]);
         assert_eq!(plan.changes[0].new_key, "2122de39e47e releas");
     }
 
@@ -440,17 +473,17 @@ mod tests {
             // Written by a current build before provision ran.
             row("z", "build 2122de39e47e", "2122de39e47e build"),
         ];
-        let plan = plan_rekey(&rows, &none());
+        let plan = plan_rekey(&rows, &none(), &[]);
         assert!(plan.changes.is_empty());
         assert_eq!(plan.collisions, vec!["a".to_string()]);
         // Another session is independent.
         let mut other = rows.clone();
         other[1].session_id = "t".into();
-        assert_eq!(plan_rekey(&other, &none()).changes.len(), 1);
+        assert_eq!(plan_rekey(&other, &none(), &[]).changes.len(), 1);
         // Observations are exempt from uniqueness, so they are re-keyed.
         let mut obs = rows.clone();
         obs[0].observation = true;
-        assert_eq!(plan_rekey(&obs, &none()).changes.len(), 1);
+        assert_eq!(plan_rekey(&obs, &none(), &[]).changes.len(), 1);
     }
 
     /// #301: a key a build from #148 up to #301 wrote (identifier unstemmed,
@@ -467,7 +500,7 @@ mod tests {
             // Written before #148: the legacy rule matches.
             row("b", "''s-lease", " leas"),
         ];
-        let plan = plan_rekey(&rows, &none());
+        let plan = plan_rekey(&rows, &none(), &[]);
         assert_eq!(
             plan.changes,
             vec![
@@ -489,7 +522,38 @@ mod tests {
             row("a", content, "2122de39e47e build"),
             row("b", "''s-lease", "leas"),
         ];
-        assert_eq!(plan_rekey(&rekeyed, &none()), RekeyPlan::default());
+        assert_eq!(plan_rekey(&rekeyed, &none(), &[]), RekeyPlan::default());
+    }
+
+    /// A row whose new key is a durable name's key bound to another concept
+    /// is refused and reported: the session would no longer load. A name
+    /// bound to the row itself does not block it, and neither does one in
+    /// another session.
+    #[test]
+    fn a_new_key_held_by_another_concepts_name_is_a_collision() {
+        let rows = [row("a", "''s-lease", " leas")];
+        let name = |session: &str, node: &str| NameRow {
+            session_id: session.into(),
+            name_key: "leas".into(),
+            node_id: node.into(),
+        };
+        let plan = plan_rekey(&rows, &none(), &[name("s", "b")]);
+        assert!(plan.changes.is_empty(), "{plan:?}");
+        assert_eq!(plan.collisions, vec!["a".to_string()]);
+        assert!(!plan.is_clean());
+        // An Observation is refused too: a load checks every concept.
+        let mut obs = rows.clone();
+        obs[0].observation = true;
+        assert_eq!(
+            plan_rekey(&obs, &none(), &[name("s", "b")]).collisions,
+            vec!["a".to_string()]
+        );
+        // Its own name, or another session's, does not block it.
+        for names in [[name("s", "a")], [name("t", "b")]] {
+            let plan = plan_rekey(&rows, &none(), &names);
+            assert_eq!(plan.changes.len(), 1, "{plan:?}");
+            assert!(plan.is_clean());
+        }
     }
 
     /// #301: a row whose current key would be empty keeps its old key and is
@@ -503,7 +567,7 @@ mod tests {
             // A current key that is already empty is not this case.
             row("c", "the", ""),
         ];
-        let plan = plan_rekey(&rows, &none());
+        let plan = plan_rekey(&rows, &none(), &[]);
         assert!(plan.changes.is_empty(), "{plan:?}");
         assert!(plan.collisions.is_empty());
         assert_eq!(plan.kept_empty, vec!["a".to_string(), "b".to_string()]);
@@ -521,16 +585,16 @@ mod tests {
             // A caller-supplied key that happens to be a's staging placeholder.
             row("p", "anything", &placeholder_key("a")),
         ];
-        let plan = plan_rekey(&rows, &none());
+        let plan = plan_rekey(&rows, &none(), &[]);
         assert!(plan.changes.is_empty(), "{plan:?}");
         assert_eq!(plan.collisions, vec!["a".to_string()]);
         // Another session's placeholder text does not block it.
         let mut other = rows.clone();
         other[1].session_id = "t".into();
-        assert_eq!(plan_rekey(&other, &none()).changes.len(), 1);
+        assert_eq!(plan_rekey(&other, &none(), &[]).changes.len(), 1);
         // An Observation holding it is exempt from the index.
         let mut obs = rows.clone();
         obs[1].observation = true;
-        assert_eq!(plan_rekey(&obs, &none()).changes.len(), 1);
+        assert_eq!(plan_rekey(&obs, &none(), &[]).changes.len(), 1);
     }
 }

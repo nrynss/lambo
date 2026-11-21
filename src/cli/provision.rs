@@ -34,12 +34,12 @@ use crate::store::{GraphStore, StoreKind};
 /// other kinds provision through the store that was already constructed from
 /// the same value.
 ///
-/// After the schema, every durable kind re-keys concepts whose key the
-/// pre-#148 rule wrote (identifier tokens stemmed); see
-/// [`crate::store::rekey`]. Refused while a session is held; a rerun is a
-/// no-op. Once a re-key has finished with no collision the store records it
-/// and later runs skip the scan (#171); `force_rekey` (`--rekey`) runs it
-/// anyway.
+/// After the schema, every durable kind re-keys concepts whose key an older
+/// rule wrote (identifier tokens stemmed before #148, empty stems kept before
+/// #301); see [`crate::store::rekey`]. Refused while a session is held; a
+/// rerun is a no-op. Once a re-key has finished with no collision and no row
+/// kept from an empty key, the store records it and later runs skip the scan
+/// (#171); `force_rekey` (`--rekey`) runs it anyway.
 pub async fn run(
     store: Box<dyn GraphStore>,
     kind: StoreKind,

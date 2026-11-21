@@ -1,4 +1,4 @@
-//! #148 on SQLite: provision re-keys concepts the pre-#148 rule keyed, keeps
+//! #148, #301 on SQLite: provision re-keys concepts an older rule keyed, keeps
 //! merged concepts merged, refuses while held, and a rerun is a no-op.
 
 use super::*;
@@ -194,6 +194,30 @@ async fn a_row_kept_from_an_empty_key_blocks_the_marker() {
     let again = store.rekey_canonical_keys(false).await.unwrap();
     assert!(!again.skipped);
     assert_eq!(again.kept_empty.len(), 1);
+}
+
+/// #301: a concept is never re-keyed onto a durable name's key bound to
+/// another concept, which would make the session refuse to load; it keeps
+/// its old key and is reported as a collision.
+#[tokio::test]
+async fn a_new_key_held_by_a_durable_name_is_a_collision() {
+    let (store, sid) = legacy_store(&["''s-lease"]).await;
+    let other = NodeId::new();
+    sqlx::query(
+        "INSERT INTO concept_names (session_id, name, name_key, node_id) VALUES (?, ?, ?, ?)",
+    )
+    .bind(sid.as_str())
+    .bind("lease")
+    .bind("leas")
+    .bind(other.to_string())
+    .execute(store.pool())
+    .await
+    .unwrap();
+    let plan = store.rekey_canonical_keys(false).await.unwrap();
+    assert!(plan.changes.is_empty(), "{plan:?}");
+    assert_eq!(plan.collisions.len(), 1, "{plan:?}");
+    assert_eq!(keys(&store).await[0].1, " leas");
+    assert_eq!(marker(&store).await, None);
 }
 
 /// The adapter-agnostic testkit the live Postgres test also runs.

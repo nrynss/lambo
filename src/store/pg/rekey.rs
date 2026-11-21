@@ -1,4 +1,4 @@
-//! #148 on Postgres and Cockroach: read, plan
+//! #148, #301 on Postgres and Cockroach: read, plan
 //! ([`crate::store::rekey::plan_rekey`]) and write the re-key in one
 //! transaction. `lambo provision` runs it on both, after the schema.
 
@@ -8,7 +8,7 @@ use super::codec::backend;
 use super::dialect::Dialect;
 use super::PgStore;
 use crate::store::rekey::{
-    live_lease_err, placeholder_key, plan_rekey, KeyRow, RekeyPlan, REKEY_MARKER_KEY,
+    live_lease_err, placeholder_key, plan_rekey, KeyRow, NameRow, RekeyPlan, REKEY_MARKER_KEY,
     REKEY_MARKER_VALUE,
 };
 use crate::types::StoreError;
@@ -59,7 +59,20 @@ impl<D: Dialect> PgStore<D> {
                 .map_err(backend)?;
         let synonyms: HashMap<(String, String), String> =
             synonyms.into_iter().map(|(s, k, v)| ((s, k), v)).collect();
-        let plan = plan_rekey(&rows, &synonyms);
+        let names: Vec<(String, String, uuid::Uuid)> =
+            sqlx::query_as("SELECT session_id, name_key, node_id FROM concept_names")
+                .fetch_all(&mut *tx)
+                .await
+                .map_err(backend)?;
+        let names: Vec<NameRow> = names
+            .into_iter()
+            .map(|(session_id, name_key, node_id)| NameRow {
+                session_id,
+                name_key,
+                node_id: node_id.to_string(),
+            })
+            .collect();
+        let plan = plan_rekey(&rows, &synonyms, &names);
         if plan.changes.is_empty() {
             record_marker(&mut tx, &plan).await?;
             tx.commit().await.map_err(backend)?;

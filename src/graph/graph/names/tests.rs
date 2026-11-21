@@ -96,7 +96,12 @@ fn snapshot_refuses_duplicate_normalized_names_and_cross_session_records() {
     assert!(Graph::from_snapshot(duplicate).is_err());
     let mut wrong = g.snapshot();
     wrong.names[0].session_id = "other".into();
-    assert!(Graph::from_snapshot(wrong).is_err());
+    // The refusal names the row, so an operator can find it.
+    let err = Graph::from_snapshot(wrong).unwrap_err().to_string();
+    assert!(
+        err.contains("\"writer rule\"") && err.contains("session other"),
+        "{err}"
+    );
 }
 
 /// #301: a stored name whose key held an empty stem refuses the load, and the
