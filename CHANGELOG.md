@@ -230,6 +230,12 @@
   latches, that a stale write is never re-sent, that the loop itself loses
   nothing silently, and that `close` returns `Ok` only when every batch that
   left the loop was committed or dead-lettered.
+- Write queue: a lane whose worker panicked is no longer stranded. The
+  panicked worker's finished handle stayed in the lane table, so admission
+  saw a worker and spawned none, and every later write of that agent stayed
+  `pending` for the rest of the serve. Admission now replaces a finished
+  handle with a new worker and logs an error; the write that was running
+  stays unsettled until the session closes (then `intent_durable`).
 - Write queue, re-review of the #295 hold. Held writes could be stranded:
   they counted against admission while the only retry was the agent's next
   admitted write, so a lane (or the whole queue) full of held writes refused

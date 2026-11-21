@@ -649,6 +649,32 @@ pub(super) struct Lanes {
 }
 
 impl Lanes {
+    /// Whether `agent`'s lane has a live worker. A worker removes its own
+    /// entry under this lock before it returns, so a finished handle still
+    /// here is one that panicked: it is dropped, and the write it was
+    /// running stops counting as running (its receipt stays unsettled, for
+    /// the close to set aside), so the caller spawns a new worker rather than
+    /// leave the lane stranded for the rest of the serve. The panicked
+    /// write's bytes cannot be told apart and stay counted.
+    pub(super) fn worker_alive(&mut self, agent: &AgentId) -> bool {
+        match self.workers.get(agent) {
+            None => false,
+            Some(handle) if handle.is_finished() => {
+                self.workers.remove(agent);
+                let stale = self.running_per_lane.remove(agent).unwrap_or(0);
+                self.running = self.running.saturating_sub(stale);
+                tracing::error!(
+                    agent = %agent,
+                    "write queue: this agent's lane worker stopped without exiting (it \
+                     panicked); a new worker takes its lane. The write it was running stays \
+                     unsettled until the session closes"
+                );
+                false
+            }
+            Some(_) => true,
+        }
+    }
+
     /// The wake-up a new worker for `agent` waits on (see [`Lanes::wakes`]).
     pub(super) fn wake_for(&mut self, agent: &AgentId) -> std::sync::Arc<tokio::sync::Notify> {
         self.wakes
@@ -854,7 +880,7 @@ impl WritePipeline {
                         payload,
                         admitted: tokio::time::Instant::now(),
                     });
-                if !lanes.workers.contains_key(&agent) {
+                if !lanes.worker_alive(&agent) {
                     let wake = lanes.wake_for(&agent);
                     let handle = self.spawn_worker(agent.clone(), wake);
                     lanes.workers.insert(agent.clone(), handle);
@@ -875,7 +901,7 @@ impl WritePipeline {
                 if let Some(wake) = lanes.wakes.get(&agent) {
                     wake.notify_one();
                 }
-                if !lanes.workers.contains_key(&agent) {
+                if !lanes.worker_alive(&agent) {
                     let wake = lanes.wake_for(&agent);
                     let handle = self.spawn_worker(agent.clone(), wake);
                     lanes.workers.insert(agent.clone(), handle);

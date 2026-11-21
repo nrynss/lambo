@@ -353,3 +353,52 @@ async fn a_fenced_pipeline_refuses_every_queued_write() {
         "a fenced pipeline must not write"
     );
 }
+
+/// An embedder that panics on content containing "boom", as a bug in an
+/// embedder or the apply path would.
+struct PanicsOnBoom(FixtureEmbedder);
+
+#[async_trait::async_trait]
+impl Embedder for PanicsOnBoom {
+    fn dimensions(&self) -> usize {
+        self.0.dimensions()
+    }
+    async fn embed(&self, text: &str) -> Result<Vec<f32>, crate::EmbedError> {
+        assert!(!text.contains("boom"), "the embedder blew up");
+        self.0.embed(text).await
+    }
+}
+
+/// **A panicked worker does not strand its lane.** A lane's worker that
+/// panics leaves its finished handle in `Lanes::workers`; before, admission
+/// saw a worker and spawned none, so every later write of that agent stayed
+/// `pending` for the rest of the serve. Now a finished handle is replaced.
+#[tokio::test]
+async fn a_lane_whose_worker_panicked_gets_a_new_worker() {
+    let rig = Rig::hybrid(
+        "wq-panicked-worker",
+        Arc::new(PanicsOnBoom(FixtureEmbedder::new())),
+    );
+    let agent = AgentId::new("agent-a");
+    let boom = rig.derive(&agent, "boom").await;
+    assert!(!boom.dropped());
+    until(
+        || {
+            rig.pipeline
+                .lanes
+                .lock()
+                .workers
+                .get(&agent)
+                .is_none_or(|h| h.is_finished())
+        },
+        "the worker to panic",
+    )
+    .await;
+    let next = rig.derive(&agent, "a later fact").await;
+    assert!(!next.dropped());
+    until(
+        || rig.pipeline.lookup(&agent, next.receipt).tag() == "applied",
+        "the agent's next write to apply",
+    )
+    .await;
+}
