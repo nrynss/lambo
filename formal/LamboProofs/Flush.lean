@@ -153,8 +153,15 @@ old one with exactly those substitutions.
 * `stop_drops_fenced`: a stop after the fence drops the tail instead of
   handing it back (contrast `stop_requeues`).
 * `good_reachable_fixed`, `no_silent_loss_fixed`, `stopped_accounted_fixed`:
-  the invariants still hold; a stale-write drop is a fenced drop, made only
-  once the fence is latched.
+  the invariants still hold for the loop; a stale-write drop is a fenced drop,
+  made only once the fence is latched.
+* `closeOk`, `close_ok_no_drop`, `close_ok_over_drop`: `Memory::close` over the
+  fixed loop. The fence can now latch while close stops the loop (a flush in
+  flight comes back stale), so a close that read the fence only before the
+  stop reports `Ok` over the dropped batch (`close_ok_over_drop`, found in
+  review of the fix). A close that reads it again after the join returns `Ok`
+  only when every batch that left `pending` was committed or dead-lettered
+  (`close_ok_no_drop`). The Rust close re-checks after joining the loop.
 * `stepFixed_agrees`, `Lease.beat_own_generation`: away from a latched fence
   and a stale write, and for a heartbeat on the holder's own generation, the
   fix changes nothing.
@@ -162,9 +169,9 @@ old one with exactly those substitutions.
 The fixed Rust also checks the fence before each retry in `flush_with_retry`,
 so a fence latched during a backoff sleep stops the ladder. The model latches
 the fence only between wake-ups, so that check is not modelled. The fixed
-heartbeat also stops beating once it latches on a re-take, so the lease it
-re-took lapses at its TTL; the model does not follow the lease row past the
-latch.
+heartbeat also stops beating once it latches, on `Held` or on a re-take, so a
+lease it re-took lapses at its TTL and a fenced handle cannot re-take one
+later; the model does not follow the lease row past the latch.
 
 ## Left out
 
@@ -173,7 +180,8 @@ carry (#17, #29); the graph's unflushed set (`mark_durable_through`,
 `pin_unflushed`, #60); `lag`, `depth` and `publish_stats`; writes that land
 during a cycle (they land between iterations here); the `select!` priority
 (the event list picks the branch); `refused_as_erased`'s store read (an input,
-`erased`); `Memory::close`'s own final flush. The model also drops an
+`erased`); `Memory::close`'s own final flush, except as the `closeOk`
+outcome below. The model also drops an
 ordering the Rust enforces: `select!` re-arms `sleep(POLL_QUANTUM)` on every
 iteration, so the real loop wakes, and runs the fence check, at least every
 100 ms. Here a run may space its wake-ups arbitrarily, so some event lists
@@ -2000,9 +2008,12 @@ fixed loop reaches. -/
 theorem good_reachable_fixed (evs : List (Ev α)) : Good (runFixed P st St.init evs) :=
   good_runFixed good_init evs
 
-/-- **`no_silent_loss` for the fixed loop.** A batch dropped for a stale write
-is a fenced drop: it leaves `pending` only once the fence is latched, the
-flag `Memory` refuses writes on and `close` reports. -/
+/-- **`no_silent_loss` for the fixed loop.** Of the loop alone: a batch
+dropped for a stale write is a fenced drop, made only once the fence is
+latched, the flag `Memory` refuses writes on. That `close` reports it is a
+separate obligation, met only by a close that reads the fence after the loop
+has stopped (`close_ok_no_drop`; `close_ok_over_drop` is the close that read
+it only before). -/
 theorem no_silent_loss_fixed (evs : List (Ev α)) :
     ∀ e ∈ (runFixed P st St.init evs).ledger, e.1 = .committed ∨
       (e.1 = .deadLettered ∧ 0 < (runFixed P st St.init evs).deadLettered) ∨
@@ -2281,6 +2292,64 @@ theorem override_fences_fixed {released A : H} (a : Lease.Row H) (hA : a.holder 
    (Lease.override_beat_latches a hA hAr hle ttl).2, no_flush_after_fence_fixed s evs⟩
 
 end FixedLease
+
+/-! ### `Memory::close` over the fixed loop
+
+`close` checks the fence, stops the loop and joins it, then final-flushes
+whatever is left in the graph log; a degraded session is an error, and an
+empty log is `Ok`. In the fixed loop the fence can latch *during* that stop:
+a flush the loop had in flight comes back `StaleWrite`, the loop latches the
+fence and drops `pending`. A close that read the fence only before the stop
+then finds an empty log and reports `Ok` over the dropped batch
+(`close_ok_over_drop`). Reading it again after the join closes that
+(`close_ok_no_drop`). `evs` is what the loop does between the first check and
+the join (its in-flight cycle and the stop); `final` is the store for the
+final flush. -/
+
+section Close
+
+variable {P : Params} {st : Store α}
+
+/-- Does `close` return `Ok`? `recheck`: it reads the fence again after the
+loop has stopped. -/
+def closeOk (P : Params) (st : Store α) (recheck : Bool) (s : St α) (evs : List (Ev α))
+    (final : Store α) : Bool :=
+  if s.fenced then false
+  else
+    let s' := runFixed P st s evs
+    if recheck && s'.fenced then false
+    else if s'.degraded then false
+    else if s'.log.isEmpty then true
+    else (final s'.log s'.attempts).reported.isNone
+
+/-- **A re-checking close never reports `Ok` over a drop.** When it returns
+`Ok`, every batch that ever left `pending` was committed or dead-lettered
+(and counted, `Good.dead`): none was dropped for the fence or for
+degradation. -/
+theorem close_ok_no_drop {s : St α} (hg : Good s) (evs : List (Ev α)) (final : Store α)
+    (hok : closeOk P st true s evs final = true) :
+    ∀ e ∈ (runFixed P st s evs).ledger, e.1 = .committed ∨ e.1 = .deadLettered := by
+  have hg' := good_runFixed (P := P) (st := st) hg evs
+  have hf : (runFixed P st s evs).fenced = false := by
+    cases h : (runFixed P st s evs).fenced
+    · rfl
+    · simp [closeOk, h] at hok
+  have hd : (runFixed P st s evs).degraded = false := by
+    cases h : (runFixed P st s evs).degraded
+    · rfl
+    · simp [closeOk, h, hf] at hok
+  intro e he
+  cases hfate : e.1 with
+  | committed => exact Or.inl rfl
+  | deadLettered => exact Or.inr rfl
+  | droppedDegraded =>
+    have := hg'.degr e he hfate
+    rw [hd] at this; cases this
+  | droppedFenced =>
+    have := hg'.fence e he hfate
+    rw [hf] at this; cases this
+
+end Close
 
 end Fixed
 
@@ -2590,6 +2659,29 @@ example :
       [.write 1, .write 2, .wake .tick 0 false, .write 3, .wake .stop 0 false] =
       run exP exDown St.init
         [.write 1, .write 2, .wake .tick 0 false, .write 3, .wake .stop 0 false] := by
+  decide
+
+/-! ### `Memory::close` over the fixed loop -/
+
+/-- **The close that read the fence only before the stop is not honest** over
+the fixed loop: a batch in flight when close starts is refused as stale, the
+loop drops it, and the close finds an empty log and reports `Ok`. The
+re-checking close reports the error. -/
+theorem close_ok_over_drop :
+    closeOk exP exStale false (run exP exStale St.init [.write 1])
+      [.wake .tick 0 false, .wake .stop 1 false] exStale = true ∧
+    (runFixed exP exStale (run exP exStale St.init [.write 1])
+      [.wake .tick 0 false, .wake .stop 1 false]).ledger = [(.droppedFenced, [1])] ∧
+    closeOk exP exStale true (run exP exStale St.init [.write 1])
+      [.wake .tick 0 false, .wake .stop 1 false] exStale = false := by
+  decide
+
+/-- Before #293 the same run was honest without the re-check: the old loop
+retained the refused batch and the stop handed it back, so close's final
+flush saw `[1]` and was refused. -/
+example :
+    (run exP exStale (run exP exStale St.init [.write 1])
+      [.wake .tick 0 false, .wake .stop 1 false]).log = [1] := by
   decide
 
 end Examples
