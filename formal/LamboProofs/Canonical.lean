@@ -1,7 +1,8 @@
 /-
 # Canonical keys and durable names: what makes two spellings the same
 
-Model of the canonical-key pipeline in `src/graph/canonical.rs` (at `a15d1e72`):
+Model of the canonical-key pipeline in `src/graph/canonical.rs` (at `a15d1e72`,
+and the fix for #301, item 1, which drops empty stems):
 
 * `split_camel_case`: a space before every ASCII uppercase letter whose
   predecessor is an ASCII lowercase letter, on the original case;
@@ -12,7 +13,8 @@ Model of the canonical-key pipeline in `src/graph/canonical.rs` (at `a15d1e72`):
   token (one containing an ASCII digit, `/` or `.`, `is_identifier_token`,
   #148), which is kept as lowercased. The camelCase split runs first, so an
   identifier piece with a lower-to-upper boundary inside is still split;
-  empty stems are not filtered out;
+  empty stems are not filtered out (`tokens`; the fix for #301 drops them,
+  `tokensF`);
 * `tokens_to_key`: sort the tokens (`Vec<String>::sort`) and join them with
   single spaces;
 * `canonical_key(content, synonyms)`: trim, look the trimmed raw text up in the
@@ -91,6 +93,27 @@ Structure (any stopword list and stemmer):
   `ons` is `on` while the key of `on` is empty (`ons_not_idempotent`).
 * `canonicalKey_syn`: a synonym is followed once, on the trimmed raw text, and
   its target is then normalized like any input (no chains).
+
+The fix for #301, item 1 (`tokensF`, `canonicalKeyF`, `keyF`, `nameKeyF`: the
+old tokens with empty stems dropped). `tokens`, `key`, `nameKey` and every
+theorem above stay, as statements about the previous version, including
+`empty_stem_key`. The fix needs only `NoSep` (no separator inside a stem), the
+half of `Sane` that the real stemmer and `stem0` meet (`noSep_stem0`):
+
+* `canonicalKeyF_tidy`, `keyF_tidy`: a fixed key never has a leading, trailing
+  or doubled space (`tidy`), whatever the synonym table; `keyF0_tidy` for the
+  concrete tables.
+* `keyF_eq_key`, `canonicalKeyF_eq_canonicalKey`, `nameKeyF_eq_nameKey`: where
+  no stem is empty the fixed key and `name_key` agree with the old ones, so
+  only a key with an empty stem changes; `keyF_eq_key_of_sane`: for a `Sane`
+  stemmer nothing changes.
+* `keyF_all_empty`, `nameKeyF_all_empty`: an input whose stems are all empty
+  has the empty key, which `name_key`'s existing empty-key check refuses.
+* `keyF_eq_iff_perm`: two inputs share a fixed key exactly when their nonempty
+  stems form the same multiset, now with `NoSep` alone (the old
+  `key_eq_iff_perm` needed `Sane`).
+* `issue301_fixed`: `''s-lease` keys as `leas` (the name `lease`), and the name
+  `''s ''s` keys as the empty key and is refused.
 
 Names (`name_key`):
 
@@ -900,6 +923,252 @@ theorem nameKey_all_stop {s : Text}
     nameKey sizeOk isUuid stop stem s = none :=
   nameKey_empty (key_all_stop h)
 
+/-! ## The fix for #301, item 1: empty stems are dropped
+
+`normalize_tokens` after the fix drops every empty stem
+(`.filter(|t| !t.is_empty())` after stemming). `tokens`, `key` and `nameKey`
+above stay as they are and describe the previous version; `tokensF`, `keyF`
+and `nameKeyF` are the fixed ones. The fix needs only that the stemmer never
+puts a separator inside a stem (`NoSep`, the half of `Sane` the real stemmer
+meets); the other half, nonempty stems, is what the filter now provides. -/
+
+/-- A stemmer that never returns a stem with a separator in it. -/
+def NoSep (stop : Token → Bool) (stem : Token → Token) : Prop :=
+  ∀ w, Called stop w → ∀ c ∈ stem w, isSep c = false
+
+theorem Sane.toNoSep (hs : Sane stop stem) : NoSep stop stem := hs.noSep
+
+/-- `.filter(|t| !t.is_empty())`. -/
+def dropEmpty (ts : List Token) : List Token := ts.filter (fun t => !t.isEmpty)
+
+/-- `normalize_tokens` after the fix. -/
+def tokensF (stop : Token → Bool) (stem : Token → Token) (s : Text) : List Token :=
+  dropEmpty (tokens stop stem s)
+
+/-- `canonical_key` after the fix. -/
+def canonicalKeyF (stop : Token → Bool) (stem : Token → Token) (syn : Text → Option Text)
+    (s : Text) : Text :=
+  let raw := trim s
+  joinSp (sort (tokensF stop stem ((syn raw).getD raw)))
+
+/-- `canonical_key(name, |_| None)` after the fix. -/
+def keyF (stop : Token → Bool) (stem : Token → Token) (s : Text) : Text :=
+  canonicalKeyF stop stem (fun _ => none) s
+
+/-- `name_key` after the fix: the same checks, on the fixed key. -/
+def nameKeyF (sizeOk isUuid : Text → Bool) (stop : Token → Bool) (stem : Token → Token)
+    (s : Text) : Option Text :=
+  if sizeOk s = false then none
+  else
+    let k := keyF stop stem s
+    if k.isEmpty || idShaped isUuid (trim s) then none else some k
+
+/-- No two spaces in a row. -/
+def noDoubleSp : Text → Bool
+  | a :: b :: cs => !(a == ' ' && b == ' ') && noDoubleSp (b :: cs)
+  | _ => true
+
+/-- No leading, trailing or doubled space. -/
+def tidy (k : Text) : Bool :=
+  k.head? != some ' ' && k.getLast? != some ' ' && noDoubleSp k
+
+theorem keyF_eq (s : Text) : keyF stop stem s = joinSp (sort (tokensF stop stem s)) := by
+  simp [keyF, canonicalKeyF, tokensF, tokens_trim]
+
+theorem mem_tokensF {s : Text} {t : Token} :
+    t ∈ tokensF stop stem s ↔ t ∈ tokens stop stem s ∧ t ≠ [] := by
+  simp [tokensF, dropEmpty]
+
+/-- A token of the old tokenizer has no separator in it (for a `NoSep` stemmer). -/
+theorem tokens_noSep (hn : NoSep stop stem) {s : Text} :
+    ∀ t ∈ tokens stop stem s, ∀ c ∈ t, isSep c = false := by
+  intro t ht
+  obtain ⟨w, hw, hstop, rfl⟩ := mem_tokens ht
+  have ⟨hg, hu⟩ := lowered_word (words_good _ w hw)
+  unfold stemOrKeep
+  split
+  · exact hg.2
+  · rename_i hid
+    exact hn _ ⟨hg, hu, hstop, by simpa using hid⟩
+
+/-- Every fixed token is `Good`: nonempty and separator-free. -/
+theorem tokensF_good (hn : NoSep stop stem) {s : Text} : ∀ t ∈ tokensF stop stem s, Good t := by
+  intro t ht
+  have ⟨h1, h2⟩ := mem_tokensF.mp ht
+  exact ⟨h2, tokens_noSep hn t h1⟩
+
+theorem sp_isSep : isSep ' ' = true := by decide
+
+theorem ne_sp_of_good {t : Token} (ht : Good t) : ∀ x ∈ t, x ≠ ' ' := by
+  intro x hx h
+  subst h
+  have := ht.2 _ hx
+  rw [sp_isSep] at this
+  cases this
+
+theorem noDoubleSp_cons {x : Char} (hx : x ≠ ' ') (l : Text) :
+    noDoubleSp (x :: l) = noDoubleSp l := by
+  cases l with
+  | nil => rfl
+  | cons y ys => simp [noDoubleSp, hx]
+
+theorem noDoubleSp_noSp : ∀ t : Text, (∀ x ∈ t, x ≠ ' ') → noDoubleSp t = true
+  | [], _ => rfl
+  | x :: xs, h => by
+    rw [noDoubleSp_cons (h x (by simp))]
+    exact noDoubleSp_noSp xs (fun y hy => h y (by simp [hy]))
+
+theorem noDoubleSp_append_sp {R : Text} (hR : R.head? ≠ some ' ') (hR2 : noDoubleSp R = true) :
+    ∀ X : Text, (∀ x ∈ X, x ≠ ' ') → noDoubleSp (X ++ ' ' :: R) = true
+  | [], _ => by
+    cases R with
+    | nil => rfl
+    | cons r rs =>
+      have hr : r ≠ ' ' := fun h => hR (by simp [h])
+      simp [noDoubleSp, hr, hR2]
+  | x :: xs, h => by
+    rw [List.cons_append, noDoubleSp_cons (h x (by simp))]
+    exact noDoubleSp_append_sp hR hR2 xs (fun y hy => h y (by simp [hy]))
+
+theorem joinSp_head : ∀ L : List Token, (∀ t ∈ L, Good t) →
+    ∀ x, (joinSp L).head? = some x → isSep x = false
+  | [], _, x, h => by simp [joinWith] at h
+  | [t], hL, x, h => by
+    have ht := hL t (by simp)
+    simp only [joinWith] at h
+    exact ht.2 x (List.mem_of_mem_head? h)
+  | t :: u :: us, hL, x, h => by
+    have ht := hL t (by simp)
+    simp only [joinWith] at h
+    obtain ⟨a, as, rfl⟩ := List.exists_cons_of_ne_nil ht.1
+    simp only [List.cons_append, List.head?_cons, Option.some.injEq] at h
+    subst h
+    exact ht.2 _ (by simp)
+
+theorem joinSp_ne_nil : ∀ L : List Token, (∀ t ∈ L, Good t) → L ≠ [] → joinSp L ≠ []
+  | [], _, h => absurd rfl h
+  | [t], hL, _ => by simpa [joinWith] using (hL t (by simp)).1
+  | t :: u :: us, _, _ => by simp [joinWith]
+
+theorem joinSp_last : ∀ L : List Token, (∀ t ∈ L, Good t) →
+    ∀ x, (joinSp L).getLast? = some x → isSep x = false
+  | [], _, x, h => by simp [joinWith] at h
+  | [t], hL, x, h => by
+    have ht := hL t (by simp)
+    simp only [joinWith] at h
+    exact ht.2 x (List.mem_of_getLast? h)
+  | t :: u :: us, hL, x, h => by
+    have hR := joinSp_ne_nil (u :: us) (fun v hv => hL v (by simp_all)) (by simp)
+    have ih := joinSp_last (u :: us) (fun v hv => hL v (by simp_all))
+    change (t ++ ' ' :: joinSp (u :: us)).getLast? = some x at h
+    generalize joinSp (u :: us) = R at h hR ih
+    obtain ⟨r, rs, rfl⟩ := List.exists_cons_of_ne_nil hR
+    rw [List.getLast?_append, List.getLast?_cons_cons] at h
+    cases hl : (r :: rs).getLast? with
+    | none => simp at hl
+    | some y =>
+      rw [hl] at h
+      simp only [Option.some_or, Option.some.injEq] at h
+      subst h
+      exact ih _ hl
+
+/-- The space-joined text of `Good` tokens has no leading, trailing or doubled
+space. -/
+theorem joinSp_tidy : ∀ L : List Token, (∀ t ∈ L, Good t) → tidy (joinSp L) = true := by
+  intro L hL
+  have hhead : (joinSp L).head? ≠ some ' ' := fun h => by
+    have := joinSp_head L hL ' ' h; rw [sp_isSep] at this; cases this
+  have hlast : (joinSp L).getLast? ≠ some ' ' := fun h => by
+    have := joinSp_last L hL ' ' h; rw [sp_isSep] at this; cases this
+  have hdouble : ∀ L : List Token, (∀ t ∈ L, Good t) → noDoubleSp (joinSp L) = true := by
+    intro L
+    induction L with
+    | nil => intro _; rfl
+    | cons t ts ih =>
+      intro hL
+      cases ts with
+      | nil => exact noDoubleSp_noSp t (ne_sp_of_good (hL t (by simp)))
+      | cons u us =>
+        have hR := fun v (hv : v ∈ u :: us) => hL v (by simp_all)
+        have hRh : (joinSp (u :: us)).head? ≠ some ' ' := fun h => by
+          have := joinSp_head (u :: us) hR ' ' h; rw [sp_isSep] at this; cases this
+        exact noDoubleSp_append_sp hRh (ih hR) t (ne_sp_of_good (hL t (by simp)))
+  simp [tidy, hhead, hlast, hdouble L hL]
+
+/-- **The fixed key never has a leading, trailing or doubled space**, whatever
+the synonym table, for any stemmer that keeps separators out of its stems. -/
+theorem canonicalKeyF_tidy (hn : NoSep stop stem) (syn : Text → Option Text) (s : Text) :
+    tidy (canonicalKeyF stop stem syn s) = true :=
+  joinSp_tidy _ (fun t ht => tokensF_good hn t ((sort_perm _).mem_iff.mp ht))
+
+theorem keyF_tidy (hn : NoSep stop stem) (s : Text) : tidy (keyF stop stem s) = true :=
+  canonicalKeyF_tidy hn _ s
+
+/-- **Agreement**: where no stem is empty, the fixed tokens are the old ones. -/
+theorem tokensF_eq_tokens {s : Text} (h : ∀ t ∈ tokens stop stem s, t ≠ []) :
+    tokensF stop stem s = tokens stop stem s := by
+  simp only [tokensF, dropEmpty]
+  rw [List.filter_eq_self]
+  intro t ht
+  simpa [List.isEmpty_iff] using h t ht
+
+/-- **Agreement**: where no stem is empty, the fixed key is the old key. So
+only a key with an empty stem changes. -/
+theorem keyF_eq_key {s : Text} (h : ∀ t ∈ tokens stop stem s, t ≠ []) :
+    keyF stop stem s = key stop stem s := by
+  rw [keyF_eq, key_eq, tokensF_eq_tokens h]
+
+theorem canonicalKeyF_eq_canonicalKey {syn : Text → Option Text} {s : Text}
+    (h : ∀ t ∈ tokens stop stem ((syn (trim s)).getD (trim s)), t ≠ []) :
+    canonicalKeyF stop stem syn s = canonicalKey stop stem syn s := by
+  simp only [canonicalKeyF, canonicalKey, tokensF_eq_tokens h]
+
+/-- A `Sane` stemmer never yields an empty stem, so for it nothing changes. -/
+theorem keyF_eq_key_of_sane (hs : Sane stop stem) (s : Text) :
+    keyF stop stem s = key stop stem s :=
+  keyF_eq_key (fun t ht => (tokens_good hs t ht).1)
+
+theorem nameKeyF_eq_nameKey {s : Text} (h : ∀ t ∈ tokens stop stem s, t ≠ []) :
+    nameKeyF sizeOk isUuid stop stem s = nameKey sizeOk isUuid stop stem s := by
+  simp only [nameKeyF, nameKey, keyF_eq_key h]
+
+theorem nameKeyF_empty {s : Text} (h : keyF stop stem s = []) :
+    nameKeyF sizeOk isUuid stop stem s = none := by
+  unfold nameKeyF
+  split
+  · rfl
+  · simp [h]
+
+/-- **A name whose stems are all empty keys to the empty key**, and the
+existing empty-key check refuses it. -/
+theorem keyF_all_empty {s : Text} (h : ∀ t ∈ tokens stop stem s, t = []) :
+    keyF stop stem s = [] := by
+  have : tokensF stop stem s = [] := by
+    rw [List.eq_nil_iff_forall_not_mem]
+    intro t ht
+    have ⟨h1, h2⟩ := mem_tokensF.mp ht
+    exact h2 (h t h1)
+  rw [keyF_eq, this]; rfl
+
+theorem nameKeyF_all_empty {s : Text} (h : ∀ t ∈ tokens stop stem s, t = []) :
+    nameKeyF sizeOk isUuid stop stem s = none :=
+  nameKeyF_empty (keyF_all_empty h)
+
+/-- With empty stems gone, the multiset characterization needs only `NoSep`:
+two inputs share a fixed key exactly when their nonempty stems form the same
+multiset. -/
+theorem keyF_eq_iff_perm (hn : NoSep stop stem) (a b : Text) :
+    keyF stop stem a = keyF stop stem b ↔ (tokensF stop stem a).Perm (tokensF stop stem b) := by
+  constructor
+  · intro h
+    rw [keyF_eq, keyF_eq] at h
+    have hgood : ∀ s, ∀ t ∈ sort (tokensF stop stem s), Good t := fun s t ht =>
+      tokensF_good hn t ((sort_perm _).mem_iff.mp ht)
+    have hsort := joinWith_inj (by decide) (hgood a) (hgood b) h
+    exact (sort_perm _).symm.trans (hsort ▸ sort_perm _)
+  · intro h
+    rw [keyF_eq, keyF_eq, sort_eq_of_perm h]
+
 /-! ## Concrete examples
 
 `stop0` is `STOPWORDS` from `src/graph/canonical.rs`. `stem0` agrees with the
@@ -1027,6 +1296,45 @@ theorem empty_stem_key :
     key0 "''s" = [] ∧ nameKey0 "''s" = none ∧
     key0 "''s-lease" = " leas".toList ∧ nameKey0 "''s-lease" = some " leas".toList ∧
     nameKey0 "''s ''s" = some " ".toList := by decide
+
+/-! ### After the fix for #301 -/
+
+/-- The fixed key with the concrete tables. -/
+def keyF0 (s : String) : Text := keyF stop0 stem0 s.toList
+
+/-- The fixed `name_key` with the concrete tables. -/
+def nameKeyF0 (s : String) : Option Text :=
+  nameKeyF (fun _ => true) (fun _ => false) stop0 stem0 s.toList
+
+theorem stemTable_noSep : ∀ p ∈ stemTable, ∀ c ∈ p.2.toList, isSep c = false := by decide
+
+/-- `stem0` keeps separators out of its stems, though it is not `Sane`, so the
+fixed-key theorems apply to it. -/
+theorem noSep_stem0 : NoSep stop0 stem0 := by
+  intro w hw c hc
+  unfold stem0 at hc
+  split at hc
+  · rename_i p hp
+    exact stemTable_noSep p (List.mem_of_find?_eq_some hp) c hc
+  · exact hw.1.2 c hc
+
+/-- Every fixed key with the concrete tables is tidy. -/
+theorem keyF0_tidy (s : String) : tidy (keyF0 s) = true := keyF_tidy noSep_stem0 _
+
+/-- **#301, item 1, fixed**: `''s-lease` keys as `leas`, the name `lease`,
+and `''s ''s` keys as the empty key and is refused. The old keys were not
+tidy; the new ones are. -/
+theorem issue301_fixed :
+    keyF0 "''s-lease" = "leas".toList ∧ nameKeyF0 "''s-lease" = nameKeyF0 "lease" ∧
+    nameKeyF0 "''s-lease" = some "leas".toList ∧
+    keyF0 "''s ''s" = [] ∧ nameKeyF0 "''s ''s" = none ∧
+    tidy (key0 "''s-lease") = false ∧ tidy (key0 "''s ''s") = false ∧
+    tidy (keyF0 "''s-lease") = true := by decide
+
+/-- Inputs without an empty stem key as before. -/
+example : keyF0 "single-writer-lease" = key0 "single-writer-lease" := by decide
+example : nameKeyF0 "SingleWriterLeases" = nameKey0 "SingleWriterLeases" := by decide
+example : keyF0 "''s" = key0 "''s" := by decide
 
 /-- The identity stemmer is `Stable`, so `key_idem` applies to it, here on a
 non-trivial input. -/
