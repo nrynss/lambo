@@ -113,9 +113,17 @@ fn default_coverage_window() -> Duration {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Config {
+    /// How often pending writes flush to the store.
     pub backend_flush_interval: Duration,
+    /// Early-flush trigger, not a cap: once this many mutations wait, they
+    /// flush before the next interval tick. A flush sends everything waiting.
     pub backend_flush_max_batch: usize,
+    /// Retries after a failed flush attempt (`retries + 1` attempts). When
+    /// they are used up the batch is retained and retried after a hold, never
+    /// dropped; only a constraint violation dead-letters it, whole.
     pub backend_flush_retries: u32,
+    /// Degrade threshold, not a cap: when the mutations not yet durable
+    /// exceed it, the session degrades to `durability = "none"`.
     pub backend_log_max: usize,
 
     pub scoring: ScoringWeights,

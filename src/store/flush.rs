@@ -35,6 +35,12 @@
 //!   interval tick. The one exception (STORE-4/D5): a batch rejected with a
 //!   deterministic constraint violation is logged and dropped — never
 //!   retried, never retained — so it cannot poison the queue head.
+//!   **What a dead letter drops:** the batch is the whole of `pending`, so
+//!   mutations retained from an earlier outage go with the write that
+//!   violated the constraint, though they alone might have committed, and
+//!   the whole batch counts as ONE in `dead_lettered` however many writes it
+//!   held (Lean: `Flush.constraint_dead_lettered` and its `exPoison`
+//!   example). Splitting it to find the offending mutation is not attempted.
 //! * **A stale write is terminal (#293).** A flush the store refuses with
 //!   [`StoreError::StaleWrite`] presented a fencing token the lease has moved
 //!   past, so it can never succeed: the loop latches the lease-lost fence and
@@ -196,7 +202,9 @@ pub struct FlushStats {
     /// Batches dropped as dead letters (STORE-4 / D5): a deterministic
     /// constraint violation is logged and dropped — never retried, never
     /// retained — so it cannot poison the queue head. Visible in stats by
-    /// design ("drop-after-log, visible in stats").
+    /// design ("drop-after-log, visible in stats"). It counts batches, not
+    /// writes: a dead letter is the whole pending batch, mutations retained
+    /// from an earlier outage included, and adds one (see the module docs).
     pub dead_lettered: u64,
 }
 
@@ -804,7 +812,9 @@ impl FlushLoop {
                 // queue head (head-of-line blocking). Dead-letter the WHOLE
                 // batch: warn (constraint + batch summary), drop, count in
                 // stats, session continues, never degrade for a dead-lettered
-                // batch.
+                // batch. "Whole" includes anything retained from an earlier
+                // outage, and the count goes up by one, not by the number of
+                // writes (module docs, `Flush.constraint_dead_lettered`).
                 let batch_len = self.pending.len();
                 self.drop_pending();
                 self.retry_after = None;
