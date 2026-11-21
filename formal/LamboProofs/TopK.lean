@@ -21,9 +21,10 @@ for s in ranked {
 ```
 
 `ranked` is the member list in `rank_members` order. `forced` marks members
-that must be shown whatever their rank (a live conflict, a contradiction on a
-Canonical or Venerable concept and its companion, and in cold mode a kept
-reservation holder).
+that must be shown whatever their rank: a member with a live hot-list conflict,
+high-risk, drift or stale payload, a contradiction on a Canonical or Venerable
+concept and its companion, and in cold mode a kept reservation holder
+(`Hotlist.lean` derives this predicate from the hot list, `forces_iff`).
 
 ## Model
 

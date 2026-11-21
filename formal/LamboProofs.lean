@@ -12,4 +12,12 @@ import LamboProofs.Receipts
 import LamboProofs.Reserve
 import LamboProofs.Contract
 import LamboProofs.Fusion
+import LamboProofs.Confidence
+import LamboProofs.Canonical
+import LamboProofs.Dispatch
+import LamboProofs.Supersession
+import LamboProofs.Policy
+import LamboProofs.Conflict
+import LamboProofs.Hotlist
+import LamboProofs.Drain
 import LamboProofs.Audit
