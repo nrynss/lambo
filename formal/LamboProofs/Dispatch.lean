@@ -7,7 +7,9 @@ Model of the structural arm of recall, `src/recall/dispatch.rs`, and of the
 daemon's routing around it in `Daemon::recall_routed` (`src/daemon/mod.rs`):
 
 * `classify` and `STRUCTURAL_MARKERS`: a query is `Structural` when its
-  lowercased text contains one of seven marker phrasings (`classify`);
+  lowercased text contains one of seven marker phrasings. `classify` is the
+  code before #299, a plain substring test; `classifyWB` is the fixed code,
+  which counts a marker only on word boundaries;
 * `dependents` over `format::dependents_of` (`src/recall/format.rs`) and
   `Edge::dependence` / `EdgeType::dependent_end` (`src/types/mod.rs`): the
   anchor's direct structural dependents, each scored by its strongest edge,
@@ -36,9 +38,17 @@ daemon's routing around it in `Daemon::recall_routed` (`src/daemon/mod.rs`):
   U+0307, so the `i` of `radius` would be followed by a combining mark, not
   `u`). So on every query the two classifications agree; the model does not
   prove this, it is the reading above.
-* **Matching** is `str::contains`: a plain substring test (`containsSub`,
-  proved equal to `List.IsInfix`), with no word boundaries. `classify` does
-  NOT use the word-bounded `word_bounded_spans` that anchor resolution uses.
+* **Matching** before #299 was `str::contains`: a plain substring test
+  (`containsSub`, proved equal to `List.IsInfix`), with no word boundaries
+  (`classify`). The fix (#299) matches each marker with the word-bounded rule
+  of `word_bounded_spans`, the one anchor resolution uses (`classifyWB`,
+  `wordAt`, `leftOk`, `rightOk`). The word-character test `is_word_char`
+  (Unicode letters and digits, `_`, combining marks) is a parameter `isWord`;
+  the theorems hold for every `isWord` (some assume that lowercase ASCII
+  letters are word characters, as they are), and the `decide` examples use
+  `asciiWord`, which is `is_word_char` on ASCII. `marker_spans`, which anchor
+  resolution measures from, is fixed the same way but is not modelled (see
+  anchor resolution below).
 * **Graph.** Node ids are `Nat`. A graph is its edge list, which concepts it
   holds (`isConcept`), which are Canonical, and each node's canonical key with
   a key order (`tie_form` comparison, a lawful parameter as in `Order.lean`).
@@ -89,18 +99,33 @@ Classifier:
   it and in any ASCII case, does (`classify_each_marker`: each marker alone).
 * `depend_not_marker` (doc: "bare `"depend"` is NOT a marker"), with the test
   `marker_bearing_non_dependency_questions_stay_general` as `decide` examples.
-* `classify_inside_word`, `classify_into_word`: matching is a substring
-  test, so a marker still classifies `Structural` when it is glued to the end
-  of a longer word or runs into the start of the next one. The second is the
-  more frequent misfire: "the answer depends only on the score" is
-  `Structural` because "depends only" contains "depends on"
+* `classify_inside_word`, `classify_into_word` (the code before #299):
+  matching is a substring test, so a marker still classifies `Structural`
+  when it is glued to the end of a longer word or runs into the start of the
+  next one. The second is the more frequent misfire: "the answer depends only
+  on the score" is `Structural` because "depends only" contains "depends on"
   (`depends_only_structural`); "is it unsafe to delete it" is too
   (`unsafe_to_delete_structural`, harmless). Glued at the front,
   "independents of" and "somewhat uses" route to the structural arm
   (`independents_of_structural`, `somewhat_uses_structural`). The doc comment
-  says every marker is "never an ordinary substring" and that marker-bearing
-  non-dependency questions stay `General`; that holds for "independent" only
+  said every marker is "never an ordinary substring" and that marker-bearing
+  non-dependency questions stay `General`; that held for "independent" only
   because no marker is a substring of it.
+
+Fixed classifier (#299):
+* `classifyWB_iff`: exactly the queries whose lowercase text has a marker
+  occurrence on word boundaries classify `Structural`; `wb_inside_word`,
+  `wb_into_word`: an occurrence with a word character just before or just
+  after it never counts. `issue_queries_general`: the issue's four queries
+  classify `General`.
+* `classifyWB_marker`: every marker as whole words (the text around it ends
+  in a non-word, non-hyphen character, or nothing), in any ASCII case,
+  classifies `Structural` for every `isWord`; `classifyWB_each_marker`: each
+  marker alone. The tests' and the docs' dependency questions stay
+  `Structural` and their general questions `General` (`decide` examples).
+* `classifyWB_structural`, `classifyWB_general`: the fix only narrows;
+  `classifyWB_agrees`: when every marker occurrence is bounded, the fixed and
+  the old classifier agree.
 
 Traversal:
 * `dependence_types`: only `Dependency` and `Hierarchical` edges declare a
@@ -135,6 +160,17 @@ Gather skip and routing:
 * `marker_no_dependents_blends`: a marker-bearing query whose anchor has no
   structural dependent falls through to the full blend; `general_blends`: a
   general query always does, even when its anchor has dependents.
+
+Dispatch over the fixed classifier (#299): `tryStructuralBy`,
+`fitsStructuralBy` and `recallRoutedBy` take the classifier as a parameter and
+are the definitions above at `classify` (`tryStructural_eq`,
+`fitsStructural_eq`, `recallRouted_eq`). `traversalBy_exact`,
+`fitsStructuralBy_iff`, `recallBy_blend_input`, `generalBy_blends` hold for
+every classifier, so for the fixed one: `traversal_exact_wb`,
+`fitsStructuralWB_iff`, `recall_blend_input_wb`, `general_blends_wb`
+(`fitsStructuralWith_iff` and `traversal_exact` read no classifier at all).
+The misrouted "independents of" question of the examples blends under the
+fixed classifier.
 -/
 
 namespace Lambo.Dispatch
@@ -283,6 +319,265 @@ example : classify "WHAT DEPENDS ON SG-Base-VPC".toList = .structural := by deci
 example : classify "What Uses the VPC".toList = .structural := by decide
 /-- The doc's other dropped marker, "is it safe", alone is general. -/
 example : classify "is it safe to rotate the key".toList = .general := by decide
+
+/-! ## The word-bounded classifier (#299)
+
+The fixed `classify` counts a marker only where it stands on word boundaries,
+by the rule `word_bounded_spans` applies to anchor names: a side of the marker
+that ends in a word character must meet the start or end of the query, or a
+character that is not part of a word. `isWord` is `is_word_char` (Unicode
+letters and digits, `_`, combining marks); it is a parameter, so every theorem
+below holds for whatever the Rust counts as a word character, and the `decide`
+examples use `asciiWord`, which agrees with `is_word_char` on ASCII. -/
+
+/-- `word_at`: the character `c`, with `prev` before it and `next` after it,
+belongs to a word: a word character, or a hyphen between two word characters. -/
+def wordAt (isWord : Char → Bool) (prev : Option Char) (c : Char) (next : Option Char) : Bool :=
+  isWord c || (c == '-' && prev.any isWord && next.any isWord)
+
+/-- `word_bounded_spans`'s left test: `rb` is the text before the occurrence,
+reversed (its head is the character just before it). -/
+def leftOk (isWord : Char → Bool) (m rb : List Char) : Bool :=
+  match m, rb with
+  | [], _ => true
+  | _, [] => true
+  | f :: _, p :: pp => !isWord f || !wordAt isWord pp.head? p (some f)
+
+/-- `word_bounded_spans`'s right test: `post` is the text after the
+occurrence. -/
+def rightOk (isWord : Char → Bool) (m post : List Char) : Bool :=
+  match m.getLast?, post with
+  | none, _ => true
+  | _, [] => true
+  | some l, c :: cs => !isWord l || !wordAt isWord (some l) c cs.head?
+
+/-- The scan of `word_bounded_spans`, stopping at the first bounded
+occurrence: `rb` is the text already passed, reversed. -/
+def scanWB (isWord : Char → Bool) (m : List Char) : List Char → List Char → Bool
+  | rb, [] => m.isPrefixOf [] && leftOk isWord m rb && rightOk isWord m []
+  | rb, h :: t =>
+    (m.isPrefixOf (h :: t) && leftOk isWord m rb && rightOk isWord m ((h :: t).drop m.length)) ||
+      scanWB isWord m (h :: rb) t
+
+/-- `!word_bounded_spans(hay, m).is_empty()`, which is empty for an empty
+needle. -/
+def containsWB (isWord : Char → Bool) (m hay : List Char) : Bool :=
+  !m.isEmpty && scanWB isWord m [] hay
+
+/-- `classify` after #299. -/
+def classifyWB (isWord : Char → Bool) (q : List Char) : Kind :=
+  if markers.any (fun m => containsWB isWord m (lower q)) then .structural else .general
+
+/-- `m` occurs in `hay` on word boundaries. -/
+def BoundedOcc (isWord : Char → Bool) (m hay : List Char) : Prop :=
+  m ≠ [] ∧ ∃ pre post, hay = pre ++ m ++ post ∧ leftOk isWord m pre.reverse = true ∧
+    rightOk isWord m post = true
+
+theorem scanWB_iff (isWord : Char → Bool) (m : List Char) :
+    ∀ hay rb : List Char, scanWB isWord m rb hay = true ↔
+      ∃ pre post, hay = pre ++ m ++ post ∧ leftOk isWord m (pre.reverse ++ rb) = true ∧
+        rightOk isWord m post = true
+  | [], rb => by
+    simp only [scanWB, Bool.and_eq_true, List.isPrefixOf_iff_prefix, List.prefix_nil]
+    constructor
+    · rintro ⟨⟨rfl, hl⟩, hr⟩
+      exact ⟨[], [], rfl, hl, hr⟩
+    · rintro ⟨pre, post, h, hl, hr⟩
+      obtain ⟨hpm, rfl⟩ := List.append_eq_nil_iff.mp h.symm
+      obtain ⟨rfl, rfl⟩ := List.append_eq_nil_iff.mp hpm
+      exact ⟨⟨rfl, by simpa using hl⟩, hr⟩
+  | h :: t, rb => by
+    have ih := scanWB_iff isWord m t (h :: rb)
+    simp only [scanWB, Bool.or_eq_true, Bool.and_eq_true, List.isPrefixOf_iff_prefix, ih]
+    constructor
+    · rintro (⟨⟨hp, hl⟩, hr⟩ | ⟨pre, post, ht, hl, hr⟩)
+      · refine ⟨[], (h :: t).drop m.length, ?_, by simpa using hl, hr⟩
+        rw [List.nil_append]
+        exact (List.prefix_iff_eq_append.mp hp).symm
+      · refine ⟨h :: pre, post, by rw [ht]; simp, ?_, hr⟩
+        simpa using hl
+    · rintro ⟨pre, post, hh, hl, hr⟩
+      cases pre with
+      | nil =>
+        left
+        rw [List.nil_append] at hh
+        refine ⟨⟨?_, by simpa using hl⟩, ?_⟩
+        · rw [hh]; exact List.prefix_append m post
+        · rw [hh, List.drop_left]; exact hr
+      | cons p pre' =>
+        right
+        simp only [List.cons_append, List.cons.injEq] at hh
+        obtain ⟨rfl, ht⟩ := hh
+        exact ⟨pre', post, ht, by simpa using hl, hr⟩
+
+theorem containsWB_iff (isWord : Char → Bool) (m hay : List Char) :
+    containsWB isWord m hay = true ↔ BoundedOcc isWord m hay := by
+  unfold containsWB BoundedOcc
+  rw [Bool.and_eq_true, scanWB_iff]
+  simp only [List.append_nil, Bool.not_eq_true', List.isEmpty_eq_false_iff]
+
+/-- **Exactness.** A query is structural iff a marker occurs in its lowercase
+text on word boundaries. -/
+theorem classifyWB_iff (isWord : Char → Bool) (q : List Char) :
+    classifyWB isWord q = .structural ↔ ∃ m ∈ markers, BoundedOcc isWord m (lower q) := by
+  unfold classifyWB
+  constructor
+  · intro h
+    split at h
+    · rename_i hany
+      obtain ⟨m, hm, hc⟩ := List.any_eq_true.mp hany
+      exact ⟨m, hm, (containsWB_iff isWord m _).mp hc⟩
+    · exact absurd h (by decide)
+  · rintro ⟨m, hm, hb⟩
+    have : markers.any (fun m => containsWB isWord m (lower q)) = true :=
+      List.any_eq_true.mpr ⟨m, hm, (containsWB_iff isWord m _).mpr hb⟩
+    rw [ite_eq_left this]
+
+/-- **The fix only narrows.** A query the fixed classifier calls structural
+was structural before: a bounded occurrence is an occurrence. -/
+theorem classifyWB_structural {isWord : Char → Bool} {q : List Char}
+    (h : classifyWB isWord q = .structural) : classify q = .structural := by
+  obtain ⟨m, hm, _, pre, post, he, _, _⟩ := (classifyWB_iff isWord q).mp h
+  exact (classify_iff q).mpr ⟨m, hm, pre, post, he.symm⟩
+
+/-- A general query stays general. -/
+theorem classifyWB_general {isWord : Char → Bool} {q : List Char}
+    (h : classify q = .general) : classifyWB isWord q = .general := by
+  cases hc : classifyWB isWord q with
+  | general => rfl
+  | structural => rw [classifyWB_structural hc] at h; exact absurd h (by decide)
+
+/-- **Agreement.** When every marker occurrence in a query stands on word
+boundaries, the fixed classifier answers as the old one did. -/
+theorem classifyWB_agrees (isWord : Char → Bool) (q : List Char)
+    (hb : ∀ m ∈ markers, ∀ pre post, lower q = pre ++ m ++ post →
+      leftOk isWord m pre.reverse = true ∧ rightOk isWord m post = true) :
+    classifyWB isWord q = classify q := by
+  cases hc : classify q with
+  | general => exact classifyWB_general hc
+  | structural =>
+    obtain ⟨m, hm, pre, post, he⟩ := (classify_iff q).mp hc
+    obtain ⟨hl, hr⟩ := hb m hm pre post he.symm
+    have hne : m ≠ [] := by
+      intro h0; subst h0; exact absurd hm (by decide)
+    exact (classifyWB_iff isWord q).mpr ⟨m, hm, hne, pre, post, he.symm, hl, hr⟩
+
+/-- Every marker is non-empty and starts and ends with a lowercase letter. -/
+theorem markers_ends :
+    ∀ m ∈ markers, m ≠ [] ∧ m.head?.all Char.isLower = true ∧ m.getLast?.all Char.isLower = true := by
+  decide
+
+/-- **A marker glued to the end of a word does not count.** An occurrence
+with a word character just before it is not bounded, whenever letters are
+word characters (`is_word_char` counts every alphanumeric). -/
+theorem wb_inside_word {isWord : Char → Bool} (hL : ∀ c : Char, c.isLower = true → isWord c = true)
+    {m : List Char} (hm : m ∈ markers) {c : Char} (hc : isWord c = true) (rb : List Char) :
+    leftOk isWord m (c :: rb) = false := by
+  obtain ⟨hne, hh, _⟩ := markers_ends m hm
+  match m, hne, hh with
+  | [], hne, _ => exact absurd rfl hne
+  | f :: _, _, hh =>
+    have hf : isWord f = true := hL f (by simpa using hh)
+    simp [leftOk, wordAt, hf, hc]
+
+/-- **A marker running into the next word does not count.** An occurrence
+with a word character just after it is not bounded. -/
+theorem wb_into_word {isWord : Char → Bool} (hL : ∀ c : Char, c.isLower = true → isWord c = true)
+    {m : List Char} (hm : m ∈ markers) {c : Char} (hc : isWord c = true) (cs : List Char) :
+    rightOk isWord m (c :: cs) = false := by
+  obtain ⟨hne, _, hl⟩ := markers_ends m hm
+  cases hg : m.getLast? with
+  | none => exact absurd (List.getLast?_eq_none_iff.mp hg) hne
+  | some l =>
+    rw [hg] at hl
+    have hlw : isWord l = true := hL l (by simpa using hl)
+    simp [rightOk, hg, wordAt, hlw, hc]
+
+/-- A character that ends a word: not a word character, not a hyphen. -/
+def Sep (isWord : Char → Bool) (c : Char) : Prop := isWord c = false ∧ c ≠ '-'
+
+theorem leftOk_sep {isWord : Char → Bool} (m : List Char) {rb : List Char}
+    (h : ∀ c ∈ rb.head?, Sep isWord c) : leftOk isWord m rb = true := by
+  match m, rb with
+  | [], _ => rfl
+  | _ :: _, [] => rfl
+  | f :: _, p :: pp =>
+    obtain ⟨h1, h2⟩ := h p rfl
+    simp [leftOk, wordAt, h1, h2]
+
+theorem rightOk_sep {isWord : Char → Bool} (m : List Char) {post : List Char}
+    (h : ∀ c ∈ post.head?, Sep isWord c) : rightOk isWord m post = true := by
+  unfold rightOk
+  match m.getLast?, post with
+  | none, _ => rfl
+  | some _, [] => rfl
+  | some l, c :: cs =>
+    obtain ⟨h1, h2⟩ := h c rfl
+    simp [wordAt, h1, h2]
+
+/-- **Every marker as whole words classifies structural**, in any ASCII
+case, for any word-character rule: `m` is any text whose lowercase is a
+marker, and the text around it ends (and starts) with a character that ends a
+word, or nothing. -/
+theorem classifyWB_marker (isWord : Char → Bool) {m : List Char} (hm : lower m ∈ markers)
+    (pre post : List Char) (hpre : ∀ c ∈ (lower pre).getLast?, Sep isWord c)
+    (hpost : ∀ c ∈ (lower post).head?, Sep isWord c) :
+    classifyWB isWord (pre ++ m ++ post) = .structural := by
+  apply (classifyWB_iff isWord _).mpr
+  have hne : lower m ≠ [] := (markers_ends _ hm).1
+  refine ⟨lower m, hm, hne, lower pre, lower post, by rw [lower_append, lower_append], ?_, ?_⟩
+  · apply leftOk_sep
+    rw [List.head?_reverse]; exact hpre
+  · exact rightOk_sep _ hpost
+
+/-- Each marker on its own is a structural query, for any word-character
+rule. -/
+theorem classifyWB_each_marker (isWord : Char → Bool) :
+    ∀ m ∈ markers, classifyWB isWord m = .structural := by
+  intro m hm
+  have := classifyWB_marker isWord (m := m) (by rw [markers_lower m hm]; exact hm) [] []
+    (by simp [lower]) (by simp [lower])
+  simpa using this
+
+/-- `is_word_char` on ASCII: letters, digits and `_`. -/
+def asciiWord (c : Char) : Bool := c.isAlphanum || c == '_'
+
+theorem asciiWord_letters : ∀ c : Char, c.isLower = true → asciiWord c = true := by
+  intro c h; simp [asciiWord, Char.isAlphanum, Char.isAlpha, h]
+
+/-- **The issue's four queries classify general** under the fixed classifier:
+each marker in them is glued to a longer word. -/
+theorem issue_queries_general :
+    classifyWB asciiWord "the answer depends only on the score".toList = .general ∧
+      classifyWB asciiWord "who are the independents of the senate".toList = .general ∧
+      classifyWB asciiWord "the team somewhat uses the old schema".toList = .general ∧
+      classifyWB asciiWord "is it unsafe to delete it".toList = .general := by
+  decide
+
+/-! The fixed classifier on the tests' and the docs' queries: every
+dependency question stays structural, every general one stays general. -/
+
+example : classifyWB asciiWord "what depends on SG-Base-VPC".toList = .structural := by decide
+example : classifyWB asciiWord "is it safe to delete the shared security group".toList =
+    .structural := by decide
+example : classifyWB asciiWord "does anything depend on this".toList = .structural := by decide
+example : classifyWB asciiWord "WHAT DEPENDS ON SG-Base-VPC".toList = .structural := by decide
+example : classifyWB asciiWord "What Uses the VPC".toList = .structural := by decide
+example : classifyWB asciiWord "dependents of SG-Base-VPC".toList = .structural := by decide
+example : classifyWB asciiWord "blast radius of user schema".toList = .structural := by decide
+example : classifyWB asciiWord "x depends-on y".toList = .structural := by decide
+example : classifyWB asciiWord "what depends on (SG-Base) - db".toList = .structural := by decide
+example : classifyWB asciiWord "is it safe to delete?".toList = .structural := by decide
+example : classifyWB asciiWord "update user schema".toList = .general := by decide
+example : classifyWB asciiWord "pagination".toList = .general := by decide
+example : classifyWB asciiWord "the report references the changelog".toList = .general := by
+  decide
+example : classifyWB asciiWord "is the system independent of a single region".toList =
+    .general := by decide
+example : classifyWB asciiWord "is it safe to rotate the key".toList = .general := by decide
+/-- A hyphen between word characters joins them, so a marker hyphenated onto
+a word does not count either. -/
+example : classifyWB asciiWord "co-dependents of the senate".toList = .general := by decide
 
 /-! ## The graph and the dependents relation -/
 
@@ -1164,6 +1459,136 @@ theorem general_blends (resolve : Graph κ → Option Choice) (rs vl : Bool) (q 
     recallRouted resolve rs vl q k d g₁ g₂ g₃ = .blend (gatherResult vl) := by
   simp [recallRouted, finalStep, hq]
 
+/-! ## The dispatch over any classifier (#299)
+
+`tryStructural`, `fitsStructural` and `recallRouted` with the classifier a
+parameter. At `classify` they are the definitions above (`tryStructural_eq`,
+`fitsStructural_eq`, `recallRouted_eq`); at `classifyWB isWord` they are the
+fixed code. The dispatch theorems hold for every classifier, so they hold for
+the fixed one (`traversal_exact_wb`, `fitsStructuralWB_iff`,
+`recall_blend_input_wb`, `general_blends_wb`). -/
+
+/-- `try_structural` over the classifier `cls`. -/
+def tryStructuralBy (cls : List Char → Kind) (g : Graph κ) (resolve : List Char → Option Choice)
+    (q : List Char) (topK traversalDepth : Nat) : Option Answer :=
+  if cls q = .structural then tryStructuralWith g (resolve q) topK traversalDepth else none
+
+/-- `fits_structural` over the classifier `cls`. -/
+def fitsStructuralBy (cls : List Char → Kind) (g : Graph κ) (resolve : List Char → Option Choice)
+    (q : List Char) : Bool :=
+  cls q == .structural && anchorDispatches g (resolve q)
+
+/-- `recall_routed` over the classifier `cls`. -/
+def recallRoutedBy (cls : List Char → Kind) (resolve : Graph κ → Option Choice)
+    (routesStructural vectorLeg : Bool) (q : List Char) (topK depth : Nat) (g₁ g₂ g₃ : Graph κ) :
+    Outcome :=
+  let structural := routesStructural && cls q == .structural
+  let ready := structural && fitsStructuralWith g₁ (resolve g₁) topK
+  if ready && vectorLeg then
+    match tryStructuralWith g₂ (resolve g₂) topK depth with
+    | some ans => .traversal ans
+    | none => finalStep g₃ (resolve g₃) structural topK depth (gatherResult vectorLeg)
+  else
+    finalStep g₃ (resolve g₃) structural topK depth
+      (if ready then .empty else gatherResult vectorLeg)
+
+theorem tryStructural_eq (g : Graph κ) (resolve : List Char → Option Choice) (q : List Char)
+    (k d : Nat) : tryStructural g resolve q k d = tryStructuralBy classify g resolve q k d := rfl
+
+theorem fitsStructural_eq (g : Graph κ) (resolve : List Char → Option Choice) (q : List Char) :
+    fitsStructural g resolve q = fitsStructuralBy classify g resolve q := rfl
+
+theorem recallRouted_eq (resolve : Graph κ → Option Choice) (rs vl : Bool) (q : List Char)
+    (k d : Nat) (g₁ g₂ g₃ : Graph κ) :
+    recallRouted resolve rs vl q k d g₁ g₂ g₃ = recallRoutedBy classify resolve rs vl q k d g₁ g₂ g₃ :=
+  rfl
+
+/-- `traversal_exact` through the classifier: a dispatched answer for a
+single anchor, with `top_k` covering every dependent, is exactly its direct
+dependents. -/
+theorem traversalBy_exact (cls : List Char → Kind) {g : Graph κ}
+    {resolve : List Char → Option Choice} {q : List Char} {a a' k d : Nat} {hits : List Nat}
+    (hres : resolve q = some (.one a))
+    (h : tryStructuralBy cls g resolve q k d = some (.traversal a' hits))
+    (hk : (ranked g a).length ≤ k) (x : Nat) : x ∈ hits ↔ DirectDep g a x := by
+  unfold tryStructuralBy at h
+  split at h
+  · rw [hres] at h; exact traversal_exact h hk x
+  · exact absurd h (by simp)
+
+/-- `fitsStructural_iff` for any classifier. -/
+theorem fitsStructuralBy_iff (cls : List Char → Kind) (g : Graph κ)
+    (resolve : List Char → Option Choice) (q : List Char) {k : Nat} (hk : 0 < k) (d : Nat) :
+    fitsStructuralBy cls g resolve q = true ↔ (tryStructuralBy cls g resolve q k d).isSome := by
+  unfold fitsStructuralBy tryStructuralBy
+  cases hc : cls q with
+  | general => simp
+  | structural =>
+    simp only [ite_eq_left, beq_self_eq_true, Bool.true_and]
+    rw [← fitsStructuralWith_iff g (resolve q) k d]
+    have hk' : k ≠ 0 := by omega
+    match resolve q with
+    | none => simp [fitsStructuralWith]
+    | some (.ambiguous _) => simp [fitsStructuralWith]
+    | some (.one _) => simp [fitsStructuralWith, hk']
+
+/-- `recall_blend_input` for any classifier. -/
+theorem recallBy_blend_input (cls : List Char → Kind) (resolve : Graph κ → Option Choice)
+    (rs vl : Bool) (q : List Char) (k d : Nat) (g₁ g₂ g₃ : Graph κ) (i : Input)
+    (h : recallRoutedBy cls resolve rs vl q k d g₁ g₂ g₃ = .blend i) : i = gatherResult vl := by
+  unfold recallRoutedBy at h
+  simp only at h
+  split at h
+  · split at h
+    · exact absurd h (by simp)
+    · exact finalStep_blend h
+  · rename_i hrv
+    have hi := finalStep_blend h
+    rw [hi]
+    split
+    · rename_i hr
+      cases vl with
+      | true => simp [hr] at hrv
+      | false => rfl
+    · rfl
+
+/-- `general_blends` for any classifier. -/
+theorem generalBy_blends (cls : List Char → Kind) (resolve : Graph κ → Option Choice)
+    (rs vl : Bool) (q : List Char) (k d : Nat) (g₁ g₂ g₃ : Graph κ) (hq : cls q = .general) :
+    recallRoutedBy cls resolve rs vl q k d g₁ g₂ g₃ = .blend (gatherResult vl) := by
+  simp [recallRoutedBy, finalStep, hq]
+
+/-- **`traversal_exact` for the fixed classifier.** -/
+theorem traversal_exact_wb (isWord : Char → Bool) {g : Graph κ}
+    {resolve : List Char → Option Choice} {q : List Char} {a a' k d : Nat} {hits : List Nat}
+    (hres : resolve q = some (.one a))
+    (h : tryStructuralBy (classifyWB isWord) g resolve q k d = some (.traversal a' hits))
+    (hk : (ranked g a).length ≤ k) (x : Nat) : x ∈ hits ↔ DirectDep g a x :=
+  traversalBy_exact _ hres h hk x
+
+/-- **The pre-check is the dispatch, for the fixed classifier** (with
+`fitsStructuralWith_iff`, which no classifier enters). -/
+theorem fitsStructuralWB_iff (isWord : Char → Bool) (g : Graph κ)
+    (resolve : List Char → Option Choice) (q : List Char) {k : Nat} (hk : 0 < k) (d : Nat) :
+    fitsStructuralBy (classifyWB isWord) g resolve q = true ↔
+      (tryStructuralBy (classifyWB isWord) g resolve q k d).isSome :=
+  fitsStructuralBy_iff _ g resolve q hk d
+
+/-- **Never degraded by the skip, for the fixed classifier.** -/
+theorem recall_blend_input_wb (isWord : Char → Bool) (resolve : Graph κ → Option Choice)
+    (rs vl : Bool) (q : List Char) (k d : Nat) (g₁ g₂ g₃ : Graph κ) (i : Input)
+    (h : recallRoutedBy (classifyWB isWord) resolve rs vl q k d g₁ g₂ g₃ = .blend i) :
+    i = gatherResult vl :=
+  recallBy_blend_input _ resolve rs vl q k d g₁ g₂ g₃ i h
+
+/-- A query the fixed classifier calls general always blends on the gathered
+input, even when its anchor has dependents. -/
+theorem general_blends_wb (isWord : Char → Bool) (resolve : Graph κ → Option Choice)
+    (rs vl : Bool) (q : List Char) (k d : Nat) (g₁ g₂ g₃ : Graph κ)
+    (hq : classifyWB isWord q = .general) :
+    recallRoutedBy (classifyWB isWord) resolve rs vl q k d g₁ g₂ g₃ = .blend (gatherResult vl) :=
+  generalBy_blends _ resolve rs vl q k d g₁ g₂ g₃ hq
+
 /-! ## Examples: the cloudops exhibit
 
 The test fixture `exhibit()`: `SG-Base-VPC` (10) is the `Hierarchical` parent
@@ -1260,6 +1685,21 @@ example : recallRouted (fun _ => some (.one 10)) true true
     "who are the independents of SG-Base-VPC".toList 5 2
     (exhibit []) (exhibit []) (exhibit []) = .traversal (.traversal 10 [30, 11, 12, 13, 14]) := by
   decide
+
+/-- #299 fixed: the same misrouted questions classify general under the
+word-bounded classifier and blend on the gathered input, though the anchor
+has dependents; the whole-word dependency question still dispatches. -/
+example : recallRoutedBy (classifyWB asciiWord) (fun _ => some (.one 10)) true true
+    "who are the independents of SG-Base-VPC".toList 5 2
+    (exhibit []) (exhibit []) (exhibit []) = .blend .gathered := by decide
+
+example : recallRoutedBy (classifyWB asciiWord) (fun _ => some (.one 10)) true true
+    "the answer depends only on SG-Base-VPC".toList 5 2
+    (exhibit []) (exhibit []) (exhibit []) = .blend .gathered := by decide
+
+example : recallRoutedBy (classifyWB asciiWord) (fun _ => some (.one 10)) true true
+    "what depends on SG-Base-VPC".toList 5 2 (exhibit []) (exhibit []) (exhibit []) =
+      .traversal (.traversal 10 [30, 11, 12, 13, 14]) := by decide
 
 end Examples
 
