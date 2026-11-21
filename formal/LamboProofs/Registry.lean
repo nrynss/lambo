@@ -51,15 +51,26 @@ Rust items modelled (paths as at `d58ebcbf`):
   difference. Where the model merges spans the Rust separates, the event's
   doc says so: an admission and its `Flight::finish` (no `.await` between
   them; the test-only `panic_after_admit` hook is the pure `endOutcome`); a
-  probe's answer and the reservation; an erase's claim, fence and close (the
-  slot reads `Erasing` throughout); and `run_detach`'s six stages (the slot
-  reads `Detaching` throughout, and the watcher may still fire before it, as
-  before stage 5).
+  failed attach's permit return, its `release_abandoned` and its `finish`
+  (`evFTimeout`); a probe's answer and the reservation; an erase's claim,
+  fence and close (the slot reads `Erasing` throughout; the heartbeat is
+  marked stopped at the claim, where the Rust's beats on until the close
+  aborts it, see `evEClaim`); and `run_detach`'s six stages (the slot reads
+  `Detaching` throughout, and the watcher may still fire before it, as before
+  stage 5).
+* The negative cache is in the state (`neg`): an on-demand attach starts only
+  when no fresh entry answers the session. The flight's end caches what
+  `Flight::end` caches on the modelled paths (a dropped flight's `Failed`, a
+  probe's `Erased` and create-less `Absent`) and an admission forgets the
+  entry; a non-transient attach error's `Failed` and `mark_erased`'s `Erased`
+  are not recorded, which only lets more attaches start. An entry ignores
+  time past `NEGATIVE_TTL`, and `negEvict` drops one early, as a full cache
+  drops its oldest (the model does not count entries).
 * Choices the Rust leaves to the store, the clock or the scheduler are event
   parameters: a store error, which victim `reserve_place` takes (any one its
   filter allows; `chooseVictim` models which one, with the per-credential
   share), a retry's outcome, whether a load fails. A heartbeat's transient
-  error and any refused request are stutters.
+  error, a negative-cache answer and any other refused request are stutters.
 * Times are milliseconds on tokio's clock, as `Nat`; there is no `f64`.
   `saturating_sub` and `saturating_mul` are `Nat` arithmetic, so
   `unplaced_cap(usize::MAX)` is out of scope.
@@ -70,9 +81,11 @@ The invariant `Inv` holds in every reachable state (`reach_inv`, from
 `inv_step`, one lemma per event). From it, over every interleaving:
 
 * `mems_le_places`, `live_on_demand_le_places`: **caps under concurrent
-  admission**. The on-demand `Memory`s, held or about to be (an attach past
-  its eviction wait counts, one still waiting does not: its victim does),
-  never exceed `max_attached - pinned` (design §3.2 step 3; test
+  admission**. The on-demand slots holding or about to hold a `Memory` (an
+  attach past its eviction wait counts, one still waiting does not: its
+  victim does) never exceed `max_attached - pinned`. A detached handle that
+  something still holds (a `PreviousHandle`) is not in a slot and is not
+  counted (`previous_wait_expires`) (design §3.2 step 3; test
   `eviction_releases_the_lease_and_a_reattach_mints_the_next_token`).
 * `attaches_le_permits`: at most `attach_permits` attaches hold a permit
   (`attach_concurrency`). `unplaced_le_cap`: unprobed attaches stay under
@@ -155,13 +168,16 @@ the one-session policy); `unplacedCap_pos`, `placeShare_pos`,
   re-takes the row at the next token and, since #293, fences the healthy
   session and drops its tail. In between, another writer could take the
   session while this one accepts writes. It needs a panic or an abort of an
-  attach task. The timeout path does not have this race: it releases before
-  `finish`, while the slot is still the flight's.
+  attach task, and the `Failed` the drop cached (on_demand.rs:377) gone
+  before the release runs: evicted from a full negative cache, or the release
+  delayed past `NEGATIVE_TTL` (30 s, against a 2 s `LEASE_RELEASE_GRACE`).
+  While the entry is fresh, `route_or_start` answers from it and starts
+  nothing (registry.rs:675-681). The timeout path does not have this race: it
+  releases before `finish`, while the slot is still the flight's.
 * `zombieRun`: after a #293 re-take, the fenced handle is detached without a
   release, so the row stays this process's. An in-serve erase then runs as
   the CLI eraser and answers 409 `HeldElsewhere`, documented (erase.rs:120) as
-  "a live writer in another process"; and the pinned retry takes the row back by the refresh
-  arm at the re-taken token. Neither is unsafe; the first is a doc mismatch.
+  "a live writer in another process": a doc mismatch, not a safety problem.
 * `retry_admits_over_held`: `admit_if`'s refusal branch is dead code under
   the permit discipline.
 
@@ -171,8 +187,8 @@ The MCP transport, the endpoints, rate limits, the layer stack
 (`LayerSource`), `LiveSessions` and the process-wide `--max-sessions`
 (beyond `credential_share`); logging, the ledger and `book_lease_loss`;
 `owners` inside the step relation (the share rule is `chooseVictim`'s);
-the negative cache inside the step relation (its answers are stutters;
-`negGet` and `negPut` model it); the `warned` flag; the `started` gate,
+the negative cache's size (its eviction is the `negEvict` event; `negGet`
+and `negPut` model its rules); the `warned` flag; the `started` gate,
 `track`, `join_detaches` and `stop_tasks`; the early-shutdown pre-arm and the second-signal escape of
 a close; `ERASE_PERMIT_WAIT` and the erase's cut-off (both answer 503 or an
 unknown outcome without a state change); an erase whose read-back finds the
@@ -192,28 +208,39 @@ over events, and each module would carry the lemmas of its own events:
 * `admission.rs` (`route_or_start`, `attach_on_demand`, `attach_outcome`,
   `reserve_place`, `insert_live_if`, `admit_if`, `build_session`):
   `inv_start`, `inv_fPermit`, `inv_fProbe`, `inv_reserve`, `inv_fGo`,
-  `inv_fTimeout`, `inv_fDrop`, `inv_fAdmit`, `inv_enter`; `mems_le_places`,
-  `live_on_demand_le_places`, `attaches_le_permits`, `unplaced_le_cap`,
-  `one_build`, `start_needs_absent`, `fAdmit_own`, `retry_admits_over_held`,
+  `inv_fTimeout`, `inv_fDrop`, `inv_fAdmit`, `inv_enter`, `inv_leave` and
+  `inv_write` (the routed request's `InFlight`, which `route_or_start`
+  takes); `mems_le_places`, `live_on_demand_le_places`,
+  `attaches_le_permits`, `unplaced_le_cap`, `one_build`,
+  `start_needs_absent`, `fAdmit_own`, `retry_admits_over_held`,
   `evict_victim`, `drop_clears`, `timeout_clears`, `admit_fills_or_releases`,
-  `tomb_never_admitted`, `attach_waits_previous`, `dropped_flight_fences_next`.
-  `on_demand.rs` keeps `chooseVictim_*`, `at_share_evicts_own`,
-  `unplacedCap_pos`, `placeShare_*`, `negGet_*`, `busy_never_cached`,
-  `panic_after_admit`.
+  `tomb_never_admitted`, `dropped_flight_fences_next`; and, with
+  `awaiting_previous_on_demand`, which `attach_outcome` calls,
+  `attach_waits_previous` and `previous_wait_expires`. `on_demand.rs` keeps
+  `chooseVictim_*`, `at_share_evicts_own`, `unplacedCap_pos`,
+  `placeShare_*`, `negGet_*`, `busy_never_cached`, `panic_after_admit`, and
+  the negative cache's `negEvict` case of `inv_step`.
 * `retry.rs` (`due`, `awaiting_previous`, `retry`, `retry_loop`):
   `inv_rRound`, `inv_rStart`, `inv_rPermit`, `inv_rResult`; `mem_due`,
   `retry_waits_previous`, `rResult_slot`, `retry_backoff`, `pinnedRetry_ge`,
   and the backoff runs.
 * `lifecycle.rs` (`release_abandoned`, `run_detach`, `sweep_idle`,
-  `idle_sweeper`): `inv_sweep`, `inv_detachRun`, `inv_wake`, `inv_lostRun`,
-  `inv_closeSet`, `inv_abandRun`; `sweep_skips_in_flight`,
+  `idle_sweeper`, and, as argued below, `detach`, `spawn_detach` and
+  `watch_lease`): `inv_sweep`, `inv_detachRun`, `inv_wake`, `inv_lostRun`,
+  `inv_abandRun`, `inv_strayDrop` (the `PreviousHandle` a detach leaves),
+  `inv_watchPark`, `inv_watchFire`; `sweep_skips_in_flight`,
   `sweep_never_pinned`, `sweep_takes_idle`, `detach_release`,
-  `detach_leaves`, `lostRun_any_live`, `stale_release_fences`,
-  `previous_wait_expires`.
-* `registry.rs` keeps the slot table (`Inv` itself), `answer_*`,
+  `detach_leaves`, `lostRun_any_live`, `stale_release_fences`, and the
+  `watch_lease` theorems below.
+* `registry.rs` keeps the slot table (`Inv` itself), `close_set`
+  (`inv_closeSet`, and the `close` case of `inv_step`), `answer_*`,
   `forScope_exit_iff`; `views.rs` `slotViews_*`; `erase.rs` `inv_eClaim`,
   `inv_eEnd`, `erase_claim_quiescent`, `erasing_no_build`, `eClaim_fences`,
   `eClaim_refuses_busy`, `eEnd_commit`, `erase_fence_not_lost`.
+* Outside the registry: `inv_beat`, `inv_stale`, `beat_own_gen`,
+  `beat_latches`, `stale_not_own_gen`, `stale_quiet` are the heartbeat and the
+  flush loop (`memory/leases.rs`, `store/flush.rs`); `inv_rowLapse` and
+  `inv_otherTake` are the store and other writers; the `tick` case is time.
 
 **`watch_lease` does not belong in `retry.rs`.** It shares no state with
 `due`, `awaiting_previous` or `retry`: it neither reads nor writes a
@@ -227,7 +254,8 @@ action is `detach`. It belongs with the lease and fencing side of the
 registry, in `lifecycle.rs` beside `run_detach` and the sweeper (the other
 detach triggers), with its contract stated against `lease_lost_latched`; the
 fix for `lost_detach_takes_healthy` (detach only the handle it watched) would
-land in `detach` there too.
+land in `detach` there too, so `detach` and `spawn_detach` go to
+`lifecycle.rs` with it.
 -/
 
 namespace Lambo.Registry
@@ -398,12 +426,30 @@ def Prior.slot : Prior → Option Slot
   | .failed => some .failed
   | .erased => some .erased
 
+/-- A negative outcome kept in `NegativeCache`. -/
+inductive Neg where
+  | absent
+  | erased
+  | failed
+  deriving DecidableEq, Repr
+
+/-- `NegativeCache::get`: an entry `(n, at)` answers until `NEGATIVE_TTL`
+after `at`; `Absent` never answers a request that may create the session. -/
+def negGet (e : Option (Neg × Nat)) (now ttl : Nat) (create : Bool) : Option Neg :=
+  match e with
+  | none => none
+  | some (n, t0) =>
+    if t0 + ttl ≤ now then none
+    else match n with
+      | .absent => if create = true then none else some .absent
+      | n => some n
+
 /-- The registry's fixed parameters. `places` is `max_attached - pinned`,
 the on-demand places; `permits` is `attach_permits`; `cap` is
 `unplaced_cap(max_attached)`; `er`, `pr` and `wait` are `ELECTION_RETRY`,
 `PINNED_RETRY` and `PREVIOUS_HANDLE_WAIT`; `idle` and `minIdle` are
 `idle_detach` and `min_idle_to_evict`; `watchers` is
-`LeaseLossPolicy::DetachSession`. `ids` is every session id that can be
+`LeaseLossPolicy::DetachSession`; `ttl` is `NEGATIVE_TTL`. `ids` is every session id that can be
 addressed, with the pinned ones among them. -/
 structure Cfg where
   ids : List Nat
@@ -418,6 +464,7 @@ structure Cfg where
   idle : Nat
   minIdle : Nat
   watchers : Bool
+  ttl : Nat
 
 /-- The registry, its tasks and the store's lease rows.
 
@@ -429,7 +476,8 @@ structure Cfg where
   session id, not yet run. `aband`: `release_abandoned` tasks a dropped
   `Flight` spawned, not yet run.
 * `strays`: detached handles something may still hold (`PreviousHandle`);
-  `prevOD` the on-demand `previous` map.
+  `prevOD` the on-demand `previous` map; `neg` the `NegativeCache`, each
+  entry with the time it was put.
 * Ghosts: `next` mints handle ids; `accepted` lists the handles writes went
   through; `rel` the handles whose close released the lease; `builds` the
   sessions an acquire was started for. -/
@@ -445,6 +493,7 @@ structure St where
   aband : List Nat
   strays : List Nat
   prevOD : Nat → Option (Nat × Nat)
+  neg : Nat → Option (Neg × Nat)
   next : Nat
   accepted : List Nat
   rel : List Nat
@@ -575,6 +624,7 @@ inductive Ev where
   | stale (i : Nat)
   | eClaim (i : Nat)
   | eEnd (i : Nat) (err : Bool)
+  | negEvict (i : Nat)
   | close
   | closeSet
   deriving DecidableEq, Repr
@@ -586,11 +636,11 @@ def endFlight (s : St) (i : Nat) (back : Nat) : St :=
 
 /-- `route_or_start`, the branch that starts an on-demand attach: the slot
 is absent, the session is not pinned, the serve attaches on demand and is not
-closing, and fewer than `cap` attaches wait unplaced. (A fresh negative-cache
-entry answers instead, with no state change; that is a stutter here.) -/
+closing, no fresh negative-cache entry answers it (`NegativeCache::get`), and
+fewer than `cap` attaches wait unplaced. -/
 def evStart (c : Cfg) (s : St) (i : Nat) (cr : Bool) : Option St :=
   if i ∈ c.ids ∧ isPinned c i = false ∧ c.onDemand = true ∧ s.slots i = none ∧
-      s.closing = false ∧ unplSum c s.slots < c.cap then
+      s.closing = false ∧ unplSum c s.slots < c.cap ∧ negGet (s.neg i) s.now c.ttl cr = none then
     some { s with slots := upd s.slots i (some (.attaching cr .queued)) }
   else none
 
@@ -673,16 +723,19 @@ def reserve (c : Cfg) (s : St) (i : Nat) (cr : Bool) (victim : Option Nat) : Opt
 (raced against the shutdown), the probe's verdict on the lease row, and
 `reserve_place`, with no `.await` between the probe's answer and the
 reservation. A store error or timeout is `err`. A free place goes straight on
-to the acquire. -/
+to the acquire. An erased session, and an absent one the flight may not
+create, are cached (`Flight::end`); held elsewhere and a store error are not. -/
 def evFProbe (c : Cfg) (s : St) (i : Nat) (err : Bool) (victim : Option Nat) : Option St :=
   match s.slots i with
   | some (.attaching cr .probing) =>
     if s.closing = true ∨ err = true then some (endFlight s i 1)
     else
       match (s.rows i).holder with
-      | .tomb => some (endFlight s i 1)
+      | .tomb => some { endFlight s i 1 with neg := upd s.neg i (some (.erased, s.now)) }
       | .other => some (endFlight s i 1)
-      | .none => if cr = true then reserve c s i cr victim else some (endFlight s i 1)
+      | .none =>
+        if cr = true then reserve c s i cr victim
+        else some { endFlight s i 1 with neg := upd s.neg i (some (.absent, s.now)) }
       | _ => reserve c s i cr victim
   | _ => none
 
@@ -703,7 +756,15 @@ def evFGo (s : St) (i : Nat) : Option St :=
 /-- `attach_on_demand`'s `ATTACH_TIMEOUT` (any phase), or the shutdown winning
 the acquire's race: the future is dropped with its permit, and when the
 acquire had started the lease it may have taken is released, holder-scoped,
-before `Flight::finish` removes the slot. -/
+before `Flight::finish` removes the slot.
+
+One step merges three the Rust separates: the permit goes back when
+`attach_outcome`'s future is dropped, then `release_abandoned` is awaited
+(registry.rs:752-760) with the permit free and the slot still `Attaching`,
+then `finish`. In between, an erase may claim another session (the permits
+are free), an erase of this one answers 503 (its slot is `Attaching`), and no
+attach of this one starts (the slot is taken); the flight never admits. So
+nothing the merge hides changes what any theorem here says. -/
 def evFTimeout (s : St) (i : Nat) : Option St :=
   match s.slots i with
   | some (.attaching _ p) =>
@@ -714,16 +775,22 @@ def evFTimeout (s : St) (i : Nat) : Option St :=
 
 /-- The attach task panics or is aborted (`Flight`'s `Drop`): `end(Failed)`
 removes the slot (it is still the flight's), the permit goes with the future,
-and a `release_abandoned` task is spawned, whatever phase the flight was in. -/
+`Failed` is cached (the slot was still the flight's, on_demand.rs:377), and a
+`release_abandoned` task is spawned, whatever phase the flight was in. -/
 def evFDrop (s : St) (i : Nat) : Option St :=
   match s.slots i with
-  | some (.attaching _ p) => some { endFlight s i p.holds with aband := i :: s.aband }
+  | some (.attaching _ p) =>
+    some { endFlight s i p.holds with aband := i :: s.aband,
+                                      neg := upd s.neg i (some (.failed, s.now)) }
   | _ => none
 
 /-- `build_attach` and `admit_if` over the flight's own slot, which no
 `.await` separates from `Flight::finish`. Held by another live writer or the
 tombstone: the flight ends. Otherwise the acquire takes the row; a load or
-contract error then releases what it took (`ok = false`). -/
+contract error then releases what it took (`ok = false`). An admission
+forgets the session's negative entry. A non-transient error is cached by the
+Rust as `Failed`; the model does not record it, which only lets more attaches
+start. -/
 def evFAdmit (c : Cfg) (s : St) (i : Nat) (ok : Bool) : Option St :=
   match s.slots i with
   | some (.attaching _ .acquiring) =>
@@ -732,7 +799,8 @@ def evFAdmit (c : Cfg) (s : St) (i : Nat) (ok : Bool) : Option St :=
     | some r =>
       if ok = true then
         some { s with slots := upd s.slots i (some (.live (fresh c s r.token))),
-                      rows := upd s.rows i r, free := s.free + 1, next := s.next + 1 }
+                      rows := upd s.rows i r, free := s.free + 1, next := s.next + 1,
+                      neg := upd s.neg i none }
       else some { endFlight s i 1 with rows := upd s.rows i (relMe r) }
   | _ => none
 
@@ -983,7 +1051,13 @@ def evStale (s : St) (i : Nat) : Option St :=
 (none held by an attach), the closing check, the claim, and for an attached
 session the watcher stopped, the quiet fence and the close, which on a fenced
 handle neither flushes nor releases. An attaching, detaching or erasing slot
-is answered 503 with nothing changed (a stutter, not an event). -/
+is answered 503 with nothing changed (a stutter, not an event).
+
+The heartbeat is marked stopped at the claim. In the Rust it runs on until
+the close aborts it, through the MCP drain (up to `SHUTDOWN_GRACE`); a beat
+there refreshes the row this handle still holds, or latches a fence that is
+already latched, and its watcher is already stopped, so the model leaves
+those beats out. -/
 def evEClaim (c : Cfg) (s : St) (i : Nat) : Option St :=
   if i ∈ c.ids ∧ s.free = c.permits ∧ s.closing = false then
     match s.slots i with
@@ -1039,6 +1113,14 @@ def evEEnd (c : Cfg) (s : St) (i : Nat) (err : Bool) : Option St :=
       else some { s with slots := markErased c s.slots i, rows := upd s.rows i ⟨.tomb, (s.rows i).token + 1⟩ }
   | _ => none
 
+/-- A negative entry leaves the cache before its `NEGATIVE_TTL` is up:
+`NegativeCache::put` drops the oldest entry when it holds
+`NEGATIVE_CACHE_MAX`. The model does not count entries, so this is enabled
+for any entry; in the Rust it needs a full cache with this entry the oldest.
+(An entry past its TTL is ignored by `negGet` without this event.) -/
+def evNegEvict (s : St) (i : Nat) : Option St :=
+  if (s.neg i).isSome then some { s with neg := upd s.neg i none } else none
+
 /-- `close_set`'s first line: no attach or sweep starts from here. -/
 def evClose (s : St) : Option St := some { s with closing := true }
 
@@ -1090,6 +1172,7 @@ def step (c : Cfg) (s : St) : Ev → Option St
   | .stale i => evStale s i
   | .eClaim i => evEClaim c s i
   | .eEnd i err => evEEnd c s i err
+  | .negEvict i => evNegEvict s i
   | .close => evClose s
   | .closeSet => evCloseSet c s
 
@@ -1365,7 +1448,7 @@ theorem inv_start (hc : WF c) (hI : Inv c s) {i : Nat} {cr : Bool} (h : evStart 
   unfold evStart at h
   split at h
   · rename_i hg
-    obtain ⟨hi, hp, -, hn, -, hu⟩ := hg
+    obtain ⟨hi, hp, -, hn, -, hu, -⟩ := hg
     cases h
     obtain ⟨-, -, h3, -⟩ := sums_upd hc hi s.slots (some (.attaching cr .queued))
     rw [hn] at h3
@@ -1490,6 +1573,7 @@ theorem inv_fProbe (hc : WF c) (hI : Inv c s) {i : Nat} {err : Bool} {v : Option
     · split at h <;> (try split at h) <;>
         first
         | (cases h; exact hend)
+        | (cases h; exact inv_congr hend rfl rfl rfl rfl)
         | exact inv_reserve hc hI heq h
         | cases h
   · cases h
@@ -1985,6 +2069,12 @@ theorem inv_step (hc : WF c) (hI : Inv c s) {e : Ev} (h : step c s e = some s') 
   | stale i => exact inv_stale hc hI h
   | eClaim i => exact inv_eClaim hc hI h
   | eEnd i err => exact inv_eEnd hc hI h
+  | negEvict i =>
+    change evNegEvict s i = some s' at h
+    unfold evNegEvict at h
+    split at h
+    · cases h; exact inv_congr hI rfl rfl rfl rfl
+    · cases h
   | close => cases h; exact inv_congr hI rfl rfl rfl rfl
   | closeSet => exact inv_closeSet hI h
 
@@ -2157,8 +2247,13 @@ theorem start_needs_absent {s' : St} {i : Nat} {cr : Bool} (h : evStart c s i cr
 /-- **Erase excludes concurrent attach** (#32, test
 `an_erase_racing_the_pinned_retry_waits_for_it_then_erases_what_it_attached`):
 an erase claims its slot only when no attach of any session holds a permit,
-so none is between its acquire and its admission: every on-demand attach is
-still waiting for its permit and no pinned retry is acquiring. -/
+so none is between its acquire and its admission. In the model that reads:
+every on-demand attach is still waiting for its permit and no pinned retry
+is acquiring. In the Rust a flight that has given its permit back but not yet
+finished (the timeout path awaits `release_abandoned` in between; see
+`evFTimeout`) can still hold its `Attaching` slot at the claim; it never
+admits, and an erase of its own session answers 503. What holds of the Rust
+is the first sentence: no attach is between its acquire and its admission. -/
 theorem erase_claim_quiescent (hc : WF c) (h : Reach c s) {i : Nat} {s' : St}
     (he : evEClaim c s i = some s') :
     (∀ j cr p, s.slots j = some (.attaching cr p) → p = .queued) ∧ ∀ j, s.retry ≠ some (j, true) := by
@@ -2203,7 +2298,12 @@ theorem retry_admits_over_held (hc : WF c) (h : Reach c s) {i : Nat}
     (hr : s.retry = some (i, true)) : isHeld (s.slots i) = true :=
   (reach_inv hc h).retryHeld i hr
 
-/-- An admission by a flight is over its own `Attaching` slot. -/
+/-- An admission by a flight is over its own `Attaching` slot. This follows
+from `evFAdmit`'s guard; what makes it say something is that only the
+flight's own events change an `Attaching` slot (an erase answers it 503, the
+sweep, eviction and `close_set` take only live slots, and `detachRun` only
+moves a waiting flight from `evicting` to `ready`), which the model shows
+event by event in `inv_step` but does not state as one theorem. -/
 theorem fAdmit_own {s' : St} {i : Nat} {ok : Bool} (he : evFAdmit c s i ok = some s') :
     ∃ cr, s.slots i = some (.attaching cr .acquiring) := by
   unfold evFAdmit at he
@@ -3060,24 +3160,6 @@ theorem slotViews_complete {c : Cfg} {s : St} (hI : Inv c s) {j : Nat} {x : Slot
 
 /-! ### The negative cache and how an attach ends -/
 
-/-- A negative outcome kept in `NegativeCache`. -/
-inductive Neg where
-  | absent
-  | erased
-  | failed
-  deriving DecidableEq, Repr
-
-/-- `NegativeCache::get`: an entry `(n, at)` answers until `NEGATIVE_TTL`
-after `at`; `Absent` never answers a request that may create the session. -/
-def negGet (e : Option (Neg × Nat)) (now ttl : Nat) (create : Bool) : Option Neg :=
-  match e with
-  | none => none
-  | some (n, t0) =>
-    if t0 + ttl ≤ now then none
-    else match n with
-      | .absent => if create = true then none else some .absent
-      | n => some n
-
 theorem negGet_create_not_absent (e : Option (Neg × Nat)) (now ttl : Nat) :
     negGet e now ttl true ≠ some .absent := by
   unfold negGet
@@ -3152,7 +3234,7 @@ constants in milliseconds (`ELECTION_RETRY` 1 s, so `PINNED_RETRY` 5 s). -/
 def cfgEx : Cfg :=
   { ids := [0, 1, 2], pinned := [0], onDemand := true, places := 1, permits := 2,
     cap := unplacedCap 2, er := 1000, pr := pinnedRetry 1000, wait := 30000, idle := 60000,
-    minIdle := 2000, watchers := true }
+    minIdle := 2000, watchers := true, ttl := 30000 }
 
 theorem cfgEx_wf : WF cfgEx :=
   ⟨by decide, by decide⟩
@@ -3167,7 +3249,7 @@ def s0 : St :=
   { now := 0, slots := fun j => if j = 0 then some (.live hPin) else none,
     rows := fun j => if j = 0 then ⟨.me, 1⟩ else ⟨.none, 0⟩, free := 2, closing := false,
     retry := none, round := [], lost := [], aband := [], strays := [], prevOD := fun _ => none,
-    next := 0, accepted := [], rel := [], builds := [] }
+    neg := fun _ => none, next := 0, accepted := [], rel := [], builds := [] }
 
 theorem s0_init : Init cfgEx s0 := by
   refine ⟨rfl, rfl, rfl, fun j => ?_⟩
@@ -3255,15 +3337,30 @@ def hFenced : H :=
     inflight := 0, used := 0 }
 
 /-- An attach task dies before its acquire (a panic, an abort): its `Drop`
-removes the slot and spawns `release_abandoned`. A request attaches the
-session again before that task runs; then it runs, and then the new handle's
-heartbeat beats. -/
-def dropRun : List Ev := [.start 1 true, .fDrop 1] ++ attach1 ++ [.abandRun 1, .beat 1]
+removes the slot, caches `Failed` and spawns `release_abandoned`. The cached
+`Failed` answers the session's requests for `NEGATIVE_TTL` and starts nothing,
+so a re-attach first needs the entry gone: here it is evicted from a full
+cache (`negEvict`); waiting out the TTL (`tick 30000`) does as well. Then a
+request attaches the session again before the release task runs; then it
+runs, and then the new handle's heartbeat beats. -/
+def dropRun : List Ev := [.start 1 true, .fDrop 1, .negEvict 1] ++ attach1 ++ [.abandRun 1, .beat 1]
+
+/-- While the `Failed` entry is fresh, no attach of the session starts. -/
+example : (run cfgEx s0 [.start 1 true, .fDrop 1, .start 1 true]).isNone = true := by decide
+example : (run cfgEx s0 [.start 1 true, .fDrop 1, .tick 29999, .start 1 true]).isNone = true := by
+  decide
+example : (run cfgEx s0 ([.start 1 true, .fDrop 1, .tick 30000] ++ attach1)).isSome = true := by
+  decide
 
 /-- **A dropped flight's release takes the next attach's lease, and #293's
 fence then fences that healthy session** (`stale_release_fences`): no other
 writer is involved. The writes the session accepted after the release and
-before the beat are dropped with its tail. -/
+before the beat are dropped with its tail. It needs the dropped flight's
+`Failed` entry gone before the release task runs: evicted from a full
+negative cache (`NEGATIVE_CACHE_MAX` newer entries), or the release task
+delayed past `NEGATIVE_TTL` (30 s; the release itself is bounded by
+`LEASE_RELEASE_GRACE`, 2 s, so only a store that applies a timed-out release
+late gets there). -/
 theorem dropped_flight_fences_next :
     ∃ s, Reach cfgEx s ∧ s.slots 1 = some (.live hFenced) ∧ s.rows 1 = ⟨.me, 2⟩ := by
   obtain ⟨s, hs, hp⟩ := reach_of_run (Reach.init s0_init) (es := dropRun)
@@ -3344,7 +3441,7 @@ override (#293): the handle is fenced and detached without a release, so the
 row stays this process's, at the new token. An in-serve erase of it then runs
 as the CLI's eraser identity, is refused as held, and answers 409, which
 `EraseAnswer::HeldElsewhere` documents as "a live writer in another
-process"; it is this one. -/
+process" (erase.rs:120); it is this one. -/
 def zombieRun : List Ev :=
   [.rowLapse 0, .beat 0, .watchFire 0, .lostRun 0, .detachRun 0, .eClaim 0, .eEnd 0 false]
 
@@ -3352,8 +3449,8 @@ example : (run cfgEx s0 zombieRun).any
     (fun s => isHeld (s.slots 0) && s.rows 0 == ⟨.me, 2⟩ && s.rel == []) = true := by decide
 
 /-- And the pinned retry then takes the re-taken row by the refresh arm, at
-that same token: the session is served again by this process, while the
-fenced heartbeat's re-take was meant to lapse at its TTL. -/
+that same token: a new, healthy handle serves the session again. This is
+fine: leases.rs only says the fenced handle's heartbeat stops. -/
 example : (run cfgEx s0 [.rowLapse 0, .beat 0, .watchFire 0, .lostRun 0, .detachRun 0,
     .strayDrop 100, .tick 5000, .rRound, .rStart, .rPermit, .rResult .acquired]).any
     (fun s => s.rows 0 == ⟨.me, 2⟩ && match s.slots 0 with
