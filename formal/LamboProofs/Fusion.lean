@@ -99,7 +99,13 @@ keyword leg is its BM25, the neighbour's is untouched, and the named concept
 ranks first (`raise_keyword_eq`, `raise_keyword_ge_bm25`, `raise_local`,
 `raise_keeps_wins`, and `full_eq_raise` for the current step, the hit being
 within the cap); on the unfixed code it failed with the leg at `1.0`
-(`assign_lowers_named_concept`).
+(`assign_lowers_named_concept`). The Rust test
+`an_exact_name_keeps_its_bm25_beyond_the_overfetch_cap` pins the step after
+review: a named concept whose hit lies beyond the over-fetch cap keeps its
+BM25, the in-cap legs are untouched, and an unnamed neighbour beyond the cap
+stays out of the leg (`full_keyword_of_mem`, `full_keyword_ge_bm25`,
+`full_local`, `full_keeps_beyond_cap_bm25`); under `raiseName` it failed with
+the leg at `1.0` (`beyond_cap_floor_only`).
 
 * `merged_mono`, `merged_mono_keyword`: max fusion is monotone in each leg.
 * `assign_lowers_named_concept`: **the bug.** Ranked BM25 `[X 3.2, Y 2.0]`

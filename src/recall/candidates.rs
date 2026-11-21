@@ -418,14 +418,21 @@ pub(crate) fn candidates_with_keyword_leg_as(
     // An exact normalized name is direct identity evidence even when the
     // target is old and its content has no words in common with the query.
     // It is evidence added, never taken away: the name match raises the
-    // target's keyword leg to at least 1.0 and keeps a higher BM25 (#288;
+    // target's keyword leg to the higher of its BM25 and 1.0 (#288;
     // assigning 1.0 used to drop a named concept below a weaker lexical
-    // neighbour). `formal/LamboProofs/Fusion.lean` models this step.
+    // neighbour). The BM25 is read off the whole ranked search, not only the
+    // part inside `keyword_cap`, so a named concept whose hit lies beyond the
+    // cap keeps it too; no other node beyond the cap joins the leg.
+    // `formal/LamboProofs/Fusion.lean` models this step (`raiseFullName`).
     let mut exact_name = false;
     if let Some(id) = graph.name_target(query)
         && matches!(graph.node(id), Some(Node::Concept(_)))
     {
-        merge_max(&mut legs.entry(id).or_default().keyword, 1.0);
+        let slot = &mut legs.entry(id).or_default().keyword;
+        if let Some(hit) = ranked.iter().find(|s| s.item == id) {
+            merge_max(slot, hit.score);
+        }
+        merge_max(slot, 1.0);
         exact_name = true;
     }
     let keyword = KeywordLeg {
@@ -620,8 +627,10 @@ pub(crate) fn candidates_without_keyword_with_legs_as(
 /// Fold `score` into a leg slot by **max**, the same rule the cross-leg merge
 /// uses.
 ///
-/// Two callers. The exact-name step raises the named concept's keyword leg to
-/// at least `1.0` with it, so a higher BM25 is kept (#288). The vector leg
+/// Two callers. The exact-name step raises the named concept's keyword leg
+/// with it, folding in its BM25 from the whole ranked search and then the
+/// `1.0` floor, so a higher BM25 is kept even beyond the over-fetch cap
+/// (#288). The vector leg
 /// needs it for a reason that is easy to lose: `vector_candidates` is a trait
 /// method whose contract does not forbid an adapter returning the same
 /// `NodeId` twice, and a plain assignment makes the *last* duplicate win. That
@@ -1199,7 +1208,8 @@ mod tests {
     /// `Fusion.raise_keyword_ge_bm25`, `Fusion.raise_local` and
     /// `Fusion.raise_keeps_wins` (and `Fusion.assign_lowers_named_concept`,
     /// the old step's failure on the same shape) in
-    /// `formal/LamboProofs/Fusion.lean`.
+    /// `formal/LamboProofs/Fusion.lean`; X's hit is within the cap, where
+    /// the current step agrees with that one (`Fusion.full_eq_raise`).
     #[test]
     fn an_exact_name_raises_the_keyword_leg_without_lowering_its_bm25() {
         let (mut g, _) = planted_graph();
@@ -1237,6 +1247,97 @@ mod tests {
         assert_eq!(out[0].item, x, "the named concept stays ahead: {out:?}");
         assert_eq!(out[0].score, bx);
         assert_eq!(out[1].item, y, "{out:?}");
+    }
+
+    /// #288 review: the exact-name step reads the named concept's BM25 off
+    /// the whole ranked search, not only the part inside the over-fetch cap.
+    /// With `limit` 1 the cap is `KEYWORD_OVERFETCH`; five stronger lexical
+    /// neighbours push the named concept X past it, though its own BM25 is
+    /// above 1.0. X's keyword leg must be its BM25, not the bare 1.0 floor,
+    /// and the fifth neighbour, also beyond the cap but not named, stays out
+    /// of the leg. Mirrors `Fusion.full_keyword_of_mem`,
+    /// `Fusion.full_keyword_ge_bm25`, `Fusion.full_local` and
+    /// `Fusion.full_keeps_beyond_cap_bm25` (and `Fusion.beyond_cap_floor_only`,
+    /// the first #288 step's gap on the same shape) in
+    /// `formal/LamboProofs/Fusion.lean`.
+    #[test]
+    fn an_exact_name_keeps_its_bm25_beyond_the_overfetch_cap() {
+        let (mut g, _) = planted_graph();
+        let i1 = interaction(1, None, 0);
+        let named = concept(
+            20,
+            i1.id,
+            "single writer lease notes kept beside the storage runbook pages",
+        );
+        let x = named.id;
+        g.insert_concept(named, i1.id).unwrap();
+        let mut neighbours = Vec::new();
+        for (id, content) in [
+            (21u64, "single writer lease"),
+            (22, "single writer lease holder"),
+            (23, "single writer lease expiry"),
+            (24, "single writer lease fencing"),
+            (25, "single writer lease renewal"),
+        ] {
+            let c = concept(id, i1.id, content);
+            neighbours.push(c.id);
+            g.insert_concept(c, i1.id).unwrap();
+        }
+        for (id, content) in [
+            (30u64, "embedding contract width"),
+            (31, "receipt lanes apply in order"),
+            (32, "garbage collection sweeps idle sessions"),
+            (33, "canonical concepts are never collected"),
+            (34, "token budget fits the context block"),
+            (35, "vector dimensions are store authoritative"),
+        ] {
+            g.insert_concept(concept(id, i1.id, content), i1.id)
+                .unwrap();
+        }
+        assert!(g.declare_name("single-writer-lease", x).unwrap());
+        let index = InvertedIndex::from_snapshot(&g.snapshot());
+        let query = "single-writer-lease";
+        let limit = 1;
+        let cap = limit * KEYWORD_OVERFETCH;
+        let ranked = index.search_ranked(query);
+        let pos = ranked.iter().position(|s| s.item == x).expect("X matches");
+        let bx = ranked[pos].score;
+        assert!(
+            pos >= cap,
+            "premise: X at {pos} lies beyond the cap {cap}: {ranked:?}"
+        );
+        assert!(bx > 1.0, "premise: X's BM25 {bx} is above the 1.0 floor");
+        let outside = ranked[cap].item;
+        assert!(
+            outside != x && neighbours.contains(&outside),
+            "premise: an unnamed neighbour also lies beyond the cap: {ranked:?}"
+        );
+
+        let (out, legs, keyword) = candidates_with_keyword_leg_as(
+            &g,
+            &index,
+            Phase1Input::default(),
+            query,
+            limit,
+            RecentLeg::Skip,
+        );
+        assert!(keyword.exact_name, "premise: the query is X's name");
+        // #256, unchanged: the raw best BM25, read before the name step.
+        assert_eq!(keyword.best_bm25, Some(ranked[0].score));
+        assert_eq!(
+            legs[&x].keyword,
+            Some(bx),
+            "max(BM25, 1.0) from the whole ranked list, not the 1.0 floor"
+        );
+        for s in ranked.iter().take(cap) {
+            assert_eq!(legs[&s.item].keyword, Some(s.score), "in-cap leg untouched");
+        }
+        assert!(
+            !legs.contains_key(&outside),
+            "an unnamed node beyond the cap stays out of the leg"
+        );
+        let got = out.iter().find(|s| s.item == x).expect("X is a candidate");
+        assert_eq!(got.score, bx, "{out:?}");
     }
 
     #[test]
