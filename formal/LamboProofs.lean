@@ -21,4 +21,8 @@ import LamboProofs.Conflict
 import LamboProofs.Hotlist
 import LamboProofs.Drain
 import LamboProofs.Flush
+import LamboProofs.BatchQueue
+import LamboProofs.Registry
+import LamboProofs.Resolve
+import LamboProofs.Tiered
 import LamboProofs.Audit
