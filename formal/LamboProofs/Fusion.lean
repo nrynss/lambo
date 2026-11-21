@@ -76,7 +76,13 @@ present in more than one leg keeps its HIGHEST score (max-merge)" (`merged`),
 and the comment above the name step, "An exact normalized name is direct
 identity evidence even when the target is old and its content has no words in
 common with the query", which reads as evidence added for the named concept,
-never taken away (`raise_*`).
+never taken away (`raise_*`). The Rust test
+`an_exact_name_raises_the_keyword_leg_without_lowering_its_bm25`
+(`candidates.rs`) pins the fixed step on #288's shape: the named concept's
+keyword leg is its BM25, the neighbour's is untouched, and the named concept
+ranks first (`raise_keyword_eq`, `raise_keyword_ge_bm25`, `raise_local`,
+`raise_keeps_wins`); on the unfixed code it failed with the leg at `1.0`
+(`assign_lowers_named_concept`).
 
 * `merged_mono`, `merged_mono_keyword`: max fusion is monotone in each leg.
 * `assign_lowers_named_concept`: **the bug.** Ranked BM25 `[X 3.2, Y 2.0]`

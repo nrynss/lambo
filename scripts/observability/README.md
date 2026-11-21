@@ -322,8 +322,8 @@ lambo_recall        query (≤2000 chars, then "…[truncated]"), top_k, hit_cou
                     leg gave ANY candidate of the caller's own session,
                     returned in hits[] or not; null when that leg did not
                     run (bm25 is 0 when it ran and matched nothing). bm25 is
-                    the index's own BM25, never the 1.0 an exact-name match
-                    ranks with; exact_name_match says the query was a
+                    the index's own BM25, never the 1.0 floor an exact-name
+                    match raises to; exact_name_match says the query was a
                     concept's durable name. Recent leg and expansion not
                     counted. Present on successful lines since #256 and failed
                     lines since #257; a refusal without a graph result has

@@ -190,8 +190,9 @@ async fn a_keyword_only_recall_has_a_null_cosine_and_a_keyword_only_confidence()
 
 /// A query that is exactly a concept's durable name: `bm25` is the index's
 /// own best BM25 (the same as for the same words plus one no concept holds,
-/// which name nothing), never the 1.0 the per-hit keyword leg carries for the
-/// named concept, and `exact_name_match` says the name matched.
+/// which name nothing), never the 1.0 floor the per-hit keyword leg is
+/// raised to for the named concept, and `exact_name_match` says the name
+/// matched.
 #[tokio::test]
 async fn an_exact_name_query_reports_its_bm25_and_the_match() {
     let s = server("top-legs-name").await;
@@ -217,7 +218,7 @@ async fn an_exact_name_query_reports_its_bm25_and_the_match() {
     assert_eq!(other["top_legs"]["exact_name_match"], json!(false));
     let bm25 = named["top_legs"]["bm25"].as_f64().expect("keyword leg");
     assert_eq!(other["top_legs"]["bm25"].as_f64(), Some(bm25));
-    assert_ne!(bm25, 1.0, "the raw BM25, not the exact-name sentinel");
+    assert_ne!(bm25, 1.0, "the raw BM25, not the exact-name floor");
     assert_eq!(
         named["confidence"]["value"].as_f64(),
         Some(bm25 / (bm25 + 5.0)),

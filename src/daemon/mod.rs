@@ -932,7 +932,7 @@ impl Daemon {
             // vector legs still yield candidates (only lexical lookup is lost).
             let recent = route.recent_leg(&query.query);
             // #256: `keyword` is what the keyword leg itself found (its raw
-            // best BM25, before an exact-name match's 1.0, and whether one
+            // best BM25, before an exact-name match's 1.0 floor, and whether one
             // happened); with no index the leg did not run.
             let (phase1, legs, keyword) = match index {
                 Some(index) => candidates::candidates_with_keyword_leg_as(

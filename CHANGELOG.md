@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Recall: an exact durable-name match now raises the named concept's
+  phase-1 keyword score to at least 1.0 instead of overwriting it with 1.0
+  (#288). BM25 is unnormalized and routinely above 1.0, so the overwrite could
+  drop the concept the query named below a weaker lexical neighbour under max
+  fusion. The per-hit keyword leg (`legs.keyword`, the ledger's per-hit
+  `legs.bm25`) for the named concept is now the higher of its BM25 and 1.0;
+  `top_legs.bm25`, `top_legs.exact_name_match` and `confidence` are unchanged.
+  `formal/LamboProofs/Fusion.lean` models the step and proves the named
+  concept's score and rank can no longer fall.
 - Durable display names now surface through layered recall, `lambo_inspect`,
   and MCP tool schemas (#285). Layered recall preserves `LayeredHit::names`
   across merged and single-session recalls, emits `names [...]` in rendered

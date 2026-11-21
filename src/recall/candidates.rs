@@ -342,7 +342,7 @@ pub(crate) enum RecentLeg {
 
 /// What the keyword leg itself found for a query (#256), read while phase 1
 /// runs it and kept apart from [`LegProvenance`], whose keyword slot an
-/// exact-name match overwrites with `1.0` (that per-hit value is unchanged).
+/// exact-name match raises to at least `1.0` (#288).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct KeywordLeg {
     /// The leg searched: a text query against an installed index.
@@ -354,8 +354,8 @@ pub(crate) struct KeywordLeg {
     /// was non-finite (phase 1's own leg ranking ignores those too).
     pub(crate) best_bm25: Option<f64>,
     /// The query, normalized as names are ([`Graph::name_target`]), is a
-    /// concept's durable name, so phase 1 scored that concept's keyword leg
-    /// `1.0` in place of its BM25.
+    /// concept's durable name, so phase 1 raised that concept's keyword leg
+    /// to at least `1.0`: the higher of its BM25 and `1.0` (#288).
     pub(crate) exact_name: bool,
 }
 
@@ -401,7 +401,7 @@ pub(crate) fn candidates_with_keyword_leg_as(
     // #256: the leg's own best, read off the same search before the cut to
     // `keyword_cap`, so it does not move with `limit` (a library caller's
     // `top_k` of 0 included). Counted over the concepts of this graph (the
-    // only ones assembly can return), before the exact-name overwrite below.
+    // only ones assembly can return), before the exact-name raise below.
     // The search is best-first, so the first such concept with a finite
     // score is the best: the walk stops there, normally at the first result.
     let mut matched = false;
@@ -417,11 +417,15 @@ pub(crate) fn candidates_with_keyword_leg_as(
     }
     // An exact normalized name is direct identity evidence even when the
     // target is old and its content has no words in common with the query.
+    // It is evidence added, never taken away: the name match raises the
+    // target's keyword leg to at least 1.0 and keeps a higher BM25 (#288;
+    // assigning 1.0 used to drop a named concept below a weaker lexical
+    // neighbour). `formal/LamboProofs/Fusion.lean` models this step.
     let mut exact_name = false;
     if let Some(id) = graph.name_target(query)
         && matches!(graph.node(id), Some(Node::Concept(_)))
     {
-        legs.entry(id).or_default().keyword = Some(1.0);
+        merge_max(&mut legs.entry(id).or_default().keyword, 1.0);
         exact_name = true;
     }
     let keyword = KeywordLeg {
@@ -616,15 +620,18 @@ pub(crate) fn candidates_without_keyword_with_legs_as(
 /// Fold `score` into a leg slot by **max**, the same rule the cross-leg merge
 /// uses.
 ///
-/// Only the vector leg needs this, and it needs it for a reason that is easy to
-/// lose: `vector_candidates` is a trait method whose contract does not forbid an
-/// adapter returning the same `NodeId` twice, and a plain assignment makes the
-/// *last* duplicate win. That silently reversed the arithmetic from before per-leg
-/// provenance — a `[(dup, 0.90), (dup, 0.10)]` input ranked at 0.1 where it used
-/// to rank at 0.9. The keyword leg assigns rather than max-merges because that is
-/// what it did before per-leg provenance too (the inverted index yields each id
-/// once), and the recency leg is idempotent by construction; changing either
-/// would be the same kind of silent arithmetic change in the other direction.
+/// Two callers. The exact-name step raises the named concept's keyword leg to
+/// at least `1.0` with it, so a higher BM25 is kept (#288). The vector leg
+/// needs it for a reason that is easy to lose: `vector_candidates` is a trait
+/// method whose contract does not forbid an adapter returning the same
+/// `NodeId` twice, and a plain assignment makes the *last* duplicate win. That
+/// silently reversed the arithmetic from before per-leg provenance — a
+/// `[(dup, 0.90), (dup, 0.10)]` input ranked at 0.1 where it used to rank at
+/// 0.9. The keyword leg's BM25 loop assigns rather than max-merges because
+/// that is what it did before per-leg provenance too (the inverted index
+/// yields each id once), and the recency leg is idempotent by construction;
+/// changing either would be the same kind of silent arithmetic change in the
+/// other direction.
 fn merge_max(slot: &mut Option<f64>, score: f64) {
     *slot = Some(match *slot {
         Some(previous) => previous.max(score),
@@ -1182,6 +1189,54 @@ mod tests {
             );
             assert_eq!(keyword.best_bm25, Some(0.0), "{q}");
         }
+    }
+
+    /// #288: an exact-name match raises the named concept's keyword leg to
+    /// at least 1.0 and never lowers a BM25 above it. The named concept X
+    /// and a lexical neighbour Y both score above 1.0, X higher; the name
+    /// step must leave X's keyword leg at its BM25, so X still ranks above
+    /// Y under max fusion. Mirrors `Fusion.raise_keyword_eq`,
+    /// `Fusion.raise_keyword_ge_bm25`, `Fusion.raise_local` and
+    /// `Fusion.raise_keeps_wins` (and `Fusion.assign_lowers_named_concept`,
+    /// the old step's failure on the same shape) in
+    /// `formal/LamboProofs/Fusion.lean`.
+    #[test]
+    fn an_exact_name_raises_the_keyword_leg_without_lowering_its_bm25() {
+        let (mut g, _) = planted_graph();
+        let i1 = interaction(1, None, 0);
+        let named = concept(5, i1.id, "single writer lease holds");
+        let neighbour = concept(6, i1.id, "writer lease expiry");
+        let (x, y) = (named.id, neighbour.id);
+        g.insert_concept(named, i1.id).unwrap();
+        g.insert_concept(neighbour, i1.id).unwrap();
+        assert!(g.declare_name("single-writer-lease", x).unwrap());
+        let index = InvertedIndex::from_snapshot(&g.snapshot());
+        let query = "single-writer-lease";
+        let raw = index.search(query, 10);
+        let bm25 = |id: NodeId| raw.iter().find(|s| s.item == id).map(|s| s.score);
+        let (bx, by) = (bm25(x).expect("X matches"), bm25(y).expect("Y matches"));
+        assert!(bx > by && by > 1.0, "premise: {bx} > {by} > 1.0");
+
+        let (out, legs, keyword) = candidates_with_keyword_leg_as(
+            &g,
+            &index,
+            Phase1Input::default(),
+            query,
+            10,
+            RecentLeg::Skip,
+        );
+        assert!(keyword.exact_name, "premise: the query is X's name");
+        // #256, unchanged: the raw best BM25, read before the name step.
+        assert_eq!(keyword.best_bm25, Some(bx));
+        assert_eq!(legs[&x].keyword, Some(bx), "max(BM25, 1.0), not 1.0");
+        assert_eq!(
+            legs[&y].keyword,
+            Some(by),
+            "another node's leg is untouched"
+        );
+        assert_eq!(out[0].item, x, "the named concept stays ahead: {out:?}");
+        assert_eq!(out[0].score, bx);
+        assert_eq!(out[1].item, y, "{out:?}");
     }
 
     #[test]

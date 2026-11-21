@@ -29,10 +29,10 @@
 //! `"keyword-only-v0"` where `top_k = 1` would report `"noisy-or-v0"`.
 //! The recent leg's flat score and expansion members are not counted (#174).
 //!
-//! An exact-name match ranks its concept with a keyword score of `1.0` in
-//! place of its BM25 (the per-hit `legs.keyword` says so, unchanged). That
-//! `1.0` is a sentinel, not a BM25: `bm25` is the index's own best, read
-//! before the substitution, and `exact_name_match` reports the match.
+//! An exact-name match raises its concept's keyword score to at least `1.0`
+//! (the per-hit `legs.keyword` is the higher of its BM25 and `1.0`, #288).
+//! That floor is not a BM25: `bm25` is the index's own best, read before the
+//! name step, and `exact_name_match` reports the match.
 //!
 //! Both maxima count only concepts of the graph the recall answers from.
 //! A reader (`lambo recall`, the web portal) loads a snapshot and then reads
