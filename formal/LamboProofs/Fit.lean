@@ -66,9 +66,15 @@ scope)`. Elements are chars, so every cut is a char boundary; the estimator
   Rust loop with enough fuel, `bsearch_fuel`) and returned; nothing follows
   it. If no form's cut `0` fits, the context is empty.
 
-Exact arithmetic: `fits t m = t < usize::MAX ∧ t ≤ m` on naturals.
-`defaultG b = (2b + 6) / 7` is `ceil(b / 3.5)`; the Rust computes it in
-`f64`, which is exact for any length a context can have.
+Exact arithmetic: `fits t m = t < usize::MAX ∧ t ≤ m` on naturals, with
+`usizeMax = 2^64 - 1`, which assumes a 64-bit target. `defaultG b = (2b + 6) /
+7` is `ceil(b / 3.5) = ceil(2b / 7)`. The Rust computes `(b as f64 / 3.5).ceil()`,
+which agrees for every `b < 2^52`: `b` and `3.5` are exact in `f64`, and the
+division is correctly rounded. If `2b/7` is an integer `k < 2^51`, it is
+representable and the quotient is exactly `k`. Otherwise `2b/7` lies at least
+`1/7` from every integer, while the rounding error is at most half an ulp,
+at most `1/8` below `2^51`, so the rounded quotient lies strictly between the
+same two integers and has the same ceiling.
 
 Results for any estimator:
 
@@ -77,8 +83,9 @@ Results for any estimator:
   loop's (`plainFit`; test
   `whole_blocks_are_byte_identical_to_the_pre_130_loop`).
 * `fitBlocks_fits`: whatever is rendered fits `max_tokens` as measured by the
-  same estimator ("the result is within budget for any estimator"; "never
-  exceeds `max_tokens`"). `fitBlocks_empty`: nothing rendered is `""`.
+  same estimator ("the result is within budget for any estimator"), so the
+  context never exceeds `max_tokens`. `fitBlocks_empty`: nothing rendered is
+  `""`.
 * `fitBlocks_rendered_pos`, `fitBlocks_context_ne_nil`: with at least one
   block, if the marker alone (the whole first block counted as left out) fits,
   the context is not empty.
@@ -97,21 +104,33 @@ at most one byte per unit of count). The default estimator and the exact byte
 estimator with the real marker are `Steady` (`rust_default_steady`,
 `rust_bytes_steady`):
 
-* `truncFirst_longest`: the head is the longest that fits in its form, and no
-  earlier form fits at any cut ("The first form that fits wins"; test
-  `the_head_is_the_longest_that_fits`).
+* `truncFirst_longest`, `rust_default_longest`: the head is the longest that
+  fits in its form, and no earlier form fits at any cut ("The first form that
+  fits wins"; test `the_head_is_the_longest_that_fits`).
 * `fitBlocks_rendered_zero_iff`: when the first block does not fit, nothing
   is rendered exactly when the marker alone does not fit (rule 3).
 
-Neither holds for every estimator monotone in bytes, which is what the module
-doc says suffices: `jump_skips_a_fitting_form` and
-`jump_renders_without_the_marker` are counterexamples (estimators whose count
-jumps by far more than one per byte). Every caller in the crate passes
-`default_token_count`, so this is a precision point about the doc, not a bug
-in a shipped path.
+The longest head does not hold for every estimator monotone in bytes, which is
+what the module doc's Arithmetic paragraph says suffices:
+`rust_jump_skips_a_fitting_form` is a byte-faithful counterexample on a real
+block (an estimator whose count jumps by `10^19` past 90 bytes), and
+`jump_skips_a_fitting_form` a toy-sized one.
+
+Rule 3 (which states no estimator condition) does hold for every estimator
+monotone in bytes on blocks of the Rust's sizes (`rust_rule3_of_mono`: label
+rest at least 16 bytes, counts at most `usize::MAX`), so on real blocks it can
+fail only for an estimator that is not monotone in bytes. The shared step is
+`fitBlocks_rendered_zero_iff_of_le`: rule 3 follows whenever the marker alone
+is estimated no higher than every form's cut-`0` candidate.
+`jump_renders_without_the_marker` shows that the size condition is needed:
+with a one-unit label and a two-unit marker prefix a monotone estimator breaks
+it.
+
+Every caller in the crate passes `default_token_count`, which is `Steady`, so
+these are precision points about the doc, not bugs in a shipped path.
 
 Not modelled: `ContextBlock::for_hit` and `with_meta` (the model takes the
-three slices as given), and `f64` rounding in `default_token_count`.
+three slices as given).
 -/
 
 namespace Lambo.Fit
@@ -300,7 +319,7 @@ section Truncation
 
 variable {α : Type}
 
-/-- `usize::MAX`. -/
+/-- `usize::MAX` on a 64-bit target. -/
 def usizeMax : Nat := 2 ^ 64 - 1
 
 /-- `fits`: within budget and not the saturated `usize::MAX`
@@ -972,7 +991,8 @@ least one byte". The argument needs more than monotonicity: the count itself
 may drop by at most one per byte removed, and the marker may shrink by at most
 one byte per unit of count. `Steady` is that hypothesis; the default
 estimator and the Rust marker satisfy it (`rust_default_steady`), and
-`jump_skips_a_fitting_form` shows a monotone estimator that does not. -/
+`jump_skips_a_fitting_form` and `rust_jump_skips_a_fitting_form` show a
+monotone estimator that does not. -/
 
 /-- The size of a text under a per-element width (`Char::len_utf8` for
 bytes). -/
@@ -1136,9 +1156,11 @@ theorem marker_alone_le (h : Steady e b w G) (f : Form) :
     omega
 
 /-- **Rule 3, under `Steady`.** When the first block does not fit whole,
-nothing is rendered exactly when the marker alone does not fit. The `←`
-direction needs `Steady` (`jump_renders_without_the_marker` breaks it); the
-`→` direction holds for any estimator (`fitBlocks_rendered_pos`). -/
+nothing is rendered exactly when the marker alone does not fit. The `→`
+direction holds for any estimator (`fitBlocks_rendered_pos`); the `←`
+direction needs a condition: `Steady` here, or monotone in bytes with the
+Rust's sizes (`rust_rule3_of_mono`); with toy sizes a monotone estimator can
+break it (`jump_renders_without_the_marker`). -/
 theorem fitBlocks_rendered_zero_iff (h : Steady e b w G) (rest : List (Block α)) (maxT : Nat)
     (h1 : okOf e (b :: rest) maxT 1 = false) :
     (fitBlocks e (b :: rest) maxT).rendered = 0 ↔
@@ -1175,11 +1197,50 @@ theorem fitBlocks_rendered_zero_iff (h : Steady e b w G) (rest : List (Block α)
     simp only [List.length_cons] at h0
     simp [plainFit, Fitted.rendered, h0]
 
+/-- Rule 3 from one comparison: when the marker alone is estimated no higher
+than any form's cut-`0` candidate, then with a first block that does not fit
+whole, nothing is rendered exactly when the marker alone does not fit.
+`Steady` gives the comparison (`marker_alone_le`); so does any estimator
+monotone in bytes on blocks of the Rust's sizes (`rust_rule3_of_mono`). -/
+theorem fitBlocks_rendered_zero_iff_of_le (rest : List (Block α)) (maxT : Nat)
+    (hle : ∀ f, e.est (b.mark (e.est b.text)) ≤ e.est (render e b f 0))
+    (h1 : okOf e (b :: rest) maxT 1 = false) :
+    (fitBlocks e (b :: rest) maxT).rendered = 0 ↔
+      fits (e.est (b.mark (e.est b.text))) maxT = false := by
+  constructor
+  · intro hz
+    cases hm : fits (e.est (b.mark (e.est b.text))) maxT with
+    | false => rfl
+    | true =>
+      have := fitBlocks_rendered_pos e b rest maxT hm
+      omega
+  · intro hm
+    have hnone : truncFirst e b maxT = none := by
+      apply tryForms_none
+      intro f _
+      rw [okCut_zero]
+      cases hf : fits (e.est (render e b f 0)) maxT with
+      | false => rfl
+      | true =>
+        have := fits_anti (hle f) hf
+        rw [hm] at this
+        exact absurd this (by decide)
+    have h0 : fit (okOf e (b :: rest) maxT) (b :: rest).length = 0 := by
+      have : ¬ okOf e (b :: rest) maxT (0 + 1) = true := by rw [Nat.zero_add, h1]; decide
+      exact fitFrom_miss this rest.length
+    have : fitBlocks e (b :: rest) maxT = plainFit e (b :: rest) maxT := by
+      unfold fitBlocks
+      rw [ite_eq_left h0]
+      simp only [hnone]
+    rw [this]
+    simp only [List.length_cons] at h0
+    simp [plainFit, Fitted.rendered, h0]
+
 /-! ### The Rust instance: the default estimator and the real marker -/
 
 /-- `default_token_count` on a byte count: `ceil(bytes / 3.5) = ceil(2 bytes /
-7)`, in exact arithmetic (the Rust computes it in `f64`, exact for any length
-below `2^52`). -/
+7)`. The Rust's `f64` computation agrees for every length below `2^52` (the
+argument is in the header). -/
 def defaultG (bytes : Nat) : Nat := (2 * bytes + 6) / 7
 
 /-- `default_token_count` on chars, measuring UTF-8 bytes. -/
@@ -1289,6 +1350,92 @@ theorem rust_bytes_steady (content label warn inspectId : List Char)
     have := toDigits_length_lip n n' h
     omega
 
+/-- **`truncFirst_longest` for the Rust as configured by default**: the head
+is the longest that fits in its form, and no earlier form fits at any cut. -/
+theorem rust_default_longest (content label warn inspectId : List Char)
+    (scope : Option (List Char)) {maxT : Nat} {t : List Char} {f : Form}
+    (ht : truncFirst (rustEnv defaultTokenCount) (rustBlock content label warn inspectId scope)
+      maxT = some (t, f)) :
+    ∃ cut, cut ∈ contentCuts rustWs content ∧
+      t = render (rustEnv defaultTokenCount) (rustBlock content label warn inspectId scope) f cut ∧
+      (∀ c ∈ contentCuts rustWs content,
+        fits (defaultTokenCount (render (rustEnv defaultTokenCount)
+          (rustBlock content label warn inspectId scope) f c)) maxT = true → c ≤ cut) ∧
+      ∃ pre post, forms (rustBlock content label warn inspectId scope) = pre ++ f :: post ∧
+        ∀ g ∈ pre, ∀ c ∈ contentCuts rustWs content,
+          fits (defaultTokenCount (render (rustEnv defaultTokenCount)
+            (rustBlock content label warn inspectId scope) g c)) maxT = false :=
+  truncFirst_longest (rust_default_steady content label warn inspectId scope) ht
+
+theorem toDigits_length_le_20 {n : Nat} (h : n ≤ usizeMax) : (Nat.toDigits 10 n).length ≤ 20 :=
+  (Nat.length_toDigits_le_iff (by decide) (by decide)).mpr
+    (Nat.lt_of_le_of_lt h (by decide))
+
+theorem wsum_label_le_keptRest (b : Block α) (w : α → Nat) {f : Form}
+    (hf : f ≠ .contentOnly) : wsum w b.label ≤ wsum w (keptRest b f) := by
+  cases f with
+  | withWarnings => simp only [keptRest, wsum_append]; omega
+  | labelOnly => exact Nat.le_refl _
+  | contentOnly => exact absurd rfl hf
+
+/-- Two real markers differ by at most 19 bytes: a `usize` count has 1 to 20
+digits. -/
+theorem rust_mark_close (inspectId : List Char) (scope : Option (List Char)) {n : Nat}
+    (hn : n ≤ usizeMax) (n' : Nat) :
+    wsum Char.utf8Size (rustMarker inspectId scope n) ≤
+      wsum Char.utf8Size (rustMarker inspectId scope n') + 19 := by
+  have h1 := toDigits_length_le_20 hn
+  have h2 : 0 < (Nat.toDigits 10 n').length := Nat.length_toDigits_pos
+  have e1 := wsum_rustMarker inspectId scope n
+  have e2 := wsum_rustMarker inspectId scope n'
+  omega
+
+/-- **Rule 3 for any estimator monotone in bytes, on blocks of the Rust's
+sizes.** If the estimator is `G` of the UTF-8 byte count with `G` monotone
+(no bound on how fast it rises), every count is a `usize` (at most 20 decimal
+digits), and the label rest is at least 16 bytes (`for_hit` always renders
+`" [<Type>] (score <s>, id <8 hex>)"`, at least 24), then when the first block
+does not fit whole, nothing is rendered exactly when the marker alone does not
+fit. The marker alone is at most 19 bytes longer than any other marker, and
+every other cut-`0` candidate adds `…` (3 bytes), the label and a newline. -/
+theorem rust_rule3_of_mono (G : Nat → Nat) (hmono : ∀ x y, x ≤ y → G x ≤ G y)
+    (hbound : ∀ x, G x ≤ usizeMax) (content label warn inspectId : List Char)
+    (scope : Option (List Char)) (hlabel : 16 ≤ wsum Char.utf8Size label)
+    (rest : List (Block Char)) (maxT : Nat)
+    (h1 : okOf (rustEnv (fun s => G (wsum Char.utf8Size s)))
+      (rustBlock content label warn inspectId scope :: rest) maxT 1 = false) :
+    (fitBlocks (rustEnv (fun s => G (wsum Char.utf8Size s)))
+        (rustBlock content label warn inspectId scope :: rest) maxT).rendered = 0 ↔
+      fits ((rustEnv (fun s => G (wsum Char.utf8Size s))).est
+        ((rustBlock content label warn inspectId scope).mark
+          ((rustEnv (fun s => G (wsum Char.utf8Size s))).est
+            (rustBlock content label warn inspectId scope).text))) maxT = false := by
+  apply fitBlocks_rendered_zero_iff_of_le rest maxT _ h1
+  intro f
+  by_cases hc : f = .contentOnly
+  · subst hc; rw [render_marker_alone]; exact Nat.le_refl _
+  · apply hmono
+    have hne : ¬ (f = .contentOnly ∧ (0 : Nat) = 0) := fun h' => hc h'.1
+    have hk := wsum_label_le_keptRest (rustBlock content label warn inspectId scope)
+      Char.utf8Size hc
+    have hkey := rust_mark_close inspectId scope
+      (hbound (wsum Char.utf8Size (rustBlock content label warn inspectId scope).text))
+      (G (wsum Char.utf8Size (content ++ dropRest (rustBlock content label warn inspectId scope) f)))
+    have hell : wsum Char.utf8Size ['…'] = 3 := by decide
+    rw [render_eq, ite_eq_right hne]
+    simp only [List.take_zero, List.drop_zero, wsum_append, wsum_nil]
+    show wsum Char.utf8Size (rustMarker inspectId scope
+        (G (wsum Char.utf8Size (rustBlock content label warn inspectId scope).text))) ≤
+      0 + wsum Char.utf8Size ['…'] +
+        wsum Char.utf8Size (keptRest (rustBlock content label warn inspectId scope) f) +
+        wsum Char.utf8Size ['\n'] +
+        wsum Char.utf8Size (rustMarker inspectId scope (G (wsum Char.utf8Size
+          (content ++ dropRest (rustBlock content label warn inspectId scope) f))))
+    have hk' : wsum Char.utf8Size (rustBlock content label warn inspectId scope).label =
+        wsum Char.utf8Size label := rfl
+    rw [hell]
+    omega
+
 /-! ### Examples on the Rust instance
 
 The default estimator, the real marker and a label as `render_block` writes
@@ -1325,6 +1472,16 @@ example : (exFit [exBig, exSmall] 124).truncation = some .withWarnings ∧
       List.replicate 319 'y' ++ ['…'] ++ exLabel ++ ['\n'] ++
         "[truncated: 24 tokens left out; lambo_inspect 1a2b3c4d for the full concept]".toList ∧
     defaultTokenCount (exFit [exBig, exSmall] 124).context = 124 := by decide +kernel
+
+/-- The head is the longest that fits (`truncFirst_longest`, here through
+`rust_default_longest`): the 319-char head of the example above fits at 124,
+and the next cut, 320, does not. -/
+example : 320 ∈ contentCuts rustWs exBig.content ∧
+    fits (defaultTokenCount
+      (render (rustEnv defaultTokenCount) exBig .withWarnings 319)) 124 = true ∧
+    fits (defaultTokenCount
+      (render (rustEnv defaultTokenCount) exBig .withWarnings 320)) 124 = false := by
+  decide +kernel
 
 /-- Long warnings fall back to the label line, then to the content head
 (`long_warnings_fall_back_to_the_label_line_then_to_the_content`). -/
@@ -1397,15 +1554,57 @@ theorem jump_skips_a_fitting_form :
     6 ∈ contentCuts (jEnv (jumpEst 5 6)).ws jBlockA.content := by
   decide
 
+/-- The same on the Rust instance, byte for byte: an estimator that is the
+byte count up to 90 bytes and `10^19` more above. -/
+def rjEst (s : List Char) : Nat :=
+  if wsum Char.utf8Size s ≤ 90 then wsum Char.utf8Size s else 10 ^ 19 + wsum Char.utf8Size s
+
+/-- It is a monotone function of the byte count. -/
+theorem rjEst_mono {s t : List Char} (h : wsum Char.utf8Size s ≤ wsum Char.utf8Size t) :
+    rjEst s ≤ rjEst t := by
+  unfold rjEst
+  by_cases hs : wsum Char.utf8Size s ≤ 90
+  · rw [ite_eq_left hs]
+    by_cases ht : wsum Char.utf8Size t ≤ 90
+    · rw [ite_eq_left ht]; exact h
+    · rw [ite_eq_right ht]; exact Nat.le_trans h (Nat.le_add_left _ _)
+  · rw [ite_eq_right hs]
+    have ht : ¬ wsum Char.utf8Size t ≤ 90 := by omega
+    rw [ite_eq_right ht]
+    exact Nat.add_le_add_left h _
+
+/-- 91 content bytes and a real label: 126 bytes. -/
+def rjBlock : Block Char := rustBlock (List.replicate 91 'y') exLabel [] "1a2b3c4d".toList none
+
+/-- **Finding (1), byte-faithful.** With `rjEst` and `max_tokens = 10^19 +
+124` the whole block does not fit. `WithWarnings` at cut `0` (133 bytes, its
+count has 20 digits) does not fit, but at cuts 1 to 9 (116 to 124 bytes) it
+does; the Rust skips the form and returns `ContentOnly` with a 26-byte head,
+although `ContentOnly` heads of 36 to 44 bytes fit too. Breaks "The first form
+that fits wins" (`fit.rs:26`) and "the head is also the longest such head that
+fits" (`fit.rs:53-55`) for an estimator monotone in bytes. -/
+theorem rust_jump_skips_a_fitting_form :
+    okOf (rustEnv rjEst) [rjBlock] (10 ^ 19 + 124) 1 = false ∧
+    fits (rjEst (render (rustEnv rjEst) rjBlock .withWarnings 0)) (10 ^ 19 + 124) = false ∧
+    fits (rjEst (render (rustEnv rjEst) rjBlock .withWarnings 1)) (10 ^ 19 + 124) = true ∧
+    fits (rjEst (render (rustEnv rjEst) rjBlock .withWarnings 9)) (10 ^ 19 + 124) = true ∧
+    fitBlocks (rustEnv rjEst) [rjBlock] (10 ^ 19 + 124) =
+      ⟨render (rustEnv rjEst) rjBlock .contentOnly 26, 0, some .contentOnly⟩ ∧
+    fits (rjEst (render (rustEnv rjEst) rjBlock .contentOnly 44)) (10 ^ 19 + 124) = true ∧
+    44 ∈ contentCuts rustWs rjBlock.content := by
+  decide +kernel
+
 /-- Thirty content units, a one-unit label, no warnings. -/
 def jBlockB : Block Nat := ⟨List.replicate 30 5, [3], [], jMark 2⟩
 
-/-- **Rule 3 depends on the estimator.** With `jumpEst 30 9` the marker alone
-does not fit a budget of 7, yet the context is not empty: `WithWarnings` fits
-at cut `0` because its marker counts only the content, which this estimator
-prices at 30, while the marker alone counts the whole block, priced at
-`10^9`. Contradicts, for this estimator, the module doc's "If the marker alone
-does not fit, the context is `""`". -/
+/-- **Rule 3 needs the label to outweigh the marker's digits.** With toy
+sizes (a one-unit label and `…`, a two-unit marker prefix) and `jumpEst 30 9`,
+the marker alone does not fit a budget of 7, yet the context is not empty:
+`WithWarnings` fits at cut `0` because its marker counts only the content,
+priced at 30, while the marker alone counts the whole block, priced at `10^9`.
+Real blocks never have these sizes: on them rule 3 holds for every estimator
+monotone in bytes (`rust_rule3_of_mono`), so it can fail there only for an
+estimator that is not. -/
 theorem jump_renders_without_the_marker :
     fits (jumpEst 30 9 (jBlockB.mark (jumpEst 30 9 jBlockB.text))) 7 = false ∧
     (fitBlocks (jEnv (jumpEst 30 9)) [jBlockB] 7).truncation = some .withWarnings ∧
