@@ -100,8 +100,8 @@ jobs:
         run: cargo doc --locked --no-deps --features fixtures
 
       - name: test
-        # fixtures is deliberately NOT in `default` (v020-R1-P3-3 — test-only
-        # profile); enable it explicitly so the fixtures-gated behavior tests
+        # fixtures is deliberately NOT in `default` (a test-only profile);
+        # enable it explicitly so the fixtures-gated behavior tests
         # (canon goldens, recall goldens, GC, stage1-3, daemon loops,
         # tests/rebuild_session.rs) keep running on the default path.
         run: cargo test --locked --all --features fixtures
@@ -118,7 +118,7 @@ jobs:
       - name: Mirror drift check (cli + mcp prose pairs)
         run: bash scripts/docs/check-mirror-drift.sh
 
-  # Feature-gated adapter tier (TEST-2): the default-features `check` job above
+  # Feature-gated adapter tier: the default-features `check` job above
   # never compiles sqlite/cockroach. Every non-default combo that must stay
   # green gets a row here; all inherit RUSTFLAGS="-D warnings".
   feature-matrix:
@@ -157,10 +157,10 @@ jobs:
           # below; restore this row to bring the behavior tests back.
           # - name: cockroach
           #   command: cargo test --no-default-features --features store-cockroach
-          # B2: postgres compile + unit. Live init is the postgres-live job
+          # Postgres compile + unit. Live init is the postgres-live job
           # below (pinned pgvector service container). Same driver as
           # store-cockroach.
-          # E2E-F8: `cargo test` alone left `store-postgres` with test coverage
+          # `cargo test` alone left `store-postgres` with test coverage
           # and ZERO lint coverage. `check` lints default features (no
           # postgres), and this row was a test row. (`ship` gained
           # `store-postgres` on 2026-08-24, so the ship rows lint it too; this
@@ -168,14 +168,14 @@ jobs:
           # can never give.) The clippy line here is what would have caught the
           # `useless_vec` inside `h3_postgres_recall_parity` that no CI row
           # could see. The `store-sqlite,fixtures` combination is included
-          # because that is where the H3 harness lives.
+          # because that is where the cross-store parity harness lives.
           - name: postgres
             command: |
               set -o pipefail
               cargo clippy --locked --all-targets --no-default-features --features store-postgres -- -D warnings
               cargo clippy --locked --all-targets --no-default-features --features store-postgres,store-sqlite,fixtures -- -D warnings
               cargo test --locked --no-default-features --features store-postgres
-          # K2 — the in-crate candle BGE-M3 embedder compiles and its
+          # The in-crate candle BGE-M3 embedder compiles and its
           # weightless unit tests pass on the default runner. The base feature
           # is CPU-capable candle only: no accelerator Cargo features, no
           # weights downloaded, no network — the adapter's live weight-loading
@@ -185,9 +185,8 @@ jobs:
           # compile cost; a named red row beats one line in an 800-test log.
           - name: candle
             command: cargo test --locked --features embed-candle
-          # A (embed-gemini) — the Vertex Gemini adapter compiles and its offline
-          # unit tests (OAuth mint/exchange, embedContent, CON-7/CON-2, normalize,
-          # dim guard) run on the default runner with no network and no
+          # The Vertex Gemini adapter compiles and its offline unit tests
+          # (OAuth mint/exchange, embedContent, normalize, dim guard) run on the default runner with no network and no
           # service-account key. A separate row beats folding into `check` because
           # the default build must not pay jsonwebtoken's compile cost; the live
           # OAuth/embedContent round-trip stays `#[ignore]`d (operator-run with a
@@ -229,7 +228,7 @@ jobs:
           # Ship profile (cockroach + memory + embedders + fixtures).
           - name: demo
             command: cargo check --locked --features demo
-          # F-R2-2: the row that compiles COCKROACH TEST CODE together with
+          # The row that compiles COCKROACH TEST CODE together with
           # `fixtures`. No other row does: `demo` above is `cargo check` (no test
           # targets) and `cockroach` is `--no-default-features --features
           # store-cockroach` (no fixtures). That gap let three `StoreConfig`
@@ -239,8 +238,8 @@ jobs:
           # `cargo test --features demo` could not compile at all. `--all-targets`
           # is what makes this row see them, and `ship,fixtures` is the widest
           # adapter set in the tree (cockroach + memory + sqlite + embedders), so
-          # it also lints the two SQL adapters against each other. Same argument
-          # F-R1-7 made for `store-sqlite,fixtures` in the `sqlite` row.
+          # it also lints the two SQL adapters against each other. The same
+          # argument applies to `store-sqlite,fixtures` in the `sqlite` row.
           - name: ship-fixtures
             command: cargo clippy --locked --all-targets --features ship,fixtures -- -D warnings
     steps:
@@ -268,11 +267,11 @@ jobs:
       - name: ${{ matrix.name }}
         run: ${{ matrix.command }}
 
-  # K2 accelerator tier: the `candle` row in feature-matrix above builds the
+  # Candle accelerator tier: the `candle` row in feature-matrix above builds the
   # BASE `embed-candle` feature only, and feature-matrix runs on ubuntu, so
   # NEITHER accelerator feature is compiled anywhere in CI by that row.
   # `embed-candle-metal` cannot be: it needs macOS. That is not a theoretical
-  # gap — Metal is the ONLY configuration K1 measured as viable on Apple
+  # gap — Metal is the ONLY configuration measured as viable on Apple
   # silicon (CPU landed at ~3% of the llama-server baseline), so the feature a
   # Mac operator actually ships was the one nothing compiled. `cargo check`,
   # not `cargo test`: the adapter's Metal behaviour needs real weights and a
@@ -309,10 +308,10 @@ jobs:
         env:
           RUSTFLAGS: -D warnings
 
-  # B2 live Postgres + pgvector tier: service container, no secret, no
+  # Live Postgres + pgvector tier: service container, no secret, no
   # provisioned cluster. The image is digest-pinned (never `:latest`) and is
-  # the same image local development runs. See B-postgres-store.md "Where B
-  # is developed".
+  # the same image local development runs (see
+  # dev-diary/lambo-for-mooshik/B-postgres-store.md).
   postgres-live:
     needs: changes
     if: needs.changes.outputs.rust == 'true'
@@ -365,7 +364,7 @@ jobs:
           grep -q 'test store::pg::postgres::tests::init_schema_at_two_widths_creates_hnsw ... ok' postgres-live.log
           grep -q 'test store::pg::postgres::tests::live_schema_width_refuses_a_config_that_disagrees ... ok' postgres-live.log
           grep -q 'test store::pg::postgres::tests::empty_database_preflight_is_fresh_not_stale ... ok' postgres-live.log
-      - name: Live Postgres B3 (EXPLAIN hnsw, fencing, NULL quarantine)
+      - name: Live Postgres EXPLAIN hnsw, fencing, NULL quarantine
         run: |
           set -o pipefail
           cargo test --locked --no-default-features --features store-postgres --lib \
@@ -379,7 +378,7 @@ jobs:
           grep -q 'test store::pg::postgres::tests::fencing_refuses_stale_write_and_upserts_replay ... ok' postgres-b3.log
           grep -q 'test store::pg::delete_fencing::postgres_fences_a_delete_only_batch ... ok' postgres-b3.log
           grep -q 'test store::pg::lease_race::postgres_takeover_waits_for_the_fence_check ... ok' postgres-b3.log
-      # B0-R4-1: the Stage-2 `coverage` decode. Only a live PostgreSQL >= 14
+      # The Stage-2 `coverage` decode. Only a live PostgreSQL >= 14
       # can exercise it -- that is where `extract(epoch ...)` began returning
       # `numeric`, and SQLite's type affinity hides the mismatch entirely, so
       # an offline row is green either way. Before the cast this step is the
@@ -412,8 +411,8 @@ jobs:
       # Issue #23: session erasure on live PostgreSQL (every table erased to the
       # tombstone, rollback and rerun on injected failure, live writer refuses,
       # repeat is already_absent, pre-erase and unleased writes refused), the
-      # release-then-erase path where every token is refused (#23 review H1),
-      # and the release that keeps the fencing token (H2).
+      # release-then-erase path where every token is refused, and the release
+      # that keeps the fencing token (both from the #23 review).
       - name: Live Postgres session erasure and release fencing
         run: |
           set -o pipefail
@@ -427,7 +426,7 @@ jobs:
           grep -q 'test store::pg::erase::postgres_erase_after_a_release_fences_every_token ... ok' postgres-erase.log
           grep -q 'test store::pg::release_fencing::postgres_release_keeps_the_fencing_token ... ok' postgres-erase.log
 
-      - name: Live Postgres H3 recall parity
+      - name: Live Postgres recall parity
         run: |
           set -o pipefail
           cargo test --locked --no-default-features --features store-postgres,store-sqlite,fixtures --lib \
@@ -435,13 +434,13 @@ jobs:
             -- --ignored --nocapture --exact \
             2>&1 | tee postgres-h3.log
           grep -q 'test store::sqlite::tests::h1_cross_store_parity::h3_postgres_recall_parity ... ok' postgres-h3.log
-      # E2E-F3: the hnsw envelope, measured where hnsw actually engages (5,000
+      # The hnsw envelope, measured where hnsw actually engages (5,000
       # vectors at dim 768) rather than on the 9- and 22-row fixture graphs,
       # where the planner never uses the index and the two lanes are the same
       # answer. Its own step so a shrink back to a size that cannot fail is a
       # named red row. ~20s on the runner; that is why it is here and not in a
       # default `cargo test`.
-      - name: Live Postgres H3 hnsw envelope at scale
+      - name: Live Postgres hnsw envelope at scale
         run: |
           set -o pipefail
           cargo test --locked --no-default-features --features store-postgres,store-sqlite,fixtures --lib \
@@ -486,16 +485,12 @@ jobs:
   # DSN / dead cluster into a hard failure, never a silent skip-as-green.
   cockroach-live:
     runs-on: ubuntu-latest
-    # Gated off on lambo-for-mooshik. This is the ONLY job that connects to a
-    # CockroachDB cluster, and the branch changes nothing about Cockroach's live
-    # behaviour: A is a new embedder, B is a Postgres dialect split, C/D are
-    # canonization, F is SQLite. `LAMBO_REQUIRE_LIVE=1` means a missing DSN is a
-    # hard failure rather than a skip, so it cannot simply be left to no-op.
-    # Restored automatically on merge: the condition is false only on this ref.
-    # DISABLED 2026-10-06: the CockroachDB CI rows are off by decision. The
-    # previous condition restored this job on every ref except the
-    # lambo-for-mooshik dogfood branch; `if: false` turns it off everywhere.
-    # Re-enable by restoring that condition.
+    # DISABLED 2026-10-06: the CockroachDB CI rows are off by decision. This is
+    # the ONLY job that connects to a CockroachDB cluster, and
+    # `LAMBO_REQUIRE_LIVE=1` means a missing DSN is a hard failure rather than a
+    # skip, so it cannot simply be left to no-op. The previous condition ran it
+    # on every ref except the lambo-for-mooshik dogfood branch; `if: false`
+    # turns it off everywhere. Re-enable by restoring that condition.
     if: false
     env:
       RUSTFLAGS: "-D warnings"

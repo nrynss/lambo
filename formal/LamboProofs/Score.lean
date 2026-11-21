@@ -227,7 +227,7 @@ theorem bonusAndModifier_le (d : Dims) : bonusAndModifier d ≤ 400 := by
 
 /-- **Range.** For every input, finite or not, and every weight set, valid or
 not, the composite lies in `[0, 1 + MAX_BONUS]`. This is the module's "bounded
-and finite for any inputs" contract (spec §5.7, ALGO-10). -/
+and finite for any inputs" contract (spec §5.7). -/
 theorem score_range (d : Dims) (w : Weights) : 0 ≤ score d w ∧ score d w ≤ 1400000 := by
   show 0 ≤ clamp 0 1400000 (rawScore d w) ∧ clamp 0 1400000 (rawScore d w) ≤ 1400000
   exact ⟨clamp_ge (by omega) _, clamp_le (by omega) _⟩
@@ -319,7 +319,7 @@ theorem liveNumerator_range (d : Dims) (w : Weights) :
   unfold liveNumerator liveTotal
   constructor <;> omega
 
-/-- NEW-6, in exact arithmetic: at `frequency == 0` the full composite's
+/-- In exact arithmetic: at `frequency == 0` the full composite's
 weighted part *is* the live numerator, that is, `live_total ×` the renormalized
 live part. Switching from the live score to the full one therefore scales the
 weighted part by `live_total` (`0.8` at the default weights). -/

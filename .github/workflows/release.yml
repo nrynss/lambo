@@ -74,7 +74,7 @@ jobs:
       contents: read
 
     # Cargo features are per matrix entry. An entry without `features` gets the
-    # full ship profile (T8.9): every compiled adapter in one binary, with
+    # full ship profile: every compiled adapter in one binary, with
     # `[store] kind` / `[embedder] kind` picking the adapter at runtime. The one
     # caveat: the adapter code is compiled in, but its backing service must be
     # reachable at runtime (a `llama-server` for BGE, a cluster for Cockroach).
@@ -91,12 +91,12 @@ jobs:
       run:
         shell: bash
     # Linux targets build natively on the Ubuntu 24.04 runners (GLIBC 2.39).
-    # The earlier debian:bookworm container (T12) existed only to keep the
+    # The earlier debian:bookworm container existed only to keep the
     # shipped floor at GLIBC 2.34 for Amazon Linux 2023; that target is
     # deliberately dropped, so the container and its flaky in-container
     # process-spawning parity tests are gone. The "Assert max required GLIBC
     # <= 2.39" gate below still guards against a dependency bump silently
-    # raising the floor further (the part of T12 worth keeping).
+    # raising the floor further (the part of that earlier setup worth keeping).
     strategy:
       fail-fast: false
       matrix:
@@ -341,7 +341,7 @@ jobs:
           ref: ${{ needs.preflight.outputs.sha }}
 
       - name: Install Rust toolchain
-        # No `toolchain:` input (v020-R1-P3-1): the committed rust-toolchain.toml
+        # No `toolchain:` input: the committed rust-toolchain.toml
         # (1.99.1) governs this job, matching ci.yml and the build job above.
         # The `# 1.99.1` comment pins the dtolnay action code revision, not the
         # toolchain.
