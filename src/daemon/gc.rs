@@ -667,7 +667,7 @@ pub fn run(graph: &mut Graph, params: GcParams) -> GcOutcome {
     if outcome.canonical_over_budget {
         outcome.warnings.push(format!(
             "canonical concept count {} exceeds max_canonical_nodes {} — \
-             T6.4 demotion sweep must act (GC does not demote)",
+             the canonical demotion sweep must act (GC does not demote)",
             outcome.canonical_count, params.max_canonical_nodes
         ));
     }
