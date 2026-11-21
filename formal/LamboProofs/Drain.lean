@@ -61,6 +61,8 @@ process's sequence starts at 1.
   before its consume, and the model takes that shape as given. A crash in the
   middle of a replay is not proved (the replay's own batches have the same
   write-with-consume shape, `loop_facts`).
+  Like `shutdown_no_silent_loss`, it is about one process's log over an
+  empty intent table: an earlier epoch's backlog is not in the statement.
 * `close_settles_all`, `close_answer`, `shutdown_no_silent_loss`: after
   `close()` every receipt is settled, and each admitted write is drained,
   `intent_durable` and owed by the next replay, or `close_unflushed`
@@ -75,7 +77,9 @@ process's sequence starts at 1.
 * `replay_order`, `load_seq_order`, `replay_seq_order`,
   `load_epoch_seq_order`, `replay_epoch_seq_order`: one serve applies in load
   order, which within one process is sequence (admission) order as long as no
-  later admission carries an earlier issue time.
+  later admission carries an earlier issue time. Ties across epochs (equal
+  `issued_ms` and `lane_seq`) are unspecified in SQL, while `loadOrder` keeps
+  input order for them; no theorem depends on how they break.
 * `inputFact_goes_on`, `replayStep_cycle`, `replayStep_decode`: a refusal
   that is a fact about the intent's input (`Embed`, `ImageIdTaken`,
   `Reference`, a cycle refusal, an undecodable payload) settles `failed` and
@@ -132,14 +136,15 @@ structure Job where
   epoch : Nat
   deriving DecidableEq, Repr
 
-/-- What identifies a write across processes: the receipt id, here its
-(epoch, sequence) pair. The adapters key intent rows by the receipt string
-`lwr1.{epoch}.{ms}.{seq}` (`WHERE session_id = ? AND receipt = ?`), and every
-process's sequence starts at 1, so the sequence alone is not a key once a
-backlog holds two crashed processes' intents. -/
-abbrev Key := Nat × Nat
+/-- What identifies a write across processes: the receipt id
+`lwr1.{epoch}.{ms}.{seq}` (`ReceiptId`'s `Display`), here its (epoch, issue
+time, sequence) triple. The adapters key intent rows by that string (`WHERE
+session_id = ? AND receipt = ?`), and every process's sequence starts at 1, so
+the sequence alone is not a key once a backlog holds two crashed processes'
+intents. -/
+abbrev Key := Nat × Int × Nat
 
-def Job.key (j : Job) : Key := (j.epoch, j.rid)
+def Job.key (j : Job) : Key := (j.epoch, j.ms, j.rid)
 
 /-- The classes of `LamboError` that `WriteCtx::run` can fail with, as the
 worker and the replay tell them apart. `cycle` is a `StoreError::Invariant`
@@ -319,7 +324,10 @@ structure Intent where
 /-- One mutation applied to the `write_intents` table: a put inserts an
 unconsumed row; a consume updates every row with that receipt (the adapters'
 `UPDATE ... WHERE receipt = ?`, so a later consume overwrites an earlier one);
-graph writes do not touch the table. -/
+graph writes do not touch the table. The Rust's put is an upsert on
+(`session_id`, `receipt`), so the table never holds two rows with one key,
+where the model's put appends; the replay theorems take arbitrary rows, so
+they cover the Rust's case as a special one. -/
 def applyMut (acc : List Intent) : Mut → List Intent
   | .put j => acc ++ [⟨j, none⟩]
   | .write _ => acc
@@ -1657,8 +1665,20 @@ example :
     r1.applied = [j1, j3] ∧ replay true okAll (applyLog ints r1.log) = ROut.empty := by decide
 
 /-- Two crashed processes' backlogs with colliding sequence numbers: the
-rows are distinct receipts (different epochs), so the replay applies both,
-in issue-time order, and consuming one does not consume the other. -/
+rows are distinct receipts (different epochs and issue times). `a` applies
+while `b` meets a transient embed answer and is skipped; `a`'s consume does
+not consume `b`'s row, so the next replay applies `b`. Keyed by sequence
+alone, `a`'s consume would mark `b`'s row too and the next replay would apply
+nothing: the dropped write this keying rules out. -/
+example :
+    let a : Job := ⟨1, 0, 1000, false, 7⟩
+    let b : Job := ⟨1, 0, 2000, false, 9⟩
+    let ints := loadOrder [⟨b, none⟩, ⟨a, none⟩]
+    let rout : Job → RR := fun j => if j.epoch = 9 then .run (.err .unavailable) else .run .ok
+    let r := replay true rout ints
+    r.applied = [a] ∧ (replay true okAll (applyLog ints r.log)).applied = [b] := by decide
+
+/-- Both processes' rows applied in one serve, in issue-time order. -/
 example :
     let a : Job := ⟨1, 0, 1000, false, 7⟩
     let b : Job := ⟨1, 0, 2000, false, 9⟩
@@ -1706,7 +1726,9 @@ break the lane order".
 The same reordering happens across a restart through the in-session outage
 path: `j1` meets `EmbedUnavailable` in session (answered `failed`, intent
 left unconsumed), `j2` applies in session, and `j1` applies at the next serve
-(`outage_then_replay_reorders`). -/
+(`outage_then_replay_reorders`). That contradicts `docs/reference/mcp.mdx`
+line 91: "sequential writes from one agent to the same session apply in
+submission order". -/
 
 /-- Two writes of agent 0; at the first serve `j1` meets one transient embed
 answer and `j2` applies; the next serve applies `j1`. Applied order across
@@ -1718,13 +1740,15 @@ theorem transient_skip_reorders :
     j1.agent = j2.agent ∧ j1.rid < j2.rid ∧ r1.applied ++ r2.applied = [j2, j1] := by
   decide
 
-/-- In session the worker meets an outage at `j1` and applies `j2`; the close
-lands; the next serve applies `j1`. Writes in the order they reached the
-graph: `j2`, then `j1`. -/
+/-- Two sequential writes of one agent (`j1` before `j2`). In session the
+worker meets an outage at `j1` and applies `j2`; the close lands; the next
+serve applies `j1`. Writes in the order they reached the graph: `j2`, then
+`j1`. -/
 theorem outage_then_replay_reorders :
     let c := close [j1, j2] (fun _ => false)
       (fun j => if j.rid = 1 then .err .unavailable else .ok) 0 .durable (admitStore [j1, j2])
     let rows := loadOrder (intentsOf (admitLog [j1, j2] ++ c.2).flatten)
+    j1.agent = j2.agent ∧ j1.rid < j2.rid ∧
     c.2 = [[], [.write j2.key, .consume j2.key .applied]] ∧
       (replay true okAll rows).applied = [j1] := by
   decide
