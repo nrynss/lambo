@@ -110,11 +110,11 @@ theorem emit_sublist (isConcept forced : ι → Bool) (topK : Nat) :
       cases hf : forced s with
       | true =>
         rw [emit_forced hc hf]
-        exact List.Sublist.cons₂ s (ih slots)
+        exact List.Sublist.cons_cons s (ih slots)
       | false =>
         by_cases hs : slots < topK
         · rw [emit_take hc hf hs]
-          exact List.Sublist.cons₂ s (ih (slots + 1))
+          exact List.Sublist.cons_cons s (ih (slots + 1))
         · rw [emit_cut hc hf hs]
           exact List.Sublist.cons s (ih slots)
 
@@ -317,8 +317,7 @@ theorem emit_free_eq_take (isConcept forced : ι → Bool) (topK : Nat) :
           have en : topK - slots = 0 := by omega
           rw [ih slots, e, en] <;> simp
 
-/-- The forced hits are exactly the forced concepts of the ranked list, in
-order: none is cut and none is added. -/
+/-- The forced concepts of a list, in order: in the graph and forced. -/
 def forcedConcepts (isConcept forced : ι → Bool) : List ι → List ι
   | [] => []
   | x :: xs =>
@@ -330,6 +329,8 @@ def forcedOnly (forced : ι → Bool) : List ι → List ι
   | [] => []
   | x :: xs => if forced x = true then x :: forcedOnly forced xs else forcedOnly forced xs
 
+/-- The forced hits are exactly the forced concepts of the ranked list, in
+order: none is cut and none is added. -/
 theorem emit_forced_eq (isConcept forced : ι → Bool) (topK : Nat) :
     ∀ (ranked : List ι) (slots : Nat),
       forcedOnly forced (emit isConcept forced topK slots ranked)

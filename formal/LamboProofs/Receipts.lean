@@ -389,7 +389,7 @@ theorem lane_fifo (ops : List (Op α)) :
 
 /-! ## Admission bounds
 
-`admit` refuses a write when its agent's lane holds `WRITE_QUEUE_LANE_MAX`
+Admission refuses a write when its agent's lane holds `WRITE_QUEUE_LANE_MAX`
 outstanding jobs or the queue holds `WRITE_QUEUE_MAX`, and otherwise enqueues
 it. Admission never waits: a refusal is answered at once with a `Dropped`
 receipt. -/
@@ -415,15 +415,15 @@ theorem queue_fits_in_retention : 4 * writeQueueMax ≤ maxRetainedReceipts := b
 
 /-- The lane and queue counts after an admission attempt, and whether it was
 accepted. -/
-def admit (lane total : Nat) : Nat × Nat × Bool :=
+def tryAdmit (lane total : Nat) : Nat × Nat × Bool :=
   if writeQueueLaneMax ≤ lane then (lane, total, false)
   else if writeQueueMax ≤ total then (lane, total, false)
   else (lane + 1, total + 1, true)
 
 /-- Admission keeps a lane within `WRITE_QUEUE_LANE_MAX`. -/
 theorem admit_lane_bound (lane total : Nat) (h : lane ≤ writeQueueLaneMax) :
-    (admit lane total).1 ≤ writeQueueLaneMax := by
-  unfold admit
+    (tryAdmit lane total).1 ≤ writeQueueLaneMax := by
+  unfold tryAdmit
   by_cases h1 : writeQueueLaneMax ≤ lane
   · rw [if_pos h1]
     exact h
@@ -437,8 +437,8 @@ theorem admit_lane_bound (lane total : Nat) (h : lane ≤ writeQueueLaneMax) :
 
 /-- Admission keeps the queue within `WRITE_QUEUE_MAX`. -/
 theorem admit_queue_bound (lane total : Nat) (h : total ≤ writeQueueMax) :
-    (admit lane total).2.1 ≤ writeQueueMax := by
-  unfold admit
+    (tryAdmit lane total).2.1 ≤ writeQueueMax := by
+  unfold tryAdmit
   by_cases h1 : writeQueueLaneMax ≤ lane
   · rw [if_pos h1]
     exact h
@@ -451,9 +451,9 @@ theorem admit_queue_bound (lane total : Nat) (h : total ≤ writeQueueMax) :
       omega
 
 /-- A refusal changes neither count: "a refusal never enters `accepted`". -/
-theorem admit_refused_unchanged (lane total : Nat) (h : (admit lane total).2.2 = false) :
-    (admit lane total).1 = lane ∧ (admit lane total).2.1 = total := by
-  unfold admit at h ⊢
+theorem admit_refused_unchanged (lane total : Nat) (h : (tryAdmit lane total).2.2 = false) :
+    (tryAdmit lane total).1 = lane ∧ (tryAdmit lane total).2.1 = total := by
+  unfold tryAdmit at h ⊢
   by_cases h1 : writeQueueLaneMax ≤ lane
   · rw [if_pos h1]
     exact ⟨rfl, rfl⟩
