@@ -119,7 +119,7 @@ use parking_lot::RwLock;
 
 use crate::canon::stage3;
 use crate::canon::supersession;
-use crate::canon::{stage2_passes_with_window, PromotionPolicy};
+use crate::canon::{stage2_passes_with_window, PromotionPolicy, Writers};
 use crate::daemon::events::{self, EventSender};
 use crate::graph::Graph;
 use crate::store::GraphStore;
@@ -495,6 +495,16 @@ impl Evaluator {
             self.stage3_cursor = plan.stage3_cursor_before;
         }
 
+        // #300: bring the writer cache up to the graph's current epoch under
+        // a read guard, so apply (which reads it once, before committing)
+        // does not rebuild it under the write guard. A write landing between
+        // the two guards moves the epoch, and apply then rebuilds once, which
+        // is still correct.
+        {
+            let g = graph.read();
+            self.timeline.get(&g);
+        }
+
         // 3. Apply — write guard, released before the next await. Commit point.
         let mut outcome = EvalOutcome::default();
         let applied = {
@@ -574,10 +584,16 @@ impl Evaluator {
         // C1: the predicate is chosen by `promotion_policy` rather than
         // welded in. `now` and `params.min_age` age the dependence evidence
         // both policies read (#36 PR 3).
+        //
+        // #300: Solo's dependents term reads which interaction wrote each
+        // edge. The writers are resolved once per graph epoch (the cache
+        // supersession already uses) and lent to every policy call below,
+        // not rebuilt per call.
+        let writers = Writers::shared(self.timeline.get(graph));
         let stage1: Vec<NodeId> = params
             .promotion_policy
             .scorer()
-            .candidates(graph, scores, params, now)
+            .candidates_with(graph, scores, params, now, &writers)
             .into_iter()
             .filter(|&id| concept_status(graph, id) == Some(CanonizationStatus::None))
             .take(params.batch_size)
@@ -593,8 +609,16 @@ impl Evaluator {
         // store probe every pass and could never promote.
         let scorer = params.promotion_policy.scorer();
         let mut candidates = ids_with_status(graph, CanonizationStatus::Candidate);
-        candidates
-            .retain(|&id| scorer.admits_hop(graph, id, CanonizationStatus::Venerable, params, now));
+        candidates.retain(|&id| {
+            scorer.admits_hop_with(
+                graph,
+                id,
+                CanonizationStatus::Venerable,
+                params,
+                now,
+                &writers,
+            )
+        });
         let stage2 = ring_window(&candidates, self.stage2_cursor, params.batch_size);
         if let Some(&last) = stage2.last() {
             self.stage2_cursor = Some(last);
@@ -627,8 +651,16 @@ impl Evaluator {
             .saturating_sub(canonical_count(graph));
         let mut venerable = ids_with_status(graph, CanonizationStatus::Venerable);
         // Same filter as Stage 2's ring (review L1).
-        venerable
-            .retain(|&id| scorer.admits_hop(graph, id, CanonizationStatus::Canonical, params, now));
+        venerable.retain(|&id| {
+            scorer.admits_hop_with(
+                graph,
+                id,
+                CanonizationStatus::Canonical,
+                params,
+                now,
+                &writers,
+            )
+        });
         let stage3_cursor_before = self.stage3_cursor;
         let stage3_speculative = remaining == 0 && !supersede.is_empty();
         let mut window = if remaining == 0 && supersede.is_empty() {
@@ -924,6 +956,12 @@ fn apply(
     // word: Swarm keeps the verdict as the whole decision, Solo also needs
     // its score band.
     let scorer = params.promotion_policy.scorer();
+    // #300: the writers Solo's admission reads, taken once before anything
+    // commits. Canonization transitions add no interaction, so they stay
+    // valid for the whole apply; `eval_cycle` refreshed the cache under the
+    // read guard, so this is normally a cache hit, not a build under the
+    // write guard.
+    let writers = Writers::shared(timeline.get(graph));
 
     // --- Supersession (#20): Canonical → None, committed first ---
     // Each verdict is re-checked against the graph as it is now (the store
@@ -984,7 +1022,14 @@ fn apply(
         if !verdicts.stage2_pass.contains(&id) {
             continue;
         }
-        if !scorer.admits_hop(graph, id, CanonizationStatus::Venerable, params, now) {
+        if !scorer.admits_hop_with(
+            graph,
+            id,
+            CanonizationStatus::Venerable,
+            params,
+            now,
+            &writers,
+        ) {
             continue;
         }
         let event = promotion_event(
@@ -1033,12 +1078,13 @@ fn apply(
         else {
             continue;
         };
-        if !scorer.admits_hop(
+        if !scorer.admits_hop_with(
             graph,
             probe.node,
             CanonizationStatus::Canonical,
             params,
             now,
+            &writers,
         ) {
             continue;
         }

@@ -50,6 +50,7 @@ pub use gate::{
 };
 pub use policy::{
     solo_breakdown, PromotionPolicy, PromotionScorer, SoloBreakdown, SoloScorer, SwarmScorer,
+    Writers,
 };
 // `deserialize_promotion_policy` is re-exported because `lambo.toml`'s
 // `promotion_policy` key must be parsed by `PromotionPolicy::from_str` and not

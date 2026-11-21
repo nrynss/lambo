@@ -203,8 +203,22 @@ pub fn solo_dependent_interaction_counts(
     let Some(cutoff) = age_cutoff(min_age, now) else {
         return HashMap::new();
     };
-    let timeline = WriterTimeline::of(graph);
-    counts_with(graph, cutoff, Credit::Writer(&timeline))
+    counts_with(graph, cutoff, Credit::Writer(&WriterTimeline::of(graph)))
+}
+
+/// [`solo_dependent_interaction_counts`] with a writer timeline the caller
+/// already holds for `graph` (the evaluator's, cached by graph epoch), so
+/// nothing is rebuilt.
+pub(crate) fn solo_dependent_interaction_counts_with(
+    graph: &Graph,
+    min_age: Duration,
+    now: DateTime<Utc>,
+    timeline: &WriterTimeline,
+) -> HashMap<NodeId, usize> {
+    let Some(cutoff) = age_cutoff(min_age, now) else {
+        return HashMap::new();
+    };
+    counts_with(graph, cutoff, Credit::Writer(timeline))
 }
 
 fn counts_with(graph: &Graph, cutoff: DateTime<Utc>, credit: Credit<'_>) -> HashMap<NodeId, usize> {
@@ -254,8 +268,27 @@ pub fn solo_dependent_interactions(
     if !has_dependence {
         return 0;
     }
-    let timeline = WriterTimeline::of(graph);
-    interactions_with(graph, node, cutoff, Credit::Writer(&timeline))
+    interactions_with(
+        graph,
+        node,
+        cutoff,
+        Credit::Writer(&WriterTimeline::of(graph)),
+    )
+}
+
+/// [`solo_dependent_interactions`] with a writer timeline the caller already
+/// holds for `graph`: `O(degree)`, nothing rebuilt.
+pub(crate) fn solo_dependent_interactions_with(
+    graph: &Graph,
+    node: NodeId,
+    min_age: Duration,
+    now: DateTime<Utc>,
+    timeline: &WriterTimeline,
+) -> usize {
+    let Some(cutoff) = age_cutoff(min_age, now) else {
+        return 0;
+    };
+    interactions_with(graph, node, cutoff, Credit::Writer(timeline))
 }
 
 fn interactions_with(
@@ -532,13 +565,14 @@ mod tests {
         let g = shared_origin();
         assert_eq!(dependent_interactions(&g, nid(1), MIN_AGE, now()), 0);
         assert_eq!(solo_dependent_interactions(&g, nid(1), MIN_AGE, now()), 1);
-        // Dependent 11 comes from i2, but i1 (the pillar's own turn, 100
-        // minutes back) wrote its edge: Swarm counts i2, Solo nothing.
+        // The other direction. Dependent 11 comes from i2 (90 minutes back);
+        // pillar 1 from i3 (80), which also wrote the dependence, after both
+        // existed: Swarm counts i2, Solo nothing.
         let mut g = graph_with([
-            concept(1, 1, 0, CanonizationStatus::None),
+            concept(1, 3, 0, CanonizationStatus::None),
             concept(11, 2, 0, CanonizationStatus::None),
         ]);
-        g.upsert_edge(edge(11, 1, EdgeType::Dependency, 100))
+        g.upsert_edge(edge(11, 1, EdgeType::Dependency, 80))
             .unwrap();
         assert_eq!(dependent_interactions(&g, nid(1), MIN_AGE, now()), 1);
         assert_eq!(solo_dependent_interactions(&g, nid(1), MIN_AGE, now()), 0);
@@ -557,11 +591,12 @@ mod tests {
 
     /// The batched and single-node Solo counts agree on every node of the
     /// shared #36 dependents case, at both ages. They agree with Swarm's
-    /// count on every concept whose dependence edges are stamped at their
-    /// dependent's origin or at no single interaction
-    /// (`Policy.dependentOriginsW_eq`), which is all but `P`: `P -Hierarchical->
-    /// X` is stamped at `i5`, `P`'s own turn, so its child `X` (from `i1`) is a
-    /// dependent interaction for Swarm and none for Solo.
+    /// count on every concept whose dependence edges are each stamped at
+    /// their dependent's origin (`Policy.dependentOriginsW_eq`) or at no
+    /// single interaction (the fallback credits the dependent's origin, so
+    /// those edges agree by construction). That is all but `P`:
+    /// `P -Hierarchical-> X` is stamped at `i5`, `P`'s own turn, so its child
+    /// `X` (from `i1`) is a dependent interaction for Swarm and none for Solo.
     #[test]
     fn solo_counts_agree_with_each_other_and_with_swarm_on_the_dependents_case() {
         use crate::test_util::dependents::concept_id;

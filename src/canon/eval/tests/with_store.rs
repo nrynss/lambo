@@ -292,6 +292,48 @@ async fn solo_cannot_bypass_stage_2_on_its_band() {
     assert_eq!(status_of(&g.read(), hub_id), CanonizationStatus::Venerable);
 }
 
+/// #300 review: Solo's admission reads writer attribution, and a cycle
+/// resolves it once, from the evaluator's epoch-cached timeline, however
+/// many members the rings hold. The Candidate is asked about at gather (its
+/// Stage 1 score and its Stage 2 ring slot) and again at apply; resolving
+/// per call built the timeline three times here, once under the write guard.
+/// A second cycle on an unchanged graph builds nothing.
+#[tokio::test]
+async fn a_solo_cycle_resolves_writers_once() {
+    use crate::daemon::conflict::TIMELINE_BUILDS;
+    let builds = || TIMELINE_BUILDS.with(|n| n.get());
+    let (mut g, hub_id) = solo_band_only_graph(CanonizationStatus::Candidate, 1);
+    attach_blast(&mut g, 10, 3, 300);
+    let store = store_from_graph(&g).await;
+    let g = RwLock::new(g);
+    let (tx, _rx) = channel();
+    let mut ev = Evaluator::new();
+    let before = builds();
+    eval_cycle(&mut ev, &g, &store, &table(&[]), &tx, &solo_params(), ts())
+        .await
+        .unwrap();
+    assert_eq!(status_of(&g.read(), hub_id), CanonizationStatus::Venerable);
+    assert_eq!(builds() - before, 1, "one timeline for the whole cycle");
+
+    // The next cycle sees the promotion's epoch and resolves once more; it
+    // commits nothing (three dependents are no Stage 3), so the one after
+    // reads the cached timeline.
+    eval_cycle(&mut ev, &g, &store, &table(&[]), &tx, &solo_params(), ts())
+        .await
+        .unwrap();
+    let epoch = g.read().epoch();
+    let before = builds();
+    eval_cycle(&mut ev, &g, &store, &table(&[]), &tx, &solo_params(), ts())
+        .await
+        .unwrap();
+    assert_eq!(
+        g.read().epoch(),
+        epoch,
+        "fixture premise: nothing committed"
+    );
+    assert_eq!(builds() - before, 0, "unchanged graph: the cached timeline");
+}
+
 /// Design test: Solo cannot bypass Stage 3. A Venerable in the Canonical
 /// band ((1 + 8) × 1.2 = 10.8) with no dependents stays Venerable.
 #[tokio::test]

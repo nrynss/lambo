@@ -53,9 +53,18 @@
   interaction was. The own-origin exclusion now asks whether the pillar's
   own turn wrote the dependence. Where every dependence was written in its
   dependent's origin turn (a fresh action or concept, the usual case)
-  nothing changes. Re-sending an identical dependence reinforces the edge
-  and keeps its date, so it still adds nothing. Swarm's Stage 1 count and
-  Stage 2's span keep crediting the dependent's origin, unchanged.
+  nothing changes. Scores can also drop: a dependence written in the
+  concept's own turn from an older concept (a repeated action whose
+  `depends_on` creates the concept) no longer counts as a dependent and its
+  support moves to the writing day, so existing Solo Candidates and
+  Venerables can lose score. Re-sending an identical dependence reinforces
+  the edge and keeps its date, so it still adds nothing. Swarm's Stage 1
+  count and Stage 2's span keep crediting the dependent's origin,
+  unchanged, so a concept can now become a Solo Candidate on writer-dated
+  evidence that Stage 2 does not count toward Venerable. The evaluator
+  resolves writers once per graph epoch and lends them to the policy
+  (`PromotionScorer::candidates_with` / `admits_hop_with`, `canon::Writers`),
+  so a cycle does not rebuild them per concept.
   `formal/LamboProofs/Policy.lean` models the fix
   (`reused_action_dependency_is_dated_by_its_writer`).
 - Conflict detection: a re-send by another agent no longer drops an edge's

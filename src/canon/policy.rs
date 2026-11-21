@@ -70,15 +70,20 @@
 //! for `Utc::now()`.
 
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::canon::event_time::separated_session_count;
-use crate::canon::stage1::{solo_dependent_interaction_counts, solo_dependent_interactions};
+use crate::canon::stage1::{
+    solo_dependent_interaction_counts_with, solo_dependent_interactions,
+    solo_dependent_interactions_with,
+};
 use crate::canon::stage1_candidates;
 use crate::canon::EvalParams;
+use crate::daemon::conflict::WriterTimeline;
 use crate::graph::Graph;
 use crate::types::{
     tie_break_by_key, CanonizationStatus, Concept, EdgeType, Node, NodeId, ScoreTable,
@@ -335,6 +340,72 @@ pub trait PromotionScorer: Send + Sync + std::fmt::Debug {
         params: &EvalParams,
         now: DateTime<Utc>,
     ) -> bool;
+
+    /// [`Self::candidates`] with the writer attribution the caller already
+    /// holds for `graph` ([`Writers`]). The evaluator passes its own, cached
+    /// across cycles by graph epoch, so a cycle resolves writers at most once
+    /// instead of once per call. A policy that reads no writer ignores it:
+    /// the default is [`Self::candidates`].
+    fn candidates_with(
+        &self,
+        graph: &Graph,
+        scores: &ScoreTable,
+        params: &EvalParams,
+        now: DateTime<Utc>,
+        writers: &Writers,
+    ) -> Vec<NodeId> {
+        let _ = writers;
+        self.candidates(graph, scores, params, now)
+    }
+
+    /// [`Self::admits_hop`] with the caller's writer attribution for `graph`
+    /// (see [`Self::candidates_with`]). The default is [`Self::admits_hop`].
+    fn admits_hop_with(
+        &self,
+        graph: &Graph,
+        node: NodeId,
+        to: CanonizationStatus,
+        params: &EvalParams,
+        now: DateTime<Utc>,
+        writers: &Writers,
+    ) -> bool {
+        let _ = writers;
+        self.admits_hop(graph, node, to, params, now)
+    }
+}
+
+/// Which interaction wrote each edge of one graph (#300): the writer
+/// attribution Solo's dependents term reads, resolved in one pass over the
+/// graph's interactions. It depends only on the interactions, so it stays
+/// valid while a cycle commits canonization transitions.
+///
+/// [`Writers::of`] resolves it; the evaluator lends its own, cached across
+/// cycles by graph epoch, through [`PromotionScorer::candidates_with`] and
+/// [`PromotionScorer::admits_hop_with`]. It must have been resolved from the
+/// same graph's interactions.
+#[derive(Clone)]
+pub struct Writers(Arc<WriterTimeline>);
+
+impl Writers {
+    /// Resolve `graph`'s writers: `O(interactions)`.
+    pub fn of(graph: &Graph) -> Self {
+        Self(Arc::new(WriterTimeline::of(graph)))
+    }
+
+    /// An already-resolved timeline (the evaluator's cached one).
+    pub(crate) fn shared(timeline: Arc<WriterTimeline>) -> Self {
+        Self(timeline)
+    }
+
+    pub(crate) fn timeline(&self) -> &WriterTimeline {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for Writers {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Writers")
+    }
 }
 
 /// Evidence-led Swarm admission — the default policy.
@@ -508,7 +579,8 @@ pub struct SoloBreakdown {
 }
 
 /// [`SoloBreakdown`] for `c`, given its dependent-interaction count (from
-/// [`solo_dependent_interaction_counts`] or [`solo_dependent_interactions`]).
+/// [`crate::canon::solo_dependent_interaction_counts`] or
+/// [`solo_dependent_interactions`]).
 pub fn solo_breakdown(graph: &Graph, c: &Concept, dependent_interactions: usize) -> SoloBreakdown {
     let sessions = recurrence_sessions(graph, c);
     let reverts = revert_count(graph, c.id);
@@ -594,11 +666,35 @@ impl PromotionScorer for SoloScorer {
     fn candidates(
         &self,
         graph: &Graph,
-        _scores: &ScoreTable,
+        scores: &ScoreTable,
         params: &EvalParams,
         now: DateTime<Utc>,
     ) -> Vec<NodeId> {
-        let counts = solo_dependent_interaction_counts(graph, params.min_age, now);
+        self.candidates_with(graph, scores, params, now, &Writers::of(graph))
+    }
+
+    fn admits_hop(
+        &self,
+        graph: &Graph,
+        node: NodeId,
+        to: CanonizationStatus,
+        params: &EvalParams,
+        now: DateTime<Utc>,
+    ) -> bool {
+        let deps = solo_dependent_interactions(graph, node, params.min_age, now);
+        band_admits(graph, node, to, deps)
+    }
+
+    fn candidates_with(
+        &self,
+        graph: &Graph,
+        _scores: &ScoreTable,
+        params: &EvalParams,
+        now: DateTime<Utc>,
+        writers: &Writers,
+    ) -> Vec<NodeId> {
+        let counts =
+            solo_dependent_interaction_counts_with(graph, params.min_age, now, writers.timeline());
         let mut admitted: Vec<(f64, &Concept)> = graph
             .concepts()
             .map(|c| {
@@ -615,22 +711,29 @@ impl PromotionScorer for SoloScorer {
         admitted.into_iter().map(|(_, c)| c.id).collect()
     }
 
-    fn admits_hop(
+    fn admits_hop_with(
         &self,
         graph: &Graph,
         node: NodeId,
         to: CanonizationStatus,
         params: &EvalParams,
         now: DateTime<Utc>,
+        writers: &Writers,
     ) -> bool {
-        match graph.node(node) {
-            Some(Node::Concept(c)) => {
-                let deps = solo_dependent_interactions(graph, node, params.min_age, now);
-                status_rank(classify(solo_score(graph, c, deps))) >= status_rank(to)
-            }
-            // Not a concept (or gone): nothing to admit.
-            _ => false,
+        let deps =
+            solo_dependent_interactions_with(graph, node, params.min_age, now, writers.timeline());
+        band_admits(graph, node, to, deps)
+    }
+}
+
+/// Whether `node`'s Solo band, given its dependents term, ranks at or above
+/// `to`. Not a concept (or gone): nothing to admit.
+fn band_admits(graph: &Graph, node: NodeId, to: CanonizationStatus, deps: usize) -> bool {
+    match graph.node(node) {
+        Some(Node::Concept(c)) => {
+            status_rank(classify(solo_score(graph, c, deps))) >= status_rank(to)
         }
+        _ => false,
     }
 }
 
@@ -1093,8 +1196,9 @@ mod tests {
         action.origin_interaction = nid_inter(2);
         let aid = action.id;
         g.insert_concept(action, nid_inter(2)).unwrap();
-        g.upsert_edge(test_edge(30, aid, hub.id, EdgeType::Dependency, ts_at(90)))
-            .unwrap();
+        // Written by the action's own turn (2), as `record_action` writes it.
+        let dependence = edge_written_by(&g, 30, aid, hub.id, EdgeType::Dependency, 2);
+        g.upsert_edge(dependence).unwrap();
         let later = day(10);
         let deps = solo_dependent_interactions(&g, hub.id, Duration::from_secs(60), later);
         assert_eq!(deps, 1);
@@ -1165,8 +1269,9 @@ mod tests {
             action.canonical_key = action.content.clone();
             action.origin_interaction = nid_inter(origin);
             g.insert_concept(action, nid_inter(origin)).unwrap();
-            g.upsert_edge(test_edge(id, nid(id), hub, ty, ts_at(90)))
-                .unwrap();
+            // Written by the action's own turn, as `record_action` writes it.
+            let e = edge_written_by(g, id, nid(id), hub, ty, origin);
+            g.upsert_edge(e).unwrap();
         };
         add_action(&mut g, 20, 2, EdgeType::Causal);
         assert_eq!(
@@ -1319,6 +1424,86 @@ mod tests {
         assert_eq!(
             dependent_interactions(&g, user_schema, params().min_age, now),
             0,
+            "Swarm's Stage 1 count keeps the dependent-origin dating"
+        );
+    }
+
+    /// #300, the direction where scores drop. Day 0's turn records "deploy
+    /// api"; on day 5 the action is repeated with a `depends_on` that
+    /// creates `user schema` in that same call. The new `Dependency` edge is
+    /// written by the day-5 turn, which is also `user schema`'s origin. The
+    /// old rule dated it by the reused action's origin (day 0): a second
+    /// session and a dependent interaction, 1 + 1 + 2 = 4.0, a Solo
+    /// Candidate. Dated by its writer it is the concept's own turn: one
+    /// session, no dependent, 1.0, ordinary memory. Swarm's Stage 1 count,
+    /// which keeps the dependent-origin dating, still credits day 0.
+    ///
+    /// Mirrors `Policy.own_origin_is_the_writing_turn` and
+    /// `Policy.dependentOriginsW_not_own` in `formal/LamboProofs/Policy.lean`.
+    #[test]
+    fn a_dependence_written_in_the_pillars_own_turn_no_longer_counts() {
+        use crate::graph::action::{record_action, Action};
+        let action = |name, depends_on| Action {
+            repo_scope: None,
+            event_time: None,
+            action: name,
+            produces: &[],
+            modifies: &[],
+            depends_on,
+        };
+        let mut g = Graph::new(sid());
+        let mut turn1 = interaction_at(1, 0, None);
+        turn1.created_at = day(0);
+        g.insert_interaction(turn1.clone()).unwrap();
+        let mut turn5 = interaction_at(5, 0, None);
+        turn5.created_at = day(5);
+        turn5.previous_id = Some(turn1.id);
+        g.insert_interaction(turn5.clone()).unwrap();
+        let agent = AgentId::from("agent-a");
+
+        let first = record_action(
+            &mut g,
+            turn1.id,
+            &agent,
+            &action("deploy api", &["billing schema"]),
+        )
+        .unwrap();
+        let again = record_action(
+            &mut g,
+            turn5.id,
+            &agent,
+            &action("deploy api", &["user schema"]),
+        )
+        .unwrap();
+        assert_eq!(again.action_node, first.action_node, "the action is reused");
+        let user_schema = again.created[0];
+        let y = concept_of(&g, user_schema);
+        assert_eq!(y.origin_interaction, turn5.id, "created by the repeat");
+
+        let now = day(10);
+        assert_eq!(
+            supporting_interaction_times(&g, &y),
+            vec![day(5)],
+            "the dependence is dated by its writer, the concept's own day"
+        );
+        assert_eq!(recurrence_sessions(&g, &y), 1);
+        assert!(
+            !PromotionPolicy::Solo.scorer().admits_hop(
+                &g,
+                user_schema,
+                CanonizationStatus::Candidate,
+                &params(),
+                now
+            ),
+            "1.0: no second session and no dependent from the concept's own turn"
+        );
+        assert!(!PromotionPolicy::Solo
+            .scorer()
+            .candidates(&g, &ScoreTable::default(), &params(), now)
+            .contains(&user_schema));
+        assert_eq!(
+            dependent_interactions(&g, user_schema, params().min_age, now),
+            1,
             "Swarm's Stage 1 count keeps the dependent-origin dating"
         );
     }
