@@ -234,15 +234,16 @@ entries (default half of `hot_list_max`) are contradictions (#196): over that
 budget the oldest-declared contradictions are dropped first, so contradictions
 never evict the high-risk, drift and stale warnings from the rest of the list.
 A contradiction dropped by the budget or the bound carries no recall warning
-until it fits again. Each cycle the list is first cut to what that cycle
-detects, and only then are the budget and the bound enforced (#298), so an
-entry the cycle no longer detects never evicts a fresh one: while the
-cycle's hits fit, the list holds every one of them. The entry is the newest qualifying
+until it fits again. The entry is the newest qualifying
 contradiction, ties going to the smaller canonical key and then the smaller
 id of `by`. `writer` is the agent acting when the edge was first written,
 falling back to `by`'s origin agent. No `DaemonEvent` is published for it.
 Recall re-validates it at read time like every hot entry, so it lapses when
-newer evidence becomes eligible, or when `by` is collected. The entries of one detector pass share one writer
+newer evidence becomes eligible, or when `by` is collected. Each cycle the
+hot list is first cut to what that cycle detects, and only then are the
+budget and the bound enforced (#298), so an entry the cycle no longer
+detects never evicts a fresh one: while the cycle's hits fit, the list
+holds every one of them. The entries of one detector pass share one writer
 timeline, rebuilt only when the graph's epoch moves.
 
 Recall renders `recall::format::contradiction_warning` on the hit and

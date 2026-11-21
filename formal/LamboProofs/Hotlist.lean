@@ -11,8 +11,8 @@ insert, insert_many, revalidate, revalidate_members, retain_conditions}`,
 contradictions, conflicts, drift, stale, high-risk inserted in that order, then
 `retain_conditions`), both before #298 (`cycle`: every insert enforces the
 budget and the bound, and the cut comes last) and since (`cycleFixed`,
-`HotList::sync_cycle`: the inserts run with both lifted, then the cut, then one
-`enforce`), and
+`HotList::sync_cycle`: the inserts are deferred, evicting nothing, then the
+cut, then one `enforce`), and
 of how recall consumes it in `src/recall/assemble.rs`: `forces`,
 `contradiction_companions`, the `hot` / `cold_forced` / `forced` predicates
 handed to `emitted`, and the kinds of the hot-list warning lines (`format::
@@ -47,13 +47,14 @@ is an input: a cycle is given its hits and its condition set.
   about that substitute cycle. `cycle_sound` and `cycle_drops_collected` hold
   for any insertion step (they only use the final `retain`), and
   `cycle_evicts_fresh_hit` inserts no contradiction.
-* `cycleFixed` models the lifted inserts with `upsertAll` (each hit refreshes
-  its pair in place or is pushed, with the next `seq`): with `usize::MAX` as
-  bound and budget, Rust's `enforce` inside each `insert` and `insert_many`
-  only sorts, and the final `enforce` sorts again, so the order the inserts
-  left is immaterial. A `decide` example checks single inserts on a lifted
-  list against `upsertAll`, with a refresh. `cycle` is kept as the cycle
-  before #298, with its theorems.
+* `cycleFixed` models the deferred inserts with `upsertAll`, which is what
+  Rust runs inside `sync_cycle`: each `insert` and each entry of an
+  `insert_many` gets the next `seq` and refreshes its pair in place (found
+  through an index of the live pairs, the unique match `upsert` finds) or is
+  pushed, with no sort and no eviction; the final `enforce` sorts once. A
+  `decide` example checks that lifting the limits instead (single inserts on
+  a list whose bound and budget are large) leaves the same entries. `cycle`
+  is kept as the cycle before #298, with its theorems.
 * Not modelled: the detectors, the `ConditionCheck` closures' bodies (except
   `windowCheck`, the shape of `clock_reading_entry`), lock order, events and
   re-arm, the companion step after the cut (`with_ordinary_companions`), and
@@ -162,7 +163,13 @@ before it enforces the budget and the bound:
   `src/daemon/hotlist.rs` says.
 * `cycleFixed_perm_cycle_of_no_evict`: when the cycle before #298 evicts
   nothing while inserting, the fixed one evicts nothing and leaves the same
-  entries, so the fix changes nothing there.
+  entries, so the fix changes nothing there. This is the narrow agreement.
+  The fair one, that the two cycles agree whenever no entry lapses (every
+  pair on the list is held and the held set is the hits' pairs) even when the
+  fresh hits overflow, reduces to the equivalence of `insert_many` with
+  one-by-one inserts, which is checked by `decide` only (see above), not
+  proved; a `decide` example checks it for this cycle on the `plan` hits and
+  several bounds and budgets.
 * `cycleFixed_keeps_fresh_hit`: the issue's bound-2 scenario keeps both n2's
   conflict and n3's drift (the cycle before #298 keeps only the conflict).
   Two more examples show that when the fresh hits themselves overflow, the
@@ -1621,9 +1628,9 @@ def countCHeld (held : List (Cond × ν)) : Nat :=
   (held.filter fun q => decide (q.1 = .contradiction)).length
 
 /-- One daemon cycle's hot-list step since #298 (`HotList::sync_cycle`, which
-`detect_into_hot_list` runs): every hit is inserted with the budget and the
-bound lifted, so each refreshes its pair in place or is pushed, with the next
-`seq`, and nothing is evicted (`upsertAll`); the list is cut to the cycle's
+`detect_into_hot_list` runs): every hit is inserted with the sort, the budget
+and the bound deferred, so each refreshes its pair in place or is pushed,
+with the next `seq`, and nothing is evicted (`upsertAll`); the list is cut to the cycle's
 condition set; only then are the budget and the bound enforced, once. Returns
 the list and what that `enforce` evicted. -/
 def cycleFixedFull (l : HotList ν) (hits : List (ν × Cond × Payload ν))
@@ -1978,8 +1985,10 @@ theorem cycle_evicts_fresh_hit :
       keys l3 = [(2, .conflict), (3, .drift)] := by
   decide
 
-/-- **#298 fixed** (`a_lapsed_entry_never_evicts_a_fresh_hit` in
-`src/daemon/hotlist.rs`): the scenario of `cycle_evicts_fresh_hit` under the
+/-- **#298 fixed** (`sync_cycle_cuts_before_it_enforces` in
+`src/daemon/hotlist.rs`; `a_lapsed_entry_never_evicts_a_fresh_hit` in
+`src/daemon/tests/conditions.rs` runs it through `detect_into_hot_list`, with
+a stale hit in place of the drift): the scenario of `cycle_evicts_fresh_hit` under the
 cycle since #298. Cycle 2 drops the old conflict on n1 before enforcing the
 bound, so both fresh hits stay: n2's conflict and n3's drift. -/
 theorem cycleFixed_keeps_fresh_hit :
@@ -2011,15 +2020,29 @@ example :
     keys r.1 = [(2, .contradiction), (3, .drift)] ∧ r.2.map key = [(1, .contradiction)] := by
   decide
 
-/-- The model of the lifted inserts: single inserts on the list with the bound
-and the budget lifted (`HotList::sync_cycle` sets both to `usize::MAX`) leave
-the entries `upsertAll` leaves, here with a refresh of a present pair. -/
+/-- Deferring the limits or lifting them leaves the same entries: single
+inserts on the list with a large bound and budget leave the entries
+`upsertAll` leaves, here with a refresh of a present pair. -/
 example :
     let l1 := insertAll (withMax 2) [req 1 .conflict, req 2 .conflict]
     let hits := [req 2 .conflict, req 3 .drift, req 1 .stale]
     sortPrio (insertAll { l1 with max := 100, cmax := 100 } hits).entries
       = sortPrio (upsertAll l1 hits).entries := by
   decide
+
+/-- **No lapsed entry, overflowing hits**: when every pair on the list is held
+and the held set is the hits' pairs, the cycles before and since #298 leave
+the same list, even where the hits overflow the bound or the budget. Checked
+on the `plan` hits (which repeat pairs and refresh the seeded one) for several
+bounds and budgets; proving it in general needs the `insert_many`
+equivalence, which is not proved (see the header). -/
+example :
+    [(0, 0), (3, 0), (3, 1), (3, 3), (8, 2), (8, 4), (8, 8), (20, 3), (20, 10), (100, 50)].all
+      fun (m, b) =>
+        let l := insertAll (withBudget m b) [req 99 .drift]
+        let hits := req 99 .drift :: plan
+        (cycleFixed l hits (heldOf hits)).entries = (cycle l hits (heldOf hits)).entries := by
+  decide +kernel
 
 /-- `revalidate_uses_the_callers_clock_and_refreshes_the_payload`: written at
 1000 with a 30 s window, the entry reads 11 then 25 seconds, and has lapsed at

@@ -36,16 +36,21 @@
   (say a lapsed conflict) could push off a fresh high-risk, drift or stale
   hit and then be dropped itself, leaving the list below its bound and the
   hit without its warning line or force-inclusion until a later cycle. The
-  detectors now insert inside the new `HotList::sync_cycle`, which lifts both
-  limits while they run, cuts the list to the cycle's condition set, then
-  enforces them once (restoring them even if a detector panics). While the
-  cycle's hits fit, the list now holds every one of them; when they do not,
-  the lowest of them go, as before. Events are unchanged.
+  detectors now insert inside a new crate-internal `HotList::sync_cycle`,
+  which defers the sort, the bound and the budget while they run (inserts
+  refresh or push through an index, so a cycle sorts the list once instead
+  of once per hit), cuts the list to the cycle's condition set, then
+  enforces both once (also when a detector panics). While the cycle's hits
+  fit, the list now holds every one of them; when they do not, the
+  lowest-priority of them go, and only they. Events are unchanged.
   `prime_offline` shares the path. `formal/LamboProofs/Hotlist.lean` models
   the fixed cycle (`cycleFixed`) and proves it keeps the invariant, keeps
   every fresh hit that fits (`cycleFixed_keeps_hits`,
-  `cycleFixed_keys_eq_hits`) and agrees with the old cycle whenever that one
-  evicted nothing while inserting.
+  `cycleFixed_keys_eq_hits`), evicts only detected entries that rank lowest
+  (`cycleFixed_evicts_only_for_held`), and agrees with the old cycle
+  whenever that one evicted nothing while inserting. That the two agree
+  whenever no entry lapses, even with overflowing hits, is checked on
+  examples only.
 
 - Recall: an exact durable-name match now raises the named concept's
   phase-1 keyword score to at least 1.0 instead of overwriting it with 1.0

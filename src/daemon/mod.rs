@@ -1155,7 +1155,7 @@ impl Daemon {
     ///
     /// Two writers maintain it. The loop keeps it equal to each cycle's fresh
     /// detector hits, up to its bound and contradiction budget
-    /// ([`HotList::sync_cycle`]), and recall **mutates**
+    /// (`HotList::sync_cycle`), and recall **mutates**
     /// it too: `Daemon::recall_detailed` re-validates the expanded members'
     /// entries at the recall's `now` ([`HotList::revalidate_members`], T5.3 /
     /// XP-3), evicting lapsed ones and rebuilding the survivors' payloads.
@@ -1198,11 +1198,11 @@ type Detected = (
 /// [`Daemon::prime_offline`], so an offline replay detects exactly as a
 /// holder does. Lock order is the caller's: graph read, then hot write.
 ///
-/// The detectors insert inside [`HotList::sync_cycle`], which lifts the
-/// bound and the contradiction budget while they run, cuts the list to the
-/// cycle's condition set, and only then enforces both (#298). Enforcing on
-/// every insert let an entry the cycle no longer detects evict a fresh hit of
-/// a lower tier before it was itself dropped.
+/// The detectors insert inside [`HotList::sync_cycle`], which defers the
+/// sort, the bound and the contradiction budget while they run, cuts the
+/// list to the cycle's condition set, and only then enforces both, once
+/// (#298). Enforcing on every insert let an entry the cycle no longer detects
+/// evict a fresh hit of a lower tier before it was itself dropped.
 fn detect_into_hot_list(
     h: &mut HotList,
     g: &Graph,
