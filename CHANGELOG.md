@@ -41,12 +41,14 @@
   refresh or push through an index, so a cycle sorts the list once instead
   of once per hit), cuts the list to the cycle's condition set, then
   enforces both once (also when a detector panics). While the cycle's hits
-  fit, the list now holds every one of them; when they do not, the
-  lowest-priority of them go, and only they. Events are unchanged.
-  `prime_offline` shares the path. `formal/LamboProofs/Hotlist.lean` models
+  fit, the list now holds every one of them; when they do not, only they
+  are evicted, the lowest-priority first (contradictions over the budget
+  first, which may outrank a kept entry of another kind). Events are
+  unchanged. `prime_offline` shares the path. `formal/LamboProofs/Hotlist.lean` models
   the fixed cycle (`cycleFixed`) and proves it keeps the invariant, keeps
   every fresh hit that fits (`cycleFixed_keeps_hits`,
-  `cycleFixed_keys_eq_hits`), evicts only detected entries that rank lowest
+  `cycleFixed_keys_eq_hits`), evicts only detected entries, ranked at or
+  below every kept one except for contradictions over the budget
   (`cycleFixed_evicts_only_for_held`), and agrees with the old cycle
   whenever that one evicted nothing while inserting. That the two agree
   whenever no entry lapses, even with overflowing hits, is checked on

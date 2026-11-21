@@ -264,7 +264,9 @@ pub struct HotList {
     /// budget beyond the bound.
     contradiction_max: usize,
     /// Priority-descending (`entries[0]` = highest priority), except during
-    /// a [`HotList::sync_cycle`], when they are in insertion order.
+    /// a [`HotList::sync_cycle`]: then they are the pre-cycle entries in
+    /// priority order, refreshed in place, with the cycle's new pairs
+    /// appended in insertion order (sorted when the cycle ends).
     entries: Vec<HotListEntry>,
     /// Monotonic insertion sequence — recency rank.
     next_seq: u64,
@@ -622,7 +624,9 @@ struct Deferred<'a> {
 
 impl<'a> Deferred<'a> {
     fn new(list: &'a mut HotList) -> Self {
-        debug_assert!(list.deferred.is_none(), "sync_cycle is not reentrant");
+        // A nested cycle would end the outer one's deferral early and bring
+        // back per-insert eviction (#298), so refuse it in every build.
+        assert!(list.deferred.is_none(), "sync_cycle is not reentrant");
         list.deferred = Some(
             list.entries
                 .iter()
@@ -1117,6 +1121,36 @@ mod tests {
     // One detection cycle (#298)
     // ------------------------------------------------------------------
 
+    /// An always-holding entry whose payload tells refreshes apart.
+    fn hit(n: u64, c: Condition, seconds_ago: u64) -> HotListEntry {
+        let payload = conflict_payload(seconds_ago);
+        let echo = payload.clone();
+        HotListEntry::new(nid(n), c, payload, move |_, _| Some(echo.clone()))
+    }
+
+    /// Run `ops` inside one cycle that holds `held`, and on its own followed by
+    /// `retain_conditions(held)` (the per-insert path), from the same seed and
+    /// with limits nothing reaches; the two lists must be identical (entries,
+    /// payloads, recency, order).
+    fn assert_deferred_matches_per_insert(
+        seed: impl Fn(&mut HotList),
+        ops: impl Fn(&mut HotList),
+        held: &HashSet<(Condition, NodeId)>,
+    ) -> HotList {
+        let mut deferred = HotList::with_budget(50, 25);
+        seed(&mut deferred);
+        deferred.sync_cycle(|h| {
+            ops(h);
+            (held.clone(), ())
+        });
+        let mut per_insert = HotList::with_budget(50, 25);
+        seed(&mut per_insert);
+        ops(&mut per_insert);
+        per_insert.retain_conditions(held);
+        assert_eq!(format!("{deferred:?}"), format!("{per_insert:?}"));
+        deferred
+    }
+
     fn pairs(list: &HotList) -> Vec<(Condition, NodeId)> {
         list.iter().map(|e| (e.condition, e.node)).collect()
     }
@@ -1203,10 +1237,11 @@ mod tests {
         );
     }
 
-    /// Inside the cycle nothing is evicted; the limits are restored and
-    /// enforced afterwards, even when the cycle panics.
+    /// Inside the cycle nothing is evicted; when it ends the deferral is
+    /// over, the list is sorted and within its limits, and inserts evict
+    /// again, even when the cycle panics.
     #[test]
-    fn sync_cycle_restores_the_limits_even_on_a_panic() {
+    fn sync_cycle_sorts_and_enforces_even_on_a_panic() {
         let mut list = HotList::with_budget(2, 1);
         let inside = list.sync_cycle(|h| {
             let evicted: Vec<_> = (1..=4)
@@ -1220,6 +1255,7 @@ mod tests {
         });
         assert_eq!(inside, 4);
         assert_eq!(pairs(&list), vec![(Condition::Contradiction, nid(4))]);
+        assert!(list.deferred.is_none(), "the deferral ends with the cycle");
 
         let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             list.sync_cycle(|h| -> (HashSet<(Condition, NodeId)>, ()) {
@@ -1230,8 +1266,7 @@ mod tests {
             })
         }));
         assert!(caught.is_err());
-        assert_eq!(list.max(), 2);
-        assert_eq!(list.contradiction_max(), 1);
+        assert!(list.deferred.is_none(), "the deferral ends on a panic too");
         assert_eq!(list.len(), 2, "the bound holds again");
         assert_eq!(
             pairs(&list),
@@ -1255,11 +1290,6 @@ mod tests {
     #[test]
     fn sync_cycle_matches_the_per_insert_path_when_nothing_is_evicted() {
         use Condition::*;
-        fn hit(n: u64, c: Condition, seconds_ago: u64) -> HotListEntry {
-            let payload = conflict_payload(seconds_ago);
-            let echo = payload.clone();
-            HotListEntry::new(nid(n), c, payload, move |_, _| Some(echo.clone()))
-        }
         fn seed(list: &mut HotList) {
             for (n, c) in [
                 (1, Conflict),
@@ -1309,6 +1339,107 @@ mod tests {
 
         assert_eq!(deferred.len(), 7);
         assert_eq!(format!("{deferred:?}"), format!("{per_insert:?}"));
+    }
+
+    /// A deferred `insert_many` batch that repeats a pair refreshes it in
+    /// place each time, as the non-deferred batch does: the last payload and
+    /// recency win, and the pair is held once.
+    #[test]
+    fn a_deferred_batch_with_repeated_pairs_matches_the_per_insert_path() {
+        use Condition::*;
+        let held: HashSet<(Condition, NodeId)> =
+            [(Contradiction, 1), (Contradiction, 2), (Drift, 3)]
+                .into_iter()
+                .map(|(c, n)| (c, nid(n)))
+                .collect();
+        let list = assert_deferred_matches_per_insert(
+            |l| {
+                let _ = l.insert(hit(2, Contradiction, 30));
+                let _ = l.insert(hit(3, Drift, 30));
+            },
+            |l| {
+                let _ = l.insert_many([
+                    hit(1, Contradiction, 1),
+                    hit(2, Contradiction, 2),
+                    hit(1, Contradiction, 3),
+                    hit(2, Contradiction, 4),
+                    hit(1, Contradiction, 5),
+                ]);
+            },
+            &held,
+        );
+        assert_eq!(list.len(), 3);
+        let payload_of = |n| {
+            list.iter()
+                .find(|e| e.node == nid(n))
+                .map(|e| e.payload.clone())
+        };
+        assert_eq!(payload_of(1), Some(conflict_payload(5)));
+        assert_eq!(payload_of(2), Some(conflict_payload(4)));
+    }
+
+    /// `retain_conditions` and `revalidate` called inside a cycle remove
+    /// entries and shift positions; the index is rebuilt, so later refreshes
+    /// still land on their pair and the cycle ends in the list the
+    /// non-deferred path leaves.
+    #[test]
+    fn removals_inside_a_cycle_keep_the_deferred_index_right() {
+        use Condition::*;
+        let g = Graph::new(sid());
+        let held: HashSet<(Condition, NodeId)> = [
+            (Drift, 2),
+            (Contradiction, 4),
+            (Contradiction, 5),
+            (Contradiction, 6),
+            (Conflict, 8),
+            (StaleSession, 9),
+        ]
+        .into_iter()
+        .map(|(c, n)| (c, nid(n)))
+        .collect();
+        let list = assert_deferred_matches_per_insert(
+            |l| {
+                for (n, c) in [
+                    (1, Conflict),
+                    (2, Drift),
+                    (3, StaleSession),
+                    (4, Contradiction),
+                ] {
+                    let _ = l.insert(hit(n, c, 30));
+                }
+            },
+            |l| {
+                let _ = l.insert_many([hit(5, Contradiction, 5), hit(6, Contradiction, 6)]);
+                let _ = l.insert(HotListEntry::new(
+                    nid(7),
+                    Drift,
+                    conflict_payload(7),
+                    |_, _| None,
+                ));
+                let _ = l.insert(hit(8, Conflict, 8));
+                // Drops n1's conflict and n3's staleness, shifting the rest.
+                let mut keep = held.clone();
+                keep.insert((Drift, nid(7)));
+                l.retain_conditions(&keep);
+                let _ = l.insert(hit(2, Drift, 92));
+                // n7's predicate fails: dropped, shifting the rest again.
+                assert!(!l.revalidate(&g, nid(7), t(0)));
+                let _ = l.insert(hit(8, Conflict, 98));
+                let _ = l.insert(hit(9, StaleSession, 9));
+                let _ = l.insert_many([hit(6, Contradiction, 96), hit(4, Contradiction, 94)]);
+            },
+            &held,
+        );
+        assert_eq!(list.len(), 6);
+        let payload_of = |n| {
+            list.iter()
+                .find(|e| e.node == nid(n))
+                .map(|e| e.payload.clone())
+        };
+        assert_eq!(payload_of(2), Some(conflict_payload(92)));
+        assert_eq!(payload_of(8), Some(conflict_payload(98)));
+        assert_eq!(payload_of(6), Some(conflict_payload(96)));
+        assert_eq!(payload_of(4), Some(conflict_payload(94)));
     }
 
     /// `insert_many` leaves exactly the list one-by-one `insert` would:
