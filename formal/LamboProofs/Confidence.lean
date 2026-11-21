@@ -48,20 +48,41 @@ the exact values of the Rust expressions:
 * `1 - (1 - a)(1 - b)` with `a = an / ad`, `b = bn / bd` is
   `(ad·bd - (ad - an)(bd - bn)) / (ad·bd)` (`noisyOrCombine`).
 
-Not captured: `f64` rounding. The range `[0, 1]` survives it: each step is a
-correctly rounded operation, monotone in each argument, whose exact result
-lies in `[0, 1]`, and `0` and `1` are representable (`s ≤ fl(s + 5)` since
-`s` is representable, so `fl(s / fl(s + 5)) ≤ 1`). The rest holds in exact
-arithmetic and only up to rounding in `f64`:
+Not captured: `f64` rounding. Correct rounding makes `fl` monotone in the
+exact result of each operation, and that is all the arguments below use (`-`
+and `/` are not monotone in their second operand; where that operand varies,
+the argument says so).
 
-* monotonicity: `S / (S + 5)` divides two rounded quantities that both grow,
-  so two BM25s an ulp apart can in principle come out an ulp out of order;
-  the Rust test checks monotonicity on integer steps only;
-* the identities (`1/2` at `S = 5`, the `0.75` of #174's test), which the Rust
-  tests compare to within `1e-12`;
-* "strictly below `1`" for the keyword term (`keywordTerm_lt_one`,
-  `noisyOr_eq_one_iff`): in `f64`, `S / (S + 5)` rounds to `1.0` once `S` is
-  near `5 · 2^53`, a BM25 no index produces.
+* **The range `[0, 1]` survives rounding.** Each step's exact result lies in
+  `[0, 1]`, and `0` and `1` are representable, so the rounded result does too
+  (`s ≤ fl(s + 5)` since `s` is representable, so `fl(s / fl(s + 5)) ≤ 1`).
+* **Monotonicity in the cosine survives rounding.** With the BM25 and the
+  median fixed, every step is a rounded operation applied to the varying
+  quantity with the other operand fixed, and each is monotone or antitone in
+  it: `c - m`, division by the fixed `1 - m > 0`, the clamp, `1 - b`, the
+  product with the fixed `1 - a ≥ 0`, and the final `1 - x`.
+* **Monotonicity in BM25 is exact-arithmetic only.** `S / (S + 5)` divides two
+  rounded quantities that both grow, so two BM25s an ulp apart can in
+  principle come out an ulp out of order (`keywordTerm_mono`,
+  `noisyOr_mono_bm25`, `provisional_mono_bm25`); the Rust test checks
+  integer steps only.
+* **"Never below either term" and the keyword-only comparison are
+  exact-arithmetic only** (`noisyOr_ge_keyword`, `noisyOr_ge_vector`,
+  `keywordOnly_le_noisyOr`, `keywordOnly_eq_noisyOr_at_null`): in `f64` they
+  can be off by an ulp. For example `noisy_or(1.0, 0.10, 0.36)` is
+  `0.16666666666666663`, below `keyword_term(1.0) = 0.16666666666666666`,
+  although the cosine is under the median (`b = 0`).
+* **The identities** (`1/2` at `S = 5`, the `0.75` of #174's test) hold up to
+  rounding; the Rust tests compare to within `1e-12`.
+* **"Strictly below `1`" is exact-arithmetic only.** The keyword term alone
+  (`keywordTerm_lt_one`) rounds to `1.0` once `S` is near `7.2e16 ≈ 2^56`, a
+  BM25 no index produces. For the two-leg value, the "if" direction of
+  `noisyOr_eq_one_iff` (cosine at least `1` gives `1`) survives rounding, but
+  the "only if" direction does not: a cosine within an ulp or two of `1`
+  can round the rescaled term to exactly `1.0`. At the BGE-M3 median
+  `m = 0.3586` and `c = 1 - 2^-53`, `(c - m) / (1 - m)` rounds to `1.0`, so
+  `noisy_or(0.0, c, 0.3586) = 1.0` with `c < 1`; likewise
+  `noisy_or(20.0, c, 0.36) = 1.0`.
 
 Overflow of `c - m` to `+∞` (inputs near `f64::MAX`) gives `+∞ / (1 - m)`,
 which clamps to `1` in Rust as in the exact model; `1 - m` and `S + 5` cannot
@@ -80,22 +101,27 @@ named are in `src/recall/confidence.rs` (`the_arithmetic_is_the_noisy_or_recorde
 
 * `provisional_inUnit`: **"The combined value, in `[0, 1]`"**
   (`ProvisionalConfidence::value`), for every `TopLegs` and every median,
-  finite or not. `keywordTerm_lt_one`: the keyword term alone never reaches 1.
+  finite or not. `keywordTerm_lt_one`: the keyword term alone never reaches 1
+  (exact arithmetic only; see the number model).
 * `keywordTerm_half`, `keywordTerm_of_nonpos`, `keywordTerm_tendsto_one`:
   `S / (S + 5)` is `1/2` at `KEYWORD_HALF_SCORE`, `0` at and below `0` ("A
   negative score counts as none"), and within `1/n` of `1` from `S = 5n` on.
 * `keywordTerm_mono`, `noisyOr_mono_bm25`, `noisyOr_mono_cosine`,
   `provisional_mono_bm25`, `provisional_mono_cosine`: **monotone in each leg**
-  (the test's "monotone in each leg"), with the basis unchanged.
+  (the test's "monotone in each leg"), with the basis unchanged. In `f64` the
+  cosine statements survive rounding; the BM25 ones hold up to an ulp.
 * `noisyOr_ge_keyword`, `noisyOr_ge_vector`, `noisyOrCombine_num`,
   `noisyOrCombine_comm`, `noisyOr_eq_one_iff`: the noisy-OR is never below
   either term, equals `a + b - ab`, is symmetric, and is `1` exactly when the
   cosine is at least `1` ("one at 1 is 1"); keyword evidence alone never
   makes it `1`. `vectorTerm_spec`: "A cosine at or under the null median adds
-  nothing".
+  nothing". The two "never below" statements and the "only if" direction of
+  `noisyOr_eq_one_iff` are exact-arithmetic only (the number model gives
+  `f64` counterexamples).
 * `keywordOnly_eq_noisyOr_at_null`, `keywordOnly_le_noisyOr`: **"It is the
   two-leg value with `b = 0`, a lower quantity than the two-leg value would
-  have been"**.
+  have been"**, in exact arithmetic; in `f64` "lower" holds only up to an ulp
+  (`noisy_or(1.0, 0.10, 0.36)` is an ulp below `keyword_term(1.0)`).
 * `provisional_basis_iff`, `provisional_keywordOnly`: **the keyword-only basis
   applies exactly when `vector_cosine` is `None`** (no vector search, a failed
   embed or vector read, nothing embedded, every cosine non-finite, every
@@ -141,6 +167,10 @@ search and its approximate indexes (modelled as the vector slots of the leg
 map; the merge of vector hits into the map after the keyword phase is not
 modelled, `topLegs_congr` and `topLegs_perm` covering what `top_legs` reads),
 `calibration::lookup` and `is_reference` (inputs of `nullMedian`), the
+daemon's `embedding.and_then(|(_, contract)| null_median_cosine(..))`
+(`src/daemon/mod.rs`, the `Route::Text` arm), which passes no median at all
+when the query embed failed, under any contract (harmless: such a recall has
+no vector leg and takes the keyword-only path, which needs none), the
 layered recall's `layer_top_legs`, and the serialized wire shape. The leg
 map is a list of entries with distinct keys standing for the `HashMap`;
 `upsertKeyword` is `entry(id).or_default()` followed by a write to the
@@ -1152,6 +1182,24 @@ example :
     (topLegs inGraphDemo [(0, ⟨none, none, some (.fin 41)⟩), (9, ⟨none, none, some (.fin 93)⟩)]
       ⟨false, none, false⟩).vectorCosine = some (.fin 41) := by
   decide
+
+/-- `firstFiniteConcept`'s branches (`isConcept` is `inGraphDemo`, so `9` is
+not a concept): a non-concept hit first is skipped; a `+∞` concept hit before
+a finite one is skipped (`matched` without a best), and the leg's best is the
+finite one; a concept list of only non-finite scores has no best, so the leg
+reports none although it matched; on a multi-hit best-first list the first
+concept is the best (`firstFiniteConcept_max`). -/
+example :
+    firstFiniteConcept inGraphDemo [(9, .fin 900), (1, .fin 300)] = some 300 ∧
+    firstFiniteConcept inGraphDemo [(2, .posInf), (1, .fin 300)] = some 300 ∧
+    (keywordLeg true inGraphDemo [(2, .posInf), (1, .fin 300)] none).bestBm25 = some (.fin 300) ∧
+    (keywordLeg true inGraphDemo [(2, .nan)] none).bestBm25 = none ∧
+    (keywordLeg true inGraphDemo [(9, .fin 900)] none).bestBm25 = some (.fin 0) ∧
+    firstFiniteConcept inGraphDemo [(9, .fin 900), (3, .fin 720), (0, .fin 410), (4, .fin 100)] =
+      some 720 ∧
+    BestFirst ([(9, .fin 900), (3, .fin 720), (0, .fin 410), (4, .fin 100)] : List (Nat × F64)) := by
+  refine ⟨by decide, by decide, by decide, by decide, by decide, by decide, ?_⟩
+  simp [BestFirst]
 
 /-- **`bm25` is not the name floor** (#288, `an_exact_name_query_reports_the_raw_bm25_and_the_match`):
 the named concept `0` scores `0.4`; after the keyword phase its keyword slot
