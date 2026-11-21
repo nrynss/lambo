@@ -134,10 +134,12 @@ process's sequence starts at 1.
   `runW_ord`: per agent, settled, running, held and queued writes are its
   admitted writes in order; `stepW_caps`, `runW_caps`: the lane, queue and
   byte caps hold over queued, running and held writes at every step;
-  `retry_settles_head`: a retry with no new write settles the oldest held
-  write once the embedder answers; `stepW_caps_free`: a retry does not read
-  the caps, so they cannot wedge it; `refused_wakes`: a refused write of an
-  agent with held writes wakes its retry; `fence_stops_applies`: after the
+  `retry_settles_head`, `retry_enabled`: a retry needs no admission, is
+  always available while writes are held, and settles the oldest held write
+  once the embedder answers (that the retry comes due is the Rust's timer,
+  not modelled); `stepW_caps_free`: a retry does not read the caps, by
+  definition; `refused_wakes`: the commit at which a refused write woke the
+  retry at once; `fence_stops_applies`: after the
   fence nothing taken is applied; `sessionW_orderInv`,
   `sessionW_then_serve_order`: per-agent order from the session through the
   next serve. `serveR_reported`: a halt that leaves intents owed reports
@@ -3092,7 +3094,24 @@ commit, which the store's fenced flush then refuses (`Flush.lean`).
 Which errors hold a write (`holdsS`): an embedder outage. A lookup timeout
 settles `failed`, as the replay settles a single one; the worker's run of
 them that says the store is slow is handed to the model as `unavailable`
-(the class the worker acts on, not its cause). -/
+(the class the worker acts on, not its cause). The run counts first attempts
+only: a held write's retry that times out again is handed over as
+`lookupTimeout`, and settles.
+
+**What the retry theorems cover, and what they do not.** `wake` and `start`
+are free events of the environment, so `retry_settles_head` and
+`retry_enabled` say that a retry needs no admission and is never blocked by
+the caps (`stepW_caps_free`, which holds because only admission reads them),
+and that it is always available while an agent has held writes and nothing
+running. They do not say that a retry ever happens: that is the Rust's
+backoff timer, which a worker keeps while its agent has held writes
+(`execution::held_retry_backoff`), and timing is not modelled. Nor do they
+bound how often it happens: in the Rust, neither a new write nor a refused
+admission starts a retry before the backoff since the last attempt has
+passed. Such a refusal is therefore no event in the model at all: it changes
+nothing but the parking, which in the Rust it leaves alone. `refused_wakes`
+describes the commit before that (`30b79824`), where a refusal woke the
+retry at once. -/
 
 /-- The admission bounds: per agent (`WRITE_QUEUE_LANE_MAX`), the whole queue
 (`WRITE_QUEUE_MAX`), payload bytes (`WRITE_QUEUE_MAX_BYTES`). -/
@@ -3605,23 +3624,28 @@ theorem runW_caps (c : Caps) (sz : Job → Nat) (now : Int) :
 
 /-! ### Held writes are retried without any new admission -/
 
-/-- **The caps cannot wedge a retry**: only admission reads them; a retry
-(`wake`, `start`, `finish`) is the same under any bounds. -/
+/-- **The caps cannot wedge a retry**: only admission reads them, so a retry
+(`wake`, `start`, `finish`) is the same under any bounds. It holds by
+definition; its point is that a retry never passes through admission. -/
 theorem stepW_caps_free (c c' : Caps) (sz sz' : Job → Nat) (now : Int) (st : WS) (ev : Ev)
     (h : ∀ j, ev ≠ .submit j) : stepW c sz now st ev = stepW c' sz' now st ev := by
   cases ev with
   | submit j => exact absurd rfl (h j)
   | _ => rfl
 
-/-- A refused admission for an agent with held writes wakes its retry. -/
+/-- In the model, a refused admission for an agent with held writes wakes its
+retry: what the Rust did at `30b79824`. Since the review that followed, the
+Rust lets a refusal start no retry before the backoff has passed (see the
+section's header). -/
 theorem refused_wakes (c : Caps) (sz : Job → Nat) (now : Int) (st : WS) (j : Job)
     (hf : fits c sz st j = false) (hh : ofAgent j.agent st.held ≠ []) :
     j.agent ∉ (stepW c sz now st (.submit j)).parked := by
   simp [stepW, hf, hh]
 
-/-- **Progress with no new write**: an agent with held writes and nothing
-running, woken by its retry timer, settles its oldest held write once the
-embedder answers it, with no admission among the events. -/
+/-- **A retry needs no admission**: an agent with held writes and nothing
+running, once its retry is due (`wake`), settles its oldest held write when
+the embedder answers it, with no admission among the events. That the retry
+comes due is the Rust's timer, not this theorem. -/
 theorem retry_settles_head (c : Caps) (sz : Job → Nat) (now : Int) (st : WS) (a : Nat)
     (h : Job) (t : List Job) (r : RunResult) (hheld : ofAgent a st.held = h :: t)
     (hrun : ofAgent a st.running = []) (hf : st.fenced = false)
@@ -3647,6 +3671,28 @@ theorem retry_settles_head (c : Caps) (sz : Job → Nat) (now : Int) (st : WS) (
   | err e =>
     have he := hr e rfl
     simp [finishW, takeHeld, settleRun, hr2, d1, he]
+
+/-- **A retry is always available while writes are held**: for an agent
+with held writes, nothing running and the lease held, the events `wake` then
+`start` take its oldest held write to run, whatever the parking, the caps or
+the rest of the state. (Enabledness, not fairness: that the environment
+delivers `wake` is the Rust's timer.) -/
+theorem retry_enabled (c : Caps) (sz : Job → Nat) (now : Int) (st : WS) (a : Nat) (h : Job)
+    (t : List Job) (hheld : ofAgent a st.held = h :: t) (hrun : ofAgent a st.running = [])
+    (hf : st.fenced = false) :
+    (runW c sz now st [.wake a, .start a]).running = st.running ++ [h] ∧
+      ofAgent a (runW c sz now st [.wake a, .start a]).held = t := by
+  obtain ⟨d1, _, _, _⟩ := dropFirst_spec (fun _ => 0) a st.held h t hheld
+  have hs : startW now a { st with parked := st.parked.filter (· ≠ a) } =
+      takeHeld a h { st with parked := st.parked.filter (· ≠ a) } := by
+    unfold startW
+    have hn : ¬ ofAgent a st.running ≠ [] := by simp [hrun]
+    rw [ite_eq_right hn]
+    simp only [hheld, hf, Bool.false_eq_true, ite_false]
+    cases hq : ofAgent a st.queue <;> simp
+  simp only [runW, stepW]
+  rw [hs]
+  exact ⟨rfl, d1⟩
 
 /-! ### The fence -/
 
