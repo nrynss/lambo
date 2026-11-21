@@ -11,7 +11,9 @@ gets a warning-only `SuspectedSupersedes` edge, newer → older. Modelled:
 `eligible_type`, `repo_scope` (as an abstract scope), `dated_at`, `settled`,
 `is_suspected_pair`, `candidate`, `record`, `record_refused_hits`, `settle`,
 and replacement candidates: `eligible_pair` and `select`, with its floor,
-clamp, skip, dedup, ranking, cap and the `newer` and `merged` marks.
+clamp, skip, dedup, ranking, cap and the `newer` and `merged` marks. `keep`
+and `select` are the version before #302's fix, which kept a repeated id's
+first score; `keepF` and `selectF` are the fixed one, which keeps its highest.
 
 **Evidence-driven supersession (#20)**, `src/canon/supersession.rs`, behind
 `Config::canonization_supersede` (default off): a Canonical concept whose
@@ -55,6 +57,16 @@ and `superseded_by` (`src/recall/assemble.rs`), and the line gate of
   with the trigger's direction on the write's own graph.
   `select_tie_not_newer`: a tie is not newer (test
   `a_later_dated_candidate_is_marked_newer_both_ways_and_a_tie_is_not`).
+* #302's fix to `select` (`keepF`, `selectF`): `keepF_best`: the fixed loop
+  keeps exactly the concepts some hit qualifies as, each once, at the highest
+  score of the hits on its id; so `selectF_order_independent`: two hit lists
+  with the same members, in any order and with any repetition, give the same
+  candidates (`selectF_swap`: in particular two hits on one id). The theorems
+  above carry over: `selectF_mem`, `selectF_length`,
+  `selectF_newer_matches_trigger`, `selectF_newer_not_replaced`,
+  `selectF_newer_never_replaced_by_new`, `selectF_tie_not_newer`. The old
+  `select` keeps a repeated id's first score (the examples, test
+  `a_duplicate_id_keeps_its_highest_cosine`).
 * `stage2Since_newest`, `evaluate_some`, `verdict_sound`: a #20 verdict
   comes from a forward probe whose source's newest counted evidence is
   strictly after the target's watermark, itself at least the target's
@@ -830,6 +842,508 @@ theorem select_tie_not_newer (E : List Edge) (look : Nat → Option Concept) (ne
     (hc : c ∈ select E look new hits floor skip merged) (old : Concept)
     (hold : look c.id = some old) (ht : old.dated = new.dated) : c.newer = false := by
   obtain ⟨o, ho, _, _, _, _, _, _, _, hnewer⟩ := select_mem E look new hits floor skip merged hl c hc
+  rw [hold] at ho; injection ho with ho; subst ho
+  cases h : c.newer
+  · rfl
+  · have := hnewer.mp h; omega
+
+/-! ### The fix for #302: a repeated id keeps its highest score
+
+`select` documents its hits as taken "in any order" and its candidates as
+"ranked by cosine", but `keep` keeps a repeated id's first score. The fixed
+loop `keepF` raises a kept id's score to the maximum instead (`raiseScore`).
+`keep`, `select` and every theorem above stay, as statements about the
+previous version. The kept list is then characterized by the hits as a set
+(`keepF_best`), so the fixed `selectF` does not depend on the order the
+store returns them in, nor on how often it repeats one
+(`selectF_order_independent`). -/
+
+/-- Raise the kept score of id `i` to at least `s`. -/
+def raiseScore (i : Nat) (s : Int) (kept : List (Concept × Int)) : List (Concept × Int) :=
+  kept.map fun k => if k.1.id = i then (k.1, max k.2 s) else k
+
+/-- The fixed loop: as `keep`, except that a hit on an id already kept raises
+its score to the maximum. -/
+def keepF (E : List Edge) (look : Nat → Option Concept) (new : Concept) (floor : Int)
+    (skip : List Nat) : List (Concept × Int) → List Hit → List (Concept × Int)
+  | kept, [] => kept
+  | kept, h :: hs =>
+    if h.finite = false then keepF E look new floor skip kept hs
+    else if clampScore h.score < floor then keepF E look new floor skip kept hs
+    else if h.item ∈ skip then keepF E look new floor skip kept hs
+    else if kept.any (fun k => k.1.id == h.item) = true then
+      keepF E look new floor skip (raiseScore h.item (clampScore h.score) kept) hs
+    else
+      match look h.item with
+      | some old =>
+        if eligiblePair E new old then keepF E look new floor skip (kept ++ [(old, clampScore h.score)]) hs
+        else keepF E look new floor skip kept hs
+      | none => keepF E look new floor skip kept hs
+
+/-- `select` after the fix. -/
+def selectF (E : List Edge) (look : Nat → Option Concept) (new : Concept) (hits : List Hit)
+    (floor : Int) (skip merged : List Nat) : List Cand :=
+  ((sortKept (keepF E look new floor skip [] hits)).take limit).map fun k =>
+    { new := new.id, id := k.1.id, cosine := k.2, newer := decide (new.dated < k.1.dated),
+      merged := decide (k.1.id ∈ merged) }
+
+section fixed
+
+variable {E : List Edge} {look : Nat → Option Concept} {new : Concept} {floor : Int}
+  {skip : List Nat}
+
+/-- A hit `select` can list as `old`: finite, at or above the floor, not
+skipped, and an eligible concept. -/
+def Qual (E : List Edge) (look : Nat → Option Concept) (new : Concept) (floor : Int)
+    (skip : List Nat) (h : Hit) (old : Concept) : Prop :=
+  h.finite = true ∧ floor ≤ clampScore h.score ∧ h.item ∉ skip ∧ look h.item = some old ∧
+    eligiblePair E new old = true
+
+/-- `k` is a concept some hit qualifies as, at the highest score of the hits
+on its id. -/
+def Best (E : List Edge) (look : Nat → Option Concept) (new : Concept) (floor : Int)
+    (skip : List Nat) (hits : List Hit) (k : Concept × Int) : Prop :=
+  (∃ h ∈ hits, Qual E look new floor skip h k.1 ∧ clampScore h.score = k.2) ∧
+    ∀ h ∈ hits, ∀ o, Qual E look new floor skip h o → h.item = k.1.id → clampScore h.score ≤ k.2
+
+/-- The loop invariant of `keepF` after the hits `pre`. -/
+def KInv (E : List Edge) (look : Nat → Option Concept) (new : Concept) (floor : Int)
+    (skip : List Nat) (pre : List Hit) (kept : List (Concept × Int)) : Prop :=
+  (∀ k, k ∈ kept ↔ Best E look new floor skip pre k) ∧ (kept.map (·.1.id)).Nodup ∧
+    ∀ h ∈ pre, ∀ o, Qual E look new floor skip h o → ∃ k ∈ kept, k.1.id = h.item
+
+theorem qual_id (hl : LookById look) {h : Hit} {o : Concept}
+    (hq : Qual E look new floor skip h o) : o.id = h.item :=
+  hl _ _ hq.2.2.2.1
+
+theorem best_snoc_of_not_qual {pre : List Hit} {h : Hit}
+    (hq : ∀ o, ¬ Qual E look new floor skip h o) (k : Concept × Int) :
+    Best E look new floor skip (pre ++ [h]) k ↔ Best E look new floor skip pre k := by
+  constructor
+  · rintro ⟨⟨h0, hm, hq0, hs⟩, hmax⟩
+    rcases List.mem_append.mp hm with hm | hm
+    · exact ⟨⟨h0, hm, hq0, hs⟩, fun h' hm' o hq' hi => hmax h' (by simp [hm']) o hq' hi⟩
+    · simp at hm; subst hm; exact absurd hq0 (hq _)
+  · rintro ⟨⟨h0, hm, hq0, hs⟩, hmax⟩
+    refine ⟨⟨h0, by simp [hm], hq0, hs⟩, fun h' hm' o hq' hi => ?_⟩
+    rcases List.mem_append.mp hm' with hm' | hm'
+    · exact hmax h' hm' o hq' hi
+    · simp at hm'; subst hm'; exact absurd hq' (hq _)
+
+/-- A hit on an id other than `k`'s does not change whether `k` is best. -/
+theorem best_snoc_other (hl : LookById look) {pre : List Hit} {h : Hit} {k : Concept × Int}
+    (hne : k.1.id ≠ h.item) :
+    Best E look new floor skip (pre ++ [h]) k ↔ Best E look new floor skip pre k := by
+  constructor
+  · rintro ⟨⟨h0, hm, hq0, hs⟩, hmax⟩
+    rcases List.mem_append.mp hm with hm | hm
+    · exact ⟨⟨h0, hm, hq0, hs⟩, fun h' hm' o hq' hi => hmax h' (by simp [hm']) o hq' hi⟩
+    · simp at hm; subst hm; exact absurd (qual_id hl hq0) hne
+  · rintro ⟨⟨h0, hm, hq0, hs⟩, hmax⟩
+    refine ⟨⟨h0, by simp [hm], hq0, hs⟩, fun h' hm' o hq' hi => ?_⟩
+    rcases List.mem_append.mp hm' with hm' | hm'
+    · exact hmax h' hm' o hq' hi
+    · simp at hm'; subst hm'; exact absurd hi.symm hne
+
+theorem raiseScore_ids (i : Nat) (s : Int) (kept : List (Concept × Int)) :
+    (raiseScore i s kept).map (·.1.id) = kept.map (·.1.id) := by
+  simp only [raiseScore, List.map_map]
+  apply List.map_congr_left
+  intro k _
+  simp only [Function.comp_apply]
+  split <;> rfl
+
+theorem mem_raiseScore {i : Nat} {s : Int} {kept : List (Concept × Int)} {k : Concept × Int} :
+    k ∈ raiseScore i s kept ↔ ∃ k0 ∈ kept, k = if k0.1.id = i then (k0.1, max k0.2 s) else k0 := by
+  simp only [raiseScore, List.mem_map]
+  constructor
+  · rintro ⟨k0, hk0, rfl⟩; exact ⟨k0, hk0, rfl⟩
+  · rintro ⟨k0, hk0, rfl⟩; exact ⟨k0, hk0, rfl⟩
+
+theorem nodup_ids_eq {kept : List (Concept × Int)} (hn : (kept.map (·.1.id)).Nodup)
+    {a b : Concept × Int} (ha : a ∈ kept) (hb : b ∈ kept) (hab : a.1.id = b.1.id) : a = b := by
+  induction kept with
+  | nil => simp at ha
+  | cons x xs ih =>
+    simp only [List.map_cons, List.nodup_cons, List.mem_map] at hn
+    simp only [List.mem_cons] at ha hb
+    rcases ha with rfl | ha <;> rcases hb with rfl | hb
+    · rfl
+    · exact absurd ⟨b, hb, hab.symm⟩ hn.1
+    · exact absurd ⟨a, ha, hab⟩ hn.1
+    · exact ih hn.2 ha hb
+
+/-- One step of `keepF` keeps the invariant. -/
+theorem kinv_step (hl : LookById look) {pre : List Hit} {kept : List (Concept × Int)}
+    (hi : KInv E look new floor skip pre kept) (h : Hit) :
+    ∃ kept', KInv E look new floor skip (pre ++ [h]) kept' ∧
+      ∀ hs, keepF E look new floor skip kept (h :: hs) = keepF E look new floor skip kept' hs := by
+  obtain ⟨hmem, hnd, hcov⟩ := hi
+  -- the hit qualifies for no concept: nothing changes
+  have nochange : (∀ o, ¬ Qual E look new floor skip h o) →
+      KInv E look new floor skip (pre ++ [h]) kept := by
+    intro hq
+    refine ⟨fun k => (hmem k).trans (best_snoc_of_not_qual hq k).symm, hnd, ?_⟩
+    intro h0 hm o hq0
+    rcases List.mem_append.mp hm with hm | hm
+    · exact hcov h0 hm o hq0
+    · simp at hm; subst hm; exact absurd hq0 (hq _)
+  by_cases hfin : h.finite = false
+  · refine ⟨kept, nochange (fun o hq => by rw [hq.1] at hfin; cases hfin), fun hs => ?_⟩
+    simp [keepF, hfin]
+  by_cases hfl : clampScore h.score < floor
+  · refine ⟨kept, nochange (fun o hq => by have := hq.2.1; omega), fun hs => ?_⟩
+    simp [keepF, hfin, hfl]
+  by_cases hsk : h.item ∈ skip
+  · refine ⟨kept, nochange (fun o hq => hq.2.2.1 hsk), fun hs => ?_⟩
+    simp [keepF, hfin, hfl, hsk]
+  have hfin' : h.finite = true := by simpa using hfin
+  have hfl' : floor ≤ clampScore h.score := by omega
+  by_cases hany : kept.any (fun k => k.1.id == h.item) = true
+  · -- raise the kept entry
+    refine ⟨raiseScore h.item (clampScore h.score) kept, ?_, fun hs => by
+      simp [keepF, hfin, hfl, hsk, hany]⟩
+    obtain ⟨e, he, heid⟩ := List.any_eq_true.mp hany
+    have heid : e.1.id = h.item := by simpa using heid
+    obtain ⟨⟨he0, he0m, he0q, he0s⟩, he0max⟩ := (hmem e).mp he
+    have hlook : look h.item = some e.1 := by
+      have h1 := he0q.2.2.2.1
+      rw [← qual_id hl he0q, heid] at h1
+      exact h1
+    have hqe : Qual E look new floor skip h e.1 := ⟨hfin', hfl', hsk, hlook, he0q.2.2.2.2⟩
+    refine ⟨fun k => ?_, by rw [raiseScore_ids]; exact hnd, ?_⟩
+    · rw [mem_raiseScore]
+      constructor
+      · rintro ⟨k0, hk0, rfl⟩
+        by_cases hk0i : k0.1.id = h.item
+        · have hk0e : k0 = e := nodup_ids_eq hnd hk0 he (hk0i.trans heid.symm)
+          subst hk0e
+          simp only [hk0i, ite_true]
+          refine ⟨?_, fun h' hm' o hq' hi' => ?_⟩
+          · by_cases hle : clampScore h.score ≤ k0.2
+            · exact ⟨he0, by simp [he0m], he0q, by rw [he0s]; omega⟩
+            · exact ⟨h, by simp, hqe, by omega⟩
+          · rcases List.mem_append.mp hm' with hm' | hm'
+            · have := he0max h' hm' o hq' hi'; simp only []; omega
+            · simp at hm'; subst hm'; simp only []; omega
+        · simp only [hk0i, ite_false]
+          exact (best_snoc_other hl (by simpa using hk0i)).mpr ((hmem k0).mp hk0)
+      · intro hb
+        by_cases hki : k.1.id = h.item
+        · refine ⟨e, he, ?_⟩
+          simp only [heid, ite_true]
+          obtain ⟨⟨h0, hm0, hq0, hs0⟩, hmax⟩ := hb
+          have hk1 : k.1 = e.1 := by
+            have h1 := hq0.2.2.2.1
+            rw [← qual_id hl hq0, hki, hlook] at h1
+            injection h1 with h1; exact h1.symm
+          have hge1 : e.2 ≤ k.2 := by
+            rw [← he0s]; exact hmax he0 (by simp [he0m]) e.1 he0q (by rw [← qual_id hl he0q, hk1])
+          have hge2 : clampScore h.score ≤ k.2 := hmax h (by simp) e.1 hqe hki.symm
+          have hle : k.2 ≤ max e.2 (clampScore h.score) := by
+            rcases List.mem_append.mp hm0 with hm0 | hm0
+            · have := he0max h0 hm0 k.1 hq0 (by rw [← qual_id hl hq0, hk1]); omega
+            · simp at hm0; subst hm0; omega
+          apply Prod.ext
+          · exact hk1
+          · simp only []; omega
+        · have hk : k ∈ kept := (hmem k).mpr ((best_snoc_other hl hki).mp hb)
+          refine ⟨k, hk, ?_⟩
+          simp [hki]
+    · intro h0 hm o hq0
+      rw [List.any_eq_true] at hany
+      rcases List.mem_append.mp hm with hm | hm
+      · obtain ⟨k, hk, hkid⟩ := hcov h0 hm o hq0
+        refine ⟨if k.1.id = h.item then (k.1, max k.2 (clampScore h.score)) else k,
+          mem_raiseScore.mpr ⟨k, hk, rfl⟩, ?_⟩
+        split <;> simp_all
+      · simp at hm; subst hm
+        refine ⟨(e.1, max e.2 (clampScore h0.score)), mem_raiseScore.mpr ⟨e, he, by simp [heid]⟩, ?_⟩
+        exact heid
+  · -- a new id
+    have hnone : ∀ k ∈ kept, k.1.id ≠ h.item := by
+      intro k hk hki
+      exact hany (List.any_eq_true.mpr ⟨k, hk, by simp [hki]⟩)
+    have hany' : kept.any (fun k => k.1.id == h.item) = false := by simpa using hany
+    cases hlook : look h.item with
+    | none =>
+      refine ⟨kept, nochange (fun o hq => by have h1 := hq.2.2.2.1; rw [hlook] at h1; cases h1),
+        fun hs => ?_⟩
+      simp [keepF, hfin, hfl, hsk, hany', hlook]
+    | some old =>
+      by_cases hel : eligiblePair E new old = true
+      · refine ⟨kept ++ [(old, clampScore h.score)], ?_, fun hs => by
+          simp [keepF, hfin, hfl, hsk, hany', hlook, hel]⟩
+        have hqo : Qual E look new floor skip h old := ⟨hfin', hfl', hsk, hlook, hel⟩
+        have holdid : old.id = h.item := qual_id hl hqo
+        -- no hit of `pre` qualifies on this id
+        have hpre : ∀ h0 ∈ pre, ∀ o, Qual E look new floor skip h0 o → h0.item ≠ h.item := by
+          intro h0 hm o hq0 heq
+          obtain ⟨k, hk, hkid⟩ := hcov h0 hm o hq0
+          exact hnone k hk (hkid.trans heq)
+        refine ⟨fun k => ?_, ?_, ?_⟩
+        · simp only [List.mem_append, List.mem_singleton]
+          by_cases hki : k.1.id = h.item
+          · constructor
+            · rintro (hk | rfl)
+              · exact absurd hki (hnone k hk)
+              · refine ⟨⟨h, by simp, hqo, rfl⟩, fun h' hm' o hq' hi' => ?_⟩
+                rcases List.mem_append.mp hm' with hm' | hm'
+                · exact absurd (hi'.trans holdid) (hpre h' hm' o hq')
+                · simp at hm'; subst hm'; exact Int.le_refl _
+            · rintro ⟨⟨h0, hm0, hq0, hs0⟩, hmax⟩
+              right
+              rcases List.mem_append.mp hm0 with hm0 | hm0
+              · exact absurd ((qual_id hl hq0).symm.trans hki) (hpre h0 hm0 _ hq0)
+              · simp at hm0; subst hm0
+                have : look h0.item = some k.1 := hq0.2.2.2.1
+                rw [hlook] at this; injection this with this
+                apply Prod.ext
+                · exact this.symm
+                · exact hs0.symm
+          · rw [best_snoc_other hl hki, ← hmem k]
+            constructor
+            · rintro (hk | rfl)
+              · exact hk
+              · exact absurd holdid hki
+            · exact Or.inl
+        · rw [List.map_append, List.nodup_append]
+          refine ⟨hnd, by simp, ?_⟩
+          intro a ha b hb
+          simp only [List.map_cons, List.map_nil, List.mem_singleton] at hb
+          subst hb
+          obtain ⟨k, hk, rfl⟩ := List.mem_map.mp ha
+          rw [holdid]; exact hnone k hk
+        · intro h0 hm o hq0
+          rcases List.mem_append.mp hm with hm | hm
+          · obtain ⟨k, hk, hkid⟩ := hcov h0 hm o hq0
+            exact ⟨k, by simp [hk], hkid⟩
+          · simp at hm; subst hm
+            exact ⟨(old, clampScore h0.score), by simp, holdid⟩
+      · refine ⟨kept, nochange (fun o hq => by
+          have h1 := hq.2.2.2.1; rw [hlook] at h1; injection h1 with h1; subst h1
+          exact hel hq.2.2.2.2), fun hs => ?_⟩
+        simp [keepF, hfin, hfl, hsk, hany', hlook, hel]
+
+theorem kinv_run (hl : LookById look) :
+    ∀ (hs pre : List Hit) (kept : List (Concept × Int)), KInv E look new floor skip pre kept →
+      KInv E look new floor skip (pre ++ hs) (keepF E look new floor skip kept hs)
+  | [], pre, kept, hi => by simpa [keepF] using hi
+  | h :: hs, pre, kept, hi => by
+    obtain ⟨kept', hi', heq⟩ := kinv_step hl hi h
+    rw [heq]
+    have := kinv_run hl hs (pre ++ [h]) kept' hi'
+    simpa using this
+
+/-- **What the fixed loop keeps**: exactly the concepts some hit qualifies as,
+each once, at the highest score of the hits on its id. -/
+theorem keepF_best (hl : LookById look) (hits : List Hit) :
+    (∀ k, k ∈ keepF E look new floor skip [] hits ↔ Best E look new floor skip hits k) ∧
+      ((keepF E look new floor skip [] hits).map (·.1.id)).Nodup := by
+  have h0 : KInv E look new floor skip [] [] := by
+    refine ⟨fun k => ?_, by simp, by simp⟩
+    simp [Best]
+  have := kinv_run hl hits [] [] h0
+  simp only [List.nil_append] at this
+  exact ⟨this.1, this.2.1⟩
+
+/-! #### Sorting kept entries -/
+
+theorem ahead_asymm {x y : Concept × Int} (h : ahead x y = true) : ahead y x = false := by
+  simp only [ahead, Bool.or_eq_true, Bool.and_eq_true, decide_eq_true_eq] at h
+  simp only [ahead, Bool.or_eq_false_iff, Bool.and_eq_false_iff, decide_eq_false_iff_not]
+  omega
+
+theorem ahead_total {x y : Concept × Int} (h : x.1.id ≠ y.1.id) :
+    ahead x y = true ∨ ahead y x = true := by
+  simp only [ahead, Bool.or_eq_true, Bool.and_eq_true, decide_eq_true_eq]
+  omega
+
+theorem ahead_trans {x y z : Concept × Int} (h1 : ahead x y = true) (h2 : ahead y z = true) :
+    ahead x z = true := by
+  simp only [ahead, Bool.or_eq_true, Bool.and_eq_true, decide_eq_true_eq] at *
+  omega
+
+theorem perm_insertBy (x : Concept × Int) : ∀ l, (insertBy x l).Perm (x :: l)
+  | [] => List.Perm.refl _
+  | y :: ys => by
+    simp only [insertBy]
+    split
+    · exact List.Perm.refl _
+    · exact ((perm_insertBy x ys).cons y).trans (List.Perm.swap x y ys)
+
+theorem perm_sortKept : ∀ l : List (Concept × Int), (sortKept l).Perm l
+  | [] => List.Perm.refl _
+  | x :: xs => by
+    simp only [sortKept, List.foldr_cons]
+    exact (perm_insertBy x _).trans ((perm_sortKept xs).cons x)
+
+theorem insertBy_sorted (x : Concept × Int) :
+    ∀ l : List (Concept × Int), l.Pairwise (fun a b => ahead a b = true) →
+      (∀ y ∈ l, y.1.id ≠ x.1.id) → (insertBy x l).Pairwise (fun a b => ahead a b = true)
+  | [], _, _ => by simp [insertBy]
+  | y :: ys, hs, hid => by
+    simp only [insertBy]
+    have hsy := List.pairwise_cons.mp hs
+    split
+    · rename_i hxy
+      refine List.pairwise_cons.mpr ⟨?_, hs⟩
+      intro z hz
+      simp only [List.mem_cons] at hz
+      rcases hz with rfl | hz
+      · exact hxy
+      · exact ahead_trans hxy (hsy.1 z hz)
+    · rename_i hxy
+      have hyx : ahead y x = true := by
+        rcases ahead_total (x := y) (y := x) (hid y (by simp)) with h | h
+        · exact h
+        · simp_all
+      refine List.pairwise_cons.mpr ⟨?_, insertBy_sorted x ys hsy.2 (fun z hz => hid z (by simp [hz]))⟩
+      intro z hz
+      rcases List.mem_cons.mp ((perm_insertBy x ys).mem_iff.mp hz) with rfl | hz
+      · exact hyx
+      · exact hsy.1 z hz
+
+theorem sortKept_sorted : ∀ l : List (Concept × Int), (l.map (·.1.id)).Nodup →
+    (sortKept l).Pairwise (fun a b => ahead a b = true)
+  | [], _ => by simp [sortKept]
+  | x :: xs, hn => by
+    simp only [List.map_cons, List.nodup_cons, List.mem_map] at hn
+    simp only [sortKept, List.foldr_cons]
+    apply insertBy_sorted x _ (sortKept_sorted xs hn.2)
+    intro y hy hyx
+    exact hn.1 ⟨y, (perm_sortKept xs).mem_iff.mp hy, hyx⟩
+
+theorem nodup_of_ids {l : List (Concept × Int)} (h : (l.map (·.1.id)).Nodup) : l.Nodup :=
+  List.Pairwise.of_map (·.1.id) (fun a b hab heq => hab (by rw [heq])) h
+
+/-- Lists of kept entries with distinct ids sort alike when they hold the
+same entries. -/
+theorem sortKept_eq {l l' : List (Concept × Int)} (hn : (l.map (·.1.id)).Nodup)
+    (hn' : (l'.map (·.1.id)).Nodup) (hp : l.Perm l') : sortKept l = sortKept l' :=
+  List.Perm.eq_of_pairwise (le := fun a b => ahead a b = true)
+    (fun a b _ _ hab hba => by rw [ahead_asymm hab] at hba; cases hba)
+    (sortKept_sorted l hn) (sortKept_sorted l' hn')
+    ((perm_sortKept l).trans (hp.trans (perm_sortKept l').symm))
+
+/-- **The fixed `select` does not depend on hit order**: two hit lists with
+the same members (in any order, with any repetition) give the same
+candidates. -/
+theorem selectF_order_independent (hl : LookById look) {hits hits' : List Hit}
+    (h : ∀ x, x ∈ hits ↔ x ∈ hits') (merged : List Nat) :
+    selectF E look new hits floor skip merged = selectF E look new hits' floor skip merged := by
+  obtain ⟨hm, hn⟩ := keepF_best (E := E) (new := new) (floor := floor) (skip := skip) hl hits
+  obtain ⟨hm', hn'⟩ := keepF_best (E := E) (new := new) (floor := floor) (skip := skip) hl hits'
+  have hbest : ∀ k, Best E look new floor skip hits k ↔ Best E look new floor skip hits' k := by
+    intro k
+    simp only [Best, h]
+  have hp : (keepF E look new floor skip [] hits).Perm (keepF E look new floor skip [] hits') :=
+    (List.perm_ext_iff_of_nodup (nodup_of_ids hn) (nodup_of_ids hn')).mpr
+      (fun k => (hm k).trans ((hbest k).trans (hm' k).symm))
+  simp only [selectF, sortKept_eq hn hn' hp]
+
+/-- A repeated id is listed at its highest score: in particular the order of
+two hits on one id does not matter. -/
+theorem selectF_swap (hl : LookById look) (a b : Hit) (hs : List Hit) (merged : List Nat) :
+    selectF E look new (a :: b :: hs) floor skip merged =
+      selectF E look new (b :: a :: hs) floor skip merged :=
+  selectF_order_independent hl (fun _ => (List.Perm.swap b a hs).mem_iff) merged
+
+theorem keepF_kept (hl : LookById look) (hits : List Hit) :
+    ∀ k ∈ keepF E look new floor skip [] hits, Kept E look new floor skip k := by
+  intro k hk
+  obtain ⟨⟨h0, _, hq, hs⟩, _⟩ := ((keepF_best hl hits).1 k).mp hk
+  have hid := qual_id hl hq
+  have hlook : look k.1.id = some k.1 := by rw [hid]; exact hq.2.2.2.1
+  have hfl : floor ≤ k.2 := by rw [← hs]; exact hq.2.1
+  have hone : k.2 ≤ one := by rw [← hs]; simp only [clampScore, one]; omega
+  have hsk : k.1.id ∉ skip := by rw [hid]; exact hq.2.2.1
+  exact ⟨hlook, hq.2.2.2.2, hfl, hone, hsk⟩
+
+end fixed
+
+/-- At most `REPLACEMENT_CANDIDATE_LIMIT` candidates, after the fix. -/
+theorem selectF_length (E : List Edge) (look : Nat → Option Concept) (new : Concept)
+    (hits : List Hit) (floor : Int) (skip merged : List Nat) :
+    (selectF E look new hits floor skip merged).length ≤ limit := by
+  simp only [selectF, List.length_map]
+  exact List.length_take_le _ _
+
+/-- `select_mem` after the fix. -/
+theorem selectF_mem (E : List Edge) (look : Nat → Option Concept) (new : Concept)
+    (hits : List Hit) (floor : Int) (skip merged : List Nat) (hl : LookById look)
+    (c : Cand) (hc : c ∈ selectF E look new hits floor skip merged) :
+    ∃ old, look c.id = some old ∧ old.id = c.id ∧ eligiblePair E new old = true ∧
+      c.id ≠ new.id ∧ floor ≤ c.cosine ∧ c.cosine ≤ one ∧ c.id ∉ skip ∧ c.new = new.id ∧
+      (c.newer = true ↔ new.dated < old.dated) := by
+  simp only [selectF, List.mem_map] at hc
+  obtain ⟨k, hk, rfl⟩ := hc
+  have hk' := (mem_sortKept k _).mp (List.mem_of_mem_take hk)
+  obtain ⟨h1, h2, h3, h4, h5⟩ := keepF_kept hl hits k hk'
+  refine ⟨k.1, h1, rfl, h2, ?_, h3, h4, h5, rfl, by simp⟩
+  intro heq
+  have hne : new.id ≠ k.1.id := by
+    have h2' := h2
+    simp only [eligiblePair, Bool.and_eq_true, bne_iff_ne, ne_eq] at h2'
+    exact h2'.1.1.1.1.1.1
+  exact hne (by simpa using heq.symm)
+
+/-- `select_newer_matches_trigger` after the fix. -/
+theorem selectF_newer_matches_trigger (slot : Nat → Nat → Bool) (E : List Edge)
+    (look : Nat → Option Concept) (new : Concept) (hits : List Hit) (floor : Int)
+    (skip merged : List Nat) (hl : LookById look) (c : Cand)
+    (hc : c ∈ selectF E look new hits floor skip merged) (old : Concept)
+    (hold : look c.id = some old) (p : Pair) (hp : candidate slot E new old = some p) :
+    (c.newer = true ↔ p.newer = old.id) ∧ (c.newer = false ↔ p.newer = new.id) := by
+  obtain ⟨o, ho, _, _, hne, _, _, _, _, hnewer⟩ := selectF_mem E look new hits floor skip merged hl c hc
+  rw [hold] at ho; injection ho with ho; subst ho
+  have hid : new.id ≠ old.id := (candidate_conditions slot E new old p hp).1
+  rcases candidate_dir slot E new old p hp with ⟨h1, _, h3⟩ | ⟨h1, _, h3⟩
+  · have hn : c.newer = false := by
+      cases h : c.newer
+      · rfl
+      · have := hnewer.mp h; omega
+    rw [hn, h1]
+    exact ⟨by simp [hid], by simp⟩
+  · have hn : c.newer = true := hnewer.mpr h3
+    rw [hn, h1]
+    exact ⟨by simp, by simp [Ne.symm hid]⟩
+
+/-- `select_newer_not_replaced` after the fix. -/
+theorem selectF_newer_not_replaced (slot : Nat → Nat → Bool) (E : List Edge)
+    (look : Nat → Option Concept) (new : Concept) (hits : List Hit) (floor : Int)
+    (skip merged : List Nat) (hl : LookById look) (c : Cand)
+    (hc : c ∈ selectF E look new hits floor skip merged) (hn : c.newer = true) (old : Concept)
+    (hold : look c.id = some old) : candidate slot E new old ≠ some ⟨new.id, old.id⟩ := by
+  intro hp
+  have := (selectF_newer_matches_trigger slot E look new hits floor skip merged hl c hc old hold _ hp).2
+  rw [hn] at this
+  simp at this
+
+/-- `select_newer_never_replaced_by_new` after the fix: never cite a newer
+candidate in `against`. -/
+theorem selectF_newer_never_replaced_by_new (E : List Edge) (look : Nat → Option Concept)
+    (new : Concept) (hits : List Hit) (floor : Int) (skip merged : List Nat)
+    (hl : LookById look) (c : Cand) (hc : c ∈ selectF E look new hits floor skip merged)
+    (old : Concept) (hold : look c.id = some old) (hn : c.newer = true) :
+    new.dated < old.dated ∧
+      ∀ (slot : Nat → Nat → Bool) (E' : List Edge) (p : Pair),
+        candidate slot E' new old = some p → p.newer = old.id ∧ p.older = new.id := by
+  obtain ⟨o, ho, _, _, _, _, _, _, _, hnewer⟩ := selectF_mem E look new hits floor skip merged hl c hc
+  rw [hold] at ho; injection ho with ho; subst ho
+  have hlt := hnewer.mp hn
+  refine ⟨hlt, ?_⟩
+  intro slot E' p hp
+  rcases candidate_dir slot E' new old p hp with ⟨_, _, h3⟩ | ⟨h1, h2, _⟩
+  · omega
+  · exact ⟨h1, h2⟩
+
+/-- `select_tie_not_newer` after the fix. -/
+theorem selectF_tie_not_newer (E : List Edge) (look : Nat → Option Concept) (new : Concept)
+    (hits : List Hit) (floor : Int) (skip merged : List Nat) (hl : LookById look) (c : Cand)
+    (hc : c ∈ selectF E look new hits floor skip merged) (old : Concept)
+    (hold : look c.id = some old) (ht : old.dated = new.dated) : c.newer = false := by
+  obtain ⟨o, ho, _, _, _, _, _, _, _, hnewer⟩ := selectF_mem E look new hits floor skip merged hl c hc
   rw [hold] at ho; injection ho with ho; subst ho
   cases h : c.newer
   · rfl
@@ -1990,10 +2504,32 @@ example : (select [] (lookOld 0) (mk 0 10)
     [⟨4, 8800, true⟩, ⟨2, 9100, true⟩, ⟨5, 8600, true⟩, ⟨3, 9100, true⟩, ⟨1, 8700, true⟩,
       ⟨2, 9100, true⟩] 8500 [] []).map (fun c => (c.id, c.cosine)) =
     [(2, 9100), (3, 9100), (4, 8800)] := by decide
-/-- A repeated id keeps its first score, not its best: the list's cosine
-depends on the order the store returns duplicates in. -/
+/-- The previous version: a repeated id keeps its first score, not its best,
+so the list's cosine depends on the order the store returns duplicates in. -/
 example : (select [] (lookOld 0) (mk 0 10) [⟨1, 8600, true⟩, ⟨1, 9500, true⟩] 8500 [] []).map
     (·.cosine) = [8600] := by decide
+
+/-- After the fix (#302): a repeated id is listed at its best score in either
+order, and it can then outrank a hit it trailed before (test
+`a_duplicate_id_keeps_its_highest_cosine`). -/
+example : (selectF [] (lookOld 0) (mk 0 10) [⟨1, 8600, true⟩, ⟨1, 9500, true⟩] 8500 [] []).map
+    (·.cosine) = [9500] := by decide
+example : (selectF [] (lookOld 0) (mk 0 10) [⟨1, 9500, true⟩, ⟨1, 8600, true⟩] 8500 [] []).map
+    (·.cosine) = [9500] := by decide
+example : (selectF [] (lookOld 0) (mk 0 10)
+    [⟨1, 8600, true⟩, ⟨2, 9000, true⟩, ⟨3, 8900, true⟩, ⟨4, 8800, true⟩, ⟨1, 9500, true⟩]
+      8500 [] []).map (fun c => (c.id, c.cosine)) = [(1, 9500), (2, 9000), (3, 8900)] := by decide
+example : (select [] (lookOld 0) (mk 0 10)
+    [⟨1, 8600, true⟩, ⟨2, 9000, true⟩, ⟨3, 8900, true⟩, ⟨4, 8800, true⟩, ⟨1, 9500, true⟩]
+      8500 [] []).map (fun c => (c.id, c.cosine)) = [(2, 9000), (3, 8900), (4, 8800)] := by decide
+/-- Without a repeated id with different scores nothing changes (test
+`ordering_cap_and_dedup`). -/
+example : selectF [] (lookOld 0) (mk 0 10)
+    [⟨4, 8800, true⟩, ⟨2, 9100, true⟩, ⟨5, 8600, true⟩, ⟨3, 9100, true⟩, ⟨1, 8700, true⟩,
+      ⟨2, 9100, true⟩] 8500 [] [] =
+    select [] (lookOld 0) (mk 0 10)
+    [⟨4, 8800, true⟩, ⟨2, 9100, true⟩, ⟨5, 8600, true⟩, ⟨3, 9100, true⟩, ⟨1, 8700, true⟩,
+      ⟨2, 9100, true⟩] 8500 [] [] := by decide
 
 /-- Two concepts' evidence. Concept 1 (C) is supported at 25, 55, 85 and
 concept 2 (S) at 20, 50, 80, each from three origins; session extent 0..100;
