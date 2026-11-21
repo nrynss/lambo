@@ -1555,6 +1555,15 @@ Rust items modelled (at the fix commit):
   and keep the session in one space.
 * `attachWarnsFixed_relabelled`: the fixed WARN fires only on a relabel that
   happened.
+* `gatePinAfter_only_creates`, `pinAfterFixed_changes_to_live`,
+  `pinAfterFixed_no_silent_replace`: the pins the verb writes. The
+  `--missing-only` gate only creates a missing pin, every pin written is the
+  live embedder's, and an unconfirmed pin changes only through a full run
+  given `--repin-canary`, which warns.
+* `--repin-canary` under `canary = "off"` is a usage error (there is no pin
+  to replace), so `reembedCmdFixed_repairs_drift` passes it only when the
+  canary is on, and `reembedCmdFixed_migration_agrees` assumes it is not that
+  error.
 
 Modelling the fix forced one choice: `drifted` in the first half is one
 Boolean, but the gate and the re-pin guard read the pin differently. The
@@ -1690,6 +1699,7 @@ def reembedCmdFixed (s : Session K M) (live : Contract K M)
     Option (Session K M × List (Mut K M)) :=
   if allow then none
   else if missingOnly && (drop || same || repin) then none
+  else if repin && decide (mode = .off) then none
   else if missingOnly && decide (s.contract = some live) &&
       !canaryAdmits mode pin.isDrifted false then none
   else if !missingOnly && !(imageVectorIds s).isEmpty && !drop then none
@@ -1724,20 +1734,24 @@ theorem reembedCmdFixed_full_spec (s s' : Session K M) (live : Contract K M)
     · split at h
       · cases h
       · split at h
-        · obtain ⟨_, _, hc', hs', _⟩ := reembedSame_spec h
-          exact ⟨hs', hc'⟩
-        · exact ⟨reembed_one_space s s' live _ drop m h, reembed_contract s s' live _ drop m h⟩
+        · cases h
+        · split at h
+          · obtain ⟨_, _, hc', hs', _⟩ := reembedSame_spec h
+            exact ⟨hs', hc'⟩
+          · exact ⟨reembed_one_space s s' live _ drop m h, reembed_contract s s' live _ drop m h⟩
 
 /-- **The drift is repairable in place** (finding 1 fixed). On a non-empty
 session under the live contract that holds a vector, with no image vector
 left behind and distinct node ids, `re-embed --rewrite-same-contract
---repin-canary` succeeds whatever the canary mode and pin say, and (by
+--repin-canary` succeeds whatever the canary mode and pin say (under
+`canary = "off"` there is no pin to replace and `--repin-canary` is a usage
+error, so there the repair is the first flag alone), and (by
 `reembedCmdFixed_full_spec`) leaves every vector in the live space. -/
 theorem reembedCmdFixed_repairs_drift (s : Session K M) (live : Contract K M) (drop : Bool)
     (mode : CanaryMode) (pin : PinState) (hc : s.contract = some live)
     (hv : hasVectors s = true) (himg : ((imageVectorIds s).isEmpty || drop) = true)
     (hdist : distinct (textIds s) = true) (hne : s.concepts ≠ []) :
-    ∃ r, reembedCmdFixed s live false false drop true true mode pin = some r ∧
+    ∃ r, reembedCmdFixed s live false false drop true (!decide (mode = .off)) mode pin = some r ∧
       oneSpace r.1 = true ∧ r.1.contract = some live := by
   have hne' : s.concepts.isEmpty = false := by
     cases hcs : s.concepts with
@@ -1749,7 +1763,8 @@ theorem reembedCmdFixed_repairs_drift (s : Session K M) (live : Contract K M) (d
     cases drop <;> simp_all
   refine ⟨(⟨some live, rewrite s.concepts (textIds s) live drop⟩,
     reembedSameBatch s live (textIds s) drop), ?_, ?_, rfl⟩
-  · simp [reembedCmdFixed, hne', hc, himg', reembedSame, hok]
+  · cases hm : decide (mode = .off) <;>
+      simp_all [reembedCmdFixed, reembedSame, PinState.safeToReplace]
   · exact rewrite_one_space s live (textIds s) drop himg hdist rfl (fun _ h => h)
 
 /-- **Agreement: the plain verb still refuses a same-contract session.**
@@ -1773,11 +1788,12 @@ old one. -/
 theorem reembedCmdFixed_migration_agrees (s : Session K M) (live : Contract K M)
     (allow drop repin : Bool) (mode : CanaryMode) (pin : PinState)
     (hc : s.contract ≠ some live)
-    (hsafe : (decide (mode = .off) || repin || pin.safeToReplace) = true) :
+    (hsafe : (decide (mode = .off) || repin || pin.safeToReplace) = true)
+    (husage : (repin && decide (mode = .off)) = false) :
     reembedCmdFixed s live allow false drop false repin mode pin = reembedCmd s live allow false drop := by
   unfold reembedCmdFixed reembedCmd
-  simp only [hc, decide_false, bne_self_eq_false, hsafe, Bool.not_true, Bool.false_eq_true,
-    ite_false, Bool.false_and, Bool.not_false, Bool.true_and]
+  simp only [hc, decide_false, bne_self_eq_false, hsafe, husage, Bool.not_true,
+    Bool.false_eq_true, ite_false, Bool.false_and, Bool.not_false, Bool.true_and]
 
 /-- **`--missing-only` runs the canary** (finding 3 fixed): under `verify`
 with a drift, the backfill of a session under the live contract is refused,
@@ -1995,6 +2011,103 @@ theorem runAll2_oneSpace :
       exact ih s' (step2_oneSpace s s' op m (hops op (by simp)) hs hstep) hrest
     · exact ih s hs hrest
 
+/-! ### The pins the fixed verb writes
+
+`PinState` above is what the store's pin says about the live embedder when
+the verb starts. The verb also writes pins: the `--missing-only` attach gate
+is `canary_gate`, whose `canary::check` pins a contract that has no usable
+pin (`write_fingerprint_if_absent`), and a full run that succeeded pins again
+from the live embedder once its rewrite is durable. Either new pin is the
+live embedder's, so afterwards it `agrees`. (When the canaries cannot be
+embedded the real gate writes nothing and the pin stays absent; the model's
+gate always pins, which only adds changes, so the safety results below hold
+of the code a fortiori.) -/
+
+/-- The store's pin after the `--missing-only` attach gate (`gatedBackfill`):
+the gate runs on a session under the live contract with the canary on, and
+pins an absent pin. A drifted or unchecked pin is left as it is: `check`
+keeps the old fingerprint on a drift and writes none when it cannot embed. -/
+def gatePinAfter (s : Session K M) (live : Contract K M) (mode : CanaryMode) (pin : PinState) :
+    PinState :=
+  if !decide (mode = .off) && decide (s.contract = some live) && pin == .absent then .agrees
+  else pin
+
+/-- **The gate only creates a pin.** It never replaces one: when the pin
+changes, there was none and the gate's is the live embedder's. -/
+theorem gatePinAfter_only_creates (s : Session K M) (live : Contract K M) (mode : CanaryMode)
+    (pin : PinState) (h : gatePinAfter s live mode pin ≠ pin) :
+    pin = .absent ∧ gatePinAfter s live mode pin = .agrees := by
+  unfold gatePinAfter at h ⊢
+  by_cases hg : (!decide (mode = .off) && decide (s.contract = some live) && pin == .absent) = true
+  · rw [ite_eq_left hg]
+    simp only [Bool.and_eq_true, beq_iff_eq] at hg
+    exact ⟨hg.2, rfl⟩
+  · rw [ite_eq_right hg] at h; exact absurd rfl h
+
+/-- The store's pin after a fixed run. A usage refusal (before the attach)
+and `canary = "off"` write nothing; `--missing-only` writes what its gate
+writes; a full run that succeeded on a non-empty session pins again. -/
+def pinAfterFixed (s : Session K M) (live : Contract K M) (allow missingOnly drop same repin : Bool)
+    (mode : CanaryMode) (pin : PinState) : PinState :=
+  if allow || (missingOnly && (drop || same || repin)) || decide (mode = .off) then pin
+  else if missingOnly then gatePinAfter s live mode pin
+  else if repinsFixed s live false drop same repin mode pin then .agrees
+  else pin
+
+/-- A fixed run only ever leaves the live embedder's pin behind: when the
+pin changes, it now agrees. -/
+theorem pinAfterFixed_changes_to_live (s : Session K M) (live : Contract K M)
+    (allow missingOnly drop same repin : Bool) (mode : CanaryMode) (pin : PinState)
+    (h : pinAfterFixed s live allow missingOnly drop same repin mode pin ≠ pin) :
+    pinAfterFixed s live allow missingOnly drop same repin mode pin = .agrees := by
+  unfold pinAfterFixed at h ⊢
+  by_cases hu : (allow || (missingOnly && (drop || same || repin)) || decide (mode = .off)) = true
+  · rw [ite_eq_left hu] at h; exact absurd rfl h
+  · rw [ite_eq_right hu] at h ⊢
+    cases missingOnly with
+    | true => exact (gatePinAfter_only_creates s live mode pin h).2
+    | false =>
+      simp only [Bool.false_eq_true, ite_false] at h ⊢
+      by_cases hr : repinsFixed s live false drop same repin mode pin = true
+      · rw [ite_eq_left hr]
+      · rw [ite_eq_right hr] at h; exact absurd rfl h
+
+/-- **No pin is replaced silently, the gate included.** If a fixed run
+changes a pin it could not confirm (drifted, or unchecked), it was a full run
+given `--repin-canary`, and it printed the warning (`repinWarnsFixed`). The
+`--missing-only` gate can only create a missing pin (`gatePinAfter_only_creates`). -/
+theorem pinAfterFixed_no_silent_replace (s : Session K M) (live : Contract K M)
+    (allow missingOnly drop same repin : Bool) (mode : CanaryMode) (pin : PinState)
+    (hunsafe : pin.safeToReplace = false)
+    (h : pinAfterFixed s live allow missingOnly drop same repin mode pin ≠ pin) :
+    missingOnly = false ∧ repin = true ∧
+      repinWarnsFixed s live false drop same repin mode pin = true := by
+  unfold pinAfterFixed at h
+  by_cases hu : (allow || (missingOnly && (drop || same || repin)) || decide (mode = .off)) = true
+  · rw [ite_eq_left hu] at h; exact absurd rfl h
+  · rw [ite_eq_right hu] at h
+    cases missingOnly with
+    | true =>
+      have := (gatePinAfter_only_creates s live mode pin h).1
+      subst this; simp [PinState.safeToReplace] at hunsafe
+    | false =>
+      simp only [Bool.false_eq_true, ite_false] at h
+      by_cases hr : repinsFixed s live false drop same repin mode pin = true
+      · exact ⟨rfl, fixed_repin_unsafe_needs_optin s live false drop same repin mode pin hr hunsafe⟩
+      · rw [ite_eq_right hr] at h; exact absurd rfl h
+
+/-- The pins of the concrete cases: the `--missing-only` gate pins an absent
+pin (not under `off`) and leaves a drifted one under `warn`; the drift repair
+replaces the drifted pin; without `--repin-canary` the refused migration
+leaves it. -/
+theorem example_pins_written :
+    pinAfterFixed sEmpty cA false true false false false .warn .absent = .agrees ∧
+    pinAfterFixed sEmpty cA false true false false false .off .absent = .absent ∧
+    pinAfterFixed sEmpty cA false true false false false .warn .drifted = .drifted ∧
+    pinAfterFixed sA cA false false false true true .verify .drifted = .agrees ∧
+    pinAfterFixed ⟨some cA', [⟨1, false, some cA'⟩]⟩ cA false false false false false .warn
+      .drifted = .drifted := by decide
+
 /-! ### The override WARN after the fix -/
 
 /-- The fixed WARN: logged only once the relabel succeeded. -/
@@ -2037,8 +2150,8 @@ theorem example_drift_repaired_in_place :
 contract (that is a migration), and on one with no vector (that is a
 backfill). -/
 theorem example_same_contract_preconditions :
-    reembedCmdFixed sA cC false false false true true .off .absent = none ∧
-    reembedCmdFixed sEmpty cA false false false true true .off .absent = none := by
+    reembedCmdFixed sA cC false false false true false .off .absent = none ∧
+    reembedCmdFixed sEmpty cA false false false true false .off .absent = none := by
   decide
 
 /-- **The drifted backfill, fixed.** Under `verify` with a drift,
