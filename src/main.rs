@@ -1853,30 +1853,37 @@ fn redact_auth_token_echo(mut err: clap::Error, argv: &[std::ffi::OsString]) -> 
         let mut tip = clap::builder::StyledStr::new();
         tip.push_str(ARGV_REDACTED_TIP);
         err.insert(ContextKind::Suggested, ContextValue::StyledStrs(vec![tip]));
-        if err.get(ContextKind::Usage).is_some() {
-            err.insert(
-                ContextKind::Usage,
-                ContextValue::StyledStr(plain_usage(before)),
-            );
+        if let Some(ContextValue::StyledStr(usage)) = err.get(ContextKind::Usage) {
+            let plain = plain_usage(&usage.to_string());
+            err.insert(ContextKind::Usage, ContextValue::StyledStr(plain));
         }
     }
     err
 }
 
-/// The plain usage of the subcommand named before `--auth-token` (the
-/// first argv element naming one), else of `lambo` itself: the same for
-/// every argv after the flag.
-fn plain_usage(before_flag: &[String]) -> clap::builder::StyledStr {
+/// The plain usage of the (sub)command clap was parsing, read off clap's
+/// own usage line for the error (`Usage: lambo serve-web --port <PORT>`):
+/// the words after the binary name that name a subcommand path, then that
+/// command's usage with no arguments. The same for every argv after the
+/// flag, whatever flag clap's line suggested. clap's generated `help`
+/// subcommand is not found this way, so its errors get `lambo`'s usage.
+fn plain_usage(clap_usage: &str) -> clap::builder::StyledStr {
     let mut command = Cli::command();
     command.build();
-    let name = before_flag
-        .iter()
-        .find(|a| command.find_subcommand(a.as_str()).is_some())
-        .cloned();
-    match name.and_then(|n| command.find_subcommand_mut(n)) {
-        Some(sub) => sub.render_usage(),
-        None => command.render_usage(),
+    let words = clap_usage
+        .trim_start()
+        .strip_prefix("Usage:")
+        .unwrap_or(clap_usage)
+        .split_whitespace()
+        .skip(1);
+    let mut current = &mut command;
+    for word in words {
+        if current.find_subcommand(word).is_none() {
+            break;
+        }
+        current = current.find_subcommand_mut(word).expect("found just above");
     }
+    current.render_usage()
 }
 
 /// The missing-session refusal, rendered the way clap rendered a missing
@@ -3371,12 +3378,26 @@ dim = 1024
     }
 
     /// An unrecognized subcommand quoted after `--auth-token` is redacted
-    /// (#315 re-review S3, the `InvalidSubcommand` branch). clap cannot
-    /// produce one after a real `--auth-token` flag (the flag itself is an
-    /// unexpected argument first anywhere but `serve` and `serve-web`), so
-    /// the error is built here to exercise the branch.
+    /// (#315 re-review S3, the `InvalidSubcommand` branch): clap's real one
+    /// for `lambo help --auth-token=<v>`, and one built here with a value
+    /// that is only a later element.
     #[test]
     fn unrecognized_subcommand_after_auth_token_is_redacted() {
+        let argv: Vec<std::ffi::OsString> = ["lambo", "help", "--auth-token=NOTASECRET"]
+            .into_iter()
+            .map(Into::into)
+            .collect();
+        let raw = Cli::try_parse_from(&argv).expect_err("not a subcommand");
+        assert_eq!(raw.kind(), clap::error::ErrorKind::InvalidSubcommand);
+        assert!(raw.render().to_string().contains("NOTASECRET"));
+        let (err, text) = parse_error_text(&argv);
+        assert_eq!(err.exit_code(), 2, "{text}");
+        assert!(
+            text.contains("unrecognized subcommand '<redacted>'"),
+            "{text}"
+        );
+        assert!(!text.contains("NOTASECRET"), "{text}");
+
         use clap::error::{ContextKind, ContextValue, ErrorKind};
         let mut command = Cli::command();
         command.build();
@@ -3396,6 +3417,57 @@ dim = 1024
             text.contains("unrecognized subcommand '<redacted>'"),
             "{text}"
         );
+        assert!(!text.contains("NOTASECRET"), "{text}");
+    }
+
+    /// clap's "unexpected value '<it>' for '--flag' found; no more were
+    /// expected" (`TooManyValues`, a value given to a flag that takes none)
+    /// quotes it through `InvalidValue` and is redacted after
+    /// `--auth-token` (#315 re-review). Mirrors `Resolve.lean`'s
+    /// `Quote.tooManyValues`.
+    #[test]
+    fn unexpected_value_after_auth_token_is_redacted() {
+        let argv = argv_with_token(
+            "serve",
+            &[],
+            &["a", "--allow-embedding-mismatch=NOTASECRET"],
+        );
+        let raw = Cli::try_parse_from(&argv).expect_err("a boolean flag takes no value");
+        assert_eq!(raw.kind(), clap::error::ErrorKind::TooManyValues);
+        assert!(raw.render().to_string().contains("NOTASECRET"));
+        let (err, text) = parse_error_text(&argv);
+        assert_eq!(err.exit_code(), 2, "{text}");
+        assert!(
+            text.contains(
+                "unexpected value '<redacted>' for '--allow-embedding-mismatch' found; \
+                 no more were expected"
+            ),
+            "{text}"
+        );
+        assert!(!text.contains("NOTASECRET"), "{text}");
+    }
+
+    /// The redacted usage line is that of the subcommand clap was parsing,
+    /// even when an earlier element is a flag's value that names another
+    /// subcommand (#315 re-review).
+    #[test]
+    fn redacted_usage_is_the_parsed_subcommands() {
+        let argv: Vec<std::ffi::OsString> = [
+            "lambo",
+            "--config",
+            "serve",
+            "serve-web",
+            "--session",
+            "s",
+            "--auth-token",
+            "abc",
+            "NOTASECRET",
+        ]
+        .into_iter()
+        .map(Into::into)
+        .collect();
+        let (_, text) = parse_error_text(&argv);
+        assert!(text.contains("Usage: lambo serve-web [OPTIONS]"), "{text}");
         assert!(!text.contains("NOTASECRET"), "{text}");
     }
 

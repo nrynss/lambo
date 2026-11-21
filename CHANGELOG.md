@@ -52,7 +52,8 @@
   `--auth-token` on, an argument the command does not accept, an invalid
   value of a flag it accepts (`--port <it>`) and an unrecognized subcommand
   are now shown as `<redacted>`, with a tip to check the arguments and quote
-  the token and the command's plain usage line; the exit code is still `2`.
+  the token; the usage line, where clap prints one, is replaced by the
+  command's plain usage. The exit code is still `2`.
   An unexpected argument before the flag, a missing value ("a value is
   required") and a misplaced `--auth-token` itself are shown as before. A
   flag right after `--auth-token ` is still refused, never taken as the

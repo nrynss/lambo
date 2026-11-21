@@ -2505,11 +2505,13 @@ def argShownFixed (before fromFlag : List (List Nat)) (q : List Nat) : Bool :=
 
 /-- The clap errors that quote an argv element, as `redact_auth_token_echo`
 handles them: an unexpected argument (`InvalidArg` of `UnknownArgument`), an
-invalid value of the flag `flag` (`InvalidValue`), an unrecognized
-subcommand (`InvalidSubcommand`). -/
+invalid value of the flag `flag` (`InvalidValue`), a value given to a flag
+that takes no more (`TooManyValues`, quoted through `InvalidValue`), an
+unrecognized subcommand (`InvalidSubcommand`). -/
 inductive Quote where
   | unexpected
   | invalidValue (flag : String)
+  | tooManyValues (flag : String)
   | subcommand
   deriving DecidableEq, Repr
 
@@ -2522,6 +2524,7 @@ def quoteText : Quote → String → String
   | .invalidValue f, s =>
     if s.isEmpty then "a value is required for '" ++ f ++ "' but none was supplied"
     else "invalid value '" ++ s ++ "' for '" ++ f ++ "'"
+  | .tooManyValues f, s => "unexpected value '" ++ s ++ "' for '" ++ f ++ "' found; no more were expected"
   | .subcommand, s => "unrecognized subcommand '" ++ s ++ "'"
 
 /-- The tip that replaces clap's suggestions on a redaction. -/
@@ -2601,9 +2604,13 @@ connects it to the argv-level `quotedRender`, whose own noninterference is
 unquoted space still reveals, which depends on the argv's shape, not on the
 token's verdict: that it was split (the error fires at all); a tail piece
 that is a real flag changes the error (`--port <piece>` names `--port`, and a
-piece starting `-h` prints help with exit 0); and a piece the command
-accepts (`--port 80`) passes silently, leaving the weaker head as the token.
-Those predate #315. -/
+piece starting `-h` prints help with exit 0); a piece the command accepts is
+accepted, leaving the weaker head as the token, and may be printed as that
+flag's value (`--transport <piece>` prints "unknown transport" with it, a
+`--session <piece>` appears in serve-web's banner); and a spaced
+`--auth-token -<x>` errors differently depending on whether `-<x>` is a
+known flag ("a value is required" or an unexpected argument). All of these
+predate #315. -/
 theorem render_noninterference (p : PrintPath) {r r' : TokenRaw}
     (h : verdict r = verdict r') : render p r = render p r' := by
   cases p with
@@ -2885,8 +2892,8 @@ theorem missing_value_kept (f : String) (before fromFlag : List (List Nat)) :
 set_option maxRecDepth 20000 in
 /-- **The re-review's probes, fixed**: a spaced `--auth-token` refuses `-h`,
 `--port=1` and `-x` and takes a lone `-`; `--auth-token=-x` takes `-x`; an
-invalid `--port` value and an unrecognized subcommand after the flag are
-redacted; `lambo --auth-token x serve-web` names `--auth-token`; a missing
+invalid `--port` value, an unrecognized subcommand and a value given to
+`--allow-embedding-mismatch` after the flag are redacted; `lambo --auth-token x serve-web` names `--auth-token`; a missing
 value says so. -/
 theorem re_review_fixed :
     authFlagValue false ⟨[45, 104], true⟩ = none ∧
@@ -2897,6 +2904,8 @@ theorem re_review_fixed :
       quotedRender (.invalidValue "--port <PORT>") [] [[97], [45, 45, 112, 111, 114, 116], [78, 79]]
           [78, 79] = redactedText (.invalidValue "--port <PORT>") ∧
       quotedRender .subcommand [] [[78, 79]] [78, 79] = redactedText .subcommand ∧
+      quotedRender (.tooManyValues "--allow-embedding-mismatch") [] [[97], [78, 79]] [78, 79] =
+        redactedText (.tooManyValues "--allow-embedding-mismatch") ∧
       quotedRender .unexpected [] [authFlagBytes, [120]] authFlagBytes =
         "unexpected argument '--auth-token' found" ∧
       quotedRender (.invalidValue "--auth-token <TOKEN>") [] [authFlagBytes] [] =
