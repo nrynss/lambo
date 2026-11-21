@@ -7,9 +7,9 @@ tests. It has no dependencies beyond Lean itself (no Mathlib).
 ## Status: machine-checked
 
 `lake build` passes on Lean `v4.36.0` with no errors, no warnings and no
-`sorry`: 252 theorems across 13 files. The axiom audit in
+`sorry`: 294 theorems across 14 files. The axiom audit in
 `LamboProofs/Audit.lean` reports only Lean's standard axioms (`propext`,
-`Quot.sound`, and `Classical.choice` for two theorems); 7 of the 35 audited
+`Quot.sound`, and `Classical.choice` for five theorems); 8 of the 43 audited
 theorems use no axioms at all.
 
 To check them yourself:
@@ -51,6 +51,7 @@ corresponds to.
 | `Receipts.lean` | `src/writeq/receipts.rs`, `admission.rs` | A settled outcome is never overwritten (`settleAll_fixed`). Unsettled receipts are never expired or evicted (`expire_keeps_unsettled`, `evict_keeps_unsettled`). A lane applies writes in submission order (`lane_fifo`). Admission keeps lanes and the queue within their caps. |
 | `Reserve.lean` | `src/graph/reserve.rs` | A live reservation excludes other agents (`reserve_denied`). Takeover happens only at or after expiry (`takeover_needs_expiry`). |
 | `Contract.lean` | `EmbeddingContract`, `stamp_embedding`, `check_vector_compatibility` | Compatibility is equality of all three fields (`compatible_iff_eq`). A stamped session's contract cannot be changed by ordinary stamps (`stampAll_keeps`). |
+| `Fusion.lean` | phase 1 in `candidates_with_keyword_leg_as`, `merge_max`, `LegScores::merged` (`src/recall/candidates.rs`) | Max fusion is monotone in each leg (`merged_mono`). Assigning `1.0` to the named concept's keyword leg can drop it below a weaker lexical neighbour (`assign_lowers_named_concept`, the #288 example). Raising it instead gives a keyword leg of at least `1.0` and at least its BM25 within the over-fetch cap (`raise_keyword_ge_one`, `raise_keyword_ge_bm25`), touches no other node (`raise_local`), never lowers its fused score or its rank (`raise_no_demotion`, `raise_ahead_le`), and agrees with assigning whenever its BM25 is at most `1.0` or absent (`raise_eq_assign`). |
 | `Audit.lean` | | `#print axioms` for the headline theorems. |
 
 ## How far the proofs reach

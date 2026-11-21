@@ -11,6 +11,7 @@ import LamboProofs.Lease
 import LamboProofs.Receipts
 import LamboProofs.Reserve
 import LamboProofs.Contract
+import LamboProofs.Fusion
 
 /-
 # Axiom audit
@@ -70,3 +71,13 @@ open Lambo
 #print axioms Receipts.lane_fifo
 #print axioms Reserve.takeover_needs_expiry
 #print axioms Contract.stampAll_keeps
+
+-- Phase-1 leg fusion and the exact-name step (#288)
+#print axioms Fusion.merged_mono
+#print axioms Fusion.assign_lowers_named_concept
+#print axioms Fusion.raise_keyword_ge_one
+#print axioms Fusion.raise_keyword_ge_bm25
+#print axioms Fusion.raise_local
+#print axioms Fusion.raise_no_demotion
+#print axioms Fusion.raise_ahead_le
+#print axioms Fusion.raise_eq_assign

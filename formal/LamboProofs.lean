@@ -11,4 +11,5 @@ import LamboProofs.Lease
 import LamboProofs.Receipts
 import LamboProofs.Reserve
 import LamboProofs.Contract
+import LamboProofs.Fusion
 import LamboProofs.Audit
