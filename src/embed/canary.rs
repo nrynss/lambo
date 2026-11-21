@@ -278,7 +278,9 @@ impl Fingerprint {
 /// How the attach's check went.
 #[derive(Clone, Debug, PartialEq)]
 pub enum CanaryVerdict {
-    /// `canary = "off"`, or a re-embed attach.
+    /// `canary = "off"`, or an attach given no canary options (a full
+    /// `lambo re-embed` attaches so and checks the pin itself with
+    /// [`compare_pin`]; `--missing-only` runs the configured canary).
     Off,
     /// No fingerprint (or one of another canary version): this attach pinned it.
     Pinned,
@@ -289,7 +291,9 @@ pub enum CanaryVerdict {
     /// At least one phrase is below [`CANARY_MIN_COSINE`].
     Drifted { min_cosine: f64, worst: usize },
     /// The canaries could not be embedded (the embedder is down or slow).
-    /// Not a measured drift, so never a refusal; the next attach checks again.
+    /// Not a measured drift, so never a refusal of a writer attach; the next
+    /// attach checks again. A full `lambo re-embed`, which would replace the
+    /// pin, refuses on it unless `--repin-canary` is given (#296).
     Unverified(String),
 }
 

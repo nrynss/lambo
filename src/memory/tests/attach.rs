@@ -288,7 +288,7 @@ async fn build_rejects_zero_cadence_before_acquiring_the_lease() {
     second.close().await.unwrap();
 }
 
-/// #296: the operator override's WARN ("relabeling the session's existing
+/// #296: the operator override's WARN ("relabeled the session's existing
 /// vectors") is logged only once the relabel succeeded. A cross-kind
 /// override over stored vectors is refused by the relabel and logs no WARN;
 /// a same-kind rename relabels and logs it.

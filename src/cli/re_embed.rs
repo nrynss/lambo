@@ -149,6 +149,14 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
     // own mechanism, never by flipping the override.
     let config = backends.config.clone();
     let canary_mode = backends.embedder_cfg.canary;
+    if args.repin_canary && canary_mode == crate::embed::canary::CanaryMode::Off {
+        return Err(CliError::Usage(
+            "--repin-canary has nothing to replace: with [embedder] canary = \"off\" a \
+             re-embed neither checks nor pins the canary, and leaves any pin the store holds \
+             as it is. Drop the flag, or turn the canary on."
+                .to_string(),
+        ));
+    }
     // #296: the backfill runs the configured canary like any writer attach;
     // a full rewrite attaches with it off and checks the pin itself below.
     let canary = if args.missing_only {
@@ -210,7 +218,7 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
     };
 
     // Every path below — success or any mid-run abort — funnels into
-    // close_writer at the end of this function (K2-R1-6): a failed migration
+    // close_writer at the end of this function: a failed migration
     // must release the writer lease immediately, not hold it to TTL.
     //
     // #296: whether the re-pin after a full rewrite replaces a pin the live
@@ -311,9 +319,19 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
                  --rewrite-same-contract"
             ),
             Ok(()) => format!("{out}\nembedder canary pinned again for the live contract"),
+            // #296: the rewrite is durable but the store still holds the
+            // old pin. If that pin was another build's, every writer attach
+            // under canary = "verify" is refused until it is replaced, so
+            // name the exact recovery.
             Err(e) => format!(
-                "{out}\nwarning: the embedder canary could not be pinned again ({e}); the next \
-                 writer attach compares against the old pin"
+                "{out}\nwarning: the embedder canary could not be pinned again ({e}). The \
+                 rewrite is durable, but the store still holds the old pin for this contract, \
+                 and the next writer attach compares against it: if it was taken from another \
+                 build, every writer attach under canary = \"verify\" is refused. Once the \
+                 embedder answers, rerun `lambo re-embed --rewrite-same-contract \
+                 --repin-canary --session {} --agent {}` to rewrite this session again and pin \
+                 the canary.",
+                args.session, args.agent,
             ),
         },
     )
@@ -386,6 +404,12 @@ async fn repin_guard(
     if mode == CanaryMode::Off {
         return Ok(false);
     }
+    let contract = format!(
+        "kind={} model={} dim={}",
+        live.kind,
+        live.model.as_deref().unwrap_or("<unset>"),
+        live.dim
+    );
     let why = match canary::compare_pin(store, embedder, live)
         .await
         .map_err(CliError::from)?
@@ -395,8 +419,23 @@ async fn repin_guard(
              {min_cosine:.5}, below {})",
             canary::CANARY_MIN_COSINE
         ),
+        // The check could not run (the embedder errored, timed out, or
+        // answered the wrong width or too few vectors). That is usually
+        // transient, so the advice is to retry; the opt-in is only for an
+        // operator who knows the pin is another build's.
         Some(CanaryVerdict::Unverified(reason)) => {
-            format!("the live embedder could not be checked against that pin ({reason})")
+            if repin {
+                return Ok(true);
+            }
+            return Err(CliError::Runtime(format!(
+                "session '{session}': the store holds an embedder canary pin for {contract}, \
+                 which this re-embed pins again after its rewrite, but the check of the live \
+                 embedder against that pin could not run ({reason}). Refused; nothing was \
+                 written. Retry once the embedder answers. Pass --repin-canary only to replace \
+                 that pin deliberately, knowing it was taken from another build of the model: \
+                 the store's other sessions under that contract keep vectors from that build, \
+                 and after the re-pin the canary would no longer flag them."
+            )));
         }
         // No usable pin, or one the live embedder reproduces: the re-pin
         // takes nothing from any other session. `compare_pin` returns no
@@ -413,16 +452,12 @@ async fn repin_guard(
         return Ok(true);
     }
     Err(CliError::Runtime(format!(
-        "session '{session}': this re-embed would pin the embedder canary again for kind={} \
-         model={} dim={}, replacing the store's pin for that contract, and {why}. Any other \
-         session in this store under that contract holds vectors from the pinned embedder, and \
-         after the re-pin the canary would no longer flag it. Refused; nothing was written. \
-         Rerun with --repin-canary to replace the pin anyway (then re-embed each of those \
-         sessions with --rewrite-same-contract), or restore the embedder the pin was taken \
-         from.",
-        live.kind,
-        live.model.as_deref().unwrap_or("<unset>"),
-        live.dim,
+        "session '{session}': this re-embed would pin the embedder canary again for \
+         {contract}, replacing the store's pin for that contract, and {why}. Any other session \
+         in this store under that contract holds vectors from the pinned embedder, and after \
+         the re-pin the canary would no longer flag it. Refused; nothing was written. Rerun \
+         with --repin-canary to replace the pin anyway (then re-embed each of those sessions \
+         with --rewrite-same-contract), or restore the embedder the pin was taken from."
     )))
 }
 
@@ -456,7 +491,7 @@ impl ImageCounts {
 /// Same all-or-nothing discipline as [`rewrite_all`]: every embed happens
 /// before any mutation, so an embedder failure part-way leaves the graph
 /// untouched rather than half-backfilled, and `close_writer` still releases
-/// the lease on that path (K2-R1-6).
+/// the lease on that path.
 async fn backfill_missing(
     mem: &Memory,
     session: &str,
@@ -503,7 +538,7 @@ async fn backfill_missing(
 /// The all-or-nothing rewrite body: embed EVERY concept BEFORE mutating the
 /// graph. Any embed failure aborts here — no mutation appended, no partial
 /// rewrite, no mixed-space state — and the caller's `close_writer` still
-/// releases the lease on this error path (K2-R1-6). `in_place`
+/// releases the lease on this error path. `in_place`
 /// (`--rewrite-same-contract`, #296) keeps the contract
 /// ([`crate::graph::Graph::reembed_in_place`]).
 #[allow(clippy::too_many_arguments)]
@@ -1381,7 +1416,11 @@ mod tests {
         )
         .await
         .expect_err("a drifted backfill under verify is refused");
-        assert!(err.to_string().contains("canary drifted"), "{err}");
+        let msg = err.to_string();
+        assert!(msg.contains("canary drifted"), "{msg}");
+        // Advice re-embed can follow: it refuses --allow-embedding-mismatch.
+        assert!(msg.contains("--rewrite-same-contract"), "{msg}");
+        assert!(!msg.contains("--allow-embedding-mismatch"), "{msg}");
         assert_eq!(durable_concepts(&store).await, before, "no writes");
         assert!(
             lease_is_free(&store).await,
@@ -1471,6 +1510,164 @@ mod tests {
         assert!(!out.contains("no longer flags"), "{out}");
     }
 
+    /// Embeds one text at a time, but fails every batch. The canary check
+    /// embeds its 20 phrases through `embed_batch`, so it cannot run, while
+    /// the rewrite's own one-at-a-time embeds succeed: a provider throttling
+    /// the canary burst.
+    struct CanaryBatchFails(FixtureEmbedder);
+
+    #[async_trait::async_trait]
+    impl Embedder for CanaryBatchFails {
+        fn dimensions(&self) -> usize {
+            1024
+        }
+        async fn embed(&self, text: &str) -> Result<Vec<f32>, crate::embed::EmbedError> {
+            Ok(self.0.embed_sync(text))
+        }
+        async fn embed_batch(
+            &self,
+            texts: &[&str],
+            _deadline: tokio::time::Instant,
+        ) -> Vec<Result<Vec<f32>, crate::embed::EmbedError>> {
+            texts
+                .iter()
+                .map(|_| Err(crate::embed::EmbedError::Backend("throttled".into())))
+                .collect()
+        }
+    }
+
+    /// #296 review: a pin check that could not run is not a drift. A
+    /// migration over an existing pin whose check fails (here only the
+    /// canary batch fails) is refused before it writes, with advice to retry
+    /// once the embedder answers and `--repin-canary` offered only as the
+    /// deliberate override; the retry with a working embedder then needs no
+    /// opt-in. With the opt-in the rewrite runs, and when the pin after it
+    /// fails the output names the exact recovery, which then works.
+    ///
+    /// Mirrors `Contract.fixed_repin_unsafe_needs_optin` and
+    /// `Contract.pinAfterFixed_no_silent_replace` (an `unchecked` pin is
+    /// replaced only with the opt-in).
+    #[tokio::test]
+    async fn re_embed_retries_rather_than_replaces_a_pin_it_could_not_check() {
+        use crate::embed::canary::CanaryMode;
+        let target = EmbeddingContract {
+            kind: "fixture".into(),
+            model: Some("fixture-model".into()),
+            dim: 1024,
+        };
+        let store = Arc::new(MemoryStore::new());
+        seed_damaged_session(&store).await;
+        pin_from(&store, &FixtureEmbedder::new(), &target).await;
+        let before = durable_state(&store).await;
+        let throttled = |store: &Arc<MemoryStore>| {
+            let mut b = with_canary(
+                backends_on(store.clone(), "fixture", "fixture-model"),
+                CanaryMode::Warn,
+            );
+            b.embedder = Box::new(CanaryBatchFails(FixtureEmbedder::new()));
+            b
+        };
+
+        let err = run(throttled(&store), args(false, false))
+            .await
+            .expect_err("an unchecked pin is not replaced without the opt-in");
+        let msg = err.to_string();
+        assert!(msg.contains("could not run"), "{msg}");
+        assert!(msg.contains("Retry once the embedder answers"), "{msg}");
+        assert!(
+            msg.contains("knowing it was taken from another build"),
+            "{msg}"
+        );
+        assert!(msg.contains("nothing was written"), "{msg}");
+        assert_eq!(durable_state(&store).await, before, "no writes");
+        assert!(
+            lease_is_free(&store).await,
+            "the refusal released the lease"
+        );
+
+        // The retry, once the embedder answers: the pin agrees, no opt-in.
+        let out = run(
+            with_canary(
+                backends_on(store.clone(), "fixture", "fixture-model"),
+                CanaryMode::Warn,
+            ),
+            args(false, false),
+        )
+        .await
+        .expect("the retry migrates");
+        assert!(!out.contains("no longer flags"), "{out}");
+
+        // The deliberate override: the rewrite runs, the pin after it fails,
+        // and the output names the recovery.
+        let store = Arc::new(MemoryStore::new());
+        seed_damaged_session(&store).await;
+        pin_from(&store, &OldBuild(FixtureEmbedder::new()), &target).await;
+        let out = run(
+            throttled(&store),
+            Args {
+                repin_canary: true,
+                ..args(false, false)
+            },
+        )
+        .await
+        .expect("the opt-in rewrites");
+        assert!(out.contains("could not be pinned again"), "{out}");
+        assert!(
+            out.contains(&format!(
+                "lambo re-embed --rewrite-same-contract --repin-canary --session {SESSION} \
+                 --agent {AGENT}"
+            )),
+            "{out}"
+        );
+        assert_eq!(durable_state(&store).await.0.as_deref(), Some("fixture"));
+
+        // The named recovery works once the embedder answers.
+        let out = run(
+            with_canary(
+                backends_on(store.clone(), "fixture", "fixture-model"),
+                CanaryMode::Verify,
+            ),
+            Args {
+                rewrite_same_contract: true,
+                repin_canary: true,
+                ..args(false, false)
+            },
+        )
+        .await
+        .expect("the recovery");
+        assert!(out.contains("embedder canary pinned again"), "{out}");
+        assert!(
+            matches!(
+                verdict(&store, &target).await,
+                crate::embed::canary::CanaryVerdict::Verified { .. }
+            ),
+            "the pin is the live embedder's"
+        );
+    }
+
+    /// #296 review: `--repin-canary` under `canary = "off"` is a usage
+    /// error, not silently ignored: with the canary off nothing is checked
+    /// or pinned, so there is no pin for it to replace.
+    ///
+    /// Mirrors the usage refusal in `Contract.reembedCmdFixed`.
+    #[tokio::test]
+    async fn re_embed_refuses_repin_canary_with_the_canary_off() {
+        let err = run(
+            with_canary(
+                backends_on(Arc::new(MemoryStore::new()), "fixture", "m"),
+                crate::embed::canary::CanaryMode::Off,
+            ),
+            Args {
+                repin_canary: true,
+                ..args(false, false)
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, CliError::Usage(_)), "{err}");
+        assert!(err.to_string().contains("canary = \"off\""), "{err}");
+    }
+
     /// An embedder whose every embed fails — drives the mid-run abort path.
     struct FailingEmbedder;
 
@@ -1486,7 +1683,7 @@ mod tests {
 
     #[tokio::test]
     async fn re_embed_embed_failure_still_releases_the_lease() {
-        // K2-R1-6: the old code returned from run() on an embed failure
+        // The old code returned from run() on an embed failure
         // WITHOUT close_writer, so the session stayed unwritable for the rest
         // of the TTL. The abort message is honest AND the lease goes back.
         let store = Arc::new(MemoryStore::new());

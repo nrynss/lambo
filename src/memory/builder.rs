@@ -751,6 +751,7 @@ impl MemoryBuilder {
                         config.semantic_match_threshold,
                         self.allow_embedding_mismatch,
                         &session,
+                        true,
                     )
                     .await?;
                 }
@@ -764,6 +765,7 @@ impl MemoryBuilder {
                     config.semantic_match_threshold,
                     self.allow_embedding_mismatch,
                     &session,
+                    false,
                 )
                 .await?;
                 // #87: labelled pairs first, then the contract's measured
@@ -1030,7 +1032,10 @@ impl Drop for AbortOnDrop {
 
 /// #176: run the canary check and apply its mode. `Some(t)` when the merge
 /// threshold was derived from labelled pairs (#87) and replaces the
-/// configured one for this session.
+/// configured one for this session. `reembed_mode` is the
+/// `re-embed --missing-only` attach (#296), whose drift refusal gives advice
+/// re-embed can follow: it refuses `--allow-embedding-mismatch`.
+#[allow(clippy::too_many_arguments)]
 async fn canary_gate(
     store: &dyn crate::store::GraphStore,
     embedder: &dyn Embedder,
@@ -1039,6 +1044,7 @@ async fn canary_gate(
     configured_threshold: f64,
     allow_mismatch: bool,
     session: &SessionId,
+    reembed_mode: bool,
 ) -> Result<Option<f64>, LamboError> {
     use crate::embed::canary::{self, CanaryMode, CanaryVerdict, ThresholdSource};
     let outcome = canary::check(store, embedder, contract, options, configured_threshold).await?;
@@ -1061,17 +1067,25 @@ async fn canary_gate(
             "embedder canary could not be checked; the next writer attach checks again"
         ),
         CanaryVerdict::Drifted { min_cosine, worst } => {
+            let remedy = if reembed_mode {
+                "Repair this session in place with `lambo re-embed --rewrite-same-contract` \
+                 instead of backfilling it, and each other session under this contract too \
+                 (the first one also with --repin-canary, which replaces this pin); restore \
+                 the previous embedder; or, knowing the spaces still agree, set [embedder] \
+                 canary = \"warn\" to backfill anyway."
+            } else {
+                "Re-embed each of the store's sessions under this contract in place with \
+                 `lambo re-embed --rewrite-same-contract` (the first one also with \
+                 --repin-canary, which replaces this pin), restore the previous embedder, or, \
+                 knowing the spaces still agree, attach with --allow-embedding-mismatch or set \
+                 [embedder] canary = \"warn\"."
+            };
             let message = format!(
                 "session {session}: embedder canary drifted — canary {worst} ({:?}) has cosine \
                  {min_cosine:.5} against the vector this store pinned for kind={} model={} \
                  dim={}, below {}. The embedder behind this contract no longer produces the \
                  vectors already stored (a re-quantised model, another server build, a provider \
-                 revision), and new vectors would land in a different space. Re-embed each of \
-                 the store's sessions under this contract in place with `lambo re-embed \
-                 --rewrite-same-contract` (the first one also with --repin-canary, which \
-                 replaces this pin), restore the previous embedder, or, knowing the spaces \
-                 still agree, attach with --allow-embedding-mismatch or set [embedder] canary \
-                 = \"warn\".",
+                 revision), and new vectors would land in a different space. {remedy}",
                 canary::CANARY_PHRASES[*worst],
                 contract.kind,
                 contract.model.as_deref().unwrap_or("(default)"),

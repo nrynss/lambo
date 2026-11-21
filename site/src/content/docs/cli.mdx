@@ -264,7 +264,13 @@ lambo re-embed --rewrite-same-contract --session <next> --agent <id>
 
 `--rewrite-same-contract` embeds every text concept again with the live embedder and keeps the contract. It is refused on a session under another contract (re-embedding that is a migration, without the flag) and on a session with no vector (use `--missing-only`). Image vectors block it as they block a migration, unless you pass `--drop-image-vectors`.
 
-A full re-embed pins the store's canary for the contract again once its rewrite is durable. Before it writes, it checks the existing pin against the live embedder, and refuses to replace one the embedder does not reproduce unless you pass `--repin-canary`, because the store's other sessions under that contract rest on the pin. After that re-pin the canary no longer flags the sessions not yet re-embedded, and the command says so: re-embed each of them. The same check guards a migration into a contract whose pin the live embedder does not reproduce.
+A full re-embed pins the store's canary for the contract again once its rewrite is durable. Before it writes, it checks the existing pin against the live embedder, and refuses to replace one the embedder does not reproduce unless you pass `--repin-canary`, because the store's other sessions under that contract rest on the pin. After that re-pin the canary no longer flags the sessions not yet re-embedded, and the command says so: re-embed each of them. The same check guards a migration into a contract whose pin the live embedder does not reproduce. When the check cannot run at all (the embedder errors, times out, or answers the wrong width), the command is refused with advice to retry once the embedder answers: that is usually transient, and `--repin-canary` there is only for a pin you know was taken from another build. With `[embedder] canary = "off"` nothing is checked or pinned, and `--repin-canary` is a usage error.
+
+The rewrite is made durable before the canary is pinned again. If that pin fails (the command prints a warning naming the recovery), or the process stops between the two, the session is in the live embedder's space while the store still holds the old pin, so under `canary = "verify"` every writer attach under the contract is refused. Once the embedder answers, rerun the rewrite on that session with the pin opt-in, which rewrites it again and pins the canary:
+
+```bash
+lambo re-embed --rewrite-same-contract --repin-canary --session <id> --agent <id>
+```
 
 ## Write commands
 

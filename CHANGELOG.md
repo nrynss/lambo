@@ -21,7 +21,17 @@
   because the store's other sessions under that contract rest on it; the
   re-pin used to be silent, and its warning keyed on a condition no
   successful rewrite met. With the opt-in the output says those sessions are
-  no longer flagged. The `--allow-embedding-mismatch` WARN ("relabeled the
+  no longer flagged. A check that could not run (the embedder errored, timed
+  out, or answered the wrong width) is refused with advice to retry once the
+  embedder answers; `--repin-canary` there is only for a pin known to be from
+  another build. `--repin-canary` under `canary = "off"`, which neither
+  checks nor pins, is a usage error rather than silently ignored. If the
+  re-pin fails after the rewrite is durable, the output names the recovery
+  (`lambo re-embed --rewrite-same-contract --repin-canary` on that session),
+  which `docs/reference/cli.mdx` also documents for a process that stops
+  between the two. A drift refusal reached through `--missing-only` now
+  advises the in-place rewrite instead of `--allow-embedding-mismatch`, which
+  re-embed refuses. The `--allow-embedding-mismatch` WARN ("relabeled the
   session's existing vectors") is now logged after the relabel succeeds,
   never ahead of a cross-kind relabel that refuses.
   `formal/LamboProofs/Contract.lean` models the fix (`reembedCmdFixed`).
