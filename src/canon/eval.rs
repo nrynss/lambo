@@ -595,7 +595,7 @@ impl Evaluator {
         // not (Swarm), nothing is resolved.
         let scorer = params.promotion_policy.scorer();
         let writers = if scorer.reads_writers() {
-            Writers::shared(self.timeline.get(graph), graph)
+            Writers::shared(self.timeline.get(graph))
         } else {
             Writers::unresolved()
         };
@@ -928,13 +928,6 @@ async fn stage2_verdict(
     }
 }
 
-/// Phase 3 — apply the verdicts. Synchronous: the caller holds the write
-/// guard, and this is the cycle's commit point.
-///
-/// Every hop re-checks the node's **current** status first: the graph was
-/// unlocked while the verdicts were computed, so another writer may have
-/// moved it. `outcome` is filled in as hops commit, so a mid-phase failure
-/// still hands the caller everything that did.
 /// Whether [`apply`] will read the writer timeline: a policy that reads
 /// writers with a Stage 2 or Stage 3 window to admit, or a supersession
 /// verdict to re-check (#300).
@@ -943,6 +936,13 @@ fn apply_reads_writers(plan: &CyclePlan, verdicts: &Verdicts, params: &EvalParam
     (params.promotion_policy.scorer().reads_writers() && windows) || !verdicts.supersede.is_empty()
 }
 
+/// Phase 3 — apply the verdicts. Synchronous: the caller holds the write
+/// guard, and this is the cycle's commit point.
+///
+/// Every hop re-checks the node's **current** status first: the graph was
+/// unlocked while the verdicts were computed, so another writer may have
+/// moved it. `outcome` is filled in as hops commit, so a mid-phase failure
+/// still hands the caller everything that did.
 #[allow(clippy::too_many_arguments)] // one cycle's apply input
 fn apply(
     graph: &mut Graph,
@@ -977,7 +977,7 @@ fn apply(
     // apply; `eval_cycle` refreshed the cache under the read guard, so this
     // is normally a cache hit, not a build under the write guard.
     let writers = if scorer.reads_writers() && (!plan.stage2.is_empty() || !stage3.is_empty()) {
-        Writers::shared(timeline.get(graph), graph)
+        Writers::shared(timeline.get(graph))
     } else {
         Writers::unresolved()
     };

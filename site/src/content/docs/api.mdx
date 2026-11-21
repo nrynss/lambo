@@ -684,10 +684,13 @@ take a `canon::Writers`, the graph's writer attribution that Solo's
 dependents term reads; the evaluator lends its own, cached by graph epoch,
 so a cycle resolves it once, and only for a scorer whose `reads_writers()`
 is true (default `false`; Solo overrides it). Any other scorer gets
-`Writers::unresolved()`, and a scorer that reads writers but is handed
-unresolved ones resolves its own. Their defaults call `candidates` and
-`admits_hop`; `Writers::of(&graph)` resolves one for other callers, and
-`canon::solo_dependent_interactions` resolves its own.
+`Writers::unresolved()`, and Solo, handed unresolved ones, resolves its
+own. `Writers` is opaque outside the crate: external code can build one
+(`Writers::of(&graph)`, `Writers::unresolved()`) and pass it along but
+cannot read it, and `PromotionPolicy::scorer()` dispatches only the two
+built-in scorers, so only Solo reads writers. Their defaults call
+`candidates` and `admits_hop`, and `canon::solo_dependent_interactions`
+resolves its own.
 `EvalParams::min_peer_count` and `Config::canonization_min_peer_count` are
 `#[deprecated]` and inert.
 

@@ -187,6 +187,10 @@ pub(crate) struct WriterTimeline {
     /// agent set collapsed to one agent, so no conflict fired) and a spurious
     /// conflict naming the wrong writer.
     by_time: HashMap<DateTime<Utc>, Vec<(NodeId, AgentId)>>,
+    /// How many interactions the graph held when this was built (its
+    /// temporal chain's length), so a reader can check it is reading the
+    /// timeline against the graph it came from (#300).
+    interactions: usize,
 }
 
 #[cfg(test)]
@@ -210,7 +214,15 @@ impl WriterTimeline {
         for candidates in by_time.values_mut() {
             candidates.sort_by_key(|(id, _)| id.0);
         }
-        Self { by_time }
+        Self {
+            by_time,
+            interactions: graph.temporal_chain().len(),
+        }
+    }
+
+    /// How many interactions the graph held when this was built.
+    pub(crate) fn interactions(&self) -> usize {
+        self.interactions
     }
 
     /// Every interaction written at exactly `at`, id-ascending. Empty when none

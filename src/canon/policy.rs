@@ -345,8 +345,9 @@ pub trait PromotionScorer: Send + Sync + std::fmt::Debug {
     /// the [`Writers`] they are given. The evaluator resolves writers only
     /// for a policy that does, and passes [`Writers::unresolved`] otherwise,
     /// so a policy that reads none (Swarm) pays nothing for them. Defaults
-    /// to `false`; a policy that reads writers must say so, or it is handed
-    /// unresolved ones and has to resolve its own.
+    /// to `false`; [`SoloScorer`] returns `true`. [`Writers`] is opaque
+    /// outside the crate, so only the built-in scorers can read them, and
+    /// [`PromotionPolicy::scorer`] dispatches only those two.
     fn reads_writers(&self) -> bool {
         false
     }
@@ -392,53 +393,48 @@ pub trait PromotionScorer: Send + Sync + std::fmt::Debug {
 /// [`Writers::of`] resolves it; the evaluator lends its own, cached across
 /// cycles by graph epoch, through [`PromotionScorer::candidates_with`] and
 /// [`PromotionScorer::admits_hop_with`], and passes [`Writers::unresolved`]
-/// to a policy that does not [read them](PromotionScorer::reads_writers). A
-/// policy handed unresolved writers resolves its own from the graph, so
-/// they are never wrong, only slower.
+/// to a policy that does not [read them](PromotionScorer::reads_writers).
+/// [`SoloScorer`], handed unresolved writers, resolves its own from the
+/// graph, so they are never wrong, only slower.
 ///
-/// Resolved writers must come from the same graph's interactions. They carry
-/// the interaction count they were resolved at, and a debug build asserts it
-/// wherever they are read (not the epoch: canonization transitions move it
-/// while the writers stay valid).
+/// Resolved writers must come from the same graph's interactions. The
+/// timeline records the interaction count it was built from, and a debug
+/// build asserts it wherever the writers are read (not the epoch:
+/// canonization transitions move it while the writers stay valid).
+///
+/// `Writers` is opaque outside the crate: external code can build one
+/// ([`Writers::of`], [`Writers::unresolved`]) and pass it along, but not
+/// read it, so only the built-in [`SoloScorer`] reads writers.
 #[derive(Clone)]
-pub struct Writers(Option<ResolvedWriters>);
-
-#[derive(Clone)]
-struct ResolvedWriters {
-    timeline: Arc<WriterTimeline>,
-    interactions: usize,
-}
+pub struct Writers(Option<Arc<WriterTimeline>>);
 
 impl Writers {
     /// Resolve `graph`'s writers: `O(interactions)`.
     pub fn of(graph: &Graph) -> Self {
-        Self::shared(Arc::new(WriterTimeline::of(graph)), graph)
+        Self::shared(Arc::new(WriterTimeline::of(graph)))
     }
 
-    /// No writers resolved, for a policy that reads none. A policy that does
-    /// read them resolves its own from the graph.
+    /// No writers resolved, for a policy that reads none. [`SoloScorer`],
+    /// which does, resolves its own from the graph when handed these.
     pub fn unresolved() -> Self {
         Self(None)
     }
 
-    /// `graph`'s already-resolved timeline (the evaluator's cached one).
-    pub(crate) fn shared(timeline: Arc<WriterTimeline>, graph: &Graph) -> Self {
-        Self(Some(ResolvedWriters {
-            timeline,
-            interactions: graph.temporal_chain().len(),
-        }))
+    /// An already-resolved timeline (the evaluator's cached one).
+    pub(crate) fn shared(timeline: Arc<WriterTimeline>) -> Self {
+        Self(Some(timeline))
     }
 
     /// The resolved timeline, to read against `graph`; `None` when
     /// unresolved.
     pub(crate) fn for_graph(&self, graph: &Graph) -> Option<&WriterTimeline> {
-        let resolved = self.0.as_ref()?;
+        let timeline = self.0.as_deref()?;
         debug_assert_eq!(
-            resolved.interactions,
+            timeline.interactions(),
             graph.temporal_chain().len(),
             "writers resolved from a different graph's interactions"
         );
-        Some(&resolved.timeline)
+        Some(timeline)
     }
 }
 
