@@ -71,6 +71,13 @@ daemon's routing around it in `Daemon::recall_routed` (`src/daemon/mod.rs`):
   and the recent-leg score `Phase1Gather::run` stamps on it is then
   `RECENT_SCORE`, the default's, so skipping the gather and running it give
   the same input.
+* **Early refusals** of `recall_routed` are not modelled: the
+  `validate_vector_candidate_limit` and caller/graph session-mismatch
+  returns (`DetailedRecall::warn_only`, `src/daemon/mod.rs`), which answer
+  before any routing. The gather's `Err` arm (`Phase1Gather::run`) is left
+  out too; that is harmless here, because only `Route::ByVector` returns it
+  and that route never routes structural, so it never meets a skipped
+  gather.
 * Concurrency: the three graph reads of `recall_routed` (pre-check, retry
   guard, final guard) are three snapshots `g₁ g₂ g₃`, any graphs at all.
 
@@ -82,8 +89,13 @@ Classifier:
   it and in any ASCII case, does (`classify_each_marker`: each marker alone).
 * `depend_not_marker` (doc: "bare `"depend"` is NOT a marker"), with the test
   `marker_bearing_non_dependency_questions_stay_general` as `decide` examples.
-* `classify_inside_word`: a marker glued to the end of a longer word still
-  classifies `Structural`, because matching is a substring test. So
+* `classify_inside_word`, `classify_into_word`: matching is a substring
+  test, so a marker still classifies `Structural` when it is glued to the end
+  of a longer word or runs into the start of the next one. The second is the
+  more frequent misfire: "the answer depends only on the score" is
+  `Structural` because "depends only" contains "depends on"
+  (`depends_only_structural`); "is it unsafe to delete it" is too
+  (`unsafe_to_delete_structural`, harmless). Glued at the front,
   "independents of" and "somewhat uses" route to the structural arm
   (`independents_of_structural`, `somewhat_uses_structural`). The doc comment
   says every marker is "never an ordinary substring" and that marker-bearing
@@ -223,6 +235,23 @@ theorem classify_inside_word {m : List Char} (hm : lower m ∈ markers) (pre : L
     (post : List Char) : classify (pre ++ c :: m ++ post) = .structural := by
   have := classify_marker hm (pre ++ [c]) post
   simpa using this
+
+/-- **Matching ignores word boundaries, at the other end too.** A marker
+that runs into the start of the next word (`c` is any character, a letter
+included) still classifies structural. -/
+theorem classify_into_word {m : List Char} (hm : lower m ∈ markers) (pre : List Char) (c : Char)
+    (post : List Char) : classify (pre ++ m ++ c :: post) = .structural :=
+  classify_marker hm pre (c :: post)
+
+/-- "depends only" contains the marker `depends on`: a statement about what a
+value is computed from routes to the structural arm. -/
+theorem depends_only_structural :
+    classify "the answer depends only on the score".toList = .structural := by decide
+
+/-- "unsafe to delete" contains the marker `safe to delete` (harmless: it is
+still a delete-safety question). -/
+theorem unsafe_to_delete_structural :
+    classify "is it unsafe to delete it".toList = .structural := by decide
 
 /-- "independents of" contains the marker `dependents of`. -/
 theorem independents_of_structural :
@@ -1034,7 +1063,10 @@ def finalStep (g : Graph κ) (choice : Option Choice) (structural : Bool) (topK 
 the query's anchor resolution on a graph snapshot; `routesStructural` is
 `Route::routes_structural`; `vectorLeg` is "a store that searches vectors and
 a query embedding". `g₁` is the pre-check's graph, `g₂` the retry guard's
-(#263), `g₃` the final guard's. -/
+(#263), `g₃` the final guard's. Not modelled: the early `warn_only` refusals
+(`validate_vector_candidate_limit`, session mismatch) that return before
+routing, and the gather's `Err` arm, which only `Route::ByVector` (never
+structural) can take. -/
 def recallRouted (resolve : Graph κ → Option Choice) (routesStructural vectorLeg : Bool)
     (q : List Char) (topK depth : Nat) (g₁ g₂ g₃ : Graph κ) : Outcome :=
   let structural := routesStructural && classify q == .structural
