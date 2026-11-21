@@ -347,15 +347,18 @@ pub(crate) enum RecentLeg {
 pub(crate) struct KeywordLeg {
     /// The leg searched: a text query against an installed index.
     pub(crate) ran: bool,
-    /// The best BM25 the index gave a concept of this graph, before any
-    /// exact-name substitution and before phase 1's over-fetch cap (so a
-    /// `limit` of 0 reports it too). `Some(0.0)` when the leg ran and matched no
-    /// concept; `None` when it did not run, or when every score it returned
-    /// was non-finite (phase 1's own leg ranking ignores those too).
+    /// The best BM25 the index gave a concept of this graph, read before
+    /// the exact-name step raises the named concept's keyword leg and before
+    /// phase 1's over-fetch cap (so a `limit` of 0 reports it too).
+    /// `Some(0.0)` when the leg ran and matched no concept; `None` when it
+    /// did not run, or when every score it returned was non-finite (phase 1's
+    /// own leg ranking ignores those too).
     pub(crate) best_bm25: Option<f64>,
     /// The query, normalized as names are ([`Graph::name_target`]), is a
     /// concept's durable name, so phase 1 raised that concept's keyword leg
-    /// to at least `1.0`: the higher of its BM25 and `1.0` (#288).
+    /// to at least `1.0`: the higher of its BM25 and `1.0` (#288), its BM25
+    /// read off the whole ranked search, so a hit beyond the over-fetch cap
+    /// counts too.
     pub(crate) exact_name: bool,
 }
 
@@ -372,10 +375,11 @@ pub(crate) fn candidates_with_legs_as(
     (out, legs)
 }
 
-/// [`candidates_with_legs_as`], plus what the keyword leg found before the
-/// exact-name substitution (#256). The same single index search: the raw
-/// best BM25 is read off its ranked results before phase 1 cuts them to its
-/// over-fetch cap, so it is the same at every `limit`.
+/// [`candidates_with_legs_as`], plus what the keyword leg found, read before
+/// the exact-name step raises the named concept's leg (#256). The same single
+/// index search: the raw best BM25 is read off its ranked results before
+/// phase 1 cuts them to its over-fetch cap, so it is the same at every
+/// `limit`.
 pub(crate) fn candidates_with_keyword_leg_as(
     graph: &Graph,
     index: &InvertedIndex,
@@ -630,13 +634,12 @@ pub(crate) fn candidates_without_keyword_with_legs_as(
 /// Two callers. The exact-name step raises the named concept's keyword leg
 /// with it, folding in its BM25 from the whole ranked search and then the
 /// `1.0` floor, so a higher BM25 is kept even beyond the over-fetch cap
-/// (#288). The vector leg
-/// needs it for a reason that is easy to lose: `vector_candidates` is a trait
-/// method whose contract does not forbid an adapter returning the same
-/// `NodeId` twice, and a plain assignment makes the *last* duplicate win. That
-/// silently reversed the arithmetic from before per-leg provenance — a
-/// `[(dup, 0.90), (dup, 0.10)]` input ranked at 0.1 where it used to rank at
-/// 0.9. The keyword leg's BM25 loop assigns rather than max-merges because
+/// (#288). The vector leg needs it for a reason that is easy to lose:
+/// `vector_candidates` is a trait method whose contract does not forbid an
+/// adapter returning the same `NodeId` twice, and a plain assignment makes
+/// the *last* duplicate win. That silently reversed the arithmetic from
+/// before per-leg provenance — a `[(dup, 0.90), (dup, 0.10)]` input ranked at
+/// 0.1 where it used to rank at 0.9. The keyword leg's BM25 loop assigns rather than max-merges because
 /// that is what it did before per-leg provenance too (the inverted index
 /// yields each id once), and the recency leg is idempotent by construction;
 /// changing either would be the same kind of silent arithmetic change in the

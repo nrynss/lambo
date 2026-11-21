@@ -465,6 +465,24 @@ async fn an_exact_name_query_reports_the_raw_bm25_and_the_match() {
         best < 1.0,
         "premise: every BM25 is under the 1.0 floor: {best}"
     );
+    let own = mem
+        .index
+        .read()
+        .search_ranked("alpha")
+        .into_iter()
+        .find(|s| s.item == target)
+        .map(|s| s.score);
+    assert!(
+        own.is_some_and(|s| s < 1.0),
+        "premise: the named concept matched, under the floor: {own:?}"
+    );
+    // Per hit, the named concept takes the floor: max(BM25, 1.0) is 1.0
+    // here, the one case where the raise and the old overwrite agree.
+    assert_eq!(
+        named.legs.get(&target).and_then(|l| l.keyword),
+        Some(1.0),
+        "a BM25 under 1.0 is raised to the 1.0 floor (#288)"
+    );
     assert_eq!(named.top_legs.bm25, Some(best));
     assert!(named.top_legs.exact_name_match);
     assert_keyword_only(&named, best);

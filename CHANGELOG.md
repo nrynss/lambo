@@ -7,10 +7,15 @@
   (#288). BM25 is unnormalized and routinely above 1.0, so the overwrite could
   drop the concept the query named below a weaker lexical neighbour under max
   fusion. The per-hit keyword leg (`legs.keyword`, the ledger's per-hit
-  `legs.bm25`) for the named concept is now the higher of its BM25 and 1.0;
-  `top_legs.bm25`, `top_legs.exact_name_match` and `confidence` are unchanged.
-  `formal/LamboProofs/Fusion.lean` models the step and proves the named
-  concept's score and rank can no longer fall.
+  `legs.bm25`) for the named concept is now the higher of its BM25 and 1.0,
+  its BM25 read off the whole ranked search: a named concept whose hit ranks
+  beyond phase 1's keyword over-fetch cap (`top_k` times 4) keeps its BM25
+  too, where it used to get exactly 1.0, and no other node beyond the cap
+  joins the leg. `top_legs.bm25`, `top_legs.exact_name_match` and
+  `confidence` are unchanged. `formal/LamboProofs/Fusion.lean` models the
+  step and proves that, under max fusion, the named concept's phase-1 fused
+  score and its phase-1 rank can no longer fall, and that other nodes' leg
+  scores are untouched (RRF fusion is not modelled).
 - Durable display names now surface through layered recall, `lambo_inspect`,
   and MCP tool schemas (#285). Layered recall preserves `LayeredHit::names`
   across merged and single-session recalls, emits `names [...]` in rendered

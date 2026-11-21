@@ -1836,9 +1836,10 @@ pub struct RecallResult {
 pub struct TopLegs {
     /// The keyword leg's best BM25 score, as the index returned it. A
     /// concept whose durable name is exactly the query is ranked with a
-    /// keyword score of at least `1.0`, the higher of its BM25 and `1.0`
-    /// (its per-hit leg score says so, #288); this field never takes that
-    /// floor, and [`Self::exact_name_match`] says the match happened. `Some(0.0)` when
+    /// keyword score of at least `1.0`, the higher of its own BM25 and `1.0`
+    /// wherever that BM25 ranks among the matches (its per-hit leg score
+    /// says so, #288); this field never takes that floor, and
+    /// [`Self::exact_name_match`] says the match happened. `Some(0.0)` when
     /// the leg ran and matched nothing; `None` when it did not run (no query
     /// text, no index, or a dependency question answered by traversal), or
     /// when every score it returned was non-finite.

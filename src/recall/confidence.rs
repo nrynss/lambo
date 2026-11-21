@@ -140,7 +140,8 @@ pub(crate) const KEYWORD_HALF_SCORE: f64 = 5.0;
 
 /// The best keyword and vector scores of a recall's phase 1 over the
 /// concepts of `graph`. The keyword leg's comes from `keyword` (the index's
-/// own best, before the exact-name substitution); the vector leg's is the
+/// own best, read before the exact-name step raises the named concept's
+/// keyword leg); the vector leg's is the
 /// best finite cosine in `legs` (phase 1's own leg ranking ignores a
 /// non-finite one too).
 pub(crate) fn top_legs(graph: &Graph, legs: &LegProvenance, keyword: KeywordLeg) -> TopLegs {
@@ -311,7 +312,7 @@ mod tests {
             (None, None, Some(f64::NAN)),
         ]);
         // The keyword best is the leg's own report, not a fold over `legs`
-        // (whose keyword slot an exact-name match overwrites).
+        // (whose keyword slot an exact-name match raises to at least 1.0).
         assert_eq!(
             top_legs(&g, &map, ran(Some(7.25))),
             top(Some(7.25), Some(0.66))
