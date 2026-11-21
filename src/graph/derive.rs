@@ -547,9 +547,12 @@ pub fn validate(
         reject_empty_key(parent, &parent_key)?;
         reject_empty_key(child, &child_key)?;
         if parent_key == child_key {
-            // An input refusal (#294): the two ends can resolve to one key
-            // only through the graph (a synonym declared since the ack), so
-            // a replay settles it `failed` rather than stopping.
+            // An input refusal (#294): a fact about this pair against this
+            // graph. Spellings that collide on any graph ("user schema",
+            // "schema user") are refused at the ack already; a synonym
+            // declared since the ack can make two ends collide only at apply,
+            // and a replay then settles the write `failed` rather than
+            // stopping.
             return Err(LamboError::Store(StoreError::input_refusal(format!(
                 "derive: parent_of pair ({parent}, {child}) resolves to the same canonical \
                  key ({parent_key:?}) — a Hierarchical self-loop is a cycle (spec §5.7)"

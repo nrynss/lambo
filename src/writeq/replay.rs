@@ -176,7 +176,7 @@ impl WritePipeline {
     /// * **Failure**: a replay that fails **for its own content** consumes the
     ///   intent with a `failed` outcome, mirroring what the in-session worker
     ///   does, rather than retrying on every restart forever. That is
-    ///   [`LamboError::Embed`] under the J3-R3-1 contract,
+    ///   [`LamboError::Embed`] (the embedder answered and refused this input),
     ///   [`LamboError::ImageIdTaken`], a refused reference
     ///   ([`LamboError::Reference`]), an
     ///   [input refusal](crate::types::StoreError::is_input_refusal) (a cycle,
@@ -195,8 +195,8 @@ impl WritePipeline {
     ///   **unconsumed** and ends the loop, except that an embedder outage
     ///   below [`EMBEDDER_SICK_THRESHOLD`] only defers that intent's agent:
     ///   those are conditions a later process can be in a position to fix,
-    ///   and settling an acked write `failed` because a dependency blinked is
-    ///   the defect N1 named.
+    ///   and settling an acked write `failed` because a dependency blinked
+    ///   would lose a write nothing was wrong with.
     /// * **Shutdown**: `close()` aborts this task before the quiesce; whatever
     ///   is still unconsumed stays durable for the next serve.
     pub(crate) fn spawn_replay(self: &Arc<Self>, intents: Vec<WriteIntent>) {
