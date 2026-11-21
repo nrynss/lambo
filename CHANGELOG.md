@@ -45,6 +45,15 @@
   `formal/LamboProofs/Resolve.lean` models the fix
   (`serveWebFlagRefusalFixed`, and `render_noninterference` now covers this
   path).
+  On `lambo serve` and `lambo serve-web`, clap's "unexpected argument"
+  error could also print a token: one starting with `-` was taken for a
+  flag (`--auth-token --abc` printed `'--abc'`, `-abc` printed `'-a'`), and
+  the rest of an unquoted token with a space was printed whole. A value
+  starting with `-` is now the token, and an argument from `--auth-token` on
+  that the command does not accept is shown as `<redacted>` with a tip to
+  quote the token; the exit code is still `2`. An unexpected argument
+  before the flag is shown as before. `Resolve.lean` models this path
+  (`unexpectedArgRefusalFixed`).
 
 - Embedding canary drift repair (#296). On a drift the refusal told the
   operator to run `lambo re-embed`, which refuses a session already under the
