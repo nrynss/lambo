@@ -1,4 +1,4 @@
-//! Hybrid canonicalization step 6 (T7.2) — spec §7.1 step 6, §5, §3.2.
+//! Hybrid canonicalization step 6 — spec §7.1 step 6, §5, §3.2.
 //!
 //! On a canonical-key miss ([`CanonicalizeResult::Unmatched`]) under
 //! `MatchStrategy::Hybrid`, this module embeds the concept **with context**
@@ -10,39 +10,38 @@
 //! to the byte-identical `MatchStrategy::Canonical` outcome (a fresh,
 //! keyword-only concept), logging the fallback once per session.
 //!
-//! **An embedder failure does not degrade — it fails the write** (J3-R3-1).
-//! A capability miss is a declared, deterministic configuration: every write of
-//! the session takes the same keyword-only arm and the session says so once. An
-//! embedder refusal or timeout is a *per-input* surprise: before this rule, the
-//! concept was applied with `embedding: NULL`, reported to the caller as an
-//! unqualified success, and became unfindable by semantic recall — the located
-//! mechanism behind the dogfood store's 92/100 unembedded concepts
-//! (DOGFOOD-FINDINGS 2026-08-20) and behind J3-R3-1's estimator poisoning (a
-//! 3 ms non-embed sampled as a fast write inflated the drain rate 20–45× and
-//! abandoned 326/361 acked writes). *Applied without its vector* is not a lesser
-//! success; it is a different outcome, and the caller decides what to do with
-//! it — retry, shorten, or accept keyword-only by configuring
-//! `MatchStrategy::Canonical`.
+//! **An embedder failure does not degrade — it fails the write.** A capability
+//! miss is a declared, deterministic configuration: every write of the session
+//! takes the same keyword-only arm and the session says so once. An embedder
+//! refusal or timeout is a *per-input* surprise: before this rule, the concept
+//! was applied with `embedding: NULL`, reported to the caller as an unqualified
+//! success, and became unfindable by semantic recall — the located mechanism
+//! behind the dogfood store's 92/100 unembedded concepts (DOGFOOD-FINDINGS
+//! 2026-08-20) and behind the ack path's estimator poisoning (a 3 ms non-embed
+//! sampled as a fast write inflated the drain rate 20–45× and abandoned 326/361
+//! acked writes). *Applied without its vector* is not a lesser success; it is a
+//! different outcome, and the caller decides what to do with it — retry,
+//! shorten, or accept keyword-only by configuring `MatchStrategy::Canonical`.
 //!
-//! **The blast radius of that rule, stated (J3 round-1 F3).** "The
-//! capability-absent arm stays a degrade" is a claim about the **store**, and it
-//! is easy to misread as a claim about the embedder. `vector_ok` below is
-//! `store.capabilities().contains(VECTOR_SEARCH)`, `SqliteStore` advertises that
-//! capability **unconditionally**, `embed::build_embedder` yields either an
-//! embedder or a startup error (there is no "no embedder configured" state that
-//! reaches this function), and `MatchStrategy::Hybrid` is the config default. So
-//! **there is no arm in which a missing or dead *embedder* degrades**: on a
-//! default deployment an unreachable or timing-out llama.cpp fails *every*
-//! `lambo_derive` for as long as it is unreachable. That is deliberate — it is
-//! the honesty rule above, and the alternative is the silent
-//! `embedding: NULL` write it replaced — but it is an **availability** fact, not
-//! only a correctness one, and the lawful keyword-only mode spec §3.2 promises is
-//! reached by *declaring* it (`match_strategy = "canonical"`), never by an
-//! embedder's silence. A per-call failure cannot be promoted to a
+//! **The blast radius of that rule, stated.** "The capability-absent arm stays
+//! a degrade" is a claim about the **store**, and it is easy to misread as a
+//! claim about the embedder. `vector_ok` below is
+//! `store.capabilities().contains(VECTOR_SEARCH)`, `SqliteStore` advertises
+//! that capability **unconditionally**, `embed::build_embedder` yields either
+//! an embedder or a startup error (there is no "no embedder configured" state
+//! that reaches this function), and `MatchStrategy::Hybrid` is the config
+//! default. So **there is no arm in which a missing or dead *embedder*
+//! degrades**: on a default deployment an unreachable or timing-out llama.cpp
+//! fails *every* `lambo_derive` for as long as it is unreachable. That is
+//! deliberate — it is the honesty rule above, and the alternative is the silent
+//! `embedding: NULL` write it replaced — but it is an **availability** fact,
+//! not only a correctness one, and the lawful keyword-only mode spec §3.2
+//! promises is reached by *declaring* it (`match_strategy = "canonical"`),
+//! never by an embedder's silence. A per-call failure cannot be promoted to a
 //! session-uniform degrade because the two are indistinguishable at the
-//! protocol: N1's classification can tell "not reached" from "refused", but not
-//! "not reached, and will not be for the rest of this session" from "not
-//! reached, for 200 ms". Declared or refused, never guessed.
+//! protocol: the embed-error classification can tell "not reached" from
+//! "refused", but not "not reached, and will not be for the rest of this
+//! session" from "not reached, for 200 ms". Declared or refused, never guessed.
 //!
 //! # The seam (design decision of record)
 //!
@@ -50,7 +49,7 @@
 //! host the async hybrid step: embedding + `vector_candidates_checked` are I/O, and the
 //! graph lock must **never** be held across an `.await` (spec §6.4; see
 //! `src/graph/mod.rs`). This module is the async twin the session owner
-//! (T8.1's `Memory`) calls in place of `derive` while `MatchStrategy::Hybrid` is
+//! (`Memory`) calls in place of `derive` while `MatchStrategy::Hybrid` is
 //! active. It manages the lock/await frontier itself:
 //!
 //! 1. **Plan (brief read lock, no I/O).** Canonicalize each unique concept,
@@ -70,7 +69,7 @@
 //!    Otherwise `store.vector_candidates_checked` through the [`GraphStore`]
 //!    trait only. A capability-miss marks the concept
 //!    for the canonical fallback (logged once per session); an embed failure or
-//!    timeout fails the whole call before anything is written (J3-R3-1); a
+//!    timeout fails the whole call before anything is written; a
 //!    genuine backend `StoreError` (not a `Capability` miss) propagates. The
 //!    `parent_of` ends this call will create (in neither the graph nor
 //!    `concepts`) are embedded here too, under the same rules but without the
@@ -94,30 +93,30 @@
 //! # Merge shape (ambiguity resolved — see handoff)
 //!
 //! A `Semantic` edge is Concept→Concept (`record_edge` rejects any other
-//! endpoint, adve-review GRAPH-2) and `record_edge` also rejects self-loops, so
+//! endpoint) and `record_edge` also rejects self-loops, so
 //! a merge must realize the new content as its **own** concept node (distinct
 //! canonical key — it was `Unmatched`, so it never duplicates an existing key)
 //! joined to the matched concept by a decaying `Semantic` edge. This is the
-//! "merge": recall expansion follows `Semantic` (spec §8) and canonization (P6)
+//! "merge": recall expansion follows `Semantic` (spec §8) and canonization
 //! later physically folds them. The new concept carries its computed embedding
 //! so it too becomes a future vector candidate.
 //! The merge target is surfaced in the outcome's [`DeriveOutcome::semantic_merged`]
 //! — kept separate from `matched` because a merge does not re-upsert the target
 //! nor `Derives`-reinforce it, and `matched` must stay faithful to the sync
-//! `derive` contract (PHASE-7 T7.2 remediation, MINOR-3). A concept for which no
+//! `derive` contract. A concept for which no
 //! vector exists (capability-absent, a store that refuses
 //! `vector_candidates_checked` after advertising the capability, or an
 //! invalid non-Concept merge target — see the commit-time validation) is written
 //! with `embedding: None` — an embed *failure* no longer reaches a write at all
-//! (J3-R3-1, module doc above); a failed embed likewise never stamps the session's
-//! embedding contract (MINOR-2). See "Vector persistence for fresh concepts"
+//! (module doc above); a failed embed likewise never stamps the session's
+//! embedding contract. See "Vector persistence for fresh concepts"
 //! below for the one arm that changed. At commit, each
 //! content is re-canonicalized against the graph as written this call so that
 //! distinct contents collapsing onto one canonical key resolve Matched to the
 //! just-created node (mirroring sync `derive`'s within-call dedup) instead of
-//! erroring on `insert_concept`'s UNIQUE key collision (MAJOR-1).
+//! erroring on `insert_concept`'s UNIQUE key collision.
 //!
-//! # Vector persistence for fresh concepts (L82-4 — product decision 2026-08-14)
+//! # Vector persistence for fresh concepts (product decision 2026-08-14)
 //!
 //! A `Fresh` concept whose embedding was **successfully computed** now keeps that
 //! vector even though no candidate cleared `semantic_match_threshold`. Until this
@@ -126,20 +125,20 @@
 //! for every row the product itself wrote: the live-CockroachDB review measured
 //! **0 of 13** organic concepts with a vector, so recall's vector leg could never
 //! fire on organically-derived memory — only out-of-band seeding produced
-//! vectors (`adversarial-review/adve-review-t8.2-t8.3-live.md`, finding L82-4).
+//! vectors (`adversarial-review/adve-review-t8.2-t8.3-live.md`).
 //! Persisting the vector is what makes derived memory vector-recallable. Arms
 //! where no vector exists still write `None` — a vector is never invented.
 //!
 //! ## The chosen semantic: **threshold-preserving** (recall-visible, merge bar unchanged)
 //!
 //! A persisted vector is read by [`GraphStore::vector_candidates_checked`], which serves
-//! two callers: recall's vector leg (read-only ranking, T5.1) and this module's
-//! merge step. The precision-bias / anti-over-merge law (MAJOR-1) survives as
+//! two callers: recall's vector leg (read-only ranking) and this module's
+//! merge step. The precision-bias / anti-over-merge law survives as
 //! three properties, each pinned by a test:
 //!
 //! 1. **A refusal is never recorded as an endorsement.** A below-threshold
 //!    concept gets its vector but **no `Semantic` edge**. Recall expansion (spec
-//!    §8) and P6 canonization's physical fold both travel `Semantic` edges, so a
+//!    §8) and canonization's physical fold both travel `Semantic` edges, so a
 //!    fresh concept is reachable only through its own similarity to the query —
 //!    never transitively, out of an unrelated concept's neighbourhood. *The
 //!    over-merge scenario this prevents:* concepts A and B sit at cosine 0.84
@@ -149,7 +148,7 @@
 //!    links no single comparison ever endorsed. No `Semantic` edge is written, so
 //!    that chain cannot start.
 //! 2. **The merge bar did not move.** A merge still requires
-//!    `score >= semantic_match_threshold` (0.85 default). G1's BGE-M3 corpus
+//!    `score >= semantic_match_threshold` (0.85 default). The BGE-M3 corpus
 //!    overlaps real paraphrases and related-but-distinct pairs, so lowering the
 //!    score-only bar would add measured false positives; 0.85 remains the
 //!    deliberate precision bias. See `evidence/mooshik-g-recall-calibration/`.
@@ -175,8 +174,9 @@
 //! need durable per-vector provenance (a new `concepts` column plus a migration
 //! in every adapter) and — because after this change *every* organic concept is
 //! fresh-persisted — it would exclude every organic concept and leave the merge
-//! leg permanently inert, a strictly larger product change than L82-4 asks for.
-//! The threshold, not the provenance of the vector, is the precision instrument.
+//! leg permanently inert, a strictly larger product change than this decision
+//! asks for. The threshold, not the provenance of the vector, is the precision
+//! instrument.
 //!
 //! One provenance rule does exist since #22, and it is about modality, not
 //! freshness: `concepts.embedding_source` marks a supplied (image) vector,
@@ -231,7 +231,7 @@ use crate::types::{
 };
 
 /// Default merge threshold (spec §7.1 step 6). Configurable per call
-/// (driven by `Config::semantic_match_threshold`); G1's BGE-M3 measurements
+/// (driven by `Config::semantic_match_threshold`); the BGE-M3 measurements
 /// retain 0.85 because score-only paraphrase and related-distinct bands overlap.
 /// It is intentionally biased toward precision: under-merging into separate
 /// concepts is safe for canonization.
@@ -255,7 +255,7 @@ pub const MAX_HYBRID_WORK_ITEMS: usize = 512;
 /// one per `parent_of` end it will create (issue #16 §2), all inside one
 /// [`HYBRID_IO_TIMEOUT`]. It keeps the ceiling the call had before ends were
 /// embedded (`MAX_HYBRID_CONCEPTS`), so embedding ends cannot push a call
-/// that fit the deadline past it. Checked at the J3 ack
+/// that fit the deadline past it. Checked at the asynchronous ack
 /// ([`validate_embed_budget`]) and again at plan, before any I/O; a call
 /// over it is refused with a `Config` error rather than timing out at apply.
 pub const MAX_HYBRID_EMBEDS: usize = MAX_HYBRID_CONCEPTS;
@@ -315,7 +315,7 @@ fn top_tier(
 
 /// A caller-supplied action to run **inside the commit critical section**,
 /// under the same write-lock hold as the committed mutations, with the final
-/// outcome in hand (J3 durable intents: the write pipeline consumes the job's
+/// outcome in hand (durable intents: the write pipeline consumes the job's
 /// intent here, so the applied mutations and the intent consumption travel in
 /// one flush batch — one store transaction — and a crash can never leave the
 /// write durable beside a still-unconsumed intent).
@@ -328,11 +328,11 @@ enum Resolution {
     CanonicalMatch { node: NodeId },
     /// `Unmatched` with no viable vector hit (capability absent, below
     /// threshold, or invalid candidate — an embed failure fails the call
-    /// instead, J3-R3-1): create a fresh concept and no `Semantic` edge.
+    /// instead): create a fresh concept and no `Semantic` edge.
     ///
     /// `embedding` is `Some` exactly when a vector was actually computed for
-    /// this concept and the store can serve vectors — the below-threshold arm
-    /// (L82-4). It is `None` on every arm where no vector exists (or none can
+    /// this concept and the store can serve vectors — the below-threshold arm.
+    /// It is `None` on every arm where no vector exists (or none can
     /// ever be queried): a vector is never invented, and the absent-capability
     /// path stays byte-identical to `MatchStrategy::Canonical`.
     ///
@@ -357,7 +357,7 @@ enum Resolution {
 }
 
 /// "log the fallback once per session" — module-level, keyed by session id,
-/// because there is no session owner yet (T8.1) and the fallback is cross-call.
+/// because there is no session owner yet and the fallback is cross-call.
 fn note_fallback_logged(session: &SessionId) -> bool {
     static LOGGED: LazyLock<Mutex<HashSet<SessionId>>> =
         LazyLock::new(|| Mutex::new(HashSet::new()));
@@ -374,7 +374,7 @@ fn note_fallback_logged(session: &SessionId) -> bool {
 /// never a bare label; the calibration evidence that separates the classes comes
 /// from the real interaction text, which the tests carry.
 ///
-/// # The asymmetry this creates with recall (F-R1-5)
+/// # The asymmetry this creates with recall
 ///
 /// What lands in `concepts.embedding` is the vector of this **framed** string, but
 /// `cli::recall` embeds the user's query **bare**. So a recall probe is always
@@ -534,7 +534,7 @@ fn new_concept(
     }
 }
 
-/// Reflect the GRAPH-8 guard from `derive.rs` (rejected: empty/whitespace-only/
+/// Reflect the empty-key guard from `derive.rs` (rejected: empty/whitespace-only/
 /// stopword-only content collapsing onto the empty key).
 fn reject_empty_key(content: &str, key: &str) -> Result<(), LamboError> {
     if key.is_empty() {
@@ -555,11 +555,11 @@ fn reject_empty_key(content: &str, key: &str) -> Result<(), LamboError> {
 /// When the store lacks `Capabilities::VECTOR_SEARCH`, the outcome is
 /// byte-identical to `derive` (fresh keyword-only concepts, no store I/O beyond
 /// the capability probe). When the **embedder** fails or times out, the call
-/// fails and nothing is written (J3-R3-1): applying the concept with
+/// fails and nothing is written: applying the concept with
 /// `embedding: NULL` would report a success the semantic tier can never serve,
 /// and — on the async path — hand the write queue a 3 ms non-embed to sample as
 /// a fast write. **Which** failure it was is carried by the type, because the
-/// durable-intent replay's consume-or-keep decision turns on it (J3 round-1 N1):
+/// durable-intent replay's consume-or-keep decision turns on it:
 /// [`LamboError::EmbedUnavailable`] when the embedder could not be reached or
 /// did not answer in time, [`LamboError::Embed`] when it answered and the answer
 /// was unusable for this input. The two render identically to a caller.
@@ -784,7 +784,7 @@ fn supplied_match_repair<'s>(
     }
 }
 
-/// [`derive`](fn@derive)'s size and range checks, on their own so J3's
+/// [`derive`](fn@derive)'s size and range checks, on their own so the
 /// asynchronous ack path can run them on the call path.
 ///
 /// These are the ones a caller can act on — too many concepts, too many parent
@@ -836,7 +836,7 @@ pub fn validate_limits(
 /// **Hybrid's pre-pass is not the synchronous path's.** It deliberately omits
 /// `graph::derive`'s repeated-`Observation` and single-`Hierarchical`-parent
 /// rejections — hybrid matches semantically and resolves `Observation`s through
-/// a different path — so J3's asynchronous ack has to run *this* one when the
+/// a different path — so the asynchronous ack has to run *this* one when the
 /// session's strategy is `Hybrid`. Running the synchronous path's pre-pass here
 /// instead would refuse writes hybrid has always accepted, which is what it did
 /// on the first attempt: a concurrent re-derive of one content started failing
@@ -968,7 +968,7 @@ fn check_embed_budget(
     Ok(())
 }
 
-/// [`derive`](fn@derive)'s embed budget, on its own so J3's asynchronous ack
+/// [`derive`](fn@derive)'s embed budget, on its own so the asynchronous ack
 /// path can refuse an over-budget call at call time instead of on a receipt.
 ///
 /// Counts what the plan phase will embed against `graph` as it is now:
@@ -1095,7 +1095,7 @@ async fn derive_planned(
             // A supplied (image) item's text is never embedded: its vector
             // arrived with it. Its content may fill the whole per-string cap
             // (a caption plus its suffix), so framing it would refuse an
-            // image derive the surface accepted (#22 PR 4 review M2).
+            // image derive the surface accepted (#22 PR 4).
             let unmatched_contents = items
                 .iter()
                 .filter(|(content, _, _, matched)| matched.is_none() && !is_supplied(content))
@@ -1258,7 +1258,7 @@ async fn derive_planned(
                     // An embed only counts as "attempted" for the contract
                     // stamp once it actually returned a vector — a failed
                     // attempt must not bind the session to an embedding
-                    // space it produced no vector in (MINOR-2).
+                    // space it produced no vector in.
                     attempted_embed = true;
                     probed_store = true;
                     match checked_candidates(
@@ -1318,7 +1318,7 @@ async fn derive_planned(
                             if tier.is_empty() {
                                 // Below threshold: fresh concept, NO
                                 // `Semantic` edge — the merge is refused.
-                                // L82-4 (product decision 2026-08-14):
+                                // Product decision 2026-08-14:
                                 // the vector it just computed IS
                                 // persisted, so organically-derived data
                                 // becomes vector-recallable; before this,
@@ -1355,8 +1355,9 @@ async fn derive_planned(
                             // leg from it. Persisting an unqueryable
                             // vector buys nothing and would break the
                             // "capability miss == MatchStrategy::Canonical"
-                            // promise, so this arm stays `None` (L82-4
-                            // changes only the below-threshold arm).
+                            // promise, so this arm stays `None` (persisting
+                            // fresh vectors changes only the below-threshold
+                            // arm).
                             Resolution::Fresh {
                                 key: key.clone(),
                                 embedding: None,
@@ -1374,7 +1375,7 @@ async fn derive_planned(
         // Issue #16 §2: embed the `parent_of` ends this call will create, under
         // the same rules as the call's own concepts — same origin-framed
         // context, same deadline, same refusal on an embedder failure or
-        // timeout (J3-R3-1), and nothing at all when the store cannot serve
+        // timeout, and nothing at all when the store cannot serve
         // vectors. They are embedded, not merged: a `parent_of` end is a
         // structural label the caller named, and sending it through the merge
         // leg would be a new matching behaviour, not this fix. Keyed by
@@ -1393,7 +1394,7 @@ async fn derive_planned(
                 // candidate, result discarded): a refusal leaves every end
                 // keyword-only, exactly as it leaves a concept. A source that
                 // cannot refuse (the holder's graph) is not asked: the answer
-                // is known, and asking would scan the whole graph (#60 L3).
+                // is known, and asking would scan the whole graph (#60).
                 if !probed_store {
                     probed_store = true;
                     if vectors.can_refuse()
@@ -1420,7 +1421,7 @@ async fn derive_planned(
         // against "anything changed". A rival write that touches nothing
         // this plan read commits alongside it; one that does sends this
         // call round again, which now costs no embeds.
-        // Review L1: the final attempt validates with a far higher rescoring
+        // The final attempt validates with a far higher rescoring
         // ceiling, so a large call under sustained unrelated writes ends in
         // one serialized check-and-commit instead of exhausting its replans.
         let last_attempt = attempt + 1 == MAX_HYBRID_REPLANS;
@@ -1525,11 +1526,11 @@ async fn derive_planned(
             };
             let mut written: HashSet<NodeId> = HashSet::new();
             let mut call_nodes: Vec<NodeId> = Vec::with_capacity(items.len());
-            // C4: the concepts THIS call wrote, by canonical key, so step 6's
+            // The concepts THIS call wrote, by canonical key, so step 6's
             // `parent_of` resolution can find them.
             //
             // `canonicalize` deliberately never matches an `Observation`
-            // (GRAPH-1: agent-declared content must not attach to a *demoted*
+            // (agent-declared content must not attach to a *demoted*
             // context-overflow record, spec section 7 demote semantics). That rule is
             // about Observations the graph already held; it was never meant to
             // hide a concept the same derive just declared. Without this index a
@@ -1559,7 +1560,7 @@ async fn derive_planned(
                 .zip(refused_by_identifiers.iter())
                 .zip(near_by_item.iter())
             {
-                // MAJOR-1 (P7 remediation): re-canonicalize `content` against the graph
+                // Re-canonicalize `content` against the graph
                 // AS WRITTEN THIS CALL. Phase-1 canonicalization ran under the read
                 // lock before ANY node was written, so two distinct contents that
                 // collide on one canonical key (e.g. "user schema" + "schema user" ->
@@ -1641,9 +1642,9 @@ async fn derive_planned(
                         written.insert(id);
                         outcome.created.push(id);
                         if embedding.is_some() {
-                            // The below-threshold arm (L82-4): the row carries its
+                            // The below-threshold arm: the row carries its
                             // vector. Counted so the receipt can say *embedded*,
-                            // not just *applied* (J3-R3-1).
+                            // not just *applied*.
                             outcome.embedded += 1;
                         }
                         this_node = id;
@@ -1660,17 +1661,16 @@ async fn derive_planned(
                         score,
                         embedding,
                     } => {
-                        // MINOR-2 (P7 remediation): the concept keeps its vector ONLY if
-                        // the merge Semantic edge is actually written. Both endpoints
-                        // must be concepts (GRAPH-2); validate EVERY carried candidate
-                        // up front and, when the store handed us a bogus non-Concept
-                        // candidate, refuse the merge and degrade to a TRUE keyword-only
-                        // concept (embedding: None) — regardless of which tier member a
-                        // run-minted tie-break would have picked, an untrustworthy
-                        // vector view for this call means no new row in it. L82-4 did
-                        // NOT relax this arm. (The below-threshold arm, where the
-                        // store behaved correctly and simply had no near neighbour, does
-                        // persist its vector — see the module doc.)
+                        // The concept keeps its vector ONLY if the merge Semantic edge is
+                        // actually written. Both endpoints must be concepts; validate EVERY
+                        // carried candidate up front and, when the store handed us a bogus
+                        // non-Concept candidate, refuse the merge and degrade to a TRUE
+                        // keyword-only concept (embedding: None) — regardless of which tier
+                        // member a run-minted tie-break would have picked, an untrustworthy
+                        // vector view for this call means no new row in it. Persisting
+                        // fresh vectors did NOT relax this arm. (The below-threshold arm,
+                        // where the store behaved correctly and simply had no near
+                        // neighbour, does persist its vector — see the module doc.)
                         let can_merge = targets
                             .iter()
                             .all(|t| matches!(g.node(*t), Some(Node::Concept(_))));
@@ -1697,7 +1697,7 @@ async fn derive_planned(
                         if can_merge {
                             // The merge arm persists its vector (`embedding` above
                             // is `Some` exactly when `can_merge`); count it for the
-                            // receipt's applied-vs-embedded distinction (J3-R3-1).
+                            // receipt's applied-vs-embedded distinction.
                             outcome.embedded += 1;
                         }
                         if can_merge {
@@ -1742,7 +1742,7 @@ async fn derive_planned(
                                 // Recorded separately from `matched`: a merge does not
                                 // re-upsert the target nor Derives-reinforce it, so the
                                 // outcome must not over-count `matched` as "re-derived"
-                                // (DeriveOutcome contract, MINOR-3).
+                                // (DeriveOutcome contract).
                                 outcome.semantic_merged.push(target);
                                 cited.merged_into.insert(id, target);
                             }
@@ -1936,7 +1936,7 @@ async fn derive_planned(
             Ok(outcome)
         });
         let outcome = committed?;
-        // J3: run the commit hook (intent consumption) under THIS write-lock
+        // Run the commit hook (intent consumption) under THIS write-lock
         // hold, after the mutations — the flush drain takes the same lock, so the
         // committed mutations and whatever the hook appends travel in one
         // batch, i.e. one store transaction. See `CommitHook`.
@@ -1974,7 +1974,7 @@ enum Verdict {
     OverBudget,
 }
 
-/// Replans [`Verdict::OverBudget`] caused, process-wide (review L1). Logged
+/// Replans [`Verdict::OverBudget`] caused, process-wide. Logged
 /// with each such replan; read by tests.
 static PLAN_BUDGET_REPLANS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
@@ -2001,7 +2001,7 @@ const MERGE_RESCORE_MARGIN: f64 = 1e-4;
 /// vector-carrying concepts written inside one embed window.
 const MAX_PLAN_RESCORES: usize = 8_192;
 
-/// [`MAX_PLAN_RESCORES`] for a call's final attempt (review L1): 32 times
+/// [`MAX_PLAN_RESCORES`] for a call's final attempt: 32 times
 /// higher, about 180 ms at 1,024 dimensions. Without it a large call (100 to
 /// 256 unmatched items) under a steady stream of unrelated writes could be
 /// over the normal cap on every attempt and fail although nothing conflicts.
@@ -2128,7 +2128,7 @@ fn plan_still_holds(g: &Graph, plan: &PlanRead<'_, '_>) -> Result<Verdict, Lambo
     if g.epoch() == plan.planned_epoch {
         return Ok(Verdict::Holds);
     }
-    // Review L3: the interaction the plan framed its embeds with and stamps
+    // The interaction the plan framed its embeds with and stamps
     // its rows from. Append-only in the chain, but a re-upsert can rewrite
     // its fields.
     match g.node(plan.interaction) {
@@ -2199,7 +2199,7 @@ fn plan_still_holds(g: &Graph, plan: &PlanRead<'_, '_>) -> Result<Verdict, Lambo
             rivals.push((id, vector));
         }
     }
-    // Review L1: the rescoring runs under the write lock, so it is capped.
+    // The rescoring runs under the write lock, so it is capped.
     // Past the cap the plan is treated as stale; the replan costs no embeds.
     if rivals.len().saturating_mul(ranked.len()) > plan.rescore_cap {
         return Ok(Verdict::OverBudget);
@@ -2304,7 +2304,7 @@ impl EmbedCache {
 }
 
 /// How long past its deadline a batched round may take to return before it
-/// is abandoned (#125 review H2). [`Embedder::embed_batch`] must return by
+/// is abandoned (#125). [`Embedder::embed_batch`] must return by
 /// its deadline; this only bounds an adapter that does not. It extends the
 /// worst case of one call's I/O past [`HYBRID_IO_TIMEOUT`] by this much,
 /// which `RECEIPT_WAIT_MAX`'s 4 s of headroom over that budget covers.
@@ -2320,7 +2320,7 @@ pub(crate) const BATCH_DEADLINE_GRACE: Duration = Duration::from_millis(100);
 /// batch (capacity 1) or there is only one text: that path is then exactly
 /// the one-at-a-time path it always was.
 ///
-/// Review H2: a round is handed the deadline itself, so the slots it
+/// A round is handed the deadline itself, so the slots it
 /// finished before the deadline keep their vectors; no round starts after
 /// the deadline; and [`BATCH_DEADLINE_GRACE`] past it, a round that has not
 /// returned (an adapter overrunning its deadline) is abandoned.
@@ -2407,7 +2407,7 @@ async fn checked_candidates(
     limit: usize,
     io_deadline: tokio::time::Instant,
 ) -> Result<Option<Vec<crate::types::Scored<NodeId>>>, LamboError> {
-    // Review H2: a lookup is not started once the budget is spent (a
+    // A lookup is not started once the budget is spent (a
     // `timeout_at` past its deadline still polls the future once). That is
     // the call's budget running out, not the store failing to answer.
     let started = tokio::time::Instant::now();
@@ -2425,7 +2425,7 @@ async fn checked_candidates(
     match tokio::time::timeout_at(deadline, vectors.checked(session_id, emb, embedding, limit))
         .await
     {
-        // Review H1: transient either way. Nothing was learned about this
+        // Transient either way. Nothing was learned about this
         // write's input, so its durable intent must stay unconsumed.
         Err(_) if own_deadline <= io_deadline => {
             Err(LamboError::lookup_timeout(VECTOR_LOOKUP_TIMEOUT))
@@ -2474,8 +2474,8 @@ fn note_store_refused_vectors(session_id: &SessionId) {
 
 /// Embed `context`, or refuse the whole write.
 ///
-/// An embed failure or timeout FAILS the write — it does not degrade it
-/// (J3-R3-1). The old arms applied the concept with `embedding: NULL` and
+/// An embed failure or timeout FAILS the write — it does not degrade it.
+/// The old arms applied the concept with `embedding: NULL` and
 /// returned `Ok`: an unqualified success over a concept semantic recall can
 /// never find (the mechanism behind the dogfood store's 92/100 unembedded
 /// concepts), and on the async path a ~3 ms non-embed handed to the write
@@ -2485,7 +2485,7 @@ fn note_store_refused_vectors(session_id: &SessionId) {
 /// arm is not here: that is a declared, session-uniform configuration, not a
 /// per-input surprise.
 ///
-/// J3 round-1 N1: a timeout is `EmbedUnavailable`, not `Embed`. We never got an
+/// A timeout is `EmbedUnavailable`, not `Embed`. We never got an
 /// answer, so nothing was learned about this *input* — and the durable-intent
 /// replay's consume/keep decision turns on exactly that difference.
 async fn embed_or_refuse(
@@ -2493,7 +2493,7 @@ async fn embed_or_refuse(
     context: &str,
     io_deadline: tokio::time::Instant,
 ) -> Result<Vec<f32>, LamboError> {
-    // Review H2: an embed is not started once the budget is spent.
+    // An embed is not started once the budget is spent.
     let embedded = if tokio::time::Instant::now() >= io_deadline {
         Err(())
     } else {
@@ -2548,13 +2548,13 @@ fn resolve_concept(
 ) -> Result<NodeId, LamboError> {
     match canonicalize_keyed(content, graph, scoped_key)? {
         CanonicalizeResult::Unmatched { key } => {
-            // C4: `canonicalize` returns Unmatched for a key whose only holder
-            // is an `Observation` (GRAPH-1). When that holder is a concept
+            // `canonicalize` returns Unmatched for a key whose only holder
+            // is an `Observation`. When that holder is a concept
             // THIS call just declared, creating a second node for the same
             // content is a duplicate, not a fresh end -- so consult the
             // call's own index before creating. Scoped to `call_by_key`, so a
             // pre-existing *demoted* Observation from an earlier interaction
-            // is still never matched and GRAPH-1 stands.
+            // is still never matched and that rule stands.
             if let Some(&node) = call_by_key.get(&key)
                 && written.contains(&node)
             {
@@ -2579,7 +2579,7 @@ fn resolve_concept(
             written.insert(id);
             outcome.created.push(id);
             if embedded {
-                // Applied ≠ embedded (J3-R3-1): the receipt's "(M embedded)"
+                // Applied ≠ embedded: the receipt's "(M embedded)"
                 // must count the ends too, or it under-reports exactly as the
                 // "2 created (1 embedded)" reproduction did.
                 outcome.embedded += 1;

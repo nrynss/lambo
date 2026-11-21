@@ -55,8 +55,7 @@
 //!   still refused.
 //! * **Not the same target as a citation.** One concept (or action) may not
 //!   both cite and contradict the same concept in one call
-//!   ([`ReferenceRefusalKind::DependsOnAndAgainst`], review M2); separate
-//!   writes may.
+//!   ([`ReferenceRefusalKind::DependsOnAndAgainst`]); separate writes may.
 //!
 //! The edge's direction comes from the write, not from node age: the
 //! concept that declares the contradiction is `newer`, whatever the two
@@ -263,7 +262,7 @@ pub(crate) fn validate_scoped(
     Ok(pinned)
 }
 
-/// #19(b) review M2: an `against` reference whose `(content, target)` the
+/// #19(b): an `against` reference whose `(content, target)` the
 /// same call also cites in `depends_on` is refused
 /// ([`ReferenceRefusalKind::DependsOnAndAgainst`]). Both pinned lists are
 /// fixed at the ack and rechecked to the same targets at the commit, so

@@ -261,7 +261,7 @@ pub(crate) enum Inferred {
     Ambiguous(Vec<NodeId>),
 }
 
-/// The identity of text whose type is inferred (#129 review M1), under
+/// The identity of text whose type is inferred (#129), under
 /// `repo_scope`: the scoped path when one exists (in `graph`, or `planned`
 /// earlier in the same call), a non-Resource concept under the legacy key,
 /// [`Inferred::Ambiguous`] when both exist; with neither, a new scoped path
@@ -313,8 +313,8 @@ pub(crate) fn canonicalize_keyed(
 /// may be another repository's: joining it would re-join repositories.
 /// So a loosely path-like name that an inferred `depends_on` met first (as
 /// plain text) and a later `produces` (scoped) are two concepts; spelled as
-/// a clear path (`./scripts/build`, `scripts/build/`) both are scoped (#129
-/// focused review L2).
+/// a clear path (`./scripts/build`, `scripts/build/`) both are scoped
+/// (#129).
 pub(crate) fn canonicalize_resource(
     content: &str,
     graph: &Graph,
@@ -364,7 +364,7 @@ mod tests {
             "Node.js",
             "",
             "a\nb",
-            // Review M1: an anchor needs a non-space character after it.
+            // An anchor needs a non-space character after it.
             "~ 5 minutes",
             "/ note",
             "/",
@@ -372,13 +372,13 @@ mod tests {
         ] {
             assert!(!is_path_like(prose), "{prose:?}");
         }
-        // Review L1: a line reference does not hide a path.
+        // A line reference does not hide a path.
         for path in ["src/main.rs:12", "README.md:3:5", "README.md#L12-L20"] {
             assert!(is_path_like(path) && is_inferred_path(path), "{path:?}");
         }
     }
 
-    /// Review M1: where the type is inferred, only a file-like name, a
+    /// Where the type is inferred, only a file-like name, a
     /// trailing-separator directory or an anchored path is a path; slash
     /// prose and a bare directory name are not.
     #[test]
@@ -413,7 +413,7 @@ mod tests {
         assert!(is_path_like("TCP/IP") && is_path_like("docs/reference"));
     }
 
-    /// Review M3: a directory's trailing separators fold, so `docs/` and
+    /// A directory's trailing separators fold, so `docs/` and
     /// `docs` are one scoped key.
     #[test]
     fn directory_keys_fold_trailing_separators() {
@@ -426,7 +426,7 @@ mod tests {
             scoped_resource_key("docs/reference/", Some("r")),
             Some(k("docs/reference"))
         );
-        // Focused review L1: a trailing line reference names the file.
+        // A trailing line reference names the file.
         for spelled in [
             "src/main.rs:12",
             "src/main.rs:12:5",
@@ -437,7 +437,7 @@ mod tests {
         }
     }
 
-    /// Review L5: the tie form lowercases a scoped key's ASCII prefix, so
+    /// The tie form lowercases a scoped key's ASCII prefix, so
     /// scoped keys sort among legacy keys rather than ahead of all of them.
     #[test]
     fn tie_form_removes_the_uppercase_prefix_bias() {
@@ -487,7 +487,7 @@ mod tests {
 
     #[test]
     fn invalid_repo_scope_is_refused() {
-        // Review L3: no whitespace, control or invisible character inside.
+        // No whitespace, control or invisible character inside.
         for scope in [
             "",
             " \t\n",
@@ -503,13 +503,13 @@ mod tests {
         ] {
             assert!(validate_repo_scope(Some(scope)).is_err(), "{scope:?}");
         }
-        // Review L2: at most MAX_REPO_SCOPE_BYTES.
+        // At most MAX_REPO_SCOPE_BYTES.
         assert!(check_repo_scope(&"a".repeat(MAX_REPO_SCOPE_BYTES)).is_ok());
         let long = check_repo_scope(&"a".repeat(MAX_REPO_SCOPE_BYTES + 1)).unwrap_err();
         assert!(long.contains("512 bytes"), "{long}");
         assert!(validate_repo_scope(Some(" github.com/acme/widgets ")).is_ok());
         assert!(validate_repo_scope(None).is_ok());
-        // Replay checks only that a stored scope is nonempty (review L4).
+        // Replay checks only that a stored scope is nonempty.
         assert!(require_repo_scope(Some("a b")).is_ok());
         assert!(require_repo_scope(Some("  ")).is_err());
     }
