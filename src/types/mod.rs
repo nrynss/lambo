@@ -2256,6 +2256,14 @@ pub enum StoreError {
     /// dead-letters it instead of retrying.
     #[error("constraint violated ({0})")]
     Constraint(String),
+    /// A permanent backend error that is not a constraint violation (#301):
+    /// no replay can fix it, such as an undefined table (SQLSTATE `42P01`,
+    /// SQLite "no such table") or a value the store rejects (SQLSTATE class
+    /// `22`). The message names the statement and carries the code. Terminal
+    /// for the flush loop: it is not retried, and the session degrades to
+    /// `durability = "none"` (see `src/store/error.rs` for the codes).
+    #[error("permanent backend error: {0}")]
+    Permanent(String),
     /// A write whose fencing token is stale (GitHub issue #1). The lease moved
     /// to a newer holder since this writer acquired it, so the store refuses
     /// the write: a fenced holder must not overwrite the new holder's rows.
@@ -2272,6 +2280,9 @@ impl StoreError {
     /// deterministic — retrying it can never succeed and only blocks the
     /// queue (head-of-line) — so it is non-retryable and dead-lettered
     /// (drop-after-log, visible in `FlushStats::dead_lettered`). A
+    /// [`StoreError::Permanent`] is non-retryable too (#301): the loop does
+    /// not retry or retain it but degrades the session, so `close` reports
+    /// that the tail was not written. A
     /// `StaleWrite` is also non-retryable: the holder's token will never catch
     /// up (it lost the lease), so retrying cannot succeed. It is terminal for
     /// the flush loop, which bails out of the retry ladder, latches the
@@ -2279,7 +2290,10 @@ impl StoreError {
     /// (#293): never retained or re-sent, and not dead-lettered either.
     /// Every other error keeps the existing retry / retain semantics.
     pub fn is_retryable(&self) -> bool {
-        !matches!(self, StoreError::Constraint(_) | StoreError::StaleWrite(_))
+        !matches!(
+            self,
+            StoreError::Constraint(_) | StoreError::StaleWrite(_) | StoreError::Permanent(_)
+        )
     }
 
     /// The prefix every write-time cycle refusal's message starts with,

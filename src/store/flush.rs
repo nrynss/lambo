@@ -41,13 +41,29 @@
 //!   the whole batch counts as ONE in `dead_lettered` however many writes it
 //!   held (Lean: `Flush.constraint_dead_lettered` and its `exPoison`
 //!   example). Splitting it to find the offending mutation is not attempted.
+//! * **A permanent error degrades (#301).** A flush the store refuses with
+//!   [`StoreError::Permanent`] (an error no replay can fix that is not a
+//!   constraint violation, such as an undefined table; the codes are in
+//!   `src/store/error.rs`) is not retried. Before #301 such an error reached
+//!   the loop as a retryable `Backend`: it was retried, retained and resent
+//!   every `RETAINED_BACKOFF` until the backlog passed `log_max` (Lean:
+//!   `Flush.permanent_retried_retained`). Now the session degrades at once,
+//!   as below, with the batch still in `pending`, so the next cycle drops it
+//!   and `close` reports the session as degraded (Lean:
+//!   `Flush.permanent_degrades_classed`). It is not dead-lettered: such an
+//!   error is usually a property of the store rather than of the batch, so
+//!   every later batch would fail the same way, and dead-lettering them would
+//!   lose every write while `close` returned `Ok` (the model's `exGone`
+//!   examples). An erased session's refusal is handled by the erased arm
+//!   first, as before.
 //! * **A stale write is terminal (#293).** A flush the store refuses with
 //!   [`StoreError::StaleWrite`] presented a fencing token the lease has moved
 //!   past, so it can never succeed: the loop latches the lease-lost fence and
 //!   drops `pending` as on any fenced iteration, rather than retain and re-send
 //!   it.
-//! * **Degradation.** If the pending depth exceeds `log_max` the session
-//!   degrades to `durability="none"`: the task logs at ERROR, sets
+//! * **Degradation.** If the pending depth exceeds `log_max`, or the store
+//!   refuses a batch with a permanent error (above), the session degrades to
+//!   `durability="none"`: the task logs at ERROR, sets
 //!   [`FlushTask::degraded`], and stops all store I/O. The mode is terminal
 //!   for the task's lifetime. While degraded the task keeps draining the log
 //!   but DROPS each drained batch (STORE-3, spec §2.3 "none = pure RAM") —
@@ -860,6 +876,29 @@ impl FlushLoop {
                      re-sending the batch"
                 );
             }
+            Err(StoreError::Permanent(why)) => {
+                // #301: no replay can fix this, so it was not retried, and
+                // retaining it would only resend it after every hold until
+                // the backlog passed `log_max`. Degrade now, as that path
+                // would in the end: no further store I/O, and the batch stays
+                // in `pending` for the next cycle's degraded drop (STORE-3).
+                // `close` then reports the session as degraded rather than
+                // returning `Ok` over writes that never reached the store.
+                // Not a dead letter: the error is usually the store's (a
+                // missing table), not the batch's, so every later batch would
+                // be dropped the same way while the session looked healthy.
+                self.shared.degraded.store(true, Ordering::Release);
+                self.retry_after = None;
+                tracing::error!(
+                    error = %why,
+                    batch_len = self.pending.len(),
+                    depth = self.shared.depth.load(Ordering::Acquire),
+                    session = %session,
+                    "FlushDegraded: the store refused the batch with a permanent error ({why}); \
+                     not retried, durability=\"none\", flushing stopped; the writes stay in \
+                     memory only, and close() will report the session as degraded",
+                );
+            }
             Err(err) => {
                 // Retries exhausted: RETAIN the batch — it is still in
                 // `self.pending`, never dropped, and flushes before new drains
@@ -953,7 +992,9 @@ impl FlushLoop {
     /// store must not wedge the loop forever — the timeout maps into this
     /// retry path exactly like any other `Err` (retry → retain → degrade).
     /// A [`StoreError::Constraint`] (STORE-4) is deterministic and surfaces
-    /// immediately with NO backoff: the caller dead-letters the batch.
+    /// immediately with NO backoff: the caller dead-letters the batch. So do
+    /// a [`StoreError::StaleWrite`] (#293: the caller fences) and a
+    /// [`StoreError::Permanent`] (#301: the caller degrades).
     async fn flush_with_retry(&mut self) -> Result<(), StoreError> {
         let mut retries_used: u32 = 0;
         let mut backoff = BACKOFF_BASE;
@@ -999,7 +1040,9 @@ impl FlushLoop {
                     if !err.is_retryable() {
                         // STORE-4: deterministic constraint violation — no
                         // backoff, no retry; the caller dead-letters it. A
-                        // stale write likewise: the caller fences (#293).
+                        // stale write likewise: the caller fences (#293). A
+                        // permanent error likewise: the caller degrades
+                        // (#301).
                         return Err(err);
                     }
                     if retries_used >= self.params.retries {
@@ -1783,15 +1826,17 @@ mod tests {
         }
     }
 
-    /// `GraphStore` mock: flush ALWAYS fails with a deterministic constraint
-    /// violation (STORE-4). Records call/batch bookkeeping like
-    /// [`FlakyStore`].
+    /// `GraphStore` mock: flush ALWAYS fails, by default with a deterministic
+    /// constraint violation (STORE-4); [`ConstraintStore::refusing`] picks
+    /// the error. Records call/batch bookkeeping like [`FlakyStore`].
     struct ConstraintStore {
         inner: Arc<dyn GraphStore>,
         flush_calls: AtomicUsize,
         batch_sizes: Mutex<Vec<usize>>,
         /// Refuse only the first flush, then delegate (#60's pin test).
         only_first: bool,
+        /// The error every refused flush returns.
+        refusal: Box<dyn Fn() -> StoreError + Send + Sync>,
     }
 
     impl ConstraintStore {
@@ -1801,6 +1846,18 @@ mod tests {
                 flush_calls: AtomicUsize::new(0),
                 batch_sizes: Mutex::new(Vec::new()),
                 only_first: false,
+                refusal: Box::new(|| StoreError::Constraint("23505".into())),
+            }
+        }
+
+        /// Refuse every flush with `refusal()` instead (#301).
+        fn refusing(
+            inner: Arc<dyn GraphStore>,
+            refusal: impl Fn() -> StoreError + Send + Sync + 'static,
+        ) -> Self {
+            Self {
+                refusal: Box::new(refusal),
+                ..Self::new(inner)
             }
         }
 
@@ -1835,7 +1892,7 @@ mod tests {
             if self.only_first && call > 0 {
                 return self.inner.flush(batch, _token).await;
             }
-            Err(StoreError::Constraint("23505".into()))
+            Err((self.refusal)())
         }
 
         async fn load_session(&self, session: &SessionId) -> Result<GraphSnapshot, StoreError> {
@@ -3466,6 +3523,171 @@ mod tests {
         let out = logs.contents();
         assert!(out.contains("FlushDeadLettered"), "warn missing: {out}");
         assert!(out.contains("23505"), "constraint code missing: {out}");
+    }
+
+    /// A store that refuses every flush with the SQL error `code`, mapped
+    /// the way the adapters map a write's error (`map_write_err`).
+    #[cfg(any(
+        feature = "store-cockroach",
+        feature = "store-postgres",
+        feature = "store-sqlite"
+    ))]
+    fn sql_refusing_store(code: &'static str) -> Arc<ConstraintStore> {
+        let inner: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
+        Arc::new(ConstraintStore::refusing(inner, move || {
+            crate::store::map_write_err(crate::store::error::fake_db_error(code), |m| {
+                format!("upsert concept: {m}")
+            })
+        }))
+    }
+
+    /// Advance the paused clock in small steps for `total`, yielding after
+    /// each, so a retry ladder's backoff sleeps all get the chance to run.
+    async fn advance_in_steps(total: Duration) {
+        let step = Duration::from_millis(50);
+        let mut done = Duration::ZERO;
+        while done < total {
+            tokio::time::advance(step).await;
+            for _ in 0..20 {
+                tokio::task::yield_now().await;
+            }
+            done += step;
+        }
+    }
+
+    /// #301: a store that refuses the batch with a permanent SQL error that is
+    /// not a constraint violation (SQLSTATE 42P01, undefined table), as the
+    /// adapters map it, is called once: no retry, no retained resend. The
+    /// session degrades at once, the batch is not dead-lettered, and the next
+    /// cycle drops what it drains with no store call. Lean:
+    /// `Flush.permanent_degrades_classed`, `Flush.permanent_never_resent_classed`
+    /// (the old behaviour, retried then retained: `Flush.permanent_retried_retained`).
+    #[cfg(any(
+        feature = "store-cockroach",
+        feature = "store-postgres",
+        feature = "store-sqlite"
+    ))]
+    #[tokio::test(start_paused = true)]
+    async fn a_permanent_sql_error_degrades_without_a_retry() {
+        let (logs, _guard) = capture_logs(tracing::Level::WARN);
+        let store = sql_refusing_store("42P01");
+        let graph = new_graph();
+        let task = FlushTask::new(
+            graph.clone(),
+            store.clone(),
+            params(Duration::from_secs(1), 100, 3, 1_000),
+        );
+        let handle = task.spawn();
+        let_task_arm().await;
+
+        let iid = add_interaction(&graph, 1, None);
+        add_concept(&graph, 1, iid); // 3 mutations
+
+        tokio::time::advance(Duration::from_secs(1)).await;
+        wait_until(|| store.flush_calls() >= 1).await;
+        // Room for the whole ladder (100 + 200 + 400 ms) and a retained
+        // resend after RETAINED_BACKOFF, had either happened.
+        advance_in_steps(RETAINED_BACKOFF + Duration::from_secs(2)).await;
+        assert_eq!(
+            store.flush_calls(),
+            1,
+            "a permanent error must not be retried"
+        );
+        assert!(task.degraded(), "a permanent error degrades the session");
+        assert_eq!(task.stats().dead_lettered, 0, "not a dead letter");
+        assert!(!handle.is_finished());
+
+        // Degraded: later writes are drained and dropped, never sent.
+        add_interaction(&graph, 2, Some(iid));
+        advance_in_steps(Duration::from_secs(2)).await;
+        assert_eq!(store.flush_calls(), 1, "no store call once degraded");
+        assert_eq!(
+            task.stats().depth,
+            0,
+            "a degraded session drops what it drains"
+        );
+
+        let out = logs.contents();
+        assert!(out.contains("FlushDegraded"), "error missing: {out}");
+        assert!(out.contains("42P01"), "code missing: {out}");
+        assert!(
+            !out.contains("BackendFlushFailed"),
+            "retained as a failure: {out}"
+        );
+    }
+
+    /// #301, the loop's arm on every build (the test above needs a sqlx
+    /// adapter for `map_write_err`): a [`StoreError::Permanent`] costs one
+    /// call and degrades the session; the batch is dropped as degraded on the
+    /// next cycle, not dead-lettered and never resent. Lean:
+    /// `Flush.permanent_one_call`, `Flush.permanent_degrades_classed`,
+    /// `Flush.permanent_never_resent_classed`.
+    #[tokio::test(start_paused = true)]
+    async fn a_permanent_store_error_degrades_the_session() {
+        let _quiet = quiet_logs();
+        let inner: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
+        let store = Arc::new(ConstraintStore::refusing(inner, || {
+            StoreError::Permanent("upsert concept: no such table: concepts (code 1)".into())
+        }));
+        let graph = new_graph();
+        let task = FlushTask::new(
+            graph.clone(),
+            store.clone(),
+            params(Duration::from_secs(1), 100, 3, 1_000),
+        );
+        let _handle = task.spawn();
+        let_task_arm().await;
+
+        let iid = add_interaction(&graph, 1, None);
+        let lost = add_concept(&graph, 1, iid);
+        tokio::time::advance(Duration::from_secs(1)).await;
+        wait_until(|| task.degraded()).await;
+        assert_eq!(store.flush_calls(), 1);
+        assert_eq!(task.stats().depth, 3, "held for the degraded drop");
+
+        advance_in_steps(RETAINED_BACKOFF + Duration::from_secs(2)).await;
+        assert_eq!(store.flush_calls(), 1, "never resent");
+        assert_eq!(task.stats().depth, 0, "dropped as degraded");
+        assert_eq!(task.stats().dead_lettered, 0, "not a dead letter");
+        assert!(
+            graph.read().is_unflushed(&lost),
+            "a degrade-dropped concept is not durable"
+        );
+    }
+
+    /// #301 control: a transient SQL error (SQLSTATE 40001, serialization
+    /// failure), mapped the same way, keeps the retry-then-retain path: every
+    /// retry is used, the batch is retained, nothing degrades or dead-letters.
+    /// Lean: `Flush.transient_retryable_fixed`, `Flush.via_fixed_agrees`,
+    /// `Flush.exhausted_retained`.
+    #[cfg(any(
+        feature = "store-cockroach",
+        feature = "store-postgres",
+        feature = "store-sqlite"
+    ))]
+    #[tokio::test(start_paused = true)]
+    async fn a_transient_sql_error_is_still_retried_then_retained() {
+        let _quiet = quiet_logs();
+        let store = sql_refusing_store("40001");
+        let graph = new_graph();
+        let task = FlushTask::new(
+            graph.clone(),
+            store.clone(),
+            params(Duration::from_secs(1), 100, 3, 1_000),
+        );
+        let _handle = task.spawn();
+        let_task_arm().await;
+
+        let iid = add_interaction(&graph, 1, None);
+        add_concept(&graph, 1, iid); // 3 mutations
+
+        tokio::time::advance(Duration::from_secs(1)).await;
+        wait_until(|| store.flush_calls() >= 1).await;
+        advance_in_steps(Duration::from_secs(2)).await;
+        assert_eq!(store.flush_calls(), 4, "1 attempt + 3 retries");
+        assert_eq!(task.stats().depth, 3, "the batch is retained");
+        assert_eq!(task.stats().dead_lettered, 0);
+        assert!(!task.degraded());
     }
 
     /// #60: a dead-lettered concept never reached the store, so a later

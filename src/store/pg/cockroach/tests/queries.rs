@@ -219,10 +219,14 @@ fn tx_retryable_is_structured_not_substring() {
     // deterministic: never replayed, dead-lettered upstream. Typed
     // variants are permanent. A Backend error may be a transient
     // (serialization conflict, connection exception, server shutdown);
-    // the replay is bounded by TX_RETRY_ATTEMPTS + backoff, so a
-    // non-constraint Backend (e.g. a schema bug) at worst re-runs the tx
-    // body a bounded number of times before surfacing.
+    // the replay is bounded by TX_RETRY_ATTEMPTS + backoff, so a Backend
+    // that is not transient at worst re-runs the tx body a bounded number of
+    // times before surfacing. A schema bug the write path classified as
+    // permanent (#301) is never replayed.
     assert!(!tx_retryable(&StoreError::Constraint("23505".into())));
+    assert!(!tx_retryable(&StoreError::Permanent(
+        "upsert concept: relation \"concepts\" does not exist (code 42P01)".into()
+    )));
     assert!(!tx_retryable(&StoreError::SessionNotFound("x".into())));
     assert!(!tx_retryable(&StoreError::Capability("nope".into())));
     assert!(!tx_retryable(&StoreError::NotFound("nope".into())));

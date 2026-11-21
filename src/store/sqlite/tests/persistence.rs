@@ -1943,3 +1943,42 @@ async fn an_image_derive_intent_survives_the_flush_load_round_trip() {
     assert_eq!(intent.outcome, None);
     assert_eq!(loaded.write_intents.len(), 2, "and the plain derive intent");
 }
+
+/// #301: a real permanent SQL error from SQLite (`no such table`,
+/// `SQLITE_ERROR`) reaches the flush loop as non-retryable and not a
+/// constraint violation, so the loop degrades instead of retrying and
+/// retaining. Lean: `Flush.permanent_not_retryable_fixed`,
+/// `Flush.permanent_degrades_classed`.
+#[tokio::test]
+async fn a_missing_table_is_a_permanent_flush_error() {
+    let store = test_store();
+    store.init_schema().await.unwrap();
+    sqlx::query("DROP TABLE concepts")
+        .execute(store.pool())
+        .await
+        .unwrap();
+    let sid = SessionId::from("missing-table");
+    let i1 = NodeId::new();
+    let ts = Utc::now();
+    let err = store
+        .flush(
+            &MutationBatch {
+                mutation_epoch: 0,
+                gc_mark: Default::default(),
+                mutations: vec![
+                    plant_interaction(&sid, i1, None, ts),
+                    plant_concept(&sid, NodeId::new(), i1, "orphan", ConceptType::Entity, ts),
+                ],
+            },
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert!(!err.is_retryable(), "must not be retried: {err:?}");
+    assert!(
+        matches!(err, StoreError::Permanent(_)),
+        "a permanent error, not a constraint or a stale write: {err:?}"
+    );
+    assert!(err.to_string().contains("concepts"), "{err}");
+    assert!(err.to_string().contains("(code 1)"), "code missing: {err}");
+}

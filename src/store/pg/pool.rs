@@ -185,13 +185,14 @@ pub(super) fn vector_beam_size_from_env() -> Result<Option<u32>, StoreError> {
 /// STORE-4: structured retry decision for `tx_retry` — no message-text
 /// matching. Constraint violations (SQLSTATE 23xxx) are deterministic and are
 /// mapped to [`StoreError::Constraint`] by the write path: never replay them.
-/// Typed variants are permanent. A [`StoreError::Backend`] may be a transient
+/// Typed variants are permanent, [`StoreError::Permanent`] among them (#301: an
+/// undefined table, a rejected value). A [`StoreError::Backend`] may be a transient
 /// (serialization conflict, connection exception, server shutdown) that
 /// replaying the transaction can fix; the replay is bounded by
 /// [`TX_RETRY_ATTEMPTS`] with backoff.
 pub(super) fn tx_retryable(e: &StoreError) -> bool {
     match e {
-        StoreError::Constraint(_) => false,
+        StoreError::Constraint(_) | StoreError::Permanent(_) => false,
         StoreError::Backend(_) => true,
         _ => false,
     }
