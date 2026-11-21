@@ -6,12 +6,13 @@ and the fix for #301, item 1, which drops empty stems):
 
 * `split_camel_case`: a space before every ASCII uppercase letter whose
   predecessor is an ASCII lowercase letter, on the original case;
-* `tokens(content, true)` (= `normalize_tokens`): split on `-`, `_` and
+* `tokens(content, true)` (`normalize_tokens` before the #301 fix; after it,
+  `normalize_tokens` is `tokensF`): split on `-`, `_` and
   `char::is_whitespace`, drop empty pieces, lowercase, drop `STOPWORDS`, then
   stem every token with Snowball English (Porter2, `rust-stemmers`
-  `Algorithm::English`; the Rust docs call it "Porter") except an identifier
-  token (one containing an ASCII digit, `/` or `.`, `is_identifier_token`,
-  #148), which is kept as lowercased. The camelCase split runs first, so an
+  `Algorithm::English`; the Rust docs called it "Porter" until #302) except
+  an identifier token (one containing an ASCII digit, `/` or `.`,
+  `is_identifier_token`, #148), which is kept as lowercased. The camelCase split runs first, so an
   identifier piece with a lower-to-upper boundary inside is still split;
   empty stems are not filtered out (`tokens`; the fix for #301 drops them,
   `tokensF`);
@@ -43,6 +44,10 @@ UUID, or exactly 8 ASCII hex digits).
   by UTF-8 bytes, which is the same order.
 * `check_size` and `uuid::Uuid::parse_str` are parameters of `nameKey`
   (`sizeOk`, `isUuid`); the 8-hex-digit rule is modelled exactly.
+
+The old `key` is also exactly `unfiltered_canonical_key`, which the
+`lambo provision` re-key uses to recognise a key written between #148 and the
+#301 fix.
 
 Not modelled: the invisible-character strip and Unicode NFC that open
 `tokens` (the model reads their output), Unicode case mapping beyond ASCII
@@ -400,7 +405,8 @@ theorem words_good (s : Text) : ∀ w ∈ words s, Good w := by
 /-- Identifier tokens are kept; every other token is stemmed. -/
 def stemOrKeep (stem : Token → Token) (t : Token) : Token := if isIdent t then t else stem t
 
-/-- `normalize_tokens` after the invisible strip and NFC. -/
+/-- `tokens(content, true)` after the invisible strip and NFC: `normalize_tokens` before the
+fix for #301 (after it, `tokensF`). -/
 def tokens (stop : Token → Bool) (stem : Token → Token) (s : Text) : List Token :=
   (((words (camel false s)).map (List.map lowerA)).filter (fun t => !stop t)).map (stemOrKeep stem)
 

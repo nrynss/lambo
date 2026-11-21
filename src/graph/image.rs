@@ -139,8 +139,8 @@ pub fn is_image_suffix_token(token: &str) -> bool {
 /// erased, NFC, case folded, split, stemmed), never on the raw text.
 /// Identity is the canonical key, so a raw check is bypassable both ways:
 /// `[IMAGE:R17]` and `[ima\u{200B}ge:r17]` normalize to `[image:r17]`, and
-/// so does `[image:rab]s`, because Porter's `s` rule strips the trailing
-/// `s` (`[image:r17]s` is not: since #148 a token with a digit is not
+/// so does `[image:rab]s`, because the stemmer's (Snowball English,
+/// Porter2) `s` rule strips the trailing `s` (`[image:r17]s` is not: since #148 a token with a digit is not
 /// stemmed, so it keeps its `s` and is no suffix).
 pub fn holds_image_suffix(text: &str) -> bool {
     crate::graph::canonical::normalize_tokens(text)

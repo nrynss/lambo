@@ -93,7 +93,7 @@ fn a_caption_suffix_in_any_case_or_with_invisible_characters_is_refused() {
         "red [ima\u{200B}ge:zzz]",
         "red [image\u{2060}:zzz]",
         "\u{FEFF}[IMAGE:zzz] red",
-        // Review M1 (PR 4): Porter's `s` rule turns these into `[image:zzz]`.
+        // The stemmer's `s` rule turns these into `[image:zzz]`.
         "red [image:zzz]s",
         "red [IMAGE:ZZZ]S",
     ] {

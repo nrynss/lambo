@@ -568,7 +568,7 @@ fn a_commit_hash_that_prefixes_a_concept_id_cites_it_unless_its_text_exists() {
 /// Fixed ids for the id-shape tests, so no run depends on a random id. The
 /// first is the shape CI flaked on: before #148 its 12- and 11-character
 /// prefixes (`2122de39e47e`, `2122de39e47`) shared one canonical key, because
-/// the Porter stemmer dropped a trailing `e` (see
+/// the stemmer dropped a trailing `e` (see
 /// `hex_text_that_stems_alike_is_two_concepts`).
 const FIXED_IDS: [u128; 4] = [
     0x2122de39_e47e_4a51_9c3b_0d6f8e2a1b47,
@@ -656,8 +656,8 @@ fn only_the_hyphenated_id_and_exactly_eight_hex_characters_are_ids() {
 }
 
 /// #148 (formerly `hex_text_that_stems_alike_is_one_concept`, the CI flake's
-/// root cause): canonicalization used to stem every token, and the Porter
-/// stemmer drops a trailing `e`, so `2122de39e47e` and `2122de39e47` were one
+/// root cause): canonicalization used to stem every token, and the stemmer
+/// drops a trailing `e`, so `2122de39e47e` and `2122de39e47` were one
 /// key and one concept. Identifier tokens (a digit, `/` or `.`) are no longer
 /// stemmed, so they are two concepts.
 #[test]

@@ -192,8 +192,10 @@ impl InvertedIndex {
 }
 
 /// Tokenizer for indexing and querying: the shared canonical normalizer
-/// (T2.2, `src/graph/canonical.rs::normalize_tokens`) — lowercase, split on
-/// `[-_ ]` + camelCase boundaries, drop stopwords, Porter-stem. Duplicate
+/// (`src/graph/canonical.rs::normalize_tokens`) — split camelCase
+/// boundaries on the original case, split on `-`, `_` and whitespace,
+/// lowercase, drop stopwords, stem with Snowball English (Porter2) except
+/// identifier tokens (#148), drop empty stems (#301). Duplicate
 /// tokens are retained so in-document term frequency counts occurrences.
 /// Imported, never forked (T2.6 phase-doc contract; the local seam copy was
 /// removed at integration).

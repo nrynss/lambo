@@ -10,9 +10,13 @@
 //! * `load_recall_goldens()`, `load_canonicalization_cases()` — P5 / P6 tables.
 //!
 //! Conventions (see `scripts/gen-fixtures.py`, which regenerates these):
-//! * Canonical keys: lowercase -> split `[-_ ]` + camelCase -> drop stopwords ->
-//!   Porter stem -> sort -> join `" "`. Synonym lookup on the raw normalized key
-//!   BEFORE stemming ("register_user" -> "create_user" -> "creat user").
+//! * Canonical keys: split camelCase on the original case -> split `[-_ ]` +
+//!   whitespace -> lowercase -> drop stopwords -> Snowball English (Porter2)
+//!   stem, identifier tokens unstemmed (#148), empty stems dropped (#301) ->
+//!   sort -> join `" "` (`graph::canonical::normalize_tokens`; the script
+//!   lowercases before the camelCase split, a drift the checked-in cases do
+//!   not follow). Synonym lookup on the raw trimmed input BEFORE normalizing
+//!   ("register_user" -> "create_user" -> "creat user").
 //! * All timestamps are in the past relative to eval time, so age filters treat
 //!   every edge as aged.
 

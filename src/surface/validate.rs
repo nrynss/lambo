@@ -525,7 +525,7 @@ mod tests {
             "render 17 [image:r17]",
             "Render 17 [IMAGE:R17]",
             "[ima\u{200B}ge:r17] render",
-            // Porter strips the trailing `s`, so these stem to `[image:rab]`.
+            // The stemmer strips the trailing `s`, so these stem to `[image:rab]`.
             "render [image:rab]s",
             "render [Image:RAB]S",
         ] {

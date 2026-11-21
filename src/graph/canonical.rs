@@ -658,7 +658,7 @@ mod tests {
     }
 
     #[test]
-    fn porter_stems_match_fixture_stem_table() {
+    fn snowball_stems_match_fixture_stem_table() {
         for (word, expected) in STEM {
             assert_eq!(STEMMER.stem(word), *expected, "stem of {word:?}");
         }

@@ -111,7 +111,9 @@ estimator with the real marker are `Steady` (`rust_default_steady`,
   is rendered exactly when the marker alone does not fit (rule 3).
 
 The longest head does not hold for every estimator monotone in bytes, which is
-what the module doc's Arithmetic paragraph says suffices:
+what the module doc's Arithmetic paragraph said sufficed until #302 (it now
+states the `Steady` condition and cites `rust_default_steady` and
+`rust_jump_skips_a_fitting_form`):
 `rust_jump_skips_a_fitting_form` is a byte-faithful counterexample on a real
 block (an estimator whose count jumps by `10^19` past 90 bytes), and
 `jump_skips_a_fitting_form` a toy-sized one.
@@ -985,9 +987,9 @@ theorem fitBlocks_truncated_prefix (e : Env α) (bs : List (Block α)) (maxT : N
 
 /-! ### When the search finds the longest head
 
-The module doc says that for an estimator monotone in bytes the head is the
-longest that fits, "a count that loses a digit does so only after losing at
-least one byte". The argument needs more than monotonicity: the count itself
+The module doc said, until #302, that for an estimator monotone in bytes the
+head is the longest that fits, "a count that loses a digit does so only after
+losing at least one byte". The argument needs more than monotonicity: the count itself
 may drop by at most one per byte removed, and the marker may shrink by at most
 one byte per unit of count. `Steady` is that hypothesis; the default
 estimator and the Rust marker satisfy it (`rust_default_steady`), and
