@@ -20,7 +20,7 @@
 //! memory, **before** the registry is consulted. Every refusal at those two
 //! steps is `surface::session`'s byte-identical 404, so a caller outside a
 //! session's scope cannot tell a held, detaching or failed session from one
-//! this serve does not host (PR 4 review L6). Only inside its scope can a
+//! this serve does not host (PR 4 review). Only inside its scope can a
 //! caller see a 503.
 
 use std::sync::Arc;
@@ -137,7 +137,7 @@ pub(super) fn reaches_past_pinned(opts: &ServeOptions) -> bool {
 
 /// How many configured credentials reach a session this serve does not pin
 /// (see [`reaches_past_pinned`]); 0 over stdio. The on-demand places are
-/// shared among them for eviction (#32 PR 6 review M4).
+/// shared among them for eviction (#32 PR 6 review).
 pub(super) fn on_demand_credentials(opts: &ServeOptions) -> usize {
     if opts.transport != Transport::Http {
         return 0;
@@ -155,7 +155,7 @@ pub(super) fn on_demand_credentials(opts: &ServeOptions) -> usize {
 }
 
 /// What an operator should hear about a serve's credentials at startup
-/// (#32 PR 5 review I3 and I5), one line each. Names credentials and
+/// (#32 PR 5 review), one line each. Names credentials and
 /// sessions, never a token.
 ///
 /// * The legacy token beside configured credentials: a `LAMBO_AUTH_TOKEN`
@@ -167,7 +167,7 @@ pub(super) fn on_demand_credentials(opts: &ServeOptions) -> usize {
 ///   once the session exists (it has a lease row, design decision 3), so a
 ///   name nobody has created yet is the uniform 404 to it.
 /// * A credential reaching past the pinned sessions while `max_attached`
-///   leaves no place beside them (#32 PR 6 review L6): every on-demand
+///   leaves no place beside them (#32 PR 6 review): every on-demand
 ///   request would get 503.
 pub(super) fn startup_warnings(opts: &ServeOptions) -> Vec<String> {
     let mut out = Vec::new();
