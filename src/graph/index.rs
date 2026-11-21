@@ -1,16 +1,16 @@
-//! In-memory inverted index over concept content + BM25 scoring (T2.6).
+//! In-memory inverted index over concept content + BM25 scoring.
 //!
 //! Recall phase 1's keyword source (spec §8): concepts are tokenized once at
 //! [`InvertedIndex::add`] time and the postings are maintained **incrementally** —
 //! add / update / remove never rebuild the index. The only bulk path,
 //! [`InvertedIndex::from_snapshot`], is repeated `add` under the hood.
 //!
-//! Per-session `df`: the index is a per-session structure (the owner, T2.3+,
+//! Per-session `df`: the index is a per-session structure (the owner
 //! keeps one [`InvertedIndex`] per session); document frequency is computed over
 //! the documents currently indexed in it.
 //!
 //! Concepts only — interactions are not searchable (spec §8 phase 1 searches
-//! concept content). [`InvertedIndex`] owns no lock; callers (`Memory`, T2.3+)
+//! concept content). [`InvertedIndex`] owns no lock; callers (`Memory`)
 //! serialize access.
 
 use std::collections::HashMap;
@@ -25,7 +25,7 @@ const BM25_B: f64 = 0.75;
 
 /// Inverted index over concept content.
 ///
-/// Terms are produced by [`normalize_tokens`] (the T2.2 canonical-normalizer contract);
+/// Terms are produced by [`normalize_tokens`] (the canonical-normalizer contract);
 /// each term maps to a posting list of `(concept id -> in-document frequency)`.
 /// Document lengths (token counts) are kept per concept for BM25's length
 /// normalization; totals are maintained for `avgdl`.
@@ -197,8 +197,7 @@ impl InvertedIndex {
 /// lowercase, drop stopwords, stem with Snowball English (Porter2) except
 /// identifier tokens (#148), drop empty stems (#301). Duplicate
 /// tokens are retained so in-document term frequency counts occurrences.
-/// Imported, never forked (T2.6 phase-doc contract; the local seam copy was
-/// removed at integration).
+/// Imported, never forked (the local seam copy was removed at integration).
 #[cfg(test)]
 mod tests {
     use super::*;

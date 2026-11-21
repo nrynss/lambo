@@ -61,7 +61,7 @@ impl Drop for Memory {
     /// abandons the tail (see `close`'s drain), so it warns. After a successful
     /// `close` every handle is already `None` and this is a no-op.
     ///
-    /// **Two ways to lose a tail, not one** (R2-2, amended by R3-1/R4-1).
+    /// **Two ways to lose a tail, not one.**
     /// Keying the warning on task handles still being `Some` catches the
     /// never-closed handle but is blind to the *closed-and-failed* one: a
     /// `close()` that **failed** has reaped all three handles, so `leaked` is
@@ -70,22 +70,22 @@ impl Drop for Memory {
     /// contract asks the owner to act on, so it must not go out quietly. The
     /// log is therefore checked too, whatever the handles say.
     ///
-    /// A **cancelled** `close()` is the third shape (R4-1): `HandleCustody`
+    /// A **cancelled** `close()` is the third shape: `HandleCustody`
     /// has put the handles *back*, so `leaked` is true and the first branch
     /// fires — but its count can understate the loss, because a tail drained
     /// by the flush task before the cancellation lives in that task's
     /// `pending`, not in the log this counts. The first message says so
     /// rather than pretending the log count is the whole story.
     fn drop(&mut self) {
-        // No-op if a successful `close()` already released the slot (R2-4).
+        // No-op if a successful `close()` already released the slot.
         self.unregister_once();
         // Stop the lease heartbeat so a leaked handle stops refreshing — its
-        // lease then lapses at TTL and the session becomes takeable (T8.6). The
+        // lease then lapses at TTL and the session becomes takeable. The
         // lease itself is NOT released here: `Drop` cannot `await` the store, and
         // a handle dropped without a clean close is the crash-shaped path where
         // expiry is the right release. A successful `close()` already released it.
         self.abort_heartbeat();
-        // J3: the background write workers and the calibration probe hold `Arc`
+        // The background write workers and the calibration probe hold `Arc`
         // clones of the graph, so a dropped handle's workers would keep writing
         // into a graph nobody will flush. Aborted without a join and without
         // settling their receipts — `Drop` cannot await, and a process that is
@@ -124,7 +124,7 @@ impl Drop for Memory {
 }
 
 /// Custody of a background task's [`JoinHandle`] while `close()` stops and
-/// reaps it — R3-1.
+/// reaps it.
 ///
 /// `close()` used to lift each handle out of its slot (`slot.lock().take()`)
 /// and then `await` it as a bare local. That await is the long one — the flush
@@ -136,7 +136,7 @@ impl Drop for Memory {
 /// been drained into it — and kept writing the session through its own `Arc`s.
 /// The slot was left `None`, so the retried `close()` skipped the join, drained
 /// an empty log, took the empty-log shortcut and returned `Ok(())` over a tail
-/// that was neither durable nor anywhere [`Drop`]'s R2-2 warning could see it
+/// that was neither durable nor anywhere [`Drop`]'s warning could see it
 /// (the log was empty because the zombie held the batch). COH-6 clause 13 — "a
 /// retained batch is never silently lost" — by the same route.
 ///
@@ -168,9 +168,9 @@ impl Drop for Memory {
 /// and no tail exists yet; a cancellation at step 4 restores the tail and every
 /// handle is already reaped. Both orders end the same way — every guard is a
 /// local declared *after* `_quiesced` and the `close_state` guard, so both run
-/// before the retry can enter `close()` at all. R2-1's rule ("the tail is back
-/// on the log before `close_state` releases") is unchanged, and R3-1's is its
-/// twin one step earlier.
+/// before the retry can enter `close()` at all. `TailCustody`'s rule ("the
+/// tail is back on the log before `close_state` releases") is unchanged, and
+/// this guard's is its twin one step earlier.
 pub(super) struct HandleCustody<'a> {
     pub(super) slot: &'a PlMutex<Option<JoinHandle<()>>>,
     /// `None` once [`HandleCustody::join`] has reaped the task — that is what
@@ -215,7 +215,7 @@ impl Drop for HandleCustody<'_> {
 }
 
 /// Custody of the tail between `close()`'s drain (step 3) and the moment it is
-/// durable (step 4) — R2-1.
+/// durable (step 4).
 ///
 /// Between those two points the mutations exist **only** as a local inside
 /// `close()`: they are out of the graph log and the flush task that owned the
@@ -231,7 +231,7 @@ impl Drop for HandleCustody<'_> {
 /// [`TailCustody::durable`] is called, and its `Drop` — which runs on
 /// cancellation exactly as it runs on the error path — hands it back to the
 /// front of the log. Cancel a `close()` and the tail is where it started, for
-/// the retry (or for `Drop`'s R2-2 warning) to find.
+/// the retry (or for `Drop`'s warning) to find.
 ///
 /// `Drop` is synchronous and takes the `parking_lot` write lock for one
 /// statement, never across an `.await` (§6.4). Re-appending a batch whose flush
@@ -353,17 +353,16 @@ impl Drop for CloseStep<'_> {
     }
 }
 
-/// `close()`'s step-4 store attempt, armored exactly like a background one
-/// (T81-2).
+/// `close()`'s step-4 store attempt, armored exactly like a background one.
 ///
 /// The flush loop protects every `store.flush` twice — `FLUSH_ATTEMPT_TIMEOUT`
-/// (STORE-2) and [`CatchUnwindPoll`] — and both rationales apply verbatim to the
-/// final flush, which runs against the same caller-supplied adapter:
+/// and [`CatchUnwindPoll`] — and both rationales apply verbatim to the final
+/// flush, which runs against the same caller-supplied adapter:
 ///
 /// * **Timeout.** Without it a hung store hangs `close()` forever, and the
 ///   handle's tail is stuck behind a call that will never return. The same
 ///   constant, not a close-specific one: this is one `store.flush` attempt on
-///   the same store, so the bound STORE-2 chose for an attempt is the bound
+///   the same store, so the bound chosen for an attempt is the bound
 ///   here. `close` makes exactly one attempt (no retry ladder), so 30s is the
 ///   whole of it.
 /// * **Panic containment.** Without it a panicking adapter unwinds out of
@@ -405,7 +404,7 @@ pub(super) async fn final_flush(
 impl Memory {
     /// Abort **and join** the canonization, daemon and flush tasks (#32 PR
     /// 7): `abort()` returns before a task has stopped, and only the join
-    /// proves it (R3-1). Each handle travels in a [`HandleCustody`], so a
+    /// proves it. Each handle travels in a [`HandleCustody`], so a
     /// caller dropped mid-join hands it back to its slot. Idempotent: a slot
     /// already reaped is skipped.
     /// The fenced end of [`Memory::close`]: a fenced handle lost its
@@ -417,7 +416,7 @@ impl Memory {
     /// flush loop and again after it has joined it (#293 review).
     async fn close_fenced(&self) -> LamboError {
         // Aborted AND joined (#32 PR 7): `abort()` returns before the
-        // task has stopped, and only the join proves it (R3-1). An erase
+        // task has stopped, and only the join proves it. An erase
         // run by this process right after this close (design §6.3) must
         // find none of this handle's tasks still able to reach the store
         // or the recall index: a flush past its store commit would
@@ -444,7 +443,7 @@ impl Memory {
             );
         }
         // The tail is dropped, so no set-aside write can be vouched
-        // for (#117 review M1).
+        // for (#117).
         self.pipeline
             .settle_deferred(crate::writeq::CloseFlush::Incomplete);
         self.lease_lost_error()
@@ -459,7 +458,7 @@ impl Memory {
         }
     }
 
-    /// Stop a handle fenced for an in-process erase (#32 PR 7 review M1)
+    /// Stop a handle fenced for an in-process erase (#32 PR 7)
     /// whose [`Memory::close`] was abandoned before its fenced branch: stuck
     /// behind a write that holds the writers gate, or cut short by a second
     /// shutdown signal. The fenced branch is what aborts and joins the
@@ -513,7 +512,7 @@ impl Memory {
     /// background tasks are stopped and every mutating method is refused, so a
     /// retry re-attempts exactly the same tail rather than a growing one.
     ///
-    /// ## Bounding this against the lease — caller's contract (T86-4)
+    /// ## Bounding this against the lease — caller's contract
     ///
     /// `close()` aborts the lease heartbeat as soon as it holds the writers
     /// gate (after latching `closed`, stopping the probe and the intent
@@ -521,12 +520,12 @@ impl Memory {
     /// because the success paths below release the lease explicitly and it
     /// must not keep being refreshed underneath that release. (This said
     /// "**first** (right after latching `closed`)", which stopped being true
-    /// when J3 put the queue drain ahead of the gate.) Until the gate is held
+    /// when the queue drain moved ahead of the gate.) Until the gate is held
     /// the lease keeps refreshing: through the replay stop and its join, the
     /// quiesce (bounded by `WRITE_QUEUE_DRAIN_BUDGET`) plus the joins of the
     /// workers it aborts, and the wait for the gate's write side, which an
-    /// unbounded embedder can stretch indefinitely (the R2-5 paragraph
-    /// below). That window has no fixed bound, but extra refresh is the
+    /// unbounded embedder can stretch indefinitely (see *How long it can
+    /// take* below). That window has no fixed bound, but extra refresh is the
     /// safe direction: the lease only outlives a close that is still running.
     ///
     /// From that moment the lease is no longer refreshed, so it stays valid
@@ -552,13 +551,13 @@ impl Memory {
     /// contend on the session. (Reordering the heartbeat to keep refreshing
     /// across the flush was considered and rejected: it entangles the heartbeat's
     /// lost-lease fence with the mid-close release/flush ordering, and this
-    /// close body's ordering is load-bearing for the R2-1/R3-1 cancellation and
-    /// custody invariants above. Bounding at the call site is the smaller-risk
+    /// close body's ordering is load-bearing for the cancellation and custody
+    /// invariants above. Bounding at the call site is the smaller-risk
     /// contract, and in-repo `serve` is the only production caller.)
     ///
     /// ## Cancellation
     ///
-    /// **Dropping this future never destroys the tail** (R2-1). A caller that
+    /// **Dropping this future never destroys the tail.** A caller that
     /// wraps `close()` in a [`timeout`](tokio::time::timeout) or drops it out of
     /// a `select!` leaves the drained mutations back at the front of the graph
     /// log — the state a *failed* close leaves, and retryable the same way. The
@@ -570,7 +569,7 @@ impl Memory {
     /// retry replays it, which the `src/graph/mod.rs` replay contract makes
     /// idempotent (the failure path has always made the same bet).
     ///
-    /// **Nor does it strand a background task** (R3-1). Cancellation lands on
+    /// **Nor does it strand a background task.** Cancellation lands on
     /// whichever `.await` this future is parked on, and the longest of those is
     /// the step-2 join — the one an external `timeout` almost always fires in.
     /// A dropped `JoinHandle` *detaches* its task rather than stopping it, so
@@ -592,10 +591,10 @@ impl Memory {
     /// buffer. So:
     ///
     /// 0. **Shut the writers up — the surface's own, then the tasks'.** Latch
-    ///    `closed` so new calls are refused, drain J3's asynchronous write
+    ///    `closed` so new calls are refused, drain the asynchronous write
     ///    queue (see the note at the end of this step), take the write side of
     ///    `Memory::writers`, which waits out every write already in flight on
-    ///    a caller task (T81-1), and only then stop the two mutation producers,
+    ///    a caller task, and only then stop the two mutation producers,
     ///    canonization first and the daemon second. It takes both halves for
     ///    "nothing new lands after the drain" to be true of the *surface* and
     ///    not just of the tasks. `abort()` is safe for both tasks: neither
@@ -604,9 +603,9 @@ impl Memory {
     ///    Both are then **joined**, not merely aborted: tokio cancels a running
     ///    task at its next `.await`, so until the join returns an aborted
     ///    producer can still finish a synchronous stretch — and append to the
-    ///    log (R3-1).
+    ///    log.
     ///
-    ///    **J3's write pipeline is drained inside this step, and BEFORE the
+    ///    **The write pipeline is drained inside this step, and BEFORE the
     ///    gate is taken** (`crate::writeq::WritePipeline::quiesce`). The
     ///    order is forced, not chosen: the gate's write side is held for the
     ///    rest of this method, so a background worker that had to pass through
@@ -620,7 +619,7 @@ impl Memory {
     ///    flush reports — then settled `intent_durable` (counted in
     ///    `lambo_stats`' `write_queue_deferred`, replayed by the next serve) if
     ///    the flush completed, `close_unflushed` if it failed, the session was
-    ///    degraded or the lease was lost (#117 review M1). (This said "abandoned ... settled
+    ///    degraded or the lease was lost (#117). (This said "abandoned ... settled
     ///    `failed` ... `write_queue_abandoned`", the pre-durable-intent
     ///    behaviour; `abandoned` now counts only jobs refused after a lost
     ///    lease.) The intent replay is stopped, aborted and joined, before the
@@ -632,14 +631,14 @@ impl Memory {
     /// 2. Await its handle — the task is gone and can no longer take the graph
     ///    lock, so step 3 races nothing. The handle is held in a
     ///    `HandleCustody` guard for the whole of that await, so a cancelled
-    ///    join returns it to its slot instead of detaching the task (R3-1).
+    ///    join returns it to its slot instead of detaching the task.
     /// 3. Take the graph lock, `drain_log()`, release. The batch is handed
     ///    straight to a `TailCustody` guard, which returns it to the log if
-    ///    this future is dropped before step 4 makes it durable (R2-1).
+    ///    this future is dropped before step 4 makes it durable.
     /// 4. `store.flush(&batch)` directly, with **no lock held**, armored like
-    ///    every background attempt is: a `FLUSH_ATTEMPT_TIMEOUT` bound
-    ///    (STORE-2) and panic containment, so a hung or panicking adapter
-    ///    yields an error instead of wedging or unwinding out of `close`.
+    ///    every background attempt is: a `FLUSH_ATTEMPT_TIMEOUT` bound and
+    ///    panic containment, so a hung or panicking adapter yields an error
+    ///    instead of wedging or unwinding out of `close`.
     ///    Its result is this method's result; on failure the batch is returned
     ///    to the log (see *Retry after failure*).
     ///
@@ -659,7 +658,7 @@ impl Memory {
     /// constant), so this does not move the number an operator has sized a
     /// supervisor timeout against.
     ///
-    /// Step 0 is itself bounded now (R2-5): every store call a gated write can
+    /// Step 0 is itself bounded now: every store call a gated write can
     /// be parked in has a timeout — `RETRACT_IO_TIMEOUT` for `retract`'s
     /// durable radius, [`hybrid::HYBRID_IO_TIMEOUT`](crate::graph::hybrid::HYBRID_IO_TIMEOUT) over hybrid `derive`'s
     /// whole embed/query phase. A caller-supplied **embedder** is the one
@@ -679,14 +678,14 @@ impl Memory {
     /// `close()` returns the same error — a degraded session has no path back
     /// to a durable tail, and saying `Ok` would be a lie.
     ///
-    /// **A degraded session errors even when its log is empty** (R2-3). While
+    /// **A degraded session errors even when its log is empty.** While
     /// degraded the flush task keeps draining the log and dropping what it
-    /// drained (STORE-3), so an empty log is that mode's steady state — the
+    /// drained, so an empty log is that mode's steady state — the
     /// tail was dead-lettered, not written — and an `Ok(())` there would be the
     /// same lie by a quieter route. `degraded()` is therefore checked before
     /// the empty-log shortcut, not after it.
     pub async fn close(&self) -> Result<(), LamboError> {
-        // T81-6: one close body at a time. A concurrent second caller parks
+        // One close body at a time. A concurrent second caller parks
         // here and, when it gets in, either sees the success flag or re-runs
         // the (idempotent) shutdown — never an early `Ok` over an in-flight
         // final flush.
@@ -697,7 +696,7 @@ impl Memory {
             return Ok(());
         }
 
-        // 0 — the writers gate (T81-1). Latch first so new writes are refused,
+        // 0 — the writers gate. Latch first so new writes are refused,
         // then take the write side: it is granted only once every write that
         // slipped in before the latch has finished, so nothing this session
         // acknowledged can still be on its way to the log. Held for the rest of
@@ -705,7 +704,7 @@ impl Memory {
         self.closed.store(true, Ordering::Release);
         step.done();
 
-        // 0a — J3's background write queue, drained BEFORE the writers gate is
+        // 0a — the background write queue, drained BEFORE the writers gate is
         // taken. The order is forced, not chosen: the gate's write side is held
         // for the rest of this method, so a worker that had to pass through the
         // gate could never finish and a close waiting for it would deadlock.
@@ -720,7 +719,7 @@ impl Memory {
         // The intent replay is stopped — aborted AND joined — before the
         // quiesce and therefore well before the final drain: an aborted task
         // can still finish a synchronous stretch that appends to the log until
-        // the join returns (R3-1). Whatever it had not yet consumed stays
+        // the join returns. Whatever it had not yet consumed stays
         // durable for the next serve.
         self.pipeline.stop_replay().await;
         step.done();
@@ -739,7 +738,7 @@ impl Memory {
         let step = CloseStep::start(&self.session, 5, "heartbeat_abort");
         self.abort_heartbeat();
 
-        // T86-2: a fenced handle lost its lease — another writer owns the
+        // A fenced handle lost its lease — another writer owns the
         // session now. The final flush this close would otherwise do is exactly
         // the split-brain write the lease exists to prevent, so refuse it: stop
         // the tasks, DROP the tail (it dies with this handle as it would on a
@@ -757,19 +756,19 @@ impl Memory {
         // ...and the two mutation producers off, before the drain. Every
         // handle travels in a `HandleCustody` guard: cancelled on a join, this
         // future must hand the handle back to its slot rather than detach a
-        // task that is still able to write (R3-1). `abort()` is synchronous, so
+        // task that is still able to write. `abort()` is synchronous, so
         // it cannot be skipped by a cancellation — but only the join proves the
         // task has actually stopped.
         //
-        // Coverage note (R4-3): only the flush handle's custody is pinned by a
+        // Coverage note: only the flush handle's custody is pinned by a
         // test. The canon/daemon detach window (an aborted task finishing a
         // synchronous stretch that appends to the log) is real — probed
         // directly in review — but too narrow to exercise deterministically:
         // neither loop has a long synchronous stretch to park in. Custody is
         // applied uniformly anyway because the hazard class is identical and
-        // reasoning per-handle about window width is exactly the mistake R3-1
-        // caught. Same class of documented blind spot as `begin_write_sync`'s
-        // re-check (R2-6) and the flush select's `biased;` (T81-4).
+        // reasoning per-handle about window width is exactly the mistake that
+        // let the flush task detach. Same class of documented blind spot as
+        // `begin_write_sync`'s re-check and the flush select's `biased;`.
         let step = CloseStep::start(&self.session, 6, "producer_joins");
         let mut canon = HandleCustody::take(&self.canon_handle);
         canon.abort();
@@ -790,8 +789,8 @@ impl Memory {
         // the long await (most of `close`'s worst case, see "How long it can
         // take") and so the one an external timeout fires in: dropping the handle here
         // used to leave a zombie flush task holding the tail in its own
-        // `pending`, invisible to the retry, to `Drop`'s warning and to the log
-        // (R3-1). Custody keeps it re-joinable instead.
+        // `pending`, invisible to the retry, to `Drop`'s warning and to the log.
+        // Custody keeps it re-joinable instead.
         let mut flush = HandleCustody::take(&self.flush_handle);
         if let Some(Err(err)) = flush.join().await
             && !err.is_cancelled()
@@ -835,12 +834,12 @@ impl Memory {
         };
         // Custody of the drained tail passes to `TailCustody` immediately:
         // from here until it is durable those mutations exist nowhere else,
-        // and `close()` is a future its caller may drop (R2-1).
+        // and `close()` is a future its caller may drop.
         let mut tail = TailCustody::new(&self.graph, batch);
 
-        // A degraded session errors **before** the empty-log shortcut (R2-3).
+        // A degraded session errors **before** the empty-log shortcut.
         // While degraded the flush task keeps draining the log and DROPPING
-        // each batch (STORE-3), so an empty log is the *normal* degraded
+        // each batch, so an empty log is the *normal* degraded
         // state, not evidence that anything was written. Checked second, the
         // shortcut turned exactly that state into `Ok(())` — a durability
         // claim over a tail the session had already dead-lettered.
@@ -854,9 +853,9 @@ impl Memory {
             );
             // `tail`'s `Drop` puts the batch back on the log: the mutations
             // are no more durable for having been drained, and leaving them
-            // there keeps `stats().log_depth` honest about what was lost
-            // (T81-5). `succeeded` stays false, so no later `close()` can
-            // report `Ok` over this tail.
+            // there keeps `stats().log_depth` honest about what was lost.
+            // `succeeded` stays false, so no later `close()` can report `Ok`
+            // over this tail.
             let detail = if count == 0 {
                 "the log is empty because degraded mode drops what it drains, not because the \
                  tail was written"
@@ -883,11 +882,11 @@ impl Memory {
                 "close: step 9/{CLOSE_STEPS} final_flush skipped (empty tail)"
             );
             // Nothing left to write: every set-aside intent was taken by an
-            // earlier flush, so it is durable (#117 review M1).
+            // earlier flush, so it is durable (#117).
             self.pipeline
                 .settle_deferred(crate::writeq::CloseFlush::Durable);
             // Graceful close: hand off the lease now rather than waiting out the
-            // TTL, so the next writer takes the session immediately (T8.6).
+            // TTL, so the next writer takes the session immediately.
             let step = CloseStep::start(&self.session, 10, "lease_release");
             self.release_lease_once().await;
             self.latch_success(&mut succeeded);
@@ -895,7 +894,7 @@ impl Memory {
             return Ok(());
         }
 
-        // 4 — the final flush, no lock held, armored (T81-2). The result is
+        // 4 — the final flush, no lock held, armored. The result is
         // bound out of the `match` scrutinee so the borrow of `tail` ends
         // here rather than spanning the arms.
         let count = tail.len();
@@ -909,7 +908,7 @@ impl Memory {
                 // no cancellation can land in this window.
                 tail.durable();
                 // Only now are the set-aside receipts true to call
-                // `intent_durable` (#117 review M1).
+                // `intent_durable` (#117).
                 self.pipeline
                     .settle_deferred(crate::writeq::CloseFlush::Durable);
                 tracing::info!(
@@ -917,10 +916,10 @@ impl Memory {
                     session = %self.session,
                     "Memory session closed (tail flushed)"
                 );
-                // Tail is durable: release the lease so the handoff is clean
-                // (T8.6). A failed flush (the `Err` arm below) deliberately does
-                // NOT release — it keeps the lease for a retry and lets it lapse
-                // at TTL if none comes.
+                // Tail is durable: release the lease so the handoff is clean.
+                // A failed flush (the `Err` arm below) deliberately does NOT
+                // release — it keeps the lease for a retry and lets it lapse at
+                // TTL if none comes.
                 let step = CloseStep::start(&self.session, 10, "lease_release");
                 self.release_lease_once().await;
                 self.latch_success(&mut succeeded);
@@ -928,13 +927,13 @@ impl Memory {
                 Ok(())
             }
             Err(err) => {
-                // T81-5: the batch is NOT lost with the error. `tail`'s `Drop`
+                // The batch is NOT lost with the error. `tail`'s `Drop`
                 // puts it back at the FRONT of the log — `push_front_log`'s
                 // documented purpose — so a retried `close()` (or an owner
                 // that fixes the store first) drains and flushes exactly this
                 // tail, in order.
                 drop(tail);
-                // A retried close that flushes upgrades these (#117 M1).
+                // A retried close that flushes upgrades these (#117).
                 self.pipeline
                     .settle_deferred(crate::writeq::CloseFlush::Incomplete);
                 tracing::error!(
@@ -952,7 +951,7 @@ impl Memory {
     /// The one place `close()` latches success and gives up its registry slot.
     ///
     /// Both success paths — the empty-log shortcut and a completed step-4 flush
-    /// — go through here so the R3-1 invariant is asserted once for both: **no
+    /// — go through here so the custody invariant is asserted once for both: **no
     /// `close()` may report success while a flush `JoinHandle` is still parked
     /// in its slot un-joined.** A parked handle means a live flush task, and a
     /// live flush task may hold the tail in its own `pending` buffer, where an
@@ -963,12 +962,12 @@ impl Memory {
     /// that guard hands the handle back unless the join returned. So `None` at
     /// step 3 means "reaped", never "detached" — the state that made the
     /// shortcut a lie. The assertion is the pin on that reasoning rather than a
-    /// second mechanism, hence `debug_assert!` — and it is a *pin only* (R4-2):
+    /// second mechanism, hence `debug_assert!` — and it is a *pin only*:
     /// a neutered guard leaves the slot `None`, the very state this asserts,
     /// so the assertion cannot fire on the regression that matters. Detachment
     /// is undetectable from here by construction; the enforcement is
-    /// `HandleCustody` and the R3-1 regression test's durability assertion,
-    /// not this line.
+    /// `HandleCustody` and its cancelled-close regression test's durability
+    /// assertion, not this line.
     pub(super) fn latch_success(&self, succeeded: &mut bool) {
         debug_assert!(
             self.flush_handle.lock().is_none(),

@@ -238,7 +238,7 @@ impl Graph {
                     ev.session_id, sid
                 )));
             }
-            // #20 review L7: an event whose reason the write gate would refuse
+            // #20: an event whose reason the write gate would refuse
             // (a reason on a promotion, a self-supersession, an unknown
             // reason) loads as an unknown reason with a warning; the snapshot
             // still loads.
@@ -299,8 +299,8 @@ impl Graph {
             })
             .collect();
         // Interactions were collected in temporal chain order above — do NOT sort
-        // them by id (adve-review T2.1 S4): the chain order is the documented
-        // contract, and random v4 UUIDs would silently destroy it.
+        // them by id: the chain order is the documented contract, and random
+        // v4 UUIDs would silently destroy it.
         concepts.sort_by_key(|c| c.id.0);
         edges.sort_by_key(|e| e.id.0);
         synonyms.sort_by(|a, b| a.source_key.cmp(&b.source_key));

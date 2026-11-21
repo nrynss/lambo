@@ -3586,8 +3586,7 @@ theorem finishW_caps (c : Caps) (sz : Job → Nat) (now : Int) (a : Nat) (r : Ru
 
 /-- **The caps hold at every step**: queued, running and held writes, and
 their bytes, never exceed the bounds. A held write stays counted from its
-admission until it settles, through every retry, bytes included (the
-review's B2 and S2). -/
+admission until it settles, through every retry, bytes included. -/
 theorem stepW_caps (c : Caps) (sz : Job → Nat) (now : Int) (st : WS) (ev : Ev)
     (hC : CapsW c sz st) : CapsW c sz (stepW c sz now st ev) := by
   obtain ⟨cl, ct, cb⟩ := hC
@@ -3792,7 +3791,7 @@ theorem sessionW_orderInv (c : Caps) (sz : Job → Nat) (now : Int) (s : RStore)
       · exact List.mem_append_right _ (List.mem_append_right _ (hm _ h))
     exact Nat.le_of_lt (hcross x hxa i.job hio')
 
-/-! ### The replay's block reason after a halt (S5) -/
+/-! ### The replay's block reason after a halt -/
 
 /-- What `write_queue_replay_blocked` reports for a block reason: `unset` (a
 halt on a lost lease or a seal) reads `null`, like no block. -/

@@ -1,4 +1,4 @@
-//! Promotion policy selection — the `PromotionScorer` seam (C1).
+//! Promotion policy selection — the `PromotionScorer` seam.
 //!
 //! Each policy owns two decisions: **Stage 1 admission** (which concepts
 //! become Candidates) and the **admission of the later hops** given a stage's
@@ -48,7 +48,7 @@
 //! actions) no longer score. `human_confirmed` is a
 //! persisted counter bumped only through [`crate::Memory::confirm_human`].
 //!
-//! The recurrence term is the reason C2 depends on D2: "sessions" are counted
+//! The recurrence term rests on session separation: "sessions" are counted
 //! with [`separated_session_count`] over the **event-time** spread of the
 //! concept's supporting interactions ([`crate::types::Interaction::about_time`],
 //! never flush stamps; a declared dependence is dated by the turn that wrote
@@ -93,7 +93,7 @@ use crate::types::{
 /// of variants, so that a variant the valid set does not name is not a thing
 /// this file can express.
 ///
-/// # Why the enum is not written out by hand (T3-P3-2)
+/// # Why the enum is not written out by hand
 ///
 /// `ALL` is what every refusal enumerates and what [`PromotionPolicy::from_str`]
 /// searches, so a variant missing from it is not cosmetic. It is unselectable
@@ -163,8 +163,8 @@ promotion_policy! {
     /// Unlike `MatchStrategy`, the `Default` here and
     /// `Config::default().promotion_policy` are the **same** value (`Swarm`).
     /// There is deliberately no second, differing product default to remember:
-    /// swarm is what the pipeline has always done, and C1's entire contract is
-    /// that it keeps doing it.
+    /// swarm is what the pipeline has always done, and the seam's entire
+    /// contract is that it keeps doing it.
     ///
     /// Declared through the `promotion_policy!` macro so that this variant list
     /// is also [`PromotionPolicy::ALL`]. **A new variant goes here**, and the
@@ -566,7 +566,7 @@ pub fn supporting_interaction_times(graph: &Graph, c: &Concept) -> Vec<DateTime<
 }
 
 /// The recurrence term: how many ≥ [`SESSION_SEPARATION`]-apart sessions the
-/// concept's supporting interactions fall into, counted by D2's greedy
+/// concept's supporting interactions fall into, counted by the greedy
 /// [`separated_session_count`] on event time.
 pub fn recurrence_sessions(graph: &Graph, c: &Concept) -> usize {
     separated_session_count(&supporting_interaction_times(graph, c), SESSION_SEPARATION)
@@ -581,7 +581,7 @@ pub fn recurrence_sessions(graph: &Graph, c: &Concept) -> usize {
 /// the filter counts Canonical → None demotions, **whatever their reason**:
 /// budget demotions and, since #20 (with `canonization_supersede` on),
 /// supersessions too. A superseded concept therefore carries Solo's revert
-/// penalty, as a budget-demoted one always has (#20 review L5). It is
+/// penalty, as a budget-demoted one always has (#20). It is
 /// written as a rank comparison on purpose — any future addition to the
 /// legal set that decreases rank lands in this count by the same filter,
 /// which is the behavior an audit of that change must re-examine. Reads the
@@ -686,7 +686,7 @@ pub fn classify(resistant: f64) -> CanonizationStatus {
     }
 }
 
-/// Single-writer promotion (C2; evidence-gated since #36 PR 3).
+/// Single-writer promotion (evidence-gated since #36 PR 3).
 ///
 /// Stage 1 admits every concept whose resistant score clears the Candidate
 /// bar, ordered by that score (highest first), then canonical key, then
@@ -805,7 +805,7 @@ mod tests {
     /// The coverage half is not asserted here, and deliberately so: `ALL` and
     /// the enum are generated from one variant list by `promotion_policy!`, so
     /// a variant `ALL` does not name is unrepresentable rather than untested.
-    /// T3-P3-2: the assertion that *used* to stand in for coverage —
+    /// The assertion that *used* to stand in for coverage —
     /// `ALL.len() == 2` — was vacuous in exactly the direction that mattered,
     /// because the length moves only when a variant is added to `ALL` and the
     /// loop below iterates `ALL`, so a variant absent from `ALL` was reached by
@@ -938,7 +938,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // C2 helpers — solo-score corpora
+    // Solo-policy helpers — solo-score corpora
     // -----------------------------------------------------------------------
 
     fn ts_at(secs: i64) -> DateTime<Utc> {
@@ -1062,7 +1062,7 @@ mod tests {
         NodeId(Uuid::from_u64_pair(1, n))
     }
 
-    /// The default policy is swarm — the whole contract of C1.
+    /// The default policy is swarm — the whole contract of the seam.
     ///
     /// Mutation: flip `#[default]` to `Solo`, or make `Config::default()`
     /// name `Solo`. Goes red here and in `config`'s `defaults_match_spec`.
@@ -1109,11 +1109,11 @@ mod tests {
     /// (one writer, `gc_survived == 0` — Stage 1's swarm gate refuses it). A
     /// mutant that points the `Solo` arm of `scorer()` at `&SwarmScorer`
     /// collapses this to the empty set — exactly the silent-fallback defect
-    /// C1's should_panic test guarded, still guarded, without a panic to lean
+    /// the seam's original should_panic test guarded, still guarded, without a panic to lean
     /// on now that solo resolves.
     ///
     /// Mutation: map `Solo → &SwarmScorer`, or make [`SoloScorer::candidates`]
-    /// return `Vec::new()` (the C1-era forbidden stub). Both red here.
+    /// return `Vec::new()` (the forbidden stub from before solo existed). Both red here.
     #[test]
     fn solo_admits_what_swarm_refuses_on_the_same_corpus() {
         let (graph, hub) = spread_support_graph(ConceptType::Entity);
@@ -1614,7 +1614,7 @@ mod tests {
         );
     }
 
-    /// #20 review L5: a supersession is a Canonical → None demotion, so it
+    /// #20: a supersession is a Canonical → None demotion, so it
     /// counts toward Solo's revert penalty exactly like a budget demotion.
     #[test]
     fn a_supersession_counts_as_a_revert() {
@@ -1717,7 +1717,7 @@ mod tests {
             .contains(&hub));
     }
 
-    /// C2 discrimination: on a MIXED corpus, does SoloPolicy admit the fact
+    /// Solo discrimination: on a MIXED corpus, does SoloPolicy admit the fact
     /// that genuinely recurs and refuse the two shapes that only look busy?
     ///
     /// The existing `a_bulk_ingest_recurs_only_under_event_time` proves the
@@ -1842,7 +1842,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // C2 helpers continued — small accessors over test graphs
+    // Solo-policy helpers continued — small accessors over test graphs
     // -----------------------------------------------------------------------
 
     fn concept_of(graph: &Graph, id: NodeId) -> Concept {
@@ -1901,7 +1901,7 @@ mod tests {
         assert!(serde_json::from_str::<PromotionPolicy>("\"solo\"").is_err());
     }
     // -----------------------------------------------------------------------
-    // C-R1-1 closure — the published bands drive the ladder admission
+    // The published bands drive the ladder admission
     // -----------------------------------------------------------------------
 
     /// Under solo, hop admission is the node's band (#36 PR 3: on top of the

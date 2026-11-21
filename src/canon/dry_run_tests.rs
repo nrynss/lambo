@@ -83,7 +83,7 @@ async fn the_dry_run_agrees_with_an_independent_oracle() {
         sqlite.init_schema().await.unwrap();
         sqlite.seed(&snap).await.unwrap();
         let p = params(policy);
-        // Review M4: the oracle waits far longer than the dry run's own
+        // The oracle waits far longer than the dry run's own
         // stop rule (200 quiet cycles), so an early stop would show here.
         let oracle = fair::fixed_point(&sqlite, snap.clone(), &p.eval, 200).await;
         let (report, finals) = run(&snap, &p).await.unwrap();
@@ -436,7 +436,7 @@ async fn watched_concepts_are_reported_by_id_at_the_start_and_the_stop() {
     .contains(&format!("watched {}", fair::concept_id("wedge_five"))));
 }
 
-/// Review M4: queues longer than one batch. With a batch of 1 or 2 the
+/// Queues longer than one batch. With a batch of 1 or 2 the
 /// fixture's 7 to 8 first-cycle Candidates and 6 Venerables each take
 /// several cycles to go round, so a stop rule that quit before the queues
 /// drained would end short of the fixed point the oracle (200 quiet cycles,
@@ -471,7 +471,7 @@ async fn queues_longer_than_a_batch_still_reach_the_oracles_fixed_point() {
     }
 }
 
-/// Review M4: the production loop itself. `CanonizationTask` runs on the
+/// The production loop itself. `CanonizationTask` runs on the
 /// same snapshot with an injected clock (61 s a cycle), woken cycle by
 /// cycle, with the daemon's scores recomputed from `Config::scoring`
 /// before each, until nothing changes for 100 cycles; its fixed point must
@@ -555,7 +555,7 @@ async fn the_canonization_task_reaches_the_same_fixed_point() {
     }
 }
 
-/// Review M1: a clock earlier than the data fails `clock_after_the_data`
+/// A clock earlier than the data fails `clock_after_the_data`
 /// and counts what it would leave out.
 #[tokio::test]
 async fn a_clock_before_the_data_fails_and_counts_the_rows_it_leaves_out() {
@@ -595,7 +595,7 @@ async fn a_clock_before_the_data_fails_and_counts_the_rows_it_leaves_out() {
         .any(|i| i.name == "clock_after_the_data" && !i.held));
 }
 
-/// Review M2: the run without redirects must hold its invariants too, and
+/// The run without redirects must hold its invariants too, and
 /// no flip is computed against a run that never reached its fixed point.
 #[tokio::test]
 async fn flips_need_both_runs_to_reach_their_fixed_point() {
@@ -624,7 +624,7 @@ async fn flips_need_both_runs_to_reach_their_fixed_point() {
     assert!(r.policies[0].flips.is_empty());
 }
 
-/// Review H2 (library half): a reviewed map with a refused line fails
+/// The library half: a reviewed map with a refused line fails
 /// `every_reviewed_line_accepted`; detection's refusals never do.
 #[tokio::test]
 async fn a_refused_reviewed_line_fails_the_preview_and_a_detected_one_does_not() {
@@ -658,7 +658,7 @@ async fn a_refused_reviewed_line_fails_the_preview_and_a_detected_one_does_not()
         .all(|i| i.name != "every_reviewed_line_accepted"));
 }
 
-/// Review M3: a redirected alias that already holds a status keeps it, and
+/// A redirected alias that already holds a status keeps it, and
 /// the report says so.
 #[tokio::test]
 async fn an_alias_keeping_its_status_is_reported() {
@@ -689,7 +689,7 @@ async fn an_alias_keeping_its_status_is_reported() {
     );
 }
 
-/// Review L2: every Canonical id is stored and compared, not only the
+/// Every Canonical id is stored and compared, not only the
 /// listed rows; a baseline of another session or version is refused.
 #[tokio::test]
 async fn every_canonical_id_is_compared_and_a_foreign_baseline_is_refused() {
@@ -729,7 +729,7 @@ async fn every_canonical_id_is_compared_and_a_foreign_baseline_is_refused() {
     assert!(baseline_mismatch(&old, &after).unwrap().contains("version"));
 }
 
-/// Review L3: an error keeps its ids and withholds the rest; a non-id
+/// An error keeps its ids and withholds the rest; a non-id
 /// `--watch` argument is not echoed.
 #[test]
 fn errors_keep_ids_and_withhold_text() {
@@ -744,7 +744,7 @@ fn errors_keep_ids_and_withhold_text() {
     assert!(!e.contains("wedge"), "{e}");
 }
 
-/// #20 review L1: the dry run with supersession on reaches the fixture's
+/// #20: the dry run with supersession on reaches the fixture's
 /// supersession fixed point under both policies, every invariant holding:
 /// `retry_forever` is held at Venerable (its explanation names the hold, so
 /// `nothing_eligible_at_the_stop` holds), and the report says it ran on.

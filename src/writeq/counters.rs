@@ -32,7 +32,7 @@ pub const APPLY_LATENCY_WINDOW: usize = 256;
 /// service time, which is what a caller waiting on a receipt experiences (#11).
 ///
 /// Failures are not recorded, for the reason they are not sampled into the
-/// observed rate (J3-R2-2): a fast failure is not evidence about how long a
+/// observed rate: a fast failure is not evidence about how long a
 /// write takes to land.
 #[derive(Debug, Default)]
 pub(super) struct ApplyLatency {
@@ -132,7 +132,7 @@ pub struct WriteQueueCounters {
     pub(super) dropped_queue_full: AtomicU64,
     pub(super) dropped_queue_bytes: AtomicU64,
     /// Refusals because the session was closing or fenced — **a third drop
-    /// class, not a subtraction** (J3-R1-8). It rides its own counter and is
+    /// class, not a subtraction**. It rides its own counter and is
     /// summed into [`WriteQueueCounters::dropped`], so no count vanishes and
     /// the gauge's exclusivity argument is untouched: like the other two, a
     /// refusal never enters `accepted`. Split out because
@@ -153,14 +153,14 @@ pub struct WriteQueueCounters {
     /// here), so `outstanding` stays exact.
     pub(super) replayed: AtomicU64,
     /// Durable intents from a previous process that this session found owed and
-    /// has **not** paid — the live replay debt (J3 round-1 N1).
+    /// has **not** paid — the live replay debt.
     ///
     /// Set to the backlog when the replay task is spawned and decremented as
     /// each intent is applied or settled `failed`. It is the operator-visible
     /// answer to "the embedder was down at attach — what happened to my
     /// writes?": a non-zero value with `write_queue_replayed` not advancing says
-    /// the debt is intact, which is the honest state and the one the N1 fix
-    /// preserves instead of destroying. Unlike the other counters this one can
+    /// the debt is intact, which is the honest state and the one the replay-debt
+    /// fix preserves instead of destroying. Unlike the other counters this one can
     /// go **down as well as up**, because it is a depth, not a total; it is
     /// therefore not a term in `outstanding` (those intents were never accepted
     /// by this process).
@@ -226,7 +226,7 @@ impl WriteQueueCounters {
     /// Every refused admission, whatever the bound that refused it. The three
     /// classes are disjoint and this is their sum, so splitting
     /// `dropped_closed` out of `dropped_queue_full` moved no count and lost
-    /// none (J3-R1-8).
+    /// none.
     pub fn dropped(&self) -> u64 {
         self.dropped_queue_full() + self.dropped_queue_bytes() + self.dropped_closed()
     }

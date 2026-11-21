@@ -97,12 +97,12 @@ pub struct LeaseHeldElsewhere {
 
 /// The outcome of an attach: this process owns the session, or someone else does.
 ///
-/// **Why a type rather than a new [`LamboError`] variant.** J1-R2-2's lesson is
-/// that a code path must never be selected by matching an error *variant* with
-/// several producers. The other way to honour that is not to widen the error
-/// enum at all: [`MemoryBuilder::build`] still returns exactly the
-/// `LamboError::Conflict` it always did — same bytes, same `err_class`, same N4
-/// treatment, same CLI text and exit code — and the one caller that needs the
+/// **Why a type rather than a new [`LamboError`] variant.** A code path must
+/// never be selected by matching an error *variant* with several producers.
+/// The other way to honour that is not to widen the error enum at all:
+/// [`MemoryBuilder::build`] still returns exactly the `LamboError::Conflict` it
+/// always did — same bytes, same `err_class`, same tool-error redaction, same
+/// CLI text and exit code — and the one caller that needs the
 /// structure asks for it by calling [`MemoryBuilder::build_attach`] instead.
 /// Nothing downstream of `build` moved.
 pub enum Attach {
@@ -316,7 +316,7 @@ impl MemoryBuilder {
     /// Defaults to [`Utc::now`].
     ///
     /// **`pub(crate)` on purpose, and it stays that way.** The invariant this
-    /// crate enforces is that no *caller* supplies a timestamp (F18: the MCP
+    /// crate enforces is that no *caller* supplies a timestamp (the MCP
     /// params are `deny_unknown_fields`, `lambo_derive` refuses a `timestamp`
     /// argument by name, and no CLI verb takes one). That invariant is about
     /// the trust boundary, not about the identity of the function that reads
@@ -404,7 +404,7 @@ impl MemoryBuilder {
     /// The store this builder will hand every session it builds, once
     /// [`MemoryBuilder::store`] or [`MemoryBuilder::backends`] set one.
     ///
-    /// For `serve`'s session registry (#32 PR 4 review L8): a background
+    /// For `serve`'s session registry (#32 PR 4): a background
     /// attach abandoned at shutdown releases the lease it may have taken
     /// through the same store.
     pub(crate) fn shared_store(&self) -> Option<Arc<dyn GraphStore>> {
@@ -426,8 +426,8 @@ impl MemoryBuilder {
     /// 1. `load_session` — a missing session is a first use, not an error.
     /// 2. **Level B contract check**: if the loaded session carries an
     ///    [`EmbeddingContract`], [`session_embedding_compatibility`]
-    ///    refuses a kind / model / dim mismatch (the model-mixing refusal —
-    ///    STORE-1). A fresh session is stamped with the live contract instead.
+    ///    refuses a kind / model / dim mismatch (the model-mixing refusal).
+    ///    A fresh session is stamped with the live contract instead.
     /// 3. Spawn the daemon, the flush task and the **canonization task**.
     ///
     /// The daemon's first cycle *is* the spec §2.5 warm-up rescore, so
@@ -490,7 +490,7 @@ impl MemoryBuilder {
         config.validate()?;
         let clock = self.clock.unwrap_or_else(|| Arc::new(Utc::now));
 
-        // (0a) Schema preflight (J3 round-1 F5), BEFORE the lease: `init_schema`
+        // (0a) Schema preflight, BEFORE the lease: `init_schema`
         // runs only from `lambo provision`, never here, so a store provisioned
         // by an older build is missing whatever tables this build's DDL added.
         // Measured on such a store: the session attaches, every write is acked,
@@ -502,8 +502,8 @@ impl MemoryBuilder {
         // refusal has no lease to release.
         store.preflight_schema().await.map_err(LamboError::Store)?;
 
-        // (0) Single-writer lease (spec §2.2, T8.6) — the store-enforced gate,
-        // taken BEFORE the startup load (T86-1). Claiming the session first means
+        // (0) Single-writer lease (spec §2.2) — the store-enforced gate,
+        // taken BEFORE the startup load. Claiming the session first means
         // a losing racer gets the honest, named refusal below rather than an
         // opaque `database is locked`: the load path opens a `BEGIN IMMEDIATE`
         // write transaction, so two simultaneous `serve` startups used to contend
@@ -556,7 +556,7 @@ impl MemoryBuilder {
                 // It cannot move above the acquire: the election loop that
                 // calls this may legitimately run for `ELECTION_BUDGET` (20s),
                 // and a registration nothing polls is deafness for exactly as
-                // long as nothing polls it (J2-R1-7). Below the acquire, that
+                // long as nothing polls it. Below the acquire, that
                 // loop is over by construction.
                 //
                 // Synchronous and non-blocking: it installs the handlers and
@@ -594,18 +594,18 @@ impl MemoryBuilder {
             }
         };
 
-        // Single-writer-lease fence (T86-2): shared by the flush loop and the
+        // Single-writer-lease fence: shared by the flush loop and the
         // lease heartbeat. Latched `true` the instant the heartbeat detects the
         // lease was lost; from then the flush loop stops (and drops its tail)
         // and the write gate refuses. Created before both consumers.
         let lease_lost = Arc::new(AtomicBool::new(false));
-        // JE2E-4: the wake-up and the winner's id, latched beside the fence.
+        // The wake-up and the winner's id, latched beside the fence.
         let lease_lost_signal = Arc::new(LeaseLostSignal::default());
         // Heartbeat: refresh the lease at a fraction of its TTL so a live holder
-        // keeps the session and a crashed one's lease lapses (T8.6).
+        // keeps the session and a crashed one's lease lapses.
         //
         // Started HERE, the moment the lease is ours and before the startup
-        // load (#31 review L1): since the holder's model load moved into the
+        // load (#31): since the holder's model load moved into the
         // startup (step 2b), the stretch from the acquire to the first refresh
         // includes reading ~1.1 GB of weights onto a device, on top of the
         // session load. Beating from the acquire means a slow load can no
@@ -635,7 +635,7 @@ impl MemoryBuilder {
             let write_intents = loaded.write_intents;
             let mut graph = loaded.graph;
 
-            // (2) Level B / STORE-1 — the model-mixing refusal's second half.
+            // (2) Level B — the model-mixing refusal's second half.
             // `None` on a fresh session is not a mismatch — it is an unstamped
             // space, so stamp it.
             //
@@ -716,7 +716,7 @@ impl MemoryBuilder {
             // with nothing deferred, and for an embedder an earlier session
             // in this process already prepared (#32: one shared embedder).
             //
-            // Error class (#31 review L2): a load that may succeed later (the
+            // Error class (#31): a load that may succeed later (the
             // device or memory was momentarily unavailable) is
             // `EmbedUnavailable`, which a pinned session's background retry
             // keeps retrying; anything else (a changed or corrupt artifact)
@@ -798,8 +798,8 @@ impl MemoryBuilder {
             ))
         };
         // J6 — the one unbounded `await` under the pre-arm, and therefore the
-        // one place the pre-arm could have become the immunity J2-R1-7
-        // rejected. The startup load reads the whole durable session back; on a
+        // one place the pre-arm could have become the immunity a
+        // past ruling rejected. The startup load reads the whole durable session back; on a
         // large session or a wedged store that is not quick, and a recorded
         // signal that nobody acts on until it finishes is deafness with no
         // bound at all — worse than the 20 seconds that ruling refused.
@@ -897,7 +897,7 @@ impl MemoryBuilder {
         )
         .with_fence(lease_lost.clone())
         .with_token(lease_token);
-        // #23 review L2: a background write refused because the session was
+        // #23: a background write refused because the session was
         // erased latches the fence and the wake-up at once, with the
         // tombstone as the winner, exactly as the heartbeat would on its next
         // beat — so `erased()` holds and reads of the deleted data stop now.
@@ -979,7 +979,7 @@ impl MemoryBuilder {
         pipeline.spawn_replay(write_intents);
 
         // Last, so nothing registers for a `build()` that failed. Released by
-        // a successful `close()` (R2-4) or, failing that, by `Drop` (T81-8).
+        // a successful `close()` or, failing that, by `Drop`.
         register_session(&session, &agent);
 
         Ok(Attach::Attached(Box::new(Memory {
@@ -1019,7 +1019,7 @@ impl MemoryBuilder {
 
 /// Aborts the task it holds when dropped, unless the task was taken out
 /// first. `build_attach` holds the lease heartbeat in one from the acquire
-/// until the `Memory` takes it (#31 review L1).
+/// until the `Memory` takes it (#31).
 struct AbortOnDrop(Option<tokio::task::JoinHandle<()>>);
 
 impl Drop for AbortOnDrop {

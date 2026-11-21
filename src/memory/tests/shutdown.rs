@@ -3,12 +3,12 @@
 
 use super::*;
 
-/// **L82-1, end to end.** A burst left un-flushed at SIGTERM must drain
-/// inside `close()`'s window against a store that charges a real cluster's
-/// per-statement latency.
+/// **The close-window drain, end to end.** A burst left un-flushed at
+/// SIGTERM must drain inside `close()`'s window against a store that charges
+/// a real cluster's per-statement latency.
 ///
 /// Both halves run so the test *shows* the finding as well as the fix. With
-/// the pre-L82-1 cost model — one round-trip per mutation, which is what
+/// the old cost model — one round-trip per mutation, which is what
 /// both adapters' `for m in &batch.mutations` loop bought — the close blows
 /// `CLOSE_FLUSH_GRACE` exactly as the live run did. With the planned-
 /// statement model it finishes in a fraction of it.
@@ -139,15 +139,15 @@ async fn the_keep_warm_is_stopped_before_the_close_starts() {
 }
 
 /// How [`AdverseStore::flush`] misbehaves — the two failure modes the
-/// background flush path is armored against (STORE-2 timeout + panic
-/// containment) plus a plain delay for the concurrency tests.
+/// background flush path is armored against (the attempt timeout +
+/// panic containment) plus a plain delay for the concurrency tests.
 #[derive(Clone, Copy, Debug)]
 enum FlushBehaviour {
     /// Never returns: the hung backend `FLUSH_ATTEMPT_TIMEOUT` exists for.
     Hang,
     /// Hangs the **first** flush and delegates every later one: a store
     /// that is unresponsive when the caller gives up on `close()` and
-    /// healthy when it retries (R2-1).
+    /// healthy when it retries.
     HangOnce,
     /// Unwinds inside the flush: the panicking adapter `CatchUnwindPoll`
     /// exists for.
@@ -156,8 +156,8 @@ enum FlushBehaviour {
     Delay(Duration),
 }
 
-/// Store double for `close()`'s step-4 armor (T81-2) and for the concurrent
-/// -close test (T81-6). Everything except `flush` delegates.
+/// Store double for `close()`'s step-4 armor and for the concurrent-close
+/// test. Everything except `flush` delegates.
 struct AdverseStore {
     inner: Arc<dyn GraphStore>,
     behaviour: FlushBehaviour,
@@ -472,7 +472,7 @@ async fn close_returns_the_retained_batch_to_the_front_of_the_log() {
              chronological batch (push-front), not just the later writes: {batches:?}"
     );
 
-    // ...and in that ORDER (T81-3). Length alone let a push-BACK mutant
+    // ...and in that ORDER. Length alone let a push-BACK mutant
     // (`splice(0..0, ..)` -> `extend(..)`) survive the whole suite, while
     // it puts an edge upsert ahead of its endpoint's UpsertNode and so
     // fails a conforming adapter's in-order replay.
@@ -511,11 +511,11 @@ async fn close_returns_the_retained_batch_to_the_front_of_the_log() {
     }
 }
 
-// -- close(): armor, retry, concurrency (T81-2 / T81-5 / T81-6) ---------
+// -- close(): armor, retry, concurrency ---------------------------------
 
-/// T81-2, timeout arm. A hung backend used to hang `close()` forever —
+/// Step-4 armor, timeout arm. A hung backend used to hang `close()` forever —
 /// the background path bounds every attempt with `FLUSH_ATTEMPT_TIMEOUT`
-/// and step 4 now does too. T81-5: the batch survives the timeout.
+/// and step 4 now does too. The batch survives the timeout.
 #[tokio::test(start_paused = true)]
 async fn close_bounds_a_hanging_store_and_keeps_the_tail() {
     let inner: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
@@ -536,7 +536,7 @@ async fn close_bounds_a_hanging_store_and_keeps_the_tail() {
     );
 }
 
-/// T81-2, panic arm. A panicking adapter used to unwind out of `close()`
+/// Step-4 armor, panic arm. A panicking adapter used to unwind out of `close()`
 /// **after** the log was drained — the tail was unrecoverable even for a
 /// caller that caught the panic.
 #[tokio::test]
@@ -558,7 +558,7 @@ async fn close_contains_a_panicking_store_and_keeps_the_tail() {
     );
 }
 
-/// T81-5: a failed `close()` is retryable and says so. The first close
+/// A failed `close()` is retryable and says so. The first close
 /// fails (store outage), the tail goes back on the log rather than
 /// vanishing with the error, and a second close — after the store
 /// recovered — makes exactly that tail durable. `Ok(())` from `close()`
@@ -603,7 +603,7 @@ async fn a_failed_close_keeps_the_tail_and_a_later_close_flushes_it() {
     mem.close().await.unwrap();
 }
 
-/// R2-1: a **cancelled** `close()` must not destroy the tail.
+/// A **cancelled** `close()` must not destroy the tail.
 ///
 /// `close()` is an ordinary future, and its own rustdoc invites an external
 /// bound ("a caller-supplied store can make step 0 arbitrarily long") —
@@ -669,12 +669,12 @@ async fn a_cancelled_close_returns_the_tail_to_the_log_for_the_retry() {
     assert_eq!(mem.graph().read().log_len(), 0);
 }
 
-/// R3-1: a `close()` cancelled at the **step-2 join** must not detach the
+/// A `close()` cancelled at the **step-2 join** must not detach the
 /// flush task.
 ///
-/// R2-1 covered the drain-to-flush window; this is the window before it,
-/// and the likelier one — the join is the long await (`close`'s own worst
-/// case is mostly this), so an external `timeout` fires here.
+/// The test above covers the drain-to-flush window; this is the window
+/// before it, and the likelier one — the join is the long await (`close`'s
+/// own worst case is mostly this), so an external `timeout` fires here.
 /// The handle was lifted out of its slot *before* that await, so dropping
 /// the future dropped the local: the flush task was detached, not stopped —
 /// still running, still holding the whole tail in its `pending` (it had
@@ -682,7 +682,7 @@ async fn a_cancelled_close_returns_the_tail_to_the_log_for_the_retry() {
 /// The retry then found `flush_handle == None`, skipped the join, drained an
 /// empty log, took the empty-log shortcut, latched success, released the
 /// [`ACTIVE_SESSIONS`] slot and returned `Ok(())` over a tail that was not
-/// durable. `Drop`'s R2-2 warning was blind to it for the same reason the
+/// durable. `Drop`'s warning was blind to it for the same reason the
 /// shortcut was: the log really was empty.
 ///
 /// With `HandleCustody` the cancelled join hands the handle back, so the
@@ -781,7 +781,7 @@ async fn a_close_cancelled_at_the_flush_join_keeps_the_handle_and_reaps_the_task
     );
 }
 
-/// T81-6: a second **concurrent** `close()` must not report `Ok` over an
+/// A second **concurrent** `close()` must not report `Ok` over an
 /// in-flight final flush (a caller gating process exit on that `Ok` would
 /// let runtime teardown cancel the flush and lose the tail). Both callers
 /// must observe the completed flush.
@@ -830,7 +830,7 @@ async fn concurrent_closes_both_wait_for_the_one_final_flush() {
 }
 
 /// Partial coverage for COH-6 clause 2 — `biased;` + stop-first in the
-/// flush loop's `select!` (T81-4).
+/// flush loop's `select!`.
 ///
 /// The regression that clause guards is a **lost stop permit**: an unbiased
 /// `select!` polls in a random start order, so a concurrently ready
@@ -897,7 +897,7 @@ async fn close_completes_when_stop_lands_during_a_long_flush() {
     assert!(snap.concepts.iter().any(|c| c.content == "user schema"));
 }
 
-/// A session that has degraded to `durability="none"` on backlog (STORE-3):
+/// A session that has degraded to `durability="none"` on backlog:
 /// one mutation of headroom, so the first cycle's drain is already past
 /// `backend_log_max`. Returns it degraded, with its log already emptied by
 /// that cycle's drain.
@@ -964,11 +964,11 @@ async fn close_refuses_to_claim_durability_for_a_degraded_session() {
     assert!(again.to_string().contains("degraded"), "{again}");
 }
 
-/// R2-3: the same must hold with an **empty** log — the case the ordering
+/// The same must hold with an **empty** log — the case the ordering
 /// bug made `Ok(())`.
 ///
 /// Degraded mode keeps draining the log and DROPPING what it drained
-/// (STORE-3, spec §2.3 "none = pure RAM"), so an empty log is that mode's
+/// (spec §2.3 "none = pure RAM"), so an empty log is that mode's
 /// *steady state*: it means the tail was dead-lettered, not written. With
 /// the empty-log shortcut ahead of the degraded check, a caller who closed
 /// a moment after the drain got `Ok(())` — a durability claim over
@@ -1015,9 +1015,9 @@ async fn close_refuses_a_degraded_session_even_when_its_log_is_empty() {
     assert!(again.to_string().contains("degraded"), "{again}");
 }
 
-// -- the writers gate (T81-1) -------------------------------------------
+// -- the writers gate ---------------------------------------------------
 
-/// The P1 race, as the reviewer demonstrated it, now as a regression test.
+/// The writers-gate race, as the reviewer demonstrated it, now as a regression test.
 ///
 /// A store double parks `retract`'s `blast_radius` call, so the retraction
 /// is suspended *mid-write* — past `ensure_open`, before its mutation.
@@ -1057,7 +1057,7 @@ async fn a_write_in_flight_when_close_starts_is_never_acknowledged_then_lost() {
     });
     // A real chance to run to completion — the whole shutdown is
     // sub-millisecond here — so this fails loudly if `close()` ever stops
-    // waiting for in-flight writers (it is what the P1 bug did).
+    // waiting for in-flight writers (it is what the original race did).
     assert!(
         tokio::time::timeout(Duration::from_millis(500), &mut closing)
             .await
@@ -1097,7 +1097,7 @@ async fn a_write_in_flight_when_close_starts_is_never_acknowledged_then_lost() {
     }
 }
 
-/// R2-6: the **post-acquire** `closed` re-check in `begin_write` — the
+/// The **post-acquire** `closed` re-check in `begin_write` — the
 /// second half of the gate, and the half a mutant could delete and still
 /// pass 539/539.
 ///
@@ -1106,7 +1106,7 @@ async fn a_write_in_flight_when_close_starts_is_never_acknowledged_then_lost() {
 /// only then does the writer ask for its read permit — which now queues.
 /// Without the re-check that write wakes up *after* `close()` has drained,
 /// flushed and returned, and appends to a log nobody will ever flush again:
-/// T81-1 exactly, by the one route the gate itself opens.
+/// the writers-gate race exactly, by the one route the gate itself opens.
 ///
 /// Held open deterministically here by taking the gate's write side in the
 /// test, which is precisely the state `close()` is in between its latch and

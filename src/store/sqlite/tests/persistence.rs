@@ -30,7 +30,7 @@ async fn include_persisted_session_metadata(
 
 #[tokio::test]
 async fn flush_stats_write_then_read_round_trips_sqlite() {
-    // T85-3: a writer publishes flush stats into the durable table; a
+    // A writer publishes flush stats into the durable table; a
     // reader (possibly another process) reads them back. Absent row =
     // honest `None` (n/a).
     let store = test_store();
@@ -80,7 +80,7 @@ async fn load_missing_session_errors() {
 /// Before `Mutation::SetRootGoal` the goal reached a store only via the
 /// full-snapshot `seed` path, so a session reloaded from the write-behind log
 /// came back with no goal — drift detection silently stopped and GC's
-/// root-goal exclusion emptied. Covers the array shape (ALGO-6), a
+/// root-goal exclusion emptied. Covers the array shape, a
 /// last-write-wins replacement, and the explicit clear.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn root_goal_roundtrips_flush_and_load() {
@@ -393,7 +393,7 @@ async fn oversized_seed_embedding_dimension_fails_before_transaction() {
     assert!(matches!(err, StoreError::Invariant(_)));
 }
 
-/// Acceptance (STORE-1, offline gate): the full-snapshot `seed` path persists
+/// Acceptance (offline gate): the full-snapshot `seed` path persists
 /// `GraphSnapshot.embedding` into `sessions.embedding_{kind,model,dim}`, and a
 /// later flush (which only ensures the session row) does not clobber it — the
 /// SQLite twin of the live cockroach conformance check.
@@ -408,9 +408,9 @@ async fn seed_load_preserves_embedding_contract() {
     let ts = Utc.timestamp_opt(1_752_000_000, 0).unwrap();
     // `dim` matches the seeded concept's vector width below. It used to read
     // 1024 against a 3-wide vector — incidental to what this test asserts
-    // (STORE-1 contract persistence + CON-8 embedding round-trip), but a
-    // snapshot no writer should be able to produce: since F-R1-1 the width gate
-    // refuses it on the seed path too, which is the point of the gate.
+    // (contract persistence + CON-8 embedding round-trip), but a snapshot no
+    // writer should be able to produce: the width gate now refuses it on the
+    // seed path too, which is the point of the gate.
     let contract = EmbeddingContract {
         kind: "bge_m3".into(),
         model: Some("BAAI/bge-m3".into()),
@@ -529,12 +529,12 @@ async fn mutations_batch_roundtrip_matches_memory() {
     );
 }
 
-/// Acceptance: flush -> load round-trip deep-equals the graph (T3.5 shape
-/// reused against SqliteStore). The graph is built through the real write
+/// Acceptance: flush -> load round-trip deep-equals the graph, against
+/// SqliteStore. The graph is built through the real write
 /// path (derive / demote / transition), drained, flushed, and loaded back
 /// via `load_session`; the loaded session must deep-equal the pre-flush
-/// snapshot (minus RAM-local synonyms/reservations — S5), including the
-/// demoted observations' `chunk_group_id` (T5.2 contract).
+/// snapshot (minus RAM-local synonyms/reservations), including the
+/// demoted observations' `chunk_group_id`.
 // Multi-thread flavor: load_session runs the store future on a worker
 // thread with its own current-thread runtime (see load.rs). sqlx returns
 // pool connections via a spawned task; a current-thread runtime that is
@@ -612,7 +612,7 @@ async fn flush_load_roundtrip_deep_equals_graph() {
         reason: None,
     })
     .unwrap();
-    // RAM-local metadata that has no Mutation kind (S5).
+    // RAM-local metadata that has no Mutation kind.
     g.declare_synonym("us", "user schema");
     reserve(
         &mut g,
@@ -643,8 +643,8 @@ async fn flush_load_roundtrip_deep_equals_graph() {
     loaded.graph.assert_invariants().unwrap();
     assert_eq!(loaded.graph.synonyms().count(), 0);
     assert_eq!(loaded.graph.reservations().len(), 0);
-    // T5.2 contract: the demote chunk id SURVIVES the flush→load round-trip
-    // (the P3 wave 2 schema remediation added concepts.chunk_group_id).
+    // The demote chunk id SURVIVES the flush→load round-trip (a schema
+    // remediation added concepts.chunk_group_id).
     for c in loaded.graph.concepts() {
         if c.concept_type == ConceptType::Observation {
             assert_eq!(
@@ -896,7 +896,7 @@ async fn canonization_events_append_and_update_concept() {
     let sid = SessionId::from("canon");
     let i1 = NodeId::new();
     let c1 = NodeId::new();
-    // Whole-second clock: the store persists ms precision (T3.1 fixed
+    // Whole-second clock: the store persists ms precision (a fixed
     // format), so Utc::now()'s nanoseconds would not round-trip.
     let ts = Utc.with_ymd_and_hms(2026, 8, 10, 12, 0, 0).unwrap();
     store
@@ -982,7 +982,7 @@ async fn canonization_events_append_and_update_concept() {
     let err = store.record_canonization(&ghost, None).await.unwrap_err();
     assert!(matches!(err, StoreError::NotFound(_)));
 
-    // F12: the write-behind log now replays ev1, which was already
+    // The write-behind log now replays ev1, which was already
     // recorded. The replay must be a no-op — not a status rollback to
     // Candidate, and not a duplicate audit row.
     store
@@ -1085,9 +1085,9 @@ async fn demotion_event_sets_and_roundtrips_last_demotion_time() {
 }
 
 /// Re-stamp a planted `UpsertNode` with a **stale** canonization snapshot
-/// and a bumped `gc_survived` — exactly the shape T4.5's
-/// `bump_gc_survived` appends: the concept as it stood when the mutation
-/// was queued, not as it stands now (R2-1).
+/// and a bumped `gc_survived` — exactly the shape `bump_gc_survived`
+/// appends: the concept as it stood when the mutation was queued, not as it
+/// stands now.
 fn with_stale_canonization(
     m: Mutation,
     status: CanonizationStatus,
@@ -1110,7 +1110,7 @@ fn with_stale_canonization(
     }
 }
 
-/// R2-1 on the durable tier: a stale `UpsertNode` flushed **ahead of** an
+/// On the durable tier, a stale `UpsertNode` flushed **ahead of** an
 /// already-recorded transition must not regress the concept row.
 ///
 /// `apply_canonization_transition` returns before the UPDATE when its
@@ -1184,7 +1184,7 @@ async fn stale_upsert_before_a_recorded_transition_does_not_regress_the_status()
     assert_eq!(snap.canonization_events.len(), 1, "no duplicate audit row");
 }
 
-/// **L82-1 on a real SQL engine.** Two upserts of the same concept in ONE
+/// **Bulk batching on a real SQL engine.** Two upserts of the same concept in ONE
 /// batch must collapse to the durable row row-by-row replay produced.
 ///
 /// This is the case the multi-row rewrite could silently get wrong, and the
@@ -1192,7 +1192,7 @@ async fn stale_upsert_before_a_recorded_transition_does_not_regress_the_status()
 /// statement whose input rows collide on the conflict target, so the rows
 /// must be deduplicated — and a naive "last wins" would take the second
 /// snapshot's canonization columns, which the row-by-row `ON CONFLICT DO
-/// UPDATE` (R2-1: canonization columns are INSERT-only) would have
+/// UPDATE` (canonization columns are INSERT-only) would have
 /// discarded. `store::batch::ConceptRow` keeps the first occurrence's
 /// canonization and the last occurrence's everything-else; this executes
 /// that against SQLite and reads the row back.
@@ -1260,7 +1260,7 @@ async fn a_repeated_concept_in_one_batch_collapses_like_row_by_row_replay() {
     assert_eq!(row.last_demotion_time, Some(ts));
 }
 
-/// **R1-1, the pin — against a real SQL engine with foreign keys on.**
+/// **The self-FK pin — against a real SQL engine with foreign keys on.**
 ///
 /// `interactions.previous_id REFERENCES interactions(id)` is a *self* FK.
 /// A planner that collapses a repeated interaction at its LAST position
@@ -1268,7 +1268,7 @@ async fn a_repeated_concept_in_one_batch_collapses_like_row_by_row_replay() {
 /// each is its own statement, SQLite checks the FK at end-of-statement, and
 /// `i2` fails with `SQLITE_CONSTRAINT_FOREIGNKEY` (787). `Constraint` is
 /// terminal, so the flush loop dead-letters the whole batch — the same loss
-/// class L82-1 was raised for.
+/// class bulk batching was introduced to fix.
 ///
 /// The second half is the control the reviewer used to prove *relocation* is
 /// the cause and not the duplicate: with the repeat adjacent, nothing moves
@@ -1348,7 +1348,7 @@ async fn a_repeated_interaction_does_not_outrun_the_row_that_chains_onto_it() {
     );
 }
 
-/// **L82-1.** A batch far larger than the per-statement row limit must
+/// A batch far larger than the per-statement row limit must
 /// round-trip whole — the chunking is what keeps a statement inside the
 /// backend's bind-parameter cap, and an off-by-one there loses rows
 /// silently rather than loudly.
@@ -1422,7 +1422,7 @@ async fn a_batch_larger_than_the_chunk_limit_round_trips_whole() {
     );
 }
 
-/// R2-1, demotion variant — the worse half. The stale snapshot carries
+/// The stale-snapshot case, demotion variant — the worse half. The stale snapshot carries
 /// `last_demotion_time: None` and the pre-demotion blast, so the demoted
 /// node used to reload `Canonical` with the re-promotion cooldown erased
 /// (COH-3, "cooldown survives restart").
@@ -1510,7 +1510,7 @@ async fn stale_upsert_before_a_recorded_demotion_does_not_erase_the_cooldown() {
 }
 
 /// Acceptance: ISO-8601 timestamps use the FIXED 24-char ms format and
-/// lex ordering == time ordering (T3.1 contract).
+/// lex ordering == time ordering.
 #[tokio::test]
 async fn timestamps_fixed_format_and_lex_ordering() {
     let store = test_store();
@@ -1567,7 +1567,7 @@ async fn timestamps_fixed_format_and_lex_ordering() {
     assert_eq!(times, vec![t1, t2]);
 }
 
-/// D-R1-2: the flush→load round-trip claim had no test that actually wrote
+/// The flush→load round-trip claim had no test that actually wrote
 /// a **non-NULL** event_time — every existing adapter row is NULL on both
 /// sides, so NULL ≡ NULL passes while a mis-bind of `created_at` (or the
 /// positional `try_get(9)` edge read drifting) would re-age every
@@ -1653,7 +1653,7 @@ async fn event_time_survives_the_flush_load_round_trip() {
     assert_eq!(plain_e.event_time, None);
 }
 
-/// C2: the same D-R1-2 discipline for `human_confirmed` — a **non-zero**
+/// The `event_time` test's discipline for `human_confirmed` — a **non-zero**
 /// count must survive flush→load on the real adapter. Every pre-existing
 /// row carries 0 on both sides, so NULL/0 ≡ 0 passes while a mis-bind or
 /// an index-drifted `try_get(16)` would silently reset every confirmed
@@ -1748,7 +1748,7 @@ async fn embedding_source_survives_the_flush_load_round_trip() {
     .await;
 }
 
-/// #22 review L1: a settled image intent keeps no vector, through the shared
+/// #22: a settled image intent keeps no vector, through the shared
 /// check every adapter runs, and no trace of it is left in the raw payload
 /// column either.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1808,7 +1808,7 @@ async fn an_unreadable_embedding_source_fails_the_load() {
     assert!(err.to_string().contains("embedding_source"), "{err}");
 }
 
-/// #22 review round 2, L1: a malformed digest is refused at the flush.
+/// #22: a malformed digest is refused at the flush.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_malformed_embedding_source_digest_is_refused_on_write() {
     let store = test_store();
@@ -1822,7 +1822,7 @@ async fn a_malformed_embedding_source_digest_is_refused_on_write() {
     .await;
 }
 
-/// #22 review L1 (decided): SQLite also quarantines on a width restamp, and
+/// #22 (decided): SQLite also quarantines on a width restamp, and
 /// like the first-stamp quarantine the shared check covers, it nulls the
 /// vector and keeps the source, so the concept stays an image concept.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1888,7 +1888,7 @@ async fn a_width_restamp_nulls_the_vector_and_keeps_its_source() {
 /// vector, contract and source through SQLite bit for bit, so a replay
 /// applies exactly the vector that was acked (or refuses it).
 ///
-/// Review L6: the vector is a real one, with non-integer components, so the
+/// The vector is a real one, with non-integer components, so the
 /// `f32` decimal round trip through the JSON payload column is what is
 /// tested (an integer-valued vector is exact in JSON whatever the
 /// formatting). With the fixture embedder compiled in it is the fixture's

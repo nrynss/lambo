@@ -96,8 +96,7 @@ pub struct DryRunParams {
     /// The composite score's weights, which order Stage 1's queue and the
     /// Stage 3 window. `lambo.toml` cannot set them, so the CLI always
     /// uses [`crate::Config`]'s defaults, which are what every writer runs;
-    /// a library caller with its own `Config` passes `config.scoring`
-    /// (review L7).
+    /// a library caller with its own `Config` passes `config.scoring`.
     pub weights: ScoringWeights,
 }
 
@@ -304,7 +303,7 @@ pub struct PolicyReport {
     /// How many Canonicals at the stop.
     pub canonical_total: usize,
     /// Every Canonical's id at the stop, ascending: what `--baseline`
-    /// compares (review L2; `canonical` is capped at `top`).
+    /// compares (`canonical` is capped at `top`).
     #[serde(default)]
     pub canonical_ids: Vec<NodeId>,
     /// The run's checks.
@@ -354,7 +353,7 @@ pub struct DryRunReport {
     /// off, so a report of a default run is unchanged.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub supersede: bool,
-    /// Rows dated after the clock (review M1); any fails `clock_after_the_data`.
+    /// Rows dated after the clock; any fails `clock_after_the_data`.
     pub rows_after_clock: RowsAfterClock,
     /// The source, when the CLI read one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -907,7 +906,7 @@ impl RowsAfterClock {
     }
 }
 
-/// Review M1: the clock must not be earlier than the newest row. The stores
+/// The clock must not be earlier than the newest row. The stores
 /// age every edge and interaction against the clock, so a row dated after it
 /// is not "young", it is silently left out, and a clock before most of the
 /// data reports a run on a fraction of the session. A failure is an
@@ -958,7 +957,7 @@ pub(crate) fn graph_of(snap: &GraphSnapshot) -> Result<Graph, LamboError> {
     })
 }
 
-/// Keep only the ids in a store or graph error (review L3): an invariant
+/// Keep only the ids in a store or graph error: an invariant
 /// message can quote a canonical key, which is derived from concept text.
 pub fn redact(message: &str) -> String {
     let ids: Vec<&str> = message

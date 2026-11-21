@@ -1,4 +1,4 @@
-//! Canonicalization pipeline (T2.2) — spec §7.1 steps 1–5.
+//! Canonicalization pipeline — spec §7.1 steps 1–5.
 //!
 //! Steps, in order:
 //! 1. Normalize — Unicode **NFC** (adve-review GRAPH-9: composed and decomposed
@@ -21,7 +21,7 @@
 //! 5. Match against existing `canonical_key` — [`canonicalize`] returns
 //!    [`CanonicalizeResult::Matched`] when a concept in the graph carries the
 //!    key, else [`CanonicalizeResult::Unmatched`]. Step 6 (hybrid/vector match,
-//!    `Semantic` edges) is T7.2's — the caller decides on `Unmatched`.
+//!    `Semantic` edges) is not this module's — the caller decides on `Unmatched`.
 //!
 //! Ordering note: the camelCase split must see the ORIGINAL case. Lowercasing
 //! first would destroy the boundary (`"UserSchema"` → `"userschema"`, one token),
@@ -31,7 +31,8 @@
 //!
 //! Pure by design (the graph owns no lock, spec §6.4): [`normalize_tokens`] and
 //! [`canonical_key`] have no `Graph` dependency, and [`canonicalize`] only reads
-//! through `Graph::synonym` (T2.1 storage — no new synonym storage here).
+//! through `Graph::synonym` (the graph's own storage — no new synonym storage
+//! here).
 
 use std::sync::LazyLock;
 
@@ -52,7 +53,7 @@ const STOPWORDS: [&str; 13] = [
 static STEMMER: LazyLock<Stemmer> = LazyLock::new(|| Stemmer::create(Algorithm::English));
 
 /// Codepoints that render as nothing, or as an empty cell — the single authority
-/// on "invisible" for the whole codebase (L82-2 / R1-2).
+/// on "invisible" for the whole codebase.
 ///
 /// # Why one table with two consumers
 ///
@@ -85,7 +86,7 @@ static STEMMER: LazyLock<Stemmer> = LazyLock::new(|| Stemmer::create(Algorithm::
 /// family, the BOM, the deprecated format controls, the whole `U+E0000–U+E007F`
 /// TAGS block including its unassigned holes — a superset costs nothing and
 /// survives future assignments), **plus** two classes that are not *Cf* and were
-/// therefore missed entirely by the first L82-2 pass (R1-2b):
+/// therefore missed entirely by the first pass:
 ///
 /// * the *filler* codepoints, which are category `Lo`/`Mn` but render blank:
 ///   `U+115F`, `U+1160`, `U+3164`, `U+FFA0` (`U+3164` HANGUL FILLER is the
@@ -210,7 +211,7 @@ fn split_camel_case(s: &str) -> String {
 /// camelCase split comes before lowercasing, which would erase the boundary
 /// (module docs, ordering note). NO sort, NO synonym
 /// lookup, NO join (those are [`canonical_key`]'s job). Pure — no `Graph`
-/// dependency, so recall's keyword index (T2.6) can tokenize without a graph.
+/// dependency, so recall's keyword index can tokenize without a graph.
 ///
 /// ## Why NFC (GRAPH-9)
 ///
@@ -220,7 +221,7 @@ fn split_camel_case(s: &str) -> String {
 /// canonicalization could never merge. macOS filesystems hand back NFD while
 /// most editors and HTTP clients emit NFC, so both reach the same session.
 /// Normalizing at the head of the tokenizer fixes **both** `canonical_key`
-/// paths, [`canonicalize`] included, and the T2.6 keyword index with them —
+/// paths, [`canonicalize`] included, and recall's keyword index with them —
 /// they all tokenize through here, so key and index agree by construction.
 ///
 /// NFC, not NFKC: NFKC folds compatibility characters (`ﬁ` → `fi`, `²` → `2`,
@@ -232,14 +233,14 @@ fn split_camel_case(s: &str) -> String {
 /// pinned canonicalization case is byte-identical through this change.
 ///
 /// The raw synonym lookup in [`canonical_key`] / [`canonicalize`] stays
-/// byte-exact on the trimmed input (the pinned muse-spark S2 contract: synonym
+/// byte-exact on the trimmed input (the pinned contract: synonym
 /// keys must match the raw call-site spelling, case included). A synonym key and
 /// a call site that disagree about composition therefore miss each other — the
 /// same shape as the existing case-sensitivity, and not widened here. A synonym
 /// miss is harmless: the raw text falls through to this function and is
 /// normalized anyway.
 ///
-/// ## Why invisible characters are stripped first (R1-2)
+/// ## Why invisible characters are stripped first
 ///
 /// [`INVISIBLE_RANGES`] is erased **before** NFC, so the key is invariant under
 /// every codepoint a reviewer cannot see. Two texts that render identically
@@ -391,7 +392,7 @@ fn tokens_to_key(stems: &mut [String]) -> String {
 ///
 /// Synonym keys are matched EXACTLY on the trimmed input: case-sensitive, no
 /// case folding, no whitespace collapsing beyond the leading/trailing trim.
-/// `declare_synonym` keys must match the raw call-site spelling (muse-spark S2).
+/// `declare_synonym` keys must match the raw call-site spelling.
 pub fn canonical_key(content: &str, synonyms: impl Fn(&str) -> Option<&str>) -> String {
     let raw = content.trim();
     let effective = synonyms(raw).unwrap_or(raw);
@@ -403,13 +404,13 @@ pub fn canonical_key(content: &str, synonyms: impl Fn(&str) -> Option<&str>) -> 
 pub enum CanonicalizeResult {
     /// A concept in the graph already carries this canonical key.
     Matched { key: String, node: NodeId },
-    /// No concept carries the key; the caller (T2.3+) decides hybrid step 6.
+    /// No concept carries the key; the caller decides hybrid step 6.
     Unmatched { key: String },
 }
 
 /// Spec §7.1 step 5 — match against existing `canonical_key`.
 ///
-/// Step 4 reads `Graph::synonym` (T2.1 storage; `declare_synonym` lives on
+/// Step 4 reads `Graph::synonym` (the graph's storage; `declare_synonym` lives on
 /// `Graph`). `Result` is part of the pinned contract; this step itself cannot
 /// fail — the hybrid step 6 is deliberately left to the caller.
 ///
@@ -437,8 +438,8 @@ pub fn canonicalize(content: &str, graph: &Graph) -> Result<CanonicalizeResult, 
         };
     }
     // Raw-lookup-before-normalization, identical to `canonical_key`'s pinned
-    // ordering, but reading T2.1's storage directly (the public synonym callback
-    // signature cannot borrow from the graph — see `canonical_key`).
+    // ordering, but reading the graph's storage directly (the public synonym
+    // callback signature cannot borrow from the graph — see `canonical_key`).
     let raw = content.trim();
     let key = match graph.synonym(raw) {
         Some(mapped) => tokens_to_key(&mut normalize_tokens(mapped)),
@@ -745,7 +746,7 @@ mod tests {
         );
     }
 
-    /// **R1-2(a), the pin.** The reviewer's reproduction: a ZWJ inside a token
+    /// **The pin.** The reviewer's reproduction: a ZWJ inside a token
     /// used to survive NFC, defeat the stemmer and yield an unrelated key —
     /// `"billing retries change"` → `"bill chang retri"` but
     /// `"billing\u{200D} retries change"` → `"billing\u{200d} chang retri"`.
@@ -1027,10 +1028,9 @@ mod tests {
     #[test]
     fn canonicalize_never_matches_observations() {
         // GRAPH-1: demote creates Observations that may legally carry the same
-        // canonical key as agent-declared content (partial-UNIQUE errata,
-        // muse-spark M1-M2). The step-5 matcher must skip them — new agent
-        // content must never attach to a context-overflow record (spec §7
-        // demote semantics).
+        // canonical key as agent-declared content (partial-UNIQUE errata).
+        // The step-5 matcher must skip them — new agent content must never
+        // attach to a context-overflow record (spec §7 demote semantics).
         let g = graph_with_concept_typed("schema user", "Observation");
         match canonicalize("UserSchema", &g).unwrap() {
             CanonicalizeResult::Matched { .. } => panic!("Observation must not match"),

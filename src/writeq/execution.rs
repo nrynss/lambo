@@ -131,7 +131,7 @@ pub(crate) struct ConsumeStamp {
 /// receipt's copy and the durable intent outcome's copy (written inside the
 /// commit lock by the [`hybrid::CommitHook`]) must be the same sentence.
 ///
-/// Applied ≠ embedded (J3-R3-1): only the hybrid strategy can embed, so only
+/// Applied ≠ embedded: only the hybrid strategy can embed, so only
 /// it reports the count — and its sentence carries the number, so a write
 /// applied without its vector is never read as an unqualified success.
 pub(super) fn derive_sentence(
@@ -524,7 +524,7 @@ impl WriteCtx {
                     // #36 PR 4: an entry that named a concept by id at the
                     // ack must name the same one now. #19(b): so must each
                     // `against` target, re-resolved in the same transaction,
-                    // before the contract is stamped (review L3).
+                    // before the contract is stamped.
                     // Legacy intents' None text slots were deliberately
                     // unpinned. Refresh only those under the commit lock;
                     // their id-shaped slots retain the original ack pins.

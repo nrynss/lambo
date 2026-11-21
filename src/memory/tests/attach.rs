@@ -31,7 +31,7 @@ pub(super) fn strip_ansi(text: &str) -> String {
     out
 }
 
-/// **P2-b.** The attach line names the live promotion policy, beside
+/// The attach line names the live promotion policy, beside
 /// `match_strategy`.
 ///
 /// This is the operator's only in-process answer to "which policy is this
@@ -132,7 +132,7 @@ async fn fresh_session_is_stamped_with_the_live_embedding_contract() {
     mem.close().await.unwrap();
 }
 
-/// STORE-1 / Level B: attaching with a different embedder kind, model or
+/// Level B: attaching with a different embedder kind, model or
 /// dim than the session was written with must refuse, not mix vector spaces.
 #[tokio::test]
 async fn session_attach_rejects_embedder_kind_model_and_dim_mismatch() {

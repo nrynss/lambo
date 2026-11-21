@@ -2438,7 +2438,7 @@ def flagTakesPrev (r : TokenRaw) : Bool := r.bytes.head? != some 45
 
 /-- The previous version a26ffd30: with `allow_hyphen_values` on both
 `--auth-token` args, the element after the flag was always its value, so a
-flag there silently became the token (fail open, #315 re-review B1). -/
+flag there silently became the token (fail open, #315). -/
 def flagTakesHyphen (_r : TokenRaw) : Bool := true
 
 /-- The previous version of clap's unexpected-argument error for an argv
@@ -2477,7 +2477,7 @@ def argShown (before fromFlag : List (List Nat)) (q : List Nat) : Bool :=
 `-` alone. -/
 def looksLikeFlag (r : TokenRaw) : Bool := r.bytes.head? == some 45 && 1 < r.bytes.length
 
-/-- Since #315's re-review (B1): `allow_hyphen_values` is gone again, so the
+/-- Since #315's re-review: `allow_hyphen_values` is gone again, so the
 element after a spaced `--auth-token` is its value only when it does not look
 like a flag. -/
 def flagTakes (r : TokenRaw) : Bool := !looksLikeFlag r
@@ -2498,7 +2498,7 @@ it is the flag, not a value (`lambo --auth-token x serve-web` quotes it). -/
 def authFlagBytes : List Nat := [45, 45, 97, 117, 116, 104, 45, 116, 111, 107, 101, 110]
 
 /-- `redact_auth_token_echo`'s rule since #315's re-review: an empty quoted
-value (clap's missing value, S2) and the flag's own spelling (N1) are shown;
+value (clap's missing value) and the flag's own spelling are shown;
 otherwise `argShown`, the narrow rule. -/
 def argShownFixed (before fromFlag : List (List Nat)) (q : List Nat) : Bool :=
   q.isEmpty || q == authFlagBytes || argShown before fromFlag q
@@ -2803,7 +2803,7 @@ theorem unexpected_arg_fixed :
 
 `allow_hyphen_values` made a flag after `--auth-token` the token, so
 `--auth-token $UNSET --allow-embedding-mismatch` started a server whose
-token was the flag (B1). It is removed: a spaced `--auth-token` refuses an
+token was the flag. It is removed: a spaced `--auth-token` refuses an
 element that looks like a flag (`authFlagValue_spaced_none_iff`), as the
 base did (`flagTakes_agrees_base`), and `--auth-token=-abc` takes any value
 (`authFlagValue_eq_form`). The redaction covers what that refusal quotes:
@@ -2883,7 +2883,7 @@ theorem quotedRender_unexpected_is_render {before fromFlag : List (List Nat)}
   rw [quotedRender_hidden (argShownFixed_from_flag h0 h1 h)]
   rfl
 
-/-- A missing value keeps clap's message, with no tip (S2). -/
+/-- A missing value keeps clap's message, with no tip. -/
 theorem missing_value_kept (f : String) (before fromFlag : List (List Nat)) :
     quotedRender (.invalidValue f) before fromFlag [] =
       "a value is required for '" ++ f ++ "' but none was supplied" := by

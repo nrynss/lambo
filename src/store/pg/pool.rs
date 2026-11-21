@@ -72,7 +72,7 @@ pub(super) struct IamAuth {
 /// immediately.
 pub(super) const TX_RETRY_ATTEMPTS: usize = 5;
 
-/// STORE-2: server-side per-statement bound (`statement_timeout`), applied to
+/// Server-side per-statement bound (`statement_timeout`), applied to
 /// every connection in the pool. `statement_timeout` applies per statement,
 /// not per transaction — a multi-statement flush batch can run N x 20s. The
 /// whole-batch bound is the client-side flush attempt timeout
@@ -82,10 +82,11 @@ pub(super) const TX_RETRY_ATTEMPTS: usize = 5;
 /// under the 30s `LOAD_SESSION_TIMEOUT`.
 pub(super) const STATEMENT_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// T7.4: accuracy dial for CockroachDB's **approximate** vector search.
+/// Accuracy dial for CockroachDB's **approximate** vector search.
 ///
-/// PostgreSQL does not have this GUC; B2 leaves `hnsw.ef_search` at the
-/// pgvector default and does not compile this dial into `store-postgres`.
+/// PostgreSQL does not have this GUC; the PostgreSQL backend leaves
+/// `hnsw.ef_search` at the pgvector default and does not compile this dial
+/// into `store-postgres`.
 ///
 /// Once `concepts_embedding_idx` is partial (spec §12.1), `vector_candidates`
 /// is served by an ANN index instead of an exact full scan: the search visits
@@ -182,7 +183,7 @@ pub(super) fn vector_beam_size_from_env() -> Result<Option<u32>, StoreError> {
     Ok(Some(n))
 }
 
-/// STORE-4: structured retry decision for `tx_retry` — no message-text
+/// Structured retry decision for `tx_retry` — no message-text
 /// matching. Constraint violations (SQLSTATE 23xxx) are deterministic and are
 /// mapped to [`StoreError::Constraint`] by the write path: never replay them;
 /// since #301 so is a value the store rejects (SQLSTATE classes 21, 22, 44 and
@@ -226,14 +227,14 @@ where
         }
     }
     Err(last_err.unwrap_or_else(|| {
-        // B2/B3: the message names Cockroach. PostgreSQL aborts with the same
+        // The message names Cockroach. PostgreSQL aborts with the same
         // SQLSTATE 40001 under `SERIALIZABLE`, so the mechanism is shared and
         // only the wording is wrong for a second dialect.
         StoreError::Backend("transaction retry exhausted (Cockroach serializable conflict)".into())
     }))
 }
 
-/// T0.3 spike: make a libpq DSN usable with sqlx's rustls stack. libpq's magic
+/// Make a libpq DSN usable with sqlx's rustls stack. libpq's magic
 /// `sslrootcert=system` is not a real path; point at an actual CA bundle or drop to
 /// `require`. Returns the DSN unchanged when no rewrite is needed.
 pub(super) fn dsn_for_rustls(dsn: &str) -> String {
@@ -359,7 +360,7 @@ impl<D: Dialect> PgStore<D> {
         let options = dsn
             .parse::<sqlx::postgres::PgConnectOptions>()
             .map_err(|e| backend(format!("invalid {}: {e}", D::DSN_LABEL)))?
-            // STORE-2: bound every statement server-side.
+            // Bound every statement server-side.
             // statement_timeout applies per statement, not per
             // transaction: a multi-statement flush batch can take
             // N x 20s. The whole-batch bound is the client-side

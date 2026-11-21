@@ -1,17 +1,17 @@
-//! Daemon hot list — spec §9, P4 T4.2.
+//! Daemon hot list — spec §9.
 //!
 //! A bounded priority queue of graph nodes whose conditions need surfacing in
 //! `recall()` (force-inclusion, spec §8). Entry conditions retained:
 //! **conflict detected**, **high-risk modification**, **drift detected**,
-//! **stale session**, plus #19(c)'s **contradiction**. The daemon loop (T4.6) keeps the list equal to the
+//! **stale session**, plus #19(c)'s **contradiction**. The daemon loop keeps the list equal to the
 //! current cycle's fresh detector hits, up to the bound and the contradiction
 //! budget (`HotList::sync_cycle`: the cycle's inserts evict nothing, entries
 //! it no longer detects are dropped, then the limits are enforced once, so a
 //! lapsed entry never evicts a fresh hit, #298); the
 //! per-entry predicate ([`ConditionCheck`]) remains available for
-//! recall-time re-validation (T5.3).
+//! recall-time re-validation.
 //!
-//! ## Priority rule (T4.2 design decision)
+//! ## Priority rule
 //!
 //! Entries are ranked by `(severity desc, recency desc, node id asc)`:
 //!
@@ -57,15 +57,15 @@
 //!
 //! Each entry carries the predicate that decides whether its condition still
 //! holds, as a closure over the current graph **and the caller's `now`**
-//! ([`ConditionCheck`]). The detector modules (T4.3 conflict, T4.4 drift,
-//! T4.6 stale/high-risk) build the predicate at insert time from the same
+//! ([`ConditionCheck`]). The detector modules (conflict, drift,
+//! stale/high-risk) build the predicate at insert time from the same
 //! per-node graph logic they used to detect; the hot list only evaluates it.
 //!
 //! The predicate takes `now` as a **parameter** and returns the recomputed
 //! payload (XP-3). A predicate that captured `now` by move re-derived its
 //! recency window from a frozen instant, so a `Conflict`/`HighRisk` entry
 //! re-validated `true` forever against an unchanged graph and served a frozen
-//! `seconds_ago` — the exact API T5.3 is told to call, rendering "wrote to it
+//! `seconds_ago` — the exact API recall is told to call, rendering "wrote to it
 //! eleven seconds ago" five minutes later. Handing `now` in and taking the
 //! payload out makes both halves impossible to get wrong.
 //!
@@ -74,12 +74,11 @@
 //! hot nodes therefore costs ten neighborhood walks under the graph lock, not
 //! ten full scans.
 //!
-//! Since T4.6 the daemon loop *does not* evaluate these predicates each cycle —
+//! The daemon loop *does not* evaluate these predicates each cycle —
 //! it diffs the list against the fresh detection pass
 //! ([`HotList::retain_conditions`], inside `HotList::sync_cycle`), which
-//! replaces the old O(hot_len × graph) per-cycle re-validation scan (T4.6
-//! finding 2).
-//! [`HotList::revalidate`] is recall's (T5.3) read-time path, run through
+//! replaces the old O(hot_len × graph) per-cycle re-validation scan.
+//! [`HotList::revalidate`] is recall's read-time path, run through
 //! [`HotList::revalidate_members`] by the daemon's recall entry before
 //! assembly.
 //! It takes `&Graph` explicitly — rather than stashing a graph handle inside
@@ -113,11 +112,11 @@ pub fn default_contradiction_max(max: usize) -> usize {
 /// [`Condition::severity`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Condition {
-    /// ≥2 active agents with edges to the node and a recent write (T4.3).
+    /// ≥2 active agents with edges to the node and a recent write.
     Conflict,
     /// A high-risk modification touched the node.
     HighRiskModification,
-    /// The node drifted from every root goal (T4.4).
+    /// The node drifted from every root goal.
     Drift,
     /// The node's session has gone stale.
     StaleSession,
@@ -463,7 +462,7 @@ impl HotList {
     /// `recall()` — stale entries drop out then, not on a timer).
     ///
     /// Returns `true` iff the node is still on the hot list (≥1 entry
-    /// survived). Recall (T5.3) uses this to decide force-inclusion and then
+    /// survived). Recall uses this to decide force-inclusion and then
     /// renders [`HotListEntry::payload`], which this call has just rebuilt
     /// against `now` — so a rendered `seconds_ago` is the age at *read* time,
     /// not at detection time (XP-3).
@@ -491,8 +490,8 @@ impl HotList {
     }
 
     /// Re-validate the hot entries of every node in `members` **at `now`** and
-    /// return the surviving payloads per node, freshly rebuilt (T5.3
-    /// force-inclusion, XP-3).
+    /// return the surviving payloads per node, freshly rebuilt (force-inclusion,
+    /// XP-3).
     ///
     /// This is recall's read-time maintenance of the hot list, run by
     /// `Daemon::recall_detailed` over the recall's expanded
@@ -530,8 +529,8 @@ impl HotList {
         payloads
     }
 
-    /// Drop every entry whose `(node, condition)` is not in `fresh` (T4.6
-    /// finding 2). The daemon loop calls this once per cycle with the
+    /// Drop every entry whose `(node, condition)` is not in `fresh`. The
+    /// daemon loop calls this once per cycle with the
     /// current detection pass's hits, through `HotList::sync_cycle` and
     /// before the bound applies, so the hot list always equals the
     /// *current* condition set: a HighRisk entry whose 30s window elapsed —
@@ -956,7 +955,7 @@ mod tests {
         assert_eq!(list.len(), 1);
     }
 
-    /// T5.3 force-include, the hot-list half (moved from
+    /// Force-include, the hot-list half (moved from
     /// `recall::assemble::tests::hot_force_include_keeps_live_and_drops_lapsed`
     /// when #25 moved re-validation out of `assemble`): over recall's expanded
     /// members, a live entry survives with its payload rebuilt at the caller's
@@ -1084,9 +1083,9 @@ mod tests {
 
     #[test]
     fn fixture_conflict_payload_survives_roundtrip_for_rendering() {
-        // The demo sentence T5.3 renders — "Agent A wrote to it eleven
+        // The demo sentence recall renders — "Agent A wrote to it eleven
         // seconds ago" — must be derivable from the payload alone: the
-        // `writer` names the subject (ALGO-2), `seconds_ago` the age.
+        // `writer` names the subject, `seconds_ago` the age.
         use crate::types::AgentId;
         let payload = HotListPayload::Conflict {
             agents: vec![AgentId::from("agent-a"), AgentId::from("agent-b")],

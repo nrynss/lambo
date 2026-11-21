@@ -1085,7 +1085,7 @@ impl Commands {
     }
 }
 
-/// Single construction site for store + embedder (T8.x must reuse this, not rebuild).
+/// Single construction site for store + embedder (commands reuse this, never rebuild).
 enum Resolved {
     Classification(lambo::resolve::ClassificationSource),
     Split(Box<lambo::resolve::SplitIo>),
@@ -1105,7 +1105,7 @@ enum Resolved {
         /// hop under (#36 PR 3). A reader resolves its own, like `serve-web`.
         promotion_policy: lambo::canon::PromotionPolicy,
         /// `lambo.toml`'s `canonization_supersede`, so `inspect` explains
-        /// the Stage 3 hold a writer with it on applies (#20 review M2).
+        /// the Stage 3 hold a writer with it on applies (#20).
         supersede: bool,
     },
 }
@@ -1232,7 +1232,7 @@ struct ServePlan {
     transport: Transport,
     pinned: PinnedSessions,
     file: LamboFile,
-    /// The legacy token, `LAMBO_AUTH_TOKEN` over `--auth-token` (T8.7).
+    /// The legacy token, `LAMBO_AUTH_TOKEN` over `--auth-token`.
     auth_token: Option<lambo::mcp::SecretToken>,
     /// The resolved `[[serve.credential]]` entries (#32 PR 5); HTTP only.
     credentials: Vec<lambo::config::ServeCredential>,
@@ -1265,8 +1265,8 @@ fn serve_preflight(
             return Err(ExitCode::from(2));
         }
     };
-    // `--auth-token` is checked only where it is used, HTTP (#32 PR 5
-    // review S3), and before the file is read, as clap checked it before.
+    // `--auth-token` is checked only where it is used, HTTP (#32 PR 5), and
+    // before the file is read, as clap checked it before.
     let auth_token = if transport == Transport::Http {
         http_auth_token_flag(auth_token)?
     } else {
@@ -1274,7 +1274,7 @@ fn serve_preflight(
     };
     // A usage error is reported before the file is read, so a stdio serve
     // given several `--session`s exits 2 whatever state the file is in
-    // (#32 PR 8 Sonnet review L1).
+    // (#32 PR 8).
     if transport == Transport::Stdio && session.len() > 1 {
         return Err(too_many_stdio_sessions(session.len()));
     }
@@ -1296,7 +1296,7 @@ fn serve_preflight(
     // Stdio: the one session chosen above. HTTP: the ordered union of
     // `--session` and `[serve] sessions`. Either way checked against `serve`'s own
     // rules (every name addressable by URL once more than one is pinned),
-    // here, before any backend is built (#32 review L3).
+    // here, before any backend is built (#32).
     let pinned = match lambo::mcp::pin_sessions(session, &file.serve, transport) {
         Ok(p) => p,
         Err(e) => {
@@ -1315,9 +1315,9 @@ fn serve_preflight(
             return Err(ExitCode::from(2));
         }
     };
-    // Env beats flag (T8.7), resolved before any of it reaches a log line.
+    // Env beats flag, resolved before any of it reaches a log line.
     // A set-but-empty LAMBO_AUTH_TOKEN is a usage error, not a silent
-    // fallback to the flag. HTTP only (#32 PR 5 review S3): a stdio serve
+    // fallback to the flag. HTTP only (#32 PR 5): a stdio serve
     // authenticates nobody and ignores the token, so a stray exported one
     // it would refuse must not stop it from starting.
     let auth_token = if transport == Transport::Http {
@@ -1349,7 +1349,7 @@ fn serve_preflight(
         Vec::new()
     };
     // `[serve]`: the keys this serve does not enforce yet are named once
-    // (#32 PR 1 review L3); never a value.
+    // (#32 PR 1); never a value.
     file.serve.warn_if_unenforced(transport == Transport::Stdio);
     let bounds = lambo::mcp::SessionBounds::from_config(&file.serve);
     Ok(ServePlan {
@@ -1648,9 +1648,9 @@ fn run_async_result<T>(
 /// [`Debug`] is redacted like [`lambo::mcp::SecretToken`]'s, since
 /// `Commands` derives `Debug`).
 ///
-/// Checked by [`http_auth_token_flag`] only for `--transport http` (#32 PR 5
-/// review S3): stdio ignores the flag, so a value no request could present
-/// must not stop a stdio serve from starting.
+/// Checked by [`http_auth_token_flag`] only for `--transport http` (#32 PR 5):
+/// stdio ignores the flag, so a value no request could present must not stop
+/// a stdio serve from starting.
 #[derive(Clone)]
 struct AuthTokenArg(std::ffi::OsString);
 
@@ -2236,7 +2236,7 @@ fn main() -> ExitCode {
             };
             let result = runtime.block_on(lambo::mcp::serve(opts, *backends));
 
-            // Do not let the runtime's `Drop` wait for blocking tasks (R1/T82-1).
+            // Do not let the runtime's `Drop` wait for blocking tasks.
             // The stdio transport parks a **blocking** read on stdin, and
             // `Runtime::drop` waits for blocking tasks to return — so after a
             // SIGINT/SIGTERM the process sat there with its session already
@@ -2254,7 +2254,7 @@ fn main() -> ExitCode {
                 }
             }
         }
-        // T8.5 — the read-only demo window. Reader path: `run_async` owns the
+        // The read-only demo window. Reader path: `run_async` owns the
         // runtime exactly as it does for `recall`, and the command body takes
         // the single `ResolvedBackends` from `resolve_for_command` above.
         (
@@ -2950,8 +2950,8 @@ mod tests {
         walk(&Cli::command());
     }
 
-    /// E2E-F6: `provision --help` names every kind it provisions. `postgres`
-    /// has been a shipped, tested provision path since B1/B2, and it is exactly
+    /// `provision --help` names every kind it provisions. `postgres` has
+    /// long been a shipped, tested provision path, and it is exactly
     /// the verb the DSN-precedence findings are about, so the operator most in
     /// need of the sentence is the one reading this line.
     #[test]
@@ -3263,9 +3263,9 @@ dim = 1024
 
     /// A spaced `--auth-token` followed by something that looks like a flag
     /// is refused at parse time (exit 2, so nothing starts), never taken as
-    /// the token, and never shown, on `serve` and `serve-web` (#315 re-review
-    /// B1). With `allow_hyphen_values` (a26ffd30) each of these was the
-    /// token and the server started. Mirrors `Resolve.lean`'s
+    /// the token, and never shown, on `serve` and `serve-web` (#315). With
+    /// `allow_hyphen_values` (a26ffd30) each of these was the token and the
+    /// server started. Mirrors `Resolve.lean`'s
     /// `authFlagValue_spaced_none_iff` and `re_review_fixed` (previous
     /// version: `b1_fail_open`).
     #[test]
@@ -3325,7 +3325,7 @@ dim = 1024
     }
 
     /// A missing value keeps clap's "a value is required" message, with no
-    /// redaction and no tip (#315 re-review S2). Mirrors `Resolve.lean`'s
+    /// redaction and no tip (#315). Mirrors `Resolve.lean`'s
     /// `missing_value_kept`.
     #[test]
     fn missing_value_keeps_clap_message() {
@@ -3353,7 +3353,7 @@ dim = 1024
     }
 
     /// An invalid value of an accepted flag after `--auth-token` is
-    /// redacted: it may be a piece of the token (#315 re-review S3, the
+    /// redacted: it may be a piece of the token (#315, the
     /// `InvalidValue` branch). Mirrors `Resolve.lean`'s
     /// `quotedRender_noninterference` and `re_review_fixed`.
     #[test]
@@ -3378,7 +3378,7 @@ dim = 1024
     }
 
     /// An unrecognized subcommand quoted after `--auth-token` is redacted
-    /// (#315 re-review S3, the `InvalidSubcommand` branch): clap's real one
+    /// (#315, the `InvalidSubcommand` branch): clap's real one
     /// for `lambo help --auth-token=<v>`, and one built here with a value
     /// that is only a later element.
     #[test]
@@ -3472,7 +3472,7 @@ dim = 1024
     }
 
     /// `lambo --auth-token x serve-web` names the misplaced flag: its own
-    /// spelling is never redacted (#315 re-review N1).
+    /// spelling is never redacted (#315).
     #[test]
     fn a_misplaced_auth_token_flag_is_named() {
         let argv: Vec<std::ffi::OsString> = ["lambo", "--auth-token", "NOTASECRET", "serve-web"]
@@ -3496,7 +3496,7 @@ dim = 1024
     /// usage line included, is the same for every tail
     /// (`quotedRender_noninterference`, `quotedRender_unexpected_is_render`).
     /// Covers `--auth-token=`, the review probes, and a mistyped flag in the
-    /// tail, whose did-you-mean clap put in its usage line (S1).
+    /// tail, whose did-you-mean clap put in its usage line.
     #[test]
     fn unexpected_argument_after_auth_token_is_not_shown() {
         let probes: [&[&str]; 6] = [

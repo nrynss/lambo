@@ -72,9 +72,9 @@ impl HangingEmbedder {
 /// **J3's founding invariant, end to end at `Memory` level**: acked ⇒
 /// (applied ∨ durable intent) at a clean close — and the durable half is a
 /// real write, not a tombstone: the next attach replays it, the concept
-/// lands **with its embedding** (the J3-R3-1 rule: durability is judged at
-/// the store's embedding column, never at `applied` counts), and the
-/// original receipt id answers `applied_after_restart` in the new process.
+/// lands **with its embedding** (durability is judged at the store's
+/// embedding column, never at `applied` counts), and the original receipt id
+/// answers `applied_after_restart` in the new process.
 #[tokio::test]
 async fn an_acked_write_survives_a_clean_close_as_a_durable_intent_and_replays() {
     let inner = Arc::new(MemoryStore::new());
@@ -277,8 +277,8 @@ async fn defer_one_intent(
     submitted.receipt
 }
 
-/// **J3 round-1 N1, the P1**: a transient embedder outage at attach must not
-/// destroy the durable-intent backlog.
+/// **A transient embedder outage at attach** must not destroy the
+/// durable-intent backlog.
 ///
 /// Red before the fix: `spawn_replay` ran unconditionally and its failure arm
 /// consumed every intent as `failed` — so this test's session 2 settled the
@@ -380,8 +380,8 @@ async fn a_dead_embedder_at_attach_leaves_the_backlog_durable_and_a_later_serve_
 /// apply in this serve), and a clean close answers `intent_durable`.
 /// Red before the fix: the in-session arm consumed *any* error class as
 /// `failed`, so this intent's row was settled and the write could never
-/// come back — the same transient condition N1 was raised about, on the
-/// path that handles almost every write.
+/// come back — the same transient condition as at attach, on the path that
+/// handles almost every write.
 #[tokio::test]
 async fn a_write_reached_during_an_in_session_embedder_outage_is_not_consumed() {
     let inner = Arc::new(MemoryStore::new());
@@ -443,7 +443,7 @@ async fn a_write_reached_during_an_in_session_embedder_outage_is_not_consumed() 
     );
 }
 
-/// **J3 round-1 F2**: a consumed intent row older than the retention window
+/// A consumed intent row older than the retention window
 /// must not answer better for having survived a restart than the same id
 /// would in a process that never restarted.
 ///
@@ -542,7 +542,7 @@ async fn a_consumed_intent_past_its_retention_window_is_not_answered_from() {
     mem.close().await.expect("clean close");
 }
 
-/// **The other half of N1's classification**: a content-level refusal still
+/// **The other half of the outage classification**: a content-level refusal still
 /// consumes. Without this, "leave it for the next process" would become
 /// retry-forever for a record no embedder will ever accept — the objection
 /// the original consume-always arm was built to answer, which the fix must
@@ -593,7 +593,7 @@ async fn a_content_refusal_at_replay_still_settles_the_intent_failed() {
     );
 }
 
-/// **#116 review M1**: a replayed intent refused because it would close a
+/// **#116**: a replayed intent refused because it would close a
 /// cycle settles `failed` on its own and the replay goes on.
 ///
 /// Two derives whose `parent_of` pairs close a Hierarchical 2-cycle, and two
@@ -784,8 +784,7 @@ async fn an_over_budget_derive_is_refused_at_the_ack() {
     mem.close().await.expect("close");
 }
 
-/// **A wait on a replay-owed receipt ends when the session closes** (#11
-/// review P3-2).
+/// **A wait on a replay-owed receipt ends when the session closes** (#11).
 ///
 /// A close settles every receipt this process holds (`intent_durable`) and
 /// wakes the waiters, so those waits end with it. A `pending_replay` id is not
@@ -849,7 +848,7 @@ async fn a_wait_on_a_replay_owed_receipt_ends_when_the_session_closes() {
 }
 
 /// A session whose acked write cannot drain (the embedder hangs on real
-/// content), over `store`, with that write admitted. For the #117 review M1
+/// content), over `store`, with that write admitted. For the #117
 /// tests: the write's receipt is what the close has to answer.
 async fn undrainable_write(
     session: &str,
@@ -882,7 +881,7 @@ async fn undrainable_write(
     (mem, agent, submitted.receipt, entered)
 }
 
-/// #117 review M1: a close whose final flush FAILS must not answer
+/// #117: a close whose final flush FAILS must not answer
 /// `intent_durable` — the intent never reached the store. It answers
 /// `close_unflushed`; the retried close that does flush upgrades it, and the
 /// intent is then really in the store.
@@ -926,7 +925,7 @@ async fn a_failed_final_flush_answers_close_unflushed_until_a_retry_lands_it() {
     assert_eq!(snap.write_intents.len(), 1);
 }
 
-/// #117 review M1: a close on a handle that LOST its lease drops the tail,
+/// #117: a close on a handle that LOST its lease drops the tail,
 /// so the set-aside receipt answers `close_unflushed`, never
 /// `intent_durable`.
 #[tokio::test]
@@ -2218,7 +2217,7 @@ async fn a_held_write_applies_before_the_agents_next_write_once_the_embedder_is_
     assert!(snap.write_intents.iter().all(|i| i.outcome.is_some()));
 }
 
-/// **#295 review (S4)**: a lookup timeout in session follows the replay's
+/// **#295**: a lookup timeout in session follows the replay's
 /// rule: one is a fact about that write and settles `failed`; it does not
 /// hold the agent's lane as an embedder outage does.
 #[tokio::test(start_paused = true)]
@@ -2436,7 +2435,7 @@ impl Embedder for Gated {
     }
 }
 
-/// **#295 review (S5)**: a replay that halts because the lease is lost
+/// **#295**: a replay that halts because the lease is lost
 /// leaves the intent it stopped at, and every later one, owed; the block
 /// reason says `Other` (the reason a lost lease has), not `null`.
 ///
@@ -2482,7 +2481,7 @@ async fn a_replay_halted_by_a_lost_lease_names_a_block_reason() {
     assert!(mem.pipeline().counters().replay_owed() > 0);
 }
 
-/// **#295 review (S6)**: only an id in another version of the receipt
+/// **#295**: only an id in another version of the receipt
 /// format (`lwr<digits>.`) is quarantined; any other unparseable id is
 /// malformed and settled `failed`, so it holds nothing back.
 #[cfg(feature = "fixtures")]
@@ -2525,7 +2524,7 @@ async fn an_unparseable_id_outside_the_format_family_is_settled_failed() {
     );
 }
 
-/// **#295 review #3, SF1 and N3**: in session, three lookup timeouts in a
+/// **#295**: in session, three lookup timeouts in a
 /// row with nothing applied between hold the third write (the store is slow
 /// for everyone), and its retry, which the run does not count again, settles
 /// it `failed` if the lookup times out once more. One input slow every time

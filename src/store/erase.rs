@@ -18,15 +18,15 @@
 //! * `holder` = [`ERASED_HOLDER`], a value no [`LeaseHolder::token`] can
 //!   produce (a real token always contains `@` and `#`);
 //! * `current_token` = the prior token plus one (one on a never-leased
-//!   session). A release keeps the row and its token (`store::lease`, #23
-//!   review H2), so the prior token is the session's high-water mark and every
+//!   session). A release keeps the row and its token (`store::lease`, #23),
+//!   so the prior token is the session's high-water mark and every
 //!   token minted before the erase is below the tombstone's;
 //! * `expires_at` = [`tombstone_expires_at`] (year 9999), so the expiry guard
 //!   every acquire carries never lets anyone take the session over;
 //! * `endpoint` = NULL; `acquired_at` = the store clock at the first erase.
 //!
 //! Every fence also refuses a tombstoned session **whatever token is
-//! presented** ([`check_fence`], #23 review H1), the tombstone's own token
+//! presented** ([`check_fence`], #23), the tombstone's own token
 //! and `None` included. The token arithmetic above already refuses every
 //! pre-erase writer; the holder check is the defense in depth that does not
 //! rest on it. No writer can hold the tombstone's holder value: acquire,
@@ -136,10 +136,10 @@ pub fn fence_refusal(
 /// presenting `token` proceed against a lease row whose current token is
 /// `current` and whose holder is `holder`?
 ///
-/// An erasure tombstone refuses **whatever token is presented** (#23 review
-/// H1). The tombstone is minted above every earlier token, so the token rule
-/// alone already refuses a pre-erase writer now that a release keeps the
-/// token (H2); the holder check is the defense in depth that does not depend
+/// An erasure tombstone refuses **whatever token is presented** (#23). The
+/// tombstone is minted above every earlier token, so the token rule alone
+/// already refuses a pre-erase writer now that a release keeps the token; the
+/// holder check is the defense in depth that does not depend
 /// on any token arithmetic being right, and it is decided on the typed holder
 /// value rather than on a number. Anything else is the ordinary
 /// [`crate::store::lease::lease_permits_write`] rule.
@@ -159,7 +159,7 @@ pub fn check_fence(
 }
 
 /// What a writer's background task calls once the store has refused one of
-/// its writes because the session was erased (#23 review L2). `Memory` passes
+/// its writes because the session was erased (#23). `Memory` passes
 /// one that latches its lease fence and the serve wake-up with
 /// [`ERASED_HOLDER`] as the winner, so the handle stops serving reads of the
 /// deleted data at once instead of at its next heartbeat.
@@ -182,7 +182,7 @@ pub async fn refused_as_erased(
 }
 
 /// What `session`'s lease row, read back, says about whether it is erased
-/// (#32 PR 7 review L2): the one typed check, shared by every caller that
+/// (#32 PR 7): the one typed check, shared by every caller that
 /// must tell an erased session from a failed store call.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tombstone {
@@ -212,7 +212,7 @@ pub async fn read_tombstone(
 /// embedding; those rows are also counted in `concepts`) and `leases` (1 when
 /// a holder's lease row was replaced by the tombstone).
 ///
-/// `#[non_exhaustive]` (#23 review L7): a table added to the schema adds a
+/// `#[non_exhaustive]` (#23): a table added to the schema adds a
 /// field here (the coverage tests force it), and that must not break a
 /// downstream struct literal or exhaustive destructuring. Read the fields;
 /// build one with `Default` and field assignment inside this crate. The JSON
@@ -301,7 +301,7 @@ impl EraseCounts {
 /// What a completed erase removed. Returned only after the store committed,
 /// so a caller (an account-deletion fan-out) may mark the target done.
 ///
-/// `#[non_exhaustive]` (#23 review L7), like [`EraseCounts`]; built with
+/// `#[non_exhaustive]` (#23), like [`EraseCounts`]; built with
 /// [`EraseReport::new`].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[non_exhaustive]
@@ -577,7 +577,7 @@ pub(crate) mod testkit {
     };
 
     /// A unit vector of `dim` non-integer components, so a JSON round trip
-    /// of it exercises `f32` decimal formatting (review L6).
+    /// of it exercises `f32` decimal formatting.
     pub(crate) fn unit_vector(dim: usize) -> Vec<f32> {
         let raw: Vec<f64> = (0..dim).map(|i| ((i as f64) * 0.37 + 0.11).sin()).collect();
         let norm = raw.iter().map(|x| x * x).sum::<f64>().sqrt();
@@ -653,7 +653,7 @@ pub(crate) mod testkit {
     /// and its #22 `embedding_source`), two edges, a canonization transition,
     /// a read access and two durable write intents: a plain text derive and
     /// an unconsumed #22 image derive, which carries a vector of its own
-    /// (review L6: the census covers both kinds of intent row). Concept text
+    /// (the census covers both kinds of intent row). Concept text
     /// is unique per call, so two sessions planted in one store never collide
     /// on a canonical key.
     pub(crate) fn planted_batch(sid: &SessionId, dim: usize) -> MutationBatch {
@@ -799,7 +799,7 @@ pub(crate) mod testkit {
         }
     }
 
-    /// #23 review L4: edges in another session that point at the erased
+    /// #23: edges in another session that point at the erased
     /// session's nodes go with them, like `DeleteNode` removes a node's
     /// incident edges in every session, and are counted in `edges`. The other
     /// session's own rows stay. `a` (erased) and `b` must be fresh ids.
@@ -872,13 +872,13 @@ pub(crate) mod testkit {
         );
     }
 
-    /// The #23 review's H1 scenario, on any store, plus the defense in depth
+    /// The #23 review's scenario, on any store, plus the defense in depth
     /// behind it.
     ///
     /// `serve` X holds token t1 and its lease lapses; a CLI verb Y takes the
     /// session over, writes and closes cleanly (a release); the operator
     /// erases. Zombie X's flush and canonization with t1 must be refused with
-    /// the erased error and recreate nothing. Before the H2 fix the release
+    /// the erased error and recreate nothing. Before the #23 fix the release
     /// deleted the row, the tombstone was minted at token 1 and X's write
     /// passed. Defense in depth: every fence refuses a tombstoned session
     /// whatever token is presented, including the tombstone's own token and

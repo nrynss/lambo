@@ -120,7 +120,7 @@ async fn submit_held(rig: &Rig, agent: &AgentId, n: usize, tag: &str) -> Vec<Rec
     ids
 }
 
-/// **Review B1 (lane wedge, and an agent that only waits)**: an outage holds
+/// **Lane wedge, and an agent that only waits**: an outage holds
 /// a full lane of an agent's writes; a further write is refused, and its
 /// refusal does not tell the agent to wait on receipts that cannot settle.
 /// Once the embedder is back, the held writes apply, in order, with no new
@@ -160,7 +160,7 @@ async fn held_writes_are_retried_without_a_new_write_even_when_the_lane_is_full(
     assert_eq!(order, expected, "held writes apply in admission order");
 }
 
-/// **Review B1 (session wedge)**: held writes across agents fill the whole
+/// **Session wedge**: held writes across agents fill the whole
 /// queue, so every agent is refused; the held writes are still retried and
 /// apply once the embedder is back, with no new write.
 #[tokio::test(start_paused = true)]
@@ -192,7 +192,7 @@ async fn a_queue_full_of_held_writes_is_still_retried() {
     .await;
 }
 
-/// **Review B2**: a held write's bytes stay counted. A lane of maximal
+/// **Held bytes**: a held write's bytes stay counted. A lane of maximal
 /// held writes (the longest concept a hybrid derive embeds) keeps every byte
 /// in the queue's byte gauge, which the byte cap checks, until each settles;
 /// once the embedder is back and they apply, the gauge returns to zero.
@@ -242,7 +242,7 @@ async fn held_writes_keep_their_bytes_counted_until_they_settle() {
     );
 }
 
-/// **Review S1**: the lease fence is checked for every write a retry takes.
+/// **Lease fence**: the lease fence is checked for every write a retry takes.
 /// Two writes are held; the retry runs the first, and the lease is lost
 /// while it is running. The first commits (the store refuses that flush);
 /// the second, and a later write, are refused without being run.
@@ -287,7 +287,7 @@ async fn a_lease_lost_mid_retry_runs_no_later_held_write() {
     assert_eq!(applied_order(&rig), vec![ids[0].to_string()]);
 }
 
-/// **Review #3, N1**: a new or refused write of an agent with held writes
+/// **Retry backoff**: a new or refused write of an agent with held writes
 /// does not start a retry before the backoff has passed. Five writes sent
 /// right after the outage are held without a single further embed attempt;
 /// before, each one retried the held write at once.

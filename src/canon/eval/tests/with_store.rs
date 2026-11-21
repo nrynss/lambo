@@ -560,15 +560,15 @@ async fn stage3_batch_is_capped_and_round_robins_score_desc() {
 }
 
 /// `MemoryStore` with an injectable fault, so the cycle's
-/// store-facing phases can be exercised (F19 / R2-4: previously
-/// unasserted). Everything else delegates.
+/// store-facing phases can be exercised (previously unasserted).
+/// Everything else delegates.
 struct FaultyStore {
     inner: MemoryStore,
-    /// Phase 4 — the durable audit write (F3).
+    /// Phase 4 — the durable audit write.
     fail_record: bool,
-    /// Phase 2 — Stage 2's span query (R2-4).
+    /// Phase 2 — Stage 2's span query.
     fail_span: bool,
-    /// #36 PR 2 review M1: answer the window-aware span as a store that
+    /// #36 PR 2: answer the window-aware span as a store that
     /// never implemented it does (the trait default's `Capability`).
     no_window: bool,
     /// Window-aware span calls received.
@@ -721,7 +721,7 @@ impl GraphStore for FaultyStore {
     }
 }
 
-/// F3: the graph apply is the commit point. A `record_canonization`
+/// The graph apply is the commit point. A `record_canonization`
 /// failure mid-cycle must not lose the `DaemonEvent::Canonized` (the
 /// old order emitted only *after* the durable write, so a store hiccup
 /// dropped the event forever — the flush replay re-records the row but
@@ -785,7 +785,7 @@ async fn record_failure_keeps_the_emitted_event_and_the_partial_outcome() {
     assert!(!g.write().drain_log().is_empty());
 }
 
-/// R2-4: a phase-2 store fault must not hold back Stage 1, which
+/// A phase-2 store fault must not hold back Stage 1, which
 /// needs no verdict at all.
 ///
 /// `verdicts()` issues every Stage-2/Stage-3 query before anything
@@ -876,7 +876,7 @@ async fn store_with_hubs(hubs: &[(u64, u64)]) -> MemoryStore {
     store_from_graph(&full).await
 }
 
-/// F1: every successful promotion removes ring members, so a
+/// Every successful promotion removes ring members, so a
 /// **positional** cursor into the rebuilt ring skids past the
 /// longest-waiting nodes. 6 Venerables, `batch_size = 2`: cycle 1
 /// evaluates [1,2] and promotes both; cycle 2's ring is [3,4,5,6] and
@@ -911,7 +911,7 @@ async fn promotion_churn_does_not_skip_the_next_ring_members() {
     );
 }
 
-/// F1: with a steady Stage-2 inflow the positional skid repeats and
+/// With a steady Stage-2 inflow the positional skid repeats and
 /// the same victims are starved **forever** — the review's
 /// demonstration, reproduced.
 ///
@@ -984,7 +984,7 @@ async fn sustained_inflow_does_not_starve_the_waiting_ring_members() {
     );
 }
 
-/// F1/F10: with the Canonical budget full the ring must not rotate at
+/// With the Canonical budget full the ring must not rotate at
 /// all, and `stage3_batch` must report nothing — it names the window
 /// the predicate **ran on**. The old shape took the window first and
 /// broke out of the promotion loop, so the cursor advanced over nodes
@@ -1021,7 +1021,7 @@ async fn full_budget_evaluates_nothing_and_does_not_rotate_the_ring() {
     );
 }
 
-/// F19: budget contention — `remaining == 1` with two eligible
+/// Budget contention — `remaining == 1` with two eligible
 /// Venerables. Exactly one may promote, and spec §10's
 /// score-descending order within the batch is what decides which: the
 /// higher-scoring node wins even though it sorts later in the ring.
@@ -1029,7 +1029,7 @@ async fn full_budget_evaluates_nothing_and_does_not_rotate_the_ring() {
 /// true; spending it in ring order would hand the slot to the lowest
 /// NodeId instead.)
 ///
-/// R2-2: both nodes are *evaluated* — the budget cut happens in
+/// Both nodes are *evaluated* — the budget cut happens in
 /// `apply`, on the nodes that passed, so `stage3_batch` names the
 /// loser too. It has to: which of them can pass is not knowable at
 /// gather time, and pre-selecting the top `remaining` starved the
@@ -1068,7 +1068,7 @@ async fn budget_contention_gives_the_last_slot_to_the_higher_score() {
     assert_eq!(canonical_count(&g.read()), 1);
 }
 
-/// R2-2: a top-scoring Venerable that cannot pass must not hold the
+/// A top-scoring Venerable that cannot pass must not hold the
 /// last budget slot hostage.
 ///
 /// Ring `[A(score .9, blast 2), B(.5, blast 8), C(.4, blast 8)]` with
@@ -1125,7 +1125,7 @@ async fn a_blocked_top_scorer_does_not_starve_the_rest_of_the_ring() {
     assert_eq!(status_of(&g.read(), nid(3)), CanonizationStatus::Venerable);
 }
 
-/// F19 + issue #2: demotion ties. Two Canonicals with the **same**
+/// Issue #2: demotion ties. Two Canonicals with the **same**
 /// blast radius over a budget of 1; spec §10 demotes the lowest blast
 /// radius first, and the tie-break is canonical key ascending with
 /// NodeId ascending only behind that. Without a stable order the
@@ -1180,7 +1180,7 @@ async fn demotion_blast_radius_tie_breaks_on_canonical_key_ahead_of_node_id() {
     assert_eq!(status_of(&g.read(), nid(20)), CanonizationStatus::Canonical);
 }
 
-/// F7 at the eval seam: `EvalParams::min_edge_age` must reach the
+/// At the eval seam: `EvalParams::min_edge_age` must reach the
 /// Stage-3 blast query. The hub's dependents are attached with edges
 /// created AT `now`, so the 60s inflation guard sees blast 0 and
 /// refuses; the same graph promotes at `min_edge_age = 0`. A refactor
@@ -1297,10 +1297,10 @@ async fn audit_rows_equal_committed_transitions() {
 
 #[tokio::test]
 async fn stage3_promotion_capped_at_remaining_budget() {
-    // P2 (phase R2): a cycle must never push the Canonical count over
+    // A cycle must never push the Canonical count over
     // max_canonical_nodes. A Venerable that would overflow stays
     // Venerable; the pre-existing Canonical is not displaced and no
-    // same-tick promote-then-demote occurs (the original P1-1).
+    // same-tick promote-then-demote occurs (the original bug).
     let mut g = Graph::new(sid());
     g.insert_interaction(interaction(1, None, ts())).unwrap();
 
@@ -1346,7 +1346,7 @@ async fn stage3_promotion_capped_at_remaining_budget() {
 
 #[tokio::test]
 async fn flush_after_eval_does_not_duplicate_audit_rows() {
-    // P1-2: record_canonization (immediate) + write-behind flush must not
+    // record_canonization (immediate) + write-behind flush must not
     // double the demo audit trail. Reload after drain_log+flush must carry
     // each committed transition exactly once.
     let mut g = Graph::new(sid());
@@ -1656,7 +1656,7 @@ async fn solo_hub_promotes_with_measured_blast(g: Graph, hub_id: NodeId, store: 
     );
 }
 
-/// #36 PR 2 review M1 (b): under Swarm, a store without the window-aware
+/// #36 PR 2: under Swarm, a store without the window-aware
 /// span gives each Stage 2 node no evidence instead of failing the cycle.
 /// The Candidate stays a Candidate and the Venerable fails its re-check, but
 /// the cycle still succeeds, Stage 3 still evaluates its window, the budget
@@ -1766,7 +1766,7 @@ async fn the_explanation_matches_the_evaluator_on_a_store_without_the_window_spa
     }
 }
 
-/// #36 PR 3 review L1: under Solo a Candidate whose band can never admit
+/// #36 PR 3: under Solo a Candidate whose band can never admit
 /// the Venerable hop is not probed (no store query), while one whose band
 /// can is. Swarm probes every Candidate, as before.
 #[tokio::test]
@@ -1803,7 +1803,7 @@ async fn solo_probes_only_candidates_its_band_could_admit() {
     }
 }
 
-/// #36 PR 3 review L9: with the Canonical budget full the cycle runs no
+/// #36 PR 3: with the Canonical budget full the cycle runs no
 /// Stage 3 window, and the explanation says so instead of reporting a
 /// Venerable whose other Stage 3 gates hold as eligible.
 #[tokio::test]

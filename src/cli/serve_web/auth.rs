@@ -1,4 +1,4 @@
-//! Authorization for the portal, mirroring T8.7's fail-closed bearer posture
+//! Authorization for the portal, mirroring the fail-closed bearer posture
 //! in `crate::mcp::serve`: the unprintable token, env-over-flag resolution,
 //! the non-loopback refusal, and the gate in front of every route.
 //!
@@ -28,7 +28,7 @@
 //! anything else is evaluated. With any credential configured (legacy,
 //! `[[web.credential]]` or inherited, one or several) any `Host` is
 //! accepted: a rebound page cannot present a token it does not know (the
-//! rule `lambo serve` applies, #32 PR 5 review M1). "Only when no token" is
+//! rule `lambo serve` applies, #32 PR 5). "Only when no token" is
 //! therefore "only under the implicit grant", whatever the number of
 //! credentials.
 
@@ -88,7 +88,7 @@ pub struct AuthToken(String);
 impl AuthToken {
     /// Refuse a token no request could present, by the rule `lambo serve`
     /// applies to its own ([`check_configured_token`], shared so the two
-    /// cannot drift; #4 PR 2 review M2): empty or whitespace-only (fail
+    /// cannot drift; #4 PR 2): empty or whitespace-only (fail
     /// closed, not silently), leading or trailing whitespace, a byte outside
     /// printable ASCII, or longer than
     /// [`MAX_BEARER_CREDENTIAL_BYTES`](crate::surface::bearer::MAX_BEARER_CREDENTIAL_BYTES).
@@ -176,7 +176,7 @@ pub(super) fn portal_authority(
 /// on serve, the `[serve] sessions` of this `lambo.toml` plus every name
 /// under any `[[serve.credential]]` prefix (`ServeConfig::hosted_sessions`,
 /// the set serve attaches on demand since #32 PR 6), intersected with the
-/// portal's allowlist; never the allowlist alone (#4 PR 3 review M1). A
+/// portal's allowlist; never the allowlist alone (#4 PR 3). A
 /// session pinned only by `lambo serve --session` is not in the file, so an
 /// inherited `"*"` does not reach it: the import narrows, never widens.
 ///
@@ -221,7 +221,7 @@ pub(super) fn resolve_web_credentials_with(
         )
         .map_err(usage)?;
         // Serve's `"*"` is serve's hosted set, never the portal's
-        // allowlist (review M1): pin it before the grant reaches the
+        // allowlist: pin it before the grant reaches the
         // portal's authority, which judges `"*"` against the allowlist.
         let hosted = serve.hosted_sessions();
         out.extend(
@@ -353,7 +353,7 @@ pub(super) fn switchable(
 
 /// Each grant's exact session names that are not served, in scan order,
 /// for a startup warning (the one `lambo serve` gives for unpinned names,
-/// #32 PR 5 review I5): exact names outside both the startup allowlist and
+/// #32 PR 5): exact names outside both the startup allowlist and
 /// the grant's explicit prefix are unreachable. Grants with none are left
 /// out. Names a credential and sessions, never a token.
 pub(super) fn unserved_names<'a>(
@@ -379,7 +379,7 @@ pub(super) fn unserved_names<'a>(
 /// The served sessions `grant` may list (design 6.2), in allowlist order:
 /// its exact names, or every one when its scope covers every served
 /// session (`local`, `default`, a web `"*"`). An inherited `"*"` lists the
-/// served sessions `[serve] sessions` pins (review M1). Never a prefix
+/// served sessions `[serve] sessions` pins. Never a prefix
 /// expansion: a prefix grant can read dynamic ids but lists none of them.
 pub(super) fn listable<'a>(grant: &SessionGrant, sessions: &'a [SessionId]) -> Vec<&'a str> {
     let scope = grant.scope();
@@ -429,8 +429,8 @@ impl HostCheck {
     /// The presented value is parsed by the rule a configured entry is
     /// ([`AllowedHost::parse`]), so a malformed one is refused even when its
     /// host part is loopback: user info (`evil@localhost`), an empty or
-    /// non-numeric port (`localhost:`, `localhost:abc`) (#4 PR 2 review L1).
-    /// More than one `Host` header is refused too (review L2; RFC 9112
+    /// non-numeric port (`localhost:`, `localhost:abc`) (#4 PR 2).
+    /// More than one `Host` header is refused too (RFC 9112
     /// section 3.2): a proxy in front that read the other one would
     /// disagree with the portal about which host the request is for.
     fn allows(&self, req: &axum::extract::Request) -> bool {
@@ -507,7 +507,7 @@ pub(super) async fn host_guard(
 /// A request carrying two `Authorization` headers is refused like a wrong
 /// token, by the extraction `lambo serve` uses
 /// ([`presented_authorization`](crate::surface::bearer::presented_authorization);
-/// #4 PR 2 review L3): this is the one helper behind both the scoped check
+/// #4 PR 2): this is the one helper behind both the scoped check
 /// and the [`gate`], so the 401 is [`unauthorized`]'s, byte for byte.
 ///
 /// `None` is answered with [`unauthorized`].

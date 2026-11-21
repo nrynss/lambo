@@ -27,7 +27,7 @@ fn distance_to_score_is_cosine() {
     assert_eq!(C::distance_to_score(2.0), -1.0);
     assert_eq!(C::distance_to_score(3.0), -1.0, "clamped");
     assert!((C::distance_to_score(0.5) - 0.875).abs() < 1e-12);
-    // B3 vice-versa pin: copying Postgres `1 - d` onto Cockroach goes red.
+    // Vice-versa pin: copying Postgres `1 - d` onto Cockroach goes red.
     // Postgres at d=1 is 0.0 and at d=0.5 is 0.5.
     assert_ne!(
         C::distance_to_score(1.0),
@@ -214,7 +214,7 @@ fn initial_fetch_k_is_floor_but_capped_at_same_bound_as_growth() {
 
 #[test]
 fn tx_retryable_is_structured_not_substring() {
-    // STORE-4: the tx-replay decision matches the TYPED error — never
+    // The tx-replay decision matches the TYPED error — never
     // message text. Constraint violations (SQLSTATE 23xxx) are
     // deterministic: never replayed, dead-lettered upstream. Typed
     // variants are permanent. A Backend error may be a transient
@@ -286,9 +286,9 @@ async fn checked_vector_transaction_retries_backend_but_not_contract_mismatch() 
 
 #[test]
 fn keyword_score_folds_case_like_memory_store() {
-    // Regression (P3 review R1): the SQL predicate lowercases the columns, so the
-    // score must fold the row text the same way — a mixed-case row ("Register
-    // User") selected by token "register" scores its hits, not 0.0.
+    // Regression: the SQL predicate lowercases the columns, so the score must
+    // fold the row text the same way — a mixed-case row ("Register User")
+    // selected by token "register" scores its hits, not 0.0.
     assert_eq!(
         score_keyword_hits("Register User", "Register User", &["register".into()]),
         1,

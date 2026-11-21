@@ -2,7 +2,7 @@
 
 use super::*;
 
-/// **L82-1, the second failure.** `serve` bounds `close()` and *drops* it on
+/// **The second failure.** `serve` bounds `close()` and *drops* it on
 /// timeout, so the release on close's success path never runs — the live run
 /// exited with a stale lease row and wedged the session for the whole
 /// `LEASE_TTL` on top of losing the tail.
@@ -44,7 +44,7 @@ async fn an_abandoned_close_still_releases_the_lease() {
     assert_eq!(store.releases(), 1, "the release must happen at most once");
 }
 
-/// **L82-1, the wiring.** The two halves above are the pieces; this is
+/// **The wiring.** The two halves above are the pieces; this is
 /// `serve`'s actual shutdown path putting them together.
 ///
 /// It drives `close_bounded_until` — the real body of the bounded close,
@@ -124,12 +124,11 @@ fn live_handles(session: &str) -> usize {
         .unwrap_or(0)
 }
 
-/// T81-8, retargeted for T8.6: the in-process `ACTIVE_SESSIONS` advisory
-/// still reports a second same-process handle loudly, with both agent ids,
-/// and releases the registration on drop — including a handle that was never
-/// closed.
+/// The in-process `ACTIVE_SESSIONS` advisory still reports a second
+/// same-process handle loudly, with both agent ids, and releases the
+/// registration on drop — including a handle that was never closed.
 ///
-/// **Two separate stores on one logical session, on purpose.** Post-T8.6 the
+/// **Two separate stores on one logical session, on purpose.** Now the
 /// store lease *refuses* a second writer that shares a store (see
 /// `a_second_writer_sharing_a_store_is_refused_by_the_lease`). The advisory
 /// log's remaining domain is the collision the per-store lease cannot see:
@@ -186,7 +185,7 @@ async fn a_second_handle_on_one_session_is_reported_loudly() {
     assert_eq!(live_handles("one-writer"), 0);
 }
 
-/// T8.6: a second writer that **shares a store** with the first is now
+/// A second writer that **shares a store** with the first is now
 /// refused by the store-enforced single-writer lease — the promotion from
 /// advisory to enforced. The refusal names the current holder and its age,
 /// and points at the operator override.
@@ -275,7 +274,7 @@ async fn the_builders_endpoint_is_published_into_the_lease_row() {
     hub.close().await.unwrap();
 }
 
-/// T86-2: a holder that LOSES its lease is FENCED. After the store starves
+/// A holder that LOSES its lease is FENCED. After the store starves
 /// its heartbeat past the TTL and another writer takes over, this handle must
 /// refuse every further write and must NOT flush or release — otherwise the
 /// two writers flush divergent graphs into one session (the exact split-brain
@@ -385,7 +384,7 @@ async fn a_lost_lease_fences_the_writer_and_stops_the_flush() {
     drop(first);
 }
 
-/// T8.6: exactly one holder and one honest refusal, in-process — the memory
+/// Exactly one holder and one honest refusal, in-process — the memory
 /// backend's cross-"process" analogue done as two `build`s on one store.
 #[tokio::test]
 async fn one_store_two_builds_yield_one_holder_and_one_refusal() {
@@ -423,7 +422,7 @@ async fn one_store_two_builds_yield_one_holder_and_one_refusal() {
     }
 }
 
-/// R2-4: close-then-reattach in one process — the MCP server's ordinary
+/// Close-then-reattach in one process — the MCP server's ordinary
 /// shape, and this crate's own reload test — must be silent.
 ///
 /// `close()` used to leave the registration in place until `Drop`, so
@@ -468,16 +467,16 @@ async fn a_closed_handle_does_not_collide_with_a_reattach() {
     assert_eq!(live_handles("reattach"), 0);
 }
 
-/// R2-2: dropping a handle whose `close()` **failed** must not be silent.
+/// Dropping a handle whose `close()` **failed** must not be silent.
 ///
 /// The leak guard keyed on task handles still being `Some`; a failed close
 /// has already taken all three, so `leaked` was false and `Drop` said
 /// nothing — while the tail that same close deliberately kept in the log
-/// (T81-5, for the retry it documents) went out with the handle. The exact
+/// (for the retry it documents) went out with the handle. The exact
 /// case an owner most needs told, lost most quietly.
 ///
 /// The failed close also keeps its registration, which is the other half of
-/// the R2-4 policy: this handle still holds an undurable tail.
+/// the registration policy: this handle still holds an undurable tail.
 #[tokio::test]
 async fn dropping_a_handle_whose_close_failed_warns_about_the_kept_tail() {
     let (logs, _guard) = capture_logs(tracing::Level::WARN);
@@ -602,7 +601,7 @@ async fn a_handle_fenced_by_an_erase_refuses_reads_and_writes() {
     );
 }
 
-/// #23 review L2: a handle whose background flush is refused because the
+/// #23: a handle whose background flush is refused because the
 /// session was erased is fenced by that refusal at once, not one heartbeat
 /// (15 s) later, so it stops answering reads from its copy of the deleted
 /// data. No `simulate_lease_loss` here: the flush task's latch is what flips
@@ -708,7 +707,7 @@ async fn fence_for_erase_closes_without_flushing_or_releasing_and_the_holder_era
     );
 }
 
-/// #32 PR 7 review L1: `fence_for_erase` fences at once (writes are refused
+/// #32 PR 7: `fence_for_erase` fences at once (writes are refused
 /// as erased) but does not wake a waiter on the fence (a one-session
 /// serve's wind-down) until `announce_fence`, so the erase can answer its
 /// request before the transport starts to drain.

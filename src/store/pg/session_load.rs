@@ -126,7 +126,7 @@ impl<D: Dialect> PgStore<D> {
                 .map_err(|e| backend(format!("parse root_goal JSONB: {e}")))?;
 
             // Ordered `SetEmbedding` mutations and full-snapshot seed both persist
-            // the nullable kind/model/dim columns. STORE-7: a row with exactly one of
+            // the nullable kind/model/dim columns. A row with exactly one of
             // embedding_kind / embedding_dim set (kind XOR dim) is a corruption
             // error — mirroring sqlite — never a silent `None` (see
             // `session_embedding_from_parts`).

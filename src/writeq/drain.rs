@@ -15,7 +15,7 @@
 //!   every unsettled receipt is set aside until `close()`'s final flush
 //!   reports, then settled by [`WritePipeline::settle_deferred`]:
 //!   `intent_durable` if the flush made its intent durable, `close_unflushed`
-//!   if it did not (#117 review M1);
+//!   if it did not (#117);
 //! * `Drop` cannot await, so [`WritePipeline::abort_all_sync`] aborts without
 //!   joining and settles nothing.
 //!
@@ -54,7 +54,7 @@ use crate::types::AgentId;
 /// serve applies it, so this constant prices *latency at shutdown against
 /// promptness of the write*, nothing more. (Its earlier career — sizing
 /// admission through a rate projection so the queue "could not admit more than
-/// shutdown will wait for" — produced J3-R1-1, J3-R2-1, J3-R3-1 and J3-R3-2 in
+/// shutdown will wait for" — produced four defects in
 /// turn, one falsified estimator axis each; the redesign retired that role.)
 ///
 /// Two seconds, and the ceiling on that choice is `close()`'s own budget:
@@ -92,7 +92,7 @@ impl WritePipeline {
     /// number admission promised"; admission stopped promising a drain time at
     /// the J3 redesign.) Anything still outstanding when it runs out is
     /// **deferred, not lost** (J3 durable intents): workers are aborted and
-    /// joined (aborting alone proves nothing — the R3-1 lesson), and every
+    /// joined (aborting alone proves nothing), and every
     /// still-pending receipt is set aside for
     /// [`WritePipeline::settle_deferred`]. The jobs themselves were recorded
     /// as intents at admission, and the close's final flush — which runs AFTER
@@ -147,7 +147,7 @@ impl WritePipeline {
 
     /// Stop every worker and set aside every receipt still unsettled, to be
     /// settled by [`WritePipeline::settle_deferred`] once `close()` knows
-    /// whether its final flush made the intents durable (#117 review M1).
+    /// whether its final flush made the intents durable (#117).
     /// Returns how many receipts this set aside.
     pub(crate) async fn abort_workers(&self) -> usize {
         self.seal();
@@ -172,7 +172,7 @@ impl WritePipeline {
             (handles, orphans)
         };
         // Abort every worker before joining any, and keep the handles in
-        // custody until each join returns (R3-1, as `Memory::close` does for
+        // custody until each join returns (as `Memory::close` does for
         // its own tasks). A join is pending while its worker is mid-poll on
         // another thread, and `close()` may be cancelled right there: joining
         // one at a time used to drop the rest un-aborted, still applying jobs,
@@ -242,7 +242,7 @@ impl WritePipeline {
     }
 
     /// Settle the receipts [`WritePipeline::abort_workers`] set aside, now that
-    /// `close()` knows how its final flush ended (#117 review M1).
+    /// `close()` knows how its final flush ended (#117).
     ///
     /// * [`CloseFlush::Durable`] — the flush completed (or there was nothing
     ///   left to flush), so every set-aside write is a durable intent the next

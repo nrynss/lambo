@@ -1,4 +1,4 @@
-//! `Memory` — the spec §6.1 library surface (T8.1).
+//! `Memory` — the spec §6.1 library surface.
 //!
 //! One [`Memory`] owns a session's in-RAM [`Graph`], its [`InvertedIndex`], the
 //! resolved store and embedder, and everything that runs in the background for
@@ -24,7 +24,7 @@
 //! * **The writers gate** (`gate.rs`): a write either lands in `close()`'s final
 //!   batch or is refused; nothing is acknowledged and lost.
 //! * **Interactions are server-stamped** from the process clock; no library
-//!   method, CLI flag or MCP argument accepts a timestamp (P6 review F18). The
+//!   method, CLI flag or MCP argument accepts a timestamp. The
 //!   clock itself is a crate-private construction seam
 //!   (`MemoryBuilder::clock`, used only by `lambo demo`).
 //! * **Single-writer custody** (`leases.rs`): lease, fence, second-writer
@@ -222,7 +222,7 @@ pub struct Memory {
     daemon_handle: PlMutex<Option<JoinHandle<()>>>,
     flush_handle: PlMutex<Option<JoinHandle<()>>>,
     canon_handle: PlMutex<Option<JoinHandle<()>>>,
-    /// The single-writer lease heartbeat (T8.6). Aborted by `close()` before the
+    /// The single-writer lease heartbeat. Aborted by `close()` before the
     /// lease is released, and by `Drop` so a leaked handle stops squatting the
     /// lease (its row then lapses at TTL rather than being kept alive forever).
     /// Unlike the three producers it never touches the graph or the tail, so a
@@ -233,7 +233,7 @@ pub struct Memory {
     startup_events: PlMutex<Option<broadcast::Receiver<DaemonEvent>>>,
     /// Session-scoped recall cache (spec §8's key carries no session id, so the
     /// owner holds one per session). Locked per lookup and per insert inside
-    /// the pipeline, never across a recall (#171 B2): before, a `tokio` mutex
+    /// the pipeline, never across a recall (#171): before, a `tokio` mutex
     /// held for the whole recall serialized every recall on this handle.
     recall_cache: SharedRecallCache<RecallPipeline>,
     /// Session-scoped LRU of recall query embeddings (#14). Keyed by the
@@ -250,7 +250,7 @@ pub struct Memory {
     /// final drain's write section. A leaf lock: never held while another lock
     /// is taken. See [`crate::daemon::access`] for what counts and why.
     accesses: Arc<AccessLedger>,
-    /// **Writers gate** (T81-1, COH-6 clause 14). Mutating methods hold the
+    /// **Writers gate** (COH-6 clause 14). Mutating methods hold the
     /// READ side for their whole body — `.await`s included — and re-check
     /// `closed` once they have it; [`Memory::close`] takes the WRITE side
     /// before stopping the tasks, so it cannot drain past an in-flight write.
@@ -265,18 +265,18 @@ pub struct Memory {
     /// once a close has actually made the tail durable.
     ///
     /// A second **concurrent** caller parks here until the first finishes
-    /// rather than returning an early `Ok` over an in-flight final flush
-    /// (T81-6), and a **failed** close leaves it `false` so the tail — pushed
-    /// back to the front of the log — can be retried (T81-5).
+    /// rather than returning an early `Ok` over an in-flight final flush,
+    /// and a **failed** close leaves it `false` so the tail — pushed back to
+    /// the front of the log — can be retried.
     close_state: tokio::sync::Mutex<bool>,
     closed: AtomicBool,
     /// `true` while this handle holds a slot in [`ACTIVE_SESSIONS`](leases::ACTIVE_SESSIONS). A
-    /// **successful** `close()` releases it (R2-4) and clears this, so [`Drop`]
+    /// **successful** `close()` releases it and clears this, so [`Drop`]
     /// does not release a second time and take a *different* handle's slot with
     /// it — the registry keys on session + agent id, which a re-attach reuses.
     registered: AtomicBool,
     /// This handle's single-writer lease identity (agent + pid + host), reused
-    /// by the heartbeat and by release (T8.6).
+    /// by the heartbeat and by release.
     lease_holder: LeaseHolder,
     /// Monotonic fencing token (GitHub issue #1) this handle presents on every
     /// durable write (via the FlushTask and the canon task). Minted by the
@@ -293,7 +293,7 @@ pub struct Memory {
     /// `Drop` cannot `await` the store anyway); it only aborts the heartbeat so
     /// the lease is actually free to lapse.
     lease_released: AtomicBool,
-    /// **Single-writer-lease fence** (T86-2). Latched `true` by the heartbeat
+    /// **Single-writer-lease fence**. Latched `true` by the heartbeat
     /// the instant it observes the lease was LOST — this handle's lease expired
     /// (a store outage starved the beat past the TTL) and another writer took
     /// the session. Once set, the write gate ([`Memory::begin_write`] /
@@ -303,7 +303,7 @@ pub struct Memory {
     /// where two writers flush divergent graphs into one session into a loud,
     /// safe stop. Shared (`Arc`) with the heartbeat and the flush task.
     lease_lost: Arc<AtomicBool>,
-    /// The serve-facing half of that fence (JE2E-4): a wake-up and the winner's
+    /// The serve-facing half of that fence: a wake-up and the winner's
     /// id. See [`LeaseLostSignal`], and [`Memory::lease_lost_latched`] for what
     /// waits on it.
     lease_lost_signal: Arc<LeaseLostSignal>,

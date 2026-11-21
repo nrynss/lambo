@@ -1,4 +1,4 @@
-//! Write-behind flush task (T3.4) — spec §2.4–§2.5.
+//! Write-behind flush task — spec §2.4–§2.5.
 //!
 //! A tokio task drains the graph's ordered mutation log ([`Graph::drain_log`])
 //! into a [`GraphStore`] every `interval` — or earlier, once a pending batch
@@ -10,10 +10,10 @@
 //!   that found nothing pending — #16 §3), `depth` (mutations not yet durable:
 //!   the in-graph log plus the pending batch — in flight, backed off, or
 //!   retained after exhausted retries) and `dead_lettered` (batches dropped
-//!   for a deterministic constraint violation, STORE-4/D5). `lag` uses the
+//!   for a deterministic constraint violation). `lag` uses the
 //!   tokio clock so it tracks paused time deterministically in tests.
 //! * **Bounded attempts.** Every `store.flush` attempt is bounded by
-//!   `FLUSH_ATTEMPT_TIMEOUT` (STORE-2): a hung store must not wedge the
+//!   `FLUSH_ATTEMPT_TIMEOUT`: a hung store must not wedge the
 //!   loop forever — the timeout maps into the retry path like any `Err`.
 //!   The loop's two other store calls get the same guard (#301): the lease
 //!   read behind the erased check after a failed flush, and the stats row
@@ -30,7 +30,7 @@
 //!   the mod.rs contract). The in-memory graph is the primary tier (spec
 //!   §2.1), so the session keeps accepting writes throughout an outage. A
 //!   retained batch that exhausted its retries waits out
-//!   `RETAINED_BACKOFF` before the next attempt (F3): a permanently failing
+//!   `RETAINED_BACKOFF` before the next attempt: a permanently failing
 //!   store re-enters the retry sequence at most once per hold, not once per
 //!   interval tick. The one exception: a batch rejected with a
 //!   deterministic constraint violation, or since #301 a value the store
@@ -70,7 +70,7 @@
 //!   `durability="none"`: the task logs at ERROR, sets
 //!   [`FlushTask::degraded`], and stops all store I/O. The mode is terminal
 //!   for the task's lifetime. While degraded the task keeps draining the log
-//!   but DROPS each drained batch (STORE-3, spec §2.3 "none = pure RAM") —
+//!   but DROPS each drained batch (spec §2.3 "none = pure RAM") —
 //!   post-degrade retention must not grow without bound.
 //! * **Read accesses do not build backlog (issue #30).** Access counts are
 //!   per-concept state in the graph's dirty set, not log entries. Each cycle
@@ -100,7 +100,7 @@
 //! [`Graph`]), so `POLL_QUANTUM` is the granularity of the early-flush
 //! trigger and of the depth observation.
 //!
-//! ## Shutdown (COH-6, T8.1)
+//! ## Shutdown (COH-6)
 //!
 //! [`FlushTask::stop`] signals a graceful stop: the loop finishes its current
 //! cycle, returns its task-owned `pending` buffer to the front of the graph's
@@ -133,22 +133,22 @@ fn access_budget(log_max: usize, pending: usize) -> usize {
 /// Poll cadence for the `max_batch` early-flush trigger and for keeping
 /// `depth` fresh between interval ticks (see module docs).
 const POLL_QUANTUM: Duration = Duration::from_millis(100);
-/// Per-attempt bound on a single `store.flush` call (STORE-2): a hung store
+/// Per-attempt bound on a single `store.flush` call: a hung store
 /// must not wedge the flush loop forever. The timeout maps into the existing
 /// retry path (same as any `Err`), so the loop still retries → retains →
-/// degrades as designed. Mirrors the F2 `LOAD_SESSION_TIMEOUT` (load.rs) —
+/// degrades as designed. Mirrors `LOAD_SESSION_TIMEOUT` (load.rs) —
 /// same 30s value, same naming convention.
 ///
 /// `pub(crate)`: `Memory::close`'s hand-rolled final flush (COH-6 step 4) is
 /// one more attempt against the same store and bounds itself with the same
-/// constant — one value, one behaviour to reason about (T81-2).
+/// constant — one value, one behaviour to reason about.
 pub(crate) const FLUSH_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Backoff base for flush retries; doubles per retry.
 const BACKOFF_BASE: Duration = Duration::from_millis(100);
 /// Cap on a single backoff sleep (retries are bounded by `FlushParams::retries`
 /// anyway; the cap keeps a large `retries` config from sleeping for minutes).
 const BACKOFF_CAP: Duration = Duration::from_secs(10);
-/// Post-retry hold on a retained batch (F3): once `retries` are exhausted the
+/// Post-retry hold on a retained batch: once `retries` are exhausted the
 /// batch waits out this long before the **next** attempt re-enters the retry
 /// sequence. Without it a permanently failing store would re-run the whole
 /// retry sequence (attempts + warn) on every interval tick. Equal to the
@@ -158,11 +158,11 @@ const BACKOFF_CAP: Duration = Duration::from_secs(10);
 const RETAINED_BACKOFF: Duration = BACKOFF_CAP;
 
 /// How often the loop may republish its stats row without a flush attempt
-/// (#11 review P3-5). After an attempt it always publishes.
+/// (#11). After an attempt it always publishes.
 const STATS_REPUBLISH_INTERVAL: Duration = Duration::from_secs(5);
 
 /// How far the live lag must drift from the published one before a cycle
-/// with no flush attempt republishes it (#11 review P3-5). Below a second the
+/// with no flush attempt republishes it (#11). Below a second the
 /// row already says "caught up", and rewriting it every poll would turn an
 /// idle writer into a steady stream of store writes.
 const STATS_REPUBLISH_LAG_DRIFT: Duration = Duration::from_secs(1);
@@ -184,10 +184,10 @@ pub struct FlushStats {
     /// the last successful flush made durable, or the last poll that found
     /// nothing pending. 0 at spawn.
     ///
-    /// A successful flush counts from its drain, not from its end (#11 review
-    /// P2-1): a write that lands while a slow or retried flush runs is not in
-    /// that flush, so counting from the end would make the lag younger than
-    /// the oldest write still at risk.
+    /// A successful flush counts from its drain, not from its end (#11): a
+    /// write that lands while a slow or retried flush runs is not in that
+    /// flush, so counting from the end would make the lag younger than the
+    /// oldest write still at risk.
     ///
     /// Until #16 §3 this was the time since the last successful flush alone,
     /// so it grew with idle time while nothing was pending: the dogfood rigs
@@ -201,7 +201,7 @@ pub struct FlushStats {
     /// caught up, since it drops what it drains.
     ///
     /// Mutations that are **dropped** rather than flushed are reported by
-    /// `dead_lettered` and `degraded`, not by the lag (#11 review P3-3):
+    /// `dead_lettered` and `degraded`, not by the lag (#11):
     ///
     /// * a dead-lettered batch is cleared from `pending`, so the next poll
     ///   that finds nothing else pending counts the store caught up and the
@@ -240,10 +240,10 @@ struct Shared {
     caught_up: Mutex<tokio::time::Instant>,
     depth: AtomicUsize,
     degraded: AtomicBool,
-    /// STORE-4 / D5: dead-lettered-batch counter (deterministic constraint
+    /// Dead-lettered-batch counter (deterministic constraint
     /// violations dropped after logging). Monotonic for the task's lifetime.
     dead_lettered: AtomicU64,
-    /// Graceful-stop channel (COH-6, T8.1). [`FlushTask::stop`] latches a
+    /// Graceful-stop channel (COH-6). [`FlushTask::stop`] latches a
     /// permit here; the loop's `biased;` `select!` polls it FIRST and, when it
     /// fires, re-appends `pending` to the front of the graph log and exits.
     stop: Arc<tokio::sync::Notify>,
@@ -291,7 +291,7 @@ pub struct FlushTask {
     store: Arc<dyn GraphStore>,
     params: FlushParams,
     shared: Arc<Shared>,
-    /// Single-writer-lease fence (T86-2). When the owning [`crate::memory::Memory`]
+    /// Single-writer-lease fence. When the owning [`crate::memory::Memory`]
     /// handle loses its lease (a store outage starved the heartbeat past the TTL
     /// and another writer took the session), the heartbeat latches this `true`,
     /// and so does this loop when the store refuses a flush as stale (#293);
@@ -305,7 +305,7 @@ pub struct FlushTask {
     /// advisory-default backends).
     token: Option<u64>,
     /// Called when the store refuses a flush because the session was erased
-    /// (#23 review L2); see [`FlushTask::with_erased_latch`].
+    /// (#23); see [`FlushTask::with_erased_latch`].
     erased_latch: Option<crate::store::erase::ErasedLatch>,
 }
 
@@ -323,7 +323,7 @@ impl FlushTask {
         }
     }
 
-    /// Arm the single-writer-lease fence (T86-2): once `fence` is set `true` the
+    /// Arm the single-writer-lease fence: once `fence` is set `true` the
     /// loop stops flushing and drops its pending buffer. `Memory::build` passes
     /// the same `Arc<AtomicBool>` here and to the lease heartbeat, so a lost
     /// lease fences the write-behind path without a channel between the two.
@@ -344,7 +344,7 @@ impl FlushTask {
     }
 
     /// Call `latch` when the store refuses a flush because the session was
-    /// erased (#23 review L2), confirmed on the lease row. `Memory::build`
+    /// erased (#23), confirmed on the lease row. `Memory::build`
     /// passes one that latches the lease fence, so this loop stops and drops
     /// its tail on its next iteration and the handle refuses reads of the
     /// deleted data at once, rather than one heartbeat later.
@@ -416,7 +416,7 @@ impl FlushTask {
     }
 
     /// Ask the flush loop to stop gracefully (COH-6 — `Memory::close`'s
-    /// shutdown drain, T8.1). Returns immediately; the task stops later.
+    /// shutdown drain). Returns immediately; the task stops later.
     ///
     /// This is a **signal, not a drain API**: the loop finishes its current
     /// `FlushLoop::cycle` (any in-flight flush and its retry/backoff run to
@@ -457,7 +457,7 @@ impl FlushTask {
 /// attempt, and since #301 the lease read behind the erased check and the
 /// stats row write ([`guarded`]).
 ///
-/// `pub(crate)`: P6's canonization loop makes the same argument for the same
+/// `pub(crate)`: the canonization loop makes the same argument for the same
 /// reason (a panicking store must not stop the loop for the process's
 /// lifetime), and one implementation means one behaviour to reason about.
 pub(crate) struct CatchUnwindPoll<F>(pub(crate) F);
@@ -521,7 +521,7 @@ struct FlushLoop {
     store: Arc<dyn GraphStore>,
     params: FlushParams,
     shared: Arc<Shared>,
-    /// Single-writer-lease fence (T86-2); see [`FlushTask::with_fence`].
+    /// Single-writer-lease fence; see [`FlushTask::with_fence`].
     fence: Option<Arc<AtomicBool>>,
     /// Monotonic fencing token presented on every `store.flush` (GitHub issue
     /// #1); see [`FlushTask::with_token`].
@@ -541,7 +541,7 @@ struct FlushLoop {
     /// MAX/GREATEST upsert).
     pending: MutationBatch,
     /// Earliest time (tokio clock) the next flush attempt may run after a
-    /// retained batch exhausted its retries (F3, `RETAINED_BACKOFF`). `None`
+    /// retained batch exhausted its retries (`RETAINED_BACKOFF`). `None`
     /// when no batch is in the post-retry hold.
     retry_after: Option<tokio::time::Instant>,
     /// `pending` holds read-access updates not yet durable (issue #30). While
@@ -550,8 +550,8 @@ struct FlushLoop {
     /// `pending` carries at most one access drain — never a growing backlog
     /// from reads. Cleared whenever `pending` is emptied.
     holds_accesses: bool,
-    /// When the stats row was last published, and what it said (#11 review
-    /// P3-5). `None` until the first flush attempt.
+    /// When the stats row was last published, and what it said (#11).
+    /// `None` until the first flush attempt.
     last_published: Option<(tokio::time::Instant, SessionFlushStats)>,
 }
 
@@ -570,7 +570,7 @@ impl FlushLoop {
         let stop = self.shared.stop.clone();
 
         loop {
-            // Single-writer-lease fence (T86-2). Checked at the top of every
+            // Single-writer-lease fence. Checked at the top of every
             // iteration, in the stop branch, after each cycle's drain and before
             // each retry of a flush (#293), so once the heartbeat (or a stale
             // write, #293) latches a lost lease no further flush is issued: a
@@ -686,7 +686,7 @@ impl FlushLoop {
     /// permanent error, which degrades the session (#301): degraded does no
     /// further store I/O, so its stats row is not written either.
     async fn drain_and_flush(&mut self, session: &SessionId, tick: bool) -> bool {
-        // When this cycle's drain took the log (#11 review P2-1). A flush makes
+        // When this cycle's drain took the log (#11). A flush makes
         // durable what was drained, so a successful one means the store held
         // every mutation as of THIS instant, not as of the flush's end: writes
         // that land while a slow or retried flush runs are not in it, and the
@@ -781,7 +781,7 @@ impl FlushLoop {
         }
         if self.shared.degraded.load(Ordering::Acquire) {
             // durability="none" (spec §2.3 — "none = pure RAM"): the graph is
-            // the only tier, so no further store I/O. STORE-3: DROP the
+            // the only tier, so no further store I/O. DROP the
             // drained batch instead of retaining it — post-degrade retention
             // used to grow without bound for the session's remaining life.
             // Depth is the in-graph log only.
@@ -803,7 +803,7 @@ impl FlushLoop {
             return false;
         }
 
-        // Post-retry hold (F3): a batch that exhausted its retries waits out
+        // Post-retry hold: a batch that exhausted its retries waits out
         // RETAINED_BACKOFF before the next attempt, so a permanently failing
         // store does not re-run the whole retry sequence on every interval
         // tick. New drains keep appending while we wait; the batch flushes
@@ -861,7 +861,7 @@ impl FlushLoop {
             // (#293): the top of the next iteration drops `pending`.
             Err(_) if self.fenced() => {}
             Err(err) if self.erased(session, &err).await => {
-                // #23 review L2: the session was erased. The latch fences
+                // #23: the session was erased. The latch fences
                 // this handle, and the top of the next iteration drops
                 // `pending` and stops; nothing is retried against a
                 // tombstone.
@@ -921,7 +921,7 @@ impl FlushLoop {
                 // Retries exhausted: RETAIN the batch — it is still in
                 // `self.pending`, never dropped, and flushes before new drains
                 // on the next cycle. The session keeps working (spec §2.4).
-                // F3: hold the next attempt until the post-retry backoff
+                // Hold the next attempt until the post-retry backoff
                 // elapses (see `cycle`'s gate above).
                 self.retry_after = Some(tokio::time::Instant::now() + RETAINED_BACKOFF);
                 self.refresh_depth();
@@ -941,13 +941,13 @@ impl FlushLoop {
         true
     }
 
-    /// Publish the observable flush stats to the shared store (T85-3), so a
+    /// Publish the observable flush stats to the shared store, so a
     /// reader in another process (e.g. `serve-web`) can render real
     /// `flush_lag_ms` / `log_depth` instead of `n/a`. Best-effort by design:
     /// publication failure must never perturb the flush path (the local
     /// stats handle is unaffected).
     ///
-    /// Always after a flush attempt. Between attempts too (#11 review P3-5),
+    /// Always after a flush attempt. Between attempts too (#11),
     /// or the row a reader sees froze at the last attempt: a retained batch
     /// waits out `RETAINED_BACKOFF` with no attempt while its lag grows, and
     /// an idle writer's lag, which #16 §3 made read under one poll, never
@@ -958,7 +958,7 @@ impl FlushLoop {
     /// row is right and an outage costs one small upsert every few seconds.
     /// Nothing is published before the first attempt: until then the honest
     /// reading for a reader is `n/a`. Nor between attempts once degraded or
-    /// over `log_max` (#11 review round 2, F2): degraded is terminal and does
+    /// over `log_max` (#11): degraded is terminal and does
     /// no further store I/O, and its lag grows for good, so the drift test
     /// would pass every time and upsert, inline in this loop, against the
     /// store whose failures degraded it.
@@ -1006,7 +1006,7 @@ impl FlushLoop {
 
     /// Attempt `store.flush` with exponential backoff, up to `retries` retries
     /// after the initial attempt (total attempts = `retries` + 1). Every
-    /// attempt is bounded by `FLUSH_ATTEMPT_TIMEOUT` (STORE-2): a hung
+    /// attempt is bounded by `FLUSH_ATTEMPT_TIMEOUT`: a hung
     /// store must not wedge the loop forever — the timeout maps into this
     /// retry path exactly like any other `Err` (retry → retain → degrade).
     /// A [`StoreError::Constraint`] is deterministic and surfaces
@@ -1043,7 +1043,7 @@ impl FlushLoop {
                     }
                 }
             };
-            // STORE-2: bound the whole attempt (panic containment included).
+            // Bound the whole attempt (panic containment included).
             // On timeout the in-flight future is dropped; the backend only
             // borrows `&self.pending`, so the pending buffer is intact.
             let result = match tokio::time::timeout(FLUSH_ATTEMPT_TIMEOUT, attempt).await {
@@ -1088,7 +1088,7 @@ impl FlushLoop {
     }
 
     /// `true` (after calling the latch) when `err` refused the flush because
-    /// the session was erased (#23 review L2). `false`, without reading the
+    /// the session was erased (#23). `false`, without reading the
     /// store, for a task with no latch armed.
     ///
     /// The lease read is [`guarded`] (#301). A read that panics or times out
@@ -1117,7 +1117,7 @@ impl FlushLoop {
         true
     }
 
-    /// `true` once the single-writer lease has been lost (T86-2): the shared
+    /// `true` once the single-writer lease has been lost: the shared
     /// fence latched, or this loop saw a stale write (#293).
     fn fenced(&self) -> bool {
         self.stale
@@ -1694,8 +1694,8 @@ mod tests {
     }
 
     /// `GraphStore` mock: its flush HANGS (never resolves) for the first
-    /// `hang_next(n)` calls, then delegates to an inner store. STORE-2
-    /// harness — mirrors the F2 `HangingStore` (load.rs) for the flush path:
+    /// `hang_next(n)` calls, then delegates to an inner store. A harness
+    /// that mirrors the `HangingStore` (load.rs) for the flush path:
     /// a hung flush must be bounded by `FLUSH_ATTEMPT_TIMEOUT`, never wedge
     /// the loop.
     struct HungStore {
@@ -1756,7 +1756,7 @@ mod tests {
             self.batch_sizes.lock().push(batch.len());
             if self.should_hang() {
                 // Never resolve — the flush-loop attempt timeout must bound
-                // this (STORE-2); the pending future is dropped on timeout.
+                // this; the pending future is dropped on timeout.
                 std::future::pending().await
             } else {
                 self.inner.flush(batch, token).await
@@ -2109,7 +2109,7 @@ mod tests {
         assert_eq!((log, depth), (0, 3), "early poll: below max_batch, held");
     }
 
-    /// T85-3: the writer's `FlushTask` publishes its flush stats into the
+    /// The writer's `FlushTask` publishes its flush stats into the
     /// shared store after each completed flush cycle, so a reader in another
     /// process can render real `flush_lag_ms` / `log_depth` instead of `n/a`.
     #[tokio::test(start_paused = true)]
@@ -2153,7 +2153,7 @@ mod tests {
         handle.abort();
     }
 
-    /// T86-2: once the single-writer-lease fence is latched, the loop stops
+    /// Once the single-writer-lease fence is latched, the loop stops
     /// flushing and DROPS its not-yet-durable `pending` rather than write it —
     /// so a handle that lost its lease cannot overwrite the new holder's rows.
     ///
@@ -2466,7 +2466,7 @@ mod tests {
         assert_eq!(task.stats().depth, 2);
         // The success made durable what the tick drained 700 ms ago, and the
         // outage-period writes landed after that drain, so the lag counts
-        // from the drain (#11 review P2-1). This asserted a reset to zero
+        // from the drain (#11). This asserted a reset to zero
         // before, which under-reported the age of those two pending writes.
         assert_eq!(task.stats().lag, Duration::from_millis(700));
 
@@ -2519,7 +2519,7 @@ mod tests {
         assert!(task.degraded());
         assert_eq!(store.flush_calls(), 2, "no flush attempt once degraded");
 
-        // STORE-3: post-degrade the drained batch is DROPPED (spec §2.3
+        // Post-degrade the drained batch is DROPPED (spec §2.3
         // "none = pure RAM") — pending is cleared every cycle, so depth
         // tracks the in-graph log only (which drains to zero). The old
         // contract retained every mutation for the session's remaining life
@@ -2598,8 +2598,8 @@ mod tests {
         assert_eq!(task.stats().depth, 5);
         assert_eq!(task.stats().lag, Duration::from_millis(1_200));
 
-        // Store recovers: the retained batch held for RETAINED_BACKOFF (F3 —
-        // the next tick after retry_after elapses re-enters the sequence and
+        // Store recovers: the retained batch held for RETAINED_BACKOFF (the
+        // next tick after retry_after elapses re-enters the sequence and
         // lands the whole pending batch); lag resets.
         tokio::time::advance(Duration::from_secs(10)).await;
         wait_until(|| store.flush_calls() >= 3).await;
@@ -2662,7 +2662,7 @@ mod tests {
         );
     }
 
-    /// **#11 review P2-1: the lag bounds the age of what a crash would lose,
+    /// **#11: the lag bounds the age of what a crash would lose,
     /// even across a slow or retried flush.** A flush makes durable what was
     /// drained when it started, not what landed while it ran. The store was
     /// marked caught up at the flush's END, so a write landing during a
@@ -2717,7 +2717,7 @@ mod tests {
         );
     }
 
-    /// **#11 review P3-5: the published stats row keeps up between flush
+    /// **#11: the published stats row keeps up between flush
     /// attempts.** A reader in another process (`serve-web`, `lambo stats`)
     /// sees only the row the writer publishes, and the row was published
     /// only after a flush attempt. A retained batch waits out
@@ -2785,7 +2785,7 @@ mod tests {
         );
     }
 
-    /// **#11 review round 2, F2: a degraded session does not republish its
+    /// **#11: a degraded session does not republish its
     /// stats row between attempts.** Degraded (`durability = "none"`) is
     /// terminal and makes no further store I/O, but its lag grows for good,
     /// so the between-attempts republish found the row drifted every time and
@@ -2869,7 +2869,7 @@ mod tests {
         let _iid2 = add_interaction(&graph, 2, Some(iid)); // 2 mutations
         assert_eq!(graph.read().log_len(), 2);
 
-        // After the post-retry hold elapses (F3), the next tick re-enters the
+        // After the post-retry hold elapses, the next tick re-enters the
         // sequence: drained(2) appended AFTER retained(3) -> one ordered batch
         // of 5. (11s from the retain point: 10s hold + 1s to the next tick.)
         tokio::time::advance(Duration::from_secs(11)).await;
@@ -3053,7 +3053,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn retained_batch_does_not_retry_every_tick() {
-        // F3: after retries are exhausted the retained batch holds for
+        // After retries are exhausted the retained batch holds for
         // RETAINED_BACKOFF (10s) before the next attempt — a permanently
         // failing store must not re-run the whole retry sequence (attempts +
         // warn) on every interval tick. Attempts stay flat while the hold is
@@ -3162,7 +3162,7 @@ mod tests {
         assert!(!task.degraded());
         assert_eq!(task.stats().depth, 3, "retained batch still pending");
 
-        // Store stops panicking: once the post-retry hold elapses (F3), the
+        // Store stops panicking: once the post-retry hold elapses, the
         // next tick lands the retained batch whole.
         tokio::time::advance(Duration::from_secs(11)).await;
         wait_until(|| task.stats().depth == 0).await;
@@ -3224,7 +3224,7 @@ mod tests {
         tokio::time::advance(Duration::from_secs(1)).await;
         wait_until(|| task.degraded()).await;
         assert!(task.degraded());
-        // STORE-3: post-degrade the drained batch is dropped — depth tracks
+        // Post-degrade the drained batch is dropped — depth tracks
         // the in-graph log only (drains to zero), never the retained backlog.
         tokio::time::advance(Duration::from_millis(100)).await;
         wait_until(|| task.stats().depth == 0).await;
@@ -3248,7 +3248,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn hung_store_flush_times_out_never_wedges_the_loop() {
-        // STORE-2: a store whose flush NEVER resolves must not wedge the
+        // A store whose flush NEVER resolves must not wedge the
         // flush loop. The per-attempt FLUSH_ATTEMPT_TIMEOUT ends the attempt;
         // the timeout maps into the existing retry path (backoff → retry →
         // retain), the session keeps working, and the loop never dies, never
@@ -3297,7 +3297,7 @@ mod tests {
         assert!(!task.degraded());
 
         // Attempt 2 times out; retries exhausted -> batch RETAINED (never
-        // dropped), post-retry hold armed (F3). Still no degrade, loop alive.
+        // dropped), post-retry hold armed. Still no degrade, loop alive.
         tokio::time::advance(FLUSH_ATTEMPT_TIMEOUT).await;
         tokio::time::advance(Duration::from_secs(1)).await; // absorb lag; retain settles
         assert_eq!(
@@ -3511,7 +3511,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn constraint_violation_dead_letters_the_batch() {
-        // STORE-4 / D5: a deterministic constraint violation is dead-lettered
+        // A deterministic constraint violation is dead-lettered
         // — logged and dropped (visible in stats), NOT retried, NOT retained,
         // NOT degraded. The session continues and the next batch flushes
         // fresh (no head-of-line poisoning).
@@ -3893,7 +3893,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn transient_failures_keep_the_retain_path_untouched() {
-        // STORE-4 contrast: transient (Backend) failures keep the EXISTING
+        // Contrast: transient (Backend) failures keep the EXISTING
         // retain path — retried, then retained — and never touch
         // `dead_lettered`. Only constraint violations dead-letter.
         let _callsites = quiet_logs();
@@ -4011,7 +4011,7 @@ mod tests {
 
     /// Issue #17: the epoch stamp must survive the pending-consumption path —
     /// a batch retained by failed flushes, carried across cycles whose drains
-    /// are empty, then flushed by the post-retry hold re-entry (F3). The
+    /// are empty, then flushed by the post-retry hold re-entry. The
     /// second flush of this test happens after only empty drains, and the
     /// watermark it lands equals the stamp of the ORIGINAL drain — not 0, not
     /// lowered. Fails on a loop that drops the stamp.
@@ -4050,7 +4050,7 @@ mod tests {
             "nothing durable yet"
         );
 
-        // Empty-drain cycles while the post-retry hold (F3) elapses: no new
+        // Empty-drain cycles while the post-retry hold elapses: no new
         // writes, the loop keeps cycling, no flush attempts fire.
         tokio::time::advance(Duration::from_secs(3)).await;
         assert_eq!(store.flush_calls(), 2, "no attempts during the hold");

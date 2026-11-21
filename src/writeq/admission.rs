@@ -39,14 +39,14 @@ use crate::types::{
 /// floor under a rate-derived lane bound), `WRITE_QUEUE_MIN` (the unmeasured
 /// aggregate floor), `PROBE_LANE_CEILING` and `PROBE_AGGREGATE_CEILING` (the
 /// probe-era caps on rate-derived bounds — the aggregate one derived per-lane
-/// and applied across lanes, which is J3-R3-2: 13 of 16 acked writes abandoned
-/// from eight concurrent agents up). All five existed to make an estimated
+/// and applied across lanes, which abandoned 13 of 16 acked writes from eight
+/// concurrent agents up). All five existed to make an estimated
 /// rate safe to build a durability invariant on. No parameter can do that —
 /// five falsified axes in three rounds are the evidence — so under durable
 /// intents the bounds are static ([`WRITE_QUEUE_LANE_MAX`],
 /// [`WRITE_QUEUE_MAX`]) and the whole family is deleted rather than re-derived
-/// under the new role: fairness needs a share, not a projection. J3-R3-2 is
-/// closed by this deletion, argument above.
+/// under the new role: fairness needs a share, not a projection. That
+/// defect is closed by this deletion, argument above.
 ///
 /// The **per-lane fair-share bound**: what one agent may hold outstanding.
 ///
@@ -74,7 +74,7 @@ const _: () = assert!(
 /// The queue's aggregate admission bound — **derived from receipt retention,
 /// not from throughput.**
 ///
-/// (J3 round-1 N3: this headline read "Upper clamp on the measured bound" for a
+/// (This headline read "Upper clamp on the measured bound" for a
 /// bound that stopped being measured and started *being* the bound at the
 /// estimator demotion. There is nothing left for it to clamp.)
 ///
@@ -99,7 +99,7 @@ pub const WRITE_QUEUE_MAX: usize = MAX_RETAINED_RECEIPTS / 4;
 
 /// Build-time invariant: the fair-share numerator is a real queue.
 ///
-/// **This replaces a vacuous guard** (J3-R1-7): `(N / 4) * 4 <= N` holds for
+/// **This replaces a vacuous guard**: `(N / 4) * 4 <= N` holds for
 /// every `usize` under integer division, so the old assertion could not fail
 /// for any value of `MAX_RETAINED_RECEIPTS` and proved none of the property its
 /// message claimed. The property the old message reached for —
@@ -147,7 +147,7 @@ pub enum DropReason {
 
 impl DropReason {
     /// The receipt's stated reason. **It must name the bound that actually
-    /// refused, as what it actually is** — J3-R3-4 caught the previous text
+    /// refused, as what it actually is** — a review caught the previous text
     /// attributing every refusal to "a bound measured … on this deployment's
     /// embedder" in an era where a fixed ceiling was deciding; under the J3
     /// redesign the bounds are static shares and the text says so.
@@ -607,12 +607,12 @@ pub(super) struct Lanes {
     /// `notify_waiters`. Distinct from [`Lanes::workers_aborted`], which is
     /// set a whole join earlier: a receipt wait that ends at close keys on
     /// this one, or it answers `pending` for a queued job the same close is
-    /// about to settle `intent_durable` (#11 review round 2, F1). Never
+    /// about to settle `intent_durable` (#11). Never
     /// cleared.
     pub(super) settled_at_close: bool,
     /// Receipts [`WritePipeline::abort_workers`] set aside for
     /// [`WritePipeline::settle_deferred`]: unsettled when the close aborted
-    /// the workers, answered once its final flush reports (#117 review M1).
+    /// the workers, answered once its final flush reports (#117).
     /// Kept after an incomplete flush so a retried close that completes can
     /// upgrade them; cleared once they are settled `intent_durable`.
     pub(super) close_deferred: Vec<ReceiptId>,
@@ -710,11 +710,11 @@ impl Lanes {
     /// Outstanding jobs **on one lane** — queued plus the one being run by that
     /// lane's own consumer. This is the population [`WRITE_QUEUE_LANE_MAX`]
     /// bounds, and the reason a global gauge could not do the job: the drain is
-    /// per-lane and serial (J3-R1-1), which is also why the round-3 defect —
-    /// a ceiling derived per-lane and enforced across lanes — was possible at
-    /// all. (J3 round-1 N3: this named `Calibration::lane_bound`, which since the
-    /// estimator demotion is a field that copies the static constant rather than
-    /// a bound of its own.)
+    /// per-lane and serial, which is also why the earlier defect — a ceiling
+    /// derived per-lane and enforced across lanes — was possible at all. (This
+    /// doc once named `Calibration::lane_bound`, which since the estimator
+    /// demotion is a field that copies the static constant rather than a bound
+    /// of its own.)
     pub(super) fn lane_outstanding(&self, agent: &AgentId) -> usize {
         self.queues.get(agent).map_or(0, VecDeque::len)
             + self.running_per_lane.get(agent).copied().unwrap_or(0)
@@ -773,7 +773,7 @@ impl WritePipeline {
         let now = (self.clock)();
 
         // Both count conditions, and the per-lane one first because it is the
-        // one that binds in the case J3-R1-1 measured: one busy agent, whose
+        // one that binds in the measured case: one busy agent, whose
         // single-consumer lane drains 1-wide however wide the deployment's
         // embedder is.
         //
@@ -923,7 +923,7 @@ impl WritePipeline {
                     // A refusal because the session is closing is still a
                     // refusal by a bound and its count must not vanish — but it
                     // gets its **own** counter rather than riding the count
-                    // bound's (J3-R1-8): `write_queue_dropped` is what an
+                    // bound's: `write_queue_dropped` is what an
                     // operator reads for "a burst degraded", and a refused
                     // shutdown tail is a different diagnosis with a different
                     // response. Both are summed into `dropped()`.
@@ -982,7 +982,7 @@ impl WritePipeline {
                         agent,
                         deliver_to,
                         // Unsettled, and therefore never expired and never
-                        // evicted until it settles (J3-R1-3).
+                        // evicted until it settles.
                         settled_at: None,
                         answer: ReceiptAnswer::Pending,
                     },

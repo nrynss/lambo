@@ -84,7 +84,7 @@ async fn memory_on(store: Arc<dyn GraphStore>, session: &str) -> Memory {
 struct FlakyStore {
     inner: Arc<dyn GraphStore>,
     fail_remaining: AtomicUsize,
-    /// Every batch it was handed, whole: the T81-3 assertions need the
+    /// Every batch it was handed, whole: the ordering assertions need the
     /// mutation **sequence**, not just the lengths.
     batches: PlMutex<Vec<MutationBatch>>,
     /// `write_flush_stats` panics instead of returning (#301).
@@ -224,18 +224,19 @@ impl GraphStore for FlakyStore {
     }
 }
 
-/// How a store charges for a flush (L82-1).
+/// How a store charges for a flush.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum CostModel {
-    /// What both SQL adapters did before L82-1: one statement, and so one
-    /// network round-trip, per mutation in the batch.
+    /// What both SQL adapters did before they planned batches into
+    /// statements: one statement, and so one network round-trip, per mutation
+    /// in the batch.
     PerMutation,
     /// What they do now: one statement per planned [`FlushStep`].
     PerPlannedStatement,
 }
 
 /// A store that charges network latency for a flush, so a test can ask
-/// whether a tail drains inside `close()`'s window (L82-1).
+/// whether a tail drains inside `close()`'s window.
 ///
 /// The `+ 2` on every count is `BEGIN` and `COMMIT`, which both adapters pay
 /// once per flush regardless of the batch.
@@ -377,8 +378,8 @@ impl GraphStore for RoundTripStore {
     }
 }
 
-/// Four `record_action` calls at the 64-target fan-out cap — the live L82-1
-/// repro's burst — left un-flushed in the log.
+/// Four `record_action` calls at the 64-target fan-out cap — the live repro's
+/// burst — left un-flushed in the log.
 async fn at_cap_burst(mem: &Memory) {
     for call in 0..4 {
         let produces: Vec<String> = (0..32).map(|n| format!("artifact {call}-{n}")).collect();
@@ -401,7 +402,7 @@ async fn at_cap_burst(mem: &Memory) {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum ParkPoint {
     /// `retract`'s durable-radius query — the await inside a **write**,
-    /// which is where the T81-1 race lives.
+    /// which is where the writers-gate race lives.
     BlastRadius,
     /// `recall`'s vector leg — the await inside a **read**, to show that
     /// `close()` does not wait for readers.

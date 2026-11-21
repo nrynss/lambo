@@ -1,4 +1,4 @@
-//! Evaluation cycle — promotions, budget demotion, audit (T6.4, spec §10).
+//! Evaluation cycle — promotions, budget demotion, audit (spec §10).
 //!
 //! One hop per cycle (documented): a node may take **at most one** legal
 //! edge of the state machine per tick. The eval loop never uses
@@ -92,7 +92,7 @@
 //! A failed *apply* still does not emit — a fabricated transition is worse
 //! than a missing one.
 //!
-//! ## Store faults and Stage 1 (R2-4)
+//! ## Store faults and Stage 1
 //!
 //! Phase 2 issues **every** store query before phase 3 commits **anything**,
 //! so a cycle is never half-applied against a half-answered store. The cost
@@ -138,7 +138,7 @@ pub struct Evaluator {
     /// Last supersession target probed (#20); the next cycle resumes after it.
     supersession_cursor: Option<NodeId>,
     /// The writer timeline supersession attributes edges with, rebuilt only
-    /// when the graph's epoch moves (#20 review L10).
+    /// when the graph's epoch moves (#20).
     timeline: supersession::Timeline,
     /// Where the hold probes of Stage 3's window start next (rotating when
     /// the probe cap cannot cover the window).
@@ -173,14 +173,14 @@ pub struct EvalParams {
     /// Nodes considered per stage per cycle (spec default 50).
     ///
     /// Spec §10 names this bound for the Stage-3 Venerable ring. It also caps
-    /// Stage 1's hops and Stage 2's window (F13): every member of either is a
+    /// Stage 1's hops and Stage 2's window: every member of either is a
     /// per-node store round-trip or a durable write, so an uncapped stage
     /// issues N sequential queries per tick against Cockroach forever. The
     /// spec fixes no *lower* bound on throughput, so capping is compatible;
     /// what it costs is latency, which the cursors bound fairly.
     pub batch_size: usize,
     pub max_canonical_nodes: usize,
-    /// Which Stage-1 promotion policy this cycle runs (C1).
+    /// Which Stage-1 promotion policy this cycle runs.
     ///
     /// A *selector*, not a threshold: it chooses which predicate reads the
     /// knobs above, and duplicates none of them. Default
@@ -206,11 +206,11 @@ pub struct EvalOutcome {
     /// The Stage 3 window this cycle ran through the predicate, in the order
     /// it was evaluated (score-descending).
     ///
-    /// F10: this is the **evaluated** window, not a candidate list — every
+    /// This is the **evaluated** window, not a candidate list — every
     /// node here was run through the Stage-3 predicate, including the ones
     /// that failed it and the ones that passed but found the budget spent.
     /// A cycle with no remaining budget evaluates nothing, so it lists
-    /// nothing and does not step the cursor either (R2-2).
+    /// nothing and does not step the cursor either.
     pub stage3_batch: Vec<NodeId>,
 }
 
@@ -312,7 +312,7 @@ struct CyclePlan {
     /// The hold (#20): the same probes for Stage 3's Venerable window.
     hold: supersession::Probes,
     /// Stage 3 was gathered at a full budget only because supersession
-    /// might free a slot (#20 review M4): its store reads are skipped, and
+    /// might free a slot (#20): its store reads are skipped, and
     /// its cursor restored, when no supersession passes.
     stage3_speculative: bool,
     /// The Stage 3 cursor before this gather, for that restore.
@@ -323,14 +323,13 @@ struct CyclePlan {
     stage2: Vec<NodeId>,
     /// Stage 3: Venerable window off the identity cursor, score-descending.
     /// Empty when the Canonical budget is already full; otherwise the whole
-    /// window — the budget cut happens in `apply`, on the nodes that passed
-    /// (R2-2).
+    /// window — the budget cut happens in `apply`, on the nodes that passed.
     stage3: Vec<Stage3Probe>,
     /// Budget: Canonical ids to rank for demotion, with each concept's
     /// canonical key (the issue-2 tie-break in `verdicts`, which holds no
     /// graph). Empty unless the session is **already** over budget: Stage 3
     /// is capped at the remaining budget, so a cycle can never create the
-    /// overflow it then demotes (the phase-R2 P2 / original P1-1 property).
+    /// overflow it then demotes.
     demotion: Vec<(NodeId, String)>,
 }
 
@@ -364,7 +363,7 @@ struct Verdicts {
     stage2_pass: Vec<NodeId>,
     /// `(node, measured blast)` for Stage-3 admissions, in evaluation order.
     /// The measurement is the one that admitted the node — it is what the
-    /// audit row is stamped with (F9), never a second query.
+    /// audit row is stamped with, never a second query.
     stage3_pass: Vec<(NodeId, u64)>,
     /// `(blast, node, key)` for the budget ranking, blast-ascending, then
     /// canonical key ascending, then NodeId-ascending (spec §10: lowest blast
@@ -429,7 +428,7 @@ impl Evaluator {
         // 2. Verdicts — store I/O, no lock held.
         let verdicts = match verdicts(store, &plan, params, now).await {
             Ok(verdicts) => verdicts,
-            // R2-4: Stage 1 asked the store nothing, so a store fault is no
+            // Stage 1 asked the store nothing, so a store fault is no
             // reason to hold its hops back. Every Stage-2/Stage-3 query runs
             // before anything commits (the atomicity that makes a half-applied
             // cycle impossible), which also means one failing query used to
@@ -481,7 +480,7 @@ impl Evaluator {
             }
         };
 
-        // #20 review M4: a speculative Stage 3 window whose reads were
+        // #20: a speculative Stage 3 window whose reads were
         // skipped was not evaluated, so its ring does not advance.
         // Focused review 1: a window the hold probes could not cover (the
         // probe cap) defers its unprobed Venerables and is evaluated again,
@@ -584,7 +583,7 @@ impl Evaluator {
         // the next cycle takes the next members), unlike Stage 2, whose
         // members can fail their evidence gate cycle after cycle.
         //
-        // C1: the predicate is chosen by `promotion_policy` rather than
+        // The predicate is chosen by `promotion_policy` rather than
         // welded in. `now` and `params.min_age` age the dependence evidence
         // both policies read (#36 PR 3).
         //
@@ -607,9 +606,9 @@ impl Evaluator {
             .collect();
 
         // Stage 2 — one `interaction_span_with_window` round-trip per member, so the
-        // window is capped and walks the identity cursor (F13).
+        // window is capped and walks the identity cursor.
         //
-        // #36 PR 3 review L1: the ring holds only members the policy could
+        // #36 PR 3: the ring holds only members the policy could
         // admit (`admits_hop` for the hop, asked before the verdict). Swarm
         // admits every member, so its ring is unchanged; Solo drops the
         // Candidates whose band cannot reach Venerable, which would cost a
@@ -637,9 +636,9 @@ impl Evaluator {
         //   evaluating is pure cost and rotating the ring is a lie. The old
         //   shape took the window and then broke out of the promotion loop, so
         //   the cursor advanced over nodes it never evaluated and
-        //   `stage3_batch` claimed them anyway (F1's related note, F10).
+        //   `stage3_batch` claimed them anyway.
         // * `remaining > 0` — take the whole ring window and evaluate all of
-        //   it. **R2-2**: truncating to `remaining` here starved the ring.
+        //   it. Truncating to `remaining` here starved the ring.
         //   The window is ranked score-descending, so when the ring fits in
         //   `batch_size` (the common case) the same top-`remaining` members
         //   were the only ones ever evaluated — a top-scoring Venerable that
@@ -656,7 +655,7 @@ impl Evaluator {
             .max_canonical_nodes
             .saturating_sub(canonical_count(graph));
         let mut venerable = ids_with_status(graph, CanonizationStatus::Venerable);
-        // Same filter as Stage 2's ring (review L1).
+        // Same filter as Stage 2's ring.
         venerable.retain(|&id| {
             scorer.admits_hop_with(
                 graph,
@@ -780,7 +779,7 @@ async fn verdicts(
     params: &EvalParams,
     now: DateTime<Utc>,
 ) -> Result<Verdicts, StoreError> {
-    // #20: supersession first (review M4), each node's evidence read once
+    // #20: supersession first, each node's evidence read once
     // per cycle. A store without `dependent_evidence` gives no verdicts and
     // one warning; any other error fails the cycle like every query here.
     let mut out = Verdicts {
@@ -818,7 +817,7 @@ async fn verdicts(
     }
     // #36 PR 3: both policies consume the Stage 2 verdict for the
     // Candidate → Venerable hop and re-check it before Stage 3 (PR 1's
-    // upgrade guard, PR 2 review M1 had Solo skip it because Solo then
+    // upgrade guard, PR 2 had Solo skip it because Solo then
     // ignored the verdict). The match is exhaustive so a new policy has to
     // decide.
     let (query_stage2, recheck_stage2) = match params.promotion_policy {
@@ -897,7 +896,7 @@ async fn verdicts(
 
 /// One Stage 2 verdict, under either policy. A store that lacks the window-aware span
 /// (`StoreError::Capability`, the trait default) gives this node **no
-/// evidence** rather than failing the cycle (#36 PR 2 review M1): Stage 2
+/// evidence** rather than failing the cycle (#36 PR 2): Stage 2
 /// fails closed for the node, and Stage 1, Stage 3's other probes and the
 /// budget still run. The capability is recorded once for the cycle's
 /// warning. Any other store error still fails the cycle.
@@ -954,14 +953,14 @@ fn apply(
     timeline: &supersession::Timeline,
     outcome: &mut EvalOutcome,
 ) -> Result<(), LamboError> {
-    // A skipped speculative window was not evaluated (#20 review M4).
+    // A skipped speculative window was not evaluated (#20).
     let stage3: &[Stage3Probe] = if verdicts.stage3_skipped {
         &[]
     } else {
         &plan.stage3
     };
     outcome.stage3_batch = stage3.iter().map(|p| p.node).collect();
-    // #20 review M5: every event this cycle commits gets a time-ordered id,
+    // #20: every event this cycle commits gets a time-ordered id,
     // so a reload (which orders one instant's rows by id) keeps commit order.
     let mut ids = EventIds::new(now);
 
@@ -989,7 +988,7 @@ fn apply(
     let mut superseded: Vec<NodeId> = Vec::new();
     if !verdicts.supersede.is_empty() {
         let timeline = timeline.get(graph);
-        // Review M1: cooldowns are judged as of the start of the cycle, so a
+        // Cooldowns are judged as of the start of the cycle, so a
         // concept demoted earlier in this loop keeps what it could do, and
         // the order verdicts are applied in changes nothing. Reciprocal pairs
         // were already settled by the pair rule in `decide`.
@@ -1066,7 +1065,7 @@ fn apply(
     }
 
     // --- Stage 3: Venerable → Canonical, capped at the remaining budget ---
-    // This is the only budget cut (R2-2): the verdicts cover the whole ring
+    // This is the only budget cut: the verdicts cover the whole ring
     // window, and the passing nodes are spent against the budget in
     // score-descending order. Recomputed here, under the write guard, because
     // the graph was unlocked while the verdicts ran.
@@ -1074,7 +1073,7 @@ fn apply(
     // A node needs a passing Stage 3 verdict (which already includes the
     // Stage 2 re-check and the cooldown) and its policy's admission. It
     // keeps the measurement that admitted it: the audit row is stamped with
-    // exactly that value (F9). Before #36 PR 3 Solo could promote here on its
+    // exactly that value. Before #36 PR 3 Solo could promote here on its
     // band with no verdict, gated only by the cooldown; that path is gone.
     let mut remaining = params
         .max_canonical_nodes
@@ -1241,7 +1240,7 @@ fn promotion_event(
     }
 }
 
-/// Audit event ids for one cycle, in commit order (#20 review M5).
+/// Audit event ids for one cycle, in commit order (#20).
 ///
 /// UUIDv7-shaped: the cycle's `now` in milliseconds, then a 12-bit sequence
 /// in commit order, then random bits. Every event of one cycle shares

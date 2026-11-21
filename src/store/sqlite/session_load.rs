@@ -349,7 +349,7 @@ pub(super) async fn load_canonization_events(
             .try_get(9)
             .map_err(|e| db_err("load canonization events", e))?;
         // A `superseded_by` that is not an id makes the pair unreadable: the
-        // reason loads as unknown (review M3) instead of failing the load.
+        // reason loads as unknown instead of failing the load.
         let (reason, superseded_by, unreadable_by) = match superseded_by.as_deref() {
             None => (reason, None, false),
             Some(by) => match node_id(by, "canonization superseded_by") {
@@ -375,8 +375,8 @@ pub(super) async fn load_canonization_events(
             last_demotion_time: last_demotion.as_deref().map(text_to_ts).transpose()?,
             occurred_at: text_to_ts(&occurred)?,
             // #20: (NULL, NULL) is a historical row. A malformed pair or a
-            // reason on a promotion loads as an unknown reason with a warning
-            // (review M3), never as Budget, and never stops the load.
+            // reason on a promotion loads as an unknown reason with a warning,
+            // never as Budget, and never stops the load.
             reason,
         };
         out.push(event.loaded());
@@ -407,7 +407,7 @@ impl SqliteStore {
 
 /// Materialize one session on the caller's transaction, `None` when it has no
 /// `sessions` row. `load_snapshot` and the split import's in-transaction
-/// verification (#33 D2) both read through here, so a verified import is
+/// verification (#33) both read through here, so a verified import is
 /// compared with exactly what a later load returns.
 pub(super) async fn load_snapshot_in(
     tx: &mut sqlx::SqliteConnection,

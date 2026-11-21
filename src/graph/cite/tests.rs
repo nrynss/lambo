@@ -76,7 +76,7 @@ fn a_citation_makes_the_cited_concept_load_bearing() {
 
 /// Every reference form reaches the same concept, so three references to one
 /// ruling write one edge. A synonym the session holds is not a reference
-/// form (review H1): it is refused as missing.
+/// form: it is refused as missing.
 #[test]
 fn every_reference_form_writes_the_same_one_edge() {
     let (mut g, i) = graph("cite-forms");
@@ -417,7 +417,7 @@ fn action<'a>(depends_on: &'a [&'a str]) -> Action<'a> {
     }
 }
 
-/// `record_action`'s `depends_on` (review M1): a hyphenated node id or a
+/// `record_action`'s `depends_on`: a hyphenated node id or a
 /// unique short id of an existing concept cites it; an interaction's id and
 /// a short id two concepts share are refused; everything else is the 0.5.0
 /// text rule, including an id that names nothing.
@@ -478,7 +478,7 @@ fn record_action_cites_ids_and_refuses_only_interactions_and_shared_prefixes() {
     node_of(&g, "schema v1");
 }
 
-/// Review M1, with what dogfood agents actually send in `depends_on`: every
+/// The same, with what dogfood agents actually send in `depends_on`: every
 /// one of these was accepted by 0.5.0 as text and still is, created on first
 /// use and matched after.
 #[test]
@@ -534,7 +534,7 @@ fn a_resent_0_5_0_request_lands_on_the_entity_its_id_text_minted() {
     assert_eq!(g.concepts().count(), before + 1, "only the action is new");
 }
 
-/// Review L4: an 8-hex commit hash that happens to prefix a concept's id
+/// An 8-hex commit hash that happens to prefix a concept's id
 /// (chance about concepts / 2^32) cites that concept; a text match wins
 /// over the prefix, as 0.5.0 matched text.
 #[test]

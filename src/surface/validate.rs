@@ -9,13 +9,13 @@
 use super::limits::{MAX_ACTION_TARGETS, MAX_CONCEPTS_PER_DERIVE, MAX_CONTENT_BYTES};
 use crate::graph::canonical::{is_invisible, is_text_required_invisible};
 
-/// Is `c` an invisible character refused by [`check_size`] (L82-2 / R1-2)?
+/// Is `c` an invisible character refused by [`check_size`]?
 ///
 /// `char::is_control()` covers **only** C0 (`U+0000–U+001F`) and C1
 /// (`U+007F–U+009F`). Every invisible codepoint above that — bidi overrides, the
 /// zero-width family, the BOM, the TAGS block, and the blank-rendering fillers —
 /// sails straight past it, which is how a `U+202E` RIGHT-TO-LEFT OVERRIDE
-/// reached a live `concepts.content` column in the T8.2/T8.3 review. Such a
+/// reached a live `concepts.content` column in a review. Such a
 /// character renders as nothing, so a recall context block containing one looks
 /// innocuous to a human reviewer while reordering or hiding what the model
 /// actually reads: a prompt-injection and spoofing vector, not a cosmetic
@@ -23,7 +23,7 @@ use crate::graph::canonical::{is_invisible, is_text_required_invisible};
 ///
 /// The table lives in [`crate::graph::canonical::INVISIBLE_RANGES`], next to the
 /// tokenizer that strips it, because the surface rule and the canonical-key rule
-/// are two halves of one policy and a second copy here would drift (R1-2). This
+/// are two halves of one policy and a second copy here would drift. This
 /// surface refuses everything in it except
 /// [`crate::graph::canonical::TEXT_REQUIRED_INVISIBLE`] — the joiners, the
 /// variation selectors and the combining grapheme joiner, which legitimate
@@ -31,7 +31,7 @@ use crate::graph::canonical::{is_invisible, is_text_required_invisible};
 /// from `canonical_key`, so allowing them cannot fork one concept into two.
 ///
 /// **`U+2028`/`U+2029` are deliberately absent, and that is a decision rather
-/// than an oversight (J1-R2-1, argument corrected J1-R3-3).** This table's
+/// than an oversight.** This table's
 /// criterion is *invisibility* — characters that survive human review while
 /// changing what the model reads or what the canonical key becomes — and on
 /// that criterion the line separators do not qualify for `content`: they render
@@ -63,7 +63,7 @@ fn is_disallowed_format(c: char) -> bool {
 ///   are the only controls a legitimate multi-line concept needs;
 /// * a bidi override, zero-width or blank-rendering character is *invisible*, so
 ///   it survives human review of a recall context block while changing what the
-///   model reads (L82-2).
+///   model reads.
 ///
 /// Both are refused here rather than sanitised silently — a validator that
 /// rewrites content would make the stored concept differ from what the caller
@@ -74,10 +74,10 @@ fn is_disallowed_format(c: char) -> bool {
 /// the control message may say "tab and newline are the only ones allowed"
 /// because for *control* characters that is exactly true, while the invisible
 /// message does not, because the joiners and variation selectors are allowed
-/// (R: the pre-L82-2 wording claimed the stronger contract for both and the
+/// (an earlier wording claimed the stronger contract for both and the
 /// check delivered neither).
 ///
-/// This function is **only half** of the invisible-character policy (R1-2). It
+/// This function is **only half** of the invisible-character policy. It
 /// decides what may be *stored*; [`crate::graph::canonical::normalize_tokens`]
 /// decides what may reach a *canonical key*, and strips the whole table
 /// including the exceptions. Neither is sufficient alone: refusing everything
@@ -158,7 +158,7 @@ pub fn check_concept_count(count: usize) -> Result<(), String> {
 }
 
 /// Refuse a `record_action` whose `produces`, `modifies` and `depends_on`
-/// lists hold more than [`MAX_ACTION_TARGETS`] entries between them (N1).
+/// lists hold more than [`MAX_ACTION_TARGETS`] entries between them.
 pub fn check_action_targets(total: usize) -> Result<(), String> {
     if total > MAX_ACTION_TARGETS {
         return Err(format!(
@@ -540,7 +540,7 @@ mod tests {
         check_no_image_suffix("concept.content", "render 17 [image:r17]s").unwrap();
     }
 
-    /// #22 PR 4 review M1: prose that only mentions the suffix holds no
+    /// #22 PR 4: prose that only mentions the suffix holds no
     /// token that can collide with an image key, so a concept, an action
     /// and a caption may all carry it.
     #[test]
@@ -586,7 +586,7 @@ mod tests {
         check_size("query", "A".repeat(MAX_CONTENT_BYTES).as_str()).unwrap();
     }
 
-    /// **L82-2.** `char::is_control()` is C0/C1 only, so the pre-fix validator
+    /// `char::is_control()` is C0/C1 only, so the pre-fix validator
     /// let every category-*Cf* codepoint through — a live `lambo_derive` with a
     /// `U+202E` returned `isError:false` and the byte landed in
     /// `concepts.content`. Each case here is one of those, by class.
@@ -603,7 +603,7 @@ mod tests {
             ("soft hyphen", "so\u{00AD}ft", "U+00AD"),
             ("tag latin small a", "a\u{E0061}b", "U+E0061"),
             ("language tag", "a\u{E0001}b", "U+E0001"),
-            // R1-2(b): invisible but NOT category Cf, so the first L82-2 pass
+            // Invisible but NOT category Cf, so the first pass of the fix
             // missed all of them. U+3164 is the codepoint most used in the wild
             // for invisible smuggling — it is a *letter* as far as Unicode is
             // concerned, and paints nothing.
@@ -677,7 +677,7 @@ mod tests {
         check_size("concept.content", "درخواست — 请求 — request 🚀").unwrap();
     }
 
-    /// **R1-2(a).** Allowing the joiners is only safe because the canonical key
+    /// Allowing the joiners is only safe because the canonical key
     /// cannot see them. Two strings that render identically must be accepted
     /// *and* collapse to one key — otherwise a caller can mint a second concept
     /// that looks like the first and can never be merged with it.
@@ -713,7 +713,7 @@ mod tests {
 
     /// The control-character message must not claim a contract the check does
     /// not enforce, and the format message must not claim the joiners are
-    /// refused (L82-2: the pre-fix single message overstated both).
+    /// refused (the pre-fix single message overstated both).
     #[test]
     fn refusal_messages_match_what_is_enforced() {
         let control = check_size("query", "a\u{0}b").unwrap_err();
@@ -772,7 +772,7 @@ mod tests {
         );
     }
 
-    /// #33 PR 4 (and its review M1): what a write into a shared layer
+    /// #33 PR 4 (and its review): what a write into a shared layer
     /// refuses as a bare relative path, and what it lets through. Every
     /// input the review listed is here.
     #[test]

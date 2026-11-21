@@ -1,17 +1,17 @@
 //! Single-writer custody of a session: the store lease, its heartbeat and
 //! fence, and in-process second-writer detection.
 //!
-//! * **The lease** (T8.6) is taken by `MemoryBuilder::build_attach` before the
+//! * **The lease** is taken by `MemoryBuilder::build_attach` before the
 //!   startup load, refreshed by [`spawn_lease_heartbeat`], released only by a
 //!   *successful* `close()` (or [`Memory::release_lease_after_abandoned_close`]),
 //!   and left to lapse at TTL on every crash-shaped path, `Drop` included.
-//! * **The fence** (T86-2) is the `lease_lost` flag the heartbeat latches when a
+//! * **The fence** is the `lease_lost` flag the heartbeat latches when a
 //!   refresh finds another holder, or comes back at a token other than the
 //!   handle's (#293), and the flush loop latches when the store refuses a flush
 //!   as stale (#293). Every write gate and the flush loop obey it;
-//!   [`LeaseLostSignal`] is the wake-up and winner id `serve` acts on (JE2E-4).
+//!   [`LeaseLostSignal`] is the wake-up and winner id `serve` acts on.
 //! * **The registry** ([`ACTIVE_SESSIONS`]) reports, never refuses, a second
-//!   `Memory` on one session in one process (T81-8). Keyed by session, so many
+//!   `Memory` on one session in one process. Keyed by session, so many
 //!   sessions in one process (#32) are each tracked independently.
 
 use std::collections::HashMap;
@@ -41,8 +41,8 @@ use crate::types::{AgentId, LamboError, SessionId};
 /// a tool that opens a read-mostly second view), and far too weak because the
 /// collisions that actually corrupt a session come from *other processes and
 /// hosts*, which no in-process registry can see. Inventing a policy here would
-/// buy a false sense of protection; an ERROR line naming both agents buys T8.2
-/// the diagnostic it will actually want.
+/// buy a false sense of protection; an ERROR line naming both agents gives the
+/// operator the diagnostic they will actually want.
 pub(super) static ACTIVE_SESSIONS: LazyLock<PlMutex<HashMap<SessionId, Vec<AgentId>>>> =
     LazyLock::new(|| PlMutex::new(HashMap::new()));
 
@@ -71,7 +71,7 @@ pub(super) fn register_session(session: &SessionId, agent: &AgentId) {
 /// **successful** [`Memory::close`], or [`Drop`] (so a handle that is never
 /// closed still releases when it goes).
 ///
-/// **A successful close releases; a failed one does not** (R2-4). Close then
+/// **A successful close releases; a failed one does not.** Close then
 /// re-attach in the same process is the MCP server's ordinary shape — and this
 /// crate's own reload test — so holding the slot until `Drop` fired a
 /// `SecondSessionWriter` ERROR against a handle that had already made its tail
@@ -93,7 +93,7 @@ pub(super) fn unregister_session(session: &SessionId, agent: &AgentId) {
     }
 }
 
-/// The serve-facing half of the single-writer fence (JE2E-4).
+/// The serve-facing half of the single-writer fence.
 ///
 /// The fence itself is the `AtomicBool` that [`FlushTask::with_fence`](crate::store::flush::FlushTask::with_fence) and every
 /// [`Memory`] write path read. It is the **safety** mechanism, it is unchanged,
@@ -118,7 +118,7 @@ pub(crate) struct LeaseLostSignal {
 }
 
 impl LeaseLostSignal {
-    /// Record the winner **without** waking anyone (#32 PR 7 review L1):
+    /// Record the winner **without** waking anyone (#32 PR 7):
     /// what [`Memory::fence_for_erase`] latches, so the serve's wind-down
     /// does not start before the erase has its answer. [`Self::wake`] wakes
     /// the waiters later. The first winner recorded is kept, as in
@@ -161,7 +161,7 @@ impl LeaseLostSignal {
 const RETAKEN_WINNER: &str =
     "an unknown writer (the lease was taken over and released between two heartbeats)";
 
-/// Spawn the single-writer lease heartbeat (T8.6).
+/// Spawn the single-writer lease heartbeat.
 ///
 /// Refreshes the lease every [`LEASE_HEARTBEAT_INTERVAL`] (a third of the TTL),
 /// so a live holder keeps the session and a crashed one's lease lapses within
@@ -171,7 +171,7 @@ const RETAKEN_WINNER: &str =
 /// A refresh that comes back [`LeaseOutcome::Held`] means this handle **lost**
 /// the session — its lease expired (a store outage starved the heartbeat past
 /// the TTL) and another writer took over. On that transition the heartbeat
-/// latches the shared `fence` (T86-2): the owning [`Memory`] then refuses every
+/// latches the shared `fence`: the owning [`Memory`] then refuses every
 /// further write and its write-behind flush loop stops and drops its pending
 /// tail, so the two writers can no longer flush divergent graphs into one
 /// session. The loss is logged loudly, and the heartbeat then **stops** (#293
@@ -194,8 +194,8 @@ const RETAKEN_WINNER: &str =
 /// rather than being kept alive by a fenced handle, which would wedge the
 /// session for as long as this process lives.
 ///
-/// **What the process does about it is `serve`'s decision, and since JE2E-4 it
-/// winds down** (operator ruling, 2026-08-22). The fence is a *safety*
+/// **What the process does about it is `serve`'s decision, and it winds
+/// down** (operator ruling, 2026-08-22). The fence is a *safety*
 /// mechanism and stays exactly what it was; `signal` is how a serve learns of
 /// the latch promptly enough to act on it, and carries the id of the writer that
 /// took the session so the exit line can name it. A library caller that wants
@@ -238,10 +238,10 @@ pub(super) fn spawn_lease_heartbeat(
                     return;
                 }
                 Ok(LeaseOutcome::Held { current, .. }) => {
-                    // T86-2: fence the writer. From here every write is refused
+                    // Fence the writer. From here every write is refused
                     // and the flush loop stops overwriting the new holder's rows.
                     fence.store(true, Ordering::Release);
-                    // JE2E-4: and wake whoever is waiting to act on it. The
+                    // And wake whoever is waiting to act on it. The
                     // fence is latched FIRST, so a waiter that wakes always
                     // finds the flag already set.
                     signal.latch(&current.holder);
@@ -276,7 +276,7 @@ pub(super) fn spawn_lease_heartbeat(
 }
 
 impl Memory {
-    /// Give up this handle's [`ACTIVE_SESSIONS`] slot, at most once (R2-4).
+    /// Give up this handle's [`ACTIVE_SESSIONS`] slot, at most once.
     ///
     /// Called by a successful `close()` and by [`Drop`], whichever comes first.
     /// The flag is what makes it safe for both to call it: the registry keys on
@@ -290,7 +290,7 @@ impl Memory {
         }
     }
 
-    /// Abort the lease heartbeat, if it is still running (T8.6). Synchronous, so
+    /// Abort the lease heartbeat, if it is still running. Synchronous, so
     /// both `close()` and `Drop` can call it. Idempotent — the second caller
     /// finds the slot already `None`.
     pub(super) fn abort_heartbeat(&self) {
@@ -299,7 +299,7 @@ impl Memory {
         }
     }
 
-    /// Release this handle's single-writer lease, at most once (T8.6).
+    /// Release this handle's single-writer lease, at most once.
     ///
     /// Called only from the **success** paths of `close()`: a graceful close
     /// hands the session off immediately rather than waiting out the TTL. Guarded
@@ -329,8 +329,7 @@ impl Memory {
         }
     }
 
-    /// Release the single-writer lease after a `close()` that was **abandoned**
-    /// (L82-1).
+    /// Release the single-writer lease after a `close()` that was **abandoned**.
     ///
     /// `close()` releases on its own success paths, and deliberately does not on
     /// a failed final flush — that failure keeps the lease for a retried close
@@ -372,7 +371,7 @@ impl Memory {
         self.release_lease_once().await;
     }
 
-    /// Test hook (T86-2): latch the lease-lost fence exactly as
+    /// Test hook: latch the lease-lost fence exactly as
     /// [`spawn_lease_heartbeat`] does when a refresh comes back
     /// [`LeaseOutcome::Held`]. The real heartbeat only fires on its
     /// [`LEASE_HEARTBEAT_INTERVAL`] (15s), so a test drives the fence directly
@@ -383,8 +382,8 @@ impl Memory {
     /// a bare `#[cfg(test)]` method becomes a dead-code error under
     /// `-D warnings` (CI feature-matrix).
     ///
-    /// `pub(crate)` since J1-R2-2, so `mcp::server`'s tests can latch the fence
-    /// too. Before that they could not, and the reserve path's lease-lost arm
+    /// `pub(crate)`, so `mcp::server`'s tests can latch the fence too. Before
+    /// it was widened they could not, and the reserve path's lease-lost arm
     /// had no MCP-level test at all — which is how a `Conflict`-variant match
     /// came to render `lease_lost_error`'s operator SQL to a model without a
     /// single test going red. Widening a test hook by one crate is the cheaper
@@ -399,7 +398,7 @@ impl Memory {
     }
 
     /// [`Memory::simulate_lease_loss`] naming the writer that took the session,
-    /// for the JE2E-4 wind-down tests that assert the exit line names it.
+    /// for the wind-down tests that assert the exit line names it.
     #[cfg(all(test, feature = "store-memory", feature = "embed-fixture"))]
     pub(crate) fn simulate_lease_loss_to(&self, winner: &str) {
         // Same order as the heartbeat: fence first, then wake, so a waiter that
@@ -408,9 +407,9 @@ impl Memory {
         self.lease_lost_signal.latch(winner);
     }
 
-    /// `true` once the heartbeat latched a lost lease (T86-2).
+    /// `true` once the heartbeat latched a lost lease.
     ///
-    /// `pub(crate)` since JE2E-4, so `mcp::serve` can tell a fenced exit from an
+    /// `pub(crate)` so `mcp::serve` can tell a fenced exit from an
     /// ordinary one — it is the difference between "we released the lease" and
     /// "another writer owns it", and it decides what the exit says.
     pub(crate) fn lease_lost(&self) -> bool {
@@ -418,7 +417,7 @@ impl Memory {
     }
 
     /// Resolve once this handle's single-writer lease has been lost, with the
-    /// id of the writer that took it (JE2E-4).
+    /// id of the writer that took it.
     ///
     /// **Waits forever on a healthy holder**, which is the point: it is one arm
     /// of `serve`'s wind-down `select!`, beside SIGTERM. The fence latches at
@@ -468,7 +467,7 @@ impl Memory {
 
     /// Fence this handle for an erase of its own session by its own process
     /// (#32 PR 7, design §6.3), exactly as the store's tombstone would fence
-    /// it at the next heartbeat or refused flush (#23 L2): the lease-lost
+    /// it at the next heartbeat or refused flush (#23): the lease-lost
     /// flag is latched first, then the wake-up, with the tombstone holder as
     /// the winner.
     ///
@@ -480,7 +479,7 @@ impl Memory {
     /// writer can acquire in between. Idempotent, like every latch of the
     /// fence.
     ///
-    /// The fence latches **quietly** (#32 PR 7 review L1): a serve waiting on
+    /// The fence latches **quietly** (#32 PR 7): a serve waiting on
     /// [`Memory::lease_lost_latched`] is not woken until
     /// [`Memory::announce_fence`]. A one-session serve winds down on that
     /// wake-up, and its transport drain must not start before the erase has
@@ -500,7 +499,7 @@ impl Memory {
         self.lease_lost_signal.wake();
     }
 
-    /// The honest refusal a fenced handle returns (T86-2): another writer owns
+    /// The honest refusal a fenced handle returns: another writer owns
     /// the session now, so this process is no longer the writer and refuses to
     /// touch the graph. A `Conflict`, the same class as the build-time
     /// single-writer refusal — except when the fence was an erasure (#23),

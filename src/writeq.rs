@@ -26,7 +26,7 @@
 //!   order; each agent has one FIFO lane with one consumer, so a lane applies
 //!   in submission order and created/matched attribution follows it. Two
 //!   writes one agent has in flight *at once* are unordered (the chain and
-//!   lane positions are pinned in two critical sections; J3-R1-10).
+//!   lane positions are pinned in two critical sections).
 //! * **Durability by construction, not by estimate.** Every admitted job is
 //!   recorded as a durable intent (`PutWriteIntent`) in the same critical
 //!   section that queues it, so at a clean close acked ⇒ (applied ∨ durable
@@ -89,7 +89,7 @@ pub use admission::{
     DropReason, Submitted, WRITE_QUEUE_LANE_MAX, WRITE_QUEUE_MAX, WRITE_QUEUE_MAX_BYTES,
 };
 /// The probe's representative write, for the test that runs it through a
-/// real derive (`memory::tests::writes`, #11 review P3-7).
+/// real derive (`memory::tests::writes`, #11).
 #[cfg(test)]
 pub(crate) use calibration::{probe_write_concepts, probe_write_contexts};
 pub use calibration::{
@@ -154,7 +154,7 @@ pub struct WritePipeline {
     /// 14).
     probe: PipelineProbe,
     /// Service time observed on real writes, which **replaces** the probe's
-    /// serial figure once [`OBSERVED_MIN_SAMPLES`] have been seen (J3-R1-2).
+    /// serial figure once [`OBSERVED_MIN_SAMPLES`] have been seen.
     observed: Arc<PlMutex<ObservedRate>>,
     /// Admission-to-settle latency of recent applied writes (#11).
     apply_latency: Arc<PlMutex<ApplyLatency>>,
@@ -177,7 +177,7 @@ pub struct WritePipeline {
     /// `lambo_stats`.
     drop_logged: AtomicBool,
     /// Latched the first time observation displaces the probe's serial figure,
-    /// so the transition is logged **once** with both numbers (J3-R2-4). It is
+    /// so the transition is logged **once** with both numbers. It is
     /// a one-way transition ([`ObservedRate::samples`] only ever grows), so a
     /// latch here cannot suppress a second, different flip.
     observed_logged: AtomicBool,
@@ -203,7 +203,7 @@ impl WritePipeline {
     /// latency on a startup path J2 has already made latency-sensitive. It
     /// sources **nothing** — the bounds are the static
     /// [`WRITE_QUEUE_LANE_MAX`] / [`WRITE_QUEUE_MAX`] whatever it reads, and
-    /// `admit` never consults it (J3 round-1 N3: this docstring used to say the
+    /// `admit` never consults it (this docstring used to say the
     /// probe "is nonetheless the only source of the bound — admission awaits its
     /// result rather than falling back to a constant", both halves of which the
     /// estimator demotion made false). It is still bounded by [`PROBE_BUDGET`]

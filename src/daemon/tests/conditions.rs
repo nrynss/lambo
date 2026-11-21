@@ -94,7 +94,7 @@ async fn loop_emits_planted_drift_from_session_drift_fixture() {
     // Warm-up: single-agent fixture → no conflict; drift is the only event
     // kind (drift detection is clock-free, the chain is 6 hops). The planted
     // node sorts first by id; the fixture's isolated pair follows with the
-    // no-path warning spec §9 requires (ALGO-5) — they are GC's step-3 food,
+    // no-path warning spec §9 requires — they are GC's step-3 food,
     // and warning once before GC's interval collects them is correct.
     let evt = tokio::time::timeout(Duration::from_secs(2), rx.recv())
         .await
@@ -213,7 +213,7 @@ async fn dropped_receiver_does_not_break_the_loop() {
 
 #[tokio::test(start_paused = true)]
 async fn stale_fires_for_idle_session_after_window_elapses() {
-    // T4.6 finding-1 regression: detection must run on EVERY tick, not
+    // Regression: detection must run on EVERY tick, not
     // only on epoch change. A session with NO mutations ages a concept
     // past the stale window; pure time passing must fire
     // `DaemonEvent::Stale` (spec §9 background-daemon semantics, §6.1
@@ -490,9 +490,9 @@ async fn loop_emits_one_session_stale_from_rest_api_fixture_after_writes_age_out
 
 #[tokio::test(start_paused = true)]
 async fn non_daemon_caller_can_emit_canonized_on_the_daemon_channel() {
-    // XP-4: P6's documented seam (`events::emit_canonized`) needs the
+    // XP-4: the canonizer's documented seam (`events::emit_canonized`) needs the
     // broadcast Sender. Before `Daemon::event_sender()` no public path to it
-    // existed anywhere in the crate, so P6 could not reach the channel
+    // existed anywhere in the crate, so the canonizer could not reach the channel
     // without owning the daemon's private field. This test is the seam: a
     // caller that is *not* the daemon loop emits, and a `Daemon::events()`
     // subscriber receives.
@@ -506,7 +506,7 @@ async fn non_daemon_caller_can_emit_canonized_on_the_daemon_channel() {
     );
     let mut rx = daemon.events();
 
-    // The "P6 evaluator": holds only the sender, never the daemon.
+    // The "canonization evaluator": holds only the sender, never the daemon.
     let sender = daemon.event_sender();
     let event = CanonizationEvent {
         id: NodeId(Uuid::from_u64_pair(9, 1)),
@@ -531,7 +531,7 @@ async fn non_daemon_caller_can_emit_canonized_on_the_daemon_channel() {
         other => panic!("expected Canonized, got {other:?}"),
     }
     // NEW-3: the seam is an `events::EventSender`, not a raw broadcast
-    // Sender — P6's send advanced the channel's SHARED publication counter,
+    // Sender — the evaluator's send advanced the channel's SHARED publication counter,
     // which is what the loop's re-arm measures ring eviction against. A
     // clone taken later reads the same count.
     assert_eq!(sender.emitted_total(), 1);
@@ -574,7 +574,7 @@ async fn external_publisher_flood_cannot_permanently_evict_a_held_conflict() {
     // `rx` — draining would defeat the point.
     wait_until(|| daemon.hot_list().read().contains(c1_id)).await;
 
-    // The "P6 evaluator" floods the channel it shares with the daemon.
+    // The "canonization evaluator" floods the channel it shares with the daemon.
     let sender = daemon.event_sender();
     for n in 0..10u64 {
         events::emit_canonized(
@@ -625,11 +625,11 @@ async fn external_publisher_flood_cannot_permanently_evict_a_held_conflict() {
 
 #[tokio::test(start_paused = true)]
 async fn late_subscriber_misses_the_warm_up_condition_set() {
-    // CONC-3: pins the documented P8 ordering obligation. The warm-up cycle
+    // CONC-3: pins the documented caller ordering obligation. The warm-up cycle
     // publishes the whole restored condition set — including the demo's
     // planted Conflict — and `broadcast` delivers only what is sent after a
     // receiver exists. Emission is on transition, so nothing re-publishes
-    // for a late subscriber's benefit. P8 must subscribe BEFORE spawn; see
+    // for a late subscriber's benefit. The caller must subscribe BEFORE spawn; see
     // `Daemon::events`.
     let (graph, c1_id, _, _) = conflicted_graph();
     let daemon = Daemon::new(
@@ -737,7 +737,7 @@ async fn entering_conditions_publish_highest_severity_first() {
     // The graph plants a Conflict and a HighRisk that enter together: a
     // Canonical, high-blast-radius node written by a second agent. The two
     // interactions carry distinct timestamps so the edge attributes cleanly
-    // to agent-b (ALGO-3) and only `contested` is contested.
+    // to agent-b and only `contested` is contested.
     let t0 = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
     let t1 = t0 + chrono::Duration::seconds(5);
     let now = t0 + chrono::Duration::seconds(10);
@@ -941,7 +941,7 @@ async fn the_contradiction_budget_keeps_the_newest_declared() {
     handle.abort();
 }
 
-/// #19(c) review L3: contradictions share conflict's tier and are inserted
+/// #19(c): contradictions share conflict's tier and are inserted
 /// before conflicts each cycle, so on a full hot list the persistent
 /// contradictions are evicted before the transient conflict.
 #[tokio::test(start_paused = true)]

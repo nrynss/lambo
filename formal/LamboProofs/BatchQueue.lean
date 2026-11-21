@@ -86,8 +86,8 @@ the call failing if any row fails, every row one width (`Uniform`).
 * Caps. `forwards_capped`: every forward holds at most `FORWARD_WIDTH`
   texts, each within twice any other's length plus `CHUNK_SLACK_BYTES`
   (`chunksOf_slack`, from the sorted order). `takePrioritized_length_le`,
-  `topUp_cap`: a take and its top-up hold at most `MAX_BATCH`
-  (K2-R1-2); `takePrioritized_perm`: nothing beyond the cap is lost.
+  `topUp_cap`: a take and its top-up hold at most `MAX_BATCH`;
+  `takePrioritized_perm`: nothing beyond the cap is lost.
   `lengthChunks_perm`: every text in exactly one chunk; `chunksOf_eq_lit`:
   the restated loop is the Rust's `last_mut` loop.
 * Isolation (#125, review M3). `forwardIsolated_rowwise`: each caller gets
@@ -105,7 +105,7 @@ the call failing if any row fails, every row one width (`Uniform`).
   take loop with the arrivals as input; it shares `pick` with `work`, and
   `pullOf_drive` shows `work`'s pulls obey `drive`'s discipline, but no
   theorem states the bound about runs of `step` directly.
-* Shutdown (K2-R1-7). `shutdown_drains`: after shutdown a running worker
+* Shutdown. `shutdown_drains`: after shutdown a running worker
   exits only once nothing is queued or held, having answered everything;
   `pullOf_nil`: no singles are pulled once shutdown is requested.
 
@@ -253,7 +253,7 @@ def once (f : Fwd) (k : Nat) (ts : List Txt) : Option (List Vec) :=
   | _ => none
 
 /-- `width_checked`: one vector of the wrong width fails every slot with
-`Backend` (K2-R1-4). -/
+`Backend`. -/
 def widthChecked (dim : Nat) (vs : List Vec) : List Res :=
   if vs.any (fun v => v.width != dim) then vs.map (fun _ => .backend) else vs.map .vec
 
@@ -688,7 +688,7 @@ theorem takePrioritized_perm (q : List Req) (n : Nat) :
   simp only [List.nil_append] at h1
   exact h2.trans h1
 
-/-- K2-R1-2: a take is clamped to `n`. -/
+/-- A take is clamped to `n`. -/
 theorem takePrioritized_length_le (q : List Req) (n : Nat) : (takePrioritized q n).1.length ≤ n := by
   unfold takePrioritized
   exact pass_fst_length_le _ _ _ _ (pass_fst_length_le _ _ _ _ (Nat.zero_le _))
@@ -2550,7 +2550,7 @@ theorem served_when_left_alone {c : Cfg} {f : Fwd} {dim : Nat} (hm : 0 < c.maxBa
   rw [← hiss] at hr
   exact core_at_rest hg'.toCore hrest.1 hrest.2 r hr
 
-/-- K2-R1-7 (test `shutdown_exits_only_after_draining_queued_work`): after
+/-- Mirrors test `shutdown_exits_only_after_draining_queued_work`: after
 shutdown is requested, a running worker exits within `measure s` steps, and
 only once nothing is queued or held: every request has been answered. -/
 theorem shutdown_drains {c : Cfg} {f : Fwd} {dim : Nat} (hm : 0 < c.maxBatch) {s : St}
@@ -2817,7 +2817,7 @@ theorem forwards_capped {c : Cfg} (f : Fwd) (dim : Nat) (hw : 1 ≤ c.width) (ev
     ∀ b ∈ (run c f dim St.init evs).fwds, b.length ≤ c.width ∧ Slack c b :=
   (good_reachable f dim hw evs).fwdCaps
 
-/-- K2-R1-2: a take, topped up, holds at most `MAX_BATCH` requests. -/
+/-- A take, topped up, holds at most `MAX_BATCH` requests. -/
 theorem topUp_cap (b q : List Req) (n : Nat) (h : b.length ≤ n) :
     (b ++ (takePrioritized q (n - b.length)).1).length ≤ n := by
   have := takePrioritized_length_le q (n - b.length)

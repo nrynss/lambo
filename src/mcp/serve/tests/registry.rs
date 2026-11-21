@@ -99,8 +99,8 @@ fn new_registry(
     new_registry_with(sessions, backends, max_sessions, HostCheck::Loopback)
 }
 
-/// [`new_registry`] with the sessions' `Host` check given (#32 PR 5 review
-/// M1: a serve whose every request presents a bearer accepts any `Host`).
+/// [`new_registry`] with the sessions' `Host` check given (#32 PR 5: a serve
+/// whose every request presents a bearer accepts any `Host`).
 fn new_registry_with(
     sessions: &[&str],
     backends: ResolvedBackends,
@@ -702,7 +702,7 @@ async fn the_mcp_session_cap_is_process_wide() {
         "{}",
         refused.body
     );
-    // #32 review L4: it names the route the session is closed on.
+    // #32: it names the route the session is closed on.
     assert!(
         refused
             .body
@@ -907,7 +907,7 @@ fn the_pinned_plan_follows_the_cli_and_the_serve_table() {
     assert!(err.contains("max_attached"), "{err}");
 }
 
-/// #32 review L3: the CLI's plan meets `serve`'s own rules, so a name that
+/// #32: the CLI's plan meets `serve`'s own rules, so a name that
 /// cannot be addressed by URL is refused before any backend is built. A
 /// single session, on either transport, keeps `--session`'s looser rule.
 #[test]
@@ -1089,7 +1089,7 @@ async fn plant_foreign_contract(store: &dyn GraphStore, id: &str, token: Option<
         .expect("plant a foreign contract");
 }
 
-/// #32 review L1: a background attach that fails with an error that will
+/// #32: a background attach that fails with an error that will
 /// not clear on its own (here the writer that held the session left it
 /// under another embedding contract) is logged once at ERROR and not
 /// retried; requests get 503 with no `Retry-After`. Before, it was retried,
@@ -1162,7 +1162,7 @@ async fn a_pinned_session_that_can_no_longer_attach_is_not_retried() {
     }
 }
 
-/// The real multi-session serve, in-process (#32 review M1/M2).
+/// The real multi-session serve, in-process (#32).
 mod authority;
 mod erase;
 /// #33 PR 3: layered recall over two pinned sessions.
@@ -1173,7 +1173,7 @@ mod on_demand;
 mod oversized_body;
 mod pinned_serve;
 
-/// #31 review L2: a holder whose model load fails transiently (the device or
+/// #31: a holder whose model load fails transiently (the device or
 /// memory momentarily unavailable) fails its attach with an error the pinned
 /// retry keeps retrying, not one that marks the session `Failed` for the life
 /// of the serve; a permanent load failure (a changed or corrupt artifact)

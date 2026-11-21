@@ -1,4 +1,4 @@
-//! Conflict detection — spec §9, P4 T4.3 (the demo trigger).
+//! Conflict detection — spec §9 (the demo trigger).
 //!
 //! A conflict is: **two or more active agents with edges to the same node, at
 //! least one `Causal`/`Dependency` edge with write activity inside the
@@ -36,7 +36,7 @@
 //! `formal/LamboProofs/Conflict.lean` models this (`conflictAtFixed`).
 //!
 //! Resolving by write time rather than by the source concept's origin is
-//! ALGO-3's fix: `record_action` reuses an already-canonical concept as the
+//! deliberate: `record_action` reuses an already-canonical concept as the
 //! source of a new edge, so origin-based attribution credits the concept's
 //! original author instead of the acting agent — collapsing the demo's
 //! two-agent set to one and silently suppressing the conflict.
@@ -51,13 +51,14 @@
 //! single answer, so **every** candidate joins the contested node's agent set and
 //! [`ConflictHit::writer`] names one of them deterministically (smallest
 //! interaction id at that instant). Keeping only a tie-break winner — the earlier
-//! rule — reproduced exactly the bug ALGO-3 fixed: the agent set collapsed to one
-//! agent and the conflict silently did not fire, while an unrelated node could
-//! pick up a spurious conflict naming the wrong writer. Erring toward detection
-//! is deliberate; see `ConflictHit::writer` for the residual ambiguity.
+//! rule — reproduced exactly the bug write-time attribution fixes: the agent set
+//! collapsed to one agent and the conflict silently did not fire, while an
+//! unrelated node could pick up a spurious conflict naming the wrong writer.
+//! Erring toward detection is deliberate; see `ConflictHit::writer` for the
+//! residual ambiguity.
 //!
 //! **J1 made this path non-degenerate, and it is the one place in this module
-//! whose *accuracy* changed** (J1-R1-8). Before per-call `agent_id`, every
+//! whose *accuracy* changed**. Before per-call `agent_id`, every
 //! interaction in a `serve` carried the process's own `--agent`, so a same-instant
 //! tie collapsed to one agent whichever rule was applied and the residual
 //! ambiguity could not be observed. Two clients writing through one `serve` in the
@@ -80,7 +81,7 @@
 //! in `fixtures/session-rest-api.json` (the caching layer: agent-a's `Derives`
 //! edge is old, agent-b's `Dependency` edges are fresh — the conflict must
 //! still fire) and with `crate::fixtures::load_store_relative`'s documented
-//! contract ("Makes the P4 conflict / recency window runnable").
+//! contract ("Makes the conflict / recency window runnable").
 //!
 //! ## Write activity and the window
 //!
@@ -103,9 +104,9 @@
 //!
 //! The age, in whole seconds (truncated), of the most recent qualifying write
 //! — the latest `Causal`/`Dependency` write inside the window — together with
-//! the agent that made *that* write ([`ConflictHit::writer`], ALGO-2), resolved
+//! the agent that made *that* write ([`ConflictHit::writer`]), resolved
 //! at that latest write: after a re-send it names the re-sender, who is in
-//! `agents` because the latest write's writers always join it (#297). T5.3
+//! `agents` because the latest write's writers always join it (#297). Recall
 //! renders "Agent A wrote to it eleven seconds ago" from `writer` +
 //! `seconds_ago`; `agents` is the full contesting set. Deriving the subject
 //! from `agents` alone is not possible and guessing is wrong on the shipped
@@ -120,7 +121,7 @@
 //! entry (the write left the window) or renders the true age — never the frozen
 //! detection-time value (XP-3). [`HotList`] dedups by `(node, condition)`, so
 //! re-running the detector refreshes an existing conflict entry instead of
-//! duplicating it. The hits are returned: the daemon loop (T4.6) publishes them
+//! duplicating it. The hits are returned: the daemon loop publishes them
 //! on transition and syncs the hot list against them with
 //! [`HotList::retain_conditions`], so a conflict that ages out of the recency
 //! window is dropped on the next cycle too.
@@ -142,8 +143,8 @@ pub const CONFLICT_RECENCY_WINDOW: Duration = Duration::from_secs(30);
 /// One detected conflict (spec §9): a node that ≥2 active agents have edges
 /// to, with a recent `Causal`/`Dependency` write.
 ///
-/// This is the daemon detector's own type (pure data); T4.6 maps it to
-/// `DaemonEvent::Conflict` and recall (T5.3) renders the payload.
+/// This is the daemon detector's own type (pure data); the daemon loop maps
+/// it to `DaemonEvent::Conflict` and recall renders the payload.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConflictHit {
     /// The contested node.
@@ -151,7 +152,7 @@ pub struct ConflictHit {
     /// Agents with edges to the node, sorted by id (deterministic): each
     /// edge's writers at its first write and at its latest (#297).
     pub agents: Vec<AgentId>,
-    /// The agent that made the most recent qualifying write (ALGO-2) — the
+    /// The agent that made the most recent qualifying write — the
     /// subject of spec §13's "Agent A wrote to it eleven seconds ago".
     ///
     /// **Residual ambiguity (NEW-4).** When two or more interactions from
@@ -171,7 +172,7 @@ pub struct ConflictHit {
 }
 
 /// The session's interactions indexed by write timestamp, for resolving which
-/// **agent was acting** when an edge was written (ALGO-3).
+/// **agent was acting** when an edge was written.
 ///
 /// One `O(interactions)` build per pass, `O(1)` per edge: a whole-graph
 /// [`detect`] builds it once and shares it across every node, and a per-node
@@ -195,7 +196,7 @@ pub(crate) struct WriterTimeline {
 
 #[cfg(test)]
 thread_local! {
-    /// Timeline builds on this thread (#19(c) review M2's assertion).
+    /// Timeline builds on this thread (the #19(c) review's assertion).
     pub(crate) static TIMELINE_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
@@ -255,7 +256,7 @@ impl WriterTimeline {
 }
 
 /// One [`WriterTimeline`] shared by every hot-list predicate a detector pass
-/// inserts, rebuilt only when the graph's epoch moved (#19(c) review M2).
+/// inserts, rebuilt only when the graph's epoch moved (#19(c)).
 ///
 /// Recall re-validates the hot entries of every expanded member under the
 /// hot-list write guard. Each predicate building its own timeline made that
@@ -323,7 +324,7 @@ impl EdgeWriters<'_> {
 
 /// The agents that may have written `edge`.
 ///
-/// Resolution order (ALGO-3):
+/// Resolution order:
 ///
 /// 1. An edge whose **source is an `Interaction`** (`Derives`/`Temporal`) is
 ///    that interaction's — exact by construction, no inference needed.
@@ -417,7 +418,7 @@ fn conflict_at_with(
     let window_start = window_start(window, now);
 
     let mut agents: Vec<AgentId> = Vec::new();
-    // The newest qualifying write and *who made it* travel together (ALGO-2).
+    // The newest qualifying write and *who made it* travel together.
     let mut newest: Option<(DateTime<Utc>, AgentId)> = None;
 
     for edge in graph.incident_edges(node) {
@@ -507,13 +508,13 @@ pub fn detect(graph: &Graph, window: Duration, now: DateTime<Utc>) -> Vec<Confli
 ///
 /// [`HotList::insert`] dedups by `(node, condition)`, so re-running this with a
 /// fresh `now` refreshes the payload (`seconds_ago`) and the re-validation
-/// predicate instead of duplicating (T4.2's contract). Each entry's predicate
+/// predicate instead of duplicating. Each entry's predicate
 /// re-checks the same conflict logic against the `now` **its caller** passes to
 /// [`HotList::revalidate`] — never this cycle's frozen instant (XP-3).
 ///
 /// Returns the hits — the daemon loop emits them on condition transition and
 /// uses them as the fresh set it syncs the hot list against
-/// ([`HotList::retain_conditions`]; T4.6 finding 2).
+/// ([`HotList::retain_conditions`]).
 pub fn insert_conflicts(
     hot: &mut HotList,
     graph: &Graph,
@@ -526,8 +527,8 @@ pub fn insert_conflicts(
         let node = hit.node;
         // The predicate re-runs the same per-node check against the *caller's*
         // `now` and hands back the payload it computed, so recall renders a
-        // read-time `seconds_ago` and writer (XP-3 / ALGO-2). It captures
-        // `node`, `window` and the pass's shared timeline (#19(c) review M2:
+        // read-time `seconds_ago` and writer (XP-3). It captures
+        // `node`, `window` and the pass's shared timeline (#19(c):
         // one timeline build per recall, not one per conflicted member); no
         // graph or hot-list lock is re-entered (spec §6.4).
         let shared = shared.clone();
@@ -888,7 +889,7 @@ mod tests {
     fn payload_carries_agents_and_seconds_ago() {
         let now = t(3600);
         // Dependency write 11s before now: the "eleven seconds ago" sentence
-        // data T5.3 renders.
+        // data recall renders.
         let (g, c1, _) = two_agent_graph(3600 - 40, 3600 - 11);
         let hits = detect(&g, CONFLICT_RECENCY_WINDOW, now);
         assert_eq!(hits.len(), 1);
@@ -974,8 +975,8 @@ mod tests {
     /// out, with **no graph mutation at all**.
     ///
     /// Pre-fix the predicate captured `now` by move and re-derived its window
-    /// from that frozen instant, so this returned `true` forever — and recall
-    /// (T5.3), the documented consumer, would render the frozen `seconds_ago`:
+    /// from that frozen instant, so this returned `true` forever — and recall,
+    /// the documented consumer, would render the frozen `seconds_ago`:
     /// "wrote to it eleven seconds ago", five minutes later, on camera.
     #[test]
     fn revalidate_ages_a_conflict_out_when_only_the_clock_advances() {
@@ -1005,7 +1006,7 @@ mod tests {
         assert!(hot.is_empty(), "no ghost entry survives a clock advance");
     }
 
-    /// ALGO-3: the writer of a concept→concept edge is the **acting** agent,
+    /// The writer of a concept→concept edge is the **acting** agent,
     /// not the source concept's original author.
     ///
     /// The demo shape: agent-a creates `user schema`; agent-b then records an
@@ -1057,7 +1058,7 @@ mod tests {
         assert_eq!(hit.seconds_ago, 11);
     }
 
-    /// ALGO-2: the payload names the writer of the **newest** qualifying write,
+    /// The payload names the writer of the **newest** qualifying write,
     /// which is not recoverable from the sorted `agents` list — on this graph
     /// (and on the shipped fixture) the naive first-listed guess is wrong.
     #[test]
@@ -1101,9 +1102,9 @@ mod tests {
 
     /// NEW-4: two agents' interactions at the **same instant**, and a cross-agent
     /// write stamped with it. The timeline used to keep only the smallest
-    /// interaction id per instant, which re-created the very failure ALGO-3
-    /// fixed — the contested node's agent set collapsed to one agent and the
-    /// conflict silently did not fire.
+    /// interaction id per instant, which re-created the very failure
+    /// write-time attribution fixed — the contested node's agent set
+    /// collapsed to one agent and the conflict silently did not fire.
     #[test]
     fn same_instant_cross_agent_write_still_conflicts() {
         let now = t(3600);
@@ -1247,7 +1248,7 @@ mod tests {
     }
 
     /// A window past chrono's range covers all of time instead of panicking
-    /// on `now - ChronoDuration::MAX` (#19(c) review M5).
+    /// on `now - ChronoDuration::MAX` (#19(c)).
     #[test]
     fn an_unrepresentable_window_saturates_instead_of_panicking() {
         let (g, c1, _) = two_agent_graph(100, 120);

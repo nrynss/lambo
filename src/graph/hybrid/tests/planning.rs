@@ -130,7 +130,7 @@ async fn concurrent_first_writers_cannot_mix_embedding_contracts() {
     g.assert_invariants().unwrap();
 }
 
-/// C4: one derive naming the same content in BOTH `concepts` and a
+/// One derive naming the same content in BOTH `concepts` and a
 /// `parent_of` pair must produce ONE node, under the product's strategy.
 ///
 /// The regression this pins is an identity split, not a missing edge:
@@ -217,7 +217,7 @@ async fn parent_of_child_resolves_to_a_concept_declared_in_the_same_call() {
     }
 }
 
-/// C4 control: the fix is scoped to THIS call's own writes, so a
+/// Control: the fix is scoped to THIS call's own writes, so a
 /// `parent_of` end the graph has never seen is still created fresh as
 /// `PARENT_OF_CONCEPT_TYPE` (`Entity`). Without this, a fix that made
 /// `canonicalize` match Observations generally would pass the test above
@@ -397,7 +397,7 @@ async fn parent_of_ends_that_resolve_to_existing_concepts_are_not_re_embedded() 
 /// The degradation rules are the `concepts` rules. Capability absent: the end
 /// stays keyword-only and nothing is embedded (byte-identical to Canonical).
 /// Embedder failure on the end: the whole write fails with nothing written,
-/// exactly as it does for a declared concept (J3-R3-1).
+/// exactly as it does for a declared concept.
 #[tokio::test]
 async fn parent_of_end_embedding_follows_the_concepts_degrade_rules() {
     let (graph, interaction) =
@@ -662,7 +662,7 @@ async fn an_ends_only_call_checks_the_contract_before_any_embed() {
     assert_eq!(g.embedding().unwrap().kind, "fixture", "stamp preserved");
 }
 
-/// #60 review L3: the `parent_of` ends' refusal probe asks only a source
+/// #60: the `parent_of` ends' refusal probe asks only a source
 /// that can refuse. The holder's graph always answers, so an ends-only call
 /// over it embeds both ends and scans nothing.
 #[tokio::test]
@@ -856,7 +856,7 @@ async fn the_embed_budget_counts_concepts_and_new_parent_of_ends() {
     assert_eq!(out.embedded, 0);
 }
 
-/// The J3 ack runs the same count against the graph as it is at the call:
+/// The ack runs the same count against the graph as it is at the call:
 /// matched concepts and existing ends are free, and nothing is refused
 /// without vector search.
 #[test]
@@ -917,7 +917,7 @@ async fn first_use_empty_candidates_still_commits_contract() {
     let mut g = graph.write();
     assert_eq!(g.embedding(), Some(&contract("fixture", 1024)));
     assert_eq!(g.concepts().count(), 1);
-    // L82-4 (product decision 2026-08-14): the store had no trusted match,
+    // Product decision 2026-08-14: the store had no trusted match,
     // so no merge is recorded — but the vector that was successfully
     // computed IS persisted, which is what makes an organically-derived
     // concept vector-recallable. This assertion used to be `is_none()`;

@@ -63,7 +63,7 @@ fn image_content_appends_one_suffix_after_the_trimmed_caption() {
     assert!(check_caption("render [image:x] 17").is_err());
 }
 
-/// Review M1 (PR 4): a caption allowed because it holds no suffix token
+/// PR 4: a caption allowed because it holds no suffix token
 /// still yields exactly one, the appended one, so its id alone decides the
 /// key.
 #[test]
@@ -82,7 +82,7 @@ fn an_allowed_caption_that_mentions_the_suffix_keeps_one_suffix_token() {
     }
 }
 
-/// Review M2: the caption check runs on the canonical tokens, so a suffix
+/// The caption check runs on the canonical tokens, so a suffix
 /// spelled in another case or split by an invisible character is refused
 /// as surely as the plain one.
 #[test]
@@ -99,7 +99,7 @@ fn a_caption_suffix_in_any_case_or_with_invisible_characters_is_refused() {
     ] {
         assert!(check_caption(caption).is_err(), "{caption:?}");
     }
-    // Review M1 (PR 4): only a token that canonicalizes to `[image:<id>]`
+    // PR 4: only a token that canonicalizes to `[image:<id>]`
     // with a valid id can collide; a caption that only mentions the suffix
     // is allowed.
     for caption in [
@@ -116,7 +116,7 @@ fn a_caption_suffix_in_any_case_or_with_invisible_characters_is_refused() {
     }
 }
 
-/// Review M2, the collision itself: two different images whose captions
+/// The collision itself: two different images whose captions
 /// smuggle each other's id share one canonical key, so the caption check is
 /// what keeps them two concepts.
 #[test]

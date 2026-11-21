@@ -268,7 +268,7 @@ fn a_skipped_hit_is_not_listed() {
     assert_eq!(listed(&g, &hits, &[]).len(), 2);
 }
 
-/// M2: the concepts the write merged with are listed, marked `merged`
+/// The concepts the write merged with are listed, marked `merged`
 /// (every tied member, m3), ranked with the rest; the others are not
 /// marked. A merged concept the call also restated is still skipped.
 #[test]
@@ -470,7 +470,7 @@ fn dated_graph(new_at: (i64, Option<i64>), old_at: (i64, Option<i64>)) -> Graph 
     g
 }
 
-/// M1: a candidate dated after the new concept is listed but marked
+/// A candidate dated after the new concept is listed but marked
 /// `newer`, compared by the trigger's clamped about-time; an older one is
 /// not, and a tie is not (the trigger's tie rule records no direction, so
 /// nothing says the candidate is the later fact).

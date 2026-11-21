@@ -197,7 +197,7 @@ mod v0_5_0 {
     }
 }
 
-/// #36 PR 4 review H2: a settled cited derive is stored as the empty derive,
+/// #36 PR 4: a settled cited derive is stored as the empty derive,
 /// which the 0.5.0 decoder reads, so a downgrade still loads a session
 /// whose cited writes all applied; an unconsumed one is refused by name
 /// (Q18), never applied without its citations; an action's pins are
@@ -242,7 +242,7 @@ fn a_settled_cited_intent_decodes_under_the_0_5_0_payload() {
     ));
 }
 
-/// L1: a pinned payload with a field this build does not know is refused,
+/// A pinned payload with a field this build does not know is refused,
 /// not decoded with the field dropped.
 #[test]
 fn an_unknown_pin_field_is_refused() {
@@ -333,7 +333,7 @@ fn repo_scoped_replay_refuses_invalid_nested_or_image_payloads() {
         repo_scope: scope.into(),
         payload: Box::new(payload),
     };
-    // Replay checks only that a stored scope is nonempty (review L4): the
+    // Replay checks only that a stored scope is nonempty: the
     // full check ran on the call path of the build that wrote the row.
     for scope in ["", "  "] {
         assert!(
@@ -466,7 +466,7 @@ fn an_action_with_against_is_its_own_variant_and_round_trips() {
     assert!(!plain.contains("against"), "{plain}");
 }
 
-/// #19(b), the #36 PR 4 H2 precedent: a settled derive or action carrying
+/// #19(b), the #36 PR 4 precedent: a settled derive or action carrying
 /// contradictions is stored as the empty derive the frozen 0.5.0 decoder
 /// reads, and an unconsumed one is refused by name, never applied without
 /// its contradictions.

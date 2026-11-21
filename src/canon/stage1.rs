@@ -1,7 +1,7 @@
-//! Stage 1 — Candidate (T6.1, spec §10, #36 PR 3).
+//! Stage 1 — Candidate (spec §10, #36 PR 3).
 //!
 //! Pure predicate: reports which concepts currently clear Stage 1. It does
-//! **not** apply a `None → Candidate` transition (T6.4 owns writes).
+//! **not** apply a `None → Candidate` transition (the canonization task owns writes).
 //!
 //! ## Evidence-led admission (#36 PR 3)
 //!
@@ -35,7 +35,7 @@
 //! The order only decides which members a bounded cycle takes first
 //! (`EvalParams::batch_size`); it never decides membership, so access
 //! frequency (#30) can reorder the queue but cannot admit or refuse anyone.
-//! A missing, non-finite or negative score entry orders as `0.0` (ALGO-10's
+//! A missing, non-finite or negative score entry orders as `0.0` (the
 //! `sane_weight` convention, see [`sane_score`]).
 //!
 //! ## Batched input
@@ -43,7 +43,7 @@
 //! The dependent-interaction count is computed for every concept in **one
 //! pass over the edges** ([`dependent_interaction_counts`]), over the in-RAM
 //! graph the cycle already holds under its read guard: no per-node store
-//! round-trip, so Stage 1 stays I/O-free (the evaluator's R2-4 property). It
+//! round-trip, so Stage 1 stays I/O-free, as the evaluator requires. It
 //! follows the stores' Stage 2 rules exactly (session-scoped concepts,
 //! edge about-time and interaction about-time at or before `now - min_age`,
 //! own origin excluded, a dependent reached twice counted once), and a
@@ -307,7 +307,7 @@ fn interactions_with(
         .len()
 }
 
-/// Finite, non-negative score, else `0.0` — ALGO-10's `sane_weight`
+/// Finite, non-negative score, else `0.0` — the `sane_weight`
 /// convention, applied at the point of use, so a NaN can neither jump the
 /// queue (`total_cmp` sorts NaN above every real score) nor be dropped.
 fn sane_score(score: f64) -> f64 {
@@ -782,7 +782,7 @@ mod tests {
         }
     }
 
-    /// Review L9: an edge and an interaction exactly at `now - min_age`
+    /// An edge and an interaction exactly at `now - min_age`
     /// count, one second younger do not, on the graph and on MemoryStore.
     #[cfg(feature = "store-memory")]
     #[tokio::test]

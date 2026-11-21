@@ -11,7 +11,7 @@
 //!    given, joined by a blank line, and the **actual joined text** is
 //!    measured (separators included), so the rendered context is within
 //!    budget. The cut stops at the first block that does not fit: a
-//!    lower-ranked block never follows a skipped one (GPT5.6sol P1-4), even
+//!    lower-ranked block never follows a skipped one, even
 //!    when it would fit on its own.
 //! 2. **A first block that is too long is truncated, not dropped (#130).**
 //!    When not even the first block fits, the **concept content** is cut at
@@ -626,7 +626,7 @@ mod tests {
         }
     }
 
-    /// L6: the binary search finds the longest head a linear scan finds,
+    /// The binary search finds the longest head a linear scan finds,
     /// for the default estimator and an exact byte estimator, over content
     /// with whitespace runs and multibyte text.
     #[test]
@@ -677,7 +677,7 @@ mod tests {
         }
     }
 
-    /// L7: `<n>` counts exactly the block text left out.
+    /// `<n>` counts exactly the block text left out.
     #[test]
     fn the_marker_counts_exactly_the_text_left_out() {
         let b = plain(&"m".repeat(500));
@@ -689,7 +689,7 @@ mod tests {
         assert_eq!(marker, truncation_marker(left_out, &b.inspect_id, None));
     }
 
-    /// M3: a layer hit's marker names the scope to pass; without a scope the
+    /// A layer hit's marker names the scope to pass; without a scope the
     /// marker is unchanged.
     #[test]
     fn a_scoped_block_names_its_scope_in_the_marker() {

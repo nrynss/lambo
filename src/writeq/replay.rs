@@ -1,5 +1,5 @@
 //! Durable-intent replay: applying, at attach, the writes a previous process
-//! acked and did not apply (J3).
+//! acked and did not apply.
 //!
 //! Spawned by `MemoryBuilder::build_attach` after the pipeline exists; stopped
 //! (abort **and join**) by `close()` before the quiesce, and aborted without a
@@ -38,9 +38,9 @@ use super::{
 use crate::types::{AgentId, LamboError, WriteIntent, WriteIntentOutcome};
 
 /// How many **consecutive transient** embed failures within one attach end the
-/// durable-intent replay loop, leaving the rest of the backlog durable
-/// (J3-R2R-1 property 3 — the sequential decision rule, in the shape the design
-/// doc's "termination measure" asks for).
+/// durable-intent replay loop, leaving the rest of the backlog durable (the
+/// sequential decision rule, in the shape the design doc's "termination
+/// measure" asks for).
 ///
 /// Each replayed intent's status-classifier outcome is a Bernoulli draw
 /// (`Transient` vs `Content`). A **content** rejection is absorbing — it is
@@ -73,7 +73,7 @@ use crate::types::{AgentId, LamboError, WriteIntent, WriteIntentOutcome};
 /// reading — enough that two independent one-off transients do not stop a
 /// healthy replay, small enough that a hung-but-alive embedder costs three
 /// bounded embeds per attach, not the whole backlog. Recorded in the design
-/// doc's as-built disposition (J3-R2R-1).
+/// doc's as-built disposition.
 pub const EMBEDDER_SICK_THRESHOLD: usize = 3;
 
 /// Consecutive vector-candidate lookup timeouts at replay that stop it, the
@@ -136,7 +136,7 @@ pub(crate) fn replay_order(intents: Vec<WriteIntent>) -> Vec<WriteIntent> {
 }
 
 impl WritePipeline {
-    /// Replay durable write intents left by previous processes (J3), spawned
+    /// Replay durable write intents left by previous processes, spawned
     /// at attach.
     ///
     /// * **Order**: intents arrive from `load_session` sorted by
@@ -168,7 +168,7 @@ impl WritePipeline {
     /// * **Idempotency**: consumption rides the same commit lock as the apply
     ///   (see [`WriteCtx::run`](super::WriteCtx::run)), so a `kill -9` mid-replay re-replays exactly
     ///   the intents whose applies did not flush — never one whose apply did.
-    /// * **Liveness before anything is consumed** (J3 round-1 N1): one embed of
+    /// * **Liveness before anything is consumed**: one embed of
     ///   [`PROBE_TEXT`] gates the loop. If it fails, the task warns and returns
     ///   **without consuming a single intent** — the backlog stays durable and
     ///   the next serve tries again. A dead or hanging embedder at attach
@@ -207,7 +207,7 @@ impl WritePipeline {
         // Seed the cross-restart answers before the task starts, so a lookup
         // racing the replay sees `pending_replay` rather than `restart_lost`.
         //
-        // J3 round-1 F2. A **consumed** row older than the retention window is
+        // A **consumed** row older than the retention window is
         // deliberately NOT seeded. `types::WRITE_INTENT_RETENTION` claimed
         // "expired rows are skipped at load" and no such filter existed in
         // either adapter, so a consumed row that outlived the window still
@@ -296,7 +296,7 @@ impl WritePipeline {
             .store(backlog as u64, Ordering::Relaxed);
         let this = self.clone();
         let handle = tokio::spawn(async move {
-            // J3 round-1 N1, step 1 — the liveness gate. Nothing below may
+            // Step 1 — the liveness gate. Nothing below may
             // consume an intent until the embedder has answered once, because
             // the failure arm cannot tell "this content is unembeddable" from
             // "there is no embedder right now" any better than the error type
@@ -312,9 +312,9 @@ impl WritePipeline {
             // That is the bound on "retry forever without visibility": the retry
             // is one embed per session start, and the debt is on the stats
             // surface until it is paid.
-            // J3-R2R-1 property 3 — the sequential decision rule that BOUNDS the
-            // loop. A fresh attach starts with a cleared block reason so a drain
-            // that never faults reports `null` (J3-R2R-8).
+            // The sequential decision rule that BOUNDS the loop. A fresh attach
+            // starts with a cleared block reason so a drain that never faults
+            // reports `null`.
             this.counters.set_replay_blocked(ReplayBlockReason::None);
             let live =
                 tokio::time::timeout(PROBE_BUDGET, this.ctx.embedder.embed(PROBE_TEXT)).await;
@@ -491,7 +491,7 @@ impl WritePipeline {
                         applied += 1;
                         this.counters.replay_owed.fetch_sub(1, Ordering::Relaxed);
                         this.counters.replayed.fetch_add(1, Ordering::Relaxed);
-                        // J4 proof obligation 5: a replayed intent's applied
+                        // Proof obligation 5: a replayed intent's applied
                         // lifecycle + metric-2 facts ride the ledger — the
                         // re-derivation-savings signal metric 2 previously lost.
                         if let Some(ledger) = &this.ctx.ledger {
@@ -629,7 +629,7 @@ impl WritePipeline {
                     // and the refusal proves the embedder just answered (resets
                     // the streak — observed aliveness).
                     //
-                    // A cycle refusal (#116 review M1) is the same kind of fact:
+                    // A cycle refusal (#116) is the same kind of fact:
                     // this write against this graph closes a cycle, every time.
                     // Before, it fell to the session-wide arm below, which left
                     // the intent durable and stopped the replay, so every later
@@ -664,7 +664,7 @@ impl WritePipeline {
                         }
                         failed += 1;
                         this.counters.replay_owed.fetch_sub(1, Ordering::Relaxed);
-                        // JE2E-12, same split as the in-session worker's failure
+                        // Same split as the in-session worker's failure
                         // arm: the class for the model, the embedder's own words
                         // for the operator. The "replay after restart was
                         // refused; nothing was written" framing is lambo's own
@@ -692,7 +692,7 @@ impl WritePipeline {
                         };
                         let detail =
                             format!("replay after restart was refused ({e}); nothing was written");
-                        // J4 proof obligation 5: a replayed intent settled
+                        // Proof obligation 5: a replayed intent settled
                         // `failed` is a lifecycle fact, visible on the ledger.
                         if let Some(ledger) = &this.ctx.ledger {
                             ledger.append(&crate::ledger::completion_line(
@@ -725,7 +725,7 @@ impl WritePipeline {
                         );
                         ReceiptAnswer::Failed(why)
                     }
-                    // #22 review L4: an image intent this process's
+                    // #22: an image intent this process's
                     // configuration cannot apply (not the hybrid strategy, or
                     // no vector search) is a `Config` refusal like any other,
                     // and stops the replay for the same reason: skipping it
@@ -858,16 +858,16 @@ impl WritePipeline {
         *self.replay.lock() = Some(handle);
     }
 
-    /// Stop the replay task (J3): abort **and join**, because an aborted task
+    /// Stop the replay task: abort **and join**, because an aborted task
     /// can still finish a synchronous stretch — and append to the log — until
-    /// the join returns (the R3-1 lesson). `close()` calls this before its
+    /// the join returns. `close()` calls this before its
     /// final drain so no replay write can land after the drain's last word.
     /// Unconsumed intents stay durable for the next serve.
     pub(crate) async fn stop_replay(&self) {
         let handle = self.replay.lock().take();
         if let Some(handle) = handle {
             handle.abort();
-            // Custody until the join returns (R3-1): a `close()` cancelled
+            // Custody until the join returns: a `close()` cancelled
             // here hands the aborted handle back to its slot, so the retried
             // close joins it rather than draining past a replay that is still
             // inside a synchronous stretch.

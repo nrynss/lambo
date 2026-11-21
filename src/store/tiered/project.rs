@@ -34,7 +34,7 @@ pub(crate) fn contract_hash(contract: &EmbeddingContract) -> String {
 /// Deletes and counts address every data index through the wildcard
 /// `{prefix}-v-*`. A prefix that contains `-v-` or ends in `-v` would let
 /// that pattern match another deployment's indices on a shared cluster
-/// (#18 review L2: prefix `lambo` reaches `lambo-v-prod-v-<hash>`), so both
+/// (#18: prefix `lambo` reaches `lambo-v-prod-v-<hash>`), so both
 /// are refused. With them refused, `{q}-v-{hash}` starts with `{p}-v-` only
 /// when `p == q`.
 pub(crate) fn validate_index_prefix(prefix: &str) -> Result<(), StoreError> {
@@ -439,7 +439,7 @@ mod tests {
         }
     }
 
-    /// L2: deletes reach `{prefix}-v-*`. A prefix that holds `-v-`, or ends
+    /// Deletes reach `{prefix}-v-*`. A prefix that holds `-v-`, or ends
     /// in `-v`, would make another deployment's data indices match that
     /// pattern (`lambo-v-*` matches `lambo-v-prod-v-<hash>` and
     /// `lambo-v-v-<hash>`), so such prefixes are refused: then

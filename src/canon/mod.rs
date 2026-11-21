@@ -1,4 +1,4 @@
-//! Canonization stages Candidate → Venerable → Canonical (P6, spec §10).
+//! Canonization stages Candidate → Venerable → Canonical (spec §10).
 //!
 //! `stage1`/`stage2`/`stage3` are store-agnostic predicates; `eval` is the
 //! write path (one hop per cycle, budget, audit, emit); `task` is the
@@ -6,8 +6,8 @@
 //!
 //! Time: gates measure **event time** — the instant a fact is about — with
 //! flush time as the per-fact fallback (`event_time` module holds the design
-//! and the separation count C2's solo score will consume). The eval's `now`
-//! stays injectable end to end (F8): [`CanonizationTask::with_clock`] pins
+//! and the separation count the solo promotion score consumes). The eval's
+//! `now` stays injectable end to end: [`CanonizationTask::with_clock`] pins
 //! it for tests, and every adapter resolves stored instants against the
 //! caller-supplied anchor rather than reading a clock of its own.
 

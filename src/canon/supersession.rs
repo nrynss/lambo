@@ -18,7 +18,7 @@
 //!    a writer cannot defend a belief against its own contradiction. When
 //!    who wrote the contradiction, or a piece of `C`'s evidence that might be
 //!    the declarer's, cannot be told apart (several agents acting at one
-//!    instant), the pair is not probed at all (review L4): an ambiguity
+//!    instant), the pair is not probed at all: an ambiguity
 //!    never demotes. Evidence and dates are #19(c)'s: eligible by write time
 //!    against the age floor, dated by about-time clamped to write time. An
 //!    assertion-only contradiction (no newer structural support for `S`)
@@ -27,7 +27,7 @@
 //!    within `canonization_repromotion_cooldown` cannot supersede, and a
 //!    target demoted within it cannot be superseded again.
 //!
-//! The bar is **asymmetric** on purpose (review L3): `S` must clear all of
+//! The bar is **asymmetric** on purpose: `S` must clear all of
 //! Stage 2 again with evidence newer than `C`'s, while one new eligible
 //! piece of evidence for `C` (from anyone but the declarer) moves the
 //! watermark past `S`'s support and protects `C` until `S` earns three more
@@ -37,10 +37,10 @@
 //! `reason = Superseded { by: S }`. `S` is **not** promoted: it climbs on its
 //! own merits. When several sources qualify for one target, one wins: the
 //! newest **counted** evidence (the newest piece the span after the
-//! watermark counted, review L2), then the smallest canonical key, then the
+//! watermark counted), then the smallest canonical key, then the
 //! smallest id.
 //!
-//! ## The pair rule (review H1, M1)
+//! ## The pair rule
 //!
 //! Two concepts can each qualify to supersede the other (each one's support
 //! is newer than the other's watermark, which self-suppression makes
@@ -57,7 +57,7 @@
 //! With supersession on, Stage 3 also does not promote a Venerable that a
 //! contradicting concept would supersede at once, under the same predicate
 //! and the pair rule. That covers a superseded concept climbing back, and
-//! also a Venerable that was never Canonical (review L9): promoting it would
+//! also a Venerable that was never Canonical: promoting it would
 //! only demote it on the next cycle. Without the hold a superseded concept
 //! whose own evidence still passes would climb back once its cooldown is
 //! over and be superseded again, once per window, forever. With it the side
@@ -65,7 +65,7 @@
 //! earns newer evidence of its own. Inspect shows the hold as a failing
 //! check (`held: contradicted by <id> with newer evidence`).
 //!
-//! **Single writer (review H1, scenario A).** Evidence the declarer itself
+//! **Single writer.** Evidence the declarer itself
 //! writes never counts for the contradicted concept, so if every write comes
 //! from one agent id (one writer, or several agents sharing an id), nothing
 //! that writer adds for `C` can ever release `C` from a contradiction it
@@ -118,7 +118,7 @@ use crate::types::{
 };
 
 /// The most forward probes one cycle runs for supersession, and again for
-/// the hold (review M4; separate budgets since the re-verify, so Canonicals
+/// the hold (separate budgets since the re-verify, so Canonicals
 /// that use the whole cap every cycle cannot starve the hold). Each needs
 /// the evidence rows of two nodes, read once per node per cycle; with their
 /// reverse probes a cycle runs at most four times this many probes. A cycle that would exceed it stops adding targets
@@ -150,8 +150,8 @@ pub(crate) struct Probes {
     pub list: Vec<Probe>,
     /// The forward probes hit [`MAX_SUPERSESSION_PROBES`].
     pub capped: bool,
-    /// Targets with a live contradiction the cap left unprobed (focused
-    /// review 1): for the hold, Stage 3 does not promote them this cycle.
+    /// Targets with a live contradiction the cap left unprobed: for the
+    /// hold, Stage 3 does not promote them this cycle.
     pub deferred: Vec<NodeId>,
 }
 
@@ -180,7 +180,7 @@ pub(crate) struct Verdict {
 }
 
 /// The evaluator's writer timeline, kept across cycles and rebuilt only when
-/// the graph's epoch moves (review L10).
+/// the graph's epoch moves.
 #[derive(Clone)]
 pub(crate) struct Timeline(std::sync::Arc<SharedTimeline>);
 
@@ -202,8 +202,7 @@ impl Timeline {
     }
 }
 
-/// Each node's evidence rows, read from the store once per cycle (review
-/// M4).
+/// Each node's evidence rows, read from the store once per cycle.
 #[derive(Default)]
 pub(crate) struct EvidenceCache {
     rows: HashMap<NodeId, DependentEvidence>,
@@ -255,7 +254,7 @@ fn certain(writers: &EdgeWriters<'_>) -> Option<AgentId> {
 /// contradiction `edge` declares: the ones its declarer certainly wrote, and
 /// the dependence of the contradicting concept itself. `None` (do not probe)
 /// when the declarer is not certain, or when a piece of evidence may or may
-/// not be the declarer's (review L4: an ambiguity never demotes).
+/// not be the declarer's (an ambiguity never demotes).
 fn self_suppressed(
     graph: &Graph,
     target: NodeId,
@@ -371,9 +370,9 @@ fn probes_for(
     budget: &mut usize,
 ) -> Probes {
     let mut out = Probes::default();
-    // Pairs whose attribution is ambiguous (review L4): never probed, and
-    // their other direction is not probed either (focused review 3), so an
-    // ambiguity on one side cannot let the other side act alone.
+    // Pairs whose attribution is ambiguous: never probed, and their other
+    // direction is not probed either, so an ambiguity on one side cannot let
+    // the other side act alone.
     let mut ambiguous: HashSet<(NodeId, NodeId)> = HashSet::new();
     let mut targets = targets.iter();
     for &target_id in targets.by_ref() {
@@ -395,7 +394,7 @@ fn probes_for(
                 // A target with more contradictions than the whole cap is
                 // still probed when it comes first, so it cannot starve the
                 // ring; its reads count against the cap, which is spent, and
-                // the cycle warns (focused review 1).
+                // the cycle warns.
                 *budget = 0;
                 out.list.extend(forward);
                 continue;
@@ -488,8 +487,8 @@ pub(crate) fn gather(
 /// The hold probes for Stage 3's window: the same probes, with Venerable
 /// targets. Empty unless supersession is on.
 ///
-/// The window's targets are probed in id order starting after `cursor`
-/// (re-verify review (a)), which advances to the last one probed: when the
+/// The window's targets are probed in id order starting after `cursor`,
+/// which advances to the last one probed: when the
 /// cap cannot cover the whole window, each cycle probes the next part of it,
 /// so a contradicted Venerable that uses the cap up cannot keep the others
 /// deferred forever.
@@ -523,7 +522,7 @@ pub(crate) fn gather_holds(
 }
 
 /// How many cycles in a row Stage 3's window may be held in place because
-/// the probe cap deferred some of its Venerables (re-verify review (a)).
+/// the probe cap deferred some of its Venerables.
 /// After that many, the ring advances anyway: the deferred ones are not
 /// promoted this time round (the hold fails closed) and come back with the
 /// ring. With the rotating probe start this is a backstop.
@@ -548,8 +547,8 @@ pub(crate) fn restore_for_deferral(deferred: bool, streak: &mut usize) -> bool {
     true
 }
 
-/// The hold probes for one Venerable concept, for inspect's explanation
-/// (review M2). Empty unless supersession is on and `node` is Venerable.
+/// The hold probes for one Venerable concept, for inspect's explanation.
+/// Empty unless supersession is on and `node` is Venerable.
 pub(crate) fn gather_hold_for(
     graph: &Graph,
     node: NodeId,
@@ -580,7 +579,7 @@ pub(crate) fn gather_hold_for(
 struct Pass<'p> {
     probe: &'p Probe,
     watermark: DateTime<Utc>,
-    /// The newest evidence the span counted (review L2).
+    /// The newest evidence the span counted.
     newest: DateTime<Utc>,
 }
 
@@ -678,7 +677,7 @@ pub(crate) async fn decide(
 }
 
 /// The cooldown state before the cycle commits anything, for every concept
-/// a verdict names (the apply loop's snapshot, review M1).
+/// a verdict names (the apply loop's snapshot).
 pub(crate) fn cooldowns_before(
     graph: &Graph,
     verdicts: &[Verdict],
