@@ -9,7 +9,8 @@ Model of the write-behind flush loop in `src/store/flush.rs`: `FlushLoop::run`
 constants `BACKOFF_BASE` (100 ms), `BACKOFF_CAP` (10 s) and `RETAINED_BACKOFF`
 (= the cap), `FlushParams` (`retries`, `max_batch`, `log_max`) and
 `FlushStats::dead_lettered`; `StoreError::is_retryable` in `src/types/mod.rs`;
-and two clauses of the `GraphStore::flush` contract in `src/store/mod.rs`, the
+the error classification in `src/store/error.rs` (`Cls`, #301 item 3); and
+two clauses of the `GraphStore::flush` contract in `src/store/mod.rs`, the
 fencing token and "Idempotency contract (flush replay)".
 
 ## Model
@@ -224,6 +225,39 @@ Rust timeout provides: a guarded call that never returns is cut off at
 `FLUSH_ATTEMPT_TIMEOUT` (the model's calls take no time), so the cycle ends
 and the stop is served.
 
+## Error classes (#301 item 3)
+
+`Cls` is how the adapters classify a failed flush (`ErrorClass` and
+`map_write_err` in `src/store/error.rs`): retryable, constraint, stale, and
+permanent but not a constraint (SQLSTATE `42P01`, say). `CStore.via m` is the
+store as the loop sees it when the adapters map a class through `m`.
+
+* `permanent_retryable_old`, `permanent_retried_retained`: before the fix a
+  permanent error reaches the loop as `Backend` (`Cls.errOld`), so the loop as
+  it is now retries it `retries` times and retains the batch, to resend it
+  after every hold until the backlog degrades the session.
+* The fix: `Err.permanent` (`StoreError::Permanent`, `Cls.errFixed`), not
+  retryable, and the `drain_and_flush` arm `settleClassed`, which degrades the
+  session (after the erased arm). `cycleClassed`, `iterClassed`,
+  `stepClassed`, `runClassed` and `runClassedGuarded` are the loop after it.
+  `permanent_one_call`, `permanent_degrades_classed`,
+  `permanent_never_resent_classed`: a permanent error costs one call, degrades
+  the session with the batch held for the degraded drop, and nothing calls the
+  store again. `close_not_ok_degraded`: `close` then reports an error.
+* `transient_retryable_fixed`, `via_fixed_agrees`, `stepClassed_agrees`,
+  `runClassed_old`: every other class is handled as before.
+* `good_reachable_classed`, `no_silent_loss_classed`,
+  `stopped_accounted_classed`, `close_ok_no_drop_classed`,
+  `close_ok_accounted_classed`: the invariants and the close theorems hold of
+  the fixed loop, over the guarded events of #301 item 2.
+* Degrade, not dead-letter: the `exGone` examples run the other candidate
+  (`Cls.errDeadLetter`, a permanent error dead-lettered like a constraint
+  violation) against a store whose table is gone. It drops every batch and
+  `close` returns `Ok` with nothing committed. Degrading keeps the writes in
+  the graph and makes `close` an error. `exBadValue` is the cost: a
+  permanent error that belongs to one batch ends durability for the session,
+  where dead-lettering would drop that batch alone.
+
 ## Left out
 
 Read-access drains and their budget (#30); the `mutation_epoch` and GC-mark
@@ -248,7 +282,10 @@ namespace Lambo.Flush
 /-! ## Errors and attempt outcomes -/
 
 /-- `StoreError`'s variants. A timed-out attempt (`FLUSH_ATTEMPT_TIMEOUT`) and
-a panicking backend (`CatchUnwindPoll`) both reach the ladder as `Backend`. -/
+a panicking backend (`CatchUnwindPoll`) both reach the ladder as `Backend`.
+`permanent` is `StoreError::Permanent`, added by the fix for #301 item 3:
+before it, no adapter produced it, and a permanent error reached the loop as
+`backend` (`Cls.errOld`). -/
 inductive Err where
   | sessionNotFound
   | notFound
@@ -258,13 +295,16 @@ inductive Err where
   | constraint
   | staleWrite
   | other
+  | permanent
   deriving DecidableEq, Repr
 
-/-- `StoreError::is_retryable`: everything except `Constraint` and
-`StaleWrite`. -/
+/-- `StoreError::is_retryable`: everything except `Constraint`, `StaleWrite`
+and (since #301) `Permanent`. Before #301 the code had no `Permanent`, so on
+the errors that existed then this is the old function. -/
 def Err.retryable : Err → Bool
   | .constraint => false
   | .staleWrite => false
+  | .permanent => false
   | _ => true
 
 /-- What one `store.flush` attempt did. Every adapter applies a batch in one
@@ -3004,6 +3044,735 @@ end CloseProbes
 
 end Unguarded
 
+/-! ## Error classes (#301)
+
+What the flush loop learns from a failed flush is the `StoreError` the adapter
+built from the driver's error (`map_write_err`, `src/store/error.rs`), and the
+adapters' commit-time fence. `Cls` is that classification: a transient
+(`Retryable`: SQLSTATE `40xxx`, `08xxx`, `57xxx`, `SQLITE_BUSY` /
+`SQLITE_LOCKED`, any error without a code such as a pool timeout or a lost
+connection, and any code not known to be permanent; a timed-out or panicking
+attempt reaches the loop the same way), a constraint violation, a stale
+fencing token, and a permanent error that is not a constraint violation (for
+example SQLSTATE `42P01`, undefined table). `CStore` is a store described by
+class, and `CStore.via m` is what the loop sees when the adapters map class
+`c` to `m c`.
+
+* Before the fix (`Cls.errOld`), `map_write_err` maps everything but a
+  constraint violation to `Backend`, so a permanent error is retried, and once
+  the retries run out the batch is retained and resent every
+  `RETAINED_BACKOFF` until the session degrades on `log_max`
+  (`permanent_retried_retained`, on `iterFixed`, the loop as it is now).
+* After it (`Cls.errFixed`), a permanent error is `StoreError::Permanent`,
+  which is not retryable (`permanent_one_call`), and `drain_and_flush` has an
+  arm for it (`settleClassed`): unless the session was erased (that arm comes
+  first, so an erased session still fences), the session degrades at once,
+  with the batch still in `pending`, so the next cycle drops it as degraded
+  (`permanent_degrades_classed`) and `close` returns an error. From then on
+  the store is never called again (`permanent_never_resent_classed`).
+* Everything else is unchanged: a transient is retried as before
+  (`transient_retryable_fixed`, `via_fixed_agrees`), and where the ladder does
+  not end in `Permanent` the fixed loop is the loop before
+  (`stepClassed_agrees`; `runClassed_old`: over the old classification it is
+  the loop before, everywhere). The invariants and the close theorems carry
+  over: `good_reachable_classed`, `no_silent_loss_classed`,
+  `stopped_accounted_classed`, `close_ok_no_drop_classed` and
+  `close_ok_accounted_classed`, over the guarded events of #301 item 2.
+
+**Why degrade and not dead-letter.** The other conservative candidate,
+dead-lettering a permanent error like a constraint violation, is
+`Cls.errDeadLetter` with the loop unchanged. A permanent error is often a
+property of the store, not of the batch (a missing table, a revoked
+privilege): then every batch fails the same way. Dead-lettering drops each
+one, counts it, keeps the session going, and `close` returns `Ok` with nothing
+committed (the `exGone` examples): every acknowledged write lost behind one
+counter. Degrading keeps the writes in the in-memory graph, stops store I/O,
+and makes `close` an error, so the operator learns that the tail was not
+written. It is also where the code before the fix ends up for a permanent
+error, after a retry storm and a `log_max` of backlog; the fix gets there on
+the first refusal. The cost is the batch-specific permanent error (a value the
+store rejects, `exBadValue`): dead-lettering would drop that batch and keep
+the session durable, degrading ends durability for the rest of the session. -/
+
+section Classes
+
+variable {α : Type}
+
+/-- The class of a failed flush, as the adapters decide it (`ErrorClass`)
+plus the fencing refusal. -/
+inductive Cls where
+  | retryable
+  | constraint
+  | stale
+  | permanent
+  deriving DecidableEq, Repr
+
+/-- Before #301: `map_write_err` maps everything but a constraint violation
+to `Backend`. -/
+def Cls.errOld : Cls → Err
+  | .retryable => .backend
+  | .constraint => .constraint
+  | .stale => .staleWrite
+  | .permanent => .backend
+
+/-- After #301: a permanent error is `StoreError::Permanent`. -/
+def Cls.errFixed : Cls → Err
+  | .permanent => .permanent
+  | c => c.errOld
+
+/-- The candidate not taken: dead-letter a permanent error as a constraint
+violation is dead-lettered. -/
+def Cls.errDeadLetter : Cls → Err
+  | .permanent => .constraint
+  | c => c.errOld
+
+/-- What one flush attempt did, by class. -/
+inductive Res where
+  | ok
+  | fail (c : Cls)
+  | lostAck
+  deriving DecidableEq, Repr
+
+def Res.outcome (m : Cls → Err) : Res → Outcome
+  | .ok => .ok
+  | .fail c => .fail (m c)
+  | .lostAck => .lostAck
+
+/-- A store described by class. -/
+abbrev CStore (α : Type) := List α → Nat → Res
+
+/-- The store as the loop sees it when class `c` reaches it as `m c`. -/
+def CStore.via (m : Cls → Err) (cs : CStore α) : Store α := fun b n => (cs b n).outcome m
+
+/-- **The bug.** Before #301 a permanent error reaches the loop retryable. -/
+theorem permanent_retryable_old : (Cls.errOld .permanent).retryable = true := rfl
+
+/-- After #301 it does not. -/
+theorem permanent_not_retryable_fixed : (Cls.errFixed .permanent).retryable = false := rfl
+
+/-- **A transient stays retryable**, and every class but `permanent` reaches
+the loop as it did before. -/
+theorem transient_retryable_fixed : (Cls.errFixed .retryable).retryable = true := rfl
+
+theorem errFixed_agrees {c : Cls} (h : c ≠ .permanent) : c.errFixed = c.errOld := by
+  cases c <;> simp_all [Cls.errFixed]
+
+/-- A store that never fails permanently is seen as before. -/
+theorem via_fixed_agrees {cs : CStore α} (h : ∀ b n, cs b n ≠ .fail .permanent) :
+    CStore.via Cls.errFixed cs = CStore.via Cls.errOld cs := by
+  funext b n
+  have hb := h b n
+  simp only [CStore.via]
+  cases hc : cs b n with
+  | ok => rfl
+  | lostAck => rfl
+  | fail c =>
+    rw [hc] at hb
+    have : c ≠ .permanent := fun e => hb (by rw [e])
+    simp [Res.outcome, errFixed_agrees this]
+
+/-- No error the old classification produces is `permanent`. -/
+theorem via_old_not_permanent (cs : CStore α) (b : List α) (n : Nat) :
+    (CStore.via Cls.errOld cs b n).reported ≠ some .permanent := by
+  simp only [CStore.via]
+  cases cs b n with
+  | ok => simp [Res.outcome, Outcome.reported]
+  | lostAck => simp [Res.outcome, Outcome.reported]
+  | fail c => cases c <;> simp [Res.outcome, Outcome.reported, Cls.errOld]
+
+/-- A ladder against a store that fails every attempt on `b` with the same
+retryable error makes `retries + 1` identical calls. -/
+theorem ladder_always {st : Store α} {b : List α} {e : Err} (hs : ∀ n, st b n = .fail e)
+    (hr : e.retryable = true) (n bo k : Nat) :
+    (ladder st b n bo k).calls = List.replicate (k + 1) (b, .fail e) ∧
+    (ladder st b n bo k).result = some e := by
+  induction k generalizing n bo with
+  | zero => simp [ladder, hs, Outcome.reported]
+  | succ k ih =>
+    have h : (st b n).reported = some e := by rw [hs]; rfl
+    rw [ladder_retry h hr]
+    obtain ⟨h1, h2⟩ := ih (n + 1) (nextBackoff bo)
+    refine ⟨?_, h2⟩
+    simp only [h1, hs, List.replicate_succ]
+
+/-- The ladder's result is what some attempt reported. -/
+theorem ladder_result_mem {st : Store α} {b : List α} (n bo k : Nat) {e : Err}
+    (h : (ladder st b n bo k).result = some e) : ∃ m, (st b m).reported = some e := by
+  obtain ⟨c, hc, hres⟩ := ladder_result_last (st := st) (b := b) n bo k
+  have hmem : c ∈ (ladder st b n bo k).calls := List.mem_of_getLast? hc
+  obtain ⟨i, hi, hci⟩ := List.getElem_of_mem hmem
+  have hidx := ladder_attempt_index (st := st) (b := b) n bo k i hi
+  refine ⟨n + i, ?_⟩
+  rw [← hidx, hci, ← hres, h]
+
+/-- **Before the fix: retried, then retained.** In the loop as it is now
+(`iterFixed`), a store that refuses the batch with a permanent error is called
+`retries + 1` times with it, each refusal seen as `Backend`; then the batch is
+retained, nothing is dropped or counted, the session does not degrade, and
+the post-retry hold is set, after which `retained_resent` sends it again.
+This holds until the backlog passes `log_max`. -/
+theorem permanent_retried_retained {P : Params} {cs : CStore α} {s : St α} {now : Nat}
+    (hrun : s.running = true) (hf : s.fenced = false) (h : Due P true now s)
+    (hp : ∀ n, cs (s.pending ++ s.log) n = .fail .permanent) :
+    (iterFixed P (CStore.via Cls.errOld cs) .tick now false s).calls =
+      s.calls ++ List.replicate (P.retries + 1) (s.pending ++ s.log, .fail .backend) ∧
+    (iterFixed P (CStore.via Cls.errOld cs) .tick now false s).pending = s.pending ++ s.log ∧
+    (iterFixed P (CStore.via Cls.errOld cs) .tick now false s).ledger = s.ledger ∧
+    (iterFixed P (CStore.via Cls.errOld cs) .tick now false s).deadLettered = s.deadLettered ∧
+    (iterFixed P (CStore.via Cls.errOld cs) .tick now false s).degraded = false ∧
+    (iterFixed P (CStore.via Cls.errOld cs) .tick now false s).running = true ∧
+    (iterFixed P (CStore.via Cls.errOld cs) .tick now false s).retryAfter =
+      some (now + (flushWithRetry (CStore.via Cls.errOld cs) (s.pending ++ s.log) s.attempts
+        P.retries).sleeps.sum + retainedBackoff) := by
+  have hs : ∀ n, CStore.via Cls.errOld cs (s.pending ++ s.log) n = .fail .backend := by
+    intro n; simp [CStore.via, hp, Res.outcome, Cls.errOld]
+  obtain ⟨hcalls, hres⟩ := ladder_always hs rfl s.attempts backoffBase P.retries
+  have her : erasedFixed P (CStore.via Cls.errOld cs) false s = false := by
+    simp [erasedFixed, flushWithRetry, hres]
+  have hr' : (!s.running) = false := by simp [hrun]
+  simp only [iterFixed, hr', Bool.false_eq_true, ↓reduceIte]
+  rw [cycleFixed_unfenced hf, her, cycle_due h]
+  simp only [flushWithRetry] at hcalls hres ⊢
+  simp [settle, hres, hcalls, checkFence, hf, hrun, h.notDegraded]
+
+/-! ### The loop after the fix -/
+
+/-- `drain_and_flush`'s `match` after #301. A `Permanent` error degrades the
+session; the erased arm comes before it, so an erased session's permanent
+error fences as before. Everything else is `settleFixed`. -/
+def settleClassed (now : Nat) (erased : Bool) (p : List α) (r : Run α) (s : St α) : St α :=
+  match r.result with
+  | some .permanent => if erased then { s with fenced := true } else { s with degraded := true }
+  | _ => settleFixed now erased p r s
+
+/-- `drain_and_flush` after #301 item 3: `cycleFixed` with `settleClassed`. -/
+def cycleClassed (P : Params) (st : Store α) (tick : Bool) (now : Nat) (erased : Bool)
+    (s0 : St α) : St α :=
+  let p := s0.pending ++ s0.log
+  let s := { s0 with pending := p, log := [] }
+  if s.fenced then s
+  else if p.isEmpty then s
+  else if s.degraded then { s with pending := [], ledger := s.ledger ++ [(.droppedDegraded, p)] }
+  else if P.logMax < p.length then { s with degraded := true }
+  else if held s.retryAfter now then s
+  else
+    let s := { s with retryAfter := none }
+    if !tick && decide (p.length < P.maxBatch) then s
+    else
+      let r := flushWithRetry st p s.attempts P.retries
+      settleClassed now erased p r
+        { s with calls := s.calls ++ r.calls, attempts := s.attempts + r.calls.length }
+
+def iterClassed (P : Params) (st : Store α) (w : Wake) (now : Nat) (erased : Bool) (s : St α) :
+    St α :=
+  if !s.running then s
+  else match w with
+    | .stop => if s.fenced then dropFenced s else requeue s
+    | .tick => checkFence (cycleClassed P st true now erased s)
+    | .poll => checkFence (cycleClassed P st false now erased s)
+
+def stepClassed (P : Params) (st : Store α) (s : St α) : Ev α → St α
+  | .write m => { s with hist := s.hist ++ [m], log := s.log ++ [m] }
+  | .fence => { s with fenced := true }
+  | .wake w now erased => iterClassed P st w now erased s
+
+def runClassed (P : Params) (st : Store α) (s : St α) (evs : List (Ev α)) : St α :=
+  evs.foldl (stepClassed P st) s
+
+theorem runClassed_cons {P : Params} {st : Store α} (s : St α) (e : Ev α) (evs : List (Ev α)) :
+    runClassed P st s (e :: evs) = runClassed P st (stepClassed P st s e) evs := rfl
+
+/-- The fixed loop with the probes of #301 item 2 guarded: the Rust after
+#301. -/
+def runClassedGuarded (P : Params) (st : Store α) (s : St α) (evs : List (PEv α)) : St α :=
+  runClassed P st s (evs.map PEv.guard)
+
+/-! ### The fixed cycle is `cycleFixed` but for the permanent arm -/
+
+/-- The shape `cycleFixed` and `cycleClassed` share; they differ only in the
+settle. -/
+def cycleWith (settleFn : Nat → Bool → List α → Run α → St α → St α) (P : Params)
+    (st : Store α) (tick : Bool) (now : Nat) (erased : Bool) (s0 : St α) : St α :=
+  let p := s0.pending ++ s0.log
+  let s := { s0 with pending := p, log := [] }
+  if s.fenced then s
+  else if p.isEmpty then s
+  else if s.degraded then { s with pending := [], ledger := s.ledger ++ [(.droppedDegraded, p)] }
+  else if P.logMax < p.length then { s with degraded := true }
+  else if held s.retryAfter now then s
+  else
+    let s := { s with retryAfter := none }
+    if !tick && decide (p.length < P.maxBatch) then s
+    else
+      let r := flushWithRetry st p s.attempts P.retries
+      settleFn now erased p r
+        { s with calls := s.calls ++ r.calls, attempts := s.attempts + r.calls.length }
+
+section ClassedCycle
+
+variable {P : Params} {st : Store α} {tick : Bool} {now : Nat} {er : Bool} {s : St α}
+
+theorem cycleFixed_with : cycleFixed P st tick now er s = cycleWith settleFixed P st tick now er s :=
+  rfl
+
+theorem cycleClassed_with :
+    cycleClassed P st tick now er s = cycleWith settleClassed P st tick now er s := rfl
+
+theorem cycleWith_due (f : Nat → Bool → List α → Run α → St α → St α) (hf : s.fenced = false)
+    (h : Due P tick now s) :
+    cycleWith f P st tick now er s =
+      f now er (s.pending ++ s.log) (flushWithRetry st (s.pending ++ s.log) s.attempts P.retries)
+        (preSettle P st s) := by
+  have h1 := h.nonempty
+  have h2 := h.notDegraded
+  have h3 : ¬ P.logMax < (s.pending ++ s.log).length := Nat.not_lt.mpr h.withinMax
+  have h4 := h.notHeld
+  have h5 : (!tick && decide ((s.pending ++ s.log).length < P.maxBatch)) = false := by
+    rcases h.tickOrFull with ht | hfull
+    · simp [ht]
+    · cases tick
+      · simp only [Bool.not_false, Bool.true_and, decide_eq_false_iff_not, Nat.not_lt]
+        exact hfull
+      · simp
+  unfold cycleWith
+  simp only [preSettle, hf, h1, h2, h3, h4, h5, Bool.false_eq_true, ↓reduceIte]
+
+theorem cycleWith_not_due (f g : Nat → Bool → List α → Run α → St α → St α)
+    (h : ¬ (s.fenced = false ∧ Due P tick now s)) :
+    cycleWith f P st tick now er s = cycleWith g P st tick now er s := by
+  unfold cycleWith
+  dsimp only
+  by_cases h0 : s.fenced = true
+  · rw [ite_eq_left h0, ite_eq_left h0]
+  · rw [ite_eq_right h0, ite_eq_right h0]
+    by_cases h1 : (s.pending ++ s.log).isEmpty = true
+    · rw [ite_eq_left h1, ite_eq_left h1]
+    · rw [ite_eq_right h1, ite_eq_right h1]
+      by_cases h2 : s.degraded = true
+      · rw [ite_eq_left h2, ite_eq_left h2]
+      · rw [ite_eq_right h2, ite_eq_right h2]
+        by_cases h3 : P.logMax < (s.pending ++ s.log).length
+        · rw [ite_eq_left h3, ite_eq_left h3]
+        · rw [ite_eq_right h3, ite_eq_right h3]
+          by_cases h4 : held s.retryAfter now = true
+          · rw [ite_eq_left h4, ite_eq_left h4]
+          · rw [ite_eq_right h4, ite_eq_right h4]
+            by_cases h5 : (!tick && decide ((s.pending ++ s.log).length < P.maxBatch)) = true
+            · rw [ite_eq_left h5, ite_eq_left h5]
+            · exfalso
+              apply h
+              refine ⟨by simpa using h0, by simpa using h1, by simpa using h2, by omega,
+                by simpa using h4, ?_⟩
+              cases tick
+              · right
+                simp only [Bool.not_false, Bool.true_and, decide_eq_true_eq] at h5
+                omega
+              · left; rfl
+
+/-- A cycle that does not reach the store makes no call. -/
+theorem cycleClassed_calls_not_due (h : ¬ (s.fenced = false ∧ Due P tick now s)) :
+    (cycleClassed P st tick now er s).calls = s.calls := by
+  rw [cycleClassed_with, cycleWith_not_due settleClassed settleFixed h, ← cycleFixed_with]
+  by_cases hf : s.fenced = true
+  · rw [cycleFixed_fenced hf]; rfl
+  · have hf' : s.fenced = false := by simpa using hf
+    rw [cycleFixed_unfenced hf']
+    rcases cycle_calls_or_due (P := P) (st := st) (tick := tick) (now := now)
+      (er := erasedFixed P st er s) s with hc | hd
+    · exact hc
+    · exact absurd ⟨hf', hd⟩ h
+
+theorem settleClassed_eq (now : Nat) (er : Bool) (p : List α) (r : Run α) (s : St α) :
+    settleClassed now er p r s =
+      if r.result = some .permanent ∧ er = false then { s with degraded := true }
+      else settleFixed now er p r s := by
+  unfold settleClassed
+  cases h : r.result with
+  | none => simp
+  | some e => cases e <;> cases er <;> simp [settleFixed, h]
+
+theorem settleClassed_calls (now : Nat) (er : Bool) (p : List α) (r : Run α) (x : St α) :
+    (settleClassed now er p r x).calls = x.calls := by
+  rw [settleClassed_eq]
+  split
+  · rfl
+  · rw [settleFixed_eq]; exact (settle_shape _ _ _ _ _).2.2.2.1
+
+/-- **The fixed cycle is the cycle before, but for one case**: a due cycle
+whose ladder ends in `Permanent`, in a session not erased, degrades with the
+drained batch still in `pending`. -/
+theorem cycleClassed_cases :
+    cycleClassed P st tick now er s = cycleFixed P st tick now er s ∨
+    (cycleClassed P st tick now er s = { preSettle P st s with degraded := true } ∧
+      s.fenced = false ∧ Due P tick now s ∧
+      (flushWithRetry st (s.pending ++ s.log) s.attempts P.retries).result = some .permanent ∧
+      er = false) := by
+  rw [cycleClassed_with, cycleFixed_with]
+  by_cases hd : s.fenced = false ∧ Due P tick now s
+  · rw [cycleWith_due _ hd.1 hd.2, cycleWith_due _ hd.1 hd.2, settleClassed_eq]
+    split
+    · rename_i hc
+      exact Or.inr ⟨rfl, hd.1, hd.2, hc.1, hc.2⟩
+    · exact Or.inl rfl
+  · exact Or.inl (cycleWith_not_due _ _ hd)
+
+end ClassedCycle
+
+/-! ### Agreement -/
+
+section ClassedAgree
+
+variable {P : Params} {st : Store α}
+
+/-- **Agreement.** In a state whose next ladder would not end in `Permanent`,
+every event does what it did before the fix. -/
+theorem stepClassed_agrees {s : St α}
+    (hs : (flushWithRetry st (s.pending ++ s.log) s.attempts P.retries).result ≠
+      some .permanent) (e : Ev α) :
+    stepClassed P st s e = stepFixed P st s e := by
+  have hc : ∀ tick now er, cycleClassed P st tick now er s = cycleFixed P st tick now er s := by
+    intro tick now er
+    rcases cycleClassed_cases (P := P) (st := st) (tick := tick) (now := now) (er := er)
+      (s := s) with h | ⟨_, _, _, h, _⟩
+    · exact h
+    · exact absurd h hs
+  cases e with
+  | write m => rfl
+  | fence => rfl
+  | wake w now er =>
+    simp only [stepClassed, stepFixed, iterClassed, iterFixed]
+    cases w with
+    | stop => rfl
+    | tick => simp only [hc]
+    | poll => simp only [hc]
+
+/-- **The new arm alone changes nothing**: over the old classification, which
+never produces `Permanent`, the fixed loop is the loop before. The fix is the
+classification and the arm together. -/
+theorem runClassed_old (cs : CStore α) (s : St α) (evs : List (Ev α)) :
+    runClassed P (CStore.via Cls.errOld cs) s evs = runFixed P (CStore.via Cls.errOld cs) s evs := by
+  induction evs generalizing s with
+  | nil => rfl
+  | cons e evs ih =>
+    rw [runClassed_cons, runFixed_cons]
+    have hs : (flushWithRetry (CStore.via Cls.errOld cs) (s.pending ++ s.log) s.attempts
+        P.retries).result ≠ some .permanent := by
+      intro h
+      obtain ⟨m, hm⟩ := ladder_result_mem _ _ _ h
+      exact via_old_not_permanent cs _ m hm
+    rw [stepClassed_agrees hs, ih]
+
+end ClassedAgree
+
+/-! ### A permanent error is never retried -/
+
+section ClassedPermanent
+
+variable {P : Params} {st : Store α}
+
+/-- **One call.** A `Permanent` error ends the ladder at once, with no
+backoff, whatever `retries` is. -/
+theorem permanent_one_call {b : List α} {n : Nat} (hs : st b n = .fail .permanent)
+    (retries : Nat) :
+    flushWithRetry st b n retries = ⟨[(b, .fail .permanent)], [], some .permanent⟩ := by
+  have hrep : (st b n).reported = some .permanent := by rw [hs]; rfl
+  unfold flushWithRetry
+  rw [ladder_nonretryable hrep rfl, hs]
+
+/-- **The issue's scenario, fixed.** The store refuses the batch with a
+permanent error: one call, then the session degrades, holding the batch in
+`pending` for the degraded drop; nothing is dead-lettered or held for a
+resend (contrast `permanent_retried_retained`). -/
+theorem permanent_degrades_classed {cs : CStore α} {s : St α} {now : Nat}
+    (hrun : s.running = true) (hf : s.fenced = false) (h : Due P true now s)
+    (hp : cs (s.pending ++ s.log) s.attempts = .fail .permanent) :
+    (iterClassed P (CStore.via Cls.errFixed cs) .tick now false s).calls =
+      s.calls ++ [(s.pending ++ s.log, .fail .permanent)] ∧
+    (iterClassed P (CStore.via Cls.errFixed cs) .tick now false s).pending = s.pending ++ s.log ∧
+    (iterClassed P (CStore.via Cls.errFixed cs) .tick now false s).ledger = s.ledger ∧
+    (iterClassed P (CStore.via Cls.errFixed cs) .tick now false s).deadLettered = s.deadLettered ∧
+    (iterClassed P (CStore.via Cls.errFixed cs) .tick now false s).degraded = true ∧
+    (iterClassed P (CStore.via Cls.errFixed cs) .tick now false s).running = true := by
+  have hs : CStore.via Cls.errFixed cs (s.pending ++ s.log) s.attempts = .fail .permanent := by
+    simp [CStore.via, hp, Res.outcome, Cls.errFixed]
+  have hres := permanent_one_call (st := CStore.via Cls.errFixed cs) hs P.retries
+  have hr' : (!s.running) = false := by simp [hrun]
+  simp only [iterClassed, hr', Bool.false_eq_true, ↓reduceIte]
+  rw [cycleClassed_with, cycleWith_due _ hf h]
+  simp [settleClassed, preSettle, checkFence, hf, hrun, hres]
+
+theorem checkFence_degraded (x : St α) : (checkFence x).degraded = x.degraded := by
+  unfold checkFence; split <;> rfl
+
+theorem checkFence_fenced (x : St α) : (checkFence x).fenced = x.fenced := by
+  unfold checkFence; split <;> simp_all [dropFenced]
+
+/-- Once degraded or fenced, no event of the fixed loop calls the store, and
+it stays so. -/
+theorem stepClassed_silent {s : St α} (h : s.degraded = true ∨ s.fenced = true) (e : Ev α) :
+    (stepClassed P st s e).calls = s.calls ∧
+    ((stepClassed P st s e).degraded = true ∨ (stepClassed P st s e).fenced = true) := by
+  cases e with
+  | write m => exact ⟨rfl, h⟩
+  | fence => exact ⟨rfl, Or.inr rfl⟩
+  | wake w now er =>
+    simp only [stepClassed, iterClassed]
+    by_cases hr : s.running = true
+    · have hr' : (!s.running) = false := by simp [hr]
+      simp only [hr', Bool.false_eq_true, ↓reduceIte]
+      have hnd : ¬ (s.fenced = false ∧ Due P true now s) ∧
+          ¬ (s.fenced = false ∧ Due P false now s) := by
+        constructor <;>
+        · rintro ⟨hf, hd⟩
+          rcases h with h | h
+          · rw [hd.notDegraded] at h; cases h
+          · rw [hf] at h; cases h
+      have hcyc : ∀ tick, ¬ (s.fenced = false ∧ Due P tick now s) →
+          (checkFence (cycleClassed P st tick now er s)).calls = s.calls ∧
+          ((checkFence (cycleClassed P st tick now er s)).degraded = true ∨
+            (checkFence (cycleClassed P st tick now er s)).fenced = true) := by
+        intro tick hn
+        refine ⟨(checkFence_shape _).2.2.trans (cycleClassed_calls_not_due hn), ?_⟩
+        rw [checkFence_degraded, checkFence_fenced]
+        rcases cycleClassed_cases (P := P) (st := st) (tick := tick) (now := now) (er := er)
+          (s := s) with hc | ⟨_, hf, hd, _⟩
+        · rw [hc]
+          by_cases hf : s.fenced = true
+          · rw [cycleFixed_fenced hf]; exact Or.inr hf
+          · have hf' : s.fenced = false := by simpa using hf
+            rw [cycleFixed_unfenced hf']
+            obtain ⟨_, _, _, h4, h5, _⟩ := cycle_shape (P := P) (st := st) (tick := tick)
+              (now := now) (er := erasedFixed P st er s) (s := s)
+            have hle : ∀ {a b : Bool}, a ≤ b → a = true → b = true := by decide
+            rcases h with h | h
+            · exact Or.inl (hle h4 h)
+            · exact Or.inr (hle h5 h)
+        · exact absurd ⟨hf, hd⟩ hn
+      cases w with
+      | stop =>
+        by_cases hf : s.fenced = true
+        · simp only [hf, ↓reduceIte]
+          exact ⟨rfl, Or.inr hf⟩
+        · simp only [hf, Bool.false_eq_true, ↓reduceIte]
+          exact ⟨rfl, h⟩
+      | tick => exact hcyc true hnd.1
+      | poll => exact hcyc false hnd.2
+    · have hr' : (!s.running) = true := by simp at hr; simp [hr]
+      rw [ite_eq_left hr']
+      exact ⟨rfl, h⟩
+
+theorem runClassed_silent {s : St α} (h : s.degraded = true ∨ s.fenced = true)
+    (evs : List (Ev α)) : (runClassed P st s evs).calls = s.calls := by
+  induction evs generalizing s with
+  | nil => rfl
+  | cons e evs ih =>
+    rw [runClassed_cons, ih (stepClassed_silent h e).2, (stepClassed_silent h e).1]
+
+/-- After any event whose store calls include a `Permanent` refusal, the
+fixed loop is degraded (or fenced, for an erased session). -/
+theorem permanent_stops_classed {s : St α} (e : Ev α)
+    (hp : ∃ c ∈ (stepClassed P st s e).calls.drop s.calls.length, c.2 = .fail .permanent) :
+    (stepClassed P st s e).degraded = true ∨ (stepClassed P st s e).fenced = true := by
+  obtain ⟨c, hc, hcp⟩ := hp
+  have nocall : (stepClassed P st s e).calls = s.calls → False := by
+    intro h
+    rw [h, List.drop_length] at hc
+    cases hc
+  cases e with
+  | write m => exact (nocall rfl).elim
+  | fence => exact (nocall rfl).elim
+  | wake w now er =>
+    by_cases hr : s.running = true
+    · have hr' : (!s.running) = false := by simp [hr]
+      have main : ∀ tick,
+          (∃ c ∈ (checkFence (cycleClassed P st tick now er s)).calls.drop s.calls.length,
+            c.2 = .fail .permanent) →
+          (checkFence (cycleClassed P st tick now er s)).degraded = true ∨
+          (checkFence (cycleClassed P st tick now er s)).fenced = true := by
+        intro tick ⟨c, hc, hcp⟩
+        rw [(checkFence_shape _).2.2] at hc
+        rw [checkFence_degraded, checkFence_fenced]
+        by_cases hd : s.fenced = false ∧ Due P tick now s
+        · rw [cycleClassed_with, cycleWith_due _ hd.1 hd.2] at hc ⊢
+          rw [settleClassed_calls] at hc
+          simp only [preSettle, List.drop_left'] at hc
+          have hc' : c ∈ (flushWithRetry st (s.pending ++ s.log) s.attempts P.retries).calls := by
+            simpa using hc
+          have hres : (flushWithRetry st (s.pending ++ s.log) s.attempts P.retries).result =
+              some .permanent :=
+            ladder_terminal_result _ _ _ c hc' .permanent (by rw [hcp]; rfl) rfl
+          cases er
+          · left; simp [settleClassed, hres]
+          · right; simp [settleClassed, hres]
+        · rw [cycleClassed_calls_not_due hd, List.drop_length] at hc
+          cases hc
+      cases w with
+      | stop =>
+        refine (nocall ?_).elim
+        by_cases hf : s.fenced = true
+        · simp [stepClassed, iterClassed, hr', hf, dropFenced]
+        · simp [stepClassed, iterClassed, hr', hf, requeue]
+      | tick =>
+        simp only [stepClassed, iterClassed, hr', Bool.false_eq_true, ↓reduceIte] at hc hcp ⊢
+        exact main true ⟨c, hc, hcp⟩
+      | poll =>
+        simp only [stepClassed, iterClassed, hr', Bool.false_eq_true, ↓reduceIte] at hc hcp ⊢
+        exact main false ⟨c, hc, hcp⟩
+    · refine (nocall ?_).elim
+      have hr' : (!s.running) = true := by simp at hr; simp [hr]
+      simp [stepClassed, iterClassed, hr']
+
+/-- **A permanent error is never retried.** Within its ladder it is the last
+call (`permanent_one_call`); after the event that saw it, no later event of
+the fixed loop calls the store again (contrast `permanent_retried_retained`,
+where the old loop resends it every `RETAINED_BACKOFF`). -/
+theorem permanent_never_resent_classed {s : St α} (e : Ev α)
+    (hp : ∃ c ∈ (stepClassed P st s e).calls.drop s.calls.length, c.2 = .fail .permanent)
+    (evs : List (Ev α)) :
+    (runClassed P st (stepClassed P st s e) evs).calls = (stepClassed P st s e).calls :=
+  runClassed_silent (permanent_stops_classed e hp) evs
+
+end ClassedPermanent
+
+/-! ### The invariants and the close theorems carry over -/
+
+section ClassedInvariants
+
+variable {P : Params} {st : Store α}
+
+theorem good_preSettle_degraded {s : St α} (hg : Good s) (hrun : s.running = true) :
+    Good { preSettle P st s with degraded := true } where
+  conserve := by
+    have hc := hg.conserve
+    simp only [preSettle, St.consumed] at hc ⊢
+    simpa [List.append_assoc] using hc
+  dead := hg.dead
+  degr := by intro _ _ _; rfl
+  fence := hg.fence
+  stopped := by intro h; simp [preSettle, hrun] at h
+
+theorem good_cycleClassed {tick : Bool} {now : Nat} {er : Bool} {s : St α} (hg : Good s)
+    (hrun : s.running = true) : Good (cycleClassed P st tick now er s) := by
+  rcases cycleClassed_cases (P := P) (st := st) (tick := tick) (now := now) (er := er) (s := s)
+    with h | ⟨h, _⟩
+  · rw [h]; exact good_cycleFixed hg hrun
+  · rw [h]; exact good_preSettle_degraded hg hrun
+
+theorem good_stepClassed {s : St α} (hg : Good s) (e : Ev α) : Good (stepClassed P st s e) := by
+  cases e with
+  | write m => exact good_step (P := P) (st := st) hg (.write m)
+  | fence => exact good_step (P := P) (st := st) hg .fence
+  | wake w now er =>
+    simp only [stepClassed, iterClassed]
+    by_cases hr : s.running = true
+    · have hr' : (!s.running) = false := by simp [hr]
+      rw [hr']
+      simp only [Bool.false_eq_true, ↓reduceIte]
+      cases w with
+      | stop =>
+        by_cases hf : s.fenced = true
+        · simp only [hf, ↓reduceIte]; exact good_dropFenced hg hf
+        · simp only [hf, Bool.false_eq_true, ↓reduceIte]; exact good_requeue hg
+      | tick => exact good_checkFence (good_cycleClassed hg hr)
+      | poll => exact good_checkFence (good_cycleClassed hg hr)
+    · have hr' : (!s.running) = true := by simp at hr; simp [hr]
+      rw [hr']
+      exact hg
+
+theorem good_runClassed {s : St α} (hg : Good s) (evs : List (Ev α)) :
+    Good (runClassed P st s evs) := by
+  induction evs generalizing s with
+  | nil => exact hg
+  | cons e evs ih => exact ih (good_stepClassed hg e)
+
+/-- **`good_reachable` after #301 item 3**, over the guarded events of item
+2: conservation, the dead-letter count and "dropped only once degraded or
+fenced" hold of every state. -/
+theorem good_reachable_classed (evs : List (PEv α)) :
+    Good (runClassedGuarded P st St.init evs) :=
+  good_runClassed good_init _
+
+/-- **`no_silent_loss` after #301 item 3.** A batch refused with a permanent
+error is dropped only as a degraded drop, with `degraded()` set: the session
+is reported as degraded, never quietly emptied. -/
+theorem no_silent_loss_classed (evs : List (PEv α)) :
+    ∀ e ∈ (runClassedGuarded P st St.init evs).ledger, e.1 = .committed ∨
+      (e.1 = .deadLettered ∧ 0 < (runClassedGuarded P st St.init evs).deadLettered) ∨
+      (e.1 = .droppedDegraded ∧ (runClassedGuarded P st St.init evs).degraded = true) ∨
+      (e.1 = .droppedFenced ∧ (runClassedGuarded P st St.init evs).fenced = true) :=
+  no_silent_loss (good_reachable_classed evs)
+
+/-- `stopped_accounted` after #301 item 3. -/
+theorem stopped_accounted_classed (evs : List (PEv α))
+    (hr : (runClassedGuarded P st St.init evs).running = false) :
+    (runClassedGuarded P st St.init evs).consumed ++ (runClassedGuarded P st St.init evs).log =
+      (runClassedGuarded P st St.init evs).hist :=
+  stopped_accounted (good_reachable_classed evs) hr
+
+/-- `closeOk` over the fixed loop. -/
+def closeOkClassed (P : Params) (st : Store α) (recheck : Bool) (s : St α) (evs : List (Ev α))
+    (final : Store α) : Bool :=
+  if s.fenced then false
+  else
+    let s' := runClassed P st s evs
+    if recheck && s'.fenced then false
+    else if s'.degraded then false
+    else if s'.log.isEmpty then true
+    else (final s'.log s'.attempts).reported.isNone
+
+/-- `close` over the fixed loop with the guarded events of #301 item 2. -/
+def closeOkClassedGuarded (P : Params) (st : Store α) (recheck : Bool) (s : St α)
+    (evs : List (PEv α)) (final : Store α) : Bool :=
+  closeOkClassed P st recheck s (evs.map PEv.guard) final
+
+/-- **A degraded session never closes `Ok`**, so a permanent refusal always
+reaches the caller of `close` as an error. -/
+theorem close_not_ok_degraded {s : St α} (evs : List (Ev α)) (r : Bool) (final : Store α)
+    (hd : (runClassed P st s evs).degraded = true) :
+    closeOkClassed P st r s evs final = false := by
+  unfold closeOkClassed
+  cases hf : s.fenced <;> cases r <;> cases hxf : (runClassed P st s evs).fenced <;>
+    simp [hd, hxf]
+
+/-- **`close_ok_no_drop` after #301 item 3.** -/
+theorem close_ok_no_drop_classed {s : St α} (hg : Good s) (evs : List (Ev α)) (final : Store α)
+    (hok : closeOkClassed P st true s evs final = true) :
+    ∀ e ∈ (runClassed P st s evs).ledger, e.1 = .committed ∨ e.1 = .deadLettered := by
+  have hg' := good_runClassed (P := P) (st := st) hg evs
+  have hf : (runClassed P st s evs).fenced = false := by
+    cases h : (runClassed P st s evs).fenced
+    · rfl
+    · simp [closeOkClassed, h] at hok
+  have hd : (runClassed P st s evs).degraded = false := by
+    cases h : (runClassed P st s evs).degraded
+    · rfl
+    · simp [closeOkClassed, h, hf] at hok
+  intro e he
+  cases hfate : e.1 with
+  | committed => exact Or.inl rfl
+  | deadLettered => exact Or.inr rfl
+  | droppedDegraded =>
+    have := hg'.degr e he hfate
+    rw [hd] at this; cases this
+  | droppedFenced =>
+    have := hg'.fence e he hfate
+    rw [hf] at this; cases this
+
+/-- **`close_ok_accounted_guarded` after #301 item 3.** When the loop has
+exited and close returns `Ok`, every mutation ever written is committed,
+dead-lettered, or in the log the final flush sent. -/
+theorem close_ok_accounted_classed {s : St α} (hg : Good s) (evs : List (PEv α))
+    (final : Store α) (hok : closeOkClassedGuarded P st true s evs final = true)
+    (hstop : (runClassedGuarded P st s evs).running = false) :
+    (∀ e ∈ (runClassedGuarded P st s evs).ledger, e.1 = .committed ∨ e.1 = .deadLettered) ∧
+    (runClassedGuarded P st s evs).consumed ++ (runClassedGuarded P st s evs).log =
+      (runClassedGuarded P st s evs).hist :=
+  ⟨close_ok_no_drop_classed hg _ final hok, stopped_accounted (good_runClassed hg _) hstop⟩
+
+end ClassedInvariants
+
+end Classes
+
 /-! ## Examples -/
 
 section Examples
@@ -3402,6 +4171,94 @@ example :
     runUnguarded exP exDown ⟨exOne, false⟩
         [.wake .tick 0 (.ret false) (some (.ret ())), .wake .stop 1 (.ret false) none] =
       ⟨runGuarded exP exDown exOne exLeasePanic, false⟩ := by
+  decide
+
+/-! ### Error classes (#301) -/
+
+/-- The store refuses every batch with a permanent error that is a property of
+the store, not of the batch: SQLSTATE `42P01`, the table is gone. -/
+def exGone : CStore Nat := fun _ _ => .fail .permanent
+
+/-- Two writes, a tick after each, then `close` stops the loop. -/
+def exGoneEvs : List (Ev Nat) :=
+  [.write 1, .wake .tick 0 false, .write 2, .wake .tick 20000 false, .wake .stop 20001 false]
+
+/-- **Before the fix** (`permanent_retried_retained`): three calls, each seen
+as `Backend`, then `[1]` is retained and held, and the session is not
+degraded; after the hold `[1, 2]` gets three more. -/
+example :
+    (runFixed exP (CStore.via Cls.errOld exGone) St.init [.write 1, .wake .tick 0 false]).calls =
+      [([1], .fail .backend), ([1], .fail .backend), ([1], .fail .backend)] ∧
+    (runFixed exP (CStore.via Cls.errOld exGone) St.init [.write 1, .wake .tick 0 false]).pending
+      = [1] ∧
+    (runFixed exP (CStore.via Cls.errOld exGone) St.init
+      [.write 1, .wake .tick 0 false]).degraded = false ∧
+    (runFixed exP (CStore.via Cls.errOld exGone) St.init
+      (exGoneEvs.take 4)).calls.length = 6 := by
+  decide
+
+/-- And it degrades in the end, once the retained backlog passes `log_max`
+(here 2). -/
+example :
+    (runFixed { exP with logMax := 2 } (CStore.via Cls.errOld exGone) St.init
+      [.write 1, .wake .tick 0 false, .write 2, .write 3, .wake .tick 20000 false]).degraded =
+      true := by
+  decide
+
+/-- **After the fix** (`permanent_degrades_classed`,
+`permanent_never_resent_classed`): one call, the session degrades holding
+`[1]`, the next tick drops `[1, 2]` as degraded with no call, and `close`
+returns an error. -/
+example :
+    (runClassed exP (CStore.via Cls.errFixed exGone) St.init exGoneEvs).calls =
+      [([1], .fail .permanent)] ∧
+    (runClassed exP (CStore.via Cls.errFixed exGone) St.init exGoneEvs).ledger =
+      [(.droppedDegraded, [1, 2])] ∧
+    (runClassed exP (CStore.via Cls.errFixed exGone) St.init exGoneEvs).degraded = true ∧
+    closeOkClassed exP (CStore.via Cls.errFixed exGone) true St.init exGoneEvs
+      (CStore.via Cls.errFixed exGone) = false := by
+  decide
+
+/-- **The candidate not taken.** Dead-lettering a permanent error: each batch
+is one call, dead-lettered and counted, the session goes on, and `close`
+returns `Ok` with nothing committed. Every acknowledged write is lost, and
+only `dead_lettered` says so. -/
+example :
+    (runFixed exP (CStore.via Cls.errDeadLetter exGone) St.init exGoneEvs).ledger =
+      [(.deadLettered, [1]), (.deadLettered, [2])] ∧
+    (runFixed exP (CStore.via Cls.errDeadLetter exGone) St.init exGoneEvs).committed = [] ∧
+    closeOk exP (CStore.via Cls.errDeadLetter exGone) true St.init exGoneEvs
+      (CStore.via Cls.errDeadLetter exGone) = true := by
+  decide
+
+/-- A permanent error that is a property of the batch: the store rejects any
+batch holding the value `3` (a value it cannot store, e.g. SQLSTATE `22021`). -/
+def exBadValue : CStore Nat := fun b _ => if b.contains 3 then .fail .permanent else .ok
+
+def exBadEvs : List (Ev Nat) :=
+  [.write 1, .wake .tick 0 false, .write 3, .wake .tick 1000 false, .write 4,
+   .wake .tick 2000 false]
+
+/-- **The cost of degrading.** After the fix `[1]` commits, `[3]` degrades the
+session and `[4]` is dropped with it; the dead-letter candidate would drop
+`[3]` alone and commit `[4]`. The code before the fix resends `[3]` until the
+backlog passes `log_max`, then degrades all the same; here it still holds
+`[3, 4]`. -/
+example :
+    (runClassed exP (CStore.via Cls.errFixed exBadValue) St.init exBadEvs).ledger =
+      [(.committed, [1]), (.droppedDegraded, [3, 4])] ∧
+    (runFixed exP (CStore.via Cls.errDeadLetter exBadValue) St.init exBadEvs).ledger =
+      [(.committed, [1]), (.deadLettered, [3]), (.committed, [4])] ∧
+    (runFixed exP (CStore.via Cls.errOld exBadValue) St.init exBadEvs).pending = [3, 4] ∧
+    (runFixed exP (CStore.via Cls.errOld exBadValue) St.init exBadEvs).degraded = false := by
+  decide
+
+/-- `via_fixed_agrees`, `runClassed_old`: a transient outage is retried and
+committed exactly as before the fix. -/
+example :
+    runClassed exP (CStore.via Cls.errFixed (fun _ n => if n = 0 then .fail .retryable else .ok))
+        St.init [.write 1, .write 2, .wake .tick 0 false] =
+      run exP exFlaky St.init [.write 1, .write 2, .wake .tick 0 false] := by
   decide
 
 end Examples
