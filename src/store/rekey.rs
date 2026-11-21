@@ -1,15 +1,21 @@
-//! #148: re-key stored concepts after identifier tokens stopped being stemmed.
+//! Re-key stored concepts after the canonical-key rule changed: identifier
+//! tokens stopped being stemmed (#148), and empty stems stopped reaching the
+//! key (#301).
 //!
 //! Builds before #148 stemmed every token, so a stored concept whose content
 //! holds an identifier token (`v2`, `2122de39e47e`, `src/main.rs`) carries a
 //! key the current [`canonical_key`] no longer derives, and a new write of the
-//! same text would mint a second concept. `lambo provision` calls
+//! same text would mint a second concept. Builds before #301 kept the empty
+//! stem Snowball English gives `''s`, so `''s-lease` was stored as `" leas"`,
+//! where the current rule derives `leas`. `lambo provision` calls
 //! [`crate::store::GraphStore::rekey_canonical_keys`], which reads every
 //! concept's `(id, session, content, key, type)` and the synonyms, plans here,
 //! and writes the plan in one transaction.
 //!
-//! The plan only touches a row whose stored key is exactly what the old rule
-//! derives from its content (through the session's synonyms). Anything else
+//! The plan only touches a row whose stored key is exactly what one of the
+//! old rules derives from its content (through the session's synonyms):
+//! [`legacy_canonical_key`] (before #148, empty stems kept) or
+//! [`unfiltered_canonical_key`] (from #148 up to #301). Anything else
 //! (a repository-scoped Resource key, a key a current build wrote) is left
 //! alone, so a rerun finds nothing to do. Already-merged concepts stay merged:
 //! the surviving concept keeps the content its first write gave it.
@@ -20,10 +26,18 @@
 //! is reported, never merged. So does a row whose staging placeholder
 //! ([`placeholder_key`]) another concept already holds: keys are
 //! caller-supplied, so the planner checks rather than assumes.
+//!
+//! A row whose new key would be empty (its text has only stopwords and empty
+//! stems, such as `''s ''s`, which an old build stored as `" "`) also keeps
+//! its old key and is reported ([`RekeyPlan::kept_empty`]): an empty key is
+//! one no write accepts, and in the key index every stopword-only text would
+//! resolve to that concept. Such a row does not stop the marker from being
+//! recorded; nothing derives its old key any more, and `lambo provision
+//! --rekey` reports it again.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use crate::graph::canonical::{canonical_key, legacy_canonical_key};
+use crate::graph::canonical::{canonical_key, legacy_canonical_key, unfiltered_canonical_key};
 
 /// One stored concept, as the re-key reads it. `id` is the adapter's id text.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -51,6 +65,9 @@ pub struct RekeyPlan {
     /// Rows that keep their old key because the new one (or the row's
     /// staging placeholder) is taken, by id.
     pub collisions: Vec<String>,
+    /// Rows that keep their old key because the current rule gives them the
+    /// empty key, by id.
+    pub kept_empty: Vec<String>,
     /// The store's `store_meta` marker ([`REKEY_MARKER_KEY`]) said a previous
     /// re-key finished clean, so nothing was read or planned (#171).
     pub skipped: bool,
@@ -71,13 +88,16 @@ pub struct RekeyPlan {
 /// full pass whatever the marker says.
 pub const REKEY_MARKER_KEY: &str = "canonical_key_rule";
 
-/// The value [`REKEY_MARKER_KEY`] holds once every key follows #148's rule.
-pub const REKEY_MARKER_VALUE: &str = "148-identifiers-unstemmed";
+/// The value [`REKEY_MARKER_KEY`] holds once every key follows the current
+/// rule. It changed when #301 changed the rule, so a store whose marker a
+/// build before #301 recorded is scanned once more.
+pub const REKEY_MARKER_VALUE: &str = "301-empty-stems-dropped";
 
 /// Plan the re-key. `synonyms` maps `(session_id, source_key)` to the
 /// synonym's target text, as the `synonyms` table stores it.
 pub fn plan_rekey(rows: &[KeyRow], synonyms: &HashMap<(String, String), String>) -> RekeyPlan {
     let mut candidates: BTreeMap<String, (usize, String)> = BTreeMap::new();
+    let mut kept_empty: Vec<String> = Vec::new();
     for (i, r) in rows.iter().enumerate() {
         // The write path's raw lookup (trimmed, exact) before normalizing;
         // trimming the target again changes no token.
@@ -85,13 +105,22 @@ pub fn plan_rekey(rows: &[KeyRow], synonyms: &HashMap<(String, String), String>)
         let effective = synonyms
             .get(&(r.session_id.clone(), raw.to_string()))
             .map_or(raw, String::as_str);
-        if legacy_canonical_key(effective, |_| None) != r.canonical_key {
+        if legacy_canonical_key(effective, |_| None) != r.canonical_key
+            && unfiltered_canonical_key(effective, |_| None) != r.canonical_key
+        {
             continue;
         }
         let new_key = canonical_key(effective, |_| None);
-        if new_key != r.canonical_key {
-            candidates.insert(r.id.clone(), (i, new_key));
+        if new_key == r.canonical_key {
+            continue;
         }
+        // Never write the empty key: no write accepts it, and the key index
+        // would resolve every stopword-only text to this concept.
+        if new_key.is_empty() {
+            kept_empty.push(r.id.clone());
+            continue;
+        }
+        candidates.insert(r.id.clone(), (i, new_key));
     }
     // A changed row parks on its placeholder between the two update passes.
     // Keys are caller-supplied, so a non-Observation concept in the same
@@ -136,7 +165,11 @@ pub fn plan_rekey(rows: &[KeyRow], synonyms: &HashMap<(String, String), String>)
             break;
         }
     }
-    let mut plan = RekeyPlan::default();
+    kept_empty.sort();
+    let mut plan = RekeyPlan {
+        kept_empty,
+        ..RekeyPlan::default()
+    };
     for (id, (i, new_key)) in candidates {
         if refused.contains(&id) {
             plan.collisions.push(id);
@@ -172,21 +205,21 @@ pub fn first_live_holder(rows: &[(String, String)]) -> Option<&(String, String)>
 /// the old keys and would flush them back (or mint a duplicate).
 pub fn live_lease_err(session: &str, holder: &str, pending: usize) -> crate::types::StoreError {
     crate::types::StoreError::Capability(format!(
-        "cannot re-key {pending} concept(s) for unstemmed identifiers (#148) while session \
-         {session:?} is held by {holder:?}: a running holder keeps the old keys in memory. \
-         Stop every holder on this store, then rerun `lambo provision`"
+        "cannot re-key {pending} concept(s) to the current canonical-key rule (#148, #301) \
+         while session {session:?} is held by {holder:?}: a running holder keeps the old \
+         keys in memory. Stop every holder on this store, then rerun `lambo provision`"
     ))
 }
 
 /// The provision line for a plan that was applied.
 pub fn report(plan: &RekeyPlan) -> String {
     if plan.skipped {
-        return "canonical keys already follow the #148 rule (recorded in store_meta; \
+        return "canonical keys already follow the current rule (#148, #301; recorded in store_meta; \
                 `lambo provision --rekey` checks every concept again)"
             .to_owned();
     }
     let mut out = format!(
-        "re-keyed {} concept(s) for unstemmed identifiers (#148)",
+        "re-keyed {} concept(s) to the current canonical-key rule (#148, #301)",
         plan.changes.len()
     );
     if !plan.collisions.is_empty() {
@@ -195,6 +228,15 @@ pub fn report(plan: &RekeyPlan) -> String {
              (or its re-key placeholder): {}",
             plan.collisions.len(),
             plan.collisions.join(", ")
+        ));
+    }
+    if !plan.kept_empty.is_empty() {
+        out.push_str(&format!(
+            "; {} kept their old key because the current rule gives them an empty key \
+             (text of only stopwords and empty stems, which no write accepts now; retract \
+             or rewrite them): {}",
+            plan.kept_empty.len(),
+            plan.kept_empty.join(", ")
         ));
     }
     out
@@ -398,6 +440,66 @@ mod tests {
         let mut obs = rows.clone();
         obs[0].observation = true;
         assert_eq!(plan_rekey(&obs, &none()).changes.len(), 1);
+    }
+
+    /// #301: a key a build from #148 up to #301 wrote (identifier unstemmed,
+    /// empty stem kept) is recognised and re-keyed, though the pre-#148 rule
+    /// would stem the identifier and not match it.
+    #[test]
+    fn a_key_with_an_empty_stem_is_rekeyed() {
+        let content = "''s build 2122de39e47e";
+        let stored = unfiltered_canonical_key(content, |_| None);
+        assert_eq!(stored, " 2122de39e47e build");
+        assert_ne!(legacy_canonical_key(content, |_| None), stored);
+        let rows = [
+            row("a", content, &stored),
+            // Written before #148: the legacy rule matches.
+            row("b", "''s-lease", " leas"),
+        ];
+        let plan = plan_rekey(&rows, &none());
+        assert_eq!(
+            plan.changes,
+            vec![
+                KeyChange {
+                    id: "a".into(),
+                    old_key: " 2122de39e47e build".into(),
+                    new_key: "2122de39e47e build".into(),
+                },
+                KeyChange {
+                    id: "b".into(),
+                    old_key: " leas".into(),
+                    new_key: "leas".into(),
+                },
+            ]
+        );
+        assert!(plan.collisions.is_empty() && plan.kept_empty.is_empty());
+        // A rerun over the re-keyed rows finds nothing to do.
+        let rekeyed = [
+            row("a", content, "2122de39e47e build"),
+            row("b", "''s-lease", "leas"),
+        ];
+        assert_eq!(plan_rekey(&rekeyed, &none()), RekeyPlan::default());
+    }
+
+    /// #301: a row whose current key would be empty keeps its old key and is
+    /// reported, never written as `""` (the key index would resolve every
+    /// stopword-only text to it).
+    #[test]
+    fn an_empty_new_key_is_kept_and_reported() {
+        let rows = [
+            row("a", "''s ''s", " "),
+            row("b", "''s the ''s", " "),
+            // A current key that is already empty is not this case.
+            row("c", "the", ""),
+        ];
+        let plan = plan_rekey(&rows, &none());
+        assert!(plan.changes.is_empty(), "{plan:?}");
+        assert!(plan.collisions.is_empty());
+        assert_eq!(plan.kept_empty, vec!["a".to_string(), "b".to_string()]);
+        let line = report(&plan);
+        assert!(line.contains("2 kept their old key"), "{line}");
+        assert!(line.contains("empty key"), "{line}");
+        assert!(line.ends_with("a, b"), "{line}");
     }
 
     #[test]

@@ -99,6 +99,26 @@ fn snapshot_refuses_duplicate_normalized_names_and_cross_session_records() {
     assert!(Graph::from_snapshot(wrong).is_err());
 }
 
+/// #301: a stored name whose key held an empty stem refuses the load, and the
+/// error names the name, its session and its target, so the operator can
+/// find the row to repair.
+#[test]
+fn a_stored_name_with_an_empty_stem_names_itself_in_the_load_error() {
+    let (mut g, i) = graph("name-empty-stem");
+    let target = concept(&mut g, i, "a durable ruling", ConceptType::Logic);
+    g.declare_name("writer rule", target).unwrap();
+    // As a build before #301 stored them.
+    for (name, key) in [("''s-lease", " leas"), ("''s ''s", " ")] {
+        let mut snap = g.snapshot();
+        snap.names[0].name = name.into();
+        snap.names[0].name_key = key.into();
+        let err = Graph::from_snapshot(snap).unwrap_err().to_string();
+        assert!(err.contains(&format!("{name:?}")), "{err}");
+        assert!(err.contains("name-empty-stem"), "{err}");
+        assert!(err.contains(&target.to_string()), "{err}");
+    }
+}
+
 #[test]
 fn migration_imports_surviving_unicode_spellings_without_new_concepts() {
     let (mut g, i) = graph("name-import");

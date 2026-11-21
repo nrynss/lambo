@@ -79,23 +79,51 @@
   (`selectF`) and proves the list does not depend on the order or repetition
   of the hits (`selectF_order_independent`).
 - Canonical keys: an empty stem no longer reaches a key (#301, item 1). The
-  Snowball English stemmer stems `''s` to the empty string, and the
-  tokenizer kept it, so `''s-lease` keyed as `" leas"` (a leading space, and
-  a different concept from `lease`) and the name `''s ''s` keyed as `" "` and
-  was accepted. `normalize_tokens` now drops empty stems, so a key never has
-  a leading, trailing or doubled space: `''s-lease` keys as `leas`, and an
-  input whose stems are all empty keys as the empty key, which names,
-  `derive` and `record_action` already refuse. Only keys containing an empty
-  stem change; every other key, and the keyword index's terms for text
-  without one, are unchanged. A stored concept keeps the key it was written
-  with, so a concept stored under such a key is no longer matched by a new
-  write of the same text, and a stored durable name whose key held an empty
-  stem no longer passes the load-time name check. `legacy_canonical_key`
-  still keeps empty stems, as the builds it describes did, so
-  `lambo provision --rekey` now also re-keys a stored concept whose key held
-  an empty stem (and reports a collision as before).
+  Snowball English stemmer stems a standalone `''s` (or `''s'`) token to the
+  empty string, and the tokenizer kept it, so `''s-lease` keyed as
+  `" leas"` (a leading space, and a different concept from `lease`) and the
+  name `''s ''s` keyed as `" "` and was accepted. `normalize_tokens` now
+  drops empty stems, so a key never has a leading, trailing or doubled
+  space: `''s-lease` keys as `leas`, and an input whose stems are all empty
+  keys as the empty key, which names, `derive` and `record_action` already
+  refuse. Only keys containing an empty stem change; every other key, and
+  the keyword index's terms for text without one, are unchanged.
   `formal/LamboProofs/Canonical.lean` models the fix (`keyF`, `keyF_tidy`,
   `keyF_eq_key`, `issue301_fixed`).
+
+  Stored data written before this change:
+
+  * **Concepts.** `lambo provision` re-keys a stored concept whose key held
+    an empty stem (the re-key marker changed, so every store is scanned once
+    more; `--rekey` forces it as before). It now also recognises keys
+    written between #148 and this change (identifier unstemmed, empty stem
+    kept). A concept whose current key would be empty (text of only
+    stopwords and `''s` tokens, stored as `" "`) keeps its old key and is
+    listed in the provision line ("kept their old key because the current
+    rule gives them an empty key"): the re-key never writes an empty key.
+  * **Durable names.** A stored name whose key held an empty stem makes the
+    whole session fail to open (every command that loads it, `lambo names`
+    included), by design: the name no longer passes the load-time name
+    check. On SQLite and Postgres the error reads
+    `invariant violated: concept name has an invalid normalized key` (a name
+    such as `''s-lease`) or `invariant violated: reference refused: name
+    "''s ''s" is invalid: a concept name must have a nonempty normalized key
+    and cannot be an id; ...` (a name whose stems are all empty). Find and
+    remove the row with the session stopped (the same SQL on SQLite and
+    Postgres; double each `'` inside a literal), then declare the name again
+    if it is still wanted:
+
+    ```sql
+    -- Find: names whose stored key has a leading, trailing or doubled space.
+    SELECT session_id, name, name_key, node_id FROM concept_names
+     WHERE name_key LIKE ' %' OR name_key LIKE '% ' OR name_key LIKE '%  %';
+    -- Remove one.
+    DELETE FROM concept_names WHERE session_id = '<session>' AND name = '<name>';
+    ```
+
+    Updating `name_key` to the current key instead keeps the binding only
+    if no other name or concept in the session holds that key.
+
 - Conflict detection: a re-send by another agent no longer drops an edge's
   original writer from the conflict agent set (#297). Re-sending an edge (the
   same source, target and type, through `record_action` or `lambo_derive`'s

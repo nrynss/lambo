@@ -367,6 +367,17 @@ pub fn legacy_canonical_key(content: &str, synonyms: impl Fn(&str) -> Option<&st
     tokens_to_key(&mut tokens(effective, false))
 }
 
+/// The canonical key as builds from #148 up to #301 derived it: identifier
+/// tokens unstemmed, empty stems kept. Used only by the `lambo provision`
+/// re-key to recognise a stored key such a build wrote; nothing derives new
+/// keys with it. It differs from [`canonical_key`] only for text with an
+/// empty stem.
+pub fn unfiltered_canonical_key(content: &str, synonyms: impl Fn(&str) -> Option<&str>) -> String {
+    let raw = content.trim();
+    let effective = synonyms(raw).unwrap_or(raw);
+    tokens_to_key(&mut tokens(effective, true))
+}
+
 /// Step 3 — sort stems and join with single spaces.
 fn tokens_to_key(stems: &mut [String]) -> String {
     stems.sort();

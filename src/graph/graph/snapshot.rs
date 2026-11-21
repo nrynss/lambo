@@ -189,7 +189,23 @@ impl Graph {
             }
         }
         for name in &snap.names {
-            let key = super::names::name_key(&name.name)?;
+            // Name the binding, so an operator can find the stored row: a name
+            // whose key the current rule derives differently (#301) refuses
+            // the whole load.
+            let key = super::names::name_key(&name.name).map_err(|e| {
+                invariant(format!(
+                    "stored name {:?} of session {} (bound to {}) is refused by the current \
+                     name rules: {e}",
+                    name.name, name.session_id, name.node_id
+                ))
+            })?;
+            if key != name.name_key {
+                return Err(invariant(format!(
+                    "stored name {:?} of session {} (bound to {}) has key {:?}, but the \
+                     current rule derives {key:?}",
+                    name.name, name.session_id, name.node_id, name.name_key
+                )));
+            }
             if name.session_id != sid
                 || key != name.name_key
                 || matches!(g.node(name.node_id), Some(Node::Interaction(_)))
