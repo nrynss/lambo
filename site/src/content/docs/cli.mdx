@@ -253,6 +253,14 @@ lambo re-embed --missing-only --session <id> --agent <id>
 
 Restart the writer and check `lambo_stats` again. The repair fills missing text vectors in the existing embedding space. To restore a missing image vector, re-derive the image. Under `[embedder] canary = "verify"` the repair runs the embedder canary like any writer attach, and a drift refuses it before it writes.
 
+A session written before embedding contracts existed has no recorded contract. Lambo does not trust its stored vectors, so it ignores them when it loads the session and logs that explicit re-embedding is required. Stop the writer for the session, then run a full re-embed. It embeds every text concept with the live embedder and records the live contract in the same write, and the coverage it reports is what the store now holds.
+
+```bash
+lambo re-embed --session <id> --agent <id>
+```
+
+`--missing-only` is refused on such a session, before it embeds anything: it fills vectors into the contract a session already has, and this one has none.
+
 ### Repairing a canary drift
 
 An embedder canary drift (see `canary` in the [configuration reference](/lambo/config/#embedder)) means the embedder behind an unchanged embedding contract now produces different vectors: a re-quantised model, another server build, a provider revision. A plain `lambo re-embed` refuses a session that already carries the live contract, since there is nothing to migrate. Stop the writers of the sessions under that contract, then rewrite each one in place:

@@ -6,7 +6,8 @@
 //!
 //! One session never mixes two model spaces: every path here either verifies
 //! the stamped contract or rewrites the vectors and the contract in one
-//! drained batch (vectors first, contract last).
+//! drained batch (vectors first, contract last; on a session with no
+//! contract, contract first, #322).
 
 use super::{invariant, Graph};
 use crate::types::{LamboError, Mutation, Node, NodeId};
@@ -139,13 +140,22 @@ impl Graph {
     ///   migration) and, like the RAM invariants everywhere, refuses a
     ///   non-different contract as a no-op.
     ///
-    /// Mutations are appended in order, so the drained batch carries every
-    /// `UpsertNode` (new vectors) **before** the trailing `SetEmbedding` (new
-    /// contract). The store applies one flushed batch transactionally, so the
-    /// durable session never holds the new contract beside old-space vectors —
-    /// and on a crash mid-flush the old contract and old vectors survive
-    /// together, which is consistent. Callers MUST flush the drained batch to
-    /// the store; until then the RAM graph is ahead of the durable state.
+    /// Mutations are appended in order, so on a stamped session the drained
+    /// batch carries every `UpsertNode` (new vectors) **before** the trailing
+    /// `SetEmbedding` (new contract). The store applies one flushed batch
+    /// transactionally, so the durable session never holds the new contract
+    /// beside old-space vectors — and on a crash mid-flush the old contract
+    /// and old vectors survive together, which is consistent.
+    ///
+    /// On a session with **no** contract (#322) the `SetEmbedding` comes
+    /// **first**. Every store treats a first stamp as the legacy upgrade and
+    /// nulls all of the session's vectors in the same transaction; after the
+    /// upserts it would null the vectors just written, leaving the contract
+    /// and no vector. There is no trusted vector to keep (the load already
+    /// ignores them), so the quarantine runs first and the new vectors land
+    /// after it, as on an ordinary first write. The graph ends the same
+    /// either way. Callers MUST flush the drained batch to the store; until
+    /// then the RAM graph is ahead of the durable state.
     pub fn reembed_all(
         &mut self,
         updates: Vec<(NodeId, Vec<f32>)>,
@@ -305,8 +315,23 @@ impl Graph {
             }
         }
 
+        // #322: on a session with no contract, stamp the contract FIRST. The
+        // store's first-stamp legacy quarantine nulls every vector of the
+        // session in the batch's transaction, so a trailing stamp would erase
+        // the vectors this batch writes. A stamped session keeps the order
+        // below: vectors first, contract last.
+        let stamp_first = !in_place && self.embedding.is_none();
+        if stamp_first {
+            self.embedding = Some(contract.clone());
+            self.append_mutation(Mutation::SetEmbedding {
+                session_id: self.session_id.clone(),
+                embedding: Some(contract.clone()),
+            });
+        }
+
         // Rewrite each concept's vector in the node map, then emit its upsert
-        // mutation (the batch orders every UpsertNode before the SetEmbedding).
+        // mutation (on a stamped session the batch orders every UpsertNode
+        // before the SetEmbedding).
         for (id, vector) in updates {
             // Write through the node map, then emit the upsert from a CLONE:
             // `append_mutation` takes `&mut self`, which cannot overlap the
@@ -348,7 +373,8 @@ impl Graph {
         }
         // In place, the contract does not move: no `SetEmbedding`, as for
         // the backfill below (one would say nothing and read as a migration).
-        if !in_place {
+        // A contract-less session was stamped above.
+        if !in_place && !stamp_first {
             self.embedding = Some(contract.clone());
             self.append_mutation(Mutation::SetEmbedding {
                 session_id: self.session_id.clone(),

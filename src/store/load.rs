@@ -135,7 +135,8 @@ fn quarantine_legacy_vectors(snap: &mut crate::types::GraphSnapshot) {
             target: "lambo::store::load",
             session_id = %snap.session_id,
             stripped_vectors = stripped,
-            "quarantined legacy vectors with no embedding contract; explicit re-embedding is required"
+            "quarantined legacy vectors with no embedding contract; explicit re-embedding is required \
+             (`lambo re-embed` without --missing-only embeds every text concept and records the live contract)"
         );
     }
 }

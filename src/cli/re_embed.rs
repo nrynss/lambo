@@ -10,7 +10,9 @@
 //! `crate::memory::MemoryBuilder::reembed_mode`, embeds every concept
 //! content outside any lock, then appends the whole rewrite as one ordered
 //! batch via [`crate::graph::Graph::reembed_all`]: every `UpsertNode` first,
-//! the trailing `SetEmbedding` last. The final flush in
+//! the trailing `SetEmbedding` last (on a session with no contract the
+//! `SetEmbedding` comes first, so the store's first-stamp legacy quarantine
+//! runs before the new vectors land, #322). The final flush in
 //! `super::close_writer` drains that batch transactionally with the lease
 //! token (one store transaction per batch), so the durable session goes
 //! old-consistent → new-consistent with no observable window in between —
@@ -243,6 +245,18 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
             "session '{}' has no concepts; nothing to re-embed",
             args.session
         ))
+    } else if args.missing_only && prior_contract.is_none() {
+        // #322: a backfill fills vectors into the contract the session
+        // already has, and never stamps one (`Graph::embed_missing`). Refuse
+        // before embedding anything, and name the full re-embed.
+        Err(CliError::Runtime(format!(
+            "session '{}' has no embedding contract (it was written before embedding \
+             contracts, and its stored vectors are ignored at load). --missing-only fills \
+             vectors into the contract a session already has. Refused; nothing was written. \
+             Run `lambo re-embed` without --missing-only to embed every text concept and \
+             record the live contract.",
+            args.session
+        )))
     } else if args.missing_only && concepts.is_empty() {
         Ok(format!(
             "session '{}': every text concept already carries a vector; nothing to \
@@ -566,7 +580,8 @@ async fn rewrite_all(
     // Under the graph WRITE lock: capture before-coverage, append the whole
     // ordered batch, capture after-coverage. Deliberately NO manual drain:
     // close_writer's Memory::close final flush drains this exact log —
-    // UpsertNodes then SetEmbedding — and flushes it transactionally with
+    // UpsertNodes then SetEmbedding, or on a session with no contract
+    // SetEmbedding then UpsertNodes (#322) — and flushes it transactionally with
     // the lease token before releasing the lease. The write lock makes the
     // append sequence atomic against the flush task's drain_log, so no
     // partial batch can ever be flushed between the two coverages.
@@ -651,13 +666,13 @@ mod tests {
     const SESSION: &str = "k2-reembed";
     const AGENT: &str = "operator";
 
-    /// `Arc<MemoryStore>` as a `GraphStore` so the seeded store is shared by
-    /// identity between the seed phase and the verb under test (the same
+    /// `Arc<S>` as a `GraphStore` so the seeded store is shared by identity
+    /// between the seed phase and the verb under test (the same
     /// two-processes-one-file shape the sibling CLI tests model).
-    struct ArcStore(Arc<MemoryStore>);
+    struct ArcStore<S>(Arc<S>);
 
     #[async_trait::async_trait]
-    impl GraphStore for ArcStore {
+    impl<S: GraphStore + 'static> GraphStore for ArcStore<S> {
         async fn init_schema(&self) -> Result<(), StoreError> {
             self.0.init_schema().await
         }
@@ -766,7 +781,11 @@ mod tests {
         }
     }
 
-    fn backends_on(store: Arc<MemoryStore>, kind: &str, model: &str) -> ResolvedBackends {
+    fn backends_on<S: GraphStore + 'static>(
+        store: Arc<S>,
+        kind: &str,
+        model: &str,
+    ) -> ResolvedBackends {
         ResolvedBackends {
             store: Box::new(ArcStore(store)),
             embedder: Box::new(FixtureEmbedder::new()),
@@ -815,6 +834,28 @@ mod tests {
     /// a sourced NULL-vector concept is an image whose vector is missing).
     async fn seed_session_with_sources(
         store: &Arc<MemoryStore>,
+        source: Option<crate::types::EmbeddingSource>,
+        unvectored: Option<crate::types::EmbeddingSource>,
+    ) {
+        seed_session_under(
+            store.as_ref(),
+            Some(EmbeddingContract {
+                kind: "legacy".into(),
+                model: Some("v1".into()),
+                dim: 1024,
+            }),
+            source,
+            unvectored,
+        )
+        .await;
+    }
+
+    /// [`seed_damaged_session`] under `contract`, into any store. With no
+    /// contract it is a pre-contract (legacy) session (#322): the vectored
+    /// concept's row keeps a vector no contract describes.
+    async fn seed_session_under<S: GraphStore>(
+        store: &S,
+        contract: Option<EmbeddingContract>,
         source: Option<crate::types::EmbeddingSource>,
         unvectored: Option<crate::types::EmbeddingSource>,
     ) {
@@ -876,14 +917,10 @@ mod tests {
         // Contract FIRST: the store treats a contract stamped over already
         // stored vectors as a legacy upgrade and strips them (untrusted
         // provenance) — which would manufacture damage instead of modeling it.
-        let set_contract = Mutation::SetEmbedding {
+        let set_contract = contract.map(|embedding| Mutation::SetEmbedding {
             session_id: sid.clone(),
-            embedding: Some(EmbeddingContract {
-                kind: "legacy".into(),
-                model: Some("v1".into()),
-                dim: 1024,
-            }),
-        };
+            embedding: Some(embedding),
+        });
         let interaction = Mutation::UpsertNode {
             node: crate::types::Node::Interaction(Interaction {
                 event_time: None,
@@ -898,14 +935,16 @@ mod tests {
         let batch = MutationBatch {
             mutation_epoch: 0,
             gc_mark: Default::default(),
-            mutations: vec![
-                interaction,
-                set_contract,
-                concept(c1, "user schema", Some(vec![0.25_f32; 1024]), source),
-                derives_edge(c1),
-                concept(c2, "auth middleware", None, unvectored),
-                derives_edge(c2),
-            ],
+            mutations: [interaction]
+                .into_iter()
+                .chain(set_contract)
+                .chain([
+                    concept(c1, "user schema", Some(vec![0.25_f32; 1024]), source),
+                    derives_edge(c1),
+                    concept(c2, "auth middleware", None, unvectored),
+                    derives_edge(c2),
+                ])
+                .collect(),
         };
         store.flush(&batch, Some(info.token)).await.unwrap();
         store.release_lease(&sid, &seeder).await.unwrap();
@@ -957,6 +996,129 @@ mod tests {
         assert_eq!(widths, vec![Some(1024), Some(1024)]);
     }
 
+    /// The raw durable session, read straight from the store (no load
+    /// quarantine): its contract, and each concept's content and vector.
+    async fn raw_session<S: GraphStore>(
+        store: &S,
+    ) -> (Option<EmbeddingContract>, Vec<(String, Option<Vec<f32>>)>) {
+        let snap = store.load_session(&SessionId::from(SESSION)).await.unwrap();
+        let mut concepts: Vec<_> = snap
+            .concepts
+            .iter()
+            .map(|c| (c.content.clone(), c.embedding.clone()))
+            .collect();
+        concepts.sort_by(|a, b| a.0.cmp(&b.0));
+        (snap.embedding, concepts)
+    }
+
+    /// #322: `lambo re-embed` on a pre-contract session (no durable
+    /// contract; one legacy vector, one NULL row) must leave the new vectors
+    /// in the store, under the live contract. Before the fix the batch wrote
+    /// the vectors, then stamped the contract, and the store's first-stamp
+    /// legacy quarantine nulled every vector in the same transaction, while
+    /// the report said 2/2.
+    ///
+    /// Mirrors `reembedCmd322_contractless_durable` (every text concept
+    /// holds a live vector) and `reembedOrdered_contractless_matches_graph`
+    /// (the store is the graph, so the reported coverage is the store's) in
+    /// `formal/LamboProofs/Contract.lean`; the old behaviour is
+    /// `reembed_contractless_durable_loses_vectors`.
+    async fn assert_contractless_re_embed_keeps_its_vectors<S: GraphStore + 'static>(
+        store: Arc<S>,
+    ) {
+        let (contract, rows) = raw_session(store.as_ref()).await;
+        assert_eq!(contract, None, "the seed is a pre-contract session");
+        assert_eq!(
+            rows.iter()
+                .map(|(c, v)| (c.as_str(), v.as_ref().map(Vec::len)))
+                .collect::<Vec<_>>(),
+            vec![("auth middleware", None), ("user schema", Some(1024))],
+            "the legacy row keeps its vector until a contract is stamped"
+        );
+
+        let out = run(
+            backends_on(store.clone(), "fixture", "fixture-model"),
+            args(false, false),
+        )
+        .await
+        .expect("re-embed");
+        // The graph loads through the legacy quarantine, so the legacy
+        // vector is not counted before; both concepts are after.
+        assert!(out.contains("coverage: embedded 0/2 -> 2/2"), "{out}");
+        assert!(out.contains("contract now: kind=fixture"), "{out}");
+
+        let (contract, rows) = raw_session(store.as_ref()).await;
+        assert_eq!(
+            contract.map(|c| c.kind).as_deref(),
+            Some("fixture"),
+            "the live contract is stamped"
+        );
+        let widths: Vec<_> = rows
+            .iter()
+            .map(|(c, v)| (c.as_str(), v.as_ref().map(Vec::len)))
+            .collect();
+        let fixture = FixtureEmbedder::new();
+        for (content, vector) in &rows {
+            assert!(
+                vector.as_ref() == Some(&fixture.embed(content).await.unwrap()),
+                "the store holds the new vector of {content:?}; stored widths: {widths:?}"
+            );
+        }
+        assert_eq!(rows.len(), 2);
+        assert!(
+            lease_is_free_on(store.as_ref()).await,
+            "the lease was released"
+        );
+    }
+
+    #[tokio::test]
+    async fn re_embed_of_a_contractless_session_keeps_its_new_vectors() {
+        let store = Arc::new(MemoryStore::new());
+        seed_session_under(store.as_ref(), None, None, None).await;
+        assert_contractless_re_embed_keeps_its_vectors(store).await;
+    }
+
+    /// [`re_embed_of_a_contractless_session_keeps_its_new_vectors`] on
+    /// SQLite, whose `set_embedding` quarantine is its own SQL. Multi-thread
+    /// flavor: the sync session load joins a worker runtime, and SQLite's
+    /// single pooled connection must be returnable meanwhile (the
+    /// cross-runtime caveat in `store::sqlite`).
+    #[cfg(feature = "store-sqlite")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn re_embed_of_a_contractless_sqlite_session_keeps_its_new_vectors() {
+        let store = Arc::new(crate::store::SqliteStore::connect("sqlite::memory:").unwrap());
+        store.init_schema().await.unwrap();
+        seed_session_under(store.as_ref(), None, None, None).await;
+        assert_contractless_re_embed_keeps_its_vectors(store).await;
+    }
+
+    /// #322: `--missing-only` fills vectors into the space a session already
+    /// declares, so on a pre-contract session it is refused before it embeds
+    /// or writes anything, and names the full re-embed instead
+    /// (`missingOnly_contractless_writes_nothing`).
+    #[tokio::test]
+    async fn re_embed_missing_only_refuses_a_contractless_session() {
+        let store = Arc::new(MemoryStore::new());
+        seed_session_under(store.as_ref(), None, None, None).await;
+        let before = raw_session(store.as_ref()).await;
+        let err = run(
+            backends_on(store.clone(), "fixture", "fixture-model"),
+            args(true, false),
+        )
+        .await
+        .expect_err("a backfill never stamps a contract");
+        assert!(matches!(err, CliError::Runtime(_)), "{err}");
+        let msg = err.to_string();
+        assert!(msg.contains("no embedding contract"), "{msg}");
+        assert!(msg.contains("without --missing-only"), "{msg}");
+        assert!(msg.contains("nothing was written"), "{msg}");
+        assert_eq!(raw_session(store.as_ref()).await, before, "no writes");
+        assert!(
+            lease_is_free(&store).await,
+            "the refusal released the lease"
+        );
+    }
+
     fn image_source() -> crate::types::EmbeddingSource {
         crate::types::EmbeddingSource {
             modality: crate::types::SourceModality::Image,
@@ -999,6 +1161,11 @@ mod tests {
     /// Whether a new writer can take the session's lease now. The probe
     /// releases what it took, so a test can go on writing.
     async fn lease_is_free(store: &Arc<MemoryStore>) -> bool {
+        lease_is_free_on(store.as_ref()).await
+    }
+
+    /// [`lease_is_free`] on any store.
+    async fn lease_is_free_on<S: GraphStore>(store: &S) -> bool {
         let probe = LeaseHolder::for_this_process(&AgentId::from("probe"));
         let sid = SessionId::from(SESSION);
         let free = matches!(

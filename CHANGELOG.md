@@ -66,6 +66,18 @@
   that treats it as a key collision now also gets the codes of SQLSTATE
   classes `21`, `22` and `44` and `54000`, and `SQLITE_TOOBIG` and
   `SQLITE_MISMATCH`.
+- `lambo re-embed` on a session with no embedding contract (one written
+  before contracts existed, which the load tells you to re-embed) now keeps
+  the vectors it writes (#322). The batch wrote the new vectors and then
+  stamped the contract, and every store treats a first stamp as the legacy
+  upgrade that nulls all of the session's vectors in the same transaction,
+  so the session ended under the live contract with no vector while the
+  command reported full coverage. On such a session the contract is now
+  stamped first, then the vectors are written; a session that already has a
+  contract is re-embedded exactly as before. `lambo re-embed --missing-only`
+  on a session with no contract is now refused before it embeds anything,
+  naming the full re-embed (it was refused only after embedding every
+  concept). `docs/reference/cli.mdx` describes re-embedding such a session.
 - Flush loop: the lease read behind the erased check that follows a failed
   flush, and the flush-stats row write, now run under the same 30 s timeout
   and panic containment as a flush attempt (#301). A store adapter that

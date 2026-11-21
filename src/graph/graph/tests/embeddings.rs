@@ -189,6 +189,52 @@ fn k2_reembed_all_rewrites_vectors_then_swaps_contract_in_order() {
     ));
 }
 
+/// #322: on a session with no contract the drained batch stamps the contract
+/// FIRST, then carries the upserts, so the store's first-stamp legacy
+/// quarantine runs before the new vectors land instead of after. The graph
+/// ends exactly as on a stamped session. Mirrors
+/// `reembedOrdered_contract_first` and `reembedOrdered_graph_eq` in
+/// `formal/LamboProofs/Contract.lean`.
+#[test]
+fn reembed_all_on_a_contractless_session_stamps_the_contract_first() {
+    let mut g = Graph::new(sid());
+    let i = interaction(1, None, 0);
+    let iid = i.id;
+    g.insert_interaction(i).unwrap();
+    let c1 = concept(1, iid, "user schema");
+    let c2 = concept(2, iid, "auth middleware");
+    let (id1, id2) = (c1.id, c2.id);
+    g.insert_concept(c1, iid).unwrap();
+    g.insert_concept(c2, iid).unwrap();
+    g.drain_log();
+    assert_eq!(g.embedding(), None, "a pre-contract session");
+
+    let target = embed_contract("fixture", "fixture-model", 1024);
+    g.reembed_all(
+        vec![(id1, vec![0.25_f32; 1024]), (id2, vec![0.5_f32; 1024])],
+        target.clone(),
+    )
+    .unwrap();
+    assert_eq!(g.embedding(), Some(&target));
+    for (id, v) in [(id1, 0.25_f32), (id2, 0.5_f32)] {
+        let Some(crate::types::Node::Concept(c)) = g.node(id) else {
+            panic!("expected concept {id}");
+        };
+        assert_eq!(c.embedding, Some(vec![v; 1024]));
+    }
+    assert!(matches!(
+        g.drain_log().mutations.as_slice(),
+        [
+            Mutation::SetEmbedding {
+                embedding: Some(c),
+                ..
+            },
+            Mutation::UpsertNode { .. },
+            Mutation::UpsertNode { .. },
+        ] if c == &target
+    ));
+}
+
 /// The backfill twin. `re-embed` refuses when the live contract is already
 /// the stored one — correct for a migration, and the reason the 2026-09-01
 /// dogfood session had no way to repair 555 concepts that were missing
