@@ -1158,7 +1158,7 @@ async fn a_stale_flush_during_close_answers_close_unflushed() {
         let mut graph = mem.graph.write();
         let previous_id = graph.temporal_chain().last().copied();
         graph
-            .insert_interaction(Interaction {
+            .insert_interaction(crate::Interaction {
                 event_time: None,
                 id: NodeId(uuid::Uuid::from_u64_pair(293, 1)),
                 session_id: session.clone(),
