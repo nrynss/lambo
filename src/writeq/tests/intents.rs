@@ -514,3 +514,60 @@ fn a_settled_contradicting_intent_decodes_under_the_0_5_0_payload() {
     let plain = serde_json::to_string(&action(vec![]).to_intent_payload()).unwrap();
     assert!(!plain.starts_with(crate::types::ACTION_CITED_PAYLOAD_LIKE.trim_end_matches('%')));
 }
+
+/// #295: the replay order keeps each position's process as loaded and puts
+/// each process's intents in `lane_seq` order, so a clock step inside one
+/// process no longer reorders it; an unparseable id keeps its place.
+/// Mirrors `Drain.fixedLoad_sorted` and `Drain.fixedLoad_epochs`; the
+/// loaded order alone is `Drain.clock_step_reorders`.
+#[test]
+fn the_replay_order_is_admission_order_within_a_process() {
+    use crate::types::{AgentId, SessionId, WriteIntent};
+    let row = |receipt: String, lane_seq: u64, issued_ms: i64| WriteIntent {
+        session_id: SessionId::new("order"),
+        receipt,
+        agent: AgentId::new("agent-a"),
+        interaction: NodeId::new(),
+        lane_seq,
+        issued_ms,
+        payload: WriteIntentPayload::Derive {
+            concepts: vec![],
+            pairs: vec![],
+            receipt_destination: None,
+        },
+        created_at: chrono::Utc::now(),
+        outcome: None,
+    };
+    let id = |epoch: u64, ms: i64, seq: u64| format!("lwr1.{epoch:016x}.{ms:x}.{seq:x}");
+    // As the adapters load them, by (`issued_ms`, `lane_seq`): process 7's
+    // clock stepped back 10 ms between its two admissions.
+    let loaded = vec![
+        row(id(7, 990, 2), 2, 990),
+        row(id(9, 995, 1), 1, 995),
+        row("lwr1.garbled".into(), 5, 997),
+        row(id(7, 1_000, 1), 1, 1_000),
+    ];
+    let ordered = super::replay::replay_order(loaded);
+    let receipts: Vec<&str> = ordered.iter().map(|i| i.receipt.as_str()).collect();
+    assert_eq!(
+        receipts,
+        [
+            id(7, 1_000, 1).as_str(),
+            id(9, 995, 1).as_str(),
+            "lwr1.garbled",
+            id(7, 990, 2).as_str(),
+        ]
+    );
+    // While no clock steps back the loaded order is kept.
+    let calm = vec![
+        row(id(7, 990, 1), 1, 990),
+        row(id(9, 995, 1), 1, 995),
+        row(id(7, 1_000, 2), 2, 1_000),
+    ];
+    let before: Vec<String> = calm.iter().map(|i| i.receipt.clone()).collect();
+    let after: Vec<String> = super::replay::replay_order(calm)
+        .into_iter()
+        .map(|i| i.receipt)
+        .collect();
+    assert_eq!(before, after);
+}

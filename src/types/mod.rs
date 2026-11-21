@@ -1347,20 +1347,23 @@ pub struct WriteIntent {
     /// what makes replay idempotent.
     pub receipt: String,
     /// The agent whose lane the write was queued on. Replay preserves order
-    /// **within** an agent's intents (the lane promise), and receipts stay
-    /// agent-scoped across restart.
+    /// **within** an agent's intents (the lane promise): one process's in
+    /// admission order, and an intent left durable by a transient embedder
+    /// answer holds back the agent's later ones until a later serve (#295).
+    /// Receipts stay agent-scoped across restart.
     pub agent: AgentId,
     /// The interaction the write hangs from. Durable by the same close that
     /// made this intent durable (the call path writes the interaction to the
     /// log before the ack).
     pub interaction: NodeId,
     /// The receipt's sequence number — strictly increasing per issuing
-    /// process, so sorting by (`issued_ms`, `lane_seq`) replays one process's
-    /// intents in exact admission order and multiple crashed processes'
-    /// intents in wall-clock order.
+    /// process, so the replay orders one process's intents by it: exact
+    /// admission order, whatever the process's clock did between two
+    /// admissions (#295). Different processes' intents interleave by
+    /// `issued_ms` (`writeq::replay::replay_order`).
     pub lane_seq: u64,
     /// The receipt's issue timestamp (epoch millis), for cross-process
-    /// ordering.
+    /// ordering only: within one process `lane_seq` decides.
     pub issued_ms: i64,
     /// The validated job.
     pub payload: WriteIntentPayload,

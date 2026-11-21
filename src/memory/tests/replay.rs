@@ -1493,6 +1493,47 @@ async fn replay_planted(
     strategy: MatchStrategy,
     intents: impl FnOnce(&SessionId, NodeId) -> Vec<crate::types::WriteIntent>,
 ) -> Memory {
+    let mem = attach_planted(
+        inner,
+        session,
+        strategy,
+        Arc::new(FixtureEmbedder::new()),
+        intents,
+    )
+    .await;
+    wait_for(&mem, |mem| {
+        mem.pipeline().counters().replay_owed() == 0
+            || mem.pipeline().counters().replay_blocked() != crate::writeq::ReplayBlockReason::None
+    })
+    .await;
+    mem
+}
+
+/// Wait (bounded) until `done` holds, then a moment more: the replay
+/// publishes a settle just after it moves its counters.
+#[cfg(feature = "fixtures")]
+async fn wait_for(mem: &Memory, done: impl Fn(&Memory) -> bool) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !done(mem) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the replay never reached the awaited state"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(20)).await;
+}
+
+/// [`replay_planted`]'s seed and attach, with the embedder given and no
+/// wait.
+#[cfg(feature = "fixtures")]
+async fn attach_planted(
+    inner: &Arc<MemoryStore>,
+    session: &str,
+    strategy: MatchStrategy,
+    embedder: Arc<dyn Embedder>,
+    intents: impl FnOnce(&SessionId, NodeId) -> Vec<crate::types::WriteIntent>,
+) -> Memory {
     let sid = SessionId::new(session);
     let interaction = NodeId::new();
     let now = Utc::now();
@@ -1513,31 +1554,17 @@ async fn replay_planted(
             ..GraphSnapshot::default()
         })
         .expect("seed");
-    let mem = Memory::builder()
+    Memory::builder()
         .session(session)
         .agent("agent-a")
         .flush_interval(Duration::from_secs(3_600))
         .store(Arc::new(VectorSearchable(inner.clone())) as Arc<dyn GraphStore>)
-        .embedder(Arc::new(FixtureEmbedder::new()) as Arc<dyn Embedder>)
+        .embedder(embedder)
         .embedding_contract(contract("fixture", 1024))
         .match_strategy(strategy)
         .build()
         .await
-        .expect("build");
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    while mem.pipeline().counters().replay_owed() != 0
-        && mem.pipeline().counters().replay_blocked() == crate::writeq::ReplayBlockReason::None
-    {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the replay neither finished nor stopped"
-        );
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
-    // The last settle is published before the counters move on; give the
-    // replay task a moment to publish it.
-    tokio::time::sleep(Duration::from_millis(20)).await;
-    mem
+        .expect("build")
 }
 
 /// **#294**: a replayed intent refused because its input no longer fits the
@@ -1638,5 +1665,321 @@ async fn a_graph_dependent_input_refusal_at_replay_settles_failed_and_the_replay
     assert!(
         snap.write_intents.iter().all(|i| i.outcome.is_some()),
         "every intent is consumed: nothing is owed to the next serve"
+    );
+}
+
+/// Answers like [`FixtureEmbedder`], except that the first embed of a text
+/// containing `trip` gets a transient answer (`EmbedError::Unavailable`, an
+/// embedder that blinked), as at a replay meeting a brief outage.
+#[cfg(feature = "fixtures")]
+struct BlinkOnce {
+    inner: FixtureEmbedder,
+    trip: &'static str,
+    tripped: std::sync::atomic::AtomicBool,
+}
+
+#[cfg(feature = "fixtures")]
+#[async_trait]
+impl Embedder for BlinkOnce {
+    fn dimensions(&self) -> usize {
+        self.inner.dimensions()
+    }
+    async fn embed(&self, text: &str) -> Result<Vec<f32>, crate::embed::EmbedError> {
+        self.embed_as(text, crate::test_util::TextRole::Document)
+            .await
+    }
+    async fn embed_query(&self, text: &str) -> Result<Vec<f32>, crate::embed::EmbedError> {
+        self.embed_as(text, crate::test_util::TextRole::Query).await
+    }
+    fn modalities(&self) -> crate::embed::Modalities {
+        self.inner.modalities()
+    }
+    async fn embed_image(
+        &self,
+        image: crate::embed::ImageInput<'_>,
+    ) -> Result<Vec<f32>, crate::embed::EmbedError> {
+        self.inner.embed_image(image).await
+    }
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        self.inner.as_any()
+    }
+}
+
+#[cfg(feature = "fixtures")]
+impl BlinkOnce {
+    async fn embed_as(
+        &self,
+        text: &str,
+        role: crate::test_util::TextRole,
+    ) -> Result<Vec<f32>, crate::embed::EmbedError> {
+        if text.contains(self.trip) && !self.tripped.swap(true, Ordering::SeqCst) {
+            return Err(crate::embed::EmbedError::Unavailable(
+                "llama.cpp unreachable: connection refused".into(),
+            ));
+        }
+        role.embed(&self.inner, text).await
+    }
+}
+
+/// The receipt id [`owed_derive`] gives a row.
+#[cfg(feature = "fixtures")]
+fn owed_receipt(epoch: u64, issued_ms: i64, seq: u64) -> crate::writeq::ReceiptId {
+    format!("lwr1.{epoch:016x}.{issued_ms:x}.{seq:x}")
+        .parse()
+        .unwrap()
+}
+
+/// **#295 (1)**: a transient embedder answer at replay must not let the same
+/// agent's later intent apply first.
+///
+/// Agent A owes two writes, agent B one, in that load order. The replay's
+/// embed of A's first write blinks once. Before the fix the loop left it
+/// durable and applied A's second write, so the next serve applied A's
+/// writes in the order 2, 1. Now A is deferred for the rest of the serve: its
+/// second write waits too, B's write still applies, and the next serve
+/// applies A's two writes in order.
+///
+/// Mirrors the Lean theorems `Drain.loopD_no_overtake` and
+/// `Drain.fixed_agent_order` (per-agent order across serves, whatever the
+/// embedder answers); the code before the fix is
+/// `Drain.transient_skip_reorders`.
+#[cfg(feature = "fixtures")]
+#[tokio::test]
+async fn a_transient_answer_at_replay_defers_the_agent_instead_of_reordering_it() {
+    let inner = Arc::new(MemoryStore::new());
+    let a = AgentId::new("agent-a");
+    let b = AgentId::new("agent-b");
+    let epoch = 0x0011_2233_4455_6677;
+    let plant = |sid: &SessionId, ix: NodeId| {
+        vec![
+            owed_derive(
+                sid,
+                &a,
+                ix,
+                epoch,
+                1_000,
+                1,
+                &[("first fact of a", ConceptType::Entity)],
+                &[],
+            ),
+            owed_derive(
+                sid,
+                &a,
+                ix,
+                epoch,
+                1_001,
+                2,
+                &[("second fact of a", ConceptType::Entity)],
+                &[],
+            ),
+            owed_derive(
+                sid,
+                &b,
+                ix,
+                epoch,
+                1_002,
+                3,
+                &[("only fact of b", ConceptType::Entity)],
+                &[],
+            ),
+        ]
+    };
+    let mem = attach_planted(
+        &inner,
+        "intent-transient-order",
+        MatchStrategy::Hybrid,
+        Arc::new(BlinkOnce {
+            inner: FixtureEmbedder::new(),
+            trip: "first fact of a",
+            tripped: std::sync::atomic::AtomicBool::new(false),
+        }),
+        plant,
+    )
+    .await;
+    let (a1, a2, b1) = (
+        owed_receipt(epoch, 1_000, 1),
+        owed_receipt(epoch, 1_001, 2),
+        owed_receipt(epoch, 1_002, 3),
+    );
+    // B's write is last in the backlog: once it settles, the serve is done.
+    wait_for(&mem, |mem| {
+        mem.pipeline().lookup(&b, b1).tag() != "pending_replay"
+    })
+    .await;
+    assert_eq!(
+        [
+            mem.pipeline().lookup(&a, a1).tag(),
+            mem.pipeline().lookup(&a, a2).tag(),
+            mem.pipeline().lookup(&b, b1).tag(),
+        ],
+        ["pending_replay", "pending_replay", "applied_after_restart"],
+        "A's second write must not apply while its first is left for the next serve"
+    );
+    assert_eq!(mem.pipeline().counters().replay_owed(), 2);
+    assert_eq!(
+        mem.pipeline().counters().replay_blocked(),
+        crate::writeq::ReplayBlockReason::None,
+        "one blink is below the threshold: nothing stops"
+    );
+    mem.close().await.expect("clean close");
+
+    // The next serve applies A's writes, in order.
+    let mem2 = Memory::builder()
+        .session("intent-transient-order")
+        .agent("agent-a")
+        .flush_interval(Duration::from_secs(3_600))
+        .store(Arc::new(VectorSearchable(inner.clone())) as Arc<dyn GraphStore>)
+        .embedder(Arc::new(FixtureEmbedder::new()) as Arc<dyn Embedder>)
+        .embedding_contract(contract("fixture", 1024))
+        .match_strategy(MatchStrategy::Hybrid)
+        .build()
+        .await
+        .expect("build session 2");
+    wait_for(&mem2, |mem| mem.pipeline().counters().replay_owed() == 0).await;
+    assert_eq!(
+        mem2.pipeline().lookup(&a, a1).tag(),
+        "applied_after_restart"
+    );
+    assert_eq!(
+        mem2.pipeline().lookup(&a, a2).tag(),
+        "applied_after_restart"
+    );
+    mem2.close().await.expect("clean close 2");
+}
+
+/// **#295 (2)**: one process's intents replay in admission (`lane_seq`)
+/// order even when its clock stepped back between two admissions.
+///
+/// The adapters load by (`issued_ms`, `lane_seq`), so A's second write,
+/// stamped a millisecond before its first, loads first; both derive one
+/// Observation, so whichever applies first wins and the other is refused
+/// (#294). Before the fix the second write won.
+///
+/// Mirrors the Lean theorems `Drain.fixedLoad_sorted` and
+/// `Drain.fixed_epoch_seq_order` (per-process sequence order with no clock
+/// assumption); the code before the fix is `Drain.clock_step_reorders`.
+#[cfg(feature = "fixtures")]
+#[tokio::test]
+async fn a_clock_step_between_two_admissions_does_not_reorder_their_replay() {
+    let inner = Arc::new(MemoryStore::new());
+    let a = AgentId::new("agent-a");
+    let epoch = 0x0099_8877_6655_4433;
+    let mem = replay_planted(
+        &inner,
+        "intent-clock-step",
+        MatchStrategy::Canonical,
+        |sid, ix| {
+            // The adapters' (`issued_ms`, `lane_seq`) order.
+            vec![
+                owed_derive(
+                    sid,
+                    &a,
+                    ix,
+                    epoch,
+                    999,
+                    2,
+                    &[("harbor tide note", ConceptType::Observation)],
+                    &[],
+                ),
+                owed_derive(
+                    sid,
+                    &a,
+                    ix,
+                    epoch,
+                    1_000,
+                    1,
+                    &[("harbor tide note", ConceptType::Observation)],
+                    &[],
+                ),
+            ]
+        },
+    )
+    .await;
+    assert_eq!(
+        [
+            mem.pipeline()
+                .lookup(&a, owed_receipt(epoch, 1_000, 1))
+                .tag(),
+            mem.pipeline().lookup(&a, owed_receipt(epoch, 999, 2)).tag(),
+        ],
+        ["applied_after_restart", "failed"],
+        "the first admitted write applies first, whatever its clock said"
+    );
+    mem.close().await.expect("clean close");
+}
+
+/// **#295 (3)**: an intent whose receipt id does not parse is settled
+/// `failed` (it can be neither applied nor looked up by its id), not skipped
+/// on every serve and counted owed forever.
+///
+/// Mirrors the Lean theorem `Drain.fixed_badId_settled`; the code before the
+/// fix is `Drain.bad_id_never_settled`.
+#[cfg(feature = "fixtures")]
+#[tokio::test]
+async fn an_intent_with_an_unparseable_receipt_id_is_settled_failed() {
+    let inner = Arc::new(MemoryStore::new());
+    let a = AgentId::new("agent-a");
+    let epoch = 0x0055_5555_5555_5555;
+    let mem = attach_planted(
+        &inner,
+        "intent-bad-id",
+        MatchStrategy::Canonical,
+        Arc::new(FixtureEmbedder::new()),
+        |sid, ix| {
+            let mut bad = owed_derive(
+                sid,
+                &a,
+                ix,
+                epoch,
+                1_000,
+                1,
+                &[("lost fact", ConceptType::Entity)],
+                &[],
+            );
+            bad.receipt = "lwr1.not-a-receipt".into();
+            vec![
+                bad,
+                owed_derive(
+                    sid,
+                    &a,
+                    ix,
+                    epoch,
+                    1_001,
+                    2,
+                    &[("kept fact", ConceptType::Entity)],
+                    &[],
+                ),
+            ]
+        },
+    )
+    .await;
+    let good = owed_receipt(epoch, 1_001, 2);
+    wait_for(&mem, |mem| {
+        mem.pipeline().lookup(&a, good).tag() != "pending_replay"
+    })
+    .await;
+    assert_eq!(
+        mem.pipeline().lookup(&a, good).tag(),
+        "applied_after_restart"
+    );
+    assert_eq!(
+        mem.pipeline().counters().replay_owed(),
+        0,
+        "the unparseable row is no longer owed"
+    );
+    mem.close().await.expect("clean close");
+    let snap = inner
+        .load_session(&SessionId::new("intent-bad-id"))
+        .await
+        .expect("reload");
+    let bad = snap
+        .write_intents
+        .iter()
+        .find(|i| i.receipt == "lwr1.not-a-receipt")
+        .expect("the row is kept, settled");
+    assert_eq!(
+        bad.outcome.as_ref().map(|o| o.tag.as_str()),
+        Some("failed"),
+        "settled, so no later serve skips it again"
     );
 }

@@ -7,16 +7,21 @@
 //!
 //! Invariants kept here (the full argument is on [`WritePipeline::spawn_replay`]):
 //!
-//! * strictly one intent at a time, in (`issued_ms`, `lane_seq`) order, never
-//!   through admission;
+//! * strictly one intent at a time, never through admission, in
+//!   [`replay_order`]: each process's intents in `lane_seq` (admission) order,
+//!   processes interleaved by `issued_ms`;
 //! * nothing is consumed before one liveness embed succeeds;
-//! * a content refusal or an input refusal consumes the intent as `failed`;
-//!   an outage, any other store error or a lost lease leaves it unconsumed
-//!   and, past [`EMBEDDER_SICK_THRESHOLD`] consecutive transients or on any
-//!   non-embedder error, ends the loop;
+//! * a content refusal, an input refusal or an unparseable receipt id
+//!   consumes the intent as `failed`; an outage, any other store error or a
+//!   lost lease leaves it unconsumed; an outage below
+//!   [`EMBEDDER_SICK_THRESHOLD`] consecutive transients defers that intent's
+//!   agent for the rest of the serve, so no later write of it overtakes the
+//!   one left behind; past the threshold, or on any non-embedder error, the
+//!   loop ends;
 //! * replay moves only `replayed` / `replay_owed` / `replay_blocked`, never this
 //!   session's own `accepted`/`applied`/`failed`.
 
+use std::collections::{BTreeMap, HashSet};
 use std::str::FromStr;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -29,7 +34,7 @@ use super::{
     ConsumeStamp, Job, JobPayload, ReceiptAnswer, ReceiptId, ReplayBlockReason, WritePipeline,
     PROBE_BUDGET, PROBE_TEXT, RECEIPT_RETENTION,
 };
-use crate::types::{LamboError, WriteIntent, WriteIntentOutcome};
+use crate::types::{AgentId, LamboError, WriteIntent, WriteIntentOutcome};
 
 /// How many **consecutive transient** embed failures within one attach end the
 /// durable-intent replay loop, leaving the rest of the backlog durable
@@ -40,8 +45,10 @@ use crate::types::{LamboError, WriteIntent, WriteIntentOutcome};
 /// (`Transient` vs `Content`). A **content** rejection is absorbing — it is
 /// permanent for *that input*, is consumed as `failed` immediately, and never
 /// counts toward the embedder-sickness evidence. A **transient** draw is
-/// evidence that the embedder is sick; it is left durable (never consumed) and
-/// increments a running streak. The streak resets to zero on any applied
+/// evidence that the embedder is sick; it is left durable (never consumed),
+/// increments a running streak, and defers that intent's agent for the rest
+/// of the attach (#295: its later intents are not run, so none can apply
+/// before it). The streak resets to zero on any applied
 /// success or any content refusal (each proves the embedder just answered —
 /// observed health), so only a run of `EMBEDDER_SICK_THRESHOLD` transients with
 /// *nothing* answered in between concludes that the embedder is sick and stops
@@ -76,15 +83,70 @@ pub const EMBEDDER_SICK_THRESHOLD: usize = 3;
 /// a slow store costs at most two settled writes per attach.
 pub const REPLAY_LOOKUP_TIMEOUT_LIMIT: usize = EMBEDDER_SICK_THRESHOLD;
 
+/// The order the replay applies durable intents in (#295).
+///
+/// `load_session` returns a session's intents sorted by (`issued_ms`,
+/// `lane_seq`). `issued_ms` is the issuing process's wall clock, so a clock
+/// that stepped back between two admissions put the later one first.
+/// `lane_seq` is the process's admission counter, so within one process
+/// (one receipt epoch) it is the order to keep. This keeps the loaded order's
+/// choice of which process each position belongs to, so different processes'
+/// intents interleave exactly as loaded (by wall clock: their counters are
+/// not comparable), and fills each process's positions with its own intents
+/// in `lane_seq` order. While no clock stepped back that is the loaded order
+/// unchanged. An intent whose receipt id does not parse has no epoch and
+/// keeps its position.
+///
+/// The ordering lives here, the one place that depends on it, so every store
+/// adapter gets it from the same code; the rows carry no epoch column, so an
+/// adapter's `ORDER BY` could not express it.
+///
+/// Modelled by `fixedLoad` in `formal/LamboProofs/Drain.lean`
+/// (`fixedLoad_sorted`, `fixedLoad_epochs`, `fixedLoad_agrees`).
+pub(crate) fn replay_order(intents: Vec<WriteIntent>) -> Vec<WriteIntent> {
+    let epochs: Vec<Option<u64>> = intents
+        .iter()
+        .map(|i| ReceiptId::from_str(&i.receipt).ok().map(|r| r.epoch()))
+        .collect();
+    let mut positions: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
+    for (at, epoch) in epochs.iter().enumerate() {
+        if let Some(epoch) = epoch {
+            positions.entry(*epoch).or_default().push(at);
+        }
+    }
+    let mut rows: Vec<Option<WriteIntent>> = intents.into_iter().map(Some).collect();
+    let mut out: Vec<Option<WriteIntent>> = (0..rows.len()).map(|_| None).collect();
+    for (at, epoch) in epochs.iter().enumerate() {
+        if epoch.is_none() {
+            out[at] = rows[at].take();
+        }
+    }
+    for at in positions.values() {
+        let mut own: Vec<WriteIntent> = at.iter().filter_map(|&p| rows[p].take()).collect();
+        // Stable: two rows with one sequence number (which one process never
+        // issues) keep their loaded order.
+        own.sort_by_key(|i| i.lane_seq);
+        for (&p, row) in at.iter().zip(own) {
+            out[p] = Some(row);
+        }
+    }
+    out.into_iter().flatten().collect()
+}
+
 impl WritePipeline {
     /// Replay durable write intents left by previous processes (J3), spawned
     /// at attach.
     ///
     /// * **Order**: intents arrive from `load_session` sorted by
-    ///   (`issued_ms`, `lane_seq`) and are applied strictly one at a time —
+    ///   (`issued_ms`, `lane_seq`); [`replay_order`] then puts each issuing
+    ///   process's intents in `lane_seq` order within the positions that
+    ///   order gave the process, and they are applied strictly one at a time:
     ///   exact admission order within one issuing process (the per-lane
-    ///   promise, since a total order refines every lane's), wall-clock order
-    ///   across crashed processes.
+    ///   promise, since a total order refines every lane's) whatever its clock
+    ///   did, wall-clock order across crashed processes (#295). An agent whose
+    ///   intent is left unconsumed by a transient embedder answer is deferred
+    ///   for the rest of the attach, so no later intent of it applies before
+    ///   the one left behind (#295); the next serve replays them in order.
     /// * **Throttling — the open question, decided here**: replay runs
     ///   sequentially in the background, at most ONE write in flight, and does
     ///   not pass through admission. A restart over a deep backlog therefore
@@ -116,19 +178,24 @@ impl WritePipeline {
     ///   a repeated Observation, a second Hierarchical parent, a pair whose
     ///   ends resolve to one key or concept: #116, #294), a stored payload
     ///   this build cannot decode (#129), and a lookup timeout below
-    ///   [`REPLAY_LOOKUP_TIMEOUT_LIMIT`]. A replay that fails for a reason
-    ///   that says nothing about the intent (the embedder unreachable or timed
-    ///   out, any other store error, the lease lost, a configuration that
-    ///   cannot apply it) leaves it **unconsumed** and ends the loop: those
-    ///   are conditions a later process can be in a position to fix, and
-    ///   settling an acked write `failed` because a dependency blinked is the
-    ///   defect N1 named.
+    ///   [`REPLAY_LOOKUP_TIMEOUT_LIMIT`]. So is an intent whose receipt id does
+    ///   not parse (#295): it can be neither applied nor answered for, and
+    ///   left unconsumed it was skipped, and counted owed, on every serve. A
+    ///   replay that fails for a reason that says nothing about the intent
+    ///   (the embedder unreachable or timed out, any other store error, the
+    ///   lease lost, a configuration that cannot apply it) leaves it
+    ///   **unconsumed** and ends the loop, except that an embedder outage
+    ///   below [`EMBEDDER_SICK_THRESHOLD`] only defers that intent's agent:
+    ///   those are conditions a later process can be in a position to fix,
+    ///   and settling an acked write `failed` because a dependency blinked is
+    ///   the defect N1 named.
     /// * **Shutdown**: `close()` aborts this task before the quiesce; whatever
     ///   is still unconsumed stays durable for the next serve.
     pub(crate) fn spawn_replay(self: &Arc<Self>, intents: Vec<WriteIntent>) {
         if intents.is_empty() {
             return;
         }
+        let intents = replay_order(intents);
         // Seed the cross-restart answers before the task starts, so a lookup
         // racing the replay sees `pending_replay` rather than `restart_lost`.
         //
@@ -162,8 +229,8 @@ impl WritePipeline {
                     tracing::warn!(
                         session = %self.ctx.session,
                         receipt = %intent.receipt,
-                        "write intent carries an unparseable receipt id; it will replay but \
-                         cannot be looked up"
+                        "write intent carries an unparseable receipt id; it can be neither \
+                         applied nor looked up by its id, so the replay settles it failed"
                     );
                     continue;
                 };
@@ -257,11 +324,56 @@ impl WritePipeline {
             // Consecutive lookup timeouts (#125); see
             // [`REPLAY_LOOKUP_TIMEOUT_LIMIT`].
             let mut lookup_streak: usize = 0;
+            // #295: agents deferred for the rest of this attach, because one of
+            // their intents got a transient embedder answer and stays durable.
+            // Their later intents are not run, so none of them can apply
+            // before it (the per-agent order `WriteIntent::agent` promises);
+            // the next serve replays them all in order.
+            let mut deferred: HashSet<AgentId> = HashSet::new();
             for intent in pending {
                 if this.ctx.lease_lost.load(Ordering::Acquire) || this.lanes.lock().sealed {
                     break;
                 }
+                if deferred.contains(&intent.agent) {
+                    continue;
+                }
                 let Ok(receipt) = ReceiptId::from_str(&intent.receipt) else {
+                    // #295: settled `failed` like a payload this build cannot
+                    // decode (#129). Left unconsumed it was skipped on every
+                    // serve and counted in `replay_owed` forever; it cannot be
+                    // applied (a job needs its id) or answered for (the
+                    // receipt map is keyed by it).
+                    failed += 1;
+                    this.counters.replay_owed.fetch_sub(1, Ordering::Relaxed);
+                    let why = "replay after restart was refused (the stored receipt id does not \
+                               parse, so this build cannot apply the write or answer for it); \
+                               nothing was written"
+                        .to_owned();
+                    if let Some(ledger) = &this.ctx.ledger {
+                        ledger.append(&crate::ledger::completion_line(
+                            &intent.agent.to_string(),
+                            &intent.receipt,
+                            "failed",
+                            Some(json!({ "error": &why, "replay": true })),
+                        ));
+                    }
+                    this.ctx.graph.write().consume_write_intent(
+                        intent.receipt.clone(),
+                        WriteIntentOutcome {
+                            tag: "failed".into(),
+                            summary: super::receipts::durable_summary(
+                                &why,
+                                intent.payload.receipt_destination(),
+                            ),
+                            consumed_at: (this.clock)(),
+                        },
+                    );
+                    tracing::warn!(
+                        session = %this.ctx.session,
+                        receipt = %intent.receipt,
+                        "write queue: a durable intent's receipt id does not parse; it is settled \
+                         failed rather than skipped on every serve"
+                    );
                     continue;
                 };
                 let destination = intent.payload.receipt_destination().cloned();
@@ -418,14 +530,23 @@ impl WritePipeline {
                             );
                             break;
                         }
+                        // #295: skipping only this intent let the agent's next
+                        // one apply first, and a later serve then applied
+                        // this one after it. Defer the whole agent instead,
+                        // as the image-`Config` arm stops for the lane order;
+                        // the other agents' intents keep sampling.
+                        deferred.insert(intent.agent.clone());
                         tracing::warn!(
                             session = %this.ctx.session,
                             receipt = %intent.receipt,
+                            agent = %intent.agent,
                             error = %e,
                             streak = transient_streak,
                             "write queue: a durable intent's replay got a transient embedder \
-                             answer; it stays DURABLE and unconsumed while the sequential \
-                             decision rule keeps sampling for the embedder's health"
+                             answer; it and the rest of this agent's intents stay DURABLE and \
+                             unconsumed for the next serve, so they keep their order, while the \
+                             sequential decision rule keeps sampling the embedder's health on \
+                             other agents' intents"
                         );
                         continue;
                     }
@@ -624,6 +745,7 @@ impl WritePipeline {
                 session = %this.ctx.session,
                 applied,
                 failed,
+                deferred_agents = deferred.len(),
                 owed = this.counters.replay_owed.load(Ordering::Relaxed),
                 "write queue: durable intent replay finished"
             );

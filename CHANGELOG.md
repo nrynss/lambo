@@ -230,6 +230,28 @@
   latches, that a stale write is never re-sent, that the loop itself loses
   nothing silently, and that `close` returns `Ok` only when every batch that
   left the loop was committed or dead-lettered.
+- Write-queue replay keeps one agent's writes in order and stops trusting the
+  wall clock for it (#295). A transient embedder answer at replay (below the
+  three-in-a-row threshold) used to leave that intent durable and go on to
+  the next, which could be the same agent's later write, so a later serve
+  applied the agent's writes out of order. Now it defers that agent for the
+  rest of the serve: its later intents wait too, other agents' intents still
+  apply, and the threshold still counts transients across them; the next
+  serve replays the agent's writes in order. Within one process, intents now
+  replay in `lane_seq` (admission) order even when its clock stepped back
+  between two admissions: the adapters still load by (`issued_ms`,
+  `lane_seq`), which decides how different processes' intents interleave, and
+  the replay puts each process's own intents in `lane_seq` order within that
+  (`writeq::replay::replay_order`; the rows carry no epoch column, so Postgres
+  and SQLite share the one ordering). An intent whose receipt id does not
+  parse is settled `failed` instead of being skipped on every serve and
+  counted in `write_queue_replay_owed` forever, and the seeding warning now
+  says so. A write the in-session worker meets during an embedder outage is
+  unchanged: it answers `failed`, stays owed, and the agent's next writes
+  still apply before it. `formal/LamboProofs/Drain.lean` models the fixed
+  replay and proves that, across serves and whatever the embedder answers,
+  each agent's writes of one process apply in admission order, with no clock
+  assumption.
 - Write-queue replay: a durable intent refused at replay because its input no
   longer fits the graph now settles `failed` and the replay goes on, as a
   cycle refusal already did and as the in-session worker does (#294). The

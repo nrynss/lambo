@@ -19,9 +19,12 @@ use crate::types::{
     Interaction, SessionId, StoreError,
 };
 
-/// Load a session's write intents (J3), in replay order — (`issued_ms`,
-/// `lane_seq`), which is exact admission order within one issuing process and
-/// wall-clock order across processes.
+/// Load a session's write intents (J3), sorted by (`issued_ms`, `lane_seq`):
+/// wall-clock order, which interleaves different processes' intents. The
+/// replay then puts each process's own intents in `lane_seq` (admission)
+/// order (`writeq::replay::replay_order`, #295), since a clock that stepped
+/// back between two admissions sorts them the wrong way round here; the rows
+/// carry no epoch column to sort by in SQL.
 pub(super) async fn load_write_intents(
     tx: &mut sqlx::SqliteConnection,
     session: &SessionId,
