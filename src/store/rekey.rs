@@ -269,7 +269,8 @@ pub fn report(plan: &RekeyPlan) -> String {
     if !plan.collisions.is_empty() {
         out.push_str(&format!(
             "; {} kept their old key because another concept already holds the new key \
-             (or its re-key placeholder): {}",
+             (or its re-key placeholder), or a durable name bound to another concept does: \
+             {}",
             plan.collisions.len(),
             plan.collisions.join(", ")
         ));
@@ -554,6 +555,35 @@ mod tests {
             assert_eq!(plan.changes.len(), 1, "{plan:?}");
             assert!(plan.is_clean());
         }
+    }
+
+    /// A row refused because of a name keeps its old key, which then blocks
+    /// another candidate whose new key is that old key (the cascade).
+    #[test]
+    fn a_name_refusal_cascades_to_a_candidate_wanting_its_old_key() {
+        // `a` (written before #148) would move "2122de39e47" ->
+        // "2122de39e47e"; `b` (written before #301) would move
+        // " 2122de39e47" -> "2122de39e47", the key `a` gives up.
+        let b_old = unfiltered_canonical_key("2122de39e47 ''s", |_| None);
+        assert_eq!(b_old, " 2122de39e47");
+        let rows = [
+            row("a", "2122de39e47e", "2122de39e47"),
+            row("b", "2122de39e47 ''s", &b_old),
+        ];
+        // Without a name both move: `a` frees the key `b` takes.
+        let free = plan_rekey(&rows, &none(), &[]);
+        assert_eq!(free.changes.len(), 2, "{free:?}");
+        assert!(free.is_clean());
+        // A name on another concept holds `a`'s new key: `a` keeps
+        // "2122de39e47", so `b` cannot take it either.
+        let name = NameRow {
+            session_id: "s".into(),
+            name_key: "2122de39e47e".into(),
+            node_id: "n".into(),
+        };
+        let plan = plan_rekey(&rows, &none(), std::slice::from_ref(&name));
+        assert!(plan.changes.is_empty(), "{plan:?}");
+        assert_eq!(plan.collisions, vec!["a".to_string(), "b".to_string()]);
     }
 
     /// #301: a row whose current key would be empty keeps its old key and is

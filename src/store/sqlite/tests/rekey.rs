@@ -198,26 +198,80 @@ async fn a_row_kept_from_an_empty_key_blocks_the_marker() {
 
 /// #301: a concept is never re-keyed onto a durable name's key bound to
 /// another concept, which would make the session refuse to load; it keeps
-/// its old key and is reported as a collision.
+/// its old key, is reported as a collision, and the session still loads.
 #[tokio::test]
 async fn a_new_key_held_by_a_durable_name_is_a_collision() {
-    let (store, sid) = legacy_store(&["''s-lease"]).await;
-    let other = NodeId::new();
+    let (store, sid) = legacy_store(&["''s-lease", "single writer lease"]).await;
+    let b: String = sqlx::query_scalar("SELECT id FROM concepts WHERE content = ?")
+        .bind("single writer lease")
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
     sqlx::query(
         "INSERT INTO concept_names (session_id, name, name_key, node_id) VALUES (?, ?, ?, ?)",
     )
     .bind(sid.as_str())
     .bind("lease")
     .bind("leas")
-    .bind(other.to_string())
+    .bind(&b)
     .execute(store.pool())
     .await
     .unwrap();
+    // `legacy_store` plants no Derives edges, which a graph load requires.
+    let origin: String = sqlx::query_scalar("SELECT id FROM interactions WHERE session_id = ?")
+        .bind(sid.as_str())
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    let ids: Vec<String> = sqlx::query_scalar("SELECT id FROM concepts")
+        .fetch_all(store.pool())
+        .await
+        .unwrap();
+    let node = |s: &str| NodeId(uuid::Uuid::parse_str(s).unwrap());
+    let ts = Utc.timestamp_opt(1_752_000_000, 0).unwrap();
+    let edges = ids
+        .iter()
+        .map(|id| Mutation::UpsertEdge {
+            edge: crate::types::Edge {
+                event_time: None,
+                id: NodeId::new(),
+                session_id: sid.clone(),
+                source: node(&origin),
+                target: node(id),
+                edge_type: EdgeType::Derives,
+                weight: 1.0,
+                reinforcements: 1,
+                created_at: ts,
+                last_reinforced: ts,
+            },
+        })
+        .collect();
+    store
+        .flush(
+            &MutationBatch {
+                mutation_epoch: 1,
+                gc_mark: Default::default(),
+                mutations: edges,
+            },
+            None,
+        )
+        .await
+        .unwrap();
     let plan = store.rekey_canonical_keys(false).await.unwrap();
     assert!(plan.changes.is_empty(), "{plan:?}");
     assert_eq!(plan.collisions.len(), 1, "{plan:?}");
-    assert_eq!(keys(&store).await[0].1, " leas");
+    assert_eq!(
+        keys(&store).await[0],
+        ("''s-lease".to_string(), " leas".to_string())
+    );
     assert_eq!(marker(&store).await, None);
+    // The failure the check prevents: re-keyed onto "leas", the concept would
+    // carry the name's key and every load of the session would be refused.
+    let snap = crate::store::GraphStore::load_session(&store, &sid)
+        .await
+        .expect("the session loads");
+    let g = crate::graph::Graph::from_snapshot(snap).expect("the graph loads");
+    assert_eq!(g.name_target("lease").map(|id| id.to_string()), Some(b));
 }
 
 /// The adapter-agnostic testkit the live Postgres test also runs.
