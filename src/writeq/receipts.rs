@@ -523,8 +523,12 @@ pub enum ReceiptAnswer {
     /// receipt this process holds* — a replay-owed id answers
     /// [`ReceiptAnswer::PendingReplay`] instead (J3-R2R-5).
     Pending,
-    /// Admitted by a **previous** process, recorded as a durable intent, and
-    /// still owed a replay (J3 round-1 N8).
+    /// Recorded as a durable intent and still owed: admitted by a
+    /// **previous** process and not yet replayed, or admitted by this one and
+    /// held because the embedder did not answer it or an earlier write of its
+    /// agent (#295, `Lanes::held`). Unsettled: a held write later applied or
+    /// refused in this process settles from here, and a close answers it
+    /// [`ReceiptAnswer::IntentRecorded`].
     ///
     /// Split from [`ReceiptAnswer::Pending`] because the two are not the same
     /// situation and the taxonomy's own principle is that every non-answer is a
@@ -536,7 +540,13 @@ pub enum ReceiptAnswer {
     PendingReplay,
     /// Applied through the ordinary path.
     Applied(AppliedSummary),
-    /// Attempted and rejected. The write did not happen.
+    /// Attempted and rejected: this process wrote nothing for it and will not
+    /// try again. Final here; one case is final only for this process: a write
+    /// refused because this handle lost its single-writer lease keeps its
+    /// intent, which the session's current holder may apply, so that holder
+    /// can answer the same id [`ReceiptAnswer::AppliedAfterRestart`]. An
+    /// embedder outage does not answer this: the write is held and answers
+    /// [`ReceiptAnswer::PendingReplay`] (#295).
     ///
     /// **The string is the N4 class, not the error** (JE2E-12). This receipt is
     /// the *only* channel a background write's failure has to the model, and it
@@ -951,6 +961,19 @@ pub(super) fn settle_one(
         r.undelivered.entry(agent).or_default().push_back(*id);
     }
     r.expire(now);
+}
+
+/// #295: answer a held write `pending_replay` (see `Lanes::held`). Only an
+/// unsettled entry moves, and it stays unsettled, so the write's later
+/// outcome in this serve (or a close's `intent_durable`) still settles it;
+/// nothing is queued for delivery, since nothing was decided.
+pub(super) fn hold_one(receipts: &PlMutex<Receipts>, id: &ReceiptId) {
+    let mut r = receipts.lock();
+    if let Some(entry) = r.entries.get_mut(id)
+        && !entry.answer.is_settled()
+    {
+        entry.answer = ReceiptAnswer::PendingReplay;
+    }
 }
 
 impl WritePipeline {

@@ -375,8 +375,9 @@ async fn a_dead_embedder_at_attach_leaves_the_backlog_durable_and_a_later_serve_
 
 /// **J3-R2R-2 (in-session symmetry).** A write the worker reaches DURING an
 /// embedder outage is not destroyed as `failed`: its durable intent is left
-/// unconsumed so the next serve can re-attempt it, even though the live
-/// caller's receipt says `failed` (nothing was written by this process).
+/// unconsumed so the next serve can re-attempt it. Since #295 the live
+/// caller's receipt says `pending_replay` (the write is held, and may still
+/// apply in this serve), and a clean close answers `intent_durable`.
 /// Red before the fix: the in-session arm consumed *any* error class as
 /// `failed`, so this intent's row was settled and the write could never
 /// come back — the same transient condition N1 was raised about, on the
@@ -414,21 +415,25 @@ async fn a_write_reached_during_an_in_session_embedder_outage_is_not_consumed() 
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     loop {
         let a = mem.pipeline().lookup(&agent, submitted.receipt);
-        if a.is_settled() {
+        if a.tag() != "pending" {
             assert_eq!(
                 a.tag(),
-                "failed",
-                "the in-session caller learns its write failed: {a:?}"
+                "pending_replay",
+                "the in-session caller learns its write is owed, not applied: {a:?}"
             );
             break;
         }
         assert!(
             std::time::Instant::now() < deadline,
-            "the worker never settled the receipt"
+            "the worker never reached the write"
         );
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     mem.close().await.expect("clean close");
+    assert_eq!(
+        mem.pipeline().lookup(&agent, submitted.receipt).tag(),
+        "intent_durable"
+    );
     let snap = inner.load_session(&sid).await.expect("reload");
     assert_eq!(snap.write_intents.len(), 1);
     assert!(
@@ -1982,4 +1987,189 @@ async fn an_intent_with_an_unparseable_receipt_id_is_settled_failed() {
         Some("failed"),
         "settled, so no later serve skips it again"
     );
+}
+
+/// An embedder that is down (`EmbedError::Unavailable`) while its switch is
+/// on, for real content; the calibration probe's own texts always answer.
+struct Switchable {
+    inner: FixtureEmbedder,
+    down: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[async_trait]
+impl Embedder for Switchable {
+    fn dimensions(&self) -> usize {
+        self.inner.dimensions()
+    }
+    async fn embed(&self, text: &str) -> Result<Vec<f32>, crate::embed::EmbedError> {
+        self.embed_as(text, crate::test_util::TextRole::Document)
+            .await
+    }
+    async fn embed_query(&self, text: &str) -> Result<Vec<f32>, crate::embed::EmbedError> {
+        self.embed_as(text, crate::test_util::TextRole::Query).await
+    }
+    fn modalities(&self) -> crate::embed::Modalities {
+        self.inner.modalities()
+    }
+    async fn embed_image(
+        &self,
+        image: crate::embed::ImageInput<'_>,
+    ) -> Result<Vec<f32>, crate::embed::EmbedError> {
+        self.inner.embed_image(image).await
+    }
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        self.inner.as_any()
+    }
+}
+
+impl Switchable {
+    async fn embed_as(
+        &self,
+        text: &str,
+        role: crate::test_util::TextRole,
+    ) -> Result<Vec<f32>, crate::embed::EmbedError> {
+        if self.down.load(Ordering::SeqCst) && !text.contains(crate::writeq::PROBE_TEXT) {
+            return Err(crate::embed::EmbedError::Unavailable(
+                "llama.cpp unreachable: connection refused".into(),
+            ));
+        }
+        role.embed(&self.inner, text).await
+    }
+}
+
+/// A session over `inner` whose embedder is down while `down` is set.
+async fn switchable_session(
+    inner: &Arc<MemoryStore>,
+    session: &str,
+    down: &Arc<std::sync::atomic::AtomicBool>,
+) -> Memory {
+    Memory::builder()
+        .session(session)
+        .agent("agent-a")
+        .flush_interval(Duration::from_secs(3_600))
+        .store(Arc::new(VectorSearchable(inner.clone())) as Arc<dyn GraphStore>)
+        .embedder(Arc::new(Switchable {
+            inner: FixtureEmbedder::new(),
+            down: down.clone(),
+        }) as Arc<dyn Embedder>)
+        .embedding_contract(contract("fixture", 1024))
+        .match_strategy(MatchStrategy::Hybrid)
+        .build()
+        .await
+        .expect("build")
+}
+
+/// Derive one concept as `agent` and wait until the worker has taken the
+/// write (its receipt is no longer `pending`).
+async fn derive_and_wait(mem: &Memory, agent: &AgentId, content: &str) -> crate::writeq::ReceiptId {
+    let submitted = mem
+        .derive_async_as(
+            agent,
+            &[(content, ConceptType::Entity)],
+            &ParentOf::none(),
+            None,
+        )
+        .await
+        .expect("ack");
+    assert!(!submitted.dropped());
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while mem.pipeline().lookup(agent, submitted.receipt).tag() == "pending" {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the worker never took the write"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    submitted.receipt
+}
+
+/// **#295 (in session)**: after an embedder outage leaves one of an agent's
+/// writes owed, the agent's later write in the same server must not apply
+/// ahead of it.
+///
+/// Before the fix the first write answered `failed` with its intent kept,
+/// the second applied, and the next serve applied the first after it. Now
+/// the second is held behind the first: both answer `pending_replay`, a
+/// clean close keeps both as durable intents, and the next serve applies
+/// them in order. Another agent's write is not held.
+///
+/// Mirrors the Lean theorems `Drain.workH_split` and
+/// `Drain.hold_then_serve_order`; the code before the fix is
+/// `Drain.outage_then_replay_reorders`.
+#[tokio::test]
+async fn an_outage_in_session_holds_the_agents_later_writes_behind_the_owed_one() {
+    let inner = Arc::new(MemoryStore::new());
+    let a = AgentId::new("agent-a");
+    let b = AgentId::new("agent-b");
+    let down = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let mem = switchable_session(&inner, "in-session-hold", &down).await;
+    let a1 = derive_and_wait(&mem, &a, "first fact of a").await;
+    let a2 = derive_and_wait(&mem, &a, "second fact of a").await;
+    assert_eq!(
+        [
+            mem.pipeline().lookup(&a, a1).tag(),
+            mem.pipeline().lookup(&a, a2).tag()
+        ],
+        ["pending_replay", "pending_replay"],
+        "a's second write must wait behind its first, not apply ahead of it"
+    );
+    down.store(false, Ordering::SeqCst);
+    let b1 = derive_and_wait(&mem, &b, "only fact of b").await;
+    assert_eq!(
+        mem.pipeline().lookup(&b, b1).tag(),
+        "applied",
+        "b is not held"
+    );
+    mem.close().await.expect("clean close");
+    assert_eq!(mem.pipeline().lookup(&a, a1).tag(), "intent_durable");
+    assert_eq!(mem.pipeline().lookup(&a, a2).tag(), "intent_durable");
+
+    let mem2 = switchable_session(&inner, "in-session-hold", &down).await;
+    wait_for_owed(&mem2).await;
+    assert_eq!(
+        mem2.pipeline().lookup(&a, a1).tag(),
+        "applied_after_restart"
+    );
+    assert_eq!(
+        mem2.pipeline().lookup(&a, a2).tag(),
+        "applied_after_restart"
+    );
+    mem2.close().await.expect("clean close 2");
+}
+
+/// **#295 (in session)**: once the embedder is back, the agent's next write
+/// first applies the held one, then itself, in this server.
+///
+/// Mirrors `Drain.arriveH_clears` and `Drain.workH_split`.
+#[tokio::test]
+async fn a_held_write_applies_before_the_agents_next_write_once_the_embedder_is_back() {
+    let inner = Arc::new(MemoryStore::new());
+    let a = AgentId::new("agent-a");
+    let down = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let mem = switchable_session(&inner, "in-session-recover", &down).await;
+    let a1 = derive_and_wait(&mem, &a, "first fact of a").await;
+    assert_eq!(mem.pipeline().lookup(&a, a1).tag(), "pending_replay");
+    down.store(false, Ordering::SeqCst);
+    let a2 = derive_and_wait(&mem, &a, "second fact of a").await;
+    assert_eq!(mem.pipeline().lookup(&a, a1).tag(), "applied");
+    assert_eq!(mem.pipeline().lookup(&a, a2).tag(), "applied");
+    mem.close().await.expect("clean close");
+    let snap = inner
+        .load_session(&SessionId::new("in-session-recover"))
+        .await
+        .expect("reload");
+    assert!(snap.write_intents.iter().all(|i| i.outcome.is_some()));
+}
+
+/// Wait (bounded) until a replay has nothing owed.
+async fn wait_for_owed(mem: &Memory) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while mem.pipeline().counters().replay_owed() != 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the replay never finished"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(20)).await;
 }

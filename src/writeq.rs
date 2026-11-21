@@ -115,7 +115,7 @@ pub use replay::{EMBEDDER_SICK_THRESHOLD, REPLAY_LOOKUP_TIMEOUT_LIMIT};
 use admission::{Job, JobPayload, Lanes};
 use calibration::{ObservedRate, PipelineProbe};
 use counters::ApplyLatency;
-use receipts::{model_safe_failure, settle_one, Entry, Receipts};
+use receipts::{hold_one, model_safe_failure, settle_one, Entry, Receipts};
 
 // ---------------------------------------------------------------------------
 // Constants — every one of them derived, at the constant, from something else

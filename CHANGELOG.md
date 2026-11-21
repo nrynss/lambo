@@ -230,6 +230,23 @@
   latches, that a stale write is never re-sent, that the loop itself loses
   nothing silently, and that `close` returns `Ok` only when every batch that
   left the loop was committed or dead-lettered.
+- Write queue: an embedder outage in session no longer lets one agent's later
+  write apply ahead of the write it left owed (#295, the in-session half). A
+  write the worker reaches during an outage is now held: its intent stays
+  owed, as before, and its receipt answers `pending_replay` instead of
+  `failed`, since it may still apply in this serve. The agent's later writes
+  are held behind it, also `pending_replay`, and the worker re-attempts the
+  held writes, oldest first, before the agent's next write: once the embedder
+  answers they apply in order (`applied`). Writes still held at close answer
+  `intent_durable` and the next serve replays them in order. Other agents are
+  not held. Held writes count against the lane and queue bounds at admission,
+  and each failed re-attempt logs a warning naming the attempt count, so a
+  write that never embeds is visible. `failed` now means this server wrote
+  nothing and will not try again (part of #302; a lease loss is the one case
+  where another server may still apply it). `formal/LamboProofs/Drain.lean`
+  models the hold and proves each agent's writes of one process apply in
+  admission order in session and across the next serve, whatever the embedder
+  answers.
 - Write-queue replay keeps one agent's writes in order and stops trusting the
   wall clock for it (#295). A transient embedder answer at replay (below the
   three-in-a-row threshold) used to leave that intent durable and go on to

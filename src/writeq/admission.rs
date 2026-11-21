@@ -601,9 +601,33 @@ pub(super) struct Lanes {
     /// Kept after an incomplete flush so a retried close that completes can
     /// upgrade them; cleared once they are settled `intent_durable`.
     pub(super) close_deferred: Vec<ReceiptId>,
+    /// #295: per agent, the write its lane worker met an embedder outage at
+    /// and every later write of that agent the worker has taken since, oldest
+    /// first. Not run until the worker takes that agent's next write, which
+    /// re-attempts them in order first, so no write of the agent applies
+    /// ahead of an earlier one still owed. Their intents stay unconsumed and
+    /// their receipts answer `pending_replay`; a close sets them aside like
+    /// any unsettled receipt (`intent_durable`), and the next serve replays
+    /// them in order. Counted against the lane and queue bounds at admission,
+    /// not by the quiesce (nothing in this serve drains them by itself).
+    pub(super) held: HashMap<AgentId, VecDeque<Job>>,
+    /// For each agent with held writes: the oldest one and how many times in
+    /// a row the worker has met an outage at it, for the warning that makes a
+    /// write which never embeds visible.
+    pub(super) held_attempts: HashMap<AgentId, (ReceiptId, u32)>,
 }
 
 impl Lanes {
+    /// Held writes (see [`Lanes::held`]) across every agent.
+    pub(super) fn held_count(&self) -> usize {
+        self.held.values().map(VecDeque::len).sum()
+    }
+
+    /// Held writes of one agent.
+    pub(super) fn lane_held(&self, agent: &AgentId) -> usize {
+        self.held.get(agent).map_or(0, VecDeque::len)
+    }
+
     pub(super) fn outstanding(&self) -> usize {
         self.queued + self.running
     }
@@ -700,9 +724,13 @@ impl WritePipeline {
             let mut lanes = self.lanes.lock();
             if lanes.sealed {
                 Some((DropReason::Closed, WRITE_QUEUE_LANE_MAX))
-            } else if lanes.lane_outstanding(&agent) >= WRITE_QUEUE_LANE_MAX {
+            } else if lanes.lane_outstanding(&agent) + lanes.lane_held(&agent)
+                >= WRITE_QUEUE_LANE_MAX
+            {
+                // #295: an agent's held writes count against its lane, so an
+                // outage that holds them cannot grow memory without bound.
                 Some((DropReason::LaneFull, WRITE_QUEUE_LANE_MAX))
-            } else if lanes.outstanding() >= WRITE_QUEUE_MAX {
+            } else if lanes.outstanding() + lanes.held_count() >= WRITE_QUEUE_MAX {
                 Some((DropReason::QueueFull, WRITE_QUEUE_MAX))
             } else if lanes.bytes.saturating_add(bytes) > WRITE_QUEUE_MAX_BYTES {
                 Some((DropReason::QueueBytes, WRITE_QUEUE_MAX))

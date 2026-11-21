@@ -27,8 +27,8 @@ use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
 use super::{
-    model_safe_failure, settle_one, AppliedSummary, Job, JobPayload, ReceiptAnswer, WriteKind,
-    WritePipeline, MAX_RECEIPT_IDS,
+    hold_one, model_safe_failure, settle_one, AppliedSummary, Job, JobPayload, ReceiptAnswer,
+    ReceiptId, WriteKind, WritePipeline, MAX_RECEIPT_IDS,
 };
 use crate::embed::Embedder;
 use crate::graph::action::{record_action_against, Action, ActionEmbeddings};
@@ -630,162 +630,229 @@ impl WritePipeline {
                 // lost while a lane drains, and every job after that must be
                 // refused rather than written into a session another writer
                 // owns.
-                let outcome = if ctx.lease_lost.load(Ordering::Acquire) {
-                    counters.abandoned.fetch_add(1, Ordering::Relaxed);
-                    // The durable intent is deliberately NOT consumed here: it
-                    // is not ours to consume any more. If it flushed before
-                    // the fence, the session's current holder replays it
-                    // (fenced flushes are refused at the store, so this
-                    // process can neither apply nor consume it now); if it
-                    // never flushed, it dies with this process's tail.
-                    //
-                    // JE2E-12: this arm hand-writes its own message and always
-                    // did, which is why the finding did not reach it — it is
-                    // lambo's own text about lambo's own lease, with nothing of
-                    // the environment in it. It carries the same string twice
-                    // because the model and the operator want the same words
-                    // here; the split exists for the arms where they do not.
-                    let fenced = format!(
-                        "this handle lost its single-writer lease before the write was applied; \
-                         this process wrote nothing for session {} — if the write's durable \
-                         intent reached the store first, the session's current holder will \
-                         apply it",
-                        ctx.session
-                    );
-                    Err((fenced.clone(), fenced))
+                //
+                // #295: the agent's held writes first. A write this worker met
+                // an embedder outage at is held (see `Lanes::held`) together
+                // with every later write of its agent, and re-attempted, in
+                // order, before the agent's next write: so no write of the
+                // agent applies ahead of an earlier one still owed. A fenced
+                // worker runs none of them.
+                let fenced = ctx.lease_lost.load(Ordering::Acquire);
+                let mut owed: VecDeque<Job> = if fenced {
+                    VecDeque::new()
                 } else {
-                    // Timed, because this lane is single-consumer: the wall
-                    // clock around one `run` *is* this deployment's serial
-                    // service time, embedder warmth and all (J3-R1-2) — the
-                    // figure `write_queue_serial_items_per_sec` publishes. It
-                    // feeds no admission decision (J3 round-1 N3: this said "the
-                    // serial service time the admission bound needs"); what it
-                    // is *for* is that an operator watching a slowing embedder
-                    // sees the deployment's own writes, not a startup estimate.
-                    // A fenced refusal above is deliberately not sampled — it
-                    // never entered `run`, and calling it a fast write would
-                    // bias the rate upward, which is the dangerous direction.
-                    //
-                    // **And neither is a failure** (J3-R2-2): the same argument
-                    // reaches one step further than it was taken. A write that
-                    // fails — embedder error, HYBRID_IO_TIMEOUT, a store error —
-                    // fails FAST, and sampling it says "this deployment retires
-                    // work quickly" on the evidence of work it did not retire.
-                    // Measured on this rig: llama returns HTTP 500 in ~2 ms for
-                    // an input it refuses, which is 30x faster than a write it
-                    // accepts. The hazard is the recovery, not the outage: an
-                    // embedder that fast-fails a burst inflates the bound, then
-                    // comes back and services the inflated queue at its real
-                    // rate. Only work that went all the way through the pipeline
-                    // is evidence about the pipeline.
-                    let started = tokio::time::Instant::now();
-                    let stamp = ConsumeStamp {
-                        tag: "applied",
-                        at: (clock)(),
-                    };
-                    let raw_outcome = ctx.run(&job, Some(stamp)).await;
-                    if raw_outcome.is_ok() {
-                        observed.lock().sample(started.elapsed().as_secs_f64());
-                    } else {
-                        // J3-R2R-2 (in-session symmetry). A failed job's intent
-                        // must be settled — `run` consumes only at a commit, and
-                        // a failure has no commit to ride — but WHICH failures
-                        // consume it is the question this arm answers to match
-                        // the replay arm. A content refusal
-                        // (`LamboError::Embed`) is settled `failed` and consumed,
-                        // exactly as the replay arm does. An embedder **outage**
-                        // (`LamboError::EmbedUnavailable`) is NOT: it says
-                        // nothing was learned about this *input*, so destroying
-                        // the durable intent over it would recreate N1's loss on
-                        // the path that handles almost every write. Instead the
-                        // intent is left unconsumed, and the next serve of the
-                        // session re-attempts it. The receipt still says `failed`
-                        // (nothing was written by this process), and the deferred
-                        // J4 seam is to re-queue with backoff or keep leaving it
-                        // unconsumed for replay.
-                        if let Err(e) = &raw_outcome
-                            && !matches!(e, LamboError::EmbedUnavailable(_))
-                        {
-                            ctx.graph.write().consume_write_intent(
-                                job.receipt.to_string(),
-                                WriteIntentOutcome {
-                                    // JE2E-12: the intent row IS the durable
-                                    // half of the receipt store — a restart
-                                    // answers `failed` straight out of this
-                                    // `summary` — so what it holds must be
-                                    // what a receipt may say. The operator's
-                                    // copy is the completion line and the
-                                    // WARN below, both written from `detail`.
-                                    tag: "failed".into(),
-                                    summary: super::receipts::durable_summary(
-                                        &model_safe_failure(e),
-                                        job.receipt_destination.as_ref(),
-                                    ),
-                                    consumed_at: (clock)(),
-                                },
-                            );
-                        }
-                    }
-                    // Two strings from here on: the class for the model, the
-                    // error for the operator (JE2E-12).
-                    raw_outcome.map_err(|e| (model_safe_failure(&e), e.to_string()))
+                    lanes.lock().held.remove(&agent).unwrap_or_default()
                 };
-
-                // No `.await` from here to the end of the iteration: an
-                // `abort()` cannot land between a completed graph write and the
-                // settle that reports it, so "aborted" always means "not
-                // written".
-                {
-                    let mut l = lanes.lock();
-                    l.running -= 1;
-                    if let Some(n) = l.running_per_lane.get_mut(&agent) {
-                        *n = n.saturating_sub(1);
-                    }
-                }
-                let answer = match outcome {
-                    Ok(summary) => {
-                        counters.applied.fetch_add(1, Ordering::Relaxed);
-                        apply_latency.lock().record(job.admitted.elapsed());
-                        // J4 proof obligation 5: a closed acked write's applied
-                        // lifecycle is measurable — carry the metric-2 fact set,
-                        // which is exactly what a durable-intent replay hid.
-                        if let Some(ledger) = &ctx.ledger {
-                            ledger.append(&crate::ledger::completion_line(
-                                &job.agent.to_string(),
-                                &job.receipt.to_string(),
-                                "applied",
-                                Some(serde_json::Value::Object(summary.ledger_facts())),
-                            ));
+                owed.push_back(job);
+                while let Some(job) = owed.pop_front() {
+                    let (outcome, outage) = if fenced {
+                        counters.abandoned.fetch_add(1, Ordering::Relaxed);
+                        // The durable intent is deliberately NOT consumed here: it
+                        // is not ours to consume any more. If it flushed before
+                        // the fence, the session's current holder replays it
+                        // (fenced flushes are refused at the store, so this
+                        // process can neither apply nor consume it now); if it
+                        // never flushed, it dies with this process's tail.
+                        //
+                        // JE2E-12: this arm hand-writes its own message and always
+                        // did, which is why the finding did not reach it — it is
+                        // lambo's own text about lambo's own lease, with nothing of
+                        // the environment in it. It carries the same string twice
+                        // because the model and the operator want the same words
+                        // here; the split exists for the arms where they do not.
+                        let fenced = format!(
+                            "this handle lost its single-writer lease before the write was applied; \
+                             this process wrote nothing for session {} — if the write's durable \
+                             intent reached the store first, the session's current holder will \
+                             apply it",
+                            ctx.session
+                        );
+                        (Err((fenced.clone(), fenced)), false)
+                    } else {
+                        // Timed, because this lane is single-consumer: the wall
+                        // clock around one `run` *is* this deployment's serial
+                        // service time, embedder warmth and all (J3-R1-2) — the
+                        // figure `write_queue_serial_items_per_sec` publishes. It
+                        // feeds no admission decision (J3 round-1 N3: this said "the
+                        // serial service time the admission bound needs"); what it
+                        // is *for* is that an operator watching a slowing embedder
+                        // sees the deployment's own writes, not a startup estimate.
+                        // A fenced refusal above is deliberately not sampled — it
+                        // never entered `run`, and calling it a fast write would
+                        // bias the rate upward, which is the dangerous direction.
+                        //
+                        // **And neither is a failure** (J3-R2-2): the same argument
+                        // reaches one step further than it was taken. A write that
+                        // fails — embedder error, HYBRID_IO_TIMEOUT, a store error —
+                        // fails FAST, and sampling it says "this deployment retires
+                        // work quickly" on the evidence of work it did not retire.
+                        // Measured on this rig: llama returns HTTP 500 in ~2 ms for
+                        // an input it refuses, which is 30x faster than a write it
+                        // accepts. The hazard is the recovery, not the outage: an
+                        // embedder that fast-fails a burst inflates the bound, then
+                        // comes back and services the inflated queue at its real
+                        // rate. Only work that went all the way through the pipeline
+                        // is evidence about the pipeline.
+                        let started = tokio::time::Instant::now();
+                        let stamp = ConsumeStamp {
+                            tag: "applied",
+                            at: (clock)(),
+                        };
+                        let raw_outcome = ctx.run(&job, Some(stamp)).await;
+                        if raw_outcome.is_ok() {
+                            observed.lock().sample(started.elapsed().as_secs_f64());
+                        } else {
+                            // J3-R2R-2 (in-session symmetry). A failed job's intent
+                            // must be settled — `run` consumes only at a commit, and
+                            // a failure has no commit to ride — but WHICH failures
+                            // consume it is the question this arm answers to match
+                            // the replay arm. A content refusal
+                            // (`LamboError::Embed`) is settled `failed` and consumed,
+                            // exactly as the replay arm does. An embedder **outage**
+                            // (`LamboError::EmbedUnavailable`) is NOT: it says
+                            // nothing was learned about this *input*, so destroying
+                            // the durable intent over it would recreate N1's loss on
+                            // the path that handles almost every write. Instead the
+                            // intent is left unconsumed and the write is held (#295,
+                            // below): re-attempted before the agent's next write in
+                            // this serve, or replayed by the next serve.
+                            if let Err(e) = &raw_outcome
+                                && !matches!(e, LamboError::EmbedUnavailable(_))
+                            {
+                                ctx.graph.write().consume_write_intent(
+                                    job.receipt.to_string(),
+                                    WriteIntentOutcome {
+                                        // JE2E-12: the intent row IS the durable
+                                        // half of the receipt store — a restart
+                                        // answers `failed` straight out of this
+                                        // `summary` — so what it holds must be
+                                        // what a receipt may say. The operator's
+                                        // copy is the completion line and the
+                                        // WARN below, both written from `detail`.
+                                        tag: "failed".into(),
+                                        summary: super::receipts::durable_summary(
+                                            &model_safe_failure(e),
+                                            job.receipt_destination.as_ref(),
+                                        ),
+                                        consumed_at: (clock)(),
+                                    },
+                                );
+                            }
                         }
-                        ReceiptAnswer::Applied(summary)
-                    }
-                    Err((why, detail)) => {
-                        counters.failed.fetch_add(1, Ordering::Relaxed);
-                        // JE2E-12: the ledger line is operator-facing JSONL and
-                        // gets the raw error; the receipt is model-facing and
-                        // gets the class. Same fact, two audiences, one site —
-                        // which is what keeps the detail from being lost rather
-                        // than merely hidden.
-                        if let Some(ledger) = &ctx.ledger {
-                            ledger.append(&crate::ledger::completion_line(
-                                &job.agent.to_string(),
-                                &job.receipt.to_string(),
-                                "failed",
-                                Some(json!({ "error": &detail })),
-                            ));
+                        let outage = matches!(&raw_outcome, Err(LamboError::EmbedUnavailable(_)));
+                        // Two strings from here on: the class for the model, the
+                        // error for the operator (JE2E-12).
+                        (
+                            raw_outcome.map_err(|e| (model_safe_failure(&e), e.to_string())),
+                            outage,
+                        )
+                    };
+                    if let (true, Err((_, detail))) = (outage, &outcome) {
+                        // #295: hold this write and every later one of the agent
+                        // this worker has taken. Their intents stay unconsumed;
+                        // their receipts answer `pending_replay`, which a later
+                        // outcome in this serve, or a close's `intent_durable`,
+                        // settles. No `.await` from here to the `break`.
+                        owed.push_front(job);
+                        let head = owed.front().map(|j| j.receipt);
+                        let held_ids: Vec<ReceiptId> = owed.iter().map(|j| j.receipt).collect();
+                        let attempts = {
+                            let mut l = lanes.lock();
+                            l.running -= 1;
+                            if let Some(n) = l.running_per_lane.get_mut(&agent) {
+                                *n = n.saturating_sub(1);
+                            }
+                            let attempts = match (l.held_attempts.get(&agent), head) {
+                                (Some((id, n)), Some(h)) if *id == h => n + 1,
+                                _ => 1,
+                            };
+                            if let Some(h) = head {
+                                l.held_attempts.insert(agent.clone(), (h, attempts));
+                            }
+                            l.held.insert(agent.clone(), std::mem::take(&mut owed));
+                            attempts
+                        };
+                        for id in &held_ids {
+                            hold_one(&receipts, id);
                         }
                         tracing::warn!(
                             session = %ctx.session,
-                            agent = %job.agent,
-                            receipt = %job.receipt,
+                            agent = %agent,
+                            receipt = ?head,
+                            attempts,
+                            held = held_ids.len(),
                             error = %detail,
-                            "write queue: a background write failed; the outcome is on its receipt"
+                            "write queue: the embedder did not answer this agent's oldest owed write \
+                             ({attempts} attempt(s) in this server); it and the agent's later writes \
+                             are held, answered pending_replay, and re-attempted in order before the \
+                             agent's next write, so none applies ahead of it. At close they stay \
+                             durable intents for the next serve. A write that never embeds (too large \
+                             for the embed budget, say) holds this agent's writes until a restart"
                         );
-                        ReceiptAnswer::Failed(why)
+                        settled.notify_waiters();
+                        break;
                     }
-                };
-                settle_one(&receipts, &job.receipt, answer, (clock)());
-                settled.notify_waiters();
+                    let last = owed.is_empty();
+                    if last {
+                        lanes.lock().held_attempts.remove(&agent);
+                    }
+
+                    // No `.await` from here to the end of the iteration: an
+                    // `abort()` cannot land between a completed graph write and the
+                    // settle that reports it, so "aborted" always means "not
+                    // written".
+                    if last {
+                        let mut l = lanes.lock();
+                        l.running -= 1;
+                        if let Some(n) = l.running_per_lane.get_mut(&agent) {
+                            *n = n.saturating_sub(1);
+                        }
+                    }
+                    let answer = match outcome {
+                        Ok(summary) => {
+                            counters.applied.fetch_add(1, Ordering::Relaxed);
+                            apply_latency.lock().record(job.admitted.elapsed());
+                            // J4 proof obligation 5: a closed acked write's applied
+                            // lifecycle is measurable — carry the metric-2 fact set,
+                            // which is exactly what a durable-intent replay hid.
+                            if let Some(ledger) = &ctx.ledger {
+                                ledger.append(&crate::ledger::completion_line(
+                                    &job.agent.to_string(),
+                                    &job.receipt.to_string(),
+                                    "applied",
+                                    Some(serde_json::Value::Object(summary.ledger_facts())),
+                                ));
+                            }
+                            ReceiptAnswer::Applied(summary)
+                        }
+                        Err((why, detail)) => {
+                            counters.failed.fetch_add(1, Ordering::Relaxed);
+                            // JE2E-12: the ledger line is operator-facing JSONL and
+                            // gets the raw error; the receipt is model-facing and
+                            // gets the class. Same fact, two audiences, one site —
+                            // which is what keeps the detail from being lost rather
+                            // than merely hidden.
+                            if let Some(ledger) = &ctx.ledger {
+                                ledger.append(&crate::ledger::completion_line(
+                                    &job.agent.to_string(),
+                                    &job.receipt.to_string(),
+                                    "failed",
+                                    Some(json!({ "error": &detail })),
+                                ));
+                            }
+                            tracing::warn!(
+                                session = %ctx.session,
+                                agent = %job.agent,
+                                receipt = %job.receipt,
+                                error = %detail,
+                                "write queue: a background write failed; the outcome is on its receipt"
+                            );
+                            ReceiptAnswer::Failed(why)
+                        }
+                    };
+                    settle_one(&receipts, &job.receipt, answer, (clock)());
+                    settled.notify_waiters();
+                }
             }
         })
     }
