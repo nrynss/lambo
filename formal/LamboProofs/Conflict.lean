@@ -34,10 +34,15 @@ Model of two daemon detectors that share write-time attribution:
   `window_start` is `MIN_UTC = lo`; a representable window whose start
   underflows also gives `lo`. For the contradiction `min_age` either failure
   gives no cutoff at all.
-* **Agents** are an abstract type with decidable equality. Rust sorts a hit's
-  `agents` by id string; the model keeps them deduplicated in discovery order
-  (the order the Rust pushes them in, before its sort), and every theorem
-  about them is about membership, so the sort does not matter.
+* **Agents** are an abstract type with decidable equality and an `Ord`
+  instance standing for the Rust's `a.as_str().cmp(b.as_str())`. As in the
+  Rust, the agent set is collected deduplicated in discovery order
+  (`agentsOf`), tested for two members, then sorted (`sortAgents`, an
+  insertion sort the kernel can evaluate for the `decide` examples; the Rust's
+  `sort_by` is a stable merge sort, and on duplicate-free agents under a total
+  order every correct sort gives the same list). The general theorems about
+  `agents` are about membership and duplicate-freedom; the `decide` examples
+  state the exact sorted list.
 * **Graph.** The per-node check walks `incident_edges(node)`, which is
   id-ascending; the model takes that list as input. An edge's source is
   `Source.interaction agent` (an `Interaction` node: certain attribution) or
@@ -88,17 +93,20 @@ Conflict:
 * `secondsAgo_le_window`, `lapse_of_old`, `lapse_permanent`,
   `secondsAgo_advances`: the hot-list predicate drops a conflict once its
   newest write leaves the window, it stays dropped while nothing is written,
-  and until then its age grows with the caller's clock (XP-3,
-  `revalidate_ages_a_conflict_out_when_only_the_clock_advances`).
-* Behaviour pinned as it is now, for the owner to rule on:
+  and until then its age grows with the caller's clock, never the frozen
+  detection-time value
+  (`revalidate_ages_a_conflict_out_when_only_the_clock_advances`).
+* Behaviour pinned as it is now:
   `old_edge_agent_counts` (only one of the two agents need write inside the
-  window, as the "Active agent" doc section says), `future_edge_agent_counts`
-  (an edge written after `now` still adds its agent, unlike `written_by` in
-  `contradiction.rs`), `resend_drops_original_writer` (an edge is attributed
-  at its latest write, so a re-send by another agent removes the original
-  writer and can suppress a conflict), and `writer_order_dependent` (with no
-  interaction at the newest instant, ties between edges go to the smallest
-  edge id, a rule the docs do not state).
+  window, the documented "Active agent" reading); `future_edge_agent_counts`
+  (an edge written after `now` still adds its agent, as documented; a
+  design-consistency question against `written_by` in `contradiction.rs`,
+  reachable only with a mocked clock or fixture); `resend_drops_original_writer`
+  (an edge is attributed at its latest write, so a re-send by another agent
+  removes the original writer from the edge's target node); and
+  `writer_order_dependent` (with no interaction at the newest instant, ties
+  between edges go to the smallest edge id, a rule the docs do not state;
+  fixture-only, see its doc).
 
 Contradiction:
 * `declaredAt_le_createdAt`, `declaredAt_of_le`, `declaredAt_of_ge`,
@@ -106,11 +114,16 @@ Contradiction:
 * `declaredAt_mono`, `declaredAt_mono_write`: a later write never gets an
   earlier date than the clamp gives; `declaredAt_resend`: re-sending does not
   re-date (module doc, "Dating").
+* `declaredAt_resend` and `eligible_eventTime` hold by `rfl`: they follow from
+  the modelling choice that a re-send changes only `lastReinforced` (and
+  `weight`, not modelled), which is what `Graph::record_edge` does on a
+  duplicate natural key (`src/graph/graph.rs`: the original id, `created_at`
+  and `event_time` are kept), and from `eligible` reading only `createdAt`.
 * `eligible_eventTime`, `eligible_le`, `backdated_not_eligible`: eligibility
-  is by write time (review M3, `a_backdated_citation_does_not_skip_the_age_floor`).
+  is by write time (`a_backdated_citation_does_not_skip_the_age_floor`).
 * `cutoff_none_no_evidence`, `contradictionAt_no_cutoff`,
   `unrepresentable_minAge`: with `now - min_age` out of range nothing is
-  eligible (review M5).
+  eligible (`an_unrepresentable_min_age_makes_no_evidence_eligible`).
 * `contradictionAt_sound`: a hit comes from an admissible declaration written
   by `now`, dated strictly after the baseline and not after `now`;
   `not_written_not_admissible` (PR #154 review), `admissible_strict`.
@@ -272,7 +285,7 @@ def newestStep (lo : Int) (w : Option Nat) (now : Int) (tl : List (Interaction A
     some (lastWrite e, (writersOf tl e).2)
   else acc
 
-/-- The newest qualifying write and its named writer (ALGO-2): a strictly
+/-- The newest qualifying write and the agent that made it: a strictly
 newer write replaces the current one, so among equal times the first edge in
 `incident_edges` order (smallest edge id) wins. -/
 def newestOf (lo : Int) (w : Option Nat) (now : Int) (tl : List (Interaction A))
@@ -287,6 +300,35 @@ structure Hit (A : Type) where
   secondsAgo : Nat
   deriving DecidableEq, Repr
 
+section Sorted
+
+variable [Ord A]
+
+/-- Insert `x` before the first element it does not compare greater than. -/
+def insertAgent (x : A) : List A → List A
+  | [] => [x]
+  | y :: ys => if compare x y = .gt then y :: insertAgent x ys else x :: y :: ys
+
+/-- `agents.sort_by(|a, b| a.as_str().cmp(b.as_str()))`, as an insertion
+sort. -/
+def sortAgents : List A → List A
+  | [] => []
+  | x :: xs => insertAgent x (sortAgents xs)
+
+omit [DecidableEq A] in
+theorem insertAgent_perm (x : A) : ∀ l : List A, (insertAgent x l).Perm (x :: l)
+  | [] => List.Perm.refl _
+  | y :: ys => by
+    unfold insertAgent
+    split
+    · exact ((insertAgent_perm x ys).cons y).trans (List.Perm.swap x y ys)
+    · exact List.Perm.refl _
+
+omit [DecidableEq A] in
+theorem sortAgents_perm : ∀ l : List A, (sortAgents l).Perm l
+  | [] => List.Perm.refl _
+  | x :: xs => (insertAgent_perm x _).trans ((sortAgents_perm xs).cons x)
+
 /-- `conflict_at_with` on one node's incident edges. -/
 def conflictAt (lo : Int) (w : Option Nat) (now : Int) (tl : List (Interaction A))
     (es : List (Edge A)) : Option (Hit A) :=
@@ -295,10 +337,11 @@ def conflictAt (lo : Int) (w : Option Nat) (now : Int) (tl : List (Interaction A
   else
     match newestOf lo w now tl es with
     | none => none
-    | some (t, wr) => some ⟨agents, wr, (now - t).toNat⟩
+    | some (t, wr) => some ⟨sortAgents agents, wr, (now - t).toNat⟩
 
 /-! ### The agent set -/
 
+omit [Ord A] in
 theorem mem_pushNew (as : List A) (a x : A) : x ∈ pushNew as a ↔ x ∈ as ∨ x = a := by
   unfold pushNew
   split
@@ -307,6 +350,7 @@ theorem mem_pushNew (as : List A) (a x : A) : x ∈ pushNew as a ↔ x ∈ as �
     · rintro (h | rfl) <;> assumption
   · simp
 
+omit [Ord A] in
 theorem nodup_pushNew {as : List A} (h : as.Nodup) (a : A) : (pushNew as a).Nodup := by
   unfold pushNew
   split
@@ -321,6 +365,7 @@ theorem nodup_pushNew {as : List A} (h : as.Nodup) (a : A) : (pushNew as a).Nodu
     subst hxy
     exact ha hx
 
+omit [Ord A] in
 theorem mem_foldl_pushNew (l as : List A) (x : A) :
     x ∈ l.foldl pushNew as ↔ x ∈ as ∨ x ∈ l := by
   induction l generalizing as with
@@ -337,12 +382,14 @@ theorem mem_foldl_pushNew (l as : List A) (x : A) :
       · exact Or.inl (Or.inr h)
       · exact Or.inr h
 
+omit [Ord A] in
 theorem nodup_foldl_pushNew (l : List A) {as : List A} (h : as.Nodup) :
     (l.foldl pushNew as).Nodup := by
   induction l generalizing as with
   | nil => exact h
   | cons a l ih => exact ih (nodup_pushNew h a)
 
+omit [Ord A] in
 theorem mem_foldl_agentsStep (tl : List (Interaction A)) (es : List (Edge A)) (as : List A)
     (x : A) :
     x ∈ es.foldl (agentsStep tl) as ↔
@@ -374,6 +421,7 @@ theorem mem_foldl_agentsStep (tl : List (Interaction A)) (es : List (Edge A)) (a
         · exact Or.inl (Or.inr h2)
         · exact Or.inr ⟨e', he', h1, h2⟩
 
+omit [Ord A] in
 /-- "Agent X has an edge to node N" == X is a resolved writer of at least one
 non-excluded edge incident to N (module doc). Any age, any type but the two
 excluded ones. -/
@@ -383,6 +431,7 @@ theorem mem_agentsOf (tl : List (Interaction A)) (es : List (Edge A)) (x : A) :
   rw [mem_foldl_agentsStep]
   simp
 
+omit [Ord A] in
 theorem agentsOf_nodup (tl : List (Interaction A)) (es : List (Edge A)) :
     (agentsOf tl es).Nodup := by
   unfold agentsOf
@@ -398,7 +447,7 @@ theorem agentsOf_nodup (tl : List (Interaction A)) (es : List (Edge A)) :
     · exact h
     · exact nodup_foldl_pushNew _ h
 
-omit [DecidableEq A] in
+omit [DecidableEq A] [Ord A] in
 /-- A duplicate-free list has two elements iff it holds two distinct ones. -/
 theorem two_le_length_iff {l : List A} (h : l.Nodup) :
     2 ≤ l.length ↔ ∃ a ∈ l, ∃ b ∈ l, a ≠ b := by
@@ -418,13 +467,13 @@ theorem two_le_length_iff {l : List A} (h : l.Nodup) :
 
 /-! ### The newest qualifying write -/
 
-omit [DecidableEq A] in
+omit [DecidableEq A] [Ord A] in
 theorem newestStep_excluded {lo : Int} {w : Option Nat} {now : Int} {tl : List (Interaction A)}
     {e : Edge A} (h : e.ty.excluded = true) (acc : Option (Int × A)) :
     newestStep lo w now tl acc e = acc := by
   simp [newestStep, h]
 
-omit [DecidableEq A] in
+omit [DecidableEq A] [Ord A] in
 theorem qualifies_false_of_excluded {lo : Int} {w : Option Nat} {now : Int} {e : Edge A}
     (h : e.ty.excluded = true) : qualifies lo w now e = false := by
   cases hq : e.ty.qualifying
@@ -433,7 +482,7 @@ theorem qualifies_false_of_excluded {lo : Int} {w : Option Nat} {now : Int} {e :
     rw [this] at h
     exact absurd h (by decide)
 
-omit [DecidableEq A] in
+omit [DecidableEq A] [Ord A] in
 theorem newestStep_eq (lo : Int) (w : Option Nat) (now : Int) (tl : List (Interaction A))
     (acc : Option (Int × A)) (e : Edge A) :
     newestStep lo w now tl acc e =
@@ -445,7 +494,7 @@ theorem newestStep_eq (lo : Int) (w : Option Nat) (now : Int) (tl : List (Intera
   · rw [newestStep_excluded hx, qualifies_false_of_excluded hx]
     simp
 
-omit [DecidableEq A] in
+omit [DecidableEq A] [Ord A] in
 theorem newestStep_none (lo : Int) (w : Option Nat) (now : Int) (tl : List (Interaction A))
     (acc : Option (Int × A)) (e : Edge A) :
     newestStep lo w now tl acc e = none ↔ acc = none ∧ qualifies lo w now e = false := by
@@ -462,7 +511,7 @@ theorem newestStep_none (lo : Int) (w : Option Nat) (now : Int) (tl : List (Inte
       exact ⟨rfl, by simpa using hc⟩
     · exact fun h => h.1
 
-omit [DecidableEq A] in
+omit [DecidableEq A] [Ord A] in
 theorem newest_fold_none (lo : Int) (w : Option Nat) (now : Int) (tl : List (Interaction A))
     (es : List (Edge A)) (acc : Option (Int × A)) :
     es.foldl (newestStep lo w now tl) acc = none ↔
@@ -472,7 +521,7 @@ theorem newest_fold_none (lo : Int) (w : Option Nat) (now : Int) (tl : List (Int
   | cons e es ih =>
     simp only [List.foldl_cons, ih, newestStep_none, List.mem_cons, forall_eq_or_imp, and_assoc]
 
-omit [DecidableEq A] in
+omit [DecidableEq A] [Ord A] in
 theorem newest_fold_ge (lo : Int) (w : Option Nat) (now : Int) (tl : List (Interaction A))
     (es : List (Edge A)) (acc : Option (Int × A)) (t : Int) (wr : A)
     (h : es.foldl (newestStep lo w now tl) acc = some (t, wr)) :
@@ -516,7 +565,7 @@ theorem newest_fold_ge (lo : Int) (w : Option Nat) (now : Int) (tl : List (Inter
           omega
       · exact h2 e' he' hq
 
-omit [DecidableEq A] in
+omit [DecidableEq A] [Ord A] in
 theorem newest_fold_src (lo : Int) (w : Option Nat) (now : Int) (tl : List (Interaction A))
     (es : List (Edge A)) (acc : Option (Int × A)) (t : Int) (wr : A)
     (h : es.foldl (newestStep lo w now tl) acc = some (t, wr)) :
@@ -537,7 +586,7 @@ theorem newest_fold_src (lo : Int) (w : Option Nat) (now : Int) (tl : List (Inte
         exact Or.inl h'
     · exact Or.inr ⟨e', by simp [he'], h1, h2, h3⟩
 
-omit [DecidableEq A] in
+omit [DecidableEq A] [Ord A] in
 theorem newestOf_none_iff (lo : Int) (w : Option Nat) (now : Int) (tl : List (Interaction A))
     (es : List (Edge A)) :
     newestOf lo w now tl es = none ↔ ∀ e ∈ es, qualifies lo w now e = false := by
@@ -545,7 +594,7 @@ theorem newestOf_none_iff (lo : Int) (w : Option Nat) (now : Int) (tl : List (In
   rw [newest_fold_none]
   simp
 
-omit [DecidableEq A] in
+omit [DecidableEq A] [Ord A] in
 /-- The newest qualifying write is the latest qualifying write time, made by
 the named writer of a qualifying edge with that time. -/
 theorem newestOf_some (lo : Int) (w : Option Nat) (now : Int) (tl : List (Interaction A))
@@ -562,7 +611,7 @@ theorem newestOf_some (lo : Int) (w : Option Nat) (now : Int) (tl : List (Intera
 
 theorem conflictAt_eq_some {lo : Int} {w : Option Nat} {now : Int} {tl : List (Interaction A)}
     {es : List (Edge A)} {h : Hit A} (hc : conflictAt lo w now tl es = some h) :
-    2 ≤ (agentsOf tl es).length ∧ h.agents = agentsOf tl es ∧
+    2 ≤ (agentsOf tl es).length ∧ h.agents = sortAgents (agentsOf tl es) ∧
       ∃ t, newestOf lo w now tl es = some (t, h.writer) ∧ h.secondsAgo = (now - t).toNat := by
   unfold conflictAt at hc
   simp only at hc
@@ -633,7 +682,9 @@ theorem conflictAt_two_agents {lo : Int} {w : Option Nat} {now : Int}
     h.agents.Nodup ∧ ∃ a ∈ h.agents, ∃ b ∈ h.agents, a ≠ b := by
   obtain ⟨hl, ha, _⟩ := conflictAt_eq_some hc
   rw [ha]
-  exact ⟨agentsOf_nodup tl es, (two_le_length_iff (agentsOf_nodup tl es)).1 hl⟩
+  have hp := sortAgents_perm (agentsOf tl es)
+  obtain ⟨a, ma, b, mb, hab⟩ := (two_le_length_iff (agentsOf_nodup tl es)).1 hl
+  exact ⟨hp.nodup_iff.2 (agentsOf_nodup tl es), a, hp.mem_iff.2 ma, b, hp.mem_iff.2 mb, hab⟩
 
 /-- The named writer is one of the contesting agents (`ConflictHit::writer`'s
 doc: "Every candidate is in `agents`"). -/
@@ -642,7 +693,7 @@ theorem writer_mem_agents {lo : Int} {w : Option Nat} {now : Int}
     (hc : conflictAt lo w now tl es = some h) : h.writer ∈ h.agents := by
   obtain ⟨_, ha, t, hn, _⟩ := conflictAt_eq_some hc
   obtain ⟨⟨e, he, hq, _, hw⟩, _⟩ := newestOf_some lo w now tl es t h.writer hn
-  rw [ha, mem_agentsOf]
+  rw [ha, (sortAgents_perm _).mem_iff, mem_agentsOf]
   refine ⟨e, he, ?_, ?_⟩
   · cases hx : e.ty.excluded
     · rfl
@@ -651,7 +702,7 @@ theorem writer_mem_agents {lo : Int} {w : Option Nat} {now : Int}
 
 /-! ### The window -/
 
-omit [DecidableEq A] in
+omit [DecidableEq A] [Ord A] in
 /-- Write activity is inside the window iff its type qualifies and its latest
 write is in `[max lo (now - window), now]`. -/
 theorem qualifies_iff (lo : Int) (w : Nat) (now : Int) (e : Edge A) :
@@ -661,21 +712,21 @@ theorem qualifies_iff (lo : Int) (w : Nat) (now : Int) (e : Edge A) :
   simp only [Bool.and_eq_true, decide_eq_true_eq]
   exact ⟨fun ⟨⟨a, b⟩, c⟩ => ⟨a, c, b⟩, fun ⟨a, c, b⟩ => ⟨⟨a, b⟩, c⟩⟩
 
-omit [DecidableEq A] in
+omit [DecidableEq A] [Ord A] in
 /-- Inclusive lower bound: a write exactly `window` ago counts. -/
 theorem window_lower_inclusive (lo : Int) (w : Nat) (now : Int) (e : Edge A)
     (hq : e.ty.qualifying = true) (hlo : lo ≤ now - w) (he : lastWrite e = now - w) :
     qualifies lo (some w) now e = true := by
   rw [qualifies_iff]; refine ⟨hq, ?_, ?_⟩ <;> omega
 
-omit [DecidableEq A] in
+omit [DecidableEq A] [Ord A] in
 /-- Inclusive upper bound: a write exactly at `now` counts. -/
 theorem window_upper_inclusive (lo : Int) (w : Nat) (now : Int) (e : Edge A)
     (hq : e.ty.qualifying = true) (hlo : lo ≤ now) (he : lastWrite e = now) :
     qualifies lo (some w) now e = true := by
   rw [qualifies_iff]; refine ⟨hq, ?_, ?_⟩ <;> omega
 
-omit [DecidableEq A] in
+omit [DecidableEq A] [Ord A] in
 /-- One second older than the window is outside it. -/
 theorem window_below_excluded (lo : Int) (w : Nat) (now : Int) (e : Edge A)
     (he : lastWrite e < now - w) : qualifies lo (some w) now e = false := by
@@ -683,7 +734,7 @@ theorem window_below_excluded (lo : Int) (w : Nat) (now : Int) (e : Edge A)
   · rfl
   · rw [qualifies_iff] at h; omega
 
-omit [DecidableEq A] in
+omit [DecidableEq A] [Ord A] in
 /-- A write after `now` (a mocked clock) is outside the window, for every
 window including the unrepresentable one. -/
 theorem future_excluded (lo : Int) (w : Option Nat) (now : Int) (e : Edge A)
@@ -691,7 +742,7 @@ theorem future_excluded (lo : Int) (w : Option Nat) (now : Int) (e : Edge A)
   simp [qualifies]
   omega
 
-omit [DecidableEq A] in
+omit [DecidableEq A] [Ord A] in
 /-- An unrepresentable window (`Duration::MAX`) covers all of time up to
 `now` (`an_unrepresentable_window_saturates_instead_of_panicking`). -/
 theorem unbounded_window_qualifies_iff (lo now : Int) (e : Edge A) (hlo : lo ≤ lastWrite e) :
@@ -710,7 +761,7 @@ theorem secondsAgo_le_window {lo : Int} {w : Nat} {now : Int} {tl : List (Intera
 
 /-! ### Order independence -/
 
-omit [DecidableEq A] in
+omit [DecidableEq A] [Ord A] in
 theorem newestOf_perm_time {lo : Int} {w : Option Nat} {now : Int} {tl : List (Interaction A)}
     {es es' : List (Edge A)} (hp : es.Perm es') {t t' : Int} {wr wr' : A}
     (h : newestOf lo w now tl es = some (t, wr)) (h' : newestOf lo w now tl es' = some (t', wr')) :
@@ -734,7 +785,8 @@ theorem conflictAt_perm_agents {lo : Int} {w : Option Nat} {now : Int}
     {tl : List (Interaction A)} {es es' : List (Edge A)} (hp : es.Perm es') {h h' : Hit A}
     (hc : conflictAt lo w now tl es = some h) (hc' : conflictAt lo w now tl es' = some h')
     (x : A) : x ∈ h.agents ↔ x ∈ h'.agents := by
-  rw [(conflictAt_eq_some hc).2.1, (conflictAt_eq_some hc').2.1, mem_agentsOf, mem_agentsOf]
+  rw [(conflictAt_eq_some hc).2.1, (conflictAt_eq_some hc').2.1, (sortAgents_perm _).mem_iff,
+    (sortAgents_perm _).mem_iff, mem_agentsOf, mem_agentsOf]
   simp only [hp.mem_iff]
 
 /-- Nor does `seconds_ago`. -/
@@ -764,6 +816,7 @@ theorem writer_perm_of_unique {lo : Int} {w : Option Nat} {now : Int}
 
 /-! ### Excluded edges -/
 
+omit [Ord A] in
 theorem agentsStep_excluded (tl : List (Interaction A)) (as : List A) {e : Edge A}
     (h : e.ty.excluded = true) : agentsStep tl as e = as := by
   simp [agentsStep, h]
@@ -794,7 +847,7 @@ theorem lapse_of_old (lo : Int) (w : Nat) (now : Int) (tl : List (Interaction A)
     rw [window_below_excluded lo w now e (h e he)] at hq
     exact absurd hq (by decide)
 
-omit [DecidableEq A] in
+omit [DecidableEq A] [Ord A] in
 theorem qualifies_later {lo : Int} {w : Nat} {now₁ now₂ : Int} {e : Edge A}
     (h12 : now₁ ≤ now₂) (hw : lastWrite e ≤ now₁) (h : qualifies lo (some w) now₂ e = true) :
     qualifies lo (some w) now₁ e = true := by
@@ -822,7 +875,7 @@ theorem lapse_permanent (lo : Int) (w : Nat) {now₁ now₂ : Int} (tl : List (I
 
 /-- Until it lapses, a re-validated conflict's age is the read-time age: with
 nothing written after `now₁`, at a later clock it is older by exactly the
-elapsed time (XP-3: never the frozen detection-time value). -/
+elapsed time, never the frozen detection-time value. -/
 theorem secondsAgo_advances (lo : Int) (w : Nat) {now₁ now₂ : Int} (tl : List (Interaction A))
     (es : List (Edge A)) (h12 : now₁ ≤ now₂) (hw : ∀ e ∈ es, lastWrite e ≤ now₁) {h₁ h₂ : Hit A}
     (hc₁ : conflictAt lo (some w) now₁ tl es = some h₁)
@@ -900,7 +953,7 @@ example : conflictAt lo₀ recencyWindow 3600 [⟨1, 1, 3540⟩, ⟨2, 2, 3580�
     [derives 1 1 3540, dep 2 1 3575, ⟨3, .contradicts, .concept 2, 3585, 3585, none⟩,
       dep 5 2 3590] = some ⟨[1, 2], 2, 10⟩ := by decide
 
-/-- `same_instant_cross_agent_write_still_conflicts` (NEW-4): both
+/-- `same_instant_cross_agent_write_still_conflicts`: both
 interactions at 3590, the cross-agent `Dependency` stamped with that instant;
 every candidate joins the set and the writer is the smallest interaction id
 (agent-a). -/
@@ -908,7 +961,7 @@ theorem same_instant_both_join :
     conflictAt lo₀ recencyWindow 3600 [⟨1, 1, 3590⟩, ⟨2, 2, 3590⟩]
       [derives 1 1 3590, dep 2 2 3590] = some ⟨[1, 2], 1, 10⟩ := by decide
 
-/-- `resolved_concept_write_is_attributed_to_the_acting_agent` (ALGO-3):
+/-- `resolved_concept_write_is_attributed_to_the_acting_agent`:
 agent-b's interaction acts at 3589 on an edge whose source concept agent-a
 created; the edge is agent-b's. -/
 example : conflictAt lo₀ recencyWindow 3600 [⟨1, 1, 3500⟩, ⟨2, 2, 3589⟩]
@@ -927,7 +980,8 @@ clock: the edge "has not happened yet") still joins the agent set, as the
 module doc says ("They still count for agent attribution"), and makes a
 conflict out of agent-a's lone in-window write. Contrast `written_by` in
 `contradiction.rs` (PR #154 review), which ignores an edge written after
-`now`. -/
+`now`. Low impact: production `created_at` is server-stamped, so an edge
+written after `now` arises only with a mocked clock or a fixture. -/
 theorem future_edge_agent_counts :
     conflictAt lo₀ recencyWindow 3600 [⟨1, 1, 3500⟩, ⟨2, 2, 4000⟩]
       [derives 1 1 3500, dep 2 1 3590, dep 3 2 4000] = some ⟨[1, 2], 1, 10⟩ := by decide
@@ -937,7 +991,18 @@ theorem future_edge_agent_counts :
 then re-sends the same dependency at 3590, which reinforces the one edge.
 The edge is resolved at its latest write, so it is agent-a's alone and
 agent-b drops out of the set: two agents wrote that dependency inside the
-window, and there is no conflict. Without the re-send it fires. -/
+window, and there is no conflict on c1. Without the re-send it fires.
+
+The theorem is about the re-sent edge's target. In a whole-graph `detect`
+the edge's source concept c2 may itself show both its creator (its `Derives`
+edge) and the re-sender (this edge), and fire there: then the conflict moves
+rather than vanishes. It is suppressed graph-wide when the original edge
+writer is not the source concept's creator. For example: agent-a creates
+"session store" and "user schema"; agent-b records an action "session store"
+depends on "user schema"; agent-a then records the same action. The edge is
+agent-a's, both concepts' `Derives` edges are agent-a's, and agent-b vanishes
+from every node. Re-sends are reachable through `record_action` and through
+`lambo_derive`'s `depends_on` (`src/graph/action.rs`, `src/graph/cite.rs`). -/
 theorem resend_drops_original_writer :
     conflictAt lo₀ recencyWindow 3600 [⟨1, 1, 3500⟩, ⟨3, 1, 3590⟩]
         [derives 1 1 3500, ⟨2, .dependency, .concept 2, 3570, 3590, none⟩] = none ∧
@@ -949,22 +1014,31 @@ theorem resend_drops_original_writer :
 edges written at the same instant, with no interaction at that instant, from
 concepts with different origin agents: the named writer is the first edge's
 (in `incident_edges` order, the smaller edge id), not "the smallest
-interaction id at that instant" the docs describe, since there is none. -/
+interaction id at that instant" the docs describe, since there is none.
+
+Fixture-only: on the production write paths every write stamps the edge with
+the acting interaction's `created_at`, and `Causal`/`Dependency` edges are
+concept to concept, so qualifying edges written at one instant all resolve
+through the same timeline entry to the same named writer. The tie needs a
+hand-built or time-rebased edge with no interaction at its instant. -/
 theorem writer_order_dependent :
     conflictAt lo₀ recencyWindow 3600 [] [dep 1 1 3590, dep 2 2 3590] =
         some ⟨[1, 2], 1, 10⟩ ∧
       conflictAt lo₀ recencyWindow 3600 [] [dep 2 2 3590, dep 1 1 3590] =
-        some ⟨[2, 1], 2, 10⟩ := by decide
+        some ⟨[1, 2], 2, 10⟩ := by decide
 
-/-- XP-3, `revalidate_ages_a_conflict_out_when_only_the_clock_advances`: the
-same graph re-validated at a later caller clock renders the read-time age,
-then drops out once the newest write is older than the window. -/
-example : conflictAt lo₀ recencyWindow 3600 (twoAgentTl 3500) (twoAgent 3500 3589) =
+/-- `revalidate_ages_a_conflict_out_when_only_the_clock_advances`, on its
+`two_agent_graph(3560, 3589)`: the same graph re-validated at later caller
+clocks renders the read-time age (11 s, then 21 s), and drops out at 3620,
+when the newest write is 31 s old, one second past the window. -/
+example : conflictAt lo₀ recencyWindow 3600 (twoAgentTl 3560) (twoAgent 3560 3589) =
     some ⟨[1, 2], 2, 11⟩ := by decide
-example : conflictAt lo₀ recencyWindow 3615 (twoAgentTl 3500) (twoAgent 3500 3589) =
-    some ⟨[1, 2], 2, 26⟩ := by decide
-example : conflictAt lo₀ recencyWindow 3900 (twoAgentTl 3500) (twoAgent 3500 3589) = none := by
+example : conflictAt lo₀ recencyWindow 3610 (twoAgentTl 3560) (twoAgent 3560 3589) =
+    some ⟨[1, 2], 2, 21⟩ := by decide
+example : conflictAt lo₀ recencyWindow 3620 (twoAgentTl 3560) (twoAgent 3560 3589) = none := by
   decide
+
+end Sorted
 
 /-! ## Contradiction dating (`contradiction.rs`) -/
 
@@ -1148,7 +1222,7 @@ theorem eligible_le {lo now : Int} {minAge : Option Nat} {ev : Evidence A}
     · simp [hl] at h; omega
 
 omit [DecidableEq A] in
-/-- Review M3: an edge written less than `min_age` ago is not eligible,
+/-- An edge written less than `min_age` ago is not eligible,
 whatever its event time says. -/
 theorem backdated_not_eligible (lo now : Int) (a : Nat) (ev : Evidence A)
     (h : now < ev.edge.createdAt + a) (t : Option Int) :
@@ -1165,7 +1239,7 @@ theorem backdated_not_eligible (lo now : Int) (a : Nat) (ev : Evidence A)
   exact key _ rfl
 
 omit [DecidableEq A] in
-/-- Review M5: with `now - min_age` out of chrono's range, or `min_age` not
+/-- With `now - min_age` out of chrono's range, or `min_age` not
 representable, nothing is eligible. -/
 theorem cutoff_none_no_evidence {lo now : Int} {minAge : Option Nat}
     (h : cutoff lo minAge now = none) (ev : Evidence A) : eligible lo now minAge ev = false := by
@@ -1562,8 +1636,8 @@ example : contradictionAt lo₀ 1000 (some 60) 0 (baseTl ++ [⟨4, 5, 300⟩]) b
 example : contradictionAt lo₀ 1000 (some 60) 0 (baseTl ++ [⟨4, 4, 300⟩])
     (baseEv ++ [cite 12 4 4 300 (some 5000)]) [baseDecl] = none := by decide
 
-/-- `a_contradiction_dated_30_days_ahead_does_not_outrank_earlier_writes`
-(review M1): written at t200, dated 30 days ahead, it is dated t200; a
+/-- `a_contradiction_dated_30_days_ahead_does_not_outrank_earlier_writes`:
+written at t200, dated 30 days ahead, it is dated t200; a
 citation written at t300 dated t500 outweighs it now and in 30 days. -/
 theorem thirty_days_ahead_clamped :
     let ahead : Int := 30 * 86400 + 200
@@ -1573,7 +1647,7 @@ theorem thirty_days_ahead_clamped :
       contradictionAt lo₀ (ahead + 1000) (some 60) 0 tl [cite 12 4 4 300 (some 500)] [d] = none ∧
       contradictionAt lo₀ 1000 (some 60) 0 tl [] [d] = some ⟨3, 3, 200⟩ := by decide
 
-/-- `a_backdated_citation_does_not_skip_the_age_floor` (review M3): written at
+/-- `a_backdated_citation_does_not_skip_the_age_floor`: written at
 t990 and dated t300, the citation is not eligible 10 s later; 60 s after its
 write it counts, dated t300, and outweighs Y (t200). -/
 theorem backdated_citation_waits :
