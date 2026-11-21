@@ -173,15 +173,53 @@ heartbeat also stops beating once it latches, on `Held` or on a re-take, so a
 lease it re-took lapses at its TTL and a fenced handle cannot re-take one
 later; the model does not follow the lease row past the latch.
 
+## The two unguarded store calls (#301)
+
+The loop above takes `erased` as an input and leaves `publish_stats` out, but
+both are store calls: `erased()` reads the lease row (`refused_as_erased` →
+`read_lease`) after a ladder that ended in an error other than a constraint
+violation (`readsLease`), and `publish_stats` calls `write_flush_stats`.
+Before #301 neither ran under `FLUSH_ATTEMPT_TIMEOUT` or `CatchUnwindPoll`.
+`PEv` makes each a `Probe` that returns, panics or never returns, and
+`stepUnguarded` / `runUnguarded` is the #293 loop with them unguarded (`Task`
+adds the "parked for good" state).
+
+* `lease_panic_loses`, `stats_panic_loses`: a panic in either kills the task
+  holding a non-empty `pending` (`abort`): no ledger entry, no count,
+  `degraded()` and the fence false, and the history no longer accounted for.
+  `close_ok_over_panic`: `close` logs the join error, finds an empty log and
+  returns `Ok`.
+* `lease_hang_blocks_stop`, `hung_stays`: a read that never returns parks the
+  task holding the batch; no later event, a stop included, gets it out, so
+  `close`'s join never returns (`closeOkUnguarded` is `none`).
+
+The fix: both calls run under the flush attempt's timeout and catch-unwind. A
+lease read that panics or times out counts as a failed read
+(`Tombstone::Unknown`, not erased, `guardLease`), so the batch takes the
+stale-write or retain arm as before; a stats write that panics or times out is
+ignored as a failed one was. The guarded loop (`PEv.guard`, `runGuarded`) is
+the #293 loop with that `erased` input, so the `Fixed` theorems carry over:
+`good_reachable_guarded`, `no_silent_loss_guarded`,
+`stopped_accounted_guarded`, `close_ok_no_drop_guarded`, and
+`close_ok_accounted_guarded` (a close that returns `Ok` after the loop exited
+leaves every mutation committed, dead-lettered or in the final flush).
+`stop_exits_guarded`: a stop always ends the loop. `stepUnguarded_agrees`,
+`closeOkUnguarded_agrees`, `runGuarded_lift`: where the calls return, the fix
+changes nothing. `cycleFixed_erased_irrelevant`: a cycle that does not read
+the lease does not depend on the `erased` input, so the `false` passed there
+is arbitrary.
+
 ## Left out
 
 Read-access drains and their budget (#30); the `mutation_epoch` and GC-mark
 carry (#17, #29); the graph's unflushed set (`mark_durable_through`,
-`pin_unflushed`, #60); `lag`, `depth` and `publish_stats`; writes that land
+`pin_unflushed`, #60); `lag`, `depth` and what `publish_stats` writes (only
+whether its call returns is modelled, in the #301 section); writes that land
 during a cycle (they land between iterations here); the `select!` priority
-(the event list picks the branch); `refused_as_erased`'s store read (an input,
-`erased`); `Memory::close`'s own final flush, except as the `closeOk`
-outcome below. The model also drops an
+(the event list picks the branch); what `refused_as_erased` reads (an input,
+`erased`; whether the read returns is a probe in the #301 section), and the
+time a guarded call spends before it times out; `Memory::close`'s own final
+flush, except as the `closeOk` outcome below. The model also drops an
 ordering the Rust enforces: `select!` re-arms `sleep(POLL_QUANTUM)` on every
 iteration, so the real loop wakes, and runs the fence check, at least every
 100 ms. Here a run may space its wake-ups arbitrarily, so some event lists
@@ -2353,6 +2391,602 @@ end Close
 
 end Fixed
 
+/-! ## The two unguarded store calls (#301)
+
+The loop above (`stepFixed`, the Rust after #293) takes `erased` as an input
+and leaves `publish_stats` out. Both are store calls: `erased()` reads the
+lease row (`refused_as_erased` → `read_lease`) after a ladder that ended in an
+error other than a constraint violation, and `publish_stats` calls
+`write_flush_stats` after a flush attempt (and, rate-limited, between
+attempts). Before #301 neither runs under `FLUSH_ATTEMPT_TIMEOUT` or
+`CatchUnwindPoll`, the guard every `store.flush` attempt has. Here each call
+is a `Probe`: it returns, panics, or never returns.
+
+* `stepUnguarded` is the loop before #301. A panic unwinds out of the task,
+  which dies holding `pending` (`abort`): `degraded()` stays false, nothing is
+  counted, and `close` only logs the join error. A call that never returns
+  parks the task (`Task.hung`) where no wake-up, the stop included, reaches it.
+* `PEv.guard` / `runGuarded` is the loop after #301: both calls run under the
+  same timeout and catch-unwind. A lease read that panics or times out counts
+  as a read that failed (`Tombstone::Unknown`, not erased), so the batch takes
+  the stale-write or retain arm as before; a stats write that panics or times
+  out is ignored like a failed one. The guarded loop is the #293 loop
+  (`runFixed`) with that `erased` input, so every `Fixed` theorem holds of it. -/
+
+section Unguarded
+
+variable {α : Type}
+
+/-- What a store call outside the flush attempt's guard did: returned with
+its answer, panicked, or never returned. -/
+inductive Probe (β : Type) where
+  | ret (v : β)
+  | panic
+  | hang
+  deriving DecidableEq, Repr
+
+/-- A loop event with the two calls made explicit. `lease` is what
+`read_lease` does if this wake-up's `erased()` reads it (`ret b`: it answered,
+and `b` says the row is the erasure tombstone); `stats` is what
+`write_flush_stats` does if `publish_stats` calls it (`none`: it does not; an
+`Err` is `ret ()`, since the loop ignores it). -/
+inductive PEv (α : Type) where
+  | write (m : α)
+  | fence
+  | wake (w : Wake) (now : Nat) (lease : Probe Bool) (stats : Option (Probe Unit))
+  deriving DecidableEq, Repr
+
+/-- The flush task: the loop's state, and whether it is parked for good inside
+a store call that never returns. -/
+structure Task (α : Type) where
+  st : St α
+  hung : Bool
+  deriving DecidableEq, Repr
+
+/-- `Due` as a test. -/
+def due (P : Params) (tick : Bool) (now : Nat) (s : St α) : Bool :=
+  !(s.pending ++ s.log).isEmpty && !s.degraded && decide ((s.pending ++ s.log).length ≤ P.logMax) &&
+    !held s.retryAfter now && (tick || decide (P.maxBatch ≤ (s.pending ++ s.log).length))
+
+theorem due_iff {P : Params} {tick : Bool} {now : Nat} {s : St α} :
+    due P tick now s = true ↔ Due P tick now s := by
+  constructor
+  · intro h
+    simp only [due, Bool.and_eq_true, Bool.not_eq_eq_eq_not, Bool.not_true, decide_eq_true_eq,
+      Bool.or_eq_true] at h
+    obtain ⟨⟨⟨⟨h1, h2⟩, h3⟩, h4⟩, h5⟩ := h
+    exact ⟨h1, h2, h3, h4, h5⟩
+  · intro h
+    have h5 : (tick || decide (P.maxBatch ≤ (s.pending ++ s.log).length)) = true := by
+      rcases h.tickOrFull with ht | hf
+      · simp [ht]
+      · simp only [Bool.or_eq_true, decide_eq_true_eq]; exact Or.inr hf
+    simp only [due, h.nonempty, h.notDegraded, h.notHeld, h5, decide_eq_true h.withinMax]
+    rfl
+
+/-- The state `drain_and_flush` is in when the ladder has returned, before
+its `match`: the drained batch in `pending`, the ladder's calls made. -/
+def preSettle (P : Params) (st : Store α) (s : St α) : St α :=
+  { s with pending := s.pending ++ s.log, log := [], retryAfter := none,
+           calls := s.calls ++ (flushWithRetry st (s.pending ++ s.log) s.attempts P.retries).calls,
+           attempts := s.attempts +
+             (flushWithRetry st (s.pending ++ s.log) s.attempts P.retries).calls.length }
+
+/-- Does this cycle call `erased()`, and so `read_lease`? Only once a ladder
+has ended in an error other than a constraint violation, with the fence
+unlatched (the arms before it are `Ok`, `Constraint` and
+`Err(_) if self.fenced()`). A `StaleWrite` is read for too: the erased arm
+comes before the stale-write arm. -/
+def readsLease (P : Params) (st : Store α) (tick : Bool) (now : Nat) (s : St α) : Bool :=
+  !s.fenced && due P tick now s &&
+    match (flushWithRetry st (s.pending ++ s.log) s.attempts P.retries).result with
+    | some .constraint => false
+    | some _ => true
+    | none => false
+
+theorem cycleFixed_running {P : Params} {st : Store α} {tick : Bool} {now : Nat} {er : Bool}
+    (s : St α) : (cycleFixed P st tick now er s).running = s.running := by
+  rw [cycleFixed_eq]
+  split
+  · rfl
+  · exact (cycle_shape (P := P) (st := st) (tick := tick) (now := now) (s := s)).2.2.1
+
+/-- Where the read happens, the cycle is the ladder's state settled with the
+read's answer. -/
+theorem readsLease_settle {P : Params} {st : Store α} {tick : Bool} {now : Nat} {s : St α}
+    (h : readsLease P st tick now s = true) (er : Bool) :
+    cycleFixed P st tick now er s =
+      settleFixed now er (s.pending ++ s.log)
+        (flushWithRetry st (s.pending ++ s.log) s.attempts P.retries) (preSettle P st s) := by
+  simp only [readsLease, Bool.and_eq_true, Bool.not_eq_eq_eq_not, Bool.not_true] at h
+  obtain ⟨⟨hf, hd⟩, _⟩ := h
+  rw [cycleFixed_unfenced hf, cycle_due (due_iff.mp hd), settleFixed_eq]
+  rfl
+
+theorem cycle_not_due {P : Params} {st : Store α} {tick : Bool} {now : Nat} {s : St α}
+    (h : ¬ Due P tick now s) (er er' : Bool) :
+    cycle P st tick now er s = cycle P st tick now er' s := by
+  unfold cycle
+  dsimp only
+  by_cases h1 : (s.pending ++ s.log).isEmpty = true
+  · rw [ite_eq_left h1, ite_eq_left h1]
+  · rw [ite_eq_right h1, ite_eq_right h1]
+    by_cases h2 : s.degraded = true
+    · rw [ite_eq_left h2, ite_eq_left h2]
+    · rw [ite_eq_right h2, ite_eq_right h2]
+      by_cases h3 : P.logMax < (s.pending ++ s.log).length
+      · rw [ite_eq_left h3, ite_eq_left h3]
+      · rw [ite_eq_right h3, ite_eq_right h3]
+        by_cases h4 : held s.retryAfter now = true
+        · rw [ite_eq_left h4, ite_eq_left h4]
+        · rw [ite_eq_right h4, ite_eq_right h4]
+          by_cases h5 : (!tick && decide ((s.pending ++ s.log).length < P.maxBatch)) = true
+          · rw [ite_eq_left h5, ite_eq_left h5]
+          · exfalso
+            apply h
+            refine ⟨by simpa using h1, by simpa using h2, by omega, by simpa using h4, ?_⟩
+            cases tick
+            · right
+              simp only [Bool.not_false, Bool.true_and, decide_eq_true_eq] at h5
+              omega
+            · left; rfl
+
+/-- **The model's input is read only where the Rust reads it.** A cycle that
+does not call `erased()` does not depend on its answer, so the `false` the
+unguarded and guarded loops pass there is arbitrary. -/
+theorem cycleFixed_erased_irrelevant {P : Params} {st : Store α} {tick : Bool} {now : Nat}
+    {s : St α} (h : readsLease P st tick now s = false) (er er' : Bool) :
+    cycleFixed P st tick now er s = cycleFixed P st tick now er' s := by
+  by_cases hf : s.fenced = true
+  · rw [cycleFixed_fenced hf, cycleFixed_fenced hf]
+  · have hf' : s.fenced = false := by simpa using hf
+    rw [cycleFixed_unfenced hf', cycleFixed_unfenced hf']
+    by_cases hd : Due P tick now s
+    · have hdue : due P tick now s = true := due_iff.mpr hd
+      simp only [readsLease, hf', hdue, Bool.not_false, Bool.true_and] at h
+      rw [cycle_due hd, cycle_due hd]
+      cases hres : (flushWithRetry st (s.pending ++ s.log) s.attempts P.retries).result with
+      | none => simp [settle, hres]
+      | some e =>
+        rw [hres] at h
+        cases e <;> simp at h <;> simp [settle, hres]
+    · exact cycle_not_due hd _ _
+
+/-- `drain_and_flush` before #301 (the #293 cycle, `cycleFixed`) with
+`read_lease` unguarded. A read that answers is `cycleFixed` with that answer.
+A panic unwinds out of the task, which dies holding the drained batch
+(`abort` of the ladder's state). A read that never returns parks the task
+there for good with the batch (`true`: hung). A cycle that does not read is
+`cycleFixed`, its `erased` input unused (`cycleFixed_erased_irrelevant`). -/
+def cycleUnguarded (P : Params) (st : Store α) (tick : Bool) (now : Nat) (lease : Probe Bool)
+    (s : St α) : St α × Bool :=
+  match lease with
+  | .ret er => (cycleFixed P st tick now er s, false)
+  | .panic =>
+    if readsLease P st tick now s then (abort (preSettle P st s), false)
+    else (cycleFixed P st tick now false s, false)
+  | .hang =>
+    if readsLease P st tick now s then (preSettle P st s, true)
+    else (cycleFixed P st tick now false s, false)
+
+/-- `publish_stats` before #301. It runs only when the cycle left the fence
+unlatched (`cycle`'s `if self.fenced() { return; }`); an error is ignored
+(best-effort), a panic kills the task with whatever is in `pending`, and a
+call that never returns parks it. -/
+def statsUnguarded (stats : Option (Probe Unit)) (s : St α) : St α × Bool :=
+  if s.fenced then (s, false)
+  else match stats with
+    | some .panic => (abort s, false)
+    | some .hang => (s, true)
+    | _ => (s, false)
+
+/-- A tick or poll of the loop before #301: the cycle, then the stats write,
+then the top-of-loop fence check. A task that died or hung goes no further. -/
+def cycleThen (P : Params) (st : Store α) (tick : Bool) (now : Nat) (lease : Probe Bool)
+    (stats : Option (Probe Unit)) (s : St α) : St α × Bool :=
+  let c := cycleUnguarded P st tick now lease s
+  if c.2 || !c.1.running then c
+  else
+    let d := statsUnguarded stats c.1
+    if d.2 || !d.1.running then d else (checkFence d.1, false)
+
+def iterUnguarded (P : Params) (st : Store α) (w : Wake) (now : Nat) (lease : Probe Bool)
+    (stats : Option (Probe Unit)) (s : St α) : St α × Bool :=
+  if !s.running then (s, false)
+  else match w with
+    | .stop => (if s.fenced then dropFenced s else requeue s, false)
+    | .tick => cycleThen P st true now lease stats s
+    | .poll => cycleThen P st false now lease stats s
+
+/-- The loop before #301. A hung task ignores every wake-up, the stop
+included: the `select!` that would serve it is never reached again. Writes
+and the heartbeat's latch still land. -/
+def stepUnguarded (P : Params) (st : Store α) (t : Task α) : PEv α → Task α
+  | .write m => { t with st := { t.st with hist := t.st.hist ++ [m], log := t.st.log ++ [m] } }
+  | .fence => { t with st := { t.st with fenced := true } }
+  | .wake w now lease stats =>
+    if t.hung then t
+    else
+      let r := iterUnguarded P st w now lease stats t.st
+      ⟨r.1, r.2⟩
+
+def runUnguarded (P : Params) (st : Store α) (t : Task α) (evs : List (PEv α)) : Task α :=
+  evs.foldl (stepUnguarded P st) t
+
+theorem runUnguarded_cons {P : Params} {st : Store α} (t : Task α) (e : PEv α) (evs : List (PEv α)) :
+    runUnguarded P st t (e :: evs) = runUnguarded P st (stepUnguarded P st t e) evs := rfl
+
+/-- `erased()` after #301: the read runs under `FLUSH_ATTEMPT_TIMEOUT` and
+`CatchUnwindPoll`, and a panic or a timeout counts as a read that failed
+(`Tombstone::Unknown`): not erased. -/
+def guardLease : Probe Bool → Bool
+  | .ret b => b
+  | .panic => false
+  | .hang => false
+
+/-- An event as the loop after #301 sees it. The stats write is guarded the
+same way, and whatever it does, as an error did before, changes nothing. -/
+def PEv.guard : PEv α → Ev α
+  | .write m => .write m
+  | .fence => .fence
+  | .wake w now lease _ => .wake w now (guardLease lease)
+
+/-- An event of the model without the probes, with both calls answering. -/
+def Ev.lift : Ev α → PEv α
+  | .write m => .write m
+  | .fence => .fence
+  | .wake w now er => .wake w now (.ret er) none
+
+theorem Ev.lift_guard (e : Ev α) : e.lift.guard = e := by
+  cases e <;> rfl
+
+/-- The loop after #301: the #293 loop, with each wake-up's `erased` input
+what the guarded read answers. -/
+def runGuarded (P : Params) (st : Store α) (s : St α) (evs : List (PEv α)) : St α :=
+  runFixed P st s (evs.map PEv.guard)
+
+/-- Every call that is made returns. -/
+def PEv.returns : PEv α → Bool
+  | .wake _ _ (.ret _) none => true
+  | .wake _ _ (.ret _) (some (.ret _)) => true
+  | .wake _ _ _ _ => false
+  | _ => true
+
+/-! ### The loop before #301 -/
+
+section UnguardedLoop
+
+variable {P : Params} {st : Store α}
+
+/-- **Agreement.** Where both calls return, the loop before #301 is the
+guarded loop: the fix changes nothing there. -/
+theorem stepUnguarded_agrees {t : Task α} (ht : t.hung = false) {e : PEv α}
+    (he : e.returns = true) :
+    stepUnguarded P st t e = ⟨stepFixed P st t.st e.guard, false⟩ := by
+  obtain ⟨s, hung⟩ := t
+  simp only at ht
+  subst ht
+  cases e with
+  | write m => rfl
+  | fence => rfl
+  | wake w now lease stats =>
+    have hs : ∀ (x : St α), x.running = true → x.fenced = false →
+        statsUnguarded stats x = (x, false) := by
+      intro x _ hf
+      unfold statsUnguarded
+      cases lease with
+      | ret er =>
+        cases stats with
+        | none => simp [hf]
+        | some p => cases p <;> simp_all [PEv.returns]
+      | panic => simp [PEv.returns] at he
+      | hang => simp [PEv.returns] at he
+    cases lease with
+    | panic => simp [PEv.returns] at he
+    | hang => simp [PEv.returns] at he
+    | ret er =>
+      simp only [stepUnguarded, Bool.false_eq_true, ↓reduceIte, PEv.guard, guardLease, stepFixed,
+        iterUnguarded, iterFixed]
+      by_cases hr : s.running = true
+      · have hr' : (!s.running) = false := by simp [hr]
+        simp only [hr', Bool.false_eq_true, ↓reduceIte]
+        have hcyc : ∀ tick, cycleThen P st tick now (.ret er) stats s =
+            (checkFence (cycleFixed P st tick now er s), false) := by
+          intro tick
+          have hrun := cycleFixed_running (P := P) (st := st) (tick := tick) (now := now)
+            (er := er) s
+          simp only [cycleThen, cycleUnguarded, Bool.false_or]
+          rw [hrun, hr]
+          simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte]
+          by_cases hf : (cycleFixed P st tick now er s).fenced = true
+          · have : statsUnguarded stats (cycleFixed P st tick now er s) =
+                (cycleFixed P st tick now er s, false) := by
+              simp [statsUnguarded, hf]
+            simp [this, hrun, hr]
+          · simp [hs _ (by rw [hrun, hr]) (by simpa using hf), hrun, hr]
+        cases w with
+        | stop => rfl
+        | tick => rw [hcyc true]
+        | poll => rw [hcyc false]
+      · have hr' : (!s.running) = true := by simp at hr; simp [hr]
+        simp only [hr', ↓reduceIte]
+
+theorem runUnguarded_agrees {t : Task α} (ht : t.hung = false) (evs : List (PEv α))
+    (he : ∀ e ∈ evs, e.returns = true) :
+    runUnguarded P st t evs = ⟨runGuarded P st t.st evs, false⟩ := by
+  induction evs generalizing t with
+  | nil => obtain ⟨s, h⟩ := t; simp only at ht; subst ht; rfl
+  | cons e evs ih =>
+    rw [runUnguarded_cons, stepUnguarded_agrees ht (he e (List.mem_cons_self ..))]
+    rw [ih rfl (fun e' h' => he e' (List.mem_cons_of_mem _ h'))]
+    rfl
+
+/-- Losing a non-empty drained batch with the task leaves the history
+unaccounted for (`abort_loses`, from a state past the drain). -/
+theorem abort_drained_loses {s x : St α} (hg : Good s) (hne : (s.pending ++ s.log).isEmpty = false)
+    (hc : x.ledger = s.ledger) (hh : x.hist = s.hist) (hl : x.log = []) :
+    (abort x).consumed ++ (abort x).pending ++ (abort x).log ≠ (abort x).hist := by
+  have e1 : (abort x).consumed = s.consumed := by simp [abort, St.consumed, hc]
+  have e2 : (abort x).pending = [] := rfl
+  have e3 : (abort x).log = [] := hl
+  have e4 : (abort x).hist = s.hist := hh
+  rw [e1, e2, e3, e4, List.append_nil, List.append_nil]
+  intro h
+  have hlen := congrArg List.length hg.conserve
+  rw [h] at hlen
+  simp only [List.length_append] at hlen
+  have hp : (s.pending ++ s.log) ≠ [] := by simpa using hne
+  have := List.length_pos_iff.mpr hp
+  simp only [List.length_append] at this
+  omega
+
+/-- A due tick whose ladder ended in an error other than a constraint
+violation reads the lease. -/
+theorem readsLease_of {s : St α} {now : Nat} (hf : s.fenced = false) (h : Due P true now s)
+    {e : Err} (hres : (flushWithRetry st (s.pending ++ s.log) s.attempts P.retries).result = some e)
+    (hne : e ≠ .constraint) : readsLease P st true now s = true := by
+  unfold readsLease
+  rw [hf, due_iff.mpr h, hres]
+  cases e
+  all_goals first | rfl | exact absurd rfl hne
+
+/-- The retain arm: `pending` kept, the post-retry hold set. -/
+def retain (now : Nat) (r : Run α) (s : St α) : St α :=
+  { s with retryAfter := some (now + r.sleeps.sum + retainedBackoff) }
+
+/-- **Before #301, a lease read that panics loses the batch silently.** A due
+tick whose ladder fails with anything but a constraint violation reads the
+lease; when the read panics, the task dies holding the drained batch. Nothing
+is retained, dead-lettered, counted or flagged: `degraded()` and the fence
+stay false, the ledger is unchanged, and the history is no longer accounted
+for. -/
+theorem lease_panic_loses {s : St α} {now : Nat} (hg : Good s) (hrun : s.running = true)
+    (hf : s.fenced = false) (h : Due P true now s) {e : Err}
+    (hres : (flushWithRetry st (s.pending ++ s.log) s.attempts P.retries).result = some e)
+    (hne : e ≠ .constraint) (stats : Option (Probe Unit)) :
+    stepUnguarded P st ⟨s, false⟩ (.wake .tick now .panic stats) =
+      ⟨abort (preSettle P st s), false⟩ ∧
+    (abort (preSettle P st s)).running = false ∧
+    (abort (preSettle P st s)).degraded = false ∧
+    (abort (preSettle P st s)).fenced = false ∧
+    (abort (preSettle P st s)).ledger = s.ledger ∧
+    (abort (preSettle P st s)).deadLettered = s.deadLettered ∧
+    (abort (preSettle P st s)).consumed ++ (abort (preSettle P st s)).pending ++
+      (abort (preSettle P st s)).log ≠ (abort (preSettle P st s)).hist := by
+  have hreads := readsLease_of (st := st) hf h hres hne
+  have hr' : (!s.running) = false := by simp [hrun]
+  refine ⟨?_, rfl, h.notDegraded, hf, rfl, rfl, abort_drained_loses hg h.nonempty rfl rfl rfl⟩
+  simp [stepUnguarded, iterUnguarded, hr', cycleThen, cycleUnguarded, hreads, abort]
+
+/-- **Before #301, a stats write that panics loses a retained batch
+silently.** The ladder fails, the read answers "not erased", the batch is
+retained (`exhausted_retained`), and then `write_flush_stats` panics: the
+task dies holding it, with the same silence. -/
+theorem stats_panic_loses {s : St α} {now : Nat} (hg : Good s) (hrun : s.running = true)
+    (hf : s.fenced = false) (h : Due P true now s) {e : Err}
+    (hres : (flushWithRetry st (s.pending ++ s.log) s.attempts P.retries).result = some e)
+    (hne : e ≠ .constraint) (hns : e ≠ .staleWrite) :
+    stepUnguarded P st ⟨s, false⟩ (.wake .tick now (.ret false) (some .panic)) =
+      ⟨abort (retain now (flushWithRetry st (s.pending ++ s.log) s.attempts P.retries)
+        (preSettle P st s)), false⟩ ∧
+    (abort (retain now (flushWithRetry st (s.pending ++ s.log) s.attempts P.retries)
+      (preSettle P st s))).running = false ∧
+    (abort (retain now (flushWithRetry st (s.pending ++ s.log) s.attempts P.retries)
+      (preSettle P st s))).degraded = false ∧
+    (abort (retain now (flushWithRetry st (s.pending ++ s.log) s.attempts P.retries)
+      (preSettle P st s))).fenced = false ∧
+    (abort (retain now (flushWithRetry st (s.pending ++ s.log) s.attempts P.retries)
+      (preSettle P st s))).ledger = s.ledger ∧
+    (abort (retain now (flushWithRetry st (s.pending ++ s.log) s.attempts P.retries)
+      (preSettle P st s))).deadLettered = s.deadLettered ∧
+    (abort (retain now (flushWithRetry st (s.pending ++ s.log) s.attempts P.retries)
+      (preSettle P st s))).consumed ++
+      (abort (retain now (flushWithRetry st (s.pending ++ s.log) s.attempts P.retries)
+        (preSettle P st s))).pending ++
+      (abort (retain now (flushWithRetry st (s.pending ++ s.log) s.attempts P.retries)
+        (preSettle P st s))).log ≠
+      (abort (retain now (flushWithRetry st (s.pending ++ s.log) s.attempts P.retries)
+        (preSettle P st s))).hist := by
+  have hreads := readsLease_of (st := st) hf h hres hne
+  have hset := readsLease_settle hreads false
+  have hr' : (!s.running) = false := by simp [hrun]
+  have hret : settleFixed now false (s.pending ++ s.log)
+      (flushWithRetry st (s.pending ++ s.log) s.attempts P.retries) (preSettle P st s) =
+      retain now (flushWithRetry st (s.pending ++ s.log) s.attempts P.retries)
+        (preSettle P st s) := by
+    unfold settleFixed
+    rw [hres]
+    cases e
+    all_goals first | rfl | exact absurd rfl hne | exact absurd rfl hns
+  have hpf : (retain now (flushWithRetry st (s.pending ++ s.log) s.attempts P.retries)
+      (preSettle P st s)).fenced = false := hf
+  have hpr : (retain now (flushWithRetry st (s.pending ++ s.log) s.attempts P.retries)
+      (preSettle P st s)).running = true := hrun
+  refine ⟨?_, rfl, h.notDegraded, hf, rfl, rfl, abort_drained_loses hg h.nonempty rfl rfl rfl⟩
+  simp [stepUnguarded, iterUnguarded, hr', cycleThen, cycleUnguarded, hset, hret, statsUnguarded,
+    hpf, hpr, abort]
+
+/-- A hung task stays hung: no event, the stop included, makes it run, exit or
+call the store again, and what it holds stays in it. -/
+theorem hung_stays {t : Task α} (ht : t.hung = true) (evs : List (PEv α)) :
+    (runUnguarded P st t evs).hung = true ∧
+    (runUnguarded P st t evs).st.running = t.st.running ∧
+    (runUnguarded P st t evs).st.pending = t.st.pending ∧
+    (runUnguarded P st t evs).st.calls = t.st.calls := by
+  induction evs generalizing t with
+  | nil => exact ⟨ht, rfl, rfl, rfl⟩
+  | cons e evs ih =>
+    rw [runUnguarded_cons]
+    have hstep : (stepUnguarded P st t e).hung = true ∧
+        (stepUnguarded P st t e).st.running = t.st.running ∧
+        (stepUnguarded P st t e).st.pending = t.st.pending ∧
+        (stepUnguarded P st t e).st.calls = t.st.calls := by
+      cases e with
+      | write m => exact ⟨ht, rfl, rfl, rfl⟩
+      | fence => exact ⟨ht, rfl, rfl, rfl⟩
+      | wake w now lease stats => simp [stepUnguarded, ht]
+    obtain ⟨i1, i2, i3, i4⟩ := ih hstep.1
+    exact ⟨i1, i2.trans hstep.2.1, i3.trans hstep.2.2.1, i4.trans hstep.2.2.2⟩
+
+/-- **Before #301, a lease read that never returns blocks `stop()`.** In the
+scenario of `lease_panic_loses`, a read that never returns parks the task
+holding the drained batch, and from then on no event, a stop included, gets
+it out: `Memory::close`'s join never returns. -/
+theorem lease_hang_blocks_stop {s : St α} {now : Nat} (hrun : s.running = true)
+    (hf : s.fenced = false) (h : Due P true now s) {e : Err}
+    (hres : (flushWithRetry st (s.pending ++ s.log) s.attempts P.retries).result = some e)
+    (hne : e ≠ .constraint) (stats : Option (Probe Unit)) (evs : List (PEv α)) :
+    stepUnguarded P st ⟨s, false⟩ (.wake .tick now .hang stats) = ⟨preSettle P st s, true⟩ ∧
+    (runUnguarded P st ⟨preSettle P st s, true⟩ evs).hung = true ∧
+    (runUnguarded P st ⟨preSettle P st s, true⟩ evs).st.running = true ∧
+    (runUnguarded P st ⟨preSettle P st s, true⟩ evs).st.pending = s.pending ++ s.log := by
+  have hreads := readsLease_of (st := st) hf h hres hne
+  have hr' : (!s.running) = false := by simp [hrun]
+  obtain ⟨h1, h2, h3, _⟩ := hung_stays (P := P) (st := st) (t := ⟨preSettle P st s, true⟩) rfl evs
+  refine ⟨?_, h1, h2.trans hrun, h3⟩
+  simp [stepUnguarded, iterUnguarded, hr', cycleThen, cycleUnguarded, hreads]
+
+end UnguardedLoop
+
+/-! ### The loop after #301 -/
+
+section GuardedLoop
+
+variable {P : Params} {st : Store α}
+
+/-- The #293 loop is the guarded loop with every call answering. -/
+theorem runGuarded_lift (s : St α) (evs : List (Ev α)) :
+    runGuarded P st s (evs.map Ev.lift) = runFixed P st s evs := by
+  unfold runGuarded
+  rw [List.map_map]
+  have : (PEv.guard ∘ Ev.lift : Ev α → Ev α) = id := funext Ev.lift_guard
+  rw [this, List.map_id]
+
+/-- **`good_reachable` for the guarded loop**: whatever the two calls do,
+conservation, the dead-letter count and "dropped only once degraded or
+fenced" hold of every state it reaches. -/
+theorem good_reachable_guarded (evs : List (PEv α)) : Good (runGuarded P st St.init evs) :=
+  good_reachable_fixed _
+
+/-- **`no_silent_loss` for the guarded loop.** A panicking or hanging lease
+read or stats write loses nothing: every batch that left `pending` was
+committed, dead-lettered and counted, or dropped with `degraded()` or the
+fence set (contrast `lease_panic_loses`, `stats_panic_loses`). -/
+theorem no_silent_loss_guarded (evs : List (PEv α)) :
+    ∀ e ∈ (runGuarded P st St.init evs).ledger, e.1 = .committed ∨
+      (e.1 = .deadLettered ∧ 0 < (runGuarded P st St.init evs).deadLettered) ∨
+      (e.1 = .droppedDegraded ∧ (runGuarded P st St.init evs).degraded = true) ∨
+      (e.1 = .droppedFenced ∧ (runGuarded P st St.init evs).fenced = true) :=
+  no_silent_loss_fixed _
+
+/-- `stopped_accounted` for the guarded loop: once it has exited, every
+mutation is in the ledger or back in the graph log. -/
+theorem stopped_accounted_guarded (evs : List (PEv α))
+    (hr : (runGuarded P st St.init evs).running = false) :
+    (runGuarded P st St.init evs).consumed ++ (runGuarded P st St.init evs).log =
+      (runGuarded P st St.init evs).hist :=
+  stopped_accounted_fixed _ hr
+
+theorem stepFixed_stop_stops (s : St α) (now : Nat) (er : Bool) :
+    (stepFixed P st s (.wake .stop now er)).running = false := by
+  cases hr : s.running <;> cases hf : s.fenced <;>
+    simp [stepFixed, iterFixed, hr, hf, dropFenced, requeue]
+
+/-- **After #301 a stop always ends the loop.** Whatever the lease read and
+the stats write did before it, a stop wake-up leaves the guarded loop exited
+(contrast `lease_hang_blocks_stop`). -/
+theorem stop_exits_guarded (s : St α) (evs : List (PEv α)) (now : Nat) (lease : Probe Bool)
+    (stats : Option (Probe Unit)) :
+    (runGuarded P st s (evs ++ [.wake .stop now lease stats])).running = false := by
+  unfold runGuarded runFixed
+  rw [List.map_append, List.foldl_append]
+  simp only [List.map_cons, List.map_nil, List.foldl_cons, List.foldl_nil, PEv.guard]
+  exact stepFixed_stop_stops (P := P) (st := st) _ _ _
+
+end GuardedLoop
+
+/-! ### `Memory::close` before and after #301 -/
+
+section CloseProbes
+
+variable {P : Params} {st : Store α}
+
+/-- `close` (with its re-check after the join) over the loop before #301:
+`none` when it never returns, because the join waits on a hung task. A task
+that died is joined with an error that `close` only logs, then the final
+drain goes ahead. -/
+def closeOkUnguarded (P : Params) (st : Store α) (recheck : Bool) (t : Task α)
+    (evs : List (PEv α)) (final : Store α) : Option Bool :=
+  if t.st.fenced then some false
+  else
+    let t' := runUnguarded P st t evs
+    if t'.hung then none
+    else if recheck && t'.st.fenced then some false
+    else if t'.st.degraded then some false
+    else if t'.st.log.isEmpty then some true
+    else some (final t'.st.log t'.st.attempts).reported.isNone
+
+/-- `close` over the guarded loop. -/
+def closeOkGuarded (P : Params) (st : Store α) (recheck : Bool) (s : St α)
+    (evs : List (PEv α)) (final : Store α) : Bool :=
+  closeOk P st recheck s (evs.map PEv.guard) final
+
+/-- Where every call returns, the two closes agree. -/
+theorem closeOkUnguarded_agrees {t : Task α} (ht : t.hung = false) (r : Bool)
+    (evs : List (PEv α)) (he : ∀ e ∈ evs, e.returns = true) (final : Store α) :
+    closeOkUnguarded P st r t evs final = some (closeOkGuarded P st r t.st evs final) := by
+  unfold closeOkUnguarded closeOkGuarded closeOk
+  rw [runUnguarded_agrees ht evs he]
+  unfold runGuarded
+  generalize runFixed P st t.st (evs.map PEv.guard) = x
+  cases hfen : t.st.fenced <;> cases r <;> cases hxf : x.fenced <;> cases hxd : x.degraded <;>
+    cases hxl : x.log.isEmpty <;> simp [hxf, hxd, hxl]
+
+/-- **`close_ok_no_drop` for the guarded loop.** A re-checking close over the
+guarded loop returns `Ok` only when every batch that left `pending` was
+committed or dead-lettered. -/
+theorem close_ok_no_drop_guarded {s : St α} (hg : Good s) (evs : List (PEv α)) (final : Store α)
+    (hok : closeOkGuarded P st true s evs final = true) :
+    ∀ e ∈ (runGuarded P st s evs).ledger, e.1 = .committed ∨ e.1 = .deadLettered :=
+  close_ok_no_drop hg _ final hok
+
+/-- **And nothing is missing from the ledger.** When the guarded loop has
+exited and close returns `Ok`, every mutation ever written is in the ledger
+as committed or dead-lettered, or in the log the final flush sent (contrast
+`close_ok_over_panic`, where the unguarded close returns `Ok` over a mutation
+that is in neither). -/
+theorem close_ok_accounted_guarded {s : St α} (hg : Good s) (evs : List (PEv α))
+    (final : Store α) (hok : closeOkGuarded P st true s evs final = true)
+    (hstop : (runGuarded P st s evs).running = false) :
+    (∀ e ∈ (runGuarded P st s evs).ledger, e.1 = .committed ∨ e.1 = .deadLettered) ∧
+    (runGuarded P st s evs).consumed ++ (runGuarded P st s evs).log = (runGuarded P st s evs).hist :=
+  ⟨close_ok_no_drop_guarded hg evs final hok,
+   stopped_accounted (good_runFixed hg _) hstop⟩
+
+end CloseProbes
+
+end Unguarded
+
 /-! ## Examples -/
 
 section Examples
@@ -2682,6 +3316,75 @@ flush saw `[1]` and was refused. -/
 example :
     (run exP exStale (run exP exStale St.init [.write 1])
       [.wake .tick 0 false, .wake .stop 1 false]).log = [1] := by
+  decide
+
+/-! ### The two unguarded store calls (#301) -/
+
+/-- One write, not yet flushed. -/
+def exOne : St Nat := run exP exDown St.init [.write 1]
+
+/-- The store is down; the tick's ladder fails, `erased()` reads the lease and
+the read panics; then `close` stops the loop. -/
+def exLeasePanic : List (PEv Nat) := [.wake .tick 0 .panic none, .wake .stop 1 (.ret false) none]
+
+/-- The same, the read answering "not erased" and the stats write panicking. -/
+def exStatsPanic : List (PEv Nat) :=
+  [.wake .tick 0 (.ret false) (some .panic), .wake .stop 1 (.ret false) none]
+
+/-- The same, the read never returning. -/
+def exLeaseHang : List (PEv Nat) := [.wake .tick 0 .hang none, .wake .stop 1 (.ret false) none]
+
+/-- **The issue's scenario, before #301** (`lease_panic_loses`,
+`stats_panic_loses`): after three refused calls the task dies holding `[1]`.
+`close` logs the join error, finds an empty log and an undegraded session, and
+returns `Ok`, with a final store that would have taken the batch. `1` was never
+committed and is nowhere: not in the ledger, `pending` or the log. -/
+theorem close_ok_over_panic :
+    (runUnguarded exP exDown ⟨exOne, false⟩ exLeasePanic).st.calls.length = 3 ∧
+    (runUnguarded exP exDown ⟨exOne, false⟩ exLeasePanic).st.ledger = [] ∧
+    (runUnguarded exP exDown ⟨exOne, false⟩ exLeasePanic).st.pending = [] ∧
+    (runUnguarded exP exDown ⟨exOne, false⟩ exLeasePanic).st.log = [] ∧
+    (runUnguarded exP exDown ⟨exOne, false⟩ exLeasePanic).st.hist = [1] ∧
+    (runUnguarded exP exDown ⟨exOne, false⟩ exLeasePanic).st.degraded = false ∧
+    closeOkUnguarded exP exDown true ⟨exOne, false⟩ exLeasePanic exFlaky = some true ∧
+    (runUnguarded exP exDown ⟨exOne, false⟩ exStatsPanic).st.ledger = [] ∧
+    (runUnguarded exP exDown ⟨exOne, false⟩ exStatsPanic).st.log = [] ∧
+    (runUnguarded exP exDown ⟨exOne, false⟩ exStatsPanic).st.pending = [] ∧
+    closeOkUnguarded exP exDown true ⟨exOne, false⟩ exStatsPanic exFlaky = some true := by
+  decide
+
+/-- `lease_hang_blocks_stop`: the read never returns, the stop is never served,
+`close` never returns (`none`), and `[1]` stays in the parked task. -/
+example :
+    (runUnguarded exP exDown ⟨exOne, false⟩ exLeaseHang).hung = true ∧
+    (runUnguarded exP exDown ⟨exOne, false⟩ exLeaseHang).st.running = true ∧
+    (runUnguarded exP exDown ⟨exOne, false⟩ exLeaseHang).st.pending = [1] ∧
+    closeOkUnguarded exP exDown true ⟨exOne, false⟩ exLeaseHang exFlaky = none := by
+  decide
+
+/-- **The same scenarios after #301** (`no_silent_loss_guarded`,
+`stop_exits_guarded`, `close_ok_accounted_guarded`): a panicking or hanging
+read counts as "not erased" and a panicking stats write is ignored, so in all
+three the batch is retained, the stop hands `[1]` back to the graph log, and
+`close`'s final flush decides: `Ok` when it commits `[1]`, an error when the
+store still refuses it. -/
+example :
+    (runGuarded exP exDown exOne exLeasePanic).log = [1] ∧
+    (runGuarded exP exDown exOne exLeasePanic).running = false ∧
+    (runGuarded exP exDown exOne exLeasePanic).ledger = [] ∧
+    runGuarded exP exDown exOne exStatsPanic = runGuarded exP exDown exOne exLeasePanic ∧
+    runGuarded exP exDown exOne exLeaseHang = runGuarded exP exDown exOne exLeasePanic ∧
+    closeOkGuarded exP exDown true exOne exLeasePanic exFlaky = true ∧
+    closeOkGuarded exP exDown true exOne exLeasePanic exDown = false ∧
+    closeOkGuarded exP exDown true exOne exLeaseHang exDown = false := by
+  decide
+
+/-- `runGuarded_lift`, `closeOkUnguarded_agrees`: where the calls return, the
+fix changes nothing (here the read answers "not erased"). -/
+example :
+    runUnguarded exP exDown ⟨exOne, false⟩
+        [.wake .tick 0 (.ret false) (some (.ret ())), .wake .stop 1 (.ret false) none] =
+      ⟨runGuarded exP exDown exOne exLeasePanic, false⟩ := by
   decide
 
 end Examples
