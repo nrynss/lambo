@@ -22,8 +22,9 @@ Rust items modelled (paths as at `16e9aafa`):
   (`src/graph/graph/mutation_log.rs`), the adapters' consume (an `UPDATE` by
   receipt) and their load order `ORDER BY issued_ms, lane_seq`
   (`src/store/{sqlite,pg}/session_load.rs`).
-* `StoreError::is_cycle_refusal` and `LamboError::is_lookup_timeout`
-  (`src/types/mod.rs`) as error classes (`Err`).
+* `StoreError::is_cycle_refusal`, `StoreError::is_input_refusal` (#294) and
+  `LamboError::is_lookup_timeout` (`src/types/mod.rs`) as error classes
+  (`Err`).
 
 It imports `Receipts.lean` and reuses its `Answer`, `Entry`, `settle`,
 `settleAll_fixed`, `Lane`, `run` and `submitted`.
@@ -87,7 +88,17 @@ process's sequence starts at 1.
   `a_cycle_refused_at_replay_settles_failed_and_the_replay_goes_on`).
   `sessionWide_stops`: any other non-transient error stops it, the intent and
   the rest left unconsumed. `unavailable_skips`, `unavailable_stops`: the
-  transient arm.
+  transient arm. These describe the replay before #294
+  (`replayStep_inputRefusal_stops`).
+* The fix for #294 (`stepInput`, run through `loopWith`, the loop with its
+  step as a parameter; `loopWith_replayStep` shows the generalisation is the
+  old loop): `fixed_input_goes_on`, `stepInput_refusesInput`: the replay
+  settles every input refusal `failed` and goes on, now including the
+  graph-dependent refusals the Rust marks with `StoreError::input_refusal`
+  (`Err.inputRefusal`); `fixed_sessionWide_stops`, `stepInput_sessionWide`:
+  it still stops on every other non-transient error; `stepInput_agrees`:
+  nothing else changes; `fixed_agrees_with_worker`: replay and the in-session
+  worker now both consume an input refusal `failed`.
 * `outage_failed_but_owed`: an in-session `EmbedUnavailable` answers
   `failed` and leaves the write owed (test
   `a_write_reached_during_an_in_session_embedder_outage_is_not_consumed`).
@@ -99,7 +110,8 @@ embed answer breaks the per-agent order across serves),
 `outage_failed_then_applied` (a doc fix: `ReceiptAnswer::Failed` says the
 write did not happen, and after an outage it later does),
 `store_error_blocks_backlog` (a graph-dependent refusal raised as a plain
-`Invariant` stops the replay on every serve), `bad_id_never_settled`.
+`Invariant` stops the replay on every serve; fixed by #294, see above),
+`bad_id_never_settled`.
 
 Not modelled: concurrency and the cancellation-safety custody of handles
 (`WorkerCustody`, `ReplayCustody`); `stop_replay` running before the quiesce;
@@ -148,10 +160,16 @@ def Job.key (j : Job) : Key := (j.epoch, j.ms, j.rid)
 
 /-- The classes of `LamboError` that `WriteCtx::run` can fail with, as the
 worker and the replay tell them apart. `cycle` is a `StoreError::Invariant`
-for which `is_cycle_refusal` holds; `store` is every other `Store` error (a
-non-cycle `Invariant`, `NotFound` such as a vanished interaction, a backend
-error). `lookupTimeout` is an `EmbedUnavailable` for which
-`is_lookup_timeout` holds; `unavailable` is every other `EmbedUnavailable`. -/
+for which `is_cycle_refusal` holds. `inputRefusal` is a non-cycle `Invariant`
+refusing the write's input against the graph it met (#294): a repeated
+`Observation`, a second `Hierarchical` parent, a `parent_of` pair whose ends
+resolve to one canonical key or one concept. Before #294 the Rust raised it as
+a plain `Invariant` the replay could not tell from `store`, and `replayStep`
+treats it so. `store` is every other `Store` error (an `Invariant` that can
+mean an inconsistent graph or store, `NotFound` such as a vanished
+interaction, a backend error). `lookupTimeout` is an `EmbedUnavailable` for
+which `is_lookup_timeout` holds; `unavailable` is every other
+`EmbedUnavailable`. -/
 inductive Err where
   | embed
   | unavailable
@@ -159,6 +177,7 @@ inductive Err where
   | imageIdTaken
   | reference
   | cycle
+  | inputRefusal
   | store
   | config
   | conflict
@@ -415,6 +434,8 @@ def replayStep (image : Bool) (rr : RR) (s : Streaks) : Step × Streaks :=
     | .imageIdTaken => (.failed, { s with transient := 0 })
     | .reference => (.failed, s)
     | .cycle => (.failed, s)
+    -- Before #294: a plain `Invariant`, so the "anything else" arm below.
+    | .inputRefusal => (.stop .other, s)
     -- #22: an image derive this configuration cannot apply.
     | .config => (.stop (if image then .imageConfig else .other), s)
     -- "Anything else (store/lease/config)".
@@ -1457,6 +1478,149 @@ theorem unavailable_stops (img : Bool) (s : Streaks) (h : sickThreshold ≤ s.tr
   simp only [replayStep]
   rw [ite_eq_left h]
 
+/-- The old replay sends an input refusal to the stop arm (pins the code
+before #294; `store_error_blocks_backlog` is the backlog it blocks). -/
+theorem replayStep_inputRefusal_stops (img : Bool) (s : Streaks) :
+    replayStep img (.run (.err .inputRefusal)) s = (.stop .other, s) := rfl
+
+/-! ## The fix for #294: graph-dependent input refusals settle `failed`
+
+The Rust marks the refusals `Err.inputRefusal` stands for by a message
+prefix (`StoreError::input_refusal`, recognised by
+`StoreError::is_input_refusal`, which a cycle refusal also satisfies), and
+the replay's content arm settles every such refusal `failed`, as the in-session
+worker already does. Every other non-transient error still stops the
+replay. -/
+
+/-- The fixed classification: the errors the replay settles `failed` and goes
+on past. -/
+def Err.refusesInput (e : Err) : Bool := e.inputFact || e == .inputRefusal
+
+/-- The replay's match after #294: an input refusal settles `failed` and
+leaves both streaks alone (decided before any embed, like a cycle refusal);
+every other result is handled as before. -/
+def stepInput (image : Bool) (rr : RR) (s : Streaks) : Step × Streaks :=
+  match rr with
+  | .run (.err .inputRefusal) => (.failed, s)
+  | rr => replayStep image rr s
+
+/-- `loop` with its step as a parameter, so a fixed step can be run through
+the same loop. -/
+def loopWith (step : Bool → RR → Streaks → Step × Streaks) (rout : Job → RR) :
+    Streaks → List Intent → ROut
+  | _, [] => ROut.empty
+  | s, i :: rest =>
+    match step i.job.image (rout i.job) s with
+    | (.applied, s') =>
+      let o := loopWith step rout s' rest
+      { o with
+        answers := (i.job.key, .appliedAfterRestart) :: o.answers
+        log := [.write i.job.key, .consume i.job.key .appliedAfterRestart] :: o.log
+        applied := i.job :: o.applied }
+    | (.failed, s') =>
+      let o := loopWith step rout s' rest
+      { o with
+        answers := (i.job.key, .failed) :: o.answers
+        log := [.consume i.job.key .failed] :: o.log
+        failed := i.job :: o.failed }
+    | (.skip, s') => loopWith step rout s' rest
+    | (.stop b, _) => { ROut.empty with block := some b }
+
+/-- `replay` with its step as a parameter. -/
+def replayWith (step : Bool → RR → Streaks → Step × Streaks) (live : Bool) (rout : Job → RR)
+    (intents : List Intent) : ROut :=
+  match pendingOf intents with
+  | [] => ROut.empty
+  | p => if live then loopWith step rout ⟨0, 0⟩ p else { ROut.empty with block := some .embedder }
+
+/-- The generalisation agrees with the loop as it was. -/
+theorem loopWith_replayStep (rout : Job → RR) : ∀ (l : List Intent) (s : Streaks),
+    loopWith replayStep rout s l = loop rout s l := by
+  intro l
+  induction l with
+  | nil => intro s; rfl
+  | cons i rest ih =>
+    intro s
+    simp only [loopWith, loop]
+    cases replayStep i.job.image (rout i.job) s with
+    | mk st s' => cases st <;> simp [ih]
+
+theorem replayWith_replayStep (live : Bool) (rout : Job → RR) (intents : List Intent) :
+    replayWith replayStep live rout intents = replay live rout intents := by
+  unfold replayWith replay
+  cases pendingOf intents with
+  | nil => rfl
+  | cons p ps => cases live <;> simp [loopWith_replayStep]
+
+/-- **Nothing else changes.** On every result but an input refusal the fixed
+step is the old one. -/
+theorem stepInput_agrees (img : Bool) (rr : RR) (s : Streaks)
+    (h : rr ≠ .run (.err .inputRefusal)) : stepInput img rr s = replayStep img rr s := by
+  unfold stepInput
+  split
+  · exact absurd rfl h
+  · rfl
+
+/-- An input refusal settles `failed` with both streaks unchanged. -/
+theorem stepInput_inputRefusal (img : Bool) (s : Streaks) :
+    stepInput img (.run (.err .inputRefusal)) s = (.failed, s) := rfl
+
+/-- **The fixed replay settles every input refusal `failed`**: `Embed`,
+`ImageIdTaken`, `Reference`, a cycle refusal, and the graph-dependent
+refusals #294 names. -/
+theorem stepInput_refusesInput (img : Bool) (e : Err) (s : Streaks) (h : e.refusesInput = true) :
+    (stepInput img (.run (.err e)) s).1 = .failed := by
+  cases e <;> simp_all [Err.refusesInput, Err.inputFact, stepInput, replayStep]
+
+/-- **And still stops on everything else that is not transient**: a store
+error that can mean an inconsistent graph or store, `Config`, a lost lease,
+anything else. -/
+theorem stepInput_sessionWide (img : Bool) (e : Err) (s : Streaks) (h1 : e.refusesInput = false)
+    (h2 : e.transient = false) : ∃ b, (stepInput img (.run (.err e)) s).1 = .stop b := by
+  cases e <;> simp_all [Err.refusesInput, Err.inputFact, Err.transient, stepInput, replayStep]
+
+/-- **The fixed replay never stops on an input refusal**: the intent is
+consumed `failed` and the loop goes on to the next one. -/
+theorem fixed_input_goes_on (rout : Job → RR) (s : Streaks) (i : Intent) (rest : List Intent)
+    (e : Err) (he : rout i.job = .run (.err e)) (hf : e.refusesInput = true) :
+    ∃ s', loopWith stepInput rout s (i :: rest) =
+      { loopWith stepInput rout s' rest with
+        answers := (i.job.key, .failed) :: (loopWith stepInput rout s' rest).answers
+        log := [.consume i.job.key .failed] :: (loopWith stepInput rout s' rest).log
+        failed := i.job :: (loopWith stepInput rout s' rest).failed } := by
+  have h := stepInput_refusesInput i.job.image e s hf
+  refine ⟨(stepInput i.job.image (rout i.job) s).2, ?_⟩
+  simp only [loopWith, he]
+  cases hs : stepInput i.job.image (.run (.err e)) s with
+  | mk st s' =>
+    rw [hs] at h
+    simp only at h
+    subst h
+    rfl
+
+/-- **The fixed replay still stops on every other non-transient error**, the
+intent and every later one left unconsumed. -/
+theorem fixed_sessionWide_stops (rout : Job → RR) (s : Streaks) (i : Intent) (rest : List Intent)
+    (e : Err) (he : rout i.job = .run (.err e)) (h1 : e.refusesInput = false)
+    (h2 : e.transient = false) :
+    ∃ b, loopWith stepInput rout s (i :: rest) = { ROut.empty with block := some b } := by
+  obtain ⟨b, hb⟩ := stepInput_sessionWide i.job.image e s h1 h2
+  refine ⟨b, ?_⟩
+  simp only [loopWith, he]
+  cases hs : stepInput i.job.image (.run (.err e)) s with
+  | mk st s' =>
+    rw [hs] at hb
+    simp only at hb
+    subst hb
+    rfl
+
+/-- The fixed replay and the in-session worker now agree on an input
+refusal: both consume the intent `failed`. -/
+theorem fixed_agrees_with_worker (img : Bool) (j : Job) (s : Streaks) :
+    (stepInput img (.run (.err .inputRefusal)) s).1 = .failed ∧
+      workerStep false j (.err .inputRefusal) = (.failed, [.consume j.key .failed]) :=
+  ⟨rfl, rfl⟩
+
 /-! ## Crash: a durable write is never replayed -/
 
 theorem mem_admit_flatten {all : List Job} {n : Nat} {m : Mut}
@@ -1824,6 +1988,30 @@ theorem store_error_blocks_backlog :
     let r := replay true rout ints
     r.applied = [] ∧ r.block = some .other ∧ applyLog ints r.log = ints ∧
       workerStep false j1 (.err .store) = (.failed, [.consume j1.key .failed]) := by
+  decide
+
+/-- #294 fixed, on the issue's scenario: a `Canonical` session's second
+derive of one Observation (`j2`) is refused at replay as an input refusal. The
+old replay stops there, `j3` unapplied, on every serve; the fixed one settles
+`j2` `failed`, applies `j3`, and leaves nothing for the next serve. -/
+example :
+    let ints : List Intent := [⟨j1, none⟩, ⟨j2, none⟩, ⟨j3, none⟩]
+    let rout : Job → RR := fun j => if j.rid = 2 then .run (.err .inputRefusal) else .run .ok
+    let old := replay true rout ints
+    let r := replayWith stepInput true rout ints
+    old.applied = [j1] ∧ old.block = some .other ∧
+      replay true rout (applyLog ints old.log) = { ROut.empty with block := some .other } ∧
+      r.applied = [j1, j3] ∧ r.failed = [j2] ∧ r.block = none ∧
+      replayWith stepInput true rout (applyLog ints r.log) = ROut.empty := by
+  decide
+
+/-- The fixed replay still stops on a store error that is not an input
+refusal (the scenario of `store_error_blocks_backlog`). -/
+example :
+    let ints : List Intent := [⟨j1, none⟩, ⟨j2, none⟩]
+    let rout : Job → RR := fun j => if j.rid = 1 then .run (.err .store) else .run .ok
+    replayWith stepInput true rout ints = replay true rout ints ∧
+      (replayWith stepInput true rout ints).block = some .other := by
   decide
 
 /-! ### Finding 5: an intent with an unparseable receipt id is never settled
