@@ -37,6 +37,10 @@ its backends, all in `src/main.rs` at `65fce2a9` (plus #315's fix to
   `AuthToken: FromStr` (`serveWebFlagRefusal`, the previous version), and
   with the fix through `WebAuthTokenParser` and the shared
   `auth_token_refusal` (`parseWebAuthArg`, `serveWebFlagRefusalFixed`).
+* clap's unexpected-argument error for an argv element after either
+  `--auth-token`: before the fix (`flagTakesPrev`, `unexpectedArgRefusal`),
+  and with `allow_hyphen_values` and `redact_auth_token_echo` in `main`
+  (`flagTakes`, `unexpectedArgRefusalFixed`, `argShown`).
 * `fn main` from the parsed command on (`main`): the `canon` route, the
   serve and serve-web pre-reads, the resolve, the
   `unreachable!("writer override requires full backends")`, the final
@@ -196,6 +200,15 @@ Redaction (#273's `AuthTokenArg` constraint):
   (`web_flag_refusal_eq_serve`), never the value
   (`render_noninterference` at `webFlagRefusal`;
   `serve_web_flag_refusal_fixed` on the issue's inputs).
+* #315's review: clap's unexpected-argument error quoted a token starting
+  with `-` (`hyphen_token_leaked`) and the tail of a token split by an
+  unquoted space (`unexpected_arg_leaked`), on `serve` and `serve-web`. Now
+  the element after the flag is always its value (`flagTakes_fixed`), and the
+  error prints the same for every element from the flag on
+  (`render_noninterference` at `unexpectedArg`, `unexpected_arg_constant`,
+  `argShown_from_flag`, `unexpected_arg_fixed`). Whether that error fires
+  depends on the argv's shape, not the token's verdict, so it is outside
+  the noninterference statement: a split token reveals that it was split.
 
 Clap rules (#273's first Track 1 constraint, the rule part):
 * `statsValid_iff`, `recall_rules_test`, `embedValid_iff`,
@@ -283,8 +296,11 @@ groups, `run_canon` + `canon_exit` beside `CanonAction`, and a thin
   split` and `canon` build SQLite stores over explicit files, and held by the
   source check named above.
 * *Redaction* covers `lambo serve` and, since #315's fix, `lambo serve-web
-  --auth-token` (before it, a refused value leaked through clap:
-  `serve_web_flag_refusal_leaks`).
+  --auth-token` and clap's unexpected-argument error after either flag
+  (before it, a refused value leaked through clap:
+  `serve_web_flag_refusal_leaks`, `unexpected_arg_leaked`,
+  `hyphen_token_leaked`). The router must keep parsing through
+  `redact_auth_token_echo`.
 
 No `f64` is involved; the model's arithmetic is `Nat` and exact.
 -/
@@ -2406,13 +2422,53 @@ def serveWebFlagRefusalFixed (r : TokenRaw) : String :=
   | .error w => "invalid value for '--auth-token <TOKEN>': " ++ whyText w ++ " (the value is not shown)"
   | .ok _ => ""
 
+/-- The previous version (before #315's review fix): whether clap took the
+argv element after `--auth-token` as its value. Without
+`allow_hyphen_values` an element starting with `-` (45) was parsed as a flag
+instead and reached clap's unexpected-argument error. -/
+def flagTakesPrev (r : TokenRaw) : Bool := r.bytes.head? != some 45
+
+/-- With `allow_hyphen_values` on both `--auth-token` args, the element
+after the flag is always its value. -/
+def flagTakes (_r : TokenRaw) : Bool := true
+
+/-- The previous version of clap's unexpected-argument error for an argv
+element `a` it could not place, such as the tail of an unquoted token split
+by a space (`--auth-token NOTASECRET-a NOTASECRET-extra`): it quotes `a`.
+Bytes are read as code points (ASCII here). -/
+def unexpectedArgRefusal (a : TokenRaw) : String :=
+  "unexpected argument '" ++ String.ofList (a.bytes.map Char.ofNat) ++ "' found"
+
+/-- The tip `redact_auth_token_echo` puts in place of clap's suggestions. -/
+def unexpectedArgTip : String :=
+  "an argument after --auth-token may be part of the token, so it is not shown; quote a token that contains a space"
+
+/-- The fixed error, for an element `a` at or after `--auth-token` in argv:
+`redact_auth_token_echo` replaces the quoted element by `<redacted>` and
+clap's suggestions by one fixed tip. clap's usage line, which follows, names
+the flags given, never a value, and is not modelled. -/
+def unexpectedArgRefusalFixed (_a : TokenRaw) : String :=
+  "unexpected argument '<redacted>' found\n\n  tip: " ++ unexpectedArgTip
+
+/-- Code-point infix: `q` occurs in `a` (`str::contains`). -/
+def infixOf (q a : List Nat) : Bool :=
+  (List.range (a.length + 1)).any fun i => (a.drop i).take q.length == q
+
+/-- `redact_auth_token_echo`'s narrow rule: an element clap quotes (`q`) is
+shown only when it occurs in an argv element before the first
+`--auth-token` and in none from that flag on (`fromFlag`). -/
+def argShown (before fromFlag : List (List Nat)) (q : List Nat) : Bool :=
+  before.any (infixOf q) && !fromFlag.any (infixOf q)
+
 /-- The paths on which `lambo serve` and `lambo serve-web` print something
 derived from the token alone (a reading of the code, not a proof of
 completeness): `AuthTokenArg`'s `Debug` (`Commands` derives `Debug`), the
 `Commands::Serve` field, the plan's `SecretToken` `Debug`, the
 `http_auth_token_flag` refusal, the `LAMBO_AUTH_TOKEN` refusal of
 `resolve_auth_token`, and (since #315's fix) `serve-web`'s `--auth-token`
-refusal from `WebAuthTokenParser`. Neither `AuthTokenArg` nor `SecretToken`
+refusal from `WebAuthTokenParser` and, on both commands, clap's
+unexpected-argument error for an element after `--auth-token`
+(`unexpectedArg`, its argument being that element, a piece of the token). Neither `AuthTokenArg` nor `SecretToken`
 implements `Display`. Two `serve-web` paths are not listed separately: its
 `AuthToken` `Debug` (`Commands::ServeWeb`'s field) is constant like
 `debugArg`, and its `LAMBO_AUTH_TOKEN` refusal (`serve_web::auth`'s
@@ -2425,6 +2481,7 @@ inductive PrintPath where
   | flagRefusal
   | envRefusal
   | webFlagRefusal
+  | unexpectedArg
   deriving DecidableEq, Repr
 
 def render : PrintPath → TokenRaw → String
@@ -2444,15 +2501,20 @@ def render : PrintPath → TokenRaw → String
     | some w => "LAMBO_AUTH_TOKEN: " ++ whyText w
     | none => ""
   | .webFlagRefusal, r => serveWebFlagRefusalFixed r
+  | .unexpectedArg, a => unexpectedArgRefusalFixed a
 
 /-- Redaction, as noninterference (#273's "AuthTokenArg redaction"
 constraint): on each `PrintPath` the output depends on the token only through
 its verdict class, never on its bytes. This holds by definition of `render`;
 what it adds is the list of paths. (A substring statement would be false: a
 token spelled `redacted` occurs in `AuthTokenArg(<redacted>)`.) Since #315's
-fix the list includes `serve-web`'s flag refusal (`webFlagRefusal`). Not
-covered: `credential_refusal_reveals_equality`, and the previous version of
-`serve-web`'s flag refusal (`serve_web_flag_refusal_leaks`). -/
+fix the list includes `serve-web`'s flag refusal (`webFlagRefusal`) and the
+unexpected-argument error after `--auth-token` (`unexpectedArg`). Not
+covered: `credential_refusal_reveals_equality`; the previous versions
+(`serve_web_flag_refusal_leaks`, `unexpected_arg_leaked`,
+`hyphen_token_leaked`); and *whether* the unexpected-argument path is taken,
+which depends on the argv's shape (an unquoted space in the token, say), not
+on the token's verdict, so a split token reveals that it was split. -/
 theorem render_noninterference (p : PrintPath) {r r' : TokenRaw}
     (h : verdict r = verdict r') : render p r = render p r' := by
   cases p with
@@ -2467,6 +2529,7 @@ theorem render_noninterference (p : PrintPath) {r r' : TokenRaw}
   | webFlagRefusal =>
     simp only [render, serveWebFlagRefusalFixed, parseWebAuthArg, h]
     cases verdict r' <;> rfl
+  | unexpectedArg => rfl
 
 /-- The two `Debug` paths are constant: they print the same for every
 token, valid or not. -/
@@ -2493,7 +2556,7 @@ theorem credential_refusal_reveals_equality :
 
 /-- The previous version (before #315's fix) of `lambo serve-web
 --auth-token`'s clap error: its parser was `AuthToken: FromStr`, so clap's
-`InvalidValue` error quoted the value it refused. Bytes are read as code
+`ValueValidation` error quoted the value it refused. Bytes are read as code
 points (ASCII here). The fixed error is `serveWebFlagRefusalFixed`. -/
 def serveWebFlagRefusal (r : TokenRaw) : String :=
   match verdict r with
@@ -2580,6 +2643,61 @@ theorem serve_web_flag_refusal_fixed :
           " (the value is not shown)" ∧
       serveWebFlagRefusalFixed ⟨[120], true⟩ = "" ∧
       render .webFlagRefusal ⟨[120, 32], true⟩ = render .flagRefusal ⟨[120, 32], true⟩ := by
+  decide
+
+/-! ### The fix for #315's unexpected-argument path
+
+Found in review of the fix above: clap's "unexpected argument '<it>' found"
+quoted a token that starts with `-` (taken for a flag) or the tail of an
+unquoted token split by a space, on `serve` and `serve-web` alike. The fix
+takes a `-`-leading element as the value (`flagTakes`) and has `main` print
+the parse error through `redact_auth_token_echo`
+(`unexpectedArgRefusalFixed`, `argShown`). -/
+
+set_option maxRecDepth 20000 in
+/-- Shown about the Rust before the fix: `--auth-token --x` printed
+"unexpected argument '--x' found" (and `-x...` its first short flag,
+`-x`). -/
+theorem hyphen_token_leaked :
+    flagTakesPrev ⟨[45, 45, 120], true⟩ = false ∧
+      unexpectedArgRefusal ⟨[45, 45, 120], true⟩ = "unexpected argument '--x' found" ∧
+      flagTakesPrev ⟨[45, 120], true⟩ = false := by
+  decide
+
+set_option maxRecDepth 20000 in
+/-- Shown about the Rust before the fix: the tail of a split token was
+printed, so two tails printed differently. -/
+theorem unexpected_arg_leaked :
+    unexpectedArgRefusal ⟨[120], true⟩ = "unexpected argument 'x' found" ∧
+      unexpectedArgRefusal ⟨[120], true⟩ ≠ unexpectedArgRefusal ⟨[121], true⟩ := by
+  decide
+
+/-- Every element after `--auth-token` is its value now, and the fix agrees
+with the previous version wherever that took the element. -/
+theorem flagTakes_fixed (r : TokenRaw) :
+    flagTakes r = true ∧ (flagTakesPrev r = true → flagTakes r = flagTakesPrev r) :=
+  ⟨rfl, fun h => h.symm ▸ rfl⟩
+
+/-- The fixed unexpected-argument error is the same for every element. -/
+theorem unexpected_arg_constant (a a' : TokenRaw) :
+    render .unexpectedArg a = render .unexpectedArg a' := rfl
+
+/-- The narrow rule never shows an element that occurs from the flag on. -/
+theorem argShown_from_flag {before fromFlag : List (List Nat)} {q : List Nat}
+    (h : fromFlag.any (infixOf q) = true) : argShown before fromFlag q = false := by
+  simp [argShown, h]
+
+set_option maxRecDepth 20000 in
+/-- **The review's probes, fixed**: `--auth-token NOTASECRET-a NOTASECRET-extra`
+prints the same line as any other tail; a mistyped `--sesion` before the
+flag is still shown; a tail that also occurs before the flag is not. -/
+theorem unexpected_arg_fixed :
+    unexpectedArgRefusalFixed
+        ⟨[78, 79, 84, 65, 83, 69, 67, 82, 69, 84, 45, 101, 120, 116, 114, 97], true⟩ =
+      unexpectedArgRefusalFixed ⟨[120], true⟩ ∧
+      argShown [[45, 45, 115, 101, 115, 105, 111, 110]] [[116, 111, 107]]
+        [45, 45, 115, 101, 115, 105, 111, 110] = true ∧
+      argShown [[98]] [[97], [98]] [98] = false := by
   decide
 
 /-! ## Per-command argument rules (clap `conflicts_with`, `requires`, groups) -/
