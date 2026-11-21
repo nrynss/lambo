@@ -58,7 +58,12 @@ points it calls:
 * **Construction is a trace**: each resolve returns what it built, in order,
   tagged with the `src/resolve.rs` entry point that built it (`Site`).
   SQLite and Postgres pools are lazy, so "built" means constructed, not
-  connected.
+  connected. Not every construction refusal is modelled: the read-only
+  opens of the session commands (`SqliteStore::connect_read_only` for the
+  classification source and verify's split output, which refuses a missing
+  file, a symlink, a hard link or a non-empty WAL) and of `stats --store`
+  (`connect_existing_read_only`, which refuses a missing file) can fail
+  where the model succeeds.
 * **Widths are `Nat`s.** An embedder reports its configured width (the
   candle adapter refuses a `hidden_size` that disagrees at construction).
   Store construction refusals (uncompiled, unlocated, a bad width) are
@@ -95,8 +100,16 @@ What each command needs, and the single construction site (Level B rule 4,
   `h1_embedding_mismatch_override_is_explicit_and_writer_only`).
 * `resolve_built_allowed`: everything any resolve builds is built by the
   entry point its command's `Resolved` variant names, and is one the command
-  may build; `main_built_allowed`: `main` builds nothing else, so the command
-  bodies construct nothing.
+  may build; `main_built_allowed`: the model's `main` builds nothing else.
+  That holds by construction (the model gives command bodies no
+  construction), so for the Rust it is a modelling assumption, scoped to
+  serving backends: no command body builds a store or embedder from
+  `lambo.toml`. Command bodies do build SQLite stores over explicit files
+  (`session split` over its `.partial` file, `canon` over its private copy),
+  outside the model. Test obligation: no non-test code under `src/cli`
+  calls `build_store*`, `build_embedder`, `resolve_backends`,
+  `resolve_from_config_path` or `resolve_store_only*` (today such calls
+  appear there only in test modules).
 * `resolve_builds_at_most_one`: at most one serving store and one embedder
   per command; `resolveBackends_trace`, `resolveStoreOnly_trace`: a resolve
   stops at its first refusal.
@@ -108,7 +121,9 @@ What each command needs, and the single construction site (Level B rule 4,
   (#248); `full_loaded_reads_none`: `serve` and `serve-web` hand their one
   read of the file to the resolve.
 * `main_canon`, `resolve_canon_would_build_store`: `canon` reads no
-  `lambo.toml` and builds nothing, and only because `main` routes it first.
+  `lambo.toml` and builds no backend from it, and only because `main` routes
+  it first (its body builds SQLite stores over its copied file, outside the
+  model).
 
 Hard errors, never a fallback (Level B rule 1):
 * `full_ok`, `storeOnly_ok`, `resolveEmbed_ok`: a successful resolve hands
@@ -127,8 +142,13 @@ Width (store-authoritative, invariant 2):
   `memory_any_dim`: the test `vector_compat_none_store_accepts_any_positive_dim`;
   `pin_mismatch_refused`: the pin check is kind-agnostic, as its comment says.
 * `echo_never_width_mismatch`: for SQLite and Postgres
-  `check_vector_compatibility` is an echo and never refuses (as its doc
-  comment says); the pin is the only width check that bites there.
+  `check_vector_compatibility` is an echo at resolve time and never refuses;
+  the pin is the only width check that bites there. Its doc comment says so
+  for SQLite only. For Postgres, the docs (`src/store/pg/mod.rs`
+  `vector_dimensions`, the `src/store/pg/postgres.rs` module doc) say the
+  width "is the schema's, not an unchecked echo", which holds only after
+  init or attach has probed the live `vector(n)`; at resolve it is the pin,
+  else the embedder width (doc mismatch filed).
 * `search_contract_holds`: `check_vector_search_contract` never fires on the
   modelled adapters.
 
@@ -151,11 +171,19 @@ Serve preflight:
   backend build.
 
 Redaction (#273's `AuthTokenArg` constraint):
-* `parseAuthArg_total`: clap's value-quoting error cannot occur.
-* `render_noninterference`: on every printing path the output depends on the
-  token only through its verdict class; `debug_constant`: the `Debug` paths
-  print the same for every token. `secretNew_ok`, `secretNew_examples`: the
-  token rule.
+* `parseAuthArg_total`: clap's value-quoting error cannot occur for
+  `lambo serve --auth-token`.
+* `render_noninterference`: on each of `lambo serve`'s token-only printing
+  paths (`PrintPath`) the output depends on the token only through its
+  verdict class; `debug_constant`: the `Debug` paths print the same for every
+  token. This holds by definition of `render`, so its strength is only the
+  completeness of `PrintPath`, which is a reading of the code. Two paths sit
+  outside it: `check_serve_credentials`'s legacy-token refusal, whose output
+  depends on whether the token equals a configured credential's
+  (`credential_refusal_reveals_equality`, the bytes are not printed), and
+  `lambo serve-web --auth-token`, whose parser is `AuthToken: FromStr`, so
+  clap's own error quotes the refused value (`serve_web_flag_refusal_leaks`).
+  `secretNew_ok`, `secretNew_examples`: the token rule.
 
 Clap rules (#273's first Track 1 constraint, the rule part):
 * `statsValid_iff`, `recall_rules_test`, `embedValid_iff`,
@@ -198,12 +226,18 @@ groups, `run_canon` + `canon_exit` beside `CanonAction`, and a thin
   redaction theorems (`parseAuthArg_total`, `render_noninterference`,
   `debug_constant`) and the pinned `bind_refused_after_build` and
   `heartbeat_without_ledger_after_build`.
-* **Per-command arg groups**: `rules` is the contract; `statsValid_iff`,
+* **Per-command arg groups**: `rules` is the contract for the rule
+  attributes only (`conflicts_with`, `requires`, `required_unless_present`,
+  the required `ArgGroup`); plain required args, defaults and
+  `default_value_t` are not in it, so golden `--help` snapshots (`-h` and
+  `--help`, every subcommand path) and parse tests carry the rest.
+  `statsValid_iff`,
   `recall_rules_test`, `embedValid_iff`, `canon_rules_test`,
   `serve_has_no_clap_rules`, `mismatchFlag_writer`,
   `readers_no_mismatch_flag`.
 * **Thin router** (`main`): `main_never_mismatch_or_panic`,
-  `main_built_allowed`, `main_canon` with `resolve_canon_would_build_store`
+  `main_built_allowed` (an assumption about serving backends, see above),
+  `main_canon` with `resolve_canon_would_build_store`
   (the router must keep `canon` ahead of the resolve), `unknown_key_exit1`,
   `session_errors_labelled_store`.
 * **`run_canon` / `canon_exit`**: not modelled; their exit codes (0, 1 on a
@@ -229,8 +263,14 @@ groups, `run_canon` + `canon_exit` beside `CanonAction`, and a thin
   `serve_multi_session.rs`, `serve_stdio_cwd_map.rs`, `cli_embed.rs`).
 * *`AuthTokenArg` redaction*: `parseAuthArg_total`, `render_noninterference`,
   `debug_constant`.
-* *Single construction site*: `resolve_built_allowed`, `main_built_allowed`,
-  `resolve_builds_at_most_one`.
+* *Single construction site*: `resolve_built_allowed` and
+  `resolve_builds_at_most_one` for the resolve. That command modules build
+  no backend is not proved (`main_built_allowed` holds by construction); it
+  should be scoped to serving backends from `lambo.toml`, since `session
+  split` and `canon` build SQLite stores over explicit files, and held by the
+  source check named above.
+* *Redaction* covers `lambo serve` only: `serve-web --auth-token` leaks a
+  refused value through clap today (`serve_web_flag_refusal_leaks`).
 
 No `f64` is involved; the model's arithmetic is `Nat` and exact.
 -/
@@ -1899,8 +1939,14 @@ theorem main_never_mismatch_or_panic (f : Features) (addr : Nat → Bool) (file 
         · split <;> simp
         · simp
 
-/-- Nothing is built outside `resolve_for_command`: whatever `main` built is
-what the resolve built, so the command bodies construct nothing. -/
+/-- Whatever the model's `main` builds is what the resolve built. This holds
+by construction: the model gives command bodies no construction. For the
+Rust it is a modelling assumption scoped to serving backends (no command body
+builds a store or embedder from `lambo.toml`); `session split` and `canon`
+bodies do build SQLite stores over explicit files, outside the model. Test
+obligation: no non-test code under `src/cli` calls `build_store*`,
+`build_embedder`, `resolve_backends`, `resolve_from_config_path` or
+`resolve_store_only*`. -/
 theorem main_built_allowed (f : Features) (addr : Nat → Bool) (file : Nat → Raw) (m : MainIn)
     {x : Site × Built} (hx : x ∈ (main f addr file m).1) : allowed m.cmd x = true := by
   unfold main at hx
@@ -1915,7 +1961,8 @@ theorem main_built_allowed (f : Features) (addr : Nat → Bool) (file : Nat → 
       split at hx <;> (try split at hx) <;> (try split at hx) <;> (try split at hx) <;>
         (try split at hx) <;> exact this hx
 
-/-- `lambo canon` reads no `lambo.toml` and builds nothing (#36). -/
+/-- `lambo canon` reads no `lambo.toml` and builds no backend from it (#36);
+its body's SQLite stores over the copied file are outside the model. -/
 theorem main_canon (f : Features) (addr : Nat → Bool) (file : Nat → Raw) (m : MainIn)
     (h : m.cmd = .canon) : main f addr file m = ([], .canon) := by
   simp [main, h]
@@ -2324,8 +2371,8 @@ def verdict (r : TokenRaw) : Option Why :=
   | .ok _ => none
   | .error w => some w
 
-/-- Every path on which `lambo serve` can print something derived from the
-token: `AuthTokenArg`'s `Debug` (`Commands` derives `Debug`), the
+/-- The paths on which `lambo serve` prints something derived from the token
+alone (a reading of the code, not a proof of completeness): `AuthTokenArg`'s `Debug` (`Commands` derives `Debug`), the
 `Commands::Serve` field, the plan's `SecretToken` `Debug`, the
 `http_auth_token_flag` refusal, and the `LAMBO_AUTH_TOKEN` refusal of
 `resolve_auth_token`. Neither type implements `Display`. -/
@@ -2355,9 +2402,11 @@ def render : PrintPath → TokenRaw → String
     | none => ""
 
 /-- Redaction, as noninterference (#273's "AuthTokenArg redaction"
-constraint): on every printing path the output depends on the token only
-through its verdict class, never on its bytes. (A substring statement would
-be false: a token spelled `redacted` occurs in `AuthTokenArg(<redacted>)`.) -/
+constraint): on each `PrintPath` the output depends on the token only through
+its verdict class, never on its bytes. This holds by definition of `render`;
+what it adds is the list of paths. (A substring statement would be false: a
+token spelled `redacted` occurs in `AuthTokenArg(<redacted>)`.) Not covered:
+`credential_refusal_reveals_equality`, `serve_web_flag_refusal_leaks`. -/
 theorem render_noninterference (p : PrintPath) {r r' : TokenRaw}
     (h : verdict r = verdict r') : render p r = render p r' := by
   cases p with
@@ -2375,6 +2424,43 @@ token, valid or not. -/
 theorem debug_constant (r r' : TokenRaw) :
     render .debugArg r = render .debugArg r' ∧
       render .debugServeField r = render .debugServeField r' := ⟨rfl, rfl⟩
+
+/-- `check_credential_set`'s legacy-token refusal (`lambo serve` over HTTP),
+for a credential set that passes its other checks: it names the first
+credential whose token equals the legacy one, never a value. -/
+def credRefusal (legacy : List Nat) (cs : List (Nat × List Nat)) : String :=
+  match cs.find? (fun c => c.2 == legacy) with
+  | some c => "credential " ++ toString c.1 ++
+      " resolves to the same token as --auth-token / LAMBO_AUTH_TOKEN (the legacy \"default\" credential); give each its own, or drop the legacy token (the value is not shown here)"
+  | none => ""
+
+/-- Outside `render_noninterference`: the credential refusal's output
+depends on whether the legacy token equals a configured credential's token
+(one bit, and the credential's name), though both tokens below are valid and
+the bytes are never printed. -/
+theorem credential_refusal_reveals_equality :
+    verdict ⟨[97], true⟩ = verdict ⟨[98], true⟩ ∧
+      credRefusal [97] [(2, [97])] ≠ credRefusal [98] [(2, [97])] := by decide
+
+/-- `lambo serve-web --auth-token`'s clap error: its parser is
+`AuthToken: FromStr`, so clap's `InvalidValue` error quotes the value it
+refused. Bytes are read as code points (ASCII here). -/
+def serveWebFlagRefusal (r : TokenRaw) : String :=
+  match verdict r with
+  | some w => "invalid value '" ++ String.ofList (r.bytes.map Char.ofNat) ++
+      "' for '--auth-token <TOKEN>': " ++ whyText w
+  | none => ""
+
+set_option maxRecDepth 20000 in
+/-- Shown about the Rust: `lambo serve-web --auth-token 'x '` prints the
+refused token in clap's error, so redaction does not hold there; two tokens
+refused for the same reason print differently. -/
+theorem serve_web_flag_refusal_leaks :
+    serveWebFlagRefusal ⟨[120, 32], true⟩ =
+        "invalid value 'x ' for '--auth-token <TOKEN>': " ++ whyText .surroundingSpace ∧
+      verdict ⟨[120, 32], true⟩ = verdict ⟨[121, 32], true⟩ ∧
+      serveWebFlagRefusal ⟨[120, 32], true⟩ ≠ serveWebFlagRefusal ⟨[121, 32], true⟩ := by
+  decide
 
 /-! ## Per-command argument rules (clap `conflicts_with`, `requires`, groups) -/
 
