@@ -20,7 +20,7 @@ Model of
 * how `Evaluator::gather` and `apply` (`src/canon/eval.rs`) consult the policy,
   as `Canon.Flags`, so `Canon.cycle` applies unchanged.
 
-The design is `dev-diary/lambo-for-mooshik/C-solopolicy.md` (C2: spec §3.2's
+The design is `dev-diary/lambo-for-mooshik/C-solopolicy.md` (spec §3.2's
 formula, with the valid-action term replaced by dependent interactions in #36
 PR 3) and `D-event-clock.md` (event time).
 
@@ -29,11 +29,27 @@ PR 3) and `D-event-clock.md` (event time).
 Instants are integers (seconds in the examples; any unit works) and `gap` a
 natural number. Scores use exact arithmetic: every eviction resistance is a
 whole number of tenths, so `score10 = 10 × solo_score` exactly, and the bars
-are 30, 60 and 100. The Rust computes in `f64`; for every integer raw score
-in `[-10^5, 10^6)` and every concept type the `f64` band equals the exact
-band (checked numerically outside Lean, not proved here). The `f64` score
-order of `candidates` agrees with the exact order except where two distinct
-exact scores round to one `f64`, which takes scores far beyond any count.
+are 30, 60 and 100. The Rust computes in `f64`.
+
+* **Bands: `f64` agrees with the model.** The weights are whole numbers and
+  the terms integer counts, so the raw sum is exact in `f64` (below `2^53`).
+  The exact resistant score is a multiple of 0.1, and the `f64` product is
+  within a tiny relative error of it, so the `f64` band can differ from the
+  exact band only when the exact score sits exactly on a bar. The integer
+  raw scores that land on a bar under a non-unit resistance are `5 × 1.2`,
+  `2 × 1.5` and `4 × 1.5` (1.1 and 0.7 never land on 3, 6 or 10; 1.0 is
+  exact), and these compute to exactly `6.0`, `3.0` and `6.0` in `f64`. (An
+  argument, not a Lean proof: `f64` is not modelled.)
+* **Order: `f64` does not agree with the model on exact ties.** Two concepts
+  of different types with *equal* exact scores can get different `f64`
+  scores: Logic raw 7 gives `7.700000000000001` and Observation raw 11 gives
+  `7.699999999999999` (both exactly 7.7); Entity raw 11 gives `13.2` and Logic
+  raw 12 gives `13.200000000000001`. `SoloScorer::candidates` sorts by
+  `sb.total_cmp(sa)` first, so Rust puts the Logic concept first whatever the
+  keys, while the model sees a tie and orders by key
+  (`exact_tie_orders_by_key`). `soloCandidates_sorted` is the order in exact
+  arithmetic. Membership (`mem_soloCandidates`) is unaffected; only which
+  members fit under the evaluator's `batch_size` can differ.
 
 Graphs are lists: interactions (id, flush time, optional event time),
 concepts (id, origin interaction) and edges (source, target, type). Lookups
@@ -87,7 +103,8 @@ Support and event time:
   one on flush time; `bulk_ingest_band`: Candidate (4.8) against None (1.2).
   `causal_touches_are_not_recurrence`, `recurring_burst_once`: the other two
   corpora.
-* `hierarchical_child_is_dependent_not_recurrence`: see "Findings".
+* `hierarchical_child_is_dependent_not_recurrence`,
+  `reused_action_dependency_is_dated_by_its_origin`: see "Findings".
 
 The score and bands:
 
@@ -105,9 +122,11 @@ The score and bands:
 
 Admission:
 
-* `soloStage1_eq_admitsHop`, `mem_soloCandidates`, `soloCandidates_sorted`:
-  Stage 1 under Solo is exactly "resistant score ≥ 3.0", in score, key, id
-  order. `admitsHop_down`, `admitsHop_mono`.
+* `soloStage1_eq_admitsHop`, `mem_soloCandidates`: Stage 1 under Solo is
+  exactly "resistant score ≥ 3.0". `soloCandidates_sorted`: in exact
+  arithmetic, the admitted concepts come out in score, key, id order
+  (`exact_tie_orders_by_key` shows where `f64` differs). `admitsHop_down`,
+  `admitsHop_mono`.
 * `policy_cycle_one_hop`, `policy_cycle_rank_le`: under either policy a cycle
   moves a concept along at most one eval-loop edge (`Canon.cycle_one_hop`), so
   `admits_hop` never lets a concept skip a rung; `solo_cycle_capped`: a Solo
@@ -120,15 +139,59 @@ Admission:
 
 ## Findings
 
-* `supporting_interaction_times` credits only `Dependency` edges into the
-  concept, while `EdgeType::dependent_end` ("the definition every
-  implementation follows") also makes a `Hierarchical` child a dependent. A
-  child declared through `parent_of` in a later turn therefore adds a
-  dependent interaction to the score (+2.0) but no recurrence session
-  (`hierarchical_child_is_dependent_not_recurrence`).
-* The tests' `spread_support_graph_with` documents about-times on days
-  0/2/4/6; the code computes `day(n - 1) + 48h`, days 0/3/4/5. Both are four
-  sessions (`spread_days_doc_and_code`), so the tests are unaffected.
+1. **Hierarchical children: an undocumented asymmetry (open design
+   question).** `supporting_interaction_times` credits `Dependency` edges into
+   the concept and ignores `Hierarchical` ones; its comment says so
+   ("`Dependency` into it"), and `EdgeType::dependent_end`'s list of
+   implementations does not name the recurrence term, so this is not a plain
+   doc/code mismatch. But every other dependence reader goes through
+   `Edge::dependence`, which makes a `Hierarchical` child (the `parent_of`
+   target) a dependent: the score's dependents term
+   (`dependent_interactions`) and Stage 2's span (`interaction_span` in
+   `src/store/evidence.rs`, via `Edge::dependence`) both credit the child's
+   origin interaction. So Solo's time-spread term and Stage 2's disagree on
+   `parent_of` children: a child declared in a later turn adds a dependent
+   interaction (+2.0) and Stage 2 support, but no recurrence session
+   (`hierarchical_child_is_dependent_not_recurrence`). Whether children
+   should count as recurrence is not stated anywhere.
+2. **A `Dependency` edge is dated by its source's origin, not by the turn
+   that wrote it.** Both terms credit a `Dependency` edge to the source
+   concept's `origin_interaction`: recurrence in
+   `supporting_interaction_times` (`src/canon/policy.rs`, the `Dependency`
+   arm) and dependents in `dependent_origin` (`src/canon/stage1.rs`).
+   `record_action` reuses an existing action node on a repeat (test
+   `record_action_repeat_is_reinforcement_not_duplication`,
+   `src/graph/action.rs`). So: day 0, turn 1, action "deploy api" depends on
+   X; day 5, the same action depends on Y. The new action → Y edge is
+   credited to turn 1 and day 0. Y gains no recurrence session, and if Y also
+   originated in turn 1, `dependent_origin` drops the edge as own-origin, so
+   Y gains no dependent either
+   (`reused_action_dependency_is_dated_by_its_origin`; a fresh action node
+   from the day-5 turn gives both). This contradicts `event_time.rs`'s "An
+   edge is about what the turn that wrote it is about": `Edge::about_time`
+   already holds the writing turn's time, and neither term reads it. Caveat:
+   a repeated *identical* citation reinforces the existing edge without
+   re-dating it, so reading the edge's time would not help that case.
+3. **Test comments disagree with the test code** (the tests still pass):
+   * `spread_support_graph` documents about-times on days 0/2/4/6; the code
+     (`day(n - 1) + 48h`) gives days 0/3/4/5 (`spread_days_doc_and_code`).
+     The same "days 0/2/4/6" or "days 2/4/6" wording recurs in
+     `causal_touches_are_not_recurrence`,
+     `a_bulk_ingest_recurs_only_under_event_time` (doc and assertion
+     message) and `solo_admits_the_recurring_fact_and_refuses_the_burst_and_the_one_off`.
+   * `a_bulk_ingest_recurs_only_under_event_time` says the about-times "sit
+     ≥48h apart"; days 3, 4 and 5 are exactly 24 h apart, on the inclusive
+     boundary, so the corpus depends on the `<` in `t - a < gap`: a `<=`
+     mutant counts 3, not 4 (`spread_days_on_the_boundary`).
+   * `eviction_resistance_multiplies_before_the_band_comparison` describes
+     three sessions (raw 3.0, Entity 3.6, Observation 2.1, additive mutant
+     3.15) but asserts on four (4.0, 4.8, 2.8).
+4. **Outside the model** (documented in the code, and fail-closed): an
+   all-whitespace `LAMBO_PROMOTION_POLICY` is treated as unset
+   (`src/config.rs`, the env overlay), while `promotion_policy = "  "` in
+   `lambo.toml` is a hard error. That is a difference between the two
+   surfaces that `from_str`'s "One parser serves both surfaces" does not
+   mention.
 -/
 
 namespace Lambo.Policy
@@ -839,7 +902,7 @@ theorem a_bulk_ingest_recurs_only_under_event_time :
 
 /-- The test's comment says the about-times are days 0/2/4/6; the code
 computes days 0/3/4/5. Both are four sessions, so the test holds on either
-reading. -/
+reading (finding 3). -/
 theorem spread_days_doc_and_code :
     sessionCount sessionSeparation [day 0, day 2, day 4, day 6] = 4 ∧
       supportingTimes (spreadGraph true) 10 = [day 0, day 3, day 4, day 5] := by
@@ -855,6 +918,22 @@ def causalGraph (dependency : Bool) : Graph where
     ⟨42, 40, .causal⟩, ⟨43, 40, .causal⟩, ⟨44, 40, .causal⟩] ++
     (if dependency then [⟨42, 40, .dependency⟩, ⟨43, 40, .dependency⟩, ⟨44, 40, .dependency⟩]
      else [])
+
+/-- The `<=` mutant of the loop (`Some(a) if t - a <= gap => {}`). -/
+def greedyLeMutant (gap : Nat) : Option Int → List Int → Nat
+  | _, [] => 0
+  | none, t :: rest => greedyLeMutant gap (some t) rest + 1
+  | some a, t :: rest =>
+    if t - a ≤ (gap : Int) then greedyLeMutant gap (some a) rest
+    else greedyLeMutant gap (some t) rest + 1
+
+/-- Days 3, 4 and 5 are exactly one separation apart, so the bulk-ingest
+corpus sits on the inclusive boundary: the `<=` mutant counts 3, not 4
+(finding 3). -/
+theorem spread_days_on_the_boundary :
+    day 4 - day 3 = sessionSeparation ∧ day 5 - day 4 = sessionSeparation ∧
+      greedyLeMutant sessionSeparation none (supportingTimes (spreadGraph true) 10) = 3 := by
+  decide
 
 theorem causal_touches_are_not_recurrence :
     recurrenceSessions (causalGraph false) 40 = 1 ∧ recurrenceSessions (causalGraph true) 40 = 4 := by
@@ -927,6 +1006,27 @@ def childGraph (hierarchical : Bool) : Graph where
 theorem hierarchical_child_is_dependent_not_recurrence :
     dependentOrigins (childGraph true) 10 = [5] ∧ recurrenceSessions (childGraph true) 10 = 4 ∧
       dependentOrigins (childGraph false) 10 = [5] ∧ recurrenceSessions (childGraph false) 10 = 5 := by
+  decide
+
+/-- Finding 2. Turn 1 (day 0) derives `X` (60), `Y` (61) and the action
+"deploy api" (62), which depends on `X`. On day 5 a turn repeats the action,
+`record_action` reuses node 62, and it now also depends on `Y`. With
+`reused = true` the new edge `62 → 61` is credited to turn 1: `Y` gets one
+session and no dependent. With `reused = false` the day-5 turn creates a
+fresh action node (63), and `Y` gets two sessions and one dependent. -/
+def reusedActionGraph (reused : Bool) : Graph where
+  interactions := [⟨1, base, some (day 0)⟩, ⟨5, base + 60, some (day 5)⟩]
+  concepts := [⟨60, 1⟩, ⟨61, 1⟩, ⟨62, 1⟩] ++ (if reused then [] else [⟨63, 5⟩])
+  edges := [⟨1, 60, .derives⟩, ⟨1, 61, .derives⟩, ⟨1, 62, .derives⟩, ⟨62, 60, .dependency⟩] ++
+    (if reused then [⟨62, 61, .dependency⟩] else [⟨5, 63, .derives⟩, ⟨63, 61, .dependency⟩])
+
+theorem reused_action_dependency_is_dated_by_its_origin :
+    supportingTimes (reusedActionGraph true) 61 = [day 0] ∧
+      recurrenceSessions (reusedActionGraph true) 61 = 1 ∧
+      dependentOrigins (reusedActionGraph true) 61 = [] ∧
+      supportingTimes (reusedActionGraph false) 61 = [day 0, day 5] ∧
+      recurrenceSessions (reusedActionGraph false) 61 = 2 ∧
+      dependentOrigins (reusedActionGraph false) 61 = [5] := by
   decide
 
 /-! ## The solo score
@@ -1387,7 +1487,9 @@ theorem mem_soloCandidates (cs : List Cand) (c : Cand) :
     simp only [soloStage1, bne_iff_ne, ne_eq]
     intro h; have := this.mp h; omega
 
-/-- The admitted concepts come out in the policy's order. -/
+/-- In exact arithmetic, the admitted concepts come out in the policy's
+order (score, key, id). The Rust sorts on `f64` scores, which can break an
+exact tie by type (see `exact_tie_orders_by_key`). -/
 theorem soloCandidates_sorted (cs : List Cand) :
     (soloCandidates cs).Pairwise (fun a b => candLe a b = true) :=
   List.pairwise_mergeSort candLe_trans candLe_total _
@@ -1489,5 +1591,20 @@ theorem parse_padded (ws cs ws' : List Char) (h : ∀ c, c ∈ ws → isWs c = t
     (h' : ∀ c, c ∈ ws' → isWs c = true) : parse (ws ++ cs ++ ws') = parse cs := by
   unfold parse
   rw [List.append_assoc, trim_ws_prefix ws _ h, trim_ws_suffix cs ws' h']
+
+/-- An exact tie that `f64` breaks: a Logic concept with raw 7 and an
+Observation concept with raw 11 both score exactly 7.7, so the model orders
+them by key and puts the Observation (key 1) first. In `f64` the Logic score
+is `7.700000000000001` and the Observation score `7.699999999999999`, and
+`sb.total_cmp(sa)` puts the Logic concept first whatever the keys. -/
+theorem exact_tie_orders_by_key :
+    score10 .logic (sessionsOnly 7) = score10 .observation (sessionsOnly 11) ∧
+      (soloCandidates [⟨1, 2, .logic, sessionsOnly 7⟩,
+        ⟨2, 1, .observation, sessionsOnly 11⟩]).map (·.id) = [2, 1] := by
+  refine ⟨by decide, ?_⟩
+  simp [soloCandidates, candLe, Cand.score, score10, rawScore,
+    sessionsOnly, ConceptType.resistance10, classify, soloStage1, sessionWeight,
+    humanConfirmedWeight, dependentInteractionWeight, revertWeight, candidateBar10,
+    venerableBar10, canonicalBar10]
 
 end Lambo.Policy
