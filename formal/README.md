@@ -9,8 +9,11 @@ tests. It has no dependencies beyond Lean itself (no Mathlib).
 **These files have not been compiled.** They were written in a cloud session
 where running a Lean toolchain was not permitted, and the session's GitHub
 credential could not add a workflow file, so neither a local `lake build` nor
-CI has ever run on them. Each proof was written by hand and then read by a
-second reviewer for errors, which is not the same thing as Lean accepting it.
+CI has ever run on them. Each proof was written by hand and then read line by
+line by an independent reviewer against the Lean `v4.36.0` core source text.
+That review found one real error class (nine uses of `Option.noConfusion`,
+whose shape changed in 4.36) and one deprecated name, both fixed. A read-through
+is not the same thing as Lean accepting the files.
 
 Until `lake build` passes, treat every theorem here as a *claim with a proposed
 proof*. Expect some proofs to need small repairs (a renamed library lemma, a
