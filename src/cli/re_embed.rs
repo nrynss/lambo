@@ -1469,7 +1469,7 @@ mod tests {
         .verdict
     }
 
-    /// #296: the drift repair can be followed. A canary drift is
+    /// #296, finding 1: the drift repair can be followed. A canary drift is
     /// only ever seen on a session under the live contract; the plain verb
     /// still refuses that session, now naming the flag, and
     /// `--rewrite-same-contract` rewrites every vector in place, keeps the
@@ -1606,7 +1606,7 @@ mod tests {
         assert!(err.to_string().contains("--missing-only"), "{err}");
     }
 
-    /// #296: `--missing-only` runs the canary. Under `verify` a
+    /// #296, finding 3: `--missing-only` runs the canary. Under `verify` a
     /// drift refuses the backfill like any writer attach, before it writes;
     /// under `warn` the backfill runs as before.
     ///
@@ -1650,7 +1650,7 @@ mod tests {
         assert!(out.contains("coverage: embedded 1/2 -> 2/2"), "{out}");
     }
 
-    /// #296: no silent re-pin. A migration into a contract whose
+    /// #296, finding 2: no silent re-pin. A migration into a contract whose
     /// store pin the live embedder does not reproduce (another session's
     /// vectors rest on it) is refused before it writes unless
     /// `--repin-canary` is given, and then says the other sessions are no

@@ -11,10 +11,10 @@
 //!
 //! The daemon's warm-up rescore over a freshly loaded session is **not** this
 //! module's job. The session owner (the `Memory` type, which owns
-//! `Arc<RwLock<Graph>>` plus the [`InvertedIndex`]) calls [`load_session`] at
-//! startup and then spawns the daemon, whose first cycle is the warm-up
-//! rescore (spec §2.5; `MemoryBuilder::build`). This module only provides the
-//! materialization.
+//! `Arc<RwLock<Graph>>` plus the [`InvertedIndex`]) calls
+//! [`load_session_async`] at startup and then spawns the daemon, whose first
+//! cycle is the warm-up rescore (spec §2.5; `MemoryBuilder::build_attach`).
+//! This module only provides the materialization.
 //!
 //! ## Lock discipline (spec §6.4)
 //!

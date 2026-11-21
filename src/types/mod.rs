@@ -1144,7 +1144,7 @@ impl WriteIntentPayload {
     /// [`Self::Derive`], [`SETTLED_IMAGE_INTENT_PAYLOAD`]. That way an
     /// `re-embed --drop-image-vectors` leaves no old-space vector behind in a
     /// retained intent row, and a build that predates `DeriveImage` can still
-    /// load a session whose image intents are all settled (design R5: only an
+    /// load a session whose image intents are all settled (only an
     /// *unconsumed* image intent stops an older build). Text payloads are kept
     /// as they are.
     ///

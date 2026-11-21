@@ -118,8 +118,8 @@ impl InvertedIndex {
     /// truncated to `limit`. Only concepts with a strictly positive score are
     /// returned; there is no zero-score padding.
     ///
-    /// Duplicate query tokens count ONCE (query-term frequency is 1 for scoring,
-    /// grok G1) — `search("user user")` scores identically to `search("user")`;
+    /// Duplicate query tokens count ONCE (query-term frequency is 1 for
+    /// scoring) — `search("user user")` scores identically to `search("user")`;
     /// document-side duplicates still matter via tf.
     pub fn search(&self, query: &str, limit: usize) -> Vec<Scored<NodeId>> {
         let mut results = self.search_ranked(query);
@@ -143,7 +143,7 @@ impl InvertedIndex {
             return Vec::new();
         }
         let n = self.total_docs as f64;
-        // Guard (grok G2): a corpus of zero-token documents (stopword-only or
+        // Guard: a corpus of zero-token documents (stopword-only or
         // empty content) would otherwise make avg_dl = 0 and tf_component NaN.
         // No postings exist in that case so results stay empty either way, but
         // keep the math sound for future callers.
@@ -354,7 +354,7 @@ mod tests {
 
     #[test]
     fn duplicate_query_terms_count_once() {
-        // grok G1: query-term frequency is 1 — "user user" must score exactly
+        // Query-term frequency is 1 — "user user" must score exactly
         // like "user" (same scores, not k-times).
         let mut idx = InvertedIndex::new();
         idx.add(&concept(1, "user schema"));
@@ -365,7 +365,7 @@ mod tests {
 
     #[test]
     fn zero_token_corpus_stays_empty_and_sane() {
-        // grok G2: a corpus of stopword-only documents has no postings; results
+        // A corpus of stopword-only documents has no postings; results
         // must stay empty with no NaN leakage (avg_dl guarded).
         let mut idx = InvertedIndex::new();
         idx.add(&concept(1, "the and of is"));

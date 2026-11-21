@@ -23,7 +23,7 @@ fn image_ids_are_lowercase_alphanumeric_and_bounded() {
     }
 }
 
-/// Design R8: the suffix must reach the canonical key whole, so the id alone
+/// The image id: the suffix must reach the canonical key whole, so the id alone
 /// separates two images with one caption, and no text phrase or id spelling
 /// can collide with it.
 #[test]

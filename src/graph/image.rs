@@ -13,7 +13,7 @@
 //! entry points; this module holds what they share and nothing that does
 //! I/O.
 //!
-//! # The image id (design R8, decided here)
+//! # The image id (decided here)
 //!
 //! An id is 1 to 64 bytes of `[a-z0-9]`. The design proposed
 //! `[a-z0-9_-]`, and named the risk that canonicalization might not keep the

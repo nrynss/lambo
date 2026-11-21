@@ -2830,7 +2830,7 @@ impl crate::embed::Embedder for LabelEmbedder {
         self.embed_as(text, crate::test_util::TextRole::Document)
             .await
     }
-    // #22 design R6: a delegating embedder forwards every method, or it
+    // #22: a delegating embedder forwards every method, or it
     // silently inherits the defaults (a query embedded as a document, an
     // image refused).
     async fn embed_query(&self, text: &str) -> Result<Vec<f32>, crate::embed::EmbedError> {
@@ -3237,7 +3237,7 @@ async fn graded_over_a_tier_with_an_exact_primary(
     (mem, fake, exact, contract, looks)
 }
 
-/// #22 PR 6 review Low 2: a recall by query vector over the tier when the
+/// #22: a recall by query vector over the tier when the
 /// index fails is served by the durable store's exact vector read, first
 /// on the failed index read itself and then with the breaker open (the
 /// index is not asked again). The graded order is the fallback's, and the
@@ -3283,7 +3283,7 @@ async fn a_recall_by_vector_over_a_failing_tier_is_served_by_the_durable_store()
     mem.close().await.unwrap();
 }
 
-/// #22 PR 6 review Low 2: when the durable fallback fails too, a recall by
+/// #22: when the durable fallback fails too, a recall by
 /// query vector fails (it has nothing to degrade to), as a bare store class
 /// with the backend detail kept out of the model-facing message.
 #[cfg(feature = "embed-fixture")]

@@ -140,7 +140,7 @@ pub(super) enum LeaseLossPolicy {
 }
 
 impl LeaseLossPolicy {
-    /// The one place the policy is derived from configuration (design R4):
+    /// The one place the policy is derived from configuration:
     /// one pinned session and nothing on demand is today's `ExitProcess`;
     /// anything more is `DetachSession`.
     pub(super) fn for_scope(pinned: usize, on_demand: bool) -> Self {

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate Lambo v0.1 fixture graphs (T1.4). Run from repo root:
+"""Generate Lambo v0.1 fixture graphs. Run from repo root:
 
     python3 scripts/gen-fixtures.py
 
@@ -307,7 +307,7 @@ recall_goldens = {
     ],
 }
 
-# --- canonicalization-cases (T6 contract) -------------------------------------
+# --- canonicalization-cases (canonization contract) ---------------------------
 canon_cases = [
     {"category": "case",   "input": "User Schema", "expected_key": "schema user", "note": "lowercase + sort"},
     {"category": "hyphen", "input": "user-schema", "expected_key": "schema user", "note": "split hyphens"},

@@ -50,8 +50,8 @@ item, as the engine applies it, and a read sees the index at any point
 between (a periodic refresh can expose any prefix). Chunks are one document
 (the tests' `with_repair_chunk(1)`; with chunk `k` the one in-flight request
 below is `k` documents). The read path's load and marker check are one step;
-`load_session`'s are two (`loadBegin`, `loadEnd`), which is what the #18 ahead-marker
-check races.
+`load_session`'s are two (`loadBegin`, `loadEnd`), the race the #18 ahead-marker
+case exercises.
 
 ## Results
 

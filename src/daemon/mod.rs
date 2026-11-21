@@ -17,10 +17,11 @@
 //!
 //! ## Wake seam (2026-08-12)
 //!
-//! There is **no mutation-notify channel and no rescore signal** — both
-//! were explicitly deferred. The loop is driven by the tick interval plus an
-//! explicit [`Notify`] wake that tests use to trigger a cycle immediately;
-//! the production notify seam lands later.
+//! There is **no mutation-notify channel and no rescore signal**. The loop
+//! is driven by the tick interval plus an explicit [`Notify`] wake
+//! ([`Daemon::wake`]): `Memory`'s write paths (graph writes, name
+//! declarations, image derives) call it after each write so the next cycle
+//! runs at once, and tests use it to trigger a cycle. Reads never wake it.
 //!
 //! ## Lock discipline (spec §6.4 — non-negotiable)
 //!
@@ -506,8 +507,8 @@ impl Daemon {
         self.rescore_faults.store(n, Ordering::Release);
     }
 
-    /// Wake the loop for an immediate cycle (tests; later the production notify
-    /// seam).
+    /// Wake the loop for an immediate cycle. `Memory`'s write paths call it
+    /// after each write; tests call it to trigger a cycle.
     pub fn wake(&self) {
         self.wake.notify_one();
     }

@@ -937,7 +937,7 @@ fn serve_checks_the_sessions_it_is_handed() {
     assert!(check_pinned("a", &s(&["a", "a"]), Transport::Http).is_err());
 }
 
-/// Design §3.5 / R2: sixteen dirty sessions sharing one SQLite connection
+/// Design §3.5: sixteen dirty sessions sharing one SQLite connection
 /// close inside `SHUTDOWN_BUDGET`, every tail durable.
 #[cfg(feature = "store-sqlite")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

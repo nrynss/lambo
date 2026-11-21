@@ -1674,7 +1674,7 @@ mod tests {
             .is_empty());
     }
 
-    /// DONE-WHEN BOX 3, measured: the SAME physical corpus recurs under event
+    /// Measured: the SAME physical corpus recurs under event
     /// time and does NOT recur under ingest time. Four supporting turns about
     /// days 0/3/4/5, all flushed inside one minute, evaluated pinned right
     /// after the burst.
