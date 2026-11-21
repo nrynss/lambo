@@ -31,7 +31,7 @@
 //! uses the same clock, so a historical ingest that backdates a
 //! contradiction to 2018 and its supporting citations to 2020 reads as
 //! outweighed, exactly as it happened. A **future** `event_time` is clamped
-//! to the write time (review M1): it may not hide a contradiction until its
+//! to the write time: it may not hide a contradiction until its
 //! date and then let it outrank everything written in between. Re-sending a
 //! contradiction reinforces its edge (`last_reinforced`, weight) and does
 //! **not** re-date it: the edge keeps its first `event_time` and
@@ -48,7 +48,7 @@
 //!
 //! * **age**: the edge was **written** at or before `now - min_age` (the
 //!   session's `canonization_edge_min_age`); a backdated `event_time` does
-//!   not skip the floor (review M3). Its date for the comparison is its
+//!   not skip the floor. Its date for the comparison is its
 //!   `declared_at`. Re-sending an existing dependence reinforces the same
 //!   edge and keeps its first dates, so it is not new evidence: only a new
 //!   dependence edge (a concept that did not depend on the node before, or
@@ -126,7 +126,7 @@ pub struct ContradictionHit {
 }
 
 /// When an edge's declaration counts as made: its about-time
-/// ([`Edge::about_time`]), clamped to its write time (#19(c) review M1).
+/// ([`Edge::about_time`]), clamped to its write time (#19(c)).
 ///
 /// The clamp only moves a **future** `event_time` back to when the edge was
 /// written. A contradiction (or a citation) dated 30 days ahead would
@@ -215,8 +215,8 @@ fn contradiction_at_with(
     CONTRADICTION_EVALUATIONS.with(|count| count.set(count.get() + 1));
     let target = concept(graph, node)?;
     // Evidence written at or before this instant is old enough to count.
-    // `None` when `now - min_age` is out of chrono's range (review M5, as
-    // Stage 1's `age_cutoff`): then no evidence is eligible.
+    // `None` when `now - min_age` is out of chrono's range (as Stage 1's
+    // `age_cutoff`): then no evidence is eligible.
     let cutoff = ChronoDuration::from_std(min_age)
         .ok()
         .and_then(|age| now.checked_sub_signed(age));
@@ -245,7 +245,7 @@ fn contradiction_at_with(
         {
             continue;
         }
-        // Eligibility is by write time (review M3): a citation backdated by
+        // Eligibility is by write time: a citation backdated by
         // its event_time does not skip the age floor. Its date for the
         // comparison is still its (clamped) about-time.
         if cutoff.is_none_or(|cutoff| e.created_at > cutoff) {
@@ -559,7 +559,7 @@ pub(crate) fn stale_citations_memo(
 }
 
 /// [`contradiction_at`] against a shared, epoch-keyed timeline: the hot-list
-/// predicate's path (review M2).
+/// predicate's path.
 fn contradiction_at_shared(
     graph: &Graph,
     node: NodeId,
@@ -576,7 +576,7 @@ fn contradiction_at_shared(
 
 /// Detect contradictions and refresh the hot list with one
 /// [`Condition::Contradiction`] entry per hit. The predicate re-runs
-/// [`contradiction_at`] at the caller's `now` (XP-3), capturing only `node`
+/// [`contradiction_at`] at the caller's `now`, capturing only `node`
 /// and `min_age`. Returns the hits, which the daemon loop adds to the
 /// cycle's condition set so [`HotList::retain_conditions`] drops an entry
 /// whose contradiction stopped holding.
