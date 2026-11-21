@@ -20,6 +20,7 @@ import LamboProofs.Policy
 import LamboProofs.Conflict
 import LamboProofs.Hotlist
 import LamboProofs.Drain
+import LamboProofs.Flush
 
 /-
 # Axiom audit
@@ -307,3 +308,25 @@ open Lambo
 #print axioms Lambo.Drain.clock_step_reorders
 #print axioms Lambo.Drain.outage_failed_then_applied
 #print axioms Lambo.Drain.store_error_blocks_backlog
+-- Store flush path
+#print axioms Flush.flushWithRetry_backoff
+#print axioms Flush.ladder_exhausted
+#print axioms Flush.ladder_ok_effect
+#print axioms Flush.upsert_idempotent
+#print axioms Flush.good_reachable
+#print axioms Flush.step_calls_unconsumed
+#print axioms Flush.never_resent
+#print axioms Flush.committed_sublist
+#print axioms Flush.transient_retried
+#print axioms Flush.exhausted_retained
+#print axioms Flush.constraint_dead_lettered
+#print axioms Flush.stale_write_one_call
+#print axioms Flush.stale_write_retained
+#print axioms Flush.override_refresh_retakes
+#print axioms Flush.flush_after_fence_latched
+#print axioms Flush.stop_requeues
+#print axioms Flush.stopped_accounted
+#print axioms Flush.no_silent_loss
+#print axioms Flush.abort_loses
+#print axioms Flush.fencing_refuses_after_takeover
+#print axioms Flush.degraded_silent
