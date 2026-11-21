@@ -33,29 +33,33 @@
 //!   `RETAINED_BACKOFF` before the next attempt (F3): a permanently failing
 //!   store re-enters the retry sequence at most once per hold, not once per
 //!   interval tick. The one exception (STORE-4/D5): a batch rejected with a
-//!   deterministic constraint violation is logged and dropped — never
-//!   retried, never retained — so it cannot poison the queue head.
+//!   deterministic constraint violation, or since #301 a value the store
+//!   cannot hold, is logged and dropped — never retried, never retained — so
+//!   it cannot poison the queue head.
 //!   **What a dead letter drops:** the batch is the whole of `pending`, so
 //!   mutations retained from an earlier outage go with the write that
 //!   violated the constraint, though they alone might have committed, and
 //!   the whole batch counts as ONE in `dead_lettered` however many writes it
 //!   held (Lean: `Flush.constraint_dead_lettered` and its `exPoison`
 //!   example). Splitting it to find the offending mutation is not attempted.
-//! * **A permanent error degrades (#301).** A flush the store refuses with
-//!   [`StoreError::Permanent`] (an error no replay can fix that is not a
-//!   constraint violation, such as an undefined table; the codes are in
-//!   `src/store/error.rs`) is not retried. Before #301 such an error reached
+//! * **A permanent error about the store degrades (#301).** A flush the store
+//!   refuses with [`StoreError::Permanent`] (an error no replay can fix that
+//!   is about the store, not the batch, such as an undefined table; the codes
+//!   are in `src/store/error.rs`) is not retried. Before #301 such an error reached
 //!   the loop as a retryable `Backend`: it was retried, retained and resent
 //!   every `RETAINED_BACKOFF` until the backlog passed `log_max` (Lean:
 //!   `Flush.permanent_retried_retained`). Now the session degrades at once,
 //!   as below, with the batch still in `pending`, so the next cycle drops it
 //!   and `close` reports the session as degraded (Lean:
-//!   `Flush.permanent_degrades_classed`). It is not dead-lettered: such an
-//!   error is usually a property of the store rather than of the batch, so
-//!   every later batch would fail the same way, and dead-lettering them would
-//!   lose every write while `close` returned `Ok` (the model's `exGone`
-//!   examples). An erased session's refusal is handled by the erased arm
-//!   first, as before.
+//!   `Flush.permanent_degrades_classed`, `Flush.store_permanent_degrades_split`).
+//!   It is not dead-lettered: every later batch would fail the same way, and
+//!   dead-lettering them would lose every write while `close` returned `Ok`
+//!   (the model's `exGone` examples). A permanent error about a value in the
+//!   batch (a character the encoding cannot hold, a row too big) is the
+//!   batch's fault instead: the adapters report it as a
+//!   [`StoreError::Constraint`], so it is dead-lettered and the session goes
+//!   on (Lean: `Flush.value_rejected_dead_letters`). An erased session's
+//!   refusal is handled by the erased arm first, as before.
 //! * **A stale write is terminal (#293).** A flush the store refuses with
 //!   [`StoreError::StaleWrite`] presented a fencing token the lease has moved
 //!   past, so it can never succeed: the loop latches the lease-lost fence and
@@ -216,7 +220,8 @@ pub struct FlushStats {
     /// backed off, or retained after exhausted retries).
     pub depth: usize,
     /// Batches dropped as dead letters (STORE-4 / D5): a deterministic
-    /// constraint violation is logged and dropped — never retried, never
+    /// constraint violation, or since #301 a value the store cannot hold, is
+    /// logged and dropped — never retried, never
     /// retained — so it cannot poison the queue head. Visible in stats by
     /// design ("drop-after-log, visible in stats"). It counts batches, not
     /// writes: a dead letter is the whole pending batch, mutations retained
@@ -677,7 +682,9 @@ impl FlushLoop {
     /// attempted a flush (whatever the outcome), `false` when it returned
     /// before one: nothing pending, degraded, over `log_max`, a retained
     /// batch still waiting out its hold, or an early poll with the batch
-    /// not yet full.
+    /// not yet full. Also `false` after a flush the store refused with a
+    /// permanent error, which degrades the session (#301): degraded does no
+    /// further store I/O, so its stats row is not written either.
     async fn drain_and_flush(&mut self, session: &SessionId, tick: bool) -> bool {
         // When this cycle's drain took the log (#11 review P2-1). A flush makes
         // durable what was drained, so a successful one means the store held
@@ -825,7 +832,9 @@ impl FlushLoop {
             Err(StoreError::Constraint(code)) => {
                 // STORE-4 / D5: a deterministic constraint violation can
                 // never succeed on replay — retrying it would only poison the
-                // queue head (head-of-line blocking). Dead-letter the WHOLE
+                // queue head (head-of-line blocking). Since #301 a value the
+                // store cannot hold arrives here too (`map_write_err`): the
+                // batch's fault, not the store's. Dead-letter the WHOLE
                 // batch: warn (constraint + batch summary), drop, count in
                 // stats, session continues, never degrade for a dead-lettered
                 // batch. "Whole" includes anything retained from an earlier
@@ -841,8 +850,9 @@ impl FlushLoop {
                     batch_len,
                     depth = self.shared.depth.load(Ordering::Acquire),
                     session = %session,
-                    "FlushDeadLettered: deterministic constraint violation; batch of {batch_len} \
-                     mutations dropped (dead-letter D5, drop-after-log), session continues",
+                    "FlushDeadLettered: the store rejected the batch's data (a constraint \
+                     violation or a value it cannot hold); batch of {batch_len} mutations \
+                     dropped (dead-letter, drop-after-log), session continues",
                 );
             }
             // The fence latched during the ladder, which stopped retrying
@@ -877,16 +887,18 @@ impl FlushLoop {
                 );
             }
             Err(StoreError::Permanent(why)) => {
-                // #301: no replay can fix this, so it was not retried, and
-                // retaining it would only resend it after every hold until
-                // the backlog passed `log_max`. Degrade now, as that path
-                // would in the end: no further store I/O, and the batch stays
-                // in `pending` for the next cycle's degraded drop (STORE-3).
+                // #301: a permanent error about the store (a missing table,
+                // a revoked privilege). No replay can fix it, so it was not
+                // retried, and retaining it would only resend it after every
+                // hold until the backlog passed `log_max`. Degrade now, as
+                // that path would in the end: no further store I/O, and the
+                // batch stays in `pending` for the next cycle's degraded drop.
                 // `close` then reports the session as degraded rather than
                 // returning `Ok` over writes that never reached the store.
-                // Not a dead letter: the error is usually the store's (a
-                // missing table), not the batch's, so every later batch would
-                // be dropped the same way while the session looked healthy.
+                // Not a dead letter: every later batch would fail the same
+                // way and be dropped while the session looked healthy. (A
+                // value the store rejects is the batch's fault and arrives as
+                // a `Constraint`, above.)
                 self.shared.degraded.store(true, Ordering::Release);
                 self.retry_after = None;
                 tracing::error!(
@@ -898,6 +910,10 @@ impl FlushLoop {
                      not retried, durability=\"none\", flushing stopped; the writes stay in \
                      memory only, and close() will report the session as degraded",
                 );
+                // Degraded does no further store I/O, its stats row included,
+                // as when the backlog degrades it: report no attempt, so
+                // `publish_stats` does not write.
+                return false;
             }
             Err(err) => {
                 // Retries exhausted: RETAIN the batch — it is still in
@@ -1827,7 +1843,7 @@ mod tests {
     }
 
     /// `GraphStore` mock: flush ALWAYS fails, by default with a deterministic
-    /// constraint violation (STORE-4); [`ConstraintStore::refusing`] picks
+    /// constraint violation; [`ConstraintStore::refusing`] picks
     /// the error. Records call/batch bookkeeping like [`FlakyStore`].
     struct ConstraintStore {
         inner: Arc<dyn GraphStore>,
@@ -1837,6 +1853,8 @@ mod tests {
         only_first: bool,
         /// The error every refused flush returns.
         refusal: Box<dyn Fn() -> StoreError + Send + Sync>,
+        /// `write_flush_stats` calls (they succeed and store nothing).
+        stats_writes: AtomicUsize,
     }
 
     impl ConstraintStore {
@@ -1847,6 +1865,7 @@ mod tests {
                 batch_sizes: Mutex::new(Vec::new()),
                 only_first: false,
                 refusal: Box::new(|| StoreError::Constraint("23505".into())),
+                stats_writes: AtomicUsize::new(0),
             }
         }
 
@@ -1893,6 +1912,15 @@ mod tests {
                 return self.inner.flush(batch, _token).await;
             }
             Err((self.refusal)())
+        }
+
+        async fn write_flush_stats(
+            &self,
+            _session: &SessionId,
+            _stats: &SessionFlushStats,
+        ) -> Result<(), StoreError> {
+            self.stats_writes.fetch_add(1, Ordering::SeqCst);
+            Ok(())
         }
 
         async fn load_session(&self, session: &SessionId) -> Result<GraphSnapshot, StoreError> {
@@ -3644,6 +3672,12 @@ mod tests {
         wait_until(|| task.degraded()).await;
         assert_eq!(store.flush_calls(), 1);
         assert_eq!(task.stats().depth, 3, "held for the degraded drop");
+        tokio::task::yield_now().await;
+        assert_eq!(
+            store.stats_writes.load(Ordering::SeqCst),
+            0,
+            "a degraded session writes no stats row, as on the log_max path"
+        );
 
         advance_in_steps(RETAINED_BACKOFF + Duration::from_secs(2)).await;
         assert_eq!(store.flush_calls(), 1, "never resent");
@@ -3653,6 +3687,58 @@ mod tests {
             graph.read().is_unflushed(&lost),
             "a degrade-dropped concept is not durable"
         );
+    }
+
+    /// #301: a permanent SQL error about a value the batch holds (SQLSTATE
+    /// 22001, a string too long for its column), as the adapters map it,
+    /// is a dead letter: one call, the batch dropped and counted once, the
+    /// session not degraded; the next batch is sent as usual. Lean:
+    /// `Flush.value_rejected_dead_letters`.
+    #[cfg(any(
+        feature = "store-cockroach",
+        feature = "store-postgres",
+        feature = "store-sqlite"
+    ))]
+    #[tokio::test(start_paused = true)]
+    async fn a_rejected_value_is_dead_lettered_and_the_session_goes_on() {
+        let (logs, _guard) = capture_logs(tracing::Level::WARN);
+        // Not 22021: the tests' stand-in error is read by its code's shape,
+        // and 22021's low byte is SQLITE_BUSY's (real errors go by type).
+        let store = sql_refusing_store("22001");
+        let graph = new_graph();
+        let task = FlushTask::new(
+            graph.clone(),
+            store.clone(),
+            params(Duration::from_secs(1), 100, 3, 1_000),
+        );
+        let _handle = task.spawn();
+        let_task_arm().await;
+
+        let iid = add_interaction(&graph, 1, None);
+        add_concept(&graph, 1, iid); // 3 mutations
+        tokio::time::advance(Duration::from_secs(1)).await;
+        wait_until(|| task.stats().dead_lettered == 1).await;
+        advance_in_steps(Duration::from_secs(2)).await;
+        assert_eq!(
+            store.flush_calls(),
+            1,
+            "a rejected value must not be retried"
+        );
+        assert_eq!(task.stats().dead_lettered, 1);
+        assert_eq!(task.stats().depth, 0, "the batch is dropped");
+        assert!(!task.degraded(), "a rejected value does not degrade");
+
+        // The session goes on: the next batch is sent.
+        add_interaction(&graph, 2, Some(iid));
+        advance_in_steps(Duration::from_secs(2)).await;
+        assert_eq!(store.flush_calls(), 2, "the next batch is sent");
+        assert_eq!(task.stats().dead_lettered, 2);
+        assert!(!task.degraded());
+
+        let out = logs.contents();
+        assert!(out.contains("FlushDeadLettered"), "warn missing: {out}");
+        assert!(out.contains("22001"), "code missing: {out}");
+        assert!(!out.contains("FlushDegraded"), "degraded: {out}");
     }
 
     /// #301 control: a transient SQL error (SQLSTATE 40001, serialization

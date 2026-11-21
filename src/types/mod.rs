@@ -2250,18 +2250,22 @@ pub enum StoreError {
     /// The driver or the backend itself failed.
     #[error("backend: {0}")]
     Backend(String),
-    /// Deterministic constraint violation (Postgres SQLSTATE 23xxx /
-    /// SQLite `SQLITE_CONSTRAINT`), carrying the SQLSTATE / extended code.
-    /// Terminal: replaying the batch can never succeed, so the flush loop
-    /// dead-letters it instead of retrying.
-    #[error("constraint violated ({0})")]
+    /// The store rejected the batch's data, carrying the SQLSTATE / extended
+    /// code: a deterministic constraint violation (Postgres SQLSTATE 23xxx /
+    /// SQLite `SQLITE_CONSTRAINT`), or since #301 a value the store cannot
+    /// hold (SQLSTATE classes 21, 22, 44 and `54000`; `SQLITE_TOOBIG`,
+    /// `SQLITE_MISMATCH`). Terminal: replaying the batch can never succeed,
+    /// so the flush loop dead-letters it instead of retrying, and the
+    /// session goes on.
+    #[error("constraint violated or value rejected ({0})")]
     Constraint(String),
-    /// A permanent backend error that is not a constraint violation (#301):
-    /// no replay can fix it, such as an undefined table (SQLSTATE `42P01`,
-    /// SQLite "no such table") or a value the store rejects (SQLSTATE class
-    /// `22`). The message names the statement and carries the code. Terminal
-    /// for the flush loop: it is not retried, and the session degrades to
-    /// `durability = "none"` (see `src/store/error.rs` for the codes).
+    /// A permanent backend error about the store rather than the batch
+    /// (#301): no replay can fix it and every later batch would fail the same
+    /// way, such as an undefined table (SQLSTATE `42P01`, SQLite "no such
+    /// table") or a missing privilege (`42501`). The message names the
+    /// statement and carries the code. Terminal for the flush loop: it is not
+    /// retried, and the session degrades to `durability = "none"` (see
+    /// `src/store/error.rs` for the codes).
     #[error("permanent backend error: {0}")]
     Permanent(String),
     /// A write whose fencing token is stale (GitHub issue #1). The lease moved
@@ -2279,7 +2283,8 @@ impl StoreError {
     /// Retryability for the flush loop. A constraint violation is
     /// deterministic — retrying it can never succeed and only blocks the
     /// queue (head-of-line) — so it is non-retryable and dead-lettered
-    /// (drop-after-log, visible in `FlushStats::dead_lettered`). A
+    /// (drop-after-log, visible in `FlushStats::dead_lettered`); so is a
+    /// value the store rejects, which shares the variant (#301). A
     /// [`StoreError::Permanent`] is non-retryable too (#301): the loop does
     /// not retry or retain it but degrades the session, so `close` reports
     /// that the tail was not written. A

@@ -24,24 +24,41 @@
   (`mirror_switch_writes_nothing`, `write_agrees`,
   `reembed_migration_repaired`).
 - Flush loop: a store error that no retry can fix and that is not a
-  constraint violation, such as an undefined table (SQLSTATE `42P01`, SQLite
-  "no such table") or a value the store rejects (SQLSTATE class `22`), is no
-  longer retried (#301). Both SQL adapters mapped it to a retryable backend
-  error, so the batch was retried, kept, and resent every 10 s until the
-  backlog passed `backend_log_max`, against the classification's own
-  "everything else is permanent". Such errors are now
-  `StoreError::Permanent`: the flush loop does not retry it, the session
-  degrades to `durability = "none"` at once, and `close` returns an error.
+  constraint violation is no longer retried (#301). Both SQL adapters
+  mapped it to a retryable backend error, so the batch was retried, kept,
+  and resent every 10 s until the backlog passed `backend_log_max`, against
+  the classification's own "everything else is permanent". Such errors now
+  split by scope:
+  - An error about the store itself, such as an undefined table (SQLSTATE
+    class `42`, SQLite "no such table") or a missing privilege, is the new
+    `StoreError::Permanent`: the flush loop does not retry it, the session
+    degrades to `durability = "none"` at once, and `close` returns an error.
+  - An error about a value the batch holds (SQLSTATE classes `21`, `22`,
+    `44` and `54000`; `SQLITE_TOOBIG`, `SQLITE_MISMATCH`), such as a
+    character the encoding cannot hold, is reported as
+    `StoreError::Constraint` and dead-lettered like a constraint violation:
+    the batch is dropped and counted in `dead_lettered`, and the session
+    goes on. `StoreError::Constraint`'s message now reads "constraint
+    violated or value rejected".
+
   The permanent codes are an explicit list per adapter
   (`src/store/error.rs`); connection failures, timeouts, serialization
-  conflicts, `SQLITE_BUSY` / `SQLITE_LOCKED`, errors without a code and any
-  code not on the list stay retryable as before. The Postgres / CockroachDB
-  transaction replay no longer replays a permanent error either. The
-  adapters now tell SQLite and Postgres codes apart by the driver's error
-  type, so a numeric SQLSTATE whose low byte matches a SQLite code (`42501`
-  and `22021` read as `SQLITE_BUSY`) is no longer misread.
-  `docs/reference/api.mdx` describes the new path under
-  `backend_flush_retries` and `backend_log_max`.
+  conflicts, `SQLITE_BUSY` / `SQLITE_LOCKED`, `0A000` (Postgres also returns
+  it for a cached plan that clears on reconnect), errors without a code and
+  any code not on the list stay retryable as before. The Postgres /
+  CockroachDB transaction replay no longer replays a permanent error. A
+  server's background attach still retries a permanent store error, as it
+  did the backend error it used to be, so a pinned session recovers once
+  the operator fixes the store (a migration, a `GRANT`) without a restart.
+  The adapters now tell SQLite and Postgres codes apart by the driver's
+  error type, so a numeric SQLSTATE whose low byte matches a SQLite code
+  (`42501` and `22021` read as `SQLITE_BUSY`) is no longer misread.
+  `docs/reference/api.mdx` describes the new paths under
+  `backend_flush_retries` and `backend_log_max`, and
+  `docs/reference/mcp.mdx` what `dead_lettered` now counts.
+  **Breaking (library API):** `StoreError` has a new variant, `Permanent`,
+  so an exhaustive `match` on `StoreError` outside this crate no longer
+  compiles until it handles it.
 - Flush loop: the lease read behind the erased check that follows a failed
   flush, and the flush-stats row write, now run under the same 30 s timeout
   and panic containment as a flush attempt (#301). A store adapter that

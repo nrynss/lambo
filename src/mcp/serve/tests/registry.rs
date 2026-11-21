@@ -1260,13 +1260,18 @@ async fn a_transient_model_load_failure_is_retried_and_a_permanent_one_is_not() 
 
 /// Sonnet review L-C: which background-attach errors keep a pinned session
 /// retrying (the store or the embedder could not be reached) and which mark
-/// it `Failed` (the same answer on every retry).
+/// it `Failed` (the same answer on every retry). A permanent store error
+/// (#301) keeps retrying as the backend error it used to be: the operator
+/// fixes it in the store (a migration, a `GRANT`) while the server runs.
 #[test]
 fn only_unreachable_store_or_embedder_errors_are_retried() {
     use crate::types::StoreError;
     for transient in [
         LamboError::Store(StoreError::Backend("connection refused".into())),
         LamboError::Store(StoreError::Other(anyhow::anyhow!("pool timed out"))),
+        LamboError::Store(StoreError::Permanent(
+            "load: permission denied for table concepts (code 42501)".into(),
+        )),
         LamboError::EmbedUnavailable("llama-server is down".into()),
     ] {
         assert!(is_transient(&transient), "{transient:?}");

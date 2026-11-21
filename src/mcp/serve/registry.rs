@@ -1902,11 +1902,17 @@ impl SessionRegistry {
 /// embedder could not be reached. Everything else (an erased session, a
 /// contract mismatch, an unprovisioned store, a configuration error) gets
 /// the same answer on every retry.
+///
+/// A permanent store error (#301: an undefined table, a missing privilege)
+/// is retried too. It was a backend error before #301, and the operator's
+/// fix for it (a migration, a `GRANT`) is made in the store while the
+/// server runs, so a pinned session keeps retrying every `PINNED_RETRY` and
+/// recovers without a restart.
 pub(super) fn is_transient(err: &LamboError) -> bool {
     use crate::types::StoreError;
     matches!(
         err,
-        LamboError::Store(StoreError::Backend(_) | StoreError::Other(_))
+        LamboError::Store(StoreError::Backend(_) | StoreError::Other(_) | StoreError::Permanent(_))
             | LamboError::EmbedUnavailable(_)
     )
 }
