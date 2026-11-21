@@ -68,7 +68,7 @@ covered).
 * `skipsR_length_le`: at most `window top_k` members are skipped ("past the
   window nothing is checked").
 * `emitR_eq_emit_of_skipsR_nil`, `emitR_eq_emit_of_no_redundant_pair`,
-  `emitR_window_zero`: when nothing is skipped the result is the no-skip
+  `emitR_eq_emit_of_no_redundant_distinct_pair`, `emitR_window_zero`: when nothing is skipped the result is the no-skip
   model's ("When nothing is skipped the result is exactly the one without
   it"; test `off_or_with_nothing_redundant_the_result_is_byte_identical`).
 * `skipsR_kept_emitted`, `skipsR_kept_before`, `skipsR_pairwise`: the kept
@@ -76,15 +76,21 @@ covered).
   ranked first is kept (test
   `a_semantic_edge_pair_keeps_the_higher_and_the_next_distinct_fills_the_slot`,
   `equal_scores_keep_the_copy_the_tie_break_ranks_first`).
-* `skipsR_not_emitted`: a skipped member is not shown.
+* `skipsR_not_emitted`: a skipped member is not emitted (the companion step
+  after emission, not modelled, can still bring it back as a contradiction
+  companion; `assemble.rs` drops it from the skip list then).
 * `skipped_canonical_kept_canonical`: in `rank_members` order a skipped
-  Canonical member was skipped for a Canonical hit, so the ⚑ line, which
-  `warns` does not count, is never lost (test `canonical_first_order_is_kept`).
+  Canonical member was skipped for a Canonical hit, so a ⚑ banner, which
+  `warns` does not count, is still present: the kept copy's. The skipped
+  member's own ⚑ line, which states its own blast radius
+  (`radii.get(&c.id)`), is not shown; only the kept copy's count and an
+  `also <id>` label remain (test `canonical_first_order_is_kept`).
 
 The last section applies #280's gated order (`Order.gatedRankMembers`, a
 design model) to emission: a forced pillar is shown whatever the order, and
 behind the gate `skipped_canonical_kept_canonical` fails (a `decide`
-counterexample).
+counterexample, which needs a redundant pair whose relevance falls on both
+sides of the gate).
 -/
 
 namespace Lambo.TopK
@@ -939,7 +945,10 @@ theorem emitR_eq_emit_of_skipsR_nil :
           rw [emitR_cut hc hf hs, emit_cut hc hf hs, ih _ _ _ h]
 
 /-- Nothing is skipped when no verdict between an emitted-or-ranked member and
-a later ranked one is redundant. -/
+a later ranked one is redundant. The hypothesis covers a member against
+itself too, which the Rust verdict satisfies (`Redundancy::signal` returns
+`None` when `a.id == b.id`); `skipsR_nil_of_no_red_distinct` drops that
+case. -/
 theorem skipsR_nil_of_no_red :
     ∀ (ranked : List ι) (slots checked : Nat) (prev : List ι),
       (∀ a b, a ∈ prev ++ ranked → b ∈ ranked → red a b = false) →
@@ -996,6 +1005,79 @@ theorem emitR_eq_emit_of_no_redundant_pair (ranked : List ι)
   emitR_eq_emit_of_skipsR_nil isConcept forced warns red topK win wmax ranked 0 0 []
     (skipsR_nil_of_no_red isConcept forced warns red topK win wmax ranked 0 0 []
       (fun a b ha hb => h a (by simpa using ha) b hb))
+
+/-- Nothing is skipped when no verdict between two *distinct* members, an
+emitted-or-ranked one and a later ranked one, is redundant, given unique ids.
+The verdict of a member against itself is not constrained (the Rust never
+asks it: `Redundancy::signal` returns `None` when `a.id == b.id`, and the
+emitted prefix and the rest are disjoint). -/
+theorem skipsR_nil_of_no_red_distinct :
+    ∀ (ranked : List ι) (slots checked : Nat) (prev : List ι), (prev ++ ranked).Nodup →
+      (∀ a b, a ∈ prev ++ ranked → b ∈ ranked → a ≠ b → red a b = false) →
+      skipsR isConcept forced warns red topK win wmax slots checked prev ranked = [] := by
+  intro ranked
+  induction ranked with
+  | nil =>
+    intro slots checked prev _ _
+    rw [skipsR_nil']
+  | cons s rest ih =>
+    intro slots checked prev hnd h
+    have hndSame : (prev ++ rest).Nodup :=
+      List.Nodup.sublist (List.Sublist.append_left (List.sublist_cons_self s rest) prev) hnd
+    have hndGrown : (prev ++ [s] ++ rest).Nodup := by
+      rw [List.append_assoc, List.singleton_append]
+      exact hnd
+    have same : ∀ a b, a ∈ prev ++ rest → b ∈ rest → a ≠ b → red a b = false := by
+      intro a b ha hb hab
+      apply h a b _ (List.mem_cons_of_mem s hb) hab
+      cases List.mem_append.mp ha with
+      | inl h' => exact List.mem_append_left _ h'
+      | inr h' => exact List.mem_append_right _ (List.mem_cons_of_mem s h')
+    have grown : ∀ a b, a ∈ (prev ++ [s]) ++ rest → b ∈ rest → a ≠ b → red a b = false := by
+      intro a b ha hb hab
+      apply h a b _ (List.mem_cons_of_mem s hb) hab
+      rw [List.append_assoc, List.singleton_append] at ha
+      exact ha
+    cases hc : isConcept s with
+    | false =>
+      rw [skipsR_missing hc]
+      exact ih _ _ _ hndSame same
+    | true =>
+      cases hf : forced s with
+      | true =>
+        rw [skipsR_forced hc hf]
+        exact ih _ _ _ hndGrown grown
+      | false =>
+        by_cases hs : slots < topK
+        · by_cases hw : checked < win
+          · by_cases hskip : ∃ k, keptBy red wmax prev s = some k ∧ warns s = false
+            · obtain ⟨k, hk, _⟩ := hskip
+              have ⟨hkp, hred⟩ := keptBy_spec hk
+              have hks : k ≠ s := by
+                intro e
+                rw [e] at hkp
+                have := (List.nodup_append.mp hnd).2.2 s hkp s List.mem_cons_self
+                exact this rfl
+              have := h k s (List.mem_append_left _ hkp) List.mem_cons_self hks
+              rw [hred] at this
+              exact absurd this (by decide)
+            · rw [skipsR_keep hc hf hs hw (keep_of_not_skip hskip)]
+              exact ih _ _ _ hndGrown grown
+          · rw [skipsR_late hc hf hs hw]
+            exact ih _ _ _ hndGrown grown
+        · rw [skipsR_cut hc hf hs]
+          exact ih _ _ _ hndSame same
+
+/-- **Agreement with the no-skip model, distinct pairs only.** With unique ids
+(`Expand.expand_nodup`) and no redundant pair of distinct ranked members, the
+skip rule changes nothing. -/
+theorem emitR_eq_emit_of_no_redundant_distinct_pair (ranked : List ι) (hnd : ranked.Nodup)
+    (h : ∀ a ∈ ranked, ∀ b ∈ ranked, a ≠ b → red a b = false) :
+    emitR isConcept forced warns red topK win wmax 0 0 [] ranked
+      = emit isConcept forced topK 0 ranked :=
+  emitR_eq_emit_of_skipsR_nil isConcept forced warns red topK win wmax ranked 0 0 []
+    (skipsR_nil_of_no_red_distinct isConcept forced warns red topK win wmax ranked 0 0 []
+      (by simpa using hnd) (fun a b ha hb => h a (by simpa using ha) b hb))
 
 /-- **Past the window nothing is checked.** At most `window` members are
 skipped. -/
@@ -1226,8 +1308,10 @@ theorem skipsR_pairwise {R : ι → ι → Prop} {ranked : List ι} (h : ranked.
   rw [e] at h
   exact (List.pairwise_append.mp h).2.2 k hk' x List.mem_cons_self
 
-/-- **A skipped member is not shown** (ids are unique in the ranked list, as
-`expand` guarantees). -/
+/-- **A skipped member is not emitted** (ids are unique in the ranked list, as
+`expand` guarantees). The companion step after `emitted` can still bring it
+back as a contradiction companion (`assemble.rs`, the `retain` on the skip
+lists); that step is not modelled. -/
 theorem skipsR_not_emitted (k x : ι) :
     ∀ (ranked : List ι) (slots checked : Nat) (prev : List ι), ranked.Nodup →
       (k, x) ∈ skipsR isConcept forced warns red topK win wmax slots checked prev ranked →
@@ -1323,6 +1407,19 @@ takes no slot. -/
 example : emitR (fun _ => true) (fun i => i == 2) (fun _ => false) exPair 1 (window 1) windowMax
     0 0 [] [1, 2, 3] = [1, 2] := by decide
 
+/-- `a_forced_member_is_never_skipped`, as the Rust test runs it (`RANKED4`,
+`top_k = 2`): the hot duplicate `2` is forced and stays past `top_k`, and
+nothing is skipped; with the original `1` hot instead, the ordinary duplicate
+`2` is skipped for it and `3`, `4` take the slots. -/
+example : emitR (fun _ => true) (fun i => i == 2) (fun _ => false) exPair 2 (window 2) windowMax
+    0 0 [] [1, 2, 3, 4] = [1, 2, 3] ∧
+    skipsR (fun _ => true) (fun i => i == 2) (fun _ => false) exPair 2 (window 2) windowMax
+    0 0 [] [1, 2, 3, 4] = [] ∧
+    emitR (fun _ => true) (fun i => i == 1) (fun _ => false) exPair 2 (window 2) windowMax
+    0 0 [] [1, 2, 3, 4] = [1, 3, 4] ∧
+    skipsR (fun _ => true) (fun i => i == 1) (fun _ => false) exPair 2 (window 2) windowMax
+    0 0 [] [1, 2, 3, 4] = [(1, 2)] := by decide
+
 /-- `a_duplicate_with_a_warning_of_its_own_is_not_skipped`: `2` warns, so it is
 emitted and takes the second slot. -/
 example : emitR (fun _ => true) (fun _ => false) (fun i => i == 2) exPair 2 (window 2) windowMax
@@ -1335,9 +1432,13 @@ example : skipsR (fun _ => true) (fun i => i == 1) (fun _ => false) exPair 1 (wi
 /-! ## Redundancy and Canonical-first
 
 `warns` does not include the ⚑ load-bearing line every Canonical hit carries,
-so a Canonical member can be skipped. Under today's `rank_members` that never
-loses the line: a skipped Canonical member was skipped for a Canonical hit,
-which carries its own. -/
+so a Canonical member can be skipped. Under today's `rank_members` a ⚑ banner
+is still present: a skipped Canonical member was skipped for a Canonical hit,
+which carries one. It is the kept copy's, not the skipped member's own line:
+each ⚑ line states its own concept's blast radius (`radii.get(&c.id)` in
+`assemble`), so of two Canonical copies with 10 and 3 dependents where the
+second ranks first, only "3 nodes depend on this" is shown, with an
+`also <id>` label naming the skipped copy. -/
 
 /-- **A skipped Canonical member is skipped only for a Canonical hit** when the
 ranked list is in `rank_members` order. -/
@@ -1360,6 +1461,27 @@ theorem skipped_canonical_kept_canonical {σ κ : Type} (isConcept forced warns 
     exact absurd hR (by decide)
   · rfl
 
+/-- Canonical `1`, `2` (one text) and a plain `3`, in `rank_members` order. -/
+def exCanon (i : Nat) : Bool := i ≤ 2
+
+def exCanonScore : Nat → Nat
+  | 1 => 90
+  | 2 => 80
+  | _ => 70
+
+def exCanonDup (a b : Nat) : Bool := (a == 1 && b == 2) || (a == 2 && b == 1)
+
+/-- `skipped_canonical_kept_canonical` at work: the Canonical `2` is skipped
+for the Canonical `1`, whose ⚑ line (not `2`'s) is the one shown. -/
+example : [1, 2, 3].Pairwise (fun a b =>
+      Order.rankMembers exCanon Order.natCmp exCanonScore Order.natCmp (fun _ => none)
+        Order.natCmp a b = .lt) ∧
+    skipsR (fun _ => true) (fun _ => false) (fun _ => false) exCanonDup 2 (window 2) windowMax
+      0 0 [] [1, 2, 3] = [(1, 2)] ∧
+    emitR (fun _ => true) (fun _ => false) (fun _ => false) exCanonDup 2 (window 2) windowMax
+      0 0 [] [1, 2, 3] = [1, 3] ∧
+    exCanon 1 = true ∧ exCanon 2 = true := by decide
+
 /-! ## #280's gate against emission (design model)
 
 Two consequences of gating only the order (`Order.gatedRankMembers`), using
@@ -1373,9 +1495,14 @@ Canonical pillar `3` reached by expansion.
    cannot remove it, or its banners, from the hits. Only an unforced pillar is
    cut by the gate.
 2. **The gate breaks `skipped_canonical_kept_canonical`.** Behind the gate a
-   below-gate Canonical member can be ranked after a non-Canonical copy of the
-   same text and skipped for it, and the ⚑ line, which `warns` does not count,
-   goes with it.
+   below-gate Canonical member can be ranked after a non-Canonical copy that
+   is redundant with it and be skipped for it, and the ⚑ line, which `warns`
+   does not count, goes with it: no ⚑ banner is left. This needs a redundant
+   pair whose query relevance falls on opposite sides of the gate. The
+   default same-content signal rarely produces one (identical texts score
+   alike in phase 1); it becomes realistic under `similar_signals = true`,
+   where a `Semantic` edge or cosine joins differently worded texts, or when
+   one copy misses the phase-1 cap or has no vector.
 -/
 
 /-- `top_k = 2`, pillar not forced: today it takes the first slot; behind the
@@ -1392,7 +1519,9 @@ def exSame (a b : Nat) : Bool := (a == 1 && b == 3) || (a == 3 && b == 1)
 
 /-- `top_k = 3`: today the Canonical copy ranks first and the plain copy is
 skipped for it; behind the gate the Canonical copy is skipped for the plain
-one. -/
+one. The example's relevances (pillar 0, plain copy 90) put the pair on
+opposite sides of the gate, which identical texts rarely are; see item 2
+above. -/
 example : skipsR (fun _ => true) (fun _ => false) (fun _ => false) exSame 3 (window 3) windowMax
     0 0 [] [3, 1, 2] = [(3, 1)] ∧
     skipsR (fun _ => true) (fun _ => false) (fun _ => false) exSame 3 (window 3) windowMax

@@ -455,7 +455,13 @@ question for the owner; see the file header):
 
 * the gate compares a per-member **query relevance** `rel` (assemble.rs's
   `query_relevance`: the phase-1 candidate score, `0` for a member phase 1
-  never scored), not the final blended score;
+  never scored), not the final blended score. Its scale depends on
+  `FusionKind`: a raw leg score (unbounded BM25 for keyword hits) under
+  `Max`, a value in `[0, 1]` under `Rrf` (#173), so one gate constant means
+  different things under the two; the model takes `rel` as given. The #175
+  research seam `assemble_with_graph_relevance` can give an expansion-only
+  member a nonzero relevance (`graph_relevance`, used by `score_of` when
+  phase 1 has none); the model ignores it, and production passes `None`;
 * a member clears the gate **at or above** it (`gate ≤ rel`);
 * the gate is `Option Nat`: `none` is the gate switched off;
 * a promoted member is Canonical **and** clears the gate; promotion is the
