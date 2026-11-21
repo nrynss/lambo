@@ -284,11 +284,11 @@ theorem time_trigger_needs_both (since gcInterval idleFloor : Nat) (longEnough :
   · rw [if_neg h1] at h
     by_cases h2 : since < idleFloor
     · rw [if_pos h2] at h
-      exact Option.noConfusion h
+      cases h
     · rw [if_neg h2] at h
       by_cases h3 : longEnough = true
       · exact ⟨by omega, h3⟩
       · rw [if_neg h3] at h
-        exact Option.noConfusion h
+        cases h
 
 end Lambo.Gc

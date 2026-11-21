@@ -294,7 +294,9 @@ theorem no_token_refused (current : Nat) (h : 0 < current) : ¬ Permits current 
   | inl h0 => omega
   | inr hex =>
     cases hex with
-    | intro p hp' => exact Option.noConfusion hp'.1
+    | intro p hp' =>
+      have hnone : (none : Option Nat) = some p := hp'.1
+      cases hnone
 
 /-- The seed and fixture bypass: a session that was never leased admits any
 write. -/

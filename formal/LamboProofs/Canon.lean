@@ -109,14 +109,14 @@ theorem gate_some (current from_ to_ result : Status)
     rw [← e, hc.1]
     exact ⟨rfl, rfl, hc.2⟩
   · rw [if_neg hc] at h
-    exact Option.noConfusion h
+    cases h
 
 /-- A fabricated transition, one whose `from` is not the current status, is
 rejected whatever it claims. -/
 theorem gate_rejects_mismatch (current from_ to_ : Status) (h : current ≠ from_) :
     gate current from_ to_ = none := by
   unfold gate
-  exact if_neg (fun hc => h hc.1)
+  exact if_neg (fun (hc : current = from_ ∧ legal from_ to_ = true) => h hc.1)
 
 /-! ## One canonization cycle
 
@@ -176,6 +176,7 @@ abbrev Consistent (g : Status) (f : Flags) : Prop :=
   (f.stage3 = true → g = .venerable) ∧
   (f.budget = true → g = .canonical)
 
+set_option maxHeartbeats 1000000 in
 /-- **One hop per cycle.** Whatever status `s` the concept has when the apply
 phase starts (it may differ from the gather-time status `g` if `set_root_goal`
 ran in between), the cycle leaves it unchanged or moves it along exactly one
@@ -190,6 +191,7 @@ theorem cycle_one_hop (g s : Status) (f : Flags) (h : Consistent g f) :
     cases g <;> cases s <;> cases supersede <;> cases stage1 <;> cases stage2 <;>
       cases stage3 <;> cases budget <;> decide
 
+set_option maxHeartbeats 1000000 in
 /-- A cycle raises a concept by at most one rank. -/
 theorem cycle_rank_le (g s : Status) (f : Flags) (h : Consistent g f) :
     (cycle s f).rank ≤ s.rank + 1 := by
@@ -199,6 +201,7 @@ theorem cycle_rank_le (g s : Status) (f : Flags) (h : Consistent g f) :
     cases g <;> cases s <;> cases supersede <;> cases stage1 <;> cases stage2 <;>
       cases stage3 <;> cases budget <;> decide
 
+set_option maxHeartbeats 1000000 in
 /-- **No stage is skipped.** A concept is Canonical after a cycle only if it
 was already Canonical or was Venerable when the cycle's apply phase began. -/
 theorem cycle_never_skips (g s : Status) (f : Flags) (h : Consistent g f)

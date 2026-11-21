@@ -153,7 +153,7 @@ theorem classify_unrecorded_iff (stored : Option (Contract K M)) (live : Contrac
       · rw [if_neg hs] at h'
         exact Compat.noConfusion h'
     · intro h
-      exact Option.noConfusion h
+      cases h
 
 /-- A recorded contract is `Compatible` exactly when it equals the live one. -/
 theorem classify_compatible_iff (s live : Contract K M) :

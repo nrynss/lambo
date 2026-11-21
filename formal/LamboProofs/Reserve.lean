@@ -118,7 +118,7 @@ theorem active_iff (now : Int) (r : Reservation A) :
         show (if now < r.expires then some r else none) = none
         rw [if_neg hlive]
       rw [e] at h
-      exact Option.noConfusion h
+      cases h
   · intro hlive
     show (if now < r.expires then some r else none) = some r
     rw [if_pos hlive]

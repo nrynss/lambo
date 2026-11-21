@@ -87,7 +87,7 @@ theorem step_keeps_binding {a b : Registry κ ι} (h : Step a b) (k : κ) (i : �
       cases hfree with
       | inl hnone =>
         rw [hnone] at hk
-        exact Option.noConfusion hk
+        cases hk
       | inr hsome =>
         rw [hsome] at hk
         exact hk

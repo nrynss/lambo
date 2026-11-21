@@ -163,7 +163,7 @@ theorem expire_keeps_unsettled (cutoff : Int) :
         cases List.mem_cons.mp he with
         | inl heq =>
           rw [heq, hx] at hnone
-          exact Option.noConfusion hnone
+          cases hnone
         | inr hmem => exact ih e hmem hnone
       · have hstep : expire cutoff (x :: rest) = x :: rest := by
           simp [expire, hx, hold]
@@ -253,7 +253,7 @@ theorem evict_keeps_unsettled :
         cases List.mem_cons.mp he with
         | inl heq =>
           rw [heq, hx] at hnone
-          exact Option.noConfusion hnone
+          cases hnone
         | inr hmem => exact ih n e hmem hnone
 
 /-! ## Looking up an id that has no entry -/
