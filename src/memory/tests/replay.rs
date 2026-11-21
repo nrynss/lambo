@@ -1490,7 +1490,8 @@ fn owed_derive(
 /// Seed `inner` with a session whose only content is one interaction and the
 /// given intents, as `load_session` returns them (`intents` is the load
 /// order), then attach `strategy` over it and wait until the replay has
-/// either paid its debt or stopped.
+/// paid its debt or named a block reason (it stopped, or ended with intents
+/// owed: since #295 a finished replay that leaves a debt always names one).
 #[cfg(feature = "fixtures")]
 async fn replay_planted(
     inner: &Arc<MemoryStore>,
@@ -1673,19 +1674,31 @@ async fn a_graph_dependent_input_refusal_at_replay_settles_failed_and_the_replay
     );
 }
 
-/// Answers like [`FixtureEmbedder`], except that the first embed of a text
-/// containing `trip` gets a transient answer (`EmbedError::Unavailable`, an
-/// embedder that blinked), as at a replay meeting a brief outage.
+/// Answers like [`FixtureEmbedder`], except that the first `trips` embeds
+/// of a text containing `trip` get a transient answer
+/// (`EmbedError::Unavailable`, an embedder that blinked), as at a replay
+/// meeting a brief outage.
 #[cfg(feature = "fixtures")]
-struct BlinkOnce {
+struct Blink {
     inner: FixtureEmbedder,
     trip: &'static str,
-    tripped: std::sync::atomic::AtomicBool,
+    trips: std::sync::Mutex<usize>,
+}
+
+#[cfg(feature = "fixtures")]
+impl Blink {
+    fn arc(trip: &'static str, trips: usize) -> Arc<dyn Embedder> {
+        Arc::new(Blink {
+            inner: FixtureEmbedder::new(),
+            trip,
+            trips: std::sync::Mutex::new(trips),
+        })
+    }
 }
 
 #[cfg(feature = "fixtures")]
 #[async_trait]
-impl Embedder for BlinkOnce {
+impl Embedder for Blink {
     fn dimensions(&self) -> usize {
         self.inner.dimensions()
     }
@@ -1711,13 +1724,19 @@ impl Embedder for BlinkOnce {
 }
 
 #[cfg(feature = "fixtures")]
-impl BlinkOnce {
+impl Blink {
     async fn embed_as(
         &self,
         text: &str,
         role: crate::test_util::TextRole,
     ) -> Result<Vec<f32>, crate::embed::EmbedError> {
-        if text.contains(self.trip) && !self.tripped.swap(true, Ordering::SeqCst) {
+        let blink = text.contains(self.trip) && {
+            let mut left = self.trips.lock().unwrap();
+            let blink = *left > 0;
+            *left = left.saturating_sub(1);
+            blink
+        };
+        if blink {
             return Err(crate::embed::EmbedError::Unavailable(
                 "llama.cpp unreachable: connection refused".into(),
             ));
@@ -1738,11 +1757,11 @@ fn owed_receipt(epoch: u64, issued_ms: i64, seq: u64) -> crate::writeq::ReceiptI
 /// agent's later intent apply first.
 ///
 /// Agent A owes two writes, agent B one, in that load order. The replay's
-/// embed of A's first write blinks once. Before the fix the loop left it
-/// durable and applied A's second write, so the next serve applied A's
-/// writes in the order 2, 1. Now A is deferred for the rest of the serve: its
-/// second write waits too, B's write still applies, and the next serve
-/// applies A's two writes in order.
+/// embed of A's first write blinks at both attempts the serve makes. Before
+/// the fix the loop left it durable and applied A's second write, so the next
+/// serve applied A's writes in the order 2, 1. Now A is deferred: its second
+/// write waits too, B's write still applies, the serve says why its debt is
+/// left (`embedder`), and the next serve applies A's two writes in order.
 ///
 /// Mirrors the Lean theorems `Drain.loopD_no_overtake` and
 /// `Drain.fixed_agent_order` (per-agent order across serves, whatever the
@@ -1793,11 +1812,7 @@ async fn a_transient_answer_at_replay_defers_the_agent_instead_of_reordering_it(
         &inner,
         "intent-transient-order",
         MatchStrategy::Hybrid,
-        Arc::new(BlinkOnce {
-            inner: FixtureEmbedder::new(),
-            trip: "first fact of a",
-            tripped: std::sync::atomic::AtomicBool::new(false),
-        }),
+        Blink::arc("first fact of a", 2),
         plant,
     )
     .await;
@@ -1806,9 +1821,9 @@ async fn a_transient_answer_at_replay_defers_the_agent_instead_of_reordering_it(
         owed_receipt(epoch, 1_001, 2),
         owed_receipt(epoch, 1_002, 3),
     );
-    // B's write is last in the backlog: once it settles, the serve is done.
+    // The serve names a block reason once it ends with writes owed.
     wait_for(&mem, |mem| {
-        mem.pipeline().lookup(&b, b1).tag() != "pending_replay"
+        mem.pipeline().counters().replay_blocked() != crate::writeq::ReplayBlockReason::None
     })
     .await;
     assert_eq!(
@@ -1823,8 +1838,8 @@ async fn a_transient_answer_at_replay_defers_the_agent_instead_of_reordering_it(
     assert_eq!(mem.pipeline().counters().replay_owed(), 2);
     assert_eq!(
         mem.pipeline().counters().replay_blocked(),
-        crate::writeq::ReplayBlockReason::None,
-        "one blink is below the threshold: nothing stops"
+        crate::writeq::ReplayBlockReason::Embedder,
+        "writes are owed because the embedder did not answer them: the serve says so"
     );
     mem.close().await.expect("clean close");
 
@@ -2172,4 +2187,144 @@ async fn wait_for_owed(mem: &Memory) {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     tokio::time::sleep(Duration::from_millis(20)).await;
+}
+
+/// The three intents of [`a_transient_answer_at_replay_defers_the_agent_instead_of_reordering_it`]:
+/// two of agent A, then one of agent B.
+#[cfg(feature = "fixtures")]
+fn two_of_a_one_of_b(
+    sid: &SessionId,
+    ix: NodeId,
+    epoch: u64,
+    first: (&str, ConceptType),
+) -> Vec<crate::types::WriteIntent> {
+    let (a, b) = (AgentId::new("agent-a"), AgentId::new("agent-b"));
+    vec![
+        owed_derive(sid, &a, ix, epoch, 1_000, 1, &[first], &[]),
+        owed_derive(
+            sid,
+            &a,
+            ix,
+            epoch,
+            1_001,
+            2,
+            &[("second fact of a", ConceptType::Entity)],
+            &[],
+        ),
+        owed_derive(
+            sid,
+            &b,
+            ix,
+            epoch,
+            1_002,
+            3,
+            &[("only fact of b", ConceptType::Entity)],
+            &[],
+        ),
+    ]
+}
+
+/// **#295 review (starvation)**: an agent deferred at a transient answer gets
+/// one more attempt at the end of the pass, so a write that blinked once does
+/// not wait for the next serve. Here the retry applies A's two writes, in
+/// order, after B's; nothing is owed and nothing is blocked.
+///
+/// Mirrors `Drain.replayP_progress` and `Drain.replayP_preserves`.
+#[cfg(feature = "fixtures")]
+#[tokio::test]
+async fn a_deferred_agent_is_retried_once_at_the_end_of_the_pass() {
+    let inner = Arc::new(MemoryStore::new());
+    let (a, b) = (AgentId::new("agent-a"), AgentId::new("agent-b"));
+    let epoch = 0x0022_3344_5566_7788;
+    let mem = attach_planted(
+        &inner,
+        "intent-retry-pass",
+        MatchStrategy::Hybrid,
+        Blink::arc("first fact of a", 1),
+        |sid, ix| two_of_a_one_of_b(sid, ix, epoch, ("first fact of a", ConceptType::Entity)),
+    )
+    .await;
+    wait_for(&mem, |mem| mem.pipeline().counters().replay_owed() == 0).await;
+    assert_eq!(
+        [
+            mem.pipeline()
+                .lookup(&a, owed_receipt(epoch, 1_000, 1))
+                .tag(),
+            mem.pipeline()
+                .lookup(&a, owed_receipt(epoch, 1_001, 2))
+                .tag(),
+            mem.pipeline()
+                .lookup(&b, owed_receipt(epoch, 1_002, 3))
+                .tag(),
+        ],
+        ["applied_after_restart"; 3]
+    );
+    assert_eq!(
+        mem.pipeline().counters().replay_blocked(),
+        crate::writeq::ReplayBlockReason::None
+    );
+    mem.close().await.expect("clean close");
+}
+
+/// **#295 review (quarantine)**: an intent whose receipt id is in another
+/// format (`lwr2`, as a newer build might write) is not settled `failed`,
+/// which cannot be undone. It is left owed, and its agent is deferred so the
+/// agent's later write does not overtake it; another agent's write still
+/// applies, and the serve names the block reason `other`. A malformed `lwr1`
+/// id is still settled `failed`
+/// (`an_intent_with_an_unparseable_receipt_id_is_settled_failed`).
+///
+/// Mirrors `Drain.stepQ_unknownFormat` and `Drain.serveQ_block`; the fix as
+/// first committed is `Drain.fixed_badId_settled`.
+#[cfg(feature = "fixtures")]
+#[tokio::test]
+async fn an_intent_in_another_receipt_format_is_quarantined_not_settled() {
+    let inner = Arc::new(MemoryStore::new());
+    let (a, b) = (AgentId::new("agent-a"), AgentId::new("agent-b"));
+    let epoch = 0x0033_4455_6677_8899;
+    let mem = attach_planted(
+        &inner,
+        "intent-quarantine",
+        MatchStrategy::Canonical,
+        Arc::new(FixtureEmbedder::new()),
+        |sid, ix| {
+            let mut rows = two_of_a_one_of_b(sid, ix, epoch, ("future fact", ConceptType::Entity));
+            rows[0].receipt = "lwr2.0000000000000001.3e8.1.extra".into();
+            rows
+        },
+    )
+    .await;
+    wait_for(&mem, |mem| {
+        mem.pipeline().counters().replay_blocked() != crate::writeq::ReplayBlockReason::None
+    })
+    .await;
+    assert_eq!(
+        mem.pipeline()
+            .lookup(&b, owed_receipt(epoch, 1_002, 3))
+            .tag(),
+        "applied_after_restart"
+    );
+    assert_eq!(
+        mem.pipeline()
+            .lookup(&a, owed_receipt(epoch, 1_001, 2))
+            .tag(),
+        "pending_replay",
+        "A's later write waits behind the quarantined one"
+    );
+    assert_eq!(mem.pipeline().counters().replay_owed(), 2);
+    assert_eq!(
+        mem.pipeline().counters().replay_blocked(),
+        crate::writeq::ReplayBlockReason::Other
+    );
+    mem.close().await.expect("clean close");
+    let snap = inner
+        .load_session(&SessionId::new("intent-quarantine"))
+        .await
+        .expect("reload");
+    let quarantined = snap
+        .write_intents
+        .iter()
+        .find(|i| i.receipt.starts_with("lwr2."))
+        .expect("kept");
+    assert!(quarantined.outcome.is_none(), "left owed, not settled");
 }

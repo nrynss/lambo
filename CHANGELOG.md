@@ -230,6 +230,25 @@
   latches, that a stale write is never re-sent, that the loop itself loses
   nothing silently, and that `close` returns `Ok` only when every batch that
   left the loop was committed or dead-lettered.
+- Write-queue replay, review follow-ups to #295. An agent the replay deferred
+  at a transient embedder answer now gets one more attempt at the end of the
+  pass, from its oldest owed intent, so a write that blinked once no longer
+  waits for the next serve; one that fails both attempts still holds its
+  agent's intents, in order, for the next serve (bounding a write that never
+  embeds is an open question). A durable intent whose receipt id is in
+  another format (an `lwrN.` prefix other than `lwr1`, as a newer build would
+  write) is no longer settled `failed`, which could not be undone: it is
+  quarantined, left owed and warned about at seeding and at replay, and its
+  agent's later intents wait behind it. Only a malformed `lwr1.` id is still
+  settled `failed`, and the seeding warning now says which of the two a row
+  is (and nothing about settling a row already consumed).
+  `write_queue_replay_blocked` is no longer `null` while a finished replay
+  leaves intents owed: `embedder` when an agent was deferred at an outage,
+  `other` when only quarantined intents hold others back.
+  `formal/LamboProofs/Drain.lean` models the retry pass, the quarantine and
+  the block reason, and proves the order still holds through both passes,
+  that a retry the embedder answers leaves nothing owed, and that the block
+  reason is never null while intents are owed.
 - Write queue: an embedder outage in session no longer lets one agent's later
   write apply ahead of the write it left owed (#295, the in-session half). A
   write the worker reaches during an outage is now held: its intent stays

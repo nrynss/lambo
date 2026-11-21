@@ -304,7 +304,15 @@ pub struct ReceiptId {
 impl ReceiptId {
     /// Wire prefix. Versioned so a later format change is detectable rather
     /// than silently mis-parsed as this one.
-    const PREFIX: &'static str = "lwr1";
+    pub(super) const PREFIX: &'static str = "lwr1";
+
+    /// Whether `s` claims this build's receipt format (`lwr1.`), parseable or
+    /// not. An id in another format (a newer build's, say) is not this build's
+    /// to settle: the replay quarantines it (#295).
+    pub(super) fn is_this_format(s: &str) -> bool {
+        s.strip_prefix(Self::PREFIX)
+            .is_some_and(|rest| rest.starts_with('.'))
+    }
 
     pub(super) fn new(epoch: u64, issued: DateTime<Utc>, seq: u64) -> Self {
         Self {

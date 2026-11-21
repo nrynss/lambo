@@ -77,7 +77,7 @@ pub struct ApplyLatencySummary {
     pub max: Duration,
 }
 
-/// Why the durable-intent replay last stopped without draining (J3-R2R-8).
+/// Why the durable-intent replay last stopped, or ended, without draining.
 ///
 /// `replay_owed` is a *level* — an operator cannot tell "draining" from
 /// "wedged" from it alone. This names the class of the error that ended the
@@ -85,15 +85,22 @@ pub struct ApplyLatencySummary {
 /// used to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ReplayBlockReason {
-    /// The replay drained, was never owed, or has not been attempted this attach.
+    /// The replay drained, was never owed, or has not been attempted (or is
+    /// still running) this attach. Never the answer once a replay has ended
+    /// with intents owed (#295).
     #[default]
     None,
     /// The embedder answered transiently (or not at all) past
     /// [`EMBEDDER_SICK_THRESHOLD`](super::EMBEDDER_SICK_THRESHOLD) — it is
-    /// presumed sick. This is "wedged", not "draining".
+    /// presumed sick. This is "wedged", not "draining". Also the reason when
+    /// the replay ended with an agent's intents owed because the embedder did
+    /// not answer one of them at either of its two attempts (#295: the agent
+    /// was deferred, and its intents wait, in order, for the next serve).
     Embedder,
     /// A non-embedder, session-wide fault (a store error, a lost lease, a
-    /// config error) ended the loop.
+    /// config error) ended the loop. Also the reason when the replay ended
+    /// with intents owed only behind an intent whose receipt id is in another
+    /// format, which this build leaves owed (quarantined, #295).
     Other,
     /// An image derive intent (#22) reached the head of the backlog in a
     /// process that cannot apply one: its match strategy is not `hybrid`, or

@@ -11,13 +11,14 @@
 //!   [`replay_order`]: each process's intents in `lane_seq` (admission) order,
 //!   processes interleaved by `issued_ms`;
 //! * nothing is consumed before one liveness embed succeeds;
-//! * a content refusal, an input refusal or an unparseable receipt id
-//!   consumes the intent as `failed`; an outage, any other store error or a
-//!   lost lease leaves it unconsumed; an outage below
-//!   [`EMBEDDER_SICK_THRESHOLD`] consecutive transients defers that intent's
-//!   agent for the rest of the serve, so no later write of it overtakes the
-//!   one left behind; past the threshold, or on any non-embedder error, the
-//!   loop ends;
+//! * a content refusal, an input refusal or a malformed receipt id consumes
+//!   the intent as `failed`; an outage, any other store error, a lost lease
+//!   or an id in another receipt format leaves it unconsumed; an outage below
+//!   [`EMBEDDER_SICK_THRESHOLD`] consecutive transients, or an id in another
+//!   format, defers that intent's agent for the rest of the pass, so no later
+//!   write of it overtakes the one left behind, and one more pass retries
+//!   the deferred agents; past the threshold, or on any non-embedder error,
+//!   the loop ends;
 //! * replay moves only `replayed` / `replay_owed` / `replay_blocked`, never this
 //!   session's own `accepted`/`applied`/`failed`.
 
@@ -47,8 +48,9 @@ use crate::types::{AgentId, LamboError, WriteIntent, WriteIntentOutcome};
 /// counts toward the embedder-sickness evidence. A **transient** draw is
 /// evidence that the embedder is sick; it is left durable (never consumed),
 /// increments a running streak, and defers that intent's agent for the rest
-/// of the attach (#295: its later intents are not run, so none can apply
-/// before it). The streak resets to zero on any applied
+/// of the pass (#295: its later intents are not run, so none can apply
+/// before it; a second pass retries it once, the streak carried over). The
+/// streak resets to zero on any applied
 /// success or any content refusal (each proves the embedder just answered —
 /// observed health), so only a run of `EMBEDDER_SICK_THRESHOLD` transients with
 /// *nothing* answered in between concludes that the embedder is sick and stops
@@ -145,8 +147,11 @@ impl WritePipeline {
     ///   promise, since a total order refines every lane's) whatever its clock
     ///   did, wall-clock order across crashed processes (#295). An agent whose
     ///   intent is left unconsumed by a transient embedder answer is deferred
-    ///   for the rest of the attach, so no later intent of it applies before
-    ///   the one left behind (#295); the next serve replays them in order.
+    ///   for the rest of the pass, so no later intent of it applies before
+    ///   the one left behind (#295). Unless the pass stopped, the replay
+    ///   runs once more over what it left owed, so each deferred agent gets
+    ///   one more attempt in the attach; what is still owed after that the
+    ///   next serve replays in order, and `replay_blocked` names why.
     /// * **Throttling — the open question, decided here**: replay runs
     ///   sequentially in the background, at most ONE write in flight, and does
     ///   not pass through admission. A restart over a deep backlog therefore
@@ -178,9 +183,12 @@ impl WritePipeline {
     ///   a repeated Observation, a second Hierarchical parent, a pair whose
     ///   ends resolve to one key or concept: #116, #294), a stored payload
     ///   this build cannot decode (#129), and a lookup timeout below
-    ///   [`REPLAY_LOOKUP_TIMEOUT_LIMIT`]. So is an intent whose receipt id does
-    ///   not parse (#295): it can be neither applied nor answered for, and
-    ///   left unconsumed it was skipped, and counted owed, on every serve. A
+    ///   [`REPLAY_LOOKUP_TIMEOUT_LIMIT`]. So is an intent whose receipt id is
+    ///   malformed in this build's own format (#295): it can be neither
+    ///   applied nor answered for, and left unconsumed it was skipped, and
+    ///   counted owed, on every serve. An id in another format (a newer
+    ///   build's) is not settled, which could not be undone: it is
+    ///   quarantined, left owed and warned about, and its agent deferred. A
     ///   replay that fails for a reason that says nothing about the intent
     ///   (the embedder unreachable or timed out, any other store error, the
     ///   lease lost, a configuration that cannot apply it) leaves it
@@ -226,11 +234,23 @@ impl WritePipeline {
                     continue;
                 }
                 let Ok(id) = ReceiptId::from_str(&intent.receipt) else {
+                    // What the replay will do with it, said only where it is
+                    // true: a consumed row is not replayed at all.
+                    let fate = if intent.outcome.is_some() {
+                        "its recorded outcome cannot be looked up by that id"
+                    } else if ReceiptId::is_this_format(&intent.receipt) {
+                        "it is malformed in this build's own format, so the replay settles it \
+                         failed"
+                    } else {
+                        "it is in another receipt format (a newer build's?), so the replay leaves \
+                         it owed (quarantined) and holds its agent's later intents behind it; a \
+                         build that reads the format can replay it"
+                    };
                     tracing::warn!(
                         session = %self.ctx.session,
                         receipt = %intent.receipt,
-                        "write intent carries an unparseable receipt id; it can be neither \
-                         applied nor looked up by its id, so the replay settles it failed"
+                        agent = %intent.agent,
+                        "write intent carries an unparseable receipt id: {fate}"
                     );
                     continue;
                 };
@@ -330,11 +350,66 @@ impl WritePipeline {
             // before it (the per-agent order `WriteIntent::agent` promises);
             // the next serve replays them all in order.
             let mut deferred: HashSet<AgentId> = HashSet::new();
-            for intent in pending {
+            // #295 review: what a pass leaves owed (every intent of a deferred
+            // agent, from the one it was deferred at), in order. Unless the
+            // pass stopped, the replay runs once more over it, so each
+            // deferred agent gets one more attempt in this serve rather than
+            // waiting for the next one. Whether the pass deferred an agent
+            // at a transient answer, and how many intents it quarantined,
+            // decide the block reason a serve that ends with writes owed
+            // reports.
+            let mut queue: std::collections::VecDeque<WriteIntent> = pending.into();
+            let mut left: Vec<WriteIntent> = Vec::new();
+            let mut retried = false;
+            let mut deferred_at_outage = false;
+            let mut quarantined = 0usize;
+            let mut halted = false;
+            loop {
+                let Some(intent) = queue.pop_front() else {
+                    if retried || left.is_empty() {
+                        break;
+                    }
+                    retried = true;
+                    deferred.clear();
+                    deferred_at_outage = false;
+                    quarantined = 0;
+                    tracing::info!(
+                        session = %this.ctx.session,
+                        left = left.len(),
+                        "write queue: retrying, once, the durable intents of agents the replay \
+                         deferred, from each one's oldest owed intent"
+                    );
+                    queue = std::mem::take(&mut left).into();
+                    continue;
+                };
                 if this.ctx.lease_lost.load(Ordering::Acquire) || this.lanes.lock().sealed {
+                    halted = true;
                     break;
                 }
                 if deferred.contains(&intent.agent) {
+                    left.push(intent);
+                    continue;
+                }
+                if ReceiptId::from_str(&intent.receipt).is_err()
+                    && !ReceiptId::is_this_format(&intent.receipt)
+                {
+                    // #295 review: an id in another receipt format, as a
+                    // newer build writes. Settling it `failed` could not be
+                    // undone, so it is quarantined: left owed (counted in
+                    // `replay_owed`, warned about at seeding and here), and
+                    // its agent deferred so the agent's later intents do not
+                    // overtake it.
+                    quarantined += 1;
+                    deferred.insert(intent.agent.clone());
+                    tracing::warn!(
+                        session = %this.ctx.session,
+                        receipt = %intent.receipt,
+                        agent = %intent.agent,
+                        "write queue: a durable intent's receipt id is in another format; it is \
+                         left owed (quarantined) for a build that reads it, and its agent's \
+                         later intents wait behind it"
+                    );
+                    left.push(intent);
                     continue;
                 }
                 let Ok(receipt) = ReceiptId::from_str(&intent.receipt) else {
@@ -377,19 +452,19 @@ impl WritePipeline {
                     continue;
                 };
                 let destination = intent.payload.receipt_destination().cloned();
-                let (payload, decode_error) = match JobPayload::from_intent_payload(intent.payload)
-                {
-                    Ok(payload) => (payload, None),
-                    Err(error) => (
-                        JobPayload::Derive {
-                            concepts: vec![],
-                            pairs: vec![],
-                            citations: Default::default(),
-                            repo_scope: None,
-                        },
-                        Some(error),
-                    ),
-                };
+                let (payload, decode_error) =
+                    match JobPayload::from_intent_payload(intent.payload.clone()) {
+                        Ok(payload) => (payload, None),
+                        Err(error) => (
+                            JobPayload::Derive {
+                                concepts: vec![],
+                                pairs: vec![],
+                                citations: Default::default(),
+                                repo_scope: None,
+                            },
+                            Some(error),
+                        ),
+                    };
                 let job = Job {
                     receipt,
                     agent: intent.agent.clone(),
@@ -536,6 +611,7 @@ impl WritePipeline {
                         // as the image-`Config` arm stops for the lane order;
                         // the other agents' intents keep sampling.
                         deferred.insert(intent.agent.clone());
+                        deferred_at_outage = true;
                         tracing::warn!(
                             session = %this.ctx.session,
                             receipt = %intent.receipt,
@@ -548,6 +624,7 @@ impl WritePipeline {
                              sequential decision rule keeps sampling the embedder's health on \
                              other agents' intents"
                         );
+                        left.push(intent);
                         continue;
                     }
                     // Content — absorbing: permanent FOR THIS INPUT. Consume it
@@ -740,6 +817,32 @@ impl WritePipeline {
                 // monopolize the runtime between two of the fresh session's
                 // polls.
                 tokio::task::yield_now().await;
+            }
+            // #295 review: a serve that ends with intents owed and did not
+            // stop says why, rather than reporting no block while a debt
+            // stands: `Embedder` when its last pass deferred an agent at a
+            // transient answer, `Other` when only quarantined intents hold
+            // writes back.
+            if !halted
+                && !left.is_empty()
+                && this.counters.replay_blocked() == ReplayBlockReason::None
+            {
+                let reason = if deferred_at_outage {
+                    ReplayBlockReason::Embedder
+                } else {
+                    ReplayBlockReason::Other
+                };
+                this.counters.set_replay_blocked(reason);
+                tracing::warn!(
+                    session = %this.ctx.session,
+                    owed = left.len(),
+                    quarantined,
+                    reason = ?reason,
+                    "write queue: the replay ended with durable intents still owed: agents whose \
+                     intent the embedder did not answer at two attempts, or that wait behind an \
+                     intent in another receipt format; they stay durable, in order, for the \
+                     next serve"
+                );
             }
             tracing::info!(
                 session = %this.ctx.session,
