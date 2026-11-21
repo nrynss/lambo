@@ -197,6 +197,34 @@ fn ordering_cap_and_dedup() {
     assert_eq!(REPLACEMENT_CANDIDATE_LIMIT, 3);
 }
 
+/// #302: a duplicate id keeps its highest-scoring occurrence wherever it
+/// stands in the store's order ("in any order", "ranked by cosine"), not
+/// its first one.
+#[test]
+fn a_duplicate_id_keeps_its_highest_cosine() {
+    use ConceptType::Logic;
+    let olds = (1..=4)
+        .map(|n| concept(n, &format!("{OLD} {n}"), Logic))
+        .collect();
+    let g = graph(concept(0, NEW, Logic), olds);
+    let hits = [
+        hit(1, 0.86),
+        hit(2, 0.90),
+        hit(3, 0.89),
+        hit(4, 0.88),
+        hit(1, 0.95),
+    ];
+    let want = vec![(id(1), 0.95), (id(2), 0.90), (id(3), 0.89)];
+    assert_eq!(listed(&g, &hits, &[]), want);
+    let reversed: Vec<_> = hits.iter().rev().cloned().collect();
+    assert_eq!(listed(&g, &reversed, &[]), want);
+    // An occurrence below the floor does not hide one above it.
+    assert_eq!(
+        listed(&g, &[hit(1, 0.50), hit(1, 0.92)], &[]),
+        vec![(id(1), 0.92)]
+    );
+}
+
 /// A pair already joined by `against` or `depends_on`, either way, is
 /// settled: never listed.
 #[test]

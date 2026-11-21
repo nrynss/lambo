@@ -70,6 +70,13 @@
   most once per survey.
   `formal/LamboProofs/Policy.lean` models the fix
   (`reused_action_dependency_is_dated_by_its_writer`).
+- Replacement candidates: a concept the store's vector hits list more than
+  once is now listed at its highest cosine, not at its first occurrence's
+  (#302). `select` documented its hits as taken "in any order" and its
+  candidates as "ranked by cosine", but the first occurrence decided the
+  cosine and so the rank. Latent: no current vector source returns a
+  duplicate id. `formal/LamboProofs/Supersession.lean` still models the
+  first-occurrence rule.
 - Canonical keys: an empty stem no longer reaches a key (#301, item 1). The
   Snowball English stemmer stems `''s` to the empty string, and the
   tokenizer kept it, so `''s-lease` keyed as `" leas"` (a leading space, and
