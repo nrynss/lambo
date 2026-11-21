@@ -18,7 +18,16 @@ Model of
   (`src/types/mod.rs`), and `Edge::dependence` / `EdgeType::dependent_end`
   for one comparison;
 * how `Evaluator::gather` and `apply` (`src/canon/eval.rs`) consult the policy,
-  as `Canon.Flags`, so `Canon.cycle` applies unchanged.
+  as `Canon.Flags`, so `Canon.cycle` applies unchanged;
+* since #300, the Solo terms' dating of a dependence edge by the turn that
+  wrote it: `Edge::about_time` and the writing interaction
+  `WriterTimeline` resolves (`src/daemon/conflict.rs`), read by
+  `supporting_interaction_times` and `solo_dependent_interactions`
+  (`src/canon/stage1.rs`). The previous dating (by the dependent's origin
+  interaction) stays beside it: `writer`, `supportingTimes`,
+  `recurrenceSessions`, `dependentOrigins`. Swarm's Stage 1 count and
+  Stage 2's span still read the dependent's origin, which is what
+  `dependentOrigins` models.
 
 The design is `dev-diary/lambo-for-mooshik/C-solopolicy.md` (spec §3.2's
 formula, with the valid-action term replaced by dependent interactions in #36
@@ -54,7 +63,10 @@ are 30, 60 and 100. The Rust computes in `f64`.
 Graphs are lists: interactions (id, flush time, optional event time),
 concepts (id, origin interaction) and edges (source, target, type). Lookups
 use the first match, so ids are taken to be unique, as `Graph` guarantees.
-Keys and ids in the Stage-1 order are natural numbers standing for their
+An edge's stamps (about-time, resolved writer) are a function of the edge,
+since a graph holds one edge per source, target and type; how
+`WriterTimeline` finds the writer (an exact `created_at` match) is not
+modelled, its answer is the input `Stamp.writer`. Keys and ids in the Stage-1 order are natural numbers standing for their
 orders. Strings are lists of characters; `str::trim`'s whitespace is the
 Unicode `White_Space` set and `to_ascii_lowercase` is `Char.toLower`.
 
@@ -106,6 +118,26 @@ Support and event time:
 * `hierarchical_child_is_dependent_not_recurrence`,
   `reused_action_dependency_is_dated_by_its_origin`: see "Findings".
 
+The fixed dating (#300; `supportingTimesW`, `recurrenceSessionsW`,
+`dependentOriginsW`, over per-edge `Stamp`s):
+
+* `reused_action_dependency_is_dated_by_its_writer` (`decide`, the issue's
+  scenario): the reused action's day-5 dependency on `Y` adds the day-5
+  session and the day-5 turn as a dependent, exactly as a fresh action node
+  does; `dependency_time_supports`: in general, a `Dependency` edge supports
+  on its own about-time.
+* `dependentOriginsW_not_own`: the own-origin exclusion is about the
+  writing turn; `own_origin_is_the_writing_turn` (`decide`): a dependence
+  written in the pillar's own turn no longer counts, even from an older
+  concept.
+* `supportingTimesW_eq`, `recurrenceSessionsW_eq`, `dependentOriginsW_eq`:
+  **agreement with the old dating** whenever every dependence edge was
+  written in its dependent's origin turn (`WrittenAtOrigin`).
+* `recurrenceW_mono_edge`, `causal_not_recurrenceW`: no edge lowers the
+  fixed term and causal touches still are not recurrence.
+* `policy_cycle_one_hop_fixed`, `band_mono_fixed_edge`: the score, band and
+  cycle results take any terms, so they hold for the fixed ones.
+
 The score and bands:
 
 * `score10_mono`, `rawScore_mono`, `band_mono`: monotone in sessions,
@@ -155,7 +187,9 @@ Admission:
    (`hierarchical_child_is_dependent_not_recurrence`). Whether children
    should count as recurrence is not stated anywhere.
 2. **A `Dependency` edge is dated by its source's origin, not by the turn
-   that wrote it.** Both terms credit a `Dependency` edge to the source
+   that wrote it** (fixed for the Solo terms in #300; see "The fixed
+   dating"; Swarm's Stage 1 count and Stage 2's span keep the origin
+   dating, an owner question). Before #300, both terms credit a `Dependency` edge to the source
    concept's `origin_interaction`: recurrence in
    `supporting_interaction_times` (`src/canon/policy.rs`, the `Dependency`
    arm) and dependents in `dependent_origin` (`src/canon/stage1.rs`).
@@ -172,7 +206,8 @@ Admission:
    already holds the writing turn's time, and neither term reads it. Caveat:
    a repeated *identical* citation reinforces the existing edge without
    re-dating it, so reading the edge's time would not help that case.
-3. **Test comments disagree with the test code** (the tests still pass):
+3. **Test comments disagreed with the test code** (the tests still
+   passed; the comments were corrected in #300):
    * `spread_support_graph` documents about-times on days 0/2/4/6; the code
      (`day(n - 1) + 48h`) gives days 0/3/4/5 (`spread_days_doc_and_code`).
      The same "days 0/2/4/6" or "days 2/4/6" wording recurs in
@@ -1029,6 +1064,282 @@ theorem reused_action_dependency_is_dated_by_its_origin :
       dependentOrigins (reusedActionGraph false) 61 = [5] := by
   decide
 
+/-! ### The fixed dating (#300)
+
+Since #300 the Solo policy's two time-spread terms date a dependence edge by
+the turn that **wrote** it, not by its dependent's origin interaction
+(`event_time.rs`: "An edge is about what the turn that wrote it is about").
+`writer`, `supportingTimes`, `recurrenceSessions` and `dependentOrigins`
+above stay as the previous version; this section is the fixed one.
+
+The Rust edge carries, or lets the graph resolve, two stamps the structural
+`Edge` above leaves out. They are modelled as a function of the edge, which
+is a function of the row because a graph holds one edge per source, target
+and type (`Graph`'s edge key):
+
+* `time`: `Edge::about_time`, stamped from the writing interaction's clock
+  when the edge is created (`record_action`, `derive`'s `depends_on` and
+  `parent_of` all copy the interaction's `created_at` and `event_time`);
+* `writer`: the writing interaction as `WriterTimeline` finds it, the one
+  interaction flushed at exactly the edge's `created_at`; `none` when no
+  interaction or several were (a hand-built or rebased edge, or a
+  same-instant collision), and then the dependent's origin is credited, as
+  before (the structural fallback `attribute_at` uses too).
+
+A repeated identical citation reinforces the existing edge and keeps both
+stamps, so it is not re-dated: no writer history is kept, and none is
+invented. Only a new edge is new evidence. -/
+
+/-- The stamps of one edge: its about-time and its resolved writer. -/
+structure Stamp where
+  time : Int
+  writer : Option Nat
+  deriving DecidableEq, Repr
+
+/-- The fixed support time: a `Derives` edge as before (its source is the
+writing interaction), a `Dependency` edge from a concept by its own
+about-time. -/
+def supportTimeW (g : Graph) (st : Edge → Stamp) (c : Nat) (e : Edge) : Option Int :=
+  if e.tgt = c then
+    match e.ty with
+    | .derives => (g.interaction e.src).map (·.aboutTime)
+    | .dependency => (g.concept e.src).map (fun _ => (st e).time)
+    | _ => none
+  else none
+
+/-- The fixed `supporting_interaction_times`. -/
+def supportingTimesW (g : Graph) (st : Edge → Stamp) (c : Nat) : List Int :=
+  canon (g.edges.filterMap (supportTimeW g st c))
+
+/-- The fixed `recurrence_sessions`. -/
+def recurrenceSessionsW (g : Graph) (st : Edge → Stamp) (c : Nat) : Nat :=
+  sessionCount sessionSeparation (supportingTimesW g st c)
+
+/-- The interaction a dependence edge is credited to: its resolved writer,
+else (no unique attribution) its dependent's origin. -/
+def credited (st : Edge → Stamp) (e : Edge) (dc : ConceptNode) : Nat :=
+  (st e).writer.getD dc.origin
+
+/-- The fixed Solo dependents term (`solo_dependent_interactions`, age floor
+cleared): the distinct interactions that wrote `c`'s dependence edges, other
+than `c`'s own origin. -/
+def dependentOriginsW (g : Graph) (st : Edge → Stamp) (c : Nat) : List Nat :=
+  (g.edges.filterMap fun e =>
+    match e.dependence with
+    | some (p, d) =>
+      if p = c then
+        match g.concept p, g.concept d with
+        | some pc, some dc =>
+          if credited st e dc = pc.origin then none
+          else (g.interaction (credited st e dc)).map (·.id)
+        | _, _ => none
+      else none
+    | none => none).eraseDups
+
+/-- The dependent end of a dependence edge, self-loops included: the source
+of a `Dependency`, the child (target) of a `Hierarchical`. -/
+def dependentEnd (e : Edge) : Option Nat :=
+  match e.ty with
+  | .dependency => some e.src
+  | .hierarchical => some e.tgt
+  | _ => none
+
+theorem dependence_dependentEnd {e : Edge} {p d : Nat} (h : e.dependence = some (p, d)) :
+    dependentEnd e = some d := by
+  unfold Edge.dependence at h
+  unfold dependentEnd
+  split at h
+  · cases h
+  · cases hty : e.ty <;> rw [hty] at h <;> simp_all
+
+/-- **The common case**: every dependence edge was written in its dependent's
+origin turn, so it is attributed to that turn and carries its about-time. -/
+def WrittenAtOrigin (g : Graph) (st : Edge → Stamp) : Prop :=
+  ∀ e, e ∈ g.edges → ∀ d dc, dependentEnd e = some d → g.concept d = some dc →
+    ∃ i, g.interaction dc.origin = some i ∧ st e = ⟨i.aboutTime, some dc.origin⟩
+
+/-- `filterMap` with functions that agree on the list. -/
+theorem filterMap_congr' {α β : Type} {f f' : α → Option β} :
+    ∀ l : List α, (∀ x, x ∈ l → f x = f' x) → l.filterMap f = l.filterMap f'
+  | [], _ => rfl
+  | x :: xs, h => by
+    rw [List.filterMap_cons, List.filterMap_cons, h x (by simp),
+      filterMap_congr' xs (fun y hy => h y (List.mem_cons_of_mem _ hy))]
+
+theorem supportTimeW_eq (g : Graph) (st : Edge → Stamp) (c : Nat) (e : Edge)
+    (he : e ∈ g.edges) (h : WrittenAtOrigin g st) :
+    supportTimeW g st c e = supportTime g c e := by
+  unfold supportTimeW supportTime writer
+  split
+  · cases hty : e.ty with
+    | derives => simp
+    | dependency =>
+      cases hc : g.concept e.src with
+      | none => simp
+      | some sc =>
+        obtain ⟨i, hi, hst⟩ := h e he e.src sc (by simp [dependentEnd, hty]) hc
+        simp [hi, hst]
+    | _ => simp
+  · rfl
+
+/-- **Agreement with the old dating** in the common case: when every
+dependence edge was written in its dependent's origin turn, the fixed
+supporting times, and so the recurrence term, are the old ones. -/
+theorem supportingTimesW_eq (g : Graph) (st : Edge → Stamp) (c : Nat)
+    (h : WrittenAtOrigin g st) : supportingTimesW g st c = supportingTimes g c := by
+  unfold supportingTimesW supportingTimes
+  congr 1
+  exact filterMap_congr' _ (fun e he => supportTimeW_eq g st c e he h)
+
+theorem recurrenceSessionsW_eq (g : Graph) (st : Edge → Stamp) (c : Nat)
+    (h : WrittenAtOrigin g st) : recurrenceSessionsW g st c = recurrenceSessions g c := by
+  unfold recurrenceSessionsW recurrenceSessions; rw [supportingTimesW_eq g st c h]
+
+/-- ... and the fixed dependents term is the old one. -/
+theorem dependentOriginsW_eq (g : Graph) (st : Edge → Stamp) (c : Nat)
+    (h : WrittenAtOrigin g st) : dependentOriginsW g st c = dependentOrigins g c := by
+  unfold dependentOriginsW dependentOrigins
+  congr 1
+  apply filterMap_congr'
+  intro e he
+  cases hd : e.dependence with
+  | none => rfl
+  | some pd =>
+    obtain ⟨p, d⟩ := pd
+    simp only []
+    split
+    · cases hp : g.concept p with
+      | none => rfl
+      | some pc =>
+        cases hdc : g.concept d with
+        | none => rfl
+        | some dc =>
+          obtain ⟨i, _, hst⟩ := h e he d dc (dependence_dependentEnd hd) hdc
+          simp [credited, hst]
+    · rfl
+
+theorem interaction_id {g : Graph} {x w : Nat} (h : (g.interaction x).map (·.id) = some w) :
+    w = x := by
+  unfold Graph.interaction at h
+  cases hf : g.interactions.find? (fun i => i.id == x) with
+  | none => rw [hf] at h; cases h
+  | some i =>
+    rw [hf] at h
+    have := List.find?_some hf
+    simp only [Option.map_some, Option.some.injEq] at h
+    simp only [beq_iff_eq] at this
+    omega
+
+/-- **Own origin is the writing turn**: no interaction the fixed dependents
+term counts is the pillar's own origin, whichever concept the edge starts
+from. -/
+theorem dependentOriginsW_not_own (g : Graph) (st : Edge → Stamp) (c : Nat) (pc : ConceptNode)
+    (hc : g.concept c = some pc) (w : Nat) (hw : w ∈ dependentOriginsW g st c) :
+    w ≠ pc.origin := by
+  unfold dependentOriginsW at hw
+  rw [List.mem_eraseDups, List.mem_filterMap] at hw
+  obtain ⟨e, _, he⟩ := hw
+  revert he
+  cases e.dependence with
+  | none => simp
+  | some pd =>
+    obtain ⟨p, d⟩ := pd
+    simp only []
+    split
+    · rename_i hpc
+      subst hpc
+      rw [hc]
+      cases g.concept d with
+      | none => simp
+      | some dc =>
+        simp only []
+        split
+        · simp
+        · rename_i hne
+          intro hm
+          rw [interaction_id hm]
+          exact hne
+    · simp
+
+/-- **A dependency written in a later turn supports on that turn's date**:
+the edge's own about-time is one of the supporting times. -/
+theorem dependency_time_supports (g : Graph) (st : Edge → Stamp) (c : Nat) (e : Edge)
+    (he : e ∈ g.edges) (hty : e.ty = .dependency) (ht : e.tgt = c) (sc : ConceptNode)
+    (hs : g.concept e.src = some sc) : (st e).time ∈ supportingTimesW g st c := by
+  unfold supportingTimesW
+  rw [mem_canon, List.mem_filterMap]
+  exact ⟨e, he, by simp [supportTimeW, ht, hty, hs]⟩
+
+theorem supportTimeW_edges (g : Graph) (st : Edge → Stamp) (es : List Edge) :
+    supportTimeW { g with edges := es } st = supportTimeW g st := rfl
+
+/-- Under the fixed dating, adding any edge still never lowers the
+recurrence term ... -/
+theorem recurrenceW_mono_edge (g : Graph) (st : Edge → Stamp) (c : Nat) (e : Edge) :
+    recurrenceSessionsW g st c ≤ recurrenceSessionsW { g with edges := e :: g.edges } st c := by
+  unfold recurrenceSessionsW
+  apply sessionCount_mono
+  intro x hx
+  unfold supportingTimesW at hx ⊢
+  rw [mem_canon] at hx ⊢
+  rw [supportTimeW_edges, List.filterMap_cons]
+  split
+  · exact hx
+  · exact List.mem_cons_of_mem _ hx
+
+/-- ... and causal touches are still not recurrence. -/
+theorem causal_not_recurrenceW (g : Graph) (st : Edge → Stamp) (c : Nat) (e : Edge)
+    (h : e.ty ≠ .derives ∧ e.ty ≠ .dependency) :
+    recurrenceSessionsW { g with edges := e :: g.edges } st c = recurrenceSessionsW g st c := by
+  have hn : supportTimeW g st c e = none := by
+    unfold supportTimeW
+    split
+    · cases hty : e.ty <;> simp_all
+    · rfl
+  unfold recurrenceSessionsW supportingTimesW
+  rw [supportTimeW_edges]
+  simp [hn]
+
+/-- The stamps of the reused-action corpus: the day-5 turn (5) wrote the
+edges into `Y` (`62 → 61`, and `63 → 61` from the fresh node); turn 1 wrote
+the rest. -/
+def reusedStamp (e : Edge) : Stamp :=
+  if e.tgt = 61 ∧ (e.src = 62 ∨ e.src = 63) then ⟨day 5, some 5⟩ else ⟨day 0, some 1⟩
+
+/-- **The fix on the issue's scenario.** Dated by its writing turn, the
+reused action's day-5 dependency on `Y` adds the day-5 session and the
+day-5 turn as a dependent interaction, exactly as a fresh action node from
+that turn does. `X`, cited only by turn 1 (its own origin), is unchanged. -/
+theorem reused_action_dependency_is_dated_by_its_writer :
+    supportingTimesW (reusedActionGraph true) reusedStamp 61 = [day 0, day 5] ∧
+      recurrenceSessionsW (reusedActionGraph true) reusedStamp 61 = 2 ∧
+      dependentOriginsW (reusedActionGraph true) reusedStamp 61 = [5] ∧
+      supportingTimesW (reusedActionGraph false) reusedStamp 61 = [day 0, day 5] ∧
+      recurrenceSessionsW (reusedActionGraph false) reusedStamp 61 = 2 ∧
+      dependentOriginsW (reusedActionGraph false) reusedStamp 61 = [5] ∧
+      recurrenceSessionsW (reusedActionGraph true) reusedStamp 60 = 1 ∧
+      dependentOriginsW (reusedActionGraph true) reusedStamp 60 = [] := by
+  decide
+
+/-- The other direction of the own-origin rule. Turn 0 records action `70`;
+turn 1 derives `Y` (71) and repeats the action, which now depends on `Y`.
+The old rule credits the action's origin, turn 0, as a dependent
+interaction; the fixed rule sees that `Y`'s own turn wrote the dependence
+and counts nothing (and dates the support on day 1, not day 0). -/
+def ownTurnGraph : Graph where
+  interactions := [⟨0, base, some (day 0)⟩, ⟨1, base + 60, some (day 1)⟩]
+  concepts := [⟨70, 0⟩, ⟨71, 1⟩]
+  edges := [⟨0, 70, .derives⟩, ⟨1, 71, .derives⟩, ⟨70, 71, .dependency⟩]
+
+def ownTurnStamp (e : Edge) : Stamp :=
+  if e.src = 70 then ⟨day 1, some 1⟩ else ⟨day 0, some 0⟩
+
+theorem own_origin_is_the_writing_turn :
+    dependentOrigins ownTurnGraph 71 = [0] ∧ dependentOriginsW ownTurnGraph ownTurnStamp 71 = [] ∧
+      supportingTimes ownTurnGraph 71 = [day 0, day 1] ∧
+      supportingTimesW ownTurnGraph ownTurnStamp 71 = [day 1] := by
+  decide
+
 /-! ## The solo score
 
 ```text
@@ -1432,6 +1743,37 @@ theorem solo_three_cycles :
     soloRun .canonical .none 1 = .candidate ∧ soloRun .canonical .none 2 = .venerable ∧
       soloRun .canonical .none 3 = .canonical ∧ soloRun .venerable .none 3 = .venerable := by
   decide
+
+/-! ### The fixed terms through the score and the cycle (#300)
+
+The score, the bands and the cycle read only the four terms, so every result
+above about them (`score10_mono`, `band_mono`, `admitsHop_mono`,
+`policy_cycle_one_hop`, `solo_cycle_capped`, `promotion_needs_verdict`)
+holds whatever measured the terms, the fixed dating included. Spelled out
+for the fixed terms: -/
+
+/-- The Solo terms under the fixed dating (age floor cleared). -/
+def termsW (g : Graph) (st : Edge → Stamp) (c : Nat) (hc : Int) (reverts : Nat) : Terms :=
+  ⟨recurrenceSessionsW g st c, hc, (dependentOriginsW g st c).length, reverts⟩
+
+/-- No skipped rung with bands from the fixed terms, at gather and apply. -/
+theorem policy_cycle_one_hop_fixed (p : PromotionPolicy) (gs s : Canon.Status) (gc deps : Nat)
+    (ty : ConceptType) (gG gA : Graph) (st : Edge → Stamp) (c : Nat) (hc : Int) (r : Nat)
+    (v2 v3 sup bud : Bool) :
+    let f := policyFlags p gs gc deps (band ty (termsW gG st c hc r))
+      (band ty (termsW gA st c hc r)) v2 v3 sup bud
+    Canon.cycle s f = s ∨ Canon.evalHop s (Canon.cycle s f) = true :=
+  policy_cycle_one_hop p gs s gc deps _ _ v2 v3 sup bud
+
+/-- An extra edge never lowers the fixed recurrence term, so with the
+dependents term no smaller (a hypothesis here) it never lowers the band. -/
+theorem band_mono_fixed_edge (ty : ConceptType) (g : Graph) (st : Edge → Stamp) (c : Nat)
+    (e : Edge) (hc : Int) (r : Nat)
+    (hdeps : (dependentOriginsW g st c).length ≤
+      (dependentOriginsW { g with edges := e :: g.edges } st c).length) :
+    (band ty (termsW g st c hc r)).rank ≤
+      (band ty (termsW { g with edges := e :: g.edges } st c hc r)).rank :=
+  band_mono ty ⟨recurrenceW_mono_edge g st c e, Int.le_refl _, hdeps, Nat.le_refl _⟩
 
 /-! ### Stage-1 order under Solo
 
