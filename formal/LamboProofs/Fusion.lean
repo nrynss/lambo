@@ -201,8 +201,15 @@ rounding in Rust, as `f64` addition is not associative, and the rounding then
 decides their order instead of the tie-break), and non-finite leg scores,
 which earn no rank in Rust (`a_non_finite_leg_score_earns_no_rrf_rank`); every
 score here is finite. The search's tie-break (`search_ranked`, keys from the
-index) and `rank`'s (keys from the graph) are assumed to be the same `tb`,
-which holds while the index mirrors the graph.
+index) and `rank`'s (keys from the graph) are assumed to be the same `tb`
+(`SortedBy` uses `rank`'s), which holds while the index mirrors the graph. The
+one stated exception is an index id that is not a concept of this graph (a
+stale id; phase 1's best-BM25 walk skips such ids, and a test adds a concept
+to the index that the graph lacks): `rank` gives it no key, so it sorts after
+every keyed node on a tie, while the index sorts it by its key. At an exact
+BM25 tie involving such an id the ranked list need not be `SortedBy` `rank`'s
+tie-break, and `full_passes_only_below_floor` and `full_rank_eq_raise` do not
+apply to that input.
 
 ### RRF results
 
@@ -218,8 +225,10 @@ which holds while the index mirrors the graph.
   not depend on the order the candidates arrive in (`legRank_example`).
 * `rrf_one_leg_agrees`: with one leg the only one with members and its weight
   above 0, RRF sorts its members exactly as the leg does.
-  `rrf_one_leg_needs_weight`: with that leg's weight 0, which `validate`
-  admits beside another positive weight, it does not.
+  `rrf_one_leg_needs_weight`: a leg of weight 0 contributes nothing by design
+  (`validate` admits it beside another positive weight, and the test
+  `rrf_ties_break_by_canonical_key_and_a_zero_weight_leg_scores_zero` pins the
+  zero `best`), so with only that leg every hit's relevance is 0.
 * `rrf_two_leg_example`, `rrf_tie_example`: the arithmetic of
   `rrf_ranks_two_leg_agreement_above_one_leg_with_a_bigger_raw_score` and
   `rrf_ties_break_by_canonical_key_and_a_zero_weight_leg_scores_zero`.
@@ -1681,7 +1690,7 @@ omit [DecidableEq ι] in
 /-- **One leg: RRF orders as the leg does.** When the keyword leg is the only
 leg with members and its weight is above 0, two of its members sort under RRF
 exactly as they sort in the leg, by BM25 descending then the tie-break. With a
-weight of 0 it fails: every `rrf` is 0 and the order is the tie-break alone
+weight of 0 the leg contributes nothing, as designed: every `rrf` is 0
 (`rrf_one_leg_needs_weight`). -/
 theorem rrf_one_leg_agrees (hv : R.cfg.Valid) (hw : 0 < R.cfg.wKeyword)
     (htb : StrictTotal R.tb)
@@ -1855,11 +1864,16 @@ theorem legRank_example :
     REq ((oneLegRecall rrfDefault).rrf oneLegLegs 1) (2, 3) := by
   decide
 
-/-- **The weight hypothesis is needed.** `RecallFusion::validate` admits a
-keyword weight of 0 beside a positive vector weight. A recall where only the
-keyword leg produced (no embedding, no recent interaction) then scores every
-candidate 0, and RRF sorts by the tie-break alone: node 2, the best BM25,
-comes last. -/
+/-- **The weight hypothesis is needed.** A leg of weight 0 contributes nothing
+by design: `RecallFusion::validate` admits a keyword weight of 0 beside a
+positive vector weight, and the test
+`rrf_ties_break_by_canonical_key_and_a_zero_weight_leg_scores_zero` asserts the
+zero-`best` case on purpose. A recall where only the keyword leg produced (no
+embedding, no recent interaction) then scores every candidate's relevance 0,
+so phase 1's own order is the tie-break (node 2, the best BM25, comes last
+here). Downstream that order is not what a user sees: phase 1 returns the
+union unreduced and expansion does not cut by it, so the final order falls to
+the daemon's share of `final = daemon × w_daemon + relevance × w_query`. -/
 theorem rrf_one_leg_needs_weight :
     let c := { rrfDefault with wKeyword := 0 }
     (oneLegRecall c).best oneLegLegs = 0 ∧
