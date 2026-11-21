@@ -256,9 +256,11 @@ pub struct FlushTask {
     shared: Arc<Shared>,
     /// Single-writer-lease fence (T86-2). When the owning [`crate::memory::Memory`]
     /// handle loses its lease (a store outage starved the heartbeat past the TTL
-    /// and another writer took the session), the heartbeat latches this `true`;
+    /// and another writer took the session), the heartbeat latches this `true`,
+    /// and so does this loop when the store refuses a flush as stale (#293);
     /// the loop then stops flushing and **drops** its not-yet-durable `pending`
     /// rather than overwriting the new holder's rows. `None` for a task with no
+    /// fence armed (every test store, the advisory-default backends).
     fence: Option<Arc<AtomicBool>>,
     /// Monotonic fencing token (GitHub issue #1) this task presents on every
     /// `store.flush`, so the store can reject a stale/missing one after a
@@ -569,7 +571,7 @@ impl FlushLoop {
         }
     }
 
-    /// The fenced exit (T86-2): drop `pending` rather than write it or hand it
+    /// The fenced exit: drop `pending` rather than write it or hand it
     /// back, and say so.
     fn stop_fenced(&mut self) {
         let dropped = self.pending.mutations.len();

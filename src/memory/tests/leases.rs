@@ -826,3 +826,118 @@ async fn a_heartbeat_that_retakes_its_lost_lease_latches_the_fence() {
         "a fenced heartbeat stops refreshing the lease it re-took, so it lapses at TTL"
     );
 }
+
+/// **#293 review: a heartbeat that latched on `Held` stops beating.** It used
+/// to keep refreshing, so once the writer that took the session released it
+/// (a clean close), the fenced handle's next beat re-took the row at a newer
+/// token and held it, as a zombie, until its TTL ran out. Stopping is safe for
+/// the wake-up: the fence and the wake-up are latched before the heartbeat
+/// returns, and a stale-write latch (flag only) still gets its wake-up from
+/// the beat that follows it, which runs because the heartbeat stops only once
+/// it has latched itself.
+#[tokio::test(start_paused = true)]
+async fn a_heartbeat_fenced_by_held_does_not_beat_again() {
+    let store = Arc::new(MemoryStore::new());
+    let session = SessionId::new("fenced-held");
+    let holder = LeaseHolder::for_this_process(&AgentId::new("agent-a"));
+    let LeaseOutcome::Acquired(mine) = store
+        .acquire_lease(&session, &holder, LEASE_TTL)
+        .await
+        .unwrap()
+    else {
+        panic!("the first acquire takes the lease");
+    };
+    let fence = Arc::new(AtomicBool::new(false));
+    let signal = Arc::new(super::super::leases::LeaseLostSignal::default());
+    let beat = super::super::leases::spawn_lease_heartbeat(
+        store.clone() as Arc<dyn GraphStore>,
+        session.clone(),
+        holder.clone(),
+        mine.token,
+        fence.clone(),
+        signal.clone(),
+    );
+    tokio::task::yield_now().await;
+
+    // Another writer takes the expired lease; the next beat sees `Held`.
+    store.force_expire_lease(&session);
+    let taker = LeaseHolder::for_this_process(&AgentId::new("agent-b"));
+    assert!(store
+        .acquire_lease(&session, &taker, LEASE_TTL)
+        .await
+        .unwrap()
+        .is_acquired());
+    tokio::time::advance(crate::store::lease::LEASE_HEARTBEAT_INTERVAL).await;
+    for _ in 0..1_000 {
+        if fence.load(Ordering::Acquire) {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(fence.load(Ordering::Acquire), "Held latches the fence");
+    assert_eq!(signal.winner(), Some(taker.token()));
+
+    // The new writer closes cleanly and releases.
+    store.release_lease(&session, &taker).await.unwrap();
+    for _ in 0..3 {
+        tokio::time::advance(crate::store::lease::LEASE_HEARTBEAT_INTERVAL).await;
+        for _ in 0..100 {
+            tokio::task::yield_now().await;
+        }
+    }
+    let row = store.read_lease(&session).await.unwrap().unwrap();
+    assert_ne!(
+        row.holder,
+        holder.token(),
+        "a fenced handle must not re-take the released lease"
+    );
+    assert!(beat.is_finished(), "the fenced heartbeat stopped");
+}
+
+/// **#293 review: the builder hands the heartbeat the session's own token.**
+/// Through `Memory::build`: a healthy beat does not latch (so the token
+/// passed is the one the lease was acquired with, not a stand-in), and after
+/// the operator override the handle's own beat re-takes the row and fences
+/// the handle, which then refuses writes and its close. Mirrors
+/// `Lease.beat_own_generation` and `Lease.override_beat_latches`.
+#[tokio::test]
+async fn the_builder_wires_the_sessions_token_into_the_heartbeat() {
+    let store = Arc::new(MemoryStore::new());
+    let session = SessionId::new("wired-token");
+    let mem = memory_on(store.clone() as Arc<dyn GraphStore>, "wired-token").await;
+    let before = store.read_lease(&session).await.unwrap().unwrap();
+    // Virtual time from here, so the 15 s heartbeat can be stepped over.
+    tokio::time::pause();
+
+    tokio::time::sleep(crate::store::lease::LEASE_HEARTBEAT_INTERVAL + Duration::from_secs(1))
+        .await;
+    assert!(
+        !mem.lease_lost(),
+        "a refresh at the session's own token must not latch"
+    );
+    assert_eq!(
+        store.read_lease(&session).await.unwrap().unwrap().token,
+        before.token
+    );
+
+    // The operator override; the handle's next beat re-takes the row.
+    store
+        .release_lease(&session, mem.lease_holder())
+        .await
+        .unwrap();
+    tokio::time::sleep(crate::store::lease::LEASE_HEARTBEAT_INTERVAL).await;
+    let row = store.read_lease(&session).await.unwrap().unwrap();
+    assert_eq!(row.token, before.token + 1, "the beat re-took the row");
+    assert!(mem.lease_lost(), "and fenced the handle");
+
+    let err = mem
+        .derive(
+            &[("after the re-take", ConceptType::Entity)],
+            &ParentOf::none(),
+        )
+        .await
+        .expect_err("a fenced handle refuses writes");
+    assert!(matches!(err, LamboError::Conflict(_)), "{err:?}");
+    let err = mem.close().await.expect_err("a fenced close refuses");
+    assert!(matches!(err, LamboError::Conflict(_)), "{err:?}");
+}

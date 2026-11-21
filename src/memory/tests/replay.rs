@@ -968,6 +968,248 @@ async fn a_lease_lost_close_answers_close_unflushed() {
     assert_eq!(mem.pipeline().counters().deferred(), 0);
 }
 
+/// [`VectorSearchable`] whose `flush` parks, once armed, until released:
+/// the flush loop's in-flight flush the #293 review's close test needs.
+struct GatedFlush {
+    inner: VectorSearchable,
+    armed: AtomicBool,
+    entered: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait::async_trait]
+impl GraphStore for GatedFlush {
+    fn capabilities(&self) -> crate::store::Capabilities {
+        self.inner.capabilities()
+    }
+    async fn init_schema(&self) -> Result<(), StoreError> {
+        self.inner.init_schema().await
+    }
+    async fn flush(&self, batch: &MutationBatch, token: Option<u64>) -> Result<(), StoreError> {
+        if self.armed.swap(false, Ordering::SeqCst) {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+        self.inner.flush(batch, token).await
+    }
+    async fn load_session(&self, session: &SessionId) -> Result<GraphSnapshot, StoreError> {
+        self.inner.load_session(session).await
+    }
+    async fn keyword_candidates(
+        &self,
+        session: &SessionId,
+        tokens: &[String],
+        limit: usize,
+    ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+        self.inner.keyword_candidates(session, tokens, limit).await
+    }
+    async fn vector_candidates(
+        &self,
+        session: &SessionId,
+        embedding: &[f32],
+        limit: usize,
+    ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+        self.inner
+            .vector_candidates(session, embedding, limit)
+            .await
+    }
+    async fn vector_candidates_checked(
+        &self,
+        session: &SessionId,
+        embedding: &[f32],
+        expected_contract: &EmbeddingContract,
+        limit: usize,
+    ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+        self.inner
+            .vector_candidates_checked(session, embedding, expected_contract, limit)
+            .await
+    }
+    async fn blast_radius(
+        &self,
+        session: &SessionId,
+        node: NodeId,
+        min_edge_age: Duration,
+        now: DateTime<Utc>,
+    ) -> Result<u64, StoreError> {
+        self.inner
+            .blast_radius(session, node, min_edge_age, now)
+            .await
+    }
+    async fn interaction_span(
+        &self,
+        session: &SessionId,
+        node: NodeId,
+        min_age: Duration,
+        now: DateTime<Utc>,
+    ) -> Result<crate::types::InteractionSpan, StoreError> {
+        self.inner
+            .interaction_span(session, node, min_age, now)
+            .await
+    }
+    async fn interaction_span_with_window(
+        &self,
+        session: &SessionId,
+        node: NodeId,
+        min_age: Duration,
+        now: DateTime<Utc>,
+        window: Duration,
+    ) -> Result<crate::types::InteractionSpan, StoreError> {
+        self.inner
+            .interaction_span_with_window(session, node, min_age, now, window)
+            .await
+    }
+    async fn record_canonization(
+        &self,
+        event: &crate::types::CanonizationEvent,
+        token: Option<u64>,
+    ) -> Result<(), StoreError> {
+        self.inner.record_canonization(event, token).await
+    }
+    async fn acquire_lease(
+        &self,
+        session: &SessionId,
+        holder: &LeaseHolder,
+        ttl: Duration,
+    ) -> Result<LeaseOutcome, StoreError> {
+        self.inner.acquire_lease(session, holder, ttl).await
+    }
+    async fn read_lease(
+        &self,
+        session: &SessionId,
+    ) -> Result<Option<crate::store::LeaseInfo>, StoreError> {
+        self.inner.read_lease(session).await
+    }
+    async fn refresh_lease(
+        &self,
+        session: &SessionId,
+        holder: &LeaseHolder,
+        ttl: Duration,
+    ) -> Result<LeaseOutcome, StoreError> {
+        self.inner.refresh_lease(session, holder, ttl).await
+    }
+    async fn release_lease(
+        &self,
+        session: &SessionId,
+        holder: &LeaseHolder,
+    ) -> Result<(), StoreError> {
+        self.inner.release_lease(session, holder).await
+    }
+}
+
+/// #293 review: the fence can latch while `close()` stops the flush loop.
+/// A flush in flight when close starts is refused as stale (the lease moved
+/// on and this handle's heartbeat has not beaten yet), the loop latches the
+/// fence and drops `pending`, and close, which checked the fence only before
+/// it stopped the loop, used to find an empty log and return `Ok`, answering
+/// the set-aside receipt `intent_durable` over a batch that never landed.
+/// Close re-checks the fence after joining the loop. Mirrors
+/// `Flush.close_ok_no_drop` (the bug: `Flush.close_ok_over_drop`).
+#[tokio::test]
+async fn a_stale_flush_during_close_answers_close_unflushed() {
+    let (logs, _guard) = capture_logs(tracing::Level::INFO);
+    let inner = Arc::new(MemoryStore::new());
+    let session = SessionId::new("close-stale");
+    let gate = Arc::new(GatedFlush {
+        inner: VectorSearchable(inner.clone()),
+        armed: AtomicBool::new(false),
+        entered: Arc::new(tokio::sync::Notify::new()),
+        release: Arc::new(tokio::sync::Notify::new()),
+    });
+    let agent = AgentId::new("agent-a");
+    let embedder = HangingEmbedder::new();
+    let entered = embedder.entered.clone();
+    let mem = Memory::builder()
+        .session("close-stale")
+        .agent("agent-a")
+        .flush_interval(Duration::from_millis(50))
+        .store(gate.clone() as Arc<dyn GraphStore>)
+        .embedder(Arc::new(embedder) as Arc<dyn Embedder>)
+        .embedding_contract(contract("fixture", 1024))
+        .match_strategy(MatchStrategy::Hybrid)
+        .build()
+        .await
+        .expect("build");
+    let submitted = mem
+        .derive_async_as(
+            &agent,
+            &[("user schema", ConceptType::Entity)],
+            &ParentOf::none(),
+            None,
+        )
+        .await
+        .expect("ack");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while entered.load(Ordering::SeqCst) == 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the job never reached the embedder"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    // A mutation for the flush loop to send, and the flush it sends parks.
+    gate.armed.store(true, Ordering::SeqCst);
+    {
+        let mut graph = mem.graph.write();
+        let previous_id = graph.temporal_chain().last().copied();
+        graph
+            .insert_interaction(Interaction {
+                event_time: None,
+                id: NodeId(uuid::Uuid::from_u64_pair(293, 1)),
+                session_id: session.clone(),
+                agent_id: agent.clone(),
+                prompt_text: Some("in flight at close".into()),
+                previous_id,
+                created_at: Utc::now(),
+            })
+            .unwrap();
+    }
+    tokio::time::timeout(Duration::from_secs(5), gate.entered.notified())
+        .await
+        .expect("the flush loop sent the batch");
+
+    // The lease moves on before this handle's heartbeat (15 s) notices.
+    inner.force_expire_lease(&session);
+    let taker = LeaseHolder::for_this_process(&AgentId::new("agent-b"));
+    assert!(inner
+        .acquire_lease(&session, &taker, LEASE_TTL)
+        .await
+        .unwrap()
+        .is_acquired());
+    assert!(!mem.lease_lost(), "nothing has noticed yet");
+
+    // Close runs past its fence check and waits on the loop; only then does
+    // the parked flush return, refused as stale.
+    let release = async {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while !logs.contains("flush_join started") {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "close never reached the flush join"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        gate.release.notify_one();
+    };
+    let (closed, ()) = tokio::join!(mem.close(), release);
+
+    let err = closed.expect_err("close must not report Ok over a batch it did not write");
+    assert!(matches!(err, LamboError::Conflict(_)), "{err:?}");
+    assert!(mem.lease_lost(), "the stale flush latched the fence");
+    assert_eq!(
+        mem.pipeline().lookup(&agent, submitted.receipt).tag(),
+        "close_unflushed",
+        "a close that lost the tail cannot vouch for the set-aside intent"
+    );
+    assert_eq!(mem.pipeline().counters().deferred(), 0);
+    let row = inner.read_lease(&session).await.unwrap().unwrap();
+    assert_eq!(
+        row.holder,
+        taker.token(),
+        "the lease is not ours to release"
+    );
+}
+
 /// [`VectorSearchable`] whose checked vector lookup is slower than a write's
 /// whole I/O budget, every time (#125 Sonnet review).
 struct SlowLookup(VectorSearchable);

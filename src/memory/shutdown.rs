@@ -408,6 +408,48 @@ impl Memory {
     /// proves it (R3-1). Each handle travels in a [`HandleCustody`], so a
     /// caller dropped mid-join hands it back to its slot. Idempotent: a slot
     /// already reaped is skipped.
+    /// The fenced end of [`Memory::close`]: a fenced handle lost its
+    /// lease, so the final flush is exactly the split-brain write the lease
+    /// exists to prevent. Stop the tasks, DROP the tail (it dies with this
+    /// handle as it would on a crash), settle the set-aside writes as not
+    /// durable, and do NOT release the lease (it is not ours to release).
+    /// Returns the honest refusal. Reached before the shutdown stops the
+    /// flush loop and again after it has joined it (#293 review).
+    async fn close_fenced(&self) -> LamboError {
+        // Aborted AND joined (#32 PR 7): `abort()` returns before the
+        // task has stopped, and only the join proves it (R3-1). An erase
+        // run by this process right after this close (design §6.3) must
+        // find none of this handle's tasks still able to reach the store
+        // or the recall index: a flush past its store commit would
+        // otherwise mirror into the index after the erase swept it. The
+        // custody guard hands a handle back to its slot if this future
+        // is dropped mid-join, so a retried close finds it again.
+        self.abort_and_join_tasks().await;
+        let undrained = self.graph.read().log_len();
+        if self.erased() {
+            tracing::warn!(
+                session = %self.session,
+                mutations = undrained,
+                "close: this session was erased; discarding its in-memory tail \
+                 ({undrained} mutations) and NOT flushing it or releasing the lease (the \
+                 erasure tombstone holds it)"
+            );
+        } else {
+            tracing::error!(
+                session = %self.session,
+                mutations = undrained,
+                "close: this handle lost its single-writer lease; refusing to flush the tail \
+                 ({undrained} mutations discarded) and NOT releasing the lease — another \
+                 writer owns the session"
+            );
+        }
+        // The tail is dropped, so no set-aside write can be vouched
+        // for (#117 review M1).
+        self.pipeline
+            .settle_deferred(crate::writeq::CloseFlush::Incomplete);
+        self.lease_lost_error()
+    }
+
     async fn abort_and_join_tasks(&self) {
         for slot in [&self.canon_handle, &self.daemon_handle, &self.flush_handle] {
             let mut task = HandleCustody::take(slot);
@@ -704,39 +746,9 @@ impl Memory {
         // may never make durable. `succeeded` stays false; a retried close hits
         // this same branch (the handles are already reaped) and errors again.
         if self.lease_lost() {
-            // Aborted AND joined (#32 PR 7): `abort()` returns before the
-            // task has stopped, and only the join proves it (R3-1). An erase
-            // run by this process right after this close (design §6.3) must
-            // find none of this handle's tasks still able to reach the store
-            // or the recall index: a flush past its store commit would
-            // otherwise mirror into the index after the erase swept it. The
-            // custody guard hands a handle back to its slot if this future
-            // is dropped mid-join, so a retried close finds it again.
-            self.abort_and_join_tasks().await;
-            let undrained = self.graph.read().log_len();
-            if self.erased() {
-                tracing::warn!(
-                    session = %self.session,
-                    mutations = undrained,
-                    "close: this session was erased; discarding its in-memory tail \
-                     ({undrained} mutations) and NOT flushing it or releasing the lease (the \
-                     erasure tombstone holds it)"
-                );
-            } else {
-                tracing::error!(
-                    session = %self.session,
-                    mutations = undrained,
-                    "close: this handle lost its single-writer lease; refusing to flush the tail \
-                     ({undrained} mutations discarded) and NOT releasing the lease — another \
-                     writer owns the session"
-                );
-            }
-            // The tail is dropped, so no set-aside write can be vouched
-            // for (#117 review M1).
-            self.pipeline
-                .settle_deferred(crate::writeq::CloseFlush::Incomplete);
+            let err = self.close_fenced().await;
             step.done();
-            return Err(self.lease_lost_error());
+            return Err(err);
         }
         step.done();
 
@@ -785,6 +797,20 @@ impl Memory {
             tracing::warn!(error = %err, "flush task did not stop cleanly");
         }
         drop(flush);
+
+        // #293 review: the fence can latch while the loop stops. A flush the
+        // loop had in flight comes back refused as stale (the lease moved on
+        // and the heartbeat had not beaten yet, or it was aborted above), and
+        // the loop latches the fence and DROPS `pending`. The check above ran
+        // before that, so the drain below would find an empty log and report
+        // `Ok` over a batch that never landed. The join is the happens-before
+        // edge with the loop's latch, so this read sees it. It also covers an
+        // erased latch the loop or the canonization task set meanwhile.
+        if self.lease_lost() {
+            let err = self.close_fenced().await;
+            step.done();
+            return Err(err);
+        }
         step.done();
 
         // 3 — final drain. Short critical section, guard dies with the block.

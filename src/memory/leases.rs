@@ -136,9 +136,9 @@ impl LeaseLostSignal {
     }
 
     /// Record the winner and wake every waiter. Idempotent, like the fence
-    /// beside it — the heartbeat keeps beating after a loss and may call this
-    /// again; the first winner recorded is kept, because it is the one that was
-    /// true at the transition.
+    /// beside it: the heartbeat latches at most once (it stops after), but the
+    /// erased latch may call this too; the first winner recorded is kept,
+    /// because it is the one that was true at the transition.
     pub(super) fn latch(&self, winner: &str) {
         let mut slot = self.winner.lock();
         if slot.is_none() {
@@ -174,8 +174,13 @@ const RETAKEN_WINNER: &str =
 /// latches the shared `fence` (T86-2): the owning [`Memory`] then refuses every
 /// further write and its write-behind flush loop stops and drops its pending
 /// tail, so the two writers can no longer flush divergent graphs into one
-/// session. The loss is still logged loudly, and the fence is idempotent, so the
-/// heartbeat may keep beating after it without changing anything.
+/// session. The loss is logged loudly, and the heartbeat then **stops** (#293
+/// review): a fenced handle that kept refreshing would re-take the lease the
+/// moment the new holder released it, and hold it as a zombie until its TTL.
+/// Stopping does not cost a wake-up: the fence and the wake-up are both latched
+/// before the heartbeat returns, and a fence the flush loop latched on a stale
+/// write (the flag alone) is woken by this heartbeat's next beat, which still
+/// runs because the heartbeat stops only once it has latched itself.
 ///
 /// **A refresh that comes back [`LeaseOutcome::Acquired`] at a token other
 /// than `token` (the one this handle acquired with) is a loss too** (#293). A
@@ -245,11 +250,15 @@ pub(super) fn spawn_lease_heartbeat(
                         holder = %holder,
                         new_holder = %current.holder,
                         "single-writer lease LOST: this handle's lease expired (heartbeat starved \
-                         past the TTL) and {} took the session. This handle is now FENCED — further \
+                         past the TTL) or an operator released it, and {} took the session. This \
+                         handle is now FENCED — further \
                          writes are refused and its tail will NOT be flushed; an operator must \
-                         reconcile.",
+                         reconcile. The heartbeat stops.",
                         current.holder
                     );
+                    // #293 review: stop, so this fenced handle cannot re-take
+                    // the lease once the new holder releases it.
+                    return;
                 }
                 Err(err) => {
                     // A transient store blip: log and keep beating. The lease has
@@ -504,9 +513,12 @@ impl Memory {
             ));
         }
         LamboError::Conflict(format!(
-            "session {} lost its single-writer lease: this process's lease expired (the store was \
-             unreachable past the {}s TTL) and another writer took the session. This handle is no \
-             longer the writer and refuses further writes — its tail will not be flushed. Spec \
+            "session {} lost its single-writer lease: the lease moved to a newer fencing token than \
+             this handle's, because it expired (for example the store was unreachable past the {}s \
+             TTL) and another writer took the session, or an operator forced a takeover; this \
+             handle learned it from its heartbeat or from a flush the store refused as stale. This \
+             handle is no longer the writer and refuses further writes — its tail will not be \
+             flushed. Spec \
              §2.2 is one writer per session; an operator must reconcile and, if needed, force a \
              takeover: {}",
             self.session,

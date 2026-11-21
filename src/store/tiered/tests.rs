@@ -1231,6 +1231,41 @@ async fn a_flush_is_not_mirrored_after_the_lease_was_lost() {
     assert_eq!(store.tier_status(&sid).sync, TierSync::Stale);
 }
 
+/// #293 review: a refresh that re-takes the lease (after the operator
+/// override, or another writer that came and went) comes back at a new token
+/// the session's writer does not hold; the heartbeat fences on it. The tier
+/// must not adopt that token either, or a fenced handle's index repair would
+/// pass `ensure_fenced` under it until the lease lapsed.
+#[tokio::test]
+async fn a_refresh_that_retakes_the_lease_does_not_adopt_its_token() {
+    let (primary, fake) = (memory_primary(), Arc::new(FakeIndex::new()));
+    let store = tier(&primary, &fake);
+    let sid = SessionId::new("retaken");
+    let w = holder("w");
+    let token = attach(&store, &sid, &w).await;
+    let ttl = Duration::from_secs(60);
+
+    // A healthy refresh keeps the held token.
+    assert!(store
+        .refresh_lease(&sid, &w, ttl)
+        .await
+        .unwrap()
+        .is_acquired());
+    assert_eq!(store.with_state(&sid, |st| st.held), Some(token));
+
+    // The override expires the row on the primary; the refresh re-takes it.
+    primary.release_lease(&sid, &w).await.unwrap();
+    let LeaseOutcome::Acquired(info) = store.refresh_lease(&sid, &w, ttl).await.unwrap() else {
+        panic!("the refresh re-takes the released row");
+    };
+    assert_eq!(info.token, token + 1);
+    assert_eq!(
+        store.with_state(&sid, |st| st.held),
+        None,
+        "a re-taken token is not the writer's: the tier must stop calling it held"
+    );
+}
+
 /// M1: releasing the lease gives an in-flight repair a grace period, then
 /// abandons it rather than holding the release (and `close`) hostage.
 #[tokio::test]

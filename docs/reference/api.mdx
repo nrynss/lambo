@@ -600,7 +600,7 @@ A session has exactly one writer. Lambo enforces this in the store with a per-se
 - If a holder's lease is taken over, that holder is fenced. Its further writes are refused and its pending writes are dropped, so it cannot overwrite the new holder. It is fenced at the first flush the store refuses for its stale token or at its next heartbeat, whichever comes first, and also when its own heartbeat takes the lease back at a new token (after an operator takeover, for example).
 
 <Note>
-There is one known limitation. The fence trips when the holder's heartbeat notices the loss, not at the instant it happens. After a lease expires and a new writer takes over, the old holder can still write for a short, bounded window. This matters most when many writers contend on one session. It is tracked in [issue #1](https://github.com/nrynss/lambo/issues/1).
+There is one known limitation. The fence trips when the holder notices the loss, at its next heartbeat or at the first flush the store refuses for its stale token, not at the instant it happens. After a lease expires and a new writer takes over, the old holder can still write for a short, bounded window. This matters most when many writers contend on one session. It is tracked in [issue #1](https://github.com/nrynss/lambo/issues/1).
 </Note>
 
 See [MCP tools](/mcp) and [Configuration](/config).

@@ -64,18 +64,29 @@
   accepting writes until it degraded, and other writers were refused the whole
   time. The heartbeat now latches the fence when a refresh comes back at a
   token other than the one the session holds, and stops refreshing, so the
-  re-taken lease lapses at its TTL. In the flush loop a `StaleWrite` is now
+  re-taken lease lapses at its TTL. It also stops after latching on a lease
+  held by another writer, so a fenced handle can no longer re-take the lease
+  once that writer releases it. The Elasticsearch recall tier no longer adopts
+  a re-taken token as held, so a fenced handle's index repair stops at its
+  next fence check. In the flush loop a `StaleWrite` is now
   terminal, as `StoreError::is_retryable` documents: it latches the fence and
   the pending batch is dropped as a fenced handle's is, never retained or
   re-sent. The loop also checks the fence after each drain and before each
   retry, so no flush is issued once the fence is latched (it was seen one pass
   late), and a stop that arrives after the fence drops the tail instead of
   handing it back for `close`'s final flush. A fenced loop no longer publishes
-  its flush-stats row. `formal/LamboProofs/Flush.lean` and `Lease.lean` model
-  the fixed heartbeat and loop and prove that after any takeover the fence
-  latches at the next heartbeat, that no flush is issued after it latches,
-  that a stale write is never re-sent, and that the loop still loses nothing
-  silently.
+  its flush-stats row. Because the fence can now latch while `close` stops the
+  flush loop (a flush in flight comes back stale), `close` checks the fence
+  again after joining the loop, and reports the lease-lost error, answers
+  set-aside writes `close_unflushed` and keeps its hands off the lease,
+  instead of returning `Ok` over the dropped batch. The lease-lost error now
+  names every way the lease can be lost (expiry, a forced takeover, a flush
+  refused as stale). `formal/LamboProofs/Flush.lean` and `Lease.lean` model
+  the fixed heartbeat, loop and close and prove that after any takeover the
+  fence latches at the next heartbeat, that no flush is issued after it
+  latches, that a stale write is never re-sent, that the loop itself loses
+  nothing silently, and that `close` returns `Ok` only when every batch that
+  left the loop was committed or dead-lettered.
 - Recall: an exact durable-name match now raises the named concept's
   phase-1 keyword score to at least 1.0 instead of overwriting it with 1.0
   (#288). BM25 is unnormalized and routinely above 1.0, so the overwrite could

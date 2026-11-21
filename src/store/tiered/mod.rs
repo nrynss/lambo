@@ -1760,7 +1760,7 @@ impl GraphStore for TieredStore {
         ttl: Duration,
     ) -> Result<LeaseOutcome, StoreError> {
         let outcome = self.primary.refresh_lease(session, holder, ttl).await?;
-        self.note_lease(session, &outcome);
+        self.note_refresh(session, &outcome);
         Ok(outcome)
     }
 
@@ -1870,5 +1870,21 @@ impl Tier {
             LeaseOutcome::Held { .. } => None,
         };
         self.with_state(session, |st| st.held = held);
+    }
+
+    /// [`Self::note_lease`] for a refresh, which never adopts a token (#293
+    /// review). A refresh that comes back at the token already held keeps it;
+    /// one that comes back at any other token re-took a lease the session's
+    /// writer had lost (the operator override, or a takeover and release
+    /// between two heartbeats), and that writer still presents the old token,
+    /// so the store no longer holds the lease for it: a repair must stop at
+    /// its next fence check rather than pass it under the re-taken token.
+    fn note_refresh(&self, session: &SessionId, outcome: &LeaseOutcome) {
+        self.with_state(session, |st| {
+            st.held = match outcome {
+                LeaseOutcome::Acquired(info) if st.held == Some(info.token) => Some(info.token),
+                _ => None,
+            };
+        });
     }
 }
