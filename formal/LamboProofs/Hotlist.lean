@@ -9,7 +9,10 @@ insert, insert_many, revalidate, revalidate_members, retain_conditions}`,
 `default_contradiction_max`, `HOT_LIST_MAX`), of the cycle that maintains it
 (`detect_into_hot_list` in `src/daemon/mod.rs`, which `prime_offline` shares:
 contradictions, conflicts, drift, stale, high-risk inserted in that order, then
-`retain_conditions`), and
+`retain_conditions`), both before #298 (`cycle`: every insert enforces the
+budget and the bound, and the cut comes last) and since (`cycleFixed`,
+`HotList::sync_cycle`: the inserts run with both lifted, then the cut, then one
+`enforce`), and
 of how recall consumes it in `src/recall/assemble.rs`: `forces`,
 `contradiction_companions`, the `hot` / `cold_forced` / `forced` predicates
 handed to `emitted`, and the kinds of the hot-list warning lines (`format::
@@ -44,6 +47,13 @@ is an input: a cycle is given its hits and its condition set.
   about that substitute cycle. `cycle_sound` and `cycle_drops_collected` hold
   for any insertion step (they only use the final `retain`), and
   `cycle_evicts_fresh_hit` inserts no contradiction.
+* `cycleFixed` models the lifted inserts with `upsertAll` (each hit refreshes
+  its pair in place or is pushed, with the next `seq`): with `usize::MAX` as
+  bound and budget, Rust's `enforce` inside each `insert` and `insert_many`
+  only sorts, and the final `enforce` sorts again, so the order the inserts
+  left is immaterial. A `decide` example checks single inserts on a lifted
+  list against `upsertAll`, with a refresh. `cycle` is kept as the cycle
+  before #298, with its theorems.
 * Not modelled: the detectors, the `ConditionCheck` closures' bodies (except
   `windowCheck`, the shape of `clock_reading_entry`), lock order, events and
   re-arm, the companion step after the cut (`with_ordinary_companions`), and
@@ -113,7 +123,7 @@ GC (`gc::run` never touches the hot list):
   `cycle_drops_collected`: the next cycle drops it when the detectors report
   live nodes only.
 
-What the model shows about the cycle:
+What the model shows about the cycle before #298:
 
 * `cycle_evicts_fresh_hit`: the cycle inserts before it retains, so an entry
   no longer detected can evict a fresh hit from a full list and is then
@@ -132,6 +142,34 @@ What the model shows about the cycle:
   budget 500) it needs at least 1000 old and fresh entries in one cycle, for
   example a full contradiction budget and about 500 conflict, high-risk or
   drift entries; with a small `hot_list_max` it is easy to reach.
+
+The cycle since #298 (`cycleFixed`) cuts the list to the cycle's condition set
+before it enforces the budget and the bound:
+
+* `cycleFixed_inv`: it keeps the invariant (`Inv`: the bound, the budget, one
+  entry per pair, unique issued `seq`s).
+* `cycleFixed_sound`: every entry after it is one the cycle detected.
+* `cycleFixed_evicts_only_for_held`: what it evicts was detected this cycle
+  and ranks at or below every kept entry, each detected too (the budget's
+  exception as in `enforce_evicts_lowest`): an entry no longer detected never
+  evicts a fresh hit.
+* `cycleFixed_keeps_hits`: when the condition set fits within the bound and
+  its contradictions within the budget, nothing is evicted and every hit
+  whose pair is in the set is on the list.
+* `cycleFixed_keys_eq_hits`: with the condition set the daemon builds (every
+  hit's pair, `heldOf`) and the hits within the bound and the budget, the
+  pairs on the list are exactly the hits' pairs, as the module doc of
+  `src/daemon/hotlist.rs` says.
+* `cycleFixed_perm_cycle_of_no_evict`: when the cycle before #298 evicts
+  nothing while inserting, the fixed one evicts nothing and leaves the same
+  entries, so the fix changes nothing there.
+* `cycleFixed_keeps_fresh_hit`: the issue's bound-2 scenario keeps both n2's
+  conflict and n3's drift (the cycle before #298 keeps only the conflict).
+  Two more examples show that when the fresh hits themselves overflow, the
+  lowest of them goes, and that the budget still holds.
+
+Events are not modelled; they are driven by the detected set, which the fix
+does not change.
 -/
 
 namespace Lambo.Hotlist
@@ -1553,6 +1591,254 @@ theorem insertMany_inv {l : HotList ν} (hl : Inv l) (es : List (ν × Cond × P
 
 end Reachable
 
+/-! ## The cycle since #298: retain, then enforce once -/
+
+theorem length_le_of_nodup_subset {α : Type} [DecidableEq α] :
+    ∀ {l₁ : List α} (l₂ : List α), l₁.Nodup → (∀ x ∈ l₁, x ∈ l₂) → l₁.length ≤ l₂.length
+  | [], _, _, _ => by simp
+  | a :: t, l₂, hn, hs => by
+    have hn' := List.nodup_cons.mp hn
+    have ha : a ∈ l₂ := hs a List.mem_cons_self
+    have ht : ∀ x ∈ t, x ∈ l₂.erase a := fun x hx =>
+      (List.mem_erase_of_ne (fun h : x = a => hn'.1 (by rw [← h]; exact hx))).mpr (hs x (List.mem_cons_of_mem _ hx))
+    have h1 := length_le_of_nodup_subset (l₂.erase a) hn'.2 ht
+    rw [List.length_erase_of_mem ha] at h1
+    have := List.length_pos_of_mem ha
+    simp only [List.length_cons]
+    omega
+
+section Fixed
+
+variable [DecidableEq ν]
+
+/-- The cycle's condition set as Rust builds it: the `(condition, node)` pair
+of every hit (`condition_set`, plus the contradiction hits' pairs). -/
+def heldOf (hits : List (ν × Cond × Payload ν)) : List (Cond × ν) :=
+  hits.map fun r => (r.2.1, r.1)
+
+/-- How many pairs of a condition set are contradictions. -/
+def countCHeld (held : List (Cond × ν)) : Nat :=
+  (held.filter fun q => decide (q.1 = .contradiction)).length
+
+/-- One daemon cycle's hot-list step since #298 (`HotList::sync_cycle`, which
+`detect_into_hot_list` runs): every hit is inserted with the budget and the
+bound lifted, so each refreshes its pair in place or is pushed, with the next
+`seq`, and nothing is evicted (`upsertAll`); the list is cut to the cycle's
+condition set; only then are the budget and the bound enforced, once. Returns
+the list and what that `enforce` evicted. -/
+def cycleFixedFull (l : HotList ν) (hits : List (ν × Cond × Payload ν))
+    (held : List (Cond × ν)) : HotList ν × List (Entry ν) :=
+  let r := retain held (upsertAll l hits)
+  let e := enforce r.max r.cmax r.entries
+  ({ r with entries := e.1 }, e.2)
+
+/-- The list after a cycle since #298. -/
+def cycleFixed (l : HotList ν) (hits : List (ν × Cond × Payload ν)) (held : List (Cond × ν)) :
+    HotList ν :=
+  (cycleFixedFull l hits held).1
+
+theorem upsertAll_limits : ∀ (l : HotList ν) (es : List (ν × Cond × Payload ν)),
+    (upsertAll l es).max = l.max ∧ (upsertAll l es).cmax = l.cmax
+  | _, [] => ⟨rfl, rfl⟩
+  | l, (n, c, p) :: rest => by
+    simp only [upsertAll]
+    exact upsertAll_limits _ rest
+
+theorem insertAll_limits : ∀ (l : HotList ν) (es : List (ν × Cond × Payload ν)),
+    (insertAll l es).max = l.max ∧ (insertAll l es).cmax = l.cmax
+  | _, [] => ⟨rfl, rfl⟩
+  | l, (n, c, p) :: rest => by
+    simp only [insertAll]
+    exact insertAll_limits _ rest
+
+/-- The keys after a batch of upserts: the old ones plus the inserted ones. -/
+theorem key_mem_upsertAll : ∀ (l : HotList ν) (es : List (ν × Cond × Payload ν)) (k : ν × Cond),
+    k ∈ (upsertAll l es).entries.map key ↔ k ∈ l.entries.map key ∨ k ∈ es.map reqKey
+  | l, [], k => by simp [upsertAll]
+  | l, (n, c, p) :: rest, k => by
+    simp only [upsertAll]
+    rw [key_mem_upsertAll _ rest k]
+    show k ∈ (upsert (stamp l n c p) l.entries).map key ∨ _ ↔ _
+    rw [key_mem_upsert]
+    simp only [List.map_cons, List.mem_cons, reqKey, key, stamp]
+    constructor
+    · rintro ((h | h) | h)
+      · exact Or.inl h
+      · exact Or.inr (Or.inl h)
+      · exact Or.inr (Or.inr h)
+    · rintro (h | h | h)
+      · exact Or.inl (Or.inl h)
+      · exact Or.inl (Or.inr h)
+      · exact Or.inr h
+
+/-- **The invariant holds after a cycle since #298**: one entry per pair,
+unique and issued `seq`s, the bound and the contradiction budget. -/
+theorem cycleFixed_inv {l : HotList ν} (hl : Inv l) (hits : List (ν × Cond × Payload ν))
+    (held : List (Cond × ν)) : Inv (cycleFixed l hits held) := by
+  have hu := upsertAll_keys l hits hl.keys_nodup hl.seq_nodup hl.seq_lt
+  have hlt := upsertAll_seq_lt l hits hl.seq_lt
+  have hs : (retain held (upsertAll l hits)).entries.Sublist (upsertAll l hits).entries :=
+    List.filter_sublist
+  refine ⟨enforce_map_nodup key _ _ _ (hu.1.sublist (hs.map key)),
+    enforce_map_nodup Entry.seq _ _ _ (hu.2.1.sublist (hs.map _)), ?_,
+    enforce_length_le _ _ _, enforce_countC_le _ _ _⟩
+  intro e he
+  exact hlt e (hs.subset (mem_enforce _ _ _ he))
+
+/-- After a cycle since #298 every entry is one the cycle detected. -/
+theorem cycleFixed_sound (l : HotList ν) (hits : List (ν × Cond × Payload ν))
+    (held : List (Cond × ν)) (e : Entry ν) (he : e ∈ (cycleFixed l hits held).entries) :
+    (e.cond, e.node) ∈ held :=
+  (mem_retain.mp (mem_enforce _ _ _ he)).2
+
+/-- **Only a detected entry evicts a fresh hit.** Since #298 what the cycle
+evicts is itself detected this cycle, and ranks at or below every entry kept,
+each of them detected too (except a contradiction dropped by the budget,
+which may outrank a kept entry of another kind): an entry the cycle no longer
+detects is gone before the budget and the bound are enforced, so it can no
+longer push a fresh hit off the list (`cycle_evicts_fresh_hit`). -/
+theorem cycleFixed_evicts_only_for_held (l : HotList ν) (hits : List (ν × Cond × Payload ν))
+    (held : List (Cond × ν)) (d : Entry ν) (hd : d ∈ (cycleFixedFull l hits held).2) :
+    (d.cond, d.node) ∈ held ∧ ∀ k ∈ (cycleFixed l hits held).entries,
+      (k.cond, k.node) ∈ held ∧ (Above k d ∨ (isC d = true ∧ isC k = false)) := by
+  have hp := enforce_perm (retain held (upsertAll l hits)).max
+    (retain held (upsertAll l hits)).cmax (retain held (upsertAll l hits)).entries
+  refine ⟨(mem_retain.mp (hp.mem_iff.mp (List.mem_append_right _ hd))).2, ?_⟩
+  intro k hk
+  exact ⟨cycleFixed_sound l hits held k hk, enforce_evicts_lowest _ _ _ k d hk hd⟩
+
+/-- **Every fresh hit that fits is kept.** When the cycle's condition set fits
+within the bound and its contradictions within the budget, the cycle since
+#298 evicts nothing, and every hit whose pair is in the set is on the list,
+whatever entries the cycle no longer detects were on it before. -/
+theorem cycleFixed_keeps_hits {l : HotList ν} (hl : Inv l) (hits : List (ν × Cond × Payload ν))
+    (held : List (Cond × ν)) (hlen : held.length ≤ l.max) (hcnt : countCHeld held ≤ l.cmax) :
+    (cycleFixedFull l hits held).2 = [] ∧
+      ∀ r ∈ hits, (r.2.1, r.1) ∈ held → reqKey r ∈ (cycleFixed l hits held).entries.map key := by
+  have hu := upsertAll_keys l hits hl.keys_nodup hl.seq_nodup hl.seq_lt
+  have hlim := upsertAll_limits l hits
+  have hs : (retain held (upsertAll l hits)).entries.Sublist (upsertAll l hits).entries :=
+    List.filter_sublist
+  have hnd : ((retain held (upsertAll l hits)).entries.map key).Nodup := hu.1.sublist (hs.map key)
+  -- the retained list fits
+  have hR : (retain held (upsertAll l hits)).entries.length ≤ l.max := by
+    have h := length_le_of_nodup_subset (held.map Prod.swap) hnd (by
+      intro k hk
+      obtain ⟨e, he, rfl⟩ := List.mem_map.mp hk
+      exact List.mem_map.mpr ⟨_, (mem_retain.mp he).2, rfl⟩)
+    simp only [List.length_map] at h
+    omega
+  have hRc : countC (retain held (upsertAll l hits)).entries ≤ l.cmax := by
+    have hnd' : (((retain held (upsertAll l hits)).entries.filter isC).map key).Nodup :=
+      hnd.sublist (List.filter_sublist.map key)
+    have h := length_le_of_nodup_subset
+      ((held.filter fun q => decide (q.1 = .contradiction)).map Prod.swap) hnd' (by
+        intro k hk
+        obtain ⟨e, he, rfl⟩ := List.mem_map.mp hk
+        obtain ⟨he, hc⟩ := List.mem_filter.mp he
+        refine List.mem_map.mpr ⟨(e.cond, e.node), List.mem_filter.mpr
+          ⟨(mem_retain.mp he).2, ?_⟩, rfl⟩
+        simpa [isC] using hc)
+    simp only [List.length_map] at h
+    unfold countC
+    unfold countCHeld at hcnt
+    omega
+  have hno := enforce_noop (retain held (upsertAll l hits)).max
+    (retain held (upsertAll l hits)).cmax (retain held (upsertAll l hits)).entries
+    (by show _ ≤ (upsertAll l hits).max; rw [hlim.1]; exact hR)
+    (by show _ ≤ (upsertAll l hits).cmax; rw [hlim.2]; exact hRc)
+  refine ⟨hno.1, ?_⟩
+  intro r hr hheld
+  obtain ⟨e, he, hek⟩ := List.mem_map.mp
+    ((key_mem_upsertAll l hits (reqKey r)).mpr (Or.inr (List.mem_map_of_mem hr)))
+  have hn : e.node = r.1 := congrArg Prod.fst hek
+  have hc : e.cond = r.2.1 := congrArg Prod.snd hek
+  have heR : e ∈ (retain held (upsertAll l hits)).entries :=
+    mem_retain.mpr ⟨he, by rw [hn, hc]; exact hheld⟩
+  rw [← hek]
+  exact List.mem_map_of_mem (hno.2.mem_iff.mpr heR)
+
+/-- **The list equals the cycle's fresh hits, up to the bound**
+(`src/daemon/hotlist.rs`, module doc): with the condition set the daemon
+builds (every hit's pair) and the hits within the bound and the budget, the
+pairs on the list after a cycle since #298 are exactly the hits' pairs. -/
+theorem cycleFixed_keys_eq_hits {l : HotList ν} (hl : Inv l)
+    (hits : List (ν × Cond × Payload ν)) (hlen : hits.length ≤ l.max)
+    (hcnt : countCHeld (heldOf hits) ≤ l.cmax) (k : ν × Cond) :
+    k ∈ (cycleFixed l hits (heldOf hits)).entries.map key ↔ k ∈ hits.map reqKey := by
+  constructor
+  · intro hk
+    obtain ⟨e, he, rfl⟩ := List.mem_map.mp hk
+    obtain ⟨r, hr, hre⟩ := List.mem_map.mp (cycleFixed_sound l hits (heldOf hits) e he)
+    refine List.mem_map.mpr ⟨r, hr, ?_⟩
+    simp only [Prod.mk.injEq] at hre
+    simp [reqKey, key, hre.1, hre.2]
+  · intro hk
+    obtain ⟨r, hr, rfl⟩ := List.mem_map.mp hk
+    exact (cycleFixed_keeps_hits hl hits (heldOf hits) (by simpa [heldOf] using hlen) hcnt).2 r hr
+      (List.mem_map_of_mem hr)
+
+theorem upsert_perm_congr (e : Entry ν) {l₁ l₂ : List (Entry ν)} (hp : l₁.Perm l₂)
+    (hn : (l₁.map key).Nodup) : (upsert e l₁).Perm (upsert e l₂) := by
+  by_cases hm : key e ∈ l₁.map key
+  · have hm₂ : key e ∈ l₂.map key := (hp.map key).mem_iff.mp hm
+    obtain ⟨x, hx, hxk, h1⟩ := upsert_perm_of_mem e l₁ hm
+    obtain ⟨y, hy, hyk, h2⟩ := upsert_perm_of_mem e l₂ hm₂
+    have hxy : x = y := eq_of_nodup_map key hn hx (hp.mem_iff.mpr hy) (hxk.trans hyk.symm)
+    subst hxy
+    exact h1.trans (((hp.erase x).cons e).trans h2.symm)
+  · have hm₂ : key e ∉ l₂.map key := fun h => hm ((hp.map key).mem_iff.mpr h)
+    rw [upsert_of_not_mem e l₁ hm, upsert_of_not_mem e l₂ hm₂]
+    exact hp.append_right [e]
+
+/-- While nothing is evicted, single inserts leave the entries a batch of
+upserts leaves (up to order). -/
+theorem insertAll_perm_upsertAll : ∀ (l u : HotList ν) (es : List (ν × Cond × Payload ν)),
+    Inv l → u.nextSeq = l.nextSeq → l.entries.Perm u.entries → insertAllEvicted l es = [] →
+      (insertAll l es).entries.Perm (upsertAll u es).entries
+  | _, _, [], _, _, hp, _ => hp
+  | l, u, (n, c, p) :: rest, hl, hs, hp, hev => by
+    simp only [insertAllEvicted, List.append_eq_nil_iff] at hev
+    simp only [insertAll, upsertAll]
+    refine insertAll_perm_upsertAll _ _ rest (insert_inv hl n c p)
+      (by show u.nextSeq + 1 = l.nextSeq + 1; rw [hs]) ?_ hev.2
+    have he := enforce_perm l.max l.cmax (upsert (stamp l n c p) l.entries)
+    have h0 : (enforce l.max l.cmax (upsert (stamp l n c p) l.entries)).2 = [] := hev.1
+    rw [h0, List.append_nil] at he
+    have hst : stamp u n c p = stamp l n c p := by simp [stamp, hs]
+    show (enforce l.max l.cmax (upsert (stamp l n c p) l.entries)).1.Perm
+      (upsert (stamp u n c p) u.entries)
+    rw [hst]
+    exact he.trans (upsert_perm_congr _ hp hl.keys_nodup)
+
+/-- **Agreement where nothing was lost.** When the cycle before #298 evicts
+nothing while inserting, the cycle since #298 evicts nothing either and
+leaves the same entries. -/
+theorem cycleFixed_perm_cycle_of_no_evict {l : HotList ν} (hl : Inv l)
+    (hits : List (ν × Cond × Payload ν)) (held : List (Cond × ν))
+    (h : insertAllEvicted l hits = []) :
+    (cycleFixedFull l hits held).2 = [] ∧
+      (cycleFixed l hits held).entries.Perm (cycle l hits held).entries := by
+  have hp := insertAll_perm_upsertAll l l hits hl rfl (List.Perm.refl _) h
+  have hf : (retain held (upsertAll l hits)).entries.Perm (cycle l hits held).entries :=
+    (hp.filter _).symm
+  have hc := cycle_inv hl hits held
+  have hlim := upsertAll_limits l hits
+  have hlim' := insertAll_limits l hits
+  have hno := enforce_noop (retain held (upsertAll l hits)).max
+    (retain held (upsertAll l hits)).cmax (retain held (upsertAll l hits)).entries
+    (by
+      show _ ≤ (upsertAll l hits).max
+      rw [hf.length_eq, hlim.1, ← hlim'.1]
+      exact hc.len_le)
+    (by
+      show _ ≤ (upsertAll l hits).cmax
+      rw [countC_perm hf, hlim.2, ← hlim'.2]
+      exact hc.countC_le)
+  exact ⟨hno.1, hno.2.trans hf⟩
+
+end Fixed
+
 /-! ## Concrete examples (nodes are `Nat`) -/
 
 section Examples
@@ -1690,6 +1976,49 @@ theorem cycle_evicts_fresh_hit :
     let l3 := cycle l2 [req 2 .conflict, req 3 .drift] [(.conflict, 2), (.drift, 3)]
     keys l1 = [(2, .conflict), (1, .conflict)] ∧ keys l2 = [(2, .conflict)] ∧
       keys l3 = [(2, .conflict), (3, .drift)] := by
+  decide
+
+/-- **#298 fixed** (`a_lapsed_entry_never_evicts_a_fresh_hit` in
+`src/daemon/hotlist.rs`): the scenario of `cycle_evicts_fresh_hit` under the
+cycle since #298. Cycle 2 drops the old conflict on n1 before enforcing the
+bound, so both fresh hits stay: n2's conflict and n3's drift. -/
+theorem cycleFixed_keeps_fresh_hit :
+    let l1 := cycleFixed (withMax 2) [req 1 .conflict, req 2 .conflict]
+      [(.conflict, 1), (.conflict, 2)]
+    let l2 := cycleFixed l1 [req 2 .conflict, req 3 .drift] [(.conflict, 2), (.drift, 3)]
+    keys l1 = [(2, .conflict), (1, .conflict)] ∧ keys l2 = [(2, .conflict), (3, .drift)] ∧
+      (cycleFixedFull l1 [req 2 .conflict, req 3 .drift] [(.conflict, 2), (.drift, 3)]).2 = [] ∧
+      keys (cycle l1 [req 2 .conflict, req 3 .drift] [(.conflict, 2), (.drift, 3)])
+        = [(2, .conflict)] := by
+  decide
+
+/-- When the fresh hits themselves overflow, the bound evicts the lowest of
+them, never for an entry the cycle no longer detects: bound 2, an old
+high-risk entry on n9 lapses, and of three fresh hits the stale one goes. -/
+example :
+    let l1 := cycleFixed (withMax 2) [req 9 .highRisk] (heldOf [req 9 .highRisk])
+    let hits := [req 1 .conflict, req 2 .drift, req 3 .stale]
+    let r := cycleFixedFull l1 hits (heldOf hits)
+    keys r.1 = [(1, .conflict), (2, .drift)] ∧ r.2.map key = [(3, .stale)] := by
+  decide
+
+/-- The budget still holds: bound 3, budget 1, two fresh contradictions and a
+drift after an old conflict lapses; the later-declared contradiction stays. -/
+example :
+    let l1 := cycleFixed (withBudget 3 1) [req 9 .conflict] (heldOf [req 9 .conflict])
+    let hits := [req 1 .contradiction, req 2 .contradiction, req 3 .drift]
+    let r := cycleFixedFull l1 hits (heldOf hits)
+    keys r.1 = [(2, .contradiction), (3, .drift)] ∧ r.2.map key = [(1, .contradiction)] := by
+  decide
+
+/-- The model of the lifted inserts: single inserts on the list with the bound
+and the budget lifted (`HotList::sync_cycle` sets both to `usize::MAX`) leave
+the entries `upsertAll` leaves, here with a refresh of a present pair. -/
+example :
+    let l1 := insertAll (withMax 2) [req 1 .conflict, req 2 .conflict]
+    let hits := [req 2 .conflict, req 3 .drift, req 1 .stale]
+    sortPrio (insertAll { l1 with max := 100, cmax := 100 } hits).entries
+      = sortPrio (upsertAll l1 hits).entries := by
   decide
 
 /-- `revalidate_uses_the_callers_clock_and_refreshes_the_payload`: written at
