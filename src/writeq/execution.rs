@@ -591,12 +591,15 @@ impl WriteCtx {
 }
 
 /// #295: how long an agent's worker waits, after its oldest held write met
-/// an outage `attempts` times in a row, before it retries that write with
-/// no new write to prompt it: one second, doubling per failed attempt, at
-/// most [`HYBRID_IO_TIMEOUT`](crate::graph::hybrid::HYBRID_IO_TIMEOUT) (30 s),
-/// the longest a single attempt can take. So a write that never embeds
-/// costs its agent at most one attempt per 30 s, and a write that blinked
-/// is retried within a second, receipts waiting on it or not.
+/// an outage `attempts` times in a row, before it retries that write: one
+/// second, doubling per failed attempt, at most
+/// [`HYBRID_IO_TIMEOUT`](crate::graph::hybrid::HYBRID_IO_TIMEOUT) (30 s).
+/// The wait runs from the end of the failed attempt, and nothing starts a
+/// retry sooner: not a new write of the agent, not a refused one. An attempt
+/// itself can take up to `HYBRID_IO_TIMEOUT`, so a write that never embeds
+/// costs its agent one attempt per cycle of at most 60 s (the wait plus the
+/// attempt); a write that blinked is retried a second later, receipts
+/// waiting on it or not.
 pub(crate) fn held_retry_backoff(attempts: u32) -> std::time::Duration {
     let first = std::time::Duration::from_secs(1);
     let max = crate::graph::hybrid::HYBRID_IO_TIMEOUT;
@@ -612,9 +615,10 @@ enum Next {
     /// A write taken off the queue while its agent has held writes and is
     /// parked: it joined them, behind, without running.
     Held(ReceiptId),
-    /// Nothing to run until the agent's retry is due (or a write or a
-    /// refused admission wakes it).
-    Wait(std::time::Duration),
+    /// Nothing to run until the agent's retry is due. A new or refused write
+    /// of the agent wakes the worker sooner, but only to hold what it finds
+    /// queued: the retry still waits for this instant.
+    Wait(tokio::time::Instant),
     Exit,
 }
 
@@ -631,11 +635,6 @@ impl WritePipeline {
         let observed = self.observed.clone();
         let apply_latency = self.apply_latency.clone();
         tokio::spawn(async move {
-            // #295: set after this worker met an outage at the agent's oldest
-            // owed write; cleared when its retry is due (the backoff timer, a
-            // new write of the agent, or a refused admission wakes it). While
-            // set, writes taken off the queue join the held ones unrun.
-            let mut parked = false;
             loop {
                 // One write per turn, under the lock admission takes, so a
                 // held write is counted (held, then running) until it settles.
@@ -643,7 +642,15 @@ impl WritePipeline {
                     let mut l = lanes.lock();
                     let fenced = ctx.lease_lost.load(Ordering::Acquire);
                     let has_held = l.lane_held(&agent) > 0;
-                    if has_held && (fenced || (!parked && !l.sealed)) {
+                    // #295: the agent's retry is due once the backoff since its
+                    // last failed attempt has passed (`Lanes::held_due`).
+                    let due = l
+                        .held_due
+                        .get(&agent)
+                        .copied()
+                        .unwrap_or_else(tokio::time::Instant::now);
+                    let retry_due = due <= tokio::time::Instant::now();
+                    if has_held && (fenced || (retry_due && !l.sealed)) {
                         // The oldest held write first: retried, or refused
                         // below if the lease is gone.
                         let job = l.held.get_mut(&agent).and_then(VecDeque::pop_front);
@@ -662,8 +669,8 @@ impl WritePipeline {
                     {
                         l.queued -= 1;
                         if has_held {
-                            // Parked (or closing): it keeps its place behind
-                            // the held writes, counted, unrun.
+                            // Its retry not due yet (or closing): it keeps its
+                            // place behind the held writes, counted, unrun.
                             let id = job.receipt;
                             l.held.entry(agent.clone()).or_default().push_back(job);
                             Next::Held(id)
@@ -673,8 +680,7 @@ impl WritePipeline {
                             Next::Run(Box::new(job))
                         }
                     } else if has_held && !l.sealed {
-                        let attempts = l.held_attempts.get(&agent).map_or(1, |(_, n)| *n);
-                        Next::Wait(held_retry_backoff(attempts))
+                        Next::Wait(due)
                     } else {
                         // Exit decision and liveness bookkeeping happen under
                         // the same lock an enqueue takes, so no job can be
@@ -695,16 +701,22 @@ impl WritePipeline {
                         hold_one(&receipts, &id);
                         continue;
                     }
-                    Next::Wait(delay) => {
+                    Next::Wait(due) => {
                         tokio::select! {
-                            _ = tokio::time::sleep(delay) => {}
+                            _ = tokio::time::sleep_until(due) => {}
                             _ = wake.notified() => {}
                         }
-                        parked = false;
                         continue;
                     }
                     Next::Run(job) => *job,
                 };
+                // A retry of the write this worker held after a failed attempt
+                // (not a held write's first attempt).
+                let retried = lanes
+                    .lock()
+                    .held_attempts
+                    .get(&agent)
+                    .is_some_and(|(id, _)| *id == job.receipt);
 
                 // The fence, checked per write, right before it would run: the
                 // lease can be lost while a lane drains or a retry runs, and
@@ -750,18 +762,26 @@ impl WritePipeline {
                     // rule (#125): one is a fact about this write, settled
                     // `failed`; a run of `REPLAY_LOOKUP_TIMEOUT_LIMIT` in a
                     // row with nothing applied between says the store is slow
-                    // for everyone, and holds it.
+                    // for everyone, and holds it. Like the replay, which
+                    // counts each intent once per pass, the run counts first
+                    // attempts only: the retry of a write it held is that
+                    // write's last attempt, and settles `failed` if the lookup
+                    // times out again, so one input slow every time cannot
+                    // hold the lane.
                     let hold_cause = match &raw_outcome {
                         Ok(_) => {
                             observed.lock().sample(started.elapsed().as_secs_f64());
-                            lanes.lock().lookup_streak = 0;
                             None
                         }
                         Err(e) if e.is_lookup_timeout() => {
-                            let mut l = lanes.lock();
-                            l.lookup_streak += 1;
-                            (l.lookup_streak >= super::REPLAY_LOOKUP_TIMEOUT_LIMIT)
-                                .then_some("the store's vector lookup is slow for every write")
+                            if retried {
+                                None
+                            } else {
+                                let mut l = lanes.lock();
+                                l.lookup_streak += 1;
+                                (l.lookup_streak >= super::REPLAY_LOOKUP_TIMEOUT_LIMIT)
+                                    .then_some("the store's vector lookup is slow for every write")
+                            }
                         }
                         Err(LamboError::EmbedUnavailable(_)) => Some("the embedder did not answer"),
                         Err(_) => None,
@@ -830,10 +850,13 @@ impl WritePipeline {
                             _ => 1,
                         };
                         l.held_attempts.insert(agent.clone(), (receipt, attempts));
+                        l.held_due.insert(
+                            agent.clone(),
+                            tokio::time::Instant::now() + held_retry_backoff(attempts),
+                        );
                         l.held.entry(agent.clone()).or_default().push_front(job);
                         (attempts, l.lane_held(&agent))
                     };
-                    parked = true;
                     hold_one(&receipts, &receipt);
                     tracing::warn!(
                         session = %ctx.session,
@@ -865,11 +888,14 @@ impl WritePipeline {
                     if let Some(n) = l.running_per_lane.get_mut(&agent) {
                         *n = n.saturating_sub(1);
                     }
-                    if l.held_attempts
-                        .get(&agent)
-                        .is_some_and(|(id, _)| *id == job.receipt)
-                    {
+                    if outcome.is_ok() {
+                        l.lookup_streak = 0;
+                    }
+                    if retried {
+                        // The held write that set the backoff has settled; the
+                        // writes behind it have had no attempt yet.
                         l.held_attempts.remove(&agent);
+                        l.held_due.remove(&agent);
                     }
                 }
                 let answer = match outcome {

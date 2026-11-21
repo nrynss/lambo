@@ -161,19 +161,21 @@ impl DropReason {
             DropReason::QueueFull => format!(
                 "the background write queue is full ({bound} outstanding — the whole-queue \
                  memory cap; wait for receipts to settle and resubmit. Writes held behind an \
-                 embedder outage count too, and are retried in the background)"
+                 embedder outage or a slow vector lookup count too, and are retried in the \
+                 background)"
             ),
             DropReason::QueueBytes => format!(
                 "the background write queue is at its {} MiB payload cap (writes held behind an \
-                 embedder outage count too, and are retried in the background)",
+                 embedder outage or a slow vector lookup count too, and are retried in the \
+                 background)",
                 WRITE_QUEUE_MAX_BYTES / (1024 * 1024)
             ),
             DropReason::Closed => "the session is closing".into(),
             DropReason::HeldLane => format!(
                 "this agent's background write lane is full ({bound} outstanding, including \
-                 writes held behind one the embedder did not answer); held writes are retried \
-                 in the background and apply in order once it answers, so resubmit this one \
-                 later rather than waiting on their receipts"
+                 writes held behind one the embedder, or the store's vector lookup, did not \
+                 answer); held writes are retried in the background and apply in order once it \
+                 answers, so resubmit this one later rather than waiting on their receipts"
             ),
         }
     }
@@ -617,9 +619,9 @@ pub(super) struct Lanes {
     /// #295: per agent, the write its lane worker met an embedder outage at
     /// and every later write of that agent the worker has taken since, oldest
     /// first. The agent's worker stays alive while it has any and retries the
-    /// oldest on a backoff timer (`execution::held_retry_backoff`), sooner
-    /// when a new write of the agent arrives or one is refused; no new write
-    /// is needed. Nothing of the agent runs ahead of them. Their intents stay
+    /// oldest on a backoff timer (`execution::held_retry_backoff`,
+    /// [`Lanes::held_due`]); no new write is needed, and none makes it
+    /// sooner. Nothing of the agent runs ahead of them. Their intents stay
     /// unconsumed and their receipts answer `pending_replay`; a close sets
     /// them aside like any unsettled receipt (`intent_durable`), and the next
     /// serve replays them in order. Counted at admission against the lane and
@@ -630,9 +632,14 @@ pub(super) struct Lanes {
     /// a row the worker has met an outage at it, for its backoff and for the
     /// warning that makes a write which never embeds visible.
     pub(super) held_attempts: HashMap<AgentId, (ReceiptId, u32)>,
+    /// For each agent with held writes: the earliest instant its worker may
+    /// retry the oldest, the end of its last failed attempt plus
+    /// `execution::held_retry_backoff`. Nothing starts a retry sooner.
+    pub(super) held_due: HashMap<AgentId, tokio::time::Instant>,
     /// Each live worker's wake-up: admission notifies it when a write of its
-    /// agent is admitted or refused, so an agent with held writes retries
-    /// the oldest at once rather than at its next backoff.
+    /// agent is admitted or refused, so a worker waiting out a backoff holds
+    /// a new write at once (its receipt answers `pending_replay`). It does
+    /// not start a retry before [`Lanes::held_due`].
     pub(super) wakes: HashMap<AgentId, std::sync::Arc<tokio::sync::Notify>>,
     /// Lookup timeouts in a row, across lanes, with nothing applied between
     /// (#295, the replay's rule): below `REPLAY_LOOKUP_TIMEOUT_LIMIT` one
@@ -854,15 +861,16 @@ impl WritePipeline {
                 } else if lanes.lane_held(&agent) > 0
                     && let Some(wake) = lanes.wakes.get(&agent)
                 {
-                    // A new write of an agent with held writes: retry the
-                    // oldest now rather than at its next backoff.
+                    // A new write of an agent with held writes: the waiting
+                    // worker holds it now (the retry still waits its backoff).
                     wake.notify_one();
                 }
                 None
             };
-            // #295: a refused write of an agent with held writes wakes its
-            // retry, so a full lane can never keep them from being retried.
-            // Its worker is alive while it has any; spawn one if not.
+            // #295: held writes are retried by their worker's timer, so a full
+            // lane can never keep them from being retried; the worker is alive
+            // while it has any, and is spawned here if not. The wake starts no
+            // retry before its backoff.
             if refusal.is_some() && !lanes.sealed && lanes.lane_held(&agent) > 0 {
                 if let Some(wake) = lanes.wakes.get(&agent) {
                     wake.notify_one();

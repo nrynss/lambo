@@ -702,8 +702,9 @@ impl ReceiptAnswer {
                                              owed: either admitted by an EARLIER serve of this \
                                              session and waiting in this serve's replay, one \
                                              write at a time, or held in this serve behind a \
-                                             write of the same agent the embedder did not \
-                                             answer, and retried in the background. It may \
+                                             write of the same agent the embedder (or the \
+                                             store's vector lookup) did not answer, and \
+                                             retried in the background. It may \
                                              settle in this process or in a later one; ask \
                                              again, and recall rather than re-deriving."
                 .into(),

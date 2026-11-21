@@ -235,21 +235,28 @@
   admitted write, so a lane (or the whole queue) full of held writes refused
   every write that could have retried them, and an agent waiting on its
   `pending_replay` receipt never wrote again. An agent's worker now stays
-  alive while it has held writes and retries the oldest on a backoff timer
-  (1 s, doubling per failed attempt, at most 30 s, the embed budget), at once
-  when a write of the agent is admitted or refused; no new write is needed.
-  A refusal caused by held writes says they are retried in the background
-  instead of telling the agent to wait on receipts. Held writes now stay
+  alive while it has held writes and retries the oldest on a backoff timer:
+  1 s after the failed attempt, doubling per failed attempt, at most 30 s
+  (the embed budget). No new write is needed, and none starts a retry
+  sooner, admitted or refused, so an agent resubmitting in a loop costs no
+  extra embeds; a write that never embeds costs one attempt (itself up to
+  30 s) per cycle of at most a minute. A refusal caused by held writes says
+  they are retried in the background instead of telling the agent to wait on
+  receipts; it is a new `DropReason::HeldLane` variant, which breaks code
+  that matches `DropReason` exhaustively. Held writes now stay
   counted until each settles: their bytes against the payload cap (they used
   to leave it when taken off the queue), and the lane and queue counts during
   a retry (a retry used to take every held write out of the count). The
   worker takes one write at a time and checks the lease fence before each,
   so a lease lost during a retry runs no later held write. A lookup timeout
   in session follows the replay's rule: one settles its write `failed`, and
-  only a run of three in a row (the store slow for everyone) holds it, so a
-  lookup that is slow every time for one input never holds a lane. A held
-  write's `pending_replay` detail now says it may be held in this server, not
-  only owed by an earlier one. Counters: an embedder outage no longer counts
+  only a run of three in a row (the store slow for everyone) holds it; the
+  run counts first attempts only, so the held write's retry settles it
+  `failed` if the lookup times out again, and a lookup that is slow every
+  time for one input never holds a lane for the serve. A held write's
+  `pending_replay` detail, and the refusals held writes cause, now say it may
+  be held in this server, behind an embedder outage or a slow vector lookup,
+  not only owed by an earlier one. Counters: an embedder outage no longer counts
   in `write_queue_failed`, and held writes count in `write_queue_outstanding`
   until they settle. A replay halted by a lost lease or a closing session
   with intents owed now reports `write_queue_replay_blocked = "other"`
@@ -260,10 +267,12 @@
   the row (dropping that write): `DELETE FROM write_intents WHERE session_id
   = '<session>' AND receipt = '<receipt>';` in SQLite or Postgres.
   `formal/LamboProofs/Drain.lean` adds an event model with admission, the
-  caps, retries and the fence, and proves that held writes are retried with
-  no new admission, that the caps hold over held writes and their bytes and
-  cannot wedge a retry, that nothing taken after the fence is applied, and
-  that per-agent order holds from the session through the next serve.
+  caps, retries and the fence, and proves that a retry of held writes needs
+  no admission and is always available while writes are held (that it comes
+  due is the timer, which the model does not cover), that the caps hold over
+  held writes and their bytes and are never read by a retry, that nothing
+  taken after the fence is applied, and that per-agent order holds from the
+  session through the next serve.
 - Write-queue replay, review follow-ups to #295. An agent the replay deferred
   at a transient embedder answer now gets one more attempt at the end of the
   pass, from its oldest owed intent, so a write that blinked once no longer

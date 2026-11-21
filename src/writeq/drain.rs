@@ -230,6 +230,7 @@ impl WritePipeline {
         // the set-aside ones above; nothing in this process will run them.
         lanes.held.clear();
         lanes.held_attempts.clear();
+        lanes.held_due.clear();
         lanes.wakes.clear();
         lanes.lookup_streak = 0;
         for id in pending {

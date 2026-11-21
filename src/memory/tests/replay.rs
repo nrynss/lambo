@@ -2524,3 +2524,72 @@ async fn an_unparseable_id_outside_the_format_family_is_settled_failed() {
         Some("failed")
     );
 }
+
+/// **#295 review #3, SF1 and N3**: in session, three lookup timeouts in a
+/// row with nothing applied between hold the third write (the store is slow
+/// for everyone), and its retry, which the run does not count again, settles
+/// it `failed` if the lookup times out once more. One input slow every time
+/// therefore cannot hold the lane for the serve. Before, every retry counted
+/// toward the run, so the third write stayed held.
+#[tokio::test(start_paused = true)]
+async fn a_lookup_timeout_run_holds_the_third_write_and_its_retry_settles_it() {
+    let inner = Arc::new(MemoryStore::new());
+    let a = AgentId::new("agent-a");
+    let mem = Memory::builder()
+        .session("in-session-lookup-run")
+        .agent("agent-a")
+        .flush_interval(Duration::from_secs(3_600))
+        .store(Arc::new(SlowLookup(VectorSearchable(inner.clone()))) as Arc<dyn GraphStore>)
+        .embedder(Arc::new(FixtureEmbedder::new()) as Arc<dyn Embedder>)
+        .embedding_contract(contract("fixture", 1024))
+        .match_strategy(MatchStrategy::Hybrid)
+        .build()
+        .await
+        .expect("build");
+    let mut ids = Vec::new();
+    for i in 0..crate::writeq::REPLAY_LOOKUP_TIMEOUT_LIMIT {
+        let content = format!("slow lookup run fact {i}");
+        let submitted = mem
+            .derive_async_as(
+                &a,
+                &[(content.as_str(), ConceptType::Entity)],
+                &ParentOf::none(),
+                None,
+            )
+            .await
+            .expect("ack");
+        for _ in 0..10_000 {
+            if mem.pipeline().lookup(&a, submitted.receipt).tag() != "pending" {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        ids.push(submitted.receipt);
+    }
+    let last = *ids.last().unwrap();
+    for id in &ids[..ids.len() - 1] {
+        assert_eq!(
+            mem.pipeline().lookup(&a, *id).tag(),
+            "failed",
+            "below the run: settled"
+        );
+    }
+    assert_eq!(
+        mem.pipeline().lookup(&a, last).tag(),
+        "pending_replay",
+        "at the run's limit the store is slow for everyone: held"
+    );
+    for _ in 0..10_000 {
+        if mem.pipeline().lookup(&a, last).tag() != "pending_replay" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    match mem.pipeline().lookup(&a, last) {
+        crate::writeq::ReceiptAnswer::Failed(why) => {
+            assert!(why.contains("candidate lookup"), "{why}")
+        }
+        other => panic!("the retry of the held write settles it: {other:?}"),
+    }
+    mem.close().await.expect("clean close");
+}

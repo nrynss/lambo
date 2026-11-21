@@ -3,6 +3,7 @@
 //! `formal/LamboProofs/Drain.lean` (`stepW`, `runW`).
 
 use super::*;
+use crate::writeq::execution::held_retry_backoff;
 
 /// An embedder that is down (`EmbedError::Unavailable`) while `down` is set
 /// and, while `gated`, parks real content on `gate`; the calibration probe's
@@ -13,6 +14,8 @@ struct Flaky {
     gated: AtomicBool,
     gate: tokio::sync::Semaphore,
     entered: AtomicUsize,
+    /// Embeds of real content attempted, answered or not.
+    calls: AtomicUsize,
 }
 
 impl Flaky {
@@ -23,6 +26,7 @@ impl Flaky {
             gated: AtomicBool::new(false),
             gate: tokio::sync::Semaphore::new(0),
             entered: AtomicUsize::new(0),
+            calls: AtomicUsize::new(0),
         })
     }
 }
@@ -61,6 +65,7 @@ impl Flaky {
     ) -> Result<Vec<f32>, crate::EmbedError> {
         // The calibration probe's texts repeat `PROBE_TEXT`.
         if !text.starts_with(&crate::writeq::PROBE_TEXT[..16]) {
+            self.calls.fetch_add(1, Ordering::SeqCst);
             if self.down.load(Ordering::SeqCst) {
                 return Err(crate::EmbedError::Unavailable(
                     "llama.cpp unreachable: connection refused".into(),
@@ -121,8 +126,9 @@ async fn submit_held(rig: &Rig, agent: &AgentId, n: usize, tag: &str) -> Vec<Rec
 /// Once the embedder is back, the held writes apply, in order, with no new
 /// write: the worker retries them on its backoff timer.
 ///
-/// Mirrors `Drain.retry_settles_head`, `Drain.stepW_caps_free` and
-/// `Drain.refused_wakes`.
+/// Mirrors `Drain.retry_settles_head`, `Drain.retry_enabled` and
+/// `Drain.stepW_caps_free` (a retry needs no admission and never reads the
+/// caps; that it comes due is the worker's timer).
 #[tokio::test(start_paused = true)]
 async fn held_writes_are_retried_without_a_new_write_even_when_the_lane_is_full() {
     let embedder = Flaky::new();
@@ -250,7 +256,7 @@ async fn a_lease_lost_mid_retry_runs_no_later_held_write() {
     let ids = submit_held(&rig, &agent, 2, "held").await;
     embedder.down.store(false, Ordering::SeqCst);
     embedder.gated.store(true, Ordering::SeqCst);
-    // A new write of the agent prompts the retry at once.
+    // A new write of the agent; the retry comes when its backoff is due.
     let third = rig.derive(&agent, "a later fact").await;
     assert!(!third.dropped());
     until(
@@ -279,4 +285,31 @@ async fn a_lease_lost_mid_retry_runs_no_later_held_write() {
         );
     }
     assert_eq!(applied_order(&rig), vec![ids[0].to_string()]);
+}
+
+/// **Review #3, N1**: a new or refused write of an agent with held writes
+/// does not start a retry before the backoff has passed. Five writes sent
+/// right after the outage are held without a single further embed attempt;
+/// before, each one retried the held write at once.
+#[tokio::test]
+async fn new_writes_do_not_retry_a_held_write_before_its_backoff() {
+    let embedder = Flaky::new();
+    let rig = Rig::hybrid("hold-no-bypass", embedder.clone());
+    let agent = AgentId::new("agent-a");
+    let first = submit_held(&rig, &agent, 1, "first").await;
+    let attempts = embedder.calls.load(Ordering::SeqCst);
+    let started = tokio::time::Instant::now();
+    let more = submit_held(&rig, &agent, 5, "more").await;
+    assert!(
+        started.elapsed() < held_retry_backoff(1),
+        "the writes must land inside the first backoff for this test to mean anything"
+    );
+    for id in first.iter().chain(&more) {
+        assert_eq!(rig.pipeline.lookup(&agent, *id).tag(), "pending_replay");
+    }
+    assert_eq!(
+        embedder.calls.load(Ordering::SeqCst),
+        attempts,
+        "no write may start a retry before the backoff has passed"
+    );
 }
