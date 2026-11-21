@@ -1,0 +1,6 @@
+name = "lambo-proofs"
+version = "0.1.0"
+defaultTargets = ["LamboProofs"]
+
+[[lean_lib]]
+name = "LamboProofs"
