@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+- Recall tier: a flush that changes a session's embedding contract is now
+  re-indexed from the store instead of mirrored (#319). `lambo re-embed`
+  into another model drains every rewritten concept before the trailing
+  `SetEmbedding`, and the mirror projected those vectors into the **old**
+  contract's index, wrote nothing to the new one, advanced the sync marker
+  and stayed in sync: vector recall under the new contract silently found
+  nothing until `lambo recall-index backfill`. The `--allow-embedding-mismatch`
+  relabel (a lone `SetEmbedding` over kept vectors) left the new index empty
+  the same way. Now a batch that moves an existing contract, or stamps one
+  after an upsert that carries a vector, writes nothing to the index: the
+  session goes stale (not counted as a mirror failure), its reads fall back
+  to the store, and the writer repairs it at once from the durable snapshot,
+  which indexes every vector under the new contract and sweeps the old
+  contract's documents. If the command releases the lease before the repair
+  finishes, the next writer's load finishes it. Batches without a contract
+  change, and first stamps that come before the concepts (every derive), are
+  mirrored as before. Modelled first in `formal/LamboProofs/Tiered.lean`
+  (`mirror_switch_writes_nothing`, `write_agrees`,
+  `reembed_migration_repaired`).
 - Flush loop: the lease read behind the erased check that follows a failed
   flush, and the flush-stats row write, now run under the same 30 s timeout
   and panic containment as a flush attempt (#301). A store adapter that

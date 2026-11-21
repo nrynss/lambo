@@ -84,6 +84,19 @@ pub(crate) struct Projection {
     pub contracts: Vec<EmbeddingContract>,
     /// The session's contract after the batch.
     pub contract_after: Option<EmbeddingContract>,
+    /// The batch moves the contract where `ops` cannot say what the new
+    /// contract's index must hold (#319): a `SetEmbedding` that changes the
+    /// contract in force when a contract was already in force (the session's
+    /// other vectors are now the new contract's: the
+    /// `--allow-embedding-mismatch` relabel, or a migration), or when an
+    /// upsert carrying a vector came earlier in the batch
+    /// (`Graph::reembed_all` drains its rewritten vectors before the
+    /// `SetEmbedding`, and a first stamp quarantines them durably). The
+    /// mirror does not trust `ops` then and repairs from the durable store.
+    /// A first stamp before any vector, or a `SetEmbedding` that keeps the
+    /// contract, is not a switch. Lean: `switches` in
+    /// `formal/LamboProofs/Tiered.lean`.
+    pub switched: bool,
 }
 
 /// Project `mutations` for `session`, starting from the session's durable
@@ -94,7 +107,7 @@ pub(crate) struct Projection {
 /// | `UpsertNode(Concept)` with a vector of the contract's width | index the document |
 /// | `UpsertNode(Concept)` without one | delete it (the vector was cleared) |
 /// | `DeleteNode` | delete it |
-/// | `SetEmbedding` | switch the contract for what follows |
+/// | `SetEmbedding` | switch the contract for what follows; one that moves the contract sets [`Projection::switched`] |
 /// | everything else | nothing (graph structure and canonization stay durable-only) |
 ///
 /// With no contract in force nothing is written: there is no index to write
@@ -109,6 +122,8 @@ pub(crate) fn project(
     version: Option<u64>,
 ) -> Projection {
     let mut current = contract_before;
+    let mut switched = false;
+    let mut vector_upserted = false;
     let mut ops: Vec<DocOp> = Vec::new();
     let mut contracts: Vec<EmbeddingContract> = Vec::new();
     let mut push = |op: DocOp, ops: &mut Vec<DocOp>| {
@@ -123,10 +138,16 @@ pub(crate) fn project(
             Mutation::SetEmbedding {
                 session_id,
                 embedding,
-            } if session_id == session => current.clone_from(embedding),
+            } if session_id == session => {
+                if *embedding != current && (current.is_some() || vector_upserted) {
+                    switched = true;
+                }
+                current.clone_from(embedding);
+            }
             Mutation::UpsertNode {
                 node: Node::Concept(c),
             } if &c.session_id == session => {
+                vector_upserted |= c.embedding.is_some();
                 let Some(contract) = current.clone() else {
                     continue;
                 };
@@ -164,6 +185,7 @@ pub(crate) fn project(
         ops,
         contracts,
         contract_after: current,
+        switched,
     }
 }
 
@@ -334,6 +356,48 @@ mod tests {
             summary,
             vec![(b, "delete", &k1), (a, "index", &k2), (c, "delete", &k2)]
         );
+    }
+
+    /// #319: `switched`, as the Lean model's `switches` (its `decide`
+    /// examples on the issue's batch, the relabel, the seed and the in-place
+    /// rewrite).
+    #[test]
+    fn a_contract_switch_is_flagged() {
+        let sid = SessionId::new("s");
+        let (k1, k2) = (contract(None), contract(Some("m2")));
+        let set = |k: Option<EmbeddingContract>| Mutation::SetEmbedding {
+            session_id: sid.clone(),
+            embedding: k,
+        };
+        let v = |id| concept(&sid, id, Some(vec![1.0, 0.0]));
+        let (a, b) = (NodeId::new(), NodeId::new());
+        let switched = |muts: &[Mutation], before: Option<EmbeddingContract>| {
+            project(&sid, muts, before, None).switched
+        };
+        // `reembed_all`'s order, from a contract and from none.
+        let reembed = [v(a), v(b), set(Some(k2.clone()))];
+        assert!(switched(&reembed, Some(k1.clone())));
+        assert!(switched(&reembed, None));
+        // The relabel, and a switch first from an existing contract.
+        assert!(switched(&[set(Some(k2.clone()))], Some(k1.clone())));
+        assert!(switched(&[set(Some(k2.clone())), v(a)], Some(k1.clone())));
+        // A cleared contract.
+        assert!(switched(&[set(None)], Some(k1.clone())));
+        // Not switches: a first stamp first, a vectorless upsert before a
+        // first stamp, the same contract again, no SetEmbedding at all.
+        assert!(!switched(&[set(Some(k1.clone())), v(a)], None));
+        assert!(!switched(
+            &[concept(&sid, a, None), set(Some(k1.clone())), v(b)],
+            None
+        ));
+        assert!(!switched(&[v(a), set(Some(k1.clone()))], Some(k1.clone())));
+        assert!(!switched(&[v(a), v(b)], Some(k1.clone())));
+        // Another session's SetEmbedding is not this session's switch.
+        let other = Mutation::SetEmbedding {
+            session_id: SessionId::new("t"),
+            embedding: Some(k2.clone()),
+        };
+        assert!(!switched(&[v(a), other], Some(k1)));
     }
 
     #[test]

@@ -82,6 +82,16 @@
 //! never meaningless. That is the accepted divergence from the SQL adapters'
 //! single-snapshot check, recorded in `dev-diary/notes/feature-18-elastic-tier.md`.
 //!
+//! A flush that moves the contract (`lambo re-embed` into another model, the
+//! `--allow-embedding-mismatch` relabel, a clear) is not mirrored (#319):
+//! `Graph::reembed_all` drains its new vectors before the trailing
+//! `SetEmbedding`, so the projection would put them in the old contract's
+//! index, and a relabel keeps vectors the batch never names. The session
+//! goes stale and is repaired from the durable snapshot instead, which
+//! indexes every vector under the new contract and sweeps the old one's
+//! documents; reads fall back meanwhile. A first stamp ahead of the
+//! session's vectors (every derive) is mirrored as before.
+//!
 //! # `exact_vector_scan` stays false (#8)
 //!
 //! A session holder over a store that declares an exact scan ranks in its own
@@ -1152,7 +1162,24 @@ impl Tier {
 
     /// Project and write at `version`; advance the marker only when
     /// everything landed.
-    async fn mirror_ops(&self, session: &SessionId, batch: &MutationBatch, version: Option<u64>) {
+    ///
+    /// A batch that moves the session's contract ([`Projection::switched`])
+    /// is not mirrored (#319): its projection would put a re-embed's new
+    /// vectors, drained before the trailing `SetEmbedding`, into the old
+    /// contract's index, and would leave a relabel's kept vectors out of the
+    /// new one, while the marker advanced. The session goes stale under the
+    /// contract after the batch (not counted as a mirror failure) and a
+    /// repair re-indexes it from the durable snapshot, which writes every
+    /// vector under the new contract and sweeps the old contract's
+    /// documents. Lean: `mirror_switch_writes_nothing`, `write_agrees`.
+    ///
+    /// [`Projection::switched`]: super::project::Projection::switched
+    async fn mirror_ops(
+        self: &Arc<Self>,
+        session: &SessionId,
+        batch: &MutationBatch,
+        version: Option<u64>,
+    ) {
         let before = match self.durable_contract(session).await {
             Ok(c) => c,
             Err(e) => {
@@ -1161,6 +1188,23 @@ impl Tier {
             }
         };
         let projection = project(session, &batch.mutations, before, version);
+        if projection.switched {
+            tracing::info!(
+                target: "lambo::recall_tier",
+                session = %session,
+                "the batch changed the session's embedding contract; vector recall falls back to \
+                 the durable store until the session is re-indexed under the new contract"
+            );
+            self.with_state(session, |st| {
+                st.contract = Some(projection.contract_after.clone());
+                st.sync = TierSync::Stale;
+                st.last_error = Some(
+                    "the embedding contract changed: re-indexing from the durable store".into(),
+                );
+            });
+            self.repair_if_due(session);
+            return;
+        }
         self.with_state(session, |st| {
             st.contract = Some(projection.contract_after.clone());
         });

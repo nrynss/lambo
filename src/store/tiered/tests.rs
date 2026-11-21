@@ -672,7 +672,12 @@ async fn a_contract_mismatch_is_refused_and_a_switch_queries_only_the_new_index(
     assert!(matches!(err, StoreError::Invariant(_)), "{err:?}");
     assert!(err.to_string().contains("contract"), "{err}");
 
-    // Switch the session to `other` and re-embed only c2.
+    // Switch the session to `other` and re-embed only c2. c1 keeps its
+    // vector durably, now under `other` (a same-width switch quarantines
+    // nothing). Before #319 the mirror indexed only c2 under `other` and
+    // stayed in sync, so c1 was left out of the new contract's index; now
+    // the switch is repaired from the durable store, and the new index
+    // holds what the store holds.
     let switch = batch(
         2,
         vec![
@@ -682,20 +687,133 @@ async fn a_contract_mismatch_is_refused_and_a_switch_queries_only_the_new_index(
                 s.c2,
                 s.origin,
                 "beta",
-                Some(vec![1.0, 0.0, 0.0, 0.0]),
+                Some(vec![1.0, 0.2, 0.0, 0.0]),
             )),
         ],
     );
     store.flush(&switch, Some(token)).await.unwrap();
+    settle(&store).await;
+    assert_eq!(store.tier_status(&sid).sync, TierSync::InSync);
+    let knn_before = fake.knn_calls.load(std::sync::atomic::Ordering::SeqCst);
     let got = store
         .vector_candidates_checked(&sid, &PROBE, &other, 10)
         .await
         .unwrap();
     assert_eq!(
-        ids(&got),
-        vec![s.c2],
-        "c1 lives only in the old contract's index and is not ranked"
+        fake.knn_calls.load(std::sync::atomic::Ordering::SeqCst),
+        knn_before + 1,
+        "only the new contract's index is queried"
     );
+    assert_eq!(ids(&got), vec![s.c2, s.c1]);
+    let new_index = fake.index_name(&other);
+    assert!(
+        fake.live(&sid)
+            .values()
+            .all(|(index, _)| index == &new_index),
+        "the old contract's documents are swept"
+    );
+    let err = store
+        .vector_candidates_checked(&sid, &PROBE, &contract(), 10)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, StoreError::Invariant(_)), "{err:?}");
+}
+
+/// #319: a re-embed migration in `Graph::reembed_all`'s real order (every
+/// `UpsertNode`, then the trailing `SetEmbedding`) through the tier. The
+/// previous mirror projected the new vectors into the OLD contract's index
+/// and nothing into the new one, advanced the marker and stayed in sync
+/// (`formal/LamboProofs/Tiered.lean`: `reembed_migration_misindexed`,
+/// `project_reembed_into_old_index`). Now the batch is not mirrored: the
+/// session goes stale and a repair re-indexes it from the durable snapshot
+/// (`mirror_switch_writes_nothing`, `reembed_migration_held_back`), so the
+/// new contract's index holds exactly the re-embedded vectors and the old
+/// contract's documents are swept (`reembed_migration_repaired`).
+#[tokio::test]
+async fn a_reembed_migration_is_indexed_under_the_new_contract() {
+    let (primary, fake) = (memory_primary(), Arc::new(FakeIndex::new()));
+    let store = tier(&primary, &fake);
+    let sid = SessionId::new("reembed");
+    let token = attach(&store, &sid, &holder("w")).await;
+    let (s, mut b) = seed_batch(&sid, 1);
+    // A graph loads only concepts its interactions derive.
+    b.mutations
+        .extend([s.c1, s.c2, s.c3].map(|target| Mutation::UpsertEdge {
+            edge: crate::types::Edge {
+                event_time: None,
+                id: NodeId::new(),
+                session_id: sid.clone(),
+                source: s.origin,
+                target,
+                edge_type: crate::types::EdgeType::Derives,
+                weight: 1.0,
+                reinforcements: 1,
+                created_at: Utc::now(),
+                last_reinforced: Utc::now(),
+            },
+        }));
+    store.flush(&b, Some(token)).await.unwrap();
+    assert_eq!(store.tier_status(&sid).sync, TierSync::InSync);
+
+    let next = EmbeddingContract {
+        model: Some("next-model".into()),
+        ..contract()
+    };
+    let rewritten = [
+        (s.c1, vec![0.0, 0.0, 1.0, 0.0]),
+        (s.c2, vec![0.0, 0.0, 0.0, 1.0]),
+        (s.c3, vec![0.0, 0.0, 0.6, 0.8]),
+    ];
+    let mut g =
+        crate::graph::Graph::from_snapshot(primary.load_session(&sid).await.unwrap()).unwrap();
+    g.reembed_all(rewritten.to_vec(), next.clone()).unwrap();
+    let migration = g.drain_log();
+    assert!(
+        matches!(
+            migration.mutations.as_slice(),
+            [
+                Mutation::UpsertNode { .. },
+                Mutation::UpsertNode { .. },
+                Mutation::UpsertNode { .. },
+                Mutation::SetEmbedding { .. }
+            ]
+        ),
+        "reembed_all's order: {:?}",
+        migration.mutations
+    );
+    store.flush(&migration, Some(token)).await.unwrap();
+    settle(&store).await;
+
+    let status = store.tier_status(&sid);
+    assert_eq!(status.sync, TierSync::InSync, "{status:?}");
+    assert_eq!(status.mirror_failures, 0, "a migration is not a failure");
+    assert_eq!(fake.marker(&sid), Some(migration.mutation_epoch));
+    let new_index = fake.index_name(&next);
+    let live = fake.live(&sid);
+    assert_eq!(live.len(), rewritten.len(), "{live:?}");
+    for (id, vector) in &rewritten {
+        let (index, doc) = &live[&id.0.to_string()];
+        assert_eq!(
+            index, &new_index,
+            "{id:?} is indexed under the new contract"
+        );
+        assert_eq!(
+            &doc.embedding, vector,
+            "{id:?} carries its re-embedded vector"
+        );
+    }
+
+    let knn_before = fake.knn_calls.load(std::sync::atomic::Ordering::SeqCst);
+    let got = store
+        .vector_candidates_checked(&sid, &[0.0, 0.0, 1.0, 0.1], &next, 10)
+        .await
+        .unwrap();
+    assert_eq!(
+        fake.knn_calls.load(std::sync::atomic::Ordering::SeqCst),
+        knn_before + 1,
+        "the new contract's read is served from the index"
+    );
+    assert_eq!(ids(&got), vec![s.c1, s.c3, s.c2]);
     let err = store
         .vector_candidates_checked(&sid, &PROBE, &contract(), 10)
         .await
