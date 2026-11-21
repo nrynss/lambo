@@ -18,7 +18,9 @@ and an Elasticsearch index mirrored from it that serves the vector leg.
   l. 1882 as changed by #293's review, `release_lease` l. 1771,
   `erase_session` l. 1648, `flush` l. 1507, `load_session` l. 1514).
 * `project.rs`: `mirror_version` (l. 72), `project` (l. 105), `index_doc`
-  (l. 172), `sole_session` (l. 197).
+  (l. 172), `sole_session` (l. 197). Since #319, `project` also reports
+  `switched` (`switches` here) and `mirror_ops` repairs a switching batch
+  instead of mirroring it.
 * `index.rs` and `fake.rs`: the engine's rules the tier relies on (external
   versions, a conflict counted as success, delete-by-query leaving a
   tombstone one version up), as the fake models them; `rank_by_cosine` in
@@ -89,25 +91,55 @@ races.
   definition: the durable store's exact scan run on the same candidates);
   `knnFetch_bounds`.
 * Versions. `version_holder_first`, `version_counter`, `nextVersion_gt`.
+* The #319 fix (`Params.switchRepairs`; `false` is the previous mirror, kept
+  for the pinned theorems below). `switches` (`Projection::switched`): a
+  `SetEmbedding` that moves the contract in force, where a contract was
+  already set or a vector-bearing upsert came earlier in the batch.
+  `mirror_switch_writes_nothing`, `write_switch_writes_nothing`: such a batch
+  is durable but writes no document or marker into any contract's index (the
+  old one included) and leaves the session out of sync, so the holder falls
+  back (`read_not_inSync_falls_back`) and a repair re-indexes it from the
+  durable snapshot (`repair_converges`, applied to the issue's batch in the
+  runs). `write_agrees`, `write_agrees_noSet`, `write_agrees_stampFirst`:
+  on every batch that does not switch (no `SetEmbedding`; a `SetEmbedding`
+  first that stamps the first contract or keeps the one in force) the flush
+  is exactly the previous version's. `reembed_migration_held_back`,
+  `reembed_migration_repaired`: the issue's batch. Every theorem above holds
+  for both versions (they are stated for any `Params`).
 
 Tests mirrored by `decide` runs: the mirror and served leg, the contract
 refusal, the mirror failure and repair, #18 review F4, F2 and F6, the #293
 re-take, the #18 review M4 ahead marker, #18 review L4, the breaker, the
-overfetch, the exact re-rank and its boundary, and the projection table.
+overfetch, the exact re-rank and its boundary, the projection table, and the
+#319 migration and relabel.
 
 ## What the model shows about the Rust
 
-* `reembed_migration_misindexed`, `project_reembed_into_old_index`: a re-embed
+* Fixed by #319 (pinned on `Pprev`, the previous mirror):
+  `reembed_migration_misindexed`, `project_reembed_into_old_index`: a re-embed
   **migration** (`lambo re-embed`, `Graph::reembed_all`) drains every
   `UpsertNode` before the trailing `SetEmbedding`, but `project` switches the
   contract only for what follows a `SetEmbedding`. Through the tier the new
-  vectors are written into the **old** contract's index, the new contract's
-  index gets nothing, the marker advances and the session stays in sync: a
-  read under the new contract is served from the index and finds no vector,
-  no load repairs it (the marker is in sync), and a reader still holding the
-  old contract ranks old-contract probes against new-model vectors under the
+  vectors were written into the **old** contract's index, the new contract's
+  index got nothing, the marker advanced and the session stayed in sync: a
+  read under the new contract was served from the index and found no vector,
+  no load repaired it (the marker is in sync), and a reader still holding the
+  old contract ranked old-contract probes against new-model vectors under the
   old contract's name. The projection's own test and the tier test put
-  `SetEmbedding` first, which is the order that works.
+  `SetEmbedding` first. `relabel_leaves_new_index_empty`, found while
+  modelling the fix: `--allow-embedding-mismatch`'s lone `SetEmbedding` (a
+  same-kind model rename that keeps the vectors) left the new contract's
+  index empty in sync, the same bug with `SetEmbedding` first.
+  Of the fixes the issue offers, projecting the batch's `SetEmbedding` before
+  its upserts (`projectFinal`) misses the relabel (`projectFinal_misses_relabel`)
+  and, on a first stamp, indexes vectors the durable store has just
+  quarantined (`projectFinal_ahead_of_durable`); reordering `reembed_all`
+  changes what the durable store keeps (`reorder_changes_durable`). The fix
+  takes the third: a switching batch is repaired, not mirrored.
+* `reorder_changes_durable` also shows a durable-side hazard outside the tier:
+  re-embedding a session that has no contract yet (`reembed_all` from none)
+  writes its vectors and then stamps, and every store's first-stamp
+  quarantine nulls them in the same transaction.
 * `inplace_reembed_mixes_builds` (the #296 review's case): an in-place
   re-embed (`--rewrite-same-contract`) is one durable transaction, but the
   index takes the bulk item by item into the same contract's index while the
@@ -182,10 +214,11 @@ keeping `TieredStore`/`Tier` state and the `GraphStore` delegation in
   `mirror_starts_held`, `mirror_ends`, `write_commits`,
   `indexSide_keeps_durable`, the breaker theorems, `read_breaker_open`,
   `read_not_inSync_falls_back`, `syncForRead_inSync`, `reader_stays_inSync`,
-  and the pinned `reembed_migration_misindexed`, `inplace_reembed_mixes_builds`,
-  `mirror_lands_after_erase`, `edge_only_batch_leaves_marker_behind`,
-  `reader_never_rechecks`. `project.rs` already holds `project` and
-  `mirror_version` (`project_reembed_into_old_index`, the version theorems).
+  `mirror_switch_writes_nothing`, `write_agrees`, and the pinned
+  `inplace_reembed_mixes_builds`, `mirror_lands_after_erase`,
+  `edge_only_batch_leaves_marker_behind`, `reader_never_rechecks`.
+  `project.rs` already holds `project`, `switched` and `mirror_version`
+  (`project_reembed_into_old_index`, `switches`, the version theorems).
   The breaker and `sync_for_read` are read-path policy; #273 groups them with
   the mirror, and `read` here spans `mirror.rs` and `search.rs`.
 * `tiered/search.rs` (`VectorCandidateSource`, `knn_fetch`, `rerank`):
@@ -401,6 +434,23 @@ example :
 example : project [.setContract none, .upsert 1 (some (0, 1)), .delete 2] (some 1) = ([], none) := by
   decide
 
+/-- `Projection::switched` (#319): the batch moves the contract where its
+projection cannot say what the new contract's index must hold. A
+`SetEmbedding` that changes the contract in force counts when a contract was
+already in force (the session's other vectors are now the new contract's:
+`--allow-embedding-mismatch`'s relabel, or a migration) or when a concept
+upsert carrying a vector came earlier in the batch (`Graph::reembed_all`'s
+order: its vector is the new contract's, and a first stamp quarantines it
+durably). A first stamp with nothing before it, or a `SetEmbedding` that
+keeps the contract, does not count. -/
+def switchesGo : List Mut → Option Nat → Bool → Bool
+  | [], _, _ => false
+  | .setContract c :: ms, cur, up => (decide (c ≠ cur) && (cur.isSome || up)) || switchesGo ms c up
+  | .upsert _ (some _) :: ms, cur, _ => switchesGo ms cur true
+  | _ :: ms, cur, up => switchesGo ms cur up
+
+def switches (ms : List Mut) (before : Option Nat) : Bool := switchesGo ms before false
+
 /-- The durable side of one session: its concepts' vectors (most recent first,
 one entry per id), its contract, its mutation epoch, whether it was erased,
 and its lease row (`lease` is `current_token`, `row` who holds it). -/
@@ -422,12 +472,17 @@ def lookup (n : Nat) (l : List (Nat × Vec)) : Option Vec :=
   (l.find? (fun p => p.1 == n)).map (·.2)
 
 /-- One mutation applied to the durable rows (the SQL adapters apply a whole
-batch in one transaction). -/
+batch in one transaction). A session's first contract stamp quarantines every
+vector it holds, those written earlier in the same batch included: the legacy
+upgrade of `MemoryStore`'s `SetEmbedding`, the pg family's
+`QUARANTINE_LEGACY_EMBEDDINGS_SQL` and SQLite's `set_embedding` (whose
+width predicate is true for an unstamped session). -/
 def applyMut (d : Durable) : Mut → Durable
   | .upsert n (some v) => { d with vecs := (n, v) :: d.vecs.filter (fun p => p.1 != n) }
   | .upsert n none => { d with vecs := d.vecs.filter (fun p => p.1 != n) }
   | .delete n => { d with vecs := d.vecs.filter (fun p => p.1 != n) }
-  | .setContract c => { d with contract := c }
+  | .setContract c =>
+      { d with contract := c, vecs := if d.contract.isNone && c.isSome then [] else d.vecs }
   | .deleteEdge | .other => d
 
 /-- A committed batch: every mutation, then the next epoch. -/
@@ -503,6 +558,10 @@ structure Params where
   threshold : Nat := 3
   cooldown : Nat := 30
   backoff : Nat := 60
+  /-- The #319 fix: a batch that moves the contract (`switches`) is repaired
+  from the durable store, not mirrored. `false` is the previous mirror, kept
+  for the theorems that pin it. -/
+  switchRepairs : Bool := true
   deriving DecidableEq, Repr
 
 /-- `breaker_admits`: whether this read may ask the index, and the breaker
@@ -873,6 +932,28 @@ def read (exp : Nat) (s : St) : St :=
 def markUnleased (s : St) : St :=
   { s with tier := { s.tier with sync := .stale, contract := none } }
 
+/-- The contract `mirror_ops` projects from (`durable_contract`): the cached
+one, else the durable row, which already holds the batch. -/
+def mirrorBefore (s : St) (d' : Durable) : Option Nat :=
+  match s.tier.contract with
+  | some c => c
+  | none => d'.contract
+
+/-- `mirror_ops` once the version `v` is taken: start the bulk and the marker
+at epoch `e`. With the #319 fix a batch that `switches` the contract writes
+nothing: the session goes stale under the contract after the batch and a
+repair is asked for, which re-indexes from the durable snapshot. Not counted
+as a mirror failure. -/
+def startMirror (s : St) (ms : List Mut) (t tok cnt v : Nat) (before : Option Nat) (e : Nat) :
+    St :=
+  let pr := project ms before
+  if P.switchRepairs && switches ms before then
+    repairIfDue { s with tier := { s.tier with tok := tok, cnt := cnt, contract := some pr.2,
+                                               sync := .stale } }
+  else
+    { s with tier := { s.tier with tok := tok, cnt := cnt, contract := some pr.2 },
+             mir := .puts t v e pr.1 }
+
 /-- `mirror_session` after the primary committed `ms` as `d'` under token `t`. -/
 def mirrorSession (s : St) (ms : List Mut) (t : Option Nat) (d' : Durable) : St :=
   let s := { s with tier := { s.tier with committed := max s.tier.committed d'.epoch } }
@@ -883,13 +964,7 @@ def mirrorSession (s : St) (ms : List Mut) (t : Option Nat) (d' : Durable) : St 
     else if s.tier.held ≠ some t then markStale s
     else match nextVersion s.tier.tok s.tier.cnt t with
       | none => markStale s
-      | some (tok, cnt, v) =>
-        let before := match s.tier.contract with
-          | some c => c
-          | none => d'.contract
-        let pr := project ms before
-        { s with tier := { s.tier with tok := tok, cnt := cnt, contract := some pr.2 },
-                 mir := .puts t v d'.epoch pr.1 }
+      | some (tok, cnt, v) => startMirror P s ms t tok cnt v (mirrorBefore s d') d'.epoch
 
 /-- Whether a batch names its session (`sole_session`). -/
 def namesSession (ms : List Mut) : Bool :=
@@ -904,10 +979,10 @@ def deletedIds (ms : List Mut) : List Nat :=
 
 /-- `mirror` (`mirror_unnamed` for a batch that names no session). -/
 def mirror (s : St) (ms : List Mut) (t : Option Nat) (d' : Durable) : St :=
-  if namesSession ms then mirrorSession s ms t d' else
+  if namesSession ms then mirrorSession P s ms t d' else
   let del := deletedIds ms
   if del = [] then s
-  else if t.isSome ∧ s.tier.held = t then mirrorSession s ms t d'
+  else if t.isSome ∧ s.tier.held = t then mirrorSession P s ms t d'
   else if s.down then markStale s
   else { s with rt := deleteIds s.rt del, log := .unattributed :: s.log }
 
@@ -1090,18 +1165,20 @@ def step (s : St) : Ev → St
   | .write ms =>
     if s.mir = .idle ∧ s.d.erased = false ∧ s.wtok = some s.d.lease then
       let d' := applyBatch s.d ms
-      mirror { s with d := d' } ms s.wtok d'
+      mirror P { s with d := d' } ms s.wtok d'
     else s
   | .writeUnleased ms =>
     if s.mir = .idle ∧ s.d.erased = false ∧ s.d.row = .none then
       let d' := applyBatch s.d ms
-      mirror { s with d := d' } ms none d'
+      mirror P { s with d := d' } ms none d'
     else s
   | .otherWrite ms mirrored =>
     if s.d.erased = false ∧ s.d.row = .other then
       let d' := applyBatch s.d ms
       let s' := { s with d := d' }
-      if mirrored ∧ s.down = false then
+      -- With the #319 fix the other holder repairs a switching batch rather
+      -- than mirror it (its repair is not modelled).
+      if mirrored ∧ s.down = false ∧ (P.switchRepairs && switches ms s.d.contract) = false then
         match mirrorVersion s.d.lease (s.otherCnt + 1) with
         | some v =>
           let pr := project ms s.d.contract
@@ -1285,8 +1362,24 @@ theorem mirStep_d (s : St) : (mirStep s).d = s.d := by
   unfold mirStep
   split <;> (try split) <;> rfl
 
+/-- What `startMirror` leaves alone: the durable store, the write log, the
+orphans and the index; the repair task stays or is asked for. -/
+theorem startMirror_aux (s : St) (ms : List Mut) (t tok cnt v : Nat) (b : Option Nat) (e : Nat) :
+    (startMirror P s ms t tok cnt v b e).d = s.d ∧ (startMirror P s ms t tok cnt v b e).log = s.log ∧
+      (startMirror P s ms t tok cnt v b e).orphans = s.orphans ∧
+      (startMirror P s ms t tok cnt v b e).rt = s.rt ∧
+      (startMirror P s ms t tok cnt v b e).mark = s.mark ∧
+      ((startMirror P s ms t tok cnt v b e).rep = s.rep ∨
+        (startMirror P s ms t tok cnt v b e).rep = .head) := by
+  unfold startMirror repairIfDue requestRepair
+  dsimp only
+  split <;> (try split) <;> (try split) <;> simp
+
+theorem startMirror_d (s : St) (ms : List Mut) (t tok cnt v : Nat) (b : Option Nat) (e : Nat) :
+    (startMirror P s ms t tok cnt v b e).d = s.d := (startMirror_aux P s ms t tok cnt v b e).1
+
 theorem mirrorSession_d (s : St) (ms : List Mut) (t : Option Nat) (d' : Durable) :
-    (mirrorSession s ms t d').d = s.d := by
+    (mirrorSession P s ms t d').d = s.d := by
   unfold mirrorSession
   simp only
   split
@@ -1295,18 +1388,20 @@ theorem mirrorSession_d (s : St) (ms : List Mut) (t : Option Nat) (d' : Durable)
     · exact repairIfDue_d _
     · split
       · rfl
-      · split <;> rfl
+      · split
+        · rfl
+        · exact startMirror_d P _ _ _ _ _ _ _ _
 
 theorem mirror_d (s : St) (ms : List Mut) (t : Option Nat) (d' : Durable) :
-    (mirror s ms t d').d = s.d := by
+    (mirror P s ms t d').d = s.d := by
   unfold mirror
   split
-  · exact mirrorSession_d s ms t d'
+  · exact mirrorSession_d P s ms t d'
   · simp only
     split
     · rfl
     · split
-      · exact mirrorSession_d s ms t d'
+      · exact mirrorSession_d P s ms t d'
       · split <;> rfl
 
 theorem landItem_d (s : St) (src : Src) (it : Item) : (landItem s src it).d = s.d := by
@@ -1344,7 +1439,7 @@ mid-repair alike (`a_mirror_failure_keeps_the_flush_...`). -/
 theorem write_commits (s : St) (ms : List Mut) (hm : s.mir = .idle) (he : s.d.erased = false)
     (ht : s.wtok = some s.d.lease) : (step P s (.write ms)).d = applyBatch s.d ms := by
   simp only [step, hm, he, ht, and_self, ite_true]
-  exact mirror_d _ _ _ _
+  exact mirror_d P _ _ _ _
 
 /-- A fenced writer's flush (its token no longer current) is refused by the
 primary and mirrors nothing. -/
@@ -1474,8 +1569,8 @@ theorem mirInflight_src (m : MPc) (t : Nat) (it : Item) : (Src.repair t, it) ∉
   split <;> simp
 
 theorem mirror_log (s : St) (ms : List Mut) (t : Option Nat) (d' : Durable) :
-    (mirror s ms t d').log = s.log ∨ (mirror s ms t d').log = .unattributed :: s.log := by
-  have hs : ∀ s', (mirrorSession s' ms t d').log = s'.log := by
+    (mirror P s ms t d').log = s.log ∨ (mirror P s ms t d').log = .unattributed :: s.log := by
+  have hs : ∀ s', (mirrorSession P s' ms t d').log = s'.log := by
     intro s'
     unfold mirrorSession
     simp only
@@ -1485,7 +1580,9 @@ theorem mirror_log (s : St) (ms : List Mut) (t : Option Nat) (d' : Durable) :
       · unfold repairIfDue requestRepair; split <;> (try split) <;> rfl
       · split
         · rfl
-        · split <;> rfl
+        · split
+          · rfl
+          · exact (startMirror_aux P _ _ _ _ _ _ _ _).2.1
   unfold mirror
   split
   · exact Or.inl (hs _)
@@ -1499,12 +1596,13 @@ theorem mirror_log (s : St) (ms : List Mut) (t : Option Nat) (d' : Durable) :
         · exact Or.inr rfl
 
 theorem mirror_tier_rep (s : St) (ms : List Mut) (t : Option Nat) (d' : Durable) :
-    (mirror s ms t d').rep = s.rep ∨ (mirror s ms t d').rep = .head := by
+    (mirror P s ms t d').rep = s.rep ∨ (mirror P s ms t d').rep = .head := by
   have hr : ∀ s', (requestRepair s').rep = s'.rep ∨ (requestRepair s').rep = .head := by
     intro s'; unfold requestRepair; split
     · exact Or.inl rfl
     · exact Or.inr rfl
-  have hs : ∀ s', (mirrorSession s' ms t d').rep = s'.rep ∨ (mirrorSession s' ms t d').rep = .head := by
+  have hs : ∀ s', (mirrorSession P s' ms t d').rep = s'.rep ∨
+      (mirrorSession P s' ms t d').rep = .head := by
     intro s'
     unfold mirrorSession
     simp only
@@ -1518,7 +1616,7 @@ theorem mirror_tier_rep (s : St) (ms : List Mut) (t : Option Nat) (d' : Durable)
         · exact Or.inl rfl
         · split
           · exact Or.inl rfl
-          · exact Or.inl rfl
+          · exact (startMirror_aux P _ _ _ _ _ _ _ _).2.2.2.2.2
   unfold mirror
   split
   · exact hs _
@@ -1530,8 +1628,8 @@ theorem mirror_tier_rep (s : St) (ms : List Mut) (t : Option Nat) (d' : Durable)
       · split <;> exact Or.inl rfl
 
 theorem mirror_orphans (s : St) (ms : List Mut) (t : Option Nat) (d' : Durable) :
-    (mirror s ms t d').orphans = s.orphans := by
-  have hs : ∀ s', (mirrorSession s' ms t d').orphans = s'.orphans := by
+    (mirror P s ms t d').orphans = s.orphans := by
+  have hs : ∀ s', (mirrorSession P s' ms t d').orphans = s'.orphans := by
     intro s'
     unfold mirrorSession
     simp only
@@ -1541,7 +1639,9 @@ theorem mirror_orphans (s : St) (ms : List Mut) (t : Option Nat) (d' : Durable) 
       · unfold repairIfDue requestRepair; split <;> (try split) <;> rfl
       · split
         · rfl
-        · split <;> rfl
+        · split
+          · rfl
+          · exact (startMirror_aux P _ _ _ _ _ _ _ _).2.2.1
   unfold mirror
   split
   · exact hs _
@@ -1657,12 +1757,12 @@ theorem frame_same {s s' : St} (h1 : s'.rep = s.rep) (h2 : s'.orphans = s.orphan
 theorem frame_refl (s : St) : Frame s s := frame_same rfl rfl rfl
 
 theorem frame_mirror (s : St) (d : Durable) (ms : List Mut) (t : Option Nat) (d' : Durable) :
-    Frame s (mirror { s with d := d } ms t d') := by
-  refine ⟨?_, Or.inl (mirror_orphans _ _ _ _), ?_⟩
-  · rcases mirror_tier_rep { s with d := d } ms t d' with h | h
+    Frame s (mirror P { s with d := d } ms t d') := by
+  refine ⟨?_, Or.inl (mirror_orphans P _ _ _ _), ?_⟩
+  · rcases mirror_tier_rep P { s with d := d } ms t d' with h | h
     · exact Or.inl h
     · exact Or.inr (Or.inl h)
-  · rcases mirror_log { s with d := d } ms t d' with h | h
+  · rcases mirror_log P { s with d := d } ms t d' with h | h
     · exact Or.inl h
     · exact Or.inr (Or.inl h)
 
@@ -1670,11 +1770,11 @@ theorem step_frame (s : St) (e : Ev) (he : e ≠ .repStep) : Frame s (step P s e
   cases e
   case write ms =>
     simp only [step]; split
-    · exact frame_mirror s _ ms _ _
+    · exact frame_mirror P s _ ms _ _
     · exact frame_same rfl rfl rfl
   case writeUnleased ms =>
     simp only [step]; split
-    · exact frame_mirror s _ ms _ _
+    · exact frame_mirror P s _ ms _ _
     · exact frame_same rfl rfl rfl
   case otherWrite ms mirrored =>
     simp only [step]; split
@@ -1904,10 +2004,22 @@ theorem read_mir (exp : Nat) (s : St) : (read P exp s).mir = s.mir := by
       · exact hs
       · split <;> (try split) <;> exact hs
 
+theorem startMirror_mir (s : St) (ms : List Mut) (t₀ tok cnt v₀ : Nat) (b : Option Nat) (e : Nat)
+    {t v ep : Nat} {ops : List Op} (h : (startMirror P s ms t₀ tok cnt v₀ b e).mir = .puts t v ep ops) :
+    s.mir = .puts t v ep ops ∨ t₀ = t := by
+  unfold startMirror repairIfDue requestRepair at h
+  dsimp only at h
+  split at h
+  · split at h
+    · split at h <;> exact Or.inl h
+    · exact Or.inl h
+  · simp only [MPc.puts.injEq] at h
+    exact Or.inr h.1
+
 theorem mirror_mir (s : St) (ms : List Mut) (tok : Option Nat) (d' : Durable) (t v ep : Nat)
-    (ops : List Op) (h : (mirror s ms tok d').mir = .puts t v ep ops) :
+    (ops : List Op) (h : (mirror P s ms tok d').mir = .puts t v ep ops) :
     s.mir = .puts t v ep ops ∨ (tok = some t ∧ s.tier.held = some t) := by
-  have hs : ∀ s', (mirrorSession s' ms tok d').mir = .puts t v ep ops →
+  have hs : ∀ s', (mirrorSession P s' ms tok d').mir = .puts t v ep ops →
       s'.mir = .puts t v ep ops ∨ (tok = some t ∧ s'.tier.held = some t) := by
     intro s' h
     unfold mirrorSession at h
@@ -1921,12 +2033,12 @@ theorem mirror_mir (s : St) (ms : List Mut) (tok : Option Nat) (d' : Durable) (t
         · exact h
       · split at h
         · exact Or.inl h
-        · split at h
+        · rename_i hne
+          split at h
           · exact Or.inl h
-          · rename_i hne _ _ _ _ _
-            simp only [MPc.puts.injEq] at h
-            obtain ⟨rfl, -, -, -⟩ := h
-            exact Or.inr ⟨rfl, Classical.not_not.mp hne⟩
+          · rcases startMirror_mir P _ _ _ _ _ _ _ _ h with h | rfl
+            · exact Or.inl h
+            · exact Or.inr ⟨rfl, Classical.not_not.mp hne⟩
   unfold mirror at h
   split at h
   · exact hs s h
@@ -1949,7 +2061,7 @@ theorem mirror_starts_held (s : St) (e : Ev) (t v ep : Nat) (ops : List Op)
     simp only [step] at h
     split at h
     · rename_i hc
-      rcases mirror_mir _ ms _ _ t v ep ops h with h' | ⟨h1, h2⟩
+      rcases mirror_mir P _ ms _ _ t v ep ops h with h' | ⟨h1, h2⟩
       · simp [hi] at h'
       · obtain ⟨-, -, h3⟩ := hc
         rw [h3] at h1
@@ -1959,7 +2071,7 @@ theorem mirror_starts_held (s : St) (e : Ev) (t v ep : Nat) (ops : List Op)
   case writeUnleased ms =>
     simp only [step] at h
     split at h
-    · rcases mirror_mir _ ms _ _ t v ep ops h with h' | ⟨h1, -⟩
+    · rcases mirror_mir P _ ms _ _ t v ep ops h with h' | ⟨h1, -⟩
       · simp [hi] at h'
       · cases h1
     · rw [hi] at h; cases h
@@ -2541,6 +2653,179 @@ theorem rerank_partial_not_exact :
 
 end Search
 
+/-! ## The fix for #319: a contract switch is repaired, not mirrored -/
+
+section Switch
+
+variable (P : Params)
+
+theorem switchesGo_noSet (ms : List Mut) (hm : ∀ c, Mut.setContract c ∉ ms) (cur : Option Nat)
+    (up : Bool) : switchesGo ms cur up = false := by
+  induction ms generalizing cur up with
+  | nil => rfl
+  | cons m ms ih =>
+    have hm' : ∀ c, Mut.setContract c ∉ ms := fun c h => hm c (List.mem_cons_of_mem _ h)
+    cases m with
+    | setContract c => exact absurd List.mem_cons_self (hm c)
+    | upsert n v => cases v <;> exact ih hm' _ _
+    | delete n => exact ih hm' _ _
+    | deleteEdge => exact ih hm' _ _
+    | other => exact ih hm' _ _
+
+/-- A batch with no `SetEmbedding` never switches. -/
+theorem switches_noSet (ms : List Mut) (b : Option Nat) (hm : ∀ c, Mut.setContract c ∉ ms) :
+    switches ms b = false := switchesGo_noSet ms hm b false
+
+/-- A `SetEmbedding` first that stamps the session's first contract (every
+`hybrid::derive` flush that stamps) or keeps the one in force, with no other
+`SetEmbedding` after it, never switches. -/
+theorem switches_stampFirst (c b : Option Nat) (ms : List Mut) (hm : ∀ c', Mut.setContract c' ∉ ms)
+    (hb : b = none ∨ b = c) : switches (.setContract c :: ms) b = false := by
+  show ((decide (c ≠ b) && (b.isSome || false)) || switchesGo ms c false) = false
+  rw [switchesGo_noSet ms hm]
+  rcases hb with rfl | rfl <;> simp
+
+theorem switchesGo_names (ms : List Mut) (cur : Option Nat) (up : Bool)
+    (h : switchesGo ms cur up = true) : namesSession ms = true := by
+  induction ms generalizing cur up with
+  | nil => cases h
+  | cons m ms ih =>
+    cases m with
+    | setContract c => simp [namesSession]
+    | upsert n v => simp [namesSession]
+    | other => simp [namesSession]
+    | delete n =>
+      have := ih cur up h
+      simp only [namesSession, List.any_cons] at this ⊢
+      simpa using this
+    | deleteEdge =>
+      have := ih cur up h
+      simp only [namesSession, List.any_cons] at this ⊢
+      simpa using this
+
+/-- A switching batch names its session, so it reaches `mirror_session`. -/
+theorem switches_names (ms : List Mut) (b : Option Nat) (h : switches ms b = true) :
+    namesSession ms = true := switchesGo_names ms b false h
+
+theorem startMirror_agrees (P' : Params) (s : St) (ms : List Mut) (t tok cnt v : Nat)
+    (b : Option Nat) (e : Nat) (h : switches ms b = false) :
+    startMirror P s ms t tok cnt v b e = startMirror P' s ms t tok cnt v b e := by
+  simp [startMirror, h]
+
+theorem mirrorSession_agrees (P' : Params) (s : St) (ms : List Mut) (t : Option Nat) (d' : Durable)
+    (h : switches ms (mirrorBefore s d') = false) :
+    mirrorSession P s ms t d' = mirrorSession P' s ms t d' := by
+  unfold mirrorSession
+  cases t with
+  | none => rfl
+  | some t =>
+    dsimp only
+    split
+    · rfl
+    · split
+      · rfl
+      · split
+        · rfl
+        · exact startMirror_agrees P P' _ _ _ _ _ _ _ _ h
+
+theorem mirror_agrees (P' : Params) (s : St) (ms : List Mut) (t : Option Nat) (d' : Durable)
+    (h : switches ms (mirrorBefore s d') = false) : mirror P s ms t d' = mirror P' s ms t d' := by
+  unfold mirror
+  rw [mirrorSession_agrees P P' s ms t d' h]
+
+/-- **The fix changes nothing for a batch that does not switch**: the writer's
+flush is the previous version's (`P'` any parameters that differ, the
+previous version among them), index writes, marker and tier state alike. -/
+theorem write_agrees (P' : Params) (s : St) (ms : List Mut)
+    (h : switches ms (mirrorBefore s (applyBatch s.d ms)) = false) :
+    step P s (.write ms) = step P' s (.write ms) := by
+  have hm := mirror_agrees P P' { s with d := applyBatch s.d ms } ms s.wtok (applyBatch s.d ms) h
+  simp only [step]
+  split
+  · exact hm
+  · rfl
+
+/-- In particular on every batch without a `SetEmbedding` (`inPlace` and every
+ordinary flush)... -/
+theorem write_agrees_noSet (P' : Params) (s : St) (ms : List Mut)
+    (hm : ∀ c, Mut.setContract c ∉ ms) : step P s (.write ms) = step P' s (.write ms) :=
+  write_agrees P P' s ms (switches_noSet ms _ hm)
+
+/-- ... and on every batch whose `SetEmbedding` comes first and stamps the
+session's first contract or keeps the one in force. -/
+theorem write_agrees_stampFirst (P' : Params) (s : St) (c : Option Nat) (ms : List Mut)
+    (hm : ∀ c', Mut.setContract c' ∉ ms)
+    (hc : mirrorBefore s (applyBatch s.d (.setContract c :: ms)) = none ∨
+      mirrorBefore s (applyBatch s.d (.setContract c :: ms)) = c) :
+    step P s (.write (.setContract c :: ms)) = step P' s (.write (.setContract c :: ms)) :=
+  write_agrees P P' s _ (switches_stampFirst c _ ms hm hc)
+
+theorem repairIfDue_index (s : St) :
+    (repairIfDue s).rt = s.rt ∧ (repairIfDue s).mark = s.mark ∧ (repairIfDue s).mir = s.mir ∧
+      (repairIfDue s).tier.sync = s.tier.sync := by
+  unfold repairIfDue requestRepair
+  split <;> (try split) <;> exact ⟨rfl, rfl, rfl, rfl⟩
+
+theorem startMirror_switch (s : St) (ms : List Mut) (t tok cnt v : Nat) (b : Option Nat) (e : Nat)
+    (hp : P.switchRepairs = true) (h : switches ms b = true) :
+    (startMirror P s ms t tok cnt v b e).rt = s.rt ∧ (startMirror P s ms t tok cnt v b e).mark = s.mark ∧
+      (startMirror P s ms t tok cnt v b e).mir = s.mir ∧
+      (startMirror P s ms t tok cnt v b e).tier.sync ≠ .inSync := by
+  unfold startMirror
+  simp only [hp, h, Bool.and_self, ↓reduceIte]
+  obtain ⟨h1, h2, h3, h4⟩ := repairIfDue_index
+    { s with tier := { s.tier with tok := tok, cnt := cnt, contract := some (project ms b).2,
+                                   sync := .stale } }
+  exact ⟨h1, h2, h3, by rw [h4]; exact fun h => Sync.noConfusion h⟩
+
+/-- **A switching batch is never mirrored (#319).** Whatever the tier's state,
+the mirror of a batch that moves the contract writes no document and no
+marker into any contract's index (the old contract's included) and leaves
+the session out of sync, so the holder's reads fall back to the durable
+store (`read_not_inSync_falls_back`) until a repair re-indexes it from the
+durable snapshot (`repair_converges`). -/
+theorem mirror_switch_writes_nothing (s : St) (ms : List Mut) (t : Option Nat) (d' : Durable)
+    (hp : P.switchRepairs = true) (h : switches ms (mirrorBefore s d') = true) :
+    (mirror P s ms t d').rt = s.rt ∧ (mirror P s ms t d').mark = s.mark ∧
+      (mirror P s ms t d').mir = s.mir ∧ (mirror P s ms t d').tier.sync ≠ .inSync := by
+  unfold mirror
+  simp only [switches_names ms _ h, ↓reduceIte]
+  unfold mirrorSession
+  cases t with
+  | none => simp [markUnleased]
+  | some t =>
+    dsimp only
+    split
+    · rename_i hs
+      obtain ⟨h1, h2, h3, h4⟩ := repairIfDue_index
+        { s with tier := { s.tier with committed := max s.tier.committed d'.epoch } }
+      exact ⟨h1, h2, h3, by rw [h4]; exact hs⟩
+    · split
+      · simp [markStale]
+      · split
+        · simp [markStale]
+        · exact startMirror_switch P _ ms _ _ _ _ _ _ hp h
+
+/-- The writer's flush of a switching batch: the batch is durable
+(`write_commits`), the index (every contract's) and the marker are as they
+were, no mirror is in flight and the session is out of sync. -/
+theorem write_switch_writes_nothing (s : St) (ms : List Mut) (hp : P.switchRepairs = true)
+    (hg : s.mir = .idle ∧ s.d.erased = false ∧ s.wtok = some s.d.lease)
+    (h : switches ms (mirrorBefore s (applyBatch s.d ms)) = true) :
+    (step P s (.write ms)).d = applyBatch s.d ms ∧ (step P s (.write ms)).rt = s.rt ∧
+      (step P s (.write ms)).mark = s.mark ∧ (step P s (.write ms)).mir = .idle ∧
+      (step P s (.write ms)).tier.sync ≠ .inSync := by
+  obtain ⟨hm, he, ht⟩ := hg
+  have e : step P s (.write ms) =
+      mirror P { s with d := applyBatch s.d ms } ms s.wtok (applyBatch s.d ms) := by
+    simp only [step, hm, he, ht, and_self, ite_true]
+  obtain ⟨h1, h2, h3, h4⟩ :=
+    mirror_switch_writes_nothing P { s with d := applyBatch s.d ms } ms s.wtok (applyBatch s.d ms) hp h
+  rw [e]
+  exact ⟨mirror_d P _ _ _ _, h1, h2, h3.trans hm, h4⟩
+
+end Switch
+
 /-! ## Runs from the tests -/
 
 section Runs
@@ -2689,42 +2974,182 @@ example :
 
 /-! ### What the model shows about the Rust -/
 
-/-- **A re-embed migration through the tier writes its new vectors into the
-old contract's index.** `Graph::reembed_all` drains every `UpsertNode`
-**before** the trailing `SetEmbedding` (so the durable flush is one
-old-to-new transaction), but `project` switches the contract only for what
-follows a `SetEmbedding`: the rewrite is projected into contract 1's index
-under contract 1's hash, the new contract 2's index gets nothing, the marker
-advances and the session stays in sync. A read under the new contract is
-served from the index and finds no vector at all, and since the marker is in
-sync no load ever repairs it (only `lambo recall-index backfill` would);
-contract 1's index now holds build-1 vectors under contract 1's name, which a
-reader still holding contract 1 ranks a contract-1 probe against. -/
+/-- The previous mirror (before the #319 fix), with the tests' backoff: the
+pinned runs below are statements about it. -/
+def Pprev : Params := { Pt with switchRepairs := false }
+
+/-- **A re-embed migration through the tier wrote its new vectors into the
+old contract's index** (the previous version, #319). `Graph::reembed_all`
+drains every `UpsertNode` **before** the trailing `SetEmbedding` (so the
+durable flush is one old-to-new transaction), but `project` switches the
+contract only for what follows a `SetEmbedding`: the rewrite is projected
+into contract 1's index under contract 1's hash, the new contract 2's index
+gets nothing, the marker advances and the session stays in sync. A read under
+the new contract is served from the index and finds no vector at all, and
+since the marker is in sync no load ever repairs it (only
+`lambo recall-index backfill` would); contract 1's index now holds build-1
+vectors under contract 1's name, which a reader still holding contract 1 ranks
+a contract-1 probe against. `project` itself is unchanged by the fix. -/
 def reembedBatch : List Mut := [.upsert 1 (some (1, 11)), .upsert 2 (some (1, 21)), .setContract (some 2)]
 
 theorem project_reembed_into_old_index :
     project reembedBatch (some 1) = ([(1, 1, some (1, 11)), (1, 2, some (1, 21))], some 2) := by
   decide
 
-def migrated : St := run Pt seeded ([.write reembedBatch] ++ steps .mirStep 4 ++ [.read 2])
+def migrated : St := run Pprev seeded ([.write reembedBatch] ++ steps .mirStep 4 ++ [.read 2])
 
 theorem reembed_migration_misindexed :
     migrated.d.contract = some 2 ∧ lookup 1 migrated.d.vecs = some (1, 11) ∧
       migrated.tier.sync = .inSync ∧ markerEpoch migrated = some 2 ∧
       answerAt migrated [1, 2] = some [none, none] ∧
       docAt migrated 1 1 = some (1, 11) ∧ docAt migrated 1 2 = some (1, 21) ∧
-      (run Pt migrated ([.loadBegin, .loadEnd] ++ steps .repStep 20 ++ [.read 2])).rep = .idle ∧
-      answerAt (run Pt migrated ([.loadBegin, .loadEnd] ++ steps .repStep 20 ++ [.read 2])) [1, 2]
+      (run Pprev migrated ([.loadBegin, .loadEnd] ++ steps .repStep 20 ++ [.read 2])).rep = .idle ∧
+      answerAt (run Pprev migrated ([.loadBegin, .loadEnd] ++ steps .repStep 20 ++ [.read 2])) [1, 2]
         = some [none, none] := by decide
 
 /-- The same switch with `SetEmbedding` first (the order `project`'s table and
 `a_contract_mismatch_is_refused_and_a_switch_queries_only_the_new_index`
-use) lands in the new index. -/
+used) landed in the new index under the previous version. -/
 example :
-    answerAt (run Pt seeded ([.write [.setContract (some 2), .upsert 1 (some (1, 11)),
+    answerAt (run Pprev seeded ([.write [.setContract (some 2), .upsert 1 (some (1, 11)),
       .upsert 2 (some (1, 21))]] ++ steps .mirStep 4 ++ [.read 2])) [1, 2]
       = some [some (1, 11), some (1, 21)] := by decide
 
+/-- **An operator relabel left the new contract's index empty** (the previous
+version; the same bug as #319 with `SetEmbedding` first, found by modelling
+the fix). `--allow-embedding-mismatch` flushes a lone `SetEmbedding`
+(`Graph::replace_embedding_with_operator_override`, a same-kind model rename
+that keeps the vectors). The projection writes nothing, the marker advances
+and the session stays in sync, so the vectors the durable store now holds
+under contract 2 are in no contract-2 document. -/
+def relabeled : St := run Pprev seeded ([.write [.setContract (some 2)]] ++ steps .mirStep 2 ++ [.read 2])
+
+theorem relabel_leaves_new_index_empty :
+    relabeled.d.contract = some 2 ∧ lookup 1 relabeled.d.vecs = some (0, 10) ∧
+      relabeled.tier.sync = .inSync ∧ markerEpoch relabeled = some 2 ∧
+      answerAt relabeled [1, 2] = some [none, none] := by decide
+
+/-! ### The fix for #319 -/
+
+/-- The issue's batch, and the relabel, switch; the seed (first stamp first)
+and the in-place rewrite (no `SetEmbedding`) do not. -/
+example : switches reembedBatch (some 1) = true ∧ switches [.setContract (some 2)] (some 1) = true ∧
+    switches reembedBatch none = true ∧ switches seed none = false ∧
+    switches [.upsert 1 (some (1, 11)), .upsert 2 (some (1, 21))] (some 1) = false := by decide
+
+/-- **The issue's batch through the fixed mirror.** The flush is durable, the
+mirror writes nothing (contract 1's index keeps the build-0 documents,
+contract 2's has none), the session is stale and a repair is asked for; the
+holder's read falls back to the durable store meanwhile. Not a mirror
+failure. -/
+def migratedFixed : St := run Pt seeded ([.write reembedBatch] ++ steps .mirStep 4 ++ [.read 2])
+
+theorem reembed_migration_held_back :
+    migratedFixed.d.contract = some 2 ∧ lookup 1 migratedFixed.d.vecs = some (1, 11) ∧
+      migratedFixed.tier.sync = .stale ∧ migratedFixed.tier.failures = 0 ∧
+      migratedFixed.rep = .head ∧ markerEpoch migratedFixed = some 1 ∧
+      fellBack migratedFixed = true ∧
+      docAt migratedFixed 1 1 = some (0, 10) ∧ docAt migratedFixed 1 2 = some (0, 20) ∧
+      docAt migratedFixed 2 1 = none ∧ docAt migratedFixed 2 2 = none := by decide
+
+/-- Then the repair re-indexes from the durable snapshot: contract 2's index
+serves exactly the batch's vectors, the session is in sync at the batch's
+epoch, and the session's contract-1 documents are swept. -/
+def migratedRepaired : St := run Pt migratedFixed (steps .repStep 20 ++ [.read 2])
+
+theorem reembed_migration_repaired :
+    migratedRepaired.tier.sync = .inSync ∧ markerEpoch migratedRepaired = some 2 ∧
+      migratedRepaired.rep = .idle ∧
+      answerAt migratedRepaired [1, 2, 3] = some [some (1, 11), some (1, 21), none] ∧
+      docAt migratedRepaired 1 1 = none ∧ docAt migratedRepaired 1 2 = none := by decide
+
+/-- The relabel through the fixed mirror is repaired too, and contract 2's
+index serves the relabelled vectors; so is a switch with `SetEmbedding` first
+from an existing contract (the fix repairs it instead of trusting the batch to
+rewrite every vector). -/
+example :
+    let r := run Pt seeded ([.write [.setContract (some 2)]] ++ steps .repStep 20 ++ [.read 2])
+    let f := run Pt seeded ([.write [.setContract (some 2), .upsert 1 (some (1, 11)),
+      .upsert 2 (some (1, 21))]] ++ steps .repStep 20 ++ [.read 2])
+    r.tier.sync = .inSync ∧ answerAt r [1, 2] = some [some (0, 10), some (0, 20)] ∧
+      f.tier.sync = .inSync ∧ answerAt f [1, 2] = some [some (1, 11), some (1, 21)] := by decide
+
+/-- `repair_converges` applies to the issue's batch: one repair step after the
+flush the task is at its load with every hypothesis met, so the new
+contract's index holds exactly the durable vectors, which are the batch's,
+for every node. -/
+def migratedAtLoad : St := run Pt seeded [.write reembedBatch, .repStep]
+
+example : migratedAtLoad.rep = .load 1 ∧ migratedAtLoad.tier.held = some 1 ∧
+    migratedAtLoad.d.lease = 1 ∧ migratedAtLoad.d.row = .ours ∧ migratedAtLoad.d.erased = false ∧
+    migratedAtLoad.down = false ∧ checkMarker false migratedAtLoad.mark (some migratedAtLoad.d) = .behind ∧
+    nextVersion migratedAtLoad.tier.tok migratedAtLoad.tier.cnt 1 = some (1, 3, shift + 3) ∧
+    migratedAtLoad.mark = some (shift + 1, 1) ∧ migratedAtLoad.tier.committed ≤ migratedAtLoad.d.epoch ∧
+    migratedAtLoad.tier.again = false ∧ migratedAtLoad.d.vecs = [(2, 1, 21), (1, 1, 11)] ∧
+    migratedAtLoad.d.contract = some 2 := by decide
+
+/-- The mirror wrote nothing: the index is still the seed's three documents. -/
+theorem migratedAtLoad_rt : migratedAtLoad.rt =
+    put (put (put Idx.empty 1 1 (shift + 1) (some (0, 10))) 1 2 (shift + 1) (some (0, 20)))
+      1 3 (shift + 1) none := rfl
+
+theorem migratedAtLoad_dom (c n : Nat) : (migratedAtLoad.rt c n).ver < shift + 3 := by
+  rw [migratedAtLoad_rt]
+  simp [put, Idx.empty, shift]
+  split <;> (try split) <;> (try split) <;> decide
+
+example : Matches (run Pt migratedAtLoad (steps .repStep (2 * 2 + 9))) ∧
+    (run Pt migratedAtLoad (steps .repStep (2 * 2 + 9))).d.contract = some 2 ∧
+    (run Pt migratedAtLoad (steps .repStep (2 * 2 + 9))).d.vecs = [(2, 1, 21), (1, 1, 11)] := by
+  obtain ⟨hm, hd, -⟩ := repair_converges Pt migratedAtLoad 1 1 3 (shift + 3) (by decide) (by decide)
+    (by decide) (by decide) (by decide) (by decide) (by decide) (by decide)
+    (migratedAtLoad_dom)
+    (by intro w e h; rw [show migratedAtLoad.mark = some (shift + 1, 1) by decide] at h
+        cases h; simp [shift])
+    (by decide) (by decide)
+  have hl : migratedAtLoad.d.vecs.length = 2 := by decide
+  rw [hl] at hm hd
+  refine ⟨hm, ?_, ?_⟩ <;> rw [hd] <;> decide
+
+/-! ### The candidates the fix did not take -/
+
+/-- Candidate 1: project the whole batch under its final contract (apply the
+batch's `SetEmbedding` before its upserts). -/
+def projectFinal (ms : List Mut) (before : Option Nat) : List Op × Option Nat :=
+  projectGo (ms.filter fun m => match m with | .setContract _ => false | _ => true)
+    (project ms before).2 []
+
+/-- It places the issue's batch... -/
+example : projectFinal reembedBatch (some 1) =
+    ([(2, 1, some (1, 11)), (2, 2, some (1, 21))], some 2) := by decide
+
+/-- ... but a relabel writes nothing while the durable session keeps its
+vectors under the new contract, -/
+theorem projectFinal_misses_relabel :
+    projectFinal [.setContract (some 2)] (some 1) = ([], some 2) ∧
+      (applyBatch seeded.d [.setContract (some 2)]).vecs = [(2, 0, 20), (1, 0, 10)] ∧
+      (applyBatch seeded.d [.setContract (some 2)]).contract = some 2 := by decide
+
+/-- A session with vectors and no contract (a legacy session; the vectors
+here stand for any the batch writes before its first stamp). -/
+def legacy : Durable := { vecs := [(2, 0, 20), (1, 0, 10)] }
+
+/-- ... and on a first stamp it indexes vectors the durable store has just
+quarantined: the stores apply the stamp's legacy quarantine to the batch's
+own earlier upserts, so the index would serve vectors the authority does not
+hold. -/
+theorem projectFinal_ahead_of_durable :
+    projectFinal reembedBatch none = ([(2, 1, some (1, 11)), (2, 2, some (1, 21))], some 2) ∧
+      (applyBatch legacy reembedBatch).vecs = [] := by decide
+
+/-- Candidate 3: reorder `reembed_all`'s emit order. The durable stores are
+not order-insensitive here: with the `SetEmbedding` last, a first stamp
+quarantines the batch's vectors; with it first, they survive. Reordering
+changes what the durable store holds, so it is not a mirror fix. -/
+theorem reorder_changes_durable :
+    (applyBatch legacy reembedBatch).vecs = [] ∧
+      (applyBatch legacy [.setContract (some 2), .upsert 1 (some (1, 11)),
+        .upsert 2 (some (1, 21))]).vecs = [(2, 1, 21), (1, 1, 11)] := by decide
 /-- **The #296 review's case: an in-place re-embed briefly mixes two builds.**
 `--rewrite-same-contract` drains `UpsertNode`s only; the durable store takes
 them in one transaction, but the index takes the bulk item by item (and a
