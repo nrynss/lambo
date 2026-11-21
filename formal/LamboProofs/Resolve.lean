@@ -2,8 +2,8 @@
 # Command resolution, the single construction site, and serve preflight
 
 Model of how the `lambo` binary decides what each command needs and builds
-its backends, all in `src/main.rs` at `65fce2a9`, with the library entry
-points it calls:
+its backends, all in `src/main.rs` at `65fce2a9` (plus #315's fix to
+`serve-web --auth-token`, below), with the library entry points it calls:
 
 * `Commands::needs_embedder`, `Commands::allow_embedding_mismatch`,
   `Commands::name` (`Cmd.needsEmbedder`, `Cmd.hasMismatchFlag`, `Cmd.name`).
@@ -33,6 +33,10 @@ points it calls:
   any lease (`authorize_bind`, `authorize_ledger`: `serveStartRefused`).
 * `AuthTokenArg`, `AuthTokenArgParser`, `http_auth_token_flag` and the
   `Debug` of `AuthTokenArg` / `SecretToken` (`parseAuthArg`, `render`).
+* `lambo serve-web --auth-token`'s clap error: before #315's fix through
+  `AuthToken: FromStr` (`serveWebFlagRefusal`, the previous version), and
+  with the fix through `WebAuthTokenParser` and the shared
+  `auth_token_refusal` (`parseWebAuthArg`, `serveWebFlagRefusalFixed`).
 * `fn main` from the parsed command on (`main`): the `canon` route, the
   serve and serve-web pre-reads, the resolve, the
   `unreachable!("writer override requires full backends")`, the final
@@ -174,16 +178,24 @@ Redaction (#273's `AuthTokenArg` constraint):
 * `parseAuthArg_total`: clap's value-quoting error cannot occur for
   `lambo serve --auth-token`.
 * `render_noninterference`: on each of `lambo serve`'s token-only printing
-  paths (`PrintPath`) the output depends on the token only through its
-  verdict class; `debug_constant`: the `Debug` paths print the same for every
-  token. This holds by definition of `render`, so its strength is only the
-  completeness of `PrintPath`, which is a reading of the code. Two paths sit
-  outside it: `check_serve_credentials`'s legacy-token refusal, whose output
-  depends on whether the token equals a configured credential's
-  (`credential_refusal_reveals_equality`, the bytes are not printed), and
-  `lambo serve-web --auth-token`, whose parser is `AuthToken: FromStr`, so
-  clap's own error quotes the refused value (`serve_web_flag_refusal_leaks`).
+  paths, and `lambo serve-web`'s flag refusal (`PrintPath`), the output
+  depends on the token only through its verdict class; `debug_constant`: the
+  `Debug` paths print the same for every token. This holds by definition of
+  `render`, so its strength is only the completeness of `PrintPath`, which is
+  a reading of the code. One path sits outside it:
+  `check_serve_credentials`'s legacy-token refusal, whose output depends on
+  whether the token equals a configured credential's
+  (`credential_refusal_reveals_equality`, the bytes are not printed).
   `secretNew_ok`, `secretNew_examples`: the token rule.
+* #315: before the fix, `lambo serve-web --auth-token`'s parser was
+  `AuthToken: FromStr`, so clap's own error quoted the refused value
+  (`serve_web_flag_refusal_leaks`, kept as the previous version). The fixed
+  parser refuses the same tokens, hands on the same token
+  (`parseWebAuthArg_ok_iff`, `parseWebAuthArg_error_iff`) and names the same
+  rule (`web_flag_refusal_keeps_reason`), in `serve`'s words
+  (`web_flag_refusal_eq_serve`), never the value
+  (`render_noninterference` at `webFlagRefusal`;
+  `serve_web_flag_refusal_fixed` on the issue's inputs).
 
 Clap rules (#273's first Track 1 constraint, the rule part):
 * `statsValid_iff`, `recall_rules_test`, `embedValid_iff`,
@@ -224,7 +236,7 @@ groups, `run_canon` + `canon_exit` beside `CanonAction`, and a thin
 * **Serve bootstrap**: `preflight` and its steps. It carries every
   `preflight_*` theorem, `serve_preflight_refusal_builds_nothing`, the
   redaction theorems (`parseAuthArg_total`, `render_noninterference`,
-  `debug_constant`) and the pinned `bind_refused_after_build` and
+  `debug_constant`, `web_flag_refusal_eq_serve`) and the pinned `bind_refused_after_build` and
   `heartbeat_without_ledger_after_build`.
 * **Per-command arg groups**: `rules` is the contract for the rule
   attributes only (`conflicts_with`, `requires`, `required_unless_present`,
@@ -262,15 +274,17 @@ groups, `run_canon` + `canon_exit` beside `CanonAction`, and a thin
   integration tests that assert them (`serve_credentials.rs`,
   `serve_multi_session.rs`, `serve_stdio_cwd_map.rs`, `cli_embed.rs`).
 * *`AuthTokenArg` redaction*: `parseAuthArg_total`, `render_noninterference`,
-  `debug_constant`.
+  `debug_constant`; for `serve-web`, `parseWebAuthArg_ok_iff` and
+  `web_flag_refusal_eq_serve`.
 * *Single construction site*: `resolve_built_allowed` and
   `resolve_builds_at_most_one` for the resolve. That command modules build
   no backend is not proved (`main_built_allowed` holds by construction); it
   should be scoped to serving backends from `lambo.toml`, since `session
   split` and `canon` build SQLite stores over explicit files, and held by the
   source check named above.
-* *Redaction* covers `lambo serve` only: `serve-web --auth-token` leaks a
-  refused value through clap today (`serve_web_flag_refusal_leaks`).
+* *Redaction* covers `lambo serve` and, since #315's fix, `lambo serve-web
+  --auth-token` (before it, a refused value leaked through clap:
+  `serve_web_flag_refusal_leaks`).
 
 No `f64` is involved; the model's arithmetic is `Nat` and exact.
 -/
@@ -2371,17 +2385,46 @@ def verdict (r : TokenRaw) : Option Why :=
   | .ok _ => none
   | .error w => some w
 
-/-- The paths on which `lambo serve` prints something derived from the token
-alone (a reading of the code, not a proof of completeness): `AuthTokenArg`'s `Debug` (`Commands` derives `Debug`), the
+/-- `WebAuthTokenParser::parse_ref`, `lambo serve-web --auth-token`'s parser
+since #315's fix. Like `AuthToken: FromStr` before it, it checks the token
+when clap parses it (UTF-8, then `AuthToken::new`) and refuses exactly the
+tokens `secretNew` refuses; unlike it, it hands clap an error it built, so
+clap never adds the value. Its refusal is the `Why` alone. -/
+def parseWebAuthArg (r : TokenRaw) : Except Why TokenRaw :=
+  match verdict r with
+  | some w => .error w
+  | none => .ok r
+
+/-- `lambo serve-web --auth-token`'s clap error since #315's fix: built by
+`auth_token_refusal`, the builder `lambo serve`'s flag refusal uses, so it
+names the flag and the rule and never the value. It is still a clap
+`ValueValidation` error from the parser, the kind the `FromStr` parser gave,
+so the exit code (2) is unchanged. The previous version is
+`serveWebFlagRefusal`. -/
+def serveWebFlagRefusalFixed (r : TokenRaw) : String :=
+  match parseWebAuthArg r with
+  | .error w => "invalid value for '--auth-token <TOKEN>': " ++ whyText w ++ " (the value is not shown)"
+  | .ok _ => ""
+
+/-- The paths on which `lambo serve` and `lambo serve-web` print something
+derived from the token alone (a reading of the code, not a proof of
+completeness): `AuthTokenArg`'s `Debug` (`Commands` derives `Debug`), the
 `Commands::Serve` field, the plan's `SecretToken` `Debug`, the
-`http_auth_token_flag` refusal, and the `LAMBO_AUTH_TOKEN` refusal of
-`resolve_auth_token`. Neither type implements `Display`. -/
+`http_auth_token_flag` refusal, the `LAMBO_AUTH_TOKEN` refusal of
+`resolve_auth_token`, and (since #315's fix) `serve-web`'s `--auth-token`
+refusal from `WebAuthTokenParser`. Neither `AuthTokenArg` nor `SecretToken`
+implements `Display`. Two `serve-web` paths are not listed separately: its
+`AuthToken` `Debug` (`Commands::ServeWeb`'s field) is constant like
+`debugArg`, and its `LAMBO_AUTH_TOKEN` refusal (`serve_web::auth`'s
+`resolve_auth_token_from`) prints `envRefusal`'s text behind a
+`lambo serve-web: ` prefix. -/
 inductive PrintPath where
   | debugArg
   | debugServeField
   | debugPlanToken
   | flagRefusal
   | envRefusal
+  | webFlagRefusal
   deriving DecidableEq, Repr
 
 def render : PrintPath → TokenRaw → String
@@ -2400,13 +2443,16 @@ def render : PrintPath → TokenRaw → String
     | some .notUtf8 => "LAMBO_AUTH_TOKEN: is not valid UTF-8"
     | some w => "LAMBO_AUTH_TOKEN: " ++ whyText w
     | none => ""
+  | .webFlagRefusal, r => serveWebFlagRefusalFixed r
 
 /-- Redaction, as noninterference (#273's "AuthTokenArg redaction"
 constraint): on each `PrintPath` the output depends on the token only through
 its verdict class, never on its bytes. This holds by definition of `render`;
 what it adds is the list of paths. (A substring statement would be false: a
-token spelled `redacted` occurs in `AuthTokenArg(<redacted>)`.) Not covered:
-`credential_refusal_reveals_equality`, `serve_web_flag_refusal_leaks`. -/
+token spelled `redacted` occurs in `AuthTokenArg(<redacted>)`.) Since #315's
+fix the list includes `serve-web`'s flag refusal (`webFlagRefusal`). Not
+covered: `credential_refusal_reveals_equality`, and the previous version of
+`serve-web`'s flag refusal (`serve_web_flag_refusal_leaks`). -/
 theorem render_noninterference (p : PrintPath) {r r' : TokenRaw}
     (h : verdict r = verdict r') : render p r = render p r' := by
   cases p with
@@ -2418,6 +2464,9 @@ theorem render_noninterference (p : PrintPath) {r r' : TokenRaw}
     split <;> split <;> simp_all
   | flagRefusal => simp only [render, h]
   | envRefusal => simp only [render, h]
+  | webFlagRefusal =>
+    simp only [render, serveWebFlagRefusalFixed, parseWebAuthArg, h]
+    cases verdict r' <;> rfl
 
 /-- The two `Debug` paths are constant: they print the same for every
 token, valid or not. -/
@@ -2442,9 +2491,10 @@ theorem credential_refusal_reveals_equality :
     verdict ⟨[97], true⟩ = verdict ⟨[98], true⟩ ∧
       credRefusal [97] [(2, [97])] ≠ credRefusal [98] [(2, [97])] := by decide
 
-/-- `lambo serve-web --auth-token`'s clap error: its parser is
-`AuthToken: FromStr`, so clap's `InvalidValue` error quotes the value it
-refused. Bytes are read as code points (ASCII here). -/
+/-- The previous version (before #315's fix) of `lambo serve-web
+--auth-token`'s clap error: its parser was `AuthToken: FromStr`, so clap's
+`InvalidValue` error quoted the value it refused. Bytes are read as code
+points (ASCII here). The fixed error is `serveWebFlagRefusalFixed`. -/
 def serveWebFlagRefusal (r : TokenRaw) : String :=
   match verdict r with
   | some w => "invalid value '" ++ String.ofList (r.bytes.map Char.ofNat) ++
@@ -2452,14 +2502,84 @@ def serveWebFlagRefusal (r : TokenRaw) : String :=
   | none => ""
 
 set_option maxRecDepth 20000 in
-/-- Shown about the Rust: `lambo serve-web --auth-token 'x '` prints the
-refused token in clap's error, so redaction does not hold there; two tokens
-refused for the same reason print differently. -/
+/-- Shown about the Rust before #315's fix: `lambo serve-web --auth-token
+'x '` printed the refused token in clap's error, so redaction did not hold
+there; two tokens refused for the same reason printed differently. The fix is
+`serve_web_flag_refusal_fixed`. -/
 theorem serve_web_flag_refusal_leaks :
     serveWebFlagRefusal ⟨[120, 32], true⟩ =
         "invalid value 'x ' for '--auth-token <TOKEN>': " ++ whyText .surroundingSpace ∧
       verdict ⟨[120, 32], true⟩ = verdict ⟨[121, 32], true⟩ ∧
       serveWebFlagRefusal ⟨[120, 32], true⟩ ≠ serveWebFlagRefusal ⟨[121, 32], true⟩ := by
+  decide
+
+/-! ### The fix for #315
+
+`lambo serve-web --auth-token` is parsed by `WebAuthTokenParser`
+(`parseWebAuthArg`), whose refusal is built by `auth_token_refusal`, the
+builder `lambo serve`'s `http_auth_token_flag` uses. Its clap error is
+`serveWebFlagRefusalFixed`, and `render_noninterference` covers it as
+`PrintPath.webFlagRefusal`. What the fix keeps: the tokens refused and the
+token handed on (`parseWebAuthArg_ok_iff`, `parseWebAuthArg_error_iff`), and
+the reason (`web_flag_refusal_keeps_reason`). -/
+
+/-- The fixed parser accepts exactly the tokens `secretNew` accepts, which
+are the tokens `AuthToken: FromStr` accepted, and hands the token on as
+given. -/
+theorem parseWebAuthArg_ok_iff (r v : TokenRaw) :
+    parseWebAuthArg r = .ok v ↔ verdict r = none ∧ v = r := by
+  unfold parseWebAuthArg
+  cases verdict r with
+  | none => simp [eq_comm]
+  | some w => simp
+
+/-- The fixed parser refuses for the rule the token broke, the one the
+previous version's error named. -/
+theorem parseWebAuthArg_error_iff (r : TokenRaw) (w : Why) :
+    parseWebAuthArg r = .error w ↔ verdict r = some w := by
+  unfold parseWebAuthArg
+  cases verdict r <;> simp
+
+/-- `serve-web`'s flag refusal is `serve`'s, word for word: one builder. -/
+theorem web_flag_refusal_eq_serve (r : TokenRaw) :
+    render .webFlagRefusal r = render .flagRefusal r := by
+  simp only [render, serveWebFlagRefusalFixed, parseWebAuthArg]
+  cases verdict r <;> rfl
+
+/-- The fix keeps the reason: a refused token's fixed error names the rule
+the previous version's error named, and both are empty exactly on a valid
+token. -/
+theorem web_flag_refusal_keeps_reason (r : TokenRaw) :
+    (∀ w, verdict r = some w →
+      serveWebFlagRefusalFixed r =
+          "invalid value for '--auth-token <TOKEN>': " ++ whyText w ++ " (the value is not shown)" ∧
+        ∃ pre, serveWebFlagRefusal r = pre ++ whyText w) ∧
+      (verdict r = none → serveWebFlagRefusalFixed r = "" ∧ serveWebFlagRefusal r = "") := by
+  refine ⟨fun w h => ?_, fun h => ?_⟩
+  · refine ⟨by simp [serveWebFlagRefusalFixed, parseWebAuthArg, h], ?_⟩
+    refine ⟨"invalid value '" ++ String.ofList (r.bytes.map Char.ofNat) ++
+      "' for '--auth-token <TOKEN>': ", ?_⟩
+    simp only [serveWebFlagRefusal, h]
+  · simp [serveWebFlagRefusalFixed, parseWebAuthArg, serveWebFlagRefusal, h]
+
+set_option maxRecDepth 20000 in
+/-- **#315 fixed**, on the issue's inputs: `lambo serve-web --auth-token
+'x '` and `--auth-token 'NOTASECRET-probe '` print the same line, which names
+the rule and not the value; a control byte is refused by its own rule, a
+valid token prints nothing, and the line is `lambo serve`'s. -/
+theorem serve_web_flag_refusal_fixed :
+    serveWebFlagRefusalFixed ⟨[120, 32], true⟩ =
+        "invalid value for '--auth-token <TOKEN>': " ++ whyText .surroundingSpace ++
+          " (the value is not shown)" ∧
+      serveWebFlagRefusalFixed
+          ⟨[78, 79, 84, 65, 83, 69, 67, 82, 69, 84, 45, 112, 114, 111, 98, 101, 32], true⟩ =
+        serveWebFlagRefusalFixed ⟨[120, 32], true⟩ ∧
+      serveWebFlagRefusalFixed ⟨[120, 32], true⟩ = serveWebFlagRefusalFixed ⟨[121, 32], true⟩ ∧
+      serveWebFlagRefusalFixed ⟨[120, 1, 121], true⟩ =
+        "invalid value for '--auth-token <TOKEN>': " ++ whyText .notPrintable ++
+          " (the value is not shown)" ∧
+      serveWebFlagRefusalFixed ⟨[120], true⟩ = "" ∧
+      render .webFlagRefusal ⟨[120, 32], true⟩ = render .flagRefusal ⟨[120, 32], true⟩ := by
   decide
 
 /-! ## Per-command argument rules (clap `conflicts_with`, `requires`, groups) -/
