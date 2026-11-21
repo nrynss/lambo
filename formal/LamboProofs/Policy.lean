@@ -133,8 +133,9 @@ The fixed dating (#300; `supportingTimesW`, `recurrenceSessionsW`,
 * `supportingTimesW_eq`, `recurrenceSessionsW_eq`, `dependentOriginsW_eq`:
   **agreement with the old dating** whenever every dependence edge was
   written in its dependent's origin turn (`WrittenAtOrigin`).
-* `recurrenceW_mono_edge`, `causal_not_recurrenceW`: no edge lowers the
-  fixed term and causal touches still are not recurrence.
+* `recurrenceW_mono_edge`, `dependentOriginsW_mono_edge`,
+  `causal_not_recurrenceW`: no edge lowers either fixed term, and causal
+  touches still are not recurrence.
 * `policy_cycle_one_hop_fixed`, `band_mono_fixed_edge`: the score, band and
   cycle results take any terms, so they hold for the fixed ones.
 
@@ -1120,21 +1121,25 @@ else (no unique attribution) its dependent's origin. -/
 def credited (st : Edge → Stamp) (e : Edge) (dc : ConceptNode) : Nat :=
   (st e).writer.getD dc.origin
 
+/-- The interaction one edge credits to `c` under the fixed rule, if any
+(`dependent_origin` with `Credit::Writer`, age floor cleared). -/
+def depOriginW (g : Graph) (st : Edge → Stamp) (c : Nat) (e : Edge) : Option Nat :=
+  match e.dependence with
+  | some (p, d) =>
+    if p = c then
+      match g.concept p, g.concept d with
+      | some pc, some dc =>
+        if credited st e dc = pc.origin then none
+        else (g.interaction (credited st e dc)).map (·.id)
+      | _, _ => none
+    else none
+  | none => none
+
 /-- The fixed Solo dependents term (`solo_dependent_interactions`, age floor
 cleared): the distinct interactions that wrote `c`'s dependence edges, other
 than `c`'s own origin. -/
 def dependentOriginsW (g : Graph) (st : Edge → Stamp) (c : Nat) : List Nat :=
-  (g.edges.filterMap fun e =>
-    match e.dependence with
-    | some (p, d) =>
-      if p = c then
-        match g.concept p, g.concept d with
-        | some pc, some dc =>
-          if credited st e dc = pc.origin then none
-          else (g.interaction (credited st e dc)).map (·.id)
-        | _, _ => none
-      else none
-    | none => none).eraseDups
+  (g.edges.filterMap (depOriginW g st c)).eraseDups
 
 /-- The dependent end of a dependence edge, self-loops included: the source
 of a `Dependency`, the child (target) of a `Hierarchical`. -/
@@ -1202,6 +1207,7 @@ theorem dependentOriginsW_eq (g : Graph) (st : Edge → Stamp) (c : Nat)
   congr 1
   apply filterMap_congr'
   intro e he
+  unfold depOriginW
   cases hd : e.dependence with
   | none => rfl
   | some pd =>
@@ -1240,6 +1246,7 @@ theorem dependentOriginsW_not_own (g : Graph) (st : Edge → Stamp) (c : Nat) (p
   rw [List.mem_eraseDups, List.mem_filterMap] at hw
   obtain ⟨e, _, he⟩ := hw
   revert he
+  unfold depOriginW
   cases e.dependence with
   | none => simp
   | some pd =>
@@ -1299,6 +1306,42 @@ theorem causal_not_recurrenceW (g : Graph) (st : Edge → Stamp) (c : Nat) (e : 
   unfold recurrenceSessionsW supportingTimesW
   rw [supportTimeW_edges]
   simp [hn]
+
+/-- `eraseDups` leaves no duplicates. -/
+theorem nodup_eraseDups : ∀ (n : Nat) (l : List Nat), l.length ≤ n → l.eraseDups.Nodup
+  | _, [], _ => by simp [List.eraseDups, List.eraseDupsBy, List.eraseDupsBy.loop]
+  | 0, _ :: _, h => by simp at h
+  | n + 1, a :: as, h => by
+    rw [List.eraseDups_cons, List.nodup_cons]
+    constructor
+    · intro hm
+      rw [List.mem_eraseDups, List.mem_filter] at hm
+      simp at hm
+    · apply nodup_eraseDups n
+      have := List.length_filter_le (fun b => !b == a) as
+      simp only [List.length_cons] at h
+      omega
+
+/-- One more element never shortens the deduplicated list. -/
+theorem length_eraseDups_le_cons (x : Nat) (l : List Nat) :
+    l.eraseDups.length ≤ (x :: l).eraseDups.length :=
+  List.Nodup.length_le_of_subset (nodup_eraseDups _ l (Nat.le_refl _)) (fun y hy => by
+    rw [List.mem_eraseDups] at hy ⊢
+    exact List.mem_cons_of_mem _ hy)
+
+theorem depOriginW_edges (g : Graph) (st : Edge → Stamp) (es : List Edge) :
+    depOriginW { g with edges := es } st = depOriginW g st := rfl
+
+/-- Adding any edge never lowers the fixed dependents term: an edge's
+stamps are its own, so the other edges credit what they credited. -/
+theorem dependentOriginsW_mono_edge (g : Graph) (st : Edge → Stamp) (c : Nat) (e : Edge) :
+    (dependentOriginsW g st c).length ≤
+      (dependentOriginsW { g with edges := e :: g.edges } st c).length := by
+  unfold dependentOriginsW
+  rw [depOriginW_edges, List.filterMap_cons]
+  split
+  · exact Nat.le_refl _
+  · exact length_eraseDups_le_cons _ _
 
 /-- The stamps of the reused-action corpus: the day-5 turn (5) wrote the
 edges into `Y` (`62 → 61`, and `63 → 61` from the fresh node); turn 1 wrote
@@ -1765,15 +1808,14 @@ theorem policy_cycle_one_hop_fixed (p : PromotionPolicy) (gs s : Canon.Status) (
     Canon.cycle s f = s ∨ Canon.evalHop s (Canon.cycle s f) = true :=
   policy_cycle_one_hop p gs s gc deps _ _ v2 v3 sup bud
 
-/-- An extra edge never lowers the fixed recurrence term, so with the
-dependents term no smaller (a hypothesis here) it never lowers the band. -/
+/-- An extra edge never lowers either fixed term, so it never lowers the
+band. -/
 theorem band_mono_fixed_edge (ty : ConceptType) (g : Graph) (st : Edge → Stamp) (c : Nat)
-    (e : Edge) (hc : Int) (r : Nat)
-    (hdeps : (dependentOriginsW g st c).length ≤
-      (dependentOriginsW { g with edges := e :: g.edges } st c).length) :
+    (e : Edge) (hc : Int) (r : Nat) :
     (band ty (termsW g st c hc r)).rank ≤
       (band ty (termsW { g with edges := e :: g.edges } st c hc r)).rank :=
-  band_mono ty ⟨recurrenceW_mono_edge g st c e, Int.le_refl _, hdeps, Nat.le_refl _⟩
+  band_mono ty ⟨recurrenceW_mono_edge g st c e, Int.le_refl _,
+    dependentOriginsW_mono_edge g st c e, Nat.le_refl _⟩
 
 /-! ### Stage-1 order under Solo
 
