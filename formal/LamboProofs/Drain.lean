@@ -117,6 +117,17 @@ process's sequence starts at 1.
   `failed` and leaves the write owed (test
   `a_write_reached_during_an_in_session_embedder_outage_is_not_consumed`).
 
+* The replay after review (#295; `stepQ`, `replayP`, `serveQ`): a retry pass
+  gives each deferred agent one more attempt in the serve, an id in another
+  receipt format is quarantined (owed, its agent deferred) rather than
+  settled, and a serve that ends with writes owed names a block reason.
+  `replayP_progress`: if the retry gets an answer for every write it runs,
+  nothing is owed after the serve; `replayP_preserves`,
+  `hold_then_serveQ_order`: the order invariant holds through both passes,
+  from the in-session hold on; `serveQ_block`: the block reason is never
+  null while writes are owed; `stepQ_badId`, `stepQ_unknownFormat`,
+  `stepQ_skip`: what settles and what defers. `fixed_badId_settled` describes
+  the fix as first committed, which settled every unparseable id.
 * The in-session hold (#295; `drainHeld`, `arriveH`, `workH`): the lane
   worker keeps an agent's writes met by an embedder outage held, answers them
   `pending_replay`, and runs them, oldest first, before the agent's next
@@ -399,11 +410,16 @@ def loadOrder : List Intent → List Intent
 
 /-- What the replay meets at one intent. `halt`: the lease is lost or the
 pipeline sealed before it (the loop's `break` at its head). `badId`: its
-receipt id does not parse (`continue`). `decodeRefused`: the stored payload
-does not decode into a job (#129). `run r`: `WriteCtx::run` returned `r`. -/
+receipt id does not parse (`continue`); since #295's remediation, a malformed
+id in this build's format (`lwr1.`). `unknownFormat`: an id in another
+format (a prefix other than `lwr1`), as a newer build would write; the code
+before that remediation did not tell it from `badId`. `decodeRefused`: the
+stored payload does not decode into a job (#129). `run r`: `WriteCtx::run`
+returned `r`. -/
 inductive RR where
   | halt
   | badId
+  | unknownFormat
   | decodeRefused
   | run (r : RunResult)
   deriving DecidableEq, Repr
@@ -443,6 +459,7 @@ def replayStep (image : Bool) (rr : RR) (s : Streaks) : Step × Streaks :=
   match rr with
   | .halt => (.stop .unset, s)
   | .badId => (.skip, s)
+  | .unknownFormat => (.skip, s)
   -- `decode_refused`: the content arm, no streak reset.
   | .decodeRefused => (.failed, s)
   | .run .ok => (.applied, ⟨0, 0⟩)
@@ -1677,6 +1694,8 @@ only move where a halting replay stops, never what it settles. -/
 def stepFixed (image : Bool) (rr : RR) (s : Streaks) : Step × Streaks :=
   match rr with
   | .badId => (.failed, s)
+  -- #295 as first fixed settled every unparseable id.
+  | .unknownFormat => (.failed, s)
   | rr => stepInput image rr s
 
 /-- The replay loop after #295. `d` holds the agents deferred for the rest of
@@ -1716,11 +1735,12 @@ def replayD (step : Bool → RR → Streaks → Step × Streaks) (live : Bool) (
 /-! ### The steps -/
 
 /-- On everything but an unparseable id the step is #294's. -/
-theorem stepFixed_agrees (img : Bool) (rr : RR) (s : Streaks) (h : rr ≠ .badId) :
-    stepFixed img rr s = stepInput img rr s := by
+theorem stepFixed_agrees (img : Bool) (rr : RR) (s : Streaks) (h : rr ≠ .badId)
+    (h' : rr ≠ .unknownFormat) : stepFixed img rr s = stepInput img rr s := by
   unfold stepFixed
   split
   · exact absurd rfl h
+  · exact absurd rfl h'
   · rfl
 
 /-- An unparseable id settles `failed`, both streaks unchanged. -/
@@ -1729,7 +1749,7 @@ theorem stepFixed_badId (img : Bool) (s : Streaks) : stepFixed img .badId s = (.
 /-- #294 still holds: every input refusal settles `failed`. -/
 theorem stepFixed_refusesInput (img : Bool) (e : Err) (s : Streaks) (h : e.refusesInput = true) :
     (stepFixed img (.run (.err e)) s).1 = .failed := by
-  rw [stepFixed_agrees img _ s (by simp)]
+  rw [stepFixed_agrees img _ s (by simp) (by simp)]
   exact stepInput_refusesInput img e s h
 
 /-- The only result the fixed step leaves unsettled without stopping is a
@@ -1739,6 +1759,7 @@ theorem stepFixed_skip {img : Bool} {rr : RR} {s : Streaks} (h : (stepFixed img 
   cases rr with
   | halt => simp [stepFixed, stepInput, replayStep] at h
   | badId => simp [stepFixed] at h
+  | unknownFormat => simp [stepFixed] at h
   | decodeRefused => simp [stepFixed, stepInput, replayStep] at h
   | run r =>
     cases r with
@@ -2139,7 +2160,11 @@ def regroup (l : List Intent) : List Intent := regroupN l.length l
 /-- **The load order after #295** (`replay_order` in `replay.rs`): the
 adapters' (`issued_ms`, `lane_seq`) order picks which process each position
 belongs to, and each process's intents fill its positions in `lane_seq`
-order. -/
+order. One difference from the Rust: every row here has an epoch, so a row
+whose id the replay cannot parse (`badId`, `unknownFormat`, outcomes of the
+run, not of the row) is regrouped with its process; `replay_order` cannot
+read an epoch from such an id and leaves the row where the load put it. Such
+a row is never applied, so the order theorems are unaffected. -/
 def fixedLoad (l : List Intent) : List Intent := regroup (loadOrder l)
 
 theorem minE_spec : ∀ (l : List Intent) (x : Intent),
@@ -2791,6 +2816,243 @@ theorem arriveH_clears (o : Job → RunResult) (now : Int) (st : HState) (j : Jo
   simp only [arriveH, drainHeld_clears o _ h, List.append_nil, List.filter_filter]
   exact List.filter_eq_nil_iff.mpr (fun k _ => by by_cases hk : k.agent = j.agent <;> simp [hk])
 
+/-! ## The replay's retry pass, quarantine and block reason (#295)
+
+Three changes to the fixed replay, after review.
+
+* **Retry pass** (`replayP`). An agent deferred at a transient answer used to
+  wait for the next serve, so a write that answers transiently every time held
+  its agent's backlog forever. Now, unless the pass stopped, the replay runs
+  once more over what it left owed (the deferred agents' writes, from each
+  one's oldest owed write), with the streaks it ended with: each deferred
+  agent gets one more attempt in the serve. `replayP_progress` says what that
+  buys; a write that never embeds still defers its agent every serve (an
+  owner question).
+* **Quarantine** (`stepQ`). An id in another receipt format (`unknownFormat`,
+  as a newer build writes) is not settled `failed`, which cannot be undone:
+  it is left owed and its agent deferred, like a transient answer, so its
+  agent's later writes do not overtake it. A malformed id in this build's own
+  format (`badId`) is still settled `failed`.
+* **Block reason** (`serveQ`). A serve that ends with writes owed and no stop
+  now says so: `embedder` if the last pass deferred an agent at a transient
+  answer, `other` if only quarantined ids hold writes back. -/
+
+/-- The replay's step after the remediation: `unknownFormat` defers its
+agent (a `skip`); everything else is `stepFixed`. -/
+def stepQ (image : Bool) (rr : RR) (s : Streaks) : Step × Streaks :=
+  match rr with
+  | .unknownFormat => (.skip, s)
+  | rr => stepFixed image rr s
+
+theorem stepQ_agrees (img : Bool) (rr : RR) (s : Streaks) (h : rr ≠ .unknownFormat) :
+    stepQ img rr s = stepFixed img rr s := by
+  unfold stepQ
+  split
+  · exact absurd rfl h
+  · rfl
+
+/-- A malformed id in this build's format is still settled `failed`. -/
+theorem stepQ_badId (img : Bool) (s : Streaks) : stepQ img .badId s = (.failed, s) := rfl
+
+/-- An id in another format is quarantined: left owed, its agent deferred,
+the streaks untouched. -/
+theorem stepQ_unknownFormat (img : Bool) (s : Streaks) :
+    stepQ img .unknownFormat s = (.skip, s) := rfl
+
+/-- Only a transient answer or a quarantined id defers an agent. -/
+theorem stepQ_skip {img : Bool} {rr : RR} {s : Streaks} (h : (stepQ img rr s).1 = .skip) :
+    rr = .run (.err .unavailable) ∨ rr = .unknownFormat := by
+  by_cases hq : rr = .unknownFormat
+  · exact Or.inr hq
+  · rw [stepQ_agrees img rr s hq] at h
+    exact Or.inl (stepFixed_skip h)
+
+/-- One serve: the fixed replay, then, unless it stopped, one more pass over
+the rows it left owed, from the streaks `s'` (the Rust carries the first
+pass's; the theorems take any). -/
+def replayP (step : Bool → RR → Streaks → Step × Streaks) (live : Bool) (rout rout' : Job → RR)
+    (s' : Streaks) (intents : List Intent) : ROut :=
+  let r1 := replayD step live rout intents
+  match r1.block with
+  | some _ => r1
+  | none =>
+    let r2 := loopD step rout' s' [] (pendingOf (applyLog intents r1.log))
+    { answers := r1.answers ++ r2.answers
+      log := r1.log ++ r2.log
+      applied := r1.applied ++ r2.applied
+      failed := r1.failed ++ r2.failed
+      block := r2.block }
+
+/-- What the loop met at each intent it deferred an agent at, in order. -/
+def skipsOf (step : Bool → RR → Streaks → Step × Streaks) (rout : Job → RR) :
+    Streaks → List Nat → List Intent → List RR
+  | _, _, [] => []
+  | s, d, i :: rest =>
+    if i.job.agent ∈ d then skipsOf step rout s d rest
+    else
+      match step i.job.image (rout i.job) s with
+      | (.applied, s') => skipsOf step rout s' d rest
+      | (.failed, s') => skipsOf step rout s' d rest
+      | (.skip, s') => rout i.job :: skipsOf step rout s' (i.job.agent :: d) rest
+      | (.stop _, _) => []
+
+/-- The serve after the remediation, with its block reason: when it ends with
+writes owed and no stop, `embedder` if the last pass deferred an agent at a
+transient answer, else `other` (only quarantined ids hold writes back). -/
+def serveQ (live : Bool) (rout rout' : Job → RR) (s' : Streaks) (intents : List Intent) : ROut :=
+  let r := replayP stepQ live rout rout' s' intents
+  if r.block = none ∧ pendingOf (applyLog intents r.log) ≠ [] then
+    let left := pendingOf (applyLog intents (replayD stepQ live rout intents).log)
+    { r with
+      block := some (if (skipsOf stepQ rout' s' [] left).contains (.run (.err .unavailable))
+        then .embedder else .other) }
+  else r
+
+/-- **The block reason is never null while writes are owed** after a serve
+that did not stop: `write_queue_replay_blocked` names why. -/
+theorem serveQ_block (live : Bool) (rout rout' : Job → RR) (s' : Streaks) (intents : List Intent)
+    (h : pendingOf (applyLog intents (serveQ live rout rout' s' intents).log) ≠ []) :
+    (serveQ live rout rout' s' intents).block ≠ none := by
+  unfold serveQ at h ⊢
+  by_cases hc : (replayP stepQ live rout rout' s' intents).block = none ∧
+      pendingOf (applyLog intents (replayP stepQ live rout rout' s' intents).log) ≠ []
+  · rw [ite_eq_left hc]; simp
+  · rw [ite_eq_right hc] at h ⊢
+    intro hb
+    exact hc ⟨hb, h⟩
+
+/-- The serve's writes and applies are the two passes'; only the block
+reason is added. -/
+theorem serveQ_log (live : Bool) (rout rout' : Job → RR) (s' : Streaks) (intents : List Intent) :
+    (serveQ live rout rout' s' intents).log = (replayP stepQ live rout rout' s' intents).log ∧
+      (serveQ live rout rout' s' intents).applied =
+        (replayP stepQ live rout rout' s' intents).applied := by
+  unfold serveQ
+  dsimp only
+  split <;> exact ⟨rfl, rfl⟩
+
+theorem applyLog_append (rows : List Intent) (l1 l2 : List Batch) :
+    applyLog rows (l1 ++ l2) = applyLog (applyLog rows l1) l2 := by
+  simp [applyLog, List.flatten_append, List.foldl_append]
+
+theorem applyLog_keys (rows : List Intent) (log : List Batch) (hnp : NoPut log.flatten) :
+    (applyLog rows log).map (·.job.key) = rows.map (·.job.key) := by
+  have h := foldl_jobs log.flatten rows hnp
+  have := congrArg (List.map (·.key)) h
+  simpa [List.map_map, applyLog, Function.comp_def] using this
+
+theorem applyLog_sorted (rows : List Intent) (log : List Batch) (hnp : NoPut log.flatten)
+    (hs : EpochSorted rows) : EpochSorted (applyLog rows log) := by
+  have h := foldl_jobs log.flatten rows hnp
+  unfold EpochSorted at hs ⊢
+  have hs' : (rows.map (·.job)).Pairwise (fun x y : Job => x.epoch = y.epoch → x.rid ≤ y.rid) :=
+    List.pairwise_map.mpr hs
+  rw [← show (applyLog rows log).map (·.job) = rows.map (·.job) from h] at hs'
+  exact List.pairwise_map.mp hs'
+
+/-- **A serve with the retry pass keeps the order invariant**: both passes
+are runs of the fixed loop over per-process-sorted rows. -/
+theorem replayP_preserves (step : Bool → RR → Streaks → Step × Streaks) (live : Bool)
+    (rout rout' : Job → RR) (s' : Streaks) (rows : List Intent) (A : List Job)
+    (hnd : (rows.map (·.job.key)).Nodup) (hs : EpochSorted rows) (hI : OrderInv rows A) :
+    OrderInv (applyLog rows (replayP step live rout rout' s' rows).log)
+      (A ++ (replayP step live rout rout' s' rows).applied) := by
+  have h1 := replayD_preserves step live rout rows A hnd hs hI
+  unfold replayP
+  dsimp only
+  cases hb : (replayD step live rout rows).block with
+  | some b => exact h1
+  | none =>
+    dsimp only
+    have hnp := (replayD_facts step live rout rows).2.2.1
+    have hnd1 : ((applyLog rows (replayD step live rout rows).log).map (·.job.key)).Nodup := by
+      rw [applyLog_keys _ _ hnp]; exact hnd
+    have h2 := loopD_preserves step rout' s' _ _ hnd1 (applyLog_sorted _ _ hnp hs) h1
+    rw [applyLog_append, ← List.append_assoc]
+    exact h2
+
+/-- With no step skipping or stopping, the fixed loop consumes every row it
+is given. -/
+theorem loopD_settles (step : Bool → RR → Streaks → Step × Streaks) (rout : Job → RR)
+    (hret : ∀ j s, (step j.image (rout j) s).1 = .applied ∨ (step j.image (rout j) s).1 = .failed) :
+    ∀ (l : List Intent) (s : Streaks), ∀ i ∈ l,
+      ∃ t, Mut.consume i.job.key t ∈ (loopD step rout s [] l).log.flatten := by
+  intro l
+  induction l with
+  | nil => intro s i hi; simp at hi
+  | cons i0 rest ih =>
+    intro s i hi
+    have hd : i0.job.agent ∉ ([] : List Nat) := by simp
+    cases h : step i0.job.image (rout i0.job) s with
+    | mk st s1 =>
+      have hr := hret i0.job s
+      rw [h] at hr
+      rcases hr with hr | hr <;> simp only at hr <;> subst hr
+      · rw [loopD_applied hd h]
+        cases List.mem_cons.mp hi with
+        | inl e => exact ⟨.appliedAfterRestart, by rw [e]; simp⟩
+        | inr hi' =>
+          obtain ⟨t, ht⟩ := ih s1 i hi'
+          exact ⟨t, by simp only [List.flatten_cons]; exact List.mem_append_right _ ht⟩
+      · rw [loopD_failed hd h]
+        cases List.mem_cons.mp hi with
+        | inl e => exact ⟨.failed, by rw [e]; simp⟩
+        | inr hi' =>
+          obtain ⟨t, ht⟩ := ih s1 i hi'
+          exact ⟨t, by simp only [List.flatten_cons]; exact List.mem_append_right _ ht⟩
+
+/-- **Progress from the retry pass.** If the first pass did not stop and the
+retry gets an answer for every write it runs (applied or refused: the
+embedder answered and no id is quarantined), the serve leaves nothing owed.
+What is not guaranteed: a write whose answer is transient at both attempts,
+or a quarantined id, keeps its agent's writes owed to the next serve, every
+serve if it never embeds (an owner question: an attempt bound). -/
+theorem replayP_progress (step : Bool → RR → Streaks → Step × Streaks) (live : Bool)
+    (rout rout' : Job → RR) (s' : Streaks) (rows : List Intent)
+    (hb : (replayD step live rout rows).block = none)
+    (hret : ∀ j s, (step j.image (rout' j) s).1 = .applied ∨ (step j.image (rout' j) s).1 = .failed) :
+    pendingOf (applyLog rows (replayP step live rout rout' s' rows).log) = [] := by
+  unfold replayP
+  dsimp only
+  rw [hb]
+  dsimp only
+  have hnp1 := (replayD_facts step live rout rows).2.2.1
+  let rows1 := applyLog rows (replayD step live rout rows).log
+  have hnp2 := (loopD_facts step rout' (pendingOf rows1) s' []).2.2.1
+  rw [applyLog_append]
+  apply List.filter_eq_nil_iff.mpr
+  intro i' hi' hn
+  have hio : i'.outcome = none := Option.isNone_iff_eq_none.mp hn
+  apply foldl_consumed _ rows1 hnp2 ?_ i' hi' rfl hio
+  by_cases hk : ∃ k ∈ rows1, k.job.key = i'.job.key ∧ k.outcome = none
+  · obtain ⟨k, hk1, hkk, hko⟩ := hk
+    have hkp : k ∈ pendingOf rows1 := List.mem_filter.mpr ⟨hk1, by simp [hko]⟩
+    obtain ⟨t, ht⟩ := loopD_settles step rout' hret _ s' k hkp
+    exact Or.inl ⟨t, hkk ▸ ht⟩
+  · refine Or.inr ?_
+    intro k hk' hkk hko
+    exact hk ⟨k, hk', hkk, hko⟩
+
+/-- **Per-agent order across the hold, a serve with its retry pass, and
+quarantine**: the writes applied in session, then by the next serve (both of
+its passes), keep each agent's writes of one process in admission order,
+whatever the embedder answers. -/
+theorem hold_then_serveQ_order (out : Nat → Job → RunResult) (now : Int) (s : RStore)
+    (js : List Job) (e : Nat) (he : ∀ j ∈ js, j.epoch = e)
+    (hjs : js.Pairwise (fun a b => a.agent = b.agent → a.rid < b.rid)) (rows : List Intent)
+    (hnd : (rows.map (·.job.key)).Nodup)
+    (hrows : ∀ i ∈ rows, i.outcome = none → i.job.epoch = e →
+      i.job ∈ (workH out now 0 (HState.init s) js).held)
+    (live : Bool) (rout rout' : Job → RR) (s' : Streaks) :
+    ((workH out now 0 (HState.init s) js).applied ++
+        (serveQ live rout rout' s' (fixedLoad rows)).applied).Pairwise
+      (fun a b => a.agent = b.agent → a.epoch = b.epoch → a.rid ≤ b.rid) := by
+  have hI := orderInv_perm (fixedLoad_perm rows) (session_orderInv out now s js e he hjs rows hrows)
+  have hnd' : ((fixedLoad rows).map (·.job.key)).Nodup :=
+    ((fixedLoad_perm rows).map _).nodup_iff.mpr hnd
+  rw [(serveQ_log live rout rout' s' _).2]
+  exact (replayP_preserves stepQ live rout rout' s' _ _ hnd' (fixedLoad_sorted rows) hI).1
+
 /-! ## Crash: a durable write is never replayed -/
 
 theorem mem_admit_flatten {all : List Job} {n : Nat} {m : Mut}
@@ -3293,6 +3555,40 @@ example :
     st.applied = [j1, j2] ∧ st.held = [] ∧
       [j1.key, j2.key].map (fun r => (lookup st.store r).map (·.answer)) =
         [some .applied, some .applied] := by
+  decide
+
+/-! ### The retry pass, quarantine and the block reason -/
+
+/-- A write that blinked once no longer waits for the next serve: the retry
+pass applies `j1`, then `j2`, after `k1`; nothing is owed and nothing is
+blocked. -/
+example :
+    let ints : List Intent := [⟨j1, none⟩, ⟨j2, none⟩, ⟨k1, none⟩]
+    let rout : Job → RR := fun j => if j.rid = 1 then .run (.err .unavailable) else .run .ok
+    let r := serveQ true rout okAll ⟨1, 0⟩ ints
+    r.applied = [k1, j1, j2] ∧ r.block = none ∧ pendingOf (applyLog ints r.log) = [] := by
+  decide
+
+/-- A write that never embeds keeps its agent's writes owed, and the serve
+says why (`embedder`). -/
+example :
+    let ints : List Intent := [⟨j1, none⟩, ⟨j2, none⟩, ⟨k1, none⟩]
+    let rout : Job → RR := fun j => if j.rid = 1 then .run (.err .unavailable) else .run .ok
+    let r := serveQ true rout rout ⟨1, 0⟩ ints
+    r.applied = [k1] ∧ r.block = some .embedder ∧
+      (pendingOf (applyLog ints r.log)).map (·.job) = [j1, j2] := by
+  decide
+
+/-- An id in another format is quarantined, not settled: it and its agent's
+later write stay owed, `k1` applies, and the serve says `other`. The fix as
+first committed settled it `failed`. -/
+example :
+    let ints : List Intent := [⟨j1, none⟩, ⟨j2, none⟩, ⟨k1, none⟩]
+    let rout : Job → RR := fun j => if j.rid = 1 then .unknownFormat else .run .ok
+    let r := serveQ true rout rout ⟨0, 0⟩ ints
+    (replayD stepFixed true rout ints).failed = [j1] ∧
+      r.applied = [k1] ∧ r.failed = [] ∧ r.block = some .other ∧
+      (pendingOf (applyLog ints r.log)).map (·.job) = [j1, j2] := by
   decide
 
 end Examples
