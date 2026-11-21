@@ -70,6 +70,24 @@
   most once per survey.
   `formal/LamboProofs/Policy.lean` models the fix
   (`reused_action_dependency_is_dated_by_its_writer`).
+- Canonical keys: an empty stem no longer reaches a key (#301, item 1). The
+  Snowball English stemmer stems `''s` to the empty string, and the
+  tokenizer kept it, so `''s-lease` keyed as `" leas"` (a leading space, and
+  a different concept from `lease`) and the name `''s ''s` keyed as `" "` and
+  was accepted. `normalize_tokens` now drops empty stems, so a key never has
+  a leading, trailing or doubled space: `''s-lease` keys as `leas`, and an
+  input whose stems are all empty keys as the empty key, which names,
+  `derive` and `record_action` already refuse. Only keys containing an empty
+  stem change; every other key, and the keyword index's terms for text
+  without one, are unchanged. A stored concept keeps the key it was written
+  with, so a concept stored under such a key is no longer matched by a new
+  write of the same text, and a stored durable name whose key held an empty
+  stem no longer passes the load-time name check. `legacy_canonical_key`
+  still keeps empty stems, as the builds it describes did, so
+  `lambo provision --rekey` now also re-keys a stored concept whose key held
+  an empty stem (and reports a collision as before).
+  `formal/LamboProofs/Canonical.lean` models the fix (`keyF`, `keyF_tidy`,
+  `keyF_eq_key`, `issue301_fixed`).
 - Conflict detection: a re-send by another agent no longer drops an edge's
   original writer from the conflict agent set (#297). Re-sending an edge (the
   same source, target and type, through `record_action` or `lambo_derive`'s

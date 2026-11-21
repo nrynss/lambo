@@ -255,8 +255,21 @@ fn split_camel_case(s: &str) -> String {
 /// `2122de39e47` were one key and one concept. This is a deliberate, approved
 /// change to spec section 7.1 step 2; `lambo provision` re-keys stored
 /// concepts written under the old rule (see [`legacy_canonical_key`]).
+///
+/// ## Empty stems are dropped (#301)
+///
+/// The stemmer can return the empty string (`''s` stems to `""`: the
+/// prelude drops the leading apostrophe and the possessive step removes
+/// `'s`). Such a stem is dropped, so a key never has a leading, trailing or
+/// doubled space: `''s-lease` keys as `leas` (the key of `lease`), not
+/// `" leas"`, and an input whose stems are all empty keys as the empty key,
+/// which `name_key`, `derive` and `record_action` refuse. Text without an
+/// empty stem keys exactly as before (Lean `Canonical.keyF_eq_key`,
+/// `Canonical.keyF_tidy`).
 pub fn normalize_tokens(content: &str) -> Vec<String> {
-    tokens(content, true)
+    let mut out = tokens(content, true);
+    out.retain(|t| !t.is_empty());
+    out
 }
 
 /// Whether `token` is identifier-like and therefore not stemmed (#148).
@@ -335,9 +348,10 @@ fn tokens(content: &str, keep_identifiers: bool) -> Vec<String> {
         .collect()
 }
 
-/// The canonical key as builds before #148 derived it, stemming every token.
-/// Used only by the `lambo provision` re-key to recognise a stored key the
-/// old rule wrote; nothing derives new keys with it.
+/// The canonical key as builds before #148 derived it, stemming every token
+/// and keeping empty stems (as builds before #301 did). Used only by the
+/// `lambo provision` re-key to recognise a stored key the old rule wrote;
+/// nothing derives new keys with it.
 pub fn legacy_canonical_key(content: &str, synonyms: impl Fn(&str) -> Option<&str>) -> String {
     let raw = content.trim();
     let effective = synonyms(raw).unwrap_or(raw);
@@ -1153,5 +1167,45 @@ mod tests {
             canonical_key("registering users", no_synonym),
             legacy_canonical_key("registering users", no_synonym)
         );
+    }
+
+    /// #301, item 1: Snowball English stems `''s` to the empty string, and an
+    /// empty stem must not reach the key. Mirrors the Lean theorems
+    /// `Canonical.issue301_fixed` (`''s-lease` keys as `leas`, the name
+    /// `''s ''s` keys as the empty key and is refused), `Canonical.keyF_tidy`
+    /// (a key never has a leading, trailing or doubled space) and
+    /// `Canonical.keyF_eq_key` (a key without an empty stem is unchanged);
+    /// `Canonical.empty_stem_key` pins the previous behaviour.
+    #[test]
+    fn empty_stems_are_dropped_from_keys() {
+        assert_eq!(
+            STEMMER.stem("''s"),
+            "",
+            "the stemmer still yields an empty stem"
+        );
+        assert_eq!(normalize_tokens("''s-lease"), vec!["leas"]);
+        assert_eq!(canonical_key("''s-lease", no_synonym), "leas");
+        assert_eq!(
+            canonical_key("''s-lease", no_synonym),
+            canonical_key("lease", no_synonym)
+        );
+        assert_eq!(canonical_key("''s ''s", no_synonym), "");
+        assert_eq!(crate::graph::names::name_key("''s-lease").unwrap(), "leas");
+        assert!(crate::graph::names::name_key("''s ''s").is_err());
+        for text in ["''s-lease", "lease ''s writer", "''s ''s", "writer-''s"] {
+            let key = canonical_key(text, no_synonym);
+            assert!(
+                !key.starts_with(' ') && !key.ends_with(' ') && !key.contains("  "),
+                "{text:?} keys as {key:?}"
+            );
+        }
+        // A key without an empty stem is unchanged.
+        assert_eq!(
+            canonical_key("single-writer-lease", no_synonym),
+            "leas singl writer"
+        );
+        // The pre-#148 rule describes what earlier builds wrote, empty stems
+        // included, so the provision re-key still recognises such a row.
+        assert_eq!(legacy_canonical_key("''s-lease", no_synonym), " leas");
     }
 }
