@@ -9,7 +9,7 @@ Rust items modelled (paths as at `16e9aafa`):
 
 * `src/writeq/execution.rs`: the lane worker `WritePipeline::spawn_worker`
   (pop, the lease-lost fence, `WriteCtx::run`, which failures consume the
-  intent, `settle_one`), and `WriteCtx::run` as far as its `ConsumeStamp`
+  intent, `settle_one`; since #295 the held writes, `Lanes::held`), and `WriteCtx::run` as far as its `ConsumeStamp`
   goes: the consume is appended under the same lock hold as the commit.
 * `src/writeq/drain.rs`: `quiesce`, `abort_workers` (every unsettled receipt
   set aside), `settle_deferred` with `CloseFlush` (including the
@@ -117,11 +117,22 @@ process's sequence starts at 1.
   `failed` and leaves the write owed (test
   `a_write_reached_during_an_in_session_embedder_outage_is_not_consumed`).
 
+* The in-session hold (#295; `drainHeld`, `arriveH`, `workH`): the lane
+  worker keeps an agent's writes met by an embedder outage held, answers them
+  `pending_replay`, and runs them, oldest first, before the agent's next
+  write. `workH_split`, `hold_split`: for every agent, the writes settled in
+  session followed by those still held are exactly its writes in admission
+  order. `session_orderInv`, `hold_then_serve_order`: each agent's writes of
+  one process apply in admission order in session and across the next serve,
+  whatever the embedder answers. `arriveH_clears`: an agent whose held writes
+  all get an answer other than an outage holds nothing after its next write.
+  `OrderInv`, `loopD_preserves`, `replayD_preserves`: the order argument as an
+  invariant each pass keeps.
+
 What the model shows about the Rust (theorems in the last section):
 `transient_skip_reorders` and `outage_then_replay_reorders` (a transient
-embed answer breaks the per-agent order across serves; the replay half is
-fixed by #295, the in-session half is not: the worker still answers `failed`,
-leaves the intent owed and goes on to the agent's next write),
+embed answer breaks the per-agent order across serves; both halves fixed by
+#295: the replay defers the agent, the worker holds its later writes),
 `clock_step_reorders` (the load order trusts the wall clock; fixed by #295),
 `outage_failed_then_applied` (a doc fix: `ReceiptAnswer::Failed` says the
 write did not happen, and after an outage it later does),
@@ -2369,6 +2380,417 @@ theorem fixed_agent_order_load (live live' : Bool) (rout rout' : Job → RR) (ro
   exact fixed_agent_order stepFixed live live' rout rout' L1 _ hnd1 (fixedLoad_sorted rows)
     (fixedLoad_sorted _) (fun i hi => (fixedLoad_perm _).mem_iff.mp hi)
 
+/-! ## Order across passes: the invariant the order proofs carry
+
+`fixed_agent_order` compares two serves. The in-session hold and the replay's
+retry pass add more passes, so the argument is stated once as an invariant
+over the rows left owed and the writes applied so far, and each pass is shown
+to keep it. -/
+
+/-- The writes applied so far keep each agent's writes of one process in
+sequence order, and none is later in sequence than a write of its agent and
+process still owed in `rows`. -/
+def OrderInv (rows : List Intent) (applied : List Job) : Prop :=
+  applied.Pairwise (fun a b => a.agent = b.agent → a.epoch = b.epoch → a.rid ≤ b.rid) ∧
+  ∀ x ∈ applied, ∀ i ∈ rows, i.outcome = none → x.agent = i.job.agent →
+    x.epoch = i.job.epoch → x.rid ≤ i.job.rid
+
+theorem orderInv_nil (rows : List Intent) : OrderInv rows [] :=
+  ⟨List.Pairwise.nil, fun _ hx => by simp at hx⟩
+
+/-- Reloading the rows in another order keeps the invariant. -/
+theorem orderInv_perm {rows rows' : List Intent} {A : List Job} (hp : rows'.Perm rows)
+    (h : OrderInv rows A) : OrderInv rows' A :=
+  ⟨h.1, fun x hx i hi => h.2 x hx i (hp.mem_iff.mp hi)⟩
+
+theorem applyMut_jobs (acc : List Intent) (m : Mut) (hm : ∀ j, m ≠ .put j) :
+    (applyMut acc m).map (·.job) = acc.map (·.job) := by
+  cases m with
+  | put k => exact absurd rfl (hm k)
+  | write _ => rfl
+  | consume r t =>
+    simp only [applyMut, List.map_map]
+    apply List.map_congr_left
+    intro i _
+    by_cases h : i.job.key = r <;> simp [h]
+
+/-- Consumes keep the rows and their order. -/
+theorem foldl_jobs : ∀ (ms : List Mut) (acc : List Intent), NoPut ms →
+    (ms.foldl applyMut acc).map (·.job) = acc.map (·.job) := by
+  intro ms
+  induction ms with
+  | nil => intro acc _; rfl
+  | cons m ms ih =>
+    intro acc hnp
+    simp only [List.foldl_cons]
+    rw [ih _ (fun x hx => hnp x (List.mem_cons_of_mem _ hx)),
+      applyMut_jobs acc m (hnp m List.mem_cons_self)]
+
+/-- **One pass of the fixed loop keeps the invariant**, for any step, any
+streaks and any run results, over rows keyed by receipt id and loaded in
+per-process sequence order. -/
+theorem loopD_preserves (step : Bool → RR → Streaks → Step × Streaks) (rout : Job → RR)
+    (s : Streaks) (rows : List Intent) (A : List Job) (hnd : (rows.map (·.job.key)).Nodup)
+    (hs : EpochSorted rows) (hI : OrderInv rows A) :
+    OrderInv (applyLog rows (loopD step rout s [] (pendingOf rows)).log)
+      (A ++ (loopD step rout s [] (pendingOf rows)).applied) := by
+  obtain ⟨f1, _, fnp, fcons, _⟩ := loopD_facts step rout (pendingOf rows) s []
+  have hp1 : EpochSorted (pendingOf rows) := hs.sublist List.filter_sublist
+  have hpa : (loopD step rout s [] (pendingOf rows)).applied.Pairwise
+      (fun a b => a.agent = b.agent → a.epoch = b.epoch → a.rid ≤ b.rid) := by
+    have hpl : ((pendingOf rows).map (·.job)).Pairwise
+        (fun a b => a.epoch = b.epoch → a.rid ≤ b.rid) := List.pairwise_map.mpr hp1
+    exact (hpl.sublist f1).imp
+      (fun {a b} (h : a.epoch = b.epoch → a.rid ≤ b.rid) (_ : a.agent = b.agent) => h)
+  refine ⟨List.pairwise_append.mpr ⟨hI.1, hpa, ?_⟩, ?_⟩
+  · intro x hx y hy hag hep
+    obtain ⟨iy, hiy, rfl⟩ := List.mem_map.mp (f1.subset hy)
+    obtain ⟨hiy1, hiy2⟩ := List.mem_filter.mp hiy
+    exact hI.2 x hx iy hiy1 (Option.isNone_iff_eq_none.mp hiy2) hag hep
+  · intro x hx i' hi' hio' hag hep
+    -- The row `i'` left owed comes from a row `i` owed before the pass.
+    have hgone : ∀ z : Job,
+        (∃ t, Mut.consume z.key t ∈ (loopD step rout s [] (pendingOf rows)).log.flatten) →
+        z.key ≠ i'.job.key := by
+      intro z hz hzk
+      exact foldl_consumed _ rows fnp (Or.inl hz) i' hi' hzk.symm hio'
+    obtain ⟨i, hi, hij⟩ := foldl_rows _ rows fnp hi'
+    have hio : i.outcome = none := by
+      cases ho : i.outcome with
+      | none => rfl
+      | some t =>
+        exfalso
+        refine foldl_consumed _ rows fnp (Or.inr ?_) i' hi' rfl hio'
+        intro k hk hkk
+        have hki : k = i := mem_eq_of_key hnd hk hi (by rw [hkk, hij])
+        rw [hki, ho]
+        exact Option.some_ne_none t
+    rw [hij] at hag hep ⊢
+    cases List.mem_append.mp hx with
+    | inl hxA => exact hI.2 x hxA i hi hio hag hep
+    | inr hxl =>
+      have hip : i ∈ pendingOf rows := List.mem_filter.mpr ⟨hi, by simp [hio]⟩
+      obtain ⟨ix, hixp, hixj⟩ := List.mem_map.mp (f1.subset hxl)
+      obtain ⟨pre, post, hsplit⟩ := List.append_of_mem hixp
+      have hndp : ((pendingOf rows).map (·.job)).Nodup := by
+        have hk : ((pendingOf rows).map (·.job.key)).Nodup :=
+          hnd.sublist (List.filter_sublist.map _)
+        unfold List.Nodup at hk ⊢
+        rw [List.pairwise_map] at hk ⊢
+        exact hk.imp (fun h e => h (by rw [e]))
+      have hxl' := hxl
+      rw [hsplit] at hip hp1 hxl' hndp
+      rw [← hixj] at hxl'
+      rcases List.mem_append.mp hip with hpre | hpost
+      · exfalso
+        have hsettled := loopD_no_overtake step rout pre ix post s [] hndp hxl' i hpre
+          (by rw [hixj]; exact hag.symm)
+        apply hgone i.job _ (by rw [hij])
+        apply fcons
+        rw [hsplit]
+        exact hsettled
+      · cases List.mem_cons.mp hpost with
+        | inl e =>
+          exfalso
+          apply hgone x (fcons x (Or.inl hxl))
+          rw [hij, e, hixj]
+        | inr hpost' =>
+          have hrel := List.rel_of_pairwise_cons (List.pairwise_append.mp hp1).2.1 hpost'
+          rw [hixj] at hrel
+          exact hrel hep
+
+/-- The same for a whole serve of the fixed replay (the liveness gate
+included). -/
+theorem replayD_preserves (step : Bool → RR → Streaks → Step × Streaks) (live : Bool)
+    (rout : Job → RR) (rows : List Intent) (A : List Job) (hnd : (rows.map (·.job.key)).Nodup)
+    (hs : EpochSorted rows) (hI : OrderInv rows A) :
+    OrderInv (applyLog rows (replayD step live rout rows).log)
+      (A ++ (replayD step live rout rows).applied) := by
+  rcases replayD_cases step live rout rows with h | h | h <;> rw [h]
+  · simpa [ROut.empty, applyLog] using hI
+  · simpa [ROut.empty, applyLog] using hI
+  · exact loopD_preserves step rout ⟨0, 0⟩ rows A hnd hs hI
+
+/-! ## The in-session hold (#295)
+
+Before, a write the lane worker met during an embedder outage answered
+`failed`, its intent was left owed, and the worker went on to the agent's next
+write, which applied ahead of it; the next serve then applied the first
+(`outage_then_replay_reorders`). Now the worker keeps the agent's owed writes
+(`held`): at each later write of the agent it first runs the held ones,
+oldest first, then the new one, and stops at the first that meets an outage.
+That one and every later write of the agent stay owed: their intents
+unconsumed, their receipts `pending_replay` (unsettled, so a close sets them
+aside and answers `intent_durable`, and the next serve replays them in
+order). A held write that is later applied in this serve answers `applied`,
+a refused one `failed`; so the receipt of a write met by an outage no longer
+says `failed` first and something else later.
+
+`out t` is what a run at the `t`-th arrival returns, so a retry can answer
+differently from the first attempt. The lease fence is not modelled here: it
+refuses the arriving write without running anything, as before, and runs no
+held one. -/
+
+/-- Run an agent's owed jobs, oldest first, until one meets an embedder
+outage: what was settled (job and answer, in order), the batches appended,
+and the jobs still owed (that one and every later one). -/
+def drainHeld (o : Job → RunResult) : List Job → List (Job × Answer) × List Batch × List Job
+  | [] => ([], [], [])
+  | j :: js =>
+    match o j with
+    | .ok =>
+      let r := drainHeld o js
+      ((j, .applied) :: r.1, [.write j.key, .consume j.key .applied] :: r.2.1, r.2.2)
+    | .err e =>
+      if e.transient then ([], [], j :: js)
+      else
+        let r := drainHeld o js
+        ((j, .failed) :: r.1, [.consume j.key .failed] :: r.2.1, r.2.2)
+
+/-- The in-session workers' state: receipts, the held jobs (every agent's, in
+arrival order), the batches appended, and what was settled, in order. -/
+structure HState where
+  store : RStore
+  held : List Job
+  log : List Batch
+  settled : List (Job × Answer)
+
+def settleList (now : Int) (s : RStore) (xs : List (Job × Answer)) : RStore :=
+  xs.foldl (fun s p => settleOne s p.1.key p.2 now) s
+
+def holdList (now : Int) (s : RStore) (js : List Job) : RStore :=
+  js.foldl (fun s j => settleOne s j.key .pendingReplay now) s
+
+/-- One write `j` taken off its lane: the agent's held writes, then `j`. -/
+def arriveH (o : Job → RunResult) (now : Int) (st : HState) (j : Job) : HState :=
+  let r := drainHeld o (st.held.filter (fun k => k.agent = j.agent) ++ [j])
+  { store := holdList now (settleList now st.store r.1) r.2.2
+    held := st.held.filter (fun k => k.agent ≠ j.agent) ++ r.2.2
+    log := st.log ++ r.2.1
+    settled := st.settled ++ r.1 }
+
+/-- The workers over the writes they take, in the order they take them. -/
+def workH (out : Nat → Job → RunResult) (now : Int) : Nat → HState → List Job → HState
+  | _, st, [] => st
+  | t, st, j :: js => workH out now (t + 1) (arriveH (out t) now st j) js
+
+/-- The writes applied in session, in the order they were applied. -/
+def HState.applied (st : HState) : List Job :=
+  (st.settled.filter (fun p => p.2 = .applied)).map (·.1)
+
+theorem drainHeld_split (o : Job → RunResult) : ∀ (l : List Job),
+    (drainHeld o l).1.map (·.1) ++ (drainHeld o l).2.2 = l := by
+  intro l
+  induction l with
+  | nil => rfl
+  | cons j js ih =>
+    unfold drainHeld
+    cases o j with
+    | ok => simp [ih]
+    | err e =>
+      by_cases h : e.transient = true
+      · simp [h]
+      · simp [h, ih]
+
+/-- With the embedder answering every held write, the agent's held writes all
+settle. -/
+theorem drainHeld_clears (o : Job → RunResult) : ∀ (l : List Job),
+    (∀ k ∈ l, ∀ e, o k = .err e → e.transient = false) → (drainHeld o l).2.2 = [] := by
+  intro l
+  induction l with
+  | nil => intro _; rfl
+  | cons j js ih =>
+    intro h
+    have ht := h j List.mem_cons_self
+    have hr := ih (fun k hk => h k (List.mem_cons_of_mem _ hk))
+    unfold drainHeld
+    cases hj : o j with
+    | ok => simpa using hr
+    | err e =>
+      have := ht e hj
+      simp [this, hr]
+
+theorem filter_agent_of_all {l : List Job} {b : Nat} (hl : ∀ k ∈ l, k.agent = b) (a : Nat) :
+    l.filter (fun k => k.agent = a) = if b = a then l else [] := by
+  by_cases hab : b = a
+  · simp only [hab, ite_true]
+    exact List.filter_eq_self.mpr (fun k hk => by simp [hl k hk, hab])
+  · simp only [hab, ite_false]
+    exact List.filter_eq_nil_iff.mpr (fun k hk => by simp [hl k hk, hab])
+
+/-- One arrival moves only its agent's writes: those settled and those held
+are, together, that agent's held writes before it and the arriving one, in
+order; every other agent is untouched. -/
+theorem arriveH_split (o : Job → RunResult) (now : Int) (st : HState) (j : Job) (a : Nat) :
+    ((arriveH o now st j).settled.map (·.1)).filter (fun k => k.agent = a) ++
+        (arriveH o now st j).held.filter (fun k => k.agent = a) =
+      (st.settled.map (·.1)).filter (fun k => k.agent = a) ++
+        st.held.filter (fun k => k.agent = a) ++ [j].filter (fun k => k.agent = a) := by
+  have hsplit := drainHeld_split o (st.held.filter (fun k => k.agent = j.agent) ++ [j])
+  have hall : ∀ k ∈ st.held.filter (fun k => k.agent = j.agent) ++ [j], k.agent = j.agent := by
+    intro k hk
+    rcases List.mem_append.mp hk with hk | hk
+    · simpa using (List.mem_filter.mp hk).2
+    · rw [List.mem_singleton.mp hk]
+  have hM := filter_agent_of_all hall a
+  rw [← hsplit, List.filter_append] at hM
+  simp only [arriveH, List.map_append, List.filter_append, List.append_assoc]
+  by_cases hab : j.agent = a
+  · subst hab
+    simp only [ite_true] at hM
+    have ho : (st.held.filter (fun k => k.agent ≠ j.agent)).filter (fun k => k.agent = j.agent)
+        = [] := by
+      rw [List.filter_filter]
+      exact List.filter_eq_nil_iff.mpr (fun k _ => by by_cases h : k.agent = j.agent <;> simp [h])
+    rw [ho, List.nil_append, hM, hsplit]
+    simp
+  · simp only [hab, ite_false] at hM
+    have h1 := (List.append_eq_nil_iff.mp hM).1
+    have h2 := (List.append_eq_nil_iff.mp hM).2
+    rw [h1, h2, List.filter_filter]
+    simp only [hab, List.nil_append, List.append_nil, List.filter_cons, List.filter_nil,
+      decide_false, Bool.false_eq_true, ite_false]
+    congr 1
+    apply List.filter_congr
+    intro k _
+    by_cases h : k.agent = a
+    · have : ¬ a = j.agent := fun e => hab e.symm
+      simp [h, this]
+    · simp [h]
+
+/-- **The hold, over a whole serve.** For every agent, the writes it settled
+in session (applied or failed) followed by the writes it still has held are
+exactly its writes, in the order its lane delivered them (admission order): a
+held write is never followed by a settled one, so no write of the agent is
+applied while an earlier one is owed. -/
+theorem workH_split (out : Nat → Job → RunResult) (now : Int) (a : Nat) :
+    ∀ (js : List Job) (t : Nat) (st : HState),
+    ((workH out now t st js).settled.map (·.1)).filter (fun k => k.agent = a) ++
+        (workH out now t st js).held.filter (fun k => k.agent = a) =
+      (st.settled.map (·.1)).filter (fun k => k.agent = a) ++
+        st.held.filter (fun k => k.agent = a) ++ js.filter (fun k => k.agent = a) := by
+  intro js
+  induction js with
+  | nil => intro t st; simp [workH]
+  | cons j js ih =>
+    intro t st
+    simp only [workH]
+    rw [ih, arriveH_split]
+    rw [show j :: js = [j] ++ js from rfl, List.filter_append]
+    simp only [List.append_assoc]
+
+/-- A serve that starts with nothing held. -/
+def HState.init (s : RStore) : HState := ⟨s, [], [], []⟩
+
+theorem hold_split (out : Nat → Job → RunResult) (now : Int) (s : RStore) (js : List Job)
+    (a : Nat) :
+    ((workH out now 0 (HState.init s) js).settled.map (·.1)).filter (fun k => k.agent = a) ++
+        (workH out now 0 (HState.init s) js).held.filter (fun k => k.agent = a) =
+      js.filter (fun k => k.agent = a) := by
+  rw [workH_split]
+  simp [HState.init]
+
+/-- A list whose every agent's sub-list is ordered is ordered for each agent. -/
+theorem pairwise_of_agent_filters {P : Job → Job → Prop} :
+    ∀ (l : List Job), (∀ a, (l.filter (fun k => k.agent = a)).Pairwise P) →
+      l.Pairwise (fun x y => x.agent = y.agent → P x y) := by
+  intro l
+  induction l with
+  | nil => intro _; exact List.Pairwise.nil
+  | cons x xs ih =>
+    intro h
+    refine List.pairwise_cons.mpr ⟨?_, ih ?_⟩
+    · intro y hy hxy
+      have hx := h x.agent
+      simp only [List.filter_cons, decide_true, ite_true] at hx
+      exact (List.pairwise_cons.mp hx).1 y (List.mem_filter.mpr ⟨hy, by simp [hxy]⟩)
+    · intro a
+      have hx := h a
+      by_cases hxa : x.agent = a
+      · simp only [List.filter_cons, hxa, decide_true, ite_true] at hx
+        exact (List.pairwise_cons.mp hx).2
+      · simpa [List.filter_cons, hxa] using hx
+
+/-- **In session, each agent's writes apply in admission order, and none
+before an earlier write of its agent still owed.** Writes of one process
+(epoch `e`), its lanes delivering each agent's writes in sequence order. The
+writes applied in session satisfy the order invariant against any rows whose
+owed writes of this process are the ones still held: so the next serve,
+whatever it does, keeps the order (`hold_then_serve_order`). -/
+theorem session_orderInv (out : Nat → Job → RunResult) (now : Int) (s : RStore) (js : List Job)
+    (e : Nat) (he : ∀ j ∈ js, j.epoch = e)
+    (hjs : js.Pairwise (fun a b => a.agent = b.agent → a.rid < b.rid)) (rows : List Intent)
+    (hrows : ∀ i ∈ rows, i.outcome = none → i.job.epoch = e →
+      i.job ∈ (workH out now 0 (HState.init s) js).held) :
+    OrderInv rows (workH out now 0 (HState.init s) js).applied := by
+  let st := workH out now 0 (HState.init s) js
+  have hsplit := hold_split out now s js
+  have hsub : st.applied.Sublist (st.settled.map (·.1)) :=
+    (List.filter_sublist).map _
+  -- Each agent's writes, in lane order, are in sequence order.
+  have hja : ∀ a, (js.filter (fun k => k.agent = a)).Pairwise (fun x y => x.rid < y.rid) := by
+    intro a
+    apply List.Pairwise.imp_of_mem _ (hjs.sublist List.filter_sublist)
+    intro x y hx hy hxy
+    exact hxy (by rw [(by simpa using (List.mem_filter.mp hx).2 : x.agent = a),
+      (by simpa using (List.mem_filter.mp hy).2 : y.agent = a)])
+  have hsettled_mem : ∀ x ∈ st.settled.map (·.1), x ∈ js := by
+    intro x hx
+    have : x ∈ (st.settled.map (·.1)).filter (fun k => k.agent = x.agent) :=
+      List.mem_filter.mpr ⟨hx, by simp⟩
+    have h2 := hsplit x.agent
+    have : x ∈ js.filter (fun k => k.agent = x.agent) := by
+      rw [← h2]; exact List.mem_append_left _ this
+    exact (List.mem_filter.mp this).1
+  refine ⟨?_, ?_⟩
+  · apply List.Pairwise.sublist hsub
+    apply pairwise_of_agent_filters
+    intro a
+    have hpre : ((st.settled.map (·.1)).filter (fun k => k.agent = a)).Sublist
+        (js.filter (fun k => k.agent = a)) := by
+      rw [← hsplit a]; exact List.sublist_append_left _ _
+    exact ((hja a).sublist hpre).imp
+      (fun {x y} (h : x.rid < y.rid) (_ : x.epoch = y.epoch) => Nat.le_of_lt h)
+  · intro x hx i hi hio hag hep
+    have hxs := hsub.subset hx
+    have hxe : x.epoch = e := he x (hsettled_mem x hxs)
+    have hih := hrows i hi hio (hep ▸ hxe)
+    have hpa := (hja x.agent)
+    rw [← hsplit x.agent] at hpa
+    have hcross := (List.pairwise_append.mp hpa).2.2
+    exact Nat.le_of_lt (hcross x (List.mem_filter.mpr ⟨hxs, by simp⟩) i.job
+      (List.mem_filter.mpr ⟨hih, by simp [hag]⟩))
+
+/-- **Per-agent order in session and across the next serve.** The writes
+applied in session, then those the next serve's fixed replay applies from the
+rows left (every owed row of this process being one still held), keep each
+agent's writes of one process in admission order, whatever the embedder
+answered at any point. The fix for `outage_then_replay_reorders`. -/
+theorem hold_then_serve_order (out : Nat → Job → RunResult) (now : Int) (s : RStore)
+    (js : List Job) (e : Nat) (he : ∀ j ∈ js, j.epoch = e)
+    (hjs : js.Pairwise (fun a b => a.agent = b.agent → a.rid < b.rid)) (rows : List Intent)
+    (hnd : (rows.map (·.job.key)).Nodup)
+    (hrows : ∀ i ∈ rows, i.outcome = none → i.job.epoch = e →
+      i.job ∈ (workH out now 0 (HState.init s) js).held)
+    (live : Bool) (rout : Job → RR) :
+    ((workH out now 0 (HState.init s) js).applied ++
+        (replayD stepFixed live rout (fixedLoad rows)).applied).Pairwise
+      (fun a b => a.agent = b.agent → a.epoch = b.epoch → a.rid ≤ b.rid) := by
+  have hI := orderInv_perm (fixedLoad_perm rows) (session_orderInv out now s js e he hjs rows hrows)
+  have hnd' : ((fixedLoad rows).map (·.job.key)).Nodup :=
+    ((fixedLoad_perm rows).map _).nodup_iff.mpr hnd
+  exact (replayD_preserves stepFixed live rout _ _ hnd' (fixedLoad_sorted rows) hI).1
+
+/-- **Progress in session**: at a write of an agent whose held writes and the
+new one all get an answer other than an outage, nothing of that agent stays
+held. -/
+theorem arriveH_clears (o : Job → RunResult) (now : Int) (st : HState) (j : Job)
+    (h : ∀ k ∈ st.held.filter (fun k => k.agent = j.agent) ++ [j], ∀ e, o k = .err e →
+      e.transient = false) :
+    (arriveH o now st j).held.filter (fun k => k.agent = j.agent) = [] := by
+  simp only [arriveH, drainHeld_clears o _ h, List.append_nil, List.filter_filter]
+  exact List.filter_eq_nil_iff.mpr (fun k _ => by by_cases hk : k.agent = j.agent <;> simp [hk])
+
 /-! ## Crash: a durable write is never replayed -/
 
 theorem mem_admit_flatten {all : List Job} {n : Nat} {m : Mut}
@@ -2844,6 +3266,33 @@ example :
     let rout : Job → RR := fun j => if j.rid = 2 then .run (.err .inputRefusal) else .run .ok
     let r := replayD stepFixed true rout ints
     r.applied = [j1, j3] ∧ r.failed = [j2] ∧ r.block = none := by
+  decide
+
+/-! ### The in-session hold on the issue's scenario -/
+
+/-- `outage_then_replay_reorders` fixed. `j1` meets an outage; when `j2`
+arrives the embedder is still down, so `j1` is retried, fails again, and
+`j2` is held behind it, unrun. Both receipts say `pending_replay`; agent 1's
+`k1` applies meanwhile. The next serve applies `j1`, then `j2`. -/
+example :
+    let out : Nat → Job → RunResult := fun _ j =>
+      if j.agent = 0 then .err .unavailable else .ok
+    let st := workH out 0 0 (HState.init (admitStore [j1, j2, k1])) [j1, j2, k1]
+    let rows : List Intent := [⟨j1, none⟩, ⟨j2, none⟩, ⟨k1, some .applied⟩]
+    st.applied = [k1] ∧ st.held = [j1, j2] ∧
+      [j1.key, j2.key, k1.key].map (fun r => (lookup st.store r).map (·.answer)) =
+        [some .pendingReplay, some .pendingReplay, some .applied] ∧
+      (replayD stepFixed true okAll (fixedLoad rows)).applied = [j1, j2] := by
+  decide
+
+/-- The embedder is back when `j2` arrives: the held `j1` applies first, then
+`j2`, in this serve. -/
+example :
+    let out : Nat → Job → RunResult := fun t _ => if t = 0 then .err .unavailable else .ok
+    let st := workH out 0 0 (HState.init (admitStore [j1, j2])) [j1, j2]
+    st.applied = [j1, j2] ∧ st.held = [] ∧
+      [j1.key, j2.key].map (fun r => (lookup st.store r).map (·.answer)) =
+        [some .applied, some .applied] := by
   decide
 
 end Examples
