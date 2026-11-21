@@ -39,8 +39,11 @@ its backends, all in `src/main.rs` at `65fce2a9` (plus #315's fix to
   `auth_token_refusal` (`parseWebAuthArg`, `serveWebFlagRefusalFixed`).
 * clap's unexpected-argument error for an argv element after either
   `--auth-token`: before the fix (`flagTakesPrev`, `unexpectedArgRefusal`),
-  and with `allow_hyphen_values` and `redact_auth_token_echo` in `main`
-  (`flagTakes`, `unexpectedArgRefusalFixed`, `argShown`).
+  with `allow_hyphen_values` and the first `redact_auth_token_echo` in
+  a26ffd30 (`flagTakesHyphen`, `unexpectedArgRefusalFixed`, `argShown`),
+  and since the re-review without `allow_hyphen_values` and with the
+  combined rule (`flagTakes`, `authFlagValue`, `quotedRender`,
+  `argShownFixed`).
 * `fn main` from the parsed command on (`main`): the `canon` route, the
   serve and serve-web pre-reads, the resolve, the
   `unreachable!("writer override requires full backends")`, the final
@@ -202,13 +205,18 @@ Redaction (#273's `AuthTokenArg` constraint):
   `serve_web_flag_refusal_fixed` on the issue's inputs).
 * #315's review: clap's unexpected-argument error quoted a token starting
   with `-` (`hyphen_token_leaked`) and the tail of a token split by an
-  unquoted space (`unexpected_arg_leaked`), on `serve` and `serve-web`. Now
-  the element after the flag is always its value (`flagTakes_fixed`), and the
-  error prints the same for every element from the flag on
-  (`render_noninterference` at `unexpectedArg`, `unexpected_arg_constant`,
-  `argShown_from_flag`, `unexpected_arg_fixed`). Whether that error fires
-  depends on the argv's shape, not the token's verdict, so it is outside
-  the noninterference statement: a split token reveals that it was split.
+  unquoted space (`unexpected_arg_leaked`), on `serve` and `serve-web`.
+  a26ffd30 took every element after the flag as its value
+  (`flagTakesHyphen_total`), which was fail open (`b1_fail_open`); now a
+  spaced `--auth-token` refuses a flag-like element
+  (`authFlagValue_spaced_none_iff`, `flagTakes_agrees_base`),
+  `--auth-token=-x` takes any value (`authFlagValue_eq_form`), and every
+  quoting error prints the same for every element from the flag on
+  (`quotedRender_noninterference`, `argShownFixed_from_flag`,
+  `quotedRender_unexpected_is_render`, `render_noninterference` at
+  `unexpectedArg`), except a missing value (`missing_value_kept`) and the
+  flag's own spelling; `re_review_fixed` on the probes. What a split token
+  still reveals is listed under `render_noninterference`.
 
 Clap rules (#273's first Track 1 constraint, the rule part):
 * `statsValid_iff`, `recall_rules_test`, `embedValid_iff`,
@@ -2428,9 +2436,10 @@ argv element after `--auth-token` as its value. Without
 instead and reached clap's unexpected-argument error. -/
 def flagTakesPrev (r : TokenRaw) : Bool := r.bytes.head? != some 45
 
-/-- With `allow_hyphen_values` on both `--auth-token` args, the element
-after the flag is always its value. -/
-def flagTakes (_r : TokenRaw) : Bool := true
+/-- The previous version a26ffd30: with `allow_hyphen_values` on both
+`--auth-token` args, the element after the flag was always its value, so a
+flag there silently became the token (fail open, #315 re-review B1). -/
+def flagTakesHyphen (_r : TokenRaw) : Bool := true
 
 /-- The previous version of clap's unexpected-argument error for an argv
 element `a` it could not place, such as the tail of an unquoted token split
@@ -2439,14 +2448,17 @@ Bytes are read as code points (ASCII here). -/
 def unexpectedArgRefusal (a : TokenRaw) : String :=
   "unexpected argument '" ++ String.ofList (a.bytes.map Char.ofNat) ++ "' found"
 
-/-- The tip `redact_auth_token_echo` puts in place of clap's suggestions. -/
+/-- The tip a26ffd30's `redact_auth_token_echo` put in place of clap's
+suggestions (previous version; now `redactTip`). -/
 def unexpectedArgTip : String :=
   "an argument after --auth-token may be part of the token, so it is not shown; quote a token that contains a space"
 
-/-- The fixed error, for an element `a` at or after `--auth-token` in argv:
-`redact_auth_token_echo` replaces the quoted element by `<redacted>` and
-clap's suggestions by one fixed tip. clap's usage line, which follows, names
-the flags given, never a value, and is not modelled. -/
+/-- The previous version a26ffd30 of the redacted error, for an element `a`
+at or after `--auth-token` in argv: `redact_auth_token_echo` replaced the
+quoted element by `<redacted>` and clap's suggestions by one fixed tip. It
+kept clap's usage line, which could name clap's did-you-mean flag for the
+redacted element (`--porr` gave `--port <PORT>`), so it hinted at it; the
+current version is `redactedText`. -/
 def unexpectedArgRefusalFixed (_a : TokenRaw) : String :=
   "unexpected argument '<redacted>' found\n\n  tip: " ++ unexpectedArgTip
 
@@ -2460,6 +2472,75 @@ shown only when it occurs in an argv element before the first
 def argShown (before fromFlag : List (List Nat)) (q : List Nat) : Bool :=
   before.any (infixOf q) && !fromFlag.any (infixOf q)
 
+/-- Whether clap reads an argv element as a flag rather than a value (no
+`allow_hyphen_values`, no negative numbers): it starts with `-` and is not
+`-` alone. -/
+def looksLikeFlag (r : TokenRaw) : Bool := r.bytes.head? == some 45 && 1 < r.bytes.length
+
+/-- Since #315's re-review (B1): `allow_hyphen_values` is gone again, so the
+element after a spaced `--auth-token` is its value only when it does not look
+like a flag. -/
+def flagTakes (r : TokenRaw) : Bool := !looksLikeFlag r
+
+/-- The value `--auth-token` gets from the next element: `eqForm` is
+`--auth-token=<v>`, where clap takes `v` whatever it starts with; `none` is
+clap's refusal ("a value is required", or the element is an unexpected
+argument), exit 2 at parse time, so nothing starts. -/
+def authFlagValue (eqForm : Bool) (next : TokenRaw) : Option TokenRaw :=
+  if eqForm || flagTakes next then some next else none
+
+/-- The previous version a26ffd30 of `authFlagValue`: every element was the
+value (`flagTakesHyphen`). -/
+def authFlagValueHyphen (_eqForm : Bool) (next : TokenRaw) : Option TokenRaw := some next
+
+/-- `--auth-token`, the one spelling `redact_auth_token_echo` never redacts:
+it is the flag, not a value (`lambo --auth-token x serve-web` quotes it). -/
+def authFlagBytes : List Nat := [45, 45, 97, 117, 116, 104, 45, 116, 111, 107, 101, 110]
+
+/-- `redact_auth_token_echo`'s rule since #315's re-review: an empty quoted
+value (clap's missing value, S2) and the flag's own spelling (N1) are shown;
+otherwise `argShown`, the narrow rule. -/
+def argShownFixed (before fromFlag : List (List Nat)) (q : List Nat) : Bool :=
+  q.isEmpty || q == authFlagBytes || argShown before fromFlag q
+
+/-- The clap errors that quote an argv element, as `redact_auth_token_echo`
+handles them: an unexpected argument (`InvalidArg` of `UnknownArgument`), an
+invalid value of the flag `flag` (`InvalidValue`), an unrecognized
+subcommand (`InvalidSubcommand`). -/
+inductive Quote where
+  | unexpected
+  | invalidValue (flag : String)
+  | subcommand
+  deriving DecidableEq, Repr
+
+/-- clap's first line for a quoted element `s`. A value parser's own source
+message after an invalid value (`: invalid digit found in string`) is not
+modelled: the parsers of the flags `serve` and `serve-web` accept (`u16`,
+`u32`, `usize`, `IpAddr`, strings, paths) never echo their input there. -/
+def quoteText : Quote → String → String
+  | .unexpected, s => "unexpected argument '" ++ s ++ "' found"
+  | .invalidValue f, s =>
+    if s.isEmpty then "a value is required for '" ++ f ++ "' but none was supplied"
+    else "invalid value '" ++ s ++ "' for '" ++ f ++ "'"
+  | .subcommand, s => "unrecognized subcommand '" ++ s ++ "'"
+
+/-- The tip that replaces clap's suggestions on a redaction. -/
+def redactTip : String :=
+  "an argument after --auth-token is not shown (it may be part of the token); check the arguments after it, and quote a token that contains a space"
+
+/-- A redacted error. Its usage line (not modelled) is the subcommand's plain
+usage, the same for every argv, since clap's own can name its did-you-mean
+flag for the redacted element. -/
+def redactedText (k : Quote) : String :=
+  quoteText k "<redacted>" ++ "\n\n  tip: " ++ redactTip
+
+/-- What `main` prints for a parse error quoting `q`, `before` and `fromFlag`
+being the argv elements before and from the first `--auth-token`: the
+combined render of the rule and the text. -/
+def quotedRender (k : Quote) (before fromFlag : List (List Nat)) (q : List Nat) : String :=
+  if argShownFixed before fromFlag q then quoteText k (String.ofList (q.map Char.ofNat))
+  else redactedText k
+
 /-- The paths on which `lambo serve` and `lambo serve-web` print something
 derived from the token alone (a reading of the code, not a proof of
 completeness): `AuthTokenArg`'s `Debug` (`Commands` derives `Debug`), the
@@ -2468,7 +2549,8 @@ completeness): `AuthTokenArg`'s `Debug` (`Commands` derives `Debug`), the
 `resolve_auth_token`, and (since #315's fix) `serve-web`'s `--auth-token`
 refusal from `WebAuthTokenParser` and, on both commands, clap's
 unexpected-argument error for an element after `--auth-token`
-(`unexpectedArg`, its argument being that element, a piece of the token). Neither `AuthTokenArg` nor `SecretToken`
+(`unexpectedArg`, its argument being that element, a piece of the token,
+in the case the rule redacts). Neither `AuthTokenArg` nor `SecretToken`
 implements `Display`. Two `serve-web` paths are not listed separately: its
 `AuthToken` `Debug` (`Commands::ServeWeb`'s field) is constant like
 `debugArg`, and its `LAMBO_AUTH_TOKEN` refusal (`serve_web::auth`'s
@@ -2501,7 +2583,7 @@ def render : PrintPath → TokenRaw → String
     | some w => "LAMBO_AUTH_TOKEN: " ++ whyText w
     | none => ""
   | .webFlagRefusal, r => serveWebFlagRefusalFixed r
-  | .unexpectedArg, a => unexpectedArgRefusalFixed a
+  | .unexpectedArg, _ => redactedText .unexpected
 
 /-- Redaction, as noninterference (#273's "AuthTokenArg redaction"
 constraint): on each `PrintPath` the output depends on the token only through
@@ -2509,12 +2591,19 @@ its verdict class, never on its bytes. This holds by definition of `render`;
 what it adds is the list of paths. (A substring statement would be false: a
 token spelled `redacted` occurs in `AuthTokenArg(<redacted>)`.) Since #315's
 fix the list includes `serve-web`'s flag refusal (`webFlagRefusal`) and the
-unexpected-argument error after `--auth-token` (`unexpectedArg`). Not
-covered: `credential_refusal_reveals_equality`; the previous versions
+unexpected-argument error for an element after `--auth-token`
+(`unexpectedArg`, the redacted case; `quotedRender_unexpected_is_render`
+connects it to the argv-level `quotedRender`, whose own noninterference is
+`quotedRender_noninterference`). Not covered:
+`credential_refusal_reveals_equality`; the previous versions
 (`serve_web_flag_refusal_leaks`, `unexpected_arg_leaked`,
-`hyphen_token_leaked`); and *whether* the unexpected-argument path is taken,
-which depends on the argv's shape (an unquoted space in the token, say), not
-on the token's verdict, so a split token reveals that it was split. -/
+`hyphen_token_leaked`, `b1_fail_open`); and what a token split by an
+unquoted space still reveals, which depends on the argv's shape, not on the
+token's verdict: that it was split (the error fires at all); a tail piece
+that is a real flag changes the error (`--port <piece>` names `--port`, and a
+piece starting `-h` prints help with exit 0); and a piece the command
+accepts (`--port 80`) passes silently, leaving the weaker head as the token.
+Those predate #315. -/
 theorem render_noninterference (p : PrintPath) {r r' : TokenRaw}
     (h : verdict r = verdict r') : render p r = render p r' := by
   cases p with
@@ -2649,10 +2738,12 @@ theorem serve_web_flag_refusal_fixed :
 
 Found in review of the fix above: clap's "unexpected argument '<it>' found"
 quoted a token that starts with `-` (taken for a flag) or the tail of an
-unquoted token split by a space, on `serve` and `serve-web` alike. The fix
-takes a `-`-leading element as the value (`flagTakes`) and has `main` print
-the parse error through `redact_auth_token_echo`
-(`unexpectedArgRefusalFixed`, `argShown`). -/
+unquoted token split by a space, on `serve` and `serve-web` alike. a26ffd30
+took a `-`-leading element as the value (`flagTakesHyphen`, fail open, so
+the re-review reverted it: `flagTakes`, `authFlagValue`) and has `main`
+print the parse error through `redact_auth_token_echo` (a26ffd30:
+`unexpectedArgRefusalFixed`, `argShown`; now `quotedRender`,
+`argShownFixed`). -/
 
 set_option maxRecDepth 20000 in
 /-- Shown about the Rust before the fix: `--auth-token --x` printed
@@ -2672,13 +2763,14 @@ theorem unexpected_arg_leaked :
       unexpectedArgRefusal ⟨[120], true⟩ ≠ unexpectedArgRefusal ⟨[121], true⟩ := by
   decide
 
-/-- Every element after `--auth-token` is its value now, and the fix agrees
-with the previous version wherever that took the element. -/
-theorem flagTakes_fixed (r : TokenRaw) :
-    flagTakes r = true ∧ (flagTakesPrev r = true → flagTakes r = flagTakesPrev r) :=
+/-- About a26ffd30 (previous version): every element after `--auth-token`
+was its value, agreeing with the base wherever that took the element. -/
+theorem flagTakesHyphen_total (r : TokenRaw) :
+    flagTakesHyphen r = true ∧
+      (flagTakesPrev r = true → flagTakesHyphen r = flagTakesPrev r) :=
   ⟨rfl, fun h => h.symm ▸ rfl⟩
 
-/-- The fixed unexpected-argument error is the same for every element. -/
+/-- The redacted unexpected-argument error is the same for every element. -/
 theorem unexpected_arg_constant (a a' : TokenRaw) :
     render .unexpectedArg a = render .unexpectedArg a' := rfl
 
@@ -2698,6 +2790,117 @@ theorem unexpected_arg_fixed :
       argShown [[45, 45, 115, 101, 115, 105, 111, 110]] [[116, 111, 107]]
         [45, 45, 115, 101, 115, 105, 111, 110] = true ∧
       argShown [[98]] [[97], [98]] [98] = false := by
+  decide
+
+/-! ### #315 re-review: fail closed, and the combined render
+
+`allow_hyphen_values` made a flag after `--auth-token` the token, so
+`--auth-token $UNSET --allow-embedding-mismatch` started a server whose
+token was the flag (B1). It is removed: a spaced `--auth-token` refuses an
+element that looks like a flag (`authFlagValue_spaced_none_iff`), as the
+base did (`flagTakes_agrees_base`), and `--auth-token=-abc` takes any value
+(`authFlagValue_eq_form`). The redaction covers what that refusal quotes:
+`quotedRender_noninterference` over every quoting kind. -/
+
+set_option maxRecDepth 20000 in
+/-- Shown about a26ffd30 (previous version): `--auth-token -h` made `-h` the
+token, and `--auth-token --port=1` made `--port=1` the token. -/
+theorem b1_fail_open :
+    authFlagValueHyphen false ⟨[45, 104], true⟩ = some ⟨[45, 104], true⟩ ∧
+      authFlagValueHyphen false ⟨[45, 45, 112, 111, 114, 116, 61, 49], true⟩ =
+        some ⟨[45, 45, 112, 111, 114, 116, 61, 49], true⟩ := by
+  decide
+
+/-- A spaced `--auth-token` is refused exactly when the next element looks
+like a flag. -/
+theorem authFlagValue_spaced_none_iff (r : TokenRaw) :
+    authFlagValue false r = none ↔ looksLikeFlag r = true := by
+  unfold authFlagValue flagTakes
+  cases looksLikeFlag r <;> simp
+
+/-- `--auth-token=<v>` takes `v`, a leading `-` included. -/
+theorem authFlagValue_eq_form (r : TokenRaw) : authFlagValue true r = some r := by
+  simp [authFlagValue]
+
+/-- The fix restores the base's rule (`flagTakesPrev`), except that a lone
+`-`, which clap takes as a value, the base model did not. -/
+theorem flagTakes_agrees_base (r : TokenRaw) (h : r.bytes ≠ [45]) :
+    flagTakes r = flagTakesPrev r := by
+  rcases r with ⟨bs, u⟩
+  cases bs with
+  | nil => rfl
+  | cons b t =>
+    by_cases hb : b = 45
+    · subst hb
+      cases t with
+      | nil => exact absurd rfl h
+      | cons c t => simp [flagTakes, looksLikeFlag, flagTakesPrev]
+    · have ho : (some b == some 45) = false := by simp [hb]
+      simp [flagTakes, looksLikeFlag, flagTakesPrev, bne, ho]
+
+/-- An element from the flag on, neither empty nor the flag's spelling, is
+never shown. -/
+theorem argShownFixed_from_flag {before fromFlag : List (List Nat)} {q : List Nat}
+    (h0 : q ≠ []) (h1 : q ≠ authFlagBytes) (h : fromFlag.any (infixOf q) = true) :
+    argShownFixed before fromFlag q = false := by
+  have h0' : q.isEmpty = false := by cases q <;> simp_all
+  simp [argShownFixed, h0', h1, argShown_from_flag h]
+
+theorem quotedRender_hidden {k : Quote} {before fromFlag : List (List Nat)} {q : List Nat}
+    (h : argShownFixed before fromFlag q = false) :
+    quotedRender k before fromFlag q = redactedText k := by
+  simp [quotedRender, h]
+
+theorem quotedRender_shown {k : Quote} {before fromFlag : List (List Nat)} {q : List Nat}
+    (h : argShownFixed before fromFlag q = true) :
+    quotedRender k before fromFlag q = quoteText k (String.ofList (q.map Char.ofNat)) := by
+  simp [quotedRender, h]
+
+/-- **Noninterference over argv**: for each quoting kind, every element from
+the flag on (other than an empty value and the flag's spelling) prints the
+same error. -/
+theorem quotedRender_noninterference (k : Quote) {before fromFlag : List (List Nat)}
+    {q q' : List Nat}
+    (h0 : q ≠ []) (h1 : q ≠ authFlagBytes) (h : fromFlag.any (infixOf q) = true)
+    (h0' : q' ≠ []) (h1' : q' ≠ authFlagBytes) (h' : fromFlag.any (infixOf q') = true) :
+    quotedRender k before fromFlag q = quotedRender k before fromFlag q' := by
+  rw [quotedRender_hidden (argShownFixed_from_flag h0 h1 h),
+    quotedRender_hidden (argShownFixed_from_flag h0' h1' h')]
+
+/-- The argv-level render is `PrintPath.unexpectedArg`'s on the elements it
+redacts. -/
+theorem quotedRender_unexpected_is_render {before fromFlag : List (List Nat)}
+    {q : List Nat} (h0 : q ≠ []) (h1 : q ≠ authFlagBytes)
+    (h : fromFlag.any (infixOf q) = true) :
+    quotedRender .unexpected before fromFlag q = render .unexpectedArg ⟨q, true⟩ := by
+  rw [quotedRender_hidden (argShownFixed_from_flag h0 h1 h)]
+  rfl
+
+/-- A missing value keeps clap's message, with no tip (S2). -/
+theorem missing_value_kept (f : String) (before fromFlag : List (List Nat)) :
+    quotedRender (.invalidValue f) before fromFlag [] =
+      "a value is required for '" ++ f ++ "' but none was supplied" := by
+  simp [quotedRender, argShownFixed, quoteText]
+
+set_option maxRecDepth 20000 in
+/-- **The re-review's probes, fixed**: a spaced `--auth-token` refuses `-h`,
+`--port=1` and `-x` and takes a lone `-`; `--auth-token=-x` takes `-x`; an
+invalid `--port` value and an unrecognized subcommand after the flag are
+redacted; `lambo --auth-token x serve-web` names `--auth-token`; a missing
+value says so. -/
+theorem re_review_fixed :
+    authFlagValue false ⟨[45, 104], true⟩ = none ∧
+      authFlagValue false ⟨[45, 45, 112, 111, 114, 116, 61, 49], true⟩ = none ∧
+      authFlagValue false ⟨[45, 120], true⟩ = none ∧
+      authFlagValue false ⟨[45], true⟩ = some ⟨[45], true⟩ ∧
+      authFlagValue true ⟨[45, 120], true⟩ = some ⟨[45, 120], true⟩ ∧
+      quotedRender (.invalidValue "--port <PORT>") [] [[97], [45, 45, 112, 111, 114, 116], [78, 79]]
+          [78, 79] = redactedText (.invalidValue "--port <PORT>") ∧
+      quotedRender .subcommand [] [[78, 79]] [78, 79] = redactedText .subcommand ∧
+      quotedRender .unexpected [] [authFlagBytes, [120]] authFlagBytes =
+        "unexpected argument '--auth-token' found" ∧
+      quotedRender (.invalidValue "--auth-token <TOKEN>") [] [authFlagBytes] [] =
+        "a value is required for '--auth-token <TOKEN>' but none was supplied" := by
   decide
 
 /-! ## Per-command argument rules (clap `conflicts_with`, `requires`, groups) -/
