@@ -14,6 +14,7 @@ anchor, written exactly as one of:
     {/* lean: Canon.stage1Passes, Policy.Edge.dependence */}
     {/* const: MIN_GC_SURVIVED, ScoringWeights::default */}
     {/* code: src/canon/stage3.rs stage3_passes, src/config.rs Config::default */}
+    {/* test: src/mcp/server/tests/schemas.rs the_router_publishes_exactly_the_seven_spec_tools */}
     {/* oracle: Canon.json stage1Passes#2 */}
 
 The rules:
@@ -37,10 +38,21 @@ The rules:
   `macro_rules!`, a field (`name:` opening a line) or an UpperCamel enum
   variant opening a line. In `A::b`, `A` must be a type, trait or module the
   file declares or implements, and `b` a declaration as above.
+* `test:` paths and names, grouped as in `code:`, notes in parentheses
+  included. Each path must exist under the root, and each name must be a
+  plain Rust identifier that the file declares as a `fn`, outside comments
+  and strings, with a test attribute above it: walking up from the `fn`
+  over its qualifiers (`pub`, `async`, ...) and the attributes stacked on
+  it, no further than ATTR_LINES lines, one attribute's path must have a
+  `test` segment (`#[test]`, `#[tokio::test]`, `#[tokio::test(flavor =
+  ...)]`). So a helper fn fails, and `#[cfg(test)]`, whose path is `cfg`,
+  does not count.
 * `oracle:` is checked by check-doc-examples.py; here it only counts.
 * Any other comment that starts like an anchor (`{/* lean : ...`,
-  `{/*const:`, `{/* Code: ...`, `{/* orcale: ...`, one split over lines) is
-  an error, not a comment the check skips.
+  `{/*const:`, `{/* Code: ...`, `{/* orcale: ...`, `{/* tests: ...`, one
+  split over lines) is an error, not a comment the check skips. A comment
+  whose first word is one edit from a kind counts, so `{/* text ...` is
+  refused too.
 * A page in REQUIRED must carry at least one anchor of each kind it lists,
   so a page cannot lose its anchors and still pass.
 
@@ -56,6 +68,12 @@ Known limits (the check is textual, not a Rust parser):
 * A variant or field that does not open its line (a one-line `enum P { A, B
   }`, or an attribute on the same line) is not found. rustfmt puts each on
   its own line, so this only matters for unformatted code.
+* `test:` checks that a name is a test fn in that file, not that the test is
+  compiled, run or passing: a test behind a feature or marked `#[ignore]`
+  passes. Two fns of one name in one file (in two `mod`s) pass when either
+  is a test. A test that a macro generates (`proptest!`, a `macro_rules!`
+  that expands to `#[test]`) is not found. Nothing checks that the test
+  asserts what the sentence says; that is the writer's job.
 
 Exit codes: 0 when every anchor resolves; 1 when one does not; 2 on a usage
 error; 3 when an input cannot be read (a page or source file that is not
@@ -73,8 +91,8 @@ import re
 import sys
 from pathlib import Path
 
-KINDS = ("lean", "const", "code", "oracle")
-ANCHOR = re.compile(r"\{/\* (?P<kind>lean|const|code|oracle): (?P<body>[^*]*?) \*/\}")
+KINDS = ("lean", "const", "code", "test", "oracle")
+ANCHOR = re.compile(r"\{/\* (?P<kind>lean|const|code|test|oracle): (?P<body>[^*]*?) \*/\}")
 # A comment's first word. A comment whose first word is an anchor kind, or
 # one edit away from one, must match ANCHOR at the same place.
 COMMENT_WORD = re.compile(r"\{\s*/\*\s*(?P<word>[A-Za-z][A-Za-z0-9_]*)")
@@ -99,6 +117,7 @@ LEAN_NAMESPACE = re.compile(r"^\s*namespace\s+(?P<name>\S+)")
 LEAN_SECTION = re.compile(r"^\s*(?:noncomputable\s+)?section\b")
 LEAN_END = re.compile(r"^\s*end(?:\s+(?P<name>\S+))?\s*$")
 LEAN_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_']*(\.[A-Za-z_][A-Za-z0-9_']*)+$")
+RUST_IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 RUST_ITEM = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(::[A-Za-z_][A-Za-z0-9_]*)*$")
 CONST_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*((::|\.)[A-Za-z_][A-Za-z0-9_]*(\(\))?)*$")
 PATH_LIKE = re.compile(r"/|\.(rs|lean|toml|json|md|mdx|sh|py)$")
@@ -336,32 +355,44 @@ def check_const(body: str, sources: Sources) -> list[str]:
     return errors
 
 
-def check_code(body: str, sources: Sources) -> list[str]:
-    errors = []
+def path_groups(kind: str, body: str, sources: Sources) -> tuple[list[str], list[tuple[str, list[str]]]]:
+    """A `code:` or `test:` body split into groups, notes in parentheses
+    dropped: the errors, and each group's (path, items) where the path
+    exists. A group that starts with a path sets the file; a group without
+    one adds items to the last path."""
+    errors: list[str] = []
+    out: list[tuple[str, list[str]]] = []
     current: str | None = None
     bare = NOTE.sub(" ", body)
     if "(" in bare.replace("()", "") or ")" in bare.replace("()", ""):
-        return [f"code: unbalanced or nested parentheses in {body!r}"]
+        return [f"{kind}: unbalanced or nested parentheses in {body!r}"], []
     groups = [g.split() for g in re.split(r"[;,]", bare)]
     for tokens in groups:
         if not tokens:
-            errors.append(f"code: an empty group in {body!r}")
+            errors.append(f"{kind}: an empty group in {body!r}")
             continue
         if PATH_LIKE.search(tokens[0]):
             current, items = tokens[0], tokens[1:]
             path = sources.root / current
             if not path.exists():
-                errors.append(f"code: no path {current}")
+                errors.append(f"{kind}: no path {current}")
                 current = None
                 continue
             if items and not path.is_file():
-                errors.append(f"code: {current} is not a file, so it names no items")
+                errors.append(f"{kind}: {current} is not a file, so it names no items")
                 continue
         elif current is None:
-            errors.append(f"code: {' '.join(tokens)!r} names no path before it")
+            errors.append(f"{kind}: {' '.join(tokens)!r} names no path before it")
             continue
         else:
             items = tokens
+        out.append((current, items))
+    return errors, out
+
+
+def check_code(body: str, sources: Sources) -> list[str]:
+    errors, groups = path_groups("code", body, sources)
+    for current, items in groups:
         code = rust_code(sources.text(current) or "") if items else ""
         for item in items:
             if not RUST_ITEM.match(item) or any(p in RUST_KEYWORDS for p in item.split("::")):
@@ -376,7 +407,77 @@ def check_code(body: str, sources: Sources) -> list[str]:
     return errors
 
 
-CHECKS = {"lean": check_lean, "const": check_const, "code": check_code}
+# How far above a test fn its test attribute may sit, in lines: room for a
+# stack such as `#[tokio::test(flavor = ...)]`, `#[ignore]` and `#[serial]`.
+ATTR_LINES = 8
+FN_DECL = (
+    r"(?:\bpub(?:\([^)]*\))?\s+)?(?:\bconst\s+)?(?:\basync\s+)?(?:\bunsafe\s+)?"
+    r"(?:\bextern\s+(?:[A-Za-z_][A-Za-z0-9_]*\s+)?)?\bfn\s+{name}\b"
+)
+ATTR_PATH = re.compile(r"#!?\[\s*(?P<path>(?:[A-Za-z_][A-Za-z0-9_]*\s*::\s*)*[A-Za-z_][A-Za-z0-9_]*)")
+
+
+def attributes_above(code: str, start: int) -> list[str]:
+    """The paths of the attributes stacked directly above position `start`
+    of Rust `code` (comments and strings already blanked), nearest first,
+    no further up than ATTR_LINES lines."""
+    floor = start
+    for _ in range(ATTR_LINES + 1):
+        floor = code.rfind("\n", 0, floor)
+        if floor < 0:
+            floor = 0
+            break
+    paths: list[str] = []
+    i = start
+    while True:
+        while i > floor and code[i - 1].isspace():
+            i -= 1
+        if i <= floor or code[i - 1] != "]":
+            return paths
+        depth, j = 0, i - 1
+        while j >= floor:
+            if code[j] == "]":
+                depth += 1
+            elif code[j] == "[":
+                depth -= 1
+                if depth == 0:
+                    break
+            j -= 1
+        if j < floor:
+            return paths
+        hash_at = j - 2 if j >= 2 and code[j - 1] == "!" else j - 1
+        if hash_at < floor or code[hash_at] != "#":
+            return paths
+        if m := ATTR_PATH.match(code, hash_at):
+            paths.append(re.sub(r"\s+", "", m.group("path")))
+        i = hash_at
+
+
+def is_test_attribute(path: str) -> bool:
+    """Whether an attribute path names a test: a `test` segment, as in
+    `test`, `tokio::test`. `cfg` (of `#[cfg(test)]`) does not."""
+    return "test" in path.split("::")
+
+
+def check_test(body: str, sources: Sources) -> list[str]:
+    errors, groups = path_groups("test", body, sources)
+    for current, names in groups:
+        code = rust_code(sources.text(current) or "") if names else ""
+        for name in names:
+            if not RUST_IDENT.match(name) or name in RUST_KEYWORDS:
+                errors.append(f"test: {current}: {name!r} is not a fn name (put notes in parentheses)")
+                continue
+            decls = list(re.finditer(FN_DECL.format(name=re.escape(name)), code))
+            if not decls:
+                errors.append(f"test: {current} declares no fn {name}")
+            elif not any(is_test_attribute(p) for d in decls for p in attributes_above(code, d.start())):
+                errors.append(
+                    f"test: {current}: fn {name} is not a test: no #[test] or #[tokio::test] above it"
+                )
+    return errors
+
+
+CHECKS = {"lean": check_lean, "const": check_const, "code": check_code, "test": check_test}
 
 
 def check_page(root: Path, page: Path, sources: Sources) -> tuple[list[str], dict[str, int]]:
