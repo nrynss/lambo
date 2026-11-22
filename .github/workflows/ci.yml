@@ -104,16 +104,18 @@ jobs:
         # tests/rebuild_session.rs) keep running on the default path.
         run: cargo test --locked --all --features fixtures
 
-  # All four mirrored page pairs are classified independently of Rust inputs.
-  # They differ intentionally in imports, link prefixes and site-only sections;
-  # the script checks their canonical shared prose.
+  # The docs job. The mirrored page pairs differ intentionally in imports, link
+  # prefixes and site-only sections; the mirror script checks their canonical
+  # shared prose. The anchor and example checkers then check the pages' citations
+  # of the Lean models, so the classifier also starts this job for changes to
+  # formal/ and src/.
   docs-mirror:
     needs: changes
     if: needs.changes.outputs.mirror == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - name: Mirror drift check (cli + mcp prose pairs)
+      - name: Mirror drift check (mirrored page pairs)
         run: bash scripts/docs/check-mirror-drift.sh
       # Pages backed by the Lean models cite their backing in MDX comments
       # (lean:, const:, code:, oracle:). These fail when a cited theorem,
