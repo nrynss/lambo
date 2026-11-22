@@ -469,7 +469,15 @@ def is_test_attribute(path: str) -> bool:
 def check_test(body: str, sources: Sources) -> list[str]:
     errors, groups = path_groups("test", body, sources)
     for current, names in groups:
-        code = rust_code(sources.text(current) or "") if names else ""
+        # Unlike `code:`, a `test:` group must name at least one test in a
+        # file: a bare path (a file or a directory) cites no test at all.
+        if not names:
+            errors.append(f"test: {current}: names no test fn (a test: group is a file then fn names)")
+            continue
+        if not (sources.root / current).is_file():
+            errors.append(f"test: {current}: is not a file")
+            continue
+        code = rust_code(sources.text(current) or "")
         for name in names:
             if not RUST_IDENT.match(name) or name in RUST_KEYWORDS:
                 errors.append(f"test: {current}: {name!r} is not a fn name (put notes in parentheses)")

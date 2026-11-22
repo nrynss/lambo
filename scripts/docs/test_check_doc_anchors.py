@@ -277,6 +277,15 @@ class Test(Fixture):
                 self.assertEqual(len(errors), 1, errors)
                 self.assertIn(f"fn {name} is not a test", errors[0])
 
+    def test_a_group_that_names_no_test_fails(self):
+        # A file or a directory alone cites no test, so it must not count
+        # toward a REQUIRED page's test: kind.
+        for body in ["src/daemon/tests.rs", "src/daemon", "src/daemon/tests.rs (a note only)"]:
+            with self.subTest(body=body):
+                errors = self.errors(f"{{/* test: {body} */}}")
+                self.assertTrue(errors, body)
+                self.assertTrue(any("names no test fn" in e or "is not a file" in e for e in errors), errors)
+
     def test_a_missing_fn_fails(self):
         for name in ["no_such_test", "in_a_module_doc", "in_a_string", "commented_out", "a_plain"]:
             with self.subTest(name=name):
