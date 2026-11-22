@@ -71,8 +71,9 @@ two-pass serve. Those citations are gone: no anchor cites
 `outage_failed_but_owed` or `outage_failed_then_applied`; an in-session
 error answer (outage, lookup timeout, held write) is backed by tests, code
 or a `stepW`-layer theorem only; and the old layer's close theorems
-(`close_answer`, `owed_in_log`, `shutdown_no_silent_loss`) back a sentence
-only about close answers, and only beside a test. The rows below follow
+(`close_answer`, `owed_in_log`, `shutdown_no_silent_loss`) back only close
+and defer accounting (a sentence about close answers, or a paragraph-level
+block whose close sentence they back), and only beside a test. The rows below follow
 the anchors (T-42, S-93a, S-93b, S-119, S-134c, S-136d). The same review
 had eight more sentences corrected: Q-17 (a query sent over 16 KiB is
 refused before dispatch), Q-21 and its Repository-scoped paths twin (a
