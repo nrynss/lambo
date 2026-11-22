@@ -359,14 +359,17 @@ rust = [
 
 [[model]]
 lean = "formal/LamboProofs/Drain.lean"
-read_against = "514da8d7"
-read_digest = "v2:sha256:0468f4fe70bfefe0aea276491ed21e24df5b80c9f7d8274161c0ec034e030efa"
+read_against = "8ee90cd3"
+read_digest = "v2:sha256:7c94201e93caf10a4f7114c0cab7761d5be2ba894024f0cbbb4b5e9e4bc3d0d8"
 rust = [
   "src/writeq/execution.rs",
   "src/writeq/drain.rs",
   "src/writeq/replay.rs",
   "src/writeq/receipts.rs#settle_one",
+  "src/writeq/receipts.rs#hold_one",
   "src/writeq/admission.rs#Lanes",
+  "src/memory/shutdown.rs#Memory::close",
+  "src/memory/shutdown.rs#Memory::close_fenced",
   "src/graph/graph/mutation_log.rs#record_write_intent",
   "src/graph/graph/mutation_log.rs#consume_write_intent",
   "src/store/sqlite/session_load.rs",

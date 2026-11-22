@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+### Changes
+
+- Formal models: `formal/LamboProofs/Drain.lean` states the close, crash and
+  shutdown accounting over the current write-queue worker (#295's held
+  writes, retries and fence), not only over the worker before #295, under
+  which an in-session embedder outage answered `failed`. Over the current
+  worker, after a close every admitted write is exactly one of applied,
+  failed with its intent consumed, failed after a lost lease with its intent
+  left for the session's current holder, `intent_durable` and owed in the
+  flushed log, or `close_unflushed` (`shutdown_no_silent_lossW`); a held write
+  answers `pending_replay`, never `failed`, and the close answers it
+  `intent_durable` or `close_unflushed` (`held_at_closeW`, `outage_holdsW`);
+  one lookup timeout settles `failed` and consumes its intent while the one
+  ending a run of them is held (`lookupTimeout_settlesW`,
+  `lookupTimeout_run_holdsW`); and no write in a durable prefix of the log is
+  applied again by the current two-pass serve (`crash_never_reappliesW`,
+  through `runW_log_refines` and `serveR_applied_pending`). The older
+  theorems stay, each labelled as describing the worker before #295 and
+  naming its counterpart; `outage_failed_but_owed` and
+  `outage_failed_then_applied` say the current Rust does not behave that
+  way. The model found no Rust defect. `docs/reference/mcp.mdx` now cites
+  the new theorems for close and crash accounting.
+
 ## 0.15.0 (2026-11-22)
 
 ### Highlights
