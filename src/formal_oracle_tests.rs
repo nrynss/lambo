@@ -29,9 +29,13 @@ use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::Value;
 
+mod batch_queue;
 mod canonical;
+mod expand;
 mod fit;
 mod order;
+mod score;
+mod top_k;
 
 /// One model's vector file, as `OracleExport.Gen.Vectors.render` writes it.
 #[derive(Deserialize)]

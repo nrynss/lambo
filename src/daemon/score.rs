@@ -293,6 +293,16 @@ fn bonus_and_modifier(dims: ScoreDims) -> f64 {
         )
 }
 
+/// Test-only access to [`bonus_and_modifier`], for
+/// `crate::formal_oracle_tests` (#291), which replays
+/// `formal/oracle/Score.json` through it.
+#[cfg(test)]
+pub(crate) mod formal_oracle {
+    pub(crate) fn bonus_and_modifier(dims: super::ScoreDims) -> f64 {
+        super::bonus_and_modifier(dims)
+    }
+}
+
 /// Clamp a composite into `[0, 1 + MAX_BONUS]`; a non-finite composite is
 /// `0.0` (the composite is finite for every input, spec §5.7).
 fn finite_or_zero(x: f64) -> f64 {

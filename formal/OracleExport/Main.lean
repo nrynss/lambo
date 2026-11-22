@@ -8,16 +8,24 @@ through the real Rust and asserts the same outputs. See formal/README.md,
 "Differential oracle".
 -/
 import OracleExport.Gen
+import OracleExport.BatchQueue
 import OracleExport.Canonical
+import OracleExport.Expand
 import OracleExport.Fit
 import OracleExport.Order
+import OracleExport.Score
+import OracleExport.TopK
 
 open Lambo.Oracle
 
 def allVectors : List Vectors := [
   Order.vectors,
   Fit.vectors,
-  Canonical.vectors
+  Canonical.vectors,
+  TopK.vectors,
+  Expand.vectors,
+  BatchQueue.vectors,
+  Score.vectors
 ]
 
 def main (args : List String) : IO UInt32 := do

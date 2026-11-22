@@ -1126,12 +1126,38 @@ fn sane_weight(w: f64) -> f64 {
 #[cfg(test)]
 mod proptests;
 
-/// Test-only access to the private ranking, for
-/// `crate::formal_oracle_tests` (#291), which replays the Lean model's
-/// vectors (`formal/oracle/Order.json`) through it.
+/// Test-only access to the private ranking and emission, for
+/// `crate::formal_oracle_tests` (#291), which replays the Lean models'
+/// vectors (`formal/oracle/Order.json`, `formal/oracle/TopK.json`) through
+/// them.
 #[cfg(test)]
 pub(crate) mod formal_oracle {
-    use super::{Graph, NodeId, Scored};
+    use super::{Graph, HashMap, NodeId, Redundancy, Scored, Selection};
+
+    /// [`super::emitted`] with a selection built from `redundancy` and
+    /// `warns`: the emitted ids, and the skips flattened to
+    /// `(kept, skipped)` pairs in no particular order.
+    pub(crate) fn emitted(
+        graph: &Graph,
+        ranked: &[Scored<NodeId>],
+        forced: impl Fn(NodeId) -> bool,
+        top_k: usize,
+        selection: Option<(&Redundancy, &mut dyn FnMut(NodeId) -> bool)>,
+    ) -> (Vec<NodeId>, Vec<(NodeId, NodeId)>) {
+        let mut sel = selection.map(|(redundancy, warns)| Selection {
+            redundancy,
+            warns,
+            verdicts: HashMap::new(),
+        });
+        let e = super::emitted(graph, ranked, forced, top_k, sel.as_mut());
+        let hits = e.hits.iter().map(|s| s.item).collect();
+        let skips = e
+            .skipped
+            .iter()
+            .flat_map(|(&kept, list)| list.iter().map(move |s| (kept, s.node_id)))
+            .collect();
+        (hits, skips)
+    }
 
     pub(crate) fn rank_cmp(
         graph: &Graph,
