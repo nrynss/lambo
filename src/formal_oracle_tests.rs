@@ -30,6 +30,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 mod batch_queue;
+mod canon;
 mod canonical;
 mod expand;
 mod fit;

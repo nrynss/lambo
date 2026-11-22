@@ -9,6 +9,7 @@ through the real Rust and asserts the same outputs. See formal/README.md,
 -/
 import OracleExport.Gen
 import OracleExport.BatchQueue
+import OracleExport.Canon
 import OracleExport.Canonical
 import OracleExport.Expand
 import OracleExport.Fit
@@ -27,7 +28,8 @@ def allVectors : List Vectors := [
   Expand.vectors,
   BatchQueue.vectors,
   Score.vectors,
-  Fusion.vectors
+  Fusion.vectors,
+  Canon.vectors
 ]
 
 def main (args : List String) : IO UInt32 := do

@@ -68,6 +68,15 @@ pub use stage2::{stage2_evidence_passes, stage2_passes, stage2_passes_with_windo
 pub use stage3::{last_demotion_time, stage3_passes};
 pub use task::CanonizationTask;
 
+/// Test-only access to two private stage predicates, for
+/// `crate::formal_oracle_tests` (#291), which replays
+/// `formal/oracle/Canon.json` through them.
+#[cfg(test)]
+pub(crate) mod formal_oracle {
+    pub(crate) use super::stage1::stage1_evidence_passes;
+    pub(crate) use super::stage3::in_repromotion_cooldown;
+}
+
 /// Test-only aliases of the stage thresholds and the Solo score's weights and
 /// bars, for `crate::formal_constants_tests` (#291):
 /// `formal/LamboProofs/Canon.lean` and `Policy.lean` hard-code them, and
