@@ -44,6 +44,19 @@ The rules:
 * A page in REQUIRED must carry at least one anchor of each kind it lists,
   so a page cannot lose its anchors and still pass.
 
+Known limits (the check is textual, not a Rust parser):
+
+* In `A::b`, `A` and `b` are found separately, so `b` may be declared on
+  another type in the same file: `CanonizationStatus::Dependency` passes
+  because `Dependency` is an `EdgeType` variant, and a free function cited as
+  a method passes.
+* The field and variant rules match a name opening a line, so a struct
+  literal's initialiser (`last_demotion_time: Some(..)`) or a line opening
+  with `Ok(` or `Some(` passes as a declaration.
+* A variant or field that does not open its line (a one-line `enum P { A, B
+  }`, or an attribute on the same line) is not found. rustfmt puts each on
+  its own line, so this only matters for unformatted code.
+
 Exit codes: 0 when every anchor resolves; 1 when one does not; 2 on a usage
 error; 3 when an input cannot be read (a page or source file that is not
 UTF-8).

@@ -58,6 +58,11 @@ Exit codes:
 
 Every error is reported with the page, line, file, case and column.
 
+Known limits: a table needs an anchor only when its header equals a COLUMNS
+entry exactly. So a table whose anchor is deleted and whose header is also
+reworded, or a worked example for a function with no COLUMNS entry, is not
+checked. Add a COLUMNS entry before a page shows a new function.
+
 Standard library only. Run its tests with:
 
   python3 -I scripts/docs/test_check_doc_examples.py

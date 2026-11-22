@@ -47,7 +47,7 @@ Evidence counts only once its about-time is at least `canonization_edge_min_age`
     state "Venerable" as V
     state "Canonical" as K
     N --> C: Stage 1
-    C --> V: Stage 2 or root goal
+    C --> V: Stage 2, or root goal (library only)
     V --> K: Stage 3
     K --> N: demotion
     N --> V: root goal (library only)`}
@@ -69,7 +69,7 @@ That has three consequences an agent can rely on:
 
 * **Canonical is entered only from Venerable.** {/* lean: Canon.canonical_only_from_venerable */}
 * **There is one way down.** The only transition that lowers a status is `Canonical` to `None`. There is no step back to Venerable or Candidate, so a demoted concept climbs from `None` again, at most one stage per cycle. The one shortcut is the library's `set_root_goal`, which lifts a `None` or Candidate concept that the root goal names straight to Venerable. {/* lean: Canon.legal_demotion_unique, Canon.legal_to_none */} {/* code: src/graph/graph/root_goal.rs set_root_goal */}
-* **One hop per cycle.** A cycle leaves a concept where it is or moves it along one edge, so `None` needs at least three cycles to reach Canonical. A concept a cycle demotes is not promoted again in that cycle. {/* lean: Canon.cycle_one_hop, Canon.cycle_rank_le, Canon.cycle_never_skips, Canon.cycle_superseded_stays_none, Policy.policy_cycle_one_hop */}
+* **One hop per cycle.** A cycle leaves a concept where it is or moves it along one edge, so through cycles alone `None` needs at least three to reach Canonical. A concept a cycle demotes is not promoted again in that cycle. {/* lean: Canon.cycle_one_hop, Canon.cycle_rank_le, Canon.cycle_never_skips, Canon.cycle_superseded_stays_none, Policy.policy_cycle_one_hop */}
 
 The write gate's answers to seven events, as the Lean model computed them and the Rust replay confirms:
 
@@ -287,7 +287,7 @@ The cadence settings change how often the bars are checked, not where they sit. 
 What follows from those limits:
 
 * **A new citation counts after a minute.** It joins the evidence once its about-time is 60 seconds old (a citation with an older `event_time` counts at once), and the next cycle after that, at most one interval later, reads it. {/* code: src/config.rs Config::default, src/canon/stage1.rs dependent_origin */}
-* **The fastest climb takes three cycles,** one per stage. {/* lean: Canon.cycle_rank_le, Policy.solo_three_cycles */}
+* **The fastest climb takes three cycles,** one per stage, without `set_root_goal`. {/* lean: Canon.cycle_rank_le, Policy.solo_three_cycles */}
 * **Swarm waits for sweeps.** A sweep runs when the session has taken `gc_interval` mutations since the last one, or when `gc_max_interval` has passed and it has taken at least `gc_idle_floor` mutations. A session with fewer than `gc_idle_floor` mutations since its last sweep never sweeps on time alone, so GC survival measures survival under write pressure, not age. {/* lean: Gc.sweepDue, Gc.mutations_always_sweep, Gc.time_trigger_needs_both, Gc.idle_never_sweeps */} The exception is a session that has never swept: it counts every mutation since it began, so one with at least `gc_idle_floor` of them sweeps once on time even if no write has arrived since. See [Daemon cadence](/lambo/config/#daemon-cadence). {/* code: src/daemon/gc.rs sweep_due */}
 * **Promotion protects.** A Venerable or Canonical concept is never collected by GC. A Candidate has no such protection. {/* lean: Gc.venerable_canonical_never_collected, Gc.candidate_not_protected */}
 * **Eligible is not immediate.** A concept that passes every gate is promoted when a cycle's batch reaches it; a busy stage can take several cycles to go round. {/* code: src/canon/eval.rs gather ring_window */}
