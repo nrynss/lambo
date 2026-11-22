@@ -31,12 +31,15 @@
 //! **Refresh.** Every listing comes from a store read that began after its
 //! request arrived, so a session erased before a request arrives is never
 //! among that request's discovered sessions (a startup session is listed
-//! with the served ones, erased or not). The store sees one read at a time.
-//! A request that arrives while a read is running does not take that read's
-//! outcome (the read may already have looked at the store, before an erase
-//! the request came after); it waits, and shares the next read, which began
-//! after it arrived (single-flight). So the requests that arrive during one
-//! read cost one more read between them, however many they are.
+//! with the served ones, erased or not). The portal issues one read at a
+//! time (a read it gave up on, past [`DISCOVERY_TIMEOUT`] or with its
+//! request dropped, may still be running in the backend). A request that
+//! arrives while a read is running does not take that read's outcome (the
+//! read may already have looked at the store, before an erase the request
+//! came after); it waits, and shares the next read, which began after it
+//! arrived (single-flight). So each such request costs at most one more
+//! read, and the requests that arrive during one read share the next one
+//! unless it is abandoned.
 //! (`formal/LamboProofs/Discovery.lean`: `fixed_fresh`,
 //! `fixed_no_erased_listed`, `one_read_at_a_time`.)
 //!

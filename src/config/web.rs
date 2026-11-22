@@ -97,8 +97,9 @@
 //! does), which then names the discovered sessions after the served ones; on
 //! any other bind the listing still needs `list_sessions = true`. Each
 //! listing comes from a store read that began after the request arrived
-//! (one read at a time; requests that arrive during a read share the next
-//! one), so a discovered session erased before the request is not listed.
+//! (the portal issues one read at a time; requests that arrive during a
+//! read share the next one), so a discovered session erased before the
+//! request is not listed.
 
 use std::time::Duration;
 

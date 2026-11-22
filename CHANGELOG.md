@@ -592,8 +592,9 @@
   which lists the store's sessions (from `GraphStore::store_health`) after the
   served ones; beyond loopback the listing still needs `list_sessions`. Every
   listing comes from a store read that began after the request arrived, so a
-  discovered session erased before the request is never listed; the store
-  sees one read at a time, and requests that arrive during a read share the
+  discovered session erased before the request is never listed. The portal
+  issues one read at a time (a read it gave up on after a timeout may still
+  be running in the store), and requests that arrive during a read share the
   next one rather than reuse it (`formal/LamboProofs/Discovery.lean`).
 - Durable display names now surface through layered recall, `lambo_inspect`,
   and MCP tool schemas (#285). Layered recall preserves `LayeredHit::names`
