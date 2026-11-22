@@ -30,8 +30,12 @@ would break a load-bearing resource is caught before it happens.
 - Writers (`derive`, `record-action`, `reserve`) hold the session's
   single-writer lease. Sequence your writes; do not run two CLI writers
   against one session. Readers are read-only and may run freely.
-  A second `lambo serve` on a held session is fine over stdio — it forwards to
-  the holder, so the session keeps exactly one writer while every client works.
+  A second stdio `lambo serve` on the same machine forwards to the holder when
+  the holder is a `serve` there, so the session keeps one writer. If it cannot
+  forward (a CLI writer, a holder on another host, one that does not answer,
+  or no local socket), it waits only if the lease lapses within about 15 s,
+  and otherwise refuses. Over HTTP, see the MCP reference, "More than one
+  client on one machine".
 - Never send a timestamp. The server stamps interactions and edges; a
   client-supplied timestamp would corrupt the age gates that canonization
   depends on.

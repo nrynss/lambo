@@ -2484,7 +2484,9 @@ pub enum LamboError {
     /// nothing applied between is held like an outage, its retry settling it
     /// `failed` if the lookup times out again. The replay at the next serve
     /// settles a lookup timeout `failed` rather than retry it again
-    /// (`Self::is_lookup_timeout`).
+    /// (`Self::is_lookup_timeout`), unless it is the third in a row with
+    /// nothing applied between: then the replay stops and leaves that intent
+    /// and the rest owed, with replay-blocked reason `other`.
     ///
     /// `Display` is deliberately identical to [`LamboError::Embed`]'s: to an
     /// operator and to the ledger this is the same *class* of failure

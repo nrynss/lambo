@@ -1,10 +1,11 @@
 # Issue drafts from the `mcp.mdx` claims audit
 
-Drafts only; none is filed. Draft 3 was fixed on the branch instead. Line
+Draft 1 is filed as #338. Draft 2 was posted as a comment on #332, the rmcp
+bump. Draft 3 was fixed on the branch instead. Line
 numbers in `docs/reference/mcp.mdx` are at commit `8cede2ae`. See
 [`mcp.md`](mcp.md) for the full audit.
 
-## 1. An `agent_id` with a control character gets the generic refusal, which says tab and newline are allowed
+## 1. An `agent_id` with a control character gets the generic refusal, which says tab and newline are allowed (filed: #338)
 
 **Kind:** code bug, or intent unclear (see below).
 
@@ -46,7 +47,7 @@ assert the message for `\r`, NUL and `U+2028`. If the generic message is
 intended, change the Errors row instead to "the offending codepoint, with the
 generic or the one-line message".
 
-## 2. A wrongly typed argument's error names no field and can quote the value back
+## 2. A wrongly typed argument's error names no field and can quote the value back (posted on #332)
 
 **Fold into #332** (the rmcp bump) rather than filing on its own.
 

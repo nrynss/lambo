@@ -43,8 +43,9 @@ A backing cell names a test or a theorem as `name` in `file`, and code as
 The rows were extracted and checked by five agents, one per range of the page.
 That first pass checked a sample of the CONTRADICTED rows and of the cited
 theorem statements again by hand before the page was changed, but did not
-record how many. An independent review then re-checked the contradictions and
-the PROVEN rows. Its findings were worked through by hand on 2026-11-22: 61 rows
+record how many. An independent review then re-read 50 of the 53
+contradictions and sampled 41 PROVEN, 22 CODE-ONLY and 24 TESTED rows; the
+other rows rest on the first pass alone. Its findings were worked through by hand on 2026-11-22: 61 rows
 were checked again against the code, the tests or the theorem statement (every
 row the review named, and every CODE-ONLY row that cited a comment or said its
 check was unfinished), and 18 of them changed class. Each of those rows now
@@ -57,15 +58,15 @@ cites code, a test or a theorem, so no row is COMMENT-ONLY.
 | Class | Rows |
 |---|---|
 | PROVEN | 120 |
-| TESTED | 310 |
-| CODE-ONLY | 217 |
+| TESTED | 309 |
+| CODE-ONLY | 218 |
 | COMMENT-ONLY | 0 |
 | CONTRADICTED | 53 |
 | NOT CHECKABLE | 24 |
 
 | Range (lines at `8cede2ae`) | Rows | PROVEN | TESTED | CODE-ONLY | CONTRADICTED | NOT CHECKABLE |
 |---|---|---|---|---|---|---|
-| 1-147: transports, forwarding, what every tool expects, errors (T) | 91 | 5 | 48 | 21 | 13 | 4 |
+| 1-147: transports, forwarding, what every tool expects, errors (T) | 91 | 5 | 47 | 22 | 13 | 4 |
 | 149-218: recall legs, arguments, confidence, truncation (R) | 72 | 27 | 17 | 16 | 6 | 6 |
 | 219-360: recall warnings, duplicates, supersession, layers (Q) | 172 | 42 | 65 | 55 | 6 | 4 |
 | 361-590: derive, derive_image, record_action (D) | 185 | 21 | 107 | 40 | 11 | 6 |
@@ -354,7 +355,7 @@ already in order.
 | T-55 | 113 | How agent_id is used | "your work is recorded in the graph under exactly that id, and your soft locks are held under it" | TESTED | `a_foreign_agent_ids_write_is_recorded_under_the_callers_id` in `src/mcp/server/tests/errors.rs`; `two_clients_over_stdio_both_work_through_one_hub` in `tests/serve_proxy_multi_client.rs` (untrimmed `"agent-b "`) |  |
 | T-56 | 113 | How agent_id is used | "The process's own `--agent` is what it holds the session lease and writes its heartbeats under; it is not applied to your calls." | TESTED | `two_clients_over_stdio_both_work_through_one_hub` in `tests/serve_proxy_multi_client.rs` (holder starts `agent-a@`); `src/mcp/server/params.rs:caller_agent` | Lease identity is `agent@host#pid`. |
 | T-57 | 115 | How agent_id is used | "over HTTP one bearer token authenticates the server rather than each agent" | CODE-ONLY | `src/mcp/server/params.rs:caller_agent` (takes the id as sent, with no check against the credential); `src/mcp/serve/authority.rs` (a grant names no agent) | The page now says a bearer token authenticates a client, not an agent; the stale `check_agent_id` doc comment is fixed on this branch. |
-| T-58 | 118 | How agent_id is used | "`agent_id` refuses newlines, tabs, any other control character, the Unicode line and paragraph separators `U+2028`/`U+2029`, and length over 256" | TESTED | `every_tool_refuses_an_unusable_agent_id` in `src/mcp/server/tests/errors.rs` (boundary of 256 accepted) | Not run on `lambo_stale` or `lambo_derive_image`. Characters are Unicode scalar values. An empty or blank id is refused too. Could pin: add the two tools to that test. |
+| T-58 | 118 | How agent_id is used | "`agent_id` refuses newlines, tabs, any other control character, the Unicode line and paragraph separators `U+2028`/`U+2029`, and length over 256" | TESTED | `every_tool_refuses_an_unusable_agent_id` in `src/mcp/server/tests/errors.rs` (boundary of 256 accepted) | Both `lambo_stale` (`stale_impl`) and `lambo_derive_image` (`caller_agent`) run the check too; the test does not cover those two tools. Characters are Unicode scalar values. An empty or blank id is refused too. Could pin: add the two tools to that test. |
 | T-59a | 119 | How agent_id is used | "one agent reserving a node another holds gets a conflict" | PROVEN | `reserve_denied`, `active_excludes_others` in `Reserve.lean` | Agent equality is exact id equality; time is an integer. |
 | T-59b | 119 | How agent_id is used | "a conflict that names the holder and the expiry, so it can wait or work elsewhere" | TESTED | `two_clients_over_stdio_both_work_through_one_hub` in `tests/serve_proxy_multi_client.rs` (asserts `"agent-b until"`); message in `src/graph/reserve.rs:120` |  |
 | T-60 | 120 | How agent_id is used | "Two callers sending the **same** id share one lock and can release each other's." | PROVEN | `reserve_same_agent`, `release_owner_only` in `Reserve.lean` | Identity is the untrimmed id string (`caller_agent`); the model's agent type stands for it. |
@@ -372,7 +373,7 @@ already in order.
 | T-65 | 130 | Errors | "The bound, such as `top_k must be in 1..=100`." | TESTED | test in `src/surface/validate.rs` (asserts `"top_k must be in 1..=100"`); `bad_parameters_are_refused_as_readable_tool_errors` in `src/mcp/server/tests/errors.rs` |  |
 | T-66 | 131 | Errors | "The field, the cap, and the size given." | TESTED | `oversized_string_is_refused` in `src/surface/validate.rs`; `oversized_client_strings_are_refused_by_every_tool` in `src/mcp/server/tests/errors.rs` | Tests assert "exceeds" and the cap, not the size. Could pin: assert "(N given)". |
 | T-67 | 132 | Errors | "The field, the offending codepoint, and which class of character was refused." | TESTED | `invisible_format_characters_are_refused_by_codepoint`, `control_char_is_refused_by_codepoint` in `src/surface/validate.rs` |  |
-| T-68 | 133 | Errors | "The candidate list with node ids, so you can name one exactly." | TESTED | `inspect_refuses_an_ambiguous_focus_and_names_the_candidates` in `src/mcp/server/tests/inspect.rs`; `src/surface/focus.rs:ambiguous_refusal` | The test asserts each candidate's content; the node ids in the list are code (`ambiguous_refusal`). |
+| T-68 | 133 | Errors | "The candidate list with node ids, so you can name one exactly." | CODE-ONLY | `src/surface/focus.rs:ambiguous_refusal` (adds the node ids); the test `inspect_refuses_an_ambiguous_focus_and_names_the_candidates` in `src/mcp/server/tests/inspect.rs` checks only the candidates' content | The test asserts each candidate's content; the node ids in the list are code (`ambiguous_refusal`). |
 | T-69 | 134 | Errors | "That the id must be one line with no tabs, control or line-separator characters, and the codepoint found." | CONTRADICTED | `src/mcp/server/params.rs:check_agent_id` (`check_size` runs before `breaks_one_line`) | For `\r`, NUL, other C0/C1 controls and invisibles the generic message says tab and newline are allowed, which is false for `agent_id`. |
 | T-70 | 135 | Errors | "The cap and the length given." | TESTED | `every_tool_refuses_an_unusable_agent_id` in `src/mcp/server/tests/errors.rs` | Test only asserts "agent_id" appears. Over 16,384 bytes the byte-cap message shows instead. Could pin: assert "at most 256 characters (got N)". |
 | T-71 | 136 | Errors | "Who holds the node and until when, and that nothing was reserved or released." | CONTRADICTED | `src/graph/reserve.rs:154` (release refusal text) | A release refusal names the holder but no expiry. |
