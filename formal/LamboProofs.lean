@@ -25,4 +25,5 @@ import LamboProofs.BatchQueue
 import LamboProofs.Registry
 import LamboProofs.Resolve
 import LamboProofs.Tiered
+import LamboProofs.Discovery
 import LamboProofs.Audit

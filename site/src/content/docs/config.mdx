@@ -645,6 +645,7 @@ max_loaded_sessions = 4
 load_concurrency = 2
 recall_concurrency = 4
 list_sessions = false
+discover_sessions = false
 inherit_serve_credentials = false
 ```
 
@@ -657,9 +658,25 @@ inherit_serve_credentials = false
 | `load_concurrency` | `2` | Session loads that may run at once. 1 to 1024. Always `1` on SQLite. |
 | `recall_concurrency` | `4` | Recalls that may run at once. A recall that waits 2 seconds for a slot gets `503` with `Retry-After: 1`. 1 to 1024. |
 | `list_sessions` | `false` | Answer `GET /api/sessions` with the served sessions the presenting credential may list. Off, the route does not exist. With no credential configured it names every served session to anyone who reaches the port, and startup warns about it. The page's session picker offers these names, plus "Other session…" for a name typed in; without the listing it asks for a name instead. |
+| `discover_sessions` | `false` | Also serve every live session in the store, including sessions created after startup, without editing `sessions` or restarting. Reaches only callers whose scope already covers every served session: no credential on loopback, `LAMBO_AUTH_TOKEN` / `--auth-token`, and a `[[web.credential]]` with `"*"`. Exact names, `session_prefix` and inherited credentials read what they read without it. Erased sessions and names outside `[A-Za-z0-9._:-]` are never served or listed. On a loopback bind it also turns on `GET /api/sessions`. `--discover-sessions` turns it on from the command line. See [Session discovery](#session-discovery). |
 | `inherit_serve_credentials` | `false` | Also accept every `[[serve.credential]]` as a read credential with the same scope as on `lambo serve`, so its `"*"` is serve's, not every served session (see below). Its `create`, `erase` and `admin` are dropped: the window only reads. With no `[[serve.credential]]` nothing is imported, and startup says so; with no other credential either, the window stays unauthenticated on loopback. |
 
 An unknown key, an out-of-range value, an empty or repeated session name and a malformed host are refused when the file is read, so they stop every command, like any other invalid key. A numeric refusal names the key and its bound, never the value. At startup `lambo serve-web` prints the sessions and bounds it runs with. It checks the store's schema at startup and loads each session on the first request that needs it. See [Watch a session in a browser](/lambo/cli/#watch-a-session-in-a-browser).
+
+### Session discovery
+
+`discover_sessions = true` (or `lambo serve-web --discover-sessions`) is for a local store that holds several sessions, such as one SQLite file shared by several projects: a session an agent creates shows up in the window without editing `lambo.toml` or restarting `lambo serve-web`. It is off by default, and then the window serves exactly its `sessions` list, as before.
+
+```toml
+[web]
+sessions = ["lambo"]      # still required: the default, served at /
+discover_sessions = true
+```
+
+- **Who it reaches.** Only a caller that may already read every served session: the unauthenticated loopback window, `LAMBO_AUTH_TOKEN` / `--auth-token`, and a `[[web.credential]]` whose `sessions` include `"*"`. A credential with exact names or a `session_prefix`, and every `[[serve.credential]]` imported by `inherit_serve_credentials` (whose `"*"` is serve's sessions), reads exactly what it reads without discovery. Startup prints which credentials discovery reaches.
+- **What it serves.** Every session in the store that is not erased and whose name is 1 to 128 bytes of `[A-Za-z0-9._:-]`, not starting with `.`. A session with any other name is skipped: never served, never listed, and startup does not fail. A discovered session that is erased, and a name the store does not hold, get the same empty `404` as any unknown path. A startup session (`sessions` or `--session`) is served whether or not discovery is on, so once erased it is an empty page, as without discovery; remove it from `sessions`.
+- **How it reads.** A discovered session is read at `/s/<session>/` only. Each request first checks that the session exists and is not erased, then loads it on demand within `max_loaded_sessions`, like a `session_prefix` session. Nothing is loaded at startup.
+- **The listing.** On a loopback bind, discovery also turns on `GET /api/sessions`, which lists the discovered sessions after the served ones, so the page's session picker offers them; reload the page to see a session created since it opened. On any other bind the listing still needs `list_sessions = true`, and startup warns that every caller discovery reaches can read every live session. Every listing comes from a store read that began after the request arrived, so a discovered session erased before the request is not listed (a startup session is always listed with the served ones). The portal issues one read at a time (a read it gave up on after a timeout may still be running in the store): requests that arrive while a read is running wait for it and share the next read, rather than take an answer the store may have given before an erase.
 
 ### Portal credentials
 
