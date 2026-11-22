@@ -80,6 +80,29 @@ class CountTheorems(unittest.TestCase):
             self.assertEqual([p.name for p in ct.model_files(d)], ["A.lean"])
             self.assertEqual(ct.main(["--repo", d]), 0)
 
+    def test_char_literal_quote_opens_no_string(self):
+        src = (
+            "def q : Char := '\"'\n"
+            "theorem a : True := trivial\n"
+            "theorem b' : True := trivial\n"
+            "def h' := 1\n"
+            "theorem c : True := trivial\n"
+        )
+        self.assertEqual(ct.count(src), 3)
+
+    def test_check_readme(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d) / "formal" / "LamboProofs"
+            root.mkdir(parents=True)
+            (root / "A.lean").write_text("theorem a : True := trivial\n", encoding="utf-8")
+            readme = Path(d) / "formal" / "README.md"
+            readme.write_text("It has 1 theorems across\n1 model files.\n", encoding="utf-8")
+            self.assertEqual(ct.main(["--repo", d, "--check-readme"]), 0)
+            readme.write_text("It has 2 theorems across 1 model files.\n", encoding="utf-8")
+            self.assertEqual(ct.main(["--repo", d, "--check-readme"]), 1)
+            readme.write_text("No count here.\n", encoding="utf-8")
+            self.assertEqual(ct.main(["--repo", d, "--check-readme"]), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

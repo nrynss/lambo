@@ -4073,7 +4073,8 @@ theorem owed_in_log (all done : List Job) (fence : Job → Bool) (out : Job → 
     exact hno d hd t hmd
 
 /-- **Shutdown drains or persists every admitted write.** After `close()`,
-each admitted write is exactly one of: finished by the drain, with the
+each admitted write is one of (for the current worker, exclusivity is proved
+by `shutdown_exactly_oneW`): finished by the drain, with the
 worker's answer; deferred with the flush landed, answered `intent_durable`
 and owed by the next serve's replay (an unconsumed row in the flushed log);
 or deferred with the flush incomplete, answered `close_unflushed`, which says
