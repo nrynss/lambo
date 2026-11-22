@@ -10,7 +10,7 @@ Canonization is how Lambo decides which memories are load-bearing. No agent can 
 This page has two readers. If you write agents, read [The ladder](#the-ladder), [The gates](#the-gates) and [What agents see](#what-agents-see). If you run Lambo, read on through [Swarm and Solo](#swarm-and-solo), [Supersession](#supersession), [Timing](#timing) and [Operator tools](#operator-tools).
 
 <Note>
-Every rule on this page is checked against the Lean 4 models in [`formal/`](https://github.com/nrynss/lambo/tree/main/formal). The promotion thresholds are the models' constants, which a Rust test pins equal to the shipped code; the timing defaults are read from the code. The worked examples are cases the Lean definitions evaluated, and a Rust test replays each one against the shipped code. A model starts from a gate's measurements; how a store counts blast radius or coverage is outside it.
+Where the Lean 4 models in [`formal/`](https://github.com/nrynss/lambo/tree/main/formal) cover a rule on this page, the rule is checked against them; the rest are read from the code. The promotion thresholds are the models' constants, which a Rust test pins equal to the shipped code. The worked examples are cases the Lean definitions evaluated, and a Rust test replays each one against the shipped code. The models take a gate's measurements as inputs; how a store computes blast radius or coverage is not modelled.
 </Note>
 
 ## Terms
@@ -21,16 +21,19 @@ These terms have one meaning on this page.
 |---|---|
 | **Status** | One of `None`, `Candidate`, `Venerable`, `Canonical`, in rising rank. Every concept starts at `None`. |
 | **Cycle** | One run of the canonization evaluator. The daemon runs one per `canonization_eval_interval`. |
+| **Interaction** | One recorded turn of agent work, such as one `lambo_derive` or `lambo_record_action` call. |
+| **Origin interaction** | The interaction a concept was written in. |
 | **Dependent** | A concept that declares a dependence on another: it names it in `depends_on` (a `Dependency` edge), or it is the other's `parent_of` child (a `Hierarchical` edge). No other edge type declares a dependence. |
 | **Blast radius** | The number of a concept's dependents. |
 | **Dependent interactions** | The distinct interactions a concept's dependents are credited to, not counting the concept's own origin interaction. |
 | **About-time** | The instant a fact is about: its interaction's `event_time` if it has one, otherwise when it was written. |
 | **GC survival** | How many garbage-collection sweeps the concept has outlived (`gc_survived`). |
+| **Write gate** | The check every status change passes before it is written. |
 
-{/* lean: Canon.Status, Canon.Status.rank, Dispatch.dependence_types, Policy.Edge.dependence, Policy.dependentOrigins, Policy.Interaction.aboutTime, Gc.bump */}
-{/* code: src/canon/stage3.rs stage3_passes (blast radius counts every dependent) */}
+{/* lean: Canon.Status, Canon.Status.rank, Canon.gate, Dispatch.dependence_types, Policy.Edge.dependence, Policy.dependentOrigins, Policy.Interaction.aboutTime, Gc.bump */}
+{/* code: src/types/mod.rs Interaction origin_interaction about_time; src/canon/stage3.rs stage3_passes (blast radius counts every dependent); src/graph/graph/transitions.rs apply_canonization_transition */}
 
-Evidence counts only once it is at least `canonization_edge_min_age` old, 60 seconds by default. That applies to each dependence edge and to each interaction it is credited to, at every stage. {/* code: src/canon/stage1.rs dependent_origin, src/canon/stage2.rs, src/canon/stage3.rs; src/config.rs Config::default */}
+Evidence counts only once its about-time is at least `canonization_edge_min_age` before the cycle's clock, 60 seconds by default. That applies to each dependence edge and to each interaction it is credited to, at every stage, so a citation with an older `event_time` counts at once. {/* code: src/canon/stage1.rs dependent_origin, src/store/memory.rs aged_dependents, src/canon/stage2.rs, src/canon/stage3.rs; src/config.rs Config::default */}
 
 ## The ladder
 
@@ -64,7 +67,7 @@ No other transition exists. The write gate refuses every other pair, and refuses
 That has three consequences an agent can rely on:
 
 * **Canonical is entered only from Venerable.** {/* lean: Canon.canonical_only_from_venerable */}
-* **There is one way down.** The only transition that lowers a status is `Canonical` to `None`. There is no step back to Venerable or Candidate, so a demoted concept earns every stage again. {/* lean: Canon.legal_demotion_unique, Canon.legal_to_none */}
+* **There is one way down.** The only transition that lowers a status is `Canonical` to `None`. There is no step back to Venerable or Candidate, so a demoted concept earns every stage again through the evaluator. {/* lean: Canon.legal_demotion_unique, Canon.legal_to_none */}
 * **One hop per cycle.** A cycle leaves a concept where it is or moves it along one edge, so `None` needs at least three cycles to reach Canonical. A concept a cycle demotes is not promoted again in that cycle. {/* lean: Canon.cycle_one_hop, Canon.cycle_rank_le, Canon.cycle_never_skips, Canon.cycle_superseded_stays_none, Policy.policy_cycle_one_hop */}
 
 The write gate's answers to seven events, as the Lean model computed them and the Rust replay confirms:
@@ -85,21 +88,21 @@ The last row is a forged event: it claims a starting status the concept does not
 
 ### Demotion and the cooldown
 
-A Canonical concept is demoted to `None` in two ways. The **budget demotion** runs at the end of every cycle: while the session holds more than `max_canonical_nodes` Canonical concepts (1000 by default), it demotes the ones with the smallest blast radius first. **Supersession**, off by default, demotes a Canonical concept that a newer, better-supported concept contradicts; see [Supersession](#supersession). {/* code: src/canon/eval.rs module doc (pass 4), src/config.rs Config::default */} {/* lean: Supersession.applySup_legal, Supersession.off_no_demotion */}
+A Canonical concept is demoted to `None` in two ways. The **budget demotion** runs at the end of every cycle: while the session holds more than `max_canonical_nodes` Canonical concepts (1000 by default), it demotes the ones with the smallest blast radius first. **Supersession**, off by default, demotes a Canonical concept that a newer, better-supported concept contradicts; see [Supersession](#supersession). {/* code: src/canon/eval.rs (module doc, pass 4), src/config.rs Config::default */} {/* lean: Supersession.applySup_legal, Supersession.off_no_demotion */}
 
 Stage 3 never creates the overflow the budget pass then removes: it promotes at most the remaining budget, and a full budget promotes nobody. {/* lean: Canon.stage3_no_overflow, Canon.stage3_full_budget */}
 
-After a demotion the concept is in its **re-promotion cooldown** for `canonization_repromotion_cooldown`, 300 seconds by default. {/* code: src/config.rs Config::default */} The cooldown blocks only Stage 3: the concept can return to Candidate and Venerable while it runs, but not to Canonical, whatever its blast radius. It ends exactly at the demotion time plus the cooldown. A concept never demoted is never cooling. {/* lean: Canon.stage1Passes, Canon.stage2Passes, Canon.stage3Passes, Canon.stage3_blocked_by_cooldown, Canon.cooldown_ends, Canon.no_demotion_no_cooldown */}
+After a demotion the concept is in its **re-promotion cooldown** for `canonization_repromotion_cooldown`, 300 seconds by default. {/* code: src/config.rs Config::default */} Among promotions, the cooldown blocks only Stage 3: the concept can return to Candidate and Venerable while it runs, but not to Canonical, whatever its blast radius. A concept in its cooldown also cannot supersede another. {/* lean: Canon.stage1Passes, Canon.stage2Passes, Canon.stage3Passes, Canon.stage3_blocked_by_cooldown, Supersession.usable */} The cooldown ends exactly at the demotion time plus the cooldown, and a concept with no demotion time is never cooling. {/* lean: Canon.cooldown_ends, Canon.no_demotion_no_cooldown */} The library's context-overflow call, `Memory::demote`, gives each Observation it creates a demotion time, so those concepts start inside the cooldown. {/* code: src/graph/demote.rs demote last_demotion_time, src/memory/writes.rs demote */}
 
 ## The gates
 
 Under the default `Swarm` policy each hop is decided by one gate. Every bar is inclusive except Stage 3's, which is strict.
 
-| Stage | Hop | Passes when | Pinned constants |
-|---|---|---|---|
-| 1 | None to Candidate | GC survival ≥ 3 **and** dependent interactions ≥ 2 | `MIN_GC_SURVIVED`, `MIN_DEPENDENT_INTERACTIONS` |
-| 2 | Candidate to Venerable | dependent interactions ≥ 3 **and** coverage ≥ 0.3 | `MIN_DISTINCT`, `MIN_COVERAGE` |
-| 3 | Venerable to Canonical | Stage 2 still passes, **and** not in the cooldown, **and** blast radius > 5 | `MIN_BLAST_RADIUS` |
+| Stage | Hop | Passes when |
+|---|---|---|
+| 1 | None to Candidate | GC survival ≥ 3 **and** dependent interactions ≥ 2 |
+| 2 | Candidate to Venerable | dependent interactions ≥ 3 **and** coverage ≥ 0.3 |
+| 3 | Venerable to Canonical | Stage 2 still passes, **and** not in the cooldown, **and** blast radius > 5 |
 
 {/* const: MIN_GC_SURVIVED, MIN_DEPENDENT_INTERACTIONS, MIN_DISTINCT, MIN_COVERAGE, MIN_BLAST_RADIUS */}
 {/* lean: Canon.stage1Passes, Canon.stage2Passes, Canon.stage3Passes, Canon.stage1_boundary, Canon.stage2_boundary, Canon.stage3_boundary */}
@@ -107,9 +110,9 @@ Under the default `Swarm` policy each hop is decided by one gate. Every bar is i
 
 ### Stage 1: Candidate
 
-Stage 1 asks whether the concept has lasted and whether anything else rests on it. It needs three GC sweeps survived and dependents from at least two interactions other than the concept's own. {/* const: MIN_GC_SURVIVED, MIN_DEPENDENT_INTERACTIONS */} {/* lean: Canon.stage1Passes, Gc.three_sweeps_reach_stage_one */}
+Stage 1 asks whether the concept has lasted and whether anything else rests on it. It needs three GC sweeps survived and dependents from at least two interactions other than the concept's origin interaction. {/* const: MIN_GC_SURVIVED, MIN_DEPENDENT_INTERACTIONS */} {/* lean: Canon.stage1Passes, Gc.three_sweeps_reach_stage_one */}
 
-Swarm credits each dependence to the interaction its dependent came from, and counts each interaction once. {/* lean: Policy.dependentOrigins */}
+Swarm credits each dependence to its dependent's origin interaction, and counts each interaction once. {/* lean: Policy.dependentOrigins */}
 
 A pass is never revoked by more evidence: GC survival only grows, and more dependent interactions only help. {/* lean: Canon.stage1_mono, Gc.bump_never_resets */}
 
@@ -127,9 +130,9 @@ The first concept is exactly on both bars and passes. The other two are one gate
 
 Stage 2 asks whether the support is independent and spread over time. It needs dependents from at least three interactions, and **coverage** of at least 0.3. {/* const: MIN_DISTINCT, MIN_COVERAGE */} {/* lean: Canon.stage2Passes */}
 
-Coverage is the span of the dependent interactions' about-times, from the earliest to the latest, divided by the session's extent. The extent runs from the session's earliest interaction to its latest, by about-time, and is capped at 14 days, so a session whose extent is longer needs 4.2 days of spread. The cap shortens the denominator only: evidence older than 14 days still counts toward the span. {/* lean: Supersession.coveragePasses */} {/* code: src/store/span.rs DEFAULT_COVERAGE_WINDOW */}
+Coverage is the span of the dependent interactions' about-times, from the earliest to the latest, divided by the session's extent. The extent runs from the session's earliest interaction to its latest, by about-time, and is capped at 14 days, so a session whose extent is longer needs 4.2 days of spread. The cap shortens the denominator only: evidence older than 14 days still counts toward the span. A session whose interactions all share one about-time has no extent, so any support counts as full coverage. Coverage never exceeds 1. {/* lean: Supersession.coveragePasses */} {/* code: src/store/span.rs coverage DEFAULT_COVERAGE_WINDOW */}
 
-Ten citations written in one turn are one dependent interaction with no span, so they do not pass. {/* lean: Policy.dependentOrigins, Canon.stage2Passes */}
+Ten concepts that cite a concept, all created in one interaction, are one dependent interaction with no span, so the concept does not pass. {/* lean: Policy.dependentOrigins, Canon.stage2Passes */}
 
 {/* oracle: Canon.json stage2Passes#119 stage2Passes#26 stage2Passes#7 */}
 
@@ -145,19 +148,19 @@ Span and extent are in the same unit. The first concept has coverage exactly 0.3
 
 Stage 3 asks whether the concept is load-bearing. It needs a blast radius greater than five: exactly five dependents does not pass. {/* const: MIN_BLAST_RADIUS */} {/* lean: Canon.stage3_boundary */}
 
-Every dependent counts, including one that also depends on something else. A `Causal` edge, which `produces` and `modifies` write, records provenance and adds nothing. {/* lean: Dispatch.dependence_types */}
+Every dependent counts, including one that also depends on something else. A `Causal` edge, which `produces` and `modifies` write, records provenance and adds nothing. {/* lean: Dispatch.dependence_types */} {/* code: src/canon/stage3.rs stage3_passes (module doc: all dependents, not only exclusive ones) */}
 
-Venerable is not a permanent pass. Stage 3 checks Stage 2 again in the same cycle, so a concept whose support has thinned waits at Venerable rather than promoting on blast radius alone. The cooldown is checked first. The blast radius that admitted the concept is the one written to its audit row. {/* code: src/canon/eval.rs verdicts, src/canon/stage3.rs stage3_passes */}
+Reaching Venerable does not settle Stage 2 for good. Stage 3 checks Stage 2 again in the same cycle, so a concept whose support has thinned waits at Venerable rather than promoting on blast radius alone. The blast radius that admitted the concept is the one written to its audit row. {/* code: src/canon/eval.rs verdicts, src/canon/stage3.rs stage3_passes */}
 
 ### What orders the queue
 
-A cycle takes at most `canonization_eval_batch_size` concepts per stage, 50 by default. Stages 2 and 3 go round their queues in turn. Stage 1 under Swarm takes the highest daemon composite score first, then the concept's key. The score only orders: Stage 1's gate reads GC survival and dependent interactions and nothing else, so reading a concept more often never makes it more promotable. {/* lean: Canon.stage1Passes */} {/* code: src/canon/eval.rs gather (ring_window), src/canon/stage1.rs stage1_candidates, src/config.rs Config::default */}
+A cycle takes at most `canonization_eval_batch_size` concepts per stage, 50 by default. Stages 2 and 3 work through their queues as rings, each cycle starting where the last one stopped. Stage 1 under Swarm takes the highest daemon composite score first, then the concept's key. Under both policies, a cycle also evaluates its Stage 3 batch in composite-score order and spends the Canonical budget in that order. The score only orders: Stage 1's gate reads GC survival and dependent interactions and nothing else, so reading a concept more often never makes it more promotable. {/* lean: Canon.stage1Passes */} {/* code: src/canon/eval.rs gather ring_window, src/canon/stage1.rs stage1_candidates, src/config.rs Config::default */}
 
 $$
 S(c) = 0.25\,R + 0.20\,F + 0.20\,A + 0.35\,D + b + m
 $$
 
-$R$ is recency, $F$ access frequency, $A$ how many interactions derived the concept relative to the session's most-derived one, and $D$ its edge count relative to the session's most connected concept. Each is clamped to $[0, 1]$ before weighting. $b$ is a bonus per incident edge (dependency and causal edges pay most; `Derives`, `Temporal` and `Contradicts` pay nothing), capped at 0.25. $m$ is a concept-type offset between $-0.10$ for an Observation and $+0.15$ for a Constraint. The score always lies in $[0, 1.4]$ and never falls when a dimension rises. {/* const: ScoringWeights::default, MAX_EDGE_BONUS, MIN_CONCEPT_MODIFIER, MAX_CONCEPT_MODIFIER */} {/* lean: Score.score_range, Score.score_mono */} {/* code: src/daemon/score.rs module doc, edge_type_bonus_value, concept_type_modifier */}
+$R$ is recency, $F$ access frequency, $A$ how many interactions derived the concept relative to the session's most-derived one, and $D$ its edge count relative to the session's most connected concept. Each is clamped to $[0, 1]$ before weighting. $b$ adds, for each incident edge, 0.02 for a `Causal` or `Dependency` edge, 0.015 for `Hierarchical`, 0.01 for `Semantic` and 0.005 for `CoOccurrence`; `Derives`, `Temporal`, `Contradicts` and `SuspectedSupersedes` edges add nothing, and $b$ is capped at 0.25. $m$ is a concept-type offset between $-0.10$ for an Observation and $+0.15$ for a Constraint. The score always lies in $[0, 1.4]$ and never falls when a dimension rises. {/* const: ScoringWeights::default, MAX_EDGE_BONUS, MIN_CONCEPT_MODIFIER, MAX_CONCEPT_MODIFIER */} {/* lean: Score.score_range, Score.score_mono */} {/* code: src/daemon/score.rs (module doc), edge_type_bonus_value, concept_type_modifier */}
 
 ## Swarm and Solo
 
@@ -176,7 +179,7 @@ $R$ is recency, $F$ access frequency, $A$ how many interactions derived the conc
 {/* const: CANDIDATE_BAR, VENERABLE_BAR, CANONICAL_BAR */}
 {/* lean: Policy.PromotionPolicy.stage1, Policy.swarm_admits_every_hop, Policy.promotion_needs_verdict, Policy.solo_admits_what_swarm_refuses, Policy.dependentOriginsW, Policy.soloCandidates_sorted */}
 
-Everything else is shared: the transitions, one hop per cycle, the cooldown, the budget and supersession. {/* lean: Policy.policyFlags, Policy.policy_cycle_one_hop */}
+Everything else is shared: the transitions, one hop per cycle, the cooldown, the budget and supersession. {/* lean: Policy.policyFlags, Policy.policy_cycle_one_hop, Canon.stage3Passes */} {/* code: src/canon/eval.rs verdicts */}
 
 ### The Solo score
 
@@ -186,17 +189,17 @@ $$
 
 {/* const: SESSION_WEIGHT, HUMAN_CONFIRMED_WEIGHT, DEPENDENT_INTERACTION_WEIGHT, REVERT_WEIGHT */} {/* lean: Policy.rawScore, Policy.score10 */}
 
-* **sessions** is the size of the largest set of the concept's support times in which any two are at least 24 hours apart. A support time is when the concept was derived or when a dependence on it was declared, by about-time. It is not a count of calendar days: five supports 23 hours apart count as three sessions. Because times are about-times, a bulk import of old turns counts their original days. {/* const: SESSION_SEPARATION */} {/* lean: Policy.sessionCount_max, Policy.sessionCount_attained, Policy.chain_counts_more_than_one, Policy.supportingTimes_reflush, Policy.a_bulk_ingest_recurs_only_under_event_time */}
+* **sessions** is the size of the largest set of the concept's support times in which any two are at least 24 hours apart. A support time is when the concept was derived or when a dependence on it was declared, by about-time. It is not a count of calendar days: five supports 23 hours apart count as three sessions. Because times are about-times, a bulk import of old interactions counts their original days. {/* const: SESSION_SEPARATION */} {/* lean: Policy.sessionCount_max, Policy.sessionCount_attained, Policy.chain_counts_more_than_one, Policy.supportingTimes_reflush, Policy.a_bulk_ingest_recurs_only_under_event_time */}
 * An action that only produced or modified the concept is not a session. A `parent_of` child counts as a dependent interaction but not as a session. {/* lean: Policy.causal_not_recurrence, Policy.hierarchical_child_is_dependent_not_recurrence */}
 * **confirmations** are human confirmations, recorded through the library's `confirm_human` call and never by an agent write. {/* code: src/memory/writes.rs confirm_human */}
 * **reverts** counts the concept's demotions from Canonical, by the budget or by supersession. {/* lean: Policy.revert_is_demotion */}
 * $r(\tau)$ is the concept type's eviction resistance: Constraint 1.5, Entity 1.2, Logic 1.1, Resource 1.0, Observation 0.7. {/* const: ConceptType::eviction_resistance */} {/* lean: Policy.ConceptType.resistance10 */}
 
-Each bar belongs to the band above it: a score of exactly 3.0 is a Candidate, exactly 6.0 a Venerable, exactly 10.0 a Canonical. More evidence never lowers the band, and the band is checked when the cycle gathers its work and again when it applies it. {/* lean: Policy.band_boundaries_are_inclusive, Policy.classify_mono, Policy.band_mono, Policy.solo_cycle_capped */}
+Each bar belongs to the band above it: a score of exactly 3.0 is a Candidate, exactly 6.0 a Venerable, exactly 10.0 a Canonical. More evidence never lowers the band. The band is checked when the cycle gathers its work and, for Venerable and Canonical, again when it applies it. {/* lean: Policy.band_boundaries_are_inclusive, Policy.classify_mono, Policy.band_mono, Policy.solo_cycle_capped */}
 
 The band is necessary, not sufficient. A Solo concept still needs Stage 2's verdict for Venerable and Stage 3's for Canonical, so nothing reaches Canonical under Solo without more than five dependents. {/* lean: Policy.promotion_needs_verdict */}
 
-For example, four sessions give an Entity 4.8 (a Candidate) and an Observation 2.8 (nothing). A Resource with four sessions and one confirmation scores 8.0; one more dependent interaction makes it exactly 10.0. One revert takes four sessions down to 1.0. {/* lean: Policy.score_examples */}
+For example, four sessions give an Entity 4.8 (a Candidate) and an Observation 2.8 (nothing). A Resource with four sessions and one confirmation scores 8.0; one more dependent interaction makes it exactly 10.0. A Resource with four sessions and one revert scores 1.0. {/* lean: Policy.score_examples */}
 
 ### Which to choose
 
@@ -204,22 +207,22 @@ Choose **Swarm** when several agents write to the session under distinct `agent_
 
 Choose **Solo** for one writer. A concept supported on separate days can become a Candidate without any GC sweep, where Swarm refuses it until it has survived three. {/* lean: Policy.solo_admits_what_swarm_refuses */}
 
-### Solo dates a dependence by the turn that wrote it
+### Solo credits a dependence to the interaction that wrote it
 
-Since 0.15.0 (#300), Solo's two time terms credit each dependence to the interaction that wrote it, and date it by that interaction's about-time. Before, both terms used the dependent's own origin interaction. {/* lean: Policy.supportingTimesW, Policy.dependentOriginsW */}
+Since 0.15.0 (#300), Solo's two time terms credit each dependence to the interaction that wrote it, and date it by that interaction's about-time. Before, both terms used the dependent's origin interaction. When no single interaction was flushed at the instant the edge was written, Solo credits the dependent's origin, as Swarm does. {/* lean: Policy.supportingTimesW, Policy.dependentOriginsW, Policy.credited */} {/* code: src/canon/stage1.rs Credit::Writer */}
 
-The two agree whenever every dependence was written in its dependent's origin turn, which is the usual case: a fresh concept or a fresh action declares its dependences when it is written. {/* lean: Policy.supportingTimesW_eq, Policy.dependentOriginsW_eq */}
+The two rules agree whenever every dependence was written in its dependent's origin interaction, which is the usual case: a new concept or action declares its dependences in the interaction that writes it. {/* lean: Policy.supportingTimesW_eq, Policy.dependentOriginsW_eq */}
 
 They differ when an existing concept gains a dependence later:
 
 * `lambo_record_action` reuses the action node when the same action is recorded again. A repeat on day 5 that adds `depends_on Y` now adds a day-5 session and a day-5 dependent interaction to `Y`. {/* lean: Policy.reused_action_dependency_is_dated_by_its_writer */}
-* A dependence written in `Y`'s own turn, from an older concept, no longer counts as a dependent interaction, and its session moves to the writing day. Some Solo Candidates and Venerables lost score in 0.15.0 for this reason. {/* lean: Policy.own_origin_is_the_writing_turn */}
+* When an older concept gains a dependence on `Y` in `Y`'s own origin interaction, that dependence no longer counts as a dependent interaction, and its session moves to the writing day. A Solo concept can therefore score lower than under 0.14.0. A lower score does not lower a status the concept already has: the only transition down is from Canonical. {/* lean: Policy.own_origin_is_the_writing_turn, Canon.legal_to_none */}
 * Sending an identical dependence again reinforces the existing edge and keeps its date, so it adds nothing. {/* code: src/graph/graph.rs upsert_edge */}
 
-Swarm's Stage 1 and Stage 2 still credit the dependent's origin. A Solo concept can therefore become a Candidate on evidence that Stage 2 does not count toward Venerable. {/* code: src/canon/stage1.rs Credit::DependentOrigin */}
+Stage 1 under Swarm, and Stage 2 under both policies, credit the dependent's origin. A Solo concept can therefore become a Candidate on evidence that Stage 2 does not count toward Venerable. {/* code: src/canon/stage1.rs Credit::DependentOrigin, src/canon/eval.rs verdicts stage2_verdict */}
 
 <Note>
-**Why #300 changed this.** The Policy model keeps the old rule beside the new one. On the issue's scenario, an action recorded on day 0 and repeated on day 5 with a new dependence on `Y`, the old rule gave `Y` one session and no dependent interaction, because it credited the day-5 edge to the action's day-0 origin. A fresh action node from the same day-5 turn gave two sessions and one dependent. The same work counted differently depending on whether Lambo reused a node. {/* lean: Policy.reused_action_dependency_is_dated_by_its_origin */}
+**Why #300 changed this.** Under the old rule the same work counted differently depending on whether Lambo reused an action node; the [0.15.0 CHANGELOG entry](https://github.com/nrynss/lambo/blob/main/CHANGELOG.md#0150-2026-11-22) gives the scenario. {/* lean: Policy.reused_action_dependency_is_dated_by_its_origin */}
 </Note>
 
 ## Supersession
@@ -230,7 +233,7 @@ Two mechanisms carry this name. Only one of them changes a status.
 |---|---|---|
 | Triggered by | an `against` contradiction plus newer support | a new fact that looks like a new value of an older one, written without `against` |
 | Changes status | yes: demotes a Canonical concept to `None` | never |
-| Default | off (`canonization_supersede = false`) | recorded on hybrid writes; when recall shows the line depends on [`suspected_supersession_line`](/lambo/config/) |
+| Default | off (`canonization_supersede = false`) | recorded on every write that has an embedder; whether recall prints the line is set by [`[embedder] suspected_supersession_line`](/lambo/config/#embedder) |
 | Recall shows | `⤓ Superseded at ... by ...` | `⚠ Possibly superseded by ...` |
 
 {/* const: Config::default().canonization_supersede */}
@@ -242,14 +245,15 @@ Two mechanisms carry this name. Only one of them changes a status.
 With `canonization_supersede = true` (see [Configuration](/lambo/config/#supersession)), a cycle demotes a Canonical concept when a concept that contradicts it has support of its own that is **newer** than the Canonical concept's latest support, and that newer support alone clears Stage 2's bars. {/* lean: Supersession.verdict_sound, Supersession.stage2Since_newest */} {/* const: MIN_DISTINCT, MIN_COVERAGE */}
 
 * It only demotes. The only move it makes is Canonical to `None`, and the contradicting concept is not promoted by it; that concept climbs the ladder on its own evidence. {/* lean: Supersession.applySup_legal, Supersession.applySup_source, Supersession.applySup_untouched */}
-* It runs first in the cycle, so a Canonical slot it frees can be filled by the same cycle's Stage 3. {/* lean: Supersession.applySup_eq_cycle */}
+* It runs first in the cycle, so a Canonical slot it frees can be filled by the same cycle's Stage 3. {/* lean: Supersession.applySup_eq_cycle */} {/* code: src/canon/eval.rs gather (a full budget still gathers the Stage 3 window while supersession probes are pending) */}
+* Its evidence ages by write time, not by about-time: a dependence counts once it was written at least `canonization_edge_min_age` before the cycle's clock, so a backdated `event_time` does not skip the floor. {/* code: src/canon/supersession.rs (module doc: eligible by write time) */}
 * A concept is never superseded by itself, and two concepts never supersede each other in one cycle. When each qualifies against the other, the one whose newest counted support is older is demoted. When several concepts qualify against one target, the one with the newest support acts. {/* lean: Supersession.verdict_ne, Supersession.pair_rule, Supersession.verdict_outranks_reverse, Supersession.verdict_best */}
 * A contradiction with no newer support never demotes anything. {/* lean: Supersession.verdict_sound */}
 * Support that the contradicting agent wrote for the old concept does not defend it against that agent's own contradiction. With one writer, or agents sharing an `agent_id`, nothing can defend it, so give agents distinct ids before you turn supersession on. {/* code: src/canon/supersession.rs self_suppressed */}
 * While the newer side still qualifies, Stage 3 holds at Venerable any concept a contradicting concept would supersede at once, whether or not it was ever Canonical. `lambo_inspect` shows the hold. {/* code: src/canon/supersession.rs gather_holds */}
 * With the setting off, nothing is probed, demoted or held. {/* lean: Supersession.off_agrees, Supersession.off_no_demotion, Supersession.held_off */}
 
-The demoted concept enters the usual re-promotion cooldown. {/* code: src/canon/eval.rs apply (last_demotion_time) */}
+The demoted concept enters the usual re-promotion cooldown. {/* code: src/canon/eval.rs apply last_demotion_time */}
 
 ### Suspected supersession (#198)
 
@@ -257,9 +261,11 @@ A suspected pair runs from the strictly later-dated concept to the earlier one; 
 
 A suspected pair is never read as a contradiction, so it never demotes anything, and recall never drops either end as a near-duplicate of the other. {/* lean: Supersession.contradictions_ignore_suspected, Supersession.probesFor_ignore_suspected, Supersession.signal_suspected, Supersession.suspected_ends_not_skipped */}
 
+Near-duplicate merging, and the two guards that refuse a merge whatever the similarity, are described under [Where deduplication looks](/lambo/config/#store).
+
 ## Timing
 
-A change in the graph reaches a status through four clocks: the age floor, the cycle interval, the batch size and, under Swarm, GC sweeps.
+A change in the graph reaches a status through four limits: the age floor, the cycle interval, the batch size and, under Swarm, GC sweeps.
 
 | Setting | Default | In `lambo.toml` | What it governs |
 |---|---|---|---|
@@ -270,40 +276,42 @@ A change in the graph reaches a status through four clocks: the age floor, the c
 | `canonization_coverage_window` | 14 days | no | cap on Stage 2's denominator |
 | `max_canonical_nodes` | 1000 | no | the Canonical budget |
 | `gc_interval` | 10000 | `[daemon] gc_interval` | mutations that trigger a GC sweep |
-| `gc_max_interval_secs` | 86400 | `[daemon] gc_max_interval_secs` | seconds after which a busy session sweeps anyway |
+| `gc_max_interval` | 86400 s | `[daemon] gc_max_interval_secs` | time after the last sweep at which a session that is still taking writes sweeps anyway |
 | `gc_idle_floor` | 100 | `[daemon] gc_idle_floor` | mutations the time trigger needs |
 
-{/* code: src/config.rs Config::default, src/daemon/gc.rs GC_MAX_INTERVAL GC_IDLE_FLOOR, src/store/span.rs DEFAULT_COVERAGE_WINDOW */}
+{/* code: src/config.rs Config::default gc_max_interval, src/daemon/gc.rs GC_MAX_INTERVAL GC_IDLE_FLOOR, src/store/span.rs DEFAULT_COVERAGE_WINDOW */}
 
-The cadence settings change how often the bars are checked, not where they sit. The thresholds are library settings and cannot be set in `lambo.toml`. See [Configuration](/lambo/config/#daemon-cadence).
+The cadence settings change how often the bars are checked, not where they sit. The gate thresholds are compiled into Lambo; no setting changes them. The settings marked "no" above are library-only `Config` fields. See [Configuration](/lambo/config/#daemon-cadence). {/* code: src/canon/stage1.rs MIN_GC_SURVIVED, src/canon/stage3.rs MIN_BLAST_RADIUS, src/canon/mod.rs formal_pins, src/config.rs DaemonConfig */}
 
-What follows from those clocks:
+What follows from those limits:
 
-* **A new citation counts after a minute.** It joins the evidence once it is 60 seconds old, and the next cycle after that, at most one interval later, reads it. {/* code: src/config.rs Config::default */}
+* **A new citation counts after a minute.** It joins the evidence once its about-time is 60 seconds old (a citation with an older `event_time` counts at once), and the next cycle after that, at most one interval later, reads it. {/* code: src/config.rs Config::default, src/canon/stage1.rs dependent_origin */}
 * **The fastest climb takes three cycles,** one per stage. {/* lean: Canon.cycle_rank_le, Policy.solo_three_cycles */}
-* **Swarm waits for sweeps.** A sweep runs when the session has taken `gc_interval` mutations since the last one, or when `gc_max_interval_secs` has passed and it has taken at least `gc_idle_floor`. An idle session never sweeps on time alone, so GC survival measures survival under write pressure, not age. {/* lean: Gc.sweepDue, Gc.mutations_always_sweep, Gc.time_trigger_needs_both, Gc.idle_never_sweeps */}
+* **Swarm waits for sweeps.** A sweep runs when the session has taken `gc_interval` mutations since the last one, or when `gc_max_interval` has passed and it has taken at least `gc_idle_floor` mutations. A session with fewer than `gc_idle_floor` mutations since its last sweep never sweeps on time alone, so GC survival measures survival under write pressure, not age. {/* lean: Gc.sweepDue, Gc.mutations_always_sweep, Gc.time_trigger_needs_both, Gc.idle_never_sweeps */} The exception is a session that has never swept: it counts every mutation since it began, so one with at least `gc_idle_floor` of them sweeps once on time even if no write has arrived since. See [Daemon cadence](/lambo/config/#daemon-cadence). {/* code: src/daemon/gc.rs sweep_due */}
 * **Promotion protects.** A Venerable or Canonical concept is never collected by GC. A Candidate has no such protection. {/* lean: Gc.venerable_canonical_never_collected, Gc.candidate_not_protected */}
-* **Eligible is not immediate.** A concept that passes every gate is promoted when a cycle's batch reaches it; a busy stage can take several cycles to go round. {/* code: src/canon/eval.rs gather (ring_window) */}
+* **Eligible is not immediate.** A concept that passes every gate is promoted when a cycle's batch reaches it; a busy stage can take several cycles to go round. {/* code: src/canon/eval.rs gather ring_window */}
 
 ## What agents see
 
-**In recall.** A Canonical hit's label ends in `canonical`, for example `[Entity, canonical]`, and the hit is followed by a `⚑ Load-bearing pillar` line that states its blast radius. {/* code: src/recall/format.rs label, blast_radius_warning; src/recall/assemble.rs */} Canonical hits rank ahead of every other hit, whatever the scores, and a dependency question ("what depends on X") lists Canonical dependents first. {/* lean: Order.rankMembers_canonical_first, Dispatch.ranked_canonical_first */} If redundancy selection skips a Canonical copy, the copy it keeps is Canonical too and carries its own `⚑` line. {/* lean: TopK.skipped_canonical_kept_canonical */}
+**In recall.** A Canonical hit's label ends in `canonical`, for example `[Entity, canonical]`, and the hit is followed by a `⚑ Load-bearing pillar` line that states its blast radius. {/* code: src/recall/format.rs concept_label blast_radius_warning, src/recall/assemble.rs */} Canonical hits rank ahead of every other hit, whatever the scores, and a dependency question ("what depends on X") lists Canonical dependents first. {/* lean: Order.rankMembers_canonical_first, Dispatch.ranked_canonical_first */} Behind that rule, recall orders hits by a blend of the composite score above and the hit's relevance to the query, half each by default; see `recall_weights` under [Settings](/lambo/api/#settings), and [Recall fusion](/lambo/config/#recall-fusion) for how the query's legs combine. {/* code: src/config.rs RecallWeights w_daemon w_query */} If redundancy selection skips a Canonical copy, the copy it keeps is Canonical too and carries its own `⚑` line. {/* lean: TopK.skipped_canonical_kept_canonical */}
 
-A contradiction pulls a hit into the result past `top_k` only when the contradicted concept is Canonical or Venerable. {/* lean: Hotlist.forces_iff */} A `⤓ Superseded` line follows a concept's latest demotion and never appears on a Canonical concept. {/* lean: Supersession.supersededLine_canonical, Supersession.budget_clears */} A `⚠ Possibly superseded` warning appears on the older concept of a suspected pair and names the newer one. {/* lean: Supersession.pss_sound, Supersession.pss_newer */} [MCP tools](/lambo/mcp/#lambo_recall) shows each line in full.
+A contradiction pulls a hit into the result past `top_k` only when the contradicted concept is Canonical or Venerable. {/* lean: Hotlist.forces_iff */} A `⤓ Superseded` line appears while a concept's latest demotion was a supersession, and never on a Canonical concept. {/* lean: Supersession.supersededLine_canonical, Supersession.budget_clears */} A `⚠ Possibly superseded` warning appears on the older concept of a suspected pair and names the newer one. {/* lean: Supersession.pss_sound, Supersession.pss_newer */} [MCP tools](/lambo/mcp/#lambo_recall) shows each line in full.
+
+**The high-risk alert.** A concept is high-value when it is Canonical or has more than five dependents. When recall returns a high-value concept that was written in the last 30 seconds, or that has an edge written or reinforced in that time, the hit carries a `High-risk modification` warning. The dependents are counted from the graph as it is now, with no age floor, so the edge that gives a concept its sixth dependent is itself the write that raises the alert. {/* code: src/daemon/events.rs is_high_value HIGH_RISK_WRITE_WINDOW HIGH_RISK_BLAST_RADIUS high_risk_at, src/recall/format.rs hot_warning */}
 
 **`lambo_saints`** lists the session's Canonical concepts with their blast radius. {/* code: src/mcp/server/tools/saints.rs saints_impl */}
 
 **`lambo_inspect`** answers "why is, or isn't, this promoted?" It names the concept's next hop under the live policy, each gate's current value and bar, and one reason for each gate that fails, such as `stage 2: dependents from 2 other interactions, needs at least 3`. It runs the evaluator's own gates on the evaluator's inputs, the Canonical budget included. It does not predict when a cycle will reach the concept. See [`lambo_inspect`](/lambo/mcp/#lambo_inspect). {/* code: src/canon/explain.rs explain_admission, render_admission */}
 
-To make a concept load-bearing, cite it: name it in `depends_on` from the concepts and actions that rest on it. Each citing concept adds to its blast radius, but all the citations from one turn count as one dependent interaction, and Stage 2 needs three, spread over time. {/* lean: Policy.dependentOrigins, Canon.stage2Passes */}
+To make a concept load-bearing, cite it: name it in `depends_on` from the concepts and actions that rest on it. Each citing concept adds to its blast radius, but the concepts created in one interaction that cite it count as one dependent interaction, and Stage 2 needs three, spread over time. {/* lean: Policy.dependentOrigins, Canon.stage2Passes */}
 
 ## Operator tools
 
-Three commands preview canonization with no writer running. Each reads a SQLite store file you name, works on a private copy, and writes nothing unless you pass `--apply` to `suspected`.
+Three commands preview canonization with no writer running. Each reads a SQLite store file you name. Without `--apply`, each works on a private copy and writes nothing. `suspected --apply` writes to the file itself and needs the session's lease, so run it only while no writer holds the session. {/* code: src/cli/canon.rs dry_run alias_preview suspected */}
 
 * **`lambo canon dry-run`** runs the evaluator to its fixed point under each policy and reports what would be promoted, how many concepts fail each gate, and which are one gate away. Its report ends with named invariants; `one_legal_hop_per_cycle` and `canonical_within_budget` check at run time what the models prove. {/* code: src/canon/dry_run.rs */} {/* lean: Canon.cycle_one_hop, Canon.stage3_no_overflow */}
-* **`lambo canon alias-preview`** shows how statuses would change if citations of old short names moved onto the rulings they stand for.
-* **`lambo canon suspected`** lists the suspected-supersession pairs a store already holds, and with `--apply` records them.
+* **`lambo canon alias-preview`** shows how statuses would change if citations of old short names moved onto the rulings they stand for. {/* code: src/canon/alias_preview.rs alias_preview, src/cli/canon.rs alias_preview */}
+* **`lambo canon suspected`** lists the suspected-supersession pairs a store already holds, and with `--apply` records them. {/* code: src/cli/canon.rs suspected */}
 
 Flags and output are in [Preview canonization](/lambo/cli/#preview-canonization).
 
