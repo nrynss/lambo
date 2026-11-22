@@ -1126,6 +1126,26 @@ fn sane_weight(w: f64) -> f64 {
 #[cfg(test)]
 mod proptests;
 
+/// Test-only access to the private ranking, for
+/// `crate::formal_oracle_tests` (#291), which replays the Lean model's
+/// vectors (`formal/oracle/Order.json`) through it.
+#[cfg(test)]
+pub(crate) mod formal_oracle {
+    use super::{Graph, NodeId, Scored};
+
+    pub(crate) fn rank_cmp(
+        graph: &Graph,
+        a: &Scored<NodeId>,
+        b: &Scored<NodeId>,
+    ) -> std::cmp::Ordering {
+        super::rank_cmp(graph, a, b)
+    }
+
+    pub(crate) fn rank_members(graph: &Graph, members: &mut [Scored<NodeId>]) {
+        super::rank_members(graph, members)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

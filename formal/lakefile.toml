@@ -4,3 +4,15 @@ defaultTargets = ["LamboProofs"]
 
 [[lean_lib]]
 name = "LamboProofs"
+
+# The differential oracle (#291): `lake exe oracle` evaluates model
+# definitions over generated inputs and writes formal/oracle/*.json, which
+# src/formal_oracle_tests.rs replays against the Rust. Not a default target,
+# so `lake build` builds the proofs alone. See README.md, "Differential oracle".
+[[lean_lib]]
+name = "OracleExport"
+globs = ["OracleExport.+"]
+
+[[lean_exe]]
+name = "oracle"
+root = "OracleExport.Main"
