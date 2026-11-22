@@ -73,6 +73,17 @@ open Lambo
 
 -- Graph writes
 #print axioms Cite.batch_acyclic
+#print axioms Cite.written_loadOk
+#print axioms Cite.cite_gate_preserves
+#print axioms Cite.parent_gate_preserves
+#print axioms Cite.redirect_preserves
+#print axioms Cite.drop_preserves
+#print axioms Cite.loadOk_of_loadOkUnion
+#print axioms Cite.union_check_rejects_written
+#print axioms Cite.child_cites_parent_loadOk
+#print axioms Cite.hierarchical_cycle_not_loadOk
+#print axioms Cite.dependency_cycle_not_loadOk
+#print axioms Cite.loadOkB_sound
 #print axioms Names.names_permanent
 #print axioms Names.resolve_never_rebinds
 
