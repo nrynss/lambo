@@ -616,9 +616,9 @@ No re-embedding is needed, and no table or column is added.
   and SQLite share the one ordering). An intent whose receipt id does not
   parse is settled `failed` instead of being skipped on every serve and
   counted in `write_queue_replay_owed` forever, and the seeding warning now
-  says so. A write the in-session worker meets during an embedder outage is
-  unchanged: it answers `failed`, stays owed, and the agent's next writes
-  still apply before it. `formal/LamboProofs/Drain.lean` models the fixed
+  says so. (A write the in-session worker meets during an embedder outage is
+  covered by the later #295 entry above: it is held and answers
+  `pending_replay`.) `formal/LamboProofs/Drain.lean` models the fixed
   replay and proves that, across serves and whatever the embedder answers,
   each agent's writes of one process apply in admission order, with no clock
   assumption.
