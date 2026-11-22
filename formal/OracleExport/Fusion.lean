@@ -22,7 +22,7 @@ The model is exact and the Rust rounds (`f64`). The model's header says where
 that matters: two candidates whose exact values tie through different rank
 vectors may be ordered by a rounding in Rust instead of by the tie-break.
 Cases with such a tie above zero are not generated (`roundingTie`);
-everywhere else the order is compared exactly and each value within 8 ulps
+everywhere else the order is compared exactly and each value within 16 ulps
 of the exact fraction, relative to its size.
 
 A tie at zero is different, and the oracle found it (#328): a candidate
@@ -138,7 +138,7 @@ def vectors : Vectors := run seed do
       "RrfRecall.rrf (an exact fraction [num, den]) and RrfRecall.rrfAhead (the output order) against rank under FusionKind::Rrf.",
       "members: id (Uuid pair (2,id)), key (a concept with that canonical_key; null: an id in no graph), keyword and vector leg scores at scale 1000, recent_rank (the model's recentRank of a generated recentIdx, written into the input because rank reads LegScores::recent_rank).",
       "tb: Order.tieBreak with str::cmp keys and member numbers, as in Order.json. config: [kNum, kDen, wKeyword, wVector, wRecent], k = kNum / kDen, weights at scale 10.",
-      "No case has two candidates whose exact values tie above zero through different rank vectors (the f64 rounding the model leaves out decides those). The order is compared exactly, each value within 8 ulps of the exact fraction, relative to its size.",
+      "No case has two candidates whose exact values tie above zero through different rank vectors (the f64 rounding the model leaves out decides those). The order is compared exactly, each value within 16 ulps of the exact fraction, relative to its size.",
       "Cases where two candidates' exact values are both zero through different rank vectors are in the second function only: the regression cases of #328, where the Rust ordered by the sign of the zero (an empty f64 sum is -0.0) rather than by the tie-break until it summed from +0.0."
     ]
     fns := [

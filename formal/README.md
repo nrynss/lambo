@@ -205,8 +205,9 @@ themselves as the reference. `lake exe oracle` (sources in `OracleExport/`,
 a library and executable outside the default target, so `lake build` builds
 the proofs alone) evaluates covered definitions over a fixed set of
 generated inputs and writes inputs and outputs to `oracle/<Model>.json`. The
-Rust test `src/formal_oracle_tests.rs` (one module per model in
-`src/formal_oracle_tests/`, part of the default `cargo test`) rebuilds each
+Rust test `formal_oracle_tests::oracle` (`src/formal_oracle_tests.rs`, one
+replay module per model in `src/formal_oracle_tests/`, part of the default
+`cargo test`) checks that every file in `oracle/` has a replay and rebuilds each
 input as the Rust types, calls the real function and asserts the output the
 Lean computed, naming the model, function, case index and input on a
 mismatch. Unlike the property tests (`src/**/proptests.rs`), nothing in the
@@ -242,7 +243,7 @@ Covered:
 | `Expand` | `expand` | `expand` | `nbrs` built per `TRAVERSAL_ORDER`, id-ascending, and checked against the graph's adjacency |
 | `BatchQueue` | `lengthChunks Cfg.rust` | `length_chunks` (feature `embed-candle`) | none |
 | `Score` | `bonusAndModifier`, `score` | `bonus_and_modifier`, `ScoreDims::composite`, `score` | fixed point at the model's scale; compared within `1e-9` (the model is exact, the Rust `f64`) |
-| `Fusion` | `RrfRecall.rrf`, `rrfAhead` | `rank` under `FusionKind::Rrf` | `tb` as in `Order`; the recent rank is the model's `recentRank`, written into the input; values within 8 ulps (relative), order exact |
+| `Fusion` | `RrfRecall.rrf`, `rrfAhead` | `rank` under `FusionKind::Rrf` | `tb` as in `Order`; the recent rank is the model's `recentRank`, written into the input; values within 16 ulps (relative), order exact |
 | `Canon` | `gate`, `stage1Passes`, `stage2Passes`, `inCooldown` | `apply_canonization_transition`, the stage predicates | `gate` exhaustively, with no demotion reason |
 
 A model's parameter that is itself Rust logic the model does not define
@@ -276,5 +277,4 @@ exact value is zero because it is ranked only in legs of weight zero got
 non-finite) got `-0.0` (an empty `f64` sum); `total_cmp` ordered `+0.0`
 first, so between the two the tie-break was not applied, where the model
 orders them by it. `rank` now sums from `+0.0`. Those cases stay a separate
-function in `oracle/Fusion.json`, replayed by
-`formal_oracle_tests::fusion::fusion`.
+function in `oracle/Fusion.json`, replayed with the rest.

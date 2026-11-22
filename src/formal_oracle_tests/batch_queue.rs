@@ -8,8 +8,9 @@ use super::{vectors, Vectors};
 /// The model this module replays (`formal/oracle/BatchQueue.json`).
 pub(super) const MODEL: &str = "BatchQueue";
 
-#[test]
-fn batch_queue() {
+/// Replay this model's vectors; run by `super::oracle`, not a test of its
+/// own, so it cannot be ignored or gated alone.
+pub(super) fn replay() {
     let v = Vectors::load(MODEL, vectors!("BatchQueue"));
     #[cfg(feature = "embed-candle")]
     v.replay("Lambo.BatchQueue.lengthChunks", |lens: &Vec<usize>| {

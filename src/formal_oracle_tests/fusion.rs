@@ -24,9 +24,14 @@ use crate::types::{CanonizationStatus, ConceptType, NodeId};
 pub(super) const MODEL: &str = "Fusion";
 
 /// How far, relative to its size, the Rust value may be from the exact
-/// fraction: a few roundings (each term, the scale division, the sums and
-/// the final quotient), each at most half an ulp.
-const ULPS: f64 = 8.0;
+/// fraction, in units in the last place. Each rounding is at most half an
+/// ulp, and there are about a dozen: this test's own input conversions (`k`
+/// as `kNum / kDen`, each weight as `w / 10`, each leg score as `n / 1000`,
+/// and the exact fraction as `num / den`), then the Rust's (each weight over
+/// the largest, `k + rank`, each term's division, up to two additions per
+/// sum and per `best`, and the final quotient). Leg scores only decide ranks,
+/// so their conversion moves no value.
+const ULPS: f64 = 16.0;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -121,8 +126,10 @@ fn run(input: &Input) -> Output {
 /// fuses every zero to `+0.0`. Before that an empty `f64` sum gave `-0.0`,
 /// which `total_cmp` put after every `+0.0` whatever the tie-break said
 /// (14 of these 30 cases failed). Found by this oracle (#291).
-#[test]
-fn fusion() {
+///
+/// Replay this model's vectors; run by `super::oracle`, not a test of its
+/// own, so it cannot be ignored or gated alone.
+pub(super) fn replay() {
     let v = Vectors::load(MODEL, vectors!("Fusion"));
     v.replay("Lambo.Fusion.RrfRecall.rrf", run);
     v.replay("Lambo.Fusion.RrfRecall.rrf zero ties", run);

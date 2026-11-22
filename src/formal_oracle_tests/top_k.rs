@@ -106,8 +106,9 @@ fn run(input: &Input) -> (Vec<u64>, Vec<(u64, u64)>) {
     )
 }
 
-#[test]
-fn top_k() {
+/// Replay this model's vectors; run by `super::oracle`, not a test of its
+/// own, so it cannot be ignored or gated alone.
+pub(super) fn replay() {
     let v = Vectors::load(MODEL, vectors!("TopK"));
 
     for input in v.inputs::<Input>("Lambo.TopK.emitR") {

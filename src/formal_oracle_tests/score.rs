@@ -101,8 +101,9 @@ impl<const S: i64> PartialEq for Scaled<S> {
     }
 }
 
-#[test]
-fn score_() {
+/// Replay this model's vectors; run by `super::oracle`, not a test of its
+/// own, so it cannot be ignored or gated alone.
+pub(super) fn replay() {
     let v = Vectors::load(MODEL, vectors!("Score"));
     v.replay("Lambo.Score.bonusAndModifier", |d: &Dims| {
         Scaled::<1_000>(bonus_and_modifier(d.rust()))

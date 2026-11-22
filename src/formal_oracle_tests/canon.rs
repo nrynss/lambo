@@ -74,8 +74,9 @@ fn millis(ms: i64) -> chrono::DateTime<Utc> {
         .expect("a valid instant")
 }
 
-#[test]
-fn canon() {
+/// Replay this model's vectors; run by `super::oracle`, not a test of its
+/// own, so it cannot be ignored or gated alone.
+pub(super) fn replay() {
     let v = Vectors::load(MODEL, vectors!("Canon"));
     v.replay("Lambo.Canon.gate", |[c, f, t]: &[String; 3]| {
         gate(status(c), status(f), status(t))

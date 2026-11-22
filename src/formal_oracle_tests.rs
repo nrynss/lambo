@@ -41,26 +41,31 @@ mod order;
 mod score;
 mod top_k;
 
-/// The models a module here replays, one per file in `formal/oracle/`.
-/// Each name is the module's own `MODEL`, which its test loads, so a name
-/// here always has a replay; [`every_vector_file_is_replayed`] checks the
-/// directory holds exactly these files.
-const REPLAYED: [&str; 9] = [
-    batch_queue::MODEL,
-    canon::MODEL,
-    canonical::MODEL,
-    expand::MODEL,
-    fit::MODEL,
-    fusion::MODEL,
-    order::MODEL,
-    score::MODEL,
-    top_k::MODEL,
+/// Every model the oracle replays, with its replay. Each entry is a
+/// module's own `MODEL` and `replay` (which is not a `#[test]` itself), and
+/// [`oracle`] is the one test that runs them all, so no model's replay can
+/// be ignored, deleted or feature-gated alone: the oracle runs whole or not
+/// at all. A replay whose Rust needs a feature (BatchQueue) is listed all
+/// the same and records a reasoned skip without it.
+const REPLAYED: [(&str, fn()); 9] = [
+    (batch_queue::MODEL, batch_queue::replay),
+    (canon::MODEL, canon::replay),
+    (canonical::MODEL, canonical::replay),
+    (expand::MODEL, expand::replay),
+    (fit::MODEL, fit::replay),
+    (fusion::MODEL, fusion::replay),
+    (order::MODEL, order::replay),
+    (score::MODEL, score::replay),
+    (top_k::MODEL, top_k::replay),
 ];
 
-/// A vector file no module replays (a model added to the exporter without a
-/// Rust test), or a module whose file is gone, fails here.
+/// The differential oracle: `formal/oracle/` holds exactly one vector file
+/// per entry of [`REPLAYED`] (dotfiles aside), so a file no module replays
+/// fails, and so does a pair whose file is gone; then every model is
+/// replayed. A failing model does not stop the others: every failure is
+/// reported, by model, before the test fails.
 #[test]
-fn every_vector_file_is_replayed() {
+fn oracle() {
     let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/formal/oracle");
     let files: BTreeSet<String> = std::fs::read_dir(dir)
         .unwrap_or_else(|e| panic!("{dir}: {e}"))
@@ -68,11 +73,25 @@ fn every_vector_file_is_replayed() {
         .map(|name| name.to_string_lossy().into_owned())
         .filter(|name| !name.starts_with('.'))
         .collect();
-    let replayed: BTreeSet<String> = REPLAYED.iter().map(|m| format!("{m}.json")).collect();
+    let replayed: BTreeSet<String> = REPLAYED.iter().map(|(m, _)| format!("{m}.json")).collect();
+    assert_eq!(
+        replayed.len(),
+        REPLAYED.len(),
+        "REPLAYED names a model twice"
+    );
     assert_eq!(
         files, replayed,
-        "formal/oracle/ must hold exactly one vector file per model that src/formal_oracle_tests/ \
-         replays (REPLAYED): add a module for a new file, or regenerate"
+        "formal/oracle/ must hold exactly one vector file per model in REPLAYED \
+         (src/formal_oracle_tests.rs): add a module and an entry for a new file, or regenerate"
+    );
+    let failed: Vec<&str> = REPLAYED
+        .iter()
+        .filter(|(_, replay)| std::panic::catch_unwind(replay).is_err())
+        .map(|(model, _)| *model)
+        .collect();
+    assert!(
+        failed.is_empty(),
+        "the oracle failed for {failed:?}; each failure is printed above"
     );
 }
 
@@ -127,7 +146,7 @@ impl Vectors {
         );
         assert_eq!(v.lean, format!("formal/LamboProofs/{model}.lean"));
         assert!(
-            REPLAYED.contains(&model),
+            REPLAYED.iter().any(|(m, _)| *m == model),
             "{model} is not in REPLAYED (src/formal_oracle_tests.rs)"
         );
         v

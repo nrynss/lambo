@@ -6,8 +6,9 @@
 //! the depth. The model's neighbour function `nbrs` is given per node; the
 //! test first checks that the graph's own adjacency (`TRAVERSAL_ORDER`, then
 //! `out_neighbors_typed`) gives exactly those lists, and reports a
-//! difference as a model mismatch (the Rust's traversal order changed). Only `required` is
-//! compared: scores and chunk-group siblings are not modelled.
+//! difference as a model mismatch (the Rust's traversal order changed).
+//! Only `required` is compared: scores and chunk-group siblings are not
+//! modelled.
 
 use std::collections::HashMap;
 
@@ -82,8 +83,9 @@ fn graph(input: &Input) -> Graph {
     g
 }
 
-#[test]
-fn expand_() {
+/// Replay this model's vectors; run by `super::oracle`, not a test of its
+/// own, so it cannot be ignored or gated alone.
+pub(super) fn replay() {
     let v = Vectors::load(MODEL, vectors!("Expand"));
 
     for input in v.inputs::<Input>("Lambo.Expand.expand") {

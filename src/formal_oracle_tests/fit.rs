@@ -60,8 +60,9 @@ fn form(t: Truncation) -> String {
     .to_owned()
 }
 
-#[test]
-fn fit() {
+/// Replay this model's vectors; run by `super::oracle`, not a test of its
+/// own, so it cannot be ignored or gated alone.
+pub(super) fn replay() {
     let v = Vectors::load(MODEL, vectors!("Fit"));
     v.replay("Lambo.Fit.fitBlocks", |input: &Input| {
         let blocks: Vec<ContextBlock> = input.blocks.iter().map(block).collect();

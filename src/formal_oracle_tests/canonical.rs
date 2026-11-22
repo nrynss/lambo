@@ -27,8 +27,9 @@ fn lookup(table: &'static HashMap<String, String>) -> impl Fn(&str) -> Option<&s
     move |raw| table.get(raw).map(String::as_str)
 }
 
-#[test]
-fn canonical() {
+/// Replay this model's vectors; run by `super::oracle`, not a test of its
+/// own, so it cannot be ignored or gated alone.
+pub(super) fn replay() {
     let v = Vectors::load(MODEL, vectors!("Canonical"));
 
     let stemmer = Stemmer::create(Algorithm::English);
