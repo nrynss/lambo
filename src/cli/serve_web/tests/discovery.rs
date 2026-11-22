@@ -725,6 +725,14 @@ fn found(
         .collect()
 }
 
+/// `fut`'s output, or a panic naming `what` if it takes more than 5 s (a
+/// regression that deadlocks the gate fails rather than hangs the run).
+async fn within<T>(what: &str, fut: impl std::future::Future<Output = T>) -> T {
+    tokio::time::timeout(Duration::from_secs(5), fut)
+        .await
+        .unwrap_or_else(|_| panic!("{what} did not finish within 5 s"))
+}
+
 /// Poll `fut` once: it has arrived, and is waiting (on the gate).
 fn arrive<F: std::future::Future>(fut: std::pin::Pin<&mut F>) {
     let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
@@ -737,8 +745,8 @@ fn arrive<F: std::future::Future>(fut: std::pin::Pin<&mut F>) {
 /// erased; request B arrives while A's read is still running; A's read
 /// returns. A lists what its read saw, but B must not take that outcome (it
 /// began before B arrived and names a session erased before B arrived): B
-/// reads again and lists `t4-a` only. The store still sees one read at a
-/// time (`one_read_at_a_time`).
+/// reads again and lists `t4-a` only. The portal still issues one read at
+/// a time (`one_read_at_a_time`).
 #[tokio::test]
 async fn a_listing_never_reuses_a_read_older_than_the_request() {
     let store = two_sessions().await;
@@ -749,16 +757,19 @@ async fn a_listing_never_reuses_a_read_older_than_the_request() {
         let (discovery, held) = (discovery.clone(), held.clone());
         async move { found(discovery.sessions(held.as_ref()).await) }
     });
-    held.observed.notified().await;
+    within("read A observing the store", held.observed.notified()).await;
     erase(store.as_ref(), "t4-b").await;
 
     let mut b = std::pin::pin!(discovery.sessions(held.as_ref()));
     arrive(b.as_mut());
     held.release.notify_one();
 
-    assert_eq!(a.await.expect("request A"), ["t4-a", "t4-b"]);
     assert_eq!(
-        found(b.await),
+        within("request A", a).await.expect("request A"),
+        ["t4-a", "t4-b"]
+    );
+    assert_eq!(
+        found(within("request B", b).await),
         ["t4-a"],
         "B lists no session erased before it arrived"
     );
@@ -784,15 +795,18 @@ async fn requests_arriving_during_a_read_share_the_next_one() {
         let (discovery, held) = (discovery.clone(), held.clone());
         async move { found(discovery.sessions(held.as_ref()).await) }
     });
-    held.observed.notified().await;
+    within("read A observing the store", held.observed.notified()).await;
     let mut c = std::pin::pin!(discovery.sessions(held.as_ref()));
     let mut d = std::pin::pin!(discovery.sessions(held.as_ref()));
     arrive(c.as_mut());
     arrive(d.as_mut());
     held.release.notify_one();
 
-    assert_eq!(a.await.expect("request A"), ["t4-a", "t4-b"]);
-    let (c, d) = tokio::join!(c, d);
+    assert_eq!(
+        within("request A", a).await.expect("request A"),
+        ["t4-a", "t4-b"]
+    );
+    let (c, d) = within("requests C and D", async { tokio::join!(c, d) }).await;
     assert_eq!(found(c), ["t4-a", "t4-b"]);
     assert_eq!(found(d), ["t4-a", "t4-b"]);
     assert_eq!(
