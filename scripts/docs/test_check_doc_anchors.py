@@ -303,6 +303,22 @@ class Test(Fixture):
                 self.assertIn(says, errors[0])
                 self.assertIn("test: ", errors[0])
 
+    def test_an_attribute_with_test_mid_path_is_not_a_test(self):
+        self.write("src/daemon/mid.rs", "#[my::test::helper]\nfn not_a_test() {}\n")
+        errors = self.errors("{/* test: src/daemon/mid.rs not_a_test */}")
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn("is not a test", errors[0])
+
+    def test_a_test_inside_a_macro_body_is_found(self):
+        self.write("src/daemon/prop.rs", "proptest! {\n    #[test]\n    fn holds(x in 0..9u8) {}\n}\n")
+        self.assertEqual(self.errors("{/* test: src/daemon/prop.rs holds */}"), [])
+
+    def test_comment_lines_count_toward_the_window(self):
+        far = "#[test]\n" + "// note\n" * (cda.ATTR_LINES + 1) + "fn far_below() {}\n"
+        self.write("src/daemon/far2.rs", far)
+        errors = self.errors("{/* test: src/daemon/far2.rs far_below */}")
+        self.assertEqual(len(errors), 1, errors)
+
     def test_the_attribute_must_be_near(self):
         far = "#[test]\n" + "\n" * (cda.ATTR_LINES + 1) + "fn far_below() {}\n"
         self.write("src/daemon/far.rs", far)
@@ -314,6 +330,7 @@ class Test(Fixture):
         for path, is_test in [
             ("test", True), ("tokio::test", True), ("sqlx::test", True),
             ("cfg", False), ("testing", False), ("ignore", False),
+            ("my::test::helper", False), ("test::helper", False),
         ]:
             with self.subTest(path=path):
                 self.assertEqual(cda.is_test_attribute(path), is_test)

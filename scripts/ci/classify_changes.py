@@ -37,11 +37,14 @@ RUST_FILES = {
 # docs' source checks (scripts/docs/check-doc-anchors.py and
 # check-doc-examples.py). Those read every docs page and what the pages'
 # anchors cite: the Lean models, the oracle vectors, the constant pins in
-# src/formal_constants_tests.rs and any `src/` file a `code:` anchor names.
+# src/formal_constants_tests.rs, any file a `code:` anchor names (under
+# src/, and migrations/ for the SQL schema) and any test file a `test:`
+# anchor names (under src/ and tests/), so a renamed or deleted test fails
+# the docs job.
 MIRROR_PREFIXES = (
     "site/src/content/docs/", "docs/reference/", "scripts/docs/",
     "formal/LamboProofs/", "formal/oracle/",
-    "src/",
+    "src/", "tests/", "migrations/",
 )
 
 

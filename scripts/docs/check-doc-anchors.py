@@ -43,10 +43,11 @@ The rules:
   plain Rust identifier that the file declares as a `fn`, outside comments
   and strings, with a test attribute above it: walking up from the `fn`
   over its qualifiers (`pub`, `async`, ...) and the attributes stacked on
-  it, no further than ATTR_LINES lines, one attribute's path must have a
-  `test` segment (`#[test]`, `#[tokio::test]`, `#[tokio::test(flavor =
-  ...)]`). So a helper fn fails, and `#[cfg(test)]`, whose path is `cfg`,
-  does not count.
+  it, no further than ATTR_LINES lines (comment and doc-comment lines
+  count toward them), one attribute's path must end in a `test` segment
+  (`#[test]`, `#[tokio::test]`, `#[tokio::test(flavor = ...)]`). So a
+  helper fn fails, and neither `#[cfg(test)]` (whose path is `cfg`) nor
+  `#[my::test::helper]` (whose path ends in `helper`) counts.
 * `oracle:` is checked by check-doc-examples.py; here it only counts.
 * Any other comment that starts like an anchor (`{/* lean : ...`,
   `{/*const:`, `{/* Code: ...`, `{/* orcale: ...`, `{/* tests: ...`, one
@@ -71,9 +72,10 @@ Known limits (the check is textual, not a Rust parser):
 * `test:` checks that a name is a test fn in that file, not that the test is
   compiled, run or passing: a test behind a feature or marked `#[ignore]`
   passes. Two fns of one name in one file (in two `mod`s) pass when either
-  is a test. A test that a macro generates (`proptest!`, a `macro_rules!`
-  that expands to `#[test]`) is not found. Nothing checks that the test
-  asserts what the sentence says; that is the writer's job.
+  is a test. A test written out inside a macro call's body (`proptest! {
+  #[test] fn name(..) }`) is found, since the check reads the text; one a
+  `macro_rules!` builds from pieces (`fn $name`) is not. Nothing checks that
+  the test asserts what the sentence says; that is the writer's job.
 
 Exit codes: 0 when every anchor resolves; 1 when one does not; 2 on a usage
 error; 3 when an input cannot be read (a page or source file that is not
@@ -411,6 +413,8 @@ def check_code(body: str, sources: Sources) -> list[str]:
 
 # How far above a test fn its test attribute may sit, in lines: room for a
 # stack such as `#[tokio::test(flavor = ...)]`, `#[ignore]` and `#[serial]`.
+# Comment and doc-comment lines between them are blanked, not removed, so
+# they count toward the window.
 ATTR_LINES = 8
 FN_DECL = (
     r"(?:\bpub(?:\([^)]*\))?\s+)?(?:\bconst\s+)?(?:\basync\s+)?(?:\bunsafe\s+)?"
@@ -456,9 +460,10 @@ def attributes_above(code: str, start: int) -> list[str]:
 
 
 def is_test_attribute(path: str) -> bool:
-    """Whether an attribute path names a test: a `test` segment, as in
-    `test`, `tokio::test`. `cfg` (of `#[cfg(test)]`) does not."""
-    return "test" in path.split("::")
+    """Whether an attribute path names a test: its last segment is `test`,
+    as in `test` and `tokio::test`. `cfg` (of `#[cfg(test)]`) and
+    `my::test::helper` do not."""
+    return path.split("::")[-1] == "test"
 
 
 def check_test(body: str, sources: Sources) -> list[str]:
