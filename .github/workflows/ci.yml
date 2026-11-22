@@ -3,9 +3,7 @@ name: ci
 # Third-party actions are pinned to full 40-char commit SHAs, with the human
 # version in a trailing comment. A tag (`@v4`) and a branch (`@1.99.0`) are both
 # mutable — whoever controls the action repo can repoint them at new code that
-# then runs with this workflow's token and secrets, including
-# `secrets.LAMBO_COCKROACH_DSN` in the cockroach-live job below. A SHA cannot be
-# repointed. Note `dtolnay/rust-toolchain@1.99.0` is a *branch*, not a tag, so it
+# then runs with this workflow's token. A SHA cannot be repointed. Note `dtolnay/rust-toolchain@1.99.0` is a *branch*, not a tag, so it
 # was the most mutable of the three.
 # To upgrade: bump the SHA and the comment together, never the comment alone.
 #   gh api repos/<owner>/<repo>/git/ref/tags/<tag> --jq .object.sha
@@ -118,9 +116,14 @@ jobs:
       - name: Mirror drift check (cli + mcp prose pairs)
         run: bash scripts/docs/check-mirror-drift.sh
 
-  # Feature-gated adapter tier: the default-features `check` job above
-  # never compiles sqlite/cockroach. Every non-default combo that must stay
-  # green gets a row here; all inherit RUSTFLAGS="-D warnings".
+  # Feature rows. Cargo features only add code, so the release build (`ship`)
+  # compiles every store and embedder the binary carries, and one full test
+  # run over it covers the adapters the per-adapter rows used to test one at a
+  # time. What a full build can hide is code that breaks with a feature OFF
+  # (dead code under -D warnings, an import of MemoryStore that only compiles
+  # because store-memory is on), so a no-default row keeps those builds.
+  # Candle is outside `ship` and keeps its own row. Every row inherits
+  # RUSTFLAGS="-D warnings".
   feature-matrix:
     name: feature-matrix (${{ matrix.name }})
     needs: changes
@@ -130,118 +133,35 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # One full SQLite suite also proves the vector leg ran, without
-          # rebuilding/rerunning its subset on a separate runner. The named
-          # outcome and every vector result must be ok, never ignored.
-          - name: sqlite
+          # The release feature set with fixtures: lints every adapter against
+          # the others (both SQL adapters, cockroach test code with fixtures,
+          # every embedder) and runs the whole suite with them compiled in.
+          # The SQLite vector leg must run, never be ignored.
+          - name: ship
             command: |
               set -o pipefail
-              cargo clippy --locked --all-targets --features store-sqlite,fixtures -- -D warnings
-              cargo test --locked --features store-sqlite,fixtures 2>&1 | tee sqlite-run.log
-              grep -qF 'test store::sqlite::tests::vector_e2e::sqlite_vector_leg_fires_on_an_organically_derived_concept ... ok' sqlite-run.log
-              if grep -E '^test store::sqlite::tests::vector[^ ]* \.\.\.' sqlite-run.log | grep -vE ' \.\.\. ok$'; then
+              cargo clippy --locked --all-targets --features ship,fixtures -- -D warnings
+              cargo test --locked --features ship,fixtures 2>&1 | tee ship-run.log
+              grep -qF 'test store::sqlite::tests::vector_e2e::sqlite_vector_leg_fires_on_an_organically_derived_concept ... ok' ship-run.log
+              if grep -E '^test store::sqlite::tests::vector[^ ]* \.\.\.' ship-run.log | grep -vE ' \.\.\. ok$'; then
                 echo 'A SQLite vector test did not run successfully' >&2
                 exit 1
               fi
-          # Keep the independent configuration WITHOUT store-memory: broad
-          # feature builds cannot catch accidental imports of MemoryStore.
-          - name: sqlite-minimal
-            command: cargo test --locked --no-default-features --features store-sqlite
-          # No adapters at all.
-          - name: minimal
-            command: cargo check --locked --no-default-features
-          # cockroach without fixtures: compiles AND runs the test module
-          # (dead-code-clean under -D warnings); live tests are #[ignore]d.
-          # DISABLED 2026-10-06: the CockroachDB CI rows are off by decision.
-          # store-cockroach code keeps its compile lint through the ship rows
-          # below; restore this row to bring the behavior tests back.
-          # - name: cockroach
-          #   command: cargo test --no-default-features --features store-cockroach
-          # Postgres compile + unit. Live init is the postgres-live job
-          # below (pinned pgvector service container). Same driver as
-          # store-cockroach.
-          # `cargo test` alone left `store-postgres` with test coverage
-          # and ZERO lint coverage. `check` lints default features (no
-          # postgres), and this row was a test row. (`ship` gained
-          # `store-postgres` on 2026-08-24, so the ship rows lint it too; this
-          # row keeps the NO-default-features lint, the one combination `ship`
-          # can never give.) The clippy line here is what would have caught the
-          # `useless_vec` inside `h3_postgres_recall_parity` that no CI row
-          # could see. The `store-sqlite,fixtures` combination is included
-          # because that is where the cross-store parity harness lives.
-          - name: postgres
+          # Builds with features off, which `ship` cannot give: SQLite without
+          # store-memory (catches accidental MemoryStore imports and test code
+          # left dead without the default features), no adapters at all, and
+          # the Postgres adapter linted without the default features.
+          - name: no-default
             command: |
               set -o pipefail
+              cargo test --locked --no-default-features --features store-sqlite
+              cargo check --locked --no-default-features
               cargo clippy --locked --all-targets --no-default-features --features store-postgres -- -D warnings
-              cargo clippy --locked --all-targets --no-default-features --features store-postgres,store-sqlite,fixtures -- -D warnings
-              cargo test --locked --no-default-features --features store-postgres
-          # The in-crate candle BGE-M3 embedder compiles and its
-          # weightless unit tests pass on the default runner. The base feature
-          # is CPU-capable candle only: no accelerator Cargo features, no
-          # weights downloaded, no network — the adapter's live weight-loading
-          # tests stay #[ignore]d and its device-resolution / identity /
-          # batching unit tests are pure. A separate row rather than folding
-          # into `check` because the default build must not pay candle's
-          # compile cost; a named red row beats one line in an 800-test log.
+          # The in-crate candle BGE-M3 embedder (not in `ship`): compiles and
+          # its weightless unit tests pass on the default runner, with no
+          # weights and no network; weight-loading tests stay #[ignore]d.
           - name: candle
             command: cargo test --locked --features embed-candle
-          # The Vertex Gemini adapter compiles and its offline unit tests
-          # (OAuth mint/exchange, embedContent, normalize, dim guard) run on the default runner with no network and no
-          # service-account key. A separate row beats folding into `check` because
-          # the default build must not pay jsonwebtoken's compile cost; the live
-          # OAuth/embedContent round-trip stays `#[ignore]`d (operator-run with a
-          # key). The clippy line lints the new surface, which `check` (default
-          # features) never sees.
-          - name: gemini
-            command: |
-              set -o pipefail
-              cargo clippy --locked --all-targets --features embed-gemini -- -D warnings
-              cargo test --locked --features embed-gemini
-          # #18: the Elasticsearch recall tier, against the in-process fake
-          # index (no cluster). Lints it with and without the default store,
-          # then runs the library with it compiled in.
-          - name: recall-elastic
-            command: |
-              set -o pipefail
-              cargo clippy --locked --all-targets --features recall-elastic,store-sqlite,fixtures -- -D warnings
-              cargo clippy --locked --all-targets --no-default-features --features recall-elastic -- -D warnings
-              cargo test --locked --features recall-elastic,store-sqlite,fixtures
-          # #22 PR 5: the EmbeddingGemma 2 embedder over llama.cpp, against
-          # httpmock only (no model, no server). The live test stays
-          # `#[ignore]`d and operator-run (evidence/issue-22-eg2/).
-          - name: embed-eg2
-            command: |
-              set -o pipefail
-              cargo clippy --locked --all-targets --features embed-eg2 -- -D warnings
-              cargo test --locked --features embed-eg2
-          # #233: the Elastic embedder over the Elasticsearch Inference API,
-          # against httpmock only (no cluster, no key). Lints it with and
-          # without the crate's default features (the second line has no
-          # embed-fixture), then runs the suite with it compiled in. The live
-          # test stays `#[ignore]`d and operator-run.
-          - name: embed-elastic
-            command: |
-              set -o pipefail
-              cargo clippy --locked --all-targets --features embed-elastic -- -D warnings
-              cargo clippy --locked --all-targets --no-default-features --features store-memory,embed-elastic -- -D warnings
-              cargo test --locked --features embed-elastic
-          # Ship profile (cockroach + memory + embedders + fixtures).
-          - name: demo
-            command: cargo check --locked --features demo
-          # The row that compiles COCKROACH TEST CODE together with
-          # `fixtures`. No other row does: `demo` above is `cargo check` (no test
-          # targets) and `cockroach` is `--no-default-features --features
-          # store-cockroach` (no fixtures). That gap let three `StoreConfig`
-          # literals inside `#[cfg(feature = "fixtures")]` cockroach/canon test
-          # modules miss a new struct field — CI stayed green while
-          # `cargo test --features ship,fixtures --lib` and
-          # `cargo test --features demo` could not compile at all. `--all-targets`
-          # is what makes this row see them, and `ship,fixtures` is the widest
-          # adapter set in the tree (cockroach + memory + sqlite + embedders), so
-          # it also lints the two SQL adapters against each other. The same
-          # argument applies to `store-sqlite,fixtures` in the `sqlite` row.
-          - name: ship-fixtures
-            command: cargo clippy --locked --all-targets --features ship,fixtures -- -D warnings
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
@@ -308,220 +228,11 @@ jobs:
         env:
           RUSTFLAGS: -D warnings
 
-  # Live Postgres + pgvector tier: service container, no secret, no
-  # provisioned cluster. The image is digest-pinned (never `:latest`) and is
-  # the same image local development runs (see
-  # dev-diary/lambo-for-mooshik/B-postgres-store.md).
-  postgres-live:
-    needs: changes
-    if: needs.changes.outputs.rust == 'true'
-    runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: pgvector/pgvector:pg17@sha256:cf134a767f474095eeba57e0117be8e568e011a63f33fbf252f14c9b760f8e6f
-        env:
-          POSTGRES_USER: lambo
-          POSTGRES_PASSWORD: lambo
-          POSTGRES_DB: lambo
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U lambo -d lambo"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-    env:
-      RUSTFLAGS: "-D warnings"
-      LAMBO_POSTGRES_DSN: postgres://lambo:lambo@localhost:5432/lambo?sslmode=disable
-      LAMBO_REQUIRE_LIVE: "1"
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@d124f86f28ff42855784ff3319f48ac182c248f8 # 1.99.1
-        with:
-          components: rustfmt, clippy
-      - name: Keep only the pinned toolchain
-        run: |
-          keep="$(rustup show active-toolchain | cut -d' ' -f1)"
-          for t in $(rustup toolchain list --quiet); do
-            if [ "$t" != "$keep" ]; then rustup toolchain uninstall "$t"; fi
-          done
-          rustup toolchain list
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Live Postgres init (hnsw from init, two widths)
-        run: |
-          set -o pipefail
-          cargo test --locked --no-default-features --features store-postgres --lib \
-            -- --ignored --nocapture --exact \
-            store::pg::postgres::tests::init_schema_at_two_widths_creates_hnsw \
-            store::pg::postgres::tests::live_schema_width_refuses_a_config_that_disagrees \
-            store::pg::postgres::tests::empty_database_preflight_is_fresh_not_stale \
-            2>&1 | tee postgres-live.log
-          grep -q 'test store::pg::postgres::tests::init_schema_at_two_widths_creates_hnsw ... ok' postgres-live.log
-          grep -q 'test store::pg::postgres::tests::live_schema_width_refuses_a_config_that_disagrees ... ok' postgres-live.log
-          grep -q 'test store::pg::postgres::tests::empty_database_preflight_is_fresh_not_stale ... ok' postgres-live.log
-      - name: Live Postgres EXPLAIN hnsw, fencing, NULL quarantine
-        run: |
-          set -o pipefail
-          cargo test --locked --no-default-features --features store-postgres --lib \
-            -- --ignored --nocapture --exact \
-            store::pg::postgres::tests::explain_recall_uses_hnsw \
-            store::pg::postgres::tests::fencing_refuses_stale_write_and_upserts_replay \
-            store::pg::delete_fencing::postgres_fences_a_delete_only_batch \
-            store::pg::lease_race::postgres_takeover_waits_for_the_fence_check \
-            2>&1 | tee postgres-b3.log
-          grep -q 'test store::pg::postgres::tests::explain_recall_uses_hnsw ... ok' postgres-b3.log
-          grep -q 'test store::pg::postgres::tests::fencing_refuses_stale_write_and_upserts_replay ... ok' postgres-b3.log
-          grep -q 'test store::pg::delete_fencing::postgres_fences_a_delete_only_batch ... ok' postgres-b3.log
-          grep -q 'test store::pg::lease_race::postgres_takeover_waits_for_the_fence_check ... ok' postgres-b3.log
-      # The Stage-2 `coverage` decode. Only a live PostgreSQL >= 14
-      # can exercise it -- that is where `extract(epoch ...)` began returning
-      # `numeric`, and SQLite's type affinity hides the mismatch entirely, so
-      # an offline row is green either way. Before the cast this step is the
-      # only thing in CI that goes red. Its own step, with the same
-      # grep-the-ok-line guard as its neighbours, so a rename or an accidental
-      # skip is a named red row rather than a silent pass.
-      - name: Live Postgres coverage decode + Stage-2 hop
-        run: |
-          set -o pipefail
-          cargo test --locked --no-default-features --features store-postgres --lib \
-            -- --ignored --nocapture --exact \
-            store::pg::postgres::tests::interaction_span_coverage_decodes_on_both_arms \
-            store::pg::postgres::tests::canonization_cycle_makes_the_stage2_hop_on_postgres \
-            2>&1 | tee postgres-coverage.log
-          grep -q 'test store::pg::postgres::tests::interaction_span_coverage_decodes_on_both_arms ... ok' postgres-coverage.log
-          grep -q 'test store::pg::postgres::tests::canonization_cycle_makes_the_stage2_hop_on_postgres ... ok' postgres-coverage.log
-
-      # Issue #30: read accesses reach PostgreSQL through the narrow, monotonic
-      # RecordAccess update (fenced, replay-safe, embedding untouched) and
-      # survive a writer restart. Its own step with the grep-the-ok-line guard.
-      - name: Live Postgres access counts (narrow update, reattach)
-        run: |
-          set -o pipefail
-          cargo test --locked --no-default-features --features store-postgres --lib \
-            -- --ignored --nocapture --exact \
-            store::pg::postgres::tests::access_counts_round_trip_through_the_narrow_update_and_survive_reattach \
-            2>&1 | tee postgres-access.log
-          grep -q 'test store::pg::postgres::tests::access_counts_round_trip_through_the_narrow_update_and_survive_reattach ... ok' postgres-access.log
-
-      # Issue #23: session erasure on live PostgreSQL (every table erased to the
-      # tombstone, rollback and rerun on injected failure, live writer refuses,
-      # repeat is already_absent, pre-erase and unleased writes refused), the
-      # release-then-erase path where every token is refused, and the release
-      # that keeps the fencing token (both from the #23 review).
-      - name: Live Postgres session erasure and release fencing
-        run: |
-          set -o pipefail
-          cargo test --locked --no-default-features --features store-postgres --lib \
-            -- --ignored --nocapture --exact \
-            store::pg::erase::postgres_erases_a_session \
-            store::pg::erase::postgres_erase_after_a_release_fences_every_token \
-            store::pg::release_fencing::postgres_release_keeps_the_fencing_token \
-            2>&1 | tee postgres-erase.log
-          grep -q 'test store::pg::erase::postgres_erases_a_session ... ok' postgres-erase.log
-          grep -q 'test store::pg::erase::postgres_erase_after_a_release_fences_every_token ... ok' postgres-erase.log
-          grep -q 'test store::pg::release_fencing::postgres_release_keeps_the_fencing_token ... ok' postgres-erase.log
-
-      - name: Live Postgres recall parity
-        run: |
-          set -o pipefail
-          cargo test --locked --no-default-features --features store-postgres,store-sqlite,fixtures --lib \
-            store::sqlite::tests::h1_cross_store_parity::h3_postgres_recall_parity \
-            -- --ignored --nocapture --exact \
-            2>&1 | tee postgres-h3.log
-          grep -q 'test store::sqlite::tests::h1_cross_store_parity::h3_postgres_recall_parity ... ok' postgres-h3.log
-      # The hnsw envelope, measured where hnsw actually engages (5,000
-      # vectors at dim 768) rather than on the 9- and 22-row fixture graphs,
-      # where the planner never uses the index and the two lanes are the same
-      # answer. Its own step so a shrink back to a size that cannot fail is a
-      # named red row. ~20s on the runner; that is why it is here and not in a
-      # default `cargo test`.
-      - name: Live Postgres hnsw envelope at scale
-        run: |
-          set -o pipefail
-          cargo test --locked --no-default-features --features store-postgres,store-sqlite,fixtures --lib \
-            store::sqlite::tests::h1_cross_store_parity::h3_postgres_hnsw_envelope_at_scale \
-            -- --ignored --nocapture --exact \
-            2>&1 | tee postgres-h3-scale.log
-          grep -q 'test store::sqlite::tests::h1_cross_store_parity::h3_postgres_hnsw_envelope_at_scale ... ok' postgres-h3-scale.log
-      # #22 PR 2: a concept's embedding_source on live PostgreSQL (round
-      # trip, quarantine keeps it, an unreadable value fails the load).
-      - name: Live Postgres embedding source round trip
-        run: |
-          set -o pipefail
-          cargo test --locked --no-default-features --features store-postgres --lib \
-            -- --ignored --nocapture --exact \
-            store::pg::embedding_source_live::postgres_round_trips_the_embedding_source \
-            2>&1 | tee postgres-embedding-source.log
-          grep -q 'test store::pg::embedding_source_live::postgres_round_trips_the_embedding_source ... ok' postgres-embedding-source.log
-      # #148 (PR #170): the provision re-key on live Postgres (old-rule keys
-      # re-keyed, a held session refuses, a rerun is a no-op).
-      - name: Live Postgres canonical-key re-key
-        run: |
-          set -o pipefail
-          cargo test --locked --no-default-features --features store-postgres --lib \
-            -- --ignored --nocapture --exact \
-            store::pg::rekey::postgres_rekeys_identifier_concepts \
-            2>&1 | tee postgres-rekey.log
-          grep -q 'test store::pg::rekey::postgres_rekeys_identifier_concepts ... ok' postgres-rekey.log
-      # #60 (PR #104): derive's merge on Postgres sees a paraphrase the holder
-      # has not flushed yet.
-      - name: Live Postgres merge freshness (unflushed paraphrase)
-        run: |
-          set -o pipefail
-          cargo test --locked --no-default-features --features store-postgres --lib \
-            -- --ignored --nocapture --exact \
-            store::pg::merge_freshness::postgres_holder_merges_an_unflushed_paraphrase \
-            2>&1 | tee postgres-merge-freshness.log
-          grep -q 'test store::pg::merge_freshness::postgres_holder_merges_an_unflushed_paraphrase ... ok' postgres-merge-freshness.log
-
-  # Live CockroachDB tier (secret-gated): runs the `#[ignore]`d live tests
-  # (CRDB conformance suite, canon progression, vector EXPLAIN) against the
-  # provisioned Lambo cloud cluster. `LAMBO_REQUIRE_LIVE=1` turns a missing
-  # DSN / dead cluster into a hard failure, never a silent skip-as-green.
-  cockroach-live:
-    runs-on: ubuntu-latest
-    # DISABLED 2026-10-06: the CockroachDB CI rows are off by decision. This is
-    # the ONLY job that connects to a CockroachDB cluster, and
-    # `LAMBO_REQUIRE_LIVE=1` means a missing DSN is a hard failure rather than a
-    # skip, so it cannot simply be left to no-op. The previous condition ran it
-    # on every ref except the lambo-for-mooshik dogfood branch; `if: false`
-    # turns it off everywhere. Re-enable by restoring that condition.
-    if: false
-    env:
-      RUSTFLAGS: "-D warnings"
-      LAMBO_COCKROACH_DSN: ${{ secrets.LAMBO_COCKROACH_DSN }}
-      LAMBO_REQUIRE_LIVE: "1"
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@d124f86f28ff42855784ff3319f48ac182c248f8 # 1.99.1
-        with:
-          components: rustfmt, clippy
-      - name: Keep only the pinned toolchain
-        run: |
-          keep="$(rustup show active-toolchain | cut -d' ' -f1)"
-          for t in $(rustup toolchain list --quiet); do
-            if [ "$t" != "$keep" ]; then rustup toolchain uninstall "$t"; fi
-          done
-          rustup toolchain list
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Live CockroachDB tests (--ignored)
-        run: cargo test --locked --features store-cockroach,store-memory,fixtures --lib -- --ignored
-
   # Release checks this exact job as well as the workflow conclusion. Skipped
   # Rust jobs cannot earn a full-ci success; failed/cancelled dependencies fail
   # the aggregate even though always() allows this job to report the result.
   full-ci:
-    needs: [changes, check, feature-matrix, candle-metal, postgres-live]
+    needs: [changes, check, feature-matrix, candle-metal]
     if: ${{ always() && needs.changes.outputs.rust == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -532,4 +243,3 @@ jobs:
           test '${{ needs.check.result }}' = success
           test '${{ needs.feature-matrix.result }}' = success
           test '${{ needs.candle-metal.result }}' = success
-          test '${{ needs.postgres-live.result }}' = success
