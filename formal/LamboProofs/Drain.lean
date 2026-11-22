@@ -14,7 +14,9 @@ Rust items modelled (paths as at `16e9aafa`):
 * `src/writeq/drain.rs`: `quiesce`, `abort_workers` (every unsettled receipt
   set aside), `settle_deferred` with `CloseFlush` (including the
   `close_unflushed → intent_durable` upgrade on a retried close), and
-  `abort_all_sync`.
+  `abort_all_sync`, which only `Memory`'s `Drop` calls; and which
+  `CloseFlush` `Memory::close` and `Memory::close_fenced`
+  (`src/memory/shutdown.rs`) pass to `settle_deferred`.
 * `src/writeq/replay.rs`: `spawn_replay` (seeding the restart map, the
   unconsumed filter, the liveness gate, the loop's match arm by arm, both
   streaks, `EMBEDDER_SICK_THRESHOLD`, `REPLAY_LOOKUP_TIMEOUT_LIMIT`; since
@@ -49,13 +51,20 @@ process's sequence starts at 1.
 
 ## Results
 
+**Two worker layers.** `workerStep`, `work` and `close` model the lane worker
+**before #295**, when an in-session embedder outage (or lookup timeout)
+answered `failed`; the theorems over them are marked "before #295" below and
+in their doc comments, and describe behaviour the current Rust no longer has.
+`stepW`/`runW` model the current worker (held writes, retries, the fence), and
+`closeW` the current close; the last item below lists the theorems over them.
+
 * `drain_fifo`, `drain_extends_taken`: a lane drained to completion has taken
   exactly the submitted jobs in submission order; what it had taken before is
   a prefix (agrees with `Receipts.lane_fifo`).
-* `drain_settles_each`, `work_log`, `drained_final`: every admitted write is
-  settled once with the worker's answer (`applied` or `failed`), one batch per
-  job, and no later settle changes it.
-* `workerStep_atomic`, `crash_never_reapplies`: a write in the durable log has
+* Before #295: `drain_settles_each`, `work_log`, `drained_final`: every
+  admitted write is settled once with the worker's answer (`applied` or
+  `failed`), one batch per job, and no later settle changes it.
+* Before #295: `workerStep_atomic`, `crash_never_reapplies`: a write in the durable log has
   its consume beside it, so no replay after a crash applies it again
   (`Graph::consume_write_intent`: "the double-apply this design excludes").
   Proved for logs shaped "all puts, then worker batches": the Rust relies on
@@ -65,13 +74,17 @@ process's sequence starts at 1.
   write-with-consume shape, `loop_facts`).
   Like `shutdown_no_silent_loss`, it is about one process's log over an
   empty intent table: an earlier epoch's backlog is not in the statement.
-* `close_settles_all`, `close_answer`, `shutdown_no_silent_loss`: after
-  `close()` every receipt is settled, and each admitted write is drained,
-  `intent_durable` and owed by the next replay, or `close_unflushed`
-  ("deferred, not lost", `quiesce`). `retry_upgrades`: the one
-  settled-to-settled change. `drop_settles_nothing`: the `Drop` path, the
-  documented exception; it is definitional (`abortAllSync` is the identity on
-  receipts) and is there to name the gap, not to prove anything about it.
+  Current counterpart: `crash_never_reappliesW`.
+* Before #295: `close_settles_all`, `close_answer`, `shutdown_no_silent_loss`:
+  after `close()` every receipt is settled, and each admitted write is
+  drained, `intent_durable` and owed by the next replay, or `close_unflushed`
+  ("deferred, not lost", `quiesce`). Current counterparts:
+  `shutdown_no_silent_lossW`, `held_at_closeW`. `retry_upgrades`: the one
+  settled-to-settled change (about `deferEntry`, so it holds of the current
+  close too; `closeW_retry_upgradesW`). `drop_settles_nothing`: the `Drop`
+  path, the documented exception; it is definitional (`abortAllSync` is the
+  identity on receipts) and is there to name the gap, not to prove anything
+  about it.
 * `replay_applied_pending`, `replay_drained`, `replay_idempotent`,
   `replay_complete_idem`: replay applies only unconsumed rows; replaying a
   fully drained queue changes nothing; a replayed write is never applied by a
@@ -113,9 +126,11 @@ process's sequence starts at 1.
   cross-process order is the old one; `fixedLoad_agrees`: while the clock
   behaves the load is unchanged; `fixed_badId_settled`: an unparseable
   receipt id is settled `failed`; `fixedD_input_goes_on`: #294 still holds.
-* `outage_failed_but_owed`: an in-session `EmbedUnavailable` answers
-  `failed` and leaves the write owed (test
-  `a_write_reached_during_an_in_session_embedder_outage_is_not_consumed`).
+* Before #295: `outage_failed_but_owed`: an in-session `EmbedUnavailable`
+  answered `failed` and left the write owed. The current Rust does not do
+  this: it holds the write (`pending_replay`), `outage_holdsW` (test
+  `a_write_reached_during_an_in_session_embedder_outage_is_not_consumed`,
+  which since #295 asserts `pending_replay`, then `intent_durable` at close).
 
 * The replay after review (#295; `stepQ`, `replayP`, `serveQ`): a retry pass
   gives each deferred agent one more attempt in the serve, an id in another
@@ -156,14 +171,34 @@ process's sequence starts at 1.
   all get an answer other than an outage holds nothing after its next write.
   `OrderInv`, `loopD_preserves`, `replayD_preserves`: the order argument as an
   invariant each pass keeps.
+* The close, crash and shutdown over the current worker (`closeW` after any
+  `runW` trace; `InvW`, `sessionW_inv`): `shutdown_no_silent_lossW`,
+  `shutdown_exactly_oneW`: after a close every admitted write is exactly one
+  of applied, failed with its intent consumed, failed after the fence with its
+  intent left unconsumed, `intent_durable` and owed in the flushed log, or
+  `close_unflushed`, whether it was running, held or queued when the close
+  began; `held_at_closeW`: a held write answers `pending_replay` while held,
+  its intent unconsumed, and the close answers it `intent_durable` or
+  `close_unflushed`, never `failed` (a held write's retry can still settle
+  `failed` in session, on a content refusal or after the fence);
+  `outage_holdsW`: an outage holds the write (the current counterpart of
+  `outage_failed_but_owed`); `lookupTimeout_settlesW`,
+  `lookupTimeout_run_holdsW`, `heldErrW_holds`: a lookup timeout settles
+  `failed` and consumes the intent, except on a first attempt once the run of
+  them reaches the limit, which holds; `closeW_retry_upgradesW`: a retried close upgrades `close_unflushed`;
+  `runW_log_refines`: every batch of the current worker is one `workerStep`
+  appends; `serveR_applied_pending`: the current serve applies only stored,
+  unconsumed rows; `crash_never_reappliesW`: no write in a durable prefix of
+  the current worker's log is applied again by the current serve.
 
 What the model shows about the Rust (theorems in the last section):
 `transient_skip_reorders` and `outage_then_replay_reorders` (a transient
 embed answer breaks the per-agent order across serves; both halves fixed by
 #295: the replay defers the agent, the worker holds its later writes),
 `clock_step_reorders` (the load order trusts the wall clock; fixed by #295),
-`outage_failed_then_applied` (a doc fix: `ReceiptAnswer::Failed` says the
-write did not happen, and after an outage it later does),
+`outage_failed_then_applied` (before #295, a doc fix: `ReceiptAnswer::Failed`
+said the write did not happen, and after an outage it later did; since #295
+an outage answers `pending_replay`, not `failed`),
 `store_error_blocks_backlog` (a graph-dependent refusal raised as a plain
 `Invariant` stops the replay on every serve; fixed by #294, see above),
 `bad_id_never_settled` (fixed by #295).
@@ -284,17 +319,44 @@ takes that same lock, so a flush carries whole batches, and a batch is one
 store transaction (`Graph::consume_write_intent`'s doc). -/
 abbrev Batch := List Mut
 
-/-! ## The lane worker (`spawn_worker`, `execution.rs`) -/
+/-! ## The lane worker before #295 (`spawn_worker`, `execution.rs`)
 
-/-- One job through the lane worker: its receipt answer and the batch it
-appends. `fenced` is the lease-lost fence, checked before the run.
+**This layer describes the worker before #295, not the current Rust.**
+`workerStep`, `work`, `close` and the theorems over them (through
+`outage_failed_but_owed` and the examples that use them) model the worker as
+it was before #295: an in-session `EmbedUnavailable` (an outage or a lookup
+timeout) answered `failed`, left the intent owed, and let the agent's next
+write run. The current worker holds such a write instead (`pending_replay`,
+retried with backoff), settles a single lookup timeout `failed` with its
+intent consumed, and holds a first-attempt lookup timeout once a run of them
+has reached the limit (the third, and every later one until a write applies).
+It is modelled
+by `stepW`/`runW` (the section "The hold with admission, caps, retries and the
+fence"), and its close, crash and shutdown accounting by the section "The
+close, crash and shutdown over the current worker", whose theorems are the
+current counterparts named in each doc comment below. The old layer is kept,
+not deleted: it is what #295 fixed (`outage_then_replay_reorders`,
+`outage_failed_then_applied` are stated over it), and the lemmas about the
+shared pieces (`deferEntry`, `settleDeferred`, `retry_upgrades`, the intent
+table) still serve the current close. -/
+
+/-- One job through the lane worker **before #295**: its receipt answer and
+the batch it appends. `fenced` is the lease-lost fence, checked before the
+run.
 
 * lease lost: `failed`, nothing written, the intent deliberately not consumed;
 * `Ok`: `applied`; the write and `ConsumeWriteIntent(applied)` under one lock
   hold (`WriteCtx::run`, "Same lock hold as the commit");
 * `EmbedUnavailable` (outage or lookup timeout): `failed`, intent left
   unconsumed for the next serve;
-* any other error: `failed`, intent consumed `failed` on its own hold. -/
+* any other error: `failed`, intent consumed `failed` on its own hold.
+
+The current worker (`finishW`, `startW`) differs on the third arm: an outage,
+or a first-attempt lookup timeout once a run of them has reached the limit,
+holds the write (`pending_replay`, nothing appended), and any other lookup
+timeout settles `failed` with its intent consumed. Its batches are still `workerStep`'s
+(`runW_log_refines`), so the batch lemmas below (`workerStep_keys`,
+`workerStep_atomic`) carry over to it. -/
 def workerStep (fenced : Bool) (j : Job) (r : RunResult) : Answer × Batch :=
   if fenced then (.failed, [])
   else
@@ -326,8 +388,8 @@ def admitStore (js : List Job) : RStore := js.map (fun j => (j.key, ⟨.pending,
 
 def admitLog (js : List Job) : List Batch := js.map (fun j => [.put j])
 
-/-- The worker loop over the jobs it takes, in the order it takes them: run,
-settle, next. `fence` and `out` are the lease state and the run result at that
+/-- The worker loop **before #295** over the jobs it takes, in the order it
+takes them: run, settle, next (current worker: `runW`). `fence` and `out` are the lease state and the run result at that
 job (an outcome function: the model does not say why a run fails). -/
 def work (fence : Job → Bool) (out : Job → RunResult) (now : Int) :
     RStore → List Job → RStore × List Batch
@@ -344,7 +406,12 @@ def drainLane {α : Type} : Nat → Lane α → Lane α
 
 def drain {α : Type} (l : Lane α) : Lane α := drainLane l.queue.length l
 
-/-! ## Close (`drain.rs`) -/
+/-! ## Close (`drain.rs`)
+
+`CloseFlush`, `deferEntry`, `pendingIds` and `settleDeferred` are
+`settle_deferred` and `abort_workers`' set-aside as they are today, shared by
+both worker layers. `close` composes them with the worker **before #295**
+(`work`); the current close is `closeW`, over `runW`. -/
 
 /-- `CloseFlush`: how `close()`'s final flush ended. -/
 inductive CloseFlush where
@@ -372,7 +439,8 @@ def pendingIds (s : RStore) : List Key :=
 def settleDeferred (flush : CloseFlush) (now : Int) (ids : List Key) (s : RStore) : RStore :=
   ids.foldl (fun s r => update s r (deferEntry flush now)) s
 
-/-- `quiesce` then the final flush then `settle_deferred`. `done` is what the
+/-- `quiesce` then the final flush then `settle_deferred`, over the worker
+**before #295** (current: `closeW`). `done` is what the
 workers finished before the drain budget ran out, in the order they finished
 them; everything else is either still queued (an orphan) or was in flight and
 aborted at an `.await` before its commit, which (no `.await` between a commit
@@ -623,9 +691,16 @@ theorem lookup_admit {js : List Job} {j : Job} (hj : j ∈ js) :
       obtain ⟨e, he, ha⟩ := ih hj'
       exact ⟨e, by simp [lookup, hk, he], ha⟩
 
-/-! ## The worker -/
+/-! ## The worker before #295
 
-/-- The worker only ever settles with a settled answer. -/
+Every theorem in this section is about `workerStep`/`work`, the worker
+**before #295** (in-session outage answered `failed`). The current worker's
+counterparts: `InvW` and `sessionW_inv` (what each write's receipt holds),
+`runW_log_refines` (its batches are `workerStep`'s). -/
+
+/-- The worker **before #295** only ever settles with a settled answer. The
+current worker also answers `pending_replay` (unsettled) for a held write:
+`InvW.held`, `held_at_closeW`. -/
 theorem workerStep_settled (f : Bool) (j : Job) (r : RunResult) :
     (workerStep f j r).1.isSettled = true := by
   unfold workerStep
@@ -636,7 +711,10 @@ theorem workerStep_settled (f : Bool) (j : Job) (r : RunResult) :
     | ok => rfl
     | err e => cases e <;> rfl
 
-/-- The worker answers `applied` or `failed`, nothing else. -/
+/-- The worker **before #295** answers `applied` or `failed`, nothing else.
+The current worker settles only with those two as well (`InvW.settled`), but
+holds an outage's write `pending_replay` instead of answering it `failed`
+(`outage_holdsW`). -/
 theorem workerStep_answer (f : Bool) (j : Job) (r : RunResult) :
     (workerStep f j r).1 = .applied ∨ (workerStep f j r).1 = .failed := by
   unfold workerStep
@@ -647,7 +725,9 @@ theorem workerStep_answer (f : Bool) (j : Job) (r : RunResult) :
     | ok => exact Or.inl rfl
     | err e => cases e <;> exact Or.inr rfl
 
-/-- A worker batch mentions only its own job. -/
+/-- A worker batch mentions only its own job. Stated over `workerStep` (the
+worker before #295); it holds of the current worker's batches through
+`runW_log_refines`. -/
 theorem workerStep_keys {f : Bool} {j : Job} {r : RunResult} {m : Mut}
     (hm : m ∈ (workerStep f j r).2) : m = .write j.key ∨ ∃ t, m = .consume j.key t := by
   unfold workerStep at hm
@@ -663,7 +743,9 @@ theorem workerStep_keys {f : Bool} {j : Job} {r : RunResult} {m : Mut}
     | err e => cases e <;> simp [Err.transient] at hm <;> exact Or.inr ⟨_, hm⟩
 
 /-- **The commit carries its consume.** A worker batch that writes also
-consumes the intent as `applied`, in the same batch, so the same flush. -/
+consumes the intent as `applied`, in the same batch, so the same flush. Stated
+over `workerStep` (the worker before #295); it holds of the current worker's
+batches through `runW_log_refines`, which `crash_never_reappliesW` uses. -/
 theorem workerStep_atomic {f : Bool} {j : Job} {r : RunResult} {q : Key}
     (hm : Mut.write q ∈ (workerStep f j r).2) : Mut.consume q .applied ∈ (workerStep f j r).2 := by
   unfold workerStep at hm ⊢
@@ -677,7 +759,9 @@ theorem workerStep_atomic {f : Bool} {j : Job} {r : RunResult} {q : Key}
       simp
     | err e => cases e <;> simp [Err.transient] at hm
 
-/-- One batch per job, in the order the worker took them. -/
+/-- One batch per job, in the order the worker **before #295** took them.
+The current worker appends none for a held or fenced write
+(`runW_log_refines`, `stepW_log`). -/
 theorem work_log (fence : Job → Bool) (out : Job → RunResult) (now : Int) :
     ∀ (js : List Job) (s : RStore),
       (work fence out now s js).2 = js.map (fun j => (workerStep (fence j) j (out j)).2) := by
@@ -690,7 +774,8 @@ theorem work_log (fence : Job → Bool) (out : Job → RunResult) (now : Int) :
     rw [ih]
     rfl
 
-/-- The worker leaves the entries of other jobs alone. -/
+/-- The worker **before #295** leaves the entries of other jobs alone
+(current worker: the key-distinctness steps of `stepW_inv`). -/
 theorem work_lookup_other (fence : Job → Bool) (out : Job → RunResult) (now : Int) :
     ∀ (js : List Job) (s : RStore) (q : Key), q ∉ js.map (·.key) →
       lookup (work fence out now s js).1 q = lookup s q := by
@@ -705,7 +790,8 @@ theorem work_lookup_other (fence : Job → Bool) (out : Job → RunResult) (now 
     rw [ih _ q hq']
     exact lookup_update_ne s _ hne
 
-/-- Each job's receipt ends with the worker's answer for it, settled once. -/
+/-- Each job's receipt ends with the answer of the worker **before #295** for
+it, settled once (current worker: `InvW.settled`, `sessionW_inv`). -/
 theorem work_lookup (fence : Job → Bool) (out : Job → RunResult) (now : Int) :
     ∀ (js : List Job) (s : RStore) (j : Job), (js.map (·.key)).Nodup → j ∈ js →
       (∃ e, lookup s j.key = some e ∧ e.answer.isSettled = false) →
@@ -784,7 +870,11 @@ theorem drain_extends_taken {α : Type} (l : Lane α) : ∃ rest, l.taken ++ res
 /-- **Every admitted write is settled, once, with the worker's answer.** A
 lane drained to completion (no write outstanding) settles every job it was
 submitted with `workerStep`'s answer (`applied` or `failed`), and appends one
-batch per job. -/
+batch per job. **Before #295**: the current worker does not settle an
+outage's write but holds it, so a lane does not drain to completion while the
+embedder is down. Current counterparts: `runW_ord` (per agent, settled,
+running, held and queued writes are its admitted writes in order) and
+`shutdown_no_silent_lossW` (every admitted write's answer after a close). -/
 theorem drain_settles_each (ops : List (Lambo.Receipts.Op Job)) (fence : Job → Bool)
     (out : Job → RunResult) (now : Int)
     (hnd : ((Lambo.Receipts.submitted ops).map (·.key)).Nodup)
@@ -802,13 +892,21 @@ theorem drain_settles_each (ops : List (Lambo.Receipts.Op Job)) (fence : Job →
   exact ⟨e, he, by rw [ha]; rfl⟩
 
 /-- Settled once means settled for good (`Receipts.settleAll_fixed`): no later
-settle attempt changes a drained write's receipt. -/
+settle attempt changes a drained write's receipt. Stated for the answers of
+the worker **before #295**; the current worker's settled answers are the same
+two (`InvW.settled`), and `settleAll_fixed` applies to them unchanged. -/
 theorem drained_final (fence : Bool) (j : Job) (r : RunResult) (e : Entry)
     (h : e.answer = (workerStep fence j r).1) (later : List (Answer × Int)) :
     Lambo.Receipts.settleAll e later = e :=
   Lambo.Receipts.settleAll_fixed later e (h ▸ workerStep_settled fence j r)
 
-/-! ## Close: drained, deferred, or answered `close_unflushed` -/
+/-! ## Close: drained, deferred, or answered `close_unflushed`
+
+The `deferEntry` and `settleDeferred` lemmas here are about `settle_deferred`
+as it is today and serve the current close (`closeW`) too. The theorems about
+`close` (`close_settles_all`, `close_final`, `close_answer`) are over the
+worker **before #295**; their current counterparts are
+`shutdown_no_silent_lossW`, `held_at_closeW` and `closeW_retry_upgradesW`. -/
 
 theorem deferEntry_durable (now : Int) (e : Entry) :
     deferEntry .durable now e =
@@ -928,7 +1026,10 @@ theorem mem_pendingIds {s : RStore} {p : Key × Entry} (hp : p ∈ s)
 /-- **No receipt is left pending by a close.** Whatever the drain finished
 before its budget, every receipt in the store is settled afterwards: the drain
 settled some, and `abort_workers` set aside every other one for
-`settle_deferred` ("deferred, not lost"). -/
+`settle_deferred` ("deferred, not lost"). Stated over `close`, the worker
+**before #295** (in-session outage answered `failed`). Current counterpart:
+`shutdown_no_silent_lossW` (no admitted write is left `pending` or
+`pending_replay` after `closeW`). -/
 theorem close_settles_all (done : List Job) (fence : Job → Bool) (out : Job → RunResult)
     (now : Int) (flush : CloseFlush) (s : RStore) :
     ∀ p ∈ (close done fence out now flush s).1, p.2.answer.isSettled = true := by
@@ -939,7 +1040,9 @@ theorem close_settles_all (done : List Job) (fence : Job → Bool) (out : Job �
   | false => exact absurd (mem_pendingIds hp h) hpi
 
 /-- And settled for good: no later settle attempt changes any receipt after a
-close (`Receipts.settleAll_fixed`). -/
+close (`Receipts.settleAll_fixed`). Over `close`, the worker **before #295**;
+`shutdown_no_silent_lossW`'s answers for the current close are all settled, so
+`settleAll_fixed` applies to them unchanged. -/
 theorem close_final (done : List Job) (fence : Job → Bool) (out : Job → RunResult) (now : Int)
     (flush : CloseFlush) (s : RStore) (p : Key × Entry)
     (hp : p ∈ (close done fence out now flush s).1) (later : List (Answer × Int)) :
@@ -972,7 +1075,10 @@ theorem eq_of_key {js : List Job} (hnd : (js.map (·.key)).Nodup) {a b : Job} (h
 (distinct receipt ids) of which the drain finished `done`: a finished job
 carries the worker's answer (`applied` or `failed`); every other one is
 `intent_durable` when the final flush landed and `close_unflushed` when it did
-not. No job is in neither state. -/
+not. No job is in neither state. Stated over the worker **before #295**
+(`workerStep`, under which an in-session outage answers `failed`), so it says
+nothing about a held write. Current counterparts: `shutdown_no_silent_lossW`
+(every admitted write, held and fenced writes included) and `held_at_closeW`. -/
 theorem close_answer (all done : List Job) (fence : Job → Bool) (out : Job → RunResult)
     (now : Int) (flush : CloseFlush) (hnd : (all.map (·.key)).Nodup)
     (hdone : ∀ d ∈ done, d ∈ all) (hdnd : (done.map (·.key)).Nodup) (j : Job) (hj : j ∈ all) :
@@ -1022,7 +1128,10 @@ theorem close_answer (all done : List Job) (fence : Job → Bool) (out : Job →
 
 /-- A retried close upgrades `close_unflushed` to `intent_durable` once its
 flush lands: the one settled-to-settled change, made by `settle_deferred`
-outside `Entry::settle` (#117). -/
+outside `Entry::settle` (#117). About one entry and `deferEntry`, which is
+`settle_deferred` as it is today, so it describes the current close as well;
+`closeW_retry_upgradesW` states it over `closeW` and a session of the current
+worker. -/
 theorem retry_upgrades (now now' : Int) (e : Entry) (h : e.answer.isSettled = false) :
     (deferEntry .durable now' (deferEntry .incomplete now e)).answer = .intentRecorded := by
   have h' : ¬ e.answer.isSettled = true := by rw [h]; decide
@@ -1032,7 +1141,9 @@ theorem retry_upgrades (now now' : Int) (e : Entry) (h : e.answer.isSettled = fa
 /-- `abort_all_sync` (the `Drop` path) settles nothing: a receipt pending when
 a `Memory` is dropped without `close()` stays pending in a process that is
 going away. This is the documented exception to "no write is lost silently";
-the write survives only if an earlier flush took its intent. -/
+the write survives only if an earlier flush took its intent. `abort_all_sync`
+is unchanged by #295 (it aborts the workers and settles nothing, held writes'
+receipts included), so this describes the current Rust. -/
 theorem drop_settles_nothing (s : RStore) (q : Key) : lookup (abortAllSync s) q = lookup s q := rfl
 
 /-! ## The intent table -/
@@ -1678,7 +1789,10 @@ theorem fixed_sessionWide_stops (rout : Job → RR) (s : Streaks) (i : Intent) (
     rfl
 
 /-- The fixed replay and the in-session worker now agree on an input
-refusal: both consume the intent `failed`. -/
+refusal: both consume the intent `failed`. Stated with `workerStep`, the worker
+before #295; it holds of the current worker too, whose `finishW` settles an
+input refusal `failed` with the same `[consume failed]` batch (an input
+refusal does not hold, `holdsS`). -/
 theorem fixed_agrees_with_worker (img : Bool) (j : Job) (s : Streaks) :
     (stepInput img (.run (.err .inputRefusal)) s).1 = .failed ∧
       workerStep false j (.err .inputRefusal) = (.failed, [.consume j.key .failed]) :=
@@ -3859,7 +3973,11 @@ theorem sessionW_then_serve_order (c : Caps) (sz : Job → Nat) (now : Int) (s :
   rw [(serveR_log live rout rout' s' _).2, (serveQ_log live rout rout' s' _).2]
   exact (replayP_preserves stepQ live rout rout' s' _ _ hnd' (fixedLoad_sorted rows) hI).1
 
-/-! ## Crash: a durable write is never replayed -/
+/-! ## Crash: a durable write is never replayed (worker before #295)
+
+Over `work` and the replay before #294 and #295 (`replay`, `loadOrder`). The
+current counterpart, over `runW` and `serveR` with `fixedLoad`, is
+`crash_never_reappliesW`. -/
 
 theorem mem_admit_flatten {all : List Job} {n : Nat} {m : Mut}
     (hm : m ∈ ((admitLog all).take n).flatten) : ∃ j, m = .put j := by
@@ -3867,6 +3985,8 @@ theorem mem_admit_flatten {all : List Job} {n : Nat} {m : Mut}
   obtain ⟨j, _, rfl⟩ := List.mem_map.mp ((List.take_sublist n _).subset hb)
   exact ⟨j, List.mem_singleton.mp hmb⟩
 
+/-- A mutation in a prefix of `work`'s batches (the worker before #295) is in
+one finished job's `workerStep` batch. Current counterpart: `runW_log_refines`. -/
 theorem mem_work_flatten {fence : Job → Bool} {out : Job → RunResult} {now : Int} {s : RStore}
     {done : List Job} {k : Nat} {m : Mut}
     (hm : m ∈ ((work fence out now s done).2.take k).flatten) :
@@ -3877,6 +3997,8 @@ theorem mem_work_flatten {fence : Job → Bool} {out : Job → RunResult} {now :
   obtain ⟨d, hd, rfl⟩ := List.mem_map.mp hb'
   exact ⟨d, hd, hmb⟩
 
+/-- `work`'s batches (the worker before #295) carry no put. The current
+worker's do not either: `runW_log_refines` with `workerStep_keys`. -/
 theorem work_noPut (fence : Job → Bool) (out : Job → RunResult) (now : Int) (s : RStore)
     (done : List Job) (k : Nat) : NoPut ((work fence out now s done).2.take k).flatten := by
   intro m hm j he
@@ -3888,7 +4010,10 @@ logged first, then the workers' batches; a flush (background or final) makes
 some prefix of the log durable, and the process may die after any flush. If a
 write is in the durable prefix, its intent is consumed there too (the commit
 carries its consume), so the next serve's replay never applies it again
-(`Graph::consume_write_intent`'s doc, `WriteCtx::run`'s doc). -/
+(`Graph::consume_write_intent`'s doc, `WriteCtx::run`'s doc). Stated over the
+worker **before #295** (`work`) and the one-pass replay before #294
+(`replay`, `loadOrder`). Current counterpart: `crash_never_reappliesW`, over
+`runW` and `serveR` (derived through `runW_log_refines`). -/
 theorem crash_never_reapplies (all done : List Job) (fence : Job → Bool)
     (out : Job → RunResult) (now : Int) (s : RStore) (n : Nat) (r : Key) (live : Bool)
     (rout : Job → RR)
@@ -3918,10 +4043,18 @@ theorem crash_never_reapplies (all done : List Job) (fence : Job → Bool)
   exact foldl_consumed _ _ (work_noPut fence out now s done _) (Or.inl ⟨_, hcB⟩) i hi
     (by rw [hix]; exact hxr) hio
 
-/-! ## Shutdown: drained or persisted, never silently lost -/
+/-! ## Shutdown: drained or persisted, never silently lost (worker before #295)
+
+Over `work` and `close`, the worker **before #295**. The current
+counterparts are in the section "The close, crash and shutdown over the
+current worker": `shutdown_no_silent_lossW`, `held_at_closeW`,
+`outage_holdsW`. -/
 
 /-- A job whose own batch consumes nothing, and whose number no other
-finished job shares, is still owed in the log: its row is unconsumed. -/
+finished job shares, is still owed in the log: its row is unconsumed. Over
+`work`, the worker **before #295**; current counterpart: `owedW_of` with
+`InvW` (a running, held, queued or fenced write's intent has no consume in the
+log), as used by `shutdown_no_silent_lossW`. -/
 theorem owed_in_log (all done : List Job) (fence : Job → Bool) (out : Job → RunResult)
     (now : Int) (s : RStore) (j : Job) (hj : j ∈ all)
     (hno : ∀ d ∈ done, ∀ t, Mut.consume j.key t ∉ (workerStep (fence d) d (out d)).2) :
@@ -3941,12 +4074,17 @@ theorem owed_in_log (all done : List Job) (fence : Job → Bool) (out : Job → 
     exact hno d hd t hmd
 
 /-- **Shutdown drains or persists every admitted write.** After `close()`,
-each admitted write is exactly one of: finished by the drain, with the
+each admitted write is one of (for the current worker, exclusivity is proved
+by `shutdown_exactly_oneW`): finished by the drain, with the
 worker's answer; deferred with the flush landed, answered `intent_durable`
 and owed by the next serve's replay (an unconsumed row in the flushed log);
 or deferred with the flush incomplete, answered `close_unflushed`, which says
 the write may not have been saved. None is pending and none is unaccounted
-for ("Acked ⇒ (applied ∨ durable intent) at a clean close", `quiesce`). -/
+for ("Acked ⇒ (applied ∨ durable intent) at a clean close", `quiesce`).
+Stated over the worker **before #295** (`work`, `workerStep`: an in-session
+outage answered `failed`, so this theorem has no held writes in it). Current
+counterpart: `shutdown_no_silent_lossW`, over `runW` and `closeW`, held,
+queued, running and fenced writes included. -/
 theorem shutdown_no_silent_loss (all done : List Job) (fence : Job → Bool)
     (out : Job → RunResult) (now : Int) (flush : CloseFlush) (hnd : (all.map (·.key)).Nodup)
     (hdone : ∀ d ∈ done, d ∈ all) (hdnd : (done.map (·.key)).Nodup) (j : Job) (hj : j ∈ all) :
@@ -3977,11 +4115,24 @@ theorem shutdown_no_silent_loss (all done : List Job) (fence : Job → Bool)
         exact hd (eq_of_key hnd (hdone d hdm) hj hr.symm ▸ hdm)
     | incomplete => exact Or.inr (Or.inr ⟨hd, rfl, ha⟩)
 
-/-- **An in-session outage answers `failed` and leaves the write owed.** A
-job the worker ran into `EmbedUnavailable` (an outage or a lookup timeout) is
-answered `failed`, but its intent is left unconsumed (by design, so that an
-outage does not destroy it), so the next serve's replay owes it and, if the embedder answers then, applies it.
-See `outage_failed_then_applied` for the receipt this produces. -/
+/-- **Before #295: an in-session outage answered `failed` and left the write
+owed.** A job the worker ran into `EmbedUnavailable` (an outage or a lookup
+timeout) is answered `failed`, but its intent is left unconsumed (by design,
+so that an outage does not destroy it), so the next serve's replay owes it
+and, if the embedder answers then, applies it. See
+`outage_failed_then_applied` for the receipt this produces.
+
+**The current Rust does not behave this way.** Since #295 the worker holds a
+write that meets an outage: it answers `pending_replay`, not `failed`, keeps
+its intent owed, holds the agent's later writes behind it, and is retried in
+the background; a close answers it `intent_durable` (or `close_unflushed`). A
+single lookup timeout now settles `failed` with its intent consumed, and the
+first-attempt one once a run of them has reached the limit is held. This
+theorem is kept because it
+documents the behaviour #295 replaced: an owed write answered `failed`, which
+let the agent's later writes overtake it (`outage_then_replay_reorders`).
+Current counterparts: `outage_holdsW`, `held_at_closeW`,
+`lookupTimeout_settlesW`, `lookupTimeout_run_holdsW`. -/
 theorem outage_failed_but_owed (all done : List Job) (fence : Job → Bool)
     (out : Job → RunResult) (now : Int) (flush : CloseFlush) (hnd : (all.map (·.key)).Nodup)
     (hdone : ∀ d ∈ done, d ∈ all) (hdnd : (done.map (·.key)).Nodup) (j : Job) (hjd : j ∈ done)
@@ -4006,6 +4157,1280 @@ theorem outage_failed_but_owed (all done : List Job) (fence : Job → Bool)
     rw [hws] at hm
     simp at hm
 
+/-! ## The close, crash and shutdown over the current worker (#295 on)
+
+The close, crash and shutdown theorems earlier in this file (`close`,
+`close_settles_all`, `close_answer`, `owed_in_log`, `shutdown_no_silent_loss`,
+`crash_never_reapplies`, `outage_failed_but_owed`) are stated over the worker
+before #295 (`work`, `workerStep`), under which an in-session embedder outage
+answers `failed`. That worker no longer exists. This section states them
+again over the current one (`stepW`, `runW`: admission, held writes,
+retries, the fence) and the current serve (`serveR` over `fixedLoad`).
+
+Rust: `quiesce`, `abort_workers`, `settle_deferred` (`src/writeq/drain.rs`);
+`WritePipeline::spawn_worker` (`src/writeq/execution.rs`, the hold arm and
+`lookup_streak`); `Lanes::held` (`src/writeq/admission.rs`); `Memory::close`
+and `Memory::close_fenced` (`src/memory/shutdown.rs`), which call
+`settle_deferred` with `CloseFlush::Durable` only once the final flush has
+completed (or found an empty tail), and with `Incomplete` when it fails, when
+the session is degraded, or when the lease was lost.
+
+What the close does to an admitted write, by its state when `close()` starts:
+
+* **applied** (`settleRun` on `.ok`): settled `applied`, its write and its
+  consume in one batch; `settle_deferred` leaves it alone.
+* **failed and consumed** (`settleRun` on an error that does not hold it: a
+  content or input refusal, a lookup timeout below the run limit, or the
+  retry of a write held by a run of them): settled `failed`, intent consumed
+  `failed`; left alone.
+* **fenced** (`refuseHeld`, `refuseQueued`: taken after the lease was lost):
+  settled `failed` without being run, its intent left unconsumed (the
+  session's current holder's to apply, if an earlier flush took it); left
+  alone. In the Rust a fenced close refuses to flush (`close_fenced` passes
+  `CloseFlush::Incomplete`, `src/memory/shutdown.rs`), so everything it sets
+  aside answers `close_unflushed`. That is code-backed, not proved: the model
+  takes the flush outcome as a free parameter, and `closeW .durable` over a
+  fenced session answers `intent_durable`, which the Rust never does.
+* **held** (`holdRun`, `parkQueued`: an embedder outage; a lookup timeout on a
+  first attempt once `lookup_streak`, the lookup timeouts in a row with nothing
+  applied between, has reached `REPLAY_LOOKUP_TIMEOUT_LIMIT`, which holds the
+  third and every later one until a write applies; or a later write of a held
+  agent): `pending_replay`, unsettled, intent unconsumed. `abort_workers`
+  clears `Lanes::held` and sets the receipt aside; `settle_deferred` answers
+  `intent_durable` after a completed final flush, `close_unflushed` otherwise.
+  It answers `pending_replay` while held, and the close never answers it
+  `failed`; a held write's retry can still settle `failed` in session (a
+  content refusal, or a refusal after the fence).
+* **queued, not started**: the same. `abort_workers` drains the queues and
+  sets the receipts aside.
+* **running when the close starts**: the quiesce waits for it, at most
+  `WRITE_QUEUE_DRAIN_BUDGET`. If it finishes in that time it is one of the
+  states above. If not, it is aborted at an `.await` before its commit (there
+  is none between a commit and its settle), so it wrote nothing, its receipt
+  is still unsettled, and it is set aside like a queued write.
+
+In the model the drain budget is the trace: `closeW` is taken after any
+`runW` trace, so whatever the workers finished before the abort is in it, and
+a write still in `running` is one the abort stopped. `closeW` sets aside every
+unsettled receipt (`deferredW`, as `abort_workers` does) and settles them by
+`CloseFlush` (`settleDeferred`, shared with the old layer, as
+`settle_deferred` is). The flush outcome is a parameter, as for `close`. A
+retried close settles the same set-aside ids again (`close_deferred` is kept
+after an incomplete flush).
+
+**The drain trace over-approximates the sealed lanes.** The Rust seals the
+lanes at the start of `quiesce` (`self.seal()`, `src/writeq/drain.rs`), and
+from then on a held write's retry starts only on a lost lease, never because
+it came due (`retry_due && !l.sealed`, `spawn_worker`). `stepW` has no seal
+state, so a `runW` trace standing for the drain can `wake`, `start` and
+`finish` a held write after the seal, which the Rust cannot. The model allows
+more traces than the Rust, never fewer, so every theorem over all `runW`
+traces holds of the Rust's. A retry that started before the seal and finishes
+during the drain is one of the Rust's traces too.
+
+**Known gaps found after this section was written (stated, not fixed
+here).**
+
+* **#345, dead-lettered batches.** The model has no dead-lettered batches:
+  `CloseFlush.durable` stands for "the final flush completed", and
+  `shutdown_no_silent_lossW` reads `intent_durable` as owed in this process's
+  log (`OwedW`). In the Rust a background flush that dead-lettered a batch
+  before the close dropped the puts in it, and a close whose tail is then
+  empty still passes `CloseFlush::Durable` (the empty-tail branch of
+  `Memory::close`), so a set-aside write can answer `intent_durable` with no
+  intent in the store.
+* **#346, where the lookup streak resets.** `heldErrW` takes the streak as an
+  input and says nothing of how it is counted. In the Rust `lookup_streak`
+  resets in the worker's settle block, after the commit, not at the commit,
+  so a lookup timeout on another lane in between still counts toward the
+  run.
+
+**Writes refused at admission: a gap between the model and the Rust.** The
+model starts from `WS.init (admitStore all)` and logs `admitLog all`, so
+every job in `all` has a `pending` receipt and a put from the start,
+including a job that `stepW`'s `.submit` later refuses (the caps did not fit
+it). In the Rust a refused write answers `dropped` (settled) and gets no
+intent at all. So in the model `closeW` sets such a job aside and answers it
+`intent_durable` or `close_unflushed`, and `OwedW` can hold of it, though the
+Rust would answer `dropped` with nothing owed. No theorem here states
+anything about such a job: every one quantifies over `st.admitted`, the
+writes admission accepted. `InvW.fresh` treats a refused job and one not yet
+submitted alike (`pending`, untouched), which is the model's state, not the
+Rust's.
+
+`InvW` carries the argument: each settled write's receipt holds its answer
+and the log its batch (or, refused after the fence, no consume); each queued
+or running write's receipt is unsettled; each held write answers
+`pending_replay`; none of these has a consume in the log; and a write not yet
+admitted is still `pending`. It needs the admitted writes' receipt ids
+distinct and every admitted write among the jobs whose intents admission
+logged (`admitLog all`). The log has the shape `crash_never_reapplies` takes:
+admission's puts, then the workers' batches.
+
+Results: `shutdown_no_silent_lossW` and `shutdown_exactly_oneW` (after a
+close every admitted write is exactly one of applied, failed and consumed,
+failed after the fence with its intent left unconsumed, `intent_durable` and
+owed in the flushed log, or `close_unflushed`; none pending),
+`held_at_closeW` (a held write answers `pending_replay` while held, its
+intent unconsumed, and the close answers it `intent_durable` or
+`close_unflushed`), `outage_holdsW` (an outage holds the write: the current
+counterpart of `outage_failed_but_owed`), `lookupTimeout_settlesW`,
+`lookupTimeout_run_holdsW`, `heldErrW_holds` (a lookup timeout below the run
+limit, or a held write's retry, settles `failed` and consumes; a first
+attempt at the limit holds), `closeW_retry_upgradesW` (a retried close
+upgrades `close_unflushed`), `runW_log_refines` (every batch the current
+worker appends is one the old `workerStep` appends), `serveR_applied_pending`
+(the current serve applies only stored, unconsumed rows), and
+`crash_never_reappliesW` (no write in a durable prefix of the current
+worker's log is applied again by the current serve). -/
+
+/-- The receipts `abort_workers` sets aside: every one still unsettled once the
+workers are aborted and joined (`pending` or `pending_replay`), held writes'
+included. -/
+def deferredW (st : WS) : List Key := pendingIds st.store
+
+/-- `close()` over the current worker: `quiesce` (the trace `st` came from is
+what the workers finished; `running`, `held` and `queue` are what the abort
+stops), `abort_workers`, then `settle_deferred` by how the final flush ended.
+It appends nothing to the log. It also sets aside a job of `all` that
+admission refused, whose receipt the model leaves `pending` where the Rust
+answers `dropped` (the gap in the section header); the theorems speak only of
+admitted writes. `.durable` stands for "the final flush completed" and nothing
+more: the model has no dead-lettered batches, while in the Rust an earlier
+dead-letter can have dropped a set-aside write's put though the close still
+passes `CloseFlush::Durable` (#345, in the section header). The trace `st`
+may also run a held write after the seal, which the Rust cannot (an
+over-approximation; see the section header). -/
+def closeW (flush : CloseFlush) (now : Int) (st : WS) : RStore :=
+  settleDeferred flush now (deferredW st) st.store
+
+/-- The answer a receipt id holds in a store. -/
+def ansOf (s : RStore) (k : Key) : Option Answer := (lookup s k).map (·.answer)
+
+/-- No batch of the log consumes `k`. -/
+def Untouched (k : Key) (log : List Batch) : Prop := ∀ t, Mut.consume k t ∉ log.flatten
+
+/-- `j`'s intent is an unconsumed row of the session's whole log, admission's
+puts then the workers' batches, in the current load order (`fixedLoad`): owed
+by the next serve once that log is durable. It is about this process's whole
+log, not a durable prefix of it: a write's row is owed by the next serve only
+if a flush took its put. `admitLog all` puts every job of `all`, so for a job
+admission refused (which in the Rust gets no intent) `OwedW` can hold in the
+model and not in the Rust; the theorems use it only for admitted writes. The
+log has no dead-lettered batches either: in the Rust a background flush that
+dead-lettered a batch dropped the puts in it, so a write `OwedW` calls owed
+may have no intent in the store (#345). -/
+def OwedW (all : List Job) (st : WS) (j : Job) : Prop :=
+  ⟨j, none⟩ ∈ pendingOf (fixedLoad (intentsOf (admitLog all ++ st.log).flatten))
+
+/-- Every write the workers hold: settled, running, held, queued. -/
+def DW (st : WS) : List Job := st.settled.map (·.1) ++ st.running ++ st.held ++ st.queue
+
+/-! ### Distinct receipt ids across the workers' lists -/
+
+theorem nodup_of_agents : ∀ (l : List Job), (∀ b, (ofAgent b l).Nodup) → l.Nodup := by
+  intro l
+  induction l with
+  | nil => intro _; exact List.nodup_nil
+  | cons x xs ih =>
+    intro h
+    have hx := h x.agent
+    rw [ofAgent_cons, ite_eq_left rfl, List.nodup_cons] at hx
+    refine List.nodup_cons.mpr ⟨?_, ih ?_⟩
+    · intro hm; exact hx.1 (List.mem_filter.mpr ⟨hm, by simp⟩)
+    · intro b
+      have hb := h b
+      rw [ofAgent_cons] at hb
+      split at hb
+      · exact (List.nodup_cons.mp hb).2
+      · exact hb
+
+theorem nodup_keys_sub {m : List Job} (hk : (m.map (·.key)).Nodup) :
+    ∀ {l : List Job}, l.Nodup → (∀ x ∈ l, x ∈ m) → (l.map (·.key)).Nodup := by
+  intro l
+  induction l with
+  | nil => intro _ _; exact List.nodup_nil
+  | cons x xs ih =>
+    intro hl hm
+    rw [List.nodup_cons] at hl
+    rw [List.map_cons, List.nodup_cons]
+    refine ⟨?_, ih hl.2 (fun y hy => hm y (List.mem_cons_of_mem _ hy))⟩
+    intro hx
+    obtain ⟨y, hy, hyx⟩ := List.mem_map.mp hx
+    have := eq_of_key hk (hm y (List.mem_cons_of_mem _ hy)) (hm x List.mem_cons_self) hyx
+    exact hl.1 (this ▸ hy)
+
+theorem dropFirst_perm (a : Nat) : ∀ (l : List Job) (h : Job) (t : List Job),
+    ofAgent a l = h :: t → (h :: dropFirst a l).Perm l := by
+  intro l
+  induction l with
+  | nil => intro h t hl; simp [ofAgent_nil] at hl
+  | cons x xs ih =>
+    intro h t hl
+    rw [ofAgent_cons] at hl
+    by_cases hx : x.agent = a
+    · simp only [hx, ite_true, List.cons.injEq] at hl
+      obtain ⟨rfl, rfl⟩ := hl
+      simp only [dropFirst, hx, ite_true]
+      exact List.Perm.refl _
+    · simp only [hx, ite_false] at hl
+      simp only [dropFirst, hx, ite_false]
+      exact (List.Perm.swap x h _).trans ((ih h t hl).cons x)
+
+theorem mem_dropFirst {a : Nat} {l : List Job} {h : Job} {t : List Job} (hl : ofAgent a l = h :: t)
+    {x : Job} (hx : x ∈ dropFirst a l) : x ∈ l :=
+  (dropFirst_perm a l h t hl).mem_iff.mp (List.mem_cons_of_mem _ hx)
+
+theorem head_mem {a : Nat} {l : List Job} {h : Job} {t : List Job} (hl : ofAgent a l = h :: t) :
+    h ∈ l :=
+  (mem_ofAgent (by rw [hl]; exact List.mem_cons_self)).1
+
+theorem key_ne_dropFirst {a : Nat} {l : List Job} {h : Job} {t : List Job}
+    (hl : ofAgent a l = h :: t) (hk : (l.map (·.key)).Nodup) {x : Job} (hx : x ∈ dropFirst a l) :
+    x.key ≠ h.key := by
+  have hp := (dropFirst_perm a l h t hl).map (·.key)
+  have hn := (List.nodup_cons.mp (hp.nodup_iff.mpr hk)).1
+  intro he
+  exact hn (by show h.key ∈ _; rw [← he]; exact List.mem_map_of_mem hx)
+
+/-- What distinct receipt ids give: the four lists' ids are distinct, within
+and across lists, and every write in them was admitted. -/
+structure KeysW (st : WS) : Prop where
+  run : (st.running.map (·.key)).Nodup
+  held : (st.held.map (·.key)).Nodup
+  queue : (st.queue.map (·.key)).Nodup
+  sr : ∀ p ∈ st.settled, ∀ y ∈ st.running, p.1.key ≠ y.key
+  sh : ∀ p ∈ st.settled, ∀ y ∈ st.held, p.1.key ≠ y.key
+  sq : ∀ p ∈ st.settled, ∀ y ∈ st.queue, p.1.key ≠ y.key
+  rh : ∀ y ∈ st.running, ∀ z ∈ st.held, y.key ≠ z.key
+  rq : ∀ y ∈ st.running, ∀ z ∈ st.queue, y.key ≠ z.key
+  hq : ∀ y ∈ st.held, ∀ z ∈ st.queue, y.key ≠ z.key
+  adm : ∀ x ∈ DW st, x ∈ st.admitted
+
+theorem mem_DW_of_admitted {st : WS} (hO : OrdW st) {j : Job} (hj : j ∈ st.admitted) :
+    j ∈ DW st := by
+  have h1 : j ∈ ofAgent j.agent st.admitted := List.mem_filter.mpr ⟨hj, by simp⟩
+  rw [← (hO j.agent).1] at h1
+  simp only [DW] at h1 ⊢
+  simp only [List.mem_append] at h1 ⊢
+  rcases h1 with ((h | h) | h) | h
+  · exact Or.inl (Or.inl (Or.inl (mem_ofAgent h).1))
+  · exact Or.inl (Or.inl (Or.inr (mem_ofAgent h).1))
+  · exact Or.inl (Or.inr (mem_ofAgent h).1)
+  · exact Or.inr (mem_ofAgent h).1
+
+theorem keysW_of (st : WS) (hO : OrdW st) (hnd : (st.admitted.map (·.key)).Nodup) : KeysW st := by
+  have hadm : st.admitted.Nodup :=
+    List.Pairwise.of_map (·.key) (fun _ _ h e => h (e ▸ rfl)) hnd
+  have hsub : ∀ x ∈ DW st, x ∈ st.admitted := by
+    intro x hx
+    have h1 : x ∈ ofAgent x.agent (DW st) := List.mem_filter.mpr ⟨hx, by simp⟩
+    have h2 : ofAgent x.agent (DW st) = ofAgent x.agent st.admitted := by
+      simp only [DW, ofAgent_append]; exact (hO x.agent).1
+    rw [h2] at h1
+    exact (mem_ofAgent h1).1
+  have hD : (DW st).Nodup := by
+    apply nodup_of_agents
+    intro b
+    have h2 : ofAgent b (DW st) = ofAgent b st.admitted := by
+      simp only [DW, ofAgent_append]; exact (hO b).1
+    rw [h2]
+    exact hadm.sublist List.filter_sublist
+  have hK := nodup_keys_sub hnd hD hsub
+  unfold DW at hK
+  rw [List.map_append, List.map_append, List.map_append] at hK
+  obtain ⟨h1, hQ, x1⟩ := List.nodup_append.mp hK
+  obtain ⟨h2, hH, x2⟩ := List.nodup_append.mp h1
+  obtain ⟨_, hR, x3⟩ := List.nodup_append.mp h2
+  have mS : ∀ p ∈ st.settled, p.1.key ∈ (st.settled.map (·.1)).map (·.key) :=
+    fun p hp => List.mem_map_of_mem (List.mem_map_of_mem hp)
+  have mk : ∀ {l : List Job} {y : Job}, y ∈ l → y.key ∈ l.map (·.key) :=
+    fun hy => List.mem_map_of_mem hy
+  refine ⟨hR, hH, hQ, ?_, ?_, ?_, ?_, ?_, ?_, hsub⟩
+  · intro p hp y hy; exact x3 _ (mS p hp) _ (mk hy)
+  · intro p hp y hy; exact x2 _ (List.mem_append_left _ (mS p hp)) _ (mk hy)
+  · intro p hp y hy
+    exact x1 _ (List.mem_append_left _ (List.mem_append_left _ (mS p hp))) _ (mk hy)
+  · intro y hy z hz; exact x2 _ (List.mem_append_right _ (mk hy)) _ (mk hz)
+  · intro y hy z hz
+    exact x1 _ (List.mem_append_left _ (List.mem_append_right _ (mk hy))) _ (mk hz)
+  · intro y hy z hz; exact x1 _ (List.mem_append_right _ (mk hy)) _ (mk hz)
+
+/-! ### The receipts and the log, as the workers leave them -/
+
+theorem ansOf_settleOne_ne {s : RStore} {k q : Key} (x : Answer) (now : Int) (h : q ≠ k) :
+    ansOf (settleOne s k x now) q = ansOf s q := by
+  unfold ansOf settleOne; rw [lookup_update_ne s _ h]
+
+theorem ansOf_settleOne_self {s : RStore} {k : Key} {a : Answer} (x : Answer) (now : Int)
+    (ha : ansOf s k = some a) (hu : a.isSettled = false) :
+    ansOf (settleOne s k x now) k = some x := by
+  unfold ansOf at ha ⊢
+  unfold settleOne
+  rw [lookup_update, ite_eq_left rfl]
+  cases hl : lookup s k with
+  | none => rw [hl] at ha; simp at ha
+  | some e =>
+    rw [hl] at ha
+    have he : e.answer = a := by simpa using ha
+    have hs : ¬ e.answer.isSettled = true := by rw [he, hu]; decide
+    simp [Lambo.Receipts.settle_unsettled e x now hs]
+
+theorem untouched_snoc {q k : Key} {log : List Batch} {b : Batch} (hq : q ≠ k)
+    (hb : ∀ m ∈ b, m = .write k ∨ ∃ t, m = .consume k t) (hu : Untouched q log) :
+    Untouched q (log ++ [b]) := by
+  intro t ht
+  rw [List.flatten_append, List.mem_append] at ht
+  cases ht with
+  | inl h => exact hu t h
+  | inr h =>
+    simp only [List.flatten_cons, List.flatten_nil, List.append_nil] at h
+    rcases hb _ h with h' | ⟨t', h'⟩
+    · cases h'
+    · exact hq (Mut.consume.inj h').1
+
+/-- What every reachable state of the current workers keeps: each settled
+write's receipt holds its answer and its batch (or, refused after the fence,
+no consume at all); each queued or running write's receipt is unsettled and
+its intent untouched; each held write answers `pending_replay` with its
+intent untouched; and a write of `all` not admitted is still `pending` and
+untouched (`fresh`). That last clause covers alike a write not yet submitted
+and one admission refused: the model gives both a `pending` receipt and a put,
+where the Rust answers a refused write `dropped` and records no intent for it
+(the gap in the section header). -/
+structure InvW (all : List Job) (st : WS) : Prop where
+  settled : ∀ p ∈ st.settled, ansOf st.store p.1.key = some p.2 ∧
+    ((p.2 = .applied ∧ [Mut.write p.1.key, .consume p.1.key .applied] ∈ st.log) ∨
+     (p.2 = .failed ∧ [Mut.consume p.1.key .failed] ∈ st.log) ∨
+     (p.2 = .failed ∧ st.fenced = true ∧ Untouched p.1.key st.log))
+  live : ∀ j ∈ st.running ++ st.queue,
+    (∃ a, ansOf st.store j.key = some a ∧ a.isSettled = false) ∧ Untouched j.key st.log
+  held : ∀ j ∈ st.held, ansOf st.store j.key = some .pendingReplay ∧ Untouched j.key st.log
+  fresh : ∀ j ∈ all, j.key ∉ st.admitted.map (·.key) →
+    ansOf st.store j.key = some .pending ∧ Untouched j.key st.log
+
+theorem invW_init (all : List Job) : InvW all (WS.init (admitStore all)) := by
+  refine ⟨?_, ?_, ?_, ?_⟩
+  · intro p hp; simp [WS.init] at hp
+  · intro j hj; simp [WS.init] at hj
+  · intro j hj; simp [WS.init] at hj
+  · intro j hj _
+    obtain ⟨e, he, ha⟩ := lookup_admit hj
+    refine ⟨show ansOf (admitStore all) j.key = _ by simp [ansOf, he, ha], ?_⟩
+    intro t ht; simp [WS.init] at ht
+
+/-! The moves, one at a time. -/
+
+theorem takeHeld_inv {all : List Job} {st : WS} {a : Nat} {h : Job} {t : List Job}
+    (hI : InvW all st) (hh : ofAgent a st.held = h :: t) : InvW all (takeHeld a h st) := by
+  refine ⟨hI.settled, ?_, ?_, hI.fresh⟩
+  · intro j hj
+    simp only [takeHeld, List.mem_append, List.mem_singleton] at hj
+    rcases hj with (hj | hj) | hj
+    · exact hI.live j (List.mem_append_left _ hj)
+    · subst hj
+      obtain ⟨h1, h2⟩ := hI.held _ (head_mem hh)
+      exact ⟨⟨_, h1, rfl⟩, h2⟩
+    · exact hI.live j (List.mem_append_right _ hj)
+  · intro j hj; exact hI.held j (mem_dropFirst hh hj)
+
+theorem takeQueued_inv {all : List Job} {st : WS} {a : Nat} {q : Job} {t : List Job}
+    (hI : InvW all st) (hq : ofAgent a st.queue = q :: t) : InvW all (takeQueued a q st) := by
+  refine ⟨hI.settled, ?_, hI.held, hI.fresh⟩
+  intro j hj
+  simp only [takeQueued, List.mem_append, List.mem_singleton] at hj
+  rcases hj with (hj | hj) | hj
+  · exact hI.live j (List.mem_append_left _ hj)
+  · subst hj; exact hI.live _ (List.mem_append_right _ (head_mem hq))
+  · exact hI.live j (List.mem_append_right _ (mem_dropFirst hq hj))
+
+theorem parkQueued_inv {all : List Job} {st : WS} {a : Nat} {q : Job} {t : List Job} (now : Int)
+    (hI : InvW all st) (hK : KeysW st) (hq : ofAgent a st.queue = q :: t) :
+    InvW all (parkQueued now a q st) := by
+  have hqm := head_mem hq
+  have hqA : q.key ∈ st.admitted.map (·.key) :=
+    List.mem_map_of_mem (hK.adm q (by simp [DW, hqm]))
+  refine ⟨?_, ?_, ?_, ?_⟩
+  · intro p hp
+    obtain ⟨h1, h2⟩ := hI.settled p hp
+    exact ⟨by simp only [parkQueued]; rw [ansOf_settleOne_ne _ _ (hK.sq p hp q hqm)]; exact h1, h2⟩
+  · intro j hj
+    simp only [parkQueued, List.mem_append] at hj
+    have hne : j.key ≠ q.key := by
+      rcases hj with hj | hj
+      · exact hK.rq j hj q hqm
+      · exact key_ne_dropFirst hq hK.queue hj
+    have hj' : j ∈ st.running ++ st.queue := by
+      rcases hj with hj | hj
+      · exact List.mem_append_left _ hj
+      · exact List.mem_append_right _ (mem_dropFirst hq hj)
+    obtain ⟨h1, h2⟩ := hI.live j hj'
+    exact ⟨by simp only [parkQueued]; rw [ansOf_settleOne_ne _ _ hne]; exact h1, h2⟩
+  · intro j hj
+    simp only [parkQueued, List.mem_append, List.mem_singleton] at hj
+    rcases hj with hj | hj
+    · obtain ⟨h1, h2⟩ := hI.held j hj
+      exact ⟨by simp only [parkQueued]; rw [ansOf_settleOne_ne _ _ (hK.hq j hj q hqm)]; exact h1, h2⟩
+    · subst hj
+      obtain ⟨⟨x, h1, h2⟩, h3⟩ := hI.live _ (List.mem_append_right _ hqm)
+      exact ⟨ansOf_settleOne_self _ now h1 h2, h3⟩
+  · intro j hj hn
+    obtain ⟨h1, h2⟩ := hI.fresh j hj hn
+    have hne : j.key ≠ q.key := fun e => hn (e ▸ hqA)
+    exact ⟨by simp only [parkQueued]; rw [ansOf_settleOne_ne _ _ hne]; exact h1, h2⟩
+
+theorem refuseHeld_inv {all : List Job} {st : WS} {a : Nat} {h : Job} {t : List Job} (now : Int)
+    (hI : InvW all st) (hK : KeysW st) (hf : st.fenced = true) (hh : ofAgent a st.held = h :: t) :
+    InvW all (refuseHeld now a h st) := by
+  have hm := head_mem hh
+  have hA : h.key ∈ st.admitted.map (·.key) :=
+    List.mem_map_of_mem (hK.adm h (by simp [DW, hm]))
+  refine ⟨?_, ?_, ?_, ?_⟩
+  · intro p hp
+    simp only [refuseHeld, List.mem_append, List.mem_singleton] at hp
+    rcases hp with hp | hp
+    · obtain ⟨h1, h2⟩ := hI.settled p hp
+      exact ⟨by simp only [refuseHeld]; rw [ansOf_settleOne_ne _ _ (hK.sh p hp h hm)]; exact h1, h2⟩
+    · subst hp
+      obtain ⟨h1, h2⟩ := hI.held h hm
+      exact ⟨ansOf_settleOne_self _ now h1 rfl, Or.inr (Or.inr ⟨rfl, hf, h2⟩)⟩
+  · intro j hj
+    have hne : j.key ≠ h.key := by
+      rcases List.mem_append.mp hj with hj | hj
+      · exact hK.rh j hj h hm
+      · exact fun e => hK.hq h hm j hj e.symm
+    obtain ⟨h1, h2⟩ := hI.live j hj
+    exact ⟨by simp only [refuseHeld]; rw [ansOf_settleOne_ne _ _ hne]; exact h1, h2⟩
+  · intro j hj
+    have hj' : j ∈ dropFirst a st.held := hj
+    obtain ⟨h1, h2⟩ := hI.held j (mem_dropFirst hh hj')
+    exact ⟨by
+      simp only [refuseHeld]; rw [ansOf_settleOne_ne _ _ (key_ne_dropFirst hh hK.held hj')]; exact h1,
+      h2⟩
+  · intro j hj hn
+    obtain ⟨h1, h2⟩ := hI.fresh j hj hn
+    have hne : j.key ≠ h.key := fun e => hn (e ▸ hA)
+    exact ⟨by simp only [refuseHeld]; rw [ansOf_settleOne_ne _ _ hne]; exact h1, h2⟩
+
+theorem refuseQueued_inv {all : List Job} {st : WS} {a : Nat} {q : Job} {t : List Job} (now : Int)
+    (hI : InvW all st) (hK : KeysW st) (hf : st.fenced = true) (hq : ofAgent a st.queue = q :: t) :
+    InvW all (refuseQueued now a q st) := by
+  have hm := head_mem hq
+  have hA : q.key ∈ st.admitted.map (·.key) :=
+    List.mem_map_of_mem (hK.adm q (by simp [DW, hm]))
+  refine ⟨?_, ?_, ?_, ?_⟩
+  · intro p hp
+    simp only [refuseQueued, List.mem_append, List.mem_singleton] at hp
+    rcases hp with hp | hp
+    · obtain ⟨h1, h2⟩ := hI.settled p hp
+      exact ⟨by simp only [refuseQueued]; rw [ansOf_settleOne_ne _ _ (hK.sq p hp q hm)]; exact h1,
+        h2⟩
+    · subst hp
+      obtain ⟨⟨x, h1, h2⟩, h3⟩ := hI.live q (List.mem_append_right _ hm)
+      exact ⟨ansOf_settleOne_self _ now h1 h2, Or.inr (Or.inr ⟨rfl, hf, h3⟩)⟩
+  · intro j hj
+    simp only [refuseQueued, List.mem_append] at hj
+    have hne : j.key ≠ q.key := by
+      rcases hj with hj | hj
+      · exact hK.rq j hj q hm
+      · exact key_ne_dropFirst hq hK.queue hj
+    have hj' : j ∈ st.running ++ st.queue := by
+      rcases hj with hj | hj
+      · exact List.mem_append_left _ hj
+      · exact List.mem_append_right _ (mem_dropFirst hq hj)
+    obtain ⟨h1, h2⟩ := hI.live j hj'
+    exact ⟨by simp only [refuseQueued]; rw [ansOf_settleOne_ne _ _ hne]; exact h1, h2⟩
+  · intro j hj
+    obtain ⟨h1, h2⟩ := hI.held j hj
+    exact ⟨by simp only [refuseQueued]; rw [ansOf_settleOne_ne _ _ (hK.hq j hj q hm)]; exact h1, h2⟩
+  · intro j hj hn
+    obtain ⟨h1, h2⟩ := hI.fresh j hj hn
+    have hne : j.key ≠ q.key := fun e => hn (e ▸ hA)
+    exact ⟨by simp only [refuseQueued]; rw [ansOf_settleOne_ne _ _ hne]; exact h1, h2⟩
+
+theorem settleRun_inv {all : List Job} {st : WS} {a : Nat} {j : Job} {t : List Job} (now : Int)
+    (x : Answer) (b : Batch) (hI : InvW all st) (hK : KeysW st) (hr : ofAgent a st.running = j :: t)
+    (hxb : (x = .applied ∧ b = [.write j.key, .consume j.key .applied]) ∨
+      (x = .failed ∧ b = [.consume j.key .failed])) :
+    InvW all (settleRun now a j x b st) := by
+  have hm := head_mem hr
+  have hA : j.key ∈ st.admitted.map (·.key) :=
+    List.mem_map_of_mem (hK.adm j (by simp [DW, hm]))
+  have hb : ∀ m ∈ b, m = .write j.key ∨ ∃ t, m = .consume j.key t := by
+    rcases hxb with ⟨_, rfl⟩ | ⟨_, rfl⟩
+    · intro m hm'
+      simp only [List.mem_cons, List.not_mem_nil, or_false] at hm'
+      rcases hm' with rfl | rfl
+      · exact Or.inl rfl
+      · exact Or.inr ⟨_, rfl⟩
+    · intro m hm'
+      simp only [List.mem_cons, List.not_mem_nil, or_false] at hm'
+      subst hm'; exact Or.inr ⟨_, rfl⟩
+  refine ⟨?_, ?_, ?_, ?_⟩
+  · intro p hp
+    simp only [settleRun, List.mem_append, List.mem_singleton] at hp
+    rcases hp with hp | hp
+    · obtain ⟨h1, h2⟩ := hI.settled p hp
+      have hne := hK.sr p hp j hm
+      refine ⟨by simp only [settleRun]; rw [ansOf_settleOne_ne _ _ hne]; exact h1, ?_⟩
+      simp only [settleRun]
+      rcases h2 with ⟨e1, e2⟩ | ⟨e1, e2⟩ | ⟨e1, e2, e3⟩
+      · exact Or.inl ⟨e1, List.mem_append_left _ e2⟩
+      · exact Or.inr (Or.inl ⟨e1, List.mem_append_left _ e2⟩)
+      · exact Or.inr (Or.inr ⟨e1, e2, untouched_snoc hne hb e3⟩)
+    · subst hp
+      obtain ⟨⟨y, h1, h2⟩, _⟩ := hI.live j (List.mem_append_left _ hm)
+      refine ⟨ansOf_settleOne_self _ now h1 h2, ?_⟩
+      simp only [settleRun]
+      rcases hxb with ⟨rfl, rfl⟩ | ⟨rfl, rfl⟩
+      · exact Or.inl ⟨rfl, List.mem_append_right _ (List.mem_singleton.mpr rfl)⟩
+      · exact Or.inr (Or.inl ⟨rfl, List.mem_append_right _ (List.mem_singleton.mpr rfl)⟩)
+  · intro y hy
+    simp only [settleRun, List.mem_append] at hy
+    have hne : y.key ≠ j.key := by
+      rcases hy with hy | hy
+      · exact key_ne_dropFirst hr hK.run hy
+      · exact fun e => hK.rq j hm y hy e.symm
+    have hy' : y ∈ st.running ++ st.queue := by
+      rcases hy with hy | hy
+      · exact List.mem_append_left _ (mem_dropFirst hr hy)
+      · exact List.mem_append_right _ hy
+    obtain ⟨h1, h2⟩ := hI.live y hy'
+    exact ⟨by simp only [settleRun]; rw [ansOf_settleOne_ne _ _ hne]; exact h1,
+      untouched_snoc hne hb h2⟩
+  · intro y hy
+    have hne : y.key ≠ j.key := fun e => hK.rh j hm y hy e.symm
+    obtain ⟨h1, h2⟩ := hI.held y hy
+    exact ⟨by simp only [settleRun]; rw [ansOf_settleOne_ne _ _ hne]; exact h1,
+      untouched_snoc hne hb h2⟩
+  · intro y hy hn
+    obtain ⟨h1, h2⟩ := hI.fresh y hy hn
+    have hne : y.key ≠ j.key := fun e => hn (e ▸ hA)
+    exact ⟨by simp only [settleRun]; rw [ansOf_settleOne_ne _ _ hne]; exact h1,
+      untouched_snoc hne hb h2⟩
+
+theorem holdRun_inv {all : List Job} {st : WS} {a : Nat} {j : Job} {t : List Job} (now : Int)
+    (hI : InvW all st) (hK : KeysW st) (hr : ofAgent a st.running = j :: t) :
+    InvW all (holdRun now a j st) := by
+  have hm := head_mem hr
+  have hA : j.key ∈ st.admitted.map (·.key) :=
+    List.mem_map_of_mem (hK.adm j (by simp [DW, hm]))
+  refine ⟨?_, ?_, ?_, ?_⟩
+  · intro p hp
+    obtain ⟨h1, h2⟩ := hI.settled p hp
+    exact ⟨by simp only [holdRun]; rw [ansOf_settleOne_ne _ _ (hK.sr p hp j hm)]; exact h1, h2⟩
+  · intro y hy
+    simp only [holdRun, List.mem_append] at hy
+    have hne : y.key ≠ j.key := by
+      rcases hy with hy | hy
+      · exact key_ne_dropFirst hr hK.run hy
+      · exact fun e => hK.rq j hm y hy e.symm
+    have hy' : y ∈ st.running ++ st.queue := by
+      rcases hy with hy | hy
+      · exact List.mem_append_left _ (mem_dropFirst hr hy)
+      · exact List.mem_append_right _ hy
+    obtain ⟨h1, h2⟩ := hI.live y hy'
+    exact ⟨by simp only [holdRun]; rw [ansOf_settleOne_ne _ _ hne]; exact h1, h2⟩
+  · intro y hy
+    simp only [holdRun, List.mem_cons] at hy
+    rcases hy with rfl | hy
+    · obtain ⟨⟨x, h1, h2⟩, h3⟩ := hI.live y (List.mem_append_left _ hm)
+      exact ⟨ansOf_settleOne_self _ now h1 h2, h3⟩
+    · have hne : y.key ≠ j.key := fun e => hK.rh j hm y hy e.symm
+      obtain ⟨h1, h2⟩ := hI.held y hy
+      exact ⟨by simp only [holdRun]; rw [ansOf_settleOne_ne _ _ hne]; exact h1, h2⟩
+  · intro y hy hn
+    obtain ⟨h1, h2⟩ := hI.fresh y hy hn
+    have hne : y.key ≠ j.key := fun e => hn (e ▸ hA)
+    exact ⟨by simp only [holdRun]; rw [ansOf_settleOne_ne _ _ hne]; exact h1, h2⟩
+
+theorem startW_inv (now : Int) (a : Nat) {all : List Job} {st : WS} (hI : InvW all st)
+    (hK : KeysW st) : InvW all (startW now a st) := by
+  unfold startW
+  by_cases hr : ofAgent a st.running ≠ []
+  · rw [ite_eq_left hr]; exact hI
+  · rw [ite_eq_right hr]
+    cases hh : ofAgent a st.held with
+    | nil =>
+      cases hq : ofAgent a st.queue with
+      | nil => exact hI
+      | cons q t =>
+        simp only
+        split
+        · next hf => exact refuseQueued_inv now hI hK hf hq
+        · exact takeQueued_inv hI hq
+    | cons h t =>
+      cases hq : ofAgent a st.queue with
+      | nil =>
+        simp only
+        split
+        · next hf => exact refuseHeld_inv now hI hK hf hh
+        · split
+          · exact hI
+          · exact takeHeld_inv hI hh
+      | cons q t' =>
+        simp only
+        split
+        · next hf => exact refuseHeld_inv now hI hK hf hh
+        · split
+          · exact parkQueued_inv now hI hK hq
+          · exact takeHeld_inv hI hh
+
+theorem finishW_inv (now : Int) (a : Nat) (r : RunResult) {all : List Job} {st : WS}
+    (hI : InvW all st) (hK : KeysW st) : InvW all (finishW now a r st) := by
+  unfold finishW
+  cases hj : ofAgent a st.running with
+  | nil => exact hI
+  | cons j t =>
+    simp only
+    cases r with
+    | ok => exact settleRun_inv now _ _ hI hK hj (Or.inl ⟨rfl, rfl⟩)
+    | err e =>
+      simp only
+      split
+      · exact holdRun_inv now hI hK hj
+      · exact settleRun_inv now _ _ hI hK hj (Or.inr ⟨rfl, rfl⟩)
+
+theorem stepW_admitted (c : Caps) (sz : Job → Nat) (now : Int) (st : WS) (ev : Ev) :
+    ∃ l, (stepW c sz now st ev).admitted = st.admitted ++ l := by
+  cases ev with
+  | submit j =>
+    simp only [stepW]
+    split
+    · exact ⟨[j], rfl⟩
+    · split <;> exact ⟨[], by simp⟩
+  | start a =>
+    refine ⟨[], ?_⟩
+    simp only [stepW, List.append_nil]
+    unfold startW
+    split
+    · rfl
+    · split
+      · split
+        · simp [refuseHeld]
+        · split
+          · simp [parkQueued]
+          · simp [takeHeld]
+      · split
+        · simp [refuseHeld]
+        · split
+          · rfl
+          · simp [takeHeld]
+      · split
+        · simp [refuseQueued]
+        · simp [takeQueued]
+      · rfl
+  | finish a r =>
+    refine ⟨[], ?_⟩
+    simp only [stepW, List.append_nil]
+    unfold finishW
+    split
+    · rfl
+    · split
+      · simp [settleRun]
+      · split
+        · simp [holdRun]
+        · simp [settleRun]
+  | wake a => exact ⟨[], by simp [stepW]⟩
+  | fence => exact ⟨[], by simp [stepW]⟩
+
+theorem runW_admitted (c : Caps) (sz : Job → Nat) (now : Int) :
+    ∀ (evs : List Ev) (st : WS), ∃ l, (runW c sz now st evs).admitted = st.admitted ++ l := by
+  intro evs
+  induction evs with
+  | nil => intro st; exact ⟨[], by simp [runW]⟩
+  | cons e es ih =>
+    intro st
+    obtain ⟨l1, h1⟩ := stepW_admitted c sz now st e
+    obtain ⟨l2, h2⟩ := ih (stepW c sz now st e)
+    exact ⟨l1 ++ l2, by simp only [runW]; rw [h2, h1, List.append_assoc]⟩
+
+theorem stepW_inv (c : Caps) (sz : Job → Nat) (now : Int) {all : List Job} (st : WS) (ev : Ev)
+    (hO : OrdW st) (hI : InvW all st)
+    (hnd : ((stepW c sz now st ev).admitted.map (·.key)).Nodup)
+    (hall : ∀ j ∈ (stepW c sz now st ev).admitted, j ∈ all) :
+    InvW all (stepW c sz now st ev) := by
+  obtain ⟨l, hl⟩ := stepW_admitted c sz now st ev
+  have hnd0 : (st.admitted.map (·.key)).Nodup := by
+    rw [hl, List.map_append] at hnd; exact (List.nodup_append.mp hnd).1
+  have hK := keysW_of st hO hnd0
+  cases ev with
+  | submit j =>
+    simp only [stepW] at hnd hall ⊢
+    split
+    · next hfit =>
+      rw [ite_eq_left hfit] at hnd hall
+      have hjn : j.key ∉ st.admitted.map (·.key) := by
+        simp only [List.map_append, List.map_cons, List.map_nil] at hnd
+        exact fun hm => (List.nodup_append.mp hnd).2.2 _ hm _ List.mem_cons_self rfl
+      have hja : j ∈ all := hall j (List.mem_append_right _ List.mem_cons_self)
+      refine ⟨hI.settled, ?_, hI.held, ?_⟩
+      · intro y hy
+        simp only [List.mem_append, List.mem_singleton] at hy
+        rcases hy with hy | hy | hy
+        · exact hI.live y (List.mem_append_left _ hy)
+        · exact hI.live y (List.mem_append_right _ hy)
+        · subst hy
+          obtain ⟨h1, h2⟩ := hI.fresh y hja hjn
+          exact ⟨⟨_, h1, rfl⟩, h2⟩
+      · intro y hy hn
+        exact hI.fresh y hy (fun hm => hn (by
+          rw [List.map_append]; exact List.mem_append_left _ hm))
+    · split
+      · exact ⟨hI.settled, hI.live, hI.held, hI.fresh⟩
+      · exact hI
+  | start a => exact startW_inv now a hI hK
+  | finish a r => exact finishW_inv now a r hI hK
+  | wake a => exact ⟨hI.settled, hI.live, hI.held, hI.fresh⟩
+  | fence =>
+    refine ⟨?_, hI.live, hI.held, hI.fresh⟩
+    intro p hp
+    obtain ⟨h1, h2⟩ := hI.settled p hp
+    refine ⟨h1, ?_⟩
+    rcases h2 with h | h | ⟨e1, _, e3⟩
+    · exact Or.inl h
+    · exact Or.inr (Or.inl h)
+    · exact Or.inr (Or.inr ⟨e1, rfl, e3⟩)
+
+theorem runW_inv (c : Caps) (sz : Job → Nat) (now : Int) (all : List Job) :
+    ∀ (evs : List Ev) (st : WS), OrdW st → InvW all st →
+      ((runW c sz now st evs).admitted.map (·.key)).Nodup →
+      (∀ j ∈ (runW c sz now st evs).admitted, j ∈ all) → InvW all (runW c sz now st evs) := by
+  intro evs
+  induction evs with
+  | nil => intro st _ hI _ _; exact hI
+  | cons e es ih =>
+    intro st hO hI hnd hall
+    obtain ⟨l, hl⟩ := runW_admitted c sz now es (stepW c sz now st e)
+    have hnd' : (runW c sz now (stepW c sz now st e) es).admitted.map (·.key) =
+        (stepW c sz now st e).admitted.map (·.key) ++ l.map (·.key) := by
+      rw [hl, List.map_append]
+    have hnd1 : ((stepW c sz now st e).admitted.map (·.key)).Nodup := by
+      have := hnd; simp only [runW] at this; rw [hnd'] at this
+      exact (List.nodup_append.mp this).1
+    have hall1 : ∀ j ∈ (stepW c sz now st e).admitted, j ∈ all := by
+      intro j hj; apply hall; simp only [runW]; rw [hl]; exact List.mem_append_left _ hj
+    exact ih _ (stepW_ord c sz now st e hO) (stepW_inv c sz now st e hO hI hnd1 hall1) hnd hall
+
+/-- The current workers' reachable states keep `InvW`. -/
+theorem sessionW_inv (c : Caps) (sz : Job → Nat) (now : Int) (all : List Job) (evs : List Ev)
+    (hnd : ((runW c sz now (WS.init (admitStore all)) evs).admitted.map (·.key)).Nodup)
+    (hall : ∀ j ∈ (runW c sz now (WS.init (admitStore all)) evs).admitted, j ∈ all) :
+    InvW all (runW c sz now (WS.init (admitStore all)) evs) :=
+  runW_inv c sz now all evs _ (ordW_init _) (invW_init all) hnd hall
+
+/-! ### The close -/
+
+theorem ansOf_closeW_settled {flush : CloseFlush} {now : Int} {st : WS} {k : Key} {x : Answer}
+    (h : ansOf st.store k = some x) (hs : x.isSettled = true) (hc : x ≠ .closeUnflushed) :
+    ansOf (closeW flush now st) k = some x := by
+  unfold ansOf closeW at *
+  rw [lookup_settleDeferred]
+  cases hl : lookup st.store k with
+  | none => rw [hl] at h; simp at h
+  | some e =>
+    rw [hl] at h
+    have he : e.answer = x := by simpa using h
+    split
+    · simp [deferEntry_of_settled flush now e (he ▸ hs) (he ▸ hc), he]
+    · simp [he]
+
+/-- What the close answers for a write it set aside. -/
+def closeAnswer : CloseFlush → Answer
+  | .durable => .intentRecorded
+  | .incomplete => .closeUnflushed
+
+theorem ansOf_closeW_unsettled {flush : CloseFlush} {now : Int} {st : WS} {k : Key} {a : Answer}
+    (h : ansOf st.store k = some a) (hu : a.isSettled = false) :
+    k ∈ deferredW st ∧ ansOf (closeW flush now st) k = some (closeAnswer flush) := by
+  unfold ansOf at h
+  cases hl : lookup st.store k with
+  | none => rw [hl] at h; simp at h
+  | some e =>
+    rw [hl] at h
+    have he : e.answer = a := by simpa using h
+    have hu' : e.answer.isSettled = false := he ▸ hu
+    have hm : k ∈ deferredW st := mem_pendingIds (lookup_mem _ _ _ hl) hu'
+    refine ⟨hm, ?_⟩
+    unfold ansOf closeW
+    rw [lookup_settleDeferred, ite_eq_left hm, hl]
+    have hs : ¬ e.answer.isSettled = true := by rw [hu']; decide
+    cases flush with
+    | durable =>
+      have hc : e.answer ≠ .closeUnflushed := by
+        intro hc; rw [hc] at hu'; exact absurd hu' (by decide)
+      simp only [Option.map_some, deferEntry_durable, ite_eq_right hc,
+        Lambo.Receipts.settle_unsettled e _ now hs]
+      rfl
+    | incomplete =>
+      simp only [Option.map_some, deferEntry_incomplete, Lambo.Receipts.settle_unsettled e _ now hs]
+      rfl
+
+theorem owedW_of {all : List Job} {st : WS} {j : Job} (hj : j ∈ all) (hu : Untouched j.key st.log) :
+    OwedW all st j := by
+  apply List.mem_filter.mpr
+  refine ⟨(fixedLoad_perm _).mem_iff.mpr ?_, rfl⟩
+  unfold intentsOf
+  rw [List.flatten_append, List.foldl_append, ← intentsOf, intentsOf_admit]
+  exact foldl_keeps_owed _ _ (List.mem_map.mpr ⟨j, hj, rfl⟩) hu
+
+/-- **Shutdown accounting over the current worker.** After any session of the
+current workers (admission, holds, retries, the fence) and a `close()`, every
+admitted write is one of: applied (its write and consume in one batch);
+failed with its intent consumed `failed`; failed after the fence, never run,
+its intent left unconsumed (the session's current holder's to apply, if an
+earlier flush took it); `intent_durable` after a completed final flush, owed
+in the flushed log (its row is unconsumed, so the next serve's replay owes
+it), whether it was running, held or queued when the close began; or
+`close_unflushed` after an incomplete flush. None is left `pending` or
+`pending_replay`. `shutdown_exactly_oneW` adds that exactly one of these
+holds. "Applied" means in this process's graph, its batch in the log: the
+batch is durable only once a flush takes it, and one committed after the
+fence is refused at the flush (`Flush.lean`). The current counterpart of
+`shutdown_no_silent_loss`. -/
+theorem shutdown_no_silent_lossW {c : Caps} {sz : Job → Nat} {now : Int} {all : List Job}
+    {evs : List Ev} {st : WS} (hst : st = runW c sz now (WS.init (admitStore all)) evs)
+    (hnd : (st.admitted.map (·.key)).Nodup) (hall : ∀ j ∈ st.admitted, j ∈ all)
+    (flush : CloseFlush) (now' : Int) (j : Job) (hj : j ∈ st.admitted) :
+    ((j, Answer.applied) ∈ st.settled ∧ ansOf (closeW flush now' st) j.key = some .applied ∧
+      [Mut.write j.key, .consume j.key .applied] ∈ st.log) ∨
+    ((j, Answer.failed) ∈ st.settled ∧ ansOf (closeW flush now' st) j.key = some .failed ∧
+      [Mut.consume j.key .failed] ∈ st.log) ∨
+    ((j, Answer.failed) ∈ st.settled ∧ st.fenced = true ∧
+      ansOf (closeW flush now' st) j.key = some .failed ∧ OwedW all st j) ∨
+    (j ∈ st.running ++ st.held ++ st.queue ∧ flush = .durable ∧
+      ansOf (closeW flush now' st) j.key = some .intentRecorded ∧ OwedW all st j) ∨
+    (j ∈ st.running ++ st.held ++ st.queue ∧ flush = .incomplete ∧
+      ansOf (closeW flush now' st) j.key = some .closeUnflushed) := by
+  subst hst
+  have hO := runW_ord c sz now evs _ (ordW_init (admitStore all))
+  have hI := sessionW_inv c sz now all evs hnd hall
+  have hja := hall j hj
+  have hD := mem_DW_of_admitted hO hj
+  simp only [DW, List.mem_append] at hD
+  rcases hD with ((hD | hD) | hD) | hD
+  · obtain ⟨p, hp, hpj⟩ := List.mem_map.mp hD
+    subst hpj
+    obtain ⟨h1, h2⟩ := hI.settled p hp
+    rcases h2 with ⟨e1, e2⟩ | ⟨e1, e2⟩ | ⟨e1, e2, e3⟩
+    · refine Or.inl ⟨by rw [← e1]; exact hp, ?_, e2⟩
+      exact ansOf_closeW_settled (e1 ▸ h1) rfl (by decide)
+    · refine Or.inr (Or.inl ⟨by rw [← e1]; exact hp, ?_, e2⟩)
+      exact ansOf_closeW_settled (e1 ▸ h1) rfl (by decide)
+    · refine Or.inr (Or.inr (Or.inl ⟨by rw [← e1]; exact hp, e2, ?_, owedW_of hja e3⟩))
+      exact ansOf_closeW_settled (e1 ▸ h1) rfl (by decide)
+  · obtain ⟨⟨a, h1, h2⟩, h3⟩ := hI.live j (List.mem_append_left _ hD)
+    have hm : j ∈ (runW c sz now (WS.init (admitStore all)) evs).running ++
+        (runW c sz now (WS.init (admitStore all)) evs).held ++
+        (runW c sz now (WS.init (admitStore all)) evs).queue := by simp [hD]
+    have hc := (ansOf_closeW_unsettled (flush := flush) (now := now') h1 h2).2
+    cases flush with
+    | durable => exact Or.inr (Or.inr (Or.inr (Or.inl ⟨hm, rfl, hc, owedW_of hja h3⟩)))
+    | incomplete => exact Or.inr (Or.inr (Or.inr (Or.inr ⟨hm, rfl, hc⟩)))
+  · obtain ⟨h1, h3⟩ := hI.held j hD
+    have hm : j ∈ (runW c sz now (WS.init (admitStore all)) evs).running ++
+        (runW c sz now (WS.init (admitStore all)) evs).held ++
+        (runW c sz now (WS.init (admitStore all)) evs).queue := by simp [hD]
+    have hc := (ansOf_closeW_unsettled (flush := flush) (now := now') h1 rfl).2
+    cases flush with
+    | durable => exact Or.inr (Or.inr (Or.inr (Or.inl ⟨hm, rfl, hc, owedW_of hja h3⟩)))
+    | incomplete => exact Or.inr (Or.inr (Or.inr (Or.inr ⟨hm, rfl, hc⟩)))
+  · obtain ⟨⟨a, h1, h2⟩, h3⟩ := hI.live j (List.mem_append_right _ hD)
+    have hm : j ∈ (runW c sz now (WS.init (admitStore all)) evs).running ++
+        (runW c sz now (WS.init (admitStore all)) evs).held ++
+        (runW c sz now (WS.init (admitStore all)) evs).queue := by simp [hD]
+    have hc := (ansOf_closeW_unsettled (flush := flush) (now := now') h1 h2).2
+    cases flush with
+    | durable => exact Or.inr (Or.inr (Or.inr (Or.inl ⟨hm, rfl, hc, owedW_of hja h3⟩)))
+    | incomplete => exact Or.inr (Or.inr (Or.inr (Or.inr ⟨hm, rfl, hc⟩)))
+
+
+/-- **A held write at close.** A write held in session (an outage, a run of
+lookup timeouts, or behind an earlier held write of its agent) answers
+`pending_replay` while held, and its intent is unconsumed; the close never
+answers it `failed`: `intent_durable` after a completed final flush (and it
+stays owed for the next serve's replay), `close_unflushed` otherwise. A held
+write can still settle `failed` in session once it leaves `held`: its retry
+meets a content refusal, or it is refused after the fence. -/
+theorem held_at_closeW {c : Caps} {sz : Job → Nat} {now : Int} {all : List Job} {evs : List Ev}
+    {st : WS} (hst : st = runW c sz now (WS.init (admitStore all)) evs)
+    (hnd : (st.admitted.map (·.key)).Nodup) (hall : ∀ j ∈ st.admitted, j ∈ all)
+    (j : Job) (hj : j ∈ st.held) (flush : CloseFlush) (now' : Int) :
+    ansOf st.store j.key = some .pendingReplay ∧ OwedW all st j ∧
+      ansOf (closeW flush now' st) j.key = some (closeAnswer flush) := by
+  subst hst
+  have hO := runW_ord c sz now evs _ (ordW_init (admitStore all))
+  have hI := sessionW_inv c sz now all evs hnd hall
+  obtain ⟨h1, h2⟩ := hI.held j hj
+  have hja : j ∈ all := hall j ((keysW_of _ hO hnd).adm j (by simp [DW, hj]))
+  exact ⟨h1, owedW_of hja h2, (ansOf_closeW_unsettled h1 rfl).2⟩
+
+/-- **An in-session outage holds the write.** The running write of agent `a`
+that meets an embedder outage becomes a held write answering `pending_replay`,
+and appends nothing (its intent is not consumed). While it stays held, `held_at_closeW` says the same of every later state and of the close.
+The current counterpart of `outage_failed_but_owed`, which states the worker
+before #295, where the same write answered `failed`. Rust test
+`a_write_reached_during_an_in_session_embedder_outage_is_not_consumed`. -/
+theorem outage_holdsW {c : Caps} {sz : Job → Nat} {now : Int} {all : List Job} {evs : List Ev}
+    {st : WS} (hst : st = runW c sz now (WS.init (admitStore all)) evs)
+    (hnd : (st.admitted.map (·.key)).Nodup) (hall : ∀ j ∈ st.admitted, j ∈ all)
+    (a : Nat) (j : Job) (t : List Job) (hrun : ofAgent a st.running = j :: t) :
+    j ∈ (stepW c sz now st (.finish a (.err .unavailable))).held ∧
+      ansOf (stepW c sz now st (.finish a (.err .unavailable))).store j.key = some .pendingReplay ∧
+      (stepW c sz now st (.finish a (.err .unavailable))).log = st.log ∧
+      OwedW all (stepW c sz now st (.finish a (.err .unavailable))) j := by
+  have hfin : stepW c sz now st (.finish a (.err .unavailable)) = holdRun now a j st := by
+    simp [stepW, finishW, hrun, holdsS]
+  rw [hfin]
+  subst hst
+  have hO := runW_ord c sz now evs _ (ordW_init (admitStore all))
+  have hI := sessionW_inv c sz now all evs hnd hall
+  have hm := head_mem hrun
+  obtain ⟨⟨x, h1, h2⟩, h3⟩ := hI.live j (List.mem_append_left _ hm)
+  have hja : j ∈ all := hall j ((keysW_of _ hO hnd).adm j (by simp [DW, hm]))
+  exact ⟨List.mem_cons_self, ansOf_settleOne_self _ now h1 h2, rfl, owedW_of hja h3⟩
+
+/-- The error the model hands `finish` for a run that failed with `e`: the
+worker's hold decision in `spawn_worker`, before its counters move. A lookup
+timeout on a write's first attempt adds one to `lookup_streak` (lookup
+timeouts in a row, across lanes, with nothing applied between; `streak` is its
+value before), and every one that brings it to `REPLAY_LOOKUP_TIMEOUT_LIMIT`
+or finds it past it (the third, and each later one until a write applies and
+resets it) holds the write as an outage does; a retried held write's lookup timeout does
+not count and settles. This is the abstraction `stepW`'s header describes
+("handed to the model as `unavailable`"), now as a function. The streak is an
+input: how the Rust counts it is not modelled, and the Rust resets it in the
+worker's settle block after a commit, not at the commit, so a timeout on
+another lane in between still counts (#346). -/
+def heldErrW (retried : Bool) (streak : Nat) : Err → Err
+  | .lookupTimeout =>
+    if retried = false ∧ lookupTimeoutLimit ≤ streak + 1 then .unavailable else .lookupTimeout
+  | e => e
+
+/-- The worker holds exactly on an outage or on a first-attempt lookup timeout
+that brings, or finds, the run of them at `REPLAY_LOOKUP_TIMEOUT_LIMIT` or
+past it. -/
+theorem heldErrW_holds (retried : Bool) (streak : Nat) (e : Err) :
+    holdsS (heldErrW retried streak e) = true ↔
+      (e = .unavailable ∨ (e = .lookupTimeout ∧ retried = false ∧ lookupTimeoutLimit ≤ streak + 1)) := by
+  cases e <;> simp only [heldErrW] <;> (try split) <;> simp_all [holdsS] <;> decide
+
+/-- **A single lookup timeout settles `failed` and consumes the intent**
+(below the run limit, or the retry of a held write): the write is settled
+`failed` and its batch is the consume. Rust test
+`a_lookup_timeout_in_session_settles_failed_and_holds_nothing`. -/
+theorem lookupTimeout_settlesW {c : Caps} {sz : Job → Nat} {now : Int} {all : List Job}
+    {evs : List Ev} {st : WS} (hst : st = runW c sz now (WS.init (admitStore all)) evs)
+    (hnd : (st.admitted.map (·.key)).Nodup) (hall : ∀ j ∈ st.admitted, j ∈ all)
+    (a : Nat) (j : Job) (t : List Job) (hrun : ofAgent a st.running = j :: t)
+    (retried : Bool) (streak : Nat) (hone : retried = true ∨ streak + 1 < lookupTimeoutLimit) :
+    let st' := stepW c sz now st (.finish a (.err (heldErrW retried streak .lookupTimeout)))
+    ansOf st'.store j.key = some .failed ∧ (j, Answer.failed) ∈ st'.settled ∧
+      st'.log = st.log ++ [[Mut.consume j.key .failed]] := by
+  have he : heldErrW retried streak .lookupTimeout = .lookupTimeout := by
+    simp only [heldErrW]
+    rw [ite_eq_right]
+    rintro ⟨h1, h2⟩
+    rcases hone with h | h
+    · rw [h] at h1; cases h1
+    · omega
+  have hfin : stepW c sz now st (.finish a (.err (heldErrW retried streak .lookupTimeout))) =
+      settleRun now a j .failed [.consume j.key .failed] st := by
+    rw [he]; simp [stepW, finishW, hrun, holdsS]
+  simp only [hfin]
+  subst hst
+  have hI := sessionW_inv c sz now all evs hnd hall
+  obtain ⟨⟨x, h1, h2⟩, _⟩ := hI.live j (List.mem_append_left _ (head_mem hrun))
+  exact ⟨ansOf_settleOne_self _ now h1 h2, List.mem_append_right _ (List.mem_singleton.mpr rfl), rfl⟩
+
+/-- **A run of lookup timeouts holds the write**: a first-attempt lookup
+timeout once the run has reached the limit is held, as an outage
+does (`outage_holdsW`). Rust test
+`a_lookup_timeout_run_holds_the_third_write_and_its_retry_settles_it`. -/
+theorem lookupTimeout_run_holdsW {c : Caps} {sz : Job → Nat} {now : Int} {all : List Job}
+    {evs : List Ev} {st : WS} (hst : st = runW c sz now (WS.init (admitStore all)) evs)
+    (hnd : (st.admitted.map (·.key)).Nodup) (hall : ∀ j ∈ st.admitted, j ∈ all)
+    (a : Nat) (j : Job) (t : List Job) (hrun : ofAgent a st.running = j :: t)
+    (streak : Nat) (hrun3 : lookupTimeoutLimit ≤ streak + 1) :
+    let st' := stepW c sz now st (.finish a (.err (heldErrW false streak .lookupTimeout)))
+    j ∈ st'.held ∧ ansOf st'.store j.key = some .pendingReplay ∧ st'.log = st.log ∧
+      OwedW all st' j := by
+  have he : heldErrW false streak .lookupTimeout = .unavailable := by
+    simp [heldErrW, hrun3]
+  simp only [he]
+  exact outage_holdsW hst hnd hall a j t hrun
+
+/-- **A retried close upgrades `close_unflushed`.** A write the close set aside
+(running, held or queued) answers `close_unflushed` after an incomplete flush;
+a retried close whose flush completes settles the same set-aside ids
+(`close_deferred`, kept after an incomplete flush) and answers it
+`intent_durable`. `retry_upgrades` is the same fact for one entry. -/
+theorem closeW_retry_upgradesW {c : Caps} {sz : Job → Nat} {now : Int} {all : List Job}
+    {evs : List Ev} {st : WS} (hst : st = runW c sz now (WS.init (admitStore all)) evs)
+    (hnd : (st.admitted.map (·.key)).Nodup) (hall : ∀ j ∈ st.admitted, j ∈ all)
+    (j : Job) (hj : j ∈ st.running ++ st.held ++ st.queue) (now1 now2 : Int) :
+    ansOf (closeW .incomplete now1 st) j.key = some .closeUnflushed ∧
+      ansOf (settleDeferred .durable now2 (deferredW st) (closeW .incomplete now1 st)) j.key =
+        some .intentRecorded := by
+  subst hst
+  have hI := sessionW_inv c sz now all evs hnd hall
+  have hu : ∃ a, ansOf (runW c sz now (WS.init (admitStore all)) evs).store j.key = some a ∧
+      a.isSettled = false := by
+    simp only [List.mem_append] at hj
+    rcases hj with (hj | hj) | hj
+    · exact (hI.live j (List.mem_append_left _ hj)).1
+    · exact ⟨_, (hI.held j hj).1, rfl⟩
+    · exact (hI.live j (List.mem_append_right _ hj)).1
+  obtain ⟨a, h1, h2⟩ := hu
+  obtain ⟨hm, hc⟩ := ansOf_closeW_unsettled (flush := .incomplete) (now := now1) h1 h2
+  refine ⟨hc, ?_⟩
+  unfold ansOf at h1 ⊢
+  cases hl : lookup (runW c sz now (WS.init (admitStore all)) evs).store j.key with
+  | none => rw [hl] at h1; simp at h1
+  | some e =>
+    rw [hl] at h1
+    have he : e.answer.isSettled = false := by
+      have : e.answer = a := by simpa using h1
+      rw [this]; exact h2
+    unfold closeW
+    rw [lookup_settleDeferred, ite_eq_left hm, lookup_settleDeferred, ite_eq_left hm, hl]
+    simp only [Option.map_some]
+    rw [retry_upgrades now1 now2 e he]
+
+/-! ### Crash and the serve that follows -/
+
+theorem startW_log (now : Int) (a : Nat) (st : WS) : (startW now a st).log = st.log := by
+  unfold startW
+  split
+  · rfl
+  · split
+    · split
+      · rfl
+      · split <;> rfl
+    · split
+      · rfl
+      · split <;> rfl
+    · split <;> rfl
+    · rfl
+
+theorem stepW_log (c : Caps) (sz : Job → Nat) (now : Int) (st : WS) (ev : Ev) :
+    (stepW c sz now st ev).log = st.log ∨
+      ∃ j r, (stepW c sz now st ev).log = st.log ++ [(workerStep false j r).2] := by
+  cases ev with
+  | submit j =>
+    simp only [stepW]
+    split
+    · exact Or.inl rfl
+    · split <;> exact Or.inl rfl
+  | start a => exact Or.inl (startW_log now a st)
+  | finish a r =>
+    simp only [stepW]
+    unfold finishW
+    split
+    · exact Or.inl rfl
+    · next j _ _ =>
+      cases r with
+      | ok => exact Or.inr ⟨j, .ok, rfl⟩
+      | err e =>
+        simp only
+        split
+        · exact Or.inl rfl
+        · exact Or.inr ⟨j, .err .embed, rfl⟩
+  | wake a => exact Or.inl rfl
+  | fence => exact Or.inl rfl
+
+/-- **The refinement.** Every batch the current workers append is a batch the
+old worker (`workerStep`, unfenced) appends for some write and run result: an
+applied write's is `workerStep`'s success batch, a consumed failure's is its
+`[consume failed]` (for a lookup timeout the old worker appended nothing; the
+batch is the one it appends for a content refusal), and a hold or a fenced
+refusal appends none. So `workerStep_atomic` and `workerStep_keys` hold of the
+current worker's batches, which is what the crash argument needs. -/
+theorem runW_log_refines (c : Caps) (sz : Job → Nat) (now : Int) :
+    ∀ (evs : List Ev) (st : WS), (∀ b ∈ st.log, ∃ j r, b = (workerStep false j r).2) →
+      ∀ b ∈ (runW c sz now st evs).log, ∃ j r, b = (workerStep false j r).2 := by
+  intro evs
+  induction evs with
+  | nil => intro st h; exact h
+  | cons e es ih =>
+    intro st h
+    apply ih
+    intro b hb
+    rcases stepW_log c sz now st e with hl | ⟨j, r, hl⟩
+    · rw [hl] at hb; exact h b hb
+    · rw [hl] at hb
+      cases List.mem_append.mp hb with
+      | inl hb => exact h b hb
+      | inr hb => exact ⟨j, r, List.mem_singleton.mp hb⟩
+
+/-- A row still unconsumed after a run of consumes was there, unconsumed,
+before it. -/
+theorem foldl_pending_mem {i' : Intent} : ∀ (ms : List Mut) (acc : List Intent), NoPut ms →
+    i' ∈ ms.foldl applyMut acc → i'.outcome = none → i' ∈ acc := by
+  intro ms
+  induction ms with
+  | nil => intro acc _ h _; exact h
+  | cons m ms ih =>
+    intro acc hnp h ho
+    have h1 := ih (applyMut acc m) (fun x hx => hnp x (List.mem_cons_of_mem _ hx)) h ho
+    cases m with
+    | put k => exact absurd rfl (hnp _ List.mem_cons_self k)
+    | write _ => exact h1
+    | consume q t =>
+      obtain ⟨i0, h0, he⟩ := List.mem_map.mp h1
+      by_cases hq : i0.job.key = q
+      · rw [ite_eq_left hq] at he; rw [← he] at ho; simp at ho
+      · rw [ite_eq_right hq] at he; rw [← he]; exact h0
+
+/-- **The current serve applies only stored, unconsumed rows.** Every write
+`serveR` (both passes, the block reason after a halt) applies is a row it was
+given, unconsumed: the first pass by `replayD_facts`, the retry pass by
+`loopD_facts` over the rows the first pass's consumes left unconsumed
+(`foldl_pending_mem`). The current counterpart of `replay_applied_pending`. -/
+theorem serveR_applied_pending {live : Bool} {rout rout' : Job → RR} {s' : Streaks}
+    {intents : List Intent} {x : Job} (hx : x ∈ (serveR live rout rout' s' intents).applied) :
+    ∃ i ∈ intents, i.job = x ∧ i.outcome = none := by
+  rw [(serveR_log live rout rout' s' intents).2, (serveQ_log live rout rout' s' intents).2] at hx
+  unfold replayP at hx
+  dsimp only at hx
+  split at hx
+  · exact replayD_applied_pending hx
+  · rcases List.mem_append.mp hx with h | h
+    · exact replayD_applied_pending h
+    · have hs := (loopD_facts stepQ rout' _ s' []).1.subset h
+      obtain ⟨i', hi', rfl⟩ := List.mem_map.mp hs
+      obtain ⟨hi1, hi2⟩ := List.mem_filter.mp hi'
+      have hio : i'.outcome = none := Option.isNone_iff_eq_none.mp hi2
+      have hnp := (replayD_facts stepQ live rout intents).2.2.1
+      exact ⟨i', foldl_pending_mem _ _ hnp hi1 hio, rfl, hio⟩
+
+/-- **No write is applied twice across a crash, over the current worker and
+serve.** A flush makes some prefix of the session's log durable (admission's
+puts, then the current workers' batches), and the process may die after any
+flush. If a write is in the durable prefix, its consume is in the same batch
+(`runW_log_refines`, `workerStep_atomic`), so the next serve (`serveR` over
+the current load order, both passes) never applies it again. The current
+counterpart of `crash_never_reapplies`; like it, about one process's log over
+an empty intent table. -/
+theorem crash_never_reappliesW (c : Caps) (sz : Job → Nat) (now : Int) (s : RStore)
+    (evs : List Ev) (all : List Job) (n : Nat) (r : Key) (live : Bool) (rout rout' : Job → RR)
+    (s' : Streaks)
+    (hw : Mut.write r ∈ ((admitLog all ++ (runW c sz now (WS.init s) evs).log).take n).flatten) :
+    ∀ x ∈ (serveR live rout rout' s' (fixedLoad (intentsOf
+      ((admitLog all ++ (runW c sz now (WS.init s) evs).log).take n).flatten))).applied,
+      x.key ≠ r := by
+  intro x hx hxr
+  obtain ⟨i, hi, hix, hio⟩ := serveR_applied_pending hx
+  rw [(fixedLoad_perm _).mem_iff] at hi
+  have hL := runW_log_refines c sz now evs (WS.init s) (by intro b hb; simp [WS.init] at hb)
+  generalize (runW c sz now (WS.init s) evs).log = L at hw hi hL
+  rw [List.take_append, List.flatten_append] at hw hi
+  have hwB : Mut.write r ∈ (L.take (n - (admitLog all).length)).flatten := by
+    cases List.mem_append.mp hw with
+    | inl h =>
+      obtain ⟨j, hj⟩ := mem_admit_flatten h
+      cases hj
+    | inr h => exact h
+  have hcB : Mut.consume r .applied ∈ (L.take (n - (admitLog all).length)).flatten := by
+    obtain ⟨b, hb, hwb⟩ := List.mem_flatten.mp hwB
+    obtain ⟨j, rr, rfl⟩ := hL _ ((List.take_sublist _ _).subset hb)
+    exact List.mem_flatten.mpr ⟨_, hb, workerStep_atomic hwb⟩
+  have hnp : NoPut (L.take (n - (admitLog all).length)).flatten := by
+    intro m hm j he
+    obtain ⟨b, hb, hmb⟩ := List.mem_flatten.mp hm
+    obtain ⟨j', rr, rfl⟩ := hL _ ((List.take_sublist _ _).subset hb)
+    rcases workerStep_keys hmb with h | ⟨t, h⟩ <;> rw [h] at he <;> cases he
+  unfold intentsOf at hi
+  rw [List.foldl_append] at hi
+  exact foldl_consumed _ _ hnp (Or.inl ⟨_, hcB⟩) i hi (by rw [hix]; exact hxr) hio
+
+/-! ### Exactly one fate at close -/
+
+/-- The five cases of `shutdown_no_silent_lossW`, by name. -/
+inductive FateW where
+  | applied
+  | failedConsumed
+  | failedFenced
+  | durable
+  | unflushed
+  deriving DecidableEq, Repr
+
+/-- What each case says of write `j` after `closeW flush now'` over `st`. -/
+def FateW.holds (all : List Job) (st : WS) (flush : CloseFlush) (now' : Int) (j : Job) :
+    FateW → Prop
+  | .applied => (j, Answer.applied) ∈ st.settled ∧
+      ansOf (closeW flush now' st) j.key = some .applied ∧
+      [Mut.write j.key, .consume j.key .applied] ∈ st.log
+  | .failedConsumed => (j, Answer.failed) ∈ st.settled ∧
+      ansOf (closeW flush now' st) j.key = some .failed ∧ [Mut.consume j.key .failed] ∈ st.log
+  | .failedFenced => (j, Answer.failed) ∈ st.settled ∧ st.fenced = true ∧
+      ansOf (closeW flush now' st) j.key = some .failed ∧ OwedW all st j
+  | .durable => j ∈ st.running ++ st.held ++ st.queue ∧ flush = .durable ∧
+      ansOf (closeW flush now' st) j.key = some .intentRecorded ∧ OwedW all st j
+  | .unflushed => j ∈ st.running ++ st.held ++ st.queue ∧ flush = .incomplete ∧
+      ansOf (closeW flush now' st) j.key = some .closeUnflushed
+
+/-- The answer the close gives in each case. -/
+def FateW.answer : FateW → Answer
+  | .applied => .applied
+  | .failedConsumed => .failed
+  | .failedFenced => .failed
+  | .durable => .intentRecorded
+  | .unflushed => .closeUnflushed
+
+theorem FateW.holds_answer {all : List Job} {st : WS} {flush : CloseFlush} {now' : Int}
+    {j : Job} : ∀ f : FateW, f.holds all st flush now' j →
+      ansOf (closeW flush now' st) j.key = some f.answer
+  | .applied, h => h.2.1
+  | .failedConsumed, h => h.2.1
+  | .failedFenced, h => h.2.2.1
+  | .durable, h => h.2.2.1
+  | .unflushed, h => h.2.2
+
+/-- A write whose `[consume failed]` batch is in the log is not owed: the
+consume comes after admission's puts, so every row of its id is consumed. -/
+theorem not_owed_of_consumed {all : List Job} {st : WS} {j : Job} {t : Tag}
+    (hnp : NoPut st.log.flatten) (hc : [Mut.consume j.key t] ∈ st.log) : ¬ OwedW all st j := by
+  intro ho
+  have hm := (List.mem_filter.mp ho).1
+  rw [(fixedLoad_perm _).mem_iff] at hm
+  unfold intentsOf at hm
+  rw [List.flatten_append, List.foldl_append] at hm
+  have hc' : Mut.consume j.key t ∈ st.log.flatten :=
+    List.mem_flatten.mpr ⟨_, hc, List.mem_singleton.mpr rfl⟩
+  exact foldl_consumed _ _ hnp (Or.inl ⟨t, hc'⟩) _ hm rfl rfl
+
+/-- **Exactly one fate at close.** For every admitted write, exactly one case
+of `shutdown_no_silent_lossW` holds. The cases differ by the close's answer,
+except the two `failed` ones: a failure consumed in session has its
+`[consume failed]` batch in the log, so its intent is not owed, while a write
+refused after the fence is owed. -/
+theorem shutdown_exactly_oneW {c : Caps} {sz : Job → Nat} {now : Int} {all : List Job}
+    {evs : List Ev} {st : WS} (hst : st = runW c sz now (WS.init (admitStore all)) evs)
+    (hnd : (st.admitted.map (·.key)).Nodup) (hall : ∀ j ∈ st.admitted, j ∈ all)
+    (flush : CloseFlush) (now' : Int) (j : Job) (hj : j ∈ st.admitted) :
+    (∃ f : FateW, f.holds all st flush now' j) ∧
+      ∀ f g : FateW, f.holds all st flush now' j → g.holds all st flush now' j → f = g := by
+  refine ⟨?_, ?_⟩
+  · rcases shutdown_no_silent_lossW hst hnd hall flush now' j hj with h | h | h | h | h
+    · exact ⟨.applied, h⟩
+    · exact ⟨.failedConsumed, h⟩
+    · exact ⟨.failedFenced, h⟩
+    · exact ⟨.durable, h⟩
+    · exact ⟨.unflushed, h⟩
+  · have hnp : NoPut st.log.flatten := by
+      subst hst
+      intro m hm k he
+      obtain ⟨b, hb, hmb⟩ := List.mem_flatten.mp hm
+      obtain ⟨j', rr, rfl⟩ := runW_log_refines c sz now evs (WS.init (admitStore all))
+        (by intro b hb; simp [WS.init] at hb) b hb
+      rcases workerStep_keys hmb with h | ⟨t, h⟩ <;> rw [h] at he <;> cases he
+    intro f g hf hg
+    have ha := (FateW.holds_answer f hf).symm.trans (FateW.holds_answer g hg)
+    cases f <;> cases g <;> simp [FateW.answer] at ha ⊢
+    · exact not_owed_of_consumed hnp hf.2.2 hg.2.2.2
+    · exact not_owed_of_consumed hnp hg.2.2 hf.2.2.2
+
 /-! ## What the model shows about the Rust: concrete cases -/
 
 section Examples
@@ -4021,8 +5446,13 @@ interleaving (`drain_fifo`). -/
 example : (drain (Lambo.Receipts.run ⟨[], []⟩ [.push j1, .pop, .push j2, .push j3])).taken =
     [j1, j2, j3] := by decide
 
-/-- `drain_settles_each`: one job applied, one refused for its content, one
-hit by an outage; all three settled. -/
+/-! The next four examples are over the worker **before #295** (`work`,
+`close`); the current worker's are under "The close over the current worker"
+at the end of this section. -/
+
+/-- `drain_settles_each` (before #295): one job applied, one refused for its
+content, one hit by an outage; all three settled. The current worker holds the
+third (`pending_replay`) instead. -/
 example :
     let w := work (fun _ => false)
       (fun j => if j.rid = 1 then .ok else if j.rid = 2 then .err .embed else .err .unavailable)
@@ -4031,8 +5461,8 @@ example :
       [some .applied, some .failed, some .failed]) ∧
     w.2 = [[.write j1.key, .consume j1.key .applied], [.consume j2.key .failed], []] := by decide
 
-/-- `shutdown_no_silent_loss`: the drain finished `j1`; `j2` and `j3` are
-deferred and owed by the next replay. -/
+/-- `shutdown_no_silent_loss` (before #295): the drain finished `j1`; `j2` and
+`j3` are deferred and owed by the next replay. -/
 example :
     let c := close [j1] (fun _ => false) (fun _ => .ok) 0 .durable (admitStore [j1, j2, j3])
     [j1.key, j2.key, j3.key].map (fun r => (lookup c.1 r).map (·.answer)) =
@@ -4040,7 +5470,7 @@ example :
       (pendingOf (loadOrder (intentsOf (admitLog [j1, j2, j3] ++ c.2).flatten))).map (·.job) =
         [j2, j3] := by decide
 
-/-- `close_answer`, incomplete flush: the deferred write says
+/-- `close_answer` (before #295), incomplete flush: the deferred write says
 `close_unflushed`, and a retried close whose flush lands upgrades it
 (`retry_upgrades`). -/
 example :
@@ -4052,8 +5482,8 @@ example :
 /-- `drop_settles_nothing`: the `Drop` path leaves a pending receipt pending. -/
 example : (lookup (abortAllSync (admitStore [j1])) j1.key).map (·.answer) = some .pending := by decide
 
-/-- `crash_never_reapplies`: the process dies after flushing `j1`'s commit;
-the next replay applies only `j2`. -/
+/-- `crash_never_reapplies` (before #295): the process dies after flushing
+`j1`'s commit; the next replay applies only `j2`. -/
 example :
     let log := admitLog [j1, j2] ++
       (work (fun _ => false) (fun _ => .ok) 0 (admitStore [j1, j2]) [j1, j2]).2
@@ -4145,7 +5575,8 @@ theorem transient_skip_reorders :
 /-- Two sequential writes of one agent (`j1` before `j2`). In session the
 worker meets an outage at `j1` and applies `j2`; the close lands; the next
 serve applies `j1`. Writes in the order they reached the graph: `j2`, then
-`j1`. -/
+`j1`. Over the worker **before #295** (`close`); the current worker holds `j2`
+behind `j1` (`stepW_ord`, `sessionW_then_serve_order`, `outage_holdsW`). -/
 theorem outage_then_replay_reorders :
     let c := close [j1, j2] (fun _ => false)
       (fun j => if j.rid = 1 then .err .unavailable else .ok) 0 .durable (admitStore [j1, j2])
@@ -4185,7 +5616,15 @@ intent is kept and replayed. What is stale is the rustdoc on
 `ReceiptAnswer::Failed` (`src/writeq/receipts.rs`), "Attempted and rejected.
 The write did not happen.", with no qualifier, and the first sentence of
 mcp.mdx's `failed` row, "Nothing was written", which needs "by this server"
-or "yet". -/
+or "yet".
+
+**This finding is about the worker before #295.** #295 removed its cause:
+the current worker no longer answers `failed` for an outage but holds the
+write (`pending_replay`, `outage_holdsW`), and the close answers a held write
+`intent_durable` (`held_at_closeW`), so the receipt goes from
+`pending_replay` or `intent_durable` to `applied_after_restart` with no
+`failed` between. The `ReceiptAnswer::Failed` rustdoc and mcp.mdx's `failed`
+row now say an outage does not answer `failed`. -/
 
 /-- The restart map's answer for a receipt after a replay: seeded from the
 rows, then overwritten by the replay's own inserts. -/
@@ -4193,6 +5632,15 @@ def restartAnswer (live : Bool) (rout : Job → RR) (intents : List Intent) (r :
     Option Answer :=
   lookupLast (seed intents ++ (replay live rout intents).answers) r
 
+/-- **Before #295: a `failed` receipt for an outage's write later answered
+`applied_after_restart`.** Under the worker before #295 (`close`, `workerStep`)
+a write met by an in-session outage answers `failed`, and the next serve
+applies it. **The current Rust does not behave this way**: since #295 that
+write answers `pending_replay` in session and `intent_durable` at close, never
+`failed` (`outage_holdsW`, `held_at_closeW`; the example "`outage_holdsW`
+beside `outage_failed_then_applied`" at the end of this section runs both on
+this scenario). Kept because it documents the receipt #295's hold replaced,
+the finding above. -/
 theorem outage_failed_then_applied :
     let c := close [j1] (fun _ => false) (fun _ => .err .unavailable) 0 .durable (admitStore [j1])
     let rows := loadOrder (intentsOf (admitLog [j1] ++ c.2).flatten)
@@ -4215,7 +5663,10 @@ acks two derives of the same Observation, both puts flush, the process dies;
 the next serve applies the first, the second is refused with a non-cycle
 `Invariant`, and the replay stops (block reason `Other`) there on every later
 serve, leaving the whole backlog behind it `pending_replay`. The in-session
-worker, meeting the same error, consumes it `failed`. (`spawn_replay`'s doc
+worker, meeting the same error, consumes it `failed` (the theorem states it of
+`workerStep`, the worker before #295; the current worker too, since `finishW`
+settles a store error `failed` with the same `[consume failed]` batch).
+(`spawn_replay`'s doc
 also lists "a vanished interaction" among the failures consumed `failed`; that
 is a `Store(NotFound)` and stops the replay too, but it is effectively
 unreachable: the interaction is logged before the put and never collected.) -/
@@ -4447,6 +5898,79 @@ example :
     reported (serveQ true rout rout ⟨0, 0⟩ ints).block = none ∧
       pendingOf (applyLog ints (serveQ true rout rout ⟨0, 0⟩ ints).log) ≠ [] ∧
       (serveR true rout rout ⟨0, 0⟩ ints).block = some .other := by
+  decide
+
+/-! ### The close over the current worker -/
+
+/-- `held_at_closeW`, `shutdown_no_silent_lossW` on #295's scenario. `j1`
+meets an outage and is held; `j2` joins it, unrun; agent 1's `k1` applies.
+Both held writes answer `pending_replay` while held; the close never answers
+them `failed`, but `intent_durable` after a completed flush and `close_unflushed`
+after an incomplete one, leaves `k1` `applied`, and the flushed log owes
+exactly `j1` and `j2`. -/
+example :
+    let st := runW capsT one 0 (WS.init (admitStore [j1, j2, k1]))
+      [.submit j1, .start 0, .finish 0 (.err .unavailable), .submit j2, .start 0,
+       .submit k1, .start 1, .finish 1 .ok]
+    st.held = [j1, j2] ∧ st.applied = [k1] ∧
+      [j1.key, j2.key, k1.key].map (ansOf st.store) =
+        [some .pendingReplay, some .pendingReplay, some .applied] ∧
+      [j1.key, j2.key, k1.key].map (ansOf (closeW .durable 1 st)) =
+        [some .intentRecorded, some .intentRecorded, some .applied] ∧
+      [j1.key, j2.key, k1.key].map (ansOf (closeW .incomplete 1 st)) =
+        [some .closeUnflushed, some .closeUnflushed, some .applied] ∧
+      (pendingOf (fixedLoad (intentsOf (admitLog [j1, j2, k1] ++ st.log).flatten))).map (·.job) =
+        [j1, j2] := by
+  decide
+
+/-- `outage_holdsW` beside `outage_failed_then_applied`: the same write under
+the current worker answers `intent_durable` at close (and the next serve
+applies it), where the worker before #295 answered it `failed`. -/
+example :
+    let st := runW capsT one 0 (WS.init (admitStore [j1]))
+      [.submit j1, .start 0, .finish 0 (.err .unavailable)]
+    let rows := fixedLoad (intentsOf (admitLog [j1] ++ st.log).flatten)
+    ansOf (closeW .durable 1 st) j1.key = some .intentRecorded ∧
+      (serveR true okAll okAll ⟨0, 0⟩ rows).applied = [j1] ∧
+      (lookup (close [j1] (fun _ => false) (fun _ => .err .unavailable) 0 .durable
+        (admitStore [j1])).1 j1.key).map (·.answer) = some .failed := by
+  decide
+
+/-- The fence at close: `j1`, already running, commits (its batch is in the
+log; the store refuses that flush); `j2` is refused `failed` unrun and its
+intent is left unconsumed (the session's current holder's to apply, if an
+earlier flush took it). -/
+example :
+    let st := runW capsT one 0 (WS.init (admitStore [j1, j2]))
+      [.submit j1, .submit j2, .start 0, .fence, .finish 0 .ok, .start 0]
+    [j1.key, j2.key].map (ansOf (closeW .incomplete 1 st)) = [some .applied, some .failed] ∧
+      st.log = [[.write j1.key, .consume j1.key .applied]] ∧
+      (pendingOf (fixedLoad (intentsOf (admitLog [j1, j2] ++ st.log).flatten))).map (·.job) =
+        [j2] := by
+  decide
+
+/-- A write running when the close starts (aborted before its commit) and one
+still queued: both `close_unflushed` after an incomplete flush, and both
+`intent_durable` once a retried close's flush lands (`closeW_retry_upgradesW`). -/
+example :
+    let st := runW capsT one 0 (WS.init (admitStore [j1, j2]))
+      [.submit j1, .submit j2, .start 0]
+    st.running = [j1] ∧ st.queue = [j2] ∧
+      [j1.key, j2.key].map (ansOf (closeW .incomplete 1 st)) =
+        [some .closeUnflushed, some .closeUnflushed] ∧
+      [j1.key, j2.key].map
+        (ansOf (settleDeferred .durable 2 (deferredW st) (closeW .incomplete 1 st))) =
+        [some .intentRecorded, some .intentRecorded] := by
+  decide
+
+/-- `crash_never_reappliesW`: the process dies after flushing `j1`'s commit;
+the next serve applies only `j2`. -/
+example :
+    let st := runW capsT one 0 (WS.init (admitStore [j1, j2]))
+      [.submit j1, .submit j2, .start 0, .finish 0 .ok, .start 0, .finish 0 .ok]
+    let log := admitLog [j1, j2] ++ st.log
+    (serveR true okAll okAll ⟨0, 0⟩ (fixedLoad (intentsOf (log.take 3).flatten))).applied =
+      [j2] := by
   decide
 
 end Examples

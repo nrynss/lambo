@@ -534,6 +534,28 @@ open Lambo
 #print axioms Lambo.Drain.unavailable_stops
 #print axioms Lambo.Drain.outage_failed_but_owed
 #print axioms Lambo.Drain.bad_id_never_settled
+-- The close, crash and shutdown over the current worker (#295 on)
+#print axioms Lambo.Drain.keysW_of
+#print axioms Lambo.Drain.stepW_inv
+#print axioms Lambo.Drain.runW_inv
+#print axioms Lambo.Drain.sessionW_inv
+#print axioms Lambo.Drain.ansOf_closeW_settled
+#print axioms Lambo.Drain.ansOf_closeW_unsettled
+#print axioms Lambo.Drain.owedW_of
+#print axioms Lambo.Drain.shutdown_no_silent_lossW
+#print axioms Lambo.Drain.held_at_closeW
+#print axioms Lambo.Drain.outage_holdsW
+#print axioms Lambo.Drain.heldErrW_holds
+#print axioms Lambo.Drain.lookupTimeout_settlesW
+#print axioms Lambo.Drain.lookupTimeout_run_holdsW
+#print axioms Lambo.Drain.closeW_retry_upgradesW
+#print axioms Lambo.Drain.stepW_log
+#print axioms Lambo.Drain.runW_log_refines
+#print axioms Lambo.Drain.serveR_applied_pending
+#print axioms Lambo.Drain.crash_never_reappliesW
+#print axioms Lambo.Drain.FateW.holds_answer
+#print axioms Lambo.Drain.not_owed_of_consumed
+#print axioms Lambo.Drain.shutdown_exactly_oneW
 -- Store flush path
 #print axioms Flush.flushWithRetry_backoff
 #print axioms Flush.ladder_exhausted

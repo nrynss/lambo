@@ -15,11 +15,15 @@ on:
     paths:
       - 'formal/**'
       - 'scripts/formal/check-oracle.sh'
+      - 'scripts/formal/count-theorems.py'
+      - 'scripts/formal/test_count_theorems.py'
       - '.github/workflows/lean.yml'
   pull_request:
     paths:
       - 'formal/**'
       - 'scripts/formal/check-oracle.sh'
+      - 'scripts/formal/count-theorems.py'
+      - 'scripts/formal/test_count_theorems.py'
       - '.github/workflows/lean.yml'
   workflow_dispatch:
 
@@ -83,6 +87,14 @@ jobs:
         run: |
           set -euo pipefail
           ../scripts/formal/check-oracle.sh
+
+      # The README states the theorem count; count-theorems.py implements the
+      # README's counting rule, so the stated number cannot drift from the files.
+      - name: Theorem count matches the README
+        run: |
+          set -euo pipefail
+          python3 -I scripts/formal/test_count_theorems.py
+          python3 -I scripts/formal/count-theorems.py --check-readme
 
       - name: Reject sorry
         working-directory: formal
