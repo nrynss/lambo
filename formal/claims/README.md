@@ -28,6 +28,7 @@ is split into rows (`D-64a`, `D-64b`).
 | PROVEN | A theorem's statement entails the claim. The row names the theorem and its model file. | As far as the model matches the Rust. The notes say what the model leaves out (exact arithmetic in place of `f64`, no concurrency, no clock). `scripts/formal/check-model-drift.py` says whether the Rust has changed since the model was last read. |
 | TESTED | A Rust test asserts the claim. The row names the test. | For the cases the test covers. |
 | CODE-ONLY | The code does what the claim says, but no theorem or test pins it. The row cites `file:item`. | Until the code changes. Nothing fails if it drifts. |
+| COMMENT-ONLY | Only a doc or module comment says so, and the check against the code was not finished. The row cites the comment. | Not at all: a comment is not code. The row needs checking against the code before anyone relies on it. |
 | CONTRADICTED | A theorem or the code says otherwise. | The audit lists the resolution: the page was fixed, or an issue was drafted. |
 | NOT CHECKABLE | The claim is about quality, statistics, history, or another program's behaviour. | Not at all, from the code. |
 
@@ -37,7 +38,8 @@ best backing, and the notes say what theorem would close the gap.
 
 ## When a claim is contradicted
 
-- If the model and the code agree and the page is wrong, the page is fixed.
+- If the code (and the model, where one exists) agree and the page is wrong,
+  the page is fixed.
 - If the page states the intended behaviour (per the spec,
   `lambo-hackathon-spec-v0.1.md`, or a model) and the code differs, the code
   has a bug. The page is left as it is and an issue is drafted.
@@ -49,4 +51,6 @@ owner to file.
 ## Line numbers
 
 Each audit names the commit it read. Line numbers refer to the page at that
-commit, not to the page after the audit's fixes.
+commit, not to the page after the audit's fixes. A `section` column names the
+heading each claim sits under in the current page, so a writer can find it
+there.
