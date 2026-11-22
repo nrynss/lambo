@@ -2,6 +2,80 @@
 
 ## Unreleased
 
+## 0.15.0 (2026-11-22)
+
+### Highlights
+
+- **An embedder outage no longer reorders an agent's writes (#295).** In
+  session, a write that meets an outage is held and answers `pending_replay`
+  instead of `failed`; the agent's later writes wait behind it, and the
+  worker retries the oldest on a backoff (1 s, doubling, at most 30 s)
+  without needing a new write. Writes still held at close answer
+  `intent_durable`, and the next serve replays them in admission order.
+- **Sessions holding a mixed `parent_of`/citation cycle load (#325).** A
+  child citing its own parent was accepted at write time, after which every
+  load of the session failed with "Causal/Dependency/Hierarchical cycle
+  detected". Such sessions now load with no data change.
+- **Store-wide session discovery in `lambo serve-web` (#276).** Opt in with
+  `--discover-sessions` or `[web] discover_sessions = true`: callers whose
+  scope already covers every served session also read every live session in
+  the store, including ones created after startup.
+- **Canary drift repair (#296).** `lambo re-embed --rewrite-same-contract`
+  rewrites a drifted session's text vectors in place under its contract.
+- **Lease and flush fixes (#293, #301).** A writer that lost its lease is
+  fenced even when its own heartbeat re-takes it, and a store error no retry
+  can fix is no longer retried every 10 s.
+- **The Lean models are checked against the Rust (#291, developer-facing).**
+  A model drift check, pinned constants, property tests and a differential
+  oracle; the oracle found the zero-score tie fixed in #328.
+
+### Upgrading from 0.14.0
+
+No re-embedding is needed, and no table or column is added.
+
+- Run `lambo provision` on each store. Its re-key marker changed, so the
+  first run scans the store once and re-keys any concept whose canonical key
+  held an empty stem (from a standalone `''s` token) (#301). A durable name
+  with such a key now stops its session from opening, and the error names
+  the row; the #301 entry below gives the SQL to find and remove it.
+- A write that meets an in-session embedder outage answers `pending_replay`,
+  not `failed` (#295). `failed` now means this server wrote nothing and will
+  not try again. `write_queue_failed` no longer counts embedder outages,
+  `write_queue_outstanding` counts held writes until they settle, and
+  `write_queue_replay_blocked` reads `embedder` or `other` instead of `null`
+  while intents stay owed.
+- On `lambo serve` and `lambo serve-web`, a token that starts with `-` is
+  passed as `--auth-token=-abc`; the space form is refused, as in 0.14.0
+  (#315). From the flag on, a rejected argument now prints as `<redacted>`,
+  and `serve-web` no longer quotes a malformed token. The exit code is still
+  `2`.
+- Sessions 0.14.0 could not load because of a mixed `parent_of`/citation
+  cycle now load, and `lambo canon alias-preview` and
+  `lambo names migrate --map` (preview and apply) move a citation that closes
+  such a cycle instead of refusing it (#325).
+- Ranking: zero-score ties under RRF and the default max fusion fall to the
+  tie-break (canonical key, then id) instead of the zero's sign (#328); an
+  exact durable-name match keeps its BM25 when that is above 1.0 (#288); a
+  dependency-question phrase routes to traversal only as whole words (#299).
+  Solo canonization dates a dependence by the turn that wrote it, so some
+  Solo Candidates and Venerables can lose score (#300).
+- `lambo re-embed`: a full re-embed refuses to replace a canary pin the live
+  embedder does not reproduce unless `--repin-canary` is given, and
+  `--missing-only` runs the canary, refusing on a drift under
+  `canary = "verify"` (#296). `--missing-only` on a session with no
+  embedding contract is refused before it embeds anything (#322).
+- A store error no retry can fix (an undefined table, a missing privilege)
+  degrades the session to `durability = "none"` at once and `close` returns
+  an error; a value the store rejects is dead-lettered (#301).
+- `[web] discover_sessions` is off by default, so existing configs serve
+  exactly their allowlist. A 0.14.0 binary refuses a file that sets it
+  (unknown key), so leave it out if you might roll back.
+- Library API: `StoreError` gains `Permanent` and `DropReason` gains
+  `HeldLane`, so an exhaustive `match` outside the crate must handle them;
+  `StoreError::Constraint` now also covers values the store rejects.
+
+### Changes
+
 - Recall: under RRF fusion (`[fusion] kind = "rrf"`), candidates whose
   fused score is zero are now ordered by the tie-break (canonical key, then
   id) like every other tie (#328). A candidate whose only leg score was
