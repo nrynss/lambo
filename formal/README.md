@@ -29,11 +29,13 @@ cd formal && lake build --wfail
 
 `lean-toolchain` pins the Lean version, and elan fetches it on first use.
 
-CI does not check these yet. To enable it, move `ci/lean.yml` to
-`.github/workflows/lean.yml`. It downloads the pinned Lean release, verifies its
-SHA-256, builds with warnings as errors, and fails on any `sorry`. It uses no
-third-party action beyond the checkout pin `ci.yml` already uses. (The session
-that wrote this could not add a workflow file.)
+CI checks them in `.github/workflows/lean.yml` on every push or pull request
+that touches `formal/`. It downloads the pinned Lean release, verifies its
+SHA-256, builds with warnings as errors, fails on any `sorry`, and re-runs the
+axiom audit, failing on any axiom other than the three standard ones. It keeps
+`formal/.lake` in the Actions cache (saved from `main` only), so an unchanged
+module is not rebuilt. Besides the checkout pin `ci.yml` already uses, the only
+action is `actions/cache`, pinned by commit.
 
 ## What is modelled, and what each file proves
 

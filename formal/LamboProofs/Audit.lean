@@ -32,8 +32,9 @@ import LamboProofs.Tiered
 `#print axioms` lists every axiom a theorem depends on. For this development
 the expected output for each line is either "does not depend on any axioms" or
 a subset of Lean's three standard axioms: `propext`, `Classical.choice` and
-`Quot.sound`. `sorryAx` must never appear; CI fails the build if it does
-(see `formal/ci/lean.yml`).
+`Quot.sound`. `sorryAx` must never appear. CI (`.github/workflows/lean.yml`)
+re-elaborates this file and fails if any answer names another axiom, or if
+the number of answers differs from the number of `#print axioms` lines.
 -/
 
 open Lambo

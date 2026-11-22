@@ -1,0 +1,115 @@
+name: lean
+
+# Checks the Lean 4 proofs under formal/. The development has no Lake
+# dependencies, so the only thing fetched is the Lean release itself, pinned by
+# version (formal/lean-toolchain) and verified by SHA-256 below. No third-party
+# action runs here beyond the SHA-pinned checkout (same pin as ci.yml) and
+# actions/cache, which keeps formal/.lake (the built .olean files, ~100 MB) so
+# an unchanged module is not rebuilt. The toolchain itself (~600 MB download,
+# ~3 GB unpacked) is not cached: fetching it from the release is about as fast
+# as a cache restore and would spend the repository's cache quota.
+# To upgrade Lean: bump formal/lean-toolchain and LEAN_SHA256 together.
+#   curl -sSfL https://github.com/leanprover/lean4/releases/download/v<ver>/lean-<ver>-linux.tar.zst | sha256sum
+on:
+  push:
+    paths:
+      - 'formal/**'
+      - '.github/workflows/lean.yml'
+  pull_request:
+    paths:
+      - 'formal/**'
+      - '.github/workflows/lean.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  LEAN_SHA256: 2b7ab1ed8b92d2e6abfaf41344823b510064dbc9c0260cac73eb496ab2dea6eb
+
+jobs:
+  proofs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Install pinned Lean
+        run: |
+          set -euo pipefail
+          ver="$(sed -n 's|^leanprover/lean4:v||p' formal/lean-toolchain)"
+          test -n "$ver"
+          curl -sSfL --retry 3 -o "$RUNNER_TEMP/lean.tar.zst" \
+            "https://github.com/leanprover/lean4/releases/download/v${ver}/lean-${ver}-linux.tar.zst"
+          echo "${LEAN_SHA256}  $RUNNER_TEMP/lean.tar.zst" | sha256sum -c -
+          mkdir -p "$HOME/lean"
+          tar --zstd -xf "$RUNNER_TEMP/lean.tar.zst" -C "$HOME/lean" --strip-components=1
+          rm -f "$RUNNER_TEMP/lean.tar.zst"
+          echo "$HOME/lean/bin" >> "$GITHUB_PATH"
+
+      # Restore the build from the closest earlier run: an exact hit when no
+      # Lean source changed, otherwise the latest build for this toolchain, so
+      # only the changed modules and their dependents are rebuilt.
+      - name: Restore Lake build
+        id: lake-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: formal/.lake
+          key: lake-${{ runner.os }}-${{ hashFiles('formal/lean-toolchain') }}-${{ hashFiles('formal/lakefile.toml', 'formal/lake-manifest.json', 'formal/**/*.lean') }}
+          restore-keys: |
+            lake-${{ runner.os }}-${{ hashFiles('formal/lean-toolchain') }}-
+
+      - name: Build proofs
+        working-directory: formal
+        run: |
+          set -euo pipefail
+          lean --version
+          lake build --wfail 2>&1 | tee "$RUNNER_TEMP/build.log"
+
+      - name: Reject sorry
+        working-directory: formal
+        run: |
+          set -euo pipefail
+          if grep -rnwE 'sorry|admit' --include='*.lean' .; then
+            echo "::error::sorry/admit found in the Lean sources"; exit 1
+          fi
+          if grep -nE "sorryAx|declaration uses 'sorry'" "$RUNNER_TEMP/build.log"; then
+            echo "::error::a proof depends on sorry"; exit 1
+          fi
+
+      # Re-elaborate the audit (a cached build would not print it) and require
+      # every audited theorem to rest on Lean's standard axioms only, and the
+      # number of answers to match the number of #print axioms lines.
+      - name: Audit axioms
+        working-directory: formal
+        run: |
+          set -euo pipefail
+          lake env lean LamboProofs/Audit.lean > "$RUNNER_TEMP/audit.log" 2>&1
+          expected="$(grep -c '^#print axioms ' LamboProofs/Audit.lean)"
+          answered="$(grep -cE "depends on axioms: \[|does not depend on any axioms" "$RUNNER_TEMP/audit.log" || true)"
+          if [ "$expected" -eq 0 ] || [ "$answered" -ne "$expected" ]; then
+            echo "::error::axiom audit answered $answered of $expected #print axioms lines"
+            cat "$RUNNER_TEMP/audit.log"; exit 1
+          fi
+          bad="$(grep -oE "depends on axioms: \[[^]]*\]" "$RUNNER_TEMP/audit.log" \
+            | sed -E 's/^depends on axioms: \[//; s/\]$//' | tr ',' '\n' | sed 's/^ *//; s/ *$//' \
+            | grep -vxE 'propext|Quot\.sound|Classical\.choice' | sort -u || true)"
+          if [ -n "$bad" ]; then
+            echo "::error::non-standard axioms in the audit: $bad"; exit 1
+          fi
+          echo "audited $expected theorems; standard axioms only"
+
+      # Keep the repository's cache quota for main: branches restore from it
+      # but do not write their own entries.
+      - name: Save Lake build
+        if: github.ref == 'refs/heads/main' && steps.lake-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: formal/.lake
+          key: ${{ steps.lake-cache.outputs.cache-primary-key }}
