@@ -9,7 +9,10 @@
   one ranked only in a leg of weight zero fused to `+0.0`, and the sort put
   every `+0.0` first: with a zero leg weight configured, a keyed concept
   could sort after keyless ones. The fused sum now starts at `+0.0`, and a
-  `-0.0` leg score ranks with `+0.0` by the tie-break. Found by the #291
+  `-0.0` leg score ranks with `+0.0` by the tie-break. The same held under
+  the default max fusion: a candidate whose best leg score was `-0.0`
+  sorted after one at `+0.0` whatever their keys; every fused value is now
+  normalised so a zero is `+0.0`. Found by the #291
   differential oracle; `Fusion.lean` already ordered them this way.
 - Load: a session holding a cycle that mixes `parent_of` with citations or
   action edges now loads (#325). The write-time checks refuse a cycle in

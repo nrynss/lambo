@@ -594,9 +594,13 @@ fn rank(
         .fold(0.0, |a, b| a + b);
         l.rrf = Some(if best > 0.0 { sum / best } else { 0.0 });
     }
+    // `+ 0.0` turns a fused `-0.0` (a `-0.0` leg score under max fusion)
+    // into `+0.0`, so equal zeros go to the tie-break under either kind
+    // rather than total_cmp's `+0.0 > -0.0` (#328); every other value,
+    // `-inf` for a candidate with no finite leg included, is unchanged.
     let mut out: Vec<Scored<NodeId>> = legs
         .iter()
-        .map(|(item, l)| Scored::new(*item, l.fused(fusion.kind)))
+        .map(|(item, l)| Scored::new(*item, l.fused(fusion.kind) + 0.0))
         .collect();
     out.sort_by(|a, b| order((a.item, a.score), (b.item, b.score)));
     out
@@ -2142,6 +2146,24 @@ mod tests {
         rank(&mut legs, &g, &rrf(), false);
         assert_eq!(legs[&cid(1)].vector_rank, Some(1), "alpha < beta");
         assert_eq!(legs[&cid(2)].vector_rank, Some(2));
+    }
+
+    /// Under max fusion (the default) too, a fused `-0.0` ties with `+0.0`
+    /// and the two go by the tie-break, not by the sign of zero (#328).
+    #[test]
+    fn max_fusion_ties_a_negative_zero_with_zero() {
+        let g = planted_graph().0;
+        let mut legs: LegProvenance = HashMap::from([
+            (cid(1), leg(None, Some(-0.0))),
+            (cid(2), leg(None, Some(0.0))),
+        ]);
+        let out = rank(&mut legs, &g, &RecallFusion::default(), false);
+        assert_eq!(
+            ids(out.clone()),
+            vec![cid(1), cid(2)],
+            "alpha < beta: {out:?}"
+        );
+        assert!(out.iter().all(|s| s.score.is_sign_positive()), "{out:?}");
     }
 
     #[test]
