@@ -10,7 +10,7 @@
 //! `centrality_bonus` is cut. The composite is clamped to
 //! `[0, 1 + MAX_BONUS]` so the score is bounded and finite for any inputs.
 //!
-//! ## Dimension semantics (T4.1 interpretation)
+//! ## Dimension semantics (interpretation)
 //!
 //! v0.6.0 §7.3's tables are not in-repo (the v0.1 spec freezes only the
 //! formula, §9), so each dimension is defined from data the graph actually
@@ -46,8 +46,8 @@
 //! * **edge_type_bonus** — additive per incident edge by type; structural /
 //!   load-bearing types carry the most, provenance (`Derives`, `Temporal`)
 //!   carries none; capped at [`MAX_EDGE_BONUS`]. The v0.6.0 table is not
-//!   in-repo — [`edge_type_bonus_value`] is the T4.1 interpretation.
-//! * **concept_type_modifier** — the additive form of the P1 typed
+//!   in-repo — [`edge_type_bonus_value`] is this module's interpretation.
+//! * **concept_type_modifier** — the additive form of the typed
 //!   multipliers: [`ConceptType::score_multiplier`] − 1.0 (Constraint +0.15,
 //!   Entity +0.05, Logic +0.05, Resource ±0.0, Observation −0.10). The spec
 //!   formula is additive (`+ concept_type_modifier`), so the existing
@@ -58,7 +58,7 @@
 //!
 //! [`score_concept`] returns the max-normalized value. Recall, [`rescore`]
 //! and swarm Stage 1's queue all read [`score`] of that. GC's step-2 cut
-//! does not. [`SessionContext::per_interaction_activity`] is still
+//! does not. `SessionContext::per_interaction_activity` is still
 //! `derived_by / |interactions|`, and `eviction_score` substitutes it before
 //! the comparison with [`crate::daemon::gc::MIN_CONCEPT_SCORE`].
 //! Max-normalization would score a concept derived once at `1/max`. At a
@@ -113,7 +113,7 @@ pub const MAX_BONUS: f64 = MAX_EDGE_BONUS + MAX_CONCEPT_MODIFIER;
 /// bits.
 pub const MIN_RECENCY_SPAN: i64 = 10 * 60 * 1_000;
 
-/// Additive per-edge-type bonus (T4.1 interpretation; v0.6.0's table is not
+/// Additive per-edge-type bonus (an interpretation; v0.6.0's table is not
 /// in-repo). Structural / load-bearing edge types carry the most weight.
 pub fn edge_type_bonus_value(ty: EdgeType) -> f64 {
     match ty {
@@ -129,7 +129,7 @@ pub fn edge_type_bonus_value(ty: EdgeType) -> f64 {
     }
 }
 
-/// Additive concept-type modifier: the P1 typed multiplier as an offset.
+/// Additive concept-type modifier: the typed multiplier as an offset.
 pub fn concept_type_modifier(t: ConceptType) -> f64 {
     t.score_multiplier() - 1.0
 }
@@ -180,7 +180,7 @@ fn clamp_additive(x: f64, lo: f64, hi: f64) -> f64 {
 /// additive bonus and modifier are clamped to their defined ranges; the
 /// result is clamped to `[0, 1 + MAX_BONUS]` (bounded, always finite).
 ///
-/// `weights` are sanitized first ([`ScoringWeights::sanitized`], ALGO-10):
+/// `weights` are sanitized first ([`ScoringWeights::sanitized`]):
 /// they arrive from TOML/JSON, where `NaN` is admissible, and a `NaN` weight
 /// would otherwise propagate into a `NaN` composite — which ranks as garbage
 /// and silently disables GC's threshold comparison. The final clamp is
@@ -201,17 +201,17 @@ pub fn score(dims: ScoreDims, weights: &ScoringWeights) -> f64 {
 /// as [`score`].
 ///
 /// GC's step-2 cut builds on this: [`score_live_plus_frequency`] adds each
-/// concept's own frequency term on top. Issue #29 replaced ALGO-1's
-/// session-wide switch to [`score`] (measured in the NEW-6 note below) with
-/// that per-concept addition. The spec formula reserves 20% of the composite
-/// for a dimension no write path feeds until P5 recall lands, so an
+/// concept's own frequency term on top. Issue #29 replaced the earlier
+/// session-wide switch to [`score`] (measured in the note below) with that
+/// per-concept addition. The spec formula reserves 20% of the composite for a
+/// dimension no write path feeds until recall records accesses, so an
 /// **absolute** threshold against
 /// the full composite measures every concept against a fifth of a score it
 /// cannot yet earn. Recall *ranking* is unaffected by the dead term (a
 /// constant-zero dimension cannot reorder anything), which is why [`score`]
 /// itself stays spec-verbatim — only a threshold comparison is distorted.
 ///
-/// ## The switch back to [`score`] LOWERS scores (NEW-6)
+/// ## The switch back to [`score`] LOWERS scores
 ///
 /// Renormalizing rather than re-weighting keeps the change reversible, but not
 /// score-preserving, and the direction is the opposite of what this block used
@@ -262,7 +262,7 @@ pub fn score_over_live_dimensions(dims: ScoreDims, weights: &ScoringWeights) -> 
 /// MAX_BONUS]` bound every composite here has.
 ///
 /// GC's cut used to switch the whole session from the live-dimension score to
-/// the full composite the moment any concept recorded an access (ALGO-1).
+/// the full composite the moment any concept recorded an access.
 /// Under #29's time-anchored recency that switch made every unread concept
 /// ~20% easier to collect at once: on the Metal rig snapshot one access on one
 /// Entity took the first sweep from 159 to 412 candidates, and the untouched
@@ -293,8 +293,18 @@ fn bonus_and_modifier(dims: ScoreDims) -> f64 {
         )
 }
 
+/// Test-only access to [`bonus_and_modifier`], for
+/// `crate::formal_oracle_tests` (#291), which replays
+/// `formal/oracle/Score.json` through it.
+#[cfg(test)]
+pub(crate) mod formal_oracle {
+    pub(crate) fn bonus_and_modifier(dims: super::ScoreDims) -> f64 {
+        super::bonus_and_modifier(dims)
+    }
+}
+
 /// Clamp a composite into `[0, 1 + MAX_BONUS]`; a non-finite composite is
-/// `0.0` (ALGO-10 — the composite is finite for every input, spec §5.7).
+/// `0.0` (the composite is finite for every input, spec §5.7).
 fn finite_or_zero(x: f64) -> f64 {
     if x.is_finite() {
         x.clamp(0.0, 1.0 + MAX_BONUS)
@@ -360,7 +370,7 @@ impl SessionContext {
 
     /// [`SessionContext::compute`] with the connectivity baseline already
     /// known, for `rescore`, which has every concept's density degree in hand
-    /// from its own pass (#171 B4).
+    /// from its own pass (#171).
     fn with_max_incident(graph: &Graph, max_incident: usize) -> Self {
         let interactions: Vec<_> = graph.interactions().collect();
         let total_interactions = interactions.len();
@@ -460,7 +470,7 @@ fn concept_recency(last_touch: DateTime<Utc>, ctx: &SessionContext) -> f64 {
 }
 
 /// What scoring needs from a concept's incident edges, from one walk of its
-/// adjacency (#171 B4). Scoring used to walk it three times per concept, each
+/// adjacency (#171). Scoring used to walk it three times per concept, each
 /// walk allocating and sorting: once for `max_incident`, once for the bonus
 /// and once more for the density degree.
 struct Incidence {
@@ -559,7 +569,7 @@ fn score_concept_with(c: &Concept, ctx: &SessionContext, inc: &Incidence) -> Sco
 ///
 /// Each concept's incident edges are walked once, into reused buffers, and
 /// the walk serves both the session's connectivity baseline and the
-/// concept's own score (#171 B4); the result is bit-identical to scoring
+/// concept's own score (#171); the result is bit-identical to scoring
 /// every concept with [`score_concept`].
 pub fn rescore(graph: &Graph, weights: &ScoringWeights) -> Vec<Scored<NodeId>> {
     let mut scratch = IncidenceScratch::default();
@@ -736,7 +746,7 @@ mod tests {
         ranked
     }
 
-    /// #171 B4: the single-walk `rescore` is the reference's table, bit for
+    /// #171: the single-walk `rescore` is the reference's table, bit for
     /// bit and in the same order.
     fn assert_rescore_matches_reference(g: &Graph) {
         let max_incident = g
@@ -1171,7 +1181,7 @@ mod tests {
         }
     }
 
-    /// ALGO-10: a garbage **weight** (they arrive from TOML, where `NaN` is
+    /// A garbage **weight** (they arrive from TOML, where `NaN` is
     /// admissible) must degrade its own dimension to zero, never poison the
     /// composite. Pre-fix the weight multiplied straight into the sum, so the
     /// composite was `NaN` — which ranks as garbage and makes GC's
@@ -1276,7 +1286,7 @@ mod tests {
         );
     }
 
-    /// ALGO-1: the live-dimension composite drops `frequency` and renormalizes
+    /// The live-dimension composite drops `frequency` and renormalizes
     /// over the surviving weights, so it stays on the same `[0,1]`+bonus scale
     /// and lifts every concept whose only missing dimension is the dead one.
     #[test]
@@ -1305,7 +1315,7 @@ mod tests {
 
         // The renormalization is a multiplication by 1/live_total, so at
         // frequency 0 the switch back to `score` costs exactly `live_total`
-        // (0.8 by default) on the weighted part — NEW-6: it LOWERS the score,
+        // (0.8 by default) on the weighted part — it LOWERS the score,
         // it does not raise it.
         let weighted_live = live - 0.07;
         let weighted_full = full - 0.07;

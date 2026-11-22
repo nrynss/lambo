@@ -1,7 +1,7 @@
 //! Session load for the Postgres-wire family: `load_session` reads the
 //! session row and every table in one transaction, replayed whole by
 //! `tx_retry` on a serializable conflict, so a load always observes one
-//! snapshot. Row decoding is in `codec.rs`; the J3 write-intent reader runs on
+//! snapshot. Row decoding is in `codec.rs`; the write-intent reader runs on
 //! the same transaction and never begins or commits one.
 
 use chrono::{DateTime, Utc};
@@ -16,9 +16,12 @@ use super::sql::SELECT_SYNONYMS_SQL;
 use super::{Dialect, PgStore};
 use crate::types::{GraphSnapshot, NodeId, SessionId, StoreError};
 
-/// Load a session's write intents (J3), in replay order — (`issued_ms`,
-/// `lane_seq`), exact admission order within one issuing process and
-/// wall-clock order across processes.
+/// Load a session's write intents, sorted by (`issued_ms`, `lane_seq`):
+/// wall-clock order, which interleaves different processes' intents. The
+/// replay then puts each process's own intents in `lane_seq` (admission)
+/// order (`writeq::replay::replay_order`, #295), since a clock that stepped
+/// back between two admissions sorts them the wrong way round here; the rows
+/// carry no epoch column to sort by in SQL.
 pub(super) async fn load_write_intents(
     tx: &mut sqlx::PgConnection,
     session: &SessionId,
@@ -123,7 +126,7 @@ impl<D: Dialect> PgStore<D> {
                 .map_err(|e| backend(format!("parse root_goal JSONB: {e}")))?;
 
             // Ordered `SetEmbedding` mutations and full-snapshot seed both persist
-            // the nullable kind/model/dim columns. STORE-7: a row with exactly one of
+            // the nullable kind/model/dim columns. A row with exactly one of
             // embedding_kind / embedding_dim set (kind XOR dim) is a corruption
             // error — mirroring sqlite — never a silent `None` (see
             // `session_embedding_from_parts`).

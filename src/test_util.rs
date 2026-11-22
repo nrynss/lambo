@@ -19,6 +19,7 @@ pub mod dependents;
 #[cfg(feature = "embed-fixture")]
 pub mod dresscode;
 pub mod fair_test;
+pub mod props;
 pub mod supersession;
 pub mod suspected;
 #[cfg(feature = "store-memory")]

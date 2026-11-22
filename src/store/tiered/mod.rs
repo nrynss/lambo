@@ -53,17 +53,17 @@
 //! index), then writes the marker. Readers never write to the index; a reader
 //! that finds the marker behind serves from the primary and checks again at
 //! most once per [`REPAIR_BACKOFF`], so it returns to the index once the
-//! holder's mirror or repair lands (#18 review F1). A holder that reads a
+//! holder's mirror or repair lands (#18). A holder that reads a
 //! stale session asks for a repair, within the same backoff. A repair
 //! re-checks the lease (this store's record and the durable row) before
 //! every bulk chunk, sweep pass and marker write, and stops without another
-//! write once it is lost (F2).
+//! write once it is lost.
 //!
 //! A repair runs as a background task, one at a time per session, off the
-//! flush loop and the attach path (#18 review M1): requests while one runs
+//! flush loop and the attach path (#18): requests while one runs
 //! collapse into a single rerun, each pass reads its own durable snapshot
 //! and repairs only when the marker is behind it (a marker ahead of a load
-//! is re-checked, never repaired from: M4). Bounds: a flush waits at most
+//! is re-checked, never repaired from). Bounds: a flush waits at most
 //! [`MIRROR_DEADLINE`] for its mirror, a repair pass runs at most
 //! [`REPAIR_DEADLINE`], releasing the lease waits at most [`RELEASE_GRACE`]
 //! for an in-flight repair, and the index client gives delete-by-query,
@@ -82,6 +82,16 @@
 //! never meaningless. That is the accepted divergence from the SQL adapters'
 //! single-snapshot check, recorded in `dev-diary/notes/feature-18-elastic-tier.md`.
 //!
+//! A flush that moves the contract (`lambo re-embed` into another model, the
+//! `--allow-embedding-mismatch` relabel, a clear) is not mirrored (#319):
+//! `Graph::reembed_all` drains its new vectors before the trailing
+//! `SetEmbedding`, so the projection would put them in the old contract's
+//! index, and a relabel keeps vectors the batch never names. The session
+//! goes stale and is repaired from the durable snapshot instead, which
+//! indexes every vector under the new contract and sweeps the old one's
+//! documents; reads fall back meanwhile. A first stamp ahead of the
+//! session's vectors (every derive) is mirrored as before.
+//!
 //! # `exact_vector_scan` stays false (#8)
 //!
 //! A session holder over a store that declares an exact scan ranks in its own
@@ -91,7 +101,7 @@
 //! note records why a holder does not switch to its graph for small sessions
 //! either.
 //!
-//! **Derive is the exception** (#18 review M6, amending #8's "one
+//! **Derive is the exception** (#18, amending #8's "one
 //! constructor, two callers"): the store declares
 //! `holder_derive_source() == HolderDeriveSource::Graph`, so a holder's hybrid
 //! derive takes its semantic-merge candidates from its in-memory graph
@@ -146,7 +156,7 @@ pub(crate) const REPAIR_BACKOFF: Duration = Duration::from_secs(60);
 /// Documents per bulk request during a repair.
 const REPAIR_CHUNK: usize = 500;
 
-/// The longest a flush waits for its mirror (#18 review M1). Past it the
+/// The longest a flush waits for its mirror (#18). Past it the
 /// flush returns, the session goes stale, and a background repair catches
 /// the index up: the primary already holds the batch.
 pub(crate) const MIRROR_DEADLINE: Duration = Duration::from_secs(15);
@@ -155,7 +165,7 @@ pub(crate) const MIRROR_DEADLINE: Duration = Duration::from_secs(15);
 /// session marked stale (the backoff then spaces the next attempt).
 pub(crate) const REPAIR_DEADLINE: Duration = Duration::from_secs(600);
 
-/// The most sessions whose tier state one store keeps (#18 review L5). A
+/// The most sessions whose tier state one store keeps (#18). A
 /// long-lived reader (serve-web) touches many sessions; past this, entries
 /// for sessions this store neither holds nor is repairing are evicted,
 /// least recently used first. An evicted reader entry costs one durable load
@@ -163,7 +173,7 @@ pub(crate) const REPAIR_DEADLINE: Duration = Duration::from_secs(600);
 pub(crate) const MAX_TRACKED_SESSIONS: usize = 4096;
 
 /// Consecutive failed or timed-out index reads that open the read breaker
-/// (#18 review M2).
+/// (#18).
 pub(crate) const BREAKER_THRESHOLD: u32 = 3;
 
 /// How long an open breaker sends every vector read straight to the durable
@@ -179,12 +189,12 @@ pub(crate) const READ_DEADLINE: Duration = Duration::from_secs(5);
 pub(crate) const RELEASE_GRACE: Duration = Duration::from_secs(10);
 
 /// Extra neighbours fetched beyond `limit`, so the exact re-rank decides the
-/// last places rather than the engine's approximate order (M3).
+/// last places rather than the engine's approximate order.
 ///
 /// Every fetched hit carries its stored vector (the re-rank needs all of
 /// them), so a read's response is about `fetch * dim` floats as JSON text,
 /// roughly 10 bytes each. `fetch` is `limit + KNN_OVERFETCH` capped at
-/// [`MAX_VECTOR_CANDIDATE_LIMIT`] (#18 review F7): at 1024 dimensions,
+/// [`MAX_VECTOR_CANDIDATE_LIMIT`] (#18): at 1024 dimensions,
 /// about 0.7 MB for a limit of 50 and at most about 20 MB at the cap, where
 /// the last places are the engine's order.
 pub(crate) const KNN_OVERFETCH: usize = 16;
@@ -231,30 +241,33 @@ struct SessionTier {
     /// The token of a lease this store acquired for the session, if held.
     held: Option<u64>,
     mirror_failures: u64,
+    /// Why the session last left `InSync` (a failed mirror or repair, an
+    /// unleased write, a contract change). Historical: a repair that brings
+    /// the session back in sync does not clear it.
     last_error: Option<String>,
     next_repair: Option<Instant>,
     /// When a read may next re-check an `Unknown` session (a check reads the
     /// whole durable session, so an unreachable index must not cost one per
     /// recall).
     next_check: Option<Instant>,
-    /// A repair of this session is running (single-flight, M4).
+    /// A repair of this session is running (single-flight).
     repairing: bool,
     /// Which repair run `repairing` and `repair_task` belong to: bumped when
     /// a run starts, so an aborted run's late cleanup cannot end the run
-    /// that replaced it (#18 review round 2, L1).
+    /// that replaced it (#18).
     repair_run: u64,
     /// The highest mutation epoch a flush through this store committed for
     /// the session. A repair from an older snapshot must not mark the
-    /// session in sync (#18 review F4).
+    /// session in sync (#18).
     committed_epoch: u64,
     /// The marker-ahead warning was logged and the marker has not been seen
-    /// in sync since (F3: log once, not on every check).
+    /// in sync since (log once, not on every check).
     ahead_warned: bool,
     /// Another repair was asked for while one ran: run once more after it.
     repair_again: bool,
-    /// The background task running the repair (M1).
+    /// The background task running the repair.
     repair_task: Option<tokio::task::JoinHandle<()>>,
-    /// Last time this entry was used, for eviction (L5).
+    /// Last time this entry was used, for eviction.
     last_used: Option<Instant>,
 }
 
@@ -293,7 +306,7 @@ impl Marker {
 }
 
 /// Held by a running repair task; dropping it ends the session's repair
-/// (#18 review F5). A panicking repair also marks the session stale and
+/// (#18). A panicking repair also marks the session stale and
 /// starts the backoff, as a failed one does.
 struct RepairRunning<'a> {
     tier: &'a Tier,
@@ -328,7 +341,7 @@ impl Drop for RepairRunning<'_> {
     }
 }
 
-/// The read-side circuit breaker (M2). One per tier: every session's reads
+/// The read-side circuit breaker. One per tier: every session's reads
 /// go to the same cluster, so a cluster that is down or blackholed for one
 /// is down for all.
 #[derive(Debug, Default)]
@@ -350,6 +363,8 @@ pub(crate) struct TierStatus {
     pub token: u64,
     pub flush_counter: u32,
     pub mirror_failures: u64,
+    /// Historical: why the session last left `InSync`, kept after it is
+    /// back in sync.
     pub last_error: Option<String>,
 }
 
@@ -534,7 +549,7 @@ impl Tier {
     }
 
     /// Forget the session's state: this store no longer holds it and runs
-    /// no repair for it (L5). The next read re-checks it.
+    /// no repair for it. The next read re-checks it.
     fn evict(&self, session: &SessionId) {
         let mut sessions = self.sessions.lock();
         if sessions.get(session).is_some_and(SessionTier::evictable) {
@@ -543,7 +558,7 @@ impl Tier {
     }
 
     /// The next external version for a write to `session` under `token`.
-    /// Only leased writes are mirrored (L4), so there always is a token.
+    /// Only leased writes are mirrored, so there always is a token.
     fn next_version(&self, session: &SessionId, token: u64) -> Result<u64, String> {
         self.with_state(session, |st| {
             if st.token != token {
@@ -596,7 +611,7 @@ impl Tier {
     }
 
     /// Refuse to write to the index for `session` unless this store still
-    /// holds its lease under `token` (#18 review F2).
+    /// holds its lease under `token` (#18).
     ///
     /// Two checks: this store's own record (cleared by a refused refresh, a
     /// release or an erase through this store), then the durable lease row,
@@ -709,7 +724,7 @@ impl Tier {
     /// A marker ahead of the snapshot this process loaded is not staleness:
     /// the load raced a flush that committed and mirrored a later epoch.
     /// Re-check against a fresh load; never repair from the older snapshot
-    /// (#18 review M4). Still ahead after the re-load: leave the session
+    /// (#18). Still ahead after the re-load: leave the session
     /// `Unknown` (reads fall back) and re-check after the backoff.
     async fn recheck_ahead(&self, session: &SessionId) -> Marker {
         let fresh = match self.load_durable(session).await {
@@ -760,13 +775,13 @@ impl Tier {
                     st.sync = marker.sync();
                     // Re-checked by a later read, never repaired here: an
                     // ahead marker, or one behind that only a holder can
-                    // fix (#18 review F1: the holder's mirror usually lands
+                    // fix (#18: the holder's mirror usually lands
                     // within seconds of its commit).
                     if marker == Marker::Ahead || (marker == Marker::Behind && held.is_none()) {
                         st.next_check = Some(Instant::now() + self.repair_backoff);
                     }
                     // Nor does a holder's flush spawn a repair for an ahead
-                    // marker before the backoff (F3).
+                    // marker before the backoff.
                     match marker {
                         Marker::Ahead => {
                             st.next_repair = Some(Instant::now() + self.repair_backoff);
@@ -783,10 +798,10 @@ impl Tier {
     }
 
     /// Ask for a repair of the session from a durable snapshot read by the
-    /// repair itself, never one a caller loaded earlier (M4), and only when
+    /// repair itself, never one a caller loaded earlier, and only when
     /// the marker is behind it.
     ///
-    /// The repair runs as a background task (#18 review M1), off the flush
+    /// The repair runs as a background task (#18), off the flush
     /// loop and the attach path: the marker makes deferring it safe, since
     /// reads fall back until it lands. One runs at a time per session; a
     /// request while one runs makes it run once more afterwards, which picks
@@ -799,7 +814,7 @@ impl Tier {
         let sid = session.clone();
         // Marked running and its handle stored under one lock, so an erase
         // or a release never sees a run without the handle to wait on
-        // (#18 review round 2, L2). Spawning does not await, and the task
+        // (#18). Spawning does not await, and the task
         // takes this lock only once it runs.
         self.with_state(session, |st| {
             if st.repairing {
@@ -818,7 +833,7 @@ impl Tier {
 
     async fn run_repairs(&self, session: &SessionId, run: u64) {
         // Clears `repairing` however the task ends: normally, aborted by a
-        // release, or by a panic (#18 review F5). Without it a panic leaves
+        // release, or by a panic (#18). Without it a panic leaves
         // the flag set for good: no later repair starts (requests only queue
         // a rerun) and the entry is never evicted.
         let mut running = RepairRunning {
@@ -840,9 +855,8 @@ impl Tier {
                     ))),
                 };
             // A `StaleWrite` is a lost lease only if the fence still says
-            // so: the error alone could come from elsewhere in a pass (#18
-            // review round 2, L4), and that is an index failure like any
-            // other.
+            // so: the error alone could come from elsewhere in a pass (#18),
+            // and that is an index failure like any other.
             if let Err(StoreError::StaleWrite(why)) = &result
                 && self.ensure_fenced(session, token).await.is_err()
             {
@@ -912,7 +926,7 @@ impl Tier {
                         // A marker that stays ahead is not a race but a
                         // durable store behind its index: back off like a
                         // failed repair, or every flush pays a full durable
-                        // load to find the same thing (#18 review F3).
+                        // load to find the same thing (#18).
                         let later = Instant::now() + self.repair_backoff;
                         st.next_check = Some(later);
                         st.next_repair = Some(later);
@@ -992,7 +1006,7 @@ impl Tier {
         // A flush that committed past this snapshot while the repair ran was
         // not mirrored (mirrors wait for InSync) and is not in these
         // documents: leave the session untrusted and run once more, from a
-        // fresh snapshot (#18 review F4). A session flushing faster than
+        // fresh snapshot (#18). A session flushing faster than
         // it can be re-indexed stays on the fallback until the flushes
         // pause, which is correct, only slower.
         self.with_state(session, |st| {
@@ -1103,7 +1117,7 @@ impl Tier {
             return;
         }
         // The primary just accepted `token`; this store's own record of the
-        // lease is the cheap check that it has not been lost since (F2).
+        // lease is the cheap check that it has not been lost since.
         if self.with_state(session, |st| st.held) != Some(token) {
             self.mark_stale(
                 session,
@@ -1121,8 +1135,8 @@ impl Tier {
         self.mirror_ops(session, batch, version).await;
     }
 
-    /// An unleased write (the seed and fixture path) is not mirrored (#18
-    /// review L4). The engine would take it with internal versioning, which
+    /// An unleased write (the seed and fixture path) is not mirrored (#18).
+    /// The engine would take it with internal versioning, which
     /// bumps an externally versioned document to `V + 1`, exactly the next
     /// leased write's `(T << 32) | (c + 1)`; that write's conflict counts as
     /// success and a stale document would be served while in sync. So the
@@ -1152,7 +1166,24 @@ impl Tier {
 
     /// Project and write at `version`; advance the marker only when
     /// everything landed.
-    async fn mirror_ops(&self, session: &SessionId, batch: &MutationBatch, version: Option<u64>) {
+    ///
+    /// A batch that moves the session's contract ([`Projection::switched`])
+    /// is not mirrored (#319): its projection would put a re-embed's new
+    /// vectors, drained before the trailing `SetEmbedding`, into the old
+    /// contract's index, and would leave a relabel's kept vectors out of the
+    /// new one, while the marker advanced. The session goes stale under the
+    /// contract after the batch (not counted as a mirror failure) and a
+    /// repair re-indexes it from the durable snapshot, which writes every
+    /// vector under the new contract and sweeps the old contract's
+    /// documents. Lean: `mirror_switch_writes_nothing`, `write_agrees`.
+    ///
+    /// [`Projection::switched`]: super::project::Projection::switched
+    async fn mirror_ops(
+        self: &Arc<Self>,
+        session: &SessionId,
+        batch: &MutationBatch,
+        version: Option<u64>,
+    ) {
         let before = match self.durable_contract(session).await {
             Ok(c) => c,
             Err(e) => {
@@ -1161,6 +1192,23 @@ impl Tier {
             }
         };
         let projection = project(session, &batch.mutations, before, version);
+        if projection.switched {
+            tracing::info!(
+                target: "lambo::recall_tier",
+                session = %session,
+                "the batch changed the session's embedding contract; vector recall falls back to \
+                 the durable store until the session is re-indexed under the new contract"
+            );
+            self.with_state(session, |st| {
+                st.contract = Some(projection.contract_after.clone());
+                st.sync = TierSync::Stale;
+                st.last_error = Some(
+                    "the embedding contract changed: re-indexing from the durable store".into(),
+                );
+            });
+            self.repair_if_due(session);
+            return;
+        }
         self.with_state(session, |st| {
             st.contract = Some(projection.contract_after.clone());
         });
@@ -1273,7 +1321,7 @@ impl Tier {
     ///
     /// An `Unknown` session (never loaded here, or a check that could not
     /// settle it) is checked against the durable store. So is a `Stale` one
-    /// this store does not hold (#18 review F1): a reader cannot repair, but
+    /// this store does not hold (#18): a reader cannot repair, but
     /// the holder's mirror or repair lands, and a reader that never looked
     /// again would serve the fallback until restart. A `Stale` session this
     /// store holds is repaired instead, when its backoff allows.
@@ -1411,7 +1459,7 @@ fn knn_fetch(limit: usize) -> usize {
         .min(MAX_VECTOR_CANDIDATE_LIMIT.max(limit))
 }
 
-/// Rank the index's hits exactly (#18 review M3).
+/// Rank the index's hits exactly (#18).
 ///
 /// The engine only chooses the pool: its scores may come from quantized
 /// vectors and are `f32` whatever the mapping, so each hit is re-scored from
@@ -1641,7 +1689,7 @@ impl GraphStore for TieredStore {
     /// safe: the durable erase reports `already_absent` and the index cleanup
     /// is retried.
     ///
-    /// "Gone" is checked, not assumed (#18 review H1): each pass sweeps the
+    /// "Gone" is checked, not assumed (#18): each pass sweeps the
     /// session (refresh, delete-by-query, retry on conflicts), refreshes, and
     /// counts what a search still finds. Only a count of zero lets the marker
     /// go and the erase report done.
@@ -1653,8 +1701,8 @@ impl GraphStore for TieredStore {
         let outcome = self.primary.erase_session(session, eraser).await?;
         if let EraseOutcome::Erased(_) = &outcome {
             // A repair this store runs for the session would rebuild what
-            // the sweep below removes (#18 review F6). It is told the lease
-            // is gone (its next fence check fails, F2) and awaited, so no
+            // the sweep below removes (#18). It is told the lease
+            // is gone (its next fence check fails) and awaited, so no
             // request of it is still in flight when the sweep runs; one that
             // does not stop within the grace is abandoned and the erase
             // reports failure, to be rerun.
@@ -1760,7 +1808,7 @@ impl GraphStore for TieredStore {
         ttl: Duration,
     ) -> Result<LeaseOutcome, StoreError> {
         let outcome = self.primary.refresh_lease(session, holder, ttl).await?;
-        self.note_lease(session, &outcome);
+        self.note_refresh(session, &outcome);
         Ok(outcome)
     }
 
@@ -1870,5 +1918,21 @@ impl Tier {
             LeaseOutcome::Held { .. } => None,
         };
         self.with_state(session, |st| st.held = held);
+    }
+
+    /// [`Self::note_lease`] for a refresh, which never adopts a token (#293
+    /// review). A refresh that comes back at the token already held keeps it;
+    /// one that comes back at any other token re-took a lease the session's
+    /// writer had lost (the operator override, or a takeover and release
+    /// between two heartbeats), and that writer still presents the old token,
+    /// so the store no longer holds the lease for it: a repair must stop at
+    /// its next fence check rather than pass it under the re-taken token.
+    fn note_refresh(&self, session: &SessionId, outcome: &LeaseOutcome) {
+        self.with_state(session, |st| {
+            st.held = match outcome {
+                LeaseOutcome::Acquired(info) if st.held == Some(info.token) => Some(info.token),
+                _ => None,
+            };
+        });
     }
 }

@@ -14,20 +14,20 @@
 //! consulted, so nothing a write declared can redirect a citation. Missing,
 //! ambiguous, interaction ids, foreign-session, self and cyclic references
 //! refuse the whole call with a typed [`LamboError::Reference`], before the
-//! ack where the pre-pass can see it ([`validate`]). A citation never
+//! ack where the pre-pass can see it (`validate_scoped`). A citation never
 //! creates its target, so a call cannot cite a concept it creates itself.
 //!
 //! # Pinned at the ack, re-resolved at the commit
 //!
-//! [`validate`] returns the resolution it accepted ([`PinnedCitations`]),
+//! `validate_scoped` returns the resolution it accepted ([`PinnedCitations`]),
 //! and the job and its durable intent carry it. The commit re-resolves every
 //! reference under the graph write lock, inside the write's transaction and
-//! before the call's own writes ([`recheck`]), and refuses with
+//! before the call's own writes (`recheck`), and refuses with
 //! [`ReferenceRefusalKind::Changed`] when the answer differs: a cited
 //! concept removed or shadowed between the ack and the apply never becomes
 //! a dangling or silently redirected edge, and a durable intent replayed
 //! after a restart reaches the same answer or settles `failed`. The self
-//! and cycle checks run again against the written sources ([`write_edges`]),
+//! and cycle checks run again against the written sources (`write_edges`),
 //! because a hybrid write can resolve a concept differently at commit than
 //! the pre-pass saw. One case is not a refusal: a hybrid similarity merge
 //! that makes the citing concept the same as its cited target drops that
@@ -36,11 +36,11 @@
 //!
 //! # One path for every reference field
 //!
-//! The pin, the recheck and the edge write take a [`ReferenceSpec`]: the
+//! The pin, the recheck and the edge write take a `ReferenceSpec`: the
 //! field, the edge it writes, its weight, whether that edge family must
 //! stay acyclic, its limits, and whether a similarity merge into the target
-//! makes the reference a reinforcement. [`DEPENDS_ON`] is a derive's
-//! citations; [`AGAINST`] and [`ACTION_AGAINST`] are #19(b)'s
+//! makes the reference a reinforcement. `DEPENDS_ON` is a derive's
+//! citations; `AGAINST` and `ACTION_AGAINST` are #19(b)'s
 //! contradictions, `newer -Contradicts-> older`, on a derive concept and on
 //! a `record_action` action. A contradiction is resolved, pinned, rechecked
 //! and refused exactly like a citation (owner decision, #19(b) option A),
@@ -55,8 +55,7 @@
 //!   still refused.
 //! * **Not the same target as a citation.** One concept (or action) may not
 //!   both cite and contradict the same concept in one call
-//!   ([`ReferenceRefusalKind::DependsOnAndAgainst`], review M2); separate
-//!   writes may.
+//!   ([`ReferenceRefusalKind::DependsOnAndAgainst`]); separate writes may.
 //!
 //! The edge's direction comes from the write, not from node age: the
 //! concept that declares the contradiction is `newer`, whatever the two
@@ -263,7 +262,7 @@ pub(crate) fn validate_scoped(
     Ok(pinned)
 }
 
-/// #19(b) review M2: an `against` reference whose `(content, target)` the
+/// #19(b): an `against` reference whose `(content, target)` the
 /// same call also cites in `depends_on` is refused
 /// ([`ReferenceRefusalKind::DependsOnAndAgainst`]). Both pinned lists are
 /// fixed at the ack and rechecked to the same targets at the commit, so

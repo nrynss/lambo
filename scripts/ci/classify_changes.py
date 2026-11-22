@@ -13,6 +13,13 @@ import sys
 RUST_PREFIXES = (
     "src/", "tests/", "migrations/", "fixtures/", "examples/", "web/",
     ".cargo/", ".github/workflows/", "scripts/ci/",
+    # The Lean models: src/formal_constants_tests.rs include_str!s them (#291).
+    "formal/LamboProofs/",
+    # The differential-oracle vectors: src/formal_oracle_tests.rs include_str!s
+    # them (#291). Nothing else under formal/ is read by the Rust build or
+    # tests (formal/OracleExport/ writes these vectors; a change there that
+    # changes them changes this directory too, or check-oracle.sh fails).
+    "formal/oracle/",
 )
 RUST_FILES = {
     "Cargo.toml", "Cargo.lock", "rust-toolchain", "rust-toolchain.toml", "build.rs",

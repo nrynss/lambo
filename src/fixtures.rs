@@ -1,18 +1,22 @@
-//! Committed fixture graphs (T1.4) — the swarm unblocker.
+//! Committed fixture graphs — the swarm unblocker.
 //!
 //! JSON lives in `fixtures/`. This module loads them into in-RAM structures so
-//! P2–P7 tracks start against realistic data with zero network access.
+//! tests start against realistic data with zero network access.
 //!
 //! Loadable surfaces:
 //! * `load_snapshot(name)` — a `GraphSnapshot` (session graphs).
 //! * `load_store(name)`    — a `MemoryStore` seeded with that snapshot.
 //! * `load_mutation_batch(name)` — a `MutationBatch` (flush/adapter input).
-//! * `load_recall_goldens()`, `load_canonicalization_cases()` — P5 / P6 tables.
+//! * `load_recall_goldens()`, `load_canonicalization_cases()` — recall and canonization tables.
 //!
 //! Conventions (see `scripts/gen-fixtures.py`, which regenerates these):
-//! * Canonical keys: lowercase -> split `[-_ ]` + camelCase -> drop stopwords ->
-//!   Porter stem -> sort -> join `" "`. Synonym lookup on the raw normalized key
-//!   BEFORE stemming ("register_user" -> "create_user" -> "creat user").
+//! * Canonical keys: split camelCase on the original case -> split `[-_ ]` +
+//!   whitespace -> lowercase -> drop stopwords -> Snowball English (Porter2)
+//!   stem, identifier tokens unstemmed (#148), empty stems dropped (#301) ->
+//!   sort -> join `" "` (`graph::canonical::normalize_tokens`; the script
+//!   lowercases before the camelCase split, a drift the checked-in cases do
+//!   not follow). Synonym lookup on the raw trimmed input BEFORE normalizing
+//!   ("register_user" -> "create_user" -> "creat user").
 //! * All timestamps are in the past relative to eval time, so age filters treat
 //!   every edge as aged.
 
@@ -91,7 +95,7 @@ fn shift_snapshot(snap: &mut GraphSnapshot, delta: ChronoDuration) {
 }
 
 /// Load a session graph rebased onto wall-clock time so the most recent concept write
-/// lands `last_write_age` before `anchor`. Makes the P4 conflict / recency window
+/// lands `last_write_age` before `anchor`. Makes the conflict / recency window
 /// runnable against `Utc::now` (fixture timestamps are in the past by default).
 pub fn load_store_relative(
     name: &str,
@@ -125,7 +129,7 @@ pub fn load_recall_goldens() -> Result<serde_json::Value, StoreError> {
     read_json("recall-goldens")
 }
 
-/// Canonicalization cases: input text -> expected canonical key (T6 contract).
+/// Canonicalization cases: input text -> expected canonical key.
 pub fn load_canonicalization_cases() -> Result<serde_json::Value, StoreError> {
     read_json("canonicalization-cases")
 }
@@ -290,7 +294,7 @@ mod tests {
                 Mutation::DeleteNode { .. } => "delete_node",
                 Mutation::DeleteEdge { .. } => "delete_edge",
                 Mutation::CanonizationTransition { .. } => "canonization_transition",
-                // XP-8: the committed fixture predates this kind and is not
+                // The committed fixture predates this kind and is not
                 // regenerated (the batch's five-kind coverage is its contract);
                 // a future fixture carrying one would count here.
                 Mutation::SetRootGoal { .. } => "set_root_goal",

@@ -1,4 +1,4 @@
-//! Phase-1 candidate retrieval (T5.1, spec §8) — the UNION of three legs.
+//! Phase-1 candidate retrieval (spec §8) — the UNION of three legs.
 //!
 //! Legs:
 //! 1. **Keyword** — [`InvertedIndex::search`] (`query`, `limit`): BM25 hits,
@@ -7,9 +7,8 @@
 //!    the N = [`RECENT_INTERACTIONS`] most recent interactions by `created_at`
 //!    (ties broken by node id ascending; interactions carry no canonical key,
 //!    so the id is the only stable separator at that step). The temporal chain
-//!    order is NOT consulted: the contract is "3 most recent by `created_at`"
-//!    (handoff T5.1), and a chain ordered by insertion may carry arbitrary
-//!    timestamps.
+//!    order is NOT consulted: the contract is "3 most recent by `created_at`",
+//!    and a chain ordered by insertion may carry arbitrary timestamps.
 //! 3. **Vector** — the checked candidate read of the source recall is handed
 //!    (`VectorCandidates`), only when the store advertises
 //!    [`Capabilities::VECTOR_SEARCH`](crate::store::Capabilities::VECTOR_SEARCH).
@@ -36,7 +35,10 @@
 //! secondary signal below a genuine BM25 or similarity hit); vector members
 //! keep the store-provided similarity score. The merged list is sorted
 //! score-descending, ties broken by canonical key ascending then node id
-//! ascending ([`crate::types::tie_break_by_key`]), then truncated to `limit`.
+//! ascending ([`crate::types::tie_break_by_key`]), and returned unreduced:
+//! phase 1 is a candidate over-approximation, and the `top_k` cut happens in
+//! phase-3 assembly by final score. `limit` only sizes the keyword leg's
+//! over-fetch (`KEYWORD_OVERFETCH`).
 //! Sorting is a total order (f64 `total_cmp`, then canonical key, then UUID),
 //! so the output is deterministic regardless of leg iteration or store result
 //! order, and stable across runs: node ids are minted per run, so the old
@@ -44,7 +46,7 @@
 //! next (issue #2).
 //!
 //! The caller supplies the [`InvertedIndex`]: the graph itself owns no index
-//! (P3 contract — the session owner mirrors every concept write into a separate
+//! (the session owner mirrors every concept write into a separate
 //! [`InvertedIndex`]; see `src/graph/mod.rs`), so building one here would
 //! silently re-derive a possibly stale copy.
 //!
@@ -87,14 +89,16 @@ pub const RECENT_INTERACTIONS: usize = 3;
 /// [`crate::embed::calibration`]).
 pub const RECENT_SCORE: f64 = 0.35;
 
-/// Phase-1 keyword over-fetch multiplier: the keyword leg is over-fetched so
-/// strong query matches cannot be evicted by the flat-scored recent/vector
-/// legs at phase-1 truncation (GPT5.6sol P1-3).
+/// Phase-1 keyword over-fetch multiplier: the keyword leg keeps the first
+/// `limit * KEYWORD_OVERFETCH` index results. Phase 1 used to truncate its
+/// merged list to `limit`, which let the flat-scored recent/vector legs evict
+/// strong query matches; it no longer truncates, and this cap bounds how many
+/// keyword candidates reach the phase-3 `top_k` cut.
 pub(crate) const KEYWORD_OVERFETCH: usize = 4;
 
 /// The score each phase-1 leg contributed for one node, **before** max-merge.
 ///
-/// The merged score alone cannot answer G's question — "was this a real semantic
+/// The merged score alone cannot answer the question "was this a real semantic
 /// hit, a lexical hit, or just the recency floor?" — because max-merge is
 /// lossy: a `0.35` could be the [`RECENT_SCORE`] floor or a genuine (weak)
 /// cosine, and the two mean opposite things. `None` means the leg did not
@@ -102,11 +106,13 @@ pub(crate) const KEYWORD_OVERFETCH: usize = 4;
 /// `recent` set was retrieved by nothing but recency).
 ///
 /// Collected on every call rather than only under a trace subscriber: the leg
-/// names already had a trace-gated map (below), but the I1 ledger needs the
+/// names already had a trace-gated map (below), but the ledger needs the
 /// *numbers*, and only from a run nobody thought to enable tracing on.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct LegScores {
-    /// BM25 score from [`InvertedIndex::search`].
+    /// BM25 score from [`InvertedIndex::search`]. For an exact-name match it
+    /// is `max(BM25, 1.0)`, with the BM25 read from the whole ranked list
+    /// (#288), so it can be the `1.0` floor rather than a BM25.
     pub keyword: Option<f64>,
     /// The flat recent-leg score ([`RECENT_SCORE`], or the contract's
     /// calibrated value, #87), when this node belongs to one of the
@@ -305,7 +311,7 @@ pub fn candidates(
 }
 
 /// [`candidates`], plus the per-leg scores the max-merge would otherwise
-/// discard (I1).
+/// discard.
 ///
 /// One implementation, two views: the merge rule lives here and `candidates`
 /// projects it, so the ranked list and the leg provenance can never describe
@@ -338,20 +344,23 @@ pub(crate) enum RecentLeg {
 
 /// What the keyword leg itself found for a query (#256), read while phase 1
 /// runs it and kept apart from [`LegProvenance`], whose keyword slot an
-/// exact-name match overwrites with `1.0` (that per-hit value is unchanged).
+/// exact-name match raises to at least `1.0` (#288).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct KeywordLeg {
     /// The leg searched: a text query against an installed index.
     pub(crate) ran: bool,
-    /// The best BM25 the index gave a concept of this graph, before any
-    /// exact-name substitution and before phase 1's over-fetch cap (so a
-    /// `limit` of 0 reports it too). `Some(0.0)` when the leg ran and matched no
-    /// concept; `None` when it did not run, or when every score it returned
-    /// was non-finite (phase 1's own leg ranking ignores those too).
+    /// The best BM25 the index gave a concept of this graph, read before
+    /// the exact-name step raises the named concept's keyword leg and before
+    /// phase 1's over-fetch cap (so a `limit` of 0 reports it too).
+    /// `Some(0.0)` when the leg ran and matched no concept; `None` when it
+    /// did not run, or when every score it returned was non-finite (phase 1's
+    /// own leg ranking ignores those too).
     pub(crate) best_bm25: Option<f64>,
     /// The query, normalized as names are ([`Graph::name_target`]), is a
-    /// concept's durable name, so phase 1 scored that concept's keyword leg
-    /// `1.0` in place of its BM25.
+    /// concept's durable name, so phase 1 raised that concept's keyword leg
+    /// to at least `1.0`: the higher of its BM25 and `1.0` (#288), its BM25
+    /// read off the whole ranked search, so a hit beyond the over-fetch cap
+    /// counts too.
     pub(crate) exact_name: bool,
 }
 
@@ -368,10 +377,11 @@ pub(crate) fn candidates_with_legs_as(
     (out, legs)
 }
 
-/// [`candidates_with_legs_as`], plus what the keyword leg found before the
-/// exact-name substitution (#256). The same single index search: the raw
-/// best BM25 is read off its ranked results before phase 1 cuts them to its
-/// over-fetch cap, so it is the same at every `limit`.
+/// [`candidates_with_legs_as`], plus what the keyword leg found, read before
+/// the exact-name step raises the named concept's leg (#256). The same single
+/// index search: the raw best BM25 is read off its ranked results before
+/// phase 1 cuts them to its over-fetch cap, so it is the same at every
+/// `limit`.
 pub(crate) fn candidates_with_keyword_leg_as(
     graph: &Graph,
     index: &InvertedIndex,
@@ -383,8 +393,8 @@ pub(crate) fn candidates_with_keyword_leg_as(
     // Phase 1 is a candidate OVER-approximation: the final `top_k` truncation
     // is applied downstream in phase-3 assembly (by final score). Prematurely
     // truncating here let the flat-scored recent/vector legs evict strong
-    // keyword matches (GPT5.6sol P1-3), so keyword is over-fetched (bounded)
-    // and the union is returned unreduced.
+    // keyword matches, so keyword is over-fetched (bounded) and the union is
+    // returned unreduced.
     let keyword_cap = limit.saturating_mul(KEYWORD_OVERFETCH);
     let keyword_ran = !query.trim().is_empty();
     let mut legs: LegProvenance = HashMap::new();
@@ -397,7 +407,7 @@ pub(crate) fn candidates_with_keyword_leg_as(
     // #256: the leg's own best, read off the same search before the cut to
     // `keyword_cap`, so it does not move with `limit` (a library caller's
     // `top_k` of 0 included). Counted over the concepts of this graph (the
-    // only ones assembly can return), before the exact-name overwrite below.
+    // only ones assembly can return), before the exact-name raise below.
     // The search is best-first, so the first such concept with a finite
     // score is the best: the walk stops there, normally at the first result.
     let mut matched = false;
@@ -413,11 +423,22 @@ pub(crate) fn candidates_with_keyword_leg_as(
     }
     // An exact normalized name is direct identity evidence even when the
     // target is old and its content has no words in common with the query.
+    // It is evidence added, never taken away: the name match raises the
+    // target's keyword leg to the higher of its BM25 and 1.0 (#288;
+    // assigning 1.0 used to drop a named concept below a weaker lexical
+    // neighbour). The BM25 is read off the whole ranked search, not only the
+    // part inside `keyword_cap`, so a named concept whose hit lies beyond the
+    // cap keeps it too; no other node beyond the cap joins the leg.
+    // `formal/LamboProofs/Fusion.lean` models this step (`raiseFullName`).
     let mut exact_name = false;
     if let Some(id) = graph.name_target(query)
         && matches!(graph.node(id), Some(Node::Concept(_)))
     {
-        legs.entry(id).or_default().keyword = Some(1.0);
+        let slot = &mut legs.entry(id).or_default().keyword;
+        if let Some(hit) = ranked.iter().find(|s| s.item == id) {
+            merge_max(slot, hit.score);
+        }
+        merge_max(slot, 1.0);
         exact_name = true;
     }
     let keyword = KeywordLeg {
@@ -440,7 +461,7 @@ pub(crate) fn candidates_with_keyword_leg_as(
         merge_max(&mut legs.entry(s.item).or_default().vector, s.score);
     }
     let out = rank(&mut legs, graph, &input.fusion, keyword_ran);
-    // T9 instrumentation: which phase-1 leg(s) produced each candidate, so a
+    // Instrumentation: which phase-1 leg(s) produced each candidate, so a
     // trace-enabled run can say whether the lexical (keyword), recent, or
     // vector arm produced an identifier-shaped hit. Unchanged output; it now
     // reads the always-collected map instead of building a second one.
@@ -464,7 +485,7 @@ pub(crate) fn candidates_with_keyword_leg_as(
     (out, legs, keyword)
 }
 
-/// Leg names in the order T9's trace printed them (sorted, deduplicated).
+/// Leg names in the order the trace prints them (sorted, deduplicated).
 fn arm_names(legs: LegScores) -> Vec<&'static str> {
     // Sorted by construction: "keyword" < "recent" < "vector".
     [
@@ -513,7 +534,11 @@ fn rank(
             // A non-finite leg score (a bad store cosine) earns no rank:
             // total_cmp would put a positive NaN first. The raw score stays
             // on the hit for the ledger, and `max` still sanitises it.
-            .filter_map(|(id, l)| pick(l).filter(|s| s.is_finite()).map(|s| (*id, s)))
+            // `+ 0.0` turns a `-0.0` into `+0.0` (and leaves every other
+            // value as it is), so the two zeros tie and go by the tie-break
+            // as every other equal score does, rather than total_cmp
+            // putting `+0.0` first (#328).
+            .filter_map(|(id, l)| pick(l).filter(|s| s.is_finite()).map(|s| (*id, s + 0.0)))
             .collect();
         members.sort_by(|a, b| order(*a, *b));
         members
@@ -550,8 +575,15 @@ fn rank(
     .into_iter()
     .filter(|(active, _)| *active)
     .map(|(_, w)| term(w, 1))
-    .sum();
+    .fold(0.0, |a, b| a + b);
     for l in legs.values_mut() {
+        // Summed from `+0.0`, not with `Iterator::sum`, whose empty sum is
+        // `-0.0`: a candidate with no ranked leg (its only leg score was
+        // non-finite) must fuse to the same zero as one ranked only in legs
+        // of weight zero, so that zero ties go to the tie-break, not to
+        // total_cmp's `+0.0 > -0.0` (#328, Lean `Fusion.RrfRecall.rrfAhead`).
+        // `0.0 + -0.0` is `+0.0`, so a `-0.0` weight's terms are normalised
+        // too.
         let sum: f64 = [
             (l.keyword_rank, fusion.keyword_weight),
             (l.vector_rank, fusion.vector_weight),
@@ -559,18 +591,22 @@ fn rank(
         ]
         .into_iter()
         .filter_map(|(r, w)| r.map(|r| term(w, r)))
-        .sum();
+        .fold(0.0, |a, b| a + b);
         l.rrf = Some(if best > 0.0 { sum / best } else { 0.0 });
     }
+    // `+ 0.0` turns a fused `-0.0` (a `-0.0` leg score under max fusion)
+    // into `+0.0`, so equal zeros go to the tie-break under either kind
+    // rather than total_cmp's `+0.0 > -0.0` (#328); every other value,
+    // `-inf` for a candidate with no finite leg included, is unchanged.
     let mut out: Vec<Scored<NodeId>> = legs
         .iter()
-        .map(|(item, l)| Scored::new(*item, l.fused(fusion.kind)))
+        .map(|(item, l)| Scored::new(*item, l.fused(fusion.kind) + 0.0))
         .collect();
     out.sort_by(|a, b| order((a.item, a.score), (b.item, b.score)));
     out
 }
 
-/// Phase-1 candidates for the RECENT + VECTOR legs only (GPT5.6sol P2-6).
+/// Phase-1 candidates for the RECENT + VECTOR legs only.
 ///
 /// Used when no inverted index is installed: the keyword leg is unavailable,
 /// but the independently gathered recent and vector candidates must not be
@@ -579,7 +615,7 @@ pub fn candidates_without_keyword(graph: &Graph, input: Phase1Input) -> Vec<Scor
     candidates_without_keyword_with_legs(graph, input).0
 }
 
-/// [`candidates_without_keyword`], plus per-leg scores (I1). The `keyword` leg
+/// [`candidates_without_keyword`], plus per-leg scores. The `keyword` leg
 /// is `None` throughout — there is no index to ask.
 pub fn candidates_without_keyword_with_legs(
     graph: &Graph,
@@ -612,15 +648,19 @@ pub(crate) fn candidates_without_keyword_with_legs_as(
 /// Fold `score` into a leg slot by **max**, the same rule the cross-leg merge
 /// uses.
 ///
-/// Only the vector leg needs this, and it needs it for a reason that is easy to
-/// lose: `vector_candidates` is a trait method whose contract does not forbid an
-/// adapter returning the same `NodeId` twice, and a plain assignment makes the
-/// *last* duplicate win. That silently reversed the pre-I1 arithmetic — a
-/// `[(dup, 0.90), (dup, 0.10)]` input ranked at 0.1 where it used to rank at 0.9.
-/// The keyword leg assigns rather than max-merges because that is what it did
-/// before I1 too (the inverted index yields each id once), and the recency leg is
-/// idempotent by construction; changing either would be the same kind of silent
-/// arithmetic change in the other direction.
+/// Two callers. The exact-name step raises the named concept's keyword leg
+/// with it, folding in its BM25 from the whole ranked search and then the
+/// `1.0` floor, so a higher BM25 is kept even beyond the over-fetch cap
+/// (#288). The vector leg needs it for a reason that is easy to lose:
+/// `vector_candidates` is a trait method whose contract does not forbid an
+/// adapter returning the same `NodeId` twice, and a plain assignment makes
+/// the *last* duplicate win. That silently reversed the arithmetic from
+/// before per-leg provenance — a `[(dup, 0.90), (dup, 0.10)]` input ranked at
+/// 0.1 where it used to rank at 0.9. The keyword leg's BM25 loop assigns
+/// rather than max-merges because that is what it did before per-leg
+/// provenance too (the inverted index yields each id once), and the recency
+/// leg is idempotent by construction; changing either would be the same kind
+/// of silent arithmetic change in the other direction.
 fn merge_max(slot: &mut Option<f64>, score: f64) {
     *slot = Some(match *slot {
         Some(previous) => previous.max(score),
@@ -661,6 +701,23 @@ fn recent_concepts(graph: &Graph) -> Vec<(NodeId, usize)> {
         *i = 1 + per_interaction[..*i].iter().sum::<usize>();
     }
     members
+}
+
+/// Test-only access to the private [`rank`], for
+/// `crate::formal_oracle_tests` (#291), which replays
+/// `formal/oracle/Fusion.json` through it.
+#[cfg(test)]
+pub(crate) mod formal_oracle {
+    use super::{Graph, LegProvenance, NodeId, RecallFusion, Scored};
+
+    pub(crate) fn rank(
+        legs: &mut LegProvenance,
+        graph: &Graph,
+        fusion: &RecallFusion,
+        keyword_ran: bool,
+    ) -> Vec<Scored<NodeId>> {
+        super::rank(legs, graph, fusion, keyword_ran)
+    }
 }
 
 #[cfg(test)]
@@ -1035,7 +1092,7 @@ mod tests {
         );
     }
 
-    /// G2: the F BGE-M3 evidence found the right durable vector at 0.3991,
+    /// The BGE-M3 calibration evidence found the right durable vector at 0.3991,
     /// below the former 0.50 recent floor. A recent leg must remain secondary:
     /// that real semantic ranking has to survive the phase-1 max merge rather
     /// than tie by node id with every young concept.
@@ -1178,6 +1235,146 @@ mod tests {
             );
             assert_eq!(keyword.best_bm25, Some(0.0), "{q}");
         }
+    }
+
+    /// #288: an exact-name match raises the named concept's keyword leg to
+    /// at least 1.0 and never lowers a BM25 above it. The named concept X
+    /// and a lexical neighbour Y both score above 1.0, X higher; the name
+    /// step must leave X's keyword leg at its BM25, so X still ranks above
+    /// Y under max fusion. Mirrors `Fusion.raise_keyword_eq`,
+    /// `Fusion.raise_keyword_ge_bm25`, `Fusion.raise_local` and
+    /// `Fusion.raise_keeps_wins` (and `Fusion.assign_lowers_named_concept`,
+    /// the old step's failure on the same shape) in
+    /// `formal/LamboProofs/Fusion.lean`; X's hit is within the cap, where
+    /// the current step agrees with that one (`Fusion.full_eq_raise`).
+    #[test]
+    fn an_exact_name_raises_the_keyword_leg_without_lowering_its_bm25() {
+        let (mut g, _) = planted_graph();
+        let i1 = interaction(1, None, 0);
+        let named = concept(5, i1.id, "single writer lease holds");
+        let neighbour = concept(6, i1.id, "writer lease expiry");
+        let (x, y) = (named.id, neighbour.id);
+        g.insert_concept(named, i1.id).unwrap();
+        g.insert_concept(neighbour, i1.id).unwrap();
+        assert!(g.declare_name("single-writer-lease", x).unwrap());
+        let index = InvertedIndex::from_snapshot(&g.snapshot());
+        let query = "single-writer-lease";
+        let raw = index.search(query, 10);
+        let bm25 = |id: NodeId| raw.iter().find(|s| s.item == id).map(|s| s.score);
+        let (bx, by) = (bm25(x).expect("X matches"), bm25(y).expect("Y matches"));
+        assert!(bx > by && by > 1.0, "premise: {bx} > {by} > 1.0");
+
+        let (out, legs, keyword) = candidates_with_keyword_leg_as(
+            &g,
+            &index,
+            Phase1Input::default(),
+            query,
+            10,
+            RecentLeg::Skip,
+        );
+        assert!(keyword.exact_name, "premise: the query is X's name");
+        // #256, unchanged: the raw best BM25, read before the name step.
+        assert_eq!(keyword.best_bm25, Some(bx));
+        assert_eq!(legs[&x].keyword, Some(bx), "max(BM25, 1.0), not 1.0");
+        assert_eq!(
+            legs[&y].keyword,
+            Some(by),
+            "another node's leg is untouched"
+        );
+        assert_eq!(out[0].item, x, "the named concept stays ahead: {out:?}");
+        assert_eq!(out[0].score, bx);
+        assert_eq!(out[1].item, y, "{out:?}");
+    }
+
+    /// #288 review: the exact-name step reads the named concept's BM25 off
+    /// the whole ranked search, not only the part inside the over-fetch cap.
+    /// With `limit` 1 the cap is `KEYWORD_OVERFETCH`; five stronger lexical
+    /// neighbours push the named concept X past it, though its own BM25 is
+    /// above 1.0. X's keyword leg must be its BM25, not the bare 1.0 floor,
+    /// and the fifth neighbour, also beyond the cap but not named, stays out
+    /// of the leg. Mirrors `Fusion.full_keyword_of_mem`,
+    /// `Fusion.full_keyword_ge_bm25`, `Fusion.full_local` and
+    /// `Fusion.full_keeps_beyond_cap_bm25` (and `Fusion.beyond_cap_floor_only`,
+    /// the first #288 step's gap on the same shape) in
+    /// `formal/LamboProofs/Fusion.lean`.
+    #[test]
+    fn an_exact_name_keeps_its_bm25_beyond_the_overfetch_cap() {
+        let (mut g, _) = planted_graph();
+        let i1 = interaction(1, None, 0);
+        let named = concept(
+            20,
+            i1.id,
+            "single writer lease notes kept beside the storage runbook pages",
+        );
+        let x = named.id;
+        g.insert_concept(named, i1.id).unwrap();
+        let mut neighbours = Vec::new();
+        for (id, content) in [
+            (21u64, "single writer lease"),
+            (22, "single writer lease holder"),
+            (23, "single writer lease expiry"),
+            (24, "single writer lease fencing"),
+            (25, "single writer lease renewal"),
+        ] {
+            let c = concept(id, i1.id, content);
+            neighbours.push(c.id);
+            g.insert_concept(c, i1.id).unwrap();
+        }
+        for (id, content) in [
+            (30u64, "embedding contract width"),
+            (31, "receipt lanes apply in order"),
+            (32, "garbage collection sweeps idle sessions"),
+            (33, "canonical concepts are never collected"),
+            (34, "token budget fits the context block"),
+            (35, "vector dimensions are store authoritative"),
+        ] {
+            g.insert_concept(concept(id, i1.id, content), i1.id)
+                .unwrap();
+        }
+        assert!(g.declare_name("single-writer-lease", x).unwrap());
+        let index = InvertedIndex::from_snapshot(&g.snapshot());
+        let query = "single-writer-lease";
+        let limit = 1;
+        let cap = limit * KEYWORD_OVERFETCH;
+        let ranked = index.search_ranked(query);
+        let pos = ranked.iter().position(|s| s.item == x).expect("X matches");
+        let bx = ranked[pos].score;
+        assert!(
+            pos >= cap,
+            "premise: X at {pos} lies beyond the cap {cap}: {ranked:?}"
+        );
+        assert!(bx > 1.0, "premise: X's BM25 {bx} is above the 1.0 floor");
+        let outside = ranked[cap].item;
+        assert!(
+            outside != x && neighbours.contains(&outside),
+            "premise: an unnamed neighbour also lies beyond the cap: {ranked:?}"
+        );
+
+        let (out, legs, keyword) = candidates_with_keyword_leg_as(
+            &g,
+            &index,
+            Phase1Input::default(),
+            query,
+            limit,
+            RecentLeg::Skip,
+        );
+        assert!(keyword.exact_name, "premise: the query is X's name");
+        // #256, unchanged: the raw best BM25, read before the name step.
+        assert_eq!(keyword.best_bm25, Some(ranked[0].score));
+        assert_eq!(
+            legs[&x].keyword,
+            Some(bx),
+            "max(BM25, 1.0) from the whole ranked list, not the 1.0 floor"
+        );
+        for s in ranked.iter().take(cap) {
+            assert_eq!(legs[&s.item].keyword, Some(s.score), "in-cap leg untouched");
+        }
+        assert!(
+            !legs.contains_key(&outside),
+            "an unnamed node beyond the cap stays out of the leg"
+        );
+        let got = out.iter().find(|s| s.item == x).expect("X is a candidate");
+        assert_eq!(got.score, bx, "{out:?}");
     }
 
     #[test]
@@ -1411,10 +1608,10 @@ mod tests {
         }
     }
 
-    // P1-3 (GPT5.6sol): a bounded recent-interactions leg must not evict every
-    // strong lexical match at phase-1 truncation. With keyword over-fetch and
-    // NO union truncation in `candidates`, all keyword matches survive even
-    // when an unrelated recent leg is present.
+    // A bounded recent-interactions leg must not evict every strong lexical
+    // match at phase-1 truncation. With keyword over-fetch and NO union
+    // truncation in `candidates`, all keyword matches survive even when an
+    // unrelated recent leg is present.
     #[test]
     fn recent_leg_does_not_evict_keyword_matches() {
         let mut g = Graph::new(sid());
@@ -1452,16 +1649,16 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // I1 — per-leg provenance
+    // Per-leg provenance
     // -----------------------------------------------------------------------
 
-    /// **I1.** The per-leg scores survive the max-merge, and the merged score
-    /// the ranking uses is exactly the maximum over the legs that fired.
+    /// The per-leg scores survive the max-merge, and the merged score the
+    /// ranking uses is exactly the maximum over the legs that fired.
     ///
     /// This is the distinction the whole of DOGFOOD metric 4 rests on: a `0.35`
     /// from the recency floor and a genuine `0.35` cosine rank identically and
-    /// mean opposite things, and before I1 the ledger could not have told them
-    /// apart because `candidates` returned one `f64`.
+    /// mean opposite things, and before per-leg provenance the ledger could not
+    /// have told them apart because `candidates` returned one `f64`.
     #[test]
     fn i1_per_leg_scores_survive_the_max_merge() {
         let (g, index) = planted_graph();
@@ -1536,7 +1733,7 @@ mod tests {
         // last-writes. The `vector_candidates` trait contract does not forbid
         // duplicates and no shipped adapter emits them, so this is the arithmetic
         // no test held down: a plain assignment made `[(dup, 0.90), (dup, 0.10)]`
-        // rank at 0.1, reversing what the pre-I1 merge did with the same input.
+        // rank at 0.1, reversing what the earlier merge did with the same input.
         let dup = NodeId(Uuid::from_u64_pair(11, 42));
         let (ranked, legs) = candidates_with_legs(
             &g,
@@ -1570,7 +1767,7 @@ mod tests {
         );
     }
 
-    /// **I1.** The recency floor is distinguishable from a real score of the
+    /// The recency floor is distinguishable from a real score of the
     /// same magnitude. A node retrieved by nothing but recency reports
     /// `recent: 0.35` and no other leg.
     #[test]
@@ -1593,7 +1790,7 @@ mod tests {
         }
     }
 
-    /// **I1.** The keyword-less path (no inverted index installed) still
+    /// The keyword-less path (no inverted index installed) still
     /// reports its two legs.
     #[test]
     fn i1_the_keywordless_path_reports_its_legs_too() {
@@ -1894,6 +2091,79 @@ mod tests {
         )]);
         let out = rank(&mut legs, &g, &only_recent, false);
         assert_eq!(out[0].score, 0.0, "no NaN from a zero normaliser");
+    }
+
+    /// #328: a fused zero is `+0.0` whatever produced it, so zero ties
+    /// fall to the tie-break (Lean `Fusion.RrfRecall.rrfAhead`). Before
+    /// the fix a candidate with no ranked leg (its only leg score is
+    /// non-finite, so it earns no rank) summed an empty iterator to `-0.0`,
+    /// and `total_cmp` put every `+0.0` (ranked only in a zero-weight leg)
+    /// ahead of it, keyed or not.
+    #[test]
+    fn rrf_zero_scores_tie_break_whatever_the_sign_of_zero() {
+        let g = planted_graph().0;
+        let no_keyword = RecallFusion {
+            keyword_weight: 0.0,
+            ..rrf()
+        };
+        let keyless = cid(99); // in no graph
+        let mut legs: LegProvenance = HashMap::from([
+            (cid(4), leg(None, Some(0.9))),
+            (cid(1), leg(None, Some(f64::NAN))),
+            (cid(2), leg(None, Some(f64::INFINITY))),
+            (cid(3), leg(Some(1.0), None)),
+            (keyless, leg(Some(0.5), None)),
+        ]);
+        let out = rank(&mut legs, &g, &no_keyword, true);
+        assert_eq!(legs[&cid(1)].vector_rank, None, "NaN earns no rank");
+        assert_eq!(legs[&cid(3)].keyword_rank, Some(1));
+        // Every zero ties and goes by key: alpha < beta < gamma, then the
+        // keyless candidate last.
+        assert_eq!(
+            ids(out.clone()),
+            vec![cid(4), cid(1), cid(2), cid(3), keyless],
+            "{out:?}"
+        );
+        for s in &out[1..] {
+            assert!(
+                s.score == 0.0 && s.score.is_sign_positive(),
+                "{:?} fuses to {:?}",
+                s.item,
+                s.score
+            );
+        }
+    }
+
+    /// A `-0.0` leg score ranks with `+0.0` by the tie-break, as every
+    /// other equal score does (`leg_ranks`), not after it.
+    #[test]
+    fn a_negative_zero_leg_score_ties_with_zero() {
+        let g = planted_graph().0;
+        let mut legs: LegProvenance = HashMap::from([
+            (cid(1), leg(None, Some(-0.0))),
+            (cid(2), leg(None, Some(0.0))),
+        ]);
+        rank(&mut legs, &g, &rrf(), false);
+        assert_eq!(legs[&cid(1)].vector_rank, Some(1), "alpha < beta");
+        assert_eq!(legs[&cid(2)].vector_rank, Some(2));
+    }
+
+    /// Under max fusion (the default) too, a fused `-0.0` ties with `+0.0`
+    /// and the two go by the tie-break, not by the sign of zero (#328).
+    #[test]
+    fn max_fusion_ties_a_negative_zero_with_zero() {
+        let g = planted_graph().0;
+        let mut legs: LegProvenance = HashMap::from([
+            (cid(1), leg(None, Some(-0.0))),
+            (cid(2), leg(None, Some(0.0))),
+        ]);
+        let out = rank(&mut legs, &g, &RecallFusion::default(), false);
+        assert_eq!(
+            ids(out.clone()),
+            vec![cid(1), cid(2)],
+            "alpha < beta: {out:?}"
+        );
+        assert!(out.iter().all(|s| s.score.is_sign_positive()), "{out:?}");
     }
 
     #[test]

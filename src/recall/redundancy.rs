@@ -21,12 +21,23 @@
 //! without the rule, so the result is byte-identical.
 //!
 //! **Never skipped:** a forced member (hot-list, contradiction companion,
-//! #19 canonical or venerable forcing, a kept reservation holder), and a
+//! #19 canonical or venerable forcing, a kept reservation holder), a
 //! member that would carry a warning line of its own (a hot-list payload, a
-//! #207 stale citation, a #20 supersession line, an active reservation):
-//! skipping drops a member's block and warnings, and a duplicate's warning
-//! (say, a contradiction declared against that copy) is not on the copy
-//! that was kept. Canonical-first order is untouched: the rule only skips.
+//! #207 stale citation, a #20 supersession line, an active reservation),
+//! and either end of a #198 suspected pair of its own session
+//! (`in_suspected_pair` in `assemble`, whether or not the other end ends up
+//! shown): skipping drops a member's block and warnings, and a duplicate's
+//! warning (say, a contradiction declared against that copy) is not on the
+//! copy that was kept. Canonical-first order is untouched: the rule only
+//! skips.
+//!
+//! The ⚑ load-bearing line is **not** on that list. A Canonical member can
+//! be skipped as a near-duplicate of a Canonical member ranked above it
+//! (Canonical-first order means the kept copy is Canonical too; Lean
+//! `TopK.skipped_canonical_kept_canonical`), and its own ⚑ line, which
+//! states its own blast radius, is then not shown: only the kept copy's
+//! line and an `also <id>` label remain, so a skipped pillar with 10
+//! dependents is reported through a kept one's "3 nodes depend on this".
 //! A dependency question answered by traversal (`recall::dispatch`) lists
 //! an anchor's dependents without assembly, so the rule does not apply to
 //! it.
@@ -275,7 +286,7 @@ fn is_negation(word: &str) -> bool {
     word.ends_with("n't") || NEGATIONS.contains(&word)
 }
 
-/// How many negation words `content` holds: [`NEGATIONS`] and every word
+/// How many negation words `content` holds: `NEGATIONS` and every word
 /// ending in `n't` (any apostrophe, U+02BC included), case-insensitive.
 /// Invisible codepoints are ignored.
 pub fn negation_count(content: &str) -> usize {
@@ -393,7 +404,7 @@ fn opposite_words(a: &[String], b: &[String]) -> bool {
 ///   script;
 /// * a different [`negation_count`];
 /// * a word in one where the other has its opposite (`enable` / `disable`,
-///   `safe` / `unsafe`: [`ANTONYMS`], [`ANTONYM_PREFIXES`]);
+///   `safe` / `unsafe`: `ANTONYMS`, `ANTONYM_PREFIXES`);
 /// * the content words both share, negation included, in a different
 ///   order (swapped roles, or a negation that moved).
 ///

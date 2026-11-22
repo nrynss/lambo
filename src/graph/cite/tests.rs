@@ -76,7 +76,7 @@ fn a_citation_makes_the_cited_concept_load_bearing() {
 
 /// Every reference form reaches the same concept, so three references to one
 /// ruling write one edge. A synonym the session holds is not a reference
-/// form (review H1): it is refused as missing.
+/// form: it is refused as missing.
 #[test]
 fn every_reference_form_writes_the_same_one_edge() {
     let (mut g, i) = graph("cite-forms");
@@ -361,6 +361,52 @@ fn the_commit_refuses_self_and_cycle_it_could_not_see_at_the_ack() {
     assert_eq!(g.snapshot(), before);
 }
 
+/// `closing_edge` counts the call's own planned edges, not just the graph's:
+/// two existing concepts re-derived in one call, each citing the other, close
+/// a cycle only through each other's planned edge. The pre-pass
+/// (`validate_scoped`) refuses the call, and so does the commit
+/// (`write_edges`) when handed pins that skipped it (each citation validated
+/// on its own, where it passes). Lean: `Cite.batch_acyclic`, whose check
+/// searches the combined graph.
+#[test]
+fn mutual_citations_in_one_call_are_refused() {
+    let (mut g, i) = graph("cite-mutual");
+    concept(&mut g, i, RULING, ConceptType::Logic);
+    concept(&mut g, i, DECISION, ConceptType::Logic);
+    let concepts = [(RULING, ConceptType::Logic), (DECISION, ConceptType::Logic)];
+    let both = [cite(RULING, &[DECISION]), cite(DECISION, &[RULING])];
+    let before = g.snapshot();
+
+    let pre_pass = validate_scoped(&g, &concepts, &both, &ParentOf::none())
+        .err()
+        .map(|e| refusal(&e).kind.clone());
+
+    let mut pinned = validate_scoped(&g, &concepts, &both[..1], &ParentOf::none()).unwrap();
+    let second = validate_scoped(&g, &concepts, &both[1..], &ParentOf::none()).unwrap();
+    pinned.references.extend(second.references);
+    assert_eq!(pinned.references.len(), 2);
+    let commit = derive_cited(
+        &mut g,
+        i,
+        &agent(),
+        &concepts,
+        &ParentOf::none(),
+        10,
+        &pinned,
+    )
+    .err()
+    .map(|e| refusal(&e).kind.clone());
+    // Both paths, reported together, so neither hides the other.
+    assert_eq!(
+        (pre_pass, commit),
+        (
+            Some(ReferenceRefusalKind::Cycle),
+            Some(ReferenceRefusalKind::Cycle)
+        )
+    );
+    assert_eq!(g.snapshot(), before);
+}
+
 /// The background refuses exactly what the pre-pass refuses: handed pins
 /// that skipped the pre-pass's self and cycle checks, the commit refuses
 /// them with the same kinds.
@@ -417,7 +463,7 @@ fn action<'a>(depends_on: &'a [&'a str]) -> Action<'a> {
     }
 }
 
-/// `record_action`'s `depends_on` (review M1): a hyphenated node id or a
+/// `record_action`'s `depends_on`: a hyphenated node id or a
 /// unique short id of an existing concept cites it; an interaction's id and
 /// a short id two concepts share are refused; everything else is the 0.5.0
 /// text rule, including an id that names nothing.
@@ -478,7 +524,7 @@ fn record_action_cites_ids_and_refuses_only_interactions_and_shared_prefixes() {
     node_of(&g, "schema v1");
 }
 
-/// Review M1, with what dogfood agents actually send in `depends_on`: every
+/// The same, with what dogfood agents actually send in `depends_on`: every
 /// one of these was accepted by 0.5.0 as text and still is, created on first
 /// use and matched after.
 #[test]
@@ -534,7 +580,7 @@ fn a_resent_0_5_0_request_lands_on_the_entity_its_id_text_minted() {
     assert_eq!(g.concepts().count(), before + 1, "only the action is new");
 }
 
-/// Review L4: an 8-hex commit hash that happens to prefix a concept's id
+/// An 8-hex commit hash that happens to prefix a concept's id
 /// (chance about concepts / 2^32) cites that concept; a text match wins
 /// over the prefix, as 0.5.0 matched text.
 #[test]
@@ -568,7 +614,7 @@ fn a_commit_hash_that_prefixes_a_concept_id_cites_it_unless_its_text_exists() {
 /// Fixed ids for the id-shape tests, so no run depends on a random id. The
 /// first is the shape CI flaked on: before #148 its 12- and 11-character
 /// prefixes (`2122de39e47e`, `2122de39e47`) shared one canonical key, because
-/// the Porter stemmer dropped a trailing `e` (see
+/// the stemmer dropped a trailing `e` (see
 /// `hex_text_that_stems_alike_is_two_concepts`).
 const FIXED_IDS: [u128; 4] = [
     0x2122de39_e47e_4a51_9c3b_0d6f8e2a1b47,
@@ -656,8 +702,8 @@ fn only_the_hyphenated_id_and_exactly_eight_hex_characters_are_ids() {
 }
 
 /// #148 (formerly `hex_text_that_stems_alike_is_one_concept`, the CI flake's
-/// root cause): canonicalization used to stem every token, and the Porter
-/// stemmer drops a trailing `e`, so `2122de39e47e` and `2122de39e47` were one
+/// root cause): canonicalization used to stem every token, and the stemmer
+/// drops a trailing `e`, so `2122de39e47e` and `2122de39e47` were one
 /// key and one concept. Identifier tokens (a digit, `/` or `.`) are no longer
 /// stemmed, so they are two concepts.
 #[test]

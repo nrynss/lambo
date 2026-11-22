@@ -1,4 +1,4 @@
-//! #148 on SQLite: read, plan ([`crate::store::rekey::plan_rekey`]) and write
+//! #148, #301 on SQLite: read, plan ([`crate::store::rekey::plan_rekey`]) and write
 //! the re-key in one `BEGIN IMMEDIATE` transaction.
 
 use std::collections::HashMap;
@@ -8,7 +8,7 @@ use sqlx::SqliteConnection;
 use super::codec::db_err;
 use super::SqliteStore;
 use crate::store::rekey::{
-    placeholder_key, plan_rekey, KeyRow, RekeyPlan, REKEY_MARKER_KEY, REKEY_MARKER_VALUE,
+    placeholder_key, plan_rekey, KeyRow, NameRow, RekeyPlan, REKEY_MARKER_KEY, REKEY_MARKER_VALUE,
 };
 use crate::types::StoreError;
 
@@ -59,9 +59,9 @@ async fn rekey_in(conn: &mut SqliteConnection, force: bool) -> Result<RekeyPlan,
 }
 
 /// Record the clean re-key, or withdraw a stale record when this pass left a
-/// collision (#171, [`REKEY_MARKER_KEY`]).
+/// collision or a row kept from an empty key (#171, #301, [`REKEY_MARKER_KEY`]).
 async fn record_marker(conn: &mut SqliteConnection, plan: &RekeyPlan) -> Result<(), StoreError> {
-    let query = if plan.collisions.is_empty() {
+    let query = if plan.is_clean() {
         sqlx::query(
             "INSERT INTO store_meta (key, value) VALUES (?, ?) \
              ON CONFLICT (key) DO UPDATE SET value = excluded.value",
@@ -102,7 +102,20 @@ async fn plan_and_apply(conn: &mut SqliteConnection) -> Result<RekeyPlan, StoreE
             .map_err(|e| db_err("rekey: read synonyms", e))?;
     let synonyms: HashMap<(String, String), String> =
         synonyms.into_iter().map(|(s, k, v)| ((s, k), v)).collect();
-    let plan = plan_rekey(&rows, &synonyms);
+    let names: Vec<(String, String, String)> =
+        sqlx::query_as("SELECT session_id, name_key, node_id FROM concept_names")
+            .fetch_all(&mut *conn)
+            .await
+            .map_err(|e| db_err("rekey: read concept names", e))?;
+    let names: Vec<NameRow> = names
+        .into_iter()
+        .map(|(session_id, name_key, node_id)| NameRow {
+            session_id,
+            name_key,
+            node_id,
+        })
+        .collect();
+    let plan = plan_rekey(&rows, &synonyms, &names);
     if plan.changes.is_empty() {
         return Ok(plan);
     }

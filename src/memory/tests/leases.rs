@@ -2,7 +2,7 @@
 
 use super::*;
 
-/// **L82-1, the second failure.** `serve` bounds `close()` and *drops* it on
+/// **The second failure.** `serve` bounds `close()` and *drops* it on
 /// timeout, so the release on close's success path never runs — the live run
 /// exited with a stale lease row and wedged the session for the whole
 /// `LEASE_TTL` on top of losing the tail.
@@ -44,7 +44,7 @@ async fn an_abandoned_close_still_releases_the_lease() {
     assert_eq!(store.releases(), 1, "the release must happen at most once");
 }
 
-/// **L82-1, the wiring.** The two halves above are the pieces; this is
+/// **The wiring.** The two halves above are the pieces; this is
 /// `serve`'s actual shutdown path putting them together.
 ///
 /// It drives `close_bounded_until` — the real body of the bounded close,
@@ -124,12 +124,11 @@ fn live_handles(session: &str) -> usize {
         .unwrap_or(0)
 }
 
-/// T81-8, retargeted for T8.6: the in-process `ACTIVE_SESSIONS` advisory
-/// still reports a second same-process handle loudly, with both agent ids,
-/// and releases the registration on drop — including a handle that was never
-/// closed.
+/// The in-process `ACTIVE_SESSIONS` advisory still reports a second
+/// same-process handle loudly, with both agent ids, and releases the
+/// registration on drop — including a handle that was never closed.
 ///
-/// **Two separate stores on one logical session, on purpose.** Post-T8.6 the
+/// **Two separate stores on one logical session, on purpose.** Now the
 /// store lease *refuses* a second writer that shares a store (see
 /// `a_second_writer_sharing_a_store_is_refused_by_the_lease`). The advisory
 /// log's remaining domain is the collision the per-store lease cannot see:
@@ -186,7 +185,7 @@ async fn a_second_handle_on_one_session_is_reported_loudly() {
     assert_eq!(live_handles("one-writer"), 0);
 }
 
-/// T8.6: a second writer that **shares a store** with the first is now
+/// A second writer that **shares a store** with the first is now
 /// refused by the store-enforced single-writer lease — the promotion from
 /// advisory to enforced. The refusal names the current holder and its age,
 /// and points at the operator override.
@@ -233,7 +232,7 @@ async fn a_second_writer_sharing_a_store_is_refused_by_the_lease() {
     second.close().await.unwrap();
 }
 
-/// J2: `MemoryBuilder::endpoint` reaches the lease row, and its absence is
+/// `MemoryBuilder::endpoint` reaches the lease row, and its absence is
 /// the default. This is the holder half of the proxy path — the loser's read
 /// is only useful if the winner actually published where it listens.
 #[tokio::test]
@@ -275,7 +274,7 @@ async fn the_builders_endpoint_is_published_into_the_lease_row() {
     hub.close().await.unwrap();
 }
 
-/// T86-2: a holder that LOSES its lease is FENCED. After the store starves
+/// A holder that LOSES its lease is FENCED. After the store starves
 /// its heartbeat past the TTL and another writer takes over, this handle must
 /// refuse every further write and must NOT flush or release — otherwise the
 /// two writers flush divergent graphs into one session (the exact split-brain
@@ -385,7 +384,7 @@ async fn a_lost_lease_fences_the_writer_and_stops_the_flush() {
     drop(first);
 }
 
-/// T8.6: exactly one holder and one honest refusal, in-process — the memory
+/// Exactly one holder and one honest refusal, in-process — the memory
 /// backend's cross-"process" analogue done as two `build`s on one store.
 #[tokio::test]
 async fn one_store_two_builds_yield_one_holder_and_one_refusal() {
@@ -423,7 +422,7 @@ async fn one_store_two_builds_yield_one_holder_and_one_refusal() {
     }
 }
 
-/// R2-4: close-then-reattach in one process — the MCP server's ordinary
+/// Close-then-reattach in one process — the MCP server's ordinary
 /// shape, and this crate's own reload test — must be silent.
 ///
 /// `close()` used to leave the registration in place until `Drop`, so
@@ -468,16 +467,16 @@ async fn a_closed_handle_does_not_collide_with_a_reattach() {
     assert_eq!(live_handles("reattach"), 0);
 }
 
-/// R2-2: dropping a handle whose `close()` **failed** must not be silent.
+/// Dropping a handle whose `close()` **failed** must not be silent.
 ///
 /// The leak guard keyed on task handles still being `Some`; a failed close
 /// has already taken all three, so `leaked` was false and `Drop` said
 /// nothing — while the tail that same close deliberately kept in the log
-/// (T81-5, for the retry it documents) went out with the handle. The exact
+/// (for the retry it documents) went out with the handle. The exact
 /// case an owner most needs told, lost most quietly.
 ///
 /// The failed close also keeps its registration, which is the other half of
-/// the R2-4 policy: this handle still holds an undurable tail.
+/// the registration policy: this handle still holds an undurable tail.
 #[tokio::test]
 async fn dropping_a_handle_whose_close_failed_warns_about_the_kept_tail() {
     let (logs, _guard) = capture_logs(tracing::Level::WARN);
@@ -602,7 +601,7 @@ async fn a_handle_fenced_by_an_erase_refuses_reads_and_writes() {
     );
 }
 
-/// #23 review L2: a handle whose background flush is refused because the
+/// #23: a handle whose background flush is refused because the
 /// session was erased is fenced by that refusal at once, not one heartbeat
 /// (15 s) later, so it stops answering reads from its copy of the deleted
 /// data. No `simulate_lease_loss` here: the flush task's latch is what flips
@@ -708,7 +707,7 @@ async fn fence_for_erase_closes_without_flushing_or_releasing_and_the_holder_era
     );
 }
 
-/// #32 PR 7 review L1: `fence_for_erase` fences at once (writes are refused
+/// #32 PR 7: `fence_for_erase` fences at once (writes are refused
 /// as erased) but does not wake a waiter on the fence (a one-session
 /// serve's wind-down) until `announce_fence`, so the erase can answer its
 /// request before the transport starts to drain.
@@ -737,4 +736,207 @@ async fn the_erase_fence_wakes_its_waiters_only_when_announced() {
         .unwrap();
     assert!(crate::store::erase::is_erased_holder(&winner), "{winner}");
     let _ = mem.close().await;
+}
+
+/// **#293: a heartbeat refresh that re-takes the lease latches the fence.**
+///
+/// A refresh is an acquire, and an acquire takes over a released or expired
+/// row held by another identity at a NEW fencing token. After the documented
+/// `OPERATOR_OVERRIDE` (here a release, which writes the same row: holder
+/// `lambo:released`, expired, token kept) the wedged holder's own next
+/// heartbeat wins that takeover. The heartbeat used to ignore the token an
+/// `Acquired` carried, so it never latched the fence while the flush loop and
+/// the canonization task kept presenting the old token, refused forever.
+///
+/// Mirrors `Lease.override_beat_latches` and `Lease.beat_latches_iff`
+/// (`formal/LamboProofs/Lease.lean`): the old beat (`beatLatchesOld`) does
+/// not latch on the re-take, the fixed beat (`beatLatches`) does, at the first
+/// beat after it. The fixed heartbeat also stops beating, so the lease it
+/// re-took lapses at its TTL instead of being refreshed by a fenced handle.
+#[tokio::test(start_paused = true)]
+async fn a_heartbeat_that_retakes_its_lost_lease_latches_the_fence() {
+    let store = Arc::new(MemoryStore::new());
+    let session = SessionId::new("retaken");
+    let holder = LeaseHolder::for_this_process(&AgentId::new("agent-a"));
+    let LeaseOutcome::Acquired(mine) = store
+        .acquire_lease(&session, &holder, LEASE_TTL)
+        .await
+        .unwrap()
+    else {
+        panic!("the first acquire takes the lease");
+    };
+    let fence = Arc::new(AtomicBool::new(false));
+    let signal = Arc::new(super::super::leases::LeaseLostSignal::default());
+    let beat = super::super::leases::spawn_lease_heartbeat(
+        store.clone() as Arc<dyn GraphStore>,
+        session.clone(),
+        holder.clone(),
+        mine.token,
+        fence.clone(),
+        signal.clone(),
+    );
+    // Let the heartbeat consume its immediate first tick.
+    tokio::task::yield_now().await;
+
+    // The operator override expires the row and hands it to `lambo:released`.
+    store.release_lease(&session, &holder).await.unwrap();
+
+    // The next beat refreshes, which re-takes the row at a new token.
+    tokio::time::advance(crate::store::lease::LEASE_HEARTBEAT_INTERVAL).await;
+    let mut row = None;
+    for _ in 0..1_000 {
+        let now = store.read_lease(&session).await.unwrap();
+        if now.as_ref().is_some_and(|l| l.holder == holder.token()) {
+            row = now;
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    let row = row.expect("the heartbeat's refresh re-took the released row");
+    assert_eq!(
+        row.token,
+        mine.token + 1,
+        "the re-take minted a new fencing token the session's tasks do not hold"
+    );
+    for _ in 0..100 {
+        tokio::task::yield_now().await;
+    }
+
+    assert!(
+        fence.load(Ordering::Acquire),
+        "a refresh that came back at a token other than the session's must latch the \
+         lease-lost fence, or every flush is refused as stale while the handle keeps \
+         accepting writes"
+    );
+    assert!(
+        signal
+            .winner()
+            .is_some_and(|w| !crate::store::erase::is_erased_holder(&w)),
+        "the wake-up is latched too, and it is not mistaken for an erasure"
+    );
+    for _ in 0..1_000 {
+        if beat.is_finished() {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        beat.is_finished(),
+        "a fenced heartbeat stops refreshing the lease it re-took, so it lapses at TTL"
+    );
+}
+
+/// **#293 review: a heartbeat that latched on `Held` stops beating.** It used
+/// to keep refreshing, so once the writer that took the session released it
+/// (a clean close), the fenced handle's next beat re-took the row at a newer
+/// token and held it, as a zombie, until its TTL ran out. Stopping is safe for
+/// the wake-up: the fence and the wake-up are latched before the heartbeat
+/// returns, and a stale-write latch (flag only) still gets its wake-up from
+/// the beat that follows it, which runs because the heartbeat stops only once
+/// it has latched itself.
+#[tokio::test(start_paused = true)]
+async fn a_heartbeat_fenced_by_held_does_not_beat_again() {
+    let store = Arc::new(MemoryStore::new());
+    let session = SessionId::new("fenced-held");
+    let holder = LeaseHolder::for_this_process(&AgentId::new("agent-a"));
+    let LeaseOutcome::Acquired(mine) = store
+        .acquire_lease(&session, &holder, LEASE_TTL)
+        .await
+        .unwrap()
+    else {
+        panic!("the first acquire takes the lease");
+    };
+    let fence = Arc::new(AtomicBool::new(false));
+    let signal = Arc::new(super::super::leases::LeaseLostSignal::default());
+    let beat = super::super::leases::spawn_lease_heartbeat(
+        store.clone() as Arc<dyn GraphStore>,
+        session.clone(),
+        holder.clone(),
+        mine.token,
+        fence.clone(),
+        signal.clone(),
+    );
+    tokio::task::yield_now().await;
+
+    // Another writer takes the expired lease; the next beat sees `Held`.
+    store.force_expire_lease(&session);
+    let taker = LeaseHolder::for_this_process(&AgentId::new("agent-b"));
+    assert!(store
+        .acquire_lease(&session, &taker, LEASE_TTL)
+        .await
+        .unwrap()
+        .is_acquired());
+    tokio::time::advance(crate::store::lease::LEASE_HEARTBEAT_INTERVAL).await;
+    for _ in 0..1_000 {
+        if fence.load(Ordering::Acquire) {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(fence.load(Ordering::Acquire), "Held latches the fence");
+    assert_eq!(signal.winner(), Some(taker.token()));
+
+    // The new writer closes cleanly and releases.
+    store.release_lease(&session, &taker).await.unwrap();
+    for _ in 0..3 {
+        tokio::time::advance(crate::store::lease::LEASE_HEARTBEAT_INTERVAL).await;
+        for _ in 0..100 {
+            tokio::task::yield_now().await;
+        }
+    }
+    let row = store.read_lease(&session).await.unwrap().unwrap();
+    assert_ne!(
+        row.holder,
+        holder.token(),
+        "a fenced handle must not re-take the released lease"
+    );
+    assert!(beat.is_finished(), "the fenced heartbeat stopped");
+}
+
+/// **#293 review: the builder hands the heartbeat the session's own token.**
+/// Through `Memory::build`: a healthy beat does not latch (so the token
+/// passed is the one the lease was acquired with, not a stand-in), and after
+/// the operator override the handle's own beat re-takes the row and fences
+/// the handle, which then refuses writes and its close. Mirrors
+/// `Lease.beat_own_generation` and `Lease.override_beat_latches`.
+#[tokio::test]
+async fn the_builder_wires_the_sessions_token_into_the_heartbeat() {
+    let store = Arc::new(MemoryStore::new());
+    let session = SessionId::new("wired-token");
+    let mem = memory_on(store.clone() as Arc<dyn GraphStore>, "wired-token").await;
+    let before = store.read_lease(&session).await.unwrap().unwrap();
+    // Virtual time from here, so the 15 s heartbeat can be stepped over.
+    tokio::time::pause();
+
+    tokio::time::sleep(crate::store::lease::LEASE_HEARTBEAT_INTERVAL + Duration::from_secs(1))
+        .await;
+    assert!(
+        !mem.lease_lost(),
+        "a refresh at the session's own token must not latch"
+    );
+    assert_eq!(
+        store.read_lease(&session).await.unwrap().unwrap().token,
+        before.token
+    );
+
+    // The operator override; the handle's next beat re-takes the row.
+    store
+        .release_lease(&session, mem.lease_holder())
+        .await
+        .unwrap();
+    tokio::time::sleep(crate::store::lease::LEASE_HEARTBEAT_INTERVAL).await;
+    let row = store.read_lease(&session).await.unwrap().unwrap();
+    assert_eq!(row.token, before.token + 1, "the beat re-took the row");
+    assert!(mem.lease_lost(), "and fenced the handle");
+
+    let err = mem
+        .derive(
+            &[("after the re-take", ConceptType::Entity)],
+            &ParentOf::none(),
+        )
+        .await
+        .expect_err("a fenced handle refuses writes");
+    assert!(matches!(err, LamboError::Conflict(_)), "{err:?}");
+    let err = mem.close().await.expect_err("a fenced close refuses");
+    assert!(matches!(err, LamboError::Conflict(_)), "{err:?}");
 }

@@ -211,6 +211,12 @@ codegen-units = 1
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }
 httpmock = "0.7"
+# #291 step 4: the Lean theorems in formal/ restated as property tests against
+# the real code. Pinned exactly so a new release cannot change generation or
+# shrinking under the suite; 1.12.0 was released 2026-10-10. Only `std`: no
+# `fork`/`timeout` (rusty-fork, tempfile) and no `bit-set` strategies, none of
+# which these tests use.
+proptest = { version = "=1.12.0", default-features = false, features = ["std"] }
 
 [[bin]]
 name = "lambo"

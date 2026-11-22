@@ -1,0 +1,284 @@
+# Lean 4 proofs about Lambo
+
+This directory holds a Lean 4 development that models parts of the Lambo engine
+and proves properties the source states in its doc comments and pins in its
+tests. It has no dependencies beyond Lean itself (no Mathlib).
+
+## Status: machine-checked
+
+`lake build` passes on Lean `v4.36.0` with no errors, no warnings and no
+`sorry`: 2,378 theorems across 27 model files. The axiom audit in
+`LamboProofs/Audit.lean` reports only Lean's standard axioms (`propext`,
+`Quot.sound`, and `Classical.choice` for 322 theorems); 31 of the 789 audited
+theorems use no axioms at all. The count is of `theorem` declarations in the
+model files (`LamboProofs/*.lean` other than `Audit.lean`): lines that start
+with `theorem`, `private theorem` or an attribute such as `@[simp]` before
+`theorem`, followed by the theorem's name and its binders or colon, so prose
+in doc comments that happens to start with "theorem" is not counted;
+`example`s are not counted either.
+
+To check them yourself:
+
+```bash
+curl https://elan.lean-lang.org/elan-init.sh -sSf | sh
+```
+
+```bash
+cd formal && lake build --wfail
+```
+
+`lean-toolchain` pins the Lean version, and elan fetches it on first use.
+
+CI checks them in `.github/workflows/lean.yml` on every push or pull request
+that touches `formal/`. It downloads the pinned Lean release, verifies its
+SHA-256, builds with warnings as errors, fails on any `sorry`, and re-runs the
+axiom audit, failing on any axiom other than the three standard ones. The
+build covers every file under `LamboProofs/` (`globs` in `lakefile.toml`), so a
+model nothing imports is still checked. It also regenerates the differential
+oracle's vectors and fails if `formal/oracle/` is stale (see "Differential
+oracle" below). It keeps
+`formal/.lake` in the Actions cache (saved from `main` only), so an unchanged
+module is not rebuilt. Besides the checkout pin `ci.yml` already uses, the only
+action is `actions/cache`, pinned by commit.
+
+## What is modelled, and what each file proves
+
+Every file opens with a comment that says which Rust items it models, what the
+model leaves out, and which doc-comment sentence or test each theorem
+corresponds to.
+
+| File | Rust source | Main results |
+| --- | --- | --- |
+| `Score.lean` | `src/daemon/score.rs`, `ScoringWeights::sanitized` | The composite is in `[0, 1 + MAX_BONUS]` for every input and weight set (`score_range`). With weights summing to at most 1 the upper clamp never fires (`rawScore_le`). The score is monotone in every dimension (`score_mono`). GC's eviction composite equals the live score at zero frequency and never falls below it (`livePlusFrequency_of_frequency_zero`, `live_le_livePlusFrequency`). The two recency formulas agree in exact arithmetic (`historical_eq_floor`). Max-normalized dimensions are at most 1 (`le_listMax`). |
+| `Order.lean` | `tie_break_by_key`, `rescore`, `rank` (candidates), `rank_members`; design model of #280 | `then_with` of lawful comparators is lawful (`lawful_lex`). The three ranking comparators are strict total orders (`rankMembers_lawful`, `rankMembers_separating`). A sorted list is determined by its set of members, so the output does not depend on input order (`sorted_unique`). Canonical members order first whatever the scores (`rankMembers_canonical_first`). Design model of #280's relevance-gated order (not yet in Rust): off is today's order (`gatedRankMembers_off`), a Canonical member at or above the gate still orders first (`gatedRankMembers_promoted_first`), one below it orders by score (`gatedRankMembers_below_gate_score`), and the order stays lawful and deterministic (`gatedRankMembers_lawful`, `gatedRankMembers_sorted_unique`). |
+| `Expand.lean` | `expand` in `src/recall/expand.rs` | The expansion is exactly the set of nodes within `depth` traversable edges of a candidate (`expand_sound`, `expand_complete`), each recorded once on any graph, cyclic or not (`expand_nodup`), candidates first in input order (`expand_prefix`). |
+| `TopK.lean` | `emitted` in `src/recall/assemble.rs`, with the #181 rule of `src/recall/redundancy.rs` | Forced members are never cut and take no slot (`forced_mem_emit`, `emit_free_le_topK`). The ordinary hits are exactly the first `top_k` ordinary concepts in rank order (`emit_free_eq_take`). Emission keeps rank order (`emit_sublist`). With the redundancy skip: order and forced members are kept (`emitR_sublist`, `forced_mem_emitR`), skipped members take no slot (`emitR_free_count`), at most `window top_k` are skipped (`skipsR_length_le`), no redundant pair means the no-skip result (`emitR_eq_emit_of_no_redundant_pair`, `emitR_eq_emit_of_no_redundant_distinct_pair`), the copy ranked first is kept (`skipsR_pairwise`), and a skipped Canonical member is skipped for a Canonical copy, whose ⚑ banner is shown instead of its own (`skipped_canonical_kept_canonical`). |
+| `Fit.lean` | `fit_blocks`, `truncate_first`, `content_cuts` in `src/recall/format/fit.rs` | Every accepted prefix fits the budget for any estimator (`fit_prefix_ok`). The cut stops at the first block that does not fit (`fit_stops_at_first_miss`). With a monotone estimator it is the longest fitting prefix (`fit_longest`). With the oversize-first-block truncation (#130), whatever is rendered fits the budget for any estimator (`fitBlocks_fits`), a first block that fits gives exactly the whole-block result (`fitBlocks_of_first_fits`), the context is non-empty whenever there is a block and the marker alone fits (`fitBlocks_context_ne_nil`), and a truncated context is a content prefix, `…`, a prefix of the label and warnings, and a marker counting exactly the text left out (`fitBlocks_truncated_prefix`). For the default and byte estimators with the real marker the head is the longest that fits and the first fitting form wins (`rust_default_steady`, `rust_default_longest`); that does not hold for every estimator monotone in bytes (`rust_jump_skips_a_fitting_form`, on a real block), while rule 3 does, on blocks of the Rust's sizes (`rust_rule3_of_mono`). |
+| `Canon.lean` | `legal_canonization_transition`, `apply` in `src/canon/eval.rs`, `stage{1,2,3}.rs` | `Canonical → None` is the only demotion (`legal_demotion_unique`). Canonical is entered only from Venerable (`canonical_only_from_venerable`). A cycle moves a concept along at most one edge (`cycle_one_hop`). Stage 3 cannot overflow the budget (`stage3_no_overflow`). |
+| `Gc.lean` | `gc::run`, `bump_gc_survived`, `sweep_due` | Protected concepts, in particular Venerable and Canonical ones, are never collected (`venerable_canonical_never_collected`). The score cut removes only Entities and Resources (`score_cut_only_entities_and_resources`). `gc_survived` never decreases (`bump_never_resets`). An idle session never sweeps on time alone (`idle_never_sweeps`). |
+| `Cite.lean` | `closing_edge` in `src/graph/action.rs`, `src/graph/cite.rs`; `reject_closing_edge` in `src/graph/derive/cycles.rs`; the alias redirect in `src/canon/alias.rs`; `Graph::assert_invariants`'s cycle check | A write that passes the cycle check leaves the `Causal`/`Dependency` graph acyclic (`batch_acyclic`). Each write gate, the alias redirect and edge removal keep both load conditions, `Causal`/`Dependency` acyclic and `Hierarchical` acyclic (`cite_gate_preserves`, `parent_gate_preserves`, `redirect_preserves`, `drop_preserves`), so every written session loads (`written_loadOk`). Before #325 the load check walked their union and refused a child citing its own parent, a session the gates write (`union_check_rejects_written`). The new check accepts everything the old one did (`loadOk_of_loadOkUnion`) and still refuses a pure cycle of either kind (`hierarchical_cycle_not_loadOk`, `dependency_cycle_not_loadOk`). |
+| `Names.lean` | `src/graph/graph/names.rs`, `resolve_reference_scoped` | A name binding is permanent (`names_permanent`) and never resolves to a different concept, even after its target is collected (`resolve_never_rebinds`). |
+| `Lease.lean` | `src/store/lease.rs`, lease upsert in `src/store/memory.rs`, the heartbeat's fence latch in `src/memory/leases.rs` | The fencing token never decreases (`token_mono`). A live lease refuses other identities (`acquire_refused_while_live`). Once another identity holds the lease, the previous holder's token is refused by the fence forever (`stale_token_refused`, `later_holder_excludes_earlier`). The heartbeat since #293 latches the fence exactly when the row has left the holder's generation, so the first beat after any takeover latches, the operator-override re-take included (`beat_latches_iff`, `override_beat_latches`). |
+| `Receipts.lean` | `src/writeq/receipts.rs`, `admission.rs` | A settled outcome is never overwritten (`settleAll_fixed`). Unsettled receipts are never expired or evicted (`expire_keeps_unsettled`, `evict_keeps_unsettled`). A lane applies writes in submission order (`lane_fifo`). Admission keeps lanes and the queue within their caps. |
+| `Reserve.lean` | `src/graph/reserve.rs` | A live reservation excludes other agents (`reserve_denied`). Takeover happens only at or after expiry (`takeover_needs_expiry`). |
+| `Contract.lean` | `EmbeddingContract`, `stamp_embedding`, `check_vector_compatibility`, the writer attach's contract check and `--allow-embedding-mismatch`, `reembed_all`, `embed_missing`, `lambo re-embed`, the checked vector read, `canary_gate`; the store applying a flushed batch, with the first-stamp legacy quarantine | Compatibility is equality of all three fields (`compatible_iff_eq`). A stamped session's contract cannot be changed by ordinary stamps (`stampAll_keeps`) or by any ordinary write, override or not (`runAll_ordinary_keeps`); it changes only by a same-width override attach, a same-width re-embed, or a re-stamp of a session with no vectors (`contract_change_explicit`). Without the override the attach is exactly `stamp` (`attach_no_override_ok_iff`), and no read ever returns a vector from another contract (`no_mixing_without_override`). The override admits exactly a same-width mismatch with no vectors or an unchanged kind (`attach_override_ok_iff`) and, in the rename-over-vectors case, leaves two labels behind one contract (`attach_override_relabel_mixes`). A successful re-embed leaves every vector in the new space (`reembed_one_space`). Before #296 it could not rewrite a session already under the live contract, the canary-drift case (`reembedCmd_refuses_same_contract`), whose only repair was a same-width rename or kind hop (`example_rename_hop`); a full re-embed re-pinned the canary without the other-sessions warning (`reembed_repins_without_warning`), and `re-embed --missing-only` skipped the canary (`missingOnly_skips_canary`). The fixed verb (#296) repairs a drift in place with `--rewrite-same-contract` and leaves every vector in the live space (`reembedCmdFixed_repairs_drift`, `reembedCmdFixed_full_spec`). It runs the canary on `--missing-only` (`missingOnly_fixed_refuses_drift`), re-pins over an unconfirmed pin only with `--repin-canary` and then warns (`fixed_repin_unsafe_needs_optin`); the `--missing-only` gate only creates a missing pin, and an unconfirmed pin changes only through an opted-in full run (`pinAfterFixed_no_silent_replace`); and it adds no way to move the contract (`runAll2_keeps`, `contract_change_explicit2`, `runAll2_oneSpace`). Before #322, on a contract-less session the re-embed reported full coverage while the store's first-stamp quarantine erased every new vector (`reembed_contractless_durable_loses_vectors`). With the contract stamped first, the store keeps every new vector and equals the graph (`reembedCmd322_contractless_durable`, `reembedOrdered_contractless_matches_graph`), a stamped session is unchanged (`reembedCmd322_stamped_agrees`), and `--missing-only` on a non-empty contract-less session is refused before anything is written (`missingOnly_contractless_writes_nothing`). |
+| `Fusion.lean` | phase 1 in `candidates_with_keyword_leg_as`, `merge_max`, `LegScores::merged` (`src/recall/candidates.rs`) | Max fusion is monotone in each leg (`merged_mono`). Assigning `1.0` to the named concept's keyword leg can drop it below a weaker lexical neighbour (`assign_lowers_named_concept`, the #288 example). Raising the capped slot instead (#288's first fix) gives a keyword leg of at least `1.0` and at least its BM25 within the over-fetch cap (`raise_keyword_ge_one`, `raise_keyword_ge_bm25`), leaves every other node's leg slots unchanged (`raise_local`), never lowers its fused score or its rank (`raise_no_demotion`, `raise_ahead_le`), and agrees with assigning whenever its BM25 is at most `1.0` or absent (`raise_eq_assign`); a hit beyond the cap still gets only `1.0` (`beyond_cap_floor_only`). The step Rust runs now reads the named concept's BM25 off the whole ranked list: its keyword leg is exactly `max(BM25, 1.0)`, or `1.0` with no hit, wherever the hit lies (`full_keyword_eq`, `full_keyword_ge_bm25`), other nodes' leg slots are unchanged (`full_local`), so an unnamed node beyond the cap stays out of the leg (with `lastScore_of_not_mem`; shown concretely by `full_keeps_beyond_cap_bm25`), its rank cannot get worse against either earlier table (`full_ahead_le`, `full_ahead_le_raise`), it agrees with the capped raise when the hit is within the cap or absent (`full_eq_raise`), and it keeps a beyond-cap BM25 the capped raise dropped (`full_keeps_beyond_cap_bm25`). Under RRF (#173, exact rationals): `rrf` is in `[0, 1]` (`rrf_range`) and monotone in each leg's rank (`rrfSum_mono`); leg ranks follow the leg's score order and tie-break and ignore input order (`legRank_lt_iff`, `legRank_perm`, `rrf_perm`); with one weighted leg RRF orders as that leg does (`rrf_one_leg_agrees`). The name step never lowers the named concept's `rrf` or position (`rrf_full_named_up`, `rrf_full_ahead_le`); it moves another node's keyword rank by at most one place, exactly when the named concept passes it, and only from the `1.0` floor (`rrf_full_other`, `full_passes_only_below_floor`), so it can reorder two unnamed nodes (`rrf_name_step_reorders_unnamed`). The beyond-cap fix changes no rank or `rrf` against the capped raise (`full_rank_eq_raise`, `full_rrf_eq_raise`). |
+| `Confidence.lean` | `src/recall/confidence.rs` (`top_legs`, `keyword_term`, `noisy_or`, `provisional`), `KeywordLeg` in `candidates.rs`, `null_median_cosine` | Exact arithmetic over any scale, non-finite `f64` included. The value is in `[0, 1]` for every input (`provisional_inUnit`); the keyword term is `1/2` at `KEYWORD_HALF_SCORE` and tends to `1` (`keywordTerm_half`, `keywordTerm_tendsto_one`). The value is monotone in BM25 and in the cosine (`provisional_mono_bm25`, `provisional_mono_cosine`); the noisy-OR is never below either term (`noisyOr_ge_keyword`) and keyword-only is the two-leg value at `b = 0` (`keywordOnly_le_noisyOr`), these last in exact arithmetic. The keyword-only basis applies exactly when `vector_cosine` is `None` (`provisional_basis_iff`); with both legs and no median the value is absent (`provisional_twoLeg_without_median`); `exact_name_match` never changes it (`provisional_exactName`). `top_legs.bm25` is the raw best BM25, untouched by the cap loop and the exact-name step (#288; `topLegs_keywordPhase`, `keywordLeg_bm25_best`). |
+| `Canonical.lean` | `canonical_key`, `normalize_tokens` in `src/graph/canonical.rs`, `name_key`; the #301 fix (`normalize_tokens` drops empty stems) | For any stopword list and stemmer, the key ignores token order (`key_perm`), treats `-`, `_` and whitespace alike (`key_sep_alike`), ignores case except across a camelCase boundary (`key_lower`, `camel_not_lower`) and ignores stopwords (`key_stop_segment`); a stopword-only input has the empty key and `name_key` refuses it (`key_all_stop`, `nameKey_all_stop`). Two inputs share a key exactly when their stems form the same multiset (`key_eq_iff_perm`), and two valid names collide exactly then (`nameKey_eq_iff_perm`; the #290 examples `issue290_order`, `issue290_stopword`). The key is idempotent for a stemmer with fixed, lowercase, non-stopword outputs (`key_idem`); the real Snowball stemmer is not (`leas_not_idempotent`, `ons_not_idempotent`), and its empty stems gave keys with stray spaces (`empty_stem_key`). The #301 fix drops empty stems (`keyF`): for any stemmer that keeps separators out of its stems, a key then never has a leading, trailing or doubled space (`keyF_tidy`, `canonicalKeyF_tidy`), agrees with the old key wherever no stem is empty (`keyF_eq_key`, `nameKeyF_eq_nameKey`), is empty and refused as a name when every stem is empty (`keyF_all_empty`, `nameKeyF_all_empty`), and two keys are equal exactly when the nonempty stems form the same multiset (`keyF_eq_iff_perm`); the issue's inputs are checked by `decide` (`issue301_fixed`). |
+| `Dispatch.lean` | `classify`, `classifyWB`, `dependents`, `try_structural_with`, `fits_structural_with` in `src/recall/dispatch.rs`; `dependents_of`; the structural routing in `Daemon::recall_routed` | Bare "depend" is no marker (`depend_not_marker`). Before #299 a query was structural exactly when its lowercase text contained a marker (`classify_iff`), a substring test, so a glued marker ("independents of", "depends only on") routed structural (`classify_inside_word`, `classify_into_word`); the fixed classifier counts a marker only on word boundaries (`classifyWB_iff`, `wb_inside_word`, `wb_into_word`, `wb_hyphen_before`, `wb_hyphen_after`, `issue_queries_general`), every marker as whole words still classifies structural (`classifyWB_marker`), the fix only narrows (`classifyWB_structural`), and the dispatch theorems carry over to it (`traversal_exact_wb`, `fitsStructuralWB_iff`, `recall_blend_input_wb`). Only `Dependency` and `Hierarchical` edges declare a dependence (`dependence_types`). The dependents are exactly the anchor's direct structural dependents at any `traversal_depth` (`mem_ranked`, `traversal_exact`), in Canonical-first order (`ranked_canonical_first`), at most `top_k` of them (`traversal_length_le`). The gather-skip pre-check holds exactly when the dispatch answers (`fitsStructuralWith_iff`), and across concurrent writes a recall that blends always blends on the gathered input (`recall_blend_input`). |
+| `Supersession.lean` | `src/canon/supersession.rs`, `src/graph/suspected.rs`, `suspected/replacement.rs`, `never_redundant` and `possibly_superseded_by` in `src/recall/` | #198: a suspected pair runs from the strictly later-dated concept to the earlier one and a tie records nothing (`candidate_dir`, `candidate_tie`), so the relation is acyclic (`suspected_acyclic`); a candidate marked `newer` is never one the new concept replaces, on any graph (`select_newer_matches_trigger`, `select_newer_never_replaced_by_new`). #302's fix keeps a repeated id's highest score (`keepF`, `selectF`): the kept list is exactly the qualifying concepts, each at its best score (`keepF_best`), so the candidates do not depend on the order or repetition of the store's hits (`selectF_order_independent`), and the select theorems carry over (`selectF_mem`, `selectF_newer_never_replaced_by_new`); the old `select` kept the first score. #20: a verdict needs the source's counted evidence strictly after the target's watermark (`verdict_sound`), never runs both ways (`pair_rule`) and demotes the side with the older evidence (`verdict_outranks_reverse`); the pass moves only Canonical → None through the gate (`applySup_unique`), equals `Canon.cycle`'s supersession pass (`applySup_eq_cycle`), and with `canonization_supersede` off changes nothing (`off_agrees`). A suspected edge never demotes (`probesFor_ignore_suspected`) and is never redundant in recall (`signal_suspected`). |
+| `Policy.lean` | `separated_session_count` in `src/canon/event_time.rs`; `supporting_interaction_times`, `solo_score`, `classify`, `SoloScorer`, `SwarmScorer`, `PromotionPolicy` in `src/canon/policy.rs`; `solo_dependent_interactions` in `src/canon/stage1.rs` | The greedy session count is order-free and ignores duplicates (`sessionCount_perm`), lies between 1 and the number of distinct starts, and is exactly the largest set of `gap`-separated starts (`sessionCount_max`, `sessionCount_attained`), so it is monotone under adding a start (`sessionCount_mono`). Causal touches are not recurrence (`causal_not_recurrence`) and flush times are irrelevant under event time (`supportingTimes_reflush`; the bulk-ingest test by `decide`). The score is monotone in each positive term and antitone in reverts (`score10_mono`), the bands partition the score range (`classify_mono`), and under either policy a cycle moves at most one rung (`policy_cycle_one_hop`, `solo_cycle_capped`). Candidate order is the exact-arithmetic order; `f64` can break exact ties across types (`exact_tie_orders_by_key`). A `Hierarchical` child is a dependent but not a recurrence session (`hierarchical_child_is_dependent_not_recurrence`). Before #300 a `Dependency` edge was dated by its source's origin interaction (`reused_action_dependency_is_dated_by_its_origin`); the Solo terms now date a dependence by the turn that wrote it (`reused_action_dependency_is_dated_by_its_writer`, `dependentOriginsW_not_own`), agreeing with the old dating whenever every dependence was written in its dependent's origin turn (`supportingTimesW_eq`, `dependentOriginsW_eq`). Swarm's Stage 1 count and Stage 2's span still use the origin dating after #300. An added edge never lowers either writer-dated term or the band (`recurrenceW_mono_edge`, `dependentOriginsW_mono_edge`, `band_mono_fixed_edge`), and a cycle still moves at most one rung (`policy_cycle_one_hop_fixed`). |
+| `Conflict.lean` | `src/daemon/conflict.rs` (`conflict_at_with`, write-time attribution, `window_start`), `src/daemon/contradiction.rs` (`declared_at`, `written_by`, the `min_age` cutoff, `contradiction_at_with`) | A conflict fires iff two distinct agents are resolved writers on the node (any age) and one `Causal`/`Dependency` write is in the window (`conflictAt_isSome_iff`); one agent never conflicts (`single_agent_never_conflicts`). The window is `[now - window, now]`, inclusive at both ends (`qualifies_iff`). The verdict, agent set and age do not depend on edge order (`conflictAt_perm_secondsAgo`); agents are sorted as in Rust (`sortAgents_perm`). Before #297 a re-send by another agent moved the edge's attribution and could drop the original writer (`resend_drops_original_writer`). The fix (`conflictAtFixed`) attributes each edge at its first and latest write: the first writer stays after any re-send (`resend_keeps_creator`), a conflict survives an edge's first re-send (`resend_still_fires`), the fix is the old rule where nothing was re-sent (`conflictAtFixed_of_unreinforced`) and never loses an old conflict (`conflictAtFixed_of_conflictAt`). A writer re-sent over by a later write is not recoverable (`second_resend_drops_first_resender`). `declared_at` is never after the write time (`declaredAt_le_createdAt`) and is monotone in the write (`declaredAt_mono_write`); eligibility is by write time (`backdated_not_eligible`), an out-of-range cutoff makes nothing eligible (`contradictionAt_no_cutoff`), and a hit is the newest declaration whatever the edge order (`contradictionAt_sound`, `contradictionAt_perm`). |
+| `Hotlist.lean` | `src/daemon/hotlist.rs` (`HotList::sync_cycle`), `detect_into_hot_list`, `forces` and the forced predicates in `src/recall/assemble.rs` | The bound and the contradiction budget always hold (`enforce_length_le`, `enforce_countC_le`), with one entry per `(node, condition)`. What is evicted ranks at or below everything kept, except a contradiction dropped by the budget (`enforce_evicts_lowest`); one insert evicts at most one entry (`insertFull_evicts_le_one`), a refresh evicts nothing (`insert_refresh`), and the batch insert keeps the invariant (`insertMany_inv`). While nothing is evicted insertion order does not change the live pairs (`insertAll_order_irrelevant`); once full it does (`order_matters_when_full`). A lapsed entry never reaches recall or forces inclusion (`lapsed_not_forced`). Conflict, high-risk, drift and stale payloads force, and a contradiction forces only on a Canonical or Venerable concept (`forces_iff`); every forced member is emitted (`hot_member_emitted`, via `TopK.forced_mem_emit`). Before #298 the cycle inserted before it retained, so a fresh lower-tier hit that fit could be evicted (`cycle_evicts_fresh_hit`). The cycle since #298 (deferred inserts, then the cut, then one `enforce`) keeps the invariant (`cycleFixed_inv`), only detected entries that rank lowest are evicted, apart from a contradiction dropped by the budget (`cycleFixed_evicts_only_for_held`), every fresh hit that fits is kept and the list equals the cycle's hits up to the bound (`cycleFixed_keeps_hits`, `cycleFixed_keys_eq_hits`), it agrees with the old cycle whenever that one evicted nothing (`cycleFixed_perm_cycle_of_no_evict`; agreement whenever no entry lapses is `decide`-checked only, as it rests on the unproved `insert_many` equivalence), and the issue's scenario now keeps both hits (`cycleFixed_keeps_fresh_hit`). |
+| `Drain.lean` | `spawn_worker`, `WriteCtx::run`'s consume (`src/writeq/execution.rs`), `quiesce`, `abort_workers`, `settle_deferred` (`src/writeq/drain.rs`), `spawn_replay` and `replay_order` (`src/writeq/replay.rs`), the held writes (`Lanes::held` in `src/writeq/admission.rs`, #295) | Intent rows and consumes are keyed by receipt id (epoch, issue time, sequence), so multi-process backlogs are modelled. A drained lane takes its writes in submission order (`drain_fifo`) and every admitted write is settled once (`drain_settles_each`). A durable write carries its consume, so no replay after a crash re-applies it (`crash_never_reapplies`). After `close()` every admitted write is drained, `intent_durable`, or `close_unflushed` (`shutdown_no_silent_loss`). Replay applies only unconsumed rows and a drained queue replays to nothing (`replay_drained`, `replay_idempotent`); one serve applies each process's writes in sequence order when issue times follow it (`replay_epoch_seq_order`). An input refusal settles `failed` and the replay goes on; any other non-transient error stops it (`inputFact_goes_on`, `sessionWide_stops`). Shown about the Rust before #294 and #295: a transient embed answer reorders one agent's writes (`transient_skip_reorders`, `outage_then_replay_reorders`), the load order trusts the wall clock (`clock_step_reorders`), a graph-dependent non-cycle `Invariant` blocks the backlog every serve (`store_error_blocks_backlog`), and an unparseable receipt id is never settled (`bad_id_never_settled`; since #295 a malformed id is settled `failed`, `fixed_badId_settled`, `stepQ_badId`). Fixed by #294: graph-dependent input refusals settle `failed` and the replay goes on, while every other non-transient error still stops it (`fixed_input_goes_on`, `fixed_sessionWide_stops`). Fixed by #295, in session: a write met by an embedder outage, or by the third slow vector lookup in a row, holds its agent's later writes (`pending_replay`), and the agent's writes apply in admission order (`runW_ord`). A retry of held writes needs no admission and is always available while they are held (`retry_settles_head`, `retry_enabled`; that the retry comes due is the server's backoff timer, which is not modelled). The caps count held writes and their bytes at every step and are never read by a retry (`runW_caps`, `stepW_caps_free`), and nothing taken after a lost lease is applied (`fence_stops_applies`). Fixed by #295, at replay: an agent is deferred at a transient answer or at a receipt id of another format version, and deferred agents are retried once at the end of the pass (`loopD_no_overtake`, `replayP_progress`). Each process's rows load in `lane_seq` order with no clock assumption (`fixedLoad_sorted`, `fixedLoad_epochs`), and a block reason is reported whenever intents are left owed, halts included (`serveR_reported`). Together, each agent's writes of one process apply in admission order from the session through the next serve, whatever the embedder answers (`sessionW_then_serve_order`). |
+| `Flush.lean` | `FlushLoop` (`drain_and_flush`, `flush_with_retry`, `requeue_pending`, and the store calls of `publish_stats` and `refused_as_erased`) in `src/store/flush.rs`, `StoreError::is_retryable`, and the adapters' error classification in `src/store/error.rs` | Backoff sleeps never decrease and are capped at `BACKOFF_CAP` (`flushWithRetry_backoff`); a ladder makes at most `retries + 1` calls, all with one batch, and only a retryable error is retried (`ladder_exhausted`, `stale_write_one_call`). With the idempotent upsert the store contract requires (`upsert_idempotent`) and no concurrent writer, a retried batch lands once in effect (`ladder_ok_effect`). Over every run the ledger, `pending` and graph log are exactly the history (`good_reachable`); each batch sent is the unconsumed tail in log order (`step_calls_unconsumed`, `committed_sublist`) and nothing consumed is sent again (`never_resent`). Exhausted retries retain the batch (`exhausted_retained`); a constraint violation is dead-lettered once and counted (`constraint_dead_lettered`). After a stop every mutation is committed, dead-lettered, dropped with a visible flag, or back in the graph log (`no_silent_loss`); only a hard abort loses `pending` (`abort_loses`). After a takeover the old token never lands (`fencing_refuses_after_takeover`, #1). Shown about the Rust before #293: a `StaleWrite` was retained and re-sent, not treated like a constraint (`stale_write_retained`); after the operator override the holder's own refresh re-took the lease at a new token the flush loop never adopted, so the fence never latched (`override_refresh_retakes`); a fence latched within one poll before a due tick was seen one pass late (`flush_after_fence_latched`). Fixed by #293 (`runFixed`, `Lease.beatLatches`): after any takeover, the operator-override re-take included, the heartbeat latches the fence at its next beat (`Lease.beat_latches_iff`, `takeover_fences_fixed`) and then stops beating (not modelled); no flush is issued once the fence is latched (`no_flush_after_fence_fixed`, `fence_before_due_tick_fixed`); a stale write fences the loop and is never re-sent (`stale_write_never_resent`); a stop after the fence drops the tail (`stop_drops_fenced`); the loop's invariants still hold (`good_reachable_fixed`, `no_silent_loss_fixed`), and a close that re-checks the fence after joining the loop returns Ok only when every batch that left the loop was committed or dead-lettered (`close_ok_no_drop`; without the re-check it can report Ok over a fenced drop, `close_ok_over_drop`); nothing else changes (`stepFixed_agrees`). Before #301, the lease read behind `erased()` and `write_flush_stats` ran outside the flush attempt's timeout and catch-unwind. A panic in either killed the task holding `pending`, with `degraded()` false (`lease_panic_loses`, `stats_panic_loses`), and `close` returned `Ok` over the loss (`close_ok_over_panic`). A call that never returned blocked the stop (`lease_hang_blocks_stop`). With both guarded, a failed lease read counts as not erased, and the invariants and close theorems carry over (`no_silent_loss_guarded`, `close_ok_accounted_guarded`, `stop_exits_guarded`). Also before #301, a permanent SQL error that is not a constraint violation reached the loop as a retryable `Backend`, so it was retried and retained until the backlog degraded the session (`permanent_retried_retained`). Since #301 a permanent error about the store costs one call and degrades the session at once (`permanent_one_call`, `permanent_degrades_classed`); nothing calls the store again (`permanent_never_resent_classed`) and `close` errors (`close_not_ok_degraded`). Every other class is unchanged (`runClassed_old`, `stepClassed_agrees`), and the invariants and close theorems carry over (`no_silent_loss_classed`, `close_ok_no_drop_classed`, `close_ok_accounted_classed`). The `exGone` examples show why a store-scoped error degrades rather than dead-letters. A permanent error about a value the batch holds is dead-lettered like a constraint violation and the session goes on (`value_rejected_dead_letters`); only one about the store degrades (`store_permanent_degrades_split`), and the results carry over (`via_split_agrees`, `no_silent_loss_split`, `close_ok_accounted_split`). |
+| `BatchQueue.lean` | `BatchQueue`, `take_prioritized`, `coalesce_loop`, `supervise`, `serve_take`, `length_chunks`, `forward_isolated`, `still_awaited`, `embed`/`embed_batch`/`recv_bounded`/`Handle::drop` in `src/embed/candle.rs` | As a step relation over pushes, timeouts, worker steps, deaths, supervisor restarts and shutdown: no caller is answered twice in any run (`answered_at_most_once`), and every request is answered exactly once once the worker catches up or the embedder shuts down (`served_when_left_alone`, `eventually_all_answered`), across deaths and restarts. Answers are never cross-wired after reordering by length (`answers_wired`, `removeDesc_eq`); with a row-wise forward every caller gets its own text's answer (`answers_are_own`, `forwardIsolated_rowwise`). Every forward holds at most `FORWARD_WIDTH` texts within the length slack, and every take at most `MAX_BATCH` (`forwards_capped`, `topUp_cap`, `lengthChunks_perm`, `chunksOf_eq_lit`). A take is singles then bulk in arrival order (`takePrioritized_fst`), runs at most `MAX_SINGLE_STREAK` single forwards in a row (`pick_progress`) and ends within `|single| + 132·|bulk| + 1` iterations (`take_ends`); shutdown exits only after draining (`shutdown_drains`). Shown about the Rust: a worker death answers held requests `Backend`, permanent (`worker_death_permanent`); a passing device fault is permanent for a lone text but not for two (`lone_transient_fault_permanent`); queued bulk work can starve behind `MAX_BATCH` singles (`queued_bulk_starves`); a long recall can wait out the whole take (`long_recall_waits_out_the_take`). |
+| `Registry.lean` | `SessionRegistry` in `src/mcp/serve/registry.rs` and `registry/{erase,on_demand,views}.rs`; the heartbeat and fence of `src/memory/leases.rs` after #293 | One step relation over requests, on-demand flights, the pinned retry, detaches, the idle sweeper, `watch_lease`, erases and the shutdown; the invariant holds in every reachable state (`reach_inv`). On-demand Memories never exceed the places (`mems_le_places`), permits and unprobed attaches stay bounded (`attaches_le_permits`, `unplaced_le_cap`), and there is never more than one build per session (`one_build`). An erase claims only with no attach holding a permit, and nothing acquires an erasing session (`erase_claim_quiescent`, `erasing_no_build`); `admit_if` never refuses (`retry_admits_over_held`). A cancelled or timed-out attach frees its place and permit (`drop_clears`, `timeout_clears`); no re-attach while the previous handle lives (`retry_waits_previous`); retry backoff holds (`retry_backoff`); the idle sweep skips in-flight and pinned sessions (`sweep_skips_in_flight`); a detach releases exactly once and only when unfenced (`detach_release`). A fenced handle refuses writes, a beat off its own generation latches and wakes the watcher, and a stale-write latch waits for that beat (`write_refused_fenced`, `beat_latches`, `stale_quiet`, `watcher_fires_after_latch`). Victim choice and the fair share (`chooseVictim_max`, `at_share_evicts_own`, `placeShare_fair`). Shown about the Rust: `watch_lease`'s by-id detach can take down a later healthy attach (`lost_detach_takes_healthy`), and a dropped flight's release can release the next attach's lease once its cached `Failed` is gone, which #293 then fences (`dropped_flight_fences_next`). |
+| `Resolve.lean` | `Commands::needs_embedder`, `Resolved`, `resolve_for_command`, `ServePlan`, `serve_preflight`, `stdio_session`, `AuthTokenArg`, `http_auth_token_flag`, `redact_auth_token_echo` and `main`'s dispatch in `src/main.rs`; `resolve_backends`, `resolve_store_only`, `resolve_embedder_only` and the session resolvers in `src/resolve.rs`; `build_store_with_options`, `wrap_with_recall_tier`, `build_embedder`, `LamboFile::load_resolved`, `pin_sessions`, `resolve_auth_token`, `SecretToken::new` | With the feature set and each read of `lambo.toml` as parameters: everything a command builds comes from the `src/resolve.rs` entry point its `Resolved` variant names, and `main` builds nothing else (`resolve_built_allowed`, `main_built_allowed`, the second by construction); at most one store and one embedder (`resolve_builds_at_most_one`); no embedder unless needed, except `session verify` (`embedder_only_when_needed`, `verify_builds_embedder_though_needs_embedder_false`); a successful resolve gets exactly the configured, compiled kinds, so an uncompiled kind, an unknown key or an unknown kind spelling is a hard error (`full_ok`, `storeOnly_ok`, `load_refuses_unknown`, `unknown_key_exit1`); the width is store-authoritative and, for SQLite and Postgres, the compatibility check is an echo (`echo_never_width_mismatch`, `cockroach_width_refused`, `pin_mismatch_refused`); `main`'s mismatch arm and override `unreachable!` are unreachable (`main_never_mismatch_or_panic`); serve preflight exits 2 except for file errors (1), a stdio serve ignores tokens, the env token wins and is never a silent fallback (`preflight_*`); the clap rules of `stats`, `recall`, `embed` and `canon` (`statsValid_iff`, `embedValid_iff`). Redaction: on every modelled print path (`PrintPath`) the output depends on the token only through its verdict, never its bytes (`render_noninterference`, by definition, so only as strong as that list of paths). Before #315, `lambo serve-web --auth-token`'s clap error quoted the refused value (`serve_web_flag_refusal_leaks`), and clap's unexpected-argument error quoted a token starting with `-` or the tail of a split token (`hyphen_token_leaked`, `unexpected_arg_leaked`). Since #315 the `serve-web` parser refuses the same tokens for the same rule in `serve`'s words (`parseWebAuthArg_ok_iff`, `web_flag_refusal_keeps_reason`, `web_flag_refusal_eq_serve`, `serve_web_flag_refusal_fixed`); a spaced `--auth-token` refuses a flag-like value and `--auth-token=-x` takes any value (`authFlagValue_spaced_none_iff`, `authFlagValue_eq_form`; the fail-open alternative is `b1_fail_open`); and every quoting error prints the same for every argument from the flag on (`quotedRender_noninterference`), except a missing value (`missing_value_kept`) and the flag's own spelling. Not covered: the legacy-token refusal reveals whether the token equals a configured credential's (`credential_refusal_reveals_equality`), and a token split by an unquoted space still reveals that it was split and may change the error, and a piece an accepted flag takes may be printed as that flag's value (`--transport <piece>` prints "unknown transport" with it, and a `--session <piece>` appears in `serve-web`'s banner). The split-token cases predate #315. Shown about the Rust: a non-loopback bind without a credential and `--ledger-heartbeat` without `--ledger` are refused after the backends are built, exit 1 (`bind_refused_after_build`, `heartbeat_without_ledger_after_build`); the store-only path reads the file twice (`storeOnly_kind_and_store_differ`). |
+| `Tiered.lean` | `src/store/tiered/` (`mod.rs` mirror, repair, reads, breaker, lease notes; `project.rs`, `Projection::switched`), `rank_by_cosine` | One-session event model. The index never touches the durable store, and an accepted flush is exactly its batch (`indexSide_keeps_durable`, `write_commits`, `mirror_ends`). A repair with no further writes leaves the index matching the durable session, in sync, given that every indexed version is below the pass's (`repair_converges`), and an overtaken pass is not trusted (`finish_overtaken`). Once the lease moves on, no repair write under the old token lands after the one in flight (`repair_silent_after_loss`, `erase_silences_repair`), and only a held, accepted flush mirrors (`mirror_starts_held`). The breaker trips, falls back while open and probes once (`breaker_*`, `read_breaker_open`). Loads settle to a consistent marker state (`settle_consistent`). With every stored vector returned, the re-rank ignores the engine's scores and is the exact scan on the candidates (`rerank_ignores_engine`, `rerank_exact`). Before #319 a re-embed migration was mirrored into the old contract's index (`reembed_migration_misindexed`) and a relabel left the new contract's index empty in sync (`relabel_leaves_new_index_empty`); both are pinned on `Pprev`. Since #319 a batch that moves the contract is repaired, not mirrored (`mirror_switch_writes_nothing`); every other flush is unchanged (`write_agrees`); the migration and the relabel end with the new contract's index matching the store (`reembed_migration_repaired`). Shown about the Rust: an in-place re-embed briefly mixes builds (`inplace_reembed_mixes_builds`); an in-sync reader never re-checks (`reader_never_rechecks`); a stalled mirror lands after an erase (`mirror_lands_after_erase`); a repair can reconcile from the snapshot taken before its re-check (`repair_from_pre_recheck_snapshot`); an edge-only batch leaves the marker behind (`edge_only_batch_leaves_marker_behind`); a stale repair pass rewinds the version counter, so the next write's version repeats an indexed one and the old vector is served while in sync (`stale_pass_rewinds_version`). |
+| `Audit.lean` | | `#print axioms` for the headline theorems. |
+
+## How far the proofs reach
+
+A proof here is about the *model* in the same file, not about the Rust code.
+The link between the two is the reading of the source recorded in each file's
+header, and it is only as good as that reading. In particular:
+
+* Arithmetic is exact. `Score.lean` uses fixed-point integers; `f64` rounding
+  and overflow are outside the model (the header says where that matters).
+* Concurrency is not modelled. The lease, receipt and reservation files prove
+  properties of sequences of atomic operations; that each operation is atomic
+  is the job of the store transaction or the lock, and is assumed.
+* Several algorithms are modelled from their inputs onward or without a path
+  that does not affect the stated results; each header lists what it leaves
+  out. Where a model's statement holds only in exact arithmetic, the header
+  says so (`Confidence.lean`, `Policy.lean`, `Fit.lean`).
+* Some files model behaviour the Rust does not have yet: `Order.lean`'s gated
+  order is a design model of #280.
+* Predicates whose inputs are measured by store queries (Stage 2 coverage,
+  blast radius, eviction score) are modelled from those inputs onward.
+
+If the Rust changes, the model has to be re-read against it. Nothing proves
+the two agree; the drift check below only makes a change to modelled Rust
+visible, and the differential oracle (last section) checks that the Rust
+gives the model's outputs on a fixed set of generated inputs.
+
+## Keeping the models in step with the Rust
+
+`formal/models.toml` lists, for every model file (every `.lean` file under
+`LamboProofs/`, subdirectories included, except `Audit.lean`), the Rust it
+models and `read_digest`, a fingerprint of that Rust as it was when the model
+was last read against it. A Rust ref is a whole file (`src/recall/expand.rs`)
+or one item in it (`src/types/mod.rs#tie_break_by_key`,
+`src/store/mod.rs#GraphStore::flush`); items are used where a model reads one
+part of a large shared file. The file's header comment gives the full syntax.
+An item ref covers that item's own text (with its attributes, and for a type
+its `impl` blocks), not the `use` imports it relies on or the helpers,
+constants and types it calls or names: list those as refs of their own when
+the model depends on them.
+
+The fingerprint is a SHA-256 over the entry's refs, sorted, and each ref's
+code with comments and `#[cfg(test)]` code blanked and whitespace collapsed
+outside string and char literals (literals are kept verbatim; for an item,
+only that item's code). It is written `v<N>:sha256:<hex>`, N being the digest
+scheme. `scripts/formal/check-model-drift.py` recomputes it and compares:
+
+```bash
+python3 -I scripts/formal/check-model-drift.py
+```
+
+It needs Python 3.11 or later (for `tomllib`) and git.
+
+A model whose fingerprint no longer matches its `read_digest` has drifted. A
+change to comments, to whitespace between tokens or to test-only code alone
+does not count (a change inside a literal does), and an item ref counts only a
+change inside that item. The fingerprint needs no git
+history, so the check gives the same answer after a squash or rebase merge
+and in a shallow clone, and a warning stays on every later run, on every
+branch, until the model is bumped.
+
+To clear a warning, re-read the model against the Rust as it is now, update
+the model file (its statements, or the header's reading of the Rust) if the
+change matters to it, and bump it:
+
+```bash
+python3 -I scripts/formal/check-model-drift.py --bump Canon
+```
+
+`--bump` takes one or more model names (`Canon`, `Canon.lean` or
+`formal/LamboProofs/Canon.lean`), recomputes their `read_digest` from the
+working tree and rewrites only those lines of `formal/models.toml`. It refuses,
+writing nothing, while any of the model's refs does not resolve, and it names
+any ref file whose code differs from `HEAD`: the digest then records
+uncommitted edits, so commit them with the manifest. Editing the Lean file
+alone does not clear drift; only a bump does, and a bump is a claim that the
+model was re-read, so bump only models you have re-read. `--bump-all` bumps
+every model: for a new manifest, or after a change to the script's
+normalisation. Such a change bumps the script's digest scheme, and the check
+then reports "digest scheme changed" (and fails) until `--bump-all` is run;
+run the previous script first to make sure no model had drifted.
+An older script run on a manifest with a newer digest scheme fails the same
+way but refuses to bump, so it cannot downgrade the manifest.
+
+The ref list is part of the fingerprint. Adding a ref, dropping one,
+narrowing a whole file to some of its items or re-pointing a ref at code that
+moved is drift until the model is bumped, so drift cannot be hidden by
+editing the manifest. The Lean path is not part of it: renaming a model file
+together with its entry is not drift.
+
+`read_against` is optional information: the commit the model was last read
+against. Only its format is checked. When a model drifts, the report uses it
+only if it is a commit in the clone and the model's refs there fingerprint to
+exactly its `read_digest`, that is, only if it is the state the digest was
+taken at. Then the report compares each ref there with now, names only the
+refs that changed, each at its first changed line, and adds a
+`git diff <read_against> -- <path>` hint. Otherwise (no `read_against`, a
+commit missing from the clone such as a squash-merged branch's or one outside
+a shallow clone's depth, or a commit that is not the digest's state) it says why and lists all the model's refs.
+`--bump` does not change `read_against`; update it by hand if you keep it.
+
+CI runs the check on pushes and pull requests as a warning
+(`.github/workflows/model-drift.yml`): drift is a reminder to re-read the
+model, not a failure (`--strict` makes it exit 1). CI checks out the full
+history (`fetch-depth: 0`) so that `read_against` resolves and each warning
+points at the changed lines; without that history (a shallow clone) the
+report lists every ref of a drifted model. Each warning is attached to a
+drifted Rust ref: at its first changed line when `read_against` narrows the
+report, otherwise at the item's keyword line, or on the whole file for a
+whole-file ref. The manifest itself is always checked, and a broken one fails
+(exit 3): a model file with no entry, a listed file or item that does not
+exist, a `read_digest` or `read_against` that is not well formed, or a
+`read_digest` of another digest scheme.
+
+When modelled code moves to another file or is renamed, update its ref in the
+manifest in the same change; the check fails until the ref names something
+that exists, and the model counts as drifted until it is re-read and bumped.
+A new model file needs its own entry, then `--bump`. To run the script's own
+tests:
+
+```bash
+python3 -I scripts/formal/check-model-drift.py --self-test
+```
+
+## Differential oracle
+
+The drift check says the Rust changed; it does not say whether the Rust and
+the model still agree. The models are executable (their definitions compute;
+the `decide` examples run them), so the oracle uses the Lean definitions
+themselves as the reference. `lake exe oracle` (sources in `OracleExport/`,
+a library and executable outside the default target, so `lake build` builds
+the proofs alone) evaluates covered definitions over a fixed set of
+generated inputs and writes inputs and outputs to `oracle/<Model>.json`. The
+Rust test `formal_oracle_tests::oracle` (`src/formal_oracle_tests.rs`, one
+replay module per model in `src/formal_oracle_tests/`, part of the default
+`cargo test`) checks that every file in `oracle/` has a replay and rebuilds each
+input as the Rust types, calls the real function and asserts the output the
+Lean computed, naming the model, function, case index and input on a
+mismatch. Unlike the property tests (`src/**/proptests.rs`), nothing in the
+comparison restates the model in Rust by hand.
+
+The inputs come from a SplitMix64 generator with one fixed seed per model,
+biased toward boundaries (ties, empty input, exact budgets, NaN and signed
+zeros where the model admits them), at most a few hundred cases and about
+150 KB per file. Each file's `notes` say how the model's abstract parameters
+were instantiated. To regenerate after changing a model or the exporter, and
+to check the committed vectors are current:
+
+```bash
+cd formal && lake exe oracle
+```
+
+```bash
+scripts/formal/check-oracle.sh
+```
+
+The second regenerates into a temporary directory and fails if anything
+differs from `oracle/`. Commit regenerated vectors with the change that
+moved them; a change under `oracle/` runs the Rust CI.
+
+Covered:
+
+| Model | Lean | Rust | Instantiation |
+| --- | --- | --- | --- |
+| `Order` | `rankMembers`, `tieBreak` | `rank_cmp`, `rank_members`, `tie_break_by_key` | scores by `f64::total_cmp` on bit patterns; keys by `str::cmp` (no scoped key, so `tie_form` is the identity: checked); ids by number |
+| `Fit` | `fitBlocks` over `rustEnv`, `rustBlock` | `fit_blocks` | estimators `defaultTokenCount`, bytes, chars, saturated |
+| `Canonical` | `canonicalKeyF`, `canonicalKey`, `nameKeyF` | `canonical_key`, `unfiltered_canonical_key`, `name_key` | `stop0`, `stem0`; inputs are drawn from a fixed vocabulary (the `stemTable` words, function words, identifiers), and the real stemmer is checked against `stem0` on every word the model stems; `check_size` passes and no input is a UUID (checked) |
+| `TopK` | `emit`, `emitR`/`skipsR` | `emitted` | the pair verdict is "same content class", checked against `Redundancy::signal` on every pair |
+| `Expand` | `expand` | `expand` | `nbrs` built per `TRAVERSAL_ORDER`, id-ascending, and checked against the graph's adjacency |
+| `BatchQueue` | `lengthChunks Cfg.rust` | `length_chunks` (feature `embed-candle`) | none |
+| `Score` | `bonusAndModifier`, `score` | `bonus_and_modifier`, `ScoreDims::composite`, `score` | fixed point at the model's scale; compared within `1e-9` (the model is exact, the Rust `f64`) |
+| `Fusion` | `RrfRecall.rrf`, `rrfAhead` | `rank` under `FusionKind::Rrf` | `tb` as in `Order`; the recent rank is the model's `recentRank`, written into the input; values within 16 ulps (relative), order exact |
+| `Canon` | `gate`, `stage1Passes`, `stage2Passes`, `inCooldown` | `apply_canonization_transition`, the stage predicates | `gate` exhaustively, with no demotion reason |
+
+A model's parameter that is itself Rust logic the model does not define
+(the stemmer, `tie_form`, the redundancy signals, the graph's adjacency
+order) is never reimplemented in Lean to make the two agree: the inputs are
+restricted to where it is trivial or given as a table, and the Rust test
+checks that restriction first, failing with "the oracle's instantiation
+does not hold" rather than as a model mismatch.
+
+Not covered, and why:
+
+* `Canon.cycle`: its flags stand for "this stage would promote", and a
+  `CyclePlan`, `Verdicts` and `EvalParams` that mean exactly that need
+  fixtures far larger than the model.
+* Exact `Fusion` ties above zero through different rank vectors: the model's
+  header says `f64` rounding, not the tie-break, decides those, so no case
+  has one.
+* Stateful or I/O models (`Lease`, `Receipts`, `Drain`, `Flush`,
+  `Registry`, `Tiered`, `Resolve`): their Rust runs against a store, a
+  queue, a clock or the serve process, so a replay needs a harness per
+  model; the property tests and constant pins cover what they can.
+* Not attempted yet: `Cite`, `Confidence`, `Conflict`, `Contract`,
+  `Dispatch`, `Gc`, `Hotlist`, `Names`, `Policy`, `Reserve`,
+  `Supersession`. Their definitions compute, but the Rust they model reads
+  a graph, a hot list or store queries built per case; they are the next
+  candidates, one exporter module and one test module each.
+
+Found by the oracle (#328, fixed in the Rust): under RRF, a candidate whose
+exact value is zero because it is ranked only in legs of weight zero got
+`+0.0` (a sum of zero terms), and one ranked in no leg (its only leg score
+non-finite) got `-0.0` (an empty `f64` sum); `total_cmp` ordered `+0.0`
+first, so between the two the tie-break was not applied, where the model
+orders them by it. `rank` now sums from `+0.0`. Those cases stay a separate
+function in `oracle/Fusion.json`, replayed with the rest.

@@ -37,11 +37,15 @@
 //! Per citation: a citer that already cites the ruling has its alias edge
 //! retired and nothing added (idempotent); the ruling citing its own alias is
 //! retired and never becomes a self-loop; a redirect that would close a
-//! `Causal`/`Dependency`/`Hierarchical` cycle (spec §5.7's acyclicity, as
-//! the graph's own invariant checks it) is
-//! left on the alias and counted. The cycle check walks `Causal`,
-//! `Dependency` and `Hierarchical` edges, as the graph's invariant does. The alias's other edges (its `parent_of`
-//! children, provenance) are untouched and counted.
+//! `Causal`/`Dependency` cycle (spec §5.7's acyclicity, as `closing_edge`
+//! refuses it at write time and the graph's invariant checks it) is left on
+//! the alias and counted. The cycle check walks `Causal` and `Dependency`
+//! edges only: a redirect adds only a `Dependency` edge, so it cannot close
+//! a `Hierarchical` cycle, and a cycle that mixes the kinds (the ruling's
+//! `parent_of` child citing it) is allowed, as it is for a citation by id
+//! (#325; `formal/LamboProofs/Cite.lean`, `redirect_preserves`). The
+//! alias's other edges (its `parent_of` children, provenance) are untouched
+//! and counted.
 //!
 //! Planning a second time on the result changes nothing: the alias has no
 //! citations left to move (`a_second_plan_on_the_result_is_empty`).
@@ -141,7 +145,7 @@ pub struct AliasRedirect {
     /// The ruling's own citations of the alias: retired, never a self-loop.
     pub self_dropped: usize,
     /// Citations left on the alias because re-pointing them would close a
-    /// `Causal`/`Dependency`/`Hierarchical` cycle.
+    /// `Causal`/`Dependency` cycle.
     pub cycle_refused: usize,
     /// The alias's dependents that are not citations (its `parent_of`
     /// children), left in place.
@@ -449,17 +453,15 @@ pub fn plan(g: &Graph, pairs: &[AliasPair], refusals: Vec<AliasRefusal>) -> Alia
     kept.sort_by_key(|p| p.alias.0);
 
     // Citation by citation, against the graph as the plan changes it. The
-    // cycle check walks `Causal`, `Dependency` and `Hierarchical` edges: the
-    // graph's own invariant refuses a cycle through any of the three (review
-    // H1: a ruling's `parent_of` child citing its alias would otherwise be
-    // moved into a cycle and abort the whole preview).
+    // cycle check walks `Causal` and `Dependency` edges, as `closing_edge`
+    // does for a citation by id: a redirect adds a `Dependency` edge, and the
+    // graph's invariant checks `Causal ∪ Dependency` and `Hierarchical`
+    // separately (#325), so a ruling's `parent_of` child citing its alias is
+    // moved like any other citation.
     let mut structural: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
     let mut dependency: HashSet<(NodeId, NodeId)> = HashSet::new();
     for e in g.edges() {
-        if matches!(
-            e.edge_type,
-            EdgeType::Causal | EdgeType::Dependency | EdgeType::Hierarchical
-        ) {
+        if matches!(e.edge_type, EdgeType::Causal | EdgeType::Dependency) {
             structural.entry(e.source).or_default().push(e.target);
         }
         if e.edge_type == EdgeType::Dependency {
@@ -551,8 +553,8 @@ pub fn plan(g: &Graph, pairs: &[AliasPair], refusals: Vec<AliasRefusal>) -> Alia
     out
 }
 
-/// Whether `to` is reachable from `from` over `Causal`/`Dependency`/
-/// `Hierarchical` edges.
+/// Whether `to` is reachable from `from` over the `Causal`/`Dependency`
+/// edges in `adj`.
 fn reaches(adj: &HashMap<NodeId, Vec<NodeId>>, from: NodeId, to: NodeId) -> bool {
     let mut queue = VecDeque::from([from]);
     let mut seen = HashSet::from([from]);

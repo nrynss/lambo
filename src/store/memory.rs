@@ -1376,6 +1376,9 @@ impl MemoryStore {
 }
 
 #[cfg(test)]
+mod proptests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::types::{

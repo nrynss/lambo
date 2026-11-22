@@ -1,6 +1,6 @@
-//! `derive()` — the primary write path (T2.3), spec §7.
+//! `derive()` — the primary write path, spec §7.
 //!
-//! Flow, exactly per spec §7: per concept — canonicalize (T2.2) → within-call
+//! Flow, exactly per spec §7: per concept — canonicalize → within-call
 //! dedup → match or create → `Derives` edge from the current interaction →
 //! pairwise `CoOccurrence` capped at `max_cooccurrence_per_derive` →
 //! `Hierarchical` edges from `ParentOf` → mutation batch (every write appends to
@@ -26,7 +26,7 @@
 //!   id, stored `Concept` cloned as-is — `gc_survived`/status/etc. preserved),
 //!   and its structural `Derives` write *creates* the edge when absent (new
 //!   interaction re-deriving an existing concept) or *reinforces* it when
-//!   present (same interaction re-deriving — "re-derives reinforce", T2.1
+//!   present (same interaction re-deriving — "re-derives reinforce",
 //!   natural-key semantics).
 //!
 //! Reinforcement counting (step 7) uses [`Graph::edge_between`] *before* each
@@ -67,26 +67,23 @@
 //! interaction. `ParentOf` contents do **not** join the pairwise `CoOccurrence`
 //! step (that is scoped to the call's `concepts` argument). A pair whose ends
 //! resolve to the same node is rejected up front — a `Hierarchical` self-loop
-//! is a cycle (§5.7 / adve-review T2.1 M1) and must never be written.
+//! is a cycle (§5.7) and must never be written.
 //!
 //! ## Validate-then-mutate (no partial writes)
 //!
 //! [`derive`](fn@derive) validates every fallible input up front in a read-only pre-pass
 //! (interaction exists; raw- and resolved-reflexive `parent_of` pairs), so the
 //! write loop that follows cannot fail mid-call — an error never leaves a
-//! partial batch in the graph or the mutation log (muse-spark M4). The loop's
+//! partial batch in the graph or the mutation log. The loop's
 //! reflexive checks remain as unreachable defense-in-depth.
 //!
-//! ## Daemon notify seam (T4.x — do NOT build the channel here)
+//! ## No daemon notify from here
 //!
-//! [`derive`](fn@derive) is the write path the daemon will subscribe to: T4.x's daemon
-//! consumes the session's mutation stream and reacts to derive-created
-//! conflicts / drift / staleness. The notify hook (a channel send, spec §6.1
-//! `DaemonEvent`) is **deferred to T4** — there is nothing to send to yet, so
-//! this module deliberately contains no stub functions and no channel types.
-//! When T4 lands, the send belongs *after* the successful graph writes here
-//! (or, more likely, inside the flush path that drains `MutationBatch`), and
-//! the receiver-side contract is `DaemonEvent` (already in `crate::types`).
+//! [`derive`](fn@derive) does not signal the daemon. The daemon polls
+//! `Graph::epoch` on its tick and reacts to what derive wrote (conflicts,
+//! drift, staleness); see `crate::daemon`. `DaemonEvent` (spec §6.1) is the
+//! daemon's outbound event, not an inbound notify, so this module contains no
+//! channel.
 
 use std::collections::{HashMap, HashSet};
 
@@ -114,7 +111,8 @@ pub const HIERARCHICAL_WEIGHT: f64 = 0.5;
 /// `ConceptType` assigned to contents that appear only in [`ParentOf`] pairs.
 /// `derive`'s caller supplies types only for the `concepts` argument; a
 /// parent/child that does not already exist must still become a concept, and
-/// `Entity` is the generic default (documented decision — T2.3 Handoff Log).
+/// `Entity` is the generic default (documented decision — the handoff log in
+/// `dev-diary/PHASE-2-graph-core.md`).
 pub const PARENT_OF_CONCEPT_TYPE: ConceptType = ConceptType::Entity;
 
 /// Declaration of `Hierarchical` parent→child relationships for one [`derive`](fn@derive)
@@ -167,10 +165,10 @@ impl<'a> ParentOf<'a> {
     ///   scoped directory (below); any other declared type keeps its legacy
     ///   key.
     /// * An undeclared end that is a scoped directory, the parent of a
-    ///   scoped path below it (`src` over `src/main.rs`, review M3), is that
+    ///   scoped path below it (`src` over `src/main.rs`), is that
     ///   directory's scoped Resource.
     /// * Any other undeclared end is inferred
-    ///   ([`crate::graph::resource::infer_identity`], review M1): an existing
+    ///   ([`crate::graph::resource::infer_identity`]): an existing
     ///   scoped path, else an existing non-Resource concept under the legacy
     ///   key, refused as ambiguous when both exist; with neither, a new
     ///   scoped path only if it reads as a path, else new legacy text.
@@ -220,8 +218,8 @@ impl<'a> ParentOf<'a> {
 
     /// Whether `content` is the parent, in one of this call's pairs, of a
     /// scoped path directly or deeply below it (`src` over `src/main.rs`):
-    /// then it names that repository's directory, not a shared Entity
-    /// (review M3). Trailing separators are folded, so `src/` and `src` are
+    /// then it names that repository's directory, not a shared Entity.
+    /// Trailing separators are folded, so `src/` and `src` are
     /// one directory.
     fn is_scoped_dir(
         &self,
@@ -312,14 +310,13 @@ pub struct DeriveOutcome {
     /// merged against via a decaying `Semantic` edge. Kept separate from
     /// [`Self::matched`] because a merge does NOT re-upsert the target nor add
     /// a `Derives` edge to it — `matched` must retain its "re-derived /
-    /// Derives-reinforced" meaning for sync `derive` consumers (PHASE-7 T7.2
-    /// remediation, MINOR-3).
+    /// Derives-reinforced" meaning for sync `derive` consumers.
     pub semantic_merged: Vec<NodeId>,
     /// Number of duplicate natural-key writes in this call that bumped an
     /// existing edge (`Derives` / `CoOccurrence` / `Hierarchical`).
     pub reinforced: usize,
     /// Concepts this call **persisted with a vector** — *applied ≠ embedded* as
-    /// a first-class fact (J3-R3-1). Counts entries of [`Self::created`] whose
+    /// a first-class fact. Counts entries of [`Self::created`] whose
     /// row carries an embedding; sync (canonical) `derive` never embeds, so it
     /// is always `0` here and only [`crate::graph::hybrid::derive`] can raise
     /// it. `matched` entries are pre-existing rows and are not re-counted.
@@ -380,7 +377,7 @@ impl MergeGuarded {
 /// * `interaction` must name an existing `Interaction` node — otherwise
 ///   `NotFound`.
 /// * `concepts` are deduplicated by content (first occurrence wins), then each
-///   is canonicalized (T2.2): an unmatched key creates a concept (with an
+///   is canonicalized: an unmatched key creates a concept (with an
 ///   automatic `Derives` edge from `interaction`); a matched key reuses the
 ///   existing node (re-upserted so the mutation batch stays well-ordered).
 /// * Every concept in the call is guaranteed a `Derives` edge from
@@ -393,8 +390,8 @@ impl MergeGuarded {
 ///
 /// Returns the [`DeriveOutcome`] (created / matched / reinforced counts). All
 /// mutations flow through `Graph`'s write APIs into its ordered log; [`derive`](fn@derive)
-/// is synchronous and pure of I/O (the daemon notify hook is T4.x's, see module
-/// docs).
+/// is synchronous and pure of I/O, and does not notify the daemon (see the
+/// module docs).
 pub fn derive(
     graph: &mut Graph,
     interaction: NodeId,
@@ -415,7 +412,7 @@ pub fn derive(
 }
 
 /// [`derive`](fn@derive) with citations (#36 PR 4) and contradictions
-/// (#19(b)), as accepted by [`crate::graph::cite::validate`]. With none it
+/// (#19(b)), as accepted by [`crate::graph::cite::validate_scoped`]. With none it
 /// is exactly `derive`.
 ///
 /// Inside the one transaction: the pinned references are re-resolved
@@ -490,14 +487,14 @@ pub(crate) fn derive_cited(
 /// [`derive`](fn@derive)'s read-only pre-pass, on its own so a caller can run
 /// it **before** deciding to write.
 ///
-/// That caller is J3's asynchronous ack path
+/// That caller is the asynchronous ack path
 /// ([`crate::Memory::derive_async_as`]): the errors below are the ones an agent
 /// can fix, and they must still surface at call time rather than on a receipt.
 /// Extracted rather than reimplemented — a second copy of these checks would be
 /// a second set of rules, and the whole point of validate-then-mutate is that
 /// there is one.
 ///
-/// Read-only: [`canonicalize`] writes nothing, so a failure here leaves the
+/// Read-only: [`canonicalize`](crate::graph::canonical::canonicalize) writes nothing, so a failure here leaves the
 /// graph exactly as it was.
 pub fn validate(
     graph: &Graph,
@@ -507,14 +504,14 @@ pub fn validate(
     crate::graph::resource::require_repo_scope(parent_of.repo_scope())?;
     // Pre-pass (read-only): hoist every fallible input check here so the write
     // loop below cannot fail mid-call — derive is validate-then-mutate, never
-    // partially applied (muse-spark M4). canonicalize is read-only, so nothing
+    // partially applied. canonicalize is read-only, so nothing
     // is written by this pass. Raw-reflexive AND resolved-reflexive parent_of
     // pairs (both ends canonicalize to the same key -> same node) are rejected
     // before any concept or edge exists.
-    // GRAPH-8: content that canonicalizes to an empty key (empty, whitespace-
+    // Content that canonicalizes to an empty key (empty, whitespace-
     // only, or stopword-only input) would collapse onto one key-"" concept with
     // a frozen arbitrary type — rejected up front, before any write.
-    // T1 part 2 #2: Observations never match a canonical key (the step-5
+    // Observations never match a canonical key (the step-5
     // matcher filters them out), so re-deriving an Observation whose canonical
     // key ALREADY exists as an Observation would create a brand-new node on
     // every reference — splitting one concept in two with nothing logged. That
@@ -528,7 +525,7 @@ pub fn validate(
         reject_empty_key(content, &key)?;
         reject_repeated_observation(content, concept_type, &key, graph)?;
     }
-    // T1 part 2 #3 — a child may have at most ONE Hierarchical parent: the
+    // A child may have at most ONE Hierarchical parent: the
     // hierarchy is a tree (see `reject_second_hierarchical_parent`;
     // `scripts/cloudops/_lambo.py::check_single_source` used to guard this
     // client-side — the engine now owns it). Checked here, up front, across
@@ -550,7 +547,13 @@ pub fn validate(
         reject_empty_key(parent, &parent_key)?;
         reject_empty_key(child, &child_key)?;
         if parent_key == child_key {
-            return Err(LamboError::Store(StoreError::Invariant(format!(
+            // An input refusal (#294): a fact about this pair against this
+            // graph. Spellings that collide on any graph ("user schema",
+            // "schema user") are refused at the ack already; a synonym
+            // declared since the ack can make two ends collide only at apply,
+            // and a replay then settles the write `failed` rather than
+            // stopping.
+            return Err(LamboError::Store(StoreError::input_refusal(format!(
                 "derive: parent_of pair ({parent}, {child}) resolves to the same canonical \
                  key ({parent_key:?}) — a Hierarchical self-loop is a cycle (spec §5.7)"
             ))));
@@ -599,7 +602,7 @@ fn derive_after_validation(
     // the Derives edge (via insert_concept's structural edge; see module docs).
     let mut seen_contents: HashSet<&str> = HashSet::with_capacity(concepts.len());
     let mut call_nodes: Vec<NodeId> = Vec::with_capacity(concepts.len());
-    // C4: the concepts THIS call wrote, by canonical key — see
+    // The concepts THIS call wrote, by canonical key — see
     // `resolve_concept`'s Unmatched arm for why step 6 needs it.
     let mut call_by_key: HashMap<String, NodeId> = HashMap::with_capacity(concepts.len());
     for &(content, concept_type) in concepts {
@@ -633,10 +636,10 @@ fn derive_after_validation(
     // Step 5 — pairwise CoOccurrence among the call's concepts (created +
     // matched, deduped), in call order, capped at max_cooccurrence_per_derive
     // edges per call. Direction: earlier-in-call -> later-in-call (CoOccurrence
-    // is symmetric; this convention keeps writes deterministic). Policy note
-    // (muse-spark S4): the cap biases connectivity toward early concepts in a
-    // large call (first 10 pairs = pairs among roughly the first 5 concepts of
-    // 8) — spec-§7-allowed, flag for P5 if recall balancing ever cares.
+    // is symmetric; this convention keeps writes deterministic). Policy note:
+    // the cap biases connectivity toward early concepts in a large call (first
+    // 10 pairs = pairs among roughly the first 5 concepts of 8) —
+    // spec-§7-allowed, worth revisiting if recall balancing ever cares.
     let mut written = 0usize;
     'pairs: for i in 0..call_nodes.len() {
         for j in (i + 1)..call_nodes.len() {
@@ -677,7 +680,7 @@ fn derive_after_validation(
     let mut seen_pairs: HashSet<(NodeId, NodeId)> = HashSet::with_capacity(parent_of.pairs.len());
     for &(parent, child) in parent_of.pairs {
         // Defense-in-depth: both reflexive checks were hoisted to the pre-pass
-        // (validate-then-mutate, muse-spark M4) and are unreachable here — kept
+        // (validate-then-mutate) and are unreachable here — kept
         // so a future edit cannot silently reintroduce a reflexive write.
         if parent == child {
             return Err(LamboError::Store(StoreError::Invariant(format!(
@@ -714,7 +717,7 @@ fn derive_after_validation(
             child_key,
         )?;
         if parent_node == child_node {
-            return Err(LamboError::Store(StoreError::Invariant(format!(
+            return Err(LamboError::Store(StoreError::input_refusal(format!(
                 "derive: parent_of pair ({parent}, {child}) resolves to the same concept \
                  {parent_node} — a Hierarchical self-loop is a cycle (spec §5.7)"
             ))));
@@ -779,16 +782,16 @@ fn resolve_concept(
 ) -> Result<NodeId, LamboError> {
     match crate::graph::resource::canonicalize_keyed(content, graph, scoped_key)? {
         CanonicalizeResult::Unmatched { key } => {
-            // C4: `canonicalize` never matches an `Observation` (GRAPH-1 —
-            // agent-declared content must not attach to a *demoted*
-            // context-overflow record). That rule is about Observations the
-            // graph already held; it was never meant to hide one this same
-            // derive just declared. Without this lookup, a call carrying
-            // `concepts: [(X, Observation)]` and `parent_of: [(doc, X)]`
-            // creates X twice — once as the declared Observation, once as a
-            // bare `Entity` — splitting X's supporting interactions in two.
-            // Scoped to this call's own writes, so a pre-existing demoted
-            // Observation is still never matched and GRAPH-1 stands.
+            // `canonicalize` never matches an `Observation` (agent-declared
+            // content must not attach to a *demoted* context-overflow record).
+            // That rule is about Observations the graph already held; it was
+            // never meant to hide one this same derive just declared. Without
+            // this lookup, a call carrying `concepts: [(X, Observation)]` and
+            // `parent_of: [(doc, X)]` creates X twice — once as the declared
+            // Observation, once as a bare `Entity` — splitting X's supporting
+            // interactions in two. Scoped to this call's own writes, so a
+            // pre-existing demoted Observation is still never matched and that
+            // rule stands.
             if let Some(&node) = call_by_key.get(&key)
                 && written_this_call.contains(&node)
             {
@@ -863,8 +866,8 @@ fn resolve_concept(
 /// CoOccurrence is symmetric (module doc), so a pair may already exist in
 /// either direction: a swapped-order re-derive (`derive([x,y])` then
 /// `derive([y,x])`) must reinforce the existing edge, not create a reverse
-/// duplicate (adve-review GRAPH-5 — which would violate the T2.3 exit criterion
-/// and double-count the pair in P4's density dimension). Fresh edges keep the
+/// duplicate (which would violate derive's exit criterion and double-count the
+/// pair in the density dimension). Fresh edges keep the
 /// deterministic earlier-in-call -> later-in-call direction; when only the
 /// reverse edge exists, its direction is adopted so the natural-key dedup
 /// reinforces instead of inserting a second edge.
@@ -878,7 +881,7 @@ fn pair_direction(graph: &Graph, a: NodeId, b: NodeId) -> (NodeId, NodeId) {
     }
 }
 
-/// GRAPH-8 guard: reject content whose canonical key is empty — empty,
+/// Empty-key guard: reject content whose canonical key is empty — empty,
 /// whitespace-only, or stopword-only input would all collapse onto one key-""
 /// concept with a frozen arbitrary type. Typed `Invariant` error, raised at the
 /// entry point before anything is written.
@@ -893,7 +896,7 @@ fn reject_empty_key(content: &str, key: &str) -> Result<(), LamboError> {
     Ok(())
 }
 
-/// T1 part 2 #2 — refuse re-deriving an Observation whose canonical key already
+/// Refuse re-deriving an Observation whose canonical key already
 /// exists as an Observation in the graph.
 ///
 /// Observations are deliberately excluded from the step-5 matcher
@@ -905,7 +908,7 @@ fn reject_empty_key(content: &str, key: &str) -> Result<(), LamboError> {
 /// this refuses only the identity-losing re-reference, up front, before any
 /// write (validate-then-mutate).
 ///
-/// Two limits are deliberate anti-false-refusal choices (T1b-R1-1), not gaps:
+/// Two limits are deliberate anti-false-refusal choices, not gaps:
 /// (a) a **first** Observation derive is unguarded — the guard only stops
 /// duplicate-Observation escalation, so a caller who declares a fresh
 /// identifier as Observation once still gets that node; (b) Observation-over-
@@ -914,10 +917,14 @@ fn reject_empty_key(content: &str, key: &str) -> Result<(), LamboError> {
 /// existing concept", not a second identity record). Only a second same-key
 /// **Observation** is refused here.
 ///
-/// (T1b-R1-2) `demote` is NOT subject to this refusal: demote may still produce
+/// `demote` is NOT subject to this refusal: demote may still produce
 /// a same-key Observation (per-sentence overflow records can repeat a key), so
 /// duplicate-key Observations remain legal at the store/model level — this
 /// guard is derive-only (caller-declared identity).
+///
+/// The refusal is an [input refusal](StoreError::is_input_refusal) (#294):
+/// two derives of one Observation can both pass the ack, so the second is
+/// refused only when it applies, and a replay settles it `failed`.
 fn reject_repeated_observation(
     content: &str,
     concept_type: ConceptType,
@@ -931,7 +938,7 @@ fn reject_repeated_observation(
         .concepts()
         .any(|c| c.concept_type == ConceptType::Observation && c.canonical_key == key);
     if exists {
-        return Err(LamboError::Store(StoreError::Invariant(format!(
+        return Err(LamboError::Store(StoreError::input_refusal(format!(
             "derive: content {content:?} is declared as an Observation, but an Observation with \
              the same canonical key ({key:?}) already exists. Observation opts out of identity \
              (never matched), so re-deriving it would silently split one concept in two. Refusing; \
@@ -941,7 +948,7 @@ fn reject_repeated_observation(
     Ok(())
 }
 
-/// T1 part 2 #3 — a concept may have at most ONE Hierarchical parent, checked
+/// A concept may have at most ONE Hierarchical parent, checked
 /// at the derive `parent_of` boundary (validate-then-mutate: nothing written).
 ///
 /// The hierarchy is a tree: `parent_of` names one containing parent per
@@ -953,11 +960,14 @@ fn reject_repeated_observation(
 /// SAME containment (same parent) is fine — it reinforces, it does not add a
 /// second parent.
 ///
-/// Scope is deliberately limited to a second **Hierarchical** parent
-/// (T1b-R1-4): a child that also depends on something through
-/// `Dependency`/`Causal` edges is the designed multi-source case
-/// (`record-action` fans `produces`/`modifies`/`depends_on`). Refusing those
-/// would be wrong, not a gap.
+/// Scope is deliberately limited to a second **Hierarchical** parent: a child
+/// that also depends on something through `Dependency`/`Causal` edges is the
+/// designed multi-source case (`record-action` fans
+/// `produces`/`modifies`/`depends_on`). Refusing those would be wrong, not a
+/// gap.
+///
+/// The refusal is an [input refusal](StoreError::is_input_refusal) (#294),
+/// for the same reason as [`reject_repeated_observation`]'s.
 fn reject_second_hierarchical_parent(
     child: &str,
     child_key: &str,
@@ -966,7 +976,7 @@ fn reject_second_hierarchical_parent(
     pending: &mut HashMap<String, String>,
 ) -> Result<(), LamboError> {
     let second_parent = |prev_key: &str| {
-        LamboError::Store(StoreError::Invariant(format!(
+        LamboError::Store(StoreError::input_refusal(format!(
             "derive: child {child:?} already has Hierarchical parent '{prev_key}'; declaring \
              parent '{parent_key}' would give it a second Hierarchical parent. A concept has at \
              most one Hierarchical parent: the hierarchy is a tree. Keep the existing parent \
@@ -1195,9 +1205,9 @@ mod tests {
             iid,
             &agent(),
             &[
-                // Single-letter labels, but not stopwords — GRAPH-8 rejects
-                // content that canonicalizes to an empty key ("a"/"an" are
-                // stopwords).
+                // Single-letter labels, but not stopwords — the empty-key guard
+                // rejects content that canonicalizes to an empty key ("a"/"an"
+                // are stopwords).
                 ("x", ConceptType::Entity),
                 ("y", ConceptType::Entity),
                 ("z", ConceptType::Entity),
@@ -1270,7 +1280,7 @@ mod tests {
         g.assert_invariants().unwrap();
     }
 
-    /// C4, `MatchStrategy::Canonical` twin of hybrid's
+    /// `MatchStrategy::Canonical` twin of hybrid's
     /// `parent_of_child_resolves_to_a_concept_declared_in_the_same_call`.
     ///
     /// The split is not strategy-specific: `canonicalize` is shared, so both
@@ -1331,7 +1341,7 @@ mod tests {
 
     #[test]
     fn derive_second_hierarchy_parent_is_refused() {
-        // T1 part 2 #3 — the hierarchy is a tree: a second Hierarchical
+        // The hierarchy is a tree: a second Hierarchical
         // parent is refused (before #36 it also silently removed the child
         // from every parent's exclusive blast radius). It was guarded
         // client-side by `scripts/cloudops/_lambo.py::check_single_source`;
@@ -1369,6 +1379,11 @@ mod tests {
             msg.contains("second Hierarchical parent"),
             "refusal must say the child would get a second parent: {msg}"
         );
+        // #294: an input refusal, which a replay settles `failed`.
+        assert!(
+            matches!(&err, LamboError::Store(e) if e.is_input_refusal()),
+            "{err:?}"
+        );
 
         // The child still has exactly ONE Hierarchical parent: nothing was
         // written.
@@ -1401,6 +1416,10 @@ mod tests {
         assert!(
             err2.to_string().contains("second Hierarchical parent"),
             "in-batch second parent must refuse: {err2}"
+        );
+        assert!(
+            matches!(&err2, LamboError::Store(e) if e.is_input_refusal()),
+            "{err2:?}"
         );
         g.assert_invariants().unwrap();
     }
@@ -1472,7 +1491,7 @@ mod tests {
 
     #[test]
     fn reject_second_hierarchical_parent_same_parent_reinforces() {
-        // T1b-R1-7 — pin the cross-call SAME-parent reinforce branch of
+        // Pin the cross-call SAME-parent reinforce branch of
         // `reject_second_hierarchical_parent` in isolation. A child whose
         // existing Hierarchical parent IS the one being re-declared must
         // return Ok (reinforce), not refuse — this is what lets re-deriving an
@@ -1629,7 +1648,7 @@ mod tests {
 
     #[test]
     fn derive_key_collision_on_preexisting_concept_does_not_self_reinforce() {
-        // F1 regression: two distinct contents in ONE call that canonicalize
+        // Regression: two distinct contents in ONE call that canonicalize
         // to the same PRE-EXISTING concept ("user schema" and "schema user"
         // both canonicalize to "schema user") must both resolve to that node,
         // but only the first may write. The second must not re-enter the write
@@ -1691,12 +1710,13 @@ mod tests {
 
     #[test]
     fn derive_parent_of_colliding_pairs_write_one_hierarchical_edge() {
-        // F2 regression: two parent_of pairs whose ends canonicalize to the
+        // Regression: two parent_of pairs whose ends canonicalize to the
         // SAME resolved node pair ("user schema" and "schema user" both
         // resolve to the pre-existing concept, child "api layer" is shared)
         // must write exactly ONE Hierarchical edge — the second pair must not
         // reinforce the fresh edge (0.5 -> 1.5) — and the shared parent must
-        // not be double-written (the F1 guard covers parent_of resolution too).
+        // not be double-written (the within-call guard covers parent_of
+        // resolution too).
         let (mut g, i1) = graph_with_interaction(1, 0);
         let i2 = interaction(2, Some(i1), 5);
         let i2id = i2.id;
@@ -1759,13 +1779,13 @@ mod tests {
 
     #[test]
     fn derive_repeated_observation_refuses_identity_split() {
-        // T1 part 2 #2 — Observations never match a canonical key (the step-5
+        // Observations never match a canonical key (the step-5
         // matcher filters them out), so re-deriving the same Observation
         // content used to create a brand-new node every time: silent identity
         // loss. The FIRST derive stays legitimate (a fresh context-overflow
         // record, what demote writes), but a re-derive whose canonical key
         // already exists as an Observation must REFUSE, before any write.
-        // Two anti-false-refusal limits hold (T1b-R1-1): a first Observation
+        // Two anti-false-refusal limits hold: a first Observation
         // derive is unguarded, and an Observation-over-non-Observation (e.g.
         // over an Entity) is permitted — asserted below.
         let (mut g, iid) = graph_with_interaction(1, 0);
@@ -1799,6 +1819,11 @@ mod tests {
             err.to_string().contains("opts out of identity"),
             "refusal must explain the Observation identity opt-out: {err}"
         );
+        // #294: an input refusal, which a replay settles `failed`.
+        assert!(
+            matches!(&err, LamboError::Store(e) if e.is_input_refusal()),
+            "{err:?}"
+        );
 
         // The graph still holds exactly ONE Observation — no silent split.
         let obs_count = g
@@ -1818,7 +1843,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(entity.created.len(), 1, "Entity derive unaffected");
-        // (T1b-R1-1) A FRESH Observation whose key matches an existing
+        // A FRESH Observation whose key matches an existing
         // non-Observation (the Entity above, canonical key "schema user") still
         // derives Ok BY DESIGN: it is "a note about an existing concept", not a
         // second identity record. Only a second same-key Observation is refused
@@ -1845,7 +1870,7 @@ mod tests {
 
     #[test]
     fn derive_after_demote_creates_new_concept_not_observation_match() {
-        // GRAPH-1 regression: demote creates an Observation keyed "schema user";
+        // Regression: demote creates an Observation keyed "schema user";
         // a later derive of an Entity with that key must create a NEW concept
         // (Unmatched) — Observations skip the step-5 matcher per spec §7 and
         // must never capture agent-declared content.
@@ -1884,7 +1909,7 @@ mod tests {
 
     #[test]
     fn derive_with_duplicate_observation_keys_is_deterministic() {
-        // GRAPH-1: duplicate Observation keys are legal (partial-UNIQUE errata);
+        // Duplicate Observation keys are legal (partial-UNIQUE errata);
         // the matcher must skip ALL of them deterministically — the outcome
         // must never depend on HashMap iteration order.
         for _ in 0..5 {
@@ -1910,7 +1935,7 @@ mod tests {
 
     #[test]
     fn demote_may_duplicate_observation_key_but_derive_still_refuses() {
-        // T1b-R1-2 — reconcile the demote/derive asymmetry at the seam. The
+        // Reconcile the demote/derive asymmetry at the seam. The
         // store/model permits duplicate-key Observations (partial-UNIQUE
         // errata), and `demote` creates per-sentence overflow records that can
         // repeat a key — so a demote producing the SAME Observation key as one
@@ -1957,9 +1982,9 @@ mod tests {
 
     #[test]
     fn derive_swapped_order_reinforces_single_cooccurrence_edge() {
-        // GRAPH-5 regression: derive([x,y]) then derive([y,x]) must reinforce
+        // Regression: derive([x,y]) then derive([y,x]) must reinforce
         // the existing CoOccurrence edge (one 1.5-weight edge), not create a
-        // reverse duplicate (T2.3 exit criterion; P4 density double-count).
+        // reverse duplicate (derive's exit criterion; density double-count).
         let (mut g, iid) = graph_with_interaction(1, 0);
         let first = derive(
             &mut g,
@@ -1999,7 +2024,7 @@ mod tests {
 
     #[test]
     fn derive_rejects_empty_and_stopword_only_content() {
-        // GRAPH-8: empty/whitespace-only/stopword-only content would collapse
+        // Empty/whitespace-only/stopword-only content would collapse
         // onto one key-"" concept — rejected at the entry point, before any
         // write.
         let (mut g, iid) = graph_with_interaction(1, 0);

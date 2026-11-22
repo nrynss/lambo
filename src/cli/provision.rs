@@ -11,7 +11,7 @@
 //! DSN is never a CLI flag; it comes from env / config as today. The Cockroach
 //! arm **hands the resolved DSN to the script** rather than letting it inherit
 //! whatever `LAMBO_COCKROACH_DSN` happens to be in the environment: before
-//! E2E-1/E2E-F2, `store.dsn` was not passed to `scripts/provision.sh` and not
+//! this, `store.dsn` was not passed to `scripts/provision.sh` and not
 //! consulted by it, so `lambo provision` could report success against a cluster
 //! the config never named. `StoreConfig::overlay_env` refuses when the two
 //! disagree; this makes the file's value the one that reaches the script when
@@ -34,12 +34,12 @@ use crate::store::{GraphStore, StoreKind};
 /// other kinds provision through the store that was already constructed from
 /// the same value.
 ///
-/// After the schema, every durable kind re-keys concepts whose key the
-/// pre-#148 rule wrote (identifier tokens stemmed); see
-/// [`crate::store::rekey`]. Refused while a session is held; a rerun is a
-/// no-op. Once a re-key has finished with no collision the store records it
-/// and later runs skip the scan (#171); `force_rekey` (`--rekey`) runs it
-/// anyway.
+/// After the schema, every durable kind re-keys concepts whose key an older
+/// rule wrote (identifier tokens stemmed before #148, empty stems kept before
+/// #301); see [`crate::store::rekey`]. Refused while a session is held; a
+/// rerun is a no-op. Once a re-key has finished with no collision and no row
+/// kept from an empty key, the store records it and later runs skip the scan
+/// (#171); `force_rekey` (`--rekey`) runs it anyway.
 pub async fn run(
     store: Box<dyn GraphStore>,
     kind: StoreKind,
@@ -117,11 +117,11 @@ async fn provision_schema(
 /// The script's DSN line is `DSN="${LAMBO_COCKROACH_DSN:-}"`. Inheriting the
 /// ambient value is how `lambo provision` came to report success against a
 /// production cluster while the operator's `lambo.toml` named a local
-/// container (E2E-1). Setting it here makes the resolved config the authority.
+/// container. Setting it here makes the resolved config the authority.
 /// When the config carries no DSN the variable is left alone, so the
 /// pre-existing "secret lives only in the environment" path still works.
 ///
-/// Pushing it is only half the pipe (B-E2E-R2-1). The script also sources
+/// Pushing it is only half the pipe. The script also sources
 /// `.env` from the repo root, and a sourced assignment overwrites what was
 /// inherited, so on an `.env`-bearing machine the pushed value used to be
 /// discarded one door down from here. The script now captures the inherited
@@ -208,7 +208,7 @@ mod tests {
     }
 }
 
-/// B2: the Postgres arm of `run` calls `init_schema` and must not run
+/// The Postgres arm of `run` calls `init_schema` and must not run
 /// `scripts/provision.sh`. A dummy store is enough; no live adapter.
 #[cfg(test)]
 mod postgres_arm_tests {
@@ -322,7 +322,7 @@ mod marker_tests {
     use super::*;
     use std::fs;
 
-    /// E2E-1 / E2E-F2: the resolved `store.dsn` reaches the script, so the
+    /// The resolved `store.dsn` reaches the script, so the
     /// config file names the cluster the DDL lands on. Reverting the `cmd.env`
     /// line makes this fail: the child would inherit whatever
     /// `LAMBO_COCKROACH_DSN` the shell (or `.env`) happened to carry.
@@ -357,7 +357,7 @@ mod marker_tests {
         );
     }
 
-    /// B-E2E-R2-1: the **receiving** end of the pipe the test above pins the
+    /// The **receiving** end of the pipe the test above pins the
     /// sending end of.
     ///
     /// `cockroach_provision_hands_the_resolved_dsn_to_the_script` asserts on
@@ -365,7 +365,7 @@ mod marker_tests {
     /// the value. `scripts/provision.sh` sourced `.env` *after* inheriting the
     /// environment and *before* reading `LAMBO_COCKROACH_DSN`, and a sourced
     /// assignment overwrites what was inherited: on a machine whose `.env`
-    /// carries a production DSN that re-opened E2E-1 one door down from where
+    /// carries a production DSN that re-opened that bug one door down from where
     /// the config layer closed it. A pin on one end of a pipe is not a pin on
     /// the pipe, so this one runs the real script with a decoy `.env` beside
     /// it and a stub `docker` first on PATH, and reads the DSN out of the
@@ -448,7 +448,7 @@ mod marker_tests {
             fs::read_to_string(&log).unwrap_or_default()
         };
 
-        // 1. A pushed DSN outranks the dotfile. This is the E2E-1 shape: the
+        // 1. A pushed DSN outranks the dotfile. This is the original bug's shape: the
         //    config named a container, `.env` names production.
         let dialled = dial(Some(PUSHED), "pushed.log");
         assert!(

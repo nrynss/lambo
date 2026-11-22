@@ -1,19 +1,19 @@
-//! GC — spec §9, periodic only (T4.5; canonization's food).
+//! GC — spec §9, periodic only (canonization's food).
 //!
 //! Runs every `gc_interval` mutations, or once `gc_max_interval` has elapsed
 //! since the last sweep and at least `gc_idle_floor` mutations happened since
-//! (issue #29; [`sweep_due`] is that rule, the caller — T4.6's loop — applies
-//! it; this module decides *what*). [`run`] is a pure, fixture-testable
+//! (issue #29; [`sweep_due`] is that rule, the caller — the daemon loop —
+//! applies it; this module decides *what*). [`run`] is a pure, fixture-testable
 //! function over `&mut Graph`: it performs the seven spec steps and returns a
-//! [`GcOutcome`] the owner records for T5.4 (cache epoch) and T6.4 (canonical
-//! budget).
+//! [`GcOutcome`] the owner records for the cache epoch and the canonical
+//! demotion sweep (canonical budget).
 //!
 //! ## Spec → code mapping
 //!
 //! 1. **Edge cleanup** — every **decaying** edge (spec §5 table:
 //!    `CoOccurrence`, `Semantic` — [`EdgeType::decays`]) with
 //!    `weight < min_edge_weight` whose last reinforcement is older than
-//!    `gc_edge_ttl` is removed (ALGO-9). The TTL anchor is `last_reinforced`
+//!    `gc_edge_ttl` is removed. The TTL anchor is `last_reinforced`
 //!    (the edge's last activity; a never-reinforced edge is dead from its
 //!    write). Structural types are exempt: their weight is a property of the
 //!    kind, not a decayed signal, and §5.7 depends on them surviving.
@@ -21,7 +21,7 @@
 //!    `Contradicts` edge not counting) and sub-threshold concepts are
 //!    collected, **excluding** Venerable, Canonical, and root-goal concepts,
 //!    and concepts that contradict a Venerable or Canonical one (below). The cut takes the **session's**
-//!    [`ScoringWeights`] (ALGO-4 — GC must not rank eviction with weights
+//!    [`ScoringWeights`] (GC must not rank eviction with weights
 //!    nothing else uses), scores each concept over the live dimensions plus
 //!    its own frequency term
 //!    ([`crate::daemon::score::score_live_plus_frequency`], issue #29 — an
@@ -31,7 +31,7 @@
 //!    on the ratio, and max-normalization would clear it for an ordinary
 //!    once-derived concept whenever the session maximum is 1 or 2. The
 //!    comparison is against a per-type bar
-//!    scaled by [`crate::types::ConceptType::eviction_resistance`] (ALGO-11).
+//!    scaled by [`crate::types::ConceptType::eviction_resistance`].
 //!    See [`MIN_CONCEPT_SCORE`] for the calibration and its evidence.
 //!
 //!    Four protections (issue #29) keep the score cut from deleting reasoning
@@ -63,9 +63,9 @@
 //!      left. Candidates past the cap are listed in [`GcOutcome::deferred`]
 //!      (counted in [`GcOutcome::collections_deferred`]) and re-evaluated on
 //!      the next sweep.
-//! 3. **Disconnected-component cleanup** — a cycle-safe BFS (visited set, per
-//!    the G6 binding note — never assume Hierarchical acyclicity) from the
-//!    temporal chain over the undirected graph, crossing every edge but
+//! 3. **Disconnected-component cleanup** — a cycle-safe BFS (visited set:
+//!    never assume Hierarchical acyclicity) from the temporal chain over the
+//!    undirected graph, crossing every edge but
 //!    `Contradicts`; every concept not reached is collected. Protected
 //!    classes are exempt ("protected classes survive" contract);
 //!    interactions are append-only and never collected. Measured
@@ -91,8 +91,8 @@
 //!    two concepts that only contradict each other keep neither alive. The
 //!    protection lapses once the contradicted concept is collected or the
 //!    contradiction is outweighed.
-//! 4. **Index maintenance** — the inverted index (T2.6) is owner-side (P3
-//!    contract, `src/graph/mod.rs`), so `run(&mut Graph, …)` cannot reach it.
+//! 4. **Index maintenance** — the inverted index is owner-side (contract in
+//!    `src/graph/mod.rs`), so `run(&mut Graph, …)` cannot reach it.
 //!    [`GcOutcome::concepts_collected`] + [`sync_index`] are the hook: the
 //!    owner MUST call `sync_index(&outcome, &mut index)` after `run` (each
 //!    collected id → `InvertedIndex::remove`). Survivor bumps never change
@@ -101,7 +101,7 @@
 //!    back, which this sweep judged collectable (issue #29) — via
 //!    [`Graph::bump_gc_survived`] (saturating `i32`), which emits `UpsertNode`
 //!    mutations so the durable store mirrors the counter. Stage 1's input —
-//!    the reason GC cannot be cut. **Chunked** (CONC-6/XP-10): one call applies
+//!    the reason GC cannot be cut. **Chunked**: one call applies
 //!    at most [`GC_SURVIVOR_BUMP_CHUNK`] bumps and returns the rest in
 //!    [`GcOutcome::survivors_pending`], which the owner drains with
 //!    [`drain_survivor_bumps`] over later cycles — see that function for why
@@ -110,7 +110,7 @@
 //!    the same ids'.
 //! 6. **Canonical budget** — GC *records* the Canonical count and the
 //!    over-budget flag in [`GcOutcome`]; demotion (lowest-blast-radius, spec
-//!    §10) is T6.4's job — GC never demotes.
+//!    §10) is the canonical demotion sweep's job — GC never demotes.
 //! 7. **MutationEpoch** — bumped by GC's own mutations (edge removals, node
 //!    removals, survivor upserts); `src/graph/graph.rs`'s epoch doc calls this
 //!    "redundant but harmless (any mutation already bumps the epoch)".
@@ -143,9 +143,11 @@ use crate::types::{CanonizationStatus, Concept, ConceptType, EdgeType, NodeId};
 
 /// Below this weight, an edge past its TTL is removed (step 1).
 ///
-/// v0.6.0's value is not in-repo — v0.1 decision. Kept below the structural
-/// write weights (`Derives` 0.9, `Temporal`/`Dependency`/`Causal` 1.0) so
-/// provenance and load-bearing edges survive a default run.
+/// v0.6.0's value is not in-repo — v0.1 decision. Structural edges survive
+/// step 1 by type, not by weight: it examines only the decaying types
+/// (`CoOccurrence`, `Semantic`; see `dead_edge_ids`). `Derives` (0.9) and
+/// `Temporal` (1.0) are written above this bar; `Causal` and `Dependency` are
+/// written exactly on it, by `record_action` and by `depends_on` citations.
 ///
 /// ### The CoOccurrence margin is zero, deliberately (issue #29)
 ///
@@ -165,7 +167,7 @@ pub const MIN_EDGE_WEIGHT: f64 = 0.5;
 /// An edge untouched for this long is "past `gc_edge_ttl`" (step 1).
 pub const GC_EDGE_TTL: ChronoDuration = ChronoDuration::seconds(3600);
 /// Below this daemon composite score, a concept is sub-threshold (step 2).
-/// v0.6.0's value is not in-repo — v0.1 decision, **recalibrated** (ALGO-1).
+/// v0.6.0's value is not in-repo — v0.1 decision, **recalibrated**.
 ///
 /// The threshold is not applied flat: the concept's eviction score is
 /// [`crate::daemon::score::score_over_live_dimensions`] plus the concept's own
@@ -174,7 +176,7 @@ pub const GC_EDGE_TTL: ChronoDuration = ChronoDuration::seconds(3600);
 /// calibrated against, whatever else has been read) and the comparison is against
 /// `MIN_CONCEPT_SCORE / ConceptType::eviction_resistance()` — the spec §5
 /// resistances (Constraint 1.5 … Observation 0.7) scale the bar per type
-/// instead of every type facing the identical cut (ALGO-11); the types
+/// instead of every type facing the identical cut; the types
 /// [`ConceptType::exempt_from_gc_score_cut`] names (Logic, Constraint,
 /// Observation) never reach the bar at all. Dividing the
 /// threshold by the resistance is algebraically the same as multiplying the
@@ -254,12 +256,12 @@ pub const GC_MIN_COLLECT_CAP: usize = 32;
 
 /// Step 5 bumps at most this many survivors per call; the rest come back as
 /// [`GcOutcome::survivors_pending`] for the owner to drain over later cycles
-/// with [`drain_survivor_bumps`] (CONC-6/XP-10).
+/// with [`drain_survivor_bumps`].
 ///
 /// Matches [`crate::config::Config::backend_flush_max_batch`] (500), so one
 /// GC cycle enqueues at most one flush batch of survivor upserts instead of
 /// twenty. An unchunked sweep at the advisory ceiling emitted 10,000
-/// full-`Concept` clones — ~40MB of clone traffic once P7 embeddings land —
+/// full-`Concept` clones — ~40MB of clone traffic once embeddings land —
 /// from inside the write guard, all in one burst.
 pub const GC_SURVIVOR_BUMP_CHUNK: usize = 500;
 
@@ -277,10 +279,10 @@ pub struct GcParams {
     /// concept type by [`crate::types::ConceptType::eviction_resistance`] — see
     /// [`MIN_CONCEPT_SCORE`].
     pub min_concept_score: f64,
-    /// Step 2: the **session's** scoring weights (ALGO-4). GC must rank
+    /// Step 2: the **session's** scoring weights. GC must rank
     /// eviction with the same function recall ranks retrieval with, or a
     /// concept can be evicted for being worthless under weights nothing else
-    /// uses. P8 threads `Config::scoring` here via the daemon.
+    /// uses. The daemon threads `Config::scoring` here.
     pub weights: ScoringWeights,
     /// Advisory capacity ceiling — warn above, never evict.
     pub max_concept_nodes: usize,
@@ -380,7 +382,7 @@ impl GcTrigger {
 /// The sweep trigger (issue #29): is a sweep due, and why?
 ///
 /// `since` is the session mutations since the last sweep — `epoch -
-/// mark.last_gc_epoch`, which excludes GC's own deferred writes (NEW-2). The
+/// mark.last_gc_epoch`, which excludes GC's own deferred writes. The
 /// mutation trigger is unchanged from spec §9 and is not gated by the floor.
 /// The time trigger needs both the elapsed bound and the floor, so an idle
 /// session never sweeps on time alone, and it measures from one stored
@@ -419,7 +421,8 @@ pub fn sweep_due(
     }
 }
 
-/// Everything one GC run did, for the owner (T4.6), T5.4, and T6.4.
+/// Everything one GC run did, for the owner (the daemon loop), the cache
+/// epoch, and the canonical demotion sweep.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct GcOutcome {
     /// Step 1: edge ids removed for being below weight past TTL.
@@ -432,7 +435,7 @@ pub struct GcOutcome {
     pub survivors: Vec<NodeId>,
     /// Step 5: the part of [`survivors`](GcOutcome::survivors) whose
     /// `gc_survived += 1` this run **deferred** — the owner must drain it with
-    /// [`drain_survivor_bumps`] on later cycles (CONC-6/XP-10). Empty when the
+    /// [`drain_survivor_bumps`] on later cycles. Empty when the
     /// survivor set fit in one chunk. In **drain order**
     /// ([`survivor_drain_order`]), not id order.
     pub survivors_pending: Vec<NodeId>,
@@ -442,8 +445,8 @@ pub struct GcOutcome {
     pub deferred: Vec<NodeId>,
     /// Step 6: number of Canonical concepts after cleanup.
     pub canonical_count: usize,
-    /// Step 6: `canonical_count > max_canonical_nodes` — recorded for T6.4's
-    /// demotion sweep; GC never demotes.
+    /// Step 6: `canonical_count > max_canonical_nodes` — recorded for the
+    /// canonical demotion sweep; GC never demotes.
     pub canonical_over_budget: bool,
     /// Step 6: the budget ceiling this run was checked against.
     pub max_canonical_nodes: usize,
@@ -522,12 +525,11 @@ pub fn run(graph: &mut Graph, params: GcParams) -> GcOutcome {
     let mut budget = outcome.collection_cap;
 
     // Step 2 — concept cleanup: orphans + sub-threshold, excluding protected.
-    // Scored against post-step-1 state with the session's own weights (ALGO-4),
-    // each concept's own frequency on top of the live dimensions (issue #29),
-    // GC's time-anchored recency (issue #29), and cut per concept type
-    // (ALGO-11). Logic, Constraint and Observation are exempt from the score cut, not from
-    // the orphan clause, and a Resource with dependents is spared it (issue
-    // #29).
+    // Scored against post-step-1 state with the session's own weights, each
+    // concept's own frequency on top of the live dimensions (issue #29), GC's
+    // time-anchored recency (issue #29), and cut per concept type. Logic,
+    // Constraint and Observation are exempt from the score cut, not from the
+    // orphan clause, and a Resource with dependents is spared it (issue #29).
     let ctx = crate::daemon::score::SessionContext::compute(graph);
     // Issue #29 operator decision: a Resource with dependents is spared the
     // score cut (see `resources_with_dependents`). Computed once, post-step-1.
@@ -638,8 +640,8 @@ pub fn run(graph: &mut Graph, params: GcParams) -> GcOutcome {
     // except the candidates the cap held back (issue #29: this sweep judged
     // them collectable, so it must not credit them with surviving it — Stage 1
     // reads the counter). At most `max_survivor_bumps` land here; the tail is
-    // deferred to later cycles (CONC-6/XP-10 — see `drain_survivor_bumps` for
-    // the convergence argument), in a drain order rotated per sweep so no id
+    // deferred to later cycles (see `drain_survivor_bumps` for the
+    // convergence argument), in a drain order rotated per sweep so no id
     // range is always last (see `survivor_drain_order`).
     let held: HashSet<NodeId> = held_back.iter().copied().collect();
     let mut survivors: Vec<NodeId> = graph
@@ -655,7 +657,8 @@ pub fn run(graph: &mut Graph, params: GcParams) -> GcOutcome {
     outcome.survivors = survivors;
     outcome.deferred = held_back;
 
-    // Step 6 — canonical budget: record only; T6.4 demotes (never here).
+    // Step 6 — canonical budget: record only; the canonical demotion sweep
+    // demotes (never here).
     outcome.canonical_count = graph
         .concepts()
         .filter(|c| c.canonization_status == CanonizationStatus::Canonical)
@@ -664,7 +667,7 @@ pub fn run(graph: &mut Graph, params: GcParams) -> GcOutcome {
     if outcome.canonical_over_budget {
         outcome.warnings.push(format!(
             "canonical concept count {} exceeds max_canonical_nodes {} — \
-             T6.4 demotion sweep must act (GC does not demote)",
+             the canonical demotion sweep must act (GC does not demote)",
             outcome.canonical_count, params.max_canonical_nodes
         ));
     }
@@ -685,8 +688,8 @@ pub fn run(graph: &mut Graph, params: GcParams) -> GcOutcome {
 }
 
 /// Every node reachable from the temporal chain over the undirected graph —
-/// step 3's cycle-safe BFS (visited set, per the G6 binding note: never assume
-/// Hierarchical acyclicity). Only edges that
+/// step 3's cycle-safe BFS (visited set: never assume Hierarchical
+/// acyclicity). Only edges that
 /// [`EdgeType::counts_toward_gc_connectivity`] are crossed, so a
 /// `Contradicts` edge connects nothing (#19(c) owner decision 1C).
 fn reachable_from_temporal_chain(graph: &Graph) -> HashSet<NodeId> {
@@ -733,7 +736,7 @@ fn has_gc_connection(graph: &Graph, node: NodeId) -> bool {
 ///
 /// The edge counts from the date the detector gives it
 /// ([`crate::daemon::contradiction::declared_at`]: its about-time clamped
-/// to its write time, #19(c) review M1), and only once it has been
+/// to its write time, #19(c)), and only once it has been
 /// **written** by the sweep's `now`
 /// ([`crate::daemon::contradiction::written_by`]): a write after the clock
 /// protects nothing yet, even with an earlier `event_time`.
@@ -832,8 +835,8 @@ pub fn survivor_drain_order(survivors: &[NodeId], epoch_before: u64) -> Vec<Node
     order
 }
 
-/// Apply up to `max` deferred survivor bumps, removing them from `pending`
-/// (CONC-6/XP-10). The owner calls this each cycle until `pending` is empty,
+/// Apply up to `max` deferred survivor bumps, removing them from `pending`.
+/// The owner calls this each cycle until `pending` is empty,
 /// and must not start another [`run`] before then.
 ///
 /// ## Why the store still converges exactly
@@ -861,9 +864,9 @@ pub fn drain_survivor_bumps(graph: &mut Graph, pending: &mut Vec<NodeId>, max: u
     graph.bump_gc_survived(&chunk)
 }
 
-/// T2.6 hook — mirror a GC run into the owner's inverted index.
+/// Index hook — mirror a GC run into the owner's inverted index.
 ///
-/// The index is owner-side (P3 contract, `src/graph/mod.rs`), so `run` cannot
+/// The index is owner-side (contract in `src/graph/mod.rs`), so `run` cannot
 /// maintain it directly. The owner MUST call this after `run`: every collected
 /// concept is dropped from the index ([`InvertedIndex::remove`]); survivors'
 /// content never changes, so no re-`add` is required.
@@ -981,7 +984,7 @@ pub fn eviction_recency(c: &Concept, now: DateTime<Utc>, window: ChronoDuration)
 }
 
 /// The step-2 bar for one concept type: [`MIN_CONCEPT_SCORE`] divided by the
-/// spec §5 [`ConceptType::eviction_resistance`] (ALGO-11).
+/// spec §5 [`ConceptType::eviction_resistance`].
 ///
 /// An Entity (1.2) faces a bar a sixth lower than a Resource (1.0). The
 /// exempt types (Logic, Constraint, Observation) never get here; their
@@ -1005,11 +1008,11 @@ fn eviction_threshold(min_concept_score: f64, ty: ConceptType) -> f64 {
 /// ([`crate::daemon::score::score_live_plus_frequency`]), with GC's
 /// time-anchored recency in place of the span-relative one.
 ///
-/// Issue #29 replaced ALGO-1's **session-wide** switch here. That switch moved
-/// every concept from the live-dimension score to the full composite as soon
-/// as *any* concept had an access, which lowers every unread concept's score
-/// (the full composite is `0.8 ×` the live one on the weighted part at
-/// frequency 0, NEW-6). Under a time-anchored recency that was a cliff: on the
+/// Issue #29 replaced the earlier **session-wide** switch here. That switch
+/// moved every concept from the live-dimension score to the full composite as
+/// soon as *any* concept had an access, which lowers every unread concept's
+/// score (the full composite is `0.8 ×` the live one on the weighted part at
+/// frequency 0). Under a time-anchored recency that was a cliff: on the
 /// Metal rig snapshot one access on one Entity took the first sweep from 159
 /// to 412 candidates. Per concept and additive, an access can only raise the
 /// accessed concept's score and never touches anyone else's, and an unread
@@ -1050,11 +1053,11 @@ fn is_protected(c: &Concept, goal_texts: &[String]) -> bool {
 
 /// A root-goal concept is one whose content (or canonical key) is named by the
 /// session's `root_goal`. The fixture carries `root_goal: "launch the
-/// product"` matching concept content; T4.4 additionally marks it Venerable
-/// via `set_root_goal` — this is belt-and-suspenders per spec §9 step 2's
+/// product"` matching concept content; `set_root_goal` additionally marks it
+/// Venerable — this is belt-and-suspenders per spec §9 step 2's
 /// "excluding Venerable/Canonical/root-goal".
 ///
-/// The goal shape is read by [`Graph::root_goal_texts`] (ALGO-6), the one
+/// The goal shape is read by [`Graph::root_goal_texts`], the one
 /// parser GC, drift and `set_root_goal` share — so an **array** goal (spec
 /// §6.1's own example) protects all of its concepts here instead of none.
 fn is_root_goal_concept(c: &Concept, goal_texts: &[String]) -> bool {
@@ -1065,16 +1068,16 @@ fn is_root_goal_concept(c: &Concept, goal_texts: &[String]) -> bool {
 
 /// Edge ids qualifying for step-1 removal, id-ascending and deduplicated.
 ///
-/// **Only decaying edge types** (ALGO-9): the spec §5 table marks `CoOccurrence`
+/// **Only decaying edge types**: the spec §5 table marks `CoOccurrence`
 /// and `Semantic` as decaying and every other type as not, so a weight-and-TTL
 /// cut is only meaningful for those two — a structural edge's weight is a fixed
 /// property of its kind, not a decayed signal, and collecting one on a protected
-/// concept would break §5.7's structural guarantees. The margin today is
-/// **zero**: `record_action` writes `Causal`/`Dependency` at exactly
-/// [`MIN_EDGE_WEIGHT`] and the predicate is a strict `<`, so any weight tweak or
-/// a lower configured `min_edge_weight` would start deleting the demo's
-/// dependency graph out from under it. [`EdgeType::decays`] is the single source
-/// of truth for the table.
+/// concept would break §5.7's structural guarantees. The type filter is what
+/// protects them: their weight margin is **zero**. `record_action` and
+/// `depends_on` citations write `Causal`/`Dependency` at exactly
+/// [`MIN_EDGE_WEIGHT`], so if this cut examined them, a lower write weight or a
+/// higher configured `min_edge_weight` would delete the dependency graph.
+/// [`EdgeType::decays`] is the single source of truth for the table.
 fn dead_edge_ids(graph: &Graph, params: GcParams) -> Vec<NodeId> {
     const DECAYING_TYPES: [EdgeType; 2] = [EdgeType::CoOccurrence, EdgeType::Semantic];
     debug_assert!(

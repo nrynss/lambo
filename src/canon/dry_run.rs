@@ -36,10 +36,11 @@ use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
+use crate::canon::explain::admission_inputs_with;
 use crate::canon::stage3::in_repromotion_cooldown;
 use crate::canon::{
-    admission_inputs, explain_admission, stage2_evidence_passes, Admission, EvalParams, Evaluator,
-    PromotionPolicy,
+    explain_admission, stage2_evidence_passes, Admission, EvalParams, Evaluator, PromotionPolicy,
+    Writers,
 };
 use crate::config::ScoringWeights;
 use crate::daemon::score::rescore;
@@ -95,8 +96,7 @@ pub struct DryRunParams {
     /// The composite score's weights, which order Stage 1's queue and the
     /// Stage 3 window. `lambo.toml` cannot set them, so the CLI always
     /// uses [`crate::Config`]'s defaults, which are what every writer runs;
-    /// a library caller with its own `Config` passes `config.scoring`
-    /// (review L7).
+    /// a library caller with its own `Config` passes `config.scoring`.
     pub weights: ScoringWeights,
 }
 
@@ -303,7 +303,7 @@ pub struct PolicyReport {
     /// How many Canonicals at the stop.
     pub canonical_total: usize,
     /// Every Canonical's id at the stop, ascending: what `--baseline`
-    /// compares (review L2; `canonical` is capped at `top`).
+    /// compares (`canonical` is capped at `top`).
     #[serde(default)]
     pub canonical_ids: Vec<NodeId>,
     /// The run's checks.
@@ -353,7 +353,7 @@ pub struct DryRunReport {
     /// off, so a report of a default run is unchanged.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub supersede: bool,
-    /// Rows dated after the clock (review M1); any fails `clock_after_the_data`.
+    /// Rows dated after the clock; any fails `clock_after_the_data`.
     pub rows_after_clock: RowsAfterClock,
     /// The source, when the CLI read one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -465,10 +465,19 @@ async fn survey(
             .map(|c| (c.id, c.concept_type, c.canonization_status))
             .collect();
         ids.sort_by_key(|(id, ..)| id.0);
+        // #300: one writer timeline for the whole survey, when anything
+        // reads one (Solo's dependents term, supersession's hold probes),
+        // not one per concept.
+        let writers =
+            if params.eval.promotion_policy.scorer().reads_writers() || params.eval.supersede {
+                Writers::of(&g)
+            } else {
+                Writers::unresolved()
+            };
         let inputs: Vec<_> = ids
             .into_iter()
             .filter_map(|(id, t, s)| {
-                admission_inputs(&g, id, &params.eval, now).map(|i| (id, t, s, i))
+                admission_inputs_with(&g, id, &params.eval, now, &writers).map(|i| (id, t, s, i))
             })
             .collect();
         (g.session_id().clone(), inputs)
@@ -897,7 +906,7 @@ impl RowsAfterClock {
     }
 }
 
-/// Review M1: the clock must not be earlier than the newest row. The stores
+/// The clock must not be earlier than the newest row. The stores
 /// age every edge and interaction against the clock, so a row dated after it
 /// is not "young", it is silently left out, and a clock before most of the
 /// data reports a run on a fraction of the session. A failure is an
@@ -948,7 +957,7 @@ pub(crate) fn graph_of(snap: &GraphSnapshot) -> Result<Graph, LamboError> {
     })
 }
 
-/// Keep only the ids in a store or graph error (review L3): an invariant
+/// Keep only the ids in a store or graph error: an invariant
 /// message can quote a canonical key, which is derived from concept text.
 pub fn redact(message: &str) -> String {
     let ids: Vec<&str> = message

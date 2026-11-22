@@ -613,6 +613,25 @@ through the same normalizer. `lambo provision` re-keys stored concepts whose key
 rule wrote (SQLite, Postgres, Cockroach), refusing while a session is held; a rerun is a
 no-op. Concepts that the old rule had already merged stay merged.
 
+**Errata (2026-11-21, issue #301): empty stems are dropped.** The stemmer stems a
+standalone `''s` token to the empty string, and step 2 kept it, so `''s-lease` keyed as
+` leas` (a leading space, and a different concept from `lease`) and the name `''s ''s`
+keyed as a single space and was accepted. An empty stem is now dropped, so a key never
+has a leading, trailing or doubled space, and text whose stems are all empty keys as the
+empty key, which names, `derive` and `record_action` refuse. Only keys containing an
+empty stem change. `lambo provision` re-keys stored concepts whose key held one, except
+a concept whose new key would be empty, which keeps its old key and is reported. A
+stored durable name whose key held one makes its session fail to load; the CHANGELOG
+gives the repair.
+
+**Errata (2026-11-21, issue #302): the stemmer and the order of step 1.** The stemmer is
+Snowball English (Porter2, `rust-stemmers` `Algorithm::English`), not the original
+Porter algorithm. "Porter" in step 2, in the #148 erratum above and in the §6.3 crate
+table means this stemmer, and "Porter only" cut the configurable `snowball` option and
+custom `stem_fn`s, not Porter2. Step 1 lists lowercasing first, but the code splits
+camelCase boundaries on the original case first (lowercasing first would erase them),
+then splits on `-`, `_` and whitespace, lowercases, and strips stopwords.
+
 ---
 
 ## 8. Read Path
@@ -633,6 +652,13 @@ independently.
 Hot-listed nodes within the expanded set are force-included after condition re-validation.
 Output assembled to `max_tokens` using the built-in `ceil(bytes / 3.5)` estimator or a
 caller-supplied `token_fn`.
+
+**Errata (2026-11-21, issue #302): which hot-listed nodes are force-included.** The
+sentence above is inaccurate in two ways. Since #179 an ordinary concept whose only hot
+payload is a contradiction is not force-included; its rank decides whether it is shown.
+And the contradicting concept of a contradicted Canonical or Venerable hit is
+force-included even when it is outside the expanded set (#19(c); `extra` in
+`src/recall/assemble.rs`).
 
 **Recall cache:** simple LRU keyed by `(query_hash, top_k, traversal_depth, mutation_epoch)`.
 The generation-counter validation of v0.6.0 §6.1 is gone with the arena; epoch invalidation

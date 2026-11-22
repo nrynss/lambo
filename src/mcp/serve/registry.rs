@@ -5,7 +5,7 @@
 //!
 //! Every serve runs through a registry. A one-session serve (stdio, or HTTP
 //! with one pinned session and nothing on demand) attaches its session
-//! through the startup election (`roles::resolve_role`, J2's proxy included)
+//! through the startup election (`roles::resolve_role`, the proxy included)
 //! and holds it in a registry of one under [`LeaseLossPolicy::ExitProcess`]:
 //! a lost lease ends the process exactly as it always has. A serve with more
 //! than one pinned session, or any credential that reaches past the pinned
@@ -101,14 +101,18 @@ use crate::types::LamboError;
 /// Multiplied as a `Duration`, not through `as_secs()`, so a sub-second
 /// `ELECTION_RETRY` cannot truncate it to zero and spin the retry loop; the
 /// floor holds whatever `ELECTION_RETRY` becomes (#32 review nit).
-pub(super) const PINNED_RETRY: Duration = {
-    let five = ELECTION_RETRY.saturating_mul(5);
+pub(super) const PINNED_RETRY: Duration = pinned_retry(ELECTION_RETRY);
+
+/// [`PINNED_RETRY`] for an election retry of `election_retry`: five of
+/// them, never under a second.
+const fn pinned_retry(election_retry: Duration) -> Duration {
+    let five = election_retry.saturating_mul(5);
     if five.as_millis() < 1_000 {
         Duration::from_secs(1)
     } else {
         five
     }
-};
+}
 
 /// The `Retry-After` of an on-demand attach refused because `max_attached`
 /// sessions are attached and none of the on-demand ones is idle to evict
@@ -129,7 +133,7 @@ const ATTACH_FOLLOWS: usize = 3;
 /// How the registry answers a session's lost lease (design §4.2, decision 8).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum LeaseLossPolicy {
-    /// One pinned session: the fence ends the process (`wind_down`, JE2E-4),
+    /// One pinned session: the fence ends the process (`wind_down`),
     /// so its client respawns into a proxy to the new holder. Today's
     /// behaviour, unchanged.
     ExitProcess,
@@ -140,7 +144,7 @@ pub(super) enum LeaseLossPolicy {
 }
 
 impl LeaseLossPolicy {
-    /// The one place the policy is derived from configuration (design R4):
+    /// The one place the policy is derived from configuration:
     /// one pinned session and nothing on demand is today's `ExitProcess`;
     /// anything more is `DetachSession`.
     pub(super) fn for_scope(pinned: usize, on_demand: bool) -> Self {
@@ -182,11 +186,11 @@ pub(super) struct OnDemandBounds {
     pub(super) max_attached: usize,
     /// An on-demand session unused this long is detached. At least
     /// [`MIN_IDLE_DETACH`]: [`SessionRegistry::new`] raises a shorter one
-    /// (#32 PR 6 review L5).
+    /// (#32 PR 6).
     pub(super) idle_detach: Duration,
     /// How many credentials reach on-demand sessions
     /// (`authority::on_demand_credentials`): the on-demand places are
-    /// shared among them for eviction (#32 PR 6 review M4,
+    /// shared among them for eviction (#32 PR 6,
     /// `on_demand::place_share`). At least 1.
     pub(super) share_among: usize,
     /// How long an on-demand session must have been idle before an attach
@@ -194,7 +198,7 @@ pub(super) struct OnDemandBounds {
     pub(super) min_idle_to_evict: Duration,
 }
 
-/// The shortest `idle_detach` a registry runs with (#32 PR 6 review L5):
+/// The shortest `idle_detach` a registry runs with (#32 PR 6):
 /// `[serve]` refuses 0, and a library caller's 0 would make the idle
 /// sweeper spin and detach every session the moment its calls end.
 pub(super) const MIN_IDLE_DETACH: Duration = Duration::from_secs(1);
@@ -248,7 +252,7 @@ enum Slot {
         /// had not.
         create: bool,
         /// Whether the attach has passed its existence probe and reserved
-        /// one of the on-demand places (#32 PR 6 review H1). Until then it
+        /// one of the on-demand places (#32 PR 6). Until then it
         /// takes no place under `max_attached` and has evicted nothing.
         placed: bool,
     },
@@ -261,9 +265,9 @@ enum Slot {
     HeldElsewhere {
         retry_at: Instant,
         /// The handle a detach took down, while anything may still hold it
-        /// (#32 review M1). The retry waits for it to go before it attaches
+        /// (#32). The retry waits for it to go before it attaches
         /// again: while it lives it keeps its second-writer registration (a
-        /// fenced close fails, and a failed close keeps it, R2-4) and its
+        /// fenced close fails, and a failed close keeps it) and its
         /// in-RAM graph.
         previous: Option<PreviousHandle>,
         /// Set once a transient attach error in the current streak has been
@@ -273,11 +277,11 @@ enum Slot {
     /// A background attach failed with an error that will not clear on its
     /// own (an erased session, an embedding-contract mismatch, an
     /// unprovisioned store): logged once at ERROR and no longer retried
-    /// (#32 review L1). An erased session gets [`Slot::Erased`] instead
+    /// (#32). An erased session gets [`Slot::Erased`] instead
     /// (#32 PR 7).
     Failed,
     /// Being erased by this process (#32 PR 7, design §6.3): requests get
-    /// 503 with `Retry-After: 1` until the erase ends (#32 PR 7 review L3:
+    /// 503 with `Retry-After: 1` until the erase ends (#32 PR 7:
     /// an erase that does not commit serves the session again, so the
     /// permanent 410 waits for `Erased`), and no attach or retry starts for
     /// it.
@@ -332,8 +336,7 @@ pub(super) enum Lookup {
     /// Erased: an on-demand session found tombstoned (#23), or a session
     /// erased by this process (#32 PR 7). It is never attached or recreated
     /// again. Reached only inside the caller's scope. A session still being
-    /// erased is [`Lookup::Unavailable`] until the erase commits (#32 PR 7
-    /// review L3).
+    /// erased is [`Lookup::Unavailable`] until the erase commits (#32 PR 7).
     Erased,
     /// Not a session this serve hosts, or an on-demand session that does
     /// not exist and that the caller may not create: the uniform 404.
@@ -355,7 +358,7 @@ pub(super) struct SessionAttacher {
     pub(super) ledger: Option<Arc<Ledger>>,
     /// The per-session endpoint's MCP-session cap (`--max-sessions`).
     pub(super) max_sessions: usize,
-    /// Each session's HTTP `Host` check (#32 PR 5 review M1).
+    /// Each session's HTTP `Host` check (#32 PR 5).
     pub(super) host_check: HostCheck,
     /// The agent this process writes as.
     pub(super) agent: String,
@@ -395,7 +398,7 @@ pub(super) struct SessionRegistry {
     attacher: Option<SessionAttacher>,
     slots: parking_lot::Mutex<HashMap<String, Slot>>,
     /// Set when the process shutdown takes the attached set: no attach
-    /// starts after it, and one in flight is abandoned (#32 review L8).
+    /// starts after it, and one in flight is abandoned (#32).
     closing: tokio::sync::watch::Sender<bool>,
     /// One permit per attach that may run at once (`attach_concurrency`,
     /// #32 PR 6; PR 4's attach lock was one). Held across an attach and its
@@ -410,19 +413,19 @@ pub(super) struct SessionRegistry {
     /// hold them: an attach of the same id waits for its handle to go (see
     /// `PreviousHandle`), as a pinned retry does.
     previous: parking_lot::Mutex<HashMap<String, PreviousHandle>>,
-    /// Which credential's request attached each on-demand session (#32 PR 6
-    /// review M4), for the fair share of places. Set when an attach
+    /// Which credential's request attached each on-demand session (#32 PR 6),
+    /// for the fair share of places. Set when an attach
     /// reserves its place, dropped with the slot. Locked after `slots`,
     /// never before.
     owners: parking_lot::Mutex<HashMap<String, String>>,
     /// Negative on-demand attach outcomes, answered without the store for
-    /// a while (#32 PR 6 review M3). Locked after `slots`, never before.
+    /// a while (#32 PR 6). Locked after `slots`, never before.
     negative: parking_lot::Mutex<NegativeCache>,
     /// Opened once the startup sessions are in, so the heartbeat's first
     /// line sees them (the process tasks are spawned before the session
     /// parts, to keep the startup's log order).
     started: tokio::sync::watch::Sender<bool>,
-    /// The process's J6 pre-arm, which each close reads for its second-signal
+    /// The process's early-shutdown pre-arm, which each close reads for its second-signal
     /// escape and each attach's load races.
     early: EarlyShutdown,
     /// The pinned retry loop.
@@ -434,12 +437,12 @@ pub(super) struct SessionRegistry {
     /// shutdown waits for it.
     detaches: parking_lot::Mutex<Vec<tokio::task::JoinHandle<()>>>,
     /// The store every session shares (one `GraphStore`, Level B), from
-    /// construction (#32 PR 7 review L4): the template builder's, else the
+    /// construction (#32 PR 7): the template builder's, else the
     /// one the caller hands a one-session registry. What an erase of a
     /// session that is not attached runs against.
     store: Option<Arc<dyn crate::store::GraphStore>>,
     /// Set by a test to make the next on-demand attach panic right after
-    /// it is admitted (#32 PR 6 Sonnet review L-a).
+    /// it is admitted (#32 PR 6).
     #[cfg(test)]
     panic_after_admit: std::sync::atomic::AtomicBool,
 }
@@ -576,18 +579,18 @@ impl SessionRegistry {
     /// 1. A live session is served at once: its use is stamped, and the
     ///    request's [`Routed::in_flight`] is taken under the slots' lock, so
     ///    neither an eviction nor the idle sweeper can take the session
-    ///    while the request is on its way to it (#32 PR 6 review M1). A
+    ///    while the request is on its way to it (#32 PR 6). A
     ///    request for a session whose attach is in flight waits for that
     ///    attach's outcome (single-flight: N concurrent first requests
     ///    cause one `build_attach`), for at most `ATTACH_WAIT`.
     /// 2. An absent session that is not pinned is answered from the
-    ///    negative cache while it holds a fresh outcome for it (#32 PR 6
-    ///    review M3), and otherwise starts an attach, unless the serve does
-    ///    not attach on demand (the uniform 404), is closing (503), or
+    ///    negative cache while it holds a fresh outcome for it (#32 PR 6),
+    ///    and otherwise starts an attach, unless the serve does not attach on
+    ///    demand (the uniform 404), is closing (503), or
     ///    already has `2 × max_attached` attaches waiting for their probe
-    ///    (503 `Retry-After`, Sonnet review L-b). The
+    ///    (503 `Retry-After`). The
     ///    attach (`attach_on_demand`) probes for the session before it
-    ///    reserves a place or evicts anything (#32 PR 6 review H1); see
+    ///    reserves a place or evicts anything (#32 PR 6); see
     ///    `on_demand` for the order.
     pub(super) async fn get_or_attach(
         self: &Arc<Self>,
@@ -601,8 +604,8 @@ impl SessionRegistry {
             };
             // The sender is the attach's `Flight`, which always sends before
             // it goes, even on a panic; a closed channel is a retry-later,
-            // never a hang, and so is a wait past `ATTACH_WAIT` (#32 PR 6
-            // review M2): the attach goes on without this request.
+            // never a hang, and so is a wait past `ATTACH_WAIT` (#32 PR 6):
+            // the attach goes on without this request.
             let outcome =
                 match tokio::time::timeout(ATTACH_WAIT, done.wait_for(Option::is_some)).await {
                     Ok(Ok(outcome)) => outcome.clone(),
@@ -640,7 +643,7 @@ impl SessionRegistry {
         match slots.get(id) {
             Some(Slot::Live(session)) => {
                 // In flight from here, under the lock an eviction and the
-                // idle sweeper choose under (review M1).
+                // idle sweeper choose under.
                 let in_flight = session.activity.enter();
                 return Route::Answer(Routed {
                     lookup: Lookup::Live(Arc::clone(session)),
@@ -670,7 +673,7 @@ impl SessionRegistry {
                 retry_after: Duration::from_secs(1),
             }));
         }
-        // A negative outcome still fresh (review M3): no store call, no
+        // A negative outcome still fresh: no store call, no
         // permit. An `Absent` one never stops a credential with `create`.
         let cached = self.negative.lock().get(id, requester.create);
         if let Some(negative) = cached {
@@ -680,9 +683,9 @@ impl SessionRegistry {
                 Negative::Failed => Lookup::Failed,
             }));
         }
-        // An attach that has not probed takes no place (review H1), so the
-        // ones waiting for their probe are bounded on their own (Sonnet
-        // review L-b): a flood of distinct ids starts no task past the cap.
+        // An attach that has not probed takes no place, so the
+        // ones waiting for their probe are bounded on their own: a flood of
+        // distinct ids starts no task past the cap.
         let unplaced = slots
             .values()
             .filter(|slot| matches!(slot, Slot::Attaching { placed: false, .. }))
@@ -700,7 +703,7 @@ impl SessionRegistry {
             }));
         }
         // No place is taken and nothing is evicted yet: the attach probes
-        // first (review H1).
+        // first.
         let (tx, done) = tokio::sync::watch::channel(None);
         slots.insert(
             id.to_string(),
@@ -717,7 +720,7 @@ impl SessionRegistry {
             registry.attach_on_demand(flight, credential).await;
         });
         // Tracked before the slots' lock is released, so a shutdown that
-        // takes the set after it also joins this task (review L4).
+        // takes the set after it also joins this task.
         self.track(task);
         drop(slots);
         Route::Wait {
@@ -728,9 +731,8 @@ impl SessionRegistry {
 
     /// An on-demand attach, on its own task so a request that goes away
     /// does not cancel it half way (a lease taken and not admitted), bounded
-    /// by `ATTACH_TIMEOUT` (review M2), and ended through its [`Flight`],
-    /// which answers every request waiting on it even if this panics
-    /// (review L1).
+    /// by `ATTACH_TIMEOUT`, and ended through its [`Flight`], which answers
+    /// every request waiting on it even if this panics.
     async fn attach_on_demand(self: Arc<Self>, flight: Flight, credential: String) {
         let acquiring = std::sync::atomic::AtomicBool::new(false);
         let outcome = match tokio::time::timeout(
@@ -765,7 +767,7 @@ impl SessionRegistry {
     /// raced against the shutdown.
     ///
     /// Nothing is evicted until the probe says the attach will go ahead
-    /// (#32 PR 6 review H1): an erased session, one that does not exist
+    /// (#32 PR 6): an erased session, one that does not exist
     /// and may not be created, and one another live writer holds each end
     /// the attach before a place is reserved.
     async fn attach_outcome(
@@ -887,7 +889,7 @@ impl SessionRegistry {
             }
         }
         // Step 5, `build_attach` through the template, raced against the
-        // shutdown like a pinned retry (#32 review L8).
+        // shutdown like a pinned retry (#32).
         acquiring.store(true, std::sync::atomic::Ordering::SeqCst);
         let attempt = tokio::select! {
             biased;
@@ -900,8 +902,8 @@ impl SessionRegistry {
         };
         match attempt {
             Ok(Acquired::Attached(mem, endpoint)) => {
-                // Only over this flight's own `Attaching` slot (#32 PR 7
-                // review H1): nothing else may have replaced it, but the
+                // Only over this flight's own `Attaching` slot (#32 PR 7):
+                // nothing else may have replaced it, but the
                 // check costs nothing and keeps every background admission
                 // conditional.
                 let Some(session) = self.admit_if(mem, endpoint, |slot| flight.owns(slot)).await
@@ -1062,7 +1064,7 @@ impl SessionRegistry {
 
     /// Spawn a task with `spawn` and keep it for the shutdown to join,
     /// unless the shutdown has begun: then nothing is spawned and `false`
-    /// is returned (#32 PR 7 review L1).
+    /// is returned (#32 PR 7).
     ///
     /// The check, the spawn and the record are under the task list's lock.
     /// The shutdown marks itself closing before it takes that list
@@ -1104,7 +1106,7 @@ impl SessionRegistry {
         self.slots.lock().insert(id.to_string(), slot);
     }
 
-    /// The process's J6 pre-arm, so a test can record shutdown signals on
+    /// The process's early-shutdown pre-arm, so a test can record shutdown signals on
     /// it (`EarlyShutdown::simulate_signal`). Gated like its reader, the
     /// registry tests.
     #[cfg(all(test, unix, feature = "store-memory", feature = "embed-fixture"))]
@@ -1113,7 +1115,7 @@ impl SessionRegistry {
     }
 
     /// Abort every on-demand attach and detach task in flight, which ends
-    /// an attach as a panic in it would (#32 PR 6 review L1). Gated like
+    /// an attach as a panic in it would (#32 PR 6). Gated like
     /// its reader, the registry tests.
     #[cfg(all(test, unix, feature = "store-memory", feature = "embed-fixture"))]
     pub(super) fn abort_tasks(&self) {
@@ -1123,8 +1125,8 @@ impl SessionRegistry {
     }
 
     /// Make the next on-demand attach panic right after its admission, as a
-    /// bug between `admit` and the flight's end would (#32 PR 6 Sonnet
-    /// review L-a). Gated like its reader, the registry tests.
+    /// bug between `admit` and the flight's end would (#32 PR 6). Gated like
+    /// its reader, the registry tests.
     #[cfg(all(test, unix, feature = "store-memory", feature = "embed-fixture"))]
     pub(super) fn panic_after_next_admit(&self) {
         self.panic_after_admit
@@ -1153,10 +1155,10 @@ impl SessionRegistry {
     }
 
     /// [`SessionRegistry::insert_live`] only while `expected` holds for the
-    /// session's slot, checked and filled under one lock (#32 PR 7 review
-    /// H1): a background attach must not overwrite a slot that changed
-    /// while it acquired (an erase that claimed it, say). `false`, with
-    /// nothing changed, when it does not hold.
+    /// session's slot, checked and filled under one lock (#32 PR 7): a
+    /// background attach must not overwrite a slot that changed while it
+    /// acquired (an erase that claimed it, say). `false`, with nothing
+    /// changed, when it does not hold.
     fn insert_live_if(
         self: &Arc<Self>,
         session: Arc<AttachedSession>,
@@ -1182,7 +1184,7 @@ impl SessionRegistry {
     }
 
     /// Take the lease for pinned session `id` through the template builder:
-    /// configuration validation, preflight, the acquire (which arms the J6
+    /// configuration validation, preflight, the acquire (which arms the early-shutdown
     /// pre-arm on the first one), the load raced against it, the contract
     /// check and the background tasks — `build_attach`, unchanged.
     pub(super) async fn acquire(&self, id: &str) -> Result<Acquired, LamboError> {
@@ -1225,7 +1227,7 @@ impl SessionRegistry {
 
     /// [`SessionRegistry::admit`] for a background attach (the pinned retry,
     /// the on-demand attach): the session is held only while `expected`
-    /// still holds for its slot (#32 PR 7 review H1, as the detach's final
+    /// still holds for its slot (#32 PR 7, as the detach's final
     /// write is conditional). Otherwise the session is taken down again,
     /// its lease released, and `None` is returned: whatever changed the
     /// slot (an erase claimed it) owns it now.
@@ -1288,7 +1290,7 @@ impl SessionRegistry {
         };
         let mut server = session_server(&mem, &ledger);
         if let Some(attacher) = &self.attacher {
-            // #33 PR 4 review L2: a layer's own writes refuse relative
+            // #33 PR 4: a layer's own writes refuse relative
             // paths, as a write scoped to it does.
             server = server.serving_a_layer(attacher.layers.is_layer(mem.session().as_str()));
             let stack = attacher.layers.stack(mem.session().as_str());
@@ -1334,7 +1336,7 @@ impl SessionRegistry {
     }
 
     /// A pinned session whose lease another writer holds: serve the others
-    /// and try it again in [`PINNED_RETRY`]. Logged, and (J4) recorded from
+    /// and try it again in [`PINNED_RETRY`]. Logged, and recorded from
     /// the loser's side, once.
     pub(super) async fn mark_held(&self, id: &str, held: &LeaseHeldElsewhere) {
         if let Some(attacher) = &self.attacher {
@@ -1433,7 +1435,7 @@ impl SessionRegistry {
     /// could not be reached): tried again in [`PINNED_RETRY`], the error
     /// logged at WARN once per streak. Any other error will not clear on
     /// its own: logged once at ERROR, and the slot becomes
-    /// [`Slot::Failed`] (#32 review L1).
+    /// [`Slot::Failed`] (#32).
     async fn retry(self: &Arc<Self>, id: &str) {
         // One of the `attach_concurrency` permits (#32 PR 6), raced against
         // the shutdown, which takes them all.
@@ -1457,13 +1459,13 @@ impl SessionRegistry {
             self.slots.lock().get(id),
             Some(Slot::HeldElsewhere { warned: true, .. })
         );
-        // The whole attach observes the shutdown (#32 review L8): the
+        // The whole attach observes the shutdown (#32): the
         // preflight, the acquire and the store round trips are not raced
-        // against J6's pre-arm, and a serve whose sessions were all held at
+        // against the early-shutdown pre-arm, and a serve whose sessions were all held at
         // startup has not armed it at all. Abandoned, it may hold the lease
         // it took, so that is released before the shutdown's close set is
         // taken; the attach permit is held until then.
-        // Bounded like an on-demand attach (#32 PR 6 review M2), so a hung
+        // Bounded like an on-demand attach (#32 PR 6), so a hung
         // store cannot hold an attach permit for good; a timeout is a
         // transient failure, tried again in `PINNED_RETRY`.
         let attempt = tokio::select! {
@@ -1489,8 +1491,8 @@ impl SessionRegistry {
         };
         let (next, warned) = match attempt {
             Ok(Acquired::Attached(mem, endpoint)) => {
-                // Only over the slot this retry started from (#32 PR 7
-                // review H1): an erase, or anything else that took the slot
+                // Only over the slot this retry started from (#32 PR 7):
+                // an erase, or anything else that took the slot
                 // meanwhile, is not overwritten.
                 let held = |slot: Option<&Slot>| matches!(slot, Some(Slot::HeldElsewhere { .. }));
                 if let Some(session) = self.admit_if(mem, endpoint, held).await {
@@ -1530,9 +1532,8 @@ impl SessionRegistry {
             // A shutdown signal that lands during the attach's load makes it
             // fail with a configuration error ("shutdown signal arrived"),
             // which is not the session's fault: the process is exiting, so
-            // leave the slot as it was and say nothing alarming (#32 PR 4
-            // Sonnet review L-A). `build_attach`'s error path has already
-            // released any lease it took.
+            // leave the slot as it was and say nothing alarming (#32 PR 4).
+            // `build_attach`'s error path has already released any lease it took.
             Err(e) if self.is_closing() || self.shutdown_signalled().await => {
                 tracing::debug!(
                     session = %id,
@@ -1577,8 +1578,8 @@ impl SessionRegistry {
     }
 
     /// The pinned retry's last write: `slot` replaces `id`'s only while it
-    /// is still the `HeldElsewhere` the retry started from (#32 PR 7 review
-    /// H1). An erase that claimed it meanwhile owns it.
+    /// is still the `HeldElsewhere` the retry started from (#32 PR 7).
+    /// An erase that claimed it meanwhile owns it.
     fn replace_held(&self, id: &str, slot: Slot) {
         let mut slots = self.slots.lock();
         if matches!(slots.get(id), Some(Slot::HeldElsewhere { .. })) {
@@ -1608,7 +1609,7 @@ impl SessionRegistry {
     }
 
     /// Release the lease a background attach of `id` may have taken before
-    /// the shutdown abandoned it (#32 review L8). Holder-scoped, so a lease
+    /// the shutdown abandoned it (#32). Holder-scoped, so a lease
     /// the attach never took, or another writer holds, is left alone;
     /// bounded by `LEASE_RELEASE_GRACE`, past which the row lapses at TTL.
     async fn release_abandoned(&self, id: &str) {
@@ -1684,7 +1685,7 @@ impl SessionRegistry {
     /// so the retry loop takes it back once it can; an on-demand session's
     /// slot is removed (#32 PR 6), so its next request attaches it again.
     /// The detach drops the registry's handle on the session before that
-    /// (#32 review M1): the slot was its only long-lived owner, so the
+    /// (#32): the slot was its only long-lived owner, so the
     /// `Memory` goes with it, and with it its second-writer registration
     /// and its graph. The next attach waits for the handle to be gone
     /// (`PreviousHandle`).
@@ -1709,7 +1710,7 @@ impl SessionRegistry {
         // and cut short once the process shutdown takes the attached set:
         // its own transport drain has ended the connections by then, and a
         // detach must not spend a second SHUTDOWN_GRACE inside the process's
-        // stage 3 (#32 review L9).
+        // stage 3 (#32).
         progress.begin(Stage::TransportDrain);
         tokio::select! {
             drained = tokio::time::timeout(SHUTDOWN_GRACE, session.close_mcp_sessions()) => {
@@ -1773,7 +1774,7 @@ impl SessionRegistry {
             return;
         };
         // `new` keeps `idle_detach` at `MIN_IDLE_DETACH` or more, so this
-        // never sleeps zero (#32 PR 6 review L5).
+        // never sleeps zero (#32 PR 6).
         let every = bounds.idle_detach.min(IDLE_SWEEP_MAX).max(MIN_IDLE_DETACH);
         let registry = Arc::downgrade(self);
         *self.sweeper.lock() = Some(tokio::spawn(idle_sweeper(registry, every)));
@@ -1789,7 +1790,7 @@ impl SessionRegistry {
         let mut slots = self.slots.lock();
         // Checked under the lock the shutdown's set is taken under, and each
         // detach tracked before it is released, so a sweep cannot start a
-        // detach the shutdown does not join (#32 PR 6 review L4).
+        // detach the shutdown does not join (#32 PR 6).
         if self.is_closing() {
             return;
         }
@@ -1832,9 +1833,9 @@ impl SessionRegistry {
     /// the registry gives out.
     pub(super) async fn close_set(&self) -> Vec<Arc<AttachedSession>> {
         self.closing.send_replace(true);
-        // The idle sweeper stops before the set is taken (#32 PR 6 review
-        // L4); a round already under way saw `closing` under the slots' lock
-        // or tracked its detaches before this takes that lock.
+        // The idle sweeper stops before the set is taken (#32 PR 6); a round
+        // already under way saw `closing` under the slots' lock or tracked its
+        // detaches before this takes that lock.
         if let Some(sweeper) = self.sweeper.lock().take() {
             sweeper.abort();
         }
@@ -1902,11 +1903,17 @@ impl SessionRegistry {
 /// embedder could not be reached. Everything else (an erased session, a
 /// contract mismatch, an unprovisioned store, a configuration error) gets
 /// the same answer on every retry.
+///
+/// A permanent store error (#301: an undefined table, a missing privilege)
+/// is retried too. It was a backend error before #301, and the operator's
+/// fix for it (a migration, a `GRANT`) is made in the store while the
+/// server runs, so a pinned session keeps retrying every `PINNED_RETRY` and
+/// recovers without a restart.
 pub(super) fn is_transient(err: &LamboError) -> bool {
     use crate::types::StoreError;
     matches!(
         err,
-        LamboError::Store(StoreError::Backend(_) | StoreError::Other(_))
+        LamboError::Store(StoreError::Backend(_) | StoreError::Other(_) | StoreError::Permanent(_))
             | LamboError::EmbedUnavailable(_)
     )
 }
@@ -1939,7 +1946,7 @@ fn answer_for(slot: &Slot) -> Lookup {
         Slot::Failed => Lookup::Failed,
         // Not yet erased: an erase that ends in 409 or fails before its
         // commit serves the session again, so the permanent 410 waits for
-        // the commit (#32 PR 7 review L3). Not attachable meanwhile.
+        // the commit (#32 PR 7). Not attachable meanwhile.
         Slot::Erasing => Lookup::Unavailable {
             retry_after: Duration::from_secs(1),
         },
@@ -2032,8 +2039,8 @@ async fn watch_lease(
 
 /// A layered session's server finds each layer here, per call (#33 PR 3):
 /// only a live slot answers, with a call in flight on the layer for as
-/// long as the answer is held. A failed or erased slot says so (review
-/// L1), so a caller is not told to retry what will not come back.
+/// long as the answer is held. A failed or erased slot says so, so a
+/// caller is not told to retry what will not come back.
 impl LayerSource for SessionRegistry {
     fn live_layer(&self, session: &str, read: LayerRead) -> Result<LiveLayer, LayerDown> {
         let live = {
@@ -2060,7 +2067,7 @@ impl LayerSource for SessionRegistry {
 /// The process-wide MCP-session cap counts every attached session's MCP
 /// sessions (design §3.6): one `--max-sessions` for the whole process. Each
 /// credential's share of it counts the MCP sessions that credential opened,
-/// across every attached session (#32 PR 5 review M2).
+/// across every attached session (#32 PR 5).
 #[async_trait::async_trait]
 impl super::http_guards::LiveSessions for SessionRegistry {
     async fn live(&self) -> usize {
@@ -2077,5 +2084,32 @@ impl super::http_guards::LiveSessions for SessionRegistry {
             total += session.live_mcp_sessions_opened_by(credential).await;
         }
         total
+    }
+}
+
+/// Test-only aliases of the serve's retry and grace constants, for
+/// `crate::formal_constants_tests` (#291): `formal/LamboProofs/Registry.lean`
+/// hard-codes them in `pinnedRetry`, `unplacedCap` and `cfgEx`. They live in
+/// private modules, so the aliases sit here, where all of them are visible.
+#[cfg(test)]
+pub(crate) mod formal_pins {
+    use std::time::Duration;
+
+    pub(crate) const ELECTION_RETRY: Duration = super::super::roles::ELECTION_RETRY;
+    pub(crate) const PINNED_RETRY: Duration = super::PINNED_RETRY;
+    pub(crate) const PREVIOUS_HANDLE_WAIT: Duration = super::PREVIOUS_HANDLE_WAIT;
+    pub(crate) const NEGATIVE_TTL: Duration = super::on_demand::NEGATIVE_TTL;
+    pub(crate) const EVICT_MIN_IDLE: Duration = super::on_demand::EVICT_MIN_IDLE;
+    pub(crate) const UNPLACED_PER_PLACE: usize = super::on_demand::UNPLACED_PER_PLACE;
+    pub(crate) const LEASE_RELEASE_GRACE: Duration = super::super::shutdown::LEASE_RELEASE_GRACE;
+
+    /// `unplaced_cap`, the bound `unplacedCap` models.
+    pub(crate) fn unplaced_cap(max_attached: usize) -> usize {
+        super::unplaced_cap(max_attached)
+    }
+
+    /// `pinned_retry`, the retry `pinnedRetry` models.
+    pub(crate) const fn pinned_retry(election_retry: Duration) -> Duration {
+        super::pinned_retry(election_retry)
     }
 }

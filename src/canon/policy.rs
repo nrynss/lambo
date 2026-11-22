@@ -1,4 +1,4 @@
-//! Promotion policy selection — the `PromotionScorer` seam (C1).
+//! Promotion policy selection — the `PromotionScorer` seam.
 //!
 //! Each policy owns two decisions: **Stage 1 admission** (which concepts
 //! become Candidates) and the **admission of the later hops** given a stage's
@@ -38,18 +38,23 @@
 //! ([`crate::types::ConceptType::eviction_resistance`]) before the band
 //! comparison: ≥ [`CANONICAL_BAR`] Canonical, ≥ [`VENERABLE_BAR`] Venerable,
 //! ≥ [`CANDIDATE_BAR`] Candidate, else None. `Dependent Interactions` is the
-//! same aged, own-origin-excluded count Swarm's Stage 1 reads
-//! ([`crate::canon::dependent_interaction_counts`]), so one write declaring a
-//! dependence moves both policies the same way, and `Causal` touches (a file
-//! modified by many actions) no longer score. `human_confirmed` is a
+//! aged, own-origin-excluded count of distinct other interactions Swarm's
+//! Stage 1 reads, with each dependence credited to the interaction that
+//! **wrote** it rather than to its dependent's origin
+//! ([`crate::canon::solo_dependent_interaction_counts`], #300). So one fresh
+//! write declaring a dependence moves both policies the same way, a later
+//! turn's new dependence from an older concept (a reused action node) counts
+//! as that turn under Solo, and `Causal` touches (a file modified by many
+//! actions) no longer score. `human_confirmed` is a
 //! persisted counter bumped only through [`crate::Memory::confirm_human`].
 //!
-//! The recurrence term is the reason C2 depends on D2: "sessions" are counted
+//! The recurrence term rests on session separation: "sessions" are counted
 //! with [`separated_session_count`] over the **event-time** spread of the
 //! concept's supporting interactions ([`crate::types::Interaction::about_time`],
-//! never flush stamps). A bulk ingest of a decade of history in ninety
-//! minutes has that separation in commit dates and none whatsoever in flush
-//! time. The test that pins the difference is
+//! never flush stamps; a declared dependence is dated by the turn that wrote
+//! it, [`crate::types::Edge::about_time`], #300). A bulk ingest of a decade
+//! of history in ninety minutes has that separation in commit dates and none
+//! whatsoever in flush time. The test that pins the difference is
 //! `a_bulk_ingest_recurs_only_under_event_time` below.
 //!
 //! ## Shape: enum on the params, trait for the behaviour
@@ -65,15 +70,20 @@
 //! for `Utc::now()`.
 
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::canon::event_time::separated_session_count;
-use crate::canon::stage1::{dependent_interaction_counts, dependent_interactions};
+use crate::canon::stage1::{
+    solo_dependent_interaction_counts, solo_dependent_interaction_counts_with,
+    solo_dependent_interactions, solo_dependent_interactions_with,
+};
 use crate::canon::stage1_candidates;
 use crate::canon::EvalParams;
+use crate::daemon::conflict::WriterTimeline;
 use crate::graph::Graph;
 use crate::types::{
     tie_break_by_key, CanonizationStatus, Concept, EdgeType, Node, NodeId, ScoreTable,
@@ -83,7 +93,7 @@ use crate::types::{
 /// of variants, so that a variant the valid set does not name is not a thing
 /// this file can express.
 ///
-/// # Why the enum is not written out by hand (T3-P3-2)
+/// # Why the enum is not written out by hand
 ///
 /// `ALL` is what every refusal enumerates and what [`PromotionPolicy::from_str`]
 /// searches, so a variant missing from it is not cosmetic. It is unselectable
@@ -153,8 +163,8 @@ promotion_policy! {
     /// Unlike `MatchStrategy`, the `Default` here and
     /// `Config::default().promotion_policy` are the **same** value (`Swarm`).
     /// There is deliberately no second, differing product default to remember:
-    /// swarm is what the pipeline has always done, and C1's entire contract is
-    /// that it keeps doing it.
+    /// swarm is what the pipeline has always done, and the seam's entire
+    /// contract is that it keeps doing it.
     ///
     /// Declared through the `promotion_policy!` macro so that this variant list
     /// is also [`PromotionPolicy::ALL`]. **A new variant goes here**, and the
@@ -330,6 +340,108 @@ pub trait PromotionScorer: Send + Sync + std::fmt::Debug {
         params: &EvalParams,
         now: DateTime<Utc>,
     ) -> bool;
+
+    /// Whether [`Self::candidates_with`] and [`Self::admits_hop_with`] read
+    /// the [`Writers`] they are given. The evaluator resolves writers only
+    /// for a policy that does, and passes [`Writers::unresolved`] otherwise,
+    /// so a policy that reads none (Swarm) pays nothing for them. Defaults
+    /// to `false`; [`SoloScorer`] returns `true`. [`Writers`] is opaque
+    /// outside the crate, so only the built-in scorers can read them, and
+    /// [`PromotionPolicy::scorer`] dispatches only those two.
+    fn reads_writers(&self) -> bool {
+        false
+    }
+
+    /// [`Self::candidates`] with the writer attribution the caller holds for
+    /// `graph` ([`Writers`]). The evaluator passes its own, cached across
+    /// cycles by graph epoch, so a cycle resolves writers at most once
+    /// instead of once per call. A policy that reads no writer ignores it:
+    /// the default is [`Self::candidates`].
+    fn candidates_with(
+        &self,
+        graph: &Graph,
+        scores: &ScoreTable,
+        params: &EvalParams,
+        now: DateTime<Utc>,
+        writers: &Writers,
+    ) -> Vec<NodeId> {
+        let _ = writers;
+        self.candidates(graph, scores, params, now)
+    }
+
+    /// [`Self::admits_hop`] with the caller's writer attribution for `graph`
+    /// (see [`Self::candidates_with`]). The default is [`Self::admits_hop`].
+    fn admits_hop_with(
+        &self,
+        graph: &Graph,
+        node: NodeId,
+        to: CanonizationStatus,
+        params: &EvalParams,
+        now: DateTime<Utc>,
+        writers: &Writers,
+    ) -> bool {
+        let _ = writers;
+        self.admits_hop(graph, node, to, params, now)
+    }
+}
+
+/// Which interaction wrote each edge of one graph (#300): the writer
+/// attribution Solo's dependents term reads, resolved in one pass over the
+/// graph's interactions. It depends only on the interactions, so it stays
+/// valid while a cycle commits canonization transitions.
+///
+/// [`Writers::of`] resolves it; the evaluator lends its own, cached across
+/// cycles by graph epoch, through [`PromotionScorer::candidates_with`] and
+/// [`PromotionScorer::admits_hop_with`], and passes [`Writers::unresolved`]
+/// to a policy that does not [read them](PromotionScorer::reads_writers).
+/// [`SoloScorer`], handed unresolved writers, resolves its own from the
+/// graph, so they are never wrong, only slower.
+///
+/// Resolved writers must come from the same graph's interactions. The
+/// timeline records the interaction count it was built from, and a debug
+/// build asserts it wherever the writers are read (not the epoch:
+/// canonization transitions move it while the writers stay valid).
+///
+/// `Writers` is opaque outside the crate: external code can build one
+/// ([`Writers::of`], [`Writers::unresolved`]) and pass it along, but not
+/// read it, so only the built-in [`SoloScorer`] reads writers.
+#[derive(Clone)]
+pub struct Writers(Option<Arc<WriterTimeline>>);
+
+impl Writers {
+    /// Resolve `graph`'s writers: `O(interactions)`.
+    pub fn of(graph: &Graph) -> Self {
+        Self::shared(Arc::new(WriterTimeline::of(graph)))
+    }
+
+    /// No writers resolved, for a policy that reads none. [`SoloScorer`],
+    /// which does, resolves its own from the graph when handed these.
+    pub fn unresolved() -> Self {
+        Self(None)
+    }
+
+    /// An already-resolved timeline (the evaluator's cached one).
+    pub(crate) fn shared(timeline: Arc<WriterTimeline>) -> Self {
+        Self(Some(timeline))
+    }
+
+    /// The resolved timeline, to read against `graph`; `None` when
+    /// unresolved.
+    pub(crate) fn for_graph(&self, graph: &Graph) -> Option<&WriterTimeline> {
+        let timeline = self.0.as_deref()?;
+        debug_assert_eq!(
+            timeline.interactions(),
+            graph.temporal_chain().len(),
+            "writers resolved from a different graph's interactions"
+        );
+        Some(timeline)
+    }
+}
+
+impl std::fmt::Debug for Writers {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Writers")
+    }
 }
 
 /// Evidence-led Swarm admission — the default policy.
@@ -407,10 +519,20 @@ fn status_rank(s: CanonizationStatus) -> u8 {
 }
 
 /// Resolved about-times of every interaction that supported this concept:
-/// direct derivations (`Derives` from an interaction), plus the writing
-/// interaction of every concept that declared it depends on this one
-/// (`Dependency` into it). Sorted, deduplicated — this is the recurrence
-/// term's input, and it resolves through `about_time`, never flush stamps.
+/// direct derivations (`Derives` from an interaction), plus every
+/// declaration by a concept that it depends on this one (`Dependency` into
+/// it), dated by the turn that **wrote** the edge (#300). Sorted,
+/// deduplicated — this is the recurrence term's input, and it resolves
+/// through `about_time`, never flush stamps.
+///
+/// A `Dependency` edge carries its writing interaction's about-time
+/// ([`crate::types::Edge::about_time`]: `record_action` and `derive` stamp
+/// it with that interaction's `created_at` and `event_time`). Before #300 it
+/// was dated by its source concept's origin interaction, which is not the
+/// writer when the source is reused: `record_action` reuses an existing
+/// action node, so a day-5 repeat adding a `depends_on` read as day 0. A
+/// re-sent identical dependence reinforces the existing edge and keeps its
+/// stamps, so it adds no session: only a new edge is new support.
 ///
 /// `Causal` (an action produced or modified this concept) is **not** support
 /// since #36 PR 3, the same reason it confers no load (#36 PR 1): a file
@@ -426,20 +548,16 @@ pub fn supporting_interaction_times(graph: &Graph, c: &Concept) -> Vec<DateTime<
         if e.target != c.id {
             continue;
         }
-        let writer = match e.edge_type {
-            EdgeType::Derives => Some(e.source),
-            EdgeType::Dependency => match graph.node(e.source) {
-                // record_action sources `depends_on` from the action node (a
-                // Resource concept); credit that action's turn.
-                Some(Node::Concept(s)) => Some(s.origin_interaction),
-                _ => None,
-            },
+        let at = match (e.edge_type, graph.node(e.source)) {
+            (EdgeType::Derives, Some(Node::Interaction(i))) => Some(i.about_time()),
+            // record_action sources `depends_on` from the action node (a
+            // Resource concept), derive from the citing concept; either may
+            // be older than the turn that wrote the edge, so date the edge.
+            (EdgeType::Dependency, Some(Node::Concept(_))) => Some(e.about_time()),
             _ => None,
         };
-        if let Some(id) = writer
-            && let Some(Node::Interaction(i)) = graph.node(id)
-        {
-            times.push(i.about_time());
+        if let Some(at) = at {
+            times.push(at);
         }
     }
     times.sort();
@@ -448,7 +566,7 @@ pub fn supporting_interaction_times(graph: &Graph, c: &Concept) -> Vec<DateTime<
 }
 
 /// The recurrence term: how many ≥ [`SESSION_SEPARATION`]-apart sessions the
-/// concept's supporting interactions fall into, counted by D2's greedy
+/// concept's supporting interactions fall into, counted by the greedy
 /// [`separated_session_count`] on event time.
 pub fn recurrence_sessions(graph: &Graph, c: &Concept) -> usize {
     separated_session_count(&supporting_interaction_times(graph, c), SESSION_SEPARATION)
@@ -463,7 +581,7 @@ pub fn recurrence_sessions(graph: &Graph, c: &Concept) -> usize {
 /// the filter counts Canonical → None demotions, **whatever their reason**:
 /// budget demotions and, since #20 (with `canonization_supersede` on),
 /// supersessions too. A superseded concept therefore carries Solo's revert
-/// penalty, as a budget-demoted one always has (#20 review L5). It is
+/// penalty, as a budget-demoted one always has (#20). It is
 /// written as a rank comparison on purpose — any future addition to the
 /// legal set that decreases rank lands in this count by the same filter,
 /// which is the behavior an audit of that change must re-examine. Reads the
@@ -497,7 +615,8 @@ pub struct SoloBreakdown {
 }
 
 /// [`SoloBreakdown`] for `c`, given its dependent-interaction count (from
-/// [`dependent_interaction_counts`] or [`dependent_interactions`]).
+/// [`crate::canon::solo_dependent_interaction_counts`] or
+/// [`solo_dependent_interactions`]).
 pub fn solo_breakdown(graph: &Graph, c: &Concept, dependent_interactions: usize) -> SoloBreakdown {
     let sessions = recurrence_sessions(graph, c);
     let reverts = revert_count(graph, c.id);
@@ -567,7 +686,7 @@ pub fn classify(resistant: f64) -> CanonizationStatus {
     }
 }
 
-/// Single-writer promotion (C2; evidence-gated since #36 PR 3).
+/// Single-writer promotion (evidence-gated since #36 PR 3).
 ///
 /// Stage 1 admits every concept whose resistant score clears the Candidate
 /// bar, ordered by that score (highest first), then canonical key, then
@@ -580,14 +699,46 @@ pub fn classify(resistant: f64) -> CanonizationStatus {
 pub struct SoloScorer;
 
 impl PromotionScorer for SoloScorer {
+    fn reads_writers(&self) -> bool {
+        true
+    }
+
     fn candidates(
+        &self,
+        graph: &Graph,
+        scores: &ScoreTable,
+        params: &EvalParams,
+        now: DateTime<Utc>,
+    ) -> Vec<NodeId> {
+        self.candidates_with(graph, scores, params, now, &Writers::of(graph))
+    }
+
+    fn admits_hop(
+        &self,
+        graph: &Graph,
+        node: NodeId,
+        to: CanonizationStatus,
+        params: &EvalParams,
+        now: DateTime<Utc>,
+    ) -> bool {
+        let deps = solo_dependent_interactions(graph, node, params.min_age, now);
+        band_admits(graph, node, to, deps)
+    }
+
+    fn candidates_with(
         &self,
         graph: &Graph,
         _scores: &ScoreTable,
         params: &EvalParams,
         now: DateTime<Utc>,
+        writers: &Writers,
     ) -> Vec<NodeId> {
-        let counts = dependent_interaction_counts(graph, params.min_age, now);
+        let counts = match writers.for_graph(graph) {
+            Some(timeline) => {
+                solo_dependent_interaction_counts_with(graph, params.min_age, now, timeline)
+            }
+            None => solo_dependent_interaction_counts(graph, params.min_age, now),
+        };
         let mut admitted: Vec<(f64, &Concept)> = graph
             .concepts()
             .map(|c| {
@@ -604,28 +755,40 @@ impl PromotionScorer for SoloScorer {
         admitted.into_iter().map(|(_, c)| c.id).collect()
     }
 
-    fn admits_hop(
+    fn admits_hop_with(
         &self,
         graph: &Graph,
         node: NodeId,
         to: CanonizationStatus,
         params: &EvalParams,
         now: DateTime<Utc>,
+        writers: &Writers,
     ) -> bool {
-        match graph.node(node) {
-            Some(Node::Concept(c)) => {
-                let deps = dependent_interactions(graph, node, params.min_age, now);
-                status_rank(classify(solo_score(graph, c, deps))) >= status_rank(to)
+        let deps = match writers.for_graph(graph) {
+            Some(timeline) => {
+                solo_dependent_interactions_with(graph, node, params.min_age, now, timeline)
             }
-            // Not a concept (or gone): nothing to admit.
-            _ => false,
+            None => solo_dependent_interactions(graph, node, params.min_age, now),
+        };
+        band_admits(graph, node, to, deps)
+    }
+}
+
+/// Whether `node`'s Solo band, given its dependents term, ranks at or above
+/// `to`. Not a concept (or gone): nothing to admit.
+fn band_admits(graph: &Graph, node: NodeId, to: CanonizationStatus, deps: usize) -> bool {
+    match graph.node(node) {
+        Some(Node::Concept(c)) => {
+            status_rank(classify(solo_score(graph, c, deps))) >= status_rank(to)
         }
+        _ => false,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::canon::stage1::dependent_interactions;
     use crate::types::{
         AgentId, CanonizationStatus, Concept, ConceptType, Interaction, Scored, SessionId,
     };
@@ -642,7 +805,7 @@ mod tests {
     /// The coverage half is not asserted here, and deliberately so: `ALL` and
     /// the enum are generated from one variant list by `promotion_policy!`, so
     /// a variant `ALL` does not name is unrepresentable rather than untested.
-    /// T3-P3-2: the assertion that *used* to stand in for coverage —
+    /// The assertion that *used* to stand in for coverage —
     /// `ALL.len() == 2` — was vacuous in exactly the direction that mattered,
     /// because the length moves only when a variant is added to `ALL` and the
     /// loop below iterates `ALL`, so a variant absent from `ALL` was reached by
@@ -775,7 +938,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // C2 helpers — solo-score corpora
+    // Solo-policy helpers — solo-score corpora
     // -----------------------------------------------------------------------
 
     fn ts_at(secs: i64) -> DateTime<Utc> {
@@ -821,6 +984,26 @@ mod tests {
         }
     }
 
+    /// [`test_edge`] as interaction `n` writes it: stamped with that
+    /// interaction's `created_at` and `event_time`, as `record_action` and
+    /// `derive` stamp every edge they write (#300).
+    fn edge_written_by(
+        g: &Graph,
+        id: u64,
+        src: NodeId,
+        tgt: NodeId,
+        ty: EdgeType,
+        n: u64,
+    ) -> crate::types::Edge {
+        let Some(crate::types::Node::Interaction(i)) = g.node(nid_inter(n)) else {
+            panic!("no interaction {n}");
+        };
+        crate::types::Edge {
+            event_time: i.event_time,
+            ..test_edge(id, src, tgt, ty, i.created_at)
+        }
+    }
+
     fn day(n: u64) -> DateTime<Utc> {
         ts_at((n * 86_400) as i64)
     }
@@ -829,8 +1012,10 @@ mod tests {
     /// interactions `supporters` through hand-upserted `Derives` edges (the
     /// shape a replayed ingest produces: every later turn re-derived the fact).
     /// Every interaction is flushed back-to-back inside one minute — the bulk
-    /// bootstrap — while their ABOUT-times are `day(0)`, `day(2)`, `day(4)`,
-    /// `day(6)`: real event-time spread, none in flush time.
+    /// bootstrap — while their ABOUT-times are `day(0)`, `day(3)`, `day(4)`,
+    /// `day(5)` (turn `n ≥ 2` is about `day(n - 1) + 48h`): real event-time
+    /// spread, none in flush time. Days 3, 4 and 5 are exactly 24 h apart,
+    /// on the inclusive session boundary (`Policy.spread_days_on_the_boundary`).
     fn spread_support_graph(hub_type: ConceptType) -> (Graph, NodeId) {
         spread_support_graph_with(hub_type, true)
     }
@@ -877,7 +1062,7 @@ mod tests {
         NodeId(Uuid::from_u64_pair(1, n))
     }
 
-    /// The default policy is swarm — the whole contract of C1.
+    /// The default policy is swarm — the whole contract of the seam.
     ///
     /// Mutation: flip `#[default]` to `Solo`, or make `Config::default()`
     /// name `Solo`. Goes red here and in `config`'s `defaults_match_spec`.
@@ -924,11 +1109,11 @@ mod tests {
     /// (one writer, `gc_survived == 0` — Stage 1's swarm gate refuses it). A
     /// mutant that points the `Solo` arm of `scorer()` at `&SwarmScorer`
     /// collapses this to the empty set — exactly the silent-fallback defect
-    /// C1's should_panic test guarded, still guarded, without a panic to lean
+    /// the seam's original should_panic test guarded, still guarded, without a panic to lean
     /// on now that solo resolves.
     ///
     /// Mutation: map `Solo → &SwarmScorer`, or make [`SoloScorer::candidates`]
-    /// return `Vec::new()` (the C1-era forbidden stub). Both red here.
+    /// return `Vec::new()` (the forbidden stub from before solo existed). Both red here.
     #[test]
     fn solo_admits_what_swarm_refuses_on_the_same_corpus() {
         let (graph, hub) = spread_support_graph(ConceptType::Entity);
@@ -974,13 +1159,13 @@ mod tests {
     }
 
     /// The eviction-resistance multiplier applies per concept type BEFORE the
-    /// band comparison, on identical evidence: three ≥24h-apart sessions
-    /// (raw 3.0) admit an Entity (3 × 1.2 = 3.6) but not an Observation
-    /// (3 × 0.7 = 2.1) — the weakest kind is the last promoted.
+    /// band comparison, on identical evidence: four ≥24h-apart sessions
+    /// (raw 4.0) admit an Entity (4 × 1.2 = 4.8) but not an Observation
+    /// (4 × 0.7 = 2.8) — the weakest kind is the last promoted.
     ///
     /// Mutation: drop the multiplier in `solo_score` → both classify alike and
     /// the Observation half goes red; apply the daemon's additive modifier
-    /// instead (+0.15 max: 3.15) → the Observation still clears, red again.
+    /// instead (+0.15 max: 4.15) → the Observation still clears, red again.
     #[test]
     fn eviction_resistance_multiplies_before_the_band_comparison() {
         let (entity_graph, entity) = spread_support_graph(ConceptType::Entity);
@@ -1059,10 +1244,11 @@ mod tests {
         action.origin_interaction = nid_inter(2);
         let aid = action.id;
         g.insert_concept(action, nid_inter(2)).unwrap();
-        g.upsert_edge(test_edge(30, aid, hub.id, EdgeType::Dependency, ts_at(90)))
-            .unwrap();
+        // Written by the action's own turn (2), as `record_action` writes it.
+        let dependence = edge_written_by(&g, 30, aid, hub.id, EdgeType::Dependency, 2);
+        g.upsert_edge(dependence).unwrap();
         let later = day(10);
-        let deps = dependent_interactions(&g, hub.id, Duration::from_secs(60), later);
+        let deps = solo_dependent_interactions(&g, hub.id, Duration::from_secs(60), later);
         assert_eq!(deps, 1);
         let c = concept_of(&g, hub.id);
         assert!((solo_score(&g, &c, deps) - 10.0).abs() < 1e-9);
@@ -1119,7 +1305,11 @@ mod tests {
         let (mut g, hub) = spread_support_graph(ConceptType::Entity);
         let later = day(10);
         let age = Duration::from_secs(60);
-        assert_eq!(dependent_interactions(&g, hub, age, later), 0, "Derives");
+        assert_eq!(
+            solo_dependent_interactions(&g, hub, age, later),
+            0,
+            "Derives"
+        );
         let add_action = |g: &mut Graph, id: u64, origin: u64, ty: EdgeType| {
             let mut action = concept(id, 0);
             action.concept_type = ConceptType::Resource;
@@ -1127,33 +1317,35 @@ mod tests {
             action.canonical_key = action.content.clone();
             action.origin_interaction = nid_inter(origin);
             g.insert_concept(action, nid_inter(origin)).unwrap();
-            g.upsert_edge(test_edge(id, nid(id), hub, ty, ts_at(90)))
-                .unwrap();
+            // Written by the action's own turn, as `record_action` writes it.
+            let e = edge_written_by(g, id, nid(id), hub, ty, origin);
+            g.upsert_edge(e).unwrap();
         };
         add_action(&mut g, 20, 2, EdgeType::Causal);
         assert_eq!(
-            dependent_interactions(&g, hub, age, later),
+            solo_dependent_interactions(&g, hub, age, later),
             0,
             "Causal confers no load"
         );
         add_action(&mut g, 21, 3, EdgeType::Dependency);
         add_action(&mut g, 22, 3, EdgeType::Dependency);
         assert_eq!(
-            dependent_interactions(&g, hub, age, later),
+            solo_dependent_interactions(&g, hub, age, later),
             1,
             "two actions from one interaction count once"
         );
         add_action(&mut g, 23, 4, EdgeType::Dependency);
-        assert_eq!(dependent_interactions(&g, hub, age, later), 2);
+        assert_eq!(solo_dependent_interactions(&g, hub, age, later), 2);
         // The hub's own interaction never counts.
         add_action(&mut g, 24, 1, EdgeType::Dependency);
-        assert_eq!(dependent_interactions(&g, hub, age, later), 2);
+        assert_eq!(solo_dependent_interactions(&g, hub, age, later), 2);
     }
 
     /// #36 PR 3 (spec §3.2 errata): a `Causal` touch is not recurrence.
     /// A second concept derived once in turn 1 and modified by actions from
-    /// turns 2, 3 and 4 (days 2/4/6) still has one supporting session; the
-    /// same actions declaring `depends_on` it give four.
+    /// turns 2, 3 and 4 (days 3/4/5) still has one supporting session; the
+    /// same actions declaring `depends_on` it, each edge written by its
+    /// action's turn, give four.
     #[test]
     fn causal_touches_are_not_recurrence() {
         let (mut g, _) = spread_support_graph(ConceptType::Resource);
@@ -1173,21 +1365,214 @@ mod tests {
             action.canonical_key = action.content.clone();
             action.origin_interaction = nid_inter(k);
             g.insert_concept(action, nid_inter(k)).unwrap();
-            g.upsert_edge(test_edge(40 + k, nid(40 + k), file.id, ty, ts_at(90)))
+            g.upsert_edge(edge_written_by(&g, 40 + k, nid(40 + k), file.id, ty, k))
                 .unwrap();
         }
         assert_eq!(recurrence_sessions(&g, &concept_of(&g, file.id)), 1);
         for k in 2..=4u64 {
-            g.upsert_edge(test_edge(
+            g.upsert_edge(edge_written_by(
+                &g,
                 50 + k,
                 nid(40 + k),
                 file.id,
                 EdgeType::Dependency,
-                ts_at(90),
+                k,
             ))
             .unwrap();
         }
         assert_eq!(recurrence_sessions(&g, &concept_of(&g, file.id)), 4);
+    }
+
+    /// #300: a dependence written by a later turn is dated by that turn, in
+    /// both Solo terms, even when its source concept is older.
+    /// `record_action` reuses the action node on a repeat, so on day 5 the
+    /// repeated "deploy api" (first recorded on day 0) writes a new
+    /// `Dependency` edge to `user schema`, which day 0's turn also created.
+    /// Dated by the action's origin (the old rule), that edge was day 0's and
+    /// own-origin: `user schema` had one session and no dependent (1.0, None).
+    /// Dated by its writer it adds the day-5 session and the day-5 turn as a
+    /// dependent interaction (1 + 1 + 2 = 4.0, Candidate), as a fresh action
+    /// node from that turn would. `billing schema`, cited only by day 0's
+    /// turn, its own, is unchanged, and so is Swarm's Stage 1 count.
+    ///
+    /// Mirrors `Policy.reused_action_dependency_is_dated_by_its_writer` (the
+    /// scenario) and `Policy.dependentOriginsW_not_own` (own origin is the
+    /// writing turn) in `formal/LamboProofs/Policy.lean`.
+    #[test]
+    fn a_reused_actions_new_dependency_is_dated_by_the_turn_that_wrote_it() {
+        use crate::graph::action::{record_action, Action};
+        let action = |name, produces, depends_on| Action {
+            repo_scope: None,
+            event_time: None,
+            action: name,
+            produces,
+            modifies: &[],
+            depends_on,
+        };
+        let mut g = Graph::new(sid());
+        let mut turn1 = interaction_at(1, 0, None);
+        turn1.created_at = day(0);
+        g.insert_interaction(turn1.clone()).unwrap();
+        let mut turn5 = interaction_at(5, 0, None);
+        turn5.created_at = day(5);
+        turn5.previous_id = Some(turn1.id);
+        g.insert_interaction(turn5.clone()).unwrap();
+        let agent = AgentId::from("agent-a");
+
+        let design = record_action(
+            &mut g,
+            turn1.id,
+            &agent,
+            &action("design schema", &["user schema"], &[]),
+        )
+        .unwrap();
+        let user_schema = design.created[1];
+        let deploy = record_action(
+            &mut g,
+            turn1.id,
+            &agent,
+            &action("deploy api", &[], &["billing schema"]),
+        )
+        .unwrap();
+        let billing_schema = deploy.created[1];
+        let again = record_action(
+            &mut g,
+            turn5.id,
+            &agent,
+            &action("deploy api", &[], &["billing schema", "user schema"]),
+        )
+        .unwrap();
+        assert_eq!(
+            again.action_node, deploy.action_node,
+            "the action is reused"
+        );
+        assert!(again.created.is_empty());
+
+        let now = day(10);
+        let solo = PromotionPolicy::Solo.scorer();
+        let admits =
+            |node| solo.admits_hop(&g, node, CanonizationStatus::Candidate, &params(), now);
+        let y = concept_of(&g, user_schema);
+        assert_eq!(y.origin_interaction, turn1.id);
+        assert_eq!(
+            supporting_interaction_times(&g, &y),
+            vec![day(0), day(5)],
+            "the day-5 dependency supports on day 5"
+        );
+        assert_eq!(recurrence_sessions(&g, &y), 2);
+        assert!(admits(user_schema), "1 + 1 + 2 = 4.0 clears Candidate");
+        assert!(solo
+            .candidates(&g, &ScoreTable::default(), &params(), now)
+            .contains(&user_schema));
+
+        let x = concept_of(&g, billing_schema);
+        assert_eq!(recurrence_sessions(&g, &x), 1, "re-citing does not re-date");
+        assert!(!admits(billing_schema), "cited by its own turn only: 1.0");
+
+        assert_eq!(
+            dependent_interactions(&g, user_schema, params().min_age, now),
+            0,
+            "Swarm's Stage 1 count keeps the dependent-origin dating"
+        );
+    }
+
+    /// #300, the direction where scores drop. Day 0's turn records "deploy
+    /// api"; on day 5 the action is repeated with a `depends_on` that
+    /// creates `user schema` in that same call. The new `Dependency` edge is
+    /// written by the day-5 turn, which is also `user schema`'s origin. The
+    /// old rule dated it by the reused action's origin (day 0): a second
+    /// session and a dependent interaction, 1 + 1 + 2 = 4.0, a Solo
+    /// Candidate. Dated by its writer it is the concept's own turn: one
+    /// session, no dependent, 1.0, ordinary memory. Swarm's Stage 1 count,
+    /// which keeps the dependent-origin dating, still credits day 0.
+    ///
+    /// Mirrors `Policy.own_origin_is_the_writing_turn` and
+    /// `Policy.dependentOriginsW_not_own` in `formal/LamboProofs/Policy.lean`.
+    #[test]
+    fn a_dependence_written_in_the_pillars_own_turn_no_longer_counts() {
+        use crate::graph::action::{record_action, Action};
+        let action = |name, depends_on| Action {
+            repo_scope: None,
+            event_time: None,
+            action: name,
+            produces: &[],
+            modifies: &[],
+            depends_on,
+        };
+        let mut g = Graph::new(sid());
+        let mut turn1 = interaction_at(1, 0, None);
+        turn1.created_at = day(0);
+        g.insert_interaction(turn1.clone()).unwrap();
+        let mut turn5 = interaction_at(5, 0, None);
+        turn5.created_at = day(5);
+        turn5.previous_id = Some(turn1.id);
+        g.insert_interaction(turn5.clone()).unwrap();
+        let agent = AgentId::from("agent-a");
+
+        let first = record_action(
+            &mut g,
+            turn1.id,
+            &agent,
+            &action("deploy api", &["billing schema"]),
+        )
+        .unwrap();
+        let again = record_action(
+            &mut g,
+            turn5.id,
+            &agent,
+            &action("deploy api", &["user schema"]),
+        )
+        .unwrap();
+        assert_eq!(again.action_node, first.action_node, "the action is reused");
+        let user_schema = again.created[0];
+        let y = concept_of(&g, user_schema);
+        assert_eq!(y.origin_interaction, turn5.id, "created by the repeat");
+
+        let now = day(10);
+        assert_eq!(
+            supporting_interaction_times(&g, &y),
+            vec![day(5)],
+            "the dependence is dated by its writer, the concept's own day"
+        );
+        assert_eq!(recurrence_sessions(&g, &y), 1);
+        assert!(
+            !PromotionPolicy::Solo.scorer().admits_hop(
+                &g,
+                user_schema,
+                CanonizationStatus::Candidate,
+                &params(),
+                now
+            ),
+            "1.0: no second session and no dependent from the concept's own turn"
+        );
+        assert!(!PromotionPolicy::Solo
+            .scorer()
+            .candidates(&g, &ScoreTable::default(), &params(), now)
+            .contains(&user_schema));
+        assert_eq!(
+            dependent_interactions(&g, user_schema, params().min_age, now),
+            1,
+            "Swarm's Stage 1 count keeps the dependent-origin dating"
+        );
+    }
+
+    /// #300: writers resolved for one graph are refused, in a debug build,
+    /// on a graph with a different number of interactions.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "different graph")]
+    fn writers_from_another_graph_are_caught() {
+        let (four_turns, _) = spread_support_graph(ConceptType::Entity);
+        let (three_turns, _) = evidence_graph(3);
+        let writers = Writers::of(&four_turns);
+        PromotionPolicy::Solo.scorer().admits_hop_with(
+            &three_turns,
+            nid(1),
+            CanonizationStatus::Candidate,
+            &params(),
+            ts(),
+            &writers,
+        );
     }
 
     /// Opposition is not a dependent or another supporting turn.
@@ -1229,7 +1614,7 @@ mod tests {
         );
     }
 
-    /// #20 review L5: a supersession is a Canonical → None demotion, so it
+    /// #20: a supersession is a Canonical → None demotion, so it
     /// counts toward Solo's revert penalty exactly like a budget demotion.
     #[test]
     fn a_supersession_counts_as_a_revert() {
@@ -1251,7 +1636,7 @@ mod tests {
         assert_eq!(revert_count(&graph, hub), 1);
     }
 
-    /// Reverts subtract: one demotion (−3.0) pulls a three-session fact back
+    /// Reverts subtract: one demotion (−3.0) pulls a four-session fact back
     /// under the bar. Only rank-DECREASING transitions count; promotions do
     /// not.
     #[test]
@@ -1289,13 +1674,14 @@ mod tests {
             .is_empty());
     }
 
-    /// DONE-WHEN BOX 3, measured: the SAME physical corpus recurs under event
+    /// Measured: the SAME physical corpus recurs under event
     /// time and does NOT recur under ingest time. Four supporting turns about
-    /// days 0/2/4/6, all flushed inside one minute, evaluated pinned right
+    /// days 0/3/4/5, all flushed inside one minute, evaluated pinned right
     /// after the burst.
     ///
-    /// * Event time: about-times sit ≥48h apart → 4 distinct sessions →
-    ///   Entity 4.8 → admitted.
+    /// * Event time: about-times sit ≥24h apart (days 3, 4 and 5 exactly
+    ///   24 h, on the inclusive boundary) → 4 distinct sessions → Entity 4.8
+    ///   → admitted.
     /// * Ingest time (same rows, event times stripped — the pre-D reading):
     ///   flush stamps span 45 seconds → ONE session → 1.2 → refused.
     ///
@@ -1310,7 +1696,7 @@ mod tests {
         assert_eq!(
             separated_session_count(&times, SESSION_SEPARATION),
             4,
-            "days 0/2/4/6 are four ≥24h-apart sessions"
+            "days 0/3/4/5 are four ≥24h-apart sessions"
         );
         assert!(PromotionPolicy::Solo
             .scorer()
@@ -1331,7 +1717,7 @@ mod tests {
             .contains(&hub));
     }
 
-    /// C2 discrimination: on a MIXED corpus, does SoloPolicy admit the fact
+    /// Solo discrimination: on a MIXED corpus, does SoloPolicy admit the fact
     /// that genuinely recurs and refuse the two shapes that only look busy?
     ///
     /// The existing `a_bulk_ingest_recurs_only_under_event_time` proves the
@@ -1344,7 +1730,7 @@ mod tests {
     ///
     /// The three shapes, and why these three:
     ///
-    /// * `recurring` — re-derived on days 0/2/4/6. Four sessions ≥24h apart:
+    /// * `recurring` — re-derived on days 0/3/4/5. Four sessions ≥24h apart:
     ///   the signal SoloPolicy exists to read, and the only one of the three
     ///   a human would call load-bearing.
     /// * `burst` — re-derived the SAME number of times (four), all inside one
@@ -1362,7 +1748,7 @@ mod tests {
     fn solo_admits_the_recurring_fact_and_refuses_the_burst_and_the_one_off() {
         let mut g = Graph::new(sid());
 
-        // Interactions 1..=4: spread across days 0/2/4/6 (real event time),
+        // Interactions 1..=4: spread across days 0/3/4/5 (real event time),
         // all flushed within minutes of each other (the bootstrap shape).
         let mut prev = None;
         for n in 1..=4u64 {
@@ -1456,7 +1842,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // C2 helpers continued — small accessors over test graphs
+    // Solo-policy helpers continued — small accessors over test graphs
     // -----------------------------------------------------------------------
 
     fn concept_of(graph: &Graph, id: NodeId) -> Concept {
@@ -1515,7 +1901,7 @@ mod tests {
         assert!(serde_json::from_str::<PromotionPolicy>("\"solo\"").is_err());
     }
     // -----------------------------------------------------------------------
-    // C-R1-1 closure — the published bands drive the ladder admission
+    // The published bands drive the ladder admission
     // -----------------------------------------------------------------------
 
     /// Under solo, hop admission is the node's band (#36 PR 3: on top of the
@@ -1547,11 +1933,11 @@ mod tests {
         actor.origin_interaction = nid_inter(2);
         let actor_id = actor.id;
         graph.insert_concept(actor, nid_inter(2)).unwrap();
-        graph
-            .upsert_edge(test_edge(20, actor_id, hub, EdgeType::Dependency, ts()))
-            .unwrap();
+        // Written by the actor's own turn (2), as `record_action` would.
+        let dependence = edge_written_by(&graph, 20, actor_id, hub, EdgeType::Dependency, 2);
+        graph.upsert_edge(dependence).unwrap();
         let hub_concept = concept_of(&graph, hub);
-        let deps = dependent_interactions(&graph, hub, p.min_age, at);
+        let deps = solo_dependent_interactions(&graph, hub, p.min_age, at);
         assert_eq!(solo_score(&graph, &hub_concept, deps), 10.0);
         assert!(solo.admits_hop(&graph, hub, CanonizationStatus::Canonical, &p, at));
     }

@@ -33,20 +33,20 @@ use crate::types::{
     SuppliedVector, WriteIntent, WriteIntentPayload,
 };
 
-/// **Deleted roles, recorded where they lived** (J3 redesign): this block used
+/// **Deleted roles, recorded where they lived** (durability redesign): this block used
 /// to define `DRAIN_PROJECTION_SHARE` (the share of the drain budget an
 /// admission bound could project a *rate* against), `WRITE_QUEUE_LANE_MIN` (the
 /// floor under a rate-derived lane bound), `WRITE_QUEUE_MIN` (the unmeasured
 /// aggregate floor), `PROBE_LANE_CEILING` and `PROBE_AGGREGATE_CEILING` (the
 /// probe-era caps on rate-derived bounds — the aggregate one derived per-lane
-/// and applied across lanes, which is J3-R3-2: 13 of 16 acked writes abandoned
-/// from eight concurrent agents up). All five existed to make an estimated
+/// and applied across lanes, which abandoned 13 of 16 acked writes from eight
+/// concurrent agents up). All five existed to make an estimated
 /// rate safe to build a durability invariant on. No parameter can do that —
 /// five falsified axes in three rounds are the evidence — so under durable
 /// intents the bounds are static ([`WRITE_QUEUE_LANE_MAX`],
 /// [`WRITE_QUEUE_MAX`]) and the whole family is deleted rather than re-derived
-/// under the new role: fairness needs a share, not a projection. J3-R3-2 is
-/// closed by this deletion, argument above.
+/// under the new role: fairness needs a share, not a projection. That
+/// defect is closed by this deletion, argument above.
 ///
 /// The **per-lane fair-share bound**: what one agent may hold outstanding.
 ///
@@ -74,7 +74,7 @@ const _: () = assert!(
 /// The queue's aggregate admission bound — **derived from receipt retention,
 /// not from throughput.**
 ///
-/// (J3 round-1 N3: this headline read "Upper clamp on the measured bound" for a
+/// (This headline read "Upper clamp on the measured bound" for a
 /// bound that stopped being measured and started *being* the bound at the
 /// estimator demotion. There is nothing left for it to clamp.)
 ///
@@ -99,7 +99,7 @@ pub const WRITE_QUEUE_MAX: usize = MAX_RETAINED_RECEIPTS / 4;
 
 /// Build-time invariant: the fair-share numerator is a real queue.
 ///
-/// **This replaces a vacuous guard** (J3-R1-7): `(N / 4) * 4 <= N` holds for
+/// **This replaces a vacuous guard**: `(N / 4) * 4 <= N` holds for
 /// every `usize` under integer division, so the old assertion could not fail
 /// for any value of `MAX_RETAINED_RECEIPTS` and proved none of the property its
 /// message claimed. The property the old message reached for —
@@ -138,14 +138,19 @@ pub enum DropReason {
     QueueBytes,
     /// The session is closing or has lost its lease.
     Closed,
+    /// This agent's lane is full and some of it is writes held behind one
+    /// the embedder did not answer (#295): they are retried in the
+    /// background, so the agent is told to resubmit later rather than to
+    /// wait on their receipts.
+    HeldLane,
 }
 
 impl DropReason {
     /// The receipt's stated reason. **It must name the bound that actually
-    /// refused, as what it actually is** — J3-R3-4 caught the previous text
+    /// refused, as what it actually is** — a review caught the previous text
     /// attributing every refusal to "a bound measured … on this deployment's
-    /// embedder" in an era where a fixed ceiling was deciding; under the J3
-    /// redesign the bounds are static shares and the text says so.
+    /// embedder" in an era where a fixed ceiling was deciding; under the
+    /// durability redesign the bounds are static shares and the text says so.
     pub(super) fn describe(self, bound: usize) -> String {
         match self {
             DropReason::LaneFull => format!(
@@ -155,13 +160,23 @@ impl DropReason {
             ),
             DropReason::QueueFull => format!(
                 "the background write queue is full ({bound} outstanding — the whole-queue \
-                 memory cap; wait for receipts to settle and resubmit)"
+                 memory cap; wait for receipts to settle and resubmit. Writes held behind an \
+                 embedder outage or a slow vector lookup count too, and are retried in the \
+                 background)"
             ),
             DropReason::QueueBytes => format!(
-                "the background write queue is at its {} MiB payload cap",
+                "the background write queue is at its {} MiB payload cap (writes held behind an \
+                 embedder outage or a slow vector lookup count too, and are retried in the \
+                 background)",
                 WRITE_QUEUE_MAX_BYTES / (1024 * 1024)
             ),
             DropReason::Closed => "the session is closing".into(),
+            DropReason::HeldLane => format!(
+                "this agent's background write lane is full ({bound} outstanding, including \
+                 writes held behind one the embedder, or the store's vector lookup, did not \
+                 answer); held writes are retried in the background and apply in order once it \
+                 answers, so resubmit this one later rather than waiting on their receipts"
+            ),
         }
     }
 }
@@ -227,7 +242,7 @@ impl JobPayload {
         }
     }
 
-    /// The durable form of this job, exactly as validated (J3 intents).
+    /// The durable form of this job, exactly as validated.
     pub(super) fn to_intent_payload(&self) -> WriteIntentPayload {
         let repo_scope = match self {
             Self::Derive { repo_scope, .. } | Self::Action { repo_scope, .. } => {
@@ -592,18 +607,92 @@ pub(super) struct Lanes {
     /// `notify_waiters`. Distinct from [`Lanes::workers_aborted`], which is
     /// set a whole join earlier: a receipt wait that ends at close keys on
     /// this one, or it answers `pending` for a queued job the same close is
-    /// about to settle `intent_durable` (#11 review round 2, F1). Never
+    /// about to settle `intent_durable` (#11). Never
     /// cleared.
     pub(super) settled_at_close: bool,
     /// Receipts [`WritePipeline::abort_workers`] set aside for
     /// [`WritePipeline::settle_deferred`]: unsettled when the close aborted
-    /// the workers, answered once its final flush reports (#117 review M1).
+    /// the workers, answered once its final flush reports (#117).
     /// Kept after an incomplete flush so a retried close that completes can
     /// upgrade them; cleared once they are settled `intent_durable`.
     pub(super) close_deferred: Vec<ReceiptId>,
+    /// #295: per agent, the write its lane worker met an embedder outage at
+    /// and every later write of that agent the worker has taken since, oldest
+    /// first. The agent's worker stays alive while it has any and retries the
+    /// oldest on a backoff timer (`execution::held_retry_backoff`,
+    /// [`Lanes::held_due`]); no new write is needed, and none makes it
+    /// sooner. Nothing of the agent runs ahead of them. Their intents stay
+    /// unconsumed and their receipts answer `pending_replay`; a close sets
+    /// them aside like any unsettled receipt (`intent_durable`), and the next
+    /// serve replays them in order. Counted at admission against the lane and
+    /// queue bounds, and their bytes stay in [`Lanes::bytes`], until each one
+    /// settles; not counted by the quiesce.
+    pub(super) held: HashMap<AgentId, VecDeque<Job>>,
+    /// For each agent with held writes: the oldest one and how many times in
+    /// a row the worker has met an outage at it, for its backoff and for the
+    /// warning that makes a write which never embeds visible.
+    pub(super) held_attempts: HashMap<AgentId, (ReceiptId, u32)>,
+    /// For each agent with held writes: the earliest instant its worker may
+    /// retry the oldest, the end of its last failed attempt plus
+    /// `execution::held_retry_backoff`. Nothing starts a retry sooner.
+    pub(super) held_due: HashMap<AgentId, tokio::time::Instant>,
+    /// Each live worker's wake-up: admission notifies it when a write of its
+    /// agent is admitted or refused, so a worker waiting out a backoff holds
+    /// a new write at once (its receipt answers `pending_replay`). It does
+    /// not start a retry before [`Lanes::held_due`].
+    pub(super) wakes: HashMap<AgentId, std::sync::Arc<tokio::sync::Notify>>,
+    /// Lookup timeouts in a row, across lanes, with nothing applied between
+    /// (#295, the replay's rule): below `REPLAY_LOOKUP_TIMEOUT_LIMIT` one
+    /// settles its write `failed`; at it the store is slow for everyone and
+    /// the write is held like an embedder outage.
+    pub(super) lookup_streak: usize,
 }
 
 impl Lanes {
+    /// Whether `agent`'s lane has a live worker. A worker removes its own
+    /// entry under this lock before it returns, so a finished handle still
+    /// here is one that panicked: it is dropped, and the write it was
+    /// running stops counting as running (its receipt stays unsettled, for
+    /// the close to set aside), so the caller spawns a new worker rather than
+    /// leave the lane stranded for the rest of the serve. The panicked
+    /// write's bytes cannot be told apart and stay counted.
+    pub(super) fn worker_alive(&mut self, agent: &AgentId) -> bool {
+        match self.workers.get(agent) {
+            None => false,
+            Some(handle) if handle.is_finished() => {
+                self.workers.remove(agent);
+                let stale = self.running_per_lane.remove(agent).unwrap_or(0);
+                self.running = self.running.saturating_sub(stale);
+                tracing::error!(
+                    agent = %agent,
+                    "write queue: this agent's lane worker stopped without exiting (it \
+                     panicked); a new worker takes its lane. The write it was running stays \
+                     unsettled until the session closes"
+                );
+                false
+            }
+            Some(_) => true,
+        }
+    }
+
+    /// The wake-up a new worker for `agent` waits on (see [`Lanes::wakes`]).
+    pub(super) fn wake_for(&mut self, agent: &AgentId) -> std::sync::Arc<tokio::sync::Notify> {
+        self.wakes
+            .entry(agent.clone())
+            .or_insert_with(|| std::sync::Arc::new(tokio::sync::Notify::new()))
+            .clone()
+    }
+
+    /// Held writes (see [`Lanes::held`]) across every agent.
+    pub(super) fn held_count(&self) -> usize {
+        self.held.values().map(VecDeque::len).sum()
+    }
+
+    /// Held writes of one agent.
+    pub(super) fn lane_held(&self, agent: &AgentId) -> usize {
+        self.held.get(agent).map_or(0, VecDeque::len)
+    }
+
     pub(super) fn outstanding(&self) -> usize {
         self.queued + self.running
     }
@@ -621,11 +710,11 @@ impl Lanes {
     /// Outstanding jobs **on one lane** — queued plus the one being run by that
     /// lane's own consumer. This is the population [`WRITE_QUEUE_LANE_MAX`]
     /// bounds, and the reason a global gauge could not do the job: the drain is
-    /// per-lane and serial (J3-R1-1), which is also why the round-3 defect —
-    /// a ceiling derived per-lane and enforced across lanes — was possible at
-    /// all. (J3 round-1 N3: this named `Calibration::lane_bound`, which since the
-    /// estimator demotion is a field that copies the static constant rather than
-    /// a bound of its own.)
+    /// per-lane and serial, which is also why the earlier defect — a ceiling
+    /// derived per-lane and enforced across lanes — was possible at all. (This
+    /// doc once named `Calibration::lane_bound`, which since the estimator
+    /// demotion is a field that copies the static constant rather than a bound
+    /// of its own.)
     pub(super) fn lane_outstanding(&self, agent: &AgentId) -> usize {
         self.queues.get(agent).map_or(0, VecDeque::len)
             + self.running_per_lane.get(agent).copied().unwrap_or(0)
@@ -664,7 +753,7 @@ impl WritePipeline {
 
     /// Admit a job and hand back its receipt, or refuse it.
     ///
-    /// Admission is instant since the J3 redesign — the bounds are the static
+    /// Admission is instant since the durability redesign — the bounds are the static
     /// fairness/memory caps, so there is no calibration to await. (The old
     /// `await_calibration` blocked the first burst on the probe for up to
     /// [`PROBE_BUDGET`](super::PROBE_BUDGET) because "a provisional constant is the constant the
@@ -684,7 +773,7 @@ impl WritePipeline {
         let now = (self.clock)();
 
         // Both count conditions, and the per-lane one first because it is the
-        // one that binds in the case J3-R1-1 measured: one busy agent, whose
+        // one that binds in the measured case: one busy agent, whose
         // single-consumer lane drains 1-wide however wide the deployment's
         // embedder is.
         //
@@ -698,16 +787,26 @@ impl WritePipeline {
         let refusal = {
             let mut graph = self.ctx.graph.write();
             let mut lanes = self.lanes.lock();
-            if lanes.sealed {
+            let refusal = if lanes.sealed {
                 Some((DropReason::Closed, WRITE_QUEUE_LANE_MAX))
-            } else if lanes.lane_outstanding(&agent) >= WRITE_QUEUE_LANE_MAX {
-                Some((DropReason::LaneFull, WRITE_QUEUE_LANE_MAX))
-            } else if lanes.outstanding() >= WRITE_QUEUE_MAX {
+            } else if lanes.lane_outstanding(&agent) + lanes.lane_held(&agent)
+                >= WRITE_QUEUE_LANE_MAX
+            {
+                // #295: an agent's held writes count against its lane, so an
+                // outage that holds them cannot grow memory without bound.
+                // They are retried in the background, so the refusal says so
+                // rather than to wait on their receipts.
+                if lanes.lane_held(&agent) > 0 {
+                    Some((DropReason::HeldLane, WRITE_QUEUE_LANE_MAX))
+                } else {
+                    Some((DropReason::LaneFull, WRITE_QUEUE_LANE_MAX))
+                }
+            } else if lanes.outstanding() + lanes.held_count() >= WRITE_QUEUE_MAX {
                 Some((DropReason::QueueFull, WRITE_QUEUE_MAX))
             } else if lanes.bytes.saturating_add(bytes) > WRITE_QUEUE_MAX_BYTES {
                 Some((DropReason::QueueBytes, WRITE_QUEUE_MAX))
             } else {
-                // J3 durable intents: the ack's other half. Recorded at
+                // Durable intents: the ack's other half. Recorded at
                 // admission, through the ordinary write-behind log, so the
                 // close-time final flush ("session closed, tail durable")
                 // carries it — acked ⇒ (applied ∨ durable intent) at a clean
@@ -781,12 +880,34 @@ impl WritePipeline {
                         payload,
                         admitted: tokio::time::Instant::now(),
                     });
-                if !lanes.workers.contains_key(&agent) {
-                    let handle = self.spawn_worker(agent.clone());
+                if !lanes.worker_alive(&agent) {
+                    let wake = lanes.wake_for(&agent);
+                    let handle = self.spawn_worker(agent.clone(), wake);
                     lanes.workers.insert(agent.clone(), handle);
+                } else if lanes.lane_held(&agent) > 0
+                    && let Some(wake) = lanes.wakes.get(&agent)
+                {
+                    // A new write of an agent with held writes: the waiting
+                    // worker holds it now (the retry still waits its backoff).
+                    wake.notify_one();
                 }
                 None
+            };
+            // #295: held writes are retried by their worker's timer, so a full
+            // lane can never keep them from being retried; the worker is alive
+            // while it has any, and is spawned here if not. The wake starts no
+            // retry before its backoff.
+            if refusal.is_some() && !lanes.sealed && lanes.lane_held(&agent) > 0 {
+                if let Some(wake) = lanes.wakes.get(&agent) {
+                    wake.notify_one();
+                }
+                if !lanes.worker_alive(&agent) {
+                    let wake = lanes.wake_for(&agent);
+                    let handle = self.spawn_worker(agent.clone(), wake);
+                    lanes.workers.insert(agent.clone(), handle);
+                }
             }
+            refusal
         };
 
         let mut receipts = self.receipts.lock();
@@ -802,14 +923,14 @@ impl WritePipeline {
                     // A refusal because the session is closing is still a
                     // refusal by a bound and its count must not vanish — but it
                     // gets its **own** counter rather than riding the count
-                    // bound's (J3-R1-8): `write_queue_dropped` is what an
+                    // bound's: `write_queue_dropped` is what an
                     // operator reads for "a burst degraded", and a refused
                     // shutdown tail is a different diagnosis with a different
                     // response. Both are summed into `dropped()`.
                     DropReason::Closed => {
                         self.counters.dropped_closed.fetch_add(1, Ordering::Relaxed);
                     }
-                    DropReason::LaneFull | DropReason::QueueFull => {
+                    DropReason::LaneFull | DropReason::QueueFull | DropReason::HeldLane => {
                         self.counters
                             .dropped_queue_full
                             .fetch_add(1, Ordering::Relaxed);
@@ -861,7 +982,7 @@ impl WritePipeline {
                         agent,
                         deliver_to,
                         // Unsettled, and therefore never expired and never
-                        // evicted until it settles (J3-R1-3).
+                        // evicted until it settles.
                         settled_at: None,
                         answer: ReceiptAnswer::Pending,
                     },

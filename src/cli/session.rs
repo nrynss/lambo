@@ -1,8 +1,8 @@
 //! `lambo session classify` (read-only: an explicit input, never a writer)
-//! and `lambo session split` (#33 D2: writes a validated plan's targets into
-//! a new offline SQLite file; the source stays read-only), and `lambo
-//! session verify` (#33 D3: a read-only before/after recall comparison of
-//! the source and the split output).
+//! and `lambo session split` (#33: writes a validated plan's targets into a
+//! new offline SQLite file; the source stays read-only), and `lambo session
+//! verify` (#33: a read-only before/after recall comparison of the source
+//! and the split output).
 
 use std::io::{Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
@@ -212,7 +212,7 @@ async fn load_source(
 }
 
 /// Produces a private plan, printing only aggregate counts and its path.
-/// The output is published create-new (see [`write_new_private`]), so an
+/// The output is published create-new (see `write_new_private`), so an
 /// output spelling cannot truncate an input.
 pub async fn classify_session(
     source: ClassificationSource,
@@ -341,9 +341,10 @@ fn check_outputs(
     Ok(())
 }
 
-/// Re-validate the plan by reproducing it: D1 must derive exactly this plan
-/// from the source, the supplied rules and labels and the plan's own audited
-/// overrides. The seal alone detects corruption, not authorization.
+/// Re-validate the plan by reproducing it: classification must derive exactly
+/// this plan from the source, the supplied rules and labels and the plan's
+/// own audited overrides. The seal alone detects corruption, not
+/// authorization.
 fn reproduce_plan(
     plan: &ClassificationPlan,
     snapshot: &GraphSnapshot,
@@ -527,7 +528,7 @@ fn summary(split: &SplitOutput, output: &Path, report: &Path, outcome: &str) -> 
     out
 }
 
-/// `lambo session split` (#33 D2). Validates and reproduces the plan, builds
+/// `lambo session split` (#33). Validates and reproduces the plan, builds
 /// every target in memory and validates it, then (unless `dry_run`) imports
 /// each target into the explicit SQLite output in its own transaction, and
 /// finally publishes the private report create-new.
@@ -827,7 +828,7 @@ pub(crate) async fn verify_merge_threshold(io: &crate::resolve::VerifyIo) -> f64
     )
 }
 
-/// `lambo session verify` (#33 D3). Rebuilds the split from the source and
+/// `lambo session verify` (#33). Rebuilds the split from the source and
 /// plan, requires the output's receipts and target digests to match it,
 /// replays the query set before (plain recall on the source) and after
 /// (layered recall per project, as the serving `[serve]` table pins and
@@ -1554,7 +1555,7 @@ mod tests {
             std::fs::remove_dir_all(&i.dir).unwrap();
         }
 
-        /// `lambo session verify` end to end on a real split output (#33 D3).
+        /// `lambo session verify` end to end on a real split output (#33).
         #[cfg(all(feature = "store-sqlite", feature = "embed-fixture"))]
         mod verify {
             use super::*;
@@ -1753,7 +1754,7 @@ mod tests {
                 std::fs::remove_dir_all(&i.dir).unwrap();
             }
 
-            /// L5: verify replays a SQLite holder, so another store kind or
+            /// Verify replays a SQLite holder, so another store kind or
             /// a [recall] tier in the serving config is refused up front.
             #[tokio::test(flavor = "multi_thread")]
             async fn a_serving_config_verify_does_not_model_is_refused() {

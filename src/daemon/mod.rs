@@ -1,5 +1,4 @@
-//! Daemon task skeleton + composite scoring (P4, T4.1) + event transport
-//! wiring (P4, T4.6).
+//! Daemon task skeleton + composite scoring + event transport wiring.
 //!
 //! A tokio task that polls [`Graph::epoch`] on a tick interval. Each cycle:
 //! rescore the session's concepts **when the epoch changed** (spec §9, spec
@@ -14,14 +13,15 @@
 //! Detection runs on **every** tick, not only on epoch change: an idle
 //! session still ages toward staleness — a concept untouched for longer than
 //! the stale window fires `DaemonEvent::Stale` purely because time passed
-//! (spec §9's background-daemon semantics; T4.6 finding 1).
+//! (spec §9's background-daemon semantics).
 //!
-//! ## Wake seam (COH-5, 2026-08-12)
+//! ## Wake seam (2026-08-12)
 //!
-//! There is **no mutation-notify channel and no T3.5 rescore signal** — both
-//! were explicitly deferred. The loop is driven by the tick interval plus an
-//! explicit [`Notify`] wake that tests use to trigger a cycle immediately;
-//! the production notify seam lands with T8.1.
+//! There is **no mutation-notify channel and no rescore signal**. The loop
+//! is driven by the tick interval plus an explicit [`Notify`] wake
+//! ([`Daemon::wake`]): `Memory`'s write paths (graph writes, name
+//! declarations, image derives) call it after each write so the next cycle
+//! runs at once, and tests use it to trigger a cycle. Reads never wake it.
 //!
 //! ## Lock discipline (spec §6.4 — non-negotiable)
 //!
@@ -34,7 +34,7 @@
 //! ## Stopping
 //!
 //! [`Daemon::spawn`] returns the `JoinHandle`; aborting it stops the loop (a
-//! graceful stop is a P8 concern per the COH-6 note).
+//! graceful stop belongs to the caller).
 pub mod access;
 pub mod conflict;
 pub mod contradiction;
@@ -63,12 +63,12 @@ use crate::recall::dispatch::{self, RecallKind};
 use crate::recall::{assemble, candidates, expand};
 use crate::types::{DaemonEvent, NodeId, RecallQuery, RecallResult, Scored, SessionId, StoreError};
 
-/// Default daemon poll interval (XP-7).
+/// Default daemon poll interval.
 ///
 /// The spec fixes no value; 1s matches `backend_flush_interval` so the daemon
 /// and the write-behind loop age state on the same beat, and it bounds the
 /// window in which a hot-list entry can lag the graph to one second. Mirrored
-/// by [`Config::daemon_tick_interval`], which is what P8 threads in.
+/// by [`Config::daemon_tick_interval`], which is what the surface threads in.
 pub const DAEMON_TICK_INTERVAL: Duration = Duration::from_secs(1);
 
 /// The daemon's score table. Read-side data shared with recall and
@@ -80,11 +80,11 @@ pub use crate::types::ScoreTable;
 /// phase-2 expansion. Cached as a unit; assembly and rendering re-run on
 /// every call so time-sensitive output (hot-list `seconds_ago`,
 /// reservations, liveness) is never frozen by a cache hit (spec §9
-/// "conditions re-validated on each recall()"; P5 phase-close finding).
+/// "conditions re-validated on each recall()").
 #[derive(Clone)]
 pub struct RecallPipeline {
     phase1: Vec<Scored<NodeId>>,
-    /// Per-leg phase-1 scores (I1). Cached with the rest of the pipeline
+    /// Per-leg phase-1 scores. Cached with the rest of the pipeline
     /// because it describes the same computation: a cache hit that reused
     /// `phase1` while recomputing legs could report provenance for a ranking
     /// nobody produced.
@@ -98,7 +98,7 @@ pub struct RecallPipeline {
 /// What kind of recall `Daemon::recall_routed` runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Route {
-    /// A text recall: a structural phrasing may dispatch to traversal (T9),
+    /// A text recall: a structural phrasing may dispatch to traversal,
     /// and a failed vector read degrades to the other legs with a warning.
     Text,
     /// A recall by an image or a client vector (#22 PR 6): never dispatched
@@ -125,7 +125,7 @@ impl Route {
     }
 
     /// Whether the blended pipeline may be served from or stored in the
-    /// recall cache (a vector-dependent pipeline never is, P1-2).
+    /// recall cache (a vector-dependent pipeline never is).
     fn may_cache(self) -> bool {
         self != Route::Layer
     }
@@ -197,8 +197,8 @@ impl Phase1Gather<'_> {
             }
             Err(err) => {
                 tracing::warn!(target: "lambo::recall", "phase-1 gather degraded: {err}");
-                // E2E-6: a mid-flight refusal of the checked vector read
-                // (H1's `Invariant` when the durable embedding contract
+                // A mid-flight refusal of the checked vector read
+                // (an `Invariant` when the durable embedding contract
                 // changed between the reader's load and its vector query)
                 // is a client-visible degradation, not just a log line:
                 // attach the `vector_degraded` annotation so both the CLI
@@ -232,15 +232,16 @@ impl Phase1Gather<'_> {
     }
 }
 
-/// The daemon cycle's `now` source (T4.6 finding-1 regression seam).
+/// The daemon cycle's `now` source (the regression seam for an idle session
+/// aging into staleness).
 ///
 /// Production uses [`Utc::now`]; tests swap in a controllable clock
 /// ([`Daemon::with_clock`]) so an idle session can be aged past a detector
 /// window (e.g. staleness) without waiting on the wall clock.
 pub type Clock = Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>;
 
-/// Background scorer + detector + event publisher (T4.1 skeleton, T4.6
-/// wiring). Spawn with [`Daemon::spawn`].
+/// Background scorer + detector + event publisher. Spawn with
+/// [`Daemon::spawn`].
 pub struct Daemon {
     graph: Arc<RwLock<Graph>>,
     weights: ScoringWeights,
@@ -250,15 +251,15 @@ pub struct Daemon {
     hot: Arc<RwLock<HotList>>,
     events: events::EventSender,
     /// The owner's inverted index, when it gave the daemon one. GC mirrors
-    /// collections into it via [`gc::sync_index`] (XP-5); `None` means the
+    /// collections into it via [`gc::sync_index`]; `None` means the
     /// owner is doing that itself.
     index: Option<Arc<RwLock<InvertedIndex>>>,
-    /// The most recent [`gc::GcOutcome`], for [`Daemon::last_gc`] (XP-5).
+    /// The most recent [`gc::GcOutcome`], for [`Daemon::last_gc`].
     last_gc: Arc<RwLock<Option<gc::GcOutcome>>>,
     /// The owner's read-access ledger (issue #30), when it gave the daemon
     /// one: each cycle applies what the read paths noted since the last.
     accesses: Option<Arc<access::AccessLedger>>,
-    /// Completed cycles, for [`Daemon::cycles`] (XP-6).
+    /// Completed cycles, for [`Daemon::cycles`].
     cycles: Arc<AtomicU64>,
     params: CycleParams,
     /// #87: whether recall uses the per-contract recent-leg score
@@ -274,18 +275,18 @@ pub struct Daemon {
     redundancy: Option<crate::recall::redundancy::Redundancy>,
     clock: Clock,
     started: AtomicBool,
-    /// Test seam: the next this-many rescores panic (#79 review L1).
+    /// Test seam: the next this-many rescores panic (#79).
     #[cfg(test)]
     rescore_faults: Arc<std::sync::atomic::AtomicUsize>,
 }
 
-/// Daemon loop tuning (T4.6).
+/// Daemon loop tuning.
 ///
 /// [`CycleParams::default`] is defined as `From<&Config::default()>` — the
 /// shared knobs (hot_list_max, conflict_recency_window, drift_threshold,
 /// gc_interval, max_canonical_nodes) have exactly one source of truth, so a
-/// default can no longer drift between here and `Config` (XP-7; they were
-/// duplicated as literals). The T4.6-specific knobs Config does not carry
+/// default can no longer drift between here and `Config` (they were
+/// duplicated as literals). The daemon-specific knobs Config does not carry
 /// (staleness / high-risk windows, event capacity, GC bump chunk) come from
 /// their module consts.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -317,7 +318,7 @@ pub struct CycleParams {
     /// Broadcast capacity (see [`events::EVENT_CAPACITY`]).
     pub event_capacity: usize,
     /// Survivor `gc_survived` bumps applied per cycle
-    /// ([`gc::GC_SURVIVOR_BUMP_CHUNK`], CONC-6/XP-10).
+    /// ([`gc::GC_SURVIVOR_BUMP_CHUNK`]).
     pub gc_survivor_bump_chunk: usize,
     /// How old dependent evidence must be before it outweighs a
     /// contradiction (#19(c), [`contradiction`]): the session's
@@ -326,7 +327,7 @@ pub struct CycleParams {
 }
 
 impl From<&Config> for CycleParams {
-    /// Derive the loop's tuning from the session config (XP-7). P8 calls this
+    /// Derive the loop's tuning from the session config. The surface calls this
     /// instead of hand-copying fields; the knobs `Config` does not carry keep
     /// their module defaults.
     fn from(config: &Config) -> Self {
@@ -361,7 +362,7 @@ impl Daemon {
         Self::with_params(graph, weights, tick, CycleParams::default())
     }
 
-    /// `new` with explicit loop tuning (tests; P8 wires `Config` here).
+    /// `new` with explicit loop tuning (tests; the surface wires `Config` here).
     pub fn with_params(
         graph: Arc<RwLock<Graph>>,
         weights: ScoringWeights,
@@ -404,9 +405,9 @@ impl Daemon {
         }
     }
 
-    /// Build the loop's tuning from a [`Config`] (XP-7): `tick` comes from
-    /// `daemon_tick_interval`, the rest from [`CycleParams::from`]. P8's entry
-    /// point — nothing has to re-derive a default.
+    /// Build the loop's tuning from a [`Config`]: `tick` comes from
+    /// `daemon_tick_interval`, the rest from [`CycleParams::from`]. The surface's
+    /// entry point — nothing has to re-derive a default.
     pub fn from_config(graph: Arc<RwLock<Graph>>, config: &Config) -> Self {
         let mut daemon = Self::with_params(
             graph,
@@ -435,9 +436,9 @@ impl Daemon {
     }
 
     /// Give the daemon the owner's inverted index so GC mirrors its collections
-    /// into it ([`gc::sync_index`], spec §9 step 4 — XP-5).
+    /// into it ([`gc::sync_index`], spec §9 step 4).
     ///
-    /// The index is owner-side by the P3 contract (`src/graph/mod.rs`), so
+    /// The index is owner-side by the graph's contract (`src/graph/mod.rs`), so
     /// `gc::run(&mut Graph, …)` structurally cannot reach it; without this the
     /// hook had no production caller and a GC'd concept stayed searchable in the
     /// index until the owner happened to notice. An owner that mirrors GC
@@ -499,20 +500,21 @@ impl Daemon {
         })
     }
 
-    /// Test seam (#79 review L1): make the next `n` rescores panic inside the
+    /// Test seam (#79): make the next `n` rescores panic inside the
     /// cycle, as a pathological node in `score_concept` would.
     #[cfg(test)]
     pub(crate) fn fail_next_rescores(&self, n: usize) {
         self.rescore_faults.store(n, Ordering::Release);
     }
 
-    /// Wake the loop for an immediate cycle (tests; later the T8.1 seam).
+    /// Wake the loop for an immediate cycle. `Memory`'s write paths call it
+    /// after each write; tests call it to trigger a cycle.
     pub fn wake(&self) {
         self.wake.notify_one();
     }
 
     /// The wake handle itself, for a caller that must poke the daemon from a
-    /// task holding no `Daemon` (J3's background write workers — they carry
+    /// task holding no `Daemon` (the background write workers — they carry
     /// `Arc` clones of shared state rather than a handle on `Memory`, so they
     /// cannot call [`Daemon::wake`]). Notifying through this is exactly what
     /// `wake` does.
@@ -526,7 +528,7 @@ impl Daemon {
     }
 
     /// Handle to the daemon-owned score table, for readers that must follow
-    /// it across cycles rather than take one snapshot — P6's
+    /// it across cycles rather than take one snapshot — the
     /// [`CanonizationTask`] reads it once per `canonization_eval_interval`
     /// to order Stage 1's queue and the Stage 3 window.
     ///
@@ -540,7 +542,7 @@ impl Daemon {
     }
 
     /// The read state a holder's first cycle gives an **unspawned** daemon
-    /// (#33 D3, `lambo session verify`): rescore the graph and publish the
+    /// (#33, `lambo session verify`): rescore the graph and publish the
     /// table at the graph's epoch (so recall is not in cold mode), then run
     /// every detector into the hot list at the daemon's clock, exactly as a
     /// cycle's steps 1 and 2 do. No access ledger is applied, no event is
@@ -559,18 +561,18 @@ impl Daemon {
         detect_into_hot_list(&mut h, &g, &self.params, now);
     }
 
-    /// Three-phase recall (spec §8; P5).
+    /// Three-phase recall (spec §8).
     ///
     /// Store I/O happens in [`crate::recall::candidates::gather`] BEFORE any
     /// lock: the vector leg is async and must not run while the graph lock is
     /// held. The pipeline then runs under the documented lock order
     /// (graph read -> index read -> hot write). The daemon's inverted index
     /// must be installed via [`Daemon::with_index`]; without it recall returns
-    /// an empty hit list with a warning (P8 wires the owner's index).
+    /// an empty hit list with a warning (the surface wires the owner's index).
     ///
     /// `cache` is session-scoped: spec §8's key carries no session id, so the
     /// caller owns one [`SharedRecallCache`] per session and shares it by
-    /// reference; it locks per lookup and per insert only (#171 B2), so
+    /// reference; it locks per lookup and per insert only (#171), so
     /// concurrent recalls never queue behind each other's pipelines. It stores
     /// the epoch-stable [`RecallPipeline`]; phase-3 assembly, hot-list
     /// re-validation and context rendering run on EVERY call with the
@@ -580,8 +582,8 @@ impl Daemon {
     /// `None` degrades to the keyword + recent-interactions legs (spec §3.2).
     /// A store error during `gather` degrades to an empty vector leg with a
     /// warning rather than failing the read.
-    /// Three-phase recall (spec §8; P5), projected onto the public flattened
-    /// [`RecallResult`] from the same single execution that builds the H3
+    /// Three-phase recall (spec §8), projected onto the public flattened
+    /// [`RecallResult`] from the same single execution that builds the
     /// presentation model (`Self::recall_detailed`).
     pub async fn recall(
         &self,
@@ -597,7 +599,7 @@ impl Daemon {
             .into()
     }
 
-    /// The H3 detailed recall: one execution producing the rendered context
+    /// The detailed recall: one execution producing the rendered context
     /// block AND the presentation model (status + typed annotations captured
     /// at assembly/dispatch). Store I/O happens in
     /// [`crate::recall::candidates::gather`] BEFORE any lock: the vector leg
@@ -605,11 +607,11 @@ impl Daemon {
     /// then runs under the documented lock order (graph read -> index read
     /// -> hot write). The daemon's inverted index must be installed via
     /// [`Daemon::with_index`]; without it recall returns an empty hit list
-    /// with a warning (P8 wires the owner's index).
+    /// with a warning (the surface wires the owner's index).
     ///
     /// `cache` is session-scoped: spec §8's key carries no session id, so the
     /// caller owns one [`SharedRecallCache`] per session and shares it by
-    /// reference; it locks per lookup and per insert only (#171 B2), so
+    /// reference; it locks per lookup and per insert only (#171), so
     /// concurrent recalls never queue behind each other's pipelines. It stores
     /// the epoch-stable [`RecallPipeline`]; phase-3 assembly, hot-list
     /// re-validation and context rendering run on EVERY call with the
@@ -687,7 +689,7 @@ impl Daemon {
     /// (with no text its flat score would outrank true image matches, see
     /// [`candidates::RecentLeg`]), and the vector leg searches with
     /// `embedding`. Nothing is cached: a
-    /// vector-dependent pipeline never is (P1-2), and the caller passes a
+    /// vector-dependent pipeline never is, and the caller passes a
     /// cache of its own for the signature's sake.
     ///
     /// **The vector leg is required.** A store error on the vector read
@@ -769,7 +771,7 @@ impl Daemon {
         if let Err(err) = crate::store::validate_vector_candidate_limit(query.top_k) {
             return Ok(DetailedRecall::warn_only(format!("recall: {err}")));
         }
-        // P2-8: the caller's `session` must match the graph's authoritative
+        // The caller's `session` must match the graph's authoritative
         // session — the keyword/recent/expansion legs come from the daemon's
         // graph while the vector leg is namespace-keyed by `session`. Deriving
         // the vector namespace from the graph prevents mixing graph A with
@@ -781,19 +783,21 @@ impl Daemon {
                  refusing to mix graph and vector namespaces"
             )));
         }
-        // T9: route by query kind. A structural/dependency question is answered
+        // Route by query kind. A structural/dependency question is answered
         // by traversal below; the gather and the blended pipeline are skipped
-        // only for a DISPATCHED structural query (N2) - one that actually resolves
-        // an anchor with structural dependents.
+        // only for a DISPATCHED structural query - one whose subject
+        // actually resolves to an anchor with structural dependents, or to an
+        // ambiguous subject (#129), which is answered with a warning alone.
         let structural =
             route.routes_structural() && dispatch::classify(&query.query) == RecallKind::Structural;
 
         // Cheap in-memory dispatch check (no store I/O) under a brief graph read:
         // does the query resolve an anchor WITH structural dependents, at a
-        // `top_k` the traversal can answer (#263: not 0)? Only then can the
-        // (async, vector-I/O) gather be skipped (T9-R1-3); a structural
-        // phrasing that does not dispatch falls through to the FULL blend
-        // below, never a degraded keyword-only answer. A write landing between
+        // `top_k` the traversal can answer (#263: not 0), or an ambiguous
+        // subject (#129, at any `top_k`)? Only then can the (async,
+        // vector-I/O) gather be skipped; a structural phrasing that
+        // does not dispatch falls through to the FULL blend below, never a
+        // degraded keyword-only answer. A write landing between
         // this check and the graph lock below can still make the predicted
         // dispatch decline after the gather was skipped; the recall then runs
         // the skipped gather once and answers from the graph as it is then
@@ -812,9 +816,9 @@ impl Daemon {
         };
 
         // Gather store I/O BEFORE any lock (the vector leg is async). Uses the
-        // graph's authoritative session as the vector namespace (P2-8). Skipped
-        // only when the traversal dispatch is about to fire (T9-R1-3).
-        // E2E-6: annotations for a vector leg refused mid-flight (checked
+        // graph's authoritative session as the vector namespace. Skipped
+        // only when the traversal dispatch is about to fire.
+        // Annotations for a vector leg refused mid-flight (checked
         // read `Invariant` on an embedding-contract race). Gathered before
         // the lock, appended to the result's response annotations below.
         let mut vector_leg_refused: Vec<Annotation> = Vec::new();
@@ -850,12 +854,12 @@ impl Daemon {
             gather.run(&mut vector_leg_refused).await?
         };
 
-        // T9 dispatch: answer a structural question by traversal when the graph has
+        // Dispatch: answer a structural question by traversal when the graph has
         // an anchor with dependents; otherwise fall through to the blended pipeline
-        // (refusal), which is the honest full-blend outcome (T9-R1-3 - the gather
-        // is skipped only when this dispatch fires).
+        // (refusal), which is the honest full-blend outcome (the gather is
+        // skipped only when this dispatch fires).
         //
-        // T9-R1-7: structural results are intentionally NOT cached, and the hotlist
+        // Structural results are intentionally NOT cached, and the hotlist
         // is not refreshed. The recall cache stores the blended RecallPipeline to
         // amortize the expensive async phase-1 gather I/O, which a dispatched
         // structural query skips entirely (the traversal is a cheap in-memory scan),
@@ -894,7 +898,7 @@ impl Daemon {
         // so the one guard below already gives the full answer. The recall
         // cache never sees a re-gathered or degraded pipeline: this runs only
         // with a query embedding, and a vector-dependent pipeline is never
-        // cached or served from the cache (P1-2, below).
+        // cached or served from the cache (see below).
         if dispatch_ready && vector_capable && embedding.is_some() {
             {
                 let graph = self.graph.read();
@@ -908,7 +912,7 @@ impl Daemon {
 
         // ONE graph guard spans pipeline acquisition AND assembly, so the epoch
         // in the cache key identifies the exact graph snapshot the context is
-        // built from (P1-1). Lock order: graph read -> index read -> hot write.
+        // built from. Lock order: graph read -> index read -> hot write.
         let graph = self.graph.read();
         let anchor = anchor.map(|a| a.current(&graph, &query.query));
         if let Some(result) = try_dispatch(&graph, anchor.as_ref()) {
@@ -920,7 +924,7 @@ impl Daemon {
         let epoch = graph.epoch();
         let key = CacheKey::new(&query.query, query.top_k, query.traversal_depth, epoch);
 
-        // P1-2: the cache key cannot capture vector-source state (embedding
+        // The cache key cannot capture vector-source state (embedding
         // presence, transient store success/failure, write-behind progress), so
         // vector-dependent results are NEVER cached or served from cache.
         let can_cache = embedding.is_none() && route.may_cache();
@@ -928,11 +932,11 @@ impl Daemon {
                               index: Option<&InvertedIndex>,
                               input: crate::recall::candidates::Phase1Input,
                               query: &RecallQuery| {
-            // P2-6: without an index, the independently gathered recent and
+            // Without an index, the independently gathered recent and
             // vector legs still yield candidates (only lexical lookup is lost).
             let recent = route.recent_leg(&query.query);
             // #256: `keyword` is what the keyword leg itself found (its raw
-            // best BM25, before an exact-name match's 1.0, and whether one
+            // best BM25, before an exact-name match's 1.0 floor, and whether one
             // happened); with no index the leg did not run.
             let (phase1, legs, keyword) = match index {
                 Some(index) => candidates::candidates_with_keyword_leg_as(
@@ -959,14 +963,14 @@ impl Daemon {
             }
         };
         let pipeline = if can_cache {
-            // #171 B2: the cache locks for this lookup and for the insert
+            // #171: the cache locks for this lookup and for the insert
             // below, never across the build, so concurrent recalls of one
             // session run their pipelines in parallel.
             match cache.get(&key) {
                 Some(cached) => cached,
                 None => {
                     let pipeline = build_pipeline(&graph, index.as_deref(), input, &query);
-                    // P5-3: never cache a compute whose daemon scores lag the
+                    // Never cache a compute whose daemon scores lag the
                     // graph epoch (rescore is epoch-gated).
                     if scores.epoch == epoch {
                         cache.insert(key, pipeline.clone());
@@ -979,13 +983,13 @@ impl Daemon {
         };
 
         let now = (self.clock)();
-        // T5.3 / XP-3: re-validate the expanded members' hot-list entries at
+        // Re-validate the expanded members' hot-list entries at
         // the SAME `now` the assembly renders with, under the guards already
         // held (graph read, then index read, then hot write). Lapsed entries
         // are evicted here; the survivors' freshly rebuilt payloads are what
         // assembly force-includes and renders. Done here rather than inside
         // `assemble` so recall reads a map and never mutates daemon state.
-        // #171 B2: the hot-list write lock is taken for this revalidation
+        // #171: the hot-list write lock is taken for this revalidation
         // only, not across the cache lookup, the pipeline build or assembly,
         // so concurrent recalls do not serialize on it. The order still
         // holds: graph and index guards are held while it is taken.
@@ -1019,7 +1023,7 @@ impl Daemon {
         result.anchor = anchor
             .as_ref()
             .and_then(|a| dispatch::resolved_anchor_text_from(&graph, a.choice()));
-        // I1: attach the phase-1 leg provenance for the hits that survived
+        // Attach the phase-1 leg provenance for the hits that survived
         // assembly. Filtered to the returned hits rather than passed whole —
         // phase 1 is a bounded over-approximation (keyword is over-fetched by
         // `KEYWORD_OVERFETCH`), and the ledger only ever asks about a hit it
@@ -1056,7 +1060,7 @@ impl Daemon {
                     .to_string(),
             );
         }
-        // E2E-6: the refused-leg note lands in producer order after the
+        // The refused-leg note lands in producer order after the
         // pipeline's own response annotations (assembled above). The only
         // other response annotation a recall makes is `traversal`, and the two
         // never coexist in a result: a dispatched structural answer returns
@@ -1079,36 +1083,36 @@ impl Daemon {
         Ok(result)
     }
 
-    /// Cycles completed since [`Daemon::spawn`] (XP-6).
+    /// Cycles completed since [`Daemon::spawn`].
     ///
     /// A cycle increments this only after it finishes, so a test can assert
     /// "a full cycle ran and published nothing" instead of sleeping and hoping.
-    /// A cycle that panicked (CONC-4) does not count.
+    /// A cycle that panicked does not count.
     pub fn cycles(&self) -> u64 {
         self.cycles.load(Ordering::Acquire)
     }
 
     /// The most recent GC run's [`gc::GcOutcome`], or `None` before the first
-    /// run (XP-5).
+    /// run.
     ///
-    /// This is T6.4's canonical-budget signal — `canonical_count`,
+    /// This is the canonical-budget signal — `canonical_count`,
     /// `canonical_over_budget` and the ceiling it was checked against — plus
     /// `concepts_collected` for an owner mirroring the index itself, the
-    /// advisory `warnings`, and `epoch_after` for T5.4's cache. Everything but
+    /// advisory `warnings`, and `epoch_after` for the recall cache. Everything but
     /// `epoch_after` was previously dropped on the floor inside `run_loop`.
     pub fn last_gc(&self) -> Option<gc::GcOutcome> {
         self.last_gc.read().clone()
     }
 
     /// Subscribe to the daemon's event channel (spec §6.1). The receiver
-    /// sees every `DaemonEvent` published after subscription; P8's
+    /// sees every `DaemonEvent` published after subscription; the surface's
     /// `mem.events()` delegates here.
     ///
     /// A dropped receiver is not an error and a lagging receiver never blocks
     /// the daemon — it misses messages (`RecvError::Lagged`) and re-syncs to
     /// the newest retained window.
     ///
-    /// ## Subscribe **before** [`Daemon::spawn`] (CONC-3)
+    /// ## Subscribe **before** [`Daemon::spawn`]
     ///
     /// The loop's first cycle is the warm-up (spec §2.5), and it runs
     /// immediately — on a resumed session it detects and publishes the whole
@@ -1116,19 +1120,19 @@ impl Daemon {
     /// `Conflict`. `broadcast` delivers only what is sent *after* a receiver
     /// subscribes, so a subscriber created after `spawn` races the warm-up and
     /// normally loses: emission is on transition, so nothing re-publishes for
-    /// its benefit on the next cycle. The re-arm path (CONC-2) republishes a
+    /// its benefit on the next cycle. The re-arm path republishes a
     /// still-held condition only once the ring has wrapped past it, which is
     /// not a delivery guarantee for a late subscriber.
     ///
-    /// P8 must therefore call `events()` **before** `spawn()`. Pinned by
+    /// The surface must therefore call `events()` **before** `spawn()`. Pinned by
     /// `daemon::tests::conditions::late_subscriber_misses_the_warm_up_condition_set`.
     pub fn events(&self) -> broadcast::Receiver<DaemonEvent> {
         self.events.subscribe()
     }
 
     /// The daemon's event **sender** (spec §6.1's single channel), for
-    /// non-daemon publishers — P6's canonization evaluator calls
-    /// [`events::emit_canonized`] with it (XP-4).
+    /// non-daemon publishers — the canonization evaluator calls
+    /// [`events::emit_canonized`] with it.
     ///
     /// Every clone feeds the same ring, so `Canonized` events reach the same
     /// [`Daemon::events`] subscribers as the daemon's own detector events, and
@@ -1136,11 +1140,11 @@ impl Daemon {
     /// channel. Publish with [`events::EventSender::send`] (or
     /// [`events::emit_canonized`]) and nothing else is required of the caller.
     ///
-    /// ## Why this is not a `broadcast::Sender` (NEW-3)
+    /// ## Why this is not a `broadcast::Sender`
     ///
     /// It used to be. Every publisher must advance the channel's shared
     /// publication counter, because that counter is how the loop's re-arm path
-    /// (CONC-2) knows a held condition's event has been pushed out of the ring.
+    /// knows a held condition's event has been pushed out of the ring.
     /// A raw `Sender` clone advanced the ring without advancing the counter, so
     /// an external publisher could evict a held `Conflict` **permanently**: 300
     /// external `Canonized` sends against a continuously-held `Conflict` and 601
@@ -1152,10 +1156,11 @@ impl Daemon {
     /// Handle to the daemon-owned hot list (tests assert maintenance here).
     ///
     /// Two writers maintain it. The loop keeps it equal to each cycle's fresh
-    /// detector hits ([`HotList::retain_conditions`]), and recall **mutates**
+    /// detector hits, up to its bound and contradiction budget
+    /// (`HotList::sync_cycle`), and recall **mutates**
     /// it too: `Daemon::recall_detailed` re-validates the expanded members'
-    /// entries at the recall's `now` ([`HotList::revalidate_members`], T5.3 /
-    /// XP-3), evicting lapsed ones and rebuilding the survivors' payloads.
+    /// entries at the recall's `now` ([`HotList::revalidate_members`]),
+    /// evicting lapsed ones and rebuilding the survivors' payloads.
     /// Both take the graph lock before this one, so consumers must never take
     /// the graph lock while holding this one.
     pub fn hot_list(&self) -> Arc<RwLock<HotList>> {
@@ -1194,45 +1199,56 @@ type Detected = (
 /// keep the hot list equal to what they found. Shared by [`run_cycle`] and
 /// [`Daemon::prime_offline`], so an offline replay detects exactly as a
 /// holder does. Lock order is the caller's: graph read, then hot write.
+///
+/// The detectors insert inside [`HotList::sync_cycle`], which defers the
+/// sort, the bound and the contradiction budget while they run, cuts the
+/// list to the cycle's condition set, and only then enforces both, once
+/// (#298). Enforcing on every insert let an entry the cycle no longer detects
+/// evict a fresh hit of a lower tier before it was itself dropped.
 fn detect_into_hot_list(
     h: &mut HotList,
     g: &Graph,
     params: &CycleParams,
     now: DateTime<Utc>,
 ) -> Detected {
-    // #19(c): hot-list only, so its pairs keep their entries below but
-    // never enter `fresh`, which drives events. Inserted FIRST (review
-    // L3): it shares conflict's severity tier, and within a tier the
-    // entry inserted last ranks higher and is evicted last, so a
-    // persistent contradiction never pushes a transient conflict off a
-    // full hot list. Lower tiers are evicted before either.
-    let contradiction_hits =
-        contradiction::insert_contradictions(h, g, params.contradiction_evidence_min_age, now);
-    let conflict_hits = conflict::insert_conflicts(h, g, params.conflict_window, now);
-    let drift_hits = drift::record(h, g, params.drift_threshold);
-    let stale_hits = events::insert_stale(h, g, params.stale_window, now);
-    let high_risk_hits = events::insert_high_risk(h, g, params.high_risk_window, now);
-    // Hot list = this cycle's fresh hits (finding 2): drop entries
-    // whose (condition, node) is no longer detected — a HighRisk
-    // entry whose 30s window elapsed ages out here, not in a frozen
-    // captured-`now` predicate. Also removes the old
-    // O(hot_len × full-graph scan) per-cycle revalidation.
-    let fresh = condition_set(&conflict_hits, &drift_hits, &stale_hits, &high_risk_hits);
-    let mut held = fresh.clone();
-    held.extend(
-        contradiction_hits
-            .iter()
-            .map(|c| (Condition::Contradiction, c.node)),
-    );
-    h.retain_conditions(&held);
-    (conflict_hits, drift_hits, stale_hits, high_risk_hits, fresh)
+    h.sync_cycle(|h| {
+        // #19(c): hot-list only, so its pairs keep their entries below but
+        // never enter `fresh`, which drives events. Inserted FIRST: it
+        // shares conflict's severity tier, and within a tier the
+        // entry inserted last ranks higher and is evicted last, so a
+        // persistent contradiction never pushes a transient conflict off a
+        // full hot list. Lower tiers are evicted before either.
+        let contradiction_hits =
+            contradiction::insert_contradictions(h, g, params.contradiction_evidence_min_age, now);
+        let conflict_hits = conflict::insert_conflicts(h, g, params.conflict_window, now);
+        let drift_hits = drift::record(h, g, params.drift_threshold);
+        let stale_hits = events::insert_stale(h, g, params.stale_window, now);
+        let high_risk_hits = events::insert_high_risk(h, g, params.high_risk_window, now);
+        // Hot list = this cycle's fresh hits: `sync_cycle` drops
+        // entries whose (condition, node) is no longer detected — a
+        // HighRisk entry whose 30s window elapsed ages out here, not in a
+        // frozen captured-`now` predicate — before it enforces the bound
+        // and the budget. Also removes the old O(hot_len × full-graph scan)
+        // per-cycle revalidation.
+        let fresh = condition_set(&conflict_hits, &drift_hits, &stale_hits, &high_risk_hits);
+        let mut held = fresh.clone();
+        held.extend(
+            contradiction_hits
+                .iter()
+                .map(|c| (Condition::Contradiction, c.node)),
+        );
+        (
+            held,
+            (conflict_hits, drift_hits, stale_hits, high_risk_hits, fresh),
+        )
+    })
 }
 
 /// The detected condition set for one cycle — `(condition, node)` pairs.
 ///
-/// Both the emit-on-transition diff (finding 3) and the hot-list sync
-/// (finding 2) key on this set: an event fires when a pair *enters* the set,
-/// and an entry stays on the hot list only while its pair is in it.
+/// Both the emit-on-transition diff and the hot-list sync key on this set:
+/// an event fires when a pair *enters* the set, and an entry stays on the hot
+/// list only while its pair is in it.
 fn condition_set(
     conflict: &[conflict::ConflictHit],
     drift: &[drift::DriftHit],
@@ -1258,21 +1274,23 @@ fn condition_set(
 /// or wake. All work runs under brief synchronous lock scopes (never across
 /// an `.await` — the select is the only suspension point):
 ///
-/// 1. **Rescore — epoch-gated** (T4.1). Only when the graph epoch changed.
+/// 1. **Rescore — epoch-gated**. Only when the graph epoch changed.
 ///    Detection below runs on *every* cycle, so an idle session still ages
-///    into staleness (spec §9 background-daemon semantics; T4.6 finding 1).
-/// 2. **Detect + hot-list sync + publish — every cycle** (T4.6). Run the
+///    into staleness (spec §9 background-daemon semantics).
+/// 2. **Detect + hot-list sync + publish — every cycle**. Run the
 ///    four detectors against the current graph; the hot list is set equal to
-///    this cycle's fresh hits ([`HotList::retain_conditions`] drops entries
-///    whose `(condition, node)` is no longer detected — no captured-`now`
-///    predicate, no ghosts; finding 2). Events are **emit-on-transition**: a
-///    `DaemonEvent` fires when a `(condition, node)` *enters* the detected
-///    set, so a persisting condition is published once, not once per cycle —
-///    a 256-capacity channel is never flooded with duplicates (finding 3).
+///    this cycle's fresh hits, up to its bound and contradiction budget
+///    ([`HotList::sync_cycle`]: entries whose `(condition, node)` is no
+///    longer detected are dropped before the limits are enforced, so they
+///    never evict a fresh hit, #298 — no captured-`now` predicate, no ghosts).
+///    Events are **emit-on-transition**: a `DaemonEvent` fires when a
+///    `(condition, node)` *enters* the detected set, so a persisting condition
+///    is published once, not once per cycle — a 256-capacity channel is never
+///    flooded with duplicates.
 ///    Exit = stop emitting (`DaemonEvent` has no resolved variant — frozen
 ///    §6.1 enum). Hot-list entries still refresh per cycle.
 ///
-///    **Re-arm (CONC-2).** Emit-on-transition alone loses an event
+///    **Re-arm.** Emit-on-transition alone loses an event
 ///    permanently: the transition is recorded whether or not any consumer
 ///    received it, so an event evicted from the ring while its condition
 ///    still holds is never re-published — and the demo's `Conflict` is
@@ -1281,8 +1299,8 @@ fn condition_set(
 ///    published that event can no longer be in the retained window.
 ///
 ///    That count is the **channel's**, shared by every publisher
-///    ([`events::EventSender`], NEW-3), not a loop-private tally: anyone's send
-///    advances the ring, so a publisher outside the loop — P6's
+///    ([`events::EventSender`]), not a loop-private tally: anyone's send
+///    advances the ring, so a publisher outside the loop — the canonizer's
 ///    `emit_canonized` — must advance the same counter or its sends evict a
 ///    held condition invisibly.
 ///
@@ -1300,7 +1318,7 @@ fn condition_set(
 ///    re-published, and a duplicate advisory event is harmless (§6.1 has no
 ///    resolved variant to reconcile against). What is ruled out is the
 ///    permanent loss. An uncounted send would break the guarantee, not merely
-///    delay it, which is why no raw `broadcast::Sender` is handed out (NEW-3).
+///    delay it, which is why no raw `broadcast::Sender` is handed out.
 ///
 ///    **Order.** Publication is highest-severity-first — Conflict, HighRisk,
 ///    Drift, then the single session Stale ([`Condition::severity`]) — so a
@@ -1331,7 +1349,7 @@ fn condition_set(
 ///    Detection runs before GC: events reflect what the session's writes
 ///    did, GC is housekeeping after.
 ///
-///    **Scoring stays inside the write guard (CONC-1, decided).** GC's step-2
+///    **Scoring stays inside the write guard (decided).** GC's step-2
 ///    rescore is deliberately *not* hoisted to a read snapshot. Step 2 must
 ///    score post-step-1 state, so a hoist means write-guard step 1, release,
 ///    score, re-acquire for steps 2–3 — a TOCTOU window in which a concurrent
@@ -1343,18 +1361,18 @@ fn condition_set(
 ///    degree)`, so atomicity is kept and the hold shrinks by the same factor.
 ///    Revisit only if a profile at scale says otherwise.
 ///
-///    Survivor bumps are chunked (CONC-6/XP-10): step 5 applies at most
+///    Survivor bumps are chunked: step 5 applies at most
 ///    `gc_survivor_bump_chunk` per cycle and the loop drains the remainder on
 ///    following cycles, so one sweep can no longer enqueue twenty flush batches
 ///    from inside the guard. GC does not re-run while a drain is outstanding.
 ///
-///    **A sweep must not fund the next one (NEW-2).** Survivor bumps are
+///    **A sweep must not fund the next one.** Survivor bumps are
 ///    mutations, so they advance the epoch; crediting them as *session*
 ///    mutations made GC self-sustaining on an idle session whenever
 ///    `survivors >= gc_interval + chunk` — every drain paid for the next
 ///    sweep, `gc_survived` climbed with no writes at all (crossing
 ///    canonization Stage 1's `>= 3` gate by idling), and the epoch ran away
-///    from T5.4's recall cache. `epoch_after` covers only the bumps applied
+///    from the recall cache. `epoch_after` covers only the bumps applied
 ///    *inside* `gc::run`; the deferred tail lands on later cycles, so each
 ///    drain advances `last_gc_epoch` by exactly what it appended. The elapsed
 ///    measure then counts session writes only, and an idle session reaches a
@@ -1363,7 +1381,7 @@ fn condition_set(
 ///    elapsed by that chunk and the next cycle measures exactly — GC can be
 ///    one cycle late, never early.
 ///
-/// ## Panic containment (CONC-4)
+/// ## Panic containment
 ///
 /// The cycle body is synchronous, so it is run inside `catch_unwind`: a panic
 /// anywhere in scoring, detection, publication or GC is logged and the loop
@@ -1394,7 +1412,7 @@ async fn run_loop(state: LoopState, weights: ScoringWeights, tick: Duration, par
             _ = interval.tick() => false,
             _ = state.wake.notified() => true,
         };
-        // #171 B4: a wake within `WAKE_CYCLE_MIN_GAP` of the last cycle waits
+        // #171: a wake within `WAKE_CYCLE_MIN_GAP` of the last cycle waits
         // out the gap (see the const). Writes landing meanwhile coalesce into
         // the one stored `Notify` permit, and the cycle that runs at the end
         // of the gap rescores the latest epoch, so the table still ends equal
@@ -1422,7 +1440,7 @@ async fn run_loop(state: LoopState, weights: ScoringWeights, tick: Duration, par
                 _ = std::future::ready(()) => {}
             }
         }
-        // CONC-4: contain a panic in the cycle body — log it, keep the loop.
+        // Contain a panic in the cycle body — log it, keep the loop.
         let contained = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             run_cycle(&state, &weights, &params, &mut cycle_state);
         }));
@@ -1439,7 +1457,7 @@ async fn run_loop(state: LoopState, weights: ScoringWeights, tick: Duration, par
 }
 
 /// The least idle time between the end of one daemon cycle and a
-/// wake-triggered start of the next (#171 B4).
+/// wake-triggered start of the next (#171).
 ///
 /// Every write wakes the daemon, and a woken cycle whose epoch moved rescores
 /// every concept under the graph read guard. Under a steady stream of writes
@@ -1451,7 +1469,7 @@ async fn run_loop(state: LoopState, weights: ScoringWeights, tick: Duration, par
 ///
 /// The cost is staleness: the score table may trail the graph by up to this
 /// much longer after a burst, and a recall in that window is computed fresh
-/// rather than cached (P5-3). Ticks are not delayed (a tick due inside the
+/// rather than cached. Ticks are not delayed (a tick due inside the
 /// gap ends it), and the first wake after an idle spell runs at once.
 pub(crate) const WAKE_CYCLE_MIN_GAP: Duration = Duration::from_millis(25);
 
@@ -1463,32 +1481,32 @@ pub(crate) const WAKE_CYCLE_MIN_GAP: Duration = Duration::from_millis(25);
 struct CycleState {
     /// `None` → the first cycle always rescores (warm-up), then epoch-gated.
     /// Set only after the cycle's table is published, so a rescore that
-    /// panicked is retried on the next cycle (#79 review L1).
+    /// panicked is retried on the next cycle (#79).
     last_epoch: Option<u64>,
     /// The epoch whose rescore last panicked and was logged at WARN, so a
-    /// failure that repeats every cycle warns once per epoch (#79 review F1).
+    /// failure that repeats every cycle warns once per epoch (#79).
     rescore_failed_epoch: Option<u64>,
-    /// Emit-on-transition (finding 3) + re-arm (CONC-2): every currently-held
+    /// Emit-on-transition + re-arm: every currently-held
     /// `(condition, node)` maps to the channel's publication index at its last
     /// emission ([`events::EventSender::send`]'s return). A pair absent from the
     /// map is entering the set and publishes; a pair whose stamp is
     /// `event_capacity` publications old has been pushed out of the broadcast
     /// ring and publishes again.
     ///
-    /// The count lives on the channel, not here (NEW-3): it must include **every**
+    /// The count lives on the channel, not here: it must include **every**
     /// publisher's sends, since anyone's send advances the ring. Only ever compared
     /// as a difference against these stamps, so wrap-around is not a concern (u64).
     armed: HashMap<(Condition, NodeId), u64>,
-    /// Survivor bumps the last GC run deferred (CONC-6/XP-10). Drained a chunk
+    /// Survivor bumps the last GC run deferred. Drained a chunk
     /// per cycle; GC does not re-run until it is empty.
     gc_pending: Vec<NodeId>,
 }
 
 /// One cycle: rescore, detect, publish, GC. Fully synchronous — no `.await`, so
 /// the graph lock is structurally incapable of spanning a suspension point
-/// (spec §6.4) and the whole body fits inside one `catch_unwind` (CONC-4).
+/// (spec §6.4) and the whole body fits inside one `catch_unwind`.
 /// The rescore also has its own, so a rescore that keeps panicking does not
-/// starve detection, the hot list and GC (#79 review F1).
+/// starve detection, the hot list and GC (#79).
 fn run_cycle(
     state: &LoopState,
     weights: &ScoringWeights,
@@ -1521,11 +1539,11 @@ fn run_cycle(
     let epoch = graph.read().epoch();
     let now = clock();
 
-    // 1. Rescore — only when the epoch changed (finding 1: detection is
+    // 1. Rescore — only when the epoch changed (detection is
     //    NOT epoch-gated; an idle session must age into staleness).
     if cs.last_epoch != Some(epoch) {
-        // #79 review F1: the rescore has its own `catch_unwind`. Under the
-        // cycle-wide one (CONC-4) a rescore that panics on every attempt (a
+        // #79: the rescore has its own `catch_unwind`. Under the
+        // cycle-wide one, a rescore that panics on every attempt (a
         // pathological node in `score_concept`) unwound past detection, the
         // hot list and GC on every cycle, because `last_epoch` stays unset
         // and each cycle retries. Contained here, the cycle carries on.
@@ -1544,7 +1562,7 @@ fn run_cycle(
         match rescored {
             Ok(ranked) => {
                 *scores.write() = ScoreTable { epoch, ranked };
-                // Only once the table is published (#79 review L1). A failed
+                // Only once the table is published (#79). A failed
                 // rescore leaves `last_epoch` behind, so the next cycle
                 // retries. Marking the epoch done first left the table stale
                 // until the next write, and with #79 a fresh concept missing
@@ -1622,7 +1640,7 @@ fn run_cycle(
         }
     }
 
-    // Pass 2 — re-arm ONE held pair (CONC-2). Stamps are unique, so
+    // Pass 2 — re-arm ONE held pair. Stamps are unique, so
     // "oldest stamp" is a total order: the pair whose event has been out of
     // the retained window longest goes first, and re-publishing it moves it
     // to the back of the queue. One per cycle is what keeps re-arm from
@@ -1633,7 +1651,7 @@ fn run_cycle(
         .min_by_key(|(_, stamp)| **stamp)
         .map(|(pair, stamp)| (*pair, *stamp))
     {
-        // NEW-3: the count is the channel's, so an external publisher's sends
+        // The count is the channel's, so an external publisher's sends
         // are measured too — they evict from the same ring.
         if sender.emitted_total() - stamp >= params.event_capacity as u64 {
             let event = match pair.0 {
@@ -1663,14 +1681,14 @@ fn run_cycle(
         }
     }
 
-    // 3a. Deferred survivor bumps from the last GC run (CONC-6/XP-10) —
+    // 3a. Deferred survivor bumps from the last GC run —
     //     one chunk per cycle, and always to empty before the next run, so
     //     no concept ever carries two outstanding bumps.
     if !cs.gc_pending.is_empty() {
         let mut g = graph.write();
         let applied =
             gc::drain_survivor_bumps(&mut g, &mut cs.gc_pending, params.gc_survivor_bump_chunk);
-        // NEW-2: a drain's own mutations must not be credited as session
+        // A drain's own mutations must not be credited as session
         // mutations toward the next `gc_interval`. `bump_gc_survived` appends
         // exactly one `UpsertNode` per applied bump and the epoch bumps once
         // per appended mutation, so advancing the watermark by `applied`
@@ -1713,7 +1731,7 @@ fn run_cycle(
     }
     // The drain above may have moved the watermark past this cycle's `epoch`
     // snapshot; `sweep_due` saturates, so that reads as zero elapsed (GC one
-    // cycle late, never early — NEW-2).
+    // cycle late, never early).
     let trigger = if cs.gc_pending.is_empty() {
         gc::sweep_due(
             epoch,
@@ -1733,7 +1751,7 @@ fn run_cycle(
                 &mut g,
                 gc::GcParams {
                     now,
-                    // ALGO-4: GC's eviction ranking uses the session's own
+                    // GC's eviction ranking uses the session's own
                     // weights, not a second hardcoded default.
                     weights: *weights,
                     max_canonical_nodes: params.max_canonical_nodes,
@@ -1747,16 +1765,16 @@ fn run_cycle(
             // Issue #29: the durable watermark and sweep time, set under the
             // sweep's own guard so they drain with its mutations.
             g.record_gc_sweep(outcome.epoch_after, now);
-            // Spec §9 step 4 (XP-5): mirror collections into the owner's
+            // Spec §9 step 4: mirror collections into the owner's
             // index when it gave us one. Held WITH the graph lock so
-            // recall's (graph, index) read pair sees an atomic publication
-            // (P5 phase-close finding); lock order stays graph -> index.
+            // recall's (graph, index) read pair sees an atomic publication;
+            // lock order stays graph -> index.
             if let Some(index) = index.as_ref() {
                 gc::sync_index(&outcome, &mut index.write());
             }
             outcome
         };
-        // XP-5: the tier had zero logging, so the advisory
+        // The tier had zero logging, so the advisory
         // `max_concept_nodes` warning and the canonical-budget signal were
         // unobservable. Both ride `GcOutcome::warnings`.
         for warning in &outcome.warnings {
@@ -1780,8 +1798,8 @@ fn run_cycle(
         *last_gc.write() = Some(outcome);
     }
 
-    // Last statement: a panicking cycle (CONC-4) does not count as completed,
-    // so `Daemon::cycles` is a witness that the whole body ran (XP-6).
+    // Last statement: a panicking cycle does not count as completed, so
+    // `Daemon::cycles` is a witness that the whole body ran.
     cycles.fetch_add(1, Ordering::Release);
 }
 

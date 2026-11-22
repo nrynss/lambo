@@ -1,25 +1,20 @@
-//! T3.5 — `load_session()` / startup materialization (spec §2.5).
+//! `load_session()` / startup materialization (spec §2.5).
 //!
 //! Turns a durable [`crate::types::GraphSnapshot`] into a live session in RAM:
 //! the [`Graph`]
 //! (via [`Graph::from_snapshot`], which re-verifies every §5.7 invariant before
 //! returning) and the session's [`InvertedIndex`] rebuilt from the **same**
-//! snapshot (T2.6's rebuild-from-graph path). A missing session is a first use,
-//! not an error — see [`load_session`].
+//! snapshot (the index's rebuild-from-graph path). A missing session is a first
+//! use, not an error — see [`load_session`].
 //!
 //! ## Daemon warm-up rescore seam (spec §2.5)
 //!
 //! The daemon's warm-up rescore over a freshly loaded session is **not** this
-//! module's job and is deliberately not implemented or stubbed here. The seam:
-//! the session owner (P3's `Memory` type, which owns `Arc<RwLock<Graph>>` plus
-//! the [`InvertedIndex`]) calls [`load_session`] at startup and, when the store
-//! returned an **existing** session (never for a fresh empty one), emits the
-//! rescore signal. That signal is the warm-up rescore the T4.1 daemon task
-//! skeleton is *intended* to wake on (planned, not yet present), transported
-//! via the T4.6 event channel — today the channel exists only as
-//! [`crate::types::DaemonEvent`]; neither the transport nor the skeleton is in
-//! the tree yet. Once T4.1/T4.6 land, they wire it up — this module only
-//! provides the materialization.
+//! module's job. The session owner (the `Memory` type, which owns
+//! `Arc<RwLock<Graph>>` plus the [`InvertedIndex`]) calls
+//! [`load_session_async`] at startup and then spawns the daemon, whose first
+//! cycle is the warm-up rescore (spec §2.5; `MemoryBuilder::build_attach`).
+//! This module only provides the materialization.
 //!
 //! ## Lock discipline (spec §6.4)
 //!
@@ -35,7 +30,7 @@
 //! to a private worker thread with its own current-thread runtime, so it is
 //! callable from sync startup code and from inside a tokio task alike (a direct
 //! `Handle::block_on` would panic in the latter case). The bridge bounds the
-//! store call with `LOAD_SESSION_TIMEOUT` (F2) so a hung store cannot block
+//! store call with `LOAD_SESSION_TIMEOUT` so a hung store cannot block
 //! the sync caller forever.
 
 use std::future::Future;
@@ -47,7 +42,7 @@ use crate::types::{LamboError, SessionId, StoreError};
 use super::GraphStore;
 
 /// A session materialized into RAM: the graph plus its rebuilt inverted index,
-/// and any durable write intents the store holds for it (J3 — unconsumed ones
+/// and any durable write intents the store holds for it (unconsumed ones
 /// are owed a replay by the loading process; consumed-and-retained ones answer
 /// `applied_after_restart` receipt lookups).
 #[derive(Debug)]
@@ -57,7 +52,7 @@ pub struct LoadedSession {
     pub write_intents: Vec<crate::types::WriteIntent>,
 }
 
-/// Default timeout for the sync bridge's store call (F2): without it the
+/// Default timeout for the sync bridge's store call: without it the
 /// worker thread would block forever on a hung store.
 const LOAD_SESSION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -74,7 +69,7 @@ const LOAD_SESSION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 ///   invariant violation) surfaces from [`Graph::from_snapshot`] as a typed
 ///   [`StoreError::Invariant`] — never a panic.
 ///
-/// This is the async CORE (F4): the sync [`load_session`] is a thin wrapper
+/// This is the async CORE: the sync [`load_session`] is a thin wrapper
 /// running it on a private worker thread via the bridge (with
 /// `load_session_with_timeout`'s timeout).
 pub async fn load_session_async(
@@ -97,7 +92,7 @@ pub async fn load_session_async(
 
 /// Materialize a loaded snapshot exactly as [`load_session_async`] does:
 /// quarantine legacy vectors, take the write intents out, rebuild the index
-/// and validate the graph. Also the offline replay's path (#33 D3), so a
+/// and validate the graph. Also the offline replay's path (#33), so a
 /// snapshot it reads becomes the same graph a holder would load.
 pub(crate) fn materialize(
     mut snap: crate::types::GraphSnapshot,
@@ -135,12 +130,15 @@ fn quarantine_legacy_vectors(snap: &mut crate::types::GraphSnapshot) {
             target: "lambo::store::load",
             session_id = %snap.session_id,
             stripped_vectors = stripped,
-            "quarantined legacy vectors with no embedding contract; explicit re-embedding is required"
+            "quarantined legacy vectors with no embedding contract; explicit re-embedding is required. \
+             If no writer has attached since, run `lambo re-embed` to embed every text concept and \
+             record the live contract. A writer attach records the live contract itself, so once one \
+             has attached run `lambo re-embed --missing-only` to fill the vectors instead"
         );
     }
 }
 
-/// [`load_session_async`] bounded by a store-call timeout (F2): a hung store
+/// [`load_session_async`] bounded by a store-call timeout: a hung store
 /// must surface as a typed [`StoreError::Backend`] instead of blocking the
 /// sync caller forever. Runs inside the worker-thread runtime (the bridge),
 /// where `tokio::time::timeout` can actually fire.
@@ -158,11 +156,11 @@ async fn load_session_with_timeout(
 }
 
 /// Load a session from a durable store into RAM (spec §2.5) — **sync
-/// wrapper** over [`load_session_async`] (F4), with the same semantics.
+/// wrapper** over [`load_session_async`], with the same semantics.
 ///
 /// Runs the async core on a private worker thread (see `block_on`) so it is
 /// callable from sync startup code and from inside a tokio task alike. The
-/// store call is bounded by `LOAD_SESSION_TIMEOUT` (F2): a hung store yields
+/// store call is bounded by `LOAD_SESSION_TIMEOUT`: a hung store yields
 /// `StoreError::Backend("load_session timed out after 30s")` instead of a
 /// permanent block.
 pub fn load_session(
@@ -376,9 +374,9 @@ mod tests {
     /// Round-trip through the write-behind path: mutate -> assert invariants ->
     /// drain -> flush -> load, then deep-compare graph and index. Written
     /// generically against `&dyn GraphStore` (a `MemoryStore` instance) so the
-    /// same shape runs against `SqliteStore` unchanged once T3.3 lands.
+    /// same shape runs against `SqliteStore` unchanged.
     ///
-    /// RAM-local metadata (synonyms, reservations — S5) has no `Mutation` kind,
+    /// RAM-local metadata (synonyms, reservations) has no `Mutation` kind,
     /// so the write-behind log cannot carry it: flush -> load restores those as
     /// empty (asserted below); their preservation is the full-snapshot path,
     /// covered by `full_snapshot_round_trip_preserves_ram_local_metadata`.
@@ -389,8 +387,8 @@ mod tests {
         g.assert_invariants().unwrap();
 
         let mut expected = g.snapshot();
-        // The mutation log carries nodes/edges/transitions only (spec §2.4,
-        // S5): drop the RAM-local metadata to get the store-faithful oracle.
+        // The mutation log carries nodes/edges/transitions only (spec §2.4):
+        // drop the RAM-local metadata to get the store-faithful oracle.
         expected.synonyms.clear();
         expected.reservations.clear();
         let epoch_at_drain = g.epoch();
@@ -412,8 +410,8 @@ mod tests {
         assert_eq!(loaded.graph.epoch(), epoch_at_drain);
         loaded.graph.assert_invariants().unwrap();
 
-        // RAM-local metadata is NOT in the write-behind materialization — the
-        // S5 contract, asserted explicitly so nobody "fixes" it by inventing
+        // RAM-local metadata is NOT in the write-behind materialization — by
+        // contract, asserted explicitly so nobody "fixes" it by inventing
         // mutations for synonyms/reservations.
         assert_eq!(loaded.graph.synonyms().count(), 0);
         assert_eq!(loaded.graph.reservations().len(), 0);
@@ -512,7 +510,7 @@ mod tests {
         assert_eq!(loaded3.graph.epoch(), epoch_2);
     }
 
-    /// Full-snapshot round-trip: seed (the full `GraphSnapshot` save path, S5)
+    /// Full-snapshot round-trip: seed (the full `GraphSnapshot` save path)
     /// -> load_session -> the loaded session deep-equals the original graph
     /// **including** synonyms and the reservation, which only the snapshot
     /// carries. Fixtures-gated because `MemoryStore::seed` is.
@@ -656,7 +654,7 @@ mod tests {
     }
 
     /// `GraphStore` mock whose `load_session` never resolves — exercises the
-    /// sync bridge's store-call timeout (F2). Everything else delegates to an
+    /// sync bridge's store-call timeout. Everything else delegates to an
     /// inner `MemoryStore` (unused by the timeout test, but the trait requires
     /// a full impl).
     #[cfg(feature = "store-memory")]
@@ -760,7 +758,7 @@ mod tests {
         }
     }
 
-    /// F2: the worker-thread bridge must not block forever on a store whose
+    /// The worker-thread bridge must not block forever on a store whose
     /// `load_session` never resolves — the parameterized timeout surfaces a
     /// typed `Backend` error instead.
     #[cfg(feature = "store-memory")]
@@ -786,7 +784,7 @@ mod tests {
         }
     }
 
-    /// F4: the async core is the same load as the sync wrapper — a flush ->
+    /// The async core is the same load as the sync wrapper — a flush ->
     /// `load_session_async` round-trip deep-equals the sync path (which runs
     /// the same core on the bridge), and both restore the same state.
     #[cfg(feature = "store-memory")]
@@ -819,7 +817,7 @@ mod tests {
         }
     }
 
-    /// F4: `load_session_async` keeps the missing-session contract — a
+    /// `load_session_async` keeps the missing-session contract — a
     /// `SessionNotFound` from the store yields a fresh empty session, not an
     /// error.
     #[cfg(feature = "store-memory")]
@@ -836,3 +834,6 @@ mod tests {
         assert!(loaded.index.search("anything", 10).is_empty());
     }
 }
+
+#[cfg(all(test, feature = "store-memory"))]
+mod mixed_cycle_tests;

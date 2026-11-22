@@ -1639,6 +1639,24 @@ fn still_awaited(items: impl Iterator<Item = Pending>) -> Vec<Pending> {
 /// a failure of the device or model, not of any caller's text.
 const CANARY_TEXT: &str = "lambo";
 
+/// Test-only aliases of the coalescer's private constants and its chunking,
+/// for `crate::formal_constants_tests` (#291):
+/// `formal/LamboProofs/BatchQueue.lean` hard-codes the constants in `Cfg.rust`
+/// and `canary`, and the `2 *` ratio in `lcAux`.
+#[cfg(test)]
+pub(crate) mod formal_pins {
+    /// `length_chunks`, the chunking `lcAux` models.
+    pub(crate) fn length_chunks(lens: &[usize]) -> Vec<Vec<usize>> {
+        super::length_chunks(lens)
+    }
+
+    pub(crate) const MAX_BATCH: usize = super::MAX_BATCH;
+    pub(crate) const FORWARD_WIDTH: usize = super::FORWARD_WIDTH;
+    pub(crate) const CHUNK_SLACK_BYTES: usize = super::CHUNK_SLACK_BYTES;
+    pub(crate) const MAX_SINGLE_STREAK: usize = super::MAX_SINGLE_STREAK;
+    pub(crate) const CANARY_TEXT: &str = super::CANARY_TEXT;
+}
+
 /// Debounce is a constant today; kept as a fn so the loop reads against the
 /// shared state it actually uses.
 fn shared_debounce() -> Duration {
@@ -1890,6 +1908,9 @@ pub(crate) mod test_artifact {
         CandleEmbedder::deferred_in(BGE_M3_DIM, opts(dir), Some(cache_dir.to_path_buf()))
     }
 }
+
+#[cfg(test)]
+mod proptests;
 
 #[cfg(test)]
 mod tests {

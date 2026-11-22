@@ -1,4 +1,4 @@
-//! Canonization stages Candidate → Venerable → Canonical (P6, spec §10).
+//! Canonization stages Candidate → Venerable → Canonical (spec §10).
 //!
 //! `stage1`/`stage2`/`stage3` are store-agnostic predicates; `eval` is the
 //! write path (one hop per cycle, budget, audit, emit); `task` is the
@@ -6,8 +6,8 @@
 //!
 //! Time: gates measure **event time** — the instant a fact is about — with
 //! flush time as the per-fact fallback (`event_time` module holds the design
-//! and the separation count C2's solo score will consume). The eval's `now`
-//! stays injectable end to end (F8): [`CanonizationTask::with_clock`] pins
+//! and the separation count the solo promotion score consumes). The eval's
+//! `now` stays injectable end to end: [`CanonizationTask::with_clock`] pins
 //! it for tests, and every adapter resolves stored instants against the
 //! caller-supplied anchor rather than reading a clock of its own.
 
@@ -50,6 +50,7 @@ pub use gate::{
 };
 pub use policy::{
     solo_breakdown, PromotionPolicy, PromotionScorer, SoloBreakdown, SoloScorer, SwarmScorer,
+    Writers,
 };
 // `deserialize_promotion_policy` is re-exported because `lambo.toml`'s
 // `promotion_policy` key must be parsed by `PromotionPolicy::from_str` and not
@@ -59,7 +60,37 @@ pub use policy::{
 // narrowest one that works, and keeps serde plumbing off the library's semver
 // surface (there is nothing an external caller could do with it).
 pub(crate) use policy::deserialize_config_value as deserialize_promotion_policy;
-pub use stage1::{dependent_interaction_counts, dependent_interactions, stage1_candidates};
+pub use stage1::{
+    dependent_interaction_counts, dependent_interactions, solo_dependent_interaction_counts,
+    solo_dependent_interactions, stage1_candidates,
+};
 pub use stage2::{stage2_evidence_passes, stage2_passes, stage2_passes_with_window};
 pub use stage3::{last_demotion_time, stage3_passes};
 pub use task::CanonizationTask;
+
+/// Test-only access to two private stage predicates, for
+/// `crate::formal_oracle_tests` (#291), which replays
+/// `formal/oracle/Canon.json` through them.
+#[cfg(test)]
+pub(crate) mod formal_oracle {
+    pub(crate) use super::stage1::stage1_evidence_passes;
+    pub(crate) use super::stage3::in_repromotion_cooldown;
+}
+
+/// Test-only aliases of the stage thresholds and the Solo score's weights and
+/// bars, for `crate::formal_constants_tests` (#291):
+/// `formal/LamboProofs/Canon.lean` and `Policy.lean` hard-code them, and
+/// `stage1`, `stage2`, `stage3` and `policy` are private modules.
+#[cfg(test)]
+pub(crate) mod formal_pins {
+    pub(crate) use super::policy::{
+        CANDIDATE_BAR, CANONICAL_BAR, DEPENDENT_INTERACTION_WEIGHT, HUMAN_CONFIRMED_WEIGHT,
+        REVERT_WEIGHT, SESSION_SEPARATION, SESSION_WEIGHT, VENERABLE_BAR,
+    };
+
+    pub(crate) const MIN_GC_SURVIVED: i32 = super::stage1::MIN_GC_SURVIVED;
+    pub(crate) const MIN_DEPENDENT_INTERACTIONS: usize = super::stage1::MIN_DEPENDENT_INTERACTIONS;
+    pub(crate) const MIN_DISTINCT: u64 = super::stage2::MIN_DISTINCT;
+    pub(crate) const MIN_COVERAGE: f64 = super::stage2::MIN_COVERAGE;
+    pub(crate) const MIN_BLAST_RADIUS: u64 = super::stage3::MIN_BLAST_RADIUS;
+}
