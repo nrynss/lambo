@@ -361,6 +361,52 @@ fn the_commit_refuses_self_and_cycle_it_could_not_see_at_the_ack() {
     assert_eq!(g.snapshot(), before);
 }
 
+/// `closing_edge` counts the call's own planned edges, not just the graph's:
+/// two existing concepts re-derived in one call, each citing the other, close
+/// a cycle only through each other's planned edge. The pre-pass
+/// (`validate_scoped`) refuses the call, and so does the commit
+/// (`write_edges`) when handed pins that skipped it (each citation validated
+/// on its own, where it passes). Lean: `Cite.batch_acyclic`, whose check
+/// searches the combined graph.
+#[test]
+fn mutual_citations_in_one_call_are_refused() {
+    let (mut g, i) = graph("cite-mutual");
+    concept(&mut g, i, RULING, ConceptType::Logic);
+    concept(&mut g, i, DECISION, ConceptType::Logic);
+    let concepts = [(RULING, ConceptType::Logic), (DECISION, ConceptType::Logic)];
+    let both = [cite(RULING, &[DECISION]), cite(DECISION, &[RULING])];
+    let before = g.snapshot();
+
+    let pre_pass = validate_scoped(&g, &concepts, &both, &ParentOf::none())
+        .err()
+        .map(|e| refusal(&e).kind.clone());
+
+    let mut pinned = validate_scoped(&g, &concepts, &both[..1], &ParentOf::none()).unwrap();
+    let second = validate_scoped(&g, &concepts, &both[1..], &ParentOf::none()).unwrap();
+    pinned.references.extend(second.references);
+    assert_eq!(pinned.references.len(), 2);
+    let commit = derive_cited(
+        &mut g,
+        i,
+        &agent(),
+        &concepts,
+        &ParentOf::none(),
+        10,
+        &pinned,
+    )
+    .err()
+    .map(|e| refusal(&e).kind.clone());
+    // Both paths, reported together, so neither hides the other.
+    assert_eq!(
+        (pre_pass, commit),
+        (
+            Some(ReferenceRefusalKind::Cycle),
+            Some(ReferenceRefusalKind::Cycle)
+        )
+    );
+    assert_eq!(g.snapshot(), before);
+}
+
 /// The background refuses exactly what the pre-pass refuses: handed pins
 /// that skipped the pre-pass's self and cycle checks, the commit refuses
 /// them with the same kinds.
