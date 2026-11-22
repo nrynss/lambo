@@ -6,7 +6,7 @@ use super::*;
 /// publishes the seven spec tools and `lambo_stale`: #22's image tool is not listed
 /// where it cannot work (design 6.1).
 #[tokio::test]
-async fn the_router_publishes_exactly_the_seven_spec_tools() {
+async fn the_router_publishes_exactly_the_eight_core_tools() {
     let s = text_only_server("mcp-seven", Config::default()).await;
     let mut names: Vec<String> = tools(&s).iter().map(|t| t.name.to_string()).collect();
     names.sort();

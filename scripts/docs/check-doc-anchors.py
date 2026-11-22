@@ -14,7 +14,7 @@ anchor, written exactly as one of:
     {/* lean: Canon.stage1Passes, Policy.Edge.dependence */}
     {/* const: MIN_GC_SURVIVED, ScoringWeights::default */}
     {/* code: src/canon/stage3.rs stage3_passes, src/config.rs Config::default */}
-    {/* test: src/mcp/server/tests/schemas.rs the_router_publishes_exactly_the_seven_spec_tools */}
+    {/* test: src/mcp/server/tests/schemas.rs the_router_publishes_exactly_the_eight_core_tools */}
     {/* oracle: Canon.json stage1Passes#2 */}
 
 The rules:
