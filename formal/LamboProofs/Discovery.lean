@@ -3,8 +3,8 @@
 
 Model of `Discovery::sessions` in `src/cli/serve_web/discovery.rs`: the
 store-wide read (`GraphStore::store_health`) behind the `/api/sessions`
-listing when `[web] discover_sessions` is on, single-flighted so the store
-sees one read at a time, and the rule that decides when a request may take
+listing when `[web] discover_sessions` is on, single-flighted so the portal
+issues one read at a time, and the rule that decides when a request may take
 the outcome of a read it did not start itself.
 
 ## Model
@@ -44,9 +44,11 @@ Two join rules (`Rule`):
   In the Rust, `Last.started` is bumped under the `last` lock while the gate
   is held, before `store_health` is called, and `Last.finished` keeps the
   latest finished read's number beside its outcome; a dropped owner leaves
-  `finished` as it was (`Ev.abandon`). The gate still serialises reads, so
-  concurrent requests cost at most two reads: the one running when they
-  arrived, which they do not share, and the next, which they all share.
+  `finished` as it was (`Ev.abandon`). The gate still serialises reads.
+  A request that arrives during a read never shares it and costs at most
+  one more read of its own; requests that arrive during one read share the
+  next read when it finishes (`fixed_shares`), whatever order they take the
+  gate in, unless that read is abandoned.
 
 ## Results
 
@@ -64,8 +66,10 @@ Two join rules (`Rule`):
 * `fixed_no_erased_listed`: under the fix, no request lists a session erased
   before it arrived (`NoErasedListed`): the promise of the module docs.
 * `one_read_at_a_time` (either rule): a read starts only when none is
-  running, and the running read is one `Option`, so the store sees at most
-  one read at a time.
+  running, and the running read is one `Option`, so the portal issues at
+  most one read at a time. (A read the portal gave up on, timed out or
+  dropped, is `Ev.abandon` here; its query may still be running in the
+  backend, which the model does not see.)
 * `fixed_shares`: the fix still shares. Three requests, the second and third
   arriving during the first one's read, cost two reads; the third takes the
   second's outcome, which began after it arrived.

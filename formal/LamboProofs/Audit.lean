@@ -25,6 +25,7 @@ import LamboProofs.BatchQueue
 import LamboProofs.Registry
 import LamboProofs.Resolve
 import LamboProofs.Tiered
+import LamboProofs.Discovery
 
 /-
 # Axiom audit
@@ -875,3 +876,14 @@ open Lambo
 #print axioms Lambo.Tiered.projectFinal_misses_relabel
 #print axioms Lambo.Tiered.projectFinal_ahead_of_durable
 #print axioms Lambo.Tiered.reorder_changes_durable
+
+-- serve-web session discovery listing (#276)
+#print axioms Lambo.Discovery.old_lists_erased
+#print axioms Lambo.Discovery.old_not_fresh
+#print axioms Lambo.Discovery.old_violates
+#print axioms Lambo.Discovery.fixed_coderabbit
+#print axioms Lambo.Discovery.fixed_shares
+#print axioms Lambo.Discovery.fixed_fresh
+#print axioms Lambo.Discovery.listing_safe
+#print axioms Lambo.Discovery.fixed_no_erased_listed
+#print axioms Lambo.Discovery.one_read_at_a_time
