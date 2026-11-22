@@ -294,11 +294,13 @@ Thresholds as in the source. Coverage is the fraction `num / den`, compared by
 cross-multiplication so no division appears. -/
 
 /-- Stage 1 (Swarm), `stage1_candidates`: `gc_survived >= 3 &&
-dependent_interactions >= 2`. -/
+dependent_interactions >= 2`.
+Pinned by `formal_constants_tests::canon`. -/
 def stage1Passes (gcSurvived dependentInteractions : Nat) : Bool :=
   decide (3 ≤ gcSurvived) && decide (2 ≤ dependentInteractions)
 
-/-- Stage 2, `stage2_evidence_passes`: `distinct >= 3 && coverage >= 0.3`. -/
+/-- Stage 2, `stage2_evidence_passes`: `distinct >= 3 && coverage >= 0.3`.
+Pinned by `formal_constants_tests::canon`. -/
 def stage2Passes (distinct coverageNum coverageDen : Nat) : Bool :=
   decide (3 ≤ distinct) && decide (3 * coverageDen ≤ 10 * coverageNum)
 
@@ -308,7 +310,8 @@ def inCooldown (lastDemotion : Option Int) (cooldown now : Int) : Bool :=
   | none => false
   | some t => decide (now < t + cooldown)
 
-/-- Stage 3, `stage3_passes`: not cooling down, and `blast > 5`. -/
+/-- Stage 3, `stage3_passes`: not cooling down, and `blast > 5`.
+Pinned by `formal_constants_tests::canon`. -/
 def stage3Passes (lastDemotion : Option Int) (cooldown now : Int) (blast : Nat) : Bool :=
   !inCooldown lastDemotion cooldown now && decide (5 < blast)
 

@@ -67,3 +67,21 @@ pub use stage1::{
 pub use stage2::{stage2_evidence_passes, stage2_passes, stage2_passes_with_window};
 pub use stage3::{last_demotion_time, stage3_passes};
 pub use task::CanonizationTask;
+
+/// Test-only aliases of the stage thresholds and the Solo score's weights and
+/// bars, for `crate::formal_constants_tests` (#291):
+/// `formal/LamboProofs/Canon.lean` and `Policy.lean` hard-code them, and
+/// `stage1`, `stage2`, `stage3` and `policy` are private modules.
+#[cfg(test)]
+pub(crate) mod formal_pins {
+    pub(crate) use super::policy::{
+        CANDIDATE_BAR, CANONICAL_BAR, DEPENDENT_INTERACTION_WEIGHT, HUMAN_CONFIRMED_WEIGHT,
+        REVERT_WEIGHT, SESSION_SEPARATION, SESSION_WEIGHT, VENERABLE_BAR,
+    };
+
+    pub(crate) const MIN_GC_SURVIVED: i32 = super::stage1::MIN_GC_SURVIVED;
+    pub(crate) const MIN_DEPENDENT_INTERACTIONS: usize = super::stage1::MIN_DEPENDENT_INTERACTIONS;
+    pub(crate) const MIN_DISTINCT: u64 = super::stage2::MIN_DISTINCT;
+    pub(crate) const MIN_COVERAGE: f64 = super::stage2::MIN_COVERAGE;
+    pub(crate) const MIN_BLAST_RADIUS: u64 = super::stage3::MIN_BLAST_RADIUS;
+}

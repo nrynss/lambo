@@ -1184,7 +1184,8 @@ table `STEM`; the rest follow the Porter2 rules by hand, and every collision and
 non-collision stated below was checked against a local debug build of
 `lambo derive` (a match against the earlier concept, or a new one). -/
 
-/-- `STOPWORDS`. -/
+/-- `STOPWORDS`.
+Pinned by `formal_constants_tests::canonical`. -/
 def stopwords : List String :=
   ["the", "a", "an", "for", "of", "at", "in", "to", "on", "and", "or", "is", "are"]
 

@@ -321,7 +321,8 @@ section Truncation
 
 variable {α : Type}
 
-/-- `usize::MAX` on a 64-bit target. -/
+/-- `usize::MAX` on a 64-bit target.
+Pinned by `formal_constants_tests::fit`. -/
 def usizeMax : Nat := 2 ^ 64 - 1
 
 /-- `fits`: within budget and not the saturated `usize::MAX`
@@ -1242,7 +1243,8 @@ theorem fitBlocks_rendered_zero_iff_of_le (rest : List (Block α)) (maxT : Nat)
 
 /-- `default_token_count` on a byte count: `ceil(bytes / 3.5) = ceil(2 bytes /
 7)`. The Rust's `f64` computation agrees for every length below `2^52` (the
-argument is in the header). -/
+argument is in the header).
+Pinned by `formal_constants_tests::fit`. -/
 def defaultG (bytes : Nat) : Nat := (2 * bytes + 6) / 7
 
 /-- `default_token_count` on chars, measuring UTF-8 bytes. -/
@@ -1256,11 +1258,13 @@ def rustWs (c : Char) : Bool :=
     v == 0x205F || v == 0x3000
 
 /-- The Rust constants: `SEPARATOR`, `ELLIPSIS`, the newline before the
-marker. -/
+marker.
+Pinned by `formal_constants_tests::fit`. -/
 def rustEnv (est : List Char → Nat) : Env Char :=
   ⟨est, ['\n', '\n'], ['…'], ['\n'], rustWs⟩
 
-/-- `truncation_marker(n, inspect_id, scope)`. -/
+/-- `truncation_marker(n, inspect_id, scope)`, both forms.
+Pinned by `formal_constants_tests::fit`. -/
 def rustMarker (inspectId : List Char) (scope : Option (List Char)) (n : Nat) : List Char :=
   "[truncated: ".toList ++ Nat.toDigits 10 n ++ " tokens left out; lambo_inspect ".toList ++
     inspectId ++

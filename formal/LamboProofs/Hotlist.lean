@@ -192,7 +192,8 @@ inductive Cond
   | contradiction
   deriving DecidableEq, Repr
 
-/-- `Condition::severity`: conflict and contradiction share the top tier. -/
+/-- `Condition::severity`: conflict and contradiction share the top tier.
+Pinned by `formal_constants_tests::hotlist`. -/
 def Cond.severity : Cond → Nat
   | .conflict => 3
   | .contradiction => 3
@@ -238,10 +239,12 @@ variable {ν : Type}
 /-- The dedup key `(node, condition)`. -/
 def key (e : Entry ν) : ν × Cond := (e.node, e.cond)
 
-/-- `default_contradiction_max`: half the bound, rounded down. -/
+/-- `default_contradiction_max`: half the bound, rounded down.
+Pinned by `formal_constants_tests::hotlist`. -/
 def defaultCmax (max : Nat) : Nat := max / 2
 
-/-- `HOT_LIST_MAX`. -/
+/-- `HOT_LIST_MAX`.
+Pinned by `formal_constants_tests::hotlist`. -/
 def hotListMax : Nat := 1000
 
 /-- `HotList::with_budget`. -/

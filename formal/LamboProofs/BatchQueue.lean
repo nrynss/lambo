@@ -201,7 +201,8 @@ structure Cfg where
   deriving DecidableEq, Repr
 
 /-- `MAX_BATCH = 32`, `FORWARD_WIDTH = 8`, `CHUNK_SLACK_BYTES = 64`,
-`MAX_SINGLE_STREAK = 3`. -/
+`MAX_SINGLE_STREAK = 3`.
+Pinned by `formal_constants_tests::batch_queue` (its Rust side with feature `embed-candle`). -/
 def Cfg.rust : Cfg := ⟨32, 8, 64, 3⟩
 
 /-! ## Texts, vectors and one forward -/
@@ -213,7 +214,8 @@ structure Txt where
   tag : Nat
   deriving DecidableEq, Repr
 
-/-- `CANARY_TEXT = "lambo"`: five bytes, tag 0. -/
+/-- `CANARY_TEXT = "lambo"`: five bytes, tag 0.
+Pinned by `formal_constants_tests::batch_queue` (its Rust side with feature `embed-candle`). -/
 def canary : Txt := ⟨5, 0⟩
 
 /-- An embedding, reduced to its width (`Vec<f32>::len`) and a tag. -/
@@ -327,7 +329,8 @@ def sortBy (key : Nat → Nat) (l : List Nat) : List Nat :=
 def lenAt (lens : List Nat) (i : Nat) : Nat := lens.getD i 0
 
 /-- The chunking loop, carrying the open chunk `cur` and its first index `h`
-(`chunk[0]`). -/
+(`chunk[0]`).
+Pinned by `formal_constants_tests::batch_queue` (its Rust side with feature `embed-candle`). -/
 def lcAux (c : Cfg) (len : Nat → Nat) (cur : List Nat) (h : Nat) :
     List Nat → List (List Nat)
   | [] => [cur]

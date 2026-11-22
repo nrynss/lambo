@@ -705,7 +705,8 @@ theorem sessionCount_window (gap : Nat) (l : List Int) (m : Int) (hm : m ∈ l)
 /-- Seconds since the epoch of the Rust tests' `ts(0)`. -/
 def base : Int := 1752000000
 
-/-- One day: `SESSION_SEPARATION`, 86 400 s. -/
+/-- One day: `SESSION_SEPARATION`, 86 400 s.
+Pinned by `formal_constants_tests::policy`. -/
 def sessionSeparation : Nat := 86400
 
 /-- Rust test `separation_counts_clusters_once_and_stragglers_each`: a cluster
@@ -1404,7 +1405,8 @@ inductive ConceptType where
   deriving DecidableEq, Repr
 
 /-- `eviction_resistance`, in tenths: Constraint 1.5, Entity 1.2, Logic 1.1,
-Resource 1.0, Observation 0.7. -/
+Resource 1.0, Observation 0.7.
+Pinned by `formal_constants_tests::policy`. -/
 def ConceptType.resistance10 : ConceptType → Int
   | .constraint => 15
   | .entity => 12
@@ -1412,18 +1414,25 @@ def ConceptType.resistance10 : ConceptType → Int
   | .resource => 10
   | .observation => 7
 
-/-- `SESSION_WEIGHT`. -/
+/-- `SESSION_WEIGHT`.
+Pinned by `formal_constants_tests::policy`. -/
 def sessionWeight : Int := 1
-/-- `HUMAN_CONFIRMED_WEIGHT`. -/
+/-- `HUMAN_CONFIRMED_WEIGHT`.
+Pinned by `formal_constants_tests::policy`. -/
 def humanConfirmedWeight : Int := 4
-/-- `DEPENDENT_INTERACTION_WEIGHT`. -/
+/-- `DEPENDENT_INTERACTION_WEIGHT`.
+Pinned by `formal_constants_tests::policy`. -/
 def dependentInteractionWeight : Int := 2
-/-- `REVERT_WEIGHT`. -/
+/-- `REVERT_WEIGHT`.
+Pinned by `formal_constants_tests::policy`. -/
 def revertWeight : Int := 3
 
-/-- `CANDIDATE_BAR`, `VENERABLE_BAR`, `CANONICAL_BAR`, in tenths. -/
+/-- `CANDIDATE_BAR`, `VENERABLE_BAR`, `CANONICAL_BAR`, in tenths.
+Pinned by `formal_constants_tests::policy`. -/
 def candidateBar10 : Int := 30
+/-- `VENERABLE_BAR`, in tenths. Pinned by `formal_constants_tests::policy`. -/
 def venerableBar10 : Int := 60
+/-- `CANONICAL_BAR`, in tenths. Pinned by `formal_constants_tests::policy`. -/
 def canonicalBar10 : Int := 100
 
 /-- The four terms (`SoloBreakdown`): `sessions` is `recurrence_sessions`,
@@ -1654,7 +1663,8 @@ inductive PromotionPolicy where
   | solo
   deriving DecidableEq, Repr
 
-/-- `#[default]`. -/
+/-- `#[default]`.
+Pinned by `formal_constants_tests::policy`. -/
 def PromotionPolicy.default : PromotionPolicy := .swarm
 
 /-- `PromotionPolicy::ALL`. -/

@@ -101,14 +101,18 @@ use crate::types::LamboError;
 /// Multiplied as a `Duration`, not through `as_secs()`, so a sub-second
 /// `ELECTION_RETRY` cannot truncate it to zero and spin the retry loop; the
 /// floor holds whatever `ELECTION_RETRY` becomes (#32 review nit).
-pub(super) const PINNED_RETRY: Duration = {
-    let five = ELECTION_RETRY.saturating_mul(5);
+pub(super) const PINNED_RETRY: Duration = pinned_retry(ELECTION_RETRY);
+
+/// [`PINNED_RETRY`] for an election retry of `election_retry`: five of
+/// them, never under a second.
+const fn pinned_retry(election_retry: Duration) -> Duration {
+    let five = election_retry.saturating_mul(5);
     if five.as_millis() < 1_000 {
         Duration::from_secs(1)
     } else {
         five
     }
-};
+}
 
 /// The `Retry-After` of an on-demand attach refused because `max_attached`
 /// sessions are attached and none of the on-demand ones is idle to evict
@@ -2080,5 +2084,32 @@ impl super::http_guards::LiveSessions for SessionRegistry {
             total += session.live_mcp_sessions_opened_by(credential).await;
         }
         total
+    }
+}
+
+/// Test-only aliases of the serve's retry and grace constants, for
+/// `crate::formal_constants_tests` (#291): `formal/LamboProofs/Registry.lean`
+/// hard-codes them in `pinnedRetry`, `unplacedCap` and `cfgEx`. They live in
+/// private modules, so the aliases sit here, where all of them are visible.
+#[cfg(test)]
+pub(crate) mod formal_pins {
+    use std::time::Duration;
+
+    pub(crate) const ELECTION_RETRY: Duration = super::super::roles::ELECTION_RETRY;
+    pub(crate) const PINNED_RETRY: Duration = super::PINNED_RETRY;
+    pub(crate) const PREVIOUS_HANDLE_WAIT: Duration = super::PREVIOUS_HANDLE_WAIT;
+    pub(crate) const NEGATIVE_TTL: Duration = super::on_demand::NEGATIVE_TTL;
+    pub(crate) const EVICT_MIN_IDLE: Duration = super::on_demand::EVICT_MIN_IDLE;
+    pub(crate) const UNPLACED_PER_PLACE: usize = super::on_demand::UNPLACED_PER_PLACE;
+    pub(crate) const LEASE_RELEASE_GRACE: Duration = super::super::shutdown::LEASE_RELEASE_GRACE;
+
+    /// `unplaced_cap`, the bound `unplacedCap` models.
+    pub(crate) fn unplaced_cap(max_attached: usize) -> usize {
+        super::unplaced_cap(max_attached)
+    }
+
+    /// `pinned_retry`, the retry `pinnedRetry` models.
+    pub(crate) const fn pinned_retry(election_retry: Duration) -> Duration {
+        super::pinned_retry(election_retry)
     }
 }

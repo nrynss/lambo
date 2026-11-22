@@ -91,6 +91,9 @@ use crate::types::HotListPayload;
 use crate::types::{AgentId, EdgeType, Node, NodeId, RecallHit, Reservation};
 
 mod fit;
+/// The fit's private strings for `crate::formal_constants_tests` (#291).
+#[cfg(test)]
+pub(crate) use fit::formal_pins as fit_formal_pins;
 pub(crate) use fit::{fit_blocks, ContextBlock, FittedContext, Truncation};
 
 /// The structural edge types (spec §4.1 errata: `Derives` provenance and

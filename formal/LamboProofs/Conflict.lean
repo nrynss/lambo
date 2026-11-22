@@ -222,7 +222,8 @@ structure Interaction (A : Type) where
   createdAt : Int
   deriving DecidableEq, Repr
 
-/-- Spec §9 `conflict_recency_window`, `CONFLICT_RECENCY_WINDOW` (30 s). -/
+/-- Spec §9 `conflict_recency_window`, `CONFLICT_RECENCY_WINDOW` (30 s).
+Pinned by `formal_constants_tests::conflict`. -/
 def recencyWindow : Option Nat := some 30
 
 variable {A : Type} [DecidableEq A]

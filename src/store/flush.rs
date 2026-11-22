@@ -157,6 +157,26 @@ const BACKOFF_CAP: Duration = Duration::from_secs(10);
 /// sequences", not the exact value.
 const RETAINED_BACKOFF: Duration = BACKOFF_CAP;
 
+/// The next retry's backoff: double the last, capped at [`BACKOFF_CAP`].
+fn next_backoff(backoff: Duration) -> Duration {
+    (backoff * 2).min(BACKOFF_CAP)
+}
+
+/// Test-only aliases of the backoff ladder, for `crate::formal_constants_tests`
+/// (#291): `formal/LamboProofs/Flush.lean` hard-codes it in milliseconds.
+#[cfg(test)]
+pub(crate) mod formal_pins {
+    use std::time::Duration;
+
+    pub(crate) const BACKOFF_BASE: Duration = super::BACKOFF_BASE;
+    pub(crate) const BACKOFF_CAP: Duration = super::BACKOFF_CAP;
+    pub(crate) const RETAINED_BACKOFF: Duration = super::RETAINED_BACKOFF;
+
+    pub(crate) fn next_backoff(backoff: Duration) -> Duration {
+        super::next_backoff(backoff)
+    }
+}
+
 /// How often the loop may republish its stats row without a flush attempt
 /// (#11). After an attempt it always publishes.
 const STATS_REPUBLISH_INTERVAL: Duration = Duration::from_secs(5);
@@ -1081,7 +1101,7 @@ impl FlushLoop {
                     if self.fenced() {
                         return Err(err);
                     }
-                    backoff = (backoff * 2).min(BACKOFF_CAP);
+                    backoff = next_backoff(backoff);
                 }
             }
         }

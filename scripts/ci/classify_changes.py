@@ -13,6 +13,9 @@ import sys
 RUST_PREFIXES = (
     "src/", "tests/", "migrations/", "fixtures/", "examples/", "web/",
     ".cargo/", ".github/workflows/", "scripts/ci/",
+    # The Lean models: src/formal_constants_tests.rs include_str!s them (#291).
+    # Nothing else under formal/ is read by the Rust build or tests.
+    "formal/LamboProofs/",
 )
 RUST_FILES = {
     "Cargo.toml", "Cargo.lock", "rust-toolchain", "rust-toolchain.toml", "build.rs",

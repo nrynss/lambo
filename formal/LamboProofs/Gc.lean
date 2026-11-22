@@ -143,7 +143,8 @@ inductive EdgeType where
   | suspectedSupersedes
   deriving DecidableEq, Repr
 
-/-- `counts_toward_gc_connectivity` (`src/types/mod.rs`). -/
+/-- `counts_toward_gc_connectivity` (`src/types/mod.rs`).
+Pinned by `formal_constants_tests::gc`. -/
 def EdgeType.countsTowardGcConnectivity : EdgeType → Bool
   | .contradicts => false
   | .suspectedSupersedes => false
@@ -203,7 +204,8 @@ theorem none_deferred_iff {ι : Type} (candidates : List ι) (budget : Nat) :
 
 /-! ## Survivor bumps -/
 
-/-- `i32::MAX`. -/
+/-- `i32::MAX`.
+Pinned by `formal_constants_tests::gc`. -/
 def i32Max : Nat := 2147483647
 
 /-- `gc_survived.saturating_add(1)`. -/

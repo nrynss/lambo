@@ -63,6 +63,14 @@ const STRUCTURAL_MARKERS: [&str; 7] = [
     "what uses",
 ];
 
+/// Test-only alias of [`STRUCTURAL_MARKERS`], for
+/// `crate::formal_constants_tests` (#291): `formal/LamboProofs/Dispatch.lean`
+/// hard-codes the list.
+#[cfg(test)]
+pub(crate) mod formal_pins {
+    pub(crate) const STRUCTURAL_MARKERS: [&str; 7] = super::STRUCTURAL_MARKERS;
+}
+
 /// Classify a query into a recall arm (lexical/vector vs structural).
 ///
 /// A query is `Structural` when one of `STRUCTURAL_MARKERS` occurs in its

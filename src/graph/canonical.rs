@@ -48,6 +48,13 @@ const STOPWORDS: [&str; 13] = [
     "the", "a", "an", "for", "of", "at", "in", "to", "on", "and", "or", "is", "are",
 ];
 
+/// Test-only alias of [`STOPWORDS`], for `crate::formal_constants_tests`
+/// (#291): `formal/LamboProofs/Canonical.lean` hard-codes the list.
+#[cfg(test)]
+pub(crate) mod formal_pins {
+    pub(crate) const STOPWORDS: [&str; 13] = super::STOPWORDS;
+}
+
 /// Shared Snowball English (Porter2) stemmer — created once, reused for every
 /// call.
 static STEMMER: LazyLock<Stemmer> = LazyLock::new(|| Stemmer::create(Algorithm::English));

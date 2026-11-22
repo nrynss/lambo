@@ -513,10 +513,12 @@ signals themselves (`normalized_content`, `distinct_claims`,
 -/
 
 /-- `redundancy::WINDOW_MAX`: the most members `taken` holds, and the cap on
-the window. -/
+the window.
+Pinned by `formal_constants_tests::top_k`. -/
 def windowMax : Nat := 20
 
-/-- `redundancy::window`: `min(20, 4 · top_k)` ordinary members are checked. -/
+/-- `redundancy::window`: `min(20, 4 · top_k)` ordinary members are checked.
+Pinned by `formal_constants_tests::top_k`. -/
 def window (topK : Nat) : Nat := min windowMax (4 * topK)
 
 /-- The hit `s` is redundant with, if any: the first of the first `wmax`

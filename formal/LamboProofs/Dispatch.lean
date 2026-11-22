@@ -192,7 +192,8 @@ inductive Kind where
   | structural
   deriving DecidableEq, Repr
 
-/-- `STRUCTURAL_MARKERS`, verbatim. -/
+/-- `STRUCTURAL_MARKERS`, verbatim.
+Pinned by `formal_constants_tests::dispatch`. -/
 def markerStrings : List String :=
   ["depends on", "depend on", "depends-on", "dependents of", "blast radius",
     "safe to delete", "what uses"]

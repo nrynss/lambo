@@ -379,7 +379,7 @@ rust = [
 [[model]]
 lean = "formal/LamboProofs/Flush.lean"
 read_against = "514da8d7"
-read_digest = "v2:sha256:b7aea37b79c45e9edbed77fd016e085b3ba3fd463ac5e505786285026c97a3e0"
+read_digest = "v2:sha256:22b26bd67c2e06ed58b9f6d3c40b37c54df93e0121a6e896b2af113cad4bd8f9"
 rust = [
   "src/store/flush.rs",
   "src/store/error.rs",
@@ -401,7 +401,7 @@ rust = [
 [[model]]
 lean = "formal/LamboProofs/Registry.lean"
 read_against = "514da8d7"
-read_digest = "v2:sha256:830fb6e3ff9c474a8dc762ebbd5fea103caab367fbeba1318d7d4a2161211238"
+read_digest = "v2:sha256:3a2f3488c9a6af870e63a17adff301ce8cd63af89172e76920d0c1e6d4635c0b"
 rust = [
   "src/mcp/serve/registry.rs",
   "src/mcp/serve/registry/on_demand.rs",
@@ -416,7 +416,7 @@ rust = [
 [[model]]
 lean = "formal/LamboProofs/Resolve.lean"
 read_against = "514da8d7"
-read_digest = "v2:sha256:2005aaf3872e5fc0e620e5208282a88fad49c163d1af9d54325c9e1576b2ce92"
+read_digest = "v2:sha256:e538d73feb2cb62cc52fab2f51d5016421c2e6e62e34baf45b77609e9d32c273"
 rust = [
   "src/main.rs",
   "src/resolve.rs",
@@ -428,6 +428,9 @@ rust = [
   "src/store/sqlite/mod.rs#vector_dimensions",
   "src/store/recall_tier.rs#wrap_with_recall_tier",
   "src/embed/mod.rs#build_embedder",
+  "src/embed/mod.rs#EmbedderKind::has_adapter",
+  "src/embed/mod.rs#EmbedderKind::is_compiled",
+  "src/embed/mod.rs#EmbedderKind::is_ready",
   "src/config.rs#load_resolved",
   "src/mcp/serve/pinned.rs#pin_sessions",
   "src/mcp/serve/layers.rs#plan_layers",

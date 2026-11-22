@@ -343,7 +343,8 @@ inductive EmbedderKind where
 
 /-- `EmbedderKind::is_ready` with the feature taken out: every kind has an
 adapter except Bedrock, whose registry arm refuses even when `embed-bedrock`
-is compiled (the Bedrock adapter is not implemented). -/
+is compiled (the Bedrock adapter is not implemented).
+Pinned by `formal_constants_tests::resolve`. -/
 def EmbedderKind.implemented : EmbedderKind → Bool
   | .bedrock => false
   | _ => true
@@ -357,6 +358,7 @@ structure Features where
   store : StoreKind → Bool
   embed : EmbedderKind → Bool
   recallTier : Bool
+  /-- Pinned by `formal_constants_tests::resolve`. -/
   crdbWidth : Nat := 1024
 
 /-- The default feature set: `store-memory + embed-bge + embed-fixture`. -/
@@ -421,6 +423,7 @@ credential's variable is unset or not a valid token, else the
 structure ServeCfg where
   sessions : List Nat := []
   defaultSession : Option Nat := none
+  /-- `DEFAULT_MAX_ATTACHED`. Pinned by `formal_constants_tests::resolve`. -/
   maxAttached : Nat := 16
   stdioSel : StdioSel := .missing
   layersOk : Bool := true
@@ -446,6 +449,7 @@ structure Raw where
   overlayOk : Bool := true
   located : Bool := true
   pin : Option Nat := none
+  /-- The `EmbedderConfig` default width. Pinned by `formal_constants_tests::resolve`. -/
   dim : Nat := 1024
   misappliedKey : Bool := false
   tiered : Bool := false
@@ -646,10 +650,13 @@ def Resolved.isFull : Resolved → Bool
   | _ => false
 
 /-- `DEFAULT_POSTGRES_VECTOR_DIM`, and the `EmbedderConfig` default width a
-SQLite store reports with no width given. -/
+SQLite store reports with no width given.
+Pinned by `formal_constants_tests::resolve` (`DEFAULT_POSTGRES_VECTOR_DIM` with feature
+`store-postgres`). -/
 def defaultDim : Nat := 1024
 
-/-- `PGVECTOR_HNSW_VECTOR_MAX_DIM`. -/
+/-- `PGVECTOR_HNSW_VECTOR_MAX_DIM`.
+Pinned by `formal_constants_tests::resolve` (its Rust side with feature `store-postgres`). -/
 def pgMaxWidth : Nat := 2000
 
 /-- `Some(embedder_cfg.dim).filter(|d| *d > 0)`. -/
@@ -1677,7 +1684,8 @@ inductive Why where
   | tooLong
   deriving DecidableEq, Repr
 
-/-- `MAX_BEARER_CREDENTIAL_BYTES`. -/
+/-- `MAX_BEARER_CREDENTIAL_BYTES`.
+Pinned by `formal_constants_tests::resolve`. -/
 def maxBearer : Nat := 4096
 
 /-- ASCII whitespace, which is what `str::trim` removes from an ASCII

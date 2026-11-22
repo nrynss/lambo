@@ -92,10 +92,10 @@ and `superseded_by` (`src/recall/assemble.rs`), and the line gate of
   demoted or held, and the cycle is `Canon.cycle` with no supersession. They
   are definitional (`rfl`), as the Rust's early returns in `gather` and
   `gather_holds` are (`if !params.supersede { return Probes::default(); }`).
-  The option defaults to off (`canonization_supersede: false`,
-  `src/config.rs:304`; test
-  `canonization_supersede_defaults_off_and_parses_from_the_file`,
-  `src/config.rs:1499`).
+  The option defaults to off (`canonization_supersede: false` in
+  `Config::default`, `src/config.rs`; test
+  `canonization_supersede_defaults_off_and_parses_from_the_file`). Pinned by
+  `formal_constants_tests::supersession`.
 * `contradictions_ignore_suspected`, `probesFor_ignore_suspected`: a
   `SuspectedSupersedes` edge is never read as a contradiction, so #198 never
   demotes anything ("informational ... never read as one").
@@ -611,7 +611,8 @@ non-finite score is dropped before anything else. -/
 /-- `1.0` in fixed point. -/
 def one : Int := 10000
 
-/-- `REPLACEMENT_CANDIDATE_LIMIT`. -/
+/-- `REPLACEMENT_CANDIDATE_LIMIT`.
+Pinned by `formal_constants_tests::supersession`. -/
 def limit : Nat := 3
 
 /-- One vector hit as the store returned it. -/
@@ -1411,7 +1412,8 @@ def newestCounted (ev : Evidence) (since : Int) : Option Int :=
 /-- `coverage(span, sess_span, window) >= 0.3` on the counted origins'
 dates, exactly: a session of no extent covers fully, otherwise
 `span / min(session, window) >= 0.3`. The clamp into `[0, 1]` does not move
-the comparison. `window` is positive (`validate_coverage_window`). -/
+the comparison. `window` is positive (`validate_coverage_window`).
+Pinned by `formal_constants_tests::supersession`. -/
 def coveragePasses (ev : Evidence) (window : Int) (c : List (Row × Int)) : Bool :=
   match c.map (·.2) with
   | [] => false
@@ -1424,7 +1426,8 @@ def coveragePasses (ev : Evidence) (window : Int) (c : List (Row × Int)) : Bool
     if sess ≤ 0 then true else decide (3 * min sess window ≤ 10 * span)
 
 /-- `stage2_evidence_passes(span_since(...))`: at least three distinct
-origins after `since`, covering at least `0.3`. -/
+origins after `since`, covering at least `0.3`.
+Pinned by `formal_constants_tests::supersession`. -/
 def stage2Since (ev : Evidence) (window since : Int) : Bool :=
   let c := counted ev since
   decide (3 ≤ (sortDedup (c.map (·.1.origin))).length) && coveragePasses ev window c

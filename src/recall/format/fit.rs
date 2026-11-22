@@ -202,6 +202,17 @@ pub(crate) fn truncation_marker(left_out: usize, inspect_id: &str, scope: Option
     }
 }
 
+/// Test-only aliases of the separator, the ellipsis and the marker, for
+/// `crate::formal_constants_tests` (#291): `formal/LamboProofs/Fit.lean`
+/// hard-codes them in `rustEnv` and `rustMarker`, and this module is private.
+#[cfg(test)]
+pub(crate) mod formal_pins {
+    pub(crate) use super::truncation_marker;
+
+    pub(crate) const SEPARATOR: &str = super::SEPARATOR;
+    pub(crate) const ELLIPSIS: &str = super::ELLIPSIS;
+}
+
 /// A count fits when it is within budget and is not the saturated
 /// `usize::MAX` (the pre-#130 loop's overflow guard, kept as is).
 fn fits(tokens: usize, max_tokens: usize) -> bool {

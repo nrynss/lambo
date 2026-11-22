@@ -401,14 +401,17 @@ outstanding and held jobs or the queue holds `WRITE_QUEUE_MAX`, and otherwise
 enqueues it. Admission never waits: a refusal is answered at once with a `Dropped`
 receipt. -/
 
-/-- `MAX_RETAINED_RECEIPTS`. -/
+/-- `MAX_RETAINED_RECEIPTS`.
+Pinned by `formal_constants_tests::receipts`. -/
 def maxRetainedReceipts : Nat := 4096
 
-/-- `WRITE_QUEUE_MAX = MAX_RETAINED_RECEIPTS / 4`. -/
+/-- `WRITE_QUEUE_MAX = MAX_RETAINED_RECEIPTS / 4`.
+Pinned by `formal_constants_tests::receipts`. -/
 def writeQueueMax : Nat := maxRetainedReceipts / 4
 
 /-- `WRITE_QUEUE_LANE_MAX = WRITE_QUEUE_MAX / MAX_CONCURRENT_RECEIPT_WAITS`,
-with 16 concurrent waits. -/
+with 16 concurrent waits.
+Pinned by `formal_constants_tests::receipts`. -/
 def writeQueueLaneMax : Nat := writeQueueMax / 16
 
 theorem writeQueueMax_eq : writeQueueMax = 1024 := by decide

@@ -235,7 +235,8 @@ instance (p : Frac) : Decidable p.InUnit := by unfold Frac.InUnit; infer_instanc
 
 /-! ## The keyword term -/
 
-/-- `KEYWORD_HALF_SCORE`, in units of `1.0`. -/
+/-- `KEYWORD_HALF_SCORE`, in units of `1.0`.
+Pinned by `formal_constants_tests::confidence`. -/
 def keywordHalfScore : Int := 5
 
 /-- `S / (S + KEYWORD_HALF_SCORE)` on a finite BM25 `s` (at scale `u`), with
@@ -526,7 +527,8 @@ inductive Basis where
   | keywordOnlyV0
 deriving DecidableEq, Repr
 
-/-- The wire string of a basis. -/
+/-- The wire string of a basis.
+Pinned by `formal_constants_tests::confidence`. -/
 def Basis.name : Basis → String
   | .noisyOrV0 => "noisy-or-v0"
   | .keywordOnlyV0 => "keyword-only-v0"
@@ -968,7 +970,8 @@ def upsertKeyword [DecidableEq ι] (id : ι) (f : Option F64 → Option F64) :
     else (j, l) :: upsertKeyword id f rest
 
 /-- The keyword loop: the first `limit * KEYWORD_OVERFETCH` hits' BM25 into
-their keyword slots. -/
+their keyword slots.
+Pinned by `formal_constants_tests::confidence`. -/
 def keywordLoop [DecidableEq ι] (limit : Nat) (ranked : List (ι × F64))
     (legs : List (ι × LegSlot)) : List (ι × LegSlot) :=
   (ranked.take (limit * 4)).foldl (fun acc p => upsertKeyword p.1 (fun _ => some p.2) acc) legs

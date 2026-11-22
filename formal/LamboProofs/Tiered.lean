@@ -256,13 +256,16 @@ namespace Lambo.Tiered
 
 /-! ## Versions (`project::mirror_version`, `Tier::next_version`) -/
 
-/-- `1 << 32`: the counter's place in an external version. -/
+/-- `1 << 32`: the counter's place in an external version.
+Pinned by `formal_constants_tests::tiered` (its Rust side with feature `recall-elastic`). -/
 def shift : Nat := 4294967296
 
-/-- `u32::MAX`. -/
+/-- `u32::MAX`.
+Pinned by `formal_constants_tests::tiered` (its Rust side with feature `recall-elastic`). -/
 def u32Max : Nat := 4294967295
 
-/-- `MAX_VERSIONED_TOKEN = (i64::MAX as u64) >> 32`. -/
+/-- `MAX_VERSIONED_TOKEN = (i64::MAX as u64) >> 32`.
+Pinned by `formal_constants_tests::tiered` (its Rust side with feature `recall-elastic`). -/
 def maxTok : Nat := 2147483647
 
 /-- `mirror_version(token, counter)`: `(token << 32) | counter`, or `None` when
@@ -355,10 +358,12 @@ example : mirrorVersion 1 u32Max = some (shift + u32Max) ∧ shift + u32Max < 2 
 
 /-! ## The over-fetch (`knn_fetch`, `KNN_OVERFETCH`) -/
 
-/-- `MAX_VECTOR_CANDIDATE_LIMIT`. -/
+/-- `MAX_VECTOR_CANDIDATE_LIMIT`.
+Pinned by `formal_constants_tests::tiered`. -/
 def maxLimit : Nat := 2048
 
-/-- `KNN_OVERFETCH`. -/
+/-- `KNN_OVERFETCH`.
+Pinned by `formal_constants_tests::tiered` (its Rust side with feature `recall-elastic`). -/
 def overfetch : Nat := 16
 
 /-- `knn_fetch(limit)`: `limit + 16`, capped at `max(2048, limit)`. -/
@@ -558,7 +563,8 @@ structure Breaker where
 
 /-- The breaker's two settings (`BREAKER_THRESHOLD = 3`,
 `BREAKER_COOLDOWN = 30s`) and the repair backoff (`REPAIR_BACKOFF = 60s`).
-Times are whole seconds. -/
+Times are whole seconds.
+Pinned by `formal_constants_tests::tiered` (its Rust side with feature `recall-elastic`). -/
 structure Params where
   threshold : Nat := 3
   cooldown : Nat := 30

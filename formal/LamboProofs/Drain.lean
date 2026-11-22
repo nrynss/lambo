@@ -464,10 +464,12 @@ structure Streaks where
   lookup : Nat
   deriving DecidableEq, Repr
 
-/-- `EMBEDDER_SICK_THRESHOLD`. -/
+/-- `EMBEDDER_SICK_THRESHOLD`.
+Pinned by `formal_constants_tests::drain`. -/
 def sickThreshold : Nat := 3
 
-/-- `REPLAY_LOOKUP_TIMEOUT_LIMIT = EMBEDDER_SICK_THRESHOLD`. -/
+/-- `REPLAY_LOOKUP_TIMEOUT_LIMIT = EMBEDDER_SICK_THRESHOLD`.
+Pinned by `formal_constants_tests::drain`. -/
 def lookupTimeoutLimit : Nat := sickThreshold
 
 /-- The match on the run's result in `spawn_replay`, arm by arm in source

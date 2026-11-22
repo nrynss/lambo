@@ -2842,7 +2842,8 @@ example : stdioAccepts 2 = false := by decide
 /-! ### Constants -/
 
 /-- `PINNED_RETRY` in milliseconds: five `ELECTION_RETRY`s, never under a
-second. -/
+second.
+Pinned by `formal_constants_tests::registry`. -/
 def pinnedRetry (er : Nat) : Nat := if 5 * er < 1000 then 1000 else 5 * er
 
 /-- `PINNED_RETRY` is at least a second and at least `ELECTION_RETRY`
@@ -2857,7 +2858,8 @@ example : pinnedRetry 1000 = 5000 := by decide
 example : pinnedRetry 0 = 1000 := by decide
 example : pinnedRetry 150 = 1000 := by decide
 
-/-- `unplaced_cap`: `UNPLACED_PER_PLACE × max_attached`, at least 1. -/
+/-- `unplaced_cap`: `UNPLACED_PER_PLACE × max_attached`, at least 1.
+Pinned by `formal_constants_tests::registry`. -/
 def unplacedCap (maxAttached : Nat) : Nat := max (maxAttached * 2) 1
 
 theorem unplacedCap_pos (m : Nat) : 1 ≤ unplacedCap m := by
@@ -3228,9 +3230,19 @@ theorem reach_of_run {c : Cfg} {s0 : St} (h0 : Reach c s0) {es : List Ev} {p : S
     rw [e] at h
     exact ⟨s, run_reach h0 e, h⟩
 
-/-- A serve with one pinned session (`0`) and two on-demand ids (`1`, `2`),
-`max_attached = 2` (one on-demand place), two attach permits, and the Rust's
-constants in milliseconds (`ELECTION_RETRY` 1 s, so `PINNED_RETRY` 5 s). -/
+/-- A witness serve: one pinned session (`0`) and two on-demand ids (`1`,
+`2`). Two kinds of value, in milliseconds:
+
+* example settings, chosen for the witness and not defaults: `max_attached =
+  2` (so `places` 1, one on-demand place, and `cap` `unplacedCap 2`, the
+  serve's `unplaced_cap(max_attached)`), `attach_concurrency = 2` (`permits`
+  2) and `idle_detach_secs = 60` (`idle` 60000; the default is 900);
+* the Rust's fixed constants: `ELECTION_RETRY` (`er` 1000), `PINNED_RETRY`
+  (`pr`, `pinnedRetry 1000` = 5000), `PREVIOUS_HANDLE_WAIT` (`wait` 30000),
+  `EVICT_MIN_IDLE` (`minIdle` 2000) and `NEGATIVE_TTL` (`ttl` 30000).
+
+Pinned by `formal_constants_tests::registry`: the constants by value; the
+settings built as a `ServeConfig`, which `ServeConfig::validate` accepts. -/
 def cfgEx : Cfg :=
   { ids := [0, 1, 2], pinned := [0], onDemand := true, places := 1, permits := 2,
     cap := unplacedCap 2, er := 1000, pr := pinnedRetry 1000, wait := 30000, idle := 60000,
@@ -3360,7 +3372,8 @@ before the beat are dropped with its tail. It needs the dropped flight's
 negative cache (`NEGATIVE_CACHE_MAX` newer entries), or the release task
 delayed past `NEGATIVE_TTL` (30 s; the release itself is bounded by
 `LEASE_RELEASE_GRACE`, 2 s, so only a store that applies a timed-out release
-late gets there). -/
+late gets there).
+Pinned by `formal_constants_tests::registry`. -/
 theorem dropped_flight_fences_next :
     ∃ s, Reach cfgEx s ∧ s.slots 1 = some (.live hFenced) ∧ s.rows 1 = ⟨.me, 2⟩ := by
   obtain ⟨s, hs, hp⟩ := reach_of_run (Reach.init s0_init) (es := dropRun)

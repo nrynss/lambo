@@ -53,6 +53,29 @@
   `rank_cmp`, unchanged, so the order laws run on the real comparator.
   Cases default to 256 (`PROPTEST_CASES` overrides) and no regression files
   are written.
+- Formal models: the constants the Lean models in `formal/LamboProofs/`
+  hard-code are now pinned to the Rust (#291). `src/formal_constants_tests.rs`
+  has one test per model that asserts each threshold, weight, bound and
+  default the model copies (Stage 1 to 3 thresholds, score weights and bonus
+  bounds, the write-queue and receipt caps, the RRF defaults, the backoff
+  ladder, the serve's retry and grace constants, the coalescer's batch
+  constants and others), with fixed-point values asserted at the model's
+  scale. Each test reads its model's source, comments dropped, and compares
+  the Rust against the value the model states: a scalar is parsed from its
+  one declaration and must be a bare literal, a formula is matched as a
+  shape whose literals are read out, and a table over an enum is evaluated
+  per constructor. Each value is written once, in the model, so changing a
+  constant on either side fails the test and names the Lean definition (a
+  `Bool` guard's operators, outside its values, are still a second copy in
+  the test); a
+  change under `formal/LamboProofs/` now starts the Rust CI. A new Rust
+  variant does not compile until its Lean constructor is named, and a new
+  Lean constructor fails the test. Private constants are read through
+  test-only `formal_pins` aliases; no production visibility changed.
+  `Registry.lean`'s witness `cfgEx` mixes fixed constants with example
+  settings (a 60 s `idle_detach`, `max_attached = 2` and the `cap` it
+  gives); its doc now says which are which, and the test builds the settings
+  as a `ServeConfig` and checks `ServeConfig::validate` accepts them.
 - Recall tier: a flush that changes a session's embedding contract is now
   re-indexed from the store instead of mirrored (#319). `lambo re-embed`
   into another model drains every rewritten concept before the trailing

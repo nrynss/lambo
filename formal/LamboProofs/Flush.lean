@@ -346,10 +346,16 @@ abbrev Store (α : Type) := List α → Nat → Outcome
 
 Durations are milliseconds. -/
 
+/-- `BACKOFF_BASE`. Pinned by `formal_constants_tests::flush`. -/
 def backoffBase : Nat := 100
+/-- `BACKOFF_CAP`. Pinned by `formal_constants_tests::flush`. -/
 def backoffCap : Nat := 10000
+/-- `RETAINED_BACKOFF = BACKOFF_CAP`. Pinned by `formal_constants_tests::flush`. -/
 def retainedBackoff : Nat := backoffCap
 
+/-- The doubling, `next_backoff`: `(backoff * 2).min(BACKOFF_CAP)`. Pinned by
+`formal_constants_tests::flush`, which evaluates it against `next_backoff` up
+the ladder and past the cap. -/
 def nextBackoff (b : Nat) : Nat := min (b * 2) backoffCap
 
 def backoffAt : Nat → Nat

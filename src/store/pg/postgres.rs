@@ -45,6 +45,15 @@ const PGVECTOR_HNSW_VECTOR_MAX_DIM: usize = 2000;
 /// authority.
 const DEFAULT_POSTGRES_VECTOR_DIM: usize = 1024;
 
+/// Test-only aliases of the width bounds, for `crate::formal_constants_tests`
+/// (#291): `formal/LamboProofs/Resolve.lean` hard-codes them as `pgMaxWidth`
+/// and `defaultDim`.
+#[cfg(test)]
+pub(crate) mod formal_pins {
+    pub(crate) const PGVECTOR_HNSW_VECTOR_MAX_DIM: usize = super::PGVECTOR_HNSW_VECTOR_MAX_DIM;
+    pub(crate) const DEFAULT_POSTGRES_VECTOR_DIM: usize = super::DEFAULT_POSTGRES_VECTOR_DIM;
+}
+
 /// PostgreSQL + pgvector, as a [`Dialect`] of the Postgres-wire-protocol family.
 ///
 /// A zero-sized compile-time selector: it is never constructed, only named as

@@ -147,7 +147,8 @@ structure Weights where
   sessionActivity : Option Int
   density : Option Int
 
-/-- `ScoringWeights::default()`: `0.25 / 0.20 / 0.20 / 0.35`. -/
+/-- `ScoringWeights::default()`: `0.25 / 0.20 / 0.20 / 0.35`.
+Pinned by `formal_constants_tests::score`. -/
 def defaultWeights : Weights :=
   { recency := some 250, frequency := some 200, sessionActivity := some 200, density := some 350 }
 
@@ -165,11 +166,13 @@ def weighted (d : Dims) (w : Weights) : Int :=
 
 /-- `bonus_and_modifier` (scale `10³`): the edge bonus clamped to
 `[0, MAX_EDGE_BONUS] = [0, 0.25]` plus the concept-type modifier clamped to
-`[MIN_CONCEPT_MODIFIER, MAX_CONCEPT_MODIFIER] = [-0.10, 0.15]`. -/
+`[MIN_CONCEPT_MODIFIER, MAX_CONCEPT_MODIFIER] = [-0.10, 0.15]`.
+Pinned by `formal_constants_tests::score`. -/
 def bonusAndModifier (d : Dims) : Int :=
   clampAdditive 0 250 d.edgeTypeBonus + clampAdditive (-100) 150 d.conceptTypeModifier
 
-/-- `finite_or_zero` on a finite composite: clamp to `[0, 1 + MAX_BONUS]`. -/
+/-- `finite_or_zero` on a finite composite: clamp to `[0, 1 + MAX_BONUS]`.
+Pinned by `formal_constants_tests::score`. -/
 def finiteOrZero (x : Int) : Int := clamp 0 1400000 x
 
 /-- The composite before its final clamp. -/
@@ -380,7 +383,8 @@ Timestamps are integer milliseconds. `MIN_RECENCY_SPAN` is ten minutes. A
 recency value is the fraction `num / den`; the statements below are about the
 numerator and denominator, so no division appears. -/
 
-/-- `MIN_RECENCY_SPAN = 10 · 60 · 1000` ms. -/
+/-- `MIN_RECENCY_SPAN = 10 · 60 · 1000` ms.
+Pinned by `formal_constants_tests::score`. -/
 def minRecencySpan : Int := 600000
 
 /-- Numerator of the historical form `(last_touch − start) / span`. -/

@@ -1105,7 +1105,8 @@ with a positive denominator. -/
 def RrfConfig.Valid (c : RrfConfig) : Prop := 1 ≤ c.kDen
 
 /-- The defaults: `k = 3` (`DEFAULT_RRF_K`), keyword and vector weight `1.0`,
-recent weight `0.3`. -/
+recent weight `0.3`.
+Pinned by `formal_constants_tests::fusion`. -/
 def rrfDefault : RrfConfig := ⟨3, 1, 10, 10, 3⟩
 
 /-- The Rust tests' `rrf()`: `k = 60`, default weights. -/

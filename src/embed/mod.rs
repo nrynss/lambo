@@ -15,6 +15,8 @@ pub(crate) mod math;
 mod bge_m3;
 #[cfg(feature = "embed-candle")]
 mod candle;
+#[cfg(all(test, feature = "embed-candle"))]
+pub(crate) use candle::formal_pins as candle_formal_pins;
 #[cfg(feature = "embed-eg2")]
 pub(crate) mod eg2;
 #[cfg(feature = "embed-elastic")]
@@ -562,18 +564,24 @@ impl EmbedderKind {
         }
     }
 
-    /// Whether [`build_embedder`] can return a working adapter (feature on **and** impl exists).
-    pub const fn is_ready(self) -> bool {
+    /// Whether this kind has an adapter at all, whatever the build's
+    /// features: every kind but Bedrock.
+    pub const fn has_adapter(self) -> bool {
         match self {
-            Self::BgeM3 => cfg!(feature = "embed-bge"),
-            Self::Candle => cfg!(feature = "embed-candle"),
-            Self::Fixture => cfg!(feature = "embed-fixture"),
-            Self::Gemini => cfg!(feature = "embed-gemini"),
-            Self::EmbeddingGemma2 => cfg!(feature = "embed-eg2"),
-            Self::Elastic => cfg!(feature = "embed-elastic"),
+            Self::BgeM3
+            | Self::Candle
+            | Self::Fixture
+            | Self::Gemini
+            | Self::EmbeddingGemma2
+            | Self::Elastic => true,
             // T7.1 not implemented yet.
             Self::Bedrock => false,
         }
+    }
+
+    /// Whether [`build_embedder`] can return a working adapter (feature on **and** impl exists).
+    pub const fn is_ready(self) -> bool {
+        self.is_compiled() && self.has_adapter()
     }
 }
 
