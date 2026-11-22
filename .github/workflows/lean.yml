@@ -14,10 +14,12 @@ on:
   push:
     paths:
       - 'formal/**'
+      - 'scripts/formal/check-oracle.sh'
       - '.github/workflows/lean.yml'
   pull_request:
     paths:
       - 'formal/**'
+      - 'scripts/formal/check-oracle.sh'
       - '.github/workflows/lean.yml'
   workflow_dispatch:
 
@@ -71,6 +73,16 @@ jobs:
           set -euo pipefail
           lean --version
           lake build --wfail 2>&1 | tee "$RUNNER_TEMP/build.log"
+
+      # The differential oracle (#291): rebuild the exporter, regenerate
+      # formal/oracle/*.json from the models and fail if the committed vectors
+      # are stale, so a model change cannot ship with vectors the Rust test
+      # (src/formal_oracle_tests.rs) replays from the old model.
+      - name: Check the oracle vectors
+        working-directory: formal
+        run: |
+          set -euo pipefail
+          ../scripts/formal/check-oracle.sh
 
       - name: Reject sorry
         working-directory: formal

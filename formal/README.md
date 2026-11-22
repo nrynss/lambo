@@ -32,7 +32,11 @@ cd formal && lake build --wfail
 CI checks them in `.github/workflows/lean.yml` on every push or pull request
 that touches `formal/`. It downloads the pinned Lean release, verifies its
 SHA-256, builds with warnings as errors, fails on any `sorry`, and re-runs the
-axiom audit, failing on any axiom other than the three standard ones. It keeps
+axiom audit, failing on any axiom other than the three standard ones. The
+build covers every file under `LamboProofs/` (`globs` in `lakefile.toml`), so a
+model nothing imports is still checked. It also regenerates the differential
+oracle's vectors and fails if `formal/oracle/` is stale (see "Differential
+oracle" below). It keeps
 `formal/.lake` in the Actions cache (saved from `main` only), so an unchanged
 module is not rebuilt. Besides the checkout pin `ci.yml` already uses, the only
 action is `actions/cache`, pinned by commit.

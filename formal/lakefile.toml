@@ -4,6 +4,9 @@ defaultTargets = ["LamboProofs"]
 
 [[lean_lib]]
 name = "LamboProofs"
+# Every module under LamboProofs/, imported or not, so a new model is always
+# checked (an unimported one would otherwise be skipped by `lake build`).
+globs = ["LamboProofs", "LamboProofs.+"]
 
 # The differential oracle (#291): `lake exe oracle` evaluates model
 # definitions over generated inputs and writes formal/oracle/*.json, which
