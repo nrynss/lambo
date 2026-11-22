@@ -43,6 +43,11 @@ structure Entry where
   warns : Bool
   deriving Inhabited
 
+/-- The spellings of class `c`: the four fixed families, then `item c` for
+the wide cases' many distinct classes. -/
+def spellings (c : Nat) : List String :=
+  if c < contents.length then contents.getD c [] else [s!"item {c}", s!"item  {c}"]
+
 def Entry.json (e : Entry) : Json :=
   Json.arr #[toJson e.id, toJson e.cls, toJson e.content, toJson e.forced, toJson e.warns]
 
@@ -58,7 +63,7 @@ def genEntries : Gen (List Entry) := do
         if ← chance 3 4 then pure (some 0) else pure (some (← below contents.length)))
       else pure none
     let content ← match cls with
-      | some c => pure (some (← pick (contents.getD c [])))
+      | some c => pure (some (← pick (spellings c)))
       | none => pure none
     return { id, cls, content, forced := ← chance 3 10, warns := ← chance 1 10 }
   if ← chance 4 5 then
@@ -66,6 +71,26 @@ def genEntries : Gen (List Entry) := do
     | some i => return { es[i]! with forced := true } :: es.eraseIdx i
     | none => return es
   return es
+
+/-- A wide list, so `taken` reaches `TopK.windowMax` (`WINDOW_MAX`): 21 to
+30 forced concepts of distinct classes first (every one is emitted and
+taken while there is room), then a few ordinary members, each redundant with
+one of them (often one past the first `windowMax`, which the cap keeps out of
+`taken`) or with none, some warned. -/
+def genWide : Gen (List Entry) := do
+  let m ← range 21 30
+  let forced := (List.range m).map fun i =>
+    ({ id := i + 1, cls := some (100 + i), content := some s!"item {100 + i}", forced := true,
+       warns := false } : Entry)
+  let k ← range 1 6
+  let tail ← (List.range k).mapM fun j => do
+    let c ← match ← below 6 with
+      | 0 => pure (200 + j)
+      | 1 | 2 | 3 => pure (100 + (← range 18 (m - 1)))
+      | _ => pure (100 + (← range 5 (m - 1)))
+    return ({ id := m + 1 + j, cls := some c, content := some (← pick (spellings c)),
+              forced := false, warns := ← chance 1 8 } : Entry)
+  return forced ++ tail
 
 def isConcept (es : List Entry) (i : Nat) : Bool := (es.find? (·.id == i)).any (·.cls.isSome)
 def forcedOf (es : List Entry) (i : Nat) : Bool := (es.find? (·.id == i)).any (·.forced)
@@ -97,17 +122,19 @@ def seed : UInt64 := 0x544F504B -- "TOPK"
 def vectors : Vectors := run seed do
   let plain ← many 150 (do return emitCase (← genEntries) (← genTopK))
   let sel ← many 250 (do return emitRCase (← genEntries) (← genTopK) (← chance 1 2))
+  let wide ← many 60 (do return emitRCase (← genWide) (← pick [1, 1, 2, 3, 5]) (← chance 1 2))
   return {
     model := "TopK", seed
     notes := [
       "ranked: [member, class, content, forced, warns] in rank order. Member 0 is the origin interaction; a member with a class is a concept with that content; any other classless member is an id in no graph.",
       "isConcept: has a class. forced / warns: the flags. red (Selection::verdict): same class; the Rust test checks Redundancy::signal agrees on every pair of concepts.",
       "emitR / skipsR: win = TopK.window top_k, wmax = TopK.windowMax, from slots = 0, checked = 0, prev = []. Their cases share inputs; similar_signals is the Redundancy flag (no vectors or Semantic edges, so it changes nothing).",
-      "skips: (kept, skipped) in scan order; the Rust map is flattened and ordered by the skipped member's rank."
+      "skips: (kept, skipped) in scan order; the Rust map is flattened and ordered by the skipped member's rank.",
+      "The last 60 emitR cases are wide: 21 to 30 forced concepts of distinct classes, so the emitted list passes windowMax and the cap on taken matters."
     ]
     fns := [
       { lean := "Lambo.TopK.emit", rust := "recall::assemble::emitted (selection None)", cases := plain },
-      { lean := "Lambo.TopK.emitR", rust := "recall::assemble::emitted (selection Some)", cases := sel }
+      { lean := "Lambo.TopK.emitR", rust := "recall::assemble::emitted (selection Some)", cases := sel ++ wide }
     ]
   }
 
