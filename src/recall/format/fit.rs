@@ -324,6 +324,9 @@ where
 }
 
 #[cfg(test)]
+mod proptests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::recall::format::{blast_radius_warning, default_token_count};

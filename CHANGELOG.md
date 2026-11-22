@@ -42,6 +42,17 @@
   one); a broken manifest (a model with no entry, a listed path or item that
   no longer exists, a malformed `read_digest` or one of another scheme)
   fails. `formal/README.md` says how to clear the warning.
+- Property tests (#291): proptest (dev-dependency only) checks the Rust
+  against the Lean theorems with generated inputs, each oracle written from
+  the Lean definition rather than from the code under test: graph expansion
+  (`Expand`), the member and tie-break orders (`Order`), forced members and
+  the #181 selection (`TopK`), context fitting (`Fit`), the lease fence
+  (`Lease`), the citation cycle check (`Cite`), one canonization cycle
+  replayed against Lean `cycle` (`Canon`), canonical keys (`Canonical`) and
+  candle's length chunks (`BatchQueue`). `rank_members` now sorts by a named
+  `rank_cmp`, unchanged, so the order laws run on the real comparator.
+  Cases default to 256 (`PROPTEST_CASES` overrides) and no regression files
+  are written.
 - Recall tier: a flush that changes a session's embedding contract is now
   re-indexed from the store instead of mirrored (#319). `lambo re-embed`
   into another model drains every rewritten concept before the trailing

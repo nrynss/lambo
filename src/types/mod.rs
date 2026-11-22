@@ -2553,6 +2553,9 @@ pub enum LamboError {
 }
 
 #[cfg(test)]
+mod proptests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use chrono::TimeZone;

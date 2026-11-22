@@ -453,6 +453,9 @@ pub fn canonicalize(content: &str, graph: &Graph) -> Result<CanonicalizeResult, 
     }
 }
 #[cfg(test)]
+mod proptests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::types::GraphSnapshot;

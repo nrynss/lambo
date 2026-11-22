@@ -924,6 +924,9 @@ fn reject_empty_key(content: &str, key: &str) -> Result<(), LamboError> {
 }
 
 #[cfg(test)]
+mod proptests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::types::{Interaction, Mutation, SessionId};

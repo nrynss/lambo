@@ -1319,4 +1319,6 @@ fn score_lookup(map: &HashMap<NodeId, f64>, id: NodeId) -> f64 {
 }
 
 #[cfg(test)]
+mod proptests;
+#[cfg(test)]
 mod tests;

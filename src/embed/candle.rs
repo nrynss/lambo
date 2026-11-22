@@ -1892,6 +1892,9 @@ pub(crate) mod test_artifact {
 }
 
 #[cfg(test)]
+mod proptests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

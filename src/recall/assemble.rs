@@ -966,6 +966,12 @@ fn with_ordinary_companions(
 /// are not graph concepts (stale durable-vector ids) have no key and fall
 /// straight to the id.
 fn rank_members(graph: &Graph, members: &mut [Scored<NodeId>]) {
+    members.sort_by(|a, b| rank_cmp(graph, a, b));
+}
+
+/// The comparator [`rank_members`] sorts by: Canonical first, then score
+/// descending (`f64::total_cmp`), then [`tie_break_by_key`].
+fn rank_cmp(graph: &Graph, a: &Scored<NodeId>, b: &Scored<NodeId>) -> std::cmp::Ordering {
     let is_canonical = |id: NodeId| {
         matches!(
             graph.node(id),
@@ -976,12 +982,10 @@ fn rank_members(graph: &Graph, members: &mut [Scored<NodeId>]) {
         Some(Node::Concept(c)) => Some(c.canonical_key.as_str()),
         _ => None,
     };
-    members.sort_by(|a, b| {
-        is_canonical(b.item)
-            .cmp(&is_canonical(a.item))
-            .then_with(|| b.score.total_cmp(&a.score))
-            .then_with(|| tie_break_by_key(key(a.item), &a.item, key(b.item), &b.item))
-    });
+    is_canonical(b.item)
+        .cmp(&is_canonical(a.item))
+        .then_with(|| b.score.total_cmp(&a.score))
+        .then_with(|| tie_break_by_key(key(a.item), &a.item, key(b.item), &b.item))
 }
 
 /// #181's rule for one assembly: the redundancy test, which members would
@@ -1118,6 +1122,9 @@ fn sane_weight(w: f64) -> f64 {
         0.0
     }
 }
+
+#[cfg(test)]
+mod proptests;
 
 #[cfg(test)]
 mod tests {

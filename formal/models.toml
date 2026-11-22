@@ -55,13 +55,14 @@ rust = [
 [[model]]
 lean = "formal/LamboProofs/Order.lean"
 read_against = "514da8d7"
-read_digest = "v2:sha256:66a02b7f37761ccf1930e64864e2ef05f50a47914f7ef3ddfeb9ca25b1377bf0"
+read_digest = "v2:sha256:1f192a250189536e75f9d8aa8e130b7cd48bd34b7038cc229d7e2299f9854de6"
 rust = [
   "src/types/mod.rs#tie_break_by_key",
   "src/daemon/score.rs#rescore",
   "src/recall/candidates.rs#rank",
   "src/graph/index.rs#search_ranked",
   "src/recall/assemble.rs#rank_members",
+  "src/recall/assemble.rs#rank_cmp",
 ]
 
 [[model]]
