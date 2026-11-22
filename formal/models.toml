@@ -416,7 +416,7 @@ rust = [
 [[model]]
 lean = "formal/LamboProofs/Resolve.lean"
 read_against = "514da8d7"
-read_digest = "v2:sha256:e538d73feb2cb62cc52fab2f51d5016421c2e6e62e34baf45b77609e9d32c273"
+read_digest = "v2:sha256:7eaba610a078723323d097b4ada91864a7bb69cd91c399443ce04f681a61a123"
 rust = [
   "src/main.rs",
   "src/resolve.rs",
