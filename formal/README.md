@@ -237,7 +237,7 @@ Covered:
 | --- | --- | --- | --- |
 | `Order` | `rankMembers`, `tieBreak` | `rank_cmp`, `rank_members`, `tie_break_by_key` | scores by `f64::total_cmp` on bit patterns; keys by `str::cmp` (no scoped key, so `tie_form` is the identity: checked); ids by number |
 | `Fit` | `fitBlocks` over `rustEnv`, `rustBlock` | `fit_blocks` | estimators `defaultTokenCount`, bytes, chars, saturated |
-| `Canonical` | `canonicalKeyF`, `canonicalKey`, `nameKeyF` | `canonical_key`, `unfiltered_canonical_key`, `name_key` | `stop0`, `stem0`; inputs stem only `stemTable` words, and the real stemmer is checked against that table; `check_size` passes and no input is a UUID (checked) |
+| `Canonical` | `canonicalKeyF`, `canonicalKey`, `nameKeyF` | `canonical_key`, `unfiltered_canonical_key`, `name_key` | `stop0`, `stem0`; inputs are drawn from a fixed vocabulary (the `stemTable` words, function words, identifiers), and the real stemmer is checked against `stem0` on every word the model stems; `check_size` passes and no input is a UUID (checked) |
 | `TopK` | `emit`, `emitR`/`skipsR` | `emitted` | the pair verdict is "same content class", checked against `Redundancy::signal` on every pair |
 | `Expand` | `expand` | `expand` | `nbrs` built per `TRAVERSAL_ORDER`, id-ascending, and checked against the graph's adjacency |
 | `BatchQueue` | `lengthChunks Cfg.rust` | `length_chunks` (feature `embed-candle`) | none |
