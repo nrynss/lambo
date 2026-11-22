@@ -21,7 +21,8 @@ These terms have one meaning on this page.
 |---|---|
 | **Status** | One of `None`, `Candidate`, `Venerable`, `Canonical`, in rising rank. Every concept starts at `None`. |
 | **Cycle** | One run of the canonization evaluator. The daemon runs one per `canonization_eval_interval`. |
-| **Interaction** | One recorded turn of agent work, such as one `lambo_derive` or `lambo_record_action` call. |
+| **Cycle's clock** | The one instant a cycle measures every age and window against. |
+| **Interaction** | One recorded unit of agent work, such as one `lambo_derive` or `lambo_record_action` call. |
 | **Origin interaction** | The interaction a concept was written in. |
 | **Dependent** | A concept that declares a dependence on another: it names it in `depends_on` (a `Dependency` edge), or it is the other's `parent_of` child (a `Hierarchical` edge). No other edge type declares a dependence. |
 | **Blast radius** | The number of a concept's dependents. |
@@ -46,7 +47,7 @@ Evidence counts only once its about-time is at least `canonization_edge_min_age`
     state "Venerable" as V
     state "Canonical" as K
     N --> C: Stage 1
-    C --> V: Stage 2
+    C --> V: Stage 2 or root goal
     V --> K: Stage 3
     K --> N: demotion
     N --> V: root goal (library only)`}
@@ -55,7 +56,7 @@ Evidence counts only once its about-time is at least `canonization_edge_min_age`
 | From | To | Taken by |
 |---|---|---|
 | `None` | `Candidate` | a cycle, when Stage 1 passes |
-| `Candidate` | `Venerable` | a cycle, when Stage 2 passes |
+| `Candidate` | `Venerable` | a cycle, when Stage 2 passes; or `set_root_goal` in the library API |
 | `Venerable` | `Canonical` | a cycle, when Stage 3 passes |
 | `Canonical` | `None` | a cycle: the budget demotion, or supersession when it is on |
 | `None` | `Venerable` | `set_root_goal` in the library API; the evaluator never takes it |
@@ -67,7 +68,7 @@ No other transition exists. The write gate refuses every other pair, and refuses
 That has three consequences an agent can rely on:
 
 * **Canonical is entered only from Venerable.** {/* lean: Canon.canonical_only_from_venerable */}
-* **There is one way down.** The only transition that lowers a status is `Canonical` to `None`. There is no step back to Venerable or Candidate, so a demoted concept earns every stage again through the evaluator. {/* lean: Canon.legal_demotion_unique, Canon.legal_to_none */}
+* **There is one way down.** The only transition that lowers a status is `Canonical` to `None`. There is no step back to Venerable or Candidate, so a demoted concept climbs from `None` again, at most one stage per cycle. The one shortcut is the library's `set_root_goal`, which lifts a `None` or Candidate concept that the root goal names straight to Venerable. {/* lean: Canon.legal_demotion_unique, Canon.legal_to_none */} {/* code: src/graph/graph/root_goal.rs set_root_goal */}
 * **One hop per cycle.** A cycle leaves a concept where it is or moves it along one edge, so `None` needs at least three cycles to reach Canonical. A concept a cycle demotes is not promoted again in that cycle. {/* lean: Canon.cycle_one_hop, Canon.cycle_rank_le, Canon.cycle_never_skips, Canon.cycle_superseded_stays_none, Policy.policy_cycle_one_hop */}
 
 The write gate's answers to seven events, as the Lean model computed them and the Rust replay confirms:
@@ -233,7 +234,7 @@ Two mechanisms carry this name. Only one of them changes a status.
 |---|---|---|
 | Triggered by | an `against` contradiction plus newer support | a new fact that looks like a new value of an older one, written without `against` |
 | Changes status | yes: demotes a Canonical concept to `None` | never |
-| Default | off (`canonization_supersede = false`) | recorded on every write that has an embedder; whether recall prints the line is set by [`[embedder] suspected_supersession_line`](/lambo/config/#embedder) |
+| Default | off (`canonization_supersede = false`) | recorded on hybrid writes (the default `match_strategy`); whether recall prints the line is set by [`[embedder] suspected_supersession_line`](/lambo/config/#embedder) |
 | Recall shows | `⤓ Superseded at ... by ...` | `⚠ Possibly superseded by ...` |
 
 {/* const: Config::default().canonization_supersede */}
@@ -261,11 +262,11 @@ A suspected pair runs from the strictly later-dated concept to the earlier one; 
 
 A suspected pair is never read as a contradiction, so it never demotes anything, and recall never drops either end as a near-duplicate of the other. {/* lean: Supersession.contradictions_ignore_suspected, Supersession.probesFor_ignore_suspected, Supersession.signal_suspected, Supersession.suspected_ends_not_skipped */}
 
-Near-duplicate merging, and the two guards that refuse a merge whatever the similarity, are described under [Where deduplication looks](/lambo/config/#store).
+Near-duplicate merging, and the two guards that refuse a merge whatever the similarity, are described under [Merging and its guards](/lambo/config/#store).
 
 ## Timing
 
-A change in the graph reaches a status through four limits: the age floor, the cycle interval, the batch size and, under Swarm, GC sweeps.
+Four things set how long a change in the graph takes to reach a status: the age floor, the cycle interval, the batch size and, under Swarm, the GC sweeps a concept must survive.
 
 | Setting | Default | In `lambo.toml` | What it governs |
 |---|---|---|---|
@@ -276,7 +277,7 @@ A change in the graph reaches a status through four limits: the age floor, the c
 | `canonization_coverage_window` | 14 days | no | cap on Stage 2's denominator |
 | `max_canonical_nodes` | 1000 | no | the Canonical budget |
 | `gc_interval` | 10000 | `[daemon] gc_interval` | mutations that trigger a GC sweep |
-| `gc_max_interval` | 86400 s | `[daemon] gc_max_interval_secs` | time after the last sweep at which a session that is still taking writes sweeps anyway |
+| `gc_max_interval` | 86400 s | `[daemon] gc_max_interval_secs` | time after the last sweep at which a session with at least `gc_idle_floor` mutations since then sweeps anyway |
 | `gc_idle_floor` | 100 | `[daemon] gc_idle_floor` | mutations the time trigger needs |
 
 {/* code: src/config.rs Config::default gc_max_interval, src/daemon/gc.rs GC_MAX_INTERVAL GC_IDLE_FLOOR, src/store/span.rs DEFAULT_COVERAGE_WINDOW */}
@@ -297,7 +298,7 @@ What follows from those limits:
 
 A contradiction pulls a hit into the result past `top_k` only when the contradicted concept is Canonical or Venerable. {/* lean: Hotlist.forces_iff */} A `⤓ Superseded` line appears while a concept's latest demotion was a supersession, and never on a Canonical concept. {/* lean: Supersession.supersededLine_canonical, Supersession.budget_clears */} A `⚠ Possibly superseded` warning appears on the older concept of a suspected pair and names the newer one. {/* lean: Supersession.pss_sound, Supersession.pss_newer */} [MCP tools](/lambo/mcp/#lambo_recall) shows each line in full.
 
-**The high-risk alert.** A concept is high-value when it is Canonical or has more than five dependents. When recall returns a high-value concept that was written in the last 30 seconds, or that has an edge written or reinforced in that time, the hit carries a `High-risk modification` warning. The dependents are counted from the graph as it is now, with no age floor, so the edge that gives a concept its sixth dependent is itself the write that raises the alert. {/* code: src/daemon/events.rs is_high_value HIGH_RISK_WRITE_WINDOW HIGH_RISK_BLAST_RADIUS high_risk_at, src/recall/format.rs hot_warning */}
+**The high-risk alert.** A concept is high-value when it is Canonical or has more than five dependents. When recall returns a high-value concept that was written in the last 30 seconds, or that has an edge written or reinforced in that time, the hit carries a `High-risk modification` warning once the daemon's next tick has seen the write. A suspected-supersession edge does not count as a write here. The dependents are counted from the graph as it is now, with no age floor, so the edge that gives a concept its sixth dependent is itself the write that raises the alert. {/* code: src/daemon/events.rs is_high_value HIGH_RISK_WRITE_WINDOW HIGH_RISK_BLAST_RADIUS high_risk_at, src/recall/format.rs hot_warning */} The warning is kept on the daemon's hot list, which holds at most `hot_list_max` entries (1000 by default), so on a full list it can be dropped. {/* code: src/daemon/mod.rs condition_set, src/daemon/hotlist.rs HOT_LIST_MAX, src/config.rs hot_list_max */}
 
 **`lambo_saints`** lists the session's Canonical concepts with their blast radius. {/* code: src/mcp/server/tools/saints.rs saints_impl */}
 
