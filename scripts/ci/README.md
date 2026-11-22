@@ -1,8 +1,10 @@
 # CI and release checks
 
 `ci.yml` runs a lightweight changes classifier on every PR and main push.
-Rust inputs start the full feature matrix; mirrored reference pages start
-the documentation drift check. Unknown or unavailable diff bases run both.
+Rust inputs start the full feature matrix. Docs pages, `scripts/docs/`, and
+the sources the docs' anchors cite (the Lean models, the oracle vectors and
+any `src/` file) start the docs job: the mirror drift check and the anchor and
+example checks. Unknown or unavailable diff bases run both.
 `workflow_dispatch` always runs full validation.
 
 The `full-ci` job succeeds only after all enabled Rust validation jobs pass.
@@ -24,7 +26,7 @@ assets and uploads workflow artifacts, and cannot publish.
 
 When adding an embedded file or test fixture outside the existing input
 trees, update `classify_changes.py` and its independent input-boundary tests.
-Keep the classifier's mirror list aligned with `scripts/docs/check-mirror-drift.sh`.
+Keep the classifier's docs prefixes covering every file `scripts/docs/` reads.
 
 Validate workflow changes locally with:
 
