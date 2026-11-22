@@ -295,7 +295,7 @@ $ echo $?
 1
 ```
 
-The same refusal covers `derive`, `derive-image`, `record-action`, `reserve`, `release`, and a second `serve`.
+The same refusal covers `derive`, `derive-image`, `record-action`, `reserve` and `release`. A second `serve` usually starts instead: see [More than one client on one machine](/mcp#more-than-one-client-on-one-machine) for when it forwards to the holder, when it answers `503`, and when it is refused this way.
 
 The refusal reports what the lease row says: when the lease was last refreshed and when it expires. A row cannot tell a live holder from one that crashed before its lease expired (a lease lasts 45 seconds from its last refresh). When the holder names the same host and no process with its pid is visible from here, the refusal says its process looks gone and how long until the lease expires. That check runs on Unix only, and on its own it is a hint, not proof: a host name is not a PID namespace, so two containers sharing the host network (Docker `--network host`, a Kubernetes `hostNetwork` pod) share the name but not the pids, and a pid can be reused. Before you take over on that hint, confirm the holder has really exited.
 
@@ -327,7 +327,7 @@ Stores concepts from the current interaction. Lambo stamps the time itself, so t
 | `--name <NAME>` | No | A durable, session-local name for the first concept. Registered atomically with the derive; normalized like its canonical key and permanently bound to the concept actually written. Use `names assign` to name existing memory without deriving it again. |
 | `--concept <CONTENT:KIND>` | No | An extra concept. Repeat it to derive several in one call. |
 | `--parent-of <CHILD:PARENT>` | No | A hierarchy pair. Repeat it for several links. |
-| `--depends-on <REF>` | No | An existing concept the first concept rests on: its 8-hex id from recall, its full node id, its durable name or its exact content. Repeat it, at most 8 times. Each must match exactly one concept of the session, or nothing is written (see [`lambo_derive`](/mcp#lambo_derive)). |
+| `--depends-on <REF>` | No | An existing concept the first concept rests on: its 8-hex id from recall, its full node id, its durable name or its content, matched by canonical key (so case, word order, stopwords and word endings do not matter). Repeat it, at most 8 times. Each must match exactly one concept of the session, or nothing is written (see [`lambo_derive`](/mcp#lambo_derive)). |
 | `--against <REF>` | No | An existing concept the first concept contradicts, by the same forms. Repeat it, at most 8 times. Each must match exactly one concept of the session other than the first concept, or nothing is written, and naming it in `--depends-on` too is refused; it is recorded as a contradiction, not a dependency (see *Saying an existing concept is wrong* under [`lambo_derive`](/mcp#lambo_derive)). |
 | `--repo-scope <REPO>` | No | The repository this call's path-like `resource` concepts, `--parent-of` ends and `--depends-on` and `--against` path text belong to, such as `github.com/acme/widgets`, so the same path in two repositories is two concepts. Matched as exact text. At most 512 bytes, with no whitespace, control or invisible character inside (the ends are trimmed); anything else, or an empty value, is a usage error. See [Repository-scoped paths](/mcp#repository-scoped-paths). |
 
@@ -380,7 +380,7 @@ Records an action the agent took. The action becomes a `Resource` concept, and t
 | `--produces <PRODUCES>` | No | Resources this action creates. Repeatable. |
 | `--modifies <MODIFIES>` | No | Resources this action mutates. Repeatable. |
 | `--depends-on <DEPENDS_ON>` | No | Things this action depends on. Repeatable. An existing concept's full node id (hyphenated), or exactly 8 hex characters that name no concept by text and start exactly one concept's id, cites that concept; an interaction's id, or a short id several concepts share, is a usage error and nothing is written. Any other value (9 to 32 hex characters, the unhyphenated form included), and an id that names nothing, is matched by text and created if new, as before 0.6.0. |
-| `--against <REF>` | No | An existing concept this action contradicts: its 8-hex id from recall, its full node id or its exact content. Repeatable, at most 8. Never created: each must match exactly one existing concept other than the action, or it is a usage error and nothing is written. Naming the same concept in `--depends-on` is refused the same way. |
+| `--against <REF>` | No | An existing concept this action contradicts: its 8-hex id from recall, its full node id, its durable name or its content, matched by canonical key. Repeatable, at most 8. Never created: each must match exactly one existing concept other than the action, or it is a usage error and nothing is written. Naming the same concept in `--depends-on` is refused the same way. |
 | `--repo-scope <REPO>` | No | As for `derive`: the repository this action's path-like `--produces`, `--modifies`, `--depends-on` and `--against` entries belong to. |
 
 ```bash
