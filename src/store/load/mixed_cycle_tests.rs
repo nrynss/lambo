@@ -250,13 +250,13 @@ fn a_pure_cycle_forced_into_a_snapshot_is_still_refused() {
         .find(|e| e.edge_type == EdgeType::Dependency)
         .expect("the citation edge")
         .clone();
-    for (ty, back) in [
+    for (ty, back, label) in [
         // P -Hierarchical-> C already; C -Hierarchical-> P closes it.
-        (EdgeType::Hierarchical, (c, p)),
+        (EdgeType::Hierarchical, (c, p), "Hierarchical cycle"),
         // C -Dependency-> P already; P -Dependency-> C closes it.
-        (EdgeType::Dependency, (p, c)),
+        (EdgeType::Dependency, (p, c), "Causal/Dependency cycle"),
         // C -Dependency-> P already; P -Causal-> C closes it.
-        (EdgeType::Causal, (p, c)),
+        (EdgeType::Causal, (p, c), "Causal/Dependency cycle"),
     ] {
         let mut snap = base.clone();
         snap.edges.push(Edge {
@@ -268,7 +268,7 @@ fn a_pure_cycle_forced_into_a_snapshot_is_still_refused() {
         });
         let err = materialize(snap).expect_err("a pure cycle must not load");
         assert!(
-            matches!(&err, StoreError::Invariant(m) if m.contains("cycle")),
+            matches!(&err, StoreError::Invariant(m) if m.contains(label)),
             "{ty:?}: {err:?}"
         );
     }

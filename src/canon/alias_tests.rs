@@ -391,6 +391,54 @@ fn a_rulings_child_citing_its_alias_is_moved_like_any_citation() {
         .is_some());
 }
 
+/// The redirect's cycle walk covers `Causal` as well as `Dependency`: the
+/// ruling depends on an action that produced a resource, and the resource
+/// cites the alias. Moving that citation onto the ruling would close
+/// `ruling -Dependency-> action -Causal-> resource -Dependency-> ruling`, a
+/// `Causal`/`Dependency` cycle, so it stays on the alias.
+#[test]
+fn a_citation_closing_a_cycle_through_a_causal_edge_is_kept() {
+    let mut snap = fair::snapshot(true);
+    let action = concept(
+        &snap,
+        "a30",
+        "causal-action",
+        ConceptType::Resource,
+        "rotated the lease signing key",
+    );
+    let resource = concept(
+        &snap,
+        "a30",
+        "causal-resource",
+        ConceptType::Resource,
+        "lease signing key v2",
+    );
+    for c in [&action, &resource] {
+        let d = derives(&snap, c);
+        snap.edges.push(d);
+    }
+    let (action_id, resource_id) = (action.id, resource.id);
+    snap.concepts.extend([action, resource]);
+    let depends = cite(&snap, id("lease_stays"), action_id, "ruling-on-action");
+    let mut produced = cite(&snap, action_id, resource_id, "action-produced");
+    produced.edge_type = EdgeType::Causal;
+    let citation = cite(&snap, resource_id, id("lease_alias"), "resource-cites");
+    snap.edges.extend([depends, produced, citation]);
+    let g = graph(&snap);
+    let (pairs, refusals) = parse_map(
+        &g,
+        &format!("{} {}", short("lease_alias"), short("lease_stays")),
+    );
+    let p = plan(&g, &pairs, refusals);
+    let r = &p.redirects[0];
+    assert_eq!(r.cycle_refused, 1);
+    assert!(p.add.iter().all(|e| e.source != resource_id));
+    let after = graph(&apply(&snap, &p));
+    assert!(after
+        .edge_between(resource_id, id("lease_alias"), EdgeType::Dependency)
+        .is_some());
+}
+
 #[test]
 fn reviewed_pairs_carry_status_fan_in_and_type_warnings() {
     let mut snap = fair::snapshot(true);

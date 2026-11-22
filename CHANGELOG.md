@@ -9,13 +9,17 @@
   through any mix of the three. A child citing its own parent
   (`depends_on: [P]` with `parent_of: [(P, C)]`, in one call or two) was
   written and flushed, and every later load of the session (a restart,
-  `lambo names apply`, canon dry-run, the names migration) failed with
+  `lambo names assign`, canon dry-run, the names migration) failed with
   "Causal/Dependency/Hierarchical cycle detected" until the database was
   edited by hand. The load check now checks the same two conditions as the
   write checks (spec §5.7), so a session already written this way loads
   with no data change; a cycle within either condition is still refused.
   `lambo canon alias-preview`, which refused to move a citation that
-  would close such a mixed cycle, now moves it like any other. Modelled
+  would close such a mixed cycle, now moves it like any other, and
+  `lambo names migrate --map ... --apply`, which refused the whole upgrade
+  with "alias repair would create a cycle" for such a citation, now applies
+  it. Both still refuse a move that would close a `Causal`/`Dependency`
+  cycle. Modelled
   first in `formal/LamboProofs/Cite.lean` (`written_loadOk`,
   `union_check_rejects_written`, `redirect_preserves`).
 - Recall tier: a flush that changes a session's embedding contract is now
