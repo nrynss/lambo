@@ -232,9 +232,12 @@ pub struct FlushStats {
     ///   `depth` 0 because the stop cleared `pending`;
     /// * a degraded session's lag grows for good (above).
     ///
-    /// The lag also grows by up to one poll while read accesses (#30) wait to
-    /// be flushed, since they are pending too; it exceeds the flush interval
-    /// only when the store is not taking writes.
+    /// The lag also grows while read accesses (#30) wait to be flushed, since
+    /// they are pending too: a poll drains them into `pending`, and they leave
+    /// it only with the next interval flush (or a full batch), so under
+    /// ordinary read traffic the lag climbs to about the flush interval
+    /// between flushes. It exceeds the flush interval only when the store is
+    /// not taking writes.
     pub lag: Duration,
     /// Mutations not yet durable: in-graph log + pending batch (in flight,
     /// backed off, or retained after exhausted retries).
