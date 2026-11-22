@@ -16,9 +16,9 @@
   with no data change; a cycle within either condition is still refused.
   `lambo canon alias-preview`, which refused to move a citation that
   would close such a mixed cycle, now moves it like any other, and
-  `lambo names migrate --map ... --apply`, which refused the whole upgrade
-  with "alias repair would create a cycle" for such a citation, now applies
-  it. Both still refuse a move that would close a `Causal`/`Dependency`
+  `lambo names migrate --map ...` (preview and apply), which refused the
+  whole upgrade with "alias repair would create a cycle" for such a
+  citation, now accepts it. Both still refuse a move that would close a `Causal`/`Dependency`
   cycle. Modelled
   first in `formal/LamboProofs/Cite.lean` (`written_loadOk`,
   `union_check_rejects_written`, `redirect_preserves`).
