@@ -460,7 +460,7 @@ rust = [
 # omission of erased sessions the model takes as given.
 [[model]]
 lean = "formal/LamboProofs/Discovery.lean"
-read_digest = "v2:sha256:dd7596277037c4e23ba2f8dc05d7446e588c948124abbac5b01468f000291d8c"
+read_digest = "v2:sha256:28a827a1f23edbed52a7b23361c4b8a9c95d485db8223ceafa7997209135d6c2"
 rust = [
   "src/cli/serve_web/discovery.rs#Last",
   "src/cli/serve_web/discovery.rs#Discovery::new",

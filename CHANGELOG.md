@@ -586,10 +586,15 @@
   Exact-name, `session_prefix` and inherited `[[serve.credential]]` scopes are
   unchanged. Each request probes existence and erasure before a lazy,
   `max_loaded_sessions`-bounded load, so erased (`lambo:erased`) and unknown
-  sessions keep the uniform `404`; names outside the addressed-id charset are
+  sessions keep the uniform `404` (an erased startup session stays an empty
+  page, as without discovery); names outside the addressed-id charset are
   skipped. On a loopback bind discovery also registers `GET /api/sessions`,
   which lists the store's sessions (from `GraphStore::store_health`) after the
-  served ones; beyond loopback the listing still needs `list_sessions`.
+  served ones; beyond loopback the listing still needs `list_sessions`. Every
+  listing comes from a store read that began after the request arrived, so a
+  discovered session erased before the request is never listed; the store
+  sees one read at a time, and requests that arrive during a read share the
+  next one rather than reuse it (`formal/LamboProofs/Discovery.lean`).
 - Durable display names now surface through layered recall, `lambo_inspect`,
   and MCP tool schemas (#285). Layered recall preserves `LayeredHit::names`
   across merged and single-session recalls, emits `names [...]` in rendered

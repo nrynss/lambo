@@ -575,6 +575,234 @@ async fn each_listing_reads_the_store_and_a_failed_read_lists_the_served_only() 
     handle.abort();
 }
 
+/// The `404` is for discovered sessions. A startup session that is erased
+/// stays served with discovery on, as without it (the CLI reference: "an
+/// empty page"): its page is empty, not the `404`, and the listing still
+/// names it among the served sessions, once.
+#[tokio::test]
+async fn an_erased_startup_session_stays_an_empty_page_with_discovery_on() {
+    let store = two_sessions().await;
+    let recording = Recording::new(store.clone());
+    let (addr, handle) = spawn(portal_with(
+        &recording,
+        &["t4-a", "t4-b"],
+        vec![],
+        false,
+        &web(true, false),
+    ))
+    .await;
+    erase(store.as_ref(), "t4-b").await;
+    let stats = get_json(addr, "/s/t4-b/api/stats").await;
+    assert_eq!(stats["concepts"], 0);
+    assert_eq!(stats["session"], "t4-b");
+    assert_eq!(listing(addr, None).await, ["t4-a", "t4-b"]);
+    handle.abort();
+}
+
+// ---- the listing is never older than the request -------------------------
+
+/// [`Shared`] whose first `store_health` read, after it has read the store,
+/// signals `observed` and holds its answer until `release`: a read that has
+/// looked at the store and not yet returned. Later reads pass straight
+/// through. It counts reads and the most ever running at once.
+struct HeldRead {
+    inner: Shared,
+    calls: AtomicUsize,
+    running: AtomicUsize,
+    most_running: AtomicUsize,
+    observed: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+impl HeldRead {
+    fn new(store: Arc<MemoryStore>) -> Arc<Self> {
+        Arc::new(Self {
+            inner: Shared(store),
+            calls: AtomicUsize::new(0),
+            running: AtomicUsize::new(0),
+            most_running: AtomicUsize::new(0),
+            observed: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        })
+    }
+}
+
+#[async_trait]
+impl GraphStore for HeldRead {
+    async fn init_schema(&self) -> Result<(), StoreError> {
+        self.inner.init_schema().await
+    }
+    fn capabilities(&self) -> Capabilities {
+        self.inner.capabilities()
+    }
+    async fn flush(&self, batch: &MutationBatch, token: Option<u64>) -> Result<(), StoreError> {
+        self.inner.flush(batch, token).await
+    }
+    async fn load_session(&self, session: &SessionId) -> Result<GraphSnapshot, StoreError> {
+        self.inner.load_session(session).await
+    }
+    async fn keyword_candidates(
+        &self,
+        session: &SessionId,
+        tokens: &[String],
+        limit: usize,
+    ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+        self.inner.keyword_candidates(session, tokens, limit).await
+    }
+    async fn vector_candidates(
+        &self,
+        session: &SessionId,
+        embedding: &[f32],
+        limit: usize,
+    ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+        self.inner
+            .vector_candidates(session, embedding, limit)
+            .await
+    }
+    async fn blast_radius(
+        &self,
+        session: &SessionId,
+        node: NodeId,
+        min_edge_age: Duration,
+        now: DateTime<Utc>,
+    ) -> Result<u64, StoreError> {
+        self.inner
+            .blast_radius(session, node, min_edge_age, now)
+            .await
+    }
+    async fn interaction_span(
+        &self,
+        session: &SessionId,
+        node: NodeId,
+        min_age: Duration,
+        now: DateTime<Utc>,
+    ) -> Result<crate::types::InteractionSpan, StoreError> {
+        self.inner
+            .interaction_span(session, node, min_age, now)
+            .await
+    }
+    async fn interaction_span_with_window(
+        &self,
+        session: &SessionId,
+        node: NodeId,
+        min_age: Duration,
+        now: DateTime<Utc>,
+        window: Duration,
+    ) -> Result<crate::types::InteractionSpan, StoreError> {
+        self.inner
+            .interaction_span_with_window(session, node, min_age, now, window)
+            .await
+    }
+    async fn record_canonization(
+        &self,
+        event: &CanonizationEvent,
+        token: Option<u64>,
+    ) -> Result<(), StoreError> {
+        self.inner.record_canonization(event, token).await
+    }
+    async fn store_health(&self) -> Result<Vec<crate::store::SessionHealth>, StoreError> {
+        let first = self.calls.fetch_add(1, Ordering::SeqCst) == 0;
+        let now = self.running.fetch_add(1, Ordering::SeqCst) + 1;
+        self.most_running.fetch_max(now, Ordering::SeqCst);
+        let health = self.inner.store_health().await;
+        if first {
+            self.observed.notify_one();
+            self.release.notified().await;
+        }
+        self.running.fetch_sub(1, Ordering::SeqCst);
+        health
+    }
+}
+
+/// The names in a discovery outcome.
+fn found(
+    outcome: Result<Arc<[crate::surface::session::AddressedSessionId]>, DiscoveryFailure>,
+) -> Vec<String> {
+    outcome
+        .expect("store-wide read")
+        .iter()
+        .map(|id| id.as_str().to_string())
+        .collect()
+}
+
+/// Poll `fut` once: it has arrived, and is waiting (on the gate).
+fn arrive<F: std::future::Future>(fut: std::pin::Pin<&mut F>) {
+    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+    assert!(fut.poll(&mut cx).is_pending(), "waits on the running read");
+}
+
+/// CodeRabbit's scenario on #287, mirroring `Discovery.lean`
+/// `old_lists_erased` (the rule before the fix) and `fixed_fresh` /
+/// `fixed_no_erased_listed`: read A observes `t4-a` and `t4-b`; `t4-b` is
+/// erased; request B arrives while A's read is still running; A's read
+/// returns. A lists what its read saw, but B must not take that outcome (it
+/// began before B arrived and names a session erased before B arrived): B
+/// reads again and lists `t4-a` only. The store still sees one read at a
+/// time (`one_read_at_a_time`).
+#[tokio::test]
+async fn a_listing_never_reuses_a_read_older_than_the_request() {
+    let store = two_sessions().await;
+    let held = HeldRead::new(store.clone());
+    let discovery = Arc::new(Discovery::new(true));
+
+    let a = tokio::spawn({
+        let (discovery, held) = (discovery.clone(), held.clone());
+        async move { found(discovery.sessions(held.as_ref()).await) }
+    });
+    held.observed.notified().await;
+    erase(store.as_ref(), "t4-b").await;
+
+    let mut b = std::pin::pin!(discovery.sessions(held.as_ref()));
+    arrive(b.as_mut());
+    held.release.notify_one();
+
+    assert_eq!(a.await.expect("request A"), ["t4-a", "t4-b"]);
+    assert_eq!(
+        found(b.await),
+        ["t4-a"],
+        "B lists no session erased before it arrived"
+    );
+    assert_eq!(
+        held.calls.load(Ordering::SeqCst),
+        2,
+        "B read the store itself"
+    );
+    assert_eq!(held.most_running.load(Ordering::SeqCst), 1);
+}
+
+/// The fix still single-flights, mirroring `Discovery.lean` `fixed_shares`:
+/// two requests that arrive while a read runs do not take it, but share the
+/// next one, which began after both arrived. Three requests, two reads, one
+/// at a time.
+#[tokio::test]
+async fn requests_arriving_during_a_read_share_the_next_one() {
+    let store = two_sessions().await;
+    let held = HeldRead::new(store.clone());
+    let discovery = Arc::new(Discovery::new(true));
+
+    let a = tokio::spawn({
+        let (discovery, held) = (discovery.clone(), held.clone());
+        async move { found(discovery.sessions(held.as_ref()).await) }
+    });
+    held.observed.notified().await;
+    let mut c = std::pin::pin!(discovery.sessions(held.as_ref()));
+    let mut d = std::pin::pin!(discovery.sessions(held.as_ref()));
+    arrive(c.as_mut());
+    arrive(d.as_mut());
+    held.release.notify_one();
+
+    assert_eq!(a.await.expect("request A"), ["t4-a", "t4-b"]);
+    let (c, d) = tokio::join!(c, d);
+    assert_eq!(found(c), ["t4-a", "t4-b"]);
+    assert_eq!(found(d), ["t4-a", "t4-b"]);
+    assert_eq!(
+        held.calls.load(Ordering::SeqCst),
+        2,
+        "C and D share one read"
+    );
+    assert_eq!(held.most_running.load(Ordering::SeqCst), 1);
+}
+
 // ---- 6. names outside the charset ---------------------------------------
 
 /// Acceptance: a store session whose name fails `parse_addressed` is

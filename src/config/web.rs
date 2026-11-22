@@ -95,9 +95,10 @@
 //! `max_loaded_sessions`, as a `session_prefix` session does. On a loopback
 //! bind discovery also registers `GET /api/sessions` (as `list_sessions`
 //! does), which then names the discovered sessions after the served ones; on
-//! any other bind the listing still needs `list_sessions = true`. The
-//! listing reads the store on each request (one read at a time, concurrent
-//! requests share it), so an erased session leaves it at once.
+//! any other bind the listing still needs `list_sessions = true`. Each
+//! listing comes from a store read that began after the request arrived
+//! (one read at a time; requests that arrive during a read share the next
+//! one), so a discovered session erased before the request is not listed.
 
 use std::time::Duration;
 

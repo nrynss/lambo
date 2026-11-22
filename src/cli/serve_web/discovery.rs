@@ -28,11 +28,17 @@
 //! [`parse_addressed`] cannot be routed, so it is skipped: never served,
 //! never listed, never a startup failure.
 //!
-//! **Refresh.** The listing reads the store on every request, one read at a
-//! time; requests that arrive while a read is running share its outcome
-//! (single-flight, as the view cache does). No result outlives the requests
-//! that joined it, so a session erased before a request arrives is not in
-//! that request's listing, and concurrent requests cost one store read.
+//! **Refresh.** Every listing comes from a store read that began after its
+//! request arrived, so a session erased before a request arrives is never
+//! among that request's discovered sessions (a startup session is listed
+//! with the served ones, erased or not). The store sees one read at a time.
+//! A request that arrives while a read is running does not take that read's
+//! outcome (the read may already have looked at the store, before an erase
+//! the request came after); it waits, and shares the next read, which began
+//! after it arrived (single-flight). So the requests that arrive during one
+//! read cost one more read between them, however many they are.
+//! (`formal/LamboProofs/Discovery.lean`: `fixed_fresh`,
+//! `fixed_no_erased_listed`, `one_read_at_a_time`.)
 //!
 //! [`SessionScope::covers_every_pinned`]: crate::surface::session::SessionScope::covers_every_pinned
 
@@ -76,11 +82,13 @@ type Outcome = Result<Arc<[AddressedSessionId]>, DiscoveryFailure>;
 
 #[derive(Default)]
 struct Last {
-    /// Reads finished. A request that saw a smaller number on arrival
-    /// joined a read that finished since.
-    completed: u64,
-    /// That read's outcome.
-    outcome: Option<Outcome>,
+    /// Reads started, the running one included: a read's number. A request
+    /// records it on arrival, and only a read numbered above that began
+    /// after the request arrived.
+    started: u64,
+    /// The latest finished read: its number and outcome. A read whose
+    /// request was dropped before it returned leaves this as it was.
+    finished: Option<(u64, Outcome)>,
 }
 
 /// The portal's discovery switch and its single-flight store read.
@@ -113,29 +121,32 @@ impl Discovery {
     }
 
     /// The store's live, non-erased, addressable sessions, in the store's
-    /// order (`session_id` ascending). Single-flight: a request that
-    /// arrived while a read was running takes that read's outcome; anyone
-    /// else reads again. Callers check [`Discovery::reaches`] first.
+    /// order (`session_id` ascending), from a store read that began after
+    /// this call did. Single-flight (module docs): reads run one at a time
+    /// under the gate, and a request holding the gate takes the latest
+    /// finished read's outcome only when that read began after the request
+    /// arrived; otherwise it reads again. Callers check
+    /// [`Discovery::reaches`] first.
     pub(super) async fn sessions(&self, store: &dyn GraphStore) -> Outcome {
-        let arrived = self.last.lock().completed;
+        let arrived = self.last.lock().started;
         let _gate = self.gate.lock().await;
-        {
-            let last = self.last.lock();
-            if last.completed > arrived
-                && let Some(outcome) = &last.outcome
+        let read = {
+            let mut last = self.last.lock();
+            if let Some((read, outcome)) = &last.finished
+                && *read > arrived
             {
                 return outcome.clone();
             }
-        }
+            last.started += 1;
+            last.started
+        };
         let outcome = match tokio::time::timeout(DISCOVERY_TIMEOUT, store.store_health()).await {
             Ok(Ok(health)) => Ok(addressable(health.into_iter().map(|h| h.session_id))),
             Ok(Err(StoreError::Capability(_))) => Err(DiscoveryFailure::Unsupported),
             Ok(Err(_)) => Err(DiscoveryFailure::Backend),
             Err(_) => Err(DiscoveryFailure::TimedOut),
         };
-        let mut last = self.last.lock();
-        last.completed += 1;
-        last.outcome = Some(outcome.clone());
+        self.last.lock().finished = Some((read, outcome.clone()));
         outcome
     }
 }
