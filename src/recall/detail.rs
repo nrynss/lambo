@@ -149,13 +149,16 @@ pub(crate) struct DetailedHit {
     /// The hit's typed warning lines, in producer order. Token exclusion
     /// discards the hit's complete block, never these annotations.
     pub(crate) annotations: Vec<Annotation>,
-    /// Set when the hit is in the result **only** as a contradiction
-    /// companion (#19(c), #179): the ids of the shown hits it contradicts,
-    /// id-ascending. Such a hit holds no `top_k` slot, so a result can have
-    /// up to one more hit than `top_k` per contradicted hit; its
-    /// `contradicts` annotations say why. A contradicting concept that
-    /// ranked into the result on its own carries the annotations but not
-    /// this field. Additive on the wire: serialized only when non-empty.
+    /// Set when the hit is in the result as a contradiction companion that
+    /// holds no `top_k` slot (#19(c), #179): the ids of the shown hits it
+    /// contradicts, id-ascending. A result can therefore have up to one more
+    /// hit than `top_k` per contradicted hit; its `contradicts` annotations
+    /// say why. Beside a Canonical or Venerable hit the companion is forced,
+    /// so it always carries this field, even when it would have ranked in on
+    /// its own. Beside any other hit it carries the field only when it did
+    /// not rank into the first `top_k`; one that did carries the annotations
+    /// but not this field. Additive on the wire: serialized only when
+    /// non-empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) companion_of: Vec<NodeId>,
     /// The shown hits this hit's `contradicts` lines name, id-ascending,

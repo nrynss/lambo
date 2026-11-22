@@ -809,8 +809,9 @@ impl LamboServer {
     /// as one field on one line** (J1-R1-1, below).
     ///
     /// **The id is caller-asserted and unauthenticated.** Over stdio the client
-    /// owns the process; over HTTP one bearer token authenticates the server,
-    /// not each agent. So identity here is a cooperative declaration, exactly
+    /// owns the process; over HTTP a bearer token or a `[[serve.credential]]`
+    /// authenticates a client to the server, never an agent. So identity here
+    /// is a cooperative declaration, exactly
     /// like the soft locks it drives (spec §11: advisory, RAM-only). Distinct
     /// ids get distinct locks; callers sharing an id share locks knowingly. The
     /// compensating control is that this is *said out loud* — in every
