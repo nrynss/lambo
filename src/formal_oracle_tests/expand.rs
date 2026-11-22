@@ -93,7 +93,9 @@ fn expand_() {
                 .collect();
             let model = nbrs.get(&x).cloned().unwrap_or_default();
             precondition("Expand", real == model, || {
-                format!("node {x}: the graph's neighbours are {real:?}, the vector's nbrs {model:?}")
+                format!(
+                    "node {x}: the graph's neighbours are {real:?}, the vector's nbrs {model:?}"
+                )
             });
         }
     }

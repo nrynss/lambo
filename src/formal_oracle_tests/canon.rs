@@ -39,7 +39,11 @@ fn name(s: CanonizationStatus) -> String {
 
 /// Apply `from → to` to a concept at `current`: its new status, or `None`
 /// when the gate refuses.
-fn gate(current: CanonizationStatus, from: CanonizationStatus, to: CanonizationStatus) -> Option<String> {
+fn gate(
+    current: CanonizationStatus,
+    from: CanonizationStatus,
+    to: CanonizationStatus,
+) -> Option<String> {
     let mut g: Graph = props::graph_of([props::concept(1, "x", "x", current)]);
     let event = CanonizationEvent {
         id: NodeId(uuid::Uuid::from_u64_pair(4, 1)),
@@ -62,7 +66,9 @@ fn gate(current: CanonizationStatus, from: CanonizationStatus, to: CanonizationS
 }
 
 fn millis(ms: i64) -> chrono::DateTime<Utc> {
-    Utc.timestamp_millis_opt(ms).single().expect("a valid instant")
+    Utc.timestamp_millis_opt(ms)
+        .single()
+        .expect("a valid instant")
 }
 
 #[test]
@@ -83,12 +89,15 @@ fn canon() {
     v.replay("Lambo.Canon.stage1Passes", |&(gc, dep): &(i32, usize)| {
         stage1_evidence_passes(gc, dep)
     });
-    v.replay("Lambo.Canon.stage2Passes", |&(distinct, num, den): &(u64, u64, u64)| {
-        stage2_evidence_passes(InteractionSpan {
-            distinct,
-            coverage: num as f64 / den as f64,
-        })
-    });
+    v.replay(
+        "Lambo.Canon.stage2Passes",
+        |&(distinct, num, den): &(u64, u64, u64)| {
+            stage2_evidence_passes(InteractionSpan {
+                distinct,
+                coverage: num as f64 / den as f64,
+            })
+        },
+    );
     v.replay(
         "Lambo.Canon.inCooldown",
         |&(last, cooldown, now): &(Option<i64>, u64, i64)| {

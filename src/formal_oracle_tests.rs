@@ -79,7 +79,10 @@ impl Vectors {
     fn load(model: &str, json: &str, lean_fns: &[&str]) -> Vectors {
         let v: Vectors = serde_json::from_str(json)
             .unwrap_or_else(|e| panic!("formal/oracle/{model}.json does not parse: {e}"));
-        assert_eq!(v.model, model, "formal/oracle/{model}.json names another model");
+        assert_eq!(
+            v.model, model,
+            "formal/oracle/{model}.json names another model"
+        );
         assert_eq!(v.lean, format!("formal/LamboProofs/{model}.lean"));
         let mut have: Vec<&str> = v.functions.iter().map(|f| f.lean.as_str()).collect();
         let mut want = lean_fns.to_vec();
