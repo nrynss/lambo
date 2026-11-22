@@ -1,0 +1,85 @@
+#!/usr/bin/env python3
+"""Tests for count-theorems.py.
+
+  python3 -I scripts/formal/test_count_theorems.py
+"""
+
+import importlib.util
+import tempfile
+import unittest
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+spec = importlib.util.spec_from_file_location("count_theorems", HERE / "count-theorems.py")
+ct = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(ct)
+
+LEAN = """\
+/-! Module doc.
+theorem inside_a_block_comment : True := trivial
+-/
+namespace Demo
+
+/-- A doc comment whose second line starts with the word
+theorem above stays a statement about the old version. -/
+theorem plain (n : Nat) : n = n := rfl
+
+private theorem hidden : True := trivial
+
+@[simp] theorem with_attr : 1 = 1 := rfl
+
+@[simp] private theorem attr_and_private : 2 = 2 := rfl
+
+theorem name_only
+    (h : True) : True := h
+
+theorem colon_next:True := trivial
+
+-- theorem in_a_line_comment : True := trivial
+
+/- nested /- block -/ still a comment
+theorem inside_nested : True := trivial -/
+
+def s : String := "theorem in_a_string : True"
+
+example : True := trivial
+
+  theorem indented_is_not_at_column_zero : True := trivial
+
+end Demo
+"""
+
+
+class CountTheorems(unittest.TestCase):
+    def test_sample(self):
+        # plain, hidden, with_attr, attr_and_private, name_only, colon_next
+        self.assertEqual(ct.count(LEAN), 6)
+
+    def test_prose_line_not_counted(self):
+        self.assertEqual(ct.count("/-- doc\ntheorem above stays -/\n"), 0)
+
+    def test_private_theorem(self):
+        self.assertEqual(ct.count("private theorem p : True := trivial\n"), 1)
+
+    def test_attribute_before_theorem(self):
+        self.assertEqual(ct.count("@[simp, grind =] theorem a : 1 = 1 := rfl\n"), 1)
+
+    def test_name_only_line(self):
+        self.assertEqual(ct.count("theorem n\n    (h : True) : True := h\n"), 1)
+
+    def test_strip_keeps_lines(self):
+        src = "/- a\nb -/\ntheorem t : True := trivial\n"
+        self.assertEqual(ct.strip_comments(src).count("\n"), src.count("\n"))
+
+    def test_main_skips_audit(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d) / "formal" / "LamboProofs"
+            root.mkdir(parents=True)
+            (root / "A.lean").write_text("theorem a : True := trivial\n", encoding="utf-8")
+            (root / "Audit.lean").write_text("theorem b : True := trivial\n", encoding="utf-8")
+            self.assertEqual([p.name for p in ct.model_files(d)], ["A.lean"])
+            self.assertEqual(ct.main(["--repo", d]), 0)
+
+
+if __name__ == "__main__":
+    unittest.main()
