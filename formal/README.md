@@ -270,11 +270,11 @@ Not covered, and why:
   a graph, a hot list or store queries built per case; they are the next
   candidates, one exporter module and one test module each.
 
-Found by the oracle: under RRF, a candidate whose exact value is zero because
-it is ranked only in legs of weight zero gets `+0.0` in the Rust (a sum of
-zero terms), and one ranked in no leg gets `-0.0` (an empty `f64` sum);
-`total_cmp` orders `+0.0` first, so between the two the tie-break is not
-applied, where the model orders them by it. Those cases are a separate
-function in `oracle/Fusion.json`, replayed by the ignored test
-`formal_oracle_tests::fusion::fusion_zero_ties` until it is decided whether
-the model or the Rust should change.
+Found by the oracle (#328, fixed in the Rust): under RRF, a candidate whose
+exact value is zero because it is ranked only in legs of weight zero got
+`+0.0` (a sum of zero terms), and one ranked in no leg (its only leg score
+non-finite) got `-0.0` (an empty `f64` sum); `total_cmp` ordered `+0.0`
+first, so between the two the tie-break was not applied, where the model
+orders them by it. `rank` now sums from `+0.0`. Those cases stay a separate
+function in `oracle/Fusion.json`, replayed by
+`formal_oracle_tests::fusion::fusion_zero_ties`.

@@ -55,7 +55,7 @@ rust = [
 [[model]]
 lean = "formal/LamboProofs/Order.lean"
 read_against = "514da8d7"
-read_digest = "v2:sha256:1f192a250189536e75f9d8aa8e130b7cd48bd34b7038cc229d7e2299f9854de6"
+read_digest = "v2:sha256:3a04cbbb5f5739914e1e2f3a1b72dc90e83bc7f04e53d45a9ef1875186dd01ae"
 rust = [
   "src/types/mod.rs#tie_break_by_key",
   "src/daemon/score.rs#rescore",
@@ -229,7 +229,7 @@ rust = [
 [[model]]
 lean = "formal/LamboProofs/Fusion.lean"
 read_against = "514da8d7"
-read_digest = "v2:sha256:5295b9daf26293f1ed5c32899896947a8c5d98bb8b46419afde7ec2ffd10ce8d"
+read_digest = "v2:sha256:2dc18a735ff52d799a2b1d6eb3b7c71db6a4bd0df454001c21885077d8005388"
 rust = [
   "src/recall/candidates.rs#candidates_with_keyword_leg_as",
   "src/recall/candidates.rs#merge_max",

@@ -119,19 +119,14 @@ fn fusion() {
 }
 
 /// Two candidates whose exact RRF values are both zero, one ranked only in
-/// legs of weight zero, the other in no leg. The model calls both `0` and
-/// orders them by the tie-break; `rank` gives the first `+0.0` (a sum of
-/// zero terms) and the second `-0.0` (an empty `f64` sum), and `total_cmp`
-/// puts `+0.0` first whatever the tie-break says. In the Rust a candidate
-/// reaches `rank` with no rank when its only leg score is non-finite (which
-/// earns no rank); the model has no non-finite scores, so the vectors stand
-/// for it with a candidate in no leg. Found by this oracle (#291); not yet
-/// decided whether the model or the Rust should change.
+/// legs of weight zero, the other in no leg (in the Rust, a candidate whose
+/// only leg score is non-finite earns no rank; the model has no non-finite
+/// scores, so the vectors stand for it with a candidate in no leg). The
+/// model calls both `0` and orders them by the tie-break, and so does `rank`
+/// since #328: it fuses every zero to `+0.0`. Before that an empty `f64` sum
+/// gave `-0.0`, which `total_cmp` put after every `+0.0` whatever the
+/// tie-break said. Found by this oracle (#291).
 #[test]
-#[ignore = "Fusion.json zero ties, case 1: config [3,1,0,10,0] (keyword and \
-            recent weight 0); member 11 (key Za:, in no leg) gets -0.0, members \
-            3 and 5 (keyless, ranked only in zero-weight legs) +0.0; Lean orders \
-            [.., 1, 11, 3, 5] by the tie-break, Rust [.., 1, 3, 5, 11]"]
 fn fusion_zero_ties() {
     let v = Vectors::load("Fusion", vectors!("Fusion"), &FNS);
     v.replay("Lambo.Fusion.RrfRecall.rrf zero ties", run);

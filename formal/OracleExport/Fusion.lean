@@ -24,12 +24,13 @@ vectors may be ordered by a rounding in Rust instead of by the tie-break.
 Cases with such a tie above zero are not generated (`roundingTie`);
 everywhere else the order is compared exactly and each value within `1e-12`.
 
-A tie at zero is different, and the oracle found it: a candidate ranked only
-in legs of weight zero has the Rust value `+0.0` (a sum of zero terms), one
-ranked in no leg `-0.0` (Rust's empty `f64` sum), and `total_cmp` orders the
-first ahead whatever the tie-break says, where the model calls both `0` and
-orders them by the tie-break. Those cases (`zeroTie`) are written to their
-own function, whose Rust replay is `#[ignore]`d with the counterexample.
+A tie at zero is different, and the oracle found it (#328): a candidate
+ranked only in legs of weight zero had the Rust value `+0.0` (a sum of zero
+terms), one ranked in no leg `-0.0` (Rust's empty `f64` sum), and
+`total_cmp` ordered the first ahead whatever the tie-break said, where the
+model calls both `0` and orders them by the tie-break. The Rust now sums
+from `+0.0` and agrees with the model. Those cases (`zeroTie`) keep their
+own function, as #328's regression cases.
 -/
 import LamboProofs.Fusion
 import OracleExport.Gen
@@ -91,9 +92,9 @@ def roundingTie (R : RrfRecall Nat) (legs : Nat → Legs) : Bool :=
 
 /-- Two candidates whose exact values are both zero through different rank
 vectors (one ranked only in legs of weight zero, one in no leg). The oracle
-found that the Rust orders these by the sign of a zero (an empty `f64` sum
+found that the Rust ordered these by the sign of a zero (an empty `f64` sum
 is `-0.0`, a sum of zero terms `+0.0`, and `total_cmp` puts `+0.0` first)
-rather than by the tie-break; they are kept apart, in their own function. -/
+rather than by the tie-break (#328, fixed); they keep their own function. -/
 def zeroTie (R : RrfRecall Nat) (legs : Nat → Legs) : Bool :=
   R.best legs != 0 && R.ids.any fun a => R.ids.any fun b =>
     a != b && R.num legs a == 0 && R.num legs b == 0 && R.ranks legs a != R.ranks legs b
@@ -137,7 +138,7 @@ def vectors : Vectors := run seed do
       "members: id (Uuid pair (2,id)), key (a concept with that canonical_key; null: an id in no graph), keyword and vector leg scores at scale 1000, recent_rank (the model's recentRank of a generated recentIdx, written into the input because rank reads LegScores::recent_rank).",
       "tb: Order.tieBreak with str::cmp keys and member numbers, as in Order.json. config: [kNum, kDen, wKeyword, wVector, wRecent], k = kNum / kDen, weights at scale 10.",
       "No case has two candidates whose exact values tie above zero through different rank vectors (the f64 rounding the model leaves out decides those). The order is compared exactly, each value within 1e-12.",
-      "Cases where two candidates' exact values are both zero through different rank vectors are in the second function only: there the Rust orders by the sign of the zero (an empty f64 sum is -0.0), not by the tie-break; its Rust test is ignored until that is decided."
+      "Cases where two candidates' exact values are both zero through different rank vectors are in the second function only: the regression cases of #328, where the Rust ordered by the sign of the zero (an empty f64 sum is -0.0) rather than by the tie-break until it summed from +0.0."
     ]
     fns := [
       { lean := "Lambo.Fusion.RrfRecall.rrf", rust := "recall::candidates::rank (FusionKind::Rrf)", cases },

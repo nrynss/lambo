@@ -534,7 +534,11 @@ fn rank(
             // A non-finite leg score (a bad store cosine) earns no rank:
             // total_cmp would put a positive NaN first. The raw score stays
             // on the hit for the ledger, and `max` still sanitises it.
-            .filter_map(|(id, l)| pick(l).filter(|s| s.is_finite()).map(|s| (*id, s)))
+            // `+ 0.0` turns a `-0.0` into `+0.0` (and leaves every other
+            // value as it is), so the two zeros tie and go by the tie-break
+            // as every other equal score does, rather than total_cmp
+            // putting `+0.0` first (#328).
+            .filter_map(|(id, l)| pick(l).filter(|s| s.is_finite()).map(|s| (*id, s + 0.0)))
             .collect();
         members.sort_by(|a, b| order(*a, *b));
         members
@@ -571,8 +575,15 @@ fn rank(
     .into_iter()
     .filter(|(active, _)| *active)
     .map(|(_, w)| term(w, 1))
-    .sum();
+    .fold(0.0, |a, b| a + b);
     for l in legs.values_mut() {
+        // Summed from `+0.0`, not with `Iterator::sum`, whose empty sum is
+        // `-0.0`: a candidate with no ranked leg (its only leg score was
+        // non-finite) must fuse to the same zero as one ranked only in legs
+        // of weight zero, so that zero ties go to the tie-break, not to
+        // total_cmp's `+0.0 > -0.0` (#328, Lean `Fusion.RrfRecall.rrfAhead`).
+        // `0.0 + -0.0` is `+0.0`, so a `-0.0` weight's terms are normalised
+        // too.
         let sum: f64 = [
             (l.keyword_rank, fusion.keyword_weight),
             (l.vector_rank, fusion.vector_weight),
@@ -580,7 +591,7 @@ fn rank(
         ]
         .into_iter()
         .filter_map(|(r, w)| r.map(|r| term(w, r)))
-        .sum();
+        .fold(0.0, |a, b| a + b);
         l.rrf = Some(if best > 0.0 { sum / best } else { 0.0 });
     }
     let mut out: Vec<Scored<NodeId>> = legs
@@ -2076,6 +2087,61 @@ mod tests {
         )]);
         let out = rank(&mut legs, &g, &only_recent, false);
         assert_eq!(out[0].score, 0.0, "no NaN from a zero normaliser");
+    }
+
+    /// #328: a fused zero is `+0.0` whatever produced it, so zero ties
+    /// fall to the tie-break (Lean `Fusion.RrfRecall.rrfAhead`). Before
+    /// the fix a candidate with no ranked leg (its only leg score is
+    /// non-finite, so it earns no rank) summed an empty iterator to `-0.0`,
+    /// and `total_cmp` put every `+0.0` (ranked only in a zero-weight leg)
+    /// ahead of it, keyed or not.
+    #[test]
+    fn rrf_zero_scores_tie_break_whatever_the_sign_of_zero() {
+        let g = planted_graph().0;
+        let no_keyword = RecallFusion {
+            keyword_weight: 0.0,
+            ..rrf()
+        };
+        let keyless = cid(99); // in no graph
+        let mut legs: LegProvenance = HashMap::from([
+            (cid(4), leg(None, Some(0.9))),
+            (cid(1), leg(None, Some(f64::NAN))),
+            (cid(2), leg(None, Some(f64::INFINITY))),
+            (cid(3), leg(Some(1.0), None)),
+            (keyless, leg(Some(0.5), None)),
+        ]);
+        let out = rank(&mut legs, &g, &no_keyword, true);
+        assert_eq!(legs[&cid(1)].vector_rank, None, "NaN earns no rank");
+        assert_eq!(legs[&cid(3)].keyword_rank, Some(1));
+        // Every zero ties and goes by key: alpha < beta < gamma, then the
+        // keyless candidate last.
+        assert_eq!(
+            ids(out.clone()),
+            vec![cid(4), cid(1), cid(2), cid(3), keyless],
+            "{out:?}"
+        );
+        for s in &out[1..] {
+            assert!(
+                s.score == 0.0 && s.score.is_sign_positive(),
+                "{:?} fuses to {:?}",
+                s.item,
+                s.score
+            );
+        }
+    }
+
+    /// A `-0.0` leg score ranks with `+0.0` by the tie-break, as every
+    /// other equal score does (`leg_ranks`), not after it.
+    #[test]
+    fn a_negative_zero_leg_score_ties_with_zero() {
+        let g = planted_graph().0;
+        let mut legs: LegProvenance = HashMap::from([
+            (cid(1), leg(None, Some(-0.0))),
+            (cid(2), leg(None, Some(0.0))),
+        ]);
+        rank(&mut legs, &g, &rrf(), false);
+        assert_eq!(legs[&cid(1)].vector_rank, Some(1), "alpha < beta");
+        assert_eq!(legs[&cid(2)].vector_rank, Some(2));
     }
 
     #[test]

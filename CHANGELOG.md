@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Recall: under RRF fusion (`[fusion] kind = "rrf"`), candidates whose
+  fused score is zero are now ordered by the tie-break (canonical key, then
+  id) like every other tie (#328). A candidate whose only leg score was
+  non-finite earns no rank and fused to `-0.0` (an empty `f64` sum), while
+  one ranked only in a leg of weight zero fused to `+0.0`, and the sort put
+  every `+0.0` first: with a zero leg weight configured, a keyed concept
+  could sort after keyless ones. The fused sum now starts at `+0.0`, and a
+  `-0.0` leg score ranks with `+0.0` by the tie-break. Found by the #291
+  differential oracle; `Fusion.lean` already ordered them this way.
 - Load: a session holding a cycle that mixes `parent_of` with citations or
   action edges now loads (#325). The write-time checks refuse a cycle in
   `Causal`/`Dependency` (`record_action`, `depends_on`) and, separately, a
@@ -70,11 +79,9 @@
   trivial and the test checks that first. `scripts/formal/check-oracle.sh`
   regenerates the vectors and fails if the committed ones are stale; a
   change under `formal/oracle/` runs the Rust CI. The oracle found that RRF
-  orders two candidates whose exact value is zero by the sign of the zero
-  (`+0.0` for one ranked only in zero-weight legs, `-0.0` for an empty sum)
-  instead of by the tie-break; those cases are replayed by an ignored test
-  until that is decided. Test-only `formal_oracle` modules expose the
-  private functions; no production code changed.
+  ordered two candidates whose exact value is zero by the sign of the zero
+  instead of by the tie-break (#328, fixed below). Test-only
+  `formal_oracle` modules expose the private functions.
 - Formal models: the constants the Lean models in `formal/LamboProofs/`
   hard-code are now pinned to the Rust (#291). `src/formal_constants_tests.rs`
   has one test per model that asserts each threshold, weight, bound and
