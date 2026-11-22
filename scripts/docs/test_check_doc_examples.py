@@ -98,14 +98,14 @@ class Fixture(unittest.TestCase):
         self.docs.mkdir(parents=True)
 
     def write_oracle(self, text, name="Demo.json"):
-        (self.root / "formal" / "oracle" / name).write_text(text)
+        (self.root / "formal" / "oracle" / name).write_text(text, encoding="utf-8")
 
     def page(self, text, name="page.mdx"):
         path = self.docs / name
         if isinstance(text, bytes):
             path.write_bytes(text)
         else:
-            path.write_text(text)
+            path.write_text(text, encoding="utf-8")
         return path
 
     def run_check(self, text):
@@ -326,7 +326,7 @@ class ExitCodes(Fixture):
     def test_default_pages_include_the_reference_copies(self):
         ref = self.root / "docs" / "reference"
         ref.mkdir(parents=True)
-        (ref / "page.mdx").write_text(page_with("{/* oracle: Demo.json stage1Passes#1 */}", rows="| 3 | 2 | fails |\n"))
+        (ref / "page.mdx").write_text(page_with("{/* oracle: Demo.json stage1Passes#1 */}", rows="| 3 | 2 | fails |\n"), encoding="utf-8")
         code, err = self.main()
         self.assertEqual(code, 1)
         self.assertIn("docs/reference/page.mdx:5", err)

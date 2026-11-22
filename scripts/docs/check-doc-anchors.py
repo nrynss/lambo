@@ -137,12 +137,20 @@ def read_text(path: Path, rel: str) -> str:
 
 def strip_lean_comments(text: str) -> str:
     """Lean source with `--` line comments and nested `/- -/` block comments
-    blanked out, newlines kept."""
+    blanked out, newlines kept. A string literal outside a comment is kept
+    as it is, so a `/-` or `--` inside one starts no comment."""
     out = []
     depth = 0
     i, n = 0, len(text)
     while i < n:
         two = text[i : i + 2]
+        if depth == 0 and text[i] == '"':
+            j = i + 1
+            while j < n and text[j] != '"':
+                j += 2 if text[j] == "\\" else 1
+            out.append(text[i : j + 1])
+            i = j + 1
+            continue
         if depth == 0 and two == "--":
             while i < n and text[i] != "\n":
                 i += 1
@@ -209,16 +217,56 @@ RUST_KEYWORDS = frozenset(
     "let loop match mod move mut pub ref return self Self static struct super trait true type "
     "union unsafe use where while".split()
 )
-RUST_NOISE = re.compile(
-    r"""'(?:\\.|[^'\\\n])'|r(#*)".*?"\1|"(?:\\.|[^"\\])*"|//[^\n]*|/\*.*?\*/""", re.DOTALL
-)
+RUST_CHAR = re.compile(r"'(?:\\.|\\u\{[0-9A-Fa-f]{1,6}\}|[^'\\\n])'")
+RUST_RAW = re.compile(r'b?r(#*)"')
 DECL_KW = r"(?:fn|struct|enum|const|static|type|trait|mod|union)"
 TYPE_KW = r"(?:struct|enum|trait|type|mod|union)"
 
 
 def rust_code(text: str) -> str:
-    """Rust source with comments and string literals blanked, newlines kept."""
-    return RUST_NOISE.sub(lambda m: "\n" * m.group(0).count("\n"), text)
+    """Rust source with comments and string and char literals blanked,
+    newlines kept. Block comments nest, as in Rust, so a declaration inside a
+    commented-out block that itself holds a comment stays blanked."""
+    out: list[str] = []
+    i, n = 0, len(text)
+
+    def blank(j: int) -> int:
+        out.append("\n" * text.count("\n", i, j))
+        return j
+
+    while i < n:
+        two = text[i : i + 2]
+        if two == "//":
+            j = text.find("\n", i)
+            i = blank(n if j < 0 else j)
+            continue
+        if two == "/*":
+            depth, j = 1, i + 2
+            while j < n and depth:
+                if text.startswith("/*", j):
+                    depth, j = depth + 1, j + 2
+                elif text.startswith("*/", j):
+                    depth, j = depth - 1, j + 2
+                else:
+                    j += 1
+            i = blank(j)
+            continue
+        if (i == 0 or not (text[i - 1].isalnum() or text[i - 1] == "_")) and (m := RUST_RAW.match(text, i)):
+            end = text.find('"' + m.group(1), m.end())
+            i = blank(n if end < 0 else end + 1 + len(m.group(1)))
+            continue
+        if text[i] == '"':
+            j = i + 1
+            while j < n and text[j] != '"':
+                j += 2 if text[j] == "\\" else 1
+            i = blank(j + 1)
+            continue
+        if text[i] == "'" and (m := RUST_CHAR.match(text, i)):
+            i = blank(m.end())
+            continue
+        out.append(text[i])
+        i += 1
+    return "".join(out)
 
 
 def has_word(text: str, word: str) -> bool:

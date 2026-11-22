@@ -98,7 +98,7 @@ class Fixture(unittest.TestCase):
         if isinstance(text, bytes):
             path.write_bytes(text)
         else:
-            path.write_text(text)
+            path.write_text(text, encoding="utf-8")
         return path
 
     def page(self, text, name="page.mdx"):
@@ -319,6 +319,35 @@ class ExitCodes(Fixture):
         code, err = self.main()
         self.assertEqual(code, 1)
         self.assertIn("docs/reference/page.mdx:1: lean: Demo.nope", err)
+
+
+class ScannerTest(unittest.TestCase):
+    def test_lean_string_holding_a_comment_opener_starts_no_comment(self):
+        names = cda.lean_names(
+            'namespace Lambo.M\n'
+            'def marker : String := "/-"\n'
+            'def kept : Nat := 0\n'
+            'def esc : String := "a\\"/-"\n'
+            'def kept2 : Nat := 1\n'
+            'end Lambo.M\n'
+        )
+        self.assertIn("Lambo.M.kept", names)
+        self.assertIn("Lambo.M.kept2", names)
+
+    def test_rust_nested_block_comment_hides_its_declarations(self):
+        code = cda.rust_code("/* outer /* inner */ fn removed() {} */\nfn kept() {}\n")
+        self.assertFalse(cda.declares(code, "removed"))
+        self.assertTrue(cda.declares(code, "kept"))
+
+    def test_rust_strings_raw_strings_and_chars_hide_their_text(self):
+        code = cda.rust_code(
+            'let s = "fn fake() {}"; let r = r#"fn raw() {}"#; let c = \'"\'; fn after() {}\n'
+            "fn last<'a>(x: &'a str) {}\n"
+        )
+        for hidden in ("fake", "raw"):
+            self.assertFalse(cda.declares(code, hidden), hidden)
+        for kept in ("after", "last"):
+            self.assertTrue(cda.declares(code, kept), kept)
 
 
 if __name__ == "__main__":
