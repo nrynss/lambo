@@ -40,7 +40,7 @@ Research experiments and their adoption decisions are indexed in
 | [`0.6.0-cutover/`](0.6.0-cutover/) | The #33 dogfood cut-over from one mixed session to eight per-project sessions with a shared `general` layer. Verify: recall@5 against the old answers 0.85–1.0 per project, and no project sees another project's hits afterwards. Performance on the same 0.6.0 binary: recall p50 5.6 → 2.7 ms and p99 144 → 75 ms; 8 concurrent agents applied 541/541 (old) and 543/543 (new) writes; four sessions in parallel applied 527/527. Endor figures withheld. |
 | [`0.5.0-vs-0.4.0/`](0.5.0-vs-0.4.0/) | The full 0.4.0 vs 0.5.0 suite on the release assets. Sequential latency is unchanged with identical top-8 results, and startup is 4× faster. Concurrent writes: 0.4.0 failed 253 of 519 at 8 agents and 1,441 of 2,009 at 16; 0.5.0 failed 0 of both. Replay of 330 real writes is indistinguishable from 0.4.0 against itself. Crash behaviour is the same. A proxy's footprint drops from 90 MB to 6.5 MB. |
 | [`0.6.0-vs-0.5.0/`](0.6.0-vs-0.5.0/) | The re-pin gate for 0.6.0 on the Linux CUDA rig. Replay of 330 real writes is indistinguishable from 0.5.0 against itself, recall results are identical, and neither build fails a write at 8 or 16 agents. One regression: queries with a structural marker (`blast radius`, `depends on`) take about 280 ms instead of 21 ms (#165). |
-| [`0.15.0-vs-0.14.0-metal/`](0.15.0-vs-0.14.0-metal/) | The re-pin gate for 0.15.0 on the Metal rig. Replay of 330 real writes: 0 of 330 calls differ. The ranked top-8 hits are identical between the builds, and the only recall differences are a ninth notice hit that two serves of one build also disagree on. Medians are level and no write fails at 8 or 16 agents; at 16 agents 0.15.0 has a few milliseconds more at p99 and one stalled second, not resolved by the runs. Session load and a canonization dry run are within 1%; under Swarm the dry-run reports are identical, and under Solo three fewer concepts reach Candidate (#300). |
+| [`0.15.0-vs-0.14.0-metal/`](0.15.0-vs-0.14.0-metal/) | The re-pin gate for 0.15.0 on the Metal rig. Replay of 330 real writes: 0 of 330 calls differ. The ranked top-8 hits are identical between the builds, and the only recall differences are a ninth notice hit that two serves of one build also disagree on. Medians are level and no write fails at 8 or 16 agents; at 16 agents 0.15.0 has a few milliseconds more at p99 and one stalled second, not resolved by the runs. Session load is 2.7% faster on 0.15.0 and a canonization dry run 0.9% slower; under Swarm the dry-run reports are identical, and under Solo three fewer concepts reach Candidate, consistent with #300. |
 
 ## Production dogfood helpfulness audit
 
@@ -79,6 +79,12 @@ reason, and the fix — rather than only the final green run.
 | `demo-live-canon-events.txt` | The canonization events the same run left behind in the database. |
 | `demo-live-saints.txt`, `demo-live-conformance.txt`, `demo-live-serveweb-cockroach.txt` | The canonical-memory listing, the conformance suite, and the read-only web surface, all against that store. |
 | [`e2e-gates-fable.txt`](e2e-gates-fable.txt) | The end-to-end gate run from an independent adversarial review. |
+
+## Formal models
+
+| Path | What it shows |
+|---|---|
+| [`formal-cost-2026-11/`](formal-cost-2026-11/) | What the local Lean work cost (#292): tokens and agent time from the transcripts of one orchestrating session and its 127 Opus agents, by work item, role and fix. The Lean work alone took 112 agents, 44M fresh input tokens, 1.43B cache-read tokens, 7.5M output tokens and 34 agent-hours, plus 12 active hours of orchestration. Review is half the agents and a quarter of the output. Most fixes in #293–#302 took 0.4–1.4 agent-hours. The cloud session that wrote the first 13 models is not covered. Scripts and per-agent rows included; no prompts or paths. |
 
 ## Concurrency capture (C1–C5)
 
