@@ -213,6 +213,10 @@ LAMBO_GIT_SHA=$(git rev-parse --short HEAD) \
 # NVIDIA/Linux rig (this machine): --features store-sqlite,embed-candle-cuda,embed-bge;
 # metal is Apple-silicon-only. CUDA must be on the build PATH (the unit's Environment
 # already exports /opt/cuda/bin); on an Apple box keep embed-candle-metal.
+# CUDA builds also need, on this rig's toolkit (13.5, GCC newer than nvcc accepts):
+#   NVCC_CCBIN=clang CUDARC_CUDA_VERSION=13040
+# cudarc 0.19.10 knows toolkits up to 13.4; 13040 selects its 13.4 bindings
+# (0.15.0 gate, evidence/0.15.0-vs-0.12.0-cuda/, section 7).
 mkdir -p ~/lambo-dogfood/bin
 cp target/release/lambo ~/lambo-dogfood/bin/lambo-<sha>
 ```
