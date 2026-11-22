@@ -14,8 +14,9 @@ Rust items modelled (paths as at `16e9aafa`):
 * `src/writeq/drain.rs`: `quiesce`, `abort_workers` (every unsettled receipt
   set aside), `settle_deferred` with `CloseFlush` (including the
   `close_unflushed → intent_durable` upgrade on a retried close), and
-  `abort_all_sync`; and which `CloseFlush` `Memory::close` and
-  `Memory::close_fenced` (`src/memory/shutdown.rs`) pass it.
+  `abort_all_sync`, which only `Memory`'s `Drop` calls; and which
+  `CloseFlush` `Memory::close` and `Memory::close_fenced`
+  (`src/memory/shutdown.rs`) pass to `settle_deferred`.
 * `src/writeq/replay.rs`: `spawn_replay` (seeding the restart map, the
   unconsumed filter, the liveness gate, the loop's match arm by arm, both
   streaks, `EMBEDDER_SICK_THRESHOLD`, `REPLAY_LOOKUP_TIMEOUT_LIMIT`; since
@@ -4217,6 +4218,33 @@ unsettled receipt (`deferredW`, as `abort_workers` does) and settles them by
 retried close settles the same set-aside ids again (`close_deferred` is kept
 after an incomplete flush).
 
+**The drain trace over-approximates the sealed lanes.** The Rust seals the
+lanes at the start of `quiesce` (`self.seal()`, `src/writeq/drain.rs`), and
+from then on a held write's retry starts only on a lost lease, never because
+it came due (`retry_due && !l.sealed`, `spawn_worker`). `stepW` has no seal
+state, so a `runW` trace standing for the drain can `wake`, `start` and
+`finish` a held write after the seal, which the Rust cannot. The model allows
+more traces than the Rust, never fewer, so every theorem over all `runW`
+traces holds of the Rust's. A retry that started before the seal and finishes
+during the drain is one of the Rust's traces too.
+
+**Known gaps found after this section was written (stated, not fixed
+here).**
+
+* **#345, dead-lettered batches.** The model has no dead-lettered batches:
+  `CloseFlush.durable` stands for "the final flush completed", and
+  `shutdown_no_silent_lossW` reads `intent_durable` as owed in this process's
+  log (`OwedW`). In the Rust a background flush that dead-lettered a batch
+  before the close dropped the puts in it, and a close whose tail is then
+  empty still passes `CloseFlush::Durable` (the empty-tail branch of
+  `Memory::close`), so a set-aside write can answer `intent_durable` with no
+  intent in the store.
+* **#346, where the lookup streak resets.** `heldErrW` takes the streak as an
+  input and says nothing of how it is counted. In the Rust `lookup_streak`
+  resets in the worker's settle block, after the commit, not at the commit,
+  so a lookup timeout on another lane in between still counts toward the
+  run.
+
 **Writes refused at admission: a gap between the model and the Rust.** The
 model starts from `WS.init (admitStore all)` and logs `admitLog all`, so
 every job in `all` has a `pending` receipt and a put from the start,
@@ -4267,7 +4295,12 @@ stops), `abort_workers`, then `settle_deferred` by how the final flush ended.
 It appends nothing to the log. It also sets aside a job of `all` that
 admission refused, whose receipt the model leaves `pending` where the Rust
 answers `dropped` (the gap in the section header); the theorems speak only of
-admitted writes. -/
+admitted writes. `.durable` stands for "the final flush completed" and nothing
+more: the model has no dead-lettered batches, while in the Rust an earlier
+dead-letter can have dropped a set-aside write's put though the close still
+passes `CloseFlush::Durable` (#345, in the section header). The trace `st`
+may also run a held write after the seal, which the Rust cannot (an
+over-approximation; see the section header). -/
 def closeW (flush : CloseFlush) (now : Int) (st : WS) : RStore :=
   settleDeferred flush now (deferredW st) st.store
 
@@ -4283,7 +4316,10 @@ by the next serve once that log is durable. It is about this process's whole
 log, not a durable prefix of it: a write's row is owed by the next serve only
 if a flush took its put. `admitLog all` puts every job of `all`, so for a job
 admission refused (which in the Rust gets no intent) `OwedW` can hold in the
-model and not in the Rust; the theorems use it only for admitted writes. -/
+model and not in the Rust; the theorems use it only for admitted writes. The
+log has no dead-lettered batches either: in the Rust a background flush that
+dead-lettered a batch dropped the puts in it, so a write `OwedW` calls owed
+may have no intent in the store (#345). -/
 def OwedW (all : List Job) (st : WS) (j : Job) : Prop :=
   ⟨j, none⟩ ∈ pendingOf (fixedLoad (intentsOf (admitLog all ++ st.log).flatten))
 
@@ -5062,7 +5098,10 @@ value before), and every one that brings it to `REPLAY_LOOKUP_TIMEOUT_LIMIT`
 or finds it past it (the third, and each later one until a write applies and
 resets it) holds the write as an outage does; a retried held write's lookup timeout does
 not count and settles. This is the abstraction `stepW`'s header describes
-("handed to the model as `unavailable`"), now as a function. -/
+("handed to the model as `unavailable`"), now as a function. The streak is an
+input: how the Rust counts it is not modelled, and the Rust resets it in the
+worker's settle block after a commit, not at the commit, so a timeout on
+another lane in between still counts (#346). -/
 def heldErrW (retried : Bool) (streak : Nat) : Err → Err
   | .lookupTimeout =>
     if retried = false ∧ lookupTimeoutLimit ≤ streak + 1 then .unavailable else .lookupTimeout

@@ -25,7 +25,10 @@
   `outage_failed_then_applied` say the current Rust does not behave that
   way. The model found no Rust defect. It does not model a write refused at
   admission, which in the Rust answers `dropped` with no intent: the theorems
-  speak only of admitted writes. `docs/reference/mcp.mdx` now cites the new
+  speak only of admitted writes. Nor does it model a batch a background
+  flush dead-lettered before the close, which can drop a set-aside write's
+  intent while the close still answers `intent_durable` (#345, a Rust defect
+  tracked separately). `docs/reference/mcp.mdx` now cites the new
   theorems for close and crash accounting, and says a run of slow vector
   lookups holds every later first attempt until a write applies, not only the
   third. `scripts/formal/count-theorems.py` counts the theorems by the rule
