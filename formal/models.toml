@@ -454,3 +454,15 @@ rust = [
   "src/store/tiered/fake.rs",
   "src/store/vector_source.rs#rank_by_cosine",
 ]
+
+# Left out: the route that appends the outcome to the served sessions
+# (`api_sessions` in routes.rs) and the adapters' `store_health`, whose
+# omission of erased sessions the model takes as given.
+[[model]]
+lean = "formal/LamboProofs/Discovery.lean"
+read_digest = "v2:sha256:dd7596277037c4e23ba2f8dc05d7446e588c948124abbac5b01468f000291d8c"
+rust = [
+  "src/cli/serve_web/discovery.rs#Last",
+  "src/cli/serve_web/discovery.rs#Discovery::new",
+  "src/cli/serve_web/discovery.rs#Discovery::sessions",
+]
