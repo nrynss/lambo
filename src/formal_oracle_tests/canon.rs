@@ -17,6 +17,9 @@ use crate::graph::Graph;
 use crate::test_util::props;
 use crate::types::{CanonizationEvent, CanonizationStatus, InteractionSpan, NodeId};
 
+/// The model this module replays (`formal/oracle/Canon.json`).
+pub(super) const MODEL: &str = "Canon";
+
 fn status(s: &str) -> CanonizationStatus {
     match s {
         "none" => CanonizationStatus::None,
@@ -73,16 +76,7 @@ fn millis(ms: i64) -> chrono::DateTime<Utc> {
 
 #[test]
 fn canon() {
-    let v = Vectors::load(
-        "Canon",
-        vectors!("Canon"),
-        &[
-            "Lambo.Canon.gate",
-            "Lambo.Canon.stage1Passes",
-            "Lambo.Canon.stage2Passes",
-            "Lambo.Canon.inCooldown",
-        ],
-    );
+    let v = Vectors::load(MODEL, vectors!("Canon"));
     v.replay("Lambo.Canon.gate", |[c, f, t]: &[String; 3]| {
         gate(status(c), status(f), status(t))
     });

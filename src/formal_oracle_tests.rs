@@ -23,6 +23,8 @@
 //! regenerates them and fails if they are stale. See formal/README.md,
 //! "Differential oracle".
 
+use std::cell::RefCell;
+use std::collections::BTreeSet;
 use std::fmt::Debug;
 
 use serde::de::DeserializeOwned;
@@ -39,6 +41,41 @@ mod order;
 mod score;
 mod top_k;
 
+/// The models a module here replays, one per file in `formal/oracle/`.
+/// Each name is the module's own `MODEL`, which its test loads, so a name
+/// here always has a replay; [`every_vector_file_is_replayed`] checks the
+/// directory holds exactly these files.
+const REPLAYED: [&str; 9] = [
+    batch_queue::MODEL,
+    canon::MODEL,
+    canonical::MODEL,
+    expand::MODEL,
+    fit::MODEL,
+    fusion::MODEL,
+    order::MODEL,
+    score::MODEL,
+    top_k::MODEL,
+];
+
+/// A vector file no module replays (a model added to the exporter without a
+/// Rust test), or a module whose file is gone, fails here.
+#[test]
+fn every_vector_file_is_replayed() {
+    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/formal/oracle");
+    let files: BTreeSet<String> = std::fs::read_dir(dir)
+        .unwrap_or_else(|e| panic!("{dir}: {e}"))
+        .map(|entry| entry.expect("a directory entry").file_name())
+        .map(|name| name.to_string_lossy().into_owned())
+        .filter(|name| !name.starts_with('.'))
+        .collect();
+    let replayed: BTreeSet<String> = REPLAYED.iter().map(|m| format!("{m}.json")).collect();
+    assert_eq!(
+        files, replayed,
+        "formal/oracle/ must hold exactly one vector file per model that src/formal_oracle_tests/ \
+         replays (REPLAYED): add a module for a new file, or regenerate"
+    );
+}
+
 /// One model's vector file, as `OracleExport.Gen.Vectors.render` writes it.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -54,6 +91,10 @@ struct Vectors {
     /// Fixed data the cases share, by name.
     tables: serde_json::Map<String, Value>,
     functions: Vec<Function>,
+    /// The functions [`Vectors::replay`] (or [`Vectors::skip`]) has handled,
+    /// checked when the file is dropped.
+    #[serde(skip)]
+    handled: RefCell<BTreeSet<String>>,
 }
 
 /// One modelled function's cases.
@@ -73,10 +114,11 @@ struct Case {
 }
 
 impl Vectors {
-    /// Parse a vector file and check that it is `model`'s and that its
-    /// functions are exactly `lean_fns`, so a function the exporter adds
-    /// without a Rust replay (or a replay whose function was dropped) fails.
-    fn load(model: &str, json: &str, lean_fns: &[&str]) -> Vectors {
+    /// Parse a vector file and check that it is `model`'s. Every function in
+    /// it must then be replayed (or skipped, with a reason) before it is
+    /// dropped, so a function the exporter adds without a Rust replay fails,
+    /// and a replay of a function the file lacks fails too.
+    fn load(model: &str, json: &str) -> Vectors {
         let v: Vectors = serde_json::from_str(json)
             .unwrap_or_else(|e| panic!("formal/oracle/{model}.json does not parse: {e}"));
         assert_eq!(
@@ -84,15 +126,24 @@ impl Vectors {
             "formal/oracle/{model}.json names another model"
         );
         assert_eq!(v.lean, format!("formal/LamboProofs/{model}.lean"));
-        let mut have: Vec<&str> = v.functions.iter().map(|f| f.lean.as_str()).collect();
-        let mut want = lean_fns.to_vec();
-        have.sort_unstable();
-        want.sort_unstable();
-        assert_eq!(
-            have, want,
-            "formal/oracle/{model}.json: the functions in the file are not the ones this test replays"
+        assert!(
+            REPLAYED.contains(&model),
+            "{model} is not in REPLAYED (src/formal_oracle_tests.rs)"
         );
         v
+    }
+
+    /// Mark `lean` as deliberately not replayed in this build, for `why`
+    /// (a function whose Rust needs a feature this build lacks).
+    #[allow(dead_code)] // used only without some features
+    fn skip(&self, lean: &str, why: &str) {
+        assert!(!why.is_empty());
+        assert!(
+            self.functions.iter().any(|f| f.lean == lean),
+            "{}: no function {lean} to skip",
+            self.model
+        );
+        self.handled.borrow_mut().insert(lean.to_owned());
     }
 
     /// The cases of the Lean function `lean`, each replayed by `run`. Every
@@ -109,6 +160,7 @@ impl Vectors {
             .find(|f| f.lean == lean)
             .unwrap_or_else(|| panic!("{}: no cases for {lean}", self.model));
         assert!(!f.cases.is_empty(), "{}: {lean} has no cases", self.model);
+        self.handled.borrow_mut().insert(lean.to_owned());
         let mut failures = Vec::new();
         for (i, case) in f.cases.iter().enumerate() {
             let input: I = serde_json::from_value(case.input.clone()).unwrap_or_else(|e| {
@@ -161,6 +213,28 @@ impl Vectors {
             .flat_map(|f| &f.cases)
             .map(|c| serde_json::from_value(c.input.clone()).expect("input parses"))
             .collect()
+    }
+}
+
+impl Drop for Vectors {
+    /// Every function in the file was replayed or skipped. Not checked while
+    /// a replay is already failing.
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            return;
+        }
+        let handled = self.handled.borrow();
+        let missed: Vec<&str> = self
+            .functions
+            .iter()
+            .map(|f| f.lean.as_str())
+            .filter(|f| !handled.contains(*f))
+            .collect();
+        assert!(
+            missed.is_empty(),
+            "formal/oracle/{}.json: no test replays {missed:?}",
+            self.model
+        );
     }
 }
 

@@ -18,6 +18,9 @@ use crate::recall::assemble::formal_oracle::{rank_cmp, rank_members};
 use crate::test_util::props;
 use crate::types::{tie_break_by_key, CanonizationStatus, ConceptType, NodeId, Scored};
 
+/// The model this module replays (`formal/oracle/Order.json`).
+pub(super) const MODEL: &str = "Order";
+
 /// `[number, key, status, score bits]`.
 type Member = (u64, Option<String>, Option<String>, u64);
 
@@ -88,20 +91,20 @@ fn graph(members: &[Member]) -> Graph {
 
 #[test]
 fn order() {
-    let v = Vectors::load(
-        "Order",
-        vectors!("Order"),
-        &["Lambo.Order.rankMembers", "Lambo.Order.tieBreak"],
-    );
+    let v = Vectors::load(MODEL, vectors!("Order"));
 
-    for input in v.inputs::<RankInput>("Lambo.Order.rankMembers") {
-        for (_, key, _, _) in &input.members {
-            if let Some(k) = key {
-                precondition("Order", tie_form(k) == k.as_str(), || {
-                    format!("tie_form({k:?}) is not {k:?}")
-                });
-            }
-        }
+    let rank_keys = v
+        .inputs::<RankInput>("Lambo.Order.rankMembers")
+        .into_iter()
+        .flat_map(|input| input.members.into_iter().map(|(_, key, _, _)| key));
+    let tie_keys = v
+        .inputs::<TieInput>("Lambo.Order.tieBreak")
+        .into_iter()
+        .flat_map(|input| input.members.into_iter().map(|(_, key)| key));
+    for k in rank_keys.chain(tie_keys).flatten() {
+        precondition("Order", tie_form(&k) == k.as_str(), || {
+            format!("tie_form({k:?}) is not {k:?}")
+        });
     }
 
     v.replay("Lambo.Order.rankMembers", |input: &RankInput| {

@@ -242,7 +242,7 @@ Covered:
 | `Expand` | `expand` | `expand` | `nbrs` built per `TRAVERSAL_ORDER`, id-ascending, and checked against the graph's adjacency |
 | `BatchQueue` | `lengthChunks Cfg.rust` | `length_chunks` (feature `embed-candle`) | none |
 | `Score` | `bonusAndModifier`, `score` | `bonus_and_modifier`, `ScoreDims::composite`, `score` | fixed point at the model's scale; compared within `1e-9` (the model is exact, the Rust `f64`) |
-| `Fusion` | `RrfRecall.rrf`, `rrfAhead` | `rank` under `FusionKind::Rrf` | `tb` as in `Order`; the recent rank is the model's `recentRank`, written into the input; values within `1e-12`, order exact |
+| `Fusion` | `RrfRecall.rrf`, `rrfAhead` | `rank` under `FusionKind::Rrf` | `tb` as in `Order`; the recent rank is the model's `recentRank`, written into the input; values within 8 ulps (relative), order exact |
 | `Canon` | `gate`, `stage1Passes`, `stage2Passes`, `inCooldown` | `apply_canonization_transition`, the stage predicates | `gate` exhaustively, with no demotion reason |
 
 A model's parameter that is itself Rust logic the model does not define
@@ -277,4 +277,4 @@ non-finite) got `-0.0` (an empty `f64` sum); `total_cmp` ordered `+0.0`
 first, so between the two the tie-break was not applied, where the model
 orders them by it. `rank` now sums from `+0.0`. Those cases stay a separate
 function in `oracle/Fusion.json`, replayed by
-`formal_oracle_tests::fusion::fusion_zero_ties`.
+`formal_oracle_tests::fusion::fusion`.

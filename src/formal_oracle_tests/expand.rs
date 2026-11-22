@@ -5,7 +5,8 @@
 //! edges, the seeds (`0` the origin interaction, `99` an id in no graph), and
 //! the depth. The model's neighbour function `nbrs` is given per node; the
 //! test first checks that the graph's own adjacency (`TRAVERSAL_ORDER`, then
-//! `out_neighbors_typed`) gives exactly those lists. Only `required` is
+//! `out_neighbors_typed`) gives exactly those lists, and reports a
+//! difference as a model mismatch (the Rust's traversal order changed). Only `required` is
 //! compared: scores and chunk-group siblings are not modelled.
 
 use std::collections::HashMap;
@@ -17,6 +18,9 @@ use crate::graph::Graph;
 use crate::recall::expand::{expand, TRAVERSAL_ORDER};
 use crate::test_util::props;
 use crate::types::{CanonizationStatus, Edge, EdgeType, NodeId, Scored};
+
+/// The model this module replays (`formal/oracle/Expand.json`).
+pub(super) const MODEL: &str = "Expand";
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -80,7 +84,7 @@ fn graph(input: &Input) -> Graph {
 
 #[test]
 fn expand_() {
-    let v = Vectors::load("Expand", vectors!("Expand"), &["Lambo.Expand.expand"]);
+    let v = Vectors::load(MODEL, vectors!("Expand"));
 
     for input in v.inputs::<Input>("Lambo.Expand.expand") {
         let g = graph(&input);
@@ -92,11 +96,17 @@ fn expand_() {
                 .map(number)
                 .collect();
             let model = nbrs.get(&x).cloned().unwrap_or_default();
-            precondition("Expand", real == model, || {
-                format!(
-                    "node {x}: the graph's neighbours are {real:?}, the vector's nbrs {model:?}"
-                )
-            });
+            // Not a `precondition`: the vector's lists are the model's
+            // neighbour function as `Expand.lean`'s header describes the
+            // Rust (per `TRAVERSAL_ORDER` type, id-ascending). If the graph
+            // disagrees, the Rust's traversal order changed under the model.
+            assert_eq!(
+                real, model,
+                "Expand: the Rust's neighbour order for node {x} no longer matches the model's \
+                 nbrs (TRAVERSAL_ORDER, then out_neighbors_typed id-ascending, as \
+                 formal/LamboProofs/Expand.lean's header and formal/OracleExport/Expand.lean \
+                 state it): a model mismatch; re-read Expand.lean and regenerate"
+            );
         }
     }
 

@@ -18,16 +18,17 @@ set -euo pipefail
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$root/formal"
 
-lake build oracle
+lake build --wfail oracle
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 lake exe oracle "$tmp" > /dev/null
 
-if ! diff -rq oracle "$tmp" > /dev/null; then
+# Dotfiles (an editor's or Finder's .DS_Store) are not vectors.
+if ! diff -rq -x '.*' oracle "$tmp" > /dev/null; then
   echo "error: formal/oracle/ is stale: the Lean models now give different vectors." >&2
   echo "Regenerate with '(cd formal && lake exe oracle)', run the Rust oracle tests" >&2
   echo "(cargo test --lib formal_oracle_tests), and commit both. Differences:" >&2
-  diff -ru oracle "$tmp" | head -n 60 >&2 || true
+  diff -ru -x '.*' oracle "$tmp" | head -n 60 >&2 || true
   exit 1
 fi
-echo "formal/oracle/ matches the Lean models ($(ls oracle | wc -l | tr -d ' ') vector files)"
+echo "formal/oracle/ matches the Lean models ($(ls oracle/*.json | wc -l | tr -d ' ') vector files)"

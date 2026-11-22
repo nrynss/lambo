@@ -19,6 +19,9 @@ use crate::recall::redundancy::{normalized_content, Redundancy};
 use crate::test_util::props;
 use crate::types::{CanonizationStatus, Node, NodeId, Scored};
 
+/// The model this module replays (`formal/oracle/TopK.json`).
+pub(super) const MODEL: &str = "TopK";
+
 /// `[member, class, content, forced, warns]`.
 type Entry = (u64, Option<u64>, Option<String>, bool, bool);
 
@@ -105,11 +108,7 @@ fn run(input: &Input) -> (Vec<u64>, Vec<(u64, u64)>) {
 
 #[test]
 fn top_k() {
-    let v = Vectors::load(
-        "TopK",
-        vectors!("TopK"),
-        &["Lambo.TopK.emit", "Lambo.TopK.emitR"],
-    );
+    let v = Vectors::load(MODEL, vectors!("TopK"));
 
     for input in v.inputs::<Input>("Lambo.TopK.emitR") {
         let g = graph(&input.ranked);

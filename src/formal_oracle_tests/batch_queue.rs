@@ -5,17 +5,22 @@
 
 use super::{vectors, Vectors};
 
+/// The model this module replays (`formal/oracle/BatchQueue.json`).
+pub(super) const MODEL: &str = "BatchQueue";
+
 #[test]
 fn batch_queue() {
-    let v = Vectors::load(
-        "BatchQueue",
-        vectors!("BatchQueue"),
-        &["Lambo.BatchQueue.lengthChunks"],
-    );
+    let v = Vectors::load(MODEL, vectors!("BatchQueue"));
     #[cfg(feature = "embed-candle")]
     v.replay("Lambo.BatchQueue.lengthChunks", |lens: &Vec<usize>| {
         crate::embed::candle_formal_pins::length_chunks(lens)
     });
     #[cfg(not(feature = "embed-candle"))]
-    let _ = v.inputs::<Vec<usize>>("Lambo.BatchQueue.lengthChunks");
+    {
+        let _ = v.inputs::<Vec<usize>>("Lambo.BatchQueue.lengthChunks");
+        v.skip(
+            "Lambo.BatchQueue.lengthChunks",
+            "length_chunks exists with feature embed-candle only",
+        );
+    }
 }

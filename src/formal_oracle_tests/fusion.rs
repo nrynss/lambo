@@ -7,7 +7,7 @@
 //! into the input (`rank` reads it from `LegScores::recent_rank`). The model
 //! is exact and the Rust `f64`: the order is compared exactly (the vectors
 //! hold no tie the model says rounding decides) and each value within
-//! [`TOLERANCE`] of the exact fraction.
+//! [`ULPS`] units in the last place of the exact fraction.
 
 use std::collections::HashMap;
 
@@ -20,7 +20,13 @@ use crate::recall::candidates::{FusionKind, LegScores, RecallFusion};
 use crate::test_util::props;
 use crate::types::{CanonizationStatus, ConceptType, NodeId};
 
-const TOLERANCE: f64 = 1e-12;
+/// The model this module replays (`formal/oracle/Fusion.json`).
+pub(super) const MODEL: &str = "Fusion";
+
+/// How far, relative to its size, the Rust value may be from the exact
+/// fraction: a few roundings (each term, the scale division, the sums and
+/// the final quotient), each at most half an ulp.
+const ULPS: f64 = 8.0;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -42,7 +48,7 @@ struct Input {
 }
 
 /// An exact fraction `[num, den]` from the model, or the Rust `f64`,
-/// compared within [`TOLERANCE`].
+/// compared within [`ULPS`] relative units in the last place.
 #[derive(Clone, Copy, Debug, Deserialize)]
 #[serde(from = "(u64, u64)")]
 struct Value(f64);
@@ -55,7 +61,7 @@ impl From<(u64, u64)> for Value {
 
 impl PartialEq for Value {
     fn eq(&self, other: &Self) -> bool {
-        (self.0 - other.0).abs() <= TOLERANCE
+        (self.0 - other.0).abs() <= ULPS * f64::EPSILON * self.0.abs().max(other.0.abs())
     }
 }
 
@@ -74,12 +80,6 @@ fn graph(members: &[Member]) -> Graph {
         Some(c)
     }))
 }
-
-/// The functions in `Fusion.json`.
-const FNS: [&str; 2] = [
-    "Lambo.Fusion.RrfRecall.rrf",
-    "Lambo.Fusion.RrfRecall.rrf zero ties",
-];
 
 fn run(input: &Input) -> Output {
     let g = graph(&input.members);
@@ -112,22 +112,18 @@ fn run(input: &Input) -> Output {
     }
 }
 
+/// The second function is #328's regression cases: two candidates whose
+/// exact RRF values are both zero, one ranked only in legs of weight zero,
+/// the other in no leg (in the Rust, a candidate whose only leg score is
+/// non-finite earns no rank; the model has no non-finite scores, so the
+/// vectors stand for it with a candidate in no leg). The model calls both
+/// `0` and orders them by the tie-break, and so does `rank` since #328: it
+/// fuses every zero to `+0.0`. Before that an empty `f64` sum gave `-0.0`,
+/// which `total_cmp` put after every `+0.0` whatever the tie-break said
+/// (14 of these 30 cases failed). Found by this oracle (#291).
 #[test]
 fn fusion() {
-    let v = Vectors::load("Fusion", vectors!("Fusion"), &FNS);
+    let v = Vectors::load(MODEL, vectors!("Fusion"));
     v.replay("Lambo.Fusion.RrfRecall.rrf", run);
-}
-
-/// Two candidates whose exact RRF values are both zero, one ranked only in
-/// legs of weight zero, the other in no leg (in the Rust, a candidate whose
-/// only leg score is non-finite earns no rank; the model has no non-finite
-/// scores, so the vectors stand for it with a candidate in no leg). The
-/// model calls both `0` and orders them by the tie-break, and so does `rank`
-/// since #328: it fuses every zero to `+0.0`. Before that an empty `f64` sum
-/// gave `-0.0`, which `total_cmp` put after every `+0.0` whatever the
-/// tie-break said. Found by this oracle (#291).
-#[test]
-fn fusion_zero_ties() {
-    let v = Vectors::load("Fusion", vectors!("Fusion"), &FNS);
     v.replay("Lambo.Fusion.RrfRecall.rrf zero ties", run);
 }

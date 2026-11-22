@@ -12,6 +12,9 @@ use serde::Deserialize;
 use super::{vectors, Vectors};
 use crate::recall::format::{default_token_count, fit_blocks, ContextBlock, Truncation};
 
+/// The model this module replays (`formal/oracle/Fit.json`).
+pub(super) const MODEL: &str = "Fit";
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Part {
@@ -59,7 +62,7 @@ fn form(t: Truncation) -> String {
 
 #[test]
 fn fit() {
-    let v = Vectors::load("Fit", vectors!("Fit"), &["Lambo.Fit.fitBlocks"]);
+    let v = Vectors::load(MODEL, vectors!("Fit"));
     v.replay("Lambo.Fit.fitBlocks", |input: &Input| {
         let blocks: Vec<ContextBlock> = input.blocks.iter().map(block).collect();
         let est: fn(&str) -> usize = match input.estimator.as_str() {

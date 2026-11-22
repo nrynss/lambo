@@ -16,6 +16,9 @@ use crate::config::ScoringWeights;
 use crate::daemon::score::formal_oracle::bonus_and_modifier;
 use crate::daemon::score::{score, ScoreDims};
 
+/// The model this module replays (`formal/oracle/Score.json`).
+pub(super) const MODEL: &str = "Score";
+
 /// Allowed distance between the Rust `f64` and the model's exact value.
 const TOLERANCE: f64 = 1e-9;
 
@@ -100,15 +103,7 @@ impl<const S: i64> PartialEq for Scaled<S> {
 
 #[test]
 fn score_() {
-    let v = Vectors::load(
-        "Score",
-        vectors!("Score"),
-        &[
-            "Lambo.Score.bonusAndModifier",
-            "Lambo.Score.score defaultWeights",
-            "Lambo.Score.score",
-        ],
-    );
+    let v = Vectors::load(MODEL, vectors!("Score"));
     v.replay("Lambo.Score.bonusAndModifier", |d: &Dims| {
         Scaled::<1_000>(bonus_and_modifier(d.rust()))
     });

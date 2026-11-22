@@ -19,6 +19,9 @@ use crate::graph::canonical::{canonical_key, unfiltered_canonical_key};
 use crate::graph::names::name_key;
 use crate::surface::validate::check_size;
 
+/// The model this module replays (`formal/oracle/Canonical.json`).
+pub(super) const MODEL: &str = "Canonical";
+
 /// A synonym callback over `table`, shaped as `canonical_key` takes it.
 fn lookup(table: &'static HashMap<String, String>) -> impl Fn(&str) -> Option<&str> + Copy {
     move |raw| table.get(raw).map(String::as_str)
@@ -26,15 +29,7 @@ fn lookup(table: &'static HashMap<String, String>) -> impl Fn(&str) -> Option<&s
 
 #[test]
 fn canonical() {
-    let v = Vectors::load(
-        "Canonical",
-        vectors!("Canonical"),
-        &[
-            "Lambo.Canonical.canonicalKeyF",
-            "Lambo.Canonical.canonicalKey",
-            "Lambo.Canonical.nameKeyF",
-        ],
-    );
+    let v = Vectors::load(MODEL, vectors!("Canonical"));
 
     let stemmer = Stemmer::create(Algorithm::English);
     for (word, stem) in v.table::<Vec<(String, String)>>("stem0") {
