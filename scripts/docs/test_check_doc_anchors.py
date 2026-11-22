@@ -1,0 +1,290 @@
+#!/usr/bin/env python3
+"""Tests for check-doc-anchors.py.
+
+  python3 -I scripts/docs/test_check_doc_anchors.py
+"""
+
+import contextlib
+import importlib.util
+import io
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+HERE = Path(__file__).resolve().parent
+spec = importlib.util.spec_from_file_location("check_doc_anchors", HERE / "check-doc-anchors.py")
+cda = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(cda)
+
+LEAN = """\
+/-! Module doc. A line inside it that reads
+def notDeclared : Nat := 0
+is not a declaration. -/
+namespace Lambo.Demo
+
+inductive Status where
+  | none | canonical
+
+def Status.rank : Status → Nat
+  | .none => 0
+  | .canonical => 3
+
+-- theorem commentedOut : True := trivial
+
+/-- A doc comment. -/
+@[simp] private theorem legal_irrefl (s : Status) : True := trivial
+
+section Examples
+abbrev Small := Nat
+end Examples
+
+namespace Edge
+def dependence : Nat := 1
+end Edge
+
+structure Flags where
+  stage1 : Bool
+
+end Lambo.Demo
+
+theorem outside : True := trivial
+"""
+
+CONSTANTS = """\
+use crate::canon::formal_pins::{MIN_GC_SURVIVED, MIN_BLAST_RADIUS};
+fn pins() {
+    let w = ScoringWeights::default();
+    for ty in ConceptType::ALL { ty.eviction_resistance(); }
+    assert!(!Config::default().canonization_supersede);
+}
+"""
+
+RUST = """\
+//! Module doc.
+pub const HIGH_RISK_WRITE_WINDOW: u64 = 30;
+enum Credit { DependentOrigin, Writer }
+fn is_high_value() -> bool { true }
+"""
+
+
+class Fixture(unittest.TestCase):
+    def setUp(self):
+        patcher = mock.patch.dict(cda.REQUIRED, clear=True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.write("formal/LamboProofs/Demo.lean", LEAN)
+        self.write("src/formal_constants_tests.rs", CONSTANTS)
+        self.write("src/daemon/events.rs", RUST)
+        self.docs = self.root / "site" / "src" / "content" / "docs"
+        self.docs.mkdir(parents=True)
+
+    def write(self, rel, text):
+        path = self.root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if isinstance(text, bytes):
+            path.write_bytes(text)
+        else:
+            path.write_text(text)
+        return path
+
+    def page(self, text, name="page.mdx"):
+        return self.write(f"site/src/content/docs/{name}", text)
+
+    def errors(self, text):
+        return cda.check(self.root, [self.page(text)])[0]
+
+    def main(self, *args):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+            code = cda.main(["--root", str(self.root), *map(str, args)])
+        return code, err.getvalue()
+
+
+class Lean(Fixture):
+    def test_declarations_resolve_with_or_without_namespaces(self):
+        for ref in [
+            "Demo.Status", "Demo.Status.rank", "Demo.legal_irrefl", "Demo.Small",
+            "Demo.Edge.dependence", "Demo.Flags", "Demo.outside", "Demo.Demo.Status.rank",
+        ]:
+            with self.subTest(ref=ref):
+                self.assertEqual(self.errors(f"Text. {{/* lean: {ref} */}}"), [])
+
+    def test_a_list_resolves_each_name(self):
+        self.assertEqual(self.errors("{/* lean: Demo.Status.rank, Demo.legal_irrefl */}"), [])
+
+    def test_unknown_names_fail(self):
+        for ref, says in [
+            ("Demo.nope", "declares no nope"),
+            ("Demo.notDeclared", "declares no notDeclared"),
+            ("Demo.commentedOut", "declares no commentedOut"),
+            ("Demo.rank.Status", "declares no rank.Status"),
+            ("Nope.legal", "no file formal/LamboProofs/Nope.lean"),
+            ("legal", "is not `<Model>.<name>`"),
+        ]:
+            with self.subTest(ref=ref):
+                errors = self.errors(f"{{/* lean: {ref} */}}")
+                self.assertEqual(len(errors), 1, errors)
+                self.assertIn(says, errors[0])
+
+    def test_one_bad_name_in_a_list_is_reported(self):
+        errors = self.errors("{/* lean: Demo.Status, Demo.missing, Demo.Flags */}")
+        self.assertEqual(len(errors), 1)
+        self.assertIn("site/src/content/docs/page.mdx:1: lean: Demo.missing", errors[0])
+
+
+class Const(Fixture):
+    def test_pinned_names_resolve(self):
+        self.assertEqual(self.errors(
+            "{/* const: MIN_GC_SURVIVED, ScoringWeights::default, ConceptType::eviction_resistance, "
+            "Config::default().canonization_supersede */}"
+        ), [])
+
+    def test_unpinned_names_fail(self):
+        for ref, says in [
+            ("MIN_DISTINCT", "does not name MIN_DISTINCT"),
+            ("MIN_GC", "does not name MIN_GC"),
+            ("ScoringWeights::custom", "does not name custom"),
+            ("not a name", "is not a Rust name"),
+        ]:
+            with self.subTest(ref=ref):
+                errors = self.errors(f"{{/* const: {ref} */}}")
+                self.assertEqual(len(errors), 1, errors)
+                self.assertIn(says, errors[0])
+
+
+class Code(Fixture):
+    def test_paths_and_items_resolve(self):
+        for body in [
+            "src/daemon/events.rs",
+            "src/daemon/events.rs is_high_value HIGH_RISK_WRITE_WINDOW",
+            "src/daemon/events.rs is_high_value, HIGH_RISK_WRITE_WINDOW; src/formal_constants_tests.rs pins",
+            "src/daemon/events.rs Credit::Writer (a note, with a comma)",
+            "src/daemon/events.rs (module doc), is_high_value",
+            "src/daemon",
+        ]:
+            with self.subTest(body=body):
+                self.assertEqual(self.errors(f"{{/* code: {body} */}}"), [])
+
+    def test_bad_paths_and_items_fail(self):
+        for body, says in [
+            ("src/daemon/nope.rs", "no path src/daemon/nope.rs"),
+            ("src/daemon/events.rs is_low_value", "does not name is_low_value"),
+            ("src/daemon/events.rs Credit::Reader", "does not name Reader"),
+            ("src/daemon/events.rs module doc", "does not name module"),
+            ("src/daemon/events.rs is_high_value()", "is not a Rust name"),
+            ("is_high_value", "names no path before it"),
+            ("src/daemon is_high_value", "is not a file"),
+            ("src/daemon/events.rs (an open note", "parentheses"),
+            ("src/daemon/events.rs is_high_value,, HIGH_RISK_WRITE_WINDOW", "an empty group"),
+        ]:
+            with self.subTest(body=body):
+                errors = self.errors(f"{{/* code: {body} */}}")
+                self.assertEqual(len(errors), 1, errors)
+                self.assertIn(says, errors[0])
+
+    def test_items_are_whole_words(self):
+        errors = self.errors("{/* code: src/daemon/events.rs high_value */}")
+        self.assertEqual(len(errors), 1)
+
+
+class NearMisses(Fixture):
+    def test_near_miss_anchors_fail(self):
+        for text in [
+            "{/* lean : Demo.Status */}",
+            "{/*lean: Demo.Status */}",
+            "{/* Lean: Demo.Status */}",
+            "{/* lean: Demo.Status*/}",
+            "{ /* const: MIN_GC_SURVIVED */ }",
+            "{/* Code: src/daemon/events.rs */}",
+            "{/* orcale: Demo.json gate#0 */}",
+            "{/* leans: Demo.Status */}",
+            "{/* cnost: MIN_GC_SURVIVED */}",
+            "{/* lean: Demo.Status,\nDemo.Flags */}",
+        ]:
+            with self.subTest(text=text):
+                errors = self.errors(text)
+                self.assertEqual(len(errors), 1, errors)
+                self.assertIn("starts like an anchor", errors[0])
+
+    def test_other_comments_are_left_alone(self):
+        self.assertEqual(self.errors(
+            "{/* lambo-site-only:start */}\n{/* a note to editors */}\n{/* lambo-site-only:end */}\n"
+        ), [])
+
+    def test_near(self):
+        self.assertTrue(cda.near("Lean", "lean"))
+        self.assertTrue(cda.near("laen", "lean"))
+        self.assertTrue(cda.near("oracl", "oracle"))
+        self.assertTrue(cda.near("codes", "code"))
+        self.assertFalse(cda.near("lambo", "lean"))
+        self.assertFalse(cda.near("a", "code"))
+
+
+class Required(Fixture):
+    ALL = (
+        "{/* lean: Demo.Status */} {/* const: MIN_GC_SURVIVED */} "
+        "{/* code: src/daemon/events.rs */}\n{/* oracle: Demo.json gate#0 */}\n"
+    )
+
+    def test_a_required_page_with_its_anchors_passes(self):
+        with mock.patch.dict(cda.REQUIRED, {"site/src/content/docs/page.mdx": cda.KINDS}):
+            self.assertEqual(self.errors(self.ALL), [])
+
+    def test_a_required_page_that_lost_its_anchors_fails(self):
+        with mock.patch.dict(cda.REQUIRED, {"site/src/content/docs/page.mdx": cda.KINDS}):
+            errors = self.errors("All the anchors are gone.\n")
+        self.assertEqual(len(errors), 4)
+        self.assertIn("carries no lean: anchor", errors[0])
+
+    def test_a_required_page_that_lost_one_kind_fails(self):
+        with mock.patch.dict(cda.REQUIRED, {"site/src/content/docs/page.mdx": ("lean", "code")}):
+            errors = self.errors("{/* lean: Demo.Status */}\n")
+        self.assertEqual(errors, ["site/src/content/docs/page.mdx: carries no code: anchor, and REQUIRED says it must"])
+
+    def test_a_required_page_that_is_gone_fails_a_full_run(self):
+        self.page("No anchors here.\n")
+        with mock.patch.dict(cda.REQUIRED, {"site/src/content/docs/gone.mdx": ("lean",)}):
+            code, err = self.main()
+        self.assertEqual(code, 1)
+        self.assertIn("gone.mdx: REQUIRED to carry anchors, but there is no such page", err)
+
+
+class ExitCodes(Fixture):
+    def test_pass_is_0(self):
+        self.assertEqual(self.main(self.page("{/* lean: Demo.Status */}\n"))[0], 0)
+
+    def test_an_unresolved_anchor_is_1(self):
+        code, err = self.main(self.page("{/* lean: Demo.nope */}\n"))
+        self.assertEqual(code, 1)
+        self.assertIn("1 error(s)", err)
+
+    def test_missing_page_is_2(self):
+        self.assertEqual(self.main(self.docs / "nope.mdx")[0], 2)
+
+    def test_bad_arguments_are_2(self):
+        self.assertEqual(self.main("--no-such-flag")[0], 2)
+
+    def test_non_utf8_page_is_3(self):
+        code, err = self.main(self.page(b"\xff\xfe {/* lean: Demo.Status */}"))
+        self.assertEqual(code, 3)
+        self.assertIn("not UTF-8", err)
+
+    def test_non_utf8_source_is_3(self):
+        self.write("src/daemon/events.rs", b"\xff\xfe")
+        code, err = self.main(self.page("{/* code: src/daemon/events.rs is_high_value */}\n"))
+        self.assertEqual(code, 3)
+        self.assertIn("src/daemon/events.rs: not UTF-8", err)
+
+    def test_default_pages_include_the_reference_copies(self):
+        self.write("docs/reference/page.mdx", "{/* lean: Demo.nope */}\n")
+        code, err = self.main()
+        self.assertEqual(code, 1)
+        self.assertIn("docs/reference/page.mdx:1: lean: Demo.nope", err)
+
+
+if __name__ == "__main__":
+    unittest.main()
