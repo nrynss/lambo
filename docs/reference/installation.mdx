@@ -131,6 +131,8 @@ Real clients drive this, not only unit tests. Claude Code and the Cursor Agent C
 
 To connect over HTTP instead, start the server yourself with `--transport http` and point your client at `http://127.0.0.1:7700`.
 
+On an Apple silicon Mac, [macOS multi-session setup](/macos) runs that HTTP server under launchd with one session per repository and wires Claude Code, Cursor and Codex to it.
+
 <Warning>
 The HTTP endpoint is a session writer, so treat it accordingly. On loopback it is unauthenticated by default. Binding anywhere else fails closed and requires a bearer token (`--auth-token` or `LAMBO_AUTH_TOKEN`), which every request must then send as `Authorization: Bearer <token>`. See [Configuration](/config#http-transport).
 </Warning>
