@@ -647,8 +647,16 @@ async fn rewrite_all(
 
 /// Test seeding shared by the store tests below: no store or embedder
 /// feature, so the Postgres live test (`--no-default-features --features
-/// store-postgres`) uses it too.
-#[cfg(test)]
+/// store-postgres`) uses it too. Compiled only with one of its users, so a
+/// build with neither (`--no-default-features --features store-sqlite`) has no
+/// dead code under `-D warnings`.
+#[cfg(all(
+    test,
+    any(
+        all(feature = "store-memory", feature = "embed-fixture"),
+        feature = "store-postgres"
+    )
+))]
 mod seed {
     use std::time::Duration;
 
