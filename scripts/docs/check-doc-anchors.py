@@ -20,18 +20,23 @@ The rules:
 
 * `lean:` a comma-separated list of `<Model>.<name>`. `formal/LamboProofs/
   <Model>.lean` must declare `<name>` with `theorem`, `lemma`, `def`,
-  `abbrev`, `structure`, `inductive`, `class` or `instance`. `<name>` may
-  carry the namespaces it sits in, so `Canon.Status.rank` matches
-  `def Status.rank` inside `namespace Lambo.Canon`.
+  `abbrev`, `structure`, `inductive`, `class` or `instance`, and `<name>`
+  must equal the declared name exactly once the `Lambo.` and `<Model>.`
+  namespace prefixes are dropped: `Canon.Status.rank` matches `def
+  Status.rank` inside `namespace Lambo.Canon`, and `Canon.rank` does not.
 * `const:` a comma-separated list of names, each pinned by
   `src/formal_constants_tests.rs`: every identifier in the name (split at
-  `::`, `.` and `()`) must appear there as a whole word.
+  `::`, `.` and `()`) must appear there as a whole word in code, not in a
+  comment or a string, and none may be a Rust keyword.
 * `code:` paths, each followed by the items it names: groups split by `;`
   or `,`, where a group that starts with a path sets the file and a group
   without one adds items to the last path. Text in parentheses is a note and
-  is not checked. Each path must exist under the root; each item must be a
-  Rust-style name (`a_b`, `Type::item`) whose every `::` part appears in that
-  file as a whole word.
+  is not checked. Each path must exist under the root. Each item is a Rust
+  name that the file declares, outside comments and strings: a `fn`,
+  `struct`, `enum`, `const`, `static`, `type`, `trait`, `mod`, `union` or
+  `macro_rules!`, a field (`name:` opening a line) or an UpperCamel enum
+  variant opening a line. In `A::b`, `A` must be a type, trait or module the
+  file declares or implements, and `b` a declaration as above.
 * `oracle:` is checked by check-doc-examples.py; here it only counts.
 * Any other comment that starts like an anchor (`{/* lean : ...`,
   `{/*const:`, `{/* Code: ...`, `{/* orcale: ...`, one split over lines) is
@@ -186,8 +191,52 @@ class Sources:
         return self._lean[model]
 
 
+RUST_KEYWORDS = frozenset(
+    "as async await break const continue crate dyn else enum extern false fn for if impl in "
+    "let loop match mod move mut pub ref return self Self static struct super trait true type "
+    "union unsafe use where while".split()
+)
+RUST_NOISE = re.compile(
+    r"""'(?:\\.|[^'\\\n])'|r(#*)".*?"\1|"(?:\\.|[^"\\])*"|//[^\n]*|/\*.*?\*/""", re.DOTALL
+)
+DECL_KW = r"(?:fn|struct|enum|const|static|type|trait|mod|union)"
+TYPE_KW = r"(?:struct|enum|trait|type|mod|union)"
+
+
+def rust_code(text: str) -> str:
+    """Rust source with comments and string literals blanked, newlines kept."""
+    return RUST_NOISE.sub(lambda m: "\n" * m.group(0).count("\n"), text)
+
+
 def has_word(text: str, word: str) -> bool:
     return re.search(rf"(?<![A-Za-z0-9_]){re.escape(word)}(?![A-Za-z0-9_])", text) is not None
+
+
+def declares(code: str, name: str, owner: bool = False) -> bool:
+    """Whether Rust `code` declares `name`. As an owner (the `A` of `A::b`):
+    a struct, enum, trait, type alias, module or union, or an `impl` of it.
+    Otherwise also a fn, const, static or macro, a field (`name:` opening a
+    line) or an enum variant (an UpperCamel `name` opening a line, followed by
+    `,`, `(`, `{`, `=` or the line's end)."""
+    n = re.escape(name)
+    pats = [rf"\b{TYPE_KW}\s+{n}\b", rf"\bimpl\b[^{{;]*?\b(?:for\s+)?{n}\b(?:<[^{{;]*>)?\s*(?:where\b[^{{]*)?\{{"]
+    if not owner:
+        pats += [
+            rf"\b{DECL_KW}\s+{n}\b",
+            rf"\bmacro_rules!\s*{n}\b",
+            rf"^\s*(?:pub(?:\([^)]*\))?\s+)?{n}\s*:(?!:)",
+        ]
+        if name[:1].isupper():
+            pats.append(rf"^\s*{n}\s*(?:,|\(|\{{|=|$)")
+    return any(re.search(p, code, re.MULTILINE) for p in pats)
+
+
+def lean_short(full: str, model: str) -> str:
+    """A declared name without its `Lambo.` and `<Model>.` namespace prefixes."""
+    for prefix in ("Lambo.", f"{model}."):
+        if full.startswith(prefix):
+            full = full[len(prefix) :]
+    return full
 
 
 def check_lean(body: str, sources: Sources) -> list[str]:
@@ -200,7 +249,7 @@ def check_lean(body: str, sources: Sources) -> list[str]:
         names = sources.lean(model)
         if names is None:
             errors.append(f"lean: {ref}: no file {LEAN_DIR}/{model}.lean")
-        elif not any(n == name or n.endswith("." + name) for n in names):
+        elif name not in {lean_short(n, model) for n in names}:
             errors.append(f"lean: {ref}: {LEAN_DIR}/{model}.lean declares no {name}")
     return errors
 
@@ -215,7 +264,12 @@ def check_const(body: str, sources: Sources) -> list[str]:
             errors.append(f"const: {ref!r} is not a Rust name")
             continue
         parts = [p for p in re.split(r"::|\.|\(\)", ref) if p]
-        missing = [p for p in parts if not has_word(text, p)]
+        keywords = [p for p in parts if p in RUST_KEYWORDS]
+        if keywords:
+            errors.append(f"const: {ref}: {', '.join(keywords)} is a Rust keyword, not a name")
+            continue
+        code = rust_code(text)
+        missing = [p for p in parts if not has_word(code, p)]
         if missing:
             errors.append(f"const: {ref}: {CONSTANTS_FILE} does not name {', '.join(missing)}")
     return errors
@@ -247,14 +301,17 @@ def check_code(body: str, sources: Sources) -> list[str]:
             continue
         else:
             items = tokens
-        text = sources.text(current) if items else None
+        code = rust_code(sources.text(current) or "") if items else ""
         for item in items:
-            if not RUST_ITEM.match(item):
+            if not RUST_ITEM.match(item) or any(p in RUST_KEYWORDS for p in item.split("::")):
                 errors.append(f"code: {current}: {item!r} is not a Rust name (put notes in parentheses)")
                 continue
-            missing = [p for p in item.split("::") if not has_word(text or "", p)]
+            parts = item.split("::")
+            missing = [
+                p for i, p in enumerate(parts) if not declares(code, p, owner=i < len(parts) - 1)
+            ]
             if missing:
-                errors.append(f"code: {current} does not name {', '.join(missing)}")
+                errors.append(f"code: {current} declares no {', '.join(missing)} (for {item})")
     return errors
 
 

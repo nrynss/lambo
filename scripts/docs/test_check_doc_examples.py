@@ -150,8 +150,10 @@ class Matching(Fixture):
         errors = self.errors(page_with(
             "{/* oracle: Demo.json stage1Passes#1 */}", between="\nA sentence in the way.\n\n"
         ))
-        self.assertEqual(len(errors), 1)
+        # The table, cut off from its anchor, is also an unanchored example.
+        self.assertEqual(len(errors), 2)
         self.assertIn("no table (header and separator rows) follows the anchor", errors[0])
+        self.assertIn("no oracle anchor is directly above it", errors[1])
 
     def test_unknown_case_index(self):
         errors = self.errors(page_with("{/* oracle: Demo.json stage1Passes#9 */}"))
@@ -175,7 +177,11 @@ class Matching(Fixture):
 
     def test_anchor_not_alone_on_its_line(self):
         errors = self.errors(page_with("Text {/* oracle: Demo.json stage1Passes#1 */}"))
-        self.assertEqual(errors, ["site/src/content/docs/page.mdx:1: an oracle anchor must be alone on its line"])
+        self.assertEqual(errors, [
+            "site/src/content/docs/page.mdx:1: an oracle anchor must be alone on its line",
+            "site/src/content/docs/page.mdx:3: this table's header is an oracle function's labels, "
+            "but no oracle anchor is directly above it",
+        ])
 
 
 class Labels(Fixture):
@@ -199,6 +205,30 @@ class Labels(Fixture):
         errors = self.errors(page_with("{/* oracle: Demo.json stage1Passes#1 gate#0 */}"))
         self.assertEqual(len(errors), 1)
         self.assertIn("one anchor names one function's cases", errors[0])
+
+
+class Unanchored(Fixture):
+    def test_a_labelled_table_without_its_anchor_fails(self):
+        errors, anchors, _ = self.run_check("Prose.\n\n" + STAGE1_HEADER + "| 2 | 2 | fails |\n")
+        self.assertEqual(anchors, 0)
+        self.assertEqual(errors, [
+            "site/src/content/docs/page.mdx:3: this table's header is an oracle function's labels, "
+            "but no oracle anchor is directly above it"
+        ])
+
+    def test_losing_one_of_two_anchors_fails(self):
+        text = PASSING.replace("{/* oracle: Demo.json gate#0 */}\n", "")
+        errors, anchors, _ = self.run_check(text)
+        self.assertEqual(anchors, 1)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("no oracle anchor is directly above it", errors[0])
+
+    def test_another_comment_above_does_not_count(self):
+        errors = self.errors("{/* lean: Demo.stage1Passes */}\n\n" + STAGE1_HEADER + "| 2 | 2 | fails |\n")
+        self.assertEqual(len(errors), 1)
+
+    def test_other_tables_need_no_anchor(self):
+        self.assertEqual(self.errors("| Setting | Default |\n|---|---|\n| a | 1 |\n"), [])
 
 
 class Vocabulary(Fixture):
@@ -248,8 +278,10 @@ class NearMisses(Fixture):
             with self.subTest(anchor=anchor):
                 errors, anchors, _ = self.run_check(page_with(anchor))
                 self.assertEqual(anchors, 0)
-                self.assertEqual(len(errors), 1, errors)
+                # The near miss, and the table it leaves unanchored.
+                self.assertEqual(len(errors), 2, errors)
                 self.assertIn("starts like an oracle anchor", errors[0])
+                self.assertIn("no oracle anchor is directly above it", errors[1])
 
     def test_other_comments_are_left_alone(self):
         errors, anchors, _ = self.run_check("{/* lambo-site-only:start */}\n{/* lean: Canon.gate */}\n")

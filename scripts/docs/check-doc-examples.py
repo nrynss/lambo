@@ -35,6 +35,9 @@ The rules are strict:
   COLUMNS below: the table's header must be exactly that entry's labels;
 * the next non-blank line after the anchor starts the table (a header row, a
   separator row, then the data rows);
+* a table whose header is exactly the labels of a COLUMNS entry must have an
+  oracle anchor as the last non-blank line above it, so an example cannot lose
+  its anchor and go unchecked;
 * the table has one data row per case id, in the anchor's order;
 * each row has one cell per input value, in the case's input order, and then
   one cell for the output (an input that is not a JSON array is one value);
@@ -285,7 +288,23 @@ def check_page(root: Path, page: Path, cache: dict) -> tuple[list[str], int, int
     lines = read_page(page, rel)
     errors: list[str] = []
     anchors = cases = 0
+    labelled = {tuple(label for label, _ in spec) for spec in COLUMNS.values()}
     for at, line in enumerate(lines):
+        if (
+            line.lstrip().startswith("|")
+            and at + 1 < len(lines)
+            and SEPARATOR.match(lines[at + 1].strip())
+            and tuple(normalise(c) for c in cells(line)) in labelled
+        ):
+            above = at - 1
+            while above >= 0 and not lines[above].strip():
+                above -= 1
+            m = ANCHOR.fullmatch(lines[above].strip()) if above >= 0 else None
+            if m is None:
+                errors.append(
+                    f"{rel}:{at + 1}: this table's header is an oracle function's labels, "
+                    f"but no oracle anchor is directly above it"
+                )
         strict = {m.start(): m for m in ANCHOR.finditer(line)}
         for loose in LOOSE.finditer(line):
             if loose.start() not in strict:

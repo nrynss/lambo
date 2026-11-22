@@ -61,10 +61,20 @@ fn pins() {
 """
 
 RUST = """\
-//! Module doc.
+//! Module doc. fn in_a_comment() is not a declaration.
 pub const HIGH_RISK_WRITE_WINDOW: u64 = 30;
-enum Credit { DependentOrigin, Writer }
-fn is_high_value() -> bool { true }
+enum Credit<'a> {
+    DependentOrigin,
+    Writer(&'a str),
+}
+pub(crate) struct Probe {
+    pub(crate) last_demotion_time: Option<u64>,
+}
+impl Default for Probe {
+    fn default() -> Self { Probe { last_demotion_time: None } }
+}
+fn is_high_value() -> bool { let s = "fn in_a_string()"; let c = '"'; true }
+fn uses(policy: u8) -> u8 { policy }
 """
 
 
@@ -108,7 +118,7 @@ class Lean(Fixture):
     def test_declarations_resolve_with_or_without_namespaces(self):
         for ref in [
             "Demo.Status", "Demo.Status.rank", "Demo.legal_irrefl", "Demo.Small",
-            "Demo.Edge.dependence", "Demo.Flags", "Demo.outside", "Demo.Demo.Status.rank",
+            "Demo.Edge.dependence", "Demo.Flags", "Demo.outside",
         ]:
             with self.subTest(ref=ref):
                 self.assertEqual(self.errors(f"Text. {{/* lean: {ref} */}}"), [])
@@ -122,6 +132,11 @@ class Lean(Fixture):
             ("Demo.notDeclared", "declares no notDeclared"),
             ("Demo.commentedOut", "declares no commentedOut"),
             ("Demo.rank.Status", "declares no rank.Status"),
+            # Exact after the `Lambo.` and `Demo.` prefixes: no suffix match,
+            # and no repeated model prefix.
+            ("Demo.rank", "declares no rank"),
+            ("Demo.dependence", "declares no dependence"),
+            ("Demo.Demo.Status.rank", "declares no Demo.Status.rank"),
             ("Nope.legal", "no file formal/LamboProofs/Nope.lean"),
             ("legal", "is not `<Model>.<name>`"),
         ]:
@@ -148,6 +163,8 @@ class Const(Fixture):
             ("MIN_DISTINCT", "does not name MIN_DISTINCT"),
             ("MIN_GC", "does not name MIN_GC"),
             ("ScoringWeights::custom", "does not name custom"),
+            ("fn", "fn is a Rust keyword"),
+            ("Config::default().for", "for is a Rust keyword"),
             ("not a name", "is not a Rust name"),
         ]:
             with self.subTest(ref=ref):
@@ -163,6 +180,8 @@ class Code(Fixture):
             "src/daemon/events.rs is_high_value HIGH_RISK_WRITE_WINDOW",
             "src/daemon/events.rs is_high_value, HIGH_RISK_WRITE_WINDOW; src/formal_constants_tests.rs pins",
             "src/daemon/events.rs Credit::Writer (a note, with a comma)",
+            "src/daemon/events.rs Credit::DependentOrigin, Probe::last_demotion_time, Probe::default",
+            "src/daemon/events.rs Credit Probe last_demotion_time",
             "src/daemon/events.rs (module doc), is_high_value",
             "src/daemon",
         ]:
@@ -172,9 +191,15 @@ class Code(Fixture):
     def test_bad_paths_and_items_fail(self):
         for body, says in [
             ("src/daemon/nope.rs", "no path src/daemon/nope.rs"),
-            ("src/daemon/events.rs is_low_value", "does not name is_low_value"),
-            ("src/daemon/events.rs Credit::Reader", "does not name Reader"),
-            ("src/daemon/events.rs module doc", "does not name module"),
+            ("src/daemon/events.rs is_low_value", "declares no is_low_value"),
+            ("src/daemon/events.rs Credit::Reader", "declares no Reader"),
+            ("src/daemon/events.rs Writer::Credit", "declares no Writer"),
+            ("src/daemon/events.rs Stage::is_high_value", "declares no Stage"),
+            ("src/daemon/events.rs Credit::fn", "is not a Rust name"),
+            ("src/daemon/events.rs policy", "declares no policy"),
+            ("src/daemon/events.rs in_a_comment", "declares no in_a_comment"),
+            ("src/daemon/events.rs in_a_string", "declares no in_a_string"),
+            ("src/daemon/events.rs Module", "declares no Module"),
             ("src/daemon/events.rs is_high_value()", "is not a Rust name"),
             ("is_high_value", "names no path before it"),
             ("src/daemon is_high_value", "is not a file"),
@@ -189,6 +214,16 @@ class Code(Fixture):
     def test_items_are_whole_words(self):
         errors = self.errors("{/* code: src/daemon/events.rs high_value */}")
         self.assertEqual(len(errors), 1)
+
+    def test_prose_in_item_position_fails(self):
+        errors = self.errors("{/* code: src/daemon/events.rs the policy cycle */}")
+        self.assertEqual(len(errors), 3)
+
+    def test_a_const_only_in_a_comment_or_string_fails(self):
+        self.write("src/formal_constants_tests.rs", CONSTANTS + "// MIN_ONLY_COMMENTED\nconst S: &str = \"MIN_ONLY_QUOTED\";\n")
+        for ref in ["MIN_ONLY_COMMENTED", "MIN_ONLY_QUOTED"]:
+            with self.subTest(ref=ref):
+                self.assertEqual(len(self.errors(f"{{/* const: {ref} */}}")), 1)
 
 
 class NearMisses(Fixture):
