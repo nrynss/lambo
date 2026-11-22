@@ -206,7 +206,7 @@ rust = [
 [[model]]
 lean = "formal/LamboProofs/Contract.lean"
 read_against = "514da8d7"
-read_digest = "v2:sha256:2944bbb26815e486f3702bc29d0401088c9a66ce19f8acca9cfc5b5fb4788c61"
+read_digest = "v2:sha256:7db5004981589d392314677cb1f95aec9902d396d85b65e3d1ca58cec7303568"
 rust = [
   "src/types/mod.rs#EmbeddingContract",
   "src/graph/graph/embeddings.rs",
