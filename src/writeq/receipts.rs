@@ -615,7 +615,10 @@ pub enum ReceiptAnswer {
     /// next serve replays it is unknown from here. A retried `close()` whose
     /// flush completes upgrades this to [`ReceiptAnswer::IntentRecorded`].
     CloseUnflushed,
-    /// Never attempted: the queue was full when the ack was issued.
+    /// Never attempted: refused at admission. The agent's lane, the whole
+    /// queue or its payload cap was full (writes held behind an embedder
+    /// outage count toward all three), or the session was closing or had
+    /// lost its lease. The string is `DropReason::describe`'s, naming which.
     Dropped(String),
     /// This process issued it and has since discarded its outcome — either the
     /// retention window passed or it was evicted as the oldest held receipt,

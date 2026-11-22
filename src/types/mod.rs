@@ -2470,14 +2470,21 @@ pub enum LamboError {
     /// its vector-candidate lookup when the store did not answer within
     /// the lookup's own budget (`Self::lookup_timeout`), or when the call's
     /// embed-and-lookup budget ran out before or during the lookup (the
-    /// ordinary budget message). Neither says anything about the input, so
-    /// the in-session write queue leaves the durable intent unconsumed. Before 0.6.0 a lookup
-    /// timeout was a store error (`store error`, `Backend`); it now reads
-    /// `embed: hybrid vector candidate lookup timed out ...` with the
-    /// "embedding error" kind. Nothing retries a transient write within the
-    /// session: the next serve of the session replays its durable intent,
-    /// and the replay settles a lookup timeout `failed` rather than retry it
-    /// again (`Self::is_lookup_timeout`).
+    /// ordinary budget message). Neither says anything about the input.
+    /// Before 0.6.0 a lookup timeout was a store error (`store error`,
+    /// `Backend`); it now reads `embed: hybrid vector candidate lookup timed
+    /// out ...` with the "embedding error" kind.
+    ///
+    /// In session (#295), the write queue holds a write that meets an
+    /// embedder outage: its durable intent stays unconsumed, its receipt
+    /// answers `pending_replay`, the agent's later writes wait behind it, and
+    /// the worker retries it in the background with a backoff, so it applies
+    /// in order once the embedder answers. A lookup timeout is decided per
+    /// write: one settles that write `failed`, and the third in a row with
+    /// nothing applied between is held like an outage, its retry settling it
+    /// `failed` if the lookup times out again. The replay at the next serve
+    /// settles a lookup timeout `failed` rather than retry it again
+    /// (`Self::is_lookup_timeout`).
     ///
     /// `Display` is deliberately identical to [`LamboError::Embed`]'s: to an
     /// operator and to the ledger this is the same *class* of failure
