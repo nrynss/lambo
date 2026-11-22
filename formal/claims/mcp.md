@@ -51,6 +51,21 @@ row the review named, and every CODE-ONLY row that cited a comment or said its
 check was unfinished), and 18 of them changed class. Each of those rows now
 cites code, a test or a theorem, so no row is COMMENT-ONLY.
 
+**Anchors (2026-11-23).** Both copies of the page now carry each PROVEN,
+TESTED and CODE-ONLY row's backing as invisible MDX anchors next to the
+sentence, item or table it backs: `lean:` for PROVEN, `test:` for TESTED,
+`code:` for CODE-ONLY, and `const:` where a pinned constant backs a number.
+`scripts/docs/check-doc-anchors.py` resolves every anchor in CI and requires
+both copies to keep their `lean:`, `const:`, `code:` and `test:` anchors. This
+file records the audit as it was done; the anchors are what keep the page
+true from here on, and where the two differ, the anchors are current. While
+anchoring, each row's backing was checked again against the page as it now
+reads, many CODE-ONLY rows gained a test beside their code, and eleven
+sentences were corrected where the code said otherwise (Q-05, Q-21, Q-43,
+T-46, T-76b, D-48, S-29, S-77, S-87b, S-127, S-128). No `Drain.lean` theorem
+from the worker layer before #295 (`work`, `workerStep`) backs an in-session
+error answer; its close theorems back close answers only beside a test.
+
 ## Summary
 
 724 claims.
