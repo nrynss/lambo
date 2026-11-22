@@ -171,18 +171,20 @@ in their doc comments, and describe behaviour the current Rust no longer has.
   `OrderInv`, `loopD_preserves`, `replayD_preserves`: the order argument as an
   invariant each pass keeps.
 * The close, crash and shutdown over the current worker (`closeW` after any
-  `runW` trace; `InvW`, `sessionW_inv`): `shutdown_no_silent_lossW`: after a
-  close every admitted write is exactly one of applied, failed with its intent
-  consumed, failed after the fence with its intent left owed,
-  `intent_durable` and owed in the flushed log, or `close_unflushed`, whether
-  it was running, held or queued when the close began; `held_at_closeW`: a
-  held write answers `pending_replay` and is owed while the session runs, and
-  the close answers it `intent_durable` or `close_unflushed`, never `failed`;
+  `runW` trace; `InvW`, `sessionW_inv`): `shutdown_no_silent_lossW`,
+  `shutdown_exactly_oneW`: after a close every admitted write is exactly one
+  of applied, failed with its intent consumed, failed after the fence with its
+  intent left unconsumed, `intent_durable` and owed in the flushed log, or
+  `close_unflushed`, whether it was running, held or queued when the close
+  began; `held_at_closeW`: a held write answers `pending_replay` while held,
+  its intent unconsumed, and the close answers it `intent_durable` or
+  `close_unflushed`, never `failed` (a held write's retry can still settle
+  `failed` in session, on a content refusal or after the fence);
   `outage_holdsW`: an outage holds the write (the current counterpart of
   `outage_failed_but_owed`); `lookupTimeout_settlesW`,
-  `lookupTimeout_run_holdsW`, `heldErrW_holds`: a single lookup timeout
-  settles `failed` and consumes the intent, the one ending a run of them
-  holds; `closeW_retry_upgradesW`: a retried close upgrades `close_unflushed`;
+  `lookupTimeout_run_holdsW`, `heldErrW_holds`: a lookup timeout settles
+  `failed` and consumes the intent, except on a first attempt once the run of
+  them reaches the limit, which holds; `closeW_retry_upgradesW`: a retried close upgrades `close_unflushed`;
   `runW_log_refines`: every batch of the current worker is one `workerStep`
   appends; `serveR_applied_pending`: the current serve applies only stored,
   unconsumed rows; `crash_never_reappliesW`: no write in a durable prefix of
@@ -325,7 +327,9 @@ it was before #295: an in-session `EmbedUnavailable` (an outage or a lookup
 timeout) answered `failed`, left the intent owed, and let the agent's next
 write run. The current worker holds such a write instead (`pending_replay`,
 retried with backoff), settles a single lookup timeout `failed` with its
-intent consumed, and holds the write that ends a run of them. It is modelled
+intent consumed, and holds a first-attempt lookup timeout once a run of them
+has reached the limit (the third, and every later one until a write applies).
+It is modelled
 by `stepW`/`runW` (the section "The hold with admission, caps, retries and the
 fence"), and its close, crash and shutdown accounting by the section "The
 close, crash and shutdown over the current worker", whose theorems are the
@@ -347,9 +351,9 @@ run.
 * any other error: `failed`, intent consumed `failed` on its own hold.
 
 The current worker (`finishW`, `startW`) differs on the third arm: an outage,
-or the lookup timeout that ends a run of them, holds the write
-(`pending_replay`, nothing appended), and a single lookup timeout settles
-`failed` with its intent consumed. Its batches are still `workerStep`'s
+or a first-attempt lookup timeout once a run of them has reached the limit,
+holds the write (`pending_replay`, nothing appended), and any other lookup
+timeout settles `failed` with its intent consumed. Its batches are still `workerStep`'s
 (`runW_log_refines`), so the batch lemmas below (`workerStep_keys`,
 `workerStep_atomic`) carry over to it. -/
 def workerStep (fenced : Bool) (j : Job) (r : RunResult) : Answer × Batch :=
@@ -1784,7 +1788,10 @@ theorem fixed_sessionWide_stops (rout : Job → RR) (s : Streaks) (i : Intent) (
     rfl
 
 /-- The fixed replay and the in-session worker now agree on an input
-refusal: both consume the intent `failed`. -/
+refusal: both consume the intent `failed`. Stated with `workerStep`, the worker
+before #295; it holds of the current worker too, whose `finishW` settles an
+input refusal `failed` with the same `[consume failed]` batch (an input
+refusal does not hold, `holdsS`). -/
 theorem fixed_agrees_with_worker (img : Bool) (j : Job) (s : Streaks) :
     (stepInput img (.run (.err .inputRefusal)) s).1 = .failed ∧
       workerStep false j (.err .inputRefusal) = (.failed, [.consume j.key .failed]) :=
@@ -4118,7 +4125,8 @@ write that meets an outage: it answers `pending_replay`, not `failed`, keeps
 its intent owed, holds the agent's later writes behind it, and is retried in
 the background; a close answers it `intent_durable` (or `close_unflushed`). A
 single lookup timeout now settles `failed` with its intent consumed, and the
-one that ends a run of them is held. This theorem is kept because it
+first-attempt one once a run of them has reached the limit is held. This
+theorem is kept because it
 documents the behaviour #295 replaced: an owed write answered `failed`, which
 let the agent's later writes overtake it (`outage_then_replay_reorders`).
 Current counterparts: `outage_holdsW`, `held_at_closeW`,
@@ -4170,19 +4178,27 @@ What the close does to an admitted write, by its state when `close()` starts:
 * **applied** (`settleRun` on `.ok`): settled `applied`, its write and its
   consume in one batch; `settle_deferred` leaves it alone.
 * **failed and consumed** (`settleRun` on an error that does not hold it: a
-  content or input refusal, a single lookup timeout, or the retry of a write
-  held by a run of them): settled `failed`, intent consumed `failed`; left
-  alone.
+  content or input refusal, a lookup timeout below the run limit, or the
+  retry of a write held by a run of them): settled `failed`, intent consumed
+  `failed`; left alone.
 * **fenced** (`refuseHeld`, `refuseQueued`: taken after the lease was lost):
-  settled `failed` without being run, its intent left unconsumed for the
-  session's current holder; left alone. A fenced close refuses to flush
-  (`close_fenced`), so everything it sets aside answers `close_unflushed`.
-* **held** (`holdRun`, `parkQueued`: an embedder outage, or the third lookup
-  timeout in a row with nothing applied between, or a later write of a held
+  settled `failed` without being run, its intent left unconsumed (the
+  session's current holder's to apply, if an earlier flush took it); left
+  alone. In the Rust a fenced close refuses to flush (`close_fenced` passes
+  `CloseFlush::Incomplete`, `src/memory/shutdown.rs`), so everything it sets
+  aside answers `close_unflushed`. That is code-backed, not proved: the model
+  takes the flush outcome as a free parameter, and `closeW .durable` over a
+  fenced session answers `intent_durable`, which the Rust never does.
+* **held** (`holdRun`, `parkQueued`: an embedder outage; a lookup timeout on a
+  first attempt once `lookup_streak`, the lookup timeouts in a row with nothing
+  applied between, has reached `REPLAY_LOOKUP_TIMEOUT_LIMIT`, which holds the
+  third and every later one until a write applies; or a later write of a held
   agent): `pending_replay`, unsettled, intent unconsumed. `abort_workers`
   clears `Lanes::held` and sets the receipt aside; `settle_deferred` answers
   `intent_durable` after a completed final flush, `close_unflushed` otherwise.
-  It never answers `failed` in session.
+  It answers `pending_replay` while held, and the close never answers it
+  `failed`; a held write's retry can still settle `failed` in session (a
+  content refusal, or a refusal after the fence).
 * **queued, not started**: the same. `abort_workers` drains the queues and
   sets the receipts aside.
 * **running when the close starts**: the quiesce waits for it, at most
@@ -4200,6 +4216,19 @@ unsettled receipt (`deferredW`, as `abort_workers` does) and settles them by
 retried close settles the same set-aside ids again (`close_deferred` is kept
 after an incomplete flush).
 
+**Writes refused at admission: a gap between the model and the Rust.** The
+model starts from `WS.init (admitStore all)` and logs `admitLog all`, so
+every job in `all` has a `pending` receipt and a put from the start,
+including a job that `stepW`'s `.submit` later refuses (the caps did not fit
+it). In the Rust a refused write answers `dropped` (settled) and gets no
+intent at all. So in the model `closeW` sets such a job aside and answers it
+`intent_durable` or `close_unflushed`, and `OwedW` can hold of it, though the
+Rust would answer `dropped` with nothing owed. No theorem here states
+anything about such a job: every one quantifies over `st.admitted`, the
+writes admission accepted. `InvW.fresh` treats a refused job and one not yet
+submitted alike (`pending`, untouched), which is the model's state, not the
+Rust's.
+
 `InvW` carries the argument: each settled write's receipt holds its answer
 and the log its batch (or, refused after the fence, no consume); each queued
 or running write's receipt is unsettled; each held write answers
@@ -4209,20 +4238,22 @@ distinct and every admitted write among the jobs whose intents admission
 logged (`admitLog all`). The log has the shape `crash_never_reapplies` takes:
 admission's puts, then the workers' batches.
 
-Results: `shutdown_no_silent_lossW` (after a close every admitted write is
-exactly one of applied, failed and consumed, failed after the fence with its
-intent left owed, `intent_durable` and owed in the flushed log, or
-`close_unflushed`; none pending), `held_at_closeW` (a held write answers
-`pending_replay` and is owed while the session runs, and the close answers it
-`intent_durable` or `close_unflushed`), `outage_holdsW` (an outage holds the
-write: the current counterpart of `outage_failed_but_owed`),
-`lookupTimeout_settlesW`, `lookupTimeout_run_holdsW`, `heldErrW_holds` (one
-lookup timeout settles `failed` and consumes; a run of them holds),
-`closeW_retry_upgradesW` (a retried close upgrades `close_unflushed`),
-`runW_log_refines` (every batch the current worker appends is one the old
-`workerStep` appends), `serveR_applied_pending` (the current serve applies only
-stored, unconsumed rows), and `crash_never_reappliesW` (no write in a durable
-prefix of the current worker's log is applied again by the current serve). -/
+Results: `shutdown_no_silent_lossW` and `shutdown_exactly_oneW` (after a
+close every admitted write is exactly one of applied, failed and consumed,
+failed after the fence with its intent left unconsumed, `intent_durable` and
+owed in the flushed log, or `close_unflushed`; none pending),
+`held_at_closeW` (a held write answers `pending_replay` while held, its
+intent unconsumed, and the close answers it `intent_durable` or
+`close_unflushed`), `outage_holdsW` (an outage holds the write: the current
+counterpart of `outage_failed_but_owed`), `lookupTimeout_settlesW`,
+`lookupTimeout_run_holdsW`, `heldErrW_holds` (a lookup timeout below the run
+limit, or a held write's retry, settles `failed` and consumes; a first
+attempt at the limit holds), `closeW_retry_upgradesW` (a retried close
+upgrades `close_unflushed`), `runW_log_refines` (every batch the current
+worker appends is one the old `workerStep` appends), `serveR_applied_pending`
+(the current serve applies only stored, unconsumed rows), and
+`crash_never_reappliesW` (no write in a durable prefix of the current
+worker's log is applied again by the current serve). -/
 
 /-- The receipts `abort_workers` sets aside: every one still unsettled once the
 workers are aborted and joined (`pending` or `pending_replay`), held writes'
@@ -4232,7 +4263,10 @@ def deferredW (st : WS) : List Key := pendingIds st.store
 /-- `close()` over the current worker: `quiesce` (the trace `st` came from is
 what the workers finished; `running`, `held` and `queue` are what the abort
 stops), `abort_workers`, then `settle_deferred` by how the final flush ended.
-It appends nothing to the log. -/
+It appends nothing to the log. It also sets aside a job of `all` that
+admission refused, whose receipt the model leaves `pending` where the Rust
+answers `dropped` (the gap in the section header); the theorems speak only of
+admitted writes. -/
 def closeW (flush : CloseFlush) (now : Int) (st : WS) : RStore :=
   settleDeferred flush now (deferredW st) st.store
 
@@ -4244,7 +4278,11 @@ def Untouched (k : Key) (log : List Batch) : Prop := ∀ t, Mut.consume k t ∉ 
 
 /-- `j`'s intent is an unconsumed row of the session's whole log, admission's
 puts then the workers' batches, in the current load order (`fixedLoad`): owed
-by the next serve once that log is durable. -/
+by the next serve once that log is durable. It is about this process's whole
+log, not a durable prefix of it: a write's row is owed by the next serve only
+if a flush took its put. `admitLog all` puts every job of `all`, so for a job
+admission refused (which in the Rust gets no intent) `OwedW` can hold in the
+model and not in the Rust; the theorems use it only for admitted writes. -/
 def OwedW (all : List Job) (st : WS) (j : Job) : Prop :=
   ⟨j, none⟩ ∈ pendingOf (fixedLoad (intentsOf (admitLog all ++ st.log).flatten))
 
@@ -4418,8 +4456,11 @@ theorem untouched_snoc {q k : Key} {log : List Batch} {b : Batch} (hq : q ≠ k)
 write's receipt holds its answer and its batch (or, refused after the fence,
 no consume at all); each queued or running write's receipt is unsettled and
 its intent untouched; each held write answers `pending_replay` with its
-intent untouched; and a write not yet admitted is still `pending` and
-untouched. -/
+intent untouched; and a write of `all` not admitted is still `pending` and
+untouched (`fresh`). That last clause covers alike a write not yet submitted
+and one admission refused: the model gives both a `pending` receipt and a put,
+where the Rust answers a refused write `dropped` and records no intent for it
+(the gap in the section header). -/
 structure InvW (all : List Job) (st : WS) : Prop where
   settled : ∀ p ∈ st.settled, ansOf st.store p.1.key = some p.2 ∧
     ((p.2 = .applied ∧ [Mut.write p.1.key, .consume p.1.key .applied] ∈ st.log) ∨
@@ -4898,14 +4939,18 @@ theorem owedW_of {all : List Job} {st : WS} {j : Job} (hj : j ∈ all) (hu : Unt
 
 /-- **Shutdown accounting over the current worker.** After any session of the
 current workers (admission, holds, retries, the fence) and a `close()`, every
-admitted write is exactly one of: applied (its write and consume in one
-batch); failed with its intent consumed `failed`; failed after the fence,
-never run, its intent left owed for the session's current holder;
-`intent_durable` after a completed final flush, owed in the flushed log (its
-row is unconsumed, so the next serve's replay owes it), whether it was
-running, held or queued when the close began; or `close_unflushed` after an
-incomplete flush. None is left `pending` or `pending_replay`. The current
-counterpart of `shutdown_no_silent_loss`. -/
+admitted write is one of: applied (its write and consume in one batch);
+failed with its intent consumed `failed`; failed after the fence, never run,
+its intent left unconsumed (the session's current holder's to apply, if an
+earlier flush took it); `intent_durable` after a completed final flush, owed
+in the flushed log (its row is unconsumed, so the next serve's replay owes
+it), whether it was running, held or queued when the close began; or
+`close_unflushed` after an incomplete flush. None is left `pending` or
+`pending_replay`. `shutdown_exactly_oneW` adds that exactly one of these
+holds. "Applied" means in this process's graph, its batch in the log: the
+batch is durable only once a flush takes it, and one committed after the
+fence is refused at the flush (`Flush.lean`). The current counterpart of
+`shutdown_no_silent_loss`. -/
 theorem shutdown_no_silent_lossW {c : Caps} {sz : Job → Nat} {now : Int} {all : List Job}
     {evs : List Ev} {st : WS} (hst : st = runW c sz now (WS.init (admitStore all)) evs)
     (hnd : (st.admitted.map (·.key)).Nodup) (hall : ∀ j ∈ st.admitted, j ∈ all)
@@ -4965,9 +5010,11 @@ theorem shutdown_no_silent_lossW {c : Caps} {sz : Job → Nat} {now : Int} {all 
 
 /-- **A held write at close.** A write held in session (an outage, a run of
 lookup timeouts, or behind an earlier held write of its agent) answers
-`pending_replay`, never `failed`, and its intent is owed while the session
-runs; the close answers it `intent_durable` after a completed final flush (and
-it stays owed for the next serve's replay) and `close_unflushed` otherwise. -/
+`pending_replay` while held, and its intent is unconsumed; the close never
+answers it `failed`: `intent_durable` after a completed final flush (and it
+stays owed for the next serve's replay), `close_unflushed` otherwise. A held
+write can still settle `failed` in session once it leaves `held`: its retry
+meets a content refusal, or it is refused after the fence. -/
 theorem held_at_closeW {c : Caps} {sz : Job → Nat} {now : Int} {all : List Job} {evs : List Ev}
     {st : WS} (hst : st = runW c sz now (WS.init (admitStore all)) evs)
     (hnd : (st.admitted.map (·.key)).Nodup) (hall : ∀ j ∈ st.admitted, j ∈ all)
@@ -4983,8 +5030,7 @@ theorem held_at_closeW {c : Caps} {sz : Job → Nat} {now : Int} {all : List Job
 
 /-- **An in-session outage holds the write.** The running write of agent `a`
 that meets an embedder outage becomes a held write answering `pending_replay`,
-appends nothing (its intent is not consumed), and stays owed. While it stays
-held, `held_at_closeW` says the same of every later state and of the close.
+and appends nothing (its intent is not consumed). While it stays held, `held_at_closeW` says the same of every later state and of the close.
 The current counterpart of `outage_failed_but_owed`, which states the worker
 before #295, where the same write answered `failed`. Rust test
 `a_write_reached_during_an_in_session_embedder_outage_is_not_consumed`. -/
@@ -5011,8 +5057,9 @@ theorem outage_holdsW {c : Caps} {sz : Job → Nat} {now : Int} {all : List Job}
 worker's hold decision in `spawn_worker`, before its counters move. A lookup
 timeout on a write's first attempt adds one to `lookup_streak` (lookup
 timeouts in a row, across lanes, with nothing applied between; `streak` is its
-value before), and the one that brings it to `REPLAY_LOOKUP_TIMEOUT_LIMIT`
-holds the write as an outage does; a retried held write's lookup timeout does
+value before), and every one that brings it to `REPLAY_LOOKUP_TIMEOUT_LIMIT`
+or finds it past it (the third, and each later one until a write applies and
+resets it) holds the write as an outage does; a retried held write's lookup timeout does
 not count and settles. This is the abstraction `stepW`'s header describes
 ("handed to the model as `unavailable`"), now as a function. -/
 def heldErrW (retried : Bool) (streak : Nat) : Err → Err
@@ -5020,8 +5067,9 @@ def heldErrW (retried : Bool) (streak : Nat) : Err → Err
     if retried = false ∧ lookupTimeoutLimit ≤ streak + 1 then .unavailable else .lookupTimeout
   | e => e
 
-/-- The worker holds exactly on an outage or on the lookup timeout that ends a
-run of `REPLAY_LOOKUP_TIMEOUT_LIMIT` first attempts. -/
+/-- The worker holds exactly on an outage or on a first-attempt lookup timeout
+that brings, or finds, the run of them at `REPLAY_LOOKUP_TIMEOUT_LIMIT` or
+past it. -/
 theorem heldErrW_holds (retried : Bool) (streak : Nat) (e : Err) :
     holdsS (heldErrW retried streak e) = true ↔
       (e = .unavailable ∨ (e = .lookupTimeout ∧ retried = false ∧ lookupTimeoutLimit ≤ streak + 1)) := by
@@ -5055,7 +5103,8 @@ theorem lookupTimeout_settlesW {c : Caps} {sz : Job → Nat} {now : Int} {all : 
   obtain ⟨⟨x, h1, h2⟩, _⟩ := hI.live j (List.mem_append_left _ (head_mem hrun))
   exact ⟨ansOf_settleOne_self _ now h1 h2, List.mem_append_right _ (List.mem_singleton.mpr rfl), rfl⟩
 
-/-- **A run of lookup timeouts holds the write** that ends it, as an outage
+/-- **A run of lookup timeouts holds the write**: a first-attempt lookup
+timeout once the run has reached the limit is held, as an outage
 does (`outage_holdsW`). Rust test
 `a_lookup_timeout_run_holds_the_third_write_and_its_retry_settles_it`. -/
 theorem lookupTimeout_run_holdsW {c : Caps} {sz : Job → Nat} {now : Int} {all : List Job}
@@ -5254,6 +5303,93 @@ theorem crash_never_reappliesW (c : Caps) (sz : Job → Nat) (now : Int) (s : RS
   unfold intentsOf at hi
   rw [List.foldl_append] at hi
   exact foldl_consumed _ _ hnp (Or.inl ⟨_, hcB⟩) i hi (by rw [hix]; exact hxr) hio
+
+/-! ### Exactly one fate at close -/
+
+/-- The five cases of `shutdown_no_silent_lossW`, by name. -/
+inductive FateW where
+  | applied
+  | failedConsumed
+  | failedFenced
+  | durable
+  | unflushed
+  deriving DecidableEq, Repr
+
+/-- What each case says of write `j` after `closeW flush now'` over `st`. -/
+def FateW.holds (all : List Job) (st : WS) (flush : CloseFlush) (now' : Int) (j : Job) :
+    FateW → Prop
+  | .applied => (j, Answer.applied) ∈ st.settled ∧
+      ansOf (closeW flush now' st) j.key = some .applied ∧
+      [Mut.write j.key, .consume j.key .applied] ∈ st.log
+  | .failedConsumed => (j, Answer.failed) ∈ st.settled ∧
+      ansOf (closeW flush now' st) j.key = some .failed ∧ [Mut.consume j.key .failed] ∈ st.log
+  | .failedFenced => (j, Answer.failed) ∈ st.settled ∧ st.fenced = true ∧
+      ansOf (closeW flush now' st) j.key = some .failed ∧ OwedW all st j
+  | .durable => j ∈ st.running ++ st.held ++ st.queue ∧ flush = .durable ∧
+      ansOf (closeW flush now' st) j.key = some .intentRecorded ∧ OwedW all st j
+  | .unflushed => j ∈ st.running ++ st.held ++ st.queue ∧ flush = .incomplete ∧
+      ansOf (closeW flush now' st) j.key = some .closeUnflushed
+
+/-- The answer the close gives in each case. -/
+def FateW.answer : FateW → Answer
+  | .applied => .applied
+  | .failedConsumed => .failed
+  | .failedFenced => .failed
+  | .durable => .intentRecorded
+  | .unflushed => .closeUnflushed
+
+theorem FateW.holds_answer {all : List Job} {st : WS} {flush : CloseFlush} {now' : Int}
+    {j : Job} : ∀ f : FateW, f.holds all st flush now' j →
+      ansOf (closeW flush now' st) j.key = some f.answer
+  | .applied, h => h.2.1
+  | .failedConsumed, h => h.2.1
+  | .failedFenced, h => h.2.2.1
+  | .durable, h => h.2.2.1
+  | .unflushed, h => h.2.2
+
+/-- A write whose `[consume failed]` batch is in the log is not owed: the
+consume comes after admission's puts, so every row of its id is consumed. -/
+theorem not_owed_of_consumed {all : List Job} {st : WS} {j : Job} {t : Tag}
+    (hnp : NoPut st.log.flatten) (hc : [Mut.consume j.key t] ∈ st.log) : ¬ OwedW all st j := by
+  intro ho
+  have hm := (List.mem_filter.mp ho).1
+  rw [(fixedLoad_perm _).mem_iff] at hm
+  unfold intentsOf at hm
+  rw [List.flatten_append, List.foldl_append] at hm
+  have hc' : Mut.consume j.key t ∈ st.log.flatten :=
+    List.mem_flatten.mpr ⟨_, hc, List.mem_singleton.mpr rfl⟩
+  exact foldl_consumed _ _ hnp (Or.inl ⟨t, hc'⟩) _ hm rfl rfl
+
+/-- **Exactly one fate at close.** For every admitted write, exactly one case
+of `shutdown_no_silent_lossW` holds. The cases differ by the close's answer,
+except the two `failed` ones: a failure consumed in session has its
+`[consume failed]` batch in the log, so its intent is not owed, while a write
+refused after the fence is owed. -/
+theorem shutdown_exactly_oneW {c : Caps} {sz : Job → Nat} {now : Int} {all : List Job}
+    {evs : List Ev} {st : WS} (hst : st = runW c sz now (WS.init (admitStore all)) evs)
+    (hnd : (st.admitted.map (·.key)).Nodup) (hall : ∀ j ∈ st.admitted, j ∈ all)
+    (flush : CloseFlush) (now' : Int) (j : Job) (hj : j ∈ st.admitted) :
+    (∃ f : FateW, f.holds all st flush now' j) ∧
+      ∀ f g : FateW, f.holds all st flush now' j → g.holds all st flush now' j → f = g := by
+  refine ⟨?_, ?_⟩
+  · rcases shutdown_no_silent_lossW hst hnd hall flush now' j hj with h | h | h | h | h
+    · exact ⟨.applied, h⟩
+    · exact ⟨.failedConsumed, h⟩
+    · exact ⟨.failedFenced, h⟩
+    · exact ⟨.durable, h⟩
+    · exact ⟨.unflushed, h⟩
+  · have hnp : NoPut st.log.flatten := by
+      subst hst
+      intro m hm k he
+      obtain ⟨b, hb, hmb⟩ := List.mem_flatten.mp hm
+      obtain ⟨j', rr, rfl⟩ := runW_log_refines c sz now evs (WS.init (admitStore all))
+        (by intro b hb; simp [WS.init] at hb) b hb
+      rcases workerStep_keys hmb with h | ⟨t, h⟩ <;> rw [h] at he <;> cases he
+    intro f g hf hg
+    have ha := (FateW.holds_answer f hf).symm.trans (FateW.holds_answer g hg)
+    cases f <;> cases g <;> simp [FateW.answer] at ha ⊢
+    · exact not_owed_of_consumed hnp hf.2.2 hg.2.2.2
+    · exact not_owed_of_consumed hnp hg.2.2 hf.2.2.2
 
 /-! ## What the model shows about the Rust: concrete cases -/
 
@@ -5487,7 +5623,10 @@ acks two derives of the same Observation, both puts flush, the process dies;
 the next serve applies the first, the second is refused with a non-cycle
 `Invariant`, and the replay stops (block reason `Other`) there on every later
 serve, leaving the whole backlog behind it `pending_replay`. The in-session
-worker, meeting the same error, consumes it `failed`. (`spawn_replay`'s doc
+worker, meeting the same error, consumes it `failed` (the theorem states it of
+`workerStep`, the worker before #295; the current worker too, since `finishW`
+settles a store error `failed` with the same `[consume failed]` batch).
+(`spawn_replay`'s doc
 also lists "a vanished interaction" among the failures consumed `failed`; that
 is a `Store(NotFound)` and stops the replay too, but it is effectively
 unreachable: the interaction is logged before the put and never collected.) -/
@@ -5725,8 +5864,8 @@ example :
 
 /-- `held_at_closeW`, `shutdown_no_silent_lossW` on #295's scenario. `j1`
 meets an outage and is held; `j2` joins it, unrun; agent 1's `k1` applies.
-Both held writes answer `pending_replay` in session, never `failed`; the close
-answers them `intent_durable` after a completed flush and `close_unflushed`
+Both held writes answer `pending_replay` while held; the close never answers
+them `failed`, but `intent_durable` after a completed flush and `close_unflushed`
 after an incomplete one, leaves `k1` `applied`, and the flushed log owes
 exactly `j1` and `j2`. -/
 example :
@@ -5759,7 +5898,8 @@ example :
 
 /-- The fence at close: `j1`, already running, commits (its batch is in the
 log; the store refuses that flush); `j2` is refused `failed` unrun and its
-intent is left owed for the session's current holder. -/
+intent is left unconsumed (the session's current holder's to apply, if an
+earlier flush took it). -/
 example :
     let st := runW capsT one 0 (WS.init (admitStore [j1, j2]))
       [.submit j1, .submit j2, .start 0, .fence, .finish 0 .ok, .start 0]

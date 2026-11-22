@@ -10,20 +10,27 @@
   which an in-session embedder outage answered `failed`. Over the current
   worker, after a close every admitted write is exactly one of applied,
   failed with its intent consumed, failed after a lost lease with its intent
-  left for the session's current holder, `intent_durable` and owed in the
-  flushed log, or `close_unflushed` (`shutdown_no_silent_lossW`); a held write
-  answers `pending_replay`, never `failed`, and the close answers it
-  `intent_durable` or `close_unflushed` (`held_at_closeW`, `outage_holdsW`);
-  one lookup timeout settles `failed` and consumes its intent while the one
-  ending a run of them is held (`lookupTimeout_settlesW`,
-  `lookupTimeout_run_holdsW`); and no write in a durable prefix of the log is
+  left unconsumed (the session's current holder's to apply, if an earlier
+  flush took it), `intent_durable` and owed in the flushed log, or
+  `close_unflushed` (`shutdown_no_silent_lossW`, `shutdown_exactly_oneW`); a
+  held write answers `pending_replay` while held, and the close never answers
+  it `failed` but `intent_durable` or `close_unflushed` (`held_at_closeW`,
+  `outage_holdsW`); a lookup timeout settles `failed` and consumes its intent,
+  except a first attempt once a run of them has reached the limit, which is
+  held (`lookupTimeout_settlesW`, `lookupTimeout_run_holdsW`); and no write in a durable prefix of the log is
   applied again by the current two-pass serve (`crash_never_reappliesW`,
   through `runW_log_refines` and `serveR_applied_pending`). The older
   theorems stay, each labelled as describing the worker before #295 and
   naming its counterpart; `outage_failed_but_owed` and
   `outage_failed_then_applied` say the current Rust does not behave that
-  way. The model found no Rust defect. `docs/reference/mcp.mdx` now cites
-  the new theorems for close and crash accounting.
+  way. The model found no Rust defect. It does not model a write refused at
+  admission, which in the Rust answers `dropped` with no intent: the theorems
+  speak only of admitted writes. `docs/reference/mcp.mdx` now cites the new
+  theorems for close and crash accounting, and says a run of slow vector
+  lookups holds every later first attempt until a write applies, not only the
+  third. `scripts/formal/count-theorems.py` counts the theorems by the rule
+  `formal/README.md` states (2,439; the README said 2,393 for files it counts
+  as 2,394).
 
 ## 0.15.0 (2026-11-22)
 

@@ -553,6 +553,9 @@ open Lambo
 #print axioms Lambo.Drain.runW_log_refines
 #print axioms Lambo.Drain.serveR_applied_pending
 #print axioms Lambo.Drain.crash_never_reappliesW
+#print axioms Lambo.Drain.FateW.holds_answer
+#print axioms Lambo.Drain.not_owed_of_consumed
+#print axioms Lambo.Drain.shutdown_exactly_oneW
 -- Store flush path
 #print axioms Flush.flushWithRetry_backoff
 #print axioms Flush.ladder_exhausted
