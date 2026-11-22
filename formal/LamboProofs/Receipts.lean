@@ -23,7 +23,14 @@ queue (`src/writeq/receipts.rs`, `src/writeq/admission.rs`,
 
 Not modelled: the one settled-to-settled upgrade `CloseUnflushed →
 IntentRecorded` on a retried close, which bypasses `Entry::settle` by design
-(`drain.rs`); replay; the restart map.
+(`drain.rs`); replay; the restart map; the in-serve hold (#295): `hold_one`
+answering a held write `pending_replay`, the held writes in `Lanes::held`, and
+admission's `DropReason::HeldLane` refusal. `Drain.lean` models the hold
+(`hold_then_serve_order`, `sessionW_orderInv`, and the caps in `Caps`).
+
+The admission counts `lane` and `total` below are read as outstanding plus
+held writes, as admission counts them (`lane_outstanding + lane_held`,
+`outstanding + held_count`).
 -/
 
 namespace Lambo.Receipts
@@ -390,8 +397,8 @@ theorem lane_fifo (ops : List (Op α)) :
 /-! ## Admission bounds
 
 Admission refuses a write when its agent's lane holds `WRITE_QUEUE_LANE_MAX`
-outstanding jobs or the queue holds `WRITE_QUEUE_MAX`, and otherwise enqueues
-it. Admission never waits: a refusal is answered at once with a `Dropped`
+outstanding and held jobs or the queue holds `WRITE_QUEUE_MAX`, and otherwise
+enqueues it. Admission never waits: a refusal is answered at once with a `Dropped`
 receipt. -/
 
 /-- `MAX_RETAINED_RECEIPTS`. -/

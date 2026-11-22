@@ -94,5 +94,103 @@ header, and it is only as good as that reading. In particular:
 * Predicates whose inputs are measured by store queries (Stage 2 coverage,
   blast radius, eviction score) are modelled from those inputs onward.
 
-If the Rust changes, the model has to be re-read against it; nothing ties the
-two together mechanically.
+If the Rust changes, the model has to be re-read against it. Nothing proves
+the two agree; the drift check below only makes a change to modelled Rust
+visible.
+
+## Keeping the models in step with the Rust
+
+`formal/models.toml` lists, for every model file (every `.lean` file under
+`LamboProofs/`, subdirectories included, except `Audit.lean`), the Rust it
+models and `read_digest`, a fingerprint of that Rust as it was when the model
+was last read against it. A Rust ref is a whole file (`src/recall/expand.rs`)
+or one item in it (`src/types/mod.rs#tie_break_by_key`,
+`src/store/mod.rs#GraphStore::flush`); items are used where a model reads one
+part of a large shared file. The file's header comment gives the full syntax.
+An item ref covers that item's own text (with its attributes, and for a type
+its `impl` blocks), not the `use` imports it relies on or the helpers,
+constants and types it calls or names: list those as refs of their own when
+the model depends on them.
+
+The fingerprint is a SHA-256 over the entry's refs, sorted, and each ref's
+code with comments and `#[cfg(test)]` code blanked and whitespace collapsed
+outside string and char literals (literals are kept verbatim; for an item,
+only that item's code). It is written `v<N>:sha256:<hex>`, N being the digest
+scheme. `scripts/formal/check-model-drift.py` recomputes it and compares:
+
+```bash
+python3 -I scripts/formal/check-model-drift.py
+```
+
+It needs Python 3.11 or later (for `tomllib`) and git.
+
+A model whose fingerprint no longer matches its `read_digest` has drifted. A
+change to comments, to whitespace between tokens or to test-only code alone
+does not count (a change inside a literal does), and an item ref counts only a
+change inside that item. The fingerprint needs no git
+history, so the check gives the same answer after a squash or rebase merge
+and in a shallow clone, and a warning stays on every later run, on every
+branch, until the model is bumped.
+
+To clear a warning, re-read the model against the Rust as it is now, update
+the model file (its statements, or the header's reading of the Rust) if the
+change matters to it, and bump it:
+
+```bash
+python3 -I scripts/formal/check-model-drift.py --bump Canon
+```
+
+`--bump` takes one or more model names (`Canon`, `Canon.lean` or
+`formal/LamboProofs/Canon.lean`), recomputes their `read_digest` from the
+working tree and rewrites only those lines of `formal/models.toml`. It refuses,
+writing nothing, while any of the model's refs does not resolve, and it names
+any ref file whose code differs from `HEAD`: the digest then records
+uncommitted edits, so commit them with the manifest. Editing the Lean file
+alone does not clear drift; only a bump does, and a bump is a claim that the
+model was re-read, so bump only models you have re-read. `--bump-all` bumps
+every model: for a new manifest, or after a change to the script's
+normalisation. Such a change bumps the script's digest scheme, and the check
+then reports "digest scheme changed" (and fails) until `--bump-all` is run;
+run the previous script first to make sure no model had drifted.
+An older script run on a manifest with a newer digest scheme fails the same
+way but refuses to bump, so it cannot downgrade the manifest.
+
+The ref list is part of the fingerprint. Adding a ref, dropping one,
+narrowing a whole file to some of its items or re-pointing a ref at code that
+moved is drift until the model is bumped, so drift cannot be hidden by
+editing the manifest. The Lean path is not part of it: renaming a model file
+together with its entry is not drift.
+
+`read_against` is optional information: the commit the model was last read
+against. Only its format is checked. When a model drifts, the report uses it
+only if it is a commit in the clone and the model's refs there fingerprint to
+exactly its `read_digest`, that is, only if it is the state the digest was
+taken at. Then the report compares each ref there with now, names only the
+refs that changed, each at its first changed line, and adds a
+`git diff <read_against> -- <path>` hint. Otherwise (no `read_against`, a
+commit missing from the clone such as a squash-merged branch's or one outside
+a shallow clone's depth, or a commit that is not the digest's state) it says why and lists all the model's refs.
+`--bump` does not change `read_against`; update it by hand if you keep it.
+
+CI runs the check on pushes and pull requests as a warning
+(`.github/workflows/model-drift.yml`): drift is a reminder to re-read the
+model, not a failure (`--strict` makes it exit 1). CI checks out the full
+history (`fetch-depth: 0`) so that `read_against` resolves and each warning
+points at the changed lines; without that history (a shallow clone) the
+report lists every ref of a drifted model. Each warning is attached to a
+drifted Rust ref: at its first changed line when `read_against` narrows the
+report, otherwise at the item's keyword line, or on the whole file for a
+whole-file ref. The manifest itself is always checked, and a broken one fails
+(exit 3): a model file with no entry, a listed file or item that does not
+exist, a `read_digest` or `read_against` that is not well formed, or a
+`read_digest` of another digest scheme.
+
+When modelled code moves to another file or is renamed, update its ref in the
+manifest in the same change; the check fails until the ref names something
+that exists, and the model counts as drifted until it is re-read and bumped.
+A new model file needs its own entry, then `--bump`. To run the script's own
+tests:
+
+```bash
+python3 -I scripts/formal/check-model-drift.py --self-test
+```

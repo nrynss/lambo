@@ -1,0 +1,452 @@
+# Which Rust each Lean model in formal/LamboProofs/ describes, and a
+# fingerprint of that Rust as it was when the model was last read against it.
+# scripts/formal/check-model-drift.py reads this file: a model whose Rust no
+# longer matches its `read_digest` is flagged on every run until the model is
+# re-read and bumped (#291). See formal/README.md, "Keeping the models in step
+# with the Rust".
+#
+# One [[model]] per .lean file under formal/LamboProofs/ (subdirectories
+# included) other than the top-level Audit.lean:
+#
+#   lean          the model file, from the repository root.
+#   read_against  optional: the commit the model was last read against.
+#                 Information for people, and a hint for the report (when it
+#                 is a commit in the clone and the refs there fingerprint to
+#                 read_digest, a drift report names only the refs that
+#                 changed since it, with a `git diff`); only its format is
+#                 checked. --bump does not change it: update it by hand.
+#   read_digest   `v<N>:sha256:` (N the digest scheme) over the entry's refs,
+#                 sorted, and each ref's code with comments and #[cfg(test)]
+#                 code blanked and whitespace collapsed outside string and
+#                 char literals. Never edit it by hand: after re-reading the
+#                 model against the Rust (and updating the model if the
+#                 change matters to it), run
+#                   python3 -I scripts/formal/check-model-drift.py --bump Canon
+#                 which rewrites this one line. That is the only way to clear
+#                 a drift warning: editing the Lean file alone does not. The
+#                 ref list is part of the digest, so adding, dropping or
+#                 narrowing a ref is drift until bumped too.
+#   rust          the Rust it models. A bare path is the whole file;
+#                 `path#name` is every item called `name` in it (fn, struct,
+#                 enum, trait, type, const, static, mod, union, macro_rules!,
+#                 and the impl blocks of a type of that name, `impl dyn name`
+#                 included); `path#Type::name` is `fn name` inside `impl Type`
+#                 or `trait Type`. Whole files are listed where the
+#                 model is of that module; items where it reads one part of a
+#                 large shared file (src/types/mod.rs, src/main.rs, ...). An
+#                 item ref does not cover the `use` imports or the helpers it
+#                 calls: list those too when the model depends on them.
+#
+# Paths a header names only as context (a test, the issue #273 proposed split,
+# a line the model does not read) are left out; each entry's comment says
+# which.
+
+[[model]]
+lean = "formal/LamboProofs/Score.lean"
+read_against = "514da8d7"
+read_digest = "v2:sha256:1fd79ee811931b960c965e67999530f3f1d0f94767a3e4ad7735780ac35e7fca"
+rust = [
+  "src/daemon/score.rs",
+  "src/config.rs#ScoringWeights",
+  "src/config.rs#ScoringWeights::sanitized",
+  "src/config.rs#sane_weight",
+]
+
+[[model]]
+lean = "formal/LamboProofs/Order.lean"
+read_against = "514da8d7"
+read_digest = "v2:sha256:66a02b7f37761ccf1930e64864e2ef05f50a47914f7ef3ddfeb9ca25b1377bf0"
+rust = [
+  "src/types/mod.rs#tie_break_by_key",
+  "src/daemon/score.rs#rescore",
+  "src/recall/candidates.rs#rank",
+  "src/graph/index.rs#search_ranked",
+  "src/recall/assemble.rs#rank_members",
+]
+
+[[model]]
+lean = "formal/LamboProofs/Expand.lean"
+read_against = "514da8d7"
+read_digest = "v2:sha256:53706543e133599abd431b403123e3fb4eb2eaf641c54593e9c61ca515e8461f"
+rust = [
+  "src/recall/expand.rs",
+]
+
+[[model]]
+lean = "formal/LamboProofs/TopK.lean"
+read_against = "514da8d7"
+read_digest = "v2:sha256:ea34f715fa6c2fe5582c13d6733c9c4b824c39a8bf7b2e0141a081cab6102ebb"
+rust = [
+  "src/recall/assemble.rs#emitted",
+  "src/recall/redundancy.rs",
+]
+
+[[model]]
+lean = "formal/LamboProofs/Fit.lean"
+read_against = "514da8d7"
+read_digest = "v2:sha256:822a7a60eb735490f21d2fec9e617c79b04706304827622781da61e51cd6b213"
+rust = [
+  "src/recall/format/fit.rs",
+  "src/recall/format.rs#default_token_count",
+  "src/recall/format.rs#render_block",
+]
+
+# Of src/canon/stage1.rs, only Swarm's Stage 1: its thresholds and candidate
+# filter. Canon takes the stage-1 dependent-interaction count as an input; the
+# count helpers (dependent_interaction_counts, dependent_origin, counts_with,
+# age_cutoff, Credit) are listed because a change to how the count is computed
+# is a reason to re-read stage1_mono's monotonicity assumption (the count only
+# grows). Solo's writer-credited count is Policy.lean's.
+[[model]]
+lean = "formal/LamboProofs/Canon.lean"
+read_against = "514da8d7"
+read_digest = "v2:sha256:7a629e028efcf28f7d1a2bac8b590f2f68b60a9e117d29d7f859c65558b17083"
+rust = [
+  "src/graph/graph/transitions.rs#legal_canonization_transition",
+  "src/graph/graph/transitions.rs#apply_canonization_transition",
+  "src/canon/eval.rs#apply",
+  "src/canon/eval.rs#Evaluator::gather",
+  "src/canon/eval.rs#canonical_count",
+  "src/canon/stage1.rs#MIN_GC_SURVIVED",
+  "src/canon/stage1.rs#MIN_DEPENDENT_INTERACTIONS",
+  "src/canon/stage1.rs#stage1_evidence_passes",
+  "src/canon/stage1.rs#stage1_candidates",
+  "src/canon/stage1.rs#dependent_interaction_counts",
+  "src/canon/stage1.rs#dependent_origin",
+  "src/canon/stage1.rs#counts_with",
+  "src/canon/stage1.rs#age_cutoff",
+  "src/canon/stage1.rs#Credit",
+  "src/canon/stage2.rs",
+  "src/canon/stage3.rs",
+  "src/canon/policy.rs#status_rank",
+  "src/types/mod.rs#CanonizationStatus",
+]
+
+[[model]]
+lean = "formal/LamboProofs/Gc.lean"
+read_against = "514da8d7"
+read_digest = "v2:sha256:ea5e3c51dc41ef5281b9d5d8a2d6cb3ac78c1218e930b1ae651b0bdc56a7fd30"
+rust = [
+  "src/daemon/gc.rs",
+  "src/graph/graph/transitions.rs#bump_gc_survived",
+  "src/types/mod.rs#counts_toward_gc_connectivity",
+  "src/types/mod.rs#exempt_from_gc_score_cut",
+  "src/types/mod.rs#EdgeType",
+]
+
+# The write gates (closing_edge for Causal/Dependency, reject_closing_edge and
+# its parent_of pre-pass for Hierarchical), the alias redirect's walk and the
+# load check's two cycle passes (#325).
+[[model]]
+lean = "formal/LamboProofs/Cite.lean"
+read_against = "a0413ec5"
+read_digest = "v2:sha256:b0a729d55ebe2e1a1a690a19b2ef3b992defe348fa0a2be09361f927eb735822"
+rust = [
+  "src/canon/alias.rs#plan",
+  "src/canon/alias.rs#reaches",
+  "src/graph/action.rs#closing_edge",
+  "src/graph/action.rs#plan",
+  "src/graph/cite.rs",
+  "src/graph/derive/cycles.rs#reject_closing_edge",
+  "src/graph/derive/cycles.rs#reject_parent_of_cycles",
+  "src/graph/graph.rs#CAUSAL_DEPENDENCY",
+  "src/graph/graph.rs#HIERARCHICAL",
+  "src/graph/graph.rs#Graph::cycle_neighbors",
+  "src/graph/graph.rs#Graph::dfs_cycle",
+  "src/graph/graph.rs#Graph::hierarchical_path",
+  "src/graph/graph/invariants.rs#Graph::assert_invariants",
+]
+
+[[model]]
+lean = "formal/LamboProofs/Names.lean"
+read_against = "514da8d7"
+read_digest = "v2:sha256:d2a1bf8deebb40549214ed4a3a71138cde98c1299d4b7ba5b1cde244b148ebd4"
+rust = [
+  "src/graph/graph/names.rs",
+  "src/surface/resolve.rs#resolve_reference_scoped",
+]
+
+# The SQL adapters' lease upserts are listed because the header models the
+# MemoryStore upsert as stating "the same rule" as theirs.
+[[model]]
+lean = "formal/LamboProofs/Lease.lean"
+read_against = "514da8d7"
+read_digest = "v2:sha256:3d4d638fe4e0d5cb4a40ea44e0b727c4008e2ce7401f4fb6d30d40ce6de33b47"
+rust = [
+  "src/store/lease.rs",
+  "src/store/memory.rs#acquire_lease",
+  "src/store/memory.rs#release_lease",
+  "src/store/sqlite/leases.rs",
+  "src/store/pg/leases.rs",
+  "src/memory/leases.rs#spawn_lease_heartbeat",
+]
+
+[[model]]
+lean = "formal/LamboProofs/Receipts.lean"
+read_against = "514da8d7"
+read_digest = "v2:sha256:ae6313c4324752c52691092f3e9ac61cf832d55f70965512153bf238fdad4f43"
+rust = [
+  "src/writeq/receipts.rs",
+  "src/writeq/admission.rs",
+  "src/writeq/execution.rs",
+]
+
+[[model]]
+lean = "formal/LamboProofs/Reserve.lean"
+read_against = "514da8d7"
+read_digest = "v2:sha256:be44ba22df4c300ce598c2bc8df1050418d672b99a5a2210f83351ec71009709"
+rust = [
+  "src/graph/reserve.rs",
+  "src/graph/graph/root_goal.rs#set_reservation",
+]
+
+# Left out: the ordinary write's lines in src/graph/hybrid.rs, cited by line
+# range only; record_action_against is the entry point the header names.
+[[model]]
+lean = "formal/LamboProofs/Contract.lean"
+read_against = "514da8d7"
+read_digest = "v2:sha256:2944bbb26815e486f3702bc29d0401088c9a66ce19f8acca9cfc5b5fb4788c61"
+rust = [
+  "src/types/mod.rs#EmbeddingContract",
+  "src/graph/graph/embeddings.rs",
+  "src/resolve.rs#session_embedding_compatibility",
+  "src/resolve.rs#check_vector_compatibility",
+  "src/memory/builder.rs#build_attach",
+  "src/memory/builder.rs#canary_gate",
+  "src/cli/re_embed.rs",
+  "src/graph/action.rs#record_action_against",
+  "src/store/load.rs#quarantine_legacy_vectors",
+  "src/graph/vector_source.rs#graph_vector_candidates",
+  "src/store/sqlite/vector_candidates.rs#checked_vector_candidates",
+  "src/main.rs#allow_embedding_mismatch",
+  "src/store/memory.rs#MemoryStore::flush",
+  "src/store/batch.rs#plan_flush",
+  "src/store/sqlite/write_rows.rs",
+  "src/store/pg/write_rows.rs",
+]
+
+[[model]]
+lean = "formal/LamboProofs/Fusion.lean"
+read_against = "514da8d7"
+read_digest = "v2:sha256:5295b9daf26293f1ed5c32899896947a8c5d98bb8b46419afde7ec2ffd10ce8d"
+rust = [
+  "src/recall/candidates.rs#candidates_with_keyword_leg_as",
+  "src/recall/candidates.rs#merge_max",
+  "src/recall/candidates.rs#LegScores",
+  "src/recall/candidates.rs#rank",
+  "src/recall/fusion.rs",
+]
+
+# Left out: search_ranked (src/graph/index.rs), modelled as its ranked list,
+# and the tests the header names.
+[[model]]
+lean = "formal/LamboProofs/Confidence.lean"
+read_against = "514da8d7"
+read_digest = "v2:sha256:3ae1dbc3eac9a735d59c35439ab24bdc6faebad71aa0b0238d88297c516c3d71"
+rust = [
+  "src/recall/confidence.rs",
+  "src/recall/candidates.rs#KeywordLeg",
+  "src/recall/candidates.rs#candidates_with_keyword_leg_as",
+  "src/daemon/mod.rs#Route",
+  "src/daemon/mod.rs#recall_routed",
+  "src/embed/calibration.rs#null_median_cosine",
+  "src/types/mod.rs#TopLegs",
+  "src/types/mod.rs#ProvisionalConfidence",
+]
+
+[[model]]
+lean = "formal/LamboProofs/Canonical.lean"
+read_against = "514da8d7"
+read_digest = "v2:sha256:6525163291921f6474da7132300be28c5b87bd30ae8114a43657b74357e1892c"
+rust = [
+  "src/graph/canonical.rs",
+  "src/graph/graph/names.rs#name_key",
+]
+
+[[model]]
+lean = "formal/LamboProofs/Dispatch.lean"
+read_against = "514da8d7"
+read_digest = "v2:sha256:5a54043e8333e61ba515da45000dcc812e40286173c395992533b94aa5f33af1"
+rust = [
+  "src/recall/dispatch.rs",
+  "src/daemon/mod.rs#recall_routed",
+  "src/recall/format.rs#dependents_of",
+  "src/types/mod.rs#dependence",
+  "src/types/mod.rs#dependent_end",
+  "src/recall/candidates.rs#gather_from",
+]
+
+[[model]]
+lean = "formal/LamboProofs/Supersession.lean"
+read_against = "514da8d7"
+read_digest = "v2:sha256:88ff79bf94bd5f838550b232cf66c030d89acceb86ea273070eab92ea4652f5c"
+rust = [
+  "src/graph/suspected.rs",
+  "src/graph/suspected/slot.rs",
+  "src/graph/suspected/replacement.rs",
+  "src/canon/supersession.rs",
+  "src/store/evidence.rs",
+  "src/canon/eval.rs#apply",
+  "src/recall/redundancy.rs#never_redundant",
+  "src/recall/redundancy.rs#Redundancy::signal",
+  "src/recall/assemble.rs#in_suspected_pair",
+  "src/recall/assemble.rs#possibly_superseded_by",
+  "src/recall/assemble.rs#superseded_by",
+  "src/recall/suspected.rs",
+]
+
+# Of src/canon/stage1.rs, the dependent counts Policy.lean models: Swarm's
+# (`dependentOrigins`) and Solo's writer-credited one (#300), per node and
+# batched (src/canon/policy.rs reads both), through `dependent_origin` and
+# `Credit`. Left out: `age_cutoff`, since the model takes every edge and
+# interaction as old enough.
+[[model]]
+lean = "formal/LamboProofs/Policy.lean"
+read_against = "514da8d7"
+read_digest = "v2:sha256:ef57c6bc35875efa648b1d1995f9642a19e1d3508296f37716b4ffbe5f7056cf"
+rust = [
+  "src/canon/event_time.rs#separated_session_count",
+  "src/canon/policy.rs",
+  "src/types/mod.rs#about_time",
+  "src/types/mod.rs#eviction_resistance",
+  "src/types/mod.rs#dependence",
+  "src/types/mod.rs#dependent_end",
+  "src/canon/eval.rs#Evaluator::gather",
+  "src/canon/eval.rs#apply",
+  "src/daemon/conflict.rs#WriterTimeline",
+  "src/canon/stage1.rs#solo_dependent_interactions",
+  "src/canon/stage1.rs#solo_dependent_interactions_with",
+  "src/canon/stage1.rs#solo_dependent_interaction_counts",
+  "src/canon/stage1.rs#solo_dependent_interaction_counts_with",
+  "src/canon/stage1.rs#dependent_interactions",
+  "src/canon/stage1.rs#interactions_with",
+  "src/canon/stage1.rs#counts_with",
+  "src/canon/stage1.rs#dependent_origin",
+  "src/canon/stage1.rs#Credit",
+]
+
+# Left out: the cases in src/daemon/contradiction/tests.rs.
+[[model]]
+lean = "formal/LamboProofs/Conflict.lean"
+read_against = "514da8d7"
+read_digest = "v2:sha256:ca35102588cabb1e8084a7453e9b93ee45fbb92a432d9fc30214af76dd3eef7c"
+rust = [
+  "src/daemon/conflict.rs",
+  "src/daemon/contradiction.rs",
+  "src/daemon/hotlist.rs#HotList::revalidate",
+  "src/graph/graph.rs#record_edge",
+]
+
+[[model]]
+lean = "formal/LamboProofs/Hotlist.lean"
+read_against = "514da8d7"
+read_digest = "v2:sha256:76dcf8b50f11d0d6932d8665ee242cb9adddd68fa817939df6eb01690619580d"
+rust = [
+  "src/daemon/hotlist.rs",
+  "src/daemon/mod.rs#detect_into_hot_list",
+  "src/recall/assemble.rs#forces",
+  "src/recall/assemble.rs#contradiction_companions",
+  "src/recall/assemble.rs#emitted",
+  "src/recall/assemble.rs#assemble_with_graph_relevance",
+  "src/daemon/contradiction.rs#forces_inclusion",
+  "src/recall/format.rs#hot_warning",
+  "src/recall/format.rs#contradiction_warning",
+  "src/types/mod.rs#HotListPayload",
+  "src/daemon/mod.rs#condition_set",
+  "src/recall/assemble.rs#same_session_concept",
+]
+
+[[model]]
+lean = "formal/LamboProofs/Drain.lean"
+read_against = "514da8d7"
+read_digest = "v2:sha256:0468f4fe70bfefe0aea276491ed21e24df5b80c9f7d8274161c0ec034e030efa"
+rust = [
+  "src/writeq/execution.rs",
+  "src/writeq/drain.rs",
+  "src/writeq/replay.rs",
+  "src/writeq/receipts.rs#settle_one",
+  "src/writeq/admission.rs#Lanes",
+  "src/graph/graph/mutation_log.rs#record_write_intent",
+  "src/graph/graph/mutation_log.rs#consume_write_intent",
+  "src/store/sqlite/session_load.rs",
+  "src/store/pg/session_load.rs",
+  "src/types/mod.rs#is_cycle_refusal",
+  "src/types/mod.rs#is_input_refusal",
+  "src/types/mod.rs#is_lookup_timeout",
+]
+
+[[model]]
+lean = "formal/LamboProofs/Flush.lean"
+read_against = "514da8d7"
+read_digest = "v2:sha256:b7aea37b79c45e9edbed77fd016e085b3ba3fd463ac5e505786285026c97a3e0"
+rust = [
+  "src/store/flush.rs",
+  "src/store/error.rs",
+  "src/types/mod.rs#is_retryable",
+  "src/store/mod.rs#GraphStore::flush",
+]
+
+# Left out: the files issue #273 proposes splitting candle.rs into.
+[[model]]
+lean = "formal/LamboProofs/BatchQueue.lean"
+read_against = "514da8d7"
+read_digest = "v2:sha256:1f023f433c651569efec33c3661e706ee3385b7e8e5f7d31c96ba5c5dd84cdf3"
+rust = [
+  "src/embed/candle.rs",
+]
+
+# Left out: src/store/flush.rs's stale-write latch, a match arm inside the
+# flush loop that Flush.lean already covers; the files issue #273 proposes.
+[[model]]
+lean = "formal/LamboProofs/Registry.lean"
+read_against = "514da8d7"
+read_digest = "v2:sha256:830fb6e3ff9c474a8dc762ebbd5fea103caab367fbeba1318d7d4a2161211238"
+rust = [
+  "src/mcp/serve/registry.rs",
+  "src/mcp/serve/registry/on_demand.rs",
+  "src/mcp/serve/registry/erase.rs",
+  "src/mcp/serve/registry/views.rs",
+  "src/memory/leases.rs",
+  "src/main.rs#too_many_stdio_sessions",
+  "src/mcp/serve/http_guards.rs#credential_share",
+]
+
+# Left out: the integration tests the header names.
+[[model]]
+lean = "formal/LamboProofs/Resolve.lean"
+read_against = "514da8d7"
+read_digest = "v2:sha256:2005aaf3872e5fc0e620e5208282a88fad49c163d1af9d54325c9e1576b2ce92"
+rust = [
+  "src/main.rs",
+  "src/resolve.rs",
+  "src/store/mod.rs#build_store_with_options",
+  "src/store/mod.rs#GraphStore::vector_dimensions",
+  "src/store/pg/mod.rs#vector_dimensions",
+  "src/store/pg/cockroach.rs",
+  "src/store/pg/postgres.rs",
+  "src/store/sqlite/mod.rs#vector_dimensions",
+  "src/store/recall_tier.rs#wrap_with_recall_tier",
+  "src/embed/mod.rs#build_embedder",
+  "src/config.rs#load_resolved",
+  "src/mcp/serve/pinned.rs#pin_sessions",
+  "src/mcp/serve/layers.rs#plan_layers",
+  "src/mcp/serve/http_guards.rs#resolve_auth_token",
+  "src/mcp/serve/http_guards.rs#authorize_bind",
+  "src/mcp/serve/heartbeat.rs#authorize_ledger",
+  "src/mcp/serve/http_guards.rs#SecretToken",
+  "src/surface/bearer.rs#check_configured_token",
+  "src/config/credential.rs#check_credential_set",
+]
+
+# Left out: the files issue #273 proposes splitting tiered/mod.rs into.
+[[model]]
+lean = "formal/LamboProofs/Tiered.lean"
+read_against = "514da8d7"
+read_digest = "v2:sha256:63d4e1e9ba459331ca7728fa71964bc488e479219fe15a74033a1f12c4d993c0"
+rust = [
+  "src/store/tiered/mod.rs",
+  "src/store/tiered/project.rs",
+  "src/store/tiered/index.rs",
+  "src/store/tiered/fake.rs",
+  "src/store/vector_source.rs#rank_by_cosine",
+]

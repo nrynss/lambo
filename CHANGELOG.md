@@ -18,10 +18,30 @@
   would close such a mixed cycle, now moves it like any other, and
   `lambo names migrate --map ...` (preview and apply), which refused the
   whole upgrade with "alias repair would create a cycle" for such a
-  citation, now accepts it. Both still refuse a move that would close a `Causal`/`Dependency`
-  cycle. Modelled
-  first in `formal/LamboProofs/Cite.lean` (`written_loadOk`,
+  citation, now accepts it. Both still refuse a move that would close a
+  `Causal`/`Dependency` cycle. Modelled first in
+  `formal/LamboProofs/Cite.lean` (`written_loadOk`,
   `union_check_rejects_written`, `redirect_preserves`).
+- Formal models: `formal/models.toml` maps each Lean model in
+  `formal/LamboProofs/` to the Rust files and items it models and a
+  `read_digest`, a fingerprint of that Rust as it was when the model was last
+  read (comments and `#[cfg(test)]` code blanked, whitespace collapsed outside
+  string and char literals, literals kept verbatim), and
+  `scripts/formal/check-model-drift.py` flags a model whose Rust no longer
+  matches it (#291). The warning stays until the model is re-read and bumped
+  with `--bump <Model>`; editing the model file alone does not clear it, and
+  since the ref list is part of the fingerprint, dropping or narrowing a ref
+  is drift too. The check needs no git history, so it holds across squash and
+  rebase merges and in shallow clones. An optional `read_against` commit
+  narrows the report to the refs that changed, at their changed lines, only
+  when it is in the clone and the refs there fingerprint to `read_digest`;
+  otherwise every ref of the model is listed. Digests are written
+  `v<N>:sha256:<hex>`, N the digest scheme: after a change to the
+  normalisation the check fails once with "digest scheme changed" until
+  `--bump-all` is run. Drift is a warning, not a failure (`--strict` makes it
+  one); a broken manifest (a model with no entry, a listed path or item that
+  no longer exists, a malformed `read_digest` or one of another scheme)
+  fails. `formal/README.md` says how to clear the warning.
 - Recall tier: a flush that changes a session's embedding contract is now
   re-indexed from the store instead of mirrored (#319). `lambo re-embed`
   into another model drains every rewritten concept before the trailing
