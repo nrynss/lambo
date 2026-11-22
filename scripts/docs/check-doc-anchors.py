@@ -102,6 +102,8 @@ REQUIRED: dict[str, tuple[str, ...]] = {
     "site/src/content/docs/canonization.mdx": ("lean", "const", "code", "oracle"),
     "site/src/content/docs/config.mdx": ("code",),
     "docs/reference/config.mdx": ("code",),
+    "site/src/content/docs/mcp.mdx": ("lean", "const", "code", "test"),
+    "docs/reference/mcp.mdx": ("lean", "const", "code", "test"),
 }
 
 CONSTANTS_FILE = "src/formal_constants_tests.rs"
