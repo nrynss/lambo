@@ -48,6 +48,16 @@ best backing, and the notes say what theorem would close the gap.
 Issue drafts are not filed by the audit. They sit beside the audit for the
 owner to file.
 
+## Anchors keep the page true
+
+An audit is a record of one reading. Once it is done, the page carries each
+checked claim's backing as invisible MDX anchors (`lean:`, `test:`, `code:`,
+`const:`) beside the sentence it backs, and
+`scripts/docs/check-doc-anchors.py` resolves them in CI: a renamed test, a
+removed theorem or a deleted item fails the docs job. The audit file records
+what was found and fixed; the anchors keep it true afterwards. `mcp.mdx`, in
+both copies, is anchored this way.
+
 ## Line numbers
 
 Each audit names the commit it read. Line numbers refer to the page at that

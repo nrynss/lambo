@@ -51,14 +51,47 @@ row the review named, and every CODE-ONLY row that cited a comment or said its
 check was unfinished), and 18 of them changed class. Each of those rows now
 cites code, a test or a theorem, so no row is COMMENT-ONLY.
 
+**Anchors (2026-11-23).** Both copies of the page now carry each PROVEN,
+TESTED and CODE-ONLY row's backing as invisible MDX anchors next to the
+sentence, item or table it backs: `lean:` for PROVEN, `test:` for TESTED,
+`code:` for CODE-ONLY, and `const:` where a pinned constant backs a number.
+`scripts/docs/check-doc-anchors.py` resolves every anchor in CI and requires
+both copies to keep their `lean:`, `const:`, `code:` and `test:` anchors. This
+file records the audit as it was done; the anchors are what keep the page
+true from here on, and where the two differ, the anchors are current. While
+anchoring, each row's backing was checked again against the page as it now
+reads, many CODE-ONLY rows gained a test beside their code, and eleven
+sentences were corrected where the code said otherwise (Q-05, Q-21, Q-43,
+T-46, T-76b, D-48, S-29, S-77, S-87b, S-127, S-128). A review then found
+the receipt-state table's anchor citing `Drain.lean` theorems stated over
+the worker layer from before #295 (`work`, `workerStep`, under which an
+outage answers `failed`) beside the table's `failed` and `pending_replay`
+rows, and order theorems over the one-pass `replayD` rather than the
+two-pass serve. Those citations are gone: no anchor cites
+`outage_failed_but_owed` or `outage_failed_then_applied`; an in-session
+error answer (outage, lookup timeout, held write) is backed by tests, code
+or a `stepW`-layer theorem only; and the old layer's close theorems
+(`close_answer`, `owed_in_log`, `shutdown_no_silent_loss`) back only close
+and defer accounting (a sentence about close answers, or a paragraph-level
+block whose close sentence they back), and only beside a test. The rows below follow
+the anchors (T-42, S-93a, S-93b, S-119, S-134c, S-136d). The same review
+had eight more sentences corrected: Q-17 (a query sent over 16 KiB is
+refused before dispatch), Q-21 and its Repository-scoped paths twin (a
+subject is ambiguous whenever the tied best matches include a scoped path),
+Q-105a (the same repository scope, and no `against` or `depends_on`
+already joining the pair), Q-146 (erasing is retryable), D-126 (512 bytes
+counted before trimming), D-147a (within one server), S-111 (a run of
+lookup timeouts also holds writes), and S-136c (the `DELETE` is the same
+on CockroachDB).
+
 ## Summary
 
 724 claims.
 
 | Class | Rows |
 |---|---|
-| PROVEN | 120 |
-| TESTED | 309 |
+| PROVEN | 119 |
+| TESTED | 310 |
 | CODE-ONLY | 218 |
 | COMMENT-ONLY | 0 |
 | CONTRADICTED | 53 |
@@ -70,7 +103,7 @@ cites code, a test or a theorem, so no row is COMMENT-ONLY.
 | 149-218: recall legs, arguments, confidence, truncation (R) | 72 | 27 | 17 | 16 | 6 | 6 |
 | 219-360: recall warnings, duplicates, supersession, layers (Q) | 172 | 42 | 65 | 55 | 6 | 4 |
 | 361-590: derive, derive_image, record_action (D) | 185 | 21 | 107 | 40 | 11 | 6 |
-| 591-790: reserve, inspect, stale, saints, stats, limits (S) | 204 | 25 | 73 | 85 | 17 | 4 |
+| 591-790: reserve, inspect, stale, saints, stats, limits (S) | 204 | 24 | 74 | 85 | 17 | 4 |
 
 The re-check moved six rows out of PROVEN (T-02, Q-33, Q-53a, Q-63, D-33,
 S-17b: the theorem was related but did not entail the claim) and twelve
@@ -266,7 +299,7 @@ already in order.
 
 | id | line | section | claim | class | backing | notes |
 |---|---|---|---|---|---|---|
-| T-01 | 6 | (page intro) | "plus `lambo_derive_image` when image embedding or client vectors are enabled (nine tools in total)" | TESTED | `the_router_publishes_exactly_the_seven_spec_tools`, `the_image_tool_is_listed_only_where_it_can_work` in `src/mcp/server/tests/schemas.rs`; `src/mcp/server.rs:image_tool_listed` | Text-only deployments list eight. |
+| T-01 | 6 | (page intro) | "plus `lambo_derive_image` when image embedding or client vectors are enabled (nine tools in total)" | TESTED | `the_router_publishes_exactly_the_eight_core_tools`, `the_image_tool_is_listed_only_where_it_can_work` in `src/mcp/server/tests/schemas.rs`; `src/mcp/server.rs:image_tool_listed` | Text-only deployments list eight. |
 | T-02 | 6 | (page intro) | "A running `lambo serve --session <id>` process is the single writer for that session" | TESTED | `a_second_process_on_one_session_is_refused_by_the_lease` in `tests/serve_single_writer_lease.rs`; related `acquire_refused_while_live`, `stale_token_refused`, `holder_token_permitted` in `Lease.lean` | The theorems prove store-level exclusion and fencing (atomic upsert, integer time from the store, no tombstone, no first acquire). That one `lambo serve` process is one lease holder is code in `src/mcp/serve/roles.rs:resolve_role`, so the claim rests on the test. A forwarding serve writes nothing; one HTTP serve may write several sessions. |
 | T-03 | 10 | Transports | "Lambo serves over stdio by default, and over HTTP when you ask for it." | CODE-ONLY | `src/main.rs:Commands::Serve` (`transport` default `"stdio"`) | Could pin: clap parse test of `lambo serve --session s`. |
 | T-04 | 12 | Transports | "Works with any MCP client through the standard `mcpServers` configuration." | NOT CHECKABLE | none | Third-party client behaviour. |
@@ -325,7 +358,7 @@ already in order.
 | T-40 | 88 | What every tool expects | "Other timestamp arguments are refused by name." | TESTED | `mcp_stdio_publishes_the_spec_tools_and_the_image_tool_and_refuses_a_client_timestamp` in `tests/binary_parity.rs` (asserts "unknown field" and "timestamp") |  |
 | T-41a | 91 | What every tool expects | "return once your input is validated and ordered, carrying a receipt id in the ack" | TESTED | `every_write_ack_carries_a_receipt_and_claims_nothing_about_the_write` in `src/mcp/server/tests/receipts.rs` (`lambo_derive`, `lambo_record_action`) | Could pin: see T-41b. |
 | T-41b | 91 | What every tool expects | "return once your input is validated and ordered, carrying a receipt id in the ack" | CODE-ONLY | `src/mcp/server/tools/derive_image.rs` ack; acked in `tests/binary_parity.rs` without a receipt assertion | Covers `lambo_derive_image`. Could pin: add it to `every_write_ack_carries_a_receipt_and_claims_nothing_about_the_write`. |
-| T-42 | 91 | What every tool expects | "sequential writes from one agent to the same session apply in submission order" | PROVEN | `lane_fifo` in `Receipts.lean`; `drain_fifo`, `runW_ord` in `Drain.lean` | No concurrency; each worker step atomic; one lane per agent. |
+| T-42 | 91 | What every tool expects | "sequential writes from one agent to the same session apply in submission order" | PROVEN | `lane_fifo` in `Receipts.lean`; `runW_ord` in `Drain.lean` | No concurrency; each worker step atomic; one lane per agent. |
 | T-43a | 91 | What every tool expects | "a write the outage leaves unapplied holds your later writes to that server behind it" | PROVEN | `hold_split`, `workH_split`, `runW_ord` in `Drain.lean`; code `src/writeq/execution.rs` held path, `src/writeq/admission.rs:Lanes::held` | Settled then held writes equal admission order per agent. No concurrency. The hold also starts at the slow-lookup limit, which the doc does not say. |
 | T-43b | 91 | What every tool expects | "all answering `pending_replay`" | CODE-ONLY | `src/writeq/receipts.rs:hold_one`; `src/writeq/execution.rs` (held write answers `pending_replay`) | `Receipts.lean` header says `hold_one` is not modelled. A write admitted but not yet taken answers `pending` briefly. Could pin: add the receipt answer to `Drain.lean`'s `stepW`. |
 | T-43c | 91 | What every tool expects | "the server retries them in the background" | CODE-ONLY | `src/writeq/execution.rs:held_retry_backoff`; enabledness in `retry_enabled`, `retry_settles_head` in `Drain.lean` | The theorems show a retry is always available, not that the timer fires. A write that never embeds holds the agent until a restart. Could pin: a pipeline test that waits out the backoff. |
@@ -1081,8 +1114,8 @@ already in order.
 | S-90 | 678 | lambo_stats | "the write's intent, if it reached the store, is the new holder's to apply, and that server can answer the same id `applied_after_restart`" | CODE-ONLY | `src/writeq/execution.rs:726-743` (a fenced write's intent is not consumed; the current holder replays it); `fence_stops_applies` in `Drain.lean` | Could pin: a lease-takeover test that replays the intent on the new holder. |
 | S-91 | 678 | lambo_stats | "An embedder outage does not answer `failed`: the write is held (`pending_replay`)." | CODE-ONLY | `src/writeq/execution.rs:701, 860` | `outage_failed_but_owed` in `Drain.lean` still states the pre-#295 worker, which answers `failed`. Could pin: a hold-answer theorem as in S-87b. |
 | S-92 | 678 | lambo_stats | "a single timeout, the retry of a write held because three lookups in a row timed out" | CODE-ONLY | `src/writeq/execution.rs:763-830` | `REPLAY_LOOKUP_TIMEOUT_LIMIT` = 3 is pinned by `drain` in `src/formal_constants_tests.rs`. |
-| S-93a | 679 | lambo_stats | "The session closed before this write was applied, and the close's final flush completed" | PROVEN | `close_answer`, `shutdown_no_silent_loss` in `Drain.lean`; `a_close_that_cannot_drain_defers_acked_writes_as_durable_intents` in `src/writeq/pipeline_tests/drain.rs` | Atomic steps; one process's log. |
-| S-93b | 679 | lambo_stats | "in the order you sent it" | PROVEN | `fixed_agent_order`, `fixed_agent_order_load` in `Drain.lean` | Per agent, within one issuing process. |
+| S-93a | 679 | lambo_stats | "The session closed before this write was applied, and the close's final flush completed" | TESTED | `a_close_that_cannot_drain_defers_acked_writes_as_durable_intents` in `src/writeq/pipeline_tests/drain.rs` | Was PROVEN by `close_answer` and `shutdown_no_silent_loss` in `Drain.lean`, which are stated over the worker layer before #295 (`workerStep`), so the page's table no longer cites them (2026-11-23 review). |
+| S-93b | 679 | lambo_stats | "in the order you sent it" | PROVEN | `sessionW_then_serve_order`, `replayP_preserves` in `Drain.lean` | Per agent, within one issuing process. Was `fixed_agent_order`, `fixed_agent_order_load`, which run over the one-pass `replayD`, not the two-pass serve. |
 | S-94 | 679 | lambo_stats | "the write no longer fits the graph it meets then" | CODE-ONLY | error classes in `src/types/mod.rs` | `fixed_input_goes_on` in `Drain.lean` proves the class (input refusal settles `failed`), not this mapping. Could pin: a replay test for each listed refusal. |
 | S-95a | 680 | lambo_stats | "the store failed, the session was degraded, or the lease had passed to another writer" | CODE-ONLY | `src/memory/shutdown.rs:448` (lease lost), `:867` (degraded), `:938` (flush failed), each `CloseFlush::Incomplete`, answered `CloseUnflushed` at `src/writeq/drain.rs:277` | Could pin: one close test per cause. |
 | S-95b | 680 | lambo_stats | "A retried shutdown whose flush completes changes the answer to `intent_durable`." | PROVEN | `retry_upgrades` in `Drain.lean`; `an_unflushed_close_answers_close_unflushed_and_a_retry_upgrades_it` in `src/writeq/pipeline_tests/drain.rs` |  |
@@ -1123,7 +1156,7 @@ already in order.
 | S-116 | 695 | lambo_stats / What a crash can lose | "That flush carries every intent not yet applied, and the next server replays them (`intent_durable`)." | PROVEN | `close_answer`, `owed_in_log` in `Drain.lean` | "Replays" means the rows are owed; whether a replay succeeds depends on the next serve. |
 | S-117 | 695 | lambo_stats / What a crash can lose | "A shutdown whose final flush does not complete loses its unflushed tail, as a crash does, and the receipts it set aside answer `close_unflushed`." | PROVEN | `close_answer` (Drain.lean, `.incomplete` branch) |  |
 | S-118 | 696 | lambo_stats / What a crash can lose | "writes acked since the last flush can be lost, which is up to about one flush interval of writes" | NOT CHECKABLE | timing | Drain.lean models a crash as a durable prefix, with no time. |
-| S-119 | 696 | lambo_stats / What a crash can lose | "Their intents never reached the store, so nothing replays them, and their receipts answer `restart_lost` on the next server." | PROVEN | `lookupMissing_restartLost` in `Receipts.lean`; replay only loads stored rows (`replay_applied_pending`, Drain.lean) |  |
+| S-119 | 696 | lambo_stats / What a crash can lose | "Their intents never reached the store, so nothing replays them, and their receipts answer `restart_lost` on the next server." | PROVEN | `lookupMissing_restartLost` in `Receipts.lean`; replay only applies stored, unconsumed rows (`replayD_facts`, `loopD_facts`, Drain.lean, one per pass) | Was `replay_applied_pending`, stated over the replay before #294. |
 | S-120 | 696 | lambo_stats / What a crash can lose | "Everything that was flushed survives: applied writes are in the store, and flushed intents not yet applied are replayed on restart." | CODE-ONLY | `crash_never_reapplies`, `owed_in_log` in `Drain.lean` | No theorem says every owed row is replayed; an embedder outage defers them. Could pin: a theorem that the next serve's load contains every unconsumed row of the durable prefix. |
 
 ### lambo_stats: rate keys and replay
@@ -1145,12 +1178,12 @@ already in order.
 | S-133 | 700 | lambo_stats | "`write_queue_replay_owed` is the other half of that pair and it is a debt, not a total" | CODE-ONLY | `src/mcp/server/stats.rs` (`replay_owed`) | Could pin: a replay test watching it fall. |
 | S-134a | 700 | lambo_stats | "that write and the agent's later replayed writes wait while the replay goes on with other agents' writes" | PROVEN | `loopD_no_overtake`, `stepQ_skip` in `Drain.lean` |  |
 | S-134b | 700 | lambo_stats | "at the end the replay tries each waiting agent once more, from its oldest owed write." | CODE-ONLY | `replayP` (Drain.lean, definition); `replayP_progress` is conditional | Could pin: a theorem that the retry pass visits each deferred agent's oldest owed row. |
-| S-134c | 700 | lambo_stats | "What still waits after that is left, in the order you sent it, for the next start" | PROVEN | `fixed_agent_order`, `replayP_preserves` in `Drain.lean` |  |
+| S-134c | 700 | lambo_stats | "What still waits after that is left, in the order you sent it, for the next start" | PROVEN | `replayP_preserves` in `Drain.lean` |  |
 | S-135 | 700 | lambo_stats | "it is `null` only while the replay runs or once nothing is owed" | PROVEN | `serveQ_block`, `serveR_reported` in `Drain.lean`; `replay_blocked_names_the_reason_or_is_none` in `src/writeq/tests/receipts.rs` | The code also emits `image_config` in `src/writeq/counters.rs:113`, which the doc does not mention and the model lacks. |
 | S-136a | 700 | lambo_stats | "A replayed write whose receipt id is in another version of the receipt format (`lwr2.` and on)" | PROVEN | `stepQ_unknownFormat` in `Drain.lean`; `src/writeq/receipts.rs:313` (`is_other_version`) | Covers the claim that such a write is left owed with the agent's later writes behind it. |
 | S-136b | 700 | lambo_stats | "the server log names it at every start." | CODE-ONLY | `src/writeq/replay.rs:236-252` | Could pin: a log-capture test. |
-| S-136c | 700 | lambo_stats | "`DELETE FROM write_intents WHERE session_id = '<session>' AND receipt = '<receipt>';`, the same in SQLite and Postgres" | CODE-ONLY | `migrations/sqlite/001_init.sql:240`, `migrations/postgres/001_init.sql:242` (PK `session_id, receipt`) | Could pin: run the statement in an adapter test. |
-| S-136d | 700 | lambo_stats | "A receipt id that is simply malformed settles its write `failed`." | PROVEN | `stepQ_badId`, `fixed_badId_settled` in `Drain.lean` |  |
+| S-136c | 700 | lambo_stats | "`DELETE FROM write_intents WHERE session_id = '<session>' AND receipt = '<receipt>';`, the same in SQLite and Postgres" | CODE-ONLY | `migrations/sqlite/001_init.sql:240`, `migrations/postgres/001_init.sql:242`, `migrations/cockroach/001_init.sql:334` (PK `session_id, receipt`) | Could pin: run the statement in an adapter test. |
+| S-136d | 700 | lambo_stats | "A receipt id that is simply malformed settles its write `failed`." | PROVEN | `stepQ_badId` in `Drain.lean` |  |
 | S-137 | 700 | lambo_stats | "Order across a restart holds among the writes an earlier server left owed, not between them and new ones" | CODE-ONLY | `src/writeq/replay.rs:spawn_replay` (owed rows replay in order in one task; new writes are admitted beside it) | New admissions interleaved with the replay are not modelled. Could pin: a test admitting during replay. |
 
 ### lambo_stats: ledger keys

@@ -66,11 +66,15 @@ class PathClassification(unittest.TestCase):
 
     def test_what_docs_anchors_cite_runs_both(self):
         # Rust inputs the docs' anchors also cite: a change to one can break a
-        # `lean:`, `const:`, `code:` or `oracle:` anchor (check-doc-anchors.py,
-        # check-doc-examples.py), so it starts the docs job too.
+        # `lean:`, `const:`, `code:`, `test:` or `oracle:` anchor
+        # (check-doc-anchors.py, check-doc-examples.py), so it starts the docs
+        # job too: mcp.mdx cites integration tests under tests/ and the SQL
+        # schema under migrations/.
         for path in [
             "formal/LamboProofs/Canon.lean", "formal/oracle/Canon.json",
             "src/formal_constants_tests.rs", "src/canon/eval.rs", "src/daemon/events.rs",
+            "tests/binary_parity.rs", "tests/serve_single_writer_lease.rs",
+            "migrations/sqlite/001_init.sql", "migrations/cockroach/001_init.sql",
         ]:
             with self.subTest(path=path):
                 self.assertEqual(classifier.classify_paths([path]), {"rust": True, "mirror": True})

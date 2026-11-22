@@ -77,6 +77,38 @@ fn is_high_value() -> bool { let s = "fn in_a_string()"; let c = '"'; true }
 fn uses(policy: u8) -> u8 { policy }
 """
 
+TESTS = """\
+//! fn in_a_module_doc() is not a test.
+use super::*;
+
+fn helper() -> u8 { 1 }
+
+#[test]
+fn a_plain_test() {
+    assert_eq!(helper(), 1);
+}
+fn helper_after_a_test() {}
+
+/// A doc comment between the attribute and the fn.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "slow"]
+async fn an_async_test() {}
+
+#[cfg(test)]
+fn cfg_test_only_helper() {}
+
+mod nested {
+    #[test]
+    pub(crate) fn a_nested_test() {
+        let s = "#[test] fn in_a_string() {}";
+    }
+}
+
+#[tokio::test]
+// fn commented_out() {}
+async fn after_a_comment() {}
+"""
+
 
 class Fixture(unittest.TestCase):
     def setUp(self):
@@ -89,6 +121,7 @@ class Fixture(unittest.TestCase):
         self.write("formal/LamboProofs/Demo.lean", LEAN)
         self.write("src/formal_constants_tests.rs", CONSTANTS)
         self.write("src/daemon/events.rs", RUST)
+        self.write("src/daemon/tests.rs", TESTS)
         self.docs = self.root / "site" / "src" / "content" / "docs"
         self.docs.mkdir(parents=True)
 
@@ -226,6 +259,92 @@ class Code(Fixture):
                 self.assertEqual(len(self.errors(f"{{/* const: {ref} */}}")), 1)
 
 
+class Test(Fixture):
+    def test_real_tests_resolve(self):
+        for body in [
+            "src/daemon/tests.rs a_plain_test",
+            "src/daemon/tests.rs an_async_test, a_nested_test, after_a_comment",
+            "src/daemon/tests.rs a_plain_test (a note, with a comma); src/daemon/tests.rs an_async_test",
+            "src/daemon/tests.rs a_plain_test an_async_test",
+        ]:
+            with self.subTest(body=body):
+                self.assertEqual(self.errors(f"{{/* test: {body} */}}"), [])
+
+    def test_a_helper_fn_fails(self):
+        for name in ["helper", "helper_after_a_test", "cfg_test_only_helper"]:
+            with self.subTest(name=name):
+                errors = self.errors(f"{{/* test: src/daemon/tests.rs {name} */}}")
+                self.assertEqual(len(errors), 1, errors)
+                self.assertIn(f"fn {name} is not a test", errors[0])
+
+    def test_a_group_that_names_no_test_fails(self):
+        # A file or a directory alone cites no test, so it must not count
+        # toward a REQUIRED page's test: kind.
+        for body in ["src/daemon/tests.rs", "src/daemon", "src/daemon/tests.rs (a note only)"]:
+            with self.subTest(body=body):
+                errors = self.errors(f"{{/* test: {body} */}}")
+                self.assertTrue(errors, body)
+                self.assertTrue(any("names no test fn" in e or "is not a file" in e for e in errors), errors)
+
+    def test_a_missing_fn_fails(self):
+        for name in ["no_such_test", "in_a_module_doc", "in_a_string", "commented_out", "a_plain"]:
+            with self.subTest(name=name):
+                errors = self.errors(f"{{/* test: src/daemon/tests.rs {name} */}}")
+                self.assertEqual(len(errors), 1, errors)
+                self.assertIn(f"declares no fn {name}", errors[0])
+
+    def test_bad_paths_and_names_fail(self):
+        for body, says in [
+            ("src/daemon/nope.rs a_plain_test", "no path src/daemon/nope.rs"),
+            ("a_plain_test", "names no path before it"),
+            ("src/daemon/tests.rs nested::a_nested_test", "is not a fn name"),
+            ("src/daemon/tests.rs a_plain_test()", "is not a fn name"),
+            ("src/daemon/tests.rs fn", "is not a fn name"),
+            ("src/daemon a_plain_test", "is not a file"),
+            ("src/daemon/tests.rs (an open note", "parentheses"),
+            ("src/daemon/tests.rs a_plain_test,, an_async_test", "an empty group"),
+            # A non-test item that code: would accept is not a test.
+            ("src/daemon/events.rs HIGH_RISK_WRITE_WINDOW", "declares no fn HIGH_RISK_WRITE_WINDOW"),
+        ]:
+            with self.subTest(body=body):
+                errors = self.errors(f"{{/* test: {body} */}}")
+                self.assertEqual(len(errors), 1, errors)
+                self.assertIn(says, errors[0])
+                self.assertIn("test: ", errors[0])
+
+    def test_an_attribute_with_test_mid_path_is_not_a_test(self):
+        self.write("src/daemon/mid.rs", "#[my::test::helper]\nfn not_a_test() {}\n")
+        errors = self.errors("{/* test: src/daemon/mid.rs not_a_test */}")
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn("is not a test", errors[0])
+
+    def test_a_test_inside_a_macro_body_is_found(self):
+        self.write("src/daemon/prop.rs", "proptest! {\n    #[test]\n    fn holds(x in 0..9u8) {}\n}\n")
+        self.assertEqual(self.errors("{/* test: src/daemon/prop.rs holds */}"), [])
+
+    def test_comment_lines_count_toward_the_window(self):
+        far = "#[test]\n" + "// note\n" * (cda.ATTR_LINES + 1) + "fn far_below() {}\n"
+        self.write("src/daemon/far2.rs", far)
+        errors = self.errors("{/* test: src/daemon/far2.rs far_below */}")
+        self.assertEqual(len(errors), 1, errors)
+
+    def test_the_attribute_must_be_near(self):
+        far = "#[test]\n" + "\n" * (cda.ATTR_LINES + 1) + "fn far_below() {}\n"
+        self.write("src/daemon/far.rs", far)
+        errors = self.errors("{/* test: src/daemon/far.rs far_below */}")
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn("is not a test", errors[0])
+
+    def test_attribute_paths(self):
+        for path, is_test in [
+            ("test", True), ("tokio::test", True), ("sqlx::test", True),
+            ("cfg", False), ("testing", False), ("ignore", False),
+            ("my::test::helper", False), ("test::helper", False),
+        ]:
+            with self.subTest(path=path):
+                self.assertEqual(cda.is_test_attribute(path), is_test)
+
+
 class NearMisses(Fixture):
     def test_near_miss_anchors_fail(self):
         for text in [
@@ -238,6 +357,10 @@ class NearMisses(Fixture):
             "{/* orcale: Demo.json gate#0 */}",
             "{/* leans: Demo.Status */}",
             "{/* cnost: MIN_GC_SURVIVED */}",
+            "{/* tests: src/daemon/tests.rs a_plain_test */}",
+            "{/* Test: src/daemon/tests.rs a_plain_test */}",
+            "{/*test: src/daemon/tests.rs a_plain_test */}",
+            "{/* tset: src/daemon/tests.rs a_plain_test */}",
             "{/* lean: Demo.Status,\nDemo.Flags */}",
         ]:
             with self.subTest(text=text):
@@ -255,6 +378,8 @@ class NearMisses(Fixture):
         self.assertTrue(cda.near("laen", "lean"))
         self.assertTrue(cda.near("oracl", "oracle"))
         self.assertTrue(cda.near("codes", "code"))
+        self.assertTrue(cda.near("tests", "test"))
+        self.assertTrue(cda.near("text", "test"))
         self.assertFalse(cda.near("lambo", "lean"))
         self.assertFalse(cda.near("a", "code"))
 
@@ -262,7 +387,8 @@ class NearMisses(Fixture):
 class Required(Fixture):
     ALL = (
         "{/* lean: Demo.Status */} {/* const: MIN_GC_SURVIVED */} "
-        "{/* code: src/daemon/events.rs */}\n{/* oracle: Demo.json gate#0 */}\n"
+        "{/* code: src/daemon/events.rs */}\n{/* test: src/daemon/tests.rs a_plain_test */}\n"
+        "{/* oracle: Demo.json gate#0 */}\n"
     )
 
     def test_a_required_page_with_its_anchors_passes(self):
@@ -272,8 +398,9 @@ class Required(Fixture):
     def test_a_required_page_that_lost_its_anchors_fails(self):
         with mock.patch.dict(cda.REQUIRED, {"site/src/content/docs/page.mdx": cda.KINDS}):
             errors = self.errors("All the anchors are gone.\n")
-        self.assertEqual(len(errors), 4)
+        self.assertEqual(len(errors), len(cda.KINDS))
         self.assertIn("carries no lean: anchor", errors[0])
+        self.assertIn("carries no test: anchor", errors[3])
 
     def test_a_required_page_that_lost_one_kind_fails(self):
         with mock.patch.dict(cda.REQUIRED, {"site/src/content/docs/page.mdx": ("lean", "code")}):
