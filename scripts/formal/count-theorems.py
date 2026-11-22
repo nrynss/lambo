@@ -6,7 +6,8 @@
 The model files are `formal/LamboProofs/*.lean` other than `Audit.lean`. A
 theorem is a declaration line: outside every comment (`--` line comments and
 `/- ... -/` block comments, which nest, doc comments included) and outside
-string literals, a line that starts at column 0 with `theorem`, or with
+string literals (raw strings `r"..."`, `r#"..."#` included) and char literals,
+a line that starts at column 0 with `theorem`, or with
 `private theorem` or `protected theorem`, optionally after one or more
 attributes (`@[simp]`), followed by the theorem's name. The binders and colon
 may be on that line or on the lines after it: a line holding only
@@ -61,6 +62,15 @@ def strip_comments(src):
             # h'. Blanked so a quote inside it opens no string.
             out.append(" " * len(m.group(0)))
             i = m.end()
+        elif c == "r" and (m := RAW_OPEN.match(src, i)) and (i == 0 or not (src[i - 1].isalnum() or src[i - 1] in "_'")):
+            # A raw string, r"..." or r#"..."# with any number of #: no escapes,
+            # and it ends only at a quote followed by as many #. Consumed whole
+            # before the ordinary-string path, so a quote inside it opens nothing.
+            close = '"' + m.group(1)
+            end = src.find(close, m.end())
+            end = n if end < 0 else end + len(close)
+            out.append("".join("\n" if ch == "\n" else " " for ch in src[i:end]))
+            i = end
         elif c == '"':
             out.append(" ")
             i += 1
@@ -81,6 +91,7 @@ def strip_comments(src):
 
 
 CHAR_LIT = re.compile(r"'(?:\\.|[^'\\\n])'")
+RAW_OPEN = re.compile(r'r(#*)"')
 README_TOTAL = re.compile(r"([0-9][0-9,]*) theorems across ([0-9]+) model files")
 
 

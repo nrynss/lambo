@@ -90,6 +90,24 @@ class CountTheorems(unittest.TestCase):
         )
         self.assertEqual(ct.count(src), 3)
 
+    def test_raw_string_is_consumed_whole(self):
+        # The quote inside r#"a"b"# does not end the string, and the closing
+        # "# does not open a new one.
+        src = 'def s := r#"a"b"#\ntheorem actual : True := trivial\n'
+        self.assertEqual(ct.count(src), 1)
+
+    def test_raw_string_has_no_escapes(self):
+        # In r"x\" the backslash escapes nothing: the string ends at the quote.
+        self.assertEqual(ct.count('def a := r"x\\"\ntheorem t1 : True := trivial\n'), 1)
+
+    def test_raw_string_ends_only_at_matching_hashes(self):
+        # "# does not close r##"..."##, so the theorem line inside is string text.
+        src = (
+            'def b := r##"x"#\ntheorem inside : True := trivial\n"##\n'
+            "theorem t2 : True := trivial\n"
+        )
+        self.assertEqual(ct.count(src), 1)
+
     def test_check_readme(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d) / "formal" / "LamboProofs"
