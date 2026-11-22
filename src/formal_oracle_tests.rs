@@ -33,6 +33,7 @@ mod batch_queue;
 mod canonical;
 mod expand;
 mod fit;
+mod fusion;
 mod order;
 mod score;
 mod top_k;

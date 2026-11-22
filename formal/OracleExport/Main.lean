@@ -12,6 +12,7 @@ import OracleExport.BatchQueue
 import OracleExport.Canonical
 import OracleExport.Expand
 import OracleExport.Fit
+import OracleExport.Fusion
 import OracleExport.Order
 import OracleExport.Score
 import OracleExport.TopK
@@ -25,7 +26,8 @@ def allVectors : List Vectors := [
   TopK.vectors,
   Expand.vectors,
   BatchQueue.vectors,
-  Score.vectors
+  Score.vectors,
+  Fusion.vectors
 ]
 
 def main (args : List String) : IO UInt32 := do

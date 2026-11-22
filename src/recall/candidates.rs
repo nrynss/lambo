@@ -688,6 +688,23 @@ fn recent_concepts(graph: &Graph) -> Vec<(NodeId, usize)> {
     members
 }
 
+/// Test-only access to the private [`rank`], for
+/// `crate::formal_oracle_tests` (#291), which replays
+/// `formal/oracle/Fusion.json` through it.
+#[cfg(test)]
+pub(crate) mod formal_oracle {
+    use super::{Graph, LegProvenance, NodeId, RecallFusion, Scored};
+
+    pub(crate) fn rank(
+        legs: &mut LegProvenance,
+        graph: &Graph,
+        fusion: &RecallFusion,
+        keyword_ran: bool,
+    ) -> Vec<Scored<NodeId>> {
+        super::rank(legs, graph, fusion, keyword_ran)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
