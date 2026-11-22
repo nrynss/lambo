@@ -96,7 +96,8 @@ header, and it is only as good as that reading. In particular:
 
 If the Rust changes, the model has to be re-read against it. Nothing proves
 the two agree; the drift check below only makes a change to modelled Rust
-visible.
+visible, and the differential oracle (last section) checks that the Rust
+gives the model's outputs on a fixed set of generated inputs.
 
 ## Keeping the models in step with the Rust
 
@@ -194,3 +195,86 @@ tests:
 ```bash
 python3 -I scripts/formal/check-model-drift.py --self-test
 ```
+
+## Differential oracle
+
+The drift check says the Rust changed; it does not say whether the Rust and
+the model still agree. The models are executable (their definitions compute;
+the `decide` examples run them), so the oracle uses the Lean definitions
+themselves as the reference. `lake exe oracle` (sources in `OracleExport/`,
+a library and executable outside the default target, so `lake build` builds
+the proofs alone) evaluates covered definitions over a fixed set of
+generated inputs and writes inputs and outputs to `oracle/<Model>.json`. The
+Rust test `src/formal_oracle_tests.rs` (one module per model in
+`src/formal_oracle_tests/`, part of the default `cargo test`) rebuilds each
+input as the Rust types, calls the real function and asserts the output the
+Lean computed, naming the model, function, case index and input on a
+mismatch. Unlike the property tests (`src/**/proptests.rs`), nothing in the
+comparison restates the model in Rust by hand.
+
+The inputs come from a SplitMix64 generator with one fixed seed per model,
+biased toward boundaries (ties, empty input, exact budgets, NaN and signed
+zeros where the model admits them), at most a few hundred cases and about
+150 KB per file. Each file's `notes` say how the model's abstract parameters
+were instantiated. To regenerate after changing a model or the exporter, and
+to check the committed vectors are current:
+
+```bash
+cd formal && lake exe oracle
+```
+
+```bash
+scripts/formal/check-oracle.sh
+```
+
+The second regenerates into a temporary directory and fails if anything
+differs from `oracle/`. Commit regenerated vectors with the change that
+moved them; a change under `oracle/` runs the Rust CI.
+
+Covered:
+
+| Model | Lean | Rust | Instantiation |
+| --- | --- | --- | --- |
+| `Order` | `rankMembers`, `tieBreak` | `rank_cmp`, `rank_members`, `tie_break_by_key` | scores by `f64::total_cmp` on bit patterns; keys by `str::cmp` (no scoped key, so `tie_form` is the identity: checked); ids by number |
+| `Fit` | `fitBlocks` over `rustEnv`, `rustBlock` | `fit_blocks` | estimators `defaultTokenCount`, bytes, chars, saturated |
+| `Canonical` | `canonicalKeyF`, `canonicalKey`, `nameKeyF` | `canonical_key`, `unfiltered_canonical_key`, `name_key` | `stop0`, `stem0`; inputs stem only `stemTable` words, and the real stemmer is checked against that table; `check_size` passes and no input is a UUID (checked) |
+| `TopK` | `emit`, `emitR`/`skipsR` | `emitted` | the pair verdict is "same content class", checked against `Redundancy::signal` on every pair |
+| `Expand` | `expand` | `expand` | `nbrs` built per `TRAVERSAL_ORDER`, id-ascending, and checked against the graph's adjacency |
+| `BatchQueue` | `lengthChunks Cfg.rust` | `length_chunks` (feature `embed-candle`) | none |
+| `Score` | `bonusAndModifier`, `score` | `bonus_and_modifier`, `ScoreDims::composite`, `score` | fixed point at the model's scale; compared within `1e-9` (the model is exact, the Rust `f64`) |
+| `Fusion` | `RrfRecall.rrf`, `rrfAhead` | `rank` under `FusionKind::Rrf` | `tb` as in `Order`; the recent rank is the model's `recentRank`, written into the input; values within `1e-12`, order exact |
+| `Canon` | `gate`, `stage1Passes`, `stage2Passes`, `inCooldown` | `apply_canonization_transition`, the stage predicates | `gate` exhaustively, with no demotion reason |
+
+A model's parameter that is itself Rust logic the model does not define
+(the stemmer, `tie_form`, the redundancy signals, the graph's adjacency
+order) is never reimplemented in Lean to make the two agree: the inputs are
+restricted to where it is trivial or given as a table, and the Rust test
+checks that restriction first, failing with "the oracle's instantiation
+does not hold" rather than as a model mismatch.
+
+Not covered, and why:
+
+* `Canon.cycle`: its flags stand for "this stage would promote", and a
+  `CyclePlan`, `Verdicts` and `EvalParams` that mean exactly that need
+  fixtures far larger than the model.
+* Exact `Fusion` ties above zero through different rank vectors: the model's
+  header says `f64` rounding, not the tie-break, decides those, so no case
+  has one.
+* Stateful or I/O models (`Lease`, `Receipts`, `Drain`, `Flush`,
+  `Registry`, `Tiered`, `Resolve`): their Rust runs against a store, a
+  queue, a clock or the serve process, so a replay needs a harness per
+  model; the property tests and constant pins cover what they can.
+* Not attempted yet: `Cite`, `Confidence`, `Conflict`, `Contract`,
+  `Dispatch`, `Gc`, `Hotlist`, `Names`, `Policy`, `Reserve`,
+  `Supersession`. Their definitions compute, but the Rust they model reads
+  a graph, a hot list or store queries built per case; they are the next
+  candidates, one exporter module and one test module each.
+
+Found by the oracle: under RRF, a candidate whose exact value is zero because
+it is ranked only in legs of weight zero gets `+0.0` in the Rust (a sum of
+zero terms), and one ranked in no leg gets `-0.0` (an empty `f64` sum);
+`total_cmp` orders `+0.0` first, so between the two the tie-break is not
+applied, where the model orders them by it. Those cases are a separate
+function in `oracle/Fusion.json`, replayed by the ignored test
+`formal_oracle_tests::fusion::fusion_zero_ties` until it is decided whether
+the model or the Rust should change.

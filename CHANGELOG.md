@@ -53,6 +53,28 @@
   `rank_cmp`, unchanged, so the order laws run on the real comparator.
   Cases default to 256 (`PROPTEST_CASES` overrides) and no regression files
   are written.
+- Formal models: a differential oracle (#291). `lake exe oracle`
+  (`formal/OracleExport/`) evaluates the Lean definitions over a fixed set of
+  generated inputs and writes inputs and outputs to `formal/oracle/*.json`;
+  `src/formal_oracle_tests.rs` replays every input through the real Rust and
+  asserts the Lean output, so nothing in the comparison is transcribed from
+  the model by hand. Covered: `Order` (`rank_cmp`, `rank_members`,
+  `tie_break_by_key`), `Fit` (`fit_blocks`), `Canonical` (`canonical_key`,
+  `unfiltered_canonical_key`, `name_key`), `TopK` (`emitted`, with and
+  without the #181 selection), `Expand` (`expand`), `BatchQueue`
+  (`length_chunks`, with `embed-candle`), `Score` (`score`,
+  `bonus_and_modifier`, within `1e-9` of the exact model), `Fusion` (RRF in
+  `rank`) and `Canon` (the transition gate and stage predicates). Where a
+  model leaves Rust logic abstract (the stemmer, `tie_form`, the redundancy
+  signals, graph adjacency), the inputs are restricted to where it is
+  trivial and the test checks that first. `scripts/formal/check-oracle.sh`
+  regenerates the vectors and fails if the committed ones are stale; a
+  change under `formal/oracle/` runs the Rust CI. The oracle found that RRF
+  orders two candidates whose exact value is zero by the sign of the zero
+  (`+0.0` for one ranked only in zero-weight legs, `-0.0` for an empty sum)
+  instead of by the tie-break; those cases are replayed by an ignored test
+  until that is decided. Test-only `formal_oracle` modules expose the
+  private functions; no production code changed.
 - Formal models: the constants the Lean models in `formal/LamboProofs/`
   hard-code are now pinned to the Rust (#291). `src/formal_constants_tests.rs`
   has one test per model that asserts each threshold, weight, bound and

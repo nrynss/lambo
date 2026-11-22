@@ -33,6 +33,8 @@ class PathClassification(unittest.TestCase):
             "evidence/issue-237/calibration-elastic-jina-v3-1024.json",
             # include_str!'d by src/formal_constants_tests.rs (#291).
             "formal/LamboProofs/Hotlist.lean",
+            # include_str!'d by src/formal_oracle_tests.rs (#291).
+            "formal/oracle/Order.json",
         ]
         for path in inputs:
             with self.subTest(path=path):
@@ -52,7 +54,8 @@ class PathClassification(unittest.TestCase):
             "evidence/issue-221/README.md", "scripts/loadtest/mcp_load.py",
             # formal/ outside the models the Rust tests read (#291).
             "formal/README.md", "formal/lakefile.toml", "formal/lean-toolchain",
-            "formal/LamboProofs.lean",
+            "formal/LamboProofs.lean", "formal/OracleExport/Order.lean",
+            "scripts/formal/check-oracle.sh",
         ]), {"rust": False, "mirror": False})
 
     def test_workflow_and_ci_script_changes_validate_both(self):
