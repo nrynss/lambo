@@ -150,9 +150,9 @@ one second of one run) against 1 on 0.14.0, a higher recall p99 in both
 paired runs, and in both pairs more seconds in which its slowest call is
 the slower by over 5 ms (section 4). Unlike the previous gate, the code a
 slow call runs through did change between the tags (section 4.3), so these
-runs cannot rule the build in or out. Session load and the canonization dry
-run are within 1% of each other; under Swarm, the rig's policy, the dry-run
-reports are identical (section 5).
+runs cannot rule the build in or out. Session load is 2.7% faster on 0.15.0
+and the canonization dry run 0.9% slower; under Swarm, the rig's policy, the
+dry-run reports are identical (section 5).
 
 The rig was re-pinned to 0.15.0 the same day (section 6).
 
