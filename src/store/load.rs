@@ -834,3 +834,6 @@ mod tests {
         assert!(loaded.index.search("anything", 10).is_empty());
     }
 }
+
+#[cfg(all(test, feature = "store-memory"))]
+mod mixed_cycle_tests;

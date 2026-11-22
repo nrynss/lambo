@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- Load: a session holding a cycle that mixes `parent_of` with citations or
+  action edges now loads (#325). The write-time checks refuse a cycle in
+  `Causal`/`Dependency` (`record_action`, `depends_on`) and, separately, a
+  cycle in the `parent_of` hierarchy, but the load check refused a cycle
+  through any mix of the three. A child citing its own parent
+  (`depends_on: [P]` with `parent_of: [(P, C)]`, in one call or two) was
+  written and flushed, and every later load of the session (a restart,
+  `lambo names apply`, canon dry-run, the names migration) failed with
+  "Causal/Dependency/Hierarchical cycle detected" until the database was
+  edited by hand. The load check now checks the same two conditions as the
+  write checks (spec §5.7), so a session already written this way loads
+  with no data change; a cycle within either condition is still refused.
+  `lambo canon alias-preview`, which refused to move a citation that
+  would close such a mixed cycle, now moves it like any other. Modelled
+  first in `formal/LamboProofs/Cite.lean` (`written_loadOk`,
+  `union_check_rejects_written`, `redirect_preserves`).
 - Recall tier: a flush that changes a session's embedding contract is now
   re-indexed from the store instead of mirrored (#319). `lambo re-embed`
   into another model drains every rewritten concept before the trailing

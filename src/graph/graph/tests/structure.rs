@@ -21,8 +21,10 @@ fn contradictions_are_directed_concept_edges_with_natural_key_replay() {
     assert!(g
         .edge_between(older, newer, EdgeType::Contradicts)
         .is_none());
-    assert!(g.cycle_neighbors(newer).is_empty());
-    assert!(g.cycle_neighbors(older).is_empty());
+    for kinds in [CAUSAL_DEPENDENCY, HIERARCHICAL] {
+        assert!(g.cycle_neighbors(newer, kinds).is_empty());
+        assert!(g.cycle_neighbors(older, kinds).is_empty());
+    }
     for (a, b) in [(iid, older), (older, iid)] {
         let err = g
             .upsert_edge(edge(3, a, b, EdgeType::Contradicts, 0.5))
@@ -617,6 +619,33 @@ fn hierarchical_cycle_is_detected_by_assert_invariants() {
         .unwrap();
     let err = g.assert_invariants().unwrap_err().to_string();
     assert!(err.contains("cycle"), "{err}");
+}
+
+/// #325: a cycle that mixes `Hierarchical` with `Dependency` or `Causal`
+/// is not a violation. The write gates check the two conditions
+/// separately, and so does the load (`Cite.lean`: `LoadOk`,
+/// `child_cites_parent_loadOk`).
+#[test]
+fn a_mixed_kind_cycle_is_not_a_violation() {
+    let (mut g, iid, cid) = small_graph();
+    let c2 = concept(2, iid, "auth middleware");
+    let c2id = c2.id;
+    g.insert_concept(c2, iid).unwrap();
+    // cid parent-of c2, c2 depends on cid.
+    g.upsert_edge(edge(1, cid, c2id, EdgeType::Hierarchical, 0.7))
+        .unwrap();
+    g.upsert_edge(edge(2, c2id, cid, EdgeType::Dependency, 0.7))
+        .unwrap();
+    g.assert_invariants().unwrap();
+    // And with Causal in place of Dependency.
+    g.upsert_edge(edge(3, c2id, cid, EdgeType::Causal, 0.7))
+        .unwrap();
+    g.assert_invariants().unwrap();
+    // A second Dependency edge back closes a pure Causal/Dependency cycle.
+    g.upsert_edge(edge(4, cid, c2id, EdgeType::Dependency, 0.7))
+        .unwrap();
+    let err = g.assert_invariants().unwrap_err().to_string();
+    assert!(err.contains("Causal/Dependency cycle"), "{err}");
 }
 
 #[test]

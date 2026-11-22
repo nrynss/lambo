@@ -267,6 +267,22 @@ fn reviewed_repair_preserves_history_moves_support_and_releases_namespace() {
     assert!(g.insert_concept(archived, origin).is_err());
 }
 
+/// #325: the citer is the target's `parent_of` child. Moving its citation
+/// onto the target closes a cycle that mixes `Hierarchical` and
+/// `Dependency`, which the write gates and the load check allow, so the
+/// repair applies and the result loads.
+#[test]
+fn repair_moves_a_citation_from_the_targets_child() {
+    let (mut g, alias, target, citer, _) = repair_graph();
+    related(&mut g, target, citer, EdgeType::Hierarchical);
+    let report = upgrade(&mut g, &[(alias, target)]).unwrap();
+    assert_eq!(report.citations_moved, 1);
+    assert!(g
+        .edge_between(citer, target, EdgeType::Dependency)
+        .is_some());
+    Graph::from_snapshot(g.snapshot()).unwrap();
+}
+
 fn archived_concept(s: &GraphSnapshot, id: NodeId) -> crate::types::Concept {
     s.retired_aliases
         .iter()
@@ -298,8 +314,10 @@ fn repair_deduplicates_existing_citations_and_refuses_substantive_relations() {
 
 #[test]
 fn repair_refuses_cycle_and_rolls_back_all_prior_changes() {
+    // The target depends on the citer: moving the citation onto the target
+    // would close a Dependency cycle.
     let (mut g, alias, target, citer, _) = repair_graph();
-    related(&mut g, target, citer, EdgeType::Hierarchical);
+    related(&mut g, target, citer, EdgeType::Dependency);
     let before = g.snapshot();
     assert!(upgrade(&mut g, &[(alias, target)]).is_err());
     assert_eq!(g.snapshot(), before);

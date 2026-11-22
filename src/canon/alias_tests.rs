@@ -356,13 +356,15 @@ fn other_dependents_of_an_alias_are_counted_and_kept() {
     assert_eq!(p.retire.len(), 3);
 }
 
-/// Review H1: the ruling is the `parent_of` parent of a concept that cites
-/// its alias. Moving that citation would make `child -> ruling -> child`,
-/// a cycle the graph's invariant refuses through `Hierarchical`, so the
-/// citation stays on the alias and is counted; the rest still move, and
-/// the overlay is a valid graph.
+/// #325: the ruling is the `parent_of` parent of a concept that cites its
+/// alias. Moving that citation makes `ruling -Hierarchical-> child
+/// -Dependency-> ruling`, a cycle that mixes the kinds: a citation by id
+/// writes the same edge, and the graph's invariant allows it (it checks
+/// `Causal ∪ Dependency` and `Hierarchical` separately). So the citation
+/// moves with the rest, and the overlay is a valid graph. Before #325 the
+/// redirect kept it on the alias as a cycle. Lean: `Cite.redirect_preserves`.
 #[test]
-fn a_rulings_child_citing_its_alias_is_kept_as_a_cycle() {
+fn a_rulings_child_citing_its_alias_is_moved_like_any_citation() {
     let mut snap = fair::snapshot(true);
     let mut child = cite(&snap, id("lease_stays"), id("a30"), "parent-of-a30");
     child.edge_type = EdgeType::Hierarchical;
@@ -374,10 +376,19 @@ fn a_rulings_child_citing_its_alias_is_kept_as_a_cycle() {
     );
     let p = plan(&g, &pairs, refusals);
     let r = &p.redirects[0];
-    assert_eq!((r.redirected, r.cycle_refused), (2, 1));
-    assert_eq!(r.citations_left(), 1);
-    assert!(p.add.iter().all(|e| e.source != id("a30")));
-    graph(&apply(&snap, &p));
+    assert_eq!((r.redirected, r.cycle_refused), (3, 0));
+    assert_eq!(r.citations_left(), 0);
+    assert!(p
+        .add
+        .iter()
+        .any(|e| e.source == id("a30") && e.target == id("lease_stays")));
+    let after = graph(&apply(&snap, &p));
+    assert!(after
+        .edge_between(id("lease_stays"), id("a30"), EdgeType::Hierarchical)
+        .is_some());
+    assert!(after
+        .edge_between(id("a30"), id("lease_stays"), EdgeType::Dependency)
+        .is_some());
 }
 
 #[test]

@@ -866,8 +866,13 @@ fn plan_edge(
 /// the search over the combined graph is exact. A self-loop (`a == b`) is a
 /// cycle by definition — an action node in its own produces/depends_on (e.g.
 /// action `"x"` producing `["x"]`) would create one. `Hierarchical` is
-/// deliberately excluded: write-time acyclicity of that edge type is not part
-/// of the pinned §5.7 contract (see `graph.rs` module docs).
+/// deliberately excluded: spec §5.7 asks for no cycles in `Causal` or
+/// `Dependency`, and `Hierarchical` is a separate DAG that `parent_of`'s own
+/// gate (`reject_closing_edge`) keeps acyclic. A cycle that mixes the kinds,
+/// such as a child citing its own parent, passes both gates, and the load
+/// check (`Graph::assert_invariants`) checks the same two conditions
+/// separately, so it loads (#325; `formal/LamboProofs/Cite.lean`,
+/// `cite_gate_preserves`).
 pub(crate) fn closing_edge(
     graph: &Graph,
     planned: &[(NodeId, NodeId, EdgeType)],

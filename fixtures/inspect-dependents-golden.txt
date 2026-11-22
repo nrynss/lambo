@@ -34,6 +34,7 @@ hop 1:
   Hierarchical
     -> concept C1 [Entity]
     -> concept C2 [Entity]
+    -> concept V [Entity]
     <- concept P [Entity]
   Semantic
     <- concept N [Entity]
