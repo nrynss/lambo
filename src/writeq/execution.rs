@@ -781,6 +781,15 @@ impl WritePipeline {
                     // hold the lane.
                     let hold_cause = match &raw_outcome {
                         Ok(_) => {
+                            // The write is applied: the run of lookup timeouts
+                            // ends here, at the commit boundary, under the
+                            // lock the timeout arm below counts under (#346).
+                            // Resetting it later, in the settle block, let a
+                            // timeout on another lane in between count toward
+                            // the run though a write had applied (Lean:
+                            // `Drain.streak_old_counts_across_commit`; the fix,
+                            // `Drain.streakNew_eq_runSince`).
+                            lanes.lock().lookup_streak = 0;
                             observed.lock().sample(started.elapsed().as_secs_f64());
                             None
                         }
@@ -912,9 +921,10 @@ impl WritePipeline {
                     if let Some(n) = l.running_per_lane.get_mut(&agent) {
                         *n = n.saturating_sub(1);
                     }
-                    if outcome.is_ok() {
-                        l.lookup_streak = 0;
-                    }
+                    // No `lookup_streak` reset here: it is reset at the commit
+                    // (the `Ok` arm above). A second reset here would forget
+                    // timeouts that came after the commit (Lean:
+                    // `Drain.streak_both_forgets_run`).
                     if retried {
                         // The held write that set the backoff has settled; the
                         // writes behind it have had no attempt yet.
