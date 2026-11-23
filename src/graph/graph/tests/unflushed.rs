@@ -120,3 +120,53 @@ fn a_loaded_graph_has_nothing_unflushed() {
     assert_eq!(loaded.unflushed_len(), 0);
     assert!(!loaded.contract_unflushed());
 }
+
+/// #345 review: the receipts of dead-lettered intents are kept only while
+/// their write is unconsumed. A consumed write (applied, or failed, after
+/// its put was dead-lettered) is never set aside by a close, so its receipt
+/// is forgotten at the consume and the set does not grow for the life of the
+/// process. A dead-lettered intent whose write is still unconsumed stays.
+///
+/// Mirrors `Drain.closeD_keptDropped`.
+#[test]
+fn a_consumed_write_leaves_the_dead_lettered_intents() {
+    let (mut g, iid, _cid) = small_graph();
+    let intent = |receipt: &str| crate::types::WriteIntent {
+        session_id: sid(),
+        receipt: receipt.into(),
+        agent: crate::types::AgentId::from("agent-a"),
+        interaction: iid,
+        lane_seq: 1,
+        issued_ms: 0,
+        payload: crate::types::WriteIntentPayload::Derive {
+            concepts: vec![],
+            pairs: vec![],
+            receipt_destination: None,
+        },
+        created_at: ts(0),
+        outcome: None,
+    };
+    g.record_write_intent(intent("lwr1.1.1.1"));
+    g.record_write_intent(intent("lwr1.1.1.2"));
+    let dropped = g.drain_log();
+    g.note_dead_lettered_intents(&dropped.mutations);
+    assert!(g.intent_dead_lettered("lwr1.1.1.1"));
+    assert!(g.intent_dead_lettered("lwr1.1.1.2"));
+
+    g.consume_write_intent(
+        "lwr1.1.1.1".into(),
+        crate::types::WriteIntentOutcome {
+            tag: "applied".into(),
+            summary: "applied".into(),
+            consumed_at: ts(1),
+        },
+    );
+    assert!(
+        !g.intent_dead_lettered("lwr1.1.1.1"),
+        "a consumed write is never set aside: its receipt is forgotten"
+    );
+    assert!(
+        g.intent_dead_lettered("lwr1.1.1.2"),
+        "an unconsumed dead-lettered intent stays"
+    );
+}
