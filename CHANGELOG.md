@@ -97,6 +97,23 @@
 
 ### Fixed
 
+- **A bind beyond loopback with no credential, and a misused
+  `--ledger-heartbeat`, are refused before anything is built, with exit 2
+  (#316).** `lambo serve --transport http --bind 0.0.0.0` with no token and
+  no `[[serve.credential]]` passed `serve_preflight`, built the store and
+  the embedder, and was then refused with exit 1, while `lambo serve-web`
+  refused the same bind with exit 2, also after the build. Both now refuse
+  it before any backend is built, with exit 2, the code of every other
+  credential refusal. `--ledger-heartbeat` without `--ledger`, or `0`, is
+  refused the same way, before `lambo.toml` is read (it was exit 1 after
+  the build). `lambo::mcp::serve` and `serve_web::run` keep their own
+  checks for library callers, and the pure checks are public:
+  `lambo::mcp::check_bind`, `lambo::mcp::check_ledger` and
+  `serve_web::plan_bind`. Modelled first in
+  `formal/LamboProofs/Resolve/Serve.lean` (`preflight_ok_start_allowed`,
+  `exposed_bind_refused_before_build`,
+  `heartbeat_without_ledger_refused_before_build`; the two theorems that
+  described the old order are deleted).
 - **A close no longer answers `intent_durable` for a write whose intent a
   dead letter dropped (#345).** A background flush the store refuses with a
   constraint violation (or a value it cannot hold) drops its whole batch
