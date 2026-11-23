@@ -38,7 +38,11 @@ public fails: that changes its kernel name), and a binder name without its macro
 scopes (a hygienic name records the module it was elaborated in). Only declarations written in the source
 are compared; the constants Lean generates for them (`foo.proof_1`,
 `foo.match_1`, `_auxLemma.N`, ...) are not, as their numbering follows the
-file layout.
+file layout. Nor are the syntax extensions a file declares (a `local
+notation`'s parser and unexpander, a `macro`'s rules: declarations whose type
+is `Lean.Macro`, `Lean.ParserDescr` and the like), whose names embed the
+module; they change no kernel term, and every statement that uses them is
+compared as the kernel term it elaborated to.
 
 Exit 0 when the only differences are the listed renames and deletions, 1
 otherwise. Needs
@@ -58,6 +62,13 @@ from collections import Counter
 from pathlib import Path
 
 STANDARD_AXIOMS = {"propext", "Quot.sound", "Classical.choice"}
+# The types of the declarations a syntax extension generates (`notation`,
+# `infix`, `macro`, `syntax`, `macro_rules`, an unexpander or elaborator).
+SYNTAX_TYPES = {
+    "Lean.Macro", "Lean.ParserDescr", "Lean.TrailingParserDescr",
+    "Lean.PrettyPrinter.Unexpander", "Lean.PrettyPrinter.Delaborator.Delab",
+    "Lean.Elab.Term.TermElab", "Lean.Elab.Tactic.Tactic", "Lean.Elab.Command.CommandElab",
+}
 PRIVATE = re.compile(r"_private\.(?:[^.\s]+\.)*?0\.")
 
 
@@ -112,7 +123,7 @@ class Dump:
                 if "record" in d:
                     continue
                 self.all[d["name"]] = d
-                if d["user"]:
+                if d["user"] and d["type"] not in SYNTAX_TYPES:
                     self.user[d["name"]] = d
         self.renames = renames
         self._aux = {}

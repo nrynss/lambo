@@ -111,6 +111,23 @@ class Equivalence(unittest.TestCase):
                 if d["name"] == "Lambo.A.f" else d for d in head]
         self.assertEqual(self.run_check(BASE, head)[0], 0)
 
+    def test_syntax_extensions_are_not_compared(self):
+        base = BASE + [
+            decl("Lambo.A._aux_LamboProofs_A___macroRules_Lambo_A_tacticT_1", kind="def",
+                 type_="Lean.Macro", value="m"),
+            decl("Lambo.A.«term_<+_»", kind="def", type_="Lean.TrailingParserDescr",
+                 value="_private.LamboProofs.A.0.x")]
+        head = BASE + [
+            decl("Lambo.A._aux_LamboProofs_A_Part___macroRules_Lambo_A_tacticT_1", kind="def",
+                 type_="Lean.Macro", value="m"),
+            decl("Lambo.A.«term_<+_»", kind="def", type_="Lean.TrailingParserDescr",
+                 value="other")]
+        self.assertEqual(self.run_check(base, head)[0], 0)
+        # A statement is still compared as its kernel term.
+        head2 = [dict(d, type="forall (n : Nat), Eq.{1} Nat n 0") if d["name"] == "Lambo.A.t" else d
+                 for d in head]
+        self.assertEqual(self.run_check(base, head2)[0], 1)
+
     def test_private_prefix_is_ignored(self):
         base = BASE + [decl("Lambo.A.p", kind="def", type_="Nat",
                             value="_private.LamboProofs.A.0.Lambo.A.q")]
