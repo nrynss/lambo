@@ -1244,6 +1244,16 @@ fn resolve_for_command(
     }
 }
 
+/// The `lambo serve` flags [`serve_preflight`] checks.
+struct ServeFlags<'a> {
+    session: &'a [String],
+    transport: &'a str,
+    auth_token: Option<AuthTokenArg>,
+    bind: std::net::IpAddr,
+    ledger: Option<&'a std::path::Path>,
+    ledger_heartbeat: Option<u64>,
+}
+
 /// What `lambo serve` decided before any backend or embedder is built: the
 /// transport, the pinned sessions, and the one read of `lambo.toml`, which
 /// the backend resolve then consumes.
@@ -1264,15 +1274,26 @@ struct ServePlan {
 
 /// `lambo serve`'s checks that need no backend (#32 PR 4), run before the
 /// resolve so a usage error costs no model load: the transport, the stdio
-/// session rule, the pinned sessions over HTTP, the credentials (#32 PR 5)
-/// and the `[serve]` notice. `Err` carries the exit code; the message is
-/// already printed.
+/// session rule, the ledger flags and the bind (#316), the pinned sessions
+/// over HTTP, the credentials (#32 PR 5) and the `[serve]` notice. `Err`
+/// carries the exit code; the message is already printed. Every refusal is
+/// a usage error (exit 2) except an unreadable file and an undecidable
+/// `[[serve.projects]]` map (exit 1). `lambo::mcp::serve` runs the ledger
+/// and bind checks again for library callers; for the CLI they never
+/// refuse there (`formal/LamboProofs/Resolve/Serve.lean`,
+/// `preflight_ok_start_allowed`).
 fn serve_preflight(
-    session: &[String],
-    transport: &str,
-    auth_token: Option<AuthTokenArg>,
+    flags: ServeFlags<'_>,
     config: Option<&std::path::Path>,
 ) -> Result<ServePlan, ExitCode> {
+    let ServeFlags {
+        session,
+        transport,
+        auth_token,
+        bind,
+        ledger,
+        ledger_heartbeat,
+    } = flags;
     // Diagnostics to stderr, before anything can log: under
     // `--transport stdio`, stdout is the JSON-RPC channel and one stray
     // line on it corrupts the framing.
@@ -1296,6 +1317,15 @@ fn serve_preflight(
     // (#32 PR 8).
     if transport == Transport::Stdio && session.len() > 1 {
         return Err(too_many_stdio_sessions(session.len()));
+    }
+    // #316: `--ledger-heartbeat` without `--ledger`, or zero, is a usage
+    // error too, so it is refused before the file is read, with the words
+    // `serve` uses for a library caller.
+    if let Err(e) =
+        lambo::mcp::check_ledger(ledger, ledger_heartbeat.map(std::time::Duration::from_secs))
+    {
+        eprintln!("lambo serve: {e}");
+        return Err(ExitCode::from(2));
     }
     let file = match LamboFile::load_resolved(config) {
         Ok(file) => file,
@@ -1367,6 +1397,14 @@ fn serve_preflight(
     } else {
         Vec::new()
     };
+    // #316: an HTTP bind beyond loopback needs a credential, the legacy
+    // token or a `[[serve.credential]]`. Refused here, once both are
+    // resolved, so it costs no backend build, and with the exit code of
+    // every other credential refusal above.
+    if let Err(e) = lambo::mcp::check_bind(transport, bind, auth_token.as_ref(), &credentials) {
+        eprintln!("lambo serve: {e}");
+        return Err(ExitCode::from(2));
+    }
     // `[serve]`: the keys this serve does not enforce yet are named once
     // (#32 PR 1); never a value.
     file.serve.warn_if_unenforced(transport == Transport::Stdio);
@@ -2010,8 +2048,21 @@ fn main() -> ExitCode {
             session,
             transport,
             auth_token,
+            bind,
+            ledger,
+            ledger_heartbeat,
             ..
-        } => match serve_preflight(session, transport, auth_token.clone(), config) {
+        } => match serve_preflight(
+            ServeFlags {
+                session,
+                transport,
+                auth_token: auth_token.clone(),
+                bind: *bind,
+                ledger: ledger.as_deref(),
+                ledger_heartbeat: *ledger_heartbeat,
+            },
+            config,
+        ) {
             Ok(plan) => Some(plan),
             Err(code) => return code,
         },
@@ -2030,6 +2081,7 @@ fn main() -> ExitCode {
             auth_token,
             no_embedder,
             discover_sessions,
+            bind,
             ..
         } => match LamboFile::load_resolved(config) {
             Ok(file) => {
@@ -2051,6 +2103,9 @@ fn main() -> ExitCode {
                         &web,
                         &file.serve,
                     )?;
+                    // #316: an exposed bind with no credential, before
+                    // any backend, exit 2 as `lambo serve`'s.
+                    lambo::cli::serve_web::plan_bind(*bind, auth_token.as_ref(), &c)?;
                     Ok((s, h, c))
                 });
                 match planned {
@@ -2229,14 +2284,10 @@ fn main() -> ExitCode {
                 layers,
                 ..
             } = serve_plan.expect("serve_preflight ran for serve");
-            // A zero `--ledger-heartbeat` would spin the heartbeat loop as fast
-            // as the executor allows, which is a flood, not a heartbeat. The
-            // refusal used to live here and now lives in
-            // `mcp::serve::authorize_ledger`, which keeps this message verbatim:
-            // a library caller gets the same refusal instead of a panicking
-            // heartbeat task, and both ledger configuration errors leave through
-            // the one `Err` arm at the end of this block rather than with two
-            // different exit codes for the same class of mistake.
+            // Both ledger configuration errors (a zero `--ledger-heartbeat`,
+            // or one without `--ledger`) and an exposed bind without a
+            // credential were refused by `serve_preflight`, exit 2 (#316).
+            // `mcp::serve` checks them again for library callers.
             let opts = ServeOptions {
                 session: pinned.default,
                 sessions: pinned.sessions,

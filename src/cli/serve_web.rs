@@ -323,6 +323,25 @@ pub fn plan_credentials(
     Ok(credentials)
 }
 
+/// The bind rule (#316): a non-loopback `bind` needs a credential, the
+/// legacy token (`LAMBO_AUTH_TOKEN` over `auth_token`, as [`run`] resolves
+/// it) or any of `credentials` (configured or inherited, from
+/// [`plan_credentials`]). The CLI runs this before any backend is built, so
+/// the refusal costs no model load and exits 2, as `lambo serve`'s does;
+/// [`run`] applies the same rule again for library callers.
+/// `formal/LamboProofs/Resolve/Serve.lean` models it as `webBindStep`.
+pub fn plan_bind(
+    bind: IpAddr,
+    auth_token: Option<&AuthToken>,
+    credentials: &[WebCredential],
+) -> Result<(), CliError> {
+    if bind.is_loopback() || !credentials.is_empty() {
+        return Ok(());
+    }
+    let legacy = resolve_auth_token(auth_token.cloned())?;
+    authorize_bind_web(bind, legacy.as_ref())
+}
+
 fn parse_allowed_host(host: &str) -> Result<AllowedHost, CliError> {
     AllowedHost::parse(host).map_err(|e| CliError::Usage(format!("--allowed-host {host:?} {e}")))
 }
@@ -431,7 +450,9 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
     }
     // Fail closed: a non-loopback bind with no credential is a config
     // error, not a warning (same posture as `mcp::serve::authorize_bind`,
-    // which also counts any credential, legacy or configured).
+    // which also counts any credential, legacy or configured). The CLI
+    // refused it already, before the backends (`plan_bind`, #316); this
+    // one is for library callers.
     authorize_bind_web(
         args.bind,
         auth.as_ref()

@@ -32,7 +32,19 @@ use crate::types::{DaemonEvent, LamboError};
 /// Split out from [`serve`](super::serve) so it is testable without a store, a transport, or a
 /// lease, and called before any lease is taken.
 pub fn authorize_ledger(opts: &ServeOptions) -> Result<(), LamboError> {
-    match (&opts.ledger, opts.ledger_heartbeat) {
+    check_ledger(opts.ledger.as_deref(), opts.ledger_heartbeat)
+}
+
+/// [`authorize_ledger`]'s rule over the two flags alone. Pure: the CLI runs
+/// it in `serve_preflight`, before the file is read and any backend is
+/// built (#316), and [`serve`](super::serve) runs it again through
+/// [`authorize_ledger`] for library callers.
+/// `formal/LamboProofs/Resolve/Serve.lean` models it as `ledgerStep`.
+pub fn check_ledger(
+    ledger: Option<&std::path::Path>,
+    ledger_heartbeat: Option<Duration>,
+) -> Result<(), LamboError> {
+    match (ledger, ledger_heartbeat) {
         (None, Some(secs)) => Err(LamboError::Config(format!(
             "--ledger-heartbeat {}s was given without --ledger: heartbeat lines are written TO \
              the call ledger, so there is nowhere to put them. Pass --ledger <path> as well, or \
