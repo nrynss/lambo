@@ -128,6 +128,11 @@ class Models:
             p = module_path(repo, d["module"]).resolve()
             if p in files and d["line"] in decl_lines[p]:
                 self.theorems[n] = d
+        # A declaration line no dumped theorem sits on: the dump is older than
+        # the sources (lines moved), and its theorems would go uncounted.
+        found = {(module_path(repo, d["module"]).resolve(), d["line"]) for d in self.theorems.values()}
+        self.stale = sorted((p.relative_to(repo).as_posix(), i) for p in files for i in decl_lines[p]
+                            if (p, i) not in found)
         # Nested declarations (structure fields) belong to their parent.
         spans = sorted(((d["span"][0], -d["span"][1], d["module"], n) for n, d in self.user.items()))
         self.parent = {}
@@ -411,6 +416,11 @@ def main(argv=None):
     if not args.dump:
         build_dump(repo, dump)
     m = Models(repo, dump)
+    if m.stale:
+        path, line = m.stale[0]
+        print(f"{dump}: no theorem at {path}:{line} ({len(m.stale)} declaration lines in all); "
+              f"the dump is older than the sources, rebuild it (omit --dump)", file=sys.stderr)
+        return 1
 
     if args.duplicates:
         groups = defaultdict(list)

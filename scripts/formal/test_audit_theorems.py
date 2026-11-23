@@ -148,6 +148,13 @@ class Audit(unittest.TestCase):
         self.assertIn("`Sub.nested_lemma`", text)
         self.assertNotIn("- (c) `nested_lemma`", text)
 
+    def test_a_stale_dump_is_refused(self):
+        (self.root / "formal" / "LamboProofs" / "M.lean").write_text("\n" + MODEL, encoding="utf-8")
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            code = at.main(["--repo", str(self.root), "--dump", str(self.dump)])
+        self.assertEqual(code, 1)
+        self.assertIn("older than the sources", err.getvalue())
+
     def test_dead_rfl_helper_is_b(self):
         model = MODEL.replace("theorem old_ruleW (n : Nat) : f n = n := rfl",
                               "theorem old_ruleV (n : Nat) : f n = n := rfl")
