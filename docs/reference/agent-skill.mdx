@@ -55,7 +55,7 @@ own `AGENTS.md` does), add four habits on top of the pre-flight rule:
 
 - **Recall twice:** Recall on the task topic before reading code, then run a
   second targeted recall once you know the concrete symbol or file names. Treat
-  memory as prior context (`spec → source → memory`); on conflict, record
+  memory as prior context (`source → reference docs → memory`); on conflict, record
   `against`.
 - **Cite by 8-hex ID or durable name:** Pass the 8-hex ID or durable name from
   recall in `depends_on` (so rulings earn real structural dependents instead of
@@ -69,6 +69,12 @@ own `AGENTS.md` does), add four habits on top of the pre-flight rule:
   `concepts[].name` (`<domain>-<subject>`, no slashes) only to settled `logic`
   or `constraint` rulings meant to be cited across PRs — never to
   `observation`s or file paths (names stay reserved permanently even after GC).
+  The shape and the choice of concept are conventions the server does not
+  check. It compares names by a normalized key that ignores word order, case,
+  separators, camelCase splits, word endings and stopwords, so
+  `single-writer-lease` and `SingleWriterLeases` are one name, and the first
+  spelling to take a key owns it. See *Durable names* under
+  [`lambo_derive`](/mcp#lambo_derive) for the exact rules.
 - **Triage warnings by scope:** Always act on `⚠ Contradicted`, `⚠ Rests on a
   contradicted concept`, `⚠ Possibly superseded`, and active `Reserved by` /
   conflict lines. For `⚑ Load-bearing pillar`, check whether the hit's surface
