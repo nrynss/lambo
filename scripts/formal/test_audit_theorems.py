@@ -102,8 +102,14 @@ class Audit(unittest.TestCase):
         (root / "formal" / "LamboProofs" / "Audit.lean").write_text(AUDIT, encoding="utf-8")
         (root / "formal" / "README.md").write_text("# Proofs\n", encoding="utf-8")
         self.dump = root / "dump.jsonl"
-        self.dump.write_text("".join(json.dumps(d) + "\n" for d in DECLS), encoding="utf-8")
         self.root = root
+        self.write_dump(DECLS)
+
+    def write_dump(self, decls):
+        src = (self.root / "formal" / "LamboProofs" / "M.lean").read_bytes()
+        record = {"record": "module", "module": "LamboProofs.M", "fnv1a64": at.fnv1a64(src)}
+        self.dump.write_text("".join(json.dumps(d) + "\n" for d in decls) + json.dumps(record) + "\n",
+                             encoding="utf-8")
 
     def report(self):
         out = self.root / "report.md"
@@ -148,19 +154,29 @@ class Audit(unittest.TestCase):
         self.assertIn("`Sub.nested_lemma`", text)
         self.assertNotIn("- (c) `nested_lemma`", text)
 
+    def test_fnv1a64_matches_the_reference_values(self):
+        self.assertEqual(at.fnv1a64(b""), "cbf29ce484222325")
+        self.assertEqual(at.fnv1a64(b"a"), "af63dc4c8601ec8c")
+
     def test_a_stale_dump_is_refused(self):
-        (self.root / "formal" / "LamboProofs" / "M.lean").write_text("\n" + MODEL, encoding="utf-8")
+        # Same declaration lines, changed text: only the hash can tell.
+        (self.root / "formal" / "LamboProofs" / "M.lean").write_text(
+            MODEL.replace("the result.", "the result, reworded."), encoding="utf-8")
         with contextlib.redirect_stderr(io.StringIO()) as err:
             code = at.main(["--repo", str(self.root), "--dump", str(self.dump)])
         self.assertEqual(code, 1)
         self.assertIn("older than the sources", err.getvalue())
+        # A dump with no module records cannot be checked.
+        self.dump.write_text("".join(json.dumps(d) + "\n" for d in DECLS), encoding="utf-8")
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(at.main(["--repo", str(self.root), "--dump", str(self.dump)]), 1)
 
     def test_dead_rfl_helper_is_b(self):
         model = MODEL.replace("theorem old_ruleW (n : Nat) : f n = n := rfl",
                               "theorem old_ruleV (n : Nat) : f n = n := rfl")
         (self.root / "formal" / "LamboProofs" / "M.lean").write_text(model, encoding="utf-8")
         decls = [dict(d, name="Lambo.M.old_ruleV") if d["name"] == "Lambo.M.old_ruleW" else d for d in DECLS]
-        self.dump.write_text("".join(json.dumps(d) + "\n" for d in decls), encoding="utf-8")
+        self.write_dump(decls)
         row = self.row(self.report(), "old_rule")
         self.assertTrue(row.startswith("- (b)"), row)
         self.assertIn("dead helper", row)

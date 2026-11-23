@@ -82,9 +82,12 @@ process's sequence starts at 1.
   (`abortAllSync` is the identity on receipts) and is there to name the gap.
 * `replayStep_inputFact`, `replayStep_decode`, `replayStep_cycle`: a refusal
   that is a fact about the intent's input settles `failed`;
-  `replayStep_sessionWide`: any other non-transient error stops the replay;
   `unavailable_skips`, `unavailable_stops`: the transient arm. The current
-  step hands these answers to `replayStep`.
+  step (`stepQ` over `stepFixed` over `stepInput`) hands these answers to
+  `replayStep`. It does not hand it a graph-dependent input refusal, which
+  `replayStep` stops on (`replayStep_sessionWide`, `History.lean`); the
+  current rule for the other non-transient errors is `stepInput_sessionWide`
+  and `fixed_sessionWide_stops` (`Replay.lean`).
 * `workerStep_atomic`, `workerStep_keys`: a write in a worker batch has its
   consume beside it, and a batch names only its own job. They are stated
   over `workerStep`, the worker step before #295, and carry over to the
@@ -1081,14 +1084,6 @@ decided before any embed, so it says nothing about the embedder
 (`StoreError::is_cycle_refusal`, #116). -/
 theorem replayStep_cycle (img : Bool) (s : Streaks) :
     replayStep img (.run (.err .cycle)) s = (.failed, s) := rfl
-
-/-- Any other error that is neither transient nor a fact about the input
-stops the replay: a non-cycle store error (another `Invariant`, a
-`NotFound`, a backend error), `Config`, a lost lease (`Conflict`), anything
-else. -/
-theorem replayStep_sessionWide (img : Bool) (e : Err) (s : Streaks) (h1 : e.inputFact = false)
-    (h2 : e.transient = false) : ∃ b, (replayStep img (.run (.err e)) s).1 = .stop b := by
-  cases e <;> simp_all [Err.inputFact, Err.transient, replayStep]
 
 /-- A transient embed answer below the threshold is a `skip`: the intent is
 left unconsumed (the loop since #295, `loopD`, then defers its agent). -/

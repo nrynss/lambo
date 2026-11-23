@@ -23,7 +23,9 @@ erased (`clean`); a generated constant's binders are named by depth instead
 universe parameters by position, so two declarations have the same shape
 exactly when they state the same thing (for finding duplicated lemmas).
 `uses` is every constant the type and value mention. `axioms` (theorems
-only) is what `#print axioms` would answer. Names are printed as Lean prints
+only) is what `#print axioms` would answer. After the constants comes one
+`{"record": "module", "module", "fnv1a64"}` line per module: the FNV-1a hash
+of the source file it was dumped from (run from `formal/`). Names are printed as Lean prints
 them; a private name is printed as its user-facing name, with "private":
 true.
 -/
@@ -68,6 +70,14 @@ partial def canon (d : Nat) : Expr → Expr
   | .mdata m e => .mdata m (canon d e)
   | .proj s i e => .proj s i (canon d e)
   | e => e
+
+/-- FNV-1a (64-bit) of a file's bytes, as 16 hex digits: what
+`audit-theorems.py` recomputes to tell a dump older than the sources. -/
+def fnv1a64 (bytes : ByteArray) : String :=
+  let h := bytes.foldl (init := (14695981039346656037 : UInt64))
+    fun h b => (h ^^^ b.toUInt64) * 1099511628211
+  let hex := String.ofList (Nat.toDigits 16 h.toNat)
+  "".pushn '0' (16 - hex.length) ++ hex
 
 def main (args : List String) : IO UInt32 := do
   match args with
@@ -118,6 +128,12 @@ def main (args : List String) : IO UInt32 := do
         ("axioms", axioms)]
       h.putStrLn j.compress
       n := n + 1
+    -- One record per module: the hash of the source it was dumped from.
+    for m in mods do
+      let path := System.FilePath.mk (m.replace "." "/") |>.addExtension "lean"
+      let bytes ← IO.FS.readBinFile path
+      h.putStrLn (Json.mkObj [("record", "module"), ("module", toJson m),
+        ("fnv1a64", toJson (fnv1a64 bytes))]).compress
     IO.eprintln s!"{n} constants from {mods.length} modules"
     return 0
   | _ =>

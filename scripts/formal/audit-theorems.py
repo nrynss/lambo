@@ -92,6 +92,14 @@ def build_dump(repo, out):
                    cwd=formal, check=True)
 
 
+def fnv1a64(data):
+    """FNV-1a (64-bit) of bytes, as DumpDecls.lean writes it."""
+    h = 14695981039346656037
+    for b in data:
+        h = ((h ^ b) * 1099511628211) & 0xFFFFFFFFFFFFFFFF
+    return f"{h:016x}"
+
+
 def module_path(repo, module):
     return repo / "formal" / Path(*module.split(".")).with_suffix(".lean")
 
@@ -106,9 +114,13 @@ class Models:
     def __init__(self, repo, dump):
         self.repo = repo
         self.env = {}
+        self.hashes = {}
         with open(dump, encoding="utf-8") as fh:
             for line in fh:
                 d = json.loads(line)
+                if d.get("record") == "module":
+                    self.hashes[d["module"]] = d["fnv1a64"]
+                    continue
                 self.env[d["name"]] = d
         self.user = {n: d for n, d in self.env.items() if d["user"]}
         # The theorems count-theorems.py counts: a `theorem` line in a model file.
@@ -128,11 +140,14 @@ class Models:
             p = module_path(repo, d["module"]).resolve()
             if p in files and d["line"] in decl_lines[p]:
                 self.theorems[n] = d
-        # A declaration line no dumped theorem sits on: the dump is older than
-        # the sources (lines moved), and its theorems would go uncounted.
-        found = {(module_path(repo, d["module"]).resolve(), d["line"]) for d in self.theorems.values()}
-        self.stale = sorted((p.relative_to(repo).as_posix(), i) for p in files for i in decl_lines[p]
-                            if (p, i) not in found)
+        # A model file whose source no longer hashes to what the dump was made
+        # from: the dump is older than the sources, and its lines (or more) are
+        # wrong. A dump with no module records cannot be checked and is stale.
+        self.stale = []
+        for p in sorted(files):
+            module = ".".join(p.relative_to((repo / "formal").resolve()).with_suffix("").parts)
+            if self.hashes.get(module) != fnv1a64(p.read_bytes()):
+                self.stale.append(p.relative_to(repo.resolve()).as_posix())
         # Nested declarations (structure fields) belong to their parent.
         spans = sorted(((d["span"][0], -d["span"][1], d["module"], n) for n, d in self.user.items()))
         self.parent = {}
@@ -419,9 +434,8 @@ def main(argv=None):
         build_dump(repo, dump)
     m = Models(repo, dump)
     if m.stale:
-        path, line = m.stale[0]
-        print(f"{dump}: no theorem at {path}:{line} ({len(m.stale)} declaration lines in all); "
-              f"the dump is older than the sources, rebuild it (omit --dump)", file=sys.stderr)
+        print(f"{dump}: {m.stale[0]} ({len(m.stale)} model files in all) is not the source the dump "
+              f"was made from; the dump is older than the sources, rebuild it (omit --dump)", file=sys.stderr)
         return 1
 
     if args.duplicates:

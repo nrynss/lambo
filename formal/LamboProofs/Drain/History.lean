@@ -53,9 +53,10 @@ in each doc comment.
   doc; test `a_cycle_refused_at_replay_settles_failed_and_the_replay_goes_on`).
   `sessionWide_stops`: any other non-transient error stopped it, the intent
   and the rest left unconsumed. `replayStep_inputRefusal_stops`: the
-  graph-dependent refusal #294 fixed. The step's arms themselves
-  (`replayStep_cycle`, `replayStep_decode`, `unavailable_skips`, ...) are
-  still the current step's and are in `Base.lean`. Current counterparts: `fixed_input_goes_on`,
+  graph-dependent refusal #294 fixed, and `replayStep_sessionWide`, the step
+  arm that stopped on it. The step's other arms (`replayStep_cycle`,
+  `replayStep_decode`, `unavailable_skips`, ...) are still the current
+  step's and are in `Base.lean`. Current counterparts: `fixed_input_goes_on`,
   `fixed_sessionWide_stops` (#294) and `fixedD_input_goes_on` (#295).
 -/
 
@@ -531,7 +532,19 @@ theorem replay_epoch_seq_order (live : Bool) (rout : Job → RR) (l : List Inten
 
 /-! ## How the replay before #294 settles a refusal
 
-Over the old `loop`; the step's arms are in `Base.lean`. -/
+Over the old `loop`; the step's arms that are still current are in
+`Base.lean`. -/
+
+/-- **Before #294**, any other error that was neither transient nor a fact
+about the input stopped `spawn_replay`: a non-cycle store error (another
+`Invariant`, a `NotFound`, a backend error), `Config`, a lost lease
+(`Conflict`), anything else, and a graph-dependent input refusal
+(`Err.inputRefusal`) with them. Since #294 `stepInput` settles that refusal
+`failed`; the current statement is `stepInput_sessionWide` and, over the
+loop, `fixed_sessionWide_stops`. -/
+theorem replayStep_sessionWide (img : Bool) (e : Err) (s : Streaks) (h1 : e.inputFact = false)
+    (h2 : e.transient = false) : ∃ b, (replayStep img (.run (.err e)) s).1 = .stop b := by
+  cases e <;> simp_all [Err.inputFact, Err.transient, replayStep]
 
 /-- **An input refusal settles `failed` and the replay continues.** For a
 refusal that is a fact about the intent's input (`Embed`, `ImageIdTaken`,

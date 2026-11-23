@@ -1719,8 +1719,15 @@ theorem read_aux (exp : Nat) (s : St) :
       · exact hsync
       · split <;> (try split) <;> exact hsync
 
-/-- A head or idle repair task is not writing. -/
+/-- A repair task at the head of `repair_once` (before it loads a snapshot)
+has no repair write under any lease token on the wire, so a lost lease has
+nothing of its to fence. -/
 theorem writing_head (t : Nat) : RPc.head.writing t = false := rfl
+
+/-- An idle repair task (`run_repairs` waiting for a request) has no repair
+write under any lease token on the wire, so a lost lease has nothing of its
+to fence. -/
+theorem writing_idle (t : Nat) : RPc.idle.writing t = false := rfl
 
 theorem step_row (s : St) (e : Ev) (h : s.d.row ≠ .none) : (step P s e).d.row ≠ .none := by
   by_cases hi : e.indexSide = true

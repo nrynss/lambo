@@ -109,6 +109,8 @@ class Dump:
         with open(path, encoding="utf-8") as fh:
             for line in fh:
                 d = json.loads(line)
+                if "record" in d:
+                    continue
                 self.all[d["name"]] = d
                 if d["user"]:
                     self.user[d["name"]] = d

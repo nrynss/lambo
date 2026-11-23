@@ -12,4 +12,3 @@ Lambo.Hotlist.seq_mem_upsert	duplicate: states exactly what mem_upsert states (s
 Lambo.Supersession.recordRefused_nil	dead helper: an undocumented rfl unfolding of recordRefused on [] that nothing uses or names	-
 Lambo.Supersession.decideV_nil	dead helper: an undocumented rfl unfolding of decideV on [] that nothing uses or names	-
 Lambo.Tiered.markStale_d	dead helper: an undocumented rfl unfolding of markStale's durable side that nothing uses or names	-
-Lambo.Tiered.writing_idle	dead helper: an undocumented rfl unfolding of RPc.writing at idle that nothing uses or names	-
