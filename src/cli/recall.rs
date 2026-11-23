@@ -503,7 +503,7 @@ async fn run_on(
     // vector hits can include concepts this snapshot lacks, and assembly skips
     // them. Ranking against the snapshot's own graph instead would keep the
     // vector leg consistent with assembly and drop the second vector parse
-    // (a follow-up in dev-diary/notes/feature-8-vector-source.md).
+    // (an open follow-up from #8).
     let vectors = VectorCandidates::from_store(backends.store.as_ref());
     let cache = SharedRecallCache::<RecallPipeline>::new();
     let rq = RecallQuery {

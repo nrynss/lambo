@@ -40,8 +40,8 @@ best backing, and the notes say what theorem would close the gap.
 
 - If the code (and the model, where one exists) agree and the page is wrong,
   the page is fixed.
-- If the page states the intended behaviour (per the spec,
-  `lambo-hackathon-spec-v0.1.md`, or a model) and the code differs, the code
+- If the page states the intended behaviour (per a model, or an owner
+  decision recorded in an issue) and the code differs, the code
   has a bug. The page is left as it is and an issue is drafted.
 - If it is not clear which is intended, an issue is drafted that says so.
 

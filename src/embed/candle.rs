@@ -16,8 +16,8 @@
 //!
 //! **Weights (hf-hub).** The default artifact is the operator-published f16
 //! safetensors repo `nrynss/bge-m3-f16-safetensors` (a bitwise-verified cast of
-//! the canonical `BAAI/bge-m3` revision, 391/391 tensors f16-equal — see
-//! `dev-diary/lambo-for-mooshik/K-candle-embedder.md`). Weights are fetched on
+//! the canonical `BAAI/bge-m3` revision, 391/391 tensors f16-equal, measured
+//! for the K2 candle embedder). Weights are fetched on
 //! first use via hf-hub and cached under the hub cache; `offline = true` (or an
 //! explicit `weights_dir`) NEVER touches the network — resolution is
 //! cache-only ([`cache_get`]) and fails loudly naming the missing artifact
@@ -2687,7 +2687,7 @@ mod tests {
     /// and applies K1's own 0.99 median gate.
     ///
     /// Ignored by default: needs real weights AND a llama-server on :8080
-    /// started with the DOGFOOD-SETUP capacity flags. Run with:
+    /// started with the batch flags in `docs/operations/dogfood-rig.md`. Run with:
     /// `cargo test --features embed-candle-metal,embed-bge -- --ignored metal_parity`
     #[ignore]
     #[tokio::test]

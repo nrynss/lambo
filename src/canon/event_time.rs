@@ -102,8 +102,8 @@ use chrono::{DateTime, Utc};
 /// contribute one session each; stragglers further than `gap` out extend the
 /// chain.
 ///
-/// This is the solo policy's seam
-/// (`dev-diary/lambo-for-mooshik/C-solopolicy.md`). Its production caller is
+/// This is the solo policy's seam (workstream C, the Solo policy).
+/// Its production caller is
 /// the solo policy's recurrence term, `recurrence_sessions` in `policy.rs`,
 /// which resolves session starts through
 /// [`crate::types::Interaction::about_time`].

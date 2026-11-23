@@ -126,7 +126,7 @@ ALTER TABLE concepts DROP CONSTRAINT IF EXISTS concepts_session_id_canonical_key
 -- FULL SCAN on concepts_pkey and the §12.1 "we used the vector index" claim is
 -- false. Against this partial index the UNCHANGED query plans as
 -- `vector search` on concepts@concepts_embedding_idx. Evidence:
--- dev-diary/evidence/20260813-130218-vector-index-predicate-finding.txt and
+-- evidence/20260813-130218-vector-index-predicate-finding.txt and
 -- …-131108-vector-index-camera-proof-diagnosis.txt.
 --
 -- !! UPGRADING A PRE-T7.4 CLUSTER — provision.sh handles it; read why.
@@ -167,7 +167,7 @@ ALTER TABLE concepts DROP CONSTRAINT IF EXISTS concepts_session_id_canonical_key
 -- timeout) is the only thing allowed to do slow schema work. CockroachDB has no
 -- DO blocks and provision.sh's splitter rejects dollar-quoting, so a conditional
 -- "drop only if non-partial" cannot be expressed in this file at all; it belongs
--- in the applier. See the T7.4 Handoff Log for the proposed provision.sh change.
+-- in the applier (scripts/provision.sh does it).
 --
 -- A cluster that misses this upgrade fails LOUDLY and specifically, not silently:
 -- `vector_explain_camera_proof` asserts `vector search`, the canonical index name,
@@ -296,7 +296,7 @@ CREATE TABLE IF NOT EXISTS session_leases (
     endpoint    STRING
 );
 
--- J4 lease refusals (dev-diary/lambo-for-mooshik/J-multi-client.md §J4): a
+-- J4 lease refusals: a
 -- writer refused the single-writer lease records the refusal here so the
 -- incumbent holder can learn it turned away a takeover ("from both sides").
 -- refused_at is the STORE clock (F18 — never a caller instant).
@@ -322,7 +322,7 @@ CREATE TABLE IF NOT EXISTS lease_refusals (
 CREATE INDEX IF NOT EXISTS lease_refusals_session_time_idx
     ON lease_refusals (session_id, refused_at);
 
--- J3 durable write intents (dev-diary/lambo-for-mooshik/J3-durability-redesign.md):
+-- J3 durable write intents:
 -- a validated, acked background write that has not yet been applied. Written
 -- at ack time through the write-behind log, so the close-time final flush
 -- carries it — at a clean close every acked write is either applied or here.

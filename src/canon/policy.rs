@@ -25,7 +25,7 @@
 //! short names with blast radius 0 (100% artifacts), ranked by how often
 //! actions touched them; the valid-action term counted `Causal` edges, which
 //! #36 decided confer no load. Evidence-gated Solo matched Swarm's set in the
-//! design measurement. See `dev-diary/notes/feature-36-pr3-admission.md`.
+//! design measurement (#36 PR 3).
 //!
 //! ## The solo score
 //!
@@ -537,8 +537,8 @@ fn status_rank(s: CanonizationStatus) -> u8 {
 /// `Causal` (an action produced or modified this concept) is **not** support
 /// since #36 PR 3, the same reason it confers no load (#36 PR 1): a file
 /// modified on five separate days recurred as work, not as a fact anyone
-/// rests on, and that alone made files Solo Candidates. This is the spec
-/// §3.2 errata recorded in `dev-diary/notes/feature-36-pr3-admission.md`.
+/// rests on, and that alone made files Solo Candidates. This is #36 PR 3's
+/// correction to spec §3.2.
 ///
 /// A fact with no event time contributes its flush time (D's fallback rule),
 /// so a live session behaves exactly as it did pre-D: one cluster.

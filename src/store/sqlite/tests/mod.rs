@@ -156,7 +156,7 @@ fn synthetic_unit_vector(i: usize, dim: usize) -> Vec<f32> {
 
 // -----------------------------------------------------------------------
 // H1 — cross-store recall parity harness
-// (dev-diary/lambo-for-mooshik/H-cross-store-parity.md)
+// (SQLite and the memory oracle; H2/H3 run the database stores)
 // -----------------------------------------------------------------------
 //
 // The matrix above (F's Done-when box 5, cluster-free half) proves SQLite

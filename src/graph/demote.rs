@@ -45,8 +45,8 @@
 //! and supersession demotions carry it on their `CanonizationEvent`, and
 //! `Graph::apply_canonization_transition` stamps it on the concept. The matching
 //! `canonization_events` audit row for the demotion is P6's carry — demote
-//! emits no `CanonizationEvent` (no `Mutation` kind exists for one); see
-//! `dev-diary/notes/adve-wave3-graph-decisions.md`.
+//! emits no `CanonizationEvent` (no `Mutation` kind exists for one), a
+//! decision of the wave-3 graph review.
 
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -150,7 +150,7 @@ pub fn demote(
             // repromotion cooldown / T6.4 read this field. The matching
             // canonization_events audit row for the demotion is P6's carry
             // (demote emits no CanonizationEvent — no Mutation kind exists for
-            // one; recorded in dev-diary/notes/adve-wave3-graph-decisions.md).
+            // one).
             last_demotion_time: Some(interaction_created_at),
             embedding: None,
             human_confirmed: 0,

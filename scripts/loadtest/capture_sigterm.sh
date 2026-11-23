@@ -169,8 +169,8 @@ cpu_model() {
 CPU_MODEL="$(cpu_model | sed "/^[[:space:]]*$/d" | head -n 1)"
 CPU_THREADS="$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo unknown)"
 case "$(uname -s)" in
-    Linux) MACHINE_NOTE="Linux box, NOT the MBP the P8 criterion names — see concurrency-capture.md" ;;
-    *) MACHINE_NOTE="$(uname -s) host — see concurrency-capture.md for which machine the P8 criterion names" ;;
+    Linux) MACHINE_NOTE="Linux box, NOT the MBP the P8 criterion names" ;;
+    *) MACHINE_NOTE="$(uname -s) host (the P8 criterion names an MBP)" ;;
 esac
 echo "== machine: $(uname -srm) | $CPU_MODEL | $CPU_THREADS threads"
 

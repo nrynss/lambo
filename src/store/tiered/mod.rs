@@ -80,7 +80,7 @@
 //! then queries only the expected contract's index. If the durable contract
 //! changes between the two, the answer is still in the expected space: stale,
 //! never meaningless. That is the accepted divergence from the SQL adapters'
-//! single-snapshot check, recorded in `dev-diary/notes/feature-18-elastic-tier.md`.
+//! single-snapshot check, decided in #18.
 //!
 //! A flush that moves the contract (`lambo re-embed` into another model, the
 //! `--allow-embedding-mismatch` relabel, a clear) is not mirrored (#319):

@@ -90,7 +90,7 @@
 //! ## Calibration
 //!
 //! [`DEFAULT_LAYER_WEIGHT`] and [`DEFAULT_LAYER_MIN_SIMILARITY`] are
-//! measured on BGE-M3 in #157 (see `dev-diary/notes/feat-157-layer-tuning.md`).
+//! measured on BGE-M3 in #157 (see `evidence/157-layer-tuning/`).
 //! Keywords do not bypass the absolute cosine floor: shared vocabulary
 //! alone admitted unrelated general rules. The weight stays 0.5 so admitted
 //! rules still fit the merged context. An unset floor is calibrated per

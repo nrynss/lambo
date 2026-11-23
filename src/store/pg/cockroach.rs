@@ -16,7 +16,7 @@
 //! "this adapter"; the code it describes is the family base in `pg/` (the
 //! module map is on `pg/mod.rs`).
 //!
-//! # Design decisions (see PHASE-3-stores.md Handoff Log T3.2)
+//! # Design decisions (T3.2)
 //!
 //! - **Batch replay order (flush).** Mutations are replayed **in submission order**
 //!   inside ONE transaction — never re-grouped by kind. The graph tier guarantees
@@ -248,7 +248,7 @@ mod tests;
 mod conformance;
 
 /// H2 — the **live Cockroach leg** of cross-store recall parity
-/// (`dev-diary/lambo-for-mooshik/H-cross-store-parity.md`, §H2): the H1
+/// (workstream H, §H2): the H1
 /// harness's corpus, probe × limit grid, and v1 report shape, run against a
 /// real cluster through [`CockroachStore`] with `LAMBO_COCKROACH_DSN`.
 ///

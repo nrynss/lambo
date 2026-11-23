@@ -360,9 +360,12 @@ calibration benchmarks, and negative research results are summarized on the
 Run `cargo test` for the core test suite, or enable feature combinations such as
 `--features ship` or `--features store-sqlite,fixtures`. Raw captures behind every claim
 live in [`evidence/`](https://github.com/nrynss/lambo/tree/main/evidence) (indexed in its
-[README](https://github.com/nrynss/lambo/blob/main/evidence/README.md)), design notes and
-reviews live in [`dev-diary/`](https://github.com/nrynss/lambo/tree/main/dev-diary), and
-the Astro/Starlight docs site lives in [`site/`](https://github.com/nrynss/lambo/tree/main/site).
+[README](https://github.com/nrynss/lambo/blob/main/evidence/README.md)), the reference
+docs live in [`docs/reference/`](https://github.com/nrynss/lambo/tree/main/docs/reference)
+(mirrored by the Astro/Starlight docs site in [`site/`](https://github.com/nrynss/lambo/tree/main/site)),
+and operational runbooks live in [`docs/operations/`](https://github.com/nrynss/lambo/tree/main/docs/operations).
+The original v0.1 spec and the development diary were retired from the tree; they remain
+in git history (for example at the `v0.15.0` tag) as a record, not as current design.
 
 ## License and origin
 
