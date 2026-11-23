@@ -50,7 +50,7 @@
 //! of either; a contrast partner covers nothing.
 //!
 //! ```text
-//! HF_HUB_OFFLINE=1 LAMBO_EMBEDDER=candle LAMBO_EMBED_DEVICE=cpu \
+//! LAMBO_EMBEDDER=candle LAMBO_EMBED_DEVICE=cpu \
 //!   cargo run --release --features embed-candle,store-sqlite --example eval_redundancy -- \
 //!   --cache /path/to/bge-m3.jsonl --out evidence/issue-181/runs-rerun/bge-m3-candle-cpu.json
 //! ```

@@ -157,8 +157,11 @@ dim = 1024
 Alternatively (or on Linux), run a local `llama-server` with an embedding model and point Lambo at it.
 
 ```bash
-llama-server -m path/to/bge-m3.gguf --embedding --port 8080
+llama-server -m path/to/bge-m3.gguf --embedding --port 8080 \
+  -c 8192 --batch-size 8192 --ubatch-size 8192
 ```
+
+The batch flags matter: llama-server embeds an input in one batch, and at its default 512-token physical batch (`--ubatch-size`) it answers HTTP 500 for a longer input while `/health` still passes. From a checkout, `scripts/run-llama-embed.sh` starts the same server on the file `scripts/fetch-bge-m3.sh` downloads, with these flags.
 
 Then set the embedder in `lambo.toml`.
 

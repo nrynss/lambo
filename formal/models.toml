@@ -474,7 +474,7 @@ rust = [
 [[model]]
 lean = "formal/LamboProofs/BatchQueue.lean"
 read_against = "514da8d7"
-read_digest = "v2:sha256:1f023f433c651569efec33c3661e706ee3385b7e8e5f7d31c96ba5c5dd84cdf3"
+read_digest = "v2:sha256:c218f50a35ab430e950c694da788fcd4e723b4509aa56b24518fb7f047f7b8e6"
 rust = [
   "src/embed/candle.rs",
 ]
