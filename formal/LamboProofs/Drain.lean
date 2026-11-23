@@ -192,9 +192,12 @@ in their doc comments, and describe behaviour the current Rust no longer has.
   the current worker's log is applied again by the current serve.
 * Dead-lettered batches at close (#345; `closeD` over a flush history,
   `Landed`): before the fix the close vouched for a put a dead letter dropped
-  (`closeW_vouches_dead_lettered`, `closeW_vouches_dead_letteredW`); the
-  current close answers a set-aside write `intent_durable` exactly when its
-  put is committed (`closeD_durable_iff`), never for a dropped one
+  (`closeW_vouches_dead_lettered`, `closeW_vouches_dead_letteredW`); at a
+  close whose final flush completed, the current close answers a set-aside
+  write `intent_durable` exactly when its put is committed
+  (`closeD_durable_iff`; a close whose flush did not complete answers every
+  set-aside write `close_unflushed`, committed put or not), never for a
+  dropped one
   (`closeD_never_vouches_dropped`, `closeD_vouches_only_committed`), with the
   accounting `shutdown_no_silent_lossD`, and a retried close upgrades only a
   committed one (`closeD_retryD`). With no dead letter it is `closeW`
@@ -6036,10 +6039,13 @@ close's answer against it.
   `Graph::note_dead_lettered_intents`, and `settle_deferred` answers such a
   receipt `close_unflushed` even under `CloseFlush::Durable`): a set-aside
   write answers `intent_durable` only when the flush ended `.durable` and its
-  put is not among the dead-lettered ones (`flushFor`). It is exact, not
-  conservative: `closeD_durable_iff` (a set-aside write answers
-  `intent_durable` exactly when its put is committed), with
-  `closeD_vouches_only_committed` and `closeD_never_vouches_dropped`, and
+  put is not among the dead-lettered ones (`flushFor`). At a close whose
+  final flush completed it is exact, not conservative: `closeD_durable_iff`
+  (a set-aside write answers `intent_durable` exactly when its put is
+  committed). A close whose flush did not complete answers every set-aside
+  write `close_unflushed`, a committed put included, as before #345. The
+  other theorems: `closeD_vouches_only_committed`,
+  `closeD_never_vouches_dropped` (whatever the flush outcome), and
   `shutdown_no_silent_lossD`, the accounting of `shutdown_no_silent_lossW`
   with the dead-lettered writes moved to `close_unflushed`. A retried close
   keeps the rule (`closeD_retryD`): it upgrades `close_unflushed` only for a

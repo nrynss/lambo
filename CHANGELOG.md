@@ -45,8 +45,10 @@
   batch it dead-letters, and the close answers those writes
   `close_unflushed` (ledger reason `intent_dead_lettered`), whatever its
   final flush does; a retried close no longer upgrades them. The rule is
-  exact: the close answers `intent_durable` exactly when the write's intent
-  reached the store. `close_unflushed`'s description now says the close
+  exact for a close whose final flush completes: it answers
+  `intent_durable` exactly when the write's intent reached the store. A
+  close whose final flush does not complete still answers every set-aside
+  write `close_unflushed`, as before. `close_unflushed`'s description now says the close
   could not confirm the write was saved, since an incomplete final flush is
   no longer its only cause. Modelled first in
   `formal/LamboProofs/Drain.lean` (`closeW_vouches_dead_lettered`, the

@@ -105,8 +105,10 @@ S-93a).
 found are fixed, model first. #345: a close answered `intent_durable` for a
 write whose intent a background flush had dead-lettered
 (`closeW_vouches_dead_lettered`); the close now answers such a write
-`close_unflushed`, and answers `intent_durable` exactly when the write's
-intent reached the store (`closeD_durable_iff`, `closeD_retryD`,
+`close_unflushed`, and a close whose final flush completes answers
+`intent_durable` exactly when the write's intent reached the store (one
+whose flush does not complete answers every set-aside write
+`close_unflushed`) (`closeD_durable_iff`, `closeD_retryD`,
 `shutdown_no_silent_lossD`). #346: the lookup-timeout streak reset at a
 write's settle, not its commit (`streak_old_counts_across_commit`); it now
 resets at the commit (`streakNew_eq_runSince`, `heldNew_iff`). The page's
