@@ -84,6 +84,9 @@ async fn memory_on(store: Arc<dyn GraphStore>, session: &str) -> Memory {
 struct FlakyStore {
     inner: Arc<dyn GraphStore>,
     fail_remaining: AtomicUsize,
+    /// Flushes still to refuse with a constraint violation, before any
+    /// `fail_remaining` count: the flush loop dead-letters each (#345).
+    dead_letter_remaining: AtomicUsize,
     /// Every batch it was handed, whole: the ordering assertions need the
     /// mutation **sequence**, not just the lengths.
     batches: PlMutex<Vec<MutationBatch>>,
@@ -96,9 +99,23 @@ impl FlakyStore {
         Self {
             inner,
             fail_remaining: AtomicUsize::new(fail_next),
+            dead_letter_remaining: AtomicUsize::new(0),
             batches: PlMutex::new(Vec::new()),
             stats_panics: false,
         }
+    }
+
+    /// Refuse the first `n` flushes with a constraint violation, which the
+    /// flush loop dead-letters: the whole batch is dropped and the session
+    /// goes on (#345).
+    fn with_dead_letters(self, n: usize) -> Self {
+        self.dead_letter_remaining.store(n, Ordering::SeqCst);
+        self
+    }
+
+    /// Fail the next `n` flushes with a backend error, from now on.
+    fn fail_next(&self, n: usize) {
+        self.fail_remaining.store(n, Ordering::SeqCst);
     }
 
     /// Make every `write_flush_stats` call panic (#301).
@@ -126,6 +143,15 @@ impl GraphStore for FlakyStore {
     }
     async fn flush(&self, batch: &MutationBatch, token: Option<u64>) -> Result<(), StoreError> {
         self.batches.lock().push(batch.clone());
+        let dead_letter = self
+            .dead_letter_remaining
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+                (n > 0).then(|| n - 1)
+            })
+            .is_ok();
+        if dead_letter {
+            return Err(StoreError::Constraint("23505".into()));
+        }
         let should_fail = self
             .fail_remaining
             .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| {

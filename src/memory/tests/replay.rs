@@ -443,6 +443,182 @@ async fn a_write_reached_during_an_in_session_embedder_outage_is_not_consumed() 
     );
 }
 
+// -- #345: a dead letter drops the puts it held -------------------------
+
+/// A session whose embedder is down (every write is held) over `store`,
+/// with a short flush interval so the background flush runs.
+async fn held_write_session(session: &str, store: Arc<dyn GraphStore>) -> Memory {
+    Memory::builder()
+        .session(session)
+        .agent("agent-a")
+        .flush_interval(Duration::from_millis(100))
+        .store(store)
+        .embedder(Arc::new(DeadEmbedder) as Arc<dyn Embedder>)
+        .embedding_contract(contract("fixture", 1024))
+        .match_strategy(MatchStrategy::Hybrid)
+        .build()
+        .await
+        .expect("build a session whose embedder is dead")
+}
+
+/// Wait (bounded, wall clock) until `done` holds.
+async fn until_mem(mem: &Memory, what: &str, done: impl Fn(&Memory) -> bool) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while !done(mem) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for {what}"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+/// Submit one write of `agent` and wait until the worker holds it.
+async fn submit_and_hold(mem: &Memory, agent: &AgentId, content: &str) -> crate::writeq::ReceiptId {
+    let submitted = mem
+        .derive_async_as(
+            agent,
+            &[(content, ConceptType::Entity)],
+            &ParentOf::none(),
+            None,
+        )
+        .await
+        .expect("ack");
+    assert!(!submitted.dropped(), "{}", submitted.answer.describe());
+    let receipt = submitted.receipt;
+    until_mem(mem, "the worker to hold the write", |m| {
+        m.pipeline().lookup(agent, receipt).tag() == "pending_replay"
+    })
+    .await;
+    receipt
+}
+
+/// Whether `batch` carries the `PutWriteIntent` of `receipt`.
+fn holds_put(batch: &MutationBatch, receipt: crate::writeq::ReceiptId) -> bool {
+    let receipt = receipt.to_string();
+    batch
+        .mutations
+        .iter()
+        .any(|m| matches!(m, Mutation::PutWriteIntent { intent } if intent.receipt == receipt))
+}
+
+/// **#345**: a background flush the store refuses with a constraint
+/// violation dead-letters its whole batch, and the session goes on. Here
+/// that batch holds the put of a write the worker is holding
+/// (`pending_replay`), so its intent never reached the store. The close then
+/// finds an empty tail. Before the fix it took that as "every set-aside
+/// intent was taken by an earlier flush" and answered the write
+/// `intent_durable`, and the next serve had nothing to replay. It must answer
+/// `close_unflushed`.
+///
+/// Mirrors `Drain.closeW_vouches_dead_lettered` (the bug) and
+/// `Drain.closeD_never_vouches_dropped`, `Drain.closeD_durable_iff` (the
+/// fix).
+#[tokio::test(start_paused = true)]
+async fn a_close_with_an_empty_tail_does_not_vouch_for_a_dead_lettered_intent() {
+    let inner = Arc::new(MemoryStore::new());
+    let sid = SessionId::new("dead-lettered-intent");
+    let agent = AgentId::new("agent-a");
+    let store = Arc::new(
+        FlakyStore::new(
+            Arc::new(VectorSearchable(inner.clone())) as Arc<dyn GraphStore>,
+            0,
+        )
+        .with_dead_letters(1),
+    );
+    let mem = held_write_session("dead-lettered-intent", store.clone()).await;
+    let receipt = submit_and_hold(&mem, &agent, "user schema").await;
+
+    // The first background flush takes the put and dead-letters the batch.
+    until_mem(&mem, "the dead letter", |m| m.stats().dead_lettered == 1).await;
+    assert!(
+        holds_put(&store.batches()[0], receipt),
+        "the dead-lettered batch held the held write's put"
+    );
+    let stats = mem.stats();
+    assert_eq!(
+        (stats.log_depth, stats.flush_depth),
+        (0, 0),
+        "nothing is left to flush: the close's tail is empty"
+    );
+
+    mem.close().await.expect("clean close");
+    let answer = mem.pipeline().lookup(&agent, receipt);
+    assert_eq!(
+        answer.tag(),
+        "close_unflushed",
+        "a close must not vouch for an intent a dead letter dropped: {answer:?}"
+    );
+    let intents = inner
+        .load_session(&sid)
+        .await
+        .map(|s| s.write_intents.len())
+        .unwrap_or(0);
+    assert_eq!(intents, 0, "the store never held the intent");
+}
+
+/// **#345, the flushed tail and the retried close**: the first write's put
+/// is dead-lettered; the second write, held behind it, has its put in the
+/// close's tail. The first close's final flush fails, so both answer
+/// `close_unflushed`. The retried close lands the tail: it upgrades the
+/// second write, whose intent is now in the store, to `intent_durable`, and
+/// leaves the first `close_unflushed`. Before the fix the retry upgraded
+/// both.
+///
+/// Mirrors `Drain.closeD_retryD` and the example after
+/// `Drain.closeW_vouches_dead_lettered`.
+#[tokio::test(start_paused = true)]
+async fn a_retried_close_upgrades_only_the_intents_it_can_vouch_for() {
+    let inner = Arc::new(MemoryStore::new());
+    let sid = SessionId::new("dead-lettered-retry");
+    let agent = AgentId::new("agent-a");
+    let store = Arc::new(
+        FlakyStore::new(
+            Arc::new(VectorSearchable(inner.clone())) as Arc<dyn GraphStore>,
+            0,
+        )
+        .with_dead_letters(1),
+    );
+    let mem = held_write_session("dead-lettered-retry", store.clone()).await;
+    let dropped = submit_and_hold(&mem, &agent, "user schema").await;
+    until_mem(&mem, "the dead letter", |m| m.stats().dead_lettered == 1).await;
+    assert!(holds_put(&store.batches()[0], dropped));
+
+    // From here every flush fails, so the second put stays in the tail.
+    store.fail_next(usize::MAX);
+    let kept = submit_and_hold(&mem, &agent, "billing schema").await;
+    mem.close()
+        .await
+        .expect_err("the final flush fails, so the close does");
+    for receipt in [dropped, kept] {
+        assert_eq!(
+            mem.pipeline().lookup(&agent, receipt).tag(),
+            "close_unflushed"
+        );
+    }
+
+    store.fail_next(0);
+    mem.close().await.expect("the retried close lands the tail");
+    assert_eq!(
+        mem.pipeline().lookup(&agent, kept).tag(),
+        "intent_durable",
+        "the retry made the second write's intent durable"
+    );
+    let answer = mem.pipeline().lookup(&agent, dropped);
+    assert_eq!(
+        answer.tag(),
+        "close_unflushed",
+        "a retried close must not vouch for an intent a dead letter dropped: {answer:?}"
+    );
+    let snap = inner.load_session(&sid).await.expect("reload");
+    let receipts: Vec<String> = snap
+        .write_intents
+        .iter()
+        .map(|i| i.receipt.clone())
+        .collect();
+    assert_eq!(receipts, [kept.to_string()]);
+}
+
 /// A consumed intent row older than the retention window
 /// must not answer better for having survived a restart than the same id
 /// would in a process that never restarted.
