@@ -1488,6 +1488,8 @@ theorem lease_mono (s : St) (e : Ev) : s.d.lease ≤ (step P s e).d.lease := by
     all_goals (repeat' split) <;>
       simp [mirror_d, (applyBatch_lease _ _).1, eraseDurable]
 
+/-- The tiered store's durable lease token never decreases, over any run of
+writes, mirrors, repairs and takeovers. -/
 theorem run_lease_mono (s : St) (evs : List Ev) : s.d.lease ≤ (run P s evs).d.lease := by
   induction evs generalizing s with
   | nil => exact Nat.le_refl _
@@ -1669,9 +1671,6 @@ theorem settle_aux (s : St) (snap : Snap) :
   by_cases h1 : checkMarker s.down s.mark snap = .ahead <;>
     simp only [h1, ite_true, ite_false] <;> split <;> (try split) <;> simp
 
-theorem settle_rep (s : St) (snap : Snap) :
-    (settle P s snap).rep = s.rep ∨ (settle P s snap).rep = .head := (settle_aux P s snap).1
-
 theorem read_aux (exp : Nat) (s : St) :
     ((read P exp s).rep = s.rep ∨ (read P exp s).rep = .head) ∧
       (read P exp s).orphans = s.orphans ∧ (read P exp s).log = s.log := by
@@ -1769,8 +1768,6 @@ structure Frame (s s' : St) : Prop where
 
 theorem frame_same {s s' : St} (h1 : s'.rep = s.rep) (h2 : s'.orphans = s.orphans)
     (h3 : s'.log = s.log) : Frame s s' := ⟨Or.inl h1, Or.inl h2, Or.inl h3⟩
-
-theorem frame_refl (s : St) : Frame s s := frame_same rfl rfl rfl
 
 theorem frame_mirror (s : St) (d : Durable) (ms : List Mut) (t : Option Nat) (d' : Durable) :
     Frame s (mirror P { s with d := d } ms t d') := by
@@ -1971,9 +1968,9 @@ theorem erase_silences_repair (s : St) (t : Nat) (e : Ev)
     exact ⟨by simp [step, hne, eraseDurable]; omega, by simp [step, hne, eraseDurable],
       by simpa [step, hne] using hw, by simpa [step, hne] using ho⟩
 
-/-- The quiet state is reached: after the fence refuses (`passLost`) the
-repair task is idle; with the lease past the token and nothing orphaned, the
-stalled holder is `Quiet`. -/
+/-- Once the lease is past token `t`, a lease row exists, the repair task is
+idle or at the head of `repair_once`, and no request under `t` is orphaned,
+the old holder can land no repair write (`Quiet t`). -/
 theorem quiet_of_idle (s : St) (t : Nat) (hp : t < s.d.lease) (hr : s.d.row ≠ .none)
     (hi : s.rep = .idle ∨ s.rep = .head) (ho : ∀ x ∈ s.orphans, x.1 ≠ .repair t) : Quiet t s :=
   ⟨hp, hr, by rcases hi with h | h <;> rw [h] <;> rfl, ho⟩
@@ -2263,6 +2260,8 @@ theorem mirror_ends (s : St) : (run P s (steps .mirStep s.mir.measure)).mir = .i
       exact ih s (by rw [hi]; exact Nat.zero_le _)
     · exact ih _ (Nat.le_of_lt_succ (Nat.lt_of_lt_of_le (mirStep_measure s hi) h))
 
+/-- A mirror timeout ends the mirror task (`mirror_ops` is abandoned): nothing
+more of that batch is mirrored. -/
 theorem mirTimeout_ends (s : St) : (step P s .mirTimeout).mir = .idle := by
   simp only [step]; split
   · assumption
@@ -3008,12 +3007,17 @@ vectors under contract 1's name, which a reader still holding contract 1 ranks
 a contract-1 probe against. `project` itself is unchanged by the fix. -/
 def reembedBatch : List Mut := [.upsert 1 (some (1, 11)), .upsert 2 (some (1, 21)), .setContract (some 2)]
 
+/-- Before #319, `project` placed a re-embed batch's new vectors under the old
+contract's index, because its `SetEmbedding` comes last. -/
 theorem project_reembed_into_old_index :
     project reembedBatch (some 1) = ([(1, 1, some (1, 11)), (1, 2, some (1, 21))], some 2) := by
   decide
 
 def migrated : St := run Pprev seeded ([.write reembedBatch] ++ steps .mirStep 4 ++ [.read 2])
 
+/-- Before #319, a re-embed migration through the tiered store wrote its new
+vectors into the old contract's index while the mirror reported in sync, so
+reads under the new contract found nothing. -/
 theorem reembed_migration_misindexed :
     migrated.d.contract = some 2 ∧ lookup 1 migrated.d.vecs = some (1, 11) ∧
       migrated.tier.sync = .inSync ∧ markerEpoch migrated = some 2 ∧
@@ -3040,6 +3044,9 @@ and the session stays in sync, so the vectors the durable store now holds
 under contract 2 are in no contract-2 document. -/
 def relabeled : St := run Pprev seeded ([.write [.setContract (some 2)]] ++ steps .mirStep 2 ++ [.read 2])
 
+/-- Before #319, an operator relabel (`SetEmbedding` alone) through the tiered
+store left the new contract's index empty while the mirror reported in sync.
+-/
 theorem relabel_leaves_new_index_empty :
     relabeled.d.contract = some 2 ∧ lookup 1 relabeled.d.vecs = some (0, 10) ∧
       relabeled.tier.sync = .inSync ∧ markerEpoch relabeled = some 2 ∧
@@ -3060,6 +3067,8 @@ holder's read falls back to the durable store meanwhile. Not a mirror
 failure. -/
 def migratedFixed : St := run Pt seeded ([.write reembedBatch] ++ steps .mirStep 4 ++ [.read 2])
 
+/-- Since #319 the mirror holds a contract-switching batch back: the durable
+flush lands, the tier goes stale and reads fall back to the durable store. -/
 theorem reembed_migration_held_back :
     migratedFixed.d.contract = some 2 ∧ lookup 1 migratedFixed.d.vecs = some (1, 11) ∧
       migratedFixed.tier.sync = .stale ∧ migratedFixed.tier.failures = 0 ∧
@@ -3073,6 +3082,8 @@ serves exactly the batch's vectors, the session is in sync at the batch's
 epoch, and the session's contract-1 documents are swept. -/
 def migratedRepaired : St := run Pt migratedFixed (steps .repStep 20 ++ [.read 2])
 
+/-- Since #319, the repair then re-indexes from the durable snapshot, and the
+tier is back in sync under the new contract. -/
 theorem reembed_migration_repaired :
     migratedRepaired.tier.sync = .inSync ∧ markerEpoch migratedRepaired = some 2 ∧
       migratedRepaired.rep = .idle ∧
@@ -3174,6 +3185,8 @@ while the session stays in sync: a read between two items ranks build-1 and
 build-0 vectors together. The durable store never holds the mix. -/
 def inPlace : List Mut := [.upsert 1 (some (1, 11)), .upsert 2 (some (1, 21))]
 
+/-- #296 review: an in-place re-embed through the tiered store briefly answers
+reads from two builds, until the bulk and the marker land. -/
 theorem inplace_reembed_mixes_builds :
     let s := run Pt seeded [.write inPlace, .mirStep, .read 1]
     s.tier.sync = .inSync ∧ answerAt s [1, 2] = some [some (1, 11), some (0, 20)] ∧
@@ -3196,6 +3209,9 @@ epoch, and the reader keeps serving node 1 from the index however much time
 passes. -/
 def readerSeeded : St := run Pt {} [.takeover, .otherWrite seed true, .read 1]
 
+/-- A tiered reader that once found the session in sync never re-checks the
+marker, so it keeps reading the index after another process's write leaves it
+behind, until it reloads. -/
 theorem reader_never_rechecks :
     let s := run Pt readerSeeded [.otherWrite [.delete 1] false, .tick 1000000, .read 1]
     readerSeeded.tier.sync = .inSync ∧ lookup 1 s.d.vecs = none ∧ markerEpoch s = some 1 ∧
@@ -3241,6 +3257,8 @@ def rewound : St :=
     [.repStep, .repStep, .write [.delete 2]] ++ steps .mirStep 3 ++
     [.write [.upsert 5 (some (0, 50))]] ++ steps .repStep 14)
 
+/-- A repair pass can reconcile from the snapshot it loaded before re-checking
+an advanced marker, so it rewinds the index to that older snapshot. -/
 theorem repair_from_pre_recheck_snapshot :
     lookup 2 rewound.d.vecs = none ∧ rewound.d.epoch = 4 ∧
       docAt rewound 1 2 = some (0, 20) ∧ markerEpoch rewound = some 2 ∧

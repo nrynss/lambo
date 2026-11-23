@@ -294,7 +294,7 @@ theorem take_fit_prefix {α : Type} (ok : Nat → Bool) (blocks : List α) :
     ∃ dropped, blocks.take (fit ok blocks.length) ++ dropped = blocks :=
   ⟨blocks.drop (fit ok blocks.length), List.take_append_drop _ _⟩
 
-/-- A zero budget (nothing fits) renders no whole block. -/
+/-- When no prefix fits the budget, `fit` renders no whole block. -/
 theorem fit_of_nothing_fits (ok : Nat → Bool) (n : Nat) (h : ∀ k, ok k = false) :
     fit ok n = 0 := by
   cases n with
@@ -306,7 +306,7 @@ theorem fit_of_nothing_fits (ok : Nat → Bool) (n : Nat) (h : ∀ k, ok k = fal
     unfold fit
     exact fitFrom_miss h1 m
 
-/-- When every prefix fits, every block is rendered. -/
+/-- When every prefix fits the budget, `fit` renders every block. -/
 theorem fit_of_all_fit (ok : Nat → Bool) (n : Nat) (h : ∀ k, ok k = true) : fit ok n = n := by
   have hle := fit_le ok n
   by_cases hlt : fit ok n < n
@@ -525,8 +525,8 @@ theorem bsearch_spec (p : Nat → Bool) (n : Nat) :
         have := ih lo (lo + (hi - lo) / 2) (by omega) (by omega) h3 (Or.inr hf)
         exact ⟨this.1, by omega, this.2.2.1, this.2.2.2⟩
 
-/-- Fuel does not matter once it covers the interval: the model is the
-unbounded `while` loop. -/
+/-- `fit.rs`'s binary search with `fuel = cuts.len()` gives the unbounded
+`while` loop's answer: the fuel never runs out. -/
 theorem bsearch_fuel (p : Nat → Bool) :
     ∀ (f f' lo hi : Nat), hi - lo ≤ f + 1 → hi - lo ≤ f' + 1 →
       bsearch p f lo hi = bsearch p f' lo hi := by
@@ -869,7 +869,8 @@ theorem fitBlocks_fits (e : Env α) (bs : List (Block α)) (maxT : Nat)
     rw [hti]
     simpa [okCut] using hoki
 
-/-- Nothing rendered means the empty context. -/
+/-- When `fit` (`src/recall/format/fit.rs`) renders no block, the context is
+empty. -/
 theorem fitBlocks_empty (e : Env α) (bs : List (Block α)) (maxT : Nat)
     (h : (fitBlocks e bs maxT).rendered = 0) : (fitBlocks e bs maxT).context = [] := by
   rcases fitBlocks_cases e bs maxT with hp | ⟨b, rest, t, f, _, _, _, hq⟩
@@ -1328,7 +1329,8 @@ theorem rust_default_steady (content label warn inspectId : List Char)
     have := toDigits_length_lip n n' h
     omega
 
-/-- The exact byte estimator `|s| s.len()` the tests also use is `Steady`. -/
+/-- The byte estimator `|s| s.len()` the Rust tests use is `Steady`, so the
+fit theorems cover it. -/
 theorem rust_bytes_steady (content label warn inspectId : List Char)
     (scope : Option (List Char)) :
     Steady (rustEnv (wsum Char.utf8Size)) (rustBlock content label warn inspectId scope)
@@ -1512,7 +1514,8 @@ def jEnv (est : List Nat → Nat) : Env Nat := ⟨est, [10, 10], [1], [10], fun 
 /-- Length up to `J`, then `10^k` more. -/
 def jumpEst (J k : Nat) (s : List Nat) : Nat := if s.length ≤ J then s.length else 10 ^ k + s.length
 
-/-- It is monotone in the length. -/
+/-- The counterexample estimator (length up to `J`, `10^k` more above) is
+monotone in the length: monotonicity alone does not make `fit`'s cut safe. -/
 theorem jumpEst_mono (J k : Nat) {s t : List Nat} (h : s.length ≤ t.length) :
     jumpEst J k s ≤ jumpEst J k t := by
   unfold jumpEst
@@ -1551,7 +1554,9 @@ byte count up to 90 bytes and `10^19` more above. -/
 def rjEst (s : List Char) : Nat :=
   if wsum Char.utf8Size s ≤ 90 then wsum Char.utf8Size s else 10 ^ 19 + wsum Char.utf8Size s
 
-/-- It is a monotone function of the byte count. -/
+/-- The counterexample estimator for `fit.rs` (the byte count up to 90 bytes,
+`10^19` more above) is monotone in the byte count: monotonicity alone does not
+make the cut safe. -/
 theorem rjEst_mono {s t : List Char} (h : wsum Char.utf8Size s ≤ wsum Char.utf8Size t) :
     rjEst s ≤ rjEst t := by
   unfold rjEst

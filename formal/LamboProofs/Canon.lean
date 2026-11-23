@@ -55,7 +55,8 @@ def legal : Status → Status → Bool
 
 /-! ## The gate's table -/
 
-/-- Self-loops are rejected. -/
+/-- `legal_canonization_transition` refuses a transition from a status to
+itself. -/
 theorem legal_irrefl (s : Status) : legal s s = false := by
   cases s <;> rfl
 
@@ -77,11 +78,6 @@ theorem canonical_only_from_venerable (a : Status) (h : legal a .canonical = tru
 theorem legal_rank_step (a b : Status) (h : legal a b = true) (hup : a.rank < b.rank) :
     b.rank = a.rank + 1 ∨ (a = .none ∧ b = .venerable) := by
   revert h hup
-  cases a <;> cases b <;> decide
-
-/-- Every legal transition changes the status. -/
-theorem legal_ne (a b : Status) (h : legal a b = true) : a ≠ b := by
-  revert h
   cases a <;> cases b <;> decide
 
 /-- A demotion always lands on `None`, the bottom of the ladder: a demoted
@@ -223,7 +219,8 @@ theorem cycle_superseded_stays_none (f : Flags) (hs : f.supersede = true) :
     cases supersede <;> cases stage1 <;> cases stage2 <;> cases stage3 <;> cases budget <;>
       decide
 
-/-- With no flag set, the cycle changes nothing. -/
+/-- An `Evaluator` cycle (`apply`) with no stage flag set leaves a concept's
+status unchanged. -/
 theorem cycle_idle (s : Status) :
     cycle s ⟨false, false, false, false, false⟩ = s := by
   cases s <;> decide

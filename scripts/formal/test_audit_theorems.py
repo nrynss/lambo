@@ -140,8 +140,9 @@ class Audit(unittest.TestCase):
         # The same statement as a referenced theorem.
         self.assertTrue(self.row(text, "twin_unused").startswith("- (b)"))
         self.assertIn("states the same as `twin_used`", self.row(text, "twin_unused"))
-        # Documented, cited nowhere: unclear, not a deletion candidate.
-        self.assertTrue(self.row(text, "documented").startswith("- (c)"))
+        # Documented, cited nowhere: under the models' rule its doc comment
+        # states its Rust guarantee, so it is kept.
+        self.assertTrue(self.row(text, "documented").startswith("- (a)"))
         # simp may use it without naming it.
         self.assertTrue(self.row(text, "f_eq").startswith("- (c)"))
         # An undocumented lemma that is not an `rfl` unfolding is unclear.

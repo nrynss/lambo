@@ -44,13 +44,14 @@ class and a one-line reason, from what the sources say about it:
   comment names) and its doc comment does not state it as a result (a
   finding's bold title keeps it in (a)); or it is a dead helper, an
   undocumented `rfl` unfolding of a definition that nothing uses or names;
-* (c) unclear: anything else, such as an undocumented lemma that may be a
-  property in its own right (an asymmetry, an invariant) or a leftover.
+* (c) unclear: an undocumented lemma, which the models' rule forbids and
+  `--check` fails on; a documented one is (a), its doc comment stating its
+  Rust guarantee.
 
 Precedence: a same-statement twin (b); a result named in a header, the
 README or the CHANGELOG, or a bold title (a); a superseding counterpart (b);
-the other (a) criteria; a `@[simp]` lemma (c); a dead helper (b); the rest
-(c). The classes are a first sort from those signals, for a person to
+the other (a) criteria; a `@[simp]` lemma (c); a dead helper (b); a
+documented theorem (a); the rest (c). The classes are a first sort from those signals, for a person to
 confirm.
 
 `--check` exits 1 when a theorem is neither used by a proof (or named by
@@ -379,7 +380,7 @@ RFL = re.compile(r":=\s*(?:by\s+)?rfl\s*$")
 
 
 def local_name(n):
-    """`n` below its model namespace: `Cmd.mem_all` for `Lambo.Resolve.Cmd.mem_all`."""
+    """`n` below its model namespace: `Acyclic.irrefl` for `Lambo.Cite.Acyclic.irrefl`."""
     ns = namespace_of(n)
     return n.removeprefix(f"Lambo.{ns}.") if ns else n
 
@@ -432,14 +433,12 @@ def classify(m, n, d, src_lines, header, readme, changelog, doc_mentions, twins=
     span = d["span"][1] - d["span"][0] + 1
     if not doc and RFL.search(body):
         return "b", "a dead helper: an undocumented `rfl` unfolding of a definition that nothing uses or names"
-    mentions = sorted(doc_mentions.get(short, set()) - {n})
-    if mentions:
-        names = ", ".join(f"`{local_name(x)}`" for x in mentions[:2])
-        return "c", f"documented; only the doc comment of {names} mentions it"
     if doc:
+        # The models' rule: a theorem no proof uses states its Rust guarantee
+        # in its doc comment, which a reviewer has checked.
         first = re.sub(r"\s+", " ", doc.lstrip()[3:].split("-/")[0]).strip()
-        return "c", f"documented but cited nowhere: \"{first[:90]}\""
-    return "c", f"undocumented {span}-line lemma, a property in its own right or a leftover"
+        return "a", f"its doc comment states its Rust guarantee: \"{first[:110]}\""
+    return "c", f"undocumented {span}-line lemma, which the models' rule forbids (`--check` fails on it)"
 
 
 def check(m):
@@ -575,13 +574,14 @@ def main(argv=None):
       "the current counterpart its doc comment names) and it is not stated as a result (a bold-titled doc "
       "comment, such as a finding's, keeps it in (a)); or it is a dead helper, an undocumented `rfl` "
       "unfolding of a definition that nothing uses or names.")
-    w("* **(c)** unclear: anything else, such as an undocumented lemma that may be a property in its own "
-      "right (an asymmetry, an invariant) or a leftover, or a `@[simp]` lemma `simp` may use unnamed.\n")
+    w("* **(c)** unclear: an undocumented lemma, which the models' rule forbids (`--check` fails on it). "
+      "A documented one is (a): under the rule (formal/README.md, \"How the models are written\") its doc "
+      "comment states what it guarantees about which Rust behaviour, and a reviewer checked that it does.\n")
     w("Precedence: a same-statement twin (b); a result named in a header, the README or the CHANGELOG, "
       "or a bold title (a); a superseding counterpart (b); the other (a) criteria; a `@[simp]` lemma (c); "
-      "a dead helper (b); the rest (c). The result is a first sort for the owner to confirm. `Drain/History.lean` describes no current Rust "
+      "a dead helper (b); a documented theorem (a); the rest (c). The result is a first sort for the owner to confirm. `Drain/History.lean` describes no current Rust "
       "and is kept as the evidence for its findings. Names are given below their model's namespace "
-      "(`Cmd.mem_all` is `Lambo.Resolve.Cmd.mem_all`).\n")
+      "(`Acyclic.irrefl` is `Lambo.Cite.Acyclic.irrefl`).\n")
     w("## Summary\n")
     w(f"{total['total']} theorems in {len(files)} model files; {total['a'] + total['b'] + total['c']} "
       f"unreferenced: {total['a']} (a), {total['b']} (b), {total['c']} (c).\n")

@@ -575,6 +575,9 @@ theorem stepW_caps (c : Caps) (sz : Job → Nat) (now : Int) (st : WS) (ev : Ev)
   | start a => exact startW_caps c sz now a st ⟨cl, ct, cb⟩
   | finish a r => exact finishW_caps c sz now a r st ⟨cl, ct, cb⟩
 
+/-- The lane, queue and byte caps of `Lanes` hold over queued, running and
+held writes after any sequence of worker events, and a retry never reads them
+(#295). -/
 theorem runW_caps (c : Caps) (sz : Job → Nat) (now : Int) :
     ∀ (evs : List Ev) (st : WS), CapsW c sz st → CapsW c sz (runW c sz now st evs) := by
   intro evs

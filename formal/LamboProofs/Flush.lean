@@ -396,6 +396,8 @@ theorem backoffAt_mono {i j : Nat} (h : i ≤ j) : backoffAt i ≤ backoffAt j :
 
 theorem backoffAt_seven : backoffAt 7 = backoffCap := by decide
 
+/-- From the seventh retry on, `flush_with_retry` sleeps `BACKOFF_CAP`
+(`next_backoff` has reached its cap). -/
 theorem backoffAt_capped {i : Nat} (h : 7 ≤ i) : backoffAt i = backoffCap := by
   induction i with
   | zero => omega
@@ -461,10 +463,6 @@ theorem ladder_nonretryable {n bo k : Nat} {e : Err} (h : (st b n).reported = so
   cases k with
   | zero => simp [ladder, h]
   | succ k => simp [ladder, h, hr]
-
-theorem ladder_last {n bo : Nat} :
-    ladder st b n bo 0 = ⟨[(b, st b n)], [], (st b n).reported⟩ := by
-  simp [ladder]
 
 theorem ladder_retry {n bo k : Nat} {e : Err} (h : (st b n).reported = some e)
     (hr : e.retryable = true) :
@@ -825,6 +823,8 @@ theorem applyBatch_upsert {K V : Type} [DecidableEq K] (b : List (K × Option V)
       simp only [upsert]
       by_cases hk : k = m.1 <;> simp [hk]
 
+/-- A row upsert (`write_rows`) is idempotent, so re-flushing a batch after a
+failed attempt changes no row. -/
 theorem upsert_idempotent {K V : Type} [DecidableEq K] :
     Idempotent (upsert (K := K) (V := V)) := by
   intro s b
@@ -1512,6 +1512,8 @@ theorem iter_due (hrun : s.running = true) (h : Due P true now s) :
   rw [ite_eq_right (show ¬ ((!s.running) = true) by simp [hrun])]
   exact congrArg checkFence (cycle_due h)
 
+/-- While the fence is not latched, `drain_and_flush`'s fence check leaves the
+loop's state unchanged. -/
 theorem checkFence_unfenced {s : St α} (hf : s.fenced = false) : checkFence s = s := by
   simp [checkFence, hf]
 
@@ -1668,6 +1670,8 @@ theorem stopped_silent {s : St α} (hr : s.running = false) (e : Ev α) :
   | fence => exact ⟨rfl, hr, rfl, rfl⟩
   | wake w now er => simp [step, iter, hr]
 
+/-- Once the flush loop has stopped, no event makes another store call or adds
+to the ledger. -/
 theorem run_stopped_silent {s : St α} (hr : s.running = false) (evs : List (Ev α)) :
     (run P st s evs).calls = s.calls ∧ (run P st s evs).ledger = s.ledger := by
   induction evs generalizing s with
@@ -1767,6 +1771,8 @@ theorem degraded_silent {s : St α} (hd : s.degraded = true) (e : Ev α) :
       | poll => exact hcyc _ _ _
     · simp at hr; simp [hr, hd]
 
+/-- A degraded flush loop makes no further store call: `drain_and_flush` keeps
+the session's writes in memory. -/
 theorem run_degraded_silent {s : St α} (hd : s.degraded = true) (evs : List (Ev α)) :
     (run P st s evs).calls = s.calls := by
   induction evs generalizing s with
@@ -3870,6 +3876,8 @@ theorem value_rejected_not_retryable : (Cause.errSplit .valueRejected).retryable
 /-- Nor is a store-scoped one, and a transient stays retryable. -/
 theorem store_permanent_not_retryable : (Cause.errSplit .storePermanent).retryable = false := rfl
 
+/-- Splitting the permanent error class by scope leaves a retryable store
+error retryable (`StoreError::is_retryable`). -/
 theorem transient_retryable_split : (Cause.errSplit .retryable).retryable = true := rfl
 
 /-- **Agreement.** On a store that never rejects a value, the split is the

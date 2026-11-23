@@ -2185,6 +2185,8 @@ ends, but makes its `Memory` only after it. -/
 theorem mems_le_places (hc : WF c) (h : Reach c s) : memSum c s.slots ≤ c.places :=
   (reach_inv hc h).mems
 
+/-- In every reachable registry state, live on-demand Memories never exceed
+the places left after the pinned sessions. -/
 theorem live_on_demand_le_places (hc : WF c) (h : Reach c s) : liveOD c s.slots ≤ c.places :=
   Nat.le_trans (S_le (fun j _ => by
     by_cases hp : isPinned c j <;> simp [hp, isLive_le_mem])) (mems_le_places hc h)
@@ -2850,6 +2852,8 @@ example : pinnedRetry 150 = 1000 := by decide
 Pinned by `formal_constants_tests::registry`. -/
 def unplacedCap (maxAttached : Nat) : Nat := max (maxAttached * 2) 1
 
+/-- The registry's cap on unprobed on-demand attaches is at least one, so an
+attach can always start. -/
 theorem unplacedCap_pos (m : Nat) : 1 ≤ unplacedCap m := by
   unfold unplacedCap; omega
 
@@ -2860,6 +2864,7 @@ example : unplacedCap 16 = 32 ∧ unplacedCap 1 = 2 ∧ unplacedCap 0 = 1 := by 
 among the credentials, rounded down, at least 1. -/
 def placeShare (places creds : Nat) : Nat := max (places / max creds 1) 1
 
+/-- Every on-demand share of the registry's places is at least one. -/
 theorem placeShare_pos (p n : Nat) : 1 ≤ placeShare p n := by
   unfold placeShare; omega
 
@@ -3150,6 +3155,7 @@ theorem slotViews_complete {c : Cfg} {s : St} (hI : Inv c s) {j : Nat} {x : Slot
 
 /-! ### The negative cache and how an attach ends -/
 
+/-- A create request never reads the cached `absent` answer for a session. -/
 theorem negGet_create_not_absent (e : Option (Neg × Nat)) (now ttl : Nat) :
     negGet e now ttl true ≠ some .absent := by
   unfold negGet
@@ -3159,6 +3165,8 @@ theorem negGet_create_not_absent (e : Option (Neg × Nat)) (now ttl : Nat) :
     · simp
     · split <;> simp_all
 
+/-- The registry's cached negative answer for a session expires once its TTL
+has passed. -/
 theorem negGet_expired (n : Neg) {t0 now ttl : Nat} (cr : Bool) (h : t0 + ttl ≤ now) :
     negGet (some (n, t0)) now ttl cr = none := by
   simp [negGet, h]
@@ -3235,9 +3243,6 @@ def cfgEx : Cfg :=
   { ids := [0, 1, 2], pinned := [0], onDemand := true, places := 1, permits := 2,
     cap := unplacedCap 2, er := 1000, pr := pinnedRetry 1000, wait := 30000, idle := 60000,
     minIdle := 2000, watchers := true, ttl := 30000 }
-
-theorem cfgEx_wf : WF cfgEx :=
-  ⟨by decide, by decide⟩
 
 /-- The pinned session's handle, attached at startup, its watcher parked. -/
 def hPin : H :=
@@ -3417,14 +3422,6 @@ def sHeld : St :=
   { s0 with slots := fun j => if j = 0 then some (.held 0 none) else none,
             rows := fun j => if j = 0 then ⟨.released, 1⟩ else ⟨.none, 0⟩ }
 
-theorem sHeld_init : Init cfgEx sHeld := by
-  refine ⟨rfl, rfl, rfl, fun j => ?_⟩
-  by_cases hj : j = 0
-  · subst hj
-    exact Or.inr ⟨by decide, Or.inr (Or.inl ⟨0, rfl⟩)⟩
-  · left
-    simp [sHeld, s0, hj]
-
 /-- The test `an_erase_racing_the_pinned_retry_waits_for_it_then_erases_what_it_attached`:
 while the retry holds its permit the erase cannot claim the slot; once the
 retry has admitted the session the erase claims it as attached. -/
@@ -3490,6 +3487,10 @@ def leakRun : List Ev :=
 example : (run cfgEx s0 (attach1 ++ [.tick 60000, .sweep, .detachRun 1, .start 1 true, .fPermit 1])).any
     (fun s => s.slots 1 == none && s.builds == [1]) = true := by decide
 
+/-- Past `PREVIOUS_HANDLE_WAIT`, an on-demand request attaches a session whose
+old handle is still alive, so two handles of one session are alive at once:
+the documented case in which the `SecondSessionWriter` ERROR is a true report.
+-/
 theorem previous_wait_expires :
     ∃ s, Reach cfgEx s ∧ 0 ∈ s.strays ∧ ∃ h, s.slots 1 = some (.live h) ∧ h.hid = 1 := by
   obtain ⟨s, hs, hp⟩ := reach_of_run (Reach.init s0_init) (es := leakRun)

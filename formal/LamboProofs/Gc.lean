@@ -154,8 +154,9 @@ def EdgeType.countsTowardGcConnectivity : EdgeType → Bool
 def hasGcConnection (incident : List EdgeType) : Bool :=
   incident.any EdgeType.countsTowardGcConnectivity
 
-/-- A concept whose only incident edges are contradictions and suspected
-supersessions has no GC connection: it is an orphan. -/
+/-- `counts_toward_gc_connectivity` excludes `Contradicts` and
+`SuspectedSupersedes`, so a concept whose only edges are those is an orphan to
+`gc.rs`. -/
 theorem only_contradictions_is_orphan :
     ∀ (incident : List EdgeType),
       (∀ e, e ∈ incident → e = .contradicts ∨ e = .suspectedSupersedes) →
@@ -183,6 +184,8 @@ theorem only_contradictions_is_orphan :
 /-- `collection_cap`: the larger of the floor and the fractional cap. -/
 def collectionCap (minCollectCap fractional : Nat) : Nat := max minCollectCap fractional
 
+/-- `collection_cap` is never below `MIN_COLLECT_CAP`, so a sweep can always
+collect at least that many. -/
 theorem cap_ge_floor (minCollectCap fractional : Nat) :
     minCollectCap ≤ collectionCap minCollectCap fractional := by
   unfold collectionCap
@@ -197,7 +200,8 @@ theorem taken_le_budget {ι : Type} (candidates : List ι) (budget : Nat) :
     | (rw [List.length_take]; omega)
     | exact Nat.le_trans (List.length_take_le _ _) (Nat.min_le_right _ _)
 
-/-- Nothing is held back exactly when the candidates fit in the budget. -/
+/-- A GC sweep defers no candidate exactly when the candidates fit in its
+budget. -/
 theorem none_deferred_iff {ι : Type} (candidates : List ι) (budget : Nat) :
     candidates.length - min candidates.length budget = 0 ↔ candidates.length ≤ budget := by
   omega
@@ -228,7 +232,8 @@ theorem bump_never_resets (g : Nat) : ∀ (n : Nat), g ≤ Nat.repeat bump n g :
     show g ≤ bump (Nat.repeat bump n g)
     exact Nat.le_trans ih (bump_mono _)
 
-/-- Below saturation a bump adds exactly one survival. -/
+/-- Below `i32::MAX`, `bump_gc_survived` adds exactly one survival; it
+saturates rather than overflow. -/
 theorem bump_adds_one (g : Nat) (h : g < i32Max) : bump g = g + 1 := by
   unfold bump
   exact ite_eq_left h

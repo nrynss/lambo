@@ -83,7 +83,7 @@ The list (`Inv`, preserved by `insert`, `insertAll`, `retain`, `revalidate`,
   can evict them from it"; test `a_flood_of_contradictions_does_not_evict_the_other_kinds`).
   `enforce_under_budget`: under the budget only the bound evicts.
   `enforce_noop`: within both nothing is evicted.
-* `insertFull_evicts_le_one`, `insert_evicted_eq`: one insert evicts at most
+* `insertFull_evicts_le_one`: one insert evicts at most
   one entry, so `pop()` loses nothing ("at most one goes").
 * `insert_refresh`: re-inserting a present pair evicts nothing and leaves the
   new payload at the newest `seq` (test
@@ -311,9 +311,6 @@ theorem sortPrio_perm : ∀ l : List (Entry ν), (sortPrio l).Perm l
     unfold sortPrio
     exact (insertPrio_perm x _).trans ((sortPrio_perm xs).cons x)
 
-theorem mem_sortPrio {e : Entry ν} {l : List (Entry ν)} : e ∈ sortPrio l ↔ e ∈ l :=
-  (sortPrio_perm l).mem_iff
-
 /-- Ranks at or above, as a `Prop`. -/
 def Above (a b : Entry ν) : Prop := prioLe a b = true
 
@@ -460,14 +457,6 @@ theorem countO_cons (e : Entry ν) (l : List (Entry ν)) :
 
 theorem countC_le_length (l : List (Entry ν)) : countC l ≤ l.length := by
   unfold countC; exact List.length_filter_le _ _
-
-theorem countC_add_countO (l : List (Entry ν)) : countC l + countO l = l.length := by
-  induction l with
-  | nil => simp [countC, countO]
-  | cons e rest ih =>
-    rw [countC_cons, countO_cons]
-    simp only [List.length_cons]
-    split <;> omega
 
 theorem countC_sublist {l₁ l₂ : List (Entry ν)} (h : l₁.Sublist l₂) : countC l₁ ≤ countC l₂ := by
   unfold countC; exact (h.filter _).length_le
@@ -638,7 +627,7 @@ theorem enforce_sublist_sorted : (enforce max cmax es).1.Sublist (sortPrio es) :
   unfold enforce
   exact (List.take_sublist _ _).trans (budgetKept_sublist cmax 0 _)
 
-/-- What is kept is in priority order. -/
+/-- `HotList::enforce` keeps its entries in priority order. -/
 theorem enforce_pairwise : (enforce max cmax es).1.Pairwise Above :=
   (sortPrio_pairwise es).sublist (enforce_sublist_sorted max cmax es)
 
@@ -670,8 +659,8 @@ theorem enforce_evicts_lowest (k d : Entry ν) (hk : k ∈ (enforce max cmax es)
     rw [← List.take_append_drop max (budgetKept cmax 0 (sortPrio es))] at this
     exact (List.pairwise_append.mp this).2.2 k hk d hd
 
-/-- The budget evicts contradictions only: an entry of another kind is
-evicted only by the bound. -/
+/-- `HotList::enforce`'s contradiction budget evicts contradictions only
+(#196): an entry of another kind is evicted only by the bound. -/
 theorem enforce_evicted_other_by_bound (d : Entry ν) (hd : d ∈ (enforce max cmax es).2)
     (hdc : isC d = false) : d ∈ (budgetKept cmax 0 (sortPrio es)).drop max := by
   unfold enforce at hd
@@ -965,6 +954,8 @@ theorem inv_withBudget (max cmax : Nat) : Inv (withBudget max cmax : HotList ν)
   ⟨by simp [withBudget], by simp [withBudget], by simp [withBudget], by simp [withBudget],
     by simp [withBudget, countC]⟩
 
+/-- A new `HotList` starts with its bound, budget and one-entry-per-condition
+invariant holding. -/
 theorem inv_new : Inv (new : HotList ν) := inv_withBudget _ _
 
 /-- **No two live entries share a seq, so the comparator's node-id arm never
@@ -1022,15 +1013,6 @@ theorem insertFull_evicts_le_one {l : HotList ν} (hl : Inv l) (n : ν) (c : Con
   have := hl.len_le
   have := hl.countC_le
   omega
-
-theorem insert_evicted_eq {l : HotList ν} (hl : Inv l) (n : ν) (c : Cond) (p : Payload ν) :
-    (insertFull l n c p).2 = (insert l n c p).2.toList := by
-  have h := insertFull_evicts_le_one hl n c p
-  show _ = ((insertFull l n c p).2.getLast?).toList
-  match hr : (insertFull l n c p).2, h with
-  | [], _ => rfl
-  | [d], _ => rfl
-  | _ :: _ :: _, h => simp at h
 
 /-- **Refresh** (`refresh_replaces_payload_and_restores_recency`): re-inserting a
 present `(node, condition)` evicts nothing, keeps the length, and leaves the new
@@ -1267,8 +1249,9 @@ theorem countC_filterMap_le (f : Entry ν → Option (Entry ν))
       rw [this]
       omega
 
-/-- Re-validation keeps the invariant: it only drops entries and rewrites
-payloads (no re-sort is needed, since priority ignores the payload). -/
+/-- `HotList::revalidate` keeps the hot list's invariant: it only drops
+entries and rewrites payloads, and priority ignores the payload, so no re-sort
+is needed. -/
 theorem revalidate_inv {l : HotList ν} (hl : Inv l) (check : Check ν) (members : List ν)
     (now : Int) : Inv (revalidate check members now l) := by
   have hkeys := filterMap_map_sublist (revalidateOne check members now) key
@@ -1338,6 +1321,9 @@ theorem forces_iff (pillar : ν → Bool) (hp : ν → List (Payload ν)) (id : 
 builds them so; `HotListEntry::new` does not check it). -/
 def WellFormed (e : Entry ν) : Prop := e.payload.kind = e.cond
 
+/-- A well-formed hot-list entry's payload forces inclusion in recall
+(`forces_inclusion`) unless it is a contradiction and the concept is not a
+pillar. -/
 theorem forcesPayload_of_wf (pillar : Bool) (e : Entry ν) (h : WellFormed e) :
     forcesPayload pillar e.payload = true ↔ e.cond ≠ .contradiction ∨ pillar = true := by
   rw [forcesPayload_iff, h]
@@ -1479,14 +1465,20 @@ def annot : Payload ν → Annot
 order (the lines between ⚑ and the companion line). -/
 def hotLines (hp : ν → List (Payload ν)) (id : ν) : List Annot := (hp id).map annot
 
+/-- Recall renders one hot-list line per payload the concept carries
+(`hot_warning`, `contradiction_warning`). -/
 theorem hotLines_length (hp : ν → List (Payload ν)) (id : ν) :
     (hotLines hp id).length = (hp id).length := by
   simp [hotLines]
 
+/-- Recall renders a hot-list payload with the contradiction warning
+(`contradiction_warning`) exactly when it is a contradiction payload. -/
 theorem annot_eq_contradiction_iff (p : Payload ν) :
     annot p = .contradiction ↔ p.kind = .contradiction := by
   cases p <;> simp [annot, Payload.kind]
 
+/-- Recall renders a hot-list payload with the conflict warning exactly when
+it is a conflict payload. -/
 theorem annot_eq_conflict_iff (p : Payload ν) :
     annot p = .conflict ↔ p.kind = .conflict := by
   cases p <;> simp [annot, Payload.kind]
@@ -1533,8 +1525,9 @@ section Reachable
 
 variable [DecidableEq ν]
 
-/-- What `insert` returns ranks at or below everything it keeps, unless it is a
-contradiction dropped by the budget and the kept entry is of another kind. -/
+/-- What `HotList::insert` evicts ranks at or below everything it keeps,
+unless it is a contradiction the budget dropped while the kept entry is of
+another kind. -/
 theorem insert_evicted_lowest (l : HotList ν) (n : ν) (c : Cond) (p : Payload ν) (d : Entry ν)
     (hd : (insert l n c p).2 = some d) (k : Entry ν) (hk : k ∈ (insert l n c p).1.entries) :
     Above k d ∨ (isC d = true ∧ isC k = false) := by

@@ -348,7 +348,7 @@ def noisyOr (u : Int) (bm25 cosine median : F64) : Option Frac :=
     else (keywordTerm u bm25).map fun a => noisyOrCombine a (vectorTerm u c m)
   | _, _ => none
 
-/-- The noisy-OR is `a + b - ab`. -/
+/-- `confidence.rs` combines the two legs as the noisy-OR `a + b − ab`. -/
 theorem noisyOrCombine_num (a b : Frac) :
     (noisyOrCombine a b).num = a.num * b.den + b.num * a.den - a.num * b.num := by
   simp only [noisyOrCombine]
@@ -430,7 +430,8 @@ theorem noisyOr_eq_some {u : Int} {bm25 cosine median : F64} {v : Frac}
       | _ => simp [keywordTerm] at h
   · cases h
 
-/-- `None` for any non-finite input or a median at or above `1`. -/
+/-- `provisional_confidence`'s two-leg value is `None` for any non-finite
+input and for a null median at or above `1`. -/
 theorem noisyOr_none {u : Int} {bm25 cosine median : F64}
     (h : bm25.isFinite = false ∨ cosine.isFinite = false ∨ median.isFinite = false ∨
       ∃ m, median = .fin m ∧ u ≤ m) :
@@ -899,7 +900,8 @@ theorem topLegs_congr {inGraph : ι → Bool} {legs legs' : List (ι × LegSlot)
     topLegs inGraph legs kw = topLegs inGraph legs' kw := by
   simp only [topLegs, finiteMax_congr h]
 
-/-- **Independent of the `HashMap`'s order.** -/
+/-- `TopLegs` (`src/recall/confidence.rs`) does not depend on the candidate
+`HashMap`'s iteration order. -/
 theorem topLegs_perm {inGraph : ι → Bool} {legs legs' : List (ι × LegSlot)} (kw : KeywordLeg)
     (h : legs.Perm legs') : topLegs inGraph legs kw = topLegs inGraph legs' kw :=
   topLegs_congr kw fun _ => ((h.filter _).filterMap _).mem_iff

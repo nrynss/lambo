@@ -97,9 +97,8 @@ The session counter (`sessionCount gap starts`):
   `sessionCount_antitone_gap`: a wider gap never counts more.
 * `sessionCount_zero_gap`: with gap 0 it counts distinct starts.
 * `sessionCount_window`: starts all less than `gap` after the earliest count
-  as one ("Dense clusters contribute one session each");
-  `window_needs_earliest`: measured from the first start in input order this
-  fails. `chain_counts_more_than_one`: a chain of starts 23 h apart, one
+  as one ("Dense clusters contribute one session each"), measured from the
+  earliest start, not the first in input order. `chain_counts_more_than_one`: a chain of starts 23 h apart, one
   cluster by single linkage, counts three.
 * `separation_counts_clusters_once_and_stragglers_each`: the Rust test.
 
@@ -568,13 +567,14 @@ theorem sessionCount_perm (gap : Nat) {l l' : List Int} (h : l.Perm l') :
     sessionCount gap l = sessionCount gap l' :=
   sessionCount_congr gap l l' (fun _ => h.mem_iff)
 
-/-- An exact duplicate is one session start ("the same instant is one session
-start"). -/
+/-- `separated_session_count` counts an exact duplicate instant once ("the
+same instant is one session start"). -/
 theorem sessionCount_dup (gap : Nat) (x : Int) (l : List Int) :
     sessionCount gap (x :: x :: l) = sessionCount gap (x :: l) :=
   sessionCount_congr gap _ _ (fun z => by simp)
 
-/-- Repeating the whole input changes nothing. -/
+/-- `separated_session_count` is unchanged when every about-time appears
+twice: repeated instants never add a session. -/
 theorem sessionCount_append_self (gap : Nat) (l : List Int) :
     sessionCount gap (l ++ l) = sessionCount gap l :=
   sessionCount_congr gap _ _ (fun z => by simp)
@@ -600,7 +600,8 @@ theorem sessionCount_le_distinct (gap : Nat) (l : List Int) :
     sessionCount gap l ≤ (canon l).length :=
   greedy_le_length gap none (canon l)
 
-/-- Hence at most one per start. -/
+/-- `separated_session_count` never counts more sessions than it is given
+about-times. -/
 theorem sessionCount_le_length (gap : Nat) (l : List Int) : sessionCount gap l ≤ l.length :=
   Nat.le_trans (sessionCount_le_distinct gap l) (length_canon_le l)
 
@@ -639,7 +640,7 @@ theorem sessionCount_mono (gap : Nat) (l l' : List Int) (h : ∀ x, x ∈ l → 
   rw [← hlen]
   exact sessionCount_max gap l' S hS (fun x hx => h x (hm x hx))
 
-/-- Adding a start never lowers the count. -/
+/-- Adding an about-time never lowers `separated_session_count`. -/
 theorem sessionCount_le_cons (gap : Nat) (x : Int) (l : List Int) :
     sessionCount gap l ≤ sessionCount gap (x :: l) :=
   sessionCount_mono gap l (x :: l) (fun _ h => List.mem_cons_of_mem _ h)
@@ -661,7 +662,7 @@ theorem length_le_filter_ne (x : Int) :
       simp only [List.filter_cons, hb, ite_true, List.length_cons]
       omega
 
-/-- Adding a start raises the count by at most one. -/
+/-- Adding an about-time raises `separated_session_count` by at most one. -/
 theorem sessionCount_cons_le (gap : Nat) (x : Int) (l : List Int) :
     sessionCount gap (x :: l) ≤ sessionCount gap l + 1 := by
   obtain ⟨S, hS, hm, hlen⟩ := sessionCount_attained gap (x :: l)
@@ -678,7 +679,8 @@ theorem sessionCount_cons_le (gap : Nat) (x : Int) (l : List Int) :
   have := length_le_filter_ne x S hstrict
   omega
 
-/-- A wider gap never counts more sessions. -/
+/-- A wider `SESSION_SEPARATION` never makes `separated_session_count` count
+more sessions. -/
 theorem sessionCount_antitone_gap (g g' : Nat) (hg : g ≤ g') (l : List Int) :
     sessionCount g' l ≤ sessionCount g l := by
   obtain ⟨S, hS, hm, hlen⟩ := sessionCount_attained g' l
@@ -730,12 +732,6 @@ and 92). -/
 theorem chain_counts_more_than_one :
     sessionCount sessionSeparation
       [base, base + 23 * 3600, base + 46 * 3600, base + 69 * 3600, base + 92 * 3600] = 3 := by
-  decide
-
-/-- `sessionCount_window` needs the *earliest* start: starts within `gap` of
-the first one *in input order* can still count as two. -/
-theorem window_needs_earliest :
-    sessionCount 15 [10, 0, 20] = 2 := by
   decide
 
 /-! ## Supporting interactions, resolved on event time
@@ -844,7 +840,8 @@ theorem causal_not_recurrence (g : Graph) (c : Nat) (e : Edge)
   unfold recurrenceSessions
   rw [supportingTimes_cons_none g c e (supportTime_none g c e h)]
 
-/-- Adding any edge never lowers the recurrence term. -/
+/-- Adding an edge to the graph never lowers a concept's
+`recurrence_sessions`. -/
 theorem recurrence_mono_edge (g : Graph) (c : Nat) (e : Edge) :
     recurrenceSessions g c ≤ recurrenceSessions { g with edges := e :: g.edges } c := by
   unfold recurrenceSessions
@@ -865,7 +862,8 @@ def Graph.reflush (g : Graph) (f : Nat → Int) : Graph :=
 def Graph.strip (g : Graph) : Graph :=
   { g with interactions := g.interactions.map (fun i => { i with eventTime := none }) }
 
-/-- With no event time, the about-time is the flush time. -/
+/-- `Interaction::about_time` falls back to the flush time (`created_at`) when
+the interaction carries no event time. -/
 theorem aboutTime_fallback (i : Interaction) (h : i.eventTime = none) :
     i.aboutTime = i.createdAt := by
   simp [Interaction.aboutTime, h]
@@ -908,6 +906,9 @@ theorem supportingTimes_reflush (g : Graph) (f : Nat → Int) (c : Nat)
   rw [hst]
   rfl
 
+/-- Once every interaction carries an event time, a re-flush (new flush times)
+changes no `recurrence_sessions` count: the solo term reads
+`Interaction::about_time`, not the flush time. -/
 theorem recurrence_reflush (g : Graph) (f : Nat → Int) (c : Nat)
     (h : ∀ i, i ∈ g.interactions → i.eventTime.isSome) :
     recurrenceSessions (g.reflush f) c = recurrenceSessions g c := by
@@ -940,9 +941,10 @@ theorem a_bulk_ingest_recurs_only_under_event_time :
       spreadGraph false = (spreadGraph true).strip := by
   decide
 
-/-- The test's comment says the about-times are days 0/2/4/6; the code
-computes days 0/3/4/5. Both are four sessions, so the test holds on either
-reading (finding 3). -/
+/-- Finding 3: the bulk-ingest test's comment gives the about-times as days
+0/2/4/6 while `supporting_interaction_times` computes days 0/3/4/5; both count
+four sessions in `separated_session_count`, so the test holds on either
+reading. -/
 theorem spread_days_doc_and_code :
     sessionCount sessionSeparation [day 0, day 2, day 4, day 6] = 4 ∧
       supportingTimes (spreadGraph true) 10 = [day 0, day 3, day 4, day 5] := by
@@ -975,6 +977,9 @@ theorem spread_days_on_the_boundary :
       greedyLeMutant sessionSeparation none (supportingTimes (spreadGraph true) 10) = 3 := by
   decide
 
+/-- Rust test `causal_touches_are_not_recurrence`: `Causal` modifications of a
+concept by later turns add no recurrence session, while the same actions
+declaring `depends_on` it count four. -/
 theorem causal_touches_are_not_recurrence :
     recurrenceSessions (causalGraph false) 40 = 1 ∧ recurrenceSessions (causalGraph true) 40 = 4 := by
   decide
@@ -992,6 +997,10 @@ def mixedGraph : Graph where
     [⟨1, 11, .derives⟩, ⟨5, 11, .derives⟩, ⟨6, 11, .derives⟩, ⟨7, 11, .derives⟩,
      ⟨1, 12, .derives⟩]
 
+/-- In `recurrence_sessions`, a concept re-derived on four spread days counts
+four sessions, while one re-derived as often in a single burst counts one (the
+graph of Rust test
+`solo_admits_the_recurring_fact_and_refuses_the_burst_and_the_one_off`). -/
 theorem recurring_burst_once :
     (supportingTimes mixedGraph 10).length = (supportingTimes mixedGraph 11).length ∧
       recurrenceSessions mixedGraph 10 = 4 ∧ recurrenceSessions mixedGraph 11 = 1 ∧
@@ -1043,6 +1052,10 @@ def childGraph (hierarchical : Bool) : Graph where
   edges := (spreadGraph true).edges ++ [⟨5, 50, .derives⟩,
     if hierarchical then ⟨10, 50, .hierarchical⟩ else ⟨50, 10, .dependency⟩]
 
+/-- A hierarchical child written in another turn counts toward its parent's
+dependent origins (`dependent_origin`) but adds no recurrence session, while a
+`Dependency` from it adds both (`supporting_interaction_times`,
+`recurrence_sessions`). -/
 theorem hierarchical_child_is_dependent_not_recurrence :
     dependentOrigins (childGraph true) 10 = [5] ∧ recurrenceSessions (childGraph true) 10 = 4 ∧
       dependentOrigins (childGraph false) 10 = [5] ∧ recurrenceSessions (childGraph false) 10 = 5 := by
@@ -1060,6 +1073,10 @@ def reusedActionGraph (reused : Bool) : Graph where
   edges := [⟨1, 60, .derives⟩, ⟨1, 61, .derives⟩, ⟨1, 62, .derives⟩, ⟨62, 60, .dependency⟩] ++
     (if reused then [⟨62, 61, .dependency⟩] else [⟨5, 63, .derives⟩, ⟨63, 61, .dependency⟩])
 
+/-- A `depends_on` from an action reused across turns is dated by the reused
+action's origin turn, so it adds no supporting time, recurrence session or
+dependent origin to its target; a new action written in a later turn adds
+them. -/
 theorem reused_action_dependency_is_dated_by_its_origin :
     supportingTimes (reusedActionGraph true) 61 = [day 0] ∧
       recurrenceSessions (reusedActionGraph true) 61 = 1 ∧
@@ -1200,6 +1217,9 @@ theorem supportingTimesW_eq (g : Graph) (st : Edge → Stamp) (c : Nat)
   congr 1
   exact filterMap_congr' _ (fun e he => supportTimeW_eq g st c e he h)
 
+/-- When every dependence edge was written in its dependent's origin turn,
+#300's writer dating gives `recurrence_sessions` the same count as the origin
+dating did. -/
 theorem recurrenceSessionsW_eq (g : Graph) (st : Edge → Stamp) (c : Nat)
     (h : WrittenAtOrigin g st) : recurrenceSessionsW g st c = recurrenceSessions g c := by
   unfold recurrenceSessionsW recurrenceSessions; rw [supportingTimesW_eq g st c h]
@@ -1359,6 +1379,9 @@ def ownTurnGraph : Graph where
 def ownTurnStamp (e : Edge) : Stamp :=
   if e.src = 70 then ⟨day 1, some 1⟩ else ⟨day 0, some 0⟩
 
+/-- #300: a dependence edge written in its dependent's origin turn, dated by
+the turn that wrote it (`WriterTimeline`), adds no Solo dependent interaction
+and no extra supporting time, where the origin dating counted both. -/
 theorem own_origin_is_the_writing_turn :
     dependentOrigins ownTurnGraph 71 = [0] ∧ dependentOriginsW ownTurnGraph ownTurnStamp 71 = [] ∧
       supportingTimes ownTurnGraph 71 = [day 0, day 1] ∧
@@ -1466,9 +1489,11 @@ theorem score10_mono (ty : ConceptType) {t t' : Terms} (h : t.Le t') :
     score10 ty t ≤ score10 ty t' :=
   Int.mul_le_mul_of_nonneg_right (rawScore_mono h) (Int.le_of_lt (resistance10_pos ty))
 
-/-- Each term moves the score by exactly its weight times the resistance:
-one more session `+1`, confirmation `+4`, dependent interaction `+2`, revert
-`−3` (in units of the resistance), so the score is strictly monotone in each. -/
+/-- `raw_solo_score` moves by exactly its weight times `eviction_resistance`
+per term: one more session `SESSION_WEIGHT` (1), a confirmation
+`HUMAN_CONFIRMED_WEIGHT` (4), a dependent interaction
+`DEPENDENT_INTERACTION_WEIGHT` (2), a revert `REVERT_WEIGHT` (−3), so the
+score is strictly monotone in each. -/
 theorem score10_steps (ty : ConceptType) (t : Terms) :
     score10 ty { t with sessions := t.sessions + 1 } = score10 ty t + ty.resistance10 ∧
       score10 ty { t with humanConfirmed := t.humanConfirmed + 1 } =
@@ -1488,6 +1513,8 @@ theorem classify_none_iff (s : Int) : classify s = .none ↔ s < candidateBar10 
   all_goals simp
   all_goals omega
 
+/-- `classify` (`src/canon/policy.rs`) puts a solo score in the Candidate band
+exactly when it is at least `CANDIDATE_BAR` and below `VENERABLE_BAR`. -/
 theorem classify_candidate_iff (s : Int) :
     classify s = .candidate ↔ candidateBar10 ≤ s ∧ s < venerableBar10 := by
   unfold classify candidateBar10 venerableBar10 canonicalBar10
@@ -1495,6 +1522,8 @@ theorem classify_candidate_iff (s : Int) :
   all_goals simp
   all_goals omega
 
+/-- `classify` puts a solo score in the Venerable band exactly when it is at
+least `VENERABLE_BAR` and below `CANONICAL_BAR`. -/
 theorem classify_venerable_iff (s : Int) :
     classify s = .venerable ↔ venerableBar10 ≤ s ∧ s < canonicalBar10 := by
   unfold classify candidateBar10 venerableBar10 canonicalBar10
@@ -1502,6 +1531,8 @@ theorem classify_venerable_iff (s : Int) :
   all_goals simp
   all_goals omega
 
+/-- `classify` puts a solo score in the Canonical band exactly when it is at
+least `CANONICAL_BAR`. -/
 theorem classify_canonical_iff (s : Int) : classify s = .canonical ↔ canonicalBar10 ≤ s := by
   unfold classify candidateBar10 venerableBar10 canonicalBar10
   repeat' split
@@ -1548,8 +1579,9 @@ theorem score_examples :
       score10 .resource ⟨4, 0, 0, 1⟩ = 10 ∧ band .resource ⟨4, 0, 0, 1⟩ = .none := by
   decide
 
-/-- The bulk-ingest corpus through the score: the Entity hub is a Candidate
-on event time (4.8) and ordinary memory on flush time (1.2). -/
+/-- The bulk-ingest corpus under `classify`: the Entity hub is a Candidate
+counted on event time (4.8) and ordinary memory counted on flush time (1.2),
+which is why the solo terms read `about_time`. -/
 theorem bulk_ingest_band :
     band .entity (sessionsOnly (recurrenceSessions (spreadGraph true) 10)) = .candidate ∧
       band .entity (sessionsOnly (recurrenceSessions (spreadGraph false) 10)) = .none := by
@@ -1580,14 +1612,15 @@ theorem revert_is_demotion (id : Nat) (e : Event) (h : isRevert id e = true)
   simp only [isRevert, Bool.and_eq_true, decide_eq_true_eq] at h
   exact Canon.legal_demotion_unique _ _ hlegal h.2
 
-/-- Recording an event adds one revert exactly when it lowers the rank. -/
+/-- `revert_count` counts a recorded status event exactly when it lowers the
+concept's rank. -/
 theorem revertCount_append (evs : List Event) (id : Nat) (e : Event) :
     revertCount (evs ++ [e]) id = revertCount evs id + (if isRevert id e then 1 else 0) := by
   unfold revertCount
   rw [List.filter_append, List.length_append]
   cases h : isRevert id e <;> simp [List.filter, h]
 
-/-- Promotions never count as reverts. -/
+/-- `revert_count` never counts a promotion. -/
 theorem promotion_not_revert (id : Nat) (e : Event) (h : e.fromS.rank ≤ e.toS.rank) :
     isRevert id e = false := by
   simp only [isRevert, Bool.and_eq_false_iff, decide_eq_false_iff_not]
@@ -1611,12 +1644,14 @@ def soloStage1 (b : Canon.Status) : Bool := b != .none
 theorem soloStage1_eq_admitsHop (b : Canon.Status) : soloStage1 b = admitsHop b .candidate := by
   cases b <;> rfl
 
-/-- A band admitting a hop admits every lower one. -/
+/-- `SoloScorer::admits_hop`: a band that admits a hop to a status admits
+every hop to a lower one. -/
 theorem admitsHop_down {b to to' : Canon.Status} (h : admitsHop b to = true)
     (h' : to'.rank ≤ to.rank) : admitsHop b to' = true := by
   simp only [admitsHop, decide_eq_true_eq] at h ⊢; omega
 
-/-- More evidence never withdraws an admission. -/
+/-- `SoloScorer::admits_hop`: more evidence (sessions, confirmations,
+dependent interactions, fewer reverts) never withdraws an admission. -/
 theorem admitsHop_mono (ty : ConceptType) {t t' : Terms} (h : t.Le t') (to : Canon.Status)
     (ha : admitsHop (band ty t) to = true) : admitsHop (band ty t') to = true := by
   have := band_mono ty h
@@ -1662,7 +1697,8 @@ def PromotionPolicy.stage1 : PromotionPolicy → (gcSurvived dependents : Nat) �
   | .swarm, gc, deps, _ => Canon.stage1Passes gc deps
   | .solo, _, _, b => soloStage1 b
 
-/-- `ALL` names every variant. -/
+/-- `PromotionPolicy::ALL` names every variant (Rust test
+`all_covers_every_variant_and_round_trips_through_from_str`). -/
 theorem mem_all (p : PromotionPolicy) : p ∈ PromotionPolicy.all := by
   cases p <;> decide
 
@@ -1722,6 +1758,8 @@ theorem policy_cycle_one_hop (p : PromotionPolicy) (g s : Canon.Status) (gc deps
     Canon.cycle s f = s ∨ Canon.evalHop s (Canon.cycle s f) = true :=
   Canon.cycle_one_hop g s _ (policyFlags_consistent p g gc deps bandG bandA v2 v3 sup bud)
 
+/-- Under either `PromotionPolicy`, one `Evaluator` cycle raises a concept's
+status by at most one rank. -/
 theorem policy_cycle_rank_le (p : PromotionPolicy) (g s : Canon.Status) (gc deps : Nat)
     (bandG bandA : Canon.Status) (v2 v3 sup bud : Bool) :
     (Canon.cycle s (policyFlags p g gc deps bandG bandA v2 v3 sup bud)).rank ≤ s.rank + 1 :=
@@ -1773,6 +1811,9 @@ def soloRun (b : Canon.Status) : Canon.Status → Nat → Canon.Status
   | s, n + 1 =>
     soloRun b (Canon.cycle s (policyFlags .solo s 0 0 b b true true false false)) n
 
+/-- Under `PromotionPolicy::Solo`, a concept whose band is Canonical climbs
+one rung per `Evaluator` cycle (Candidate, Venerable, then Canonical on the
+third), and one whose band is Venerable stops there. -/
 theorem solo_three_cycles :
     soloRun .canonical .none 1 = .candidate ∧ soloRun .canonical .none 2 = .venerable ∧
       soloRun .canonical .none 3 = .canonical ∧ soloRun .venerable .none 3 = .venerable := by
@@ -1960,8 +2001,8 @@ theorem trim_ws_suffix (l ws : List Char) (h : ∀ c, c ∈ ws → isWs c = true
   · rw [List.reverse_append, dropWhile_ws_prefix ws.reverse _
       (fun c hc => h c (List.mem_reverse.mp hc))]
 
-/-- **Padding is ignored**: whitespace around a value never changes what it
-parses to. -/
+/-- `PromotionPolicy::from_str` trims whitespace (`str::trim`), so padding
+around a configured value never changes the policy it parses to. -/
 theorem parse_padded (ws cs ws' : List Char) (h : ∀ c, c ∈ ws → isWs c = true)
     (h' : ∀ c, c ∈ ws' → isWs c = true) : parse (ws ++ cs ++ ws') = parse cs := by
   unfold parse

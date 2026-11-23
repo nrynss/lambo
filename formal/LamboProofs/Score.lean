@@ -46,10 +46,6 @@ theorem clamp_eq_self {lo hi v : Int} (h1 : lo ≤ v) (h2 : v ≤ hi) : clamp lo
   repeat' split
   all_goals omega
 
-theorem clamp_idem {lo hi : Int} (h : lo ≤ hi) (v : Int) :
-    clamp lo hi (clamp lo hi v) = clamp lo hi v :=
-  clamp_eq_self (clamp_ge h v) (clamp_le h v)
-
 theorem clamp_mono {lo hi : Int} (h : lo ≤ hi) {a b : Int} (hab : a ≤ b) :
     clamp lo hi a ≤ clamp lo hi b := by
   unfold clamp
@@ -245,21 +241,23 @@ theorem rawScore_le (d : Dims) (w : Weights) (hw : weightTotal w ≤ 1000) :
   unfold rawScore
   omega
 
-/-- The composite can only fall below zero through the concept-type modifier,
-and by at most `|MIN_CONCEPT_MODIFIER| = 0.10`. -/
+/-- `score_concept_with`'s composite falls below zero only through the
+concept-type modifier, and by at most `|MIN_CONCEPT_MODIFIER| = 0.10`. -/
 theorem rawScore_ge (d : Dims) (w : Weights) : -100000 ≤ rawScore d w := by
   have h1 := weighted_nonneg d w
   have h2 := bonusAndModifier_ge d
   unfold rawScore
   omega
 
-/-- So under such weights the final clamp is exactly "floor at zero". -/
+/-- With sanitized weights summing to at most 1 and a non-negative composite,
+`score_concept_with`'s final clamp only floors at zero: the score is the raw
+composite. -/
 theorem score_eq_rawScore (d : Dims) (w : Weights) (hw : weightTotal w ≤ 1000)
     (hpos : 0 ≤ rawScore d w) : score d w = rawScore d w := by
   show clamp 0 1400000 (rawScore d w) = rawScore d w
   exact clamp_eq_self hpos (rawScore_le d w hw)
 
-/-- The default weights sum to exactly `1`. -/
+/-- `ScoringWeights::default`'s weights sum to exactly 1. -/
 theorem defaultWeights_total : weightTotal defaultWeights = 1000 := by
   first
     | decide
@@ -360,7 +358,8 @@ theorem live_le_livePlusFrequency (live : Int) (frequency weight : Option Int)
   show live ≤ clamp 0 1400000 (live + clampDim frequency * saneWeight weight)
   exact hmono
 
-/-- The eviction composite is monotone in the concept's own frequency. -/
+/-- GC's eviction composite (the live score plus the frequency term,
+`score.rs`) is monotone in the concept's own frequency. -/
 theorem livePlusFrequency_mono (live : Int) {f f' : Option Int} (weight : Option Int)
     (h : clampDim f ≤ clampDim f') :
     livePlusFrequency live f weight ≤ livePlusFrequency live f' weight := by
@@ -369,7 +368,8 @@ theorem livePlusFrequency_mono (live : Int) {f f' : Option Int} (weight : Option
     ≤ clamp 0 1400000 (live + clampDim f' * saneWeight weight)
   exact clamp_mono (by omega) (by omega)
 
-/-- The eviction composite keeps the common bound of every composite here. -/
+/-- GC's eviction composite stays in the range of every score here, `[0, 1 +
+MAX_BONUS]`. -/
 theorem livePlusFrequency_range (live : Int) (frequency weight : Option Int) :
     0 ≤ livePlusFrequency live frequency weight
       ∧ livePlusFrequency live frequency weight ≤ 1400000 := by
@@ -401,8 +401,8 @@ theorem historical_eq_floor (start stop lastTouch : Int) :
   unfold historicalNum floorNum
   omega
 
-/-- A touch inside the session extent has historical recency in `[0, 1]`
-without help from the clamp. -/
+/-- `score.rs`'s historical recency of a touch inside the session's extent is
+in `[0, 1]` without help from the clamp. -/
 theorem historical_in_unit (start stop lastTouch : Int)
     (h1 : start ≤ lastTouch) (h2 : lastTouch ≤ stop) :
     0 ≤ historicalNum start lastTouch ∧ historicalNum start lastTouch ≤ stop - start := by
@@ -428,6 +428,8 @@ def lastTouch (createdAt : Int) : Option Int → Int
   | none => createdAt
   | some t => if t < createdAt then createdAt else t
 
+/-- The last touch `score_concept_with` dates recency by (`last_accessed`,
+never before `created_at`) is never earlier than the concept's creation. -/
 theorem createdAt_le_lastTouch (createdAt : Int) (lastAccessed : Option Int) :
     createdAt ≤ lastTouch createdAt lastAccessed := by
   cases lastAccessed with

@@ -438,7 +438,8 @@ theorem expand_prefix (nbrs : ι → List ι) (depth : Nat) (seeds : List ι) :
     ∃ t, expand nbrs depth seeds = discover [] seeds ++ t :=
   levels_prefix nbrs depth (discover [] seeds) (discover [] seeds)
 
-/-- With distinct candidate ids, level 0 is the candidate list itself. -/
+/-- With distinct candidate ids, `expand` returns the candidates first, in
+their input order. -/
 theorem expand_prefix_of_nodup (nbrs : ι → List ι) (depth : Nat) (seeds : List ι)
     (hs : seeds.Pairwise (fun a b => a ≠ b)) : ∃ t, expand nbrs depth seeds = seeds ++ t := by
   have e : discover [] seeds = seeds :=
@@ -448,7 +449,8 @@ theorem expand_prefix_of_nodup (nbrs : ι → List ι) (depth : Nat) (seeds : Li
     rw [e] at ht
     exact ⟨t, ht⟩
 
-/-- `depth = 0` returns the candidates and nothing else. -/
+/-- `expand` (`src/recall/expand.rs`) at `depth = 0` returns the de-duplicated
+candidates and nothing else. -/
 theorem expand_depth_zero (nbrs : ι → List ι) (seeds : List ι) :
     expand nbrs 0 seeds = discover [] seeds := by
   unfold expand

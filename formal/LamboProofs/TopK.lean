@@ -169,9 +169,9 @@ theorem emit_sublist (isConcept forced : ι → Bool) (topK : Nat) :
         · rw [emit_cut hc hf hs]
           exact List.Sublist.cons s (ih slots)
 
-/-- Any pairwise ordering of the ranked list survives emission. With
-`Order.rankMembers_canonical_first` this gives Canonical-first in the hits a
-recall returns. -/
+/-- Any pairwise order of the ranked list survives in recall's hits
+(`emitted`); with `Order.rankMembers_canonical_first` this puts Canonical hits
+first. -/
 theorem emit_pairwise (isConcept forced : ι → Bool) (topK slots : Nat) {R : ι → ι → Prop}
     {ranked : List ι} (h : ranked.Pairwise R) :
     (emit isConcept forced topK slots ranked).Pairwise R :=
@@ -380,8 +380,8 @@ def forcedOnly (forced : ι → Bool) : List ι → List ι
   | [] => []
   | x :: xs => if forced x = true then x :: forcedOnly forced xs else forcedOnly forced xs
 
-/-- The forced hits are exactly the forced concepts of the ranked list, in
-order: none is cut and none is added. -/
+/-- Recall emits exactly the forced concepts of the ranked list, in order:
+none is cut and none is added. -/
 theorem emit_forced_eq (isConcept forced : ι → Bool) (topK : Nat) :
     ∀ (ranked : List ι) (slots : Nat),
       forcedOnly forced (emit isConcept forced topK slots ranked)
@@ -427,8 +427,8 @@ theorem emit_forced_eq (isConcept forced : ι → Bool) (topK : Nat) :
         · rw [emit_cut hc hf hs, e]
           exact ih slots
 
-/-- When the ordinary concepts all fit, nothing is cut: the recall emits every
-ranked concept. -/
+/-- When the ordinary concepts all fit in `top_k`, recall emits every ranked
+concept and cuts nothing. -/
 theorem emit_eq_filter (isConcept forced : ι → Bool) (topK : Nat) :
     ∀ (ranked : List ι) (slots : Nat),
       slots + (ordinary isConcept forced ranked).length ≤ topK →
@@ -738,6 +738,8 @@ theorem emitR_sublist :
         · rw [emitR_cut hc hf hs]
           exact (ih _ _ _).cons s
 
+/-- With the redundancy filter too, any pairwise order of the ranked list
+survives in recall's hits (`emitted`). -/
 theorem emitR_pairwise {R : ι → ι → Prop} {ranked : List ι} (h : ranked.Pairwise R)
     (slots checked : Nat) (prev : List ι) :
     (emitR isConcept forced warns red topK win wmax slots checked prev ranked).Pairwise R :=
@@ -793,7 +795,8 @@ theorem forced_mem_emitR (x : ι) (hcx : isConcept x = true) (hfx : forced x = t
         · rw [emitR_cut hc hf hs]
           exact tail hne rfl
 
-/-- Everything emitted is a concept of the graph. -/
+/-- Every hit recall emits (`emitted`, with the redundancy filter) is a
+concept of the graph. -/
 theorem emitR_all_concepts (x : ι) :
     ∀ (ranked : List ι) (slots checked : Nat) (prev : List ι),
       x ∈ emitR isConcept forced warns red topK win wmax slots checked prev ranked →

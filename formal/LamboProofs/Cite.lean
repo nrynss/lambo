@@ -166,18 +166,20 @@ theorem refuses_self_loop (E P : ι → ι → Prop) (s : ι) (hp : P s s)
     (hcheck : ∀ s t, P s t → ¬ Reach (Combined E P) t s) : False :=
   hcheck s s hp (Reach.refl s)
 
-/-- An acyclic graph has no self-loop. -/
+/-- On the `Causal`/`Dependency` graph the write gates keep acyclic, no
+concept depends on itself: `closing_edge` refuses the edge `s → s` as a
+one-edge cycle. -/
 theorem Acyclic.irrefl {R : ι → ι → Prop} (h : Acyclic R) (x : ι) : ¬ R x x :=
   fun hxx => h x x hxx (Reach.refl x)
 
-/-- **No mutual dependency.** In an acyclic graph, if `x` depends on `y` then
-`y` does not depend on `x`. -/
+/-- **No mutual dependency.** On the graph the write gates keep acyclic, if
+`x` depends on `y` then `y` does not depend on `x`. -/
 theorem no_mutual_dependency {R : ι → ι → Prop} (h : Acyclic R) {x y : ι} (hxy : R x y) :
     ¬ R y x :=
   fun hyx => h x y hxy (Reach.single hyx)
 
-/-- More generally, nothing a concept (transitively) depends on depends back
-on it. -/
+/-- On the `Causal`/`Dependency` graph the write gates (`closing_edge`) keep
+acyclic, nothing a concept transitively depends on depends back on it. -/
 theorem no_dependency_cycle {R : ι → ι → Prop} (h : Acyclic R) {x y z : ι} (hxy : R x y)
     (hyz : Reach R y z) : ¬ R z x :=
   fun hzx => h x y hxy (Reach.trans hyz (Reach.single hzx))
@@ -238,9 +240,6 @@ def Kind.hier : Kind → Bool
 def Kind.union : Kind → Bool := fun _ => true
 
 theorem Kind.hier_false_of_cd {k : Kind} (h : Kind.cd k = true) : Kind.hier k = false := by
-  cases k <;> simp_all [Kind.cd, Kind.hier]
-
-theorem Kind.cd_false_of_hier {k : Kind} (h : Kind.hier k = true) : Kind.cd k = false := by
   cases k <;> simp_all [Kind.cd, Kind.hier]
 
 /-- A typed edge. -/
@@ -456,14 +455,6 @@ theorem mem_post {g : Graph ι} {ks : Kind → Bool} {x y : ι} (h : rel g ks x 
   unfold post
   exact List.mem_map.mpr ⟨e, List.mem_filter.mpr ⟨he, by simp [hs, hk]⟩, ht⟩
 
-theorem rel_of_mem_post {g : Graph ι} {ks : Kind → Bool} {x y : ι} (h : y ∈ post g ks x) :
-    rel g ks x y := by
-  unfold post at h
-  obtain ⟨e, hf, ht⟩ := List.mem_map.mp h
-  obtain ⟨he, hc⟩ := List.mem_filter.mp hf
-  simp only [Bool.and_eq_true, decide_eq_true_eq] at hc
-  exact ⟨e, he, hc.1, ht, hc.2⟩
-
 /-- One search level: `S` and every successor of a member. -/
 def grow (g : Graph ι) (ks : Kind → Bool) (S : List ι) : List ι :=
   S ++ S.flatMap (post g ks)
@@ -544,6 +535,9 @@ theorem acyclicB_sound {g : Graph ι} {ks : Kind → Bool} (h : acyclicB g ks = 
   rw [← hs, ← ht]
   exact unreachB_sound h1
 
+/-- The load check (`Graph::assert_invariants`' two cycle passes) is sound: a
+graph it accepts has no `Causal`/`Dependency` cycle and no `Hierarchical`
+cycle. -/
 theorem loadOkB_sound {g : Graph ι} (h : loadOkB g = true) : LoadOk g := by
   simp only [loadOkB, Bool.and_eq_true] at h
   exact ⟨acyclicB_sound h.1, acyclicB_sound h.2⟩

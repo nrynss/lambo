@@ -309,7 +309,8 @@ theorem holder_token_permitted (r : Row H) : Permits r.token (some r.token) := b
   unfold Permits
   exact Or.inr ⟨r.token, rfl, Nat.le_refl r.token⟩
 
-/-- A writer that presents no token is refused once the session is leased. -/
+/-- Once a session is leased, the writer fence refuses a writer that presents
+no lease token. -/
 theorem no_token_refused (current : Nat) (h : 0 < current) : ¬ Permits current none := by
   intro hp
   unfold Permits at hp
@@ -321,8 +322,8 @@ theorem no_token_refused (current : Nat) (h : 0 < current) : ¬ Permits current 
       have hnone : (none : Option Nat) = some p := hp'.1
       cases hnone
 
-/-- The seed and fixture bypass: a session that was never leased admits any
-write. -/
+/-- The writer fence admits any write to a session that was never leased: the
+seed and fixture bypass. -/
 theorem unleased_permits (presented : Option Nat) : Permits 0 presented := by
   unfold Permits
   exact Or.inl rfl
@@ -372,7 +373,8 @@ acquire (and presents on every flush). -/
 def beatLatches (me : H) (t : Nat) (now ttl : Int) (r : Row H) : Bool :=
   decide ((acquire me now ttl r).holder ≠ me) || decide ((acquire me now ttl r).token ≠ t)
 
-/-- The fix only adds latches. -/
+/-- The #293 fix to the heartbeat's latch only adds latches: every beat the
+old rule latched still latches. -/
 theorem beatLatchesOld_le (me : H) (t : Nat) (now ttl : Int) (r : Row H)
     (h : beatLatchesOld me now ttl r = true) : beatLatches me t now ttl r = true := by
   unfold beatLatchesOld at h
@@ -417,8 +419,9 @@ theorem beat_latches_iff {released A : H} {a b : Row H} (hsteps : Steps released
         simp [htok, hne]
     · simp [hA]
 
-/-- In particular the first beat after any takeover latches: once the token
-has moved past the one `A` captured, `A`'s beat latches whoever holds the row. -/
+/-- `spawn_lease_heartbeat`'s beat latches the fence on the first beat after
+any takeover: once the token has moved past the one the holder captured, its
+beat latches whoever holds the row. -/
 theorem beat_latches_after_takeover {released A : H} {a b : Row H}
     (hsteps : Steps released a b) (hlt : a.token < b.token) (now ttl : Int) :
     beatLatches A a.token now ttl b = true :=

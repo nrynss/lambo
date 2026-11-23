@@ -533,12 +533,6 @@ def Cmd.all : List Cmd :=
    .eraseSession, .canon, .names, .recallIndex, .derive, .deriveImage, .recordAction,
    .reserve, .release, .reEmbed]
 
-theorem Cmd.mem_all (c : Cmd) : c ∈ Cmd.all := by
-  cases c with
-  | session a => cases a <;> decide
-  | stats b => cases b <;> decide
-  | _ => decide
-
 /-- `Commands::needs_embedder`. -/
 def Cmd.needsEmbedder : Cmd → Bool
   | .session _ | .provision | .canon | .eraseSession | .recallIndex | .names
@@ -944,6 +938,8 @@ theorem load_store_no_fallback {r : Raw} {c : Config} (h : load r = .ok c) :
         (r.storeFile = .known c.store ∨ (r.storeFile = .unset ∧ c.store = .memory))) :=
   pick_some (load_ok h).2.2.1
 
+/-- `load_resolved` takes the embedder kind from `LAMBO_EMBEDDER`, else from
+`lambo.toml`, else the default BGE-M3, and from nowhere else. -/
 theorem load_embed_no_fallback {r : Raw} {c : Config} (h : load r = .ok c) :
     r.embedEnv = .known c.embed ∨
       (r.embedEnv = .unset ∧
@@ -997,6 +993,8 @@ theorem wrapTier_ok {f : Features} {c : Config} {p w} (h : wrapTier f c p = .ok 
     · cases h
     · cases h; simp_all
 
+/-- `wrap_with_recall_tier` refuses `tiered = true` when the `recall-tier`
+feature is not compiled in: a hard error, not a silent fallback. -/
 theorem wrapTier_uncompiled {f : Features} {c : Config} (p : Option Nat)
     (h1 : c.tiered = true) (h2 : f.recallTier = false) :
     wrapTier f c p = .error .tierUncompiled := by
@@ -1177,6 +1175,8 @@ theorem mem_tag {s : Site} {t : List Built} {x : Site × Built} :
     x ∈ tag s t ↔ ∃ b ∈ t, x = (s, b) := by
   simp [tag, eq_comm]
 
+/-- `resolve_classification_source` builds the source database's store and
+nothing else. -/
 theorem classificationSource_built {f : Features} {d : Bool} {b : Built}
     (h : b ∈ (classificationSource f d).1) : b = .sourceDb := by
   unfold classificationSource at h
@@ -2337,6 +2337,9 @@ before any lease. -/
 def exposedServe : MainIn :=
   { cmd := .serve, serve := { transport := some .http, sessions := [3], loopback := false } }
 
+/-- An exposed HTTP bind with no token passes `serve_preflight` and is refused
+only after `resolve_backends` has built the store and the embedder, exit 1
+(`authorize_bind`). -/
 theorem bind_refused_after_build :
     preflight (fun _ => true) {} exposedServe.serve ≠ .error 2 ∧
       main Features.dflt (fun _ => true) (fun _ => {}) exposedServe =
@@ -2360,6 +2363,8 @@ theorem serve_preflight_refusal_builds_nothing (f : Features) (addr : Nat → Bo
 
 /-! ## `--auth-token`: the token check and redaction -/
 
+/-- `SecretToken::new` accepts a token only when it is valid UTF-8, non-empty,
+printable, at most `MAX_BEARER` bytes and has no leading or trailing space. -/
 theorem secretNew_ok {r : TokenRaw} {k : List Nat} (h : secretNew r = .ok k) :
     k = r.bytes ∧ r.utf8 = true ∧ r.bytes ≠ [] ∧ r.bytes.all printable = true ∧
       r.bytes.length ≤ maxBearer ∧ r.bytes.head? ≠ some 32 ∧ r.bytes.getLast? ≠ some 32 := by
@@ -2402,6 +2407,8 @@ refuses, so clap's own "invalid value '<it>'" error, which would quote the
 token, cannot occur for `--auth-token`. -/
 def parseAuthArg (r : TokenRaw) : Except Unit TokenRaw := .ok r
 
+/-- Parsing `--auth-token` (`AuthTokenArg`) accepts every raw value; the
+token's checks run later, in `SecretToken::new`. -/
 theorem parseAuthArg_total (r : TokenRaw) : parseAuthArg r = .ok r := rfl
 
 def whyText : Why → String
@@ -2866,6 +2873,8 @@ theorem quotedRender_hidden {k : Quote} {before fromFlag : List (List Nat)} {q :
     quotedRender k before fromFlag q = redactedText k := by
   simp [quotedRender, h]
 
+/-- Under the fixed echo rule, `redact_auth_token_echo` renders a shown
+argument quoted exactly as typed. -/
 theorem quotedRender_shown {k : Quote} {before fromFlag : List (List Nat)} {q : List Nat}
     (h : argShownFixed before fromFlag q = true) :
     quotedRender k before fromFlag q = quoteText k (String.ofList (q.map Char.ofNat)) := by

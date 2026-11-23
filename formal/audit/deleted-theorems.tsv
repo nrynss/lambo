@@ -24,3 +24,41 @@ Lambo.Registry.place_ern	unused @[simp] lemma; Registry.lean elaborates without 
 Lambo.Registry.place_erased	unused @[simp] lemma; Registry.lean elaborates without it (one-shot probe: the lemma removed from a copy, lake env lean, no errors or warnings)	-
 Lambo.Registry.isHeld_ers	unused @[simp] lemma; Registry.lean elaborates without it (one-shot probe: the lemma removed from a copy, lake env lean, no errors or warnings)	-
 Lambo.Registry.isHeld_ern	unused @[simp] lemma; Registry.lean elaborates without it (one-shot probe: the lemma removed from a copy, lake env lean, no errors or warnings)	-
+Lambo.Contract.canary_override_admits	implied by canary_refuses_iff (the gate refuses only without the override)	Lambo.Contract.canary_refuses_iff
+Lambo.Contract.canary_verify_refuses_drift	implied by canary_refuses_iff (verify, drifted, no override refuses)	Lambo.Contract.canary_refuses_iff
+Lambo.Contract.same_dim_not_enough	implied by compatible_iff_eq (compatibility is equality of kind, model and dim)	Lambo.Contract.compatible_iff_eq
+Lambo.Flush.ladder_last	leftover helper: unfolds the model's last retry rung, which nothing uses; `backoffAt_capped` states the ladder's end	-
+Lambo.Registry.sHeld_init	leftover helper: the example's held state is an initial state, which no proof or example uses	-
+Lambo.Registry.cfgEx_wf	leftover helper: the example configuration is well formed, which no proof or example uses	-
+Lambo.Fusion.full_rank_eq_raise_needs_sorted	a counterexample to a model lemma without its sortedness hypothesis; the Rust's keyword leg is always ranked, so it states nothing about the Rust	-
+Lambo.Fusion.rrf_den_pos	leftover helper: positivity of the model's exact-rational RRF denominator, which nothing uses and which `fusion.rs`'s f64 sum has no counterpart of	-
+Lambo.Fusion.idOrder_strictTotal	leftover helper: the examples' id tie-break is a strict total order, which no proof or example uses	-
+Lambo.Fusion.term_exact	model-internal: the exactness of the model's rational arithmetic, not a property of `fusion.rs`'s f64 sum	-
+Lambo.Supersession.mem_sortDedup	leftover helper: membership in the model's sort-and-dedup, which nothing uses	-
+Lambo.Supersession.edgeBetween_append_other	leftover helper: a fact about the model's edge lookup that nothing uses	-
+Lambo.Hotlist.insert_evicted_eq	model-internal: equates two model forms of `insert`'s eviction, and nothing uses it	-
+Lambo.Hotlist.countC_add_countO	leftover helper: a counting identity over the model's entry lists, which nothing uses	-
+Lambo.Hotlist.mem_sortPrio	leftover helper: membership in the model's priority sort, which nothing uses	-
+Lambo.Dispatch.recallRouted_eq	model-internal: equates a definition with its generalisation over the classifier, and nothing uses it	-
+Lambo.Dispatch.fitsStructural_eq	model-internal: equates a definition with its generalisation over the classifier, and nothing uses it	-
+Lambo.Dispatch.tryStructural_eq	model-internal: equates a definition with its generalisation over the classifier, and nothing uses it	-
+Lambo.Dispatch.asciiWord_letters	leftover helper: a character-class fact about the model's word check, which nothing uses	-
+Lambo.Resolve.Cmd.mem_all	leftover helper: the model's command list is complete, which nothing uses	-
+Lambo.BatchQueue.chunkOf_snd_sublist	leftover helper: what a chunk leaves keeps its order, which nothing uses; `takePrioritized_snd_sublist` states the queue order	Lambo.BatchQueue.takePrioritized_snd_sublist
+Lambo.Policy.window_needs_earliest	a counterexample to a stronger form of a model lemma (`sessionCount_window`'s hypothesis); it states nothing about `separated_session_count` the Rust relies on	-
+Lambo.Cite.rel_of_mem_post	leftover helper: unfolds membership in the model's successor list, which nothing uses	-
+Lambo.Cite.Kind.cd_false_of_hier	leftover helper: a hierarchical edge kind is not causal or dependency, which nothing uses	-
+Lambo.Canon.legal_ne	implied by legal_irrefl: a legal transition never leaves the status where it is	Lambo.Canon.legal_irrefl
+Lambo.Drain.orderInv_nil	leftover helper: the base case of the replay's order invariant, which no proof uses	-
+Lambo.Score.clamp_idem	leftover helper: idempotence of the model's clamp, which nothing uses; `clampDim_eq_self` states the no-op the Rust's doc relies on	-
+Lambo.Tiered.frame_refl	leftover helper: reflexivity of the model's frame relation, which nothing uses	-
+Lambo.Tiered.settle_rep	leftover helper: a step fact about the model's repair position that nothing uses	-
+Lambo.Canonical.Sane.toNoSep	leftover helper: converts one model hypothesis into another, and nothing uses it	-
+Lambo.Canonical.map_lowerA_idem	leftover helper: idempotence of the model's ASCII lowercasing, which nothing uses	-
+Lambo.Canonical.words_all_sep	leftover helper: a string of separators has no words, which nothing uses; `nameKeyF_all_empty` states what `name_key` does with no tokens	-
+Lambo.BatchQueue.extract_snd_sublist	leftover helper: used only by the deleted chunkOf_snd_sublist	-
+Lambo.Canonical.words_sep_cons	leftover helper: used only by the deleted words_all_sep	-
+Lambo.Supersession.mem_insertDedup	leftover helper: used only by the deleted mem_sortDedup	-
+Lambo.Supersession.edgeBetween_append	leftover helper: used only by the deleted edgeBetween_append_other	-
+Lambo.BatchQueue.removeDesc_snd_sublist	leftover helper: used only by the deleted extract_snd_sublist	-
+Lambo.Canonical.words_nil	leftover helper: an rfl unfolding used only by the deleted words_sep_cons	-

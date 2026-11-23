@@ -464,7 +464,6 @@ open Lambo
 #print axioms Lambo.Drain.fixedLoad_agrees
 #print axioms Lambo.Drain.fixed_epoch_seq_order
 #print axioms Lambo.Drain.fixed_agent_order_load
-#print axioms Lambo.Drain.orderInv_nil
 #print axioms Lambo.Drain.orderInv_perm
 #print axioms Lambo.Drain.applyMut_jobs
 #print axioms Lambo.Drain.foldl_jobs

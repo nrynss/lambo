@@ -77,16 +77,6 @@ theorem compatible_iff_eq (a b : Contract K M) : compatible a b = true ↔ a = b
       by_cases hd : ad = bd <;> by_cases hk : ak = bk <;> by_cases hm : am = bm <;>
         simp [compatible, hd, hk, hm]
 
-/-- Same width, different model: incompatible. -/
-theorem same_dim_not_enough (a b : Contract K M) (hm : a.model ≠ b.model) :
-    compatible a b = false := by
-  cases hc : compatible a b with
-  | false => rfl
-  | true =>
-    have e : a = b := (compatible_iff_eq a b).mp hc
-    rw [e] at hm
-    exact absurd rfl hm
-
 /-- `stamp_embedding`: the session's contract afterwards, and whether the
 stamp was accepted. -/
 def stamp (stored : Option (Contract K M)) (offered : Contract K M) :
@@ -135,8 +125,9 @@ theorem stampAll_keeps (c : Contract K M) :
     rw [stamp_keeps c offered]
     exact ih
 
-/-- Whoever stamps first decides: "only the winner may stamp its vector
-space". -/
+/-- On an unstamped session the first `Graph::stamp_embedding` decides the
+contract ("only the winner may stamp its vector space"), and later stamps
+cannot change it. -/
 theorem first_stamp_wins (first : Contract K M) (later : List (Contract K M)) :
     stampAll none (first :: later) = some first := by
   show stampAll (stamp none first).1 later = some first
@@ -157,7 +148,8 @@ def classify (stored : Option (Contract K M)) (live : Contract K M) : Compat :=
   | none => .unrecorded
   | some s => if s = live then .compatible else .mismatch
 
-/-- The only wildcard is a session with no recorded contract. -/
+/-- `session_embedding_compatibility` treats a session as a wildcard
+(`Unrecorded`) exactly when it has no recorded contract. -/
 theorem classify_unrecorded_iff (stored : Option (Contract K M)) (live : Contract K M) :
     classify stored live = .unrecorded ↔ stored = none := by
   cases stored with
@@ -174,7 +166,8 @@ theorem classify_unrecorded_iff (stored : Option (Contract K M)) (live : Contrac
     · intro h
       cases h
 
-/-- A recorded contract is `Compatible` exactly when it equals the live one. -/
+/-- `session_embedding_compatibility` answers `Compatible` for a recorded
+contract exactly when it equals the live embedder's. -/
 theorem classify_compatible_iff (s live : Contract K M) :
     classify (some s) live = .compatible ↔ s = live := by
   constructor
@@ -198,14 +191,16 @@ def vectorCheck (storeDim : Option Nat) (embedderDim : Nat) : Bool :=
   | none => decide (embedderDim ≠ 0)
   | some d => decide (embedderDim ≠ 0) && decide (d = embedderDim)
 
-/-- When the store declares a width, a passing check means the embedder has
-exactly that width: the store's `VECTOR(n)` column is the authority. -/
+/-- When the store declares a vector width, `check_vector_compatibility`
+passes only an embedder of exactly that width: the store's `VECTOR(n)` column
+is the authority. -/
 theorem vector_check_store_authoritative (d embedderDim : Nat)
     (h : vectorCheck (some d) embedderDim = true) : embedderDim = d ∧ embedderDim ≠ 0 := by
   simp [vectorCheck] at h
   omega
 
-/-- A zero-width embedder never passes. -/
+/-- `check_vector_compatibility` refuses a zero-width embedder whatever the
+store declares. -/
 theorem vector_check_zero (storeDim : Option Nat) : vectorCheck storeDim 0 = false := by
   cases storeDim <;> simp [vectorCheck]
 
@@ -690,8 +685,9 @@ def runAll (s : Session K M) : List (Op K M) → Session K M
 
 /-! ### The writer attach -/
 
-/-- The attach follows `classify`: compatible passes unchanged, unrecorded is
-stamped, a mismatch without the override is refused. -/
+/-- `build_attach` follows `session_embedding_compatibility`: a compatible
+session passes unchanged, an unrecorded one is stamped, and a mismatch without
+the override is refused. -/
 theorem attach_follows_classify (s : Session K M) (live : Contract K M) (allow : Bool) :
     (classify s.contract live = .compatible → attach s live allow = some (s, [])) ∧
     (classify s.contract live = .unrecorded →
@@ -727,8 +723,9 @@ theorem attach_no_override_contract (s s' : Session K M) (live : Contract K M)
     · simp [he]
     · exact absurd (hmis e hc he).1 (by simp)
 
-/-- Any successful writer attach, override on or off, leaves the session
-under the live contract. -/
+/-- Every successful writer attach (`build_attach`), with or without
+`--allow-embedding-mismatch`, leaves the session under the live embedder's
+contract. -/
 theorem attach_ok_contract_live (s s' : Session K M) (live : Contract K M) (allow : Bool)
     (m : List (Mut K M)) (h : attach s live allow = some (s', m)) :
     s'.contract = some live :=
@@ -756,7 +753,9 @@ theorem attach_override_ok_iff (s : Session K M) (e live : Contract K M)
     | false => simp [hne, hd]
   · simp [hne, hd]
 
-/-- **Refused even with the override:** a width change. -/
+/-- `build_attach` refuses a width change even with
+`--allow-embedding-mismatch`: the override never relabels a session to a
+contract of another `dim`. -/
 theorem attach_override_width_refused (s : Session K M) (e live : Contract K M) (allow : Bool)
     (hc : s.contract = some e) (hd : e.dim ≠ live.dim) : attach s live allow = none := by
   unfold attach
@@ -764,8 +763,8 @@ theorem attach_override_width_refused (s : Session K M) (e live : Contract K M) 
   have hne : e ≠ live := fun h => hd (h ▸ rfl)
   simp [hne, hd]
 
-/-- **Refused even with the override:** a kind change while any concept
-carries a vector. -/
+/-- `build_attach` refuses even with `--allow-embedding-mismatch` a kind
+change while any concept carries a vector. -/
 theorem attach_override_cross_kind_refused (s : Session K M) (e live : Contract K M)
     (allow : Bool) (hc : s.contract = some e) (hv : hasVectors s = true)
     (hk : e.kind ≠ live.kind) : attach s live allow = none := by
@@ -774,9 +773,9 @@ theorem attach_override_cross_kind_refused (s : Session K M) (e live : Contract 
   have hne : e ≠ live := fun h => hk (h ▸ rfl)
   by_cases hd : e.dim = live.dim <;> simp [hne, hd, hv, hk]
 
-/-- **What is recorded.** A successful override emits exactly one
-`SetEmbedding` of the live contract (flushed before the attach returns) and
-logs the WARN. -/
+/-- A successful `--allow-embedding-mismatch` attach (`build_attach`) emits
+exactly one `SetEmbedding` of the live contract, flushed before the attach
+returns, and logs the override WARN. -/
 theorem attach_override_records (s s' : Session K M) (e live : Contract K M)
     (m : List (Mut K M)) (hc : s.contract = some e) (hne : e ≠ live)
     (h : attach s live true = some (s', m)) :
@@ -818,7 +817,9 @@ theorem write_keeps_contract (s s' : Session K M) (c live : Contract K M) (id : 
       rw [hc]; exact stamp_keeps c live
     · rw [ite_eq_right hs] at h; cases h
 
-/-- A write of a vector from another space into a stamped session is refused. -/
+/-- An ordinary write of a vector from another embedding space into a stamped
+session is refused (`Graph::stamp_embedding` via `record_action_against`), so
+a stamped session's vectors stay in its space. -/
 theorem write_refuses_other_space (s : Session K M) (c live : Contract K M) (id : Nat)
     (image : Bool) (hc : s.contract = some c) (hne : c ≠ live) :
     write s live id image true = none := by
@@ -1163,8 +1164,9 @@ theorem runAll_oneSpace :
       exact ih s' (step_oneSpace s s' op m (hops op (by simp)) hs hstep) hrest
     · exact ih s hs hrest
 
-/-- The read refuses a session under another contract; it takes no
-override. -/
+/-- The checked vector read (`graph_vector_candidates` /
+`checked_vector_candidates`) refuses a session under another contract and has
+no override, so recall never ranks vectors of two spaces together. -/
 theorem read_refuses_mismatch (s : Session K M) (c expected : Contract K M)
     (hc : s.contract = some c) (hne : c ≠ expected) : vectorRead s expected = none := by
   unfold vectorRead; rw [hc]; simp [hne]
@@ -1198,8 +1200,9 @@ theorem read_one_space (s : Session K M) (expected : Contract K M) (l : List (Co
     · rw [ite_eq_right he] at h; cases h
 
 omit [DecidableEq K] [DecidableEq M] in
-/-- The legacy quarantine: a session loaded with no contract holds no vector,
-so the stamp that follows cannot label a vector it did not produce. -/
+/-- `quarantine_legacy_vectors` leaves a session loaded with no contract
+holding no vector, so the first stamp after load cannot label a vector the
+live embedder did not produce. -/
 theorem quarantine_no_vectors (s : Session K M) (hc : s.contract = none) :
     hasVectors (quarantine s) = false := by
   unfold quarantine; rw [hc]
@@ -1247,8 +1250,8 @@ theorem attach_override_relabel_mixes (s s' : Session K M) (e live : Contract K 
         · rw [hcon, h1] at h2; exact absurd (Option.some.inj h2) hne
     rw [hv] at hv'; cases hv'
 
-/-- With the override on a session that holds no vector, nothing is mixed:
-the relabel is a re-stamp of an empty space. -/
+/-- An `--allow-embedding-mismatch` attach on a session holding no vector
+mixes nothing: the relabel is a re-stamp of an empty space. -/
 theorem attach_override_no_vectors_oneSpace (s s' : Session K M) (live : Contract K M)
     (m : List (Mut K M)) (hv : hasVectors s = false)
     (h : attach s live true = some (s', m)) : oneSpace s' = true := by
@@ -1258,7 +1261,8 @@ theorem attach_override_no_vectors_oneSpace (s s' : Session K M) (live : Contrac
 
 /-! ### The `re-embed` verb -/
 
-/-- `re-embed` refuses the override flag, whatever the session. -/
+/-- `lambo re-embed` refuses `--allow-embedding-mismatch` on every session: a
+migration never relabels instead of rewriting. -/
 theorem reembedCmd_refuses_override (s : Session K M) (live : Contract K M)
     (missingOnly drop : Bool) : reembedCmd s live true missingOnly drop = none := by
   simp [reembedCmd]
@@ -1318,15 +1322,8 @@ def canaryAdmits (mode : CanaryMode) (drifted allow : Bool) : Bool :=
   | .verify => !drifted || allow
   | _ => true
 
-/-- Under `verify`, a drift refuses the attach unless the override is on. -/
-theorem canary_verify_refuses_drift : canaryAdmits .verify true false = false := rfl
-
-/-- The override admits a drifted embedder in every mode. -/
-theorem canary_override_admits (mode : CanaryMode) (drifted : Bool) :
-    canaryAdmits mode drifted true = true := by
-  cases mode <;> simp [canaryAdmits]
-
-/-- Only `verify` without the override ever refuses. -/
+/-- `canary_gate` refuses a writer attach exactly under `canary = "verify"`
+with a drifted embedder and no `--allow-embedding-mismatch`. -/
 theorem canary_refuses_iff (mode : CanaryMode) (drifted allow : Bool) :
     canaryAdmits mode drifted allow = false ↔
       mode = .verify ∧ drifted = true ∧ allow = false := by
@@ -1354,7 +1351,8 @@ theorem missingOnly_skips_canary (s : Session K M) (live : Contract K M)
     reembedCmdGated s live allow missingOnly drop mode drifted =
       reembedCmdGated s live allow missingOnly drop .off false := rfl
 
-/-- Under `verify` with a drift, every ordinary writer attach is refused. -/
+/-- Under `canary = "verify"` with a drifted embedder, `canary_gate` refuses
+every ordinary writer attach (`build_attach` step 2c). -/
 theorem writerAttach_verify_drift (s : Session K M) (live : Contract K M) :
     writerAttach s live false .verify true = none := by
   unfold writerAttach
@@ -1417,61 +1415,71 @@ def sA : Session Nat Nat := ⟨some cA, [⟨1, false, some cA⟩]⟩
 /-- A session stamped `cA` with no vector. -/
 def sEmpty : Session Nat Nat := ⟨some cA, [⟨1, false, none⟩]⟩
 
-/-- Without the override the rename is refused; with it, it is relabelled
-and recorded. -/
+/-- `build_attach` refuses a rename of the model without
+`--allow-embedding-mismatch`; with it, the session is relabelled, a
+`SetEmbedding` recorded and the WARN logged. -/
 theorem example_rename :
     attach sA cB false = none ∧
     attach sA cB true = some (⟨some cB, sA.concepts⟩, [.setEmbedding (some cB)]) ∧
     attachWarns sA cB true = true := by decide
 
-/-- Refused even with the override: a width change, and a kind change over
-existing vectors. A kind change over an empty space is allowed. -/
+/-- `build_attach` refuses even with `--allow-embedding-mismatch` a width
+change and a kind change over existing vectors, and allows a kind change over
+an empty space. -/
 theorem example_override_refusals :
     attach sA cD true = none ∧ attach sA cC true = none ∧
     (attach sEmpty cC true).isSome = true := by decide
 
-/-- The WARN fires on the cross-kind attempt the relabel then refuses. -/
+/-- `build_attach` logs the override WARN on a cross-kind attempt that the
+relabel then refuses (the WARN before the relabel, which #296 moved after it).
+-/
 theorem example_warn_without_relabel :
     attachWarns sA cC true = true ∧ attach sA cC true = none := by decide
 
-/-- **The override's mixing, end to end.** Rename `cA` to `cB` over an
-existing vector, write one new vector, and read under `cB`: the read returns
-one vector produced under `cA` and one under `cB`. -/
+/-- With `--allow-embedding-mismatch`, renaming the contract over an existing
+vector and writing one new vector makes the checked vector read return vectors
+of two spaces: the override's mixing, end to end (#296). -/
 theorem override_mixes_reads :
     vectorRead (runAll sA [.attach cB true, .write cB 2 false true]) cB = some [cA, cB] := by
   decide
 
-/-- The same operations without the override: the attach and the write are
-refused, and the read under `cB` is refused too. -/
+/-- Without `--allow-embedding-mismatch`, the rename attach and the
+cross-space write are refused, and the checked vector read
+(`checked_vector_candidates`) under the new contract is refused, so no read
+mixes spaces. -/
 theorem example_no_override_no_mix :
     vectorRead (runAll sA [.attach cB false, .write cB 2 false true]) cB = none ∧
     vectorRead (runAll sA [.attach cB false, .write cB 2 false true]) cA = some [cA] := by
   decide
 
-/-- Re-embed from `cA` to `cC` (another kind) rewrites the vector, then
-swaps the contract; the read returns one space. -/
+/-- `lambo re-embed` to a contract of another kind rewrites every vector, then
+swaps the contract, and the checked vector read afterwards returns one space.
+-/
 theorem example_reembed :
     reembedCmd sA cC false false false =
       some (⟨some cC, [⟨1, false, some cC⟩]⟩, [.upsert 1 (some cC), .setEmbedding (some cC)]) ∧
     vectorRead (runAll sA [.reembed cC [1] false]) cC = some [cC] := by decide
 
-/-- Re-embed's coverage check: a duplicate id, or a missing one, is refused. -/
+/-- `lambo re-embed`'s coverage check refuses an id list with a duplicate or a
+missing concept, so a migration rewrites every vector exactly once or not at
+all. -/
 theorem example_reembed_coverage :
     reembed (⟨some cA, [⟨1, false, some cA⟩, ⟨2, false, some cA⟩]⟩ : Session Nat Nat) cC [1, 1]
       false = none ∧
     reembed (⟨some cA, [⟨1, false, some cA⟩, ⟨2, false, some cA⟩]⟩ : Session Nat Nat) cC [1]
       false = none := by decide
 
-/-- Image vectors block a full re-embed unless dropped. -/
+/-- `lambo re-embed` refuses a full re-embed while image vectors remain unless
+`--drop-images` is given, which clears them and swaps the contract. -/
 theorem example_reembed_images :
     reembed (⟨some cA, [⟨1, true, some cA⟩]⟩ : Session Nat Nat) cC [] false = none ∧
     reembed (⟨some cA, [⟨1, true, some cA⟩]⟩ : Session Nat Nat) cC [] true =
       some (⟨some cC, [⟨1, true, none⟩]⟩, [.upsert 1 none, .setEmbedding (some cC)]) := by
   decide
 
-/-- The canary drift case: the session is under the live contract, and
-`re-embed` refuses to rewrite it in place; the override flag is refused too.
-The repair is a rename hop (`example_rename_hop`). -/
+/-- Before #296, `lambo re-embed` refused to rewrite in place a session
+already under the live contract whose canary drifted, and refused the override
+flag too, leaving the rename hop (`example_rename_hop`) as the only repair. -/
 theorem example_drift_not_reembeddable_in_place :
     reembedCmd sA cA false false false = none ∧ reembedCmd sA cA true false false = none ∧
     canaryAdmits .verify true false = false := by decide
@@ -1480,8 +1488,9 @@ theorem example_drift_not_reembeddable_in_place :
 `llama_model`). -/
 def cA' : Contract Nat Nat := ⟨0, some 2, 4⟩
 
-/-- **The undocumented repair** (finding 1): re-embed to an alias of the same
-width succeeds, and re-embed back to the original name succeeds too. -/
+/-- Finding 1 of #296: `lambo re-embed` to a same-width alias of the contract
+succeeds, and re-embedding back to the original name succeeds too, an
+undocumented repair route. -/
 theorem example_rename_hop :
     reembedCmd sA cA' false false false =
       some (⟨some cA', [⟨1, false, some cA'⟩]⟩, [.upsert 1 (some cA'), .setEmbedding (some cA')]) ∧
@@ -1489,9 +1498,9 @@ theorem example_rename_hop :
       some (⟨some cA, [⟨1, false, some cA⟩]⟩, [.upsert 1 (some cA), .setEmbedding (some cA)]) := by
   decide
 
-/-- **Silent re-pin, two routes** (finding 2). The round trip's second hop
-(prior `cA'`, live `cA`) and the re-embed of an unrecorded session with a
-text concept (prior none) both re-pin `cA` without the warning. -/
+/-- Finding 2 of #296: the rename round trip's second hop and the re-embed of
+an unrecorded session with a text concept both re-pin the canary without the
+warning (`re_embed.rs:209-215`). -/
 theorem example_silent_repin :
     repins (⟨some cA', [⟨1, false, some cA'⟩]⟩ : Session Nat Nat) cA false false .verify = true ∧
     repinWarns (⟨some cA', [⟨1, false, some cA'⟩]⟩ : Session Nat Nat) cA = false ∧
@@ -1506,20 +1515,23 @@ theorem example_drifted_backfill :
     reembedCmdGated sEmpty cA false true false .verify true =
       some (⟨some cA, [⟨1, false, some cA⟩]⟩, [.upsert 1 (some cA)]) := by decide
 
-/-- The weak same-kind guard (finding 5): vectors from model `0` are
-relabelled as model `1` of the same kind and width. -/
+/-- Finding 5 of #296: the override's same-kind guard is weak: `build_attach`
+relabels vectors from model `0` as model `1` of the same kind and width, and
+refuses another kind. -/
 theorem example_same_kind_relabel :
     (attach sA cB true).isSome = true ∧ (attach sA cC true).isSome = false := by decide
 
-/-- A backfill fills a missing vector in the session's own space and keeps
-the contract; from another space it is refused. -/
+/-- `lambo re-embed --missing-only` (`Graph::embed_missing`) fills a missing
+vector in the session's own space and keeps its contract, and refuses a
+backfill from another space. -/
 theorem example_backfill :
     reembedCmd sEmpty cA false true false =
       some (⟨some cA, [⟨1, false, some cA⟩]⟩, [.upsert 1 (some cA)]) ∧
     reembedCmd sEmpty cB false true false = none := by decide
 
-/-- An ordinary write after an override keeps the relabelled contract, and
-cannot move it back. -/
+/-- After an override relabel, an ordinary write (`record_action_against` with
+the live embedder's vector) keeps the relabelled contract and cannot move the
+session back to the old one. -/
 theorem example_write_after_override :
     (runAll sA [.attach cB true, .write cA 2 false true]).contract = some cB := by decide
 
@@ -1821,8 +1833,9 @@ theorem missingOnly_fixed_refuses_drift (s : Session K M) (live : Contract K M)
   cases drop <;> cases same <;> cases repin <;>
     simp [reembedCmdFixed, hc, canaryAdmits, PinState.isDrifted]
 
-/-- Under `verify` with a drift the backfill writes nothing, whatever the
-session's contract: it is refused, or it is a no-op. -/
+/-- Since #296, `lambo re-embed --missing-only` under `canary = "verify"` with
+a drifted embedder writes nothing to the store, whatever the session's
+contract: the canary gate refuses it or it is a no-op. -/
 theorem missingOnly_fixed_verify_drift_writes_nothing (s : Session K M) (live : Contract K M)
     (r : Session K M × List (Mut K M))
     (h : reembedCmdFixed s live false true false false false .verify .drifted = some r) :
@@ -1980,7 +1993,9 @@ theorem runAll2_keeps (c : Contract K M) :
       exact ih s' (step2_keeps s s' c op m hc (hops op (by simp)) hstep) hrest
     · exact ih s hc hrest
 
-/-- The ordinary operations alone. -/
+/-- Since #296, no sequence of ordinary operations (writes, stamps, the
+canary-gated `--missing-only` backfill) changes a stamped session's contract;
+only an override attach or a full `lambo re-embed` does. -/
 theorem runAll2_ordinary_keeps (c : Contract K M) (ops : List (Op2 K M)) (s : Session K M)
     (hc : s.contract = some c) (hops : ∀ op ∈ ops, op.ordinary = true) :
     (runAll2 s ops).contract = some c :=
@@ -2113,10 +2128,11 @@ theorem pinAfterFixed_no_silent_replace (s : Session K M) (live : Contract K M)
       · exact ⟨rfl, fixed_repin_unsafe_needs_optin s live false drop same repin mode pin hr hunsafe⟩
       · rw [ite_eq_right hr] at h; exact absurd rfl h
 
-/-- The pins of the concrete cases: the `--missing-only` gate pins an absent
-pin (not under `off`) and leaves a drifted one under `warn`; the drift repair
-replaces the drifted pin; without `--repin-canary` the refused migration
-leaves it. -/
+/-- The canary pins the fixed `lambo re-embed` writes on the concrete
+sessions: the `--missing-only` gate pins an absent pin (not under `canary =
+"off"`) and leaves a drifted one under `warn`, the drift repair replaces the
+drifted pin, and without `--repin-canary` a refused migration leaves it
+(`re_embed.rs`, #296). -/
 theorem example_pins_written :
     pinAfterFixed sEmpty cA false true false false false .warn .absent = .agrees ∧
     pinAfterFixed sEmpty cA false true false false false .off .absent = .absent ∧

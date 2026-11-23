@@ -273,6 +273,9 @@ also lists "a vanished interaction" among the failures consumed `failed`; that
 is a `Store(NotFound)` and stops the replay too, but it is effectively
 unreachable: the interaction is logged before the put and never collected.) -/
 
+/-- Before #294, a graph-dependent refusal raised as a plain `Invariant`
+stopped `spawn_replay` on every serve, so the backlog behind it never drained.
+-/
 theorem store_error_blocks_backlog :
     let ints : List Intent := [⟨j1, none⟩, ⟨j2, none⟩]
     let rout : Job → RR := fun j => if j.rid = 1 then .run (.err .store) else .run .ok
@@ -314,6 +317,8 @@ false: it never replays. And the row stays counted in `replay_owed` (set from
 the backlog's length, decremented only when a row is applied or failed)
 forever. -/
 
+/-- Before #295, `spawn_replay` skipped an intent whose receipt id did not
+parse and never settled it. -/
 theorem bad_id_never_settled :
     let ints : List Intent := [⟨j1, none⟩, ⟨j2, none⟩]
     let rout : Job → RR := fun j => if j.rid = 1 then .badId else .run .ok

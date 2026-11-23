@@ -190,7 +190,7 @@ naturals at one common scale (`1.0 = 10`, `0.3 = 3`; the value is a ratio, so
 a common scale cancels, as Rust's own division by the largest weight relies
 on). A term `w / (k + r)` is `w · kDen / (kNum + kDen · r)`; every term is
 scaled by `M = prodDen`, the product of `kNum + kDen · r` for `r = 1 … N` over
-`N` candidates, so each scaled term is an exact quotient (`term_exact`), and
+`N` candidates, so each scaled term is an exact quotient, and
 `rrf` is the exact fraction of the two scaled sums, `(num, best)`, the factor
 `M / kDen` common to both cancelling (`RLe`, `REq` compare fractions by
 cross-multiplication).
@@ -255,7 +255,7 @@ The exact-name step under RRF (`raiseFullName` against the table before it):
   BM25 beyond the cap) changes no node's keyword rank and no `rrf` against
   `raiseName`. Against the table before the step it can:
   `rrf_beyond_cap_shifts_neighbour`. `full_rank_eq_raise` needs the ranked
-  list in search order (`full_rank_eq_raise_needs_sorted`).
+  list in search order, as the Rust's keyword leg always is.
 * `rrf_name_step_shifts_neighbour`, `rrf_name_step_reorders_unnamed`: under
   RRF the step lowers a neighbour's `rrf` and can swap two nodes it does not
   name, where max fusion moves neither.
@@ -739,7 +739,9 @@ theorem assign_lowers_named_concept :
     ahead (score assignName bugInput) idOrder [0, 1] 0 = 1 := by
   decide
 
-/-- The same input under the raising step: `X` keeps `3.2` and stays ahead. -/
+/-- #288's fix on the bug input: the exact-name step raises the named
+concept's keyword leg to `max(BM25, 1.0)`, so `X` keeps `3.2` and stays ahead.
+-/
 theorem raise_fixes_example :
     (phase1 raiseName bugInput 0).keyword = some 3200 ∧
     Beats (score raiseName bugInput) idOrder 0 1 ∧
@@ -852,7 +854,8 @@ theorem raise_eq_assign (hle : OLe (keywordLeg inp.ranked inp.cap t) (some one))
     cases keywordLeg inp.ranked inp.cap n <;> simp [OLe, mergeMax, imax, one] <;> omega
   · simp [raiseName, assignName, hn]
 
-/-- And only then: a keyword leg above `1.0` is where the two differ. -/
+/-- #288: the raising step and the assigning step (`1.0`) give the named
+concept different keyword legs exactly when its BM25 is above `1.0`. -/
 theorem raise_ne_assign {s : Int} (hs : keywordLeg inp.ranked inp.cap t = some s)
     (hgt : one < s) : (phase1 raiseName inp t).keyword ≠ (phase1 assignName inp t).keyword := by
   rw [raise_keyword_eq inp ht, assign_keyword_eq inp ht, hs]
@@ -874,6 +877,8 @@ def beyondCapInput : Input Nat where
   recentScore := 350
   vector := []
 
+/-- #288 review: beyond the keyword cap, where the named concept is absent
+from the leg, the exact-name step gives it only the `1.0` floor. -/
 theorem beyond_cap_floor_only :
     (phase1 noName beyondCapInput 0).keyword = none ∧
     (phase1 raiseName beyondCapInput 0).keyword = some 1000 := by
@@ -974,7 +979,8 @@ theorem full_score_local {n : ι} (hn : n ≠ t) :
     score (raiseFullName inp.ranked) inp n = score noName inp n := by
   unfold score; rw [full_local inp ht hn]
 
-/-- **Keeps its wins.** -/
+/-- The full exact-name step (#288 review) never makes the named concept lose
+to a node it beat before the step. -/
 theorem full_keeps_wins (tb : ι → ι → Bool) {j : ι} (hj : j ≠ t)
     (h : Beats (score noName inp) tb t j) : Beats (score (raiseFullName inp.ranked) inp) tb t j :=
   beats_of_raise (fun _ hn => full_score_local inp ht hn) (full_no_demotion inp ht) hj h
@@ -1130,11 +1136,6 @@ theorem prodDen_pos {c : RrfConfig} (hv : c.Valid) : ∀ N, 0 < prodDen c N
   | 0 => Nat.one_pos
   | N + 1 => Nat.mul_pos (den_pos hv (by omega)) (prodDen_pos hv N)
 
-/-- **Exact.** Each scaled term is an exact quotient: no rounding at all. -/
-theorem term_exact (c : RrfConfig) {N r : Nat} (h1 : 1 ≤ r) (h2 : r ≤ N) :
-    prodDen c N / c.den r * c.den r = prodDen c N :=
-  Nat.div_mul_cancel (den_dvd_prodDen c h1 h2)
-
 /-- A worse rank never gives a larger reciprocal. -/
 theorem div_den_anti (c : RrfConfig) (M : Nat) {a b : Nat} (ha : 1 ≤ a) (hab : a ≤ b) :
     M / c.den b ≤ M / c.den a := by
@@ -1216,7 +1217,7 @@ def RankPos : Option Nat → Prop
   | none => True
   | some r => 1 ≤ r
 
-/-- **An absent leg contributes 0.** -/
+/-- In `RecallFusion`, a leg that did not rank a node adds 0 to its `rrf`. -/
 theorem term_none (c : RrfConfig) (M w : Nat) : term c M w none = 0 := rfl
 
 theorem term_anti (c : RrfConfig) (M w : Nat) {a b : Option Nat} (ha : RankPos a)
@@ -1298,11 +1299,6 @@ theorem StrictTotal.asymm {tb : ι → ι → Bool} (h : StrictTotal tb) {a b : 
   · rfl
   · have := h.trans a b a hab hba; rw [h.irrefl] at this; cases this
 
-theorem idOrder_strictTotal : StrictTotal idOrder where
-  irrefl a := by simp [idOrder]
-  total a b h := by simp only [idOrder, decide_eq_true_eq]; omega
-  trans a b c h1 h2 := by simp only [idOrder, decide_eq_true_eq] at *; omega
-
 theorem oLe_total (a b : Option Int) : OLe a b ∨ OLe b a := by
   cases a <;> cases b <;> simp [OLe] <;> omega
 
@@ -1349,6 +1345,8 @@ theorem beats_total {tb : ι → ι → Bool} (htb : StrictTotal tb) (sc : ι �
     · exact Or.inl (Or.inl (oLt_of_le_of_ne h (Ne.symm he)))
 
 omit [DecidableEq ι] in
+/-- The recall order (score, then `tie_break_by_key`) never puts each of two
+nodes ahead of the other. -/
 theorem beats_asymm {tb : ι → ι → Bool} (htb : StrictTotal tb) (sc : ι → Option Int) {a b : ι}
     (h : Beats sc tb a b) : ¬ Beats sc tb b a :=
   fun h' => beats_irrefl htb sc a (beats_trans htb sc h h')
@@ -1531,11 +1529,9 @@ theorem ranks_pos (n : ι) : RankPos (R.ranks legs n).keyword ∧ RankPos (R.ran
   exact ⟨legRank_pos _ _ _ _, legRank_pos _ _ _ _, recentRank_pos _ _ _⟩
 
 omit [DecidableEq ι] in
-theorem rrf_den_pos (n : ι) : 0 < (R.rrf legs n).2 := by
-  unfold RrfRecall.rrf; split <;> simp <;> omega
-
 omit [DecidableEq ι] in
-/-- Ordering two nodes by their exact `rrf` is ordering them by `key`. -/
+/-- `fusion.rs` orders two nodes by `rrf` exactly as it orders them by their
+sort key. -/
 theorem rrf_le_iff_key (a b : ι) : RLe (R.rrf legs a) (R.rrf legs b) ↔ OLe (R.key legs a) (R.key legs b) := by
   unfold RrfRecall.rrf RrfRecall.key RLe
   by_cases h : R.best legs = 0
@@ -1782,6 +1778,8 @@ def recentRecall (ran : Bool) : RrfRecall Nat :=
 
 def recentLegs : Nat → Legs := fun _ => ⟨none, some 350, none⟩
 
+/-- `RecallFusion`'s recent leg on the example input: it ranks by recency, and
+the `rrf` values follow from those ranks. -/
 theorem rrf_recent_example :
     (recentRecall true).ranks recentLegs 2 = ⟨none, none, some 1⟩ ∧
     ((recentRecall true).ranks recentLegs 5).recent = some 1 ∧
@@ -1808,6 +1806,8 @@ def zeroRecall : RrfRecall Nat :=
 def tieRecall : RrfRecall Nat :=
   { cfg := rrfK60, tb := idOrder, ids := [3, 1], keywordRan := true, recentIdx := fun _ => none }
 
+/-- RRF ties break by `tie_break_by_key`, and a zero-weight leg scores zero
+(test `rrf_ties_break_by_canonical_key_and_a_zero_weight_leg_scores_zero`). -/
 theorem rrf_tie_example :
     tieRecall.key tieLegs 1 = tieRecall.key tieLegs 3 ∧ tieRecall.rrfAhead tieLegs 1 = 0 ∧
     zeroRecall.best recentLegs = 0 ∧ zeroRecall.rrf recentLegs 1 = (0, 1) := by
@@ -1824,6 +1824,8 @@ def oneLegLegs : Nat → Legs
 def oneLegRecall (c : RrfConfig) : RrfRecall Nat :=
   { cfg := c, tb := idOrder, ids := [0, 1, 2], keywordRan := true, recentIdx := fun _ => none }
 
+/-- With one active leg, RRF (`fusion.rs`) orders the candidates as that leg
+ranks them. -/
 theorem rrf_one_leg_example :
     (oneLegRecall rrfDefault).rrfAhead oneLegLegs 2 = 0 ∧
     (oneLegRecall rrfDefault).rrfAhead oneLegLegs 0 = 1 ∧
@@ -1831,9 +1833,9 @@ theorem rrf_one_leg_example :
     ahead (fun n => (oneLegLegs n).keyword) idOrder [0, 1, 2] 2 = 0 := by
   decide
 
-/-- Leg ranks on `oneLegLegs`: BM25 `3.0` first, then the `2.0` tie broken by
-`tb`, the same whatever order the candidates arrive in (`legRank_lt_iff`,
-`legRank_perm`). -/
+/-- The leg ranks `RecallFusion` assigns on the one-leg example: BM25 `3.0`
+first, then the `2.0` tie broken by `tie_break_by_key`, whatever order the
+candidates arrive in. -/
 theorem legRank_example :
     (oneLegRecall rrfDefault).ranks oneLegLegs 2 = ⟨some 1, none, none⟩ ∧
     (oneLegRecall rrfDefault).ranks oneLegLegs 0 = ⟨some 2, none, none⟩ ∧
@@ -2398,6 +2400,8 @@ def beyondCapLow : Input Nat where
   recentScore := 350
   vector := []
 
+/-- #288 review: beyond the cap, raising the named concept into the keyword
+leg moves its neighbour down one keyword rank in RRF. -/
 theorem rrf_beyond_cap_shifts_neighbour :
     ((nameRecall [0, 1]).ranks (phase1 noName beyondCapLow) 0).keyword = none ∧
     ((nameRecall [0, 1]).ranks (phase1 (raiseFullName beyondCapLow.ranked) beyondCapLow) 0).keyword =
@@ -2438,16 +2442,6 @@ def unsortedInput : Input Nat where
   recent := fun _ => false
   recentScore := 350
   vector := []
-
-theorem full_rank_eq_raise_needs_sorted :
-    ¬ SortedBy idOrder unsortedInput.ranked ∧ legRank (kwSlots (phase1 (raiseFullName unsortedInput.ranked) unsortedInput)) idOrder [0, 1] 1 =
-      some 2 ∧
-    legRank (kwSlots (phase1 raiseName unsortedInput)) idOrder [0, 1] 1 = some 1 := by
-  refine ⟨?_, by decide⟩
-  intro h
-  simp only [SortedBy, unsortedInput, List.pairwise_cons] at h
-  have := h.1 (0, 3200) List.mem_cons_self
-  simp at this
 
 /-- Two unnamed nodes, `Y` (node 1) and `Z` (node 2), and the named `X`
 (node 0). Keyword BM25: `Z 2.0, Y 0.5, X 0.3`; vector: `Y 0.9, Z 0.8`. -/

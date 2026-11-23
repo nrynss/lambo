@@ -700,7 +700,8 @@ theorem takePrioritized_length_le (q : List Req) (n : Nat) : (takePrioritized q 
   unfold takePrioritized
   exact pass_fst_length_le _ _ _ _ (pass_fst_length_le _ _ _ _ (Nat.zero_le _))
 
-/-- What stays queued keeps its arrival order. -/
+/-- `take_prioritized` leaves the requests it does not take queued in arrival
+order. -/
 theorem takePrioritized_snd_sublist (q : List Req) (n : Nat) :
     (takePrioritized q n).2.Sublist q :=
   (pass_snd_sublist _ _ _ _).trans (pass_snd_sublist _ _ _ _)
@@ -1020,16 +1021,6 @@ theorem removeDesc_length {α : Type} (g : List α) (is : List Nat) :
     · simpa using ih _
     · have := ih g; simp; omega
 
-theorem removeDesc_snd_sublist {α : Type} (g : List α) (is : List Nat) :
-    (removeDesc g is).2.Sublist g := by
-  induction is generalizing g with
-  | nil => simp [removeDesc]
-  | cons i is ih =>
-    unfold removeDesc
-    split
-    · exact (ih _).trans (List.eraseIdx_sublist g i)
-    · exact ih g
-
 theorem filterMap_congr' {α β : Type} {f g : α → Option β} {l : List α}
     (h : ∀ a ∈ l, f a = g a) : l.filterMap f = l.filterMap g := by
   induction l with
@@ -1111,9 +1102,6 @@ theorem extract_length (g : List Req) (ch : List Nat) : (extract g ch).1.length 
   simp only [List.length_reverse]
   exact Nat.le_trans (removeDesc_length _ _) (Nat.le_of_eq (sortDesc_perm ch).length_eq)
 
-theorem extract_snd_sublist (g : List Req) (ch : List Nat) : (extract g ch).2.Sublist g :=
-  removeDesc_snd_sublist _ _
-
 theorem extract_mem (g : List Req) (ch : List Nat) (hn : ch.Nodup) :
     ∀ a ∈ (extract g ch).1, ∃ i ∈ ch, g[i]? = some a := by
   intro a ha
@@ -1159,11 +1147,6 @@ theorem chunkOf_perm (c : Cfg) (g : List Req) : ((chunkOf c g).1 ++ (chunkOf c g
   obtain ⟨ch, ⟨-, h, -⟩ | ⟨-, h, -⟩⟩ := chunkOf_spec c g
   · rw [h]; exact List.Perm.refl _
   · rw [h]; exact extract_perm _ _
-
-theorem chunkOf_snd_sublist (c : Cfg) (g : List Req) : (chunkOf c g).2.Sublist g := by
-  obtain ⟨ch, ⟨-, h, -⟩ | ⟨-, h, -⟩⟩ := chunkOf_spec c g
-  · rw [h]; exact List.Sublist.refl _
-  · rw [h]; exact extract_snd_sublist _ _
 
 theorem chunkOf_ne_nil (c : Cfg) (g : List Req) (hg : g ≠ []) : (chunkOf c g).1 ≠ [] := by
   obtain ⟨ch, ⟨-, -, h⟩ | ⟨-, h, hne, hn, hr⟩⟩ := chunkOf_spec c g
@@ -1422,12 +1405,17 @@ alone; `Backend` makes the write path settle it `failed` and consume its
 intent (`LamboError::Embed`, see `Drain/Worker.lean`). -/
 def flaky (row : Txt → Option Vec) : Fwd := fun k ts => if k = 0 then .err else rowFwd row k ts
 
+/-- `forward_isolated`: a transient device fault on a lone text's forward is
+answered as a permanent backend error, since a one-text batch is not retried.
+-/
 theorem lone_transient_fault_permanent (row : Txt → Option Vec) (dim : Nat) (t : Txt)
     (hc : (row canary).isSome) :
     (forwardIsolated (flaky row) dim 0 [t]).1 = [.backend] := by
   obtain ⟨v, hv⟩ := Option.isSome_iff_exists.mp hc
   simp [forwardIsolated, once, flaky, rowFwd, hv]
 
+/-- `forward_isolated`: when a transient device fault fails a pair's batched
+forward, each text is retried alone and both embed. -/
 theorem paired_transient_fault_recovers (row : Txt → Option Vec) (dim : Nat) (t u : Txt)
     (hc : (row canary).isSome) :
     (forwardIsolated (flaky row) dim 0 [t, u]).1 = [soloRes row dim t, soloRes row dim u] := by
@@ -1488,8 +1476,8 @@ theorem test_lone_bad : forwardIsolated (fake 4) 4 0 [tBad] = ([.backend], [[tBa
 theorem test_width_mismatch :
     forwardIsolated (fake 4) 8 0 [tA, tBB] = ([.backend, .backend], [[tA, tBB]]) := by decide
 
-/-- The transient asymmetry on concrete texts: a device fault on the first
-forward only. -/
+/-- `forward_isolated` on concrete texts with a device fault on the first
+forward only: a lone text fails (`backend`), a pair recovers both. -/
 theorem test_lone_vs_pair :
     (forwardIsolated (fun k ts => if k = 0 then .err else fake 4 k ts) 4 0 [tA]).1 = [.backend] ∧
       (forwardIsolated (fun k ts => if k = 0 then .err else fake 4 k ts) 4 0 [tA, tBB]).1 =
@@ -1523,6 +1511,8 @@ theorem pick_none_iff (c : Cfg) (pulled : List Req) (t : Take) :
   · rintro ⟨hb, hs⟩
     simp [hb, hs]
 
+/-- `pick` (`serve_take`) always yields a batch when there is a bulk request
+or any single to serve. -/
 theorem pick_some (c : Cfg) (pulled : List Req) (t : Take) (h : t.bulk ≠ [] ∨ t.single ++ pulled ≠ []) :
     ∃ items t', pick c pulled t = some (items, t') := by
   cases hp : pick c pulled t with
@@ -1691,6 +1681,9 @@ theorem take_ends (c : Cfg) (P : Nat) (ps : List (List Req)) (t : Take)
       obtain ⟨hlt, hs'⟩ := pick_phi c P p t items t' (hp p (by simp)) hs h
       exact ih t' (fun q hq => hp q (by simp [hq])) hs' (by simp at hlen; omega)
 
+/-- With the Rust's configuration (`MAX_BATCH` = 32), the coalescer's
+potential is at most the singles plus 132 per bulk request: the bound on
+`coalesce_loop`'s iterations. -/
 theorem phi_rust (t : Take) (ht : t.streak = 0) :
     phi Cfg.rust 32 t ≤ t.single.length + 132 * t.bulk.length := by
   unfold phi; split
@@ -2944,6 +2937,8 @@ except by the caller's own timeout. `EMBED_WAIT` turns this wedge into a
 named `Unavailable` after ten minutes, every time. -/
 def Wedged (s : St) : Prop := s.sup = false ∧ s.pc = .down ∧ s.shutdown = false
 
+/-- Once the embedder worker is wedged (its spawn failed), every event but
+shutdown keeps it wedged, and callers only ever time out (`supervise`). -/
 theorem wedged_stays {c : Cfg} {f : Fwd} {dim : Nat} {s : St} (hw : Wedged s) (e : Ev)
     (he : e ≠ .shutdown) :
     Wedged (step c f dim s e) ∧ ∀ p ∈ (step c f dim s e).obs, p ∈ s.obs ∨ p.2 = .timedOut := by
@@ -2979,6 +2974,8 @@ theorem wedged_stays {c : Cfg} {f : Fwd} {dim : Nat} {s : St} (hw : Wedged s) (e
     rw [this]
     exact ⟨⟨hsup, hpc, hsd⟩, fun p hp => Or.inl hp⟩
 
+/-- A failed worker spawn wedges the embed queue: `supervise` cannot restart
+it and queued callers time out. -/
 theorem test_spawn_failure_wedges :
     let s := run Cfg.rust okFwd 4 St.init
       ([.supervise false, .enqueue (sReq 1 7)] ++ List.replicate 5 .work ++ [.giveUp (sReq 1 7)])
@@ -3000,6 +2997,8 @@ def starveEvs : List Ev :=
     List.replicate 4 .work ++ [.enqueue (sReq 5 5), .enqueue (sReq 6 5)] ++
     List.replicate 4 .work
 
+/-- Queued bulk work can starve: while `MAX_BATCH` singles keep arriving,
+`take_prioritized` never takes a queued bulk request. -/
 theorem queued_bulk_starves :
     let s := run cfg2 okFwd 4 St.init starveEvs
     s.queue = [bReq 0 9] ∧ s.fwds.length = 3 ∧ (bReq 0 9).txt ∉ s.fwds.flatten := by decide

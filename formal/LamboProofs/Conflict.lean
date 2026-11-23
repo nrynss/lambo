@@ -698,7 +698,8 @@ theorem single_agent_never_conflicts (lo : Int) (w : Option Nat) (now : Int)
     obtain ⟨⟨x, y, hxy, ⟨e, he, hx, hxw⟩, ⟨f, hf, hy, hyw⟩⟩, _⟩ := this
     exact absurd ((h e he hx x hxw).trans (h f hf hy y hyw).symm) hxy
 
-/-- A hit's agent list is duplicate-free and holds two distinct agents. -/
+/-- `conflict_at` fires only when at least two distinct agents contest the
+node, each listed once in `ConflictHit::agents`. -/
 theorem conflictAt_two_agents {lo : Int} {w : Option Nat} {now : Int}
     {tl : List (Interaction A)} {es : List (Edge A)} {h : Hit A}
     (hc : conflictAt lo w now tl es = some h) :
@@ -736,14 +737,16 @@ theorem qualifies_iff (lo : Int) (w : Nat) (now : Int) (e : Edge A) :
   exact ⟨fun ⟨⟨a, b⟩, c⟩ => ⟨a, c, b⟩, fun ⟨a, c, b⟩ => ⟨⟨a, b⟩, c⟩⟩
 
 omit [DecidableEq A] [Ord A] in
-/-- Inclusive lower bound: a write exactly `window` ago counts. -/
+/-- `conflict_at` counts a write made exactly one recency window before `now`
+(test `window_boundaries_are_inclusive`). -/
 theorem window_lower_inclusive (lo : Int) (w : Nat) (now : Int) (e : Edge A)
     (hq : e.ty.qualifying = true) (hlo : lo ≤ now - w) (he : lastWrite e = now - w) :
     qualifies lo (some w) now e = true := by
   rw [qualifies_iff]; refine ⟨hq, ?_, ?_⟩ <;> omega
 
 omit [DecidableEq A] [Ord A] in
-/-- Inclusive upper bound: a write exactly at `now` counts. -/
+/-- `conflict_at` counts a write made exactly at `now` (test
+`window_boundaries_are_inclusive`). -/
 theorem window_upper_inclusive (lo : Int) (w : Nat) (now : Int) (e : Edge A)
     (hq : e.ty.qualifying = true) (hlo : lo ≤ now) (he : lastWrite e = now) :
     qualifies lo (some w) now e = true := by
@@ -758,8 +761,9 @@ theorem window_below_excluded (lo : Int) (w : Nat) (now : Int) (e : Edge A)
   · rw [qualifies_iff] at h; omega
 
 omit [DecidableEq A] [Ord A] in
-/-- A write after `now` (a mocked clock) is outside the window, for every
-window including the unrepresentable one. -/
+/-- A write dated after `now` (a mocked clock) is outside `conflict_at`'s
+window, the unrepresentable window included (test
+`future_dated_edges_are_outside_the_window`). -/
 theorem future_excluded (lo : Int) (w : Option Nat) (now : Int) (e : Edge A)
     (he : now < lastWrite e) : qualifies lo w now e = false := by
   simp [qualifies]
@@ -772,7 +776,8 @@ theorem unbounded_window_qualifies_iff (lo now : Int) (e : Edge A) (hlo : lo ≤
     qualifies lo none now e = true ↔ e.ty.qualifying = true ∧ lastWrite e ≤ now := by
   simp [qualifies, windowStart, hlo]
 
-/-- The age of the newest qualifying write is at most the window. -/
+/-- `ConflictHit::seconds_ago` (the newest qualifying write's age) is at most
+the recency window. -/
 theorem secondsAgo_le_window {lo : Int} {w : Nat} {now : Int} {tl : List (Interaction A)}
     {es : List (Edge A)} {h : Hit A} (hc : conflictAt lo (some w) now tl es = some h) :
     h.secondsAgo ≤ w := by
@@ -795,7 +800,8 @@ theorem newestOf_perm_time {lo : Int} {w : Option Nat} {now : Int} {tl : List (I
   have h2 := hmax' e (hp.mem_iff.1 he) hq
   omega
 
-/-- The verdict does not depend on the order of the incident edges. -/
+/-- Whether `conflict_at` fires does not depend on the order `incident_edges`
+returns a node's edges (test `detect_is_deterministic_and_sorted`). -/
 theorem conflictAt_perm_isSome (lo : Int) (w : Option Nat) (now : Int)
     (tl : List (Interaction A)) {es es' : List (Edge A)} (hp : es.Perm es') :
     (conflictAt lo w now tl es).isSome = (conflictAt lo w now tl es').isSome := by
@@ -803,7 +809,8 @@ theorem conflictAt_perm_isSome (lo : Int) (w : Option Nat) (now : Int)
   rw [conflictAt_isSome_iff, conflictAt_isSome_iff]
   simp only [hp.mem_iff]
 
-/-- Nor does the agent set. -/
+/-- `conflict_at`'s agent set (`ConflictHit::agents`) does not depend on the
+order `incident_edges` returns a node's edges. -/
 theorem conflictAt_perm_agents {lo : Int} {w : Option Nat} {now : Int}
     {tl : List (Interaction A)} {es es' : List (Edge A)} (hp : es.Perm es') {h h' : Hit A}
     (hc : conflictAt lo w now tl es = some h) (hc' : conflictAt lo w now tl es' = some h')
@@ -821,8 +828,9 @@ theorem conflictAt_perm_secondsAgo {lo : Int} {w : Option Nat} {now : Int}
   obtain ⟨_, _, t', hn', hs'⟩ := conflictAt_eq_some hc'
   rw [hs, hs', newestOf_perm_time hp hn hn']
 
-/-- Nor does the named writer, when no two qualifying writes at the same
-instant name different agents. -/
+/-- `ConflictHit::writer` does not depend on `incident_edges` order as long as
+no two qualifying writes at one instant name different agents; the tie is
+`writer_order_dependent`. -/
 theorem writer_perm_of_unique {lo : Int} {w : Option Nat} {now : Int}
     {tl : List (Interaction A)} {es es' : List (Edge A)} (hp : es.Perm es') {h h' : Hit A}
     (hu : ∀ e₁ ∈ es, ∀ e₂ ∈ es, qualifies lo w now e₁ = true → qualifies lo w now e₂ = true →
@@ -857,8 +865,9 @@ theorem excluded_edge_irrelevant (lo : Int) (w : Option Nat) (now : Int)
 
 /-! ### Lapse: the hot-list predicate against the caller's clock -/
 
-/-- Once every write is older than the window, the predicate returns `None`
-and `revalidate` drops the entry. -/
+/-- Once every write to the node is older than the recency window,
+`conflict_at` returns `None`, and `HotList::revalidate` drops the entry (test
+`revalidate_ages_a_conflict_out_when_only_the_clock_advances`). -/
 theorem lapse_of_old (lo : Int) (w : Nat) (now : Int) (tl : List (Interaction A))
     (es : List (Edge A)) (h : ∀ e ∈ es, lastWrite e < now - w) :
     conflictAt lo (some w) now tl es = none := by
@@ -896,9 +905,9 @@ theorem lapse_permanent (lo : Int) (w : Nat) {now₁ now₂ : Int} (tl : List (I
     rw [h] at this
     simp at this
 
-/-- Until it lapses, a re-validated conflict's age is the read-time age: with
-nothing written after `now₁`, at a later clock it is older by exactly the
-elapsed time, never the frozen detection-time value. -/
+/-- `HotList::revalidate` re-runs `conflict_at` at read time, so until a
+conflict lapses its age grows by exactly the elapsed time, never the frozen
+detection-time value. -/
 theorem secondsAgo_advances (lo : Int) (w : Nat) {now₁ now₂ : Int} (tl : List (Interaction A))
     (es : List (Edge A)) (h12 : now₁ ≤ now₂) (hw : ∀ e ∈ es, lastWrite e ≤ now₁) {h₁ h₂ : Hit A}
     (hc₁ : conflictAt lo (some w) now₁ tl es = some h₁)
@@ -1176,7 +1185,9 @@ theorem agentsOfFixed_nodup (tl : List (Interaction A)) (es : List (Edge A)) :
     · exact nodup_foldl_pushNew _ h
 
 omit [Ord A] in
-/-- The fix only adds agents: every agent of the old set is in the new one. -/
+/-- The fixed attribution of a re-sent write (`edge_writers`, test
+`a_resend_by_another_agent_keeps_the_original_writer`) only adds agents: every
+agent the old rule counted still counts. -/
 theorem agentsOf_sub_fixed (tl : List (Interaction A)) (es : List (Edge A)) {x : A}
     (h : x ∈ agentsOf tl es) : x ∈ agentsOfFixed tl es := by
   rw [mem_agentsOf] at h
@@ -1297,7 +1308,9 @@ theorem conflictAtFixed_of_conflictAt {lo : Int} {w : Option Nat} {now : Int}
   exact ⟨⟨a, b, hab, ⟨e, he, hx, (mem_candidatesOf _ _ _).2 (Or.inr ha)⟩,
     ⟨f, hf, hy, (mem_candidatesOf _ _ _).2 (Or.inr hb)⟩⟩, hq⟩
 
-/-- One agent never conflicts under the fix either. -/
+/-- Under the fixed attribution, a node every qualifying edge of which has one
+candidate writer never yields a `ConflictHit` (test
+`single_agent_does_not_fire`). -/
 theorem single_agent_never_conflicts_fixed (lo : Int) (w : Option Nat) (now : Int)
     (tl : List (Interaction A)) (es : List (Edge A)) (a : A)
     (h : ∀ e ∈ es, e.ty.excluded = false → ∀ x ∈ candidatesOf tl e, x = a) :
@@ -1325,7 +1338,8 @@ theorem writer_mem_agents_fixed {lo : Int} {w : Option Nat} {now : Int}
     right
     rw [← hw]; exact attributeAt_named_mem _ _ _
 
-/-- The fix keeps the window: a hit's age is at most the window. -/
+/-- Under the fixed attribution, `ConflictHit::seconds_ago` is still at most
+the recency window. -/
 theorem secondsAgo_le_window_fixed {lo : Int} {w : Nat} {now : Int}
     {tl : List (Interaction A)} {es : List (Edge A)} {h : Hit A}
     (hc : conflictAtFixed lo (some w) now tl es = some h) : h.secondsAgo ≤ w := by
@@ -1337,7 +1351,8 @@ theorem secondsAgo_le_window_fixed {lo : Int} {w : Nat} {now : Int}
 
 /-! ### Order independence, under the fix -/
 
-/-- The verdict does not depend on the order of the incident edges. -/
+/-- Whether the fixed `conflict_at_with` fires does not depend on
+`incident_edges` order. -/
 theorem conflictAtFixed_perm_isSome (lo : Int) (w : Option Nat) (now : Int)
     (tl : List (Interaction A)) {es es' : List (Edge A)} (hp : es.Perm es') :
     (conflictAtFixed lo w now tl es).isSome = (conflictAtFixed lo w now tl es').isSome := by
@@ -1345,7 +1360,8 @@ theorem conflictAtFixed_perm_isSome (lo : Int) (w : Option Nat) (now : Int)
   rw [conflictAtFixed_isSome_iff, conflictAtFixed_isSome_iff]
   simp only [hp.mem_iff]
 
-/-- Nor does the agent set. -/
+/-- The fixed `conflict_at_with`'s agent set does not depend on
+`incident_edges` order. -/
 theorem conflictAtFixed_perm_agents {lo : Int} {w : Option Nat} {now : Int}
     {tl : List (Interaction A)} {es es' : List (Edge A)} (hp : es.Perm es') {h h' : Hit A}
     (hc : conflictAtFixed lo w now tl es = some h)
@@ -1388,7 +1404,9 @@ theorem agentsStepFixed_excluded (tl : List (Interaction A)) (as : List A) {e : 
     (h : e.ty.excluded = true) : agentsStepFixed tl as e = as := by
   simp [agentsStepFixed, h]
 
-/-- A `Contradicts` or `SuspectedSupersedes` edge still changes nothing. -/
+/-- Under the fixed attribution a `Contradicts` or `SuspectedSupersedes` edge
+still never changes `conflict_at`'s answer (test
+`a_contradiction_writer_does_not_join_the_conflict_agent_set`). -/
 theorem excluded_edge_irrelevant_fixed (lo : Int) (w : Option Nat) (now : Int)
     (tl : List (Interaction A)) (pre suf : List (Edge A)) {e : Edge A}
     (h : e.ty.excluded = true) :
@@ -1659,6 +1677,7 @@ theorem declaredAt_le_createdAt (e : Edge A) : declaredAt e ≤ e.createdAt := b
   simp [declaredAt]; omega
 
 omit [DecidableEq A] in
+/-- `declared_at` never dates a declaration later than its event time. -/
 theorem declaredAt_le_aboutTime (e : Edge A) : declaredAt e ≤ aboutTime e := by
   simp [declaredAt]; omega
 
@@ -1675,11 +1694,13 @@ theorem declaredAt_of_ge {e : Edge A} {t : Int} (h : e.eventTime = some t)
   simp [declaredAt, aboutTime, h]; omega
 
 omit [DecidableEq A] in
+/-- `declared_at` dates a declaration with no event time at its write time. -/
 theorem declaredAt_none {e : Edge A} (h : e.eventTime = none) : declaredAt e = e.createdAt := by
   simp [declaredAt, aboutTime, h]
 
 omit [DecidableEq A] in
-/-- The date is monotone in the write time and the about-time. -/
+/-- `declared_at` (`contradiction.rs`) is monotone: a later write time and a
+later event time never give an earlier date. -/
 theorem declaredAt_mono {e₁ e₂ : Edge A} (hc : e₁.createdAt ≤ e₂.createdAt)
     (ha : aboutTime e₁ ≤ aboutTime e₂) : declaredAt e₁ ≤ declaredAt e₂ := by
   simp only [declaredAt]; omega
@@ -1747,6 +1768,9 @@ theorem cutoff_none_no_evidence {lo now : Int} {minAge : Option Nat}
     (h : cutoff lo minAge now = none) (ev : Evidence A) : eligible lo now minAge ev = false := by
   simp [eligible, h]
 
+/-- When `now - min_age` falls below `MIN_UTC`, `checked_sub_signed` gives
+`contradiction.rs` no age cutoff, so no evidence clears the age floor (the
+out-of-range case beside `unrepresentable_minAge`). -/
 theorem cutoff_none_of_out_of_range {lo now : Int} {a : Nat} (h : now - a < lo) :
     cutoff lo (some a) now = none := by
   simp [cutoff, h]
@@ -1936,6 +1960,8 @@ theorem latest_le_cons (lo now : Int) (minAge : Option Nat) (baseline : Int)
     · exact Int.le_refl _
   · exact Int.le_refl _
 
+/-- In `contradiction.rs`, evidence only ever outweighs: a contradiction that
+qualifies with one more piece of evidence still qualifies without it. -/
 theorem admissible_of_more_evidence {lo now : Int} {minAge : Option Nat} {baseline : Int}
     {tl : List (Interaction A)} {evs : List (Evidence A)} {d : Decl A} (ev : Evidence A)
     (h : admissible lo now minAge baseline tl (ev :: evs) d = true) :

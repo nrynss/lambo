@@ -215,23 +215,6 @@ def suspectedPair (E : List Edge) (a b : Nat) : Bool := joined E .suspected a b
 theorem suspectedPair_symm (E : List Edge) (a b : Nat) :
     suspectedPair E a b = suspectedPair E b a := joined_symm E _ a b
 
-theorem edgeBetween_append (E F : List Edge) (a b : Nat) (t : EType) :
-    edgeBetween (E ++ F) a b t = (edgeBetween E a b t || edgeBetween F a b t) := by
-  simp [edgeBetween, List.any_append]
-
-/-- Edges of other types do not change `edgeBetween` at type `t`. -/
-theorem edgeBetween_append_other (E F : List Edge) (a b : Nat) (t : EType)
-    (hF : ∀ e ∈ F, e.ty ≠ t) : edgeBetween (E ++ F) a b t = edgeBetween E a b t := by
-  rw [edgeBetween_append]
-  have : edgeBetween F a b t = false := by
-    unfold edgeBetween
-    rw [List.any_eq_false]
-    intro e he h
-    apply hF e he
-    simp only [Bool.and_eq_true, beq_iff_eq] at h
-    exact h.2
-  rw [this, Bool.or_false]
-
 /-! ## Suspected supersession (#198): the pair condition
 
 A concept is reduced to what `candidate` reads. `content` stands for the text
@@ -308,7 +291,8 @@ theorem blocked_symm (E : List Edge) (a b : Concept) : blocked E a b = blocked E
     have h2 : (b.ty != a.ty) = true := by simp [Ne.symm hty]
     simp [h1, h2]
 
-/-- A concept is never suspected of superseding itself. -/
+/-- The #198 trigger (`candidate`) never suspects a concept of superseding
+itself. -/
 theorem candidate_self (slot : Nat → Nat → Bool) (E : List Edge) (a : Concept) :
     candidate slot E a a = none := by
   simp [candidate, blocked]
@@ -402,27 +386,6 @@ def insertDedup (x : Nat) : List Nat → List Nat
 /-- `sort_by_key(id)` then `dedup`. -/
 def sortDedup (l : List Nat) : List Nat := l.foldr insertDedup []
 
-theorem mem_insertDedup (x z : Nat) (l : List Nat) : z ∈ insertDedup x l ↔ z = x ∨ z ∈ l := by
-  induction l with
-  | nil => simp [insertDedup]
-  | cons y ys ih =>
-    unfold insertDedup
-    by_cases h1 : x < y
-    · simp [h1]
-    · by_cases h2 : x = y
-      · subst h2; simp [h1]
-      · simp only [h1, h2, ite_false, List.mem_cons, ih]
-        constructor
-        · rintro (h | h | h) <;> simp [h]
-        · rintro (h | h | h) <;> simp [h]
-
-theorem mem_sortDedup (z : Nat) (l : List Nat) : z ∈ sortDedup l ↔ z ∈ l := by
-  induction l with
-  | nil => simp [sortDedup]
-  | cons y ys ih =>
-    simp only [sortDedup, List.foldr_cons] at ih ⊢
-    rw [mem_insertDedup, ih]; simp
-
 /-- One hit of `record_refused_hits`: record the `candidate` pair of the
 created concept `new` and the hit, if any. `look` resolves an id to a concept
 of the session (`None`: no longer a concept), `fresh k` is the id of the
@@ -505,8 +468,8 @@ theorem step_wellDated (slot : Nat → Nat → Bool) (date : Nat → Int)
       · rw [h1, h2, ← ho, ← hd.1]; exact h3
       · rw [h1, h2, ← ho, ← hd.1]; exact h3
 
-/-- The trigger adds only `SuspectedSupersedes` edges, after the ones it was
-given, and none of another type. -/
+/-- `record_refused_hits` only appends `SuspectedSupersedes` edges, after the
+existing ones, and never an edge of another type. -/
 theorem recordRefused_extends (slot : Nat → Nat → Bool) (look : Nat → Option Concept)
     (new : Concept) (fresh : Nat → Nat) (at_ : Int) (E : List Edge) (refused : List Nat) :
     ∃ added, recordRefused slot look new fresh at_ E refused = E ++ added ∧
@@ -562,6 +525,9 @@ theorem suspected_acyclic (date : Nat → Int) (E : List Edge) (hE : WellDated d
   have := reach_date date E hE h
   omega
 
+/-- On a well-dated graph the #198 trigger never leaves `SuspectedSupersedes`
+edges both ways between two concepts: a suspected pair runs from the
+later-dated concept to the earlier. -/
 theorem suspected_not_both_ways (date : Nat → Int) (E : List Edge) (hE : WellDated date E)
     (e f : Edge) (he : e ∈ E) (hf : f ∈ E) (hte : e.ty = .suspected) (htf : f.ty = .suspected)
     (h1 : f.src = e.dst) (h2 : f.dst = e.src) : False := by
@@ -591,7 +557,8 @@ theorem settle_clears (E : List Edge) (a b : Nat) : suspectedPair (settle E a b)
     obtain ⟨⟨h1, h2⟩, h3⟩ := h
     simp [h1, h2, h3] at h'
 
-/-- `settle` keeps every edge of another type. -/
+/-- `settle` removes only `SuspectedSupersedes` edges between the pair; every
+edge of another type stays. -/
 theorem settle_keeps_other (E : List Edge) (a b : Nat) (e : Edge) (he : e ∈ E)
     (ht : e.ty ≠ .suspected) : e ∈ settle E a b := by
   rw [settle, List.mem_filter]
@@ -1558,6 +1525,8 @@ theorem outranks_total (a b : Pass) (h : a.probe.source ≠ b.probe.source) :
   simp only [outranks, decide_eq_true_eq]
   omega
 
+/-- `outranks` (newer counted evidence, then the smaller key, then the smaller
+source id) never ranks each of two supersession passes over the other. -/
 theorem outranks_asymm (a b : Pass) (h : outranks a b = true) : outranks b a = false := by
   simp only [outranks, decide_eq_true_eq, decide_eq_false_iff_not] at *
   omega
@@ -2018,6 +1987,7 @@ theorem probesFor_ok (W : World) (cooldown now : Int) (targets : List Nat) (p : 
   · obtain ⟨l, ⟨rv, ⟨q, _, rfl⟩, rfl⟩, hl⟩ := hp
     exact reverseOf_ok W cooldown now _ q p hl
 
+/-- The supersession pass never probes a concept against itself. -/
 theorem probesFor_noSelf (W : World) (cooldown now : Int) (targets : List Nat) :
     NoSelf (probesFor W cooldown now targets) :=
   fun p hp => (probesFor_ok W cooldown now targets p hp).1
@@ -2026,6 +1996,7 @@ theorem probesFor_noSelf (W : World) (cooldown now : Int) (targets : List Nat) :
 `Probes::default()`), so nothing is decided. -/
 theorem gather_off (W : World) (cooldown now : Int) : gather W false cooldown now = [] := rfl
 
+/-- With the supersession option off, `gather_holds` returns no probes. -/
 theorem gatherHolds_off (W : World) (cooldown now : Int) (window : List Nat) :
     gatherHolds W false cooldown now window = [] := rfl
 
@@ -2047,6 +2018,8 @@ theorem contradictions_ignore_suspected (W : World) (F : List Edge)
   simp
   rfl
 
+/-- The supersession pass's probes ignore `SuspectedSupersedes` edges: adding
+any changes no probe. -/
 theorem probesFor_ignore_suspected (W : World) (F : List Edge)
     (hF : ∀ e ∈ F, e.ty = .suspected) (cooldown now : Int) (targets : List Nat) :
     probesFor { W with edges := W.edges ++ F } cooldown now targets =
@@ -2182,6 +2155,8 @@ theorem off_agrees (W : World) (ev : Nat → Evidence) (window cooldown now : In
     Canon.cycle s { f with supersede := superFlag holds (decideV ev window (gather W false cooldown now)) n } =
       Canon.cycle s { f with supersede := false } := rfl
 
+/-- With the supersession option off, the canon supersession pass demotes
+nothing: `gather` probes nothing, so no verdict is applied. -/
 theorem off_no_demotion (W : World) (ev : Nat → Evidence) (window cooldown now : Int)
     (holds : Verdict → Bool) (st : Nat → Status) :
     applySup holds st (decideV ev window (gather W false cooldown now)) = st := rfl
@@ -2191,6 +2166,8 @@ them. -/
 def held (ev : Nat → Evidence) (window : Int) (probes : List Probe) (n : Nat) : Bool :=
   (decideV ev window probes).any fun v => v.target == n
 
+/-- With the supersession option off, `gather_holds` holds no concept, so no
+replacement is held off. -/
 theorem held_off (W : World) (ev : Nat → Evidence) (window cooldown now : Int) (win : List Nat)
     (n : Nat) : held ev window (gatherHolds W false cooldown now win) n = false := rfl
 
@@ -2205,6 +2182,8 @@ concepts, or a `SuspectedSupersedes` edge either way. -/
 def neverRedundant (E : List Edge) (a b : Nat) : Bool :=
   (a != b && joined E .contradicts a b) || suspectedPair E a b
 
+/-- `never_redundant` (`src/recall/redundancy.rs`) is symmetric in its two
+concepts. -/
 theorem neverRedundant_symm (E : List Edge) (a b : Nat) :
     neverRedundant E a b = neverRedundant E b a := by
   unfold neverRedundant
@@ -2374,6 +2353,8 @@ allows it (`shows_line`). -/
 def annotate (showsLine : Bool) (pss : Option Nat) : Option Nat × Option Nat :=
   (pss, if showsLine then pss else none)
 
+/-- Recall's annotation passes `possibly_superseded_by` through unchanged and
+renders the prose line only where `suspected_supersession_line` allows it. -/
 theorem annotate_field (showsLine : Bool) (pss : Option Nat) :
     (annotate showsLine pss).1 = pss ∧ ((annotate showsLine pss).2.isSome → showsLine = true) := by
   cases showsLine <;> simp [annotate]

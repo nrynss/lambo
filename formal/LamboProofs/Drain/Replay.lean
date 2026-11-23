@@ -121,6 +121,8 @@ theorem loopWith_replayStep (rout : Job → RR) : ∀ (l : List Intent) (s : Str
     cases replayStep i.job.image (rout i.job) s with
     | mk st s' => cases st <;> simp [ih]
 
+/-- The replay loop with its step as a parameter (`loopWith`) is the replay
+before #294 when given `replayStep`: #294 changed the step, not the loop. -/
 theorem replayWith_replayStep (live : Bool) (rout : Job → RR) (intents : List Intent) :
     replayWith replayStep live rout intents = replay live rout intents := by
   unfold replayWith replay
@@ -954,9 +956,6 @@ def OrderInv (rows : List Intent) (applied : List Job) : Prop :=
   applied.Pairwise (fun a b => a.agent = b.agent → a.epoch = b.epoch → a.rid ≤ b.rid) ∧
   ∀ x ∈ applied, ∀ i ∈ rows, i.outcome = none → x.agent = i.job.agent →
     x.epoch = i.job.epoch → x.rid ≤ i.job.rid
-
-theorem orderInv_nil (rows : List Intent) : OrderInv rows [] :=
-  ⟨List.Pairwise.nil, fun _ hx => by simp at hx⟩
 
 /-- Reloading the rows in another order keeps the invariant. -/
 theorem orderInv_perm {rows rows' : List Intent} {A : List Job} (hp : rows'.Perm rows)

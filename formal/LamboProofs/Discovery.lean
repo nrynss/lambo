@@ -235,11 +235,16 @@ theorem old_lists_erased :
     (run .old (St.init [1, 2]) coderabbit).erased = [(2, 2)] := by
   decide
 
+/-- Under #287's first rule, `Discovery::sessions` can answer a request with a
+listing read before the request arrived. -/
 theorem old_not_fresh : ¬ Fresh (run .old (St.init [1, 2]) coderabbit) := by
   intro h
   have := h ⟨1, 3, 1, [1, 2]⟩ (by rw [old_lists_erased.1]; exact List.mem_cons_self ..)
   exact absurd this (by decide)
 
+/-- Under #287's first rule (join any read that finished since arrival),
+`Discovery::sessions` can list a session erased before the request's own read
+began. -/
 theorem old_violates : ¬ NoErasedListed (run .old (St.init [1, 2]) coderabbit) := by
   intro h
   have := h ⟨1, 3, 1, [1, 2]⟩ (by rw [old_lists_erased.1]; exact List.mem_cons_self ..)
@@ -248,6 +253,8 @@ theorem old_violates : ¬ NoErasedListed (run .old (St.init [1, 2]) coderabbit) 
 
 /-! ## The fix -/
 
+/-- The fixed `Discovery::sessions` on the review's scenario: each request is
+answered by a read that started after it arrived. -/
 theorem fixed_coderabbit :
     (run .fixed (St.init [1, 2]) coderabbit).answers =
       [⟨1, 3, 5, [1]⟩, ⟨0, 0, 1, [1, 2]⟩] := by
@@ -258,6 +265,8 @@ two reads. -/
 def sharing : List Ev :=
   [.arrive 0, .take 0, .arrive 1, .arrive 2, .finish, .take 1, .take 2, .finish, .take 2]
 
+/-- The fixed `Discovery::sessions` still shares reads: three requests are
+served by two reads. -/
 theorem fixed_shares :
     (run .fixed (St.init [1]) sharing).started = 2 ∧
     (run .fixed (St.init [1]) sharing).answers =
