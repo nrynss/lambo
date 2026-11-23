@@ -17,7 +17,9 @@ import LamboProofs.Confidence
 import LamboProofs.Canonical
 import LamboProofs.Dispatch
 import LamboProofs.Supersession
-import LamboProofs.Policy
+import LamboProofs.Policy.Sessions
+import LamboProofs.Policy.Support
+import LamboProofs.Policy.Score
 import LamboProofs.Conflict.Detect
 import LamboProofs.Conflict.Contradiction
 import LamboProofs.Hotlist

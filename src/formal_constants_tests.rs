@@ -484,11 +484,12 @@ fn policy() {
     };
     use crate::canon::PromotionPolicy;
 
-    let lean = Lean::new(model!("Policy"));
+    let sessions = Lean::new(model!("Policy/Sessions"));
     assert_pin!(
         SESSION_SEPARATION,
-        lean.def("sessionSeparation", "Nat").nat().secs()
+        sessions.def("sessionSeparation", "Nat").nat().secs()
     );
+    let lean = Lean::new(model!("Policy/Score"));
     let weight = |name: &str| lean.def(name, "Int").int().scaled(1);
     assert_pin!(SESSION_WEIGHT, weight("sessionWeight"));
     assert_pin!(HUMAN_CONFIRMED_WEIGHT, weight("humanConfirmedWeight"));

@@ -213,7 +213,7 @@ theorem foldl_max_mem (xs : List Int) (x : Int) : xs.foldl max x ∈ x :: xs := 
 
 /-! ## `eraseDups` on naturals
 
-Moved from `Policy.lean`. -/
+Moved from `Policy.lean` (now `Policy/Support.lean`). -/
 
 /-- `eraseDups` leaves no duplicates. -/
 theorem nodup_eraseDups : ∀ (n : Nat) (l : List Nat), l.length ≤ n → l.eraseDups.Nodup
