@@ -708,10 +708,27 @@ rust = [
   "src/main.rs",
 ]
 
+# The tier's stateless functions.
+[[model]]
+lean = "formal/LamboProofs/Tiered/Pure.lean"
+read_against = "e9b647cf"
+read_digest = "v2:sha256:2ac85267486e5fe1d768d27694a59b8f1343271aa90321fb2178bb1492aab161"
+rust = [
+  "src/store/tiered/project.rs",
+  "src/store/tiered/mod.rs#next_version",
+  "src/store/tiered/mod.rs#knn_fetch",
+  "src/store/tiered/mod.rs#check_marker",
+  "src/store/tiered/mod.rs#breaker_admits",
+  "src/store/tiered/mod.rs#breaker_success",
+  "src/store/tiered/mod.rs#breaker_failure",
+  "src/store/tiered/mod.rs#note_lease",
+  "src/store/tiered/mod.rs#note_refresh",
+]
+
 # Left out: the files issue #273 proposes splitting tiered/mod.rs into.
 [[model]]
-lean = "formal/LamboProofs/Tiered.lean"
-read_against = "514da8d7"
+lean = "formal/LamboProofs/Tiered/Machine.lean"
+read_against = "e9b647cf"
 read_digest = "v2:sha256:63d4e1e9ba459331ca7728fa71964bc488e479219fe15a74033a1f12c4d993c0"
 rust = [
   "src/store/tiered/mod.rs",
@@ -719,6 +736,17 @@ rust = [
   "src/store/tiered/index.rs",
   "src/store/tiered/fake.rs",
   "src/store/vector_source.rs#rank_by_cosine",
+]
+
+# Runs of the state machine, from the tier's tests.
+[[model]]
+lean = "formal/LamboProofs/Tiered/Runs.lean"
+read_against = "e9b647cf"
+read_digest = "v2:sha256:772ce3bcd26eb0af5aa9cac3f6d4671fb9d7fbba20a693b08b45e74b4422d58c"
+rust = [
+  "src/store/tiered/mod.rs",
+  "src/store/tiered/project.rs",
+  "src/store/tiered/tests.rs",
 ]
 
 # Left out: the route that appends the outcome to the served sessions

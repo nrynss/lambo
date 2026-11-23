@@ -96,7 +96,7 @@ pub(crate) struct Projection {
     /// mirror does not trust `ops` then and repairs from the durable store.
     /// A first stamp before any vector, or a `SetEmbedding` that keeps the
     /// contract, is not a switch. Lean: `switches` in
-    /// `formal/LamboProofs/Tiered.lean`.
+    /// `formal/LamboProofs/Tiered/Pure.lean`.
     pub switched: bool,
 }
 

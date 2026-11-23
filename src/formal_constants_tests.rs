@@ -854,7 +854,7 @@ fn resolve() {
 fn tiered() {
     use crate::store::MAX_VECTOR_CANDIDATE_LIMIT;
 
-    let lean = Lean::new(model!("Tiered"));
+    let lean = Lean::new(model!("Tiered/Pure"));
     assert_pin!(
         MAX_VECTOR_CANDIDATE_LIMIT,
         lean.def("maxLimit", "Nat").nat().to::<usize>()

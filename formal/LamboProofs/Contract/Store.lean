@@ -90,7 +90,7 @@ a contract. For the first stamp the order has to be the other way round, the
 same order an ordinary first write already uses (`write` emits its
 `SetEmbedding` before its upsert).
 
-Not modelled: the tier's index (`Tiered.lean`). With the `SetEmbedding`
+Not modelled: the tier's index (`Tiered/`). With the `SetEmbedding`
 first, its projection meets the contract before the upserts and indexes them
 under it, as for any first write.
 -/

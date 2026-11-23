@@ -46,7 +46,9 @@ import LamboProofs.Resolve.Construction
 import LamboProofs.Resolve.Serve
 import LamboProofs.Resolve.Auth
 import LamboProofs.Resolve.Args
-import LamboProofs.Tiered
+import LamboProofs.Tiered.Pure
+import LamboProofs.Tiered.Machine
+import LamboProofs.Tiered.Runs
 import LamboProofs.Discovery
 
 /-
