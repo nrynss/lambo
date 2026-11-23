@@ -130,9 +130,10 @@ stay fail-closed and stop until recall succeeds (see
   their keys match, and the first spelling to take a key owns it for good; any spelling
   with that key resolves to that concept. A name is reduced to its key in these steps:
   1. Trim surrounding whitespace.
-  2. Erase invisible characters, then apply Unicode NFC. Zero-width joiner and
-     non-joiner and variation selectors are allowed in a name but erased from the key,
-     so the words on either side join into one; other invisible characters are refused.
+  2. Erase invisible characters, then apply Unicode NFC. The few a name may contain
+     (zero-width joiner and non-joiner, variation selectors and the like, which some
+     scripts and emoji need) are erased from the key, so the words on either side join
+     into one; any other invisible character refuses the name.
   3. Split into words at `-`, `_` and any whitespace, and at camelCase boundaries. A
      camelCase boundary is only an ASCII lowercase letter directly followed by an ASCII
      uppercase letter.
@@ -153,14 +154,14 @@ stay fail-closed and stop until recall succeeds (see
   (`v2Lease` is one word), dotted or slashed pieces without a camelCase boundary
   (`single.writer.lease`; `leases/v2` is not `v2/leases`, though case is still
   ignored), repeated words (`lease lease` is not `lease`), a stopword glued into a word
-  (`thelease`). Keys are not stable under re-typing: the displayed key
+  (`thelease`). Keys are not stable under re-typing: the key
   `leas singl writer`, typed back as a name, keys as `lea singl writer`. Always reuse
-  the original spelling, never the displayed key. A name is refused when another name
+  the original spelling, never a key. A name is refused when another name
   already holds its key (`NameTaken`); when another concept's canonical key is the same
   (normally its content's key after graph synonyms; observations count; the name's own
   target does not block it); when its key is empty (only stopwords or separators:
   `the`, `the-of`); when it is id-shaped (a UUID, or exactly 8 hex digits such as
-  `DeadBeef`); or when it fails the size or control-character check. Proved in
+  `DeadBeef`); or when it fails the size or character check (control and invisible characters). Proved in
   `formal/LamboProofs/Canonical.lean` (`nameKey_eq_iff_perm`, `keyF_eq_iff_perm`,
   `issue290_order`, `issue290_stopword`); the code is `name_key` in
   `src/graph/graph/names.rs` and `canonical_key` in `src/graph/canonical.rs`.
