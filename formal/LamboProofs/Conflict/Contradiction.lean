@@ -246,8 +246,8 @@ theorem cutoff_none_no_evidence {lo now : Int} {minAge : Option Nat}
   simp [eligible, h]
 
 /-- When `now - min_age` falls below `MIN_UTC`, `checked_sub_signed` gives
-`contradiction.rs` no age cutoff, so no evidence clears the age floor (the
-out-of-range case beside `unrepresentable_minAge`). -/
+`contradiction.rs` no age cutoff (the case `cutoff_none_no_evidence` then
+reads as no evidence eligible). -/
 theorem cutoff_none_of_out_of_range {lo now : Int} {a : Nat} (h : now - a < lo) :
     cutoff lo (some a) now = none := by
   simp [cutoff, h]
@@ -270,7 +270,9 @@ theorem contradictionAt_no_cutoff {lo now : Int} {minAge : Option Nat} (baseline
     rfl
   simp only [contradictionAt, hadm]
 
-/-- `an_unrepresentable_min_age_makes_no_evidence_eligible`. -/
+/-- An unrepresentable `min_age` makes no evidence eligible: the verdict is
+the one with no evidence at all (test
+`an_unrepresentable_min_age_makes_no_evidence_eligible`). -/
 theorem unrepresentable_minAge (lo now baseline : Int) (tl : List (Interaction A))
     (evs : List (Evidence A)) (decls : List (Decl A)) :
     contradictionAt lo now none baseline tl evs decls =

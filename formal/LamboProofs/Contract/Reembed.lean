@@ -605,9 +605,9 @@ theorem attach_override_cross_kind_refused (s : Session K M) (e live : Contract 
   have hne : e ≠ live := fun h => hk (h ▸ rfl)
   by_cases hd : e.dim = live.dim <;> simp [hne, hd, hv, hk]
 
-/-- A successful `--allow-embedding-mismatch` attach (`build_attach`) emits
-exactly one `SetEmbedding` of the live contract, flushed before the attach
-returns, and logs the override WARN. -/
+/-- A successful `--allow-embedding-mismatch` attach (`build_attach`) that
+changes the contract emits exactly one mutation, a `SetEmbedding` of the live
+contract, and logs the override WARN (when it is flushed is not modelled). -/
 theorem attach_override_records (s s' : Session K M) (e live : Contract K M)
     (m : List (Mut K M)) (hc : s.contract = some e) (hne : e ≠ live)
     (h : attach s live true = some (s', m)) :
@@ -1113,8 +1113,8 @@ theorem reembedCmd_full (s : Session K M) (live : Contract K M) (drop : Bool)
   unfold reembedCmd
   simp [hne']
 
-/-- A successful full `re-embed` leaves the session in one space under the
-live contract. -/
+/-- A successful full `re-embed` of a session with at least one concept leaves
+it in one space under the live contract. -/
 theorem reembedCmd_full_one_space (s s' : Session K M) (live : Contract K M) (drop : Bool)
     (m : List (Mut K M)) (hne : s.concepts ≠ [])
     (h : reembedCmd s live false false drop = some (s', m)) :

@@ -1106,7 +1106,8 @@ theorem lone_transient_fault_permanent (row : Txt → Option Vec) (dim : Nat) (t
   simp [forwardIsolated, once, flaky, rowFwd, hv]
 
 /-- `forward_isolated`: when a transient device fault fails a pair's batched
-forward, each text is retried alone and both embed. -/
+forward and the canary then embeds, each text is retried alone and gets what
+it gets alone (`soloRes`), as if the fault had not happened. -/
 theorem paired_transient_fault_recovers (row : Txt → Option Vec) (dim : Nat) (t u : Txt)
     (hc : (row canary).isSome) :
     (forwardIsolated (flaky row) dim 0 [t, u]).1 = [soloRes row dim t, soloRes row dim u] := by

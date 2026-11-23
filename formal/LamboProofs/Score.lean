@@ -255,8 +255,8 @@ theorem rawScore_le (d : Dims) (w : Weights) (hw : weightTotal w ≤ 1000) :
   unfold rawScore
   omega
 
-/-- `score_concept_with`'s composite falls below zero only through the
-concept-type modifier, and by at most `|MIN_CONCEPT_MODIFIER| = 0.10`. -/
+/-- `score_concept_with`'s composite is never below `-|MIN_CONCEPT_MODIFIER| =
+-0.10`. -/
 theorem rawScore_ge (d : Dims) (w : Weights) : -100000 ≤ rawScore d w := by
   have h1 := weighted_nonneg d w
   have h2 := bonusAndModifier_ge d

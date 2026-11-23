@@ -706,8 +706,8 @@ theorem key_lower_of_noLower {s : Text} (h : ∀ c ∈ s, isLowerA c = false) :
 
 /-! ### Stopwords -/
 
-/-- A single word whose lowercase form is a stopword contributes no token to
-the canonical key. -/
+/-- A single word with no camelCase boundary inside, whose lowercase form is a
+stopword, contributes no token to the canonical key. -/
 theorem tokens_stopword {w : Text} (hw : Good w) (hc : camel false w = w)
     (hs : stop (w.map lowerA) = true) : tokens stop stem w = [] := by
   simp [tokens, hc, words_single w hw.1 hw.2, hs]
@@ -817,8 +817,10 @@ theorem key_eq_iff_perm (hs : Sane stop stem) (a b : Text) :
     exact (sort_perm _).symm.trans (hsort ▸ sort_perm _)
   · exact key_perm
 
-/-- Two strings get the same canonical key (`src/graph/canonical.rs`) exactly
-when their tokens agree with multiplicities. -/
+/-- With a stemmer that gives every word a nonempty, separator-free stem
+(`Sane`, which the real stemmer is not: see `empty_stem_key`), two strings get
+the same canonical key (`src/graph/canonical.rs`) exactly when their tokens
+agree with multiplicities. -/
 theorem key_eq_iff_count (hs : Sane stop stem) (a b : Text) :
     key stop stem a = key stop stem b ↔
       ∀ t, (tokens stop stem a).count t = (tokens stop stem b).count t := by

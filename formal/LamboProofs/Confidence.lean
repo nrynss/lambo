@@ -443,12 +443,14 @@ theorem noisyOr_inUnit {u : Int} (hu : 0 < u) {bm25 cosine median : F64} {v : Fr
   obtain ⟨s, c, m, -, -, -, hm, rfl⟩ := noisyOr_eq_some h
   exact noisyOrCombine_inUnit (keywordTermFin_inUnit hu s) (vectorTerm_inUnit hm)
 
-/-- **Never below the keyword term.** -/
+/-- **Never below the keyword term**, in exact arithmetic (in `f64` up to an
+ulp, as the number model shows). -/
 theorem noisyOr_ge_keyword {u : Int} (hu : 0 < u) {s c m : Int} (hm : m < u) :
     (keywordTermFin u s).le (noisyOrCombine (keywordTermFin u s) (vectorTerm u c m)) :=
   le_noisyOrCombine_left (keywordTermFin_inUnit hu s) (vectorTerm_inUnit hm)
 
-/-- **Never below the rescaled cosine.** -/
+/-- **Never below the rescaled cosine**, in exact arithmetic (in `f64` up to an
+ulp). -/
 theorem noisyOr_ge_vector {u : Int} (hu : 0 < u) {s c m : Int} (hm : m < u) :
     (vectorTerm u c m).le (noisyOrCombine (keywordTermFin u s) (vectorTerm u c m)) :=
   le_noisyOrCombine_right (keywordTermFin_inUnit hu s) (vectorTerm_inUnit hm)
@@ -490,7 +492,7 @@ theorem noisyOr_eq_one_iff {u : Int} (hu : 0 < u) {s c m : Int} (hm : m < u) :
     rw [h1, Int.mul_zero, Int.sub_zero]
 
 /-- **The keyword-only value is the two-leg value with `b = 0`**: at a cosine
-at or under the null median the two agree. -/
+at or under the null median the two agree, in exact arithmetic. -/
 theorem keywordOnly_eq_noisyOr_at_null {u : Int} {s c m : Int} (hm : m < u) (hc : c ≤ m) :
     (keywordTermFin u s).eqv (noisyOrCombine (keywordTermFin u s) (vectorTerm u c m)) := by
   have h0 := (vectorTerm_spec (c := c) hm).1 hc
