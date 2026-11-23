@@ -28,25 +28,33 @@
 
 ## Lambo project notes
 
-- Spec of record: `lambo-hackathon-spec-v0.1.md` (frozen). Phase handoffs in `dev-diary/`.
+- Authority, highest first: the source, then the reference docs (`docs/reference/`, mirrored in `site/src/content/docs/`; keep each pair in sync with `scripts/docs/check-mirror-drift.sh`), then memory. Operational runbooks live in `docs/operations/`.
+- The v0.1 hackathon spec (`lambo-hackathon-spec-v0.1.md`) and the `dev-diary/` tree were removed from the repo because Lambo has outgrown them; they are history, never authority. Code comments, migrations, the CHANGELOG and `evidence/` still cite `spec §N` and `dev-diary/` paths, which name those retired files. To read one, run `git show v0.15.0:lambo-hackathon-spec-v0.1.md` (or `git show v0.15.0:<dev-diary path>`). Where a retired file disagrees with the code, the code is right; do not restore either file or cite it as a rule.
 - Never commit `.env`. Cockroach DSN uses `sslmode=verify-full&sslrootcert=system`.
-- Single-writer deployment model for `lambo serve` (see spec §2.2).
-- **Level B pluggability** (design of record: `dev-diary/notes/level-b-pluggability.md`):
-  - Cargo **features** compile adapters in (`store-*`, `embed-*`).
-  - **`lambo.toml` / env** select among compiled kinds; process start uses
-    `resolve_backends` / `resolve_from_config_path` (**single construction site** →
-    `ResolvedBackends`). Do not rebuild store/embedder inside each command.
-  - Selecting an uncompiled kind or unknown TOML key is a **hard error**.
-  - New backend = adapter module + feature + registry arm + docs — not a core fork.
+- Single-writer deployment model: each session has exactly one writer, enforced by a store lease (see `docs/reference/api.mdx#the-single-writer-lease`).
+- **Level B pluggability** (rules: `docs/reference/config.mdx`, "Features"):
+  - Cargo **features** compile adapters in (`store-*`, `embed-*`, `recall-elastic`).
+  - **`lambo.toml` / env** select among compiled kinds. Each process builds its store
+    and embedder once, through a resolver in `src/resolve.rs` (`resolve_backends` /
+    `resolve_from_config_path` -> `ResolvedBackends` for commands that embed).
+    Commands never call `build_store` / `build_embedder` or resolve twice.
+  - Selecting an uncompiled kind or an unknown TOML key is a **hard error**.
+  - New backend: follow "Adding a backend" in that section (adapter module, feature,
+    registry arm, the formal `EmbedderKind.implemented` table for embedders, docs).
+    Not a core fork.
   - Example config: `lambo.example.toml`.
-- **Vector dim is store-authoritative** (`GraphStore::vector_dimensions()`), not hardwired
-  in the embedder factory. Config `embedder.dim` is expected embedder width (default 1024
-  for BGE demos). Compatibility is checked at resolve time.
-- **Embeddings are portable** (see `dev-diary/notes/embeddings-portable.md`):
-  - Default: **BGE-M3** from **Hugging Face**, run with **llama.cpp** (`embed-bge`).
-  - Swap-in: **Bedrock Titan V2** when authorized (`embed-bedrock`, T7.1).
+- **Vector width belongs to the store** (`GraphStore::vector_dimensions()`), not the
+  embedder factory. `embedder.dim` is the expected width (default 1024 for every kind).
+  Resolve refuses a mismatch; for SQLite the reported width echoes `[store] vector_dim`
+  or the embedder, so the pin check and the session contract are what protect it.
+- **Embeddings are portable** (see `docs/reference/config.mdx`, "Embedder" and "Features"):
+  - Default: `bge_m3` (`embed-bge`), reference setup a BGE-M3 GGUF from Hugging Face
+    in llama.cpp's `llama-server` (`scripts/fetch-bge-m3.sh`, `scripts/run-llama-embed.sh`).
+  - Other kinds: `candle`, `gemini`, `embeddinggemma2`, `elastic`. `embed-bedrock` is
+    reserved and not implemented.
   - Tests: `FixtureEmbedder` (`embed-fixture`). Never mix model vectors in one session
-    without re-embed — use `EmbeddingContract` on `GraphSnapshot`.
+    without `lambo re-embed`; the `EmbeddingContract` on `GraphSnapshot` is enforced at
+    writer attach and on vector reads.
   - Never commit `models/` weights.
 
 ## Consulting memory (Lambo MCP)
@@ -54,7 +62,7 @@
 If a Lambo MCP server (`lambo-dogfood` or an infrastructure session) is attached,
 use it as shared multi-agent memory alongside the repo. For repository
 development work (no server attached = no obligation), never block on an outage:
-fall back to `dev-diary/` and note it. For destructive infrastructure actions,
+fall back to the source and the reference docs and note it. For destructive infrastructure actions,
 stay fail-closed and stop until recall succeeds (see
 `skills/lambo-cloudops/SKILL.md`).
 
@@ -63,7 +71,7 @@ stay fail-closed and stop until recall succeeds (see
   AWS/infra resource) *before* reading code or editing; run a second targeted recall
   once you learn exact symbol or resource names.
 - **Authority order:** Memory is prior context, not unquestioned authority. For code,
-  `spec → phase doc / source → memory`; for infra, memory answers *"would this break
+  `source → reference docs → memory`; for infra, memory answers *"would this break
   something another agent built?"* while live provider state answers what exists now.
   On conflict, name it explicitly and update memory with `against`.
 - **Triage warnings (don't false-halt, never ignore real conflicts):**

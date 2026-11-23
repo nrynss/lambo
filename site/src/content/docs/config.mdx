@@ -170,6 +170,7 @@ Only the first `min(20, 4 × top_k)` hits are checked, each against at most 20 h
 | `kind` | string | `memory` | `memory`, `sqlite`, `cockroach`, or `postgres`. |
 | `path` | string | none | The SQLite file, used when `kind` is `sqlite`. |
 | `dsn` | string | none | The CockroachDB or PostgreSQL connection string, used when `kind` is `cockroach` or `postgres`. Prefer the environment variable so the secret stays out of the file. |
+| `vector_dim` | integer | none | The vector width you assert for the store. SQLite reports it instead of echoing `[embedder] dim`, and `lambo provision` creates PostgreSQL's `vector(n)` column at it (else 1024). A command that embeds (every writer, `lambo serve` included) refuses to start when it differs from `[embedder] dim`, whatever the store kind. See [Vector width](#vector-width). |
 
 `kind` also accepts a few spellings: `mem` and `ram` for `memory`, `crdb` for `cockroach`, `pg` for `postgres`, and `sqlite3` for `sqlite`. `"postgres"` and `"pg"` are PostgreSQL, not CockroachDB.
 
@@ -614,7 +615,7 @@ project's text recall reads its own session plus `general`; its writes
 go to the addressed project unless a call passes `scope = "general"` (see
 [Writing to a layer](/lambo/mcp/#lambo_derive)). See the
 [read examples](/lambo/mcp/#reading-a-layer-hit) and the operator's
-[cut-over runbook](https://github.com/nrynss/lambo/blob/main/dev-diary/lambo-for-mooshik/DOGFOOD-SETUP.md#7-multi-session-cut-over-runbook).
+[cut-over runbook](https://github.com/nrynss/lambo/blob/main/docs/operations/dogfood-rig.md#multi-session-cut-over-runbook).
 
 ### Choosing a stdio serve's session
 
@@ -735,7 +736,7 @@ Keep connection strings in the environment rather than in `lambo.toml`.
 
 ## Features
 
-Cargo features decide which stores and embedders exist in your binary, and `lambo.toml` picks among them at runtime. Asking for a kind that was not compiled in is a startup error, not a fallback.
+Cargo features decide which stores and embedders exist in your binary, and `lambo.toml` (or the environment) picks among them when the process starts. Asking for a kind that was not compiled in is a startup error that names the feature to rebuild with, not a fallback to another kind, and an unknown key in the file is refused the same way. Released binaries are built with `ship`, so for them choosing a backend is only a config change; a kind outside `ship` needs a rebuild with its feature.
 
 | Feature | What it adds |
 |---|---|
@@ -753,12 +754,64 @@ Cargo features decide which stores and embedders exist in your binary, and `lamb
 | `embed-candle-metal` | `embed-candle` plus the Metal GPU backend. Apple silicon only. This is what the Metal release asset adds to `ship`. |
 | `embed-candle-accelerate` | `embed-candle` plus Apple's Accelerate framework for the CPU backend. macOS only. |
 | `embed-candle-cuda` | `embed-candle` plus the CUDA GPU backend. Needs a CUDA toolkit at build time and an NVIDIA GPU at runtime. |
-| `embed-bedrock` | Reserved for Amazon Titan embeddings through Bedrock. Not implemented yet. |
+| `embed-bedrock` | Reserved for Amazon Titan embeddings through Bedrock. Not implemented: `kind = "bedrock"` fails at startup whether or not this feature is compiled. |
 | `ship` | The adapter set released binaries carry: every store and embedder above except `embed-bedrock` and the `embed-candle` family, plus `recall-elastic`. |
 | `fixtures` | Committed fixture graphs for tests, which also enables `store-memory`. Not in the default build. |
 | `demo` | A convenience profile: the memory and CockroachDB stores, the BGE-M3 and fixture embedders, and `fixtures`. |
 
 The default build enables `store-memory`, `embed-bge`, and `embed-fixture`.
+
+### Embedders and model files
+
+The default `[embedder] kind` is `bge_m3`, which speaks the OpenAI embeddings API. Its reference setup is BGE-M3 weights in GGUF form served by llama.cpp's `llama-server` on `http://127.0.0.1:8080`, the default `url`. From a checkout, `scripts/fetch-bge-m3.sh` downloads a pinned BGE-M3 GGUF from Hugging Face into `models/bge-m3/` and checks its SHA-256, and `scripts/run-llama-embed.sh` starts `llama-server` on that file. Lambo never starts `llama-server` itself. `candle` runs BGE-M3 inside the process instead (the Metal release build), and `fixture` gives deterministic vectors with no model behind them, for tests and CI that must run without a model or a network. See [Installation](/lambo/installation/#set-up-real-embeddings) for the setup and [Embedder](#embedder) for every kind.
+
+Model weights never go in the repository. `models/` is ignored by git, and the files for other models, such as the EmbeddingGemma 2 GGUF, are kept outside the checkout.
+
+### How a process builds its backends
+
+Each process builds its store and its embedder exactly once, through one of the resolvers in `src/resolve.rs`, and hands the result to the command; in the `lambo` binary, `resolve_for_command` in `src/main.rs` picks the resolver. A command that embeds (every writer, including `lambo serve`, which loads the file once before startup and passes it in) calls `resolve_backends`, or `resolve_from_config_path`, which first loads the file and the environment overrides. It returns one `ResolvedBackends`: the store, the embedder, their configs, the session embedding contract, and the process `Config` with the file's settings applied. A command that never embeds, such as `provision`, calls `resolve_store_only` (or `resolve_store_only_read_only`), `lambo embed` calls `resolve_embedder_only`, and `lambo session split`, `verify` and `classify` have their own resolvers in the same file. The `[recall]` tier is wrapped around the store inside these resolvers and nowhere else.
+
+A command does not call `build_store` or `build_embedder` itself and does not resolve a second time: those registries exist for the resolvers and for adapter unit tests. A Rust program does the same with `Memory::builder().backends(resolved)`; see [Library API](/lambo/api/#build-a-memory).
+
+A full resolve refuses to start, before any session is attached, when:
+
+- the file's own settings are invalid (a degenerate `[daemon]` cadence, an unknown `promotion_policy`, a bad `[fusion]` or `[selection]`); these are checked before any adapter is built;
+- a kind is not compiled in, or its adapter refuses its configuration;
+- the embedder reports a width other than `[embedder] dim`;
+- the store claims vector search but reports no vector width, or reports a width without claiming vector search;
+- `[store] vector_dim` is set and differs from `[embedder] dim`;
+- the store reports a vector width and the embedder's differs from it.
+
+Building an adapter is kept light. The candle embedder resolves its device, its weights' identity and its width at resolve time but loads the weights only in `Embedder::prepare`, which a writer awaits after it wins the session's lease, so a `lambo serve` that loses the startup election never loads them.
+
+### Vector width
+
+The width of stored vectors belongs to the store, not to the embedder factory and not to a product constant. `[embedder] dim` is the width you expect the embedder to emit. Its default, `1024`, is BGE-M3's width and applies to every kind. There is no product-wide width rule: each adapter checks only the widths its own model can emit (for example, `embeddinggemma2` accepts `768`, `512`, `256` or `128`, so it refuses the default; `gemini` accepts `768`, `1536` or `3072`; `candle` accepts only `1024`). Each store reports its width through `GraphStore::vector_dimensions()`, and the resolve compares it with the embedder's:
+
+| Store | Width it reports | What the comparison proves |
+|---|---|---|
+| `memory` | None. It has no vector column and no vector search. | Nothing: any positive width is accepted. |
+| `cockroach` | `n` from `VECTOR(n)` in its schema file, `migrations/cockroach/001_init.sql` (1024). | A real check: the embedder must emit 1024. |
+| `postgres` | `[store] vector_dim` when set, else `[embedder] dim`, and the store refuses to open when that differs from the live `vector(n)` column. `lambo provision` creates the column at `[store] vector_dim`, else `1024`; it does not read `[embedder] dim`. | A real check against the database. For an embedder that is not 1024 wide, set `[store] vector_dim` before you provision. |
+| `sqlite` | `[store] vector_dim` when set, else `[embedder] dim`. Its vectors are stored in a column with no width of its own. | Nothing: the store reports the number it is compared with. Set `vector_dim` to make the resolve refuse a different embedder width. |
+
+For SQLite, and for every store, what protects stored vectors from a different model is the session's embedding contract, which vector-capable stores check on every vector read.
+
+### Embedding spaces
+
+A process runs one embedder for every session it serves. The first writer of a session stamps it with the embedder's contract (kind, model and width), and a later writer attach whose contract differs is refused. `--allow-embedding-mismatch` overrides that refusal; it exists for a deliberate rename of the same space, not for switching models. The same width does not mean the same space: vectors from two models, or from one model behind two servers, are not comparable. To move a session to another model, run `lambo re-embed` or start a new session; never mix models in one session. See the [Embedder](#embedder) warning and [Command line](/lambo/cli/).
+
+### Adding a backend
+
+A new store or embedder is an adapter module, a Cargo feature, a registry arm and its documentation. It is not a change to the core, and Lambo has no plugin loading: adapters are compiled in.
+
+1. Implement `GraphStore` (see [The GraphStore trait](/lambo/api/#the-graphstore-trait)) or `Embedder` (see [The Embedder trait](/lambo/api/#the-embedder-trait)) in a module compiled only under the new feature.
+2. Add the feature to `Cargo.toml`, with its dependencies as optional `dep:` entries. Add it to `ship` if released binaries should carry it.
+3. Add the kind to `StoreKind` or `EmbedderKind` in `src/store/mod.rs` or `src/embed/mod.rs`: its spellings in `FromStr` and the accepted-kinds lists in its error messages (`STORE_KIND_EXPECTED`, or the two literal lists in `EmbedderKind::from_str`), `Display`, `feature_name`, `is_compiled`, and (embedders) `has_adapter`, plus a `#[cfg(feature = "...")]` arm in `build_store` or `build_embedder` with a `#[cfg(not(...))]` arm that returns the missing-feature error. Keep both the `is_compiled` pre-check and the `cfg` arm. The pre-check produces the "rebuild with `--features ...`" message without naming types the binary does not contain; the `cfg` arm is what actually keeps the uncompiled adapter out. A new `EmbedderKind` must also be added to the formal model's `EmbedderKind.implemented` table in `formal/LamboProofs/Resolve.lean`, which `src/formal_constants_tests.rs` checks every kind against.
+4. For an embedder: return unit-length (L2-normalized) vectors, because SQLite ranks by cosine and CockroachDB by L2 distance, and the two agree only on unit vectors. If the session's contract should carry more than the configured `model` string (an artifact hash, a prompt profile, an endpoint id), expose the adapter through `Embedder::as_any` and add its arm to the contract match in `src/resolve.rs`, as `candle`, `gemini`, `embeddinggemma2` and `elastic` do. If construction is heavy, defer it to `Embedder::prepare`.
+5. For a store that keeps vectors: claim `Capabilities::VECTOR_SEARCH` and report `vector_dimensions()` together, and implement `vector_candidates_checked`, which must compare the query's contract with the session's in the same transaction as the read. The default refuses on a store that claims vector search.
+6. Add any environment variable the adapter reads during resolve to `RESOLVE_ENV_VARS` in `src/resolve.rs`.
+7. Document the kind and its feature in this page's [Store](#store) or [Embedder](#embedder) table and the table above, in the feature table in [Installation](/lambo/installation/#build-from-source), and in `lambo.example.toml`.
 
 ## HTTP transport
 
